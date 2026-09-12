@@ -1,9 +1,9 @@
-//! flint-lean: the checkout/publish sidecar core (plan of record:
+//! flint-lean: the checkout/publish syncer core (plan of record:
 //! docs/plans/flint-lean-plan.md v2).
 //!
 //! Lean is a SEPARATE front end from the hub: no NFS, no daemon in the
 //! data path. An agent pod gets a full local checkout on an emptyDir
-//! (real ext4/APFS POSIX), and a sidecar publishes snapshots to the
+//! (real ext4/APFS POSIX), and a syncer publishes snapshots to the
 //! bucket through a barrier. Durability is RPO-shaped (the flush floor);
 //! coherence is snapshot-level (the subtree manifest CAS is the atomic
 //! commit point). This module reuses `tier::store` (ObjectStore,
@@ -22,7 +22,7 @@
 //!   upload→delete→CAS order dangles the manifest on a crash.)
 //! - **HITL writes land as object + inbox entry, never direct manifest
 //!   edits**; the barrier never runs against an unconsumed inbox.
-//! - **Never If-Match-overwrite an ETag this sidecar did not itself
+//! - **Never If-Match-overwrite an ETag this syncer did not itself
 //!   publish or consume**: a foreign 412 parks the path and surfaces a
 //!   conflict; own-crashed-PUT is recognized by flush_uuid and adopted.
 //! - **GC deletes are HEAD-guarded** on the recognized ETag.
@@ -71,7 +71,7 @@ use flint_store::ObjectStore;
 /// never part of a checkout, never GC'd by the barrier.
 pub const LEAN_DIR: &str = ".flint/lean";
 
-/// The sidecar's durable bookkeeping directory inside the workspace
+/// The syncer's durable bookkeeping directory inside the workspace
 /// (emptyDir-scoped: survives container restarts, dies with the pod).
 pub const STATE_DIR: &str = ".flint-sync";
 
@@ -87,10 +87,10 @@ pub const SENTINEL_PROTOCOL: u32 = 1;
 
 /// This binary's version, echoed to the agent (`capabilities.json`) and
 /// to the operator (the lease-heartbeat echo, §2.6). Both mixed-version
-/// holes — agent↔sidecar and operator↔sidecar — are detected by
+/// holes — agent↔syncer and operator↔syncer — are detected by
 /// comparing what is RUNNING against what was asked for, and neither
 /// comparison exists without a version on the running side.
-pub const SIDECAR_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const SYNCER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Default whole-object publish ceiling; larger files go through the
 /// multipart compose path (`tier/flush.rs` uses the same 64 MiB split).
@@ -219,7 +219,7 @@ pub struct LeanConfig {
     pub root: PathBuf,
     /// Publish cadence floor, seconds (the durability contract).
     pub floor_secs: u64,
-    /// Stamp `sole_writer` on every manifest this sidecar installs.
+    /// Stamp `sole_writer` on every manifest this syncer installs.
     ///
     /// Set for a workspace that is PUBLISHED rather than worked in —
     /// forge's legible export is the shipped case. It tells every later
@@ -268,7 +268,7 @@ pub struct LeanConfig {
     pub max_bytes: u64,
     pub max_files: u64,
     /// Window deadline slack beyond the barrier start, seconds. A dead
-    /// sidecar's window is ignorable past this deadline.
+    /// syncer's window is ignorable past this deadline.
     pub window_slack_secs: u64,
     /// Bounded concurrency for uploads and checkout fetches. The 0b
     /// rig measured the sequential loops at 561-854 PUTs/s and
@@ -292,7 +292,7 @@ pub struct LeanConfig {
     /// size, and `get_whole` holds each whole object in RAM before it
     /// reaches disk — so peak RSS was `fanout x largest object`, an
     /// unbounded product of two numbers nobody sets together. A 32-wide
-    /// window over 64 MiB objects is 2 GiB in a sidecar that ships with
+    /// window over 64 MiB objects is 2 GiB in a syncer that ships with
     /// no memory limit at all. Each entry takes permits proportional to
     /// its size, so small-file trees still run the full width.
     pub fetch_inflight_max_bytes: u64,
@@ -505,11 +505,11 @@ impl LeanConfig {
     }
 }
 
-/// Everything a sidecar operation needs: store + config + durable state.
-pub struct Sidecar {
+/// Everything a syncer operation needs: store + config + durable state.
+pub struct Syncer {
     pub store: Arc<dyn ObjectStore>,
     pub cfg: LeanConfig,
-    pub state: state::SidecarState,
+    pub state: state::SyncerState,
     /// The held lease, once claimed. Barriers refuse to run without it.
     pub lease: Option<flint_store::EpochLease>,
     /// Standing conditions already written to `conflicts.jsonl` by THIS

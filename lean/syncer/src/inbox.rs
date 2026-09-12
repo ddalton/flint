@@ -3,12 +3,12 @@
 //!
 //! - The gateway appends an entry per UI write (object first, then the
 //!   inbox CAS) — never a direct manifest edit.
-//! - The sidecar CAS-marks the window open (with a deadline + its
+//! - The syncer CAS-marks the window open (with a deadline + its
 //!   epoch) at barrier intent time and clears it after the manifest
 //!   CAS; every gateway replica checks the cell before admitting a UI
 //!   write, which closes the stateless-two-replica race the review
 //!   proved.
-//! - A dead sidecar cannot wedge HITL forever: the window carries a
+//! - A dead syncer cannot wedge HITL forever: the window carries a
 //!   deadline, and a successor epoch may override a stale window.
 
 use serde::{Deserialize, Serialize};
@@ -37,7 +37,7 @@ pub struct Window {
 }
 
 /// A verb asked for through the gateway door (§2.5, D14). Idempotent
-/// STATE, not a queue: repeated sets before the sidecar acts collapse
+/// STATE, not a queue: repeated sets before the syncer acts collapse
 /// to the newest, which is why neither field needs a rate limit, an
 /// exactly-once protocol, or a clearing CAS of its own.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -115,7 +115,7 @@ pub async fn cas_write(
 }
 
 /// Whether a gateway may admit a UI write right now. A window past its
-/// deadline does not block (the dead-sidecar unwedge).
+/// deadline does not block (the dead-syncer unwedge).
 pub fn admits_hitl(doc: &InboxDoc) -> bool {
     match &doc.window {
         None => true,
@@ -197,7 +197,7 @@ pub async fn gateway_request(
     Err(LeanError::State("inbox verb request lost 5 CAS races".into()))
 }
 
-/// The SIDECAR side: open the barrier window (the intent). Succeeds
+/// The SYNCER side: open the barrier window (the intent). Succeeds
 /// over a closed cell, an expired window, or a LOWER epoch's stale
 /// window; refuses a live window at our own or a higher epoch.
 pub async fn open_window(

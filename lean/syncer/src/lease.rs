@@ -17,7 +17,7 @@ use std::sync::Arc;
 use flint_store::{EpochLease, ObjectStore, StoreError};
 
 use super::state::Incarnation;
-use super::{manifest, LeanError, LeanResult, Sidecar};
+use super::{manifest, LeanError, LeanResult, Syncer};
 
 /// Quiet polls required before superseding a foreign holder (the
 /// token must not advance across this many observations).
@@ -40,13 +40,13 @@ pub enum ClaimOutcome {
 /// nothing anywhere reports the condition.
 ///
 /// Note what is NOT a finding: forge's legible export IS a lean
-/// workspace, published by forge rather than by an agent's sidecar, so
-/// a sidecar reading an export prefix finds only its own kind of cell.
+/// workspace, published by forge rather than by an agent's syncer, so
+/// a syncer reading an export prefix finds only its own kind of cell.
 /// And an export nested under a repository's prefix puts this cell at
 /// `<prefix>/inner/.flint/lean/epoch`, which is not the key forge
 /// probes — the exact-key probe is what keeps that from reading as a
 /// collision.
-pub async fn warn_if_prefix_is_shared(sc: &Sidecar) {
+pub async fn warn_if_prefix_is_shared(sc: &Syncer) {
     // A published mirror does not probe. Two reasons, and the second is
     // the load-bearing one:
     //
@@ -79,7 +79,7 @@ pub async fn warn_if_prefix_is_shared(sc: &Sidecar) {
 
 /// One claim step. The caller loops on `Waiting` at its poll cadence;
 /// each call performs at most one read + one acquire.
-pub async fn claim_step(sc: &mut Sidecar) -> LeanResult<ClaimOutcome> {
+pub async fn claim_step(sc: &mut Syncer) -> LeanResult<ClaimOutcome> {
     let store: &Arc<dyn ObjectStore> = &sc.store;
     let key = sc.cfg.epoch_key();
     let mut inc = sc.state.load_incarnation()?.unwrap_or_else(|| Incarnation {
@@ -156,13 +156,13 @@ pub async fn claim_step(sc: &mut Sidecar) -> LeanResult<ClaimOutcome> {
     }
 }
 
-/// What this sidecar is OBSERVED to be doing, for the heartbeat cell
+/// What this syncer is OBSERVED to be doing, for the heartbeat cell
 /// (boundary-verbs plan §2.6). Computed from local files only — the
 /// same store-free discipline as `write_gauges`, and for the same
 /// reason: this rides the renewal, so it must not add a request to the
 /// one tick every idle workspace in the fleet pays (leg B8's oracle
 /// counts them).
-fn observed_echo(sc: &Sidecar) -> Option<String> {
+fn observed_echo(sc: &Syncer) -> Option<String> {
     let g = sc.load_gauges().ok()?;
     // The count comes from the stage itself rather than the gauges
     // snapshot: it is the exposure number an operator pages on, and
@@ -176,7 +176,7 @@ fn observed_echo(sc: &Sidecar) -> Option<String> {
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok());
     serde_json::to_string(&flint_store::LeaseEcho {
-        sidecar_version: super::SIDECAR_VERSION.to_string(),
+        syncer_version: super::SYNCER_VERSION.to_string(),
         protocol: super::SENTINEL_PROTOCOL,
         active_boundary_mode: sc.cfg.boundary_mode.as_str().to_string(),
         last_cited_seq: seq,
@@ -192,9 +192,9 @@ fn observed_echo(sc: &Sidecar) -> Option<String> {
 /// publishing (self-fence).
 ///
 /// The renewal also carries the observed-state echo (§2.6): the
-/// operator's only evidence of what the sidecar binary is ACTUALLY
+/// operator's only evidence of what the syncer binary is ACTUALLY
 /// running, on a request that was already being paid for.
-pub async fn renew(sc: &mut Sidecar) -> LeanResult<()> {
+pub async fn renew(sc: &mut Syncer) -> LeanResult<()> {
     let key = sc.cfg.epoch_key();
     let lease = sc
         .lease
@@ -276,7 +276,7 @@ pub async fn renew(sc: &mut Sidecar) -> LeanResult<()> {
 /// `LeanError::Refused`: the process exits `EXIT_REFUSED`, which the
 /// delivery treats as final (tear down, name the reason) rather than
 /// as one more crash to restart.
-pub async fn verify_claim(sc: &Sidecar) -> LeanResult<()> {
+pub async fn verify_claim(sc: &Syncer) -> LeanResult<()> {
     let Some(mine) = sc.cfg.project_id.as_deref() else { return Ok(()) };
     let key = sc.cfg.claim_key();
     match sc.store.get_whole(&key, None).await {
@@ -301,7 +301,7 @@ pub async fn verify_claim(sc: &Sidecar) -> LeanResult<()> {
 
 /// Clean release (the preStop path): a successor supersedes immediately
 /// instead of waiting out the lease.
-pub async fn release(sc: &mut Sidecar) -> LeanResult<()> {
+pub async fn release(sc: &mut Syncer) -> LeanResult<()> {
     let key = sc.cfg.epoch_key();
     if let Some(lease) = sc.lease.take() {
         match sc.store.epoch_release(&key, &lease).await {

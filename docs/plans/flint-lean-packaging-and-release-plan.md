@@ -4,7 +4,7 @@
 clusters**.
 
 Today it does not install. Not "installs with rough edges" — the chart
-execs a binary that is not in the image it pulls, and the sidecar it
+execs a binary that is not in the image it pulls, and the syncer it
 injects has no published image at all. This plan is what stands between
 the code (which is drilled hard: battery 101/101, formal 61/61, kind
 14/14, bucket 27/27) and a cluster that can actually run it.
@@ -44,13 +44,13 @@ stale-MPU sweep. Fixing F1 covers the webhook.
 **F2 — `flint-sync` has no production image recipe.** The webhook injects
 `dilipdalton/flint-sync` (`values.yaml:27`) into every workspace pod. No
 Dockerfile outside `lean/e2e/` mentions it. It also builds from a
-**different crate** (`lean/sidecar`) than the operator
+**different crate** (`lean/syncer`) than the operator
 (`spdk-csi-driver`), so a lean release cross-compiles two crates into one
 staging tree.
 
-**F3 — the sidecar needs a CA bundle, and the obvious base has none.**
+**F3 — the syncer needs a CA bundle, and the obvious base has none.**
 `crates/flint-store` uses the AWS SDK's `rustls` feature, which resolves
-to **`rustls-native-certs`** (`lean/sidecar/Cargo.lock:1720`) — the
+to **`rustls-native-certs`** (`lean/syncer/Cargo.lock:1720`) — the
 **system trust store**, not bundled roots. A busybox or scratch
 `flint-sync` fails against every HTTPS S3 endpoint. Every drill missed
 this because MinIO was plain HTTP; it appears on the first real bucket.
@@ -120,7 +120,7 @@ What multi-cluster does change:
   as broad as the bucket policy makes it.
 - **The data-plane fence is still unbuilt.** P5-at-the-proxy is not
   implemented (verified 2026-08-26, §3 residual 4). Cross-cluster this
-  matters more, not less: a partitioned cluster's sidecar keeps writing
+  matters more, not less: a partitioned cluster's syncer keeps writing
   uncited versions until its lease is taken, and nothing refuses them at
   the wire.
 
@@ -129,7 +129,7 @@ What multi-cluster does change:
 1. **F1** — add `flint-lean-operator` + `flint-lean-gateway` to
    `Dockerfile.operator.prebuilt`. Smallest unblock; covers the webhook.
 2. **F2/F3** — a `Dockerfile.sync.prebuilt` with a shell and
-   `ca-certificates`; stage `lean/sidecar` binaries into the same
+   `ca-certificates`; stage `lean/syncer` binaries into the same
    `docker/prebuilt/{amd64,arm64}/` tree.
 3. **Release gate** — teach `scripts/release.sh` about
    `flint-lean-chart` the way it already knows `flint-lite-operator-chart`

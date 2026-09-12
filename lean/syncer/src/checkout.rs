@@ -20,7 +20,7 @@ use flint_store::StoreError;
 use super::barrier::{contained_path, mtime_of, write_file_atomic};
 use super::manifest;
 use super::state::BaselineEntry;
-use super::{LeanError, LeanResult, Sidecar};
+use super::{LeanError, LeanResult, Syncer};
 
 #[derive(Debug, Default)]
 pub struct CheckoutReport {
@@ -254,7 +254,7 @@ fn describe_scope(s: Option<&[String]>) -> String {
     }
 }
 
-impl Sidecar {
+impl Syncer {
     /// Materialize an ADMITTED SET under a bounded fan-out window:
     /// each entry's guarded fetch + atomic write is independent (the
     /// 0b rig measured the sequential loop at ~1,000-2,000 files/s and
@@ -294,7 +294,7 @@ impl Sidecar {
             (self.cfg.fetch_inflight_max_bytes / FETCH_UNIT).clamp(1, u32::MAX as u64) as u32;
         let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(budget_units as usize));
         use futures::stream::{self, StreamExt};
-        let this: &super::Sidecar = self;
+        let this: &super::Syncer = self;
             let range_min = this.cfg.range_get_min_bytes;
             let range_chunk = this.cfg.range_get_chunk_bytes;
             let range_par = this.cfg.range_get_parallelism;
@@ -887,7 +887,7 @@ pub struct RescopeReport {
     pub replayed: bool,
 }
 
-impl Sidecar {
+impl Syncer {
     /// Move the workspace to `target`: stop holding what it no longer
     /// admits, and fetch what it newly does.
     ///

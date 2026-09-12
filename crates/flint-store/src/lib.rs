@@ -613,7 +613,7 @@ pub struct EpochState {
     /// An opaque observed-state echo the holder wrote with its last
     /// heartbeat, if any ([`LeaseEcho`]). Read-only to everyone but the
     /// holder: it is the ONE fleet-visible surface that reports what a
-    /// sidecar is actually *doing* rather than what its spec asked for,
+    /// syncer is actually *doing* rather than what its spec asked for,
     /// and it costs nothing — the heartbeat CAS was already happening.
     /// `None` = the holder wrote none (an older binary, a clean
     /// release, or a backend that cannot carry it).
@@ -632,30 +632,30 @@ pub struct EpochLease {
     pub token: String,
 }
 
-/// What a live lean sidecar echoes into its lease-heartbeat cell
+/// What a live lean syncer echoes into its lease-heartbeat cell
 /// (boundary-verbs plan §2.6). The schema lives here, beside the cell
-/// that carries it, because the WRITER (the sidecar) and the READER
+/// that carries it, because the WRITER (the syncer) and the READER
 /// (the operator) are in different crates and a duplicated mirror
 /// struct on either side would drift silently — which is the failure
 /// this field exists to detect, not to reproduce.
 ///
 /// It answers one question no spec field can: is the binary in that pod
-/// actually running the mode the CR asked for? An old sidecar reads a
+/// actually running the mode the CR asked for? An old syncer reads a
 /// FIXED env list, so `FLINT_SYNC_BOUNDARY_MODE=gated` reaching a
 /// pre-boundary binary is silently ignored and the workspace runs fused
 /// cadence behind a green condition.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct LeaseEcho {
-    /// The sidecar binary's own version — the mixed-fleet tell.
+    /// The syncer binary's own version — the mixed-fleet tell.
     #[serde(default)]
-    pub sidecar_version: String,
+    pub syncer_version: String,
     /// `.flint/capabilities.json`'s protocol number.
     #[serde(default)]
     pub protocol: u32,
-    /// The mode the sidecar is RUNNING, not the mode it was asked for.
+    /// The mode the syncer is RUNNING, not the mode it was asked for.
     #[serde(default)]
     pub active_boundary_mode: String,
-    /// The last citation this sidecar installed.
+    /// The last citation this syncer installed.
     #[serde(default)]
     pub last_cited_seq: u64,
     #[serde(default)]

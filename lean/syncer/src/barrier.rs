@@ -17,7 +17,7 @@ use super::inbox::{self, InboxEntry};
 use super::manifest::{self, LeanEntry};
 use super::scan;
 use super::state::{BaselineEntry, ConflictRecord, IntentJournal};
-use super::{now_unix, LeanError, LeanResult, Sidecar};
+use super::{now_unix, LeanError, LeanResult, Syncer};
 
 /// The last gateway request this workspace acted on, per verb. A
 /// watermark rather than a consumed queue — see `note_verb_requests`.
@@ -78,7 +78,7 @@ const UPLOAD_CHUNK_WAVES: usize = 16;
 /// and comfortably below the 6-poll (~60 s) takeover window.
 const RENEW_WITHIN_SECS: u64 = 20;
 
-impl Sidecar {
+impl Syncer {
     fn lease_epoch(&self) -> LeanResult<u64> {
         self.lease
             .as_ref()
@@ -87,7 +87,7 @@ impl Sidecar {
     }
 
     /// The in-loop honor paths' fence check (boundary-verbs plan D2):
-    /// `Sidecar::sync` carries no lease/epoch check of its own, so a
+    /// `Syncer::sync` carries no lease/epoch check of its own, so a
     /// straggler consuming a sync sentinel between deposal and its next
     /// cooperative fence would apply the successor's manifest onto its
     /// zombie tree and ack SUCCESS.
@@ -175,7 +175,7 @@ impl Sidecar {
             };
             if head.etag != entry.etag {
                 // Superseded by a newer write (its own inbox entry
-                // follows, or it is the sidecar's): drop.
+                // follows, or it is the syncer's): drop.
                 consumed.push(entry.clone());
                 continue;
             }
@@ -650,7 +650,7 @@ impl Sidecar {
             // An unchunked upload phase therefore starves the heartbeat
             // for its whole duration, which does two bad things: a
             // deposed straggler cannot learn it was deposed (the CAS
-            // that would tell it never runs), and a HEALTHY sidecar can
+            // that would tell it never runs), and a HEALTHY syncer can
             // outrun the 60 s takeover window and have a standby take
             // the lease off a live writer. The 0b numbers put a 1M-file
             // checkout at 7 m 05 s, so this is reachable, not exotic.
@@ -682,7 +682,7 @@ impl Sidecar {
             let all: Vec<&String> = classified.uploads.iter().collect();
             for group in all.chunks(chunk) {
                 {
-                    let this: &Sidecar = &*self;
+                    let this: &Syncer = &*self;
                     let mut part: Vec<(String, LeanResult<UploadOutcome>)> =
                         stream::iter(group.iter().map(|path| {
                             let path = *path;
@@ -748,7 +748,7 @@ impl Sidecar {
         // Citation repairs: paths whose integrated object (the
         // baseline) differs from the manifest's citation — consumed
         // HITL adoptions and checkout's S3-wins arm. No bytes move; the
-        // manifest re-cites what this sidecar already integrated.
+        // manifest re-cites what this syncer already integrated.
         // Without this, an adopted upload is clean-vs-baseline, never
         // enters the upload set, and the manifest silently drops it —
         // the battery's amputation leg caught exactly that.
@@ -898,7 +898,7 @@ impl Sidecar {
                     report.deleted.push(path.clone());
                 }
                 Ok(meta) => {
-                    // An ETag this sidecar does not recognize is NEVER
+                    // An ETag this syncer does not recognize is NEVER
                     // deleted (a HITL re-create landed after our CAS).
                     self.state.append_conflict(&ConflictRecord {
                         path: path.clone(),
@@ -1280,10 +1280,10 @@ pub(super) fn mtime_of(m: &std::fs::Metadata) -> i64 {
 /// callers (checkout, inbox consume, sync): `write_file_atomic` did
 /// `create_dir_all(parent)` + write with no `O_NOFOLLOW` and no
 /// root-containment check, while the scanner SKIPS symlinks — so a
-/// planted symlink is invisible to the sidecar. An unprivileged app
+/// planted symlink is invisible to the syncer. An unprivileged app
 /// that plants `inputs -> /root/.aws`, lands an object at
 /// `inputs/<path>` and drops a scoped sync turns the credential-holding
-/// sidecar into an on-demand arbitrary-file-write primitive outside the
+/// syncer into an on-demand arbitrary-file-write primitive outside the
 /// workspace.
 pub(super) fn write_file_atomic_in(
     root: &Path,
@@ -1326,7 +1326,7 @@ fn resolve_contained(
         return refuse("empty path");
     }
     if super::scan::is_control_path(rel) {
-        // The reserved namespace is the sidecar's own; a citation or
+        // The reserved namespace is the syncer's own; a citation or
         // inbox entry naming it is surfaced, never materialized (D0.3).
         return refuse("reserved control namespace");
     }

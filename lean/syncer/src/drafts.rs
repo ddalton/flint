@@ -1,7 +1,7 @@
 //! Per-user DRAFTS: a durable edit that is deliberately NOT published.
 //!
 //! The gap this closes. `PUT /files/{path}` is a LIVE write — the
-//! object lands at `files/<path>`, the real key, and the sidecar
+//! object lands at `files/<path>`, the real key, and the syncer
 //! integrates it at step 1 of the next barrier (default cadence 60 s).
 //! Nothing gates it and nobody approves it, so there was no way to say
 //! "I edited this, keep it for me, don't show it to anyone yet."

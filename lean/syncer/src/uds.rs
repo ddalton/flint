@@ -18,7 +18,7 @@
 //! any process in the pod can already touch (§3 residual 6). A TCP
 //! listener would be a new remote surface, which is a stated non-goal.
 //!
-//! The listener owns NO sidecar state. It forwards requests over a
+//! The listener owns NO syncer state. It forwards requests over a
 //! channel to the run loop, which is the single thread that holds the
 //! lease and the state directory — the same reason `flint-sync status`
 //! reads files instead of claiming anything.
@@ -119,9 +119,9 @@ async fn handle_conn(
             match tx.send(CtlRequest::Boundary { note: None, reply }).await {
                 Ok(()) => match rx.await {
                     Ok(v) => (200, v),
-                    Err(_) => (503, json_err("the sidecar did not answer")),
+                    Err(_) => (503, json_err("the syncer did not answer")),
                 },
-                Err(_) => (503, json_err("the sidecar run loop is gone")),
+                Err(_) => (503, json_err("the syncer run loop is gone")),
             }
         }
         ("POST", "/v1/sync") => {
@@ -129,9 +129,9 @@ async fn handle_conn(
             match tx.send(CtlRequest::Sync { reply }).await {
                 Ok(()) => match rx.await {
                     Ok(v) => (200, v),
-                    Err(_) => (503, json_err("the sidecar did not answer")),
+                    Err(_) => (503, json_err("the syncer did not answer")),
                 },
-                Err(_) => (503, json_err("the sidecar run loop is gone")),
+                Err(_) => (503, json_err("the syncer run loop is gone")),
             }
         }
         ("GET", "/v1/status") => {
@@ -139,9 +139,9 @@ async fn handle_conn(
             match tx.send(CtlRequest::Status { reply }).await {
                 Ok(()) => match rx.await {
                     Ok(v) => (200, v),
-                    Err(_) => (503, json_err("the sidecar did not answer")),
+                    Err(_) => (503, json_err("the syncer did not answer")),
                 },
-                Err(_) => (503, json_err("the sidecar run loop is gone")),
+                Err(_) => (503, json_err("the syncer run loop is gone")),
             }
         }
         _ => (

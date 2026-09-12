@@ -29,7 +29,7 @@ use flint_store::{crc64_nvme, crc64_to_b64, GenerationStamps, PosixStamps, Store
 
 use super::barrier::{mtime_of, write_file_atomic_in};
 use super::state::{BaselineEntry, ConflictRecord};
-use super::{inbox, manifest, now_unix, scan, LeanError, LeanResult, Sidecar};
+use super::{inbox, manifest, now_unix, scan, LeanError, LeanResult, Syncer};
 
 #[derive(Debug, Default, Serialize)]
 pub struct SyncReport {
@@ -87,7 +87,7 @@ impl Scope {
     }
 }
 
-impl Sidecar {
+impl Syncer {
     /// Whole-tree sync — exactly as shipped, including advancing
     /// `seq`/`manifest_etag`.
     pub async fn sync(&mut self) -> LeanResult<SyncReport> {

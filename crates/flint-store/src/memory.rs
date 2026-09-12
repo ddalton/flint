@@ -1101,7 +1101,7 @@ impl ObjectStore for MemoryStore {
                 holder_id: lease.holder_id.clone(),
                 epoch: lease.epoch,
                 released: true,
-                // A released cell reports no live sidecar: clearing the
+                // A released cell reports no live syncer: clearing the
                 // echo is the point, not an omission.
                 echo: None,
             })

@@ -84,9 +84,11 @@ pub struct MountSpec {
     #[serde(default)]
     pub identity: Option<crate::s3csi::policy::Identity>,
     // NO per-mount `resources`. There was a field here and it was dead:
-    // the injector takes the sidecar's resources from the CHART
-    // (`sidecarResources` → `InjectDefaults`) and never looked at the
-    // CR's, so a spec that set it would have been accepted and ignored.
+    // the webhook injector took the mounter's resources from the CHART
+    // and never looked at the CR's, so a spec that set it would have
+    // been accepted and ignored. (The injector, and the chart value it
+    // read, are both gone since v1.45.0 — this comment named them until
+    // v1.50.0, which sent readers after settings that do not exist.)
     // It is also the right answer on purpose — the CR is writable by
     // tenants and the container it configures is privileged, so the
     // limits are the cluster operator's to set, not the mount author's.

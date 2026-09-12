@@ -1,5 +1,5 @@
 ---
-title: flint-lean — checkout/publish sidecar + control-plane gateway
+title: flint-lean — checkout/publish syncer + control-plane gateway
 status: PLAN OF RECORD, v2 (post-adversarial-review 2026-08-24) — lean is
   the default front end for the agent-harness architecture; the FUSE track
   is DEPRIORITIZED (docs/flint-fuse-architecture.html stays as the designed
@@ -12,7 +12,7 @@ lineage: extracted from the 14-agent FUSE review; v2 incorporates its own
   12-agent adversarial review (6 dimensions x dedicated skeptic; 18
   CONFIRMED + 5 DOWNGRADED-but-real, 1 refuted — record in §10)
 governs:
-  - spdk-csi-driver/src/bin/flint-sync.rs (new — the lean sidecar binary)
+  - spdk-csi-driver/src/bin/flint-sync.rs (new — the lean syncer binary)
   - spdk-csi-driver/src/tier/ (subtree lease re-scope, claim identity, manifest split + MERGE writer, materializing import)
   - spdk-csi-driver/src/s3_surface/ (new — the one S3-dialect library)
   - flint-hub-gateway/ (control plane: publish intents, inbox, sync diffs, HITL writes)
@@ -25,15 +25,15 @@ governs:
 > its own 20-run TLC gate (`lean/formal/check.sh`), deliberately separate
 > from flint's `formal/` corpus; the model's findings are recorded in
 > `lean/formal/README.md`. Phase 1+2 CORE SHIPPED, and Phase 3
-> GATEWAY VERBS SHIPPED — the `flint-lean` crate (`lean/sidecar/`,
+> GATEWAY VERBS SHIPPED — the `flint-lean` crate (`lean/syncer/`,
 > deliberately its own crate over the extracted `crates/flint-store`
 > layer, so the lean test loop never builds the hub crate): flint-sync
 > (checkout/restart matrix, 7-step barrier, inbox/window cell,
 > merge-capable manifest writer, 412 park/AdoptOwn policy, guarded GC,
 > claim/rotation lease, sync verb) + flint-lean-gateway (HITL
-> PUT/GET with the window gate, snapshot/status, and the sidecar verbs
+> PUT/GET with the window gate, snapshot/status, and the syncer verbs
 > with PER-REQUEST epoch validation — P5's teeth on every
-> gateway-mediated write). 17-leg battery (`lean/sidecar/src/tests.rs`)
+> gateway-mediated write). 17-leg battery (`lean/syncer/src/tests.rs`)
 > against MemoryStore's full conditional semantics. **Phase 0b FIRST
 > NUMBERS MEASURED** (`docs/plans/flint-lean-0b-measurements.md` —
 > loopback floors; tentative v1 file-count cap 250k; fan-out +
@@ -51,9 +51,9 @@ governs:
 > and **§2.2's four failure effects are PROXY effects, not gateway
 > effects** (C8 vs C12: a gateway outage costs only "HITL writes
 > fail"), which locates P5 enforcement at the proxy — where the
-> sidecar's writes actually go, and where the epoch already rides in
+> syncer's writes actually go, and where the epoch already rides in
 > GenerationStamps. Still open: multipart compose for > whole_put_max
-> files, routing sidecar barriers through the gateway verbs by default
+> files, routing syncer barriers through the gateway verbs by default
 > (the deferral the drill measures the cost of), proxy conformance gate
 > + proxy-shaped 0b/0c re-measure, the three Phase 6 legs kind cannot
 > run (real spot NODE reclaim, burst N≥1000, real-proxy rates),
@@ -62,7 +62,7 @@ governs:
 ## 1. Summary and scope
 
 The lean variant is a third front end over the unchanged bucket format:
-an **unprivileged** sidecar materializes the workspace as plain files at
+an **unprivileged** syncer materializes the workspace as plain files at
 pod start, the app runs against a real local filesystem with zero
 interception, and changed files publish at the flush cadence. The
 deployment is **two planes**: a full S3 proxy (existing component, holds
@@ -88,8 +88,8 @@ explicit); no durable REMOVAL journal (full checkout keeps deletes
 RPO-symmetric — but see the emptyDir bookkeeping below, which is NOT
 that journal); no eviction engine.
 
-**Revised in v2 (review):** "no sqlite in the sidecar" survives, but
-"no durable sidecar state at all" does not — the sidecar persists
+**Revised in v2 (review):** "no sqlite in the syncer" survives, but
+"no durable syncer state at all" does not — the syncer persists
 **plain-file bookkeeping on the emptyDir**: a checkout-complete marker,
 the baseline manifest snapshot (seq + per-entry ETags, rewritten at
 every barrier and sync), a pre-barrier intent journal of (key, new-ETag)
@@ -107,7 +107,7 @@ An ordinary process reusing `tier::` as a library.
 (bytes vs the emptyDir sizeLimit; file count vs the v1 cap — the
 manifest `Inventory` already carries both). Writes the
 checkout-complete marker + baseline snapshot LAST. The agent container
-cannot start before the marker exists (§2.4 native-sidecar gating).
+cannot start before the marker exists (§2.4 native-syncer gating).
 
 **publish barrier** — every `floorSecs` and on preStop:
 
@@ -122,7 +122,7 @@ cannot start before the marker exists (§2.4 native-sidecar gating).
    bucket manifest**. Deletion basis: a path is delete-eligible only
    if absent in THIS scan AND the previous scan (absence must survive
    two consecutive scans — the rename-vs-walk race guard) AND present
-   in the sidecar's own baseline.
+   in the syncer's own baseline.
 3. Write the intent journal (keys + expected ETags) to the emptyDir.
 4. Upload changed/new files: ≤ 64 MiB via guarded `put_whole`
    (If-Match per key); larger via streaming multipart compose. After
@@ -137,7 +137,7 @@ cannot start before the marker exists (§2.4 native-sidecar gating).
    inbox for the next sync — never dropped, never deleted.
 6. **Deletes last**, after the CAS, as garbage collection of keys the
    new manifest no longer references — **etag-guarded** (HEAD +
-   compare the baseline ETag; a key whose ETag the sidecar does not
+   compare the baseline ETag; a key whose ETag the syncer does not
    recognize is never deleted; note S3 DELETE itself is
    unconditional, hence the HEAD guard). Reordered from v1
    (upload→delete→CAS dangled the manifest on crash).
@@ -148,7 +148,7 @@ upload, HEAD the key and compare the `flush_uuid`/GenerationStamps
 metadata the store already stamps: my own crashed/torn earlier PUT ⇒
 adopt the ETag and continue; foreign (a HITL write) ⇒ **park the path,
 emit it in the conflict report, never If-Match-overwrite an ETag the
-sidecar did not itself publish** — the inherited flush arbitration is
+syncer did not itself publish** — the inherited flush arbitration is
 LOCAL-WINS-overwrite (`flush.rs:1391`) and is explicitly NOT reused
 here. The arbitrate loop is re-derived for flint-sync (it cannot lift
 `flush.rs` wholesale); the same rule covers ambiguous proxy errors
@@ -162,7 +162,7 @@ the agent's un-scanned latest work). Then: gateway manifest+inbox diff
 since the baseline seq; apply — locally-dirty wins, remote deletions
 only on locally-clean paths, adds/changes fetched via the proxy;
 machine-readable conflict report + exit status; baseline advances.
-Serialized against the sidecar's own barrier.
+Serialized against the syncer's own barrier.
 
 **Restart matrix (first-class, was the review's top theme):**
 
@@ -193,7 +193,7 @@ deposing on it would manufacture the §2.2 straggler).
 
 **preStop drain** — early drain begins at observed
 `deletionTimestamp`; final barrier after the agent exits (native
-sidecar ordering). Sizing is now explicit and operator-enforced:
+syncer ordering). Sizing is now explicit and operator-enforced:
 `dirtySetCapGiB ≤ (grace − agentExitBudget − release) ×
 proxyMeasuredDrainRate / maxCoScheduledLeanPodsPerNode` — the 8–13
 s/GiB figure predates the proxy and is re-measured in Phase 0b;
@@ -208,8 +208,8 @@ publish cooldown instead (the amplification pathology, §6).
 - **Publish intent + the barrier-window/inbox cell.** Statelessness
   needs a durable coordination substrate: `<subtree>/.flint/inbox` — a
   CAS cell that is BOTH the HITL inbox and the barrier-window token.
-  The sidecar's intent CAS-marks the window open (with a deadline +
-  epoch, so a dead sidecar cannot wedge HITL past lease expiry) and
+  The syncer's intent CAS-marks the window open (with a deadline +
+  epoch, so a dead syncer cannot wedge HITL past lease expiry) and
   clears it after the manifest CAS; every replica checks it before
   admitting a UI write, closing the two-replica race the review proved
   (a barrier through replica A was invisible to replica B). Starvation
@@ -217,8 +217,8 @@ publish cooldown instead (the amplification pathology, §6).
   defers to the pending write.
 - **The HITL write path.** UI writes land as objects plus **inbox
   entries — never direct manifest edits** (a gateway manifest bump is
-  amputated by the sidecar's next whole-document CAS; the review
-  reproduced this end-to-end three ways). The sidecar consumes the
+  amputated by the syncer's next whole-document CAS; the review
+  reproduced this end-to-end three ways). The syncer consumes the
   inbox at every barrier (§2.1 step 1) and at every sync; a HITL
   upload therefore survives any number of barriers without an explicit
   sync. Refuse-vs-queue during an open window is pinned: refuse with
@@ -230,7 +230,7 @@ publish cooldown instead (the amplification pathology, §6).
   only multipart; per-key If-Match has no purchase because a
   checkout-only successor rotates no data ETags; the epoch residual
   note in `epoch.rs:28` assumes a PUBLISHING successor). Additionally
-  every sidecar PUT carries its epoch in the GenerationStamps and the
+  every syncer PUT carries its epoch in the GenerationStamps and the
   gateway's validation is **per-request** (granularity now stated),
   rejecting writes whose epoch is below the subtree cell's.
 - **Proxy posture (decided):** grade-1 primary; conditional-header
@@ -243,7 +243,7 @@ publish cooldown instead (the amplification pathology, §6).
   rides: conditional multipart Complete + its 200-with-error-body,
   copy-source-if-match, DeleteObjects, ETag stability across
   PUT/multipart/HEAD/GET.
-- **Auth:** sidecar holds a proxy token + a gateway bearer; SigV4
+- **Auth:** syncer holds a proxy token + a gateway bearer; SigV4
   verification arrives with `s3_surface`.
 - **Failure mode (corrected §7):** gateway/proxy down ⇒ publishes
   pause AND checkouts/restarts wedge AND sync is unavailable AND HITL
@@ -271,7 +271,7 @@ classification. Hub dual-serves `/files` + the dialect for one release.
   materialize or published over user data by local-wins — both
   observed in the review.
 - **Probes derived, never fleet constants:** the webhook computes the
-  sidecar's startupProbe budget from the workspace Inventory × the
+  syncer's startupProbe budget from the workspace Inventory × the
   Phase-0b proxy-measured checkout rate + the unclean-death lockout
   (~110 s) + headroom; "checkout complete" moves to readiness where
   claiming states need to hold longer. (The hub's 600 s default kills
@@ -342,7 +342,7 @@ classification. Hub dual-serves `/files` + the dialect for one release.
   0a. Formal model per §4.
   0b. Checkout AND publish rates through a PROXY-SHAPED rig, on two
       axes: bytes (s/GiB) and **file count (100k and 1M entries: walk
-      wall-time, digest cost, manifest bytes, sidecar peak RSS,
+      wall-time, digest cost, manifest bytes, syncer peak RSS,
       barrier duration, HITL-refusal window)** — acceptance numbers,
       and the v1 file-count cap falls out of them.
   0c. Burst rig N≥1000 proxy-shaped; acceptance criterion is the
@@ -372,7 +372,7 @@ classification. Hub dual-serves `/files` + the dialect for one release.
   error), observability deliverables: per-pod RPO gauge
   (seconds-since-last-barrier + unpublished bytes), publish-failure
   and checkout-wedged alerts, conflict-report surfacing.
-- **Phase 4 — operator/webhook:** native-sidecar injection, derived
+- **Phase 4 — operator/webhook:** native-syncer injection, derived
   probes, layout/claim (+both adopt legs), principal-split bootstrap,
   operator-side MPU sweep, kind e2e (incl. agent-starts-after-
   checkout with a plain-container failing control).
@@ -456,7 +456,7 @@ barrier is unfenced — MPU sweep/If-Match/manifest CAS all fence the
 wrong party (→ takeover manifest rotation + per-request epoch
 validation); >64 MiB/5 GiB files check out but can never publish (→
 streaming multipart, `put_whole` never past `whole_put_max`); plain
-sidecar + startupProbe gates neither start nor stop (→ native sidecars
+syncer + startupProbe gates neither start nor stop (→ native sidecars
 mandatory, K8s ≥1.29); container restart over a live tree resurrects
 unpublished deletes + 60 s lease lockout (→ restart matrix + emptyDir
 bookkeeping + incarnation id).

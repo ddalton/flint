@@ -15,7 +15,9 @@
 # launch message so a kubelet restart (`OnFailure`) relaunches WITHOUT
 # the plugin, and serve the loopback credential door flint-sync reads
 # its keys from. That is the worker; flint-sync stays byte-identical to
-# the sidecar the lean webhook injects.
+# the syncer the node plugin launches (it was the webhook's injected
+# sidecar until v1.45.0, and the binary did not change when delivery
+# did — which is the property this sentence exists to assert).
 #
 # UNPRIVILEGED, like the passthrough worker: non-root at the CR's uid
 # (a syncer at any other uid cannot read the app's 0600 files and

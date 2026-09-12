@@ -6,7 +6,7 @@
 # arch before it sideloads.
 #
 # busybox rather than scratch, for the same reason as the kind image: the
-# sidecar's startupProbe execs `test -f <marker>` INSIDE this container.
+# syncer's startupProbe execs `test -f <marker>` INSIDE this container.
 FROM busybox:stable
 COPY flint-sync /usr/local/bin/flint-sync
 COPY flint-lean-gateway /usr/local/bin/flint-lean-gateway

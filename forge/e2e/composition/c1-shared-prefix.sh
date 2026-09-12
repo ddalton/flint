@@ -12,7 +12,7 @@
 # independently:
 #
 #   forge  <prefix>/git/epoch          (forge/syncer/src/lib.rs:210)
-#   lean   <prefix>/.flint/lean/epoch  (lean/sidecar/src/lib.rs:389)
+#   lean   <prefix>/.flint/lean/epoch  (lean/syncer/src/lib.rs:389)
 #
 # If those disagree there is no contention to win: both processes
 # acquire, both are correct that they hold THEIR cell, and neither can
@@ -65,12 +65,12 @@ fi
 forge_down f2; forge_down f1
 
 # ── control 2: lean vs lean on one prefix ────────────────────────────
-head_ "control 2 — two lean sidecars on one prefix must contend"
+head_ "control 2 — two lean syncers on one prefix must contend"
 seed_workspace "$WORK/w1"; seed_workspace "$WORK/w2"
 ( lean run c1/lean "$WORK/w1" FLINT_SYNC_FLOOR_SECS=5 > "$WORK/lean1.log" 2>&1 ) &
 LEAN1=$!
-wait_key c1/lean/.flint/lean/epoch 40 && ok "first lean sidecar holds the lease" \
-  || bad "first lean sidecar never took the lease"
+wait_key c1/lean/.flint/lean/epoch 40 && ok "first lean syncer holds the lease" \
+  || bad "first lean syncer never took the lease"
 ( lean barrier c1/lean "$WORK/w2" > "$WORK/lean2.log" 2>&1 ) &
 LEAN2=$!
 for _ in $(seq 1 25); do
@@ -80,9 +80,9 @@ for _ in $(seq 1 25); do
 done
 kill $LEAN2 2>/dev/null; wait $LEAN2 2>/dev/null
 if grep -q "waiting on the standing lease" "$WORK/lean2.log"; then
-  ok "the second lean sidecar is held off (contention is observable here)"
+  ok "the second lean syncer is held off (contention is observable here)"
 else
-  bad "the second lean sidecar did not contend"
+  bad "the second lean syncer did not contend"
   head -5 "$WORK/lean2.log"
 fi
 kill $LEAN1 2>/dev/null; wait $LEAN1 2>/dev/null

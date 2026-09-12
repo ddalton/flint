@@ -7,7 +7,7 @@
 (* flint corpus in formal/: lean is a separate system that reuses tier::   *)
 (* as a library, and its protocol lives in the bucket, not in the hub.     *)
 (*                                                                         *)
-(* One subtree.  Two sidecar incarnations (A, then B after takeover), a    *)
+(* One subtree.  Two syncer incarnations (A, then B after takeover), a    *)
 (* gateway abstracted to its bucket effects (HITL writes, window check,    *)
 (* per-request epoch validation), and the bucket substrate: lease cell,    *)
 (* manifest (seq + per-path citation), whole-file objects (per-path        *)
@@ -53,7 +53,7 @@ CONSTANTS
   ConflictSurfacing,   \* FALSE: LOCAL-WINS silently (the flush.rs:1391 reuse)
   WindowCheck,         \* FALSE: gateway admits HITL during an open window
   Rotation,            \* successor CAS-rotates manifest seq before serving
-  EpochCheck,          \* per-request epoch validation on sidecar writes
+  EpochCheck,          \* per-request epoch validation on syncer writes
   GuardedGC,           \* HEAD etag-guard before the GC delete
   DeletesAfterCAS,     \* FALSE: v1 order upload -> delete -> CAS
   RematerializeOnRestart, \* TRUE = mutation: re-checkout over a live tree
@@ -111,7 +111,7 @@ CONSTANTS
                        \* the window CAS has already loaded it.
   \* ---- tranche 3 product 1: the boundary VERB x barrier x inbox --------
   \* (boundary-verbs D1/D2/D3/D12.)  The sentinel is a FILE in the tree,
-  \* not a bucket object: the agent touches `.flint/publish`, the sidecar
+  \* not a bucket object: the agent touches `.flint/publish`, the syncer
   \* renames it into its own state dir (the consume), honors it with a
   \* real barrier, writes `.flint/publish.ack`, and retires the pending
   \* record.  What this product searches is the interleaving of those
@@ -154,7 +154,7 @@ CONSTANTS
                        \* argument, machine-checked.
   GatedRepair,         \* TRUE = the citation lane carries the same
                        \* citation-repair the fused barrier has: re-cite
-                       \* an object this sidecar INTEGRATED (a consumed
+                       \* an object this syncer INTEGRATED (a consumed
                        \* HITL write) whose citation is still behind it.
                        \* FALSE = what shipped, where the repair lived
                        \* only in the fused barrier — which gated mode
@@ -225,7 +225,7 @@ CONSTANTS
                        \* LOCAL file; the manifest is what the fleet
                        \* reads, so the bucket held the wrong one.
 
-Sidecars == {"A", "B"}
+Syncers == {"A", "B"}
 Sources == {"none", "cadence", "sentinel"}
 
 VARIABLES
@@ -241,22 +241,22 @@ VARIABLES
   objects,     \* [Paths -> Nat]: current object generation (0 = absent)
   inbox,       \* SUBSET (Paths \X Nat): pending HITL entries
   window,      \* 0 = closed; else the opener's epoch
-  \* ---- sidecars ---------------------------------------------------------
-  sc,          \* [Sidecars -> record], fields below
+  \* ---- syncers ---------------------------------------------------------
+  sc,          \* [Syncers -> record], fields below
   \* ---- the versioned substrate (tranche 3 product 2) --------------------
   versions,    \* [Paths -> SUBSET Nat]: every generation still STORED for
                \* the path.  `objects[p]` is which one it currently reads
                \* as; a PUT over a versioned bucket destroys nothing, so
                \* the two diverge exactly while work is staged-uncited.
-  stage,       \* [Sidecars -> [Paths -> Nat]]: the gated pending set —
+  stage,       \* [Syncers -> [Paths -> Nat]]: the gated pending set —
                \* staged-but-uncited generation per path (0 = none).
-  stageBase,   \* [Sidecars -> [Paths -> Nat]]: the generation the BASELINE
+  stageBase,   \* [Syncers -> [Paths -> Nat]]: the generation the BASELINE
                \* cited when we staged.  D7's re-validation guard: if the
                \* baseline has moved by citation time, a HITL consume or a
                \* sync landed after we staged, and installing our staged
                \* generation would let work that PREDATES the foreign
                \* bytes win against them.
-  withheldDel, \* [Sidecars -> SUBSET Paths]: deletes withheld from the
+  withheldDel, \* [Syncers -> SUBSET Paths]: deletes withheld from the
                \* manifest until a citation, so a rename never becomes
                \* reader-visible as gone/absent at an undeclared point.
   \* ---- environment / ghosts --------------------------------------------
@@ -465,7 +465,7 @@ DSet(s)     == {p \in Dirty(s) : sc[s].local[p] = 0
 CitedGens   == {manifest[p] : p \in Paths} \ {0}
 UploadsDone(s) == sc[s].scanU \subseteq (sc[s].upDone \cup sc[s].parked)
 
-\* The generation an acked pair refers to is destroyed by a sidecar that
+\* The generation an acked pair refers to is destroyed by a syncer that
 \* never legitimately learned it, with no surfaced record: the amputation
 \* stamp for the destruction site.
 Destroys(s, p, cur) ==
@@ -484,10 +484,10 @@ Init ==
   /\ inbox = {} /\ window = 0
   \* Every path starts published at gen 1, so gen 1 is its only version.
   /\ versions = [p \in Paths |-> {1}]
-  /\ stage = [s \in Sidecars |-> [p \in Paths |-> 0]]
-  /\ stageBase = [s \in Sidecars |-> [p \in Paths |-> 0]]
-  /\ withheldDel = [s \in Sidecars |-> {}]
-  /\ sc = [s \in Sidecars |->
+  /\ stage = [s \in Syncers |-> [p \in Paths |-> 0]]
+  /\ stageBase = [s \in Syncers |-> [p \in Paths |-> 0]]
+  /\ withheldDel = [s \in Syncers |-> {}]
+  /\ sc = [s \in Syncers |->
        [st |-> "unstarted", pc |-> "idle", epoch |-> 0, expSeq |-> 0,
         installed |-> FALSE,
         local |-> [p \in Paths |-> 0], baseline |-> [p \in Paths |-> 0],
@@ -567,7 +567,7 @@ CrashPod(s) ==
    the reason no gated cfg could safely raise MaxCrashes (review: U13).
 
    `citeDone` must go WITH it, and that is the half a frame fix alone
-   misses.  Clearing only gatedVars leaves a dead sidecar's frozen
+   misses.  Clearing only gatedVars leaves a dead syncer's frozen
    citeDone quantified by Inv_BoundaryAtomic against a Valid(s) that
    keeps moving as the inbox changes — a false positive that surfaces
    EARLIER (depth 9) than the one it was meant to remove (depth 16), on
@@ -692,7 +692,7 @@ CheckoutB ==
                  window, hitlAcked, conflicts, gh>>
 
 ------------------------------------------------------------------------------
-(* The agent (local edits only — the sidecar publishes them later) *)
+(* The agent (local edits only — the syncer publishes them later) *)
 
 AgentWrite(s, p) ==
   /\ Running(s) /\ gh.nextGen <= MaxGen
@@ -782,7 +782,7 @@ HitlWrite(p) ==
           ELSE /\ manifest' = [manifest EXCEPT ![p] = g]
                /\ manSeq' = manSeq + 1
                \* The refuted direct-bump path: a party that holds no
-               \* lease installed this, so it carries no sidecar clock.
+               \* lease installed this, so it carries no syncer clock.
                /\ manSrc' = "none"
                /\ UNCHANGED inbox
        /\ hitlAcked' = hitlAcked \cup {<<p, g>>}
@@ -883,7 +883,7 @@ Scan(s) ==
    The 412 arm: own/known generation => adopt (the crashed-PUT resume);
    foreign => park + surface, or LOCAL-WINS overwrite under the
    mutation.  EpochCheck rejects a deposed writer per-request — the
-   sidecar takes the rejection as deposal and fences.                   *)
+   syncer takes the rejection as deposal and fences.                   *)
 UploadFenced(s) ==
   /\ ~GatedCitation
   /\ Running(s) /\ sc[s].pc = "scanned"
@@ -919,7 +919,7 @@ Upload(s, p) ==
                         inbox, window, hitlAcked, conflicts>>
        ELSE IF ConflictSurfacing
        THEN \* foreign ETag: park the path, surface the conflict, never
-            \* overwrite an ETag this sidecar did not itself publish.
+            \* overwrite an ETag this syncer did not itself publish.
          /\ sc' = [sc EXCEPT ![s].parked = @ \cup {p}]
          /\ conflicts' = conflicts \cup {<<p, cur>>}
          /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
@@ -935,7 +935,7 @@ Upload(s, p) ==
                         window, hitlAcked, conflicts>>
 
 (* Steps 5+6 in the chosen order.  The GC delete (etag-guarded HEAD:
-   refuse any ETag the sidecar does not recognize).  Under
+   refuse any ETag the syncer does not recognize).  Under
    DeletesAfterCAS = FALSE (the v1 order) the deletes run BEFORE the
    CAS — the dangling-manifest mutation.                                *)
 GCDelete(s, p) ==
@@ -1040,7 +1040,7 @@ CASInstall(s) ==
        \* barrier after preserving it, once Finish absorbs it into the
        \* base).  A foreign change (theirs # base) is PRESERVED —
        \* including over a local delete (delete/modify resolves
-       \* conservative).  The REPAIR arm re-cites an object this sidecar
+       \* conservative).  The REPAIR arm re-cites an object this syncer
        \* integrated (consume advanced baseline past the citation),
        \* guarded on the object still holding that generation — the
        \* implementation's citation-repair with its HEAD guard.
@@ -1087,7 +1087,7 @@ CASInstall(s) ==
        inbox2 == inbox \cup foreignQ
        \* An install amputates when it drops the last tracked reference to
        \* an acked generation the installer NEVER LEARNED (pr[2] \notin
-       \* known).  A sidecar that consumed the write and then published a
+       \* known).  A syncer that consumed the write and then published a
        \* delete of it speaks for the workspace — that is integration
        \* followed by ordinary editing, not amputation.
        amp == \E pr \in hitlAcked :
@@ -1113,7 +1113,7 @@ CASInstall(s) ==
   /\ UNCHANGED <<cellEpoch, cellHolder, objects, hitlAcked, conflicts>>
 
 (* Step 7: rewrite the baseline, clear the barrier state.  The baseline
-   advances ONLY for keys whose bytes this sidecar integrated (its own
+   advances ONLY for keys whose bytes this syncer integrated (its own
    uploads and its own landed deletes) — never for merge-preserved
    foreign entries, whose bytes arrive at the next Consume.  known
    likewise never absorbs cited-but-unintegrated generations.           *)
@@ -1142,7 +1142,7 @@ Finish(s) ==
 ------------------------------------------------------------------------------
 (* TRANCHE 2: the sync verb (v1, HITL) x the barrier.                       *)
 (*                                                                          *)
-(* Harness-invoked, never background, serialized against this sidecar's own *)
+(* Harness-invoked, never background, serialized against this syncer's own *)
 (* barrier (hence pc = "idle").  Sync BEGINS WITH A FULL SCAN: "locally     *)
 (* dirty" means dirty per THAT scan against the baseline, never per the     *)
 (* last barrier's snapshot — otherwise sync honors a remote delete (or      *)
@@ -1560,8 +1560,8 @@ BackstopExpire(p) ==
                  conflicts>>
 
 GatedNext ==
-  \/ \E s \in Sidecars, p \in Paths : StagePut(s, p)
-  \/ \E s \in Sidecars :
+  \/ \E s \in Syncers, p \in Paths : StagePut(s, p)
+  \/ \E s \in Syncers :
        StagePutFenced(s) \/ LaneDone(s) \/ LaneOnly(s) \/ CiteFenced(s)
        \/ CitePassStep(s) \/ CiteFinish(s) \/ CrashPodGated(s)
   \/ \E p \in Paths : BackstopExpire(p)
@@ -1570,7 +1570,7 @@ GatedNext ==
 (* TRANCHE 3, PRODUCT 1: the boundary VERB x the barrier x the inbox.      *)
 (*                                                                         *)
 (* The agent declares a coherent point by touching `.flint/publish`; the   *)
-(* sidecar consumes it (rename into its own state dir), honors it with a   *)
+(* syncer consumes it (rename into its own state dir), honors it with a   *)
 (* real barrier, writes `.flint/publish.ack`, and retires the pending      *)
 (* record.  Four steps, each of which a crash, a restart or a deposal can  *)
 (* land between, and all of them racing the inbox and the manifest CAS.    *)
@@ -1833,7 +1833,7 @@ AckRefused(s) ==
                  window, hitlAcked, conflicts>>
 
 SentinelNext ==
-  \E s \in Sidecars :
+  \E s \in Syncers :
     Touch(s) \/ TakeSentinel(s) \/ FastPath(s) \/ AckOk(s)
     \/ AckPartial(s) \/ RetirePending(s) \/ AckRefused(s)
 
@@ -1855,15 +1855,15 @@ VersionsFollow ==
 
 BaseNext ==
   \/ StartA
-  \/ \E s \in Sidecars : CrashPod(s) \/ Restart(s) \/ RenewDiscover(s)
+  \/ \E s \in Syncers : CrashPod(s) \/ Restart(s) \/ RenewDiscover(s)
   \/ StallA \/ ThawA \/ ClaimB \/ CheckoutB
-  \/ \E s \in Sidecars, p \in Paths :
+  \/ \E s \in Syncers, p \in Paths :
        AgentWrite(s, p) \/ AgentDelete(s, p) \/ Upload(s, p)
        \/ GCDelete(s, p)
-  \/ \E s \in Sidecars : Narrow(s)
+  \/ \E s \in Syncers : Narrow(s)
   \/ \E p \in Paths : HitlWrite(p)
   \/ HitlRefused
-  \/ \E s \in Sidecars :
+  \/ \E s \in Syncers :
        Consume(s) \/ Scan(s) \/ UploadFenced(s) \/ GCDeleteFenced(s)
        \/ PreDeletesDone(s) \/ CASFenced(s) \/ CASMiss(s) \/ CASInstall(s)
        \/ Finish(s) \/ Sync(s)
@@ -1879,15 +1879,15 @@ Spec == Init /\ [][Next]_vars
 (* Invariants *)
 
 TypeOK ==
-  /\ cellEpoch \in 0..3 /\ cellHolder \in Sidecars \cup {"none"}
+  /\ cellEpoch \in 0..3 /\ cellHolder \in Syncers \cup {"none"}
   /\ manSeq \in 1..MaxSeq+1 /\ manSrc \in Sources
   /\ manifest \in [Paths -> Gens] /\ objects \in [Paths -> Gens]
   /\ inbox \subseteq (Paths \X Gens) /\ window \in 0..3
   /\ hitlAcked \subseteq (Paths \X Gens) /\ conflicts \subseteq (Paths \X Gens)
   /\ versions \in [Paths -> SUBSET Gens]
-  /\ stage \in [Sidecars -> [Paths -> Gens]]
-  /\ stageBase \in [Sidecars -> [Paths -> Gens]]
-  /\ \A s \in Sidecars : sc[s].scope \subseteq Paths /\ sc[s].prevScan \subseteq Paths
+  /\ stage \in [Syncers -> [Paths -> Gens]]
+  /\ stageBase \in [Syncers -> [Paths -> Gens]]
+  /\ \A s \in Syncers : sc[s].scope \subseteq Paths /\ sc[s].prevScan \subseteq Paths
 
 \* §4.2: A NARROW IS AN UNWATCH, NEVER AN ABSENCE.  No path a narrow
 \* dropped may lose its object — a workspace that stops holding a file
@@ -1968,7 +1968,7 @@ Inv_NoUncitedGC ==
 \* construction; the split-install mutation is what keeps that from
 \* being an untested claim.
 Inv_BoundaryAtomic ==
-  \A s \in Sidecars :
+  \A s \in Syncers :
     sc[s].citeDone = {} \/ sc[s].citeDone = Valid(s)
 
 \* ---- tranche 3, product 1: the boundary verb (D1/D2/D12) ----------------
@@ -1994,7 +1994,7 @@ Inv_AckBoundaryCoherent == ~gh.ackIncoherent
 \* incarnation, because a pod replacement takes the agent and the tree
 \* with the pending file.
 Inv_NoNonceOrphan ==
-  \A s \in Sidecars : sc[s].owed \subseteq (sc[s].pendN \cup sc[s].ackN)
+  \A s \in Syncers : sc[s].owed \subseteq (sc[s].pendN \cup sc[s].ackN)
 
 \* One boundary, ONE clock.  The agent reads the ack; the fleet reads the
 \* manifest's stamp; an operator asking "did my agent's publish land, or

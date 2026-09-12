@@ -89,7 +89,7 @@ pub struct Classified {
 
 /// Legacy citations under the reserved control namespace (boundary-verbs
 /// plan D0.2). A workspace that legally published `files/.flint/...`
-/// under a pre-D0 sidecar has those paths in its baseline; the new scan
+/// under a pre-D0 syncer has those paths in its baseline; the new scan
 /// skips them, so two consecutive scans would classify them absent and
 /// publish their DELETION. An upgrade must never delete data: they are
 /// carried forward frozen — never re-uploaded, never deleted by us.

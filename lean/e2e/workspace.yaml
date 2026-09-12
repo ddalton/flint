@@ -7,7 +7,7 @@ metadata:
   namespace: default
 type: Opaque
 stringData:
-  # Keys AWS_* VERBATIM (the sidecar's ambient credential chain).
+  # Keys AWS_* VERBATIM (the syncer's ambient credential chain).
   AWS_ACCESS_KEY_ID: drill
   AWS_SECRET_ACCESS_KEY: drillsecret
   AWS_REGION: us-east-1
@@ -42,7 +42,7 @@ spec:
       command:
         - /bin/sh
         - -c
-        # The agent proves the gate: it can only run once the sidecar's
+        # The agent proves the gate: it can only run once the syncer's
         # checkout-complete marker exists (the webhook injects the
         # workspace mount + the native sidecar ahead of it).
         - |

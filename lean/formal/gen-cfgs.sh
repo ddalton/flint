@@ -319,7 +319,7 @@ SENTRESTART="SentinelEnabled=TRUE MaxTouches=2 MaxGen=2 MaxSeq=6 MaxHitl=1 \
 MaxBarriers=2 MaxCrashes=0 MaxRestarts=1"
 # The stall/takeover world buys its depth the way the tranche-1 takeover
 # cfgs do — MaxGen=2, MaxHitl=0, one touch. At MaxGen=3 the deposal run
-# passed 1.3 GB of TLC scratch without terminating: two live sidecars,
+# passed 1.3 GB of TLC scratch without terminating: two live syncers,
 # each with its own sentinel/pending/ack, is a different scale from one.
 SENTSTALL="SentinelEnabled=TRUE MaxTouches=1 MaxGen=2 MaxSeq=6 MaxHitl=0 \
 MaxBarriers=2 MaxCrashes=0 MaxRestarts=0 AllowStall=TRUE"
@@ -471,7 +471,7 @@ emit LeanSentinelGatedClockUnstamped "Inv_BoundaryNamesItsClock" \
 # deferral probe FIRED, and the D4 mutation still generated a byte-identical
 # state count — `ScopedInstBase` was unreachable, so the pair run was green
 # over a world its bug cannot live in. The foreign source has to be the one
-# SCOPEWORLD uses: a second sidecar installing while ours is stalled.
+# SCOPEWORLD uses: a second syncer installing while ours is stalled.
 SCOPEGATED="SyncEnabled=TRUE SyncScope=TRUE GatedCitation=TRUE MaxSyncs=1 \
 AllowStall=TRUE MaxHitl=0 MaxGen=2 MaxSeq=6 MaxBarriers=2 \
 MaxCrashes=0 MaxRestarts=0"

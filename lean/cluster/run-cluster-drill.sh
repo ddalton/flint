@@ -194,7 +194,7 @@ nl_node() { $K get pods -l app=nl$1 -o jsonpath='{.items[0].spec.nodeName}' 2>/d
 
 # ─────────────────────────────────────────────────────────────────────
 # LEG A1 — graceful node loss. The claim: an evicted agent loses NOTHING,
-# because the sidecar's SIGTERM path runs a final drain barrier.
+# because the syncer's SIGTERM path runs a final drain barrier.
 # ─────────────────────────────────────────────────────────────────────
 legA1_drain() {
   local i

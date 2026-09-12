@@ -1,12 +1,12 @@
 //! The version-surface conformance probe (lean boundary-verbs plan D8).
 //!
 //! It lives HERE, in the store crate, because it has two callers in two
-//! crates that must never disagree: the sidecar runs it at startup and
+//! crates that must never disagree: the syncer runs it at startup and
 //! REFUSES gated mode on failure, and the operator runs it on its
 //! reconcile cadence and flips `BoundaryModeAccepted=False`. Two copies
 //! of "is this bucket conformant?" would eventually answer differently,
 //! and the failure that produces — a workspace the operator calls
-//! healthy and the sidecar refuses to start — is worse than either
+//! healthy and the syncer refuses to start — is worse than either
 //! answer alone.
 //!
 //! What it refuses, and why refusal rather than degradation: a
@@ -24,7 +24,7 @@ use crate::{crc64_nvme, GenerationStamps, ObjectStore, PutCondition, StoreError}
 /// present; `Err` names the exact step that failed, for a condition
 /// message an operator can act on.
 ///
-/// Callers must use DISTINCT keys per principal: the sidecar and the
+/// Callers must use DISTINCT keys per principal: the syncer and the
 /// operator probe on independent clocks, and a shared key would let two
 /// conformant probes fail each other's `If-None-Match` write.
 pub async fn probe_version_surface(store: &dyn ObjectStore, key: &str) -> Result<(), String> {

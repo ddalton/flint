@@ -90,16 +90,16 @@ prc=$?; t1=$(date +%s)
                || bad "pushes were already failing before the violation (rc=$prc)"
 sleep 6
 
-# ── the violation: a live lean sidecar takes B's lease ───────────────
-head_ "the violation — a read-write lean sidecar on the export prefix $B"
+# ── the violation: a live lean syncer takes B's lease ───────────────
+head_ "the violation — a read-write lean syncer on the export prefix $B"
 mkdir -p "$WORK/wb"
 ( lean run "$B" "$WORK/wb" FLINT_SYNC_FLOOR_SECS=5 > "$WORK/leanB.log" 2>&1 ) &
 LEANB=$!
 sleep 12
 if grep -q "holding epoch" "$WORK/leanB.log"; then
-  ok "the lean sidecar took the export prefix's lease"
+  ok "the lean syncer took the export prefix's lease"
 else
-  bad "the lean sidecar never took B's lease — the violation did not happen"
+  bad "the lean syncer never took B's lease — the violation did not happen"
   head -5 "$WORK/leanB.log"
 fi
 

@@ -36,7 +36,7 @@ tenant namespace can enforce PodSecurity `restricted` because
 `spec.volumes[*].csi` is on the restricted allow-list
 ([web-k8s-csi-mechanics §1.5]). *Lean: yes, conditionally* — the lean
 sidecar is not a mount but a process that lives with the pod (claim →
-checkout → barrier loop → drain on SIGTERM, `lean/sidecar/src/bin/flint_sync.rs:340-374,583-604`);
+checkout → barrier loop → drain on SIGTERM, `lean/syncer/src/bin/flint_sync.rs:340-374,583-604`);
 CSI supplies the two moments it needs — kubelet blocks every container
 on `NodePublishVolume` and calls `NodeUnpublishVolume` only after every
 container has exited ([web-k8s-csi-mechanics §4.3, §5]) — but the loop in
@@ -942,7 +942,7 @@ sets **no `securityContext`** (`inject.rs:200-228`), the image sets no
 chart sets the security context" is not true today — `code-lean §0`), and
 it holds the bucket credential in its environment while sharing an
 app-writable tree that the code treats as attacker-reachable
-(`lean/sidecar/src/safefs.rs:1-26`; `barrier.rs:1070-1081`). The plan of
+(`lean/syncer/src/safefs.rs:1-26`; `barrier.rs:1070-1081`). The plan of
 record says "Pods hold zero bucket credentials" and the proxy holds the
 real ones (`docs/plans/flint-lean-plan.md:66-73`); `credentialsSecretRef`
 is explicitly interim (`docs/flint-lean-for-agent-fleets.md:115-117`).
@@ -959,7 +959,7 @@ is explicitly interim (`docs/flint-lean-for-agent-fleets.md:115-117`).
 | T6 | **PSA regression.** Tenant namespaces must be `privileged` for passthrough, which admits *every* privileged pod there | the mutated pod is inadmissible under `baseline`/`restricted` | `NOTES.txt:35-42`; leg A11 |
 | T7 | **FUSE death strands consumers on `ENOTCONN`**, unrecoverable in place; today the sidecar's readiness flips so the pod leaves Service endpoints | measured on kind; proven by leg A12 | `passthrough/inject.rs:173-202,466-476`; `run-passthrough.sh:371-442` |
 | T8 | **Root lean sidecar, no limits, credential in env, app-writable tree** | a symlink plant turns the writer into an arbitrary-file-write primitive inside the pod; contained by `safefs` code discipline, not by the kernel | `lean_operator/inject.rs:200-228`; `safefs.rs:1-26`; `lib.rs:206-208` |
-| T9 | **Forgeable acks.** `.flint/*.ack` is writable by any in-pod process | advisory by design; the authoritative signal is a remote read | `lean/sidecar/src/control.rs:19-23` |
+| T9 | **Forgeable acks.** `.flint/*.ack` is writable by any in-pod process | advisory by design; the authoritative signal is a remote read | `lean/syncer/src/control.rs:19-23` |
 
 The repo already wrote down the principle this design implements: "The
 webhook must not be the security boundary. The subtree prefix derives
@@ -1674,7 +1674,7 @@ longer-lived keys than passthrough (§5, final-barrier row); (b) CR edit → nex
 - **Convergence with the fleet-auth endgame**: the broker's `(ns, SA) →
   project` mapping and the hub file API's planned `aud = flint:<project>`
   SA-JWT verification (`file-api-fleet-auth.md:204-242`) key on the same
-  identity; the lean gateway's one shared bearer (`lean/sidecar/src/gateway.rs:35-38`)
+  identity; the lean gateway's one shared bearer (`lean/syncer/src/gateway.rs:35-38`)
   is the remaining odd one out.
 - **P5 at the proxy** (per-PUT `x-amz-meta-flint-epoch` vs the
   `<prefix>/.flint/lean/epoch` cell, DECIDED 2026-08-26, unbuilt —
@@ -2104,7 +2104,7 @@ and `inject::mounter_args` (`spec.rs:39-165`; `inject.rs:251-299`);
 | `bin/flint_s3_worker.rs` | 200 | PID 1 of every worker: passthrough — `recvmsg` fd, `exec mount-s3 … /dev/fd/3`; lean — spawn `flint-sync run`, forward SIGTERM, propagate exit; optional loopback creds door |
 | `bin/flint_s3_broker.rs` + `s3csi/broker/` | 700 | STS façade (XML), `TokenReview`, CR entitlement, Knox step (K1/K2/K3), proxy step (P-CRED/P-STS), audit, metrics |
 | unit tests | 500 | attribute allow-list; record round-trip; creds expiry; worker-spec parity with `inject.rs` (the "every knob stamped" test re-homed); broker refusal matrix |
-| `lean/sidecar`: `flint-sync drain` | 80 | the syncer-already-gone path (§3.5) |
+| `lean/syncer`: `flint-sync drain` | 80 | the syncer-already-gone path (§3.5) |
 
 Changed: `passthrough/spec.rs` and `lean_operator/crd.rs` (+~40 each:
 `consumers`, `identity`, `uid/gid` for lean, tombstone `image`) and both
@@ -2307,7 +2307,7 @@ lean key-lifetime chart value need a decision before M5.
 ### 12.1 Repo (at `a9f3facd`, via the recon reports)
 
 - `spdk-csi-driver/src/passthrough/{mod.rs, spec.rs, inject.rs, webhook.rs}`; `spdk-csi-driver/src/webhook_certs.rs`; `spdk-csi-driver/src/bin/flint_passthrough_operator.rs`; `flint-passthrough-chart/{values.yaml, templates/rbac.yaml, templates/NOTES.txt, crds/flintpassthroughmounts.yaml}`; `spdk-csi-driver/docker/Dockerfile.passthrough`; `passthrough/e2e/{run-passthrough.sh, mounts.yaml, rig.yaml}` — cited lines: `inject.rs:5-13,15-28,30-35,37-40,52,57-85,95-111,173-202,238-244,251-299,355-498,431-441,445-461,466-476,492-495`; `spec.rs:1-10,39-165,64-67,72-74,91-93,188-241`; `webhook.rs:63-103,142-177,205-225`; `webhook_certs.rs:84-110`; `values.yaml:18-33,32-34,36-44,77-81,94-107`; `rbac.yaml:58-60`; `crds:85-93,118-126`; `run-passthrough.sh:12-21,359-368,371-442,445-451`; `mounts.yaml:1-3`.
-- `spdk-csi-driver/src/lean_operator/{webhook.rs, inject.rs, crd.rs, boundary.rs, reconcile.rs}`; `lean/sidecar/src/{bin/flint_sync.rs, lease.rs, state.rs, checkout.rs, sentinel.rs, control.rs, uds.rs, inbox.rs, barrier.rs, safefs.rs, gateway.rs, gauges.rs, lib.rs}`; `spdk-csi-driver/docker/Dockerfile.sync.prebuilt`; `flint-lean-chart/templates/monitoring.yaml`; `lean/e2e/{run-agent.sh, run-verbs.sh, run-chaos.sh, run-boundary.sh}` — cited lines as given inline.
+- `spdk-csi-driver/src/lean_operator/{webhook.rs, inject.rs, crd.rs, boundary.rs, reconcile.rs}`; `lean/syncer/src/{bin/flint_sync.rs, lease.rs, state.rs, checkout.rs, sentinel.rs, control.rs, uds.rs, inbox.rs, barrier.rs, safefs.rs, gateway.rs, gauges.rs, lib.rs}`; `spdk-csi-driver/docker/Dockerfile.sync.prebuilt`; `flint-lean-chart/templates/monitoring.yaml`; `lean/e2e/{run-agent.sh, run-verbs.sh, run-chaos.sh, run-boundary.sh}` — cited lines as given inline.
 - `spdk-csi-driver/src/{main.rs, mount_util.rs, mount_opts.rs, node_volume_locks.rs, lib.rs}`; `flint-csi-driver-chart/templates/{csidriver.yaml, node.yaml, rbac.yaml}`; `flint-csi-driver-chart/values.yaml:70`; `spdk-csi-driver/docker/Dockerfile.csi.prebuilt`; `scripts/{release.sh, publish-images.sh, stage-prebuilt.sh}`.
 - `crates/flint-store/src/{s3.rs:39-74,131-143, lib.rs:529-691, probe.rs:1-18}`; `crates/flint-store/Cargo.toml:26`.
 - `docs/plans/flint-lean-plan.md:66-73,236-247,304-322,407-408,421,434,438-441`; `docs/plans/flint-lean-boundary-verbs-plan.md:314-317`; `docs/plans/flint-lean-chaos-drill.md:131-138`; `docs/plans/file-api-fleet-auth.md:92-104,204-242,236-238`; `docs/plans/multicluster-frontdoor-review.md:50-51`; `docs/plans/libflint-and-snapshotter-design.md:249-258`; `docs/flint-fuse-architecture.html:376`; `docs/flint-lean-for-agent-fleets.md:115-117`.

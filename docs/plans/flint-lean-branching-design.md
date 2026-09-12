@@ -354,7 +354,7 @@ because L4 holds for chunks too.
 `checkout.rs` reads `entry.key`. Everything else recomputes
 `file_key(path)` from the path — fifteen sites across `barrier.rs`,
 `sync.rs`, `gated.rs` and `gateway.rs`
-(`grep -n 'file_key(' lean/sidecar/src`). On a branch, WRITES resolve
+(`grep -n 'file_key(' lean/syncer/src`). On a branch, WRITES resolve
 to the overlay and READS resolve to the entry's key, and those are
 different functions. Every site is classified as read or write and
 routed accordingly, with a test per site. The three that carry data-

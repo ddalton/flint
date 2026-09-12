@@ -454,8 +454,8 @@ EOF
             fi
             echo "  ✓ $hub_ns/$lean_op_img:$lean_app is $hub_ns/flint-lite-operator:$lean_app ($src_d)"
         fi
-        # Same question for the sidecar, plus the two things a lean
-        # sidecar base MUST have: a shell (the injected startupProbe
+        # Same question for the syncer, plus the two things a lean
+        # syncer base MUST have: a shell (the injected startupProbe
         # execs `test -f` inside it) and ca-certificates (the S3 client
         # resolves rustls to rustls-native-certs — the SYSTEM trust
         # store — so a certless base fails every HTTPS endpoint, which
@@ -463,12 +463,12 @@ EOF
         sync_recipe="$repo_root/spdk-csi-driver/docker/Dockerfile.sync.prebuilt"
         if [ ! -f "$sync_recipe" ]; then
             echo "REFUSING to push flint-lean $lean_version: no build recipe for the" \
-                 "sidecar image ($sync_recipe)." >&2
+                 "syncer image ($sync_recipe)." >&2
             exit 1
         fi
         if ! grep -q 'ca-certificates' "$sync_recipe"; then
             echo "REFUSING to push flint-lean $lean_version: $(basename "$sync_recipe")" \
-                 "installs no ca-certificates; the sidecar reads the SYSTEM trust store" \
+                 "installs no ca-certificates; the syncer reads the SYSTEM trust store" \
                  "and would fail every HTTPS S3 endpoint." >&2
             exit 1
         fi

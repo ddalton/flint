@@ -21,7 +21,7 @@ set -euo pipefail
 
 ver=${1:?usage: publish-images.sh <version> [all|lean|s3csi|forge|lite] [--dry-run]}
 # Scope, matching stage-prebuilt.sh. A lean-scoped release publishes the
-# operator image (which carries the lean binaries) and the sidecar, then
+# operator image (which carries the lean binaries) and the syncer, then
 # aliases the operator to its lean name — it does not republish the CSI
 # driver or the pNFS image, because nothing in them changed.
 #
@@ -93,7 +93,7 @@ cd "$crate"
 # Dockerfile — no staging check, no staleness check, no multi-arch
 # manifest step that anything verified. `release.sh` only asks whether a
 # tag EXISTS on the Hub, which a hand-pushed wrong build satisfies
-# perfectly. An unpublished or stale sidecar is a fleet of pods that
+# perfectly. An unpublished or stale syncer is a fleet of pods that
 # never start, with the operator itself perfectly healthy.
 set -- \
     "flint-driver:docker/Dockerfile.csi.prebuilt" \

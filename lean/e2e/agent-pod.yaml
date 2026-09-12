@@ -2,7 +2,7 @@
 #
 # READ THE AGENT PODS AS SPECS, NOT AS SCRIPTS: the whole point of this
 # file is what is ABSENT from them. No bucket. No endpoint. No AWS_*
-# secret. No volume, no volumeMount, no sidecar, no probe. An agent pod
+# secret. No volume, no volumeMount, no syncer, no probe. An agent pod
 # names a workspace with one label and is otherwise an ordinary pod;
 # everything else in its running spec was put there by the operator.
 # run-agent.sh asserts that absence against this file directly, so if a
@@ -20,7 +20,7 @@ metadata:
   namespace: agents
 type: Opaque
 stringData:
-  # Keys AWS_* VERBATIM — the SIDECAR's chain. Never mounted into an
+  # Keys AWS_* VERBATIM — the SYNCER's chain. Never mounted into an
   # agent container; leg A4 proves that at runtime, not just in spec.
   AWS_ACCESS_KEY_ID: drill
   AWS_SECRET_ACCESS_KEY: drillsecret

@@ -80,7 +80,7 @@ fn source_code(s: &str) -> u64 {
     }
 }
 
-/// Every metric this sidecar exposes: the metric name, its HELP text,
+/// Every metric this syncer exposes: the metric name, its HELP text,
 /// and how it is read out of the gauges. The table is the contract the
 /// parity test checks — a gauges field with no row here fails the
 /// build's tests rather than silently going unexposed.
@@ -88,7 +88,7 @@ fn series(g: &Gauges) -> Vec<(&'static str, &'static str, u64)> {
     vec![
         (
             "flint_lean_fenced",
-            "1 when this sidecar has been deposed and stopped publishing (gauges.state)",
+            "1 when this syncer has been deposed and stopped publishing (gauges.state)",
             u64::from(g.state == "fenced"),
         ),
         (
@@ -218,7 +218,7 @@ pub const COVERED_FIELDS: &[&str] = &[
     "auth_paused_since_unix",
 ];
 
-/// What the sidecar recorded about its own exposition attempt. Written
+/// What the syncer recorded about its own exposition attempt. Written
 /// to the state directory at startup and echoed to the operator: a bind
 /// collision has to be VISIBLE, because the design's answer to it is to
 /// keep running, and a degradation nobody can see is indistinguishable
@@ -236,7 +236,7 @@ pub struct MetricsPosture {
 
 pub const POSTURE_FILE: &str = "metrics.json";
 
-impl super::Sidecar {
+impl super::Syncer {
     pub fn save_metrics_posture(&self, p: &MetricsPosture) -> super::LeanResult<()> {
         let bytes = serde_json::to_vec_pretty(p)
             .map_err(|e| super::LeanError::State(format!("metrics posture: {e}")))?;

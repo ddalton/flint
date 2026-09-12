@@ -21,8 +21,8 @@ Declare a workspace:
   # holds that prefix's claim. The operator NEVER adopts a foreign
   # claim on the fly; resolve it explicitly.
 
-Then give a pod the workspace as ONE volume — no label, no sidecar,
-no Secret in the pod's namespace (the s3.csi.chert.us node driver from
+Then give a pod the workspace as ONE volume — no label, no injected
+container, no Secret in the pod's namespace (the s3.csi.chert.us node driver from
 flint-s3-csi-chart must be installed; the CR's spec.consumers names the
 ServiceAccounts that may mount it, and spec.uid the uid the syncer
 runs as):

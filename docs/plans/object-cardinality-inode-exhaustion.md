@@ -179,7 +179,7 @@ are the counterexample.
 ### 2.3 It can propagate into the bucket's DR manifest
 
 The hub's manifest writer rebuilds the whole document from its local
-walk and cannot merge (recorded at `lean/sidecar/src/manifest.rs:5-8`,
+walk and cannot merge (recorded at `lean/syncer/src/manifest.rs:5-8`,
 which exists *because* of that property). A truncated local tree
 therefore yields a truncated manifest, and **G13 is still open**
 (`docs/plans/nfs-server-hardening-plan.md:265`):

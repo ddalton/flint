@@ -1,7 +1,7 @@
 //! The boundary verbs: `.flint/publish` and `.flint/sync` (plan §2.1,
 //! §2.2 — D1, D2, D3, D3.1, D12).
 //!
-//! The agent touches a file; the sidecar consumes it, honors it with a
+//! The agent touches a file; the syncer consumes it, honors it with a
 //! real barrier (or a real sync), and answers with an ack. The
 //! discipline is `consume_inbox`'s, mirrored — exactly-once via
 //! integrate → persist → drop, idempotent between — with rename in
@@ -36,7 +36,7 @@
 //! ack ⇒ retire only; the ack already names a real install.
 //!
 //! **Refused acks (D2).** Deposal must never strand a waiting agent: on
-//! `Fenced` during honor the sidecar writes `status: "refused-fenced"`
+//! `Fenced` during honor the syncer writes `status: "refused-fenced"`
 //! naming the observed epoch BEFORE the fenced exit, and flips
 //! `capabilities.json` to `state: "fenced"` with no verbs.
 
@@ -46,7 +46,7 @@ use serde::{Deserialize, Serialize};
 
 use super::control::{self, write_atomic};
 use super::state::ConflictRecord;
-use super::{now_unix, LeanError, LeanResult, Sidecar};
+use super::{now_unix, LeanError, LeanResult, Syncer};
 
 /// Bound on a sentinel body read. A larger file is truncated and the
 /// remainder ignored — never a wedge.
@@ -316,7 +316,7 @@ fn mtime_ns(m: &std::fs::Metadata) -> u128 {
 /// second path resolution — so on its own the check is a TOCTOU: swap a
 /// FIFO in between and a plain `File::open` blocks forever waiting for a
 /// writer, wedging the poll arm and, behind it, every boundary this
-/// sidecar owes (review: U23).
+/// syncer owes (review: U23).
 ///
 /// `O_NONBLOCK` closes it at the syscall rather than by winning a race:
 /// opening a writer-less FIFO returns immediately instead of blocking,
@@ -347,7 +347,7 @@ pub(crate) fn read_bounded(path: &Path) -> std::io::Result<(Vec<u8>, bool)> {
     Ok((buf, oversize))
 }
 
-impl Sidecar {
+impl Syncer {
     fn pending_path(&self, verb: Verb) -> PathBuf {
         self.cfg.state_dir().join(verb.pending_name())
     }
@@ -483,7 +483,7 @@ impl Sidecar {
         };
         // Type check FIRST: a FIFO would block the body read forever;
         // a directory, socket or symlink at the sentinel path is not a
-        // touch this sidecar will act on.
+        // touch this syncer will act on.
         if !meta.is_file() {
             // ONCE per process, not once per poll tick. A FIFO or dir
             // parked at the sentinel path is a standing condition, and
@@ -642,7 +642,7 @@ impl Sidecar {
     /// install); not matching ⇒ run a full barrier and ack from THAT.
     pub(crate) fn ack_matches(&self, verb: Verb, pending: &PendingSentinel) -> bool {
         let Some(ack) = self.read_ack(verb) else { return false };
-        // Compare values the SIDECAR minted (review: U22). The ack is an
+        // Compare values the SYNCER minted (review: U22). The ack is an
         // ordinary file in `.flint/`, writable by every process sharing
         // the mount, and `sentinel_mtime_unix_ns` is the agent's own
         // file mtime — which is not monotone even without an adversary:
@@ -672,7 +672,7 @@ impl Sidecar {
     /// D2's refused-ack rule for the restarted claimant, which was the last
     /// open corner of the protocol.
     ///
-    /// A sidecar SIGKILLed mid-honor runs no cooperative fence path, so
+    /// A syncer SIGKILLed mid-honor runs no cooperative fence path, so
     /// nothing settles the pending sentinel it left in the emptyDir. If the
     /// kubelet then restarts it over that surviving tree while a successor
     /// holds the lease, it blocks in `claim` — the successor's token keeps
@@ -928,7 +928,7 @@ impl Sidecar {
     }
 
     async fn honor_sync(&mut self, pending: &PendingSentinel, forced: bool) -> LeanResult<Ack> {
-        // D2: `Sidecar::sync` has NO lease/epoch check of its own — it
+        // D2: `Syncer::sync` has NO lease/epoch check of its own — it
         // is only ever reachable via `claim_then` today. A straggler
         // consuming a sync sentinel between deposal and its next
         // cooperative fence would apply the successor's manifest onto
@@ -1012,7 +1012,7 @@ pub struct FloorOutcome {
     observed_etag: Option<String>,
 }
 
-impl Sidecar {
+impl Syncer {
     /// Move the news ticker from what the barrier already learned (D5).
     /// Never issues a request of its own.
     fn ticker_from(&self, seq: Option<u64>, etag: Option<String>) -> LeanResult<()> {

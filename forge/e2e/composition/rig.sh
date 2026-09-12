@@ -29,7 +29,7 @@ WORK=${WORK:-$(mktemp -d)}
 REPO_ROOT=${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../../.." && pwd)}
 FORGE_BIN=${FORGE_BIN:-$REPO_ROOT/forge/syncer/target/debug/flint-forge-syncer}
 HOOK_BIN=${HOOK_BIN:-$REPO_ROOT/forge/syncer/target/debug/flint-forge-hook}
-SYNC_BIN=${SYNC_BIN:-$REPO_ROOT/lean/sidecar/target/debug/flint-sync}
+SYNC_BIN=${SYNC_BIN:-$REPO_ROOT/lean/syncer/target/debug/flint-sync}
 
 export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-minioadmin}
 export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-minioadmin}

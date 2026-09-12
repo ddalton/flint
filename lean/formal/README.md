@@ -3,8 +3,8 @@
 TLA+/TLC models for **flint-lean** (checkout/publish + gateway — plan of
 record: `docs/plans/flint-lean-plan.md`). Model BEFORE code, the
 FlintExtents posture: the module was written against plan v2 and the
-review's confirmed counterexamples, and the sidecar implementation
-(`lean/sidecar/`, the flint-lean crate) is written to it.
+review's confirmed counterexamples, and the syncer implementation
+(`lean/syncer/`, the flint-lean crate) is written to it.
 
 **Deliberately separate from `formal/`** (the flint corpus and its
 196-run gate): lean is a separate system that consumes `tier::store` as
@@ -88,7 +88,7 @@ property leaks"; this module is what that leak costs.
 
 ## The module: LeanSubtree.tla
 
-One subtree; sidecars A (first holder) and B (takeover successor); the
+One subtree; syncers A (first holder) and B (takeover successor); the
 gateway abstracted to its bucket effects; the bucket substrate: lease
 cell, manifest (seq + per-path citation), whole-file objects
 (generation = ETag), the inbox/window cell. Generations model ETags;
@@ -128,7 +128,7 @@ FlintClaimsNoLeader idiom):
    citation with no record (depth-12 trace: bump → preserve → absorb →
    delete). Only the inbox's consume path (integrate-or-surface) makes
    HITL durable against subsequent local operations.
-1. **The amputation stamp needed a legitimacy term.** A sidecar that
+1. **The amputation stamp needed a legitimacy term.** A syncer that
    CONSUMED a user's upload and then published a delete of it is doing
    integration + ordinary editing, not amputation. Legitimacy rides on
    the `known` set (generations learned via checkout, own mints, and
@@ -143,7 +143,7 @@ FlintClaimsNoLeader idiom):
 3. **`baseline` and `instBase` are different objects.** The If-Match
    baseline (what I believe the bucket objects hold AND have
    integrated) advances at consume; the merge base (the manifest view
-   at my last install) does not — collapsing them makes a sidecar
+   at my last install) does not — collapsing them makes a syncer
    mistake its own consumed adoption for a foreign entry.
 
 ## Tranche 2 (2026-08-25): the sync verb × the barrier
@@ -295,7 +295,7 @@ code holds the HITL window across both).
   unmodelled.)
 - `conflicts` is a set of records: the implementation obligation is
   that a conflict record preserves the BYTES (conflict-suffixed key —
-  `lean/sidecar/src/barrier.rs` does this), not just the reference.
+  `lean/syncer/src/barrier.rs` does this), not just the reference.
 - Multi-gateway is collapsed into the cell semantics: replicas are
   stateless by design, so the window cell IS the coordination — a
   per-replica model adds states, not behaviors, at this abstraction.
@@ -376,7 +376,7 @@ line existed. And `MaxGen=3` with `MaxRestarts=1` does not fit: the two
 worlds are split — `MaxGen=3/MaxRestarts=0` for breadth,
 `MaxGen=2/MaxRestarts=1` for the crash matrix, and `MaxGen=2/MaxHitl=0`
 with one touch for the stall/takeover world (at `MaxGen=3` the deposal
-run passed 1.3 GB of TLC scratch without terminating: two live sidecars,
+run passed 1.3 GB of TLC scratch without terminating: two live syncers,
 each with its own sentinel, pending record and ack, is a different scale
 from one) — and every mutation runs in the smaller world its
 counterexample needs.

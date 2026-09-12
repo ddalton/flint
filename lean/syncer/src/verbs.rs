@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use super::lease::{self, ClaimOutcome};
-use super::{LeanError, Sidecar};
+use super::{LeanError, Syncer};
 
 /// A comma list, trimmed, empties dropped. Returns `None` when the
 /// variable is unset or holds only separators — `Some(vec![])` would be
@@ -59,7 +59,7 @@ impl Step {
 /// The one door every one-shot verb goes through. The ROUTING lives
 /// here rather than in the binary's argv match so that the battery
 /// exercises the same decision the shipped binary makes.
-pub async fn run_verb(sc: &mut Sidecar, step: Step) -> Result<(), LeanError> {
+pub async fn run_verb(sc: &mut Syncer, step: Step) -> Result<(), LeanError> {
     if step.installs_nothing_in_the_bucket() {
         read_only_then(sc, step).await
     } else {
@@ -67,7 +67,7 @@ pub async fn run_verb(sc: &mut Sidecar, step: Step) -> Result<(), LeanError> {
     }
 }
 
-pub async fn claim(sc: &mut Sidecar) -> Result<(), LeanError> {
+pub async fn claim(sc: &mut Syncer) -> Result<(), LeanError> {
     // Before the first claim step: is this prefix ours to claim at all?
     lease::verify_claim(sc).await?;
     lease::warn_if_prefix_is_shared(sc).await;
@@ -106,7 +106,7 @@ pub async fn claim(sc: &mut Sidecar) -> Result<(), LeanError> {
 ///
 /// Every verb that can change the BUCKET comes through here. `checkout`
 /// deliberately does not — see `read_only_then`.
-pub async fn claim_then(sc: &mut Sidecar, step: Step) -> Result<(), LeanError> {
+pub async fn claim_then(sc: &mut Syncer, step: Step) -> Result<(), LeanError> {
     claim(sc).await?;
     let out = run_step(sc, step).await;
     let _ = lease::release(sc).await;
@@ -142,7 +142,7 @@ pub async fn claim_then(sc: &mut Sidecar, step: Step) -> Result<(), LeanError> {
 ///
 /// `status` and `ctl` have taken no lease since they shipped, for the
 /// same reason stated the same way; this makes `checkout` the third.
-pub async fn read_only_then(sc: &mut Sidecar, step: Step) -> Result<(), LeanError> {
+pub async fn read_only_then(sc: &mut Syncer, step: Step) -> Result<(), LeanError> {
     lease::verify_claim(sc).await?;
     lease::warn_if_prefix_is_shared(sc).await;
     run_step(sc, step).await
@@ -151,7 +151,7 @@ pub async fn read_only_then(sc: &mut Sidecar, step: Step) -> Result<(), LeanErro
 /// The verb bodies. Shared by both doors above so that the ONLY
 /// difference between a fenced verb and a lease-free one is the door,
 /// never a second copy of the work.
-pub async fn run_step(sc: &mut Sidecar, step: Step) -> Result<(), LeanError> {
+pub async fn run_step(sc: &mut Syncer, step: Step) -> Result<(), LeanError> {
     {
         match step {
             Step::Checkout => {

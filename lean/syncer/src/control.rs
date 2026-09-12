@@ -4,11 +4,11 @@
 //! The app container ships UNCHANGED — no HTTP client, no CLI binary,
 //! no library can be assumed in its image. The only interface every
 //! agent is guaranteed to have is the shared workspace mount, so the
-//! boundary verbs are *files*. This module owns everything the sidecar
+//! boundary verbs are *files*. This module owns everything the syncer
 //! writes there:
 //!
 //! - `capabilities.json` — the marker an agent MUST check before
-//!   touching a sentinel. Absence ⇒ an old sidecar ⇒ sentinels are live
+//!   touching a sentinel. Absence ⇒ an old syncer ⇒ sentinels are live
 //!   ammunition (they would be scanned and published, §2.0).
 //! - `remote.seq` — the news ticker (D5), fed from information the
 //!   barrier already has: zero added bucket requests.
@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::{now_unix, LeanResult, Sidecar, SENTINEL_PROTOCOL};
+use super::{now_unix, LeanResult, Syncer, SENTINEL_PROTOCOL};
 
 pub const CAPABILITIES: &str = "capabilities.json";
 pub const REMOTE_SEQ: &str = "remote.seq";
@@ -61,15 +61,15 @@ pub struct Capabilities {
     pub protocol: u32,
     pub verbs: Vec<String>,
     pub boundary_mode: String,
-    /// "live" | "fenced" (D2). A fenced sidecar advertises no verbs, so
+    /// "live" | "fenced" (D2). A fenced syncer advertises no verbs, so
     /// agents stop touching sentinels on a zombie.
     pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     pub sentinel_min_interval_secs: u64,
     pub sentinel_hourly_budget: u64,
-    pub sidecar_version: String,
-    /// The rollback tell (D11): an agent that observes a sidecar
+    pub syncer_version: String,
+    /// The rollback tell (D11): an agent that observes a syncer
     /// restart while this stamp is UNCHANGED is looking at a stale
     /// marker left by a downgrade — the safety catch painted green.
     pub boot: BootStamp,
@@ -90,11 +90,11 @@ pub struct RemoteSeq {
     pub integrated_seq: u64,
     /// Refreshed on EVERY successful HEAD tick — a local rename, zero
     /// bucket cost. Without the heartbeat an agent cannot distinguish
-    /// "no news" from "sidecar dead" on an idle-but-healthy workspace.
-    /// Contract: older than 3×floor ⇒ sidecar or proxy problem.
+    /// "no news" from "syncer dead" on an idle-but-healthy workspace.
+    /// Contract: older than 3×floor ⇒ syncer or proxy problem.
     pub updated_unix: u64,
     /// Advisory news from the gateway (D14): a HITL/CI party asked this
-    /// workspace to pull. The sidecar performs NO tree mutation on
+    /// workspace to pull. The syncer performs NO tree mutation on
     /// receipt — it moves the ticker and stops.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sync_requested_unix: Option<u64>,
@@ -139,7 +139,7 @@ fn write_json<T: Serialize>(path: &Path, v: &T) -> LeanResult<()> {
     write_atomic(path, &bytes)
 }
 
-impl Sidecar {
+impl Syncer {
     pub fn control_path(&self, name: &str) -> PathBuf {
         self.cfg.control_dir().join(name)
     }
@@ -191,7 +191,7 @@ impl Sidecar {
             || baseline.inst_base.keys().any(|p| super::scan::is_control_path(p));
 
         // (b) a sentinel-named file exists before this tree has ever
-        //     been given a capability marker (i.e. before any sidecar
+        //     been given a capability marker (i.e. before any syncer
         //     that understands the protocol ran here).
         let never_marked = !self.control_path(CAPABILITIES).exists();
         let sentinel_named = self.control_path(PUBLISH).exists() || self.control_path(SYNC).exists();
@@ -233,7 +233,7 @@ impl Sidecar {
             reason: posture.reason.clone(),
             sentinel_min_interval_secs: self.cfg.sentinel_min_interval_secs,
             sentinel_hourly_budget: self.cfg.sentinel_hourly_budget,
-            sidecar_version: super::SIDECAR_VERSION.to_string(),
+            syncer_version: super::SYNCER_VERSION.to_string(),
             boot: BootStamp { holder_id, boot_unix: now_unix() },
         };
         write_json(&self.control_path(CAPABILITIES), &caps)

@@ -980,7 +980,7 @@ async fn a_restarted_successor_rotates_before_it_serves() {
 
 /// A 412 on the renew whose cell still names us at our own epoch is a
 /// lost response, not a deposal. Fencing on it once made a live lean
-/// sidecar go silent for the rest of its tenant's life.
+/// syncer go silent for the rest of its tenant's life.
 #[tokio::test]
 async fn a_lost_renew_response_is_adopted_rather_than_fenced() {
     let mut rig = Rig::new().await;

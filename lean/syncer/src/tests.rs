@@ -13,8 +13,8 @@ use flint_store::{crc64_nvme, GenerationStamps, ObjectStore, PutCondition};
 use super::inbox::{self, InboxEntry};
 use super::lease::{self, ClaimOutcome};
 use super::manifest;
-use super::state::SidecarState;
-use super::{now_unix, LeanConfig, LeanError, Sidecar};
+use super::state::SyncerState;
+use super::{now_unix, LeanConfig, LeanError, Syncer};
 
 const PREFIX: &str = "tenant/proj1";
 
@@ -35,10 +35,10 @@ fn cfg_single(root: &std::path::Path) -> LeanConfig {
     c
 }
 
-async fn sidecar(store: &Arc<MemoryStore>, root: &std::path::Path) -> Sidecar {
+async fn syncer(store: &Arc<MemoryStore>, root: &std::path::Path) -> Syncer {
     let cfg = cfg_for(root);
-    let state = SidecarState::open(cfg.state_dir()).unwrap();
-    Sidecar {
+    let state = SyncerState::open(cfg.state_dir()).unwrap();
+    Syncer {
         store: store.clone() as Arc<dyn ObjectStore>,
         cfg,
         state,
@@ -49,7 +49,7 @@ async fn sidecar(store: &Arc<MemoryStore>, root: &std::path::Path) -> Sidecar {
 
 /// Claim, looping claim_step (a fresh or released cell claims on the
 /// first step; a foreign one needs the quiet polls).
-async fn claim_until_held(sc: &mut Sidecar, max_steps: u32) -> bool {
+async fn claim_until_held(sc: &mut Syncer, max_steps: u32) -> bool {
     for _ in 0..max_steps {
         match lease::claim_step(sc).await.unwrap() {
             ClaimOutcome::Claimed(_) => return true,
@@ -71,7 +71,7 @@ fn read(root: &std::path::Path, rel: &str) -> Option<String> {
 
 /// Bump a file's mtime past the 1-second stat granularity so the scan
 /// sees the change without sleeping.
-fn backdate_baseline(sc: &Sidecar, rel: &str) {
+fn backdate_baseline(sc: &Syncer, rel: &str) {
     let mut b = sc.state.load_baseline().unwrap();
     if let Some(e) = b.entries.get_mut(rel) {
         e.mtime_unix -= 10;
@@ -126,7 +126,7 @@ async fn hitl_write(
 async fn checkout_publish_roundtrip_and_two_scan_delete() {
     let store = Arc::new(MemoryStore::new());
     let dir_a = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir_a.path()).await;
+    let mut a = syncer(&store, dir_a.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap(); // empty subtree
     write(dir_a.path(), "src/main.rs", "fn main() {}");
@@ -136,7 +136,7 @@ async fn checkout_publish_roundtrip_and_two_scan_delete() {
 
     // Fresh pod elsewhere: checkout sees both files.
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     let cr = b.checkout().await.unwrap();
     assert_eq!(cr.materialized, 2);
     assert_eq!(read(dir_b.path(), "src/main.rs").unwrap(), "fn main() {}");
@@ -161,7 +161,7 @@ async fn checkout_publish_roundtrip_and_two_scan_delete() {
 async fn hitl_upload_survives_two_barriers_without_sync() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
     write(dir.path(), "agent.txt", "agent work");
@@ -182,7 +182,7 @@ async fn hitl_upload_survives_two_barriers_without_sync() {
     assert!(m.manifest.entries.contains_key("docs/upload.pdf"), "amputated!");
     // ...and materialized by a fresh checkout.
     let dir2 = tempfile::tempdir().unwrap();
-    let mut sc2 = sidecar(&store, dir2.path()).await;
+    let mut sc2 = syncer(&store, dir2.path()).await;
     sc2.checkout().await.unwrap();
     assert_eq!(read(dir2.path(), "docs/upload.pdf").unwrap(), "user bytes");
 }
@@ -223,7 +223,7 @@ async fn foreign_overwrite(store: &Arc<MemoryStore>, cfg: &LeanConfig, path: &st
 async fn a_published_workspace_refuses_a_foreign_write_instead_of_adopting_it() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     sc.cfg.sole_writer = true;
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
@@ -233,7 +233,7 @@ async fn a_published_workspace_refuses_a_foreign_write_instead_of_adopting_it() 
     foreign_overwrite(&store, &sc.cfg, "README.md", "FOREIGN BYTES").await;
 
     let dir2 = tempfile::tempdir().unwrap();
-    let mut sc2 = sidecar(&store, dir2.path()).await;
+    let mut sc2 = syncer(&store, dir2.path()).await;
     let err = sc2.checkout().await.expect_err("a published workspace must refuse");
     let msg = format!("{err}");
     assert!(msg.contains("SOLE WRITER"), "the refusal must say why: {msg}");
@@ -258,7 +258,7 @@ async fn a_published_workspace_refuses_a_foreign_write_instead_of_adopting_it() 
 async fn an_ordinary_workspace_still_adopts_bytes_that_moved_past_the_manifest() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     assert!(!sc.cfg.sole_writer, "the default is an ordinary workspace");
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
@@ -268,7 +268,7 @@ async fn an_ordinary_workspace_still_adopts_bytes_that_moved_past_the_manifest()
     foreign_overwrite(&store, &sc.cfg, "README.md", "newer human bytes").await;
 
     let dir2 = tempfile::tempdir().unwrap();
-    let mut sc2 = sidecar(&store, dir2.path()).await;
+    let mut sc2 = syncer(&store, dir2.path()).await;
     sc2.checkout().await.expect("an ordinary workspace adopts");
     assert_eq!(read(dir2.path(), "README.md").unwrap(), "newer human bytes");
 }
@@ -280,7 +280,7 @@ async fn an_ordinary_workspace_still_adopts_bytes_that_moved_past_the_manifest()
 async fn the_published_flag_survives_the_pointer_round_trip() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     sc.cfg.sole_writer = true;
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
@@ -309,7 +309,7 @@ async fn the_published_flag_survives_the_pointer_round_trip() {
 async fn a_published_mirror_does_not_probe_for_neighbours() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
 
     // A forge repository is squatting on this workspace's prefix.
     store
@@ -340,7 +340,7 @@ async fn a_published_mirror_does_not_probe_for_neighbours() {
 async fn ui_edit_vs_agent_edit_never_a_silent_winner() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
     write(dir.path(), "notes.md", "v1");
@@ -377,7 +377,7 @@ async fn ui_edit_vs_agent_edit_never_a_silent_winner() {
 async fn container_restart_never_resurrects_unpublished_delete() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
     write(dir.path(), "keep.txt", "keep");
@@ -387,7 +387,7 @@ async fn container_restart_never_resurrects_unpublished_delete() {
     // The agent deletes; the container restarts BEFORE any barrier.
     std::fs::remove_file(dir.path().join("gone.txt")).unwrap();
     drop(sc);
-    let mut sc = sidecar(&store, dir.path()).await; // same emptyDir
+    let mut sc = syncer(&store, dir.path()).await; // same emptyDir
     let cr = sc.checkout().await.unwrap();
     assert!(cr.resumed_live_tree, "marker present ⇒ live-tree row");
     assert_eq!(cr.materialized, 0, "must not re-materialize");
@@ -411,7 +411,7 @@ async fn container_restart_never_resurrects_unpublished_delete() {
 async fn takeover_rotation_fences_the_straggler() {
     let store = Arc::new(MemoryStore::new());
     let dir_a = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir_a.path()).await;
+    let mut a = syncer(&store, dir_a.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir_a.path(), "f.txt", "from A");
@@ -421,7 +421,7 @@ async fn takeover_rotation_fences_the_straggler() {
     // A stalls (stops renewing). B replaces it: fresh emptyDir, fresh
     // identity ⇒ the foreign-holder path, quiet polls, then takeover.
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     assert!(
         !claim_until_held(&mut b, 3).await,
         "a fresh replacement must NOT claim instantly over a live-looking lease"
@@ -453,7 +453,7 @@ async fn takeover_rotation_fences_the_straggler() {
 async fn adopt_own_412_converges_without_conflict() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
 
@@ -497,7 +497,7 @@ async fn adopt_own_412_converges_without_conflict() {
 async fn foreign_412_parks_never_overwrites() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
 
@@ -535,13 +535,13 @@ async fn foreign_412_parks_never_overwrites() {
 }
 
 /// The GC HEAD-guard: a delete-eligible key whose current ETag the
-/// sidecar does not recognize is NEVER deleted (LeanGCUnguarded.cfg's
+/// syncer does not recognize is NEVER deleted (LeanGCUnguarded.cfg's
 /// counterexample — the HITL re-create).
 #[tokio::test]
 async fn gc_refuses_unrecognized_etag() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
     write(dir.path(), "doc.txt", "v1");
@@ -552,7 +552,7 @@ async fn gc_refuses_unrecognized_etag() {
     sc.run_barrier().await.unwrap(); // first absence
 
     // A UI write re-creates the path AFTER our consume window — model
-    // it as a direct foreign PUT (etag the sidecar never learned).
+    // it as a direct foreign PUT (etag the syncer never learned).
     let body = Bytes::from("user re-created");
     let crc = crc64_nvme(&body);
     let stamps = GenerationStamps {
@@ -591,7 +591,7 @@ async fn gc_refuses_unrecognized_etag() {
 async fn local_delete_loses_to_foreign_modify() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
     write(dir.path(), "shared.txt", "v1");
@@ -660,7 +660,7 @@ async fn local_delete_loses_to_foreign_modify() {
 async fn window_refuses_hitl_and_expiry_unwedges() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let sc = sidecar(&store, dir.path()).await;
+    let sc = syncer(&store, dir.path()).await;
     let entry = |p: &str| InboxEntry {
         path: p.into(),
         etag: "e".into(),
@@ -675,7 +675,7 @@ async fn window_refuses_hitl_and_expiry_unwedges() {
     inbox::clear_window(store.as_ref(), &sc.cfg, 1, &[]).await.unwrap();
     inbox::gateway_append(store.as_ref(), &sc.cfg, entry("a.txt")).await.unwrap();
 
-    // A dead sidecar's window (deadline in the past) does not wedge.
+    // A dead syncer's window (deadline in the past) does not wedge.
     inbox::open_window(store.as_ref(), &sc.cfg, 1, now_unix() - 10).await.unwrap();
     inbox::gateway_append(store.as_ref(), &sc.cfg, entry("b.txt")).await.unwrap();
 }
@@ -688,7 +688,7 @@ async fn window_refuses_hitl_and_expiry_unwedges() {
 async fn large_file_publishes_via_compose_and_roundtrips() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     sc.cfg.whole_put_max = 8; // 8 bytes: everything bigger composes
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
@@ -701,7 +701,7 @@ async fn large_file_publishes_via_compose_and_roundtrips() {
 
     // Roundtrip through a fresh checkout.
     let dir2 = tempfile::tempdir().unwrap();
-    let mut sc2 = sidecar(&store, dir2.path()).await;
+    let mut sc2 = syncer(&store, dir2.path()).await;
     sc2.checkout().await.unwrap();
     assert_eq!(read(dir2.path(), "model.bin").unwrap(), big_v1);
 
@@ -717,17 +717,17 @@ async fn large_file_publishes_via_compose_and_roundtrips() {
     assert_eq!(String::from_utf8(body.to_vec()).unwrap(), big_v2);
 }
 
-/// The occupancy lock: a second sidecar over the SAME workspace tree
+/// The occupancy lock: a second syncer over the SAME workspace tree
 /// must refuse to start — self-recognition of the lease is only sound
 /// because the previous process is provably gone (observed live on the
 /// 0b rig: a concurrent process deposed a live sibling and both wrote
 /// the tree).
 #[tokio::test]
-async fn second_sidecar_on_one_tree_refuses() {
+async fn second_syncer_on_one_tree_refuses() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = cfg_for(dir.path());
-    let _held = SidecarState::open(cfg.state_dir()).unwrap();
-    let Err(err) = SidecarState::open(cfg.state_dir()) else {
+    let _held = SyncerState::open(cfg.state_dir()).unwrap();
+    let Err(err) = SyncerState::open(cfg.state_dir()) else {
         panic!("second open over a held workspace must refuse");
     };
     assert!(matches!(err, LeanError::State(_)));
@@ -738,14 +738,14 @@ async fn second_sidecar_on_one_tree_refuses() {
 async fn checkout_budget_refuses_before_first_byte() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
     write(dir.path(), "big.txt", "0123456789012345678901234567890123456789");
     sc.run_barrier().await.unwrap();
 
     let dir2 = tempfile::tempdir().unwrap();
-    let mut sc2 = sidecar(&store, dir2.path()).await;
+    let mut sc2 = syncer(&store, dir2.path()).await;
     sc2.cfg.max_bytes = 10;
     let err = sc2.checkout().await.unwrap_err();
     assert!(matches!(err, LeanError::Budget(_)));
@@ -801,14 +801,14 @@ async fn gateway_auth_tenancy_and_path_hygiene() {
 }
 
 /// The full HITL flow THROUGH the gateway: PUT lands object + inbox
-/// entry, the sidecar's next barrier consumes and cites it, and the
+/// entry, the syncer's next barrier consumes and cites it, and the
 /// gateway serves it back — first from the inbox fallback, then from
 /// the manifest citation.
 #[tokio::test]
 async fn gateway_hitl_put_consumed_and_cited_by_barrier() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
 
@@ -858,7 +858,7 @@ async fn gateway_hitl_put_consumed_and_cited_by_barrier() {
 async fn a_failed_consume_write_is_retried_not_silently_dropped() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
 
@@ -925,7 +925,7 @@ async fn a_failed_consume_write_is_retried_not_silently_dropped() {
 async fn an_all_rejected_sync_scope_is_refused_not_widened_to_the_whole_tree() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
 
@@ -948,12 +948,12 @@ async fn an_all_rejected_sync_scope_is_refused_not_widened_to_the_whole_tree() {
 }
 
 /// The window gate: a PUT during a live barrier window is refused with
-/// Retry-After; an expired window admits (the dead-sidecar unwedge).
+/// Retry-After; an expired window admits (the dead-syncer unwedge).
 #[tokio::test]
 async fn gateway_put_refused_while_window_open() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let sc = sidecar(&store, dir.path()).await;
+    let sc = syncer(&store, dir.path()).await;
     let routes = super::gateway::routes(gw_core(&store));
 
     inbox::open_window(store.as_ref(), &sc.cfg, 1, now_unix() + 120).await.unwrap();
@@ -1091,7 +1091,7 @@ async fn gateway_put_refuses_an_unconditioned_or_stale_overwrite() {
 async fn gateway_manifest_cas_rejects_stale_epoch() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut sc, 3).await); // epoch 1
     sc.checkout().await.unwrap();
     write(dir.path(), "f.txt", "v1");
@@ -1137,7 +1137,7 @@ async fn gateway_manifest_cas_rejects_stale_epoch() {
 async fn gateway_status_and_snapshot() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
     write(dir.path(), "f.txt", "v1");
@@ -1167,7 +1167,7 @@ async fn gateway_status_and_snapshot() {
 async fn sync_scan_first_dirty_wins_clean_applies() {
     let store = Arc::new(MemoryStore::new());
     let dir_a = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir_a.path()).await;
+    let mut a = syncer(&store, dir_a.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir_a.path(), "shared.txt", "v1");
@@ -1223,14 +1223,14 @@ fn control_exists(root: &std::path::Path, name: &str) -> bool {
 /// D0.1 — the keystone. The RED form named in §5: before the scan
 /// exclusion, `.flint/publish` is an ordinary regular file, so it gets
 /// scanned and PUBLISHED to `<prefix>/files/.flint/publish` — the
-/// sentinel is live ammunition on an old sidecar. This asserts the
+/// sentinel is live ammunition on an old syncer. This asserts the
 /// hazard is gone: no `.flint/` key ever appears in the manifest or the
 /// bucket, and the scan never yields the path.
 #[tokio::test]
 async fn flint_dir_never_scanned() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
 
@@ -1258,7 +1258,7 @@ async fn flint_dir_never_scanned() {
 }
 
 /// D0.2 — an upgrade must never delete data. A workspace that legally
-/// published `files/.flint/legacy.txt` under a pre-D0 sidecar has it in
+/// published `files/.flint/legacy.txt` under a pre-D0 syncer has it in
 /// the baseline; the new scan skips it, so the two-consecutive-scans
 /// rule would otherwise classify it absent twice and publish its
 /// DELETION. It is carried forward frozen.
@@ -1266,14 +1266,14 @@ async fn flint_dir_never_scanned() {
 async fn legacy_flint_citation_survives_upgrade() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir.path(), "keep.txt", "v1");
     a.run_barrier().await.unwrap();
 
     // Manufacture the pre-D0 state: a cited `.flint/` path in both the
-    // manifest and our baseline, as an old sidecar would have left it.
+    // manifest and our baseline, as an old syncer would have left it.
     let key = a.cfg.file_key(".flint/legacy.txt");
     let body = Bytes::from_static(b"legacy payload");
     let crc = crc64_nvme(&body);
@@ -1348,7 +1348,7 @@ async fn legacy_flint_citation_survives_upgrade() {
 async fn checkout_never_materializes_control_citation() {
     let store = Arc::new(MemoryStore::new());
     let dir_a = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir_a.path()).await;
+    let mut a = syncer(&store, dir_a.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir_a.path(), "real.txt", "v1");
@@ -1396,7 +1396,7 @@ async fn checkout_never_materializes_control_citation() {
 
     // A FRESH pod checks the same subtree out.
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     let r = b.checkout().await.unwrap();
     assert_eq!(read(dir_b.path(), "real.txt").unwrap(), "v1");
     assert!(
@@ -1414,14 +1414,14 @@ async fn checkout_never_materializes_control_citation() {
 
 /// D11 — the marker must be written on the LIVE-TREE restart row, not
 /// only inside a fresh checkout. `checkout()` returns at
-/// `marker_present()` without reaching its body, so a sidecar upgrade
+/// `marker_present()` without reaching its body, so a syncer upgrade
 /// over live workspaces would otherwise leave sentinels dead on exactly
 /// the pods the upgrade targeted.
 #[tokio::test]
 async fn capabilities_written_on_live_tree_restart() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir.path(), "f.txt", "v1");
@@ -1462,10 +1462,10 @@ async fn capabilities_written_on_live_tree_restart() {
 async fn preexisting_flint_disables_sentinels() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    // The app owned `.flint/publish` BEFORE any protocol-aware sidecar
+    // The app owned `.flint/publish` BEFORE any protocol-aware syncer
     // ran here — recorded bytes, per the drill's anti-vacuity rule.
     touch_sentinel(dir.path(), control::PUBLISH, "app-owned payload");
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
 
     let posture = a.sentinel_preflight().unwrap();
@@ -1501,7 +1501,7 @@ async fn preexisting_flint_disables_sentinels() {
 /// Zero the min-interval clock so a test can honor back-to-back without
 /// sleeping. (The interval itself is exercised by
 /// `min_interval_coalesces_into_one_barrier`.)
-fn clear_min_interval(sc: &Sidecar) {
+fn clear_min_interval(sc: &Syncer) {
     let mut b = sc.load_budget().unwrap();
     b.last_honor_unix = 0;
     let bytes = serde_json::to_vec(&b).unwrap();
@@ -1514,7 +1514,7 @@ fn clear_min_interval(sc: &Sidecar) {
 async fn publish_sentinel_honored_and_acked() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     let posture = a.sentinel_preflight().unwrap();
     a.write_capabilities(&posture, false).unwrap();
@@ -1560,7 +1560,7 @@ async fn publish_sentinel_honored_and_acked() {
 async fn sentinel_ack_echoes_covered_nonces() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     let posture = a.sentinel_preflight().unwrap();
     a.write_capabilities(&posture, false).unwrap();
@@ -1594,7 +1594,7 @@ async fn sentinel_ack_echoes_covered_nonces() {
 async fn min_interval_coalesces_into_one_barrier() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     a.cfg.sentinel_min_interval_secs = 3600; // the 1-hour-floor trick, applied to the interval
     assert!(claim_until_held(&mut a, 3).await);
     let posture = a.sentinel_preflight().unwrap();
@@ -1640,7 +1640,7 @@ async fn budget_meters_bytes_not_calls() {
     // Arm (a): the large-file storm.
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     a.cfg.whole_put_max = 1024; // a small ceiling keeps the test fast
     a.cfg.sentinel_hourly_budget = 8; // ⇒ 2 honors of a 4 KiB file
     a.cfg.sentinel_min_interval_secs = 0;
@@ -1677,7 +1677,7 @@ async fn budget_meters_bytes_not_calls() {
     // Arm (b): the SAME touch rate on a small file must NOT throttle.
     let store2 = Arc::new(MemoryStore::new());
     let dir2 = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store2, dir2.path()).await;
+    let mut b = syncer(&store2, dir2.path()).await;
     b.cfg.whole_put_max = 1024;
     b.cfg.sentinel_hourly_budget = 8;
     b.cfg.sentinel_min_interval_secs = 0;
@@ -1712,7 +1712,7 @@ async fn budget_meters_bytes_not_calls() {
 async fn no_diff_sentinel_honor_costs_no_budget() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     a.cfg.sentinel_hourly_budget = 2;
     a.cfg.sentinel_min_interval_secs = 0;
     assert!(claim_until_held(&mut a, 3).await);
@@ -1740,7 +1740,7 @@ async fn no_diff_sentinel_honor_costs_no_budget() {
 async fn crash_between_consume_and_ack_reruns_barrier() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     let posture = a.sentinel_preflight().unwrap();
     a.write_capabilities(&posture, false).unwrap();
@@ -1778,7 +1778,7 @@ async fn crash_between_consume_and_ack_reruns_barrier() {
 async fn restart_settles_pending_before_new_consume() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     a.cfg.sentinel_min_interval_secs = 0;
     assert!(claim_until_held(&mut a, 3).await);
     let posture = a.sentinel_preflight().unwrap();
@@ -1809,7 +1809,7 @@ async fn restart_settles_pending_before_new_consume() {
 async fn torn_pending_body_honored_as_bare_touch() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     let posture = a.sentinel_preflight().unwrap();
     a.write_capabilities(&posture, false).unwrap();
@@ -1840,7 +1840,7 @@ async fn torn_pending_body_honored_as_bare_touch() {
 async fn fifo_sentinel_skipped() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     let posture = a.sentinel_preflight().unwrap();
     a.write_capabilities(&posture, false).unwrap();
@@ -1877,7 +1877,7 @@ async fn fifo_sentinel_skipped() {
 async fn fenced_honor_writes_refused_ack() {
     let store = Arc::new(MemoryStore::new());
     let dir_a = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir_a.path()).await;
+    let mut a = syncer(&store, dir_a.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     let posture = a.sentinel_preflight().unwrap();
     a.write_capabilities(&posture, false).unwrap();
@@ -1893,7 +1893,7 @@ async fn fenced_honor_writes_refused_ack() {
 
     // ...and a successor deposes us. Anti-vacuity: the takeover is real.
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     assert!(claim_until_held(&mut b, 12).await);
     let our_epoch = a.lease.as_ref().unwrap().epoch;
     let their_epoch = b.lease.as_ref().unwrap().epoch;
@@ -1916,7 +1916,7 @@ async fn fenced_honor_writes_refused_ack() {
 }
 
 /// D2 — the in-loop SYNC honor must never apply the successor's
-/// manifest onto a zombie tree. `Sidecar::sync` has no lease/epoch
+/// manifest onto a zombie tree. `Syncer::sync` has no lease/epoch
 /// check of its own, so before this tranche a straggler consuming a
 /// sync sentinel between deposal and its next cooperative fence would
 /// have done exactly that, and acked SUCCESS.
@@ -1928,13 +1928,13 @@ async fn fenced_honor_writes_refused_ack() {
 /// load-bearing fence and the explicit check is the narrower guard for
 /// the window between renew and apply. Both are kept; the test asserts
 /// the property (tree unmutated, ack refused), and
-/// `deposed_sidecar_fails_the_explicit_epoch_check` covers the guard
+/// `deposed_syncer_fails_the_explicit_epoch_check` covers the guard
 /// itself so it is not untested code.
 #[tokio::test]
 async fn fenced_sync_honor_refused_and_tree_unmutated() {
     let store = Arc::new(MemoryStore::new());
     let dir_a = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir_a.path()).await;
+    let mut a = syncer(&store, dir_a.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     let posture = a.sentinel_preflight().unwrap();
     a.write_capabilities(&posture, false).unwrap();
@@ -1945,7 +1945,7 @@ async fn fenced_sync_honor_refused_and_tree_unmutated() {
     // The successor takes over and publishes something the zombie's
     // sync WOULD apply if it ran.
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     assert!(claim_until_held(&mut b, 12).await);
     b.checkout().await.unwrap();
     write(dir_b.path(), "shared.txt", "successor view");
@@ -1968,19 +1968,19 @@ async fn fenced_sync_honor_refused_and_tree_unmutated() {
 }
 
 /// The explicit guard of the previous test, isolated: on a deposed
-/// sidecar the epoch check itself fences, independently of the renew.
+/// syncer the epoch check itself fences, independently of the renew.
 #[tokio::test]
-async fn deposed_sidecar_fails_the_explicit_epoch_check() {
+async fn deposed_syncer_fails_the_explicit_epoch_check() {
     let store = Arc::new(MemoryStore::new());
     let dir_a = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir_a.path()).await;
+    let mut a = syncer(&store, dir_a.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     // Anti-vacuity: it passes while we hold the lease.
     a.verify_not_deposed_pub().await.unwrap();
 
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     assert!(claim_until_held(&mut b, 12).await);
     assert!(b.lease.as_ref().unwrap().epoch > a.lease.as_ref().unwrap().epoch);
 
@@ -2016,7 +2016,7 @@ async fn deposed_sidecar_fails_the_explicit_epoch_check() {
 async fn scoped_sync_preserves_out_of_scope_foreign_flow() {
     let store = Arc::new(MemoryStore::new());
     let dir_a = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir_a.path()).await;
+    let mut a = syncer(&store, dir_a.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir_a.path(), "inputs/data.txt", "v1");
@@ -2116,7 +2116,7 @@ fn scope_matches_on_component_boundary() {
 /// `O_NOFOLLOW` and no root check, while the scanner SKIPS symlinks — so
 /// an unprivileged app that plants `inputs -> /root/.aws`, lands an
 /// object at `inputs/<path>` and drops a scoped sync turns the
-/// credential-holding sidecar into an arbitrary-file-write primitive
+/// credential-holding syncer into an arbitrary-file-write primitive
 /// outside the workspace.
 #[tokio::test]
 #[cfg(unix)]
@@ -2127,7 +2127,7 @@ async fn write_file_atomic_refuses_symlink_escape() {
 
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
 
@@ -2155,7 +2155,7 @@ async fn write_file_atomic_refuses_symlink_escape() {
     assert_eq!(
         std::fs::read_to_string(&secret).unwrap(),
         "ORIGINAL CREDENTIALS",
-        "the sidecar wrote THROUGH a planted symlink, outside the workspace"
+        "the syncer wrote THROUGH a planted symlink, outside the workspace"
     );
     assert!(a
         .state
@@ -2174,7 +2174,7 @@ async fn write_file_atomic_refuses_symlink_escape() {
 async fn sync_rehonor_no_phantom_conflicts() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir.path(), "shared.txt", "v1");
@@ -2209,13 +2209,13 @@ async fn sync_rehonor_no_phantom_conflicts() {
 
 /// D5 — the news ticker is fed from information the barrier already
 /// has: ZERO added bucket requests. `updated_unix` heartbeats on every
-/// tick (so an agent can tell "no news" from "sidecar dead");
+/// tick (so an agent can tell "no news" from "syncer dead");
 /// `observed_seq` moves only when it moves.
 #[tokio::test]
 async fn remote_seq_ticks_without_added_requests() {
     let store = Arc::new(MemoryStore::new());
     let dir_a = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir_a.path()).await;
+    let mut a = syncer(&store, dir_a.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir_a.path(), "f.txt", "v1");
@@ -2254,12 +2254,12 @@ async fn remote_seq_ticks_without_added_requests() {
 /// DELETES local files for remotely-deleted paths.
 ///
 /// Failing control, house style: the tree hash is taken before and
-/// after, and the test FAILS if the sidecar mutated anything.
+/// after, and the test FAILS if the syncer mutated anything.
 #[tokio::test]
 async fn sync_request_is_carried_never_executed() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir.path(), "keep.txt", "agent bytes");
@@ -2277,7 +2277,7 @@ async fn sync_request_is_carried_never_executed() {
 
     let tree_before = std::fs::read_to_string(dir.path().join("keep.txt")).unwrap();
     a.carry_sync_request(super::now_unix(), "ci@example").unwrap();
-    // Several ticks: the sidecar must move the ticker and NOTHING else.
+    // Several ticks: the syncer must move the ticker and NOTHING else.
     for _ in 0..3 {
         let _ = a.sentinel_tick().await.unwrap();
     }
@@ -2287,7 +2287,7 @@ async fn sync_request_is_carried_never_executed() {
     assert_eq!(
         std::fs::read_to_string(dir.path().join("keep.txt")).unwrap(),
         tree_before,
-        "the sidecar acted on a remote's sync request"
+        "the syncer acted on a remote's sync request"
     );
 
     // The agent's OWN touch is what performs it — and then the request
@@ -2301,7 +2301,7 @@ async fn sync_request_is_carried_never_executed() {
 /// U8 — the last open corner of the protocol, and the one the bucket
 /// drill hit from the other side ("a one-shot blocks in `claim` FOREVER").
 ///
-/// A sidecar SIGKILLed mid-honor runs no cooperative fence path, so its
+/// A syncer SIGKILLed mid-honor runs no cooperative fence path, so its
 /// pending sentinel is never settled. The kubelet restarts it over the
 /// surviving emptyDir while a successor holds the lease; it blocks in
 /// `claim` (the successor's token keeps advancing, so quiet polls never
@@ -2312,13 +2312,13 @@ async fn sync_request_is_carried_never_executed() {
 async fn a_restarted_claimant_that_can_never_honor_says_so_instead_of_stranding() {
     let store = Arc::new(MemoryStore::new());
     let dir_a = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir_a.path()).await;
+    let mut a = syncer(&store, dir_a.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     let posture = a.sentinel_preflight().unwrap();
     a.write_capabilities(&posture, false).unwrap();
 
-    // The agent declares a boundary; the sidecar consumes it into a
+    // The agent declares a boundary; the syncer consumes it into a
     // pending record and is SIGKILLed before honoring.
     touch_sentinel(dir_a.path(), control::PUBLISH, r#"{"nonce":"task-42"}"#);
     assert!(a.consume_sentinel(Verb::Publish).unwrap(), "the touch was not consumed");
@@ -2327,7 +2327,7 @@ async fn a_restarted_claimant_that_can_never_honor_says_so_instead_of_stranding(
 
     // A successor takes the lease.
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     assert!(claim_until_held(&mut b, 10).await, "quiet polls exhausted ⇒ takeover");
 
     // A restarts over its surviving emptyDir and lands in Waiting: the
@@ -2363,12 +2363,12 @@ async fn a_restarted_claimant_that_can_never_honor_says_so_instead_of_stranding(
 async fn a_healthy_replacement_waiting_out_quiet_polls_is_not_marked_fenced() {
     let store = Arc::new(MemoryStore::new());
     let dir_a = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir_a.path()).await;
+    let mut a = syncer(&store, dir_a.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
 
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     let posture = b.sentinel_preflight().unwrap();
     b.write_capabilities(&posture, false).unwrap();
     // B is fresh and A still holds: B waits.
@@ -2402,7 +2402,7 @@ async fn a_healthy_replacement_waiting_out_quiet_polls_is_not_marked_fenced() {
 async fn a_stale_ack_never_retires_a_fresh_bare_touch() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
 
@@ -2472,7 +2472,7 @@ async fn a_stale_ack_never_retires_a_fresh_bare_touch() {
 async fn a_fifo_at_the_sentinel_path_never_wedges_the_poll_arm() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
 
@@ -2567,7 +2567,7 @@ async fn a_fifo_at_the_sentinel_path_never_wedges_the_poll_arm() {
 async fn a_gated_no_diff_honor_still_names_the_boundary_it_is_satisfied_by() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     gated(&mut a);
@@ -2603,7 +2603,7 @@ async fn a_gated_no_diff_honor_still_names_the_boundary_it_is_satisfied_by() {
 
 use super::gated::CitationSource;
 
-fn gated(sc: &mut Sidecar) {
+fn gated(sc: &mut Syncer) {
     sc.cfg.boundary_mode = super::BoundaryMode::Gated;
     sc.cfg.visibility_lag_bound_secs = Some(3600); // the 1-hour-floor trick
     sc.cfg.quiesce_bound_secs = 3600;
@@ -2630,7 +2630,7 @@ fn gated(sc: &mut Sidecar) {
 async fn a_deposed_stragglers_reaper_never_deletes_the_successors_cited_version() {
     let store = Arc::new(MemoryStore::new());
     let dir_a = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir_a.path()).await;
+    let mut a = syncer(&store, dir_a.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     gated(&mut a);
@@ -2646,7 +2646,7 @@ async fn a_deposed_stragglers_reaper_never_deletes_the_successors_cited_version(
 
     // A stalls. B takes over.
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     assert!(claim_until_held(&mut b, 10).await, "quiet polls exhausted ⇒ takeover");
     b.checkout().await.unwrap();
     gated(&mut b);
@@ -2708,7 +2708,7 @@ async fn a_deposed_stragglers_reaper_never_deletes_the_successors_cited_version(
 async fn the_reaper_reclaims_only_the_version_its_own_record_names() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     gated(&mut a);
@@ -2824,7 +2824,7 @@ async fn the_reaper_reclaims_only_the_version_its_own_record_names() {
 async fn staging_put_never_destroys_the_cited_version() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir.path(), "model.json", "BOUNDARY 1");
@@ -2864,7 +2864,7 @@ async fn staging_put_never_destroys_the_cited_version() {
 async fn pinned_reads_never_adopts_current() {
     let store = Arc::new(MemoryStore::new());
     let dir_a = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir_a.path()).await;
+    let mut a = syncer(&store, dir_a.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     gated(&mut a);
@@ -2896,7 +2896,7 @@ async fn pinned_reads_never_adopts_current() {
 
     // A second pod checks out between the staging and the boundary.
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     let r = b.checkout().await.unwrap();
     // The probe checkout must COMPLETE (a wedged probe fails the leg).
     assert_eq!(r.materialized, 2);
@@ -2917,7 +2917,7 @@ async fn pinned_reads_never_adopts_current() {
 async fn raw_key_reader_sees_uncited_bytes() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     gated(&mut a);
@@ -2949,7 +2949,7 @@ async fn raw_key_reader_sees_uncited_bytes() {
 async fn quiet_staged_file_is_not_restaged() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     gated(&mut a);
@@ -2977,7 +2977,7 @@ async fn quiet_staged_file_is_not_restaged() {
 async fn hitl_admitted_between_citations() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     gated(&mut a);
@@ -3011,7 +3011,7 @@ async fn hitl_admitted_between_citations() {
 async fn quiescence_fires_and_is_not_the_lag_cap() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     gated(&mut a);
@@ -3050,7 +3050,7 @@ async fn quiescence_fires_and_is_not_the_lag_cap() {
 async fn lag_cap_forces_citation_and_stamps_the_source() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     gated(&mut a);
@@ -3087,7 +3087,7 @@ async fn lag_cap_forces_citation_and_stamps_the_source() {
 async fn version_reclamation_returns_to_one_per_key() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     gated(&mut a);
@@ -3132,7 +3132,7 @@ async fn version_reclamation_returns_to_one_per_key() {
 async fn dangling_citation_refuses_rather_than_serving_a_hole() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     gated(&mut a);
@@ -3158,7 +3158,7 @@ async fn dangling_citation_refuses_rather_than_serving_a_hole() {
 
     // A fresh pod's checkout now dangles, and must refuse.
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     let err = b.checkout().await.unwrap_err();
     let msg = err.to_string();
     assert!(
@@ -3183,7 +3183,7 @@ async fn dangling_citation_refuses_rather_than_serving_a_hole() {
 async fn versioning_conformance_probe_passes_on_a_versioned_store() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.versioning_conformance().await.expect("a versioned store must pass the probe");
 }
@@ -3202,7 +3202,7 @@ async fn versioning_conformance_probe_passes_on_a_versioned_store() {
 async fn gated_floor_tick_stages_without_citing() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     gated(&mut a);
@@ -3235,7 +3235,7 @@ async fn gated_floor_tick_stages_without_citing() {
 async fn gated_floor_tick_cites_at_the_lag_cap() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     gated(&mut a);
@@ -3262,7 +3262,7 @@ async fn gated_floor_tick_cites_at_the_lag_cap() {
 async fn gated_publish_sentinel_cites_the_whole_stage() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     gated(&mut a);
@@ -3298,7 +3298,7 @@ async fn gated_publish_sentinel_cites_the_whole_stage() {
 async fn gated_drain_cites_the_staged_versions_in_place() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     gated(&mut a);
@@ -3337,7 +3337,7 @@ async fn gated_drain_cites_the_staged_versions_in_place() {
 async fn versioning_conformance_survives_a_leftover_probe_object() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
 
     // Exactly what a crashed probe leaves behind.
@@ -3514,8 +3514,8 @@ async fn gated_startup_refuses_a_version_stripping_backend() {
     let inner = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
     let cfg = cfg_for(dir.path());
-    let state = SidecarState::open(cfg.state_dir()).unwrap();
-    let mut a = Sidecar {
+    let state = SyncerState::open(cfg.state_dir()).unwrap();
+    let mut a = Syncer {
         store: Arc::new(VersionStripping(inner.clone())) as Arc<dyn ObjectStore>,
         cfg,
         state,
@@ -3545,14 +3545,14 @@ async fn gated_startup_refuses_a_version_stripping_backend() {
 /// `flint-store`'s trait doc has always said the prefix-wide
 /// `ListObjectVersions` is "the claim-time/DR fallback when
 /// `orphans.json` is missing or stale — the expensive path, which is
-/// why the durable summary is written eagerly". Nothing in the sidecar
+/// why the durable summary is written eagerly". Nothing in the syncer
 /// read the summary, so recovery always took the expensive path and the
-/// eager write bought the sidecar nothing.
+/// eager write bought the syncer nothing.
 #[tokio::test]
 async fn recover_staged_uses_the_durable_summary_and_falls_back_without_it() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     gated(&mut a);
@@ -3594,7 +3594,7 @@ async fn recover_staged_uses_the_durable_summary_and_falls_back_without_it() {
     drop(a);
 
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     b.cfg.boundary_mode = super::BoundaryMode::Gated;
     b.cfg.visibility_lag_bound_secs = Some(3600);
     assert!(claim_until_held(&mut b, 12).await);
@@ -3624,7 +3624,7 @@ async fn recover_staged_uses_the_durable_summary_and_falls_back_without_it() {
     // everything, by the expensive route. A summary is an optimisation,
     // never the source of truth.
     let dir_c = tempfile::tempdir().unwrap();
-    let mut c = sidecar(&store, dir_c.path()).await;
+    let mut c = syncer(&store, dir_c.path()).await;
     c.cfg.boundary_mode = super::BoundaryMode::Gated;
     c.cfg.visibility_lag_bound_secs = Some(3600);
     assert!(claim_until_held(&mut c, 12).await);
@@ -3645,7 +3645,7 @@ async fn recover_staged_uses_the_durable_summary_and_falls_back_without_it() {
 async fn recover_staged_recites_uncited_work_forward() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     gated(&mut a);
@@ -3665,7 +3665,7 @@ async fn recover_staged_recites_uncited_work_forward() {
 
     // A replacement pod: fresh emptyDir, no pending record at all.
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     b.cfg.boundary_mode = super::BoundaryMode::Gated;
     b.cfg.visibility_lag_bound_secs = Some(3600);
     assert!(claim_until_held(&mut b, 12).await);
@@ -3685,7 +3685,7 @@ async fn recover_staged_recites_uncited_work_forward() {
     // Rolls FORWARD: a checkout of the recovered boundary yields the
     // newer bytes, not the last cited ones.
     let dir_c = tempfile::tempdir().unwrap();
-    let mut c = sidecar(&store, dir_c.path()).await;
+    let mut c = syncer(&store, dir_c.path()).await;
     c.checkout().await.unwrap();
     assert_eq!(read(dir_c.path(), "cited.txt").as_deref(), Some("V2-UNCITED"));
     assert_eq!(read(dir_c.path(), "brand-new.txt").as_deref(), Some("NEW-UNCITED"));
@@ -3704,7 +3704,7 @@ async fn recover_staged_recites_uncited_work_forward() {
 async fn recover_staged_repairs_a_dangling_citation() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     gated(&mut a);
@@ -3719,11 +3719,11 @@ async fn recover_staged_repairs_a_dangling_citation() {
 
     // The dangling state, confirmed before the repair.
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     assert!(b.checkout().await.is_err());
 
     let dir_r = tempfile::tempdir().unwrap();
-    let mut r = sidecar(&store, dir_r.path()).await;
+    let mut r = syncer(&store, dir_r.path()).await;
     r.cfg.boundary_mode = super::BoundaryMode::Gated;
     r.cfg.visibility_lag_bound_secs = Some(3600);
     assert!(claim_until_held(&mut r, 12).await);
@@ -3732,7 +3732,7 @@ async fn recover_staged_repairs_a_dangling_citation() {
 
     // Now a fresh checkout completes, on the surviving newer bytes.
     let dir_c = tempfile::tempdir().unwrap();
-    let mut c = sidecar(&store, dir_c.path()).await;
+    let mut c = syncer(&store, dir_c.path()).await;
     c.checkout().await.expect("checkout still refuses after recover-staged");
     assert_eq!(read(dir_c.path(), "abandoned.txt").as_deref(), Some("UNCITED WORK"));
     let _ = key;
@@ -3746,7 +3746,7 @@ async fn recover_staged_repairs_a_dangling_citation() {
 async fn recover_staged_is_a_no_op_when_nothing_is_uncited() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     gated(&mut a);
@@ -3775,7 +3775,7 @@ async fn recover_staged_is_a_no_op_when_nothing_is_uncited() {
 async fn gauges_name_the_reason_visibility_is_withheld() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     gated(&mut a);
@@ -3809,7 +3809,7 @@ async fn gauges_name_the_reason_visibility_is_withheld() {
 async fn gauges_count_forced_citations_and_name_the_last_boundary() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     gated(&mut a);
@@ -3832,15 +3832,15 @@ async fn gauges_count_forced_citations_and_name_the_last_boundary() {
     assert_eq!(g.withheld_reason, None);
 }
 
-/// A deposed sidecar's gauges must say `fenced`, exactly as
+/// A deposed syncer's gauges must say `fenced`, exactly as
 /// `capabilities.json` does. An agent that reads only the gauges (the
 /// operational file) must not conclude a zombie is healthy — the two
 /// surfaces cannot be allowed to disagree about liveness.
 #[tokio::test]
-async fn a_fenced_sidecar_gauges_itself_fenced() {
+async fn a_fenced_syncer_gauges_itself_fenced() {
     let store = Arc::new(MemoryStore::new());
     let dir_a = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir_a.path()).await;
+    let mut a = syncer(&store, dir_a.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir_a.path(), "work.txt", "v1");
@@ -3849,7 +3849,7 @@ async fn a_fenced_sidecar_gauges_itself_fenced() {
 
     // A successor takes over.
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     assert!(claim_until_held(&mut b, 12).await);
 
     write(dir_a.path(), "work.txt", "v2");
@@ -3866,14 +3866,14 @@ async fn a_fenced_sidecar_gauges_itself_fenced() {
 }
 
 /// `flint-sync status` is the exec surface for a workspace whose
-/// sidecar is DEAD or deposed — so it must render with no lease held
+/// syncer is DEAD or deposed — so it must render with no lease held
 /// and no claim attempted. A status verb that claims the lease would
-/// depose the very sidecar being diagnosed.
+/// depose the very syncer being diagnosed.
 #[tokio::test]
 async fn status_renders_without_claiming_the_lease() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     // The mode is env-stamped at pod creation, before anything runs.
     gated(&mut a);
@@ -3918,7 +3918,7 @@ async fn status_renders_without_claiming_the_lease() {
 async fn citation_never_reaps_a_hitl_write_that_landed_mid_stage() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     gated(&mut a);
@@ -3993,7 +3993,7 @@ async fn citation_never_reaps_a_hitl_write_that_landed_mid_stage() {
 async fn the_reaper_never_takes_an_out_of_band_writers_current_version() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     gated(&mut a);
@@ -4051,7 +4051,7 @@ async fn the_reaper_never_takes_an_out_of_band_writers_current_version() {
 async fn a_sentinel_boundary_carries_a_delete_made_before_the_touch() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     let posture = a.sentinel_preflight().unwrap();
     a.write_capabilities(&posture, false).unwrap();
@@ -4088,7 +4088,7 @@ async fn a_sentinel_boundary_carries_a_delete_made_before_the_touch() {
 async fn only_a_declared_barrier_confirms_a_first_absence() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir.path(), "gone.txt", "v1");
@@ -4135,7 +4135,7 @@ async fn only_a_declared_barrier_confirms_a_first_absence() {
 async fn an_unreadable_path_is_not_confirmed_as_deleted() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let a = sidecar(&store, dir.path()).await;
+    let a = syncer(&store, dir.path()).await;
 
     if unsafe { libc::geteuid() } == 0 {
         eprintln!("SKIPPED: running as root, mode bits cannot induce EACCES");
@@ -4172,7 +4172,7 @@ async fn an_unreadable_path_is_not_confirmed_as_deleted() {
 async fn the_confirmation_never_deletes_a_path_the_walk_merely_missed() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let a = sidecar(&store, dir.path()).await;
+    let a = syncer(&store, dir.path()).await;
     write(dir.path(), "renamed.txt", "here all along");
 
     // What a walk that lost the rename race produces: the path is
@@ -4200,7 +4200,7 @@ async fn the_confirmation_never_deletes_a_path_the_walk_merely_missed() {
 async fn a_gated_sentinel_boundary_carries_a_delete_made_before_the_touch() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     gated(&mut a);
     assert!(claim_until_held(&mut a, 3).await);
     let posture = a.sentinel_preflight().unwrap();
@@ -4233,7 +4233,7 @@ async fn a_gated_sentinel_boundary_carries_a_delete_made_before_the_touch() {
 async fn the_drain_carries_a_delete_made_before_it() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir.path(), "gone.txt", "v1");
@@ -4262,7 +4262,7 @@ async fn the_drain_carries_a_delete_made_before_it() {
 async fn the_heartbeat_arm_settles_owed_acks_when_it_finds_the_fence() {
     let store = Arc::new(MemoryStore::new());
     let dir_a = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir_a.path()).await;
+    let mut a = syncer(&store, dir_a.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     let posture = a.sentinel_preflight().unwrap();
     a.write_capabilities(&posture, false).unwrap();
@@ -4277,7 +4277,7 @@ async fn the_heartbeat_arm_settles_owed_acks_when_it_finds_the_fence() {
     assert!(a.load_pending(Verb::Sync).unwrap().is_some());
 
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     assert!(claim_until_held(&mut b, 12).await);
     let their_epoch = b.lease.as_ref().unwrap().epoch;
     assert!(their_epoch > a.lease.as_ref().unwrap().epoch, "no takeover happened");
@@ -4314,7 +4314,7 @@ async fn the_heartbeat_arm_settles_owed_acks_when_it_finds_the_fence() {
 async fn a_crash_between_the_cas_and_step_7_never_makes_our_own_entry_foreign() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir.path(), "f.txt", "v1");
@@ -4364,7 +4364,7 @@ async fn a_crash_between_the_cas_and_step_7_never_makes_our_own_entry_foreign() 
 async fn a_gated_citation_never_reads_its_own_boundary_as_foreign() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     gated(&mut a);
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
@@ -4418,7 +4418,7 @@ async fn a_gated_citation_never_reads_its_own_boundary_as_foreign() {
 async fn a_pending_sync_at_sigterm_never_cancels_the_drains_own_boundary() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir.path(), "seed.txt", "S1");
@@ -4449,7 +4449,7 @@ async fn a_pending_sync_at_sigterm_never_cancels_the_drains_own_boundary() {
 async fn a_gated_drain_cites_its_stage_even_when_a_sync_was_owed() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir.path(), "seed.txt", "S1");
@@ -4488,7 +4488,7 @@ async fn a_gated_drain_cites_its_stage_even_when_a_sync_was_owed() {
 async fn a_recreated_file_survives_its_own_withheld_tombstone() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir.path(), "ckpt.bin", "v1");
@@ -4538,10 +4538,10 @@ async fn a_recreated_file_survives_its_own_withheld_tombstone() {
 /// `control::write_atomic` and `state::write_atomic` have no
 /// containment at all and write into directories the app must be able
 /// to write, and `.flint/remote.seq` is rewritten on every tick — so
-/// the sidecar's own heartbeat performs the write, with no remote
+/// the syncer's own heartbeat performs the write, with no remote
 /// cooperation at all.
 ///
-/// The sidecar holds the bucket credentials and runs with no
+/// The syncer holds the bucket credentials and runs with no
 /// `securityContext`: this is a cross-container write primitive, not a
 /// workspace-local nuisance.
 #[tokio::test]
@@ -4549,7 +4549,7 @@ async fn a_planted_temp_sibling_is_never_written_through() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir.path(), "seed.txt", "S1");
@@ -4596,7 +4596,7 @@ async fn a_planted_temp_sibling_is_never_written_through() {
         assert_eq!(
             std::fs::read_to_string(outside.path().join(v)).unwrap(),
             "ORIGINAL",
-            "the sidecar wrote through a planted temp sibling ({v}) — an arbitrary-file-write \
+            "the syncer wrote through a planted temp sibling ({v}) — an arbitrary-file-write \
              primitive outside the workspace, with the bucket credentials"
         );
     }
@@ -4621,7 +4621,7 @@ async fn a_planted_temp_sibling_is_never_written_through() {
 async fn a_consumed_hitl_write_is_re_cited_in_gated_mode() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir.path(), "shared.txt", "AGENT-V1");
@@ -4683,7 +4683,7 @@ async fn a_consumed_hitl_write_is_re_cited_in_gated_mode() {
 async fn a_pinned_manifest_never_adopts_current_for_a_legacy_entry() {
     let store = Arc::new(MemoryStore::new());
     let dir_a = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir_a.path()).await;
+    let mut a = syncer(&store, dir_a.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir_a.path(), "legacy.txt", "L1");
@@ -4721,7 +4721,7 @@ async fn a_pinned_manifest_never_adopts_current_for_a_legacy_entry() {
 
     // …and a successor checks out in that window.
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     b.checkout().await.unwrap();
     assert_eq!(
         read(dir_b.path(), "legacy.txt").as_deref(),
@@ -4741,7 +4741,7 @@ async fn a_pinned_manifest_never_adopts_current_for_a_legacy_entry() {
 async fn an_unresolvable_legacy_citation_refuses_rather_than_adopts() {
     let store = Arc::new(MemoryStore::new());
     let dir_a = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir_a.path()).await;
+    let mut a = syncer(&store, dir_a.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir_a.path(), "legacy.txt", "L1");
@@ -4798,7 +4798,7 @@ async fn an_unresolvable_legacy_citation_refuses_rather_than_adopts() {
     );
 
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     let err = b.checkout().await;
     assert!(
         err.is_err(),
@@ -4895,7 +4895,7 @@ async fn a_gated_ack_never_claims_a_path_the_citation_dropped() {
 async fn a_delete_cancels_the_version_the_lane_had_already_staged() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir.path(), "ckpt.bin", "V1");
@@ -4952,7 +4952,7 @@ async fn a_delete_cancels_the_version_the_lane_had_already_staged() {
 
 // ── Phase 4: the operator-facing surfaces (§2.6) ─────────────────────
 
-/// D12's heartbeat is the ONE request a live sidecar always pays, so it
+/// D12's heartbeat is the ONE request a live syncer always pays, so it
 /// is where the observed-state echo rides (§2.6). Without it the
 /// operator can only report what the spec ASKED for: the env read is a
 /// fixed list, so `FLINT_SYNC_BOUNDARY_MODE=gated` reaching a
@@ -4967,7 +4967,7 @@ async fn a_delete_cancels_the_version_the_lane_had_already_staged() {
 async fn a_heartbeat_echoes_the_running_mode_into_the_lease_cell() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir.path(), "seed.txt", "S1");
@@ -4991,7 +4991,7 @@ async fn a_heartbeat_echoes_the_running_mode_into_the_lease_cell() {
     assert_eq!(echo.staged_uncited_count, staged, "the gated exposure is not echoed");
     assert_eq!(echo.last_cited_seq, cited, "the echo names no citation");
     assert_eq!(echo.protocol, super::SENTINEL_PROTOCOL);
-    assert!(!echo.sidecar_version.is_empty(), "no version ⇒ no mixed-fleet tell");
+    assert!(!echo.syncer_version.is_empty(), "no version ⇒ no mixed-fleet tell");
 }
 
 /// D8's refusal arm, as a unit test rather than only as drill leg
@@ -5005,7 +5005,7 @@ async fn a_heartbeat_echoes_the_running_mode_into_the_lease_cell() {
 async fn a_version_stripping_proxy_refuses_gated_startup() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     gated(&mut a);
 
     // Control: the same probe against a conformant store passes, so a
@@ -5034,7 +5034,7 @@ async fn a_version_stripping_proxy_refuses_gated_startup() {
 async fn uncited_work_is_surfaced_durably_and_cleared_by_its_citation() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir.path(), "seed.txt", "S1");
@@ -5073,7 +5073,7 @@ async fn uncited_work_is_surfaced_durably_and_cleared_by_its_citation() {
 async fn an_unchanged_orphan_set_costs_no_request() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     gated(&mut a);
@@ -5110,7 +5110,7 @@ async fn an_unchanged_orphan_set_costs_no_request() {
 async fn a_uds_boundary_and_a_file_sentinel_coalesce_into_one_ack() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     // Two honors in one test: the min-interval would defer the second,
@@ -5167,7 +5167,7 @@ async fn a_uds_boundary_and_a_file_sentinel_coalesce_into_one_ack() {
 async fn a_gateway_boundary_request_becomes_a_pending_sentinel_with_no_conflict() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
 
@@ -5217,7 +5217,7 @@ async fn a_gateway_boundary_request_becomes_a_pending_sentinel_with_no_conflict(
 async fn a_gateway_sync_request_is_carried_and_never_executed() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir.path(), "keep.txt", "LOCAL");
@@ -5241,7 +5241,7 @@ async fn a_gateway_sync_request_is_carried_and_never_executed() {
     assert_eq!(
         read(dir.path(), "keep.txt"),
         tree_before,
-        "the sidecar EXECUTED a sync on a remote's say-so and rewrote the agent's tree"
+        "the syncer EXECUTED a sync on a remote's say-so and rewrote the agent's tree"
     );
     assert!(tree_before.is_some(), "the fixture had nothing to lose");
     let t: control::RemoteSeq = serde_json::from_slice(
@@ -5369,7 +5369,7 @@ fn the_label_key_set_is_exactly_workspace_and_namespace() {
 async fn a_scrape_costs_no_bucket_request() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir.path(), "work.txt", "W1");
@@ -5402,7 +5402,7 @@ async fn a_scrape_costs_no_bucket_request() {
 async fn status_reports_a_standing_pending_sentinel() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
 
@@ -5445,7 +5445,7 @@ async fn a_resumed_checkout_never_adopts_a_stale_generation() {
     let dir = tempfile::tempdir().unwrap();
     let dir2 = tempfile::tempdir().unwrap();
 
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir.path(), "big.bin", "GENERATION-ONE");
@@ -5467,7 +5467,7 @@ async fn a_resumed_checkout_never_adopts_a_stale_generation() {
     lease::release(&mut a).await.unwrap();
     drop(a);
 
-    let mut b = sidecar(&store, dir2.path()).await;
+    let mut b = syncer(&store, dir2.path()).await;
     assert!(claim_until_held(&mut b, 8).await);
     assert!(
         !b.state.marker_present(),
@@ -5499,7 +5499,7 @@ async fn a_resumed_checkout_never_adopts_a_stale_generation() {
 async fn the_gateway_resolves_the_cited_version_while_newer_bytes_are_staged() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     gated(&mut sc);
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
@@ -5554,7 +5554,7 @@ async fn the_gateway_resolves_the_cited_version_while_newer_bytes_are_staged() {
 async fn every_boundary_says_which_clock_installed_it() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
 
@@ -5605,7 +5605,7 @@ async fn every_boundary_says_which_clock_installed_it() {
 async fn the_gateway_never_tells_a_reader_to_retry_a_citation_that_cannot_come_back() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     gated(&mut sc);
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
@@ -5649,7 +5649,7 @@ async fn the_gateway_never_tells_a_reader_to_retry_a_citation_that_cannot_come_b
 async fn a_drained_sentinel_names_the_same_clock_in_the_ack_and_in_the_bucket() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
 
@@ -5683,7 +5683,7 @@ async fn a_drained_sentinel_names_the_same_clock_in_the_ack_and_in_the_bucket() 
 async fn a_gated_drain_names_the_same_clock_in_the_ack_and_in_the_bucket() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     gated(&mut sc);
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
@@ -5722,7 +5722,7 @@ async fn a_gated_drain_names_the_same_clock_in_the_ack_and_in_the_bucket() {
 ///   - a deposed straggler cannot learn it was deposed, because the
 ///     renewal CAS that would tell it is starved by the very barrier it
 ///     is executing (chaos C3's 7,591 post-deposal PUTs, drill B12);
-///   - a HEALTHY sidecar can depose ITSELF. Takeover is QUIET_POLLS(6) x
+///   - a HEALTHY syncer can depose ITSELF. Takeover is QUIET_POLLS(6) x
 ///     10 s = 60 s, so any barrier that outruns that window stops
 ///     renewing and a standby legitimately takes the lease from a live
 ///     writer. The 0b measurements put a 1M-file checkout at 7 m 05 s.
@@ -5734,7 +5734,7 @@ async fn a_gated_drain_names_the_same_clock_in_the_ack_and_in_the_bucket() {
 async fn a_long_barrier_does_not_starve_the_lease_renewal() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
 
@@ -5801,7 +5801,7 @@ async fn a_long_barrier_does_not_starve_the_lease_renewal() {
 async fn a_stage_that_outlived_its_citation_must_not_reap_the_cited_version() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     gated(&mut a);
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
@@ -5883,7 +5883,7 @@ async fn a_stage_that_outlived_its_citation_must_not_reap_the_cited_version() {
 async fn the_drain_never_reclaims_a_recorded_version_the_boundary_still_cites() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     gated(&mut a);
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
@@ -5961,7 +5961,7 @@ async fn the_drain_never_reclaims_a_recorded_version_the_boundary_still_cites() 
 async fn sync_refuses_to_clobber_a_locally_dirty_path_and_says_so() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir.path(), "dirty.txt", "published v1");
@@ -6141,7 +6141,7 @@ async fn merge_applies_a_local_delete_only_where_theirs_is_unchanged() {
 async fn a_resumed_checkout_adopts_identical_bytes_and_refetches_same_size_impostors() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir.path(), "same.txt", "these bytes never move");
@@ -6230,7 +6230,7 @@ async fn a_resumed_checkout_adopts_identical_bytes_and_refetches_same_size_impos
 async fn sync_under_pinned_reads_resolves_the_cited_version_not_the_current_one() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     gated(&mut a);
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
@@ -6339,7 +6339,7 @@ async fn measure_backlog_cap_footprint() {
     for hot in [1usize, 10, 100] {
         let store = Arc::new(MemoryStore::new());
         let dir = tempfile::tempdir().unwrap();
-        let mut a = sidecar(&store, dir.path()).await;
+        let mut a = syncer(&store, dir.path()).await;
         gated(&mut a);
         // The lag cap and quiescence must be unreachable, or they, not
         // the backlog cap, decide when a citation fires and the
@@ -6416,7 +6416,7 @@ async fn measure_backlog_cap_footprint() {
 async fn a_takeover_rotation_carries_the_boundary_stamp_with_the_document() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
     write(dir.path(), "f.txt", "v1");
@@ -6966,8 +6966,8 @@ async fn a_refused_credential_pauses_the_holder_without_fencing_it() {
     let proxy = Arc::new(AuthRefusing::new(inner.clone()));
     let dir = tempfile::tempdir().unwrap();
     let cfg = cfg_for(dir.path());
-    let state = SidecarState::open(cfg.state_dir()).unwrap();
-    let mut a = Sidecar {
+    let state = SyncerState::open(cfg.state_dir()).unwrap();
+    let mut a = Syncer {
         store: proxy.clone() as Arc<dyn ObjectStore>,
         cfg,
         state,
@@ -8001,7 +8001,7 @@ impl ObjectStore for PublishOnList {
 async fn a_chunked_barrier_keeps_a_foreign_write_it_never_read() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     sc.cfg.chunked = true;
     sc.cfg.chunk_target = 8;
     sc.cfg.chunk_min = 2;
@@ -8030,7 +8030,7 @@ async fn a_chunked_barrier_keeps_a_foreign_write_it_never_read() {
         chunks.len()
     );
 
-    // A foreign write the sidecar never read, and a local edit far from
+    // A foreign write the syncer never read, and a local edit far from
     // it in key order, so they fall in different chunks.
     hitl_write(&store, &sc.cfg, "src/f000.txt", "user version", "dilip").await.unwrap();
     write(dir.path(), "src/f059.txt", "v2");
@@ -8068,7 +8068,7 @@ async fn a_chunked_barrier_keeps_a_foreign_write_it_never_read() {
 async fn migrating_to_chunks_leaves_no_generation_objects_behind() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     sc.cfg.chunked = false; // start on the layout being migrated FROM
     sc.cfg.chunk_target = 8;
     sc.cfg.chunk_min = 2;
@@ -8349,7 +8349,7 @@ async fn the_chunk_reaper_judges_the_grace_now_not_when_it_listed() {
 async fn the_barrier_reaps_unreferenced_chunks_without_being_asked() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(&store, dir.path()).await;
+    let mut sc = syncer(&store, dir.path()).await;
     sc.cfg.chunk_target = 8;
     sc.cfg.chunk_min = 2;
     sc.cfg.chunk_max = 32;
@@ -8591,8 +8591,8 @@ async fn a_deposed_writer_stops_at_the_next_chunk_boundary() {
         deposed: Default::default(),
         puts_after: Default::default(),
     });
-    let state = SidecarState::open(cfg.state_dir()).unwrap();
-    let mut a = Sidecar {
+    let state = SyncerState::open(cfg.state_dir()).unwrap();
+    let mut a = Syncer {
         store: hooked.clone() as Arc<dyn ObjectStore>,
         cfg,
         state,
@@ -8640,7 +8640,7 @@ async fn a_deposed_writer_stops_at_the_next_chunk_boundary() {
 async fn a_lost_renew_response_does_not_self_fence() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     let key = a.cfg.epoch_key();
 
@@ -8664,7 +8664,7 @@ async fn a_lost_renew_response_does_not_self_fence() {
 
     // Control: a GENUINE takeover still fences the old holder.
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     assert!(claim_until_held(&mut b, 12).await, "quiet polls exhausted ⇒ takeover");
     assert!(matches!(lease::renew(&mut a).await.unwrap_err(), LeanError::Fenced(_)));
     assert!(a.lease.is_none(), "a fenced holder must drop its lease");
@@ -8679,7 +8679,7 @@ async fn a_lost_renew_response_does_not_self_fence() {
 async fn a_foreign_claim_refuses_the_syncer_before_it_claims() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
 
     // Unstamped: no check (the pre-operator posture the drill runs).
     lease::verify_claim(&a).await.unwrap();
@@ -8727,7 +8727,7 @@ async fn a_foreign_claim_refuses_the_syncer_before_it_claims() {
 fn the_drain_attestation_is_written_by_the_drain_and_cleared_at_startup() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = cfg_for(dir.path());
-    let st = SidecarState::open(cfg.state_dir()).unwrap();
+    let st = SyncerState::open(cfg.state_dir()).unwrap();
     assert!(!st.drained_path().exists(), "a fresh state dir must carry no attestation");
     st.sync_tree().unwrap();
     st.write_drained(Some(7), 1).unwrap();
@@ -8754,7 +8754,7 @@ fn the_drain_attestation_is_written_by_the_drain_and_cleared_at_startup() {
 async fn ranged_checkout_is_byte_identical_and_parallel() {
     let store = Arc::new(MemoryStore::new());
     let dir_a = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir_a.path()).await;
+    let mut a = syncer(&store, dir_a.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
 
@@ -8766,7 +8766,7 @@ async fn ranged_checkout_is_byte_identical_and_parallel() {
     a.run_barrier().await.unwrap();
 
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     b.cfg.range_get_min_bytes = 1024 * 1024;
     b.cfg.range_get_chunk_bytes = 512 * 1024; // 10 ranges over 5 MiB
     b.cfg.range_get_parallelism = 4;
@@ -8816,7 +8816,7 @@ fn ranged_default_tree() -> Vec<u8> {
 async fn ranged_checkout_on_by_default_uses_ranges() {
     let store = Arc::new(MemoryStore::new());
     let dir_a = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir_a.path()).await;
+    let mut a = syncer(&store, dir_a.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     let big = ranged_default_tree();
@@ -8825,7 +8825,7 @@ async fn ranged_checkout_on_by_default_uses_ranges() {
     a.run_barrier().await.unwrap();
 
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     assert_eq!(
         b.cfg.range_get_min_bytes,
         8 * 1024 * 1024,
@@ -8853,7 +8853,7 @@ async fn ranged_checkout_on_by_default_uses_ranges() {
 async fn ranged_checkout_explicitly_disabled_uses_no_ranges() {
     let store = Arc::new(MemoryStore::new());
     let dir_a = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir_a.path()).await;
+    let mut a = syncer(&store, dir_a.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     let big = ranged_default_tree();
@@ -8862,7 +8862,7 @@ async fn ranged_checkout_explicitly_disabled_uses_no_ranges() {
     a.run_barrier().await.unwrap();
 
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     b.cfg.range_get_min_bytes = 0;
     store.reset_peak_get_range_in_flight();
     let cr = b.checkout().await.unwrap();
@@ -8890,7 +8890,7 @@ async fn ranged_checkout_explicitly_disabled_uses_no_ranges() {
 /// below move exactly one dimension.
 async fn scoped_fixture(store: &Arc<MemoryStore>) -> tempfile::TempDir {
     let dir_a = tempfile::tempdir().unwrap();
-    let mut a = sidecar(store, dir_a.path()).await;
+    let mut a = syncer(store, dir_a.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir_a.path(), "inputs/wanted.txt", "the file the agent edits");
@@ -8908,7 +8908,7 @@ async fn a_scoped_checkout_materialises_only_the_admitted_set() {
     let _keep = scoped_fixture(&store).await;
 
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     let cr = b.checkout_scoped(Some(vec!["inputs".into()])).await.unwrap();
 
     assert_eq!(cr.materialized, 2, "only the admitted citations");
@@ -8937,7 +8937,7 @@ async fn what_a_scoped_checkout_never_materialised_it_can_never_delete() {
     let _keep = scoped_fixture(&store).await;
 
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     b.checkout_scoped(Some(vec!["inputs".into()])).await.unwrap();
     assert!(claim_until_held(&mut b, 12).await, "quiet polls exhausted ⇒ takeover");
 
@@ -8964,13 +8964,13 @@ async fn a_scoped_checkout_budget_is_computed_over_the_admitted_set() {
     // One budget, between the admitted bytes (~60) and the whole tree
     // (~24 KiB). The two arms differ in the SCOPE and nothing else.
     let dir_whole = tempfile::tempdir().unwrap();
-    let mut whole = sidecar(&store, dir_whole.path()).await;
+    let mut whole = syncer(&store, dir_whole.path()).await;
     whole.cfg.max_bytes = 1024;
     let err = whole.checkout().await.expect_err("the whole tree is over this budget");
     assert!(matches!(err, LeanError::Budget(_)), "{err}");
 
     let dir_scoped = tempfile::tempdir().unwrap();
-    let mut scoped = sidecar(&store, dir_scoped.path()).await;
+    let mut scoped = syncer(&store, dir_scoped.path()).await;
     scoped.cfg.max_bytes = 1024;
     let cr = scoped
         .checkout_scoped(Some(vec!["inputs".into()]))
@@ -8985,7 +8985,7 @@ async fn an_all_rejected_checkout_scope_is_refused_not_widened() {
     let _keep = scoped_fixture(&store).await;
 
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     let err = b
         .checkout_scoped(Some(vec!["../escape".into(), "./here".into()]))
         .await
@@ -9006,7 +9006,7 @@ async fn a_live_tree_refuses_a_checkout_whose_scope_disagrees() {
     // Direction 1, the dangerous one: a caller that asks for the whole
     // tree and resumes a 2-file workspace would believe it holds 8.
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     b.checkout_scoped(Some(vec!["inputs".into()])).await.unwrap();
     let err = b.checkout().await.expect_err("scoped tree, unscoped request");
     let msg = format!("{err}");
@@ -9015,7 +9015,7 @@ async fn a_live_tree_refuses_a_checkout_whose_scope_disagrees() {
 
     // Direction 2: a whole tree, then a scoped request.
     let dir_c = tempfile::tempdir().unwrap();
-    let mut c = sidecar(&store, dir_c.path()).await;
+    let mut c = syncer(&store, dir_c.path()).await;
     c.checkout().await.unwrap();
     let err = c
         .checkout_scoped(Some(vec!["inputs".into()]))
@@ -9034,7 +9034,7 @@ async fn a_scoped_checkout_leaves_the_merge_base_whole() {
     let _keep = scoped_fixture(&store).await;
 
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     b.checkout_scoped(Some(vec!["inputs".into()])).await.unwrap();
 
     let base = b.state.load_baseline().unwrap();
@@ -9058,7 +9058,7 @@ async fn a_narrowed_merge_base_makes_every_unadmitted_citation_foreign() {
 
     // Arm A — as shipped: inst_base whole.
     let dir_a = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir_a.path()).await;
+    let mut a = syncer(&store, dir_a.path()).await;
     a.checkout_scoped(Some(vec!["inputs".into()])).await.unwrap();
     a.sync().await.unwrap();
     assert!(
@@ -9068,7 +9068,7 @@ async fn a_narrowed_merge_base_makes_every_unadmitted_citation_foreign() {
 
     // Arm B — inst_base narrowed to the scope, and NOTHING else changed.
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     b.checkout_scoped(Some(vec!["inputs".into()])).await.unwrap();
     {
         let mut base = b.state.load_baseline().unwrap();
@@ -9096,7 +9096,7 @@ async fn an_unreadable_scope_is_not_read_as_unscoped() {
     }
 
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     b.checkout_scoped(Some(vec!["inputs".into()])).await.unwrap();
 
     // The PARENT, not the file. A mode-0o000 file still `stat`s fine —
@@ -9122,7 +9122,7 @@ async fn a_whole_tree_checkout_clears_a_stale_scope() {
     // disk, the gate never opened. The whole-tree checkout that replaces
     // it must not inherit a claim it did not make.
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     b.state.save_scope(Some(&["inputs".to_string()])).unwrap();
     assert!(!b.state.marker_present());
 
@@ -9152,7 +9152,7 @@ fn bulky_conflict(i: usize) -> super::state::ConflictRecord {
 async fn the_conflict_log_rotates_instead_of_growing_without_bound() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let a = sidecar(&store, dir.path()).await;
+    let a = syncer(&store, dir.path()).await;
 
     for i in 0..2000 {
         a.state.append_conflict(&bulky_conflict(i)).unwrap();
@@ -9178,7 +9178,7 @@ async fn the_conflict_log_rotates_instead_of_growing_without_bound() {
 async fn a_rotation_never_shortens_what_a_reader_has_already_counted() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let a = sidecar(&store, dir.path()).await;
+    let a = syncer(&store, dir.path()).await;
 
     // `honor_sync` counts before a sync and skips that many after. The
     // count must never go DOWN across one rotation, or it skips past
@@ -9201,7 +9201,7 @@ async fn a_rotation_never_shortens_what_a_reader_has_already_counted() {
 async fn a_second_rotation_reports_what_it_dropped() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let a = sidecar(&store, dir.path()).await;
+    let a = syncer(&store, dir.path()).await;
 
     for i in 0..4000 {
         a.state.append_conflict(&bulky_conflict(i)).unwrap();
@@ -9220,7 +9220,7 @@ async fn a_second_rotation_reports_what_it_dropped() {
 async fn an_unreadable_conflict_log_is_not_reported_as_empty() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let a = sidecar(&store, dir.path()).await;
+    let a = syncer(&store, dir.path()).await;
     if unsafe { libc::geteuid() } == 0 {
         eprintln!("SKIPPED: running as root, mode bits cannot induce EACCES");
         return;
@@ -9409,8 +9409,8 @@ async fn a_compose_that_reports_no_checksum_refuses_instead_of_citing() {
         c.whole_put_max = 4096;
         c
     };
-    let state = SidecarState::open(cfg.state_dir()).unwrap();
-    let mut a = Sidecar {
+    let state = SyncerState::open(cfg.state_dir()).unwrap();
+    let mut a = Syncer {
         store,
         cfg,
         state,
@@ -9444,12 +9444,12 @@ async fn a_compose_that_reports_no_checksum_refuses_instead_of_citing() {
 // ---------------------------------------------------------------------
 
 /// A published tree plus a live gateway. Returns (dir, routes) — the
-/// dir must be kept alive or the tempdir unlinks under the sidecar.
+/// dir must be kept alive or the tempdir unlinks under the syncer.
 async fn draft_fixture(
     store: &Arc<MemoryStore>,
-) -> (tempfile::TempDir, Sidecar, warp::filters::BoxedFilter<(warp::reply::Response,)>) {
+) -> (tempfile::TempDir, Syncer, warp::filters::BoxedFilter<(warp::reply::Response,)>) {
     let dir = tempfile::tempdir().unwrap();
-    let mut sc = sidecar(store, dir.path()).await;
+    let mut sc = syncer(store, dir.path()).await;
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
     write(dir.path(), "inputs/wanted.txt", "published v1");
@@ -9990,7 +9990,7 @@ async fn the_draft_door_refuses_reserved_paths_and_bad_users() {
 async fn a_promote_is_adopted_by_the_gated_upload_lane() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
-    let mut a = sidecar(&store, dir.path()).await;
+    let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir.path(), "inputs/wanted.txt", "published v1");
@@ -10029,7 +10029,7 @@ async fn an_unpromoted_draft_never_widens_a_scoped_workspace() {
     let routes = super::gateway::routes(gw_core(&store));
 
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     b.checkout_scoped(Some(vec!["inputs".into()])).await.unwrap();
     assert!(claim_until_held(&mut b, 12).await);
     let admitted: Vec<String> = b.state.load_baseline().unwrap().entries.keys().cloned().collect();
@@ -10071,7 +10071,7 @@ async fn promoting_an_out_of_scope_draft_widens_the_held_set() {
     let routes = super::gateway::routes(gw_core(&store));
 
     let dir_b = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir_b.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
     b.checkout_scoped(Some(vec!["inputs".into()])).await.unwrap();
     assert!(claim_until_held(&mut b, 12).await);
     assert!(!b.state.load_baseline().unwrap().entries.contains_key("outputs/big-0.bin"));
@@ -10107,9 +10107,9 @@ async fn promoting_an_out_of_scope_draft_widens_the_held_set() {
 
 /// A whole-tree workspace over `scoped_fixture`'s published tree: two
 /// files under `inputs/`, six under `outputs/`, all held and all cited.
-async fn rescope_fixture(store: &Arc<MemoryStore>) -> (tempfile::TempDir, Sidecar) {
+async fn rescope_fixture(store: &Arc<MemoryStore>) -> (tempfile::TempDir, Syncer) {
     let dir = tempfile::tempdir().unwrap();
-    let mut b = sidecar(store, dir.path()).await;
+    let mut b = syncer(store, dir.path()).await;
     b.checkout().await.unwrap();
     assert!(claim_until_held(&mut b, 12).await, "quiet polls exhausted ⇒ takeover");
     assert_eq!(b.state.load_baseline().unwrap().entries.len(), 8);
@@ -10377,7 +10377,7 @@ async fn a_rescope_before_any_checkout_is_refused() {
     let store = Arc::new(MemoryStore::new());
     let _keep = scoped_fixture(&store).await;
     let dir = tempfile::tempdir().unwrap();
-    let mut b = sidecar(&store, dir.path()).await;
+    let mut b = syncer(&store, dir.path()).await;
 
     let err = b.rescope(Some(vec!["inputs".into()])).await.unwrap_err();
     match err {
@@ -10429,7 +10429,7 @@ async fn a_checkout_does_not_wait_out_a_standing_lease() {
 
     // The publisher: holds the epoch, and keeps holding it.
     let pdir = tempfile::tempdir().unwrap();
-    let mut publisher = sidecar(&store, pdir.path()).await;
+    let mut publisher = syncer(&store, pdir.path()).await;
     assert!(claim_until_held(&mut publisher, 3).await);
     publisher.checkout().await.unwrap();
     write(pdir.path(), "README.md", "the real readme");
@@ -10439,7 +10439,7 @@ async fn a_checkout_does_not_wait_out_a_standing_lease() {
 
     // The reader: a different pod, a different tree, no lease.
     let rdir = tempfile::tempdir().unwrap();
-    let mut reader = sidecar(&store, rdir.path()).await;
+    let mut reader = syncer(&store, rdir.path()).await;
     let done = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         super::verbs::run_verb(&mut reader, super::verbs::Step::Checkout),
@@ -10479,7 +10479,7 @@ async fn a_checkout_does_not_wait_out_a_standing_lease() {
 async fn a_checkout_issues_no_write_to_the_bucket() {
     let store = Arc::new(MemoryStore::new());
     let pdir = tempfile::tempdir().unwrap();
-    let mut publisher = sidecar(&store, pdir.path()).await;
+    let mut publisher = syncer(&store, pdir.path()).await;
     assert!(claim_until_held(&mut publisher, 3).await);
     publisher.checkout().await.unwrap();
     for i in 0..8 {
@@ -10488,7 +10488,7 @@ async fn a_checkout_issues_no_write_to_the_bucket() {
     publisher.run_barrier().await.unwrap();
 
     let rdir = tempfile::tempdir().unwrap();
-    let mut reader = sidecar(&store, rdir.path()).await;
+    let mut reader = syncer(&store, rdir.path()).await;
     store.reset_op_counts();
     super::verbs::run_verb(&mut reader, super::verbs::Step::Checkout).await.unwrap();
     let ops = store.op_counts();
@@ -10714,7 +10714,7 @@ impl ObjectStore for PublishMidCheckout {
 async fn a_publish_that_lands_mid_checkout_names_the_publisher_not_a_stranger() {
     let inner = Arc::new(MemoryStore::new());
     let pdir = tempfile::tempdir().unwrap();
-    let mut publisher = sidecar(&inner, pdir.path()).await;
+    let mut publisher = syncer(&inner, pdir.path()).await;
     publisher.cfg.sole_writer = true;
     assert!(claim_until_held(&mut publisher, 3).await);
     publisher.checkout().await.unwrap();
@@ -10722,7 +10722,7 @@ async fn a_publish_that_lands_mid_checkout_names_the_publisher_not_a_stranger() 
     publisher.run_barrier().await.unwrap();
 
     let rdir = tempfile::tempdir().unwrap();
-    let mut reader = sidecar(&inner, rdir.path()).await;
+    let mut reader = syncer(&inner, rdir.path()).await;
     let racing = Arc::new(PublishMidCheckout {
         inner: inner.clone(),
         cfg: reader.cfg.clone(),

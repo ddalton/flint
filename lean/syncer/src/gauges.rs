@@ -13,14 +13,14 @@
 //! issue one. This is the "instrument reports on itself" class the
 //! runas campaign paid for five times; here it would also make the
 //! zero-added-cost oracle (leg B8) intermittently red and blame the
-//! sidecar for its own instrument.
+//! syncer for its own instrument.
 //!
 //! Phase 6 renders `/metrics` from this same struct — one renderer over
 //! one struct cannot drift; two computations would.
 
 use serde::{Deserialize, Serialize};
 
-use super::{now_unix, LeanResult, Sidecar};
+use super::{now_unix, LeanResult, Syncer};
 
 const GAUGES: &str = "gauges.json";
 
@@ -135,7 +135,7 @@ pub struct Gauges {
     pub last_durable_unix: u64,
 }
 
-impl Sidecar {
+impl Syncer {
     fn gauges_path(&self) -> std::path::PathBuf {
         self.cfg.state_dir().join(GAUGES)
     }
@@ -270,10 +270,10 @@ impl Sidecar {
 }
 
 /// What `flint-sync status` renders. Read STRICTLY from files: the verb
-/// exists to diagnose a workspace whose sidecar is dead or deposed, so
-/// it must neither claim the lease (which would depose the very sidecar
+/// exists to diagnose a workspace whose syncer is dead or deposed, so
+/// it must neither claim the lease (which would depose the very syncer
 /// under diagnosis) nor take the state-directory occupancy lock (which
-/// a live sidecar already holds).
+/// a live syncer already holds).
 #[derive(Debug, Clone, Serialize)]
 pub struct StatusReport {
     pub root: String,

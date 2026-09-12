@@ -1,4 +1,4 @@
-//! flint-sync: the lean checkout/publish sidecar (plan of record:
+//! flint-sync: the lean checkout/publish syncer (plan of record:
 //! docs/plans/flint-lean-plan.md). Runs beside an agent container as a
 //! native sidecar: checkout gates the agent start; the barrier loop
 //! publishes on the flush floor; preStop drains.
@@ -13,13 +13,13 @@
 //!   recover-staged  re-cite durable-but-uncited work as one flagged
 //!              boundary (gated recovery after pod replacement), exit
 //!   ctl <boundary|sync|status>
-//!              talk to the UDS door of the sidecar running in THIS
-//!              pod (§2.5). A client, not a second sidecar: it takes
+//!              talk to the UDS door of the syncer running in THIS
+//!              pod (§2.5). A client, not a second syncer: it takes
 //!              no lease and no state lock. Requires FLINT_SYNC_UDS_DOOR.
 //!   status     render gauges + pending + lease state as JSON, exit.
 //!              Takes NO lease and NO state-dir lock: it exists to
-//!              diagnose a workspace whose sidecar is dead or deposed,
-//!              and claiming would depose the very sidecar under
+//!              diagnose a workspace whose syncer is dead or deposed,
+//!              and claiming would depose the very syncer under
 //!              diagnosis.
 //!   probe-copy verify the cross-key copy surface against THIS bucket
 //!   run        claim → checkout → barrier loop (floorSecs) → drain on
@@ -53,7 +53,7 @@
 //!   FLINT_SYNC_UPLOAD_PART_PARALLELISM  parts of ONE object uploaded
 //!                                 concurrently on publish (default 1)
 //!   FLINT_SYNC_SOLE_WRITER        "true" marks every manifest this
-//!                                 sidecar installs as a PUBLISHED
+//!                                 syncer installs as a PUBLISHED
 //!                                 mirror: readers then refuse an
 //!                                 object that has moved off its
 //!                                 citation instead of adopting it.
@@ -76,10 +76,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use flint_lean::state::SidecarState;
+use flint_lean::state::SyncerState;
 use flint_lean::lease;
 use flint_lean::verbs;
-use flint_lean::{BoundaryMode, LeanConfig, LeanError, Sidecar, SentinelMode};
+use flint_lean::{BoundaryMode, LeanConfig, LeanError, Syncer, SentinelMode};
 use flint_store::s3::S3Store;
 use flint_store::ObjectStore;
 use warp::Filter;
@@ -107,7 +107,7 @@ fn flint_lean_now() -> u64 {
 /// consequence is worth spelling out on the line itself: a paused
 /// holder stops renewing, and a stopped renewal is precisely what a
 /// challenger reads as a dead holder.
-fn log_retry(sc: &Sidecar, e: &LeanError, fallback: &str) {
+fn log_retry(sc: &Syncer, e: &LeanError, fallback: &str) {
     if !e.is_auth() {
         eprintln!("flint-sync: {fallback}: {e}");
         return;
@@ -226,7 +226,7 @@ async fn main() {
     }
 
     // Also dispatched before the state directory is opened, and for a
-    // stronger reason: `ctl` is a CLIENT of the running sidecar. Taking
+    // stronger reason: `ctl` is a CLIENT of the running syncer. Taking
     // the occupancy lock — or the lease — would fight the very process
     // it is asking to do something.
     if cmd == "ctl" {
@@ -253,7 +253,7 @@ async fn main() {
         }
     }
 
-    // Dispatched before the state directory is opened: a live sidecar
+    // Dispatched before the state directory is opened: a live syncer
     // holds the occupancy flock, and `status` must work WHILE it does.
     if cmd == "status" {
         match flint_lean::status_report(&cfg) {
@@ -268,17 +268,17 @@ async fn main() {
         }
     }
 
-    let state = match SidecarState::open(cfg.state_dir()) {
+    let state = match SyncerState::open(cfg.state_dir()) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("flint-sync: state dir: {e}");
             std::process::exit(1);
         }
     };
-    let mut sc = Sidecar { store, cfg, state, lease: None, noted_not_regular: Default::default() };
+    let mut sc = Syncer { store, cfg, state, lease: None, noted_not_regular: Default::default() };
 
     // Conformance probes: they take NO lease and touch no tree, so they
-    // run before the claim. A probe that had to depose a live sidecar to
+    // run before the claim. A probe that had to depose a live syncer to
     // answer "does this bucket support X?" would be unusable on exactly
     // the workspaces anyone wants the answer for.
     if cmd == "probe-copy" {
@@ -379,7 +379,7 @@ async fn ctl_call(
 }
 
 
-async fn run_loop(sc: &mut Sidecar) -> Result<(), LeanError> {
+async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
     verbs::claim(sc).await?;
     // This incarnation owes its own drain attestation; one left by an
     // earlier life of this tree must not vouch for it.
@@ -492,7 +492,7 @@ async fn run_loop(sc: &mut Sidecar) -> Result<(), LeanError> {
 
     // §2.5's UDS door, opt-in. Bind failure DEGRADES: a workspace
     // whose control socket cannot be created is fully operable through
-    // the file protocol, and killing the sidecar over a missing
+    // the file protocol, and killing the syncer over a missing
     // convenience would be a worse outcome than not having it.
     let mut ctl_rx = if std::env::var("FLINT_SYNC_UDS_DOOR").ok().as_deref() == Some("true") {
         let path = flint_lean::uds::socket_path(&sc.cfg.state_dir());
@@ -522,7 +522,7 @@ async fn run_loop(sc: &mut Sidecar) -> Result<(), LeanError> {
     // every iteration and renewed the lease only from that arm — so a
     // third arm completing every second would win every iteration,
     // perpetually reset the floor sleep, and the lease would NEVER
-    // renew: the sidecar would depose itself into the straggler class
+    // renew: the syncer would depose itself into the straggler class
     // by construction. Independent intervals make no arm's readiness
     // able to starve another.
     let floor = Duration::from_secs(sc.cfg.floor_secs.max(1));
@@ -545,7 +545,7 @@ async fn run_loop(sc: &mut Sidecar) -> Result<(), LeanError> {
             _ = renew_iv.tick() => {
                 // Liveness signaling, independent of publish cadence.
                 // The tick settles owed acks on a fence itself — see
-                // Sidecar::heartbeat_tick for why that cannot live here.
+                // Syncer::heartbeat_tick for why that cannot live here.
                 if let Err(e) = sc.heartbeat_tick().await {
                     if matches!(e, LeanError::Fenced(_)) { return Err(e); }
                     log_retry(&sc, &e, "renew failed (retrying)");

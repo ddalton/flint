@@ -137,7 +137,7 @@ metadata:
   labels: { chert.us/lean-workspace: portclash }
 spec:
   restartPolicy: Never
-  # The agent grabs the metrics port BEFORE the sidecar can bind it.
+  # The agent grabs the metrics port BEFORE the syncer can bind it.
   # hostNetwork is not needed: both containers share the pod's netns,
   # which is exactly the collision D15 has to survive.
   initContainers:

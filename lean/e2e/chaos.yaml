@@ -57,8 +57,8 @@ spec:
             httpGet: { path: /healthz, port: 8091 }
             periodSeconds: 2
 ---
-# Bucket assertions (the oracle runs OUTSIDE the sidecar: reading the
-# bucket through the sidecar's own code would let one bug hide another).
+# Bucket assertions (the oracle runs OUTSIDE the syncer: reading the
+# bucket through the syncer's own code would let one bug hide another).
 apiVersion: v1
 kind: Pod
 metadata:

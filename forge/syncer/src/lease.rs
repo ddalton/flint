@@ -2,7 +2,7 @@
 //!
 //! Lean's claim loop, its lost-response rule and its takeover rotation,
 //! re-typed on the syncer. They are copied deliberately rather than
-//! imported: lean's are methods on `Sidecar` and reach for a manifest,
+//! imported: lean's are methods on `Syncer` and reach for a manifest,
 //! a stage and a gauge file that forge has none of. What is shared is
 //! the PROTOCOL, which is the part the models in `lean/formal/` check.
 //!
@@ -18,7 +18,7 @@
 //! `If-Match` on our own token, and only two things move that token: a
 //! successor's acquire, or our own previous renew whose RESPONSE was
 //! lost. One read tells them apart, and treating the second as the
-//! first once made a live lean sidecar fence itself into silence for
+//! first once made a live lean syncer fence itself into silence for
 //! the rest of its tenant's life (audit 2026-09-03, finding 2).
 
 use std::sync::Arc;
@@ -354,7 +354,7 @@ pub async fn release(sc: &mut Syncer) -> ForgeResult<()> {
 /// refusing here would turn a diagnostic into an outage the first time
 /// a stale cell outlived the workspace that wrote it. What this buys is
 /// that the condition stops being SILENT: today a forge server and a
-/// lean sidecar on one prefix both acquire, both are right that they
+/// lean syncer on one prefix both acquire, both are right that they
 /// hold their own cell, and neither logs a line (drill C1).
 ///
 /// Never fatal, and never fatal by accident: a probe that cannot read

@@ -136,7 +136,7 @@ Two, both of which exist because the alternative is a silent widening:
 
 ## 4. The narrow / widen verb — SHIPPED
 
-Approved by the user 2026-09-11 and built as `Sidecar::rescope`
+Approved by the user 2026-09-11 and built as `Syncer::rescope`
 (`checkout.rs`), with the CLI surface `flint-sync rescope <paths…> |
 --all`. §4.1–4.4 below are the design as written before the build; §4.5
 records what building it changed.

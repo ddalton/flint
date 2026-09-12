@@ -3,7 +3,7 @@
 //! Deliberately NOT `lite_gateway`: that module is the hub fleet's
 //! door (FlintShare resolution, derived per-share tokens, reverse
 //! proxy to hub pods). Lean's gateway talks to the BUCKET — the same
-//! CAS cells the sidecar uses — and has no hub, no CR resolution, no
+//! CAS cells the syncer uses — and has no hub, no CR resolution, no
 //! token minting. It shares only the crate, the image, and the warp
 //! stack. Coupling the two would hand every future hub-side change
 //! (strict mode included) a blast radius into lean; see the operator
@@ -34,7 +34,7 @@
 //! - `GET  /status`        — seq/window/inbox depth/epoch cell: the
 //!   RPO observability surface.
 //!
-//! Sidecar-facing (epoch-validated PER REQUEST — P5's teeth: a write
+//! Syncer-facing (epoch-validated PER REQUEST — P5's teeth: a write
 //! whose claimed epoch is not the cell's CURRENT epoch is rejected,
 //! closing the deposed-straggler door the model's LeanNoEpochCheck
 //! mutation proves rotation alone leaves open):
@@ -392,7 +392,7 @@ pub fn routes(
         .then(handle_inbox_drop).boxed();
 
     // §2.5's gateway door. Two verbs, deliberately asymmetric: a
-    // boundary is PERFORMED by the sidecar, a sync is CARRIED to the
+    // boundary is PERFORMED by the syncer, a sync is CARRIED to the
     // agent as advisory news (D14).
     let boundary_req = warp::post()
         .and(authed.clone())
@@ -902,7 +902,7 @@ async fn handle_status_authed(
 /// `POST /lean/v1/{ws}/boundary` — ask the workspace to publish.
 ///
 /// The gateway does not publish anything itself and holds no epoch: it
-/// sets a field, and the sidecar performs the barrier under its own
+/// sets a field, and the syncer performs the barrier under its own
 /// lease, min-interval and budget. That is what keeps a leaked bearer
 /// from turning into an unbounded publish loop, and what keeps this
 /// endpoint honest about what it can promise — the response says the
@@ -918,7 +918,7 @@ async fn handle_boundary_request(
 
 /// `POST /lean/v1/{ws}/sync-request` — ask the workspace to pull.
 ///
-/// CARRIED, never performed (D14): the sidecar copies it into
+/// CARRIED, never performed (D14): the syncer copies it into
 /// `.flint/remote.seq` and stops. `sync` deletes local files for
 /// remotely-deleted paths, so performing it on a remote's say-so would
 /// upgrade a leaked bearer from "publish, plus hand over these N named
@@ -947,7 +947,7 @@ async fn handle_verb_request(
         Ok(req) => {
             #[derive(Serialize)]
             struct Accepted {
-                /// "recorded", never "done": the sidecar decides when.
+                /// "recorded", never "done": the syncer decides when.
                 status: &'static str,
                 verb: &'static str,
                 requested_unix: u64,
@@ -964,11 +964,11 @@ async fn handle_verb_request(
                 requestor: req.requestor,
                 note: match verb {
                     super::inbox::RequestedVerb::Boundary =>
-                        "the sidecar honors this as a publish sentinel at its next tick, \
+                        "the syncer honors this as a publish sentinel at its next tick, \
                          subject to the same min-interval and hourly budget; the ack lands \
                          in .flint/publish.ack",
                     super::inbox::RequestedVerb::Sync =>
-                        "CARRIED, not executed: the sidecar moves .flint/remote.seq and the \
+                        "CARRIED, not executed: the syncer moves .flint/remote.seq and the \
                          agent decides whether to sync",
                 },
             })

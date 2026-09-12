@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1
-# flint-sync — the flint-lean workspace sidecar, runtime-only image for a
+# flint-sync — the flint-lean workspace syncer, runtime-only image for a
 # HOST-CROSS-COMPILED binary, same recipe shape as
 # Dockerfile.operator.prebuilt.
 #
 #   for T in x86_64 aarch64; do
-#     (cd ../lean/sidecar && cargo zigbuild --release --features s3 \
+#     (cd ../lean/syncer && cargo zigbuild --release --features s3 \
 #       --target $T-unknown-linux-musl --bin flint-sync); done
 #   # stage: docker/prebuilt/{amd64,arm64}/flint-sync
 #   for A in amd64 arm64; do
@@ -15,9 +15,15 @@
 #   docker manifest create dilipdalton/flint-sync:<tag> \
 #     --amend ...-amd64 --amend ...-arm64 && docker manifest push ...
 #
-# This image is INJECTED into every workspace pod by the lean webhook
-# (flint-lean-chart/values.yaml `sidecarImage`), so it is sized and
-# hardened as a guest in somebody else's pod, not as a service.
+# This image runs as the workspace's SYNCER. It was injected into every
+# workspace pod by the lean webhook (from a chart value `sidecarImage`)
+# until v1.45.0; delivery moved to the s3.csi.chert.us node plugin,
+# which launches it in a worker pod from `FLINT_S3CSI_LEAN_IMAGE`. The
+# chart value is gone and the webhook with it.
+#
+# It is still sized and hardened as a guest rather than as a service,
+# and that is deliberate rather than left over: the worker shares the
+# tenant's tree and uid, so the two requirements below are unchanged.
 #
 # TWO REQUIREMENTS, both load-bearing, and a scratch/distroless-static
 # base fails BOTH:
@@ -44,7 +50,7 @@ RUN apk add --no-cache ca-certificates && update-ca-certificates
 
 COPY ${BIN_DIR}/${TARGETARCH}/flint-sync /usr/local/bin/flint-sync
 
-# No USER: the sidecar shares the agent's workspace volume and must be
+# No USER: the syncer shares the agent's workspace volume and must be
 # able to read and write files the agent owns. The chart sets the
 # security context, because only the chart knows the agent's uid.
 ENTRYPOINT ["/usr/local/bin/flint-sync"]

@@ -58,11 +58,11 @@
 # versioning ENABLED (the script asserts it before any gated leg).
 #
 #   kind create cluster --name flint-lean-verbs
-#   cd lean/sidecar && cargo zigbuild --release --features s3 \
+#   cd lean/syncer && cargo zigbuild --release --features s3 \
 #       --target aarch64-unknown-linux-musl
-#   cd ../e2e && cp ../sidecar/target/aarch64-unknown-linux-musl/release/\
+#   cd ../e2e && cp ../syncer/target/aarch64-unknown-linux-musl/release/\
 #       {flint-sync,flint-lean-gateway} .
-#   docker build -t flint-sync:e2e         -f Dockerfile.sidecar .
+#   docker build -t flint-sync:e2e         -f Dockerfile.syncer .
 #   docker build -t flint-lean-gateway:e2e -f Dockerfile.gateway .
 #   kind load docker-image flint-sync:e2e flint-lean-gateway:e2e \
 #       --name flint-lean-verbs
@@ -75,10 +75,10 @@
 # verbs existed, in a worktree so the working tree is untouched:
 #
 #   git worktree add /tmp/predo 69b35978
-#   cd /tmp/predo/lean/sidecar && cargo zigbuild --release --features s3 \
+#   cd /tmp/predo/lean/syncer && cargo zigbuild --release --features s3 \
 #       --target aarch64-unknown-linux-musl
 #   # then docker build that binary as flint-sync:predo with
-#   # Dockerfile.sidecar and kind load it.
+#   # Dockerfile.syncer and kind load it.
 #
 # Without it B14 FAILS loudly rather than skipping: a mixed-fleet leg
 # with no old binary in it is not a mixed-fleet leg.
@@ -128,7 +128,7 @@ has()  { [ "$(printf '%s' "$2" | grep -c -- "$1")" -gt 0 ]; }
 # grepping '"status":"ok"' matches nothing and reads like a failure.
 ajq()  { printf '%s' "$1" | jq -r "$2" 2>/dev/null; }
 
-# Every leg starts from a pod with no sidecar running. A leg that FAILS
+# Every leg starts from a pod with no syncer running. A leg that FAILS
 # skips its own cleanup, and the loop it leaves behind renews a lease —
 # so the next leg claims, deposes it, and reads a refused-fenced ack it
 # never asked for. That is a harness bug producing a product-shaped
@@ -139,7 +139,7 @@ reset_pods() {
     $K exec "$p" -c sync -- /bin/sh -c 'kill -9 $(pidof flint-sync) 2>/dev/null; true' > /dev/null 2>&1
   done
   for p in verbs-a verbs-b verbs-s verbs-s2; do
-    await_exit "$p" flint-sync 10 > /dev/null || note "$p still has a sidecar process at leg start"
+    await_exit "$p" flint-sync 10 > /dev/null || note "$p still has a syncer process at leg start"
   done
 }
 
@@ -162,7 +162,7 @@ leg() {
 # Legs never share a subtree: one leg's debris must not become the
 # next leg's starting state.
 # A one-shot verb claims the lease FIRST, and `claim` loops forever
-# while another sidecar holds it — that is the design, not a bug. A leg
+# while another syncer holds it — that is the design, not a bug. A leg
 # that gets the ownership wrong must FAIL, not hang the drill, so every
 # one-shot carries a timeout and the caller reads exit 124 as "blocked".
 sy() { # <pod> <prefix> <root> <extra-env> <args…>
@@ -210,7 +210,7 @@ mkfiles() { # <pod> <dir> <n> <tag>
 }
 pad() { printf '%04d' "$1"; }
 
-# ── the oracle: reads the bucket DIRECTLY, never through the sidecar's
+# ── the oracle: reads the bucket DIRECTLY, never through the syncer's
 #    own code, or one bug could hide another ─────────────────────────
 mcx()      { $K -n flint-system exec mc -- "$@" 2>/dev/null; }
 objcat()   { mcx mc cat "m/$BUCKET/$1"; }
@@ -345,7 +345,7 @@ epoch_mtime() { objstat "$1/.flint/lean/epoch" | jq -r '.lastModified // empty';
 # A foreign takeover is NOT instant and must not be waited on with a
 # sleep: `claim` needs QUIET_POLLS=6 observations of an unchanging cell
 # at 10 s each, so a successor claims ~60 s after its predecessor stops
-# renewing. Legs that depose a sidecar pay this, once, on purpose.
+# renewing. Legs that depose a syncer pay this, once, on purpose.
 TAKEOVER_SECS=150
 await_file() { # <pod> <path> <secs>
   local i
@@ -357,8 +357,8 @@ await_file() { # <pod> <path> <secs>
 }
 
 # A tree hash the leg can compare across an event — B18 and B35 both
-# turn "did the sidecar mutate anything?" into one string. The control
-# namespace is excluded: the sidecar writes its own marker files there
+# turn "did the syncer mutate anything?" into one string. The control
+# namespace is excluded: the syncer writes its own marker files there
 # and that is not a mutation of the AGENT's tree.
 treehash() { # <pod> <root>
   inpod "$1" "cd $2 2>/dev/null && find . -type f \
@@ -372,7 +372,7 @@ treehash() { # <pod> <root>
 GATED_TICK="$GATED FLINT_SYNC_FLOOR_SECS=5"
 
 # The gateway is the HITL party: it holds no lease and never edits a
-# manifest, which is precisely why it can write while a sidecar runs.
+# manifest, which is precisely why it can write while a syncer runs.
 gw_put_ws() { gw_put "/lean/v1/$1/files/$2" "$3"; }
 gw_get_ws() { gw_get "/lean/v1/$1/files/$2"; }
 
@@ -685,9 +685,9 @@ b6_conflict_rides_the_ack() {
 #
 #     THE FOREIGN WRITER HAS TO BE THE GATEWAY, and that is a product
 #     fact rather than a rig convenience: the lease admits exactly one
-#     sidecar, so while this workspace's sidecar runs, the only party
+#     syncer, so while this workspace's syncer runs, the only party
 #     that can put new bytes in the bucket is one that holds no lease
-#     and edits no manifest — the HITL/gateway path. A second sidecar
+#     and edits no manifest — the HITL/gateway path. A second syncer
 #     would block in `claim` forever (the first draft of this leg did,
 #     and hung the drill rather than failing it).
 # ─────────────────────────────────────────────────────────────────────
@@ -718,7 +718,7 @@ b7_ticker_is_local_only_news() {
   ok "probe (no creds, no S3 client) reads the ticker: observed_seq=$before"
 
   # Heartbeat: updated_unix must advance across an IDLE tick — without
-  # it an agent cannot tell "no news" from "sidecar dead".
+  # it an agent cannot tell "no news" from "syncer dead".
   sleep 12
   u2=$(probe_seq | jq -r '.updated_unix')
   [ "$u2" -gt "$u1" ] || { bad "updated_unix did not advance across an idle tick ($u1 -> $u2)"; return 1; }
@@ -727,7 +727,7 @@ b7_ticker_is_local_only_news() {
   [ "$mid" = "$before" ] || { bad "observed_seq moved with no foreign write ($before -> $mid)"; return 1; }
   ok "idle heartbeat: updated_unix $u1 -> $u2, observed_seq still $before"
 
-  # The foreign write, through the gateway, while the sidecar holds the
+  # The foreign write, through the gateway, while the syncer holds the
   # lease and keeps ticking.
   local code
   code=$(gw_put_ws b07 hitl.txt "from-a-party-that-holds-no-lease")
@@ -795,7 +795,7 @@ b8_unused_verbs_cost_nothing() {
   ok "control (sentinels off): $off_n requests in ${win}s ≈ $((off_n / ticks))/tick"
 
   # U7: this leg computed a per-tick figure, printed it, and asserted
-  # NOTHING about it. A delta-only oracle passes a sidecar that
+  # NOTHING about it. A delta-only oracle passes a syncer that
   # regressed from 4 requests per tick to 40, so long as sentinels
   # added none of them — and §7 says the draft's own "1 HEAD" figure
   # was ~19x under, so the absolute number is exactly the thing that
@@ -1052,7 +1052,7 @@ b20_quiescence_fires() {
 
 # ─────────────────────────────────────────────────────────────────────
 # B22  A workspace that already had app-owned `.flint/` data. The
-#      sidecar must disable the verbs rather than eat the file.
+#      syncer must disable the verbs rather than eat the file.
 # ─────────────────────────────────────────────────────────────────────
 b22_preexisting_flint_disables_the_verbs() {
   local P=tenants/b22 R=/work/b22
@@ -1074,7 +1074,7 @@ b22_preexisting_flint_disables_the_verbs() {
   for i in $(seq 1 40); do
     c=$(caps verbs-a $R); [ -n "$c" ] && break; sleep 1
   done
-  [ -n "$c" ] || { bad "the sidecar never wrote a capability marker"; return 1; }
+  [ -n "$c" ] || { bad "the syncer never wrote a capability marker"; return 1; }
   local verbs reason
   verbs=$(printf '%s' "$c" | jq -r '.verbs|length')
   reason=$(printf '%s' "$c" | jq -r '.reason // empty')
@@ -1087,7 +1087,7 @@ b22_preexisting_flint_disables_the_verbs() {
   local post
   post=$(inpod verbs-a "cat $R/.flint/publish 2>/dev/null")
   [ "$post" = "$want" ] || { bad "the app's file was consumed or rewritten (now: '$post')"; return 1; }
-  inpod verbs-a "test -e $R/.flint/publish.ack" && { bad "the sidecar acked a file it was never given"; return 1; }
+  inpod verbs-a "test -e $R/.flint/publish.ack" && { bad "the syncer acked a file it was never given"; return 1; }
   local leaked
   leaked=$(allkeys "$P" | grep -c "files/.flint/" || true)
   [ "$leaked" = "0" ] || { bad "$leaked object(s) under files/.flint/ — the app's control data was published"; return 1; }
@@ -1135,7 +1135,7 @@ b11a_sigterm_drains_and_cites() {
   ok "$staged paths staged uncited at seq $s0 (no timer may cite: both bounds are an hour)"
 
   termsync verbs-a
-  await_exit verbs-a flint-sync 40 || { bad "the sidecar never exited on SIGTERM"; return 1; }
+  await_exit verbs-a flint-sync 40 || { bad "the syncer never exited on SIGTERM"; return 1; }
   local s1 src cited
   s1=$(mseq $P); src=$(bsource $P); cited=$(manif $P | jq -r '.entries|keys|length')
   [ "$s1" -gt "$s0" ] || { bad "the drain installed no boundary (still seq $s0)"; return 1; }
@@ -1175,7 +1175,7 @@ b11a_sigterm_drains_and_cites() {
   ok "a consumed-but-unhonored sentinel stands at seq $s2 (held by a 600 s min-interval, floor an hour away)"
 
   termsync verbs-a
-  await_exit verbs-a flint-sync 40 || { bad "the sidecar never exited on SIGTERM (phase 2)"; return 1; }
+  await_exit verbs-a flint-sync 40 || { bad "the syncer never exited on SIGTERM (phase 2)"; return 1; }
   local a
   a=$(ackf verbs-a $R2 publish)
   has 'b11a-owed' "$a" || { bad "the owed ack was never settled: $a"; return 1; }
@@ -1281,7 +1281,7 @@ b11c_drain_bounds_a_writer_that_ignores_sigterm() {
   local t0
   t0=$(date +%s)
   termsync verbs-a
-  await_exit verbs-a flint-sync 70 || { bad "the sidecar never exited on SIGTERM — the drain is unbounded"; return 1; }
+  await_exit verbs-a flint-sync 70 || { bad "the syncer never exited on SIGTERM — the drain is unbounded"; return 1; }
   local t1 took
   t1=$(date +%s); took=$((t1 - t0))
   # D10 sizes the pod's grace against the ~2-minute spot-reclaim
@@ -1308,7 +1308,7 @@ b11c_drain_bounds_a_writer_that_ignores_sigterm() {
 }
 
 # ─────────────────────────────────────────────────────────────────────
-# B13  Legacy `.flint/` upgrade safety. A pre-D0 sidecar could cite a
+# B13  Legacy `.flint/` upgrade safety. A pre-D0 syncer could cite a
 #      path under the reserved namespace; an upgraded one must neither
 #      eat it nor DELETE it for having fallen out of its scan.
 # ─────────────────────────────────────────────────────────────────────
@@ -1325,10 +1325,10 @@ b13_legacy_citation_survives_the_upgrade() {
   # The pre-D0 state, planted in BOTH places it lives: the object in the
   # bucket, and the citation in the tree's baseline — which is exactly
   # what the pre-flight reads (`legacy_cited`).
-  local want='legacy control data cited by a pre-D0 sidecar'
+  local want='legacy control data cited by a pre-D0 syncer'
   putobj "$P/files/.flint/legacy.txt" "$want"
   [ "$(objcat $P/files/.flint/legacy.txt)" = "$want" ] || { bad "the legacy object was not planted"; return 1; }
-  # The sidecar image is busybox: no jq. sed with a printf'd insert
+  # The syncer image is busybox: no jq. sed with a printf'd insert
   # line does the same job and keeps the fixture inside the image the
   # product actually ships.
   inpod verbs-a "printf '    \".flint/legacy.txt\": {\"etag\": \"legacy\", \"generation\": 1, \"size\": ${#want}, \"mtime_unix\": 1, \"version_id\": null},\n' > /tmp/b13.ins" > /dev/null
@@ -1345,7 +1345,7 @@ b13_legacy_citation_survives_the_upgrade() {
   local verbs reason
   verbs=$(printf '%s' "$c" | jq -r '.verbs|length')
   reason=$(printf '%s' "$c" | jq -r '.reason // empty')
-  [ "$verbs" = "0" ] || { bad "the upgraded sidecar advertises $verbs verb(s) over a legacy citation"; return 1; }
+  [ "$verbs" = "0" ] || { bad "the upgraded syncer advertises $verbs verb(s) over a legacy citation"; return 1; }
   [ "$reason" = "preexisting-flint-paths" ] || { bad "the warning record reads '$reason'"; return 1; }
   ok "the upgrade disabled the verbs and said why: reason=$reason"
 
@@ -1353,7 +1353,7 @@ b13_legacy_citation_survives_the_upgrade() {
   # scan that no longer SEES a cited path must not conclude it was
   # deleted.
   inpod verbs-a "printf more > $R/more.txt" > /dev/null
-  wait_seq_gt $P "$s0" 40 || { bad "the upgraded sidecar never published again"; return 1; }
+  wait_seq_gt $P "$s0" 40 || { bad "the upgraded syncer never published again"; return 1; }
   local s1
   s1=$(mseq $P)
   wait_seq_gt $P "$s1" 40 > /dev/null
@@ -1461,7 +1461,7 @@ b21_version_reclamation_returns_to_one_per_key() {
 
 # ─────────────────────────────────────────────────────────────────────
 # B12  Straggler non-destructiveness (§8 Q2's containment claim). A
-#      frozen sidecar thaws AFTER a takeover and writes. On a versioned
+#      frozen syncer thaws AFTER a takeover and writes. On a versioned
 #      bucket those writes land as UNCITED versions: nothing the
 #      successor cited is destroyed, and a pinned reader never sees them.
 # ─────────────────────────────────────────────────────────────────────
@@ -1583,7 +1583,7 @@ b12_straggler_is_contained_not_destructive() {
 
   # A pinned reader is unaffected — this is what the citation BUYS.
   #
-  # BOTH sidecars stop first. The successor still holds the lease, and a
+  # BOTH syncers stop first. The successor still holds the lease, and a
   # one-shot checkout claims before it reads, so leaving it up makes the
   # probe time out in `claim` and reports a lease queue as a corrupted
   # boundary.
@@ -1717,7 +1717,7 @@ b15_citation_is_atomic_across_kills() {
 
 # ─────────────────────────────────────────────────────────────────────
 # B17  Renewal under storm. A sentinel storm must never starve the
-#      heartbeat into letting a standby depose a live sidecar.
+#      heartbeat into letting a standby depose a live syncer.
 # ─────────────────────────────────────────────────────────────────────
 b17_renewal_survives_a_sentinel_storm() {
   local P=tenants/b17 R=/work/b17 RB=/work/b17b
@@ -1747,7 +1747,7 @@ b17_renewal_survives_a_sentinel_storm() {
   # floor, so renewals land every 30 s. Sampling at 3 s means an
   # observed gap of 30 s reads as 30-33; the bound that MATTERS is the
   # takeover threshold — six quiet polls at 10 s — so a gap comfortably
-  # under 60 s is what keeps a live sidecar from being deposed.
+  # under 60 s is what keeps a live syncer from being deposed.
   local i renews="" last_seen="" last_at=0 gap_max=0 now
   for i in $(seq 1 45); do
     local lm
@@ -1767,7 +1767,7 @@ b17_renewal_survives_a_sentinel_storm() {
   local n_renews=${#renews}
   local e1
   e1=$(epochdoc $P | jq -r '.epoch')
-  [ "$e1" = "$e0" ] || { bad "the epoch moved $e0 -> $e1 — the standby DEPOSED a live sidecar under storm"; return 1; }
+  [ "$e1" = "$e0" ] || { bad "the epoch moved $e0 -> $e1 — the standby DEPOSED a live syncer under storm"; return 1; }
 
   # The standby was genuinely watching.
   local sb
@@ -1777,7 +1777,7 @@ b17_renewal_survives_a_sentinel_storm() {
 
   [ "$n_renews" -ge 3 ] || { bad "only $n_renews renewals observed across ~135 s — the heartbeat starved under storm"; return 1; }
   [ "$gap_max" -gt 0 ] || { bad "no renewal gap could be measured — the oracle saw nothing move"; return 1; }
-  [ "$gap_max" -lt 60 ] || { bad "the widest renewal gap was ${gap_max}s, past the 60 s quiet-poll takeover window — a standby could have deposed a LIVE sidecar"; return 1; }
+  [ "$gap_max" -lt 60 ] || { bad "the widest renewal gap was ${gap_max}s, past the 60 s quiet-poll takeover window — a standby could have deposed a LIVE syncer"; return 1; }
   ok "$n_renews renewals, widest gap ${gap_max}s (30 s cadence, 60 s takeover window) while the storm ran"
   inpod verbs-a "pkill -f 'while \[ ' 2>/dev/null; true" > /dev/null
   killsync verbs-a; killsync verbs-b
@@ -1834,12 +1834,12 @@ b18_deposed_mid_pending_refuses() {
   local st ep
   st=$(ajq "$a" .status); ep=$(ajq "$a" '.observed_epoch // empty')
   [ "$st" = "refused-fenced" ] || { bad "the zombie's ack status is '$st'"; return 1; }
-  [ -n "$ep" ] || { bad "the refusal names no epoch — an agent cannot tell WHICH successor deposed its sidecar"; return 1; }
+  [ -n "$ep" ] || { bad "the refusal names no epoch — an agent cannot tell WHICH successor deposed its syncer"; return 1; }
   [ "$ep" = "$newepoch" ] || { bad "the refusal names epoch $ep, the successor holds $newepoch"; return 1; }
   local c
   c=$(caps verbs-s $RS)
-  [ "$(printf '%s' "$c" | jq -r '.state')" = "fenced" ] || { bad "capabilities still reads '$(printf '%s' "$c" | jq -r .state)' on a deposed sidecar"; return 1; }
-  [ "$(printf '%s' "$c" | jq -r '.verbs|length')" = "0" ] || { bad "a fenced sidecar still advertises verbs"; return 1; }
+  [ "$(printf '%s' "$c" | jq -r '.state')" = "fenced" ] || { bad "capabilities still reads '$(printf '%s' "$c" | jq -r .state)' on a deposed syncer"; return 1; }
+  [ "$(printf '%s' "$c" | jq -r '.verbs|length')" = "0" ] || { bad "a fenced syncer still advertises verbs"; return 1; }
   ok "owed ack settled refused-fenced (epoch ${ep:-unnamed}); capabilities: state=fenced, verbs=[]"
 
   # A FURTHER sentinel on the zombie is refused too, and the tree is
@@ -1950,7 +1950,7 @@ b23_dangling_citation_refuses_then_recovers() {
 # ─────────────────────────────────────────────────────────────────────
 b24_stripping_proxy_refuses_gated() {
   # THREE PREFIXES, one per arm, and that is load-bearing. A killed
-  # sidecar does not release its lease, so a following arm on the same
+  # syncer does not release its lease, so a following arm on the same
   # prefix sits in `claim` for the quiet-poll window — and "still
   # running after 12 s" is exactly what BLOCKED looks like. The first
   # draft of this leg reported the proxy arm as accepted on precisely
@@ -1965,7 +1965,7 @@ b24_stripping_proxy_refuses_gated() {
   }
 
   # THE ACCEPTED CONTROL FIRST: same knobs, straight at MinIO. A refusal
-  # suite whose accepted case never passes proves only that the sidecar
+  # suite whose accepted case never passes proves only that the syncer
   # says no to everything.
   inpod verbs-a "rm -rf $RA && mkdir -p $RA" > /dev/null
   sy_bg verbs-a $PA $RA "$GATED_TICK" /tmp/b24ok.log run
@@ -2099,7 +2099,7 @@ b14_mixed_fleet_is_detectable_both_ways() {
     return 1
   }
 
-  # ── (a) an old sidecar leaves no marker, and PUBLISHES the control
+  # ── (a) an old syncer leaves no marker, and PUBLISHES the control
   #        namespace. Both halves on isolated prefixes.
   CONT=sync
   inpod verbs-old "rm -rf $RA && mkdir -p $RA/.flint" > /dev/null
@@ -2163,15 +2163,15 @@ b14_mixed_fleet_is_detectable_both_ways() {
   local c2 boot2
   c2=$(caps verbs-old $RC)
   boot2=$(printf '%s' "$c2" | jq -c '.boot')
-  [ -n "$c2" ] || { bad "the rollback DELETED the marker — an agent would see no sidecar rather than a stale one"; CONT=$restore; return 1; }
+  [ -n "$c2" ] || { bad "the rollback DELETED the marker — an agent would see no syncer rather than a stale one"; CONT=$restore; return 1; }
   [ "$boot2" = "$boot1" ] || { bad "the boot stamp moved across a downgrade ($boot1 -> $boot2) — the marker would look freshly written"; CONT=$restore; return 1; }
   # The safety catch painted green: a live-looking marker over a binary
   # that cannot honor a sentinel. The tell is the UNCHANGED stamp across
   # an observed restart, which is what the leg just demonstrated.
   ok "downgrade over a live tree: the marker survives with an UNCHANGED boot stamp — the agent's rollback tell"
   local ver
-  ver=$(printf '%s' "$c2" | jq -r '.sidecar_version')
-  ok "the stale marker still advertises verbs from sidecar $ver, over a binary that has none — this is why the stamp is the tell"
+  ver=$(printf '%s' "$c2" | jq -r '.syncer_version')
+  ok "the stale marker still advertises verbs from syncer $ver, over a binary that has none — this is why the stamp is the tell"
   CONT=$restore
   return 0
 }
@@ -2247,7 +2247,7 @@ b12b_straggler_frozen_in_the_reaper_destroys_nothing() {
   touchp verbs-s $RS publish '{"nonce":"b12r-gen2"}'
 
   # THE FREEZE HAS TO LAND INSIDE THE REAPER. Two conditions, and both
-  # are read from the bucket, never from the sidecar's own log:
+  # are read from the bucket, never from the syncer's own log:
   #   (i)  the manifest CAS has landed   ⇒ seq advanced past s0
   #   (ii) the sweep has NOT finished    ⇒ a0300's superseded version
   #        is still there

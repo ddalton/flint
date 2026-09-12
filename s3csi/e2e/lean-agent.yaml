@@ -3,7 +3,7 @@
 ---
 # Created AFTER the seeder is deleted. The init container is the new
 # assertion of S11: the checkout gate must hold for init containers
-# too (the appended sidecar of the webhook design never gated them).
+# too (the appended syncer of the webhook design never gated them).
 apiVersion: v1
 kind: Pod
 metadata:

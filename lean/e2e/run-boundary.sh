@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# RETIRED PATH (2026-09-03): the lean webhook and sidecar injector are
+# RETIRED PATH (2026-09-03): the lean webhook and syncer injector are
 # gone — a workspace reaches a pod as ONE csi: volume served by the
 # s3.csi.chert.us node driver (docs/plans/csi-node-mount-design.md §3.5).
 # This rig labels pods and/or execs into an injected `flint-sync`
@@ -160,7 +160,7 @@ $K wait --for=condition=Ready pod/agent-good --timeout=300s > /dev/null \
 # No poke here on purpose: this leg's claim is that the operator picks
 # the echo up ON ITS OWN CADENCE. Two observation intervals of slack.
 wait_cond good BoundaryModeActive status True 130 \
-  || fail "the running sidecar never echoed its mode (reason $(cond good BoundaryModeActive reason))"
+  || fail "the running syncer never echoed its mode (reason $(cond good BoundaryModeActive reason))"
 SEQ=$($K get flintleanworkspace good -o jsonpath='{.status.citedSeq}')
 [ -n "$SEQ" ] || fail "status.citedSeq is empty — the echo did not reach status"
 ok "B32 the lease-heartbeat echo reaches status (citedSeq=$SEQ)"
@@ -177,8 +177,8 @@ wait_cond good BoundaryModeActive status True 130 || note "mode did not settle b
 # The message must name the BINARY, not just disagree — an operator has
 # to know which side to move.
 case "$(cond good BoundaryModeActive message)" in
-  *sidecar*) ;;
-  *) note "the mismatch message does not name the sidecar version" ;;
+  *syncer*) ;;
+  *) note "the mismatch message does not name the syncer version" ;;
 esac
 
 # ── Phase 5: the gateway door (the inbox document's two fields) ──────
@@ -217,7 +217,7 @@ case "$CARRIED" in
 esac
 HASH_AFTER=$($K exec agent-good -c agent -- sh -c 'ls -la /workspace | md5sum')
 [ "$HASH_BEFORE" = "$HASH_AFTER" ] \
-  || fail "the sidecar MUTATED the tree on a remote's say-so (D14 violated)"
+  || fail "the syncer MUTATED the tree on a remote's say-so (D14 violated)"
 ok "B35 a gateway sync request is carried, and the tree is byte-identical"
 
 # ── Phase 5: the UDS door, and that it shares ONE consume path ───────

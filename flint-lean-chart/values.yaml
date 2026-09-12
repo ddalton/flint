@@ -26,7 +26,7 @@ image:
   ref: ""
   pullPolicy: IfNotPresent
 
-# There is no sidecar image here any more: a workspace reaches a pod
+# There is no syncer image here any more: a workspace reaches a pod
 # through the s3.csi.chert.us CSI driver (flint-s3-csi-chart), whose
 # `workers.leanImage` is the flint-sync image every lean volume runs.
 # This chart is the CRD and the thin controller (claim, posture, sweep).
@@ -49,7 +49,7 @@ resources:
 
 # The operator principal: bucket-admin ops (posture probes, the
 # bucket-wide MPU sweep) run as THIS identity, never as a workspace's
-# scoped sidecar credentials. Point it at a Secret with AWS_* keys
+# scoped syncer credentials. Point it at a Secret with AWS_* keys
 # verbatim, or leave empty to use the pod's ambient chain (IRSA, etc).
 operatorCredentialsSecret: ""
 endpoint: ""            # S3 endpoint override for the operator (MinIO rigs)
@@ -96,7 +96,7 @@ metrics:
   # flint WORKERS run in — `flint-workers` unless the node plugin was
   # given FLINT_S3CSI_WORKER_NAMESPACE — and NOT your agent pods'
   # namespaces, which is what this said before fcac038f moved the
-  # metrics endpoint off the injected sidecar and onto the worker pod.
+  # metrics endpoint off the injected syncer and onto the worker pod.
   # Empty ⇒ no policy is created and the port is reachable from anywhere
   # the CNI allows.
   networkPolicyNamespaces: []

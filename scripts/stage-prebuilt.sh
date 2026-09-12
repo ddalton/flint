@@ -45,7 +45,7 @@ dest="$crate/docker/prebuilt"
 BINS="csi-driver flint-nfs-server flint-pnfs-mds flint-pnfs-ds flint-lite-operator flint-hub-gateway flint-lean-operator flint-s3-csi-node flint-s3-broker"
 
 # A LEAN-SCOPED release (the 1.38.0 shape: only the flint-lean chart and
-# the two images it pulls) republishes the operator image and the sidecar
+# the two images it pulls) republishes the operator image and the syncer
 # image, and nothing else. Demanding csi-driver and the pNFS binaries be
 # fresh for that is a refusal with no safety content — and it is almost
 # certainly why the lean binaries were hand-staged in the first place,
@@ -84,7 +84,7 @@ case "$SCOPE" in
     *)    echo "usage: stage-prebuilt.sh [all|lean|s3csi|forge|lite]" >&2; exit 2 ;;
 esac
 
-# Binaries from the LEAN crate (lean/sidecar) — a separate crate with a
+# Binaries from the LEAN crate (lean/syncer) — a separate crate with a
 # separate target dir, which is why they could not simply join $BINS.
 # `flint-sync` is the image every workspace pod actually RUNS, and it was
 # published entirely by hand: absent from this script AND from
@@ -144,10 +144,10 @@ esac
 echo "newest source: $(date -r "$src_mtime" '+%Y-%m-%d %H:%M:%S')  ${src_name#$crate/}"
 
 # The lean crate has its OWN newest-source clock, and it must include
-# crates/flint-store: the sidecar links it, so a store edit changes the
-# binary with no lean/sidecar/src file touched at all. That is exactly
+# crates/flint-store: the syncer links it, so a store edit changes the
+# binary with no lean/syncer/src file touched at all. That is exactly
 # the Cargo.lock argument above, one crate further out.
-lean_crate=$(cd "$here/../lean/sidecar" && pwd)
+lean_crate=$(cd "$here/../lean/syncer" && pwd)
 store_crate=$(cd "$here/../crates/flint-store" && pwd)
 # There is no workspace Cargo.lock at the repo root — the lean crate
 # carries its own. Naming a path that does not exist made `find` fail,
@@ -240,7 +240,7 @@ for arch_pair in "x86_64:amd64" "aarch64:arm64"; do
         src="$lean_crate/target/$triple/release/$b"
         if [ ! -f "$src" ]; then
             echo "  ✗ MISSING $arch/$b — build it before staging" >&2
-            echo "            (cd lean/sidecar && cargo zigbuild --release --features s3 \\" >&2
+            echo "            (cd lean/syncer && cargo zigbuild --release --features s3 \\" >&2
             echo "               --target $triple)" >&2
             stale=1; continue
         fi

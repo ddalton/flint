@@ -31,17 +31,17 @@ echo "building for $ARCH ($TRIPLE), tag $TAG ($OUT)"
 # flint-sync from THIS checkout. Without it the lean worker image is
 # built FROM a pinned published flint-sync (Dockerfile.s3worker-lean's
 # SYNC_IMAGE default), so every lean leg — S11 to S14 — measures a
-# RELEASED syncer and no change to lean/sidecar is visible to the drill
+# RELEASED syncer and no change to lean/syncer is visible to the drill
 # at all. That was true until 2026-09-03 and is exactly the kind of
 # silent staleness the stage-prebuilt guard exists to prevent elsewhere.
-( cd lean/sidecar && cargo zigbuild --release --target "$TRIPLE" --features s3 --bin flint-sync )
+( cd lean/syncer && cargo zigbuild --release --target "$TRIPLE" --features s3 --bin flint-sync )
 
 STAGE=spdk-csi-driver/docker/prebuilt/$ARCH
 mkdir -p "$STAGE"
 cp spdk-csi-driver/target/$TRIPLE/release/flint-s3-csi-node "$STAGE/"
 cp spdk-csi-driver/target/$TRIPLE/release/flint-s3-broker "$STAGE/"
 cp crates/flint-s3-worker/target/$TRIPLE/release/flint-s3-worker "$STAGE/"
-cp lean/sidecar/target/$TRIPLE/release/flint-sync "$STAGE/"
+cp lean/syncer/target/$TRIPLE/release/flint-sync "$STAGE/"
 ls -la "$STAGE"/flint-s3-*
 
 docker buildx build --platform linux/$ARCH $OUT \

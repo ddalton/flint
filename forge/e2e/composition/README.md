@@ -27,7 +27,7 @@ Needs Docker, `git`, and the two binaries:
 
 ```sh
 cargo build --manifest-path forge/syncer/Cargo.toml --features s3
-cargo build --manifest-path lean/sidecar/Cargo.toml --features s3 --bin flint-sync
+cargo build --manifest-path lean/syncer/Cargo.toml --features s3 --bin flint-sync
 ```
 
 ## C8 is forge against forge

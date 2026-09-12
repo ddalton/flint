@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# RETIRED PATH (2026-09-03): the lean webhook and sidecar injector are
+# RETIRED PATH (2026-09-03): the lean webhook and syncer injector are
 # gone — a workspace reaches a pod as ONE csi: volume served by the
 # s3.csi.chert.us node driver (docs/plans/csi-node-mount-design.md §3.5).
 # This rig labels pods and/or execs into an injected `flint-sync`
@@ -12,7 +12,7 @@
 # The CHART e2e: install flint-lean via helm (not raw manifests) and
 # re-run the same acceptance. A chart that renders is not a chart that
 # works — this leg is what proves the templates wire the operator, its
-# RBAC, the webhook Service and the sidecar image reference correctly.
+# RBAC, the webhook Service and the syncer image reference correctly.
 #
 # Prereqs: kind cluster `flint-lean-chart` with flint-sync:e2e and
 # flint-lean-operator:e2e loaded.

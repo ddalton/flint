@@ -133,7 +133,7 @@ wait_key() { # <prefix> <relative key> <iters>
   return 1
 }
 
-# The oracle reads the bucket DIRECTLY (mc), never through the sidecar's
+# The oracle reads the bucket DIRECTLY (mc), never through the syncer's
 # own code — otherwise one bug can hide another.
 mcx()      { $K -n flint-system exec mc -- "$@" 2>/dev/null; }
 objcat()   { mcx mc cat "m/$BUCKET/$1"; }
@@ -469,7 +469,7 @@ c5_hitl_conflict() {
 
 # ─────────────────────────────────────────────────────────────────────
 # C6  Per-request epoch validation — P5's teeth.
-#     Claim: a stale epoch is refused on EVERY sidecar-facing verb, and
+#     Claim: a stale epoch is refused on EVERY syncer-facing verb, and
 #     the current epoch is admitted (so the 403s are the check firing,
 #     not the endpoint being broken).
 # ─────────────────────────────────────────────────────────────────────
@@ -586,12 +586,12 @@ c8_gateway_outage() {
   inpod chaos-a "echo written-during-outage > $R/outage.txt; echo w" > /dev/null
   local out
   out=$(sy chaos-a $P $R barrier)
-  has "up=1" "$out" || { bad "the sidecar could not publish during the outage: $out"; return 1; }
+  has "up=1" "$out" || { bad "the syncer could not publish during the outage: $out"; return 1; }
   local body
   body=$(objcat "$P/files/outage.txt")
   [ "$body" = "written-during-outage" ] || { bad "outage publish body is '$body'"; return 1; }
   manif "$P" | jq -e '.entries["outage.txt"]' > /dev/null || { bad "outage publish not cited"; return 1; }
-  ok "the sidecar published and cited a new file WHILE the gateway was down"
+  ok "the syncer published and cited a new file WHILE the gateway was down"
   note "a GATEWAY outage costs only the fourth of plan §2.2's four stated effects: publishing, checkout and sync are untouched. The shipped flint-sync writes the manifest/window/inbox cells DIRECTLY to the store (barrier.rs:257,261,384,467) and links no HTTP client at all, so the gateway is not on its write path. C12 drills the other half — the proxy — and gets all four. Gateway and proxy are separate failure domains; plan §2.2 states them as one line ('gateway/proxy down'), and Phase 3's 'assert ALL FOUR effects' is a PROXY criterion."
 
   $K -n flint-system scale deploy/lean-gateway --replicas=1 > /dev/null
@@ -616,18 +616,18 @@ c9_occupancy_lock() {
   mkfiles chaos-a $R $N g > /dev/null
   sy_bg chaos-a $P $R /work/c9.log barrier
   # The contended window has to be OBSERVED open, not assumed: the
-  # second sidecar must start while the first is demonstrably mid-barrier.
+  # second syncer must start while the first is demonstrably mid-barrier.
   wait_key "$P" "g0200.txt" 150 || { bad "the first barrier never got going"; return 1; }
   local second rc
   second=$(sy chaos-a $P $R barrier); rc=$?
   [ "$rc" -ne 0 ] || { bad "a SECOND flint-sync over one tree exited 0 — the occupancy lock is gone"; return 1; }
   has "another flint-sync already holds this workspace" "$second" \
     || { bad "second run failed for the wrong reason: $second"; return 1; }
-  ok "second sidecar over one tree refused: $(printf '%s' "$second" | grep 'another flint-sync' | head -1)"
+  ok "second syncer over one tree refused: $(printf '%s' "$second" | grep 'another flint-sync' | head -1)"
 
   await_exit chaos-a flint-sync 90 || { bad "the first barrier never exited"; return 1; }
   # ANTI-VACUITY: the lock must RELEASE, or this leg would also pass on
-  # a sidecar that can never run twice at all.
+  # a syncer that can never run twice at all.
   local third
   third=$(sy chaos-a $P $R barrier) || { bad "the lock never released: $third"; return 1; }
   ok "lock released after the first exited: $(printf '%s' "$third" | tail -1)"
@@ -742,7 +742,7 @@ c12_proxy_outage() {
   [ "$rc" -ne 0 ] || { bad "the barrier SUCCEEDED with the proxy unreachable: $out"; return 1; }
   ok "publish FAILS with the proxy unreachable (exit $rc)"
 
-  # The agent's own work must survive its sidecar failing to publish.
+  # The agent's own work must survive its syncer failing to publish.
   local body
   body=$(inpod chaos-a "cat $R/pending.txt")
   [ "$body" = "unpublished" ] || { bad "the failed barrier damaged the local tree: '$body'"; return 1; }
@@ -765,7 +765,7 @@ c12_proxy_outage() {
   tree=$(inpod chaos-a "cd $R2 && ls | sort | tr '\n' ' '")
   [ "$tree" = "base.txt pending.txt " ] || { bad "recovered checkout tree is '$tree'"; return 1; }
   ok "both recover with the proxy back — publish and checkout, same subtree"
-  note "the four effects in plan §2.2 are PROXY effects, not gateway effects: proxy unreachable ⇒ publish fails, checkout wedges, sync dead, HITL fails; gateway down (C8) ⇒ only HITL fails. Worth splitting in the plan, and it locates P5 enforcement at the PROXY — where the sidecar's writes actually go, and where the epoch is already on the wire in GenerationStamps."
+  note "the four effects in plan §2.2 are PROXY effects, not gateway effects: proxy unreachable ⇒ publish fails, checkout wedges, sync dead, HITL fails; gateway down (C8) ⇒ only HITL fails. Worth splitting in the plan, and it locates P5 enforcement at the PROXY — where the syncer's writes actually go, and where the epoch is already on the wire in GenerationStamps."
 }
 
 # ─────────────────────────────────────────────────────────────────────

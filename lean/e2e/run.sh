@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# RETIRED PATH (2026-09-03): the lean webhook and sidecar injector are
+# RETIRED PATH (2026-09-03): the lean webhook and syncer injector are
 # gone — a workspace reaches a pod as ONE csi: volume served by the
 # s3.csi.chert.us node driver (docs/plans/csi-node-mount-design.md §3.5).
 # This rig and its siblings (run-agent.sh, run-boundary.sh,
@@ -49,7 +49,7 @@ ok "workspace $PHASE"
 
 # 2. The webhook injected the NATIVE sidecar.
 INJ=$($K get pod agent-1 -o jsonpath='{.spec.initContainers[0].name}/{.spec.initContainers[0].restartPolicy}')
-[ "$INJ" = "flint-sync/Always" ] || fail "sidecar not injected as a native sidecar (got '$INJ')"
+[ "$INJ" = "flint-sync/Always" ] || fail "syncer not injected as a native sidecar (got '$INJ')"
 ok "native sidecar injected"
 
 # 3. The gate: the pod goes Ready, and the agent's own first command

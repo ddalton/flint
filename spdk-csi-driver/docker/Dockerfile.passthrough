@@ -40,7 +40,7 @@ RUN set -eux; \
     rm -f /tmp/mount-s3.deb; \
     rm -rf /var/lib/apt/lists/*; \
     # allow_other lets the APP container's uid traverse a mount made by
-    # root in the sidecar. Without it the mount exists and everything
+    # root in the MOUNTER. Without it the mount exists and everything
     # in it is EACCES to the workload, which reads as a bucket policy
     # problem and is not one.
     echo user_allow_other >> /etc/fuse.conf; \

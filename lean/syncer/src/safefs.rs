@@ -1,17 +1,17 @@
 //! Writes that cannot be redirected by the process on the other side of
 //! the mount.
 //!
-//! Every durable write this sidecar makes is write-temp-then-rename, and
+//! Every durable write this syncer makes is write-temp-then-rename, and
 //! every one of those temp files lives in a directory the APP owns: the
 //! workspace tree itself, `.flint/` (the agent drops its sentinels
 //! there by design), and the `.flint-sync` state dir. `contained_path`
 //! validates the rename TARGET — it never sees the temp sibling, which
 //! is computed afterwards — so `fs::write` on a planted
 //! `<name>.flint-sync-tmp` symlink followed it and wrote remote-supplied
-//! bytes wherever it pointed, inside the credential-holding sidecar's
+//! bytes wherever it pointed, inside the credential-holding syncer's
 //! own mount namespace. The scanner skips symlinks, so the plant is
 //! invisible; `.flint/remote.seq` is rewritten every tick, so the
-//! sidecar's own heartbeat is a sufficient trigger.
+//! syncer's own heartbeat is a sufficient trigger.
 //!
 //! The rule is therefore not "validate the target" but **every path the
 //! write touches**:

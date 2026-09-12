@@ -8,7 +8,7 @@
 //! CSI volume — `driver: s3.csi.chert.us`, `volumeAttributes:
 //! { chert.us/workspace: <name> }` — and kubelet's NodePublishVolume is
 //! what delivers the tree. Before v1.45.0 a mutating webhook injected a
-//! sidecar for pods carrying the label `chert.us/lean-workspace`; that
+//! syncer for pods carrying the label `chert.us/lean-workspace`; that
 //! webhook and its label are gone (`fcac038f`).
 
 use kube::{CustomResource, KubeSchema};
@@ -55,7 +55,7 @@ pub struct FlintLeanWorkspaceSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
 
-    /// Secret with the SIDECAR's proxy credentials, keys AWS_* VERBATIM
+    /// Secret with the SYNCER's proxy credentials, keys AWS_* VERBATIM
     /// (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, ...). The
     /// OPERATOR never uses this — bucket-admin ops run under the
     /// operator principal (plan §2.4 principal split).
@@ -99,7 +99,7 @@ pub struct FlintLeanWorkspaceSpec {
     /// `fanout` bounds how MANY objects are fetched at once but not how
     /// big they are, and each is held whole in RAM before it reaches
     /// disk, so peak RSS is the product of the two. Sized against the
-    /// sidecar's memory limit, not its CPU.
+    /// syncer's memory limit, not its CPU.
     #[serde(default = "default_fetch_inflight_mb")]
     pub fetch_inflight_mb: u64,
 
@@ -120,11 +120,20 @@ pub struct FlintLeanWorkspaceSpec {
     #[serde(default = "default_mount_path")]
     pub mount_path: String,
 
-    /// Sidecar image override; None = the operator's default.
+    /// Syncer image override, and DEAD — it has no reader.
+    ///
+    /// The webhook that read it went in v1.45.0. The worker image now
+    /// comes from `FLINT_S3CSI_LEAN_IMAGE` on the node plugin
+    /// (`s3csi/node.rs`), which the flint-s3-csi chart pins, and the
+    /// only construction of `WorkerInputs.image` takes it from there.
+    /// Setting this on a CR changes nothing. Kept rather than removed
+    /// so a spec carrying it still parses — the node plugin REFUSES a
+    /// spec it cannot parse — but it should go, with the same
+    /// treatment `FlintPassthroughMount.spec.image` needs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
 
-    /// Expected inventory, used to DERIVE the sidecar's startupProbe
+    /// Expected inventory, used to DERIVE the syncer's startupProbe
     /// budget (plan §2.4: probes are derived, never fleet constants —
     /// the hub's 600 s default killed a 20 GiB checkout at the only
     /// measured rate). Unset ⇒ the budgets assume the caps.
@@ -353,18 +362,18 @@ pub struct FlintLeanWorkspaceStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Vec<LeanCondition>>,
 
-    // ── observed, from the live sidecar's lease-heartbeat echo ───────
+    // ── observed, from the live syncer's lease-heartbeat echo ───────
     //    Every field below reports what the RUNNING binary says, never
     //    what the spec asked for. That distinction is the whole point:
-    //    an old sidecar reads a FIXED env list, so a `gated` spec
+    //    an old syncer reads a FIXED env list, so a `gated` spec
     //    reaching a pre-boundary binary is ignored in silence.
-    /// The mode the sidecar is actually running.
+    /// The mode the syncer is actually running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_boundary_mode: Option<String>,
-    /// The sidecar binary's version — the mixed-fleet tell.
+    /// The syncer binary's version — the mixed-fleet tell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observed_sidecar_version: Option<String>,
-    /// The last manifest seq the sidecar cited.
+    pub observed_syncer_version: Option<String>,
+    /// The last manifest seq the syncer cited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cited_seq: Option<u64>,
     /// Seconds since that citation — gated mode's coherence lag, as a

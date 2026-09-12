@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# RETIRED PATH (2026-09-03): the lean webhook and sidecar injector are
+# RETIRED PATH (2026-09-03): the lean webhook and syncer injector are
 # gone — a workspace reaches a pod as ONE csi: volume served by the
 # s3.csi.chert.us node driver (docs/plans/csi-node-mount-design.md §3.5).
 # This rig labels pods and/or execs into an injected `flint-sync`
@@ -281,7 +281,7 @@ EOF
 )
   [ "$verdict" = "CLEAN" ] || {
     bad "the author's spec is not name-only: $verdict"; return 1; }
-  ok "the author's spec declares one label and nothing else: no volume, mount, env, envFrom or sidecar"
+  ok "the author's spec declares one label and nothing else: no volume, mount, env, envFrom or syncer"
 
   [ "$(jpath agent-1 '{.spec.initContainers[0].name}/{.spec.initContainers[0].restartPolicy}')" \
       = "flint-sync/Always" ] || { bad "no native sidecar in the live spec"; return 1; }
@@ -290,29 +290,29 @@ EOF
   local ep grace
   ep=$(jpath agent-1 '{.spec.initContainers[0].env[?(@.name=="FLINT_SYNC_ENDPOINT")].value}')
   [ "$ep" = "http://minio.flint-system.svc:9000" ] || {
-    bad "the sidecar's endpoint is '$ep'"; return 1; }
+    bad "the syncer's endpoint is '$ep'"; return 1; }
   grace=$(jpath agent-1 '{.spec.terminationGracePeriodSeconds}')
   [ -n "$grace" ] && [ "$grace" -gt 30 ] || {
     bad "grace is '$grace' — the drain was left in the 30 s default nobody chose"; return 1; }
-  ok "the live spec carries all of it: sidecar, mount, endpoint, and a ${grace}s derived grace"
+  ok "the live spec carries all of it: syncer, mount, endpoint, and a ${grace}s derived grace"
   # Surfaced, not asserted: for cadence/hybrid the derivation is
   # floorSecs + retry + slack, so a long RPO buys a long CEILING. It
   # costs nothing on a spot reclaim (the node is gone at the notice
   # either way) but it is the whole wait on a `kubectl delete` or a
-  # rollout, and native-sidecar ordering spends the AGENT's share of it
+  # rollout, and native-syncer ordering spends the AGENT's share of it
   # first — a container whose PID 1 is a shell running `sleep` never
   # sees SIGTERM and sits out the entire budget before the drain is
   # asked for anything. Both agent pods here trap TERM for that reason.
-  [ "$grace" -le 300 ] || note "the derived grace is ${grace}s (floorSecs=$($K -n $NS get flintleanworkspace proj -o jsonpath='{.spec.floorSecs}') + retry + slack); an agent that ignores SIGTERM burns all of it before the sidecar drains"
+  [ "$grace" -le 300 ] || note "the derived grace is ${grace}s (floorSecs=$($K -n $NS get flintleanworkspace proj -o jsonpath='{.spec.floorSecs}') + retry + slack); an agent that ignores SIGTERM burns all of it before the syncer drains"
 }
 
 # ─────────────────────────────────────────────────────────────────────
 # A4  No credential reaches the agent container — checked in the
-#     RUNNING process's environment, not just the spec. The sidecar's
+#     RUNNING process's environment, not just the spec. The syncer's
 #     own envFrom is asserted non-empty in the same breath, or "nobody
 #     has credentials" would pass this leg.
 # ─────────────────────────────────────────────────────────────────────
-a4_credentials_stop_at_the_sidecar() {
+a4_credentials_stop_at_the_syncer() {
   require_pod agent-1 || return 1
   local awsn flintn efrom
   awsn=$(tmpf agent-1 aws-count)
@@ -323,9 +323,9 @@ a4_credentials_stop_at_the_sidecar() {
     bad "the agent container has an envFrom"; return 1; }
   efrom=$(jpath agent-1 '{.spec.initContainers[0].envFrom[0].secretRef.name}')
   [ "$efrom" = "lean-proxy-creds" ] || {
-    bad "the sidecar's envFrom is '$efrom' — if nothing has credentials this leg proves nothing"
+    bad "the syncer's envFrom is '$efrom' — if nothing has credentials this leg proves nothing"
     return 1; }
-  ok "0 AWS_* and 0 FLINT_SYNC_* in the live agent process; the sidecar holds $efrom alone"
+  ok "0 AWS_* and 0 FLINT_SYNC_* in the live agent process; the syncer holds $efrom alone"
 }
 
 # ─────────────────────────────────────────────────────────────────────
@@ -485,7 +485,7 @@ run_leg() { leg "$1"; shift; "$@" && echo "  PASS" || echo "  FAIL"; }
 run_leg "A1 a job-shaped agent seeds the project at a declared boundary" a1_seed
 run_leg "A2 a cold agent finds the whole project already in its filesystem" a2_cold_agent_gets_the_project
 run_leg "A3 the pod declares a name, the operator supplies the rest" a3_the_pod_declares_a_name_not_an_endpoint
-run_leg "A4 credentials stop at the sidecar" a4_credentials_stop_at_the_sidecar
+run_leg "A4 credentials stop at the syncer" a4_credentials_stop_at_the_syncer
 run_leg "A5 the agent declares a boundary and is answered" a5_the_agent_declares_a_boundary
 run_leg "A6 a foreign edit reaches the running agent" a6_a_foreign_edit_reaches_the_running_agent
 run_leg "A7 two teams, one bucket, no leakage" a7_tenancy

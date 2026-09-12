@@ -28,7 +28,7 @@ relative to the repository root.
 | **SPDK block path** (disk product) | `bdev_get_iostat` RPC, called by `spdk_dashboard_backend_minimal.rs` `fetch_bdev_stats` | **Yes at the source** (`bytes_read`, `bytes_written` per bdev) but the backend's `BdevStats` keeps only `read_iops`, `write_iops`, latency; bytes are dropped | IOPS only, derived from the previous sample in `iostat_history` | Pull | n/a (same origin via nginx `/api/`) |
 | **Forge syncer** (git server), `forge/syncer` | `GET /status` on `FLINT_FORGE_STATUS_ADDR` (default 127.0.0.1:9848), hand-rolled HTTP in `server.rs`; document in `status.rs` | **No.** `repo.{refs,packs,snapshotSeq}`, `activity.{lastActivityUnix,idleSecs}`, `phase`, `epoch`, `rpoClean`, `fenced` | No | Pull. `Facts` are SNAPSHOTTED by `publish()` at phase changes and batch ends — not live | None |
 | Forge door (git HTTP transport, port 8090) | `flint-forge-chart/templates/door.yaml` | No accounting | — | — | — |
-| **Lean sidecar**, `lean/sidecar` | `GET /metrics` (opt-in, `FLINT_SYNC_METRICS_PORT` default 9847), Prometheus text rendered from `Gauges` only (`metrics.rs`, D15) | **No cumulative bytes.** Gauges: `flint_lean_staged_uncited_bytes/objects`, `rpo_seconds`, `visibility_lag_seconds`, `last_boundary_seq`, `sentinel_budget_remaining`, … | No | Pull; `gauges.json` is rewritten on boundary events, not every heartbeat | None |
+| **Lean syncer**, `lean/syncer` | `GET /metrics` (opt-in, `FLINT_SYNC_METRICS_PORT` default 9847), Prometheus text rendered from `Gauges` only (`metrics.rs`, D15) | **No cumulative bytes.** Gauges: `flint_lean_staged_uncited_bytes/objects`, `rpo_seconds`, `visibility_lag_seconds`, `last_boundary_seq`, `sentinel_budget_remaining`, … | No | Pull; `gauges.json` is rewritten on boundary events, not every heartbeat | None |
 | **Passthrough** (`s3csi`, Mountpoint) | none in our code; Mountpoint's own metrics are not wired | No | No | — | — |
 | **`flint-store::ObjectStore`** (`crates/flint-store`) | the trait every S3 byte from hub, lean, forge and the operator passes through (`S3Store`, `MemoryStore`) | **No accounting today.** This is the one choke point that covers every "→ S3" edge at once | — | — | — |
 | **Dashboard** (`spdk-dashboard`) | React + tanstack-query; `useDashboardData` polls at `BASE_POLL_MS`, events every 10 s; nginx proxies `/api/` → backend :8080 | — | — | Pull. No SSE or WebSocket anywhere in the repo | — |
@@ -37,7 +37,7 @@ Two details that shape the design:
 
 - The only production `ObjectStore` implementations are `S3Store` and
   `MemoryStore`. The wrappers that exist are test doubles in
-  `lean/sidecar/src/tests.rs` (`VersionStripping`, `AuthRefusing`, …) and
+  `lean/syncer/src/tests.rs` (`VersionStripping`, `AuthRefusing`, …) and
   they do **not** forward the trait's defaulted methods (`presign_get`,
   `presign_put`, `lifecycle_rules`, `ensure_noncurrent_retention`,
   `list_versions`, …). A production wrapper that copied that shape would

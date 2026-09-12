@@ -4,7 +4,7 @@
 //!
 //! **Forge writes no manifest.** It materialises the tree and then runs
 //! the shipped `flint-sync barrier` over it — the same binary a lean
-//! sidecar runs, with lean's own ordering (upload, CAS, deletes LAST).
+//! syncer runs, with lean's own ordering (upload, CAS, deletes LAST).
 //! The first draft of the design described that ordering as "PUT the
 //! files, delete what is gone, then write the manifest", which is
 //! exactly `LeanDanglingOrder`, the mutation lean's model refutes: a

@@ -40,7 +40,7 @@ echo "building forge for $ARCH ($TRIPLE), tag $TAG"
 # under the two hook names. The git image's HTTP front is the gitcgi
 # bin (feature `gitcgi`: hyper, no S3).
 ( cd forge/syncer   && cargo zigbuild --release --target "$TRIPLE" --features s3,gitcgi --bin flint-forge-syncer --bin flint-forge-gitcgi )
-( cd lean/sidecar   && cargo zigbuild --release --target "$TRIPLE" --features s3 --bin flint-sync )
+( cd lean/syncer   && cargo zigbuild --release --target "$TRIPLE" --features s3 --bin flint-sync )
 
 STAGE=spdk-csi-driver/docker/prebuilt/$ARCH
 mkdir -p "$STAGE"
@@ -48,7 +48,7 @@ cp spdk-csi-driver/target/$TRIPLE/release/flint-forge-operator "$STAGE/"
 cp spdk-csi-driver/target/$TRIPLE/release/flint-hub-gateway    "$STAGE/"
 cp forge/syncer/target/$TRIPLE/release/flint-forge-syncer      "$STAGE/"
 cp forge/syncer/target/$TRIPLE/release/flint-forge-gitcgi      "$STAGE/"
-cp lean/sidecar/target/$TRIPLE/release/flint-sync             "$STAGE/"
+cp lean/syncer/target/$TRIPLE/release/flint-sync             "$STAGE/"
 ls -la "$STAGE"/flint-forge-* "$STAGE"/flint-hub-gateway "$STAGE"/flint-sync
 
 # Context is spdk-csi-driver: the forge-git Dockerfile COPYs

@@ -99,7 +99,7 @@ drill resets both halves of the state — fresh emptyDirs and an emptied
 subtree — so it is re-runnable.
 
 The oracle reads the bucket **directly** through `mc`, never through
-the sidecar's own code, so one bug cannot hide another.
+the syncer's own code, so one bug cannot hide another.
 
 ## The legs
 
@@ -110,10 +110,10 @@ the sidecar's own code, so one bug cannot hide another.
 | C3 | A deposed straggler's manifest CAS never lands (`Inv_NoStragglerInstall`) | straggler frozen mid-upload; successor really rotated |
 | C4 | A container restart never re-materializes (`Inv_NoResurrection`); a delete needs **two** consecutive absent scans | `restartCount` incremented; barrier 1 must *not* delete |
 | C5 | HITL write vs dirty local file: both versions stay recoverable — the bytes, not just the reference (`Inv_HITLDurable`) | the two versions must actually differ |
-| C6 | Per-request epoch validation refuses a stale epoch on every sidecar-facing verb | the same verbs at the *current* epoch must succeed |
+| C6 | Per-request epoch validation refuses a stale epoch on every syncer-facing verb | the same verbs at the *current* epoch must succeed |
 | C7 | An open barrier window refuses HITL writes with 409 + `Retry-After`, and releases them after | the same write must succeed once cleared |
 | C8 | The gateway is control plane only — agents keep publishing through an outage | HITL write must succeed before and after, fail during |
-| C9 | The state-dir occupancy lock refuses a second sidecar over one tree | the lock must *release* afterwards |
+| C9 | The state-dir occupancy lock refuses a second syncer over one tree | the lock must *release* afterwards |
 | C10 | The GC never reaches outside `<prefix>/files/`, including a **string-prefix** neighbour (`tenants/c10` vs `tenants/c10-sibling`) | the GC must have actually deleted something that run |
 | C11 | A HITL upload survives later barriers — including a GC — with the sync verb never invoked | each later barrier must have done real work |
 | C12 | Proxy unreachable ⇒ publish fails, checkout **wedges**, and the agent-start marker is never written over an empty tree | both must succeed again once the proxy answers |
@@ -167,13 +167,13 @@ in the plan.
 
 The mechanism: the shipped `flint-sync` writes the manifest, window and
 inbox cells **directly** to the store
-(`lean/sidecar/src/barrier.rs:257, 261, 384, 467`) and links no HTTP
-client at all (`lean/sidecar/Cargo.toml` has no `reqwest`/`hyper`/
-`ureq`). The gateway's sidecar-facing verbs are implemented and
-correct, but the sidecar is not one of their callers.
+(`lean/syncer/src/barrier.rs:257, 261, 384, 467`) and links no HTTP
+client at all (`lean/syncer/Cargo.toml` has no `reqwest`/`hyper`/
+`ureq`). The gateway's syncer-facing verbs are implemented and
+correct, but the syncer is not one of their callers.
 
 This is a **known deferral, now measured** — not a surprise. The plan's
-own status header already lists "routing sidecar barriers through the
+own status header already lists "routing syncer barriers through the
 gateway verbs by default" as open. What the drill adds is the
 consequence: for as long as that deferral stands, the failure-mode
 sentence and the Phase 3 acceptance criterion describe a system that
@@ -190,7 +190,7 @@ whose data PUTs are fenced by nothing (finding 1). The enforcement
 point for both has to be the **proxy**, not the gateway.
 
 The good news is that nothing on the wire has to change for that: plan
-§2.2 already has every sidecar PUT carrying its epoch in the
+§2.2 already has every syncer PUT carrying its epoch in the
 `GenerationStamps`, so a proxy can reject a stale-epoch write from the
 metadata it already receives. That turns the proxy conformance gate
 from one question into two — *does the proxy preserve our conditional
@@ -236,9 +236,9 @@ overwrites without failing loudly.
 
 ```sh
 kind create cluster --name flint-lean-chaos
-cd lean/sidecar && cargo zigbuild --release --features s3 --target aarch64-unknown-linux-musl
-cd ../e2e && cp ../sidecar/target/aarch64-unknown-linux-musl/release/{flint-sync,flint-lean-gateway} .
-docker build -t flint-sync:e2e -f Dockerfile.sidecar .
+cd lean/syncer && cargo zigbuild --release --features s3 --target aarch64-unknown-linux-musl
+cd ../e2e && cp ../syncer/target/aarch64-unknown-linux-musl/release/{flint-sync,flint-lean-gateway} .
+docker build -t flint-sync:e2e -f Dockerfile.syncer .
 docker build -t flint-lean-gateway:e2e -f Dockerfile.gateway .
 kind load docker-image flint-sync:e2e flint-lean-gateway:e2e --name flint-lean-chaos
 kubectl --context kind-flint-lean-chaos apply -f minio.yaml -f chaos.yaml

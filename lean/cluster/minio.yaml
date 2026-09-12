@@ -3,7 +3,7 @@
 # MinIO stands in for the deployment proxy here. It is deliberately given
 # a dedicated, tainted node: a 1000-pod burst co-scheduled with its own
 # store would measure the two contending, and a saturated store shows up
-# as sidecar startupProbe failures that read exactly like a product bug.
+# as syncer startupProbe failures that read exactly like a product bug.
 # Isolating it does not make the throughput number quotable — it is not,
 # and the drill record says so — it makes the CLUSTER-side result
 # attributable, which is the whole point of this leg.

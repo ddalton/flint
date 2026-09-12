@@ -26,7 +26,7 @@ use super::crd::{FlintLeanWorkspaceSpec, LeanCondition};
 
 /// The routine ceiling a preStop drain is really sized against on this
 /// fleet (D10, and the standing pure-spot directive): EC2 spot gives
-/// ~2 minutes of reclaim notice, and native-sidecar ordering spends the
+/// ~2 minutes of reclaim notice, and native-syncer ordering spends the
 /// agent's share of that budget first. A gated workspace whose drain
 /// arithmetic does not fit inside it is not "tight", it is a workspace
 /// whose backlog caps are set to a size it can never drain — so the
@@ -99,7 +99,7 @@ pub fn validate_spec(spec: &FlintLeanWorkspaceSpec) -> Result<(), Refusal> {
         return Err(refuse(
             "InvalidBoundaryMode",
             format!(
-                "boundaryMode {:?} is not cadence|hybrid|gated — the sidecar would exit 2 at \
+                "boundaryMode {:?} is not cadence|hybrid|gated — the syncer would exit 2 at \
                  startup and the pod would crash-loop with a full checkout behind it",
                 spec.boundary_mode
             ),
@@ -213,7 +213,7 @@ pub struct BucketVerdict {
 }
 
 /// The probe key the OPERATOR writes. Deliberately distinct from the
-/// sidecar's: the two probe on independent clocks and share a bucket,
+/// syncer's: the two probe on independent clocks and share a bucket,
 /// and a shared key would let two conformant probes fail each other's
 /// `If-None-Match` write — a conformance failure manufactured by
 /// conformance checking.
@@ -315,14 +315,14 @@ pub async fn assess_bucket(
 /// the lease-heartbeat echo.
 ///
 /// `Unknown` is a real answer here and is used honestly. No lease means
-/// no sidecar — an idle lean workspace at rest is bucket objects and
+/// no syncer — an idle lean workspace at rest is bucket objects and
 /// nothing else, which is the design, not a fault — and an old binary
 /// writes no echo at all. Neither is evidence that the mode is wrong;
 /// what would be evidence is an echo that disagrees.
 ///
 /// `echo_unparseable` is the THIRD case and it is not cosmetic. The
 /// reader used to collapse a parse failure into `None` with `.ok()`, and
-/// `None` reports as `NoEcho` — "a sidecar older than the boundary-verbs
+/// `None` reports as `NoEcho` — "a syncer older than the boundary-verbs
 /// protocol". So a malformed or schema-mismatched echo, the exact thing a
 /// field rename or a version skew produces, was reported as a benign old
 /// binary. An error must not return a legal value.
@@ -338,18 +338,18 @@ pub fn boundary_mode_active(
             "True",
             "Matches",
             format!(
-                "sidecar {} (protocol {}) is running boundaryMode={}",
-                e.sidecar_version, e.protocol, e.active_boundary_mode
+                "syncer {} (protocol {}) is running boundaryMode={}",
+                e.syncer_version, e.protocol, e.active_boundary_mode
             ),
         ),
         Some(e) => (
             "False",
             "ModeMismatch",
             format!(
-                "spec asks for boundaryMode={} but sidecar {} reports {}: the sidecar reads a \
+                "spec asks for boundaryMode={} but syncer {} reports {}: the syncer reads a \
                  FIXED env list, so a binary older than the knob ignores it in silence — \
-                 upgrade the sidecar image, then recreate the pod",
-                spec.boundary_mode, e.sidecar_version, e.active_boundary_mode
+                 upgrade the syncer image, then recreate the pod",
+                spec.boundary_mode, e.syncer_version, e.active_boundary_mode
             ),
         ),
         // RELEASED IS CHECKED FIRST. A released lease is at rest whatever
@@ -358,7 +358,7 @@ pub fn boundary_mode_active(
         // Ordering pinned by an_unparseable_echo_is_not_reported_as_an_absent_one.
         None if lease_released => (
             "Unknown",
-            "NoLiveSidecar",
+            "NoLiveSyncer",
             "no syncer holds the lease (the workspace is at rest, which is the design)".into(),
         ),
         None if echo_unparseable => (
@@ -372,7 +372,7 @@ pub fn boundary_mode_active(
         None => (
             "Unknown",
             "NoEcho",
-            "the lease holder writes no observed-state echo — a sidecar older than the \
+            "the lease holder writes no observed-state echo — a syncer older than the \
              boundary-verbs protocol, or a backend that cannot carry it"
                 .into(),
         ),
@@ -811,7 +811,7 @@ mod tests {
 
     fn echo(mode: &str, version: &str) -> flint_store::LeaseEcho {
         flint_store::LeaseEcho {
-            sidecar_version: version.into(),
+            syncer_version: version.into(),
             protocol: 1,
             active_boundary_mode: mode.into(),
             last_cited_seq: 7,
@@ -823,9 +823,9 @@ mod tests {
     }
 
     /// The mixed-version hole this condition exists to close: an old
-    /// sidecar reads a FIXED env list, so `gated` reaching it is ignored
+    /// syncer reads a FIXED env list, so `gated` reaching it is ignored
     /// in silence and the workspace runs fused cadence. `Unknown` is
-    /// used honestly — no sidecar is the design at rest, not a fault.
+    /// used honestly — no syncer is the design at rest, not a fault.
     #[test]
     fn boundary_mode_active_separates_mismatch_from_absence() {
         let s = gated_spec();
@@ -841,7 +841,7 @@ mod tests {
 
         assert_eq!(
             boundary_mode_active(&s, None, true, None, false).reason,
-            "NoLiveSidecar"
+            "NoLiveSyncer"
         );
         assert_eq!(
             boundary_mode_active(&s, None, false, None, false).reason,
@@ -883,7 +883,7 @@ mod tests {
         // describes a HELD lease whose holder wrote something bad.
         assert_eq!(
             boundary_mode_active(&s, None, true, None, true).reason,
-            "NoLiveSidecar",
+            "NoLiveSyncer",
             "a released lease is at rest whatever the stale echo says"
         );
     }

@@ -80,12 +80,14 @@ name = "flint-hub-stub"
 path = "src/bin/flint_hub_stub.rs"
 
 # flint-sync and flint-lean-gateway moved to the flint-lean crate
-# (lean/sidecar/) so the lean test loop builds without this crate's
+# (lean/syncer/) so the lean test loop builds without this crate's
 # binaries and dep trees; flint-store (crates/flint-store) is the
 # shared layer.
 
 # The flint-lean operator: FlintLeanWorkspace CRD + claim/adopt +
-# native-sidecar injection (docs/plans/flint-lean-plan.md §2.4). Ships
+# boundary reporting (docs/plans/flint-lean-plan.md §2.4). It injected
+# a native sidecar until v1.45.0; the syncer now reaches a pod through
+# the s3.csi.chert.us node plugin and the operator injects nothing. Ships
 # in the flint-lite-operator image; SEPARATE controller — no FlintShare
 # coupling (strict mode stays hub-side by construction).
 [[bin]]

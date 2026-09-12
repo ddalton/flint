@@ -33,7 +33,7 @@ Rename and move inherit the gap: they are a delete plus a create.
 
 Worth stating, because the fix has to live inside this constraint.
 
-**The sidecar is the only process that may write the workspace.** The
+**The syncer is the only process that may write the workspace.** The
 gateway holds no tree at all — `LeanConfig::new(prefix, "/nonexistent")`
 — and a library caller in a backend service is in the same position:
 different pod, probably different node. So an outside write is not
@@ -155,7 +155,7 @@ the destination entry and the source removal together. Two calls would
 be two renames' worth of failure modes, and the crash between them is
 the one that loses data.
 
-The sidecar then:
+The syncer then:
 1. applies the destination (existing consume path, unchanged),
 2. refuses on a locally-dirty source — conflict recorded, nothing
    applied, both halves left in the cell to retry,
@@ -269,9 +269,9 @@ follows from wanting to keep that true.
    `consume-dirty` site — a one-field addition, and without it the
    feature cannot route.
 2. **The records are in the wrong place.** `conflicts.jsonl` lives in
-   the sidecar's pod-local state dir and `gateway.rs` has ZERO
+   the syncer's pod-local state dir and `gateway.rs` has ZERO
    references to it. It becomes a cell in the bucket, the same shape as
-   the inbox: one CAS'd document, the sidecar the only writer, gateway
+   the inbox: one CAS'd document, the syncer the only writer, gateway
    and library as readers, with an acknowledge verb.
 3. **Nothing else is needed to correlate.** `foreign_etag` IS the etag
    the caller's PUT returned, so `(path, foreign_etag)` matches a
@@ -340,7 +340,7 @@ small ones.
 out-of-band from the record, so as the primary it produces exactly the
 dangling `preserved_key` ruled out above. Set LONGER than the record TTL
 — records 30 days, lifecycle 45 — it covers the one case the sweep
-cannot: a workspace whose sidecar never comes back, where no barrier
+cannot: a workspace whose syncer never comes back, where no barrier
 ever runs. Not available on every endpoint, so it cannot be relied on.
 
 **Standalone, ships regardless:** `conflicts.jsonl` needs a cap and
@@ -366,7 +366,7 @@ path applies NOTHING and records a conflict — mutation: drop the dirty
 check and watch the agent's edit disappear; (3) a failed unlink publishes
 no deletion.
 
-**Phase C — rename as one transaction.** Control: kill the sidecar
+**Phase C — rename as one transaction.** Control: kill the syncer
 between the destination write and the source unlink; on restart the
 source still exists and the transaction re-applies — an extra file, never
 a hole. And the atomicity claim: a manifest reader observes either

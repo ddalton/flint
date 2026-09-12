@@ -1189,7 +1189,7 @@ impl ObjectStore for S3Store {
             lease.epoch,
             PutCondition::IfMatch(lease.token.clone()),
             true,
-            // A released cell reports no live sidecar: clearing the
+            // A released cell reports no live syncer: clearing the
             // echo is the point, not an omission.
             None,
         )

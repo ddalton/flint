@@ -39,9 +39,9 @@ use super::{ObjectStore, StoreResult};
 pub enum Writer {
     /// `flint-forge-syncer` over a bare git repository.
     ForgeRepository,
-    /// A `flint-sync` sidecar over a lean workspace. Forge's legible
+    /// A `flint-sync` syncer over a lean workspace. Forge's legible
     /// export is one of these, published by forge rather than by an
-    /// agent's sidecar.
+    /// agent's syncer.
     LeanWorkspace,
 }
 

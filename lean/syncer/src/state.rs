@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{LeanError, LeanResult};
 
-/// One published path as this sidecar last knew it: the recognized ETag
+/// One published path as this syncer last knew it: the recognized ETag
 /// is the If-Match guard for the next publish and the HEAD-guard for GC.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BaselineEntry {
@@ -32,13 +32,13 @@ pub struct BaselineEntry {
     pub version_id: Option<String>,
 }
 
-/// The persisted baseline snapshot: what this sidecar believes the
+/// The persisted baseline snapshot: what this syncer believes the
 /// bucket holds AND has integrated locally. Distinct from `inst_base`
 /// (the manifest view at our last install — the three-way merge base):
 /// consuming a HITL entry advances the baseline for that path but not
 /// the merge base. The formal model carries the same split
 /// (baseline vs instBase in LeanSubtree.tla) — collapsing them made a
-/// sidecar mistake its own consumed adoption for a foreign entry.
+/// syncer mistake its own consumed adoption for a foreign entry.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Baseline {
     /// Manifest seq at our last install/checkout.
@@ -128,7 +128,7 @@ pub struct ConflictRecord {
     pub at_unix: u64,
 }
 
-pub struct SidecarState {
+pub struct SyncerState {
     dir: PathBuf,
     /// The state-directory occupancy lock (flock, held for the process
     /// lifetime). Self-recognition of the lease via the persisted
@@ -201,8 +201,8 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> LeanResult<()> {
     super::safefs::write_via_tmp(path, &tmp, bytes, None)
 }
 
-impl SidecarState {
-    pub fn open(dir: PathBuf) -> LeanResult<SidecarState> {
+impl SyncerState {
+    pub fn open(dir: PathBuf) -> LeanResult<SyncerState> {
         fs::create_dir_all(&dir)?;
         let lock = fs::OpenOptions::new()
             .create(true)
@@ -217,12 +217,12 @@ impl SidecarState {
             if rc != 0 {
                 return Err(LeanError::State(format!(
                     "another flint-sync already holds this workspace ({}): \
-                     refusing to run two sidecars over one tree",
+                     refusing to run two syncers over one tree",
                     dir.display()
                 )));
             }
         }
-        Ok(SidecarState { dir, _lock: lock })
+        Ok(SyncerState { dir, _lock: lock })
     }
 
     pub fn marker_present(&self) -> bool {

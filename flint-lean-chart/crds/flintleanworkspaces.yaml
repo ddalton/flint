@@ -103,7 +103,7 @@ spec:
                 type: object
               credentialsSecretRef:
                 description: |-
-                  Secret with the SIDECAR's proxy credentials, keys AWS_* VERBATIM
+                  Secret with the SYNCER's proxy credentials, keys AWS_* VERBATIM
                   (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, ...). The
                   OPERATOR never uses this — bucket-admin ops run under the
                   operator principal (plan §2.4 principal split).
@@ -117,7 +117,7 @@ spec:
                 type: string
               expectedBytes:
                 description: |-
-                  Expected inventory, used to DERIVE the sidecar's startupProbe
+                  Expected inventory, used to DERIVE the syncer's startupProbe
                   budget (plan §2.4: probes are derived, never fleet constants —
                   the hub's 600 s default killed a 20 GiB checkout at the only
                   measured rate). Unset ⇒ the budgets assume the caps.
@@ -145,7 +145,7 @@ spec:
                   `fanout` bounds how MANY objects are fetched at once but not how
                   big they are, and each is held whole in RAM before it reaches
                   disk, so peak RSS is the product of the two. Sized against the
-                  sidecar's memory limit, not its CPU.
+                  syncer's memory limit, not its CPU.
                 format: uint64
                 minimum: 0.0
                 type: integer
@@ -177,7 +177,12 @@ spec:
                     type: string
                 type: object
               image:
-                description: Sidecar image override; None = the operator's default.
+                description: >-
+                  Syncer image override, and DEAD: nothing reads it. The
+                  webhook that did was removed in v1.45.0; the worker
+                  image is pinned by the flint-s3-csi chart and reaches
+                  the node plugin as FLINT_S3CSI_LEAN_IMAGE. Setting this
+                  changes nothing.
                 nullable: true
                 type: string
               keyPrefix:
@@ -369,7 +374,7 @@ spec:
             nullable: true
             properties:
               citedSeq:
-                description: The last manifest seq the sidecar cited.
+                description: The last manifest seq the syncer cited.
                 format: uint64
                 minimum: 0.0
                 nullable: true
@@ -423,11 +428,11 @@ spec:
                 nullable: true
                 type: string
               observedBoundaryMode:
-                description: The mode the sidecar is actually running.
+                description: The mode the syncer is actually running.
                 nullable: true
                 type: string
-              observedSidecarVersion:
-                description: The sidecar binary's version — the mixed-fleet tell.
+              observedSyncerVersion:
+                description: The syncer binary's version — the mixed-fleet tell.
                 nullable: true
                 type: string
               phase:

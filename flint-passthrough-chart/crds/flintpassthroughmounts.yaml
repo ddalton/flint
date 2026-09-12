@@ -169,11 +169,16 @@ spec:
                 image:
                   type: string
                   description: >-
-                    Per-mount mounter image override. The chart's
-                    sidecarImage otherwise. WEBHOOK DELIVERY ONLY: the
-                    s3.csi.chert.us CSI driver never reads it (the worker
-                    image is chart-pinned; this field is the
-                    privileged-escape knob the CSI design removes).
+                    Per-mount mounter image override, and DEAD: it was
+                    read by the mutating webhook that v1.45.0 removed.
+                    The s3.csi.chert.us CSI driver never reads it — the
+                    mounter image is pinned by the flint-s3-csi chart at
+                    workers.passthroughImage, and the workers policy
+                    admits only the two images that chart names. Setting
+                    this changes nothing; it is the privileged-escape
+                    knob the CSI design removes. (It said "the chart's
+                    sidecarImage otherwise" until v1.50.0, naming a
+                    value no chart has had since the webhook went.)
                 consumers:
                   type: object
                   description: >-

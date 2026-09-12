@@ -10,7 +10,7 @@
 # missed the defect F14 found on runcj in a single run. And this area
 # has a defect history that neither method caught first: the takeover
 # rotation had two gaps found by a model, a fold commit did not
-# revalidate the lease, and a live lean sidecar once fenced ITSELF into
+# revalidate the lease, and a live lean syncer once fenced ITSELF into
 # silence by reading a lost renewal response as a deposal.
 #
 # It also exercises the one S3 behaviour no local rig can: the lease is

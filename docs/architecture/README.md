@@ -279,7 +279,7 @@ falsifiers as run on EC2, §17 for the composition drills), `docs/flint-lite-arc
 `flint-passthrough-chart`, `flint-s3-csi-chart` and `flint-forge-chart` values, the
 drills under `forge/e2e/`, and the code under
 `spdk-csi-driver/src/{s3csi,passthrough,tier,lite_operator,lean_operator,forge_operator,lite_gateway}`,
-`lean/sidecar/src` and `forge/syncer/src`. The security page also draws on the approach
+`lean/syncer/src` and `forge/syncer/src`. The security page also draws on the approach
 radar's verified Security cells (`docs/radar/`).
 
 This deck describes the four front ends. It does not cover the pNFS/block data

@@ -18,7 +18,7 @@
 //! Bucket-admin ops run here under the OPERATOR principal: `bootstrap`
 //! (versioning/lifecycle posture) and the MPU sweep (`list_uploads` is
 //! bucket-wide on the wire and a correctly project-scoped proxy DENIES
-//! it to sidecars — plan §2.4).
+//! it to syncers — plan §2.4).
 
 use std::sync::Arc;
 
@@ -98,7 +98,7 @@ pub async fn ensure_claim(
 }
 
 /// The operator-side MPU sweep: abort in-progress multipart assemblies
-/// under the prefix older than `min_age_secs` (a crashed sidecar's
+/// under the prefix older than `min_age_secs` (a crashed syncer's
 /// half-uploaded compose bills until aborted; the lifecycle rule is
 /// the backstop, this is the fast path). Returns aborted count.
 pub async fn sweep_stale_uploads(
@@ -163,7 +163,7 @@ pub async fn verify_workspace(
 }
 
 /// Everything one operator pass observed about a workspace: the claim
-/// verdict, the boundary conditions, and what the RUNNING sidecar says
+/// verdict, the boundary conditions, and what the RUNNING syncer says
 /// about itself.
 #[derive(Debug, Clone, Default)]
 pub struct WorkspaceReport {
@@ -172,7 +172,7 @@ pub struct WorkspaceReport {
     pub standing_project_id: Option<String>,
     pub conditions: Vec<LeanCondition>,
     pub observed_boundary_mode: Option<String>,
-    pub observed_sidecar_version: Option<String>,
+    pub observed_syncer_version: Option<String>,
     pub cited_seq: Option<u64>,
     pub visibility_lag_secs: Option<u64>,
     pub staged_uncited: Option<u64>,
@@ -190,7 +190,7 @@ pub struct WorkspaceReport {
 /// provisioning — a dozen-odd requests that answer questions which
 /// change on the timescale of a proxy upgrade or an admin edit. The
 /// cheap half is the OBSERVATION: one epoch read that carries the
-/// sidecar's echo, and with it `citedSeq`, the visibility lag and the
+/// syncer's echo, and with it `citedSeq`, the visibility lag and the
 /// staged-uncited count.
 ///
 /// They cannot share a cadence. §2.6 promises `LAG` as a printer
@@ -313,7 +313,7 @@ pub async fn full_pass(
         (Ok(()), false) => {}
     }
 
-    // 3. What the RUNNING sidecar says. One read of a cell the operator
+    // 3. What the RUNNING syncer says. One read of a cell the operator
     //    already has a reason to look at.
     let cell = store.epoch_read(&format!("{prefix}/.flint/lean/epoch")).await?;
     // NOT `.ok()`. That mapped a parse FAILURE onto `None`, and `None`
@@ -335,7 +335,7 @@ pub async fn full_pass(
     );
     if let Some(e) = &echo {
         r.observed_boundary_mode = Some(e.active_boundary_mode.clone());
-        r.observed_sidecar_version = Some(e.sidecar_version.clone());
+        r.observed_syncer_version = Some(e.syncer_version.clone());
         r.cited_seq = Some(e.last_cited_seq);
         r.staged_uncited = Some(e.staged_uncited_count);
         r.visibility_lag_secs = Some(
@@ -372,7 +372,7 @@ pub async fn full_pass(
                 if bound { "True" } else { "False" },
                 if bound { "Listening" } else { "PortUnavailable" },
                 Some(if bound {
-                    "the sidecar is serving /metrics".into()
+                    "the syncer is serving /metrics".into()
                 } else {
                     "exposition is enabled but the port was taken (the agent container is \
                      the likely occupant). The workspace is fully operable — gauges.json, \
@@ -392,7 +392,7 @@ pub async fn full_pass(
     // "No live lease" cannot mean "no cell": the pure-spot failure that
     // strands work is a pod that DIED, and a dead holder leaves its
     // cell behind unreleased. Liveness is judged against the STORE's
-    // clock (A8's rule), on the same threshold the sidecar's own
+    // clock (A8's rule), on the same threshold the syncer's own
     // takeover uses — six quiet polls at ten seconds, doubled for
     // slack. Without this the DR-signature condition can only fire
     // after a CLEAN shutdown, which is the one case that never strands
@@ -407,7 +407,7 @@ pub async fn full_pass(
             && c.last_renew_unix.is_none_or(|t| now.saturating_sub(t) < LEASE_DEAD_SECS)
     });
     // Only read when it can mean something: with a live holder this is
-    // a BACKLOG the sidecar is expected to cite, and the GET would be
+    // a BACKLOG the syncer is expected to cite, and the GET would be
     // one request per workspace per pass for an answer nobody acts on.
     let stranded = if live_lease {
         None
@@ -433,13 +433,13 @@ pub async fn full_pass(
                     // "in a pod on this workspace" sent operators somewhere
                     // there is nothing to run (design §3.2).
                     // Say what was OBSERVED, which is a lease that has
-                    // stopped advancing — not "no sidecar", which is an
+                    // stopped advancing — not "no syncer", which is an
                     // inference this code cannot make. A syncer whose
                     // credentials the store is refusing (401/403) is
                     // alive, is serving its tenant, and cannot renew:
                     // the renewal is the request being refused, so it
                     // has no way to say so through the bucket (design
-                    // §6.3). Telling an operator the sidecar is gone
+                    // §6.3). Telling an operator the syncer is gone
                     // sends them to restart something that is running
                     // fine, and away from the credential that expired.
                     // The operator holds no `pods` RBAC, so it cannot
@@ -454,7 +454,7 @@ pub async fn full_pass(
                          it, and it cannot report that through the bucket. Check \
                          `flint_lean_auth_paused_since_timestamp_seconds` (non-zero = \
                          credentials refused since then) or `flint-sync status` on the worker \
-                         before concluding the sidecar died. To re-cite the objects as one \
+                         before concluding the syncer died. To re-cite the objects as one \
                          flagged boundary run `flint-sync recover-staged` in the worker pod \
                          serving this workspace (`kubectl -n flint-workers exec <worker> -- \
                          flint-sync recover-staged`); with no worker running, start a pod \
@@ -468,7 +468,7 @@ pub async fn full_pass(
     Ok(r)
 }
 
-/// D9's durable summary, if the sidecar has written one. Absence is not
+/// D9's durable summary, if the syncer has written one. Absence is not
 /// evidence of absence — a cadence/hybrid workspace never writes one —
 /// so this returns `None` rather than `Some(0)` when the doc is missing.
 async fn read_orphans(store: &Arc<dyn ObjectStore>, prefix: &str) -> Option<usize> {
@@ -533,14 +533,14 @@ mod tests {
     /// objects and nothing else — that is the design, and the status
     /// must not read as a fault.
     #[tokio::test]
-    async fn full_pass_accepts_a_default_workspace_and_reports_no_sidecar() {
+    async fn full_pass_accepts_a_default_workspace_and_reports_no_syncer() {
         let s = store();
         let r = full_pass(&s, &spec_of(serde_json::json!({})), "op", Some(1), true).await.unwrap();
         assert_eq!(r.phase, "Claimed");
         assert_eq!(cond(&r, "BoundaryModeAccepted").unwrap().status, "True");
         let active = cond(&r, "BoundaryModeActive").unwrap();
         assert_eq!(active.status, "Unknown");
-        assert_eq!(active.reason, "NoLiveSidecar");
+        assert_eq!(active.reason, "NoLiveSyncer");
         assert!(r.observed_boundary_mode.is_none());
         // Nothing gated was asked for, so nothing gated was provisioned.
         assert!(cond(&r, "VersionRetentionProvisioned").is_none());
@@ -587,12 +587,12 @@ mod tests {
     /// the pod predates the knob, reads a FIXED env list, ignores it,
     /// and runs fused cadence. Nothing else in the system can see that.
     #[tokio::test]
-    async fn a_stale_sidecar_binary_flips_boundary_mode_active() {
+    async fn a_stale_syncer_binary_flips_boundary_mode_active() {
         let s = store();
         let key = "t/p1/.flint/lean/epoch";
         let lease = s.epoch_acquire(key, "holder-1", None).await.unwrap();
         let echo = serde_json::to_string(&flint_store::LeaseEcho {
-            sidecar_version: "0.0.9".into(),
+            syncer_version: "0.0.9".into(),
             protocol: 1,
             active_boundary_mode: "hybrid".into(),
             last_cited_seq: 12,
@@ -668,7 +668,7 @@ mod tests {
             "the recipe must name the namespace the binary is reachable in, not a tenant pod: {msg}"
         );
 
-        // With a live sidecar this is a BACKLOG, not an orphan set: the
+        // With a live syncer this is a BACKLOG, not an orphan set: the
         // holder is expected to cite it, and paging on it would page on
         // gated mode working as designed.
         let key = "t/p1/.flint/lean/epoch";
@@ -718,7 +718,7 @@ mod tests {
     }
 
     /// The two cadences, and the property that makes them safe to
-    /// separate: the OBSERVATION pass must still see what the sidecar
+    /// separate: the OBSERVATION pass must still see what the syncer
     /// is doing, and must not spend the posture's dozen requests to do
     /// it. §2.6 promises `LAG` as a printer column, and a lag column
     /// refreshed on the posture cadence is not a lag column.
@@ -728,7 +728,7 @@ mod tests {
         let key = "t/p1/.flint/lean/epoch";
         let lease = s.epoch_acquire(key, "holder-1", None).await.unwrap();
         let echo = serde_json::to_string(&flint_store::LeaseEcho {
-            sidecar_version: "0.1.0".into(),
+            syncer_version: "0.1.0".into(),
             protocol: 1,
             active_boundary_mode: "gated".into(),
             last_cited_seq: 42,

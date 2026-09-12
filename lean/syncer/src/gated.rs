@@ -50,7 +50,7 @@ use flint_store::{GenerationStamps, ListedVersion, StoreError};
 
 use super::manifest::{self, LeanEntry};
 use super::state::{BaselineEntry, ConflictRecord};
-use super::{inbox, now_unix, scan, BoundaryMode, LeanError, LeanResult, Sidecar};
+use super::{inbox, now_unix, scan, BoundaryMode, LeanError, LeanResult, Syncer};
 
 const PENDING: &str = "pending.json";
 
@@ -144,7 +144,7 @@ pub enum CitationSource {
     Drain,
     Recovered,
     /// A repair-only pass: nothing of the agent's is staged, but the
-    /// manifest cites an older object than the one this sidecar has
+    /// manifest cites an older object than the one this syncer has
     /// already INTEGRATED (a consumed HITL write, checkout's S3-wins
     /// arm). §2.4.2 exempts these from gating, and D13's promise to
     /// pinned readers — "within one floor" — is this source.
@@ -207,7 +207,7 @@ pub struct CitationReport {
     /// an ack for a declared point that names one of these is a lie
     /// (D1's at-least guarantee).
     pub dropped_inflight: Vec<String>,
-    /// Paths re-cited onto bytes this sidecar had already integrated —
+    /// Paths re-cited onto bytes this syncer had already integrated —
     /// no data moved (§2.4.2's ungated repair).
     pub repaired: Vec<String>,
     /// Inherited entries this boundary made version-addressable before
@@ -266,7 +266,7 @@ pub struct OrphanCandidate {
     pub staged_unix: u64,
 }
 
-impl Sidecar {
+impl Syncer {
     fn stage_path(&self) -> std::path::PathBuf {
         self.cfg.state_dir().join(PENDING)
     }
@@ -958,7 +958,7 @@ impl Sidecar {
         }
 
         // The ungated repair (§2.4.2). No bytes move: the object IS
-        // what this sidecar already integrated, and the citation is
+        // what this syncer already integrated, and the citation is
         // catching up to it. The HEAD is also what supplies the VERSION
         // id — a consume records none, and under `pinned_reads` a
         // citation without one is unreadable by the very readers this
@@ -1331,7 +1331,7 @@ impl Sidecar {
         // doc has said so since the version surface landed — "the
         // claim-time/DR fallback when `orphans.json` is missing or
         // stale — the expensive path, which is why the durable summary
-        // is written eagerly" — but nothing in the sidecar read the
+        // is written eagerly" — but nothing in the syncer read the
         // summary, so recovery always took the expensive path and the
         // eager write bought nothing here.
         //
@@ -1537,7 +1537,7 @@ impl Sidecar {
     /// implementation in `flint_store::probe`, because the operator
     /// runs the same probe on its reconcile cadence and the two
     /// verdicts must never disagree. A workspace the operator calls
-    /// conformant and the sidecar refuses to start is worse than
+    /// conformant and the syncer refuses to start is worse than
     /// either answer alone.
     ///
     /// A project-scoped proxy that strips `x-amz-version-id` degrades

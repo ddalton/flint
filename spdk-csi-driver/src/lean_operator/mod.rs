@@ -2,7 +2,7 @@
 //! claim/adopt/refuse reconcile (`reconcile`), the boundary-verb
 //! validation (`boundary`), and the syncer environment (`sync_env`) the
 //! s3.csi.chert.us node plugin hands to a lean worker. The webhook and the
-//! sidecar injector are gone: a workspace reaches a pod as ONE `csi:`
+//! syncer injector are gone: a workspace reaches a pod as ONE `csi:`
 //! volume (docs/plans/csi-node-mount-design.md §3.5, §5).
 
 pub mod boundary;

@@ -1,4 +1,4 @@
-# flint-lean: the checkout/publish sidecar (flint-sync) + the lean
+# flint-lean: the checkout/publish syncer (flint-sync) + the lean
 # gateway (flint-lean-gateway). Plan of record:
 # docs/plans/flint-lean-plan.md; formal model: lean/formal/.
 #

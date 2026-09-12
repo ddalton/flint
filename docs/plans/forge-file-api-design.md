@@ -564,7 +564,7 @@ while pinning `GIT_COMMITTER_*` to `flint-forge`/`forge@chert.us`
 (`gitcmd.rs:847-868`). The change is to pass two identities instead of
 one, not to invent a mechanism.
 
-The header spelling is lean's (`lean/sidecar/src/gateway.rs:208`), so
+The header spelling is lean's (`lean/syncer/src/gateway.rs:208`), so
 one app-side convention covers both modules.
 
 **Two consequences of many writers, both already designed for but now

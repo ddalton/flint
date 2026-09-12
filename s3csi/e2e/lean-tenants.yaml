@@ -1,7 +1,7 @@
 # The lean arm of the s3.csi.chert.us drill (design §3.5, §5, §10.2 S11/S13):
 # one FlintLeanWorkspace, a seeder that publishes, an agent created
 # after the seeder is gone. The pods carry ONE csi: volume and nothing
-# else — no label, no sidecar, no Secret, no env.
+# else — no label, no syncer, no Secret, no env.
 #
 # floorSecs is an HOUR: nothing in this rig can be published by the
 # cadence timer, so every publish a leg observes was DECLARED by an

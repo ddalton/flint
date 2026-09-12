@@ -1,6 +1,6 @@
 # The lean manifest: an immutable generation plus a pointer — design of record
 
-Status: **BUILT 2026-09-03** (`lean/sidecar/src/manifest.rs`), 126/0 in the
+Status: **BUILT 2026-09-03** (`lean/syncer/src/manifest.rs`), 126/0 in the
 lean suite. §7 records what the build changed about §3.
 Written 2026-09-03 after the user asked for metadata optimisation and
 proposed three options; this is the fourth, arrived at by checking the
