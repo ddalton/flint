@@ -39,8 +39,8 @@ Writing through the mount also works; see
 | Kubernetes | 1.25+, `kubectl` and `helm` |
 | On every node that will mount | an NFS client (`mount.nfs4`) — see [node prerequisite](#the-one-node-prerequisite) |
 | If more than one cluster mounts one hub | **globally unique hostnames across the fleet** — see [one hub, many clusters](#one-hub-many-clusters-give-every-client-a-unique-name) |
-| Images | `1.49.0` |
-| Chart | `flint-lite-operator` `0.3.0` |
+| Images | `1.50.0` |
+| Chart | `flint-lite-operator` `0.3.1` |
 
 ## 1. Install the operator and the gateway
 
@@ -62,7 +62,7 @@ kubectl -n flint-system create secret generic flint-gateway-root \
 
 helm install flint-lite-operator \
   oci://registry-1.docker.io/dilipdalton/flint-lite-operator \
-  --version 0.3.0 \
+  --version 0.3.1 \
   -n flint-system \
   --set gateway.enabled=true \
   --set gateway.tokenSecretRef=flint-gateway-token \
@@ -430,12 +430,12 @@ the file already exists; send If-Match with the version you read,
 or If-None-Match: * to create only if absent
 ```
 
-**Which release:** the mandate is newer than every published image at
-the time of writing — `flint-pnfs:1.49.0` and earlier accept the
-unconditioned overwrite silently, and lose the update. If you are
-pinning an image, that is the line to check; if you are following this
-guide against the latest chart, write as though the mandate is there,
-because code written for it is correct on both.
+**Which release:** `flint-pnfs:1.50.0` is the first image that refuses
+the unconditioned overwrite. `1.49.0` and earlier accept it silently,
+and lose the update. If you are pinning an image, that is the line to
+check; if you are following this guide against the latest chart, write
+as though the mandate is there, because code written for it is correct
+on both.
 
 That is deliberate, and it is the single thing most likely to surprise
 you when you move from a first run to a second. Without it, two callers
