@@ -651,6 +651,10 @@ mod tests {
 
     #[test]
     fn interval_overflow_collapses_to_whole() {
+        // Every global this test touches is process-wide, and a
+        // concurrent `rig()` resets them mid-body. Serialise, like
+        // every other test in the tier that reaches for them.
+        let _excl = test_exclusive();
         let mut c = FileCapture::default();
         for i in 0..(MAX_INTERVALS as u64 + 1) {
             // Disjoint ranges with gaps: 0, 2, 4, ...
@@ -676,6 +680,10 @@ mod tests {
 
     #[test]
     fn map_note_take_merge_roundtrip() {
+        // Every global this test touches is process-wide, and a
+        // concurrent `rig()` resets them mid-body. Serialise, like
+        // every other test in the tier that reaches for them.
+        let _excl = test_exclusive();
         force_enable();
         let key = (0xF11D_u64, 0x51E1_u64);
         note(key.0, key.1, W(0, 10));
@@ -689,6 +697,10 @@ mod tests {
 
     #[test]
     fn disabled_is_a_no_op() {
+        // Every global this test touches is process-wide, and a
+        // concurrent `rig()` resets them mid-body. Serialise, like
+        // every other test in the tier that reaches for them.
+        let _excl = test_exclusive();
         // Cannot force-disable (shared flag), and a PARALLEL test may
         // force_enable at any instant — so assert only when the flag
         // was off across the whole window. The flag is monotonic
@@ -705,6 +717,10 @@ mod tests {
 
     #[test]
     fn durable_memo_suppresses_queueing_and_paths_upsert() {
+        // Every global this test touches is process-wide, and a
+        // concurrent `rig()` resets them mid-body. Serialise, like
+        // every other test in the tier that reaches for them.
+        let _excl = test_exclusive();
         force_enable();
         // Primed-durable (the startup-restore shape): notes must not
         // re-queue, but the in-memory capture still records.

@@ -164,6 +164,36 @@ pub fn forget(dev: u64, ino: u64) {
     markers().remove(&(dev, ino));
 }
 
+/// Drop EVERY marker. Test-only, and the mirror of
+/// [`crate::tier::capture::reset_for_tests`] — written after the same
+/// hazard bit the same way, one global map later.
+///
+/// The map is keyed by `(dev, ino)` and lives for the whole process,
+/// while every rig here builds a `TempDir` and drops it. A dropped
+/// TempDir frees its inode NUMBERS, and the next rig's files are handed
+/// them back — **deterministically on ext4**. So a test that legitimately
+/// marks an inode evicted leaves a marker that the NEXT test's unrelated
+/// file inherits, and `is_evicted` answers true for a file nothing ever
+/// evicted. That is `a_name_that_appears_mid_sweep_is_not_clobbered`
+/// failing in CI on 2026-09-12 while passing on every developer's macOS,
+/// where APFS does not reuse inode numbers the same way — the identical
+/// signature `capture`'s own reset doc describes.
+///
+/// PRODUCTION IS NOT EXPOSED TO THIS, for the same reason capture is not:
+/// a real unlink or rename goes through the server, `tier::identity`
+/// fires, and [`forget`] clears the marker. Only a tree that vanishes
+/// without the server knowing leaves a stale entry. So this is a
+/// test-only reset, NOT a change to the product's keying.
+///
+/// MARKER_CYCLE is deliberately NOT reset. It is insert-only by design
+/// and its consumers compare two samples for INEQUALITY, never against
+/// zero; rewinding a monotonic counter could make a genuine cycle look
+/// like no cycle at all — the exact blindness it exists to catch.
+#[cfg(test)]
+pub fn reset_for_tests() {
+    markers().clear();
+}
+
 /// A12 reporter gauge: currently-evicted (files, logical bytes).
 /// Process-global like the map itself.
 pub fn marker_stats() -> (usize, u64) {
@@ -1202,6 +1232,7 @@ mod tests {
         // ext4 that reuse is deterministic — so start from no
         // process-global capture state at all. See reset_for_tests.
         crate::tier::capture::reset_for_tests();
+        crate::tier::evict::reset_for_tests();
         let dir = tempfile::TempDir::new().unwrap();
         let f = dir.path().join("weights.bin");
         std::fs::write(&f, vec![9u8; 4096]).unwrap();
@@ -1328,6 +1359,7 @@ mod tests {
         // ext4 that reuse is deterministic — so start from no
         // process-global capture state at all. See reset_for_tests.
         capture::reset_for_tests();
+        crate::tier::evict::reset_for_tests();
         capture::force_enable();
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().to_path_buf();

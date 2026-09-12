@@ -1286,6 +1286,7 @@ mod tests {
         // ext4 that reuse is deterministic — so start from no
         // process-global capture state at all. See reset_for_tests.
         capture::reset_for_tests();
+        crate::tier::evict::reset_for_tests();
         capture::force_enable();
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().to_path_buf();
@@ -1816,6 +1817,55 @@ mod tests {
         );
         let (dev, ino) = ident(&p);
         assert!(!evict::is_evicted(dev, ino), "and it must not be marked evicted");
+    }
+
+    /// A marker must not outlive the rig that made it.
+    ///
+    /// The map is process-global and keyed by `(dev, ino)`; every rig
+    /// builds a `TempDir` and drops it, freeing those inode NUMBERS for
+    /// the next rig — deterministically on ext4. So a marker left
+    /// behind is inherited by an unrelated later file, and `is_evicted`
+    /// answers true for something nothing evicted. That is exactly how
+    /// `a_name_that_appears_mid_sweep_is_not_clobbered` failed in CI on
+    /// 2026-09-12 while passing on every macOS workstation, where APFS
+    /// does not recycle inode numbers the same way.
+    ///
+    /// THE PLANT HAPPENS UNDER THE RIG'S GUARD, and that is not
+    /// incidental. `rig()` moves `capture::test_exclusive()` into the
+    /// `Rig`, so rig-using tests are serialised for their whole life;
+    /// every other marker test in this crate plants under it too. The
+    /// first draft of this leg planted OUTSIDE it and was itself racy —
+    /// green alone, red in the parallel run on ext4, because a
+    /// concurrent rig's reset wiped the fixture between the plant and
+    /// the assertion. A leg written to catch a cross-test race is worth
+    /// very little if it is one.
+    ///
+    /// Delete `evict::reset_for_tests()` from `rig()` and this goes red
+    /// on any filesystem — the marker survives into the second rig.
+    #[tokio::test]
+    async fn a_marker_does_not_outlive_the_rig_that_made_it() {
+        let (dev, ino) = {
+            let _r = rig();
+            let stale = (0x5445_5354u64, 0x1234_5678u64);
+            evict::install_marker_for_tests(stale.0, stale.1, 4096);
+            assert!(
+                evict::marker_meta(stale.0, stale.1).is_some(),
+                "the fixture must actually plant a marker, or this leg is vacuous"
+            );
+            stale
+            // `_r` drops here: the TempDir goes and the guard releases,
+            // and the marker outlives both. That IS the hazard.
+        };
+
+        // The next test's rig, which must not inherit it.
+        let _next = rig();
+        assert!(
+            evict::marker_meta(dev, ino).is_none(),
+            "a marker survived into the next rig — on ext4 that inode number is \
+             handed straight to the next test's file, which then reads as evicted"
+        );
+        // And through the production predicate, capture now being on.
+        assert!(!evict::is_evicted(dev, ino));
     }
 
     /// A failure after the rows are durable must drop the marker too.

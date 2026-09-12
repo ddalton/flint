@@ -352,6 +352,7 @@ mod tests {
         // ext4 that reuse is deterministic — so start from no
         // process-global capture state at all. See reset_for_tests.
         crate::tier::capture::reset_for_tests();
+        crate::tier::evict::reset_for_tests();
         capture::force_enable();
         let ino = 0x31_u64;
         const WRITERS: usize = 8;
@@ -507,6 +508,7 @@ mod tests {
         // ext4 that reuse is deterministic — so start from no
         // process-global capture state at all. See reset_for_tests.
         crate::tier::capture::reset_for_tests();
+        crate::tier::evict::reset_for_tests();
         capture::force_enable();
         let ino = 0x35_u64;
         // A ticket in flight holds the drain; the note lands before the

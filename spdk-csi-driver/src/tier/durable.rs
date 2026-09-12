@@ -132,6 +132,7 @@ mod tests {
         // ext4 that reuse is deterministic — so start from no
         // process-global capture state at all. See reset_for_tests.
         crate::tier::capture::reset_for_tests();
+        crate::tier::evict::reset_for_tests();
         capture::force_enable();
         let be: Arc<dyn StateBackend> = Arc::new(MemoryBackend::new());
         let (dev, ino) = (0xD8A1_u64, 0x11_u64);
@@ -160,6 +161,7 @@ mod tests {
         // ext4 that reuse is deterministic — so start from no
         // process-global capture state at all. See reset_for_tests.
         crate::tier::capture::reset_for_tests();
+        crate::tier::evict::reset_for_tests();
         capture::force_enable();
         let be: Arc<dyn StateBackend> = Arc::new(MemoryBackend::new());
         let (dev, ino) = (0xD8A1_u64, 0x22_u64);

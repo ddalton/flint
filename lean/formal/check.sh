@@ -238,7 +238,7 @@ mutation_run $C LeanChunkGCProbeCollect.cfg "probe: the reaper actually deletes 
   "Invariant Probe_Collected is violated"
 mutation_run $C LeanChunkGCProbeAdopt.cfg "probe: a publisher actually references a chunk it did not upload (adoption is REACHABLE, and only a crash makes it so)" \
   "Invariant Probe_Adopted is violated"
-mutation_run $C LeanChunkGCSlowReader.cfg "the reader does NOT revalidate: its generation is swept out from under it and it reads a hole -- a reader safe for `Retain` PUBLISHES rather than for a duration, which is the wrong unit when a checkout runs minutes and the floor is seconds" \
+mutation_run $C LeanChunkGCSlowReader.cfg "the reader does NOT revalidate: its generation is swept out from under it and it reads a hole -- a reader safe for 'Retain' PUBLISHES rather than for a duration, which is the wrong unit when a checkout runs minutes and the floor is seconds" \
   "Invariant Inv_NoTornRead is violated"
 mutation_run $C LeanChunkGCProbeRestart.cfg "probe: a reader actually restarts onto a newer generation -- without it the strict run is green over a reader that never raced a sweep" \
   "Invariant Probe_Restarted is violated"

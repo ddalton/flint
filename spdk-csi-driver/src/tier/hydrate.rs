@@ -1238,6 +1238,7 @@ mod tests {
         // ext4 that reuse is deterministic — so start from no
         // process-global capture state at all. See reset_for_tests.
         capture::reset_for_tests();
+        crate::tier::evict::reset_for_tests();
         capture::force_enable();
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().to_path_buf();
