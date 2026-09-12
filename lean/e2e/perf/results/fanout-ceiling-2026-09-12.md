@@ -191,6 +191,59 @@ allocator that scales; the ceiling after that is S3's per-prefix rate
 and the node's cores, in that order on a fresh bucket. Torn down: 0
 instances, 0 spot requests, 0 buckets, inline policy removed.
 
+## 4. What a raw HTTP GET path would buy (measured, not built)
+
+Same 6-vCPU VM, same 20,000 objects on loopback fakes3, same
+tmp+rename write per file, both binaries with symbols, shipped defaults
+(6 drivers, mimalloc, fanout 128). `smallclient` is HTTP/1.1 keep-alive
+GETs over 32 raw sockets with no SDK in it; a real raw path would add
+SigV4 signing (~1.2% of the syncer's samples, `sha2` + canonical
+request) and the TLS both already share on the node.
+
+| | files/s (3 runs) | CPU / file | of which kernel |
+|---|---:|---:|---:|
+| flint-sync, shipped defaults | 22,700-28,500 | ~165 us | ~70 us |
+| raw client | 73,500-79,700 | ~50 us | ~45 us |
+
+So the SDK layer costs ~110 us per 8 KiB object here — 2.6-3.5x in
+files/s and 3.3x in CPU per file — and the raw client's own floor is
+the FILESYSTEM: 90% of its CPU is the create + rename, and its top
+symbol is the directory lock (`osq_lock` under `open_last_lookups` and
+`do_renameat2`, 13.5%).
+
+Where the syncer's 165 us go (perf, self time, `flint-sync` DSO = 57%
+of samples, kernel the rest): `memcpy` 5.3% (half of it
+`de_get_object_http_response`), mimalloc alloc/free ~4%, Arc refcount
+atomics (`ldadd8`) ~3.2%, `sha2` 1.2%, `CanonicalRequest::from`,
+`RuntimeComponentsBuilder::merge_from`, `Interceptors::modify_before_
+serialization`, `config_bag::ItemIter`, `SharedRuntimePlugin`,
+`parse_hdr`, `fmt::write`, `String::from_iter`, `hex` — each under 1%,
+thirty of them. That is the smithy orchestrator building a runtime
+component set, a config bag and a signed canonical request per call,
+and there is no single line to fix. Kernel side, two things the write
+path pays that it need not: **20,006 `unlinkat` calls, every one
+ENOENT** (`write_via_tmp_opts` removes the tmp name before `create_new`;
+`O_EXCL` already refuses a leftover or a planted symlink, so the unlink
+could run only on EEXIST — one syscall and one directory write-lock per
+file saved), and **six `stat`s per file** (the containment walk, the
+resume check, `check_parent`, the post-write metadata; ~3 would do).
+
+**Verdict.** A raw path for small whole-object GETs is worth ~2.5-3x in
+CPU per file, and 2.6-3.5x in files/s ONLY where the client is the wall.
+On the node it is not: at 6,200-6,500 files/s the shipped-defaults
+syncer holds 2.5 of 4 cores and S3's per-prefix rate on a fresh bucket
+is what stops it, so a raw path there would buy CPU (smaller pod, more
+syncers per node), not throughput, until the key space spans more S3
+partitions or the prefix has been warmed. It costs owning SigV4,
+credential refresh, retry/backoff with the standard-mode token bucket,
+412/404/5xx classification, checksum validation, path-style and
+endpoint overrides, and `x-amz-meta-*` parsing behind the existing
+`ObjectStore` trait — 400-600 lines plus a live drill. Recommendation:
+not yet. First the two syscall trims above (they are a third of the
+raw client's whole cost, and every path pays them), then measure S3's
+delivered rate on a partitioned prefix; build the raw path when a real
+workload is CPU-bound after this commit.
+
 ## Rig defects found on the way (each would have been quoted)
 
 - macOS `paste -sd,` with no `-` prints usage: every "scoped" syncer got
