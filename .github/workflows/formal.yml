@@ -1,0 +1,105 @@
+# The TLA+ gates, which until now ran only when someone remembered.
+#
+# WHAT THIS JOB CLAIMS, AND WHAT IT DOES NOT. It claims the models still
+# CHECK OUT: every strict run holds, and every must-fail mutation still
+# fails. It does NOT claim the models still describe the code. Nothing
+# automated can: the dangerous drift is the Rust changing until the
+# abstraction no longer matches it, with the .tla file untouched and
+# perfectly green. This project has recorded that failure — the
+# abstraction being the bug — more than once. Read a green badge here as
+# "the model is internally sound", never as "the model is true".
+#
+# WHY IT IS WORTH RUNNING ANYWAY. These are not documentation models.
+# The lean gate is 83 TLC runs and most of them are MUST-FAIL: the
+# script breaks the spec deliberately and requires TLC to catch it, so a
+# model that has decayed into vacuity goes red rather than green. A gate
+# with that shape is worth keeping honest.
+#
+# The trigger is what makes it cheap: both jobs are path-scoped to their
+# own model directory, so an ordinary Rust change runs neither.
+name: formal
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'lean/formal/**'
+      - 'formal/**'
+      - '.github/workflows/formal.yml'
+  pull_request:
+    paths:
+      - 'lean/formal/**'
+      - 'formal/**'
+      - '.github/workflows/formal.yml'
+  # Bit-rot catcher: the models can stop checking without anyone editing
+  # them — a TLC release changes, a run that used to fit in memory stops
+  # fitting. Weekly rather than nightly because the models change rarely
+  # and a job that cries wolf is a job people mute.
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  # ── lean's subtree model: 83 runs, ~10 min ────────────────────────────
+  #
+  # Measured 2026-09-12 on a 4-core workstation: 9m30s wall, 431% CPU —
+  # it parallelises, so a 4-vCPU runner is the right size. On push
+  # because that is affordable and because the gate is only useful if it
+  # answers while the change is still in front of you.
+  lean-model:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      # The scripts fetch tla2tools.jar themselves on first use. Cache it
+      # so a weekly run does not re-download 20 MB from a GitHub release
+      # that is pinned anyway.
+      - uses: actions/cache@v4
+        with:
+          path: .tla2tools.jar
+          key: tla2tools-1.7.4
+      - name: lean formal gate
+        working-directory: lean/formal
+        env:
+          TLA_TOOLS_JAR: ${{ github.workspace }}/.tla2tools.jar
+        run: bash check.sh
+      - name: the gate must have RUN something
+        working-directory: lean/formal
+        # Anti-vacuity, the same guard store-tests carries: a check.sh
+        # that fetched nothing and looped zero times exits 0 and looks
+        # exactly like 83 green runs.
+        env:
+          TLA_TOOLS_JAR: ${{ github.workspace }}/.tla2tools.jar
+        run: |
+          n=$(ls *.cfg | wc -l)
+          echo "cfgs present: $n"
+          test "$n" -ge 40 || { echo "::error::only $n cfgs — the model set did not check out"; exit 1; }
+
+  # ── the hub's models: 250 runs ────────────────────────────────────────
+  #
+  # Roughly three times the lean gate's work, so it is NOT on the default
+  # push path for ordinary work — only when `formal/**` itself changes,
+  # which is rare, plus the weekly run. A gate slow enough to ignore is a
+  # gate people learn to ignore, and the way to avoid that is to fire it
+  # rarely rather than to make it shallow.
+  hub-model:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/cache@v4
+        with:
+          path: .tla2tools.jar
+          key: tla2tools-1.7.4
+      - name: hub formal gate
+        env:
+          TLA_TOOLS_JAR: ${{ github.workspace }}/.tla2tools.jar
+        run: bash scripts/check-tla.sh

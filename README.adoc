@@ -2,6 +2,28 @@
 :toc:
 :toclevels: 2
 
+image:https://github.com/ddalton/flint/actions/workflows/rust-ci.yml/badge.svg?branch=main[rust-ci,link=https://github.com/ddalton/flint/actions/workflows/rust-ci.yml]
+image:https://github.com/ddalton/flint/actions/workflows/dashboard-ci.yml/badge.svg?branch=main[dashboard-ci,link=https://github.com/ddalton/flint/actions/workflows/dashboard-ci.yml]
+image:https://github.com/ddalton/flint/actions/workflows/dashboard-api-spec.yml/badge.svg?branch=main[dashboard-api-spec,link=https://github.com/ddalton/flint/actions/workflows/dashboard-api-spec.yml]
+image:https://github.com/ddalton/flint/actions/workflows/formal.yml/badge.svg?branch=main[formal,link=https://github.com/ddalton/flint/actions/workflows/formal.yml]
+
+// `?branch=main` is deliberate. Without it a badge reports the most
+// recent run of the workflow on ANY ref, so a red run from a fork's
+// pull request shows as this project being broken — and, worse, a
+// green one from a stale branch shows main as healthy when it is not.
+// The badge is only worth putting in a README if it answers "is main
+// good right now".
+//
+// rust-ci carries five jobs: the hub's lib+integration suites, the
+// flint-store crate, flint-lean, flint-forge, and the cross-uid
+// authorization drill against a real kernel NFS mount.
+//
+// `formal` is the TLA+ gate. A green badge there says the models still
+// CHECK OUT — every strict run holds and every must-fail mutation still
+// fails. It does NOT say the models still describe the code; nothing
+// automated can, and reading it that way is how an abstraction becomes
+// the bug.
+
 Kubernetes CSI driver providing high-performance local storage using SPDK (Storage Performance Development Kit) with multi-replica support, snapshots, and volume cloning.
 
 TIP: Looking for a shared POSIX filesystem without any of this machinery?

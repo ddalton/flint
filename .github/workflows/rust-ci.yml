@@ -28,12 +28,19 @@ on:
       # nothing under spdk-csi-driver/ builds its tests. Its own job is
       # below; this is what makes that job run when it changes.
       - 'crates/**'
+      # lean and forge are separate crates for the SAME reason, and for a
+      # year nothing ran their 378 tests on push. A job without its path
+      # here is a gate that never fires.
+      - 'lean/syncer/**'
+      - 'forge/syncer/**'
   pull_request:
     paths:
       - 'spdk-csi-driver/**'
       - '.github/workflows/rust-ci.yml'
       - 'tests/lima/pnfs/**'
       - 'crates/**'
+      - 'lean/syncer/**'
+      - 'forge/syncer/**'
 
 jobs:
   lib-tests:
@@ -180,3 +187,76 @@ jobs:
       - name: hub log on failure
         if: failure()
         run: tail -60 /tmp/hub.log || true
+
+  # ── flint-lean's own suite, which nothing else runs ───────────────────
+  #
+  # Same shape as store-tests above and the same reason: `lean/syncer` is
+  # a SEPARATE crate, not a workspace member, so `cargo test` in
+  # spdk-csi-driver never compiles it. 202 tests — every restart-matrix
+  # row, the lease protocol, the gated lane, the scoped checkout — were a
+  # developer belt that nothing enforced on push. The hub suite's 28
+  # `lean_operator` tests cover the OPERATOR; they say nothing about the
+  # syncer binary that does the work.
+  #
+  # THE BUILD STEP IS NOT REDUNDANT, and this is the trap the crate is
+  # shaped around: both binaries carry `required-features = ["s3"]`, so
+  # `cargo test` compiles NEITHER of them. A rename or a signature change
+  # in `bin/flint_sync.rs` leaves the library suite perfectly green while
+  # the shipped binary does not compile. `--features s3 --bins` is what
+  # makes this job able to see that.
+  lean-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lean/syncer
+      - name: cargo test --lib
+        working-directory: lean/syncer
+        run: cargo test --lib
+      - name: the binaries must COMPILE — `cargo test` never builds them
+        working-directory: lean/syncer
+        run: cargo build --features s3 --bins
+      - name: anti-vacuity — the suite must not be empty
+        working-directory: lean/syncer
+        # A green run over zero tests looks exactly like a green run over
+        # 202. `store-tests` guards its s3 module the same way.
+        run: |
+          n=$(cargo test --lib -- --list | grep -c ': test$' || true)
+          echo "lean tests discovered: $n"
+          test "$n" -ge 150 || {
+            echo "::error::only $n lean tests compiled — the suite did not build"
+            exit 1
+          }
+
+  # ── flint-forge's own suite, same argument ────────────────────────────
+  #
+  # 176 tests, no job until now. Its binaries are gated on TWO different
+  # features — `flint-forge-syncer` on `s3`, `flint-forge-gitcgi` on
+  # `gitcgi` — so a bare build silently skips both. The release build
+  # needs `s3,gitcgi` together, which is exactly what stage-prebuilt.sh
+  # prints in its own MISSING-binary error, and what this job exercises.
+  forge-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: forge/syncer
+      - name: cargo test --lib
+        working-directory: forge/syncer
+        run: cargo test --lib
+      - name: the binaries must COMPILE under the SHIPPED feature set
+        working-directory: forge/syncer
+        run: cargo build --features s3,gitcgi --bins
+      - name: anti-vacuity — the suite must not be empty
+        working-directory: forge/syncer
+        run: |
+          n=$(cargo test --lib -- --list | grep -c ': test$' || true)
+          echo "forge tests discovered: $n"
+          test "$n" -ge 120 || {
+            echo "::error::only $n forge tests compiled — the suite did not build"
+            exit 1
+          }
