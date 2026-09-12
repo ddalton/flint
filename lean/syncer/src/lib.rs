@@ -296,6 +296,15 @@ pub struct LeanConfig {
     /// no memory limit at all. Each entry takes permits proportional to
     /// its size, so small-file trees still run the full width.
     pub fetch_inflight_max_bytes: u64,
+    /// Driver tasks for the checkout fan-out (see `materialize`). Each
+    /// runs `fanout / fetch_drivers` fetches at a time over its own
+    /// slice of the tree, so the per-request SDK work spreads over that
+    /// many cores instead of one. Default: the machine's cores, at most
+    /// 8 (`FLINT_SYNC_FETCH_DRIVERS` / `spec.fetchDrivers`, 0 = auto).
+    /// Measured 2026-09-12: one driver is the ~3,300 files/s plateau on
+    /// i4i.xlarge whatever `fanout` says; four are 6,188-6,521 at
+    /// fanout 256, and fanout 256 beats 128 for the first time.
+    pub fetch_drivers: usize,
 
     /// Materialise an object this size or larger as PARALLEL RANGES
     /// rather than one whole-object GET. `0` disables it.
@@ -396,6 +405,10 @@ impl LeanConfig {
             upload_fanout: 32,
             project_id: None,
             fetch_inflight_max_bytes: 512 * 1024 * 1024,
+            fetch_drivers: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+                .clamp(1, 8),
             range_get_min_bytes: 8 * 1024 * 1024,
             range_get_chunk_bytes: 16 * 1024 * 1024,
             range_get_parallelism: 4,

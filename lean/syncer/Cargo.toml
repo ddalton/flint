@@ -15,7 +15,19 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = []
+# DEFAULT ON since 2026-09-12, after measurement — the same finding the
+# hub made for the NFS server on 2026-08-29 (spdk-csi-driver/Cargo.toml,
+# `fastalloc`). flint-sync ships as a STATIC MUSL binary, and musl's
+# malloc holds ONE process-wide lock. That never showed while the
+# checkout fan-out was driven from a single task; the moment the fetches
+# ran on several threads the lock made it 3x the CPU per file and SLOWER
+# (6-vCPU rig: 6 musl drivers 8.4-10.4k files/s at ~430 us/file vs one
+# driver 11.9-13.0k at ~110 us). Same binary, mimalloc: 21.5-27.7k at
+# ~90 us/file. On i4i.xlarge against real S3: 3,277-3,481 -> 6,188-6,521.
+# `--no-default-features --features s3` restores musl's allocator and is
+# the control arm. Details: lean/e2e/perf/results/fanout-ceiling-2026-09-12.md.
+default = ["fastalloc"]
+fastalloc = ["dep:mimalloc"]
 s3 = ["flint-store/s3"]
 
 [[bin]]
@@ -40,6 +52,7 @@ thiserror = "1.0"
 tokio = { version = "1.0", features = ["full"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 warp = "0.3"
+mimalloc = { version = "0.1", optional = true, default-features = false }
 
 [dev-dependencies]
 async-trait = "0.1"

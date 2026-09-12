@@ -49,6 +49,7 @@ pub fn sync_env(ws: &FlintLeanWorkspace, root: &str) -> Vec<(String, String)> {
         p("FLINT_SYNC_MAX_FILES", s.max_files.to_string()),
         p("FLINT_SYNC_FANOUT", s.fanout.to_string()),
         p("FLINT_SYNC_FETCH_INFLIGHT_MB", s.fetch_inflight_mb.to_string()),
+        p("FLINT_SYNC_FETCH_DRIVERS", s.fetch_drivers.to_string()),
         // Boundary verbs (§2.6), unconditionally.
         p("FLINT_SYNC_BOUNDARY_MODE", s.boundary_mode.clone()),
         p("FLINT_SYNC_SENTINELS", s.sentinels.clone()),
@@ -107,7 +108,7 @@ mod tests {
         assert_eq!(get("FLINT_SYNC_ROOT").as_deref(), Some("/workspace"));
         assert_eq!(get("FLINT_SYNC_ENDPOINT").as_deref(), Some("http://proxy:9000"));
         assert_eq!(get("FLINT_SYNC_WORKSPACE").as_deref(), Some("proj1"));
-        for k in ["FLINT_SYNC_FLOOR_SECS", "FLINT_SYNC_MAX_FILES", "FLINT_SYNC_FANOUT", "FLINT_SYNC_BOUNDARY_MODE", "FLINT_SYNC_METRICS_PORT"] {
+        for k in ["FLINT_SYNC_FLOOR_SECS", "FLINT_SYNC_MAX_FILES", "FLINT_SYNC_FANOUT", "FLINT_SYNC_FETCH_DRIVERS", "FLINT_SYNC_BOUNDARY_MODE", "FLINT_SYNC_METRICS_PORT"] {
             assert!(get(k).is_some(), "{k} must be stamped even at its default");
         }
         assert!(get("FLINT_SYNC_NAMESPACE").is_none(), "the namespace is the caller's literal, never this list's");

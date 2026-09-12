@@ -10752,3 +10752,46 @@ async fn a_publish_that_lands_mid_checkout_names_the_publisher_not_a_stranger() 
         "it materialized a file it could not verify"
     );
 }
+
+/// Two fetches racing into one directory that does not exist yet.
+///
+/// `resolve_contained` walks the parent chain and, for a component that
+/// is missing, calls `create_dir`. Between its stat and its mkdir a
+/// sibling can create the same component, and the loser's EEXIST was
+/// reported as a containment REFUSAL: the entry went to the conflict
+/// record, `materialized` came up one short, the checkout completed,
+/// and the tree had a hole. Unreachable while every fetch was polled
+/// from one driver task — the walk is synchronous, so two entries could
+/// never be inside it at once — and reachable the moment fetches run on
+/// their own tasks, on any tree with a subdirectory: 3 of 6 spawn runs
+/// over 20 x 1,000 files on a 2-vCPU VM came back one file short.
+///
+/// Eight threads released together, fifty rounds, two fresh components
+/// per path. Against the unfixed walk this fails in the first rounds.
+/// What it cannot pin deterministically: a symlink that APPEARS inside
+/// the stat-to-mkdir window. The fix re-stats on EEXIST and refuses a
+/// symlink there exactly as the first stat does; that branch is read,
+/// not raced.
+#[test]
+fn siblings_racing_to_create_one_parent_do_not_refuse_each_other() {
+    let dir = tempfile::tempdir().unwrap();
+    for round in 0..50 {
+        let root = dir.path().join(format!("r{round}"));
+        std::fs::create_dir(&root).unwrap();
+        let go = Arc::new(std::sync::Barrier::new(8));
+        let hs: Vec<_> = (0..8)
+            .map(|i| {
+                let root = root.clone();
+                let go = go.clone();
+                std::thread::spawn(move || {
+                    go.wait();
+                    super::barrier::contained_path(&root, &format!("new/deeper/f-{i}"))
+                })
+            })
+            .collect();
+        for h in hs {
+            h.join().unwrap().expect("a sibling's mkdir is not a containment refusal");
+        }
+        assert!(root.join("new/deeper").is_dir());
+    }
+}

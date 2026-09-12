@@ -130,6 +130,12 @@ fn log_retry(sc: &Syncer, e: &LeanError, fallback: &str) {
 }
 
 
+// See `fastalloc` in Cargo.toml: musl's one-lock malloc is the second
+// ceiling on the read path once the fan-out runs on several threads.
+#[cfg(feature = "fastalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
@@ -170,6 +176,12 @@ async fn main() {
     cfg.max_bytes = env_u64("FLINT_SYNC_MAX_BYTES", 0);
     cfg.max_files = env_u64("FLINT_SYNC_MAX_FILES", 0);
     cfg.fanout = env_u64("FLINT_SYNC_FANOUT", 128).max(1) as usize;
+    // 0 = auto (the machine's cores, at most 8) — the value the CR
+    // stamps by default, so a stamped default and no stamp read alike.
+    match env_u64("FLINT_SYNC_FETCH_DRIVERS", 0) {
+        0 => {}
+        n => cfg.fetch_drivers = n as usize,
+    }
     // Separate from the read knob on purpose — see barrier.rs: uploads
     // have no byte gate, and this number multiplies into the lease-fence
     // window. Raising it needs its own measurement.

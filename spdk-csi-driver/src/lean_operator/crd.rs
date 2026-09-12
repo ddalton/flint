@@ -103,6 +103,14 @@ pub struct FlintLeanWorkspaceSpec {
     #[serde(default = "default_fetch_inflight_mb")]
     pub fetch_inflight_mb: u64,
 
+    /// Driver tasks for the checkout fan-out. `fanout` is how many
+    /// fetches are in flight; this is how many tasks drive them, i.e.
+    /// how many cores the per-request work can use. 0 = auto (the
+    /// syncer's cores, at most 8). One driver was the ~3,300 files/s
+    /// small-file plateau whatever `fanout` said.
+    #[serde(default = "default_fetch_drivers")]
+    pub fetch_drivers: u64,
+
     /// Ceiling on the workspace tree, GiB. 0 = no limit.
     ///
     /// Under the CSI delivery this is a sparse ext4 image loop-mounted
@@ -305,6 +313,9 @@ fn default_fanout() -> u64 {
 }
 fn default_fetch_inflight_mb() -> u64 {
     512
+}
+fn default_fetch_drivers() -> u64 {
+    0
 }
 fn default_size_limit_gib() -> u64 {
     20

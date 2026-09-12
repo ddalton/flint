@@ -10,6 +10,39 @@ StorageClass `parameters` schema, and the `volume_context` key
 namespace. Internal Rust types and node-agent HTTP routes are not
 covered by the stability guarantee.
 
+## [Unreleased]
+
+### Changed
+
+- **lean: the small-file read ceiling was one thread, then one lock.**
+  `checkout` of 20,000 x 8 KiB plateaued at ~3,300 files/s from fanout
+  128 to 512 because every fetch future was polled by ONE
+  `buffer_unordered` task on the main thread — the per-request SDK work
+  ran on one core whatever `fanout` said. The fan-out is now driven by
+  `fetchDrivers` tasks (default 0 = the syncer's cores, at most 8;
+  `FLINT_SYNC_FETCH_DRIVERS`), each over its own slice of the tree. That
+  alone made it WORSE: flint-sync is a static musl binary and musl's
+  malloc holds one process-wide lock, so six drivers burned 3x the CPU
+  per file. `flint-lean` now defaults to mimalloc (`fastalloc`, the
+  hub's 2026-08-29 feature by the same name; `--no-default-features
+  --features s3` is the control arm). i4i.xlarge against real S3, n=3:
+  3,277-3,481 -> 6,188-6,521 files/s at fanout 256 on less CPU per
+  file, and fanout 256 beats 128 for the first time. The ceiling after
+  that is S3's per-prefix rate on a fresh bucket.
+  `lean/e2e/perf/results/fanout-ceiling-2026-09-12.md`.
+
+### Fixed
+
+- **lean: a parent-directory race was a silent hole.** With fetches
+  running in parallel, two siblings race to create the same missing
+  parent; the loser's `EEXIST` was reported as a containment REFUSAL,
+  the checkout completed ("19999 materialized, 0 present"), and one
+  file was missing with only a conflict record to say so. 5 of 12 runs.
+  `resolve_contained` now re-stats on `EEXIST`: a directory is fine, a
+  symlink that appeared in the window is refused exactly as one the
+  stat found. Pinned by
+  `siblings_racing_to_create_one_parent_do_not_refuse_each_other`.
+
 ## [1.50.0] - 2026-09-12
 
 ### Added

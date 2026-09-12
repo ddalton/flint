@@ -1357,9 +1357,28 @@ fn resolve_contained(
             Ok(_) => {}
             Err(_) if i < last => {
                 if create_dirs {
-                    std::fs::create_dir(&cur).map_err(|e| {
-                        LeanError::State(format!("mkdir {}: {e}", cur.display()))
-                    })?;
+                    if let Err(e) = std::fs::create_dir(&cur) {
+                        // A SIBLING may have created it between the stat
+                        // above and this mkdir: fetches run on their own
+                        // tasks, so the first files of one directory
+                        // race here, and the loser's EEXIST is not a
+                        // containment refusal. It is fine only if what
+                        // exists now is a plain directory — a symlink
+                        // that appeared in the window is refused exactly
+                        // as one the stat found.
+                        match std::fs::symlink_metadata(&cur) {
+                            Ok(m) if m.file_type().is_symlink() => {
+                                return refuse("path traverses a symlink");
+                            }
+                            Ok(m) if m.is_dir() => {}
+                            _ => {
+                                return Err(LeanError::State(format!(
+                                    "mkdir {}: {e}",
+                                    cur.display()
+                                )))
+                            }
+                        }
+                    }
                 }
             }
             Err(_) => {}

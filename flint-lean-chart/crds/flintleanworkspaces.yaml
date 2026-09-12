@@ -138,6 +138,17 @@ spec:
                 format: uint64
                 minimum: 0.0
                 type: integer
+              fetchDrivers:
+                default: 0
+                description: |-
+                  Driver tasks for the checkout fan-out. `fanout` is how many
+                  fetches are in flight; this is how many tasks drive them, i.e.
+                  how many cores the per-request work can use. 0 = auto (the
+                  syncer's cores, at most 8). One driver was the ~3,300 files/s
+                  small-file plateau whatever `fanout` said.
+                format: uint64
+                minimum: 0.0
+                type: integer
               fetchInflightMb:
                 default: 512
                 description: |-
@@ -177,12 +188,17 @@ spec:
                     type: string
                 type: object
               image:
-                description: >-
-                  Syncer image override, and DEAD: nothing reads it. The
-                  webhook that did was removed in v1.45.0; the worker
-                  image is pinned by the flint-s3-csi chart and reaches
-                  the node plugin as FLINT_S3CSI_LEAN_IMAGE. Setting this
-                  changes nothing.
+                description: |-
+                  Syncer image override, and DEAD — it has no reader.
+
+                  The webhook that read it went in v1.45.0. The worker image now
+                  comes from `FLINT_S3CSI_LEAN_IMAGE` on the node plugin
+                  (`s3csi/node.rs`), which the flint-s3-csi chart pins, and the
+                  only construction of `WorkerInputs.image` takes it from there.
+                  Setting this on a CR changes nothing. Kept rather than removed
+                  so a spec carrying it still parses — the node plugin REFUSES a
+                  spec it cannot parse — but it should go, with the same
+                  treatment `FlintPassthroughMount.spec.image` needs.
                 nullable: true
                 type: string
               keyPrefix:

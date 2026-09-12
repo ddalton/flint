@@ -298,11 +298,41 @@ impl Syncer {
             let range_min = this.cfg.range_get_min_bytes;
             let range_chunk = this.cfg.range_get_chunk_bytes;
             let range_par = this.cfg.range_get_parallelism;
-        stream::iter(admission.into_iter().map(|(path, entry)| {
-            let store = this.store.clone();
-            let root = this.cfg.root.clone();
-            let local = this.cfg.root.join(path);
-            let gate = gate.clone();
+        // SHARDED DRIVERS. Every fetch future used to be polled by ONE
+        // `buffer_unordered` task on the block_on thread, so each
+        // request's SDK work (build, sign, orchestrate, parse, collect,
+        // checksum) ran on one thread whatever `fanout` said: the main
+        // thread saturated at ~8,000 files/s on a 2-vCPU VM with half a
+        // core idle. Spawning every fetch as its own task fixed that and
+        // then lost to the single driver on a 6-vCPU loopback rig (7.6k
+        // vs 11.4k) — with no RTT to hide behind, a wake per response
+        // per task costs more than the parallelism buys.
+        //
+        // So: `fetch_drivers` driver tasks, each running its own
+        // `buffer_unordered` over a round-robin slice of the (already
+        // largest-first) admission list. A driver's fetches stay on one
+        // task — one wake path, the batching the single driver had —
+        // and the per-request work spreads over that many cores.
+        let drivers = this.cfg.fetch_drivers.max(1);
+        let per_driver = (this.cfg.fanout.max(1) / drivers).max(1);
+        let mut shards: Vec<Vec<(String, super::manifest::LeanEntry)>> =
+            (0..drivers).map(|_| Vec::new()).collect();
+        for (i, (path, entry)) in admission.into_iter().enumerate() {
+            shards[i % drivers].push((path.clone(), entry.clone()));
+        }
+        let store_all = this.store.clone();
+        let root_all = this.cfg.root.clone();
+        let mut set = tokio::task::JoinSet::new();
+        for shard in shards {
+            let store_d = store_all.clone();
+            let root_d = root_all.clone();
+            let gate_d = gate.clone();
+            set.spawn(async move {
+        stream::iter(shard.into_iter().map(|(path, entry)| {
+            let store = store_d.clone();
+            let root = root_d.clone();
+            let local = root_d.join(&path);
+            let gate = gate_d.clone();
             // THE CHARGE MUST DESCRIBE THE PATH THAT WILL RUN.
             //
             // `fetch_inflight_max_bytes` is a bound on BYTES HELD IN
@@ -346,7 +376,7 @@ impl Syncer {
                 // control files); it stays cited and a conflict
                 // record names it. Same arm refuses a citation
                 // whose path escapes the workspace.
-                let target = match contained_path(&root, path) {
+                let target = match contained_path(&root, &path) {
                     Ok(t) => t,
                     Err(e) => {
                         return Ok(Fetched {
@@ -624,9 +654,21 @@ impl Syncer {
                 })
             }
         }))
-        .buffer_unordered(this.cfg.fanout.max(1))
+        .buffer_unordered(per_driver)
         .collect::<Vec<LeanResult<Fetched>>>()
         .await
+            });
+        }
+        let mut out = Vec::new();
+        while let Some(r) = set.join_next().await {
+            match r {
+                Ok(v) => out.extend(v),
+                Err(e) => out.push(Err(LeanError::State(format!(
+                    "fetch driver did not complete: {e}"
+                )))),
+            }
+        }
+        out
     }
 
     /// Materialize the workspace from the manifest. Idempotent across
