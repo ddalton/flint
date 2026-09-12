@@ -143,8 +143,18 @@ impl Syncer {
         let ib = inbox::load(self.store.as_ref(), &self.cfg).await?;
         let mut remote: BTreeMap<String, String> =
             theirs.entries.iter().map(|(p, e)| (p.clone(), e.etag.clone())).collect();
+        // The writer's CRC for each remote etag, overlaid in the same
+        // order as the etags so the two maps always describe the same
+        // object: the manifest's for a cited entry, the inbox entry's
+        // for an overlay (`None` if that writer had none to give).
+        let mut remote_crc: BTreeMap<String, Option<String>> = theirs
+            .entries
+            .iter()
+            .map(|(p, e)| (p.clone(), Some(e.crc64_b64.clone())))
+            .collect();
         for e in &ib.doc.entries {
             remote.insert(e.path.clone(), e.etag.clone());
+            remote_crc.insert(e.path.clone(), e.crc64_b64.clone());
         }
 
         /// Paths whose `inst_base` this sync is entitled to advance:
@@ -189,13 +199,18 @@ impl Syncer {
                     Ok(m) if m.etag == *etag => Some(m),
                     _ => None,
                 };
+                // The remote's CRC: the backend's attestation when it
+                // offers one, else the writer's for this etag — client-
+                // computed, so it exists on a backend that attests none
+                // (Ozone). Without either the bytes cannot be judged
+                // identical, and the path is a conflict as before.
+                let want: Option<String> = remote_meta.as_ref().and_then(|m| {
+                    m.crc64_b64.clone().or_else(|| remote_crc.get(path).cloned().flatten())
+                });
                 let local_path = self.cfg.root.join(path);
-                let identical = match (&remote_meta, std::fs::read(&local_path)) {
-                    (Some(m), Ok(bytes)) => {
-                        m.crc64_b64.as_deref() == Some(crc64_to_b64(crc64_nvme(&bytes)).as_str())
-                    }
-                    _ => false,
-                };
+                let local_crc =
+                    std::fs::read(&local_path).ok().map(|b| crc64_to_b64(crc64_nvme(&b)));
+                let identical = want.is_some() && want == local_crc;
                 if identical {
                     let st = std::fs::metadata(&local_path)?;
                     let stamps =
@@ -211,6 +226,7 @@ impl Syncer {
                             size: st.len(),
                             mtime_unix: mtime_of(&st),
                             version_id: None,
+                            crc64_b64: local_crc,
                         },
                     );
                     advanced.0.insert(path.clone());
@@ -253,6 +269,24 @@ impl Syncer {
                 Err(e) => return Err(e.into()),
             };
             let mode = PosixStamps::from_meta(&meta.meta).map(|p| p.mode);
+            // VERIFIED before it is written, exactly as checkout's fresh
+            // fetch is: against the writer's CRC for this etag (the
+            // manifest's for a cited entry, the gateway's for an inbox
+            // overlay), else the backend's attestation when it offers
+            // one. What the baseline records is OURS, over the bytes
+            // written; the next citation repair cites that.
+            let got = crc64_to_b64(crc64_nvme(&body));
+            let want =
+                remote_crc.get(path).cloned().flatten().or_else(|| meta.crc64_b64.clone());
+            if let Some(want) = want {
+                if want != got {
+                    return Err(LeanError::State(format!(
+                        "sync: {path} (etag {etag}) is cited with CRC-64 {want}, but the bytes \
+                         fetched under that etag hash to {got} — the object is corrupt or the \
+                         store returned the wrong bytes; refusing to apply it (nothing written)"
+                    )));
+                }
+            }
             if let Err(e) = write_file_atomic_in(&self.cfg.root, path, &body, mode) {
                 // Containment refusal: surfaced, never a wedge.
                 self.state.append_conflict(&ConflictRecord {
@@ -276,6 +310,7 @@ impl Syncer {
                     size: st.len(),
                     mtime_unix: mtime_of(&st),
                     version_id: None,
+                    crc64_b64: Some(got),
                 },
             );
             advanced.0.insert(path.clone());

@@ -655,6 +655,7 @@ async fn handle_files_put(
         etag: meta.etag.clone(),
         author,
         added_unix: now_unix(),
+        crc64_b64: Some(flint_store::crc64_to_b64(crc)),
     };
     match inbox::gateway_append(core.store.as_ref(), &cfg, entry).await {
         Ok(()) => ok_json(&EtagResp { etag: meta.etag }),

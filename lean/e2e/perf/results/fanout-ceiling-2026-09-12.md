@@ -297,8 +297,9 @@ writes it and folds the ranges in offset order with `crc64_combine`,
 compared before the rename. Only CITED bytes are checked — an If-Match
 hit or a pinned version. The S3-wins adoption arm adopts bytes that
 moved past the manifest, whose CRC describes the old ones, and is
-exempt by construction; legacy entries carry no CRC and stay unchecked.
-A mismatch refuses the checkout with nothing written or renamed.
+exempt from the MANIFEST check (§7 checks it against the backend's own
+attestation when one is offered). A mismatch refuses the checkout with
+nothing written or renamed.
 
 Mutation controls: the whole-arm check deleted fails only the
 whole-arm test; the ranged fold deleted fails only the ranged test; the
@@ -313,6 +314,71 @@ Cost, 6-vCPU rig, loopback, tmpfs, fanout 128, n=3 interleaved:
 previous build 32,102-33,388 files/s, with the check 31,496-32,573.
 An 8 KiB CRC is ~8 us on the blocking pool; the ranges overlap. Identity
 20,000/0 on both runs.
+
+## 7. The manifest CRC is client-computed, and mandatory (done)
+
+Section 6 left two holes. A legacy entry without a CRC stayed
+unchecked, and the three citation repairs (the barrier's, the gated
+lane's, `recover_staged`) copied the CRC from a HEAD — which Ozone
+never returns, and which a HITL uploader on S3 may not have sent — so
+on Ozone the manifest could not carry a CRC for any adopted file at
+all, and §6's check was empty exactly where the backend attests
+nothing. Lean is not yet adopted, so there is no upgrade to carry:
+`LeanEntry::crc64_b64` is a `String` now.
+
+Every value is computed by the flint client that MOVED the bytes, never
+copied from a header:
+
+- the publisher, over what it uploaded (as before);
+- a consume, a sync apply, or a checkout, over what it wrote — recorded
+  in `BaselineEntry::crc64_b64` (`None` only on the consume-dirty
+  sentinel, which never repairs);
+- the barrier's and the gated lane's citation repairs cite the
+  BASELINE's; a HEAD's checksum is a cross-check that refuses loudly on
+  disagreement ("the workspace holds bytes the object does not");
+- `recover_staged` has no baseline (a replacement pod), so it takes the
+  versioned HEAD's when the backend attests one and otherwise fetches
+  the version it re-cites and hashes it — the one recovery step that
+  moves data, and only there;
+- the inbox entry carries the writer's CRC: the gateway hashes the
+  request body, a merge-preserved entry carries the manifest's, a draft
+  promote (a server-side copy) carries the backend's echo or none.
+
+With the writer's CRC on every path, a consume and a sync apply now
+verify fetched bytes before writing them, the way §6's fresh fetch
+does; sync's phantom-conflict identity check, which compared the local
+hash to HEAD's, uses the writer's CRC when HEAD attests nothing; and
+checkout's adopted (uncited) bytes are checked against the backend's
+attestation when it offers one and hashed either way for the baseline.
+
+The double: `AttestsNoChecksum` strips the checksum from every read and
+every write echo (HEAD, GET, versioned HEAD/GET, PUT, copy) — Ozone's
+shape — with an anti-vacuity assertion that the store underneath still
+carries one. Six mutation controls, each failing exactly the test that
+pins it (M1 also fails the pre-existing HITL leg, which now verifies on
+its fresh checkout):
+
+| mutation | fails |
+|---|---|
+| M1 barrier repair cites a wrong CRC | `a_hitl_upload_on_a_backend_that_attests_no_checksum_is_cited_with_the_bytes_crc`, `hitl_upload_survives_two_barriers_without_sync` |
+| M2 recover fallback hashes nothing | `recover_staged_on_a_backend_that_attests_no_checksum_hashes_what_it_recites` |
+| M3 sync identity from HEAD only | `sync_on_a_backend_that_attests_no_checksum_still_sees_identical_bytes` |
+| M4 consume check removed | `a_consume_whose_bytes_do_not_match_the_writers_crc_is_refused` |
+| M5 sync apply check removed | `a_sync_whose_bytes_do_not_match_the_manifest_crc_is_refused` |
+| M6 gated repair cites a wrong CRC | `a_gated_citation_repair_on_a_backend_that_attests_no_checksum_cites_the_bytes_crc` |
+
+M6 first PASSED the whole battery: the gated lane's citation repair
+(§2.4.2) had no test at all — no test in the file mentioned
+`repaired` — and citing a wrong CRC there broke nothing until the
+sixth test was written. Battery 212/212.
+
+Not carried: a manifest written before this change does not load (the
+field is required); a baseline written before it loads with no CRC,
+and a citation repair on such an entry refuses loudly rather than
+citing bare; an inbox entry without one is verified against the
+backend's attestation only. The rig was not rerun — the cited-fetch
+path hashes exactly what §6 measured — and the gated lane's HEAD
+cross-check is one more comparison per repaired path.
 
 ## Rig defects found on the way (each would have been quoted)
 
@@ -334,14 +400,11 @@ An 8 KiB CRC is ~8 us on the blocking pool; the ranges overlap. Identity
 ## What ships, and what does not yet
 
 - `resolve_contained` EEXIST fix + test: ship regardless.
-- Sharded drivers (`fetch_drivers`, default = cores clamped to 8): the
-  env knob `FLINT_SYNC_FETCH_DRIVERS` is NOT stamped by the webhook, so
-  either it becomes a CR field or the default stays computed and the env
-  read is removed before release (see `inject.rs`
-  `every_knob_the_sidecar_reads_is_stamped_by_the_webhook`).
-- mimalloc as global allocator (`--features mimalloc`): behind a feature
-  until the cluster leg lands; the shipped images are static musl, so
-  this applies to every image, and the SAME lock sits under
-  `barrier`'s `upload_fanout` and forge's push.
+- Sharded drivers (`fetch_drivers`, default = cores clamped to 8, `0` =
+  auto) and mimalloc (`fastalloc`, default on) shipped in `087d5c43`:
+  `FLINT_SYNC_FETCH_DRIVERS` is stamped from the CR's `fetchDrivers` by
+  `sync_env()` like every other knob. The shipped images are static
+  musl, so the allocator lock applies to every image, and the SAME lock
+  sits under `barrier`'s `upload_fanout` and forge's push.
 - Not touched: the SDK-per-request cost (~100 us/file), which is now the
   floor. A raw hyper GET path for small objects is the next lever.

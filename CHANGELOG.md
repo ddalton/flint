@@ -55,10 +55,32 @@ covered by the stability guarantee.
   (Ozone carries no CRC-64) validates nothing. Now the whole-object arm
   hashes the body before the write and the ranged arm folds each
   range's CRC in offset order before the rename; a mismatch refuses the
-  checkout with nothing written. Only cited bytes are checked — the
-  S3-wins adoption arm adopts bytes the manifest's CRC does not
-  describe, and legacy entries carry none. Three mutation controls,
-  each failing exactly one test. Cost within noise on the rig.
+  checkout with nothing written. Only cited bytes are checked against
+  the manifest — the S3-wins adoption arm adopts bytes the manifest's
+  CRC does not describe. Three mutation controls, each failing exactly
+  one test. Cost within noise on the rig.
+
+- **lean: the manifest's CRC-64 is mandatory and computed by the client
+  that moved the bytes — never copied from a backend header.** The
+  three citation repairs (the barrier's, the gated lane's,
+  `recover-staged`) took the CRC from a HEAD, which Ozone never returns
+  and a HITL uploader may not have sent, so on Ozone the manifest could
+  not carry a CRC for any adopted file and the check above was empty
+  exactly where the backend attests nothing. Now `LeanEntry.crc64_b64`
+  is required; the baseline records the CRC of what each consume, sync
+  or checkout wrote and the repairs cite that (a HEAD's value is a
+  cross-check that refuses loudly on disagreement); `recover-staged`,
+  which has no baseline, hashes the version it re-cites when the
+  backend attests nothing; and the inbox entry carries the writer's CRC
+  (the gateway hashes the request body). With it, a consume and a sync
+  apply verify fetched bytes before writing them, and sync's
+  phantom-conflict identity check works on a backend with no checksum
+  header. Pinned on an Ozone-shaped double that attests nothing
+  (`AttestsNoChecksum`); six mutation controls, each failing exactly
+  the test that pins it — the gated lane's repair had NO test before
+  (citing a wrong CRC there passed the whole battery). Manifests
+  written before this change do not load; lean is not yet adopted, so
+  there is no migration.
 
 - **lean: a parent-directory race was a silent hole.** With fetches
   running in parallel, two siblings race to create the same missing

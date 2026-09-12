@@ -26,7 +26,15 @@ pub struct LeanEntry {
     /// Object key (under `<prefix>/files/`).
     pub key: String,
     pub etag: String,
-    pub crc64_b64: Option<String>,
+    /// Full-object CRC-64/NVME of the cited bytes, in wire (base64)
+    /// form — computed by the flint client that MOVED the bytes (the
+    /// publisher over what it uploaded, a consume or checkout over what
+    /// it wrote), never copied from a backend header. It is the one
+    /// integrity check that holds on every backend: S3 attests a
+    /// checksum on the wire, Ozone attests none, and the manifest's
+    /// value describes the bytes either way. Every reader verifies a
+    /// fresh fetch against it before the file becomes visible.
+    pub crc64_b64: String,
     pub size: u64,
     pub mode: u32,
     pub mtime_unix: i64,

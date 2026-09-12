@@ -111,6 +111,7 @@ async fn hitl_write(
             etag: meta.etag.clone(),
             author: author.to_string(),
             added_unix: now_unix(),
+            crc64_b64: Some(flint_store::crc64_to_b64(crc)),
         },
     )
     .await?;
@@ -666,6 +667,7 @@ async fn window_refuses_hitl_and_expiry_unwedges() {
         etag: "e".into(),
         author: "dilip".into(),
         added_unix: now_unix(),
+        crc64_b64: None,
     };
 
     inbox::open_window(store.as_ref(), &sc.cfg, 1, now_unix() + 300).await.unwrap();
@@ -1296,7 +1298,7 @@ async fn legacy_flint_citation_survives_upgrade() {
         manifest::LeanEntry {
             key: key.clone(),
             etag: meta.etag.clone(),
-            crc64_b64: meta.crc64_b64.clone(),
+            crc64_b64: meta.crc64_b64.clone().unwrap(),
             size: meta.size,
             mode: 0o644,
             mtime_unix: 0,
@@ -1318,6 +1320,7 @@ async fn legacy_flint_citation_survives_upgrade() {
             size: meta.size,
             mtime_unix: 0,
             version_id: None,
+            crc64_b64: meta.crc64_b64.clone(),
         },
     );
     b.inst_base.insert(".flint/legacy.txt".into(), meta.etag.clone());
@@ -1381,7 +1384,7 @@ async fn checkout_never_materializes_control_citation() {
         manifest::LeanEntry {
             key,
             etag: meta.etag.clone(),
-            crc64_b64: meta.crc64_b64.clone(),
+            crc64_b64: meta.crc64_b64.clone().unwrap(),
             size: meta.size,
             mode: 0o644,
             mtime_unix: 0,
@@ -2053,7 +2056,7 @@ async fn scoped_sync_preserves_out_of_scope_foreign_flow() {
             .unwrap();
         let e = theirs.entries.get_mut(path).unwrap();
         e.etag = meta.etag.clone();
-        e.crc64_b64 = meta.crc64_b64.clone();
+        e.crc64_b64 = meta.crc64_b64.clone().unwrap();
         e.size = meta.size;
         e.generation = 2;
     }
@@ -2780,7 +2783,7 @@ async fn the_reaper_reclaims_only_the_version_its_own_record_names() {
     let mut pe = super::gated::PendingEntry {
         key: key.clone(),
         etag: installed.entries["n.txt"].etag.clone(),
-        crc64_b64: None,
+        crc64_b64: installed.entries["n.txt"].crc64_b64.clone(),
         size: 2,
         mode: 0o644,
         mtime_unix: 0,
@@ -5997,7 +6000,7 @@ async fn sync_refuses_to_clobber_a_locally_dirty_path_and_says_so() {
             .unwrap();
         let e = theirs.entries.get_mut(path).unwrap();
         e.etag = meta.etag.clone();
-        e.crc64_b64 = meta.crc64_b64.clone();
+        e.crc64_b64 = meta.crc64_b64.clone().unwrap();
         e.size = meta.size;
         e.generation = 2;
     }
@@ -6063,7 +6066,7 @@ async fn merge_applies_a_local_delete_only_where_theirs_is_unchanged() {
         manifest::LeanEntry {
             key: "tenant/proj1/files/p.txt".into(),
             etag: etag.into(),
-            crc64_b64: None,
+            crc64_b64: "AAAAAAAAAAA=".into(),
             size: 3,
             mode: 0o644,
             mtime_unix: 0,
@@ -6172,7 +6175,7 @@ async fn a_resumed_checkout_adopts_identical_bytes_and_refetches_same_size_impos
         .unwrap();
     let e = theirs.entries.get_mut("impostor.txt").unwrap();
     e.etag = meta.etag.clone();
-    e.crc64_b64 = meta.crc64_b64.clone();
+    e.crc64_b64 = meta.crc64_b64.clone().unwrap();
     e.size = meta.size;
     e.generation = 2;
     manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.handle()), 0, "sibling")
@@ -6266,7 +6269,7 @@ async fn sync_under_pinned_reads_resolves_the_cited_version_not_the_current_one(
     {
         let e = theirs.entries.get_mut("d.txt").unwrap();
         e.etag = v2.etag.clone();
-        e.crc64_b64 = v2.crc64_b64.clone();
+        e.crc64_b64 = v2.crc64_b64.clone().unwrap();
         e.size = v2.size;
         e.generation = 2;
         e.version_id = v2.version_id.clone();
@@ -6472,7 +6475,7 @@ fn entry(name: &str) -> manifest::LeanEntry {
     manifest::LeanEntry {
         key: format!("{PREFIX}/files/{name}"),
         etag: "e".into(),
-        crc64_b64: None,
+        crc64_b64: "AAAAAAAAAAA=".into(),
         size: 1,
         mode: 0o100644,
         mtime_unix: 0,
@@ -7196,7 +7199,7 @@ fn entry_at(k: &str, seq: u64) -> super::manifest::LeanEntry {
     super::manifest::LeanEntry {
         key: format!("files/{k}"),
         etag: format!("e-{k}-{seq}"),
-        crc64_b64: None,
+        crc64_b64: "AAAAAAAAAAA=".into(),
         size: 10,
         mode: 0o644,
         mtime_unix: 1_700_000_000,
@@ -10922,4 +10925,457 @@ async fn a_ranged_fetch_whose_bytes_do_not_match_the_manifest_crc_is_refused() {
     assert!(msg.contains("CRC-64") && msg.contains("10 ranges"), "{msg}");
     assert!(!dir_b.path().join("weights.bin").exists(), "a wrong object must never be renamed into place");
     assert!(!dir_b.path().join("weights.bin.flint-sync-tmp").exists(), "the temp file is cleaned up");
+}
+
+// ---------------------------------------------------------------------
+// The manifest's CRC is CLIENT-computed: a backend that attests nothing
+// ---------------------------------------------------------------------
+
+/// A backend that attests NO checksum on any read — HEAD, GET, a
+/// versioned HEAD or GET — and echoes none on a write: Ozone's shape,
+/// and on S3 the shape of a HITL upload sent without one. Every CRC the
+/// manifest carries must then have been computed by a flint client
+/// over the bytes it moved; nothing here can be copied from a header.
+///
+/// `compose_generation` is left alone: `flint-store`'s S3 backend folds
+/// the part CRCs itself and returns that whatever the wire echoed, so a
+/// compose with no checksum is a different double (`ComposeWithoutChecksum`).
+struct AttestsNoChecksum(Arc<MemoryStore>);
+
+fn unattested(mut m: flint_store::ObjectMeta) -> flint_store::ObjectMeta {
+    m.crc64_b64 = None;
+    m
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for AttestsNoChecksum {
+    async fn copy_object(
+        &self,
+        src_key: &str,
+        src_if_match: Option<&str>,
+        dst_key: &str,
+        condition: &PutCondition,
+        stamps: &GenerationStamps,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.0.copy_object(src_key, src_if_match, dst_key, condition, stamps).await.map(unattested)
+    }
+    async fn put_whole(
+        &self,
+        key: &str,
+        body: Bytes,
+        cond: &PutCondition,
+        stamps: &GenerationStamps,
+        crc: u64,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.0.put_whole(key, body, cond, stamps, crc).await.map(unattested)
+    }
+    async fn compose_generation(
+        &self,
+        spec: &flint_store::ComposeSpec<'_>,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.0.compose_generation(spec).await
+    }
+    async fn head(&self, key: &str) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.0.head(key).await.map(unattested)
+    }
+    async fn get_whole(
+        &self,
+        key: &str,
+        if_match: Option<&str>,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        self.0.get_whole(key, if_match).await.map(|(m, b)| (unattested(m), b))
+    }
+    async fn get_range(
+        &self,
+        key: &str,
+        off: u64,
+        len: u64,
+        if_match: &str,
+    ) -> flint_store::StoreResult<Bytes> {
+        self.0.get_range(key, off, len, if_match).await
+    }
+    fn min_part_size(&self) -> u64 {
+        self.0.min_part_size()
+    }
+    fn max_parts(&self) -> usize {
+        self.0.max_parts()
+    }
+    async fn list(&self, prefix: &str) -> flint_store::StoreResult<Vec<flint_store::ListedObject>> {
+        self.0.list(prefix).await
+    }
+    async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
+        self.0.delete(key).await
+    }
+    async fn head_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.0.head_version(key, v).await.map(unattested)
+    }
+    async fn get_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        self.0.get_version(key, v).await.map(|(m, b)| (unattested(m), b))
+    }
+    async fn delete_version(&self, key: &str, v: &str) -> flint_store::StoreResult<()> {
+        self.0.delete_version(key, v).await
+    }
+    async fn list_versions(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::ListedVersion>> {
+        self.0.list_versions(prefix).await
+    }
+    async fn list_uploads(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::PendingUpload>> {
+        self.0.list_uploads(prefix).await
+    }
+    async fn abort_upload(&self, key: &str, id: &str) -> flint_store::StoreResult<()> {
+        self.0.abort_upload(key, id).await
+    }
+    async fn bootstrap(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<flint_store::BootstrapReport> {
+        self.0.bootstrap(prefix).await
+    }
+    async fn epoch_read(
+        &self,
+        key: &str,
+    ) -> flint_store::StoreResult<Option<flint_store::EpochState>> {
+        self.0.epoch_read(key).await
+    }
+    async fn epoch_acquire(
+        &self,
+        key: &str,
+        holder: &str,
+        observed: Option<&flint_store::EpochState>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.0.epoch_acquire(key, holder, observed).await
+    }
+    async fn epoch_renew(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+        echo: Option<&str>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.0.epoch_renew(key, lease, echo).await
+    }
+    async fn epoch_release(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+    ) -> flint_store::StoreResult<()> {
+        self.0.epoch_release(key, lease).await
+    }
+}
+
+/// A syncer over any store, for the doubles that wrap `MemoryStore`.
+fn syncer_on(store: Arc<dyn ObjectStore>, root: &std::path::Path) -> Syncer {
+    let cfg = cfg_for(root);
+    let state = SyncerState::open(cfg.state_dir()).unwrap();
+    Syncer { store, cfg, state, lease: None, noted_not_regular: Default::default() }
+}
+
+fn crc_of(content: &str) -> String {
+    flint_store::crc64_to_b64(crc64_nvme(content.as_bytes()))
+}
+
+/// The double has the property it claims: nothing it returns carries a
+/// checksum, while the store underneath it does. A double missing a
+/// property passes for the wrong reason.
+async fn assert_attests_nothing(mem: &Arc<MemoryStore>, store: &Arc<dyn ObjectStore>, key: &str) {
+    assert!(mem.head(key).await.unwrap().crc64_b64.is_some(), "the fixture object has a CRC");
+    assert!(store.head(key).await.unwrap().crc64_b64.is_none(), "HEAD attests a checksum");
+    let (m, _) = store.get_whole(key, None).await.unwrap();
+    assert!(m.crc64_b64.is_none(), "GET attests a checksum");
+}
+
+/// A HITL upload on a backend that attests no checksum — and from a
+/// writer that sent none in its inbox entry either (an old gateway, a
+/// draft promote), so NOTHING on the read path carries a CRC. The
+/// consume hashes what it writes, the baseline carries that, and the
+/// citation repair cites it: the manifest ends up with the bytes' CRC
+/// with no header ever consulted. A fresh checkout — which now verifies
+/// every fetch against the manifest — materialises the file.
+///
+/// Before this change the repair copied HEAD's checksum into the
+/// manifest, which here is `None`: the manifest could not carry one at
+/// all on Ozone.
+#[tokio::test]
+async fn a_hitl_upload_on_a_backend_that_attests_no_checksum_is_cited_with_the_bytes_crc() {
+    let mem = Arc::new(MemoryStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(AttestsNoChecksum(mem.clone()));
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = syncer_on(store.clone(), dir.path());
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+    write(dir.path(), "agent.txt", "agent work");
+    sc.run_barrier().await.unwrap();
+
+    // The upload lands object-first, then an inbox entry that names
+    // only the etag.
+    let key = sc.cfg.file_key("docs/upload.pdf");
+    let body = Bytes::from_static(b"user bytes");
+    let stamps = GenerationStamps {
+        generation: 0,
+        epoch: 0,
+        flush_uuid: "gateway-old".into(),
+        boundary_source: None,
+        posix: None,
+    };
+    let meta = mem
+        .put_whole(&key, body.clone(), &PutCondition::IfNoneMatchAny, &stamps, crc64_nvme(&body))
+        .await
+        .unwrap();
+    inbox::gateway_append(
+        store.as_ref(),
+        &sc.cfg,
+        InboxEntry {
+            path: "docs/upload.pdf".into(),
+            etag: meta.etag.clone(),
+            author: "dilip".into(),
+            added_unix: now_unix(),
+            crc64_b64: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_attests_nothing(&mem, &store, &key).await;
+
+    write(dir.path(), "agent.txt", "agent work v2 — longer");
+    sc.run_barrier().await.unwrap();
+    sc.run_barrier().await.unwrap();
+
+    assert_eq!(read(dir.path(), "docs/upload.pdf").unwrap(), "user bytes");
+    let b = sc.state.load_baseline().unwrap();
+    assert_eq!(
+        b.entries["docs/upload.pdf"].crc64_b64.as_deref(),
+        Some(crc_of("user bytes").as_str()),
+        "the baseline carries the CRC of the bytes the consume wrote"
+    );
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
+    let e = m.entries.get("docs/upload.pdf").expect("amputated!");
+    assert_eq!(e.crc64_b64, crc_of("user bytes"), "the repair cited the bytes' CRC");
+
+    // A fresh reader verifies against exactly that and gets the file.
+    let dir2 = tempfile::tempdir().unwrap();
+    let mut sc2 = syncer_on(store.clone(), dir2.path());
+    sc2.checkout().await.unwrap();
+    assert_eq!(read(dir2.path(), "docs/upload.pdf").unwrap(), "user bytes");
+}
+
+/// Recovery on a backend that attests no checksum: a replacement pod
+/// has no baseline to ask and the versioned HEAD carries nothing, so
+/// the re-citation is the one recovery step that moves data — it
+/// fetches the version it re-cites and hashes it. The proof that the
+/// hash is right is a fresh checkout, which refuses a wrong one.
+#[tokio::test]
+async fn recover_staged_on_a_backend_that_attests_no_checksum_hashes_what_it_recites() {
+    let mem = Arc::new(MemoryStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(AttestsNoChecksum(mem.clone()));
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer_on(store.clone(), dir.path());
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+
+    write(dir.path(), "cited.txt", "V1");
+    a.upload_lane().await.unwrap();
+    a.citation_pass(CitationSource::Sentinel).await.unwrap();
+
+    write(dir.path(), "cited.txt", "V2-UNCITED");
+    backdate_baseline(&a, "cited.txt");
+    write(dir.path(), "brand-new.txt", "NEW-UNCITED");
+    a.upload_lane().await.unwrap();
+    let key = a.cfg.file_key("brand-new.txt");
+    drop(a);
+
+    assert_attests_nothing(&mem, &store, &key).await;
+    let vs = store.list_versions(&key).await.unwrap();
+    let cur = vs.iter().find(|v| v.is_current).unwrap();
+    assert!(
+        store.head_version(&key, &cur.version_id).await.unwrap().crc64_b64.is_none(),
+        "the versioned HEAD attests a checksum"
+    );
+
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = syncer_on(store.clone(), dir_b.path());
+    b.cfg.boundary_mode = super::BoundaryMode::Gated;
+    b.cfg.visibility_lag_bound_secs = Some(3600);
+    assert!(claim_until_held(&mut b, 12).await);
+    let r = b.recover_staged().await.unwrap();
+    assert_eq!(r.recited.len(), 2, "recovery re-cited {:?}", r.recited);
+
+    let m = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries["brand-new.txt"].crc64_b64, crc_of("NEW-UNCITED"));
+    assert_eq!(m.entries["cited.txt"].crc64_b64, crc_of("V2-UNCITED"));
+
+    let dir_c = tempfile::tempdir().unwrap();
+    let mut c = syncer_on(store.clone(), dir_c.path());
+    c.checkout().await.unwrap();
+    assert_eq!(read(dir_c.path(), "cited.txt").as_deref(), Some("V2-UNCITED"));
+    assert_eq!(read(dir_c.path(), "brand-new.txt").as_deref(), Some("NEW-UNCITED"));
+}
+
+/// The phantom-conflict rule on a backend that attests no checksum: the
+/// dirty-vs-remote identity check used to compare the local hash with
+/// HEAD's, which here is `None` — every crash-shaped re-honor reported
+/// a conflict for byte-identical content. The writer's CRC in the inbox
+/// entry is what carries the check now.
+#[tokio::test]
+async fn sync_on_a_backend_that_attests_no_checksum_still_sees_identical_bytes() {
+    let mem = Arc::new(MemoryStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(AttestsNoChecksum(mem.clone()));
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer_on(store.clone(), dir.path());
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "shared.txt", "v1");
+    a.run_barrier().await.unwrap();
+
+    // The gateway hashes what it sends; the backend attests nothing.
+    hitl_write(&mem, &a.cfg, "shared.txt", "foreign v2", "ci").await.unwrap();
+    assert_attests_nothing(&mem, &store, &a.cfg.file_key("shared.txt")).await;
+    let r = a.sync().await.unwrap();
+    assert!(r.applied.contains(&"shared.txt".to_string()));
+
+    let mut b = a.state.load_baseline().unwrap();
+    let stale = b.entries.get_mut("shared.txt").unwrap();
+    stale.etag = "\"stale-pre-sync-etag\"".into();
+    stale.mtime_unix -= 10;
+    stale.size = 1;
+    a.state.save_baseline(&b).unwrap();
+    let scanned = super::scan::scan(dir.path()).unwrap();
+    let c = super::scan::classify(&scanned, &a.state.load_baseline().unwrap());
+    assert!(c.uploads.contains("shared.txt"), "the fixture is not actually dirty");
+
+    let r = a.sync().await.unwrap();
+    assert!(
+        !r.conflicts.contains(&"shared.txt".to_string()),
+        "a phantom conflict was reported for byte-identical content"
+    );
+    assert!(r.applied.contains(&"shared.txt".to_string()));
+}
+
+/// A consume whose bytes do not match the writer's CRC is refused: not
+/// written, not consumed (the entry stays in the cell so the failure
+/// repeats visibly), and recorded. The corruption keeps the etag and
+/// the store's attestation intact, the shape of bit-rot or a broken
+/// gateway.
+#[tokio::test]
+async fn a_consume_whose_bytes_do_not_match_the_writers_crc_is_refused() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+    write(dir.path(), "agent.txt", "agent work");
+    sc.run_barrier().await.unwrap();
+
+    hitl_write(&store, &sc.cfg, "docs/upload.pdf", "user bytes", "dilip").await.unwrap();
+    store.inject_corrupt_body(&sc.cfg.file_key("docs/upload.pdf"), |b| b[3] ^= 0x40);
+
+    sc.run_barrier().await.unwrap();
+    assert!(read(dir.path(), "docs/upload.pdf").is_none(), "corrupt bytes were written");
+    assert!(
+        sc.state.load_conflicts().unwrap().iter().any(|c| c.kind.starts_with("consume-refused-checksum")),
+        "the refusal was silent"
+    );
+    let ib = inbox::load(store.as_ref(), &sc.cfg).await.unwrap();
+    assert!(
+        ib.doc.entries.iter().any(|e| e.path == "docs/upload.pdf"),
+        "a refused entry must stay in the inbox, not be consumed away"
+    );
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
+    assert!(!m.entries.contains_key("docs/upload.pdf"), "refused bytes were cited");
+}
+
+/// A sync whose fetched bytes do not match the manifest's CRC is
+/// refused before anything is written — the same check checkout's
+/// fresh fetch makes, on the other read path.
+#[tokio::test]
+async fn a_sync_whose_bytes_do_not_match_the_manifest_crc_is_refused() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = syncer(&store, dir_b.path()).await;
+    b.checkout().await.unwrap();
+
+    write(dir_a.path(), "f.txt", "published bytes");
+    a.run_barrier().await.unwrap();
+    store.inject_corrupt_body(&a.cfg.file_key("f.txt"), |bytes| bytes[0] ^= 0x01);
+
+    let err = b.sync().await.expect_err("a sync of corrupt bytes must refuse");
+    assert!(err.to_string().contains("refusing to apply it"), "{err}");
+    assert!(read(dir_b.path(), "f.txt").is_none(), "corrupt bytes were written");
+}
+
+/// The gated lane's citation repair (§2.4.2), on a backend that attests
+/// no checksum: the lane consumes the HITL upload and hashes what it
+/// writes, the citation pass re-cites the path from the baseline's CRC,
+/// and a fresh reader verifies against it. Nothing in the battery
+/// exercised this repair before; the mutation that makes it cite a
+/// wrong CRC passed the whole battery.
+#[tokio::test]
+async fn a_gated_citation_repair_on_a_backend_that_attests_no_checksum_cites_the_bytes_crc() {
+    let mem = Arc::new(MemoryStore::new());
+    let store: Arc<dyn ObjectStore> = Arc::new(AttestsNoChecksum(mem.clone()));
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer_on(store.clone(), dir.path());
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    gated(&mut a);
+    write(dir.path(), "agent.txt", "agent work");
+    a.upload_lane().await.unwrap();
+    a.citation_pass(CitationSource::Sentinel).await.unwrap();
+
+    let key = a.cfg.file_key("docs/upload.pdf");
+    let body = Bytes::from_static(b"user bytes");
+    let stamps = GenerationStamps {
+        generation: 0,
+        epoch: 0,
+        flush_uuid: "gateway-old".into(),
+        boundary_source: None,
+        posix: None,
+    };
+    let meta = mem
+        .put_whole(&key, body.clone(), &PutCondition::IfNoneMatchAny, &stamps, crc64_nvme(&body))
+        .await
+        .unwrap();
+    inbox::gateway_append(
+        store.as_ref(),
+        &a.cfg,
+        InboxEntry {
+            path: "docs/upload.pdf".into(),
+            etag: meta.etag.clone(),
+            author: "dilip".into(),
+            added_unix: now_unix(),
+            crc64_b64: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_attests_nothing(&mem, &store, &key).await;
+
+    // The lane consumes it; the citation pass re-cites it.
+    a.upload_lane().await.unwrap();
+    assert_eq!(read(dir.path(), "docs/upload.pdf").unwrap(), "user bytes");
+    let r = a.citation_pass(CitationSource::Sentinel).await.unwrap();
+    assert!(r.repaired.contains(&"docs/upload.pdf".to_string()), "not repaired: {r:?}");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries["docs/upload.pdf"].crc64_b64, crc_of("user bytes"));
+
+    let dir2 = tempfile::tempdir().unwrap();
+    let mut b = syncer_on(store.clone(), dir2.path());
+    b.checkout().await.unwrap();
+    assert_eq!(read(dir2.path(), "docs/upload.pdf").unwrap(), "user bytes");
 }

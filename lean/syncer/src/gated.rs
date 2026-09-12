@@ -46,7 +46,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use flint_store::{GenerationStamps, ListedVersion, StoreError};
+use flint_store::{crc64_nvme, crc64_to_b64, GenerationStamps, ListedVersion, StoreError};
 
 use super::manifest::{self, LeanEntry};
 use super::state::{BaselineEntry, ConflictRecord};
@@ -59,7 +59,9 @@ const PENDING: &str = "pending.json";
 pub struct PendingEntry {
     pub key: String,
     pub etag: String,
-    pub crc64_b64: Option<String>,
+    /// The publisher's CRC over the bytes it staged (see
+    /// `LeanEntry::crc64_b64`).
+    pub crc64_b64: String,
     pub size: u64,
     pub mode: u32,
     pub mtime_unix: i64,
@@ -976,6 +978,7 @@ impl Syncer {
                 // to prevent. The next consume reconciles it.
                 _ => continue,
             };
+            let crc = super::barrier::repair_crc(path, &be, &meta)?;
             let stamps = GenerationStamps::from_meta(&meta.meta);
             let scan_entry = scanned.get(path);
             upserts.insert(
@@ -983,7 +986,7 @@ impl Syncer {
                 LeanEntry {
                     key,
                     etag: meta.etag.clone(),
-                    crc64_b64: meta.crc64_b64.clone(),
+                    crc64_b64: crc,
                     size: meta.size,
                     mode: stamps
                         .as_ref()
@@ -1222,6 +1225,7 @@ impl Syncer {
                         size: pe.size,
                         mtime_unix: pe.mtime_unix,
                         version_id: e.version_id.clone(),
+                        crc64_b64: Some(e.crc64_b64.clone()),
                     },
                 );
             }
@@ -1256,6 +1260,7 @@ impl Syncer {
                 etag: e.etag,
                 author: "merge-preserved".into(),
                 added_unix: now_unix(),
+                crc64_b64: Some(e.crc64_b64),
             })
             .collect();
         inbox::clear_window(self.store.as_ref(), &self.cfg, epoch, &queue).await?;
@@ -1438,6 +1443,18 @@ impl Syncer {
             // One HEAD per re-cited path to recover the stamps the
             // manifest entry needs. A HEAD is not data movement.
             let meta = self.store.head_version(&key, &live.version_id).await?;
+            // The CRC the re-citation carries: the backend's attestation
+            // when it offers one. A replacement pod has no baseline to
+            // ask, so on a backend that attests nothing (Ozone; a HITL
+            // upload sent without one) the bytes are the only source —
+            // the one recovery step that moves data, and only there.
+            let crc = match meta.crc64_b64.clone() {
+                Some(c) => c,
+                None => {
+                    let (_, body) = self.store.get_version(&key, &live.version_id).await?;
+                    crc64_to_b64(crc64_nvme(&body))
+                }
+            };
             let stamps = GenerationStamps::from_meta(&meta.meta);
             let posix = stamps.as_ref().and_then(|s| s.posix);
             upserts.insert(
@@ -1445,7 +1462,7 @@ impl Syncer {
                 LeanEntry {
                     key: key.clone(),
                     etag: meta.etag.clone(),
-                    crc64_b64: meta.crc64_b64.clone(),
+                    crc64_b64: crc,
                     size: meta.size,
                     mode: posix
                         .map(|p| p.mode)

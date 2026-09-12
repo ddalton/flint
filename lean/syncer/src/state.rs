@@ -23,6 +23,16 @@ pub struct BaselineEntry {
     pub generation: u64,
     pub size: u64,
     pub mtime_unix: i64,
+    /// CRC-64/NVME (wire form) of the object bytes this syncer
+    /// integrated at this path — computed from the bytes it wrote or
+    /// uploaded, never from a HEAD. A citation repair cites it, which
+    /// is what lets the manifest carry a CRC for an object whose
+    /// backend returns none (Ozone) or whose HITL uploader sent none.
+    ///
+    /// `None` only on the consume-dirty sentinel (`size == u64::MAX`):
+    /// the bytes on disk are the LOCAL edit, about to publish under a
+    /// CRC of its own, and the sentinel never repairs.
+    pub crc64_b64: Option<String>,
     /// The version the manifest cites for this path, when the bucket is
     /// versioned (boundary-verbs plan D7). Carried so a gated citation
     /// can re-validate its staging base: if this moved between staging

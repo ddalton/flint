@@ -541,6 +541,10 @@ pub async fn handle_draft_promote(
         etag: published.etag.clone(),
         author,
         added_unix: now_unix(),
+        // A server-side copy: the backend's attestation when it offers
+        // one, else nothing — consume then verifies against nothing and
+        // records its own hash for the repair.
+        crc64_b64: published.crc64_b64.clone(),
     };
     if let Err(e) = inbox::gateway_append(core.store.as_ref(), &cfg, entry).await {
         return match e {

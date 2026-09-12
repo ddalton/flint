@@ -206,6 +206,9 @@ impl Syncer {
                         size: u64::MAX,
                         mtime_unix: 0,
                         version_id: None,
+                        // The sentinel's bytes are the LOCAL edit; the
+                        // publish that supersedes hashes them itself.
+                        crc64_b64: None,
                     },
                 );
             } else {
@@ -218,6 +221,36 @@ impl Syncer {
                         other => other,
                     })?;
                 let mode = PosixStamps::from_meta(&meta.meta).map(|p| p.mode);
+                // VERIFIED before it is written, as checkout's fresh
+                // fetch is: against the writer's CRC when the inbox
+                // entry carries one (the gateway hashes what it sent),
+                // else the backend's attestation when it offers one.
+                // Ozone offers none, so the inbox's is what a HITL
+                // upload gets checked against there. What the baseline
+                // records — and the next citation repair cites — is
+                // OURS, over the bytes actually written.
+                let got = crc64_to_b64(crc64_nvme(&body));
+                let want = entry.crc64_b64.clone().or_else(|| meta.crc64_b64.clone());
+                if let Some(want) = want {
+                    if want != got {
+                        // NOT consumed: the entry stays in the cell and
+                        // the record repeats — a permanent, visible
+                        // contradiction is the right failure for
+                        // bytes nobody vouches for.
+                        self.state.append_conflict(&ConflictRecord {
+                            path: entry.path.clone(),
+                            foreign_etag: entry.etag.clone(),
+                            preserved_key: None,
+                            kind: format!(
+                                "consume-refused-checksum: etag {} is attested with CRC-64 \
+                                 {want} but the bytes fetched under it hash to {got}",
+                                entry.etag
+                            ),
+                            at_unix: now_unix(),
+                        })?;
+                        continue;
+                    }
+                }
                 // CONTAINMENT and I/O are split, because the answers are
                 // opposite. Containment was already decided above by
                 // `check_contained`, so a refusal reaching here is a
@@ -271,6 +304,7 @@ impl Syncer {
                         size: st.len(),
                         mtime_unix: mtime_of(&st),
                         version_id: None,
+                        crc64_b64: Some(got),
                     },
                 );
                 baseline.prev_scan.insert(entry.path.clone());
@@ -768,6 +802,7 @@ impl Syncer {
             let be = baseline.entries[&path].clone();
             match self.store.head(&key).await {
                 Ok(meta) if meta.etag == be.etag => {
+                    let crc = repair_crc(&path, &be, &meta)?;
                     let stamps = GenerationStamps::from_meta(&meta.meta);
                     let scan_entry = scanned.get(&path);
                     upserts.insert(
@@ -775,7 +810,7 @@ impl Syncer {
                         LeanEntry {
                             key,
                             etag: meta.etag.clone(),
-                            crc64_b64: meta.crc64_b64.clone(),
+                            crc64_b64: crc,
                             size: meta.size,
                             mode: stamps
                                 .as_ref()
@@ -934,6 +969,7 @@ impl Syncer {
                 etag: e.etag,
                 author: "merge-preserved".into(),
                 added_unix: now_unix(),
+                crc64_b64: Some(e.crc64_b64),
             })
             .collect();
         inbox::clear_window(self.store.as_ref(), &self.cfg, epoch, &queue).await?;
@@ -1213,7 +1249,7 @@ impl UploadOutcome {
             entry: LeanEntry {
                 key,
                 etag: etag.clone(),
-                crc64_b64: Some(crc64_to_b64(crc)),
+                crc64_b64: crc64_to_b64(crc),
                 size: scanned.size,
                 mode: scanned.mode,
                 mtime_unix: scanned.mtime_unix,
@@ -1230,6 +1266,7 @@ impl UploadOutcome {
                 // re-stat/re-queue valve).
                 size: scanned.size,
                 mtime_unix: scanned.mtime_unix,
+                crc64_b64: Some(crc64_to_b64(crc)),
             },
         }
     }
@@ -1248,6 +1285,44 @@ fn local_dirty(local: &Path, base: Option<&BaselineEntry>) -> bool {
 ///
 /// Reached only by the 412 recovery path: the ordinary publish gets its
 /// checksum from the store, which computes one while uploading.
+/// The CRC a citation repair cites: the bytes this syncer integrated,
+/// as the baseline recorded them when it wrote or uploaded them. The
+/// HEAD's own checksum is a cross-check when the backend offers one,
+/// never the source — Ozone offers none, a HITL uploader may have sent
+/// none, and the manifest must carry a CRC either way, because every
+/// reader now verifies a fresh fetch against it.
+///
+/// A baseline entry with no CRC is refused loudly rather than cited
+/// bare: the only entry built without one is the consume-dirty sentinel,
+/// which the candidate filters exclude, so reaching this is a defect.
+/// A HEAD that attests a DIFFERENT value is refused the same way — the
+/// workspace holds bytes the object does not, and citing either would
+/// make one reader or another refuse the path forever.
+pub(crate) fn repair_crc(
+    path: &str,
+    be: &BaselineEntry,
+    head: &flint_store::ObjectMeta,
+) -> LeanResult<String> {
+    let Some(ours) = be.crc64_b64.clone() else {
+        return Err(LeanError::State(format!(
+            "citation repair of {path}: the baseline records no CRC for the bytes it \
+             integrated at etag {} — refusing to cite bytes nothing hashed",
+            be.etag
+        )));
+    };
+    if let Some(theirs) = head.crc64_b64.as_deref() {
+        if theirs != ours {
+            return Err(LeanError::State(format!(
+                "citation repair of {path}: the store attests CRC-64 {theirs} for etag {} but \
+                 the bytes this workspace integrated under that etag hash to {ours} — the \
+                 workspace holds bytes the object does not; refusing to cite either",
+                be.etag
+            )));
+        }
+    }
+    Ok(ours)
+}
+
 fn file_crc(local_path: &Path) -> LeanResult<u64> {
     use std::io::Read;
     let mut crc = flint_store::Crc64Nvme::new();

@@ -80,7 +80,7 @@ async fn fetch_ranged(
     mode: Option<u32>,
     chunk_bytes: u64,
     parallelism: usize,
-    expect_crc: Option<u64>,
+    expect_crc: u64,
 ) -> LeanResult<Option<u64>> {
     use futures::stream::StreamExt;
 
@@ -224,28 +224,28 @@ async fn fetch_ranged(
     // composes A-then-B, so the fold runs in offset order whatever
     // order the ranges landed in. Checked BEFORE the rename, for the
     // same reason a hole is: a wrong file must never become visible.
-    if let Some(want) = expect_crc {
-        crcs.sort_unstable_by_key(|(off, _, _)| *off);
-        let mut folded: Option<u64> = None;
-        for (_, len, crc) in &crcs {
-            folded = Some(match folded {
-                None => *crc,
-                Some(acc) => flint_store::crc64_combine(acc, *crc, *len),
-            });
-        }
-        if folded != Some(want) {
-            drop(sink);
-            let _ = std::fs::remove_file(tmp);
-            return Err(LeanError::State(format!(
-                "manifest cites {key} at etag {etag} with CRC-64 {}, but the {} ranges fetched \
-                 under that etag fold to {} — the object is corrupt or the store returned the \
-                 wrong bytes; refusing to materialise {} (nothing renamed into place)",
-                flint_store::crc64_to_b64(want),
-                crcs.len(),
-                folded.map(flint_store::crc64_to_b64).unwrap_or_else(|| "nothing".into()),
-                target.display()
-            )));
-        }
+    // Unconditional: this arm fetches only under If-Match on the cited
+    // etag, so the bytes are always the manifest's to describe.
+    crcs.sort_unstable_by_key(|(off, _, _)| *off);
+    let mut folded: Option<u64> = None;
+    for (_, len, crc) in &crcs {
+        folded = Some(match folded {
+            None => *crc,
+            Some(acc) => flint_store::crc64_combine(acc, *crc, *len),
+        });
+    }
+    if folded != Some(expect_crc) {
+        drop(sink);
+        let _ = std::fs::remove_file(tmp);
+        return Err(LeanError::State(format!(
+            "manifest cites {key} at etag {etag} with CRC-64 {}, but the {} ranges fetched \
+             under that etag fold to {} — the object is corrupt or the store returned the \
+             wrong bytes; refusing to materialise {} (nothing renamed into place)",
+            flint_store::crc64_to_b64(expect_crc),
+            crcs.len(),
+            folded.map(flint_store::crc64_to_b64).unwrap_or_else(|| "nothing".into()),
+            target.display()
+        )));
     }
     sink.commit()?;
     Ok(Some(bytes))
@@ -452,15 +452,9 @@ impl Syncer {
                     // file. No bucket request either way — which is
                     // why it can be unconditional rather than a knob.
                     let same = st.len() == entry.size
-                        && match &entry.crc64_b64 {
-                            Some(want) => local_crc64_b64(&local)
-                                .map(|got| &got == want)
-                                .unwrap_or(false),
-                            // A legacy entry attests nothing beyond
-                            // its size; adopting on size alone is
-                            // the same residual the scan carries.
-                            None => true,
-                        };
+                        && local_crc64_b64(&local)
+                            .map(|got| got == entry.crc64_b64)
+                            .unwrap_or(false);
                     if same {
                         return Ok(Fetched {
                             ranged: false,
@@ -471,6 +465,7 @@ impl Syncer {
                                 size: st.len(),
                                 mtime_unix: mtime_of(&st),
                                 version_id: entry.version_id.clone(),
+                                crc64_b64: Some(entry.crc64_b64.clone()),
                             }),
                             skipped: true,
                             bytes: 0,
@@ -495,6 +490,12 @@ impl Syncer {
                         "{}.flint-sync-tmp",
                         target.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
                     ));
+                    let want = flint_store::crc64_from_b64(&entry.crc64_b64).ok_or_else(|| {
+                        LeanError::State(format!(
+                            "manifest cites {} with a CRC-64 that is not one: {:?}",
+                            entry.key, entry.crc64_b64
+                        ))
+                    })?;
                     fetch_ranged(
                         &store,
                         &entry.key,
@@ -505,7 +506,7 @@ impl Syncer {
                         Some(entry.mode),
                         range_chunk,
                         range_par,
-                        entry.crc64_b64.as_deref().and_then(flint_store::crc64_from_b64),
+                        want,
                     )
                     .await?
                 } else {
@@ -522,6 +523,9 @@ impl Syncer {
                             size: st.len(),
                             mtime_unix: mtime_of(&st),
                             version_id: None,
+                            // The fold above equalled it, or we would
+                            // not be here.
+                            crc64_b64: Some(entry.crc64_b64.clone()),
                         }),
                         skipped: false,
                         bytes: n,
@@ -672,12 +676,16 @@ impl Syncer {
                 // the wrong object — passes If-Match either way. Until
                 // 2026-09-12 the manifest's CRC was compared only on the
                 // RESUME path, so a corrupt fresh fetch was written, cited
-                // in the baseline and read by the agent as the file. A
-                // legacy entry carries no CRC and attests nothing beyond
-                // its size; adopted (uncited) bytes are not the manifest's
-                // to describe.
-                let expect_crc = if cited { entry.crc64_b64.clone() } else { None };
-                let st = {
+                // in the baseline and read by the agent as the file.
+                // Adopted (uncited) bytes are not the manifest's to
+                // describe: they are checked against the backend's own
+                // attestation when it offers one, and hashed either way,
+                // because the baseline records the CRC of what was
+                // written and the next barrier's citation repair cites
+                // THAT — never a HEAD's, which Ozone does not return.
+                let expect_crc =
+                    if cited { Some(entry.crc64_b64.clone()) } else { meta.crc64_b64.clone() };
+                let (st, got) = {
                     let target_w = target.clone();
                     let body_w = body.clone(); // Bytes: a refcount bump, not a copy
                     let mode_w = entry.mode;
@@ -685,20 +693,28 @@ impl Syncer {
                     let key_crc = entry.key.clone();
                     let etag_err = entry.etag.clone();
                     let rel_err = path.clone();
-                    tokio::task::spawn_blocking(move || -> LeanResult<std::fs::Metadata> {
-                        if let Some(want) = expect_crc {
+                    tokio::task::spawn_blocking(
+                        move || -> LeanResult<(std::fs::Metadata, String)> {
                             let got = flint_store::crc64_to_b64(flint_store::crc64_nvme(&body_w));
-                            if got != want {
-                                return Err(LeanError::State(format!(
-                                    "manifest cites {rel_err} ({key_crc} at etag {etag_err}) with \
-                                     CRC-64 {want}, but the bytes fetched under that etag hash to \
-                                     {got} — the object is corrupt or the store returned the wrong \
-                                     bytes; refusing to materialise it (nothing written)"
-                                )));
+                            if let Some(want) = expect_crc {
+                                if got != want {
+                                    let who = if cited {
+                                        format!("manifest cites {rel_err} ({key_crc} at etag {etag_err}) with")
+                                    } else {
+                                        format!("the store attests {rel_err} ({key_crc} at etag {etag_err}) with")
+                                    };
+                                    return Err(LeanError::State(format!(
+                                        "{who} CRC-64 {want}, but the bytes fetched under that \
+                                         etag hash to {got} — the object is corrupt or the store \
+                                         returned the wrong bytes; refusing to materialise it \
+                                         (nothing written)"
+                                    )));
+                                }
                             }
-                        }
-                        write_file_atomic(&target_w, &body_w, Some(mode_w))
-                    })
+                            let st = write_file_atomic(&target_w, &body_w, Some(mode_w))?;
+                            Ok((st, got))
+                        },
+                    )
                     .await
                     .map_err(|e| {
                         LeanError::State(format!(
@@ -715,6 +731,7 @@ impl Syncer {
                         size: st.len(),
                         mtime_unix: mtime_of(&st),
                         version_id: None,
+                        crc64_b64: Some(got),
                     }),
                     skipped: false,
                     bytes: body.len() as u64,

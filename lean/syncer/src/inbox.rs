@@ -28,6 +28,15 @@ pub struct InboxEntry {
     /// Who wrote it (user identity from the gateway; audit surface).
     pub author: String,
     pub added_unix: u64,
+    /// CRC-64/NVME (wire form) of the bytes the write produced, computed
+    /// by the writer over what it sent — the gateway over the request
+    /// body, a merge-preserved entry from the manifest it came from.
+    /// Consume verifies the fetched bytes against it before they are
+    /// written, which is the only verification a backend that attests
+    /// no checksum (Ozone) gets. `None` when the writer had no bytes in
+    /// hand (a draft promote is a server-side copy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crc64_b64: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
