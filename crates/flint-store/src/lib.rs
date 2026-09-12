@@ -647,16 +647,22 @@ pub struct EpochLease {
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct LeaseEcho {
     /// The sidecar binary's own version — the mixed-fleet tell.
+    #[serde(default)]
     pub sidecar_version: String,
     /// `.flint/capabilities.json`'s protocol number.
+    #[serde(default)]
     pub protocol: u32,
     /// The mode the sidecar is RUNNING, not the mode it was asked for.
+    #[serde(default)]
     pub active_boundary_mode: String,
     /// The last citation this sidecar installed.
+    #[serde(default)]
     pub last_cited_seq: u64,
+    #[serde(default)]
     pub last_cited_unix: u64,
     /// Durable-but-invisible work standing right now — the gated
     /// exposure, per workspace, with no metrics stack in the picture.
+    #[serde(default)]
     pub staged_uncited_count: u64,
     /// Whether the boundary verbs are live in this workspace. The
     /// pre-flight that turns them off (an app already owns `.flint/`)

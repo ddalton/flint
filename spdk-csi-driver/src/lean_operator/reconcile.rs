@@ -316,14 +316,22 @@ pub async fn full_pass(
     // 3. What the RUNNING sidecar says. One read of a cell the operator
     //    already has a reason to look at.
     let cell = store.epoch_read(&format!("{prefix}/.flint/lean/epoch")).await?;
-    let echo: Option<flint_store::LeaseEcho> = cell
-        .as_ref()
-        .and_then(|c| c.echo.as_deref())
-        .and_then(|e| serde_json::from_str(e).ok());
+    // NOT `.ok()`. That mapped a parse FAILURE onto `None`, and `None`
+    // reports as "NoEcho — a syncer older than the boundary-verbs
+    // protocol". A schema skew therefore surfaced as a benign old
+    // binary: an error returning a legal value.
+    let raw_echo = cell.as_ref().and_then(|c| c.echo.as_deref());
+    let (echo, echo_unparseable): (Option<flint_store::LeaseEcho>, bool) = match raw_echo {
+        None => (None, false),
+        Some(e) => match serde_json::from_str(e) {
+            Ok(v) => (Some(v), false),
+            Err(_) => (None, true),
+        },
+    };
     let released = cell.as_ref().map(|c| c.released).unwrap_or(true);
     boundary::set_condition(
         &mut r.conditions,
-        boundary::boundary_mode_active(spec, echo.as_ref(), released, generation),
+        boundary::boundary_mode_active(spec, echo.as_ref(), released, generation, echo_unparseable),
     );
     if let Some(e) = &echo {
         r.observed_boundary_mode = Some(e.active_boundary_mode.clone());

@@ -319,11 +319,19 @@ pub async fn assess_bucket(
 /// nothing else, which is the design, not a fault — and an old binary
 /// writes no echo at all. Neither is evidence that the mode is wrong;
 /// what would be evidence is an echo that disagrees.
+///
+/// `echo_unparseable` is the THIRD case and it is not cosmetic. The
+/// reader used to collapse a parse failure into `None` with `.ok()`, and
+/// `None` reports as `NoEcho` — "a sidecar older than the boundary-verbs
+/// protocol". So a malformed or schema-mismatched echo, the exact thing a
+/// field rename or a version skew produces, was reported as a benign old
+/// binary. An error must not return a legal value.
 pub fn boundary_mode_active(
     spec: &FlintLeanWorkspaceSpec,
     echo: Option<&flint_store::LeaseEcho>,
     lease_released: bool,
     generation: Option<i64>,
+    echo_unparseable: bool,
 ) -> LeanCondition {
     let (status, reason, message) = match echo {
         Some(e) if e.active_boundary_mode == spec.boundary_mode => (
@@ -344,10 +352,22 @@ pub fn boundary_mode_active(
                 spec.boundary_mode, e.sidecar_version, e.active_boundary_mode
             ),
         ),
+        // RELEASED IS CHECKED FIRST. A released lease is at rest whatever
+        // the last holder happened to leave in the cell, so a stale
+        // unparseable echo must not turn an idle workspace into a fault.
+        // Ordering pinned by an_unparseable_echo_is_not_reported_as_an_absent_one.
         None if lease_released => (
             "Unknown",
             "NoLiveSidecar",
-            "no sidecar holds the lease (the workspace is at rest, which is the design)".into(),
+            "no syncer holds the lease (the workspace is at rest, which is the design)".into(),
+        ),
+        None if echo_unparseable => (
+            "Unknown",
+            "EchoUnparseable",
+            "the lease holder wrote an observed-state echo this operator \
+             could not parse — a schema skew between syncer and operator, \
+             NOT an absent or older syncer"
+                .into(),
         ),
         None => (
             "Unknown",
@@ -809,22 +829,63 @@ mod tests {
     #[test]
     fn boundary_mode_active_separates_mismatch_from_absence() {
         let s = gated_spec();
-        let matched = boundary_mode_active(&s, Some(&echo("gated", "0.1.0")), false, Some(4));
+        let matched =
+            boundary_mode_active(&s, Some(&echo("gated", "0.1.0")), false, Some(4), false);
         assert_eq!(matched.status, "True");
 
-        let stale = boundary_mode_active(&s, Some(&echo("hybrid", "0.0.9")), false, Some(4));
+        let stale =
+            boundary_mode_active(&s, Some(&echo("hybrid", "0.0.9")), false, Some(4), false);
         assert_eq!(stale.status, "False");
         assert_eq!(stale.reason, "ModeMismatch");
         assert!(stale.message.unwrap().contains("0.0.9"), "name the binary that is wrong");
 
-        assert_eq!(boundary_mode_active(&s, None, true, None).reason, "NoLiveSidecar");
-        assert_eq!(boundary_mode_active(&s, None, false, None).reason, "NoEcho");
+        assert_eq!(
+            boundary_mode_active(&s, None, true, None, false).reason,
+            "NoLiveSidecar"
+        );
+        assert_eq!(
+            boundary_mode_active(&s, None, false, None, false).reason,
+            "NoEcho"
+        );
         for c in [
-            boundary_mode_active(&s, None, true, None),
-            boundary_mode_active(&s, None, false, None),
+            boundary_mode_active(&s, None, true, None, false),
+            boundary_mode_active(&s, None, false, None, false),
         ] {
             assert_eq!(c.status, "Unknown", "absence is not evidence of a wrong mode");
         }
+    }
+
+    /// The THIRD case, and the one the reader used to erase. An echo that
+    /// is PRESENT but unparseable is a schema skew between syncer and
+    /// operator. It used to arrive here as `None` — because the reader
+    /// said `.ok()` — and report as `NoEcho`, i.e. "an older syncer that
+    /// writes no echo at all". Two different faults, one message, and the
+    /// wrong one: an error returning a legal value.
+    ///
+    /// The assertion that matters is the INEQUALITY. Asserting only that
+    /// the reason is "EchoUnparseable" would still pass if `NoEcho` were
+    /// renamed to match it, which is exactly the collapse being pinned.
+    #[test]
+    fn an_unparseable_echo_is_not_reported_as_an_absent_one() {
+        let s = gated_spec();
+        let garbled = boundary_mode_active(&s, None, false, None, true);
+        let absent = boundary_mode_active(&s, None, false, None, false);
+
+        assert_eq!(garbled.reason, "EchoUnparseable");
+        assert_ne!(
+            garbled.reason, absent.reason,
+            "a parse failure must not be indistinguishable from no echo"
+        );
+        assert_ne!(garbled.message, absent.message);
+        // Still Unknown: a skew is not evidence the MODE is wrong.
+        assert_eq!(garbled.status, "Unknown");
+        // A released lease still reads as at-rest; unparseable only
+        // describes a HELD lease whose holder wrote something bad.
+        assert_eq!(
+            boundary_mode_active(&s, None, true, None, true).reason,
+            "NoLiveSidecar",
+            "a released lease is at rest whatever the stale echo says"
+        );
     }
 
     /// A condition's timestamp must mean "when this changed", not "when

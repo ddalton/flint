@@ -55,9 +55,14 @@ spec:
           image: flint-lean-operator:e2e
           imagePullPolicy: Never
           env:
-            - { name: FLINT_LEAN_WEBHOOK_SERVICE, value: flint-lean-operator }
-            - { name: FLINT_LEAN_WEBHOOK_NAMESPACE, value: flint-system }
-            - { name: FLINT_LEAN_SIDECAR_IMAGE, value: "flint-sync:e2e" }
+            # The webhook env pair and FLINT_LEAN_SIDECAR_IMAGE lived here
+            # until fcac038f removed the webhook. All three were read by
+            # nothing — one occurrence each in the whole tree, zero in any
+            # .rs — while FLINT_LEAN_SIDECAR_IMAGE still pinned an image
+            # tag as though it configured the syncer. The live knob is
+            # FLINT_S3CSI_LEAN_IMAGE (s3csi/node.rs:114). A leftover that
+            # READS AS OPERATIVE is worse than no setting: the next reader
+            # changes it and waits for an effect that cannot come.
             # The OPERATOR principal (bucket-admin ops) — MinIO root in
             # the rig; a scoped role in production.
             - { name: AWS_ACCESS_KEY_ID, value: drill }
