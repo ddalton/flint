@@ -130,7 +130,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> LeanResult<()> {
         "{}.tmp",
         path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
     ));
-    super::safefs::write_via_tmp(path, &tmp, bytes, None)
+    super::safefs::write_via_tmp(path, &tmp, bytes, None).map(|_| ())
 }
 
 fn write_json<T: Serialize>(path: &Path, v: &T) -> LeanResult<()> {

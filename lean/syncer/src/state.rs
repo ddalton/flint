@@ -198,7 +198,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> LeanResult<()> {
     // The state dir lives in the same app-writable emptyDir.
     super::safefs::check_parent(path)?;
     let tmp = path.with_extension("tmp");
-    super::safefs::write_via_tmp(path, &tmp, bytes, None)
+    super::safefs::write_via_tmp(path, &tmp, bytes, None).map(|_| ())
 }
 
 impl SyncerState {

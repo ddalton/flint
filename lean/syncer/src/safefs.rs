@@ -16,12 +16,17 @@
 //! The rule is therefore not "validate the target" but **every path the
 //! write touches**:
 //!
-//! 1. unlink the temp name first — a leftover is crash garbage, and
-//!    `remove_file` removes a symlink itself, never its target;
-//! 2. create it `O_CREAT|O_EXCL`, which POSIX requires to fail with
-//!    `EEXIST` on a symlink *whatever it points at* — so a plant
-//!    re-established in the gap between the two is a refusal, not a
-//!    redirect;
+//! 1. create it `O_CREAT|O_EXCL`, which POSIX requires to fail with
+//!    `EEXIST` on a symlink *whatever it points at* — a plant is a
+//!    refusal, not a redirect;
+//! 2. only on `EEXIST`, unlink the temp name and create once more. A
+//!    leftover is crash garbage, `remove_file` removes a symlink itself
+//!    and never its target, and a plant re-established in the gap is
+//!    `EEXIST` again. Unlinking FIRST on every write bought nothing the
+//!    exclusive create does not already refuse, and cost one syscall
+//!    plus the parent directory's write lock per file: 20,006
+//!    `unlinkat`, every one ENOENT, on a 20,000-file checkout
+//!    (2026-09-12);
 //! 3. refuse outright when the parent directory is itself a symlink,
 //!    which `create_dir_all` would happily walk through.
 
@@ -63,25 +68,68 @@ pub(crate) fn check_parent(path: &Path) -> LeanResult<()> {
 /// (audit 2026-09-03, finding 9). Bulk materialisations go through
 /// `write_via_tmp_fast` and are made durable by `sync_tree` before the
 /// record that vouches for them is written.
+///
+/// A missing parent is an ERROR here: a state or control directory
+/// that vanished mid-run is not something to quietly recreate.
+/// Returns the written file's metadata (an `fstat` on the handle, so
+/// the caller never pays a `stat` to learn what it just wrote).
 pub(crate) fn write_via_tmp(
     path: &Path,
     tmp: &Path,
     bytes: &[u8],
     mode: Option<u32>,
-) -> LeanResult<()> {
-    write_via_tmp_opts(path, tmp, bytes, mode, true)
+) -> LeanResult<std::fs::Metadata> {
+    write_via_tmp_opts(path, tmp, bytes, mode, true, false)
 }
 
 /// The same write without the per-file fsync: for checkout, consume and
 /// sync materialisations, where a million fsyncs would be the cost and
-/// one `sync_tree` before the marker/baseline is the equivalent.
+/// one `sync_tree` before the marker/baseline is the equivalent. A
+/// parent that vanished after containment created it (an app deleting
+/// a directory mid-checkout) is recreated on the retry path — the one
+/// place `create_dir_all` runs, and only after the caller's
+/// `check_parent`.
 pub(crate) fn write_via_tmp_fast(
     path: &Path,
     tmp: &Path,
     bytes: &[u8],
     mode: Option<u32>,
-) -> LeanResult<()> {
-    write_via_tmp_opts(path, tmp, bytes, mode, false)
+) -> LeanResult<std::fs::Metadata> {
+    write_via_tmp_opts(path, tmp, bytes, mode, false, true)
+}
+
+/// `O_CREAT|O_EXCL` at `tmp`, and the two retries the common path never
+/// pays for: on `EEXIST` unlink the name (a symlink is removed, never
+/// followed) and create once more; on `ENOENT`, when the caller allows
+/// it, recreate the parent and create once more. Anything else, and a
+/// second failure of either kind, is a refusal.
+fn create_exclusive(tmp: &Path, mkdir_parent: bool) -> LeanResult<std::fs::File> {
+    let open = || OpenOptions::new().write(true).create_new(true).open(tmp);
+    let first = match open() {
+        Ok(f) => return Ok(f),
+        Err(e) => e,
+    };
+    let again = |why: &str, e: std::io::Error| {
+        refuse(tmp, &format!("temp file is not exclusively creatable after {why}: {e}"))
+    };
+    match first.kind() {
+        std::io::ErrorKind::AlreadyExists => {
+            if let Err(e) = std::fs::remove_file(tmp) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    return Err(refuse(tmp, &format!("stale temp file is not removable: {e}")));
+                }
+            }
+            open().map_err(|e| again("removing a leftover", e))
+        }
+        std::io::ErrorKind::NotFound if mkdir_parent => {
+            if let Some(parent) = tmp.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| refuse(tmp, &format!("mkdir for temp: {e}")))?;
+            }
+            open().map_err(|e| again("recreating its parent", e))
+        }
+        _ => Err(refuse(tmp, &format!("temp file is not exclusively creatable: {first}"))),
+    }
 }
 
 /// The RANGED sibling of `write_via_tmp_fast`: the caller streams an
@@ -114,16 +162,7 @@ impl RangedTmp {
         size: u64,
         mode: Option<u32>,
     ) -> LeanResult<RangedTmp> {
-        match std::fs::remove_file(tmp) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(refuse(tmp, &format!("stale temp file is not removable: {e}"))),
-        }
-        let f = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(tmp)
-            .map_err(|e| refuse(tmp, &format!("temp file is not exclusively creatable: {e}")))?;
+        let f = create_exclusive(tmp, true)?;
         #[cfg(unix)]
         if let Some(mode) = mode {
             use std::os::unix::fs::PermissionsExt;
@@ -220,17 +259,9 @@ fn write_via_tmp_opts(
     bytes: &[u8],
     mode: Option<u32>,
     durable: bool,
-) -> LeanResult<()> {
-    match std::fs::remove_file(tmp) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(refuse(tmp, &format!("stale temp file is not removable: {e}"))),
-    }
-    let mut f = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(tmp)
-        .map_err(|e| refuse(tmp, &format!("temp file is not exclusively creatable: {e}")))?;
+    mkdir_parent: bool,
+) -> LeanResult<std::fs::Metadata> {
+    let mut f = create_exclusive(tmp, mkdir_parent)?;
     #[cfg(unix)]
     if let Some(mode) = mode {
         use std::os::unix::fs::PermissionsExt;
@@ -244,6 +275,11 @@ fn write_via_tmp_opts(
         f.sync_all()
             .map_err(|e| LeanError::State(format!("fsync tmp for {}: {e}", path.display())))?;
     }
+    // The rename moves the name, not the inode: this is the metadata
+    // the caller would otherwise `stat` the target for.
+    let meta = f
+        .metadata()
+        .map_err(|e| LeanError::State(format!("fstat tmp for {}: {e}", path.display())))?;
     drop(f);
     std::fs::rename(tmp, path)
         .map_err(|e| LeanError::State(format!("rename into {}: {e}", path.display())))?;
@@ -256,5 +292,5 @@ fn write_via_tmp_opts(
             }
         }
     }
-    Ok(())
+    Ok(meta)
 }

@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 
 use flint_store::StoreError;
 
-use super::barrier::{contained_path, mtime_of, write_file_atomic};
+use super::barrier::{contained_path, contained_path_stat, mtime_of, write_file_atomic};
 use super::manifest;
 use super::state::BaselineEntry;
 use super::{LeanError, LeanResult, Syncer};
@@ -376,7 +376,9 @@ impl Syncer {
                 // control files); it stays cited and a conflict
                 // record names it. Same arm refuses a citation
                 // whose path escapes the workspace.
-                let target = match contained_path(&root, &path) {
+                // The walk hands back the final component's lstat as
+                // well, which is the resume check's whole question.
+                let (target, present) = match contained_path_stat(&root, &path) {
                     Ok(t) => t,
                     Err(e) => {
                         return Ok(Fetched {
@@ -389,8 +391,7 @@ impl Syncer {
                         })
                     }
                 };
-                let _ = &target;
-                if local.exists() {
+                if let Some(st) = present {
                     // Resume: a present path is one THIS checkout
                     // already fetched, so re-downloading it would
                     // pay bucket GETs for bytes that are on disk.
@@ -409,10 +410,9 @@ impl Syncer {
                     // divergence is silent and permanent.
                     //
                     // The check is local-only: size from the stat
-                    // we already took, then crc of the local file.
-                    // No bucket request either way — which is why
-                    // it can be unconditional rather than a knob.
-                    let st = std::fs::metadata(&local)?;
+                    // the walk already took, then crc of the local
+                    // file. No bucket request either way — which is
+                    // why it can be unconditional rather than a knob.
                     let same = st.len() == entry.size
                         && match &entry.crc64_b64 {
                             Some(want) => local_crc64_b64(&local)
@@ -623,13 +623,11 @@ impl Syncer {
                 // 3,200 files/s at 1.29 of 2 cores, flat from 128 to 512.
                 let st = {
                     let target_w = target.clone();
-                    let local_w = local.clone();
                     let body_w = body.clone(); // Bytes: a refcount bump, not a copy
                     let mode_w = entry.mode;
                     let key_err = entry.key.clone();
                     tokio::task::spawn_blocking(move || -> LeanResult<std::fs::Metadata> {
-                        write_file_atomic(&target_w, &body_w, Some(mode_w))?;
-                        Ok(std::fs::metadata(&local_w)?)
+                        write_file_atomic(&target_w, &body_w, Some(mode_w))
                     })
                     .await
                     .map_err(|e| {

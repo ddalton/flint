@@ -10795,3 +10795,50 @@ fn siblings_racing_to_create_one_parent_do_not_refuse_each_other() {
         assert!(root.join("new/deeper").is_dir());
     }
 }
+
+/// The temp name is created `O_EXCL` FIRST and unlinked only on EEXIST
+/// (2026-09-12: the unconditional unlink was 20,006 syscalls on a
+/// 20,000-file checkout, every one ENOENT, each taking the parent's
+/// write lock), the parent is recreated only on ENOENT, and the write
+/// returns its own `fstat`. So the retry paths must do exactly what the
+/// unconditional path did: replace a leftover, remove a planted symlink
+/// WITHOUT following it, and recreate a parent that vanished after
+/// containment. Delete the EEXIST arm of `create_exclusive` and leg 1
+/// fails on "not exclusively creatable"; delete the ENOENT arm and leg
+/// 3 does.
+#[test]
+fn the_temp_retry_paths_replace_a_leftover_and_recreate_a_vanished_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // 1. a leftover regular temp file from a killed checkout
+    std::fs::create_dir_all(root.join("d")).unwrap();
+    std::fs::write(root.join("d/f.txt.flint-sync-tmp"), b"STALE").unwrap();
+    let st = super::barrier::write_file_atomic(&root.join("d/f.txt"), b"NEW", Some(0o644)).unwrap();
+    assert_eq!(std::fs::read(root.join("d/f.txt")).unwrap(), b"NEW");
+    assert_eq!(st.len(), 3, "the returned metadata is the written file's, not the leftover's");
+    assert!(!root.join("d/f.txt.flint-sync-tmp").exists(), "the temp name is gone after the rename");
+    // 2. a planted symlink at the temp name: removed, never followed
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("victim"), b"ORIGINAL").unwrap();
+    std::os::unix::fs::symlink(outside.path().join("victim"), root.join("d/g.txt.flint-sync-tmp"))
+        .unwrap();
+    super::barrier::write_file_atomic(&root.join("d/g.txt"), b"NEW", None).unwrap();
+    assert_eq!(std::fs::read(outside.path().join("victim")).unwrap(), b"ORIGINAL");
+    assert_eq!(std::fs::read(root.join("d/g.txt")).unwrap(), b"NEW");
+    // 3. the parent vanished between containment and the write
+    let (target, present) = super::barrier::contained_path_stat(root, "gone/h.txt").unwrap();
+    assert!(present.is_none(), "the walk reports an absent final component as None");
+    std::fs::remove_dir(root.join("gone")).unwrap();
+    super::barrier::write_file_atomic(&target, b"NEW", None).unwrap();
+    assert_eq!(std::fs::read(root.join("gone/h.txt")).unwrap(), b"NEW");
+    // …and now the walk hands back the present file's own metadata.
+    let (_, present) = super::barrier::contained_path_stat(root, "gone/h.txt").unwrap();
+    assert_eq!(present.map(|m| m.len()), Some(3));
+    // 4. the durable writer does NOT recreate a vanished parent: a state
+    //    or control directory that disappeared mid-run is an error.
+    let missing = root.join("nostate/x.json");
+    let err = super::safefs::write_via_tmp(&missing, &root.join("nostate/x.json.tmp"), b"{}", None)
+        .unwrap_err();
+    assert!(err.to_string().contains("not exclusively creatable"), "{err}");
+    assert!(!root.join("nostate").exists());
+}

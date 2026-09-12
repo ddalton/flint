@@ -1292,7 +1292,7 @@ pub(super) fn write_file_atomic_in(
     mode: Option<u32>,
 ) -> LeanResult<()> {
     let target = contained_path(root, rel)?;
-    write_file_atomic(&target, bytes, mode)
+    write_file_atomic(&target, bytes, mode).map(|_| ())
 }
 
 /// Validate `rel` under `root` WITHOUT creating anything — for callers
@@ -1308,6 +1308,19 @@ pub(super) fn check_contained(root: &Path, rel: &str) -> LeanResult<()> {
 /// directories. Walks the parent chain component by component: a
 /// component that EXISTS as a symlink is a refusal (never followed).
 pub(super) fn contained_path(root: &Path, rel: &str) -> LeanResult<std::path::PathBuf> {
+    resolve_contained(root, rel, true).map(|(p, _)| p)
+}
+
+/// As `contained_path`, and also what the walk already learned about
+/// the FINAL component: its `lstat` if it exists, `None` if it does
+/// not. The walk stats every component to refuse a symlink; a caller
+/// that then asked `exists()` and `metadata()` paid two more stats for
+/// an answer it was already holding (checkout's resume check did, on
+/// every one of 20,000 files).
+pub(super) fn contained_path_stat(
+    root: &Path,
+    rel: &str,
+) -> LeanResult<(std::path::PathBuf, Option<std::fs::Metadata>)> {
     resolve_contained(root, rel, true)
 }
 
@@ -1315,7 +1328,7 @@ fn resolve_contained(
     root: &Path,
     rel: &str,
     create_dirs: bool,
-) -> LeanResult<std::path::PathBuf> {
+) -> LeanResult<(std::path::PathBuf, Option<std::fs::Metadata>)> {
     use std::path::Component;
     let refuse = |why: &str| {
         Err(LeanError::State(format!(
@@ -1345,6 +1358,7 @@ fn resolve_contained(
         return refuse("no path components");
     }
     let last = comps.len() - 1;
+    let mut final_meta = None;
     for (i, c) in comps.iter().enumerate() {
         cur.push(c);
         match std::fs::symlink_metadata(&cur) {
@@ -1354,7 +1368,11 @@ fn resolve_contained(
             Ok(m) if i < last && !m.is_dir() => {
                 return refuse("parent component is not a directory");
             }
-            Ok(_) => {}
+            Ok(m) => {
+                if i == last {
+                    final_meta = Some(m);
+                }
+            }
             Err(_) if i < last => {
                 if create_dirs {
                     if let Err(e) = std::fs::create_dir(&cur) {
@@ -1384,18 +1402,20 @@ fn resolve_contained(
             Err(_) => {}
         }
     }
-    Ok(cur)
+    Ok((cur, final_meta))
 }
 
-pub(super) fn write_file_atomic(path: &Path, bytes: &[u8], mode: Option<u32>) -> LeanResult<()> {
-    fn ctx(op: &'static str, path: &Path) -> impl FnOnce(std::io::Error) -> super::LeanError {
-        let p = path.display().to_string();
-        move |e| super::LeanError::State(format!("{op} {p}: {e}"))
-    }
+/// Write `bytes` to `path` through an exclusive temp sibling and a
+/// rename. The parent already exists — containment created it — and
+/// one that vanished since is recreated on the retry path in `safefs`,
+/// so the common path pays no `mkdir` and no `stat` for it. Returns
+/// the written file's metadata.
+pub(super) fn write_file_atomic(
+    path: &Path,
+    bytes: &[u8],
+    mode: Option<u32>,
+) -> LeanResult<std::fs::Metadata> {
     super::safefs::check_parent(path)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(ctx("mkdir for", path))?;
-    }
     // NOT with_extension(): that REPLACES the final extension, so
     // "a.txt" and "a.md" would collide on one tmp name.
     let tmp = path.with_file_name(format!(

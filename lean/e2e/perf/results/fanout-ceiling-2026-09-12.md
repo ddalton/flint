@@ -244,6 +244,48 @@ raw client's whole cost, and every path pays them), then measure S3's
 delivered rate on a partitioned prefix; build the raw path when a real
 workload is CPU-bound after this commit.
 
+## 5. The two syscall trims (done, `lean/syncer/src/safefs.rs`)
+
+Same 6-vCPU VM, loopback fakes3, tmpfs, shipped defaults, n=3
+interleaved, `strace -c -f` for the counts:
+
+| per 20,000 files | before | after |
+|---|---:|---:|
+| `unlinkat` (pre-create, all ENOENT) | 20,006 | 1 |
+| `mkdirat` (`create_dir_all` on an existing parent) | 20,024 | 25 |
+| `newfstatat` | 120,268 (40,033 ENOENT) | 60,269 (20,034) |
+| `fstat` (the write returns its own) | 9 | 20,014 |
+| all syscalls per file | 22.2 | 18.6 |
+| files/s | 29,761-31,201 | 32,206-33,003 |
+
+The temp name is now created `O_EXCL` first and unlinked only on
+`EEXIST`; the parent is recreated only on `ENOENT` and only for the
+materialising writer (a state or control directory that vanished
+mid-run stays an error); the containment walk hands back the final
+component's `lstat`, so checkout's resume check no longer pays
+`exists()` + `metadata()` for an answer the walk already held; and the
+write returns the `fstat` of the handle it just wrote instead of the
+caller `stat`ing the target. Six stats per file became three. The safety
+argument is unchanged and the test
+`the_temp_retry_paths_replace_a_leftover_and_recreate_a_vanished_parent`
+fails on the leftover leg with the `EEXIST` arm deleted and on the
+vanished-parent leg with the `ENOENT` arm deleted. The three remaining
+stats are the two-component containment walk (a symlink check that must
+stay) and `check_parent`.
+
+**On-prem Ozone.** The syncer also runs against Apache Ozone's S3
+gateway on-prem. Nothing in sections 1-2 or 5 depends on the backend;
+section 3's ceiling and the section 4 verdict do: an Ozone gateway on a
+LAN has no per-prefix throttle and sub-millisecond first-byte time, so
+the client's CPU becomes the wall far sooner there, and the raw-path
+question should be re-asked with Ozone's delivered GET rate measured
+the same way (the fanout-8 control gives first-byte time; the
+multi-syncer leg gives the backend's rate). Ozone may also omit
+`x-amz-checksum-crc64nvme` on GET, in which case the SDK validates
+nothing and lean's own manifest CRC is the only integrity check on a
+fresh fetch — an argument for end-to-end CRC verification in checkout
+whichever client is underneath.
+
 ## Rig defects found on the way (each would have been quoted)
 
 - macOS `paste -sd,` with no `-` prints usage: every "scoped" syncer got

@@ -31,6 +31,19 @@ covered by the stability guarantee.
   that is S3's per-prefix rate on a fresh bucket.
   `lean/e2e/perf/results/fanout-ceiling-2026-09-12.md`.
 
+- **lean: four syscalls per materialised file that bought nothing.**
+  The temp name was unlinked before every exclusive create (20,006
+  `unlinkat` on a 20,000-file checkout, every one ENOENT, each taking
+  the parent's write lock), `create_dir_all` ran on a parent the
+  containment walk had just created, and each file was `stat`ed six
+  times. Now `O_EXCL` first with the unlink only on `EEXIST`, the parent
+  recreated only on `ENOENT` (and never for state/control writes), the
+  walk's own `lstat` reused for the resume check, and the write's
+  `fstat` returned instead of a post-rename `stat`: 22.2 -> 18.6
+  syscalls per file, 29,761-31,201 -> 32,206-33,003 files/s on the
+  6-vCPU rig. The refusal rules are unchanged and the retry legs are
+  pinned by a test that fails with either arm deleted.
+
 ### Fixed
 
 - **lean: a parent-directory race was a silent hole.** With fetches
