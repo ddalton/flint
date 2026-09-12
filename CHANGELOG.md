@@ -46,6 +46,20 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **lean: a fresh fetch is verified against the manifest's CRC-64.**
+  Checkout compared bytes to the manifest only on the RESUME path, so a
+  fresh fetch whose body was wrong under the cited etag — bit-rot, a
+  broken gateway, a cache serving the wrong object — was written,
+  cited in the baseline, and read by the agent as the file. S3 returns
+  a checksum header the SDK validates; a backend that returns none
+  (Ozone carries no CRC-64) validates nothing. Now the whole-object arm
+  hashes the body before the write and the ranged arm folds each
+  range's CRC in offset order before the rename; a mismatch refuses the
+  checkout with nothing written. Only cited bytes are checked — the
+  S3-wins adoption arm adopts bytes the manifest's CRC does not
+  describe, and legacy entries carry none. Three mutation controls,
+  each failing exactly one test. Cost within noise on the rig.
+
 - **lean: a parent-directory race was a silent hole.** With fetches
   running in parallel, two siblings race to create the same missing
   parent; the loser's `EEXIST` was reported as a containment REFUSAL,

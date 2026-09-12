@@ -388,6 +388,21 @@ impl MemoryStore {
         self.stall_next_get_range_ms.store(ms, Ordering::SeqCst);
     }
 
+    /// Test surface: the bytes under a key change while its etag and its
+    /// stored checksum claim do NOT — bit-rot, a broken gateway, a cache
+    /// serving the wrong body. Nothing on the wire says so: If-Match
+    /// still matches, and a store that never carried a checksum header
+    /// validates nothing. Only a reader that checks the body against
+    /// what the MANIFEST cites can see it.
+    pub fn inject_corrupt_body(&self, key: &str, mutate: impl FnOnce(&mut Vec<u8>)) {
+        let mut inner = self.inner.lock().unwrap();
+        let chain = inner.chains.get_mut(key).expect("corrupting a key that exists");
+        let obj = chain.versions.last_mut().expect("a version to corrupt");
+        let mut b = obj.bytes.to_vec();
+        mutate(&mut b);
+        obj.bytes = Bytes::from(b);
+    }
+
     /// Test surface: plant an object directly (foreign writers, torn
     /// own states, import fixtures). Stamps go in as given.
     pub fn raw_put(&self, key: &str, bytes: Bytes, meta: Vec<(String, String)>) -> ObjectMeta {

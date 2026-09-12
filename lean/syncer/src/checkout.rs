@@ -80,6 +80,7 @@ async fn fetch_ranged(
     mode: Option<u32>,
     chunk_bytes: u64,
     parallelism: usize,
+    expect_crc: Option<u64>,
 ) -> LeanResult<Option<u64>> {
     use futures::stream::StreamExt;
 
@@ -159,16 +160,22 @@ async fn fetch_ranged(
                      end — refusing a hole"
                 ))));
             }
-            tokio::task::spawn_blocking(move || {
+            let crc = tokio::task::spawn_blocking(move || {
                 // Segments are contiguous and in order within the range,
                 // so each lands at the running offset. The file is
                 // positional throughout, so siblings still cannot race.
+                // The range's CRC-64 is taken here, on the same pass, so
+                // the drain can fold the ranges in offset order and
+                // compare the whole against the manifest before the
+                // rename makes the file visible.
+                let mut h = flint_store::Crc64Nvme::new();
                 let mut at = off;
                 for seg in &b {
                     sink.write_at(at, seg)?;
+                    h.update(seg);
                     at += seg.len() as u64;
                 }
-                Ok::<(), LeanError>(())
+                Ok::<u64, LeanError>(h.finalize())
             })
             .await
             .map_err(|e| {
@@ -177,15 +184,19 @@ async fn fetch_ranged(
                 )))
             })?
             .map_err(RangeFail::Fatal)?;
-            Ok(n)
+            Ok((off, n, crc))
         }
     }))
     .buffer_unordered(parallelism.max(1));
 
     let mut bytes = 0u64;
+    let mut crcs: Vec<(u64, u64, u64)> = Vec::new();
     while let Some(next) = ranges.next().await {
         match next {
-            Ok(n) => bytes += n,
+            Ok((off, n, crc)) => {
+                bytes += n;
+                crcs.push((off, n, crc));
+            }
             Err(RangeFail::Fallback) => {
                 drop(ranges);
                 let _ = std::fs::remove_file(tmp);
@@ -209,6 +220,33 @@ async fn fetch_ranged(
             target.display()
         ))
     })?;
+    // The whole object's CRC-64 from its ranges: `crc64_combine`
+    // composes A-then-B, so the fold runs in offset order whatever
+    // order the ranges landed in. Checked BEFORE the rename, for the
+    // same reason a hole is: a wrong file must never become visible.
+    if let Some(want) = expect_crc {
+        crcs.sort_unstable_by_key(|(off, _, _)| *off);
+        let mut folded: Option<u64> = None;
+        for (_, len, crc) in &crcs {
+            folded = Some(match folded {
+                None => *crc,
+                Some(acc) => flint_store::crc64_combine(acc, *crc, *len),
+            });
+        }
+        if folded != Some(want) {
+            drop(sink);
+            let _ = std::fs::remove_file(tmp);
+            return Err(LeanError::State(format!(
+                "manifest cites {key} at etag {etag} with CRC-64 {}, but the {} ranges fetched \
+                 under that etag fold to {} — the object is corrupt or the store returned the \
+                 wrong bytes; refusing to materialise {} (nothing renamed into place)",
+                flint_store::crc64_to_b64(want),
+                crcs.len(),
+                folded.map(flint_store::crc64_to_b64).unwrap_or_else(|| "nothing".into()),
+                target.display()
+            )));
+        }
+    }
     sink.commit()?;
     Ok(Some(bytes))
 }
@@ -467,6 +505,7 @@ impl Syncer {
                         Some(entry.mode),
                         range_chunk,
                         range_par,
+                        entry.crc64_b64.as_deref().and_then(flint_store::crc64_from_b64),
                     )
                     .await?
                 } else {
@@ -530,9 +569,11 @@ impl Syncer {
                 // exactly the arm the mode exists to avoid. HITL
                 // writes still reach readers, through the ungated
                 // repair pass, within one floor.
-                let (meta, body) = match (pinned, entry.version_id.as_deref()) {
+                // `cited` is whether these are the bytes the manifest
+                // describes — every arm but S3-wins adoption.
+                let ((meta, body), cited) = match (pinned, entry.version_id.as_deref()) {
                     (true, Some(vid)) => match store.get_version(&entry.key, vid).await {
-                        Ok(ok) => ok,
+                        Ok(ok) => (ok, true),
                         Err(StoreError::NotFound(_)) => {
                             // The dangling-citation endgame (D8):
                             // the backstop reaped a cited noncurrent
@@ -551,7 +592,7 @@ impl Syncer {
                         Err(e) => return Err(e.into()),
                     },
                     _ => match store.get_whole(&entry.key, Some(&entry.etag)).await {
-                        Ok(ok) => ok,
+                        Ok(ok) => (ok, true),
                         Err(StoreError::PreconditionFailed(_)) if sole_writer => {
                             // Deliberately NOT the `recover-staged`
                             // advice below: nothing was staged
@@ -601,7 +642,7 @@ impl Syncer {
                             // `hitl_upload_survives_two_barriers`
                             // behaviour is untouched in the default
                             // mode.
-                            store.get_whole(&entry.key, None).await?
+                            (store.get_whole(&entry.key, None).await?, false)
                         }
                         Err(StoreError::NotFound(_)) => {
                             return Err(LeanError::State(format!(
@@ -621,12 +662,41 @@ impl Syncer {
                 // effective ranged threshold — which is why raising fanout
                 // stopped paying above 128 with half a core sitting idle:
                 // 3,200 files/s at 1.29 of 2 cores, flat from 128 to 512.
+                //
+                // And VERIFIED against the manifest before it is written.
+                // This is the one integrity check that does not depend on
+                // the backend: S3 returns a checksum header the SDK
+                // validates, Ozone returns no CRC-64 at all so the SDK
+                // validates nothing, and a body that is wrong under the
+                // cited etag — bit-rot, a broken gateway, a cache serving
+                // the wrong object — passes If-Match either way. Until
+                // 2026-09-12 the manifest's CRC was compared only on the
+                // RESUME path, so a corrupt fresh fetch was written, cited
+                // in the baseline and read by the agent as the file. A
+                // legacy entry carries no CRC and attests nothing beyond
+                // its size; adopted (uncited) bytes are not the manifest's
+                // to describe.
+                let expect_crc = if cited { entry.crc64_b64.clone() } else { None };
                 let st = {
                     let target_w = target.clone();
                     let body_w = body.clone(); // Bytes: a refcount bump, not a copy
                     let mode_w = entry.mode;
                     let key_err = entry.key.clone();
+                    let key_crc = entry.key.clone();
+                    let etag_err = entry.etag.clone();
+                    let rel_err = path.clone();
                     tokio::task::spawn_blocking(move || -> LeanResult<std::fs::Metadata> {
+                        if let Some(want) = expect_crc {
+                            let got = flint_store::crc64_to_b64(flint_store::crc64_nvme(&body_w));
+                            if got != want {
+                                return Err(LeanError::State(format!(
+                                    "manifest cites {rel_err} ({key_crc} at etag {etag_err}) with \
+                                     CRC-64 {want}, but the bytes fetched under that etag hash to \
+                                     {got} — the object is corrupt or the store returned the wrong \
+                                     bytes; refusing to materialise it (nothing written)"
+                                )));
+                            }
+                        }
                         write_file_atomic(&target_w, &body_w, Some(mode_w))
                     })
                     .await

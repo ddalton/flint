@@ -10842,3 +10842,84 @@ fn the_temp_retry_paths_replace_a_leftover_and_recreate_a_vanished_parent() {
     assert!(err.to_string().contains("not exclusively creatable"), "{err}");
     assert!(!root.join("nostate").exists());
 }
+
+/// A fresh fetch is verified against the manifest's CRC-64 — the one
+/// integrity check that does not depend on the backend. S3 returns a
+/// checksum header the SDK validates; Ozone returns no CRC-64 at all
+/// and the SDK then validates nothing; and a body that is wrong under
+/// the cited etag (bit-rot, a broken gateway, a cache serving the wrong
+/// object) passes If-Match either way. Until 2026-09-12 checkout
+/// compared bytes to the manifest only on the RESUME path, so a corrupt
+/// fresh fetch was written, cited in the baseline, and read by the
+/// agent as the file.
+///
+/// The S3-wins adoption arm is deliberately NOT checked: it adopts
+/// bytes that moved past the manifest, whose CRC describes the old
+/// ones — `an_ordinary_workspace_still_adopts_bytes_that_moved_past_
+/// the_manifest` is that control, and it fails if the check is applied
+/// to adopted bytes. Delete the whole-arm check and this test fails on
+/// "must refuse".
+#[tokio::test]
+async fn a_fresh_fetch_whose_bytes_do_not_match_the_manifest_crc_is_refused() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "model/config.json", "{\"layers\": 12, \"hidden\": 768}");
+    write(dir_a.path(), "README.md", "intact");
+    a.run_barrier().await.unwrap();
+
+    // Same length, one bit flipped, same etag, same stored checksum
+    // claim: nothing on the wire changes.
+    store.inject_corrupt_body(&a.cfg.file_key("model/config.json"), |b| b[10] ^= 0x01);
+
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = syncer(&store, dir_b.path()).await;
+    let err = b.checkout().await.expect_err("a corrupt fresh fetch must refuse");
+    let msg = err.to_string();
+    assert!(msg.contains("CRC-64") && msg.contains("model/config.json"), "{msg}");
+    assert!(
+        !dir_b.path().join("model/config.json").exists(),
+        "nothing may be written for a body that fails the check"
+    );
+    assert!(!dir_b.path().join("model/config.json.flint-sync-tmp").exists());
+}
+
+/// The ranged arm has no checksum header to lean on at all — a range
+/// GET carries none — so before this it had NO integrity check on a
+/// fresh fetch. Each range's CRC-64 is taken as it is written and the
+/// ranges are folded in offset order with `crc64_combine`; the fold is
+/// compared before the rename, so a wrong object never becomes visible.
+/// The flipped byte sits mid-object, in a range that is neither first
+/// nor last, so a fold that ignored offsets or dropped a range would
+/// not be caught by luck. Delete the fold and this fails on "must
+/// refuse"; `ranged_checkout_is_byte_identical_and_parallel` is the
+/// control that an intact object still passes it.
+#[tokio::test]
+async fn a_ranged_fetch_whose_bytes_do_not_match_the_manifest_crc_is_refused() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    let big: Vec<u8> = (0..5 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    std::fs::write(dir_a.path().join("weights.bin"), &big).unwrap();
+    a.run_barrier().await.unwrap();
+
+    store.inject_corrupt_body(&a.cfg.file_key("weights.bin"), |b| {
+        let i = b.len() / 2 + 777;
+        b[i] ^= 0x01;
+    });
+
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = syncer(&store, dir_b.path()).await;
+    b.cfg.range_get_min_bytes = 1024 * 1024;
+    b.cfg.range_get_chunk_bytes = 512 * 1024; // 10 ranges over 5 MiB
+    b.cfg.range_get_parallelism = 4;
+    let err = b.checkout().await.expect_err("a corrupt ranged fetch must refuse");
+    let msg = err.to_string();
+    assert!(msg.contains("CRC-64") && msg.contains("10 ranges"), "{msg}");
+    assert!(!dir_b.path().join("weights.bin").exists(), "a wrong object must never be renamed into place");
+    assert!(!dir_b.path().join("weights.bin.flint-sync-tmp").exists(), "the temp file is cleaned up");
+}

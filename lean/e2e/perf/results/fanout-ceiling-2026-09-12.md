@@ -286,6 +286,34 @@ nothing and lean's own manifest CRC is the only integrity check on a
 fresh fetch — an argument for end-to-end CRC verification in checkout
 whichever client is underneath.
 
+## 6. Fresh fetches verified against the manifest CRC (done, `checkout.rs`)
+
+The backend-independent integrity check the raw-path discussion kept
+coming back to, built first because it does not depend on the client.
+The whole-object arm hashes the body (CRC-64/NVME, slice-by-8) on the
+blocking pool before the write and compares it to the manifest entry's
+`crc64_b64`; the ranged arm takes each range's CRC on the pass that
+writes it and folds the ranges in offset order with `crc64_combine`,
+compared before the rename. Only CITED bytes are checked — an If-Match
+hit or a pinned version. The S3-wins adoption arm adopts bytes that
+moved past the manifest, whose CRC describes the old ones, and is
+exempt by construction; legacy entries carry no CRC and stay unchecked.
+A mismatch refuses the checkout with nothing written or renamed.
+
+Mutation controls: the whole-arm check deleted fails only the
+whole-arm test; the ranged fold deleted fails only the ranged test; the
+check applied to adopted bytes fails
+`an_ordinary_workspace_still_adopts_bytes_that_moved_past_the_manifest`
+with the CRC refusal. The memory double gained `inject_corrupt_body`,
+which changes a key's bytes while its etag and stored checksum claim
+stay intact — the shape of bit-rot, a broken gateway, or a cache
+serving the wrong object, none of which If-Match can see.
+
+Cost, 6-vCPU rig, loopback, tmpfs, fanout 128, n=3 interleaved:
+previous build 32,102-33,388 files/s, with the check 31,496-32,573.
+An 8 KiB CRC is ~8 us on the blocking pool; the ranges overlap. Identity
+20,000/0 on both runs.
+
 ## Rig defects found on the way (each would have been quoted)
 
 - macOS `paste -sd,` with no `-` prints usage: every "scoped" syncer got
