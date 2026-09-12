@@ -534,7 +534,38 @@ trap print_profile EXIT
 # checks on runaj).  The failure-path `tail -30` pipes are safe (tail
 # consumes all input).
 
+# ── SHARDING: which modules does THIS process check? ───────────────────
+#
+# The gate is 246 TLC runs.  On the 4-vCPU CI runner that does not fit in
+# a job, so the workflow splits it across a matrix and each process is
+# handed a group of modules in TLA_MODULES (space-separated).  Empty or
+# unset means the whole gate, which is what a developer running this by
+# hand gets and what the file has always meant.
+#
+# A FILTER'S CHARACTERISTIC FAILURE IS A SHARD THAT CHECKS NOTHING AND
+# REPORTS IT IN GREEN — one typo'd module name and the road is empty.
+# Two things stop that, and neither is a comment:
+#
+#   * here, the tail of this script asserts the EXACT number of runs this
+#     process was supposed to execute (TLA_EXPECT_RUNS).  Every call
+#     below is unconditional and at column 0, so that number is knowable
+#     statically and any drift is an error rather than a judgement call.
+#   * in the workflow, the matrix is GENERATED from this file by
+#     scripts/tla-shards.sh.  A module added below therefore cannot be
+#     left out of the matrix by forgetting to list it somewhere else.
+RAN=0
+SKIPPED=0
+want_module() { # <module>
+  [ -z "${TLA_MODULES:-}" ] && return 0
+  case " ${TLA_MODULES} " in
+    *" $1 "*) return 0 ;;
+    *)        return 1 ;;
+  esac
+}
+
 strict_run() { # <module> <cfg> <label>
+  want_module "$1" || { SKIPPED=$((SKIPPED+1)); return 0; }
+  RAN=$((RAN+1))
   echo "== $3 ($2): invariants must hold =="
   local OUT
   OUT=$(run_tlc "$1" "$2") || { echo "$OUT" | tail -30; echo "FAIL: $3 errored"; exit 1; }
@@ -544,6 +575,8 @@ strict_run() { # <module> <cfg> <label>
 }
 
 mutation_run() { # <module> <cfg> <label> <expected-violation-regex>
+  want_module "$1" || { SKIPPED=$((SKIPPED+1)); return 0; }
+  RAN=$((RAN+1))
   echo "== $3 ($2): TLC must FIND the loss =="
   local MOUT PAT
   MOUT=$(run_tlc "$1" "$2" || true)
@@ -554,6 +587,8 @@ mutation_run() { # <module> <cfg> <label> <expected-violation-regex>
 }
 
 liveness_mutation_run() { # <module> <cfg> <label>
+  want_module "$1" || { SKIPPED=$((SKIPPED+1)); return 0; }
+  RAN=$((RAN+1))
   echo "== $3 ($2): TLC must FIND the starvation lasso =="
   local MOUT
   MOUT=$(run_tlc "$1" "$2" || true)
@@ -1478,4 +1513,29 @@ liveness_mutation_run FlintCsiMount FlintCsiMountCrashStuck.cfg "cluster-death l
 mutation_run FlintCsiMount FlintCsiMountProbeHandoff.cfg "cross-cluster VACUITY PROBE (required-fail: a cluster must be able to SERVE a file another cluster wrote, or the multi-cluster tranche is a green light over an empty road)" "Probe_HandoffReachable"
 mutation_run FlintCsiMount FlintCsiMountProbeCleanup.cfg "cleanup-branch VACUITY PROBE (required-fail: the start-over branch must be reachable under the blind oracle, or the mutations that depend on it check nothing)" "Probe_CleanupReachable"
 
+# ── ANTI-VACUITY: did this process actually check anything? ────────────
+#
+# Without this, a shard whose module list matches nothing runs zero TLC,
+# falls straight through, and prints TLA GATE PASSED over an empty road.
+# That is the failure mode this directory's own drills keep finding in
+# other people's harnesses; it would be embarrassing to ship it here.
+#
+# TLA_EXPECT_RUNS is computed by scripts/tla-shards.sh from this very
+# file, so it cannot drift from the calls below.  Equality, not a floor:
+# running MORE than expected means the count and the file disagree, which
+# is just as much a broken harness as running fewer.
+if [ -n "${TLA_EXPECT_RUNS:-}" ]; then
+  if [ "$RAN" -ne "$TLA_EXPECT_RUNS" ]; then
+    echo "FAIL: this process ran $RAN TLC runs, expected exactly $TLA_EXPECT_RUNS."
+    echo "      TLA_MODULES='${TLA_MODULES:-<all>}'"
+    echo "      A module name matching nothing checks nothing.  The names are:"
+    echo "        awk '/^(strict_run|mutation_run|liveness_mutation_run)[ ]/ {print \$2}' scripts/check-tla.sh | sort -u"
+    exit 1
+  fi
+fi
+if [ -n "${TLA_MODULES:-}" ]; then
+  echo "shard checked $RAN runs, skipped $SKIPPED (modules: ${TLA_MODULES})"
+else
+  echo "whole gate: $RAN runs"
+fi
 echo "TLA GATE PASSED"

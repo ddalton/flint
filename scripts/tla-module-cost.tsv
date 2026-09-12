@@ -1,0 +1,39 @@
+# Per-module wall clock for the hub TLA+ gate, in seconds, on a GitHub
+# ubuntu-latest runner (4 vCPU; TLC takes -workers auto, so this is a
+# 4-worker number and will not match an 8-core workstation).
+#
+# Read by scripts/tla-shards.sh to balance the job matrix. A module
+# absent from this file falls back to run-count times 30s, so the file
+# is an optimisation and never a correctness requirement: a wrong number
+# costs an unbalanced shard, never a skipped run.
+#
+# SOURCE: run 34713496277 (commit 4d03b120, 2026-09-12) — the first time
+# this gate ever executed on Linux, and it did not finish. It was killed
+# by the job timeout after 120 minutes having completed 183 of 246 runs,
+# so a THIRD OF THE GATE HAS NEVER BEEN TIMED ANYWHERE. Those modules are
+# marked NOT MEASURED below and carry the fallback estimate. Regenerate
+# this file from a full green run and the guesses go away.
+#
+# The number that decides the shape of the matrix: ForgeSync.cfg is a
+# SINGLE run of 2071s. No partition of this gate can finish faster than
+# that, at any granularity, until that model is made cheaper.
+#
+# module<TAB>seconds<TAB># provenance
+FlintA2Probe	3	# measured 3/3 runs
+FlintAdmission	4	# measured 5/5 runs
+FlintClaims	3	# measured 3/3 runs
+FlintClientIdentity	450	# NOT MEASURED — never reached before the 120-min timeout; 15 runs at 30s
+FlintComposition	530	# measured 33/33 runs
+FlintCsiMount	360	# NOT MEASURED — never reached before the 120-min timeout; 12 runs at 30s
+FlintDelegRecall	330	# NOT MEASURED — never reached before the 120-min timeout; 11 runs at 30s
+FlintExtents	1174	# measured 15/15 runs
+FlintExtentsProbe	47	# measured 11/11 runs
+FlintReplication	2685	# measured 71/71 runs
+FlintShareDisk	6	# measured 7/7 runs
+FlintSnapshots	4	# measured 4/4 runs
+FlintTierEpoch	159	# measured 8/8 runs
+FlintTierMarker	210	# NOT MEASURED — never reached before the 120-min timeout; 7 runs at 30s
+FlintTierSession	210	# NOT MEASURED — never reached before the 120-min timeout; 7 runs at 30s
+FlintTruncate	9	# measured 7/7 runs
+ForgeMergeChain	90	# NOT MEASURED — never reached before the 120-min timeout; 3 runs at 30s
+ForgeSync	2883	# measured 15/24 runs, +9 estimated at 30s
