@@ -583,8 +583,31 @@ impl Sidecar {
                         Err(e) => return Err(e.into()),
                     },
                 };
-                write_file_atomic(&target, &body, Some(entry.mode))?;
-                let st = std::fs::metadata(&local)?;
+                // OFF the fan-out task, for the same reason the ranged arm
+                // is: write_file_atomic is a blocking create+write+fsync+
+                // rename, and running it inline here froze every other
+                // in-flight fetch sharing this task. Small files ALL come
+                // through this arm — 8 KiB is far below the 16 MiB
+                // effective ranged threshold — which is why raising fanout
+                // stopped paying above 128 with half a core sitting idle:
+                // 3,200 files/s at 1.29 of 2 cores, flat from 128 to 512.
+                let st = {
+                    let target_w = target.clone();
+                    let local_w = local.clone();
+                    let body_w = body.clone(); // Bytes: a refcount bump, not a copy
+                    let mode_w = entry.mode;
+                    let key_err = entry.key.clone();
+                    tokio::task::spawn_blocking(move || -> LeanResult<std::fs::Metadata> {
+                        write_file_atomic(&target_w, &body_w, Some(mode_w))?;
+                        Ok(std::fs::metadata(&local_w)?)
+                    })
+                    .await
+                    .map_err(|e| {
+                        LeanError::State(format!(
+                            "write task for {key_err} did not complete: {e}"
+                        ))
+                    })??
+                };
                 Ok(Fetched {
                     ranged: false,
                     path: path.clone(),

@@ -386,7 +386,7 @@ impl LeanConfig {
             max_bytes: 0,
             max_files: 0,
             window_slack_secs: 180,
-            fanout: 32,
+            fanout: 128,
             project_id: None,
             fetch_inflight_max_bytes: 512 * 1024 * 1024,
             range_get_min_bytes: 8 * 1024 * 1024,

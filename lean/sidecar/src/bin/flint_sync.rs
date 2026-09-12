@@ -37,7 +37,7 @@
 //!                                 set is not frozen: a path the remote
 //!                                 changes arrives through the inbox and
 //!                                 is then owned like any other.
-//!   FLINT_SYNC_FANOUT             concurrent fetches/uploads (default 32)
+//!   FLINT_SYNC_FANOUT             concurrent fetches/uploads (default 128)
 //!   FLINT_SYNC_RANGE_GET_MIN_MB   materialise objects >= this as parallel
 //!                                 ranges (default 8; 0 = off)
 //!   FLINT_SYNC_RANGE_GET_CHUNK_MB bytes per range (default 16)
@@ -177,7 +177,7 @@ async fn main() {
         .unwrap_or(false);
     cfg.max_bytes = env_u64("FLINT_SYNC_MAX_BYTES", 0);
     cfg.max_files = env_u64("FLINT_SYNC_MAX_FILES", 0);
-    cfg.fanout = env_u64("FLINT_SYNC_FANOUT", 32).max(1) as usize;
+    cfg.fanout = env_u64("FLINT_SYNC_FANOUT", 128).max(1) as usize;
     cfg.project_id = std::env::var("FLINT_SYNC_PROJECT_ID").ok().filter(|p| !p.is_empty());
     cfg.fetch_inflight_max_bytes =
         env_u64("FLINT_SYNC_FETCH_INFLIGHT_MB", 512).max(1) * 1024 * 1024;
