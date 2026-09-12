@@ -84,18 +84,23 @@ case "$SCOPE" in
     *)    echo "usage: stage-prebuilt.sh [all|lean|s3csi|forge|lite]" >&2; exit 2 ;;
 esac
 
-# Binaries from the LEAN crate (lean/syncer) — a separate crate with a
-# separate target dir, which is why they could not simply join $BINS.
-# `flint-sync` is the image every workspace pod actually RUNS, and it was
-# published entirely by hand: absent from this script AND from
+# Binaries from the LEAN crates — separate crates with separate target
+# dirs, which is why they could not simply join $BINS. `flint-sync`
+# (lean/syncer) is the image every workspace pod actually RUNS, and it
+# was published entirely by hand: absent from this script AND from
 # publish-images.sh, with only release.sh's after-the-fact "is it on the
 # Hub?" check standing between it and a silent wrong-code release.
-LEAN_BINS="flint-sync flint-lean-gateway"
+# `flint-lean-gateway` builds from lean/gateway (the flint-lean-gateway
+# crate: the library a backend embeds, and this binary around it) and
+# links lean/syncer, so it has its own clock below.
+LEAN_BINS="flint-sync"
+GW_BINS="flint-lean-gateway"
 
 # An s3csi release publishes neither lean image, so it stages neither
 # lean binary; it stages the worker crate's binary instead (below).
 if [ "$SCOPE" = s3csi ]; then
     LEAN_BINS=""
+    GW_BINS=""
 fi
 # A forge release stages `flint-sync` and nothing else from the lean
 # crate: the syncer image COPYs it, because the legible export runs the
@@ -104,12 +109,14 @@ fi
 # produces no image at all, at "COPY failed".
 if [ "$SCOPE" = forge ]; then
     LEAN_BINS="flint-sync"
+    GW_BINS=""
 fi
 
 # A lite release publishes only flint-pnfs, which COPYs nothing from the
 # lean crate.
 if [ "$SCOPE" = lite ]; then
     LEAN_BINS=""
+    GW_BINS=""
 fi
 
 # Binaries from the FORGE crate (forge/syncer). Only a forge-scoped
@@ -165,6 +172,26 @@ case "$lean_mtime" in
         exit 2 ;;
 esac
 echo "newest lean source: $(date -r "$lean_mtime" '+%Y-%m-%d %H:%M:%S')  ${lean_name#$here/../}"
+
+# The gateway crate links lean/syncer AND crates/flint-store, so its
+# clock is the union of all three — the same argument one crate further
+# out again.
+gw_crate=$(cd "$here/../lean/gateway" && pwd)
+if [ -n "$GW_BINS" ]; then
+    newest_gw=$(find "$gw_crate/src" "$gw_crate/Cargo.toml" "$gw_crate/Cargo.lock" \
+                     "$lean_crate/src" "$lean_crate/Cargo.toml" \
+                     "$store_crate/src" "$store_crate/Cargo.toml" \
+                     -type f -print0 \
+                | xargs -0 stat -f '%m %N' | sort -rn | head -1)
+    gw_mtime=${newest_gw%% *}
+    gw_name=${newest_gw#* }
+    case "$gw_mtime" in
+        ''|*[!0-9]*)
+            echo "cannot determine the newest GATEWAY source mtime — refusing to stage blind" >&2
+            exit 2 ;;
+    esac
+    echo "newest gateway source: $(date -r "$gw_mtime" '+%Y-%m-%d %H:%M:%S')  ${gw_name#$here/../}"
+fi
 
 # The worker crate (crates/flint-s3-worker) has its own clock too. It
 # links nothing of ours, so its own sources and lockfile are the whole
@@ -247,6 +274,22 @@ for arch_pair in "x86_64:amd64" "aarch64:arm64"; do
         m=$(stat -f '%m' "$src")
         if [ "$m" -lt "$lean_mtime" ]; then
             echo "  ✗ STALE   $arch/$b built $(date -r "$m" '+%m-%d %H:%M') — older than the lean source" >&2
+            stale=1; continue
+        fi
+        cp "$src" "$dest/$arch/$b"
+        echo "  ✓ staged  $arch/$b  ($(date -r "$m" '+%m-%d %H:%M'), $(( $(stat -f '%z' "$src") / 1048576 )) MiB)"
+    done
+    for b in $GW_BINS; do
+        src="$gw_crate/target/$triple/release/$b"
+        if [ ! -f "$src" ]; then
+            echo "  ✗ MISSING $arch/$b — build it before staging" >&2
+            echo "            (cd lean/gateway && cargo zigbuild --release --features s3 \\" >&2
+            echo "               --target $triple)" >&2
+            stale=1; continue
+        fi
+        m=$(stat -f '%m' "$src")
+        if [ "$m" -lt "$gw_mtime" ]; then
+            echo "  ✗ STALE   $arch/$b built $(date -r "$m" '+%m-%d %H:%M') — older than the gateway source" >&2
             stale=1; continue
         fi
         cp "$src" "$dest/$arch/$b"

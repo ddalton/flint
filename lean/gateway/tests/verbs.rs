@@ -1,0 +1,452 @@
+//! The library API, verb by verb, on the in-memory store — what an
+//! embedder's backend sees, with no HTTP anywhere. The gateway's own
+//! battery (`battery.rs`) drives the same verbs through the wire; this
+//! file pins what the typed surface promises: the refusals, what they
+//! carry, and the order of writes.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use flint_lean_gateway::{
+    crc64_nvme, crc64_to_b64, Bytes, LeanEntry, LeanManifest, MemoryStore, ObjectStore, PutFile,
+    VerbError, Workspace,
+};
+
+const PREFIX: &str = "tenant/proj1";
+
+fn store() -> Arc<dyn ObjectStore> {
+    Arc::new(MemoryStore::new())
+}
+
+fn ws(store: &Arc<dyn ObjectStore>) -> Workspace {
+    Workspace::new(store.clone(), PREFIX)
+}
+
+/// A syncer's lease on the workspace, so the epoch-validated verbs
+/// have a cell to validate against. Returns the epoch.
+async fn hold_lease(store: &Arc<dyn ObjectStore>, w: &Workspace) -> u64 {
+    let lease = store.epoch_acquire(&w.config().epoch_key(), "syncer-1", None).await.unwrap();
+    lease.epoch
+}
+
+/// What the syncer's barrier does after consuming the inbox, in one
+/// CAS: cite `path` at `etag` with the CRC of `body`.
+async fn cite(w: &Workspace, epoch: u64, seq: u64, path: &str, etag: &str, body: &[u8]) -> String {
+    let mut m = LeanManifest { seq, ..Default::default() };
+    m.entries.insert(
+        path.to_string(),
+        LeanEntry {
+            key: w.config().file_key(path),
+            etag: etag.to_string(),
+            crc64_b64: crc64_to_b64(crc64_nvme(body)),
+            size: body.len() as u64,
+            mode: 0o644,
+            mtime_unix: 0,
+            generation: seq,
+            epoch,
+            version_id: None,
+        },
+    );
+    let current = w.snapshot().await.unwrap().manifest_etag;
+    w.cas_manifest(&m, current.as_deref(), epoch, &format!("test-{seq}")).await.unwrap()
+}
+
+#[tokio::test]
+async fn a_write_is_durable_and_readable_at_once_and_tracked_until_cited() {
+    let s = store();
+    let w = ws(&s);
+    let etag = w.put_file("a.txt", Bytes::from("one"), &PutFile::default()).await.unwrap();
+
+    let blob = w.get_file("a.txt").await.unwrap();
+    assert_eq!(blob.body, Bytes::from("one"));
+    assert_eq!(blob.etag, etag);
+
+    // Object at the real key, entry in the inbox, nothing in the manifest.
+    assert!(s.head(&w.config().file_key("a.txt")).await.is_ok());
+    let snap = w.snapshot().await.unwrap();
+    assert_eq!(snap.inbox.entries.len(), 1);
+    assert_eq!(snap.inbox.entries[0].etag, etag);
+    assert_eq!(snap.inbox.entries[0].author, "ui", "no author ⇒ `ui`");
+    assert!(snap.manifest.entries.is_empty());
+    assert!(snap.manifest_etag.is_none());
+
+    let st = w.status().await.unwrap();
+    assert_eq!(st.inbox_depth, 1);
+    assert_eq!(st.seq, None);
+    assert_eq!(st.epoch, None, "no syncer holds this workspace");
+    assert!(st.window.is_none());
+}
+
+#[tokio::test]
+async fn an_overwrite_must_name_what_it_read() {
+    let s = store();
+    let w = ws(&s);
+    let v1 = w.put_file("a.txt", Bytes::from("one"), &PutFile::default()).await.unwrap();
+
+    // No If-Match at all: refused, nothing written.
+    let err = w.put_file("a.txt", Bytes::from("two"), &PutFile::default()).await.unwrap_err();
+    assert!(matches!(err, VerbError::PreconditionRequired), "{err}");
+    assert_eq!((err.status(), err.code()), (428, "precondition-required"));
+    assert!(!err.is_retryable());
+    assert_eq!(w.get_file("a.txt").await.unwrap().body, Bytes::from("one"));
+
+    // A stale one: refused, and the refusal names the current tag.
+    let stale = PutFile { if_match: Some("\"not-it\"".into()), ..Default::default() };
+    let err = w.put_file("a.txt", Bytes::from("two"), &stale).await.unwrap_err();
+    match &err {
+        VerbError::FileChanged { current } => assert_eq!(current.as_deref(), Some(v1.as_str())),
+        e => panic!("expected FileChanged, got {e}"),
+    }
+    assert_eq!(err.current_etag(), Some(v1.as_str()));
+    assert_eq!((err.status(), err.code()), (412, "file-changed"));
+
+    // The right one, quoted as S3 hands it out: accepted.
+    let ok = PutFile { if_match: Some(v1.clone()), author: Some("dilip".into()), ..Default::default() };
+    let v2 = w.put_file("a.txt", Bytes::from("two"), &ok).await.unwrap();
+    assert_ne!(v2, v1);
+    assert_eq!(w.get_file("a.txt").await.unwrap().body, Bytes::from("two"));
+
+    // The bare form of the tag is judged the same as the quoted one.
+    let bare = PutFile { if_match: Some(v2.trim_matches('"').to_string()), ..Default::default() };
+    w.put_file("a.txt", Bytes::from("three"), &bare).await.unwrap();
+
+    // `*` demands existence: a create over an existing file is refused.
+    let create = PutFile { if_none_match: Some("*".into()), ..Default::default() };
+    let err = w.put_file("a.txt", Bytes::from("four"), &create).await.unwrap_err();
+    assert!(matches!(err, VerbError::FileChanged { current: Some(_) }), "{err}");
+    // ...and a create where nothing exists succeeds.
+    w.put_file("b.txt", Bytes::from("new"), &create).await.unwrap();
+
+    // If-Match on a path that is not there is a stale caller.
+    let err = w.put_file("c.txt", Bytes::from("x"), &ok).await.unwrap_err();
+    assert!(matches!(err, VerbError::FileChanged { current: None }), "{err}");
+
+    // Precondition shapes the verb refuses to guess at.
+    let odd = PutFile { if_none_match: Some("\"e\"".into()), ..Default::default() };
+    let err = w.put_file("d.txt", Bytes::from("x"), &odd).await.unwrap_err();
+    assert!(matches!(err, VerbError::BadPrecondition(_)), "{err}");
+    let both = PutFile { if_match: Some("*".into()), if_none_match: Some("*".into()), ..Default::default() };
+    let err = w.put_file("d.txt", Bytes::from("x"), &both).await.unwrap_err();
+    assert_eq!(err.code(), "bad-precondition");
+}
+
+#[tokio::test]
+async fn path_hygiene_the_size_cap_and_a_missing_file() {
+    let s = store();
+    let w = ws(&s).with_max_put_bytes(4);
+    for bad in ["../x", "/abs", "a//b", ".flint/x", ".flint", "a/./b", ".flint-sync/state"] {
+        let err = w.put_file(bad, Bytes::from("x"), &PutFile::default()).await.unwrap_err();
+        assert!(matches!(err, VerbError::BadPath(_)), "{bad}: {err}");
+        assert_eq!(err.status(), 400);
+        let err = w.get_file(bad).await.unwrap_err();
+        assert!(matches!(err, VerbError::BadPath(_)), "{bad}: {err}");
+    }
+    let err = w.put_file("ok.txt", Bytes::from("12345"), &PutFile::default()).await.unwrap_err();
+    assert!(matches!(err, VerbError::TooLarge { size: 5, max: 4 }), "{err}");
+    assert_eq!((err.status(), err.code()), (413, "payload-too-large"));
+    assert!(
+        s.head(&w.config().file_key("ok.txt")).await.is_err(),
+        "a refused body must not have landed"
+    );
+    w.put_file("ok.txt", Bytes::from("1234"), &PutFile::default()).await.unwrap();
+
+    let err = w.get_file("nope.txt").await.unwrap_err();
+    assert!(matches!(err, VerbError::NoSuchFile(_)), "{err}");
+    assert_eq!((err.status(), err.code()), (404, "no-such-file"));
+}
+
+#[tokio::test]
+async fn a_cited_file_reads_through_the_manifest_and_wait_cited_sees_the_citation() {
+    let s = store();
+    let w = ws(&s);
+    let epoch = hold_lease(&s, &w).await;
+    let etag = w.put_file("a.txt", Bytes::from("one"), &PutFile::default()).await.unwrap();
+
+    // Nobody has cited it: the wait says so within the bound, and the
+    // write is still readable meanwhile.
+    let err = w
+        .wait_cited("a.txt", &etag, Duration::from_millis(400), Duration::from_millis(50))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VerbError::CitationPending { .. }), "{err}");
+    assert_eq!((err.status(), err.code()), (202, "citation-pending"));
+    assert_eq!(w.get_file("a.txt").await.unwrap().body, Bytes::from("one"));
+
+    // A syncer cites it while a caller waits.
+    let w2 = w.clone();
+    let etag2 = etag.clone();
+    let citer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        cite(&w2, epoch, 1, "a.txt", &etag2, b"one").await
+    });
+    let seq = w
+        .wait_cited("a.txt", &etag, Duration::from_secs(5), Duration::from_millis(50))
+        .await
+        .unwrap();
+    assert_eq!(seq, 1);
+    citer.await.unwrap();
+
+    let snap = w.snapshot().await.unwrap();
+    assert_eq!(snap.manifest.seq, 1);
+    assert_eq!(snap.manifest.entries["a.txt"].etag, etag);
+    assert!(snap.manifest_etag.is_some());
+    assert_eq!(w.status().await.unwrap().seq, Some(1));
+
+    // The read now resolves through the citation.
+    assert_eq!(w.get_file("a.txt").await.unwrap().etag, etag);
+}
+
+#[tokio::test]
+async fn wait_cited_refuses_at_once_when_no_syncer_holds_the_lease() {
+    let s = store();
+    let w = ws(&s);
+    let etag = w.put_file("a.txt", Bytes::from("one"), &PutFile::default()).await.unwrap();
+    let t0 = std::time::Instant::now();
+    let err = w
+        .wait_cited("a.txt", &etag, Duration::from_secs(30), Duration::from_secs(1))
+        .await
+        .unwrap_err();
+    assert!(t0.elapsed() < Duration::from_secs(2), "must not run the 30 s clock down");
+    match err {
+        VerbError::CitationPending { reason, .. } => assert!(reason.contains("no syncer"), "{reason}"),
+        e => panic!("{e}"),
+    }
+}
+
+#[tokio::test]
+async fn a_superseded_write_is_named_not_waited_for() {
+    let s = store();
+    let w = ws(&s);
+    let epoch = hold_lease(&s, &w).await;
+    let v1 = w.put_file("a.txt", Bytes::from("one"), &PutFile::default()).await.unwrap();
+    let v2 = w
+        .put_file("a.txt", Bytes::from("two"), &PutFile { if_match: Some(v1.clone()), ..Default::default() })
+        .await
+        .unwrap();
+    // The syncer consumed both entries and cited the later bytes.
+    let entries = w.snapshot().await.unwrap().inbox.entries;
+    w.drop_inbox(epoch, &entries).await.unwrap();
+    cite(&w, epoch, 1, "a.txt", &v2, b"two").await;
+
+    let err = w
+        .wait_cited("a.txt", &v1, Duration::from_secs(5), Duration::from_millis(50))
+        .await
+        .unwrap_err();
+    match err {
+        VerbError::Superseded { cited_etag, .. } => assert_eq!(cited_etag, v2),
+        e => panic!("{e}"),
+    }
+    assert_eq!(
+        w.wait_cited("a.txt", &v2, Duration::from_secs(5), Duration::from_millis(50)).await.unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn an_open_barrier_window_refuses_hitl_writes_until_it_closes() {
+    let s = store();
+    let w = ws(&s);
+    let epoch = hold_lease(&s, &w).await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    w.open_window(epoch, now + 60).await.unwrap();
+    assert!(w.status().await.unwrap().window.is_some());
+
+    // Refused at once, with the window's remaining time as the hint.
+    let err = w.put_file("a.txt", Bytes::from("x"), &PutFile::default()).await.unwrap_err();
+    match &err {
+        VerbError::WindowOpen { retry_after_secs, .. } => {
+            assert!((55..=60).contains(retry_after_secs), "{retry_after_secs}")
+        }
+        e => panic!("{e}"),
+    }
+    assert_eq!((err.status(), err.code()), (409, "barrier-window-open"));
+    assert!(err.is_retryable());
+    assert!(s.head(&w.config().file_key("a.txt")).await.is_err(), "nothing was written");
+
+    // A bounded wait that runs out is the same refusal, later.
+    let patient = w.clone().with_window_wait(Some(Duration::from_millis(300)));
+    let t0 = std::time::Instant::now();
+    let err = patient.put_file("a.txt", Bytes::from("x"), &PutFile::default()).await.unwrap_err();
+    assert!(matches!(err, VerbError::WindowOpen { .. }), "{err}");
+    assert!(t0.elapsed() >= Duration::from_millis(300));
+
+    // ...and one that outlasts the window sees the write through.
+    let w2 = w.clone();
+    let closer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        w2.clear_window(epoch, &[]).await.unwrap();
+    });
+    let patient = w.clone().with_window_wait(Some(Duration::from_secs(5)));
+    patient.put_file("a.txt", Bytes::from("x"), &PutFile::default()).await.unwrap();
+    closer.await.unwrap();
+    assert!(w.status().await.unwrap().window.is_none());
+    assert_eq!(w.get_file("a.txt").await.unwrap().body, Bytes::from("x"));
+}
+
+#[tokio::test]
+async fn the_syncer_facing_verbs_are_epoch_validated() {
+    let s = store();
+    let w = ws(&s);
+
+    // No cell at all.
+    let err = w.open_window(1, 10).await.unwrap_err();
+    assert!(matches!(err, VerbError::NoHolder), "{err}");
+    assert_eq!((err.status(), err.code()), (403, "no-holder"));
+
+    let epoch = hold_lease(&s, &w).await;
+    // A stale claim, and a claim from the future, both die here.
+    for claimed in [epoch.wrapping_sub(1), epoch + 1] {
+        let err = w.open_window(claimed, 10).await.unwrap_err();
+        match &err {
+            VerbError::StaleEpoch { cell_epoch, holder_id, claimed: c } => {
+                assert_eq!(*cell_epoch, epoch);
+                assert_eq!(holder_id, "syncer-1");
+                assert_eq!(*c, claimed);
+            }
+            e => panic!("{e}"),
+        }
+        assert_eq!((err.status(), err.code()), (403, "stale-epoch"));
+        assert!(matches!(w.clear_window(claimed, &[]).await.unwrap_err(), VerbError::StaleEpoch { .. }));
+        assert!(matches!(w.drop_inbox(claimed, &[]).await.unwrap_err(), VerbError::StaleEpoch { .. }));
+        let m = LeanManifest::default();
+        assert!(matches!(
+            w.cas_manifest(&m, None, claimed, "u").await.unwrap_err(),
+            VerbError::StaleEpoch { .. }
+        ));
+    }
+
+    // The manifest CAS: a first write, then a miss against a stale handle.
+    let etag = w.put_file("a.txt", Bytes::from("one"), &PutFile::default()).await.unwrap();
+    let h1 = cite(&w, epoch, 1, "a.txt", &etag, b"one").await;
+    let mut m = LeanManifest { seq: 2, ..Default::default() };
+    m.entries.insert("a.txt".into(), w.snapshot().await.unwrap().manifest.entries["a.txt"].clone());
+    let err = w.cas_manifest(&m, Some("\"stale\""), epoch, "u2").await.unwrap_err();
+    match &err {
+        VerbError::CasMiss { current } => assert_eq!(current.as_deref(), Some(h1.as_str())),
+        e => panic!("{e}"),
+    }
+    assert_eq!((err.status(), err.code()), (409, "cas-miss"));
+    assert_eq!(w.snapshot().await.unwrap().manifest.seq, 1, "a miss changes nothing");
+}
+
+#[tokio::test]
+async fn a_boundary_request_is_recorded_never_performed() {
+    let s = store();
+    let w = ws(&s);
+    let a = w.request_boundary(Some("dilip")).await.unwrap();
+    assert_eq!(a.status, "recorded");
+    assert_eq!(a.verb, "boundary");
+    assert_eq!(a.requestor, "dilip");
+    let st = w.status().await.unwrap();
+    assert_eq!(st.boundary_request.as_ref().map(|r| r.requestor.as_str()), Some("dilip"));
+    assert!(st.sync_request.is_none());
+    assert_eq!(st.seq, None, "nothing was published by asking");
+
+    let a = w.request_sync(None).await.unwrap();
+    assert_eq!(a.verb, "sync");
+    assert_eq!(a.requestor, "gateway");
+    assert!(a.note.contains("CARRIED"));
+    assert!(w.status().await.unwrap().sync_request.is_some());
+}
+
+#[tokio::test]
+async fn a_draft_is_private_until_promoted_and_promote_holds_the_recorded_base() {
+    let s = store();
+    let w = ws(&s);
+    let v1 = w.put_file("doc.md", Bytes::from("v1"), &PutFile::default()).await.unwrap();
+
+    // Save against v1. Nothing about the file changes.
+    let body_etag = w
+        .put_draft("alice", "doc.md", Bytes::from("alice's edit"), None, Some(&v1))
+        .await
+        .unwrap();
+    assert_eq!(w.get_file("doc.md").await.unwrap().body, Bytes::from("v1"));
+    assert_eq!(w.snapshot().await.unwrap().inbox.entries.len(), 1, "a draft is not tracked");
+
+    let d = w.get_draft("alice", "doc.md").await.unwrap();
+    assert_eq!(d.body, Bytes::from("alice's edit"));
+    assert_eq!(d.etag, body_etag);
+    assert_eq!(d.base_etag.as_deref(), Some(v1.as_str()));
+    assert!(!d.incomplete);
+
+    // Per user: bob has none.
+    assert!(w.list_drafts("bob").await.unwrap().is_empty());
+    assert!(matches!(w.get_draft("bob", "doc.md").await.unwrap_err(), VerbError::NoDraft(_)));
+
+    let rows = w.list_drafts("alice").await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].path, "doc.md");
+    assert_eq!(rows[0].author, "alice", "no author ⇒ the user");
+    assert!(!rows[0].stale);
+
+    // A sibling publishes: the resume view says stale, promote refuses
+    // and KEEPS the draft.
+    let v2 = w
+        .put_file("doc.md", Bytes::from("v2"), &PutFile { if_match: Some(v1.clone()), ..Default::default() })
+        .await
+        .unwrap();
+    assert!(w.list_drafts("alice").await.unwrap()[0].stale);
+    let err = w.promote_draft("alice", "doc.md", None).await.unwrap_err();
+    match &err {
+        VerbError::DraftStale { current, message } => {
+            assert_eq!(current.as_deref(), Some(v2.as_str()));
+            assert!(message.contains("KEPT"), "{message}");
+        }
+        e => panic!("{e}"),
+    }
+    assert_eq!((err.status(), err.code()), (409, "draft-stale"));
+    assert_eq!(err.current_etag(), Some(v2.as_str()));
+    assert!(w.get_draft("alice", "doc.md").await.is_ok(), "the draft survives the refusal");
+    assert_eq!(w.get_file("doc.md").await.unwrap().body, Bytes::from("v2"));
+
+    // Re-saved against v2, the promote publishes and the draft is gone.
+    w.put_draft("alice", "doc.md", Bytes::from("alice's edit 2"), Some("alice@x"), Some(&v2))
+        .await
+        .unwrap();
+    let v3 = w.promote_draft("alice", "doc.md", None).await.unwrap();
+    assert_ne!(v3, v2);
+    assert_eq!(w.get_file("doc.md").await.unwrap().body, Bytes::from("alice's edit 2"));
+    let inbox = w.snapshot().await.unwrap().inbox.entries;
+    assert_eq!(inbox.last().unwrap().etag, v3, "a promote is a tracked HITL write");
+    assert_eq!(inbox.last().unwrap().author, "alice@x");
+    assert!(w.list_drafts("alice").await.unwrap().is_empty());
+    assert!(matches!(w.get_draft("alice", "doc.md").await.unwrap_err(), VerbError::NoDraft(_)));
+
+    // A draft with no base creates, and refuses to clobber a file that
+    // appeared meanwhile.
+    w.put_draft("alice", "new.md", Bytes::from("fresh"), None, None).await.unwrap();
+    w.put_file("new.md", Bytes::from("someone else"), &PutFile::default()).await.unwrap();
+    let err = w.promote_draft("alice", "new.md", None).await.unwrap_err();
+    assert!(matches!(err, VerbError::DraftStale { current: Some(_), .. }), "{err}");
+    w.delete_draft("alice", "new.md").await.unwrap();
+    w.delete_draft("alice", "new.md").await.unwrap();
+    assert!(matches!(w.get_draft("alice", "new.md").await.unwrap_err(), VerbError::NoDraft(_)));
+
+    // Hygiene on the user segment.
+    for bad in ["", "a/b", "..", "a\\b"] {
+        let err = w.put_draft(bad, "x.md", Bytes::from("x"), None, None).await.unwrap_err();
+        assert!(matches!(err, VerbError::BadUser(_)), "{bad:?}: {err}");
+        assert_eq!((err.status(), err.code()), (400, "bad-user"));
+    }
+}
+
+#[tokio::test]
+async fn ten_workspaces_share_one_store_and_never_see_each_other() {
+    let s = store();
+    let all: Vec<Workspace> =
+        (0..10).map(|i| Workspace::new(s.clone(), &format!("teams/t{i}"))).collect();
+    for (i, w) in all.iter().enumerate() {
+        w.put_file("shared.txt", Bytes::from(format!("ws {i}")), &PutFile::default()).await.unwrap();
+    }
+    for (i, w) in all.iter().enumerate() {
+        assert_eq!(w.get_file("shared.txt").await.unwrap().body, Bytes::from(format!("ws {i}")));
+        assert_eq!(w.status().await.unwrap().inbox_depth, 1);
+        assert_eq!(w.prefix(), format!("teams/t{i}"));
+    }
+    // A trailing slash on the prefix is dropped, so `teams/t0/` IS `teams/t0`.
+    let alias = Workspace::new(s.clone(), "teams/t0/");
+    assert_eq!(alias.get_file("shared.txt").await.unwrap().body, Bytes::from("ws 0"));
+}

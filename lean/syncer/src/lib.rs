@@ -42,9 +42,7 @@ pub mod barrier;
 pub mod checkout;
 pub mod chunk;
 pub mod control;
-pub mod drafts;
 pub mod gated;
-pub mod gateway;
 pub mod gauges;
 pub use gauges::{status_report, Gauges, StatusReport};
 pub mod inbox;
@@ -77,7 +75,7 @@ pub const STATE_DIR: &str = ".flint-sync";
 
 /// The workspace-local control namespace (boundary-verbs plan D0): the
 /// agent's side of the file protocol. Reserved exactly as the gateway
-/// reserves `.flint/` on the HTTP side (`gateway::path_ok`) — the scan
+/// reserves `.flint/` on the HTTP side (flint-lean-gateway's `path_ok`) — the scan
 /// skips it, `classify` never makes it delete-eligible, and checkout
 /// never materializes a `files/.flint/...` citation into it.
 pub const CONTROL_DIR: &str = ".flint";
@@ -532,7 +530,8 @@ pub struct Syncer {
     pub noted_not_regular: std::collections::BTreeSet<String>,
 }
 
-fn now_unix() -> u64 {
+/// Seconds since the epoch, saturating at 0 on a clock before it.
+pub fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())

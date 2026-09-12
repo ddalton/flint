@@ -12,6 +12,36 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Added
+
+- **lean: the gateway is a crate — `flint-lean-gateway` on crates.io.**
+  A backend that serves lean workspaces to a UI no longer runs a
+  `flint-lean-gateway` process and speaks HTTP to it: it depends on the
+  crate and calls the verbs in-process. `Workspace::new(store, prefix)`
+  is one workspace — an `Arc` and a config, so a thousand cost nothing
+  to hold — and its methods are exactly the gateway's verbs: `put_file`
+  / `get_file` with the same If-Match discipline, `snapshot`, `status`,
+  `request_boundary` / `request_sync`, the five draft verbs, and the
+  epoch-validated syncer-facing verbs. `VerbError` is typed and carries
+  the status and `error` code the gateway answers with (`status()`,
+  `code()`, `retry_after_secs()`, `current_etag()`), so a frontend
+  written against the gateway keeps working when the backend moves
+  in-process. Two additions the wire never had: `with_window_wait` lets
+  a HITL write wait out an open barrier window instead of seeing the
+  409, and `wait_cited` waits for the manifest to cite a write (202
+  `citation-pending` at once when no syncer holds the lease). The
+  binary `flint-lean-gateway` is now `main` around this crate's router,
+  built from `lean/gateway` (`stage-prebuilt.sh`, the operator image
+  recipe and the e2e build hints point there); `flint-lean` is the
+  protocol and the syncer, with warp behind an `http` feature for
+  `flint-sync`'s `/metrics` only. The 29 gateway and draft tests moved
+  with the code into the crate's `battery.rs`; the API has its own
+  eleven-test suite on the in-memory store. `flint-store` and
+  `flint-lean` are published alongside it, because crates.io does not
+  take path dependencies. The backend talks to the BUCKET, never to a
+  syncer: it can run on another cluster, or none, with nothing but
+  credentials for the prefixes it serves.
+
 ### Changed
 
 - **lean: the small-file read ceiling was one thread, then one lock.**

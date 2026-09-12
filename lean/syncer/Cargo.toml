@@ -1,6 +1,8 @@
-# flint-lean: the checkout/publish syncer (flint-sync) + the lean
-# gateway (flint-lean-gateway). Plan of record:
-# docs/plans/flint-lean-plan.md; formal model: lean/formal/.
+# flint-lean: the checkout/publish syncer (flint-sync) and the lean
+# protocol it implements (manifest, inbox, lease, barrier). The gateway
+# is its own crate, lean/gateway (flint-lean-gateway), built ON this one.
+# Plan of record: docs/plans/flint-lean-plan.md; formal model:
+# lean/formal/.
 #
 # Deliberately its OWN crate: `cargo test` here builds flint-store's
 # memory double + this crate + a small dep tree — never the hub crate's
@@ -13,6 +15,11 @@
 name = "flint-lean"
 version = "0.1.0"
 edition = "2021"
+description = "flint lean: the checkout/publish syncer for S3-backed agent workspaces, and the gateway verbs it shares with flint-lean-gateway"
+license = "MIT"
+repository = "https://github.com/ddalton/flint"
+keywords = ["s3", "sync", "workspace", "flint"]
+categories = ["filesystem"]
 
 [features]
 # DEFAULT ON since 2026-09-12, after measurement — the same finding the
@@ -26,22 +33,22 @@ edition = "2021"
 # ~90 us/file. On i4i.xlarge against real S3: 3,277-3,481 -> 6,188-6,521.
 # `--no-default-features --features s3` restores musl's allocator and is
 # the control arm. Details: lean/e2e/perf/results/fanout-ceiling-2026-09-12.md.
-default = ["fastalloc"]
+default = ["fastalloc", "http"]
 fastalloc = ["dep:mimalloc"]
 s3 = ["flint-store/s3"]
+# The syncer binary's own HTTP endpoint (`/metrics`, warp). Off, the
+# crate is the protocol and the syncer core with no web stack at all —
+# what `flint-lean-gateway` builds against, so an embedder's backend
+# does not compile warp to use it.
+http = ["dep:warp"]
 
 [[bin]]
 name = "flint-sync"
 path = "src/bin/flint_sync.rs"
-required-features = ["s3"]
-
-[[bin]]
-name = "flint-lean-gateway"
-path = "src/bin/flint_lean_gateway.rs"
-required-features = ["s3"]
+required-features = ["s3", "http"]
 
 [dependencies]
-flint-store = { path = "../../crates/flint-store" }
+flint-store = { version = "0.1.0", path = "../../crates/flint-store" }
 futures = "0.3"
 libc = "0.2"
 bytes = "1.0"
@@ -51,7 +58,7 @@ sha2 = "0.10"
 thiserror = "1.0"
 tokio = { version = "1.0", features = ["full"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
-warp = "0.3"
+warp = { version = "0.3", optional = true }
 mimalloc = { version = "0.1", optional = true, default-features = false }
 
 [dev-dependencies]

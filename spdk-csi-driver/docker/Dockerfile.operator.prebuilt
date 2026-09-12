@@ -3,12 +3,12 @@
 # binary, same recipe as Dockerfile.csi.prebuilt / Dockerfile.pnfs.prebuilt.
 #
 #   # TWO crates stage into one tree: the lite/hub/lean operators build
-#   # from spdk-csi-driver, flint-lean-gateway from lean/syncer.
+#   # from spdk-csi-driver, flint-lean-gateway from lean/gateway.
 #   for T in x86_64 aarch64; do
 #     cargo zigbuild --release --target $T-unknown-linux-musl \
 #       --bin flint-lite-operator --bin flint-hub-gateway \
 #       --bin flint-lean-operator
-#     (cd ../lean/syncer && cargo zigbuild --release --features s3 \
+#     (cd ../lean/gateway && cargo zigbuild --release --features s3 \
 #       --target $T-unknown-linux-musl --bin flint-lean-gateway); done
 #   # stage: docker/prebuilt/amd64/{flint-lite-operator,flint-hub-gateway}
 #   #        docker/prebuilt/arm64/{flint-lite-operator,flint-hub-gateway}
@@ -60,8 +60,9 @@ COPY ${BIN_DIR}/${TARGETARCH}/flint-hub-gateway /usr/local/bin/flint-hub-gateway
 # and nothing else.
 #
 # NOTE flint-lean-gateway is the one binary here that does NOT build
-# from this crate — it comes from lean/syncer. Same staging tree, two
-# cargo invocations; see the header.
+# from this crate — it comes from lean/gateway, the flint-lean-gateway
+# crate (the library a backend embeds, and this binary around it). Same
+# staging tree, two cargo invocations; see the header.
 COPY ${BIN_DIR}/${TARGETARCH}/flint-lean-operator /usr/local/bin/flint-lean-operator
 COPY ${BIN_DIR}/${TARGETARCH}/flint-lean-gateway /usr/local/bin/flint-lean-gateway
 

@@ -1,0 +1,230 @@
+# flint-lean-gateway
+
+The [flint lean](https://github.com/ddalton/flint) gateway as a library.
+A backend that reads, writes, drafts and publishes files in S3-backed
+lean workspaces calls these verbs in-process, with one connection to
+the bucket, instead of running a `flint-lean-gateway` process and
+speaking HTTP to it. Ten workspaces are ten `Workspace` values, not ten
+gateways.
+
+The verbs are the gateway's verbs, and this crate is the gateway: the
+`flint-lean-gateway` binary that ships in the operator image is `main`
+around this library's HTTP router, and the router is a thin skin over
+the same `Workspace` methods. An embedder cannot drift from what the
+gateway does — same refusals, same preconditions, same order of
+writes — because there is one implementation. `VerbError`
+carries the status and `error` code the gateway would have answered
+with, so a frontend written against the gateway keeps working when the
+backend moves in-process.
+
+```toml
+[dependencies]
+flint-lean-gateway = "0.1"
+```
+
+## Quick start
+
+```rust,no_run
+use flint_lean_gateway::{connect, Bytes, PutFile, VerbError, Workspace};
+
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
+// One connection to the bucket, from the ambient AWS environment.
+// `Some("http://minio:9000")` for MinIO or Ozone's S3 gateway.
+let store = connect("my-bucket", None).await?;
+
+// One value per workspace: the subtree prefix the syncer was started with.
+let ws = Workspace::new(store.clone(), "teams/alpha/project-1");
+
+// A read resolves through the manifest citation, falling back to a
+// write no barrier has cited yet.
+let blob = ws.get_file("notes/todo.md").await?;
+
+// An overwrite must say what it read. The tag comes back quoted, as
+// S3 hands it out; send it back as is.
+let etag = ws
+    .put_file(
+        "notes/todo.md",
+        Bytes::from("- ship it\n"),
+        &PutFile {
+            author: Some("dilip".into()),
+            if_match: Some(blob.etag.clone()),
+            if_none_match: None,
+        },
+    )
+    .await?;
+
+// A create says the file must not exist.
+match ws
+    .put_file("notes/new.md", Bytes::from("hi"), &PutFile {
+        if_none_match: Some("*".into()),
+        ..Default::default()
+    })
+    .await
+{
+    Ok(etag) => println!("created at {etag}"),
+    Err(VerbError::FileChanged { current }) => println!("someone got there first: {current:?}"),
+    Err(e) => return Err(e.into()),
+}
+# Ok(()) }
+```
+
+Without S3, the same code runs against the in-memory store the tests
+use — `cargo test` in this crate needs no credentials:
+
+```rust
+use std::sync::Arc;
+use flint_lean_gateway::{Bytes, MemoryStore, ObjectStore, PutFile, VerbError, Workspace};
+
+# tokio::runtime::Runtime::new().unwrap().block_on(async {
+let store: Arc<dyn ObjectStore> = Arc::new(MemoryStore::new());
+let ws = Workspace::new(store, "p");
+
+let etag = ws.put_file("a.txt", Bytes::from("one"), &PutFile::default()).await.unwrap();
+assert_eq!(ws.get_file("a.txt").await.unwrap().body, Bytes::from("one"));
+
+// The write is tracked in the inbox until the syncer's next barrier cites it.
+let snap = ws.snapshot().await.unwrap();
+assert_eq!(snap.inbox.entries[0].etag, etag);
+assert!(snap.manifest.entries.is_empty());
+
+// An overwrite without If-Match is refused, and the refusal says so.
+let err = ws.put_file("a.txt", Bytes::from("two"), &PutFile::default()).await.unwrap_err();
+assert!(matches!(err, VerbError::PreconditionRequired));
+assert_eq!((err.status(), err.code()), (428, "precondition-required"));
+# });
+```
+
+## What a write is, and when others see it
+
+`put_file` returns when the object is at `<prefix>/files/<path>` and an
+entry naming it is in the inbox cell at `<prefix>/.flint/lean/inbox`.
+Both are in the bucket; there is no other channel. That is the whole
+durability promise, and it is immediate.
+
+Visibility has two tiers, by design:
+
+- **Now**: any reader through this crate or through the gateway
+  (`get_file` falls back to the tracked inbox entry), and any agent pod
+  that runs `sync` (it overlays the inbox on the manifest as remote
+  truth).
+- **At the next barrier**: the manifest. The workspace's syncer
+  consumes the inbox at the start of every barrier — on its cadence
+  (default 60 s) or sooner on a `request_boundary` — fetches the object,
+  verifies its CRC-64, cites it in `<prefix>/.flint/lean/current`, and
+  from then on a fresh checkout sees it.
+
+The library never edits the manifest for a HITL write. The syncer that
+holds the workspace's lease is the manifest's only writer, and that is
+what the protocol's model checks: a second manifest writer would
+reintroduce exactly the race the barrier exists to prevent. What the
+library offers instead:
+
+- `request_boundary(requestor)` asks the syncer to cite now. It answers
+  `recorded`, never `done`; the syncer honours it at its next poll
+  (about a second) outside its min-interval and hourly budget.
+- `wait_cited(path, etag, timeout, poll)` waits until the manifest cites
+  the write, for a status view that wants to show "published". It
+  refuses at once with `CitationPending` when no syncer holds the
+  lease, because nothing is there to cite. Not for the request path of
+  a UI.
+- `status()` reports the cited seq, the inbox depth, whether a barrier
+  window is open, and who holds the lease.
+
+A workspace no syncer ever runs on takes writes and keeps them; the
+manifest catches up when a syncer next starts.
+
+## When an immediate answer is not possible
+
+- **A barrier window is open** (the syncer is mid-publish, usually
+  well under a second): `VerbError::WindowOpen` with `retry_after_secs`,
+  before anything is written. A frontend retries after the hint, or the
+  backend sets `Workspace::with_window_wait(Some(duration))` and the
+  verb polls the cell until the window closes or the bound passes.
+- **The file changed under the user**: `PreconditionRequired` (no
+  `If-Match` on an overwrite) or `FileChanged { current }` (a stale one).
+  A UI decision — re-read and reconcile — never a retry.
+- **The object moved inside the HEAD-to-PUT window**:
+  `ConcurrentWrite`, retryable as is. `VerbError::is_retryable` says
+  which refusals are.
+
+## Drafts
+
+A draft is a durable edit that is deliberately not published: the bytes
+sit under the workspace's reserved namespace where no scan, no
+checkout, no manifest and no sweep can see them. Per user, per path.
+
+- `put_draft(user, path, body, author, base_etag)` saves, always. The
+  base etag — what the editor read — is recorded, never enforced at
+  save time: refusing a save would destroy the edit the feature exists
+  to keep.
+- `list_drafts(user)` is the resume view; each row says whether the
+  file has moved since (`stale`).
+- `get_draft(user, path)` returns the bytes, the recorded base, and
+  whether the draft is incomplete (a body whose meta never landed).
+- `promote_draft(user, path, author)` publishes it as a HITL write
+  conditioned on the recorded base: `DraftStale { current }` if the
+  file moved, and the draft is kept.
+- `delete_draft(user, path)` discards it.
+
+## Every verb and its wire code
+
+| Method | Gateway route | Refusals |
+|---|---|---|
+| `get_file` | `GET /files/{path}` | 404 `no-such-file`, 409 `moved`, 410 `dangling-citation` / `foreign-write` / `uncited-bytes` |
+| `put_file` | `PUT /files/{path}` | 400 `bad-path` / `bad-precondition`, 409 `barrier-window-open` / `concurrent-write`, 412 `file-changed`, 413 `payload-too-large`, 428 `precondition-required` |
+| `snapshot` | `GET /snapshot` | |
+| `status` | `GET /status` | |
+| `request_boundary`, `request_sync` | `POST /boundary`, `POST /sync-request` | |
+| `put_draft`, `get_draft`, `list_drafts`, `delete_draft`, `promote_draft` | `/drafts/{user}[/{path}]` | 400 `bad-user`, 404 `no-draft`, 409 `draft-stale` / `draft-moved` |
+| `open_window`, `clear_window`, `drop_inbox`, `cas_manifest` | syncer-facing | 403 `stale-epoch` / `no-holder` / `fenced`, 409 `cas-miss` |
+| `wait_cited` | library only | 202 `citation-pending`, 409 `superseded` |
+
+Every verb can also fail 502 `store` (the object store said no) and
+the path-taking ones 400 `bad-path`. The syncer-facing verbs are
+epoch-validated per request and exist because the gateway's HTTP layer
+is built on them; a backend serving a UI has no use for them.
+
+## Many workspaces, one process
+
+`Workspace` is an `Arc` and a config. Build one per prefix on a shared
+store and keep them in whatever map the backend already has:
+
+```rust,no_run
+use std::collections::HashMap;
+use flint_lean_gateway::{connect, Workspace};
+
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
+let store = connect("my-bucket", None).await?;
+let mut workspaces: HashMap<String, Workspace> = HashMap::new();
+for (id, prefix) in [("alpha", "teams/alpha"), ("beta", "teams/beta")] {
+    workspaces.insert(id.into(), Workspace::new(store.clone(), prefix));
+}
+# Ok(()) }
+```
+
+Workspaces in different buckets, or under different credentials, take
+different stores; `Workspace::new` takes any `Arc<dyn ObjectStore>`.
+
+## Serving the wire yourself
+
+The `http` feature (on by default) carries the gateway's warp router
+(`http::routes`, `http::GatewayCore`) and the binary, for a process
+that wants to keep serving the exact HTTP surface `flint-lean-gateway`
+serves — same routes, same bearer, same codes — inside its own server.
+A backend on another web stack turns it off and never compiles warp:
+
+```toml
+flint-lean-gateway = { version = "0.1", default-features = false, features = ["s3"] }
+```
+
+## What this crate is not
+
+Not a syncer. It performs no barrier, holds no lease, and never touches
+a local tree; `flint-sync` does those, in the agent's pod. Not a
+`rescope` door either: that verb unlinks local files by scope, and a
+library caller has no more business triggering it remotely than the
+gateway did.
+
+## License
+
+MIT.

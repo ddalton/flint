@@ -6,6 +6,11 @@
 name = "flint-store"
 version = "0.1.0"
 edition = "2021"
+description = "The flint object-store layer: the ObjectStore trait, conditional writes, generation stamps, CRC-64/NVME, an in-memory double and the S3 backend"
+license = "MIT"
+repository = "https://github.com/ddalton/flint"
+keywords = ["s3", "object-store", "flint"]
+categories = ["filesystem"]
 
 [features]
 default = []

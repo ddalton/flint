@@ -1,6 +1,9 @@
 //! `flint-lean-gateway` — the lean control plane's door (plan §2.2,
-//! Phase 3). Ships in the operator image like flint-hub-gateway does:
-//! same crate, same build, the chart picks the binary. That image is
+//! Phase 3): `main` around the `flint-lean-gateway` LIBRARY's router.
+//! Every verb it serves is a method on that crate's `Workspace`, so a
+//! backend that embeds the crate and this binary cannot disagree.
+//! Ships in the operator image like flint-hub-gateway does: the chart
+//! picks the binary. That image is
 //! published under two names from one digest — flint-lite-operator and
 //! flint-lean-operator — so a lean install pulls nothing called
 //! "lite"; the lean chart names the latter. Shares NO runtime state with the hub gateway and resolves
@@ -27,7 +30,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use flint_lean::gateway::{routes, GatewayCore};
+use flint_lean_gateway::http::{routes, GatewayCore};
 use flint_store::s3::S3Store;
 use flint_store::ObjectStore;
 

@@ -1,0 +1,57 @@
+# flint-lean-gateway: the lean gateway. The LIBRARY is the verbs
+# (`workspace.rs`, `drafts.rs`) — what a backend calls in-process to
+# serve lean workspaces without running a gateway beside each one — and
+# the BINARY `flint-lean-gateway` is `main` around the same verbs behind
+# HTTP (`http.rs`). One crate, so the two cannot drift. Depends on
+# `flint-lean` for the protocol (inbox, manifest, config) and on
+# `flint-store` for the bucket; the S3 backend is on by default.
+#
+#   cargo test                                  # the API + the HTTP battery on the in-memory store
+#   cargo test --no-default-features            # the API alone (no AWS SDK, no warp)
+#   cargo build --release                       # the shippable binary
+[package]
+name = "flint-lean-gateway"
+version = "0.1.0"
+edition = "2021"
+description = "The flint lean gateway: read, write, draft and publish files in S3-backed lean workspaces from your own process, or run the binary"
+license = "MIT"
+repository = "https://github.com/ddalton/flint"
+readme = "README.md"
+keywords = ["s3", "workspace", "flint", "lean", "gateway"]
+categories = ["filesystem"]
+
+[features]
+default = ["s3", "http"]
+# The real S3 backend (`connect`, `S3Store`). Off, the crate builds
+# against the in-memory store only.
+s3 = ["flint-lean/s3", "flint-store/s3"]
+# The HTTP router (`http::routes`) and the binary. A backend on another
+# web stack turns it off and never compiles warp.
+http = ["dep:warp"]
+
+[[bin]]
+name = "flint-lean-gateway"
+path = "src/bin/flint_lean_gateway.rs"
+required-features = ["s3", "http"]
+
+# The HTTP battery drives the verbs through the router.
+[[test]]
+name = "battery"
+required-features = ["http"]
+
+[dependencies]
+flint-lean = { version = "0.1.0", path = "../syncer", default-features = false }
+flint-store = { version = "0.1.0", path = "../../crates/flint-store" }
+bytes = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+tokio = { version = "1.0", features = ["rt", "time", "macros"] }
+uuid = { version = "1.0", features = ["v4"] }
+warp = { version = "0.3", optional = true }
+
+[dev-dependencies]
+# The battery skips one leg when it runs as root.
+libc = "0.2"
+tempfile = "3.0"
+tokio = { version = "1.0", features = ["full"] }

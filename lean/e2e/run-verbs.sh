@@ -60,8 +60,10 @@
 #   kind create cluster --name flint-lean-verbs
 #   cd lean/syncer && cargo zigbuild --release --features s3 \
 #       --target aarch64-unknown-linux-musl
-#   cd ../e2e && cp ../syncer/target/aarch64-unknown-linux-musl/release/\
-#       {flint-sync,flint-lean-gateway} .
+#   cd ../gateway && cargo zigbuild --release --features s3 \
+#       --target aarch64-unknown-linux-musl
+#   cd ../e2e && cp ../syncer/target/aarch64-unknown-linux-musl/release/flint-sync \
+#       ../gateway/target/aarch64-unknown-linux-musl/release/flint-lean-gateway .
 #   docker build -t flint-sync:e2e         -f Dockerfile.syncer .
 #   docker build -t flint-lean-gateway:e2e -f Dockerfile.gateway .
 #   kind load docker-image flint-sync:e2e flint-lean-gateway:e2e \
