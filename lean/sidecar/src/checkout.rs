@@ -104,21 +104,29 @@ async fn fetch_ranged(
         return Ok(None);
     }
 
-    let sink = super::safefs::RangedTmp::create(target, tmp, size, mode)?;
+    // SHARED so each range writes ITSELF, on the blocking pool. Before
+    // this the write ran on the task that polls the fan-out, so a pwrite
+    // of one range stalled the FETCH of every other range in flight —
+    // concurrency that could never overlap I/O with I/O. Measured on
+    // i4i.large against an in-memory S3: system time beat user time 6:1
+    // and the process never exceeded 1.31 of 2 cores, flat from 4
+    // streams to 32.
+    let sink = std::sync::Arc::new(super::safefs::RangedTmp::create(target, tmp, size, mode)?);
     let mut ranges = futures::stream::iter(parts.into_iter().map(|(off, len)| {
         let store = store.clone();
         let key = key.to_string();
         let etag = etag.to_string();
+        let sink = sink.clone();
         async move {
             let mut attempt: u32 = 0;
-            loop {
+            let b = loop {
                 // EVERY range carries the same If-Match, which is what
                 // makes the assembled file one object rather than a
                 // splice of two: a write between range 3 and range 4
                 // fails range 4 instead of silently interleaving
                 // generations.
-                match store.get_range(&key, off, len, &etag).await {
-                    Ok(b) => return Ok((off, b)),
+                match store.get_range_segments(&key, off, len, &etag).await {
+                    Ok(b) => break b,
                     Err(StoreError::PreconditionFailed(_)) | Err(StoreError::NotFound(_)) => {
                         return Err(RangeFail::Fallback)
                     }
@@ -138,7 +146,38 @@ async fn fetch_ranged(
                         ))))
                     }
                 }
+            };
+            // The SDK's own frames, never flattened into one buffer.
+            // Summed rather than `b.is_empty()`: an empty range can also
+            // arrive as one zero-length segment, which is the same hole.
+            let n: u64 = b.iter().map(|seg| seg.len() as u64).sum();
+            // Checked HERE rather than at the drain: a hole must be
+            // refused before it is written, not after.
+            if n == 0 {
+                return Err(RangeFail::Fatal(LeanError::State(format!(
+                    "get_range {key} at {off} returned an empty range before the object's \
+                     end — refusing a hole"
+                ))));
             }
+            tokio::task::spawn_blocking(move || {
+                // Segments are contiguous and in order within the range,
+                // so each lands at the running offset. The file is
+                // positional throughout, so siblings still cannot race.
+                let mut at = off;
+                for seg in &b {
+                    sink.write_at(at, seg)?;
+                    at += seg.len() as u64;
+                }
+                Ok::<(), LeanError>(())
+            })
+            .await
+            .map_err(|e| {
+                RangeFail::Fatal(LeanError::State(format!(
+                    "write task for {key} at {off} did not complete: {e}"
+                )))
+            })?
+            .map_err(RangeFail::Fatal)?;
+            Ok(n)
         }
     }))
     .buffer_unordered(parallelism.max(1));
@@ -146,18 +185,7 @@ async fn fetch_ranged(
     let mut bytes = 0u64;
     while let Some(next) = ranges.next().await {
         match next {
-            Ok((off, b)) => {
-                if b.is_empty() {
-                    drop(ranges);
-                    let _ = std::fs::remove_file(tmp);
-                    return Err(LeanError::State(format!(
-                        "get_range {key} at {off} returned an empty range before the object's \
-                         end — refusing a hole"
-                    )));
-                }
-                bytes += b.len() as u64;
-                sink.write_at(off, &b)?;
-            }
+            Ok(n) => bytes += n,
             Err(RangeFail::Fallback) => {
                 drop(ranges);
                 let _ = std::fs::remove_file(tmp);
@@ -170,6 +198,17 @@ async fn fetch_ranged(
             }
         }
     }
+    // Every range future is finished and dropped, so this is the last
+    // reference. try_unwrap rather than a clone-tolerant commit: if a
+    // writer were somehow still alive, renaming now would publish a
+    // file still being written into.
+    drop(ranges);
+    let sink = std::sync::Arc::try_unwrap(sink).map_err(|_| {
+        LeanError::State(format!(
+            "ranged materialisation of {}: a range writer outlived the fan-out",
+            target.display()
+        ))
+    })?;
     sink.commit()?;
     Ok(Some(bytes))
 }
@@ -264,12 +303,42 @@ impl Sidecar {
             let root = this.cfg.root.clone();
             let local = this.cfg.root.join(path);
             let gate = gate.clone();
-            let want =
+            // THE CHARGE MUST DESCRIBE THE PATH THAT WILL RUN.
+            //
+            // `fetch_inflight_max_bytes` is a bound on BYTES HELD IN
+            // MEMORY, and the two arms hold wildly different amounts.
+            // `get_whole` returns the entire object, so charging
+            // `entry.size` is exactly right for it. The ranged arm does
+            // not: it is `buffer_unordered(range_par)` over per-chunk
+            // `get_range` calls, each written at its offset as it
+            // lands, so it holds `range_par * range_chunk` — 64 MiB at
+            // the shipped defaults — WHATEVER the object's size.
+            //
+            // Charging a ranged 1 GiB fetch 1 GiB of a 512 MiB budget
+            // therefore mis-states its footprint by ~16x, and the
+            // `clamp` turns that into the pathology: an entry at or
+            // over the budget takes the WHOLE semaphore, so object
+            // concurrency collapses to ONE and `fanout` is dead code.
+            // On a 6 x 1 GiB tree that leaves 4 streams on a 25 Gbps
+            // link — measured at 325 MiB/s, 11% of the guarantee, and
+            // identical on a node with 12x the vCPU and 32x the
+            // bandwidth. The bound was never the memory it names.
+            let ranged_eligible = range_min > 0
+                && entry.size >= range_min
+                && !(pinned && entry.version_id.is_some());
+            let whole_units =
                 entry.size.div_ceil(FETCH_UNIT).clamp(1, budget_units as u64) as u32;
+            let ranged_units = (range_par.max(1) as u64)
+                .saturating_mul(range_chunk.max(1))
+                .min(entry.size)
+                .div_ceil(FETCH_UNIT)
+                .clamp(1, budget_units as u64) as u32;
+            let want = if ranged_eligible { ranged_units } else { whole_units };
             async move {
                 // Held until this entry's bytes have reached disk.
-                let _permit = gate
-                    .acquire_many(want)
+                let mut permit = gate
+                    .clone()
+                    .acquire_many_owned(want)
                     .await
                     .map_err(|_| LeanError::State("fetch budget closed".into()))?;
                 // D0.3: a legacy `files/.flint/...` citation is
@@ -390,6 +459,32 @@ impl Sidecar {
                         refused: None,
                     });
                 }
+
+                // TOP UP BEFORE BUFFERING THE WHOLE OBJECT.
+                //
+                // Reaching here having been charged the ranged rate
+                // means `fetch_ranged` declined — either the object is
+                // one chunk (harmless: it holds less than the ranged
+                // charge) or it hit the 412/404 policy fallback, which
+                // hands the whole object to `get_whole` below. In that
+                // second case we are about to hold `entry.size` while
+                // charged for 64 MiB, and N concurrent fallbacks would
+                // walk RSS straight through the bound this semaphore
+                // exists to enforce.
+                //
+                // Released BEFORE re-acquiring, never upgraded in
+                // place: holding `want` while waiting for
+                // `whole_units` is a deadlock the moment two entries
+                // do it at once against a full budget.
+                if want < whole_units {
+                    drop(permit);
+                    permit = gate
+                        .clone()
+                        .acquire_many_owned(whole_units)
+                        .await
+                        .map_err(|_| LeanError::State("fetch budget closed".into()))?;
+                }
+                let _permit = permit;
 
                 // D13, the reader rule. Under a GATED citation the
                 // manifest is stamped `pinned_reads` and every

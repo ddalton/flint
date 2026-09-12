@@ -765,6 +765,37 @@ impl ObjectStore for MemoryStore {
         Ok((o.to_meta(), o.bytes.clone()))
     }
 
+    /// Real S3 always delivers a ranged body as MANY frames. This
+    /// double handed back exactly one, so a caller that walks segments
+    /// and advances a running offset was never actually exercised
+    /// against it — a double missing a property its subject always has,
+    /// which passes for the wrong reason. Built on `get_range` so every
+    /// injected failure, stall and in-flight count still applies.
+    async fn get_range_segments(
+        &self,
+        key: &str,
+        offset: u64,
+        len: u64,
+        if_match: &str,
+    ) -> StoreResult<Vec<Bytes>> {
+        let whole = self.get_range(key, offset, len, if_match).await?;
+        // Deliberately UNEVEN and never aligned to the caller's chunk
+        // size: equal segments let an off-by-one in the running offset
+        // cancel itself out and land the bytes correctly anyway.
+        let mut segs: Vec<Bytes> = Vec::new();
+        let (mut at, mut step) = (0usize, 1usize);
+        while at < whole.len() {
+            let n = step.min(whole.len() - at);
+            segs.push(whole.slice(at..at + n)); // zero-copy
+            at += n;
+            step = (step.saturating_mul(3)).min(64 * 1024);
+        }
+        if segs.is_empty() {
+            segs.push(whole);
+        }
+        Ok(segs)
+    }
+
     async fn get_range(
         &self,
         key: &str,

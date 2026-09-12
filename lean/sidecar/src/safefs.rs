@@ -99,8 +99,11 @@ pub(crate) struct RangedTmp {
     tmp: std::path::PathBuf,
     path: std::path::PathBuf,
     /// Bytes actually written, so `commit` can refuse a short object
-    /// rather than renaming a file with a hole in it.
-    written: std::cell::Cell<u64>,
+    /// rather than renaming a file with a hole in it. ATOMIC, not Cell:
+    /// ranges are written from the blocking pool now, so several
+    /// threads bump this concurrently and a Cell would also make the
+    /// whole sink `!Sync` and unshareable.
+    written: std::sync::atomic::AtomicU64,
     expect: u64,
 }
 
@@ -133,7 +136,7 @@ impl RangedTmp {
             file: f,
             tmp: tmp.to_path_buf(),
             path: path.to_path_buf(),
-            written: std::cell::Cell::new(0),
+            written: std::sync::atomic::AtomicU64::new(0),
             expect: size,
         })
     }
@@ -158,7 +161,8 @@ impl RangedTmp {
             f.write_all(bytes)
                 .map_err(|e| refuse(&self.tmp, &format!("write at {offset}: {e}")))?;
         }
-        self.written.set(self.written.get() + bytes.len() as u64);
+        self.written
+            .fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -167,13 +171,14 @@ impl RangedTmp {
     /// materialised file reads to the next scan as the agent's own
     /// truncation and publishes back over the good version.
     pub(crate) fn commit(self) -> LeanResult<()> {
-        if self.written.get() != self.expect {
+        let written = self.written.load(std::sync::atomic::Ordering::Relaxed);
+        if written != self.expect {
             let _ = std::fs::remove_file(&self.tmp);
             return Err(LeanError::State(format!(
                 "ranged materialisation of {} wrote {} of {} bytes — refusing to rename a \
                  file with a hole in it",
                 self.path.display(),
-                self.written.get(),
+                written,
                 self.expect
             )));
         }

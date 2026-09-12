@@ -647,6 +647,35 @@ impl ObjectStore for S3Store {
         Ok(bytes)
     }
 
+    /// As `get_range`, but hands back the SDK's own frames instead of
+    /// copying them into one buffer. `into_segments` is
+    /// `self.0.into_inner().into_iter()` — no allocation, no copy.
+    async fn get_range_segments(
+        &self,
+        key: &str,
+        offset: u64,
+        len: u64,
+        if_match: &str,
+    ) -> StoreResult<Vec<Bytes>> {
+        let range = format!("bytes={}-{}", offset, offset + len - 1);
+        let resp = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .range(range)
+            .if_match(if_match)
+            .send()
+            .await
+            .map_err(|e| map_err("get_range_segments", e))?;
+        let agg = resp
+            .body
+            .collect()
+            .await
+            .map_err(|e| StoreError::Other(format!("get_range_segments body: {}", e)))?;
+        Ok(agg.into_segments().collect())
+    }
+
     async fn list(&self, prefix: &str) -> StoreResult<Vec<ListedObject>> {
         let mut out = Vec::new();
         let mut pages = self

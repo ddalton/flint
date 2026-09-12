@@ -1,0 +1,23 @@
+# An in-memory S3 that is FASTER THAN THE NETWORK, so that a client run
+# against it measures the CLIENT and nothing else.
+#
+# WHY NOT minio OR s3proxy: they have their own bottlenecks, and a fake
+# whose ceiling sits below the client's would silently BECOME the
+# measurement. This one serves slices of an Arc'd buffer with no disk, no
+# TLS and no allocation on the read path, and it reports its own byte
+# counter at /__stats so the client's number can be checked against an
+# instrument the client does not control.
+[package]
+name = "fakes3"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+
+[profile.release]
+opt-level = 3

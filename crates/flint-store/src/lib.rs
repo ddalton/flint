@@ -743,6 +743,31 @@ pub trait ObjectStore: Send + Sync {
         if_match: &str,
     ) -> StoreResult<Bytes>;
 
+    /// The same ranged read, WITHOUT flattening the response into one
+    /// contiguous buffer.
+    ///
+    /// `get_range` ends in `AggregatedBytes::into_bytes`, which for any
+    /// multi-frame body — i.e. always — takes `SegmentedBuf`'s general
+    /// branch: `BytesMut::with_capacity(len); res.put(self.take(len))`.
+    /// That is one full-size allocation and one full-size copy per
+    /// range, on top of the frames the SDK is already holding. At a 16
+    /// MiB chunk the allocation goes through mmap and is returned on
+    /// free, so the next range faults in fresh zeroed pages: measured
+    /// on i4i.large as system time beating user time 6:1.
+    ///
+    /// The DEFAULT deliberately wraps `get_range`, so a store with
+    /// nothing to stream (the in-memory double) behaves exactly as it
+    /// did and no implementation is forced to care.
+    async fn get_range_segments(
+        &self,
+        key: &str,
+        offset: u64,
+        len: u64,
+        if_match: &str,
+    ) -> StoreResult<Vec<Bytes>> {
+        Ok(vec![self.get_range(key, offset, len, if_match).await?])
+    }
+
     async fn list(&self, prefix: &str) -> StoreResult<Vec<ListedObject>>;
 
     async fn delete(&self, key: &str) -> StoreResult<()>;
