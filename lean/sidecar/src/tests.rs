@@ -8580,7 +8580,9 @@ async fn a_deposed_writer_stops_at_the_next_chunk_boundary() {
     let inner = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = cfg_for(dir.path());
-    cfg.fanout = 1; // one chunk = 16 files, uploads strictly sequential
+    // The UPLOAD knob, not the read one: this test is about the upload
+    // chunk boundary, and chunk = upload_fanout * UPLOAD_CHUNK_WAVES.
+    cfg.upload_fanout = 1; // one chunk = 16 files, uploads strictly sequential
     let hooked = Arc::new(DeposeOnNthPut {
         inner: inner.clone(),
         epoch_key: cfg.epoch_key(),

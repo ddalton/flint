@@ -666,7 +666,18 @@ impl Sidecar {
             // window; closing that needs the renewal on its own task,
             // which needs the lease behind a shared cell.
             let mut outcomes: Vec<(String, LeanResult<UploadOutcome>)> = Vec::new();
-            let fanout = self.cfg.fanout.max(1);
+            // NOT cfg.fanout. That knob was raised to 128 for the READ
+            // path, where a byte semaphore (fetch_inflight_max_bytes)
+            // bounds what concurrency can hold in memory. THIS path has
+            // no such gate — `buffer_unordered` is the only bound — so
+            // riding the same number would have quadrupled both the
+            // bodies held in memory and `chunk`, widening the
+            // lease-fence window from 512 files to 2048 and making the
+            // hazard named in the comment above four times likelier.
+            // The read-side measurement (2.5x on 20k small files) says
+            // nothing about either, so uploads keep the value they were
+            // measured at until someone measures them.
+            let fanout = self.cfg.upload_fanout.max(1);
             let chunk = fanout.saturating_mul(UPLOAD_CHUNK_WAVES).max(1);
             let all: Vec<&String> = classified.uploads.iter().collect();
             for group in all.chunks(chunk) {

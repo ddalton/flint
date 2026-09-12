@@ -273,6 +273,11 @@ pub struct LeanConfig {
     /// rig measured the sequential loops at 561-854 PUTs/s and
     /// 1,000-2,000 GETs/s; fan-out multiplies directly against those.
     pub fanout: usize,
+    /// Concurrent UPLOADS. Deliberately separate from `fanout`: the read
+    /// path is additionally bounded by `fetch_inflight_max_bytes`, the
+    /// upload path is bounded by nothing but this number, and
+    /// `UPLOAD_CHUNK_WAVES` multiplies it into the lease-fence window.
+    pub upload_fanout: usize,
     /// The project this workspace claims to be, stamped from the CR
     /// (`FLINT_SYNC_PROJECT_ID`). When set, `lease::verify_claim`
     /// refuses to run over a prefix whose claim cell names another
@@ -387,6 +392,7 @@ impl LeanConfig {
             max_files: 0,
             window_slack_secs: 180,
             fanout: 128,
+            upload_fanout: 32,
             project_id: None,
             fetch_inflight_max_bytes: 512 * 1024 * 1024,
             range_get_min_bytes: 8 * 1024 * 1024,
