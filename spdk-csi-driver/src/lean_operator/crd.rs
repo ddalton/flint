@@ -111,6 +111,22 @@ pub struct FlintLeanWorkspaceSpec {
     #[serde(default = "default_fetch_drivers")]
     pub fetch_drivers: u64,
 
+    /// Parts of ONE object uploaded concurrently on publish (1 =
+    /// sequential, the default). Distinct from `fanout`, which spreads
+    /// uploads ACROSS objects: this only moves a tree whose critical
+    /// path is a single large object — the checkpoint shape. Measured
+    /// (runcu 2026-09-12, `door-drill-2026-09-12.md`): publishing a
+    /// 4 GiB object 8-wide instead of 1 took a checkpoint publish from
+    /// ~51 s to ~14 s (3.6x), the point the NIC saturates. NOT raised by
+    /// default: an upload part is held whole in RAM and the upload
+    /// window has no bytes-in-flight bound, so peak RSS is
+    /// `min(large_objects, fanout) x this x 64 MiB` — 8 across many large
+    /// objects is 16 GiB. Raise it only with pod-memory headroom
+    /// (~512 MiB per concurrent large object at 8); the safe default
+    /// bump waits on an upload byte-bound.
+    #[serde(default = "default_upload_part_parallelism")]
+    pub upload_part_parallelism: u64,
+
     /// Route every GET and HEAD through the syncer's raw HTTP/1.1 read
     /// path (SigV4 by hand, pooled keep-alive connections, none of the
     /// SDK's per-request machinery) instead of the AWS SDK. Writes
@@ -324,6 +340,12 @@ fn default_fetch_inflight_mb() -> u64 {
 }
 fn default_fetch_drivers() -> u64 {
     0
+}
+fn default_upload_part_parallelism() -> u64 {
+    // 1 = today's sequential per-object upload. Opt-in only: raising it
+    // multiplies upload RSS against `fanout` and the upload path has no
+    // byte bound yet (see the field doc).
+    1
 }
 fn default_size_limit_gib() -> u64 {
     20

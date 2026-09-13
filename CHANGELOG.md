@@ -32,6 +32,24 @@ covered by the stability guarantee.
   the marker's protocol number, and asserts a barrier never publishes it.
   `flint-lean` 0.2.0 → 0.3.0.
 
+- **lean: `uploadPartParallelism` — the parts of one large object can
+  upload concurrently on publish (opt-in, default 1).** A publish's
+  critical path on the checkpoint shape (one 4 GiB object beside two
+  thousand small files) was the single object's multipart upload, whose
+  parts went up one at a time: measured on runcu (i4i.large, same node,
+  same bucket) a lean publish of that tree took 50.5–51.7 s where
+  `aws s3 cp` took 16.9–17.1 s. `FLINT_SYNC_UPLOAD_PART_PARALLELISM`
+  already existed in the syncer but nothing set it: the FlintLeanWorkspace
+  spec gains `uploadPartParallelism` (default 1) and the node plugin
+  stamps it into the worker's fixed env list. At 8 the same publish took
+  13.9–14.4 s (3.6x, faster than the CLI); 16 was no better — the NIC is
+  saturated at 8. The default is NOT raised: an upload part is held whole
+  in RAM and the upload window has no bytes-in-flight bound, so the
+  worst case is `min(large objects, fanout) × parallelism × 64 MiB` —
+  16 GiB at 8 across 32 large objects. Raise it only with pod-memory
+  headroom; the default bump waits on an upload byte-bound
+  (`lean/e2e/perf/results/door-drill-2026-09-12.md` §4a).
+
 - **lean: delete and rename from outside the pod — declared removals
   (`docs/plans/flint-lean-delete-rename-design.md`, phases B, C, D).**
   A UI could create and overwrite files through the gateway but not

@@ -378,6 +378,25 @@ spec:
                 format: int64
                 nullable: true
                 type: integer
+              uploadPartParallelism:
+                default: 1
+                description: |-
+                  Parts of ONE object uploaded concurrently on publish (1 =
+                  sequential, the default). Distinct from `fanout`, which spreads
+                  uploads ACROSS objects: this only moves a tree whose critical
+                  path is a single large object — the checkpoint shape. Measured
+                  (runcu 2026-09-12, `door-drill-2026-09-12.md`): publishing a
+                  4 GiB object 8-wide instead of 1 took a checkpoint publish from
+                  ~51 s to ~14 s (3.6x), the point the NIC saturates. NOT raised by
+                  default: an upload part is held whole in RAM and the upload
+                  window has no bytes-in-flight bound, so peak RSS is
+                  `min(large_objects, fanout) x this x 64 MiB` — 8 across many large
+                  objects is 16 GiB. Raise it only with pod-memory headroom
+                  (~512 MiB per concurrent large object at 8); the safe default
+                  bump waits on an upload byte-bound.
+                format: uint64
+                minimum: 0.0
+                type: integer
               visibilityLagBoundSecs:
                 description: |-
                   Gated only, and REQUIRED there: the hard cap on citation
