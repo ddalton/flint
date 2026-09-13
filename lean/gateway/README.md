@@ -19,7 +19,7 @@ backend moves in-process.
 
 ```toml
 [dependencies]
-flint-lean-gateway = "0.1"
+flint-lean-gateway = "0.2"
 ```
 
 ## Quick start
@@ -255,7 +255,7 @@ serves — same routes, same bearer, same codes — inside its own server.
 A backend on another web stack turns it off and never compiles warp:
 
 ```toml
-flint-lean-gateway = { version = "0.1", default-features = false, features = ["s3"] }
+flint-lean-gateway = { version = "0.2", default-features = false, features = ["s3"] }
 ```
 
 ## What this crate is not
