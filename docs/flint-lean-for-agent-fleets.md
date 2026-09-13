@@ -278,17 +278,37 @@ migrated workspace that key holds a refusal doc, not a manifest, so read
 
 ## What it costs
 
-Measured floors (loopback; a latency-bound proxy moves these):
+Measured on real S3 (us-west-1, one i4i.large node, 2026-09-12; the whole
+drill, its controls and its rig are in
+`lean/e2e/perf/results/door-drill-2026-09-12.md`). Every cell is the
+range over three reps, never a mean. "Host engine" is the syncer binary
+alone on the node; "as deployed" is the chart, the `s3.csi.chert.us` node
+plugin, the worker pod and the tenant pod, timed from `kubectl apply` of
+the tenant pod to Ready (checkout) or from the `publish` touch to its ack.
 
-| | |
-|---|---|
-| bytes | checkout **3.3 s/GiB** · publish **8.0 s/GiB** |
-| 100k files | checkout **49.5 s** · first publish **65 s** · idle tick **1.85 s** |
-| 1M files | checkout **7 m 05 s**; manifest **264 MiB** at ~277 B/entry |
-| idle | ~5 bucket requests per tick, per workspace |
+| | host engine | as deployed |
+|---|---|---|
+| checkout, 6 × 1 GiB | **24.1–25.0 s** | **118.4–161.1 s (n=2)** (reps 2,3: rep 1 paid a lease lockout the drill itself caused) |
+| checkout, 20,000 × 8 KiB | **5.3–5.9 s** | **22.9–24.9 s** |
+| checkout, 4 GiB + 2,000 × 16 KiB | **19.6–19.9 s** | **92.4–115.1 s** |
+| publish, 6 × 1 GiB | **18.3 s** | **19.0–19.4 s** |
+| publish, 20,000 × 8 KiB | **19.5–20.4 s** | **20.8–22.6 s** |
+| publish, 4 GiB + 2,000 × 16 KiB | **50.5–51.7 s** at the default; **13.9–14.4 s** at `uploadPartParallelism: 8` | **50.8–50.9 s** |
+| idle | ~5 bucket requests per tick, per workspace | — |
+
+The deployed column carries what a pod pays that the engine does not —
+scheduling, the worker pod, the lease claim, the loop mount, the bind —
+a mostly fixed cost of roughly the small tree's gap. Peak worker RSS at
+the default read window (128 MiB in flight): 403–437 MiB on the 1 GiB
+objects, 229 MiB on the mixed tree, 72 MiB on the small one, under the
+worker's 1Gi limit.
 
 **The file count binds before the byte count** — the manifest is exactly
-linear in entries, which is why the v1 cap is ~250k files.
+linear in entries, which is why the v1 cap is ~250k files. For scale,
+the loopback floors: 100k files check out in 49.5 s (first publish 65 s,
+idle tick 1.85 s); 1M files in 7 m 05 s, with a 264 MiB manifest at
+~277 B/entry.
+
 
 ---
 

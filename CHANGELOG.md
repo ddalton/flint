@@ -112,6 +112,28 @@ covered by the stability guarantee.
   binary (`FLINT_SYNC_FETCH_INFLIGHT_MB`) and the config; a CR that
   names its own value is unaffected.
 
+- **lean/passthrough: the four doors re-measured on real S3, as host
+  engines AND as deployed
+  (`lean/e2e/perf/results/door-drill-2026-09-12.md`).** i4i.large,
+  us-west-1, one node, n=3, every cell a range, every arm behind a
+  guard that fails the run (and did, twice, on the rig itself). Host
+  engine: lean checkout 24.1–25.0 s on 6 × 1 GiB (2.9x faster than
+  2026-09-10), 5.3–5.9 s on 20,000 × 8 KiB (3x), 19.6–19.9 s on the
+  checkpoint tree; lean publish 18.3 s / 19.5–20.4 s / 50.5–58.6 s (the
+  last is the serial-parts case that `uploadPartParallelism: 8` takes to
+  13.8–14.4 s). Passthrough as deployed matches its host engine to
+  within a second on every shape. Lean as deployed publishes at the
+  engine's speed (19.0–19.4 s / 20.8–22.6 s / 50.8–50.9 s) but checks
+  out a many-GiB tree at roughly a third of it (118–206 s on `big`,
+  92–115 s on `mixed`): the worker's own checkout, measured by its own
+  timestamps, writing into a loop-mounted ext4 image from inside a 1Gi
+  cgroup at ~100 MB/s where the node's NVMe takes 309 — the plugin's
+  tree substrate, not the syncer, and a follow-up. Also found on the
+  way: ambient identity is dead behind cilium (the broker is the path),
+  the region gap and the OOM above, and a rig that printed "done" on a
+  failure — every one recorded in the results document. The agent-fleets
+  guide's cost table now carries these numbers, host beside deployed.
+
 - **lean: the agent contract is a file the syncer writes into the mount
   — `.flint/AGENTS.md`.** flint-lean has no client library and no API: an
   agent interacts with a workspace entirely through files (`.flint/publish`,
