@@ -12,6 +12,8 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.51.0] - 2026-09-13
+
 ### Added
 
 - **lean: the protocol review — one CRITICAL, seven HIGH and eight
@@ -6575,7 +6577,8 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.49.0...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.51.0...HEAD
+[1.51.0]: https://github.com/ddalton/flint/compare/v1.50.0...v1.51.0
 [1.50.0]: https://github.com/ddalton/flint/compare/v1.49.0...v1.50.0
 [1.49.0]: https://github.com/ddalton/flint/compare/v1.48.0...v1.49.0
 [1.48.0]: https://github.com/ddalton/flint/compare/v1.47.0...v1.48.0
