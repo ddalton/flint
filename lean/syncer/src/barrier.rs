@@ -213,7 +213,27 @@ impl Syncer {
                 continue;
             }
             let local_path = self.cfg.root.join(&entry.path);
-            let dirty = local_dirty(&local_path, baseline.entries.get(&entry.path));
+            let mut dirty = local_dirty(&local_path, baseline.entries.get(&entry.path));
+            // Review 2026-09-12, atomicity-3 / inbox-2: the fetch is a
+            // network round trip and the agent may write the path inside
+            // it. The stat that licenses the adopt is repeated AFTER the
+            // fetch, before anything touches the file: a write in that
+            // window makes this the dirty case — the foreign bytes are
+            // preserved and a record names them, the agent's stay.
+            let mut fetched = None;
+            if !dirty {
+                let got = self.store.get_whole(&key, Some(&entry.etag)).await.map_err(|e| match e {
+                    StoreError::PreconditionFailed(m) => {
+                        StoreError::Other(format!("consume raced a newer write: {m}"))
+                    }
+                    other => other,
+                })?;
+                if local_dirty(&local_path, baseline.entries.get(&entry.path)) {
+                    dirty = true;
+                } else {
+                    fetched = Some(got);
+                }
+            }
             if dirty {
                 // Locally-dirty wins; preserve the FOREIGN bytes first
                 // (a conflict record must keep both versions
@@ -238,6 +258,7 @@ impl Syncer {
                         // version publishes.
                         size: u64::MAX,
                         mtime_unix: 0,
+                        mtime_nanos: None,
                         version_id: None,
                         // The sentinel's bytes are the LOCAL edit; the
                         // publish that supersedes hashes them itself.
@@ -245,14 +266,9 @@ impl Syncer {
                     },
                 );
             } else {
-                // Clean: adopt the foreign content into the tree.
-                let (meta, body) =
-                    self.store.get_whole(&key, Some(&entry.etag)).await.map_err(|e| match e {
-                        StoreError::PreconditionFailed(m) => {
-                            StoreError::Other(format!("consume raced a newer write: {m}"))
-                        }
-                        other => other,
-                    })?;
+                // Clean, re-checked after the fetch: adopt the foreign
+                // content into the tree.
+                let (meta, body) = fetched.expect("fetched while clean");
                 let mode = PosixStamps::from_meta(&meta.meta).map(|p| p.mode);
                 // VERIFIED before it is written, as checkout's fresh
                 // fetch is: against the writer's CRC when the inbox
@@ -336,6 +352,7 @@ impl Syncer {
                         generation: stamps.map(|s| s.generation).unwrap_or(0),
                         size: st.len(),
                         mtime_unix: mtime_of(&st),
+                        mtime_nanos: Some(mtime_nanos_of(&st)),
                         version_id: None,
                         crc64_b64: Some(got),
                     },
@@ -1268,6 +1285,7 @@ impl Syncer {
     /// barrier — publish-possibly-torn is put_whole's documented
     /// dilemma, not this path's.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     async fn upload_compose(
         &self,
         path: &str,
@@ -1279,22 +1297,12 @@ impl Syncer {
         stamps: GenerationStamps,
         generation: u64,
         epoch: u64,
+        prior_uuids: &[String],
     ) -> LeanResult<UploadOutcome> {
         // NO PRE-PASS. The store accumulates the full-object CRC from
         // the parts as it reads them for upload, so this file is read
-        // ONCE. It used to be read TWICE — a streaming hash of the whole
-        // file, and then again part by part — which on the 2026-09-10
-        // door drill was roughly 11 s of the `mixed` workload's 24.3 s,
-        // all of it at the disk's read ceiling and none of it on the
-        // wire.
-        //
-        // That pre-pass was not laziness: asking the store to accumulate
-        // used to pin its part uploads to a sequential loop, because a
-        // CRC-64 taken out of order is a different number. `crc64_combine`
-        // removed the choice — parts are hashed independently and folded
-        // in part order — so the single read and the parallel upload are
-        // no longer alternatives.
-
+        // ONCE (the 2026-09-10 door drill measured the second read at
+        // roughly 11 s of the `mixed` workload's 24.3 s).
         // Part grid: within [min_part_size, ...], at most max_parts,
         // contiguous from 0.
         let min_part = self.store.min_part_size().max(1);
@@ -1312,68 +1320,92 @@ impl Syncer {
             off += len;
         }
 
-        let spec = flint_store::ComposeSpec {
-            progress: None,
-            key,
-            local_path,
-            parts,
-            base_key: None,
-            base_etag: None,
-            condition,
-            stamps: stamps.clone(),
-            crc64: None,
-        };
-        match self.store.compose_generation(&spec).await {
-            Ok(meta) => {
-                // The store computed it; refuse to cite bytes nothing
-                // vouched for rather than invent a number for the
-                // manifest. A backend that returns no checksum has not
-                // validated the publish server-side either.
-                let crc = meta
-                    .crc64_b64
-                    .as_deref()
-                    .and_then(flint_store::crc64_from_b64)
-                    .ok_or_else(|| {
-                        LeanError::State(format!(
-                            "compose of {key} returned no full-object checksum — refusing to \
-                             cite bytes nothing vouched for"
-                        ))
-                    })?;
-                Ok(UploadOutcome::published(
-                    path, key.to_string(), meta.etag, crc, scanned, generation, epoch,
-                    meta.version_id,
-                ))
-            }
-            Err(StoreError::ChecksumMismatch(_)) | Err(StoreError::NoSuchUpload(_)) => {
-                // Drift mid-compose, or the operator sweep aborted us:
-                // nothing published; the next barrier re-queues.
-                Ok(UploadOutcome::Deferred)
-            }
-            Err(StoreError::PreconditionFailed(_)) => {
-                // The AdoptOwn recognizer compares OUR bytes' checksum
-                // against what landed, and without the pre-pass we do
-                // not have one — so the file is read HERE, on the rare
-                // recovery path, instead of on every publish.
-                let crc = file_crc(local_path)?;
-                let head = self.store.head(key).await?;
-                let head_stamps = GenerationStamps::from_meta(&head.meta);
-                let own = head_stamps
-                    .as_ref()
-                    .map(|s| s.flush_uuid == stamps.flush_uuid)
-                    .unwrap_or(false);
-                if own || head.crc64_b64.as_deref() == Some(crc64_to_b64(crc).as_str()) {
-                    // Our own torn earlier Complete with these bytes:
-                    // cite it.
-                    let g = head_stamps.map(|s| s.generation).unwrap_or(generation);
+
+        // At most three attempts: the caller's condition; then once more
+        // If-Match on what a 412 showed us — our own torn Complete
+        // (recognized through the crash journal, review 2026-09-12
+        // atomicity-2), or a foreign version now PRESERVED (inbox-1) —
+        // or a create if the base object vanished (inbox-5). A 412 on
+        // the retry means the path is being written under us: park.
+        let mut condition = condition;
+        for attempt in 0..3u32 {
+            let spec = flint_store::ComposeSpec {
+                progress: None,
+                key,
+                local_path,
+                parts: parts.clone(),
+                base_key: None,
+                base_etag: None,
+                condition: condition.clone(),
+                stamps: stamps.clone(),
+                crc64: None,
+            };
+            match self.store.compose_generation(&spec).await {
+                Ok(meta) => {
+                    // The store computed it; refuse to cite bytes nothing
+                    // vouched for rather than invent a number for the
+                    // manifest. A backend that returns no checksum has not
+                    // validated the publish server-side either.
+                    let crc = meta
+                        .crc64_b64
+                        .as_deref()
+                        .and_then(flint_store::crc64_from_b64)
+                        .ok_or_else(|| {
+                            LeanError::State(format!(
+                                "compose of {key} returned no full-object checksum — refusing to \
+                                 cite bytes nothing vouched for"
+                            ))
+                        })?;
                     return Ok(UploadOutcome::published(
-                        path, key.to_string(), head.etag, crc, scanned, g, epoch,
-                        head.version_id,
+                        path, key.to_string(), meta.etag, crc, size, scanned, generation, epoch,
+                        meta.version_id,
                     ));
                 }
-                Ok(UploadOutcome::Parked { foreign_etag: head.etag })
+                Err(StoreError::ChecksumMismatch(_)) | Err(StoreError::NoSuchUpload(_)) => {
+                    // Drift mid-compose, or the operator sweep aborted us:
+                    // nothing published; the next barrier re-queues.
+                    return Ok(UploadOutcome::Deferred);
+                }
+                Err(StoreError::PreconditionFailed(_)) => {
+                    // The AdoptOwn recognizer compares OUR bytes' checksum
+                    // against what landed, and without the pre-pass we do
+                    // not have one — so the file is read HERE, on the rare
+                    // recovery path, instead of on every publish.
+                    let crc = file_crc(local_path)?;
+                    let head = match self.store.head(key).await {
+                        Ok(h) => h,
+                        Err(StoreError::NotFound(_)) => {
+                            condition = PutCondition::IfNoneMatchAny;
+                            continue;
+                        }
+                        Err(e) => return Err(e.into()),
+                    };
+                    let head_stamps = GenerationStamps::from_meta(&head.meta);
+                    if head.crc64_b64.as_deref() == Some(crc64_to_b64(crc).as_str()) {
+                        // These bytes are already there (a torn Complete):
+                        // cite them.
+                        let g = head_stamps.map(|s| s.generation).unwrap_or(generation);
+                        return Ok(UploadOutcome::published(
+                            path, key.to_string(), head.etag, crc, head.size, scanned, g, epoch,
+                            head.version_id,
+                        ));
+                    }
+                    if attempt >= 1 {
+                        return Ok(UploadOutcome::Parked { foreign_etag: head.etag });
+                    }
+                    let own = head_stamps
+                        .as_ref()
+                        .map(|s| s.flush_uuid == stamps.flush_uuid || prior_uuids.contains(&s.flush_uuid))
+                        .unwrap_or(false);
+                    if !own && self.preserve_foreign_412(path, &head).await.is_none() {
+                        return Ok(UploadOutcome::Parked { foreign_etag: head.etag });
+                    }
+                    condition = PutCondition::IfMatch(head.etag);
+                }
+                Err(e) => return Err(e.into()),
             }
-            Err(e) => Err(e.into()),
         }
+        Ok(UploadOutcome::Deferred)
     }
 
     /// The gated staging lane's entry point into the shipped guard
@@ -1410,7 +1442,28 @@ impl Syncer {
         let key = self.cfg.file_key(path);
         let local_path = self.cfg.root.join(path);
         let generation = base.map(|b| b.generation + 1).unwrap_or(1);
-        let posix = std::fs::metadata(&local_path).ok().map(|m| PosixStamps::from_metadata(&m));
+        // Review 2026-09-12, atomicity-6: the scan skipped symlinks; this
+        // read followed them. A regular file swapped for a symlink between
+        // the two published the link's TARGET — a file outside the
+        // workspace, the syncer's own /proc/self/environ included. Every
+        // stat here is an lstat and the read opens O_NOFOLLOW; a path that
+        // is no longer a regular file is refused, recorded, and deferred
+        // (the next scan skips it, and the two-scan rule retires it).
+        let lmeta = std::fs::symlink_metadata(&local_path)
+            .map_err(|e| LeanError::State(format!("stat {}: {e}", local_path.display())))?;
+        if !lmeta.is_file() {
+            self.state.append_conflict(&ConflictRecord {
+                path: path.to_string(),
+                foreign_etag: String::new(),
+                preserved_key: None,
+                kind: "upload-refused-not-regular: no longer a regular file after the scan (a symlink \
+                       or special file replaced it); nothing published"
+                    .into(),
+                at_unix: now_unix(),
+            })?;
+            return Ok(UploadOutcome::Deferred);
+        }
+        let posix = Some(PosixStamps::from_metadata(&lmeta));
         let stamps = GenerationStamps {
             generation,
             epoch,
@@ -1422,14 +1475,15 @@ impl Syncer {
             Some(b) => PutCondition::IfMatch(b.etag.clone()),
             None => PutCondition::IfNoneMatchAny,
         };
-        let size = std::fs::metadata(&local_path)
-            .map_err(|e| LeanError::State(format!("stat {}: {e}", local_path.display())))?
-            .len();
+        let size = lmeta.len();
         if size > self.cfg.whole_put_max {
             // Streaming multipart compose: put_whole is never fed past
             // whole_put_max (unbounded memory + S3's 5 GiB wall).
             return self
-                .upload_compose(path, &key, &local_path, size, scanned, condition, stamps, generation, epoch)
+                .upload_compose(
+                    path, &key, &local_path, size, scanned, condition, stamps, generation, epoch,
+                    prior_uuids,
+                )
                 .await;
         }
         // `Bytes::from(Vec<u8>)` TAKES OWNERSHIP without copying, so the
@@ -1437,7 +1491,8 @@ impl Syncer {
         // published file body — bought solely to leave `body` intact for
         // the 412 retry below, which is reached almost never. Build the
         // `Bytes` once; the retry gets a refcount clone.
-        let body = Bytes::from(std::fs::read(&local_path)?);
+        let body = Bytes::from(read_nofollow(&local_path)?);
+        let uploaded_len = body.len() as u64;
         let crc = crc64_nvme(&body);
         match self
             .store
@@ -1445,40 +1500,114 @@ impl Syncer {
             .await
         {
             Ok(meta) => Ok(UploadOutcome::published(
-                path, key, meta.etag, crc, scanned, generation, epoch, meta.version_id,
+                path, key, meta.etag, crc, uploaded_len, scanned, generation, epoch, meta.version_id,
             )),
             Err(StoreError::PreconditionFailed(_)) => {
-                // The 412 policy: my own crashed/torn PUT ⇒ adopt;
-                // foreign ⇒ park. NEVER the inherited LOCAL-WINS
-                // overwrite.
-                let head = self.store.head(&key).await?;
+                // The 412 policy: my own crashed/torn PUT ⇒ adopt; a
+                // foreign version ⇒ the consume-dirty rule, at upload time
+                // (preserve it, then supersede it knowingly). NEVER the
+                // inherited LOCAL-WINS overwrite, and never a park with
+                // no way out.
+                let head = match self.store.head(&key).await {
+                    Ok(h) => h,
+                    Err(StoreError::NotFound(_)) => {
+                        // Review 2026-09-12, inbox-5: the base object is
+                        // gone (a bucket-level delete, or our own GC after
+                        // a crash between the CAS and the baseline
+                        // rewrite). Failing the barrier here failed EVERY
+                        // barrier, forever. A vanished base is a create.
+                        let meta = self
+                            .store
+                            .put_whole(&key, body, &PutCondition::IfNoneMatchAny, &stamps, crc)
+                            .await?;
+                        return Ok(UploadOutcome::published(
+                            path, key, meta.etag, crc, uploaded_len, scanned, generation, epoch,
+                            meta.version_id,
+                        ));
+                    }
+                    Err(e) => return Err(e.into()),
+                };
                 let head_stamps = GenerationStamps::from_meta(&head.meta);
                 let own = head_stamps
                     .as_ref()
                     .map(|s| s.flush_uuid == flush_uuid || prior_uuids.contains(&s.flush_uuid))
                     .unwrap_or(false);
-                if !own {
-                    return Ok(UploadOutcome::Parked { foreign_etag: head.etag });
-                }
                 if head.crc64_b64.as_deref() == Some(crc64_to_b64(crc).as_str()) {
-                    // Bytes already there (torn response): cite it.
+                    // Bytes already there (a torn response, ours or a
+                    // foreign write of the same content): cite it.
                     let g = head_stamps.map(|s| s.generation).unwrap_or(generation);
                     return Ok(UploadOutcome::published(
-                        path, key, head.etag, crc, scanned, g, epoch, head.version_id,
+                        path, key, head.etag, crc, head.size, scanned, g, epoch, head.version_id,
                     ));
                 }
-                // Our earlier PUT, older content: supersede it knowingly.
-                let meta = self
+                if !own && self.preserve_foreign_412(path, &head).await.is_none() {
+                    return Ok(UploadOutcome::Parked { foreign_etag: head.etag });
+                }
+                // Our earlier PUT (older content), or a foreign version
+                // now preserved: supersede it knowingly, If-Match on what
+                // we saw. A second 412 means the path is being written
+                // under us right now; that one parks.
+                let meta = match self
                     .store
-                    .put_whole(&key, body, &PutCondition::IfMatch(head.etag), &stamps, crc)
-                    .await?;
+                    .put_whole(&key, body, &PutCondition::IfMatch(head.etag.clone()), &stamps, crc)
+                    .await
+                {
+                    Ok(m) => m,
+                    Err(StoreError::PreconditionFailed(_)) => {
+                        return Ok(UploadOutcome::Parked { foreign_etag: head.etag });
+                    }
+                    Err(e) => return Err(e.into()),
+                };
                 Ok(UploadOutcome::published(
-                    path, key, meta.etag, crc, scanned, generation, epoch, meta.version_id,
+                    path, key, meta.etag, crc, uploaded_len, scanned, generation, epoch, meta.version_id,
                 ))
             }
             Err(e) => Err(e.into()),
         }
     }
+
+    /// A 412 against a version this syncer did not write, met at upload
+    /// time. The contract's rule for a foreign write to a path the agent
+    /// modified is the consume-dirty rule — the agent's version wins and
+    /// the foreign bytes are preserved — and a "park" was that case with
+    /// no resolution: nothing ever un-parked, and every ack said `ok`
+    /// (review 2026-09-12, inbox-1). Preserve, record, and let the caller
+    /// supersede. `None` = the preserve failed; the caller parks, and the
+    /// boundary is `partial`.
+    async fn preserve_foreign_412(&self, path: &str, head: &flint_store::ObjectMeta) -> Option<()> {
+        let preserved = match self.preserve_conflict_copy(path, &head.etag).await {
+            Ok(k) => k,
+            Err(e) => {
+                eprintln!("flint-sync: {path}: foreign version {} could not be preserved ({e}); parking", head.etag);
+                return None;
+            }
+        };
+        self.state
+            .append_conflict(&ConflictRecord {
+                path: path.to_string(),
+                foreign_etag: head.etag.clone(),
+                preserved_key: Some(preserved),
+                kind: "upload-412-preserved".into(),
+                at_unix: now_unix(),
+            })
+            .ok()?;
+        Some(())
+    }
+}
+
+/// Read a workspace file for upload without following a symlink at the
+/// final component, and refuse anything that is not a regular file once
+/// open (review 2026-09-12, atomicity-6).
+fn read_nofollow(p: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(p)?;
+    if !f.metadata()?.is_file() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"));
+    }
+    let mut v = Vec::new();
+    f.read_to_end(&mut v)?;
+    Ok(v)
 }
 
 enum UploadOutcome {
@@ -1497,6 +1626,7 @@ impl UploadOutcome {
         key: String,
         etag: String,
         crc: u64,
+        uploaded_len: u64,
         scanned: &scan::ScanEntry,
         generation: u64,
         epoch: u64,
@@ -1508,7 +1638,12 @@ impl UploadOutcome {
                 key,
                 etag: etag.clone(),
                 crc64_b64: crc64_to_b64(crc),
-                size: scanned.size,
+                // The length the object HAS (review 2026-09-12,
+                // atomicity-1): the scanned size was cited while the
+                // body was read fresh, so a file that grew between the
+                // two was cited short and every fresh checkout of it
+                // failed its CRC fold — the successor never started.
+                size: uploaded_len,
                 mode: scanned.mode,
                 mtime_unix: scanned.mtime_unix,
                 generation,
@@ -1524,6 +1659,7 @@ impl UploadOutcome {
                 // re-stat/re-queue valve).
                 size: scanned.size,
                 mtime_unix: scanned.mtime_unix,
+                mtime_nanos: Some(scanned.mtime_nanos),
                 crc64_b64: Some(crc64_to_b64(crc)),
             },
         }
@@ -1535,7 +1671,9 @@ fn local_dirty(local: &Path, base: Option<&BaselineEntry>) -> bool {
         (Err(_), None) => false,                   // both absent: clean
         (Err(_), Some(_)) => true,                 // locally deleted vs baseline
         (Ok(_), None) => true,                     // local exists, never published
-        (Ok(m), Some(b)) => m.len() != b.size || mtime_of(&m) != b.mtime_unix,
+        (Ok(m), Some(b)) => {
+            scan::stat_changed(b.size, b.mtime_unix, b.mtime_nanos, m.len(), mtime_of(&m), mtime_nanos_of(&m))
+        }
     }
 }
 
@@ -1594,6 +1732,14 @@ fn file_crc(local_path: &Path) -> LeanResult<u64> {
         crc.update(&buf[..n]);
     }
     Ok(crc.finalize())
+}
+
+pub(super) fn mtime_nanos_of(m: &std::fs::Metadata) -> u32 {
+    m.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0)
 }
 
 pub(super) fn mtime_of(m: &std::fs::Metadata) -> i64 {

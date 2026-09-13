@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 
 use flint_store::StoreError;
 
-use super::barrier::{contained_path, contained_path_stat, mtime_of, write_file_atomic};
+use super::barrier::{contained_path, contained_path_stat, mtime_nanos_of, mtime_of, write_file_atomic};
 use super::manifest;
 use super::state::BaselineEntry;
 use super::{LeanError, LeanResult, Syncer};
@@ -464,6 +464,7 @@ impl Syncer {
                                 generation: entry.generation,
                                 size: st.len(),
                                 mtime_unix: mtime_of(&st),
+                                mtime_nanos: Some(mtime_nanos_of(&st)),
                                 version_id: entry.version_id.clone(),
                                 crc64_b64: Some(entry.crc64_b64.clone()),
                             }),
@@ -522,6 +523,7 @@ impl Syncer {
                             generation: entry.generation,
                             size: st.len(),
                             mtime_unix: mtime_of(&st),
+                            mtime_nanos: Some(mtime_nanos_of(&st)),
                             version_id: None,
                             // The fold above equalled it, or we would
                             // not be here.
@@ -730,6 +732,7 @@ impl Syncer {
                         generation: entry.generation,
                         size: st.len(),
                         mtime_unix: mtime_of(&st),
+                        mtime_nanos: Some(mtime_nanos_of(&st)),
                         version_id: None,
                         crc64_b64: Some(got),
                     }),

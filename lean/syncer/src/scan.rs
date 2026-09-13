@@ -17,7 +17,24 @@ use super::{state::Baseline, LeanResult, CONTROL_DIR, STATE_DIR};
 pub struct ScanEntry {
     pub size: u64,
     pub mtime_unix: i64,
+    /// The sub-second part of mtime. Compared only against a baseline
+    /// that recorded one (review 2026-09-12, atomicity-4: a same-size
+    /// rewrite inside the recorded second was invisible forever).
+    pub mtime_nanos: u32,
     pub mode: u32,
+}
+
+/// The consume's temp sibling (`safefs`): a crash between its create and
+/// its rename leaves it as a regular file in the tree, and the scan used
+/// to publish it as data (review 2026-09-12, atomicity-7).
+pub const TMP_SUFFIX: &str = ".flint-sync-tmp";
+
+/// Whether a file's stat differs from its baseline stamp. Size and
+/// seconds always; nanoseconds only when the baseline recorded them — a
+/// baseline written before nanoseconds were stamped has `None`, and
+/// comparing against a missing value would re-upload every file once.
+pub fn stat_changed(b_size: u64, b_mtime: i64, b_nanos: Option<u32>, size: u64, mtime: i64, nanos: u32) -> bool {
+    b_size != size || b_mtime != mtime || b_nanos.map(|n| n != nanos).unwrap_or(false)
 }
 
 /// Walk the workspace. Skips the state dir, symlinks (v1 non-goal, as
@@ -44,6 +61,9 @@ fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, ScanEntry>) -> LeanR
                 continue;
             }
         }
+        if name.to_string_lossy().ends_with(TMP_SUFFIX) {
+            continue;
+        }
         let meta = std::fs::symlink_metadata(&path)?;
         if meta.file_type().is_symlink() {
             continue;
@@ -63,13 +83,13 @@ fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, ScanEntry>) -> LeanR
             };
             #[cfg(not(unix))]
             let mode = 0o644;
-            let mtime_unix = meta
+            let (mtime_unix, mtime_nanos) = meta
                 .modified()
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            out.insert(rel, ScanEntry { size: meta.len(), mtime_unix, mode });
+                .map(|d| (d.as_secs() as i64, d.subsec_nanos()))
+                .unwrap_or((0, 0));
+            out.insert(rel, ScanEntry { size: meta.len(), mtime_unix, mtime_nanos, mode });
         }
     }
     Ok(())
@@ -94,7 +114,12 @@ pub struct Classified {
 /// publish their DELETION. An upgrade must never delete data: they are
 /// carried forward frozen — never re-uploaded, never deleted by us.
 pub fn is_control_path(path: &str) -> bool {
-    path == CONTROL_DIR || path.strip_prefix(CONTROL_DIR).map(|r| r.starts_with('/')).unwrap_or(false)
+    // Both reserved names (review 2026-09-12, inbox-8: only `.flint/`
+    // was refused, so a citation naming `.flint-sync/scope-intent.json`
+    // was materialised INTO the state directory and replayed).
+    [CONTROL_DIR, STATE_DIR].iter().any(|d| {
+        path == *d || path.strip_prefix(d).map(|r| r.starts_with('/')).unwrap_or(false)
+    })
 }
 
 pub fn classify(scan: &BTreeMap<String, ScanEntry>, baseline: &Baseline) -> Classified {
@@ -105,7 +130,7 @@ pub fn classify(scan: &BTreeMap<String, ScanEntry>, baseline: &Baseline) -> Clas
                 c.uploads.insert(path.clone());
             }
             Some(b) => {
-                if b.size != s.size || b.mtime_unix != s.mtime_unix {
+                if stat_changed(b.size, b.mtime_unix, b.mtime_nanos, s.size, s.mtime_unix, s.mtime_nanos) {
                     c.uploads.insert(path.clone());
                 }
             }

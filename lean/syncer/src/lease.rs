@@ -106,9 +106,17 @@ pub async fn claim_step(sc: &mut Syncer) -> LeanResult<ClaimOutcome> {
             Err(e) => Err(e.into()),
         },
         Some(state) => {
-            let ours = state.holder_id == inc.holder_id;
+            // Self-recognition needs the EPOCH too (review 2026-09-12,
+            // lease-3 / audit #7): a cell naming this holder at an epoch
+            // this incarnation never recorded is our own acquire whose
+            // response was lost, or whose rotation failed after it
+            // landed — the straggler it deposed may still be mid-barrier,
+            // so that path takes the takeover rotation like any other.
+            let same_holder = state.holder_id == inc.holder_id;
+            let ours = same_holder && state.epoch == inc.epoch;
+            let orphaned_own = same_holder && !ours;
             let quiet = inc.last_token.as_deref() == Some(state.token.as_str());
-            if ours || state.released || (quiet && inc.quiet_polls + 1 >= QUIET_POLLS) {
+            if ours || orphaned_own || state.released || (quiet && inc.quiet_polls + 1 >= QUIET_POLLS) {
                 // Self-recognition (same emptyDir), a clean release, or
                 // a lease judged dead across QUIET_POLLS observations.
                 //
@@ -241,6 +249,17 @@ pub async fn renew(sc: &mut Syncer) -> LeanResult<()> {
                         token: state.token,
                     });
                     let _ = sc.clear_auth_pause();
+                    // Review 2026-09-12, lease-2: the adoption alone
+                    // writes nothing, so the cell's token would stand
+                    // still for a whole takeover threshold and a waiting
+                    // challenger could count a live holder dead. One
+                    // renew moves it; if that write fails the adopted
+                    // token stands and the next tick tries again.
+                    if let Some(adopted) = sc.lease.clone() {
+                        if let Ok(fresh) = sc.store.epoch_renew(&key, &adopted, None).await {
+                            sc.lease = Some(fresh);
+                        }
+                    }
                     Ok(())
                 }
                 _ => {

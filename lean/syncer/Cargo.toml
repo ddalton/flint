@@ -13,7 +13,7 @@
 #   cargo build --release --features s3 # the shippable binaries
 [package]
 name = "flint-lean"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "flint lean: the checkout/publish syncer for S3-backed agent workspaces, and the gateway verbs it shares with flint-lean-gateway"
 license = "MIT"

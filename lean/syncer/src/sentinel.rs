@@ -140,6 +140,10 @@ pub struct PendingSentinel {
     /// drop.
     #[serde(default)]
     pub torn: bool,
+    /// A coalesced touch asked for the WHOLE tree (no `scope`); later
+    /// scoped touches must not narrow it (review 2026-09-12, inbox-7).
+    #[serde(default)]
+    pub whole_tree: bool,
 }
 
 /// The ack document (`.flint/<verb>.ack`).
@@ -164,6 +168,10 @@ pub struct Ack {
     /// Set on refused-fenced: the epoch that fenced us.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_epoch: Option<u64>,
+    /// Set on a refusal that is the AGENT's to fix (`refused-scope`):
+    /// what was wrong with the request, in words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     pub report: AckReport,
 }
 
@@ -209,7 +217,10 @@ pub(crate) fn gated_ack(
     cite: &super::gated::CitationReport,
     manifest_etag: Option<String>,
 ) -> Ack {
-    let dropped = cite.dropped_inflight.clone();
+    // A standing park in the lane is the same fact as an inflight drop:
+    // the boundary does not carry the path (review 2026-09-12, inbox-1).
+    let mut dropped = cite.dropped_inflight.clone();
+    dropped.extend(lane.parked.iter().cloned());
     Ack {
         status: if dropped.is_empty() { "ok".into() } else { "partial".into() },
         nonces: pending.nonces.clone(),
@@ -219,6 +230,7 @@ pub(crate) fn gated_ack(
         boundary: if forced { "sentinel-deferred".into() } else { "sentinel".into() },
         completed_unix: now_unix(),
         observed_epoch: None,
+        reason: None,
         report: AckReport {
             uploaded: lane.staged.len(),
             deleted: cite.deleted.len(),
@@ -376,6 +388,7 @@ impl Syncer {
                 note: None,
                 scope: None,
                 torn: true,
+                whole_tree: false,
             })),
         }
     }
@@ -570,6 +583,7 @@ impl Syncer {
             note: None,
             scope: None,
             torn: false,
+            whole_tree: false,
         });
         pending.consumed_mtime_unix_ns = pending.consumed_mtime_unix_ns.max(ns);
         pending.consumed_at = now_unix();
@@ -587,18 +601,31 @@ impl Syncer {
         if let Some(note) = parsed.note {
             pending.note = Some(note.chars().take(4096).collect());
         }
-        if let Some(scope) = parsed.scope {
-            let mut merged = pending.scope.take().unwrap_or_default();
-            for e in scope.into_iter().take(MAX_SCOPE_ENTRIES) {
-                if e.len() > MAX_SCOPE_ENTRY_LEN {
-                    continue;
-                }
-                if !merged.contains(&e) {
-                    merged.push(e);
-                }
+        // Scope folding (review 2026-09-12, inbox-7 / inbox-10): an
+        // UNSCOPED sync touch means the whole tree and outranks every
+        // scoped one it coalesces with, in either order — the whole-tree
+        // agent matches its nonce on this ack and must get what it asked
+        // for. Scoped touches union, and the union is NOT truncated
+        // here: an oversize or all-invalid scope is answered at the
+        // honor as `refused-scope`, never silently narrowed.
+        match parsed.scope {
+            None if matches!(verb, Verb::Sync) => {
+                pending.scope = None;
+                pending.whole_tree = true;
             }
-            merged.truncate(MAX_SCOPE_ENTRIES);
-            pending.scope = Some(merged);
+            Some(scope) if !pending.whole_tree => {
+                let mut merged = pending.scope.take().unwrap_or_default();
+                for e in scope {
+                    if e.len() > MAX_SCOPE_ENTRY_LEN {
+                        continue;
+                    }
+                    if !merged.contains(&e) {
+                        merged.push(e);
+                    }
+                }
+                pending.scope = Some(merged);
+            }
+            _ => {}
         }
         self.save_pending(verb, &pending)?;
         Ok(())
@@ -689,13 +716,24 @@ impl Syncer {
     /// waiting out its 60 s of quiet polls is HEALTHY, not fenced, and its
     /// emptyDir carries no pending record — so it takes none of this.
     pub async fn refuse_what_this_incarnation_can_never_honor(&mut self) -> LeanResult<bool> {
+        // Review 2026-09-12, gated-3 / lease-6: a RAW touch standing in
+        // the tree (made before the crash, or during this wait against
+        // the predecessor's `live` marker) was consumed by nobody until
+        // the claim returned — behind a live foreign holder, never.
+        // Consume first, so it is owed and can be refused.
+        self.poll_sentinels()?;
         let mut owed = false;
         for verb in [Verb::Publish, Verb::Sync] {
             if self.load_pending(verb)?.is_some() {
                 owed = true;
             }
         }
-        if !owed {
+        // A predecessor's `live` marker keeps inviting touches nobody will
+        // answer while this incarnation waits: flip it now (the claim
+        // rewrites it live). A fresh tree has no marker and takes none of
+        // this.
+        let marker_lies = self.read_capabilities().map(|c| c.state != "fenced").unwrap_or(false);
+        if !owed && !marker_lies {
             return Ok(false);
         }
         // Who fenced us — one epoch read, on a path taken at most once per
@@ -706,7 +744,7 @@ impl Syncer {
                 self.refuse_pending(verb, observed)?;
             }
         }
-        self.mark_fenced()?;
+        self.mark_fenced_because(observed)?;
         Ok(true)
     }
 
@@ -722,6 +760,7 @@ impl Syncer {
             boundary: "sentinel".into(),
             completed_unix: now_unix(),
             observed_epoch,
+            reason: None,
             report: AckReport::default(),
         };
         self.write_ack(verb, &ack)?;
@@ -732,9 +771,21 @@ impl Syncer {
     /// Flip the capability marker to fenced: no verbs, `state:
     /// "fenced"`, so agents stop touching sentinels on a zombie.
     pub fn mark_fenced(&self) -> LeanResult<()> {
-        let posture = self
+        self.mark_fenced_because(None)
+    }
+
+    /// `mark_fenced` with the fencer named: AGENTS.md promises `reason`
+    /// says why the verbs are off (review 2026-09-12, gated-7).
+    pub fn mark_fenced_because(&self, observed_epoch: Option<u64>) -> LeanResult<()> {
+        let mut posture = self
             .load_posture()?
             .unwrap_or(super::control::SentinelPosture { enabled: false, reason: None });
+        posture.reason = Some(match observed_epoch {
+            Some(e) => format!(
+                "fenced: this syncer no longer holds the lease; the workspace is served under epoch {e}"
+            ),
+            None => "fenced: this syncer no longer holds the lease (the fencing epoch could not be read)".into(),
+        });
         // Both surfaces or neither: an agent reading only the
         // operational file must not conclude a zombie is healthy.
         self.write_gauges(true, None)?;
@@ -779,8 +830,11 @@ impl Syncer {
         if let Err(e) = super::lease::renew(self).await {
             if let LeanError::Fenced(_) = e {
                 let epoch = self.observed_foreign_epoch().await;
-                self.refuse_pending(verb, epoch)?;
-                self.mark_fenced()?;
+                // Review 2026-09-12, lease-1: the settle's own failure
+                // must never replace the fence.
+                if let Err(se) = self.refuse_pending(verb, epoch).and_then(|_| self.mark_fenced_because(epoch)) {
+                    eprintln!("flint-sync: fenced, but the local settle failed ({se}); the fence stands");
+                }
             }
             return Err(e);
         }
@@ -797,8 +851,11 @@ impl Syncer {
             }
             Err(LeanError::Fenced(m)) => {
                 let epoch = self.observed_foreign_epoch().await;
-                self.refuse_pending(verb, epoch)?;
-                self.mark_fenced()?;
+                // Review 2026-09-12, lease-1: the settle's own failure
+                // must never replace the fence.
+                if let Err(se) = self.refuse_pending(verb, epoch).and_then(|_| self.mark_fenced_because(epoch)) {
+                    eprintln!("flint-sync: fenced, but the local settle failed ({se}); the fence stands");
+                }
                 Err(LeanError::Fenced(m))
             }
             Err(e) => Err(e),
@@ -826,16 +883,25 @@ impl Syncer {
         // boundary that withholds them to the next floor tick.
         // The ack and the manifest must agree on which clock published:
         // a budget-deferred boundary reads `sentinel-deferred` in both.
+        let before = self.state.load_conflicts()?.len();
         let report = self
             .declared_barrier_as(
                 source.unwrap_or(if forced { "sentinel-deferred" } else { "sentinel" }),
             )
             .await?;
+        // Review 2026-09-12, ack-3: the boundary's own records (a
+        // `consume-dirty` the agent won, a refused removal) ride the
+        // publish ack as they ride the sync ack — AGENTS.md says so.
+        let conflicts = conflicts_since(before, self.state.load_conflicts()?);
         let units = self.charge_budget(report.published_bytes)?;
         let _ = units;
         let baseline = self.state.load_baseline()?;
+        // Review 2026-09-12, inbox-1: a boundary with a standing park does
+        // NOT carry the agent's file — `ok` promised "the boundary is in
+        // the bucket". It is `partial`, the same word the gated citation
+        // uses for the same fact, and `report.dropped` names the paths.
         Ok(Ack {
-            status: "ok".into(),
+            status: if report.parked.is_empty() { "ok".into() } else { "partial".into() },
             nonces: pending.nonces.clone(),
             sentinel_mtime_unix_ns: pending.consumed_mtime_unix_ns,
             seq: report.seq,
@@ -843,12 +909,15 @@ impl Syncer {
             boundary: if forced { "sentinel-deferred".into() } else { "sentinel".into() },
             completed_unix: now_unix(),
             observed_epoch: None,
+        reason: None,
             report: AckReport {
                 uploaded: report.uploaded.len(),
                 deleted: report.deleted.len(),
                 parked: report.parked.len(),
                 consumed: report.consumed,
                 no_change: report.no_change,
+                conflicts,
+                dropped: report.parked.clone(),
                 ..Default::default()
             },
         })
@@ -935,6 +1004,27 @@ impl Syncer {
         // its zombie tree and ack SUCCESS. The in-loop honor path
         // verifies first.
         self.verify_not_deposed_pub().await?;
+        if let Some(reason) = Self::scope_refusal(&pending.scope) {
+            // Review 2026-09-12, ack-1 / inbox-3: the refusal used to be
+            // an ERROR the loop retried every tick — never acked, never
+            // retired, and returned ahead of the publish honor and the
+            // cadence barrier, so one `{"scope":[]}` stopped every
+            // boundary for the life of the workspace. An invalid request
+            // is the agent's to fix: answered, retired, and nothing else
+            // waits on it.
+            return Ok(Ack {
+                status: "refused-scope".into(),
+                nonces: pending.nonces.clone(),
+                sentinel_mtime_unix_ns: pending.consumed_mtime_unix_ns,
+                seq: None,
+                manifest_etag: None,
+                boundary: if forced { "sentinel-deferred".into() } else { "sentinel".into() },
+                completed_unix: now_unix(),
+                observed_epoch: None,
+                reason: Some(reason),
+                report: AckReport { scope: pending.scope.clone(), ..Default::default() },
+            });
+        }
         let before = self.state.load_conflicts()?.len();
         let report = self.sync_scoped(pending.scope.clone()).await?;
         let conflicts = conflicts_since(before, self.state.load_conflicts()?);
@@ -950,6 +1040,7 @@ impl Syncer {
             boundary: if forced { "sentinel-deferred".into() } else { "sentinel".into() },
             completed_unix: now_unix(),
             observed_epoch: None,
+        reason: None,
             report: AckReport {
                 consumed: report.applied.len(),
                 deleted: report.deleted.len(),
@@ -960,6 +1051,29 @@ impl Syncer {
                 ..Default::default()
             },
         })
+    }
+
+    /// Review 2026-09-12, ack-1: an invalid sync scope is the AGENT's
+    /// error and is answered as one (`refused-scope`), never retried.
+    /// `None` = the scope is acceptable (or absent: the whole tree).
+    fn scope_refusal(scope: &Option<Vec<String>>) -> Option<String> {
+        let raw = scope.as_ref()?;
+        if raw.len() > MAX_SCOPE_ENTRIES {
+            return Some(format!(
+                "scope names {} entries; at most {MAX_SCOPE_ENTRIES} are allowed per sync",
+                raw.len()
+            ));
+        }
+        if super::sync::Scope::new(raw).is_empty() {
+            return Some(format!(
+                "scope names {} entr{} and none is valid: each must be a relative path inside the \
+                 workspace with no `.` or `..` component (an empty scope is refused, not widened \
+                 to the whole tree)",
+                raw.len(),
+                if raw.len() == 1 { "y" } else { "ies" }
+            ));
+        }
+        None
     }
 
     /// The startup settle (the uniform crash rule). Runs before the
@@ -1030,7 +1144,7 @@ impl Syncer {
                 self.refuse_pending(verb, epoch)?;
             }
         }
-        self.mark_fenced()
+        self.mark_fenced_because(epoch)
     }
 
     /// One poll tick of the sentinel arm: consume what is there, then
@@ -1054,10 +1168,23 @@ impl Syncer {
                 Ok(Some(a)) => acks.push(a),
                 Ok(None) => {}
                 Err(e @ LeanError::Fenced(_)) => {
-                    self.settle_fence().await?;
+                    if let Err(se) = self.settle_fence().await {
+                        // Review 2026-09-12, lease-1: the `?` here replaced the
+                        // FENCE with the settle's I/O error (ENOSPC on `.flint/`
+                        // is the routine one), and the run loop retried a
+                        // leaseless syncer forever behind a `live` marker.
+                        eprintln!("flint-sync: fenced, but the local settle failed ({se}); the fence stands");
+                    }
                     return Err(e);
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    // Review 2026-09-12, ack-1: a non-fence honor error is
+                    // THIS verb's problem. Returning here left the other
+                    // verb unhonoured for as long as the error recurred —
+                    // for a deterministic one, forever. The pending stands
+                    // and is retried; the tick goes on.
+                    eprintln!("flint-sync: {verb:?} honor failed (pending kept, retrying): {e}");
+                }
             }
         }
         if !acks.is_empty() {
@@ -1082,7 +1209,13 @@ impl Syncer {
     pub async fn heartbeat_tick(&mut self) -> LeanResult<()> {
         if let Err(e) = super::lease::renew(self).await {
             if matches!(e, LeanError::Fenced(_)) {
-                self.settle_fence().await?;
+                if let Err(se) = self.settle_fence().await {
+                        // Review 2026-09-12, lease-1: the `?` here replaced the
+                        // FENCE with the settle's I/O error (ENOSPC on `.flint/`
+                        // is the routine one), and the run loop retried a
+                        // leaseless syncer forever behind a `live` marker.
+                        eprintln!("flint-sync: fenced, but the local settle failed ({se}); the fence stands");
+                    }
             }
             return Err(e);
         }
@@ -1100,7 +1233,13 @@ impl Syncer {
         let mut out = FloorOutcome::default();
         if let Err(e) = super::lease::renew(self).await {
             if matches!(e, LeanError::Fenced(_)) {
-                self.settle_fence().await?;
+                if let Err(se) = self.settle_fence().await {
+                        // Review 2026-09-12, lease-1: the `?` here replaced the
+                        // FENCE with the settle's I/O error (ENOSPC on `.flint/`
+                        // is the routine one), and the run loop retried a
+                        // leaseless syncer forever behind a `live` marker.
+                        eprintln!("flint-sync: fenced, but the local settle failed ({se}); the fence stands");
+                    }
             }
             return Err(e);
         }
@@ -1128,10 +1267,21 @@ impl Syncer {
                     }
                     Ok(None) => {}
                     Err(e @ LeanError::Fenced(_)) => {
-                        self.settle_fence().await?;
+                        if let Err(se) = self.settle_fence().await {
+                        // Review 2026-09-12, lease-1: the `?` here replaced the
+                        // FENCE with the settle's I/O error (ENOSPC on `.flint/`
+                        // is the routine one), and the run loop retried a
+                        // leaseless syncer forever behind a `live` marker.
+                        eprintln!("flint-sync: fenced, but the local settle failed ({se}); the fence stands");
+                    }
                         return Err(e);
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        // Review 2026-09-12, ack-1: same rule as the poll
+                        // arm, and here the stake is the cadence barrier
+                        // below, which used to go unrun behind the error.
+                        eprintln!("flint-sync: {verb:?} honor failed on the floor (pending kept): {e}");
+                    }
                 }
             }
         }
@@ -1184,7 +1334,13 @@ impl Syncer {
                     return Ok(out);
                 }
                 Err(e @ LeanError::Fenced(_)) => {
-                    self.settle_fence().await?;
+                    if let Err(se) = self.settle_fence().await {
+                        // Review 2026-09-12, lease-1: the `?` here replaced the
+                        // FENCE with the settle's I/O error (ENOSPC on `.flint/`
+                        // is the routine one), and the run loop retried a
+                        // leaseless syncer forever behind a `live` marker.
+                        eprintln!("flint-sync: fenced, but the local settle failed ({se}); the fence stands");
+                    }
                     return Err(e);
                 }
                 Err(e) => return Err(e),
@@ -1225,7 +1381,13 @@ impl Syncer {
                     }
                     Ok(None) => {}
                     Err(e @ LeanError::Fenced(_)) => {
-                        self.settle_fence().await?;
+                        if let Err(se) = self.settle_fence().await {
+                        // Review 2026-09-12, lease-1: the `?` here replaced the
+                        // FENCE with the settle's I/O error (ENOSPC on `.flint/`
+                        // is the routine one), and the run loop retried a
+                        // leaseless syncer forever behind a `live` marker.
+                        eprintln!("flint-sync: fenced, but the local settle failed ({se}); the fence stands");
+                    }
                         return Err(e);
                     }
                     Err(e) => return Err(e),
@@ -1242,12 +1404,31 @@ impl Syncer {
             // it, and would leave the last boundary of the workspace's
             // life unstamped and unpinned.
             if self.is_gated() {
-                self.declared_lane().await?;
+                let lane = self.declared_lane().await?;
+                if !lane.parked.is_empty() {
+                    return Err(LeanError::State(format!(
+                        "drain: {} path(s) could not be published (parked on a foreign version whose \
+                         preserve failed): {:?} — not attesting",
+                        lane.parked.len(),
+                        lane.parked
+                    )));
+                }
                 let cite = self.citation_pass(super::gated::CitationSource::Drain).await?;
                 self.ticker_from(cite.seq, None)?;
             } else {
                 let r = self.declared_barrier_as("drain").await?;
                 self.ticker_from(r.observed_seq, r.observed_etag.clone())?;
+                // Review 2026-09-12, inbox-1: a drain that leaves a path
+                // parked has not published the tree; attesting it let the
+                // node remove the agent's only copy.
+                if !r.parked.is_empty() {
+                    return Err(LeanError::State(format!(
+                        "drain: {} path(s) could not be published (parked on a foreign version whose \
+                         preserve failed): {:?} — not attesting",
+                        r.parked.len(),
+                        r.parked
+                    )));
+                }
             }
         }
         Ok(acks)

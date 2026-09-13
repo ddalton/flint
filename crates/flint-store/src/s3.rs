@@ -334,8 +334,14 @@ async fn read_local(path: &std::path::Path, offset: u64, len: u64) -> StoreResul
     let pb = path.to_path_buf();
     let label = pb.display().to_string();
     tokio::task::spawn_blocking(move || -> std::io::Result<Bytes> {
-        use std::os::unix::fs::FileExt;
-        let f = std::fs::File::open(&pb)?;
+        use std::os::unix::fs::{FileExt, OpenOptionsExt};
+        // Never follow a symlink at the final component: the syncer's
+        // scan skipped symlinks and a swap after the scan must not read
+        // the link's target (flint-lean review 2026-09-12, atomicity-6).
+        let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&pb)?;
+        if !f.metadata()?.is_file() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"));
+        }
         let mut buf = vec![0u8; len as usize];
         f.read_exact_at(&mut buf, offset)?;
         Ok(Bytes::from(buf))

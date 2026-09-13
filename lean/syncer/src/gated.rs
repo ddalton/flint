@@ -65,6 +65,9 @@ pub struct PendingEntry {
     pub size: u64,
     pub mode: u32,
     pub mtime_unix: i64,
+    /// Sub-second mtime of the staged file (`scan::stat_changed`).
+    #[serde(default)]
+    pub mtime_nanos: Option<u32>,
     pub generation: u64,
     pub epoch: u64,
     /// The version this staging PUT created.
@@ -440,7 +443,7 @@ impl Syncer {
                 None => true,
                 Some(pe) => {
                     let s = &scanned[*p];
-                    pe.size != s.size || pe.mtime_unix != s.mtime_unix
+                    super::scan::stat_changed(pe.size, pe.mtime_unix, pe.mtime_nanos, s.size, s.mtime_unix, s.mtime_nanos)
                 }
             })
             .cloned()
@@ -551,6 +554,12 @@ impl Syncer {
         }
         stage.staged_absent_once = absent_now;
 
+        // A tombstone must not outlive the path's return (review
+        // 2026-09-12, gated-2): the re-stage cancel above sees only a
+        // path whose stat changed, and a file moved back under its old
+        // name has the stat it left with — its withheld delete rode
+        // into the citation and the GC deleted its object.
+        stage.withheld_deletes.retain(|p| !scanned.contains_key(p));
         // Deletes are WITHHELD until a citation pass (unchanged rule).
         for p in &classified.deletes {
             stage.withheld_deletes.insert(p.clone());
@@ -624,6 +633,7 @@ impl Syncer {
                 size: entry.size,
                 mode: entry.mode,
                 mtime_unix: entry.mtime_unix,
+                mtime_nanos: Some(scanned.mtime_nanos),
                 generation: entry.generation,
                 epoch: entry.epoch,
                 version_id: entry.version_id,
@@ -932,7 +942,9 @@ impl Syncer {
             let stale = pe.base_version_id.is_some() && cited_now != pe.base_version_id;
             if stale {
                 let still_differs = match (scanned.get(path), baseline.entries.get(path)) {
-                    (Some(s), Some(b)) => s.size != b.size || s.mtime_unix != b.mtime_unix,
+                    (Some(s), Some(b)) => {
+                        super::scan::stat_changed(b.size, b.mtime_unix, b.mtime_nanos, s.size, s.mtime_unix, s.mtime_nanos)
+                    }
                     (Some(_), None) => true,
                     _ => false,
                 };
@@ -1260,6 +1272,7 @@ impl Syncer {
                         generation: e.generation,
                         size: pe.size,
                         mtime_unix: pe.mtime_unix,
+                        mtime_nanos: pe.mtime_nanos,
                         version_id: e.version_id.clone(),
                         crc64_b64: Some(e.crc64_b64.clone()),
                     },
@@ -1285,7 +1298,16 @@ impl Syncer {
             .entries
             .iter()
             .filter(|e| {
-                baseline.entries.get(&e.path).map(|b| b.etag == e.etag || b.size == u64::MAX).unwrap_or(false)
+                // The REWRITTEN baseline no longer carries the consume-dirty
+                // sentinel for a path this citation upserted from the stage
+                // (review 2026-09-12, gated-1): that entry lost to the agent's
+                // version — cited over it — and is superseded too.
+                upserts.contains_key(&e.path)
+                    || baseline
+                        .entries
+                        .get(&e.path)
+                        .map(|b| b.etag == e.etag || b.size == u64::MAX)
+                        .unwrap_or(false)
             })
             .cloned()
             .collect();

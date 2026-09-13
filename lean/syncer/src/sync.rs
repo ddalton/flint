@@ -27,7 +27,7 @@ use serde::Serialize;
 
 use flint_store::{crc64_nvme, crc64_to_b64, GenerationStamps, PosixStamps, StoreError};
 
-use super::barrier::{mtime_of, write_file_atomic_in};
+use super::barrier::{mtime_nanos_of, mtime_of, write_file_atomic_in};
 use super::state::{BaselineEntry, ConflictRecord};
 use super::{inbox, manifest, now_unix, scan, LeanError, LeanResult, Syncer};
 
@@ -225,6 +225,7 @@ impl Syncer {
                                 .unwrap_or(0),
                             size: st.len(),
                             mtime_unix: mtime_of(&st),
+                            mtime_nanos: Some(mtime_nanos_of(&st)),
                             version_id: None,
                             crc64_b64: local_crc,
                         },
@@ -309,6 +310,7 @@ impl Syncer {
                     generation: stamps.map(|s| s.generation).unwrap_or(0),
                     size: st.len(),
                     mtime_unix: mtime_of(&st),
+                    mtime_nanos: Some(mtime_nanos_of(&st)),
                     version_id: None,
                     crc64_b64: Some(got),
                 },

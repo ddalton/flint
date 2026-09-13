@@ -26,7 +26,8 @@ to; sentinel protocol 1.
    process in this pod shares the tree. Nobody else writes to these
    files live. Contributions from outside (another party through the
    gateway, or a previous incarnation of this workspace) arrive only at a
-   boundary, and only onto files you have not modified.
+   boundary (in `gated` mode: at every cadence tick — see the last
+   section), and only onto files you have not modified.
 5. **Nothing is silent.** Every file the syncer did not take, and every
    foreign change it declined to apply over yours, is named in a record
    you can read.
@@ -51,8 +52,9 @@ The syncer's own state lives in `.flint-sync/` at the workspace root.
 Never write there. Two files in it are for you to read:
 `.flint-sync/gauges.json` (health: `state`, `boundary_mode`,
 `rpo_secs`, `last_boundary`) and `.flint-sync/conflicts.jsonl` (one
-JSON record per line for every conflict ever recorded: `path`, `kind`,
-`foreign_etag`, `preserved_key`, `at_unix`).
+JSON record per line per conflict: `path`, `kind`, `foreign_etag`,
+`preserved_key`, `at_unix`; the file rotates at 1 MiB into
+`conflicts.jsonl.1` and older records are gone — read it as you go).
 
 ### `capabilities.json`: check first, every time
 
@@ -71,8 +73,10 @@ JSON record per line for every conflict ever recorded: `path`, `kind`,
   served by a successor, or the pod is being replaced); `reason` says
   why verbs are off. Keep working on the files; a fenced syncer does not
   publish, so expect the workspace to be re-served or the pod replaced.
-- `boundary_mode` is `cadence` (no verbs), `hybrid` (the default: cadence
-  plus the verbs) or `gated` (see the last section).
+- `boundary_mode` is `cadence`, `hybrid` (the default) or `gated` (see
+  the last section). The verbs work in all three; the mode names how a
+  boundary is made (one fused barrier in the first two, a staging lane
+  plus a citation in `gated`).
 
 ## `publish`: declare a coherent point
 
@@ -83,7 +87,8 @@ Write `.flint/publish`. Either an empty file, or a JSON body:
 ```
 
 `nonce` is any string you choose (at most 128 bytes) so you can find your
-answer; `note` is free text (at most 4 KiB). **Write the body atomically**:
+answer — use a fresh one for every touch, since a reused nonce matches
+the previous ack; `note` is free text (at most 4 KiB). **Write the body atomically**:
 write to a temporary name inside `.flint/` and rename it onto
 `.flint/publish`. The syncer consumes the file by renaming it away, and a
 plain write racing that rename can leave a torn body (which is then
@@ -101,9 +106,12 @@ next one overwrites it. Match your own answer by one of two rules:
 
 - your `nonce` is in `nonces` (the list is bounded at 32; under a storm
   of touches the oldest are dropped), or
-- `sentinel_mtime_unix_ns` is at least the time of your touch. A later
-  boundary strictly contains an earlier one, so an ack for a touch after
-  yours covers yours.
+- `sentinel_mtime_unix_ns` is at least the time of your touch, where
+  "the time of your touch" is the mtime `stat` reports for the file you
+  renamed into place (or for the temp file just before the rename) — not
+  a wall-clock reading taken before writing, which a filesystem's mtime
+  clock can lag by a tick. A later boundary strictly contains an earlier
+  one, so an ack for a touch after yours covers yours.
 
 ```sh
 printf '{"nonce":"task-42"}' > .flint/.publish.tmp && mv .flint/.publish.tmp .flint/publish
@@ -121,24 +129,37 @@ The ack:
   "seq": 17, "manifest_etag": "\"…\"", "boundary": "sentinel",
   "completed_unix": 0,
   "report": { "uploaded": 3, "deleted": 1, "parked": 0, "consumed": 0,
-              "no_change": false, "dropped": [] } }
+              "no_change": false, "conflicts": [] } }
 ```
+
+Empty lists (`conflicts`, `dropped`, `applied`) are omitted from the
+JSON, not written as `[]`.
 
 - `status: "ok"` — **the boundary is in the bucket**, under manifest
   `seq`. Not queued, not scheduled. `uploaded: 0` with `no_change: true`
   is still an honest ok: nothing had changed since the last boundary.
-- `status: "partial"` (gated mode only) — the boundary installed, but
-  the paths in `report.dropped` are not in it. Treat it as a failure for
-  those paths and touch again.
+- `status: "partial"` — the boundary installed, but the paths in
+  `report.dropped` are not in it: in gated mode a foreign write raced
+  the citation; in any mode a path met a newer foreign version the
+  syncer could not preserve (`report.parked` counts them). Treat it as a
+  failure for those paths and touch again.
 - `status: "refused-fenced"` — this syncer lost its lease
   (`observed_epoch` names the winner) and cannot publish. Stop touching
   sentinels; `capabilities.json` is now `fenced`.
-- `boundary: "sentinel-deferred"` — you exceeded the hourly budget; the
-  boundary was still honoured in full, by the next cadence tick.
-- `report.parked` — files whose upload was refused because the bucket
-  held a newer foreign version; each is a `upload-412-parked` conflict
-  record. `report.consumed` — foreign writes integrated into your tree
-  at this boundary (see "foreign changes").
+- `boundary: "sentinel-deferred"` — your touch was honoured by the
+  cadence tick rather than at once: it arrived inside
+  `sentinel_min_interval_secs` of the previous boundary, or the hourly
+  budget was spent. Honoured in full either way. `boundary: "drain"` —
+  the syncer was stopping (the pod is shutting down) and honoured your
+  touch as part of its final boundary.
+- `report.parked` — paths whose upload met a newer foreign version the
+  syncer could not preserve; they are not in this boundary (`status` is
+  `partial` and `report.dropped` names them) and are retried at the
+  next. In the normal case the foreign version IS preserved and your
+  version is published over it, with an `upload-412-preserved` record
+  naming the preserved copy. `report.consumed` — foreign writes
+  integrated into your tree at this boundary (see "foreign changes").
+  `report.conflicts` — the conflict records this boundary wrote.
 
 Rate limits, enforced by the syncer, never by you: at most one
 sentinel boundary per `sentinel_min_interval_secs` (touches inside the
@@ -172,8 +193,12 @@ empty, or `{"nonce": "…", "scope": ["inputs/", "shared/config.json"]}`.
 Without `scope` the whole tree is reconciled to the bucket's latest
 manifest; with `scope` (up to 64 prefixes or exact paths, matched on
 whole path components) only those paths are, and everything else keeps
-flowing through the ordinary boundary path. The rules are the same
-either way:
+flowing through the ordinary boundary path. An empty or invalid scope
+(no entry that is a relative path without `.` or `..`, or more than 64)
+is answered with `status: "refused-scope"` and a `reason`: nothing was
+done, fix the scope and touch again. A touch without `scope` that
+coalesces with a scoped one is honoured as the whole tree. The rules
+are the same either way:
 
 - remote adds, changes and deletes are applied **only to paths you have
   not modified since the last boundary**;
@@ -205,11 +230,10 @@ acks and `conflicts.jsonl` before assuming a path is the latest.
   directories are not tracked: a fresh checkout will not have them.
   Sockets, FIFOs and devices are ignored.
 - **A file has changed if its size or its mtime differs** from the last
-  boundary. mtime is compared at one-second granularity. So never
-  preserve or restore timestamps after editing (`cp -p`, `touch -d`,
-  `rsync -t`): a rewrite to the same size that keeps the old mtime is
-  invisible until the file changes again. Plain editors and `cp` are
-  fine.
+  boundary (mtime to the nanosecond). So never preserve or restore
+  timestamps after editing (`cp -p`, `touch -d`, `rsync -t`): a rewrite
+  to the same size that keeps the old mtime is invisible until the file
+  changes again. Plain editors and `cp` are fine.
 - **A delete is published** once the path is absent from two consecutive
   scans, and a declared boundary (`publish`) takes the second look at
   once: `rm` then `publish` deletes it in the bucket.
@@ -236,7 +260,7 @@ Do not:
 
 - write anything under `.flint/` other than `publish` and `sync`, or
   anything at all under `.flint-sync/`;
-- wait on `publish.ack` merely existing;
+- wait on `publish.ack` merely existing, or reuse a nonce;
 - touch sentinels in a loop, or expect a boundary faster than
   `sentinel_min_interval_secs`;
 - preserve timestamps when copying edited files into the tree;
@@ -250,6 +274,9 @@ Do not:
 
 Uploads are staged continuously but become *visible* to readers only
 when a boundary is cited: your `publish` touch, or a lag cap the operator
-set. A publish ack can be `partial` with `report.dropped` naming paths
-the citation could not carry (a foreign write raced it); touch again for
-those. Everything else above is unchanged.
+set. Foreign writes (the inbox) are applied onto your unmodified files
+at every cadence tick — the staging lane — not only at a citation. A
+publish ack can be `partial` with `report.dropped` naming paths the
+citation could not carry (a foreign write raced it); touch again for
+those. A park in this mode is recorded as `stage-412-parked`. Everything
+else above is unchanged.

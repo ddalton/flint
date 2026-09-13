@@ -14,6 +14,87 @@ covered by the stability guarantee.
 
 ### Added
 
+- **lean: the protocol review — one CRITICAL, seven HIGH and eight
+  MEDIUM defects fixed before the agent contract ships
+  (`docs/plans/flint-lean-protocol-review-2026-09-12.md`).** Five
+  adversarial reviews of the syncer's protocol against the contract in
+  `.flint/AGENTS.md` — every sentence of which is a promise to an agent
+  with no other API — each reproduced first by a test that fails at
+  `33abb284`, then fixed, then mutation-checked. The commit point (the
+  manifest CAS) held; the edges around it did not:
+  - *The manifest cited the scanned size while the upload carried the
+    file as it stood at read time* (CRITICAL). A file that grew during a
+    cadence tick — a checkpoint being streamed — was cited short, and
+    every fresh checkout of that entry over 16 MiB failed its CRC fold:
+    the successor pod exited 1 in a loop with the bytes intact in the
+    bucket. The manifest now cites the uploaded length. Live-tested on
+    runcu (§Live in the review).
+  - *One invalid `sync` scope stopped every boundary for the life of the
+    workspace.* The scope refusal added on 2026-09-03 returned an error
+    the sentinel loop retried every tick: never acked, never retired,
+    and returned ahead of the publish honor AND the cadence barrier. An
+    invalid request is now the agent's error — a new ack status
+    `refused-scope` with a `reason`, retired at once — and both ticks
+    continue past a non-fence honor error. A scoped touch coalesced with
+    an unscoped one is honoured as the whole tree (it was silently
+    narrowed); an oversize scope is refused (its tail was silently
+    dropped).
+  - *A same-size rewrite inside the scan's second was invisible forever*
+    — the make/rsync trap, with no timestamp preservation needed. mtime
+    is compared to the nanosecond; baselines written before this compare
+    at seconds until each entry is next rewritten, so an upgrade
+    re-uploads nothing.
+  - *A path parked on a foreign version never un-parked*: every later
+    ack said `ok` with `parked: n`, and the drain attested success so
+    the node removed the tree with the agent's only copy. A 412 against
+    a foreign version is now the consume-dirty rule at upload time — the
+    foreign bytes are preserved (`upload-412-preserved`), the agent's
+    version is published over them; only a failed preserve still parks,
+    and then the ack is `partial` with the path in `report.dropped` and
+    the drain refuses to attest. A crashed compose of a > 64 MiB file
+    parked the same way because the compose 412 recognizer ignored the
+    crash journal; and a 412 whose object had vanished failed the whole
+    barrier forever — now a create.
+  - *The consume overwrote an agent write that landed during its fetch*
+    (a network round trip between the dirty stat and the rename), with
+    no record: the stat is repeated after the fetch, and a write in the
+    window takes the dirty path.
+  - *A file swapped for a symlink between the scan and the upload
+    published the link's target* — a file outside the workspace, the
+    syncer's own `/proc/self/environ` included. Every upload read is
+    now `O_NOFOLLOW` with a regular-file check; a swapped path is
+    refused, recorded (`upload-refused-not-regular`) and deferred.
+  - *Gated mode*: a consume-dirty inbox entry was never dropped after the
+    citation that superseded it and was consumed a second time over the
+    agent's published edit; a withheld tombstone survived a file's
+    same-stat return and the GC deleted its object. Both fixed.
+  - *Lease edges*: a fence whose local settle failed (ENOSPC on `.flint/`)
+    replaced the fence with the settle's error and left a leaseless
+    syncer running behind a `live` marker; adopting a lost-renew token
+    wrote nothing, so a waiting challenger could count a live holder
+    dead; a lost acquire response (or a rotation that failed after the
+    acquire) skipped the takeover rotation because self-recognition was
+    keyed on `holder_id` alone; a raw touch during a restarted claimant's
+    wait was never consumed or refused and the predecessor's `live`
+    marker stood. All four fixed.
+  - Also: `.flint-sync/` is refused by containment as `.flint/` is (a
+    planted citation could be materialised into the state directory);
+    a crash-orphaned `*.flint-sync-tmp` is never scanned; a fenced marker
+    carries a `reason`; publish acks carry `report.conflicts`; the
+    operator's stale-upload sweep no longer aborts uploads whose
+    `Initiated` the store omits.
+  - The contract (`.flint/AGENTS.md`) is corrected where the code
+    disagreed with it: `sentinel-deferred` and `drain`, the verbs in
+    `cadence` mode, `conflicts.jsonl` rotation, empty lists omitted, the
+    mtime rule's clock, fresh nonces, the gated lane applying the inbox
+    every tick, `stage-412-parked`, and the two new statuses.
+  - Deferred with reasons in the review: a crash between the manifest
+    CAS and the window clear against a second manifest writer
+    (barrier-7), the legacy-manifest migration fence (mixed-version
+    rollouts only), a node clock behind the store's, and two LOW
+    bookkeeping edges.
+  `flint-lean` 0.3.0 → 0.4.0.
+
 - **lean: the agent contract is a file the syncer writes into the mount
   — `.flint/AGENTS.md`.** flint-lean has no client library and no API: an
   agent interacts with a workspace entirely through files (`.flint/publish`,

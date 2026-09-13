@@ -23,6 +23,10 @@ pub struct BaselineEntry {
     pub generation: u64,
     pub size: u64,
     pub mtime_unix: i64,
+    /// Sub-second mtime, when this entry was written by a syncer that
+    /// stamps it; `None` compares as "unknown" (`scan::stat_changed`).
+    #[serde(default)]
+    pub mtime_nanos: Option<u32>,
     /// CRC-64/NVME (wire form) of the object bytes this syncer
     /// integrated at this path — computed from the bytes it wrote or
     /// uploaded, never from a HEAD. A citation repair cites it, which

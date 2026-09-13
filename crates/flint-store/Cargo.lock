@@ -742,6 +742,7 @@ dependencies = [
  "hyper 1.11.0",
  "hyper-rustls 0.27.9",
  "hyper-util",
+ "libc",
  "rustls 0.23.43",
  "serde",
  "serde_json",

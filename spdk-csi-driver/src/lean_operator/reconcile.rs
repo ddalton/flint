@@ -112,10 +112,16 @@ pub async fn sweep_stale_uploads(
         .unwrap_or(0);
     let mut aborted = 0;
     for up in store.list_uploads(prefix).await? {
+        // A store that cannot date its uploads gets a leak, never an
+        // aborted LIVE publish: `unwrap_or(true)` swept every in-progress
+        // compose on such a backend on every reconcile, and a compose
+        // longer than the reconcile interval never completed (protocol
+        // review 2026-09-12, atomicity-9 / audit csi-6). Real S3 always
+        // returns `Initiated`; the lifecycle rule is the backstop there.
         let old_enough = up
             .initiated_unix
             .map(|t| now.saturating_sub(t) >= min_age_secs)
-            .unwrap_or(true);
+            .unwrap_or(false);
         if old_enough {
             store.abort_upload(&up.key, &up.upload_id).await?;
             aborted += 1;

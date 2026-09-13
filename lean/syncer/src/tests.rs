@@ -492,10 +492,14 @@ async fn adopt_own_412_converges_without_conflict() {
     assert!(m.manifest.entries.contains_key("big.bin"));
 }
 
-/// A foreign 412 parks the path — the inherited LOCAL-WINS overwrite is
-/// exactly what lean must NOT do (LeanLocalWins.cfg's counterexample).
+/// A foreign 412 is the consume-dirty rule met at upload time: the
+/// foreign bytes are PRESERVED and recorded, then the agent's version is
+/// published over them. The inherited LOCAL-WINS overwrite — silent, the
+/// foreign write gone — is exactly what lean must NOT do
+/// (LeanLocalWins.cfg's counterexample); the park it was replaced with
+/// had no way out (review 2026-09-12, inbox-1). Preservation keeps both.
 #[tokio::test]
-async fn foreign_412_parks_never_overwrites() {
+async fn foreign_412_is_preserved_and_superseded_never_silently_overwritten() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
     let mut sc = syncer(&store, dir.path()).await;
@@ -520,19 +524,27 @@ async fn foreign_412_parks_never_overwrites() {
 
     write(dir.path(), "f.txt", "agent bytes");
     let r = sc.run_barrier().await.unwrap();
-    assert_eq!(r.parked, vec!["f.txt".to_string()]);
-    assert!(r.uploaded.is_empty());
+    assert!(r.parked.is_empty(), "parked with no way out: {:?}", r.parked);
+    assert_eq!(r.uploaded, vec!["f.txt".to_string()]);
 
-    // The foreign bytes are UNTOUCHED and the conflict is surfaced.
+    // The agent's version is current and cited...
     let (meta, body) = store.get_whole(&sc.cfg.file_key("f.txt"), None).await.unwrap();
-    assert_eq!(meta.etag, foreign.etag);
-    assert_eq!(&body[..], b"foreign bytes");
-    let conflicts = sc.state.load_conflicts().unwrap();
-    assert!(conflicts.iter().any(|c| c.kind == "upload-412-parked" && c.path == "f.txt"));
-    // And the manifest does not lie about the path (no citation of a
-    // generation we never published).
+    assert_ne!(meta.etag, foreign.etag);
+    assert_eq!(&body[..], b"agent bytes");
     let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
-    assert!(!m.manifest.entries.contains_key("f.txt"));
+    assert_eq!(m.manifest.entries["f.txt"].etag, meta.etag);
+    // ...and the foreign bytes are not lost: preserved, and the record
+    // says where.
+    let rec = sc
+        .state
+        .load_conflicts()
+        .unwrap()
+        .into_iter()
+        .find(|c| c.kind == "upload-412-preserved" && c.path == "f.txt")
+        .expect("no record surfaces the foreign write");
+    assert_eq!(rec.foreign_etag, foreign.etag);
+    let (_, kept) = store.get_whole(&rec.preserved_key.expect("not preserved"), None).await.unwrap();
+    assert_eq!(&kept[..], b"foreign bytes", "the preserved copy is not the foreign version");
 }
 
 /// The GC HEAD-guard: a delete-eligible key whose current ETag the
@@ -946,6 +958,7 @@ async fn legacy_flint_citation_survives_upgrade() {
             generation: 1,
             size: meta.size,
             mtime_unix: 0,
+            mtime_nanos: None,
             version_id: None,
             crc64_b64: meta.crc64_b64.clone(),
         },
@@ -2025,8 +2038,11 @@ async fn a_restarted_claimant_that_can_never_honor_says_so_instead_of_stranding(
 
 /// The other half of the same rule: a FRESH replacement pod waiting out
 /// its 60 s of quiet polls is healthy, not fenced. Nothing is owed in a
-/// fresh emptyDir, so it must take none of this — or every rolling
-/// restart would mark itself fenced on the way up.
+/// fresh emptyDir and no marker stands in it (the marker is written
+/// after the claim), so it must take none of this — or every rolling
+/// restart would mark itself fenced on the way up. (A tree that DOES
+/// carry a predecessor's live marker is the restarted case:
+/// `a_waiting_claimant_refuses_a_raw_touch_and_flips_the_marker`.)
 #[tokio::test]
 async fn a_healthy_replacement_waiting_out_quiet_polls_is_not_marked_fenced() {
     let store = Arc::new(MemoryStore::new());
@@ -2037,8 +2053,6 @@ async fn a_healthy_replacement_waiting_out_quiet_polls_is_not_marked_fenced() {
 
     let dir_b = tempfile::tempdir().unwrap();
     let mut b = syncer(&store, dir_b.path()).await;
-    let posture = b.sentinel_preflight().unwrap();
-    b.write_capabilities(&posture, false).unwrap();
     // B is fresh and A still holds: B waits.
     assert!(
         matches!(lease::claim_step(&mut b).await.unwrap(), lease::ClaimOutcome::Waiting { .. }),
@@ -2048,11 +2062,10 @@ async fn a_healthy_replacement_waiting_out_quiet_polls_is_not_marked_fenced() {
     let answered = b.refuse_what_this_incarnation_can_never_honor().await.unwrap();
     assert!(!answered, "a healthy replacement marked itself fenced on the way up");
     assert!(b.read_ack(Verb::Publish).is_none(), "a refused ack appeared with nothing owed");
-    let caps: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(dir_b.path().join(".flint").join("capabilities.json")).unwrap(),
-    )
-    .unwrap();
-    assert_ne!(caps["state"], "fenced", "a healthy replacement was marked fenced");
+    assert!(
+        !dir_b.path().join(".flint").join("capabilities.json").exists(),
+        "a healthy replacement wrote a marker on the way up"
+    );
     // And it still takes over on schedule.
     assert!(claim_until_held(&mut b, 10).await, "the refusal path blocked a legitimate takeover");
 }
@@ -2452,6 +2465,7 @@ async fn the_reaper_reclaims_only_the_version_its_own_record_names() {
         size: 2,
         mode: 0o644,
         mtime_unix: 0,
+        mtime_nanos: None,
         generation: 3,
         epoch: 1,
         version_id: None,
@@ -4504,6 +4518,7 @@ async fn a_gated_ack_never_claims_a_path_the_citation_dropped() {
         note: None,
         scope: None,
         torn: false,
+        whole_tree: false,
     };
     let lane = super::gated::LaneReport {
         staged: vec!["p".into(), "q".into()],
@@ -8220,10 +8235,13 @@ async fn a_lost_renew_response_does_not_self_fence() {
     lease::renew(&mut a)
         .await
         .expect("a renew whose previous response was lost is not a deposal");
+    // The holder's token is the cell's — which the adoption's own renew
+    // has moved past `landed` (review 2026-09-12, lease-2).
+    let cell = store.epoch_read(&key).await.unwrap().unwrap().token;
     assert_eq!(
         a.lease.as_ref().map(|l| l.token.as_str()),
-        Some(landed.as_str()),
-        "the holder did not adopt the token its own landed renew minted"
+        Some(cell.as_str()),
+        "the holder did not adopt the cell's token after its lost renew"
     );
     a.verify_not_deposed_pub().await.unwrap();
 
@@ -10896,3 +10914,953 @@ async fn a_consumed_hitl_write_survives_pod_replacement_before_the_cas() {
     assert!(inbox::load(inner.as_ref(), &b.cfg).await.unwrap().doc.entries.is_empty(), "and then dropped");
 }
 
+
+// ── protocol review 2026-09-12: reproductions ───────────────────────
+//
+// Each test below was written to FAIL at `33abb284` against the finding
+// it names (docs/plans/flint-lean-protocol-review-2026-09-12.md), then
+// pass with the fix. The failing run is the reproduction.
+
+/// ack-1 / inbox-3. A `.flint/sync` touch whose scope names no valid
+/// entry (`[]`, `["/"]`, `["../x"]`) folded into a pending record whose
+/// honor is a deterministic error — never acked, never retired, and
+/// returned BEFORE the publish honor, so one touch stopped every
+/// boundary for the life of the workspace. The scope refusal was a fix
+/// ("an error must not return a legal value") shipped without its
+/// callers. An invalid request is the agent's error: it is ACKED as
+/// such and retired, and the publish behind it is still honoured.
+#[tokio::test]
+async fn an_invalid_sync_scope_is_acked_refused_and_never_wedges_publish() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.cfg.sentinel_min_interval_secs = 0;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture, false).unwrap();
+
+    touch_sentinel(dir.path(), control::SYNC, r#"{"nonce":"s1","scope":[]}"#);
+    a.sentinel_tick().await.expect("an invalid scope is the agent's error, not the syncer's");
+    let ack = a.read_ack(Verb::Sync).expect("no sync ack: the agent waits forever");
+    assert_eq!(ack.status, "refused-scope");
+    assert!(ack.nonces.contains(&"s1".to_string()), "the refusal does not name the agent's nonce");
+    assert!(
+        ack.reason.as_deref().unwrap_or("").contains("scope"),
+        "the refusal must say WHY: {:?}",
+        ack.reason
+    );
+    assert!(
+        a.load_pending(Verb::Sync).unwrap().is_none(),
+        "the pending record stood: every later tick repeats the same error"
+    );
+
+    // THE WEDGE: a publish declared after the bad sync is still honoured.
+    write(dir.path(), "b.txt", "b");
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"p1"}"#);
+    a.sentinel_tick().await.unwrap();
+    let ack = a.read_ack(Verb::Publish).expect("no publish ack after a refused sync");
+    assert_eq!(ack.status, "ok");
+    assert!(ack.nonces.contains(&"p1".to_string()));
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("b.txt"), "the boundary the agent declared never reached the bucket");
+}
+
+/// ack-1, the floor half: a standing pending whose honor fails must not
+/// stop the CADENCE barrier — the floor tick returned on the sync error
+/// before the barrier ran, so nothing published on the cadence either.
+#[tokio::test]
+async fn a_refused_sync_pending_does_not_stop_the_cadence_barrier() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture, false).unwrap();
+
+    touch_sentinel(dir.path(), control::SYNC, r#"{"nonce":"s1","scope":["../escape"]}"#);
+    assert!(a.consume_sentinel(Verb::Sync).unwrap());
+    write(dir.path(), "c.txt", "c");
+    a.floor_tick().await.expect("a refused pending must not fail the floor tick");
+    assert_eq!(a.read_ack(Verb::Sync).map(|k| k.status), Some("refused-scope".into()));
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("c.txt"), "the cadence barrier never ran behind the refused sync");
+}
+
+/// inbox-7. Coalescing folded scopes by UNION and left `None` alone, so
+/// an unscoped touch ("the whole tree") coalesced with a scoped one was
+/// honoured as the scoped one, and the whole-tree agent matched its
+/// nonce on an ack for a sync that reconciled one directory.
+#[tokio::test]
+async fn an_unscoped_sync_touch_widens_a_coalesced_scope_to_the_whole_tree() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+
+    // Scoped first, then unscoped.
+    touch_sentinel(dir.path(), control::SYNC, r#"{"nonce":"b","scope":["x/"]}"#);
+    assert!(a.consume_sentinel(Verb::Sync).unwrap());
+    touch_sentinel(dir.path(), control::SYNC, r#"{"nonce":"a"}"#);
+    assert!(a.consume_sentinel(Verb::Sync).unwrap());
+    let p = a.load_pending(Verb::Sync).unwrap().unwrap();
+    assert!(p.scope.is_none(), "an unscoped touch was narrowed to {:?}", p.scope);
+    assert_eq!(p.nonces, vec!["b".to_string(), "a".to_string()]);
+    a.sentinel_tick().await.unwrap();
+    assert!(a.load_pending(Verb::Sync).unwrap().is_none());
+
+    // Unscoped first, then scoped: the later scope must not narrow it.
+    touch_sentinel(dir.path(), control::SYNC, r#"{"nonce":"c"}"#);
+    assert!(a.consume_sentinel(Verb::Sync).unwrap());
+    touch_sentinel(dir.path(), control::SYNC, r#"{"nonce":"d","scope":["y/"]}"#);
+    assert!(a.consume_sentinel(Verb::Sync).unwrap());
+    let p = a.load_pending(Verb::Sync).unwrap().unwrap();
+    assert!(p.scope.is_none(), "a later scoped touch narrowed a whole-tree request to {:?}", p.scope);
+}
+
+/// ack-3 / atomicity-8 / inbox-6. AGENTS.md tells the agent to read
+/// `report.conflicts` on its acks; only the sync honor filled it. A
+/// `consume-dirty` recorded by the publish's own boundary reached the
+/// agent only through `conflicts.jsonl`.
+#[tokio::test]
+async fn a_publish_ack_carries_the_boundarys_conflict_records() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.cfg.sentinel_min_interval_secs = 0;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture, false).unwrap();
+    write(dir.path(), "shared.txt", "v1");
+    a.run_barrier().await.unwrap();
+
+    // The agent edits; someone else writes the same path from outside.
+    write(dir.path(), "shared.txt", "the agent's longer edit");
+    hitl_write(&store, &a.cfg, "shared.txt", "UI", "ui").await.unwrap();
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"p1"}"#);
+    a.sentinel_tick().await.unwrap();
+    let ack = a.read_ack(Verb::Publish).expect("no publish ack");
+    assert_eq!(ack.status, "ok");
+    assert!(
+        ack.report.conflicts.iter().any(|c| c.path == "shared.txt" && c.kind == "consume-dirty"),
+        "the publish ack carries no conflict record for the path the agent won: {:?}",
+        ack.report.conflicts
+    );
+}
+
+/// atomicity-4. The scan compares mtime at whole seconds. A same-size
+/// rewrite inside the second the baseline recorded is invisible until
+/// the file changes size or second: the bucket stays stale under an
+/// `ok` ack, a foreign consume overwrites the edit as "clean", a
+/// declared removal unlinks it. The classic make/rsync trap, and it
+/// needs no timestamp preservation by the agent — an editor that saves
+/// twice in a second does it. Nanosecond mtime closes it.
+#[tokio::test]
+async fn a_same_size_rewrite_within_the_scan_second_is_still_published() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "status.json", r#"{"ok":1}"#);
+    write(dir.path(), "other.txt", "untouched");
+    a.run_barrier().await.unwrap();
+
+    // Same size, same second (half a second later), different bytes.
+    let sec = a.state.load_baseline().unwrap().entries["status.json"].mtime_unix;
+    write(dir.path(), "status.json", r#"{"ok":2}"#);
+    let f = std::fs::OpenOptions::new().write(true).open(dir.path().join("status.json")).unwrap();
+    f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::new(sec as u64, 500_000_000)).unwrap();
+    drop(f);
+
+    let r = a.run_barrier().await.unwrap();
+    assert!(
+        r.uploaded.contains(&"status.json".to_string()),
+        "the rewrite was invisible: uploaded={:?} no_change={}",
+        r.uploaded,
+        r.no_change
+    );
+    // THE OTHER ARM SHUT: the untouched file is not re-uploaded.
+    assert!(!r.uploaded.contains(&"other.txt".to_string()), "nanosecond compare re-uploads everything");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let (_, body) = store.get_whole(&a.cfg.file_key("status.json"), Some(&m.entries["status.json"].etag)).await.unwrap();
+    assert_eq!(&body[..], br#"{"ok":2}"#);
+}
+
+/// inbox-5. A 412 whose follow-up HEAD finds NO object (the base object
+/// is gone: a bucket-level delete, or our own GC after a crash between
+/// the CAS and the baseline rewrite) propagated as the barrier's error
+/// — every barrier, forever, and every publish touch consumed and never
+/// acked. A vanished base is a fresh create.
+#[tokio::test]
+async fn a_412_on_a_vanished_object_recreates_instead_of_failing_forever() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "x.txt", "v1");
+    a.run_barrier().await.unwrap();
+
+    store.delete(&a.cfg.file_key("x.txt")).await.unwrap();
+    write(dir.path(), "x.txt", "v2, longer than before");
+    let r = a.run_barrier().await.expect("a vanished base object failed the whole barrier");
+    assert!(r.uploaded.contains(&"x.txt".to_string()), "the edit was not published: {r:?}");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let (_, body) = store.get_whole(&a.cfg.file_key("x.txt"), Some(&m.entries["x.txt"].etag)).await.unwrap();
+    assert_eq!(&body[..], b"v2, longer than before");
+}
+
+/// inbox-8. Containment refused `.flint/` and nothing else: a citation
+/// naming `.flint-sync/scope-intent.json` (a manifest installed through
+/// the gateway's CAS door) was materialised INTO the state directory by
+/// checkout, sync and rescope, and replayed at the next barrier's step 0.
+#[test]
+fn containment_refuses_the_state_directory_too() {
+    let dir = tempfile::tempdir().unwrap();
+    super::barrier::contained_path(dir.path(), ".flint/x").expect_err("the control namespace must be refused");
+    super::barrier::contained_path(dir.path(), ".flint-sync/scope-intent.json")
+        .expect_err("the state directory must be refused");
+    super::barrier::contained_path(dir.path(), ".flint-sync").expect_err("the state directory itself");
+    // THE OTHER ARM SHUT: ordinary paths, including look-alikes, pass.
+    super::barrier::contained_path(dir.path(), "ok/x").expect("an ordinary path");
+    super::barrier::contained_path(dir.path(), ".flint-syncer/notes").expect("a look-alike is not the state dir");
+}
+
+/// atomicity-7. A consume that crashed between `create_exclusive` and
+/// `rename` left `<name>.flint-sync-tmp` as a regular file in the tree;
+/// the next scan published it. The temp suffix is never scanned.
+#[tokio::test]
+async fn an_orphaned_consume_temp_is_never_published() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "a.txt", "real");
+    write(dir.path(), "a.txt.flint-sync-tmp", "torn consume leftover");
+    let r = a.run_barrier().await.unwrap();
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("a.txt"));
+    assert!(
+        !m.entries.contains_key("a.txt.flint-sync-tmp") && !r.uploaded.iter().any(|p| p.ends_with(".flint-sync-tmp")),
+        "a crash-orphaned temp was published as data: {:?}",
+        r.uploaded
+    );
+}
+
+/// gated-7. AGENTS.md: "`reason` says why verbs are off". A fenced marker
+/// carried no `reason` at all.
+#[tokio::test]
+async fn a_fenced_marker_says_why() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture, false).unwrap();
+    touch_sentinel(dir_a.path(), control::PUBLISH, r#"{"nonce":"n"}"#);
+    assert!(a.consume_sentinel(Verb::Publish).unwrap());
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = syncer(&store, dir_b.path()).await;
+    assert!(claim_until_held(&mut b, 10).await);
+    assert!(matches!(lease::claim_step(&mut a).await.unwrap(), lease::ClaimOutcome::Waiting { .. }));
+    assert!(a.refuse_what_this_incarnation_can_never_honor().await.unwrap());
+    let caps = a.read_capabilities().expect("no marker");
+    assert_eq!(caps.state, "fenced");
+    let reason = caps.reason.expect("a fenced marker must say why");
+    assert!(reason.contains("epoch"), "the reason names no fencer: {reason}");
+}
+
+/// lease-2. Adopting a lost-renew token wrote nothing, so the cell's
+/// token stood still for a full takeover threshold and a waiting
+/// challenger could depose a live holder whose next write was late. The
+/// adoption is followed by one renew so the token moves.
+#[tokio::test]
+async fn adopting_a_lost_renew_token_moves_the_cell() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    let key = a.cfg.epoch_key();
+    let stale = a.lease.clone().unwrap();
+    store.epoch_renew(&key, &stale, None).await.unwrap();
+    let landed = store.epoch_read(&key).await.unwrap().unwrap().token;
+    lease::renew(&mut a).await.expect("a lost renew response is not a deposal");
+    let now = store.epoch_read(&key).await.unwrap().unwrap().token;
+    assert_ne!(now, landed, "the adoption wrote nothing: a challenger's quiet count keeps climbing");
+    assert_eq!(a.lease.as_ref().map(|l| l.token.as_str()), Some(now.as_str()), "the holder's token is not the cell's");
+    a.verify_not_deposed_pub().await.unwrap();
+}
+
+// ── protocol review 2026-09-12: reproductions needing a store that can act
+// INSIDE the barrier's windows ───────────────────────────────────────────
+
+type Hook = Box<dyn Fn() + Send + Sync>;
+
+/// A store that lets a test act inside the syncer's windows: between the
+/// scan and the upload (the inbox window-open PUT), inside a consume's
+/// fetch, at a torn compose or acquire response, at a failed preserve.
+#[derive(Default)]
+struct Hooks {
+    /// Run ONCE, before the first `put_whole` whose key ends with the suffix.
+    before_put: std::sync::Mutex<Option<(String, Hook)>>,
+    /// Run ONCE, after `get_whole` fetched a key ending with the suffix and
+    /// before the body is returned to the syncer.
+    before_get_return: std::sync::Mutex<Option<(String, Hook)>>,
+    /// `compose_generation` delegates (the object LANDS) and then reports a
+    /// torn response, once.
+    compose_err_once: std::sync::atomic::AtomicBool,
+    /// `epoch_acquire` delegates (the acquire LANDS) and then reports a lost
+    /// response, once.
+    acquire_err_once: std::sync::atomic::AtomicBool,
+    /// `copy_object` fails while set.
+    copy_fail: std::sync::atomic::AtomicBool,
+    /// `put_whole` fails for every key containing this (the conflict
+    /// preserve is a GET + guarded PUT under `.flint/lean/conflicts/`).
+    put_fail_containing: std::sync::Mutex<Option<String>>,
+}
+
+struct Hooked(Arc<MemoryStore>, Hooks);
+
+impl Hooked {
+    fn before_put(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {
+        *self.1.before_put.lock().unwrap() = Some((key.to_string(), Box::new(f)));
+    }
+    fn before_get_return(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {
+        *self.1.before_get_return.lock().unwrap() = Some((key.to_string(), Box::new(f)));
+    }
+}
+
+fn take_hook(slot: &std::sync::Mutex<Option<(String, Hook)>>, key: &str) -> Option<Hook> {
+    let mut g = slot.lock().unwrap();
+    if g.as_ref().map(|(suf, _)| key.ends_with(suf.as_str())).unwrap_or(false) {
+        g.take().map(|(_, h)| h)
+    } else {
+        None
+    }
+}
+
+fn hooked_syncer(store: &Arc<Hooked>, root: &std::path::Path) -> Syncer {
+    let cfg = cfg_for(root);
+    Syncer {
+        store: store.clone() as Arc<dyn ObjectStore>,
+        state: SyncerState::open(cfg.state_dir()).unwrap(),
+        cfg,
+        lease: None,
+        noted_not_regular: Default::default(),
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for Hooked {
+    async fn copy_object(
+        &self,
+        src_key: &str,
+        src_if_match: Option<&str>,
+        dst_key: &str,
+        condition: &PutCondition,
+        stamps: &GenerationStamps,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        if self.1.copy_fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(flint_store::StoreError::Other("injected: preserve copy failed".into()));
+        }
+        self.0.copy_object(src_key, src_if_match, dst_key, condition, stamps).await
+    }
+    async fn put_whole(
+        &self,
+        key: &str,
+        body: Bytes,
+        cond: &PutCondition,
+        stamps: &GenerationStamps,
+        crc: u64,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        if let Some(h) = take_hook(&self.1.before_put, key) {
+            h();
+        }
+        if let Some(needle) = self.1.put_fail_containing.lock().unwrap().as_deref() {
+            if key.contains(needle) {
+                return Err(flint_store::StoreError::Other(format!("injected: put refused for {key}")));
+            }
+        }
+        self.0.put_whole(key, body, cond, stamps, crc).await
+    }
+    async fn compose_generation(
+        &self,
+        spec: &flint_store::ComposeSpec<'_>,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        let r = self.0.compose_generation(spec).await;
+        if self.1.compose_err_once.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(flint_store::StoreError::Other("injected: torn compose response".into()));
+        }
+        r
+    }
+    async fn head(&self, key: &str) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.0.head(key).await
+    }
+    async fn get_whole(
+        &self,
+        key: &str,
+        if_match: Option<&str>,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        let r = self.0.get_whole(key, if_match).await;
+        if let Some(h) = take_hook(&self.1.before_get_return, key) {
+            h();
+        }
+        r
+    }
+    async fn get_range(
+        &self,
+        key: &str,
+        off: u64,
+        len: u64,
+        if_match: &str,
+    ) -> flint_store::StoreResult<Bytes> {
+        self.0.get_range(key, off, len, if_match).await
+    }
+    fn min_part_size(&self) -> u64 {
+        self.0.min_part_size()
+    }
+    fn max_parts(&self) -> usize {
+        self.0.max_parts()
+    }
+    async fn list(&self, prefix: &str) -> flint_store::StoreResult<Vec<flint_store::ListedObject>> {
+        self.0.list(prefix).await
+    }
+    async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
+        self.0.delete(key).await
+    }
+    async fn head_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.0.head_version(key, v).await
+    }
+    async fn get_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        self.0.get_version(key, v).await
+    }
+    async fn delete_version(&self, key: &str, v: &str) -> flint_store::StoreResult<()> {
+        self.0.delete_version(key, v).await
+    }
+    async fn list_versions(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::ListedVersion>> {
+        self.0.list_versions(prefix).await
+    }
+    async fn list_uploads(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::PendingUpload>> {
+        self.0.list_uploads(prefix).await
+    }
+    async fn abort_upload(&self, key: &str, id: &str) -> flint_store::StoreResult<()> {
+        self.0.abort_upload(key, id).await
+    }
+    async fn bootstrap(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<flint_store::BootstrapReport> {
+        self.0.bootstrap(prefix).await
+    }
+    async fn epoch_read(
+        &self,
+        key: &str,
+    ) -> flint_store::StoreResult<Option<flint_store::EpochState>> {
+        self.0.epoch_read(key).await
+    }
+    async fn epoch_acquire(
+        &self,
+        key: &str,
+        holder: &str,
+        observed: Option<&flint_store::EpochState>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        let r = self.0.epoch_acquire(key, holder, observed).await;
+        if self.1.acquire_err_once.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(flint_store::StoreError::Other("injected: lost acquire response".into()));
+        }
+        r
+    }
+    async fn epoch_renew(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+        echo: Option<&str>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.0.epoch_renew(key, lease, echo).await
+    }
+    async fn epoch_release(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+    ) -> flint_store::StoreResult<()> {
+        self.0.epoch_release(key, lease).await
+    }
+}
+
+/// atomicity-1 (CRITICAL). The manifest entry carried the SCANNED size
+/// while the upload carried the file as it stood at read time. A file
+/// that grew between the two — a checkpoint being streamed when a
+/// cadence tick fired — was cited with a length its object does not
+/// have, and every fresh checkout of that entry (> range_get_min) fetched
+/// `[0, entry.size)`, folded a CRC that could not match, and failed the
+/// WHOLE checkout: the successor pod exits 1 and restarts into the same
+/// failure, forever. The bytes were intact in the bucket the whole time.
+#[tokio::test]
+async fn the_manifest_cites_the_uploaded_length_not_the_scanned_one() {
+    let inner = Arc::new(MemoryStore::new());
+    let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = hooked_syncer(&hooked, dir.path());
+    a.cfg.whole_put_max = 1 << 20;
+    a.cfg.range_get_min_bytes = 1 << 20;
+    a.cfg.range_get_chunk_bytes = 1 << 20;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    let path = dir.path().join("ckpt.bin");
+    std::fs::write(&path, vec![7u8; 4 << 20]).unwrap();
+
+    // Between the scan and the upload — the window-open PUT on the inbox
+    // cell sits exactly there — the writer keeps streaming.
+    let grow = path.clone();
+    hooked.before_put(&a.cfg.inbox_key(), move || {
+        use std::io::Write;
+        std::fs::OpenOptions::new().append(true).open(&grow).unwrap().write_all(&vec![9u8; 2 << 20]).unwrap();
+    });
+    a.run_barrier().await.unwrap();
+
+    let head = inner.head(&a.cfg.file_key("ckpt.bin")).await.unwrap();
+    assert_eq!(head.size, 6 << 20, "fixture: the upload did not carry the grown file");
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(
+        m.entries["ckpt.bin"].size, head.size,
+        "the manifest cites a length the object does not have"
+    );
+
+    // The successor checks out the boundary.
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = hooked_syncer(&hooked, dir_b.path());
+    b.cfg.whole_put_max = 1 << 20;
+    b.cfg.range_get_min_bytes = 1 << 20;
+    b.cfg.range_get_chunk_bytes = 1 << 20;
+    assert!(claim_until_held(&mut b, 12).await, "takeover");
+    b.checkout().await.expect("the successor cannot check out the boundary: the workspace is unrecoverable");
+    assert_eq!(std::fs::metadata(dir_b.path().join("ckpt.bin")).unwrap().len(), 6 << 20);
+}
+
+/// atomicity-2. The compose path's 412 recognizer compared only the
+/// CURRENT flush uuid; the whole-object path also consults the crash
+/// journal (`prior_uuids`). A > whole_put_max file whose compose landed
+/// but whose response was torn, then edited, 412'd at the next barrier
+/// against its own earlier version and was parked as "foreign" — at
+/// every barrier, forever.
+#[tokio::test]
+async fn a_crashed_compose_is_adopted_after_an_edit_not_parked_forever() {
+    let inner = Arc::new(MemoryStore::new());
+    let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = hooked_syncer(&hooked, dir.path());
+    a.cfg.whole_put_max = 1 << 20;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    let path = dir.path().join("big.bin");
+    std::fs::write(&path, vec![1u8; 3 << 20]).unwrap();
+
+    hooked.1.compose_err_once.store(true, std::sync::atomic::Ordering::SeqCst);
+    a.run_barrier().await.expect_err("fixture: the torn compose did not fail the barrier");
+    inner.head(&a.cfg.file_key("big.bin")).await.expect("fixture: the compose did not land");
+
+    // The agent edits; the next barrier must publish, not park.
+    {
+        use std::io::Write;
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&vec![2u8; 1 << 20]).unwrap();
+    }
+    let r = a.run_barrier().await.unwrap();
+    assert!(r.parked.is_empty(), "the crashed compose parked the path: {:?}", r.parked);
+    assert!(r.uploaded.contains(&"big.bin".to_string()), "not published: {r:?}");
+    let head = inner.head(&a.cfg.file_key("big.bin")).await.unwrap();
+    assert_eq!(head.size, 4 << 20, "the bucket holds the pre-edit bytes");
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries["big.bin"].size, 4 << 20);
+}
+
+/// atomicity-3 / inbox-2. The consume stat'd the path clean, fetched the
+/// foreign bytes over the network, and renamed them over the path
+/// without looking again. An agent write inside the fetch was gone, with
+/// no record. "The syncer never overwrites a file you modified."
+#[tokio::test]
+async fn a_consume_never_overwrites_a_write_that_landed_during_its_fetch() {
+    let inner = Arc::new(MemoryStore::new());
+    let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = hooked_syncer(&hooked, dir.path());
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "shared.txt", "v1");
+    a.run_barrier().await.unwrap();
+
+    hitl_write(&inner, &a.cfg, "shared.txt", "UI", "ui").await.unwrap();
+    let late = dir.path().join("shared.txt");
+    hooked.before_get_return(&a.cfg.file_key("shared.txt"), move || {
+        std::fs::write(&late, "AGENT-LATE, a different length").unwrap();
+    });
+    a.run_barrier().await.unwrap();
+
+    assert_eq!(
+        read(dir.path(), "shared.txt").as_deref(),
+        Some("AGENT-LATE, a different length"),
+        "the agent's write was overwritten by a consume that checked the path before its fetch"
+    );
+    let recs = a.state.load_conflicts().unwrap();
+    assert!(
+        recs.iter().any(|c| c.path == "shared.txt" && c.kind == "consume-dirty" && c.preserved_key.is_some()),
+        "no record names the foreign version that lost: {recs:?}"
+    );
+}
+
+/// atomicity-6. The scan skips symlinks; the upload read followed them.
+/// A regular file swapped for a symlink between the two published the
+/// link's TARGET under the file's path — a file outside the workspace,
+/// `/proc/self/environ` of the syncer's own process included.
+#[tokio::test]
+async fn the_upload_refuses_a_symlink_swapped_in_after_the_scan() {
+    let inner = Arc::new(MemoryStore::new());
+    let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = hooked_syncer(&hooked, dir.path());
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret"), "SECRET").unwrap();
+    write(dir.path(), "cfg.yaml", "harmless");
+    let p = dir.path().join("cfg.yaml");
+    let target = outside.path().join("secret");
+    hooked.before_put(&a.cfg.inbox_key(), move || {
+        std::fs::remove_file(&p).unwrap();
+        std::os::unix::fs::symlink(&target, &p).unwrap();
+    });
+
+    let r = a.run_barrier().await.expect("a planted symlink must not fail the barrier");
+    assert!(!r.uploaded.contains(&"cfg.yaml".to_string()), "the link's target was published: {r:?}");
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(!m.entries.contains_key("cfg.yaml"), "the manifest cites the link's target");
+    assert!(inner.head(&a.cfg.file_key("cfg.yaml")).await.is_err(), "the outside bytes reached the bucket");
+    let recs = a.state.load_conflicts().unwrap();
+    assert!(recs.iter().any(|c| c.path == "cfg.yaml"), "nothing recorded the refusal: {recs:?}");
+}
+
+/// lease-3 / audit #7. Self-recognition keyed on `holder_id` alone: an
+/// acquire that LANDED but whose response was lost left the cell naming
+/// this holder at an epoch it never recorded; the retry recognized
+/// itself and skipped the takeover rotation, so a deposed straggler's
+/// manifest CAS still matched.
+#[tokio::test]
+async fn a_lost_acquire_response_still_rotates() {
+    let inner = Arc::new(MemoryStore::new());
+    let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = hooked_syncer(&hooked, dir_a.path());
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "f.txt", "x");
+    a.run_barrier().await.unwrap();
+    let seq0 = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.seq;
+
+    // The challenger polls the quiet cell up to the takeover threshold.
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = hooked_syncer(&hooked, dir_b.path());
+    loop {
+        match lease::claim_step(&mut b).await.unwrap() {
+            lease::ClaimOutcome::Waiting { quiet_polls } if quiet_polls >= 5 => break,
+            lease::ClaimOutcome::Waiting { .. } => {}
+            lease::ClaimOutcome::Claimed(_) => panic!("fixture: claimed before the threshold"),
+        }
+    }
+    // The acquiring step: the acquire lands, the response is lost.
+    hooked.1.acquire_err_once.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(lease::claim_step(&mut b).await.is_err(), "fixture: the lost response did not surface");
+    let cell = inner.epoch_read(&a.cfg.epoch_key()).await.unwrap().unwrap();
+    let b_id = b.state.load_incarnation().unwrap().unwrap().holder_id;
+    assert_eq!(cell.holder_id, b_id, "fixture: the acquire did not land");
+
+    // The retry (a container restart) must still rotate the manifest.
+    let outcome = lease::claim_step(&mut b).await.unwrap();
+    assert!(matches!(outcome, lease::ClaimOutcome::Claimed(_)), "the retry did not claim");
+    let seq1 = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.seq;
+    assert!(
+        seq1 > seq0,
+        "a lost acquire response skipped the takeover rotation (seq {seq0} → {seq1}): a straggler's CAS still matches"
+    );
+}
+
+/// gated-1. After the citation that superseded it, a consume-dirty
+/// inbox entry (baseline sentinel `size == u64::MAX`) was not dropped —
+/// the drop filter ran against the rewritten baseline, which no longer
+/// carried the sentinel — and the next lane consumed it a second time:
+/// the path was now clean at the agent's published stat, so the foreign
+/// bytes were written over the agent's published edit, with no record.
+#[tokio::test]
+async fn a_consume_dirty_entry_leaves_the_cell_at_the_citation_that_supersedes_it() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.cfg.sentinel_min_interval_secs = 0;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "F.txt", "A1");
+    a.run_barrier().await.unwrap();
+    gated(&mut a);
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture, false).unwrap();
+
+    write(dir.path(), "F.txt", "A1-edited-by-the-agent");
+    a.upload_lane().await.unwrap();
+    assert!(a.load_stage().unwrap().entries.contains_key("F.txt"), "fixture: the edit was not staged");
+    hitl_write(&store, &a.cfg, "F.txt", "UI", "ui").await.unwrap();
+    a.upload_lane().await.unwrap();
+    assert!(
+        a.state.load_conflicts().unwrap().iter().any(|c| c.path == "F.txt" && c.kind == "consume-dirty"),
+        "fixture: the consume was not dirty"
+    );
+
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n1"}"#);
+    a.sentinel_tick().await.unwrap();
+    let ack = a.read_ack(Verb::Publish).expect("no ack");
+    assert_eq!(ack.status, "ok", "{ack:?}");
+    let cell = super::inbox::load(store.as_ref(), &a.cfg).await.unwrap().doc;
+    assert!(
+        !cell.entries.iter().any(|e| e.path == "F.txt"),
+        "the superseded entry is still in the cell after the citation that cited the agent's version"
+    );
+
+    // And the agent's published edit survives the next lane.
+    a.upload_lane().await.unwrap();
+    assert_eq!(
+        read(dir.path(), "F.txt").as_deref(),
+        Some("A1-edited-by-the-agent"),
+        "the foreign bytes were written over the agent's PUBLISHED edit"
+    );
+}
+
+/// gated-2. A withheld tombstone was cancelled only by a RE-STAGE, and a
+/// path whose size and mtime equal the baseline's is never re-staged. A
+/// file moved away and moved back (same inode, same stat) rode into the
+/// citation as a delete: the boundary omitted a file on disk and the GC
+/// deleted its object.
+#[tokio::test]
+async fn a_same_stat_recreated_file_survives_its_withheld_tombstone() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "ckpt.bin", "v1");
+    a.run_barrier().await.unwrap();
+    gated(&mut a);
+
+    let away = dir.path().join("elsewhere");
+    std::fs::create_dir_all(&away).unwrap();
+    std::fs::rename(dir.path().join("ckpt.bin"), away.join("ckpt.bin")).unwrap();
+    a.upload_lane().await.unwrap();
+    a.upload_lane().await.unwrap();
+    assert!(
+        a.load_stage().unwrap().withheld_deletes.contains("ckpt.bin"),
+        "fixture: the tombstone never armed"
+    );
+    std::fs::rename(away.join("ckpt.bin"), dir.path().join("ckpt.bin")).unwrap();
+    a.upload_lane().await.unwrap();
+    a.citation_pass(CitationSource::ForcedLagCap).await.unwrap();
+
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("ckpt.bin"), "the boundary omits a file that is on disk");
+    store.head(&a.cfg.file_key("ckpt.bin")).await.expect("the GC deleted the object of a file that is on disk");
+}
+
+/// gated-3 / lease-6. A restarted claimant waiting behind a live holder
+/// refused only a CONSUMED pending; a raw `.flint/publish` standing in
+/// its tree (touched before the crash, or during the wait against the
+/// predecessor's `live` marker) was consumed by nobody and answered by
+/// nobody.
+#[tokio::test]
+async fn a_waiting_claimant_refuses_a_raw_touch_and_flips_the_marker() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+
+    // B's tree survived its crash: a live marker, and a touch nobody consumed.
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = syncer(&store, dir_b.path()).await;
+    b.write_capabilities(&super::control::SentinelPosture { enabled: true, reason: None }, false).unwrap();
+    touch_sentinel(dir_b.path(), control::PUBLISH, r#"{"nonce":"stranded"}"#);
+
+    assert!(matches!(lease::claim_step(&mut b).await.unwrap(), lease::ClaimOutcome::Waiting { .. }));
+    assert!(
+        b.refuse_what_this_incarnation_can_never_honor().await.unwrap(),
+        "nothing refused: the raw touch was not consumed"
+    );
+    let ack = b.read_ack(Verb::Publish).expect("the agent is still stranded: no ack");
+    assert_eq!(ack.status, "refused-fenced");
+    assert!(ack.nonces.contains(&"stranded".to_string()));
+    assert_eq!(b.read_capabilities().unwrap().state, "fenced", "the marker still says live");
+}
+
+/// lease-1. On `Fenced`, the settle (refused acks + fenced marker) ran
+/// under `?`, so a settle that could not write — ENOSPC on `.flint/` is
+/// the routine one — REPLACED the fence with an I/O error; the run loop
+/// retried a leaseless syncer forever behind a `live` marker.
+#[tokio::test]
+async fn a_fence_whose_settle_fails_is_still_a_fence() {
+    use std::os::unix::fs::PermissionsExt;
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir_a.path()).await;
+    a.cfg.sentinel_min_interval_secs = 0;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture, false).unwrap();
+    touch_sentinel(dir_a.path(), control::PUBLISH, r#"{"nonce":"n"}"#);
+    assert!(a.consume_sentinel(Verb::Publish).unwrap());
+
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = syncer(&store, dir_b.path()).await;
+    assert!(claim_until_held(&mut b, 10).await, "takeover");
+
+    // The settle cannot write.
+    let control = dir_a.path().join(super::CONTROL_DIR);
+    std::fs::set_permissions(&control, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let err = a.sentinel_tick().await.expect_err("a deposed holder honoured a touch");
+    std::fs::set_permissions(&control, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(matches!(err, LeanError::Fenced(_)), "the fence was replaced by the settle's error: {err}");
+    assert!(a.lease.is_none(), "a fenced holder must drop its lease");
+}
+
+/// inbox-1. A 412 against a version this syncer did not write "parked"
+/// the path: no un-park existed, every later ack said `ok` with
+/// `parked: n`, and the agent's file stayed unpublished for the life of
+/// the workspace. The contract's rule for a foreign write to a modified
+/// path is "your version wins, the foreign bytes are preserved" — the
+/// consume-dirty rule — and a park is the same case met at upload time.
+#[tokio::test]
+async fn a_parked_path_is_preserved_and_published_over_not_abandoned() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "dirty.txt", "published v1");
+    a.run_barrier().await.unwrap();
+
+    // A sibling installs a new generation of the path, with no inbox entry.
+    let loaded = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
+    let mut theirs = loaded.manifest.clone();
+    theirs.seq += 1;
+    let key = a.cfg.file_key("dirty.txt");
+    let body = Bytes::from("foreign bytes".to_string());
+    let crc = crc64_nvme(&body);
+    let cur = store.head(&key).await.unwrap();
+    let meta = store
+        .put_whole(
+            &key,
+            body,
+            &PutCondition::IfMatch(cur.etag),
+            &GenerationStamps { generation: 2, epoch: 0, flush_uuid: "sibling".into(), boundary_source: None, posix: None },
+            crc,
+        )
+        .await
+        .unwrap();
+    let foreign_etag = meta.etag.clone();
+    let e = theirs.entries.get_mut("dirty.txt").unwrap();
+    e.etag = meta.etag.clone();
+    e.crc64_b64 = meta.crc64_b64.clone().unwrap();
+    e.size = meta.size;
+    e.generation = 2;
+    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.handle()), 0, "sibling").await.unwrap();
+
+    // The agent's unpublished edit, then a boundary.
+    write(dir.path(), "dirty.txt", "the agent's own unpublished work, longer");
+    let r = a.run_barrier().await.unwrap();
+    assert!(r.parked.is_empty(), "the path was parked: {:?}", r.parked);
+    assert!(r.uploaded.contains(&"dirty.txt".to_string()), "the agent's version was not published: {r:?}");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let (_, got) = store.get_whole(&key, Some(&m.entries["dirty.txt"].etag)).await.unwrap();
+    assert_eq!(&got[..], b"the agent's own unpublished work, longer", "the boundary does not carry the agent's bytes");
+    let rec = a
+        .state
+        .load_conflicts()
+        .unwrap()
+        .into_iter()
+        .find(|c| c.path == "dirty.txt" && c.kind == "upload-412-preserved")
+        .expect("no record names the foreign version that was superseded");
+    assert_eq!(rec.foreign_etag, foreign_etag);
+    let preserved = rec.preserved_key.expect("the foreign bytes were not preserved");
+    let (_, kept) = store.get_whole(&preserved, None).await.unwrap();
+    assert_eq!(&kept[..], b"foreign bytes", "the preserved copy is not the foreign version");
+}
+
+/// inbox-1, the drain half. When a park DOES stand (the preserve failed,
+/// so the foreign version could not be kept), the boundary is not the
+/// coherent point the agent declared: the ack says so (`partial`, the
+/// path in `report.dropped`), and the drain does not attest a tree it
+/// did not publish — the node keeps it.
+#[tokio::test]
+async fn a_boundary_with_a_standing_park_is_partial_and_the_drain_does_not_attest_it() {
+    let inner = Arc::new(MemoryStore::new());
+    let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = hooked_syncer(&hooked, dir.path());
+    a.cfg.sentinel_min_interval_secs = 0;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture, false).unwrap();
+    write(dir.path(), "dirty.txt", "published v1");
+    a.run_barrier().await.unwrap();
+
+    // A foreign current version lands with no inbox entry (a straggler's
+    // PUT, or a gateway write whose inbox append the window refused).
+    let key = a.cfg.file_key("dirty.txt");
+    let body = Bytes::from("foreign bytes".to_string());
+    let crc = crc64_nvme(&body);
+    let cur = inner.head(&key).await.unwrap();
+    inner
+        .put_whole(
+            &key,
+            body,
+            &PutCondition::IfMatch(cur.etag),
+            &GenerationStamps { generation: 2, epoch: 0, flush_uuid: "straggler".into(), boundary_source: None, posix: None },
+            crc,
+        )
+        .await
+        .unwrap();
+    write(dir.path(), "dirty.txt", "the agent's own unpublished work, longer");
+    *hooked.1.put_fail_containing.lock().unwrap() = Some("/conflicts/".into());
+
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"p1"}"#);
+    a.sentinel_tick().await.unwrap();
+    let ack = a.read_ack(Verb::Publish).expect("no ack");
+    assert_eq!(ack.status, "partial", "a boundary that does not carry the agent's file acked ok: {ack:?}");
+    assert_eq!(ack.report.dropped, vec!["dirty.txt".to_string()]);
+    assert_eq!(ack.report.parked, 1);
+
+    // The drain at SIGTERM: the same park stands; nothing is attested.
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"p2"}"#);
+    assert!(a.consume_sentinel(Verb::Publish).unwrap());
+    let drained = a.drain().await;
+    assert!(drained.is_err(), "the drain attested a boundary with a standing park: {drained:?}");
+    assert!(
+        !a.cfg.state_dir().join(super::state::DRAINED).exists(),
+        "drained.json written: the node will remove a tree whose only copy of dirty.txt is on it"
+    );
+}
