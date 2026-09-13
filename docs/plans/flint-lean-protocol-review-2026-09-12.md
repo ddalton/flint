@@ -195,5 +195,21 @@ worker's limit and not. The default moves to 128 MiB in the CRD, the
 binary and the config; the host arms of the door drill never saw this
 because they ran without a cgroup.
 
-**Live.** See `lean/e2e/perf/results/door-drill-2026-09-12.md` §5 for
-the leg and its control.
+**Live.** Run on runcu's control-plane node (i4i.large, real S3,
+us-west-1) against the drill bucket, `live-size.sh` in
+`lean/e2e/perf/`: a syncer daemon (`flint-sync run`, floor 10 s) serving
+an empty prefix; a writer streaming a 1 GiB checkpoint into the tree at
+~30 MiB/s; the moment the first barrier carrying `ckpt.bin` is logged,
+the daemon is SIGKILLed (a spot reclaim — no drain) and the writer
+stopped; then a successor checks the boundary out into an empty tree
+with the same binary. Three arms, run once each in sequence:
+
+| arm | binary | file on disk at the kill | successor's checkout |
+|---|---|---|---|
+| old, mid-write | `33abb284` (sha `6adb6926…`) | 400,556,032 B | **FAILED in 1 s**: `manifest cites …/files/ckpt.bin at etag "…-5" with CRC-64 03ZM7x7zbtQ=, but the 16 ranges fetched under that etag fold to …` — the wedge |
+| new, mid-write | `4fc8bee6` (sha `3d8dd041…`) | 401,604,608 B | **OK in 1 s**: `ckpt.bin` is 271,581,184 B on the successor, equal to the object — the boundary carries what was durable when the upload read the file |
+| new, finished (control) | `4fc8bee6` | 1,073,741,824 B | OK in 6 s, 1,073,741,824 B — the fix is not what makes checkouts pass |
+
+The old arm's cited size was the scan's; the object was longer; every
+ranged checkout of that entry folds a CRC that cannot match. The new
+arm cites the length it uploaded.
