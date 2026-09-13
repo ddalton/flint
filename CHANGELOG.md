@@ -14,6 +14,24 @@ covered by the stability guarantee.
 
 ### Added
 
+- **lean: the agent contract is a file the syncer writes into the mount
+  — `.flint/AGENTS.md`.** flint-lean has no client library and no API: an
+  agent interacts with a workspace entirely through files (`.flint/publish`,
+  `.flint/sync`, `.flint/capabilities.json`, `.flint/remote.seq`, and the
+  `.flint-sync/` records). Nothing told the agent that. The syncer now
+  writes the whole contract — the local-copy/boundary model, the two
+  verbs with their exact ack shapes and the two ack-matching rules, the
+  foreign-change and conflict rules, the mtime-granularity change-detection
+  trap, and a do/do-not list — into `.flint/AGENTS.md` beside the
+  capability marker, at checkout and on every capabilities write, so it
+  always describes the running syncer (an old syncer writes none; a
+  fenced one still says so in its marker). The text is the crate's
+  `AGENTS.md`, embedded with `include_str!` and exported as
+  `control::AGENT_GUIDE_TEXT`; a test (`agent_guide_names_every_advertised_verb`)
+  fails the build if the guide ever stops naming an advertised verb or
+  the marker's protocol number, and asserts a barrier never publishes it.
+  `flint-lean` 0.2.0 → 0.3.0.
+
 - **lean: delete and rename from outside the pod — declared removals
   (`docs/plans/flint-lean-delete-rename-design.md`, phases B, C, D).**
   A UI could create and overwrite files through the gateway but not

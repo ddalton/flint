@@ -1083,6 +1083,44 @@ async fn capabilities_written_on_live_tree_restart() {
     assert_eq!(caps.boundary_mode, "hybrid");
 }
 
+/// The guide the syncer writes beside the marker is the crate's
+/// `AGENTS.md`, and it must name every verb the marker advertises and
+/// the protocol number the marker carries — the one place the two could
+/// drift apart. It lives under `.flint/`, so a barrier must not publish
+/// it.
+#[tokio::test]
+async fn agent_guide_names_every_advertised_verb() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture, false).unwrap();
+    let caps = a.read_capabilities().unwrap();
+    assert!(!caps.verbs.is_empty(), "the fixture advertises verbs");
+    let guide = std::fs::read_to_string(dir.path().join(super::CONTROL_DIR).join(control::AGENT_GUIDE)).unwrap();
+    assert_eq!(guide, control::AGENT_GUIDE_TEXT);
+    for v in &caps.verbs {
+        let named = match v.as_str() {
+            "remote-seq" => ".flint/remote.seq",
+            other => &format!(".flint/{other}"),
+        };
+        assert!(guide.contains(named), "the guide never names the advertised verb {v} as {named}");
+    }
+    assert!(
+        guide.contains(&format!("sentinel protocol {}", super::SENTINEL_PROTOCOL)),
+        "the guide names a protocol other than the marker's {}",
+        super::SENTINEL_PROTOCOL
+    );
+    // Under the control namespace: never in the upload set.
+    write(dir.path(), "f.txt", "v1");
+    a.run_barrier().await.unwrap();
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
+    assert!(m.manifest.entries.contains_key("f.txt"));
+    assert!(m.manifest.entries.keys().all(|k| !k.starts_with(".flint/")), "the guide was published as data");
+}
+
 /// D0.4 — reserving `.flint/` is a BREAKING change for a workspace
 /// already using it as data: a file literally named `.flint/publish`
 /// would be CONSUMED (renamed away) by the poll — a data grab from a

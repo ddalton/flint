@@ -29,6 +29,13 @@ use serde::{Deserialize, Serialize};
 use super::{now_unix, LeanResult, Syncer, SENTINEL_PROTOCOL};
 
 pub const CAPABILITIES: &str = "capabilities.json";
+/// `.flint/AGENTS.md` — the workspace contract, written beside the
+/// marker so an agent reads the protocol of the syncer it is talking to
+/// (an old syncer writes neither; a fenced one still says so in the
+/// marker). The text is the crate's `AGENTS.md`; the test
+/// `agent_guide_names_every_advertised_verb` keeps the two from drifting.
+pub const AGENT_GUIDE: &str = "AGENTS.md";
+pub const AGENT_GUIDE_TEXT: &str = include_str!("../AGENTS.md");
 pub const REMOTE_SEQ: &str = "remote.seq";
 pub const PUBLISH: &str = "publish";
 pub const PUBLISH_ACK: &str = "publish.ack";
@@ -236,7 +243,8 @@ impl Syncer {
             syncer_version: super::SYNCER_VERSION.to_string(),
             boot: BootStamp { holder_id, boot_unix: now_unix() },
         };
-        write_json(&self.control_path(CAPABILITIES), &caps)
+        write_json(&self.control_path(CAPABILITIES), &caps)?;
+        write_atomic(&self.control_path(AGENT_GUIDE), AGENT_GUIDE_TEXT.as_bytes())
     }
 
     pub fn read_capabilities(&self) -> Option<Capabilities> {
