@@ -489,6 +489,16 @@ pub fn judge_preconditions(
     }
 }
 
+/// What the read door's overlay found for a path.
+enum Overlay {
+    /// The newest tracked write, served.
+    Served(Blob),
+    /// A tracked write the bucket has outrun.
+    Outrun,
+    /// No tracked write, or its object is gone.
+    Absent,
+}
+
 impl Workspace {
     /// A workspace at `prefix` on `store`. The prefix is the subtree's
     /// bucket key prefix — the same string the syncer was started with
@@ -681,7 +691,10 @@ impl Workspace {
     /// the bucket has outrun (the syncer published over it and its
     /// citation now names the newer bytes; entries leave the cell only
     /// after that CAS) yields to the citation: the overlay never serves
-    /// bytes an entry no longer describes.
+    /// bytes an entry no longer describes. The common read — a cited
+    /// path nobody has overwritten — costs what it did before the
+    /// overlay: the cell is fetched only when the cited fetch fails
+    /// its precondition, which is the overwritten case itself.
     ///
     /// Under `pinned_reads` the citation names a VERSION, and that is
     /// what a coherent read resolves — the same rule `checkout`
@@ -723,30 +736,23 @@ impl Workspace {
                 VerbError::Moved
             }
         };
-        // The overlay: the newest entry for the path, read guarded on
-        // its own etag. A tracked write is complete bytes under a known
-        // tag; the agent's mid-change upload has no entry, so nothing
-        // uncited can come through this arm.
-        let ib = inbox::load(self.store.as_ref(), &self.cfg).await?;
-        let mut entry_outrun = false;
-        if let Some(entry) = ib.doc.entries.iter().rev().find(|e| e.path == path) {
-            match self.store.get_whole(&key, Some(&entry.etag)).await {
-                Ok((meta, body)) => return Ok(Blob { etag: meta.etag, body }),
-                // The object moved past the entry: the citation is the
-                // newer truth if the barrier has installed it, and the
-                // read is `moved` if it has not.
-                Err(StoreError::PreconditionFailed(_)) => entry_outrun = true,
-                // Gone from the bucket (a consume found it missing):
-                // the citation, if any, says what is left.
-                Err(StoreError::NotFound(_)) => {}
-                Err(e) => return Err(e.into()),
-            }
-        }
         let pinned_version = match (pinned, cited.as_ref()) {
             (true, Some((_, Some(vid)))) => Some(vid.clone()),
             _ => None,
         };
+        // ORDER, and what the common read costs. A cited path is read
+        // guarded on its citation FIRST: when that fetch succeeds the
+        // cited bytes are current, so no tracked write can be newer
+        // than them and the cell is never fetched — two requests, what
+        // the read cost before the overlay. Only the precondition
+        // failure, which IS the overwritten case, fetches the cell. A
+        // pinned citation reads a VERSION, which succeeds after an
+        // overwrite too and so cannot say whether a write is newer:
+        // pinned reads consult the cell first.
         if let Some(vid) = pinned_version {
+            if let Overlay::Served(blob) = self.read_tracked(&key, path).await? {
+                return Ok(blob);
+            }
             return match self.store.get_version(&key, &vid).await {
                 Ok((meta, body)) => Ok(Blob { etag: meta.etag, body }),
                 // The dangling-citation endgame (D8): the backstop
@@ -762,12 +768,45 @@ impl Workspace {
             };
         }
         let Some((etag, _)) = cited else {
-            return Err(if entry_outrun { moved(path) } else { VerbError::NoSuchFile(path.to_string()) });
+            // Never cited: the cell is the only place the path can be.
+            return match self.read_tracked(&key, path).await? {
+                Overlay::Served(blob) => Ok(blob),
+                Overlay::Outrun => Err(moved(path)),
+                Overlay::Absent => Err(VerbError::NoSuchFile(path.to_string())),
+            };
         };
         match self.store.get_whole(&key, Some(&etag)).await {
             Ok((meta, body)) => Ok(Blob { etag: meta.etag, body }),
-            Err(StoreError::PreconditionFailed(_)) => Err(moved(path)),
+            // The citation is no longer current: a tracked write is the
+            // newest bytes the workspace knows, and failing that the
+            // object moved under an upload no entry describes.
+            Err(StoreError::PreconditionFailed(_)) => match self.read_tracked(&key, path).await? {
+                Overlay::Served(blob) => Ok(blob),
+                Overlay::Outrun | Overlay::Absent => Err(moved(path)),
+            },
             Err(StoreError::NotFound(_)) => Err(VerbError::NoSuchFile(path.to_string())),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The read door's overlay: the newest inbox entry for `path`, read
+    /// guarded on its own etag — one GET for the cell, one for the
+    /// bytes. A tracked write is complete bytes under a known tag; the
+    /// agent's mid-change upload has no entry, so nothing uncited can
+    /// come through this arm.
+    async fn read_tracked(&self, key: &str, path: &str) -> Result<Overlay, VerbError> {
+        let ib = inbox::load(self.store.as_ref(), &self.cfg).await?;
+        let Some(entry) = ib.doc.entries.iter().rev().find(|e| e.path == path) else {
+            return Ok(Overlay::Absent);
+        };
+        match self.store.get_whole(key, Some(&entry.etag)).await {
+            Ok((meta, body)) => Ok(Overlay::Served(Blob { etag: meta.etag, body })),
+            // The object moved past the entry: the citation is the
+            // newer truth if the barrier has installed it, and the
+            // read is `moved` if it has not.
+            Err(StoreError::PreconditionFailed(_)) => Ok(Overlay::Outrun),
+            // Gone from the bucket (a consume found it missing).
+            Err(StoreError::NotFound(_)) => Ok(Overlay::Absent),
             Err(e) => Err(e.into()),
         }
     }

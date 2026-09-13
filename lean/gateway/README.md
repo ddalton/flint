@@ -107,9 +107,11 @@ Visibility has two tiers, by design:
   any agent pod that runs `sync`. Both overlay the tracked inbox entry
   on the manifest citation, so an overwrite of a file the manifest
   already cites reads as the new bytes the moment `put_file` returns,
-  for every reader, with or without a syncer running. (Before 0.2.1
-  `get_file` preferred the citation and answered 409 `moved` until the
-  syncer re-cited the path.)
+  for every reader, with or without a syncer running. The cell is
+  consulted only when the cited fetch fails its precondition, so a
+  read of a file nobody has overwritten costs what it did before the
+  overlay. (Before 0.2.1 `get_file` preferred the citation and
+  answered 409 `moved` until the syncer re-cited the path.)
 - **At the next barrier**: the manifest. The workspace's syncer
   consumes the inbox at the start of every barrier — on its cadence
   (default 60 s) or sooner on a `request_boundary` — fetches the object,

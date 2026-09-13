@@ -623,8 +623,9 @@ async fn a_rename_is_refused_while_a_window_is_open_and_copies_nothing() {
 /// bucket has outrun: in the barrier's window after the manifest CAS
 /// (the syncer published the agent's newer bytes and cited them; the
 /// consumed entry leaves the cell only with the window) the read
-/// yields to the citation. Mutations: prefer the citation ⇒ the first
-/// read answers `moved`; overlay without the fallback ⇒ the last one.
+/// yields to the citation. Mutation: answer `moved` on the citation's
+/// precondition failure instead of consulting the cell ⇒ the first
+/// read fails (and the battery leg that reads a promote).
 #[tokio::test]
 async fn an_overwrite_of_a_cited_file_reads_at_once_and_an_outrun_entry_yields_to_the_citation() {
     use flint_store::{GenerationStamps, PutCondition};
@@ -670,4 +671,204 @@ async fn an_overwrite_of_a_cited_file_reads_at_once_and_an_outrun_entry_yields_t
     assert_eq!(tracked, 1, "the fixture: the outrun entry is still in the cell");
     let blob = w.get_file("a.txt").await.unwrap();
     assert_eq!((blob.etag.as_str(), &blob.body[..]), (v3.as_str(), &b"three"[..]));
+}
+
+/// A store that remembers every `get_whole` key, so a test can say
+/// what a read COST in requests rather than time it.
+struct CountGets {
+    inner: Arc<MemoryStore>,
+    gets: std::sync::Mutex<Vec<String>>,
+}
+
+impl CountGets {
+    fn new(inner: Arc<MemoryStore>) -> Self {
+        Self { inner, gets: Default::default() }
+    }
+    /// The keys fetched since the last take: (inbox cell, file objects).
+    fn take(&self) -> (usize, usize) {
+        let keys = std::mem::take(&mut *self.gets.lock().unwrap());
+        let cell = keys.iter().filter(|k| k.ends_with("/inbox")).count();
+        let files = keys.iter().filter(|k| k.contains("/files/")).count();
+        (cell, files)
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for CountGets {
+    async fn copy_object(
+        &self,
+        src_key: &str,
+        src_if_match: Option<&str>,
+        dst_key: &str,
+        condition: &flint_store::PutCondition,
+        stamps: &flint_store::GenerationStamps,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.copy_object(src_key, src_if_match, dst_key, condition, stamps).await
+    }
+    async fn put_whole(
+        &self,
+        key: &str,
+        body: Bytes,
+        cond: &flint_store::PutCondition,
+        stamps: &flint_store::GenerationStamps,
+        crc: u64,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.put_whole(key, body, cond, stamps, crc).await
+    }
+    async fn compose_generation(
+        &self,
+        spec: &flint_store::ComposeSpec<'_>,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.compose_generation(spec).await
+    }
+    async fn head(&self, key: &str) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.head(key).await
+    }
+    async fn get_whole(
+        &self,
+        key: &str,
+        if_match: Option<&str>,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        self.gets.lock().unwrap().push(key.to_string());
+        self.inner.get_whole(key, if_match).await
+    }
+    async fn get_range(
+        &self,
+        key: &str,
+        off: u64,
+        len: u64,
+        if_match: &str,
+    ) -> flint_store::StoreResult<Bytes> {
+        self.inner.get_range(key, off, len, if_match).await
+    }
+    fn min_part_size(&self) -> u64 {
+        self.inner.min_part_size()
+    }
+    fn max_parts(&self) -> usize {
+        self.inner.max_parts()
+    }
+    async fn list(&self, prefix: &str) -> flint_store::StoreResult<Vec<flint_store::ListedObject>> {
+        self.inner.list(prefix).await
+    }
+    async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete(key).await
+    }
+    async fn head_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.head_version(key, v).await
+    }
+    async fn get_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        self.inner.get_version(key, v).await
+    }
+    async fn delete_version(&self, key: &str, v: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete_version(key, v).await
+    }
+    async fn list_versions(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::ListedVersion>> {
+        self.inner.list_versions(prefix).await
+    }
+    async fn list_uploads(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::PendingUpload>> {
+        self.inner.list_uploads(prefix).await
+    }
+    async fn abort_upload(&self, key: &str, id: &str) -> flint_store::StoreResult<()> {
+        self.inner.abort_upload(key, id).await
+    }
+    async fn bootstrap(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<flint_store::BootstrapReport> {
+        self.inner.bootstrap(prefix).await
+    }
+    async fn epoch_read(
+        &self,
+        key: &str,
+    ) -> flint_store::StoreResult<Option<flint_store::EpochState>> {
+        self.inner.epoch_read(key).await
+    }
+    async fn epoch_acquire(
+        &self,
+        key: &str,
+        holder: &str,
+        observed: Option<&flint_store::EpochState>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.inner.epoch_acquire(key, holder, observed).await
+    }
+    async fn epoch_renew(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+        echo: Option<&str>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.inner.epoch_renew(key, lease, echo).await
+    }
+    async fn epoch_release(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+    ) -> flint_store::StoreResult<()> {
+        self.inner.epoch_release(key, lease).await
+    }
+}
+
+/// WHAT THE COMMON READ COSTS. A cited path nobody has overwritten is
+/// read guarded on its citation and the inbox cell is never fetched —
+/// even while a consumed entry for it still lingers in the cell. Only
+/// an overwrite, the citation's precondition failure, fetches the cell
+/// and reads the entry; once the barrier cites past the entry the read
+/// is back to one object fetch. Mutation: the 0.2.1 order (the cell
+/// first) fetches it on every read ⇒ the first count fails.
+#[tokio::test]
+async fn a_read_of_an_unmodified_cited_file_never_fetches_the_inbox() {
+    use flint_store::{GenerationStamps, PutCondition};
+    let counting = Arc::new(CountGets::new(Arc::new(MemoryStore::new())));
+    let s: Arc<dyn ObjectStore> = counting.clone();
+    let w = ws(&s);
+    let epoch = hold_lease(&s, &w).await;
+    let v1 = w.put_file("a.txt", Bytes::from("one"), &PutFile::default()).await.unwrap();
+    cite(&w, epoch, 1, "a.txt", &v1, b"one").await;
+    assert_eq!(w.snapshot().await.unwrap().inbox.entries.len(), 1, "the fixture: the entry lingers");
+
+    counting.take();
+    assert_eq!(w.get_file("a.txt").await.unwrap().etag, v1);
+    assert_eq!(counting.take(), (0, 1), "(inbox fetches, object fetches) for the common read");
+
+    // An overwrite: the cited fetch fails its precondition, the cell
+    // is fetched once, the entry's bytes are fetched once.
+    let v2 = w
+        .put_file("a.txt", Bytes::from("two"), &PutFile { if_match: Some(v1.clone()), ..Default::default() })
+        .await
+        .unwrap();
+    counting.take();
+    assert_eq!(w.get_file("a.txt").await.unwrap().etag, v2);
+    assert_eq!(counting.take(), (1, 2), "(inbox fetches, object fetches) for an overwritten read");
+
+    // The barrier cites past the entry: one object fetch again, the
+    // cell untouched, the lingering entry never consulted.
+    let key = w.config().file_key("a.txt");
+    let three = Bytes::from("three");
+    let crc = crc64_nvme(&three);
+    let stamps = GenerationStamps {
+        generation: 2,
+        epoch,
+        flush_uuid: "agent-publish".into(),
+        boundary_source: None,
+        posix: None,
+    };
+    let v3 = s.put_whole(&key, three, &PutCondition::Unconditional, &stamps, crc).await.unwrap().etag;
+    cite(&w, epoch, 2, "a.txt", &v3, b"three").await;
+    counting.take();
+    assert_eq!(w.get_file("a.txt").await.unwrap().etag, v3);
+    assert_eq!(counting.take(), (0, 1), "(inbox fetches, object fetches) once cited past the entry");
 }

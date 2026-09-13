@@ -111,6 +111,17 @@ covered by the stability guarantee.
 
 ### Changed
 
+- **lean gateway (`flint-lean-gateway` 0.2.2): the read door's overlay
+  costs nothing on the common read.** 0.2.1 fetched the inbox cell on
+  every `get_file`. Now a cited path is read guarded on its citation
+  first; when that succeeds the cited bytes are current and no tracked
+  write can be newer, so the cell is never fetched — two requests, as
+  before the overlay. Only the precondition failure, which is the
+  overwritten case, fetches the cell. Pinned-reads workspaces keep the
+  cell-first order, because a versioned read succeeds after an
+  overwrite too and cannot tell. A counting store pins the request
+  count on each leg; the 0.2.1 order is its mutation.
+
 - **lean: the small-file read ceiling was one thread, then one lock.**
   `checkout` of 20,000 x 8 KiB plateaued at ~3,300 files/s from fanout
   128 to 512 because every fetch future was polled by ONE

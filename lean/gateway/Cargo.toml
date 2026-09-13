@@ -11,7 +11,7 @@
 #   cargo build --release                       # the shippable binary
 [package]
 name = "flint-lean-gateway"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "The flint lean gateway: read, write, draft and publish files in S3-backed lean workspaces from your own process, or run the binary"
 license = "MIT"
@@ -51,6 +51,8 @@ uuid = { version = "1.0", features = ["v4"] }
 warp = { version = "0.3", optional = true }
 
 [dev-dependencies]
+# A counting store wrapper pins what a read costs in requests.
+async-trait = "0.1"
 # The battery skips one leg when it runs as root.
 libc = "0.2"
 tempfile = "3.0"
