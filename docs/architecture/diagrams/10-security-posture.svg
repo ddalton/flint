@@ -230,7 +230,8 @@
 <text class="t4" x="590" y="870">A syncer that lost its lease answers refused-fenced rather</text>
 <text class="t4" x="590" y="885">than publishing; the plugin refuses to clean up a published</text>
 <text class="t4" x="590" y="900">tree; the chart refuses to render on credential misconfig;</text>
-<text class="t4" x="590" y="915">gated mode is refused without a lag bound.</text>
+<text class="t4" x="590" y="915">the drain refuses to attest a boundary that left a path</text>
+<text class="t4" x="590" y="930">parked.</text>
 <text class="t4b" x="922" y="855">Deny is the default.</text>
 <text class="t4" x="922" y="870">consumers absent means deny; the</text>
 <text class="t4" x="922" y="885">ValidatingAdmissionPolicy — not the namespace label —</text>

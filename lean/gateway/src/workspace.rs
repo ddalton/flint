@@ -145,14 +145,13 @@ pub struct Status {
     pub holder_id: Option<String>,
     pub holder_released: Option<bool>,
     pub now_unix: u64,
-    /// The last CITED manifest seq — under gated mode this is the
-    /// coherent view, not the newest bytes in the bucket.
+    /// The last manifest seq a boundary installed.
     pub last_cited_seq: Option<u64>,
     pub manifest_stamp_unix: Option<u64>,
-    /// Which coherent point installed it: `sentinel`, `quiescence`,
-    /// `forced-lag-cap`, `drain`, `recovered`… A reader that cares
-    /// whether the view it is about to take was DECLARED coherent or
-    /// forced by a cap can tell, from the bucket.
+    /// Which clock installed it: `sentinel`, `sentinel-deferred`,
+    /// `cadence` or `drain`. A reader that cares whether the view it is
+    /// about to take was DECLARED coherent by the agent or taken by the
+    /// floor can tell, from the bucket.
     pub boundary_source: Option<String>,
     /// Whether a boundary/sync request is standing (§2.5).
     pub boundary_request: Option<VerbRequest>,
@@ -223,20 +222,11 @@ pub enum VerbError {
     /// 404 `no-such-file`. Carries the path.
     #[error("{0}")]
     NoSuchFile(String),
-    /// 410 `dangling-citation`: the manifest cites a version the
-    /// backstop has reaped (D8). Never falls back to the current
-    /// object, which is precisely the uncited bytes gating withholds.
-    #[error("the manifest cites {path} version {version_id} but that version is gone; run `flint-sync recover-staged` to re-cite forward")]
-    DanglingCitation { path: String, version_id: String },
     /// 410 `foreign-write`: a sole-writer workspace whose object no
     /// longer carries the cited etag — something other than its
     /// publisher wrote it.
     #[error("the manifest cites {path} at an etag the object no longer carries, and this workspace is published by a sole writer — something other than its publisher wrote that object")]
     ForeignWrite { path: String },
-    /// 410 `uncited-bytes`: under `pinned_reads`, an entry the citation
-    /// could not make version-addressable whose object has moved.
-    #[error("the manifest cites {path} at an etag the object no longer carries and names no version to resolve instead; run `flint-sync recover-staged` to re-cite forward")]
-    UncitedBytes { path: String },
     /// 413 `payload-too-large`: the body is over the whole-object cap.
     /// The HTTP gateway refuses this at the body filter; the library
     /// refuses it here so an embedder cannot exceed the cap by
@@ -312,9 +302,7 @@ impl VerbError {
             | VerbError::DraftMoved(_)
             | VerbError::DestinationExists { .. }
             | VerbError::CasMiss { .. } => 409,
-            VerbError::DanglingCitation { .. }
-            | VerbError::ForeignWrite { .. }
-            | VerbError::UncitedBytes { .. } => 410,
+            VerbError::ForeignWrite { .. } => 410,
             VerbError::FileChanged { .. } => 412,
             VerbError::TooLarge { .. } => 413,
             VerbError::PreconditionRequired => 428,
@@ -337,9 +325,7 @@ impl VerbError {
             VerbError::ConcurrentWrite => "concurrent-write",
             VerbError::Moved => "moved",
             VerbError::NoSuchFile(_) => "no-such-file",
-            VerbError::DanglingCitation { .. } => "dangling-citation",
             VerbError::ForeignWrite { .. } => "foreign-write",
-            VerbError::UncitedBytes { .. } => "uncited-bytes",
             VerbError::TooLarge { .. } => "payload-too-large",
             VerbError::DestinationExists { .. } => "destination-exists",
             VerbError::NoRemoval(_) => "no-removal",
@@ -696,78 +682,26 @@ impl Workspace {
     /// overlay: the cell is fetched only when the cited fetch fails
     /// its precondition, which is the overwritten case itself.
     ///
-    /// Under `pinned_reads` the citation names a VERSION, and that is
-    /// what a coherent read resolves — the same rule `checkout`
-    /// follows, and for the same reason. Reading by etag alone breaks
-    /// exactly when gating is doing its job: the upload lane makes the
-    /// cited version noncurrent, so an If-Match GET against the current
-    /// object fails its precondition and the human read path goes dark
-    /// for the whole withholding window. Gated mode withholds
-    /// VISIBILITY of new bytes; it never withholds the cited ones.
     pub async fn get_file(&self, path: &str) -> Result<Blob, VerbError> {
         if !path_ok(path) {
             return Err(VerbError::BadPath(path.to_string()));
         }
         let key = self.cfg.file_key(path);
-        let (cited, pinned, sole_writer) =
-            match manifest::load(self.store.as_ref(), &self.cfg).await? {
-                Some(l) => (
-                    l.manifest.entries.get(path).map(|e| (e.etag.clone(), e.version_id.clone())),
-                    l.manifest.pinned_reads,
-                    l.manifest.sole_writer,
-                ),
-                None => (None, false, false),
-            };
+        let (cited, sole_writer) = match manifest::load(self.store.as_ref(), &self.cfg).await? {
+            Some(l) => (l.manifest.entries.get(path).map(|e| e.etag.clone()), l.manifest.sole_writer),
+            None => (None, false),
+        };
         let moved = |path: &str| -> VerbError {
             // A sole-writer workspace (forge's export) never has a
             // second legitimate writer, so "retry" is wrong: the cited
             // etag is not coming back on its own.
             if sole_writer {
                 VerbError::ForeignWrite { path: path.to_string() }
-            // Under `pinned_reads` this is the mixed-manifest cell: an
-            // entry the citation could not make version-addressable,
-            // whose object has since moved. Retrying cannot fix it and
-            // adopting the current version is exactly the uncited bytes
-            // gating withholds. Say which it is, so a UI does not retry
-            // forever.
-            } else if pinned {
-                VerbError::UncitedBytes { path: path.to_string() }
             } else {
                 VerbError::Moved
             }
         };
-        let pinned_version = match (pinned, cited.as_ref()) {
-            (true, Some((_, Some(vid)))) => Some(vid.clone()),
-            _ => None,
-        };
-        // ORDER, and what the common read costs. A cited path is read
-        // guarded on its citation FIRST: when that fetch succeeds the
-        // cited bytes are current, so no tracked write can be newer
-        // than them and the cell is never fetched — two requests, what
-        // the read cost before the overlay. Only the precondition
-        // failure, which IS the overwritten case, fetches the cell. A
-        // pinned citation reads a VERSION, which succeeds after an
-        // overwrite too and so cannot say whether a write is newer:
-        // pinned reads consult the cell first.
-        if let Some(vid) = pinned_version {
-            if let Overlay::Served(blob) = self.read_tracked(&key, path).await? {
-                return Ok(blob);
-            }
-            return match self.store.get_version(&key, &vid).await {
-                Ok((meta, body)) => Ok(Blob { etag: meta.etag, body }),
-                // The dangling-citation endgame (D8): the backstop
-                // reaped a cited noncurrent version. Say so — never
-                // fall back to the current object, which is precisely
-                // the uncited, possibly-mid-logical-change bytes gating
-                // withholds.
-                Err(StoreError::NotFound(_)) => Err(VerbError::DanglingCitation {
-                    path: path.to_string(),
-                    version_id: vid,
-                }),
-                Err(e) => Err(e.into()),
-            };
-        }
-        let Some((etag, _)) = cited else {
+        let Some(etag) = cited else {
             // Never cited: the cell is the only place the path can be.
             return match self.read_tracked(&key, path).await? {
                 Overlay::Served(blob) => Ok(blob),

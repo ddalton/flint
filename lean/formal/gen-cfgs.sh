@@ -219,97 +219,6 @@ emit LeanProbeScopedDeferral "ProbeScopedDeferral" \
 emit LeanProbeOutOfScopeLater "ProbeOutOfScopeLater" \
   $SCOPEWORLD MaxBarriers=3
 
-# ---- tranche 3, product 2: gated citation x version GC x the backstop ------
-# The substrate this product adds is `versions[p]` — what is still STORED,
-# which on a versioned bucket is a different question from what the key
-# reads as. Inv_NoDangling ("the object exists") was the right question
-# until D7; gated staging makes the CITED version noncurrent, so an object
-# can exist, read as newer uncited bytes, and have nothing behind its
-# citation. Inv_CitedVersionLives is the corrected question, and it was
-# VIOLATED IN SHIPPED CODE this session (put_whole reported its ObjectMeta
-# before the version id was minted), which is why it is modelled at all.
-#
-# WORLD NOTE: MaxHitl=1 is load-bearing, not breadth. The D7 stale-base
-# mutation needs a foreign write to arrive AFTER a path was staged and be
-# consumed before the citation; with MaxHitl=0 that interleaving does not
-# exist and the mutation checks a state space its bug cannot live in — the
-# same trap product 4 fell into from the other side.
-# U41: MaxRestarts was 0 while GATEDINV listed `Inv_NoResurrection`, whose
-# only writer is `Restart` — the line read as coverage and could not fire.
-# Gated is the mode where it matters most (a delete stays cited until a
-# citation, which IS the shape `res` tests), and the run costs 2 s.
-GATEDWORLD="GatedCitation=TRUE MaxGen=3 MaxSeq=6 MaxHitl=1 MaxBarriers=2 \
-MaxCrashes=0 MaxRestarts=1"
-GATEDINV="TypeOK,Inv_HITLDurable,Inv_NoResurrection,Inv_CitedVersionLives,Inv_NoUncitedGC,Inv_BoundaryAtomic"
-emit LeanGatedHolds "$GATEDINV" $GATEDWORLD
-# ...and the probe that stops the knob from being cosmetic.
-emit LeanProbeGatedRestart "ProbeGatedRestartReachable" $GATEDWORLD
-emit LeanGatedBackstop "Inv_CitedVersionLives" $GATEDWORLD BackstopEnabled=TRUE
-# THE ONE THIS TRANCHE PAID FOR. The shipped reaper's rule was "delete
-# every version of a touched key except the one the installed manifest
-# cites" — and a HITL write that landed between the lane and the citation
-# is neither, so it was deleted. It was CURRENT, it was acked, and the
-# inbox entry then 412d on its next consume and was dropped as superseded.
-# The model found it on its FIRST strict run.
-# Defence in depth, PINNED as such: with the inbox guard removed, the
-# keep-current rule is the only thing between a citation and destroying
-# live acked bytes. Two arms in one cfg on purpose — that is the claim.
-emit LeanGatedReapsCurrent "Inv_NoUncitedGC" $GATEDWORLD \
-  GCKeepsCurrent=FALSE CiteDropsInflightHitl=FALSE
-emit LeanGatedSplitCitation "Inv_BoundaryAtomic" $GATEDWORLD AtomicCitation=FALSE
-# THE CITATION'S CRASH MATRIX. Every gated cfg ran MaxCrashes=0 and
-# §10.1c deferred this to product 1 — whose cfgs are MaxCrashes=0 too, so
-# it belonged to no product at all (review: U12). It could not simply be
-# switched on: `stage` was framed at the Next composition, so a crashed
-# incarnation's staged set SURVIVED pod replacement — the opposite of
-# §4's substrate rule — and a frozen `citeDone` was then quantified by
-# Inv_BoundaryAtomic against a Valid(s) that kept moving. CrashPodGated
-# clears both; these two runs are what that bought.
-emit LeanGatedCrash "$GATEDINV" $GATEDWORLD MaxCrashes=1
-emit LeanProbeGatedCrash "ProbeGatedCrashReachable" $GATEDWORLD MaxCrashes=1
-# A citation naming bytes that PREDATE a user's write. D7 wrote a
-# base-version guard for this; the model showed that guard unreachable
-# (the lane never advances the baseline, so a staged path is always
-# locally dirty, and consume/sync refuse dirty paths) and the REACHABLE
-# arm — an inbox entry still in flight, on a lane that opens no window —
-# had no guard at all. That is the whole return on this tranche.
-# LaneCancelsStaged stays FALSE here, and that is load-bearing rather than
-# inherited: this mutation's counterexample runs through a path the agent
-# DELETED while the stage still held a version for it, which is exactly the
-# shape C3's lane cancellation closes. With the cancellation on, every
-# remaining route to citing over an acked HITL write in this world is
-# already conflict-surfaced (the park arm records one), so the mutation
-# goes green and proves nothing. What the drop-inflight rule actually
-# guards in shipped code — a HITL write landing between the lane's consume
-# and the citation's window — this model cannot express: its gated lane
-# reuses `Scan`, which OPENS the window, while the shipped lane
-# deliberately opens none. Named here rather than papered over; making the
-# gated lane window-free is the fidelity fix, and it is not free.
-emit LeanGatedInflightHitl "Inv_HITLDurable" $GATEDWORLD CiteDropsInflightHitl=FALSE
-emit LeanProbeCitationInstalled "ProbeCitationInstalled" $GATEDWORLD
-emit LeanProbeWithheldDelete "ProbeWithheldDelete" $GATEDWORLD
-# U15: §4 asked for a `ProbeGC` re-run with GatedCitation=TRUE and it was
-# never built. A plain ProbeGC re-run would not have answered it either:
-# `gh.gc` is bumped by the CADENCE `GCDelete` as well, so the probe would
-# fire on a path the gated design does not use. `gcCited` is written only
-# by `CiteFinish`, so this proves a withheld delete actually LANDS at a
-# citation — the step where Inv_CitedVersionLives and Inv_NoUncitedGC are
-# most exposed, and which LeanGatedHolds could otherwise hold over with
-# `dels = {}` at every boundary.
-emit LeanProbeGatedGC "ProbeGatedGC" $GATEDWORLD
-emit LeanProbeForcedCite "ProbeForcedCite" $GATEDWORLD
-# MaxHitl=0 is the whole point of this cfg, not an inherited default.
-# With HITL on, `HitlWrite` is enabled in the INITIAL state and sets
-# objects[p] # manifest[p] in one step — so TLC's counterexample is an
-# ordinary HITL write, reachable before any StagePut and equally
-# reachable in cadence and hybrid. The probe then proves nothing about
-# §3 residual 11 (the gated lane's uncited CURRENT version), and the
-# regression fence §4 assigns it does not work: a design that abolished
-# uncited staging entirely would still fail it (review: U14). With HITL
-# off, the only way to separate objects from manifest is the staging
-# lane, which is the exposure being pinned.
-emit LeanProbeRawUncited "ProbeRawReaderSeesUncited" $GATEDWORLD MaxHitl=0
-
 # ---- tranche 3, product 1: the boundary VERB x barrier x inbox -------------
 # The ack/fence/crash matrix is where the plan retracted its own per-crash
 # prescriptions, so `settle_pending_at_startup` is currently justified by
@@ -389,61 +298,6 @@ emit LeanProbeFastPathHonor "ProbeFastPathHonor" $SENTWORLD
 emit LeanSentinelStaleMergeBase "Inv_AckImpliesCited" \
   $SENTRESTART MineIsNotForeign=FALSE
 
-# ---- C6: the sentinel over the CITATION lane ------------------------------
-# The gap the verified review named: no cfg paired SentinelEnabled with
-# GatedCitation, so `Inv_AckImpliesCited` was never evaluated over a
-# citation-lane honor even though `CiteFinish` sets `honored` under
-# SentinelEnabled — the module could express it, the matrix never asked.
-#
-# WORLD NOTE: one touch, MaxGen=4, and the generation budget is load-bearing
-# in the way MaxHitl=1 is for product 2 — PILOTED, not guessed, because the
-# probe said so. The in-flight drop needs FOUR things minted: a second
-# staged path (without one the citation never fires — a citation installs
-# `Valid(s)`, and the dropped path is by definition not in it), the dropped
-# path's own generation, the HITL generation that lands on it, and the
-# declaration's mint watermark. At MaxGen=3 (two mints) `ProbeDeclaredDrop`
-# holds — no drop is reachable AT ALL — and both mutations in this world go
-# green against a state space their bug cannot live in. A second NONCE buys
-# nothing here (that is product 1's business, and it doubles the space).
-#
-# The same probe says something about the runs that came BEFORE it:
-# `CiteDropsInflightHitl`, product 2's rule, has never had a positive
-# reachability probe. Its mutation fires through a different shape (a path
-# the agent deleted while the stage still held a version for it), and the
-# state the rule actually guards is unreachable in GATEDWORLD for exactly
-# the reason above. That is a coverage hole in a gate that was already
-# green, found by adding one anti-vacuity probe.
-# Costs ~20 s of the gate at this budget (1.5M distinct states); measured.
-SENTGATED="SentinelEnabled=TRUE MaxTouches=1 GatedCitation=TRUE \
-MaxGen=4 MaxSeq=6 MaxHitl=1 MaxBarriers=2 MaxCrashes=0 MaxRestarts=0 \
-AckHonest=TRUE LaneCancelsStaged=TRUE GatedRepair=TRUE"
-emit LeanSentinelGatedHolds \
-  "TypeOK,Inv_HITLDurable,Inv_NoResurrection,Inv_CitedVersionLives,\
-Inv_NoUncitedGC,Inv_BoundaryAtomic,Inv_AckImpliesCited,\
-Inv_AckBoundaryCoherent,Inv_NoNonceOrphan,Inv_NoFencedOkAck" $SENTGATED
-# What shipped: `status: "ok"` whatever the citation dropped, with no
-# field in the ack schema that could express the exception. The agent
-# that declared a point containing p is told the point landed while the
-# manifest at the acked seq still cites p's previous generation.
-emit LeanSentinelGatedOkOverDrop "Inv_AckImpliesCited" \
-  $SENTGATED AckHonest=FALSE
-# Anti-vacuity, both halves: the drop is REACHED inside a declared
-# boundary, and the honest answer actually fires.
-emit LeanProbeDeclaredDrop "ProbeDeclaredDrop" $SENTGATED
-emit LeanProbePartialAck "ProbePartialAck" $SENTGATED
-# The defect TLC found in this world, in a fix two hours old: the stage
-# and the withheld-delete set both reach the citation, and `merge` has no
-# ordering between them. Cancel neither and the boundary an ok ack names
-# cites a file the agent deleted before declaring.
-emit LeanSentinelGatedStaleStage "Inv_AckImpliesCited" \
-  $SENTGATED LaneCancelsStaged=FALSE
-# C2, as a model artifact rather than a battery-only fix: the repair the
-# fused barrier has and the citation lane did not. Without it an ok ack
-# names a manifest that does not cite a HITL write this workspace has
-# already integrated into its own tree.
-emit LeanSentinelGatedNoRepair "Inv_AckBoundaryCoherent" \
-  $SENTGATED GatedRepair=FALSE
-
 # ---- the ack's PROVENANCE: one boundary, one clock -------------------------
 # `Inv_AckBoundaryCoherent` asks whether the acked boundary is a coherent
 # POINT.  It never asked which CLOCK installed it — and that is a separate
@@ -467,47 +321,6 @@ emit LeanSentinelClockHolds \
 # reports as the default clock while the ack tells the agent otherwise.
 emit LeanSentinelClockUnstamped "Inv_BoundaryNamesItsClock" \
   $SENTWORLD StampBoundarySource=FALSE
-# The same claim over the CITATION lane, which is a different installer and
-# is where the second half of the shipped defect actually lived.
-emit LeanSentinelGatedClockUnstamped "Inv_BoundaryNamesItsClock" \
-  $SENTGATED StampBoundarySource=FALSE
-
-# ---- the PAIR the plan predicted and the matrix never ran -----------------
-# §10.3: "two products that share an action are not covered by running them
-# separately", and it named SyncScope x GatedCitation as the obvious next
-# one — a scoped sync and a citation lane both advance `instBase`, by
-# different rules. No cfg had ever set both TRUE. This is that run.
-#
-# The shared object is `instBase`: D4 advances it per-path (only where the
-# sync applied or verified in scope) while the citation lane advances it
-# for everything it installs. If the citation's advance is not scope-aware,
-# an out-of-scope foreign entry reads as already-integrated at the next
-# merge and is lost from the inbox flow forever — which is exactly what
-# Inv_NoForeignLost exists to catch, and it had never been evaluated in a
-# world where a citation could do the advancing.
-# WORLD NOTE, and it is the trap §10.3 named, walked into from the third
-# side: the first budget for this pair used MaxHitl=1 as its foreign source
-# and AllowStall=FALSE. The holds run went green over 70,701 states, the
-# deferral probe FIRED, and the D4 mutation still generated a byte-identical
-# state count — `ScopedInstBase` was unreachable, so the pair run was green
-# over a world its bug cannot live in. The foreign source has to be the one
-# SCOPEWORLD uses: a second syncer installing while ours is stalled.
-SCOPEGATED="SyncEnabled=TRUE SyncScope=TRUE GatedCitation=TRUE MaxSyncs=1 \
-AllowStall=TRUE MaxHitl=0 MaxGen=2 MaxSeq=6 MaxBarriers=2 \
-MaxCrashes=0 MaxRestarts=0"
-emit LeanScopedGatedHolds \
-  "TypeOK,Inv_HITLDurable,Inv_NoResurrection,Inv_CitedVersionLives,\
-Inv_NoUncitedGC,Inv_BoundaryAtomic,Inv_SyncNeverDestroysDirty,Inv_NoForeignLost" \
-  $SCOPEGATED
-# Anti-vacuity for the pair, and it is the whole reason the run exists: if
-# the scoped-deferral action is unreachable in this world then the pair is
-# not being exercised and the holds run above is green over nothing.
-emit LeanProbeScopedGated "ProbeScopedDeferral" $SCOPEGATED
-# The D4 mutation, re-run inside the gated world: whole-instBase advance
-# must still be caught when a citation lane is also advancing it.
-emit LeanScopedGatedWholeBase "Inv_NoForeignLost" \
-  $SCOPEGATED ScopedInstBase=FALSE
-
 # ---- tranche 4: the NARROW verb x the barrier (scoped-read design §4) ------
 #
 # WORLD NOTE. The narrow's two failure modes are read by `classify`, so the

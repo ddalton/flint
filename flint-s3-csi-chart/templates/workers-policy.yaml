@@ -127,8 +127,8 @@ spec:
 # On a pure-spot fleet the middle row is the common case, and a budget
 # does nothing there. What covers all three is DETECTION: NodeUnpublish
 # asks `worker::is_gone` first, and a syncer that died early produces a
-# SyncerGoneAtUnpublish event on the tenant pod naming `recover-staged`,
-# with staged-but-uncited objects recoverable. The budget only upgraded
+# SyncerGoneAtUnpublish event on the tenant pod naming the preserved
+# tree. The budget only upgraded
 # "detected and recoverable" to "did not happen", on one path — while
 # stalling autoscaler scale-down (it contradicted the workers' own
 # safe-to-evict: true) and blocking drain for as long as any tenant

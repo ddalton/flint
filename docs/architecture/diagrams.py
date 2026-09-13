@@ -679,7 +679,7 @@ def plate_04():
     s = SVG(W, H, "flint-lean, drawn as a flow: the agent pod writes plain local files in a tree the CSI node plugin owns and bind-mounts; "
                   "the same tree is hostPathed into an unprivileged flint-sync worker, which checks it out from S3 at start and publishes "
                   "changed files at a boundary or on cadence. The lease, the broker and the boundary verbs are control, off the data path. "
-                  "Gated mode makes durability and visibility separate events with one CAS.")
+                  "A boundary makes the whole changed set visible with one CAS.")
     fe = "lean"
     s.group(M, 22, 1020, 310, "one node", "no FUSE, no privileged container in the tenant pod, no webhook")
     s.box(44, 56, 430, 160, fe)
@@ -721,12 +721,12 @@ def plate_04():
         s.numdot(x + 12, 410, i + 1, fe)
         s.text(x + 34, 414, head, "t2" if i < 2 else "mono")
         s.text(x + 34, 432, body, "t4")
-    # control · gated
+    # control · the boundary
     s.group(M, 468, 760, 96, "control — off the data path")
     s.text(44, 508, "lease in the bucket — one writer; a second syncer is refused, never merged", "t4")
     s.text(44, 526, "broker → short-lived keys → the worker, over a loopback door · consumers absent = deny", "t4")
     s.text(44, 544, "the boundary verbs are files: an agent that can write a file can declare a coherent point", "t4")
-    s.card(808, 468, 768, 96, "gated mode — durable now, visible on ONE CAS", ["every changed file is uploaded as a new version at once: durable, and invisible; one CAS cites the whole set", ("b", "a reader sees the whole change or none of it; refused without a lag bound")], fe)
+    s.card(808, 468, 768, 96, "a boundary is a coherent point", ["every floor tick and every publish touch runs one fused barrier: upload, then ONE CAS cites the whole set", ("b", "a reader takes a boundary entire or not at all; a publish touch is the point the agent declared")], fe)
     s.legend(M + 4, 596, [("data", "data path"), ("ctl", "control"), ("red", "hazard / trust boundary")])
     s.h = 620
     return s
@@ -1053,7 +1053,7 @@ def plate_10():
           [("b", "Its ServiceAccount's push rights."), "No bucket credential — they land on the syncer container only — and no privilege. It can push as that SA to repositories listing it, within policy; revoked by pod deletion or SA rotation within the review cache. Ceiling: a shared SA reaches every sibling's agent/* branch, and the server runs as root."]]),
         ("Does it fail closed?", "secure defaults, refusal over silent degradation",
          [[("r", "No, by default."), "security.enforcePermissions is false — evaluate, log, allow — and even enforced the hub holds CAP_DAC_OVERRIDE. SECINFO now advertises AUTH_SYS first and AUTH_NONE last, pinned by a test, so a stock mount negotiates sec=sys."],
-          [("b", "Detection becomes refusal."), "A syncer that lost its lease answers refused-fenced rather than publishing; the plugin refuses to clean up a published tree; the chart refuses to render on credential misconfig; gated mode is refused without a lag bound."],
+          [("b", "Detection becomes refusal."), "A syncer that lost its lease answers refused-fenced rather than publishing; the plugin refuses to clean up a published tree; the chart refuses to render on credential misconfig; the drain refuses to attest a boundary that left a path parked."],
           [("b", "Deny is the default."), "consumers absent means deny; the ValidatingAdmissionPolicy — not the namespace label — fences the workers namespace to the plugin's own node; a dead mounter strands the pod on ENOTCONN rather than serving stale bytes."],
           [("b", "Closed where it counts, open on two defaults."), "An unparseable policy refuses; a MISSING pre-receive does not open the repository; a snapshot naming a missing pack refuses to serve.", ("r", "No door.namespace renders no NetworkPolicy, and an absent branches block is permissive: both documented, neither refuses.")]]),
     ]
@@ -1168,7 +1168,7 @@ def plate_12():
           [("b", "Many, serialised by the server."), "one syncer per repository; a stale push is refused by name; a merge is a push to refs/for/<target>"]]),
         ("What a reader sees", "the consistency contract",
          [["the live tree, strongly — close-to-open, no RPO lag, through the coherence authority"],
-          ["the last PUBLISHED boundary, never your last write; gated mode makes it all-or-nothing"],
+          ["the last PUBLISHED boundary, never your last write; a boundary is all-or-nothing"],
           ["whatever S3 currently holds, with S3's own consistency and nothing added"],
           ["on fetch, every acknowledged push — served by the write authority, never stale, never from S3; between fetches, a snapshot with no signal"]]),
         ("Across clusters", "the fleet shape",
@@ -1325,7 +1325,7 @@ def portrait_p4():
     s.alabel(448, 98, "checkout · publish", fe)
     s.card(472, 8, 160, 250, "S3", [("m", "files/<path>"), ("m", ".flint/lean/epoch"), ("m", "  claim · manifest"), ("m", "  inbox · conflicts/"), "the lease lives in the BUCKET, so one writer holds across clusters"], None, "s3", pad=10, lh=13)
     s.card(8, 272, 306, 138, "The loop", ["1 · pod starts: checkout first", "2 · the agent works at disk speed", ("m", "3 · echo > .flint/publish"), ("m", "4 · .flint/publish.ack = ok"), "ok means the bytes are in S3. RPO = the last barrier, ≤ floorSecs on a hard kill."], fe, lh=13)
-    s.card(326, 272, 306, 138, "Gated mode", ["every changed file is uploaded as a new version at once — durable and INVISIBLE — and one CAS cites the whole pending set. A reader sees all of a change or none of it; gated is refused without a lag bound."], fe, lh=13)
+    s.card(326, 272, 306, 138, "A boundary", ["every floor tick and every publish touch runs one fused barrier: the changed files are uploaded, then ONE CAS cites the whole set. A reader sees all of a boundary or none of it; a publish touch is the point the agent declared coherent."], fe, lh=13)
     return s
 
 

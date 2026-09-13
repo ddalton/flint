@@ -53,7 +53,7 @@ chart. Commands are copy-pasteable, not illustrative.
 
 | | |
 |---|---|
-| An S3 bucket | must already exist. **Versioning on** if you want gated mode — it is refused without it. Nothing here creates or deletes buckets. |
+| An S3 bucket | must already exist. Versioning is not required. Nothing here creates or deletes buckets. |
 | Kubernetes | **1.29+** — the sidecar is injected as a *native sidecar* (`initContainer` with `restartPolicy: Always`), which is 1.29 or newer. |
 | Tools | `kubectl`, `helm` 3.8+ (OCI support) |
 | Credentials | see [credentials](#credentials) — the agent container never holds one |
@@ -166,7 +166,7 @@ kubectl apply -f workspace.yaml
 kubectl -n agents get flintleanworkspace proj1 -o yaml | grep -A6 conditions
 ```
 
-You want `BoundaryModeAccepted: True`. `BoundaryModeActive: Unknown`
+You want `SpecAccepted: True`. `SyncerObserved: Unknown`
 with reason `NoLiveSyncer` is normal for a workspace at rest — nothing
 holds the lease until a pod starts.
 

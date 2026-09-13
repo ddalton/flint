@@ -962,7 +962,7 @@ impl S3Node {
         // well as into the launch message. The child gets it either way,
         // but only the pod spec is inherited by `kubectl exec`, and
         // §3.2's operator-side recipe — `kubectl -n flint-workers exec
-        // <worker> -- flint-sync recover-staged|status` — is the only way
+        // <worker> -- flint-sync status` — is the only way
         // left to run those verbs now that no tenant can. With the list
         // in the launch message alone every one of them exits 2 with
         // "FLINT_SYNC_BUCKET is required" (found by S12). Credentials are
@@ -1175,8 +1175,7 @@ impl S3Node {
     /// is moved out of `volumes/` (adoption and retries ignore it), the
     /// quota image kept, and the tenant told where it is. Before this
     /// the same paths deleted the tree seconds after an event that
-    /// promised `recover-staged`, which can only re-cite objects that
-    /// were uploaded.
+    /// pointed the operator at it.
     async fn preserve_undrained(&self, dir: &Path, st: &VolumeState, target: &Path, why: &str) -> Result<(), Status> {
         unmount_all(target).map_err(|e| Status::internal(format!("unmount target: {e}")))?;
         if st.tree_image.is_some() {
@@ -1208,7 +1207,7 @@ impl S3Node {
             &format!(
                 "{}: the syncer {why}. Nothing written since the last boundary was published. The tree is preserved on \
                  node {} at {} ({}); copy out what matters, then remove that directory. Objects that did upload \
-                 before the failure can be re-cited with recover-staged.",
+                 before the failure remain in the bucket under their keys.",
                 st.cr,
                 self.cfg.node_name,
                 dest.display(),

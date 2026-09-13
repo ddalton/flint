@@ -120,7 +120,7 @@
 <p>Everything below was run end to end on 2026-08-26 against the published chart. Commands are copy-pasteable, not illustrative.</p>
 <hr>
 <h2>Before you start</h2>
-<table><tr><th></th><th></th></tr><tr><td>An S3 bucket</td><td>must already exist. <strong>Versioning on</strong> if you want gated mode — it is refused without it. Nothing here creates or deletes buckets.</td></tr><tr><td>Kubernetes</td><td><strong>1.29+</strong> — the sidecar is injected as a *native sidecar* (<code>initContainer</code> with <code>restartPolicy: Always</code>), which is 1.29 or newer.</td></tr><tr><td>Tools</td><td><code>kubectl</code>, <code>helm</code> 3.8+ (OCI support)</td></tr><tr><td>Credentials</td><td>see <a href="#credentials">credentials</a> — the agent container never holds one</td></tr></table>
+<table><tr><th></th><th></th></tr><tr><td>An S3 bucket</td><td>must already exist. Versioning is not required. Nothing here creates or deletes buckets.</td></tr><tr><td>Kubernetes</td><td><strong>1.29+</strong> — the sidecar is injected as a *native sidecar* (<code>initContainer</code> with <code>restartPolicy: Always</code>), which is 1.29 or newer.</td></tr><tr><td>Tools</td><td><code>kubectl</code>, <code>helm</code> 3.8+ (OCI support)</td></tr><tr><td>Credentials</td><td>see <a href="#credentials">credentials</a> — the agent container never holds one</td></tr></table>
 <p>Nothing is installed on your nodes. The sidecar is an ordinary unprivileged container.</p>
 <hr>
 <h2>1. Install the operator</h2>
@@ -171,7 +171,7 @@ spec:
   floorSecs: 60                  # publish cadence — and the RPO</code></pre>
 <pre><code>kubectl apply -f workspace.yaml
 kubectl -n agents get flintleanworkspace proj1 -o yaml | grep -A6 conditions</code></pre>
-<p>You want <code>BoundaryModeAccepted: True</code>. <code>BoundaryModeActive: Unknown</code> with reason <code>NoLiveSyncer</code> is normal for a workspace at rest — nothing holds the lease until a pod starts.</p>
+<p>You want <code>SpecAccepted: True</code>. <code>SyncerObserved: Unknown</code> with reason <code>NoLiveSyncer</code> is normal for a workspace at rest — nothing holds the lease until a pod starts.</p>
 <hr>
 <h2>3. Opt a pod in</h2>
 <p>One label. That is the whole integration.</p>

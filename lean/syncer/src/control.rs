@@ -67,7 +67,6 @@ pub struct BootStamp {
 pub struct Capabilities {
     pub protocol: u32,
     pub verbs: Vec<String>,
-    pub boundary_mode: String,
     /// "live" | "fenced" (D2). A fenced syncer advertises no verbs, so
     /// agents stop touching sentinels on a zombie.
     pub state: String,
@@ -235,7 +234,6 @@ impl Syncer {
         let caps = Capabilities {
             protocol: SENTINEL_PROTOCOL,
             verbs,
-            boundary_mode: self.cfg.boundary_mode.as_str().to_string(),
             state: if fenced { "fenced".into() } else { "live".into() },
             reason: posture.reason.clone(),
             sentinel_min_interval_secs: self.cfg.sentinel_min_interval_secs,

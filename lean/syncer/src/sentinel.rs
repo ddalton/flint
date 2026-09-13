@@ -151,8 +151,8 @@ pub struct PendingSentinel {
 pub struct Ack {
     /// "ok" | "partial" | "refused-fenced".
     ///
-    /// `partial` is the gated citation's honest answer (D1): the
-    /// boundary installed, but a path the agent declared is not in it —
+    /// `partial` is the honest answer when the boundary installed but a
+    /// path the agent declared is not in it (D1) —
     /// `report.dropped` names them. An agent that treats it as failure
     /// and re-touches is behaving correctly.
     pub status: String,
@@ -194,53 +194,12 @@ pub struct AckReport {
     /// Foreign changes seen but deferred to the inbox flow (D4).
     #[serde(default)]
     pub out_of_scope_foreign: usize,
-    /// Declared paths the boundary does NOT carry (gated citations
-    /// only). Non-empty ⇒ `status: "partial"`: the §2.2 rule — the
+    /// Declared paths the boundary does NOT carry (a standing park).
+    /// Non-empty ⇒ `status: "partial"`: the §2.2 rule — the
     /// conflict report rides the ack in full, never a silent loser —
     /// generalized from `sync` to the publish verb.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dropped: Vec<String>,
-}
-
-/// The ack a gated publish honor writes.
-///
-/// Extracted so the one rule that makes it truthful is testable on its
-/// own: a citation can install a boundary that does NOT carry a path
-/// the agent declared, and the shipped honor said `status: "ok"` with
-/// no field anywhere that could express the exception — the plan's own
-/// "silent loser", at the verb whose whole contract is D1's at-least
-/// guarantee.
-pub(crate) fn gated_ack(
-    pending: &PendingSentinel,
-    forced: bool,
-    lane: &super::gated::LaneReport,
-    cite: &super::gated::CitationReport,
-    manifest_etag: Option<String>,
-) -> Ack {
-    // A standing park in the lane is the same fact as an inflight drop:
-    // the boundary does not carry the path (review 2026-09-12, inbox-1).
-    let mut dropped = cite.dropped_inflight.clone();
-    dropped.extend(lane.parked.iter().cloned());
-    Ack {
-        status: if dropped.is_empty() { "ok".into() } else { "partial".into() },
-        nonces: pending.nonces.clone(),
-        sentinel_mtime_unix_ns: pending.consumed_mtime_unix_ns,
-        seq: cite.seq,
-        manifest_etag,
-        boundary: if forced { "sentinel-deferred".into() } else { "sentinel".into() },
-        completed_unix: now_unix(),
-        observed_epoch: None,
-        reason: None,
-        report: AckReport {
-            uploaded: lane.staged.len(),
-            deleted: cite.deleted.len(),
-            parked: lane.parked.len(),
-            consumed: lane.consumed,
-            no_change: lane.staged.is_empty() && cite.no_change && dropped.is_empty(),
-            dropped,
-            ..Default::default()
-        },
-    }
 }
 
 /// The work meter (D3.1 — the hot-loops no-regression rule).
@@ -874,9 +833,6 @@ impl Syncer {
         forced: bool,
         source: Option<&str>,
     ) -> LeanResult<Ack> {
-        if self.is_gated() {
-            return self.honor_publish_gated(pending, forced, source).await;
-        }
         // The DECLARED form (D1): a delete the agent made before the
         // touch is part of the coherent point it declared, so this
         // barrier confirms first-absence paths instead of acking a
@@ -898,8 +854,8 @@ impl Syncer {
         let baseline = self.state.load_baseline()?;
         // Review 2026-09-12, inbox-1: a boundary with a standing park does
         // NOT carry the agent's file — `ok` promised "the boundary is in
-        // the bucket". It is `partial`, the same word the gated citation
-        // uses for the same fact, and `report.dropped` names the paths.
+        // the bucket". It is `partial`, and `report.dropped` names the
+        // paths.
         Ok(Ack {
             status: if report.parked.is_empty() { "ok".into() } else { "partial".into() },
             nonces: pending.nonces.clone(),
@@ -921,79 +877,6 @@ impl Syncer {
                 ..Default::default()
             },
         })
-    }
-
-    /// The gated honor (D1 x D6): a publish sentinel is a CITATION
-    /// SOURCE, not a fused barrier. The lane runs first so the boundary
-    /// includes everything written up to the touch, then ONE CAS
-    /// installs the whole pending set.
-    ///
-    /// An empty stage still acks `ok`: the lane just ran and staged
-    /// nothing, so every local byte is already cited and the boundary
-    /// the ack claims is already true. That is the same soundness
-    /// argument the cadence path's skip-on-no-diff fast path rests on.
-    async fn honor_publish_gated(
-        &mut self,
-        pending: &PendingSentinel,
-        forced: bool,
-        source: Option<&str>,
-    ) -> LeanResult<Ack> {
-        // The drain honors a standing sentinel too, and rewrites the ack
-        // to `drain`. The manifest has to agree: one boundary must never
-        // name two clocks, least of all with the BUCKET — the surface an
-        // operator trusts — holding the wrong one.
-        let cite_source = match source {
-            Some("drain") => super::gated::CitationSource::Drain,
-            _ => super::gated::CitationSource::Sentinel,
-        };
-        let mut lane = self.declared_lane().await?;
-        let mut cite = self.citation_pass(cite_source).await?;
-        // D1, at the one place gated can break it. A citation drops a
-        // staged path when a HITL write landed between the lane's
-        // consume and the citation's window — so the manifest this ack
-        // would name still cites the PREVIOUS generation of a path the
-        // agent declared. Re-run once: the racing entry is queued in
-        // the inbox now, the lane consumes it the ordinary way (the
-        // local file is still dirty, so the conflict rule publishes the
-        // agent's bytes and preserves the user's), and the second
-        // citation carries the declared point.
-        if !cite.dropped_inflight.is_empty() {
-            let lane2 = self.declared_lane().await?;
-            let mut cite2 = self.citation_pass(cite_source).await?;
-            if cite2.seq.is_none() {
-                // Nothing left to cite: the boundary the first pass
-                // installed is still the one being acked.
-                cite2.seq = cite.seq;
-            }
-            lane.staged.extend(lane2.staged);
-            lane.parked.extend(lane2.parked);
-            lane.staged_bytes += lane2.staged_bytes;
-            lane.consumed += lane2.consumed;
-            cite = cite2;
-        }
-        // Metered on what the LANE moved: the citation itself is one
-        // CAS regardless of how many paths it names, so charging by
-        // cited-path count would price the mode's whole advantage as a
-        // cost (D3.1).
-        self.charge_budget(lane.staged_bytes)?;
-        let baseline = self.state.load_baseline()?;
-        // An `ok` ack MUST name a seq (review: U38). A citation that
-        // installed nothing — the no-diff honor, and the re-run after a
-        // crash that had already installed — returns `seq: None`, and
-        // the ack then said `status: "ok"` with `seq: null`, which
-        // breaks the ack schema and §1.2's authoritative-durability
-        // recipe ("read the ack's seq, then confirm that seq in the
-        // bucket"). Nothing was published, but the agent's boundary IS
-        // satisfied — by the boundary already installed. Name that one.
-        //
-        // The earlier `dropped_inflight` fallback above closes a THIRD
-        // path and does nothing for these two: it sits inside a block
-        // guarded on dropped_inflight being non-empty, which is exactly
-        // what a no-diff citation does not have.
-        if cite.seq.is_none() {
-            cite.seq = Some(baseline.seq);
-        }
-        Ok(gated_ack(pending, forced, &lane, &cite, baseline.manifest_etag.clone()))
     }
 
     async fn honor_sync(&mut self, pending: &PendingSentinel, forced: bool) -> LeanResult<Ack> {
@@ -1109,18 +992,11 @@ pub struct FloorOutcome {
     pub uploaded: usize,
     pub deleted: usize,
     pub consumed: usize,
-    /// Gated only: what the upload lane made durable on this tick.
-    pub staged: usize,
-    /// Gated only: what a citation, if one fired, made visible.
-    pub cited: usize,
-    /// Gated only: which coherent point fired (`None` = none did, which
-    /// is the mode working, not a fault).
-    pub citation_source: Option<String>,
     /// Why visibility is withheld right now, straight off the gauges —
     /// so the per-tick stderr line is greppable and structured, which
     /// until Phase 6 is the ONLY signal surface an operator has.
     pub withheld_reason: Option<String>,
-    /// Gated only: a foreign 412 parked at least one path on this tick.
+    /// A foreign 412 parked at least one path on this tick.
     pub parked: usize,
     /// Carried out of the barrier only to feed the news ticker.
     observed_etag: Option<String>,
@@ -1289,38 +1165,16 @@ impl Syncer {
         // barrier the floor owed; running a second one would be pure
         // churn.
         if !published {
-            // D6: in `gated` the floor tick is the UPLOAD lane, and a
-            // citation only at a coherent point. `cadence` and `hybrid`
-            // keep the fused barrier byte-for-byte.
-            let ran = if self.is_gated() {
-                self.gated_tick(false).await.map(|(lane, cite)| {
-                    out.seq = cite.seq;
-                    out.uploaded = lane.staged.len();
-                    out.deleted = cite.deleted.len();
-                    out.consumed = lane.consumed;
-                    out.staged = lane.staged.len();
-                    out.cited = cite.cited;
-                    out.citation_source = cite.source.clone();
-                    out.parked = lane.parked.len();
-                    out.no_change = lane.staged.is_empty() && cite.no_change;
-                    // The ticker moves at CITATION points in gated mode.
-                    // The lane issues no manifest request of its own
-                    // (D5's rule), so between citations there is nothing
-                    // it could learn about a sibling's publish without
-                    // paying a HEAD per floor tick.
-                    cite.seq
-                })
-            } else {
-                self.cadence_barrier().await.map(|r| {
-                    out.seq = r.seq;
-                    out.no_change = r.no_change;
-                    out.uploaded = r.uploaded.len();
-                    out.deleted = r.deleted.len();
-                    out.consumed = r.consumed;
-                    out.observed_etag = r.observed_etag.clone();
-                    r.observed_seq
-                })
-            };
+            let ran = self.cadence_barrier().await.map(|r| {
+                out.seq = r.seq;
+                out.no_change = r.no_change;
+                out.uploaded = r.uploaded.len();
+                out.deleted = r.deleted.len();
+                out.consumed = r.consumed;
+                out.parked = r.parked.len();
+                out.observed_etag = r.observed_etag.clone();
+                r.observed_seq
+            });
             match ran {
                 Ok(observed) => {
                     let etag = out.observed_etag.take();
@@ -1395,27 +1249,7 @@ impl Syncer {
             }
         }
         if !published {
-            // D10: the drain cites EVERYTHING, in every mode. Under
-            // gated that is the lane plus one CAS naming versions that
-            // already exist — no data movement, which is exactly what
-            // makes the drain sizable against a spot reclaim's grace.
-            // Running the fused barrier here instead would re-upload
-            // every staged byte at the one moment there is no time for
-            // it, and would leave the last boundary of the workspace's
-            // life unstamped and unpinned.
-            if self.is_gated() {
-                let lane = self.declared_lane().await?;
-                if !lane.parked.is_empty() {
-                    return Err(LeanError::State(format!(
-                        "drain: {} path(s) could not be published (parked on a foreign version whose \
-                         preserve failed): {:?} — not attesting",
-                        lane.parked.len(),
-                        lane.parked
-                    )));
-                }
-                let cite = self.citation_pass(super::gated::CitationSource::Drain).await?;
-                self.ticker_from(cite.seq, None)?;
-            } else {
+            // D10: the drain publishes EVERYTHING it can, as one declared barrier.
                 let r = self.declared_barrier_as("drain").await?;
                 self.ticker_from(r.observed_seq, r.observed_etag.clone())?;
                 // Review 2026-09-12, inbox-1: a drain that leaves a path
@@ -1429,7 +1263,6 @@ impl Syncer {
                         r.parked
                     )));
                 }
-            }
         }
         Ok(acks)
     }

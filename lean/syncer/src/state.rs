@@ -37,13 +37,6 @@ pub struct BaselineEntry {
     /// the bytes on disk are the LOCAL edit, about to publish under a
     /// CRC of its own, and the sentinel never repairs.
     pub crc64_b64: Option<String>,
-    /// The version the manifest cites for this path, when the bucket is
-    /// versioned (boundary-verbs plan D7). Carried so a gated citation
-    /// can re-validate its staging base: if this moved between staging
-    /// and citation, a HITL consume or sync landed in between and
-    /// installing the staged version would UNCITE the foreign bytes.
-    #[serde(default)]
-    pub version_id: Option<String>,
 }
 
 /// The persisted baseline snapshot: what this syncer believes the

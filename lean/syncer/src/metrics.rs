@@ -15,7 +15,7 @@
 //! the label keys exactly.
 //!
 //! **String-valued gauges are rendered as numeric enums**, not as
-//! labels, for the same reason: `mode="gated"` would add a label key
+//! labels, for the same reason: `reason="parked-412"` would add a label key
 //! and open the door to the next one. The mapping is in each metric's
 //! HELP line, where a human reading the exposition can see it.
 
@@ -42,40 +42,22 @@ fn escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " ")
 }
 
-/// `cadence` → 0, `hybrid` → 1, `gated` → 2.
-fn mode_code(s: &str) -> u64 {
-    match s {
-        "cadence" => 0,
-        "hybrid" => 1,
-        "gated" => 2,
-        _ => 99,
-    }
-}
-
 /// `none` → 0, and one code per `Withheld` variant.
 fn withheld_code(s: Option<&str>) -> u64 {
     match s {
         None => 0,
-        Some("quiesce-pending") => 1,
-        Some("awaiting-boundary") => 2,
-        Some("parked-412") => 3,
-        Some("cas-conflict") => 4,
-        Some("version-probe-failed") => 5,
+        Some("parked-412") => 1,
         Some(_) => 99,
     }
 }
 
-/// One code per citation source (`gauges::LastBoundary::source`).
+/// One code per boundary source (`gauges::LastBoundary::source`).
 fn source_code(s: &str) -> u64 {
     match s {
         "sentinel" => 1,
-        "quiescence" => 2,
-        "forced-lag-cap" => 3,
-        "forced-backlog-cap" => 4,
-        "cadence" => 5,
-        "drain" => 6,
-        "recovered" => 7,
-        "repair" => 8,
+        "sentinel-deferred" => 2,
+        "cadence" => 3,
+        "drain" => 4,
         _ => 99,
     }
 }
@@ -92,46 +74,15 @@ fn series(g: &Gauges) -> Vec<(&'static str, &'static str, u64)> {
             u64::from(g.state == "fenced"),
         ),
         (
-            "flint_lean_boundary_mode",
-            "citation policy in force: 0=cadence 1=hybrid 2=gated (gauges.boundary_mode)",
-            mode_code(&g.boundary_mode),
-        ),
-        (
             "flint_lean_rpo_seconds",
-            "seconds since the last DURABLE write. Elapsed time, not exposure: an idle \
-             healthy workspace has nothing at risk and a growing value — pair it with \
-             flint_lean_staged_uncited_objects before alerting",
+            "seconds since the last boundary was installed. Elapsed time, not exposure: an \
+             idle healthy workspace has nothing at risk and a growing value — pair it with \
+             flint_lean_withheld_reason before alerting",
             g.rpo_secs,
         ),
         (
-            "flint_lean_visibility_lag_seconds",
-            "seconds since the last CITATION. In cadence/hybrid this equals the RPO by \
-             construction; in gated it is the number visibilityLagBoundSecs caps",
-            g.visibility_lag_secs,
-        ),
-        (
-            "flint_lean_staged_uncited_objects",
-            "durable objects no manifest cites yet. This is gated mode's whole exposure: \
-             what a pod replacement would strand for `flint-sync recover-staged`",
-            g.staged_uncited_count,
-        ),
-        (
-            "flint_lean_staged_uncited_bytes",
-            "bytes staged and uncited",
-            g.staged_uncited_bytes,
-        ),
-        (
-            "flint_lean_cited_noncurrent_age_max_seconds",
-            "how long the OLDEST still-cited version has been noncurrent. Gated staging \
-             makes the cited version noncurrent, so the retention backstop runs a clock \
-             against live cited data — noncurrentRetentionDays is the number this must \
-             never reach",
-            g.cited_noncurrent_age_max_secs,
-        ),
-        (
             "flint_lean_withheld_reason",
-            "why visibility is withheld: 0=none 1=quiesce-pending 2=awaiting-boundary \
-             3=parked-412 4=cas-conflict 5=version-probe-failed",
+            "why visibility is withheld: 0=none 1=parked-412",
             withheld_code(g.withheld_reason.as_deref()),
         ),
         (
@@ -141,26 +92,19 @@ fn series(g: &Gauges) -> Vec<(&'static str, &'static str, u64)> {
             g.sentinel_budget_remaining,
         ),
         (
-            "flint_lean_forced_citations_total",
-            "citations forced by a cap rather than taken at a declared coherent point. A \
-             workspace that forces every citation has no coherence contract left",
-            g.forced_citation_count,
-        ),
-        (
             "flint_lean_last_boundary_source",
-            "which coherent point installed the last citation: 1=sentinel 2=quiescence \
-             3=forced-lag-cap 4=forced-backlog-cap 5=cadence 6=drain 7=recovered 8=repair, \
-             0=none yet",
+            "which clock installed the last boundary: 1=sentinel 2=sentinel-deferred \
+             3=cadence 4=drain, 0=none yet",
             g.last_boundary.as_ref().map(|b| source_code(&b.source)).unwrap_or(0),
         ),
         (
             "flint_lean_last_boundary_seq",
-            "the manifest seq the last citation installed",
+            "the manifest seq the last boundary installed",
             g.last_boundary.as_ref().map(|b| b.seq).unwrap_or(0),
         ),
         (
             "flint_lean_last_boundary_timestamp_seconds",
-            "unix time of the last citation",
+            "unix time of the last boundary",
             g.last_boundary.as_ref().map(|b| b.unix).unwrap_or(0),
         ),
         (
@@ -203,15 +147,9 @@ pub fn render(g: &Gauges, labels: &Labels) -> String {
 /// a compile-time-visible omission rather than a silent gap.
 pub const COVERED_FIELDS: &[&str] = &[
     "state",
-    "boundary_mode",
     "rpo_secs",
-    "visibility_lag_secs",
-    "staged_uncited_count",
-    "staged_uncited_bytes",
-    "cited_noncurrent_age_max_secs",
     "withheld_reason",
     "sentinel_budget_remaining",
-    "forced_citation_count",
     "last_boundary",
     "updated_unix",
     "last_durable_unix",

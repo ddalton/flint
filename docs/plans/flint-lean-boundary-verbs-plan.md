@@ -1,5 +1,7 @@
 # flint-lean boundary verbs — sentinel protocol and gated manifest advance
 
+**Status (2026-09-13):** gated mode (D6-D10, D13) and the `boundaryMode` axis were REMOVED — see `flint-lean-writer-lease-and-gated-assessment.md` §9; the sentinel verbs (D0-D5, D11-D15) stand. Historical text below.
+
 **Status:** plan of record for the boundary-verbs tranche — **v2**, adversarial review folded (5 lenses: crash-takeover, gc-durability, security-dos, ops-fleet, model-drill; 43 findings, ledger in §9). **Phases 0–3 implemented 2026-08-25 — see §10.**
 **Peers:** `docs/plans/flint-lean-plan.md` (v2, the design of record for the syncer), `docs/plans/flint-lean-chaos-drill.md` (12-leg drill + findings ledger), `lean/formal/README.md` (65-run TLC gate).
 **Shipped substrate this plans against:** crate `flint-lean` at `lean/syncer/` (bins `flint-sync`, `flint-lean-gateway`), operator at `spdk-csi-driver/src/lean_operator/`, chart `flint-lean-chart/`, model `lean/formal/LeanSubtree.tla`. (The syncer moved out of `spdk-csi-driver/src/lean/`; any memory of that path is stale.)

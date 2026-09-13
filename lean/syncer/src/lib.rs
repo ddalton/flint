@@ -42,7 +42,6 @@ pub mod barrier;
 pub mod checkout;
 pub mod chunk;
 pub mod control;
-pub mod gated;
 pub mod gauges;
 pub use gauges::{status_report, Gauges, StatusReport};
 pub mod inbox;
@@ -143,42 +142,6 @@ impl LeanError {
 }
 
 pub type LeanResult<T> = Result<T, LeanError>;
-
-/// Citation policy (boundary-verbs plan D6). `hybrid` is the default:
-/// the fused barrier runs at every floor tick AND at every consumed
-/// publish sentinel, whichever comes first — citation never waits, so
-/// published-view freshness is never later than cadence-only.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BoundaryMode {
-    /// Exactly pre-boundary behavior (the escape hatch).
-    Cadence,
-    /// Cadence ∪ sentinels. No trade; the default.
-    Hybrid,
-    /// Durability and visibility split: uploads land as uncited object
-    /// versions every floor tick, citation happens at coherent points
-    /// only. Opt-in per workspace; requires the versioning conformance
-    /// probe and a `visibility_lag_bound_secs`.
-    Gated,
-}
-
-impl BoundaryMode {
-    pub fn parse(s: &str) -> Option<BoundaryMode> {
-        match s {
-            "cadence" => Some(BoundaryMode::Cadence),
-            "hybrid" => Some(BoundaryMode::Hybrid),
-            "gated" => Some(BoundaryMode::Gated),
-            _ => None,
-        }
-    }
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            BoundaryMode::Cadence => "cadence",
-            BoundaryMode::Hybrid => "hybrid",
-            BoundaryMode::Gated => "gated",
-        }
-    }
-}
 
 /// Sentinel posture knob (D0.4). `auto` = verbs on unless the
 /// pre-existing-`.flint/` pre-flight trips; `force` accepts consumption
@@ -351,9 +314,6 @@ pub struct LeanConfig {
     pub range_get_parallelism: usize,
 
     // --- boundary verbs (plan docs/plans/flint-lean-boundary-verbs-plan.md) ---
-    /// Citation policy. Default `hybrid` ≡ today's behavior when the
-    /// agent never touches a sentinel.
-    pub boundary_mode: BoundaryMode,
     /// Sentinel posture (D0.4 pre-flight override).
     pub sentinel_mode: SentinelMode,
     /// A consumed sentinel arriving sooner than this after the previous
@@ -367,17 +327,6 @@ pub struct LeanConfig {
     pub sentinel_hourly_budget: u64,
     /// Sentinel poll cadence (env-only, not a fleet contract).
     pub sentinel_poll_secs: u64,
-    /// Gated: hard cap on citation staleness. Required iff gated.
-    pub visibility_lag_bound_secs: Option<u64>,
-    /// Gated: scan-to-scan stability window that counts as quiescence.
-    pub quiesce_bound_secs: u64,
-    /// Gated: forced-citation sources bounding the preStop drain.
-    pub staged_backlog_cap_objects: u64,
-    pub staged_backlog_cap_bytes: u64,
-    /// Gated: the noncurrent-version retention the operator provisions
-    /// on `<prefix>/files/` — the crash-window backstop BEHIND flint's
-    /// exact per-citation version GC (D8).
-    pub noncurrent_retention_days: u64,
 }
 
 impl LeanConfig {
@@ -413,16 +362,10 @@ impl LeanConfig {
             range_get_min_bytes: 8 * 1024 * 1024,
             range_get_chunk_bytes: 16 * 1024 * 1024,
             range_get_parallelism: 4,
-            boundary_mode: BoundaryMode::Hybrid,
             sentinel_mode: SentinelMode::Auto,
             sentinel_min_interval_secs: 5,
             sentinel_hourly_budget: 60,
             sentinel_poll_secs: 1,
-            visibility_lag_bound_secs: None,
-            quiesce_bound_secs: 30,
-            staged_backlog_cap_objects: 5000,
-            staged_backlog_cap_bytes: 2 * 1024 * 1024 * 1024,
-            noncurrent_retention_days: 30,
         }
     }
 
@@ -451,8 +394,8 @@ impl LeanConfig {
     /// reach the same seq therefore write two different objects and
     /// race only at the pointer, which is the one place a race should
     /// be decided; and a path that legitimately rewrites without
-    /// bumping (the gated lane's version-id backfill) is not refused by
-    /// a write-once key it never meant to collide with.
+    /// bumping is not refused by a write-once key it never meant to
+    /// collide with.
     pub fn generation_key(&self, seq: u64, flush_uuid: &str) -> String {
         format!("{}/{}/manifests/{seq:020}-{flush_uuid}", self.prefix, LEAN_DIR)
     }

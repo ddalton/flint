@@ -53,8 +53,8 @@ GLOSSARY = [
               "refuse a foreign one"),
     ("boundary verb", "a file the agent writes to declare a coherent point, "
                       "and an ack file it reads back"),
-    ("gated mode", "upload everything first — durable and invisible — then "
-                   "install the whole set with one CAS"),
+    ("boundary", "one fused barrier: upload the changed files, then install "
+                 "the whole set with one CAS"),
 
     ("loopback door", "AWS_CONTAINER_CREDENTIALS_FULL_URI: how short-lived "
                       "keys reach the worker, and only the worker"),
@@ -274,10 +274,10 @@ def build():
           fill=d.PLAIN_F, line=d.PLAIN_L, line_weight=0.012, title_size=9.6,
           body_size=7.4, body_color=SUB)
     p.box(7.90, 10.85, 6.70, 1.05,
-          "gated mode — durable NOW, visible on ONE CAS",
-          "every changed file is uploaded as a new version at once — durable, "
-          "and invisible — and one CAS cites the whole set. A reader sees the "
-          "whole change or none of it. Refused without a lag bound.",
+          "a boundary — uploaded, then visible on ONE CAS",
+          "every floor tick and every publish touch runs one fused barrier: the "
+          "changed files are uploaded, then one CAS cites the whole set. A reader "
+          "sees the whole boundary or none of it.",
           fill="#F3EEFB", line=d.WORK_L, line_weight=0.012, title_size=9.6,
           body_size=7.4, body_color=SUB)
     p.box(15.40, 10.85, 6.50, 1.05, "lean operator — thin, and optional",

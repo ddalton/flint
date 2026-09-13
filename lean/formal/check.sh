@@ -136,32 +136,6 @@ mutation_run $M LeanNarrowUncieFirst.cfg "uncite-then-unlink: the surviving file
 mutation_run $M LeanProbeNarrow.cfg "probe: the narrow verb actually fires" \
   "Invariant ProbeNarrow is violated"
 
-# ---- tranche 3, product 2: gated citation x version GC x the backstop -----
-strict_run $M LeanGatedHolds.cfg "gated advance: cited versions live, the reaper never takes live bytes, boundaries are all-or-nothing"
-strict_run $M LeanGatedCrash.cfg "gated advance UNDER POD REPLACEMENT: the citation's own crash matrix, which belonged to no product until now"
-mutation_run $M LeanProbeGatedCrash.cfg "probe: a pod replacement is REACHABLE in the gated world -- without it the crash run is green over nothing" \
-  "Invariant ProbeGatedCrashReachable is violated"
-mutation_run $M LeanProbeGatedRestart.cfg "probe (U41): a RESTART is reachable in the gated world — Inv_NoResurrection was listed as checked there while MaxRestarts=0 disabled its only writer" \
-  "Invariant ProbeGatedRestartReachable is violated"
-mutation_run $M LeanGatedReapsCurrent.cfg "the shipped reaper rule (keep only the cited version) DELETES a HITL write that landed between the lane and the citation — it was current, acked, and about to be read" \
-  "Invariant Inv_NoUncitedGC is violated"
-mutation_run $M LeanGatedBackstop.cfg "the noncurrent-retention BACKSTOP reaps a cited version — gated staging makes the cited generation noncurrent, so lifecycle runs a clock against live cited data (D8's inversion; the abandoned-mid-stage endgame)" \
-  "Invariant Inv_CitedVersionLives is violated"
-mutation_run $M LeanGatedSplitCitation.cfg "a citation split across two CASes lets a reader see half a logical change" \
-  "Invariant Inv_BoundaryAtomic is violated"
-mutation_run $M LeanGatedInflightHitl.cfg "citing over an inbox entry still in flight names bytes that PREDATE the user's write" \
-  "Invariant Inv_HITLDurable is violated"
-mutation_run $M LeanProbeCitationInstalled.cfg "probe: ONE CAS installs >= 2 paths from a pending set that survived a lane pass" \
-  "Invariant ProbeCitationInstalled is violated"
-mutation_run $M LeanProbeWithheldDelete.cfg "probe: a delete is actually withheld from the manifest until a citation" \
-  "Invariant ProbeWithheldDelete is violated"
-mutation_run $M LeanProbeGatedGC.cfg "probe (U15): the withheld delete actually LANDS at a citation — ProbeWithheldDelete counts the WITHHOLDING, so the gated run could hold over dels={} forever" \
-  "Invariant ProbeGatedGC is violated"
-mutation_run $M LeanProbeForcedCite.cfg "probe: a citation actually fires mid-change (the lag/backlog caps' shape)" \
-  "Invariant ProbeForcedCite is violated"
-mutation_run $M LeanProbeRawUncited.cfg "probe (REQUIRED-REACHABLE): a raw reader sees uncited bytes — §3 residual 11 proven present, not assumed away" \
-  "Invariant ProbeRawReaderSeesUncited is violated"
-
 # ---- tranche 3, product 1: the boundary VERB x barrier x inbox ------------
 strict_run $M LeanSentinelHolds.cfg "boundary verb: consume/honor/ack/retire against the barrier, the inbox and a restart"
 strict_run $M LeanSentinelRestart.cfg "boundary verb across a RESTART: the pending file outlives it, the in-memory honored flag does not"
@@ -187,36 +161,10 @@ mutation_run $M LeanProbeCoalescedAck.cfg "probe: two touches actually coalesced
 mutation_run $M LeanProbeFastPathHonor.cfg "probe: a pending sentinel was honored by the skip-on-no-diff pass rather than a full barrier" \
   "Invariant ProbeFastPathHonor is violated"
 
-# ---- C6: the sentinel over the CITATION lane ------------------------------
-# The matrix gap the verified review named: the two products never ran in
-# one world, so an ack written off a citation-lane honor was never checked
-# at all.
-strict_run $M LeanSentinelGatedHolds.cfg "the boundary verb over the GATED citation lane: an ok ack never claims a path the citation dropped"
-mutation_run $M LeanSentinelGatedOkOverDrop.cfg "the shipped gated honor: status ok whatever the citation dropped, with no ack field that could express the exception (found in shipped code)" \
-  "Invariant Inv_AckImpliesCited is violated"
-mutation_run $M LeanProbeDeclaredDrop.cfg "probe: a gated citation actually dropped a path the agent had DECLARED (without it the honesty rule holds vacuously)" \
-  "Invariant ProbeDeclaredDrop is violated"
-mutation_run $M LeanProbePartialAck.cfg "probe: the partial ack fires -- the agent is answered rather than left waiting" \
-  "Invariant ProbePartialAck is violated"
-mutation_run $M LeanSentinelGatedNoRepair.cfg "the citation lane WITHOUT the repair the fused barrier has: an ok ack names a manifest that does not cite a HITL write this workspace already integrated into its own tree (found in shipped code -- C2)" \
-  "Invariant Inv_AckBoundaryCoherent is violated"
-mutation_run $M LeanSentinelGatedStaleStage.cfg "the stage and the withheld-delete set both reach the citation and merge order decides: the boundary an ok ack names cites a file the agent deleted before declaring (found in a fix two hours old)" \
-  "Invariant Inv_AckImpliesCited is violated"
-
 # ---- the ack's PROVENANCE: one boundary, one clock ------------------------
 strict_run $M LeanSentinelClockHolds.cfg "the ack and the manifest name the SAME clock -- the agent reads the ack, the fleet reads the stamp"
 mutation_run $M LeanSentinelClockUnstamped.cfg "the barrier installs through an UNSTAMPED CAS: the bucket reports the default clock while the ack tells the agent otherwise (found by the bucket drill, twice in one session)" \
   "Invariant Inv_BoundaryNamesItsClock is violated"
-mutation_run $M LeanSentinelGatedClockUnstamped.cfg "the same, over the CITATION lane -- the installer where the second half of the shipped defect actually lived (leg B11a caught it after the cadence half was fixed)" \
-  "Invariant Inv_BoundaryNamesItsClock is violated"
-
-# ---- the PAIR the plan predicted and the matrix never ran -----------------
-strict_run $M LeanScopedGatedHolds.cfg "SyncScope x GatedCitation: two products that both advance instBase, run together for the first time (the pair 10.3 named)"
-mutation_run $M LeanProbeScopedGated.cfg "probe: the scoped deferral is REACHABLE in the gated world -- without it the pair run is green over nothing" \
-  "Invariant ProbeScopedDeferral is violated"
-mutation_run $M LeanScopedGatedWholeBase.cfg "whole-instBase advance, with a citation lane also advancing it: the out-of-scope foreign entry is still lost forever" \
-  "Invariant Inv_NoForeignLost is violated"
-
 # ---- chunk GC (LeanChunkGC.tla) -------------------------------------------
 # Chunks are SHARED between generations, which is what makes LeanSubtree's GC
 # reasoning not carry over: there, every generation object had exactly one

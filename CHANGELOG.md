@@ -12,6 +12,36 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Removed
+
+- **lean: gated mode, and the mode axis with it.** `boundaryMode` was
+  three names for two behaviours — the code never had a cadence branch,
+  only "gated or not" — and gated's one benefit to a reader (seeing only
+  the points the agent declared) cost a second syncer's worth of code, a
+  versioning conformance bar, a version reaper, an operator recovery
+  step after every pod replacement, and the two HIGH findings of the
+  2026-09-12 protocol review. Versioning is not a first-class concept in
+  lean, so the whole of it goes: the staging lane, the citation lane,
+  the reaper, `recover-staged`, `probe-versions`, the pinned reader rule
+  in checkout, sync and the gateway (with the `dangling-citation` and
+  `uncited-bytes` refusals only a pinned manifest could raise), the
+  per-entry `version_id` in the manifest (~40 bytes per entry nothing
+  read), and the CRD knobs `boundaryMode`, `visibilityLagBoundSecs`,
+  `quiesceBoundSecs`, `stagedBacklogCapObjects`, `stagedBacklogCapBytes`
+  and `noncurrentRetentionDays` with the operator's versioning probe,
+  lifecycle-rule provisioning and stranded-work event. Status columns
+  `MODE`, `LAG` and `STAGED` are gone; `BoundaryModeAccepted` is now
+  `SpecAccepted` and `BoundaryModeActive` is `SyncerObserved`, which
+  names the binary, protocol and last boundary the lease echo carries.
+  The one mode is what `hybrid` always was: a fused barrier at every
+  floor tick and at every publish touch. `capabilities.json` and
+  `gauges.json` drop `boundary_mode`; `/metrics` drops the six gated
+  series; the contract in `.flint/AGENTS.md` drops its gated section.
+  Nothing under defaults changes, and no deployment carried a gated
+  workspace (`docs/plans/flint-lean-writer-lease-and-gated-assessment.md`
+  §9). The formal gate drops its 23 gated configurations; the `verbs`
+  and `boundary` kind drills drop their gated legs.
+
 ## [1.51.0] - 2026-09-13
 
 ### Added

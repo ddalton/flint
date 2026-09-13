@@ -226,7 +226,6 @@ impl Syncer {
                             size: st.len(),
                             mtime_unix: mtime_of(&st),
                             mtime_nanos: Some(mtime_nanos_of(&st)),
-                            version_id: None,
                             crc64_b64: local_crc,
                         },
                     );
@@ -245,23 +244,7 @@ impl Syncer {
                 continue;
             }
             let key = self.cfg.file_key(path);
-            // D13: under a gated citation this reader resolves the
-            // CITED version, never the current one — the same rule
-            // checkout follows, for the same reason. An inbox-overlaid
-            // path has no cited version yet and takes the etag path.
-            let pinned_version = if theirs.pinned_reads {
-                theirs
-                    .entries
-                    .get(path)
-                    .filter(|e| &e.etag == etag)
-                    .and_then(|e| e.version_id.clone())
-            } else {
-                None
-            };
-            let fetched = match &pinned_version {
-                Some(vid) => self.store.get_version(&key, vid).await,
-                None => self.store.get_whole(&key, Some(etag)).await,
-            };
+            let fetched = self.store.get_whole(&key, Some(etag)).await;
             let (meta, body) = match fetched {
                 Ok(ok) => ok,
                 Err(StoreError::PreconditionFailed(_)) | Err(StoreError::NotFound(_)) => {
@@ -311,7 +294,6 @@ impl Syncer {
                     size: st.len(),
                     mtime_unix: mtime_of(&st),
                     mtime_nanos: Some(mtime_nanos_of(&st)),
-                    version_id: None,
                     crc64_b64: Some(got),
                 },
             );

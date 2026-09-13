@@ -61,7 +61,7 @@ pub struct CheckoutReport {
 /// whole-object arm — either because ranging does not apply, or because
 /// the store answered with one of the two POLICY-BEARING errors. That
 /// second case is deliberate: `PreconditionFailed` and `NotFound` mean
-/// three different things here depending on `pinned` and `sole_writer`,
+/// two different things here depending on `sole_writer`,
 /// and all three refusals are written once, in the whole-object arm
 /// below. Re-deciding them here would put the same policy in two
 /// places, which is how the two drift apart. The cost is one wasted
@@ -301,13 +301,12 @@ impl Syncer {
     /// Takes the admitted set rather than the manifest, so the one
     /// decision about WHICH citations get materialized lives at the call
     /// site and every caller inherits the same LPT ordering, the same
-    /// in-flight byte bound, and the same D13/D0.3 refusals. A caller
+    /// in-flight byte bound, and the same D0.3 refusals. A caller
     /// that admits a subset owes its own budget arithmetic over that
     /// subset — this function refuses nothing on size.
     async fn materialize<'a>(
         &'a self,
         mut admission: Vec<(&'a String, &'a super::manifest::LeanEntry)>,
-        pinned: bool,
         sole_writer: bool,
     ) -> Vec<LeanResult<Fetched>> {
         // LARGEST FIRST. `m.entries` is a BTreeMap, so iterating it
@@ -391,9 +390,7 @@ impl Syncer {
             // link — measured at 325 MiB/s, 11% of the guarantee, and
             // identical on a node with 12x the vCPU and 32x the
             // bandwidth. The bound was never the memory it names.
-            let ranged_eligible = range_min > 0
-                && entry.size >= range_min
-                && !(pinned && entry.version_id.is_some());
+            let ranged_eligible = range_min > 0 && entry.size >= range_min;
             let whole_units =
                 entry.size.div_ceil(FETCH_UNIT).clamp(1, budget_units as u64) as u32;
             let ranged_units = (range_par.max(1) as u64)
@@ -465,7 +462,6 @@ impl Syncer {
                                 size: st.len(),
                                 mtime_unix: mtime_of(&st),
                                 mtime_nanos: Some(mtime_nanos_of(&st)),
-                                version_id: entry.version_id.clone(),
                                 crc64_b64: Some(entry.crc64_b64.clone()),
                             }),
                             skipped: true,
@@ -476,17 +472,8 @@ impl Syncer {
                     // Fall through and re-materialize.
                 }
                 // RANGED FIRST, when the object is big enough to
-                // pay for it and the citation is a plain etag. A
-                // pinned entry naming a VERSION is excluded: the
-                // store's ranged read is guarded by If-Match, which
-                // attests the object's identity but does not
-                // ADDRESS a noncurrent version, so ranging a pinned
-                // citation could only read the current object —
-                // exactly what D13 forbids. Those stay whole.
-                let ranged_bytes = if range_min > 0
-                    && entry.size >= range_min
-                    && !(pinned && entry.version_id.is_some())
-                {
+                // pay for it.
+                let ranged_bytes = if range_min > 0 && entry.size >= range_min {
                     let tmp = target.with_file_name(format!(
                         "{}.flint-sync-tmp",
                         target.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
@@ -524,7 +511,6 @@ impl Syncer {
                             size: st.len(),
                             mtime_unix: mtime_of(&st),
                             mtime_nanos: Some(mtime_nanos_of(&st)),
-                            version_id: None,
                             // The fold above equalled it, or we would
                             // not be here.
                             crc64_b64: Some(entry.crc64_b64.clone()),
@@ -561,50 +547,14 @@ impl Syncer {
                 }
                 let _permit = permit;
 
-                // D13, the reader rule. Under a GATED citation the
-                // manifest is stamped `pinned_reads` and every
-                // entry names the version it cites: readers resolve
-                // that version EXCLUSIVELY and never S3-wins-adopt
-                // the current one.
-                //
-                // This is load-bearing, not a refinement. The
-                // moment the gated lane stages a path, the cited
-                // etag stops matching current — so without it EVERY
-                // gated checkout would 412 on EVERY dirty path and
-                // adopt uncited mid-logical-change bytes through
-                // exactly the arm the mode exists to avoid. HITL
-                // writes still reach readers, through the ungated
-                // repair pass, within one floor.
                 // `cited` is whether these are the bytes the manifest
                 // describes — every arm but S3-wins adoption.
-                let ((meta, body), cited) = match (pinned, entry.version_id.as_deref()) {
-                    (true, Some(vid)) => match store.get_version(&entry.key, vid).await {
-                        Ok(ok) => (ok, true),
-                        Err(StoreError::NotFound(_)) => {
-                            // The dangling-citation endgame (D8):
-                            // the backstop reaped a cited noncurrent
-                            // version. REFUSE loudly — the bytes are
-                            // not lost, `recover-staged` re-cites the
-                            // surviving current version forward — and
-                            // never serve a hole.
-                            return Err(LeanError::State(format!(
-                                "manifest cites {} version {} but that version is gone — \
-                                 the noncurrent backstop reaped a cited version. Run \
-                                 `flint-sync recover-staged` to re-cite forward; refusing \
-                                 a silent hole",
-                                entry.key, vid
-                            )));
-                        }
-                        Err(e) => return Err(e.into()),
-                    },
-                    _ => match store.get_whole(&entry.key, Some(&entry.etag)).await {
+                let ((meta, body), cited) = match store.get_whole(&entry.key, Some(&entry.etag)).await {
                         Ok(ok) => (ok, true),
                         Err(StoreError::PreconditionFailed(_)) if sole_writer => {
-                            // Deliberately NOT the `recover-staged`
-                            // advice below: nothing was staged
-                            // here, the citation is intact, and the
-                            // thing to go and find is the second
-                            // writer.
+                            // Nothing was staged here, the citation is
+                            // intact, and the thing to go and find is
+                            // the second writer.
                             return Err(LeanError::State(format!(
                                 "manifest cites {} at an etag the object no longer \
                                  carries, and this workspace is published by a SOLE \
@@ -614,26 +564,6 @@ impl Syncer {
                                  read-write mount over its prefix; the export \
                                  republishes only what git changed and will not repair \
                                  this on its own",
-                                entry.key
-                            )));
-                        }
-                        Err(StoreError::PreconditionFailed(_)) if pinned => {
-                            // The mixed-manifest cell: a pinned
-                            // boundary carrying an entry the
-                            // citation could not make
-                            // version-addressable (its cited etag
-                            // matched no surviving version). D13
-                            // says readers under `pinned_reads`
-                            // never S3-wins-adopt, and here the
-                            // current version is precisely what the
-                            // rule excludes — uncited, possibly
-                            // mid-logical-change bytes. Refuse
-                            // loudly; the bytes are not lost.
-                            return Err(LeanError::State(format!(
-                                "manifest cites {} at an etag the object no longer carries, and \
-                                 the entry names no version to resolve instead — refusing \
-                                 to adopt uncited bytes into a pinned checkout. Run \
-                                 `flint-sync recover-staged` to re-cite forward",
                                 entry.key
                             )));
                         }
@@ -658,7 +588,6 @@ impl Syncer {
                             )));
                         }
                         Err(e) => return Err(e.into()),
-                    },
                 };
                 // OFF the fan-out task, for the same reason the ranged arm
                 // is: write_file_atomic is a blocking create+write+fsync+
@@ -733,7 +662,6 @@ impl Syncer {
                         size: st.len(),
                         mtime_unix: mtime_of(&st),
                         mtime_nanos: Some(mtime_nanos_of(&st)),
-                        version_id: None,
                         crc64_b64: Some(got),
                     }),
                     skipped: false,
@@ -785,8 +713,8 @@ impl Syncer {
     /// the admitted set is the set the agent needs for its whole life.
     /// Name the right culprit when a fetch could not be served.
     ///
-    /// Three of `materialize`'s refusals — the SOLE WRITER 412, the
-    /// pinned 412, and the cited-object-is-gone 404 — read the same
+    /// Two of `materialize`'s refusals — the SOLE WRITER 412 and the
+    /// cited-object-is-gone 404 — read the same
     /// evidence ("this object is not what the manifest said") and
     /// accuse a stranger of writing the bucket. There is a second
     /// explanation, and after 2026-09-11 it is the LIKELIER one:
@@ -914,7 +842,7 @@ impl Syncer {
         // so an object off its citation was moved by a stranger.
         // Adopting it would copy bytes no manifest cites into this
         // tree, silently — drill C4.
-        let results = self.materialize(admission, m.pinned_reads, m.sole_writer).await;
+        let results = self.materialize(admission, m.sole_writer).await;
         report.fetch_secs = t_fetch.elapsed().as_secs_f64();
         let t_commit = std::time::Instant::now();
         for r in results {
@@ -1202,7 +1130,7 @@ impl Syncer {
         report.already_held =
             m.entries.keys().filter(|p| covered(p) && baseline.entries.contains_key(*p)).count();
         if !add.is_empty() {
-            let results = self.materialize(add, m.pinned_reads, m.sole_writer).await;
+            let results = self.materialize(add, m.sole_writer).await;
             for r in results {
                 let f = r?;
                 if let Some(why) = f.refused {

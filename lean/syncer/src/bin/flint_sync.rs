@@ -10,8 +10,6 @@
 //!              only made concurrent readers serialise on one cell.
 //!   barrier    one publish barrier, exit
 //!   sync       the HITL sync verb (scan-first), exit
-//!   recover-staged  re-cite durable-but-uncited work as one flagged
-//!              boundary (gated recovery after pod replacement), exit
 //!   ctl <boundary|sync|status>
 //!              talk to the UDS door of the syncer running in THIS
 //!              pod (§2.5). A client, not a second syncer: it takes
@@ -25,7 +23,6 @@
 //!   probe-conditional  verify that If-Match / If-None-Match are ENFORCED
 //!              by THIS store (a store that ignores them turns every
 //!              manifest CAS into last-writer-wins, silently)
-//!   probe-versions     verify the object-version surface gated mode needs
 //!   run        claim → checkout → barrier loop (floorSecs) → drain on
 //!              SIGTERM → clean lease release
 //!
@@ -66,16 +63,10 @@
 //!                                 object that has moved off its
 //!                                 citation instead of adopting it.
 //!                                 Set by forge's legible export.
-//!   FLINT_SYNC_BOUNDARY_MODE      cadence|hybrid|gated (default hybrid)
 //!   FLINT_SYNC_SENTINELS          auto|off|force (default auto)
 //!   FLINT_SYNC_SENTINEL_MIN_INTERVAL_SECS  (default 5)
 //!   FLINT_SYNC_SENTINEL_HOURLY_BUDGET      work units/hour (default 60)
 //!   FLINT_SYNC_SENTINEL_POLL_SECS          (default 1; env-only)
-//!   FLINT_SYNC_QUIESCE_BOUND_SECS          gated: quiescence window (30)
-//!   FLINT_SYNC_VISIBILITY_LAG_BOUND_SECS   gated: REQUIRED, no default
-//!   FLINT_SYNC_STAGED_BACKLOG_CAP_OBJECTS  gated: forced-citation cap (5000)
-//!   FLINT_SYNC_STAGED_BACKLOG_CAP_BYTES    gated: forced-citation cap (2 GiB)
-//!   FLINT_SYNC_NONCURRENT_RETENTION_DAYS   gated: the backstop's age (30)
 //!   FLINT_SYNC_UDS_DOOR                    "true" arms .flint-sync/ctl.sock
 //!   FLINT_SYNC_METRICS                     "true" arms /metrics (D15)
 //!   FLINT_SYNC_METRICS_PORT                default 9847
@@ -87,7 +78,7 @@ use std::time::Duration;
 use flint_lean::state::SyncerState;
 use flint_lean::lease;
 use flint_lean::verbs;
-use flint_lean::{BoundaryMode, LeanConfig, LeanError, Syncer, SentinelMode};
+use flint_lean::{LeanConfig, LeanError, Syncer, SentinelMode};
 use flint_store::s3::S3Store;
 use flint_store::ObjectStore;
 use warp::Filter;
@@ -212,15 +203,6 @@ async fn main() {
     cfg.range_get_min_bytes = env_u64("FLINT_SYNC_RANGE_GET_MIN_MB", 8) * 1024 * 1024;
     cfg.range_get_chunk_bytes = env_u64("FLINT_SYNC_RANGE_GET_CHUNK_MB", 16).max(1) * 1024 * 1024;
     cfg.range_get_parallelism = env_u64("FLINT_SYNC_RANGE_GET_PARALLELISM", 4).max(1) as usize;
-    if let Ok(m) = std::env::var("FLINT_SYNC_BOUNDARY_MODE") {
-        match BoundaryMode::parse(&m) {
-            Some(bm) => cfg.boundary_mode = bm,
-            None => {
-                eprintln!("flint-sync: FLINT_SYNC_BOUNDARY_MODE={m:?} is not cadence|hybrid|gated");
-                std::process::exit(2);
-            }
-        }
-    }
     if let Ok(m) = std::env::var("FLINT_SYNC_SENTINELS") {
         match SentinelMode::parse(&m) {
             Some(sm) => cfg.sentinel_mode = sm,
@@ -233,29 +215,6 @@ async fn main() {
     cfg.sentinel_min_interval_secs = env_u64("FLINT_SYNC_SENTINEL_MIN_INTERVAL_SECS", 5);
     cfg.sentinel_hourly_budget = env_u64("FLINT_SYNC_SENTINEL_HOURLY_BUDGET", 60);
     cfg.sentinel_poll_secs = env_u64("FLINT_SYNC_SENTINEL_POLL_SECS", 1).max(1);
-    cfg.quiesce_bound_secs = env_u64("FLINT_SYNC_QUIESCE_BOUND_SECS", 30);
-    // The backlog caps and the retention days were config fields the
-    // binary never read — knobs that exist and do NOTHING, the class
-    // this codebase keeps paying for. The caps bound the preStop drain
-    // by construction (D10 sizes the pod's grace against exactly these
-    // numbers), and the retention is what the citation GC's noncurrent
-    // gauge is measured against.
-    cfg.staged_backlog_cap_objects = env_u64("FLINT_SYNC_STAGED_BACKLOG_CAP_OBJECTS", 5_000);
-    cfg.staged_backlog_cap_bytes =
-        env_u64("FLINT_SYNC_STAGED_BACKLOG_CAP_BYTES", 2 * 1024 * 1024 * 1024);
-    cfg.noncurrent_retention_days = env_u64("FLINT_SYNC_NONCURRENT_RETENTION_DAYS", 30);
-    cfg.visibility_lag_bound_secs =
-        std::env::var("FLINT_SYNC_VISIBILITY_LAG_BOUND_SECS").ok().and_then(|v| v.parse().ok());
-    // Gated is refused without a lag bound: unbounded staleness must be
-    // impossible by construction, not by convention (§2.4.1).
-    if cfg.boundary_mode == BoundaryMode::Gated && cfg.visibility_lag_bound_secs.is_none() {
-        eprintln!(
-            "flint-sync: boundaryMode=gated requires FLINT_SYNC_VISIBILITY_LAG_BOUND_SECS \
-             (unbounded citation staleness is refused)"
-        );
-        std::process::exit(2);
-    }
-
     // Also dispatched before the state directory is opened, and for a
     // stronger reason: `ctl` is a CLIENT of the running syncer. Taking
     // the occupancy lock — or the lease — would fight the very process
@@ -348,25 +307,11 @@ async fn main() {
             }
         }
     }
-    if cmd == "probe-versions" {
-        let key = format!("{}/{}/probe-versions", sc.cfg.prefix, flint_lean::LEAN_DIR);
-        match flint_store::probe::probe_version_surface(sc.store.as_ref(), &key).await {
-            Ok(()) => {
-                eprintln!("flint-sync: probe-versions PASS ({key})");
-                return;
-            }
-            Err(e) => {
-                eprintln!("flint-sync: probe-versions FAIL: {e}");
-                std::process::exit(1);
-            }
-        }
-    }
 
     let result = match cmd.as_str() {
         "checkout" => verbs::run_verb(&mut sc, verbs::Step::Checkout).await,
         "barrier" => verbs::run_verb(&mut sc, verbs::Step::Barrier).await,
         "sync" => verbs::run_verb(&mut sc, verbs::Step::Sync).await,
-        "recover-staged" => verbs::run_verb(&mut sc, verbs::Step::RecoverStaged).await,
         // `rescope <a> <b> ...` narrows/widens to exactly that set;
         // `rescope --all` goes back to the whole tree. Spelled out
         // rather than "no arguments means everything", because the
@@ -392,7 +337,7 @@ async fn main() {
         other => {
             eprintln!(
                 "flint-sync: unknown subcommand {other:?} \
-                 (checkout|barrier|sync|rescope|status|ctl|recover-staged|run|probe-copy)"
+                 (checkout|barrier|sync|rescope|status|ctl|run|probe-copy|probe-conditional)"
             );
             std::process::exit(2);
         }
@@ -454,12 +399,6 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
     // reaching checkout's body, so pinning the write there would
     // upgrade a fleet whose live workspaces never get the marker:
     // sentinels dead on exactly the pods the upgrade targeted.
-    // D8: gated mode is REFUSED over a backend that cannot express the
-    // version surface — before a single byte is staged. Degrading into
-    // etag semantics on a key whose current version is uncited is
-    // precisely the torn view the mode exists to prevent, so this is a
-    // startup failure, not a warning.
-    sc.gated_startup_check().await?;
     let posture = sc.sentinel_preflight()?;
     sc.write_capabilities(&posture, false)?;
     if !posture.enabled {
@@ -612,18 +551,14 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
             _ = floor_iv.tick() => {
                 match sc.floor_tick().await {
                     Ok(o) if !o.no_change || !o.acks.is_empty() => eprintln!(
-                        "flint-sync: {} seq={:?} up={} del={} consumed={} acks={}{}",
-                        if sc.is_gated() { "lane" } else { "barrier" },
+                        "flint-sync: barrier seq={:?} up={} del={} consumed={} acks={}{}",
                         o.seq, o.uploaded, o.deleted, o.consumed, o.acks.len(),
-                        // A gated tick that staged and did not cite is
-                        // the mode working; say so rather than leaving
-                        // it indistinguishable from a wedged loop.
-                        // Structured and greppable: until Phase 6 this
-                        // line is the only signal surface there is.
-                        match (&o.citation_source, &o.withheld_reason) {
-                            (Some(src), _) => format!(" cited={} source={src}", o.cited),
-                            (None, Some(why)) => format!(" cited=0 withheld_reason={why}"),
-                            (None, None) => String::new(),
+                        // Structured and greppable: this line is the
+                        // only signal surface an operator has without
+                        // the metrics endpoint.
+                        match &o.withheld_reason {
+                            Some(why) => format!(" withheld_reason={why}"),
+                            None => String::new(),
                         }
                     ),
                     Ok(_) => {}

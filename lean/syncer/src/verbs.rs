@@ -29,7 +29,6 @@ pub enum Step {
     Checkout,
     Barrier,
     Sync,
-    RecoverStaged,
     /// The narrow/widen verb. `None` is the whole tree; an empty
     /// argument list therefore cannot mean "narrow to nothing".
     Rescope(Option<Vec<String>>),
@@ -47,11 +46,11 @@ impl Step {
     /// and writes nothing to it either, but it rewrites the held set
     /// and leaves a replayable intent behind, so it stays fenced until
     /// someone has walked that crash matrix with two of them running;
-    /// `sync`, `barrier` and `recover-staged` all publish.
+    /// `sync` and `barrier` both publish.
     pub fn installs_nothing_in_the_bucket(&self) -> bool {
         match self {
             Step::Checkout => true,
-            Step::Barrier | Step::Sync | Step::RecoverStaged | Step::Rescope(_) => false,
+            Step::Barrier | Step::Sync | Step::Rescope(_) => false,
         }
     }
 }
@@ -209,31 +208,6 @@ pub async fn run_step(sc: &mut Syncer, step: Step) -> Result<(), LeanError> {
             Step::Sync => {
                 let r = sc.sync().await?;
                 println!("{}", serde_json::to_string_pretty(&r).unwrap());
-            }
-            Step::RecoverStaged => {
-                let r = sc.recover_staged().await?;
-                eprintln!(
-                    "flint-sync: recover-staged seq={:?} recited={} dangling={} unrecoverable={}",
-                    r.seq,
-                    r.recited.len(),
-                    r.dangling.len(),
-                    r.unrecoverable.len()
-                );
-                for p in &r.recited {
-                    eprintln!("flint-sync:   recited {p}");
-                }
-                // Named loudly: no verb can fix these — the retention
-                // backstop reaped the cited version and no newer
-                // generation survives.
-                for p in &r.unrecoverable {
-                    eprintln!("flint-sync:   UNRECOVERABLE {p}");
-                }
-                if !r.unrecoverable.is_empty() {
-                    return Err(LeanError::State(format!(
-                        "{} path(s) have no surviving version to cite",
-                        r.unrecoverable.len()
-                    )));
-                }
             }
         }
         Ok(())

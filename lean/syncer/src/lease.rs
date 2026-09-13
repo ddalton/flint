@@ -172,10 +172,6 @@ pub async fn claim_step(sc: &mut Syncer) -> LeanResult<ClaimOutcome> {
 /// counts them).
 fn observed_echo(sc: &Syncer) -> Option<String> {
     let g = sc.load_gauges().ok()?;
-    // The count comes from the stage itself rather than the gauges
-    // snapshot: it is the exposure number an operator pages on, and
-    // gauges lag by up to a floor.
-    let staged = sc.load_stage().map(|s| s.entries.len() as u64).unwrap_or(0);
     let (seq, unix) = g.last_boundary.as_ref().map(|b| (b.seq, b.unix)).unwrap_or((0, 0));
     // The pre-flight verdict lives in the marker the AGENT reads; the
     // operator has no other way to see it, so it rides the echo.
@@ -186,10 +182,8 @@ fn observed_echo(sc: &Syncer) -> Option<String> {
     serde_json::to_string(&flint_store::LeaseEcho {
         syncer_version: super::SYNCER_VERSION.to_string(),
         protocol: super::SENTINEL_PROTOCOL,
-        active_boundary_mode: sc.cfg.boundary_mode.as_str().to_string(),
         last_cited_seq: seq,
         last_cited_unix: unix,
-        staged_uncited_count: staged,
         sentinel_verbs_active: caps.map(|c| !c.verbs.is_empty()).unwrap_or(false),
         metrics_bound: sc.load_metrics_posture().filter(|m| m.enabled).map(|m| m.bound),
     })

@@ -291,7 +291,7 @@
   </header>
   <p class="dek">Pages 1–2 describe publishing <b>at cadence</b>: an mtime/size scan on a timer. That is still the default, and it is still the whole story for a workspace nobody is watching. What it could not express is a coherent point — &ldquo;these files, together, now&rdquo; — so an agent finishing a unit of work had no way to say so and no way to learn when its bytes were durable. The boundary verbs are that sentence, written as files in the workspace the agent already has. Nothing new is mounted, no port is opened, and a workspace that ignores them pays nothing: measured at <b>20 bucket requests per 22&nbsp;s idle with the verbs off and 20 with them on</b>.</p>
   <figure>
-  <svg viewBox="0 0 1600 760" role="img" aria-label="The agent writes a sentinel file into .flint/ and the syncer answers with an ack file; in gated mode the upload lane makes bytes durable continuously while a single manifest CAS decides when readers see them; the CSI node driver starts the syncer and a thin controller reports observed state.">
+  <svg viewBox="0 0 1600 760" role="img" aria-label="The agent writes a sentinel file into .flint/ and the syncer answers with an ack file; every boundary is one fused barrier whose single manifest CAS decides when readers see the changed set; the CSI node driver starts the syncer and a thin controller reports observed state.">
     <defs>
       <marker id="p3-ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
       <marker id="p3-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b45309"/></marker>
@@ -324,7 +324,7 @@
     <text class="tx" x="80" y="366">heartbeat field separates &ldquo;no news&rdquo; from &ldquo;syncer dead&rdquo;.</text>
 
     <rect x="770" y="70" width="790" height="330" rx="10" class="bx-ochre"/>
-    <text class="th" x="786" y="96">gated mode — durability split from visibility</text>
+    <text class="th" x="786" y="96">a boundary — one barrier, one CAS</text>
 
     <rect x="792" y="118" width="360" height="150" rx="8" class="bx"/>
     <text class="tl ctr" x="972" y="144">the upload lane</text>
@@ -347,7 +347,7 @@
     <rect x="792" y="288" width="748" height="88" rx="8" class="bx"/>
     <text class="tl" x="810" y="314">when a citation fires</text>
     <text class="tx" x="810" y="336">the agent asks (a sentinel) · the tree goes quiet · a lag cap expires · a backlog cap trips · preStop drains</text>
-    <text class="tx" x="810" y="354">gated is REFUSED without a lag bound, so unbounded staleness is impossible by construction, not by convention</text>
+    <text class="tx" x="810" y="354">a publish touch is the point the agent declared coherent; the floor bounds staleness by construction</text>
 
     <rect x="40" y="424" width="1520" height="120" rx="10" class="bx-violet"/>
     <text class="th" x="56" y="450">the operator — one CRD, a thin controller, no webhook, no new data path</text>
@@ -364,7 +364,7 @@
     <text class="tx" x="56" y="676">  coherent reader resolves them, but a raw-key reader can still see them. Closing that needs per-request epoch validation at a proxy, which is a component</text>
     <text class="tx" x="56" y="694">  this front end exists to avoid — so it is a chosen ceiling, not an unfinished task.</text>
   </svg>
-  <figcaption><b>The verbs are files because the workspace is the interface.</b> An agent that can write a file can declare a boundary — no client library, no credential, no network path, and the same mechanism serves a shell script and a language runtime. The ack is the other half: <code>ok</code> means the boundary is installed in the bucket, <code>partial</code> means it installed without something the agent declared, and <code>refused-fenced</code> means this syncer lost the lease and is saying so rather than leaving the agent waiting — which it used to do, forever. <b>Gated mode answers a different question from cadence:</b> cadence asks how stale a reader may be, gated asks whether a reader may see half a logical change, and answers no by making durability and visibility separate events. The cost is stated, not hidden — uncited versions exist in the bucket, a raw-key reader can see them, and the retention backstop must outlast the crash window or it will reap a version the manifest still cites. <b>Evidence, not assertion:</b> 27 bucket legs against a real MinIO, 14 operator legs on kind, a TLC gate that was 61 runs then and is 94 today (page 6), and the published chart installed on a three-node AWS cluster publishing to real S3 over TLS — logs committed under <code>lean/e2e/results/</code>.</figcaption>
+  <figcaption><b>The verbs are files because the workspace is the interface.</b> An agent that can write a file can declare a boundary — no client library, no credential, no network path, and the same mechanism serves a shell script and a language runtime. The ack is the other half: <code>ok</code> means the boundary is installed in the bucket, <code>partial</code> means it installed without something the agent declared, and <code>refused-fenced</code> means this syncer lost the lease and is saying so rather than leaving the agent waiting — which it used to do, forever. <b>A publish touch is the point the agent declared coherent:</b> the floor asks how stale a reader may be, the touch says which boundary is a whole logical change — and a reader takes any boundary entire or not at all, by one CAS. <b>Evidence, not assertion:</b> 27 bucket legs against a real MinIO, 14 operator legs on kind, a TLC gate that was 61 runs then and is 94 today (page 6), and the published chart installed on a three-node AWS cluster publishing to real S3 over TLS — logs committed under <code>lean/e2e/results/</code>.</figcaption>
 </section>
 
 <!-- ============================================================ PAGE 4 -->
@@ -452,7 +452,7 @@
     <text class="th" x="56" y="584">when to walk away from lean</text>
     <text class="tx" x="56" y="608">· The tree does not fit the pod's disk, or is TiB-scale, or you need lazy access to a small slice of a huge dataset — FUSE.</text>
     <text class="tx" x="56" y="626">· Two writers must see each other's bytes live, or you need byte-range locks, O_EXCL or shared sqlite/git ACROSS pods — the hub.</text>
-    <text class="tx" x="56" y="644">· A reader cannot tolerate seeing the last boundary instead of the last write — the hub. Gated mode narrows WHAT a reader sees, never HOW STALE it is.</text>
+    <text class="tx" x="56" y="644">· A reader cannot tolerate seeing the last boundary instead of the last write — the hub.</text>
   </svg>
   <figcaption><b>The fit question is one question, and it is about the disk.</b> Everything else follows: because the whole tree is local, the app gets real POSIX at local speed and the FUSE risk class disappears; because it is local, it must fit; and because publishing is a boundary rather than a write-through, a reader sees coherent points instead of a live tree. <b>The file count binds before the byte count, but no longer through the manifest.</b> In 2026-08 the manifest was one object rewritten whole — 264 MiB at a million entries, so the cap was expressed in files (~250k). Since 1.45.0 the entries live in immutable, content-addressed chunks named by a pointer of a few hundred bytes: a publish sends only the chunks whose address the pointer does not already hold, a small project is one chunk and pays what the single generation did, and the design sizes one chunk level to about ten million entries. What still binds is the disk, now a real quota, and the time to materialise and scan the count — which page 6 measures. <b>The verbs change the shape of the workflow, not its cost.</b> Cadence alone forces a choice between publishing too often (wasted work) and too rarely (a reviewer reads a half-finished tree); a declared boundary removes the choice, and costs nothing when unused. <b>Say no early.</b> The three questions above are ordered so the cheapest disqualifier comes first, and a workload that fails any of them is better served by another front end over the same bucket format — all three are mutually convertible, so choosing lean today does not strand the data if the answer changes.</figcaption>
 </section>
@@ -593,7 +593,7 @@
     <text class="tx" x="56" y="320">three citation repairs took the CRC from a HEAD; one had</text>
     <text class="tx" x="56" y="336">NO test — citing a wrong CRC there passed the battery.</text>
     <text class="tx" x="56" y="352">Six mutation controls now, each failing one test</text>
-    <text class="tsb" x="56" y="380">probe-conditional · probe-versions · probe-copy</text>
+    <text class="tsb" x="56" y="380">probe-conditional · probe-copy</text>
     <text class="tx" x="56" y="400">the verbs a deployment runs against a new backend first:</text>
     <text class="tx" x="56" y="416">a store that ignores If-Match turns every manifest CAS</text>
     <text class="tx" x="56" y="432">into last-writer-wins, silently. Ozone 2.2.1: probed</text>
@@ -660,7 +660,7 @@
     <text class="tx" x="1226" y="328">four syncers reading disjoint subtrees of one</text>
     <text class="tx" x="1226" y="344">prefix: 2.1x one syncer with the claim gone,</text>
     <text class="tx" x="1226" y="360">0.41x — slower than one — with it</text>
-    <text class="tsb" x="1226" y="388">barrier · sync · rescope · recover-staged</text>
+    <text class="tsb" x="1226" y="388">barrier · sync · rescope</text>
     <text class="tx" x="1226" y="408">still claim: they write, or rewrite the held</text>
     <text class="tx" x="1226" y="424">set and leave a replayable intent behind</text>
 
@@ -668,7 +668,7 @@
     <rect x="40" y="474" width="1520" height="200" rx="10" class="band"/>
     <text class="th" x="56" y="500">the model is the gate — lean/formal, TLA+ checked before the code, and the code written to it</text>
     <text class="tx" x="56" y="524">check.sh runs 94 configurations, ALL required: 20 strict runs that must hold, and mutations and probes that must FAIL — a model that cannot rediscover its own bug classes proves</text>
-    <text class="tx" x="56" y="540">nothing, and a probe names an action through a ghost only that action writes. LeanSubtree.tla is the protocol (lease, barrier, inbox, gated citation, removals, renames); LeanChunkGC.tla and</text>
+    <text class="tx" x="56" y="540">nothing, and a probe names an action through a ghost only that action writes. LeanSubtree.tla is the protocol (lease, barrier, inbox, removals, renames); LeanChunkGC.tla and</text>
     <text class="tx" x="56" y="556">LeanChunkMerge.tla are the chunked manifest&rsquo;s reaper and its 412 merge. Three times the abstraction found what no test had:</text>
     <text class="tsb" x="56" y="584">the early inbox drop</text>
     <text class="tx" x="56" y="602">consumed entries left the cell at window-open, &ldquo;durably in the</text>

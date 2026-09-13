@@ -124,8 +124,8 @@
 <text class="t4" x="38" y="416">the consistency contract</text>
 <text class="t4" x="258" y="398">the live tree, strongly — close-to-open, no RPO lag, through</text>
 <text class="t4" x="258" y="413">the coherence authority</text>
-<text class="t4" x="590" y="398">the last PUBLISHED boundary, never your last write; gated</text>
-<text class="t4" x="590" y="413">mode makes it all-or-nothing</text>
+<text class="t4" x="590" y="398">the last PUBLISHED boundary, never your last write; a</text>
+<text class="t4" x="590" y="413">boundary is all-or-nothing</text>
 <text class="t4" x="922" y="398">whatever S3 currently holds, with S3's own consistency</text>
 <text class="t4" x="922" y="413">and nothing added</text>
 <text class="t4" x="1254" y="398">on fetch, every acknowledged push — served by the write</text>

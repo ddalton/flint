@@ -55,7 +55,7 @@
 #
 # Prereqs: kind cluster `flint-lean-verbs` with flint-sync:e2e and
 # flint-lean-gateway:e2e loaded; minio.yaml + verbs.yaml applied; bucket
-# versioning ENABLED (the script asserts it before any gated leg).
+# any bucket; versioning is not required.
 #
 #   kind create cluster --name flint-lean-verbs
 #   cd lean/syncer && cargo zigbuild --release --features s3 \
@@ -182,7 +182,6 @@ sy_bg() { # <pod> <prefix> <root> <extra-env> <log> <args…>
      /usr/local/bin/flint-sync $* > $log 2>&1 & echo bg-started" > /dev/null 2>&1
 }
 inpod() { local pod=$1; shift; $K exec "$pod" -c "$CONT" -- /bin/sh -c "$*" 2>/dev/null; }
-GATED="FLINT_SYNC_BOUNDARY_MODE=gated FLINT_SYNC_VISIBILITY_LAG_BOUND_SECS=3600 FLINT_SYNC_QUIESCE_BOUND_SECS=3600"
 
 # `pidof` alone is the WRONG liveness test: PID 1 here is `sleep
 # infinity`, which never reaps, so an exited flint-sync sits as a
@@ -367,11 +366,6 @@ treehash() { # <pod> <root>
     ! -path './.flint/*' ! -path './.flint-sync/*' -exec md5sum {} + 2>/dev/null | sort | md5sum"
 }
 
-# Gated legs run the upload lane on a short floor while NO timer may
-# cite: the hour-long lag/quiesce bounds are this half of the drill's
-# falsifiability fixture, exactly as the hour-long floor is the other
-# half. Any citation that appears is attributable to the leg.
-GATED_TICK="$GATED FLINT_SYNC_FLOOR_SECS=5"
 
 # The gateway is the HITL party: it holds no lease and never edits a
 # manifest, which is precisely why it can write while a syncer runs.
@@ -874,119 +868,6 @@ b8_unused_verbs_cost_nothing() {
 }
 
 # ─────────────────────────────────────────────────────────────────────
-# B9  Gated invisibility of a mid-logical-change (§8 Q2).
-#
-#     Durability and visibility are separated on purpose, so the leg has
-#     to observe BOTH halves: the new bytes really are in the bucket (a
-#     raw GET returns them — residual 11 is real), and no coherent
-#     reader can see them.
-# ─────────────────────────────────────────────────────────────────────
-b9_gated_withholds_a_mid_logical_change() {
-  local P=tenants/b09 R=/work/b09 RB=/work/b09p
-  inpod verbs-a "mkdir -p $R" > /dev/null
-
-  # Seed a real cited boundary. In gated mode NO timer may cite (both
-  # bounds are an hour), so the sentinel is the only way in — which is
-  # also this half of the falsifiability fixture.
-  sy_bg verbs-a $P $R "$GATED_TICK" /tmp/b09.log run
-  inpod verbs-a "for i in \$(seq 1 60); do [ -f $R/.flint-sync/checkout-complete ] && break; sleep 1; done" > /dev/null
-  inpod verbs-a "printf CITED-A0 > $R/a.txt; printf KEEP > $R/keep.txt" > /dev/null
-  touchp verbs-a $R publish '{"nonce":"b9-seed"}'
-  local a
-  a=$(wait_ack verbs-a $R publish 'b9-seed' 60) || { bad "the seed citation never acked: $a"; return 1; }
-  local seq0 pinned n0
-  seq0=$(mseq $P)
-  pinned=$(manif $P | jq -r '.pinned_reads')
-  n0=$(manif $P | jq -r '.entries|keys|length')
-  [ "$pinned" = "true" ] || { bad "the seed boundary is not pinned_reads — this is not gated mode"; return 1; }
-  [ -n "$(manif $P | jq -r '.entries["a.txt"].version_id // empty')" ] || \
-    { bad "the citation names no version_id — version resolution cannot be under test"; return 1; }
-  ok "seeded a pinned boundary at seq $seq0 citing $n0 files (a.txt=CITED-A0)"
-
-  # The mid-logical-change: A then B, boundary only after B. Write A and
-  # let the lane STAGE it, with no sentinel and no timer that can cite.
-  inpod verbs-a "printf A1-NEW-MID-CHANGE > $R/a.txt" > /dev/null
-  local i vc
-  for i in $(seq 1 40); do
-    vc=$(vcount "$P/files/a.txt"); [ "$vc" -ge 2 ] && break; sleep 1
-  done
-  [ "$vc" -ge 2 ] || { bad "the upload lane never staged a second version of a.txt (versions=$vc)"; return 1; }
-  [ "$(mseq $P)" = "$seq0" ] || { bad "the manifest advanced to $(mseq $P) with no sentinel — a timer cited and the fixture is not holding"; return 1; }
-  # DURABILITY observed: the raw current object IS the new bytes.
-  [ "$(objcat $P/files/a.txt)" = "A1-NEW-MID-CHANGE" ] || \
-    { bad "a raw GET does not return the staged bytes — nothing was staged to test invisibility against"; return 1; }
-  ok "staged: a.txt has $vc versions, the current one is A1-NEW-MID-CHANGE, manifest still seq $seq0"
-
-  # VISIBILITY withheld — reader 1: the gateway's coherent read.
-  local code body
-  code=$(gw_get_ws b09 a.txt)
-  body=$(gw_body)
-  [ "$code" = "200" ] || { bad "the gateway refused the cited version ($code: $body) — a readable citation went dark"; return 1; }
-  [ "$body" = "CITED-A0" ] || { bad "the gateway served uncited bytes ($body)"; return 1; }
-  ok "gateway read resolves the citation: CITED-A0, not the staged bytes"
-
-  # VISIBILITY withheld — reader 2: a full checkout into a fresh tree.
-  # It must COMPLETE (a wedged probe fails the leg) and materialize
-  # EXACTLY the pre-boundary cited set.
-  #
-  # The probe needs the lease, so the writer stops first — by SIGKILL,
-  # because a SIGTERM would drain and cite, destroying the very state
-  # under test. That costs one takeover window, on purpose.
-  killsync verbs-a
-  await_exit verbs-a flint-sync 15 > /dev/null
-  inpod verbs-b "rm -rf $RB" > /dev/null
-  local out rc
-  out=$(SY_TIMEOUT=$TAKEOVER_SECS sy verbs-b $P $RB "$GATED" checkout); rc=$?
-  [ "$rc" = "0" ] || { bad "the probe checkout did not complete (rc=$rc): $(printf '%s' "$out" | tail -3)"; return 1; }
-  local pa pk pn
-  pa=$(inpod verbs-b "cat $RB/a.txt 2>/dev/null")
-  pk=$(inpod verbs-b "cat $RB/keep.txt 2>/dev/null")
-  pn=$(inpod verbs-b "find $RB -type f ! -path '*/.flint/*' ! -path '*/.flint-sync/*' | wc -l" | tr -d ' ')
-  [ "$pa" = "CITED-A0" ] || { bad "the probe materialized the UNCITED bytes (a.txt=$pa) — the boundary is not coherent"; return 1; }
-  [ "$pk" = "KEEP" ] || { bad "the probe lost a cited file (keep.txt=$pk)"; return 1; }
-  [ "$pn" = "$n0" ] || { bad "the probe materialized $pn files, the boundary cites $n0"; return 1; }
-  ok "probe checkout completed and materialized exactly the $n0 cited files, a.txt=CITED-A0"
-  return 0
-}
-
-# ─────────────────────────────────────────────────────────────────────
-# B10  The lag cap forces a citation while the tree is still changing.
-#      Quiescence is set to an hour so it CANNOT fire: the only timer
-#      left is the one under test.
-# ─────────────────────────────────────────────────────────────────────
-b10_lag_cap_forces_citation() {
-  local P=tenants/b10 R=/work/b10
-  inpod verbs-a "mkdir -p $R" > /dev/null
-  sy_bg verbs-a $P $R \
-    "FLINT_SYNC_BOUNDARY_MODE=gated FLINT_SYNC_VISIBILITY_LAG_BOUND_SECS=25 FLINT_SYNC_QUIESCE_BOUND_SECS=3600 FLINT_SYNC_FLOOR_SECS=5" \
-    /tmp/b10.log run
-  inpod verbs-a "for i in \$(seq 1 60); do [ -f $R/.flint-sync/checkout-complete ] && break; sleep 1; done" > /dev/null
-
-  # A writer that never lets the tree go quiescent, for longer than the
-  # cap. Lengths differ every iteration so every write is scan-visible.
-  inpod verbs-a "nohup sh -c 'i=1; while [ \$i -le 40 ]; do \
-      awk -v n=\$i \"BEGIN{s=\\\"\\\"; for(j=0;j<n;j++) s=s \\\"x\\\"; print s}\" > $R/churn.txt; \
-      i=\$((i+1)); sleep 2; done' > /dev/null 2>&1 & echo started" > /dev/null
-
-  local src
-  src=$(wait_bsource $P forced-lag-cap 70) || { bad "no forced-lag-cap citation within 70 s (boundary source: ${src:-none})"; return 1; }
-
-  # Anti-vacuity: the tree was genuinely NON-quiescent across the cap.
-  # A stalled writer would have let quiescence be the honest answer, and
-  # this leg would then be crediting the cap for another timer's work.
-  local writes
-  writes=$(inpod verbs-a "cat $R/churn.txt | wc -c" | tr -d ' ')
-  [ "$writes" -ge 3 ] || { bad "the churn writer never got going (churn.txt is $writes bytes)"; return 1; }
-  local alive
-  alive=$(inpod verbs-a "pidof sh > /dev/null && echo yes || echo no")
-  ok "citation source is forced-lag-cap, read from the manifest object's metadata alone"
-  ok "the tree was non-quiescent across the cap (churn.txt at $writes bytes, writer alive=$alive)"
-  inpod verbs-a "pkill -f 'while \[ ' 2>/dev/null; true" > /dev/null
-  killsync verbs-a
-  return 0
-}
-
-# ─────────────────────────────────────────────────────────────────────
 # B16  Hybrid default-floor regression: the rewritten select/interval
 #      loop must not have starved cadence. No sentinel anywhere.
 # ─────────────────────────────────────────────────────────────────────
@@ -1014,40 +895,6 @@ b16_default_floor_still_publishes() {
   cited=$(manif $P | jq -r '.entries|keys|length')
   [ "$cited" -ge 3 ] || { bad "cadence published a boundary citing only $cited files"; return 1; }
   ok "cadence advanced seq $s0 -> $s1 citing $cited files, source=cadence, no sentinel ever existed"
-  killsync verbs-a
-  return 0
-}
-
-# ─────────────────────────────────────────────────────────────────────
-# B20  Quiescence fires. The lag cap is an hour, so a citation stamped
-#      `forced-lag-cap` here would be the exact dead-code shape the
-#      review named — the leg FAILS on it rather than passing on
-#      "something cited".
-# ─────────────────────────────────────────────────────────────────────
-b20_quiescence_fires() {
-  local P=tenants/b20 R=/work/b20
-  inpod verbs-a "mkdir -p $R" > /dev/null
-  sy_bg verbs-a $P $R \
-    "FLINT_SYNC_BOUNDARY_MODE=gated FLINT_SYNC_VISIBILITY_LAG_BOUND_SECS=3600 FLINT_SYNC_QUIESCE_BOUND_SECS=15 FLINT_SYNC_FLOOR_SECS=5" \
-    /tmp/b20.log run
-  inpod verbs-a "for i in \$(seq 1 60); do [ -f $R/.flint-sync/checkout-complete ] && break; sleep 1; done" > /dev/null
-  local s0
-  s0=$(mseq $P)
-
-  # ONE write, then silence.
-  inpod verbs-a "printf quiet-one > $R/q.txt" > /dev/null
-  local t0
-  t0=$(date +%s)
-  local src
-  src=$(wait_bsource $P quiescence 60) || { bad "no quiescence citation within 60 s (boundary source: ${src:-none})"; return 1; }
-  local t1 took
-  t1=$(date +%s); took=$((t1 - t0))
-  [ "$src" != "forced-lag-cap" ] || { bad "the citation is stamped forced-lag-cap with an hour-long cap — the source is dead code"; return 1; }
-  [ "$took" -ge 10 ] || { bad "the citation landed after ${took}s — sooner than the 15 s window, so it was not quiescence"; return 1; }
-  local cited
-  cited=$(manif $P | jq -r '.entries|keys[]' | grep -c '^q.txt$')
-  [ "$cited" = "1" ] || { bad "the quiescence boundary does not cite q.txt"; return 1; }
-  ok "quiescence cited q.txt ${took}s after the last write (window 15 s), source=quiescence"
   killsync verbs-a
   return 0
 }
@@ -1099,55 +946,11 @@ b22_preexisting_flint_disables_the_verbs() {
 }
 
 # ─────────────────────────────────────────────────────────────────────
-# B11a  preStop cites everything: gated SIGTERM ⇒ the final manifest
-#       cites every uncited version and the owed ack is settled.
+# B11a  preStop settles what it owes: SIGTERM with a held sentinel ⇒
+#       the final boundary publishes the declared bytes and acks it.
 # ─────────────────────────────────────────────────────────────────────
-b11a_sigterm_drains_and_cites() {
-  # TWO PHASES, because the two claims cannot be observed under one set
-  # of knobs and the first draft of this leg raced itself trying.
-  #
-  # In gated mode the lane and the citation share the floor tick, so a
-  # short floor is required to stage anything — and the floor arm
-  # deliberately honors a HELD sentinel (forced), which means an owed
-  # ack cannot survive a floor tick. Phase 1 therefore tests the
-  # cite-everything drain with no sentinel at all; phase 2 tests the
-  # owed ack under an hour-long floor, where nothing can steal it.
-
-  # ── phase 1: the gated drain cites every uncited version ──
-  local P=tenants/b11a R=/work/b11a
-  inpod verbs-a "rm -rf $R && mkdir -p $R" > /dev/null
-  sy_bg verbs-a $P $R "$GATED_TICK" /tmp/b11a.log run
-  inpod verbs-a "for i in \$(seq 1 60); do [ -f $R/.flint-sync/checkout-complete ] && break; sleep 1; done" > /dev/null
-  inpod verbs-a "printf seed > $R/seed.txt" > /dev/null
-  touchp verbs-a $R publish '{"nonce":"b11a-seed"}'
-  wait_ack verbs-a $R publish 'b11a-seed' 60 > /dev/null || { bad "the seed citation never acked"; return 1; }
-
-  mkfiles verbs-a $R 12 d > /dev/null
-  local i staged s0
-  for i in $(seq 1 40); do
-    staged=$(statusj verbs-a $P $R '.pending_stage_entries')
-    [ -n "$staged" ] && [ "$staged" -ge 12 ] && break
-    sleep 1
-  done
-  [ -n "$staged" ] && [ "$staged" -ge 12 ] || { bad "only $staged path(s) staged uncited — nothing to drain"; return 1; }
-  # s0 is captured HERE, immediately before the signal: taken any
-  # earlier it counts boundaries the drain did not install, and the
-  # "did the drain publish?" assertion passes on somebody else's work.
-  s0=$(mseq $P)
-  ok "$staged paths staged uncited at seq $s0 (no timer may cite: both bounds are an hour)"
-
-  termsync verbs-a
-  await_exit verbs-a flint-sync 40 || { bad "the syncer never exited on SIGTERM"; return 1; }
-  local s1 src cited
-  s1=$(mseq $P); src=$(bsource $P); cited=$(manif $P | jq -r '.entries|keys|length')
-  [ "$s1" -gt "$s0" ] || { bad "the drain installed no boundary (still seq $s0)"; return 1; }
-  [ "$cited" -ge 13 ] || { bad "the drain boundary cites $cited files, not the 13 that were staged"; return 1; }
-  [ "$src" = "drain" ] || { bad "the drain boundary is stamped '$src' in the bucket, not drain"; return 1; }
-  ok "SIGTERM drained: seq $s0 -> $s1, $cited files cited, bucket reads source=drain"
-
-  # ── phase 2: the owed ack, where no floor tick can steal it ──
-  #
-  # Cadence mode with an hour-long floor and a long min-interval: the
+b11a_sigterm_settles_an_owed_ack() {
+  # An hour-long floor and a long min-interval: the
   # sentinel arm consumes the touch and then must HOLD it, so the
   # pending record still stands when SIGTERM arrives. That is the
   # container-restart case D10 names — the emptyDir and the agent both
@@ -1177,7 +980,7 @@ b11a_sigterm_drains_and_cites() {
   ok "a consumed-but-unhonored sentinel stands at seq $s2 (held by a 600 s min-interval, floor an hour away)"
 
   termsync verbs-a
-  await_exit verbs-a flint-sync 40 || { bad "the syncer never exited on SIGTERM (phase 2)"; return 1; }
+  await_exit verbs-a flint-sync 40 || { bad "the syncer never exited on SIGTERM"; return 1; }
   local a
   a=$(ackf verbs-a $R2 publish)
   has 'b11a-owed' "$a" || { bad "the owed ack was never settled: $a"; return 1; }
@@ -1192,120 +995,6 @@ b11a_sigterm_drains_and_cites() {
   [ "$(objcat $P2/files/two.txt)" = "two" ] || { bad "the drain acked but did not publish the declared bytes"; return 1; }
   ok "owed ack settled: seq $s2 -> $s3, ack and bucket BOTH read drain, declared bytes published"
   mcx mc rm --recursive --force --versions "m/$BUCKET/$P2/" > /dev/null 2>&1
-  return 0
-}
-
-# ─────────────────────────────────────────────────────────────────────
-# B11b  SIGKILL mid-drain + pod replacement: the emptyDir is gone, so
-#       the pending record can name nothing and the BUCKET is the only
-#       source of truth. Orphans must be surfaced durably.
-# ─────────────────────────────────────────────────────────────────────
-b11b_sigkill_surfaces_orphans_durably() {
-  local P=tenants/b11b R=/work/b11b RB=/work/b11bp
-  inpod verbs-a "mkdir -p $R" > /dev/null
-  sy_bg verbs-a $P $R "$GATED_TICK" /tmp/b11b.log run
-  inpod verbs-a "for i in \$(seq 1 60); do [ -f $R/.flint-sync/checkout-complete ] && break; sleep 1; done" > /dev/null
-  inpod verbs-a "printf seed > $R/seed.txt" > /dev/null
-  touchp verbs-a $R publish '{"nonce":"b11b-seed"}'
-  wait_ack verbs-a $R publish 'b11b-seed' 60 > /dev/null || { bad "the seed citation never acked"; return 1; }
-  local s0
-  s0=$(mseq $P)
-
-  mkfiles verbs-a $R 8 e > /dev/null
-  local i staged
-  for i in $(seq 1 40); do
-    staged=$(statusj verbs-a $P $R '.pending_stage_entries')
-    [ -n "$staged" ] && [ "$staged" -ge 8 ] && break
-    sleep 1
-  done
-  [ -n "$staged" ] && [ "$staged" -ge 8 ] || { bad "only $staged path(s) staged — nothing to orphan"; return 1; }
-
-  # D9's durable summary: written by the LANE, so it survives the pod
-  # that wrote it. It had never actually been written until this
-  # campaign — a knob that existed and did nothing.
-  local od
-  for i in $(seq 1 30); do
-    od=$(objcat "$P/.flint/lean/orphans.json"); [ -n "$od" ] && break; sleep 1
-  done
-  [ -n "$od" ] || { bad "orphans.json was never written to the bucket"; return 1; }
-  local ocount
-  ocount=$(printf '%s' "$od" | jq -r '.candidates|length')
-  [ "$ocount" -ge 8 ] || { bad "orphans.json names $ocount candidate(s), $staged are staged"; return 1; }
-  ok "$staged staged, orphans.json in the bucket names $ocount candidates"
-
-  killsync verbs-a
-  await_exit verbs-a flint-sync 15 > /dev/null
-  [ "$(mseq $P)" = "$s0" ] || { bad "a boundary landed despite SIGKILL — nothing was orphaned"; return 1; }
-
-  # The replacement pod: a FRESH emptyDir, so the pending record died
-  # with its predecessor and cannot be the answer.
-  inpod verbs-b "rm -rf $RB" > /dev/null
-  inpod verbs-b "test -e $RB/.flint-sync/pending.json" && { bad "the replacement carries a pending record — not a replacement"; return 1; }
-  local out rc
-  out=$(SY_TIMEOUT=$TAKEOVER_SECS sy verbs-b $P $RB "$GATED" recover-staged); rc=$?
-  [ "$rc" = "0" ] || { bad "recover-staged failed (rc=$rc): $(printf '%s' "$out" | tail -3)"; return 1; }
-  local s1 src cited
-  s1=$(mseq $P); src=$(bsource $P); cited=$(manif $P | jq -r '.entries|keys|length')
-  [ "$s1" -gt "$s0" ] || { bad "recovery installed no boundary"; return 1; }
-  [ "$src" = "recovered" ] || { bad "the recovery boundary is stamped '$src', not recovered"; return 1; }
-  [ "$cited" -ge 9 ] || { bad "recovery cited $cited files, expected the 8 orphans plus the seed"; return 1; }
-  ok "recovery from the bucket alone: seq $s0 -> $s1, source=recovered, $cited files cited"
-  return 0
-}
-
-# ─────────────────────────────────────────────────────────────────────
-# B11c  A SIGTERM-ignoring agent keeps writing through the drain. The
-#       citation must still land inside the derived grace, and whatever
-#       the agent wrote after it is the DOCUMENTED bound, not a
-#       surprise.
-# ─────────────────────────────────────────────────────────────────────
-b11c_drain_bounds_a_writer_that_ignores_sigterm() {
-  local P=tenants/b11c R=/work/b11c
-  inpod verbs-a "mkdir -p $R" > /dev/null
-  sy_bg verbs-a $P $R "$GATED_TICK" /tmp/b11c.log run
-  inpod verbs-a "for i in \$(seq 1 60); do [ -f $R/.flint-sync/checkout-complete ] && break; sleep 1; done" > /dev/null
-  inpod verbs-a "printf seed > $R/seed.txt" > /dev/null
-  touchp verbs-a $R publish '{"nonce":"b11c-seed"}'
-  wait_ack verbs-a $R publish 'b11c-seed' 60 > /dev/null || { bad "the seed citation never acked"; return 1; }
-  local s0
-  s0=$(mseq $P)
-
-  # The agent: writes w0001.txt, w0002.txt … once a second and has
-  # never heard of SIGTERM. Zero-padded, so "written before or after
-  # the drain?" is answered by name.
-  inpod verbs-a "nohup sh -c 'i=1; while [ \$i -le 90 ]; do \
-      printf w%04d \$i > $R/w\$(printf %04d \$i).txt; i=\$((i+1)); sleep 1; done' > /dev/null 2>&1 & echo started" > /dev/null
-  sleep 10
-  local before
-  before=$(inpod verbs-a "ls $R/w*.txt 2>/dev/null | wc -l" | tr -d ' ')
-  [ "$before" -ge 5 ] || { bad "the ignoring writer only produced $before file(s)"; return 1; }
-
-  local t0
-  t0=$(date +%s)
-  termsync verbs-a
-  await_exit verbs-a flint-sync 70 || { bad "the syncer never exited on SIGTERM — the drain is unbounded"; return 1; }
-  local t1 took
-  t1=$(date +%s); took=$((t1 - t0))
-  # D10 sizes the pod's grace against the ~2-minute spot-reclaim
-  # ceiling; a drain that outruns it is the whole hazard.
-  [ "$took" -le 120 ] || { bad "the drain took ${took}s, past the 120 s spot-reclaim ceiling"; return 1; }
-
-  local s1 cited
-  s1=$(mseq $P); cited=$(manif $P | jq -r '.entries|keys|length')
-  [ "$s1" -gt "$s0" ] || { bad "the drain installed no boundary while a writer was still running"; return 1; }
-  [ "$cited" -ge "$before" ] || { bad "the drain cited $cited files, fewer than the $before that existed before SIGTERM"; return 1; }
-
-  # The writer really did keep going — otherwise "the loss is bounded"
-  # is a claim about an event that never happened.
-  sleep 6
-  local after
-  after=$(inpod verbs-a "ls $R/w*.txt 2>/dev/null | wc -l" | tr -d ' ')
-  [ "$after" -gt "$before" ] || { bad "the writer stopped at SIGTERM ($before -> $after) — nothing outlived the drain"; return 1; }
-  local uncited=$(( after - cited ))
-  [ "$uncited" -ge 0 ] || uncited=0
-  ok "drain finished in ${took}s (ceiling 120 s), cited $cited of the $before pre-SIGTERM files"
-  ok "the writer ran on to $after files; the $uncited written past the drain are the documented bound"
-  inpod verbs-a "pkill -f 'while \[ ' 2>/dev/null; true" > /dev/null
   return 0
 }
 
@@ -1333,7 +1022,7 @@ b13_legacy_citation_survives_the_upgrade() {
   # The syncer image is busybox: no jq. sed with a printf'd insert
   # line does the same job and keeps the fixture inside the image the
   # product actually ships.
-  inpod verbs-a "printf '    \".flint/legacy.txt\": {\"etag\": \"legacy\", \"generation\": 1, \"size\": ${#want}, \"mtime_unix\": 1, \"version_id\": null},\n' > /tmp/b13.ins" > /dev/null
+  inpod verbs-a "printf '    \".flint/legacy.txt\": {\"etag\": \"legacy\", \"generation\": 1, \"size\": ${#want}, \"mtime_unix\": 1},\n' > /tmp/b13.ins" > /dev/null
   inpod verbs-a "sed '/\"entries\": {/r /tmp/b13.ins' $R/.flint-sync/baseline.json > /tmp/b13.bl && mv /tmp/b13.bl $R/.flint-sync/baseline.json" > /dev/null
   local planted
   planted=$(inpod verbs-a "grep -c '\.flint/legacy.txt' $R/.flint-sync/baseline.json" | tr -d ' \r')
@@ -1364,356 +1053,6 @@ b13_legacy_citation_survives_the_upgrade() {
   [ "$post" = "$want" ] || { bad "the legacy object was destroyed or rewritten (now: '$post')"; return 1; }
   ok "after two barriers the legacy object survives byte-identical"
   killsync verbs-a
-  return 0
-}
-
-# ─────────────────────────────────────────────────────────────────────
-# B19  HITL is admitted BETWEEN citations. Gated withholds visibility,
-#      never the human's write path — a 409 in every inter-citation
-#      interval would make gated mode unusable with a UI in front of it.
-# ─────────────────────────────────────────────────────────────────────
-b19_hitl_admitted_between_citations() {
-  local P=tenants/b19 R=/work/b19
-  inpod verbs-a "mkdir -p $R" > /dev/null
-  sy_bg verbs-a $P $R "$GATED_TICK" /tmp/b19.log run
-  inpod verbs-a "for i in \$(seq 1 60); do [ -f $R/.flint-sync/checkout-complete ] && break; sleep 1; done" > /dev/null
-  inpod verbs-a "printf seed > $R/seed.txt" > /dev/null
-  touchp verbs-a $R publish '{"nonce":"b19-seed"}'
-  wait_ack verbs-a $R publish 'b19-seed' 60 > /dev/null || { bad "the seed citation never acked"; return 1; }
-  local s0
-  s0=$(mseq $P)
-
-  # Keep the lane genuinely busy: without ticks there is no window that
-  # could have been wrongly closed, and the leg proves nothing.
-  local n=0 bad_code=""
-  local i
-  for i in $(seq 1 6); do
-    inpod verbs-a "printf lane-$i-$(date +%s) > $R/lane$i.txt" > /dev/null
-    sleep 4
-    local staged
-    staged=$(statusj verbs-a $P $R '.pending_stage_entries')
-    [ -n "$staged" ] && [ "$staged" -gt 0 ] && n=$((n + 1))
-    local code
-    code=$(gw_put_ws b19 "hitl$i.txt" "human write $i")
-    [ "$code" = "200" ] || { bad_code="$code"; break; }
-  done
-  [ -z "$bad_code" ] || { bad "a HITL PUT was refused with $bad_code between citations: $(gw_body)"; return 1; }
-  [ "$n" -ge 3 ] || { bad "the lane had staged work in only $n of 6 intervals — no window was ever open to close"; return 1; }
-  [ "$(mseq $P)" = "$s0" ] || { bad "a citation fired during the leg — the intervals were not inter-citation"; return 1; }
-  ok "6 HITL PUTs admitted across 6 inter-citation intervals; the lane had staged work in $n of them"
-
-  # And the human's bytes are really in the bucket, not merely accepted.
-  [ "$(objcat $P/files/hitl3.txt)" = "human write 3" ] || { bad "a 200 was returned but the bytes are not in the bucket"; return 1; }
-  ok "the HITL bytes are durable while the citation is still withheld"
-  killsync verbs-a
-  return 0
-}
-
-# ─────────────────────────────────────────────────────────────────────
-# B21  Version reclamation: flint's own GC returns each key to ONE live
-#      version. The retention backstop measures in DAYS, so a leg that
-#      runs in a minute cannot be crediting it.
-# ─────────────────────────────────────────────────────────────────────
-b21_version_reclamation_returns_to_one_per_key() {
-  local P=tenants/b21 R=/work/b21
-  inpod verbs-a "mkdir -p $R" > /dev/null
-  sy_bg verbs-a $P $R "$GATED_TICK" /tmp/b21.log run
-  inpod verbs-a "for i in \$(seq 1 60); do [ -f $R/.flint-sync/checkout-complete ] && break; sleep 1; done" > /dev/null
-
-  local t0
-  t0=$(date +%s)
-  local i peak=0 v
-  # Churn one key hard, with a citation between rounds. Lengths differ
-  # every round so every rewrite is scan-visible.
-  for i in $(seq 1 4); do
-    inpod verbs-a "awk -v n=$i 'BEGIN{s=\"r\"; for(j=0;j<n*7;j++) s=s \"y\"; print s}' > $R/churn.txt" > /dev/null
-    sleep 7
-    v=$(vcount "$P/files/churn.txt")
-    [ -n "$v" ] && [ "$v" -gt "$peak" ] && peak=$v
-    touchp verbs-a $R publish "{\"nonce\":\"b21-$i\"}"
-    wait_ack verbs-a $R publish "b21-$i" 60 > /dev/null || { bad "round $i never acked"; return 1; }
-  done
-  # Anti-vacuity: the key genuinely carried more than one version at
-  # some point, or "it drains to one" is a statement about nothing.
-  [ "$peak" -ge 2 ] || { bad "churn.txt never carried more than $peak version — nothing to reclaim"; return 1; }
-  ok "mid-leg peak: churn.txt carried $peak versions"
-
-  local left cur
-  for i in $(seq 1 30); do
-    left=$(vcount "$P/files/churn.txt")
-    [ -n "$left" ] && [ "$left" -le 1 ] && break
-    sleep 2
-  done
-  [ "$left" = "1" ] || { bad "churn.txt is left with $left versions — reclamation did not run"; return 1; }
-  cur=$(objcat "$P/files/churn.txt")
-  local cited_v
-  cited_v=$(manif $P | jq -r '.entries["churn.txt"].version_id // empty')
-  [ -n "$cited_v" ] || { bad "the surviving version is not the cited one — the manifest cites nothing"; return 1; }
-  [ "$(vcat "$P/files/churn.txt" "$cited_v")" = "$cur" ] || { bad "the surviving version is not the cited version"; return 1; }
-
-  local t1 elapsed
-  t1=$(date +%s); elapsed=$((t1 - t0))
-  # The backstop's clock is 30 DAYS. A leg that ran in under two minutes
-  # cannot be crediting GC for the backstop's work.
-  [ "$elapsed" -lt 600 ] || { bad "the leg ran ${elapsed}s — long enough that attribution is muddy"; return 1; }
-  ok "reclaimed to 1 live version in ${elapsed}s — 30-day retention could not have done it"
-  killsync verbs-a
-  return 0
-}
-
-# ─────────────────────────────────────────────────────────────────────
-# B12  Straggler non-destructiveness (§8 Q2's containment claim). A
-#      frozen syncer thaws AFTER a takeover and writes. On a versioned
-#      bucket those writes land as UNCITED versions: nothing the
-#      successor cited is destroyed, and a pinned reader never sees them.
-# ─────────────────────────────────────────────────────────────────────
-b12_straggler_is_contained_not_destructive() {
-  local P=tenants/b12 RS=/work/b12 RB=/work/b12s
-  inpod verbs-s "rm -rf $RS" > /dev/null
-  inpod verbs-s2 "rm -rf $RB" > /dev/null
-  sy_bg verbs-s $P $RS "$GATED_TICK" /tmp/b12.log run
-  inpod verbs-s "for i in \$(seq 1 60); do [ -f $RS/.flint-sync/checkout-complete ] && break; sleep 1; done" > /dev/null
-  inpod verbs-s "printf ORIGINAL-X > $RS/x.txt; printf ORIGINAL-Y > $RS/y.txt" > /dev/null
-  touchp verbs-s $RS publish '{"nonce":"b12-seed"}'
-  wait_ack verbs-s $RS publish 'b12-seed' 60 > /dev/null || { bad "the seed citation never acked"; return 1; }
-  local s0 vx vy inbox_before
-  s0=$(mseq $P)
-  vx=$(manif $P | jq -r '.entries["x.txt"].version_id')
-  vy=$(manif $P | jq -r '.entries["y.txt"].version_id')
-  [ -n "$vx" ] && [ -n "$vy" ] || { bad "the seed boundary names no versions"; return 1; }
-  inbox_before=$(objcat "$P/.flint/lean/inbox")
-  ok "seeded seq $s0; cited versions x=${vx:0:8}… y=${vy:0:8}…"
-
-  # THE FREEZE HAS TO LAND INSIDE THE UPLOAD LOOP. Frozen anywhere else
-  # the straggler thaws into `verify_not_deposed`, fences cooperatively
-  # and writes NOTHING — which is the product working, and which leaves
-  # containment untested. (The leg's own guard caught exactly that on
-  # the first run.) So: a long upload set, and `x.txt` named so it
-  # sorts AFTER it — the set is a BTreeSet walked at fan-out 1, so
-  # lexicographic order is upload order, and x.txt is still to come when
-  # the freeze lands.
-  mkfiles verbs-s $RS 300 a > /dev/null
-  inpod verbs-s "printf STRAGGLER-WRITES-THIS > $RS/x.txt" > /dev/null
-  wait_key $P "a0002.txt" 300 || { bad "the lane never started uploading"; return 1; }
-  objexists "$P/files/a0300.txt" && { bad "the upload set finished before the freeze — nothing is mid-flight"; return 1; }
-  stopsync verbs-s
-  ok "straggler frozen INSIDE the upload loop (a0002 landed, a0300 has not); waiting out the quiet-poll takeover"
-
-  sy_bg verbs-s2 $P $RB "$GATED_TICK" /tmp/b12s.log run
-  await_file verbs-s2 "$RB/.flint-sync/checkout-complete" "$TAKEOVER_SECS" \
-    || { bad "the successor never took the lease over"; contsync verbs-s; return 1; }
-  inpod verbs-s2 "printf SUCCESSOR-Z > $RB/z.txt" > /dev/null
-  touchp verbs-s2 $RB publish '{"nonce":"b12-succ"}'
-  wait_ack verbs-s2 $RB publish 'b12-succ' 120 > /dev/null || { bad "the successor never published"; contsync verbs-s; return 1; }
-  local s1 vz
-  s1=$(mseq $P)
-  [ "$s1" -gt "$s0" ] || { bad "the successor's manifest never advanced — no takeover happened"; contsync verbs-s; return 1; }
-  vz=$(manif $P | jq -r '.entries["z.txt"].version_id // empty')
-  ok "successor deposed it and published seq $s0 -> $s1 (z.txt cited)"
-
-  # THAW. The straggler resumes mid-loop with a dead lease; whatever it
-  # PUTs now is the attack this leg exists to bound.
-  local vx_before
-  vx_before=$(vcount "$P/files/x.txt")
-  contsync verbs-s
-  local i cur_x vx_after
-  for i in $(seq 1 40); do
-    cur_x=$(objcat "$P/files/x.txt")
-    [ "$cur_x" = "STRAGGLER-WRITES-THIS" ] && break
-    sleep 2
-  done
-  vx_after=$(vcount "$P/files/x.txt")
-
-  # Anti-vacuity, both halves: the straggler must genuinely have PUT
-  # something, and `current` must genuinely have moved on a key the
-  # successor's boundary CITES — otherwise non-destructiveness is
-  # proven by the attack's absence.
-  [ "$cur_x" = "STRAGGLER-WRITES-THIS" ] || {
-    bad "the thawed straggler never moved current on a cited key (x.txt still '$cur_x') — containment is untested"
-    return 1
-  }
-  [ "$vx_after" -gt "$vx_before" ] || { bad "x.txt did not gain a version ($vx_before -> $vx_after)"; return 1; }
-  ok "the thawed straggler landed writes: x.txt $vx_before -> $vx_after versions, current is now STRAGGLER-WRITES-THIS"
-
-  # THE CLAIM: every version the successor's boundary cites is still
-  # there, byte-identical, and re-fetchable by id.
-  [ "$(vcat "$P/files/x.txt" "$vx")" = "ORIGINAL-X" ] || { bad "the cited version of x.txt was destroyed"; return 1; }
-  [ "$(vcat "$P/files/y.txt" "$vy")" = "ORIGINAL-Y" ] || { bad "the cited version of y.txt was destroyed"; return 1; }
-  [ -z "$vz" ] || [ "$(vcat "$P/files/z.txt" "$vz")" = "SUCCESSOR-Z" ] || { bad "the successor's own citation was destroyed"; return 1; }
-  ok "every cited version id is still fetchable byte-identical after the straggler's writes"
-
-  # U7: three clauses this leg's own header CLAIMS and never asserted.
-  # B12 was proven structurally blind to the defect it was named for
-  # (it froze the straggler in the upload loop, where the reaper never
-  # runs — see B12b), so its remaining claims get checked rather than
-  # credited.
-  #
-  # (1) "those writes land as UNCITED versions". Survival of the cited
-  # version is NOT that claim: a straggler whose CAS landed would leave
-  # the old version alive AND cite its own, and every assertion above
-  # would still pass.
-  local vx_cited_now seq_now
-  vx_cited_now=$(manif $P | jq -r '.entries["x.txt"].version_id')
-  [ "$vx_cited_now" = "$vx" ] || {
-    bad "the boundary now cites ${vx_cited_now:0:8}… for x.txt, not the successor's ${vx:0:8}… — the straggler's write became CITED"
-    return 1; }
-  ok "the straggler's bytes are UNCITED: x.txt is still cited at ${vx:0:8}…"
-
-  # (2) it installed NOTHING. The seq must be exactly where the
-  # successor left it — not merely greater than the seed.
-  seq_now=$(mseq $P)
-  [ "$seq_now" = "$s1" ] || {
-    bad "the manifest moved $s1 -> $seq_now with only the straggler writing — a deposed CAS landed"
-    return 1; }
-  ok "the manifest is untouched at seq $seq_now — the straggler installed nothing"
-
-  # (3) CONTAINED, not merely ineffective. §8 Q2's word is containment,
-  # and a straggler that writes forever while believing it holds the
-  # lease is a different product from one that knows it was deposed.
-  # The agent-facing marker is the only place that difference is
-  # visible, and nothing in this leg had ever looked at it.
-  local cs
-  cs=$(caps verbs-s "$RS")
-  [ -n "$cs" ] || { bad "the straggler has no capabilities.json to inspect"; return 1; }
-  [ "$(printf '%s' "$cs" | jq -r '.state')" = "fenced" ] || {
-    bad "the straggler still advertises state=$(printf '%s' "$cs" | jq -r '.state') — it does not know it was deposed"
-    return 1; }
-  [ "$(printf '%s' "$cs" | jq -r '.verbs|length')" = "0" ] || {
-    bad "a fenced straggler still advertises verbs $(printf '%s' "$cs" | jq -c '.verbs') — an agent would keep touching sentinels on a zombie"
-    return 1; }
-  ok "the straggler fenced itself: state=fenced, verbs=[]"
-
-  # A pinned reader is unaffected — this is what the citation BUYS.
-  #
-  # BOTH syncers stop first. The successor still holds the lease, and a
-  # one-shot checkout claims before it reads, so leaving it up makes the
-  # probe time out in `claim` and reports a lease queue as a corrupted
-  # boundary.
-  killsync verbs-s
-  killsync verbs-s2
-  await_exit verbs-s flint-sync 20 > /dev/null
-  await_exit verbs-s2 flint-sync 20 > /dev/null
-  inpod verbs-b "rm -rf /work/b12r" > /dev/null
-  local out rc rx
-  out=$(SY_TIMEOUT=$TAKEOVER_SECS sy verbs-b $P /work/b12r "$GATED" checkout); rc=$?
-  [ "$rc" = "0" ] || { bad "a pinned checkout could not complete after the straggler's writes (rc=$rc): $(printf '%s' "$out" | tail -3)"; return 1; }
-  rx=$(inpod verbs-b "cat /work/b12r/x.txt 2>/dev/null")
-  [ "$rx" = "ORIGINAL-X" ] || { bad "a pinned reader saw the straggler's bytes (x.txt=$rx)"; return 1; }
-  ok "a pinned_reads checkout still materializes ORIGINAL-X"
-
-  # The inbox survived the whole episode: no entry disappeared, and no
-  # live stale-epoch window was left standing.
-  local inbox_after n_before n_after win
-  inbox_after=$(objcat "$P/.flint/lean/inbox")
-  n_before=$(printf '%s' "$inbox_before" | jq -r '.entries|length' 2>/dev/null); n_before=${n_before:-0}
-  n_after=$(printf '%s' "$inbox_after" | jq -r '.entries|length' 2>/dev/null); n_after=${n_after:-0}
-  win=$(printf '%s' "$inbox_after" | jq -r '.window.epoch // empty' 2>/dev/null)
-  [ "$n_after" -ge "$n_before" ] || { bad "the inbox lost entries across the episode ($n_before -> $n_after)"; return 1; }
-  if [ -n "$win" ]; then
-    local wexp
-    wexp=$(printf '%s' "$inbox_after" | jq -r '.window.expires_unix // 0')
-    [ "$wexp" -le "$(date +%s)" ] || { bad "a live window from epoch $win is still standing after the takeover"; return 1; }
-  fi
-  ok "inbox intact ($n_before -> $n_after entries), no live stale-epoch window"
-  return 0
-}
-
-# ─────────────────────────────────────────────────────────────────────
-# B15  Citation atomicity with no roll-forward machinery. Kill across
-#      the CAS repeatedly: a reader sees the whole pre-boundary set or
-#      the whole post-boundary set, never a mixture. Runs must land on
-#      BOTH sides, or the leg proves nothing about the CAS.
-# ─────────────────────────────────────────────────────────────────────
-b15_citation_is_atomic_across_kills() {
-  local P=tenants/b15 R=/work/b15
-  inpod verbs-a "mkdir -p $R" > /dev/null
-  sy_bg verbs-a $P $R "$GATED_TICK" /tmp/b15.log run
-  inpod verbs-a "for i in \$(seq 1 60); do [ -f $R/.flint-sync/checkout-complete ] && break; sleep 1; done" > /dev/null
-  inpod verbs-a "printf R0 > $R/p1.txt; printf R0 > $R/p2.txt; printf R0 > $R/p3.txt" > /dev/null
-  touchp verbs-a $R publish '{"nonce":"b15-seed"}'
-  wait_ack verbs-a $R publish 'b15-seed' 60 > /dev/null || { bad "the seed citation never acked"; return 1; }
-
-  local KILL_DELAYS=(0.2 0.6 1.0 1.4 1.9 2.5)
-  local pre_cas=0 post_cas=0 mixed=0 rounds=6 r
-  for r in $(seq 1 $rounds); do
-    local before
-    before=$(mseq $P)
-    # Three paths, all moving to the SAME round marker: a mixture is
-    # therefore visible as a manifest citing two different rounds.
-    inpod verbs-a "for f in p1 p2 p3; do printf 'ROUND-%02d-%s' $r \$f > $R/\$f.txt; done" > /dev/null
-    # Let the lane stage all three as uncited versions.
-    local i staged
-    for i in $(seq 1 25); do
-      staged=$(statusj verbs-a $P $R '.pending_stage_entries')
-      [ -n "$staged" ] && [ "$staged" -ge 3 ] && break
-      sleep 1
-    done
-    [ -n "$staged" ] && [ "$staged" -ge 3 ] || { bad "round $r staged only $staged path(s) — nothing to make atomic"; return 1; }
-
-    touchp verbs-a $R publish "{\"nonce\":\"b15-r$r\"}"
-    # The honor is one CAS and takes milliseconds, so no delay can
-    # reliably land INSIDE it. What the kill delay actually walks across
-    # is the 1 s sentinel poll: short delays kill before the sentinel is
-    # consumed, longer ones after the boundary is installed. Landing on
-    # both sides is what the leg needs, and the guard below FAILS if the
-    # spread turns out degenerate.
-    local delay=${KILL_DELAYS[$((r - 1))]}
-    inpod verbs-a "sleep $delay; kill -9 \$(pidof flint-sync) 2>/dev/null; true" > /dev/null
-    await_exit verbs-a flint-sync 15 > /dev/null
-
-    local after
-    after=$(mseq $P)
-    if [ "$after" -gt "$before" ]; then post_cas=$((post_cas + 1)); else pre_cas=$((pre_cas + 1)); fi
-    # THE CLAIM: whatever a reader sees, it is coherent. Every one of
-    # the three paths cites the same round, or none of them do — read
-    # through the CITED version ids, which is what a reader resolves.
-    #
-    # `grep -c` counts matching LINES, and `mc cat` emits no trailing
-    # newline — so three cited paths all at the new round land on ONE
-    # line and count as 1, which reads exactly like a half boundary.
-    # (It did: the first run of this leg reported "1 of 3" on a boundary
-    # that was perfectly whole.) Count OCCURRENCES, and count the paths
-    # that carry no version id separately rather than silently dropping
-    # them out of the denominator.
-    local m_now n_new n_ver
-    m_now=$(manif $P)
-    n_ver=0
-    n_new=$(for f in p1 p2 p3; do
-              v=$(printf '%s' "$m_now" | jq -r ".entries[\"$f.txt\"].version_id // empty")
-              [ -n "$v" ] || continue
-              vcat "$P/files/$f.txt" "$v"
-              echo
-            done | grep -o "ROUND-$(printf '%02d' $r)" | grep -c . || true)
-    n_ver=$(printf '%s' "$m_now" | jq -r '[.entries["p1.txt"],.entries["p2.txt"],.entries["p3.txt"]] | map(select(. != null and .version_id != null)) | length')
-    [ "$n_ver" = "3" ] || { bad "round $r: the boundary names version ids for only $n_ver of 3 paths"; return 1; }
-    if [ "$n_new" != "0" ] && [ "$n_new" != "3" ]; then
-      mixed=$((mixed + 1))
-      bad "round $r: the manifest cites $n_new of 3 paths at the new round — a HALF boundary"
-    fi
-    sy_bg verbs-a $P $R "$GATED_TICK" /tmp/b15.log run
-    inpod verbs-a "for i in \$(seq 1 40); do [ -f $R/.flint-sync/checkout-complete ] && break; sleep 1; done" > /dev/null
-  done
-
-  [ "$mixed" = "0" ] || { bad "$mixed of $rounds rounds observed a mixed boundary"; return 1; }
-  # Anti-vacuity: kills that all land pre-CAS say nothing about the CAS.
-  [ "$post_cas" -ge 1 ] && [ "$pre_cas" -ge 1 ] || {
-    bad "every kill landed on the same side of the CAS (pre=$pre_cas post=$post_cas) — atomicity is untested"
-    return 1
-  }
-  ok "$rounds kill rounds: $pre_cas landed pre-CAS, $post_cas post-CAS, 0 mixed boundaries"
-
-  # …and the successor converges with no intent document to read.
-  killsync verbs-a
-  await_exit verbs-a flint-sync 15 > /dev/null
-  inpod verbs-b "rm -rf /work/b15p" > /dev/null
-  local out rc
-  out=$(SY_TIMEOUT=$TAKEOVER_SECS sy verbs-b $P /work/b15p "$GATED" checkout); rc=$?
-  [ "$rc" = "0" ] || { bad "the probe checkout did not complete (rc=$rc): $(printf '%s' "$out" | tail -3)"; return 1; }
-  local c1 c2 c3
-  c1=$(inpod verbs-b "cat /work/b15p/p1.txt"); c2=$(inpod verbs-b "cat /work/b15p/p2.txt"); c3=$(inpod verbs-b "cat /work/b15p/p3.txt")
-  local r1=${c1%%-p1}; local r2=${c2%%-p2}; local r3=${c3%%-p3}
-  [ "$r1" = "$r2" ] && [ "$r2" = "$r3" ] || { bad "the probe materialized a mixture: $c1 / $c2 / $c3"; return 1; }
-  ok "the probe checkout materialized one coherent round ($r1) with no intent document in the bucket"
   return 0
 }
 
@@ -1858,156 +1197,6 @@ b18_deposed_mid_pending_refuses() {
   [ "$hash_after" = "$hash_before" ] || { bad "the zombie mutated its tree after being fenced"; return 1; }
   ok "a later sync sentinel on the zombie is refused${sa:+ (acked)}; tree hash unchanged"
   killsync verbs-s; killsync verbs-s2
-  return 0
-}
-
-# ─────────────────────────────────────────────────────────────────────
-# B23  The abandoned-mid-stage endgame (D8). MinIO's noncurrent
-#      expiration is expressed in DAYS, so the reaper is simulated by
-#      the one action the backstop actually takes: a version-scoped
-#      delete of the CITED noncurrent version. Everything downstream —
-#      the refusal, the recovery — is the product's own.
-# ─────────────────────────────────────────────────────────────────────
-b23_dangling_citation_refuses_then_recovers() {
-  local P=tenants/b23 R=/work/b23 RB=/work/b23p
-  inpod verbs-a "mkdir -p $R" > /dev/null
-  sy_bg verbs-a $P $R "$GATED_TICK" /tmp/b23.log run
-  inpod verbs-a "for i in \$(seq 1 60); do [ -f $R/.flint-sync/checkout-complete ] && break; sleep 1; done" > /dev/null
-  inpod verbs-a "printf CITED-OLD > $R/d.txt" > /dev/null
-  touchp verbs-a $R publish '{"nonce":"b23-seed"}'
-  wait_ack verbs-a $R publish 'b23-seed' 60 > /dev/null || { bad "the seed citation never acked"; return 1; }
-  local vcited
-  vcited=$(manif $P | jq -r '.entries["d.txt"].version_id')
-  [ -n "$vcited" ] || { bad "the citation names no version"; return 1; }
-
-  # Stage newer bytes: THIS is what makes the cited version noncurrent,
-  # which is D8's inversion — the backstop's clock now runs against live
-  # cited data.
-  inpod verbs-a "printf STAGED-NEWER-BYTES > $R/d.txt" > /dev/null
-  local i vc
-  for i in $(seq 1 40); do vc=$(vcount "$P/files/d.txt"); [ "$vc" -ge 2 ] && break; sleep 1; done
-  [ "$vc" -ge 2 ] || { bad "the lane never staged over d.txt"; return 1; }
-  local latest_is_cited
-  latest_is_cited=$(vers "$P/files/d.txt" | jq -s -r --arg v "$vcited" 'any(.[]; .v==$v and .latest)')
-  [ "$latest_is_cited" = "false" ] || { bad "the cited version is still current — nothing is exposed to the backstop"; return 1; }
-  ok "cited version ${vcited:0:8}… is now NONCURRENT while $vc versions exist"
-
-  # Abandon the workspace (no lease, no drain), then the reaper runs.
-  killsync verbs-a
-  await_exit verbs-a flint-sync 15 > /dev/null
-  # `--versions` (ALL versions) and `--version-id` (exactly this one)
-  # are two different requests; passing both removed neither, and the
-  # leg's own guard caught it. The backstop reaps ONE version, so the
-  # simulation names one.
-  mcx mc rm --force --version-id "$vcited" "m/$BUCKET/$P/files/d.txt" > /dev/null 2>&1
-  local still
-  still=$(vers "$P/files/d.txt" | jq -r "select(.v==\"$vcited\")|.v")
-  [ -z "$still" ] || { bad "the reaper simulation did not remove the cited version"; return 1; }
-  ok "the backstop reaped the CITED noncurrent version; the manifest still cites it"
-
-  # A fresh checkout must REFUSE, loudly, rather than serve a hole.
-  inpod verbs-b "rm -rf $RB" > /dev/null
-  local out rc
-  out=$(SY_TIMEOUT=$TAKEOVER_SECS sy verbs-b $P $RB "$GATED" checkout); rc=$?
-  [ "$rc" != "0" ] || { bad "the checkout SUCCEEDED over a dangling citation — a silent hole"; return 1; }
-  has 'recover-staged' "$out" || { bad "the refusal does not name the recovery verb: $(printf '%s' "$out" | tail -2)"; return 1; }
-  ok "checkout refused on the dangling citation and named the recovery verb"
-
-  # Recovery re-cites FORWARD onto the surviving bytes, and moves no
-  # data: the versions already exist, so it is one manifest CAS.
-  # The window is a WAIT, not a budget: the leg blocks on the tracer, so
-  # every second here is a second the leg costs. 45 s is enough because
-  # a one-shot verb RELEASES the lease when it exits, so the recovery
-  # that follows the refused checkout claims immediately instead of
-  # sitting out a quiet-poll takeover.
-  $K -n flint-system exec mc -- sh -c "timeout 45 mc admin trace --json m > /tmp/b23.json 2>/dev/null; true" > /dev/null 2>&1 &
-  local tracer=$!
-  sleep 2
-  out=$(SY_TIMEOUT=$TAKEOVER_SECS sy verbs-b $P $RB "$GATED" recover-staged); rc=$?
-  wait $tracer 2>/dev/null
-  [ "$rc" = "0" ] || { bad "recover-staged failed (rc=$rc): $(printf '%s' "$out" | tail -3)"; return 1; }
-  local src
-  src=$(bsource $P)
-  [ "$src" = "recovered" ] || { bad "the recovery boundary is stamped '$src'"; return 1; }
-  local puts
-  puts=$($K -n flint-system exec mc -- cat /tmp/b23.json 2>/dev/null \
-         | grep -c "\"api\":\"s3.PutObject\",\"path\":\"/$BUCKET/$P/files/" || true)
-  [ "${puts:-0}" = "0" ] || { bad "recovery moved data: $puts PUT(s) under files/ — it should be one manifest CAS"; return 1; }
-  ok "recovery re-cited forward with ZERO data PUTs under files/"
-
-  inpod verbs-b "rm -rf $RB" > /dev/null
-  out=$(SY_TIMEOUT=$TAKEOVER_SECS sy verbs-b $P $RB "$GATED" checkout); rc=$?
-  [ "$rc" = "0" ] || { bad "the workspace is still unusable after recovery (rc=$rc)"; return 1; }
-  local got
-  got=$(inpod verbs-b "cat $RB/d.txt 2>/dev/null")
-  [ "$got" = "STAGED-NEWER-BYTES" ] || { bad "recovery did not roll forward onto the surviving bytes (d.txt=$got)"; return 1; }
-  ok "a fresh checkout completes on the surviving bytes (d.txt=STAGED-NEWER-BYTES)"
-  return 0
-}
-
-# ─────────────────────────────────────────────────────────────────────
-# B24  Conformance refusal, arm (a): a proxy that strips
-#      `x-amz-version-id` must take gated mode DOWN, never degrade it
-#      quietly to etag semantics.
-# ─────────────────────────────────────────────────────────────────────
-b24_stripping_proxy_refuses_gated() {
-  # THREE PREFIXES, one per arm, and that is load-bearing. A killed
-  # syncer does not release its lease, so a following arm on the same
-  # prefix sits in `claim` for the quiet-poll window — and "still
-  # running after 12 s" is exactly what BLOCKED looks like. The first
-  # draft of this leg reported the proxy arm as accepted on precisely
-  # that confusion.
-  local PA=tenants/b24a PB=tenants/b24b PC=tenants/b24c
-  local RA=/work/b24a RB=/work/b24b RC=/work/b24c
-
-  # Liveness is not the test. `checkout-complete` is: it is written only
-  # AFTER the startup gate has passed and the lease is held.
-  came_up() { # <pod> <root> <secs>
-    await_file "$1" "$2/.flint-sync/checkout-complete" "$3"
-  }
-
-  # THE ACCEPTED CONTROL FIRST: same knobs, straight at MinIO. A refusal
-  # suite whose accepted case never passes proves only that the syncer
-  # says no to everything.
-  inpod verbs-a "rm -rf $RA && mkdir -p $RA" > /dev/null
-  sy_bg verbs-a $PA $RA "$GATED_TICK" /tmp/b24ok.log run
-  came_up verbs-a $RA 60 || { bad "the direct-endpoint control never came up: $(inpod verbs-a 'tail -3 /tmp/b24ok.log')"; killsync verbs-a; return 1; }
-  ok "control: gated came up green through MinIO directly"
-  killsync verbs-a
-  await_exit verbs-a flint-sync 15 > /dev/null
-
-  # THE PROXY: everything passes through except `x-amz-version-id`. The
-  # workspace looks healthy right up until a citation must NAME a
-  # version — which is why a silent degradation here stays invisible
-  # until it has already cost somebody a boundary.
-  inpod verbs-a "rm -rf $RB && mkdir -p $RB" > /dev/null
-  sy_bg verbs-a $PB $RB \
-    "$GATED_TICK FLINT_SYNC_ENDPOINT=http://strip-proxy.flint-system.svc:9000" /tmp/b24bad.log run
-  await_exit verbs-a flint-sync 45 || {
-    bad "gated mode came up THROUGH A HEADER-STRIPPING PROXY — it degraded to etag semantics silently"
-    killsync verbs-a; return 1
-  }
-  inpod verbs-a "test -f $RB/.flint-sync/checkout-complete" && { bad "the proxy arm completed checkout before dying — it staged before the gate"; return 1; }
-  local out
-  out=$(inpod verbs-a "cat /tmp/b24bad.log 2>/dev/null")
-  # The refusal has to be actionable: an operator reading this line must
-  # be pointed at the version surface, not merely told "no".
-  has 'x-amz-version-id' "$out" || { bad "the refusal never names the missing header: $(printf '%s' "$out" | tail -3)"; return 1; }
-  ok "gated REFUSED through the stripping proxy: $(printf '%s' "$out" | grep -i 'version' | head -1 | cut -c1-110)"
-
-  # …and the refusal binds on GATED, not on the network: a cadence
-  # workspace needs no version surface, and a gate that took every
-  # default workspace down with it would be worse than the hazard.
-  inpod verbs-a "rm -rf $RC && mkdir -p $RC" > /dev/null
-  sy_bg verbs-a $PC $RC \
-    "FLINT_SYNC_FLOOR_SECS=5 FLINT_SYNC_ENDPOINT=http://strip-proxy.flint-system.svc:9000" /tmp/b24cad.log run
-  came_up verbs-a $RC 60 || { bad "the gate took a CADENCE workspace down through the same proxy: $(inpod verbs-a 'tail -3 /tmp/b24cad.log')"; killsync verbs-a; return 1; }
-  ok "cadence mode is unaffected by the same proxy — the gate binds on gated, not on the network"
-  killsync verbs-a
-  mcx mc rm --recursive --force --versions "m/$BUCKET/tenants/b24a/" > /dev/null 2>&1
-  mcx mc rm --recursive --force --versions "m/$BUCKET/tenants/b24b/" > /dev/null 2>&1
-  mcx mc rm --recursive --force --versions "m/$BUCKET/tenants/b24c/" > /dev/null 2>&1
-  note "B24 arm (b) — a customer NoncurrentVersionExpiration rule over the prefix — is the OPERATOR's check, covered green as B30/B31 in run-boundary.sh"
   return 0
 }
 
@@ -2181,7 +1370,6 @@ b14_mixed_fleet_is_detectable_both_ways() {
 # ── run ──────────────────────────────────────────────────────────────
 gw_healthy 60 || { echo "gateway never healthy"; exit 1; }
 mcx mc alias set m http://minio.flint-system.svc:9000 drill drillsecret > /dev/null
-[ "$(mcx mc version info m/$BUCKET | grep -ci enabled)" -ge 1 ] || { echo "bucket versioning is OFF — every gated leg would test the refusal path by accident"; exit 1; }
 
 # Rig reset: every leg owns a prefix, and a previous run's debris is a
 # previous run's answer. B1's control asserts the manifest is ABSENT,
@@ -2189,9 +1377,9 @@ mcx mc alias set m http://minio.flint-system.svc:9000 drill drillsecret > /dev/n
 for i in $(seq -w 1 25); do
   mcx mc rm --recursive --force --versions "m/$BUCKET/tenants/b$i/" > /dev/null 2>&1
 done
-# The legs that need more than one prefix of their own: B11's three
-# drains, B24's three conformance arms, B25's second storm.
-for p in b11a b11a2 b11b b11c b12r b14a b14b b14c b24a b24b b24c b25b; do
+# The legs that need more than one prefix of their own: B11a's second
+# workspace, B14's three arms, B25's second storm.
+for p in b11a b11a2 b14a b14b b14c b25b; do
   mcx mc rm --recursive --force --versions "m/$BUCKET/tenants/$p/" > /dev/null 2>&1
 done
 $K exec verbs-a -c sync -- /bin/sh -c 'rm -rf /work/b*' > /dev/null 2>&1
@@ -2199,160 +1387,6 @@ $K exec verbs-b -c sync -- /bin/sh -c 'rm -rf /work/b*' > /dev/null 2>&1
 $K exec verbs-s -c sync -- /bin/sh -c 'rm -rf /work/b*' > /dev/null 2>&1
 $K exec verbs-s2 -c sync -- /bin/sh -c 'rm -rf /work/b*' > /dev/null 2>&1
 echo "  rig reset: 25 leg prefixes and their workspaces cleared"
-
-# ── B12b  the straggler frozen in the REAPER, not the upload loop ──────
-#
-# B12 freezes the straggler INSIDE THE UPLOAD LOOP, and that is the arm
-# that really is non-destructive: a lane PUT lands a new version and
-# destroys nothing. The REAPER is the other arm, it runs AFTER the
-# manifest CAS in the same pass, and it used to delete every version of
-# a cited key that was neither `keep` nor `is_current`.
-#
-# That rule destroys committed data. The `is_current` guard protects
-# exactly ONE version, on the reasoning that at most one foreign
-# generation can appear between the lane and the citation. A successor
-# in gated mode does not stop at one — its cadence is stage → cite →
-# stage — so a straggler resuming here finds the successor's CITED
-# version sitting noncurrent-and-not-`keep`, and takes it.
-#
-# So B12 passed on the safe half of the mechanism it exists to test,
-# and the plan asserted "they destroy nothing" in four places on the
-# strength of it.
-b12b_straggler_frozen_in_the_reaper_destroys_nothing() {
-  local P=tenants/b12r RS=/work/b12r RB=/work/b12rs
-  inpod verbs-s "rm -rf $RS" > /dev/null
-  inpod verbs-s2 "rm -rf $RB" > /dev/null
-  sy_bg verbs-s $P $RS "$GATED_TICK" /tmp/b12r.log run
-  await_file verbs-s "$RS/.flint-sync/checkout-complete" 60 \
-    || { bad "the straggler never checked out"; return 1; }
-
-  # A wide cited set: the reaper is one LIST + one DELETE per cited
-  # path, walked in lexicographic order, so 300 paths is a window wide
-  # enough to freeze inside and a0001/a0300 bracket it.
-  mkfiles verbs-s $RS 300 a > /dev/null
-  touchp verbs-s $RS publish '{"nonce":"b12r-seed"}'
-  wait_ack verbs-s $RS publish 'b12r-seed' 180 > /dev/null \
-    || { bad "the seed citation never acked"; return 1; }
-  local s0 v1_first v1_last
-  s0=$(mseq $P)
-  v1_first=$(manif $P | jq -r '.entries["a0001.txt"].version_id // empty')
-  v1_last=$(manif $P  | jq -r '.entries["a0300.txt"].version_id // empty')
-  [ -n "$v1_first" ] && [ -n "$v1_last" ] \
-    || { bad "the seed boundary names no versions — is the bucket versioned?"; return 1; }
-  ok "seeded seq $s0 over 300 cited paths (a0001=${v1_first:0:8}… a0300=${v1_last:0:8}…)"
-
-  # Now supersede every one of them. The lane stages 300 new versions;
-  # the citation CAS then advances the manifest and the REAPER starts
-  # deleting the 300 superseded ones, oldest key first.
-  inpod verbs-s "for i in \$(seq 1 300); do \
-      printf GEN2 > $RS/a\$(printf %04d \$i).txt; done" > /dev/null
-  touchp verbs-s $RS publish '{"nonce":"b12r-gen2"}'
-
-  # THE FREEZE HAS TO LAND INSIDE THE REAPER. Two conditions, and both
-  # are read from the bucket, never from the syncer's own log:
-  #   (i)  the manifest CAS has landed   ⇒ seq advanced past s0
-  #   (ii) the sweep has NOT finished    ⇒ a0300's superseded version
-  #        is still there
-  # (i) alone would catch the citation before the reaper; (ii) alone
-  # would catch the whole pass before the CAS. Together they are the
-  # reaper, mid-flight. Same two-probe discipline as B12's upload
-  # freeze, one phase later.
-  local i s1=0 froze=no
-  for i in $(seq 1 600); do
-    s1=$(mseq $P)
-    if [ "$s1" -gt "$s0" ] && vhas "$P/files/a0300.txt" "$v1_last"; then
-      stopsync verbs-s; froze=yes; break
-    fi
-    sleep 0.2
-  done
-  [ "$froze" = yes ] || {
-    bad "never caught the reaper mid-flight (seq $s0 -> $s1) — the window closed before the probe, widen the cited set"
-    contsync verbs-s; return 1
-  }
-  # ANTI-VACUITY on the freeze itself: the sweep must have genuinely
-  # STARTED (an early key already reaped) and genuinely NOT FINISHED (a
-  # late key not yet). "Frozen during the pass" is not "frozen in the
-  # reaper", and the difference is the whole leg.
-  vhas "$P/files/a0001.txt" "$v1_first" && {
-    bad "the reaper had not started at freeze time (a0001's superseded version is intact) — this is not the reaper arm"
-    contsync verbs-s; return 1
-  }
-  ok "straggler frozen INSIDE the reaper at seq $s0 -> $s1 (a0001 reaped, a0300 not); waiting out the takeover"
-
-  # The successor takes over and does the ORDINARY gated thing: cite,
-  # then stage past the citation. That second staging is what pushes
-  # its own cited version off `current` and into the old rule's kill
-  # zone — and it is the steady state, not a contrived one.
-  sy_bg verbs-s2 $P $RB "$GATED_TICK" /tmp/b12rs.log run
-  await_file verbs-s2 "$RB/.flint-sync/checkout-complete" "$TAKEOVER_SECS" \
-    || { bad "the successor never took the lease over"; contsync verbs-s; return 1; }
-  inpod verbs-s2 "printf SUCCESSOR-CITED > $RB/a0300.txt" > /dev/null
-  touchp verbs-s2 $RB publish '{"nonce":"b12r-succ"}'
-  wait_ack verbs-s2 $RB publish 'b12r-succ' 180 > /dev/null \
-    || { bad "the successor never published"; contsync verbs-s; return 1; }
-  local s2 vsucc
-  s2=$(mseq $P)
-  [ "$s2" -gt "$s1" ] || { bad "the successor's manifest never advanced ($s1 -> $s2)"; contsync verbs-s; return 1; }
-  vsucc=$(manif $P | jq -r '.entries["a0300.txt"].version_id // empty')
-  [ -n "$vsucc" ] || { bad "the successor's boundary names no version for a0300.txt"; contsync verbs-s; return 1; }
-
-  # ...and now stage past it, so the successor's CITED version becomes
-  # noncurrent.
-  inpod verbs-s2 "printf SUCCESSOR-STAGED > $RB/a0300.txt" > /dev/null
-  local staged=no
-  for i in $(seq 1 90); do
-    [ "$(objcat "$P/files/a0300.txt")" = "SUCCESSOR-STAGED" ] && { staged=yes; break; }
-    sleep 1
-  done
-  [ "$staged" = yes ] || { bad "the successor never staged past its own citation"; contsync verbs-s; return 1; }
-
-  # ANTI-VACUITY on the KILL ZONE. Unless the successor's cited version
-  # is present AND noncurrent AND not the straggler's `keep`, the old
-  # rule would have skipped it anyway and survival proves nothing.
-  vnoncurrent "$P/files/a0300.txt" "$vsucc" || {
-    bad "the successor's cited version is not noncurrent — the old rule's kill zone is empty, this leg proves nothing"
-    contsync verbs-s; return 1
-  }
-  ok "kill zone armed: the successor cited ${vsucc:0:8}… at seq $s2, then staged past it (it is now noncurrent)"
-
-  # THAW. The straggler resumes inside the reaper holding a dead lease.
-  contsync verbs-s
-  sleep 20
-
-  # THE CLAIM. Nothing the straggler could still have reached is gone.
-  vhas "$P/files/a0300.txt" "$vsucc" || {
-    bad "THE STRAGGLER'S REAPER DELETED THE SUCCESSOR'S CITED VERSION (${vsucc:0:8}…) — committed data destroyed"
-    return 1
-  }
-  [ "$(vcat "$P/files/a0300.txt" "$vsucc")" = "SUCCESSOR-CITED" ] \
-    || { bad "the successor's cited version survived but its bytes changed"; return 1; }
-
-  # ANTI-VACUITY on the THAW: the reaper must have had work OUTSTANDING
-  # when it resumed. If a0300's superseded version is gone the sweep ran
-  # to completion and simply chose well; if it is still there the fence
-  # stopped it with work left, which is the shipped behaviour and the
-  # only thing that makes the survival above meaningful.
-  vhas "$P/files/a0300.txt" "$v1_last" || {
-    bad "the reaper ran to completion after deposal — the epoch fence never fired, so nothing stopped it taking more"
-    return 1
-  }
-  ok "the deposed reaper stopped with work outstanding: a0300's superseded version survives, and so does the successor's citation"
-
-  # The successor's own view is intact end to end.
-  local m_now
-  m_now=$(manif $P | jq -r '.entries["a0300.txt"].version_id // empty')
-  [ "$m_now" = "$vsucc" ] || { bad "the manifest no longer cites the successor's version"; return 1; }
-  [ "$(mseq $P)" = "$s2" ] || { bad "the straggler's CAS landed after deposal (seq moved past $s2)"; return 1; }
-  ok "the manifest still cites ${vsucc:0:8}… at seq $s2 — the straggler installed nothing"
-
-  killsync verbs-s
-  killsync verbs-s2
-  await_exit verbs-s flint-sync 20 > /dev/null
-  await_exit verbs-s2 flint-sync 20 > /dev/null
-  return 0
-}
-
-
 
 leg "B1  sentinel publishes when cadence cannot"     b1_sentinel_beats_cadence
 leg "B2  crash between consume and ack re-runs"      b2_crash_between_consume_and_ack
@@ -2362,25 +1396,13 @@ leg "B5  scoped sync defers, never loses"            b5_scoped_sync_defers_out_o
 leg "B6  conflict transport rides the ack"           b6_conflict_rides_the_ack
 leg "B7  remote.seq is local-only news"              b7_ticker_is_local_only_news
 leg "B8  unused verbs cost nothing"                  b8_unused_verbs_cost_nothing
-leg "B9  gated withholds a mid-logical-change"       b9_gated_withholds_a_mid_logical_change
-leg "B10 the lag cap forces a citation"              b10_lag_cap_forces_citation
 leg "B16 the default floor still publishes"          b16_default_floor_still_publishes
-leg "B20 quiescence fires"                           b20_quiescence_fires
-leg "B11a SIGTERM drains and cites"                  b11a_sigterm_drains_and_cites
-leg "B11b SIGKILL surfaces orphans durably"          b11b_sigkill_surfaces_orphans_durably
-leg "B11c the drain bounds a SIGTERM-ignoring agent" b11c_drain_bounds_a_writer_that_ignores_sigterm
+leg "B11a SIGTERM settles an owed ack"               b11a_sigterm_settles_an_owed_ack
 leg "B13 a legacy citation survives the upgrade"     b13_legacy_citation_survives_the_upgrade
-leg "B19 HITL admitted between citations"            b19_hitl_admitted_between_citations
-leg "B21 version reclamation returns to one per key" b21_version_reclamation_returns_to_one_per_key
-leg "B12 the straggler is contained, not destructive" b12_straggler_is_contained_not_destructive
-leg "B12b straggler frozen in the REAPER"            b12b_straggler_frozen_in_the_reaper_destroys_nothing
 leg "B14 mixed-fleet detection, both ways"           b14_mixed_fleet_is_detectable_both_ways
-leg "B15 the citation is atomic across kills"        b15_citation_is_atomic_across_kills
 leg "B17 renewal survives a sentinel storm"          b17_renewal_survives_a_sentinel_storm
 leg "B18 deposed mid-pending refuses"                b18_deposed_mid_pending_refuses
 leg "B22 pre-existing .flint/ disables the verbs"    b22_preexisting_flint_disables_the_verbs
-leg "B23 dangling citation refuses, then recovers"   b23_dangling_citation_refuses_then_recovers
-leg "B24 a stripping proxy refuses gated"            b24_stripping_proxy_refuses_gated
 leg "B25 hot loops meter by work, not by calls"      b25_hot_loops_meter_by_work_not_by_calls
 
 # The reconciliation. Skipped under -only, which runs one leg on

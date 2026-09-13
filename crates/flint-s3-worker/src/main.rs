@@ -165,7 +165,7 @@ fn await_release(comm: &Path, budget: Duration) -> ! {
     // lean syncer still needs for its final publish.
     eprintln!(
         "flint-s3-worker: preStop — still unreleased after {}s; terminating anyway (the tenant may see \
-         a dead mount, and for lean the last writes are recoverable with recover-staged)",
+         a dead mount; for lean, nothing written since the last boundary was published)",
         budget.as_secs()
     );
     std::process::exit(0);

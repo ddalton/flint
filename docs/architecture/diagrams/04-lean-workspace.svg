@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 620" role="img"
-     aria-label="flint-lean, drawn as a flow: the agent pod writes plain local files in a tree the CSI node plugin owns and bind-mounts; the same tree is hostPathed into an unprivileged flint-sync worker, which checks it out from S3 at start and publishes changed files at a boundary or on cadence. The lease, the broker and the boundary verbs are control, off the data path. Gated mode makes durability and visibility separate events with one CAS.">
+     aria-label="flint-lean, drawn as a flow: the agent pod writes plain local files in a tree the CSI node plugin owns and bind-mounts; the same tree is hostPathed into an unprivileged flint-sync worker, which checks it out from S3 at start and publishes changed files at a boundary or on cadence. The lease, the broker and the boundary verbs are control, off the data path. A boundary makes the whole changed set visible with one CAS.">
 <style>
   text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
   .t1{font-size:17.0px;font-weight:600}
@@ -116,9 +116,9 @@
 <text class="t4" x="44" y="544">the boundary verbs are files: an agent that can write a file can declare a coherent point</text>
 <rect x="808" y="468" width="768" height="96" rx="7" class="bx"/>
 <path class="f-lean" d="M815,468 H1569 A7,7 0 0 1 1576,475 V473 H808 V475 A7,7 0 0 1 815,468 Z"/>
-<text class="t2 c-lean" x="824" y="492">gated mode — durable now, visible on ONE CAS</text>
-<text class="t4" x="824" y="512">every changed file is uploaded as a new version at once: durable, and invisible; one CAS cites the whole set</text>
-<text class="t4b" x="824" y="527">a reader sees the whole change or none of it; refused without a lag bound</text>
+<text class="t2 c-lean" x="824" y="492">a boundary is a coherent point</text>
+<text class="t4" x="824" y="512">every floor tick and every publish touch runs one fused barrier: upload, then ONE CAS cites the whole set</text>
+<text class="t4b" x="824" y="527">a reader takes a boundary entire or not at all; a publish touch is the point the agent declared</text>
 <line class="l-ink" x1="28" y1="592" x2="54" y2="592"/>
 <text class="t4" x="60" y="596">data path</text>
 <line class="l-ctl" x1="127.98" y1="592" x2="153.98000000000002" y2="592" stroke-dasharray="6 5"/>

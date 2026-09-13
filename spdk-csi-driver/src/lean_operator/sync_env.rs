@@ -53,25 +53,15 @@ pub fn sync_env(ws: &FlintLeanWorkspace, root: &str) -> Vec<(String, String)> {
         p("FLINT_SYNC_UPLOAD_PART_PARALLELISM", s.upload_part_parallelism.to_string()),
         p("FLINT_SYNC_RAW_READS", s.raw_reads.to_string()),
         // Boundary verbs (§2.6), unconditionally.
-        p("FLINT_SYNC_BOUNDARY_MODE", s.boundary_mode.clone()),
         p("FLINT_SYNC_SENTINELS", s.sentinels.clone()),
         p("FLINT_SYNC_SENTINEL_MIN_INTERVAL_SECS", s.sentinel_min_interval_secs.to_string()),
         p("FLINT_SYNC_SENTINEL_HOURLY_BUDGET", s.sentinel_hourly_budget.to_string()),
-        p("FLINT_SYNC_QUIESCE_BOUND_SECS", s.quiesce_bound_secs.to_string()),
-        p("FLINT_SYNC_STAGED_BACKLOG_CAP_OBJECTS", s.staged_backlog_cap_objects.to_string()),
-        p("FLINT_SYNC_STAGED_BACKLOG_CAP_BYTES", s.staged_backlog_cap_bytes.to_string()),
-        p("FLINT_SYNC_NONCURRENT_RETENTION_DAYS", s.noncurrent_retention_days.to_string()),
         p("FLINT_SYNC_UDS_DOOR", if s.uds_door { "true" } else { "false" }.to_string()),
         p("FLINT_SYNC_METRICS", if s.metrics.enabled { "true" } else { "false" }.to_string()),
         p("FLINT_SYNC_METRICS_PORT", s.metrics.port.to_string()),
         // One of the only two labels any series carries (D15).
         p("FLINT_SYNC_WORKSPACE", ws.name_any()),
     ];
-    // The one knob with no default: gated REFUSES to start without it,
-    // and stamping an invented value would defeat that refusal.
-    if let Some(lag) = s.visibility_lag_bound_secs {
-        env.push(p("FLINT_SYNC_VISIBILITY_LAG_BOUND_SECS", lag.to_string()));
-    }
     if let Some(endpoint) = &s.endpoint {
         env.push(p("FLINT_SYNC_ENDPOINT", endpoint.clone()));
     }
@@ -120,11 +110,11 @@ mod tests {
         assert_eq!(get("FLINT_SYNC_REGION").as_deref(), Some("us-west-1"));
         // Opt-in, default-off: the sequential per-object upload (1).
         assert_eq!(get("FLINT_SYNC_UPLOAD_PART_PARALLELISM").as_deref(), Some("1"));
-        for k in ["FLINT_SYNC_FLOOR_SECS", "FLINT_SYNC_MAX_FILES", "FLINT_SYNC_FANOUT", "FLINT_SYNC_FETCH_DRIVERS", "FLINT_SYNC_UPLOAD_PART_PARALLELISM", "FLINT_SYNC_RAW_READS", "FLINT_SYNC_BOUNDARY_MODE", "FLINT_SYNC_METRICS_PORT"] {
+        for k in ["FLINT_SYNC_FLOOR_SECS", "FLINT_SYNC_MAX_FILES", "FLINT_SYNC_FANOUT", "FLINT_SYNC_FETCH_DRIVERS", "FLINT_SYNC_UPLOAD_PART_PARALLELISM", "FLINT_SYNC_RAW_READS", "FLINT_SYNC_SENTINELS", "FLINT_SYNC_METRICS_PORT"] {
             assert!(get(k).is_some(), "{k} must be stamped even at its default");
         }
         assert!(get("FLINT_SYNC_NAMESPACE").is_none(), "the namespace is the caller's literal, never this list's");
-        assert!(get("FLINT_SYNC_VISIBILITY_LAG_BOUND_SECS").is_none(), "the one knob with no default is not invented");
+        assert!(get("FLINT_SYNC_BOUNDARY_MODE").is_none(), "the retired mode knob is not stamped");
     }
 
     /// A region is stamped only when the CR names one: the plugin's

@@ -39,8 +39,7 @@ use spdk_csi_driver::tier::store::ObjectStore;
 const POSTURE_EVERY_SECS: u64 = 1800;
 
 /// How often the cheap observation half runs: ONE epoch read that
-/// carries the syncer's echo (plus one orphans GET only when the lease
-/// is dead). At 3,000 workspaces that is ~25 GET/s — a third of the
+/// carries the syncer's echo. At 3,000 workspaces that is ~25 GET/s — a third of the
 /// syncers' own idle read rate (§7) — and it is what makes
 /// `CITED-SEQ`, `LAG` and `STAGED` mean anything.
 const OBSERVE_EVERY_SECS: u64 = 120;
@@ -102,7 +101,7 @@ async fn reconcile(ws: Arc<FlintLeanWorkspace>, ctx: Arc<Ctx>) -> Result<Action,
                 .status
                 .as_ref()
                 .and_then(|s| s.conditions.as_ref())
-                .and_then(|c| c.iter().find(|c| c.r#type == "BoundaryModeAccepted"))
+                .and_then(|c| c.iter().find(|c| c.r#type == "SpecAccepted"))
                 .and_then(|c| c.observed_generation);
     let posture = edited || now.saturating_sub(last_posture) >= POSTURE_EVERY_SECS;
     let report = full_pass(&store, &ws.spec, &ctx.identity, generation, posture)
@@ -130,34 +129,6 @@ async fn reconcile(ws: Arc<FlintLeanWorkspace>, ctx: Arc<Ctx>) -> Result<Action,
         spdk_csi_driver::lean_operator::boundary::set_condition(&mut conditions, c);
     }
 
-    // D9's DR signature deserves an EVENT as well as a condition: the
-    // condition is a state an operator has to look at, the event is one
-    // that reaches them.
-    if let Some(n) = report.stranded_candidates.filter(|n| *n > 0) {
-        event(
-            &ctx,
-            &ws,
-            kube::runtime::events::EventType::Warning,
-            "UncitedWorkStranded",
-            // Same correction as the condition (reconcile.rs): what was
-            // observed is a lease that stopped advancing, not an absent
-            // syncer. A credential-paused syncer is alive and cannot
-            // renew, because the renewal is the refused request.
-            //
-            // The runs of spaces here were a lost line continuation —
-            // the event text shipped with them in it.
-            &format!(
-                "{n} durable object(s) are staged and uncited and the lease has stopped \
-                 advancing — invisible to every manifest-resolving reader. The holder may be \
-                 gone, or alive and refused by the store (401/403), which pauses a syncer \
-                 without stopping it; check flint_lean_auth_paused_since_timestamp_seconds \
-                 first. Run `flint-sync recover-staged` on this workspace to re-cite them as \
-                 one flagged boundary"
-            ),
-        )
-        .await;
-    }
-
     let refused = phase == "Refused";
     let status = FlintLeanWorkspaceStatus {
         phase: Some(phase.clone()),
@@ -171,11 +142,8 @@ async fn reconcile(ws: Arc<FlintLeanWorkspace>, ctx: Arc<Ctx>) -> Result<Action,
         // starve the posture forever.
         last_verified_unix: if posture { Some(now) } else { prev.and_then(|s| s.last_verified_unix) },
         conditions: Some(conditions),
-        observed_boundary_mode: report.observed_boundary_mode.clone(),
         observed_syncer_version: report.observed_syncer_version.clone(),
         cited_seq: report.cited_seq,
-        visibility_lag_secs: report.visibility_lag_secs,
-        staged_uncited: report.staged_uncited,
     };
     let api: Api<FlintLeanWorkspace> = Api::namespaced(ctx.client.clone(), &ns);
     api.patch_status(

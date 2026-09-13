@@ -44,7 +44,6 @@ async fn cite(w: &Workspace, epoch: u64, seq: u64, path: &str, etag: &str, body:
             mtime_unix: 0,
             generation: seq,
             epoch,
-            version_id: None,
         },
     );
     let current = w.snapshot().await.unwrap().manifest_etag;

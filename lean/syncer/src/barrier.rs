@@ -259,7 +259,6 @@ impl Syncer {
                         size: u64::MAX,
                         mtime_unix: 0,
                         mtime_nanos: None,
-                        version_id: None,
                         // The sentinel's bytes are the LOCAL edit; the
                         // publish that supersedes hashes them itself.
                         crc64_b64: None,
@@ -353,7 +352,6 @@ impl Syncer {
                         size: st.len(),
                         mtime_unix: mtime_of(&st),
                         mtime_nanos: Some(mtime_nanos_of(&st)),
-                        version_id: None,
                         crc64_b64: Some(got),
                     },
                 );
@@ -683,9 +681,8 @@ impl Syncer {
     /// the cadence barrier relying on exactly that phantom fence
     /// between upload chunks and completing every remaining data PUT
     /// after a takeover. The cell is returned so the caller can compare
-    /// it against its lease — the gated lanes already pay a separate
-    /// `verify_not_deposed_pub` for the same purpose; the cadence
-    /// barrier uses the read it already paid for. `None` when there is
+    /// it against its lease — the cadence barrier uses the read it
+    /// already paid for rather than a separate fence. `None` when there is
     /// no lease or the read failed: neither is a fence, and the
     /// ordinary renewal arm will try again.
     pub(crate) async fn renew_if_due(&mut self) -> LeanResult<Option<EpochState>> {
@@ -1078,7 +1075,6 @@ impl Syncer {
                             mtime_unix: scan_entry.map(|s| s.mtime_unix).unwrap_or(0),
                             generation: stamps.map(|s| s.generation).unwrap_or(be.generation),
                             epoch,
-                            version_id: meta.version_id.clone(),
                         },
                     );
                 }
@@ -1167,7 +1163,7 @@ impl Syncer {
         // A fused install IS a coherent point, and cadence/hybrid have
         // exactly one source. The gauges must not report "no boundary
         // ever" on a workspace that publishes every minute.
-        self.note_boundary(super::gated::CitationSource::Cadence.as_str(), installed.seq)?;
+        self.note_boundary("cadence", installed.seq)?;
         report.manifest_etag = Some(installed_etag.clone());
         report.observed_seq = Some(installed.seq);
         report.observed_etag = Some(installed_etag.clone());
@@ -1358,7 +1354,6 @@ impl Syncer {
                         })?;
                     return Ok(UploadOutcome::published(
                         path, key.to_string(), meta.etag, crc, size, scanned, generation, epoch,
-                        meta.version_id,
                     ));
                 }
                 Err(StoreError::ChecksumMismatch(_)) | Err(StoreError::NoSuchUpload(_)) => {
@@ -1387,7 +1382,6 @@ impl Syncer {
                         let g = head_stamps.map(|s| s.generation).unwrap_or(generation);
                         return Ok(UploadOutcome::published(
                             path, key.to_string(), head.etag, crc, head.size, scanned, g, epoch,
-                            head.version_id,
                         ));
                     }
                     if attempt >= 1 {
@@ -1408,27 +1402,6 @@ impl Syncer {
         Ok(UploadOutcome::Deferred)
     }
 
-    /// The gated staging lane's entry point into the shipped guard
-    /// chain — same 412 policy, same AdoptOwn recognizer, same park;
-    /// only the caller's use of the response differs. `None` = parked
-    /// on a foreign etag.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn upload_one_pub(
-        &self,
-        path: &str,
-        scanned: &scan::ScanEntry,
-        base: Option<&BaselineEntry>,
-        epoch: u64,
-        flush_uuid: &str,
-        prior_uuids: &[String],
-    ) -> LeanResult<Option<(LeanEntry, BaselineEntry)>> {
-        match self.upload_one(path, scanned, base, epoch, flush_uuid, prior_uuids).await? {
-            UploadOutcome::Published { entry, baseline_entry } => {
-                Ok(Some((entry, baseline_entry)))
-            }
-            UploadOutcome::Parked { .. } | UploadOutcome::Deferred => Ok(None),
-        }
-    }
 
     async fn upload_one(
         &self,
@@ -1500,7 +1473,7 @@ impl Syncer {
             .await
         {
             Ok(meta) => Ok(UploadOutcome::published(
-                path, key, meta.etag, crc, uploaded_len, scanned, generation, epoch, meta.version_id,
+                path, key, meta.etag, crc, uploaded_len, scanned, generation, epoch,
             )),
             Err(StoreError::PreconditionFailed(_)) => {
                 // The 412 policy: my own crashed/torn PUT ⇒ adopt; a
@@ -1522,7 +1495,6 @@ impl Syncer {
                             .await?;
                         return Ok(UploadOutcome::published(
                             path, key, meta.etag, crc, uploaded_len, scanned, generation, epoch,
-                            meta.version_id,
                         ));
                     }
                     Err(e) => return Err(e.into()),
@@ -1537,7 +1509,7 @@ impl Syncer {
                     // foreign write of the same content): cite it.
                     let g = head_stamps.map(|s| s.generation).unwrap_or(generation);
                     return Ok(UploadOutcome::published(
-                        path, key, head.etag, crc, head.size, scanned, g, epoch, head.version_id,
+                        path, key, head.etag, crc, head.size, scanned, g, epoch,
                     ));
                 }
                 if !own && self.preserve_foreign_412(path, &head).await.is_none() {
@@ -1559,7 +1531,7 @@ impl Syncer {
                     Err(e) => return Err(e.into()),
                 };
                 Ok(UploadOutcome::published(
-                    path, key, meta.etag, crc, uploaded_len, scanned, generation, epoch, meta.version_id,
+                    path, key, meta.etag, crc, uploaded_len, scanned, generation, epoch,
                 ))
             }
             Err(e) => Err(e.into()),
@@ -1630,7 +1602,6 @@ impl UploadOutcome {
         scanned: &scan::ScanEntry,
         generation: u64,
         epoch: u64,
-        version_id: Option<String>,
     ) -> UploadOutcome {
         let _ = path;
         UploadOutcome::Published {
@@ -1648,12 +1619,10 @@ impl UploadOutcome {
                 mtime_unix: scanned.mtime_unix,
                 generation,
                 epoch,
-                version_id: version_id.clone(),
             },
             baseline_entry: BaselineEntry {
                 etag,
                 generation,
-                version_id,
                 // The PRE-read stat: if the agent wrote during our read,
                 // the next scan sees the drift and re-queues (the
                 // re-stat/re-queue valve).

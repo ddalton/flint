@@ -41,16 +41,6 @@ pub struct LeanEntry {
     pub generation: u64,
     /// The publishing writer's lease epoch (0 = a gateway/HITL write).
     pub epoch: u64,
-    /// The object VERSION this citation names (boundary-verbs plan D7).
-    ///
-    /// `None` = a legacy or unversioned entry ⇒ readers take today's
-    /// `get_whole(key, If-Match etag)` path verbatim. Mixed manifests
-    /// are NORMAL during rollout and after any bucket-versioning
-    /// change, so both forms are permanent reader cases, not a
-    /// migration state. **The version id ADDRESSES; the etag ATTESTS** —
-    /// the etag stays and is still verified.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -58,26 +48,11 @@ pub struct LeanManifest {
     pub seq: u64,
     /// path -> entry. Paths are workspace-relative, '/'-separated.
     pub entries: BTreeMap<String, LeanEntry>,
-    /// Set by a GATED citation (D13). Under `pinned_reads` flint's
-    /// readers resolve EXCLUSIVELY by the cited `version_id` and never
-    /// S3-wins-adopt the current version.
-    ///
-    /// The rule is load-bearing, not a refinement: the moment the gated
-    /// lane stages a path, the cited etag stops matching current, so
-    /// without it EVERY gated checkout would 412 on every dirty path
-    /// and adopt uncited mid-logical-change bytes — the versioned
-    /// design would leak its own staging into readers through exactly
-    /// the arm the whole mode exists to avoid.
-    ///
-    /// Unset for cadence, hybrid and legacy manifests, which therefore
-    /// keep the shipped 412/S3-wins arm byte-for-byte.
-    #[serde(default)]
-    pub pinned_reads: bool,
     /// This workspace is published by exactly ONE writer, so an object
     /// that has moved off its citation was moved by something that is
     /// not the publisher.
     ///
-    /// It exists because the default arm below `pinned_reads` is an
+    /// It exists because a reader's default arm on a 412 is an
     /// explicit S3-wins adopt — right for a lean workspace, where an
     /// object past its citation means a human wrote newer bytes that
     /// ought to win. On a MIRROR that reading is exactly inverted: the
@@ -86,12 +61,6 @@ pub struct LeanManifest {
     /// manifest cites into a reader's tree with no error and no
     /// conflict record. Composition drill C4 measured that against
     /// forge's legible export.
-    ///
-    /// Distinct from `pinned_reads` on purpose. That flag is the GATED
-    /// lane's, it drives version-addressed resolution, and its refusal
-    /// tells the operator to run `recover-staged` — advice that is
-    /// wrong here, where nothing was staged and the answer is to find
-    /// the second writer.
     ///
     /// Set by the installing pass from config, never inherited.
     #[serde(default)]
@@ -156,8 +125,6 @@ pub struct Pointer {
     /// Vec with a default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chunks: Option<Vec<super::chunk::ChunkRef>>,
-    #[serde(default)]
-    pub pinned_reads: bool,
     /// Carried here as well as on the manifest because the pointer is
     /// the authority for the fields it carries, and a reader that
     /// reconstructs a manifest from it must not lose the flag that
@@ -397,7 +364,6 @@ pub async fn load(
                     LeanManifest {
                         seq: p.seq,
                         entries,
-                        pinned_reads: p.pinned_reads,
                         sole_writer: p.sole_writer,
                         boundary_source: p.boundary_source.clone(),
                     },
@@ -409,7 +375,6 @@ pub async fn load(
         // rotation moves `seq` without rewriting the entries object, so
         // the generation's own copy is stale by construction.
         manifest.seq = p.seq;
-        manifest.pinned_reads = p.pinned_reads;
         manifest.sole_writer = p.sole_writer;
         manifest.boundary_source = p.boundary_source.clone();
         return Ok(Some(LoadedManifest {
@@ -479,8 +444,8 @@ pub async fn cas_write_stamped(
     // a reader that GETs and a reader that HEADs must never disagree
     // about how coherent the citation claims to be.
     // The layout switch. Every publisher routes through here — the
-    // barrier, both gated lanes and the gateway's HITL CAS — so the
-    // decision lives at one site rather than four, and §6's "chunk
+    // barrier, the takeover rotation and the gateway's HITL CAS — so the
+    // decision lives at one site rather than three, and §6's "chunk
     // server-side on receipt" falls out rather than needing its own
     // path.
     if cfg.chunked {
@@ -547,7 +512,6 @@ pub async fn cas_write_stamped(
         // The step-one layout. `cas_write_chunked` is what produces a
         // chunk list; this path stays byte-for-byte what it was.
         chunks: None,
-        pinned_reads: m.pinned_reads,
         sole_writer: m.sole_writer,
         boundary_source: m.boundary_source.clone(),
         epoch,
@@ -633,7 +597,6 @@ pub async fn cas_write_chunked(
         entries_key: None,
         entries_seq: None,
         chunks: Some(split.into_iter().map(|(r, _)| r).collect()),
-        pinned_reads: m.pinned_reads,
         sole_writer: m.sole_writer,
         boundary_source: m.boundary_source.clone(),
         epoch,
@@ -735,7 +698,6 @@ pub async fn rotate_for_takeover(
                 // did not need to be.
                 let mut m = LeanManifest::default();
                 m.seq = next.seq;
-                m.pinned_reads = next.pinned_reads;
                 m.sole_writer = next.sole_writer;
                 m.boundary_source = next.boundary_source.clone();
                 return Ok(Some((m, meta.etag)));
@@ -973,9 +935,8 @@ pub async fn sweep_chunks(store: &dyn ObjectStore, cfg: &LeanConfig) -> LeanResu
 /// **`mine_upserts` and `mine_deletes` must be DISJOINT**, and that is
 /// the caller's job, not this function's: which one wins depends on
 /// which the tree saw LAST, and neither set carries that. The fused
-/// barrier gets it free (both are computed from one scan); the gated
-/// lane, whose stage and tombstones persist across ticks, cancels each
-/// against the other as it observes them. Resolving an overlap here —
+/// barrier gets it free (both are computed from one scan). Resolving an
+/// overlap here —
 /// in either direction — cites a deleted file half the time and
 /// amputates a live one the other half. TLC found both halves.
 /// Returns the merged document plus the foreign entries a consume must
@@ -989,10 +950,6 @@ pub fn merge(
 ) -> (LeanManifest, Vec<(String, LeanEntry)>) {
     let mut merged = theirs.clone();
     merged.seq = theirs.seq + 1;
-    // Set explicitly by the installing pass; never inherited from
-    // whoever wrote last (a cadence barrier must not inherit a gated
-    // predecessor's `pinned_reads`, and vice versa).
-    merged.pinned_reads = false;
     // Same discipline, and for a sharper reason: inheriting it would
     // let a workspace that once published as a mirror keep refusing
     // adopts forever, and NOT inheriting it would let a mirror silently

@@ -31,10 +31,7 @@ use serde::{Deserialize, Serialize};
     printcolumn = r#"{"name":"PROJECT","type":"string","jsonPath":".spec.projectId"}"#,
     printcolumn = r#"{"name":"BUCKET","type":"string","jsonPath":".spec.bucket"}"#,
     printcolumn = r#"{"name":"PREFIX","type":"string","jsonPath":".spec.keyPrefix"}"#,
-    printcolumn = r#"{"name":"MODE","type":"string","jsonPath":".status.observedBoundaryMode"}"#,
     printcolumn = r#"{"name":"CITED-SEQ","type":"integer","jsonPath":".status.citedSeq"}"#,
-    printcolumn = r#"{"name":"LAG","type":"integer","jsonPath":".status.visibilityLagSecs"}"#,
-    printcolumn = r#"{"name":"STAGED","type":"integer","jsonPath":".status.stagedUncited"}"#,
     printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
@@ -188,39 +185,6 @@ pub struct FlintLeanWorkspaceSpec {
     // ── boundary verbs (docs/plans/flint-lean-boundary-verbs-plan.md
     //    §2.6). Every default below is today's behavior, so an existing
     //    CR that names none of them is byte-identical after upgrade. ──
-    /// Citation policy (D6): `cadence` | `hybrid` | `gated`.
-    ///
-    /// - `cadence` — exactly pre-boundary behavior; the escape hatch.
-    /// - `hybrid` (DEFAULT) — cadence ∪ boundary sentinels, whichever
-    ///   comes first. No trade: a workspace whose agent never touches
-    ///   `.flint/publish` behaves identically to `cadence`.
-    /// - `gated` — OPT-IN. Durability and visibility split: uploads
-    ///   land every floor tick as uncited object versions, and the
-    ///   manifest advances only at coherent points. Buys coherent
-    ///   views for manifest-resolving readers. COSTS, all of which
-    ///   apply the moment you set it: (1) automatic-recovery RPO is
-    ///   the last BOUNDARY, not the last floor — on a pure-spot fleet
-    ///   pod replacement is routine, and uncited work then needs
-    ///   `flint-sync recover-staged`, an operator action; (2) uncited
-    ///   generations are the CURRENT version of real `files/` keys, so
-    ///   any reader that does not resolve through the manifest — an
-    ///   import tool, `aws s3 cp`, a foreign system, a human — sees
-    ///   mid-logical-change bytes; (3) uncited = invisible to every
-    ///   import, DR checkout, GitOps re-apply and cross-cluster move;
-    ///   (4) the bucket must pass the versioning conformance probe
-    ///   (versioning=Enabled, `x-amz-version-id` on PUT, version-scoped
-    ///   GET/HEAD/DELETE, `ListObjectVersions`) — a proxy that strips
-    ///   the version header gets gated REFUSED, never degraded into;
-    ///   (5) `visibilityLagBoundSecs` is REQUIRED.
-    ///
-    /// CHANGING THIS ON A LIVE WORKSPACE REQUIRES POD RECREATION: the
-    /// worker's config is stamped in as environment when the node plugin
-    /// creates it, and there is no re-read path. Recreation destroys the emptyDir
-    /// pending record, which turns the whole uncited window into
-    /// recovery candidates — the gated→cadence escape hatch is
-    /// therefore an operator procedure, not an edit.
-    #[serde(default = "default_boundary_mode")]
-    pub boundary_mode: String,
 
     /// Sentinel posture (D0.4): `auto` | `off` | `force`. `auto` runs
     /// the verbs unless the pre-flight finds pre-existing `.flint/`
@@ -245,43 +209,9 @@ pub struct FlintLeanWorkspaceSpec {
     #[serde(default = "default_sentinel_hourly_budget")]
     pub sentinel_hourly_budget: u64,
 
-    /// Gated only, and REQUIRED there: the hard cap on citation
-    /// staleness. Unbounded staleness is refused by construction
-    /// rather than by convention — a gated CR without this is
-    /// `BoundaryModeAccepted=False`. A citation forced by this cap is
-    /// stamped `forced-lag-cap` in the ack AND on the manifest object,
-    /// so "was that view coherent?" is answerable from the bucket.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub visibility_lag_bound_secs: Option<u64>,
 
-    /// Gated only: the scan-to-scan stability window that counts as
-    /// quiescence — the cheapest coherent point there is, and the one
-    /// that fires for an agent that never learns the verbs.
-    #[serde(default = "default_quiesce_bound_secs")]
-    pub quiesce_bound_secs: u64,
 
-    /// Gated only: forced-citation sources that bound the preStop
-    /// drain by construction. If backlog-cap becomes the DOMINANT
-    /// citation source, the cap is pacing the workspace instead of
-    /// bounding it — lower the lag bound or teach the agent the verbs.
-    #[serde(default = "default_staged_backlog_cap_objects")]
-    pub staged_backlog_cap_objects: u64,
-    #[serde(default = "default_staged_backlog_cap_bytes")]
-    pub staged_backlog_cap_bytes: u64,
 
-    /// Gated only: the noncurrent-version retention the operator
-    /// provisions on `<prefix>/files/` — the crash-window backstop
-    /// BEHIND flint's exact per-citation version GC, not the reaper.
-    ///
-    /// Read the inversion before lowering it: gated staging makes the
-    /// CITED version noncurrent the moment a newer generation stages,
-    /// so a `NoncurrentVersionExpiration` rule over `files/` runs a
-    /// clock against live cited data and never against the newest
-    /// uncited bytes. A shorter fleet rule covering this prefix
-    /// REFUSES gated mode with the offending rule Id named. Cross-
-    /// validated against `2 × (visibilityLagBoundSecs + floorSecs)`.
-    #[serde(default = "default_noncurrent_retention_days")]
-    pub noncurrent_retention_days: u64,
 
     /// The UDS control door (§2.5, Phase 5): a Unix socket at
     /// `<mountPath>/.flint-sync/ctl.sock` serving `POST /v1/boundary`,
@@ -370,9 +300,6 @@ fn default_size_limit_gib() -> u64 {
 fn default_mount_path() -> String {
     "/workspace".into()
 }
-fn default_boundary_mode() -> String {
-    "hybrid".into()
-}
 fn default_sentinels() -> String {
     "auto".into()
 }
@@ -381,18 +308,6 @@ fn default_sentinel_min_interval_secs() -> u64 {
 }
 fn default_sentinel_hourly_budget() -> u64 {
     60
-}
-fn default_quiesce_bound_secs() -> u64 {
-    30
-}
-fn default_staged_backlog_cap_objects() -> u64 {
-    5_000
-}
-fn default_staged_backlog_cap_bytes() -> u64 {
-    2 * 1024 * 1024 * 1024
-}
-fn default_noncurrent_retention_days() -> u64 {
-    30
 }
 fn default_metrics_port() -> u32 {
     9847
@@ -415,34 +330,22 @@ pub struct FlintLeanWorkspaceStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_verified_unix: Option<u64>,
 
-    /// `BoundaryModeAccepted`, `VersionRetentionProvisioned`,
-    /// `SentinelVerbsActive`, `BoundaryModeActive` (§2.6).
+    /// `SpecAccepted`, `SyncerObserved`, `SentinelVerbsActive`,
+    /// `MetricsExposed` (§2.6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Vec<LeanCondition>>,
 
     // ── observed, from the live syncer's lease-heartbeat echo ───────
     //    Every field below reports what the RUNNING binary says, never
     //    what the spec asked for. That distinction is the whole point:
-    //    an old syncer reads a FIXED env list, so a `gated` spec
-    //    reaching a pre-boundary binary is ignored in silence.
-    /// The mode the syncer is actually running.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observed_boundary_mode: Option<String>,
+    //    an old syncer reads a FIXED env list, so a knob it predates is
+    //    ignored in silence.
     /// The syncer binary's version — the mixed-fleet tell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_syncer_version: Option<String>,
     /// The last manifest seq the syncer cited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cited_seq: Option<u64>,
-    /// Seconds since that citation — gated mode's coherence lag, as a
-    /// printer column, with no metrics stack in the picture.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub visibility_lag_secs: Option<u64>,
-    /// Durable-but-invisible objects standing right now. This is the
-    /// number that would need `recover-staged` if the pod were
-    /// replaced this second.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub staged_uncited: Option<u64>,
 }
 
 /// A metav1.Condition mirror (same field names, same semantics) — the
@@ -530,6 +433,15 @@ mod tests {
         assert!(bad.is_empty(), "CRD is not structural — the API server refuses it: {bad:?}");
     }
 
+    const RETIRED_KNOBS: &[&str] = &[
+        "boundaryMode",
+        "visibilityLagBoundSecs",
+        "quiesceBoundSecs",
+        "stagedBacklogCapObjects",
+        "stagedBacklogCapBytes",
+        "noncurrentRetentionDays",
+    ];
+
     /// Every §2.6 knob must reach the schema, and every default must be
     /// today's behavior: an existing CR that names none of them is
     /// byte-identical after the upgrade.
@@ -539,39 +451,23 @@ mod tests {
             "projectId": "team-a/p", "bucket": "b", "keyPrefix": "t/p",
         }))
         .unwrap();
-        assert_eq!(spec.boundary_mode, "hybrid");
         assert_eq!(spec.sentinels, "auto");
         assert_eq!(spec.sentinel_min_interval_secs, 5);
         assert_eq!(spec.sentinel_hourly_budget, 60);
-        assert_eq!(spec.visibility_lag_bound_secs, None);
-        assert_eq!(spec.quiesce_bound_secs, 30);
-        assert_eq!(spec.noncurrent_retention_days, 30);
         assert!(!spec.metrics.enabled, "metrics must be off by default — D15 is opt-in");
 
         // And they are really in the published schema, not just in Rust.
         let v = serde_json::to_value(crd()).unwrap();
         let props = &v["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
             ["properties"];
-        for k in [
-            "boundaryMode",
-            "sentinels",
-            "sentinelMinIntervalSecs",
-            "sentinelHourlyBudget",
-            "visibilityLagBoundSecs",
-            "quiesceBoundSecs",
-            "stagedBacklogCapObjects",
-            "stagedBacklogCapBytes",
-            "noncurrentRetentionDays",
-            "metrics",
-        ] {
+        for k in ["sentinels", "sentinelMinIntervalSecs", "sentinelHourlyBudget", "metrics"] {
             assert!(props.get(k).is_some(), "{k} never reached the CRD schema");
         }
-        // The doc-comment carries the trade a user must read before
-        // setting gated; a knob whose cost is only in a plan file is a
-        // knob nobody reads the cost of.
-        let doc = props["boundaryMode"]["description"].as_str().unwrap();
-        for phrase in ["recover-staged", "POD RECREATION", "aws s3 cp"] {
-            assert!(doc.contains(phrase), "boundaryMode doc-comment never states {phrase:?}");
+        // The retired knobs must be GONE from the schema, not merely
+        // ignored: a field the schema still carries is a field a CR
+        // can set and nothing will honour.
+        for k in RETIRED_KNOBS {
+            assert!(props.get(*k).is_none(), "{k} is still in the CRD schema");
         }
     }
 }

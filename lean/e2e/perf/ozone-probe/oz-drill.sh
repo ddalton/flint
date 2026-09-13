@@ -30,7 +30,6 @@ run "head cond/badcrc (present means the wrong checksum was ACCEPTED)" aws --end
 say "=== 2. flint-store probes through the SDK ==="
 export FLINT_SYNC_ROOT=$A
 run "probe-conditional" flint-sync probe-conditional
-run "probe-versions" flint-sync probe-versions
 run "probe-copy (CopyObject arm)" flint-sync probe-copy
 FLINT_SYNC_COPY_WHOLE_MAX_MB=0 run "probe-copy (MPU + UploadPartCopy arm)" flint-sync probe-copy
 say "=== 3. lean flow: publish from A, checkout into B ==="

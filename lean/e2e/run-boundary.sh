@@ -10,7 +10,7 @@
 # worker pod in flint-workers (design §10.2 S12) — not deleted, and
 # never left silently green.
 # The boundary-verbs kind drill (plan §5 Phases 4/5/6): the operator's
-# refusals, the observed-state echo, the layered doors and /metrics —
+# spec verdict, the observed-state echo, the layered doors and /metrics —
 # on a real cluster, against a real MinIO.
 #
 # House rules inherited from run-chaos.sh: every leg observes its own
@@ -26,7 +26,7 @@ CTX=kind-flint-lean-boundary
 K="kubectl --context $CTX"
 H="helm --kube-context $CTX"
 PASS=0
-TOTAL=14
+TOTAL=7
 fail() { echo "FAIL: $1"; exit 1; }
 ok() { PASS=$((PASS + 1)); echo "  ok: $1"; }
 note() { echo "  NOTE: $1"; }
@@ -65,18 +65,7 @@ $K get mutatingwebhookconfiguration flint-lean-inject > /dev/null 2>&1 || fail "
 $K -n flint-system run mc-assert --image=minio/mc --restart=Never --command -- sleep 3600 > /dev/null 2>&1
 $K -n flint-system wait --for=condition=Ready pod/mc-assert --timeout=120s > /dev/null || fail "mc pod"
 mc alias set m http://minio.flint-system.svc:9000 drill drillsecret > /dev/null || fail "mc alias"
-# Gated mode REQUIRES versioning; without it every gated leg below is
-# testing the refusal path by accident.
-mc version enable m/agentws > /dev/null 2>&1 || fail "enable bucket versioning"
-[ "$(mc version info m/agentws | grep -ci enabled)" -ge 1 ] || fail "versioning not Enabled"
-echo "  bring-up: chart installed, bucket versioned"
-
-# Rig reset: this drill PLANTS a hostile lifecycle rule, and a leftover
-# from an interrupted run would poison its own accepted control. Remove
-# any rule flint did not write before starting.
-for id in $(mc ilm rule ls m/agentws --json 2>/dev/null | grep -o '"ID":"[^"]*"' | cut -d'"' -f4 | grep -v '^flint-lean'); do
-  mc ilm rule rm --id "$id" m/agentws > /dev/null 2>&1
-done
+echo "  bring-up: chart installed"
 
 # Fresh objects, not re-applied ones: a CR whose spec does not change
 # raises no watch event, so a status left over from an interrupted run
@@ -85,101 +74,21 @@ done
 $K delete -f boundary-workspaces.yaml --ignore-not-found --wait=true > /dev/null 2>&1
 $K apply -f boundary-workspaces.yaml > /dev/null || fail "apply boundary fixtures"
 
-# ── Phase 4: the refusals, each with its accepted control ────────────
-# The control comes FIRST: a refusal suite whose accepted case does not
-# pass is a suite that says no to everything.
-wait_cond good BoundaryModeAccepted status True 60 \
-  || fail "the ACCEPTED control was refused: $(cond good BoundaryModeAccepted reason) — $(cond good BoundaryModeAccepted message)"
-ok "accepted control: a coherent gated workspace is accepted"
-
-wait_cond nolag BoundaryModeAccepted reason LagBoundRequired 30 \
-  || fail "gated-without-a-lag-bound was accepted (reason '$(cond nolag BoundaryModeAccepted reason)')"
-[ "$(cond nolag BoundaryModeAccepted status)" = "False" ] || fail "nolag reason set but status not False"
-ok "B26 gated without visibilityLagBoundSecs is refused"
-
-wait_cond shortret BoundaryModeAccepted reason RetentionTooShort 30 \
-  || fail "a retention shorter than one staging window was accepted"
-case "$(cond shortret BoundaryModeAccepted message)" in
-  *7210s*) ;;
-  *) fail "the refusal does not name the window it violated" ;;
-esac
-ok "B27 retention cross-validation refuses, naming the window"
-
-wait_cond bigbacklog BoundaryModeAccepted reason GraceTooShort 30 \
-  || fail "an undrainable backlog cap was accepted"
-case "$(cond bigbacklog BoundaryModeAccepted message)" in
-  *stagedBacklogCapBytes*) ;;
-  *) fail "the refusal does not name the knob to lower" ;;
-esac
-ok "B28 a backlog no spot reclaim can drain is refused, naming the knob"
-
-# ── Phase 4: the backstop is really installed, in the bucket ─────────
-wait_cond good VersionRetentionProvisioned status True 30 \
-  || fail "the noncurrent backstop was never provisioned"
-RULES=$(mc ilm rule ls m/agentws --json 2>/dev/null)
-case "$RULES" in
-  *tenants/good/files/*) ;;
-  *) fail "no lifecycle rule covering tenants/good/files/ exists in the BUCKET: $RULES" ;;
-esac
-ok "B29 the 30-day noncurrent backstop exists in the live bucket config"
-
-# ── Phase 4: a customer's shorter rule refuses gated, both ways ──────
-# On the `lifecycle` workspace, which carries no pod: these legs
-# RECREATE the CR, and recreating `good` would take its agent — and
-# every later leg — with it.
-#
-# Recreation is how the drill forces a POSTURE pass. The bucket-side
-# checks ride the slow cadence by design (§2.6): re-asking every two
-# minutes whether a bucket's lifecycle rules changed would multiply
-# fleet operator traffic to re-answer a question that moves on the
-# timescale of an admin edit. The exposure that implies — up to one
-# posture cadence between someone arming a 1-day rule and the refusal —
-# is immaterial against a rule that reaps at DAY granularity.
-wait_cond lifecycle BoundaryModeAccepted status True 60 \
-  || fail "the lifecycle fixture was refused before the rule was planted"
-mc ilm rule add m/agentws --prefix "tenants/lifecycle/" \
-   --noncurrent-expire-days 1 > /dev/null 2>&1 \
-   || fail "could not plant the hostile lifecycle rule"
-$K delete flintleanworkspace lifecycle --wait=true > /dev/null 2>&1
-$K apply -f boundary-workspaces.yaml > /dev/null
-wait_cond lifecycle BoundaryModeAccepted reason ShorterNoncurrentRule 40 \
-  || fail "a 1-day noncurrent rule over the prefix did NOT refuse gated mode"
-ok "B30 a shorter covering rule refuses gated mode (the destroyer flint never wrote)"
-
-BAD=$(mc ilm rule ls m/agentws --json | grep -o '"ID":"[^"]*"' | cut -d'"' -f4 | grep -v '^flint-lean' | head -1)
-[ -n "$BAD" ] && mc ilm rule rm --id "$BAD" m/agentws > /dev/null 2>&1
-$K delete flintleanworkspace lifecycle --wait=true > /dev/null 2>&1
-$K apply -f boundary-workspaces.yaml > /dev/null
-wait_cond lifecycle BoundaryModeAccepted status True 60 \
-  || fail "removing the hostile rule did not restore acceptance — the refusal did not track the rule"
-ok "B31 removing it restores acceptance (the refusal tracks the rule, not a typo)"
+# ── Phase 4: the spec verdict ─────────────────────────────────────────
+wait_cond good SpecAccepted status True 60 \
+  || fail "the workspace was refused: $(cond good SpecAccepted reason) — $(cond good SpecAccepted message)"
+ok "B26 a coherent workspace is accepted"
 
 # ── Phase 4: the observed-state echo ─────────────────────────────────
 $K wait --for=condition=Ready pod/agent-good --timeout=300s > /dev/null \
   || { $K describe pod agent-good | tail -20; fail "agent-good never Ready"; }
 # No poke here on purpose: this leg's claim is that the operator picks
 # the echo up ON ITS OWN CADENCE. Two observation intervals of slack.
-wait_cond good BoundaryModeActive status True 130 \
-  || fail "the running syncer never echoed its mode (reason $(cond good BoundaryModeActive reason))"
+wait_cond good SyncerObserved status True 130 \
+  || fail "the running syncer never echoed (reason $(cond good SyncerObserved reason))"
 SEQ=$($K get flintleanworkspace good -o jsonpath='{.status.citedSeq}')
 [ -n "$SEQ" ] || fail "status.citedSeq is empty — the echo did not reach status"
 ok "B32 the lease-heartbeat echo reaches status (citedSeq=$SEQ)"
-
-# Spec vs RUNNING binary. Patching the CR does NOT re-stamp a running
-# pod's env (§2.6's propagation semantics), so the echo must disagree.
-$K patch flintleanworkspace good --type=merge -p '{"spec":{"boundaryMode":"hybrid"}}' > /dev/null
-wait_cond good BoundaryModeActive reason ModeMismatch 130 \
-  || fail "spec/observed mismatch did NOT flip BoundaryModeActive"
-[ "$(cond good BoundaryModeActive status)" = "False" ] || fail "ModeMismatch without status False"
-ok "B33 a spec the running binary is not honoring flips BoundaryModeActive"
-$K patch flintleanworkspace good --type=merge -p '{"spec":{"boundaryMode":"gated"}}' > /dev/null
-wait_cond good BoundaryModeActive status True 130 || note "mode did not settle back to True"
-# The message must name the BINARY, not just disagree — an operator has
-# to know which side to move.
-case "$(cond good BoundaryModeActive message)" in
-  *syncer*) ;;
-  *) note "the mismatch message does not name the syncer version" ;;
-esac
 
 # ── Phase 5: the gateway door (the inbox document's two fields) ──────
 INBOX=tenants/good/.flint/lean/inbox
@@ -237,13 +146,13 @@ ok "B36 the UDS door answers synchronously through the sentinel consume path"
 # ── Phase 6: /metrics, and the label rule ────────────────────────────
 METRICS=$($K exec agent-good -c agent -- wget -q -O - http://127.0.0.1:9847/metrics 2>/dev/null)
 SERIES=$(printf '%s\n' "$METRICS" | grep -c '^flint_lean_')
-[ "$SERIES" -ge 13 ] || fail "/metrics returned $SERIES series (expected >= 13): $METRICS"
+[ "$SERIES" -ge 9 ] || fail "/metrics returned $SERIES series (expected >= 9): $METRICS"
 BADLABEL=$(printf '%s\n' "$METRICS" | grep '^flint_lean_' \
   | sed 's/^[^{]*{//; s/}.*//' | tr ',' '\n' | cut -d= -f1 | sort -u \
   | grep -vE '^(workspace|namespace)$' | head -1)
 [ -z "$BADLABEL" ] || fail "a series carries the label key '$BADLABEL' beyond {workspace,namespace}"
-printf '%s\n' "$METRICS" | grep -q 'flint_lean_boundary_mode{workspace="good",namespace="default"} 2' \
-  || fail "the exposition does not report gated mode with the expected labels"
+printf '%s\n' "$METRICS" | grep -q 'flint_lean_fenced{workspace="good",namespace="default"} 0' \
+  || fail "the exposition does not carry the fenced gauge with the expected labels"
 ok "B37 /metrics serves $SERIES series, label keys exactly {workspace,namespace}"
 
 # ── Phase 6: the bind collision degrades, it does not crash ──────────

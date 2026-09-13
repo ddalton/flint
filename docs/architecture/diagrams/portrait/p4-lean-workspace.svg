@@ -90,9 +90,9 @@
 <text class="t4" x="24" y="381">floorSecs on a hard kill.</text>
 <rect x="326" y="272" width="306" height="138" rx="7" class="bx"/>
 <path class="f-lean" d="M333,272 H625 A7,7 0 0 1 632,279 V277 H326 V279 A7,7 0 0 1 333,272 Z"/>
-<text class="t2 c-lean" x="342" y="296">Gated mode</text>
-<text class="t4" x="342" y="316">every changed file is uploaded as a new version at once —</text>
-<text class="t4" x="342" y="329">durable and INVISIBLE — and one CAS cites the whole</text>
-<text class="t4" x="342" y="342">pending set. A reader sees all of a change or none of it; gated</text>
-<text class="t4" x="342" y="355">is refused without a lag bound.</text>
+<text class="t2 c-lean" x="342" y="296">A boundary</text>
+<text class="t4" x="342" y="316">every floor tick and every publish touch runs one fused</text>
+<text class="t4" x="342" y="329">barrier: the changed files are uploaded, then ONE CAS cites</text>
+<text class="t4" x="342" y="342">the whole set. A reader sees all of a boundary or none of it; a</text>
+<text class="t4" x="342" y="355">publish touch is the point the agent declared coherent.</text>
 </svg>

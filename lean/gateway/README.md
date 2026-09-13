@@ -216,7 +216,7 @@ function in this crate that deletes a cited object.
 
 | Method | Gateway route | Refusals |
 |---|---|---|
-| `get_file` | `GET /files/{path}` | 404 `no-such-file`, 409 `moved`, 410 `dangling-citation` / `foreign-write` / `uncited-bytes` |
+| `get_file` | `GET /files/{path}` | 404 `no-such-file`, 409 `moved`, 410 `foreign-write` |
 | `put_file` | `PUT /files/{path}` | 400 `bad-path` / `bad-precondition`, 409 `barrier-window-open` / `concurrent-write`, 412 `file-changed`, 413 `payload-too-large`, 428 `precondition-required` |
 | `remove_file`, `remove_files` | `DELETE /files/{path}` | 404 `no-such-file`, 412 `file-changed` |
 | `rename_file`, `rename_files` | `POST /rename` `{from, to}` | 404 `no-such-file`, 409 `destination-exists` / `barrier-window-open` / `concurrent-write` |

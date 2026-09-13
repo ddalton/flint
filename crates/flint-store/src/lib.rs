@@ -641,11 +641,10 @@ pub struct EpochLease {
 /// struct on either side would drift silently — which is the failure
 /// this field exists to detect, not to reproduce.
 ///
-/// It answers one question no spec field can: is the binary in that pod
-/// actually running the mode the CR asked for? An old syncer reads a
-/// FIXED env list, so `FLINT_SYNC_BOUNDARY_MODE=gated` reaching a
-/// pre-boundary binary is silently ignored and the workspace runs fused
-/// cadence behind a green condition.
+/// It answers a question no spec field can: which binary, at which
+/// protocol, is actually serving that workspace. An old syncer reads a
+/// FIXED env list, so a knob it predates is ignored in silence, and the
+/// echo is the only place an operator can see that.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct LeaseEcho {
     /// The syncer binary's own version — the mixed-fleet tell.
@@ -654,18 +653,11 @@ pub struct LeaseEcho {
     /// `.flint/capabilities.json`'s protocol number.
     #[serde(default)]
     pub protocol: u32,
-    /// The mode the syncer is RUNNING, not the mode it was asked for.
-    #[serde(default)]
-    pub active_boundary_mode: String,
     /// The last citation this syncer installed.
     #[serde(default)]
     pub last_cited_seq: u64,
     #[serde(default)]
     pub last_cited_unix: u64,
-    /// Durable-but-invisible work standing right now — the gated
-    /// exposure, per workspace, with no metrics stack in the picture.
-    #[serde(default)]
-    pub staged_uncited_count: u64,
     /// Whether the boundary verbs are live in this workspace. The
     /// pre-flight that turns them off (an app already owns `.flint/`)
     /// runs INSIDE the pod against the agent's own tree, so this is the
@@ -796,11 +788,9 @@ pub trait ObjectStore: Send + Sync {
         Err(StoreError::Other("this backend has no version-scoped HEAD".into()))
     }
 
-    /// GET one specific version. This is the read `pinned_reads`
-    /// citations resolve through (D13): under a gated citation flint's
-    /// readers resolve EXCLUSIVELY by the cited version and never
-    /// S3-wins-adopt the current one — without which every gated
-    /// checkout would 412 on its own staged bytes and adopt them.
+    /// GET one specific version, when the backend keeps versions. Lean's
+    /// readers resolve citations by etag alone (version-pinned reads went
+    /// with gated mode, 2026-09-13); the method stays for tools and probes.
     async fn get_version(&self, key: &str, version_id: &str) -> StoreResult<(ObjectMeta, Bytes)> {
         let _ = (key, version_id);
         Err(StoreError::Other("this backend has no version-scoped GET".into()))

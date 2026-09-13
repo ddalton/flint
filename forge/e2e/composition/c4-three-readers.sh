@@ -104,7 +104,7 @@ if [ $rc -ne 0 ]; then
     && ok "the refusal says the workspace has one writer" \
     || bad "it refused, but not for this reason"
   printf '%s' "$out" | grep -q 'recover-staged' \
-    && bad "it gave the gated lane's advice; nothing was staged here" \
+    && bad "it named a remedy that no longer exists; nothing was staged here" \
     || ok "it did not give the wrong remedy"
 else
   bad "the lean reader accepted the diverged prefix (rc=0)"

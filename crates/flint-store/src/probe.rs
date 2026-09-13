@@ -1,13 +1,10 @@
-//! The version-surface conformance probe (lean boundary-verbs plan D8).
+//! The version-surface conformance probe.
 //!
-//! It lives HERE, in the store crate, because it has two callers in two
-//! crates that must never disagree: the syncer runs it at startup and
-//! REFUSES gated mode on failure, and the operator runs it on its
-//! reconcile cadence and flips `BoundaryModeAccepted=False`. Two copies
-//! of "is this bucket conformant?" would eventually answer differently,
-//! and the failure that produces — a workspace the operator calls
-//! healthy and the syncer refuses to start — is worse than either
-//! answer alone.
+//! It lives HERE, in the store crate, so that every caller asks the one
+//! question the same way — two copies of "is this bucket conformant?"
+//! would eventually answer differently. Lean no longer depends on the
+//! version surface (gated mode was removed 2026-09-13); the probe stays
+//! as a tool for any store user that does.
 //!
 //! What it refuses, and why refusal rather than degradation: a
 //! project-scoped proxy that strips `x-amz-version-id` makes every
@@ -77,8 +74,8 @@ pub async fn probe_version_surface(store: &dyn ObjectStore, key: &str) -> Result
         return Err(refuse("the backend reused one version id for two PUTs"));
     }
 
-    // The first version must still be fetchable BY ID — this is the read
-    // `pinned_reads` citations depend on.
+    // The first version must still be fetchable BY ID — the read any
+    // version-pinned citation would depend on.
     let (_, body) = store
         .get_version(key, &v1)
         .await

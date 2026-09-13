@@ -1,7 +1,5 @@
-# The Phase 4/5/6 fixtures (boundary-verbs plan §5). Each workspace
-# exists to be REFUSED for one named reason, plus one that must be
-# accepted — a refusal suite with no accepted control proves only that
-# the operator says no to everything.
+# The Phase 4/5/6 fixtures (boundary-verbs plan §5): the accepted
+# workspace with an agent, and the metrics bind-collision fixture.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -13,50 +11,7 @@ stringData:
   AWS_SECRET_ACCESS_KEY: drillsecret
   AWS_REGION: us-east-1
 ---
-# (1) gated with NO lag bound ⇒ BoundaryModeAccepted=False.
-apiVersion: chert.us/v1alpha1
-kind: FlintLeanWorkspace
-metadata: { name: nolag, namespace: default }
-spec:
-  projectId: team-a/nolag
-  bucket: agentws
-  keyPrefix: tenants/nolag
-  endpoint: http://minio.flint-system.svc:9000
-  credentialsSecretRef: lean-proxy-creds
-  floorSecs: 5
-  boundaryMode: gated
----
-# (2) gated, lag bound set, retention shorter than one staging window.
-apiVersion: chert.us/v1alpha1
-kind: FlintLeanWorkspace
-metadata: { name: shortret, namespace: default }
-spec:
-  projectId: team-a/shortret
-  bucket: agentws
-  keyPrefix: tenants/shortret
-  endpoint: http://minio.flint-system.svc:9000
-  credentialsSecretRef: lean-proxy-creds
-  floorSecs: 5
-  boundaryMode: gated
-  visibilityLagBoundSecs: 3600
-  noncurrentRetentionDays: 0
----
-# (3) gated, backlog caps nothing can drain inside a spot reclaim.
-apiVersion: chert.us/v1alpha1
-kind: FlintLeanWorkspace
-metadata: { name: bigbacklog, namespace: default }
-spec:
-  projectId: team-a/bigbacklog
-  bucket: agentws
-  keyPrefix: tenants/bigbacklog
-  endpoint: http://minio.flint-system.svc:9000
-  credentialsSecretRef: lean-proxy-creds
-  floorSecs: 5
-  boundaryMode: gated
-  visibilityLagBoundSecs: 300
-  stagedBacklogCapBytes: 21474836480
----
-# (4) THE ACCEPTED CONTROL: a coherent gated workspace with an agent.
+# (1) THE ACCEPTED CONTROL: a coherent workspace with an agent.
 apiVersion: chert.us/v1alpha1
 kind: FlintLeanWorkspace
 metadata: { name: good, namespace: default }
@@ -69,9 +24,6 @@ spec:
   floorSecs: 5
   expectedBytes: 1048576
   expectedFiles: 100
-  boundaryMode: gated
-  visibilityLagBoundSecs: 60
-  quiesceBoundSecs: 5
   udsDoor: true
   metrics:
     enabled: true
@@ -95,23 +47,7 @@ spec:
           echo v1 > /workspace/ckpt.bin
           sleep 3600
 ---
-# (4b) A gated workspace with NO pod, used for the lifecycle legs: they
-# recreate the CR to force a posture pass, and recreating `good` would
-# take its agent (and every later leg) with it.
-apiVersion: chert.us/v1alpha1
-kind: FlintLeanWorkspace
-metadata: { name: lifecycle, namespace: default }
-spec:
-  projectId: team-a/lifecycle
-  bucket: agentws
-  keyPrefix: tenants/lifecycle
-  endpoint: http://minio.flint-system.svc:9000
-  credentialsSecretRef: lean-proxy-creds
-  floorSecs: 5
-  boundaryMode: gated
-  visibilityLagBoundSecs: 60
----
-# (5) The METRICS BIND COLLISION: the agent takes the port first. The
+# (2) The METRICS BIND COLLISION: the agent takes the port first. The
 # workspace must stay fully operable and say so in a condition.
 apiVersion: chert.us/v1alpha1
 kind: FlintLeanWorkspace

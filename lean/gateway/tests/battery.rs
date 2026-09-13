@@ -14,7 +14,7 @@ use flint_lean::inbox::{self, InboxEntry};
 use flint_lean::lease::{self, ClaimOutcome};
 use flint_lean::manifest;
 use flint_lean::state::SyncerState;
-use flint_lean::{now_unix, BoundaryMode, LeanConfig, LeanError, Syncer, LEAN_DIR};
+use flint_lean::{now_unix, LeanConfig, LeanError, Syncer, LEAN_DIR};
 use flint_lean_gateway::http::{routes, GatewayCore};
 
 const PREFIX: &str = "tenant/proj1";
@@ -98,12 +98,6 @@ async fn hitl_write(
 
 async fn current_etag(store: &Arc<MemoryStore>, cfg: &LeanConfig, path: &str) -> String {
     store.head(&cfg.file_key(path)).await.unwrap().etag
-}
-
-fn gated(sc: &mut Syncer) {
-    sc.cfg.boundary_mode = BoundaryMode::Gated;
-    sc.cfg.visibility_lag_bound_secs = Some(3600); // the 1-hour-floor trick
-    sc.cfg.quiesce_bound_secs = 3600;
 }
 
 /// Publishes a tree with a clear in-scope / out-of-scope split: two
@@ -495,109 +489,6 @@ async fn gateway_status_and_snapshot() {
     let v: serde_json::Value = serde_json::from_slice(res.body()).unwrap();
     assert!(v["manifest"]["entries"]["f.txt"].is_object());
     assert_eq!(v["inbox"]["entries"][0]["path"], "pending.txt");
-}
-
-/// The gateway is a READER of the coherent view, so it owes the same
-/// promise `checkout` does: under `pinned_reads` the manifest entry
-/// names a `version_id`, and that is what a coherent read resolves.
-///
-/// Reading by ETag alone breaks precisely when gating is doing its job.
-/// The upload lane makes the cited version NONCURRENT, so the current
-/// object's etag no longer matches the citation, and an If-Match GET
-/// fails its precondition — the gateway turned a perfectly readable
-/// cited version into a 409 for every staged-but-uncited file. The
-/// human read path went dark for the whole withholding window, which is
-/// the window gated mode exists to make invisible *and still readable*.
-#[tokio::test]
-async fn the_gateway_resolves_the_cited_version_while_newer_bytes_are_staged() {
-    let store = Arc::new(MemoryStore::new());
-    let dir = tempfile::tempdir().unwrap();
-    let mut sc = syncer(&store, dir.path()).await;
-    gated(&mut sc);
-    assert!(claim_until_held(&mut sc, 3).await);
-    sc.checkout().await.unwrap();
-
-    write(dir.path(), "docs/spec.md", "CITED");
-    sc.gated_tick(true).await.unwrap();
-    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
-    assert!(m.pinned_reads, "the fixture did not produce a pinned boundary");
-    let cited_seq = m.seq;
-    assert!(
-        m.entries.get("docs/spec.md").and_then(|e| e.version_id.as_ref()).is_some(),
-        "the citation names no version — the leg cannot test version resolution"
-    );
-
-    let routes = routes(gw_core(&store));
-    let res = gw_req().method("GET").path("/lean/v1/proj1/files/docs/spec.md").reply(&routes).await;
-    assert_eq!(res.status(), 200, "the cited version is not readable at all");
-    assert_eq!(&res.body()[..], b"CITED");
-
-    // Stage newer bytes WITHOUT citing them: the current version moves,
-    // the manifest does not. This is the ordinary gated steady state,
-    // not an exotic one.
-    write(dir.path(), "docs/spec.md", "STAGED-NEWER");
-    sc.upload_lane().await.unwrap();
-    let m2 = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
-    assert_eq!(m2.seq, cited_seq, "the fixture cited the new bytes — nothing is withheld");
-    let (_, cur) = store.get_whole(&sc.cfg.file_key("docs/spec.md"), None).await.unwrap();
-    assert_eq!(&cur[..], b"STAGED-NEWER", "the lane did not stage over the real key");
-
-    // The coherent read must still serve the CITED bytes.
-    let res = gw_req().method("GET").path("/lean/v1/proj1/files/docs/spec.md").reply(&routes).await;
-    assert_eq!(
-        res.status(),
-        200,
-        "the gateway refused a readable cited version while newer bytes were staged"
-    );
-    assert_eq!(
-        &res.body()[..],
-        b"CITED",
-        "the gateway served uncited, possibly mid-logical-change bytes"
-    );
-}
-
-/// The mixed-manifest cell, through the gateway: a pinned boundary
-/// carrying an entry the citation could not make version-addressable,
-/// whose object has since moved. "Retry" is advice that can never come
-/// true — the cited etag is gone — and serving the current version
-/// would hand a coherent reader the uncited bytes gating withholds.
-#[tokio::test]
-async fn the_gateway_never_tells_a_reader_to_retry_a_citation_that_cannot_come_back() {
-    let store = Arc::new(MemoryStore::new());
-    let dir = tempfile::tempdir().unwrap();
-    let mut sc = syncer(&store, dir.path()).await;
-    gated(&mut sc);
-    assert!(claim_until_held(&mut sc, 3).await);
-    sc.checkout().await.unwrap();
-    write(dir.path(), "spec.md", "CITED");
-    sc.gated_tick(true).await.unwrap();
-
-    // Strip the version id off the citation, keeping the boundary
-    // pinned: this is the cell, not a mode change.
-    let loaded = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
-    let mut m = loaded.manifest.clone();
-    m.entries.get_mut("spec.md").unwrap().version_id = None;
-    assert!(m.pinned_reads, "the fixture stopped being a pinned boundary");
-    manifest::cas_write(store.as_ref(), &sc.cfg, &m, Some(&loaded.handle()), 1, "test-strip")
-        .await
-        .unwrap();
-
-    // …and the object moves past the cited etag.
-    write(dir.path(), "spec.md", "MOVED-PAST-THE-CITATION");
-    sc.upload_lane().await.unwrap();
-
-    let routes = routes(gw_core(&store));
-    let res = gw_req().method("GET").path("/lean/v1/proj1/files/spec.md").reply(&routes).await;
-    assert_ne!(res.status(), 200, "the gateway served uncited bytes to a pinned reader");
-    let body = String::from_utf8_lossy(&res.body()[..]).to_string();
-    assert!(
-        !body.contains("retry"),
-        "the gateway told a reader to retry a citation that can never come back: {body}"
-    );
-    assert!(
-        body.contains("recover-staged"),
-        "the refusal does not name the way out: {body}"
-    );
 }
 
 /// A published tree plus a live gateway. Returns (dir, routes) — the
@@ -1127,41 +1018,6 @@ async fn the_draft_door_refuses_reserved_paths_and_bad_users() {
         .reply(&routes)
         .await;
     assert_eq!(res.status(), 401, "the draft door is behind the same bearer");
-}
-
-/// Gated mode withholds the AGENT's mid-logical-change bytes. It does
-/// NOT withhold a human's coherent whole-object write, and `lane_inner`
-/// says so in as many words. A promoted draft is therefore adopted by
-/// the gated upload lane exactly like any other HITL write — pinned
-/// here so "gated" is never later read as "drafts are held too".
-#[tokio::test]
-async fn a_promote_is_adopted_by_the_gated_upload_lane() {
-    let store = Arc::new(MemoryStore::new());
-    let dir = tempfile::tempdir().unwrap();
-    let mut a = syncer(&store, dir.path()).await;
-    assert!(claim_until_held(&mut a, 3).await);
-    a.checkout().await.unwrap();
-    write(dir.path(), "inputs/wanted.txt", "published v1");
-    a.run_barrier().await.unwrap();
-
-    let routes = routes(gw_core(&store));
-    let base = current_etag(&store, &a.cfg, "inputs/wanted.txt").await;
-    save_draft(&routes, "alice", "inputs/wanted.txt", Some(&base), "alice's edit").await;
-    let res = gw_req()
-        .method("POST")
-        .path("/lean/v1/proj1/drafts/alice/inputs/wanted.txt")
-        .reply(&routes)
-        .await;
-    assert_eq!(res.status(), 200, "{:?}", res.body());
-
-    gated(&mut a);
-    let out = a.upload_lane().await.unwrap();
-    assert_eq!(out.consumed, 1, "the gated lane must consume a promoted draft");
-    assert_eq!(
-        read(dir.path(), "inputs/wanted.txt").as_deref(),
-        Some("alice's edit"),
-        "a promoted draft must reach the agent's tree under gated mode too"
-    );
 }
 
 /// An unpromoted draft of an OUT-OF-SCOPE path changes nothing about a

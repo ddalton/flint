@@ -26,8 +26,7 @@ to; sentinel protocol 1.
    process in this pod shares the tree. Nobody else writes to these
    files live. Contributions from outside (another party through the
    gateway, or a previous incarnation of this workspace) arrive only at a
-   boundary (in `gated` mode: at every cadence tick — see the last
-   section), and only onto files you have not modified.
+   boundary, and only onto files you have not modified.
 5. **Nothing is silent.** Every file the syncer did not take, and every
    foreign change it declined to apply over yours, is named in a record
    you can read.
@@ -50,7 +49,7 @@ the syncer owns it. You write exactly two names there, `publish` and
 
 The syncer's own state lives in `.flint-sync/` at the workspace root.
 Never write there. Two files in it are for you to read:
-`.flint-sync/gauges.json` (health: `state`, `boundary_mode`,
+`.flint-sync/gauges.json` (health: `state`,
 `rpo_secs`, `last_boundary`) and `.flint-sync/conflicts.jsonl` (one
 JSON record per line per conflict: `path`, `kind`, `foreign_etag`,
 `preserved_key`, `at_unix`; the file rotates at 1 MiB into
@@ -60,7 +59,7 @@ JSON record per line per conflict: `path`, `kind`, `foreign_etag`,
 
 ```json
 { "protocol": 1, "verbs": ["publish", "sync", "remote-seq"],
-  "boundary_mode": "hybrid", "state": "live",
+  "state": "live",
   "sentinel_min_interval_secs": 5, "sentinel_hourly_budget": 60,
   "syncer_version": "…", "boot": { "holder_id": "…", "boot_unix": 0 } }
 ```
@@ -73,10 +72,6 @@ JSON record per line per conflict: `path`, `kind`, `foreign_etag`,
   served by a successor, or the pod is being replaced); `reason` says
   why verbs are off. Keep working on the files; a fenced syncer does not
   publish, so expect the workspace to be re-served or the pod replaced.
-- `boundary_mode` is `cadence`, `hybrid` (the default) or `gated` (see
-  the last section). The verbs work in all three; the mode names how a
-  boundary is made (one fused barrier in the first two, a staging lane
-  plus a citation in `gated`).
 
 ## `publish`: declare a coherent point
 
@@ -139,8 +134,7 @@ JSON, not written as `[]`.
   `seq`. Not queued, not scheduled. `uploaded: 0` with `no_change: true`
   is still an honest ok: nothing had changed since the last boundary.
 - `status: "partial"` — the boundary installed, but the paths in
-  `report.dropped` are not in it: in gated mode a foreign write raced
-  the citation; in any mode a path met a newer foreign version the
+  `report.dropped` are not in it: each met a newer foreign version the
   syncer could not preserve (`report.parked` counts them). Treat it as a
   failure for those paths and touch again.
 - `status: "refused-fenced"` — this syncer lost its lease
@@ -269,14 +263,3 @@ Do not:
   process in the pod could write. The authoritative record is the
   manifest in the bucket, which outside parties read through the
   gateway.
-
-## Gated mode (only if `boundary_mode` is `gated`)
-
-Uploads are staged continuously but become *visible* to readers only
-when a boundary is cited: your `publish` touch, or a lag cap the operator
-set. Foreign writes (the inbox) are applied onto your unmodified files
-at every cadence tick — the staging lane — not only at a citation. A
-publish ack can be `partial` with `report.dropped` naming paths the
-citation could not carry (a foreign write raced it); touch again for
-those. A park in this mode is recorded as `stage-412-parked`. Everything
-else above is unchanged.
