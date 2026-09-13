@@ -197,8 +197,16 @@ CONSTANTS
                        \* against live cited data (D8's inversion, and
                        \* §2.4.3's abandoned-mid-stage endgame).
   TwoScanDelete,       \* TRUE = a path is delete-eligible only if it was
-                       \* also present at the PREVIOUS scan — the shipped
-                       \* two-consecutive-scans rule (`scan.rs` classify).
+                       \* ALSO ABSENT at the PREVIOUS scan — the shipped
+                       \* two-consecutive-scans rule (`scan.rs` classify:
+                       \* absent now and in `prev_scan` is a FIRST
+                       \* absence, withheld).  Until 2026-09-12 this read
+                       \* `p \in prevScan` — present at the previous scan
+                       \* — which is a one-scan rule with a spurious
+                       \* conjunct; the narrow runs did not notice (their
+                       \* comment records that prevScan changed nothing
+                       \* there), and the declared-removal mutation could
+                       \* not be expressed against it.
                        \* FALSE in every PRE-EXISTING cfg, deliberately:
                        \* this tranche is the first to model `prev_scan`
                        \* at all, and turning it on globally would shrink
@@ -214,7 +222,7 @@ CONSTANTS
                        \* FALSE = uncite and leave the file (classify
                        \* reads an UPLOAD).  Both are the naive orders
                        \* §4.2 says are each destructive on their own.
-  StampBoundarySource  \* TRUE = every install stamps the manifest with
+  StampBoundarySource, \* TRUE = every install stamps the manifest with
                        \* the SAME clock its ack will name.  FALSE = the
                        \* mutation, and it is what shipped: the barrier
                        \* installed through an UNSTAMPED CAS, so every
@@ -224,6 +232,31 @@ CONSTANTS
                        \* different clocks for one boundary.  The ack is a
                        \* LOCAL file; the manifest is what the fleet
                        \* reads, so the bucket held the wrong one.
+  \* ---- tranche 5: DECLARED removals (delete/rename design §3-§6) --------
+  MaxRemovals,         \* budget for HitlRemove/HitlRename; 0 in every
+                       \* pre-existing cfg, so `removals` stays {} and
+                       \* those state spaces are preserved by construction.
+  DeclaredSkipsWalk,   \* TRUE = §4: a declared removal goes STRAIGHT into
+                       \* the delete set at the scan that follows its
+                       \* consume.  FALSE = the mutation: the consume only
+                       \* unlinks and the walk infers the absence — under
+                       \* the two-scan rule that is one barrier late, and a
+                       \* rename's two halves land in two generations.
+  FreePaths,           \* the paths that start UNPUBLISHED (a rename needs
+                       \* a free destination; every pre-existing cfg has
+                       \* {} and starts every path at gen 1 as before).
+  RenameWaitsForDestination, \* TRUE = a rename's removal is performed only
+                       \* once its destination is INTEGRATED AND CLEAN.
+                       \* FALSE = the mutation: the source goes as soon as
+                       \* it is clean, whatever became of the destination.
+  EarlyInboxDrop       \* TRUE = the rule that SHIPPED until 2026-09-12: a
+                       \* consume clears the inbox at once ("durably in
+                       \* the baseline").  FALSE = consumed entries leave
+                       \* the cell at Finish / CiteFinish, after the
+                       \* manifest cites them.  TRUE is the mutation: a
+                       \* pod REPLACEMENT between the two takes the
+                       \* baseline with the emptyDir, and an acked write
+                       \* is then tracked by nothing.
 
 Syncers == {"A", "B"}
 Sources == {"none", "cadence", "sentinel"}
@@ -240,6 +273,9 @@ VARIABLES
   manifest,    \* [Paths -> Nat]: cited generation per path (0 = uncited)
   objects,     \* [Paths -> Nat]: current object generation (0 = absent)
   inbox,       \* SUBSET (Paths \X Nat): pending HITL entries
+  removals,    \* SUBSET Paths: DECLARED removals pending in the cell
+               \* (delete/rename design §3) — recorded from outside the
+               \* pod, performed by the syncer at its next consume.
   window,      \* 0 = closed; else the opener's epoch
   \* ---- syncers ---------------------------------------------------------
   sc,          \* [Syncers -> record], fields below
@@ -266,7 +302,7 @@ VARIABLES
 
 gatedVars == <<stage, stageBase, withheldDel>>
 
-vars == <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, window,
+vars == <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals, window,
           sc, versions, stage, stageBase, withheldDel, hitlAcked,
           conflicts, gh>>
 
@@ -461,7 +497,7 @@ USet(s)     == {p \in Dirty(s) : sc[s].local[p] # 0}
 \* one-scan rule every pre-existing cfg was written against, so their
 \* state spaces are unchanged by construction.
 DSet(s)     == {p \in Dirty(s) : sc[s].local[p] = 0
-                                 /\ (~TwoScanDelete \/ p \in sc[s].prevScan)}
+                                 /\ (~TwoScanDelete \/ p \notin sc[s].prevScan)}
 CitedGens   == {manifest[p] : p \in Paths} \ {0}
 UploadsDone(s) == sc[s].scanU \subseteq (sc[s].upDone \cup sc[s].parked)
 
@@ -479,11 +515,12 @@ Destroys(s, p, cur) ==
 Init ==
   /\ cellEpoch = 0 /\ cellHolder = "none" /\ manSeq = 1
   /\ manSrc = "none"
-  /\ manifest = [p \in Paths |-> 1]
-  /\ objects  = [p \in Paths |-> 1]
-  /\ inbox = {} /\ window = 0
-  \* Every path starts published at gen 1, so gen 1 is its only version.
-  /\ versions = [p \in Paths |-> {1}]
+  /\ manifest = [p \in Paths |-> IF p \in FreePaths THEN 0 ELSE 1]
+  /\ objects  = [p \in Paths |-> IF p \in FreePaths THEN 0 ELSE 1]
+  /\ inbox = {} /\ removals = {} /\ window = 0
+  \* Every path starts published at gen 1, so gen 1 is its only version
+  \* — except the FreePaths, which start absent.
+  /\ versions = [p \in Paths |-> IF p \in FreePaths THEN {} ELSE {1}]
   /\ stage = [s \in Syncers |-> [p \in Paths |-> 0]]
   /\ stageBase = [s \in Syncers |-> [p \in Paths |-> 0]]
   /\ withheldDel = [s \in Syncers |-> {}]
@@ -501,7 +538,8 @@ Init ==
         sentTok |-> 0, pendN |-> {}, pendCov |-> [p \in Paths |-> 0],
         pendMint |-> 0, pendDirty |-> {},
         honored |-> FALSE, pendReRun |-> FALSE, owed |-> {}, ackN |-> {},
-        citeDropped |-> {}]]
+        citeDropped |-> {},
+        declared |-> {}, consumed |-> {}]]
   /\ hitlAcked = {} /\ conflicts = {}
   /\ gh = [amputated |-> FALSE, resurrected |-> FALSE,
            stragglerInstalls |-> 0, stragglerCas |-> 0, deposedPuts |-> 0,
@@ -521,7 +559,10 @@ Init ==
            ackIncoherent |-> FALSE, fencedOkAck |-> FALSE,
            srcMismatch |-> FALSE,
            partialAcks |-> 0, declaredDrops |-> 0,
-           narrows |-> 0, narrowed |-> {}, narrowRecited |-> {}]
+           narrows |-> 0, narrowed |-> {}, narrowRecited |-> {},
+           removals |-> 0, removalsApplied |-> 0, removalsRefused |-> 0,
+           renamed |-> {}, renamesApplied |-> 0, renameRefused |-> {},
+           citedPairs |-> {}]
 
 ------------------------------------------------------------------------------
 (* Lifecycle *)
@@ -537,7 +578,7 @@ StartA ==
                             THEN {q \in Paths : manifest[q] # 0} ELSE {},
        !["A"].instBase = [p \in Paths |-> manifest[p]],
        !["A"].known = CitedGens]
-  /\ UNCHANGED <<manSeq, manSrc, manifest, objects, inbox, window,
+  /\ UNCHANGED <<manSeq, manSrc, manifest, objects, inbox, removals, window,
                  hitlAcked, conflicts, gh>>
 
 CrashPod(s) ==
@@ -552,9 +593,10 @@ CrashPod(s) ==
        ![s].sentTok = 0, ![s].pendN = {}, ![s].pendCov = NoPend,
        ![s].pendMint = 0, ![s].pendDirty = {},
        ![s].honored = FALSE, ![s].pendReRun = FALSE,
-       ![s].owed = {}, ![s].ackN = {}]
+       ![s].owed = {}, ![s].ackN = {},
+       ![s].declared = {}, ![s].consumed = {}]
   /\ gh' = [gh EXCEPT !.crashes = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 (* Pod REPLACEMENT under gated staging.  §4's substrate rule: `pending`
@@ -581,12 +623,13 @@ CrashPodGated(s) ==
        ![s].pendMint = 0, ![s].pendDirty = {},
        ![s].honored = FALSE, ![s].pendReRun = FALSE,
        ![s].owed = {}, ![s].ackN = {},
-       ![s].citeDone = {}]
+       ![s].citeDone = {},
+       ![s].declared = {}, ![s].consumed = {}]
   /\ stage' = [stage EXCEPT ![s] = [p \in Paths |-> 0]]
   /\ stageBase' = [stageBase EXCEPT ![s] = [p \in Paths |-> 0]]
   /\ withheldDel' = [withheldDel EXCEPT ![s] = {}]
   /\ gh' = [gh EXCEPT !.crashes = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts, versions>>
 
 (* Container restart in the SAME pod: the emptyDir survives, so local,
@@ -615,10 +658,13 @@ Restart(s) ==
             ![s].known = IF RematerializeOnRestart THEN @ \cup CitedGens ELSE @,
             ![s].scanU = {}, ![s].scanD = {},
             ![s].scanGen = [p \in Paths |-> 0],
-            ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}]
+            ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {},
+            \* `consumed` is in-memory barrier state; `declared` is the
+            \* intent journal, a FILE in the surviving emptyDir.
+            ![s].consumed = {}]
        /\ gh' = [gh EXCEPT !.restarts = @ + 1,
             !.resurrected = @ \/ (RematerializeOnRestart /\ res)]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 (* A node freeze / partition: the process persists but takes no steps.
@@ -628,13 +674,13 @@ StallA ==
   /\ AllowStall /\ sc["A"].st = "running" /\ ~gh.stallUsed
   /\ sc' = [sc EXCEPT !["A"].st = "stalled"]
   /\ gh' = [gh EXCEPT !.stallUsed = TRUE]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 ThawA ==
   /\ sc["A"].st = "stalled"
   /\ sc' = [sc EXCEPT !["A"].st = "running"]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts, gh>>
 
 (* A deposed incarnation's next successful cell read (heartbeat renew)
@@ -659,7 +705,7 @@ RenewDiscover(s) ==
             ![s].pendDirty = IF settle THEN {} ELSE @,
             ![s].honored = FALSE, ![s].pendReRun = FALSE]
        /\ gh' = [gh EXCEPT !.refusedAcks = @ + (IF settle THEN 1 ELSE 0)]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 (* Takeover: B observes the quiet cell (abstracting the 6-poll protocol)
@@ -677,7 +723,7 @@ ClaimB ==
   /\ sc' = [sc EXCEPT !["B"].st = "claiming",
                       !["B"].epoch = cellEpoch + 1]
   /\ gh' = [gh EXCEPT !.takeovers = @ + 1]
-  /\ UNCHANGED <<manifest, objects, inbox, window, hitlAcked, conflicts>>
+  /\ UNCHANGED <<manifest, objects, inbox, removals, window, hitlAcked, conflicts>>
 
 CheckoutB ==
   /\ sc["B"].st = "claiming"
@@ -688,7 +734,7 @@ CheckoutB ==
                             THEN {q \in Paths : manifest[q] # 0} ELSE {},
        !["B"].instBase = [p \in Paths |-> manifest[p]],
        !["B"].known = CitedGens]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts, gh>>
 
 ------------------------------------------------------------------------------
@@ -704,13 +750,13 @@ AgentWrite(s, p) ==
   \* Inv_NarrowNeverRecites would fire on legitimate widening and the
   \* invariant would be unsound rather than strong.
   /\ gh' = [gh EXCEPT !.nextGen = @ + 1, !.narrowed = @ \ {p}]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 AgentDelete(s, p) ==
   /\ Running(s) /\ sc[s].local[p] # 0
   /\ sc' = [sc EXCEPT ![s].local[p] = 0]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts, gh>>
 
 ------------------------------------------------------------------------------
@@ -761,7 +807,7 @@ Narrow(s) ==
             \* a miss and the wrong direction for a claim.
             ![s].prevScan = IF NarrowAtomic THEN @ \ {p} ELSE @]
        /\ gh' = [gh EXCEPT !.narrows = @ + 1, !.narrowed = @ \cup {p}]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 ------------------------------------------------------------------------------
@@ -787,15 +833,51 @@ HitlWrite(p) ==
                /\ UNCHANGED inbox
        /\ hitlAcked' = hitlAcked \cup {<<p, g>>}
        /\ gh' = [gh EXCEPT !.nextGen = @ + 1, !.hitl = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, window, sc, conflicts>>
+  /\ UNCHANGED <<cellEpoch, cellHolder, window, sc, conflicts, removals>>
 
 (* The refusal the window is FOR (availability shape, bounded to keep the
    space small; the starvation bound is a tranche-2 liveness question).  *)
 HitlRefused ==
   /\ WindowCheck /\ window # 0 /\ gh.refusals < 1
   /\ gh' = [gh EXCEPT !.refusals = @ + 1]
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+                 window, sc, hitlAcked, conflicts>>
+
+(* Tranche 5: a DECLARED removal (delete/rename design §3).  The caller
+   outside the pod records intent in the cell and touches no object;
+   the syncer performs it at its next consume.  Not window-gated (§12):
+   a removal touches nothing when it is recorded.                        *)
+Tracked(p) == manifest[p] # 0 \/ \E pr \in inbox : pr[1] = p
+
+HitlRemove(p) ==
+  /\ gh.removals < MaxRemovals
+  /\ p \notin removals /\ Tracked(p)
+  /\ removals' = removals \cup {p}
+  /\ gh' = [gh EXCEPT !.removals = @ + 1]
   /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, sc, hitlAcked, conflicts>>
+
+(* A rename is a server-side copy to the destination (a fresh
+   generation of the same bytes — create first, §5) and then ONE CAS
+   carrying the destination entry and the source removal (§6).  The
+   destination is acked as a HITL write is.  Window-gated, because it
+   carries an entry.                                                    *)
+HitlRename(p, q) ==
+  /\ gh.removals < MaxRemovals /\ gh.nextGen <= MaxGen
+  /\ p # q /\ p \notin removals /\ q \notin removals
+  /\ Tracked(p) /\ ~Tracked(q) /\ objects[q] = 0
+  /\ ~(WindowCheck /\ window # 0)
+  /\ LET g == gh.nextGen IN
+       /\ objects' = [objects EXCEPT ![q] = g]
+       /\ inbox' = inbox \cup {<<q, g>>}
+       /\ removals' = removals \cup {p}
+       /\ hitlAcked' = hitlAcked \cup {<<q, g>>}
+       \* The triple carries the SOURCE's generation at rename time:
+       \* atomicity is about those bytes, not the name — an agent that
+       \* re-creates the old name after the unlink has made a new file.
+       /\ gh' = [gh EXCEPT !.nextGen = @ + 1, !.removals = @ + 1,
+                          !.renamed = @ \cup {<<p, q, objects[p], g>>}]
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, window, sc, conflicts>>
 
 ------------------------------------------------------------------------------
 (* The publish barrier (plan §2.1, seven steps; scan+intent merged, the
@@ -826,22 +908,62 @@ Consume(s) ==
        surfPaths == IF ConflictSurfacing
                     THEN {pr[1] : pr \in conflicted} ELSE {}
        advPaths == adoptPaths \cup surfPaths
+       local1 == [p \in Paths |->
+                    IF p \in adoptPaths THEN objects[p] ELSE sc[s].local[p]]
+       base1  == [p \in Paths |->
+                    IF p \in advPaths THEN objects[p] ELSE sc[s].baseline[p]]
+       \* ---- the DECLARED removals (tranche 5, design §4-§6) ---------
+       \* After the entries, so a rename's destination is in the tree
+       \* before its source leaves it (§5).  A rename's removal waits
+       \* for its destination to be INTEGRATED AND CLEAN; a destination
+       \* the agent had taken (the consume surfaced it, the agent's
+       \* version wins) REFUSES the move — the source stays, rather
+       \* than surviving only as a conflict copy.  A dirty source
+       \* refuses.  A clean or already-absent source is unlinked and
+       \* declared.  Refusals leave the cell now, with a record;
+       \* performed removals leave it at Finish, after the manifest.
+       dstOf(p) == {pr[2] : pr \in {x \in gh.renamed : x[1] = p}}
+       dstReady(p) == ~RenameWaitsForDestination
+                      \/ \A q \in dstOf(p) : base1[q] = objects[q] /\ local1[q] = base1[q]
+       dstTaken(p) == \E q \in dstOf(p) :
+                        q \in surfPaths \/ (base1[q] = objects[q] /\ local1[q] # base1[q])
+       refused == {p \in removals :
+                     \/ (local1[p] # 0 /\ local1[p] # base1[p])
+                     \/ dstTaken(p)}
+       applied == {p \in removals \ refused :
+                     /\ (local1[p] = 0 \/ local1[p] = base1[p])
+                     /\ dstReady(p)}
+       declaredNow == IF DeclaredSkipsWalk THEN applied ELSE {}
      IN
        /\ sc' = [sc EXCEPT ![s].pc = "consumed",
-            ![s].local = [p \in Paths |->
-              IF p \in adoptPaths THEN objects[p] ELSE @[p]],
-            ![s].baseline = [p \in Paths |->
-              IF p \in advPaths THEN objects[p] ELSE @[p]],
-            ![s].known = @ \cup {objects[p] : p \in advPaths}]
-       /\ conflicts' = conflicts \cup
-            (IF ConflictSurfacing THEN conflicted ELSE {})
-       /\ inbox' = {}
+            ![s].local = [p \in Paths |-> IF p \in applied THEN 0 ELSE local1[p]],
+            ![s].baseline = base1,
+            ![s].known = @ \cup {objects[p] : p \in advPaths},
+            \* `baseline.prev_scan.insert(entry.path)`: a consumed path
+            \* gets the two-scan protection as if the walk had seen it,
+            \* so an agent delete right after the consume is a FIRST
+            \* absence.  Gated like Scan's write, for the same reason.
+            ![s].prevScan = IF TwoScanDelete THEN @ \cup adoptPaths ELSE @,
+            ![s].declared = @ \cup declaredNow,
+            \* What this barrier consumed, to leave the cell at Finish.
+            ![s].consumed = IF EarlyInboxDrop THEN {} ELSE inbox]
+       /\ conflicts' = conflicts
+            \cup (IF ConflictSurfacing THEN conflicted ELSE {})
+            \cup {<<p, local1[p]>> : p \in refused}
+       \* The rule that shipped cleared the cell here ("durably in the
+       \* baseline"); the baseline dies with the pod.  See EarlyInboxDrop.
+       /\ inbox' = IF EarlyInboxDrop THEN {} ELSE inbox
+       /\ removals' = removals \ refused
        \* U16: the arrival half of D4. A path this workspace deferred
        \* out of scope is integrated HERE, one consume later — which is
        \* the only reason deferring it was not simply losing it.
        /\ gh' = [gh EXCEPT
             !.deferredLater = @ + Cardinality(advPaths \cap gh.deferredPaths),
-            !.deferredPaths = @ \ advPaths]
+            !.deferredPaths = @ \ advPaths,
+            !.removalsApplied = @ + Cardinality(applied),
+            !.removalsRefused = @ + Cardinality(refused),
+            !.renamesApplied = @ + Cardinality({pr \in gh.renamed : pr[1] \in applied}),
+            !.renameRefused = @ \cup {pr \in gh.renamed : pr[1] \in refused}]
   /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, window,
                  hitlAcked>>
 
@@ -852,7 +974,10 @@ Scan(s) ==
   /\ Running(s) /\ sc[s].pc = "consumed"
   /\ window = 0 \/ window < sc[s].epoch
   /\ sc' = [sc EXCEPT ![s].pc = "scanned",
-       ![s].scanU = USet(s), ![s].scanD = DSet(s),
+       \* A declared removal skips the two-scan guard (§4): the guard
+       \* protects against absence INFERRED by a walk, and a
+       \* declaration is not an inference.
+       ![s].scanU = USet(s), ![s].scanD = DSet(s) \cup sc[s].declared,
        ![s].lastDirty = IF SyncEnabled THEN USet(s) \cup DSet(s) ELSE {},
        ![s].scanGen = [p \in Paths |-> sc[s].local[p]],
        \* `prev_scan = scanned.keys()`.  Read UNPRIMED above by DSet, so
@@ -875,7 +1000,7 @@ Scan(s) ==
        ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}]
   /\ window' = sc[s].epoch
   /\ gh' = [gh EXCEPT !.barriers = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  hitlAcked, conflicts>>
 
 (* Step 4: guarded per-key upload.  If-Match = the persisted baseline
@@ -890,7 +1015,7 @@ UploadFenced(s) ==
   /\ EpochCheck /\ Deposed(s)
   /\ sc[s].scanU \ (sc[s].upDone \cup sc[s].parked) # {}
   /\ sc' = [sc EXCEPT ![s].st = "dead"]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts, gh>>
 
 Upload(s, p) ==
@@ -907,7 +1032,7 @@ Upload(s, p) ==
          /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
          /\ gh' = [gh EXCEPT !.narrowRecited = @ \cup ({p} \cap gh.narrowed), !.deposedPuts =
                      @ + (IF Deposed(s) THEN 1 ELSE 0)]
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox,
+         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox, removals,
                         window, hitlAcked, conflicts>>
        ELSE IF cur \in sc[s].known
        THEN \* 412, but the current ETag is one I minted or consumed:
@@ -916,14 +1041,14 @@ Upload(s, p) ==
          /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
          /\ gh' = [gh EXCEPT !.narrowRecited = @ \cup ({p} \cap gh.narrowed), !.adoptOwn = @ + 1]
          /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
-                        inbox, window, hitlAcked, conflicts>>
+                        inbox, removals, window, hitlAcked, conflicts>>
        ELSE IF ConflictSurfacing
        THEN \* foreign ETag: park the path, surface the conflict, never
             \* overwrite an ETag this syncer did not itself publish.
          /\ sc' = [sc EXCEPT ![s].parked = @ \cup {p}]
          /\ conflicts' = conflicts \cup {<<p, cur>>}
          /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
-                        inbox, window, hitlAcked, gh>>
+                        inbox, removals, window, hitlAcked, gh>>
        ELSE \* MUTATION: the inherited LOCAL-WINS arbitration — re-read
             \* the ETag and overwrite blind.  known does NOT grow.
          /\ objects' = [objects EXCEPT ![p] = want]
@@ -931,7 +1056,7 @@ Upload(s, p) ==
          /\ gh' = [gh EXCEPT
               !.amputated = @ \/ Destroys(s, p, cur),
               !.deposedPuts = @ + (IF Deposed(s) THEN 1 ELSE 0)]
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox,
+         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox, removals,
                         window, hitlAcked, conflicts>>
 
 (* Steps 5+6 in the chosen order.  The GC delete (etag-guarded HEAD:
@@ -956,13 +1081,13 @@ GCDelete(s, p) ==
        THEN \* already absent, still referenced, or unrecognized ETag
          /\ sc' = [sc EXCEPT ![s].gcDone = @ \cup {p}]
          /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
-                        inbox, window, hitlAcked, conflicts, gh>>
+                        inbox, removals, window, hitlAcked, conflicts, gh>>
        ELSE
          /\ objects' = [objects EXCEPT ![p] = 0]
          /\ sc' = [sc EXCEPT ![s].gcDone = @ \cup {p}]
          /\ gh' = [gh EXCEPT !.gc = @ + 1,
               !.amputated = @ \/ Destroys(s, p, cur)]
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox,
+         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox, removals,
                         window, hitlAcked, conflicts>>
 
 GCDeleteFenced(s) ==
@@ -971,7 +1096,7 @@ GCDeleteFenced(s) ==
      \/ (~DeletesAfterCAS /\ sc[s].pc = "scanned" /\ UploadsDone(s))
   /\ sc[s].scanD \ sc[s].gcDone # {}
   /\ sc' = [sc EXCEPT ![s].st = "dead"]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts, gh>>
 
 PreDeletesDone(s) ==
@@ -979,7 +1104,7 @@ PreDeletesDone(s) ==
   /\ sc[s].pc = "scanned" /\ UploadsDone(s)
   /\ sc[s].scanD \subseteq sc[s].gcDone
   /\ sc' = [sc EXCEPT ![s].pc = "delDone"]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts, gh>>
 
 (* Step 5: the manifest CAS.  Parked paths withhold their entry.  A
@@ -999,7 +1124,7 @@ CASFenced(s) ==
   /\ EpochCheck /\ Deposed(s)
   /\ sc' = [sc EXCEPT ![s].st = "dead"]
   /\ gh' = [gh EXCEPT !.stragglerCas = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 CASMiss(s) ==
@@ -1023,7 +1148,7 @@ CASMiss(s) ==
             ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}]
        /\ window' = 0
        /\ UNCHANGED <<conflicts, gh>>
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  hitlAcked>>
 
 CASInstall(s) ==
@@ -1108,9 +1233,10 @@ CASInstall(s) ==
        /\ gh' = [gh EXCEPT
             !.amputated = @ \/ amp,
             !.cited = IF cite THEN 1 ELSE @,
+            !.citedPairs = @ \cup {pr \in hitlAcked : inst[pr[1]] = pr[2]},
             !.stragglerCas = @ + (IF Deposed(s) THEN 1 ELSE 0),
             !.stragglerInstalls = @ + (IF Deposed(s) THEN 1 ELSE 0)]
-  /\ UNCHANGED <<cellEpoch, cellHolder, objects, hitlAcked, conflicts>>
+  /\ UNCHANGED <<cellEpoch, cellHolder, objects, hitlAcked, conflicts, removals>>
 
 (* Step 7: rewrite the baseline, clear the barrier state.  The baseline
    advances ONLY for keys whose bytes this syncer integrated (its own
@@ -1133,9 +1259,15 @@ Finish(s) ==
        ![s].expSeq = sc[s].instSeq,
        ![s].scanU = {}, ![s].scanD = {},
        ![s].scanGen = [p \in Paths |-> 0],
-       ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}]
+       ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {},
+       ![s].declared = {}, ![s].consumed = {}]
+  \* The window clear's CAS: what this barrier integrated leaves the
+  \* cell now, after the manifest cites it — the consumed entries and
+  \* the performed removals.
+  /\ inbox' = inbox \ sc[s].consumed
+  /\ removals' = removals \ sc[s].declared
   /\ gh' = [gh EXCEPT !.done = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
                  window, hitlAcked, conflicts>>
 
 
@@ -1225,7 +1357,7 @@ Sync(s) ==
             !.scopedDeferrals = @ + (IF SyncScope THEN Cardinality(deferred) ELSE 0),
             !.deferredPaths = @ \cup (IF SyncScope THEN deferred ELSE {}),
             !.foreignLost = @ \/ lost]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked>>
 
 ------------------------------------------------------------------------------
@@ -1287,7 +1419,7 @@ StagePut(s, p) ==
          /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
          /\ gh' = [gh EXCEPT !.staged = @ + 1,
                      !.deposedPuts = @ + (IF Deposed(s) THEN 1 ELSE 0)]
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox,
+         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox, removals,
                         window, withheldDel, hitlAcked, conflicts>>
        ELSE IF cur \in sc[s].known /\ cur = want
        THEN \* our own crashed/torn earlier PUT of THESE bytes: adopt the
@@ -1305,7 +1437,7 @@ StagePut(s, p) ==
          /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
          /\ gh' = [gh EXCEPT !.adoptOwn = @ + 1]
          /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
-                        versions, inbox, window, withheldDel, hitlAcked,
+                        versions, inbox, removals, window, withheldDel, hitlAcked,
                         conflicts>>
        ELSE IF cur \in sc[s].known
        THEN \* our own earlier PUT, OLDER content: supersede it knowingly
@@ -1318,13 +1450,13 @@ StagePut(s, p) ==
          /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
          /\ gh' = [gh EXCEPT !.adoptOwn = @ + 1,
                      !.deposedPuts = @ + (IF Deposed(s) THEN 1 ELSE 0)]
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox,
+         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox, removals,
                         window, withheldDel, hitlAcked, conflicts>>
        ELSE \* foreign ETag: park and surface; never overwrite.
          /\ sc' = [sc EXCEPT ![s].parked = @ \cup {p}]
          /\ conflicts' = conflicts \cup {<<p, cur>>}
          /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
-                        versions, inbox, window, stage, stageBase,
+                        versions, inbox, removals, window, stage, stageBase,
                         withheldDel, hitlAcked, gh>>
 
 StagePutFenced(s) ==
@@ -1334,7 +1466,7 @@ StagePutFenced(s) ==
   /\ sc[s].scanU \ (sc[s].upDone \cup sc[s].parked) # {}
   /\ sc' = [sc EXCEPT ![s].st = "dead"]
   /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, versions,
-                 inbox, window, stage, stageBase, withheldDel, hitlAcked,
+                 inbox, removals, window, stage, stageBase, withheldDel, hitlAcked,
                  conflicts, gh>>
 
 (* The lane ends.  Deletes are WITHHELD — a rename r->s must not become
@@ -1361,7 +1493,7 @@ LaneDone(s) ==
   /\ sc' = [sc EXCEPT ![s].pc = "laneDone"]
   /\ gh' = [gh EXCEPT !.withheld = @ + Cardinality(sc[s].scanD \ withheldDel[s])]
   /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, versions,
-                 inbox, window, hitlAcked, conflicts>>
+                 inbox, removals, window, hitlAcked, conflicts>>
 
 (* No coherent point is due: the tick ends with the bytes DURABLE and the
    manifest un-advanced, and the pending set survives to the next lane.
@@ -1377,7 +1509,7 @@ LaneOnly(s) ==
        ![s].scanGen = [p \in Paths |-> 0],
        ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}]
   /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, versions,
-                 inbox, stage, stageBase, withheldDel, hitlAcked, conflicts,
+                 inbox, removals, stage, stageBase, withheldDel, hitlAcked, conflicts,
                  gh>>
 
 CiteFenced(s) ==
@@ -1388,7 +1520,7 @@ CiteFenced(s) ==
   /\ sc' = [sc EXCEPT ![s].st = "dead"]
   /\ gh' = [gh EXCEPT !.stragglerCas = @ + 1]
   /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, versions,
-                 inbox, window, stage, stageBase, withheldDel, hitlAcked,
+                 inbox, removals, window, stage, stageBase, withheldDel, hitlAcked,
                  conflicts>>
 
 (* THE citation.  Under AtomicCitation it installs the whole valid
@@ -1450,7 +1582,7 @@ CitePassStep(s) ==
                  !.carriedCite = @ \/ (sc[s].stageCarried /\ Cardinality(sub) > 1),
                  !.stragglerCas = @ + (IF Deposed(s) THEN 1 ELSE 0),
                  !.stragglerInstalls = @ + (IF Deposed(s) THEN 1 ELSE 0)]
-  /\ UNCHANGED <<cellEpoch, cellHolder, objects, versions, inbox, window,
+  /\ UNCHANGED <<cellEpoch, cellHolder, objects, versions, inbox, removals, window,
                  stage, stageBase, withheldDel, hitlAcked, conflicts>>
 
 (* The citation completes: withheld deletes land WITH it, the EXACT
@@ -1529,17 +1661,21 @@ CiteFinish(s) ==
             ![s].known = @ \cup {stage[s][p] : p \in sc[s].citeDone},
             ![s].scanU = {}, ![s].scanD = {},
             ![s].scanGen = [p \in Paths |-> 0],
-            ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}]
+            ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {},
+            ![s].declared = {}, ![s].consumed = {}]
+       /\ inbox' = inbox \ sc[s].consumed
+       /\ removals' = removals \ sc[s].declared
        /\ gh' = [gh EXCEPT !.done = @ + 1,
             !.gc = @ + Cardinality(dels),
             !.gcCited = @ + Cardinality(dels),
             !.reaped = @ + Cardinality(UNION {versions[p] \ ver2[p] : p \in Paths}),
             !.cited = IF \E pr \in hitlAcked : man2[pr[1]] = pr[2]
                       THEN 1 ELSE @,
+            !.citedPairs = @ \cup {pr \in hitlAcked : man2[pr[1]] = pr[2]},
             !.declaredDrops = @ + (IF SentinelEnabled /\ PendLive(s)
                                    THEN Cardinality(dropped \cap sc[s].pendDirty)
                                    ELSE 0)]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, inbox, hitlAcked>>
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, hitlAcked>>
 
 (* The noncurrent-retention BACKSTOP.  It is not the reaper and it must
    never be creditable for the reaper's work: on `files/` it cannot tell
@@ -1555,7 +1691,7 @@ BackstopExpire(p) ==
        /\ g # objects[p]          \* noncurrent only, exactly as S3
        /\ versions' = [versions EXCEPT ![p] = @ \ {g}]
   /\ gh' = [gh EXCEPT !.reaped = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, sc, stage, stageBase, withheldDel, hitlAcked,
                  conflicts>>
 
@@ -1601,7 +1737,7 @@ Touch(s) ==
   /\ gh.touches < MaxTouches
   /\ sc' = [sc EXCEPT ![s].sentTok = gh.touches + 1]
   /\ gh' = [gh EXCEPT !.touches = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 (* The consume: rename the sentinel out of the agent's reach and FOLD it
@@ -1629,7 +1765,7 @@ TakeSentinel(s) ==
             ![s].honored = FALSE,
             ![s].owed = @ \cup {t}]
        /\ gh' = [gh EXCEPT !.coalesced = @ + (IF fold THEN 1 ELSE 0)]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 (* Skip-on-no-diff (`barrier.rs`): nothing local to publish, no citation
@@ -1667,7 +1803,7 @@ FastPath(s) ==
        ![s].lastDirty = IF SyncEnabled THEN {} ELSE @]
   /\ gh' = [gh EXCEPT !.barriers = @ + 1, !.fastPaths = @ + 1,
                       !.fastHonor = @ \/ PendLive(s)]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 (* THE PROMISE, evaluated at the instant the ack is written and stamped
@@ -1780,7 +1916,7 @@ AckOk(s) ==
        \* (The first pilot conflated them and fired on correct code.)
        !.srcMismatch = @ \/ (sc[s].honored /\ sc[s].installed
                              /\ manSrc # BoundaryClock(s))]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 (* The honest answer when the boundary does not carry the declared
@@ -1801,7 +1937,7 @@ AckPartial(s) ==
   /\ sc' = [sc EXCEPT ![s].ackN = @ \cup sc[s].pendN, ![s].honored = FALSE,
        ![s].installed = FALSE, ![s].citeDropped = {}]
   /\ gh' = [gh EXCEPT !.acks = @ + 1, !.partialAcks = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 (* Retire AFTER the ack rename.  Splitting these two is not ceremony:
@@ -1814,7 +1950,7 @@ RetirePending(s) ==
   /\ sc' = [sc EXCEPT ![s].pendN = {}, ![s].pendCov = NoPend,
        ![s].pendMint = 0, ![s].pendDirty = {},
        ![s].honored = FALSE, ![s].pendReRun = FALSE]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts, gh>>
 
 (* D2's refused ack: deposal must never strand a waiting agent.  Write
@@ -1829,7 +1965,7 @@ AckRefused(s) ==
        ![s].honored = FALSE, ![s].pendReRun = FALSE,
        ![s].st = "dead"]
   /\ gh' = [gh EXCEPT !.refusedAcks = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 SentinelNext ==
@@ -1861,7 +1997,8 @@ BaseNext ==
        AgentWrite(s, p) \/ AgentDelete(s, p) \/ Upload(s, p)
        \/ GCDelete(s, p)
   \/ \E s \in Syncers : Narrow(s)
-  \/ \E p \in Paths : HitlWrite(p)
+  \/ \E p \in Paths : HitlWrite(p) \/ HitlRemove(p)
+  \/ \E p, q \in Paths : HitlRename(p, q)
   \/ HitlRefused
   \/ \E s \in Syncers :
        Consume(s) \/ Scan(s) \/ UploadFenced(s) \/ GCDeleteFenced(s)
@@ -1888,6 +2025,9 @@ TypeOK ==
   /\ stage \in [Syncers -> [Paths -> Gens]]
   /\ stageBase \in [Syncers -> [Paths -> Gens]]
   /\ \A s \in Syncers : sc[s].scope \subseteq Paths /\ sc[s].prevScan \subseteq Paths
+  /\ removals \subseteq Paths
+  /\ \A s \in Syncers : sc[s].declared \subseteq Paths
+                       /\ sc[s].consumed \subseteq (Paths \X Gens)
 
 \* §4.2: A NARROW IS AN UNWATCH, NEVER AN ABSENCE.  No path a narrow
 \* dropped may lose its object — a workspace that stops holding a file
@@ -2154,5 +2294,56 @@ ProbePartialAck   == gh.partialAcks = 0
 \* NOT faked here with a predicate that would read as coverage.
 ProbeRawReaderSeesUncited ==
   \A p \in Paths : objects[p] = manifest[p] \/ manifest[p] = 0
+
+\* ---- tranche 5: DECLARED removals ----------------------------------------
+
+\* Every acked HITL write is TRACKED by something in the world until it
+\* is legitimately superseded or was once CITED: in the cell, surfaced
+\* as a conflict, integrated into a LIVE incarnation's baseline, or
+\* published in some generation — after which a later deletion is the
+\* workspace's own editing (the crash between a delete's CAS and its
+\* GC leaves an orphan object, not a lost write).  What the early drop
+\* violated: consumed, then the pod replaced, and the write was acked,
+\* durable, and known to nothing — never cited, never to be.
+Inv_HITLTracked ==
+  \A pr \in hitlAcked :
+    \/ objects[pr[1]] # pr[2]
+    \/ manifest[pr[1]] = pr[2]
+    \/ pr \in gh.citedPairs
+    \/ pr \in inbox
+    \/ pr \in conflicts
+    \/ \E s \in Syncers : sc[s].st # "dead" /\ sc[s].baseline[pr[1]] = pr[2]
+
+\* A rename that was PERFORMED is one manifest generation: no reader
+\* of the manifest ever sees the moved BYTES under both names (§4, §6)
+\* — the old name citing the generation that was moved while the new
+\* name is cited.  A refused rename legitimately leaves both — an extra
+\* file, never a hole (§5) — and an agent that re-creates the old name
+\* after the unlink has made a NEW file, which is cited as its own.
+Inv_RenameAtomic ==
+  \A r \in gh.renamed \ gh.renameRefused :
+    ~(manifest[r[1]] = r[3] /\ manifest[r[2]] # 0)
+
+\* ...and never neither: the old name stays cited until the new name
+\* has been cited (or is still tracked in the cell for the barrier
+\* that will cite it).  Once the destination was cited, whatever the
+\* workspace does to either name afterwards is its own editing.  A
+\* REFUSED rename is answered, not performed: the source's fate is
+\* then the agent's (it may have deleted it before the request even
+\* arrived), and the copy survives under the conflict record.
+Inv_RenameNoHole ==
+  \A r \in gh.renamed \ gh.renameRefused :
+    \/ manifest[r[1]] # 0
+    \/ manifest[r[2]] # 0
+    \/ <<r[2], r[4]>> \in gh.citedPairs
+    \/ \E e \in inbox : e[1] = r[2]
+    \* The copy was overwritten by a later write to the new name before
+    \* any barrier cited it: that writer read the name, and the bytes
+    \* it replaced are its to have replaced.
+    \/ objects[r[2]] # r[4]
+
+ProbeRemovalApplied == gh.removalsApplied = 0
+ProbeRemovalRefused == gh.removalsRefused = 0
+ProbeRenameApplied  == gh.renamesApplied = 0
 
 ==============================================================================

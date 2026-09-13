@@ -10655,3 +10655,206 @@ async fn a_rename_whose_destination_the_agent_took_keeps_the_source() {
     let (_, kept) = store.get_whole(c.preserved_key.as_ref().unwrap(), None).await.unwrap();
     assert_eq!(&kept[..], b"the user's bytes", "the moved bytes are preserved too");
 }
+
+/// A store that fails every `put_whole` to keys ending in `suffix`
+/// once armed — the way to stop a real barrier at the manifest CAS,
+/// after its commitment point, and see what the cell holds then.
+struct FailPutTo(Arc<MemoryStore>, String, std::sync::atomic::AtomicBool);
+
+impl FailPutTo {
+    fn arm(&self) {
+        self.2.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+
+#[async_trait::async_trait]
+impl ObjectStore for FailPutTo {
+    async fn copy_object(
+        &self,
+        src_key: &str,
+        src_if_match: Option<&str>,
+        dst_key: &str,
+        condition: &PutCondition,
+        stamps: &GenerationStamps,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.0.copy_object(src_key, src_if_match, dst_key, condition, stamps).await
+    }
+    async fn put_whole(
+        &self,
+        key: &str,
+        body: Bytes,
+        cond: &PutCondition,
+        stamps: &GenerationStamps,
+        crc: u64,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        if self.2.load(std::sync::atomic::Ordering::SeqCst) && key.ends_with(&self.1) {
+            return Err(flint_store::StoreError::Other(format!("injected failure on {key}")));
+        }
+        self.0.put_whole(key, body, cond, stamps, crc).await
+    }
+    async fn compose_generation(
+        &self,
+        spec: &flint_store::ComposeSpec<'_>,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.0.compose_generation(spec).await
+    }
+    async fn head(&self, key: &str) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.0.head(key).await
+    }
+    async fn get_whole(
+        &self,
+        key: &str,
+        if_match: Option<&str>,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        self.0.get_whole(key, if_match).await.map(|(m, b)| (unattested(m), b))
+    }
+    async fn get_range(
+        &self,
+        key: &str,
+        off: u64,
+        len: u64,
+        if_match: &str,
+    ) -> flint_store::StoreResult<Bytes> {
+        self.0.get_range(key, off, len, if_match).await
+    }
+    fn min_part_size(&self) -> u64 {
+        self.0.min_part_size()
+    }
+    fn max_parts(&self) -> usize {
+        self.0.max_parts()
+    }
+    async fn list(&self, prefix: &str) -> flint_store::StoreResult<Vec<flint_store::ListedObject>> {
+        self.0.list(prefix).await
+    }
+    async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
+        self.0.delete(key).await
+    }
+    async fn head_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.0.head_version(key, v).await
+    }
+    async fn get_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        self.0.get_version(key, v).await.map(|(m, b)| (unattested(m), b))
+    }
+    async fn delete_version(&self, key: &str, v: &str) -> flint_store::StoreResult<()> {
+        self.0.delete_version(key, v).await
+    }
+    async fn list_versions(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::ListedVersion>> {
+        self.0.list_versions(prefix).await
+    }
+    async fn list_uploads(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::PendingUpload>> {
+        self.0.list_uploads(prefix).await
+    }
+    async fn abort_upload(&self, key: &str, id: &str) -> flint_store::StoreResult<()> {
+        self.0.abort_upload(key, id).await
+    }
+    async fn bootstrap(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<flint_store::BootstrapReport> {
+        self.0.bootstrap(prefix).await
+    }
+    async fn epoch_read(
+        &self,
+        key: &str,
+    ) -> flint_store::StoreResult<Option<flint_store::EpochState>> {
+        self.0.epoch_read(key).await
+    }
+    async fn epoch_acquire(
+        &self,
+        key: &str,
+        holder: &str,
+        observed: Option<&flint_store::EpochState>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.0.epoch_acquire(key, holder, observed).await
+    }
+    async fn epoch_renew(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+        echo: Option<&str>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.0.epoch_renew(key, lease, echo).await
+    }
+    async fn epoch_release(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+    ) -> flint_store::StoreResult<()> {
+        self.0.epoch_release(key, lease).await
+    }
+}
+
+/// The pod-REPLACEMENT window the early drop left open. A HITL write
+/// is consumed into A's tree and baseline; A's barrier passes its
+/// commitment point and dies at the manifest CAS; the pod is replaced
+/// — the emptyDir, and the baseline in it, are gone. The entry must
+/// still be in the cell for the successor to consume, or the write is
+/// acked, durable in the bucket, and tracked by nothing: every
+/// checkout blind to it forever. Mutation: drop consumed entries at
+/// the window-open commitment (the old rule) and the successor never
+/// learns the write.
+#[tokio::test]
+async fn a_consumed_hitl_write_survives_pod_replacement_before_the_cas() {
+    let inner = Arc::new(MemoryStore::new());
+    let failing = Arc::new(FailPutTo(
+        inner.clone(),
+        "/current".into(),
+        std::sync::atomic::AtomicBool::new(false),
+    ));
+    let dir_a = tempfile::tempdir().unwrap();
+    let cfg = cfg_for(dir_a.path());
+    let mut a = Syncer {
+        store: failing.clone() as Arc<dyn ObjectStore>,
+        state: SyncerState::open(cfg.state_dir()).unwrap(),
+        cfg,
+        lease: None,
+        noted_not_regular: Default::default(),
+    };
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "base.txt", "published");
+    a.run_barrier().await.unwrap();
+
+    let etag = hitl_write(&inner, &a.cfg, "ui/upload.txt", "acked to the user", "dilip").await.unwrap();
+    // The REAL barrier: consume, window open, ... and the manifest CAS
+    // fails. Everything before it ran as shipped.
+    failing.arm();
+    let err = a.run_barrier().await.unwrap_err();
+    assert!(err.to_string().contains("injected"), "{err}");
+    assert_eq!(read(dir_a.path(), "ui/upload.txt").unwrap(), "acked to the user", "consumed into A's tree");
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap();
+    assert!(!m.manifest.entries.contains_key("ui/upload.txt"), "and not cited");
+    // The pod dies: emptyDir and baseline gone with it.
+    drop(a);
+    drop(dir_a);
+
+    // The replacement: fresh emptyDir, fresh identity, takeover.
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = syncer(&inner, dir_b.path()).await;
+    assert!(!claim_until_held(&mut b, 3).await);
+    assert!(claim_until_held(&mut b, 10).await, "takeover");
+    b.checkout().await.unwrap();
+    assert!(read(dir_b.path(), "ui/upload.txt").is_none(), "not cited, so not materialised");
+    let r = b.run_barrier().await.unwrap();
+    assert_eq!(r.consumed, 1, "the entry was still in the cell for the successor");
+    assert_eq!(read(dir_b.path(), "ui/upload.txt").unwrap(), "acked to the user");
+    let m = manifest::load(inner.as_ref(), &b.cfg).await.unwrap().unwrap();
+    assert_eq!(m.manifest.entries["ui/upload.txt"].etag, etag, "cited by the successor");
+    assert!(inbox::load(inner.as_ref(), &b.cfg).await.unwrap().doc.entries.is_empty(), "and then dropped");
+}
+

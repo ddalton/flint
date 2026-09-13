@@ -502,23 +502,30 @@ pub async fn clear_window(
     epoch: u64,
     queued: &[InboxEntry],
 ) -> LeanResult<()> {
-    clear_window_settling(store, cfg, epoch, queued, &[]).await
+    clear_window_settling(store, cfg, epoch, queued, &[], &[]).await
 }
 
-/// `clear_window`, and in the SAME CAS drop the DECLARED removals this
-/// barrier performed. They stay in the cell until here — after the
-/// manifest CAS — so a listing that subtracts pending removals keeps
-/// hiding the path for exactly as long as the manifest still cites it:
-/// dropping them at the window-open commitment would have made a
-/// deleted file reappear in every UI for the length of the upload
-/// phase. A crash before this CAS leaves the removal in the cell and
-/// the path in the intent journal's `declared_deletes`; the next
-/// barrier finds both and settles both, idempotently.
+/// `clear_window`, and in the SAME CAS drop what this barrier
+/// integrated: the entries it consumed and the DECLARED removals it
+/// performed. Both stay in the cell until here — after the manifest
+/// CAS — for two reasons that are one. A consumed entry's only other
+/// record is the pod's emptyDir baseline, which a pod REPLACEMENT
+/// takes with it; dropped at the window-open commitment, a HITL write
+/// acked and consumed but not yet cited had nothing in the bucket
+/// tracking it through the whole upload phase, and a successor's
+/// checkout was blind to it. And a listing that subtracts pending
+/// removals must keep hiding the path for exactly as long as the
+/// manifest cites it, not reappear it for the length of the uploads.
+/// A crash before this CAS leaves both in the cell; the next
+/// incarnation re-consumes and re-declares, idempotently (the consume
+/// skips an entry its baseline already holds, and a declared path
+/// already absent re-declares as it stands).
 pub async fn clear_window_settling(
     store: &dyn ObjectStore,
     cfg: &LeanConfig,
     epoch: u64,
     queued: &[InboxEntry],
+    consumed: &[InboxEntry],
     applied_removals: &[Removal],
 ) -> LeanResult<()> {
     for _ in 0..5 {
@@ -533,6 +540,7 @@ pub async fn clear_window_settling(
             }
         }
         doc.window = None;
+        doc.entries.retain(|e| !consumed.contains(e));
         for q in queued {
             if !doc.entries.iter().any(|e| e.path == q.path && e.etag == q.etag) {
                 doc.entries.push(q.clone());

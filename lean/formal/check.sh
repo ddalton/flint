@@ -257,12 +257,30 @@ mutation_run $M2 LeanChunkMergeProbeBoth.cfg "probe: both writers actually wrote
   "Invariant Probe_BothWrote is violated"
 
 echo
+# ---- tranche 5: DECLARED removals (delete/rename design, phase E) ---------
+strict_run $M LeanRemovalHolds.cfg "declared removals + rename: one generation, no hole, every acked write tracked"
+strict_run $M LeanRemovalCrashHolds.cfg "declared removals + rename under crash + restart: the late inbox drop and the intent journal"
+mutation_run $M LeanRemovalViaWalk.cfg "mutation: a declared removal routed through the walk lands a rename in two generations" \
+  "Invariant Inv_RenameAtomic is violated"
+mutation_run $M LeanEarlyInboxDropLosesHitl.cfg "mutation: the early inbox drop loses a consumed write to a pod replacement" \
+  "Invariant Inv_HITLTracked is violated"
+mutation_run $M LeanEarlyInboxDropLosesRename.cfg "mutation: the early inbox drop loses a rename's destination to a pod replacement" \
+  "Invariant Inv_HITLTracked is violated"
+mutation_run $M LeanRenameNoDestinationGuard.cfg "mutation: a rename that does not wait for its destination leaves a HOLE under that crash" \
+  "Invariant Inv_RenameNoHole is violated"
+mutation_run $M LeanProbeRemoval.cfg "probe: a declared removal is actually performed" \
+  "Invariant ProbeRemovalApplied is violated"
+mutation_run $M LeanProbeRemovalRefused.cfg "probe: a declared removal of a dirty path is actually refused" \
+  "Invariant ProbeRemovalRefused is violated"
+mutation_run $M LeanProbeRename.cfg "probe: a rename's removal is actually performed" \
+  "Invariant ProbeRenameApplied is violated"
+
 # The expected total is ASSERTED, not printed: a hardcoded denominator
 # that drifts below the real run count turns "83/79 green" into a line
 # nobody reads as wrong. It had drifted to 79 against 79 real runs
 # before this tranche; the prose count at the top of this file had
 # drifted further still, to "Fifty-five".
-EXPECT=83
+EXPECT=92
 echo
 if [ "$PASS" -ne "$EXPECT" ]; then
   echo "lean formal gate: $PASS runs green but $EXPECT were declared — a run was"

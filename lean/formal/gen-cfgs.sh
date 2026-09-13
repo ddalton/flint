@@ -13,7 +13,8 @@ GCKeepsCurrent CiteDropsInflightHitl BackstopEnabled MineIsNotForeign \
 MaxTouches \
 SentinelEnabled FoldPending AckFromInstall RefuseOnFence FastPathGuards \
 AckHonest LaneCancelsStaged GatedRepair StampBoundarySource \
-TwoScanDelete MaxNarrows NarrowAtomic NarrowUnlinkFirst"
+TwoScanDelete MaxNarrows NarrowAtomic NarrowUnlinkFirst \
+MaxRemovals DeclaredSkipsWalk EarlyInboxDrop RenameWaitsForDestination"
 
 emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
   local name=$1 invs=$2; shift 2
@@ -58,13 +59,32 @@ emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
   # harness exists to prevent.
   local c_TwoScanDelete=FALSE c_MaxNarrows=0
   local c_NarrowAtomic=TRUE c_NarrowUnlinkFirst=FALSE
+  # tranche 5: DECLARED removals.  MaxRemovals=0 in every pre-existing
+  # cfg, so HitlRemove/HitlRename are unreachable and `removals` stays
+  # {} — those state spaces are preserved by construction.
+  # EarlyInboxDrop=FALSE everywhere is NOT an arm kept for preservation:
+  # it is the shipped rule since 2026-09-12 (consumed entries leave the
+  # cell after the manifest cites them), and the whole gate was re-run
+  # against it.  TRUE is the old rule, kept as the mutation that loses a
+  # consumed write to a pod replacement.
+  local c_MaxRemovals=0 c_DeclaredSkipsWalk=TRUE c_EarlyInboxDrop=FALSE
+  local c_RenameWaitsForDestination=TRUE
+  # The path set.  NPaths=3 FreeLast=TRUE gives the removal runs a third
+  # path that starts UNPUBLISHED — a rename needs a free destination,
+  # and with every path at gen 1 there was none: the rename probe was
+  # green because the action never fired.  Every pre-existing cfg keeps
+  # {p1, p2} with FreePaths = {}.
+  local c_NPaths=2 c_FreeLast=FALSE
   local kv
   for kv in "$@"; do eval "c_${kv%%=*}=${kv#*=}"; done
   {
     echo "SPECIFICATION Spec"
     echo "CHECK_DEADLOCK FALSE"
     echo "CONSTANTS"
-    echo "  Paths = {p1, p2}"
+    local paths="p1" j
+    for ((j = 2; j <= c_NPaths; j++)); do paths="$paths, p$j"; done
+    echo "  Paths = {$paths}"
+    if [ "$c_FreeLast" = TRUE ]; then echo "  FreePaths = {p$c_NPaths}"; else echo "  FreePaths = {}"; fi
     local k v
     for k in $KEYS; do
       eval "v=\$c_$k"
@@ -76,7 +96,7 @@ emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
   echo "wrote $name.cfg"
 }
 
-ALLINV="TypeOK,Inv_HITLDurable,Inv_NoDangling,Inv_NoStragglerInstall,Inv_NoDeposedPut,Inv_NoResurrection"
+ALLINV="TypeOK,Inv_HITLDurable,Inv_NoDangling,Inv_NoStragglerInstall,Inv_NoDeposedPut,Inv_NoResurrection,Inv_HITLTracked"
 
 # ---- strict runs -----------------------------------------------------------
 # Breadth budget note: MaxBarriers=3 + MaxGen=4 blows past an hour of
@@ -520,3 +540,38 @@ emit LeanNarrowUnlinkFirst "Inv_NarrowNeverDeletes" \
 # re-cites it — the barrier silently undoes the narrow.
 emit LeanNarrowUncieFirst "Inv_NarrowNeverRecites" \
   $NARROWWORLD NarrowAtomic=FALSE NarrowUnlinkFirst=FALSE
+
+# ---- tranche 5: DECLARED removals — delete and rename from outside the pod -
+# (docs/plans/flint-lean-delete-rename-design.md, phase E.)  TwoScanDelete
+# is ON here: the design's atomicity claim is exactly that a declared
+# removal need not wait out the two-scan guard, so the mutation that
+# routes it through the walk is only visible against that guard.
+REMOVALWORLD="TwoScanDelete=TRUE NPaths=3 FreeLast=TRUE MaxRemovals=1 MaxHitl=1 \
+MaxGen=3 MaxSeq=6 MaxBarriers=2 MaxCrashes=0 MaxRestarts=0"
+# Crash + restart with the rename's own write as the only HITL write:
+# the crash world is where the late inbox drop and the intent journal
+# earn their keep, and MaxHitl=1 on top of it is an hour of TLC.
+REMOVALCRASH="TwoScanDelete=TRUE NPaths=3 FreeLast=TRUE MaxRemovals=1 MaxHitl=0 \
+MaxGen=3 MaxSeq=6 MaxBarriers=2 MaxCrashes=1 MaxRestarts=1"
+emit LeanRemovalHolds "$ALLINV,Inv_RenameAtomic,Inv_RenameNoHole" $REMOVALWORLD
+emit LeanRemovalCrashHolds "$ALLINV,Inv_RenameAtomic,Inv_RenameNoHole" $REMOVALCRASH
+# §4's claim, pinned: route the declared removal through the walk and a
+# performed rename lands in two generations — the manifest cites both
+# names for a barrier.
+emit LeanRemovalViaWalk "Inv_RenameAtomic" $REMOVALWORLD DeclaredSkipsWalk=FALSE
+# The rule that shipped until 2026-09-12: a consume clears the cell at
+# once, and a pod replacement before the manifest CAS leaves an acked
+# write tracked by nothing.  No removal needed to see it.
+emit LeanEarlyInboxDropLosesHitl "Inv_HITLTracked" $REMOVALCRASH EarlyInboxDrop=TRUE \
+  MaxRemovals=0 MaxHitl=1 MaxRestarts=0
+# ...and a rename's destination is lost the same way, while the source
+# removal waits forever for a destination that will never arrive.
+emit LeanEarlyInboxDropLosesRename "Inv_HITLTracked" $REMOVALCRASH EarlyInboxDrop=TRUE \
+  MaxRestarts=0
+# Without the wait, that same crash cites the source OUT while the
+# destination is lost: a HOLE — the outcome §5 forbids.
+emit LeanRenameNoDestinationGuard "Inv_RenameNoHole" $REMOVALCRASH EarlyInboxDrop=TRUE \
+  RenameWaitsForDestination=FALSE MaxRestarts=0
+emit LeanProbeRemoval "ProbeRemovalApplied" $REMOVALWORLD
+emit LeanProbeRemovalRefused "ProbeRemovalRefused" $REMOVALWORLD
+emit LeanProbeRename "ProbeRenameApplied" $REMOVALWORLD

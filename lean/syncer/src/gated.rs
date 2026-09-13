@@ -400,9 +400,9 @@ impl Syncer {
         let inbox_doc = inbox::load(self.store.as_ref(), &self.cfg).await?.doc;
         let consumed = self.consume_inbox_doc(&inbox_doc).await?;
         report.consumed = consumed.len();
-        if !consumed.is_empty() {
-            inbox::drop_entries(self.store.as_ref(), &self.cfg, epoch, &consumed).await?;
-        }
+        // NOT dropped here (see `clear_window_settling`): a consumed
+        // entry leaves the cell at the citation that cites it, so a
+        // pod replacement between the two cannot orphan it.
         // DECLARED removals (delete/rename design): unlinked here and
         // WITHHELD like every other delete under gating, so they become
         // reader-visible at a citation and nowhere else. Refusals are
@@ -1044,8 +1044,25 @@ impl Syncer {
         // (Found by the formal model — tranche 3 product 2. Before the
         // companion rule below, the reaper then DELETED the user's
         // version, because it was not the one the manifest cited.)
-        let inflight: BTreeSet<String> =
-            opened.doc.entries.iter().map(|e| e.path.clone()).collect();
+        //
+        // NOT every entry in the cell: since consumed entries leave the
+        // cell at the citation rather than at the consume, an entry
+        // this lane has already integrated — the baseline holds its
+        // etag, or the consume-dirty sentinel for it — is the citation's
+        // own business, not a write that landed after the stage.
+        let inflight: BTreeSet<String> = opened
+            .doc
+            .entries
+            .iter()
+            .filter(|e| {
+                !baseline
+                    .entries
+                    .get(&e.path)
+                    .map(|b| b.etag == e.etag || b.size == u64::MAX)
+                    .unwrap_or(false)
+            })
+            .map(|e| e.path.clone())
+            .collect();
         for path in &inflight {
             if upserts.remove(path).is_some() {
                 stage.entries.remove(path);
@@ -1259,11 +1276,23 @@ impl Syncer {
         self.state.save_baseline(&baseline)?;
         self.state.clear_intent_keys()?;
 
-        // The DECLARED removals whose deletion this citation installed
-        // leave the cell now — after the CAS, for the listing's sake.
-        let cited_out: Vec<inbox::Removal> = inbox::load(self.store.as_ref(), &self.cfg)
-            .await?
-            .doc
+        // What this citation installed leaves the cell now — after the
+        // CAS, never before it: the consumed entries the manifest now
+        // cites (or that the agent's own version has since superseded),
+        // and the DECLARED removals whose deletion it installed.
+        let cell = inbox::load(self.store.as_ref(), &self.cfg).await?.doc;
+        let cited_entries: Vec<inbox::InboxEntry> = cell
+            .entries
+            .iter()
+            .filter(|e| {
+                baseline.entries.get(&e.path).map(|b| b.etag == e.etag || b.size == u64::MAX).unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        if !cited_entries.is_empty() {
+            inbox::drop_entries(self.store.as_ref(), &self.cfg, epoch, &cited_entries).await?;
+        }
+        let cited_out: Vec<inbox::Removal> = cell
             .removals
             .into_iter()
             .filter(|r| r.refused.is_none() && deletes.contains(&r.path))

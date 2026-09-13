@@ -799,6 +799,17 @@ impl Syncer {
         // ride ONE manifest generation (§4).
         for p in &removals.declared {
             classified.first_absence.remove(p);
+            if classified.uploads.contains(p) {
+                // The agent re-created the path between the unlink and
+                // the scan. The declaration named the OLD file, which is
+                // gone from the tree (and, for a rename, moved); what is
+                // here now is a new file the agent wrote, and it
+                // publishes as one — its PUT supersedes the old object
+                // under the same key. Deleting it would un-cite the
+                // agent's work for a barrier and GC-skip its object; the
+                // model's install gives the upload the same precedence.
+                continue;
+            }
             classified.deletes.insert(p.clone());
         }
         report.first_absence = classified.first_absence.iter().cloned().collect();
@@ -886,11 +897,16 @@ impl Syncer {
         self.state.save_intent(&intent)?;
         let deadline = now_unix() + self.cfg.window_slack_secs;
         inbox::open_window(self.store.as_ref(), &self.cfg, epoch, deadline).await?;
-        if !consumed.is_empty() {
-            // Drop consumed entries now that they are durably in the
-            // baseline (idempotent if this crashes: re-consume skips).
-            inbox::drop_entries(self.store.as_ref(), &self.cfg, epoch, &consumed).await?;
-        }
+        // The consumed entries are NOT dropped here. They used to be —
+        // "durably in the baseline", which is true of a container
+        // restart and false of a pod REPLACEMENT: the emptyDir goes
+        // with the pod, and a spot reclamation between this CAS and
+        // the manifest CAS (the whole upload phase) then left a HITL
+        // write that was acked, consumed and never cited with nothing
+        // in the bucket tracking it — the object an orphan, the
+        // successor's checkout blind to it. They leave the cell with
+        // the window clear, after the manifest cites them; a successor
+        // that finds them re-consumes, idempotently.
 
         // Step 4: guarded uploads, fanned out under a bounded window
         // (each key's guard chain is independent; the 412 policy and
@@ -1206,8 +1222,15 @@ impl Syncer {
                 crc64_b64: Some(e.crc64_b64),
             })
             .collect();
-        inbox::clear_window_settling(self.store.as_ref(), &self.cfg, epoch, &queue, &removals.applied)
-            .await?;
+        inbox::clear_window_settling(
+            self.store.as_ref(),
+            &self.cfg,
+            epoch,
+            &queue,
+            &consumed,
+            &removals.applied,
+        )
+        .await?;
         // Reap superseded generations. Immutable metadata that is never
         // collected is a leak that grows by a whole manifest per
         // publish, and this also collects the orphan a crash between the

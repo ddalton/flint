@@ -39,7 +39,16 @@ covered by the stability guarantee.
   and `/status` counts pending and refused removals. Seven syncer
   tests with three mutation controls (two-scan routing, the dirty
   check, the journal), four API tests, three wire legs including the
-  one-predicate path table the design asks for.
+  one-predicate path table the design asks for. Phase E: the formal
+  model (`lean/formal/LeanSubtree.tla`) gains the removal cell, the
+  declared pass in its consume, `HitlRemove`/`HitlRename`, and three
+  invariants — a performed rename never shows the moved bytes under
+  both names, never leaves neither, and every acked write stays
+  tracked — with nine new runs (two strict, four mutations, three
+  probes). Modelling it found two places the model was weaker than
+  the code (its two-scan rule was inverted, and a consumed path got
+  no two-scan protection), both corrected, and one place the code
+  was wrong (the early inbox drop, under Fixed).
 
 - **lean: the gateway is a crate — `flint-lean-gateway` on crates.io.**
   A backend that serves lean workspaces to a UI no longer runs a
@@ -68,6 +77,23 @@ covered by the stability guarantee.
   take path dependencies. The backend talks to the BUCKET, never to a
   syncer: it can run on another cluster, or none, with nothing but
   credentials for the prefixes it serves.
+
+### Fixed
+
+- **lean: a consumed HITL write could be orphaned by a pod replacement
+  during the upload phase.** The barrier dropped consumed inbox entries
+  at the window-open CAS, "durably in the baseline" — true of a
+  container restart, false of a pod replacement, whose emptyDir takes
+  the baseline with it. A spot reclamation between that CAS and the
+  manifest CAS left a write that was acked, consumed and never cited
+  with nothing in the bucket tracking it: the object an orphan, every
+  successor checkout blind to it. Consumed entries now leave the cell
+  with the window clear, after the manifest cites them (the gated lane
+  drops them at its citation), and a successor that finds them
+  re-consumes idempotently. Found while modelling the rename, where
+  the same window could cite out the source while the destination was
+  lost. Test: `a_consumed_hitl_write_survives_pod_replacement_before_the_cas`;
+  the old rule as its mutation.
 
 ### Changed
 
