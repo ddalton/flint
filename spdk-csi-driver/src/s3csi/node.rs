@@ -353,8 +353,13 @@ impl S3Node {
         // the lean syncer's SDK client reads AWS_REGION and, without it,
         // fails its first request as a bare "dispatch failure" (measured:
         // the same env with AWS_REGION checks out). The static arm's
-        // Secret may name its own; the node's default fills the rest.
-        m.env.entry("AWS_REGION".to_string()).or_insert_with(|| self.cfg.region.clone());
+        // Secret may name its own; else the CR's (`spec.region`, carried
+        // as FLINT_SYNC_REGION in the lean launch list — a bucket in the
+        // wrong region 301s every request and the worker crash-loops);
+        // else the node's default.
+        m.env
+            .entry("AWS_REGION".to_string())
+            .or_insert_with(|| creds::effective_region(st.sync_env.as_ref(), &self.cfg.region));
         Ok(m)
     }
 

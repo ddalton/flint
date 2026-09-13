@@ -55,6 +55,17 @@ pub struct FlintLeanWorkspaceSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
 
+    /// AWS region of `bucket`. None = the node plugin's default
+    /// (`FLINT_S3CSI_REGION`, chart `node.region`), ONE value for the
+    /// whole node. A bucket in any other region answers the syncer's
+    /// first request `301 PermanentRedirect` and the worker crash-loops
+    /// (runcu 2026-09-12: a us-west-1 bucket under a us-east-1 plugin).
+    /// A passthrough mount has named its region since its first release;
+    /// a workspace needs to for the same reason. A static-identity
+    /// Secret's own `AWS_REGION` still wins over both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+
     /// Secret with the SYNCER's proxy credentials, keys AWS_* VERBATIM
     /// (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, ...). The
     /// OPERATOR never uses this — bucket-admin ops run under the

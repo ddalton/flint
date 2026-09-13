@@ -143,6 +143,19 @@ pub fn door_arm(auth_token: &str) -> Materialized {
 }
 
 /// The worker calls the STS façade itself.
+/// The region a worker runs against when its credential arm named none:
+/// the CR's own (`spec.region`, carried as `FLINT_SYNC_REGION` in the lean
+/// launch list) ahead of the node-wide default (`FLINT_S3CSI_REGION`). A
+/// bucket in the wrong region answers every request 301 and the worker
+/// crash-loops (runcu 2026-09-12), so the CR must be able to say.
+pub fn effective_region(launch: Option<&std::collections::BTreeMap<String, String>>, node_default: &str) -> String {
+    launch
+        .and_then(|l| l.get("FLINT_SYNC_REGION"))
+        .filter(|r| !r.is_empty())
+        .cloned()
+        .unwrap_or_else(|| node_default.to_string())
+}
+
 pub fn web_identity_arm(role_arn: &str, sts_url: &str, session_name: &str, token: &str, region: &str) -> Materialized {
     let mut env = base_env();
     env.insert("AWS_ROLE_ARN".into(), role_arn.into());
@@ -445,6 +458,51 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&creds_json(&with_session)).unwrap();
         assert_eq!(v["Token"], "ST");
     }
+
+
+
+    /// The CR's region beats the node's default and an empty stamp does not.
+
+
+
+    #[test]
+
+
+
+    fn effective_region_prefers_the_cr_then_the_node() {
+
+
+
+        let mut l = std::collections::BTreeMap::new();
+
+
+
+        assert_eq!(effective_region(None, "us-east-1"), "us-east-1");
+
+
+
+        assert_eq!(effective_region(Some(&l), "us-east-1"), "us-east-1");
+
+
+
+        l.insert("FLINT_SYNC_REGION".to_string(), String::new());
+
+
+
+        assert_eq!(effective_region(Some(&l), "us-east-1"), "us-east-1");
+
+
+
+        l.insert("FLINT_SYNC_REGION".to_string(), "us-west-1".to_string());
+
+
+
+        assert_eq!(effective_region(Some(&l), "us-east-1"), "us-west-1");
+
+
+
+    }
+
 
 
 

@@ -75,6 +75,12 @@ pub fn sync_env(ws: &FlintLeanWorkspace, root: &str) -> Vec<(String, String)> {
     if let Some(endpoint) = &s.endpoint {
         env.push(p("FLINT_SYNC_ENDPOINT", endpoint.clone()));
     }
+    // The bucket's region, when the CR names one. The node plugin turns
+    // it into the worker's AWS_REGION ahead of its node-wide default
+    // (`creds::effective_region`); absent, the default stands.
+    if let Some(region) = &s.region {
+        env.push(p("FLINT_SYNC_REGION", region.clone()));
+    }
     env
 }
 
@@ -92,6 +98,7 @@ mod tests {
                 "bucket": "agentws",
                 "keyPrefix": "tenants/proj1",
                 "endpoint": "http://proxy:9000",
+                "region": "us-west-1",
                 "expectedBytes": 2147483648u64,
                 "expectedFiles": 50000u64,
             }))
@@ -110,6 +117,7 @@ mod tests {
         assert_eq!(get("FLINT_SYNC_ROOT").as_deref(), Some("/workspace"));
         assert_eq!(get("FLINT_SYNC_ENDPOINT").as_deref(), Some("http://proxy:9000"));
         assert_eq!(get("FLINT_SYNC_WORKSPACE").as_deref(), Some("proj1"));
+        assert_eq!(get("FLINT_SYNC_REGION").as_deref(), Some("us-west-1"));
         // Opt-in, default-off: the sequential per-object upload (1).
         assert_eq!(get("FLINT_SYNC_UPLOAD_PART_PARALLELISM").as_deref(), Some("1"));
         for k in ["FLINT_SYNC_FLOOR_SECS", "FLINT_SYNC_MAX_FILES", "FLINT_SYNC_FANOUT", "FLINT_SYNC_FETCH_DRIVERS", "FLINT_SYNC_UPLOAD_PART_PARALLELISM", "FLINT_SYNC_RAW_READS", "FLINT_SYNC_BOUNDARY_MODE", "FLINT_SYNC_METRICS_PORT"] {
@@ -117,6 +125,20 @@ mod tests {
         }
         assert!(get("FLINT_SYNC_NAMESPACE").is_none(), "the namespace is the caller's literal, never this list's");
         assert!(get("FLINT_SYNC_VISIBILITY_LAG_BOUND_SECS").is_none(), "the one knob with no default is not invented");
+    }
+
+    /// A region is stamped only when the CR names one: the plugin's
+    /// node-wide default must stay distinguishable from a CR's choice.
+    #[test]
+    fn region_is_stamped_only_when_named() {
+        let ws = FlintLeanWorkspace::new(
+            "proj2",
+            serde_json::from_value::<FlintLeanWorkspaceSpec>(serde_json::json!({
+                "projectId": "team-a/proj2", "bucket": "agentws", "keyPrefix": "tenants/proj2",
+            }))
+            .unwrap(),
+        );
+        assert!(!sync_env(&ws, "/workspace").iter().any(|(k, _)| k == "FLINT_SYNC_REGION"));
     }
 
     /// Budget grows with the inventory and never drops below the floor.

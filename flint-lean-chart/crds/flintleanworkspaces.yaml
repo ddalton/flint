@@ -289,6 +289,18 @@ spec:
                   always use the SDK. Integrity does not depend on the client:
                   every reader verifies each fetch against the manifest's CRC-64.
                 type: boolean
+              region:
+                description: |-
+                  AWS region of `bucket`. None = the node plugin's default
+                  (`FLINT_S3CSI_REGION`, chart `node.region`), ONE value for the
+                  whole node. A bucket in any other region answers the syncer's
+                  first request `301 PermanentRedirect` and the worker crash-loops
+                  (runcu 2026-09-12: a us-west-1 bucket under a us-east-1 plugin).
+                  A passthrough mount has named its region since its first release;
+                  a workspace needs to for the same reason. A static-identity
+                  Secret's own `AWS_REGION` still wins over both.
+                nullable: true
+                type: string
               sentinelHourlyBudget:
                 default: 60
                 description: |-

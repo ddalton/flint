@@ -50,6 +50,19 @@ covered by the stability guarantee.
   headroom; the default bump waits on an upload byte-bound
   (`lean/e2e/perf/results/door-drill-2026-09-12.md` §4a).
 
+- **lean: a workspace can name its bucket's region — `spec.region` on
+  FlintLeanWorkspace.** The lean worker took its `AWS_REGION` from one
+  node-wide plugin setting (`FLINT_S3CSI_REGION`, chart `node.region`,
+  default `us-east-1`); a passthrough mount has named its own region
+  since its first release, a workspace could not. The deployed-door drill
+  found it: a us-west-1 bucket under a us-east-1 plugin, and every lean
+  worker crash-looped on its first request (`get_whole: 301
+  PermanentRedirect`) while the passthrough mounts beside it ran. The
+  spec gains `region` (optional), the launch list carries it as
+  `FLINT_SYNC_REGION`, and the node plugin's credential step prefers it
+  to the node default (`creds::effective_region`); a static-identity
+  Secret's own `AWS_REGION` still wins over both. Unset, nothing changes.
+
 - **lean: delete and rename from outside the pod — declared removals
   (`docs/plans/flint-lean-delete-rename-design.md`, phases B, C, D).**
   A UI could create and overwrite files through the gateway but not
