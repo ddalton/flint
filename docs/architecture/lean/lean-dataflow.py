@@ -149,7 +149,7 @@ def build():
 
     # ---- the stores ------------------------------------------------------
     d.node(p, "cylinder", 16.70, 2.95, 4.15, 0.85, "files",
-           "<prefix>/files/<path> — whole objects: checked out at start, and a touched file is re-uploaded",
+           "<prefix>/files/<path> — whole objects, every fetch verified against the manifest's CRC-64; ranged GETs and parallel parts above 8 MiB",
            fill=d.S3_F, line=d.S3_L, line_weight=0.013, cap=0.28,
            body_size=7.4)
     d.node(p, "cylinder", 16.70, 3.95, 4.15, 0.85, ".flint/lean/current",
@@ -236,12 +236,13 @@ def build():
     p.text(9.55, 8.08, 2.05, "browser / UI", size=9.6, color=INK, bold=True,
            halign=1)
     d.node(p, "rect", 11.60, 6.70, 3.65, 1.75,
-           "flint-lean-gateway — ONE, for every workspace",
-           "one Deployment, two replicas, N workspaces: /lean/v1/{workspace} "
-           "against a map of id=prefix pairs, and an unknown id is a 404 — "
-           "never a guessed prefix.\n"
-           "It talks to the BUCKET, never to the pod: no CR to resolve, no "
-           "hub, no proxy. GET /snapshot · /files · /status — and the HITL "
+           "flint-lean-gateway — ONE door, for every workspace; and a CRATE",
+           "one Deployment, N workspaces: /lean/v1/{workspace} against a map "
+           "of id=prefix pairs — an unknown id is a 404, never a guessed "
+           "prefix. Or no process at all: flint-lean-gateway on crates.io is "
+           "the same verbs called in-process by your own backend.\n"
+           "It talks to the BUCKET, never to the pod. GET /snapshot · /files · "
+           "/status · drafts · DELETE /files · POST /rename — and the HITL "
            "write: PUT the object FIRST, append the inbox entry SECOND, and "
            "NEVER edit the manifest.",
            fill="#FFF6E2", line="#B0862A", line_weight=0.016,
@@ -307,10 +308,10 @@ def build():
           "the UI's write — DURABLE, and UNCITED",
           "PUT /files/{path} is a CONDITIONAL whole-object PUT (If-Match on "
           "what it read, else 409 concurrent-write). When it returns, the "
-          "BYTES are in S3 — but nothing cites them: not the manifest, not "
-          "the agent's tree. ADOPTION is a separate event at the syncer's "
-          "next barrier, and it can go against them. Durable is not "
-          "committed. Refused 409 + Retry-After while a window is open, and "
+          "BYTES are in S3 and every gateway reader sees them at once — but "
+          "nothing cites them: not the manifest, not the agent's tree. "
+          "ADOPTION is a separate event at the syncer's next barrier, and it "
+          "can go against them. Durable is not committed. Refused 409 + Retry-After while a window is open, and "
           "stamped epoch: 0 — deliberately the SECOND writer.",
           fill="#FFF6E2", line="#B0862A", line_weight=0.012,
           title_size=9.6, body_size=7.3, body_color=SUB)
@@ -363,11 +364,17 @@ def build():
         "the pod, and the pod may not exist at all, so there is nothing for "
         "a UI to call. flint-lean-gateway — opt-in, its own bearer, an "
         "explicit workspace map, and deliberately NOT the lite gateway — "
-        "reads and writes the same CAS cells the syncer uses. GET /snapshot "
-        "returns {manifest, manifest_etag, inbox} in one read; GET "
-        "/files/{path} reads via the manifest citation and falls back to an "
-        "uncited-but-tracked inbox entry; GET /status reports seq, window, "
-        "inbox depth and the epoch cell.",
+        "reads and writes the same CAS cells the syncer uses, and since 0.1.0 "
+        "it is a CRATE too: a backend depends on flint-lean-gateway and calls "
+        "the verbs in-process, holding nothing but credentials for the "
+        "prefixes it serves. GET /snapshot returns {manifest, manifest_etag, "
+        "inbox} in one read; GET /files/{path} reads guarded on the "
+        "citation and consults the inbox only when that fails, so an "
+        "overwrite reads at once and the common read costs nothing extra; "
+        "delete and rename are DECLARED removals the syncer performs at its "
+        "barrier (a rename is one generation; a removal of a dirty path is "
+        "refused, never retried); drafts are durable edits nobody sees until "
+        "promoted.",
 
         "THE HITL WRITE IS THREE ORDERED STEPS AND THE MANIFEST IS NOT ONE "
         "OF THEM. PUT /files/{path} writes the OBJECT first and appends an "
@@ -398,8 +405,7 @@ def build():
         "gateway bearer can do from \u201cpublish, plus hand over these N named "
         "objects\u201d to \u201crewrite and delete across a running agent\u2019s tree, at "
         "my timing, under a scope I choose\u201d. v1\u2019s recorded limits: "
-        "whole-object HITL writes under a cap, one shared bearer, and no "
-        "HITL delete verb yet.",
+        "whole-object HITL writes under a cap, and one shared bearer.",
 
         "NOTHING HERE IS INJECTED, AND THERE IS NO WEBHOOK IN ANY OF IT. "
         "The flint-sync worker is CREATED by the node plugin during "
@@ -407,8 +413,8 @@ def build():
         "namespace, pinned with nodeName so it skips the scheduler, and "
         "owned by the Node object so a vanished node garbage-collects it. "
         "It is not a container in the tenant's pod and no mutating "
-        "admission rewrites the tenant's spec; the crate is still named "
-        "\u201csidecar\u201d only for historical reasons. The gateway, the broker "
+        "admission rewrites the tenant's spec: the component is the SYNCER, "
+        "and flint-sync is its binary. The gateway, the broker "
         "and the operator are not injected either — each is an ordinary "
         "Deployment installed by Helm, and the gateway is opt-in: its chart "
         "REFUSES to render without a token Secret and a workspace map, "
@@ -516,8 +522,10 @@ def build():
         "keeps two workspaces apart.",
 
         "THREE QUESTIONS DECIDE AGAINST LEAN, cheapest disqualifier first: "
-        "does the tree fit the disk (the manifest is the wall — about 250k "
-        "files); is one writer per subtree enough; is snapshot freshness "
+        "does the tree fit the disk, and its file count the checkout budget "
+        "(the manifest is chunked and a publish is O(changed), but every "
+        "checkout still materialises every file); is one writer per subtree "
+        "enough; is snapshot freshness "
         "acceptable. A no on any of them means the hub. And a worker is "
         "never taken away from a tenant still using its tree by ORDERING, "
         "not by a PodDisruptionBudget — a PriorityClass for kubelet's "

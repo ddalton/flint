@@ -73,7 +73,7 @@
 <text class="cap" x="220" y="144" style="text-anchor:middle">same dir</text>
 <text class="cap" x="220" y="186" style="text-anchor:middle">no wire</text>
 <rect x="262" y="114" width="180" height="92" rx="7" class="b-lean"/>
-<text class="t2 c-lean" x="278" y="138">flint-sync sidecar</text>
+<text class="t2 c-lean" x="278" y="138">flint-sync, the syncer</text>
 <text class="t4" x="278" y="158">copies changed files</text>
 <text class="t4" x="278" y="171">at a boundary; checkout at start</text>
 <line class="l-lean" x1="442" y1="160" x2="518" y2="160" marker-start="url(#a-lean)" marker-end="url(#a-lean)"/>

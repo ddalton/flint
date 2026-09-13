@@ -75,11 +75,11 @@
 <section class="page">
   <header class="ph">
     <h1>Flint-lean — plain files, one bucket</h1>
-    <span class="kicker">1 / 5 · architecture</span>
+    <span class="kicker">1 / 7 · architecture</span>
   </header>
-  <p class="dek">The third front end over the flint bucket format, split out of the flint-fuse architecture doc: if the workspace fits on disk, no interception is needed at all. Materialize plain files at pod start, publish changed files at cadence with an unprivileged sidecar, and put write authority in a stateless gateway. Most of FUSE's value at a fraction of its risk surface — same bucket format, same engine.</p>
+  <p class="dek">The third front end over the flint bucket format, split out of the flint-fuse architecture doc: if the workspace fits on disk, no interception is needed at all. Materialize plain files at pod start, publish changed files at a boundary with an unprivileged <b>syncer</b> — a worker pod the CSI node driver starts beside the tenant, never a container injected into it — and give writers outside the pod a stateless gateway that is, since 0.2, a library. Most of FUSE's value at a fraction of its risk surface — same bucket format, same engine.</p>
   <figure>
-  <svg viewBox="0 0 1600 810" role="img" aria-label="An agent pod holds an app container working on plain files and an unprivileged flint-sync sidecar that checks the workspace out at start and publishes changed files at cadence; a stateless flint-gateway arbitrates publishes by minting presigned PUTs; the bucket format is unchanged; a bottom band lists what the lean variant gives up relative to FUSE.">
+  <svg viewBox="0 0 1600 810" role="img" aria-label="An agent pod holds an app container working on plain files; an unprivileged flint-sync syncer, a worker pod the CSI node driver created, checks the workspace out at start and publishes changed files at a boundary; the flint-lean-gateway crate is the door for writers outside the pod and talks to the bucket only; the bucket holds the pointer, chunks, inbox and files; a bottom band lists what the lean variant gives up relative to FUSE.">
     <defs>
       <marker id="f6-ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
       <marker id="f6-av" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6d4aa8"/></marker>
@@ -99,7 +99,7 @@
     <text class="tx ctr" x="185" y="280">zero interception</text>
 
     <rect x="330" y="156" width="250" height="230" rx="8" class="bx-blue"/>
-    <text class="tl ctr" x="455" y="182">flint-sync sidecar</text>
+    <text class="tl ctr" x="455" y="182">flint-sync — the syncer</text>
     <text class="mns ctr" x="455" y="202">ordinary process — UNPRIVILEGED</text>
     <text class="tx ctr" x="455" y="222">no /dev/fuse · no mount propagation</text>
     <text class="tx ctr" x="455" y="238">no privileged · no PSA conflict</text>
@@ -108,7 +108,7 @@
     <text class="tx ctr" x="455" y="286">verb, bytes instead of stubs</text>
     <text class="tx ctr" x="455" y="306">publish at cadence — mtime/size</text>
     <text class="tx ctr" x="455" y="322">scan against the manifest</text>
-    <text class="tx ctr" x="455" y="342">preStop: final publish barrier</text>
+    <text class="tx ctr" x="455" y="342">NodeUnpublish: the final drain barrier</text>
     <text class="tx ctr" x="455" y="366">same epoch · claim · manifest</text>
     <text class="tx ctr" x="455" y="382">machinery, unchanged</text>
 
@@ -116,40 +116,41 @@
     <line class="ln-blue" x1="455" y1="386" x2="455" y2="406" marker-end="url(#f6-ab)"/>
 
     <rect x="60" y="410" width="520" height="64" rx="8" class="bx-slate"/>
-    <text class="tl" x="76" y="436">emptyDir — the whole workspace, materialized</text>
-    <text class="tx" x="76" y="456">must fit the disk budget — the lean variant has no stubs and no eviction</text>
+    <text class="tl" x="76" y="436">the tree — a quota'd filesystem the node driver owns, bound into the pod</text>
+    <text class="tx" x="76" y="456">sizeLimitGib is a real quota: ENOSPC, never an eviction — no stubs, no lazy fault-in</text>
 
     <text class="tx" x="56" y="502">the FUSE risk class is gone: no ENOTCONN wedge, no restart-in-place</text>
     <text class="tx" x="56" y="518">choreography, no mount-broker endgame, no kernel floor</text>
 
-    <text class="tx" x="40" y="566">webhook injection shrinks to: an emptyDir + an ordinary sidecar —</text>
-    <text class="tx" x="40" y="582">failurePolicy: Fail still applies; everything the FUSE recipe</text>
-    <text class="tx" x="40" y="598">needs for privilege, brokers and /dev/fuse is simply not needed</text>
+    <text class="tx" x="40" y="566">delivered as ONE csi: volume by s3.csi.chert.us — no webhook, no injected container;</text>
+    <text class="tx" x="40" y="582">the syncer is a worker pod the node plugin creates in a system namespace, and kubelet</text>
+    <text class="tx" x="40" y="598">blocks the agent's containers on NodePublishVolume until the checkout marker exists</text>
 
     <!-- gateway -->
     <rect x="640" y="110" width="400" height="300" rx="10" class="bx-violet"/>
-    <text class="tl" x="656" y="136">flint-gateway — stateless write authority</text>
-    <text class="tx" x="656" y="156">N replicas behind one Service · no PVC, no epoch of</text>
-    <text class="tx" x="656" y="172">its own, no state — everything durable is in the bucket</text>
+    <text class="tl" x="656" y="136">flint-lean-gateway — the outside door</text>
+    <text class="tx" x="656" y="156">a crate (0.2, crates.io): a backend calls the verbs in-process,</text>
+    <text class="tx" x="656" y="172">or runs the same router as a binary — one implementation</text>
     <line class="hair" x1="656" y1="184" x2="1024" y2="184"/>
-    <text class="thv" x="656" y="206">grade 1 — write proxy</text>
-    <text class="tx" x="656" y="224">bytes transit the gateway; strongest enforcement;</text>
-    <text class="tx" x="656" y="240">pays back a slice of the hub's NIC ceiling</text>
-    <text class="thv" x="656" y="264">grade 2 — presigned arbiter (PLAN OF RECORD; not yet built)</text>
-    <text class="tx" x="656" y="282">the sidecar asks to publish generation N of subtree X;</text>
-    <text class="tx" x="656" y="298">the gateway validates lease + layout + claim identity,</text>
-    <text class="tx" x="656" y="314">then mints short-lived presigned PUTs pinned to</text>
-    <text class="tx" x="656" y="330">exactly those keys — bytes go pod → S3 DIRECT</text>
-    <text class="tsb" x="656" y="356">the cooperative CAS regime becomes ENFORCED:</text>
-    <text class="tx" x="656" y="374">non-holders get no URL; If-Match is required; per-share</text>
-    <text class="tx" x="656" y="390">metering; revocation in seconds — kill the token</text>
+    <text class="thv" x="656" y="206">a write from outside the pod</text>
+    <text class="tx" x="656" y="224">PUT files/&lt;path&gt; + one inbox entry — durable at once</text>
+    <text class="tx" x="656" y="240">never a manifest edit: the syncer cites it at its next barrier</text>
+    <text class="tx" x="656" y="256">428 no version · 412 stale · 409 barrier window open</text>
+    <text class="thv" x="656" y="280">reads, removals, renames, drafts</text>
+    <text class="tx" x="656" y="298">GET reads the citation first, guarded on its etag; the cell only</text>
+    <text class="tx" x="656" y="314">when that fails — an overwrite reads at once, at no common cost</text>
+    <text class="tx" x="656" y="330">a delete or rename is DECLARED and the syncer performs it; a</text>
+    <text class="tx" x="656" y="346">rename is one manifest generation; a removal over dirty bytes</text>
+    <text class="tx" x="656" y="362">is refused, never retried</text>
+    <text class="tx" x="656" y="378">drafts: durable edits no scan, checkout or sweep can see</text>
+    <text class="tsb" x="656" y="398">it talks to the BUCKET, never to a syncer — page 5</text>
 
     <rect x="640" y="430" width="400" height="110" rx="10" class="band"/>
-    <text class="tsb" x="656" y="456">then pods hold ZERO bucket write credentials</text>
-    <text class="tx" x="656" y="476">checkout/hydrate: a read-only prefix role (harmless</text>
-    <text class="tx" x="656" y="492">blast radius), or presigned GETs from the same door</text>
-    <text class="tx" x="656" y="514">the FUSE variant's two-principal split and sidecar-only-</text>
-    <text class="tx" x="656" y="530">IRSA machinery is unnecessary in this variant</text>
+    <text class="tsb" x="656" y="456">credentials — on the syncer, never on the app</text>
+    <text class="tx" x="656" y="476">the worker reads short-lived keys from a loopback door the</text>
+    <text class="tx" x="656" y="492">node plugin serves; a broker exchanges the pod's kubelet-</text>
+    <text class="tx" x="656" y="508">asserted identity for them (static · sts · rest backends).</text>
+    <text class="tx" x="656" y="524">the agent container holds none — no Secret, no S3 token</text>
 
     <text class="tx" x="640" y="566">gateway down ⇒ only HITL writes fail — publishes, checkout and sync CONTINUE (chaos C8)</text>
     <text class="tx" x="640" y="582">serving local files — far softer than hub-down; reads never depended on it</text>
@@ -161,48 +162,46 @@
     <text class="tx" x="1100" y="180">cells — hub-mode, FUSE-mode and lean-mode volumes</text>
     <text class="tx" x="1100" y="196">stay mutually convertible; DR import is the same verb</text>
     <line class="hair" x1="1100" y1="210" x2="1540" y2="210"/>
-    <text class="mns" x="1100" y="234">.flint/epoch · .flint/manifest · .flint/claim</text>
-    <text class="tx" x="1100" y="258">the gateway is the enforcement point these cells</text>
-    <text class="tx" x="1100" y="274">always lacked — detection becomes refusal</text>
+    <text class="mns" x="1100" y="234">.flint/lean/{epoch · claim · current · inbox} · chunks/ · files/</text>
+    <text class="tx" x="1100" y="258">current is the ONE mutable pointer; entries live in immutable,</text>
+    <text class="tx" x="1100" y="274">content-addressed chunks, so a publish costs O(changed)</text>
     <text class="tx" x="1100" y="298">the project service browses exactly as before —</text>
     <text class="tx" x="1100" y="314">read-only, RPO-consistent snapshots per subtree</text>
-    <text class="tx" x="1100" y="338">strict journal mode composes here too: the gateway</text>
-    <text class="tx" x="1100" y="354">is the natural group-commit point for fsync ⇒ S3</text>
+    <text class="tx" x="1100" y="338">every entry carries a CRC-64 the client computed; every</text>
+    <text class="tx" x="1100" y="354">fetch is verified against it before a byte is written</text>
 
-    <line class="ln-violet" x1="600" y1="240" x2="636" y2="240" marker-end="url(#f6-av)"/>
-    <line class="ln-violet" x1="636" y1="278" x2="600" y2="278" marker-end="url(#f6-av)"/>
-    <line class="ln-violet dash" x1="1040" y1="240" x2="1076" y2="240" marker-end="url(#f6-av)"/>
-    <text class="txs" x="1044" y="230">grade 1</text>
+    <line class="ln-violet" x1="1040" y1="240" x2="1076" y2="240" marker-end="url(#f6-av)"/>
+    <line class="ln-violet" x1="1076" y1="278" x2="1040" y2="278" marker-end="url(#f6-av)"/>
 
-    <text class="tx ctr" x="838" y="622">publish — presigned PUT, bytes pod → S3 direct</text>
+    <text class="tx ctr" x="838" y="622">publish — the syncer's PUT, multipart with parallel parts, bytes pod → S3 direct</text>
     <line class="ln-ochre" x1="600" y1="630" x2="1076" y2="630" marker-end="url(#f6-ao)"/>
-    <text class="tx ctr" x="838" y="656">checkout / hydrate — read-only GETs, direct</text>
+    <text class="tx ctr" x="838" y="656">checkout / sync — GETs, ranged above 8 MiB, every fetch CRC-64 verified — direct</text>
     <line class="ln-ochre" x1="1076" y1="664" x2="600" y2="664" marker-end="url(#f6-ao)"/>
 
     <!-- what it gives up -->
     <rect x="40" y="690" width="1520" height="110" rx="10" class="band"/>
     <text class="th" x="56" y="716">what the lean variant gives up — FUSE is the escalation, not the default</text>
     <text class="tsb" x="56" y="740">lazy hydration</text>
-    <text class="tx" x="56" y="758">cold start downloads the whole workspace;</text>
-    <text class="tx" x="56" y="774">fine at GiB scale — a partial-checkout</text>
-    <text class="tx" x="56" y="790">path list covers bigger trees</text>
+    <text class="tx" x="56" y="758">cold start materialises the whole tree, or a</text>
+    <text class="tx" x="56" y="774">declared SCOPE of it (checkout scope, rescope</text>
+    <text class="tx" x="56" y="790">narrow / widen) — there is no lazy fault-in</text>
     <text class="tsb" x="560" y="740">interception-grade capture</text>
     <text class="tx" x="560" y="758">scan-based publish re-uploads touched files</text>
     <text class="tx" x="560" y="774">whole — the engine's whole-dirty fallback</text>
     <text class="tx" x="560" y="790">was already the correctness backstop</text>
     <text class="tsb" x="1060" y="740">eviction / space management</text>
-    <text class="tx" x="1060" y="758">no stubs: the workspace must fit the</text>
-    <text class="tx" x="1060" y="774">emptyDir budget; TiB-scale or lazy</text>
-    <text class="tx" x="1060" y="790">volumes are FUSE's territory (its own doc)</text>
+    <text class="tx" x="1060" y="758">no stubs: the tree must fit sizeLimitGib,</text>
+    <text class="tx" x="1060" y="774">a real quota; TiB-scale or lazy volumes</text>
+    <text class="tx" x="1060" y="790">are FUSE's territory (its own doc)</text>
   </svg>
-  <figcaption><b>This is a third front end, not a FUSE configuration</b> — the app touches plain files on a real local filesystem, and the sidecar is an ordinary unprivileged program running the same engine verbs: <code>import</code> at start (bytes instead of stubs), the flush barrier's whole-file lane at cadence (driven by an mtime/size scan against the manifest instead of capture interception), the same epoch, claim, and manifest machinery. For the agent-workspace shape — code, configs, artifacts, GiB-scale — it is most of FUSE's value with none of FUSE's hard parts: the entire privileged/mount-propagation/ENOTCONN/mount-broker risk section of the FUSE architecture stops applying, and the kernel floor drops to nothing. <b>Two corrections from the drills.</b> This page originally read &ldquo;gateway down ⇒ publishes pause&rdquo;; chaos leg C8 measured the opposite — barriers continue, because the shipped sidecar writes its manifest, window and epoch cells straight to the store. All four stated outage effects belong to the <b>proxy</b>; the gateway costs only the fourth. And <b>grade 2 is the plan of record, not yet a build</b>: the S3 proxy IS the intended deployment — a project-scoped door holding the real credentials, so no pod stores one at all — but nothing in the tree mints a presigned URL today, and the interim path gives the sidecar a scoped credential of its own. Read every &ldquo;pods hold zero credentials&rdquo; claim on these pages as the target the proxy delivers; today the agent container holds none, which is the half that already matters for blast radius. <b>The gateway restores the security posture the review said direct mode gives up.</b> With grade 2, "the bucket trusts one principal" is true again — pods hold no write credentials, the cooperative CAS regime becomes enforced arbitration (a non-holder is refused a URL, not merely detected after the fact), revocation returns to seconds, and per-share metering exists again. Its failure mode is publish-pause with growing RPO while pods keep serving — the softest failure shape any component on these pages has. <b>One dialect everywhere:</b> this also argues for converging the hub's file API onto the S3 REST surface (the libflint plan's §8 sidecar adapter, built once, placed three ways — hub listener, localhost sidecar, gateway), so the live view and the published view speak the same protocol and the same tools work against both. <b>Recommendation:</b> lean is the direct-mode entry point; FUSE is the escalation for volumes too large or too lazy to materialize; the hub is unchanged. Same bucket, three front ends, one engine. Implementation plan: docs/plans/flint-lean-plan.md.</figcaption>
+  <figcaption><b>This is a third front end, not a FUSE configuration</b> — the app touches plain files on a real local filesystem, and the syncer is an ordinary unprivileged program running the same engine verbs: <code>checkout</code> at start (bytes instead of stubs), the flush barrier's whole-file lane at a boundary (driven by an mtime/size scan against the manifest instead of capture interception), the same epoch, claim, and manifest machinery. For the agent-workspace shape — code, configs, artifacts, GiB-scale — it is most of FUSE's value with none of FUSE's hard parts: the entire privileged/mount-propagation/ENOTCONN/mount-broker risk section of the FUSE architecture stops applying, and the kernel floor drops to nothing. <b>How the tree gets there changed on 2026-09-03.</b> This page originally drew a mutating webhook injecting the syncer as a native sidecar; that delivery was removed outright before anything was deployed. A workspace now reaches a pod as one <code>csi:</code> volume served by the <code>s3.csi.chert.us</code> node DaemonSet: kubelet calls <code>NodePublishVolume</code> with a pod-bound ServiceAccount token, the plugin resolves the <code>FlintLeanWorkspace</code> in the token's namespace, refuses a ServiceAccount the CR's <code>spec.consumers</code> does not list, creates a quota'd filesystem for the tree, creates the syncer as a worker pod in a system namespace with that tree at <code>/workspace</code>, waits for the checkout marker, and only then binds the tree into the pod — so the agent's first line still sees a complete tree, and a pod whose workspace is missing or refused stays <code>ContainerCreating</code>, fail-closed. A thin controller remains for bucket-side work (claim stamping, posture, the stale-upload sweep); the syncer claims the lease itself, so a workspace mounts with the controller absent. <b>Credentials follow the same shape.</b> The syncer holds them and the agent container never does: keys reach the worker on a loopback door the node plugin serves, exchanged by the broker for the pod's kubelet-asserted identity under a <code>static</code>, <code>sts</code> or <code>rest</code> backend — the last being an application's own JWT-enforcing API in front of an S3 proxy, which is the fleet posture. The presigned-arbiter "grade 2" this page once called the plan of record was never built and nothing in the tree mints a presigned URL; enforcement moved to the credential path instead. <b>Two corrections from the drills stand:</b> chaos leg C8 measured that barriers continue with the gateway down, because the syncer writes its pointer, window and epoch cells straight to the store — a gateway outage costs only HITL writes. <b>Recommendation:</b> lean is the direct-mode entry point; FUSE is the escalation for volumes too large or too lazy to materialize; the hub is unchanged. Same bucket, three front ends, one engine. Delivery design: <code>docs/plans/csi-node-mount-design.md</code> §0 and §3.5; implementation plan: <code>docs/plans/flint-lean-plan.md</code>.</figcaption>
 </section>
 
 <!-- ============================================================ PAGE 2 -->
 <section class="page">
   <header class="ph">
     <h1>One dialect — the S3 surface, three placements</h1>
-    <span class="kicker">2 / 5 · protocol</span>
+    <span class="kicker">2 / 7 · protocol</span>
   </header>
   <p class="dek">The decision of record: every REST surface in the system speaks the S3 dialect — the hub's file API converges onto it, the gateway serves it, and direct-mode non-mount access (lean and FUSE alike) is plain S3 against the bucket. One library, three placements; the consistency contracts say which view a client is reading.</p>
   <figure>
@@ -288,11 +287,11 @@
 <section class="page">
   <header class="ph">
     <h1>Boundary verbs — the agent says when</h1>
-    <span class="kicker">3 / 5 · architecture · shipped 2026-08-26</span>
+    <span class="kicker">3 / 7 · architecture · shipped 2026-08-26</span>
   </header>
   <p class="dek">Pages 1–2 describe publishing <b>at cadence</b>: an mtime/size scan on a timer. That is still the default, and it is still the whole story for a workspace nobody is watching. What it could not express is a coherent point — &ldquo;these files, together, now&rdquo; — so an agent finishing a unit of work had no way to say so and no way to learn when its bytes were durable. The boundary verbs are that sentence, written as files in the workspace the agent already has. Nothing new is mounted, no port is opened, and a workspace that ignores them pays nothing: measured at <b>20 bucket requests per 22&nbsp;s idle with the verbs off and 20 with them on</b>.</p>
   <figure>
-  <svg viewBox="0 0 1600 760" role="img" aria-label="The agent writes a sentinel file into .flint/ and the sidecar answers with an ack file; in gated mode the upload lane makes bytes durable continuously while a single manifest CAS decides when readers see them; the operator injects the sidecar and reports observed state.">
+  <svg viewBox="0 0 1600 760" role="img" aria-label="The agent writes a sentinel file into .flint/ and the syncer answers with an ack file; in gated mode the upload lane makes bytes durable continuously while a single manifest CAS decides when readers see them; the CSI node driver starts the syncer and a thin controller reports observed state.">
     <defs>
       <marker id="p3-ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
       <marker id="p3-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b45309"/></marker>
@@ -309,7 +308,7 @@
     <text class="tx ctr" x="212" y="226">no client, no credentials</text>
 
     <rect x="418" y="118" width="300" height="120" rx="8" class="bx"/>
-    <text class="tl ctr" x="568" y="144">sidecar answers</text>
+    <text class="tl ctr" x="568" y="144">syncer answers</text>
     <text class="mns ctr" x="568" y="168">.flint/publish.ack</text>
     <text class="tx ctr" x="568" y="192">status ok | partial |</text>
     <text class="mns ctr" x="568" y="208">refused-fenced</text>
@@ -322,7 +321,7 @@
     <text class="mns" x="80" y="308">.flint/remote.seq</text>
     <text class="tx" x="80" y="330">observed_seq &gt; integrated_seq means &ldquo;somebody else published; consider a sync&rdquo;.</text>
     <text class="tx" x="80" y="348">Fed by the barrier&rsquo;s own HEAD, so N agents cost ZERO extra bucket requests, and a</text>
-    <text class="tx" x="80" y="366">heartbeat field separates &ldquo;no news&rdquo; from &ldquo;sidecar dead&rdquo;.</text>
+    <text class="tx" x="80" y="366">heartbeat field separates &ldquo;no news&rdquo; from &ldquo;syncer dead&rdquo;.</text>
 
     <rect x="770" y="70" width="790" height="330" rx="10" class="bx-ochre"/>
     <text class="th" x="786" y="96">gated mode — durability split from visibility</text>
@@ -351,28 +350,28 @@
     <text class="tx" x="810" y="354">gated is REFUSED without a lag bound, so unbounded staleness is impossible by construction, not by convention</text>
 
     <rect x="40" y="424" width="1520" height="120" rx="10" class="bx-violet"/>
-    <text class="th" x="56" y="450">the operator — one CRD, one webhook, no new data path</text>
-    <text class="tx" x="56" y="474">A FlintLeanWorkspace names the bucket, the prefix and the knobs; the mutating webhook injects the sidecar as a NATIVE sidecar</text>
-    <text class="tx" x="56" y="492">(initContainer, restartPolicy Always) so the workspace is materialized before the agent&rsquo;s first line runs, and an opted-in pod</text>
-    <text class="tx" x="56" y="510">whose workspace is missing or refused does not schedule at all. The webhook serves in-process and provisions its own TLS.</text>
+    <text class="th" x="56" y="450">the operator — one CRD, a thin controller, no webhook, no new data path</text>
+    <text class="tx" x="56" y="474">A FlintLeanWorkspace names the bucket, the prefix and the knobs; the s3.csi.chert.us node driver delivers the workspace as one csi: volume,</text>
+    <text class="tx" x="56" y="492">starting the syncer as a worker pod and blocking the agent&rsquo;s containers on NodePublishVolume until the checkout marker exists; a pod</text>
+    <text class="tx" x="56" y="510">whose workspace is missing or refused stays ContainerCreating, fail-closed. The controller stamps the claim and sweeps stale uploads.</text>
     <text class="tx" x="56" y="528">Observed state rides the lease heartbeat that was already happening: cited seq, staged-uncited count, the mode actually running.</text>
 
     <rect x="40" y="568" width="1520" height="150" rx="10" class="band"/>
     <text class="th" x="56" y="594">what is NOT here, and deliberately</text>
     <text class="tx" x="56" y="618">· No new component in the data path. The verbs are files; the doors (a pod-local UNIX socket, a gateway endpoint) are opt-in sugar over the same consume path.</text>
     <text class="tx" x="56" y="638">· No fsync interception. A boundary is declared, never inferred — that is the whole reason this is not FUSE.</text>
-    <text class="tx" x="56" y="658">· No enforced data-plane fencing. A deposed sidecar is refused at the control plane and its writes land as UNCITED versions: they destroy nothing and no</text>
+    <text class="tx" x="56" y="658">· No enforced data-plane fencing. A deposed syncer is refused at the control plane and its writes land as UNCITED versions: they destroy nothing and no</text>
     <text class="tx" x="56" y="676">  coherent reader resolves them, but a raw-key reader can still see them. Closing that needs per-request epoch validation at a proxy, which is a component</text>
     <text class="tx" x="56" y="694">  this front end exists to avoid — so it is a chosen ceiling, not an unfinished task.</text>
   </svg>
-  <figcaption><b>The verbs are files because the workspace is the interface.</b> An agent that can write a file can declare a boundary — no client library, no credential, no network path, and the same mechanism serves a shell script and a language runtime. The ack is the other half: <code>ok</code> means the boundary is installed in the bucket, <code>partial</code> means it installed without something the agent declared, and <code>refused-fenced</code> means this sidecar lost the lease and is saying so rather than leaving the agent waiting — which it used to do, forever. <b>Gated mode answers a different question from cadence:</b> cadence asks how stale a reader may be, gated asks whether a reader may see half a logical change, and answers no by making durability and visibility separate events. The cost is stated, not hidden — uncited versions exist in the bucket, a raw-key reader can see them, and the retention backstop must outlast the crash window or it will reap a version the manifest still cites. <b>Evidence, not assertion:</b> 27 bucket legs against a real MinIO, 14 operator legs on kind, a 61-run TLC gate, and the published chart installed on a three-node AWS cluster publishing to real S3 over TLS — logs committed under <code>lean/e2e/results/</code>.</figcaption>
+  <figcaption><b>The verbs are files because the workspace is the interface.</b> An agent that can write a file can declare a boundary — no client library, no credential, no network path, and the same mechanism serves a shell script and a language runtime. The ack is the other half: <code>ok</code> means the boundary is installed in the bucket, <code>partial</code> means it installed without something the agent declared, and <code>refused-fenced</code> means this syncer lost the lease and is saying so rather than leaving the agent waiting — which it used to do, forever. <b>Gated mode answers a different question from cadence:</b> cadence asks how stale a reader may be, gated asks whether a reader may see half a logical change, and answers no by making durability and visibility separate events. The cost is stated, not hidden — uncited versions exist in the bucket, a raw-key reader can see them, and the retention backstop must outlast the crash window or it will reap a version the manifest still cites. <b>Evidence, not assertion:</b> 27 bucket legs against a real MinIO, 14 operator legs on kind, a TLC gate that was 61 runs then and is 94 today (page 6), and the published chart installed on a three-node AWS cluster publishing to real S3 over TLS — logs committed under <code>lean/e2e/results/</code>.</figcaption>
 </section>
 
 <!-- ============================================================ PAGE 4 -->
 <section class="page">
   <header class="ph">
     <h1>Does it fit? — the workflow lean is for</h1>
-    <span class="kicker">4 / 5 · use case · sizing</span>
+    <span class="kicker">4 / 7 · use case · sizing</span>
   </header>
   <p class="dek">Lean is not a general filesystem and does not try to be. It is for <b>one agent, one workspace, one writer, a workspace that fits on disk</b> — the harness shape: clone-ish tree of code and artifacts, an agent that reads and writes it locally at full speed, and a durable point somebody else can read when the work is done. Everything below is the boundary of that claim, in measured numbers, so the answer to &ldquo;will this work for us&rdquo; is arithmetic rather than opinion.</p>
   <figure>
@@ -391,7 +390,7 @@
 
     <rect x="60" y="204" width="430" height="76" rx="8" class="bx"/>
     <text class="tl" x="76" y="228">2 · is one writer per subtree enough?</text>
-    <text class="tx" x="76" y="248">a lease admits exactly one sidecar; a second is refused,</text>
+    <text class="tx" x="76" y="248">a lease admits exactly one syncer; a second is refused,</text>
     <text class="tx" x="76" y="264">not merged. No ⇒ the hub, for live shared POSIX.</text>
 
     <rect x="60" y="292" width="430" height="80" rx="8" class="bx"/>
@@ -404,7 +403,7 @@
 
     <rect x="560" y="118" width="220" height="90" rx="8" class="bx"/>
     <text class="tl ctr" x="670" y="142">pod starts</text>
-    <text class="tx ctr" x="670" y="162">webhook injects the sidecar;</text>
+    <text class="tx ctr" x="670" y="162">the node driver starts the syncer;</text>
     <text class="tx ctr" x="670" y="178">checkout runs BEFORE the</text>
     <text class="tx ctr" x="670" y="194">agent's first line</text>
 
@@ -421,7 +420,7 @@
     <text class="tx ctr" x="1150" y="200">API surface</text>
 
     <rect x="1280" y="118" width="260" height="90" rx="8" class="bx"/>
-    <text class="tl ctr" x="1410" y="142">sidecar answers</text>
+    <text class="tl ctr" x="1410" y="142">syncer answers</text>
     <text class="mns ctr" x="1410" y="164">.flint/publish.ack</text>
     <text class="tx ctr" x="1410" y="184">ok ⇒ the bytes are in S3 and</text>
     <text class="tx ctr" x="1410" y="200">a sibling can read them</text>
@@ -431,15 +430,15 @@
     <line class="ln ln-blue" x1="1260" y1="163" x2="1280" y2="163" marker-end="url(#p4-ab)"/>
 
     <rect x="560" y="228" width="980" height="144" rx="8" class="bx"/>
-    <text class="tl" x="578" y="252">what it costs — MEASURED, loopback floors (0b); a latency-bound proxy moves these</text>
+    <text class="tl" x="578" y="252">what it costs — MEASURED 2026-08, loopback floors (0b), before the read-path work on page 6; a latency-bound proxy moves these</text>
     <text class="mns" x="578" y="278">bytes</text>
     <text class="tx" x="700" y="278">checkout 3.3 s/GiB · publish 8.0 s/GiB</text>
     <text class="mns" x="578" y="300">100k files</text>
     <text class="tx" x="700" y="300">checkout 49.5 s · first publish 65 s (was 117 s before bounded fan-out) · idle tick 1.85 s</text>
     <text class="mns" x="578" y="322">1M files</text>
-    <text class="tx" x="700" y="322">checkout 7 m 05 s · manifest 264 MiB at ~277 B/entry, exactly linear — the manifest is the wall</text>
-    <text class="mns" x="578" y="344">v1 cap</text>
-    <text class="tx" x="700" y="344">~250k files, and it falls out of the manifest size, not the byte count</text>
+    <text class="tx" x="700" y="322">checkout 7 m 05 s · a 264 MiB manifest then — chunked since 1.45.0: the pointer is a few hundred bytes, a publish costs O(changed)</text>
+    <text class="mns" x="578" y="344">the cap</text>
+    <text class="tx" x="700" y="344">the disk (sizeLimitGib, a real quota) and the time to materialise the file count — not the manifest; one chunk level is sized to ~10M entries</text>
     <text class="tx" x="578" y="364">idle costs ~5 bucket requests per tick, and the verbs add ZERO when unused — measured 20 vs 20 over 22 s</text>
 
     <rect x="40" y="414" width="1520" height="120" rx="10" class="band"/>
@@ -455,18 +454,250 @@
     <text class="tx" x="56" y="626">· Two writers must see each other's bytes live, or you need byte-range locks, O_EXCL or shared sqlite/git ACROSS pods — the hub.</text>
     <text class="tx" x="56" y="644">· A reader cannot tolerate seeing the last boundary instead of the last write — the hub. Gated mode narrows WHAT a reader sees, never HOW STALE it is.</text>
   </svg>
-  <figcaption><b>The fit question is one question, and it is about the disk.</b> Everything else follows: because the whole tree is local, the app gets real POSIX at local speed and the FUSE risk class disappears; because it is local, it must fit; and because publishing is a boundary rather than a write-through, a reader sees coherent points instead of a live tree. <b>The file count binds before the byte count.</b> At ~277 B per manifest entry the document is exactly linear, so a million small files costs a 264 MiB manifest while a million bytes costs nothing — which is why the v1 cap is expressed in files (~250k) and why the levers that mattered were fan-out and skipping the manifest parse on an idle tick, not raw throughput. <b>The verbs change the shape of the workflow, not its cost.</b> Cadence alone forces a choice between publishing too often (wasted work) and too rarely (a reviewer reads a half-finished tree); a declared boundary removes the choice, and costs nothing when unused. <b>Say no early.</b> The three questions above are ordered so the cheapest disqualifier comes first, and a workload that fails any of them is better served by another front end over the same bucket format — all three are mutually convertible, so choosing lean today does not strand the data if the answer changes.</figcaption>
+  <figcaption><b>The fit question is one question, and it is about the disk.</b> Everything else follows: because the whole tree is local, the app gets real POSIX at local speed and the FUSE risk class disappears; because it is local, it must fit; and because publishing is a boundary rather than a write-through, a reader sees coherent points instead of a live tree. <b>The file count binds before the byte count, but no longer through the manifest.</b> In 2026-08 the manifest was one object rewritten whole — 264 MiB at a million entries, so the cap was expressed in files (~250k). Since 1.45.0 the entries live in immutable, content-addressed chunks named by a pointer of a few hundred bytes: a publish sends only the chunks whose address the pointer does not already hold, a small project is one chunk and pays what the single generation did, and the design sizes one chunk level to about ten million entries. What still binds is the disk, now a real quota, and the time to materialise and scan the count — which page 6 measures. <b>The verbs change the shape of the workflow, not its cost.</b> Cadence alone forces a choice between publishing too often (wasted work) and too rarely (a reviewer reads a half-finished tree); a declared boundary removes the choice, and costs nothing when unused. <b>Say no early.</b> The three questions above are ordered so the cheapest disqualifier comes first, and a workload that fails any of them is better served by another front end over the same bucket format — all three are mutually convertible, so choosing lean today does not strand the data if the answer changes.</figcaption>
 </section>
 
 <!-- ============================================================ PAGE 5 -->
 <section class="page">
   <header class="ph">
+    <h1>Outside the pod — the gateway is a crate</h1>
+    <span class="kicker">5 / 7 · architecture · shipped 2026-09-12</span>
+  </header>
+  <p class="dek">A UI, a reviewer, a backend serving a thousand workspaces: none of them is in the pod, and none of them may touch the agent&rsquo;s tree or edit the manifest. <b><code>flint-lean-gateway</code> is the door for them, and since 0.2 it is a library</b> — a backend depends on the crate and calls the verbs in-process; the <code>flint-lean-gateway</code> binary is <code>main</code> around the same router, so there is one implementation and one set of refusals. The door talks to the <b>bucket</b>, never to a syncer: it can run on another cluster, or on none.</p>
+  <figure>
+  <svg viewBox="0 0 1600 740" role="img" aria-label="A backend embedding the flint-lean-gateway crate writes an object and an inbox entry to the bucket, durable at once; the syncer consumes the inbox at its next barrier and is the only writer of the manifest pointer; reads resolve the citation first and the inbox only when the citation is outrun; a band lists the two visibility tiers and a band lists the refusals on the wire.">
+    <defs>
+      <marker id="p6-av" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6d4aa8"/></marker>
+      <marker id="p6-ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
+      <marker id="p6-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a06b12"/></marker>
+    </defs>
+
+    <!-- the backend -->
+    <rect x="40" y="70" width="500" height="330" rx="10" class="bx-violet"/>
+    <text class="th" x="56" y="96">a backend, in-process — the crate</text>
+    <text class="mns" x="56" y="120">Workspace::new(store, "teams/alpha/p1")</text>
+    <text class="tx" x="56" y="140">an Arc and a config: a thousand workspaces cost nothing to hold,</text>
+    <text class="tx" x="56" y="156">one connection per bucket, N backend replicas, every verb reads the cell</text>
+    <line class="hair" x1="56" y1="168" x2="524" y2="168"/>
+    <text class="thv" x="56" y="190">the verbs — the gateway&rsquo;s, exactly</text>
+    <text class="mns" x="56" y="212">put_file · get_file · snapshot · status</text>
+    <text class="mns" x="56" y="232">remove_file(s) · rename_file(s) · withdraw_removal</text>
+    <text class="mns" x="56" y="252">put_draft · list · get · promote · delete_draft</text>
+    <text class="mns" x="56" y="272">request_boundary · request_sync · wait_cited</text>
+    <line class="hair" x1="56" y1="286" x2="524" y2="286"/>
+    <text class="tx" x="56" y="308">VerbError carries the status and code the wire would answer —</text>
+    <text class="tx" x="56" y="324">a frontend written against the gateway keeps working in-process</text>
+    <text class="tx" x="56" y="346">with_window_wait absorbs an open barrier window before writing;</text>
+    <text class="tx" x="56" y="362">wait_cited answers 202 at once when no syncer holds the lease</text>
+    <text class="tsb" x="56" y="386">the library never edits the manifest and never deletes a cited object</text>
+
+    <!-- the bucket -->
+    <rect x="590" y="70" width="480" height="330" rx="12" class="bx-oo"/>
+    <text class="tt" x="610" y="98">the bucket — the only channel</text>
+    <text class="mns" x="610" y="126">files/&lt;path&gt;</text>
+    <text class="tx" x="610" y="144">the object itself, whole — the same key the syncer publishes to</text>
+    <text class="mns" x="610" y="172">.flint/lean/inbox</text>
+    <text class="tx" x="610" y="190">the cell: tracked writes (object + etag + the writer&rsquo;s CRC-64),</text>
+    <text class="tx" x="610" y="206">declared removals, and the barrier window with its deadline</text>
+    <text class="mns" x="610" y="234">.flint/lean/current</text>
+    <text class="tx" x="610" y="252">the pointer — the syncer&rsquo;s alone; a HITL write never touches it</text>
+    <text class="mns" x="610" y="280">.flint/lean/drafts/&lt;user&gt;/…</text>
+    <text class="tx" x="610" y="298">under the reserved namespace, so no scan, checkout or sweep sees it</text>
+    <line class="hair" x1="610" y1="312" x2="1050" y2="312"/>
+    <text class="tx" x="610" y="334">a rename is a server-side copy, then ONE CAS recording the destination</text>
+    <text class="tx" x="610" y="350">entry and the source removal together — the cell never holds half</text>
+    <text class="tx" x="610" y="372">a removal of a path the agent has dirtied is REFUSED, the reason written</text>
+    <text class="tx" x="610" y="388">back to the cell, and never retried — a retry would delete the edit</text>
+
+    <!-- the syncer -->
+    <rect x="1120" y="70" width="440" height="330" rx="10" class="bx-blue"/>
+    <text class="th" x="1136" y="96">the syncer — the manifest&rsquo;s only writer</text>
+    <text class="tx" x="1136" y="120">at its next barrier — on cadence, or sooner on request_boundary:</text>
+    <text class="tx" x="1136" y="144">1 · consume the inbox: fetch each tracked object, verify its</text>
+    <text class="tx" x="1136" y="160">    CRC-64, write it into the tree, cite it in current</text>
+    <text class="tx" x="1136" y="184">2 · perform declared removals: clean ⇒ unlink, confirm by lstat,</text>
+    <text class="tx" x="1136" y="200">    straight into the delete set — no two-scan guard, a declaration</text>
+    <text class="tx" x="1136" y="216">    is not an absence a walk inferred; so a rename is ONE generation</text>
+    <text class="tx" x="1136" y="240">3 · the manifest CAS — then, and only then, the consumed entries</text>
+    <text class="tx" x="1136" y="256">    and performed removals leave the cell</text>
+    <line class="hair" x1="1136" y1="270" x2="1544" y2="270"/>
+    <text class="tsb" x="1136" y="292">why the order matters — found by the model, not by a test</text>
+    <text class="tx" x="1136" y="312">dropping consumed entries at window-open was safe for a container</text>
+    <text class="tx" x="1136" y="328">restart and unsafe for a POD REPLACEMENT, whose emptyDir takes the</text>
+    <text class="tx" x="1136" y="344">baseline with it: an acked, consumed, uncited write with nothing left</text>
+    <text class="tx" x="1136" y="360">tracking it. Entries leave after the CAS; a successor re-consumes</text>
+    <text class="tx" x="1136" y="376">idempotently. Inv_HITLTracked pins it (LeanSubtree.tla, tranche 5).</text>
+
+    <!-- arrows -->
+    <line class="ln-violet" x1="540" y1="150" x2="586" y2="150" marker-end="url(#p6-av)"/>
+    <line class="ln-violet" x1="586" y1="200" x2="540" y2="200" marker-end="url(#p6-av)"/>
+    <line class="ln-blue" x1="1070" y1="150" x2="1116" y2="150" marker-end="url(#p6-ab)"/>
+    <line class="ln-blue" x1="1116" y1="250" x2="1070" y2="250" marker-end="url(#p6-ab)"/>
+
+    <!-- visibility -->
+    <rect x="40" y="424" width="1520" height="140" rx="10" class="band"/>
+    <text class="th" x="56" y="450">visibility has two tiers, by design — and durability has one</text>
+    <text class="tsb" x="56" y="474">durable: when put_file returns</text>
+    <text class="tx" x="56" y="492">the object and the entry are in the bucket; there is no other channel,</text>
+    <text class="tx" x="56" y="508">and no syncer needs to be running. A workspace nobody syncs keeps the</text>
+    <text class="tx" x="56" y="524">writes; the manifest catches up when a syncer next starts.</text>
+    <text class="tsb" x="560" y="474">visible NOW: the crate, the gateway, and any pod that runs sync</text>
+    <text class="tx" x="560" y="492">get_file reads the citation first, guarded on its etag. Success means no entry</text>
+    <text class="tx" x="560" y="508">can be newer, so the cell is never fetched: two requests, as before the overlay.</text>
+    <text class="tx" x="560" y="524">Only the precondition failure — the overwritten case — reads the cell (0.2.2).</text>
+    <text class="tx" x="560" y="544">Before 0.2.1 the door preferred the citation and answered 409 until the next barrier.</text>
+    <text class="tsb" x="1120" y="474">visible at the NEXT BARRIER: the manifest</text>
+    <text class="tx" x="1120" y="492">a fresh checkout sees the write once current cites it —</text>
+    <text class="tx" x="1120" y="508">about a second after request_boundary, at most a cadence</text>
+    <text class="tx" x="1120" y="524">otherwise. wait_cited is the status view&rsquo;s way to show</text>
+    <text class="tx" x="1120" y="544">&ldquo;published&rdquo;; it is not for the request path of a UI.</text>
+
+    <!-- refusals -->
+    <rect x="40" y="588" width="1520" height="132" rx="10" class="bx-ochre"/>
+    <text class="th" x="56" y="614">the refusals are the wire — every one typed, every one a decision the caller can make</text>
+    <text class="mns" x="56" y="640">409 barrier-window-open</text>
+    <text class="tx" x="340" y="640">the syncer is mid-publish, usually well under a second; retry_after says when, with_window_wait absorbs it</text>
+    <text class="mns" x="56" y="660">428 · 412 file-changed</text>
+    <text class="tx" x="340" y="660">an overwrite named no version, or a stale one (the current etag rides the 412) — re-read and reconcile, never retry</text>
+    <text class="mns" x="56" y="680">409 moved · 410 foreign-write</text>
+    <text class="tx" x="340" y="680">an entry the bucket has outrun yields to the citation; bytes no entry and no citation vouch for are refused, not served</text>
+    <text class="mns" x="56" y="700">202 citation-pending · 409 draft-stale</text>
+    <text class="tx" x="340" y="700">wait_cited with no lease holder; a promote whose recorded base has moved — the draft is kept, because saving must never destroy the edit</text>
+  </svg>
+  <figcaption><b>What a write is.</b> <code>put_file</code> returns when the object is at <code>&lt;prefix&gt;/files/&lt;path&gt;</code> and an entry naming it is in the inbox cell. Both are in the bucket; that is the whole durability promise, and it is immediate. What the library will <i>not</i> do is edit the manifest: the syncer holding the workspace&rsquo;s lease is the manifest&rsquo;s only writer, and that is what the protocol&rsquo;s model checks — a second manifest writer would reintroduce exactly the race the barrier exists to prevent. <b>A delete from outside is declared, never performed.</b> A cited object deleted by a caller wedges every checkout with &ldquo;the manifest cites it but it is gone&rdquo;, so <code>remove_file</code> records the intent and returns; the listing hides the path at once, the bytes stay readable by name until the syncer performs it, and a removal the syncer refuses leaves the file exactly as it was — there is no function in the crate that deletes a cited object. <b>A rename is one generation.</b> The server-side copy lands first (a 10&nbsp;GB checkpoint moves without a download), then one CAS records the destination entry and the source removal together, and the barrier cites both halves in one manifest generation: a reader sees the old name or the new, never both and never neither. <b>Drafts are the edit that must not be published yet</b> — under the reserved namespace, where no scan, checkout or sweep can see them; the base etag is recorded, never enforced at save time, and a promote is a HITL write conditioned on it. <b>The cost of the overlay on the common read is zero</b>, and it is pinned by a counting store: (inbox fetches, object fetches) of (0,&nbsp;1) for an unmodified cited file, (1,&nbsp;2) for an overwritten one; the 0.2.1 order fails the first count. Crate: <code>lean/gateway</code>; design of record for removals: <code>docs/plans/flint-lean-delete-rename-design.md</code>.</figcaption>
+</section>
+
+<!-- ============================================================ PAGE 6 -->
+<section class="page">
+  <header class="ph">
+    <h1>What the syncer learned — integrity, scope, throughput, arbitration</h1>
+    <span class="kicker">6 / 7 · architecture · 2026-09-04 → 2026-09-12</span>
+  </header>
+  <p class="dek">Pages 1–4 describe the protocol. This page is what changed in the syncer once it met real buckets, real nodes and the formal model: <b>every fetched byte is verified against a CRC the client computed</b>, a checkout can be a <b>scope</b> rather than the whole tree, the read and publish paths lost the copies, the lock and the double read that bounded them, and a reader <b>no longer stands in the writer&rsquo;s queue</b>. Every number is a range over reps from a drill committed under <code>lean/e2e/perf/results/</code>; the four-door comparison against passthrough and the CLI is measured separately, in the door-drill results there.</p>
+  <figure>
+  <svg viewBox="0 0 1600 700" role="img" aria-label="Four columns — integrity, scope, throughput and arbitration — each listing what shipped in the syncer since September 4th with the measurement behind it, and a bottom band describing the TLA+ gate and three findings the model made before any test did.">
+    <!-- integrity -->
+    <rect x="40" y="70" width="370" height="380" rx="10" class="bx-ochre"/>
+    <text class="th" x="56" y="96">integrity — the client vouches</text>
+    <text class="tx" x="56" y="120">every manifest entry carries a CRC-64, mandatory,</text>
+    <text class="tx" x="56" y="136">computed by the client that moved the bytes — never</text>
+    <text class="tx" x="56" y="152">copied from a backend header: Ozone returns none,</text>
+    <text class="tx" x="56" y="168">and a HITL uploader may not have sent one</text>
+    <text class="tx" x="56" y="192">a fresh fetch is verified BEFORE the write: the whole-</text>
+    <text class="tx" x="56" y="208">object arm hashes the body, the ranged arm folds each</text>
+    <text class="tx" x="56" y="224">range in offset order; a mismatch refuses the checkout</text>
+    <text class="tx" x="56" y="240">with nothing written. Consume and sync verify too</text>
+    <text class="tx" x="56" y="264">the S3 SDK validated a checksum header the store sent;</text>
+    <text class="tx" x="56" y="280">a store that sends none validated nothing — exactly</text>
+    <text class="tx" x="56" y="296">where the backend attests nothing, the check was empty</text>
+    <text class="tx" x="56" y="320">three citation repairs took the CRC from a HEAD; one had</text>
+    <text class="tx" x="56" y="336">NO test — citing a wrong CRC there passed the battery.</text>
+    <text class="tx" x="56" y="352">Six mutation controls now, each failing one test</text>
+    <text class="tsb" x="56" y="380">probe-conditional · probe-versions · probe-copy</text>
+    <text class="tx" x="56" y="400">the verbs a deployment runs against a new backend first:</text>
+    <text class="tx" x="56" y="416">a store that ignores If-Match turns every manifest CAS</text>
+    <text class="tx" x="56" y="432">into last-writer-wins, silently. Ozone 2.2.1: probed</text>
+
+    <!-- scope -->
+    <rect x="430" y="70" width="370" height="380" rx="10" class="bx-blue"/>
+    <text class="th" x="446" y="96">scope — part of the tree, safely</text>
+    <text class="mns" x="446" y="120">FLINT_SYNC_CHECKOUT_SCOPE=inputs,docs/spec.md</text>
+    <text class="tx" x="446" y="140">checkout materialises only the citations it admits:</text>
+    <text class="tx" x="446" y="156">3 files of 2,001 on the drill, 22x faster than the tree</text>
+    <text class="tx" x="446" y="180">the admission filter is the WHOLE safety argument: a</text>
+    <text class="tx" x="446" y="196">path never materialised is never cited in the baseline,</text>
+    <text class="tx" x="446" y="212">so classify cannot read it as absent and the barrier</text>
+    <text class="tx" x="446" y="228">cannot DELETE its object — no filter in the barrier,</text>
+    <text class="tx" x="446" y="244">the sync or the delete sites; four copies would drift</text>
+    <text class="mns" x="446" y="270">flint-sync rescope inputs docs/spec.md</text>
+    <text class="mns" x="446" y="288">flint-sync rescope --all</text>
+    <text class="tx" x="446" y="308">narrows or widens a live held set. A narrow is an</text>
+    <text class="tx" x="446" y="324">UNWATCH, never an absence: the drop set is recorded</text>
+    <text class="tx" x="446" y="340">in a replayable intent, not re-derived; a path with</text>
+    <text class="tx" x="446" y="356">unpublished changes is refused at the door, kept on replay</text>
+    <text class="tx" x="446" y="380">two constraints: the scope matches path COMPONENTS,</text>
+    <text class="tx" x="446" y="396">not prefixes; and the manifest baseline stays WHOLE —</text>
+    <text class="tx" x="446" y="412">narrowing it would queue every unadmitted citation into</text>
+    <text class="tx" x="446" y="428">the inbox and land it one barrier later</text>
+
+    <!-- throughput -->
+    <rect x="820" y="70" width="370" height="380" rx="10" class="bx-violet"/>
+    <text class="th" x="836" y="96">throughput — what was in the way</text>
+    <text class="tsb" x="836" y="120">one thread, then one lock</text>
+    <text class="tx" x="836" y="138">every fetch future was polled by ONE task; the fan-out</text>
+    <text class="tx" x="836" y="154">is now driven by fetchDrivers tasks (cores, ≤ 8) — which</text>
+    <text class="tx" x="836" y="170">made it WORSE until mimalloc replaced musl&rsquo;s one-lock</text>
+    <text class="tx" x="836" y="186">malloc: 3,277–3,481 → 6,188–6,521 files/s, i4i.xlarge</text>
+    <text class="tsb" x="836" y="210">the copy, and the inline write</text>
+    <text class="tx" x="836" y="228">every fetched body was copied once more, and the ranged</text>
+    <text class="tx" x="836" y="244">arm wrote inline on the task that drained the fan-out:</text>
+    <text class="tx" x="836" y="260">477–500 → 654–676 MiB/s on real S3, at LESS CPU per byte</text>
+    <text class="tsb" x="836" y="284">the publish read every file twice</text>
+    <text class="tx" x="836" y="302">once for its CRC, once part by part; a large object was one</text>
+    <text class="tx" x="836" y="318">stream both ways. Parallel parts: publish 1.55–1.63x</text>
+    <text class="tsb" x="836" y="342">defaults: fan-out 128, ranged GET above 8 MiB</text>
+    <text class="tx" x="836" y="360">small files are bound by objects in flight, not bytes;</text>
+    <text class="tx" x="836" y="376">large objects fetch as parallel ranges and cap at 8 in flight</text>
+    <text class="tsb" x="836" y="400">and one door left shut: FLINT_SYNC_RAW_READS</text>
+    <text class="tx" x="836" y="418">GET/HEAD without the SDK, off by default: +42–56% at fan-out</text>
+    <text class="tx" x="836" y="434">512 on real S3, equal at 128 — latency-bound, it buys nothing</text>
+
+    <!-- arbitration -->
+    <rect x="1210" y="70" width="350" height="380" rx="10" class="bx-slate"/>
+    <text class="th" x="1226" y="96">arbitration — a reader takes no lease</text>
+    <text class="tx" x="1226" y="120">the epoch cell decides who may INSTALL a</text>
+    <text class="tx" x="1226" y="136">manifest. A checkout installs nothing, and</text>
+    <text class="tx" x="1226" y="152">was standing in that queue anyway — a</text>
+    <text class="tx" x="1226" y="168">deadlock wearing mutual exclusion&rsquo;s clothes:</text>
+    <text class="tx" x="1226" y="184">a checkout waited for a publisher, a publisher</text>
+    <text class="tx" x="1226" y="200">for the checkout, and on a quiet cell the wait</text>
+    <text class="tx" x="1226" y="216">ended with a READER DEPOSING A LIVE</text>
+    <text class="tx" x="1226" y="232">PUBLISHER, sixty seconds in</text>
+    <text class="tx" x="1226" y="256">mid-read safety never was the lease&rsquo;s job:</text>
+    <text class="tx" x="1226" y="272">every fetch carries the cited etag as If-Match,</text>
+    <text class="tx" x="1226" y="288">and a publish landing mid-checkout now names</text>
+    <text class="tx" x="1226" y="304">the publisher and says to re-run</text>
+    <text class="tx" x="1226" y="328">four syncers reading disjoint subtrees of one</text>
+    <text class="tx" x="1226" y="344">prefix: 2.1x one syncer with the claim gone,</text>
+    <text class="tx" x="1226" y="360">0.41x — slower than one — with it</text>
+    <text class="tsb" x="1226" y="388">barrier · sync · rescope · recover-staged</text>
+    <text class="tx" x="1226" y="408">still claim: they write, or rewrite the held</text>
+    <text class="tx" x="1226" y="424">set and leave a replayable intent behind</text>
+
+    <!-- the model -->
+    <rect x="40" y="474" width="1520" height="200" rx="10" class="band"/>
+    <text class="th" x="56" y="500">the model is the gate — lean/formal, TLA+ checked before the code, and the code written to it</text>
+    <text class="tx" x="56" y="524">check.sh runs 94 configurations, ALL required: 20 strict runs that must hold, and mutations and probes that must FAIL — a model that cannot rediscover its own bug classes proves</text>
+    <text class="tx" x="56" y="540">nothing, and a probe names an action through a ghost only that action writes. LeanSubtree.tla is the protocol (lease, barrier, inbox, gated citation, removals, renames); LeanChunkGC.tla and</text>
+    <text class="tx" x="56" y="556">LeanChunkMerge.tla are the chunked manifest&rsquo;s reaper and its 412 merge. Three times the abstraction found what no test had:</text>
+    <text class="tsb" x="56" y="584">the early inbox drop</text>
+    <text class="tx" x="56" y="602">consumed entries left the cell at window-open, &ldquo;durably in the</text>
+    <text class="tx" x="56" y="618">baseline&rdquo; — true of a restart, false of a pod replacement. A hand-</text>
+    <text class="tx" x="56" y="634">simulated crash test PASSED with the bug; the real barrier driven</text>
+    <text class="tx" x="56" y="650">into an injected CAS failure did not. Entries now leave after the CAS</text>
+    <text class="tsb" x="560" y="584">the reaper&rsquo;s ordering rule</text>
+    <text class="tx" x="560" y="602">&ldquo;list candidates, then union the references&rdquo; is not what makes GC</text>
+    <text class="tx" x="560" y="618">safe: the reference set must not predate a CAS the delete follows.</text>
+    <text class="tx" x="560" y="634">Refs are read at the delete behind an etag fence, adoption rewrites</text>
+    <text class="tx" x="560" y="650">what it adopts, and the grace outlives the longest publish</text>
+    <text class="tsb" x="1070" y="584">the model&rsquo;s own two-scan rule</text>
+    <text class="tx" x="1070" y="602">was inverted — &ldquo;present at the previous scan&rdquo; is a one-scan</text>
+    <text class="tx" x="1070" y="618">rule — and gave consumed paths no two-scan protection at all.</text>
+    <text class="tx" x="1070" y="634">Both corrected; a rename needs a FREE destination, or the probe is</text>
+    <text class="tx" x="1070" y="650">green because the action never fires. The abstraction is the bug, often</text>
+  </svg>
+  <figcaption><b>Integrity does not depend on the client that reads, or on the store.</b> S3 returns a checksum header the SDK validates; Ozone carries none, so the SDK validated nothing exactly where the backend attests nothing. Now the manifest&rsquo;s CRC-64 is what every reader checks — checkout, consume and sync — and it is the CRC of what the writer wrote, never a copy of what a HEAD said. Manifests written before the change do not load; lean is not yet adopted, so there is no migration. <b>Scope is safe because of one filter, not four.</b> The admission filter in <code>checkout</code> is the whole argument: what was never materialised was never cited, so nothing downstream can mistake it for a deletion — and a narrow that recorded its drop set as an intent can be replayed after a crash without re-deriving it from a tree that cannot tell a leftover from a file the agent created. <b>The throughput work removed work rather than redistributing it</b> — the copy, the inline write, the second read, the one task and the one lock — which is why the shipped defaults now equal hand-tuned settings, where before the difference was nearly 2x; the raw HTTP read path stays behind a flag because on a latency-bound node it buys nothing and the SDK&rsquo;s retry and credential machinery had to be reproduced by hand, including the per-request IMDS credential defect the cluster found and a single-flight cache fixed. <b>The lease fences installs, not reads.</b> Sources: CHANGELOG 1.45.0–1.50.0 and Unreleased; <code>docs/plans/flint-lean-scoped-read-design.md</code>, <code>flint-lean-chunked-manifest-design.md</code>; <code>lean/formal/README.md</code>.</figcaption>
+</section>
+
+<!-- ============================================================ PAGE 7 -->
+<section class="page">
+  <header class="ph">
     <h1>Git on a lean workspace — two jobs, two paths</h1>
-    <span class="kicker">5 / 5 · use case · collaboration</span>
+    <span class="kicker">7 / 7 · use case · collaboration</span>
   </header>
   <p class="dek">The obvious question once several agents share a repo: how do they integrate? The answer is that they do not integrate through flint-lean at all. <b>Use plain git against a real git host, and let flint-lean keep the workspace durable.</b> Two mechanisms, two network paths, two different jobs — and they never touch, which is exactly why nothing special is needed to make them coexist. Full guide: <code>docs/flint-lean-git-workflow.md</code>.</p>
   <figure>
-  <svg viewBox="0 0 1600 660" role="img" aria-label="An agent pod whose workspace is a local emptyDir; git pushes and pulls over HTTPS to a git host for collaboration, while the flint-lean sidecar snapshots the whole tree to S3 for durability; a table divides what each mechanism owns and is blind to.">
+  <svg viewBox="0 0 1600 660" role="img" aria-label="An agent pod whose workspace is a local emptyDir; git pushes and pulls over HTTPS to a git host for collaboration, while the flint-lean syncer snapshots the whole tree to S3 for durability; a table divides what each mechanism owns and is blind to.">
     <defs>
       <marker id="p5-ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
       <marker id="p5-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b45309"/></marker>
@@ -479,7 +710,7 @@
     <text class="tx ctr" x="300" y="166">local emptyDir · real POSIX · zero interception</text>
     <text class="tx ctr" x="300" y="182">so plain git just works — index locks, hard links, local clones</text>
     <text class="tx" x="76" y="222">The app container holds ONE storage-facing secret: the git</text>
-    <text class="tx" x="76" y="240">credential. The S3 side belongs to the sidecar, never the app.</text>
+    <text class="tx" x="76" y="240">credential. The S3 side belongs to the syncer, never the app.</text>
     <text class="tx" x="76" y="268">(flint-lite&rsquo;s LINK→NOTSUPP limit is an NFS-over-S3 constraint —</text>
     <text class="tx" x="76" y="286">it does not apply here, because a lean checkout is local disk.)</text>
 
@@ -518,7 +749,7 @@
 
     <rect x="40" y="488" width="1520" height="140" rx="10" class="bx-ochre"/>
     <text class="th" x="56" y="514">why NOT a git-over-S3 remote</text>
-    <text class="tx" x="56" y="540">· A lean pod reaches the bucket through the project-scoped proxy (or, until it lands, the sidecar&rsquo;s scoped credential) — not the open bucket</text>
+    <text class="tx" x="56" y="540">· A lean pod reaches the bucket with the syncer&rsquo;s short-lived keys from the broker, scoped to its prefix — never the open bucket</text>
     <text class="tx" x="56" y="558">  such a helper expects; its writes would be unscoped and carry no epoch stamp — invisible to the arbitration everything else here depends on.</text>
     <text class="tx" x="56" y="580">· flint-lean IS a checkout/publish-to-S3 engine. A second S3 sync on top is redundant, and gives you two coherence models that disagree.</text>
     <text class="tx" x="56" y="602">· flint-lean is ONE WRITER per subtree. N agents merging into one tree is precisely what a git remote is for — so let it be.</text>

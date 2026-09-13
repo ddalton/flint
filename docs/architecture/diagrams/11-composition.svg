@@ -107,7 +107,7 @@
 <text class="t4b" x="644" y="241">a REAL lean workspace; readers: lean, and passthrough aimed at B/files/</text>
 <rect x="628" y="268" width="430" height="61" rx="7" class="bx"/>
 <path class="f-lean" d="M635,268 H1051 A7,7 0 0 1 1058,275 V273 H628 V275 A7,7 0 0 1 635,268 Z"/>
-<text class="t2 c-lean" x="644" y="292">C  ws/&lt;agent&gt;/ — writer: the lean sidecar</text>
+<text class="t2 c-lean" x="644" y="292">C  ws/&lt;agent&gt;/ — writer: the lean syncer</text>
 <text class="mono" x="644" y="312" xml:space="preserve">files/&lt;path&gt;  .flint/lean/{epoch,claim,current}</text>
 <rect x="628" y="339" width="430" height="61" rx="7" class="bx"/>
 <path class="f-pass" d="M635,339 H1051 A7,7 0 0 1 1058,346 V344 H628 V346 A7,7 0 0 1 635,339 Z"/>
@@ -133,7 +133,7 @@
 <text class="t4" x="1118" y="164">different holders; no 412, no fence, no log line (drill C1). The operator's arbitration</text>
 <text class="t4" x="1118" y="178">reasons over FlintRepos only: it refuses an export aimed at another repository and</text>
 <text class="t4" x="1118" y="192">sees nothing involving a lean CR.</text>
-<text class="t4" x="1118" y="206">The one arbitrated direction: a read-write lean sidecar on the EXPORT prefix contends</text>
+<text class="t4" x="1118" y="206">The one arbitrated direction: a read-write lean syncer on the EXPORT prefix contends</text>
 <text class="t4" x="1118" y="220">on the same cell — and until today that wedged the repository, because the syncer</text>
 <text class="t4" x="1118" y="234">awaited the blocked export inline with its own heartbeat (C2; now bounded by a</text>
 <text class="t4" x="1118" y="248">timeout with backoff — pushes still stall for that long).</text>

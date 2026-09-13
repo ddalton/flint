@@ -85,7 +85,7 @@
 <text class="t4" x="24" y="364">forge arbitrates on git/epoch, lean on .flint/lean/epoch:</text>
 <text class="t4" x="24" y="377">pointed at one prefix they never meet — no 412, no fence, no</text>
 <text class="t4" x="24" y="390">log line (C1). The operator sees FlintRepos only. A read-write</text>
-<text class="t4" x="24" y="403">lean sidecar on the export prefix does contend, and used to</text>
+<text class="t4" x="24" y="403">lean syncer on the export prefix does contend, and used to</text>
 <text class="t4" x="24" y="416">wedge the repository (C2, now bounded).</text>
 <rect x="326" y="320" width="306" height="140" rx="7" class="bx"/>
 <path class="f-red" d="M326,327 A7,7 0 0 1 333,320 H331 V460 H333 A7,7 0 0 1 326,453 Z"/>

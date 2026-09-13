@@ -78,6 +78,22 @@ covered by the stability guarantee.
   syncer: it can run on another cluster, or none, with nothing but
   credentials for the prefixes it serves.
 
+- **docs: an ACID poster — passthrough vs lean, side by side
+  (`docs/architecture/acid/`, the sixth page of
+  `flint-dataflow-posters.pdf`).** Both doors put whole objects in a
+  bucket, so the question a reader asks after the passthrough and lean
+  posters is what each one actually promises about a write. The page
+  asks the four questions — atomic, consistent, isolated, durable — of
+  each door in one matrix, draws the two write paths above it (a file
+  becomes an object at `close()`; N objects become a boundary at ONE
+  CAS), and names the tie and the two things neither gives.
+  Passthrough keeps one ledger, the bucket, and inherits S3's
+  guarantees exactly; lean keeps two, the objects and the manifest that
+  cites them, and every property it adds is paid for with a recovery
+  point on the agent's writes. Drawn with the posters' own kit and its
+  seven gates; the checker was shown to fail on a deliberately
+  collided copy before the clean run was trusted.
+
 ### Fixed
 
 - **lean gateway (`flint-lean-gateway` 0.2.1): an overwrite of a cited
@@ -151,6 +167,25 @@ covered by the stability guarantee.
   syscalls per file, 29,761-31,201 -> 32,206-33,003 files/s on the
   6-vCPU rig. The refusal rules are unchanged and the retry legs are
   pinned by a test that fails with either arm deleted.
+
+- **docs: the lean poster, deck and architecture document say SYNCER,
+  and describe the gateway as it is.** The lean data-flow poster names
+  the component the syncer (the binary is `flint-sync`), draws
+  `flint-lean-gateway` as a door AND a crate a backend calls
+  in-process, lists the verbs it has now (drafts, `DELETE /files`,
+  `POST /rename` as declared removals), states that a UI's write is
+  readable at once through the read door, that every fetch is verified
+  against the manifest's CRC-64 with ranged GETs and parallel parts
+  above 8 MiB, and restates the file-count wall now that the manifest
+  is chunked. The deck (`docs/architecture/diagrams.py` and its
+  renditions) drops the last "sidecar" for lean's component;
+  `docs/flint-lean-architecture.html` and its PDF are brought to HEAD
+  (delivery by the CSI node driver, the gateway crate, declared
+  removals, drafts, scoped checkout, the chunked manifest, CRC-64,
+  ranged and parallel transfer, the read path that no longer takes the
+  writer's lease); the agent-fleets guide's current-shape prose says
+  syncer. Every PDF was re-rendered and inspected page by page for
+  clipping and overlap.
 
 ### Fixed
 

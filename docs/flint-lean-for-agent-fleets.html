@@ -97,6 +97,17 @@
 </head>
 <body>
 <h1>flint-lean on a Kubernetes cluster</h1>
+<blockquote><p><strong>Delivery changed (2026-09-03).</strong> A workspace now reaches a pod as ONE <code>csi:</code> volume served by the <code>s3.csi.chert.us</code> node driver (<code>flint-s3-csi-chart</code>), not as a webhook-injected sidecar. The label <code>chert.us/lean-workspace</code>, the injected <code>flint-sync</code> container, the per-namespace credential Secret and the webhook described below are the RETIRED shape; the workspace protocol (claim, checkout gate, <code>.flint/publish</code>, boundaries, drain on delete) is unchanged and the syncer binary is the same. What a pod writes today:</p>
+<pre><code>spec:
+  serviceAccountName: agent            # listed in the CR's spec.consumers
+  volumes:
+    - name: ws
+      csi:
+        driver: s3.csi.chert.us
+        volumeAttributes: { chert.us/workspace: proj1 }
+  containers:
+    - volumeMounts: [{ name: ws, mountPath: /workspace }]</code></pre>
+<p>and the CR gains <code>spec.uid</code> (the uid the syncer runs as — the app&#x27;s) and <code>spec.consumers.serviceAccounts</code>. See <code>docs/plans/csi-node-mount-design.md</code> §0 and §3.5.</p></blockquote>
 <p>Give every agent pod its own workspace: <strong>plain local files</strong> checked out of your S3 bucket at pod start, published back on a cadence — or when the agent says so. No FUSE, no NFS, no privileged pods, no mount to wedge.</p>
 <pre><code>        agent pod
         ├─ your container ──▶ /workspace   plain files, real POSIX, local speed
@@ -120,7 +131,7 @@ helm install flint-lean \
   -n flint-system</code></pre>
 <p>That installs three things: the <code>FlintLeanWorkspace</code> CRD, the operator, and a mutating webhook. The webhook provisions <strong>its own TLS certificate and <code>MutatingWebhookConfiguration</code> at startup</strong> — there is no cert-manager dependency and nothing to pre-create.</p>
 <p>It pulls two images and nothing else:</p>
-<table><tr><th>image</th><th>pulled by</th><th>what runs</th></tr><tr><td><code>dilipdalton/flint-lean-operator</code></td><td>the <code>flint-system</code> deployment</td><td><code>flint-lean-operator</code> — the controller and webhook</td></tr><tr><td><code>dilipdalton/flint-sync</code></td><td>every opted-in agent pod</td><td>the injected sidecar</td></tr></table>
+<table><tr><th>image</th><th>pulled by</th><th>what runs</th></tr><tr><td><code>dilipdalton/flint-lean-operator</code></td><td>the <code>flint-system</code> deployment</td><td><code>flint-lean-operator</code> — the controller and webhook</td></tr><tr><td><code>dilipdalton/flint-sync</code></td><td>every opted-in agent pod</td><td>the syncer</td></tr></table>
 <p><strong>flint-lean does not install or require flint-lite.</strong> No CSI driver, no NFS hub, no <code>FlintShare</code> CRD — the chart bundles exactly one CRD and its RBAC covers only <code>flintleanworkspaces</code>. (The operator image is the same build artifact as <code>flint-lite-operator</code>, republished under the lean name from an identical digest: one image, two names, so nothing is duplicated and nothing called &quot;lite&quot; appears in a lean install.)</p>
 <p>Check it came up:</p>
 <pre><code>kubectl -n flint-system get pods
@@ -133,7 +144,7 @@ kubectl -n flint-system logs deploy/flint-lean | tail -3
 <blockquote><strong>If <code>helm install</code> fails with <code>permission denied</code> on <code>~/Library/Caches/helm</code></strong>, something ran <code>helm</code> as root with your <code>HOME</code> and took ownership of your cache. Either <code>sudo chown -R &quot;$USER&quot; ~/Library/Caches/helm</code>, or run with a private cache: <code>HELM_CACHE_HOME=/tmp/helmcache helm install …</code></blockquote>
 <hr>
 <h2>Credentials</h2>
-<p>The operator does bucket-admin work (posture probes, a stale-upload sweep) under its own identity. Each workspace&#x27;s sidecar uses the credential its CR names. <strong>The agent container is given neither</strong> — the webhook stamps the secret onto the sidecar container only, and process namespaces are not shared, so a compromised agent cannot read it.</p>
+<p>The operator does bucket-admin work (posture probes, a stale-upload sweep) under its own identity. Each workspace&#x27;s syncer uses the credential its CR names. <strong>The agent container is given neither</strong> — the webhook stamps the secret onto the sidecar container only, and process namespaces are not shared, so a compromised agent cannot read it.</p>
 <pre><code>kubectl -n flint-system create secret generic s3 \
   --from-literal=AWS_ACCESS_KEY_ID=... \
   --from-literal=AWS_SECRET_ACCESS_KEY=... \
@@ -142,7 +153,7 @@ kubectl -n flint-system logs deploy/flint-lean | tail -3
 # and the same secret in the namespace your agents run in
 kubectl -n agents create secret generic s3 --from-literal=... </code></pre>
 <p>Point the operator at it by reinstalling (or <code>helm upgrade</code>) with <code>--set operatorCredentialsSecret=s3</code>, or leave it empty to use the pod&#x27;s ambient chain (IRSA and friends).</p>
-<p>The keys must be named <code>AWS_*</code> <strong>verbatim</strong> — they are passed to the sidecar as environment.</p>
+<p>The keys must be named <code>AWS_*</code> <strong>verbatim</strong> — they are passed to the syncer as environment.</p>
 <blockquote><strong>Plan of record:</strong> a project-scoped S3 proxy holds the real credentials and no pod stores one at all. Until that lands, <code>credentialsSecretRef</code> is the interim posture.</blockquote>
 <hr>
 <h2>2. Create a workspace</h2>
@@ -160,7 +171,7 @@ spec:
   floorSecs: 60                  # publish cadence — and the RPO</code></pre>
 <pre><code>kubectl apply -f workspace.yaml
 kubectl -n agents get flintleanworkspace proj1 -o yaml | grep -A6 conditions</code></pre>
-<p>You want <code>BoundaryModeAccepted: True</code>. <code>BoundaryModeActive: Unknown</code> with reason <code>NoLiveSidecar</code> is normal for a workspace at rest — nothing holds the lease until a pod starts.</p>
+<p>You want <code>BoundaryModeAccepted: True</code>. <code>BoundaryModeActive: Unknown</code> with reason <code>NoLiveSyncer</code> is normal for a workspace at rest — nothing holds the lease until a pod starts.</p>
 <hr>
 <h2>3. Opt a pod in</h2>
 <p>One label. That is the whole integration.</p>
@@ -176,7 +187,7 @@ spec:
     - name: agent
       image: your-agent:latest
       workingDir: /workspace</code></pre>
-<p>The webhook injects the sidecar, adds the workspace volume, and mounts it into <strong>every</strong> container in the pod. The sidecar runs the checkout *before* your container starts — the injected <code>startupProbe</code> gates it — so your first line of code sees a complete tree.</p>
+<p>The webhook injects the sidecar, adds the workspace volume, and mounts it into <strong>every</strong> container in the pod. The syncer runs the checkout *before* your container starts — the injected <code>startupProbe</code> gates it — so your first line of code sees a complete tree.</p>
 <pre><code>kubectl -n agents get pod agent-1
 # agent-1   2/2   Running        ← 2/2 = your container + the sidecar</code></pre>
 <p>If the workspace is missing or refused, the pod is <strong>rejected at admission</strong> rather than started against an empty directory.</p>
@@ -200,7 +211,7 @@ cat /workspace/.flint/publish.ack
 #   &quot;report&quot;: { &quot;uploaded&quot;: 0, &quot;deleted&quot;: 0, &quot;parked&quot;: 0, ... }
 # }</code></pre>
 <p><code>uploaded: 0</code> here just means nothing had changed since the last boundary — the point the agent declared is already true, which is still an honest <code>ok</code>.</p>
-<p><code>status: &quot;ok&quot;</code> means <strong>the named boundary is in the bucket</strong> — not queued, not scheduled. <code>refused-fenced</code> means this sidecar lost the lease and is telling you rather than leaving you waiting.</p>
+<p><code>status: &quot;ok&quot;</code> means <strong>the named boundary is in the bucket</strong> — not queued, not scheduled. <code>refused-fenced</code> means this syncer lost the lease and is telling you rather than leaving you waiting.</p>
 <p>Costs nothing when unused: measured at 20 bucket requests per 22 s idle with the verbs off, and 20 with them on.</p>
 <hr>
 <h2>5. Verify</h2>

@@ -24,10 +24,11 @@ abbreviation on the page.
 | `lean/flint-lean-dataflow.pdf` | `python3 lean/lean-dataflow.py --pdf --emf` |
 | `passthrough/flint-passthrough-dataflow.pdf` | `python3 passthrough/passthrough-dataflow.py --pdf --emf` |
 | `migration/flint-migration-dataflow.pdf` | `python3 migration/migration-dataflow.py --pdf --emf` |
+| `acid/flint-acid-passthrough-vs-lean.pdf` | `python3 acid/acid-poster.py --pdf --emf` |
 
 Each script writes a `.vsdx` (editable in Visio), a `.pdf` (via Chrome), and with
 `--emf` a metafile for pasting into Office. They are drawn with `vsdxkit.py`, and the
-four non-forge ones share `dataflowkit.py`: the role palette, the four arrow classes,
+five non-forge ones share `dataflowkit.py`: the role palette, the four arrow classes,
 the numbered-step strip, the glossary grid, and the gates.
 
 The fifth is not a front end but a **use case**: `migration/` draws a workload whose
@@ -45,19 +46,37 @@ the bucket — `bucket`, `keyPrefix`, `endpoint`, `region`, `image` and credenti
 refused BY NAME from a pod's `volumeAttributes` (`s3csi/attrs.rs`), because those
 attributes are attacker-controlled input to a privileged process.
 
-### The five as one book
+The sixth is a **comparison**: `acid/` asks the four ACID questions — atomic,
+consistent, isolated, durable — of the two front ends that write whole objects, side
+by side. It exists because both posters end at the same bucket and a reader
+reasonably asks what each door actually promises about a write. The answer the page
+draws is that they keep different ledgers: passthrough keeps one, the bucket, and
+inherits S3's guarantees exactly — strong per object, nothing across objects, a file
+becomes an object at `close()`; lean keeps two, the objects and a manifest that cites
+them, and the CAS on the manifest is what turns N object writes into one transaction,
+gives every fetch a CRC-64 to verify against, and lets a lease say who may write —
+every one of which is paid for with a recovery point on the agent's writes that
+passthrough does not have. The UI's write through the gateway is drawn as the third
+contract, durable when the call returns and cited at the next barrier. The script's
+docstring names the sources every cell is drawn from (`passthrough/spec.rs`, the
+radar's Mountpoint note, the 2026-09-10 door drill, `LeanSubtree.tla`), so a cell is a
+claim that can be checked, not an opinion.
 
-`flint-dataflow-posters.pdf` is all five in one file — lite, passthrough, lean, forge,
-then the migration use case — each page kept at its own size, since they differ and
-scaling to a common sheet would shrink 7.5 pt body text to illegible:
+### The six as one book
+
+`flint-dataflow-posters.pdf` is all six in one file — lite, passthrough, lean, forge,
+the migration use case, then the ACID comparison — each page kept at its own size,
+since they differ and scaling to a common sheet would shrink 7.5 pt body text to
+illegible:
 
 ```sh
 pdfunite lite/flint-lite-dataflow.pdf passthrough/flint-passthrough-dataflow.pdf \
          lean/flint-lean-dataflow.pdf forge/flint-forge-dataflow.pdf \
-         migration/flint-migration-dataflow.pdf flint-dataflow-posters.pdf
+         migration/flint-migration-dataflow.pdf \
+         acid/flint-acid-passthrough-vs-lean.pdf flint-dataflow-posters.pdf
 ```
 
-Verify it with `pdfinfo -f 1 -l 5`: five pages, and each page's size is a fingerprint
+Verify it with `pdfinfo -f 1 -l 6`: six pages, and each page's size is a fingerprint
 of which poster it is, so the sizes are how you check the ORDER as well as the count.
 
 **The gates are the point, and they are not advisory.** Before anything is written each

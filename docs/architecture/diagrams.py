@@ -495,7 +495,7 @@ def plate_01():
 def plate_01b():
     s = SVG(W, H, "The data flow of each front end as a column: what the pod touches, what carries the bytes, and what puts them "
                   "in the bucket. flint-lite: an NFS mount reaches the hub over the wire, live; the hub publishes on a cadence and "
-                  "hydrates on demand. flint-lean: the pod writes a local directory a sidecar copies to S3 at a boundary. "
+                  "hydrates on demand. flint-lean: the pod writes a local directory the syncer copies to S3 at a boundary. "
                   "flint-passthrough: every file operation is intercepted by mount-s3 and becomes an S3 request. flint-forge: a push "
                   "carries packs to the server pod, whose syncer uploads them and acknowledges only once they are in S3. Control "
                   "sits beside each column and never carries a file.")
@@ -509,11 +509,11 @@ def plate_01b():
          ["epoch cell in the bucket — who is the hub", "operator — suspend, wake", "port 2049 — no credential; reachability"]),
         ("lean", "sync", "flint-lean — local disk, then reconciled",
          ("the pod", [("m", "/workspace — local disk"), ("b", "reads and writes touch nothing but the disk")]),
-         ("the same directory", "no wire, no interception — the sidecar reads it later", False, True),
-         ("flint-sync sidecar", ["scans for changed files; copies them with the plain S3 API", ("m", "unprivileged, in a system namespace")]),
+         ("the same directory", "no wire, no interception — the syncer reads it later", False, True),
+         ("flint-sync, the syncer", ["scans for changed files; copies them with the plain S3 API", ("m", "unprivileged, in a system namespace")]),
          ("publish at a boundary  ↑   checkout at start  ↓", "RPO = the last barrier"),
          ("m", "<prefix>/files/<path>"),
-         ["lease in the bucket — one writer", "broker → short-lived keys → sidecar", ".flint/publish → .flint/publish.ack"]),
+         ["lease in the bucket — one writer", "broker → short-lived keys → syncer", ".flint/publish → .flint/publish.ack"]),
         ("pass", "FUSE", "flint-passthrough — every operation is a request",
          ("the pod", [("m", "/mnt/s3 — a FUSE mount"), ("b", "every file operation is intercepted")]),
          ("FUSE", "per operation, in the pod's critical path", True, False),
@@ -1048,7 +1048,7 @@ def plate_10():
           [("b", "Yes, per ServiceAccount."), "consumers grants read; the branch policy decides writes per principal, in pre-receive and again in the syncer. A reader is listed in consumers with every ref protected and only the writer's SA in pushers; refs/for stays closed without mergeInto.", ("r", "Until a branches block exists, every consumer may push.")]]),
         ("What an owned agent pod gains", "and how fast the gain is revoked",
          [[("r", "The whole share, as anyone."), "It has the mount, asserts any uid, and the permission check logs by default. Not the bucket — the hub holds that credential. Nothing per-client to revoke; containment is the network boundary."],
-          [("b", "Its own workspace, and nothing that outlives it."), "No S3 credential in the agent container in either deployment mode; the sidecar holds it, unprivileged. Revocation is killing the token or the pod. Ceiling: a deposed writer's uncited versions remain readable by a raw key."],
+          [("b", "Its own workspace, and nothing that outlives it."), "No S3 credential in the agent container in either deployment mode; the syncer holds it, unprivileged. Revocation is killing the token or the pod. Ceiling: a deposed writer's uncited versions remain readable by a raw key."],
           [("b", "The prefix, as mounted."), "Short-lived scoped keys it never sees, at the CR's readOnly setting; no sidecar, no privilege. Scope the CR and you have scoped the breach; the residual is the single uid."],
           [("b", "Its ServiceAccount's push rights."), "No bucket credential — they land on the syncer container only — and no privilege. It can push as that SA to repositories listing it, within policy; revoked by pod deletion or SA rotation within the review cache. Ceiling: a shared SA reaches every sibling's agent/* branch, and the server runs as root."]]),
         ("Does it fail closed?", "secure defaults, refusal over silent degradation",
@@ -1093,7 +1093,7 @@ def plate_11():
     pre = [
         ("forge", "A  repo/ — writer: the syncer", [("m", "git/objects/pack/*  git/snapshot"), ("m", "git/epoch · git/claim  lfs/objects/")]),
         ("forge", "B  repo-main/ — writer: the syncer, via the shipped flint-sync", [("m", "files/<path>  .flint/lean/{epoch,current,chunks/}"), ("b", "a REAL lean workspace; readers: lean, and passthrough aimed at B/files/")]),
-        ("lean", "C  ws/<agent>/ — writer: the lean sidecar", [("m", "files/<path>  .flint/lean/{epoch,claim,current}")]),
+        ("lean", "C  ws/<agent>/ — writer: the lean syncer", [("m", "files/<path>  .flint/lean/{epoch,claim,current}")]),
         ("pass", "D  datasets/ — writer: whoever owns them", [("m", "<key>  — objects and nothing else; passthrough reads")]),
         ("lite", "E  shared/ — writer: the hub", [("m", "<path>  .flint/epoch · manifest · owner")]),
     ]
@@ -1112,7 +1112,7 @@ def plate_11():
     s.card(1102, 22, 474, 270, "One writer per prefix — where it is a mechanism, and where it is not",
            [("b", "Within a product, a mechanism:"), "an epoch lease plus one CAS'd pointer — forge's on git/epoch, lean's on .flint/lean/epoch. A second writer of the same product does not acquire: it observes the standing lease and waits, superseding only after six quiet polls have shown the holder dead; drilled both ways.",
             ("r", "Across products, a convention: the cells are disjoint."), "Point forge and lean at ONE prefix and they never meet — both acquire epoch 1 under different holders; no 412, no fence, no log line (drill C1). The operator's arbitration reasons over FlintRepos only: it refuses an export aimed at another repository and sees nothing involving a lean CR.",
-            "The one arbitrated direction: a read-write lean sidecar on the EXPORT prefix contends on the same cell — and until today that wedged the repository, because the syncer awaited the blocked export inline with its own heartbeat (C2; now bounded by a timeout with backoff — pushes still stall for that long)."], None, lh=14)
+            "The one arbitrated direction: a read-write lean syncer on the EXPORT prefix contends on the same cell — and until today that wedged the repository, because the syncer awaited the blocked export inline with its own heartbeat (C2; now bounded by a timeout with backoff — pushes still stall for that long)."], None, lh=14)
     s.card(1102, 306, 474, 278, "An export is a mirror that is never repaired",
            ["The barrier computes uploads and deletes from a LOCAL scan against a LOCAL baseline; the only remote thing it reads is the pointer's etag. A foreign write into B moves no pointer and changes no local file, so no later export notices it (C3).",
             ("r", "A reader that cannot verify takes the foreign bytes (C4):"), "a passthrough or lite mount has no manifest to check against and serves them. A reader that verifies now refuses: the export marks its manifests as published by a sole writer, and lean's checkout refuses an object off its citation — after the drill first found it adopting. Detectable, not self-healing.",
@@ -1148,7 +1148,7 @@ def plate_12():
     rows = [
         ("Technology", "in one word: what carries the bytes",
          [[("b", "NFS."), "a hub pod serves the tree over NFSv4.2; the node's kernel client carries every byte"],
-          [("b", "Sync."), "the agent writes a local directory; a sidecar copies changed bytes to S3 with the plain S3 API, after the fact. No FUSE anywhere: nothing intercepts a file operation, nothing mounts the bucket"],
+          [("b", "Sync."), "the agent writes a local directory; the syncer copies changed bytes to S3 with the plain S3 API, after the fact. No FUSE anywhere: nothing intercepts a file operation, nothing mounts the bucket"],
           [("b", "FUSE."), "Mountpoint for S3 intercepts every file operation in the pod and translates it into object requests"],
           [("b", "Git."), "real git, served per repository, with S3 as its only durable state"]]),
         ("What the pod sees", "the shape of the thing",
@@ -1240,7 +1240,7 @@ def portrait_p1b():
     s = SVG(640, 470, "The data flow of the four front ends as four rows: the pod, what carries the bytes, and the S3 prefix, with the "
                       "moment the bytes move written on the arrows.", compact=True)
     rows = [("lite", "NFS", ["an NFS mount"], ("every op", "live"), "the hub pod", ["one process, one tree", "publishes on a cadence; hydrates on demand"], ("publish ↑", "hydrate ↓"), "<prefix>/<path>"),
-            ("lean", "sync", ["local disk"], ("same dir", "no wire"), "flint-sync sidecar", ["copies changed files", "at a boundary; checkout at start"], ("publish ↑", "checkout ↓"), "<prefix>/files/…"),
+            ("lean", "sync", ["local disk"], ("same dir", "no wire"), "flint-sync, the syncer", ["copies changed files", "at a boundary; checkout at start"], ("publish ↑", "checkout ↓"), "<prefix>/files/…"),
             ("pass", "FUSE", ["a FUSE mount"], ("every op", "intercepted"), "mount-s3 worker", ["each op → a request", "nothing buffered"], ("GET · PUT", "per op"), "<prefix>/<key>"),
             ("forge", "git", ["a git clone"], ("push ↑", "fetch ↓"), "server pod", ["gitcgi + syncer", "ack after the packs land"], ("packs ↑", "restore ↓"), "<prefix>/git/…")]
     for i, (fe, word, pod, (a1, a1s), comp, compb, (a2, a2s), key) in enumerate(rows):
@@ -1393,7 +1393,7 @@ def portrait_p7():
     y = s.para(382, y + 6, "C  ws/<agent>/ — one lean workspace. Writer: lean.", 234)
     y = s.para(382, y + 6, "D  datasets/ — objects as-is. E  shared/ — the hub's.", 234)
     s.para(382, y + 8, "Composition is in the reading, never the writing.", 234, "t4b")
-    s.card(8, 320, 306, 140, "The rule: mechanism within, convention across", ["forge arbitrates on git/epoch, lean on .flint/lean/epoch: pointed at one prefix they never meet — no 412, no fence, no log line (C1). The operator sees FlintRepos only. A read-write lean sidecar on the export prefix does contend, and used to wedge the repository (C2, now bounded)."], None, lh=13)
+    s.card(8, 320, 306, 140, "The rule: mechanism within, convention across", ["forge arbitrates on git/epoch, lean on .flint/lean/epoch: pointed at one prefix they never meet — no 412, no fence, no log line (C1). The operator sees FlintRepos only. A read-write lean syncer on the export prefix does contend, and used to wedge the repository (C2, now bounded)."], None, lh=13)
     s.card(326, 320, 306, 140, "An export is a mirror that is never repaired", ["a foreign overwrite is not noticed by the next export (C3); a reader with no manifest serves it, and a reader that verifies now refuses it (C4); a foreign delete is refused loudly and never restored (C5). A read-write mount over an export prefix is unsupported."], None, "warn", lh=13)
     return s
 

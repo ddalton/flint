@@ -60,7 +60,7 @@
 <text class="t4" x="258" y="99">a hub pod serves the tree over NFSv4.2; the node's kernel</text>
 <text class="t4" x="258" y="114">client carries every byte</text>
 <text class="t4b" x="590" y="84">Sync.</text>
-<text class="t4" x="590" y="99">the agent writes a local directory; a sidecar copies</text>
+<text class="t4" x="590" y="99">the agent writes a local directory; the syncer copies</text>
 <text class="t4" x="590" y="114">changed bytes to S3 with the plain S3 API, after the fact.</text>
 <text class="t4" x="590" y="129">No FUSE anywhere: nothing intercepts a file operation,</text>
 <text class="t4" x="590" y="144">nothing mounts the bucket</text>

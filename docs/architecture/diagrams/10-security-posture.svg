@@ -200,7 +200,7 @@
 <text class="t4" x="258" y="784">network boundary.</text>
 <text class="t4b" x="590" y="724">Its own workspace, and nothing that outlives it.</text>
 <text class="t4" x="590" y="739">No S3 credential in the agent container in either</text>
-<text class="t4" x="590" y="754">deployment mode; the sidecar holds it, unprivileged.</text>
+<text class="t4" x="590" y="754">deployment mode; the syncer holds it, unprivileged.</text>
 <text class="t4" x="590" y="769">Revocation is killing the token or the pod. Ceiling: a</text>
 <text class="t4" x="590" y="784">deposed writer's uncited versions remain readable by a</text>
 <text class="t4" x="590" y="799">raw key.</text>

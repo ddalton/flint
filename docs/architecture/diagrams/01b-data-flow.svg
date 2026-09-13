@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 772" role="img"
-     aria-label="The data flow of each front end as a column: what the pod touches, what carries the bytes, and what puts them in the bucket. flint-lite: an NFS mount reaches the hub over the wire, live; the hub publishes on a cadence and hydrates on demand. flint-lean: the pod writes a local directory a sidecar copies to S3 at a boundary. flint-passthrough: every file operation is intercepted by mount-s3 and becomes an S3 request. flint-forge: a push carries packs to the server pod, whose syncer uploads them and acknowledges only once they are in S3. Control sits beside each column and never carries a file.">
+     aria-label="The data flow of each front end as a column: what the pod touches, what carries the bytes, and what puts them in the bucket. flint-lite: an NFS mount reaches the hub over the wire, live; the hub publishes on a cadence and hydrates on demand. flint-lean: the pod writes a local directory the syncer copies to S3 at a boundary. flint-passthrough: every file operation is intercepted by mount-s3 and becomes an S3 request. flint-forge: a push carries packs to the server pod, whose syncer uploads them and acknowledges only once they are in S3. Control sits beside each column and never carries a file.">
 <style>
   text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
   .t1{font-size:17.0px;font-weight:600}
@@ -78,11 +78,11 @@
 <text class="mono" x="432" y="120" xml:space="preserve">/workspace — local disk</text>
 <text class="t4b" x="432" y="135">reads and writes touch nothing but the disk</text>
 <line class="l-lean" x1="603" y1="166" x2="603" y2="228" stroke-dasharray="6 5" marker-end="url(#a-lean)"/>
-<rect x="470" y="179" width="266" height="30" rx="3" class="halo"/>
+<rect x="472" y="179" width="262" height="30" rx="3" class="halo"/>
 <text class="t4b c-lean" x="603" y="190" style="text-anchor:middle">the same directory</text>
-<text class="t4" x="603" y="205" style="text-anchor:middle">no wire, no interception — the sidecar reads it later</text>
+<text class="t4" x="603" y="205" style="text-anchor:middle">no wire, no interception — the syncer reads it later</text>
 <rect x="416" y="232" width="374" height="100" rx="7" class="b-lean"/>
-<text class="t2 c-lean" x="432" y="256">flint-sync sidecar</text>
+<text class="t2 c-lean" x="432" y="256">flint-sync, the syncer</text>
 <text class="t4" x="432" y="276">scans for changed files; copies them with the plain S3 API</text>
 <text class="mono" x="432" y="291" xml:space="preserve">unprivileged, in a system namespace</text>
 <line class="l-lean" x1="603" y1="338" x2="603" y2="424" marker-start="url(#a-lean)" marker-end="url(#a-lean)"/>
@@ -93,7 +93,7 @@
 <rect x="416" y="560" width="374" height="118" rx="7" class="panel"/>
 <text class="t2" x="432" y="584">control — never on the data path</text>
 <text class="t4" x="432" y="604">lease in the bucket — one writer</text>
-<text class="t4" x="432" y="619">broker → short-lived keys → sidecar</text>
+<text class="t4" x="432" y="619">broker → short-lived keys → syncer</text>
 <text class="t4" x="432" y="634">.flint/publish → .flint/publish.ack</text>
 <rect x="808" y="16" width="374" height="46" rx="7" class="hd-pass"/>
 <text class="on" x="995" y="38" style="text-anchor:middle">FUSE</text>

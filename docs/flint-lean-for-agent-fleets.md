@@ -83,7 +83,7 @@ It pulls two images and nothing else:
 | image | pulled by | what runs |
 |---|---|---|
 | `dilipdalton/flint-lean-operator` | the `flint-system` deployment | `flint-lean-operator` — the controller and webhook |
-| `dilipdalton/flint-sync` | every opted-in agent pod | the injected sidecar |
+| `dilipdalton/flint-sync` | every opted-in agent pod | the syncer |
 
 **flint-lean does not install or require flint-lite.** No CSI driver, no
 NFS hub, no `FlintShare` CRD — the chart bundles exactly one CRD and its
@@ -115,7 +115,7 @@ kubectl -n flint-system logs deploy/flint-lean | tail -3
 ## Credentials
 
 The operator does bucket-admin work (posture probes, a stale-upload
-sweep) under its own identity. Each workspace's sidecar uses the
+sweep) under its own identity. Each workspace's syncer uses the
 credential its CR names. **The agent container is given neither** — the
 webhook stamps the secret onto the sidecar container only, and process
 namespaces are not shared, so a compromised agent cannot read it.
@@ -135,7 +135,7 @@ Point the operator at it by reinstalling (or `helm upgrade`) with
 ambient chain (IRSA and friends).
 
 The keys must be named `AWS_*` **verbatim** — they are passed to the
-sidecar as environment.
+syncer as environment.
 
 > **Plan of record:** a project-scoped S3 proxy holds the real
 > credentials and no pod stores one at all. Until that lands,
@@ -167,7 +167,7 @@ kubectl -n agents get flintleanworkspace proj1 -o yaml | grep -A6 conditions
 ```
 
 You want `BoundaryModeAccepted: True`. `BoundaryModeActive: Unknown`
-with reason `NoLiveSidecar` is normal for a workspace at rest — nothing
+with reason `NoLiveSyncer` is normal for a workspace at rest — nothing
 holds the lease until a pod starts.
 
 ---
@@ -192,7 +192,7 @@ spec:
 ```
 
 The webhook injects the sidecar, adds the workspace volume, and mounts
-it into **every** container in the pod. The sidecar runs the checkout
+it into **every** container in the pod. The syncer runs the checkout
 *before* your container starts — the injected `startupProbe` gates it —
 so your first line of code sees a complete tree.
 
@@ -239,7 +239,7 @@ boundary — the point the agent declared is already true, which is still
 an honest `ok`.
 
 `status: "ok"` means **the named boundary is in the bucket** — not
-queued, not scheduled. `refused-fenced` means this sidecar lost the
+queued, not scheduled. `refused-fenced` means this syncer lost the
 lease and is telling you rather than leaving you waiting.
 
 Costs nothing when unused: measured at 20 bucket requests per 22 s idle
