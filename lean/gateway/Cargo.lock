@@ -765,7 +765,7 @@ checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
 
 [[package]]
 name = "flint-lean"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "flint-store",
@@ -781,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "flint-lean-gateway"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -815,6 +815,7 @@ dependencies = [
  "hyper 1.11.1",
  "hyper-rustls 0.27.9",
  "hyper-util",
+ "libc",
  "rustls 0.23.44",
  "serde",
  "serde_json",

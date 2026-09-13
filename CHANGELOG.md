@@ -93,7 +93,9 @@ covered by the stability guarantee.
     (barrier-7), the legacy-manifest migration fence (mixed-version
     rollouts only), a node clock behind the store's, and two LOW
     bookkeeping edges.
-  `flint-lean` 0.3.0 → 0.4.0.
+  `flint-lean` 0.3.0 → 0.4.0; `flint-lean-gateway` 0.2.2 → 0.2.3 (its
+  `flint-lean` requirement was still `^0.2.0` — unsatisfiable since the
+  0.3.0 bump — and is now `^0.4.0`).
 
 - **lean: the default read window is 128 MiB in flight, down from 512 —
   the deployed lean worker was OOM-killed checking out 1 GiB objects.**
