@@ -214,10 +214,25 @@ run:  verify_claim (project-id precondition, a read)
       capabilities
       loop:
         wait for floor tick | publish touch | sync touch | SIGTERM
+        consume inbox, scan, UPLOAD the dirty set   (no lease: every PUT is
+                                                     guarded by If-Match on
+                                                     the base etag — S3's
+                                                     own optimistic lock)
         claim(ticket)      ─┐
-        barrier             │  the lease is held here and only here
-        release            ─┘
+        merge + manifest CAS, deletes, baseline    │  the lease is held here
+        release            ─┘                       and only here: milliseconds
 ```
+
+**Why no finer lock is needed (user's question, 2026-09-13).** S3's
+conditional writes are the lock-free primitive. Every upload already
+carries `If-Match` on the object's base etag, so two writers' uploads
+overlap fully and a collision on one key is decided by the store (412 ⇒
+preserve the foreign version, supersede knowingly, or park). The only
+thing that must serialise is the manifest install, and the pointer CAS
+with its three-way merge already does that in one small request. So the
+lease shrinks to the commit section — merge, CAS, deletes, baseline —
+and write throughput scales with the number of writers up to the NIC and
+S3's per-prefix rate, exactly as reads already do.
 
 Between boundaries nobody holds the cell. `sync` never needs it. The
 preStop drain claims for its final boundary as today. The renew
