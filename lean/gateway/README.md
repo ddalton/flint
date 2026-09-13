@@ -174,7 +174,10 @@ every checkout with "the manifest cites it but it is gone". So a delete
 is DECLARED. `remove_file` records the intent in the inbox cell and
 returns; the syncer performs it at its next barrier — unlink, cite out,
 GC — and the listing hides the path from the moment it is recorded,
-whatever the syncer's cadence. `rename_file` is a server-side copy to
+whatever the syncer's cadence. A read of the path by name still answers
+until then: the object and its citation are untouched, and a removal
+the syncer refuses leaves the file exactly as it was, with nothing to
+undo in a reader that never saw it vanish. `rename_file` is a server-side copy to
 the destination (the bytes never traverse your process, so a 10 GB
 checkpoint moves without a download) followed by one CAS that records
 the destination entry and the source removal together, so the cell
