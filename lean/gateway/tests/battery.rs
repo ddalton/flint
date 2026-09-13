@@ -700,24 +700,22 @@ async fn promote_publishes_the_draft_and_the_barrier_cites_it() {
         .await;
     assert_eq!(res.status(), 200, "{:?}", res.body());
 
-    // The bytes are LIVE at the real key immediately — read the object
-    // directly to see it, because the gateway's own read path will not
-    // serve them yet.
+    // The bytes are LIVE at the real key immediately: read the object
+    // directly, below any door.
     let (_, live) = store.get_whole(&sc.cfg.file_key("inputs/wanted.txt"), None).await.unwrap();
     assert_eq!(&live[..], b"alice's edit", "promote must publish at the live key at once");
 
-    // `GET /files/{path}` answers 409 `moved` until the barrier
-    // re-cites: `handle_files_get` prefers the manifest CITATION over
-    // the inbox fallback and then GETs guarded on it, so a write over
-    // an already-cited path is unreadable through that door in the
-    // window between the write and the citation.
+    // `GET /files/{path}` serves the promoted bytes at once: the read
+    // door overlays the inbox entry on the manifest citation, as the
+    // listing and the sync verb do. (Before 0.2.1 it preferred the
+    // citation and answered 409 `moved` until the barrier re-cited.)
     //
-    // THE CONTROL, and the reason this is not a drafts defect: the
-    // ordinary HITL door does the identical thing to a second path in
-    // the same fixture. If promote had introduced this, the control
-    // would read 200.
+    // THE CONTROL, and the reason a defect here would not be a drafts
+    // defect: the ordinary HITL door reads a second path in the same
+    // fixture through the same door.
     let res = gw_req().method("GET").path("/lean/v1/proj1/files/inputs/wanted.txt").reply(&routes).await;
-    assert_eq!(res.status(), 409, "{:?}", res.body());
+    assert_eq!(res.status(), 200, "{:?}", res.body());
+    assert_eq!(&res.body()[..], b"alice's edit", "the promoted bytes, through the read door, before any barrier");
 
     let b = current_etag(&store, &sc.cfg, "outputs/report.bin").await;
     let res = gw_req()
@@ -729,14 +727,11 @@ async fn promote_publishes_the_draft_and_the_barrier_cites_it() {
         .await;
     assert_eq!(res.status(), 200, "{:?}", res.body());
     let res = gw_req().method("GET").path("/lean/v1/proj1/files/outputs/report.bin").reply(&routes).await;
-    assert_eq!(
-        res.status(),
-        409,
-        "the plain HITL door must answer the same, or the 409 above is promote's fault"
-    );
+    assert_eq!(res.status(), 200, "the plain HITL door must answer the same as promote's: {:?}", res.body());
+    assert_eq!(&res.body()[..], b"plain HITL overwrite");
 
-    // The barrier consumes both entries and cites them; the read door
-    // opens again.
+    // The barrier consumes both entries and cites them; the read is the
+    // same bytes, now through the citation.
     let r = sc.run_barrier().await.unwrap();
     assert_eq!(r.consumed, 2, "promote must land an inbox entry like any HITL write");
     let res = gw_req().method("GET").path("/lean/v1/proj1/files/inputs/wanted.txt").reply(&routes).await;

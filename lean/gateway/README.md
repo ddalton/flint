@@ -103,10 +103,13 @@ durability promise, and it is immediate.
 
 Visibility has two tiers, by design:
 
-- **Now**: any reader through this crate or through the gateway
-  (`get_file` falls back to the tracked inbox entry), and any agent pod
-  that runs `sync` (it overlays the inbox on the manifest as remote
-  truth).
+- **Now**: any reader through this crate or through the gateway, and
+  any agent pod that runs `sync`. Both overlay the tracked inbox entry
+  on the manifest citation, so an overwrite of a file the manifest
+  already cites reads as the new bytes the moment `put_file` returns,
+  for every reader, with or without a syncer running. (Before 0.2.1
+  `get_file` preferred the citation and answered 409 `moved` until the
+  syncer re-cited the path.)
 - **At the next barrier**: the manifest. The workspace's syncer
   consumes the inbox at the start of every barrier — on its cadence
   (default 60 s) or sooner on a `request_boundary` — fetches the object,

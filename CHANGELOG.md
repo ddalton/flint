@@ -80,6 +80,20 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **lean gateway (`flint-lean-gateway` 0.2.1): an overwrite of a cited
+  file read 409 `moved` until the syncer re-cited it.** `get_file`
+  preferred the manifest citation over the tracked inbox entry and then
+  read guarded on the cited etag, so a browser's overwrite of any file
+  older than one barrier was unreadable through the crate and the
+  gateway — by every reader, the writer included — for up to a barrier,
+  and forever in a workspace no syncer runs on. The listing and the
+  sync verb already overlaid the inbox on the citation; the read door
+  now does the same, and yields to the citation only for an entry the
+  bucket has outrun (the syncer published over it and cited the newer
+  bytes; entries leave the cell only after that CAS). One API test with
+  both mutations as controls; the battery leg that documented the 409
+  now asserts the bytes.
+
 - **lean: a consumed HITL write could be orphaned by a pod replacement
   during the upload phase.** The barrier dropped consumed inbox entries
   at the window-open CAS, "durably in the baseline" — true of a

@@ -614,3 +614,60 @@ async fn a_rename_is_refused_while_a_window_is_open_and_copies_nothing() {
     w.rename_file("a.txt", "b.txt", None).await.unwrap();
     assert_eq!(w.get_file("b.txt").await.unwrap().body, Bytes::from("x"));
 }
+
+/// THE READ DOOR OVERLAYS THE INBOX. An overwrite of a file the
+/// manifest already cites is readable at once, by every reader — not
+/// 409 `moved` until the syncer re-cites it, which is what preferring
+/// the citation answered before 0.2.1, and forever in a workspace no
+/// syncer runs on. And the overlay never answers for an entry the
+/// bucket has outrun: in the barrier's window after the manifest CAS
+/// (the syncer published the agent's newer bytes and cited them; the
+/// consumed entry leaves the cell only with the window) the read
+/// yields to the citation. Mutations: prefer the citation ⇒ the first
+/// read answers `moved`; overlay without the fallback ⇒ the last one.
+#[tokio::test]
+async fn an_overwrite_of_a_cited_file_reads_at_once_and_an_outrun_entry_yields_to_the_citation() {
+    use flint_store::{GenerationStamps, PutCondition};
+    let s = store();
+    let w = ws(&s);
+    let epoch = hold_lease(&s, &w).await;
+    let v1 = w.put_file("a.txt", Bytes::from("one"), &PutFile::default()).await.unwrap();
+    cite(&w, epoch, 1, "a.txt", &v1, b"one").await;
+    assert_eq!(w.get_file("a.txt").await.unwrap().etag, v1);
+
+    // A browser overwrites the cited file: every reader sees it now,
+    // and the read agrees with the listing.
+    let v2 = w
+        .put_file(
+            "a.txt",
+            Bytes::from("two"),
+            &PutFile { if_match: Some(v1.clone()), ..Default::default() },
+        )
+        .await
+        .unwrap();
+    let blob = w.get_file("a.txt").await.unwrap();
+    assert_eq!((blob.etag.as_str(), &blob.body[..]), (v2.as_str(), &b"two"[..]));
+    let snap = w.snapshot().await.unwrap();
+    assert_eq!(snap.listing().iter().find(|l| l.path == "a.txt").unwrap().etag, v2);
+    assert_eq!(snap.manifest.entries["a.txt"].etag, v1, "the library never edits the manifest");
+
+    // The barrier consumed v2, the agent changed the file again, the
+    // barrier published and cited THAT — and v2's entry is still in
+    // the cell. The read serves what the manifest cites, never `moved`.
+    let key = w.config().file_key("a.txt");
+    let three = Bytes::from("three");
+    let crc = crc64_nvme(&three);
+    let stamps = GenerationStamps {
+        generation: 2,
+        epoch,
+        flush_uuid: "agent-publish".into(),
+        boundary_source: None,
+        posix: None,
+    };
+    let v3 = s.put_whole(&key, three, &PutCondition::Unconditional, &stamps, crc).await.unwrap().etag;
+    cite(&w, epoch, 2, "a.txt", &v3, b"three").await;
+    let tracked = w.snapshot().await.unwrap().inbox.entries.iter().filter(|e| e.path == "a.txt").count();
+    assert_eq!(tracked, 1, "the fixture: the outrun entry is still in the cell");
+    let blob = w.get_file("a.txt").await.unwrap();
+    assert_eq!((blob.etag.as_str(), &blob.body[..]), (v3.as_str(), &b"three"[..]));
+}

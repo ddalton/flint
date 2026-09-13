@@ -11,7 +11,7 @@
 #   cargo build --release                       # the shippable binary
 [package]
 name = "flint-lean-gateway"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "The flint lean gateway: read, write, draft and publish files in S3-backed lean workspaces from your own process, or run the binary"
 license = "MIT"

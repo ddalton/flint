@@ -670,8 +670,18 @@ impl Workspace {
         Ok(meta.etag)
     }
 
-    /// Read via the manifest citation, falling back to an uncited but
-    /// tracked inbox entry (a HITL write no barrier has re-cited yet).
+    /// Read the newest bytes the workspace tracks for `path`: a HITL
+    /// write in the inbox cell first (a write no barrier has re-cited
+    /// yet), else the manifest citation. The read door overlays the
+    /// inbox on the citation exactly as the listing and the sync verb
+    /// do, so an overwrite of a cited file is readable by everyone the
+    /// moment `put_file` returns — not 409 `moved` until the syncer
+    /// re-cites, which is what preferring the citation answered
+    /// (0.2.0), and forever in a workspace no syncer runs on. An entry
+    /// the bucket has outrun (the syncer published over it and its
+    /// citation now names the newer bytes; entries leave the cell only
+    /// after that CAS) yields to the citation: the overlay never serves
+    /// bytes an entry no longer describes.
     ///
     /// Under `pinned_reads` the citation names a VERSION, and that is
     /// what a coherent read resolves — the same rule `checkout`
@@ -695,6 +705,43 @@ impl Workspace {
                 ),
                 None => (None, false, false),
             };
+        let moved = |path: &str| -> VerbError {
+            // A sole-writer workspace (forge's export) never has a
+            // second legitimate writer, so "retry" is wrong: the cited
+            // etag is not coming back on its own.
+            if sole_writer {
+                VerbError::ForeignWrite { path: path.to_string() }
+            // Under `pinned_reads` this is the mixed-manifest cell: an
+            // entry the citation could not make version-addressable,
+            // whose object has since moved. Retrying cannot fix it and
+            // adopting the current version is exactly the uncited bytes
+            // gating withholds. Say which it is, so a UI does not retry
+            // forever.
+            } else if pinned {
+                VerbError::UncitedBytes { path: path.to_string() }
+            } else {
+                VerbError::Moved
+            }
+        };
+        // The overlay: the newest entry for the path, read guarded on
+        // its own etag. A tracked write is complete bytes under a known
+        // tag; the agent's mid-change upload has no entry, so nothing
+        // uncited can come through this arm.
+        let ib = inbox::load(self.store.as_ref(), &self.cfg).await?;
+        let mut entry_outrun = false;
+        if let Some(entry) = ib.doc.entries.iter().rev().find(|e| e.path == path) {
+            match self.store.get_whole(&key, Some(&entry.etag)).await {
+                Ok((meta, body)) => return Ok(Blob { etag: meta.etag, body }),
+                // The object moved past the entry: the citation is the
+                // newer truth if the barrier has installed it, and the
+                // read is `moved` if it has not.
+                Err(StoreError::PreconditionFailed(_)) => entry_outrun = true,
+                // Gone from the bucket (a consume found it missing):
+                // the citation, if any, says what is left.
+                Err(StoreError::NotFound(_)) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
         let pinned_version = match (pinned, cited.as_ref()) {
             (true, Some((_, Some(vid)))) => Some(vid.clone()),
             _ => None,
@@ -714,33 +761,12 @@ impl Workspace {
                 Err(e) => Err(e.into()),
             };
         }
-        let tracked = if let Some((etag, _)) = cited {
-            Some(etag)
-        } else {
-            let l = inbox::load(self.store.as_ref(), &self.cfg).await?;
-            l.doc.entries.iter().rev().find(|e| e.path == path).map(|e| e.etag.clone())
-        };
-        let Some(etag) = tracked else {
-            return Err(VerbError::NoSuchFile(path.to_string()));
+        let Some((etag, _)) = cited else {
+            return Err(if entry_outrun { moved(path) } else { VerbError::NoSuchFile(path.to_string()) });
         };
         match self.store.get_whole(&key, Some(&etag)).await {
             Ok((meta, body)) => Ok(Blob { etag: meta.etag, body }),
-            // A sole-writer workspace (forge's export) never has a
-            // second legitimate writer, so "retry" is wrong: the cited
-            // etag is not coming back on its own.
-            Err(StoreError::PreconditionFailed(_)) if sole_writer => {
-                Err(VerbError::ForeignWrite { path: path.to_string() })
-            }
-            // Under `pinned_reads` this is the mixed-manifest cell: an
-            // entry the citation could not make version-addressable,
-            // whose object has since moved. Retrying cannot fix it and
-            // adopting the current version is exactly the uncited bytes
-            // gating withholds. Say which it is, so a UI does not retry
-            // forever.
-            Err(StoreError::PreconditionFailed(_)) if pinned => {
-                Err(VerbError::UncitedBytes { path: path.to_string() })
-            }
-            Err(StoreError::PreconditionFailed(_)) => Err(VerbError::Moved),
+            Err(StoreError::PreconditionFailed(_)) => Err(moved(path)),
             Err(StoreError::NotFound(_)) => Err(VerbError::NoSuchFile(path.to_string())),
             Err(e) => Err(e.into()),
         }
