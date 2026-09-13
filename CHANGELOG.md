@@ -95,6 +95,21 @@ covered by the stability guarantee.
     bookkeeping edges.
   `flint-lean` 0.3.0 → 0.4.0.
 
+- **lean: the default read window is 128 MiB in flight, down from 512 —
+  the deployed lean worker was OOM-killed checking out 1 GiB objects.**
+  The deployed-door drill found it: the worker for a 6 × 1 GiB tree
+  died `OOMKilled` at its checkout, three times over. The plugin-wide
+  worker limit is 1Gi (`node.workers.resources`, shared with mount-s3)
+  and the syncer's checkout peaked at 1105 MiB RSS with 512 MiB in
+  flight at fan-out 32; the host arms of every previous drill ran with
+  no cgroup and never saw it. Measured on the same node (`VmHWM`): at
+  128 MiB the same checkout peaks at 403–437 MiB (n=3) in the same wall
+  time (24.9–25.7 s against 24.1–25.0 s), `mixed` 229 vs 298 MiB at
+  equal time, `small` 72 MiB — the window past 128 buys nothing on the
+  NIC. The default moves to 128 in the CRD (`fetchInflightMb`), the
+  binary (`FLINT_SYNC_FETCH_INFLIGHT_MB`) and the config; a CR that
+  names its own value is unaffected.
+
 - **lean: the agent contract is a file the syncer writes into the mount
   — `.flint/AGENTS.md`.** flint-lean has no client library and no API: an
   agent interacts with a workspace entirely through files (`.flint/publish`,

@@ -402,7 +402,10 @@ impl LeanConfig {
             fanout: 128,
             upload_fanout: 32,
             project_id: None,
-            fetch_inflight_max_bytes: 512 * 1024 * 1024,
+            // 128 MiB (was 512): fits the deployed worker's 1Gi limit on a
+            // tree of 1 GiB objects at no cost in wall time (door drill
+            // 2026-09-12 §5, finding 4).
+            fetch_inflight_max_bytes: 128 * 1024 * 1024,
             fetch_drivers: std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(1)

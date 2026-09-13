@@ -150,7 +150,7 @@ spec:
                 minimum: 0.0
                 type: integer
               fetchInflightMb:
-                default: 512
+                default: 128
                 description: |-
                   Ceiling on bytes in flight across the checkout fan-out window, MiB.
                   `fanout` bounds how MANY objects are fetched at once but not how

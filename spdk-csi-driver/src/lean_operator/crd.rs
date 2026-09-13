@@ -347,7 +347,13 @@ fn default_fanout() -> u64 {
     32
 }
 fn default_fetch_inflight_mb() -> u64 {
-    512
+    // 512 → 128 (2026-09-13). The deployed door drill OOM-killed the
+    // worker on a 6 x 1 GiB checkout: the plugin-wide worker limit is
+    // 1Gi and the checkout peaked at 1105 MiB RSS with 512 MiB in
+    // flight. At 128 the same checkout peaks at 403-437 MiB (n=3) in
+    // the same wall time (24.9-25.7 s vs 24.1-25.0 s); `mixed` 229 vs
+    // 298 MiB, equal time. The window past 128 buys nothing on the NIC.
+    128
 }
 fn default_fetch_drivers() -> u64 {
     0

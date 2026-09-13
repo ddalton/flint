@@ -54,7 +54,7 @@
 //!                                 ranges (default 8; 0 = off)
 //!   FLINT_SYNC_RANGE_GET_CHUNK_MB bytes per range (default 16)
 //!   FLINT_SYNC_RANGE_GET_PARALLELISM ranges in flight per object (default 4)
-//!   FLINT_SYNC_FETCH_INFLIGHT_MB  checkout bytes in flight (default 512)
+//!   FLINT_SYNC_FETCH_INFLIGHT_MB  checkout bytes in flight (default 128)
 //!   FLINT_SYNC_COPY_WHOLE_MAX_MB   single-request ceiling for a cross-key
 //!                                 copy (default 5120; above it, MPU +
 //!                                 UploadPartCopy)
@@ -207,7 +207,7 @@ async fn main() {
     cfg.upload_fanout = env_u64("FLINT_SYNC_UPLOAD_FANOUT", 32).max(1) as usize;
     cfg.project_id = std::env::var("FLINT_SYNC_PROJECT_ID").ok().filter(|p| !p.is_empty());
     cfg.fetch_inflight_max_bytes =
-        env_u64("FLINT_SYNC_FETCH_INFLIGHT_MB", 512).max(1) * 1024 * 1024;
+        env_u64("FLINT_SYNC_FETCH_INFLIGHT_MB", 128).max(1) * 1024 * 1024;
     // 0 = off, which is the shipped default until a drill moves it.
     cfg.range_get_min_bytes = env_u64("FLINT_SYNC_RANGE_GET_MIN_MB", 8) * 1024 * 1024;
     cfg.range_get_chunk_bytes = env_u64("FLINT_SYNC_RANGE_GET_CHUNK_MB", 16).max(1) * 1024 * 1024;
