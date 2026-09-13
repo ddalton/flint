@@ -13,7 +13,7 @@ use flint_store::{
     crc64_nvme, crc64_to_b64, GenerationStamps, PosixStamps, PutCondition, StoreError,
 };
 
-use super::inbox::{self, InboxEntry};
+use super::inbox::{self, InboxDoc, InboxEntry, Refusal, Removal};
 use super::manifest::{self, LeanEntry};
 use super::scan;
 use super::state::{BaselineEntry, ConflictRecord, IntentJournal};
@@ -34,6 +34,12 @@ pub struct BarrierReport {
     pub seq: Option<u64>,
     pub uploaded: Vec<String>,
     pub deleted: Vec<String>,
+    /// Paths a DECLARED removal (delete/rename design) cited out this
+    /// barrier — a subset of `deleted` once the GC has run.
+    pub removed: Vec<String>,
+    /// Declared removals this barrier REFUSED (locally dirty, not a
+    /// file, uncontainable); the cell carries the reason.
+    pub removals_refused: usize,
     pub parked: Vec<String>,
     pub consumed: usize,
     pub foreign_queued: usize,
@@ -66,6 +72,26 @@ pub struct BarrierReport {
     /// an ordinary barrier can be told from one that had to converge a
     /// workspace first.
     pub rescope_replayed: bool,
+}
+
+/// What a pass over the cell's DECLARED removals did (`apply_removals`).
+#[derive(Debug, Default)]
+pub struct RemovalPass {
+    /// Performed: the local file is gone (or already was) and the path
+    /// is in `declared`. Dropped from the cell with the window clear —
+    /// AFTER the manifest CAS — so a listing keeps hiding the path
+    /// until the manifest stops citing it.
+    pub applied: Vec<Removal>,
+    /// Refused for good, `refused` filled in: the cell is told at once
+    /// and the removal is never retried.
+    pub refused: Vec<Removal>,
+    /// Left in the cell for the next barrier: a rename whose
+    /// destination is not integrated yet, or an unlink that failed for
+    /// a transient reason.
+    pub deferred: usize,
+    /// The paths this barrier cites OUT: `applied`, plus any a crashed
+    /// earlier barrier had unlinked and journalled.
+    pub declared: BTreeSet<String>,
 }
 
 /// Upload waves per chunk. The chunk is `fanout * this`, so a wave
@@ -121,16 +147,23 @@ impl Syncer {
     /// cell at the window-open CAS).
     pub async fn consume_inbox(&mut self) -> LeanResult<Vec<InboxEntry>> {
         let loaded = inbox::load(self.store.as_ref(), &self.cfg).await?;
+        self.consume_inbox_doc(&loaded.doc).await
+    }
+
+    /// `consume_inbox` over a cell the caller has already read — the
+    /// barrier reads it once and hands the same document to
+    /// `apply_removals`, so the removal pass adds no request.
+    pub async fn consume_inbox_doc(&mut self, doc: &InboxDoc) -> LeanResult<Vec<InboxEntry>> {
         // §2.5's layered doors ride the inbox GET this function already
         // pays for: promptness is one tick, and the added request count
         // is ZERO. A failure here must never fail the consume — the
         // request is idempotent state and the next tick re-reads it.
-        if let Err(e) = self.note_verb_requests(&loaded.doc) {
+        if let Err(e) = self.note_verb_requests(doc) {
             eprintln!("flint-sync: verb request not consumed (retrying next tick): {e}");
         }
         let mut consumed = vec![];
         let mut baseline = self.state.load_baseline()?;
-        for entry in &loaded.doc.entries {
+        for entry in &doc.entries {
             let key = self.cfg.file_key(&entry.path);
             // Containment BEFORE anything else: a path we could never
             // safely materialize must be surfaced and dropped, not
@@ -316,6 +349,176 @@ impl Syncer {
         self.state.sync_tree()?;
         self.state.save_baseline(&baseline)?;
         Ok(consumed)
+    }
+
+    /// Step 1b: perform the DECLARED removals (delete/rename design
+    /// §4-§6). Runs after `consume_inbox_doc`, so a rename's destination
+    /// is in the tree before its source leaves it — §5: create first,
+    /// removal second; a partial application leaves an EXTRA file,
+    /// never a missing one.
+    ///
+    /// Per removal, in order:
+    /// - the path must be containable, as a consume's must;
+    /// - a rename WAITS until its destination is integrated (in the
+    ///   baseline): a consume that deferred the destination defers the
+    ///   removal with it;
+    /// - a locally-DIRTY path — unpublished edits, or a file the agent
+    ///   created there — is REFUSED, nothing applied, the agent's work
+    ///   untouched. The same rule a consume applies to a HITL write
+    ///   over dirty bytes, and the reason a declared removal cannot be
+    ///   "just a delete". Refused for good: the cell is told, and a
+    ///   retry that waited for the agent to publish would delete the
+    ///   very edit the refusal protected;
+    /// - a clean file is unlinked, and the unlink is CONFIRMED by lstat
+    ///   before the path is declared — an unlink that did not take
+    ///   publishes no deletion (`confirm_absences`' rule, kept);
+    /// - a path already absent locally and known to the baseline or the
+    ///   merge base is declared as it stands: the agent got there
+    ///   first, or this tree never held it (a scoped workspace).
+    ///
+    /// A declared path skips the two-scan guard (§4): that guard
+    /// protects against absence INFERRED by a walk, and a declaration
+    /// is not an inference. That is what lets a rename's two halves
+    /// ride one manifest generation.
+    pub async fn apply_removals(&mut self, doc: &InboxDoc) -> LeanResult<RemovalPass> {
+        let mut pass = RemovalPass::default();
+        let baseline = self.state.load_baseline()?;
+        // A crashed earlier barrier that had unlinked and journalled but
+        // not installed: its declarations are still deletions with a
+        // recorded basis — unless the agent has since put a file back.
+        for p in self.state.load_intent()?.declared_deletes {
+            let gone = matches!(
+                std::fs::symlink_metadata(self.cfg.root.join(&p)),
+                Err(ref e) if e.kind() == std::io::ErrorKind::NotFound
+            );
+            if gone && (baseline.entries.contains_key(&p) || baseline.inst_base.contains_key(&p)) {
+                pass.declared.insert(p);
+            }
+        }
+        for r in &doc.removals {
+            if r.refused.is_some() {
+                continue;
+            }
+            let refusal = |kind: &str, message: String| Removal {
+                refused: Some(Refusal { kind: kind.into(), message, at_unix: now_unix() }),
+                ..r.clone()
+            };
+            let mut refuse = |kind: &str, message: String| -> LeanResult<()> {
+                self.state.append_conflict(&ConflictRecord {
+                    path: r.path.clone(),
+                    foreign_etag: String::new(),
+                    preserved_key: None,
+                    kind: format!("{kind}: {message}"),
+                    at_unix: now_unix(),
+                })?;
+                pass.refused.push(refusal(kind, message));
+                Ok(())
+            };
+            if let Err(e) = check_contained(&self.cfg.root, &r.path) {
+                refuse("removal-refused-containment", e.to_string())?;
+                continue;
+            }
+            if let Some(dst) = &r.moved_to {
+                match baseline.entries.get(dst) {
+                    // Not integrated yet (a consume deferred it): wait.
+                    None => {
+                        pass.deferred += 1;
+                        continue;
+                    }
+                    // Integrated as a CONFLICT: the agent had an
+                    // unpublished file at the destination, its version
+                    // won, and the moved bytes are preserved under
+                    // `conflicts/`. Deleting the source now would leave
+                    // the user's file nowhere in the tree — so the move
+                    // is refused and the source stays. The sentinel is
+                    // the consume-dirty baseline entry's `u64::MAX`.
+                    Some(b) if b.size == u64::MAX => {
+                        refuse(
+                            "removal-refused-destination-conflict",
+                            format!(
+                                "{} was not moved to {dst}: the agent has an unpublished                                  file at the destination and it wins; the moved bytes are                                  preserved under the conflict record and the source is kept",
+                                r.path
+                            ),
+                        )?;
+                        continue;
+                    }
+                    Some(_) => {}
+                }
+            }
+            let local = self.cfg.root.join(&r.path);
+            let be = baseline.entries.get(&r.path);
+            match std::fs::symlink_metadata(&local) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    if be.is_some() || baseline.inst_base.contains_key(&r.path) {
+                        pass.declared.insert(r.path.clone());
+                    }
+                    // Nothing here and nothing cited: a removal of a path
+                    // that was never there, or that a sibling already
+                    // removed. Applied as a no-op.
+                    pass.applied.push(r.clone());
+                }
+                Err(e) => {
+                    // Unreadable is not absent (`confirm_absences`' rule):
+                    // fail closed, and say so where the pod-side reader
+                    // looks. Transient, so deferred rather than refused.
+                    self.state.append_conflict(&ConflictRecord {
+                        path: r.path.clone(),
+                        foreign_etag: String::new(),
+                        preserved_key: None,
+                        kind: format!("removal-deferred: cannot stat the path: {e}"),
+                        at_unix: now_unix(),
+                    })?;
+                    pass.deferred += 1;
+                }
+                Ok(m) if !m.is_file() => {
+                    refuse(
+                        "removal-refused-not-a-file",
+                        format!("{} is not a regular file in the workspace", r.path),
+                    )?;
+                }
+                Ok(_) => {
+                    if local_dirty(&local, be) {
+                        refuse(
+                            "removal-refused-dirty",
+                            format!(
+                                "{} has unpublished local changes; the removal {} asked for                                  was not applied and the agent's work is kept — publish or                                  discard the local version, then ask again",
+                                r.path, r.author
+                            ),
+                        )?;
+                        continue;
+                    }
+                    if let Err(e) = std::fs::remove_file(&local) {
+                        self.state.append_conflict(&ConflictRecord {
+                            path: r.path.clone(),
+                            foreign_etag: String::new(),
+                            preserved_key: None,
+                            kind: format!("removal-unlink-failed (will retry): {e}"),
+                            at_unix: now_unix(),
+                        })?;
+                        pass.deferred += 1;
+                        continue;
+                    }
+                    // CONFIRM: only NotFound is absence.
+                    match std::fs::symlink_metadata(&local) {
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            pass.declared.insert(r.path.clone());
+                            pass.applied.push(r.clone());
+                        }
+                        _ => {
+                            self.state.append_conflict(&ConflictRecord {
+                                path: r.path.clone(),
+                                foreign_etag: String::new(),
+                                preserved_key: None,
+                                kind: "removal-unlink-unconfirmed (will retry)".into(),
+                                at_unix: now_unix(),
+                            })?;
+                            pass.deferred += 1;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(pass)
     }
 
     /// Act on the inbox document's two request fields (§2.5, D14).
@@ -568,9 +771,20 @@ impl Syncer {
         // path.
         self.verify_not_deposed().await?;
 
-        // Step 1.
-        let consumed = self.consume_inbox().await?;
+        // Step 1: the cell, read ONCE — HITL entries into the tree, then
+        // the DECLARED removals (delete/rename design §4-§6).
+        let inbox_doc = inbox::load(self.store.as_ref(), &self.cfg).await?.doc;
+        let consumed = self.consume_inbox_doc(&inbox_doc).await?;
         report.consumed = consumed.len();
+        let removals = self.apply_removals(&inbox_doc).await?;
+        report.removed = removals.declared.iter().cloned().collect();
+        report.removals_refused = removals.refused.len();
+        // A refusal is settled NOW, whatever else this barrier does: the
+        // cell is where the human who asked reads the answer, and a
+        // refused removal is never retried, so saying so before the
+        // no-diff return below loses nothing.
+        inbox::settle_removals(self.store.as_ref(), &self.cfg, epoch, &[], &removals.refused)
+            .await?;
 
         // Step 2: scan-diff against the persisted baseline.
         let mut baseline = self.state.load_baseline()?;
@@ -578,6 +792,14 @@ impl Syncer {
         let mut classified = scan::classify(&scanned, &baseline);
         if declared {
             report.absences_confirmed = self.confirm_absences(&mut classified)?;
+        }
+        // A declared removal is a deletion with its basis RECORDED, so
+        // it skips the two-scan guard the walk needs and goes straight
+        // into the delete set — which is what lets a rename's two halves
+        // ride ONE manifest generation (§4).
+        for p in &removals.declared {
+            classified.first_absence.remove(p);
+            classified.deletes.insert(p.clone());
         }
         report.first_absence = classified.first_absence.iter().cloned().collect();
 
@@ -591,6 +813,7 @@ impl Syncer {
             && classified.deletes.is_empty()
             && consumed.is_empty()
             && classified.first_absence.is_empty()
+            && removals.applied.is_empty()
             && !repairs_pending
         {
             // Read the POINTER, never the entries: the 0b rig measured
@@ -658,6 +881,7 @@ impl Syncer {
             keys: classified.uploads.iter().map(|p| self.cfg.file_key(p)).collect(),
             recent_uuids: prior_uuids.clone(),
             installed_etag: prev_installed.clone(),
+            declared_deletes: removals.declared.iter().cloned().collect(),
         };
         self.state.save_intent(&intent)?;
         let deadline = now_unix() + self.cfg.window_slack_secs;
@@ -923,7 +1147,17 @@ impl Syncer {
                 continue; // delete/modify resolved foreign-wins: not garbage
             }
             let key = self.cfg.file_key(path);
-            let recognized = baseline.entries.get(path).map(|b| b.etag.clone());
+            let recognized = baseline.entries.get(path).map(|b| b.etag.clone()).or_else(|| {
+                // A DECLARED removal of a path this tree never held (a
+                // scoped workspace's out-of-scope citation): what the
+                // declaration named is the object the manifest cited
+                // when this barrier began, and that is the merge base.
+                removals
+                    .declared
+                    .contains(path)
+                    .then(|| baseline.inst_base.get(path).cloned())
+                    .flatten()
+            });
             match self.store.head(&key).await {
                 Err(StoreError::NotFound(_)) => {
                     report.deleted.push(path.clone());
@@ -972,7 +1206,8 @@ impl Syncer {
                 crc64_b64: Some(e.crc64_b64),
             })
             .collect();
-        inbox::clear_window(self.store.as_ref(), &self.cfg, epoch, &queue).await?;
+        inbox::clear_window_settling(self.store.as_ref(), &self.cfg, epoch, &queue, &removals.applied)
+            .await?;
         // Reap superseded generations. Immutable metadata that is never
         // collected is a leak that grows by a whole manifest per
         // publish, and this also collects the orphan a crash between the

@@ -22,6 +22,7 @@
 //! every write, epoch-validated syncer verbs — is made here, because
 //! this is where it was always made.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -29,8 +30,8 @@ use serde::{Deserialize, Serialize};
 
 use flint_store::{crc64_nvme, GenerationStamps, ObjectStore, PutCondition, StoreError};
 
-use flint_lean::inbox::{self, InboxDoc, InboxEntry, RequestedVerb, VerbRequest, Window};
-use flint_lean::manifest::{self, LeanManifest};
+use flint_lean::inbox::{self, InboxDoc, InboxEntry, Removal, RequestedVerb, VerbRequest, Window};
+use flint_lean::manifest::{self, LeanManifest, LoadedManifest};
 use flint_lean::{now_unix, LeanConfig, LeanError, WHOLE_PUT_MAX};
 
 /// One lean workspace: a subtree prefix on an object store, seen from
@@ -76,6 +77,63 @@ pub struct Snapshot {
     pub inbox: InboxDoc,
 }
 
+/// One row of a file listing: what a browser shows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Listed {
+    pub path: String,
+    pub etag: String,
+    /// Known when the manifest cites the path; a tracked write no
+    /// barrier has integrated yet carries none.
+    pub size: Option<u64>,
+    /// Cited by the manifest (a fresh checkout sees it), as opposed to
+    /// tracked in the inbox only.
+    pub cited: bool,
+}
+
+impl Snapshot {
+    /// The listing a file browser shows: the manifest's citations,
+    /// overlaid by the tracked writes no barrier has cited yet, MINUS
+    /// every path a pending removal names — so a deleted or
+    /// renamed-away file leaves the listing the moment its removal is
+    /// recorded, and a rename's destination appears in the same
+    /// instant, whatever the syncer's cadence.
+    pub fn listing(&self) -> Vec<Listed> {
+        let mut rows: BTreeMap<String, Listed> = self
+            .manifest
+            .entries
+            .iter()
+            .map(|(p, e)| {
+                (
+                    p.clone(),
+                    Listed { path: p.clone(), etag: e.etag.clone(), size: Some(e.size), cited: true },
+                )
+            })
+            .collect();
+        for e in &self.inbox.entries {
+            rows.insert(
+                e.path.clone(),
+                Listed { path: e.path.clone(), etag: e.etag.clone(), size: None, cited: false },
+            );
+        }
+        for r in &self.inbox.removals {
+            if r.refused.is_none() {
+                rows.remove(&r.path);
+            }
+        }
+        rows.into_values().collect()
+    }
+
+    /// Removals recorded and not yet performed.
+    pub fn pending_removals(&self) -> impl Iterator<Item = &Removal> {
+        self.inbox.removals.iter().filter(|r| r.refused.is_none())
+    }
+
+    /// Removals the syncer refused, with the reason on each.
+    pub fn refused_removals(&self) -> impl Iterator<Item = &Removal> {
+        self.inbox.removals.iter().filter(|r| r.refused.is_some())
+    }
+}
+
 /// The RPO observability surface: seq, window, inbox depth, the epoch
 /// cell, and the standing verb requests.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +157,12 @@ pub struct Status {
     /// Whether a boundary/sync request is standing (§2.5).
     pub boundary_request: Option<VerbRequest>,
     pub sync_request: Option<VerbRequest>,
+    /// Declared removals recorded and not yet performed.
+    #[serde(default)]
+    pub removals_pending: usize,
+    /// Declared removals the syncer refused (the cell carries why).
+    #[serde(default)]
+    pub removals_refused: usize,
 }
 
 /// A recorded verb request. `status` is always `recorded`, never
@@ -179,6 +243,14 @@ pub enum VerbError {
     /// forgetting to check.
     #[error("body is {size} bytes; the whole-object cap is {max}")]
     TooLarge { size: u64, max: u64 },
+    /// 409 `destination-exists`: a rename's destination is already a
+    /// file here — cited, tracked, or an untracked object this crate
+    /// did not put there. `current` is its entity-tag.
+    #[error("{path} already exists; a rename does not overwrite (current {current:?})")]
+    DestinationExists { path: String, current: Option<String> },
+    /// 404 `no-removal`: nothing to withdraw for the path.
+    #[error("no removal of {0} is recorded")]
+    NoRemoval(String),
     /// 404 `no-draft`. The message says which shape: no draft at all,
     /// a body whose meta never landed, or a meta whose body is gone.
     #[error("{0}")]
@@ -232,12 +304,13 @@ impl VerbError {
         match self {
             VerbError::BadPath(_) | VerbError::BadUser(_) | VerbError::BadPrecondition(_) => 400,
             VerbError::StaleEpoch { .. } | VerbError::NoHolder | VerbError::Fenced(_) => 403,
-            VerbError::NoSuchFile(_) | VerbError::NoDraft(_) => 404,
+            VerbError::NoSuchFile(_) | VerbError::NoDraft(_) | VerbError::NoRemoval(_) => 404,
             VerbError::WindowOpen { .. }
             | VerbError::ConcurrentWrite
             | VerbError::Moved
             | VerbError::DraftStale { .. }
             | VerbError::DraftMoved(_)
+            | VerbError::DestinationExists { .. }
             | VerbError::CasMiss { .. } => 409,
             VerbError::DanglingCitation { .. }
             | VerbError::ForeignWrite { .. }
@@ -268,6 +341,8 @@ impl VerbError {
             VerbError::ForeignWrite { .. } => "foreign-write",
             VerbError::UncitedBytes { .. } => "uncited-bytes",
             VerbError::TooLarge { .. } => "payload-too-large",
+            VerbError::DestinationExists { .. } => "destination-exists",
+            VerbError::NoRemoval(_) => "no-removal",
             VerbError::NoDraft(_) => "no-draft",
             VerbError::DraftStale { .. } => "draft-stale",
             VerbError::DraftMoved(_) => "draft-moved",
@@ -298,9 +373,9 @@ impl VerbError {
     /// now (`draft-stale`, on `x-flint-current-etag`).
     pub fn current_etag(&self) -> Option<&str> {
         match self {
-            VerbError::FileChanged { current } | VerbError::DraftStale { current, .. } => {
-                current.as_deref()
-            }
+            VerbError::FileChanged { current }
+            | VerbError::DraftStale { current, .. }
+            | VerbError::DestinationExists { current, .. } => current.as_deref(),
             _ => None,
         }
     }
@@ -725,7 +800,259 @@ impl Workspace {
             boundary_source,
             boundary_request: ib.doc.boundary_request.clone(),
             sync_request: ib.doc.sync_request.clone(),
+            removals_pending: ib.doc.removals.iter().filter(|r| r.refused.is_none()).count(),
+            removals_refused: ib.doc.removals.iter().filter(|r| r.refused.is_some()).count(),
         })
+    }
+
+    // ── delete and rename (docs/plans/flint-lean-delete-rename-design.md) ──
+    //
+    // A caller outside the pod cannot touch the tree, and must never
+    // delete an object itself (§9: a cited object deleted from outside
+    // wedges every checkout with "manifest cites it but it is gone").
+    // So a removal is DECLARED: recorded in the inbox cell, performed
+    // by the syncer at its next barrier — unlink, cite out, GC, in ONE
+    // manifest generation — and refused there, with the reason written
+    // back to the cell, if the agent has unpublished edits on the path.
+    // This crate exposes no function that deletes a cited object.
+
+    /// What the workspace knows about a path: the etag it is tracked or
+    /// cited at, and the CRC of those bytes when the manifest has it.
+    /// `None` = not a file here, or a removal of it is pending.
+    fn lookup(m: Option<&LoadedManifest>, ib: &InboxDoc, path: &str) -> Option<(String, Option<String>)> {
+        if ib.pending_removal(path).is_some() {
+            return None;
+        }
+        if let Some(e) = ib.entries.iter().rev().find(|e| e.path == path) {
+            return Some((e.etag.clone(), e.crc64_b64.clone()));
+        }
+        m.and_then(|l| l.manifest.entries.get(path))
+            .map(|e| (e.etag.clone(), Some(e.crc64_b64.clone())))
+    }
+
+    async fn view(&self) -> Result<(Option<LoadedManifest>, InboxDoc), VerbError> {
+        let m = manifest::load(self.store.as_ref(), &self.cfg).await?;
+        let ib = inbox::load(self.store.as_ref(), &self.cfg).await?;
+        Ok((m, ib.doc))
+    }
+
+    /// Delete a file: record its removal for the syncer to perform.
+    /// Returns as soon as the intent is durable; the listing hides the
+    /// path from then on, the object and the citation go at the next
+    /// barrier. `if_match` is judged against the file as the workspace
+    /// tracks it (`FileChanged` names the current tag); `None` skips
+    /// the check. Not window-gated: a removal touches nothing when it
+    /// is recorded.
+    pub async fn remove_file(
+        &self,
+        path: &str,
+        author: Option<&str>,
+        if_match: Option<&str>,
+    ) -> Result<(), VerbError> {
+        self.remove_files(&[(path, if_match)], author).await
+    }
+
+    /// `remove_file` for many paths in ONE transaction — a folder
+    /// delete is one CAS on the cell, and one manifest generation at
+    /// the barrier. Every path is checked before anything is recorded:
+    /// one unknown path or failed precondition records none of them.
+    pub async fn remove_files(
+        &self,
+        paths: &[(&str, Option<&str>)],
+        author: Option<&str>,
+    ) -> Result<(), VerbError> {
+        let author = author.unwrap_or("ui");
+        for (path, _) in paths {
+            if !path_ok(path) {
+                return Err(VerbError::BadPath(path.to_string()));
+            }
+        }
+        let (m, ib) = self.view().await?;
+        let mut removals = Vec::with_capacity(paths.len());
+        for (path, if_match) in paths {
+            let Some((current, _)) = Self::lookup(m.as_ref(), &ib, path) else {
+                return Err(VerbError::NoSuchFile(path.to_string()));
+            };
+            if let Some(tag) = if_match {
+                let t = normalize_etag(tag);
+                if t != "*" && t != normalize_etag(&current) {
+                    return Err(VerbError::FileChanged { current: Some(current) });
+                }
+            }
+            removals.push(Removal {
+                path: path.to_string(),
+                author: author.to_string(),
+                requested_unix: now_unix(),
+                moved_to: None,
+                refused: None,
+            });
+        }
+        if removals.is_empty() {
+            return Ok(());
+        }
+        inbox::gateway_remove(self.store.as_ref(), &self.cfg, removals).await?;
+        Ok(())
+    }
+
+    /// Rename or move a file. Returns the destination's entity-tag; the
+    /// destination is readable at once, the source leaves the listing
+    /// at once, and the syncer's next barrier cites both halves in ONE
+    /// manifest generation — a manifest reader sees the old name or the
+    /// new, never both and never neither.
+    pub async fn rename_file(
+        &self,
+        from: &str,
+        to: &str,
+        author: Option<&str>,
+    ) -> Result<String, VerbError> {
+        let mut etags = self.rename_files(&[(from, to)], author).await?;
+        Ok(etags.pop().expect("one pair, one etag"))
+    }
+
+    /// `rename_file` for many pairs in ONE transaction — a folder move.
+    ///
+    /// Create first, removal second (design §5): every destination is
+    /// written by a server-side copy — the bytes never traverse this
+    /// process, and a 10 GB checkpoint moves without a download — and
+    /// then ONE CAS records the destination entries and the source
+    /// removals together (§6), so the cell never holds half a rename.
+    /// Refused before anything is written: `NoSuchFile` for a source
+    /// that is not here, `DestinationExists` for a destination that
+    /// is, `BadPath` for either, `WindowOpen` while a barrier is in
+    /// flight. A copy that lands and then loses its CAS to a window is
+    /// an orphan the retry overwrites, exactly as a HITL write's is.
+    pub async fn rename_files(
+        &self,
+        pairs: &[(&str, &str)],
+        author: Option<&str>,
+    ) -> Result<Vec<String>, VerbError> {
+        let author = author.unwrap_or("ui");
+        let mut seen_to = std::collections::BTreeSet::new();
+        for (from, to) in pairs {
+            if !path_ok(from) {
+                return Err(VerbError::BadPath(from.to_string()));
+            }
+            if !path_ok(to) || from == to || !seen_to.insert(to.to_string()) {
+                return Err(VerbError::BadPath(to.to_string()));
+            }
+        }
+        self.admit_hitl().await?;
+        let (m, ib) = self.view().await?;
+        // Every source resolved and every destination checked BEFORE
+        // the first copy: a batch that can be refused is refused whole.
+        let mut plan = Vec::with_capacity(pairs.len());
+        for (from, to) in pairs {
+            let Some(src) = Self::lookup(m.as_ref(), &ib, from) else {
+                return Err(VerbError::NoSuchFile(from.to_string()));
+            };
+            if let Some((current, _)) = Self::lookup(m.as_ref(), &ib, to) {
+                return Err(VerbError::DestinationExists {
+                    path: to.to_string(),
+                    current: Some(current),
+                });
+            }
+            plan.push((*from, *to, src));
+        }
+        let mut entries = Vec::with_capacity(plan.len());
+        let mut removals = Vec::with_capacity(plan.len());
+        let mut etags = Vec::with_capacity(plan.len());
+        for (from, to, (src_etag, src_crc)) in plan {
+            let src_key = self.cfg.file_key(from);
+            let dst_key = self.cfg.file_key(to);
+            let stamps = GenerationStamps {
+                generation: 1,
+                epoch: 0, // a HITL act carries no lease epoch
+                flush_uuid: format!("gateway-rename-{}", uuid::Uuid::new_v4()),
+                boundary_source: None,
+                posix: None,
+            };
+            let copied = match self
+                .store
+                .copy_object(&src_key, Some(&src_etag), &dst_key, &PutCondition::IfNoneMatchAny, &stamps)
+                .await
+            {
+                Ok(meta) => meta,
+                Err(StoreError::PreconditionFailed(_)) => {
+                    // The source moved past what was resolved, or an
+                    // object sits at the destination. Nothing cites or
+                    // tracks `to` (checked above), so an object there is
+                    // either this verb's own orphan — a copy whose CAS
+                    // was refused — or a stranger's. Only the former is
+                    // overwritten: its stamps say which.
+                    match self.store.head(&dst_key).await {
+                        Ok(orphan) => {
+                            let ours = GenerationStamps::from_meta(&orphan.meta)
+                                .map(|s| s.flush_uuid.starts_with("gateway-rename-"))
+                                .unwrap_or(false);
+                            if !ours {
+                                return Err(VerbError::DestinationExists {
+                                    path: to.to_string(),
+                                    current: Some(orphan.etag),
+                                });
+                            }
+                            self.store
+                                .copy_object(
+                                    &src_key,
+                                    Some(&src_etag),
+                                    &dst_key,
+                                    &PutCondition::IfMatch(orphan.etag),
+                                    &stamps,
+                                )
+                                .await
+                                .map_err(|e| match e {
+                                    StoreError::PreconditionFailed(_) => VerbError::ConcurrentWrite,
+                                    StoreError::NotFound(_) => VerbError::NoSuchFile(from.to_string()),
+                                    e => e.into(),
+                                })?
+                        }
+                        Err(StoreError::NotFound(_)) => return Err(VerbError::ConcurrentWrite),
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+                Err(StoreError::NotFound(_)) => return Err(VerbError::NoSuchFile(from.to_string())),
+                Err(e) => return Err(e.into()),
+            };
+            entries.push(InboxEntry {
+                path: to.to_string(),
+                etag: copied.etag.clone(),
+                author: author.to_string(),
+                added_unix: now_unix(),
+                // The bytes are the source's, and the manifest's CRC of
+                // them is the attestation every backend gets; the copy's
+                // own is the fallback for a source only the inbox knew.
+                crc64_b64: src_crc.or(copied.crc64_b64),
+            });
+            removals.push(Removal {
+                path: from.to_string(),
+                author: author.to_string(),
+                requested_unix: now_unix(),
+                moved_to: Some(to.to_string()),
+                refused: None,
+            });
+            etags.push(copied.etag);
+        }
+        match inbox::gateway_rename(self.store.as_ref(), &self.cfg, entries, removals).await {
+            Ok(()) => Ok(etags),
+            Err(LeanError::State(message)) => {
+                Err(VerbError::WindowOpen { retry_after_secs: 2, message })
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Take back a recorded removal, pending or refused. `NoRemoval`
+    /// when there is none. Best effort against a barrier that is
+    /// already performing it: a removal the syncer has unlinked is
+    /// applied whatever the cell says afterwards, and the next
+    /// `snapshot` tells which happened.
+    pub async fn withdraw_removal(&self, path: &str) -> Result<(), VerbError> {
+        if !path_ok(path) {
+            return Err(VerbError::BadPath(path.to_string()));
+        }
+        match inbox::withdraw_removal(self.store.as_ref(), &self.cfg, path).await? {
+            true => Ok(()),
+            false => Err(VerbError::NoRemoval(path.to_string())),
+        }
     }
 
     /// Ask the workspace to publish (§2.5).

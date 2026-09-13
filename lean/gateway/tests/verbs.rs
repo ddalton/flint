@@ -450,3 +450,167 @@ async fn ten_workspaces_share_one_store_and_never_see_each_other() {
     let alias = Workspace::new(s.clone(), "teams/t0/");
     assert_eq!(alias.get_file("shared.txt").await.unwrap().body, Bytes::from("ws 0"));
 }
+
+// ── delete and rename (docs/plans/flint-lean-delete-rename-design.md) ──
+
+#[tokio::test]
+async fn a_delete_is_recorded_hides_the_path_and_is_withdrawable() {
+    let s = store();
+    let w = ws(&s);
+    let etag_a = w.put_file("a.txt", Bytes::from("aaa"), &PutFile::default()).await.unwrap();
+    w.put_file("b.txt", Bytes::from("bbb"), &PutFile::default()).await.unwrap();
+
+    // A stale precondition refuses and records nothing.
+    let err = w.remove_file("a.txt", Some("dilip"), Some("\"stale\"")).await.unwrap_err();
+    assert!(matches!(&err, VerbError::FileChanged { current: Some(c) } if c == &etag_a), "{err}");
+    assert_eq!(w.snapshot().await.unwrap().pending_removals().count(), 0);
+    let err = w.remove_file("nope.txt", None, None).await.unwrap_err();
+    assert!(matches!(err, VerbError::NoSuchFile(_)), "{err}");
+
+    // Recorded: the listing hides the path at once, the bytes stay put
+    // until the syncer performs it, and the path reads as gone to a
+    // second removal.
+    w.remove_file("a.txt", Some("dilip"), Some(&etag_a)).await.unwrap();
+    let snap = w.snapshot().await.unwrap();
+    let pending: Vec<_> = snap.pending_removals().collect();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].path, "a.txt");
+    assert_eq!(pending[0].author, "dilip");
+    assert!(pending[0].moved_to.is_none());
+    let listed: Vec<String> = snap.listing().into_iter().map(|l| l.path).collect();
+    assert_eq!(listed, vec!["b.txt".to_string()]);
+    assert_eq!(w.status().await.unwrap().removals_pending, 1);
+    assert!(s.head(&w.config().file_key("a.txt")).await.is_ok(), "the object is the syncer's to delete");
+    assert!(w.get_file("a.txt").await.is_ok(), "bytes stay readable until then");
+    assert!(matches!(w.remove_file("a.txt", None, None).await.unwrap_err(), VerbError::NoSuchFile(_)));
+
+    // Withdrawn: back in the listing; a second withdraw has nothing.
+    w.withdraw_removal("a.txt").await.unwrap();
+    assert_eq!(w.snapshot().await.unwrap().listing().len(), 2);
+    let err = w.withdraw_removal("a.txt").await.unwrap_err();
+    assert!(matches!(err, VerbError::NoRemoval(_)), "{err}");
+    assert_eq!((err.status(), err.code()), (404, "no-removal"));
+    assert!(matches!(w.withdraw_removal("../x").await.unwrap_err(), VerbError::BadPath(_)));
+
+    // A batch is one transaction: all recorded, or none.
+    let err = w.remove_files(&[("b.txt", None), ("zzz", None)], None).await.unwrap_err();
+    assert!(matches!(err, VerbError::NoSuchFile(_)), "{err}");
+    assert_eq!(w.snapshot().await.unwrap().pending_removals().count(), 0, "none recorded");
+    w.remove_files(&[("a.txt", None), ("b.txt", None)], None).await.unwrap();
+    let snap = w.snapshot().await.unwrap();
+    assert_eq!(snap.pending_removals().count(), 2);
+    assert!(snap.pending_removals().all(|r| r.author == "ui"));
+    assert!(snap.listing().is_empty());
+}
+
+#[tokio::test]
+async fn a_rename_copies_then_records_both_halves_in_one_cas_and_refuses_what_it_must() {
+    let s = store();
+    let w = ws(&s);
+    let body = Bytes::from("the same bytes");
+    w.put_file("notes/a.txt", body.clone(), &PutFile::default()).await.unwrap();
+    let etag_taken = w.put_file("taken.txt", Bytes::from("t"), &PutFile::default()).await.unwrap();
+
+    // Refused before anything is written.
+    assert!(matches!(w.rename_file("notes/a.txt", "notes/a.txt", None).await.unwrap_err(), VerbError::BadPath(_)));
+    assert!(matches!(w.rename_file("nope.txt", "x.txt", None).await.unwrap_err(), VerbError::NoSuchFile(_)));
+    let err = w.rename_file("notes/a.txt", "taken.txt", None).await.unwrap_err();
+    match &err {
+        VerbError::DestinationExists { path, current } => {
+            assert_eq!(path, "taken.txt");
+            assert_eq!(current.as_deref(), Some(etag_taken.as_str()));
+        }
+        e => panic!("{e}"),
+    }
+    assert_eq!((err.status(), err.code()), (409, "destination-exists"));
+    assert!(s.head(&w.config().file_key("docs/b.txt")).await.is_err(), "no copy landed");
+
+    // The rename: destination readable at once with the same bytes,
+    // source out of the listing at once, one entry + one removal.
+    let etag_b = w.rename_file("notes/a.txt", "docs/b.txt", Some("dilip")).await.unwrap();
+    let blob = w.get_file("docs/b.txt").await.unwrap();
+    assert_eq!(blob.body, body);
+    assert_eq!(blob.etag, etag_b);
+    let snap = w.snapshot().await.unwrap();
+    let listed: Vec<String> = snap.listing().into_iter().map(|l| l.path).collect();
+    assert_eq!(listed, vec!["docs/b.txt".to_string(), "taken.txt".to_string()]);
+    let entry = snap.inbox.entries.iter().find(|e| e.path == "docs/b.txt").expect("tracked");
+    assert_eq!(entry.author, "dilip");
+    assert_eq!(entry.crc64_b64.as_deref(), Some(crc64_to_b64(crc64_nvme(&body)).as_str()), "the bytes' own CRC");
+    let removal = snap.pending_removals().find(|r| r.path == "notes/a.txt").expect("recorded");
+    assert_eq!(removal.moved_to.as_deref(), Some("docs/b.txt"));
+    assert_eq!(removal.author, "dilip");
+    assert!(w.get_file("notes/a.txt").await.is_ok(), "bytes stay until the syncer performs it");
+
+    // A batch: two pairs, one CAS; a duplicate destination refuses the whole batch.
+    w.put_file("c1", Bytes::from("1"), &PutFile::default()).await.unwrap();
+    w.put_file("c2", Bytes::from("2"), &PutFile::default()).await.unwrap();
+    assert!(matches!(w.rename_files(&[("c1", "d1"), ("c2", "d1")], None).await.unwrap_err(), VerbError::BadPath(_)));
+    assert!(s.head(&w.config().file_key("d1")).await.is_err(), "nothing copied");
+    let etags = w.rename_files(&[("c1", "d1"), ("c2", "d2")], None).await.unwrap();
+    assert_eq!(etags.len(), 2);
+    let snap = w.snapshot().await.unwrap();
+    assert_eq!(snap.pending_removals().count(), 3);
+    assert_eq!(w.get_file("d2").await.unwrap().body, Bytes::from("2"));
+}
+
+#[tokio::test]
+async fn a_rename_overwrites_its_own_orphan_but_never_a_strangers_object() {
+    use flint_lean_gateway::{crc64_nvme, StoreError};
+    use flint_store::{GenerationStamps, PutCondition};
+    let s = store();
+    let w = ws(&s);
+    let body = Bytes::from("moved bytes");
+    w.put_file("a.txt", body.clone(), &PutFile::default()).await.unwrap();
+    w.put_file("s.txt", Bytes::from("second source"), &PutFile::default()).await.unwrap();
+    let plant = |key: String, bytes: &'static str, uuid: &'static str| {
+        let s = s.clone();
+        async move {
+            let b = Bytes::from(bytes);
+            let crc = crc64_nvme(&b);
+            let stamps = GenerationStamps {
+                generation: 1,
+                epoch: 0,
+                flush_uuid: uuid.into(),
+                boundary_source: None,
+                posix: None,
+            };
+            s.put_whole(&key, b, &PutCondition::Unconditional, &stamps, crc).await.unwrap().etag
+        }
+    };
+    // An orphan of an earlier attempt of THIS verb: untracked, uncited,
+    // stamped as a rename copy. Overwritten.
+    plant(w.config().file_key("b.txt"), "stale copy", "gateway-rename-earlier").await;
+    w.rename_file("a.txt", "b.txt", None).await.unwrap();
+    assert_eq!(w.get_file("b.txt").await.unwrap().body, body);
+
+    // A stranger's object at the destination: refused, and intact.
+    let theirs = plant(w.config().file_key("c.txt"), "someone else's", "other-writer").await;
+    let err = w.rename_file("s.txt", "c.txt", None).await.unwrap_err();
+    match &err {
+        VerbError::DestinationExists { current, .. } => assert_eq!(current.as_deref(), Some(theirs.as_str())),
+        e => panic!("{e}"),
+    }
+    let (_, kept) = s.get_whole(&w.config().file_key("c.txt"), None).await.unwrap();
+    assert_eq!(&kept[..], b"someone else's");
+    assert!(matches!(s.head("nothing").await, Err(StoreError::NotFound(_))));
+}
+
+#[tokio::test]
+async fn a_rename_is_refused_while_a_window_is_open_and_copies_nothing() {
+    let s = store();
+    let w = ws(&s);
+    w.put_file("a.txt", Bytes::from("x"), &PutFile::default()).await.unwrap();
+    let epoch = hold_lease(&s, &w).await;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    w.open_window(epoch, now + 60).await.unwrap();
+    let err = w.rename_file("a.txt", "b.txt", None).await.unwrap_err();
+    assert!(matches!(err, VerbError::WindowOpen { .. }), "{err}");
+    assert!(s.head(&w.config().file_key("b.txt")).await.is_err(), "refused BEFORE the copy");
+    // A removal is not window-gated: it touches nothing when recorded.
+    w.remove_file("a.txt", None, None).await.unwrap();
+    w.withdraw_removal("a.txt").await.unwrap();
+    w.clear_window(epoch, &[]).await.unwrap();
+    w.rename_file("a.txt", "b.txt", None).await.unwrap();
+    assert_eq!(w.get_file("b.txt").await.unwrap().body, Bytes::from("x"));
+}

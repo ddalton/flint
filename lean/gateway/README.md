@@ -166,12 +166,53 @@ checkout, no manifest and no sweep can see them. Per user, per path.
   file moved, and the draft is kept.
 - `delete_draft(user, path)` discards it.
 
+## Delete and rename
+
+A caller outside the pod cannot touch the agent's tree and must never
+delete an object itself: a cited object deleted from outside wedges
+every checkout with "the manifest cites it but it is gone". So a delete
+is DECLARED. `remove_file` records the intent in the inbox cell and
+returns; the syncer performs it at its next barrier — unlink, cite out,
+GC — and the listing hides the path from the moment it is recorded,
+whatever the syncer's cadence. `rename_file` is a server-side copy to
+the destination (the bytes never traverse your process, so a 10 GB
+checkpoint moves without a download) followed by one CAS that records
+the destination entry and the source removal together, so the cell
+never holds half a rename and the barrier cites both halves in ONE
+manifest generation: a manifest reader sees the old name or the new,
+never both and never neither.
+
+- `remove_file(path, author, if_match)` and `remove_files(pairs,
+  author)`: a folder delete is one transaction, recorded whole or not
+  at all.
+- `rename_file(from, to, author)` and `rename_files(pairs, author)`: a
+  folder move likewise. The destination is readable at once;
+  `DestinationExists` if something is already there.
+- `withdraw_removal(path)` takes a recorded removal back, best effort
+  against a barrier already performing it.
+- `Snapshot::listing()` is the file browser's list: citations, overlaid
+  by tracked writes, minus pending removals. `pending_removals()` and
+  `refused_removals()` are the rest of the story.
+
+**A removal can be refused.** If the agent has unpublished edits on the
+path, or created a file there, the syncer applies nothing, keeps the
+agent's work, and writes the reason back into the cell — the same rule
+it applies to a write over dirty bytes. A refused removal is never
+retried (a retry that waited for the agent to publish would delete the
+very edit the refusal protected); it stays readable with its `refused`
+reason until a newer removal of the path supersedes it or you withdraw
+it. `status()` counts pending and refused removals. There is no
+function in this crate that deletes a cited object.
+
 ## Every verb and its wire code
 
 | Method | Gateway route | Refusals |
 |---|---|---|
 | `get_file` | `GET /files/{path}` | 404 `no-such-file`, 409 `moved`, 410 `dangling-citation` / `foreign-write` / `uncited-bytes` |
 | `put_file` | `PUT /files/{path}` | 400 `bad-path` / `bad-precondition`, 409 `barrier-window-open` / `concurrent-write`, 412 `file-changed`, 413 `payload-too-large`, 428 `precondition-required` |
+| `remove_file`, `remove_files` | `DELETE /files/{path}` | 404 `no-such-file`, 412 `file-changed` |
+| `rename_file`, `rename_files` | `POST /rename` `{from, to}` | 404 `no-such-file`, 409 `destination-exists` / `barrier-window-open` / `concurrent-write` |
+| `withdraw_removal` | `DELETE /removals/{path}` | 404 `no-removal` |
 | `snapshot` | `GET /snapshot` | |
 | `status` | `GET /status` | |
 | `request_boundary`, `request_sync` | `POST /boundary`, `POST /sync-request` | |
@@ -219,9 +260,10 @@ flint-lean-gateway = { version = "0.1", default-features = false, features = ["s
 
 ## What this crate is not
 
-Not a syncer. It performs no barrier, holds no lease, and never touches
-a local tree; `flint-sync` does those, in the agent's pod. Not a
-`rescope` door either: that verb unlinks local files by scope, and a
+Not a syncer. It performs no barrier, holds no lease, never touches a
+local tree, and never deletes a cited object; `flint-sync` does those,
+in the agent's pod, and a delete asked for here is performed there. Not
+a `rescope` door either: that verb unlinks local files by scope, and a
 library caller has no more business triggering it remotely than the
 gateway did.
 

@@ -55,6 +55,50 @@ pub struct VerbRequest {
     pub requestor: String,
 }
 
+/// A DECLARED removal (delete/rename design §3): a delete asked for from
+/// OUTSIDE the pod — a UI, a backend embedding the gateway crate. The
+/// caller cannot touch the tree and must never delete the object
+/// itself (§9: a cited object deleted from outside wedges every
+/// checkout), so it records INTENT here and the syncer performs it at
+/// its next barrier: unlink, then cite out, then GC — one manifest
+/// generation, and for a rename the same generation that cites the
+/// destination.
+///
+/// A FIELD of the cell and not a tombstone `InboxEntry`, for the reason
+/// `boundary_request` gives above: `consume_inbox` HEADs every entry's
+/// object and is not taught a second shape.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Removal {
+    pub path: String,
+    pub author: String,
+    pub requested_unix: u64,
+    /// For a rename: where the bytes went. Audit trail and conflict
+    /// message; never load-bearing for correctness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_to: Option<String>,
+    /// Filled in by the syncer when it REFUSED to perform this removal
+    /// — the path had unpublished local edits, was not a file, or
+    /// could not be contained. A refused removal is never retried: it
+    /// stays here, so the human who asked can read why from any
+    /// replica, until a newer removal of the path supersedes it or the
+    /// caller withdraws it. Bounded by `REFUSED_REMOVALS_CAP`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<Refusal>,
+}
+
+/// Why the syncer did not perform a removal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Refusal {
+    /// `removal-refused-dirty` | `removal-refused-not-a-file` |
+    /// `removal-refused-containment`.
+    pub kind: String,
+    pub message: String,
+    pub at_unix: u64,
+}
+
+/// Refused removals kept per cell before the oldest is evicted.
+pub const REFUSED_REMOVALS_CAP: usize = 100;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InboxDoc {
     pub entries: Vec<InboxEntry>,
@@ -78,6 +122,21 @@ pub struct InboxDoc {
     /// tree, at my timing, under a scope I choose".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_request: Option<VerbRequest>,
+    /// DECLARED removals, pending or refused (see `Removal`). At most
+    /// one per path: a newer removal of a path supersedes an older one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removals: Vec<Removal>,
+}
+
+impl InboxDoc {
+    /// A removal of `path` that is recorded and not yet performed nor
+    /// refused — what a listing built over the manifest and the inbox
+    /// subtracts, so a deleted or renamed-away file leaves the UI the
+    /// moment the removal is recorded rather than when the syncer gets
+    /// to it.
+    pub fn pending_removal(&self, path: &str) -> Option<&Removal> {
+        self.removals.iter().find(|r| r.path == path && r.refused.is_none())
+    }
 }
 
 pub struct LoadedInbox {
@@ -159,6 +218,170 @@ pub async fn gateway_append(
         }
     }
     Err(LeanError::State("inbox append lost 5 CAS races".into()))
+}
+
+/// One removal per path: a newer one supersedes an older one, pending
+/// or refused — the older is that caller's own earlier intent, which
+/// the newer replaces (the rule `gateway_append` applies to entries).
+fn record_removal(doc: &mut InboxDoc, r: Removal) {
+    doc.removals.retain(|x| x.path != r.path);
+    doc.removals.push(r);
+}
+
+/// The GATEWAY side: record DECLARED removals (delete/rename design
+/// §3), all in ONE CAS. The caller must have verified the paths exist
+/// (cited or tracked) and must never delete the objects itself.
+///
+/// NOT window-gated, deliberately (§12): a write races the barrier that
+/// is about to publish the tree, but a removal touches no object and no
+/// path at the moment it is recorded — the same argument that left
+/// `gateway_request` ungated. A removal recorded while a window is open
+/// is simply performed by the NEXT barrier.
+pub async fn gateway_remove(
+    store: &dyn ObjectStore,
+    cfg: &LeanConfig,
+    removals: Vec<Removal>,
+) -> LeanResult<()> {
+    for _ in 0..5 {
+        let loaded = load(store, cfg).await?;
+        let mut doc = loaded.doc;
+        for r in &removals {
+            record_removal(&mut doc, r.clone());
+        }
+        match cas_write(store, cfg, &doc, loaded.etag.as_deref(), 0).await {
+            Ok(_) => return Ok(()),
+            Err(LeanError::Store(StoreError::PreconditionFailed(_))) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(LeanError::State("inbox removal lost 5 CAS races".into()))
+}
+
+/// The GATEWAY side of a RENAME (§6): the destination entries and the
+/// source removals land in ONE CAS, so the cell never holds half a
+/// rename. The destination objects must already have been copied
+/// (create first, removal second — §5). Window-gated like
+/// `gateway_append`, because it carries entries.
+pub async fn gateway_rename(
+    store: &dyn ObjectStore,
+    cfg: &LeanConfig,
+    entries: Vec<InboxEntry>,
+    removals: Vec<Removal>,
+) -> LeanResult<()> {
+    for _ in 0..5 {
+        let loaded = load(store, cfg).await?;
+        if !admits_hitl(&loaded.doc) {
+            return Err(LeanError::State(
+                "barrier window open — retry after the window deadline".into(),
+            ));
+        }
+        let mut doc = loaded.doc;
+        for e in &entries {
+            doc.entries.retain(|x| x.path != e.path);
+            doc.entries.push(e.clone());
+        }
+        for r in &removals {
+            record_removal(&mut doc, r.clone());
+        }
+        match cas_write(store, cfg, &doc, loaded.etag.as_deref(), 0).await {
+            Ok(_) => return Ok(()),
+            Err(LeanError::Store(StoreError::PreconditionFailed(_))) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(LeanError::State("inbox rename lost 5 CAS races".into()))
+}
+
+/// The GATEWAY side: take back a removal of `path`, pending or refused.
+/// `Ok(false)` when there was none. Best effort against a barrier that
+/// is already performing it: the cell says whether the record was
+/// still there, the listing says what happened.
+pub async fn withdraw_removal(
+    store: &dyn ObjectStore,
+    cfg: &LeanConfig,
+    path: &str,
+) -> LeanResult<bool> {
+    for _ in 0..5 {
+        let loaded = load(store, cfg).await?;
+        let mut doc = loaded.doc;
+        let before = doc.removals.len();
+        doc.removals.retain(|r| r.path != path);
+        if doc.removals.len() == before {
+            return Ok(false);
+        }
+        match cas_write(store, cfg, &doc, loaded.etag.as_deref(), 0).await {
+            Ok(_) => return Ok(true),
+            Err(LeanError::Store(StoreError::PreconditionFailed(_))) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(LeanError::State("inbox withdraw lost 5 CAS races".into()))
+}
+
+/// The SYNCER side: what became of the removals a pass looked at.
+/// `applied` are dropped from the cell; `refused` are annotated in
+/// place (their `refused` field is the answer), never retried, and
+/// capped at `REFUSED_REMOVALS_CAP` with the oldest evicted. A removal
+/// that was superseded meanwhile (same path, newer `requested_unix`)
+/// is left alone — the newer intent gets its own pass.
+pub async fn settle_removals(
+    store: &dyn ObjectStore,
+    cfg: &LeanConfig,
+    epoch: u64,
+    applied: &[Removal],
+    refused: &[Removal],
+) -> LeanResult<()> {
+    if applied.is_empty() && refused.is_empty() {
+        return Ok(());
+    }
+    let same = |a: &Removal, b: &Removal| a.path == b.path && a.requested_unix == b.requested_unix;
+    for _ in 0..5 {
+        let loaded = load(store, cfg).await?;
+        let mut doc = loaded.doc.clone();
+        let mut changed = false;
+        doc.removals.retain(|r| {
+            let drop = applied.iter().any(|a| same(a, r));
+            changed |= drop;
+            !drop
+        });
+        for r in doc.removals.iter_mut() {
+            if r.refused.is_none() {
+                if let Some(f) = refused.iter().find(|f| same(f, r)) {
+                    r.refused = f.refused.clone();
+                    changed = true;
+                }
+            }
+        }
+        loop {
+            let refused_now = doc.removals.iter().filter(|r| r.refused.is_some()).count();
+            if refused_now <= REFUSED_REMOVALS_CAP {
+                break;
+            }
+            let oldest = doc
+                .removals
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.refused.is_some())
+                .min_by_key(|(_, r)| r.refused.as_ref().map(|f| f.at_unix).unwrap_or(0))
+                .map(|(i, _)| i);
+            match oldest {
+                Some(i) => {
+                    doc.removals.remove(i);
+                    changed = true;
+                }
+                None => break,
+            }
+        }
+        if !changed {
+            return Ok(());
+        }
+        match cas_write(store, cfg, &doc, loaded.etag.as_deref(), epoch).await {
+            Ok(_) => return Ok(()),
+            Err(LeanError::Store(StoreError::PreconditionFailed(_))) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(LeanError::State("inbox removal settle lost 5 CAS races".into()))
 }
 
 /// Which verb a gateway request is asking for.
@@ -279,6 +502,25 @@ pub async fn clear_window(
     epoch: u64,
     queued: &[InboxEntry],
 ) -> LeanResult<()> {
+    clear_window_settling(store, cfg, epoch, queued, &[]).await
+}
+
+/// `clear_window`, and in the SAME CAS drop the DECLARED removals this
+/// barrier performed. They stay in the cell until here — after the
+/// manifest CAS — so a listing that subtracts pending removals keeps
+/// hiding the path for exactly as long as the manifest still cites it:
+/// dropping them at the window-open commitment would have made a
+/// deleted file reappear in every UI for the length of the upload
+/// phase. A crash before this CAS leaves the removal in the cell and
+/// the path in the intent journal's `declared_deletes`; the next
+/// barrier finds both and settles both, idempotently.
+pub async fn clear_window_settling(
+    store: &dyn ObjectStore,
+    cfg: &LeanConfig,
+    epoch: u64,
+    queued: &[InboxEntry],
+    applied_removals: &[Removal],
+) -> LeanResult<()> {
     for _ in 0..5 {
         let loaded = load(store, cfg).await?;
         let mut doc = loaded.doc.clone();
@@ -296,6 +538,11 @@ pub async fn clear_window(
                 doc.entries.push(q.clone());
             }
         }
+        doc.removals.retain(|r| {
+            !applied_removals
+                .iter()
+                .any(|a| a.path == r.path && a.requested_unix == r.requested_unix)
+        });
         match cas_write(store, cfg, &doc, loaded.etag.as_deref(), epoch).await {
             Ok(_) => return Ok(()),
             Err(LeanError::Store(StoreError::PreconditionFailed(_))) => continue,

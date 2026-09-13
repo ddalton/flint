@@ -1251,3 +1251,156 @@ async fn promoting_an_out_of_scope_draft_widens_the_held_set() {
     // the declaration. That asymmetry is the design's, not a bug here.
     assert_eq!(b.state.load_scope().unwrap().as_deref(), Some(&["inputs".to_string()][..]));
 }
+
+// ── delete and rename through the wire, performed by a real barrier ──
+
+/// DELETE records a removal, POST /rename copies and records both
+/// halves, and ONE barrier cites the delete out and the rename across
+/// in ONE manifest generation. The HTTP reads agree at every step:
+/// the destination reads before the barrier, the old names 404 after.
+#[tokio::test]
+async fn a_ui_delete_and_a_rename_ride_one_barrier_through_the_wire() {
+    let store = Arc::new(MemoryStore::new());
+    let (_dir, mut sc, routes) = draft_fixture(&store).await;
+    let before = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest.seq;
+
+    // A stale If-Match: 412 with the current tag; nothing recorded.
+    let res = gw_req()
+        .method("DELETE")
+        .path("/lean/v1/proj1/files/outputs/report.bin")
+        .header("if-match", "\"nope\"")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 412);
+    assert!(res.headers().get("etag").is_some());
+    // The delete: 204 as soon as the intent is durable.
+    let res = gw_req()
+        .method("DELETE")
+        .path("/lean/v1/proj1/files/outputs/report.bin")
+        .header("x-flint-author", "dilip")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 204, "{:?}", res.body());
+    // The rename: 200 {etag}; the destination reads at once.
+    let res = gw_req()
+        .method("POST")
+        .path("/lean/v1/proj1/rename")
+        .header("content-type", "application/json")
+        .body(r#"{"from":"inputs/wanted.txt","to":"inputs/renamed.txt"}"#)
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 200, "{:?}", res.body());
+    let res = gw_req().method("GET").path("/lean/v1/proj1/files/inputs/renamed.txt").reply(&routes).await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(&res.body()[..], b"published v1");
+    // A source under a pending removal is gone to a second rename.
+    let res = gw_req()
+        .method("POST")
+        .path("/lean/v1/proj1/rename")
+        .header("content-type", "application/json")
+        .body(r#"{"from":"outputs/report.bin","to":"outputs/again.bin"}"#)
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 404);
+    let res = gw_req().method("GET").path("/lean/v1/proj1/status").reply(&routes).await;
+    let v: serde_json::Value = serde_json::from_slice(res.body()).unwrap();
+    assert_eq!(v["removals_pending"], 2);
+    assert_eq!(v["removals_refused"], 0);
+
+    // ONE barrier, ONE generation, both halves.
+    let r = sc.run_barrier().await.unwrap();
+    assert_eq!(r.consumed, 1);
+    assert_eq!(r.removed.len(), 2, "{r:?}");
+    let after = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    assert_eq!(after.manifest.seq, before + 1);
+    assert!(after.manifest.entries.contains_key("inputs/renamed.txt"));
+    assert!(!after.manifest.entries.contains_key("inputs/wanted.txt"));
+    assert!(!after.manifest.entries.contains_key("outputs/report.bin"));
+    for gone in ["inputs/wanted.txt", "outputs/report.bin"] {
+        let res = gw_req().method("GET").path(&format!("/lean/v1/proj1/files/{gone}")).reply(&routes).await;
+        assert_eq!(res.status(), 404, "{gone}");
+        assert!(store.head(&sc.cfg.file_key(gone)).await.is_err(), "{gone} GC'd");
+    }
+    let res = gw_req().method("GET").path("/lean/v1/proj1/files/inputs/renamed.txt").reply(&routes).await;
+    assert_eq!(res.status(), 200);
+    // Settled: nothing left to withdraw.
+    let res = gw_req().method("DELETE").path("/lean/v1/proj1/removals/outputs/report.bin").reply(&routes).await;
+    assert_eq!(res.status(), 404);
+    let v: serde_json::Value = serde_json::from_slice(res.body()).unwrap();
+    assert_eq!(v["error"], "no-removal");
+}
+
+/// A removal the syncer REFUSES — the agent has unpublished edits on
+/// the path — is answered in the cell, where `/snapshot` shows it with
+/// the reason and the author, and `/status` counts it.
+#[tokio::test]
+async fn a_refused_removal_is_readable_through_the_wire() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir, mut sc, routes) = draft_fixture(&store).await;
+    write(dir.path(), "inputs/wanted.txt", "the agent's unpublished edit");
+    let res = gw_req()
+        .method("DELETE")
+        .path("/lean/v1/proj1/files/inputs/wanted.txt")
+        .header("x-flint-author", "dilip")
+        .reply(&routes)
+        .await;
+    assert_eq!(res.status(), 204);
+    let r = sc.run_barrier().await.unwrap();
+    assert_eq!(r.removals_refused, 1);
+    assert!(r.removed.is_empty());
+    assert_eq!(read(dir.path(), "inputs/wanted.txt").unwrap(), "the agent's unpublished edit");
+    let res = gw_req().method("GET").path("/lean/v1/proj1/snapshot").reply(&routes).await;
+    let v: serde_json::Value = serde_json::from_slice(res.body()).unwrap();
+    let removals = v["inbox"]["removals"].as_array().unwrap();
+    assert_eq!(removals.len(), 1);
+    assert_eq!(removals[0]["path"], "inputs/wanted.txt");
+    assert_eq!(removals[0]["author"], "dilip");
+    assert_eq!(removals[0]["refused"]["kind"], "removal-refused-dirty");
+    let res = gw_req().method("GET").path("/lean/v1/proj1/status").reply(&routes).await;
+    let v: serde_json::Value = serde_json::from_slice(res.body()).unwrap();
+    assert_eq!(v["removals_pending"], 0);
+    assert_eq!(v["removals_refused"], 1);
+    // Withdrawing a refused record clears it.
+    let res = gw_req().method("DELETE").path("/lean/v1/proj1/removals/inputs/wanted.txt").reply(&routes).await;
+    assert_eq!(res.status(), 204);
+    let res = gw_req().method("GET").path("/lean/v1/proj1/status").reply(&routes).await;
+    let v: serde_json::Value = serde_json::from_slice(res.body()).unwrap();
+    assert_eq!(v["removals_refused"], 0);
+}
+
+/// Phase D control: the path rule is ONE predicate. Every traversal or
+/// reserved path in the table is refused identically through the HTTP
+/// route and the library verb, and a clean path reaches the verb on
+/// both sides (404, not 400) — a second copy of the rule would let the
+/// two drift and still pass.
+#[tokio::test]
+async fn a_bad_path_is_refused_identically_by_the_wire_and_the_library() {
+    use flint_lean_gateway::{VerbError, Workspace};
+    let store = Arc::new(MemoryStore::new());
+    let routes = routes(gw_core(&store));
+    let ws = Workspace::new(store.clone() as Arc<dyn ObjectStore>, PREFIX);
+    let table = ["../x", "a/../b", "a/./b", ".flint/x", ".flint", ".flint-sync/state"];
+    for bad in table {
+        let res = gw_req().method("DELETE").path(&format!("/lean/v1/proj1/files/{bad}")).reply(&routes).await;
+        assert_eq!(res.status(), 400, "wire DELETE {bad}");
+        let v: serde_json::Value = serde_json::from_slice(res.body()).unwrap();
+        assert_eq!(v["error"], "bad-path", "{bad}");
+        let err = ws.remove_file(bad, None, None).await.unwrap_err();
+        assert!(matches!(err, VerbError::BadPath(_)), "library remove {bad}: {err}");
+
+        let res = gw_req()
+            .method("POST")
+            .path("/lean/v1/proj1/rename")
+            .header("content-type", "application/json")
+            .body(format!(r#"{{"from":"ok.txt","to":"{bad}"}}"#))
+            .reply(&routes)
+            .await;
+        assert_eq!(res.status(), 400, "wire rename to {bad}");
+        let err = ws.rename_file("ok.txt", bad, None).await.unwrap_err();
+        assert!(matches!(err, VerbError::BadPath(_)), "library rename to {bad}: {err}");
+    }
+    // The positive control: a clean path gets past the rule on both sides.
+    let res = gw_req().method("DELETE").path("/lean/v1/proj1/files/clean/ok.txt").reply(&routes).await;
+    assert_eq!(res.status(), 404);
+    assert!(matches!(ws.remove_file("clean/ok.txt", None, None).await.unwrap_err(), VerbError::NoSuchFile(_)));
+}

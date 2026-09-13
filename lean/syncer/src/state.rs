@@ -122,6 +122,14 @@ pub struct IntentJournal {
     /// base IS this document.
     #[serde(default)]
     pub installed_etag: Option<String>,
+    /// Paths whose DECLARED removal this barrier unlinked and is about
+    /// to cite out (delete/rename design §4). Journalled before the
+    /// window commitment, so a crash after the cell has been told and
+    /// before the manifest CAS still produces ONE generation without
+    /// them, instead of handing the deletion to the two-scan path and
+    /// citing a file the tree no longer has for a barrier.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declared_deletes: Vec<String>,
 }
 
 /// One surfaced conflict: both versions stay recoverable (local bytes in
@@ -422,6 +430,7 @@ impl SyncerState {
         }
         j.flush_uuid = String::new();
         j.keys.clear();
+        j.declared_deletes.clear();
         self.save_intent(&j)
     }
 

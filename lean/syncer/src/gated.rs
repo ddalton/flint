@@ -397,17 +397,33 @@ impl Syncer {
         // Inbound HITL adoption stays exactly today's behavior: a HITL
         // write is already a coherent, whole-object act by a foreign
         // author, so it is not gated.
-        let consumed = self.consume_inbox().await?;
+        let inbox_doc = inbox::load(self.store.as_ref(), &self.cfg).await?.doc;
+        let consumed = self.consume_inbox_doc(&inbox_doc).await?;
         report.consumed = consumed.len();
         if !consumed.is_empty() {
             inbox::drop_entries(self.store.as_ref(), &self.cfg, epoch, &consumed).await?;
         }
+        // DECLARED removals (delete/rename design): unlinked here and
+        // WITHHELD like every other delete under gating, so they become
+        // reader-visible at a citation and nowhere else. Refusals are
+        // settled now; a performed removal stays in the cell until the
+        // citation that cites it out (`cite_pass` settles it), so a
+        // listing keeps hiding the path meanwhile. The pass is
+        // idempotent tick to tick: an already-unlinked path just
+        // re-declares.
+        let removals = self.apply_removals(&inbox_doc).await?;
+        inbox::settle_removals(self.store.as_ref(), &self.cfg, epoch, &[], &removals.refused)
+            .await?;
 
         let mut baseline = self.state.load_baseline()?;
         let scanned = scan::scan(&self.cfg.root)?;
         let mut classified = scan::classify(&scanned, &baseline);
         if declared {
             report.absences_confirmed = self.confirm_absences(&mut classified)?;
+        }
+        for p in &removals.declared {
+            classified.first_absence.remove(p);
+            classified.deletes.insert(p.clone());
         }
         report.first_absence = classified.first_absence.iter().cloned().collect();
         let mut stage = self.load_stage()?;
@@ -444,6 +460,9 @@ impl Syncer {
             keys: to_stage.iter().map(|p| self.cfg.file_key(p)).collect(),
             recent_uuids: prior_uuids.clone(),
             installed_etag: intent.installed_etag.clone(),
+            // The lane's declared deletes live in the persisted stage
+            // (`withheld_deletes`), not here.
+            declared_deletes: Vec::new(),
         };
         self.state.save_intent(&intent)?;
 
@@ -1239,6 +1258,17 @@ impl Syncer {
         baseline.manifest_etag = Some(installed_etag);
         self.state.save_baseline(&baseline)?;
         self.state.clear_intent_keys()?;
+
+        // The DECLARED removals whose deletion this citation installed
+        // leave the cell now — after the CAS, for the listing's sake.
+        let cited_out: Vec<inbox::Removal> = inbox::load(self.store.as_ref(), &self.cfg)
+            .await?
+            .doc
+            .removals
+            .into_iter()
+            .filter(|r| r.refused.is_none() && deletes.contains(&r.path))
+            .collect();
+        inbox::settle_removals(self.store.as_ref(), &self.cfg, epoch, &cited_out, &[]).await?;
 
         stage.entries.clear();
         stage.withheld_deletes.clear();

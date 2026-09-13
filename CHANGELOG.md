@@ -14,6 +14,33 @@ covered by the stability guarantee.
 
 ### Added
 
+- **lean: delete and rename from outside the pod — declared removals
+  (`docs/plans/flint-lean-delete-rename-design.md`, phases B, C, D).**
+  A UI could create and overwrite files through the gateway but not
+  delete or rename them: nothing in the inbox could say "gone", and a
+  caller that deleted the object itself would wedge every checkout. The
+  inbox cell gains a `removals` FIELD — a `Removal {path, author,
+  requested_unix, moved_to?, refused?}` per path, never a tombstone
+  entry — and the barrier gains one pass after the consume: a declared
+  removal of a clean path is unlinked, confirmed by lstat, and goes
+  STRAIGHT into the delete set, skipping the two-scan guard (a
+  declaration is not an absence inferred by a walk), so a rename's
+  destination entry and source removal ride ONE manifest generation. A
+  removal of a locally-dirty path applies nothing and is REFUSED with
+  the reason written back to the cell, attributed to who asked, and is
+  never retried. Performed removals leave the cell with the window
+  clear, after the manifest CAS, so a listing hides the path for
+  exactly as long as the manifest cites it; the intent journal carries
+  `declared_deletes` across a crash. `flint-lean-gateway`:
+  `remove_file(s)`, `rename_file(s)` (server-side copy, then one CAS
+  with both halves; refuses `DestinationExists`, overwrites only its
+  own orphan), `withdraw_removal`, `Snapshot::listing()`; on the wire
+  `DELETE /files/{path}`, `POST /rename`, `DELETE /removals/{path}`,
+  and `/status` counts pending and refused removals. Seven syncer
+  tests with three mutation controls (two-scan routing, the dirty
+  check, the journal), four API tests, three wire legs including the
+  one-predicate path table the design asks for.
+
 - **lean: the gateway is a crate — `flint-lean-gateway` on crates.io.**
   A backend that serves lean workspaces to a UI no longer runs a
   `flint-lean-gateway` process and speaks HTTP to it: it depends on the

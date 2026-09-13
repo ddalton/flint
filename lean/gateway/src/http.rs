@@ -28,6 +28,12 @@
 //!   window from the CELL — the statelessness contract).
 //! - `GET  /files/{path}`  — read via the manifest citation, falling
 //!   back to an uncited-but-tracked inbox entry.
+//! - `DELETE /files/{path}` — record a DECLARED removal (delete/rename
+//!   design): the syncer performs it at its next barrier. `If-Match`
+//!   optional. 204 as soon as the intent is durable.
+//! - `POST /rename` {from, to} — server-side copy, then one CAS with
+//!   the destination entry and the source removal; `{etag}`.
+//! - `DELETE /removals/{path}` — withdraw a recorded removal.
 //! - `PUT  /drafts/{user}/{path}` — save a DURABLE UNPUBLISHED edit
 //!   (`drafts.rs`). Unlike `PUT /files`, nothing about this is live:
 //!   the bytes sit under the reserved namespace where no scan, no
@@ -203,6 +209,12 @@ struct ManifestCasReq {
     flush_uuid: String,
 }
 
+#[derive(Deserialize)]
+struct RenameReq {
+    from: String,
+    to: String,
+}
+
 #[derive(Serialize)]
 pub(crate) struct EtagResp {
     pub(crate) etag: String,
@@ -286,6 +298,36 @@ pub fn routes(
         .and(warp::path::tail())
         .then(|_auth, core: Arc<GatewayCore>, ws: String, tail: warp::path::Tail| {
             handle_files_get(core, ws, tail.as_str().to_string())
+        }).boxed();
+
+    let files_delete = warp::delete()
+        .and(authed.clone())
+        .and(with_core.clone())
+        .and(warp::path!("lean" / "v1" / String / "files" / ..))
+        .and(warp::path::tail())
+        .and(warp::header::optional::<String>("x-flint-author"))
+        .and(warp::header::optional::<String>("if-match"))
+        .then(
+            |_auth, core: Arc<GatewayCore>, ws: String, tail: warp::path::Tail, author, if_match| {
+                handle_files_delete(core, ws, tail.as_str().to_string(), author, if_match)
+            },
+        ).boxed();
+
+    let rename = warp::post()
+        .and(authed.clone())
+        .and(with_core.clone())
+        .and(warp::path!("lean" / "v1" / String / "rename"))
+        .and(warp::header::optional::<String>("x-flint-author"))
+        .and(warp::body::json::<RenameReq>())
+        .then(handle_rename).boxed();
+
+    let removal_withdraw = warp::delete()
+        .and(authed.clone())
+        .and(with_core.clone())
+        .and(warp::path!("lean" / "v1" / String / "removals" / ..))
+        .and(warp::path::tail())
+        .then(|_auth, core: Arc<GatewayCore>, ws: String, tail: warp::path::Tail| {
+            handle_removal_withdraw(core, ws, tail.as_str().to_string())
         }).boxed();
 
     // ── drafts (`drafts.rs`) ─────────────────────────────────────────
@@ -427,6 +469,9 @@ pub fn routes(
 
     files_put
         .or(files_get).unify()
+        .or(files_delete).unify()
+        .or(rename).unify()
+        .or(removal_withdraw).unify()
         // The exact-match list route goes BEFORE the tail routes: a
         // tail filter matches `/drafts/{u}` with an EMPTY tail, which
         // `path_ok` then refuses as a bad path instead of listing.
@@ -489,6 +534,46 @@ async fn handle_files_get(
     let Some(w) = core.workspace(&ws) else { return unknown_workspace(ws) };
     match w.get_file(&path).await {
         Ok(blob) => body_reply(&blob.etag, blob.body),
+        Err(e) => reply_err(e),
+    }
+}
+
+async fn handle_files_delete(
+    core: Arc<GatewayCore>,
+    ws: String,
+    path: String,
+    author: Option<String>,
+    if_match: Option<String>,
+) -> warp::reply::Response {
+    let Some(w) = core.workspace(&ws) else { return unknown_workspace(ws) };
+    match w.remove_file(&path, author.as_deref(), if_match.as_deref()).await {
+        Ok(()) => warp::reply::with_status("", StatusCode::NO_CONTENT).into_response(),
+        Err(e) => reply_err(e),
+    }
+}
+
+async fn handle_rename(
+    _auth: (),
+    core: Arc<GatewayCore>,
+    ws: String,
+    author: Option<String>,
+    req: RenameReq,
+) -> warp::reply::Response {
+    let Some(w) = core.workspace(&ws) else { return unknown_workspace(ws) };
+    match w.rename_file(&req.from, &req.to, author.as_deref()).await {
+        Ok(etag) => ok_json(&EtagResp { etag }),
+        Err(e) => reply_err(e),
+    }
+}
+
+async fn handle_removal_withdraw(
+    core: Arc<GatewayCore>,
+    ws: String,
+    path: String,
+) -> warp::reply::Response {
+    let Some(w) = core.workspace(&ws) else { return unknown_workspace(ws) };
+    match w.withdraw_removal(&path).await {
+        Ok(()) => warp::reply::with_status("", StatusCode::NO_CONTENT).into_response(),
         Err(e) => reply_err(e),
     }
 }
@@ -702,6 +787,8 @@ mod tests {
             (VerbError::ForeignWrite { path: "p".into() }, 410, "foreign-write", None, None),
             (VerbError::UncitedBytes { path: "p".into() }, 410, "uncited-bytes", None, None),
             (VerbError::TooLarge { size: 2, max: 1 }, 413, "payload-too-large", None, None),
+            (VerbError::DestinationExists { path: "p".into(), current: Some("\"e3\"".into()) }, 409, "destination-exists", Some(2), None),
+            (VerbError::NoRemoval("p".into()), 404, "no-removal", None, None),
             (VerbError::NoDraft("d".into()), 404, "no-draft", None, None),
             (VerbError::DraftStale { current: Some("\"e2\"".into()), message: "s".into() }, 409, "draft-stale", Some(2), Some("\"e2\"")),
             (VerbError::DraftMoved("p".into()), 409, "draft-moved", Some(2), None),

@@ -10243,3 +10243,415 @@ async fn a_gated_citation_repair_on_a_backend_that_attests_no_checksum_cites_the
     b.checkout().await.unwrap();
     assert_eq!(read(dir2.path(), "docs/upload.pdf").unwrap(), "user bytes");
 }
+
+// ---------------------------------------------------------------------
+// DECLARED removals (docs/plans/flint-lean-delete-rename-design.md):
+// delete and rename asked for from OUTSIDE the pod, performed by the
+// barrier — one manifest generation, never a hole.
+// ---------------------------------------------------------------------
+
+/// What the gateway crate's `remove_file` records: a removal in the
+/// cell, nothing else. The caller never touches the object.
+async fn hitl_remove(store: &Arc<MemoryStore>, cfg: &LeanConfig, path: &str, author: &str) {
+    inbox::gateway_remove(
+        store.as_ref(),
+        cfg,
+        vec![inbox::Removal {
+            path: path.to_string(),
+            author: author.to_string(),
+            requested_unix: now_unix(),
+            moved_to: None,
+            refused: None,
+        }],
+    )
+    .await
+    .unwrap();
+}
+
+/// What the gateway crate's `rename_file` does: a server-side copy to
+/// the destination (create first), then ONE CAS carrying the
+/// destination entry and the source removal (removal second).
+async fn hitl_rename(store: &Arc<MemoryStore>, cfg: &LeanConfig, from: &str, to: &str, author: &str) {
+    let m = manifest::load(store.as_ref(), cfg).await.unwrap().unwrap();
+    let src = m.manifest.entries.get(from).expect("source is cited");
+    let stamps = GenerationStamps {
+        generation: 1,
+        epoch: 0,
+        flush_uuid: format!("gateway-rename-{author}"),
+        boundary_source: None,
+        posix: None,
+    };
+    let dst = store
+        .copy_object(
+            &cfg.file_key(from),
+            Some(&src.etag),
+            &cfg.file_key(to),
+            &PutCondition::IfNoneMatchAny,
+            &stamps,
+        )
+        .await
+        .unwrap();
+    inbox::gateway_rename(
+        store.as_ref(),
+        cfg,
+        vec![InboxEntry {
+            path: to.to_string(),
+            etag: dst.etag,
+            author: author.to_string(),
+            added_unix: now_unix(),
+            crc64_b64: Some(src.crc64_b64.clone()),
+        }],
+        vec![inbox::Removal {
+            path: from.to_string(),
+            author: author.to_string(),
+            requested_unix: now_unix(),
+            moved_to: Some(to.to_string()),
+            refused: None,
+        }],
+    )
+    .await
+    .unwrap();
+}
+
+/// Phase B control (1): a DECLARED removal reaches the delete set in
+/// ONE barrier — it skips the two-scan guard, because a declaration is
+/// not an absence inferred by a walk. Mutation: route it through
+/// `first_absence` and the one-barrier assertions fail.
+#[tokio::test]
+async fn a_declared_removal_is_cited_out_in_one_barrier() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+    write(dir.path(), "README.md", "hello");
+    write(dir.path(), "src/main.rs", "fn main() {}");
+    sc.run_barrier().await.unwrap();
+    let before = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest.seq;
+
+    hitl_remove(&store, &sc.cfg, "README.md", "dilip").await;
+    // Recorded, not performed: the object and the citation stand until
+    // the syncer gets to it, and the cell says a removal is pending.
+    assert!(store.head(&sc.cfg.file_key("README.md")).await.is_ok());
+    let ib = inbox::load(store.as_ref(), &sc.cfg).await.unwrap();
+    assert!(ib.doc.pending_removal("README.md").is_some());
+
+    let r = sc.run_barrier().await.unwrap();
+    assert_eq!(r.removed, vec!["README.md".to_string()], "declared this barrier");
+    assert_eq!(r.deleted, vec!["README.md".to_string()], "and GC'd this barrier, not next");
+    assert!(r.first_absence.is_empty(), "a declaration is not a first absence");
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    assert_eq!(m.manifest.seq, before + 1, "exactly one generation");
+    assert!(!m.manifest.entries.contains_key("README.md"));
+    assert!(m.manifest.entries.contains_key("src/main.rs"));
+    assert!(store.head(&sc.cfg.file_key("README.md")).await.is_err(), "object GC'd");
+    assert!(read(dir.path(), "README.md").is_none(), "unlinked from the agent's tree");
+    let ib = inbox::load(store.as_ref(), &sc.cfg).await.unwrap();
+    assert!(ib.doc.removals.is_empty(), "settled out of the cell");
+    assert!(!sc.state.load_baseline().unwrap().entries.contains_key("README.md"));
+
+    // Nothing left to do: the next barrier is a no-change tick.
+    let r2 = sc.run_barrier().await.unwrap();
+    assert!(r2.no_change, "{r2:?}");
+
+    // A fresh checkout agrees.
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = syncer(&store, dir_b.path()).await;
+    let cr = b.checkout().await.unwrap();
+    assert_eq!(cr.materialized, 1);
+    assert!(read(dir_b.path(), "README.md").is_none());
+}
+
+/// Phase B control (2): a removal of a LOCALLY-DIRTY path applies
+/// NOTHING and is refused with the reason in the cell — the agent's
+/// unpublished edit is kept and published. Never retried: a retry that
+/// waited for the publish would delete the very edit the refusal
+/// protected. Mutation: drop the dirty check and the agent's edit
+/// disappears.
+#[tokio::test]
+async fn a_declared_removal_of_a_dirty_path_applies_nothing_and_is_refused() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+    write(dir.path(), "shared.txt", "v1");
+    sc.run_barrier().await.unwrap();
+
+    // The agent edits (a different size: dirty whatever the mtime says).
+    write(dir.path(), "shared.txt", "the agent's unpublished v2");
+    backdate_baseline(&sc, "shared.txt");
+    hitl_remove(&store, &sc.cfg, "shared.txt", "dilip").await;
+
+    let r = sc.run_barrier().await.unwrap();
+    assert!(r.removed.is_empty(), "nothing declared");
+    assert!(r.deleted.is_empty(), "nothing deleted");
+    assert_eq!(r.removals_refused, 1);
+    assert_eq!(read(dir.path(), "shared.txt").unwrap(), "the agent's unpublished v2");
+    assert_eq!(r.uploaded, vec!["shared.txt".to_string()], "the agent's edit publishes");
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    let (_, body) = store.get_whole(&sc.cfg.file_key("shared.txt"), None).await.unwrap();
+    assert_eq!(&body[..], b"the agent's unpublished v2");
+    assert!(m.manifest.entries.contains_key("shared.txt"));
+
+    // The cell carries the answer, attributed and reasoned.
+    let ib = inbox::load(store.as_ref(), &sc.cfg).await.unwrap();
+    assert!(ib.doc.pending_removal("shared.txt").is_none(), "not pending any more");
+    let rm = ib.doc.removals.iter().find(|r| r.path == "shared.txt").expect("kept, annotated");
+    let refusal = rm.refused.as_ref().expect("refused");
+    assert_eq!(refusal.kind, "removal-refused-dirty");
+    assert!(refusal.message.contains("dilip"), "names who asked: {}", refusal.message);
+    assert!(refusal.message.contains("kept"), "{}", refusal.message);
+    assert!(
+        sc.state.load_conflicts().unwrap().iter().any(|c| c.kind.starts_with("removal-refused-dirty")),
+        "the pod-side record too"
+    );
+
+    // Never retried: now that the edit is published the path is CLEAN,
+    // and a retry would delete it. Two more barriers change nothing.
+    for _ in 0..2 {
+        let r = sc.run_barrier().await.unwrap();
+        assert!(r.deleted.is_empty() && r.removed.is_empty(), "{r:?}");
+    }
+    assert_eq!(read(dir.path(), "shared.txt").unwrap(), "the agent's unpublished v2");
+    assert!(store.head(&sc.cfg.file_key("shared.txt")).await.is_ok());
+
+    // A NEW removal of the path supersedes the refused one and, the
+    // path now being clean, is performed.
+    hitl_remove(&store, &sc.cfg, "shared.txt", "dilip").await;
+    let r = sc.run_barrier().await.unwrap();
+    assert_eq!(r.deleted, vec!["shared.txt".to_string()]);
+    assert!(inbox::load(store.as_ref(), &sc.cfg).await.unwrap().doc.removals.is_empty());
+}
+
+/// Phase B control (3): an unlink that fails publishes NO deletion. The
+/// removal stays pending (transient), the manifest keeps citing, the
+/// object stays; once the unlink can succeed the removal goes through.
+#[tokio::test]
+async fn a_failed_unlink_publishes_no_deletion() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root ignores directory permissions");
+        return;
+    }
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+    write(dir.path(), "locked/f.txt", "keep");
+    sc.run_barrier().await.unwrap();
+
+    use std::os::unix::fs::PermissionsExt;
+    let locked = dir.path().join("locked");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    hitl_remove(&store, &sc.cfg, "locked/f.txt", "dilip").await;
+    let r = sc.run_barrier().await.unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(r.removed.is_empty() && r.deleted.is_empty(), "{r:?}");
+    assert_eq!(read(dir.path(), "locked/f.txt").unwrap(), "keep");
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    assert!(m.manifest.entries.contains_key("locked/f.txt"), "still cited");
+    assert!(store.head(&sc.cfg.file_key("locked/f.txt")).await.is_ok(), "object untouched");
+    let ib = inbox::load(store.as_ref(), &sc.cfg).await.unwrap();
+    assert!(ib.doc.pending_removal("locked/f.txt").is_some(), "deferred, not refused");
+    assert!(sc
+        .state
+        .load_conflicts()
+        .unwrap()
+        .iter()
+        .any(|c| c.kind.starts_with("removal-unlink-failed")));
+
+    // Unlockable now: the same pending removal is performed.
+    let r = sc.run_barrier().await.unwrap();
+    assert_eq!(r.deleted, vec!["locked/f.txt".to_string()]);
+    assert!(read(dir.path(), "locked/f.txt").is_none());
+}
+
+/// Phase C control: a rename is ONE manifest generation. A reader
+/// resolving through the manifest sees {source} or {destination},
+/// never both and never neither; the bytes are the same bytes (the
+/// CRC the destination cites is the source's), the source object is
+/// GC'd, and the agent's tree has the file under its new name.
+#[tokio::test]
+async fn a_rename_rides_one_manifest_generation() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+    write(dir.path(), "notes/a.txt", "the same bytes");
+    sc.run_barrier().await.unwrap();
+    let before = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    let src_crc = before.manifest.entries["notes/a.txt"].crc64_b64.clone();
+
+    hitl_rename(&store, &sc.cfg, "notes/a.txt", "docs/b.txt", "dilip").await;
+    // Before the barrier: destination readable, source still cited —
+    // an extra file, never a hole.
+    assert!(store.head(&sc.cfg.file_key("docs/b.txt")).await.is_ok());
+    assert!(store.head(&sc.cfg.file_key("notes/a.txt")).await.is_ok());
+    let ib = inbox::load(store.as_ref(), &sc.cfg).await.unwrap();
+    assert_eq!(ib.doc.entries.len(), 1);
+    assert_eq!(ib.doc.removals.len(), 1);
+    assert_eq!(ib.doc.removals[0].moved_to.as_deref(), Some("docs/b.txt"));
+
+    let r = sc.run_barrier().await.unwrap();
+    assert_eq!(r.consumed, 1);
+    assert_eq!(r.removed, vec!["notes/a.txt".to_string()]);
+    assert_eq!(r.deleted, vec!["notes/a.txt".to_string()]);
+    let after = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    assert_eq!(after.manifest.seq, before.manifest.seq + 1, "ONE generation carries both halves");
+    assert!(!after.manifest.entries.contains_key("notes/a.txt"));
+    let dst = &after.manifest.entries["docs/b.txt"];
+    assert_eq!(dst.crc64_b64, src_crc, "the same bytes, attested");
+    assert!(store.head(&sc.cfg.file_key("notes/a.txt")).await.is_err(), "source GC'd");
+    assert_eq!(read(dir.path(), "docs/b.txt").unwrap(), "the same bytes");
+    assert!(read(dir.path(), "notes/a.txt").is_none());
+    assert!(inbox::load(store.as_ref(), &sc.cfg).await.unwrap().doc.removals.is_empty());
+
+    // A fresh checkout materialises exactly the destination.
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = syncer(&store, dir_b.path()).await;
+    let cr = b.checkout().await.unwrap();
+    assert_eq!(cr.materialized, 1);
+    assert_eq!(read(dir_b.path(), "docs/b.txt").unwrap(), "the same bytes");
+}
+
+/// Phase C control, the crash: the syncer dies after the destination
+/// landed in the tree and before the source was unlinked. On restart
+/// the source still exists (an extra file, never a hole) and the
+/// transaction re-applies as ONE generation.
+#[tokio::test]
+async fn a_rename_interrupted_before_the_source_unlink_re_applies() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+    write(dir.path(), "a.txt", "bytes");
+    sc.run_barrier().await.unwrap();
+    let before = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest.seq;
+
+    hitl_rename(&store, &sc.cfg, "a.txt", "b.txt", "dilip").await;
+    // Step 1 only: the destination is integrated; then the pod dies.
+    sc.consume_inbox().await.unwrap();
+    assert_eq!(read(dir.path(), "b.txt").unwrap(), "bytes");
+    assert_eq!(read(dir.path(), "a.txt").unwrap(), "bytes", "the source is still there");
+    drop(sc);
+
+    // Restart on the same tree (marker present: reload, never re-materialise).
+    let mut sc = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut sc, 3).await);
+    let r = sc.run_barrier().await.unwrap();
+    assert_eq!(r.removed, vec!["a.txt".to_string()]);
+    let after = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    assert_eq!(after.manifest.seq, before + 1, "still one generation");
+    assert!(after.manifest.entries.contains_key("b.txt"));
+    assert!(!after.manifest.entries.contains_key("a.txt"));
+    assert!(read(dir.path(), "a.txt").is_none());
+    assert_eq!(read(dir.path(), "b.txt").unwrap(), "bytes");
+}
+
+/// The journal half of the crash story: a barrier that unlinked and
+/// journalled its declared deletes, then died before the manifest CAS
+/// — and whose removal has meanwhile left the cell (withdrawn, or
+/// superseded). The next barrier still cites the path out in ONE
+/// generation from the journal, rather than handing an already-absent
+/// file to the two-scan path and citing it for a barrier it no longer
+/// has. Mutation: ignore `declared_deletes` and the first barrier
+/// reports a first absence instead of a delete.
+#[tokio::test]
+async fn a_journalled_declared_delete_survives_a_crash() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+    write(dir.path(), "gone.txt", "bytes");
+    write(dir.path(), "kept.txt", "bytes");
+    sc.run_barrier().await.unwrap();
+    let before = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest.seq;
+
+    // What the crashed barrier left behind: the unlink and the journal.
+    std::fs::remove_file(dir.path().join("gone.txt")).unwrap();
+    let mut intent = sc.state.load_intent().unwrap();
+    intent.declared_deletes = vec!["gone.txt".to_string()];
+    sc.state.save_intent(&intent).unwrap();
+    drop(sc);
+
+    let mut sc = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut sc, 3).await);
+    let r = sc.run_barrier().await.unwrap();
+    assert_eq!(r.deleted, vec!["gone.txt".to_string()], "one barrier, from the journal");
+    assert!(r.first_absence.is_empty());
+    let after = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    assert_eq!(after.manifest.seq, before + 1);
+    assert!(!after.manifest.entries.contains_key("gone.txt"));
+    assert!(after.manifest.entries.contains_key("kept.txt"));
+    assert!(sc.state.load_intent().unwrap().declared_deletes.is_empty(), "cleared with the keys");
+}
+
+/// A removal recorded from outside for a path the agent ALSO removed,
+/// or that a scoped tree never held, is declared as it stands; and a
+/// removal of nothing at all is applied as a no-op rather than left
+/// pending forever.
+#[tokio::test]
+async fn a_declared_removal_of_an_already_absent_path_declares_as_it_stands() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+    write(dir.path(), "both.txt", "bytes");
+    sc.run_barrier().await.unwrap();
+
+    // The agent deletes it AND the UI asks for the same: one barrier,
+    // not the two the walk alone would take.
+    std::fs::remove_file(dir.path().join("both.txt")).unwrap();
+    hitl_remove(&store, &sc.cfg, "both.txt", "dilip").await;
+    hitl_remove(&store, &sc.cfg, "never/there.txt", "dilip").await;
+    let r = sc.run_barrier().await.unwrap();
+    assert_eq!(r.deleted, vec!["both.txt".to_string()]);
+    assert!(r.first_absence.is_empty());
+    let ib = inbox::load(store.as_ref(), &sc.cfg).await.unwrap();
+    assert!(ib.doc.removals.is_empty(), "both settled: {:?}", ib.doc.removals);
+}
+
+/// A rename whose destination the agent had ALREADY taken with an
+/// unpublished file: the consume resolves the destination the way it
+/// resolves every HITL write over dirty bytes (the agent's version
+/// wins, the moved bytes are preserved), and the removal is REFUSED so
+/// the source stays — the user's file is still in the tree under its
+/// old name, never only under `conflicts/`.
+#[tokio::test]
+async fn a_rename_whose_destination_the_agent_took_keeps_the_source() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+    write(dir.path(), "a.txt", "the user's bytes");
+    sc.run_barrier().await.unwrap();
+
+    // The agent creates b.txt locally (unpublished) ...
+    write(dir.path(), "b.txt", "the agent's unpublished file");
+    // ... and the UI moves a.txt to b.txt.
+    hitl_rename(&store, &sc.cfg, "a.txt", "b.txt", "dilip").await;
+
+    let r = sc.run_barrier().await.unwrap();
+    assert_eq!(r.consumed, 1, "the destination entry is consumed (as a conflict)");
+    assert_eq!(r.removals_refused, 1);
+    assert!(r.removed.is_empty() && r.deleted.is_empty(), "{r:?}");
+    assert_eq!(read(dir.path(), "a.txt").unwrap(), "the user's bytes", "the source stays");
+    assert_eq!(read(dir.path(), "b.txt").unwrap(), "the agent's unpublished file");
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    assert!(m.manifest.entries.contains_key("a.txt"), "still cited");
+    let (_, b) = store.get_whole(&sc.cfg.file_key("b.txt"), None).await.unwrap();
+    assert_eq!(&b[..], b"the agent's unpublished file", "the agent's version publishes");
+    let ib = inbox::load(store.as_ref(), &sc.cfg).await.unwrap();
+    let rm = ib.doc.removals.iter().find(|r| r.path == "a.txt").expect("refused, kept");
+    assert_eq!(rm.refused.as_ref().unwrap().kind, "removal-refused-destination-conflict");
+    let conflicts = sc.state.load_conflicts().unwrap();
+    let c = conflicts.iter().find(|c| c.kind == "consume-dirty" && c.path == "b.txt").unwrap();
+    let (_, kept) = store.get_whole(c.preserved_key.as_ref().unwrap(), None).await.unwrap();
+    assert_eq!(&kept[..], b"the user's bytes", "the moved bytes are preserved too");
+}
