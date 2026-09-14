@@ -910,8 +910,8 @@ impl Syncer {
         // subcommand, which otherwise leaves an agent with no marker to
         // read and therefore no way to know the verbs exist.
         let posture = self.sentinel_preflight()?;
-        self.write_capabilities(&posture, false)?;
-        self.write_gauges(false, None)?;
+        self.write_capabilities(&posture)?;
+        self.write_gauges(None)?;
         // The marker is written LAST: the agent-start gate.
         self.state.write_marker()?;
         report.commit_secs = t_commit.elapsed().as_secs_f64();

@@ -345,14 +345,45 @@ impl Syncer {
         //    already-integrated at the next merge and is lost.
         let theirs_base: BTreeMap<String, String> =
             theirs.entries.iter().map(|(p, e)| (p.clone(), e.etag.clone())).collect();
+        //    Except where an inbox OVERLAY hid the manifest's version. This
+        //    sync judged those paths against the overlay's etag, never the
+        //    manifest's, so the base must not claim the manifest's: an
+        //    entry can be OLDER than the manifest (the commit that cited
+        //    past it drops it only after its CAS), and advancing there
+        //    skipped a change the tree never received — for good, since
+        //    nothing later compares against it again (the model's
+        //    LeanBarrierLeaseSyncOverlayStale). Left where it was, the next
+        //    barrier's merge sees the manifest's change as foreign and
+        //    brings it in.
+        let hidden: std::collections::BTreeSet<&String> = ib
+            .doc
+            .entries
+            .iter()
+            .map(|e| &e.path)
+            .filter(|p| theirs_base.get(*p) != remote.get(*p))
+            .collect();
         match &scope {
             None => {
+                let before = std::mem::take(&mut baseline.inst_base);
+                baseline.inst_base = theirs_base.clone();
+                for path in &hidden {
+                    match before.get(*path) {
+                        Some(etag) => {
+                            baseline.inst_base.insert((*path).clone(), etag.clone());
+                        }
+                        None => {
+                            baseline.inst_base.remove(*path);
+                        }
+                    }
+                }
                 baseline.seq = theirs.seq;
-                baseline.inst_base = theirs_base;
                 report.seq = theirs.seq;
             }
             Some(_) => {
                 for path in &advanced.0 {
+                    if hidden.contains(path) {
+                        continue;
+                    }
                     match theirs_base.get(path) {
                         Some(etag) => {
                             baseline.inst_base.insert(path.clone(), etag.clone());

@@ -1,5 +1,16 @@
-//! The subtree lease (plan P4: `tier::epoch` re-scoped to the lean
-//! subtree cell), with lean's own claim loop.
+//! The subtree lease, held for ONE BARRIER's commit section (design
+//! 2026-09-13, `docs/plans/flint-lean-writer-lease-and-gated-assessment.md`
+//! §4), with a FIFO ticket so W writers wait at most W barriers.
+//!
+//! What the cell arbitrates is who may INSTALL a manifest. Nothing
+//! else: checkout, sync, status and the uploads of a barrier hold
+//! nothing, because every one of those is guarded by the object's own
+//! etag (`If-Match`) and installs no citation. Between barriers nobody
+//! holds the cell, so a second writer on the same workspace is Ready in
+//! checkout time and publishes every floor — the life-long lease this
+//! replaces made it wait the first writer's LIFETIME in
+//! ContainerCreating (`verbs.rs` used to call it "a DEADLOCK dressed as
+//! mutual exclusion", and had already taken checkout out of it).
 //!
 //! Deliberately NOT `tier::epoch::claim`: that path (a) runs the
 //! bucket-wide MPU takeover sweep, which a project-scoped proxy denies
@@ -11,25 +22,66 @@
 //! safe. A replacement pod gets a fresh id and must wait out the quiet
 //! polls; that observation ({last_token, quiet_polls}) persists so a
 //! container restart RESUMES it instead of resetting the clock.
+//!
+//! The claim step is one read plus at most one CAS. Its verdicts:
+//!
+//! - a FRESH cell: acquire.
+//! - a cell that names THIS incarnation at THIS epoch: our own acquire
+//!   whose response was lost — adopt it.
+//! - a RELEASED cell reserved for nobody, or for us: acquire (a clean
+//!   handoff; no manifest rotation).
+//! - a RELEASED cell reserved for someone else: queue up once, and wait
+//!   — unless the reservation has stood unclaimed across
+//!   `HANDOFF_QUIET_POLLS` spaced observations (the reserved holder
+//!   died), in which case take it.
+//! - a cell HELD by someone else (or by us at an epoch we never
+//!   recorded: an orphaned acquire): queue up once, and wait — unless it
+//!   has stood still across `QUIET_POLLS` spaced observations (the
+//!   holder died inside its commit section), in which case DEPOSE it and
+//!   rotate the manifest, exactly the straggler fence there always was.
+//!
+//! An observation is "spaced" when at least `QUIET_SPACING_SECS` passed
+//! since the previous counted one. The wait loop polls faster than
+//! that (`CLAIM_POLL_SECS`), so a release is seen within a second, but
+//! deadness is still judged over a minute of a token that does not move.
+//! A waiter's own enqueue moves the token; the holder's next renew or
+//! handoff 412s, re-reads, and adopts the longer queue (`renew`,
+//! `release`).
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use flint_store::{EpochLease, ObjectStore, StoreError};
+use bytes::Bytes;
+use flint_store::{EpochLease, EpochState, GenerationStamps, ObjectStore, PutCondition, StoreError};
 
 use super::state::Incarnation;
 use super::{manifest, LeanError, LeanResult, Syncer};
 
-/// Quiet polls required before superseding a foreign holder (the
-/// token must not advance across this many observations).
+/// Spaced quiet observations before a HELD cell's holder is judged dead
+/// and deposed (6 x 10 s: the takeover threshold the drills were run at).
 pub const QUIET_POLLS: u32 = 6;
+/// Spaced quiet observations before a RELEASED cell's reservation is
+/// judged abandoned (the reserved waiter died before claiming).
+pub const HANDOFF_QUIET_POLLS: u32 = 2;
+/// Minimum spacing between two observations that COUNT toward either
+/// threshold. Polls in between only look for a release or a handoff.
+pub const QUIET_SPACING_SECS: u64 = 10;
+/// The wait loop's poll cadence: one GET of a few-hundred-byte cell.
+pub const CLAIM_POLL_SECS: u64 = 1;
+/// Longest a barrier waits for the cell before failing (and being
+/// retried at the next floor). Comfortably past the deposal threshold
+/// plus the spacing it needs, so a dead holder is always deposed within
+/// one wait; a LIVE holder that never releases is a bug, and the
+/// deadline is what keeps it from being a hang.
+pub const CLAIM_DEADLINE_SECS: u64 = 150;
 
 pub enum ClaimOutcome {
-    /// Fresh cell or clean-released cell: claimed immediately.
+    /// Fresh, released-for-us, deposed, or adopted: held.
     Claimed(EpochLease),
-    /// Foreign holder's token advanced (or not enough quiet polls yet):
-    /// call again after the heartbeat interval. The observation is
-    /// persisted.
-    Waiting { quiet_polls: u32 },
+    /// Not ours yet. `quiet_polls` is the spaced-observation count
+    /// against the current verdict's threshold; `behind` names the
+    /// holder or the reserved waiter we are waiting on.
+    Waiting { quiet_polls: u32, behind: Option<String> },
 }
 
 /// Say so, loudly, if another product also writes this prefix.
@@ -77,21 +129,39 @@ pub async fn warn_if_prefix_is_shared(sc: &Syncer) {
     }
 }
 
+/// This pod's identity, minted once and persisted in the state
+/// directory (emptyDir-scoped: a restarted container inherits it, a
+/// replacement pod does not).
+pub fn incarnation(sc: &Syncer) -> LeanResult<Incarnation> {
+    match sc.state.load_incarnation()? {
+        Some(i) => Ok(i),
+        None => {
+            let i = Incarnation {
+                holder_id: format!("lean-{}", uuid::Uuid::new_v4()),
+                epoch: 0,
+                last_token: None,
+                quiet_polls: 0,
+            };
+            sc.state.save_incarnation(&i)?;
+            Ok(i)
+        }
+    }
+}
+
 /// One claim step. The caller loops on `Waiting` at its poll cadence;
-/// each call performs at most one read + one acquire.
-pub async fn claim_step(sc: &mut Syncer) -> LeanResult<ClaimOutcome> {
+/// each call performs one read and at most one CAS (an acquire, or an
+/// enqueue). `count` says whether this observation is spaced far
+/// enough from the last counted one to advance the quiet thresholds —
+/// the loop decides that from its own clock, so the judgement of
+/// deadness stays tied to wall time however fast the loop polls.
+pub async fn claim_step(sc: &mut Syncer, count: bool) -> LeanResult<ClaimOutcome> {
     let store: &Arc<dyn ObjectStore> = &sc.store;
     let key = sc.cfg.epoch_key();
-    let mut inc = sc.state.load_incarnation()?.unwrap_or_else(|| Incarnation {
-        holder_id: format!("lean-{}", uuid::Uuid::new_v4()),
-        epoch: 0,
-        last_token: None,
-        quiet_polls: 0,
-    });
+    let mut inc = incarnation(sc)?;
 
     let observed = store.epoch_read(&key).await?;
-    match observed {
-        None => match store.epoch_acquire(&key, &inc.holder_id, None).await {
+    let Some(state) = observed else {
+        return match store.epoch_acquire(&key, &inc.holder_id, None).await {
             Ok(lease) => {
                 inc.epoch = lease.epoch;
                 inc.last_token = None;
@@ -101,75 +171,175 @@ pub async fn claim_step(sc: &mut Syncer) -> LeanResult<ClaimOutcome> {
                 Ok(ClaimOutcome::Claimed(lease))
             }
             Err(StoreError::PreconditionFailed(_)) | Err(StoreError::Conflict(_)) => {
-                Ok(ClaimOutcome::Waiting { quiet_polls: 0 })
+                Ok(ClaimOutcome::Waiting { quiet_polls: 0, behind: None })
             }
             Err(e) => Err(e.into()),
-        },
-        Some(state) => {
-            // Self-recognition needs the EPOCH too (review 2026-09-12,
-            // lease-3 / audit #7): a cell naming this holder at an epoch
-            // this incarnation never recorded is our own acquire whose
-            // response was lost, or whose rotation failed after it
-            // landed — the straggler it deposed may still be mid-barrier,
-            // so that path takes the takeover rotation like any other.
-            let same_holder = state.holder_id == inc.holder_id;
-            let ours = same_holder && state.epoch == inc.epoch;
-            let orphaned_own = same_holder && !ours;
-            let quiet = inc.last_token.as_deref() == Some(state.token.as_str());
-            if ours || orphaned_own || state.released || (quiet && inc.quiet_polls + 1 >= QUIET_POLLS) {
-                // Self-recognition (same emptyDir), a clean release, or
-                // a lease judged dead across QUIET_POLLS observations.
-                //
-                // Rotation is needed ONLY for the unreleased-foreign
-                // takeover (a possibly-live straggler mid-barrier). A
-                // released cell is a clean handoff — the holder's final
-                // barrier completed before release — and self-
-                // recognition means the previous container's process
-                // (and any in-flight write of its) died with it.
-                // Rotating on those paths is pure manifest churn: at
-                // 100k+ entries it is a multi-MB GET+PUT per claim, it
-                // double-bumps seq, and it defeats the no-change
-                // barrier's early exit (measured on the 0b rig).
-                let rotate = !ours && !state.released;
-                match store.epoch_acquire(&key, &inc.holder_id, Some(&state)).await {
-                    Ok(lease) => {
-                        if rotate {
-                            manifest::rotate_for_takeover(store.as_ref(), &sc.cfg, lease.epoch)
-                                .await?;
-                        }
-                        inc.epoch = lease.epoch;
-                        inc.last_token = None;
-                        inc.quiet_polls = 0;
-                        sc.state.save_incarnation(&inc)?;
-                        sc.lease = Some(lease.clone());
-                        Ok(ClaimOutcome::Claimed(lease))
-                    }
-                    Err(StoreError::PreconditionFailed(_)) | Err(StoreError::Conflict(_)) => {
-                        // Lost the supersede race; restart observation.
-                        inc.last_token = None;
-                        inc.quiet_polls = 0;
-                        sc.state.save_incarnation(&inc)?;
-                        Ok(ClaimOutcome::Waiting { quiet_polls: 0 })
-                    }
-                    Err(e) => Err(e.into()),
+        };
+    };
+
+    // Self-recognition needs the EPOCH too (review 2026-09-12, lease-3 /
+    // audit #7): a cell naming this holder at an epoch this incarnation
+    // never recorded is our own acquire whose response was lost, or
+    // whose rotation failed after it landed — the straggler it deposed
+    // may still be mid-barrier, so that path takes the takeover
+    // rotation like any other.
+    let same_holder = state.holder_id == inc.holder_id;
+    let ours = same_holder && state.epoch == inc.epoch && !state.released;
+    let quiet = inc.last_token.as_deref() == Some(state.token.as_str());
+    let counted_quiet = if count {
+        if quiet {
+            inc.quiet_polls + 1
+        } else {
+            0
+        }
+    } else {
+        inc.quiet_polls
+    };
+
+    if ours {
+        // Our own acquire whose response was lost, or a cell a previous
+        // container of this pod is still named on at the epoch we
+        // recorded: adopt it IN PLACE — token and queue as they stand,
+        // no write. (Re-acquiring would move the epoch for nothing and
+        // make every reader of the cell count a barrier that never ran.)
+        let lease = EpochLease {
+            holder_id: state.holder_id,
+            epoch: state.epoch,
+            token: state.token,
+            waiters: state.waiters,
+        };
+        inc.last_token = None;
+        inc.quiet_polls = 0;
+        sc.state.save_incarnation(&inc)?;
+        sc.lease = Some(lease.clone());
+        return Ok(ClaimOutcome::Claimed(lease));
+    }
+
+    // The verdict. `take` = acquire now; `rotate` = the acquire is a
+    // deposal of a possibly-live straggler and must fence it.
+    let (take, rotate, behind) = if same_holder && !state.released {
+        // Orphaned own: our acquire landed and its response was lost, or
+        // its rotation failed after it landed. The straggler it deposed
+        // may still be mid-commit, so this takes the rotation too.
+        (true, true, None)
+    } else if state.released {
+        match state.handoff.as_deref() {
+            None => (true, false, None),
+            Some(h) if h == inc.holder_id => (true, false, None),
+            Some(h) => (counted_quiet >= HANDOFF_QUIET_POLLS, false, Some(h.to_string())),
+        }
+    } else {
+        // Held by someone else, or by us at an epoch we never recorded.
+        (counted_quiet >= QUIET_POLLS, true, Some(state.holder_id.clone()))
+    };
+
+    if take {
+        // Rotation is needed ONLY for the unreleased-foreign takeover (a
+        // possibly-live straggler mid-commit). A released cell is a
+        // clean handoff — the holder's barrier completed before its
+        // release — and self-recognition means the previous container's
+        // process (and any in-flight write of its) died with it.
+        // Rotating on those paths is pure manifest churn: at 100k+
+        // entries it is a multi-MB GET+PUT per claim, it double-bumps
+        // seq, and it defeats the no-change barrier's early exit
+        // (measured on the 0b rig). Under the per-barrier lease that
+        // would be every boundary.
+        return match store.epoch_acquire(&key, &inc.holder_id, Some(&state)).await {
+            Ok(lease) => {
+                if rotate {
+                    manifest::rotate_for_takeover(store.as_ref(), &sc.cfg, lease.epoch).await?;
                 }
-            } else {
-                inc.quiet_polls = if quiet { inc.quiet_polls + 1 } else { 0 };
-                inc.last_token = Some(state.token.clone());
-                let polls = inc.quiet_polls;
+                inc.epoch = lease.epoch;
+                inc.last_token = None;
+                inc.quiet_polls = 0;
                 sc.state.save_incarnation(&inc)?;
-                Ok(ClaimOutcome::Waiting { quiet_polls: polls })
+                sc.lease = Some(lease.clone());
+                Ok(ClaimOutcome::Claimed(lease))
+            }
+            Err(StoreError::PreconditionFailed(_)) | Err(StoreError::Conflict(_)) => {
+                // Lost the race (a rival acquire, or an enqueue moved the
+                // token); restart the observation.
+                inc.last_token = None;
+                inc.quiet_polls = 0;
+                sc.state.save_incarnation(&inc)?;
+                Ok(ClaimOutcome::Waiting { quiet_polls: 0, behind })
+            }
+            Err(e) => Err(e.into()),
+        };
+    }
+
+    // Not ours yet: make sure we are in the queue, ONCE. The enqueue
+    // moves the token, so the observation restarts from the token we
+    // wrote — our own append must not read as the holder's heartbeat,
+    // and it must not reset a count that a rival's append did not.
+    let token = if state.waiters.iter().any(|w| w == &inc.holder_id) {
+        state.token.clone()
+    } else {
+        match store.epoch_enqueue(&key, &state, &inc.holder_id).await {
+            Ok(after) => after.token,
+            Err(StoreError::PreconditionFailed(_)) | Err(StoreError::Conflict(_)) => {
+                // Somebody else moved the cell first; observe again.
+                state.token.clone()
+            }
+            Err(e) => return Err(e.into()),
+        }
+    };
+    if count {
+        inc.quiet_polls = counted_quiet;
+        inc.last_token = Some(token);
+        sc.state.save_incarnation(&inc)?;
+    }
+    Ok(ClaimOutcome::Waiting { quiet_polls: counted_quiet, behind })
+}
+
+/// The wait loop: claim the cell for a commit section, or give up
+/// after `CLAIM_DEADLINE_SECS` so a holder that never releases turns
+/// into a failed (and retried) barrier rather than a hang.
+pub async fn claim(sc: &mut Syncer) -> LeanResult<EpochLease> {
+    let started = Instant::now();
+    let mut last_counted: Option<Instant> = None;
+    let mut reported: Option<String> = None;
+    let spacing = Duration::from_secs(sc.cfg.claim_quiet_spacing_secs);
+    let deadline = Duration::from_secs(sc.cfg.claim_deadline_secs);
+    let poll = Duration::from_secs(sc.cfg.claim_poll_secs);
+    loop {
+        let count = last_counted.map(|t| t.elapsed() >= spacing).unwrap_or(true);
+        match claim_step(sc, count).await? {
+            ClaimOutcome::Claimed(lease) => return Ok(lease),
+            ClaimOutcome::Waiting { quiet_polls, behind } => {
+                if count {
+                    last_counted = Some(Instant::now());
+                    // Once per spaced observation, not once per second.
+                    let line = format!(
+                        "flint-sync: waiting for the publish fence behind {} (quiet {quiet_polls})",
+                        behind.as_deref().unwrap_or("a rival claim")
+                    );
+                    if reported.as_deref() != Some(line.as_str()) {
+                        eprintln!("{line}");
+                        reported = Some(line);
+                    }
+                }
+                if started.elapsed() >= deadline {
+                    return Err(LeanError::State(format!(
+                        "could not acquire the publish fence within {}s \
+                         (behind {}); this barrier is abandoned and retried at the next floor — \
+                         its uploads are durable and the next barrier adopts them",
+                        deadline.as_secs(),
+                        behind.as_deref().unwrap_or("a rival claim")
+                    )));
+                }
+                tokio::time::sleep(poll).await;
             }
         }
     }
 }
 
-/// What this syncer is OBSERVED to be doing, for the heartbeat cell
-/// (boundary-verbs plan §2.6). Computed from local files only — the
+/// What this syncer is OBSERVED to be doing, for the heartbeat and the
+/// cell (boundary-verbs plan §2.6). Computed from local files only — the
 /// same store-free discipline as `write_gauges`, and for the same
-/// reason: this rides the renewal, so it must not add a request to the
-/// one tick every idle workspace in the fleet pays (leg B8's oracle
-/// counts them).
+/// reason: this rides writes that already happen, so it must not add a
+/// request to the one tick every idle workspace in the fleet pays (leg
+/// B8's oracle counts them).
 fn observed_echo(sc: &Syncer) -> Option<String> {
     let g = sc.load_gauges().ok()?;
     let (seq, unix) = g.last_boundary.as_ref().map(|b| (b.seq, b.unix)).unwrap_or((0, 0));
@@ -190,12 +360,32 @@ fn observed_echo(sc: &Syncer) -> Option<String> {
     .ok()
 }
 
-/// Renew the held lease; a 412 means deposed — the caller must stop
-/// publishing (self-fence).
+/// Re-read the cell after a 412 and, if it still names this holder at
+/// this epoch unreleased, hand back its current token and queue: the
+/// only things that move OUR cell's token are our own writes whose
+/// response was lost and the waiters' enqueues, and neither is a
+/// takeover. Anything else is the fence.
+async fn still_ours(sc: &Syncer, key: &str, lease: &EpochLease) -> Option<EpochLease> {
+    match sc.store.epoch_read(key).await {
+        Ok(Some(state))
+            if state.holder_id == lease.holder_id && state.epoch == lease.epoch && !state.released =>
+        {
+            Some(EpochLease {
+                holder_id: state.holder_id,
+                epoch: state.epoch,
+                token: state.token,
+                waiters: state.waiters,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Renew the held lease inside a commit section; a 412 that is not our
+/// own moved token means deposed — the caller must abandon the barrier
+/// (self-fence).
 ///
-/// The renewal also carries the observed-state echo (§2.6): the
-/// operator's only evidence of what the syncer binary is ACTUALLY
-/// running, on a request that was already being paid for.
+/// The renewal also carries the observed-state echo (§2.6).
 pub async fn renew(sc: &mut Syncer) -> LeanResult<()> {
     let key = sc.cfg.epoch_key();
     let lease = sc
@@ -206,69 +396,55 @@ pub async fn renew(sc: &mut Syncer) -> LeanResult<()> {
     match sc.store.epoch_renew(&key, &lease, echo.as_deref()).await {
         Ok(l) => {
             sc.lease = Some(l);
-            // The renewal is the only scheduled probe of our own
-            // credentials, so it is also the only place a pause can be
-            // observed to have ENDED. Best-effort: a gauge that failed
-            // to write must not fail a renewal that succeeded.
+            // The renewal is a probe of our own credentials, so it is
+            // also a place a pause can be observed to have ENDED.
+            // Best-effort: a gauge that failed to write must not fail a
+            // renewal that succeeded.
             let _ = sc.clear_auth_pause();
             Ok(())
         }
         Err(StoreError::PreconditionFailed(e)) => {
             // A 412 is not yet a deposal. The renew CAS is If-Match on
-            // OUR token, and only two things move that token: a
-            // successor's acquire, or our own previous renew whose
-            // RESPONSE was lost (the PUT landed, the client saw a
-            // timeout). The second is not a takeover, and treating it as
-            // one made a live holder fence itself — exit 0, and under
-            // the CSI delivery nothing restarted it, so the workspace
-            // went unpublished for the rest of the tenant's life
-            // (audit 2026-09-03, finding 2). One read tells the cases
-            // apart: a cell that still names this holder at this epoch,
-            // unreleased, can only have been written by us, so its token
-            // is ours to adopt. Anything else is the fence.
-            match sc.store.epoch_read(&key).await {
-                Ok(Some(state))
-                    if state.holder_id == lease.holder_id
-                        && state.epoch == lease.epoch
-                        && !state.released =>
-                {
+            // OUR token, and three things move that token: a
+            // successor's acquire, a waiter's enqueue, or our own
+            // previous write whose RESPONSE was lost. Only the first is
+            // a takeover, and treating the others as one made a live
+            // holder fence itself (audit 2026-09-03, finding 2). One
+            // read tells the cases apart.
+            match still_ours(sc, &key, &lease).await {
+                Some(adopted) => {
                     eprintln!(
-                        "flint-sync: renew 412 on a cell that is still ours (epoch {}): a lost \
-                         renew response — adopting its token, not fencing",
-                        state.epoch
+                        "flint-sync: renew 412 on a cell that is still ours (epoch {}, {} queued): \
+                         adopting its token, not fencing",
+                        adopted.epoch,
+                        adopted.waiters.len()
                     );
-                    sc.lease = Some(EpochLease {
-                        holder_id: state.holder_id,
-                        epoch: state.epoch,
-                        token: state.token,
-                    });
-                    let _ = sc.clear_auth_pause();
                     // Review 2026-09-12, lease-2: the adoption alone
-                    // writes nothing, so the cell's token would stand
-                    // still for a whole takeover threshold and a waiting
-                    // challenger could count a live holder dead. One
-                    // renew moves it; if that write fails the adopted
-                    // token stands and the next tick tries again.
-                    if let Some(adopted) = sc.lease.clone() {
-                        if let Ok(fresh) = sc.store.epoch_renew(&key, &adopted, None).await {
-                            sc.lease = Some(fresh);
-                        }
-                    }
+                    // writes nothing, so the token would stand still
+                    // for a whole takeover threshold and a waiter could
+                    // count a live holder dead. One renew moves it; if
+                    // that write fails the adopted token stands and the
+                    // next tick tries again.
+                    sc.lease = Some(
+                        sc.store
+                            .epoch_renew(&key, &adopted, echo.as_deref())
+                            .await
+                            .unwrap_or(adopted),
+                    );
+                    let _ = sc.clear_auth_pause();
                     Ok(())
                 }
-                _ => {
+                None => {
                     sc.lease = None;
                     Err(LeanError::Fenced(format!("deposed at renew: {e}")))
                 }
             }
         }
         // 401/403 is not contention and not a bucket fault; retrying
-        // cannot fix it. We keep serving local files and keep trying —
-        // but the renewals we are now missing are exactly what a
-        // challenger reads as a dead holder, so record when the pause
-        // began while we still can. Nothing we write to the STORE can
-        // carry this: the request that would carry it is the one being
-        // refused (design §6.3).
+        // cannot fix it. Record when the pause began while we still can:
+        // nothing we write to the STORE can carry this, because the
+        // request that would carry it is the one being refused (design
+        // §6.3).
         Err(e @ StoreError::Auth(_)) => {
             let _ = sc.note_auth_pause();
             Err(e.into())
@@ -312,17 +488,134 @@ pub async fn verify_claim(sc: &Syncer) -> LeanResult<()> {
     }
 }
 
-/// Clean release (the preStop path): a successor supersedes immediately
-/// instead of waiting out the lease.
+/// Release at the end of a commit section: the cell is handed to the
+/// queue head and keeps this barrier's echo. A 412 is re-read once —
+/// a waiter's enqueue moved the token — and retried with the adopted
+/// token; a cell that is no longer ours is nobody's to release.
 pub async fn release(sc: &mut Syncer) -> LeanResult<()> {
     let key = sc.cfg.epoch_key();
-    if let Some(lease) = sc.lease.take() {
-        match sc.store.epoch_release(&key, &lease).await {
-            Ok(()) => Ok(()),
-            Err(StoreError::PreconditionFailed(_)) => Ok(()), // already deposed
-            Err(e) => Err(e.into()),
-        }
-    } else {
-        Ok(())
+    let Some(lease) = sc.lease.take() else { return Ok(()) };
+    let echo = observed_echo(sc);
+    match sc.store.epoch_handoff(&key, &lease, echo.as_deref()).await {
+        Ok(()) => Ok(()),
+        Err(StoreError::PreconditionFailed(_)) => match still_ours(sc, &key, &lease).await {
+            Some(adopted) => match sc.store.epoch_handoff(&key, &adopted, echo.as_deref()).await {
+                Ok(()) => Ok(()),
+                Err(StoreError::PreconditionFailed(_)) => Ok(()), // deposed meanwhile
+                Err(e) => Err(e.into()),
+            },
+            None => Ok(()), // already deposed: the cell is the successor's
+        },
+        Err(e) => Err(e.into()),
     }
 }
+
+/// A restarted container that finds the cell HELD by its own
+/// incarnation releases it: it holds nothing in memory, the intent
+/// journal replays whatever the previous container left, and a cell
+/// left held would cost every other writer a 60 s deposal wait.
+pub async fn release_stale_own(sc: &mut Syncer) -> LeanResult<()> {
+    let key = sc.cfg.epoch_key();
+    let inc = incarnation(sc)?;
+    if let Some(state) = sc.store.epoch_read(&key).await? {
+        if state.holder_id == inc.holder_id && !state.released {
+            eprintln!(
+                "flint-sync: the publish fence was left held by a previous container of this pod \
+                 (epoch {}); releasing it",
+                state.epoch
+            );
+            sc.lease = Some(EpochLease {
+                holder_id: state.holder_id,
+                epoch: state.epoch,
+                token: state.token,
+                waiters: state.waiters,
+            });
+            return release(sc).await;
+        }
+    }
+    Ok(())
+}
+
+/// The per-writer heartbeat: `<prefix>/.flint/lean/writers/<holder_id>`,
+/// written unconditionally every ≤30 s by the run loop and after every
+/// barrier. With the cell at rest between barriers this is the ONLY
+/// liveness a reader can see — the operator's `observedWriters` and the
+/// gateway's "is anyone here to cite it" both read this prefix. One
+/// small PUT per interval per writer: the same cost the lease renewal
+/// used to be.
+pub async fn heartbeat(sc: &mut Syncer) -> LeanResult<()> {
+    let inc = incarnation(sc)?;
+    let key = sc.cfg.writer_key(&inc.holder_id);
+    let body = Bytes::from(
+        serde_json::to_vec(&WriterHeartbeat {
+            holder_id: inc.holder_id.clone(),
+            unix: super::now_unix(),
+            echo: observed_echo(sc),
+        })
+        .map_err(|e| LeanError::State(format!("heartbeat: {e}")))?,
+    );
+    let crc = flint_store::crc64_nvme(&body);
+    let stamps = GenerationStamps {
+        generation: 0,
+        epoch: inc.epoch,
+        flush_uuid: "heartbeat".into(),
+        boundary_source: None,
+        posix: None,
+    };
+    match sc.store.put_whole(&key, body, &PutCondition::Unconditional, &stamps, crc).await {
+        Ok(_) => {
+            let _ = sc.clear_auth_pause();
+            Ok(())
+        }
+        Err(e @ StoreError::Auth(_)) => {
+            let _ = sc.note_auth_pause();
+            Err(e.into())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Clean shutdown: take the heartbeat down so readers stop counting
+/// this writer at once instead of after it goes stale. Best effort.
+pub async fn retire_heartbeat(sc: &Syncer) -> LeanResult<()> {
+    let inc = incarnation(sc)?;
+    match sc.store.delete(&sc.cfg.writer_key(&inc.holder_id)).await {
+        Ok(()) | Err(StoreError::NotFound(_)) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The heartbeat object's body. `echo` is the same `LeaseEcho` the cell
+/// carries, so one parser serves both.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WriterHeartbeat {
+    pub holder_id: String,
+    pub unix: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub echo: Option<String>,
+}
+
+/// Writers whose heartbeat is fresher than `stale_secs` by the STORE's
+/// clock, for the operator and the gateway. `now` is the caller's
+/// clock; compare generously (the callers pass minutes, not seconds) —
+/// a node clock behind the store's reads a live writer as stale, never
+/// as live, so the error is on the safe side.
+pub async fn live_writers(
+    store: &dyn ObjectStore,
+    cfg: &super::LeanConfig,
+    now: u64,
+    stale_secs: u64,
+) -> LeanResult<Vec<String>> {
+    let prefix = cfg.writers_prefix();
+    let mut out = vec![];
+    for o in store.list(&prefix).await? {
+        let fresh = o.last_modified_unix.map(|t| now.saturating_sub(t) <= stale_secs).unwrap_or(true);
+        if fresh {
+            out.push(o.key.trim_start_matches(&prefix).to_string());
+        }
+    }
+    Ok(out)
+}
+
+// An observed cell, re-exported for the callers that fence on one.
+pub type Observed = EpochState;

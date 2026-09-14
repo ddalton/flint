@@ -16,8 +16,8 @@
 //!    orphan its nonces forever. Coalescing happens INSIDE the pending
 //!    record: touches arriving during the min-interval wait append
 //!    their nonces to the standing record.
-//! 2. **Honor** — renew the lease (D12), verify we are not deposed,
-//!    then run one full fused barrier (or one sync).
+//! 2. **Honor** — run one full fused barrier (which claims the publish
+//!    fence for its commit section only) or one sync.
 //! 3. **Ack** — written atomically AFTER the barrier's manifest CAS and
 //!    baseline rewrite, carrying the FULL covered-nonce set: under
 //!    coalescing an agent whose nonce rode behind a later touch would
@@ -35,10 +35,12 @@
 //! set), then ack with THAT barrier's installed seq. Pending + matching
 //! ack ⇒ retire only; the ack already names a real install.
 //!
-//! **Refused acks (D2).** Deposal must never strand a waiting agent: on
-//! `Fenced` during honor the syncer writes `status: "refused-fenced"`
-//! naming the observed epoch BEFORE the fenced exit, and flips
-//! `capabilities.json` to `state: "fenced"` with no verbs.
+//! **A fence is a retry (design 2026-09-13 §4).** The lease is held per
+//! barrier, so a commit section deposed mid-way abandons THAT barrier:
+//! nothing was installed, the pending record stands, and the next tick
+//! honors it with a fresh claim. There is no refused-fenced ack and no
+//! fenced marker any more — the life-long lease they answered for is
+//! gone.
 
 use std::path::{Path, PathBuf};
 
@@ -149,7 +151,7 @@ pub struct PendingSentinel {
 /// The ack document (`.flint/<verb>.ack`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ack {
-    /// "ok" | "partial" | "refused-fenced".
+    /// "ok" | "partial" | "refused-scope".
     ///
     /// `partial` is the honest answer when the boundary installed but a
     /// path the agent declared is not in it (D1) —
@@ -165,9 +167,6 @@ pub struct Ack {
     /// "sentinel" | "sentinel-deferred" | "drain" | "recovered".
     pub boundary: String,
     pub completed_unix: u64,
-    /// Set on refused-fenced: the epoch that fenced us.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub observed_epoch: Option<u64>,
     /// Set on a refusal that is the AGENT's to fix (`refused-scope`):
     /// what was wrong with the request, in words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -655,102 +654,6 @@ impl Syncer {
         pending.nonces.iter().all(|n| ack.nonces.contains(n))
     }
 
-    /// D2's refused-ack rule for the restarted claimant, which was the last
-    /// open corner of the protocol.
-    ///
-    /// A syncer SIGKILLed mid-honor runs no cooperative fence path, so
-    /// nothing settles the pending sentinel it left in the emptyDir. If the
-    /// kubelet then restarts it over that surviving tree while a successor
-    /// holds the lease, it blocks in `claim` — the successor's token keeps
-    /// advancing, so quiet polls never accumulate — and `settle_pending_at_
-    /// startup` is unreachable, because that runs only after `claim` returns.
-    /// The agent is left polling an ack that will never come, behind a
-    /// `capabilities.json` that still says `state: "live"` with live verbs.
-    ///
-    /// This process can never honor what it owes. It says so, once, on the
-    /// first Waiting poll: a `refused-fenced` ack per owed verb and a fenced
-    /// marker, so the agent stops waiting and the marker stops lying.
-    ///
-    /// Gated on a pending record actually standing. A fresh replacement pod
-    /// waiting out its 60 s of quiet polls is HEALTHY, not fenced, and its
-    /// emptyDir carries no pending record — so it takes none of this.
-    pub async fn refuse_what_this_incarnation_can_never_honor(&mut self) -> LeanResult<bool> {
-        // Review 2026-09-12, gated-3 / lease-6: a RAW touch standing in
-        // the tree (made before the crash, or during this wait against
-        // the predecessor's `live` marker) was consumed by nobody until
-        // the claim returned — behind a live foreign holder, never.
-        // Consume first, so it is owed and can be refused.
-        self.poll_sentinels()?;
-        let mut owed = false;
-        for verb in [Verb::Publish, Verb::Sync] {
-            if self.load_pending(verb)?.is_some() {
-                owed = true;
-            }
-        }
-        // A predecessor's `live` marker keeps inviting touches nobody will
-        // answer while this incarnation waits: flip it now (the claim
-        // rewrites it live). A fresh tree has no marker and takes none of
-        // this.
-        let marker_lies = self.read_capabilities().map(|c| c.state != "fenced").unwrap_or(false);
-        if !owed && !marker_lies {
-            return Ok(false);
-        }
-        // Who fenced us — one epoch read, on a path taken at most once per
-        // process and only when something is actually owed.
-        let observed = self.store.epoch_read(&self.cfg.epoch_key()).await.ok().flatten().map(|c| c.epoch);
-        for verb in [Verb::Publish, Verb::Sync] {
-            if self.load_pending(verb)?.is_some() {
-                self.refuse_pending(verb, observed)?;
-            }
-        }
-        self.mark_fenced_because(observed)?;
-        Ok(true)
-    }
-
-    /// The refused ack (D2). Deposal must never strand a waiting agent.
-    pub fn refuse_pending(&mut self, verb: Verb, observed_epoch: Option<u64>) -> LeanResult<()> {
-        let Some(pending) = self.load_pending(verb)? else { return Ok(()) };
-        let ack = Ack {
-            status: "refused-fenced".into(),
-            nonces: pending.nonces.clone(),
-            sentinel_mtime_unix_ns: pending.consumed_mtime_unix_ns,
-            seq: None,
-            manifest_etag: None,
-            boundary: "sentinel".into(),
-            completed_unix: now_unix(),
-            observed_epoch,
-            reason: None,
-            report: AckReport::default(),
-        };
-        self.write_ack(verb, &ack)?;
-        self.retire_pending(verb)?;
-        Ok(())
-    }
-
-    /// Flip the capability marker to fenced: no verbs, `state:
-    /// "fenced"`, so agents stop touching sentinels on a zombie.
-    pub fn mark_fenced(&self) -> LeanResult<()> {
-        self.mark_fenced_because(None)
-    }
-
-    /// `mark_fenced` with the fencer named: AGENTS.md promises `reason`
-    /// says why the verbs are off (review 2026-09-12, gated-7).
-    pub fn mark_fenced_because(&self, observed_epoch: Option<u64>) -> LeanResult<()> {
-        let mut posture = self
-            .load_posture()?
-            .unwrap_or(super::control::SentinelPosture { enabled: false, reason: None });
-        posture.reason = Some(match observed_epoch {
-            Some(e) => format!(
-                "fenced: this syncer no longer holds the lease; the workspace is served under epoch {e}"
-            ),
-            None => "fenced: this syncer no longer holds the lease (the fencing epoch could not be read)".into(),
-        });
-        // Both surfaces or neither: an agent reading only the
-        // operational file must not conclude a zombie is healthy.
-        self.write_gauges(true, None)?;
-        self.write_capabilities(&posture, true)
-    }
-
     /// Honor a standing pending sentinel, if one stands and is due.
     ///
     /// `forced` = this is a floor tick picking up a budget-deferred
@@ -785,19 +688,6 @@ impl Syncer {
             return Ok(None);
         }
 
-        // D12: every barrier-triggering arm renews first.
-        if let Err(e) = super::lease::renew(self).await {
-            if let LeanError::Fenced(_) = e {
-                let epoch = self.observed_foreign_epoch().await;
-                // Review 2026-09-12, lease-1: the settle's own failure
-                // must never replace the fence.
-                if let Err(se) = self.refuse_pending(verb, epoch).and_then(|_| self.mark_fenced_because(epoch)) {
-                    eprintln!("flint-sync: fenced, but the local settle failed ({se}); the fence stands");
-                }
-            }
-            return Err(e);
-        }
-
         let ack = match verb {
             Verb::Publish => self.honor_publish(&pending, forced, source).await,
             Verb::Sync => self.honor_sync(&pending, forced).await,
@@ -808,23 +698,8 @@ impl Syncer {
                 self.retire_pending(verb)?;
                 Ok(Some(ack))
             }
-            Err(LeanError::Fenced(m)) => {
-                let epoch = self.observed_foreign_epoch().await;
-                // Review 2026-09-12, lease-1: the settle's own failure
-                // must never replace the fence.
-                if let Err(se) = self.refuse_pending(verb, epoch).and_then(|_| self.mark_fenced_because(epoch)) {
-                    eprintln!("flint-sync: fenced, but the local settle failed ({se}); the fence stands");
-                }
-                Err(LeanError::Fenced(m))
-            }
             Err(e) => Err(e),
         }
-    }
-
-    /// Best-effort read of the epoch that fenced us (for the refused
-    /// ack's `observed_epoch`). Never fails the refusal.
-    async fn observed_foreign_epoch(&self) -> Option<u64> {
-        self.store.epoch_read(&self.cfg.epoch_key()).await.ok().flatten().map(|s| s.epoch)
     }
 
     async fn honor_publish(
@@ -864,7 +739,6 @@ impl Syncer {
             manifest_etag: baseline.manifest_etag.clone(),
             boundary: if forced { "sentinel-deferred".into() } else { "sentinel".into() },
             completed_unix: now_unix(),
-            observed_epoch: None,
         reason: None,
             report: AckReport {
                 uploaded: report.uploaded.len(),
@@ -880,13 +754,6 @@ impl Syncer {
     }
 
     async fn honor_sync(&mut self, pending: &PendingSentinel, forced: bool) -> LeanResult<Ack> {
-        // D2: `Syncer::sync` has NO lease/epoch check of its own — it
-        // is only ever reachable via `claim_then` today. A straggler
-        // consuming a sync sentinel between deposal and its next
-        // cooperative fence would apply the successor's manifest onto
-        // its zombie tree and ack SUCCESS. The in-loop honor path
-        // verifies first.
-        self.verify_not_deposed_pub().await?;
         if let Some(reason) = Self::scope_refusal(&pending.scope) {
             // Review 2026-09-12, ack-1 / inbox-3: the refusal used to be
             // an ERROR the loop retried every tick — never acked, never
@@ -903,8 +770,7 @@ impl Syncer {
                 manifest_etag: None,
                 boundary: if forced { "sentinel-deferred".into() } else { "sentinel".into() },
                 completed_unix: now_unix(),
-                observed_epoch: None,
-                reason: Some(reason),
+                    reason: Some(reason),
                 report: AckReport { scope: pending.scope.clone(), ..Default::default() },
             });
         }
@@ -922,7 +788,6 @@ impl Syncer {
             manifest_etag: None,
             boundary: if forced { "sentinel-deferred".into() } else { "sentinel".into() },
             completed_unix: now_unix(),
-            observed_epoch: None,
         reason: None,
             report: AckReport {
                 consumed: report.applied.len(),
@@ -1010,19 +875,6 @@ impl Syncer {
         self.touch_remote_seq(seq, etag, integrated)
     }
 
-    /// Handle a fence uniformly: settle every owed ack with a refusal,
-    /// flip the capability marker, and let the caller exit. Deposal
-    /// must never strand a waiting agent with a live-looking marker.
-    async fn settle_fence(&mut self) -> LeanResult<()> {
-        let epoch = self.observed_foreign_epoch().await;
-        for verb in [Verb::Publish, Verb::Sync] {
-            if self.load_pending(verb)?.is_some() {
-                self.refuse_pending(verb, epoch)?;
-            }
-        }
-        self.mark_fenced_because(epoch)
-    }
-
     /// One poll tick of the sentinel arm: consume what is there, then
     /// honor if the min-interval and the work budget allow.
     ///
@@ -1043,16 +895,6 @@ impl Syncer {
             match self.honor_pending(verb, false).await {
                 Ok(Some(a)) => acks.push(a),
                 Ok(None) => {}
-                Err(e @ LeanError::Fenced(_)) => {
-                    if let Err(se) = self.settle_fence().await {
-                        // Review 2026-09-12, lease-1: the `?` here replaced the
-                        // FENCE with the settle's I/O error (ENOSPC on `.flint/`
-                        // is the routine one), and the run loop retried a
-                        // leaseless syncer forever behind a `live` marker.
-                        eprintln!("flint-sync: fenced, but the local settle failed ({se}); the fence stands");
-                    }
-                    return Err(e);
-                }
                 Err(e) => {
                     // Review 2026-09-12, ack-1: a non-fence honor error is
                     // THIS verb's problem. Returning here left the other
@@ -1070,35 +912,16 @@ impl Syncer {
         Ok(acks)
     }
 
-    /// The D12 heartbeat renewal arm, as a tick of its own.
-    ///
-    /// It is a method rather than three lines in the run loop because
-    /// of what it owes on a fence. This arm renews on its own
-    /// non-resettable interval — `min(floor, 30) s`, decoupled from
-    /// publish cadence, which is the whole reason D12 added it — so on
-    /// deposal it is usually the FIRST arm to find out, ahead of the
-    /// floor tick and ahead of any poll that has nothing to honor.
-    /// Returning from here without settling would strand every owed
-    /// ack and leave `capabilities.json` advertising live verbs on a
-    /// zombie: the hole D2's refused acks exist to close, re-opened at
-    /// the arm D12 added to close a different one.
+    /// The heartbeat arm, as a tick of its own: one unconditional PUT
+    /// of this writer's liveness object. It carries the observed-state
+    /// echo, and it is what the operator's `observedWriters` and the
+    /// gateway's "is anyone here to cite it" read — the cell is at rest
+    /// between barriers and says nothing about a live idle writer.
     pub async fn heartbeat_tick(&mut self) -> LeanResult<()> {
-        if let Err(e) = super::lease::renew(self).await {
-            if matches!(e, LeanError::Fenced(_)) {
-                if let Err(se) = self.settle_fence().await {
-                        // Review 2026-09-12, lease-1: the `?` here replaced the
-                        // FENCE with the settle's I/O error (ENOSPC on `.flint/`
-                        // is the routine one), and the run loop retried a
-                        // leaseless syncer forever behind a `live` marker.
-                        eprintln!("flint-sync: fenced, but the local settle failed ({se}); the fence stands");
-                    }
-            }
-            return Err(e);
-        }
-        Ok(())
+        super::lease::heartbeat(self).await
     }
 
-    /// One floor tick: renew (D12), then either honor a standing
+    /// One floor tick: either honor a standing
     /// pending sentinel that the budget or min-interval held back — the
     /// boundary is honored by a REAL barrier, its ack stamped
     /// `sentinel-deferred` — or run the ordinary cadence barrier.
@@ -1107,18 +930,6 @@ impl Syncer {
     /// let the poll arm starve cadence.
     pub async fn floor_tick(&mut self) -> LeanResult<FloorOutcome> {
         let mut out = FloorOutcome::default();
-        if let Err(e) = super::lease::renew(self).await {
-            if matches!(e, LeanError::Fenced(_)) {
-                if let Err(se) = self.settle_fence().await {
-                        // Review 2026-09-12, lease-1: the `?` here replaced the
-                        // FENCE with the settle's I/O error (ENOSPC on `.flint/`
-                        // is the routine one), and the run loop retried a
-                        // leaseless syncer forever behind a `live` marker.
-                        eprintln!("flint-sync: fenced, but the local settle failed ({se}); the fence stands");
-                    }
-            }
-            return Err(e);
-        }
         // A held-back sync pending is settled first, for the same
         // reason as in the poll arm.
         //
@@ -1142,16 +953,6 @@ impl Syncer {
                         out.acks.push(a);
                     }
                     Ok(None) => {}
-                    Err(e @ LeanError::Fenced(_)) => {
-                        if let Err(se) = self.settle_fence().await {
-                        // Review 2026-09-12, lease-1: the `?` here replaced the
-                        // FENCE with the settle's I/O error (ENOSPC on `.flint/`
-                        // is the routine one), and the run loop retried a
-                        // leaseless syncer forever behind a `live` marker.
-                        eprintln!("flint-sync: fenced, but the local settle failed ({se}); the fence stands");
-                    }
-                        return Err(e);
-                    }
                     Err(e) => {
                         // Review 2026-09-12, ack-1: same rule as the poll
                         // arm, and here the stake is the cadence barrier
@@ -1184,24 +985,14 @@ impl Syncer {
                     // saying "quiesce-pending" would send an operator
                     // looking for a clock instead of a conflict record.
                     let forced = (out.parked > 0).then_some(super::gauges::Withheld::Parked412);
-                    out.withheld_reason = self.write_gauges(false, forced)?.withheld_reason;
+                    out.withheld_reason = self.write_gauges(forced)?.withheld_reason;
                     return Ok(out);
-                }
-                Err(e @ LeanError::Fenced(_)) => {
-                    if let Err(se) = self.settle_fence().await {
-                        // Review 2026-09-12, lease-1: the `?` here replaced the
-                        // FENCE with the settle's I/O error (ENOSPC on `.flint/`
-                        // is the routine one), and the run loop retried a
-                        // leaseless syncer forever behind a `live` marker.
-                        eprintln!("flint-sync: fenced, but the local settle failed ({se}); the fence stands");
-                    }
-                    return Err(e);
                 }
                 Err(e) => return Err(e),
             }
         }
         self.ticker_from(out.seq, None)?;
-        out.withheld_reason = self.write_gauges(false, None)?.withheld_reason;
+        out.withheld_reason = self.write_gauges(None)?.withheld_reason;
         Ok(out)
     }
 
@@ -1234,16 +1025,6 @@ impl Syncer {
                         acks.push(a);
                     }
                     Ok(None) => {}
-                    Err(e @ LeanError::Fenced(_)) => {
-                        if let Err(se) = self.settle_fence().await {
-                        // Review 2026-09-12, lease-1: the `?` here replaced the
-                        // FENCE with the settle's I/O error (ENOSPC on `.flint/`
-                        // is the routine one), and the run loop retried a
-                        // leaseless syncer forever behind a `live` marker.
-                        eprintln!("flint-sync: fenced, but the local settle failed ({se}); the fence stands");
-                    }
-                        return Err(e);
-                    }
                     Err(e) => return Err(e),
                 }
             }

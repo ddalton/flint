@@ -20,11 +20,17 @@
 //!              and claiming would depose the very syncer under
 //!              diagnosis.
 //!   probe-copy verify the cross-key copy surface against THIS bucket
-//!   probe-conditional  verify that If-Match / If-None-Match are ENFORCED
-//!              by THIS store (a store that ignores them turns every
-//!              manifest CAS into last-writer-wins, silently)
-//!   run        claim → checkout → barrier loop (floorSecs) → drain on
-//!              SIGTERM → clean lease release
+//!   probe-conditional  verify that If-Match / If-None-Match on PUT and
+//!              If-Match on DELETE are ENFORCED by THIS store (one that
+//!              ignores them turns every manifest CAS into
+//!              last-writer-wins, and lets a garbage collector delete
+//!              another writer's upload — silently)
+//!   run        checkout → barrier loop (floorSecs) → drain on SIGTERM.
+//!              No lease is held between barriers: each barrier claims
+//!              the publish fence for its commit section only (after
+//!              its uploads) and hands it to the next waiter, so a second
+//!              writer on the workspace is Ready in checkout time. A
+//!              per-writer heartbeat object carries liveness instead.
 //!
 //! Environment:
 //!   FLINT_SYNC_BUCKET    (required) bucket name
@@ -56,7 +62,10 @@
 //!                                 copy (default 5120; above it, MPU +
 //!                                 UploadPartCopy)
 //!   FLINT_SYNC_UPLOAD_PART_PARALLELISM  parts of ONE object uploaded
-//!                                 concurrently on publish (default 1)
+//!                                 concurrently on publish (default 8)
+//!   FLINT_SYNC_UPLOAD_INFLIGHT_MB upload bytes in flight — every part
+//!                                 and whole body is read into RAM before
+//!                                 its PUT (default 256; 0 = no bound)
 //!   FLINT_SYNC_SOLE_WRITER        "true" marks every manifest this
 //!                                 syncer installs as a PUBLISHED
 //!                                 mirror: readers then refuse an
@@ -150,9 +159,17 @@ async fn main() {
     // Parts of ONE object uploaded concurrently. `fanout` already
     // spreads uploads ACROSS objects, so this only moves a tree whose
     // critical path is a single large object — which is the shape a
-    // checkpoint actually has. Default 1 = today's sequential loop; the
-    // default moves on measurement, not on plausibility.
-    let part_par = env_u64("FLINT_SYNC_UPLOAD_PART_PARALLELISM", 1).max(1) as usize;
+    // checkpoint actually has. 8: measured on runcu (2026-09-12, n=3)
+    // the 4 GiB checkpoint publish went from 50.7-58.6 s at 1 to
+    // 13.8-14.4 s at 8, where the NIC is full (16 bought nothing). It
+    // could only become the default once the byte bound below existed:
+    // every part is read whole into RAM before its PUT, and without the
+    // bound the window held `min(objects, fanout) x this x 64 MiB`.
+    let part_par = env_u64("FLINT_SYNC_UPLOAD_PART_PARALLELISM", 8).max(1) as usize;
+    // Bytes the upload path may hold at once, parts and whole bodies
+    // alike — the write side's FLINT_SYNC_FETCH_INFLIGHT_MB. A single
+    // body or part larger than the whole window still uploads, alone.
+    let upload_inflight = env_u64("FLINT_SYNC_UPLOAD_INFLIGHT_MB", 256) * 1024 * 1024;
     // The single-request copy ceiling, in MiB. Exists so a drill can
     // drive the MPU + UploadPartCopy arm without a 5 GiB fixture: that
     // arm has never executed anywhere, and an arm only a 5 GiB object
@@ -164,6 +181,7 @@ async fn main() {
     let store = match S3Store::connect(bucket, endpoint).await {
         Ok(s) => match s
             .with_part_parallelism(part_par)
+            .with_upload_inflight_max_bytes(upload_inflight)
             .with_copy_whole_max(copy_whole_max)
             .with_raw_reads(raw_reads)
         {
@@ -215,6 +233,8 @@ async fn main() {
     cfg.sentinel_min_interval_secs = env_u64("FLINT_SYNC_SENTINEL_MIN_INTERVAL_SECS", 5);
     cfg.sentinel_hourly_budget = env_u64("FLINT_SYNC_SENTINEL_HOURLY_BUDGET", 60);
     cfg.sentinel_poll_secs = env_u64("FLINT_SYNC_SENTINEL_POLL_SECS", 1).max(1);
+    // Drill-only: opens the mid-commit window no drill can hit by timing.
+    cfg.drill_hold_commit_secs = env_u64("FLINT_SYNC_DRILL_HOLD_COMMIT_SECS", 0);
     // Also dispatched before the state directory is opened, and for a
     // stronger reason: `ctl` is a CLIENT of the running syncer. Taking
     // the occupancy lock — or the lease — would fight the very process
@@ -295,14 +315,24 @@ async fn main() {
     }
 
     if cmd == "probe-conditional" {
+        // Both surfaces lean's arbitration stands on: If-Match /
+        // If-None-Match on PUT (every upload, every pointer CAS) and
+        // If-Match on DELETE (the garbage collector, once two writers
+        // share a workspace). A store that ignores either answers exactly
+        // like one that enforces it, so each is asked, not assumed.
         let key = format!("{}/{}/probe-conditional", sc.cfg.prefix, flint_lean::LEAN_DIR);
-        match flint_store::probe::probe_conditional_writes(sc.store.as_ref(), &key).await {
+        if let Err(e) = flint_store::probe::probe_conditional_writes(sc.store.as_ref(), &key).await {
+            eprintln!("flint-sync: probe-conditional FAIL (PUT): {e}");
+            std::process::exit(1);
+        }
+        let dkey = format!("{}/{}/probe-conditional-delete", sc.cfg.prefix, flint_lean::LEAN_DIR);
+        match flint_store::probe::probe_conditional_delete(sc.store.as_ref(), &dkey).await {
             Ok(()) => {
-                eprintln!("flint-sync: probe-conditional PASS ({key})");
+                eprintln!("flint-sync: probe-conditional PASS — PUT ({key}) and DELETE ({dkey})");
                 return;
             }
             Err(e) => {
-                eprintln!("flint-sync: probe-conditional FAIL: {e}");
+                eprintln!("flint-sync: probe-conditional FAIL (DELETE): {e}");
                 std::process::exit(1);
             }
         }
@@ -344,14 +374,12 @@ async fn main() {
     };
     if let Err(e) = result {
         eprintln!("flint-sync: {e}");
-        // A fence is a clean shutdown order, not a crash loop. A
-        // refusal is final: EXIT_REFUSED is the code the CSI plugin
+        // A refusal is final: EXIT_REFUSED is the code the CSI plugin
         // reads as "tear the worker down and name the reason on the
         // tenant" — under OnFailure any other code is relaunched in
         // place forever, and a refusal that shared it looked to the
         // tenant like a checkout that never finished (leg S22).
         std::process::exit(match e {
-            LeanError::Fenced(_) => 0,
             LeanError::Refused(_) => flint_lean::EXIT_REFUSED,
             _ => 1,
         });
@@ -383,7 +411,19 @@ async fn ctl_call(
 
 
 async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
-    verbs::claim(sc).await?;
+    // No claim before checkout (design 2026-09-13 §4): the cell is a
+    // publish fence and a checkout installs nothing. What stays are the
+    // project-id precondition (a refusal, not a fence), the shared-prefix
+    // diagnostic, and one repair: a cell a previous container of THIS pod
+    // left held is released now, before anyone waits 60 s to depose it.
+    lease::verify_claim(sc).await?;
+    lease::warn_if_prefix_is_shared(sc).await;
+    if let Err(e) = lease::release_stale_own(sc).await {
+        eprintln!("flint-sync: could not release a fence left held by a previous container: {e}");
+    }
+    if let Err(e) = lease::heartbeat(sc).await {
+        log_retry(sc, &e, "first heartbeat failed (retrying)");
+    }
     // This incarnation owes its own drain attestation; one left by an
     // earlier life of this tree must not vouch for it.
     if let Err(e) = sc.state.clear_drained() {
@@ -400,7 +440,7 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
     // upgrade a fleet whose live workspaces never get the marker:
     // sentinels dead on exactly the pods the upgrade targeted.
     let posture = sc.sentinel_preflight()?;
-    sc.write_capabilities(&posture, false)?;
+    sc.write_capabilities(&posture)?;
     if !posture.enabled {
         eprintln!(
             "flint-sync: sentinel verbs DISABLED ({}) — the poll arm will not arm",
@@ -418,7 +458,7 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
     // (disabled stays disabled unless mode is `force`), so re-running it
     // can only narrow, never spuriously re-enable.
     let posture = sc.sentinel_preflight()?;
-    sc.write_capabilities(&posture, false)?;
+    sc.write_capabilities(&posture)?;
     eprintln!("flint-sync: checkout complete — agent may start");
 
     // The uniform crash rule (D2): a surviving pending sentinel is
@@ -426,9 +466,6 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
     // fresh one.
     if posture.enabled {
         if let Err(e) = sc.settle_pending_at_startup().await {
-            if matches!(e, LeanError::Fenced(_)) {
-                return Err(e);
-            }
             eprintln!("flint-sync: startup settle failed (retrying at the floor): {e}");
         }
     }
@@ -516,21 +553,20 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
     // D3/D12: three INDEPENDENT, non-resettable interval timers.
     //
     // The shipped loop recreated `sleep(floor)` inside `select!` on
-    // every iteration and renewed the lease only from that arm — so a
-    // third arm completing every second would win every iteration,
-    // perpetually reset the floor sleep, and the lease would NEVER
-    // renew: the syncer would depose itself into the straggler class
-    // by construction. Independent intervals make no arm's readiness
-    // able to starve another.
+    // every iteration and ran the liveness write only from that arm — so
+    // a third arm completing every second would win every iteration,
+    // perpetually reset the floor sleep, and liveness would NEVER be
+    // written. Independent intervals make no arm's readiness able to
+    // starve another.
     let floor = Duration::from_secs(sc.cfg.floor_secs.max(1));
-    // Decoupled from publish cadence entirely: at the default floor the
-    // shipped renew cadence EQUALS the takeover threshold (6 quiet
-    // polls × 10 s), which is already racy.
-    let renew_every = Duration::from_secs(sc.cfg.floor_secs.min(30).max(1));
+    // The heartbeat is decoupled from publish cadence entirely: it is
+    // what the operator's `observedWriters` and the gateway's "is anyone
+    // here to cite it" read, and they judge staleness in minutes.
+    let heartbeat_every = Duration::from_secs(sc.cfg.floor_secs.min(30).max(1));
     let poll_every = Duration::from_secs(sc.cfg.sentinel_poll_secs.max(1));
 
     let mut floor_iv = tokio::time::interval(floor);
-    let mut renew_iv = tokio::time::interval(renew_every);
+    let mut renew_iv = tokio::time::interval(heartbeat_every);
     let mut poll_iv = tokio::time::interval(poll_every);
     for iv in [&mut floor_iv, &mut renew_iv, &mut poll_iv] {
         iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -540,12 +576,10 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
     loop {
         tokio::select! {
             _ = renew_iv.tick() => {
-                // Liveness signaling, independent of publish cadence.
-                // The tick settles owed acks on a fence itself — see
-                // Syncer::heartbeat_tick for why that cannot live here.
+                // Liveness signaling, independent of publish cadence:
+                // one unconditional PUT of this writer's heartbeat.
                 if let Err(e) = sc.heartbeat_tick().await {
-                    if matches!(e, LeanError::Fenced(_)) { return Err(e); }
-                    log_retry(&sc, &e, "renew failed (retrying)");
+                    log_retry(&sc, &e, "heartbeat failed (retrying)");
                 }
             }
             _ = floor_iv.tick() => {
@@ -562,7 +596,9 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
                         }
                     ),
                     Ok(_) => {}
-                    Err(e @ LeanError::Fenced(_)) => return Err(e),
+                    // A fence (deposed inside the commit section) is one
+                    // more failed barrier: nothing was installed, the
+                    // uploads stand, the next floor claims again.
                     Err(e) => log_retry(&sc, &e, "barrier failed (retrying next floor)"),
                 }
             }
@@ -575,7 +611,6 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
                             a.status, a.boundary, a.seq, a.nonces.len()
                         );
                     },
-                    Err(e @ LeanError::Fenced(_)) => return Err(e),
                     Err(e) => log_retry(&sc, &e, "sentinel honor failed (retrying)"),
                 }
             }
@@ -633,12 +668,12 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
                 // three attempts and for as long as the budget allows;
                 // and the OUTCOME is attested rather than implied
                 // (audit 2026-09-03, finding 3). On success the marker
-                // is written and the lease released. On failure neither
-                // happens: the cell stays unreleased so a successor waits
-                // it out instead of reading a clean handoff, and the
-                // absent marker is what makes the node plugin PRESERVE
-                // the tree instead of removing it with the pod. A fence
-                // is the same — a deposed straggler drained nothing.
+                // is written and the heartbeat retired. On failure
+                // neither happens: the absent marker is what makes the
+                // node plugin PRESERVE the tree instead of removing it
+                // with the pod. A fence inside the drain's commit section
+                // is one more failed attempt — the drain's barrier
+                // claims again on the retry.
                 let started = std::time::Instant::now();
                 let mut attempt = 0u32;
                 let mut last = Ok(vec![]);
@@ -647,7 +682,6 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
                     last = sc.drain().await;
                     match &last {
                         Ok(_) => break,
-                        Err(LeanError::Fenced(_)) => break,
                         Err(e) => {
                             eprintln!("flint-sync: drain attempt {attempt} failed: {e}");
                             let again = attempt < 3
@@ -663,15 +697,13 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
                         if let Err(e) = sc.state.write_drained(seq, acks.len()) {
                             eprintln!("flint-sync: drain published but its attestation could not be written: {e}");
                         }
-                        let _ = lease::release(sc).await;
+                        let _ = lease::retire_heartbeat(sc).await;
                         return Ok(());
                     }
-                    Err(e @ LeanError::Fenced(_)) => return Err(e),
                     Err(e) => {
                         eprintln!(
-                            "flint-sync: drain FAILED after {attempt} attempts over {}s — lease left \
-                             UNRELEASED, no drain attestation written; the tree keeps everything \
-                             since the last boundary",
+                            "flint-sync: drain FAILED after {attempt} attempts over {}s — no drain \
+                             attestation written; the tree keeps everything since the last boundary",
                             started.elapsed().as_secs()
                         );
                         return Err(e);

@@ -40,8 +40,10 @@ agent says so. No FUSE, no NFS, no privileged pods, no mount to wedge.
 ```
 
 The trade, stated up front: the workspace is a **local copy**. It must
-fit the pod's disk, one writer owns it at a time, and other readers see
-the last published boundary rather than your last write. If that is not
+fit the pod's disk, writers merge at the manifest rather than editing
+one live tree (two agents editing one file get last-boundary-wins with
+the loser's bytes preserved), and other readers see the last published
+boundary rather than your last write. If that is not
 your shape, see [when not to use lean](#when-not-to-use-lean).
 
 Everything below was run end to end on 2026-08-26 against the published
@@ -167,8 +169,10 @@ kubectl -n agents get flintleanworkspace proj1 -o yaml | grep -A6 conditions
 ```
 
 You want `SpecAccepted: True`. `SyncerObserved: Unknown`
-with reason `NoLiveSyncer` is normal for a workspace at rest — nothing
-holds the lease until a pod starts.
+with reason `NoLiveSyncer` is normal for a workspace no pod has ever
+published; once one has, the condition names the binary that ran the
+last boundary, and `observedWriters` counts the pods with a live
+heartbeat (several pods may share one workspace).
 
 ---
 
@@ -239,8 +243,8 @@ boundary — the point the agent declared is already true, which is still
 an honest `ok`.
 
 `status: "ok"` means **the named boundary is in the bucket** — not
-queued, not scheduled. `refused-fenced` means this syncer lost the
-lease and is telling you rather than leaving you waiting.
+queued, not scheduled. A boundary that lost its turn at the publish
+fence is retried by the cadence, so an ack is late rather than refused.
 
 Costs nothing when unused: measured at 20 bucket requests per 22 s idle
 with the verbs off, and 20 with them on.
@@ -293,7 +297,7 @@ the tenant pod to Ready (checkout) or from the `publish` touch to its ack.
 | checkout, 4 GiB + 2,000 × 16 KiB | **19.6–19.9 s** | **92.4–115.1 s** |
 | publish, 6 × 1 GiB | **18.3 s** | **19.0–19.4 s** |
 | publish, 20,000 × 8 KiB | **19.5–20.4 s** | **20.8–22.6 s** |
-| publish, 4 GiB + 2,000 × 16 KiB | **50.5–51.7 s** at the default; **13.9–14.4 s** at `uploadPartParallelism: 8` | **50.8–50.9 s** |
+| publish, 4 GiB + 2,000 × 16 KiB | **50.5–51.7 s** at `uploadPartParallelism: 1` (the v1.51.0 default); **13.9–14.4 s** at 8, the default since the upload window gained its byte bound (`uploadInflightMb`, 256) | **50.8–50.9 s** (at 1) |
 | idle | ~5 bucket requests per tick, per workspace | — |
 
 The deployed column carries what a pod pays that the engine does not —

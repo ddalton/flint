@@ -92,7 +92,7 @@
 <text class="mono" x="432" y="470" xml:space="preserve">&lt;prefix&gt;/files/&lt;path&gt;</text>
 <rect x="416" y="560" width="374" height="118" rx="7" class="panel"/>
 <text class="t2" x="432" y="584">control — never on the data path</text>
-<text class="t4" x="432" y="604">lease in the bucket — one writer</text>
+<text class="t4" x="432" y="604">lease in the bucket — one writer per barrier</text>
 <text class="t4" x="432" y="619">broker → short-lived keys → syncer</text>
 <text class="t4" x="432" y="634">.flint/publish → .flint/publish.ack</text>
 <rect x="808" y="16" width="374" height="46" rx="7" class="hd-pass"/>

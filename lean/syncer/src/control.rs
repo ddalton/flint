@@ -67,8 +67,11 @@ pub struct BootStamp {
 pub struct Capabilities {
     pub protocol: u32,
     pub verbs: Vec<String>,
-    /// "live" | "fenced" (D2). A fenced syncer advertises no verbs, so
-    /// agents stop touching sentinels on a zombie.
+    /// Always `"live"`. It used to read `"fenced"` for a syncer deposed
+    /// from a life-long lease; the lease is now held per barrier
+    /// (design 2026-09-13 §4), a lost commit section is retried at the
+    /// next floor, and there is no terminal state left to report. Kept
+    /// so the marker's schema is stable for an agent that reads it.
     pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -217,8 +220,8 @@ impl Syncer {
     }
 
     /// Write `.flint/capabilities.json` for the current posture.
-    pub fn write_capabilities(&self, posture: &SentinelPosture, fenced: bool) -> LeanResult<()> {
-        let verbs: Vec<String> = if fenced || !posture.enabled {
+    pub fn write_capabilities(&self, posture: &SentinelPosture) -> LeanResult<()> {
+        let verbs: Vec<String> = if !posture.enabled {
             vec![]
         } else {
             ["publish", "sync", "remote-seq"].iter().map(|s| s.to_string()).collect()
@@ -234,7 +237,7 @@ impl Syncer {
         let caps = Capabilities {
             protocol: SENTINEL_PROTOCOL,
             verbs,
-            state: if fenced { "fenced".into() } else { "live".into() },
+            state: "live".into(),
             reason: posture.reason.clone(),
             sentinel_min_interval_secs: self.cfg.sentinel_min_interval_secs,
             sentinel_hourly_budget: self.cfg.sentinel_hourly_budget,

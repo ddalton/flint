@@ -129,11 +129,12 @@ library offers instead:
   (about a second) outside its min-interval and hourly budget.
 - `wait_cited(path, etag, timeout, poll)` waits until the manifest cites
   the write, for a status view that wants to show "published". It
-  refuses at once with `CitationPending` when no syncer holds the
-  lease, because nothing is there to cite. Not for the request path of
+  refuses at once with `CitationPending` when no live writer has a
+  heartbeat, because nothing is there to cite. Not for the request path of
   a UI.
 - `status()` reports the cited seq, the inbox depth, whether a barrier
-  window is open, and who holds the lease.
+  window is open, the fence's state (who ran the last boundary, and
+  whether a commit section is in progress) and the live writers.
 
 A workspace no syncer ever runs on takes writes and keeps them; the
 manifest catches up when a syncer next starts.

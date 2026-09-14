@@ -42,9 +42,102 @@ struct Obj {
 
 struct State {
     objs: RwLock<HashMap<String, Obj>>,
+    /// Multipart uploads in progress: upload id -> (key, part number ->
+    /// body). Lean's publish composes every object over its whole-put
+    /// ceiling (64 MiB) this way, so a fake without it 405s the first
+    /// large object and the failure reads as a lean bug.
+    uploads: RwLock<HashMap<String, (String, std::collections::BTreeMap<u32, Bytes>)>>,
+    upload_seq: AtomicU64,
     bytes_out: AtomicU64,
+    /// Body bytes accepted by PutObject and UploadPart — the client-
+    /// independent count of what a publish moved.
+    bytes_in: AtomicU64,
     reqs: AtomicU64,
     range_reqs: AtomicU64,
+}
+
+/// CRC-64/NVME (reflected 0xAD93D23594C935A9, init/xorout all-ones):
+/// the checksum lean asks S3 to validate FULL_OBJECT at
+/// CompleteMultipartUpload. The fake validates it too, so a wrong fold
+/// of the parts' checksums — or a part landed out of order — fails the
+/// publish here exactly as the real bucket would, instead of passing.
+fn crc64_nvme(data: &[u8]) -> u64 {
+    const POLY: u64 = 0x9A6C_9329_AC4B_C9B5;
+    static TABLE: std::sync::OnceLock<[u64; 256]> = std::sync::OnceLock::new();
+    let t = TABLE.get_or_init(|| {
+        let mut t = [0u64; 256];
+        for (i, slot) in t.iter_mut().enumerate() {
+            let mut crc = i as u64;
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 { (crc >> 1) ^ POLY } else { crc >> 1 };
+            }
+            *slot = crc;
+        }
+        t
+    });
+    let mut crc = u64::MAX;
+    for &b in data {
+        crc = t[((crc ^ b as u64) & 0xFF) as usize] ^ (crc >> 8);
+    }
+    crc ^ u64::MAX
+}
+
+/// S3's wire form of a CRC-64: base64 of the 8 big-endian bytes.
+fn crc64_b64(crc: u64) -> String {
+    const AL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes = crc.to_be_bytes();
+    let mut out = String::with_capacity(12);
+    for chunk in bytes.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = u32::from_be_bytes([0, b[0], b[1], b[2]]);
+        out.push(AL[(n >> 18) as usize & 63] as char);
+        out.push(AL[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { AL[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { AL[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
+/// The fake's etag: content-addressed, so a re-PUT of identical bytes
+/// is stable.
+fn fnv_etag(body: &[u8]) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for c in body {
+        h ^= *c as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{:016x}{:016x}", h, body.len() as u64)
+}
+
+/// An `aws-chunked` body (the SDK's framing for a streamed body with a
+/// trailing checksum) decoded to its payload; any other body returned
+/// as is. Framing: `<hex-len>[;chunk-signature=..]\r\n<data>\r\n`,
+/// terminated by a zero-length chunk and trailer lines.
+fn dechunk(headers: &hyper::HeaderMap, body: Bytes) -> Bytes {
+    let chunked = headers
+        .get("content-encoding")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("aws-chunked"))
+        .unwrap_or(false)
+        || headers.contains_key("x-amz-decoded-content-length");
+    if !chunked {
+        return body;
+    }
+    let mut out = Vec::with_capacity(body.len());
+    let mut i = 0usize;
+    while i < body.len() {
+        let Some(nl) = body[i..].windows(2).position(|w| w == b"\r\n") else { break };
+        let line = &body[i..i + nl];
+        let hex = line.split(|&c| c == b';').next().unwrap_or(&[]);
+        let n = usize::from_str_radix(std::str::from_utf8(hex).unwrap_or("0").trim(), 16).unwrap_or(0);
+        i += nl + 2;
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&body[i..(i + n).min(body.len())]);
+        i += n + 2;
+    }
+    Bytes::from(out)
 }
 
 fn pct_decode(s: &str) -> String {
@@ -105,14 +198,28 @@ async fn handle(req: Request<Incoming>, st: Arc<State>) -> Result<Response<Full<
     let path = req.uri().path().to_string();
     let q = query(req.uri().query());
     let headers = req.headers().clone();
+    // FAKES3_LOG=1: one line per request, so a request-count delta
+    // between two arms can be ATTRIBUTED rather than guessed at.
+    if std::env::var_os("FAKES3_LOG").is_some() {
+        eprintln!(
+            "fakes3: {} {}{}{} len={}",
+            method,
+            path,
+            if req.uri().query().is_some() { "?" } else { "" },
+            req.uri().query().unwrap_or(""),
+            headers.get("content-length").and_then(|v| v.to_str().ok()).unwrap_or("-")
+        );
+    }
 
     if path == "/__stats" {
         let s = format!(
-            "bytes_out {}\nreqs {}\nrange_reqs {}\nobjects {}\n",
+            "bytes_out {}\nreqs {}\nrange_reqs {}\nobjects {}\nbytes_in {}\nuploads_open {}\n",
             st.bytes_out.load(Ordering::Relaxed),
             st.reqs.load(Ordering::Relaxed),
             st.range_reqs.load(Ordering::Relaxed),
-            st.objs.read().unwrap().len()
+            st.objs.read().unwrap().len(),
+            st.bytes_in.load(Ordering::Relaxed),
+            st.uploads.read().unwrap().len()
         );
         return Ok(Response::new(Full::new(Bytes::from(s))));
     }
@@ -166,6 +273,140 @@ async fn handle(req: Request<Incoming>, st: Arc<State>) -> Result<Response<Full<
             .unwrap());
     }
 
+    // Multipart upload — the four verbs lean's compose path issues for an
+    // object over its whole-put ceiling. Conditions (If-Match /
+    // If-None-Match on Complete) are not modelled, as they are not on
+    // PutObject below: this is a rig, and a publish onto a fresh prefix
+    // never needs them. The full-object checksum IS validated.
+    if method == Method::POST && q.contains_key("uploads") {
+        let id = format!("mpu-{}", st.upload_seq.fetch_add(1, Ordering::Relaxed));
+        st.uploads.write().unwrap().insert(id.clone(), (key.clone(), Default::default()));
+        let xml = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><InitiateMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Bucket>{}</Bucket><Key>{}</Key><UploadId>{}</UploadId></InitiateMultipartUploadResult>",
+            xml_esc(_bucket), xml_esc(&key), id
+        );
+        return Ok(Response::builder()
+            .status(200)
+            .header("content-type", "application/xml")
+            .body(Full::new(Bytes::from(xml)))
+            .unwrap());
+    }
+    if method == Method::GET && key.is_empty() && q.contains_key("uploads") {
+        // ListMultipartUploads: the A9 sweep's question. Answered from
+        // the table, unpaged.
+        let ups = st.uploads.read().unwrap();
+        let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListMultipartUploadsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><IsTruncated>false</IsTruncated>");
+        for (id, (k, _)) in ups.iter() {
+            xml.push_str(&format!("<Upload><Key>{}</Key><UploadId>{}</UploadId><Initiated>{}</Initiated></Upload>", xml_esc(k), id, LAST_MOD_ISO));
+        }
+        xml.push_str("</ListMultipartUploadsResult>");
+        return Ok(Response::builder()
+            .status(200)
+            .header("content-type", "application/xml")
+            .body(Full::new(Bytes::from(xml)))
+            .unwrap());
+    }
+    if let Some(id) = q.get("uploadId").cloned() {
+        match method {
+            Method::PUT => {
+                // UploadPart.
+                let n: u32 = q.get("partNumber").and_then(|v| v.parse().ok()).unwrap_or(0);
+                // A body that does not arrive whole is REFUSED, never
+                // stored as an empty part: the client that aborted it
+                // (a reset, a stalled-stream abort) retries, and the
+                // retry must not find a hole it can complete over.
+                let raw = match req.into_body().collect().await {
+                    Ok(c) => c.to_bytes(),
+                    Err(e) => {
+                        eprintln!("fakes3: UploadPart {} part {} body did not arrive whole: {}", key, n, e);
+                        return Ok(err(StatusCode::BAD_REQUEST, "IncompleteBody"));
+                    }
+                };
+                let body = dechunk(&headers, raw);
+                let etag = fnv_etag(&body);
+                let crc = crc64_b64(crc64_nvme(&body));
+                if let Some(claimed) = headers.get("x-amz-checksum-crc64nvme").and_then(|v| v.to_str().ok()) {
+                    if claimed != crc {
+                        return Ok(err(StatusCode::BAD_REQUEST, "BadDigest"));
+                    }
+                }
+                let n_bytes = body.len() as u64;
+                let mut ups = st.uploads.write().unwrap();
+                match ups.get_mut(&id) {
+                    Some((_, parts)) => {
+                        parts.insert(n, body);
+                    }
+                    None => return Ok(err(StatusCode::NOT_FOUND, "NoSuchUpload")),
+                }
+                // Counted only once the part is HELD: a part refused
+                // above moved nothing.
+                st.bytes_in.fetch_add(n_bytes, Ordering::Relaxed);
+                return Ok(Response::builder()
+                    .status(200)
+                    .header("etag", format!("\"{}\"", etag))
+                    .header("x-amz-checksum-crc64nvme", crc)
+                    .body(Full::new(Bytes::new()))
+                    .unwrap());
+            }
+            Method::POST => {
+                // CompleteMultipartUpload. The part list in the body is
+                // not consulted: every part landed is assembled in part
+                // order, which is what the list would say.
+                let _ = req.into_body().collect().await;
+                // Assembled and VALIDATED before the upload is consumed:
+                // a refused Complete leaves the MPU in place on S3 (the
+                // client retries or aborts), and a fake that ate it on
+                // refusal turned every retry into a 404 (its own smoke
+                // test found that).
+                let (k, body, nparts) = {
+                    let ups = st.uploads.read().unwrap();
+                    let Some((k, parts)) = ups.get(&id) else {
+                        return Ok(err(StatusCode::NOT_FOUND, "NoSuchUpload"));
+                    };
+                    let total: usize = parts.values().map(|p| p.len()).sum();
+                    let mut body = Vec::with_capacity(total);
+                    for p in parts.values() {
+                        body.extend_from_slice(p);
+                    }
+                    (k.clone(), body, parts.len())
+                };
+                let total = body.len();
+                let crc = crc64_b64(crc64_nvme(&body));
+                if let Some(claimed) = headers.get("x-amz-checksum-crc64nvme").and_then(|v| v.to_str().ok()) {
+                    if claimed != crc {
+                        return Ok(err(StatusCode::BAD_REQUEST, "BadDigest"));
+                    }
+                }
+                if let Some(size) = headers.get("x-amz-mp-object-size").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<usize>().ok()) {
+                    if size != total {
+                        return Ok(err(StatusCode::BAD_REQUEST, "InvalidRequest"));
+                    }
+                }
+                st.uploads.write().unwrap().remove(&id);
+                let etag = format!("{}-{}", fnv_etag(&body), nparts);
+                st.objs.write().unwrap().insert(k.clone(), Obj { body: Bytes::from(body), etag: etag.clone() });
+                let xml = format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?><CompleteMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Location>/{}/{}</Location><Bucket>{}</Bucket><Key>{}</Key><ETag>&quot;{}&quot;</ETag><ChecksumCRC64NVME>{}</ChecksumCRC64NVME><ChecksumType>FULL_OBJECT</ChecksumType></CompleteMultipartUploadResult>",
+                    xml_esc(_bucket), xml_esc(&k), xml_esc(_bucket), xml_esc(&k), etag, crc
+                );
+                return Ok(Response::builder()
+                    .status(200)
+                    .header("content-type", "application/xml")
+                    .header("etag", format!("\"{}\"", etag))
+                    .header("x-amz-checksum-crc64nvme", crc)
+                    .header("x-amz-checksum-type", "FULL_OBJECT")
+                    .body(Full::new(Bytes::from(xml)))
+                    .unwrap());
+            }
+            Method::DELETE => {
+                // AbortMultipartUpload; absent is success, as on S3.
+                st.uploads.write().unwrap().remove(&id);
+                return Ok(Response::builder().status(204).body(Full::new(Bytes::new())).unwrap());
+            }
+            _ => return Ok(err(StatusCode::METHOD_NOT_ALLOWED, "MethodNotAllowed")),
+        }
+    }
+
     match method {
         Method::GET | Method::HEAD => {
             let (body, etag, total) = {
@@ -217,14 +458,10 @@ async fn handle(req: Request<Incoming>, st: Arc<State>) -> Result<Response<Full<
             Ok(b.body(Full::new(slice)).unwrap())
         }
         Method::PUT => {
-            let body = req.into_body().collect().await.map(|c| c.to_bytes()).unwrap_or_default();
-            // Content-addressed so a re-PUT of identical bytes is stable.
-            let mut h: u64 = 0xcbf29ce484222325;
-            for c in body.iter() {
-                h ^= *c as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            let etag = format!("{:016x}{:016x}", h, body.len() as u64);
+            let raw = req.into_body().collect().await.map(|c| c.to_bytes()).unwrap_or_default();
+            let body = dechunk(&headers, raw);
+            let etag = fnv_etag(&body);
+            st.bytes_in.fetch_add(body.len() as u64, Ordering::Relaxed);
             st.objs.write().unwrap().insert(key, Obj { body, etag: etag.clone() });
             Ok(Response::builder()
                 .status(200)
@@ -233,7 +470,20 @@ async fn handle(req: Request<Incoming>, st: Arc<State>) -> Result<Response<Full<
                 .unwrap())
         }
         Method::DELETE => {
-            st.objs.write().unwrap().remove(&key);
+            // lean's garbage collector deletes If-Match on the etag it
+            // recognized; honoured as the GET above honours it, so a rig
+            // run never deletes an object that was replaced in between.
+            let mut objs = st.objs.write().unwrap();
+            if let Some(m) = headers.get("if-match").and_then(|v| v.to_str().ok()) {
+                match objs.get(&key) {
+                    None => return Ok(err(StatusCode::NOT_FOUND, "NoSuchKey")),
+                    Some(o) if norm_etag(m) != norm_etag(&o.etag) => {
+                        return Ok(err(StatusCode::PRECONDITION_FAILED, "PreconditionFailed"));
+                    }
+                    Some(_) => {}
+                }
+            }
+            objs.remove(&key);
             Ok(Response::builder().status(204).body(Full::new(Bytes::new())).unwrap())
         }
         _ => Ok(err(StatusCode::METHOD_NOT_ALLOWED, "MethodNotAllowed")),
@@ -315,7 +565,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let st = Arc::new(State {
         objs: RwLock::new(objs),
+        uploads: RwLock::new(HashMap::new()),
+        upload_seq: AtomicU64::new(1),
         bytes_out: AtomicU64::new(0),
+        bytes_in: AtomicU64::new(0),
         reqs: AtomicU64::new(0),
         range_reqs: AtomicU64::new(0),
     });

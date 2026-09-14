@@ -58,6 +58,7 @@ pub mod verbs;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)] mod tests_upload_gate;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -101,8 +102,11 @@ pub enum LeanError {
     Io(#[from] std::io::Error),
     #[error("state: {0}")]
     State(String),
-    /// The lease was lost or a higher epoch was observed: the caller
-    /// must stop publishing immediately (self-fence).
+    /// The cell moved under a commit section: this barrier is
+    /// abandoned — its manifest is never installed, its uploads stand
+    /// as uncited generations the next barrier adopts by `flush_uuid`.
+    /// Not a process exit and not a terminal state: the lease is held
+    /// per barrier, so the next one claims again.
     #[error("fenced: {0}")]
     Fenced(String),
     /// A budget refused the operation (checkout bytes/file-count).
@@ -235,10 +239,15 @@ pub struct LeanConfig {
     /// rig measured the sequential loops at 561-854 PUTs/s and
     /// 1,000-2,000 GETs/s; fan-out multiplies directly against those.
     pub fanout: usize,
-    /// Concurrent UPLOADS. Deliberately separate from `fanout`: the read
-    /// path is additionally bounded by `fetch_inflight_max_bytes`, the
-    /// upload path is bounded by nothing but this number, and
-    /// `UPLOAD_CHUNK_WAVES` multiplies it into the lease-fence window.
+    /// Concurrent UPLOADS. Deliberately separate from `fanout`, and
+    /// measured separately: the read path's width is what the checkout
+    /// rig moved, this one is what the publish rig moved. Both paths are
+    /// byte-bounded, by different gates — the read side by
+    /// `fetch_inflight_max_bytes` here, the upload side by the store's
+    /// own gate (`with_upload_inflight_max_bytes`, 256 MiB from the
+    /// binary), which charges every whole body and every multipart part
+    /// from before its read until its PUT returns. So this number sets
+    /// request concurrency, not peak RSS.
     pub upload_fanout: usize,
     /// The project this workspace claims to be, stamped from the CR
     /// (`FLINT_SYNC_PROJECT_ID`). When set, `lease::verify_claim`
@@ -327,6 +336,24 @@ pub struct LeanConfig {
     pub sentinel_hourly_budget: u64,
     /// Sentinel poll cadence (env-only, not a fleet contract).
     pub sentinel_poll_secs: u64,
+
+    // --- the publish fence (design 2026-09-13 §4; `lease.rs`) ---
+    /// How often a barrier waiting for the cell re-reads it.
+    pub claim_poll_secs: u64,
+    /// Minimum spacing between two observations that COUNT toward the
+    /// dead-holder (`QUIET_POLLS`) and abandoned-handoff thresholds.
+    /// The tests set it to 0 so a deposal takes six polls, not a minute.
+    pub claim_quiet_spacing_secs: u64,
+    /// Longest a barrier waits for the cell before it is abandoned and
+    /// retried at the next floor.
+    pub claim_deadline_secs: u64,
+    /// DRILL-ONLY (`FLINT_SYNC_DRILL_HOLD_COMMIT_SECS`, never stamped by
+    /// the operator): sleep this long inside the commit section, right
+    /// after the claim. The one straggler the per-barrier lease still
+    /// has is a holder that stalls INSIDE its commit section, and that
+    /// section is milliseconds long — no drill can hit it by timing, so
+    /// this is how `run-writers.sh` opens the window. 0 = off.
+    pub drill_hold_commit_secs: u64,
 }
 
 impl LeanConfig {
@@ -366,6 +393,10 @@ impl LeanConfig {
             sentinel_min_interval_secs: 5,
             sentinel_hourly_budget: 60,
             sentinel_poll_secs: 1,
+            claim_poll_secs: lease::CLAIM_POLL_SECS,
+            claim_quiet_spacing_secs: lease::QUIET_SPACING_SECS,
+            claim_deadline_secs: lease::CLAIM_DEADLINE_SECS,
+            drill_hold_commit_secs: 0,
         }
     }
 
@@ -413,6 +444,15 @@ impl LeanConfig {
     }
     pub fn epoch_key(&self) -> String {
         format!("{}/{}/epoch", self.prefix, LEAN_DIR)
+    }
+    /// The per-writer heartbeats (`lease::heartbeat`): one small object
+    /// per live writer, the only liveness a reader can see now that the
+    /// cell is at rest between barriers.
+    pub fn writers_prefix(&self) -> String {
+        format!("{}/{}/writers/", self.prefix, LEAN_DIR)
+    }
+    pub fn writer_key(&self, holder_id: &str) -> String {
+        format!("{}{holder_id}", self.writers_prefix())
     }
     /// The operator's claim cell for this prefix (`lean_operator::
     /// reconcile::claim_key` writes it; the syncer only READS it).
@@ -467,7 +507,10 @@ pub struct Syncer {
     pub store: Arc<dyn ObjectStore>,
     pub cfg: LeanConfig,
     pub state: state::SyncerState,
-    /// The held lease, once claimed. Barriers refuse to run without it.
+    /// The lease held for the CURRENT commit section, if any. `None`
+    /// between barriers: the cell arbitrates who installs a manifest and
+    /// nothing else (design 2026-09-13 §4), so a barrier claims after
+    /// its uploads and releases after its baseline rewrite.
     pub lease: Option<flint_store::EpochLease>,
     /// Standing conditions already written to `conflicts.jsonl` by THIS
     /// process, so a condition that persists across every poll tick is

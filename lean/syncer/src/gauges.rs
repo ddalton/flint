@@ -50,10 +50,6 @@ impl Withheld {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Gauges {
-    /// `live` | `fenced` — must agree with `capabilities.json`. An
-    /// agent reading only the operational file must not conclude a
-    /// zombie is healthy.
-    pub state: String,
     /// Since the last boundary was installed. Elapsed time, NOT
     /// exposure: an idle healthy workspace has nothing at risk and a
     /// growing `rpo_secs`. Pair it with `withheld_reason`, which carries
@@ -150,12 +146,11 @@ impl Syncer {
     /// Recompute and write the gauges. Deliberately synchronous and
     /// store-free: a scrape, a tick and an exec all cost zero bucket
     /// requests, and the type system is what says so.
-    pub fn write_gauges(&self, fenced: bool, withheld: Option<Withheld>) -> LeanResult<Gauges> {
+    pub fn write_gauges(&self, withheld: Option<Withheld>) -> LeanResult<Gauges> {
         let now = now_unix();
         let prev = self.load_gauges()?;
         let budget = self.load_budget().unwrap_or_default();
         let g = Gauges {
-            state: if fenced { "fenced".into() } else { "live".into() },
             rpo_secs: if prev.last_durable_unix == 0 {
                 0
             } else {

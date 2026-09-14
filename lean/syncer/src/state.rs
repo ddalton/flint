@@ -98,6 +98,29 @@ pub struct Incarnation {
 /// recognize its own crashed/torn PUT at the 412 (AdoptOwn) instead of
 /// mistaking it for a foreign write. `recent_uuids` keeps the last few
 /// barriers' uuids for the same reason.
+/// A change ANOTHER writer made that this workspace's merge carried into
+/// the manifest but not yet into the tree: the next consume fetches it
+/// (or, for a deletion, removes a clean local copy).
+///
+/// Writer-local on purpose. These rode the SHARED inbox as
+/// `merge-preserved` entries, which was right while one syncer wrote a
+/// workspace and wrong the moment two did: the other writer's consume
+/// found its own bytes there, called the entry integrated and dropped
+/// it, and the writer that needed it never fetched the change; a
+/// `sync` read it as remote truth after the manifest had moved past it.
+/// And a peer's DELETE had no carrier at all. A pod replacement loses
+/// this file with the baseline, which is correct: the replacement's
+/// checkout materializes the whole manifest.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ForeignChange {
+    pub path: String,
+    /// The etag the manifest cites; `None` means the path was deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crc64_b64: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IntentJournal {
     pub flush_uuid: String,
@@ -190,6 +213,7 @@ const SCOPE: &str = "scope.json";
 const SCOPE_INTENT: &str = "scope-intent.json";
 const INCARNATION: &str = "incarnation.json";
 const INTENT: &str = "intent.json";
+const FOREIGN_QUEUE: &str = "foreign-queue.json";
 const CONFLICTS: &str = "conflicts.jsonl";
 /// The rotated generation. `load_conflicts` reads it FIRST, so the
 /// sequence a reader sees is unbroken across a rotation — which matters
@@ -394,6 +418,24 @@ impl SyncerState {
         let bytes = serde_json::to_vec_pretty(i)
             .map_err(|e| LeanError::State(format!("incarnation: {e}")))?;
         write_atomic(&self.dir.join(INCARNATION), &bytes)
+    }
+
+    /// The writer-local foreign-change queue. Only NotFound means empty
+    /// (an unreadable queue answered as empty would strand every change
+    /// in it).
+    pub fn load_foreign_queue(&self) -> LeanResult<Vec<ForeignChange>> {
+        match fs::read(self.dir.join(FOREIGN_QUEUE)) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|e| LeanError::State(format!("foreign queue: {e}"))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn save_foreign_queue(&self, q: &[ForeignChange]) -> LeanResult<()> {
+        let bytes =
+            serde_json::to_vec(q).map_err(|e| LeanError::State(format!("foreign queue: {e}")))?;
+        write_atomic(&self.dir.join(FOREIGN_QUEUE), &bytes)
     }
 
     pub fn load_intent(&self) -> LeanResult<IntentJournal> {

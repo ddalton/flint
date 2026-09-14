@@ -440,7 +440,7 @@ def plate_01():
          ("flint-sync — an unprivileged worker", [("m", "delivered by the s3.csi.chert.us driver"), "checkout at start, before the agent's first line; a barrier at cadence from an mtime/size scan",
                                                   ("m", ".flint/publish  →  .flint/publish.ack"),
                                                   ("b", "preStop drains — a graceful stop loses nothing")]),
-         ("coordination — a lease in the BUCKET", ["one writer per subtree, admitted by a CAS on the epoch cell; a second syncer is REFUSED, never merged; readers see the last published boundary"]),
+         ("coordination — a lease in the BUCKET", ["one writer per BARRIER, admitted by a CAS on the epoch cell and a FIFO ticket; several syncers share a subtree and merge at the manifest; readers see the last published boundary"]),
          ("checkout · publish", "RPO = the last barrier")),
         ("pass", "flint-passthrough — the mount", "FUSE · an S3 prefix mounted as-is · no flint semantics",
          ("the tenant pod", ["no sidecar, no label, no credential, no privilege — admissible under PodSecurity restricted",
@@ -513,7 +513,7 @@ def plate_01b():
          ("flint-sync, the syncer", ["scans for changed files; copies them with the plain S3 API", ("m", "unprivileged, in a system namespace")]),
          ("publish at a boundary  ↑   checkout at start  ↓", "RPO = the last barrier"),
          ("m", "<prefix>/files/<path>"),
-         ["lease in the bucket — one writer", "broker → short-lived keys → syncer", ".flint/publish → .flint/publish.ack"]),
+         ["lease in the bucket — one writer per barrier", "broker → short-lived keys → syncer", ".flint/publish → .flint/publish.ack"]),
         ("pass", "FUSE", "flint-passthrough — every operation is a request",
          ("the pod", [("m", "/mnt/s3 — a FUSE mount"), ("b", "every file operation is intercepted")]),
          ("FUSE", "per operation, in the pod's critical path", True, False),
@@ -714,7 +714,7 @@ def plate_04():
     s.box(M, 354, W - 2 * M, 92, None, "panel")
     s.text(44, 382, "the loop — one agent, start to durable", "t1")
     steps = [("pod starts", "checkout first — never an empty tree"), ("the agent works", "local files at local speed"),
-             ("echo > .flint/publish", "declares a boundary — the whole API"), (".flint/publish.ack", "ok = in S3 · partial · refused-fenced")]
+             ("echo > .flint/publish", "declares a boundary — the whole API"), (".flint/publish.ack", "ok = in S3 · partial · refused-scope")]
     sw = (W - 2 * M - 44 - 3 * 14) / 4
     for i, (head, body) in enumerate(steps):
         x = 44 + i * (sw + 14)
@@ -723,7 +723,7 @@ def plate_04():
         s.text(x + 34, 432, body, "t4")
     # control · the boundary
     s.group(M, 468, 760, 96, "control — off the data path")
-    s.text(44, 508, "lease in the bucket — one writer; a second syncer is refused, never merged", "t4")
+    s.text(44, 508, "lease in the bucket — held per barrier; several syncers merge at the manifest", "t4")
     s.text(44, 526, "broker → short-lived keys → the worker, over a loopback door · consumers absent = deny", "t4")
     s.text(44, 544, "the boundary verbs are files: an agent that can write a file can declare a coherent point", "t4")
     s.card(808, 468, 768, 96, "a boundary is a coherent point", ["every floor tick and every publish touch runs one fused barrier: upload, then ONE CAS cites the whole set", ("b", "a reader takes a boundary entire or not at all; a publish touch is the point the agent declared")], fe)
@@ -1053,7 +1053,7 @@ def plate_10():
           [("b", "Its ServiceAccount's push rights."), "No bucket credential — they land on the syncer container only — and no privilege. It can push as that SA to repositories listing it, within policy; revoked by pod deletion or SA rotation within the review cache. Ceiling: a shared SA reaches every sibling's agent/* branch, and the server runs as root."]]),
         ("Does it fail closed?", "secure defaults, refusal over silent degradation",
          [[("r", "No, by default."), "security.enforcePermissions is false — evaluate, log, allow — and even enforced the hub holds CAP_DAC_OVERRIDE. SECINFO now advertises AUTH_SYS first and AUTH_NONE last, pinned by a test, so a stock mount negotiates sec=sys."],
-          [("b", "Detection becomes refusal."), "A syncer that lost its lease answers refused-fenced rather than publishing; the plugin refuses to clean up a published tree; the chart refuses to render on credential misconfig; the drain refuses to attest a boundary that left a path parked."],
+          [("b", "Detection becomes refusal."), "A barrier that lost the publish fence mid-commit installs nothing and is retried, never acked; the plugin refuses to clean up a published tree; the chart refuses to render on credential misconfig; the drain refuses to attest a boundary that left a path parked."],
           [("b", "Deny is the default."), "consumers absent means deny; the ValidatingAdmissionPolicy — not the namespace label — fences the workers namespace to the plugin's own node; a dead mounter strands the pod on ENOTCONN rather than serving stale bytes."],
           [("b", "Closed where it counts, open on two defaults."), "An unparseable policy refuses; a MISSING pre-receive does not open the repository; a snapshot naming a missing pack refuses to serve.", ("r", "No door.namespace renders no NetworkPolicy, and an absent branches block is permissive: both documented, neither refuses.")]]),
     ]

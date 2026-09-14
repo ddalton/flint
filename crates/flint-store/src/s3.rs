@@ -54,6 +54,15 @@ pub struct S3Store {
     /// this loop: `fanout` spreads work ACROSS objects, so a tree whose
     /// critical path is one large object gets no concurrency at all.
     part_parallelism: usize,
+    /// The upload bytes-in-flight gate (`gate.rs`), when
+    /// `with_upload_inflight_max_bytes` set one. Every local part of a
+    /// compose holds a permit for its length from before its read —
+    /// the read is the allocation — until its `UploadPart` has
+    /// returned, and [`ObjectStore::upload_gate`] hands the same gate to
+    /// the caller that PUTs whole bodies. It is what lets
+    /// `part_parallelism` default above 1: without it the window held
+    /// `min(objects, fanout) x part_parallelism x part_size`.
+    upload_gate: Option<std::sync::Arc<crate::gate::ByteGate>>,
     /// The raw read path (`rawread.rs`), when `with_raw_reads(true)`:
     /// every GET and HEAD goes through it; every write stays on the
     /// SDK client above.
@@ -142,6 +151,7 @@ impl S3Store {
             region,
             endpoint: endpoint_for_raw,
             part_parallelism: 1,
+            upload_gate: None,
             // S3's documented CopyObject ceiling.
             copy_whole_max: 5 * 1024 * 1024 * 1024,
         })
@@ -180,6 +190,13 @@ impl S3Store {
     /// Clamped to at least 1; `1` restores the sequential loop.
     pub fn with_part_parallelism(mut self, n: usize) -> Self {
         self.part_parallelism = n.max(1);
+        self
+    }
+
+    /// Bound the bytes the upload path holds in memory at once (see the
+    /// field and `gate.rs`). `0` = no gate: the count-only bound.
+    pub fn with_upload_inflight_max_bytes(mut self, n: u64) -> Self {
+        self.upload_gate = (n > 0).then(|| std::sync::Arc::new(crate::gate::ByteGate::new(n)));
         self
     }
 
@@ -376,6 +393,26 @@ struct EpochBody {
     /// keeps cells written by older binaries readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     echo: Option<String>,
+    /// The claim queue (lean's per-barrier lease). `default` keeps cells
+    /// written by binaries that never queue readable: an empty queue.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    waiters: Vec<String>,
+    /// Who a released cell is reserved for (the queue head at handoff).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    handoff: Option<String>,
+}
+
+/// Everything one epoch PUT writes, so the five transitions (acquire,
+/// renew, release, handoff, enqueue) issue the SAME request and differ
+/// only in what they say.
+struct EpochWrite<'a> {
+    holder_id: &'a str,
+    epoch: u64,
+    condition: PutCondition,
+    released: bool,
+    echo: Option<&'a str>,
+    waiters: Vec<String>,
+    handoff: Option<String>,
 }
 
 fn now_unix() -> u64 {
@@ -780,6 +817,21 @@ impl ObjectStore for S3Store {
             .send()
             .await
             .map_err(|e| map_err("delete", e))?;
+        Ok(())
+    }
+
+    async fn delete_if_match(&self, key: &str, etag: &str) -> StoreResult<()> {
+        // A backend that accepts the header and ignores it deletes
+        // unconditionally and answers 204 — indistinguishable here. That
+        // is what `probe::probe_conditional_delete` exists to catch.
+        self.client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .if_match(etag)
+            .send()
+            .await
+            .map_err(|e| map_err("delete-if-match", e))?;
         Ok(())
     }
 
@@ -1204,6 +1256,8 @@ impl ObjectStore for S3Store {
                     last_renew_unix: meta.last_modified_unix,
                     released: body.released,
                     echo: body.echo,
+                    waiters: body.waiters,
+                    handoff: body.handoff,
                 }))
             }
             Err(StoreError::NotFound(_)) => Ok(None),
@@ -1218,15 +1272,26 @@ impl ObjectStore for S3Store {
         supersede: Option<&EpochState>,
     ) -> StoreResult<EpochLease> {
         let epoch = supersede.map_or(1, |s| s.epoch + 1);
-        self.epoch_put(
+        // The claimant leaves the queue it was in; whoever else was
+        // waiting stays queued behind the new holder (FIFO survives the
+        // handoff), and a reservation is consumed by the acquire.
+        let waiters: Vec<String> = supersede
+            .map(|s| s.waiters.iter().filter(|w| w.as_str() != holder_id).cloned().collect())
+            .unwrap_or_default();
+        self.epoch_write(
             key,
-            holder_id,
-            epoch,
-            match supersede {
-                None => PutCondition::IfNoneMatchAny,
-                Some(s) => PutCondition::IfMatch(s.token.clone()),
+            EpochWrite {
+                holder_id,
+                epoch,
+                condition: match supersede {
+                    None => PutCondition::IfNoneMatchAny,
+                    Some(s) => PutCondition::IfMatch(s.token.clone()),
+                },
+                released: false,
+                echo: None,
+                waiters,
+                handoff: None,
             },
-            None,
         )
         .await
     }
@@ -1237,12 +1302,18 @@ impl ObjectStore for S3Store {
         lease: &EpochLease,
         echo: Option<&str>,
     ) -> StoreResult<EpochLease> {
-        self.epoch_put(
+        self.epoch_write(
             key,
-            &lease.holder_id,
-            lease.epoch,
-            PutCondition::IfMatch(lease.token.clone()),
-            echo,
+            EpochWrite {
+                holder_id: &lease.holder_id,
+                epoch: lease.epoch,
+                condition: PutCondition::IfMatch(lease.token.clone()),
+                released: false,
+                echo,
+                // Carried forward, never erased by a heartbeat.
+                waiters: lease.waiters.clone(),
+                handoff: None,
+            },
         )
         .await
     }
@@ -1262,18 +1333,84 @@ impl ObjectStore for S3Store {
         // mid-shutdown cannot stamp `released` onto a live successor's
         // cell — that would invite a third hub to claim instantly while
         // the successor is serving.
-        self.epoch_put_marked(
+        self.epoch_write(
             key,
-            &lease.holder_id,
-            lease.epoch,
-            PutCondition::IfMatch(lease.token.clone()),
-            true,
-            // A released cell reports no live syncer: clearing the
-            // echo is the point, not an omission.
-            None,
+            EpochWrite {
+                holder_id: &lease.holder_id,
+                epoch: lease.epoch,
+                condition: PutCondition::IfMatch(lease.token.clone()),
+                released: true,
+                // A released cell reports no live syncer: clearing the
+                // echo is the point, not an omission (the tier hub's
+                // rule; lean's per-barrier handoff KEEPS it, see
+                // `epoch_handoff`).
+                echo: None,
+                waiters: lease.waiters.clone(),
+                handoff: None,
+            },
         )
         .await
         .map(|_| ())
+    }
+
+    async fn epoch_handoff(
+        &self,
+        key: &str,
+        lease: &EpochLease,
+        echo: Option<&str>,
+    ) -> StoreResult<()> {
+        let mut rest = lease.waiters.clone();
+        let head = if rest.is_empty() { None } else { Some(rest.remove(0)) };
+        self.epoch_write(
+            key,
+            EpochWrite {
+                holder_id: &lease.holder_id,
+                epoch: lease.epoch,
+                condition: PutCondition::IfMatch(lease.token.clone()),
+                released: true,
+                echo,
+                waiters: rest,
+                handoff: head,
+            },
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn epoch_enqueue(
+        &self,
+        key: &str,
+        observed: &EpochState,
+        holder_id: &str,
+    ) -> StoreResult<EpochState> {
+        let mut waiters = observed.waiters.clone();
+        if !waiters.iter().any(|w| w == holder_id) {
+            waiters.push(holder_id.to_string());
+        }
+        let lease = self
+            .epoch_write(
+                key,
+                EpochWrite {
+                    holder_id: &observed.holder_id,
+                    epoch: observed.epoch,
+                    condition: PutCondition::IfMatch(observed.token.clone()),
+                    released: observed.released,
+                    echo: observed.echo.as_deref(),
+                    waiters: waiters.clone(),
+                    handoff: observed.handoff.clone(),
+                },
+            )
+            .await?;
+        Ok(EpochState {
+            holder_id: observed.holder_id.clone(),
+            epoch: observed.epoch,
+            token: lease.token,
+            last_renew_unix: observed.last_renew_unix,
+            echo: observed.echo.clone(),
+            released: observed.released,
+            waiters,
+            handoff: observed.handoff.clone(),
+        })
     }
 
     fn min_part_size(&self) -> u64 {
@@ -1282,6 +1419,10 @@ impl ObjectStore for S3Store {
 
     fn max_parts(&self) -> usize {
         S3_MAX_PARTS
+    }
+
+    fn upload_gate(&self) -> Option<std::sync::Arc<crate::gate::ByteGate>> {
+        self.upload_gate.clone()
     }
 }
 
@@ -1330,6 +1471,15 @@ impl S3Store {
     ) -> StoreResult<(i32, CompletedPart, Option<u64>, u64)> {
         match p {
             PartSource::Local { offset, len } => {
+                // The upload byte gate: this part's length is charged
+                // from BEFORE it is read — the read is what allocates —
+                // until its PUT has returned (the permit lives to the
+                // end of this arm). A copied part below holds no bytes
+                // and takes none.
+                let _permit = match &self.upload_gate {
+                    Some(g) => Some(g.acquire(*len).await),
+                    None => None,
+                };
                 let bytes = read_local(spec.local_path, *offset, *len).await?;
                 // Hashed on a blocking thread while this part's PUT is
                 // in flight, so hashing costs the upload nothing on the
@@ -1535,26 +1685,8 @@ impl S3Store {
         })
     }
 
-    async fn epoch_put(
-        &self,
-        key: &str,
-        holder_id: &str,
-        epoch: u64,
-        condition: PutCondition,
-        echo: Option<&str>,
-    ) -> StoreResult<EpochLease> {
-        self.epoch_put_marked(key, holder_id, epoch, condition, false, echo).await
-    }
-
-    async fn epoch_put_marked(
-        &self,
-        key: &str,
-        holder_id: &str,
-        epoch: u64,
-        condition: PutCondition,
-        released: bool,
-        echo: Option<&str>,
-    ) -> StoreResult<EpochLease> {
+    async fn epoch_write(&self, key: &str, w: EpochWrite<'_>) -> StoreResult<EpochLease> {
+        let EpochWrite { holder_id, epoch, condition, released, echo, waiters, handoff } = w;
         let body = Bytes::from(
             serde_json::to_vec(&EpochBody {
                 holder_id: holder_id.to_string(),
@@ -1563,6 +1695,8 @@ impl S3Store {
                 salt: uuid::Uuid::new_v4().to_string(),
                 released,
                 echo: echo.map(|e| e.to_string()),
+                waiters: waiters.clone(),
+                handoff,
             })
             .unwrap(),
         );
@@ -1585,6 +1719,7 @@ impl S3Store {
             holder_id: holder_id.to_string(),
             epoch,
             token: resp.e_tag().unwrap_or_default().to_string(),
+            waiters,
         })
     }
 

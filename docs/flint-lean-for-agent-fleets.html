@@ -116,7 +116,7 @@
         │                                     │
         └─ flint-sync sidecar ────────────────┴──▶ S3
               injected by a webhook · unprivileged · no /dev/fuse</code></pre>
-<p>The trade, stated up front: the workspace is a <strong>local copy</strong>. It must fit the pod&#x27;s disk, one writer owns it at a time, and other readers see the last published boundary rather than your last write. If that is not your shape, see <a href="#when-not-to-use-lean">when not to use lean</a>.</p>
+<p>The trade, stated up front: the workspace is a <strong>local copy</strong>. It must fit the pod&#x27;s disk, writers merge at the manifest rather than editing one live tree (two agents editing one file get last-boundary-wins with the loser&#x27;s bytes preserved), and other readers see the last published boundary rather than your last write. If that is not your shape, see <a href="#when-not-to-use-lean">when not to use lean</a>.</p>
 <p>Everything below was run end to end on 2026-08-26 against the published chart. Commands are copy-pasteable, not illustrative.</p>
 <hr>
 <h2>Before you start</h2>
@@ -171,7 +171,7 @@ spec:
   floorSecs: 60                  # publish cadence — and the RPO</code></pre>
 <pre><code>kubectl apply -f workspace.yaml
 kubectl -n agents get flintleanworkspace proj1 -o yaml | grep -A6 conditions</code></pre>
-<p>You want <code>SpecAccepted: True</code>. <code>SyncerObserved: Unknown</code> with reason <code>NoLiveSyncer</code> is normal for a workspace at rest — nothing holds the lease until a pod starts.</p>
+<p>You want <code>SpecAccepted: True</code>. <code>SyncerObserved: Unknown</code> with reason <code>NoLiveSyncer</code> is normal for a workspace no pod has ever published; once one has, the condition names the binary that ran the last boundary, and <code>observedWriters</code> counts the pods with a live heartbeat (several pods may share one workspace).</p>
 <hr>
 <h2>3. Opt a pod in</h2>
 <p>One label. That is the whole integration.</p>
@@ -211,7 +211,7 @@ cat /workspace/.flint/publish.ack
 #   &quot;report&quot;: { &quot;uploaded&quot;: 0, &quot;deleted&quot;: 0, &quot;parked&quot;: 0, ... }
 # }</code></pre>
 <p><code>uploaded: 0</code> here just means nothing had changed since the last boundary — the point the agent declared is already true, which is still an honest <code>ok</code>.</p>
-<p><code>status: &quot;ok&quot;</code> means <strong>the named boundary is in the bucket</strong> — not queued, not scheduled. <code>refused-fenced</code> means this syncer lost the lease and is telling you rather than leaving you waiting.</p>
+<p><code>status: &quot;ok&quot;</code> means <strong>the named boundary is in the bucket</strong> — not queued, not scheduled. A boundary that lost its turn at the publish fence is retried by the cadence, so an ack is late rather than refused.</p>
 <p>Costs nothing when unused: measured at 20 bucket requests per 22 s idle with the verbs off, and 20 with them on.</p>
 <hr>
 <h2>5. Verify</h2>
@@ -230,7 +230,7 @@ cat /workspace/.flint/publish.ack
 <hr>
 <h2>What it costs</h2>
 <p>Measured on real S3 (us-west-1, one i4i.large node, 2026-09-12; the whole drill, its controls and its rig are in <code>lean/e2e/perf/results/door-drill-2026-09-12.md</code>). Every cell is the range over three reps, never a mean. "Host engine" is the syncer binary alone on the node; "as deployed" is the chart, the <code>s3.csi.chert.us</code> node plugin, the worker pod and the tenant pod, timed from <code>kubectl apply</code> of the tenant pod to Ready (checkout) or from the <code>publish</code> touch to its ack.</p>
-<table><tr><th></th><th>host engine</th><th>as deployed</th></tr><tr><td>checkout, 6 × 1 GiB</td><td><strong>24.1–25.0 s</strong></td><td><strong>118.4–161.1 s (n=2)</strong> (reps 2,3: rep 1 paid a lease lockout the drill itself caused)</td></tr><tr><td>checkout, 20,000 × 8 KiB</td><td><strong>5.3–5.9 s</strong></td><td><strong>22.9–24.9 s</strong></td></tr><tr><td>checkout, 4 GiB + 2,000 × 16 KiB</td><td><strong>19.6–19.9 s</strong></td><td><strong>92.4–115.1 s</strong></td></tr><tr><td>publish, 6 × 1 GiB</td><td><strong>18.3 s</strong></td><td><strong>19.0–19.4 s</strong></td></tr><tr><td>publish, 20,000 × 8 KiB</td><td><strong>19.5–20.4 s</strong></td><td><strong>20.8–22.6 s</strong></td></tr><tr><td>publish, 4 GiB + 2,000 × 16 KiB</td><td><strong>50.5–51.7 s</strong> at the default; <strong>13.9–14.4 s</strong> at <code>uploadPartParallelism: 8</code></td><td><strong>50.8–50.9 s</strong></td></tr><tr><td>idle</td><td>~5 bucket requests per tick, per workspace</td><td>—</td></tr></table>
+<table><tr><th></th><th>host engine</th><th>as deployed</th></tr><tr><td>checkout, 6 × 1 GiB</td><td><strong>24.1–25.0 s</strong></td><td><strong>118.4–161.1 s (n=2)</strong> (reps 2,3: rep 1 paid a lease lockout the drill itself caused)</td></tr><tr><td>checkout, 20,000 × 8 KiB</td><td><strong>5.3–5.9 s</strong></td><td><strong>22.9–24.9 s</strong></td></tr><tr><td>checkout, 4 GiB + 2,000 × 16 KiB</td><td><strong>19.6–19.9 s</strong></td><td><strong>92.4–115.1 s</strong></td></tr><tr><td>publish, 6 × 1 GiB</td><td><strong>18.3 s</strong></td><td><strong>19.0–19.4 s</strong></td></tr><tr><td>publish, 20,000 × 8 KiB</td><td><strong>19.5–20.4 s</strong></td><td><strong>20.8–22.6 s</strong></td></tr><tr><td>publish, 4 GiB + 2,000 × 16 KiB</td><td><strong>50.5–51.7 s</strong> at <code>uploadPartParallelism: 1</code> (the v1.51.0 default); <strong>13.9–14.4 s</strong> at 8, the default since the upload window gained its byte bound (<code>uploadInflightMb</code>, 256)</td><td><strong>50.8–50.9 s</strong> (at 1)</td></tr><tr><td>idle</td><td>~5 bucket requests per tick, per workspace</td><td>—</td></tr></table>
 <p>The deployed column carries what a pod pays that the engine does not — scheduling, the worker pod, the lease claim, the loop mount, the bind — a mostly fixed cost of roughly the small tree's gap. Peak worker RSS at the default read window (128 MiB in flight): 403–437 MiB on the 1 GiB objects, 229 MiB on the mixed tree, 72 MiB on the small one, under the worker's 1Gi limit.</p>
 <p><strong>The file count binds before the byte count</strong> — the manifest is exactly linear in entries, which is why the v1 cap is ~250k files. For scale, the loopback floors: 100k files check out in 49.5 s (first publish 65 s, idle tick 1.85 s); 1M files in 7 m 05 s, with a 264 MiB manifest at ~277 B/entry.</p>
 <hr>

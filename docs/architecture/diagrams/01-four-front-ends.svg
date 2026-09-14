@@ -90,9 +90,9 @@
 <text class="t4b" x="432" y="318">preStop drains — a graceful stop loses nothing</text>
 <rect x="416" y="378" width="374" height="96" rx="7" class="panel"/>
 <text class="t2" x="432" y="402">coordination — a lease in the BUCKET</text>
-<text class="t4" x="432" y="422">one writer per subtree, admitted by a CAS on the epoch cell; a</text>
-<text class="t4" x="432" y="437">second syncer is REFUSED, never merged; readers see the last</text>
-<text class="t4" x="432" y="452">published boundary</text>
+<text class="t4" x="432" y="422">one writer per BARRIER, admitted by a CAS on the epoch cell and</text>
+<text class="t4" x="432" y="437">a FIFO ticket; several syncers share a subtree and merge at the</text>
+<text class="t4" x="432" y="452">manifest; readers see the last published boundary</text>
 <line class="l-lean" x1="603" y1="474" x2="603" y2="528" marker-end="url(#a-lean)"/>
 <rect x="543" y="485" width="119" height="30" rx="3" class="halo"/>
 <text class="t4b c-lean" x="603" y="496" style="text-anchor:middle">checkout · publish</text>

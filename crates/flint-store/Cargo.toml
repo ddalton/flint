@@ -17,7 +17,7 @@ default = []
 # The real S3 backend (aws-sdk). OFF by default so test loops that only
 # need the memory double never build the AWS SDK.
 s3 = [
-    "dep:aws-config", "dep:aws-sdk-s3", "dep:tracing", "dep:futures",
+    "dep:aws-config", "dep:aws-sdk-s3", "dep:tracing",
     # The raw read path (`rawread.rs`): hyper + rustls + SigV4, no SDK
     # per-request machinery. Same TLS provider as the SDK (aws-lc-rs).
     "dep:hyper", "dep:hyper-util", "dep:hyper-rustls", "dep:rustls", "dep:http",
@@ -49,10 +49,10 @@ httpdate = { version = "1", optional = true }
 aws-sigv4 = { version = "1", default-features = false, features = ["http1", "sign-http"], optional = true }
 aws-credential-types = { version = "1", optional = true }
 aws-smithy-runtime-api = { version = "1", optional = true }
-# Only the S3 backend composes parts concurrently; the memory double
-# never needs this, and the feature gate above keeps it out of test
-# loops that only build the double.
-futures = { version = "0.3", optional = true }
+# Both backends compose parts concurrently (the memory double mirrors the
+# S3 window shape so the upload byte gate can be observed in tests), so
+# this is no longer behind the `s3` feature.
+futures = "0.3"
 
 [dev-dependencies]
 tempfile = "3.0"

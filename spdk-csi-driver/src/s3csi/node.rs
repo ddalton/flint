@@ -1083,7 +1083,7 @@ impl S3Node {
                 break;
             }
             // Is the syncer still alive? A syncer that exited over budget
-            // (Refused, Fenced, maxFiles) never writes the marker.
+            // (Refused, maxFiles) never writes the marker.
             match worker::wait_running(&self.client, &st.worker_namespace, &st.worker_name, Duration::from_millis(1)).await {
                 Ok(WaitOutcome::Failed { reason, message }) => {
                     let detail = st
@@ -1240,7 +1240,7 @@ impl S3Node {
                     }
                     Some(p) if p == "Succeeded" || p == "Failed" => {
                         // Exited on its own before anyone asked it to
-                        // drain: fenced, refused, or evicted with the
+                        // drain: refused, or evicted with the
                         // object left behind. Whatever it did not
                         // publish is still in the tree.
                         self.release_worker(&st);
@@ -1291,7 +1291,7 @@ impl S3Node {
         }
         // The pod is gone. That says nothing about whether the drain
         // PUBLISHED: a drain that failed every attempt exits 1 and a
-        // fenced one exits 0, and both leave the pod just as gone as a
+        // refused one exits EXIT_REFUSED, and both leave the pod just as gone as a
         // drain that succeeded. The syncer attests a completed drain in
         // the tree, and only that attestation lets the tree go
         // (audit 2026-09-03, finding 3).
@@ -1301,7 +1301,7 @@ impl S3Node {
                 "DrainNotAttested",
                 &format!(
                     "{}: the syncer exited without attesting a completed drain (every attempt failed, or it was \
-                     fenced), so what it did not publish is still in its tree, which is preserved (see \
+                     refused), so what it did not publish is still in its tree, which is preserved (see \
                      UndrainedTreePreserved)",
                     st.cr
                 ),
@@ -1313,7 +1313,7 @@ impl S3Node {
                     dir,
                     &st,
                     target,
-                    "exited without attesting a completed drain (every attempt failed, or it was fenced), so what it did not publish is still in the tree",
+                    "exited without attesting a completed drain (every attempt failed), so what it did not publish is still in the tree",
                 )
                 .await;
         }
@@ -1774,7 +1774,7 @@ pub(crate) fn relaunch_reason(phase: Option<&str>) -> Option<&'static str> {
         // published (audit 2026-09-03, finding 2). Relaunched, the syncer
         // self-recognises a cell that still names it and, against a live
         // successor, waits out the quiet polls it never wins.
-        Some("Succeeded") => Some("had exited on its own (fenced, or refused) while the tenant was still mounted"),
+        Some("Succeeded") => Some("had exited on its own while the tenant was still mounted"),
         Some(_) => None,
     }
 }

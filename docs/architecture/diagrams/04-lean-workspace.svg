@@ -108,10 +108,10 @@
 <circle cx="1198" cy="410" r="11" class="f-lean"/>
 <text class="num" x="1198" y="414" style="text-anchor:middle">4</text>
 <text class="mono" x="1220" y="414" xml:space="preserve">.flint/publish.ack</text>
-<text class="t4" x="1220" y="432">ok = in S3 · partial · refused-fenced</text>
+<text class="t4" x="1220" y="432">ok = in S3 · partial · refused-scope</text>
 <rect x="24" y="468" width="760" height="96" rx="10" class="grp"/>
 <text class="cap" x="40" y="490">CONTROL — OFF THE DATA PATH</text>
-<text class="t4" x="44" y="508">lease in the bucket — one writer; a second syncer is refused, never merged</text>
+<text class="t4" x="44" y="508">lease in the bucket — held per barrier; several syncers merge at the manifest</text>
 <text class="t4" x="44" y="526">broker → short-lived keys → the worker, over a loopback door · consumers absent = deny</text>
 <text class="t4" x="44" y="544">the boundary verbs are files: an agent that can write a file can declare a coherent point</text>
 <rect x="808" y="468" width="768" height="96" rx="7" class="bx"/>

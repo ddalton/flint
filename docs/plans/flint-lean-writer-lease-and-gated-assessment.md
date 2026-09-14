@@ -1,7 +1,8 @@
 # flint-lean — gated mode assessed, and concurrent writers without starvation: design
 
-Date: 2026-09-13. Status: **ASSESSMENT + DESIGN; §9 (gated removal)
-IMPLEMENTED the same day as a single cut, nothing being deployed.**
+Date: 2026-09-13. Status: **§9 (gated removal) and §4 (the per-barrier
+lease) BOTH IMPLEMENTED the same day; §10 records what was built and
+where it departs from §4.**
 Against `37ff97d0` (v1.51.0). Companion to
 `flint-lean-per-user-access-design.md` (same day), whose §4.7 records
 the one-writer constraint this document relaxes in granularity, not in
@@ -475,3 +476,84 @@ becomes a class of defect that cannot recur.
 - D7 **Versioning is not a lean precondition.** The reader rule and
   the store surface remain as legacy support; the branching design is
   re-based before any branching code.
+
+## 10. What was built (2026-09-13, the same day)
+
+§4 was built as one mode — there is no `FLINT_SYNC_LEASE=life|barrier`
+flag (§4.5) and no life-long lease left to fall back to; lean is not
+deployed, and the user's standing decision is one mode. Departures from
+§4, each deliberate:
+
+- **Uploads outside the lease (§4.1 as refined).** The barrier consumes,
+  scans and uploads with the cell at rest, stamped with the last epoch
+  this incarnation held; the manifest entries carry the commit epoch.
+  The window opens in the commit section, under the lease, not at the
+  scan: the uploads race a HITL write the way two writers race each
+  other (If-Match decides; `LeanNoWindowHolds` is the proof safety never
+  depended on the window).
+- **Liveness left the cell.** With the cell released between barriers,
+  neither the operator nor the gateway can read liveness from it, so
+  each writer PUTs `<prefix>/.flint/lean/writers/<holder_id>` every ≤30 s
+  (the same cost the renewal was) and deletes it on a clean drain. The
+  handoff KEEPS the echo, so `SyncerObserved` names the last barrier's
+  binary; `observedWriters` counts heartbeats fresher than five minutes.
+- **A fence is a retry.** §4.3 kept "the straggler case unchanged";
+  under the per-barrier lease the only straggler is a holder stalled
+  inside its commit section, and being deposed there costs it that
+  barrier and nothing else. So `refused-fenced`, the `fenced` marker,
+  `gauges.state` and the fenced exit are gone; the pending stands and the
+  next tick claims again. The 2026-09-12 review's lease-1/lease-6/gated-3
+  fixes (settle-on-fence, refuse-while-waiting) were deleted with the
+  state they settled.
+- **The claim wait is bounded** (150 s) so a holder that never releases
+  is a failed barrier retried at the next floor, never a hang; the
+  quiet-poll judgement counts only observations ≥ 10 s apart, so the loop
+  can poll every second without judging a live holder dead in six.
+- **The deposal round is unordered.** Any waiter may depose a dead
+  holder (the CAS picks one); FIFO resumes at the next handoff.
+- **Model tranche** (§5) and the cluster drill (§6): see the commit
+  record. `lean/e2e/run-writers.sh` is the drill, written beside the
+  code and not yet run; W5 opens the mid-commit window with the
+  drill-only `FLINT_SYNC_DRILL_HOLD_COMMIT_SECS`, because a commit
+  section is milliseconds and no drill hits it by timing.
+
+Cost as built: `lease.rs` rewritten (~600 lines), `barrier.rs` commit
+section (~100), `sentinel.rs` −250 (the fence-settling paths), flint-store
++250 (queue, handoff, enqueue in both stores), gateway/operator +60, 11
+tests deleted and 11 added (174 in the syncer battery).
+
+### 10.1 What a second live writer broke, and the fixes (same day)
+
+The model tranche (§5) was run against this build, and the tests written
+to check its findings against the code found more. §3.2's "the protocol
+already tolerates two writers" was wrong in six places — none reachable
+under the life lease, because the second writer did not exist. Each is a
+test in `lean/syncer/src/tests.rs` that failed on its load-bearing
+assertion before the fix and fails again when the fix is disabled by
+exact string (the file restored by string, checksum verified):
+
+| Defect | Test | Fix |
+|---|---|---|
+| The GC HEADs, recognizes the etag, and DELETEs unconditionally; the other writer's lease-free upload of that path lands between and is deleted, then cited (model: `LeanBarrierLeaseGCUnconditional`) | `a_peer_upload_between_the_gc_head_and_its_delete_is_not_deleted` | `ObjectStore::delete_if_match` (default refuses), S3 `If-Match` on DeleteObject; the GC deletes `If-Match` the recognized etag, re-HEADs on 412; `probe_conditional_delete`, run by `flint-sync probe-conditional` — no result recorded on S3 or Ozone yet |
+| An upload that finds its bytes already at the key cites that OBSERVED etag with no lease; the other writer's commit uncites the path and its GC removes the object before the adopter's CAS (model: `LeanBarrierLeaseAdoptBlind`). A citation repair has the same shape | `an_adopted_upload_deleted_by_the_peer_before_the_claim_is_not_cited` | observed citations are re-read INSIDE the commit section and withheld when gone (`adopt-withheld`, `partial`, the path stays dirty). Race-free only because GC runs under the lease — so the lease is load-bearing here, and GC must not leave it |
+| `sync` advanced its merge base to the manifest for a path an older inbox entry hid (model: `LeanBarrierLeaseSyncOverlayStale`) | `a_sync_does_not_advance_its_base_past_a_change_the_inbox_hid` | step 5 keeps the base for overlay-hidden paths; model control `LeanBarrierLeaseSyncOverlayHolds` (`SyncKeepsHiddenBase`) holds |
+| A writer's merge queued the other writer's changes as `merge-preserved` entries in the SHARED inbox; the other writer's consume found its own bytes there and dropped them, and the first writer never converged | `a_peers_change_reaches_the_writer_whose_merge_queued_it_even_if_the_peer_consumes_first` | a writer-local queue (`state::ForeignChange`, `foreign-queue.json`), saved before the baseline; nothing merge-preserved in the shared inbox |
+| A peer's DELETE never reached the other tree | `a_peers_delete_reaches_the_other_writers_tree` | the merge records foreign deletions as tombstones in that queue; consume removes a clean copy, keeps a modified one (`consume-foreign-delete-vs-dirty`) |
+| Two idle writers traded empty generations and fence claims every tick (seq 5 → 13 in 8 idle barriers) | `two_idle_writers_do_not_trade_empty_generations` | a barrier whose merge adds nothing to theirs installs nothing; theirs becomes its merge base |
+
+**Still open:** the 412 arm's supersede of the other writer's UPLOADED
+BUT NOT YET CITED object leaves that writer's CAS citing a generation the
+key no longer holds, until the superseding writer's own commit re-cites
+the path (no bytes lost — the preserved copy exists). A commit-section
+re-read does not close it: the supersede is lease-free. The model hides
+it (its 412 arm parks, and `Inv_NoDangling` checks existence, not the
+generation).
+
+**Not yet modelled:** the writer-local queue and the empty-install rule
+— convergence properties the safety invariants cannot see. The module's
+`foreignQ` still joins the shared inbox at install.
+
+Verification with all of it: syncer 180/180, flint-store 33 (46 with
+`s3`), gateway 45, forge 175, operator 16, plugin 64. The assessment of
+which named protocols these rules come from, and why GC may not move
+out of the lease, is `flint-lean-consensus-protocol-assessment.md`.

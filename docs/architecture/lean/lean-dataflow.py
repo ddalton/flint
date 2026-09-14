@@ -130,7 +130,7 @@ def build():
            title_size=10.5, body_size=7.3)
     d.node(p, "document", 0.92, 4.05, 4.30, 0.80,
            ".flint/publish   →   .flint/publish.ack",
-           "ok  ·  partial  ·  refused-fenced",
+           "ok  ·  partial  ·  refused-scope",
            fill="#FFF6E2", line="#B0862A", line_weight=0.013,
            title_size=8.8, body_size=7.4)
 
@@ -157,7 +157,7 @@ def build():
            fill=d.S3_HOT_F, line=d.S3_L, line_weight=0.015, cap=0.28,
            body_size=7.4)
     d.node(p, "cylinder", 16.70, 4.95, 4.15, 0.85, ".flint/lean/epoch",
-           "the lease, and the claim beside it — claimed, renewed, and fenced on a lost CAS",
+           "the publish fence, and the claim beside it — held per BARRIER, handed to a FIFO of waiters",
            fill=d.S3_F, line=d.S3_L, line_weight=0.013, cap=0.28,
            body_size=7.4)
     d.node(p, "cylinder", 16.70, 5.95, 4.15, 0.85, ".flint/lean/inbox",
@@ -301,7 +301,7 @@ def build():
           "It lands on local disk and the agent sees it at once, but it is "
           "NOT durable until the next barrier, when the syncer uploads it "
           "and CASes the pointer. .flint/publish.ack then says ok. RPO = the "
-          "last barrier. The only refusal is a lost lease: refused-fenced.",
+          "last barrier. A boundary that lost its turn at the fence is retried.",
           fill=d.CLIENT_F, line=d.CLIENT_L, line_weight=0.012,
           title_size=9.6, body_size=7.3, body_color=SUB)
     p.box(7.70, 12.15, 7.00, 1.45,
@@ -355,9 +355,9 @@ def build():
         "interface. An agent that can write a file can declare a coherent "
         "point — echo > .flint/publish — and learn when its bytes are "
         "durable, from .flint/publish.ack: ok means the bytes are in S3, "
-        "refused-fenced means this syncer lost the lease and is saying so "
-        "rather than leaving the agent waiting forever. No client library, "
-        "no credential, no network path.",
+        "partial names what a foreign write kept out, and a boundary that "
+        "lost its turn at the fence is retried rather than refused. No client "
+        "library, no credential, no network path.",
 
         "A UI IS POWERED BY THE BUCKET, NOT BY THE POD, and that is forced "
         "rather than chosen: the workspace tree is local disk that dies with "
@@ -483,9 +483,9 @@ def build():
         "outside it is a proposal.",
 
         "AND THREE CONSEQUENCES FOLLOW FROM THAT ONE. A manifest write "
-        "would need the lease the gateway does not hold — it stamps epoch: "
-        "0 — so either the gateway becomes a second lease holder and "
-        "single-writer is gone, or manifest writes stop being fenced, which "
+        "would need the fence the gateway does not hold — it stamps epoch: "
+        "0 — so either the gateway queues for the fence like a syncer and "
+        "runs a merge, or manifest writes stop being fenced, which "
         "is the deposed-straggler hole. It would move the pointer\u2019s ETag "
         "on every UI write, so baseline.manifest_etag would no longer match "
         "and the syncer would take its adopt-a-foreign-manifest path on "

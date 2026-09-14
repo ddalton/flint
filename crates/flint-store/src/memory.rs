@@ -188,6 +188,10 @@ pub struct MemoryStore {
     /// a network round trip, so a test can observe whether fetches
     /// OVERLAP rather than time them.
     get_range_delay_ms: AtomicU64,
+    /// A latency every whole PUT pays, in ms: the write side's
+    /// `get_range_delay_ms`, so a test can observe whether whole-body
+    /// uploads OVERLAP — and how many bytes they hold while they do.
+    put_whole_delay_ms: AtomicU64,
     /// While set, every whole PUT parks at the door until
     /// `release_held_puts`: a stalled upload a test can run something
     /// BESIDE (a batch beside a fold's upload), with the ordering held
@@ -213,6 +217,14 @@ pub struct MemoryStore {
     ops: Mutex<std::collections::BTreeMap<&'static str, u64>>,
     pub min_part: u64,
     pub max_parts: usize,
+    /// Parts of one compose read and staged concurrently — the S3
+    /// backend's `part_parallelism`, mirrored so the double runs the
+    /// same window shape. 1 = sequential.
+    part_parallelism: usize,
+    /// The upload byte gate, when `with_upload_inflight_max_bytes` set
+    /// one: the same charge at the same points as the S3 backend, so a
+    /// test can read the bound off the gate's high-water mark.
+    upload_gate: Option<std::sync::Arc<crate::gate::ByteGate>>,
 }
 
 /// Leaves the in-flight count on drop, so an early `return` still
@@ -263,6 +275,7 @@ impl MemoryStore {
             fail_put_after_land_key: Mutex::new(String::new()),
             stall_next_get_range_ms: AtomicU64::new(0),
             get_range_delay_ms: AtomicU64::new(0),
+            put_whole_delay_ms: AtomicU64::new(0),
             hold_puts: AtomicBool::new(false),
             held_puts: Mutex::new(Vec::new()),
             inflight_get_range: AtomicU64::new(0),
@@ -273,7 +286,32 @@ impl MemoryStore {
             // files; S3's real limits live in the S3 backend.
             min_part: 1,
             max_parts: 10_000,
+            part_parallelism: 1,
+            upload_gate: None,
         }
+    }
+
+    /// Stage this many parts of one compose concurrently (the S3
+    /// backend's `with_part_parallelism`). Clamped to at least 1.
+    pub fn with_part_parallelism(mut self, n: usize) -> Self {
+        self.part_parallelism = n.max(1);
+        self
+    }
+
+    /// Bound the bytes the upload path holds at once (the S3 backend's
+    /// `with_upload_inflight_max_bytes`; see `gate.rs`). `0` = no gate.
+    pub fn with_upload_inflight_max_bytes(mut self, n: u64) -> Self {
+        self.upload_gate = (n > 0).then(|| std::sync::Arc::new(crate::gate::ByteGate::new(n)));
+        self
+    }
+
+    /// Every whole PUT from now on sleeps `ms` first — the write side's
+    /// `inject_get_range_delay_ms`: whole bodies that overlap are in
+    /// flight together for the whole delay, so the upload byte gate's
+    /// high-water mark reads the caller's bound rather than the
+    /// scheduler's luck.
+    pub fn inject_put_whole_delay_ms(&self, ms: u64) {
+        self.put_whole_delay_ms.store(ms, Ordering::SeqCst);
     }
 
     /// Every write from here on reports no version id — a proxy that
@@ -558,9 +596,38 @@ struct EpochBody {
     /// The holder's observed-state echo (`LeaseEcho`), opaque here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     echo: Option<String>,
+    /// The claim queue and the handoff reservation (see the S3 twin).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    waiters: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    handoff: Option<String>,
 }
 
 impl MemoryStore {
+    /// One epoch transition: CAS on `condition`, then store `body`. The
+    /// etag is SALTED with a sequence so two writes of the same body
+    /// (a renew, a re-enqueue) still rotate the CAS token — a stale
+    /// holder's heartbeat must fail even when nothing in it changed.
+    fn epoch_store(&self, key: &str, body: EpochBody, condition: &PutCondition) -> StoreResult<String> {
+        let bytes = Bytes::from(serde_json::to_vec(&body).unwrap());
+        let mut inner = self.inner.lock().unwrap();
+        Self::check_condition(inner.current(key), condition)?;
+        let mut salted = bytes.to_vec();
+        salted.extend_from_slice(&self.upload_seq.fetch_add(1, Ordering::SeqCst).to_be_bytes());
+        let obj = StoredObject {
+            etag: put_etag(&salted),
+            crc64: crc64_nvme(&bytes),
+            meta: HashMap::new(),
+            last_modified_unix: now_unix(),
+            bytes,
+            version_id: String::new(),
+            deleted: false,
+        };
+        let token = obj.etag.clone();
+        inner.push(key, obj);
+        Ok(token)
+    }
+
     fn bump(&self, op: &'static str) {
         *self.ops.lock().unwrap().entry(op).or_insert(0) += 1;
     }
@@ -593,6 +660,10 @@ impl ObjectStore for MemoryStore {
             // A dropped sender (a release that drained the list) lets
             // the PUT through as well.
             let _ = rx.await;
+        }
+        let delay = self.put_whole_delay_ms.load(Ordering::SeqCst);
+        if delay > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
         }
         let actual = crc64_nvme(&body);
         if actual != crc64 {
@@ -883,6 +954,25 @@ impl ObjectStore for MemoryStore {
         Ok(())
     }
 
+    async fn delete_if_match(&self, key: &str, etag: &str) -> StoreResult<()> {
+        // Counted as the one DELETE request it is on the wire.
+        self.bump("delete");
+        let mut inner = self.inner.lock().unwrap();
+        let refused = match inner.current(key) {
+            None => Some(StoreError::NotFound(key.to_string())),
+            Some(o) if o.etag != etag => Some(StoreError::PreconditionFailed(format!(
+                "{key}: If-Match {etag} but the current etag is {}",
+                o.etag
+            ))),
+            Some(_) => None,
+        };
+        if let Some(e) = refused {
+            return Err(e);
+        }
+        inner.push_delete_marker(key);
+        Ok(())
+    }
+
     async fn head_version(&self, key: &str, version_id: &str) -> StoreResult<ObjectMeta> {
         self.bump("head_version");
         self.inner
@@ -1021,6 +1111,8 @@ impl ObjectStore for MemoryStore {
             last_renew_unix: Some(o.last_modified_unix),
             released: body.released,
             echo: body.echo,
+            waiters: body.waiters,
+            handoff: body.handoff,
         }))
     }
 
@@ -1032,33 +1124,26 @@ impl ObjectStore for MemoryStore {
     ) -> StoreResult<EpochLease> {
         self.bump("epoch_acquire");
         let epoch = supersede.map_or(1, |s| s.epoch + 1);
-        let body = Bytes::from(
-            serde_json::to_vec(&EpochBody {
-                holder_id: holder_id.into(),
-                epoch,
-                released: false,
-                echo: None,
-            })
-            .unwrap(),
-        );
+        let waiters: Vec<String> = supersede
+            .map(|s| s.waiters.iter().filter(|w| w.as_str() != holder_id).cloned().collect())
+            .unwrap_or_default();
         let condition = match supersede {
             None => PutCondition::IfNoneMatchAny,
             Some(s) => PutCondition::IfMatch(s.token.clone()),
         };
-        let mut inner = self.inner.lock().unwrap();
-        Self::check_condition(inner.current(key), &condition)?;
-        let obj = StoredObject {
-            etag: put_etag(&body),
-            crc64: crc64_nvme(&body),
-            meta: HashMap::new(),
-            last_modified_unix: now_unix(),
-            bytes: body,
-                   version_id: String::new(),
-            deleted: false,
-        };
-        let token = obj.etag.clone();
-        inner.push(&key, obj);
-        Ok(EpochLease { holder_id: holder_id.into(), epoch, token })
+        let token = self.epoch_store(
+            key,
+            EpochBody {
+                holder_id: holder_id.into(),
+                epoch,
+                released: false,
+                echo: None,
+                waiters: waiters.clone(),
+                handoff: None,
+            },
+            &condition,
+        )?;
+        Ok(EpochLease { holder_id: holder_id.into(), epoch, token, waiters })
     }
 
     async fn epoch_renew(
@@ -1075,69 +1160,104 @@ impl ObjectStore for MemoryStore {
         {
             return Err(StoreError::Other("injected renew failure: store unreachable".into()));
         }
-        let body = Bytes::from(
-            serde_json::to_vec(&EpochBody {
+        let token = self.epoch_store(
+            key,
+            EpochBody {
                 holder_id: lease.holder_id.clone(),
                 epoch: lease.epoch,
                 released: false,
                 echo: echo.map(|e| e.to_string()),
-            })
-            .unwrap(),
-        );
-        let mut inner = self.inner.lock().unwrap();
-        Self::check_condition(
-            inner.current(key),
+                waiters: lease.waiters.clone(),
+                handoff: None,
+            },
             &PutCondition::IfMatch(lease.token.clone()),
         )?;
-        // Same holder/epoch, fresh Last-Modified; the etag must CHANGE
-        // so a stale holder's renew CAS fails — salt with the clock.
-        let mut salted = body.to_vec();
-        salted.extend_from_slice(&now_unix().to_be_bytes());
-        salted.extend_from_slice(&self.upload_seq.fetch_add(1, Ordering::SeqCst).to_be_bytes());
-        let obj = StoredObject {
-            etag: put_etag(&salted),
-            crc64: crc64_nvme(&body),
-            meta: HashMap::new(),
-            last_modified_unix: now_unix(),
-            bytes: body,
-                   version_id: String::new(),
-            deleted: false,
-        };
-        let token = obj.etag.clone();
-        inner.push(&key, obj);
-        Ok(EpochLease { holder_id: lease.holder_id.clone(), epoch: lease.epoch, token })
+        Ok(EpochLease {
+            holder_id: lease.holder_id.clone(),
+            epoch: lease.epoch,
+            token,
+            waiters: lease.waiters.clone(),
+        })
     }
 
     async fn epoch_release(&self, key: &str, lease: &EpochLease) -> StoreResult<()> {
         self.bump("epoch_release");
         // Mark, never delete — deleting restarts epoch numbering at 1.
-        let body = Bytes::from(
-            serde_json::to_vec(&EpochBody {
+        // A released cell reports no live syncer: clearing the echo is
+        // the point, not an omission (the tier hub's rule; lean's
+        // per-barrier `epoch_handoff` keeps it).
+        self.epoch_store(
+            key,
+            EpochBody {
                 holder_id: lease.holder_id.clone(),
                 epoch: lease.epoch,
                 released: true,
-                // A released cell reports no live syncer: clearing the
-                // echo is the point, not an omission.
                 echo: None,
-            })
-            .unwrap(),
-        );
-        let mut inner = self.inner.lock().unwrap();
-        Self::check_condition(
-            inner.current(key),
+                waiters: lease.waiters.clone(),
+                handoff: None,
+            },
             &PutCondition::IfMatch(lease.token.clone()),
         )?;
-        let obj = StoredObject {
-            etag: put_etag(&body),
-            crc64: crc64_nvme(&body),
-            meta: HashMap::new(),
-            last_modified_unix: now_unix(),
-            bytes: body,
-                   version_id: String::new(),
-            deleted: false,
-        };
-        inner.push(&key, obj);
         Ok(())
+    }
+
+    async fn epoch_handoff(
+        &self,
+        key: &str,
+        lease: &EpochLease,
+        echo: Option<&str>,
+    ) -> StoreResult<()> {
+        self.bump("epoch_handoff");
+        let mut rest = lease.waiters.clone();
+        let head = if rest.is_empty() { None } else { Some(rest.remove(0)) };
+        self.epoch_store(
+            key,
+            EpochBody {
+                holder_id: lease.holder_id.clone(),
+                epoch: lease.epoch,
+                released: true,
+                echo: echo.map(|e| e.to_string()),
+                waiters: rest,
+                handoff: head,
+            },
+            &PutCondition::IfMatch(lease.token.clone()),
+        )?;
+        Ok(())
+    }
+
+    async fn epoch_enqueue(
+        &self,
+        key: &str,
+        observed: &EpochState,
+        holder_id: &str,
+    ) -> StoreResult<EpochState> {
+        self.bump("epoch_enqueue");
+        let mut waiters = observed.waiters.clone();
+        if !waiters.iter().any(|w| w == holder_id) {
+            waiters.push(holder_id.to_string());
+        }
+        let token = self.epoch_store(
+            key,
+            EpochBody {
+                holder_id: observed.holder_id.clone(),
+                epoch: observed.epoch,
+                released: observed.released,
+                echo: observed.echo.clone(),
+                waiters: waiters.clone(),
+                handoff: observed.handoff.clone(),
+            },
+            &PutCondition::IfMatch(observed.token.clone()),
+        )?;
+        Ok(EpochState {
+            holder_id: observed.holder_id.clone(),
+            epoch: observed.epoch,
+            token,
+            last_renew_unix: Some(now_unix()),
+            echo: observed.echo.clone(),
+            released: observed.released,
+            waiters,
+            handoff: observed.handoff.clone(),
+        })
     }
 
     fn min_part_size(&self) -> u64 {
@@ -1147,9 +1267,103 @@ impl ObjectStore for MemoryStore {
     fn max_parts(&self) -> usize {
         self.max_parts
     }
+
+    fn upload_gate(&self) -> Option<std::sync::Arc<crate::gate::ByteGate>> {
+        self.upload_gate.clone()
+    }
 }
 
 impl MemoryStore {
+    /// One part of a compose, staged into the upload's part map: a
+    /// local part read through the upload byte gate, a copied part
+    /// taken under its guard. Independent of every other part, which
+    /// is what lets `compose_inner` run these `part_parallelism` wide —
+    /// the S3 backend's `compose_one_part`, in the double.
+    async fn stage_one_part(
+        &self,
+        spec: &ComposeSpec<'_>,
+        upload_id: &str,
+        i: usize,
+        p: &PartSource,
+    ) -> StoreResult<()> {
+        match p {
+            PartSource::Local { offset, len } => {
+                // Charged from BEFORE the read — the read is the
+                // allocation — until the part has landed (the permit
+                // lives to the end of this arm), exactly as the S3
+                // backend holds it until `UploadPart` returns. The read
+                // runs on the blocking pool as the backend's does, so
+                // the parts of one object genuinely overlap and a test
+                // reading the gate's high-water mark sees the window,
+                // not the scheduler.
+                let _permit = match &self.upload_gate {
+                    Some(g) => Some(g.acquire(*len).await),
+                    None => None,
+                };
+                let path = spec.local_path.to_path_buf();
+                let (offset, len) = (*offset, *len);
+                let bytes = tokio::task::spawn_blocking(move || read_local(&path, offset, len))
+                    .await
+                    .map_err(|e| StoreError::Other(format!("local read join: {e}")))??;
+                self.land_part(spec, upload_id, i, len, bytes)
+            }
+            PartSource::BaseCopy { offset, len } => {
+                let want = spec.base_etag.as_deref().ok_or_else(|| {
+                    StoreError::Other("compose: BaseCopy without base_etag".into())
+                })?;
+                let bytes = {
+                    let inner = self.inner.lock().unwrap();
+                    let base_key = spec.base_key.unwrap_or(spec.key);
+                    let base = inner.current(base_key).ok_or_else(|| {
+                        StoreError::PreconditionFailed("copy-source: no base object".into())
+                    })?;
+                    if base.etag != want {
+                        return Err(StoreError::PreconditionFailed(
+                            "copy-source-if-match: base etag differs".into(),
+                        ));
+                    }
+                    let s = *offset as usize;
+                    let e = (*offset + *len) as usize;
+                    if e > base.bytes.len() {
+                        return Err(StoreError::Other(format!(
+                            "copy-source range [{}, {}) beyond base size {}",
+                            s,
+                            e,
+                            base.bytes.len()
+                        )));
+                    }
+                    base.bytes.slice(s..e)
+                };
+                self.land_part(spec, upload_id, i, *len, bytes)
+            }
+        }
+    }
+
+    /// A staged part lands in the upload's part map — the double's
+    /// "UploadPart returned".
+    fn land_part(
+        &self,
+        spec: &ComposeSpec<'_>,
+        upload_id: &str,
+        i: usize,
+        want_len: u64,
+        bytes: Bytes,
+    ) -> StoreResult<()> {
+        if bytes.len() as u64 != want_len {
+            return Err(StoreError::Other(format!("compose: part {} short read", i)));
+        }
+        spec.note_progress(bytes.len() as u64);
+        self.inner
+            .lock()
+            .unwrap()
+            .uploads
+            .get_mut(upload_id)
+            .ok_or_else(|| StoreError::NoSuchUpload(upload_id.into()))?
+            .parts
+            .insert(i, bytes);
+        Ok(())
+    }
+
     async fn compose_inner(
         &self,
         spec: &ComposeSpec<'_>,
@@ -1190,59 +1404,37 @@ impl MemoryStore {
             expect = off + len;
         }
 
-        // Assemble: local reads + guarded base copies (the copy guard
-        // is evaluated per part against the CURRENT object, exactly
-        // like x-amz-copy-source-if-match).
-        let mut assembled = Vec::with_capacity(expect as usize);
-        for (i, p) in spec.parts.iter().enumerate() {
-            let bytes = match p {
-                PartSource::Local { offset, len } => {
-                    read_local(spec.local_path, *offset, *len)?
-                }
-                PartSource::BaseCopy { offset, len } => {
-                    let want = spec.base_etag.as_deref().ok_or_else(|| {
-                        StoreError::Other("compose: BaseCopy without base_etag".into())
-                    })?;
-                    let inner = self.inner.lock().unwrap();
-                    let base_key = spec.base_key.unwrap_or(spec.key);
-                    let base = inner.current(base_key).ok_or_else(|| {
-                        StoreError::PreconditionFailed("copy-source: no base object".into())
-                    })?;
-                    if base.etag != want {
-                        return Err(StoreError::PreconditionFailed(
-                            "copy-source-if-match: base etag differs".into(),
-                        ));
-                    }
-                    let s = *offset as usize;
-                    let e = (*offset + *len) as usize;
-                    if e > base.bytes.len() {
-                        return Err(StoreError::Other(format!(
-                            "copy-source range [{}, {}) beyond base size {}",
-                            s,
-                            e,
-                            base.bytes.len()
-                        )));
-                    }
-                    base.bytes.slice(s..e)
-                }
-            };
-            if bytes.len() as u64
-                != match p {
-                    PartSource::Local { len, .. } | PartSource::BaseCopy { len, .. } => *len,
-                }
-            {
-                return Err(StoreError::Other(format!("compose: part {} short read", i)));
+        // Stage: local reads (through the upload byte gate) + guarded
+        // base copies (the copy guard is evaluated per part against the
+        // CURRENT object, exactly like x-amz-copy-source-if-match),
+        // `part_parallelism` at a time — the S3 backend's window shape.
+        // The futures are built by a loop for the reason `s3.rs` gives:
+        // a closure here is not general enough over the borrow.
+        {
+            use futures::stream::StreamExt;
+            let par = self.part_parallelism.max(1);
+            let mut futs = Vec::with_capacity(spec.parts.len());
+            for (i, p) in spec.parts.iter().enumerate() {
+                futs.push(self.stage_one_part(spec, upload_id, i, p));
             }
-            spec.note_progress(bytes.len() as u64);
-            self.inner
-                .lock()
-                .unwrap()
+            let staged: Vec<StoreResult<()>> =
+                futures::stream::iter(futs).buffer_unordered(par).collect().await;
+            staged.into_iter().collect::<StoreResult<Vec<()>>>()?;
+        }
+        // Assemble in PART order — the parts landed in completion order.
+        let mut assembled = Vec::with_capacity(expect as usize);
+        {
+            let inner = self.inner.lock().unwrap();
+            let up = inner
                 .uploads
-                .get_mut(upload_id)
-                .ok_or_else(|| StoreError::NoSuchUpload(upload_id.into()))?
-                .parts
-                .insert(i, bytes.clone());
-            assembled.extend_from_slice(&bytes);
+                .get(upload_id)
+                .ok_or_else(|| StoreError::NoSuchUpload(upload_id.into()))?;
+            for i in 0..spec.parts.len() {
+                let bytes = up.parts.get(&i).ok_or_else(|| {
+                    StoreError::Other(format!("compose: part {} was staged but did not land", i))
+                })?;
+                assembled.extend_from_slice(bytes);
+            }
         }
 
         // S3 validates the full-object CRC64-NVME at
@@ -1434,6 +1626,65 @@ mod tests {
             !s.epoch_read(K).await.unwrap().unwrap().released,
             "a fresh claim clears the released mark"
         );
+    }
+
+    /// The per-barrier lease's queue (lean, design 2026-09-13 §4.2):
+    /// a waiter appends itself ONCE, the handoff pops the head into the
+    /// reservation and keeps the echo, only the reserved holder's
+    /// acquire consumes the reservation, and every transition rotates
+    /// the token so a heartbeat issued against the pre-enqueue token
+    /// is dead — which is what forces the holder to re-read and carry
+    /// the longer queue forward.
+    #[tokio::test]
+    async fn epoch_queue_hands_the_cell_to_the_head_and_keeps_the_echo() {
+        const K: &str = "t/.flint/lean/epoch";
+        let s = MemoryStore::new();
+        let a = s.epoch_acquire(K, "a", None).await.unwrap();
+        let seen = s.epoch_read(K).await.unwrap().unwrap();
+        let seen = s.epoch_enqueue(K, &seen, "b").await.unwrap();
+        let seen = s.epoch_enqueue(K, &seen, "c").await.unwrap();
+        let seen = s.epoch_enqueue(K, &seen, "b").await.unwrap();
+        assert_eq!(seen.waiters, vec!["b", "c"], "a waiter is appended once, in order");
+        // The holder's renew with its claim-time token is dead: the
+        // queue moved the token.
+        let err = s.epoch_renew(K, &a, None).await.unwrap_err();
+        assert!(matches!(err, StoreError::PreconditionFailed(_)));
+        // The holder adopts the observed token + queue and renews; the
+        // renew CARRIES the queue.
+        let adopted = EpochLease {
+            holder_id: "a".into(),
+            epoch: seen.epoch,
+            token: seen.token.clone(),
+            waiters: seen.waiters.clone(),
+        };
+        let a = s.epoch_renew(K, &adopted, Some("echo-a")).await.unwrap();
+        assert_eq!(s.epoch_read(K).await.unwrap().unwrap().waiters, vec!["b", "c"]);
+        // Handoff: released, reserved for b, c still queued, echo KEPT.
+        s.epoch_handoff(K, &a, Some("echo-a")).await.unwrap();
+        let cell = s.epoch_read(K).await.unwrap().unwrap();
+        assert!(cell.released);
+        assert_eq!(cell.handoff.as_deref(), Some("b"));
+        assert_eq!(cell.waiters, vec!["c"]);
+        assert_eq!(cell.echo.as_deref(), Some("echo-a"), "the last barrier's echo survives the handoff");
+        // b acquires: reservation consumed, c stays queued, epoch+1.
+        let b = s.epoch_acquire(K, "b", Some(&cell)).await.unwrap();
+        assert_eq!(b.epoch, cell.epoch + 1);
+        assert_eq!(b.waiters, vec!["c"]);
+        let cell = s.epoch_read(K).await.unwrap().unwrap();
+        assert!(!cell.released && cell.handoff.is_none());
+        assert_eq!(cell.holder_id, "b");
+        assert_eq!(cell.waiters, vec!["c"]);
+        // b's handoff reserves c with an empty queue behind it; c
+        // acquires with nobody left queued.
+        s.epoch_handoff(K, &b, None).await.unwrap();
+        let cell = s.epoch_read(K).await.unwrap().unwrap();
+        assert_eq!(cell.handoff.as_deref(), Some("c"));
+        assert!(cell.waiters.is_empty());
+        let c = s.epoch_acquire(K, "c", Some(&cell)).await.unwrap();
+        assert!(c.waiters.is_empty());
+        s.epoch_handoff(K, &c, None).await.unwrap();
+        let cell = s.epoch_read(K).await.unwrap().unwrap();
+        assert!(cell.released && cell.handoff.is_none() && cell.waiters.is_empty());
     }
 
     #[tokio::test]

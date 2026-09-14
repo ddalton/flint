@@ -305,22 +305,37 @@ spec:
                 format: int64
                 nullable: true
                 type: integer
-              uploadPartParallelism:
-                default: 1
+              uploadInflightMb:
+                default: 256
                 description: |-
-                  Parts of ONE object uploaded concurrently on publish (1 =
-                  sequential, the default). Distinct from `fanout`, which spreads
-                  uploads ACROSS objects: this only moves a tree whose critical
-                  path is a single large object — the checkpoint shape. Measured
-                  (runcu 2026-09-12, `door-drill-2026-09-12.md`): publishing a
-                  4 GiB object 8-wide instead of 1 took a checkpoint publish from
-                  ~51 s to ~14 s (3.6x), the point the NIC saturates. NOT raised by
-                  default: an upload part is held whole in RAM and the upload
-                  window has no bytes-in-flight bound, so peak RSS is
-                  `min(large_objects, fanout) x this x 64 MiB` — 8 across many large
-                  objects is 16 GiB. Raise it only with pod-memory headroom
-                  (~512 MiB per concurrent large object at 8); the safe default
-                  bump waits on an upload byte-bound.
+                  Ceiling on bytes in flight across the upload window, MiB — the
+                  write side's `fetchInflightMb`. `fanout` bounds how MANY objects
+                  upload at once and `uploadPartParallelism` how many parts of
+                  each, but not how big they are, and every part and every whole
+                  body is read into RAM before its PUT, so peak upload RSS was the
+                  product of the three. A single part or body larger than the whole
+                  window still uploads, alone. Sized against the syncer's memory
+                  limit, not its CPU; 0 = no bound.
+                format: uint64
+                minimum: 0.0
+                type: integer
+              uploadPartParallelism:
+                default: 8
+                description: |-
+                  Parts of ONE object uploaded concurrently on publish (default 8;
+                  1 = sequential). Distinct from `fanout`, which spreads uploads
+                  ACROSS objects: this only moves a tree whose critical path is a
+                  single large object — the checkpoint shape. Measured (runcu
+                  2026-09-12, `door-drill-2026-09-12.md`, n=3): publishing a 4 GiB
+                  object 8-wide instead of 1 took a checkpoint publish from
+                  50.7–58.6 s to 13.8–14.4 s (3.6x), the point the NIC saturates;
+                  16 was no better. It shipped opt-in in v1.51.0 because an upload
+                  part is held whole in RAM and the window had no byte bound, so
+                  peak RSS was `min(large_objects, fanout) x this x 64 MiB` — 16 GiB
+                  at 8 across many large objects. `uploadInflightMb` is that bound:
+                  peak upload RSS is now `min(uploadInflightMb, the bytes actually
+                  live)` plus the fan-out's small bodies, whatever this says, and
+                  this only decides how fast one large object goes.
                 format: uint64
                 minimum: 0.0
                 type: integer
@@ -390,6 +405,15 @@ spec:
                 description: The syncer binary's version — the mixed-fleet tell.
                 nullable: true
                 type: string
+              observedWriters:
+                description: |-
+                  Writers with a heartbeat within the last five minutes. The lease
+                  is held per barrier, so several writers can share a workspace and
+                  each shows here; the cell alone names only the last boundary's.
+                format: uint64
+                minimum: 0.0
+                nullable: true
+                type: integer
               phase:
                 description: Pending | Claimed | Adopted | Refused | Error
                 nullable: true

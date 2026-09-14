@@ -134,16 +134,31 @@ impl Snapshot {
     }
 }
 
+/// A writer whose heartbeat is older than this is not counted live.
+/// Heartbeats are written every ≤30 s; three minutes is six missed
+/// beats, generous on purpose (the comparison is the store's clock
+/// against this process's).
+pub const WRITER_STALE_SECS: u64 = 180;
+
 /// The RPO observability surface: seq, window, inbox depth, the epoch
-/// cell, and the standing verb requests.
+/// cell, the live writers, and the standing verb requests.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Status {
     pub seq: Option<u64>,
     pub window: Option<Window>,
     pub inbox_depth: usize,
+    /// The publish fence: its epoch advances once per barrier, and
+    /// `holder_id`/`holder_released` name the LAST barrier's writer and
+    /// whether its commit section is over (the cell is at rest between
+    /// barriers, so `released: true` is the normal idle reading, not an
+    /// absent syncer — see `writers`).
     pub epoch: Option<u64>,
     pub holder_id: Option<String>,
     pub holder_released: Option<bool>,
+    /// Writers with a heartbeat within `WRITER_STALE_SECS`: the liveness
+    /// surface, since the cell no longer is.
+    #[serde(default)]
+    pub writers: Vec<String>,
     pub now_unix: u64,
     /// The last manifest seq a boundary installed.
     pub last_cited_seq: Option<u64>,
@@ -786,6 +801,9 @@ impl Workspace {
             };
         let ib = inbox::load(self.store.as_ref(), &self.cfg).await?;
         let cell = self.store.epoch_read(&self.cfg.epoch_key()).await?;
+        let writers =
+            flint_lean::lease::live_writers(self.store.as_ref(), &self.cfg, now_unix(), WRITER_STALE_SECS)
+                .await?;
         Ok(Status {
             seq,
             window: ib.doc.window.clone(),
@@ -793,6 +811,7 @@ impl Workspace {
             epoch: cell.as_ref().map(|c| c.epoch),
             holder_id: cell.as_ref().map(|c| c.holder_id.clone()),
             holder_released: cell.as_ref().map(|c| c.released),
+            writers,
             now_unix: now_unix(),
             last_cited_seq: seq,
             manifest_stamp_unix: stamp_unix,
@@ -1170,10 +1189,20 @@ impl Workspace {
                     }
                 }
             }
-            // Nobody to cite: say so now rather than at the deadline.
-            match self.store.epoch_read(&self.cfg.epoch_key()).await? {
-                Some(cell) if !cell.released => {}
-                _ => return Err(pending("no syncer holds this workspace's lease")),
+            // Nobody to cite: say so now rather than at the deadline. The
+            // cell is at rest between barriers (the lease is held per
+            // barrier, design 2026-09-13 §4), so liveness is the writers'
+            // heartbeats, not the cell.
+            if flint_lean::lease::live_writers(
+                self.store.as_ref(),
+                &self.cfg,
+                now_unix(),
+                WRITER_STALE_SECS,
+            )
+            .await?
+            .is_empty()
+            {
+                return Err(pending("no live syncer writes this workspace (no heartbeat within the last three minutes)"));
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(pending("the syncer did not cite it within the wait"));

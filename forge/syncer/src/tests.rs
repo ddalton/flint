@@ -6702,6 +6702,7 @@ async fn a_restoring_door_says_to_retry_rather_than_naming_a_standby() {
         holder_id: "forge-test-a".into(),
         epoch: 1,
         token: "t".into(),
+        waiters: vec![],
     });
     let (tx, _rx) = tokio::sync::mpsc::channel(4);
     let (_d, resp) = ask_the_door(hold, tx).await;

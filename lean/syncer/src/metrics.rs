@@ -69,11 +69,6 @@ fn source_code(s: &str) -> u64 {
 fn series(g: &Gauges) -> Vec<(&'static str, &'static str, u64)> {
     vec![
         (
-            "flint_lean_fenced",
-            "1 when this syncer has been deposed and stopped publishing (gauges.state)",
-            u64::from(g.state == "fenced"),
-        ),
-        (
             "flint_lean_rpo_seconds",
             "seconds since the last boundary was installed. Elapsed time, not exposure: an \
              idle healthy workspace has nothing at risk and a growing value — pair it with \
@@ -146,7 +141,6 @@ pub fn render(g: &Gauges, labels: &Labels) -> String {
 /// beside `series` so adding a metric without saying what it covers is
 /// a compile-time-visible omission rather than a silent gap.
 pub const COVERED_FIELDS: &[&str] = &[
-    "state",
     "rpo_secs",
     "withheld_reason",
     "sentinel_budget_remaining",

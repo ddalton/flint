@@ -219,6 +219,9 @@ pub async fn renew_shared(
                         holder_id: state.holder_id,
                         epoch: state.epoch,
                         token: state.token,
+                        // Forge never queues claimants; carry whatever the
+                        // cell holds so a renew does not erase it.
+                        waiters: state.waiters,
                     });
                     Ok(())
                 }

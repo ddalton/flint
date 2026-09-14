@@ -1,14 +1,13 @@
-//! The one-shot verbs, and which of them takes the publish fence.
+//! The one-shot verbs, and which of them holds the publish fence for
+//! its whole run.
 //!
 //! Lifted out of `bin/flint_sync.rs` so the RULE — which verb claims —
 //! is a property the battery can execute rather than a line of dispatch
 //! nobody can reach from a test. `a_checkout_does_not_wait_out_a_\
-//! standing_lease` in `tests.rs` calls `read_only_then`, the same
+//! standing_lease` in `tests.rs` calls `lease_free_then`, the same
 //! function the dispatch calls, rather than a re-implementation of it.
 
-use std::time::Duration;
-
-use super::lease::{self, ClaimOutcome};
+use super::lease;
 use super::{LeanError, Syncer};
 
 /// A comma list, trimmed, empties dropped. Returns `None` when the
@@ -35,22 +34,27 @@ pub enum Step {
 }
 
 impl Step {
-    /// Does this verb need the publish fence?
+    /// Does this verb hold the publish fence for its WHOLE run?
     ///
-    /// The epoch cell arbitrates who may INSTALL a manifest. A verb
-    /// that installs none does not belong in that queue, and putting it
-    /// there does not make it safer — see `read_only_then` for what it
-    /// actually cost.
+    /// The epoch cell arbitrates who may INSTALL a manifest, and since
+    /// the lease is held per barrier (design 2026-09-13 §4) a barrier
+    /// claims it INSIDE — after its uploads, for the commit section
+    /// only — so the `barrier` verb needs no outer claim. `checkout`
+    /// and `sync` install nothing: every GET they make carries the
+    /// cited etag as `If-Match`, so a publisher racing them yields a
+    /// handled 412, never a torn file, and holding the fence around
+    /// them only ever serialised readers on one cell (four syncers
+    /// reading disjoint subtrees ran 2.1x faster without it, 0.41x with
+    /// it — measured 2026-09-11).
     ///
-    /// `checkout` is the only `false` today. `rescope` reads the bucket
-    /// and writes nothing to it either, but it rewrites the held set
-    /// and leaves a replayable intent behind, so it stays fenced until
-    /// someone has walked that crash matrix with two of them running;
-    /// `sync` and `barrier` both publish.
-    pub fn installs_nothing_in_the_bucket(&self) -> bool {
+    /// `rescope` is the only `true`. It reads the bucket and writes
+    /// nothing to it either, but it rewrites the held set and leaves a
+    /// replayable intent behind, so it stays fenced until someone has
+    /// walked that crash matrix with two of them running.
+    pub fn holds_the_fence_throughout(&self) -> bool {
         match self {
-            Step::Checkout => true,
-            Step::Barrier | Step::Sync | Step::Rescope(_) => false,
+            Step::Rescope(_) => true,
+            Step::Checkout | Step::Barrier | Step::Sync => false,
         }
     }
 }
@@ -59,86 +63,33 @@ impl Step {
 /// here rather than in the binary's argv match so that the battery
 /// exercises the same decision the shipped binary makes.
 pub async fn run_verb(sc: &mut Syncer, step: Step) -> Result<(), LeanError> {
-    if step.installs_nothing_in_the_bucket() {
-        read_only_then(sc, step).await
-    } else {
+    if step.holds_the_fence_throughout() {
         claim_then(sc, step).await
+    } else {
+        lease_free_then(sc, step).await
     }
 }
 
-pub async fn claim(sc: &mut Syncer) -> Result<(), LeanError> {
-    // Before the first claim step: is this prefix ours to claim at all?
+/// Take the fence, do one step, release it.
+pub async fn claim_then(sc: &mut Syncer, step: Step) -> Result<(), LeanError> {
     lease::verify_claim(sc).await?;
     lease::warn_if_prefix_is_shared(sc).await;
-    loop {
-        match lease::claim_step(sc).await? {
-            ClaimOutcome::Claimed(lease) => {
-                eprintln!("flint-sync: holding epoch {}", lease.epoch);
-                return Ok(());
-            }
-            ClaimOutcome::Waiting { quiet_polls } => {
-                // On EVERY poll (review 2026-09-12, gated-3 / lease-6): a
-                // touch can land at any point of the wait.
-                match sc.refuse_what_this_incarnation_can_never_honor().await {
-                    Ok(true) => eprintln!(
-                        "flint-sync: a foreign holder stands and this incarnation owes an \
-                         ack it can never honor — refused-fenced written, marker fenced"
-                    ),
-                    Ok(false) => {}
-                    Err(e) => {
-                        // Never let this block the claim: a fresh pod
-                        // must still take over.
-                        eprintln!("flint-sync: could not settle owed acks while waiting: {e}");
-                    }
-                }
-                eprintln!("flint-sync: waiting on the standing lease (quiet {quiet_polls}/6)");
-                tokio::time::sleep(Duration::from_secs(10)).await;
-            }
-        }
-    }
-}
-
-/// Take the writer's lease, do one step, release it.
-///
-/// Every verb that can change the BUCKET comes through here. `checkout`
-/// deliberately does not — see `read_only_then`.
-pub async fn claim_then(sc: &mut Syncer, step: Step) -> Result<(), LeanError> {
-    claim(sc).await?;
+    let held = lease::claim(sc).await?;
+    eprintln!("flint-sync: holding epoch {}", held.epoch);
     let out = run_step(sc, step).await;
-    let _ = lease::release(sc).await;
+    if let Err(e) = lease::release(sc).await {
+        eprintln!("flint-sync: the publish fence could not be released ({e}); a waiter deposes it");
+    }
     out
 }
 
-/// A verb that reads the bucket and writes only this pod's own tree.
-///
-/// It does NOT claim the epoch, and that is the point. The epoch cell
-/// is a PUBLISH fence: it decides which of several syncers may install
-/// a manifest. A checkout installs nothing — it GETs the manifest and
-/// GETs the objects it cites, and every one of those GETs already
-/// carries the cited etag as `If-Match`, so a publisher racing a reader
-/// yields a 412 (handled, loudly, in `checkout.rs`) and never a torn
-/// file.
-///
-/// What claiming actually bought was a DEADLOCK dressed as mutual
-/// exclusion. `claim_step` supersedes a foreign holder only after six
-/// observations in which its token did not advance — and a LIVE holder
-/// renews, so its token always advances. A checkout that met a running
-/// publisher therefore waited forever, and a publisher that met a
-/// checkout waited for it (forge's export already carries a timeout for
-/// exactly this: `export.rs`, "waits for a foreign lease forever").
-/// Measured 2026-09-11: four syncers reading disjoint subtrees of one
-/// prefix ran 2.1x faster with the claim skipped, and 0.41x — SLOWER
-/// than one syncer — with it, because they serialised on the cell.
-///
-/// Two things here are not the lease and stay:
+/// A verb that claims nothing up front. Two things here are not the
+/// lease and stay:
 ///   * `verify_claim` — the project-id precondition. A refusal, not a
 ///     fence: this prefix is another project's and must not be read or
 ///     written by us at all.
 ///   * `warn_if_prefix_is_shared` — a diagnostic nobody else emits.
-///
-/// `status` and `ctl` have taken no lease since they shipped, for the
-/// same reason stated the same way; this makes `checkout` the third.
-pub async fn read_only_then(sc: &mut Syncer, step: Step) -> Result<(), LeanError> {
+pub async fn lease_free_then(sc: &mut Syncer, step: Step) -> Result<(), LeanError> {
     lease::verify_claim(sc).await?;
     lease::warn_if_prefix_is_shared(sc).await;
     run_step(sc, step).await

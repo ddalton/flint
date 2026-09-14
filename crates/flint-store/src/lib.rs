@@ -34,6 +34,7 @@
 //! test loops that only need the memory double never build the AWS
 //! SDK.
 
+pub mod gate;
 pub mod layout;
 pub mod memory;
 pub mod probe;
@@ -624,6 +625,19 @@ pub struct EpochState {
     /// epoch again — a successor supersedes immediately instead of
     /// waiting out the lease. Written by [`ObjectStore::epoch_release`].
     pub released: bool,
+    /// The FIFO of holders waiting for the cell (lean's per-barrier
+    /// lease, design 2026-09-13 §4.2). A claimant that finds the cell
+    /// held, or released-and-handed to someone else, appends itself
+    /// ONCE ([`ObjectStore::epoch_enqueue`]); the holder's handoff pops
+    /// the head into `handoff`. Empty on every cell written by a holder
+    /// that never queues (the tier hub), which degrades to today's
+    /// behaviour and never to a second holder.
+    pub waiters: Vec<String>,
+    /// Who a RELEASED cell is reserved for: the queue head at the time
+    /// of the handoff. Only that holder may acquire it — or anyone,
+    /// once it has been quiet long enough to be judged dead. `None` =
+    /// first come, first served.
+    pub handoff: Option<String>,
 }
 
 /// A held lease (write side).
@@ -632,6 +646,11 @@ pub struct EpochLease {
     pub holder_id: String,
     pub epoch: u64,
     pub token: String,
+    /// The queue as the holder last saw it. A renew rewrites the whole
+    /// body, so it must carry the waiters forward or a heartbeat would
+    /// erase the queue; a 412 on renew re-reads the cell and adopts
+    /// whatever the waiters appended meanwhile.
+    pub waiters: Vec<String>,
 }
 
 /// What a live lean syncer echoes into its lease-heartbeat cell
@@ -771,6 +790,27 @@ pub trait ObjectStore: Send + Sync {
     async fn list(&self, prefix: &str) -> StoreResult<Vec<ListedObject>>;
 
     async fn delete(&self, key: &str) -> StoreResult<()>;
+
+    /// DELETE `key` only while its current ETag is `etag` (`If-Match`):
+    /// `PreconditionFailed` once the object has moved on, `NotFound`
+    /// when there is nothing to delete.
+    ///
+    /// This is the garbage collector's delete. A HEAD that recognizes an
+    /// etag followed by a plain DELETE leaves a window in which another
+    /// writer's guarded PUT replaces the object, and the DELETE then
+    /// removes bytes that writer's next commit cites. With one writer per
+    /// workspace nothing could land there; with several writers holding
+    /// the lease only for their commit sections, an upload can.
+    ///
+    /// The default REFUSES rather than falling back to [`delete`]: a
+    /// fallback would reopen exactly that window without a word, on
+    /// whichever backend happened not to override this.
+    ///
+    /// [`delete`]: ObjectStore::delete
+    async fn delete_if_match(&self, key: &str, etag: &str) -> StoreResult<()> {
+        let _ = (key, etag);
+        Err(StoreError::Other("this backend has no conditional DELETE".into()))
+    }
 
     // ── version-scoped operations (boundary-verbs plan D7/D8) ────────
     //
@@ -932,9 +972,54 @@ pub trait ObjectStore: Send + Sync {
     /// holder cannot mark a live successor's cell.
     async fn epoch_release(&self, key: &str, lease: &EpochLease) -> StoreResult<()>;
 
+    /// Append `holder_id` to the cell's FIFO of waiters, by CAS on the
+    /// OBSERVED token, and return the cell as rewritten. A holder that
+    /// is already queued is not appended twice. The write moves the
+    /// token: a live holder's next renew/handoff 412s, re-reads, and
+    /// adopts the new token with the longer queue (lean `lease.rs`).
+    /// Default: unsupported — a backend without a queue serialises
+    /// claimants by the quiet-poll rule alone.
+    async fn epoch_enqueue(
+        &self,
+        key: &str,
+        observed: &EpochState,
+        holder_id: &str,
+    ) -> StoreResult<EpochState> {
+        let _ = (key, observed, holder_id);
+        Err(StoreError::Other("this store carries no lease queue".into()))
+    }
+
+    /// The per-BARRIER release (lean, design 2026-09-13 §4): mark the
+    /// cell released like [`ObjectStore::epoch_release`], but hand it to
+    /// the queue head (`handoff = waiters[0]`, the rest stay queued) and
+    /// KEEP `echo` — the cell is at rest between every barrier now, so
+    /// the last holder's echo is the only thing that tells an operator
+    /// which binary ran the last boundary. Guarded on the lease token
+    /// like every other transition. Default: the plain release.
+    async fn epoch_handoff(
+        &self,
+        key: &str,
+        lease: &EpochLease,
+        echo: Option<&str>,
+    ) -> StoreResult<()> {
+        let _ = echo;
+        self.epoch_release(key, lease).await
+    }
+
     /// Backend part granularity for the A11 part-size grid.
     fn min_part_size(&self) -> u64;
     fn max_parts(&self) -> usize;
+
+    /// The store's upload bytes-in-flight gate ([`gate::ByteGate`]),
+    /// when it was built with one. The store charges every local part
+    /// of a compose to it; a caller that reads whole bodies ITSELF
+    /// before `put_whole` (lean's `upload_one`) takes this so those
+    /// bodies are charged to the SAME budget, and the bound is one
+    /// number rather than two that must be set together. `None` = the
+    /// upload path is bounded only by its counts.
+    fn upload_gate(&self) -> Option<std::sync::Arc<gate::ByteGate>> {
+        None
+    }
 }
 
 /// One lifecycle rule, reduced to what VERSION RETENTION cares about

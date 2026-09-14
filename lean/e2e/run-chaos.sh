@@ -38,7 +38,13 @@
 #
 # Prereqs: kind cluster `flint-lean-chaos` with flint-sync:e2e and
 # flint-lean-gateway:e2e loaded; minio.yaml + chaos.yaml applied.
-# Runtime ~6-8 min (two legs wait out a 6-quiet-poll takeover).
+# Runtime ~4-6 min. C2 and C3 were RE-DERIVED on 2026-09-13 for the
+# per-barrier lease (design flint-lean-writer-lease-and-gated-assessment
+# §4) and have NOT been run against it: a writer that dies or stalls
+# mid-UPLOAD holds nothing, so nobody waits out a takeover, and a thawed
+# writer's late work LANDS (the two-writer rule) instead of fencing. The
+# mid-commit straggler — the one fence that remains — cannot be hit by
+# timing here; run-writers.sh W5 opens that window with the drill hold.
 set -u
 cd "$(dirname "$0")"
 
@@ -252,11 +258,14 @@ c1_crash_midbarrier() {
 }
 
 # ─────────────────────────────────────────────────────────────────────
-# C2  Pod loss mid-barrier ⇒ a fresh pod takes over.
+# C2  Pod loss mid-barrier ⇒ a fresh pod carries on WITHOUT WAITING.
 #     Claim: loss is exactly the RPO — everything published before the
 #     kill survives, everything after it is gone, and the successor's
-#     checkout reproduces precisely the published set. Rotation bumps
-#     seq WITHOUT changing entries.
+#     checkout reproduces precisely the published set. The dead pod died
+#     mid-upload and so held no fence: the successor checks out at once
+#     (no quiet-poll wait — the control is the old binary, which printed
+#     `quiet` six times over a minute here) and its first barrier claims
+#     a fence nobody holds.
 # ─────────────────────────────────────────────────────────────────────
 c2_podloss_takeover() {
   local P=tenants/c2 R=/work/c2 BASE=6 BURST=8000
@@ -285,13 +294,16 @@ c2_podloss_takeover() {
   fi
   ok "pod lost mid-barrier: $orphans/$BURST burst objects orphaned in the bucket"
 
-  # The successor: fresh emptyDir ⇒ fresh incarnation ⇒ it MUST wait out
-  # the quiet polls rather than self-recognize.
-  local cout
+  # The successor: fresh emptyDir, fresh incarnation, and NOTHING to
+  # wait for — a checkout claims no fence, and the dead pod held none.
+  local cout t0 t1
+  t0=$(date +%s)
   cout=$(sy chaos-k2 $P $R checkout)
-  has "quiet" "$cout" || { bad "successor did NOT wait out the standing lease (self-recognized?): $cout"; return 1; }
+  t1=$(date +%s)
   has "materialized" "$cout" || { bad "successor checkout produced no report: $cout"; return 1; }
-  ok "successor waited out the standing lease, then claimed"
+  if has "quiet" "$cout"; then bad "successor WAITED on a fence nobody held: $cout"; return 1; fi
+  [ $((t1 - t0)) -lt 30 ] || { bad "successor checkout took $((t1 - t0))s — a takeover wait is back"; return 1; }
+  ok "successor checked out at once ($((t1 - t0))s), no fence to wait out"
 
   local tree
   tree=$(inpod chaos-k2 "cd $R && ls | sort | tr '\n' ' '")
@@ -299,25 +311,39 @@ c2_podloss_takeover() {
   [ "$tree" = "$want" ] || { bad "successor tree is '$tree', want '$want' (RPO not exact)"; return 1; }
   ok "successor tree is EXACTLY the published set — loss equals the RPO"
 
+  # Nothing rotated: no takeover happened, because there was nothing to
+  # take over. The manifest is exactly where the dead pod's last
+  # COMPLETED barrier left it, and the successor's own first barrier is
+  # what moves it next.
   local seq1 cited
   seq1=$(manif "$P" | jq -r '.seq')
   cited=$(manif "$P" | jq -r '.entries|keys|length')
-  [ "$seq1" -gt "$seq0" ] || { bad "takeover did not rotate the manifest (seq $seq0 -> $seq1)"; return 1; }
-  [ "$cited" = "$BASE" ] || { bad "rotation changed the entry set ($cited entries, want $BASE)"; return 1; }
-  ok "rotation bumped seq $seq0 -> $seq1 content-identical ($cited entries)"
+  [ "$seq1" = "$seq0" ] || { bad "the manifest moved without a publish (seq $seq0 -> $seq1)"; return 1; }
+  [ "$cited" = "$BASE" ] || { bad "the entry set changed ($cited entries, want $BASE)"; return 1; }
+  ok "manifest untouched by the loss: seq $seq1, $cited entries"
+  local bout
+  bout=$(sy chaos-k2 $P $R barrier)
+  has "barrier seq=" "$bout" || { bad "successor's first barrier did not run: $bout"; return 1; }
+  local cell
+  cell=$(objcat "$P/.flint/lean/epoch")
+  [ "$(printf '%s' "$cell" | jq -r '.released')" = "true" ] || { bad "the successor left the fence held: $cell"; return 1; }
+  ok "successor's first barrier claimed and handed on the fence (epoch $(printf '%s' "$cell" | jq -r '.epoch'))"
 
   local d
   d=$(dangling "$P")
-  [ "$d" -eq 0 ] || { bad "$d dangling citations after takeover"; return 1; }
-  ok "zero dangling citations after takeover"
+  [ "$d" -eq 0 ] || { bad "$d dangling citations after the loss"; return 1; }
+  ok "zero dangling citations after the loss"
 }
 
 # ─────────────────────────────────────────────────────────────────────
-# C3  A STOPPED straggler resumes after it has been deposed.
-#     Claim (Inv_NoStragglerInstall): its manifest CAS never lands.
-#     Also MEASURES the known P5 residual — whether its data PUTs still
-#     land after deposal, which is what proxy-side epoch enforcement
-#     would have to close.
+# C3  A STOPPED writer resumes after another writer published.
+#     Claim (the two-writer rule, design 2026-09-13 §4): a writer frozen
+#     mid-UPLOAD holds no fence, so the other writer publishes without
+#     deposing anyone, and the thawed writer's late work LANDS — its
+#     remaining uploads, then its own commit section, then its paths
+#     cited beside the other's. Nothing fences, nothing is lost. (The
+#     straggler fence, Inv_NoStragglerInstall, now applies to a holder
+#     stalled INSIDE its commit section only: run-writers.sh W5.)
 # ─────────────────────────────────────────────────────────────────────
 c3_straggler_after_takeover() {
   local P=tenants/c3 R=/work/c3 BASE=4 BURST=8000
@@ -339,36 +365,39 @@ c3_straggler_after_takeover() {
   fi
   ok "straggler frozen mid-barrier at $frozen/$BURST uploads"
 
+  # The other writer: checks out at once and publishes its own file
+  # while the first is frozen — no fence to wait out, no deposal.
   local cout
   cout=$(sy chaos-s2 $P $R checkout)
-  has "quiet" "$cout" || { bad "successor did not take over: $cout"; return 1; }
+  if has "quiet" "$cout"; then bad "the second writer waited on a fence the frozen one did not hold: $cout"; return 1; fi
+  inpod chaos-s2 "mkdir -p $R && echo other > $R/other.txt" > /dev/null
+  local bout
+  bout=$(sy chaos-s2 $P $R barrier)
+  has "barrier seq=" "$bout" || { bad "the second writer's barrier did not run: $bout"; return 1; }
   local seq1
   seq1=$(manif "$P" | jq -r '.seq')
-  [ "$seq1" -gt "$seq0" ] || { bad "no rotation on takeover (seq $seq0 -> $seq1)"; return 1; }
-  ok "successor deposed the straggler and rotated (seq $seq0 -> $seq1)"
+  [ "$seq1" -gt "$seq0" ] || { bad "the second writer published nothing (seq $seq0 -> $seq1)"; return 1; }
+  ok "second writer published beside the frozen one (seq $seq0 -> $seq1), no deposal"
 
   inpod chaos-s "kill -CONT \$(pidof flint-sync); echo resumed" > /dev/null
-  await_exit chaos-s flint-sync 90 || { bad "the thawed straggler never exited"; return 1; }
+  await_exit chaos-s flint-sync 180 || { bad "the thawed writer never exited"; return 1; }
   local log
   log=$(inpod chaos-s "cat /work/c3.log")
-  has "fenced" "$log" || { bad "the resumed straggler did NOT fence: $log"; return 1; }
-  ok "resumed straggler self-fenced: $(printf '%s' "$log" | grep fenced | head -1)"
+  if has "fenced" "$log"; then bad "the thawed writer FENCED — nothing deposed it: $log"; return 1; fi
+  has "barrier seq=" "$log" || { bad "the thawed writer did not complete its barrier: $log"; return 1; }
+  ok "thawed writer completed its barrier: $(printf '%s' "$log" | grep 'barrier seq=' | head -1)"
 
   local seq2 cited_burst
   seq2=$(manif "$P" | jq -r '.seq')
   cited_burst=$(manif "$P" | jq -r '.entries|keys[]' | grep -c 'burst')
-  [ "$seq2" = "$seq1" ] || { bad "the straggler's manifest CAS LANDED (seq $seq1 -> $seq2)"; return 1; }
-  [ "$cited_burst" -eq 0 ] || { bad "$cited_burst straggler paths are cited — straggler install"; return 1; }
-  ok "straggler install refused: manifest still at seq $seq2, zero straggler citations"
-
-  # The residual, measured rather than assumed.
-  local thawed
-  thawed=$(allkeys "$P/files" | grep -c 'burst')
-  if [ "$thawed" -gt "$frozen" ]; then
-    note "P5 data-plane residual CONFIRMED: the deposed straggler landed $((thawed - frozen)) more data PUTs after rotation ($frozen -> $thawed). The control plane held; only proxy-side epoch enforcement closes the data path."
-  else
-    note "no post-deposal data PUTs observed this run ($frozen -> $thawed) — the residual is timing-dependent, not absent"
-  fi
+  [ "$seq2" -gt "$seq1" ] || { bad "the thawed writer's commit did not land (seq $seq1 -> $seq2)"; return 1; }
+  [ "$cited_burst" -eq "$BURST" ] || { bad "$cited_burst/$BURST of the thawed writer's paths are cited"; return 1; }
+  manif "$P" | jq -e '.entries["other.txt"]' > /dev/null || { bad "the thawed writer's merge dropped the other writer's entry"; return 1; }
+  ok "both writers' work is cited: $cited_burst burst paths + other.txt at seq $seq2"
+  local d
+  d=$(dangling "$P")
+  [ "$d" -eq 0 ] || { bad "$d dangling citations"; return 1; }
+  ok "zero dangling citations"
 }
 
 # ─────────────────────────────────────────────────────────────────────
@@ -792,8 +821,8 @@ $K -n flint-system rollout status deploy/lean-gateway --timeout=180s > /dev/null
 gw_healthy 60 || { echo "FAIL: gateway does not answer /healthz"; exit 1; }
 
 leg "C1  crash mid-barrier, recover over the same emptyDir" c1_crash_midbarrier
-leg "C2  pod loss mid-barrier, fresh-pod takeover"          c2_podloss_takeover
-leg "C3  deposed straggler resumes"                          c3_straggler_after_takeover
+leg "C2  pod loss mid-barrier, fresh pod carries on"        c2_podloss_takeover
+leg "C3  a stopped writer resumes and its work lands"       c3_straggler_after_takeover
 leg "C4  container restart + two-scan delete"                c4_restart_and_two_scan_delete
 leg "C5  HITL write vs dirty local file"                     c5_hitl_conflict
 leg "C6  per-request epoch validation (P5)"                  c6_gateway_epoch_validation

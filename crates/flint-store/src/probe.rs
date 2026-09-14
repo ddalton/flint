@@ -205,6 +205,78 @@ pub async fn probe_conditional_writes(store: &dyn ObjectStore, key: &str) -> Res
     Ok(())
 }
 
+/// The CONDITIONAL-DELETE surface: `DeleteObject` with `If-Match`.
+///
+/// Lean's garbage collector needs it once several writers share a
+/// workspace. A GC that HEADs an object, recognizes the etag and then
+/// deletes unconditionally races another writer's lease-free upload of
+/// the same path: the upload lands in between, the delete removes it,
+/// and that writer's next commit cites bytes that are gone. `If-Match`
+/// on the DELETE closes the window — on a backend that enforces it.
+/// One that accepts the header and ignores it answers exactly like one
+/// that enforces it, until the day it deletes the wrong generation, so
+/// this is asked separately from the conditional-PUT probe (the lite
+/// tier needs that one and not this).
+pub async fn probe_conditional_delete(store: &dyn ObjectStore, key: &str) -> Result<(), String> {
+    let stamps = GenerationStamps {
+        generation: 0,
+        epoch: 0,
+        flush_uuid: "cond-delete-probe".into(),
+        boundary_source: None,
+        posix: None,
+    };
+    let refuse = |m: &str| m.to_string();
+    let _ = store.delete(key).await;
+    let m1 = store
+        .put_whole(
+            key,
+            Bytes::from_static(b"cond-delete-probe"),
+            &PutCondition::IfNoneMatchAny,
+            &stamps,
+            crc64_nvme(b"cond-delete-probe"),
+        )
+        .await
+        .map_err(|e| refuse(&format!("cannot write the probe object: {e}")))?;
+
+    // A STALE etag must be refused, and the object must still be there.
+    let stale = "\"0000000000000000000000000000dead\"";
+    let r = store.delete_if_match(key, stale).await;
+    let survived = store.head(key).await.map(|m| m.etag == m1.etag).unwrap_or(false);
+    match (r, survived) {
+        (Err(StoreError::PreconditionFailed(_)), true) => {}
+        (_, false) => {
+            return Err(refuse(
+                "DELETE If-Match on a STALE etag removed the object — this store ignores the \
+                 condition, so a garbage collector would delete another writer's upload",
+            ));
+        }
+        (Ok(()), true) => {
+            let _ = store.delete(key).await;
+            return Err(refuse("DELETE If-Match on a STALE etag answered success and deleted nothing"));
+        }
+        (Err(e), true) => {
+            let _ = store.delete(key).await;
+            return Err(refuse(&format!("DELETE If-Match (stale) failed unexpectedly: {e}")));
+        }
+    }
+
+    // On the CURRENT etag it must delete, or the collector could never
+    // collect: a store that refused every conditional DELETE would pass
+    // the leg above.
+    store
+        .delete_if_match(key, &m1.etag)
+        .await
+        .map_err(|e| refuse(&format!("DELETE If-Match on the CURRENT etag was refused: {e}")))?;
+    match store.head(key).await {
+        Err(StoreError::NotFound(_)) => Ok(()),
+        Ok(_) => {
+            let _ = store.delete(key).await;
+            Err(refuse("DELETE If-Match on the CURRENT etag answered success but the object remains"))
+        }
+        Err(e) => Err(refuse(&format!("HEAD after the conditional DELETE failed: {e}"))),
+    }
+}
+
 /// The cross-key copy surface (`copy_object`). Run against a REAL
 /// bucket; the memory double cannot tell you whether `CopyObject`
 /// honours `x-amz-copy-source-if-match`, whether `MetadataDirective:
@@ -476,5 +548,95 @@ mod tests {
             .await
             .expect_err("inherited stamps must be caught");
         assert!(err.contains("inherited the SOURCE's stamps"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_conformant_store_passes_the_conditional_delete_probe() {
+        let store = MemoryStore::new();
+        probe_conditional_delete(&store, "t/.flint/probe/conditional-delete")
+            .await
+            .expect("MemoryStore enforces If-Match on DELETE and must pass");
+    }
+
+    /// The failure the probe exists for: a backend that takes the header
+    /// and deletes anyway. Without this leg the probe could pass a store
+    /// it never actually tested.
+    #[tokio::test]
+    async fn the_conditional_delete_probe_catches_a_store_that_ignores_the_condition() {
+        use crate::{
+            BootstrapReport, ComposeSpec, EpochLease, EpochState, ListedObject, ObjectMeta,
+            PendingUpload, StoreResult,
+        };
+        struct IgnoresIfMatch(MemoryStore);
+        #[async_trait::async_trait]
+        impl ObjectStore for IgnoresIfMatch {
+            async fn delete_if_match(&self, key: &str, _etag: &str) -> StoreResult<()> {
+                self.0.delete(key).await
+            }
+            async fn copy_object(
+                &self,
+                src_key: &str,
+                src_if_match: Option<&str>,
+                dst_key: &str,
+                condition: &PutCondition,
+                stamps: &GenerationStamps,
+            ) -> StoreResult<ObjectMeta> {
+                self.0.copy_object(src_key, src_if_match, dst_key, condition, stamps).await
+            }
+            async fn put_whole( &self, key: &str, body: Bytes, condition: &PutCondition, stamps: &GenerationStamps, crc64: u64, ) -> StoreResult<ObjectMeta> {
+                self.0.put_whole(key, body, condition, stamps, crc64).await
+            }
+            async fn compose_generation(&self, spec: &ComposeSpec<'_>) -> StoreResult<ObjectMeta> {
+                self.0.compose_generation(spec).await
+            }
+            async fn head(&self, key: &str) -> StoreResult<ObjectMeta> {
+                self.0.head(key).await
+            }
+            async fn get_whole(&self, key: &str, if_match: Option<&str>) -> StoreResult<(ObjectMeta, Bytes)> {
+                self.0.get_whole(key, if_match).await
+            }
+            async fn get_range( &self, key: &str, offset: u64, len: u64, if_match: &str, ) -> StoreResult<Bytes> {
+                self.0.get_range(key, offset, len, if_match).await
+            }
+            async fn list(&self, prefix: &str) -> StoreResult<Vec<ListedObject>> {
+                self.0.list(prefix).await
+            }
+            async fn delete(&self, key: &str) -> StoreResult<()> {
+                self.0.delete(key).await
+            }
+            async fn list_uploads(&self, prefix: &str) -> StoreResult<Vec<PendingUpload>> {
+                self.0.list_uploads(prefix).await
+            }
+            async fn abort_upload(&self, key: &str, upload_id: &str) -> StoreResult<()> {
+                self.0.abort_upload(key, upload_id).await
+            }
+            async fn bootstrap(&self, prefix: &str) -> StoreResult<BootstrapReport> {
+                self.0.bootstrap(prefix).await
+            }
+            async fn epoch_read(&self, key: &str) -> StoreResult<Option<EpochState>> {
+                self.0.epoch_read(key).await
+            }
+            async fn epoch_acquire( &self, key: &str, holder_id: &str, supersede: Option<&EpochState>, ) -> StoreResult<EpochLease> {
+                self.0.epoch_acquire(key, holder_id, supersede).await
+            }
+            async fn epoch_renew( &self, key: &str, lease: &EpochLease, echo: Option<&str>, ) -> StoreResult<EpochLease> {
+                self.0.epoch_renew(key, lease, echo).await
+            }
+            async fn epoch_release(&self, key: &str, lease: &EpochLease) -> StoreResult<()> {
+                self.0.epoch_release(key, lease).await
+            }
+            fn min_part_size(&self) -> u64 {
+                self.0.min_part_size()
+            }
+            fn max_parts(&self) -> usize {
+                self.0.max_parts()
+            }
+        }
+
+        let store = IgnoresIfMatch(MemoryStore::new());
+        let err = probe_conditional_delete(&store, "t/.flint/probe/conditional-delete")
+            .await
+            .expect_err("a store that ignores If-Match on DELETE must be refused");
+        assert!(err.contains("ignores the condition"), "{err}");
     }
 }

@@ -12,6 +12,115 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Changed
+
+- **lean: the publish fence is held per BARRIER, with a FIFO ticket —
+  several writers share one workspace and none waits for another's
+  lifetime.** The lease used to be claimed before checkout and held for
+  the pod's life, and a live holder was never deposed, so a second
+  writer on the same workspace sat in `ContainerCreating` until the
+  first pod ended. Now a barrier runs its consume, scan and uploads with
+  no lease at all (every PUT is guarded by the object's own etag), claims
+  the cell only for its commit section — merge, manifest CAS, guarded
+  deletes, baseline — and hands it to the queue head when done, keeping
+  its echo on the released cell. A claimant that finds the cell held or
+  reserved for someone else queues once and polls every second; a holder
+  that stops moving for 60 s inside its commit section is deposed with
+  the rotation as before, a reservation quiet for 20 s is skipped, and a
+  wait past 150 s fails that barrier for the next floor to retry (its
+  uploads stand and are adopted by `flush_uuid`). The cell gains
+  `waiters` and `handoff`; `flint-store` gains `epoch_enqueue` and
+  `epoch_handoff` (the plain `epoch_release` is unchanged for the tier
+  hub). Liveness moves off the cell: each writer PUTs a heartbeat under
+  `<prefix>/.flint/lean/writers/<holder_id>` every ≤30 s and deletes it
+  on a clean drain; the operator's `SyncerObserved` names the binary that
+  ran the last boundary, the CR gains `status.observedWriters`, and the
+  gateway's `wait_cited` and `/status` read the heartbeats (`writers`).
+  **A fence is a retry, not a death:** a holder deposed mid-commit
+  abandons that barrier (nothing installed, the pending sentinel stands)
+  and its next barrier claims again — so `refused-fenced` acks, the
+  `fenced` marker state, `gauges.state` and `flint_lean_fenced` are gone,
+  `capabilities.json`'s `state` is always `live`, and a syncer never
+  exits on a fence. `checkout`, `sync`, `status` and `ctl` never claim;
+  `rescope` still holds the fence for its run; the one-shot `barrier`
+  claims inside like the loop's. `.flint/AGENTS.md` gains a paragraph on
+  sharing a workspace (disjoint files merge; a same-file edit is
+  last-boundary-wins with the loser preserved and recorded on both
+  sides). Local falsifiers L1–L8 are unit tests (two writers publish at
+  once, disjoint edits cross, a same-path edit is preserved, the ticket
+  hands the cell to the queue head, a dead handoff is skipped, a dead
+  holder mid-commit is deposed and its CAS fenced, readers never write
+  the cell, an idle boundary costs no cell request and a publishing one
+  costs four); `lean/e2e/run-writers.sh` is the cluster form, written and
+  not yet run; run-chaos.sh's C2/C3 are re-derived and not yet run.
+  Design: `docs/plans/flint-lean-writer-lease-and-gated-assessment.md`
+  §4, §10.
+- **lean: two writers on one workspace no longer delete, strand or miss
+  each other's changes.** The per-barrier fence above made uploads
+  lease-free, and the model tranche written for it, plus the tests
+  written to check that tranche against the code, found six places where
+  a second LIVE writer broke rules one writer had kept. Each is now a
+  failing test before its fix and mutation-checked after:
+  (1) the garbage collector HEADed an object, recognized its etag and
+  deleted it unconditionally, so the other writer's upload of the same
+  path landing between the two was deleted and then cited — the delete
+  now carries `If-Match` on the recognized etag (`flint-store` gains
+  `ObjectStore::delete_if_match`, whose default REFUSES rather than
+  falling back, S3 sends `If-Match` on `DeleteObject`, and
+  `probe::probe_conditional_delete` with its negative control;
+  `flint-sync probe-conditional` runs it after the PUT leg, with no
+  result yet recorded on S3 or Ozone); (2) an upload that found its bytes
+  already at the key cited that etag with no lease held, and the other
+  writer's collector could remove it first — observed citations (adopts,
+  citation repairs) are re-read inside the commit section and withheld
+  when gone (`adopt-withheld`, `status: "partial"`, the path publishes
+  next boundary); (3) `sync` advanced its merge base to the manifest for
+  a path whose remote truth came from an older inbox entry, skipping a
+  change the tree never received — the base is kept for such paths;
+  (4) a writer's merge queued the other writer's changes as
+  `merge-preserved` entries in the SHARED inbox, where the other
+  writer's consume found its own bytes and dropped them, so the writer
+  that needed them never converged — they now sit in a writer-local
+  queue (`foreign-queue.json`), written before the baseline; (5) a
+  peer's DELETE never reached the other writer's tree — the same queue
+  carries deletions, and consume removes a clean copy and keeps a
+  modified one with a `consume-foreign-delete-vs-dirty` record; (6) two
+  idle writers traded empty manifest generations (and fence claims)
+  every tick — a barrier whose merge adds nothing installs nothing.
+  Still open: a writer that supersedes the other writer's not-yet-cited
+  upload leaves that writer citing a generation the key no longer holds
+  until the superseding writer commits (no bytes lost). The formal model
+  gains `SyncKeepsHiddenBase` with a green control
+  (`LeanBarrierLeaseSyncOverlayHolds`); the writer-local queue and the
+  empty-install rule are convergence properties it does not yet model.
+  Design record: `docs/plans/flint-lean-writer-lease-and-gated-assessment.md`
+  §10.1.
+- **lean: `uploadPartParallelism` defaults to 8, behind a new upload
+  bytes-in-flight bound `uploadInflightMb` (default 256).** v1.51.0
+  shipped the 8-wide per-object upload as an opt-in, measured at 3.6–4.2x
+  on checkpoint-shaped trees, because nothing bounded what it held: every
+  part and every whole body is read WHOLE into memory before its PUT, and
+  only counts bounded the window, so peak upload RSS was
+  `min(large objects, fanout) x parts x part_size` — a product of three
+  numbers nobody sets together, 16 GiB at 8 wide. The store now carries a
+  byte gate (`flint_store::gate::ByteGate`: FIFO, so a large request at
+  the head is not starved, and a request above the whole budget clamps to
+  it so an object bigger than the window still uploads — alone). Every
+  local part of a multipart compose is charged from before its read until
+  its `UploadPart` returns, and the syncer charges every whole body it
+  reads for `put_whole` to the same gate. Measured on the loopback fake
+  S3 (4 x 256 MiB, parts 8 wide, fresh fake per leg): peak RSS 280–311
+  MiB bounded at 256 (n=4) against 1042–1049 MiB unbounded (n=6) — the
+  4 x 4 x 64 MiB the arithmetic predicts — at identical bytes and 46
+  requests per publish either way; the old serial-parts default peaked at
+  278–279 MiB (n=3). `FLINT_SYNC_UPLOAD_INFLIGHT_MB` on the binary (0 =
+  no bound), `spec.uploadInflightMb` on the CR, stamped into the worker
+  env; a CR naming its own `uploadPartParallelism` is unaffected. The
+  in-memory store composes parts `part_parallelism`-wide through the same
+  gate, so the double can fail the way the real store would, and the perf
+  fake (`lean/e2e/perf/fakes3`) now speaks multipart and validates the
+  full-object CRC-64/NVME at `CompleteMultipartUpload`.
+
 ### Removed
 
 - **lean: gated mode, and the mode axis with it.** `boundaryMode` was

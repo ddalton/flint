@@ -19,7 +19,20 @@ use super::{now_unix, LeanConfig, LeanError, Syncer};
 const PREFIX: &str = "tenant/proj1";
 
 fn cfg_for(root: &std::path::Path) -> LeanConfig {
-    LeanConfig::new(PREFIX, root)
+    let mut c = LeanConfig::new(PREFIX, root);
+    instant_fence(&mut c);
+    c
+}
+
+/// The fence's clocks, collapsed for the battery: every poll counts
+/// toward the quiet thresholds (a deposal is six polls, not a minute),
+/// polls do not sleep, and a wait gives up after two seconds rather
+/// than 150. A test that needs a holder deposed drives the polls itself
+/// through `claim_until_held`.
+fn instant_fence(c: &mut LeanConfig) {
+    c.claim_poll_secs = 0;
+    c.claim_quiet_spacing_secs = 0;
+    c.claim_deadline_secs = 2;
 }
 
 /// A config pinned to the SINGLE-generation layout (chunking off).
@@ -32,6 +45,7 @@ fn cfg_for(root: &std::path::Path) -> LeanConfig {
 fn cfg_single(root: &std::path::Path) -> LeanConfig {
     let mut c = LeanConfig::new(PREFIX, root);
     c.chunked = false;
+    instant_fence(&mut c);
     c
 }
 
@@ -51,7 +65,7 @@ async fn syncer(store: &Arc<MemoryStore>, root: &std::path::Path) -> Syncer {
 /// first step; a foreign one needs the quiet polls).
 async fn claim_until_held(sc: &mut Syncer, max_steps: u32) -> bool {
     for _ in 0..max_steps {
-        match lease::claim_step(sc).await.unwrap() {
+        match lease::claim_step(sc, true).await.unwrap() {
             ClaimOutcome::Claimed(_) => return true,
             ClaimOutcome::Waiting { .. } => {}
         }
@@ -405,22 +419,26 @@ async fn container_restart_never_resurrects_unpublished_delete() {
     assert!(!m.manifest.entries.contains_key("gone.txt"));
 }
 
-/// Takeover: the successor rotates the manifest BEFORE serving, so the
-/// deposed straggler's next barrier is fenced — its CAS can never land
-/// (Inv_NoStragglerInstall).
+/// Takeover: a holder that stalls INSIDE its commit section is deposed
+/// after the quiet polls, and the successor rotates the manifest before
+/// serving, so the straggler's CAS can never land
+/// (Inv_NoStragglerInstall). Under the per-barrier lease this is the
+/// only straggler there is: a writer stalled anywhere else holds
+/// nothing, and its next barrier simply claims again.
 #[tokio::test]
 async fn takeover_rotation_fences_the_straggler() {
     let store = Arc::new(MemoryStore::new());
     let dir_a = tempfile::tempdir().unwrap();
     let mut a = syncer(&store, dir_a.path()).await;
-    assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir_a.path(), "f.txt", "from A");
     a.run_barrier().await.unwrap();
     let seq_before = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.seq;
+    // A claims for a commit section and stalls in it (stops renewing).
+    assert!(claim_until_held(&mut a, 3).await, "a released cell is claimable at once");
 
-    // A stalls (stops renewing). B replaces it: fresh emptyDir, fresh
-    // identity ⇒ the foreign-holder path, quiet polls, then takeover.
+    // B replaces it: fresh emptyDir, fresh identity ⇒ the foreign-holder
+    // path, quiet polls, then takeover.
     let dir_b = tempfile::tempdir().unwrap();
     let mut b = syncer(&store, dir_b.path()).await;
     assert!(
@@ -434,17 +452,30 @@ async fn takeover_rotation_fences_the_straggler() {
     b.checkout().await.unwrap();
     assert_eq!(read(dir_b.path(), "f.txt").unwrap(), "from A");
 
-    // A thaws mid-work and tries to publish: fenced, and the bucket is
-    // untouched by it.
-    write(dir_a.path(), "f.txt", "stale straggler bytes");
-    backdate_baseline(&a, "f.txt");
-    let err = a.run_barrier().await.unwrap_err();
+    // A thaws inside its commit section: the cell no longer names it,
+    // and the fence is a Fenced error that abandons the barrier — the
+    // manifest B rotated is untouched. (Driven through the commit
+    // section's own check rather than a full barrier, because a full
+    // barrier claims AFTER its uploads and would simply queue behind
+    // B; that path is `a_holder_deposed_mid_commit_abandons_the_barrier`.)
+    let err = lease::renew(&mut a).await.unwrap_err();
     assert!(matches!(err, LeanError::Fenced(_)), "straggler must fence, got: {err:?}");
+    assert!(a.lease.is_none(), "a fenced holder must drop its lease");
     let m = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap();
     assert_eq!(m.manifest.seq, rotated.manifest.seq, "straggler CAS landed!");
     let cited = &m.manifest.entries["f.txt"];
     let (_, body) = store.get_whole(&cited.key, Some(&cited.etag)).await.unwrap();
     assert_eq!(&body[..], b"from A", "straggler bytes reached a cited object");
+
+    // And A is not dead: its next barrier claims again (B holds without
+    // renewing, so A deposes it in turn) and publishes its work.
+    write(dir_a.path(), "f.txt", "A, after the fence");
+    backdate_baseline(&a, "f.txt");
+    a.run_barrier().await.expect("a fenced writer's NEXT barrier publishes");
+    let m = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap();
+    let cited = &m.manifest.entries["f.txt"];
+    let (_, body) = store.get_whole(&cited.key, Some(&cited.etag)).await.unwrap();
+    assert_eq!(&body[..], b"A, after the fence");
 }
 
 /// The 412 AdoptOwn arm: a crashed/torn earlier PUT (our flush_uuid,
@@ -645,8 +676,9 @@ async fn local_delete_loses_to_foreign_modify() {
     assert_eq!(m.manifest.entries["shared.txt"].etag, newmeta.etag, "foreign entry dropped!");
     let (_, body) = store.get_whole(&sc.cfg.file_key("shared.txt"), None).await.unwrap();
     assert_eq!(&body[..], b"their v2");
-    let ib = inbox::load(store.as_ref(), &sc.cfg).await.unwrap();
-    assert!(ib.doc.entries.iter().any(|e| e.path == "shared.txt" && e.etag == newmeta.etag));
+    // Queued for THIS writer's next consume, in its own queue.
+    let queued = sc.state.load_foreign_queue().unwrap();
+    assert!(queued.iter().any(|c| c.path == "shared.txt" && c.etag.as_deref() == Some(newmeta.etag.as_str())), "{queued:?}");
 
     // The SECOND barrier consumes the queued foreign edit against the
     // local delete: the decided policy is locally-dirty wins WITH the
@@ -1084,7 +1116,7 @@ async fn capabilities_written_on_live_tree_restart() {
 
     // The startup write is what closes it.
     let posture = a.sentinel_preflight().unwrap();
-    a.write_capabilities(&posture, false).unwrap();
+    a.write_capabilities(&posture).unwrap();
     let caps = a.read_capabilities().unwrap();
     assert_eq!(caps.protocol, super::SENTINEL_PROTOCOL);
     assert_eq!(caps.state, "live");
@@ -1105,7 +1137,7 @@ async fn agent_guide_names_every_advertised_verb() {
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     let posture = a.sentinel_preflight().unwrap();
-    a.write_capabilities(&posture, false).unwrap();
+    a.write_capabilities(&posture).unwrap();
     let caps = a.read_capabilities().unwrap();
     assert!(!caps.verbs.is_empty(), "the fixture advertises verbs");
     let guide = std::fs::read_to_string(dir.path().join(super::CONTROL_DIR).join(control::AGENT_GUIDE)).unwrap();
@@ -1148,7 +1180,7 @@ async fn preexisting_flint_disables_sentinels() {
     let posture = a.sentinel_preflight().unwrap();
     assert!(!posture.enabled);
     assert_eq!(posture.reason.as_deref(), Some("preexisting-flint-paths"));
-    a.write_capabilities(&posture, false).unwrap();
+    a.write_capabilities(&posture).unwrap();
     let caps = a.read_capabilities().unwrap();
     assert!(caps.verbs.is_empty());
     assert_eq!(caps.reason.as_deref(), Some("preexisting-flint-paths"));
@@ -1194,7 +1226,7 @@ async fn publish_sentinel_honored_and_acked() {
     let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     let posture = a.sentinel_preflight().unwrap();
-    a.write_capabilities(&posture, false).unwrap();
+    a.write_capabilities(&posture).unwrap();
     a.checkout().await.unwrap();
     a.run_barrier().await.unwrap();
     let before = manifest::load(store.as_ref(), &a.cfg).await.unwrap().map(|l| l.manifest.seq);
@@ -1240,7 +1272,7 @@ async fn sentinel_ack_echoes_covered_nonces() {
     let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     let posture = a.sentinel_preflight().unwrap();
-    a.write_capabilities(&posture, false).unwrap();
+    a.write_capabilities(&posture).unwrap();
     a.checkout().await.unwrap();
 
     write(dir.path(), "f.txt", "v1");
@@ -1275,7 +1307,7 @@ async fn min_interval_coalesces_into_one_barrier() {
     a.cfg.sentinel_min_interval_secs = 3600; // the 1-hour-floor trick, applied to the interval
     assert!(claim_until_held(&mut a, 3).await);
     let posture = a.sentinel_preflight().unwrap();
-    a.write_capabilities(&posture, false).unwrap();
+    a.write_capabilities(&posture).unwrap();
     a.checkout().await.unwrap();
 
     write(dir.path(), "f.txt", "v1");
@@ -1323,7 +1355,7 @@ async fn budget_meters_bytes_not_calls() {
     a.cfg.sentinel_min_interval_secs = 0;
     assert!(claim_until_held(&mut a, 3).await);
     let posture = a.sentinel_preflight().unwrap();
-    a.write_capabilities(&posture, false).unwrap();
+    a.write_capabilities(&posture).unwrap();
     a.checkout().await.unwrap();
 
     let mut honors_large = 0;
@@ -1360,7 +1392,7 @@ async fn budget_meters_bytes_not_calls() {
     b.cfg.sentinel_min_interval_secs = 0;
     assert!(claim_until_held(&mut b, 3).await);
     let posture = b.sentinel_preflight().unwrap();
-    b.write_capabilities(&posture, false).unwrap();
+    b.write_capabilities(&posture).unwrap();
     b.checkout().await.unwrap();
 
     let mut honors_small = 0;
@@ -1394,7 +1426,7 @@ async fn no_diff_sentinel_honor_costs_no_budget() {
     a.cfg.sentinel_min_interval_secs = 0;
     assert!(claim_until_held(&mut a, 3).await);
     let posture = a.sentinel_preflight().unwrap();
-    a.write_capabilities(&posture, false).unwrap();
+    a.write_capabilities(&posture).unwrap();
     a.checkout().await.unwrap();
     write(dir.path(), "f.txt", "v1");
     a.run_barrier().await.unwrap();
@@ -1420,7 +1452,7 @@ async fn crash_between_consume_and_ack_reruns_barrier() {
     let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     let posture = a.sentinel_preflight().unwrap();
-    a.write_capabilities(&posture, false).unwrap();
+    a.write_capabilities(&posture).unwrap();
     a.checkout().await.unwrap();
     a.run_barrier().await.unwrap();
     let seq_before = a.state.load_baseline().unwrap().seq;
@@ -1459,7 +1491,7 @@ async fn restart_settles_pending_before_new_consume() {
     a.cfg.sentinel_min_interval_secs = 0;
     assert!(claim_until_held(&mut a, 3).await);
     let posture = a.sentinel_preflight().unwrap();
-    a.write_capabilities(&posture, false).unwrap();
+    a.write_capabilities(&posture).unwrap();
     a.checkout().await.unwrap();
 
     write(dir.path(), "a.txt", "v1");
@@ -1489,7 +1521,7 @@ async fn torn_pending_body_honored_as_bare_touch() {
     let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     let posture = a.sentinel_preflight().unwrap();
-    a.write_capabilities(&posture, false).unwrap();
+    a.write_capabilities(&posture).unwrap();
     a.checkout().await.unwrap();
 
     write(dir.path(), "f.txt", "v1");
@@ -1520,7 +1552,7 @@ async fn fifo_sentinel_skipped() {
     let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     let posture = a.sentinel_preflight().unwrap();
-    a.write_capabilities(&posture, false).unwrap();
+    a.write_capabilities(&posture).unwrap();
     a.checkout().await.unwrap();
 
     let ctl = dir.path().join(super::CONTROL_DIR);
@@ -1545,132 +1577,6 @@ async fn fifo_sentinel_skipped() {
         .iter()
         .any(|c| c.kind == "sentinel-not-regular-file"));
 }
-
-/// D2's largest protocol hole in the draft: deposal stranded sentinels
-/// forever. A fenced honor writes `refused-fenced` naming the observed
-/// epoch, flips the marker to fenced with no verbs, and retires the
-/// pending — the agent is answered, and stops touching a zombie.
-#[tokio::test]
-async fn fenced_honor_writes_refused_ack() {
-    let store = Arc::new(MemoryStore::new());
-    let dir_a = tempfile::tempdir().unwrap();
-    let mut a = syncer(&store, dir_a.path()).await;
-    assert!(claim_until_held(&mut a, 3).await);
-    let posture = a.sentinel_preflight().unwrap();
-    a.write_capabilities(&posture, false).unwrap();
-    a.checkout().await.unwrap();
-    write(dir_a.path(), "f.txt", "v1");
-    a.run_barrier().await.unwrap();
-
-    // A pending sentinel stands...
-    write(dir_a.path(), "g.txt", "v1");
-    touch_sentinel(dir_a.path(), control::PUBLISH, r#"{"nonce":"stranded"}"#);
-    a.poll_sentinels().unwrap();
-    assert!(a.load_pending(Verb::Publish).unwrap().is_some());
-
-    // ...and a successor deposes us. Anti-vacuity: the takeover is real.
-    let dir_b = tempfile::tempdir().unwrap();
-    let mut b = syncer(&store, dir_b.path()).await;
-    assert!(claim_until_held(&mut b, 12).await);
-    let our_epoch = a.lease.as_ref().unwrap().epoch;
-    let their_epoch = b.lease.as_ref().unwrap().epoch;
-    assert!(their_epoch > our_epoch, "no takeover happened");
-
-    let err = a.sentinel_tick().await.unwrap_err();
-    assert!(matches!(err, LeanError::Fenced(_)));
-
-    let ack = a.read_ack(Verb::Publish).unwrap();
-    assert_eq!(ack.status, "refused-fenced");
-    assert!(ack.nonces.contains(&"stranded".to_string()));
-    assert_eq!(ack.observed_epoch, Some(their_epoch));
-    assert!(ack.seq.is_none());
-    assert!(a.load_pending(Verb::Publish).unwrap().is_none());
-
-    // The marker stops the agent from touching a zombie.
-    let caps = a.read_capabilities().unwrap();
-    assert_eq!(caps.state, "fenced");
-    assert!(caps.verbs.is_empty());
-}
-
-/// D2 — the in-loop SYNC honor must never apply the successor's
-/// manifest onto a zombie tree. `Syncer::sync` has no lease/epoch
-/// check of its own, so before this tranche a straggler consuming a
-/// sync sentinel between deposal and its next cooperative fence would
-/// have done exactly that, and acked SUCCESS.
-///
-/// **Correction to D2's framing, recorded because the mutation matrix
-/// found it:** removing `verify_not_deposed` from the sync honor does
-/// NOT turn this test red — `honor_pending` renews the lease first
-/// (D12) and the renew 412s on deposal, so the renew is the
-/// load-bearing fence and the explicit check is the narrower guard for
-/// the window between renew and apply. Both are kept; the test asserts
-/// the property (tree unmutated, ack refused), and
-/// `deposed_syncer_fails_the_explicit_epoch_check` covers the guard
-/// itself so it is not untested code.
-#[tokio::test]
-async fn fenced_sync_honor_refused_and_tree_unmutated() {
-    let store = Arc::new(MemoryStore::new());
-    let dir_a = tempfile::tempdir().unwrap();
-    let mut a = syncer(&store, dir_a.path()).await;
-    assert!(claim_until_held(&mut a, 3).await);
-    let posture = a.sentinel_preflight().unwrap();
-    a.write_capabilities(&posture, false).unwrap();
-    a.checkout().await.unwrap();
-    write(dir_a.path(), "shared.txt", "zombie view");
-    a.run_barrier().await.unwrap();
-
-    // The successor takes over and publishes something the zombie's
-    // sync WOULD apply if it ran.
-    let dir_b = tempfile::tempdir().unwrap();
-    let mut b = syncer(&store, dir_b.path()).await;
-    assert!(claim_until_held(&mut b, 12).await);
-    b.checkout().await.unwrap();
-    write(dir_b.path(), "shared.txt", "successor view");
-    backdate_baseline(&b, "shared.txt");
-    b.run_barrier().await.unwrap();
-
-    let before = std::fs::read_to_string(dir_a.path().join("shared.txt")).unwrap();
-    touch_sentinel(dir_a.path(), control::SYNC, r#"{"nonce":"zombie-sync"}"#);
-    let err = a.sentinel_tick().await.unwrap_err();
-    assert!(matches!(err, LeanError::Fenced(_)));
-
-    let ack = a.read_ack(Verb::Sync).unwrap();
-    assert_eq!(ack.status, "refused-fenced");
-    assert_eq!(
-        std::fs::read_to_string(dir_a.path().join("shared.txt")).unwrap(),
-        before,
-        "a fenced sync honor MUTATED the zombie's tree"
-    );
-    assert_ne!(before, "successor view", "the fixture never diverged");
-}
-
-/// The explicit guard of the previous test, isolated: on a deposed
-/// syncer the epoch check itself fences, independently of the renew.
-#[tokio::test]
-async fn deposed_syncer_fails_the_explicit_epoch_check() {
-    let store = Arc::new(MemoryStore::new());
-    let dir_a = tempfile::tempdir().unwrap();
-    let mut a = syncer(&store, dir_a.path()).await;
-    assert!(claim_until_held(&mut a, 3).await);
-    a.checkout().await.unwrap();
-    // Anti-vacuity: it passes while we hold the lease.
-    a.verify_not_deposed_pub().await.unwrap();
-
-    let dir_b = tempfile::tempdir().unwrap();
-    let mut b = syncer(&store, dir_b.path()).await;
-    assert!(claim_until_held(&mut b, 12).await);
-    assert!(b.lease.as_ref().unwrap().epoch > a.lease.as_ref().unwrap().epoch);
-
-    assert!(matches!(
-        a.verify_not_deposed_pub().await.unwrap_err(),
-        LeanError::Fenced(_)
-    ));
-}
-
-// ---------------------------------------------------------------------
-// Phase 2 — sync sentinel + scope (D4) + remote.seq (D5) + write
-// containment (§2.2 security gate).
-// ---------------------------------------------------------------------
 
 /// D4 — THE correctness rule, not an optimization. A scoped sync must
 /// advance `inst_base` only for what it applied in scope. `inst_base`
@@ -1975,97 +1881,6 @@ async fn sync_request_is_carried_never_executed() {
     assert!(!dir.path().join("keep.txt").exists(), "the agent's own sync did not run");
 }
 
-/// U8 — the last open corner of the protocol, and the one the bucket
-/// drill hit from the other side ("a one-shot blocks in `claim` FOREVER").
-///
-/// A syncer SIGKILLed mid-honor runs no cooperative fence path, so its
-/// pending sentinel is never settled. The kubelet restarts it over the
-/// surviving emptyDir while a successor holds the lease; it blocks in
-/// `claim` (the successor's token keeps advancing, so quiet polls never
-/// accumulate) and `settle_pending_at_startup` is unreachable, because
-/// that runs only AFTER claim returns. The agent is left polling an ack
-/// that will never come, behind a marker that still says `live`.
-#[tokio::test]
-async fn a_restarted_claimant_that_can_never_honor_says_so_instead_of_stranding() {
-    let store = Arc::new(MemoryStore::new());
-    let dir_a = tempfile::tempdir().unwrap();
-    let mut a = syncer(&store, dir_a.path()).await;
-    assert!(claim_until_held(&mut a, 3).await);
-    a.checkout().await.unwrap();
-    let posture = a.sentinel_preflight().unwrap();
-    a.write_capabilities(&posture, false).unwrap();
-
-    // The agent declares a boundary; the syncer consumes it into a
-    // pending record and is SIGKILLed before honoring.
-    touch_sentinel(dir_a.path(), control::PUBLISH, r#"{"nonce":"task-42"}"#);
-    assert!(a.consume_sentinel(Verb::Publish).unwrap(), "the touch was not consumed");
-    assert!(a.load_pending(Verb::Publish).unwrap().is_some(), "no pending record to owe");
-    assert!(a.read_ack(Verb::Publish).is_none(), "an ack already exists — fixture not armed");
-
-    // A successor takes the lease.
-    let dir_b = tempfile::tempdir().unwrap();
-    let mut b = syncer(&store, dir_b.path()).await;
-    assert!(claim_until_held(&mut b, 10).await, "quiet polls exhausted ⇒ takeover");
-
-    // A restarts over its surviving emptyDir and lands in Waiting: the
-    // live successor means it can never claim, so it can never honor.
-    let outcome = lease::claim_step(&mut a).await.unwrap();
-    assert!(
-        matches!(outcome, lease::ClaimOutcome::Waiting { .. }),
-        "the fixture never armed — A claimed over a live successor"
-    );
-
-    let answered = a.refuse_what_this_incarnation_can_never_honor().await.unwrap();
-    assert!(answered, "nothing was owed — the fixture never armed");
-
-    // THE ASSERTIONS. The agent gets an answer...
-    let ack = a.read_ack(Verb::Publish).expect("the agent is still stranded: no ack");
-    assert_eq!(ack.status, "refused-fenced");
-    assert!(ack.nonces.contains(&"task-42".to_string()), "the ack does not cover the agent's nonce");
-    assert_eq!(ack.observed_epoch, Some(b.lease.as_ref().unwrap().epoch), "the ack names no fencer");
-
-    // ...and the marker stops advertising verbs a zombie cannot serve.
-    let caps: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(dir_a.path().join(".flint").join("capabilities.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(caps["state"], "fenced", "capabilities.json still says the zombie is live");
-}
-
-/// The other half of the same rule: a FRESH replacement pod waiting out
-/// its 60 s of quiet polls is healthy, not fenced. Nothing is owed in a
-/// fresh emptyDir and no marker stands in it (the marker is written
-/// after the claim), so it must take none of this — or every rolling
-/// restart would mark itself fenced on the way up. (A tree that DOES
-/// carry a predecessor's live marker is the restarted case:
-/// `a_waiting_claimant_refuses_a_raw_touch_and_flips_the_marker`.)
-#[tokio::test]
-async fn a_healthy_replacement_waiting_out_quiet_polls_is_not_marked_fenced() {
-    let store = Arc::new(MemoryStore::new());
-    let dir_a = tempfile::tempdir().unwrap();
-    let mut a = syncer(&store, dir_a.path()).await;
-    assert!(claim_until_held(&mut a, 3).await);
-    a.checkout().await.unwrap();
-
-    let dir_b = tempfile::tempdir().unwrap();
-    let mut b = syncer(&store, dir_b.path()).await;
-    // B is fresh and A still holds: B waits.
-    assert!(
-        matches!(lease::claim_step(&mut b).await.unwrap(), lease::ClaimOutcome::Waiting { .. }),
-        "the fixture never armed — B claimed instantly"
-    );
-
-    let answered = b.refuse_what_this_incarnation_can_never_honor().await.unwrap();
-    assert!(!answered, "a healthy replacement marked itself fenced on the way up");
-    assert!(b.read_ack(Verb::Publish).is_none(), "a refused ack appeared with nothing owed");
-    assert!(
-        !dir_b.path().join(".flint").join("capabilities.json").exists(),
-        "a healthy replacement wrote a marker on the way up"
-    );
-    // And it still takes over on schedule.
-    assert!(claim_until_held(&mut b, 10).await, "the refusal path blocked a legitimate takeover");
-}
-
 /// U22 — a STALE ack must not retire a FRESH request.
 ///
 /// The restart rule ("crash after ack before retire ⇒ retire on
@@ -2241,39 +2056,6 @@ async fn a_fifo_at_the_sentinel_path_never_wedges_the_poll_arm() {
 // emptyDir.
 // ---------------------------------------------------------------------
 
-/// A deposed syncer's gauges must say `fenced`, exactly as
-/// `capabilities.json` does. An agent that reads only the gauges (the
-/// operational file) must not conclude a zombie is healthy — the two
-/// surfaces cannot be allowed to disagree about liveness.
-#[tokio::test]
-async fn a_fenced_syncer_gauges_itself_fenced() {
-    let store = Arc::new(MemoryStore::new());
-    let dir_a = tempfile::tempdir().unwrap();
-    let mut a = syncer(&store, dir_a.path()).await;
-    assert!(claim_until_held(&mut a, 3).await);
-    a.checkout().await.unwrap();
-    write(dir_a.path(), "work.txt", "v1");
-    a.floor_tick().await.unwrap();
-    assert_eq!(a.load_gauges().unwrap().state, "live");
-
-    // A successor takes over.
-    let dir_b = tempfile::tempdir().unwrap();
-    let mut b = syncer(&store, dir_b.path()).await;
-    assert!(claim_until_held(&mut b, 12).await);
-
-    write(dir_a.path(), "work.txt", "v2");
-    backdate_baseline(&a, "work.txt");
-    let err = a.floor_tick().await.unwrap_err();
-    assert!(matches!(err, LeanError::Fenced(_)), "the straggler was not fenced: {err}");
-
-    assert_eq!(a.read_capabilities().unwrap().state, "fenced");
-    assert_eq!(
-        a.load_gauges().unwrap().state,
-        "fenced",
-        "capabilities say fenced but the gauges still say live"
-    );
-}
-
 /// `flint-sync status` is the exec surface for a workspace whose
 /// syncer is DEAD or deposed — so it must render with no lease held
 /// and no claim attempted. A status verb that claims the lease would
@@ -2291,14 +2073,17 @@ async fn status_renders_without_claiming_the_lease() {
     // A second process over the SAME tree cannot even open the state
     // dir (the occupancy flock), so status reads the files directly.
     let s = super::status_report(&cfg_for(dir.path())).unwrap();
-    assert_eq!(s.gauges.unwrap().state, "live");
+    assert!(s.gauges.is_some());
     assert_eq!(s.capabilities.unwrap().state, "live");
     assert!(s.baseline_seq >= 1, "the tick's boundary never reached the baseline status reads");
     assert!(s.incarnation_epoch.is_some());
-    // Rendering it must not have touched the lease.
+    // Rendering it must not have touched the cell (at rest since the
+    // tick's barrier handed it on).
+    let cell = store.epoch_read(&a.cfg.epoch_key()).await.unwrap().unwrap();
+    assert!(cell.released);
     assert_eq!(
-        store.epoch_read(&a.cfg.epoch_key()).await.unwrap().unwrap().epoch,
-        a.lease.as_ref().unwrap().epoch,
+        cell.epoch,
+        a.state.load_incarnation().unwrap().unwrap().epoch,
         "status rotated the epoch it was supposed to observe"
     );
 }
@@ -2318,7 +2103,7 @@ async fn a_sentinel_boundary_carries_a_delete_made_before_the_touch() {
     let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     let posture = a.sentinel_preflight().unwrap();
-    a.write_capabilities(&posture, false).unwrap();
+    a.write_capabilities(&posture).unwrap();
     a.checkout().await.unwrap();
 
     write(dir.path(), "keep.txt", "k");
@@ -2479,57 +2264,6 @@ async fn the_drain_carries_a_delete_made_before_it() {
         !m.entries.contains_key("gone.txt"),
         "the drain left the delete withheld — the successor's checkout resurrects it"
     );
-}
-
-/// D12 × D2 — the heartbeat renewal arm owes the refused ack too.
-///
-/// The heartbeat runs on its own interval precisely so liveness
-/// signalling does not wait for publish cadence, which makes it the arm
-/// that usually discovers deposal FIRST — ahead of the floor tick, and
-/// ahead of a poll arm that has nothing due to honor. If it exits
-/// without settling, the pending sentinel is stranded and the marker
-/// still advertises live verbs on a zombie: the hole D2's refused acks
-/// exist to close, at the arm D12 added.
-#[tokio::test]
-async fn the_heartbeat_arm_settles_owed_acks_when_it_finds_the_fence() {
-    let store = Arc::new(MemoryStore::new());
-    let dir_a = tempfile::tempdir().unwrap();
-    let mut a = syncer(&store, dir_a.path()).await;
-    assert!(claim_until_held(&mut a, 3).await);
-    let posture = a.sentinel_preflight().unwrap();
-    a.write_capabilities(&posture, false).unwrap();
-    a.checkout().await.unwrap();
-
-    // Both verbs owed: settle_fence answers every one, not just the
-    // verb some other arm happened to be honoring.
-    touch_sentinel(dir_a.path(), control::PUBLISH, r#"{"nonce":"pub-stranded"}"#);
-    touch_sentinel(dir_a.path(), control::SYNC, r#"{"nonce":"sync-stranded"}"#);
-    a.poll_sentinels().unwrap();
-    assert!(a.load_pending(Verb::Publish).unwrap().is_some());
-    assert!(a.load_pending(Verb::Sync).unwrap().is_some());
-
-    let dir_b = tempfile::tempdir().unwrap();
-    let mut b = syncer(&store, dir_b.path()).await;
-    assert!(claim_until_held(&mut b, 12).await);
-    let their_epoch = b.lease.as_ref().unwrap().epoch;
-    assert!(their_epoch > a.lease.as_ref().unwrap().epoch, "no takeover happened");
-
-    // The arm the run loop drives, not the poll arm.
-    let err = a.heartbeat_tick().await.unwrap_err();
-    assert!(matches!(err, LeanError::Fenced(_)));
-
-    for (verb, nonce) in [(Verb::Publish, "pub-stranded"), (Verb::Sync, "sync-stranded")] {
-        let ack = a
-            .read_ack(verb)
-            .unwrap_or_else(|| panic!("{verb:?} was stranded: the heartbeat exited unsettled"));
-        assert_eq!(ack.status, "refused-fenced");
-        assert!(ack.nonces.contains(&nonce.to_string()));
-        assert_eq!(ack.observed_epoch, Some(their_epoch));
-        assert!(a.load_pending(verb).unwrap().is_none());
-    }
-    let caps = a.read_capabilities().unwrap();
-    assert_eq!(caps.state, "fenced", "the marker still advertises a zombie as live");
-    assert!(caps.verbs.is_empty());
 }
 
 /// The merge base is rewritten at step 7 — after the manifest CAS and
@@ -2708,33 +2442,47 @@ async fn a_planted_temp_sibling_is_never_written_through() {
 
 // ── Phase 4: the operator-facing surfaces (§2.6) ─────────────────────
 
-/// D12's heartbeat is the ONE request a live syncer always pays, so it
-/// is where the observed-state echo rides (§2.6). Without it the
-/// operator can only report what the spec ASKED for: the env read is a
-/// fixed list, so a knob reaching a binary that predates it is ignored
-/// in silence — the mixed-version hole D11 closes on the agent side and
-/// nothing closed on the operator's. The echo names the binary, its
-/// protocol and its last boundary, on a request already paid for.
+/// The observed-state echo (§2.6) rides two writes a live syncer
+/// already pays for: the HANDOFF that ends every barrier (the cell is at
+/// rest between barriers, so the echo it keeps is the only thing that
+/// tells an operator which binary ran the last boundary) and the
+/// per-writer HEARTBEAT (the only liveness an idle writer has). Without
+/// it the operator can only report what the spec ASKED for: the env
+/// read is a fixed list, so a knob reaching a binary that predates it
+/// is ignored in silence — the mixed-version hole D11 closes on the
+/// agent side and nothing closed on the operator's.
 #[tokio::test]
 async fn a_heartbeat_echoes_the_running_binary_into_the_lease_cell() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
     let mut a = syncer(&store, dir.path()).await;
-    assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir.path(), "seed.txt", "S1");
     let cited = a.run_barrier().await.unwrap().seq.unwrap();
 
-    a.heartbeat_tick().await.unwrap();
-
+    // The handoff kept the echo on a RELEASED cell.
     let cell = store.epoch_read(&a.cfg.epoch_key()).await.unwrap().unwrap();
+    assert!(cell.released, "a barrier must hand the cell on when it is done");
     let echo: flint_store::LeaseEcho = serde_json::from_str(
-        cell.echo.as_deref().expect("the heartbeat carried no observed-state echo"),
+        cell.echo.as_deref().expect("the handoff carried no observed-state echo"),
     )
     .expect("the echo is not a LeaseEcho");
     assert_eq!(echo.last_cited_seq, cited, "the echo names no citation");
     assert_eq!(echo.protocol, super::SENTINEL_PROTOCOL);
     assert!(!echo.syncer_version.is_empty(), "no version ⇒ no mixed-fleet tell");
+
+    // The heartbeat object carries the same echo, under the writer's id.
+    a.heartbeat_tick().await.unwrap();
+    let writers = lease::live_writers(store.as_ref(), &a.cfg, super::now_unix(), 300).await.unwrap();
+    let me = lease::incarnation(&a).unwrap().holder_id;
+    assert_eq!(writers, vec![me.clone()], "the heartbeat did not register this writer");
+    let (_, body) = store.get_whole(&a.cfg.writer_key(&me), None).await.unwrap();
+    let hb: lease::WriterHeartbeat = serde_json::from_slice(&body).unwrap();
+    let echo: flint_store::LeaseEcho = serde_json::from_str(hb.echo.as_deref().unwrap()).unwrap();
+    assert_eq!(echo.last_cited_seq, cited);
+    // A clean shutdown takes it down at once.
+    lease::retire_heartbeat(&a).await.unwrap();
+    assert!(lease::live_writers(store.as_ref(), &a.cfg, super::now_unix(), 300).await.unwrap().is_empty());
 }
 
 // ── Phase 5: the layered doors (§2.5, D14) ───────────────────────────
@@ -2904,7 +2652,6 @@ async fn a_gateway_sync_request_is_carried_and_never_executed() {
 #[test]
 fn every_gauges_field_reaches_exactly_one_metric() {
     let g = super::Gauges {
-        state: "live".into(),
         rpo_secs: 11,
         withheld_reason: Some("parked-412".into()),
         sentinel_budget_remaining: 44,
@@ -2919,7 +2666,7 @@ fn every_gauges_field_reaches_exactly_one_metric() {
     };
     let json = serde_json::to_value(&g).unwrap();
     let fields: Vec<String> = json.as_object().unwrap().keys().cloned().collect();
-    assert!(fields.len() >= 8, "the fixture did not populate the struct: {fields:?}");
+    assert!(fields.len() >= 7, "the fixture did not populate the struct: {fields:?}");
 
     for f in &fields {
         assert!(
@@ -2946,7 +2693,6 @@ fn every_gauges_field_reaches_exactly_one_metric() {
         ("flint_lean_last_boundary_seq", 66),
         ("flint_lean_withheld_reason", 1),      // parked-412
         ("flint_lean_last_boundary_source", 1), // sentinel
-        ("flint_lean_fenced", 0),
     ] {
         let line = text
             .lines()
@@ -2963,7 +2709,7 @@ fn every_gauges_field_reaches_exactly_one_metric() {
 /// across a 3,000-workspace fleet.
 #[test]
 fn the_label_key_set_is_exactly_workspace_and_namespace() {
-    let g = super::Gauges { state: "live".into(), ..Default::default() };
+    let g = super::Gauges { rpo_secs: 1, ..Default::default() };
     let text = super::metrics::render(
         &g,
         &super::metrics::Labels { workspace: "proj1".into(), namespace: "agents".into() },
@@ -2984,7 +2730,7 @@ fn the_label_key_set_is_exactly_workspace_and_namespace() {
         );
         series += 1;
     }
-    assert!(series >= 9, "the renderer emitted almost nothing: {series}");
+    assert!(series >= 8, "the renderer emitted almost nothing: {series}");
 }
 
 /// A scrape costs zero bucket requests, and the type system is what
@@ -3001,7 +2747,7 @@ async fn a_scrape_costs_no_bucket_request() {
     a.checkout().await.unwrap();
     write(dir.path(), "work.txt", "W1");
     a.run_barrier().await.unwrap();
-    let g = a.write_gauges(false, None).unwrap();
+    let g = a.write_gauges(None).unwrap();
 
     let before = store.list("").await.unwrap().len();
     for _ in 0..25 {
@@ -3943,6 +3689,9 @@ impl ObjectStore for AuthRefusing {
     async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
         self.inner.delete(key).await
     }
+    async fn delete_if_match(&self, key: &str, etag: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete_if_match(key, etag).await
+    }
     async fn head_version(
         &self,
         key: &str,
@@ -4081,7 +3830,7 @@ async fn a_refused_credential_pauses_the_holder_without_fencing_it() {
     // observe credentials. Recomputing this field instead of carrying
     // it would erase the pause on the very next tick — the gauge would
     // exist and always read None.
-    a.write_gauges(false, None).unwrap();
+    a.write_gauges(None).unwrap();
     assert_eq!(
         a.load_gauges().unwrap().auth_paused_since_unix,
         Some(1_000),
@@ -4570,6 +4319,9 @@ impl ObjectStore for SweepMidRead {
     async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
         self.inner.delete(key).await
     }
+    async fn delete_if_match(&self, key: &str, etag: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete_if_match(key, etag).await
+    }
     async fn head_version(
         &self,
         key: &str,
@@ -4983,6 +4735,9 @@ impl ObjectStore for PublishOnList {
     async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
         self.inner.delete(key).await
     }
+    async fn delete_if_match(&self, key: &str, etag: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete_if_match(key, etag).await
+    }
     async fn head_version(
         &self,
         key: &str,
@@ -5261,6 +5016,9 @@ impl ObjectStore for StaleListing {
     async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
         self.inner.delete(key).await
     }
+    async fn delete_if_match(&self, key: &str, etag: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete_if_match(key, etag).await
+    }
     async fn head_version(
         &self,
         key: &str,
@@ -5469,229 +5227,6 @@ async fn the_barrier_reaps_unreferenced_chunks_without_being_asked() {
 // precondition, and the drain attestation.
 // ---------------------------------------------------------------------
 
-/// A backend that DEPOSES the writer from inside its Nth `put_whole`: a
-/// takeover landing in the middle of an upload chunk, which no sequence
-/// of ordinary store calls from a test can produce. Counts every
-/// `put_whole` issued AFTER the deposal — the number the fence bounds.
-struct DeposeOnNthPut {
-    inner: Arc<MemoryStore>,
-    epoch_key: String,
-    at: usize,
-    puts: std::sync::atomic::AtomicUsize,
-    deposed: std::sync::atomic::AtomicBool,
-    puts_after: std::sync::atomic::AtomicUsize,
-}
-
-#[async_trait::async_trait]
-impl ObjectStore for DeposeOnNthPut {
-    async fn copy_object(
-        &self,
-        src_key: &str,
-        src_if_match: Option<&str>,
-        dst_key: &str,
-        condition: &PutCondition,
-        stamps: &GenerationStamps,
-    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
-        self.inner.copy_object(src_key, src_if_match, dst_key, condition, stamps).await
-    }
-    async fn put_whole(
-        &self,
-        key: &str,
-        body: Bytes,
-        cond: &PutCondition,
-        stamps: &GenerationStamps,
-        crc: u64,
-    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
-        use std::sync::atomic::Ordering::SeqCst;
-        let n = self.puts.fetch_add(1, SeqCst) + 1;
-        if self.deposed.load(SeqCst) {
-            self.puts_after.fetch_add(1, SeqCst);
-        }
-        let r = self.inner.put_whole(key, body, cond, stamps, crc).await;
-        if n == self.at && !self.deposed.swap(true, SeqCst) {
-            let state = self.inner.epoch_read(&self.epoch_key).await?.expect("a held cell");
-            self.inner.epoch_acquire(&self.epoch_key, "lean-usurper", Some(&state)).await?;
-        }
-        r
-    }
-    async fn compose_generation(
-        &self,
-        spec: &flint_store::ComposeSpec<'_>,
-    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
-        self.inner.compose_generation(spec).await
-    }
-    async fn head(&self, key: &str) -> flint_store::StoreResult<flint_store::ObjectMeta> {
-        self.inner.head(key).await
-    }
-    async fn get_whole(
-        &self,
-        key: &str,
-        if_match: Option<&str>,
-    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
-        self.inner.get_whole(key, if_match).await
-    }
-    async fn get_range(
-        &self,
-        key: &str,
-        off: u64,
-        len: u64,
-        if_match: &str,
-    ) -> flint_store::StoreResult<Bytes> {
-        self.inner.get_range(key, off, len, if_match).await
-    }
-    fn min_part_size(&self) -> u64 {
-        self.inner.min_part_size()
-    }
-    fn max_parts(&self) -> usize {
-        self.inner.max_parts()
-    }
-    async fn list(&self, prefix: &str) -> flint_store::StoreResult<Vec<flint_store::ListedObject>> {
-        self.inner.list(prefix).await
-    }
-    async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
-        self.inner.delete(key).await
-    }
-    async fn head_version(
-        &self,
-        key: &str,
-        v: &str,
-    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
-        self.inner.head_version(key, v).await
-    }
-    async fn get_version(
-        &self,
-        key: &str,
-        v: &str,
-    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
-        self.inner.get_version(key, v).await
-    }
-    async fn delete_version(&self, key: &str, v: &str) -> flint_store::StoreResult<()> {
-        self.inner.delete_version(key, v).await
-    }
-    async fn list_versions(
-        &self,
-        prefix: &str,
-    ) -> flint_store::StoreResult<Vec<flint_store::ListedVersion>> {
-        self.inner.list_versions(prefix).await
-    }
-    async fn list_uploads(
-        &self,
-        prefix: &str,
-    ) -> flint_store::StoreResult<Vec<flint_store::PendingUpload>> {
-        self.inner.list_uploads(prefix).await
-    }
-    async fn abort_upload(&self, key: &str, id: &str) -> flint_store::StoreResult<()> {
-        self.inner.abort_upload(key, id).await
-    }
-    async fn bootstrap(
-        &self,
-        prefix: &str,
-    ) -> flint_store::StoreResult<flint_store::BootstrapReport> {
-        self.inner.bootstrap(prefix).await
-    }
-    async fn epoch_read(
-        &self,
-        key: &str,
-    ) -> flint_store::StoreResult<Option<flint_store::EpochState>> {
-        self.inner.epoch_read(key).await
-    }
-    async fn epoch_acquire(
-        &self,
-        key: &str,
-        holder: &str,
-        observed: Option<&flint_store::EpochState>,
-    ) -> flint_store::StoreResult<flint_store::EpochLease> {
-        self.inner.epoch_acquire(key, holder, observed).await
-    }
-    async fn epoch_renew(
-        &self,
-        key: &str,
-        lease: &flint_store::EpochLease,
-        echo: Option<&str>,
-    ) -> flint_store::StoreResult<flint_store::EpochLease> {
-        self.inner.epoch_renew(key, lease, echo).await
-    }
-    async fn epoch_release(
-        &self,
-        key: &str,
-        lease: &flint_store::EpochLease,
-    ) -> flint_store::StoreResult<()> {
-        self.inner.epoch_release(key, lease).await
-    }
-}
-
-/// AUDIT 2026-09-03, finding 1 (the model's `Inv_NoDeposedPut`, whose
-/// `LeanNoEpochCheck` mutation the shipped code turned out to BE).
-///
-/// `renew_if_due` returned `Ok(())` on exactly the deposed condition
-/// (`state.epoch != lease.epoch`), so the between-chunk "fence" the
-/// cadence barrier relied on never fired, and a writer taken over
-/// mid-barrier completed every remaining data PUT — each with If-Match
-/// on a baseline etag that still matched, because the successor had
-/// published nothing yet. Every reader's S3-wins arm then adopted the
-/// straggler's uncited bytes. The cadence barrier paired no fence with
-/// its renewal, and no test deposed a writer BETWEEN chunks — the two straggler
-/// tests fence at the barrier's first line.
-///
-/// Anti-vacuity, in order: the deposal must have fired; some PUTs must
-/// have landed AFTER it (so the chunk boundary, not the barrier's
-/// entry check, is what stopped the writer); and then fewer than one
-/// chunk's worth may follow. Without the fix this reads 36-38 PUTs
-/// after the takeover (the rest of the 40-file set).
-#[tokio::test]
-async fn a_deposed_writer_stops_at_the_next_chunk_boundary() {
-    let inner = Arc::new(MemoryStore::new());
-    let dir = tempfile::tempdir().unwrap();
-    let mut cfg = cfg_for(dir.path());
-    // The UPLOAD knob, not the read one: this test is about the upload
-    // chunk boundary, and chunk = upload_fanout * UPLOAD_CHUNK_WAVES.
-    cfg.upload_fanout = 1; // one chunk = 16 files, uploads strictly sequential
-    let hooked = Arc::new(DeposeOnNthPut {
-        inner: inner.clone(),
-        epoch_key: cfg.epoch_key(),
-        at: 4,
-        puts: Default::default(),
-        deposed: Default::default(),
-        puts_after: Default::default(),
-    });
-    let state = SyncerState::open(cfg.state_dir()).unwrap();
-    let mut a = Syncer {
-        store: hooked.clone() as Arc<dyn ObjectStore>,
-        cfg,
-        state,
-        lease: None,
-        noted_not_regular: Default::default(),
-    };
-    assert!(claim_until_held(&mut a, 3).await);
-    a.checkout().await.unwrap();
-    for i in 0..40 {
-        write(dir.path(), &format!("f{i:02}.txt"), &format!("body-{i}"));
-    }
-
-    let err = a
-        .run_barrier()
-        .await
-        .expect_err("a writer deposed mid-barrier completed its barrier");
-    assert!(matches!(err, LeanError::Fenced(_)), "expected Fenced, got: {err}");
-
-    use std::sync::atomic::Ordering::SeqCst;
-    assert!(hooked.deposed.load(SeqCst), "the fixture never deposed the writer — this run proves nothing");
-    let after = hooked.puts_after.load(SeqCst);
-    assert!(
-        after > 0,
-        "no PUT landed after the deposal: the barrier's entry check caught it, not the chunk boundary"
-    );
-    assert!(
-        after < 16,
-        "the deposed writer issued {after} more data PUTs after its takeover — it ran past the \
-         chunk boundary (16 files at fanout 1) instead of fencing there"
-    );
-    assert!(
-        manifest::load(inner.as_ref(), &a.cfg).await.unwrap().is_none(),
-        "the straggler installed a manifest after being deposed"
-    );
-}
-
 /// AUDIT 2026-09-03, finding 2. The renew CAS is If-Match on OUR token;
 /// when our own renew LANDED but its response was lost, the next renew
 /// 412s on the stale token and the holder read that as a deposal:
@@ -5726,8 +5261,6 @@ async fn a_lost_renew_response_does_not_self_fence() {
         Some(cell.as_str()),
         "the holder did not adopt the cell's token after its lost renew"
     );
-    a.verify_not_deposed_pub().await.unwrap();
-
     // Control: a GENUINE takeover still fences the old holder.
     let dir_b = tempfile::tempdir().unwrap();
     let mut b = syncer(&store, dir_b.path()).await;
@@ -6395,6 +5928,9 @@ impl ObjectStore for ComposeWithoutChecksum {
     async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
         self.0.delete(key).await
     }
+    async fn delete_if_match(&self, key: &str, etag: &str) -> flint_store::StoreResult<()> {
+        self.0.delete_if_match(key, etag).await
+    }
     async fn head_version(
         &self,
         key: &str,
@@ -6461,6 +5997,22 @@ impl ObjectStore for ComposeWithoutChecksum {
         lease: &flint_store::EpochLease,
     ) -> flint_store::StoreResult<()> {
         self.0.epoch_release(key, lease).await
+    }
+    async fn epoch_handoff(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+        echo: Option<&str>,
+    ) -> flint_store::StoreResult<()> {
+        self.0.epoch_handoff(key, lease, echo).await
+    }
+    async fn epoch_enqueue(
+        &self,
+        key: &str,
+        observed: &flint_store::EpochState,
+        holder_id: &str,
+    ) -> flint_store::StoreResult<flint_store::EpochState> {
+        self.0.epoch_enqueue(key, observed, holder_id).await
     }
 }
 
@@ -6819,8 +6371,8 @@ async fn a_rescope_to_none_holds_everything_and_clears_the_scope() {
 /// `verbs::run_verb` — the single door `bin/flint_sync.rs` sends every
 /// one-shot verb through, ROUTING included — rather than through
 /// `checkout_scoped`, which never claimed anything and so could never
-/// have failed. Flip `Step::Checkout` in `installs_nothing_in_the_\
-/// bucket` and this leg goes red.
+/// have failed. Flip `Step::Checkout` in `holds_the_fence_throughout`
+/// and this leg goes red.
 ///
 /// The TIMEOUT is the assertion, not a safety net. `claim` polls a
 /// standing foreign lease every 10 seconds and supersedes only after
@@ -6841,6 +6393,9 @@ async fn a_checkout_does_not_wait_out_a_standing_lease() {
     write(pdir.path(), "README.md", "the real readme");
     write(pdir.path(), "src/main.rs", "fn main() {}");
     publisher.run_barrier().await.unwrap();
+    // The barrier handed the cell on; hold it again, as a publisher
+    // inside its commit section does.
+    assert!(claim_until_held(&mut publisher, 3).await);
     let held = publisher.lease.clone().expect("the publisher holds a lease");
 
     // The reader: a different pod, a different tree, no lease.
@@ -7036,6 +6591,9 @@ impl ObjectStore for PublishMidCheckout {
     }
     async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
         self.inner.delete(key).await
+    }
+    async fn delete_if_match(&self, key: &str, etag: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete_if_match(key, etag).await
     }
     async fn head_version(
         &self,
@@ -7409,6 +6967,9 @@ impl ObjectStore for AttestsNoChecksum {
     async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
         self.0.delete(key).await
     }
+    async fn delete_if_match(&self, key: &str, etag: &str) -> flint_store::StoreResult<()> {
+        self.0.delete_if_match(key, etag).await
+    }
     async fn head_version(
         &self,
         key: &str,
@@ -7475,6 +7036,22 @@ impl ObjectStore for AttestsNoChecksum {
         lease: &flint_store::EpochLease,
     ) -> flint_store::StoreResult<()> {
         self.0.epoch_release(key, lease).await
+    }
+    async fn epoch_handoff(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+        echo: Option<&str>,
+    ) -> flint_store::StoreResult<()> {
+        self.0.epoch_handoff(key, lease, echo).await
+    }
+    async fn epoch_enqueue(
+        &self,
+        key: &str,
+        observed: &flint_store::EpochState,
+        holder_id: &str,
+    ) -> flint_store::StoreResult<flint_store::EpochState> {
+        self.0.epoch_enqueue(key, observed, holder_id).await
     }
 }
 
@@ -8155,6 +7732,9 @@ impl ObjectStore for FailPutTo {
     async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
         self.0.delete(key).await
     }
+    async fn delete_if_match(&self, key: &str, etag: &str) -> flint_store::StoreResult<()> {
+        self.0.delete_if_match(key, etag).await
+    }
     async fn head_version(
         &self,
         key: &str,
@@ -8222,6 +7802,22 @@ impl ObjectStore for FailPutTo {
     ) -> flint_store::StoreResult<()> {
         self.0.epoch_release(key, lease).await
     }
+    async fn epoch_handoff(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+        echo: Option<&str>,
+    ) -> flint_store::StoreResult<()> {
+        self.0.epoch_handoff(key, lease, echo).await
+    }
+    async fn epoch_enqueue(
+        &self,
+        key: &str,
+        observed: &flint_store::EpochState,
+        holder_id: &str,
+    ) -> flint_store::StoreResult<flint_store::EpochState> {
+        self.0.epoch_enqueue(key, observed, holder_id).await
+    }
 }
 
 /// The pod-REPLACEMENT window the early drop left open. A HITL write
@@ -8268,11 +7864,12 @@ async fn a_consumed_hitl_write_survives_pod_replacement_before_the_cas() {
     drop(a);
     drop(dir_a);
 
-    // The replacement: fresh emptyDir, fresh identity, takeover.
+    // The replacement: fresh emptyDir, fresh identity. The failed commit
+    // handed the cell on (a commit that fails for any reason but a fence
+    // releases), so there is nothing to wait out.
     let dir_b = tempfile::tempdir().unwrap();
     let mut b = syncer(&inner, dir_b.path()).await;
-    assert!(!claim_until_held(&mut b, 3).await);
-    assert!(claim_until_held(&mut b, 10).await, "takeover");
+    assert!(claim_until_held(&mut b, 3).await, "a released cell is claimable at once");
     b.checkout().await.unwrap();
     assert!(read(dir_b.path(), "ui/upload.txt").is_none(), "not cited, so not materialised");
     let r = b.run_barrier().await.unwrap();
@@ -8307,7 +7904,7 @@ async fn an_invalid_sync_scope_is_acked_refused_and_never_wedges_publish() {
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     let posture = a.sentinel_preflight().unwrap();
-    a.write_capabilities(&posture, false).unwrap();
+    a.write_capabilities(&posture).unwrap();
 
     touch_sentinel(dir.path(), control::SYNC, r#"{"nonce":"s1","scope":[]}"#);
     a.sentinel_tick().await.expect("an invalid scope is the agent's error, not the syncer's");
@@ -8346,7 +7943,7 @@ async fn a_refused_sync_pending_does_not_stop_the_cadence_barrier() {
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     let posture = a.sentinel_preflight().unwrap();
-    a.write_capabilities(&posture, false).unwrap();
+    a.write_capabilities(&posture).unwrap();
 
     touch_sentinel(dir.path(), control::SYNC, r#"{"nonce":"s1","scope":["../escape"]}"#);
     assert!(a.consume_sentinel(Verb::Sync).unwrap());
@@ -8402,7 +7999,7 @@ async fn a_publish_ack_carries_the_boundarys_conflict_records() {
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     let posture = a.sentinel_preflight().unwrap();
-    a.write_capabilities(&posture, false).unwrap();
+    a.write_capabilities(&posture).unwrap();
     write(dir.path(), "shared.txt", "v1");
     a.run_barrier().await.unwrap();
 
@@ -8521,30 +8118,6 @@ async fn an_orphaned_consume_temp_is_never_published() {
     );
 }
 
-/// gated-7. AGENTS.md: "`reason` says why verbs are off". A fenced marker
-/// carried no `reason` at all.
-#[tokio::test]
-async fn a_fenced_marker_says_why() {
-    let store = Arc::new(MemoryStore::new());
-    let dir_a = tempfile::tempdir().unwrap();
-    let mut a = syncer(&store, dir_a.path()).await;
-    assert!(claim_until_held(&mut a, 3).await);
-    a.checkout().await.unwrap();
-    let posture = a.sentinel_preflight().unwrap();
-    a.write_capabilities(&posture, false).unwrap();
-    touch_sentinel(dir_a.path(), control::PUBLISH, r#"{"nonce":"n"}"#);
-    assert!(a.consume_sentinel(Verb::Publish).unwrap());
-    let dir_b = tempfile::tempdir().unwrap();
-    let mut b = syncer(&store, dir_b.path()).await;
-    assert!(claim_until_held(&mut b, 10).await);
-    assert!(matches!(lease::claim_step(&mut a).await.unwrap(), lease::ClaimOutcome::Waiting { .. }));
-    assert!(a.refuse_what_this_incarnation_can_never_honor().await.unwrap());
-    let caps = a.read_capabilities().expect("no marker");
-    assert_eq!(caps.state, "fenced");
-    let reason = caps.reason.expect("a fenced marker must say why");
-    assert!(reason.contains("epoch"), "the reason names no fencer: {reason}");
-}
-
 /// lease-2. Adopting a lost-renew token wrote nothing, so the cell's
 /// token stood still for a full takeover threshold and a waiting
 /// challenger could depose a live holder whose next write was late. The
@@ -8563,7 +8136,9 @@ async fn adopting_a_lost_renew_token_moves_the_cell() {
     let now = store.epoch_read(&key).await.unwrap().unwrap().token;
     assert_ne!(now, landed, "the adoption wrote nothing: a challenger's quiet count keeps climbing");
     assert_eq!(a.lease.as_ref().map(|l| l.token.as_str()), Some(now.as_str()), "the holder's token is not the cell's");
-    a.verify_not_deposed_pub().await.unwrap();
+    let cell = store.epoch_read(&key).await.unwrap().unwrap();
+    assert_eq!(cell.holder_id, a.lease.as_ref().unwrap().holder_id);
+    assert!(!cell.released);
 }
 
 // ── protocol review 2026-09-12: reproductions needing a store that can act
@@ -8581,6 +8156,14 @@ struct Hooks {
     /// Run ONCE, after `get_whole` fetched a key ending with the suffix and
     /// before the body is returned to the syncer.
     before_get_return: std::sync::Mutex<Option<(String, Hook)>>,
+    /// Run ONCE, before the first DELETE (conditional or not) of a key
+    /// ending with the suffix — the gap between a GC's HEAD and its
+    /// delete, where a peer's lease-free upload can land.
+    before_delete: std::sync::Mutex<Option<(String, Hook)>>,
+    /// Run ONCE, after `head` answered for a key ending with the suffix
+    /// and before the answer is returned — the moment an upload's 412
+    /// arm decides to adopt what it saw.
+    after_head: std::sync::Mutex<Option<(String, Hook)>>,
     /// `compose_generation` delegates (the object LANDS) and then reports a
     /// torn response, once.
     compose_err_once: std::sync::atomic::AtomicBool,
@@ -8602,6 +8185,12 @@ impl Hooked {
     }
     fn before_get_return(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {
         *self.1.before_get_return.lock().unwrap() = Some((key.to_string(), Box::new(f)));
+    }
+    fn before_delete(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {
+        *self.1.before_delete.lock().unwrap() = Some((key.to_string(), Box::new(f)));
+    }
+    fn after_head(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {
+        *self.1.after_head.lock().unwrap() = Some((key.to_string(), Box::new(f)));
     }
 }
 
@@ -8669,7 +8258,11 @@ impl ObjectStore for Hooked {
         r
     }
     async fn head(&self, key: &str) -> flint_store::StoreResult<flint_store::ObjectMeta> {
-        self.0.head(key).await
+        let r = self.0.head(key).await;
+        if let Some(h) = take_hook(&self.1.after_head, key) {
+            h();
+        }
+        r
     }
     async fn get_whole(
         &self,
@@ -8701,7 +8294,16 @@ impl ObjectStore for Hooked {
         self.0.list(prefix).await
     }
     async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
+        if let Some(h) = take_hook(&self.1.before_delete, key) {
+            h();
+        }
         self.0.delete(key).await
+    }
+    async fn delete_if_match(&self, key: &str, etag: &str) -> flint_store::StoreResult<()> {
+        if let Some(h) = take_hook(&self.1.before_delete, key) {
+            h();
+        }
+        self.0.delete_if_match(key, etag).await
     }
     async fn head_version(
         &self,
@@ -8774,6 +8376,22 @@ impl ObjectStore for Hooked {
     ) -> flint_store::StoreResult<()> {
         self.0.epoch_release(key, lease).await
     }
+    async fn epoch_handoff(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+        echo: Option<&str>,
+    ) -> flint_store::StoreResult<()> {
+        self.0.epoch_handoff(key, lease, echo).await
+    }
+    async fn epoch_enqueue(
+        &self,
+        key: &str,
+        observed: &flint_store::EpochState,
+        holder_id: &str,
+    ) -> flint_store::StoreResult<flint_store::EpochState> {
+        self.0.epoch_enqueue(key, observed, holder_id).await
+    }
 }
 
 /// atomicity-1 (CRITICAL). The manifest entry carried the SCANNED size
@@ -8793,15 +8411,20 @@ async fn the_manifest_cites_the_uploaded_length_not_the_scanned_one() {
     a.cfg.whole_put_max = 1 << 20;
     a.cfg.range_get_min_bytes = 1 << 20;
     a.cfg.range_get_chunk_bytes = 1 << 20;
-    assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     let path = dir.path().join("ckpt.bin");
     std::fs::write(&path, vec![7u8; 4 << 20]).unwrap();
 
-    // Between the scan and the upload — the window-open PUT on the inbox
-    // cell sits exactly there — the writer keeps streaming.
+    // Between the scan and the upload's own stat the writer keeps
+    // streaming. Nothing touches the store in that gap any more (the
+    // window-open PUT the hook used to ride now opens in the commit
+    // section, after the uploads), so the growth rides the PUT of a
+    // path that uploads FIRST: with the fan-out at one, uploads run in
+    // path order, and ckpt.bin's stat comes after aaa-first.txt's PUT.
+    write(dir.path(), "aaa-first.txt", "uploads before ckpt.bin");
+    a.cfg.upload_fanout = 1;
     let grow = path.clone();
-    hooked.before_put(&a.cfg.inbox_key(), move || {
+    hooked.before_put(&a.cfg.file_key("aaa-first.txt"), move || {
         use std::io::Write;
         std::fs::OpenOptions::new().append(true).open(&grow).unwrap().write_all(&vec![9u8; 2 << 20]).unwrap();
     });
@@ -8906,14 +8529,20 @@ async fn the_upload_refuses_a_symlink_swapped_in_after_the_scan() {
     let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
     let dir = tempfile::tempdir().unwrap();
     let mut a = hooked_syncer(&hooked, dir.path());
-    assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("secret"), "SECRET").unwrap();
     write(dir.path(), "cfg.yaml", "harmless");
+    // The swap lands between the scan and cfg.yaml's stat. Nothing
+    // touches the store in that gap any more (the window-open PUT the
+    // hook used to ride now opens in the commit section, after the
+    // uploads), so it rides the PUT of a path that uploads FIRST: with
+    // the fan-out at one, uploads run in path order.
+    write(dir.path(), "aaa-first.txt", "uploads before cfg.yaml");
+    a.cfg.upload_fanout = 1;
     let p = dir.path().join("cfg.yaml");
     let target = outside.path().join("secret");
-    hooked.before_put(&a.cfg.inbox_key(), move || {
+    hooked.before_put(&a.cfg.file_key("aaa-first.txt"), move || {
         std::fs::remove_file(&p).unwrap();
         std::os::unix::fs::symlink(&target, &p).unwrap();
     });
@@ -8938,98 +8567,38 @@ async fn a_lost_acquire_response_still_rotates() {
     let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
     let dir_a = tempfile::tempdir().unwrap();
     let mut a = hooked_syncer(&hooked, dir_a.path());
-    assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     write(dir_a.path(), "f.txt", "x");
     a.run_barrier().await.unwrap();
     let seq0 = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.seq;
+    // A holds a commit section and stalls in it.
+    assert!(claim_until_held(&mut a, 3).await);
 
     // The challenger polls the quiet cell up to the takeover threshold.
     let dir_b = tempfile::tempdir().unwrap();
     let mut b = hooked_syncer(&hooked, dir_b.path());
     loop {
-        match lease::claim_step(&mut b).await.unwrap() {
-            lease::ClaimOutcome::Waiting { quiet_polls } if quiet_polls >= 5 => break,
+        match lease::claim_step(&mut b, true).await.unwrap() {
+            lease::ClaimOutcome::Waiting { quiet_polls, .. } if quiet_polls >= 5 => break,
             lease::ClaimOutcome::Waiting { .. } => {}
             lease::ClaimOutcome::Claimed(_) => panic!("fixture: claimed before the threshold"),
         }
     }
     // The acquiring step: the acquire lands, the response is lost.
     hooked.1.acquire_err_once.store(true, std::sync::atomic::Ordering::SeqCst);
-    assert!(lease::claim_step(&mut b).await.is_err(), "fixture: the lost response did not surface");
+    assert!(lease::claim_step(&mut b, true).await.is_err(), "fixture: the lost response did not surface");
     let cell = inner.epoch_read(&a.cfg.epoch_key()).await.unwrap().unwrap();
     let b_id = b.state.load_incarnation().unwrap().unwrap().holder_id;
     assert_eq!(cell.holder_id, b_id, "fixture: the acquire did not land");
 
     // The retry (a container restart) must still rotate the manifest.
-    let outcome = lease::claim_step(&mut b).await.unwrap();
+    let outcome = lease::claim_step(&mut b, true).await.unwrap();
     assert!(matches!(outcome, lease::ClaimOutcome::Claimed(_)), "the retry did not claim");
     let seq1 = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.seq;
     assert!(
         seq1 > seq0,
         "a lost acquire response skipped the takeover rotation (seq {seq0} → {seq1}): a straggler's CAS still matches"
     );
-}
-
-/// gated-3 / lease-6. A restarted claimant waiting behind a live holder
-/// refused only a CONSUMED pending; a raw `.flint/publish` standing in
-/// its tree (touched before the crash, or during the wait against the
-/// predecessor's `live` marker) was consumed by nobody and answered by
-/// nobody.
-#[tokio::test]
-async fn a_waiting_claimant_refuses_a_raw_touch_and_flips_the_marker() {
-    let store = Arc::new(MemoryStore::new());
-    let dir_a = tempfile::tempdir().unwrap();
-    let mut a = syncer(&store, dir_a.path()).await;
-    assert!(claim_until_held(&mut a, 3).await);
-    a.checkout().await.unwrap();
-
-    // B's tree survived its crash: a live marker, and a touch nobody consumed.
-    let dir_b = tempfile::tempdir().unwrap();
-    let mut b = syncer(&store, dir_b.path()).await;
-    b.write_capabilities(&super::control::SentinelPosture { enabled: true, reason: None }, false).unwrap();
-    touch_sentinel(dir_b.path(), control::PUBLISH, r#"{"nonce":"stranded"}"#);
-
-    assert!(matches!(lease::claim_step(&mut b).await.unwrap(), lease::ClaimOutcome::Waiting { .. }));
-    assert!(
-        b.refuse_what_this_incarnation_can_never_honor().await.unwrap(),
-        "nothing refused: the raw touch was not consumed"
-    );
-    let ack = b.read_ack(Verb::Publish).expect("the agent is still stranded: no ack");
-    assert_eq!(ack.status, "refused-fenced");
-    assert!(ack.nonces.contains(&"stranded".to_string()));
-    assert_eq!(b.read_capabilities().unwrap().state, "fenced", "the marker still says live");
-}
-
-/// lease-1. On `Fenced`, the settle (refused acks + fenced marker) ran
-/// under `?`, so a settle that could not write — ENOSPC on `.flint/` is
-/// the routine one — REPLACED the fence with an I/O error; the run loop
-/// retried a leaseless syncer forever behind a `live` marker.
-#[tokio::test]
-async fn a_fence_whose_settle_fails_is_still_a_fence() {
-    use std::os::unix::fs::PermissionsExt;
-    let store = Arc::new(MemoryStore::new());
-    let dir_a = tempfile::tempdir().unwrap();
-    let mut a = syncer(&store, dir_a.path()).await;
-    a.cfg.sentinel_min_interval_secs = 0;
-    assert!(claim_until_held(&mut a, 3).await);
-    a.checkout().await.unwrap();
-    let posture = a.sentinel_preflight().unwrap();
-    a.write_capabilities(&posture, false).unwrap();
-    touch_sentinel(dir_a.path(), control::PUBLISH, r#"{"nonce":"n"}"#);
-    assert!(a.consume_sentinel(Verb::Publish).unwrap());
-
-    let dir_b = tempfile::tempdir().unwrap();
-    let mut b = syncer(&store, dir_b.path()).await;
-    assert!(claim_until_held(&mut b, 10).await, "takeover");
-
-    // The settle cannot write.
-    let control = dir_a.path().join(super::CONTROL_DIR);
-    std::fs::set_permissions(&control, std::fs::Permissions::from_mode(0o500)).unwrap();
-    let err = a.sentinel_tick().await.expect_err("a deposed holder honoured a touch");
-    std::fs::set_permissions(&control, std::fs::Permissions::from_mode(0o700)).unwrap();
-    assert!(matches!(err, LeanError::Fenced(_)), "the fence was replaced by the settle's error: {err}");
-    assert!(a.lease.is_none(), "a fenced holder must drop its lease");
 }
 
 /// inbox-1. A 412 against a version this syncer did not write "parked"
@@ -9110,7 +8679,7 @@ async fn a_boundary_with_a_standing_park_is_partial_and_the_drain_does_not_attes
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
     let posture = a.sentinel_preflight().unwrap();
-    a.write_capabilities(&posture, false).unwrap();
+    a.write_capabilities(&posture).unwrap();
     write(dir.path(), "dirty.txt", "published v1");
     a.run_barrier().await.unwrap();
 
@@ -9149,4 +8718,784 @@ async fn a_boundary_with_a_standing_park_is_partial_and_the_drain_does_not_attes
         !a.cfg.state_dir().join(super::state::DRAINED).exists(),
         "drained.json written: the node will remove a tree whose only copy of dirty.txt is on it"
     );
+}
+
+// ── the per-barrier lease (design 2026-09-13 §4): the falsifiers L1–L8
+// in their local form, each with the control that makes it non-vacuous ──
+
+/// L1/L2 — two writers on one workspace both publish, at once, with
+/// neither waiting for the other's LIFE: each barrier claims the fence
+/// for its commit section and hands it on. Control: the life-long lease
+/// this replaces made the second writer wait forever (`verbs.rs`
+/// 2026-09-11 named it a deadlock).
+#[tokio::test]
+async fn two_writers_publish_without_waiting_for_each_other() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    b.checkout().await.unwrap();
+    write(dir_a.path(), "a/one.txt", "from A");
+    write(dir_b.path(), "b/one.txt", "from B");
+    // Both barriers in flight together: whoever claims second queues
+    // behind the first's commit section and follows it.
+    let (ra, rb) = tokio::join!(a.run_barrier(), b.run_barrier());
+    let (ra, rb) = (ra.expect("A's barrier"), rb.expect("B's barrier"));
+    assert_eq!(ra.uploaded, vec!["a/one.txt"]);
+    assert_eq!(rb.uploaded, vec!["b/one.txt"]);
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("a/one.txt") && m.entries.contains_key("b/one.txt"), "{:?}", m.entries.keys());
+    // Nobody holds the cell between barriers, and it advanced once per
+    // commit section.
+    let cell = store.epoch_read(&a.cfg.epoch_key()).await.unwrap().unwrap();
+    assert!(cell.released && cell.handoff.is_none() && cell.waiters.is_empty(), "{cell:?}");
+    assert_eq!(cell.epoch, 2, "one epoch per barrier");
+    assert!(a.lease.is_none() && b.lease.is_none());
+}
+
+/// L3 — disjoint edits cross: what B published reaches A's tree at A's
+/// next consume, and vice versa, with nothing but the ordinary
+/// merge → inbox → consume path (`report.foreign_queued` names it).
+#[tokio::test]
+async fn disjoint_edits_cross_at_the_next_consume() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    b.checkout().await.unwrap();
+    write(dir_a.path(), "a/one.txt", "from A");
+    write(dir_b.path(), "b/one.txt", "from B");
+    a.run_barrier().await.unwrap();
+    let rb = b.run_barrier().await.unwrap();
+    assert_eq!(rb.foreign_queued, 1, "B's merge did not preserve A's entry as foreign");
+    assert!(read(dir_b.path(), "a/one.txt").is_none(), "the merge alone must not touch B's tree");
+    let rb2 = b.run_barrier().await.unwrap();
+    assert_eq!(rb2.consumed, 1, "B's next consume did not integrate A's file");
+    assert_eq!(read(dir_b.path(), "a/one.txt").as_deref(), Some("from A"));
+    let ra2 = a.run_barrier().await.unwrap();
+    assert_eq!(ra2.foreign_queued, 1);
+    let ra3 = a.run_barrier().await.unwrap();
+    assert_eq!(ra3.consumed, 1);
+    assert_eq!(read(dir_a.path(), "b/one.txt").as_deref(), Some("from B"));
+}
+
+/// L4 — two writers edit ONE path: the later commit is current, the
+/// earlier version is preserved in the bucket and named by a record on
+/// the later writer, and the earlier writer's tree carries the later
+/// version after its consume. Nothing is lost and nothing is silent.
+#[tokio::test]
+async fn a_same_path_edit_is_preserved_never_lost() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "x.txt", "seed");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("seed"));
+    write(dir_a.path(), "x.txt", "A's edit");
+    backdate_baseline(&a, "x.txt");
+    write(dir_b.path(), "x.txt", "B's edit, longer");
+    backdate_baseline(&b, "x.txt");
+    a.run_barrier().await.unwrap();
+    let rb = b.run_barrier().await.unwrap();
+    assert!(rb.parked.is_empty(), "B's upload parked instead of preserving: {rb:?}");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let cited = &m.entries["x.txt"];
+    let (_, body) = store.get_whole(&cited.key, Some(&cited.etag)).await.unwrap();
+    assert_eq!(&body[..], b"B's edit, longer", "the later commit is current");
+    let rec = b
+        .state
+        .load_conflicts()
+        .unwrap()
+        .into_iter()
+        .find(|c| c.path == "x.txt" && c.kind.starts_with("upload-412-preserved"))
+        .expect("B wrote no record of the version it superseded");
+    let preserved = rec.preserved_key.expect("the record names no preserved key");
+    let (_, kept) = store.get_whole(&preserved, None).await.unwrap();
+    assert_eq!(&kept[..], b"A's edit", "A's bytes are not where the record says");
+    // A's next consume brings B's version onto A's now-clean path.
+    a.run_barrier().await.unwrap();
+    a.run_barrier().await.unwrap();
+    assert_eq!(read(dir_a.path(), "x.txt").as_deref(), Some("B's edit, longer"));
+}
+
+/// L5 — the ticket is load-bearing. A released cell is reserved for the
+/// queue HEAD: a later waiter that polls first does not get it. Delete
+/// the `handoff` check in `claim_step` and C claims here.
+#[tokio::test]
+async fn the_ticket_hands_the_fence_to_the_queue_head() {
+    let store = Arc::new(MemoryStore::new());
+    let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+    let mut a = syncer(&store, dirs[0].path()).await;
+    let mut b = syncer(&store, dirs[1].path()).await;
+    let mut c = syncer(&store, dirs[2].path()).await;
+    let id = |sc: &Syncer| lease::incarnation(sc).unwrap().holder_id;
+    assert!(claim_until_held(&mut a, 1).await);
+    assert!(matches!(lease::claim_step(&mut b, true).await.unwrap(), lease::ClaimOutcome::Waiting { .. }));
+    assert!(matches!(lease::claim_step(&mut c, true).await.unwrap(), lease::ClaimOutcome::Waiting { .. }));
+    let cell = store.epoch_read(&a.cfg.epoch_key()).await.unwrap().unwrap();
+    assert_eq!(cell.waiters, vec![id(&b), id(&c)], "waiters queue in arrival order");
+    lease::release(&mut a).await.unwrap();
+    let cell = store.epoch_read(&a.cfg.epoch_key()).await.unwrap().unwrap();
+    assert!(cell.released);
+    assert_eq!(cell.handoff.as_deref(), Some(id(&b).as_str()), "the handoff names the head");
+    assert_eq!(cell.waiters, vec![id(&c)]);
+    // C polls first and is refused: the cell is B's.
+    assert!(
+        matches!(lease::claim_step(&mut c, true).await.unwrap(), lease::ClaimOutcome::Waiting { .. }),
+        "a later waiter took a cell reserved for the queue head"
+    );
+    assert!(matches!(lease::claim_step(&mut b, true).await.unwrap(), lease::ClaimOutcome::Claimed(_)));
+    let cell = store.epoch_read(&a.cfg.epoch_key()).await.unwrap().unwrap();
+    assert_eq!((cell.holder_id.as_str(), cell.released), (id(&b).as_str(), false));
+    assert_eq!(cell.waiters, vec![id(&c)], "the queue survives the handoff");
+    lease::release(&mut b).await.unwrap();
+    assert!(matches!(lease::claim_step(&mut c, true).await.unwrap(), lease::ClaimOutcome::Claimed(_)));
+    let cell = store.epoch_read(&a.cfg.epoch_key()).await.unwrap().unwrap();
+    assert_eq!(cell.epoch, 3);
+    assert!(cell.waiters.is_empty() && cell.handoff.is_none());
+}
+
+/// L6a — a reservation whose holder died is skipped after the quiet
+/// polls, or the cell would be wedged forever by a waiter that crashed
+/// between enqueue and claim.
+#[tokio::test]
+async fn a_dead_handoff_is_skipped_after_the_quiet_polls() {
+    let store = Arc::new(MemoryStore::new());
+    let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+    let mut a = syncer(&store, dirs[0].path()).await;
+    let mut b = syncer(&store, dirs[1].path()).await;
+    let mut c = syncer(&store, dirs[2].path()).await;
+    assert!(claim_until_held(&mut a, 1).await);
+    assert!(matches!(lease::claim_step(&mut b, true).await.unwrap(), lease::ClaimOutcome::Waiting { .. }));
+    lease::release(&mut a).await.unwrap();
+    drop(b); // B dies holding the reservation.
+    assert!(!claim_until_held(&mut c, lease::HANDOFF_QUIET_POLLS).await, "C took a reservation that was not yet quiet");
+    assert!(claim_until_held(&mut c, 1).await, "C never took the dead reservation");
+    let cell = store.epoch_read(&a.cfg.epoch_key()).await.unwrap().unwrap();
+    assert_eq!(cell.holder_id, lease::incarnation(&c).unwrap().holder_id);
+    assert!(cell.waiters.is_empty() && cell.handoff.is_none());
+}
+
+/// L6b — a holder that dies INSIDE its commit section is deposed after
+/// the quiet polls by the next writer's barrier, which then publishes;
+/// the deposed holder's own fence (renew) says so and its next barrier
+/// claims again. Control: below the threshold the waiter does not depose.
+#[tokio::test]
+async fn a_dead_holder_mid_commit_is_deposed_by_the_next_barrier() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    b.checkout().await.unwrap();
+    assert!(claim_until_held(&mut a, 1).await); // A: mid-commit, stalled
+    write(dir_b.path(), "b.txt", "B publishes past a dead holder");
+    assert!(!claim_until_held(&mut b, 3).await, "the waiter deposed a holder below the quiet threshold");
+    let rb = b.run_barrier().await.expect("B's barrier deposes the dead holder and publishes");
+    assert_eq!(rb.uploaded, vec!["b.txt"]);
+    let err = lease::renew(&mut a).await.unwrap_err();
+    assert!(matches!(err, LeanError::Fenced(_)), "{err}");
+    write(dir_a.path(), "a.txt", "A, after being deposed");
+    a.run_barrier().await.expect("a deposed writer's next barrier claims again");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("a.txt") && m.entries.contains_key("b.txt"));
+}
+
+/// L6c — a holder deposed INSIDE its commit section abandons that
+/// barrier and nothing else: no manifest of its is installed, the
+/// pending sentinel stands, the marker stays live, and the next tick
+/// honours it. (`refused-fenced` and the fenced marker died with the
+/// life-long lease.) The deposal lands between A's CAS attempt and its
+/// pointer PUT, through the store hook.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_holder_deposed_mid_commit_abandons_the_barrier() {
+    let inner = Arc::new(MemoryStore::new());
+    let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = hooked_syncer(&hooked, dir_a.path());
+    a.cfg.sentinel_min_interval_secs = 0;
+    a.checkout().await.unwrap();
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture).unwrap();
+    write(dir_a.path(), "seed.txt", "seed");
+    a.run_barrier().await.unwrap();
+    let seq0 = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.seq;
+
+    write(dir_a.path(), "work.txt", "v1");
+    touch_sentinel(dir_a.path(), control::PUBLISH, r#"{"nonce":"n1"}"#);
+    assert!(a.consume_sentinel(Verb::Publish).unwrap(), "fixture: the touch was not consumed");
+    assert!(matches!(a.sentinel_due().unwrap(), super::sentinel::Due::Ready), "fixture: not due");
+    // Inside A's commit section, before its pointer CAS: a rival deposes
+    // it (the cell moves, the manifest rotates).
+    let (rival_store, cfg) = (inner.clone(), a.cfg.clone());
+    hooked.before_put(&a.cfg.current_key(), move || {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let key = cfg.epoch_key();
+                let seen = rival_store.epoch_read(&key).await.unwrap().unwrap();
+                assert!(!seen.released, "fixture: A is not holding at its CAS");
+                let l = rival_store.epoch_acquire(&key, "rival", Some(&seen)).await.unwrap();
+                manifest::rotate_for_takeover(rival_store.as_ref(), &cfg, l.epoch).await.unwrap();
+            })
+        });
+    });
+    // The tick swallows the fence like any other failed honor: the
+    // pending is kept and retried, nothing is acked, nothing exits.
+    let acks = a.sentinel_tick().await.expect("a fence is a retry, not an error the loop sees");
+    assert!(acks.is_empty(), "an ack was written for an abandoned barrier: {acks:?}");
+    assert!(a.lease.is_none());
+    assert!(a.load_pending(Verb::Publish).unwrap().is_some(), "the pending was dropped by the fence");
+    assert!(a.read_ack(Verb::Publish).is_none(), "an ack was written for an abandoned barrier");
+    let caps = a.read_capabilities().unwrap();
+    assert_eq!(caps.state, "live");
+    assert!(!caps.verbs.is_empty(), "the marker stopped advertising verbs");
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(!m.entries.contains_key("work.txt"), "the abandoned barrier's manifest landed");
+    assert_eq!(m.seq, seq0 + 1, "the rotation, and nothing after it");
+
+    // The rival never renews: A's next tick deposes it in turn and
+    // honours the standing touch with a fresh claim.
+    let acks = a.sentinel_tick().await.expect("the retry");
+    assert_eq!(acks.len(), 1);
+    assert_eq!(acks[0].status, "ok");
+    assert!(acks[0].nonces.contains(&"n1".to_string()));
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("work.txt"));
+}
+
+/// L7 — readers never touch the cell: a checkout and a sync leave no
+/// epoch cell behind and issue no epoch request at all.
+#[tokio::test]
+async fn readers_never_touch_the_cell() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_w = tempfile::tempdir().unwrap();
+    let mut w = syncer(&store, dir_w.path()).await;
+    w.checkout().await.unwrap();
+    write(dir_w.path(), "f.txt", "published");
+    w.run_barrier().await.unwrap();
+    let epoch_before = store.epoch_read(&w.cfg.epoch_key()).await.unwrap().unwrap().epoch;
+    store.reset_op_counts();
+    let dir_r = tempfile::tempdir().unwrap();
+    let mut r = syncer(&store, dir_r.path()).await;
+    super::verbs::run_verb(&mut r, super::verbs::Step::Checkout).await.unwrap();
+    super::verbs::run_verb(&mut r, super::verbs::Step::Sync).await.unwrap();
+    assert_eq!(read(dir_r.path(), "f.txt").as_deref(), Some("published"));
+    // The shared-prefix diagnostic READS the cell (one GET per verb, to
+    // say whether another product writes here); a reader never WRITES it.
+    let ops = store.op_counts();
+    assert!(
+        !ops.keys().any(|k| k.starts_with("epoch_") && *k != "epoch_read"),
+        "a reader wrote the cell: {ops:?}"
+    );
+    let cell = store.epoch_read(&w.cfg.epoch_key()).await.unwrap().unwrap();
+    assert_eq!(cell.epoch, epoch_before);
+    assert!(cell.released && cell.waiters.is_empty());
+    assert!(r.lease.is_none());
+}
+
+/// L8 — what the fence costs: a no-change boundary touches the cell not
+/// at all (the inbox GET and the pointer GET, exactly as before), and a
+/// publishing one pays two reads and two writes of a few-hundred-byte
+/// cell — claim, verify, handoff — and no heartbeat renewal.
+#[tokio::test]
+async fn the_fence_costs_a_publishing_boundary_four_cell_requests_and_an_idle_one_none() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.checkout().await.unwrap();
+    write(dir.path(), "f.txt", "v1");
+    a.floor_tick().await.unwrap();
+
+    store.reset_op_counts();
+    let idle = a.floor_tick().await.unwrap();
+    assert!(idle.no_change);
+    let ops = store.op_counts();
+    assert!(!ops.keys().any(|k| k.starts_with("epoch_")), "an idle tick touched the cell: {ops:?}");
+    assert_eq!(ops.values().sum::<u64>(), 2, "an idle tick is the inbox and the pointer: {ops:?}");
+
+    write(dir.path(), "f.txt", "v2");
+    backdate_baseline(&a, "f.txt");
+    store.reset_op_counts();
+    let busy = a.floor_tick().await.unwrap();
+    assert_eq!(busy.uploaded, 1);
+    let ops = store.op_counts();
+    assert_eq!(ops.get("epoch_read").copied(), Some(2), "{ops:?}");
+    assert_eq!(ops.get("epoch_acquire").copied(), Some(1), "{ops:?}");
+    assert_eq!(ops.get("epoch_handoff").copied(), Some(1), "{ops:?}");
+    assert_eq!(ops.get("epoch_renew"), None, "{ops:?}");
+    assert_eq!(ops.get("epoch_enqueue"), None, "{ops:?}");
+}
+
+/// The wait is bounded: a holder that never hands the cell on turns
+/// into a FAILED barrier at the deadline, retried at the next floor,
+/// never a hang — and its uploads stand, so the retry adopts them by
+/// flush_uuid instead of re-sending the bytes.
+#[tokio::test]
+async fn a_claim_that_reaches_the_deadline_fails_the_barrier_and_the_retry_adopts_the_uploads() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    b.cfg.claim_deadline_secs = 0;
+    a.checkout().await.unwrap();
+    b.checkout().await.unwrap();
+    assert!(claim_until_held(&mut a, 1).await); // A holds and keeps holding
+    write(dir_b.path(), "b.txt", "B's bytes");
+    let err = b.run_barrier().await.expect_err("the wait must give up at the deadline");
+    assert!(err.to_string().contains("publish fence"), "{err}");
+    assert!(b.lease.is_none());
+    // The bytes are already in the bucket, uncited.
+    let landed = store.head(&b.cfg.file_key("b.txt")).await.expect("the upload did not land before the claim");
+    assert!(manifest::load(store.as_ref(), &b.cfg).await.unwrap().is_none(), "a manifest was installed without the fence");
+    // A hands the cell on; B's retry adopts its own earlier PUT (a 412
+    // on the create, own flush_uuid) and cites it without re-sending.
+    lease::release(&mut a).await.unwrap();
+    let r = b.run_barrier().await.expect("the retry");
+    assert_eq!(r.uploaded, vec!["b.txt"]);
+    let m = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries["b.txt"].etag, landed.etag, "the retry re-sent the bytes instead of citing its own earlier PUT");
+}
+
+/// A restarted container that finds the cell HELD by its own pod
+/// releases it at startup, so the other writers do not wait out a
+/// deposal for a holder that holds nothing in memory.
+#[tokio::test]
+async fn a_restarted_container_releases_the_fence_its_predecessor_left_held() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 1).await);
+    let held = a.lease.clone().unwrap();
+    drop(a); // the container dies mid-commit
+    let mut a2 = syncer(&store, dir_a.path()).await; // same emptyDir, same incarnation
+    assert_eq!(lease::incarnation(&a2).unwrap().holder_id, held.holder_id);
+    lease::release_stale_own(&mut a2).await.unwrap();
+    let cell = store.epoch_read(&a2.cfg.epoch_key()).await.unwrap().unwrap();
+    assert!(cell.released, "the stale hold was not released");
+    assert_eq!(cell.epoch, held.epoch);
+    let mut b = syncer(&store, dir_b.path()).await;
+    assert!(claim_until_held(&mut b, 1).await, "the successor still had to wait");
+}
+
+// ── the per-barrier lease under TWO writers: the model tranche's findings,
+// reproduced against the code (LeanSubtree tranche 6, 2026-09-13) ─────────
+//
+// Uploads hold no lease, so a peer's upload can land inside another
+// writer's commit section. Under the life lease the second writer did not
+// exist, and each of these was unreachable.
+
+/// Run a syncer's barrier on its own OS thread and runtime. The barrier's
+/// future is not provably `Send` (the upload fan-out's higher-ranked
+/// lifetimes), so `tokio::spawn` cannot take it, and `tokio::join!` puts
+/// both writers on ONE task — a hook that parks one writer there parks
+/// both. A thread each keeps a parked writer's peer running.
+fn barrier_on_thread(
+    mut sc: Syncer,
+) -> std::thread::JoinHandle<(Syncer, crate::LeanResult<super::barrier::BarrierReport>)> {
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let r = rt.block_on(sc.run_barrier());
+        (sc, r)
+    })
+}
+
+/// Every citation in the current manifest resolves to its bytes.
+async fn assert_every_citation_resolves(store: &Arc<MemoryStore>, cfg: &LeanConfig, when: &str) {
+    let m = manifest::load(store.as_ref(), cfg).await.unwrap().unwrap().manifest;
+    for (path, e) in &m.entries {
+        if let Err(err) = store.get_whole(&e.key, Some(&e.etag)).await {
+            panic!("{when}: seq {} cites {path} at {} but the object is gone: {err}", m.seq, e.etag);
+        }
+    }
+}
+
+/// Finding 1 (`LeanBarrierLeaseGCUnconditional`): the GC was a HEAD then
+/// an UNCONDITIONAL delete. A peer's upload of the same path landing
+/// between the two was deleted, and the peer's commit then cited it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_upload_between_the_gc_head_and_its_delete_is_not_deleted() {
+    let inner = Arc::new(MemoryStore::new());
+    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = hooked_syncer(&ha, dir_a.path());
+    let mut b = syncer(&inner, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "x.txt", "seed");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("seed"));
+
+    // A deletes x.txt (the two-scan rule withholds the first absence);
+    // B edits it.
+    std::fs::remove_file(dir_a.path().join("x.txt")).unwrap();
+    let first = a.run_barrier().await.unwrap();
+    assert!(first.deleted.is_empty(), "fixture: the first absence was not withheld");
+    write(dir_b.path(), "x.txt", "B's edit, longer");
+    backdate_baseline(&b, "x.txt");
+
+    let key = a.cfg.file_key("x.txt");
+    let seed_etag = inner.head(&key).await.unwrap().etag;
+    let (parked_tx, parked_rx) = std::sync::mpsc::channel::<()>();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let go_rx = std::sync::Mutex::new(go_rx);
+    let parked_tx = std::sync::Mutex::new(parked_tx);
+    // A's GC has HEADed x.txt at the etag it recognizes and not yet sent
+    // its delete: park it there until B's upload has landed.
+    ha.before_delete(&key, move || {
+        parked_tx.lock().unwrap().send(()).unwrap();
+        tokio::task::block_in_place(|| {
+            go_rx.lock().unwrap().recv_timeout(std::time::Duration::from_secs(20)).expect("never released")
+        });
+    });
+    let a_task = barrier_on_thread(a);
+    tokio::task::spawn_blocking(move || {
+        parked_rx.recv_timeout(std::time::Duration::from_secs(20)).expect("A never reached its GC delete")
+    })
+    .await
+    .unwrap();
+    // B's barrier: its upload holds no lease and lands now; its claim
+    // then queues behind A.
+    let b_task = barrier_on_thread(b);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        if inner.head(&key).await.map(|m| m.etag != seed_etag).unwrap_or(false) {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "B's upload never landed");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    go_tx.send(()).unwrap();
+    let ((a, ra), (b, rb)) = tokio::task::spawn_blocking(move || {
+        (a_task.join().expect("A's thread"), b_task.join().expect("B's thread"))
+    })
+    .await
+    .unwrap();
+    ra.expect("A's barrier");
+    rb.expect("B's barrier");
+
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let cited = m.entries.get("x.txt").expect("B's edit is not cited: a modify must beat the delete");
+    let (_, body) = inner
+        .get_whole(&cited.key, Some(&cited.etag))
+        .await
+        .expect("the manifest cites B's edit, and A's GC deleted the object under it");
+    assert_eq!(&body[..], b"B's edit, longer");
+    assert_every_citation_resolves(&inner, &b.cfg, "after both commits").await;
+}
+
+/// Finding 2 (`LeanBarrierLeaseAdoptBlind`): an upload whose 412 found
+/// the same bytes already at the key ADOPTED them — no PUT, no lease.
+/// Before the adopter claimed, the peer's commit uncited the path and its
+/// GC (recognizing that very etag) deleted the object; the adopter's
+/// merge then cited nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adopted_upload_deleted_by_the_peer_before_the_claim_is_not_cited() {
+    let inner = Arc::new(MemoryStore::new());
+    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = hooked_syncer(&ha, dir_a.path());
+    let mut b = syncer(&inner, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "x.txt", "seed");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+
+    // B publishes "same"; A — which has not integrated B's boundary —
+    // writes the SAME bytes, so its upload will 412 on the seed etag and
+    // adopt B's object on the CRC match.
+    write(dir_b.path(), "x.txt", "same");
+    backdate_baseline(&b, "x.txt");
+    b.run_barrier().await.unwrap();
+    write(dir_a.path(), "x.txt", "same");
+    backdate_baseline(&a, "x.txt");
+    // B deletes x.txt; the first absence is withheld.
+    std::fs::remove_file(dir_b.path().join("x.txt")).unwrap();
+    let first = b.run_barrier().await.unwrap();
+    assert!(first.deleted.is_empty(), "fixture: the first absence was not withheld");
+
+    // At the HEAD that licenses A's adopt, B's whole delete barrier runs:
+    // the cell is free (A is still uploading), B's CAS uncites x.txt and
+    // its GC deletes the object A is about to cite.
+    let key = a.cfg.file_key("x.txt");
+    let b_slot = std::sync::Mutex::new(Some(b));
+    let b_done: Arc<std::sync::Mutex<Option<Syncer>>> = Arc::new(std::sync::Mutex::new(None));
+    let b_done_in = b_done.clone();
+    ha.after_head(&key, move || {
+        let mut b = b_slot.lock().unwrap().take().expect("hook ran twice");
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let r = b.run_barrier().await.expect("B's delete barrier");
+                assert!(r.deleted.contains(&"x.txt".to_string()), "fixture: B did not delete x.txt: {r:?}");
+            })
+        });
+        *b_done_in.lock().unwrap() = Some(b);
+    });
+    let ra = a.run_barrier().await.expect("A's barrier");
+    let b = b_done.lock().unwrap().take().expect("fixture: the adopt's HEAD never ran");
+    assert!(inner.head(&key).await.is_err(), "fixture: B's GC did not delete the object");
+    assert_every_citation_resolves(&inner, &a.cfg, "after A's commit").await;
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(!m.entries.contains_key("x.txt"), "A cited an object that is gone: {ra:?}");
+
+    // A's bytes are not lost: the path stays dirty and the next barrier
+    // publishes them for real.
+    let _ = b;
+    a.run_barrier().await.expect("A's retry");
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let cited = m.entries.get("x.txt").expect("A's edit never reached the manifest");
+    let (_, body) = inner.get_whole(&cited.key, Some(&cited.etag)).await.expect("A's retry cites nothing");
+    assert_eq!(&body[..], b"same");
+}
+
+/// A merge-preserved entry lives in the SHARED inbox, and every writer
+/// consumes the inbox. The writer whose merge queued it (B) and the
+/// writer whose change it carries (A) both see it; A's consume finds it
+/// already integrated and drops it. B must still end up with A's bytes.
+#[tokio::test]
+async fn a_peers_change_reaches_the_writer_whose_merge_queued_it_even_if_the_peer_consumes_first() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "x.txt", "seed");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+
+    write(dir_a.path(), "x.txt", "A's v2");
+    backdate_baseline(&a, "x.txt");
+    a.run_barrier().await.unwrap();
+    // B publishes an unrelated path: its merge preserves A's x.txt and
+    // queues it for B's next consume — in B's OWN queue, and nothing in
+    // the shared inbox for another writer's consume to drop.
+    write(dir_b.path(), "z.txt", "z");
+    b.run_barrier().await.unwrap();
+    let queued = b.state.load_foreign_queue().unwrap();
+    assert!(
+        queued.iter().any(|c| c.path == "x.txt" && c.etag.is_some()),
+        "fixture: B's merge queued nothing for x.txt: {queued:?}"
+    );
+    let ib = super::inbox::load(store.as_ref(), &b.cfg).await.unwrap();
+    assert!(
+        !ib.doc.entries.iter().any(|e| e.path == "x.txt"),
+        "B's merge put its own queue in the shared inbox: {:?}",
+        ib.doc.entries
+    );
+    // A's barrier consumes the shared inbox first.
+    a.run_barrier().await.unwrap();
+    // B converges on A's bytes within a couple of barriers.
+    b.run_barrier().await.unwrap();
+    b.run_barrier().await.unwrap();
+    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("A's v2"), "A's change never reached B");
+    assert_every_citation_resolves(&store, &a.cfg, "after convergence").await;
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let (_, body) = store.get_whole(&m.entries["x.txt"].key, Some(&m.entries["x.txt"].etag)).await.unwrap();
+    assert_eq!(&body[..], b"A's v2", "the manifest reverted A's change");
+}
+
+/// Deletes cross between writers the way edits do: A's delete of a path
+/// B holds clean reaches B's tree.
+#[tokio::test]
+async fn a_peers_delete_reaches_the_other_writers_tree() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "x.txt", "seed");
+    write(dir_a.path(), "keep.txt", "keep");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("seed"));
+
+    std::fs::remove_file(dir_a.path().join("x.txt")).unwrap();
+    a.run_barrier().await.unwrap();
+    a.run_barrier().await.unwrap();
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(!m.entries.contains_key("x.txt"), "fixture: A's delete never published");
+
+    for _ in 0..3 {
+        b.run_barrier().await.unwrap();
+    }
+    assert_eq!(read(dir_b.path(), "x.txt"), None, "A's delete never reached B's tree");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(!m.entries.contains_key("x.txt"), "B resurrected the path A deleted");
+}
+
+/// Two IDLE writers settle. A barrier that finds the manifest moved but
+/// has nothing of its own to publish must not install a generation of its
+/// own — or the peer's next tick sees the manifest move, does the same,
+/// and the two trade empty generations (and cell claims) forever.
+#[tokio::test]
+async fn two_idle_writers_do_not_trade_empty_generations() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    b.checkout().await.unwrap();
+    write(dir_a.path(), "x.txt", "from A");
+    a.run_barrier().await.unwrap();
+    // B integrates A's publish; then neither writer changes anything.
+    for _ in 0..2 {
+        b.run_barrier().await.unwrap();
+        a.run_barrier().await.unwrap();
+    }
+    let settled = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.seq;
+    for _ in 0..4 {
+        b.run_barrier().await.unwrap();
+        a.run_barrier().await.unwrap();
+    }
+    let later = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.seq;
+    assert_eq!(later, settled, "idle writers kept installing generations: seq {settled} -> {later}");
+    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("from A"));
+}
+
+/// Finding 3 (`LeanBarrierLeaseSyncOverlayStale`): `sync` takes the
+/// manifest OVERLAID by live inbox entries as remote truth, then advanced
+/// its merge base to the manifest. An inbox entry can be older than the
+/// manifest while the commit that cited past it has not yet dropped it —
+/// here A's delete, between its CAS and its window clear — and a sync in
+/// that window advanced B's base past a change B never applied: B kept
+/// the file forever, the manifest did not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sync_does_not_advance_its_base_past_a_change_the_inbox_hid() {
+    let inner = Arc::new(MemoryStore::new());
+    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = hooked_syncer(&ha, dir_a.path());
+    let mut b = syncer(&inner, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "x.txt", "seed");
+    write(dir_a.path(), "keep.txt", "keep");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+
+    // A deletes x.txt (first absence withheld); a HITL write of x.txt then
+    // lands in the inbox. A's next barrier consumes it against the local
+    // delete (the delete wins, the HITL bytes are preserved) and publishes
+    // the delete.
+    std::fs::remove_file(dir_a.path().join("x.txt")).unwrap();
+    a.run_barrier().await.unwrap();
+    hitl_write(&inner, &a.cfg, "x.txt", "hitl", "user").await.unwrap();
+
+    // Inside A's commit — the manifest no longer cites x.txt, the inbox
+    // entry for it is not yet dropped — B syncs the whole tree.
+    let key = a.cfg.file_key("x.txt");
+    let b_slot = std::sync::Mutex::new(Some(b));
+    let b_done: Arc<std::sync::Mutex<Option<Syncer>>> = Arc::new(std::sync::Mutex::new(None));
+    let b_done_in = b_done.clone();
+    let cfg = a.cfg.clone();
+    let probe = inner.clone();
+    ha.before_delete(&key, move || {
+        let mut b = b_slot.lock().unwrap().take().expect("hook ran twice");
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let m = manifest::load(probe.as_ref(), &cfg).await.unwrap().unwrap().manifest;
+                assert!(!m.entries.contains_key("x.txt"), "fixture: A's CAS has not uncited x.txt");
+                let ib = super::inbox::load(probe.as_ref(), &cfg).await.unwrap();
+                assert!(ib.doc.entries.iter().any(|e| e.path == "x.txt"), "fixture: the entry is gone");
+                b.sync_scoped(None).await.expect("B's sync");
+            })
+        });
+        *b_done_in.lock().unwrap() = Some(b);
+    });
+    let ra = a.run_barrier().await.expect("A's delete barrier");
+    assert!(ra.deleted.contains(&"x.txt".to_string()), "fixture: A did not publish the delete: {ra:?}");
+    let mut b = b_done.lock().unwrap().take().expect("fixture: A's GC never reached x.txt");
+
+    // A's delete stands, and reaches B.
+    for _ in 0..3 {
+        b.run_barrier().await.expect("B's barrier");
+    }
+    let m = manifest::load(inner.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
+    assert!(!m.entries.contains_key("x.txt"), "the delete was undone");
+    assert_eq!(read(dir_b.path(), "x.txt"), None, "B's sync advanced its base past A's delete and kept the file");
+    assert_eq!(read(dir_b.path(), "keep.txt").as_deref(), Some("keep"));
+}
+
+/// A UI write through the gateway reaches EVERY writer of the workspace,
+/// not only the one whose consume took the inbox entry. The first
+/// consumer drops the entry once its commit cites the write; the other
+/// writer learns of it through its own merge (a foreign change, into its
+/// local queue) and fetches it at the next consume.
+#[tokio::test]
+async fn a_gateway_write_reaches_every_writer_not_only_the_first_consumer() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "doc.md", "v1");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+
+    hitl_write(&store, &a.cfg, "doc.md", "edited in the UI", "user@ui").await.unwrap();
+    hitl_write(&store, &a.cfg, "new-from-ui.md", "created in the UI", "user@ui").await.unwrap();
+    // A's barrier consumes both entries, cites them, and drops them.
+    a.run_barrier().await.unwrap();
+    let ib = super::inbox::load(store.as_ref(), &a.cfg).await.unwrap();
+    assert!(ib.doc.entries.is_empty(), "fixture: A did not drop the consumed entries: {:?}", ib.doc.entries);
+    assert_eq!(read(dir_a.path(), "doc.md").as_deref(), Some("edited in the UI"));
+
+    // B never saw the entries; it must still converge on both writes.
+    b.run_barrier().await.unwrap();
+    b.run_barrier().await.unwrap();
+    assert_eq!(read(dir_b.path(), "doc.md").as_deref(), Some("edited in the UI"), "the UI edit never reached B");
+    assert_eq!(read(dir_b.path(), "new-from-ui.md").as_deref(), Some("created in the UI"), "the UI create never reached B");
+    assert_every_citation_resolves(&store, &a.cfg, "after both").await;
+}
+
+/// The same UI write against a path the second writer has EDITED: its
+/// agent's version wins at its next boundary, the UI's bytes are
+/// preserved in the bucket, and a record says so — never a silent loss.
+#[tokio::test]
+async fn a_gateway_write_over_a_path_another_writer_edited_is_preserved_on_that_writer() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "doc.md", "v1");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+
+    write(dir_b.path(), "doc.md", "B's agent edit");
+    backdate_baseline(&b, "doc.md");
+    hitl_write(&store, &a.cfg, "doc.md", "edited in the UI", "user@ui").await.unwrap();
+    a.run_barrier().await.unwrap(); // consumes, cites, drops
+    b.run_barrier().await.unwrap();
+    b.run_barrier().await.unwrap();
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let (_, body) = store.get_whole(&m.entries["doc.md"].key, Some(&m.entries["doc.md"].etag)).await.unwrap();
+    assert_eq!(&body[..], b"B's agent edit", "B's later boundary is current");
+    let preserved: Vec<_> = b
+        .state
+        .load_conflicts()
+        .unwrap()
+        .into_iter()
+        .filter(|c| c.path == "doc.md" && c.preserved_key.is_some())
+        .collect();
+    let mut found_ui = false;
+    for c in &preserved {
+        let (_, kept) = store.get_whole(c.preserved_key.as_ref().unwrap(), None).await.unwrap();
+        found_ui |= &kept[..] == b"edited in the UI";
+    }
+    assert!(found_ui, "the UI's bytes are not preserved under any record on B: {preserved:?}");
+    assert_every_citation_resolves(&store, &a.cfg, "after both").await;
 }

@@ -39,7 +39,7 @@ async fn syncer(store: &Arc<MemoryStore>, root: &std::path::Path) -> Syncer {
 /// first step; a foreign one needs the quiet polls).
 async fn claim_until_held(sc: &mut Syncer, max_steps: u32) -> bool {
     for _ in 0..max_steps {
-        match lease::claim_step(sc).await.unwrap() {
+        match lease::claim_step(sc, true).await.unwrap() {
             ClaimOutcome::Claimed(_) => return true,
             ClaimOutcome::Waiting { .. } => {}
         }

@@ -49,8 +49,8 @@ the syncer owns it. You write exactly two names there, `publish` and
 
 The syncer's own state lives in `.flint-sync/` at the workspace root.
 Never write there. Two files in it are for you to read:
-`.flint-sync/gauges.json` (health: `state`,
-`rpo_secs`, `last_boundary`) and `.flint-sync/conflicts.jsonl` (one
+`.flint-sync/gauges.json` (health: `rpo_secs`, `withheld_reason`,
+`last_boundary`) and `.flint-sync/conflicts.jsonl` (one
 JSON record per line per conflict: `path`, `kind`, `foreign_etag`,
 `preserved_key`, `at_unix`; the file rotates at 1 MiB into
 `conflicts.jsonl.1` and older records are gone — read it as you go).
@@ -67,11 +67,10 @@ JSON record per line per conflict: `path`, `kind`, `foreign_etag`,
 - **File absent** ⇒ an old syncer that does not know the verbs. Do not
   create `.flint/publish` or `.flint/sync`: an old syncer would upload
   them to the bucket as data. Work normally and rely on the cadence.
-- **`verbs` empty, or `state` is `"fenced"`** ⇒ do not touch sentinels.
-  `fenced` means this syncer lost its lease (the workspace is being
-  served by a successor, or the pod is being replaced); `reason` says
-  why verbs are off. Keep working on the files; a fenced syncer does not
-  publish, so expect the workspace to be re-served or the pod replaced.
+- **`verbs` empty** ⇒ do not touch sentinels; `reason` says why they are
+  off (the pre-flight found `.flint/` already in use by an application,
+  or the operator turned sentinels off). Keep working on the files; the
+  cadence still publishes. `state` is always `"live"`.
 
 ## `publish`: declare a coherent point
 
@@ -135,11 +134,10 @@ JSON, not written as `[]`.
   is still an honest ok: nothing had changed since the last boundary.
 - `status: "partial"` — the boundary installed, but the paths in
   `report.dropped` are not in it: each met a newer foreign version the
-  syncer could not preserve (`report.parked` counts them). Treat it as a
-  failure for those paths and touch again.
-- `status: "refused-fenced"` — this syncer lost its lease
-  (`observed_epoch` names the winner) and cannot publish. Stop touching
-  sentinels; `capabilities.json` is now `fenced`.
+  syncer could not preserve, or the copy already in the bucket that it
+  meant to cite was replaced or removed by another writer just before
+  this boundary committed (an `adopt-withheld` record); `report.parked`
+  counts them. Treat it as a failure for those paths and touch again.
 - `boundary: "sentinel-deferred"` — your touch was honoured by the
   cadence tick rather than at once: it arrived inside
   `sentinel_min_interval_secs` of the previous boundary, or the hourly
@@ -207,7 +205,7 @@ are the same either way:
 Ask for a sync at a safe point: between tasks, never mid-edit of the
 files in scope.
 
-## Foreign changes at a boundary
+## Foreign changes at a boundary, and other writers
 
 At every boundary the syncer first integrates the bucket's inbox (writes
 made from outside) into your tree, onto paths you have not modified. If
@@ -216,6 +214,27 @@ and is published**; the foreign bytes are preserved in the bucket and
 a `consume-dirty` record names the path and where the foreign copy went
 (`preserved_key`). When you collaborate, read `report.conflicts` on your
 acks and `conflicts.jsonl` before assuming a path is the latest.
+
+**Other agents may share this workspace**, each with its own syncer and
+its own tree, and every one of them publishes every floor: a boundary
+never waits for another writer's lifetime, only for the seconds its
+commit takes. What that means for you:
+
+- a path you have not modified may change under you at a boundary, or
+  disappear if another writer deleted it — the ack's `report.consumed`
+  counts both, and `remote.seq` says there is news before that. A path
+  you HAVE modified is never removed that way: your version stays and
+  publishes, and a `consume-foreign-delete-vs-dirty` record names it;
+- if two writers edit ONE file, the later boundary's version is current
+  and the earlier is preserved in the bucket with an
+  `upload-412-preserved` record on the later writer and a
+  `consume-dirty` record on the earlier one when its copy is replaced.
+  Nothing is lost, but only one version is current: edit disjoint
+  files where you can, and `sync` before you start on a path that
+  `remote.seq` says has news;
+- a boundary that could not take its turn (`publish.ack` absent past
+  two floors) is retried by the cadence; touch again rather than assume
+  it failed.
 
 ## What gets published, and how change is detected
 
@@ -242,8 +261,7 @@ acks and `conflicts.jsonl` before assuming a path is the latest.
 
 Do:
 
-- read `.flint/capabilities.json` before your first sentinel, and again
-  if an ack comes back `refused-fenced`;
+- read `.flint/capabilities.json` before your first sentinel;
 - touch `.flint/publish` when a unit of work is complete, with a nonce,
   and wait for *your* ack by nonce or by mtime;
 - check `.flint/remote.seq` between tasks and `sync` at a safe point when

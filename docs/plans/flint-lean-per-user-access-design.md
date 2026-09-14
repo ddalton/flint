@@ -593,3 +593,22 @@ since the backend is the first consumer.
 - D7 **One writer per workspace stands.** Multi-agent sessions are one
   writer plus readers, or many workspaces, until branching is built.
 - D8 **The branching design's §4.5 is re-based on this document** (S4).
+
+## Status note, 2026-09-13 (later the same day)
+
+The per-barrier publish fence was built
+(`flint-lean-writer-lease-and-gated-assessment.md` §4, §10), which
+changes two statements above without changing the design's conclusion:
+
+- **S3 / §4.7 "one writer per workspace is a lease, not a convention."**
+  The lease is now held per barrier: several writer pods share a
+  workspace and merge at the manifest, and none waits on another's
+  lifetime. A read-only credential therefore no longer fails at a claim
+  before the first barrier — `run` claims nothing before checkout — so
+  the pod becomes Ready; it fails at its first heartbeat PUT and at
+  every barrier's uploads instead, logged and retried each floor. That
+  is still not a reader mode: the enforcement is the credential, the
+  syncer keeps attempting writes it cannot make, and §4.4's reader loop
+  (no heartbeat, no barrier, `refused-read-only`) remains the build.
+- **§4.8's worked scenario** stands, with B's "holds the lease" now
+  reading "claims the fence for each of its commit sections".

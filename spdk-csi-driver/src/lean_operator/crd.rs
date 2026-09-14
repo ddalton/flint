@@ -119,21 +119,33 @@ pub struct FlintLeanWorkspaceSpec {
     #[serde(default = "default_fetch_drivers")]
     pub fetch_drivers: u64,
 
-    /// Parts of ONE object uploaded concurrently on publish (1 =
-    /// sequential, the default). Distinct from `fanout`, which spreads
-    /// uploads ACROSS objects: this only moves a tree whose critical
-    /// path is a single large object — the checkpoint shape. Measured
-    /// (runcu 2026-09-12, `door-drill-2026-09-12.md`): publishing a
-    /// 4 GiB object 8-wide instead of 1 took a checkpoint publish from
-    /// ~51 s to ~14 s (3.6x), the point the NIC saturates. NOT raised by
-    /// default: an upload part is held whole in RAM and the upload
-    /// window has no bytes-in-flight bound, so peak RSS is
-    /// `min(large_objects, fanout) x this x 64 MiB` — 8 across many large
-    /// objects is 16 GiB. Raise it only with pod-memory headroom
-    /// (~512 MiB per concurrent large object at 8); the safe default
-    /// bump waits on an upload byte-bound.
+    /// Parts of ONE object uploaded concurrently on publish (default 8;
+    /// 1 = sequential). Distinct from `fanout`, which spreads uploads
+    /// ACROSS objects: this only moves a tree whose critical path is a
+    /// single large object — the checkpoint shape. Measured (runcu
+    /// 2026-09-12, `door-drill-2026-09-12.md`, n=3): publishing a 4 GiB
+    /// object 8-wide instead of 1 took a checkpoint publish from
+    /// 50.7–58.6 s to 13.8–14.4 s (3.6x), the point the NIC saturates;
+    /// 16 was no better. It shipped opt-in in v1.51.0 because an upload
+    /// part is held whole in RAM and the window had no byte bound, so
+    /// peak RSS was `min(large_objects, fanout) x this x 64 MiB` — 16 GiB
+    /// at 8 across many large objects. `uploadInflightMb` is that bound:
+    /// peak upload RSS is now `min(uploadInflightMb, the bytes actually
+    /// live)` plus the fan-out's small bodies, whatever this says, and
+    /// this only decides how fast one large object goes.
     #[serde(default = "default_upload_part_parallelism")]
     pub upload_part_parallelism: u64,
+
+    /// Ceiling on bytes in flight across the upload window, MiB — the
+    /// write side's `fetchInflightMb`. `fanout` bounds how MANY objects
+    /// upload at once and `uploadPartParallelism` how many parts of
+    /// each, but not how big they are, and every part and every whole
+    /// body is read into RAM before its PUT, so peak upload RSS was the
+    /// product of the three. A single part or body larger than the whole
+    /// window still uploads, alone. Sized against the syncer's memory
+    /// limit, not its CPU; 0 = no bound.
+    #[serde(default = "default_upload_inflight_mb")]
+    pub upload_inflight_mb: u64,
 
     /// Route every GET and HEAD through the syncer's raw HTTP/1.1 read
     /// path (SigV4 by hand, pooled keep-alive connections, none of the
@@ -289,10 +301,21 @@ fn default_fetch_drivers() -> u64 {
     0
 }
 fn default_upload_part_parallelism() -> u64 {
-    // 1 = today's sequential per-object upload. Opt-in only: raising it
-    // multiplies upload RSS against `fanout` and the upload path has no
-    // byte bound yet (see the field doc).
-    1
+    // 1 → 8 (2026-09-13), the knee of the runcu measurement (see the
+    // field doc), made safe by `uploadInflightMb`: the width no longer
+    // multiplies into peak RSS.
+    8
+}
+fn default_upload_inflight_mb() -> u64 {
+    // 256: four 64 MiB parts in flight, and with `fetchInflightMb`'s 128
+    // and the binary's own footprint still under the plugin-wide 1Gi
+    // worker limit that OOM-killed a 512 MiB read window. Loopback A/B
+    // 2026-09-13, 4 x 256 MiB objects published parts 8-wide (n=3,
+    // interleaved): peak RSS 280-311 MiB at 256 against 1048-1049 MiB
+    // with the bound effectively off (8192) — the predicted
+    // 4 objects x 4 parts x 64 MiB — for the same 46 requests and the
+    // same bytes; the serial-parts v1.51.0 default peaked at 278 MiB.
+    256
 }
 fn default_size_limit_gib() -> u64 {
     20
@@ -346,6 +369,11 @@ pub struct FlintLeanWorkspaceStatus {
     /// The last manifest seq the syncer cited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cited_seq: Option<u64>,
+    /// Writers with a heartbeat within the last five minutes. The lease
+    /// is held per barrier, so several writers can share a workspace and
+    /// each shows here; the cell alone names only the last boundary's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_writers: Option<u64>,
 }
 
 /// A metav1.Condition mirror (same field names, same semantics) — the
