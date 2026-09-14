@@ -513,9 +513,14 @@ pub const UNTRACKED_GRACE_SECS: u64 = 600;
 /// UI retries in a moment and overwrites the version that commit cites,
 /// which every writer's consume already handles.
 ///
-/// An untracked object is fair game once nobody could still cite it: no
-/// writer has a live heartbeat, or it has sat untracked past
-/// `UNTRACKED_GRACE_SECS`.
+/// An untracked object is fair game once it has sat untracked past
+/// `UNTRACKED_GRACE_SECS` — a crashed writer's orphan upload, which no
+/// commit will cite. There used to be a second escape, "no writer has a
+/// live heartbeat"; the heartbeat is gone. Neither escape carries safety
+/// any more: the uploading writer's commit re-reads every citation it
+/// adds and withholds one whose object moved (the model's
+/// `LeanBarrierLeaseHitlOverAnyVerified`), so this rule is defense in
+/// depth and the grace only bounds how long an orphan answers 409.
 pub async fn hitl_may_overwrite(
     store: &dyn ObjectStore,
     cfg: &LeanConfig,
@@ -523,7 +528,6 @@ pub async fn hitl_may_overwrite(
     current: &str,
     last_modified_unix: Option<u64>,
     now: u64,
-    writer_stale_secs: u64,
 ) -> LeanResult<bool> {
     let same = |a: &str, b: &str| a.trim_matches('"') == b.trim_matches('"');
     if let Some(m) = super::manifest::load(store, cfg).await? {
@@ -535,10 +539,7 @@ pub async fn hitl_may_overwrite(
     if ib.doc.entries.iter().any(|e| e.path == path && same(&e.etag, current)) {
         return Ok(true);
     }
-    if last_modified_unix.map(|t| now.saturating_sub(t) > UNTRACKED_GRACE_SECS).unwrap_or(false) {
-        return Ok(true);
-    }
-    Ok(super::lease::live_writers(store, cfg, now, writer_stale_secs).await?.is_empty())
+    Ok(last_modified_unix.map(|t| now.saturating_sub(t) > UNTRACKED_GRACE_SECS).unwrap_or(false))
 }
 
 /// Clear the window (after the manifest CAS) and, in the same CAS,

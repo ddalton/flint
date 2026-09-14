@@ -106,7 +106,7 @@ async fn hitl_write(
     let cond = match store.head(&key).await {
         Ok(meta) => {
             // The gateway's rule for a blind write (`put_file`).
-            if !inbox::hitl_may_overwrite(store.as_ref(), cfg, path, &meta.etag, meta.last_modified_unix, now_unix(), 180).await? {
+            if !inbox::hitl_may_overwrite(store.as_ref(), cfg, path, &meta.etag, meta.last_modified_unix, now_unix()).await? {
                 return Err(LeanError::State(format!("concurrent write: {path} is another writer's uncited upload")));
             }
             PutCondition::IfMatch(meta.etag)
@@ -2379,7 +2379,7 @@ async fn a_pending_sync_at_sigterm_never_cancels_the_drains_own_boundary() {
 /// `control::write_atomic` and `state::write_atomic` have no
 /// containment at all and write into directories the app must be able
 /// to write, and `.flint/remote.seq` is rewritten on every tick — so
-/// the syncer's own heartbeat performs the write, with no remote
+/// the syncer's own tick performs the write, with no remote
 /// cooperation at all.
 ///
 /// The syncer holds the bucket credentials and runs with no
@@ -2448,17 +2448,16 @@ async fn a_planted_temp_sibling_is_never_written_through() {
 
 // ── Phase 4: the operator-facing surfaces (§2.6) ─────────────────────
 
-/// The observed-state echo (§2.6) rides two writes a live syncer
-/// already pays for: the HANDOFF that ends every barrier (the cell is at
-/// rest between barriers, so the echo it keeps is the only thing that
-/// tells an operator which binary ran the last boundary) and the
-/// per-writer HEARTBEAT (the only liveness an idle writer has). Without
-/// it the operator can only report what the spec ASKED for: the env
+/// The observed-state echo (§2.6) rides a write a live syncer already
+/// pays for: the HANDOFF that ends every barrier (the cell is at rest
+/// between barriers, so the echo it keeps is the only thing that tells
+/// an operator which binary ran the last boundary). Without it the
+/// operator can only report what the spec ASKED for: the env
 /// read is a fixed list, so a knob reaching a binary that predates it
 /// is ignored in silence — the mixed-version hole D11 closes on the
 /// agent side and nothing closed on the operator's.
 #[tokio::test]
-async fn a_heartbeat_echoes_the_running_binary_into_the_lease_cell() {
+async fn a_barrier_echoes_the_running_binary_into_the_lease_cell() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
     let mut a = syncer(&store, dir.path()).await;
@@ -2476,19 +2475,6 @@ async fn a_heartbeat_echoes_the_running_binary_into_the_lease_cell() {
     assert_eq!(echo.last_cited_seq, cited, "the echo names no citation");
     assert_eq!(echo.protocol, super::SENTINEL_PROTOCOL);
     assert!(!echo.syncer_version.is_empty(), "no version ⇒ no mixed-fleet tell");
-
-    // The heartbeat object carries the same echo, under the writer's id.
-    a.heartbeat_tick().await.unwrap();
-    let writers = lease::live_writers(store.as_ref(), &a.cfg, super::now_unix(), 300).await.unwrap();
-    let me = lease::incarnation(&a).unwrap().holder_id;
-    assert_eq!(writers, vec![me.clone()], "the heartbeat did not register this writer");
-    let (_, body) = store.get_whole(&a.cfg.writer_key(&me), None).await.unwrap();
-    let hb: lease::WriterHeartbeat = serde_json::from_slice(&body).unwrap();
-    let echo: flint_store::LeaseEcho = serde_json::from_str(hb.echo.as_deref().unwrap()).unwrap();
-    assert_eq!(echo.last_cited_seq, cited);
-    // A clean shutdown takes it down at once.
-    lease::retire_heartbeat(&a).await.unwrap();
-    assert!(lease::live_writers(store.as_ref(), &a.cfg, super::now_unix(), 300).await.unwrap().is_empty());
 }
 
 // ── Phase 5: the layered doors (§2.5, D14) ───────────────────────────
@@ -3622,17 +3608,28 @@ async fn a_rotation_reads_and_writes_no_generation_object() {
 /// A backend whose EPOCH RENEWAL can be switched to answer 401/403 while
 /// every other call keeps working — the §6.3 shape exactly: the broker
 /// or the token is gone, the bucket is fine, and the holder is alive.
+/// `refuse_reads` refuses the calls an IDLE writer's floor tick makes
+/// too (HEAD, GET, LIST, the cell read): a writer with nothing to publish
+/// never renews, so its tick is the only probe of its credentials.
 struct AuthRefusing {
     inner: Arc<MemoryStore>,
     refuse: std::sync::atomic::AtomicBool,
+    refuse_reads: std::sync::atomic::AtomicBool,
 }
 
 impl AuthRefusing {
     fn new(inner: Arc<MemoryStore>) -> Self {
-        Self { inner, refuse: std::sync::atomic::AtomicBool::new(false) }
+        Self {
+            inner,
+            refuse: std::sync::atomic::AtomicBool::new(false),
+            refuse_reads: std::sync::atomic::AtomicBool::new(false),
+        }
     }
     fn set_refuse(&self, v: bool) {
         self.refuse.store(v, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn set_refuse_reads(&self, v: bool) {
+        self.refuse_reads.store(v, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -3665,6 +3662,11 @@ impl ObjectStore for AuthRefusing {
         self.inner.compose_generation(spec).await
     }
     async fn head(&self, key: &str) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        if self.refuse_reads.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(flint_store::StoreError::Auth(
+                "ExpiredToken: the security token included in the request is expired".into(),
+            ));
+        }
         self.inner.head(key).await
     }
     async fn get_whole(
@@ -3672,6 +3674,11 @@ impl ObjectStore for AuthRefusing {
         key: &str,
         if_match: Option<&str>,
     ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        if self.refuse_reads.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(flint_store::StoreError::Auth(
+                "ExpiredToken: the security token included in the request is expired".into(),
+            ));
+        }
         self.inner.get_whole(key, if_match).await
     }
     async fn get_range(
@@ -3690,6 +3697,11 @@ impl ObjectStore for AuthRefusing {
         self.inner.max_parts()
     }
     async fn list(&self, prefix: &str) -> flint_store::StoreResult<Vec<flint_store::ListedObject>> {
+        if self.refuse_reads.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(flint_store::StoreError::Auth(
+                "ExpiredToken: the security token included in the request is expired".into(),
+            ));
+        }
         self.inner.list(prefix).await
     }
     async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
@@ -3740,6 +3752,11 @@ impl ObjectStore for AuthRefusing {
         &self,
         key: &str,
     ) -> flint_store::StoreResult<Option<flint_store::EpochState>> {
+        if self.refuse_reads.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(flint_store::StoreError::Auth(
+                "ExpiredToken: the security token included in the request is expired".into(),
+            ));
+        }
         self.inner.epoch_read(key).await
     }
     async fn epoch_acquire(
@@ -3843,13 +3860,54 @@ async fn a_refused_credential_pauses_the_holder_without_fencing_it() {
         "an ordinary gauge tick erased the credential pause"
     );
 
-    // The renewal is the only scheduled probe of our own credentials,
-    // so it is also the only thing that can observe recovery.
+    // A renewal is a probe of our own credentials, so it observes
+    // recovery too. (An idle writer never renews; its probe is the floor
+    // tick — the next test.)
     proxy.set_refuse(false);
     lease::renew(&mut a).await.expect("renew after the credentials came back");
     assert!(
         a.load_gauges().unwrap().auth_paused_since_unix.is_none(),
         "the pause outlived the credentials being restored"
+    );
+}
+
+/// The writer heartbeat was the scheduled probe of an IDLE writer's
+/// credentials: a writer with nothing to publish never claims, so no
+/// renewal ever runs. With the heartbeat gone the floor tick — which
+/// every writer runs, idle or not — must record a 401/403 as a pause and
+/// clear it when the credentials come back, or `authPausedSinceUnix`
+/// stops answering for exactly the writers most likely to sit idle.
+#[tokio::test]
+async fn an_idle_writer_records_and_clears_a_credential_pause_on_its_floor_tick() {
+    let inner = Arc::new(MemoryStore::new());
+    let proxy = Arc::new(AuthRefusing::new(inner.clone()));
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = cfg_for(dir.path());
+    let state = SyncerState::open(cfg.state_dir()).unwrap();
+    let mut a = Syncer {
+        store: proxy.clone() as Arc<dyn ObjectStore>,
+        cfg,
+        state,
+        lease: None,
+        noted_not_regular: Default::default(),
+    };
+    a.checkout().await.unwrap();
+    a.floor_tick().await.expect("an idle tick with working credentials");
+    assert!(a.load_gauges().unwrap().auth_paused_since_unix.is_none(), "a healthy idle writer reads as paused");
+
+    proxy.set_refuse_reads(true);
+    let e = a.floor_tick().await.expect_err("fixture: the idle tick made no refused request");
+    assert!(e.is_auth(), "the refused tick did not classify as a credential fault: {e}");
+    assert!(
+        a.load_gauges().unwrap().auth_paused_since_unix.is_some(),
+        "an idle writer's refused tick left no local evidence of the pause"
+    );
+
+    proxy.set_refuse_reads(false);
+    a.floor_tick().await.expect("an idle tick after the credentials came back");
+    assert!(
+        a.load_gauges().unwrap().auth_paused_since_unix.is_none(),
+        "the pause outlived the credentials being restored on an idle writer"
     );
 }
 
@@ -9762,10 +9820,6 @@ async fn a_ui_write_over_an_uncited_upload_is_never_silently_lost() {
     a.run_barrier().await.unwrap();
     let mut b = b;
     b.checkout().await.unwrap();
-    // Both writers are live, as in a running fleet: without a heartbeat an
-    // uncited upload reads as an orphan, which a UI write may overwrite.
-    lease::heartbeat(&mut a).await.unwrap();
-    lease::heartbeat(&mut b).await.unwrap();
 
     // A's agent edits both paths; A's barrier uploads p1 then p2.
     write(dir_a.path(), "p1.txt", "A's edit of p1");

@@ -638,8 +638,8 @@ checked against it (the `MineIsNotForeign` pattern).
    `LeanBarrierLeaseHitlOverAnyUnverified`, the same world without the
    re-read, is finding 4 again (depth 16). So the tracked-only rule is
    now defense in depth, and the writer heartbeat — which the
-   no-live-writer escape reads — carries no safety; that is what let
-   its interval go from min(floor, 30) s to 60 s.
+   no-live-writer escape read — carried no safety; it was removed the
+   same day, escape and all, leaving only the grace.
 5. **Identical bytes share an etag — found by the LIVE DRILL, not the
    model** (runcv A3, `churn/p14.txt`; syncer finding 13). S3's etag for a
    whole PUT is the MD5 of the bytes. A deletes a path; B rewrites it with

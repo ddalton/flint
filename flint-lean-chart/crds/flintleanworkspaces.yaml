@@ -417,15 +417,6 @@ spec:
                 description: The syncer binary's version — the mixed-fleet tell.
                 nullable: true
                 type: string
-              observedWriters:
-                description: |-
-                  Writers with a heartbeat within the last five minutes. The lease
-                  is held per barrier, so several writers can share a workspace and
-                  each shows here; the cell alone names only the last boundary's.
-                format: uint64
-                minimum: 0.0
-                nullable: true
-                type: integer
               phase:
                 description: Pending | Claimed | Adopted | Refused | Error
                 nullable: true

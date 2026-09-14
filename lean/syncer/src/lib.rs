@@ -85,7 +85,7 @@ pub const CONTROL_DIR: &str = ".flint";
 pub const SENTINEL_PROTOCOL: u32 = 1;
 
 /// This binary's version, echoed to the agent (`capabilities.json`) and
-/// to the operator (the lease-heartbeat echo, §2.6). Both mixed-version
+/// to the operator (the lease cell's echo, §2.6). Both mixed-version
 /// holes — agent↔syncer and operator↔syncer — are detected by
 /// comparing what is RUNNING against what was asked for, and neither
 /// comparison exists without a version on the running side.
@@ -456,15 +456,6 @@ impl LeanConfig {
     }
     pub fn epoch_key(&self) -> String {
         format!("{}/{}/epoch", self.prefix, LEAN_DIR)
-    }
-    /// The per-writer heartbeats (`lease::heartbeat`): one small object
-    /// per live writer, the only liveness a reader can see now that the
-    /// cell is at rest between barriers.
-    pub fn writers_prefix(&self) -> String {
-        format!("{}/{}/writers/", self.prefix, LEAN_DIR)
-    }
-    pub fn writer_key(&self, holder_id: &str) -> String {
-        format!("{}{holder_id}", self.writers_prefix())
     }
     /// The operator's claim cell for this prefix (`lean_operator::
     /// reconcile::claim_key` writes it; the syncer only READS it).

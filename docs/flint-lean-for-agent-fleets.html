@@ -171,7 +171,7 @@ spec:
   floorSecs: 60                  # publish cadence — and the RPO</code></pre>
 <pre><code>kubectl apply -f workspace.yaml
 kubectl -n agents get flintleanworkspace proj1 -o yaml | grep -A6 conditions</code></pre>
-<p>You want <code>SpecAccepted: True</code>. <code>SyncerObserved: Unknown</code> with reason <code>NoLiveSyncer</code> is normal for a workspace no pod has ever published; once one has, the condition names the binary that ran the last boundary, and <code>observedWriters</code> counts the pods with a live heartbeat (several pods may share one workspace).</p>
+<p>You want <code>SpecAccepted: True</code>. <code>SyncerObserved: Unknown</code> with reason <code>NoLiveSyncer</code> is normal for a workspace no pod has ever published; once one has, the condition names the binary that ran the last boundary (several pods may share one workspace; the status does not count them).</p>
 <hr>
 <h2>3. Opt a pod in</h2>
 <p>One label. That is the whole integration.</p>

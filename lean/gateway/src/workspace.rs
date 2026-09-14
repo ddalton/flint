@@ -134,16 +134,6 @@ impl Snapshot {
     }
 }
 
-/// A writer whose heartbeat is older than this is not counted live.
-/// Heartbeats are written every `flint_lean::lease::HEARTBEAT_SECS`
-/// (60 s), and a barrier waiting for the fence holds its writer's back
-/// for up to `CLAIM_DEADLINE_SECS` (150 s); five minutes — the operator's
-/// window too — covers both, generous on purpose (the comparison is the
-/// store's clock against this process's). A stale reading of a live
-/// writer is not a loss: this process's answer is slower, or a UI write
-/// replaces an upload the writer's commit then withholds.
-pub const WRITER_STALE_SECS: u64 = 300;
-
 /// The RPO observability surface: seq, window, inbox depth, the epoch
 /// cell, the live writers, and the standing verb requests.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,14 +145,13 @@ pub struct Status {
     /// `holder_id`/`holder_released` name the LAST barrier's writer and
     /// whether its commit section is over (the cell is at rest between
     /// barriers, so `released: true` is the normal idle reading, not an
-    /// absent syncer — see `writers`).
+    /// absent syncer). Nothing in the bucket tells a live idle syncer
+    /// from a dead one, and nothing here needs to: a write is durable
+    /// and tracked either way, and `last_cited_seq` moving is what says
+    /// a syncer is citing.
     pub epoch: Option<u64>,
     pub holder_id: Option<String>,
     pub holder_released: Option<bool>,
-    /// Writers with a heartbeat within `WRITER_STALE_SECS`: the liveness
-    /// surface, since the cell no longer is.
-    #[serde(default)]
-    pub writers: Vec<String>,
     pub now_unix: u64,
     /// The last manifest seq a boundary installed.
     pub last_cited_seq: Option<u64>,
@@ -683,7 +672,6 @@ impl Workspace {
                 cur,
                 last_modified,
                 now_unix(),
-                WRITER_STALE_SECS,
             )
             .await?
             {
@@ -854,9 +842,6 @@ impl Workspace {
             };
         let ib = inbox::load(self.store.as_ref(), &self.cfg).await?;
         let cell = self.store.epoch_read(&self.cfg.epoch_key()).await?;
-        let writers =
-            flint_lean::lease::live_writers(self.store.as_ref(), &self.cfg, now_unix(), WRITER_STALE_SECS)
-                .await?;
         Ok(Status {
             seq,
             window: ib.doc.window.clone(),
@@ -864,7 +849,6 @@ impl Workspace {
             epoch: cell.as_ref().map(|c| c.epoch),
             holder_id: cell.as_ref().map(|c| c.holder_id.clone()),
             holder_released: cell.as_ref().map(|c| c.released),
-            writers,
             now_unix: now_unix(),
             last_cited_seq: seq,
             manifest_stamp_unix: stamp_unix,
@@ -1187,10 +1171,12 @@ impl Workspace {
     /// caught up, typically after a `request_boundary`.
     ///
     /// Polls the POINTER (a few hundred bytes) every `poll` and reads
-    /// the manifest only when its seq moved. Returns the citing seq.
-    /// Refuses at once with `CitationPending` when no syncer holds the
-    /// lease — nothing is there to cite, and waiting would only run the
-    /// clock down — and with the same error when `timeout` passes. A
+    /// the manifest only when its seq moved. Returns the citing seq, or
+    /// `CitationPending` (HTTP 202) when `timeout` passes: the write is
+    /// durable and tracked either way, and a syncer that starts later
+    /// cites it. There is no early refusal for "no syncer is running" —
+    /// the bucket cannot tell a dead syncer from an idle one, and the
+    /// caller's timeout is the bound it asked for. A
     /// manifest that cites the path at a DIFFERENT etag means the write
     /// was superseded before or after citation: `Superseded`.
     pub async fn wait_cited(
@@ -1241,21 +1227,6 @@ impl Workspace {
                         }
                     }
                 }
-            }
-            // Nobody to cite: say so now rather than at the deadline. The
-            // cell is at rest between barriers (the lease is held per
-            // barrier, design 2026-09-13 §4), so liveness is the writers'
-            // heartbeats, not the cell.
-            if flint_lean::lease::live_writers(
-                self.store.as_ref(),
-                &self.cfg,
-                now_unix(),
-                WRITER_STALE_SECS,
-            )
-            .await?
-            .is_empty()
-            {
-                return Err(pending("no live syncer writes this workspace (no heartbeat within the last five minutes)"));
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(pending("the syncer did not cite it within the wait"));

@@ -14,7 +14,7 @@ use super::crd::FlintLeanWorkspace;
 /// re-measure through the REAL proxy replaces them, the shape stays.
 pub fn checkout_budget_secs(expected_bytes: u64, expected_files: u64) -> u64 {
     /// Unclean-death claim lockout the replacement must wait out
-    /// (QUIET_POLLS × heartbeat, ~60–110 s observed band).
+    /// (QUIET_POLLS × their spacing, ~60–110 s observed band).
     const LOCKOUT_SECS: u64 = 110;
     const SECS_PER_GIB: u64 = 15;
     const FILES_PER_SEC: u64 = 500;

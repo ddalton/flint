@@ -494,15 +494,22 @@ deployed, and the user's standing decision is one mode. Departures from
   UI write conditional on an uncited upload's etag was lost (§10.1, the
   seventh row), and the gateway now refuses to overwrite what the
   workspace does not track.
-- **Liveness left the cell.** With the cell released between barriers,
-  neither the operator nor the gateway can read liveness from it, so
-  each writer PUTs `<prefix>/.flint/lean/writers/<holder_id>` every 60 s
-  (`lease::HEARTBEAT_SECS`; it was min(floor, 30) s until 2026-09-14) and
-  deletes it on a clean drain. Nothing that fences reads it; the gateway
-  and the operator count a writer live for five minutes after its last
-  beat. The
-  handoff KEEPS the echo, so `SyncerObserved` names the last barrier's
-  binary; `observedWriters` counts heartbeats fresher than five minutes.
+- **Liveness left the cell — and then left the protocol.** With the cell
+  released between barriers, neither the operator nor the gateway can
+  read liveness from it, so each writer PUT
+  `<prefix>/.flint/lean/writers/<holder_id>` every min(floor, 30) s. It was
+  REMOVED on 2026-09-14: nothing that fences read it (the cell detects a
+  dead holder from its own token; agents read `.flint/remote.seq`
+  locally), and its readers were conveniences — the gateway's early
+  "no live syncer" refusal in `wait_cited` (it now waits out the caller's
+  timeout and answers 202), its overwrite rule's "no writer is live"
+  escape (now only the untracked grace; `LeanBarrierLeaseHitlOverAnyVerified`
+  shows neither escape carries safety since the commit re-reads its own
+  citations), `Status.writers`, and the operator's `observedWriters` (gone;
+  the operator has no pod-to-workspace link to count from). An idle
+  writer's floor tick now records and clears the credential pause the
+  heartbeat used to. The handoff KEEPS the echo, so `SyncerObserved`
+  names the last barrier's binary.
 - **A fence is a retry.** §4.3 kept "the straggler case unchanged";
   under the per-barrier lease the only straggler is a holder stalled
   inside its commit section, and being deposed there costs it that
@@ -596,9 +603,9 @@ the path. A container restart does not produce it (the state directory
 survives and the retry adopts its own upload by `flush_uuid`), nor does a
 deleted worker pod (the plugin relaunches it over the same tree). Pinned as
 `a_writer_killed_after_its_upload_does_not_leave_the_trees_diverged`
-(`#[ignore]`, fails today). Candidates: each writer's heartbeat names its
-in-flight upload paths and a live writer reconciles a dead writer's list; or
-a live writer re-publishes over an untracked object older than a grace,
+(`#[ignore]`, fails today). Candidates: each writer records its in-flight
+upload paths in the bucket and a live writer reconciles a dead writer's list;
+or a live writer re-publishes over an untracked object older than a grace,
 preserving it as a conflict copy. Not built.
 
 **Found in the deployed storm (finding 12, data loss, FIXED locally):** the

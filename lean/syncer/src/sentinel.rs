@@ -915,15 +915,6 @@ impl Syncer {
         Ok(acks)
     }
 
-    /// The heartbeat arm, as a tick of its own: one unconditional PUT
-    /// of this writer's liveness object. It carries the observed-state
-    /// echo, and it is what the operator's `observedWriters` and the
-    /// gateway's "is anyone here to cite it" read — the cell is at rest
-    /// between barriers and says nothing about a live idle writer.
-    pub async fn heartbeat_tick(&mut self) -> LeanResult<()> {
-        super::lease::heartbeat(self).await
-    }
-
     /// One floor tick: either honor a standing
     /// pending sentinel that the budget or min-interval held back — the
     /// boundary is honored by a REAL barrier, its ack stamped
@@ -981,6 +972,13 @@ impl Syncer {
             });
             match ran {
                 Ok(observed) => {
+                    // The floor tick is the one scheduled request every
+                    // writer makes, idle or not, so it is where a
+                    // credential pause is seen to END — and, below, to
+                    // begin. A claim sees both too, but an idle writer
+                    // never claims. Best-effort: a gauge that failed to
+                    // write must not fail a tick that succeeded.
+                    let _ = self.clear_auth_pause();
                     let etag = out.observed_etag.take();
                     self.ticker_from(observed, etag)?;
                     // A foreign 412 outranks "waiting for a boundary":
@@ -991,7 +989,12 @@ impl Syncer {
                     out.withheld_reason = self.write_gauges(forced)?.withheld_reason;
                     return Ok(out);
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    if e.is_auth() {
+                        let _ = self.note_auth_pause();
+                    }
+                    return Err(e);
+                }
             }
         }
         self.ticker_from(out.seq, None)?;

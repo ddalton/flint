@@ -371,7 +371,6 @@ impl Workspace {
                 cur,
                 last_modified,
                 now_unix(),
-                crate::workspace::WRITER_STALE_SECS,
             )
             .await?
             {

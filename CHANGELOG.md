@@ -39,19 +39,6 @@ covered by the stability guarantee.
 
 ### Changed
 
-- **lean: the writer heartbeat is written every 60 s, not every
-  min(floor, 30) s, and the gateway counts a writer live for five
-  minutes instead of three.** Nothing that fences reads the heartbeat
-  (`.flint/lean/writers/<id>`): the publish fence detects a dead holder
-  from its own cell, and agents read `.flint/remote.seq` locally. Its
-  readers — the gateway's "is anyone here to cite it", its overwrite
-  rule for an untracked object, `Status.writers`, and the operator's
-  `observedWriters` — judge staleness in minutes, so at a 5 s floor an
-  idle writer paid one PUT every 5 s for a signal read every few. The
-  gateway's window moves to the operator's five minutes because a
-  barrier waiting for the fence (up to 150 s) holds its writer's
-  heartbeat back. `flint_lean::lease::HEARTBEAT_SECS` names the interval.
-
 - **lean: the publish fence is held per BARRIER, with a FIFO ticket —
   several writers share one workspace and none waits for another's
   lifetime.** The lease used to be claimed before checkout and held for
@@ -242,6 +229,37 @@ covered by the stability guarantee.
   full-object CRC-64/NVME at `CompleteMultipartUpload`.
 
 ### Removed
+
+- **lean: the writer heartbeat.** Every syncer PUT
+  `.flint/lean/writers/<id>` every min(floor, 30) s — one PUT every 5 s
+  per idle writer at a 5 s floor — and nothing that fences read it: the
+  publish fence detects a dead holder from its own cell, and agents read
+  `.flint/remote.seq` locally. What goes with it:
+  - `flint-lean`: `lease::heartbeat`, `retire_heartbeat`, `live_writers`,
+    `WriterHeartbeat`, `LeanConfig::writers_prefix`/`writer_key`; and
+    `inbox::hitl_may_overwrite` loses its `writer_stale_secs` argument
+    and its "no writer is live" escape. An untracked object at a key is
+    now writable only after `UNTRACKED_GRACE_SECS` (600 s), so a UI write
+    over a crashed writer's orphan upload answers 409 `concurrent-write`
+    for up to ten minutes. Neither escape carried safety: the uploading
+    writer's commit re-reads its own citations and withholds one whose
+    object moved (the model's `LeanBarrierLeaseHitlOverAnyVerified`).
+  - `flint-lean-gateway`: `WRITER_STALE_SECS` and `Status.writers`.
+    `wait_cited` no longer refuses at once when no writer is live — the
+    bucket cannot tell a dead syncer from an idle one — and answers 202
+    `citation-pending` when the caller's timeout passes.
+  - The operator's `status.observedWriters` (and the field in the CRD):
+    the operator has no link from pods to a workspace to count instead.
+    `SyncerObserved` still names the binary that ran the last boundary.
+  - An idle writer never claims, so the heartbeat was its only probe of
+    its own credentials; the floor tick now records and clears
+    `authPausedSinceUnix` instead.
+
+  Heartbeat objects older syncers wrote stay in buckets until deleted;
+  nothing reads them. Upgrade the gateway with the syncers: an older
+  gateway reads no heartbeats from new syncers, so its `wait_cited`
+  refuses at once and its overwrite rule treats every uncited upload as
+  an orphan.
 
 - **lean: gated mode, and the mode axis with it.** `boundaryMode` was
   three names for two behaviours — the code never had a cadence branch,

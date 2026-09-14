@@ -23,48 +23,10 @@ fn ws(store: &Arc<dyn ObjectStore>) -> Workspace {
 }
 
 /// A syncer's lease on the workspace, so the epoch-validated verbs
-/// have a cell to validate against, PLUS the heartbeat that makes it
-/// look alive. Returns the epoch.
+/// have a cell to validate against. Returns the epoch.
 async fn hold_lease(store: &Arc<dyn ObjectStore>, w: &Workspace) -> u64 {
     let lease = store.epoch_acquire(&w.config().epoch_key(), "syncer-1", None).await.unwrap();
-    beat(store, w, "syncer-1").await;
     lease.epoch
-}
-
-/// The liveness the gateway reads is a writer's HEARTBEAT, not the
-/// cell. The fence is held per barrier (design 2026-09-13 sec 4), so
-/// the cell is at rest between barriers and a held cell proves nothing
-/// about a live syncer — a fixture that wants to look like one must
-/// leave a heartbeat.
-async fn beat(store: &Arc<dyn ObjectStore>, w: &Workspace, holder: &str) {
-    let body = Bytes::from(
-        serde_json::to_vec(&flint_lean::lease::WriterHeartbeat {
-            holder_id: holder.to_string(),
-            unix: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-            echo: None,
-        })
-        .unwrap(),
-    );
-    let crc = crc64_nvme(&body);
-    store
-        .put_whole(
-            &w.config().writer_key(holder),
-            body,
-            &flint_store::PutCondition::Unconditional,
-            &flint_store::GenerationStamps {
-                generation: 0,
-                epoch: 0,
-                flush_uuid: "heartbeat".into(),
-                boundary_source: None,
-                posix: None,
-            },
-            crc,
-        )
-        .await
-        .unwrap();
 }
 
 /// What the syncer's barrier does after consuming the inbox, in one
@@ -200,9 +162,7 @@ async fn a_cited_file_reads_through_the_manifest_and_wait_cited_sees_the_citatio
     let etag = w.put_file("a.txt", Bytes::from("one"), &PutFile::default()).await.unwrap();
 
     // Nobody has cited it: the wait says so within the bound, and the
-    // write is still readable meanwhile. The syncer is ALIVE here
-    // (hold_lease left a heartbeat), so this is the deadline's refusal,
-    // not the no-writer one.
+    // write is still readable meanwhile.
     let err = w
         .wait_cited("a.txt", &etag, Duration::from_millis(400), Duration::from_millis(50))
         .await
@@ -241,42 +201,30 @@ async fn a_cited_file_reads_through_the_manifest_and_wait_cited_sees_the_citatio
     assert_eq!(w.get_file("a.txt").await.unwrap().etag, etag);
 }
 
+/// With no syncer anywhere — no lease cell, nothing cited — the wait
+/// runs its own clock down and answers 202 `citation-pending`, and the
+/// write stays readable. It used to refuse at once when no writer had a
+/// heartbeat; the heartbeat is gone, and the bucket cannot tell a dead
+/// syncer from an idle one, so the caller's timeout is the only bound.
 #[tokio::test]
-async fn wait_cited_refuses_at_once_when_no_syncer_is_alive() {
+async fn wait_cited_with_no_syncer_waits_out_its_timeout_and_answers_pending() {
     let s = store();
     let w = ws(&s);
     let etag = w.put_file("a.txt", Bytes::from("one"), &PutFile::default()).await.unwrap();
     let t0 = std::time::Instant::now();
     let err = w
-        .wait_cited("a.txt", &etag, Duration::from_secs(30), Duration::from_secs(1))
-        .await
-        .unwrap_err();
-    assert!(t0.elapsed() < Duration::from_secs(2), "must not run the 30 s clock down");
-    match err {
-        VerbError::CitationPending { reason, .. } => {
-            assert!(reason.contains("no live syncer"), "{reason}")
-        }
-        e => panic!("{e}"),
-    }
-
-    // The control, one dimension moved: a heartbeat and NOTHING else —
-    // no lease cell, no citation — and the same call runs its (short)
-    // clock down instead, refusing for the other reason. Without this
-    // the assertion above would pass on a wait_cited that refused
-    // everything.
-    beat(&s, &w, "syncer-1").await;
-    let t1 = std::time::Instant::now();
-    let err = w
         .wait_cited("a.txt", &etag, Duration::from_millis(400), Duration::from_millis(50))
         .await
         .unwrap_err();
-    assert!(t1.elapsed() >= Duration::from_millis(400), "a live writer must be waited for");
+    assert!(t0.elapsed() >= Duration::from_millis(400), "refused before the caller's timeout");
+    assert_eq!((err.status(), err.code()), (202, "citation-pending"));
     match err {
         VerbError::CitationPending { reason, .. } => {
             assert!(reason.contains("did not cite it"), "{reason}")
         }
         e => panic!("{e}"),
     }
+    assert_eq!(w.get_file("a.txt").await.unwrap().body, Bytes::from("one"));
 }
 
 #[tokio::test]
@@ -946,13 +894,13 @@ async fn a_read_of_an_unmodified_cited_file_never_fetches_the_inbox() {
 /// cited yet (the object is neither the manifest's citation nor an inbox
 /// entry): 409 `concurrent-write`, retry-after 2, the object untouched.
 /// Once the commit cites that version, the same write succeeds. And an
-/// untracked object with no live writer anywhere is an orphan, which a
-/// write may overwrite.
+/// untracked object is an orphan once it has sat untracked past
+/// `UNTRACKED_GRACE_SECS` — refused while younger, writable after.
 #[tokio::test]
 async fn a_blind_write_over_an_uncited_upload_is_refused_until_it_is_cited() {
     let s = store();
     let w = ws(&s);
-    let epoch = hold_lease(&s, &w).await; // also leaves a live heartbeat
+    let epoch = hold_lease(&s, &w).await;
     let seed = w.put_file("a.txt", Bytes::from("seed"), &PutFile::default()).await.unwrap();
     cite(&w, epoch, 1, "a.txt", &seed, b"seed").await;
     let entries = w.snapshot().await.unwrap().inbox.entries;
@@ -988,10 +936,13 @@ async fn a_blind_write_over_an_uncited_upload_is_refused_until_it_is_cited() {
     let opts = PutFile { if_match: Some(uploaded.etag.clone()), ..Default::default() };
     w.put_file("a.txt", Bytes::from("from the UI"), &opts).await.expect("the retry over a cited version");
 
-    // An orphan: an untracked object and NO live writer.
-    let orphan_ws = Workspace::new(s.clone(), "tenant/orphaned");
+    // An orphan: an untracked object a dead writer left. Refused while it
+    // is younger than the grace — no process can tell a dead writer from
+    // a slow one — and writable once it has aged past it.
+    let mem = Arc::new(MemoryStore::new());
+    let orphan_ws = Workspace::new(mem.clone() as Arc<dyn ObjectStore>, "tenant/orphaned");
     let okey = orphan_ws.config().file_key("b.txt");
-    s.put_whole(
+    mem.put_whole(
         &okey,
         Bytes::from("a dead writer's upload"),
         &flint_store::PutCondition::IfNoneMatchAny,
@@ -1001,7 +952,10 @@ async fn a_blind_write_over_an_uncited_upload_is_refused_until_it_is_cited() {
     .await
     .unwrap();
     let force = PutFile { if_match: Some("*".into()), ..Default::default() };
-    orphan_ws.put_file("b.txt", Bytes::from("from the UI"), &force).await.expect("an orphan is writable");
+    let err = orphan_ws.put_file("b.txt", Bytes::from("from the UI"), &force).await.unwrap_err();
+    assert!(matches!(err, VerbError::ConcurrentWrite), "a young orphan: {err}");
+    mem.backdate_epoch(&okey, flint_lean::inbox::UNTRACKED_GRACE_SECS + 60);
+    orphan_ws.put_file("b.txt", Bytes::from("from the UI"), &force).await.expect("an aged orphan is writable");
 }
 
 

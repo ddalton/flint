@@ -98,10 +98,9 @@ pub struct RemovalPass {
 /// still saturates fan-out and the sync point between chunks is rare.
 const UPLOAD_CHUNK_WAVES: usize = 16;
 
-/// How stale the lease may get inside a barrier before it is renewed.
-/// Deliberately BELOW the run loop's `renew_every` (min(floor, 30) s) so
-/// a long barrier keeps the same heartbeat cadence the loop would have,
-/// and comfortably below the 6-poll (~60 s) takeover window.
+/// How stale the lease may get inside a barrier before it is renewed:
+/// comfortably below the 6-poll (~60 s) takeover window, so a holder
+/// busy in a long commit section never reads as quiet to a waiter.
 const RENEW_WITHIN_SECS: u64 = 20;
 
 impl Syncer {
@@ -780,7 +779,7 @@ impl Syncer {
     ///
     /// Costs nothing on a short barrier: the renewal is skipped unless
     /// it was already due, so the request count is unchanged — this
-    /// moves WHEN the heartbeat can happen, not how often.
+    /// moves WHEN the renewal can happen, not how often.
     ///
     /// What this does NOT do, stated because the previous comment
     /// claimed it did: it never raises `Fenced` for a deposed holder.

@@ -51,8 +51,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
-use flint_store::{EpochLease, EpochState, GenerationStamps, ObjectStore, PutCondition, StoreError};
+use flint_store::{EpochLease, EpochState, ObjectStore, StoreError};
 
 use super::state::Incarnation;
 use super::{manifest, LeanError, LeanResult, Syncer};
@@ -74,14 +73,6 @@ pub const CLAIM_POLL_SECS: u64 = 1;
 /// one wait; a LIVE holder that never releases is a bug, and the
 /// deadline is what keeps it from being a hang.
 pub const CLAIM_DEADLINE_SECS: u64 = 150;
-/// The writer heartbeat's interval (`heartbeat`), fixed and independent
-/// of the floor. Its readers judge staleness in minutes — the gateway
-/// and the operator both at five — and none of them is a fence: the cell
-/// detects a dead holder from its own token, and a stale reading costs
-/// a UI a slower answer or a conflict record, never bytes. It was
-/// min(floor, 30) s, which at a 5 s floor was one PUT every 5 s per idle
-/// writer for readers that look every few minutes.
-pub const HEARTBEAT_SECS: u64 = 60;
 
 pub enum ClaimOutcome {
     /// Fresh, released-for-us, deposed, or adopted: held.
@@ -292,7 +283,7 @@ pub async fn claim_step(sc: &mut Syncer, count: bool) -> LeanResult<ClaimOutcome
 
     // Not ours yet: make sure we are in the queue, ONCE. The enqueue
     // moves the token, so the observation restarts from the token we
-    // wrote — our own append must not read as the holder's heartbeat,
+    // wrote — our own append must not read as the holder's renewal,
     // and it must not reset a count that a rival's append did not.
     let token = if state.waiters.iter().any(|w| w == &inc.holder_id) {
         state.token.clone()
@@ -360,8 +351,8 @@ pub async fn claim(sc: &mut Syncer) -> LeanResult<EpochLease> {
     }
 }
 
-/// What this syncer is OBSERVED to be doing, for the heartbeat and the
-/// cell (boundary-verbs plan §2.6). Computed from local files only — the
+/// What this syncer is OBSERVED to be doing, for the cell's echo
+/// (boundary-verbs plan §2.6). Computed from local files only — the
 /// same store-free discipline as `write_gauges`, and for the same
 /// reason: this rides writes that already happen, so it must not add a
 /// request to the one tick every idle workspace in the fleet pays (leg
@@ -561,90 +552,6 @@ pub async fn release_stale_own(sc: &mut Syncer) -> LeanResult<()> {
         }
     }
     Ok(())
-}
-
-/// The per-writer heartbeat: `<prefix>/.flint/lean/writers/<holder_id>`,
-/// written unconditionally at startup and every `HEARTBEAT_SECS` by the
-/// run loop's own arm. That arm shares the loop with the barrier, so a
-/// barrier that waits for the fence (up to `CLAIM_DEADLINE_SECS`) or
-/// uploads for minutes holds its writer's heartbeat back for as long —
-/// which is why the readers' windows are minutes. With the cell at rest
-/// between barriers this is the ONLY liveness a reader can see — the
-/// operator's `observedWriters` and the gateway's "is anyone here to
-/// cite it" both read this prefix. One small PUT per interval per
-/// writer.
-pub async fn heartbeat(sc: &mut Syncer) -> LeanResult<()> {
-    let inc = incarnation(sc)?;
-    let key = sc.cfg.writer_key(&inc.holder_id);
-    let body = Bytes::from(
-        serde_json::to_vec(&WriterHeartbeat {
-            holder_id: inc.holder_id.clone(),
-            unix: super::now_unix(),
-            echo: observed_echo(sc),
-        })
-        .map_err(|e| LeanError::State(format!("heartbeat: {e}")))?,
-    );
-    let crc = flint_store::crc64_nvme(&body);
-    let stamps = GenerationStamps {
-        generation: 0,
-        epoch: inc.epoch,
-        flush_uuid: "heartbeat".into(),
-        boundary_source: None,
-        posix: None,
-    };
-    match sc.store.put_whole(&key, body, &PutCondition::Unconditional, &stamps, crc).await {
-        Ok(_) => {
-            let _ = sc.clear_auth_pause();
-            Ok(())
-        }
-        Err(e @ StoreError::Auth(_)) => {
-            let _ = sc.note_auth_pause();
-            Err(e.into())
-        }
-        Err(e) => Err(e.into()),
-    }
-}
-
-/// Clean shutdown: take the heartbeat down so readers stop counting
-/// this writer at once instead of after it goes stale. Best effort.
-pub async fn retire_heartbeat(sc: &Syncer) -> LeanResult<()> {
-    let inc = incarnation(sc)?;
-    match sc.store.delete(&sc.cfg.writer_key(&inc.holder_id)).await {
-        Ok(()) | Err(StoreError::NotFound(_)) => Ok(()),
-        Err(e) => Err(e.into()),
-    }
-}
-
-/// The heartbeat object's body. `echo` is the same `LeaseEcho` the cell
-/// carries, so one parser serves both.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct WriterHeartbeat {
-    pub holder_id: String,
-    pub unix: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub echo: Option<String>,
-}
-
-/// Writers whose heartbeat is fresher than `stale_secs` by the STORE's
-/// clock, for the operator and the gateway. `now` is the caller's
-/// clock; compare generously (the callers pass minutes, not seconds) —
-/// a node clock behind the store's reads a live writer as stale, never
-/// as live, so the error is on the safe side.
-pub async fn live_writers(
-    store: &dyn ObjectStore,
-    cfg: &super::LeanConfig,
-    now: u64,
-    stale_secs: u64,
-) -> LeanResult<Vec<String>> {
-    let prefix = cfg.writers_prefix();
-    let mut out = vec![];
-    for o in store.list(&prefix).await? {
-        let fresh = o.last_modified_unix.map(|t| now.saturating_sub(t) <= stale_secs).unwrap_or(true);
-        if fresh {
-            out.push(o.key.trim_start_matches(&prefix).to_string());
-        }
-    }
-    Ok(out)
 }
 
 // An observed cell, re-exported for the callers that fence on one.

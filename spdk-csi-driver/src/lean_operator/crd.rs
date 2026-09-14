@@ -369,7 +369,7 @@ pub struct FlintLeanWorkspaceStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Vec<LeanCondition>>,
 
-    // ── observed, from the live syncer's lease-heartbeat echo ───────
+    // ── observed, from the lease cell's echo of the last barrier ────
     //    Every field below reports what the RUNNING binary says, never
     //    what the spec asked for. That distinction is the whole point:
     //    an old syncer reads a FIXED env list, so a knob it predates is
@@ -380,11 +380,6 @@ pub struct FlintLeanWorkspaceStatus {
     /// The last manifest seq the syncer cited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cited_seq: Option<u64>,
-    /// Writers with a heartbeat within the last five minutes. The lease
-    /// is held per barrier, so several writers can share a workspace and
-    /// each shows here; the cell alone names only the last boundary's.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observed_writers: Option<u64>,
 }
 
 /// A metav1.Condition mirror (same field names, same semantics) — the

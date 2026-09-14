@@ -238,7 +238,7 @@ strict_run $M LeanBarrierLeaseDeposal.cfg "barrier lease, takeover world: A free
 strict_run $M LeanBarrierLeaseEpochOnly.cfg "barrier lease, rotation OFF: per-request epoch validation alone fences the deposed holder"
 strict_run $M LeanBarrierLeaseRotationOnly.cfg "barrier lease, epoch-check OFF: rotation alone fences the deposed holder's CAS"
 strict_run $M LeanBarrierLeaseAdoptVerified.cfg "barrier lease: an ADOPTED entry re-verified under the lease survives the other writer's GC (the control for the adopt race)"
-strict_run $M LeanBarrierLeaseHitlOverAnyVerified.cfg "barrier lease: a UI write may overwrite ANY current object and is still never lost -- the uploader's commit re-reads its citation (so the gateway's untracked-object escapes, the heartbeat's included, carry no safety)"
+strict_run $M LeanBarrierLeaseHitlOverAnyVerified.cfg "barrier lease: a UI write may overwrite ANY current object and is still never lost -- the uploader's commit re-reads its citation (so the gateway's untracked-object escapes carry no safety -- which is why the writer heartbeat could go)"
 strict_run $M LeanBarrierLeaseSameBytesVerified.cfg "barrier lease, identical bytes share an etag: every citation the commit adds is re-verified under the lease (the control for finding 13)"
 strict_run $M LeanBarrierLeaseSyncOverlayHolds.cfg "barrier lease: a sync keeps its merge base for a path an older inbox entry hid (SyncKeepsHiddenBase, sync.rs step 5) -- the control for the overlay finding"
 strict_run $M LeanBarrierLeaseLive.cfg "LIVENESS (FairSpec): with the ticket, every queued writer eventually holds the cell"

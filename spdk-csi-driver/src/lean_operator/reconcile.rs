@@ -179,11 +179,6 @@ pub struct WorkspaceReport {
     pub conditions: Vec<LeanCondition>,
     pub observed_syncer_version: Option<String>,
     pub cited_seq: Option<u64>,
-    /// Writers with a heartbeat within the last five minutes. The lease
-    /// is held per barrier (design 2026-09-13 §4), so the cell says who
-    /// ran the LAST boundary and nothing about who is alive; the
-    /// heartbeats do, and two writers on one workspace show as two.
-    pub observed_writers: Option<u64>,
 }
 
 /// One operator pass over a workspace.
@@ -296,20 +291,6 @@ pub async fn full_pass(
     boundary::set_condition(
         &mut r.conditions,
         boundary::syncer_observed(echo.as_ref(), released, generation, echo_unparseable),
-    );
-    // 4. Who is ALIVE: one LIST of the writers' heartbeats. The cell is
-    //    at rest between barriers, so its `released` says nothing about
-    //    liveness any more; a heartbeat fresher than five minutes does.
-    r.observed_writers = Some(
-        boundary::live_writers(
-            store.as_ref(),
-            prefix,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-        )
-        .await?,
     );
     if let Some(e) = &echo {
         r.observed_syncer_version = Some(e.syncer_version.clone());

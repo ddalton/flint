@@ -126,8 +126,8 @@ impl Syncer {
     }
 
     /// Clear the pause. Writes only on an actual transition: this runs
-    /// on every successful renewal, and the healthy path must not
-    /// rewrite the file every heartbeat for no change.
+    /// on every successful renewal and floor tick, and the healthy path
+    /// must not rewrite the file every tick for no change.
     pub fn clear_auth_pause(&self) -> LeanResult<()> {
         let mut g = self.load_gauges()?;
         if g.auth_paused_since_unix.is_some() {

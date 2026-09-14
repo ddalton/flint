@@ -171,8 +171,8 @@ kubectl -n agents get flintleanworkspace proj1 -o yaml | grep -A6 conditions
 You want `SpecAccepted: True`. `SyncerObserved: Unknown`
 with reason `NoLiveSyncer` is normal for a workspace no pod has ever
 published; once one has, the condition names the binary that ran the
-last boundary, and `observedWriters` counts the pods with a live
-heartbeat (several pods may share one workspace).
+last boundary (several pods may share one workspace; the status does not
+count them).
 
 ---
 

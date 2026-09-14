@@ -475,8 +475,8 @@ emit LeanBarrierLeaseHitlOverUncited "Inv_HITLDurable" $BLSENT HitlOverwritesTra
 # After 79e7dac9 the tracked-only rule is no longer what saves the UI
 # write: the uploader's commit re-reads its own citation and withholds
 # it.  The pair below lets the gateway overwrite ANY current object —
-# a superset of its untracked-object escapes (the grace, and "no writer
-# has a live heartbeat", which is why the heartbeat carries no safety)
+# a superset of its untracked-object escapes (the grace, and until the
+# heartbeat was removed, "no writer has a live heartbeat")
 # — with the sentinel off so the strict half exhausts on a laptop.  The
 # control is the same world without the re-read: finding 4 again.
 BLOVER="$BLSENT SentinelEnabled=FALSE MaxTouches=0 HitlOverwritesTrackedOnly=FALSE"

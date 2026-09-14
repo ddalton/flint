@@ -11,7 +11,7 @@
 //! bytes wherever it pointed, inside the credential-holding syncer's
 //! own mount namespace. The scanner skips symlinks, so the plant is
 //! invisible; `.flint/remote.seq` is rewritten every tick, so the
-//! syncer's own heartbeat is a sufficient trigger.
+//! syncer's own tick is a sufficient trigger.
 //!
 //! The rule is therefore not "validate the target" but **every path the
 //! write touches**:

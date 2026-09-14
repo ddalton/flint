@@ -144,7 +144,6 @@ async fn reconcile(ws: Arc<FlintLeanWorkspace>, ctx: Arc<Ctx>) -> Result<Action,
         conditions: Some(conditions),
         observed_syncer_version: report.observed_syncer_version.clone(),
         cited_seq: report.cited_seq,
-        observed_writers: report.observed_writers,
     };
     let api: Api<FlintLeanWorkspace> = Api::namespaced(ctx.client.clone(), &ns);
     api.patch_status(

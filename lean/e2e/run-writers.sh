@@ -313,17 +313,17 @@ w6_reader_never_claims() {
 
 # ─────────────────────────────────────────────────────────────────────
 # W7  The run loop: two writers in `run` for a minute — both publish on
-#     the floor, both heartbeats are listed, a SIGTERM drain retires the
-#     heartbeat and hands the fence on.
+#     the floor, neither writes a heartbeat (removed 2026-09-14: nothing
+#     that fences read it), and a SIGTERM drain hands the fence on.
 # ─────────────────────────────────────────────────────────────────────
-w7_run_loop_heartbeats_and_drain() {
+w7_run_loop_floor_and_drain() {
   local P=tenants/w7 R=/work/w7 pod
   for pod in chaos-a chaos-s; do
     sy_bg $pod $P $R /work/w7.log "FLINT_SYNC_FLOOR_SECS=5" run
   done
   sleep 12
-  [ "$(writers "$P")" -eq 2 ] || { bad "$(writers "$P") heartbeats listed, want 2"; return 1; }
-  ok "two writer heartbeats under .flint/lean/writers/"
+  [ "$(writers "$P")" -eq 0 ] || { bad "$(writers "$P") objects under .flint/lean/writers/, want none"; return 1; }
+  ok "two running writers, no heartbeat objects"
   inpod chaos-a "echo a > $R/a.txt" > /dev/null
   inpod chaos-s "echo s > $R/s.txt" > /dev/null
   sleep 14
@@ -335,13 +335,12 @@ w7_run_loop_heartbeats_and_drain() {
   inpod chaos-a "kill -TERM \$(pidof flint-sync)" > /dev/null
   await_exit chaos-a flint-sync 30 || { bad "A did not exit on SIGTERM"; return 1; }
   has "final drain barrier" "$(inpod chaos-a "cat /work/w7.log")" || { bad "no drain in A's log"; return 1; }
-  [ "$(writers "$P")" -eq 1 ] || { bad "$(writers "$P") heartbeats after A's drain, want 1"; return 1; }
   [ "$(cell_field "$P" released)" = "true" ] || { bad "A's drain left the fence held"; return 1; }
-  ok "A drained: heartbeat retired, fence handed on; B still listed"
+  ok "A drained: fence handed on"
   inpod chaos-s "kill -TERM \$(pidof flint-sync)" > /dev/null
   await_exit chaos-s flint-sync 30 || { bad "B did not exit"; return 1; }
-  [ "$(writers "$P")" -eq 0 ] || { bad "heartbeats remain after both drained"; return 1; }
-  ok "both drained; no heartbeat remains"
+  [ "$(writers "$P")" -eq 0 ] || { bad "objects under .flint/lean/writers/ after both drained"; return 1; }
+  ok "both drained; still no heartbeat objects"
 }
 
 # ─────────────────────────────────────────────────────────────────────
@@ -351,7 +350,7 @@ leg "W3  same-path edit preserved"                          w3_same_path_preserv
 leg "W4  three writers in a hot loop"                       w4_three_writers_hot_loop
 leg "W5  a mid-commit stall is deposed and fenced"          w5_mid_commit_stall_is_deposed
 leg "W6  a reader never claims"                             w6_reader_never_claims
-leg "W7  run loop: heartbeats, floor, drain"                w7_run_loop_heartbeats_and_drain
+leg "W7  run loop: no heartbeat, floor, drain"              w7_run_loop_floor_and_drain
 
 echo
 echo "writers drill: $PASS passed, $FAILED failed"

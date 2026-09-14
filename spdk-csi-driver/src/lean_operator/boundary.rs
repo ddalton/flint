@@ -132,25 +132,6 @@ pub fn syncer_observed(
     }
 }
 
-/// Writers with a heartbeat fresher than `WRITER_STALE_SECS` by the
-/// store's clock — one LIST of `<prefix>/.flint/lean/writers/`. The
-/// comparison is the store's Last-Modified against this process's
-/// clock, so the threshold is minutes, not beats: a node clock behind
-/// the store's under-counts, never over-counts.
-pub const WRITER_STALE_SECS: u64 = 300;
-
-pub async fn live_writers(
-    store: &dyn flint_store::ObjectStore,
-    prefix: &str,
-    now: u64,
-) -> Result<u64, flint_store::StoreError> {
-    let listed = store.list(&format!("{prefix}/.flint/lean/writers/")).await?;
-    Ok(listed
-        .iter()
-        .filter(|o| o.last_modified_unix.map(|t| now.saturating_sub(t) <= WRITER_STALE_SECS).unwrap_or(true))
-        .count() as u64)
-}
-
 /// Upsert a condition, preserving `lastTransitionTime` unless the status
 /// actually changed — so the timestamp means what it says instead of
 /// "when we last reconciled".

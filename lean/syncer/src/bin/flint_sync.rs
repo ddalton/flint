@@ -34,8 +34,9 @@
 //!              No lease is held between barriers: each barrier claims
 //!              the publish fence for its commit section only (after
 //!              its uploads) and hands it to the next waiter, so a second
-//!              writer on the workspace is Ready in checkout time. A
-//!              per-writer heartbeat object carries liveness instead.
+//!              writer on the workspace is Ready in checkout time.
+//!              Nothing marks a writer live between barriers: the cell
+//!              detects a dead holder from its own token.
 //!
 //! Environment:
 //!   FLINT_SYNC_BUCKET    (required) bucket name
@@ -465,9 +466,6 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
     if let Err(e) = lease::release_stale_own(sc).await {
         eprintln!("flint-sync: could not release a fence left held by a previous container: {e}");
     }
-    if let Err(e) = lease::heartbeat(sc).await {
-        log_retry(sc, &e, "first heartbeat failed (retrying)");
-    }
     // This incarnation owes its own drain attestation; one left by an
     // earlier life of this tree must not vouch for it.
     if let Err(e) = sc.state.clear_drained() {
@@ -516,8 +514,8 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
 
     // D15's exposition, opt-in and DEGRADING. The agent container is
     // the likely occupant of any well-known port, so a collision must
-    // leave the workspace fully operable — gauges.json, the heartbeat
-    // echo and `flint-sync status` remain the authority for every
+    // leave the workspace fully operable — gauges.json, the lease
+    // cell's echo and `flint-sync status` remain the authority for every
     // operational decision, and /metrics is additive.
     {
         let enabled = std::env::var("FLINT_SYNC_METRICS").ok().as_deref() == Some("true");
@@ -557,7 +555,7 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
                 Err(e) => {
                     eprintln!(
                         "flint-sync: /metrics NOT exposed on {addr} ({e}) — the workspace is \
-                         unaffected; gauges.json and the heartbeat echo remain authoritative"
+                         unaffected; gauges.json and the lease cell's echo remain authoritative"
                     );
                     posture.error = Some(e.to_string());
                 }
@@ -594,38 +592,27 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("SIGTERM handler");
 
-    // D3/D12: three INDEPENDENT, non-resettable interval timers.
+    // D3/D12: INDEPENDENT, non-resettable interval timers.
     //
     // The shipped loop recreated `sleep(floor)` inside `select!` on
-    // every iteration and ran the liveness write only from that arm — so
-    // a third arm completing every second would win every iteration,
-    // perpetually reset the floor sleep, and liveness would NEVER be
-    // written. Independent intervals make no arm's readiness able to
-    // starve another.
+    // every iteration — so a second arm completing every second would
+    // win every iteration and perpetually reset the floor sleep.
+    // Independent intervals make no arm's readiness able to starve
+    // another. (There was a third, the writer heartbeat, until
+    // 2026-09-14: nothing that fences read it, and the floor tick is
+    // what probes our credentials now.)
     let floor = Duration::from_secs(sc.cfg.floor_secs.max(1));
-    // The heartbeat is decoupled from publish cadence entirely: it is
-    // what the operator's `observedWriters` and the gateway's "is anyone
-    // here to cite it" read, and they judge staleness in minutes.
-    let heartbeat_every = Duration::from_secs(lease::HEARTBEAT_SECS);
     let poll_every = Duration::from_secs(sc.cfg.sentinel_poll_secs.max(1));
 
     let mut floor_iv = tokio::time::interval(floor);
-    let mut renew_iv = tokio::time::interval(heartbeat_every);
     let mut poll_iv = tokio::time::interval(poll_every);
-    for iv in [&mut floor_iv, &mut renew_iv, &mut poll_iv] {
+    for iv in [&mut floor_iv, &mut poll_iv] {
         iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         iv.reset(); // consume the immediate first tick
     }
 
     loop {
         tokio::select! {
-            _ = renew_iv.tick() => {
-                // Liveness signaling, independent of publish cadence:
-                // one unconditional PUT of this writer's heartbeat.
-                if let Err(e) = sc.heartbeat_tick().await {
-                    log_retry(&sc, &e, "heartbeat failed (retrying)");
-                }
-            }
             _ = floor_iv.tick() => {
                 match sc.floor_tick().await {
                     Ok(o) if !o.no_change || !o.acks.is_empty() => eprintln!(
@@ -712,8 +699,8 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
                 // three attempts and for as long as the budget allows;
                 // and the OUTCOME is attested rather than implied
                 // (audit 2026-09-03, finding 3). On success the marker
-                // is written and the heartbeat retired. On failure
-                // neither happens: the absent marker is what makes the
+                // is written. On failure it is
+                // not: the absent marker is what makes the
                 // node plugin PRESERVE the tree instead of removing it
                 // with the pod. A fence inside the drain's commit section
                 // is one more failed attempt — the drain's barrier
@@ -741,7 +728,6 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
                         if let Err(e) = sc.state.write_drained(seq, acks.len()) {
                             eprintln!("flint-sync: drain published but its attestation could not be written: {e}");
                         }
-                        let _ = lease::retire_heartbeat(sc).await;
                         return Ok(());
                     }
                     Err(e) => {
