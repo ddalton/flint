@@ -9204,6 +9204,120 @@ async fn the_fence_costs_a_publishing_boundary_four_cell_requests_and_an_idle_on
     assert_eq!(ops.get("epoch_enqueue"), None, "{ops:?}");
 }
 
+/// A PULL-ONLY boundary — the manifest moved, and this writer has nothing
+/// of its own to publish, delete, consume or re-cite — writes nothing to
+/// the bucket: its merge adds nothing, so there is no CAS, no GC and no
+/// inbox entry to drop, and what is left (queue the peer's change, move
+/// the merge base) is local. It must not queue for the cell or open the
+/// window HITL writers wait on for that. In the writers drill 65 of 191
+/// claims were pull-only.
+#[tokio::test]
+async fn a_pull_only_boundary_takes_no_fence_and_writes_nothing() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "x.txt", "seed");
+    write(dir_a.path(), "gone.txt", "A deletes this");
+    a.floor_tick().await.unwrap();
+    b.checkout().await.unwrap();
+    b.floor_tick().await.unwrap();
+
+    write(dir_a.path(), "x.txt", "A's v2");
+    backdate_baseline(&a, "x.txt");
+    std::fs::remove_file(dir_a.path().join("gone.txt")).unwrap();
+    a.declared_barrier().await.unwrap();
+    let seq_a = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.seq;
+
+    store.reset_op_counts();
+    let pulled = b.floor_tick().await.unwrap();
+    let ops = store.op_counts();
+    eprintln!("a pull-only boundary: {ops:?}");
+    assert!(!ops.keys().any(|k| k.starts_with("epoch_")), "a pull-only boundary touched the cell: {ops:?}");
+    let writes: Vec<_> =
+        ops.keys().filter(|k| !matches!(**k, "get_whole" | "get_range" | "head" | "list")).collect();
+    assert!(writes.is_empty(), "a pull-only boundary wrote to the bucket: {ops:?}");
+    assert_eq!(pulled.seq, Some(seq_a), "{pulled:?}");
+    let queued = b.state.load_foreign_queue().unwrap();
+    assert!(queued.iter().any(|c| c.path == "x.txt" && c.etag.is_some()), "A's edit was not queued: {queued:?}");
+    assert!(queued.iter().any(|c| c.path == "gone.txt" && c.etag.is_none()), "A's delete was not queued: {queued:?}");
+
+    // It converges exactly as the fenced path did, and installs nothing.
+    b.floor_tick().await.unwrap();
+    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("A's v2"));
+    assert_eq!(read(dir_b.path(), "gone.txt"), None);
+    let t = b.load_remote_seq();
+    assert_eq!(t.observed_seq, t.integrated_seq, "{t:?}");
+    assert_eq!(manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.seq, seq_a, "B installed a generation");
+
+    // And B publishing for real afterwards still takes the fence.
+    write(dir_b.path(), "b.txt", "B's own");
+    store.reset_op_counts();
+    let busy = b.floor_tick().await.unwrap();
+    assert_eq!(busy.uploaded, 1);
+    assert_eq!(store.op_counts().get("epoch_acquire").copied(), Some(1), "a publishing boundary skipped the fence");
+}
+
+/// The interleaving the fence used to rule out for a pull-only boundary:
+/// B pulls INSIDE A's commit section — after A's manifest CAS, before its
+/// GC delete and its window clear. B reads a committed document, so the
+/// change it queues and the base it takes are A's installed ones; A's GC
+/// removes only what that document no longer cites.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pull_only_boundary_inside_a_peers_commit_section_converges() {
+    let inner = Arc::new(MemoryStore::new());
+    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = hooked_syncer(&ha, dir_a.path());
+    let mut b = syncer(&inner, dir_b.path()).await;
+    // A claim B was not meant to make fails at once instead of waiting on A.
+    b.cfg.claim_deadline_secs = 0;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "p.txt", "seed");
+    write(dir_a.path(), "q.txt", "A deletes this");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+
+    write(dir_a.path(), "p.txt", "A's v2");
+    backdate_baseline(&a, "p.txt");
+    std::fs::remove_file(dir_a.path().join("q.txt")).unwrap();
+    let b_slot = std::sync::Mutex::new(Some(b));
+    let b_done: Arc<std::sync::Mutex<Option<(Syncer, std::collections::BTreeMap<&'static str, u64>)>>> = Default::default();
+    let b_done_in = b_done.clone();
+    let (cfg, probe) = (a.cfg.clone(), inner.clone());
+    ha.before_delete(&a.cfg.file_key("q.txt"), move || {
+        let mut b = b_slot.lock().unwrap().take().expect("hook ran twice");
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let m = manifest::load(probe.as_ref(), &cfg).await.unwrap().unwrap().manifest;
+                assert!(!m.entries.contains_key("q.txt"), "fixture: A's CAS has not uncited q.txt");
+                let cell = probe.epoch_read(&cfg.epoch_key()).await.unwrap().unwrap();
+                assert!(!cell.released, "fixture: A is not inside its commit section");
+                probe.reset_op_counts();
+                b.floor_tick().await.expect("B's pull inside A's commit section");
+                *b_done_in.lock().unwrap() = Some((b, probe.op_counts()));
+            })
+        });
+    });
+    let ra = a.declared_barrier().await.expect("A's barrier");
+    assert!(ra.deleted.contains(&"q.txt".to_string()), "fixture: {ra:?}");
+    let (mut b, ops) = b_done.lock().unwrap().take().expect("fixture: A's GC never reached q.txt");
+    assert!(!ops.keys().any(|k| k.starts_with("epoch_")), "B's pull touched the cell: {ops:?}");
+
+    for _ in 0..3 {
+        b.floor_tick().await.expect("B's tick");
+        a.floor_tick().await.expect("A's tick");
+    }
+    assert_eq!(read(dir_b.path(), "p.txt").as_deref(), Some("A's v2"));
+    assert_eq!(read(dir_b.path(), "q.txt"), None, "A's delete never reached B");
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(!m.entries.contains_key("q.txt"), "the delete was undone");
+    assert_every_citation_resolves(&inner, &a.cfg, "after the pull inside A's commit").await;
+    let t = b.load_remote_seq();
+    assert_eq!(t.observed_seq, t.integrated_seq, "{t:?}");
+}
+
 /// The wait is bounded: a holder that never hands the cell on turns
 /// into a FAILED barrier at the deadline, retried at the next floor,
 /// never a hang — and its uploads stand, so the retry adopts them by

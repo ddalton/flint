@@ -1189,6 +1189,54 @@ impl Syncer {
             }
         }
 
+        // A PULL-ONLY boundary: nothing uploaded, deleted, consumed, removed
+        // or re-cited, so the merge can only add nothing — and then the
+        // commit section writes nothing to the bucket (no CAS, no GC, no
+        // inbox entry to drop) and what remains is local: queue the other
+        // writers' changes and take theirs as the merge base. That needs no
+        // fence and no window; claiming for it queued every such writer
+        // behind the publishing ones (65 of 191 claims in the writers drill).
+        // A merge that does add something (a mirror flag to restamp, say)
+        // falls through to the commit section.
+        if classified.uploads.is_empty()
+            && classified.deletes.is_empty()
+            && upserts.is_empty()
+            && consumed.is_empty()
+            && removals.applied.is_empty()
+            && observed.is_empty()
+        {
+            let current = manifest::load(self.store.as_ref(), &self.cfg).await?;
+            let m = self.merge_onto(
+                current.as_ref(),
+                prev_installed.as_deref(),
+                &baseline.inst_base,
+                &upserts,
+                &classified.deletes,
+                &parked,
+                &flush_uuid,
+            );
+            if let Some(handle) = m.expected.as_ref().filter(|_| m.adds_nothing()) {
+                if !m.foreign.is_empty() || !m.gone.is_empty() {
+                    self.state.queue_foreign(&foreign_changes(&m.foreign, &m.gone))?;
+                    self.trace("queue", serde_json::json!({"flush": flush_uuid, "upserts": m.foreign.len(), "tombstones": m.gone.len(), "fence": false}));
+                }
+                report.seq = Some(m.theirs.seq);
+                report.no_change = true;
+                report.manifest_etag = Some(handle.etag.clone());
+                report.observed_seq = Some(m.theirs.seq);
+                report.observed_etag = Some(handle.etag.clone());
+                report.foreign_queued = m.foreign.len();
+                baseline.inst_base = m.theirs.entries.iter().map(|(p, e)| (p.clone(), e.etag.clone())).collect();
+                baseline.seq = m.theirs.seq;
+                baseline.manifest_etag = Some(handle.etag.clone());
+                baseline.prev_scan = scanned.keys().cloned().collect();
+                self.state.save_baseline(&baseline)?;
+                self.state.clear_intent_keys()?;
+                self.trace_barrier_end(&report, barrier_started);
+                return Ok(report);
+            }
+        }
+
         // THE COMMIT SECTION (design 2026-09-13 §4). Everything above ran
         // with no lease: the uploads are durable and etag-guarded, and
         // nothing is cited yet. Claim the cell now — for the merge, the
@@ -1294,65 +1342,21 @@ impl Syncer {
                     ));
                 }
                 let current = manifest::load(self.store.as_ref(), &self.cfg).await?;
-                let (theirs, expected) = match &current {
-                    // The handle carries the LAYOUT as well as the tag: a
-                    // workspace still on the legacy single object CASes a
-                    // pointer that must not exist yet, not one it read.
-                    Some(l) => (l.manifest.clone(), Some(l.handle())),
-                    None => (Default::default(), None),
-                };
-                // If the bucket is still at the document THIS workspace
-                // installed, that document IS the merge base — whatever the
-                // persisted one says. Step 7 rewrites the merge base after
-                // the CAS, so a restart in between leaves it behind a
-                // document we wrote, and every entry in it would read as
-                // somebody else's change. See `IntentJournal::installed_etag`.
-                let own_base;
-                let base: &BTreeMap<String, String> =
-                    if prev_installed.is_some()
-                        && prev_installed.as_deref() == expected.as_ref().map(|h| h.etag.as_str())
-                    {
-                        own_base = theirs
-                            .entries
-                            .iter()
-                            .map(|(p, e)| (p.clone(), e.etag.clone()))
-                            .collect();
-                        &own_base
-                    } else {
-                        &baseline.inst_base
-                    };
-                let (mut merged, foreign) =
-                    manifest::merge(base, &theirs, &upserts, &classified.deletes, &parked);
-                // Deletions another writer made since this workspace's
-                // merge base: in the base, gone from theirs, and not this
-                // barrier's own upsert, delete or park. `merge` has no use
-                // for them — theirs already lacks the path — but the TREE
-                // does: they reach it through the local queue, as the
-                // foreign upserts do.
-                let gone: Vec<String> = base
-                    .keys()
-                    .filter(|p| {
-                        !theirs.entries.contains_key(*p)
-                            && !upserts.contains_key(*p)
-                            && !classified.deletes.contains(*p)
-                            && !parked.contains(*p)
-                    })
-                    .cloned()
-                    .collect();
-                // `merge` clears it; the installing pass owns it. A mirror
-                // is a property of how this workspace is DEPLOYED, so it
-                // comes from config on every publish rather than being
-                // inherited from whatever wrote last.
-                merged.sole_writer = self.cfg.sole_writer;
+                let MergeOnto { theirs, expected, merged, foreign, gone } = self.merge_onto(
+                    current.as_ref(),
+                    prev_installed.as_deref(),
+                    &baseline.inst_base,
+                    &upserts,
+                    &classified.deletes,
+                    &parked,
+                    &flush_uuid,
+                );
                 // Nothing of ours changes the document — a barrier that only
                 // found the manifest moved by another writer. Installing it
                 // anyway was an empty generation, and the peer's next tick
                 // then found the manifest moved and did the same: two idle
                 // writers traded generations (and cell claims) for as long
                 // as both ran. Theirs becomes the merge base as it stands.
-                self.trace("merge", serde_json::json!({"flush": flush_uuid, "theirs_seq": theirs.seq, "upserts": upserts.len(),
-                    "deletes": classified.deletes.len(), "foreign": foreign.len(), "gone": gone.len(),
-                    "adds_nothing": merged.entries == theirs.entries}));
                 if let Some(handle) = expected.as_ref() {
                     if merged.entries == theirs.entries && merged.sole_writer == theirs.sole_writer {
                         foreign_entries = foreign;
@@ -2280,4 +2284,86 @@ fn foreign_changes(entries: &[(String, LeanEntry)], gone: &[String]) -> Vec<Fore
         })
         .chain(gone.iter().map(|path| ForeignChange { path: path.clone(), etag: None, crc64_b64: None }))
         .collect()
+}
+
+/// One three-way merge of a barrier's changes onto the bucket's manifest.
+struct MergeOnto {
+    theirs: manifest::LeanManifest,
+    /// The CAS handle over `theirs`; `None` when the bucket has no manifest.
+    expected: Option<manifest::ManifestHandle>,
+    merged: manifest::LeanManifest,
+    /// Other writers' changes since the merge base that the tree lacks.
+    foreign: Vec<(String, LeanEntry)>,
+    /// Other writers' deletions since the merge base.
+    gone: Vec<String>,
+}
+
+impl MergeOnto {
+    /// The merge adds nothing to the document: installing it would be an
+    /// empty generation.
+    fn adds_nothing(&self) -> bool {
+        self.merged.entries == self.theirs.entries && self.merged.sole_writer == self.theirs.sole_writer
+    }
+}
+
+impl Syncer {
+    #[allow(clippy::too_many_arguments)]
+    fn merge_onto(
+        &self,
+        current: Option<&manifest::LoadedManifest>,
+        prev_installed: Option<&str>,
+        inst_base: &BTreeMap<String, String>,
+        upserts: &BTreeMap<String, LeanEntry>,
+        deletes: &BTreeSet<String>,
+        parked: &BTreeSet<String>,
+        flush_uuid: &str,
+    ) -> MergeOnto {
+        let (theirs, expected) = match current {
+            // The handle carries the LAYOUT as well as the tag: a
+            // workspace still on the legacy single object CASes a
+            // pointer that must not exist yet, not one it read.
+            Some(l) => (l.manifest.clone(), Some(l.handle())),
+            None => (Default::default(), None),
+        };
+        // If the bucket is still at the document THIS workspace
+        // installed, that document IS the merge base — whatever the
+        // persisted one says. Step 7 rewrites the merge base after
+        // the CAS, so a restart in between leaves it behind a
+        // document we wrote, and every entry in it would read as
+        // somebody else's change. See `IntentJournal::installed_etag`.
+        let own_base: BTreeMap<String, String>;
+        let base: &BTreeMap<String, String> =
+            if prev_installed.is_some() && prev_installed == expected.as_ref().map(|h| h.etag.as_str()) {
+                own_base = theirs.entries.iter().map(|(p, e)| (p.clone(), e.etag.clone())).collect();
+                &own_base
+            } else {
+                inst_base
+            };
+        let (mut merged, foreign) = manifest::merge(base, &theirs, upserts, deletes, parked);
+        // Deletions another writer made since this workspace's
+        // merge base: in the base, gone from theirs, and not this
+        // barrier's own upsert, delete or park. `merge` has no use
+        // for them — theirs already lacks the path — but the TREE
+        // does: they reach it through the local queue, as the
+        // foreign upserts do.
+        let gone: Vec<String> = base
+            .keys()
+            .filter(|p| {
+                !theirs.entries.contains_key(*p)
+                    && !upserts.contains_key(*p)
+                    && !deletes.contains(*p)
+                    && !parked.contains(*p)
+            })
+            .cloned()
+            .collect();
+        // `merge` clears it; the installing pass owns it. A mirror
+        // is a property of how this workspace is DEPLOYED, so it
+        // comes from config on every publish rather than being
+        // inherited from whatever wrote last.
+        merged.sole_writer = self.cfg.sole_writer;
+        self.trace("merge", serde_json::json!({"flush": flush_uuid, "theirs_seq": theirs.seq, "upserts": upserts.len(),
+            "deletes": deletes.len(), "foreign": foreign.len(), "gone": gone.len(),
+            "adds_nothing": merged.entries == theirs.entries}));
+        MergeOnto { theirs, expected, merged, foreign, gone }
+    }
 }

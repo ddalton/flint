@@ -703,6 +703,17 @@ holds while the queue or the journal is non-empty
 mutation-checked on both arms). The invariant's one-directional
 refinement is still to do.
 
+**After the release (scalability, 2026-09-14):** a PULL-ONLY barrier —
+nothing uploaded, deleted, consumed, removed or re-cited — skips the fence.
+Its merge can only add nothing, so its commit section wrote nothing to the
+bucket; what is left is local (queue the foreign changes, take theirs as
+the merge base). 18 requests (4 cell, 2 inbox writes) become 4 GETs, and
+the drill's 65/191 pull-only claims leave the queue. The one interleaving
+the fence ruled out — a pull between a peer's CAS and its GC/window clear —
+is a test (`a_pull_only_boundary_inside_a_peers_commit_section_converges`).
+The model has no empty-install rule to extend, so this rides the same
+modelling gap as below.
+
 **Not yet modelled:** the writer-local queue and the empty-install rule
 — convergence properties the safety invariants cannot see. The module's
 `foreignQ` still joins the shared inbox at install.

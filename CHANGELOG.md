@@ -12,6 +12,25 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Changed
+
+- **lean: a pull-only boundary no longer queues for the publish fence.**
+  A barrier that found the manifest moved while it had nothing of its
+  own to upload, delete, consume, remove or re-cite still claimed the
+  cell, opened and cleared the window HITL writers wait on, and handed
+  the cell on — to install nothing, since its merge could add nothing.
+  In the writers drill 65 of 191 claims were such barriers. It now takes
+  the other writers' changes into its local queue and their manifest as
+  its merge base without the fence: one such boundary costs 4 GETs where
+  it cost 18 requests (4 of them to the cell, 2 inbox writes), and it
+  never waits behind a publishing writer. A merge that would add
+  something (a mirror flag to restamp) still goes through the commit
+  section. Pinned by `a_pull_only_boundary_takes_no_fence_and_writes_nothing`
+  (fails with the arm disabled) and
+  `a_pull_only_boundary_inside_a_peers_commit_section_converges`, which
+  runs the pull between a peer's manifest CAS and its GC delete — the
+  interleaving the fence used to rule out.
+
 ## [1.52.0] - 2026-09-14
 
 ### Added
