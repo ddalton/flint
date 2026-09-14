@@ -76,7 +76,9 @@ covered by the stability guarantee.
   claims inside like the loop's. `.flint/AGENTS.md` gains a paragraph on
   sharing a workspace (disjoint files merge; a same-file edit is
   last-boundary-wins with the loser preserved and recorded on both
-  sides). Local falsifiers L1–L8 are unit tests (two writers publish at
+  sides); its model's rule 4 no longer says "one writer", and it says
+  that other writers' changes reach the tree at the next boundary or two
+  rather than waiting for a `sync`. Local falsifiers L1–L8 are unit tests (two writers publish at
   once, disjoint edits cross, a same-path edit is preserved, the ticket
   hands the cell to the queue head, a dead handoff is skipped, a dead
   holder mid-commit is deposed and its CAS fenced, readers never write

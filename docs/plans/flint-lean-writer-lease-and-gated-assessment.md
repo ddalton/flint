@@ -672,11 +672,11 @@ the syncer test
 `a_peer_put_over_an_identical_bytes_upload_is_not_cited_as_the_old_version`
 reproduces it (fails with the re-read limited to adopted citations), and the
 same re-read closes it because it compares etags, not presence.
-`LeanBarrierLeaseHolds` holds with the new invariant (21.8M states). Still
-open: the same-bytes write in that richest world
-(`LeanBarrierLeaseSameBytesDeep`) was stopped for disk at depth 19, 30.3M
-states, no violation, and needs the TLC box; the sentinel world has not had
-a same-bytes write and is itself VIOLATED at depth 19
+`LeanBarrierLeaseHolds` holds with the new invariant (21.8M states), and
+the same-bytes write in that richest world (`LeanBarrierLeaseSameBytesDeep`:
+two paths, HITL, crash, restart) holds exhaustively on the TLC box — 382.7M
+distinct states, depth 39, two hours. Still open: the sentinel world has
+not had a same-bytes write and is itself VIOLATED at depth 19
 (`Inv_AckBoundaryCoherent`, an open refinement of the ack stamp —
 `lean/formal/README.md`).
 

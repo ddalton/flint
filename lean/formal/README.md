@@ -30,7 +30,8 @@ over 69 real calls, so the gate at that commit failed its own count
 check — which is what the check is for.) `LeanSubtreeDeep.cfg` is the
 rich-budget breadth run — an opt-in overnight job, not in the gate — and
 `LeanBarrierLeaseSameBytesDeep.cfg` is the same-bytes write in the richest
-barrier-lease world, also opt-in: it does not fit a laptop.
+barrier-lease world, also opt-in: it does not fit a laptop (it HOLDS —
+382,678,936 distinct states, depth 39, two hours on an i4i.2xlarge).
 
 ## The module: LeanChunkGC.tla
 
@@ -688,9 +689,14 @@ checked against it (the `MineIsNotForeign` pattern).
    `LeanBarrierLeaseHolds` (two paths, HITL, crash, restart) holds with it
    too, exhaustively on the Mac: 21,754,734 distinct states, depth 35,
    eight minutes. The same world WITH a same-bytes write and the fix
-   (`LeanBarrierLeaseSameBytesDeep`, opt-in) is not exhausted: stopped for
-   disk at depth 19, 30,265,184 distinct states, 11.6M queued, no violation
-   — after two false positives it surfaced in `Inv_HITLTracked` (below).
+   (`LeanBarrierLeaseSameBytesDeep`, opt-in) stopped on the Mac for disk at
+   depth 19 (30,265,184 distinct states, 11.6M queued, no violation) — after
+   two false positives it surfaced in `Inv_HITLTracked` (below) — and then
+   HOLDS exhaustively on the TLC box (i4i.2xlarge, 8 workers, 40 GB heap,
+   TLC 2.19, 2026-09-14): 1,169,317,179 states generated, 382,678,936
+   distinct, depth 39, two hours and one minute, every `BLINV` invariant
+   including `Inv_NoStaleOverride` and `Inv_HITLTracked` (fingerprint
+   collision estimate 0.0069 from the actual fingerprints).
 
 **The ack under two writers — a refinement, not a finding.** The first
 sentinel run under the barrier lease violated `Inv_AckBoundaryCoherent`

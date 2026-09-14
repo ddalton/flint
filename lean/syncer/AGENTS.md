@@ -22,11 +22,12 @@ to; sentinel protocol 1.
    60) **and on demand**, when you ask for one with the publish verb.
    Ask when you finish a unit of work; do not rely on the cadence for
    anything a reader must see.
-4. **One writer.** This workspace has exactly one syncer, and every
-   process in this pod shares the tree. Nobody else writes to these
-   files live. Contributions from outside (another party through the
-   gateway, or a previous incarnation of this workspace) arrive only at a
-   boundary, and only onto files you have not modified.
+4. **One tree per pod.** This pod has one syncer, and every process in
+   it shares the tree. Nobody outside the pod writes to these files live.
+   Contributions from outside (other agents sharing this workspace, a
+   party writing through the gateway, or a previous incarnation of this
+   workspace) arrive only at a boundary, and only onto files you have not
+   modified; see "Foreign changes at a boundary, and other writers".
 5. **Nothing is silent.** Every file the syncer did not take, and every
    foreign change it declined to apply over yours, is named in a record
    you can read.
@@ -164,10 +165,11 @@ not in a loop.
 ## `sync`: integrate news at a point you choose
 
 The syncer never overwrites a file you modified. News from the bucket
-reaches you two ways: writes queued from outside (the inbox) are applied
-at every boundary onto files you have not modified; everything else (a
-manifest that moved ahead, through another party or a previous
-incarnation of this workspace) waits until you ask for it with `sync`.
+reaches your tree at boundaries, onto files you have not modified:
+writes queued from outside (the inbox) at the next boundary, and changes
+other writers published within a boundary or two of your syncer seeing
+the manifest move. `sync` integrates the bucket's latest manifest now,
+at a point you choose, instead of waiting for that.
 
 `.flint/remote.seq` tells you whether there is news, at zero cost:
 

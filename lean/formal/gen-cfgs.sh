@@ -558,8 +558,8 @@ emit LeanBarrierLeaseSameBytesOverride "Inv_NoStaleOverride" $BLSAME
 emit LeanProbeUploadWithheld "ProbeUploadWithheld" $BLSAME VerifyUploadedCitations=TRUE
 # Opt-in, NOT in the gate (like LeanSubtreeDeep): the same-bytes write in
 # BLWORLD — two paths, HITL, crash, restart — with the fix.  Stopped on the
-# Mac for disk at depth 19, 30,265,184 distinct states and 11.6M queued,
-# no violation; it needs the TLC box.
+# Mac for disk at depth 19; HOLDS on an i4i.2xlarge (8 workers, 40 GB heap):
+# 382,678,936 distinct states, depth 39, 2 h 01 min (2026-09-14).
 emit LeanBarrierLeaseSameBytesDeep "$BLINV" $BLWORLD MaxSameBytes=1 VerifyUploadedCitations=TRUE
 # Liveness: the ticket (falsifier L5) and the dead-handoff skip.
 emit LeanBarrierLeaseLive "TypeOK" $BLLIVE
