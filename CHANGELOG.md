@@ -39,6 +39,19 @@ covered by the stability guarantee.
 
 ### Changed
 
+- **lean: the writer heartbeat is written every 60 s, not every
+  min(floor, 30) s, and the gateway counts a writer live for five
+  minutes instead of three.** Nothing that fences reads the heartbeat
+  (`.flint/lean/writers/<id>`): the publish fence detects a dead holder
+  from its own cell, and agents read `.flint/remote.seq` locally. Its
+  readers — the gateway's "is anyone here to cite it", its overwrite
+  rule for an untracked object, `Status.writers`, and the operator's
+  `observedWriters` — judge staleness in minutes, so at a 5 s floor an
+  idle writer paid one PUT every 5 s for a signal read every few. The
+  gateway's window moves to the operator's five minutes because a
+  barrier waiting for the fence (up to 150 s) holds its writer's
+  heartbeat back. `flint_lean::lease::HEARTBEAT_SECS` names the interval.
+
 - **lean: the publish fence is held per BARRIER, with a FIFO ticket —
   several writers share one workspace and none waits for another's
   lifetime.** The lease used to be claimed before checkout and held for

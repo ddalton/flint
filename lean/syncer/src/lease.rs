@@ -74,6 +74,14 @@ pub const CLAIM_POLL_SECS: u64 = 1;
 /// one wait; a LIVE holder that never releases is a bug, and the
 /// deadline is what keeps it from being a hang.
 pub const CLAIM_DEADLINE_SECS: u64 = 150;
+/// The writer heartbeat's interval (`heartbeat`), fixed and independent
+/// of the floor. Its readers judge staleness in minutes — the gateway
+/// and the operator both at five — and none of them is a fence: the cell
+/// detects a dead holder from its own token, and a stale reading costs
+/// a UI a slower answer or a conflict record, never bytes. It was
+/// min(floor, 30) s, which at a 5 s floor was one PUT every 5 s per idle
+/// writer for readers that look every few minutes.
+pub const HEARTBEAT_SECS: u64 = 60;
 
 pub enum ClaimOutcome {
     /// Fresh, released-for-us, deposed, or adopted: held.
@@ -556,12 +564,15 @@ pub async fn release_stale_own(sc: &mut Syncer) -> LeanResult<()> {
 }
 
 /// The per-writer heartbeat: `<prefix>/.flint/lean/writers/<holder_id>`,
-/// written unconditionally every ≤30 s by the run loop and after every
-/// barrier. With the cell at rest between barriers this is the ONLY
-/// liveness a reader can see — the operator's `observedWriters` and the
-/// gateway's "is anyone here to cite it" both read this prefix. One
-/// small PUT per interval per writer: the same cost the lease renewal
-/// used to be.
+/// written unconditionally at startup and every `HEARTBEAT_SECS` by the
+/// run loop's own arm. That arm shares the loop with the barrier, so a
+/// barrier that waits for the fence (up to `CLAIM_DEADLINE_SECS`) or
+/// uploads for minutes holds its writer's heartbeat back for as long —
+/// which is why the readers' windows are minutes. With the cell at rest
+/// between barriers this is the ONLY liveness a reader can see — the
+/// operator's `observedWriters` and the gateway's "is anyone here to
+/// cite it" both read this prefix. One small PUT per interval per
+/// writer.
 pub async fn heartbeat(sc: &mut Syncer) -> LeanResult<()> {
     let inc = incarnation(sc)?;
     let key = sc.cfg.writer_key(&inc.holder_id);

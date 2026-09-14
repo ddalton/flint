@@ -606,7 +606,7 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
     // The heartbeat is decoupled from publish cadence entirely: it is
     // what the operator's `observedWriters` and the gateway's "is anyone
     // here to cite it" read, and they judge staleness in minutes.
-    let heartbeat_every = Duration::from_secs(sc.cfg.floor_secs.min(30).max(1));
+    let heartbeat_every = Duration::from_secs(lease::HEARTBEAT_SECS);
     let poll_every = Duration::from_secs(sc.cfg.sentinel_poll_secs.max(1));
 
     let mut floor_iv = tokio::time::interval(floor);

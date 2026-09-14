@@ -472,6 +472,17 @@ emit LeanBarrierLeaseSentinel "$SENTINV,Inv_HITLTracked,Inv_CommitExclusive,Inv_
 # untracked, preserved nowhere.  The breadth world (MaxGen=2) could not
 # reach it — the interleaving needs a third generation.
 emit LeanBarrierLeaseHitlOverUncited "Inv_HITLDurable" $BLSENT HitlOverwritesTrackedOnly=FALSE
+# After 79e7dac9 the tracked-only rule is no longer what saves the UI
+# write: the uploader's commit re-reads its own citation and withholds
+# it.  The pair below lets the gateway overwrite ANY current object —
+# a superset of its untracked-object escapes (the grace, and "no writer
+# has a live heartbeat", which is why the heartbeat carries no safety)
+# — with the sentinel off so the strict half exhausts on a laptop.  The
+# control is the same world without the re-read: finding 4 again.
+BLOVER="$BLSENT SentinelEnabled=FALSE MaxTouches=0 HitlOverwritesTrackedOnly=FALSE"
+emit LeanBarrierLeaseHitlOverAnyUnverified "Inv_HITLDurable" $BLOVER
+emit LeanBarrierLeaseHitlOverAnyVerified "Inv_HITLDurable,Inv_NoDangling,Inv_NoStaleOverride,Inv_HITLTracked" $BLOVER \
+  VerifyUploadedCitations=TRUE
 emit LeanBarrierLeaseDeposal "$BLSTALLINV" $BLSTALL
 # The redundancy A/B, as in the life-lease world: each fence alone holds.
 emit LeanBarrierLeaseEpochOnly "$BLSTALLINV" $BLSTALL Rotation=FALSE

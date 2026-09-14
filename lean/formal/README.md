@@ -13,11 +13,11 @@ a library. Nothing here is wired into `scripts/check-tla.sh`.
 ## Running
 
 ```
-./check.sh          # the 96-run gate
+./check.sh          # the 98-run gate
 ./gen-cfgs.sh       # regenerate the cfg matrix
 ```
 
-Ninety-six runs, ALL required: 25 strict (must hold), 38 mutations
+Ninety-eight runs, ALL required: 26 strict (must hold), 39 mutations
 (must find their designated counterexample — a model that cannot
 rediscover its bug classes proves nothing), 33 probes (must be violated
 — each names an ACTION via a ghost only that action writes; probe the
@@ -626,6 +626,20 @@ checked against it (the `MineIsNotForeign` pattern).
    guard refuses every untracked overwrite, stricter than the code,
    which is the safe direction for a durability claim and says nothing
    about whether those escapes are themselves safe.
+
+   **They are, since finding 5's fix** (2026-09-14). The commit re-reads
+   every citation its own uploads add, so a UI write over an uncited
+   upload no longer lets the uploader re-cite over it: its commit
+   withholds. `LeanBarrierLeaseHitlOverAnyVerified` lets the gateway
+   overwrite ANY current object — a superset of both escapes — in
+   `BLSENT` with the sentinel off, and HOLDS `Inv_HITLDurable`,
+   `Inv_NoDangling`, `Inv_NoStaleOverride` and `Inv_HITLTracked`:
+   15,528,749 distinct states, depth 36, six minutes on a laptop.
+   `LeanBarrierLeaseHitlOverAnyUnverified`, the same world without the
+   re-read, is finding 4 again (depth 16). So the tracked-only rule is
+   now defense in depth, and the writer heartbeat — which the
+   no-live-writer escape reads — carries no safety; that is what let
+   its interval go from min(floor, 30) s to 60 s.
 5. **Identical bytes share an etag — found by the LIVE DRILL, not the
    model** (runcv A3, `churn/p14.txt`; syncer finding 13). S3's etag for a
    whole PUT is the MD5 of the bytes. A deletes a path; B rewrites it with

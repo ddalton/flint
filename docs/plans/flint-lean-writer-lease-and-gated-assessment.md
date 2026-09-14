@@ -496,8 +496,11 @@ deployed, and the user's standing decision is one mode. Departures from
   workspace does not track.
 - **Liveness left the cell.** With the cell released between barriers,
   neither the operator nor the gateway can read liveness from it, so
-  each writer PUTs `<prefix>/.flint/lean/writers/<holder_id>` every ≤30 s
-  (the same cost the renewal was) and deletes it on a clean drain. The
+  each writer PUTs `<prefix>/.flint/lean/writers/<holder_id>` every 60 s
+  (`lease::HEARTBEAT_SECS`; it was min(floor, 30) s until 2026-09-14) and
+  deletes it on a clean drain. Nothing that fences reads it; the gateway
+  and the operator count a writer live for five minutes after its last
+  beat. The
   handoff KEEPS the echo, so `SyncerObserved` names the last barrier's
   binary; `observedWriters` counts heartbeats fresher than five minutes.
 - **A fence is a retry.** §4.3 kept "the straggler case unchanged";

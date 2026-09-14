@@ -135,10 +135,14 @@ impl Snapshot {
 }
 
 /// A writer whose heartbeat is older than this is not counted live.
-/// Heartbeats are written every ≤30 s; three minutes is six missed
-/// beats, generous on purpose (the comparison is the store's clock
-/// against this process's).
-pub const WRITER_STALE_SECS: u64 = 180;
+/// Heartbeats are written every `flint_lean::lease::HEARTBEAT_SECS`
+/// (60 s), and a barrier waiting for the fence holds its writer's back
+/// for up to `CLAIM_DEADLINE_SECS` (150 s); five minutes — the operator's
+/// window too — covers both, generous on purpose (the comparison is the
+/// store's clock against this process's). A stale reading of a live
+/// writer is not a loss: this process's answer is slower, or a UI write
+/// replaces an upload the writer's commit then withholds.
+pub const WRITER_STALE_SECS: u64 = 300;
 
 /// The RPO observability surface: seq, window, inbox depth, the epoch
 /// cell, the live writers, and the standing verb requests.
@@ -1251,7 +1255,7 @@ impl Workspace {
             .await?
             .is_empty()
             {
-                return Err(pending("no live syncer writes this workspace (no heartbeat within the last three minutes)"));
+                return Err(pending("no live syncer writes this workspace (no heartbeat within the last five minutes)"));
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(pending("the syncer did not cite it within the wait"));

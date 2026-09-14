@@ -6,7 +6,7 @@
 # DELIBERATELY SEPARATE from scripts/check-tla.sh (flint's 196-run gate):
 # lean is a separate system.  Same harness discipline, its own runs.
 #
-# Ninety-six runs, ALL required (asserted at the bottom, not just printed —
+# Ninety-eight runs, ALL required (asserted at the bottom, not just printed —
 # this prose count had drifted to "fifty-five", then to "eighty-three";
 # and EXPECT itself was left at 92 over 69 real runs when gated mode's
 # 23 runs were removed, so the gate at that commit failed its own count.
@@ -238,6 +238,7 @@ strict_run $M LeanBarrierLeaseDeposal.cfg "barrier lease, takeover world: A free
 strict_run $M LeanBarrierLeaseEpochOnly.cfg "barrier lease, rotation OFF: per-request epoch validation alone fences the deposed holder"
 strict_run $M LeanBarrierLeaseRotationOnly.cfg "barrier lease, epoch-check OFF: rotation alone fences the deposed holder's CAS"
 strict_run $M LeanBarrierLeaseAdoptVerified.cfg "barrier lease: an ADOPTED entry re-verified under the lease survives the other writer's GC (the control for the adopt race)"
+strict_run $M LeanBarrierLeaseHitlOverAnyVerified.cfg "barrier lease: a UI write may overwrite ANY current object and is still never lost -- the uploader's commit re-reads its citation (so the gateway's untracked-object escapes, the heartbeat's included, carry no safety)"
 strict_run $M LeanBarrierLeaseSameBytesVerified.cfg "barrier lease, identical bytes share an etag: every citation the commit adds is re-verified under the lease (the control for finding 13)"
 strict_run $M LeanBarrierLeaseSyncOverlayHolds.cfg "barrier lease: a sync keeps its merge base for a path an older inbox entry hid (SyncKeepsHiddenBase, sync.rs step 5) -- the control for the overlay finding"
 strict_run $M LeanBarrierLeaseLive.cfg "LIVENESS (FairSpec): with the ticket, every queued writer eventually holds the cell"
@@ -252,6 +253,8 @@ mutation_run $M LeanBarrierLeaseSameBytesUnverified.cfg "FINDING 13 (live drill 
   "Invariant Inv_NoDangling is violated"
 mutation_run $M LeanBarrierLeaseSameBytesOverride.cfg "FINDING 13, second route (model-found): B's identical-bytes upload is overwritten by A's new bytes If-Match the same etag, A commits, and B's commit cites its generation over A's -- nothing dangles, A's committed bytes are cited by nothing" \
   "Invariant Inv_NoStaleOverride is violated"
+mutation_run $M LeanBarrierLeaseHitlOverAnyUnverified.cfg "the control for the strict run above: the same world without the commit's re-read loses the UI write (finding 4)" \
+  "Invariant Inv_HITLDurable is violated"
 mutation_run $M LeanBarrierLeaseHitlOverUncited.cfg "FINDING: the gateway overwrote whatever object was current -- a UI write over another writer's UNCITED upload, consumed and cited by a third party, is re-cited over by the uploader's commit and lost (the tracked-only overwrite rule is the fix)" \
   "Invariant Inv_HITLDurable is violated"
 mutation_run $M LeanBarrierLeaseSyncOverlayStale.cfg "FINDING (D4 refuted with two writers): the sync's remote truth reads a queued foreign entry as newer than a manifest a second LIVE writer already moved past, verifies the path unchanged against the overlay and advances the merge base to the manifest -- the silent, permanent loss" \
@@ -282,7 +285,7 @@ mutation_run $M LeanProbeUploadWithheld.cfg "probe: the upload re-verification a
 # nobody reads as wrong. It had drifted to 79 against 79 real runs
 # before this tranche; the prose count at the top of this file had
 # drifted further still, to "Fifty-five".
-EXPECT=96
+EXPECT=98
 echo
 if [ "$PASS" -ne "$EXPECT" ]; then
   echo "lean formal gate: $PASS runs green but $EXPECT were declared — a run was"
