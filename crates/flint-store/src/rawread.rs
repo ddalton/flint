@@ -585,7 +585,7 @@ impl RawReader {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     //! Against an in-process hyper server that records every request
     //! and answers from a script: the request shape S3 will sign-check,
     //! the metadata parsed back, the status table, the retry budget,
@@ -593,6 +593,9 @@ mod tests {
     //! by re-signing the recorded request with the same inputs and the
     //! `x-amz-date` it carried; S3 itself is the final arbiter and is
     //! exercised by the cluster drill.
+    //!
+    //! `serve` is `pub(crate)` so the SDK-path tests in `s3.rs` can point
+    //! a store at the same recorder.
     use super::*;
     use std::collections::VecDeque;
     use std::convert::Infallible;
@@ -609,32 +612,32 @@ mod tests {
     use tokio::net::TcpListener;
 
     #[derive(Clone, Debug)]
-    struct Seen {
-        method: String,
-        path: String,
-        headers: HeaderMap,
+    pub(crate) struct Seen {
+        pub(crate) method: String,
+        pub(crate) path: String,
+        pub(crate) headers: HeaderMap,
     }
 
     /// One scripted answer: status, headers, body frames.
-    type Answer = (u16, Vec<(&'static str, String)>, Vec<Bytes>);
+    pub(crate) type Answer = (u16, Vec<(&'static str, String)>, Vec<Bytes>);
 
-    struct Server {
-        url: String,
+    pub(crate) struct Server {
+        pub(crate) url: String,
         seen: Arc<Mutex<Vec<Seen>>>,
         script: Arc<Mutex<VecDeque<Answer>>>,
         conns: Arc<AtomicUsize>,
     }
 
     impl Server {
-        fn push(&self, a: Answer) {
+        pub(crate) fn push(&self, a: Answer) {
             self.script.lock().unwrap().push_back(a);
         }
-        fn seen(&self) -> Vec<Seen> {
+        pub(crate) fn seen(&self) -> Vec<Seen> {
             self.seen.lock().unwrap().clone()
         }
     }
 
-    async fn serve(delay: Option<Duration>) -> Server {
+    pub(crate) async fn serve(delay: Option<Duration>) -> Server {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let seen: Arc<Mutex<Vec<Seen>>> = Default::default();

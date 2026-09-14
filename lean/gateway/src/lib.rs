@@ -44,3 +44,20 @@ pub async fn connect(
     Ok(std::sync::Arc::new(store))
 }
 
+/// Connect with EXPLICIT credentials to an explicit endpoint, addressed
+/// path-style — for test rigs and integrations against MinIO, Ozone's S3
+/// gateway or localstack. Nothing is read from the environment, so an
+/// AWS profile on the machine running the tests cannot stand in for the
+/// key given here. See [`S3Store::with_credentials`].
+#[cfg(feature = "s3")]
+pub fn connect_with_credentials(
+    bucket: &str,
+    endpoint: &str,
+    region: &str,
+    access_key_id: &str,
+    secret_access_key: &str,
+) -> Result<std::sync::Arc<dyn ObjectStore>, StoreError> {
+    let store = S3Store::with_credentials(bucket, endpoint, region, access_key_id, secret_access_key)?;
+    Ok(std::sync::Arc::new(store))
+}
+

@@ -4,7 +4,7 @@
 # crate's Cargo.toml — keep them in step when bumping there.
 [package]
 name = "flint-store"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "The flint object-store layer: the ObjectStore trait, conditional writes, generation stamps, CRC-64/NVME, an in-memory double and the S3 backend"
 license = "MIT"
@@ -37,7 +37,11 @@ tokio = { version = "1.0", features = ["rt", "time", "macros", "sync"] }
 uuid = { version = "1.0", features = ["v4"] }
 
 aws-config = { version = "1.10.1", default-features = false, features = ["rustls", "rt-tokio", "credentials-process"], optional = true }
-aws-sdk-s3 = { version = "1.141.0", default-features = false, features = ["rustls", "rt-tokio"], optional = true }
+# `default-https-client` is what gives a config built WITHOUT aws-config
+# (`S3Store::with_credentials`) an HTTP client at all. aws-config happens
+# to switch it on for the whole graph today; named here so that stays
+# true if aws-config's features ever move.
+aws-sdk-s3 = { version = "1.141.0", default-features = false, features = ["rustls", "rt-tokio", "default-https-client"], optional = true }
 tracing = { version = "0.1", optional = true }
 hyper = { version = "1", default-features = false, features = ["client", "http1"], optional = true }
 hyper-util = { version = "0.1", default-features = false, features = ["client", "client-legacy", "http1", "tokio"], optional = true }

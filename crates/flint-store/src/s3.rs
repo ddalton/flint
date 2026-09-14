@@ -85,7 +85,89 @@ impl S3Store {
         let base = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .load()
             .await;
-        let mut b = aws_sdk_s3::config::Builder::from(&base);
+        let creds = base.credentials_provider();
+        let region = base.region().map(|r| r.to_string()).unwrap_or_else(|| "us-east-1".into());
+        Ok(Self::from_sdk_builder(
+            bucket,
+            aws_sdk_s3::config::Builder::from(&base),
+            creds,
+            region,
+            endpoint,
+        ))
+    }
+
+    /// Build with EXPLICIT credentials against an explicit endpoint,
+    /// addressed path-style — for test rigs and integrations that hold a
+    /// MinIO / Ozone / localstack key pair rather than an AWS profile.
+    ///
+    /// Nothing is read from the environment: not the credential chain,
+    /// not `AWS_REGION`, not `AWS_ENDPOINT_URL`, not `~/.aws/config`. A
+    /// developer's own AWS profile therefore cannot leak into a test,
+    /// and a CI runner with no AWS setup at all builds the same store.
+    /// It is not async for the same reason — there is nothing to load.
+    ///
+    /// The clients are otherwise [`connect`]'s: the same timeouts, the
+    /// same presign client, and the standard retry policy `connect` gets
+    /// from an environment that does not override it. Refuses only what
+    /// would otherwise fail on the first request with a less useful
+    /// message: an empty field, or an endpoint without an `http://` or
+    /// `https://` scheme.
+    ///
+    /// No session token: a key pair for an S3-compatible server, not
+    /// temporary AWS credentials.
+    ///
+    /// [`connect`]: S3Store::connect
+    pub fn with_credentials(
+        bucket: impl Into<String>,
+        endpoint: impl Into<String>,
+        region: impl Into<String>,
+        access_key_id: impl Into<String>,
+        secret_access_key: impl Into<String>,
+    ) -> StoreResult<Self> {
+        let (bucket, endpoint, region) = (bucket.into(), endpoint.into(), region.into());
+        let (access_key_id, secret_access_key) = (access_key_id.into(), secret_access_key.into());
+        for (name, v) in [
+            ("bucket", &bucket),
+            ("endpoint", &endpoint),
+            ("region", &region),
+            ("access key id", &access_key_id),
+            ("secret access key", &secret_access_key),
+        ] {
+            if v.trim().is_empty() {
+                return Err(StoreError::Other(format!("S3Store::with_credentials: {name} is empty")));
+            }
+        }
+        if !(endpoint.starts_with("http://") || endpoint.starts_with("https://")) {
+            return Err(StoreError::Other(format!(
+                "S3Store::with_credentials: endpoint {endpoint:?} needs an http:// or https:// scheme"
+            )));
+        }
+        let creds = aws_sdk_s3::config::SharedCredentialsProvider::new(
+            aws_sdk_s3::config::Credentials::new(
+                access_key_id,
+                secret_access_key,
+                None,
+                None,
+                "flint-store-explicit",
+            ),
+        );
+        let base = aws_sdk_s3::config::Builder::new()
+            .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+            .region(aws_sdk_s3::config::Region::new(region.clone()))
+            .credentials_provider(creds.clone())
+            .retry_config(aws_sdk_s3::config::retry::RetryConfig::standard());
+        Ok(Self::from_sdk_builder(bucket, base, Some(creds), region, Some(endpoint)))
+    }
+
+    /// Both constructors end here: the request client and the presign
+    /// client, cut from one base, plus the raw reader's inputs.
+    fn from_sdk_builder(
+        bucket: String,
+        base: aws_sdk_s3::config::Builder,
+        creds: Option<aws_credential_types::provider::SharedCredentialsProvider>,
+        region: String,
+        endpoint: Option<String>,
+    ) -> Self {
         // Bound TIME TO FIRST BYTE. The default provider sets only a
         // connect timeout (~3.1 s), and the SDK's stalled-stream
         // protection arms AFTER headers arrive — so nothing at all
@@ -102,17 +184,12 @@ impl S3Store {
         // would guillotine a legitimately long `upload_part`.
         // Retries are unaffected and safe here — every lean write is
         // conditional, so a retried publish cannot double-apply.
-        b = b.timeout_config(
-            aws_sdk_s3::config::timeout::TimeoutConfig::builder()
-                .connect_timeout(std::time::Duration::from_secs(3))
-                .read_timeout(std::time::Duration::from_secs(10))
-                .build(),
-        );
-        let endpoint_for_presign = endpoint.clone();
-        let endpoint_for_raw = endpoint.clone();
-        let creds = base.credentials_provider();
-        let region = base.region().map(|r| r.to_string()).unwrap_or_else(|| "us-east-1".into());
-        if let Some(ep) = endpoint {
+        let timeouts = aws_sdk_s3::config::timeout::TimeoutConfig::builder()
+            .connect_timeout(std::time::Duration::from_secs(3))
+            .read_timeout(std::time::Duration::from_secs(10))
+            .build();
+        let mut b = base.clone().timeout_config(timeouts.clone());
+        if let Some(ep) = &endpoint {
             // Custom endpoints (MinIO/localstack) need path-style —
             // virtual-hosted addressing would resolve the bucket as a
             // DNS label of the rig host.
@@ -129,14 +206,8 @@ impl S3Store {
         // scoped to this client rather than set globally because every
         // other write in flint passes its CRC-64 EXPLICITLY and must
         // keep doing so.
-        let mut pb = aws_sdk_s3::config::Builder::from(&base);
-        pb = pb.timeout_config(
-            aws_sdk_s3::config::timeout::TimeoutConfig::builder()
-                .connect_timeout(std::time::Duration::from_secs(3))
-                .read_timeout(std::time::Duration::from_secs(10))
-                .build(),
-        );
-        if let Some(ep) = endpoint_for_presign {
+        let mut pb = base.timeout_config(timeouts);
+        if let Some(ep) = &endpoint {
             pb = pb.endpoint_url(ep).force_path_style(true);
         }
         pb = pb.request_checksum_calculation(
@@ -145,20 +216,20 @@ impl S3Store {
         let presign_client = aws_sdk_s3::Client::from_conf(pb.build());
 
         let client = aws_sdk_s3::Client::from_conf(b.build());
-        Ok(S3Store {
+        S3Store {
             client,
             presign_client,
             bucket,
             raw: None,
             creds,
             region,
-            endpoint: endpoint_for_raw,
+            endpoint,
             part_parallelism: 1,
             upload_gate: None,
             requests: Default::default(),
             // S3's documented CopyObject ceiling.
             copy_whole_max: 5 * 1024 * 1024 * 1024,
-        })
+        }
     }
 
     /// Route every GET and HEAD through the raw HTTP/1.1 read path
@@ -296,6 +367,169 @@ pub(crate) fn classify(status: u16, code: &str, msg: String) -> Option<StoreErro
         }
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod with_credentials_tests {
+    //! `S3Store::with_credentials` against the raw reader's recording
+    //! server (`rawread::tests::serve`): every client the store holds —
+    //! the SDK request client, the raw read path, the presign client —
+    //! must sign with the key it was GIVEN, in the region it was given,
+    //! and address the bucket as a path on the endpoint.
+    use super::*;
+    use crate::rawread::tests::{serve, Seen};
+
+    const AK: &str = "AKIDEXPLICIT";
+    const REGION: &str = "eu-central-1";
+
+    /// The recorder's URL with its host spelled as a NAME. The SDK's S3
+    /// endpoint rules address an IP-literal endpoint path-style whatever
+    /// `force_path_style` says, so against `127.0.0.1` a store that
+    /// dropped path-style would pass every assertion here — measured:
+    /// both path-style mutations passed until this.
+    fn by_name(url: &str) -> String {
+        url.replace("127.0.0.1", "localhost")
+    }
+
+    fn header<'a>(s: &'a Seen, name: &str) -> &'a str {
+        s.headers.get(name).map(|v| v.to_str().unwrap()).unwrap_or("")
+    }
+
+    /// What every recorded request must show: path-style addressing on
+    /// the endpoint's own host, and a SigV4 scope naming the explicit
+    /// key and region.
+    fn assert_explicit(seen: &[Seen], url: &str) {
+        assert!(!seen.is_empty(), "no request reached the endpoint");
+        for s in seen {
+            let path = s.path.split('?').next().unwrap();
+            assert_eq!(path, "/bkt/dir/obj", "path-style: the bucket is the first path segment");
+            assert_eq!(header(s, "host"), url.trim_start_matches("http://"), "the endpoint's own host, not bkt.<host>");
+            let auth = header(s, "authorization");
+            assert!(auth.contains(&format!("Credential={AK}/")), "signed with the explicit key: {auth}");
+            assert!(auth.contains(&format!("/{REGION}/s3/aws4_request")), "scoped to the explicit region: {auth}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_sdk_client_signs_with_the_given_key_and_addresses_the_bucket_by_path() {
+        let srv = serve(None).await;
+        let url = by_name(&srv.url);
+        let store = S3Store::with_credentials("bkt", url.clone(), REGION, AK, "secret").unwrap();
+        srv.push((200, vec![("etag", "\"e1\"".into()), ("content-length", "3".into())], vec![]));
+        let m = store.head("dir/obj").await.unwrap();
+        assert_eq!((m.etag.as_str(), m.size), ("\"e1\"", 3));
+        let seen = srv.seen();
+        assert_eq!(seen[0].method, "HEAD");
+        assert_explicit(&seen, &url);
+    }
+
+    #[tokio::test]
+    async fn the_raw_read_path_signs_with_the_same_explicit_key() {
+        let srv = serve(None).await;
+        let url = by_name(&srv.url);
+        let store = S3Store::with_credentials("bkt", url.clone(), REGION, AK, "secret")
+            .unwrap()
+            .with_raw_reads(true)
+            .unwrap();
+        srv.push((200, vec![("etag", "\"g\"".into())], vec![Bytes::from_static(b"body")]));
+        let (m, b) = store.get_whole("dir/obj", None).await.unwrap();
+        assert_eq!((m.etag.as_str(), &b[..]), ("\"g\"", &b"body"[..]));
+        assert_eq!(store.raw_read_attempts(), 1, "the read must have gone through the raw path");
+        let seen = srv.seen();
+        assert_eq!(seen[0].method, "GET");
+        assert_explicit(&seen, &url);
+    }
+
+    #[tokio::test]
+    async fn the_presign_client_carries_the_explicit_key_region_and_path() {
+        // A name, not an IP literal (see `by_name`); nothing is sent.
+        let url = "http://minio.test:9000";
+        let store = S3Store::with_credentials("bkt", url, REGION, AK, "secret").unwrap();
+        let signed = store.presign_put("dir/obj", 60).await.unwrap();
+        assert!(signed.starts_with(&format!("{url}/bkt/dir/obj?")), "path-style on the endpoint: {signed}");
+        assert!(
+            signed.contains(&format!("X-Amz-Credential={AK}%2F")) && signed.contains(&format!("%2F{REGION}%2Fs3%2Faws4_request")),
+            "the explicit key and region: {signed}"
+        );
+    }
+
+    #[test]
+    fn an_empty_field_or_an_endpoint_without_a_scheme_is_refused_at_construction() {
+        let ok = ("bkt", "http://minio:9000", "us-east-1", "ak", "sk");
+        assert!(S3Store::with_credentials(ok.0, ok.1, ok.2, ok.3, ok.4).is_ok());
+        for (i, bad) in [
+            ("", ok.1, ok.2, ok.3, ok.4),
+            (ok.0, "", ok.2, ok.3, ok.4),
+            (ok.0, ok.1, " ", ok.3, ok.4),
+            (ok.0, ok.1, ok.2, "", ok.4),
+            (ok.0, ok.1, ok.2, ok.3, ""),
+            (ok.0, "minio:9000", ok.2, ok.3, ok.4),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let r = S3Store::with_credentials(bad.0, bad.1, bad.2, bad.3, bad.4);
+            assert!(matches!(r, Err(StoreError::Other(_))), "case {i} must be refused");
+        }
+    }
+
+    /// The whole store against a real S3-compatible endpoint — the
+    /// recording server cannot check a signature the way a server that
+    /// holds the secret does, nor conditional writes. Run with
+    /// `FLINT_STORE_TEST_S3_{ENDPOINT,BUCKET,REGION,ACCESS_KEY,SECRET_KEY}`
+    /// set and `cargo test --features s3 -- --ignored with_credentials`.
+    #[tokio::test]
+    #[ignore = "needs a live S3-compatible endpoint (FLINT_STORE_TEST_S3_* env)"]
+    async fn a_live_endpoint_round_trips_conditional_writes() {
+        let var = |k: &str| {
+            let name = format!("FLINT_STORE_TEST_S3_{k}");
+            std::env::var(&name).unwrap_or_else(|_| panic!("{name} is not set"))
+        };
+        let store = S3Store::with_credentials(
+            var("BUCKET"),
+            var("ENDPOINT"),
+            var("REGION"),
+            var("ACCESS_KEY"),
+            var("SECRET_KEY"),
+        )
+        .unwrap();
+        let key = format!("flint-store-with-credentials/{}", uuid::Uuid::new_v4());
+        let stamps = GenerationStamps { generation: 1, epoch: 0, flush_uuid: "t".into(), boundary_source: None, posix: None };
+        let body = Bytes::from_static(b"explicit credentials");
+        let crc = crate::crc64_nvme(&body);
+
+        let first = store.put_whole(&key, body.clone(), &PutCondition::IfNoneMatchAny, &stamps, crc).await.unwrap();
+        assert!(
+            matches!(
+                store.put_whole(&key, body.clone(), &PutCondition::IfNoneMatchAny, &stamps, crc).await,
+                Err(StoreError::PreconditionFailed(_)) | Err(StoreError::Conflict(_))
+            ),
+            "a second create of the same key must be refused"
+        );
+        let (m, got) = store.get_whole(&key, Some(&first.etag)).await.unwrap();
+        assert_eq!((&got[..], m.etag.as_str()), (&body[..], first.etag.as_str()));
+        assert_eq!(m.crc64_b64.as_deref(), Some(crate::crc64_to_b64(crc).as_str()));
+        assert!(store.list("flint-store-with-credentials/").await.unwrap().iter().any(|o| o.key == key));
+
+        let next = Bytes::from_static(b"explicit credentials, again");
+        let second = store
+            .put_whole(&key, next.clone(), &PutCondition::IfMatch(first.etag.clone()), &stamps, crate::crc64_nvme(&next))
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                store
+                    .put_whole(&key, next.clone(), &PutCondition::IfMatch(first.etag.clone()), &stamps, crate::crc64_nvme(&next))
+                    .await,
+                Err(StoreError::PreconditionFailed(_))
+            ),
+            "an overwrite citing a stale etag must be refused"
+        );
+        let signed = store.presign_get(&key, 60).await.unwrap();
+        assert!(signed.contains("X-Amz-Credential="), "{signed}");
+        store.delete_if_match(&key, &second.etag).await.unwrap();
+        assert!(matches!(store.head(&key).await, Err(StoreError::NotFound(_))));
+    }
 }
 
 #[cfg(test)]

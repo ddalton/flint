@@ -254,6 +254,31 @@ for (id, prefix) in [("alpha", "teams/alpha"), ("beta", "teams/beta")] {
 Workspaces in different buckets, or under different credentials, take
 different stores; `Workspace::new` takes any `Arc<dyn ObjectStore>`.
 
+## Explicit credentials, for tests
+
+`connect` reads the ambient AWS environment. A test rig that holds a
+key pair for MinIO, Ozone's S3 gateway or localstack passes it instead;
+nothing is read from the environment, and the bucket is addressed
+path-style on the endpoint:
+
+```rust,no_run
+use flint_lean_gateway::{connect_with_credentials, Workspace};
+
+# fn run() -> Result<(), Box<dyn std::error::Error>> {
+let store = connect_with_credentials(
+    "test-bucket",
+    "http://localhost:9000",
+    "us-east-1",
+    "test-access-key",
+    "test-secret-key",
+)?;
+let ws = Workspace::new(store, "teams/alpha/project-1");
+# let _ = ws; Ok(()) }
+```
+
+The same constructor is `S3Store::with_credentials` for a caller that
+wants the store's own builder methods before wrapping it.
+
 ## Serving the wire yourself
 
 The `http` feature (on by default) carries the gateway's warp router

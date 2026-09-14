@@ -12,6 +12,25 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Added
+
+- **flint-store 0.1.3: `S3Store::with_credentials(bucket, endpoint, region,
+  access_key_id, secret_access_key)`** — an S3 store from an explicit key
+  pair and endpoint, addressed path-style, for test rigs and integrations
+  against MinIO, Ozone's S3 gateway or localstack. It reads nothing from
+  the environment (no credential chain, `AWS_REGION`, `AWS_ENDPOINT_URL`
+  or profile) and is not async. Every client the store holds — requests,
+  the raw read path, presigning — signs with the given key in the given
+  region; the tests address the endpoint by NAME, because the SDK's S3
+  endpoint rules go path-style on their own for an IP literal and both
+  path-style mutations passed against `127.0.0.1`. An ignored live test
+  (`FLINT_STORE_TEST_S3_*`) round-trips conditional writes; it passed
+  against MinIO RELEASE.2025-09-07, and failed with
+  `403 SignatureDoesNotMatch` when the environment held the right key and
+  the argument a wrong one.
+- **flint-lean-gateway 0.4.1: `connect_with_credentials`**, the same
+  constructor returning the `Arc<dyn ObjectStore>` a `Workspace` takes.
+
 ## [1.53.0] - 2026-09-14
 
 ### Added
