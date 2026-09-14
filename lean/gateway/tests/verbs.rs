@@ -941,3 +941,65 @@ async fn a_read_of_an_unmodified_cited_file_never_fetches_the_inbox() {
     assert_eq!(w.get_file("a.txt").await.unwrap().etag, v3);
     assert_eq!(counting.take(), (0, 1), "(inbox fetches, object fetches) once cited past the entry");
 }
+
+/// A blind UI write never overwrites a writer's upload its commit has not
+/// cited yet (the object is neither the manifest's citation nor an inbox
+/// entry): 409 `concurrent-write`, retry-after 2, the object untouched.
+/// Once the commit cites that version, the same write succeeds. And an
+/// untracked object with no live writer anywhere is an orphan, which a
+/// write may overwrite.
+#[tokio::test]
+async fn a_blind_write_over_an_uncited_upload_is_refused_until_it_is_cited() {
+    let s = store();
+    let w = ws(&s);
+    let epoch = hold_lease(&s, &w).await; // also leaves a live heartbeat
+    let seed = w.put_file("a.txt", Bytes::from("seed"), &PutFile::default()).await.unwrap();
+    cite(&w, epoch, 1, "a.txt", &seed, b"seed").await;
+    let entries = w.snapshot().await.unwrap().inbox.entries;
+    w.drop_inbox(epoch, &entries).await.unwrap();
+
+    // A syncer's upload lands over the cited seed and is not cited yet.
+    let key = w.config().file_key("a.txt");
+    let body = Bytes::from("agent upload, not yet cited");
+    let uploaded = s
+        .put_whole(
+            &key,
+            body.clone(),
+            &flint_store::PutCondition::IfMatch(seed.clone()),
+            &flint_store::GenerationStamps { generation: 2, epoch, flush_uuid: "syncer-flush".into(), boundary_source: None, posix: None },
+            crc64_nvme(&body),
+        )
+        .await
+        .unwrap();
+
+    // Every way a UI overwrites: force (`If-Match: *`), the etag it read
+    // (the seed — stale, so without the rule this would be FileChanged
+    // naming the upload's etag), and the upload's etag itself.
+    for if_match in ["*".to_string(), seed.clone(), uploaded.etag.clone()] {
+        let opts = PutFile { if_match: Some(if_match.clone()), ..Default::default() };
+        let err = w.put_file("a.txt", Bytes::from("from the UI"), &opts).await.unwrap_err();
+        assert!(matches!(err, VerbError::ConcurrentWrite), "If-Match {if_match}: {err}");
+        assert_eq!((err.status(), err.code()), (409, "concurrent-write"));
+        assert_eq!(s.head(&key).await.unwrap().etag, uploaded.etag, "If-Match {if_match} touched the upload");
+    }
+
+    // The commit cites the upload; the UI's retry now overwrites it.
+    cite(&w, epoch, 2, "a.txt", &uploaded.etag, &body).await;
+    let opts = PutFile { if_match: Some(uploaded.etag.clone()), ..Default::default() };
+    w.put_file("a.txt", Bytes::from("from the UI"), &opts).await.expect("the retry over a cited version");
+
+    // An orphan: an untracked object and NO live writer.
+    let orphan_ws = Workspace::new(s.clone(), "tenant/orphaned");
+    let okey = orphan_ws.config().file_key("b.txt");
+    s.put_whole(
+        &okey,
+        Bytes::from("a dead writer's upload"),
+        &flint_store::PutCondition::IfNoneMatchAny,
+        &flint_store::GenerationStamps { generation: 1, epoch: 1, flush_uuid: "dead".into(), boundary_source: None, posix: None },
+        crc64_nvme(b"a dead writer's upload"),
+    )
+    .await
+    .unwrap();
+    let force = PutFile { if_match: Some("*".into()), ..Default::default() };
+    orphan_ws.put_file("b.txt", Bytes::from("from the UI"), &force).await.expect("an orphan is writable");
+}

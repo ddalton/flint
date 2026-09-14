@@ -12,6 +12,31 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Added
+
+- **lean: a protocol event trace and per-kind request counters, so a
+  multi-writer run that goes wrong can be reconstructed afterwards.**
+  `FLINT_SYNC_EVENT_TRACE=1` (`spec.eventTrace: true` on the CR, stamped
+  into the worker env; off by default) makes the syncer write one JSON
+  object per protocol step to stderr — consume and tombstone actions,
+  the scan, each upload's outcome and etag, every claim verdict with the
+  cell it saw, observed-citation re-reads, the merge, the manifest CAS,
+  each guarded delete, the local queue, fences, acks, syncs, and
+  `barrier_end` with the barrier's cumulative requests. Every line starts
+  `{"ts_ms":…,"mono_ms":…,"holder":…,"ev":…`, so a parser can pick them
+  out of the prose logs without a schema negotiation. `flint-store`
+  gains `RequestCounter` and `ObjectStore::request_counts` (get, head,
+  put, copy, delete, list, multipart), counted by the S3 store at each
+  request site and mapped from the in-memory store's op counts. For
+  drills only, `FLINT_SYNC_DRILL_HOLD_GC_SECS` holds a barrier once
+  between its GC HEAD and its conditional DELETE, the two-request window
+  the first two-writer finding lived in.
+- **lean: `flint-sync manifest`** prints the resolved manifest and a HEAD
+  of every citation as one JSON line (`seq`, `pointer_etag`, `entries`,
+  `heads`). Read-only — no lease, no state lock, no tree — so it answers
+  while a syncer runs; one HEAD per entry, meant for drills and for an
+  operator asking whether every citation resolves.
+
 ### Changed
 
 - **lean: the publish fence is held per BARRIER, with a FIFO ticket —
@@ -89,12 +114,35 @@ covered by the stability guarantee.
   every tick — a barrier whose merge adds nothing installs nothing.
   Still open: a writer that supersedes the other writer's not-yet-cited
   upload leaves that writer citing a generation the key no longer holds
-  until the superseding writer commits (no bytes lost). The formal model
+  until the superseding writer commits (no bytes lost); and a writer lost
+  for good between an upload and its commit (pod replaced, node gone)
+  leaves an uncited object that the manifest, a fresh checkout and the
+  live trees disagree about until some writer rewrites the path (a
+  container restart or a relaunched worker does not produce it). The formal model
   gains `SyncKeepsHiddenBase` with a green control
   (`LeanBarrierLeaseSyncOverlayHolds`); the writer-local queue and the
   empty-install rule are convergence properties it does not yet model.
   Design record: `docs/plans/flint-lean-writer-lease-and-gated-assessment.md`
   §10.1.
+- **lean gateway: a UI write no longer overwrites a writer's upload that
+  its commit has not cited yet.** Found by the formal gate on the fixes
+  above (`Inv_HITLDurable`, two writers with sentinels): uploads hold no
+  lease, so nothing kept the gateway off a key while a writer uploaded
+  it, and the gateway's PUT was conditional on the key's CURRENT etag —
+  that upload. Another writer then consumed and cited the UI's write and
+  dropped its inbox entry, and the uploading writer's commit re-cited its
+  own generation over it: the UI's acked write was uncited, untracked
+  and preserved nowhere, and the manifest cited bytes the key no longer
+  held. `put_file` and `promote_draft` now overwrite only a version the
+  workspace tracks — the manifest's citation, or one an inbox entry
+  names — and answer anything else with the retryable
+  `concurrent-write` (409), before any precondition is judged; the UI
+  retries and overwrites the version that commit cites. An untracked
+  object older than 600 s, or one in a workspace with no live writer
+  heartbeat, may still be overwritten. The rule is
+  `flint_lean::inbox::hitl_may_overwrite`; a syncer repro and a gateway
+  test fail without it, and the model gains `HitlOverwritesTrackedOnly`
+  with its mutation `LeanBarrierLeaseHitlOverUncited`.
 - **lean: `uploadPartParallelism` defaults to 8, behind a new upload
   bytes-in-flight bound `uploadInflightMb` (default 256).** v1.51.0
   shipped the 8-wide per-object upload as an opt-in, measured at 3.6–4.2x

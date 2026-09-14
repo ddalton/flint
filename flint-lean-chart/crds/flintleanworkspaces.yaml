@@ -71,6 +71,18 @@ spec:
                   ambient AWS endpoint resolution.
                 nullable: true
                 type: string
+              eventTrace:
+                default: false
+                description: |-
+                  Write the syncer's protocol event trace: one JSON line on the
+                  worker's stderr per protocol step (each consume, upload outcome,
+                  claim, merge, CAS, garbage-collector delete, queue write, release,
+                  fence, ack and sync), in the format pinned by
+                  `lean/e2e/writers-live/README.md` §2. For explaining what several
+                  writers of one workspace did to each other after the fact, when
+                  the interleaving may not happen again. Off by default: on, it is a
+                  line per step on the worker's log.
+                type: boolean
               expectedBytes:
                 description: |-
                   Expected inventory, used to DERIVE the syncer's startupProbe

@@ -13,19 +13,22 @@ a library. Nothing here is wired into `scripts/check-tla.sh`.
 ## Running
 
 ```
-./check.sh          # the 49-run gate (~4 min)
+./check.sh          # the 90-run gate (~8 min)
 ./gen-cfgs.sh       # regenerate the cfg matrix
 ```
 
-Seventy-nine runs, ALL required: 16 strict (must hold), 32 mutations
+Ninety-two runs, ALL required: 24 strict (must hold), 36 mutations
 (must find their designated counterexample — a model that cannot
-rediscover its bug classes proves nothing), 31 probes (must be violated
+rediscover its bug classes proves nothing), 32 probes (must be violated
 — each names an ACTION via a ghost only that action writes; probe the
 action, never the situation). The three numbers are `grep -c "^strict_run "`,
 `grep "^mutation_run " | grep -vc Probe` and `grep "^mutation_run " |
 grep -c Probe` in `check.sh` — they had drifted from the script twice,
-so they are stated as a recipe rather than a claim. `LeanSubtreeDeep.cfg` is the rich-budget breadth run — an
-opt-in overnight job, not in the gate.
+so they are stated as a recipe rather than a claim. (And `EXPECT` itself
+drifted once: gated mode's removal took 23 runs out and left it at 92
+over 69 real calls, so the gate at that commit failed its own count
+check — which is what the check is for.) `LeanSubtreeDeep.cfg` is the
+rich-budget breadth run — an opt-in overnight job, not in the gate.
 
 ## The module: LeanChunkGC.tla
 
@@ -98,12 +101,16 @@ Invariants:
 
 | Invariant | Claim | Mutation that must violate it |
 | --- | --- | --- |
-| `Inv_HITLDurable` | an acked HITL write is never silently lost | `LeanAmputation` (direct manifest bump + whole-rewrite writer), `LeanLocalWins` (the inherited flush.rs LOCAL-WINS 412 arm), `LeanGCUnguarded` (unguarded GC delete) |
-| `Inv_NoDangling` | every cited manifest entry has a live object | `LeanDanglingOrder` (v1 order: upload→delete→CAS) |
-| `Inv_NoStragglerInstall` | a deposed writer's manifest CAS never lands | `LeanNoRotate` (no takeover rotation) |
-| `Inv_NoDeposedPut` | a deposed writer's data PUT never lands | `LeanNoEpochCheck` (rotation alone — proves rotation does NOT cover the data path) |
+| `Inv_HITLDurable` | an acked HITL write is never silently lost | `LeanAmputation` (direct manifest bump + whole-rewrite writer), `LeanLocalWins` (the inherited flush.rs LOCAL-WINS 412 arm), `LeanGCUnguarded` (unguarded GC delete); with TWO LIVE WRITERS `LeanBarrierLeaseHitlOverUncited` (a UI write over a writer's uncited upload — a FINDING, tranche 6) |
+| `Inv_NoDangling` | every cited manifest entry has a live object | `LeanDanglingOrder` (v1 order: upload→delete→CAS); under the barrier lease `LeanBarrierLeaseGCUnconditional` (the shipped HEAD-then-DELETE GC against a second writer's supersede) and `LeanBarrierLeaseAdoptBlind` (an adopted entry cited without re-verification under the lease) — both FINDINGS, tranche 6 |
+| `Inv_NoStragglerInstall` | a deposed writer's manifest CAS never lands | `LeanNoRotate` (no takeover rotation); `LeanBarrierLeaseNoRotate` (the same, deposal mid-commit) |
+| `Inv_NoDeposedPut` | a deposed writer's data PUT never lands | `LeanNoEpochCheck` (rotation alone — proves rotation does NOT cover the data path). Under the barrier lease this is vacuous by design: uploads precede the claim and are never fenced (protocol of record, straggler rules) |
 | `Inv_NoResurrection` | a container restart never resurrects an unpublished delete | `LeanRematerialize` (re-checkout over a live tree) |
 | `Inv_SyncNeverDestroysDirty` | the sync verb never destroys genuinely-dirty local work without surfacing it | `LeanSyncStaleDirt` (sync judging dirt from the last barrier's snapshot) |
+| `Inv_NoForeignLost` | a sync never advances the merge base for a path it did not integrate or surface (D4) | `LeanScopedSyncWholeBase`; and with TWO LIVE WRITERS the shipped rule itself: `LeanBarrierLeaseSyncOverlayStale` (a FINDING, tranche 6; its control `LeanBarrierLeaseSyncOverlayHolds` moves `SyncKeepsHiddenBase` alone) |
+| `Inv_CommitExclusive` | one writer in the commit section at a time (D1, the lease's safety half) | none needed yet: it is what every deposal run checks, and it held in every world |
+| `Inv_CellHeldByHolder` | model coherence: a HELD cell's holder is in its commit section at the cell's epoch | — (pins the claim arms; a wrong arm fails it first) |
+| `NoStarvation` (liveness, `FairSpec`) | every live writer that queued for the cell eventually holds it | `LeanBarrierLeaseRandomArbitration` (no ticket: one writer claims forever), `LeanBarrierLeaseDeadHandoffWedge` (no dead-handoff skip: a crashed waiter wedges the cell) |
 
 Deliberate strict-HOLDS runs (machine-checked design findings, the
 FlintClaimsNoLeader idiom):
@@ -450,6 +457,233 @@ consume and the citation's window — is not expressible, because the
 gated lane reuses `Scan`, which OPENS the window, while the shipped lane
 deliberately opens none. Making the gated lane window-free is the
 fidelity fix and it is not free.
+
+## Tranche 6 (2026-09-13): the PER-BARRIER lease × the FIFO ticket
+
+Design of record: `docs/plans/flint-lean-writer-lease-and-gated-assessment.md`
+§4–§8 and the lease-v2 protocol note. The cell is held for ONE barrier's
+commit section — claim after the uploads, release after the baseline —
+with a FIFO ticket, instead of for the pod's life. Twenty-one runs
+(69 → **90**), behind `BarrierLease`, FALSE in every pre-existing cfg:
+`StartA`/`ClaimB` keep the life lease, `Scan` opens the window, every
+fence kills, and `cellQueue`/`cellHandoff`/`cellReleased` stay frozen at
+Init. **Preserved by construction, verified by number**: four strict
+worlds re-run on the new module against the HEAD module's counts —
+`LeanRemovalHolds` 332,847, `LeanSentinelHolds` 1,208,901,
+`LeanSubtreeTakeover` 1,365,619, `LeanSentinelDeposal` 3,484,752 distinct
+states, all identical.
+
+What the module gained, and which action writes each thing:
+
+| new | kind | meaning |
+| --- | --- | --- |
+| `cellQueue`, `cellHandoff`, `cellReleased` | variables | the ticket: waiters in FIFO order, who the last release named, and whether the cell is HELD (`cellEpoch > 0 /\ ~cellReleased`) or RELEASED |
+| `StartLease(s)` | action | both syncers start by checking out, holding nothing (B no earlier than A: symmetry breaking only) |
+| `Claim(s)` | action | fresh cell, released cell whose handoff is nobody/me, or the DEPOSAL of a quiet holder (stalled/dead — the 60 s rule, the same abstraction `ClaimB` uses); only the deposal rotates; the window opens HERE |
+| `Enqueue(s)` | action | a syncer that cannot claim takes a ticket (pc `waiting`) — separate so the queue is observable |
+| `SkipDeadHandoff(s)` | action | the 20 s rule: a quiet handoff is dropped and the released cell is anybody's |
+| `Finish(s)` | changed | releases as its LAST step (handoff = queue head); a crash between CAS and Finish leaves the cell HELD by a dead holder, which the deposal covers; a deposed holder releases nothing |
+| `Restart(s)` | changed | a restarted container that finds the cell held by its own id releases it |
+| the fence arms | changed | `FencedSc`: under the barrier lease a fence ABANDONS the barrier and the syncer keeps running; no `refused-fenced` ack exists (`AckRefused` is life-lease only) |
+| `Holding(s)`, `DeposedHolder(s)`, `Fenced(s)` | helpers | `Deposed` means something only inside the commit section; every fence and every straggler stamp now reads `DeposedHolder`, which collapses to `Deposed` under the life lease |
+| `Upload(s, p)` | changed | a NON-holder action, never fenced; `gh.interleaved` is the required-reachable probe |
+| `GCHead(s, p)`, `gcHeaded`/`gcSeen` | action/fields | the shipped two-request GC, under `~ConditionalGC` (finding 1) |
+| `adopted`, `VerifyAdoptedCitations` | field/arm | an adopted entry is re-verified inside the commit section (finding 2) |
+| `AckedDoc(s)`, `AckedSrc(s)`, `instSrc` | helpers/field | under the barrier lease the three ack stamps (`BoundaryBroken`, `BoundaryIncoherent`, `srcMismatch`) are judged against the document the ack NAMES (`instSnap` at `instSeq`, seeded at checkout for a never-installed writer) and its clock, never against the live manifest — see "the ack under two writers" below |
+| `InfiniteBarriers`, `FairSpec`, `NoStarvation` | liveness | see below |
+| `gh.claimed/interleaved/handoffs/deposals/deadSkips/enqueues/abandoned/adoptWithheld` | ghosts | one probe each, each written by exactly one action |
+
+**The liveness property, and what it took.** `NoStarvation ==
+\A s : [](Waiting(s) => <>(Holding(s) \/ ~Running(s)))` under `FairSpec
+== Spec /\ \A s : WF_vars(BarrierStep(s))` — weak fairness on each
+writer's OWN barrier step, never on "some writer steps". The first
+obstacle was not the two symmetric writers, it was the budgets: every
+counter a no-change barrier moves (`gh.barriers`, `manSeq`, the epoch,
+`gh.done`) is monotone, so under budgets the state graph has no cycle
+and "claims forever" is not a behaviour TLC can exhibit — the FALSE arm
+was GREEN, because after the last budgeted barrier the waiter's claim is
+continuously enabled and WF fires it. `InfiniteBarriers` is the
+abstraction: those counters saturate instead of stopping the world, one
+path, no writes, no crashes. No third syncer and no biased choice were
+needed once the loop could cycle. Results, each ~5 s:
+
+- `LeanBarrierLeaseLive` (`Ticket`): HOLDS, 24,465 states.
+- `LeanBarrierLeaseRandomArbitration` (`Ticket = FALSE`): VIOLATED —
+  the lasso is A `Claim → CASInstall → Finish(release, handoff none) →
+  Consume → Scan → Claim …` ("Back to state 33") with B parked at
+  `waiting` in `cellQueue = <<"B">>` throughout: B's `Claim` is enabled
+  only between A's release and A's next claim, WF asks nothing of an
+  action that is not continuously enabled, and A claims forever. With
+  the ticket, A's release names B and A's own next claim is DISABLED
+  until B holds, so B's claim is continuously enabled and WF forces it.
+- `LeanBarrierLeaseLiveCrash` (a crash, `DeadHandoffSkip`): HOLDS,
+  103,448 states — a dead holder is deposed, a dead handoff is skipped.
+- `LeanBarrierLeaseDeadHandoffWedge` (`DeadHandoffSkip = FALSE`):
+  VIOLATED — B queues, crashes; A's release names the dead B; A queues
+  behind a handoff that will never claim, and stutters there forever.
+
+**Four findings, all two-writer, none reachable under the life lease.**
+The rule was: a real counterexample in the protocol is not "fixed" in
+the model; it is pinned as the must-fail it is, and the fix — where one
+belongs to this protocol — is modelled as an arm so the rest can be
+checked against it (the `MineIsNotForeign` pattern).
+
+1. **The GC delete is a HEAD then an unconditional DELETE**
+   (`barrier.rs` step 6). Under the life lease the lease covered that
+   window; under the barrier lease the other writer's uploads hold no
+   lease, and its supersede landing between A's HEAD and A's DELETE
+   leaves B's citation dangling. The module's atomic `GCDelete` had
+   always hidden this; `ConditionalGC = FALSE` makes it two steps and
+   `LeanBarrierLeaseGCUnconditional` finds it in 86,771 states, no stall,
+   no crash, no HITL. The fix is a conditional delete (If-Match on the
+   recognised etag — S3 supports it on DeleteObject; `flint-store`'s
+   trait has only `delete(key)` today). Strict runs use the conditional
+   delete; that is what they certify.
+2. **An adopted entry is cited blind.** A barrier that restarts between
+   its CAS and its baseline re-uploads next time and finds its own bytes
+   already there; `upload_one` adopts (CRC match, no PUT — the correct
+   rule, and the model's ungated arm was made to follow it under the
+   barrier lease: it used to adopt ANY recognised generation and cite
+   the walk's bytes, which is how the first four strict runs dangled
+   before the real race was reached). Between the adopt and the
+   adopter's CAS the other writer's commit uncites the path and its GC —
+   HEAD-guarded on an etag it learned at checkout — deletes the object;
+   the adopter's merge then upserts a citation over nothing. TLC found
+   it at depth 28 of the first stall run (5.0M states); the restart
+   world (`LeanBarrierLeaseAdoptBlind`) reaches it without a stall. A
+   same-bytes re-PUT would not help — a real etag is the content hash,
+   so the recognised-etag guard cannot tell the re-PUT from the
+   original. The one race-free place to look is the commit section,
+   because GCs run only under the lease: `VerifyAdoptedCitations`
+   re-verifies adopted entries at the CAS and withholds what is gone
+   (parked, with a record; the path stays dirty). `LeanProbeAdoptWithheld`
+   proves the arm fires; `LeanBarrierLeaseAdoptVerified` is the control.
+3. **D4 does not survive a second live writer.** The sync verb's remote
+   truth is the manifest overlaid by live inbox entries (`sync.rs` step
+   2: "an inbox entry is a write the manifest has not re-cited yet").
+   With two writers the entry B's own merge queued (A's install) can be
+   OLDER than the manifest: A deletes the path afterwards while the
+   entry's object still exists, so B's scoped sync "verifies" the path
+   unchanged against the overlay and advances the merge base to the
+   manifest — the silent, permanent loss `Inv_NoForeignLost` names. One
+   writer cannot produce it: the only party that could move a manifest
+   past its own queued entry is dead. Pinned as
+   `LeanBarrierLeaseSyncOverlayStale` (817,765 states, 25 s). The fix is
+   the sync verb's — advance the base only to what was VERIFIED, never to
+   a manifest the overlay hid — and was built the same day (`sync.rs`
+   step 5, with a repro test that fails without it). Modelled as
+   `SyncKeepsHiddenBase` (FALSE in every earlier cfg, so their state
+   spaces are unchanged); `LeanBarrierLeaseSyncOverlayHolds` is the same
+   world with that one constant moved, and HOLDS (1,493,045 states,
+   104 s).
+
+   Two things the code now does that this module does NOT yet model,
+   named so the gap is not mistaken for coverage. The code no longer
+   queues merge-preserved entries in the SHARED inbox — a peer's consume
+   dropped them as "already integrated" and the writer that needed them
+   never converged — but keeps them, with the peer's DELETIONS as
+   tombstones, in a writer-local queue; the module's `foreignQ` still
+   joins the shared `inbox` at install. And a barrier whose merge adds
+   nothing to theirs installs nothing (two idle writers traded empty
+   generations). Both are convergence properties, invisible to the
+   safety invariants here; modelling them is a liveness tranche of its
+   own. Until then the overlay finding's trace (a stale merge-preserved
+   entry) is a path the code no longer takes — the stale overlay it now
+   guards against is a consumed HITL entry between a commit's CAS and
+   its window clear, which the repro test drives.
+4. **A UI write over an uncited upload is lost** — found by the gate,
+   not by review: the first full run under the three fixes above
+   violated `Inv_HITLDurable` in the two-writer sentinel world. The
+   window now opens at the claim, so nothing holds the gateway off
+   while a writer uploads, and the gateway's PUT is If-Match the key's
+   CURRENT etag — which may be A's upload, not yet cited. B consumes the
+   UI write, cites it and drops the entry; A's commit then re-cites its
+   own generation over it. The UI's acked write is uncited, untracked
+   and preserved nowhere, and the manifest cites bytes the key no longer
+   holds. No writer-side rule can see this: A's upload and the UI's PUT
+   both succeeded on their own conditions. The fix is the gateway's — a
+   HITL write overwrites only a version the workspace TRACKS (the
+   manifest's citation, or one an inbox entry names) and otherwise gets
+   a retryable 409; an untracked object older than
+   `UNTRACKED_GRACE_SECS`, or one with no live writer, is fair game
+   (`flint_lean::inbox::hitl_may_overwrite`, used by `put_file` and
+   `promote_draft`, with a syncer repro and a gateway test, both failing
+   without it). Modelled as `HitlOverwritesTrackedOnly`, a guard on
+   `HitlWrite` (`objects[p] = 0 \/ objects[p] = manifest[p] \/
+   <<p, objects[p]>> \in inbox`), TRUE in `BLWORLD` and `BLSENT`
+   (`LeanBarrierLeaseHolds`, `LeanBarrierLeaseSentinel`) and FALSE in
+   every other cfg. `LeanBarrierLeaseHitlOverUncited` is `BLSENT`
+   with that constant alone moved: VIOLATED, 18,939,222 distinct states,
+   622 s. The grace and no-live-writer escapes are not modelled: the
+   guard refuses every untracked overwrite, stricter than the code,
+   which is the safe direction for a durability claim and says nothing
+   about whether those escapes are themselves safe.
+
+**The ack under two writers — a refinement, not a finding.** The first
+sentinel run under the barrier lease violated `Inv_AckBoundaryCoherent`
+in 13 steps: B honored a sentinel on the fast path (tree clean, manifest
+unmoved since its checkout), A's commit then deleted a path, and B wrote
+its ok ack. `BoundaryIncoherent` compared B's baseline with the LIVE
+manifest, which with one writer nothing could move between the honor
+and the ack. An ok ack names a seq (`remote.seq`); the promise is about
+the document at that seq, and a later install that merges from theirs
+and preserves this workspace's entries is the two-writer rule working.
+So under the barrier lease the three ack stamps read `AckedDoc(s)` —
+`instSnap`, which now also records the checkout for a never-installed
+writer — and `AckedSrc(s)` for the clock. The durability invariants keep
+reading the live manifest. FALSE world untouched.
+
+**The ack under two writers, second refinement — a declined repair.** With
+`HitlOverwritesTrackedOnly` in place, the two-writer sentinel world
+violated `Inv_AckBoundaryCoherent` again, in 16 steps: a HITL write is
+consumed by both writers; A's agent edits on top of it and A uploads,
+lease-free and uncited; B's commit owes a citation repair for the HITL
+generation it integrated, finds the key holding A's upload, and rightly
+declines (`repair`'s HEAD guard, `barrier.rs` "moved again or gone: the
+next consume reconciles it"); B's ok ack then names a document citing the
+pre-HITL generation while B's baseline holds the HITL one. The stamp's
+stated harm cannot follow: a reader of that document is sent to a key
+that holds neither the superseded generation nor the cited one, so its
+conditional read fails into the newer object — and nothing acked is at
+risk (`Inv_HITLDurable` held in the same run). So `CASInstall` records the
+repairs it declined BECAUSE THE KEY MOVED (`repairMoved`, BarrierLease
+only) and `BoundaryIncoherent` exempts exactly those paths, at that CAS. A
+repair skipped while the key still held the integrated generation is not
+exempt: `LeanSentinelFastPathUnguarded` is still VIOLATED (4,210 states).
+With the exemption `LeanBarrierLeaseSentinel` found no violation through
+41,958,554 distinct states at depth 18 (the counterexample was at 16) and
+was STOPPED, not exhausted — its state queue passed 19 GB on a machine with
+10 GB of disk left. Its exhaustive run needs a larger box; until then this
+world is "no violation to depth 18", not "holds".
+
+**Budgets.** `BLWORLD` is MaxGen=2/MaxBarriers=2 with crash + restart +
+HITL — not `LeanSubtree`'s MaxGen=3: two live writers with a crash AND a
+restart passed 2.8M states at depth 16 in the first minute with the
+queue spilling to disk (the `SENTRESTART` split, for the same reason).
+`BLSENT` is `SENTWORLD` (two touches, HITL, no crash), `BLSTALL` is
+MaxGen=2/MaxBarriers=2 (A freezes inside its commit section; a third
+barrier is only needed for the adopt race, which has its own world),
+`BLADOPT` is one path, MaxGen=2/MaxBarriers=3/MaxRestarts=1 (with two
+paths the mutation sat past 1M states at depth 20 and its strict control
+would have had to exhaust the lot). The stall world at MaxBarriers=3 was
+4–5M states and three to four minutes per run; at 2 it keeps every stamp
+site the deposal needs.
+
+**Not modelled, named rather than omitted.** The window closes at the
+CAS here and after the GC deletes in the code, so a HITL write inside
+the two-request GC window would be a false positive — the GC finding's
+world runs MaxHitl=0 and the writer race is the real one. The 412 arm
+parks on the FIRST foreign 412 where `upload_one` preserves and
+supersedes and parks on the second; and a vanished base (HEAD → 404) is
+a create in the code and a park here (review inbox-5) — both make the
+model more conservative than the code, and neither is this tranche's.
+Generations are unique mints where real etags are content hashes, which
+is why finding 2's fix had to be a verification and not a re-PUT.
+Gated mode is asserted off under the barrier lease (`ASSUME`), per D3.
+`Inv_NoDeposedPut` and `Inv_NoFencedOkAck` hold vacuously under the
+barrier lease — uploads precede the claim and no refused-fenced ack
+exists — and are listed in its strict runs for the FALSE-world reader,
+not as coverage.
 
 ## Tranche 3 candidates (in review-priority order)
 

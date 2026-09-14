@@ -619,7 +619,10 @@ impl Syncer {
     fn write_ack(&self, verb: Verb, ack: &Ack) -> LeanResult<()> {
         let bytes =
             serde_json::to_vec_pretty(ack).map_err(|e| LeanError::State(format!("ack: {e}")))?;
-        write_atomic(&self.ack_path(verb), &bytes)
+        write_atomic(&self.ack_path(verb), &bytes)?;
+        self.trace("ack", serde_json::json!({"verb": format!("{verb:?}"), "nonces": ack.nonces, "status": ack.status,
+            "seq": ack.seq, "dropped": ack.report.dropped, "boundary": ack.boundary}));
+        Ok(())
     }
 
     /// Does a standing ack already answer this pending record? Used by

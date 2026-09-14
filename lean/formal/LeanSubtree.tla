@@ -35,7 +35,7 @@
 (*     preserve the BYTES (conflict-suffixed key or versioning), not just  *)
 (*     the reference — otherwise "both versions recoverable" is false.     *)
 (***************************************************************************)
-EXTENDS Naturals, FiniteSets
+EXTENDS Naturals, FiniteSets, Sequences
 
 CONSTANTS
   Paths,          \* model values, e.g. {p1, p2}
@@ -249,7 +249,7 @@ CONSTANTS
                        \* once its destination is INTEGRATED AND CLEAN.
                        \* FALSE = the mutation: the source goes as soon as
                        \* it is clean, whatever became of the destination.
-  EarlyInboxDrop       \* TRUE = the rule that SHIPPED until 2026-09-12: a
+  EarlyInboxDrop,      \* TRUE = the rule that SHIPPED until 2026-09-12: a
                        \* consume clears the inbox at once ("durably in
                        \* the baseline").  FALSE = consumed entries leave
                        \* the cell at Finish / CiteFinish, after the
@@ -257,6 +257,86 @@ CONSTANTS
                        \* pod REPLACEMENT between the two takes the
                        \* baseline with the emptyDir, and an acked write
                        \* is then tracked by nothing.
+  \* ---- tranche 6: the PER-BARRIER lease (writer-lease design §4-§5) ----
+  \* The cell is held for ONE barrier's commit section — claim after the
+  \* uploads, release after the baseline — instead of for the pod's life,
+  \* and it carries a FIFO ticket.  Both syncers run from the start; the
+  \* takeover (`ClaimB`) is the life-lease world's and does not exist
+  \* here: a dead holder mid-commit is deposed by the generic `Claim`.
+  BarrierLease,        \* FALSE in every pre-existing cfg: `StartA`/`ClaimB`
+                       \* keep the life lease, `Scan` opens the window,
+                       \* every fence kills, and the three new cell
+                       \* variables stay frozen at Init — those state
+                       \* spaces are preserved by construction.
+  Ticket,              \* TRUE = release names the queue head as the
+                       \* HANDOFF and only the handoff may acquire a
+                       \* released cell.  FALSE = the mutation (falsifier
+                       \* L5): release names nobody and any syncer may
+                       \* acquire — random arbitration, and under
+                       \* fairness one writer claims forever.
+  DeadHandoffSkip,     \* TRUE = a released cell whose handoff is quiet
+                       \* (dead or stalled, the 20 s rule) may be acquired
+                       \* by anyone and the handoff is dropped.  FALSE =
+                       \* the mutation: a crashed waiter wedges the cell
+                       \* for every survivor, forever.
+  InfiniteBarriers,    \* TRUE = the LIVENESS abstraction, and nothing
+                       \* else: the barrier budget, the manifest seq and
+                       \* the epoch SATURATE instead of stopping the world
+                       \* (every counter a no-change barrier moves is
+                       \* monotone, so with budgets the state graph has no
+                       \* cycle and TLC cannot exhibit "claims forever").
+                       \* Only meaningful under FairSpec; every safety run
+                       \* keeps FALSE.
+  ConditionalGC,       \* TRUE = the GC delete carries If-Match on the
+                       \* recognised etag: guard and delete are ONE
+                       \* request, which is what this module's atomic
+                       \* `GCDelete` has always modelled.  FALSE = what
+                       \* SHIPS (`barrier.rs` step 6): a HEAD, then an
+                       \* unconditional DELETE.  Under the life lease the
+                       \* lease covered that window; under the barrier
+                       \* lease the other writer's uploads hold no lease,
+                       \* and a supersede landing between the two dangles
+                       \* its citation.  THE MODEL FOUND THIS the moment
+                       \* the step was made two steps — see
+                       \* LeanBarrierLeaseGCUnconditional.  Modelled only
+                       \* under BarrierLease (TRUE everywhere else, so
+                       \* every earlier state space is preserved).
+  VerifyAdoptedCitations,\* TRUE = an entry this barrier ADOPTED (the 412
+                       \* arm found its own bytes already there and cited
+                       \* the existing object) is re-verified INSIDE the
+                       \* commit section and withheld if the object is
+                       \* gone.  FALSE = what SHIPS: the adopt cites blind.
+                       \* Under the life lease nothing else could GC the
+                       \* object; under the barrier lease the other
+                       \* writer's commit can uncite it and its GC — HEAD-
+                       \* guarded on an etag it learned at checkout —
+                       \* deletes it between the adopt and the adopter's
+                       \* CAS.  A same-bytes re-PUT would not help: a real
+                       \* etag is the content hash.  The commit section is
+                       \* the one race-free place to look, because GCs run
+                       \* only under the lease.  THE MODEL FOUND THIS at
+                       \* depth 28 of the first two-writer stall run.
+                       \* Only under BarrierLease; TRUE elsewhere.
+  HitlOverwritesTrackedOnly, \* TRUE = a HITL write (the gateway) overwrites
+                       \* only a version the workspace TRACKS: the object at
+                       \* the key is the manifest's citation or an inbox
+                       \* entry (or absent).  FALSE = what shipped until
+                       \* 2026-09-13: any current object, including another
+                       \* writer's upload its commit has not cited — which,
+                       \* under the barrier lease (no window during
+                       \* uploads), loses the acked HITL write
+                       \* (LeanBarrierLeaseHitlOverUncited).  FALSE in every
+                       \* pre-existing cfg, so earlier state spaces are
+                       \* preserved by construction.
+  SyncKeepsHiddenBase  \* TRUE = a sync does NOT advance the merge base for
+                       \* a path whose remote truth came from an inbox
+                       \* overlay that differs from the manifest: the
+                       \* manifest's version was hidden from it, never
+                       \* applied or verified (`sync.rs` step 5, built
+                       \* 2026-09-13 for LeanBarrierLeaseSyncOverlayStale).
+                       \* FALSE in every pre-existing cfg — the shipped
+                       \* advance — so earlier state spaces are preserved
+                       \* by construction.
 
 Syncers == {"A", "B"}
 Sources == {"none", "cadence", "sentinel"}
@@ -265,6 +345,10 @@ VARIABLES
   \* ---- bucket -----------------------------------------------------------
   cellEpoch,   \* subtree lease cell: current epoch (0 = never claimed)
   cellHolder,  \* "A" | "B" | "none"
+  cellQueue,   \* tranche 6: the FIFO ticket — a sequence of waiters
+  cellHandoff, \* tranche 6: "none" | the syncer a release named
+  cellReleased,\* tranche 6: TRUE between a release and the next claim.
+               \* HELD = cellEpoch > 0 /\ ~cellReleased; FRESH = epoch 0.
   manSeq,      \* manifest document seq (the CAS token)
   manSrc,      \* the boundary-source stamp on the INSTALLED manifest —
                \* the fleet-visible answer to "which clock installed
@@ -301,15 +385,21 @@ VARIABLES
   gh           \* ghost/counter record, fields below
 
 gatedVars == <<stage, stageBase, withheldDel>>
+leaseVars == <<cellQueue, cellHandoff, cellReleased>>
 
-vars == <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals, window,
+vars == <<cellEpoch, cellHolder, cellQueue, cellHandoff, cellReleased,
+          manSeq, manSrc, manifest, objects, inbox, removals, window,
           sc, versions, stage, stageBase, withheldDel, hitlAcked,
           conflicts, gh>>
 
 (* sc[s] fields:
      st       "unstarted" | "claiming" | "running" | "stalled" | "dead"
      pc       "idle" | "consumed" | "scanned" | "delDone" | "cased"
-     epoch    the epoch this incarnation believes it holds
+              | "waiting" | "claimed"   (tranche 6: the barrier lease —
+              uploads done and queued for the cell; cell claimed, the
+              commit section from here to Finish)
+     epoch    the epoch this incarnation believes it holds (tranche 6:
+              the LAST epoch it held; 0 before its first claim)
      expSeq   the manifest seq it will If-Match
      local    [Paths -> Nat]  the live tree (0 = absent)
      baseline [Paths -> Nat]  the persisted baseline snapshot
@@ -333,14 +423,32 @@ vars == <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, remov
                               implementation threads `installed` through
                               for exactly this reason).
      instSeq  Nat             the seq THIS barrier installed.
+     instSrc  Sources         tranche 6: the clock stamped on THIS
+                              barrier's install (BarrierLease only).  With
+                              two writers the live manifest's stamp is
+                              whoever installed LAST, which is not what
+                              this workspace's ack names.
      scanU    SUBSET Paths    upload set frozen at scan
      scanD    SUBSET Paths    delete-eligible set frozen at scan
      scanGen  [Paths -> Nat]  local generations frozen at scan (re-stat guard:
                               the barrier publishes walk-time content; post-
                               scan agent edits are next barrier's dirt)
      upDone   SUBSET Paths    uploaded (or adopted-own) this barrier
+     adopted  SUBSET Paths    tranche 6: the subset of upDone that was
+                              ADOPTED — cited without a PUT — and so is
+                              re-verified under the lease (BarrierLease
+                              only; {} otherwise)
+     repairMoved SUBSET Paths the last install's DECLINED citation repairs:
+                              paths this writer integrated whose key held a
+                              newer generation at the CAS (BarrierLease
+                              only; {} otherwise) — see BoundaryIncoherent
      parked   SUBSET Paths    412-parked this barrier
      gcDone   SUBSET Paths    delete-set entries processed this barrier
+     gcHeaded SUBSET Paths    tranche 6, ~ConditionalGC only: delete-set
+                              entries whose HEAD has been read this barrier
+     gcSeen   [Paths -> Nat]  ...and the generation that HEAD saw — what
+                              the unconditional DELETE is guarded on,
+                              which is not what it deletes
      citeDone SUBSET Paths    which staged paths THIS citation has already
                               installed.  Non-empty and not the whole
                               valid pending set = a reader can see half a
@@ -452,7 +560,21 @@ vars == <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, remov
                             it never saw.  That is exactly the silent,
                             permanent loss D4 exists to prevent: the next
                             merge computes `changed = FALSE` for it and it
-                            is never queued again. *)
+                            is never queued again.
+     ---- tranche 6: the barrier lease (each written by ONE action) ----
+     claimed  SUBSET Syncers  who has claimed the cell at least once (Claim)
+     interleaved BOOLEAN  an upload LANDED while another syncer held the
+                            cell in its commit section (Upload) — the
+                            required-reachable probe: two writers really
+                            do overlap uploads with a commit
+     handoffs 0|1          a claim by the syncer the release NAMED (Claim)
+     deposals Nat          a quiet holder was deposed mid-commit (Claim)
+     deadSkips 0|1         a quiet handoff was skipped (SkipDeadHandoff)
+     enqueues 0|1          a syncer queued for the cell (Enqueue)
+     abandoned 0|1         a fenced holder abandoned its barrier and kept
+                            running (the fence arms, under BarrierLease)
+     adoptWithheld 0|1     a CAS withheld an adopted entry whose object
+                            was gone (CASInstall, under the fix) *)
 
 ------------------------------------------------------------------------------
 (* Helpers *)
@@ -488,9 +610,83 @@ BoundaryClock(s) == IF SentinelEnabled /\ PendLive(s) THEN "sentinel" ELSE "cade
    clock however it was driven.                                          *)
 InstallSource(s) == IF StampBoundarySource THEN BoundaryClock(s) ELSE "cadence"
 
+(* Tranche 6: WHICH DOCUMENT an ack is judged against.  An ok ack names
+   a seq (`remote.seq`) — the document this workspace installed, or, on
+   the fast path, the one it found unmoved since its last install or
+   checkout (`manSeq = expSeq`, and `instSnap` tracks both).  With one
+   writer that document IS the live manifest at ack time: nothing else
+   could move it between the honor and the ack.  With two, the other
+   writer's commit can land in between — TLC's first sentinel run under
+   the barrier lease was exactly that, a fast-path honor followed by the
+   other writer's delete followed by the ack — and a later install that
+   merges from theirs and preserves this workspace's entries is the
+   two-writer rule working, not an incoherent ack.  The live manifest
+   stays the subject of every durability invariant.                    *)
+AckedDoc(s) == IF BarrierLease THEN sc[s].instSnap ELSE manifest
+AckedSrc(s) == IF BarrierLease THEN sc[s].instSrc ELSE manSrc
+
 
 Deposed(s)  == cellEpoch > sc[s].epoch
 Running(s)  == sc[s].st = "running"
+
+(* ---- tranche 6: the per-barrier lease --------------------------------
+   The COMMIT SECTION runs from the claim to the release.  Only there does
+   the cell's epoch mean anything to a syncer: before the claim it holds
+   nothing, and `Deposed` merely compares against the last epoch it held.
+   Under the life lease every post-claim step of the incarnation is in
+   the commit section, which is what `DeposedHolder` collapses to.       *)
+Holding(s)       == sc[s].pc \in {"claimed", "delDone", "cased"}
+DeposedHolder(s) == Deposed(s) /\ (~BarrierLease \/ Holding(s))
+Fenced(s)        == EpochCheck /\ DeposedHolder(s)
+CellFresh        == cellEpoch = 0
+CellHeld         == cellEpoch > 0 /\ ~cellReleased
+Quiet(t)         == sc[t].st \in {"stalled", "dead"}
+InQueue(s)       == \E i \in 1..Len(cellQueue) : cellQueue[i] = s
+Without(q, s)    == SelectSeq(q, LAMBDA t : t # s)
+\* Uploads complete: the barrier wants the cell.  Under the life lease
+\* this IS `CASReady`; under the barrier lease the claim sits between.
+UploadsDone(s)   == sc[s].scanU \subseteq (sc[s].upDone \cup sc[s].parked)
+PreCommitReady(s) == sc[s].pc = "scanned" /\ UploadsDone(s)
+WantsCell(s)     == PreCommitReady(s) \/ sc[s].pc = "waiting"
+\* Every claim bumps the epoch; every claim follows a scan, so the
+\* barrier budget bounds it (+2 for the life lease's StartA and ClaimB).
+\* Under the liveness abstraction it saturates there instead.
+EpochBound       == MaxBarriers + 2
+NextEpoch        == IF InfiniteBarriers /\ cellEpoch >= EpochBound
+                    THEN cellEpoch ELSE cellEpoch + 1
+\* The claim rule (protocol of record §3): a FRESH cell; a RELEASED cell
+\* whose handoff is nobody or me; or a HELD cell whose holder has been
+\* quiet for the 60 s rule (stalled or dead) — the DEPOSAL, which is the
+\* only arm that rotates.
+ClaimEnabled(s) ==
+  \/ CellFresh
+  \/ cellReleased /\ cellHandoff \in {"none", s}
+  \/ CellHeld /\ cellHolder # s /\ Quiet(cellHolder)
+\* The 20 s rule on a handoff: the named waiter is quiet, so the released
+\* cell is anybody's and the waiter is dropped.
+SkipEnabled(s) ==
+  /\ DeadHandoffSkip
+  /\ cellReleased /\ cellHandoff \notin {"none", s}
+  /\ Quiet(cellHandoff)
+\* What a release writes: the queue head becomes the handoff (the
+\* ticket), or nobody under the mutation.
+ReleaseCell ==
+  /\ cellReleased' = TRUE
+  /\ cellHandoff' = IF Ticket /\ cellQueue # <<>> THEN Head(cellQueue) ELSE "none"
+  /\ cellQueue'   = IF Ticket /\ cellQueue # <<>> THEN Tail(cellQueue) ELSE cellQueue
+\* What a fence does to the incarnation.  Life lease: the process exits.
+\* Barrier lease: the barrier is ABANDONED — its manifest never installed,
+\* its uploads standing as uncited generations the next barrier adopts —
+\* and the syncer keeps running; the next barrier claims again.
+FencedSc(s) ==
+  IF BarrierLease
+  THEN [sc EXCEPT ![s].pc = "idle",
+        ![s].scanU = {}, ![s].scanD = {},
+        ![s].scanGen = [p \in Paths |-> 0],
+        ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {},
+        ![s].gcHeaded = {}, ![s].gcSeen = [p \in Paths |-> 0],
+        ![s].adopted = {}]
+  ELSE [sc EXCEPT ![s].st = "dead"]
 Dirty(s)    == {p \in Paths : sc[s].local[p] # sc[s].baseline[p]}
 USet(s)     == {p \in Dirty(s) : sc[s].local[p] # 0}
 \* The two-consecutive-scans rule.  Under ~TwoScanDelete this is the
@@ -499,7 +695,6 @@ USet(s)     == {p \in Dirty(s) : sc[s].local[p] # 0}
 DSet(s)     == {p \in Dirty(s) : sc[s].local[p] = 0
                                  /\ (~TwoScanDelete \/ p \notin sc[s].prevScan)}
 CitedGens   == {manifest[p] : p \in Paths} \ {0}
-UploadsDone(s) == sc[s].scanU \subseteq (sc[s].upDone \cup sc[s].parked)
 
 \* The generation an acked pair refers to is destroyed by a syncer that
 \* never legitimately learned it, with no surfaced record: the amputation
@@ -514,6 +709,7 @@ Destroys(s, p, cur) ==
 
 Init ==
   /\ cellEpoch = 0 /\ cellHolder = "none" /\ manSeq = 1
+  /\ cellQueue = <<>> /\ cellHandoff = "none" /\ cellReleased = FALSE
   /\ manSrc = "none"
   /\ manifest = [p \in Paths |-> IF p \in FreePaths THEN 0 ELSE 1]
   /\ objects  = [p \in Paths |-> IF p \in FreePaths THEN 0 ELSE 1]
@@ -530,10 +726,12 @@ Init ==
         local |-> [p \in Paths |-> 0], baseline |-> [p \in Paths |-> 0],
         scope |-> Paths, prevScan |-> {},
         instBase |-> [p \in Paths |-> 0],
-        instSnap |-> [p \in Paths |-> 0], instSeq |-> 0,
+        instSnap |-> [p \in Paths |-> 0], instSeq |-> 0, instSrc |-> "none",
         known |-> {}, scanU |-> {}, scanD |-> {},
         scanGen |-> [p \in Paths |-> 0], upDone |-> {}, parked |-> {},
-        gcDone |-> {}, lastDirty |-> {}, stageCarried |-> FALSE,
+        gcDone |-> {}, gcHeaded |-> {}, gcSeen |-> [p \in Paths |-> 0],
+        adopted |-> {}, repairMoved |-> {},
+        lastDirty |-> {}, stageCarried |-> FALSE,
         citeDone |-> {},
         sentTok |-> 0, pendN |-> {}, pendCov |-> [p \in Paths |-> 0],
         pendMint |-> 0, pendDirty |-> {},
@@ -562,12 +760,16 @@ Init ==
            narrows |-> 0, narrowed |-> {}, narrowRecited |-> {},
            removals |-> 0, removalsApplied |-> 0, removalsRefused |-> 0,
            renamed |-> {}, renamesApplied |-> 0, renameRefused |-> {},
-           citedPairs |-> {}]
+           citedPairs |-> {},
+           claimed |-> {}, interleaved |-> FALSE, handoffs |-> 0,
+           deposals |-> 0, deadSkips |-> 0, enqueues |-> 0, abandoned |-> 0,
+           adoptWithheld |-> 0]
 
 ------------------------------------------------------------------------------
 (* Lifecycle *)
 
 StartA ==
+  /\ ~BarrierLease           \* the life lease: claim, then checkout
   /\ sc["A"].st = "unstarted" /\ cellHolder = "none"
   /\ cellHolder' = "A" /\ cellEpoch' = 1
   /\ sc' = [sc EXCEPT
@@ -578,8 +780,32 @@ StartA ==
                             THEN {q \in Paths : manifest[q] # 0} ELSE {},
        !["A"].instBase = [p \in Paths |-> manifest[p]],
        !["A"].known = CitedGens]
+  /\ UNCHANGED leaseVars
   /\ UNCHANGED <<manSeq, manSrc, manifest, objects, inbox, removals, window,
                  hitlAcked, conflicts, gh>>
+
+(* Tranche 6: under the barrier lease a syncer starts by CHECKING OUT and
+   holds nothing — `checkout` is lease-free, and the cell is claimed
+   inside each barrier.  Both syncers start this way; there is no
+   takeover.  B starts no earlier than A: pure symmetry breaking (the two
+   are interchangeable here, except that only A can stall).             *)
+StartLease(s) ==
+  /\ BarrierLease /\ sc[s].st = "unstarted"
+  /\ (s = "B" => sc["A"].st # "unstarted")
+  /\ sc' = [sc EXCEPT
+       ![s].st = "running", ![s].expSeq = manSeq,
+       ![s].local = [p \in Paths |-> manifest[p]],
+       ![s].baseline = [p \in Paths |-> manifest[p]],
+       ![s].prevScan = IF TwoScanDelete
+                          THEN {q \in Paths : manifest[q] # 0} ELSE {},
+       ![s].instBase = [p \in Paths |-> manifest[p]],
+       \* The document a never-installed writer's fast-path ack names.
+       ![s].instSnap = [p \in Paths |-> manifest[p]], ![s].instSeq = manSeq,
+       ![s].instSrc = manSrc,
+       ![s].known = CitedGens]
+  /\ UNCHANGED leaseVars
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
+                 inbox, removals, window, hitlAcked, conflicts, gh>>
 
 CrashPod(s) ==
   /\ ~GatedCitation          \* gated replaces this with CrashPodGated
@@ -596,7 +822,7 @@ CrashPod(s) ==
        ![s].owed = {}, ![s].ackN = {},
        ![s].declared = {}, ![s].consumed = {}]
   /\ gh' = [gh EXCEPT !.crashes = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 (* Pod REPLACEMENT under gated staging.  §4's substrate rule: `pending`
@@ -629,7 +855,7 @@ CrashPodGated(s) ==
   /\ stageBase' = [stageBase EXCEPT ![s] = [p \in Paths |-> 0]]
   /\ withheldDel' = [withheldDel EXCEPT ![s] = {}]
   /\ gh' = [gh EXCEPT !.crashes = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts, versions>>
 
 (* Container restart in the SAME pod: the emptyDir survives, so local,
@@ -659,11 +885,18 @@ Restart(s) ==
             ![s].scanU = {}, ![s].scanD = {},
             ![s].scanGen = [p \in Paths |-> 0],
             ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {},
+            ![s].gcHeaded = {}, ![s].gcSeen = [p \in Paths |-> 0],
+            ![s].adopted = {},
             \* `consumed` is in-memory barrier state; `declared` is the
             \* intent journal, a FILE in the surviving emptyDir.
             ![s].consumed = {}]
        /\ gh' = [gh EXCEPT !.restarts = @ + 1,
             !.resurrected = @ \/ (RematerializeOnRestart /\ res)]
+  \* Tranche 6: a restarted container that finds the cell HELD by its own
+  \* holder_id releases it at startup — it holds nothing in memory, and
+  \* the intent journal replays what the previous container left.
+  /\ IF BarrierLease /\ CellHeld /\ cellHolder = s
+     THEN ReleaseCell ELSE UNCHANGED leaseVars
   /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
@@ -674,19 +907,19 @@ StallA ==
   /\ AllowStall /\ sc["A"].st = "running" /\ ~gh.stallUsed
   /\ sc' = [sc EXCEPT !["A"].st = "stalled"]
   /\ gh' = [gh EXCEPT !.stallUsed = TRUE]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 ThawA ==
   /\ sc["A"].st = "stalled"
   /\ sc' = [sc EXCEPT !["A"].st = "running"]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts, gh>>
 
 (* A deposed incarnation's next successful cell read (heartbeat renew)
    discovers the higher epoch and self-fences.                          *)
 RenewDiscover(s) ==
-  /\ Running(s) /\ Deposed(s)
+  /\ Running(s) /\ DeposedHolder(s)
   \* D12 x D2.  The heartbeat renewal runs on its own interval,
   \* decoupled from publish cadence, so on deposal it is usually the
   \* FIRST arm to find out — ahead of the floor tick and ahead of a poll
@@ -696,22 +929,29 @@ RenewDiscover(s) ==
   \* (Shipped code returned from this arm without settling; the model
   \* was being written when the code was read, and the leg for it is
   \* `the_heartbeat_arm_settles_owed_acks_when_it_finds_the_fence`.)
-  /\ LET settle == SentinelEnabled /\ RefuseOnFence /\ PendLive(s) IN
-       /\ sc' = [sc EXCEPT ![s].st = "dead",
+  \* Tranche 6: `renew_if_due` between the commit's long steps finds the
+  \* fence.  A fence is no longer a death and no `refused-fenced` ack
+  \* exists: the barrier is abandoned and the pending record stands for
+  \* the next barrier to honor.
+  /\ LET settle == ~BarrierLease /\ SentinelEnabled /\ RefuseOnFence /\ PendLive(s) IN
+       /\ sc' = [FencedSc(s) EXCEPT
             ![s].ackN = IF settle THEN @ \cup sc[s].pendN ELSE @,
             ![s].pendN = IF settle THEN {} ELSE @,
             ![s].pendCov = IF settle THEN NoPend ELSE @,
             ![s].pendMint = IF settle THEN 0 ELSE @,
             ![s].pendDirty = IF settle THEN {} ELSE @,
-            ![s].honored = FALSE, ![s].pendReRun = FALSE]
-       /\ gh' = [gh EXCEPT !.refusedAcks = @ + (IF settle THEN 1 ELSE 0)]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+            ![s].honored = FALSE,
+            ![s].pendReRun = IF BarrierLease THEN @ ELSE FALSE]
+       /\ gh' = [gh EXCEPT !.refusedAcks = @ + (IF settle THEN 1 ELSE 0),
+                          !.abandoned = IF BarrierLease THEN 1 ELSE @]
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 (* Takeover: B observes the quiet cell (abstracting the 6-poll protocol)
    and claims.  Rotation: the successor CAS-rewrites the manifest
    (seq++, content-identical) BEFORE serving — the straggler fence.     *)
 ClaimB ==
+  /\ ~BarrierLease           \* the life lease's takeover; see Claim
   /\ sc["B"].st = "unstarted" /\ cellHolder = "A"
   /\ sc["A"].st \in {"stalled", "dead"}
   /\ (Rotation => manSeq < MaxSeq)
@@ -723,6 +963,7 @@ ClaimB ==
   /\ sc' = [sc EXCEPT !["B"].st = "claiming",
                       !["B"].epoch = cellEpoch + 1]
   /\ gh' = [gh EXCEPT !.takeovers = @ + 1]
+  /\ UNCHANGED leaseVars
   /\ UNCHANGED <<manifest, objects, inbox, removals, window, hitlAcked, conflicts>>
 
 CheckoutB ==
@@ -734,7 +975,7 @@ CheckoutB ==
                             THEN {q \in Paths : manifest[q] # 0} ELSE {},
        !["B"].instBase = [p \in Paths |-> manifest[p]],
        !["B"].known = CitedGens]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts, gh>>
 
 ------------------------------------------------------------------------------
@@ -750,13 +991,13 @@ AgentWrite(s, p) ==
   \* Inv_NarrowNeverRecites would fire on legitimate widening and the
   \* invariant would be unsound rather than strong.
   /\ gh' = [gh EXCEPT !.nextGen = @ + 1, !.narrowed = @ \ {p}]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 AgentDelete(s, p) ==
   /\ Running(s) /\ sc[s].local[p] # 0
   /\ sc' = [sc EXCEPT ![s].local[p] = 0]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts, gh>>
 
 ------------------------------------------------------------------------------
@@ -807,7 +1048,7 @@ Narrow(s) ==
             \* a miss and the wrong direction for a claim.
             ![s].prevScan = IF NarrowAtomic THEN @ \ {p} ELSE @]
        /\ gh' = [gh EXCEPT !.narrows = @ + 1, !.narrowed = @ \cup {p}]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 ------------------------------------------------------------------------------
@@ -819,6 +1060,10 @@ Narrow(s) ==
 HitlWrite(p) ==
   /\ gh.hitl < MaxHitl /\ gh.nextGen <= MaxGen
   /\ ~(WindowCheck /\ window # 0)
+  /\ HitlOverwritesTrackedOnly =>
+       \/ objects[p] = 0
+       \/ objects[p] = manifest[p]
+       \/ <<p, objects[p]>> \in inbox
   /\ (~InboxEnabled => manSeq < MaxSeq)
   /\ LET g == gh.nextGen IN
        /\ objects' = [objects EXCEPT ![p] = g]
@@ -833,14 +1078,14 @@ HitlWrite(p) ==
                /\ UNCHANGED inbox
        /\ hitlAcked' = hitlAcked \cup {<<p, g>>}
        /\ gh' = [gh EXCEPT !.nextGen = @ + 1, !.hitl = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, window, sc, conflicts, removals>>
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, window, sc, conflicts, removals>>
 
 (* The refusal the window is FOR (availability shape, bounded to keep the
    space small; the starvation bound is a tranche-2 liveness question).  *)
 HitlRefused ==
   /\ WindowCheck /\ window # 0 /\ gh.refusals < 1
   /\ gh' = [gh EXCEPT !.refusals = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, sc, hitlAcked, conflicts>>
 
 (* Tranche 5: a DECLARED removal (delete/rename design §3).  The caller
@@ -854,7 +1099,7 @@ HitlRemove(p) ==
   /\ p \notin removals /\ Tracked(p)
   /\ removals' = removals \cup {p}
   /\ gh' = [gh EXCEPT !.removals = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, sc, hitlAcked, conflicts>>
 
 (* A rename is a server-side copy to the destination (a fresh
@@ -877,7 +1122,7 @@ HitlRename(p, q) ==
        \* re-creates the old name after the unlink has made a new file.
        /\ gh' = [gh EXCEPT !.nextGen = @ + 1, !.removals = @ + 1,
                           !.renamed = @ \cup {<<p, q, objects[p], g>>}]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, window, sc, conflicts>>
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, window, sc, conflicts>>
 
 ------------------------------------------------------------------------------
 (* The publish barrier (plan §2.1, seven steps; scan+intent merged, the
@@ -898,7 +1143,7 @@ Consume(s) ==
   \* would be judged against a baseline that moved after the boundary
   \* it names.
   /\ ~(SentinelEnabled /\ sc[s].honored)
-  /\ gh.barriers < MaxBarriers
+  /\ gh.barriers < MaxBarriers \/ InfiniteBarriers
   /\ LET
        live == {pr \in inbox : objects[pr[1]] = pr[2]}
        adoptable == {pr \in live :
@@ -964,7 +1209,7 @@ Consume(s) ==
             !.removalsRefused = @ + Cardinality(refused),
             !.renamesApplied = @ + Cardinality({pr \in gh.renamed : pr[1] \in applied}),
             !.renameRefused = @ \cup {pr \in gh.renamed : pr[1] \in refused}]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, window,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, window,
                  hitlAcked>>
 
 (* Steps 2+3: scan-diff against the persisted baseline and CAS the
@@ -972,7 +1217,9 @@ Consume(s) ==
    overridden; an open window at my own or a higher epoch blocks.       *)
 Scan(s) ==
   /\ Running(s) /\ sc[s].pc = "consumed"
-  /\ window = 0 \/ window < sc[s].epoch
+  \* Tranche 6: the window belongs to the commit section and opens AT
+  \* the claim; a scan before the claim neither opens nor waits for it.
+  /\ BarrierLease \/ window = 0 \/ window < sc[s].epoch
   /\ sc' = [sc EXCEPT ![s].pc = "scanned",
        \* A declared removal skips the two-scan guard (§4): the guard
        \* protects against absence INFERRED by a walk, and a
@@ -998,9 +1245,9 @@ Scan(s) ==
        \* ProbeCitationInstalled has to make non-vacuous.
        ![s].stageCarried = \E q \in Paths : stage[s][q] # 0,
        ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}]
-  /\ window' = sc[s].epoch
-  /\ gh' = [gh EXCEPT !.barriers = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+  /\ window' = IF BarrierLease THEN window ELSE sc[s].epoch
+  /\ gh' = [gh EXCEPT !.barriers = IF InfiniteBarriers THEN @ ELSE @ + 1]
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  hitlAcked, conflicts>>
 
 (* Step 4: guarded per-key upload.  If-Match = the persisted baseline
@@ -1012,42 +1259,64 @@ Scan(s) ==
 UploadFenced(s) ==
   /\ ~GatedCitation
   /\ Running(s) /\ sc[s].pc = "scanned"
-  /\ EpochCheck /\ Deposed(s)
+  /\ Fenced(s)               \* unreachable under BarrierLease: no holder uploads
   /\ sc[s].scanU \ (sc[s].upDone \cup sc[s].parked) # {}
   /\ sc' = [sc EXCEPT ![s].st = "dead"]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts, gh>>
 
+(* Tranche 6: under the barrier lease the upload is a NON-HOLDER action —
+   every PUT is If-Match on the base etag, S3's own optimistic lock, so
+   it needs no lease and is never fenced; `Inv_NoDeposedPut` applies to
+   the commit section only (protocol of record, straggler rules).       *)
 Upload(s, p) ==
   /\ ~GatedCitation          \* gated replaces this with StagePut
   /\ Running(s) /\ sc[s].pc = "scanned"
   /\ p \in sc[s].scanU \ (sc[s].upDone \cup sc[s].parked)
-  /\ ~(EpochCheck /\ Deposed(s))
+  /\ ~Fenced(s)
   /\ LET cur == objects[p]
          want == sc[s].scanGen[p]
+         \* Tranche 6: `upload_one`'s 412 arm adopts ONLY when the object
+         \* already holds the bytes being uploaded (CRC match); any other
+         \* generation it recognises is SUPERSEDED knowingly, If-Match on
+         \* what the HEAD saw.  The life-lease arm below adopts any
+         \* recognised generation and then cites the walk's bytes — a
+         \* generation no object holds — which `Inv_NoDangling` cannot
+         \* see with one writer (the object still exists) and TLC showed
+         \* on the first two-writer strict run, once the OTHER writer's
+         \* GC removed the adopted object.  The gated lane got this fix
+         \* in product 1 x 2; the ungated arm keeps its coarse rule under
+         \* the life lease so those state spaces are unchanged.
+         supersede == BarrierLease /\ cur \in sc[s].known /\ cur # want
      IN
-       IF cur = sc[s].baseline[p]
+       IF cur = sc[s].baseline[p] \/ supersede
        THEN \* If-Match passes: the PUT lands
          /\ objects' = [objects EXCEPT ![p] = want]
          /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
          /\ gh' = [gh EXCEPT !.narrowRecited = @ \cup ({p} \cap gh.narrowed), !.deposedPuts =
-                     @ + (IF Deposed(s) THEN 1 ELSE 0)]
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox, removals,
+                     @ + (IF DeposedHolder(s) THEN 1 ELSE 0),
+                     \* the required-reachable overlap: this PUT landed
+                     \* while another syncer was in its commit section
+                     !.interleaved = @ \/ (BarrierLease /\ CellHeld /\ cellHolder # s)]
+         /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox, removals,
                         window, hitlAcked, conflicts>>
        ELSE IF cur \in sc[s].known
        THEN \* 412, but the current ETag is one I minted or consumed:
             \* adopt (my own crashed/torn earlier PUT, or content already
-            \* integrated).  AdoptOwn convergence.
-         /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
+            \* integrated).  AdoptOwn convergence.  Tranche 6: remembered,
+            \* because nothing was PUT and the object is another writer's
+            \* to GC until this barrier's CAS cites it.
+         /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p},
+                             ![s].adopted = IF BarrierLease THEN @ \cup {p} ELSE @]
          /\ gh' = [gh EXCEPT !.narrowRecited = @ \cup ({p} \cap gh.narrowed), !.adoptOwn = @ + 1]
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
+         /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
                         inbox, removals, window, hitlAcked, conflicts>>
        ELSE IF ConflictSurfacing
        THEN \* foreign ETag: park the path, surface the conflict, never
             \* overwrite an ETag this syncer did not itself publish.
          /\ sc' = [sc EXCEPT ![s].parked = @ \cup {p}]
          /\ conflicts' = conflicts \cup {<<p, cur>>}
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
+         /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
                         inbox, removals, window, hitlAcked, gh>>
        ELSE \* MUTATION: the inherited LOCAL-WINS arbitration — re-read
             \* the ETag and overwrite blind.  known does NOT grow.
@@ -1055,21 +1324,44 @@ Upload(s, p) ==
          /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
          /\ gh' = [gh EXCEPT
               !.amputated = @ \/ Destroys(s, p, cur),
-              !.deposedPuts = @ + (IF Deposed(s) THEN 1 ELSE 0)]
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox, removals,
+              !.deposedPuts = @ + (IF DeposedHolder(s) THEN 1 ELSE 0)]
+         /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox, removals,
                         window, hitlAcked, conflicts>>
 
 (* Steps 5+6 in the chosen order.  The GC delete (etag-guarded HEAD:
    refuse any ETag the syncer does not recognize).  Under
    DeletesAfterCAS = FALSE (the v1 order) the deletes run BEFORE the
-   CAS — the dangling-manifest mutation.                                *)
+   CAS — the dangling-manifest mutation.  Tranche 6: the deletes are
+   commit-section work in either order, so under the barrier lease the
+   pre-CAS arm runs from the claim, not from the uploads.               *)
+GCPhase(s) ==
+  \/ (DeletesAfterCAS /\ sc[s].pc = "cased")
+  \/ (~DeletesAfterCAS
+      /\ (IF BarrierLease THEN sc[s].pc = "claimed" ELSE PreCommitReady(s)))
+
+(* Tranche 6, ~ConditionalGC: the HEAD half of the shipped two-request
+   GC.  Reads the object's generation and remembers it; the DELETE below
+   is then guarded on what was SEEN, not on what is there.              *)
+GCHead(s, p) ==
+  /\ BarrierLease /\ ~ConditionalGC
+  /\ Running(s) /\ GCPhase(s)
+  /\ p \in sc[s].scanD \ (sc[s].gcDone \cup sc[s].gcHeaded)
+  /\ sc' = [sc EXCEPT ![s].gcHeaded = @ \cup {p},
+                      ![s].gcSeen = [@ EXCEPT ![p] = objects[p]]]
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
+                 inbox, removals, window, hitlAcked, conflicts, gh>>
+
 GCDelete(s, p) ==
   /\ Running(s)
-  /\ \/ (DeletesAfterCAS /\ sc[s].pc = "cased")
-     \/ (~DeletesAfterCAS /\ sc[s].pc = "scanned" /\ UploadsDone(s))
+  /\ GCPhase(s)
   /\ p \in sc[s].scanD \ sc[s].gcDone
-  /\ ~(EpochCheck /\ Deposed(s))
-  /\ LET cur == objects[p] IN
+  /\ ~Fenced(s)
+  \* Two requests (the shipped shape) or one: with If-Match the guard and
+  \* the delete are the same request and `cur` is what is there.
+  /\ ConditionalGC \/ ~BarrierLease \/ p \in sc[s].gcHeaded
+  /\ LET cur == IF ConditionalGC \/ ~BarrierLease THEN objects[p] ELSE sc[s].gcSeen[p]
+         now == objects[p]
+     IN
        \* v2 (deletes-after-CAS): the delete set is "keys the NEW manifest
        \* no longer references" — a key the merge re-cited (delete/modify
        \* resolved foreign-wins) is NOT garbage.  The v1 order cannot make
@@ -1080,31 +1372,31 @@ GCDelete(s, p) ==
           \/ DeletesAfterCAS /\ manifest[p] # 0
        THEN \* already absent, still referenced, or unrecognized ETag
          /\ sc' = [sc EXCEPT ![s].gcDone = @ \cup {p}]
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
+         /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
                         inbox, removals, window, hitlAcked, conflicts, gh>>
        ELSE
          /\ objects' = [objects EXCEPT ![p] = 0]
          /\ sc' = [sc EXCEPT ![s].gcDone = @ \cup {p}]
          /\ gh' = [gh EXCEPT !.gc = @ + 1,
-              !.amputated = @ \/ Destroys(s, p, cur)]
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox, removals,
+              !.amputated = @ \/ Destroys(s, p, now)]
+         /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox, removals,
                         window, hitlAcked, conflicts>>
 
 GCDeleteFenced(s) ==
-  /\ Running(s) /\ EpochCheck /\ Deposed(s)
-  /\ \/ (DeletesAfterCAS /\ sc[s].pc = "cased")
-     \/ (~DeletesAfterCAS /\ sc[s].pc = "scanned" /\ UploadsDone(s))
+  /\ Running(s) /\ Fenced(s)
+  /\ GCPhase(s)
   /\ sc[s].scanD \ sc[s].gcDone # {}
-  /\ sc' = [sc EXCEPT ![s].st = "dead"]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
-                 window, hitlAcked, conflicts, gh>>
+  /\ sc' = FencedSc(s)
+  /\ gh' = [gh EXCEPT !.abandoned = IF BarrierLease THEN 1 ELSE @]
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+                 window, hitlAcked, conflicts>>
 
 PreDeletesDone(s) ==
   /\ Running(s) /\ ~DeletesAfterCAS
-  /\ sc[s].pc = "scanned" /\ UploadsDone(s)
+  /\ (IF BarrierLease THEN sc[s].pc = "claimed" ELSE PreCommitReady(s))
   /\ sc[s].scanD \subseteq sc[s].gcDone
   /\ sc' = [sc EXCEPT ![s].pc = "delDone"]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts, gh>>
 
 (* Step 5: the manifest CAS.  Parked paths withhold their entry.  A
@@ -1116,48 +1408,59 @@ PreDeletesDone(s) ==
    install.                                                             *)
 CASReady(s) ==
   IF DeletesAfterCAS
-  THEN sc[s].pc = "scanned" /\ UploadsDone(s)
+  THEN (IF BarrierLease THEN sc[s].pc = "claimed" ELSE PreCommitReady(s))
   ELSE sc[s].pc = "delDone"
 
 CASFenced(s) ==
   /\ Running(s) /\ CASReady(s)
-  /\ EpochCheck /\ Deposed(s)
-  /\ sc' = [sc EXCEPT ![s].st = "dead"]
-  /\ gh' = [gh EXCEPT !.stragglerCas = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+  /\ Fenced(s)
+  /\ sc' = FencedSc(s)
+  /\ gh' = [gh EXCEPT !.stragglerCas = @ + 1,
+                      !.abandoned = IF BarrierLease THEN 1 ELSE @]
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 CASMiss(s) ==
   /\ Running(s) /\ CASReady(s)
-  /\ ~(EpochCheck /\ Deposed(s))
+  /\ ~Fenced(s)
   /\ manSeq # sc[s].expSeq
-  /\ IF Deposed(s)
+  /\ IF DeposedHolder(s)
      THEN \* the 412 handler re-reads the cell and discovers deposal
-       /\ sc' = [sc EXCEPT ![s].st = "dead"]
-       /\ gh' = [gh EXCEPT !.stragglerCas = @ + 1]
+       /\ sc' = FencedSc(s)
+       /\ gh' = [gh EXCEPT !.stragglerCas = @ + 1,
+                           !.abandoned = IF BarrierLease THEN 1 ELSE @]
        /\ UNCHANGED <<window, conflicts>>
+       /\ UNCHANGED leaseVars
      ELSE IF MergeCapable
      THEN \* refresh the token and retry as a three-way merge
        /\ sc' = [sc EXCEPT ![s].expSeq = manSeq]
        /\ UNCHANGED <<window, conflicts, gh>>
+       /\ UNCHANGED leaseVars
      ELSE \* the whole-rewrite writer: re-seed and FAIL the barrier;
-          \* the next barrier overwrites from the local walk
+          \* the next barrier overwrites from the local walk.  Tranche 6:
+          \* a commit that fails for a non-fence reason RELEASES.
        /\ sc' = [sc EXCEPT ![s].expSeq = manSeq, ![s].pc = "idle",
             ![s].scanU = {}, ![s].scanD = {},
             ![s].scanGen = [p \in Paths |-> 0],
-            ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}]
+            ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {},
+            ![s].gcHeaded = {}, ![s].gcSeen = [p \in Paths |-> 0],
+            ![s].adopted = {}]
        /\ window' = 0
        /\ UNCHANGED <<conflicts, gh>>
+       /\ IF BarrierLease THEN ReleaseCell ELSE UNCHANGED leaseVars
   /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  hitlAcked>>
 
 CASInstall(s) ==
   /\ ~GatedCitation          \* gated replaces this with CitePassStep
   /\ Running(s) /\ CASReady(s)
-  /\ ~(EpochCheck /\ Deposed(s))
+  /\ ~Fenced(s)
   /\ manSeq = sc[s].expSeq
-  /\ manSeq < MaxSeq
+  /\ manSeq < MaxSeq \/ InfiniteBarriers
   /\ LET
+       \* Under the liveness abstraction the seq saturates (see the
+       \* constant): with nothing to merge the token is never contended.
+       seq2 == IF InfiniteBarriers THEN manSeq ELSE manSeq + 1
        \* Merge semantics: base = instBase (the last-installed view), mine
        \* = the scan-time walk, theirs = the current bucket manifest.  The
        \* merge STARTS FROM THEIRS (untouched paths keep theirs' entry —
@@ -1193,8 +1496,22 @@ CASInstall(s) ==
          /\ p \notin (sc[s].scanU \cup sc[s].scanD \cup sc[s].parked)
          /\ sc[s].baseline[p] # sc[s].instBase[p]
          /\ objects[p] = sc[s].baseline[p]
+       \* The same candidate with its HEAD guard failed: the key moved past
+       \* what this writer integrated.  The code declines silently ("the
+       \* next consume reconciles it"); recorded for the ack's judgement.
+       declined(p) ==
+         /\ p \notin (sc[s].scanU \cup sc[s].scanD \cup sc[s].parked)
+         /\ sc[s].baseline[p] # sc[s].instBase[p]
+         /\ objects[p] # sc[s].baseline[p]
+       \* Tranche 6: an adopted entry is re-verified HERE, under the
+       \* lease — the object must still hold the bytes the adopt found.
+       \* If it does not, another writer's GC took it between the adopt
+       \* and this CAS; the entry is withheld like a parked one and the
+       \* path stays dirty for the next barrier to re-upload.
+       gone == {p \in sc[s].adopted :
+                  VerifyAdoptedCitations /\ objects[p] # sc[s].scanGen[p]}
        inst == [p \in Paths |->
-         IF p \in sc[s].parked THEN manifest[p]
+         IF p \in sc[s].parked \cup gone THEN manifest[p]
          ELSE IF p \in sc[s].scanU \cap sc[s].upDone THEN sc[s].scanGen[p]
          ELSE IF repair(p) THEN sc[s].baseline[p]
          ELSE IF foreign(p) THEN manifest[p]
@@ -1224,19 +1541,28 @@ CASInstall(s) ==
        cite == \E pr \in hitlAcked : inst[pr[1]] = pr[2]
      IN
        /\ manifest' = inst
-       /\ manSeq' = manSeq + 1
+       /\ manSeq' = seq2
        /\ manSrc' = InstallSource(s)
        /\ inbox' = inbox2
        /\ window' = 0
+       \* A withheld adoption leaves the path dirty (upDone loses it, so
+       \* Finish does not advance its baseline) and a record behind.
        /\ sc' = [sc EXCEPT ![s].pc = "cased",
-                           ![s].instSnap = inst, ![s].instSeq = manSeq + 1]
+                           ![s].upDone = @ \ gone,
+                           ![s].instSnap = inst, ![s].instSeq = seq2,
+                           ![s].instSrc = IF BarrierLease THEN InstallSource(s) ELSE @,
+                           ![s].repairMoved = IF BarrierLease
+                                              THEN {p \in Paths : declined(p)}
+                                              ELSE {}]
+       /\ conflicts' = conflicts \cup {<<p, objects[p]>> : p \in gone}
        /\ gh' = [gh EXCEPT
+            !.adoptWithheld = IF gone # {} THEN 1 ELSE @,
             !.amputated = @ \/ amp,
             !.cited = IF cite THEN 1 ELSE @,
             !.citedPairs = @ \cup {pr \in hitlAcked : inst[pr[1]] = pr[2]},
-            !.stragglerCas = @ + (IF Deposed(s) THEN 1 ELSE 0),
-            !.stragglerInstalls = @ + (IF Deposed(s) THEN 1 ELSE 0)]
-  /\ UNCHANGED <<cellEpoch, cellHolder, objects, hitlAcked, conflicts, removals>>
+            !.stragglerCas = @ + (IF DeposedHolder(s) THEN 1 ELSE 0),
+            !.stragglerInstalls = @ + (IF DeposedHolder(s) THEN 1 ELSE 0)]
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, objects, hitlAcked, removals>>
 
 (* Step 7: rewrite the baseline, clear the barrier state.  The baseline
    advances ONLY for keys whose bytes this syncer integrated (its own
@@ -1260,15 +1586,89 @@ Finish(s) ==
        ![s].scanU = {}, ![s].scanD = {},
        ![s].scanGen = [p \in Paths |-> 0],
        ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {},
+       ![s].gcHeaded = {}, ![s].gcSeen = [p \in Paths |-> 0],
+       ![s].adopted = {},
        ![s].declared = {}, ![s].consumed = {}]
   \* The window clear's CAS: what this barrier integrated leaves the
   \* cell now, after the manifest cites it — the consumed entries and
   \* the performed removals.
   /\ inbox' = inbox \ sc[s].consumed
   /\ removals' = removals \ sc[s].declared
-  /\ gh' = [gh EXCEPT !.done = @ + 1]
+  /\ gh' = [gh EXCEPT !.done = IF InfiniteBarriers THEN @ ELSE @ + 1]
+  \* Tranche 6: the RELEASE is the last step of the commit section, so a
+  \* crash anywhere between the CAS and here leaves the cell HELD by a
+  \* dead holder — the deposal's whole subject.  A holder deposed after
+  \* its CAS landed releases nothing: the cell is the successor's.
+  /\ IF BarrierLease /\ ~Deposed(s) THEN ReleaseCell ELSE UNCHANGED leaseVars
   /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
                  window, hitlAcked, conflicts>>
+
+------------------------------------------------------------------------------
+(* TRANCHE 6: the per-barrier lease — the cell as a FIFO ticket.           *)
+(*                                                                          *)
+(* Protocol of record: the writer-lease design §4 and the lease-v2 note.    *)
+(* The cell is FRESH, HELD(holder, epoch, waiters) or RELEASED(last holder, *)
+(* epoch, waiters, handoff).  A barrier claims AFTER its uploads and        *)
+(* releases after its baseline; between barriers nobody holds anything.    *)
+(* The abstractions are the life lease's: the 60 s quiet rule on a holder   *)
+(* and the 20 s rule on a handoff are each ONE action enabled when the      *)
+(* party is stalled or dead (the poll protocol itself is checked in         *)
+(* flint's FlintTierEpoch.tla).                                             *)
+
+(* The claim.  Three arms in one action — fresh, released-and-mine, and    *)
+(* the DEPOSAL of a quiet holder — because they are one CAS on one object  *)
+(* and differ only in whether the manifest is rotated: a released cell is  *)
+(* a clean handoff, a deposal is the straggler fence (unchanged).  The     *)
+(* window opens HERE, at the claim, not at the scan.                        *)
+Claim(s) ==
+  /\ BarrierLease /\ Running(s) /\ WantsCell(s)
+  /\ ClaimEnabled(s)
+  /\ LET deposal == CellHeld /\ cellHolder # s
+         handoff == cellReleased /\ cellHandoff = s
+         e == NextEpoch
+     IN
+       /\ (deposal /\ Rotation => manSeq < MaxSeq)
+       /\ cellEpoch' = e /\ cellHolder' = s
+       /\ cellReleased' = FALSE /\ cellHandoff' = "none"
+       /\ cellQueue' = Without(cellQueue, s)
+       /\ window' = e
+       /\ manSeq' = IF deposal /\ Rotation THEN manSeq + 1 ELSE manSeq
+       /\ manSrc' = IF deposal /\ Rotation THEN "none" ELSE manSrc
+       /\ sc' = [sc EXCEPT ![s].pc = "claimed", ![s].epoch = e]
+       /\ gh' = [gh EXCEPT !.claimed = @ \cup {s},
+                           !.handoffs = IF handoff THEN 1 ELSE @,
+                           !.deposals = @ + (IF deposal THEN 1 ELSE 0)]
+  /\ UNCHANGED <<manifest, objects, inbox, removals, hitlAcked, conflicts>>
+
+(* A syncer that cannot claim takes a ticket: one CAS-append, only if     *)
+(* absent.  A separate action so the queue is observable.  A waiter that  *)
+(* was dropped as a quiet handoff and then thawed re-queues from here.     *)
+Enqueue(s) ==
+  /\ BarrierLease /\ Running(s) /\ WantsCell(s)
+  /\ ~ClaimEnabled(s) /\ ~SkipEnabled(s)
+  /\ sc[s].pc = "scanned" \/ ~InQueue(s)
+  /\ cellQueue' = IF InQueue(s) THEN cellQueue ELSE Append(cellQueue, s)
+  /\ sc' = [sc EXCEPT ![s].pc = "waiting"]
+  /\ gh' = [gh EXCEPT !.enqueues = 1]
+  /\ UNCHANGED <<cellEpoch, cellHolder, cellHandoff, cellReleased,
+                 manSeq, manSrc, manifest, objects, inbox, removals, window,
+                 hitlAcked, conflicts>>
+
+(* The handoff is quiet (crashed, or frozen): after two polls anybody may *)
+(* acquire the released cell and the named waiter is dropped.  Without    *)
+(* this a crashed waiter wedges the cell for every survivor, forever.     *)
+SkipDeadHandoff(s) ==
+  /\ BarrierLease /\ Running(s) /\ WantsCell(s)
+  /\ SkipEnabled(s)
+  /\ LET e == NextEpoch IN
+       /\ cellEpoch' = e /\ cellHolder' = s
+       /\ cellReleased' = FALSE /\ cellHandoff' = "none"
+       /\ cellQueue' = Without(cellQueue, s)
+       /\ window' = e
+       /\ sc' = [sc EXCEPT ![s].pc = "claimed", ![s].epoch = e]
+       /\ gh' = [gh EXCEPT !.claimed = @ \cup {s}, !.deadSkips = 1]
+  /\ UNCHANGED <<manSeq, manSrc, manifest, objects, inbox, removals,
+                 hitlAcked, conflicts>>
 
 
 ------------------------------------------------------------------------------
@@ -1316,11 +1716,14 @@ Sync(s) ==
        \* A conflicted path is deliberately NOT advanced — its local
        \* bytes won, and the remote generation is still owed to us.
        advanced == applicable \cup (Paths \ changed)
+       \* Paths whose manifest version the overlay HID from this sync.
+       hidden == {p \in Paths : remote(p) # manifest[p]}
+       keep(p) == SyncKeepsHiddenBase /\ p \in hidden
        newInstBase ==
          IF SyncScope /\ ScopedInstBase
          THEN [p \in Paths |->
-                IF p \in advanced THEN manifest[p] ELSE sc[s].instBase[p]]
-         ELSE [p \in Paths |-> manifest[p]]
+                IF p \in advanced /\ ~keep(p) THEN manifest[p] ELSE sc[s].instBase[p]]
+         ELSE [p \in Paths |-> IF keep(p) THEN sc[s].instBase[p] ELSE manifest[p]]
        \* THE LOSS STAMP.  The merge base moved for a path this sync
        \* neither applied nor surfaced a conflict for, and whose bytes
        \* we do not hold: we have just claimed to have integrated a
@@ -1357,7 +1760,7 @@ Sync(s) ==
             !.scopedDeferrals = @ + (IF SyncScope THEN Cardinality(deferred) ELSE 0),
             !.deferredPaths = @ \cup (IF SyncScope THEN deferred ELSE {}),
             !.foreignLost = @ \/ lost]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked>>
 
 ------------------------------------------------------------------------------
@@ -1419,7 +1822,7 @@ StagePut(s, p) ==
          /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
          /\ gh' = [gh EXCEPT !.staged = @ + 1,
                      !.deposedPuts = @ + (IF Deposed(s) THEN 1 ELSE 0)]
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox, removals,
+         /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox, removals,
                         window, withheldDel, hitlAcked, conflicts>>
        ELSE IF cur \in sc[s].known /\ cur = want
        THEN \* our own crashed/torn earlier PUT of THESE bytes: adopt the
@@ -1436,7 +1839,7 @@ StagePut(s, p) ==
          /\ stageBase' = [stageBase EXCEPT ![s] = [@ EXCEPT ![p] = cur]]
          /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
          /\ gh' = [gh EXCEPT !.adoptOwn = @ + 1]
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
+         /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
                         versions, inbox, removals, window, withheldDel, hitlAcked,
                         conflicts>>
        ELSE IF cur \in sc[s].known
@@ -1450,12 +1853,12 @@ StagePut(s, p) ==
          /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
          /\ gh' = [gh EXCEPT !.adoptOwn = @ + 1,
                      !.deposedPuts = @ + (IF Deposed(s) THEN 1 ELSE 0)]
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox, removals,
+         /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox, removals,
                         window, withheldDel, hitlAcked, conflicts>>
        ELSE \* foreign ETag: park and surface; never overwrite.
          /\ sc' = [sc EXCEPT ![s].parked = @ \cup {p}]
          /\ conflicts' = conflicts \cup {<<p, cur>>}
-         /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
+         /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
                         versions, inbox, removals, window, stage, stageBase,
                         withheldDel, hitlAcked, gh>>
 
@@ -1465,7 +1868,7 @@ StagePutFenced(s) ==
   /\ EpochCheck /\ Deposed(s)
   /\ sc[s].scanU \ (sc[s].upDone \cup sc[s].parked) # {}
   /\ sc' = [sc EXCEPT ![s].st = "dead"]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, versions,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, versions,
                  inbox, removals, window, stage, stageBase, withheldDel, hitlAcked,
                  conflicts, gh>>
 
@@ -1492,7 +1895,7 @@ LaneDone(s) ==
        [p \in Paths |-> IF LaneCancelsStaged /\ p \in sc[s].scanD THEN 0 ELSE @[p]]]
   /\ sc' = [sc EXCEPT ![s].pc = "laneDone"]
   /\ gh' = [gh EXCEPT !.withheld = @ + Cardinality(sc[s].scanD \ withheldDel[s])]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, versions,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, versions,
                  inbox, removals, window, hitlAcked, conflicts>>
 
 (* No coherent point is due: the tick ends with the bytes DURABLE and the
@@ -1508,7 +1911,7 @@ LaneOnly(s) ==
        ![s].scanU = {}, ![s].scanD = {},
        ![s].scanGen = [p \in Paths |-> 0],
        ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, versions,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, versions,
                  inbox, removals, stage, stageBase, withheldDel, hitlAcked, conflicts,
                  gh>>
 
@@ -1519,7 +1922,7 @@ CiteFenced(s) ==
   /\ Valid(s) \ sc[s].citeDone # {}
   /\ sc' = [sc EXCEPT ![s].st = "dead"]
   /\ gh' = [gh EXCEPT !.stragglerCas = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, versions,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, versions,
                  inbox, removals, window, stage, stageBase, withheldDel, hitlAcked,
                  conflicts>>
 
@@ -1582,7 +1985,7 @@ CitePassStep(s) ==
                  !.carriedCite = @ \/ (sc[s].stageCarried /\ Cardinality(sub) > 1),
                  !.stragglerCas = @ + (IF Deposed(s) THEN 1 ELSE 0),
                  !.stragglerInstalls = @ + (IF Deposed(s) THEN 1 ELSE 0)]
-  /\ UNCHANGED <<cellEpoch, cellHolder, objects, versions, inbox, removals, window,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, objects, versions, inbox, removals, window,
                  stage, stageBase, withheldDel, hitlAcked, conflicts>>
 
 (* The citation completes: withheld deletes land WITH it, the EXACT
@@ -1675,7 +2078,7 @@ CiteFinish(s) ==
             !.declaredDrops = @ + (IF SentinelEnabled /\ PendLive(s)
                                    THEN Cardinality(dropped \cap sc[s].pendDirty)
                                    ELSE 0)]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, hitlAcked>>
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, hitlAcked>>
 
 (* The noncurrent-retention BACKSTOP.  It is not the reaper and it must
    never be creditable for the reaper's work: on `files/` it cannot tell
@@ -1691,7 +2094,7 @@ BackstopExpire(p) ==
        /\ g # objects[p]          \* noncurrent only, exactly as S3
        /\ versions' = [versions EXCEPT ![p] = @ \ {g}]
   /\ gh' = [gh EXCEPT !.reaped = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, sc, stage, stageBase, withheldDel, hitlAcked,
                  conflicts>>
 
@@ -1737,7 +2140,7 @@ Touch(s) ==
   /\ gh.touches < MaxTouches
   /\ sc' = [sc EXCEPT ![s].sentTok = gh.touches + 1]
   /\ gh' = [gh EXCEPT !.touches = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 (* The consume: rename the sentinel out of the agent's reach and FOLD it
@@ -1765,7 +2168,7 @@ TakeSentinel(s) ==
             ![s].honored = FALSE,
             ![s].owed = @ \cup {t}]
        /\ gh' = [gh EXCEPT !.coalesced = @ + (IF fold THEN 1 ELSE 0)]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 (* Skip-on-no-diff (`barrier.rs`): nothing local to publish, no citation
@@ -1794,16 +2197,17 @@ FastPath(s) ==
   \* free cycle that consumes nothing, and the state graph's DIAMETER
   \* grows without bound (the pilot ran to depth 148 and 17M states
   \* before this line existed).
-  /\ gh.barriers < MaxBarriers
+  /\ gh.barriers < MaxBarriers \/ InfiniteBarriers
   /\ FastPathClean(s)
   /\ sc' = [sc EXCEPT ![s].pc = "idle",
        ![s].honored = IF PendLive(s) THEN TRUE ELSE @,
        \* No boundary was installed, so this honor stamps nothing.
        ![s].installed = FALSE,
        ![s].lastDirty = IF SyncEnabled THEN {} ELSE @]
-  /\ gh' = [gh EXCEPT !.barriers = @ + 1, !.fastPaths = @ + 1,
+  /\ gh' = [gh EXCEPT !.barriers = IF InfiniteBarriers THEN @ ELSE @ + 1,
+                      !.fastPaths = IF InfiniteBarriers THEN @ ELSE @ + 1,
                       !.fastHonor = @ \/ PendLive(s)]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 (* THE PROMISE, evaluated at the instant the ack is written and stamped
@@ -1855,8 +2259,8 @@ FastPath(s) ==
    its old generation) are the same defect and the same test.          *)
 BoundaryBroken(s) ==
   \E p \in sc[s].pendDirty :
-    /\ manifest[p] # sc[s].pendCov[p]
-    /\ manifest[p] < sc[s].pendMint
+    /\ AckedDoc(s)[p] # sc[s].pendCov[p]
+    /\ AckedDoc(s)[p] < sc[s].pendMint
     /\ sc[s].local[p] = sc[s].pendCov[p]
     \* The conflict exemption reads the ack's `report.parked`.  A path
     \* the CITATION dropped is in no such field — the gated honor
@@ -1886,13 +2290,25 @@ BoundaryBroken(s) ==
    their conflict record is the ack's `report.parked`.               *)
 BoundaryIncoherent(s) ==
   \E p \in Paths :
-    /\ sc[s].baseline[p] # manifest[p]
+    /\ sc[s].baseline[p] # AckedDoc(s)[p]
     /\ ~\E pr \in conflicts : pr[1] = p
+    \* Under the barrier lease a PEER's lease-free upload can supersede, at
+    \* the key, a generation this writer integrated before its commit
+    \* re-cited it, and the repair's HEAD guard then rightly declines.  The
+    \* harm this stamp names cannot follow: a reader of the acked document
+    \* is sent to a key that holds neither the superseded generation nor
+    \* the cited one, so its conditional read fails into the NEWER object.
+    \* Exempt exactly the paths the install declined for that reason, at
+    \* that CAS — a repair skipped while the key still held the integrated
+    \* generation (the fast-path finding) is not exempt.  The first run of
+    \* the two-writer sentinel world with HitlOverwritesTrackedOnly found
+    \* this in 16 steps (README, tranche 6).
+    /\ p \notin sc[s].repairMoved
 
 AckOk(s) ==
   /\ SentinelEnabled /\ Running(s) /\ sc[s].pc = "idle"
   /\ PendLive(s) /\ ~AckMatches(s)
-  /\ ~(RefuseOnFence /\ Deposed(s))
+  /\ ~(RefuseOnFence /\ DeposedHolder(s))
   /\ (AckFromInstall => sc[s].honored)
   \* D1, at the one place a gated boundary can break it: a citation
   \* that dropped a declared path installed a point that does not
@@ -1906,7 +2322,7 @@ AckOk(s) ==
        !.ackAfterRestart = @ + (IF sc[s].pendReRun THEN 1 ELSE 0),
        !.ackEarly = @ \/ BoundaryBroken(s),
        !.ackIncoherent = @ \/ BoundaryIncoherent(s),
-       !.fencedOkAck = @ \/ Deposed(s),
+       !.fencedOkAck = @ \/ DeposedHolder(s),
        \* Only an ack that claims its OWN install can disagree with the
        \* stamp; an ack that installed nothing names no clock.
        \* Scoped to an honor that actually INSTALLED. A no-diff honor
@@ -1915,8 +2331,8 @@ AckOk(s) ==
        \* questions, and only a real install owes them the same answer.
        \* (The first pilot conflated them and fired on correct code.)
        !.srcMismatch = @ \/ (sc[s].honored /\ sc[s].installed
-                             /\ manSrc # BoundaryClock(s))]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+                             /\ AckedSrc(s) # BoundaryClock(s))]
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 (* The honest answer when the boundary does not carry the declared
@@ -1932,12 +2348,12 @@ AckOk(s) ==
 AckPartial(s) ==
   /\ SentinelEnabled /\ AckHonest /\ Running(s) /\ sc[s].pc = "idle"
   /\ PendLive(s) /\ ~AckMatches(s)
-  /\ ~(RefuseOnFence /\ Deposed(s))
+  /\ ~(RefuseOnFence /\ DeposedHolder(s))
   /\ sc[s].pendDirty \cap sc[s].citeDropped # {}
   /\ sc' = [sc EXCEPT ![s].ackN = @ \cup sc[s].pendN, ![s].honored = FALSE,
        ![s].installed = FALSE, ![s].citeDropped = {}]
   /\ gh' = [gh EXCEPT !.acks = @ + 1, !.partialAcks = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 (* Retire AFTER the ack rename.  Splitting these two is not ceremony:
@@ -1950,7 +2366,7 @@ RetirePending(s) ==
   /\ sc' = [sc EXCEPT ![s].pendN = {}, ![s].pendCov = NoPend,
        ![s].pendMint = 0, ![s].pendDirty = {},
        ![s].honored = FALSE, ![s].pendReRun = FALSE]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts, gh>>
 
 (* D2's refused ack: deposal must never strand a waiting agent.  Write
@@ -1958,14 +2374,17 @@ RetirePending(s) ==
    exit fenced — one step here.                                         *)
 AckRefused(s) ==
   /\ SentinelEnabled /\ Running(s)
-  /\ PendLive(s) /\ RefuseOnFence /\ Deposed(s)
+  \* Tranche 6: no `refused-fenced` ack exists under the barrier lease —
+  \* a fence abandons the barrier and the next one honors the record.
+  /\ ~BarrierLease
+  /\ PendLive(s) /\ RefuseOnFence /\ DeposedHolder(s)
   /\ sc' = [sc EXCEPT ![s].ackN = @ \cup sc[s].pendN,
        ![s].pendN = {}, ![s].pendCov = NoPend, ![s].pendMint = 0,
        ![s].pendDirty = {},
        ![s].honored = FALSE, ![s].pendReRun = FALSE,
        ![s].st = "dead"]
   /\ gh' = [gh EXCEPT !.refusedAcks = @ + 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
 SentinelNext ==
@@ -1993,9 +2412,11 @@ BaseNext ==
   \/ StartA
   \/ \E s \in Syncers : CrashPod(s) \/ Restart(s) \/ RenewDiscover(s)
   \/ StallA \/ ThawA \/ ClaimB \/ CheckoutB
+  \/ \E s \in Syncers :
+       StartLease(s) \/ Claim(s) \/ Enqueue(s) \/ SkipDeadHandoff(s)
   \/ \E s \in Syncers, p \in Paths :
        AgentWrite(s, p) \/ AgentDelete(s, p) \/ Upload(s, p)
-       \/ GCDelete(s, p)
+       \/ GCDelete(s, p) \/ GCHead(s, p)
   \/ \E s \in Syncers : Narrow(s)
   \/ \E p \in Paths : HitlWrite(p) \/ HitlRemove(p)
   \/ \E p, q \in Paths : HitlRename(p, q)
@@ -2012,14 +2433,44 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
+\* Gated mode is frozen and not supported under the barrier lease (design
+\* §4.3, D3): its upload lane runs outside any barrier.
+ASSUME ~(BarrierLease /\ GatedCitation)
+
+(* ---- tranche 6: FAIRNESS, for the liveness runs only -------------------
+   Weak fairness on each syncer's OWN barrier step — not on "some syncer
+   takes a step", which would let one writer discharge the other's
+   obligation.  Under `Ticket` the queue head's claim is continuously
+   enabled from the release until it fires, so WF is enough; under the
+   mutation the claim is enabled only between one release and the next
+   claim, WF asks nothing, and one writer claims forever.               *)
+BarrierStep(s) ==
+  /\ \/ Consume(s) \/ Scan(s) \/ Claim(s) \/ Enqueue(s) \/ SkipDeadHandoff(s)
+     \/ \E p \in Paths : Upload(s, p) \/ GCDelete(s, p) \/ GCHead(s, p)
+     \/ PreDeletesDone(s) \/ CASMiss(s) \/ CASInstall(s) \/ Finish(s)
+     \/ CASFenced(s) \/ GCDeleteFenced(s) \/ RenewDiscover(s)
+  /\ VersionsFollow /\ UNCHANGED gatedVars
+
+FairSpec == Spec /\ \A s \in Syncers : WF_vars(BarrierStep(s))
+
+\* Every live writer that queued for the cell eventually holds it.  A
+\* waiter that dies or freezes is released from the claim (a frozen
+\* waiter needs `ThawA`, which is not fair, and a dead one needs nothing).
+Waiting(s) == sc[s].pc = "waiting" /\ Running(s)
+NoStarvation ==
+  \A s \in Syncers : [](Waiting(s) => <>(Holding(s) \/ ~Running(s)))
+
 ------------------------------------------------------------------------------
 (* Invariants *)
 
 TypeOK ==
-  /\ cellEpoch \in 0..3 /\ cellHolder \in Syncers \cup {"none"}
+  /\ cellEpoch \in 0..EpochBound /\ cellHolder \in Syncers \cup {"none"}
+  /\ cellQueue \in Seq(Syncers) /\ Len(cellQueue) <= Cardinality(Syncers)
+  /\ \A i, j \in 1..Len(cellQueue) : cellQueue[i] = cellQueue[j] => i = j
+  /\ cellHandoff \in Syncers \cup {"none"} /\ cellReleased \in BOOLEAN
   /\ manSeq \in 1..MaxSeq+1 /\ manSrc \in Sources
   /\ manifest \in [Paths -> Gens] /\ objects \in [Paths -> Gens]
-  /\ inbox \subseteq (Paths \X Gens) /\ window \in 0..3
+  /\ inbox \subseteq (Paths \X Gens) /\ window \in 0..EpochBound
   /\ hitlAcked \subseteq (Paths \X Gens) /\ conflicts \subseteq (Paths \X Gens)
   /\ versions \in [Paths -> SUBSET Gens]
   /\ stage \in [Syncers -> [Paths -> Gens]]
@@ -2028,6 +2479,7 @@ TypeOK ==
   /\ removals \subseteq Paths
   /\ \A s \in Syncers : sc[s].declared \subseteq Paths
                        /\ sc[s].consumed \subseteq (Paths \X Gens)
+                       /\ sc[s].repairMoved \subseteq Paths
 
 \* §4.2: A NARROW IS AN UNWATCH, NEVER AN ABSENCE.  No path a narrow
 \* dropped may lose its object — a workspace that stops holding a file
@@ -2152,6 +2604,25 @@ Inv_BoundaryNamesItsClock == ~gh.srcMismatch
 \* ack side, which is the side the agent reads and the only side a
 \* fenced incarnation still controls.
 Inv_NoFencedOkAck == ~gh.fencedOkAck
+
+\* ---- tranche 6: the per-barrier lease -----------------------------------
+
+\* D1, the safety half of the lease: ONE writer in the commit section at
+\* a time.  A deposed straggler may still BELIEVE it is in its commit
+\* section — that is what the fences are for — so the claim is over the
+\* holders the cell still recognises.  True under the life lease too.
+Inv_CommitExclusive ==
+  \A s, t \in Syncers :
+    (Holding(s) /\ Holding(t) /\ s # t) => (Deposed(s) \/ Deposed(t))
+
+\* Model coherence, pinned so a wrong claim arm cannot hide: a HELD cell's
+\* holder is in its commit section at the cell's epoch — alive, frozen or
+\* dead there.  A restart releases, a failed commit releases, a fence
+\* yields; nothing else may leave a held cell behind a syncer that is not
+\* committing.
+Inv_CellHeldByHolder ==
+  BarrierLease /\ CellHeld =>
+    (Holding(cellHolder) /\ sc[cellHolder].epoch = cellEpoch)
 
 ------------------------------------------------------------------------------
 (* Non-vacuity probes — each names an ACTION via a ghost that only that
@@ -2345,5 +2816,29 @@ Inv_RenameNoHole ==
 ProbeRemovalApplied == gh.removalsApplied = 0
 ProbeRemovalRefused == gh.removalsRefused = 0
 ProbeRenameApplied  == gh.renamesApplied = 0
+
+\* ---- tranche 6: the per-barrier lease -----------------------------------
+\* REQUIRED-REACHABLE: an upload landed while the other writer was in
+\* its commit section.  The house rule — never prove a guarantee by the
+\* attack's absence: the lease's claim is that two writers OVERLAP and
+\* only the commit serialises.  Written by Upload.
+ProbeWritersInterleave == ~gh.interleaved
+\* A claim by the syncer the release NAMED actually happened (Claim).
+ProbeHandoffFired      == gh.handoffs = 0
+\* A quiet holder in its commit section was deposed by the other writer
+\* (Claim's deposal arm).
+ProbeDeposalMidCommit  == gh.deposals = 0
+\* A quiet handoff was skipped and the cell taken by a survivor.
+ProbeDeadHandoffSkipped == gh.deadSkips = 0
+\* A syncer actually queued for the cell — without this the strict runs
+\* could hold with the ticket never exercised.
+ProbeEnqueued          == gh.enqueues = 0
+\* A fenced holder abandoned its barrier and KEPT RUNNING (a fence is
+\* not a death).  Written only by the fence arms under BarrierLease.
+ProbeFenceAbandoned    == gh.abandoned = 0
+\* The fix actually fired: a CAS under the lease found an adopted object
+\* gone and withheld the entry.  Without this the strict runs could hold
+\* with the race never reached — which is exactly how it hid until now.
+ProbeAdoptWithheld     == gh.adoptWithheld = 0
 
 ==============================================================================

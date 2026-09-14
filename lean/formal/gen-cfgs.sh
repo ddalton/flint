@@ -14,9 +14,13 @@ MaxTouches \
 SentinelEnabled FoldPending AckFromInstall RefuseOnFence FastPathGuards \
 AckHonest LaneCancelsStaged GatedRepair StampBoundarySource \
 TwoScanDelete MaxNarrows NarrowAtomic NarrowUnlinkFirst \
-MaxRemovals DeclaredSkipsWalk EarlyInboxDrop RenameWaitsForDestination"
+MaxRemovals DeclaredSkipsWalk EarlyInboxDrop RenameWaitsForDestination \
+BarrierLease Ticket DeadHandoffSkip InfiniteBarriers ConditionalGC VerifyAdoptedCitations \
+HitlOverwritesTrackedOnly SyncKeepsHiddenBase"
 
 emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
+         # Spec=<name> selects the SPECIFICATION (default Spec; FairSpec
+         # for the liveness runs); Props=<a,b> adds PROPERTY lines.
   local name=$1 invs=$2; shift 2
   local c_MaxGen=4 c_MaxSeq=6 c_MaxHitl=1 c_MaxBarriers=3
   local c_MaxCrashes=1 c_MaxRestarts=1 c_MaxSyncs=0 c_AllowStall=FALSE
@@ -75,10 +79,37 @@ emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
   # green because the action never fired.  Every pre-existing cfg keeps
   # {p1, p2} with FreePaths = {}.
   local c_NPaths=2 c_FreeLast=FALSE
+  # tranche 6: the PER-BARRIER lease.  BarrierLease=FALSE in every
+  # pre-existing cfg: StartA/ClaimB keep the life lease, Scan opens the
+  # window, every fence kills, and cellQueue/cellHandoff/cellReleased
+  # stay frozen at Init — those state spaces are preserved by
+  # construction (verified by distinct-state count against the HEAD
+  # module: see the README).  Ticket/DeadHandoffSkip are the shipped
+  # rules (TRUE), each with its mutation; InfiniteBarriers is the
+  # liveness abstraction and is FALSE in every safety run.
+  local c_BarrierLease=FALSE c_Ticket=TRUE c_DeadHandoffSkip=TRUE
+  local c_InfiniteBarriers=FALSE
+  # ConditionalGC=TRUE is the atomic If-Match delete this module has always
+  # modelled; FALSE is the shipped HEAD-then-DELETE, modelled only under
+  # BarrierLease, where the model found it unsafe.
+  local c_ConditionalGC=TRUE
+  # VerifyAdoptedCitations=TRUE re-verifies an adopted entry under the
+  # lease; FALSE is the shipped blind adopt, which the model refuted at
+  # depth 28 of the first two-writer stall run.  BarrierLease only.
+  local c_VerifyAdoptedCitations=TRUE
+  # SyncKeepsHiddenBase=FALSE is the sync verb's shipped advance, kept in
+  # every pre-existing cfg; TRUE is the 2026-09-13 fix, whose control is
+  # LeanBarrierLeaseSyncOverlayHolds.
+  local c_SyncKeepsHiddenBase=FALSE
+  # HitlOverwritesTrackedOnly=FALSE is the gateway as it shipped (it
+  # overwrote whatever object was current); TRUE is the 2026-09-13 rule
+  # (`inbox::hitl_may_overwrite`), on in the barrier-lease worlds with HITL.
+  local c_HitlOverwritesTrackedOnly=FALSE
+  local c_Spec=Spec c_Props=""
   local kv
   for kv in "$@"; do eval "c_${kv%%=*}=${kv#*=}"; done
   {
-    echo "SPECIFICATION Spec"
+    echo "SPECIFICATION $c_Spec"
     echo "CHECK_DEADLOCK FALSE"
     echo "CONSTANTS"
     local paths="p1" j
@@ -92,6 +123,7 @@ emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
     done
     local i
     for i in ${invs//,/ }; do echo "INVARIANT $i"; done
+    for i in ${c_Props//,/ }; do echo "PROPERTY $i"; done
   } > "$name.cfg"
   echo "wrote $name.cfg"
 }
@@ -388,3 +420,113 @@ emit LeanRenameNoDestinationGuard "Inv_RenameNoHole" $REMOVALCRASH EarlyInboxDro
 emit LeanProbeRemoval "ProbeRemovalApplied" $REMOVALWORLD
 emit LeanProbeRemovalRefused "ProbeRemovalRefused" $REMOVALWORLD
 emit LeanProbeRename "ProbeRenameApplied" $REMOVALWORLD
+
+# ---- tranche 6: the PER-BARRIER lease (writer-lease design §4-§5) --------
+# The cell is held for one barrier's commit section with a FIFO ticket;
+# both writers run from the start and the takeover is the generic
+# deposal.  Three safety worlds, each two-writer:
+#   BLWORLD   the breadth run: HITL + crash + restart.  MaxGen=2, not
+#             LeanSubtree's 3: two live writers with a crash AND a
+#             restart passed 2.8M states at depth 16 in the first minute
+#             with the queue spilling to disk (the crash-matrix split
+#             SENTRESTART made for the same reason)
+#   BLSENT    the sentinel over a commit that had to WAIT for the cell
+#   BLSTALL   the takeover world: A freezes INSIDE its commit section and
+#             B deposes it; the thawed A abandons (MaxBarriers=2 — the
+#             retry after a fence is BLADOPT's subject, and cheaper there)
+#   BLADOPT   a restart between the CAS and the baseline, so the next
+#             barrier ADOPTS its own earlier upload — the adopt race
+# and the liveness world BLLIVE, which is where the ticket is proved
+# load-bearing: InfiniteBarriers makes the barrier loop a CYCLE (every
+# counter a barrier moves is monotone, so under budgets TLC has no lasso
+# to find and "claims forever" is unstatable), one path, no writes, and
+# FairSpec's WF on each writer's own barrier step.
+BLWORLD="BarrierLease=TRUE HitlOverwritesTrackedOnly=TRUE MaxGen=2 MaxSeq=6 MaxHitl=1 MaxBarriers=2 \
+MaxCrashes=1 MaxRestarts=1"
+BLSENT="BarrierLease=TRUE HitlOverwritesTrackedOnly=TRUE SentinelEnabled=TRUE MaxTouches=2 MaxGen=3 MaxSeq=6 \
+MaxHitl=1 MaxBarriers=2 MaxCrashes=0 MaxRestarts=0"
+BLSTALL="BarrierLease=TRUE AllowStall=TRUE MaxHitl=0 MaxGen=2 MaxSeq=6 \
+MaxBarriers=2 MaxCrashes=0 MaxRestarts=0"
+BLLIVE="BarrierLease=TRUE InfiniteBarriers=TRUE NPaths=1 MaxGen=1 MaxSeq=3 \
+MaxHitl=0 MaxBarriers=2 MaxCrashes=0 MaxRestarts=0 Spec=FairSpec Props=NoStarvation"
+BLINV="TypeOK,Inv_HITLDurable,Inv_NoDangling,Inv_NoStragglerInstall,\
+Inv_NoDeposedPut,Inv_NoResurrection,Inv_HITLTracked,\
+Inv_CommitExclusive,Inv_CellHeldByHolder"
+BLPROBE="BarrierLease=TRUE MaxHitl=0 MaxCrashes=0 MaxRestarts=0 MaxGen=2 MaxSeq=6 MaxBarriers=2"
+BLSTALLINV="TypeOK,Inv_NoDangling,Inv_NoStragglerInstall,Inv_NoDeposedPut,\
+Inv_HITLTracked,Inv_CommitExclusive,Inv_CellHeldByHolder"
+emit LeanBarrierLeaseHolds "$BLINV" $BLWORLD
+emit LeanBarrierLeaseSentinel "$SENTINV,Inv_HITLTracked,Inv_CommitExclusive,Inv_CellHeldByHolder" \
+  $BLSENT
+# THE FINDING of the gate run (2026-09-13).  The gateway overwrote whatever
+# object was current.  Under the barrier lease no window holds it off
+# during a writer's uploads, so a UI write lands over A's UNCITED upload;
+# B consumes the UI write, cites it, drops the entry; A's commit re-cites
+# its own upload over it.  16 steps: the acked HITL write is uncited,
+# untracked, preserved nowhere.  The breadth world (MaxGen=2) could not
+# reach it — the interleaving needs a third generation.
+emit LeanBarrierLeaseHitlOverUncited "Inv_HITLDurable" $BLSENT HitlOverwritesTrackedOnly=FALSE
+emit LeanBarrierLeaseDeposal "$BLSTALLINV" $BLSTALL
+# The redundancy A/B, as in the life-lease world: each fence alone holds.
+emit LeanBarrierLeaseEpochOnly "$BLSTALLINV" $BLSTALL Rotation=FALSE
+emit LeanBarrierLeaseRotationOnly "$BLSTALLINV" $BLSTALL EpochCheck=FALSE
+# Both fences off: the thawed straggler's manifest CAS lands.
+emit LeanBarrierLeaseNoRotate "Inv_NoStragglerInstall" $BLSTALL \
+  Rotation=FALSE EpochCheck=FALSE
+# THE FINDING.  The shipped GC delete is a HEAD then an unconditional
+# DELETE (barrier.rs step 6).  Under the life lease the lease covered that
+# window; under the barrier lease the other writer's uploads hold no lease,
+# and its supersede landing between A's HEAD and A's DELETE leaves B's
+# citation dangling.  No stall, no crash, no HITL: two live writers.
+# MaxHitl=0 on purpose — the model clears the window at the CAS while the
+# code holds it through the deletes, so a HITL write in that gap would be
+# a false positive here; the writer race is the real one.
+emit LeanBarrierLeaseGCUnconditional "Inv_NoDangling" $BLPROBE ConditionalGC=FALSE
+# NOT a holds-run.  The scoped sync was to be re-checked in the world it
+# will actually run in — the second writer is a legitimate foreign
+# manifest installer, no stall arm needed — and TLC REFUTED D4 there:
+# the sync's remote truth is the manifest overlaid by live inbox entries
+# (`sync.rs` step 2), which reads a queued foreign entry as newer than
+# the manifest; a second LIVE writer can move the manifest past that
+# entry (delete the path) while the entry's object still exists, so the
+# sync "verifies" the path unchanged against the overlay and advances the
+# merge base to the manifest — the silent, permanent D4 loss.  One writer
+# cannot produce it: the only party that moves a manifest past its own
+# queued entry is dead.  Pinned as the must-fail it is.  The fix is the
+# sync verb's — do not advance the base for a path the overlay hid
+# (`SyncKeepsHiddenBase`, built in `sync.rs` the same day) — and
+# LeanBarrierLeaseSyncOverlayHolds is its control: the same world, the
+# one constant moved.
+BLSCOPE="BarrierLease=TRUE SyncEnabled=TRUE SyncScope=TRUE MaxSyncs=1 \
+MaxHitl=0 MaxGen=2 MaxSeq=6 MaxBarriers=2 MaxCrashes=0 MaxRestarts=0"
+emit LeanBarrierLeaseSyncOverlayStale "Inv_NoForeignLost" $BLSCOPE
+emit LeanBarrierLeaseSyncOverlayHolds "TypeOK,Inv_NoForeignLost,Inv_NoDangling" $BLSCOPE \
+  SyncKeepsHiddenBase=TRUE
+# THE SECOND FINDING.  A barrier that restarts between its CAS and its
+# baseline re-uploads next time and finds its own bytes already there:
+# `upload_one` adopts (CRC match, no PUT).  Between that adopt and the
+# adopter's CAS the OTHER writer's commit can uncite the path and its GC
+# — HEAD-guarded on an etag it learned at checkout — deletes the object.
+# The adopter's merge then upserts a citation over a deleted object.
+# The fix re-verifies adopted entries INSIDE the commit section, where no
+# GC can run, and withholds what is gone.  ONE path: the race needs one,
+# and with two the mutation's counterexample sat past 1M states at depth
+# 20 while its strict control would have had to exhaust the lot.
+BLADOPT="BarrierLease=TRUE NPaths=1 MaxHitl=0 MaxGen=2 MaxSeq=6 MaxBarriers=3 \
+MaxCrashes=0 MaxRestarts=1"
+emit LeanBarrierLeaseAdoptVerified "$BLSTALLINV,Inv_HITLDurable,Inv_NoResurrection" $BLADOPT
+emit LeanBarrierLeaseAdoptBlind "Inv_NoDangling" $BLADOPT VerifyAdoptedCitations=FALSE
+emit LeanProbeAdoptWithheld "ProbeAdoptWithheld" $BLADOPT
+# Liveness: the ticket (falsifier L5) and the dead-handoff skip.
+emit LeanBarrierLeaseLive "TypeOK" $BLLIVE
+emit LeanBarrierLeaseLiveCrash "TypeOK" $BLLIVE MaxCrashes=1
+emit LeanBarrierLeaseRandomArbitration "TypeOK" $BLLIVE Ticket=FALSE
+emit LeanBarrierLeaseDeadHandoffWedge "TypeOK" $BLLIVE MaxCrashes=1 DeadHandoffSkip=FALSE
+# Probes.
+emit LeanProbeWritersInterleave "ProbeWritersInterleave" $BLPROBE
+emit LeanProbeHandoff "ProbeHandoffFired" $BLPROBE
+emit LeanProbeEnqueued "ProbeEnqueued" $BLPROBE
+emit LeanProbeDeposalMidCommit "ProbeDeposalMidCommit" $BLSTALL
+emit LeanProbeFenceAbandoned "ProbeFenceAbandoned" $BLSTALL
+emit LeanProbeDeadHandoffSkipped "ProbeDeadHandoffSkipped" \
+  BarrierLease=TRUE NPaths=1 MaxGen=1 MaxSeq=6 MaxHitl=0 MaxCrashes=1 MaxRestarts=0 MaxBarriers=3

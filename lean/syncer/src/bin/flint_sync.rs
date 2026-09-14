@@ -25,6 +25,11 @@
 //!              ignores them turns every manifest CAS into
 //!              last-writer-wins, and lets a garbage collector delete
 //!              another writer's upload — silently)
+//!   manifest   print the resolved manifest and a HEAD of every citation
+//!              as one JSON line, exit. Read-only: no lease, no state
+//!              lock, no tree. One HEAD per entry — for drills and for an
+//!              operator asking whether every citation resolves, not for a
+//!              100k-entry workspace on a hot path.
 //!   run        checkout → barrier loop (floorSecs) → drain on SIGTERM.
 //!              No lease is held between barriers: each barrier claims
 //!              the publish fence for its commit section only (after
@@ -235,6 +240,10 @@ async fn main() {
     cfg.sentinel_poll_secs = env_u64("FLINT_SYNC_SENTINEL_POLL_SECS", 1).max(1);
     // Drill-only: opens the mid-commit window no drill can hit by timing.
     cfg.drill_hold_commit_secs = env_u64("FLINT_SYNC_DRILL_HOLD_COMMIT_SECS", 0);
+    cfg.drill_hold_gc_secs = env_u64("FLINT_SYNC_DRILL_HOLD_GC_SECS", 0);
+    if matches!(std::env::var("FLINT_SYNC_EVENT_TRACE").as_deref(), Ok("1") | Ok("true")) {
+        cfg.event_trace = Some(flint_lean::trace::Sink::Stderr);
+    }
     // Also dispatched before the state directory is opened, and for a
     // stronger reason: `ctl` is a CLIENT of the running syncer. Taking
     // the occupancy lock — or the lease — would fight the very process
@@ -258,6 +267,41 @@ async fn main() {
             }
             Err(e) => {
                 eprintln!("flint-sync ctl: {} ({e})", sock.display());
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Read-only, before the state directory for the same reason as
+    // `status`: it must answer while a syncer holds the occupancy lock.
+    if cmd == "manifest" {
+        match flint_lean::manifest::load(store.as_ref(), &cfg).await {
+            Ok(Some(m)) => {
+                let mut heads = serde_json::Map::new();
+                for (path, e) in &m.manifest.entries {
+                    let head = match store.head(&e.key).await {
+                        Ok(meta) => serde_json::Value::String(meta.etag),
+                        Err(flint_store::StoreError::NotFound(_)) => serde_json::Value::Null,
+                        Err(err) => {
+                            eprintln!("flint-sync: manifest: HEAD {}: {err}", e.key);
+                            std::process::exit(1);
+                        }
+                    };
+                    heads.insert(path.clone(), head);
+                }
+                let out = serde_json::json!({
+                    "seq": m.manifest.seq, "pointer_etag": m.etag,
+                    "entries": m.manifest.entries, "heads": heads,
+                });
+                println!("{}", serde_json::to_string(&out).unwrap());
+                return;
+            }
+            Ok(None) => {
+                println!("{}", serde_json::json!({"seq": null, "entries": {}, "heads": {}}));
+                return;
+            }
+            Err(e) => {
+                eprintln!("flint-sync: manifest: {e}");
                 std::process::exit(1);
             }
         }
@@ -367,7 +411,7 @@ async fn main() {
         other => {
             eprintln!(
                 "flint-sync: unknown subcommand {other:?} \
-                 (checkout|barrier|sync|rescope|status|ctl|run|probe-copy|probe-conditional)"
+                 (checkout|barrier|sync|rescope|status|manifest|ctl|run|probe-copy|probe-conditional)"
             );
             std::process::exit(2);
         }

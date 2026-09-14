@@ -63,6 +63,9 @@ pub struct S3Store {
     /// `part_parallelism` default above 1: without it the window held
     /// `min(objects, fanout) x part_parallelism x part_size`.
     upload_gate: Option<std::sync::Arc<crate::gate::ByteGate>>,
+    /// Requests sent, by kind (`counters.rs`), bumped once per request at
+    /// the method that issues it.
+    requests: std::sync::Arc<crate::RequestCounter>,
     /// The raw read path (`rawread.rs`), when `with_raw_reads(true)`:
     /// every GET and HEAD goes through it; every write stays on the
     /// SDK client above.
@@ -152,6 +155,7 @@ impl S3Store {
             endpoint: endpoint_for_raw,
             part_parallelism: 1,
             upload_gate: None,
+            requests: Default::default(),
             // S3's documented CopyObject ceiling.
             copy_whole_max: 5 * 1024 * 1024 * 1024,
         })
@@ -432,6 +436,7 @@ impl ObjectStore for S3Store {
         stamps: &GenerationStamps,
         crc64: u64,
     ) -> StoreResult<ObjectMeta> {
+        self.requests.bump(crate::RequestKind::Put);
         let size = body.len() as u64;
         let crc_b64 = crc64_to_b64(crc64);
         let mut req = self
@@ -473,6 +478,7 @@ impl ObjectStore for S3Store {
         condition: &PutCondition,
         stamps: &GenerationStamps,
     ) -> StoreResult<ObjectMeta> {
+        self.requests.bump(crate::RequestKind::Copy);
         // HEAD the source for its SIZE and its CRC. The size picks the
         // transport; the CRC is the destination's, unchanged, because a
         // copy cannot alter bytes and a checksum describes bytes.
@@ -571,6 +577,7 @@ impl ObjectStore for S3Store {
     }
 
     async fn compose_generation(&self, spec: &ComposeSpec<'_>) -> StoreResult<ObjectMeta> {
+        self.requests.bump(crate::RequestKind::Multipart);
         if spec.parts.is_empty() {
             return Err(StoreError::Other("compose: no parts".into()));
         }
@@ -616,6 +623,7 @@ impl ObjectStore for S3Store {
     }
 
     async fn head(&self, key: &str) -> StoreResult<ObjectMeta> {
+        self.requests.bump(crate::RequestKind::Head);
         if let Some(raw) = &self.raw {
             return raw.head(key, None).await;
         }
@@ -682,6 +690,7 @@ impl ObjectStore for S3Store {
         key: &str,
         if_match: Option<&str>,
     ) -> StoreResult<(ObjectMeta, Bytes)> {
+        self.requests.bump(crate::RequestKind::Get);
         if let Some(raw) = &self.raw {
             return raw.get_whole(key, if_match, None).await;
         }
@@ -720,6 +729,7 @@ impl ObjectStore for S3Store {
         len: u64,
         if_match: &str,
     ) -> StoreResult<Bytes> {
+        self.requests.bump(crate::RequestKind::Get);
         if let Some(raw) = &self.raw {
             let segs = raw.get_range_segments(key, offset, len, if_match).await?;
             return Ok(match segs.len() {
@@ -764,6 +774,7 @@ impl ObjectStore for S3Store {
         len: u64,
         if_match: &str,
     ) -> StoreResult<Vec<Bytes>> {
+        self.requests.bump(crate::RequestKind::Get);
         if let Some(raw) = &self.raw {
             return raw.get_range_segments(key, offset, len, if_match).await;
         }
@@ -787,6 +798,7 @@ impl ObjectStore for S3Store {
     }
 
     async fn list(&self, prefix: &str) -> StoreResult<Vec<ListedObject>> {
+        self.requests.bump(crate::RequestKind::List);
         let mut out = Vec::new();
         let mut pages = self
             .client
@@ -810,6 +822,7 @@ impl ObjectStore for S3Store {
     }
 
     async fn delete(&self, key: &str) -> StoreResult<()> {
+        self.requests.bump(crate::RequestKind::Delete);
         self.client
             .delete_object()
             .bucket(&self.bucket)
@@ -821,6 +834,7 @@ impl ObjectStore for S3Store {
     }
 
     async fn delete_if_match(&self, key: &str, etag: &str) -> StoreResult<()> {
+        self.requests.bump(crate::RequestKind::Delete);
         // A backend that accepts the header and ignores it deletes
         // unconditionally and answers 204 — indistinguishable here. That
         // is what `probe::probe_conditional_delete` exists to catch.
@@ -836,6 +850,7 @@ impl ObjectStore for S3Store {
     }
 
     async fn head_version(&self, key: &str, version_id: &str) -> StoreResult<ObjectMeta> {
+        self.requests.bump(crate::RequestKind::Head);
         if let Some(raw) = &self.raw {
             return raw.head(key, Some(version_id)).await;
         }
@@ -861,6 +876,7 @@ impl ObjectStore for S3Store {
     }
 
     async fn get_version(&self, key: &str, version_id: &str) -> StoreResult<(ObjectMeta, Bytes)> {
+        self.requests.bump(crate::RequestKind::Get);
         if let Some(raw) = &self.raw {
             return raw.get_whole(key, None, Some(version_id)).await;
         }
@@ -893,6 +909,7 @@ impl ObjectStore for S3Store {
     }
 
     async fn delete_version(&self, key: &str, version_id: &str) -> StoreResult<()> {
+        self.requests.bump(crate::RequestKind::Delete);
         self.client
             .delete_object()
             .bucket(&self.bucket)
@@ -905,6 +922,7 @@ impl ObjectStore for S3Store {
     }
 
     async fn list_versions(&self, prefix: &str) -> StoreResult<Vec<ListedVersion>> {
+        self.requests.bump(crate::RequestKind::List);
         let mut out = Vec::new();
         let mut key_marker: Option<String> = None;
         let mut vid_marker: Option<String> = None;
@@ -954,6 +972,7 @@ impl ObjectStore for S3Store {
     }
 
     async fn list_uploads(&self, prefix: &str) -> StoreResult<Vec<PendingUpload>> {
+        self.requests.bump(crate::RequestKind::List);
         let mut out = Vec::new();
         let mut key_marker: Option<String> = None;
         let mut id_marker: Option<String> = None;
@@ -996,6 +1015,7 @@ impl ObjectStore for S3Store {
     }
 
     async fn abort_upload(&self, key: &str, upload_id: &str) -> StoreResult<()> {
+        self.requests.bump(crate::RequestKind::Multipart);
         match self
             .client
             .abort_multipart_upload()
@@ -1424,6 +1444,10 @@ impl ObjectStore for S3Store {
     fn upload_gate(&self) -> Option<std::sync::Arc<crate::gate::ByteGate>> {
         self.upload_gate.clone()
     }
+
+    fn request_counts(&self) -> Option<crate::RequestCounts> {
+        Some(self.requests.snapshot())
+    }
 }
 
 impl S3Store {
@@ -1438,6 +1462,7 @@ impl S3Store {
         part_number: i32,
         bytes: Bytes,
     ) -> StoreResult<CompletedPart> {
+        self.requests.bump(crate::RequestKind::Put);
         let resp = self
             .client
             .upload_part()
@@ -1518,6 +1543,7 @@ impl S3Store {
         offset: u64,
         len: u64,
     ) -> StoreResult<CompletedPart> {
+        self.requests.bump(crate::RequestKind::Copy);
         let base_etag = spec
             .base_etag
             .as_deref()
@@ -1548,6 +1574,7 @@ impl S3Store {
         spec: &ComposeSpec<'_>,
         upload_id: &str,
     ) -> StoreResult<ObjectMeta> {
+        self.requests.bump(crate::RequestKind::Multipart);
         // Contiguity is validated over the WHOLE list BEFORE any part
         // moves. It used to be checked inside the upload loop, which was
         // fine while that loop was sequential — a parallel one would
@@ -1686,6 +1713,7 @@ impl S3Store {
     }
 
     async fn epoch_write(&self, key: &str, w: EpochWrite<'_>) -> StoreResult<EpochLease> {
+        self.requests.bump(crate::RequestKind::Put);
         let EpochWrite { holder_id, epoch, condition, released, echo, waiters, handoff } = w;
         let body = Bytes::from(
             serde_json::to_vec(&EpochBody {

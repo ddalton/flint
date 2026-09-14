@@ -168,6 +168,7 @@ pub async fn claim_step(sc: &mut Syncer, count: bool) -> LeanResult<ClaimOutcome
                 inc.quiet_polls = 0;
                 sc.state.save_incarnation(&inc)?;
                 sc.lease = Some(lease.clone());
+                sc.trace("claim", serde_json::json!({"verdict": "claimed", "how": "fresh", "epoch": lease.epoch}));
                 Ok(ClaimOutcome::Claimed(lease))
             }
             Err(StoreError::PreconditionFailed(_)) | Err(StoreError::Conflict(_)) => {
@@ -212,6 +213,7 @@ pub async fn claim_step(sc: &mut Syncer, count: bool) -> LeanResult<ClaimOutcome
         inc.quiet_polls = 0;
         sc.state.save_incarnation(&inc)?;
         sc.lease = Some(lease.clone());
+        sc.trace("claim", serde_json::json!({"verdict": "claimed", "how": "adopted-own", "epoch": lease.epoch}));
         return Ok(ClaimOutcome::Claimed(lease));
     }
 
@@ -244,6 +246,17 @@ pub async fn claim_step(sc: &mut Syncer, count: bool) -> LeanResult<ClaimOutcome
         // seq, and it defeats the no-change barrier's early exit
         // (measured on the 0b rig). Under the per-barrier lease that
         // would be every boundary.
+        let prior = serde_json::json!({"holder": state.holder_id, "epoch": state.epoch, "released": state.released,
+            "handoff": state.handoff, "waiters": state.waiters});
+        let how = if rotate && same_holder {
+            "orphaned-own"
+        } else if rotate {
+            "deposed"
+        } else if state.handoff.as_deref().map(|h| h != inc.holder_id).unwrap_or(false) {
+            "skipped-handoff"
+        } else {
+            "released"
+        };
         return match store.epoch_acquire(&key, &inc.holder_id, Some(&state)).await {
             Ok(lease) => {
                 if rotate {
@@ -254,6 +267,7 @@ pub async fn claim_step(sc: &mut Syncer, count: bool) -> LeanResult<ClaimOutcome
                 inc.quiet_polls = 0;
                 sc.state.save_incarnation(&inc)?;
                 sc.lease = Some(lease.clone());
+                sc.trace("claim", serde_json::json!({"verdict": "claimed", "how": how, "epoch": lease.epoch, "prior": prior}));
                 Ok(ClaimOutcome::Claimed(lease))
             }
             Err(StoreError::PreconditionFailed(_)) | Err(StoreError::Conflict(_)) => {
@@ -309,6 +323,8 @@ pub async fn claim(sc: &mut Syncer) -> LeanResult<EpochLease> {
             ClaimOutcome::Waiting { quiet_polls, behind } => {
                 if count {
                     last_counted = Some(Instant::now());
+                    sc.trace("claim", serde_json::json!({"verdict": "waiting", "behind": behind, "quiet_polls": quiet_polls,
+                        "waited_ms": started.elapsed().as_millis() as u64}));
                     // Once per spaced observation, not once per second.
                     let line = format!(
                         "flint-sync: waiting for the publish fence behind {} (quiet {quiet_polls})",
@@ -320,6 +336,8 @@ pub async fn claim(sc: &mut Syncer) -> LeanResult<EpochLease> {
                     }
                 }
                 if started.elapsed() >= deadline {
+                    sc.trace("claim", serde_json::json!({"verdict": "deadline", "behind": behind,
+                        "waited_ms": started.elapsed().as_millis() as u64}));
                     return Err(LeanError::State(format!(
                         "could not acquire the publish fence within {}s \
                          (behind {}); this barrier is abandoned and retried at the next floor — \
@@ -496,6 +514,7 @@ pub async fn release(sc: &mut Syncer) -> LeanResult<()> {
     let key = sc.cfg.epoch_key();
     let Some(lease) = sc.lease.take() else { return Ok(()) };
     let echo = observed_echo(sc);
+    sc.trace("release", serde_json::json!({"epoch": lease.epoch, "waiters_at_claim": lease.waiters}));
     match sc.store.epoch_handoff(&key, &lease, echo.as_deref()).await {
         Ok(()) => Ok(()),
         Err(StoreError::PreconditionFailed(_)) => match still_ours(sc, &key, &lease).await {

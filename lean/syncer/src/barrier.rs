@@ -194,11 +194,13 @@ impl Syncer {
                     kind: format!("consume-refused-containment: {e}"),
                     at_unix: now_unix(),
                 })?;
+                self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "refused"}));
                 consumed.push(idx);
                 continue;
             }
             // Already integrated (a crashed earlier consume): idempotent.
             if baseline.entries.get(&entry.path).map(|b| b.etag == entry.etag).unwrap_or(false) {
+                self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "already"}));
                 consumed.push(idx);
                 continue;
             }
@@ -214,6 +216,7 @@ impl Syncer {
                         kind: "consume-object-missing".into(),
                         at_unix: now_unix(),
                     })?;
+                    self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "missing"}));
                     consumed.push(idx);
                     continue;
                 }
@@ -222,6 +225,7 @@ impl Syncer {
             if head.etag != entry.etag {
                 // Superseded by a newer write (its own inbox entry
                 // follows, or it is the syncer's): drop.
+                self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "superseded"}));
                 consumed.push(idx);
                 continue;
             }
@@ -277,6 +281,7 @@ impl Syncer {
                         crc64_b64: None,
                     },
                 );
+                self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "dirty-preserved"}));
             } else {
                 // Clean, re-checked after the fetch: adopt the foreign
                 // content into the tree.
@@ -309,6 +314,7 @@ impl Syncer {
                             ),
                             at_unix: now_unix(),
                         })?;
+                        self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "refused-checksum"}));
                         continue;
                     }
                 }
@@ -337,6 +343,7 @@ impl Syncer {
                             kind: format!("consume-refused-containment: {e}"),
                             at_unix: now_unix(),
                         })?;
+                        self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "refused"}));
                         consumed.push(idx);
                         continue;
                     }
@@ -353,6 +360,7 @@ impl Syncer {
                         kind: format!("consume-write-failed (will retry): {e}"),
                         at_unix: now_unix(),
                     })?;
+                    self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "deferred"}));
                     continue;
                 }
                 let st = std::fs::metadata(&local_path)?;
@@ -369,6 +377,7 @@ impl Syncer {
                     },
                 );
                 baseline.prev_scan.insert(entry.path.clone());
+                self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "adopted"}));
             }
             consumed.push(idx);
         }
@@ -396,9 +405,12 @@ impl Syncer {
                 at_unix: now_unix(),
             };
             match std::fs::symlink_metadata(&local) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    self.trace("tombstone", serde_json::json!({"path": change.path, "action": "absent"}));
+                }
                 Err(e) => {
                     // Unreadable is not absent: keep it queued.
+                    self.trace("tombstone", serde_json::json!({"path": change.path, "action": "deferred"}));
                     self.state.append_conflict(&record(format!(
                         "consume-foreign-delete-deferred: cannot stat the path: {e}"
                     )))?;
@@ -410,6 +422,7 @@ impl Syncer {
                          local version has unpublished changes, so it stays and publishes"
                             .into(),
                     ))?;
+                    self.trace("tombstone", serde_json::json!({"path": change.path, "action": "kept-dirty"}));
                     settled.insert(change.path.clone());
                     continue;
                 }
@@ -430,6 +443,7 @@ impl Syncer {
                         ))?;
                         continue;
                     }
+                    self.trace("tombstone", serde_json::json!({"path": change.path, "action": "removed"}));
                 }
             }
             baseline.entries.remove(&change.path);
@@ -861,6 +875,8 @@ impl Syncer {
         // manifest entries carry the commit section's real epoch.
         let epoch_hint = self.state.load_incarnation()?.map(|i| i.epoch).unwrap_or(0);
         let mut report = BarrierReport::default();
+        let barrier_started = std::time::Instant::now();
+        self.trace("barrier_start", serde_json::json!({"source": source, "declared": declared}));
 
         // STEP 0: finish any rescope a crash left half-applied, before
         // the scan reads the tree (scoped-read design §4.3). This is the
@@ -977,6 +993,7 @@ impl Syncer {
                     baseline.prev_scan = scanned.keys().cloned().collect();
                     self.state.save_baseline(&baseline)?;
                 }
+                self.trace_barrier_end(&report, barrier_started);
                 return Ok(report);
             }
         }
@@ -984,6 +1001,8 @@ impl Syncer {
         // Step 3: intent journal, then the window (the commitment
         // point: the same CAS drops the consumed entries).
         let flush_uuid = uuid::Uuid::new_v4().to_string();
+        self.trace("scan", serde_json::json!({"flush": flush_uuid, "uploads": classified.uploads.len(),
+            "deletes": classified.deletes.len(), "first_absence": classified.first_absence.len()}));
         let mut intent = self.state.load_intent()?;
         let prior_uuids = {
             let mut v = intent.recent_uuids.clone();
@@ -1084,6 +1103,8 @@ impl Syncer {
             let path = &path;
             match outcome? {
                 UploadOutcome::Published { entry, baseline_entry, adopted } => {
+                    self.trace("upload", serde_json::json!({"flush": flush_uuid, "path": path, "etag": entry.etag,
+                        "outcome": if adopted { "adopted" } else { "put" }}));
                     if adopted {
                         observed.insert(path.clone());
                     }
@@ -1093,6 +1114,7 @@ impl Syncer {
                     report.uploaded.push(path.clone());
                 }
                 UploadOutcome::Parked { foreign_etag } => {
+                    self.trace("upload", serde_json::json!({"flush": flush_uuid, "path": path, "etag": foreign_etag, "outcome": "parked"}));
                     parked.insert(path.clone());
                     self.state.append_conflict(&ConflictRecord {
                         path: path.clone(),
@@ -1104,6 +1126,7 @@ impl Syncer {
                     report.parked.push(path.clone());
                 }
                 UploadOutcome::Deferred => {
+                    self.trace("upload", serde_json::json!({"flush": flush_uuid, "path": path, "outcome": "deferred"}));
                     report.deferred.push(path.clone());
                 }
             }
@@ -1203,6 +1226,7 @@ impl Syncer {
                     Err(StoreError::NotFound(_)) => false,
                     Err(e) => return Err(e.into()),
                 };
+                self.trace("observed", serde_json::json!({"flush": flush_uuid, "path": path, "etag": cited.etag, "still": still_there}));
                 if still_there {
                     continue;
                 }
@@ -1297,6 +1321,9 @@ impl Syncer {
                 // then found the manifest moved and did the same: two idle
                 // writers traded generations (and cell claims) for as long
                 // as both ran. Theirs becomes the merge base as it stands.
+                self.trace("merge", serde_json::json!({"flush": flush_uuid, "theirs_seq": theirs.seq, "upserts": upserts.len(),
+                    "deletes": classified.deletes.len(), "foreign": foreign.len(), "gone": gone.len(),
+                    "adds_nothing": merged.entries == theirs.entries}));
                 if let Some(handle) = expected.as_ref() {
                     if merged.entries == theirs.entries && merged.sole_writer == theirs.sole_writer {
                         foreign_entries = foreign;
@@ -1319,6 +1346,8 @@ impl Syncer {
                     Ok(meta) => {
                         // Before the deletes and before step 7: this is the
                         // only record that survives a crash in that window.
+                        self.trace("cas", serde_json::json!({"flush": flush_uuid, "seq": merged.seq,
+                            "expected": expected.as_ref().map(|h| h.etag.clone()), "etag": meta.etag, "result": "ok"}));
                         intent.installed_etag = Some(meta.etag.clone());
                         self.state.save_intent(&intent)?;
                         foreign_entries = foreign;
@@ -1327,6 +1356,8 @@ impl Syncer {
                     }
                     Err(LeanError::Store(StoreError::PreconditionFailed(_)))
                     | Err(LeanError::Store(StoreError::Conflict(_))) => {
+                        self.trace("cas", serde_json::json!({"flush": flush_uuid, "seq": merged.seq,
+                            "expected": expected.as_ref().map(|h| h.etag.clone()), "result": "lost"}));
                         // Re-verify the cell before retrying: a rotation is
                         // exactly this 412, and re-merging past it would be
                         // the straggler install.
@@ -1353,6 +1384,7 @@ impl Syncer {
             // Step 6: deletes LAST — GC of keys the NEW manifest no longer
             // references, HEAD-guarded on the recognized ETag.
             let mut swept = 0usize;
+            let mut gc_held = false;
             for path in &classified.deletes {
                 // A mass delete is the one long stretch of the commit
                 // section: keep the token moving so a waiter does not count
@@ -1387,12 +1419,24 @@ impl Syncer {
                 // model's LeanBarrierLeaseGCUnconditional).
                 let unrecognized = match self.store.head(&key).await {
                     Err(StoreError::NotFound(_)) => {
+                        self.trace("gc", serde_json::json!({"flush": flush_uuid, "path": path, "head": null, "result": "absent"}));
                         report.deleted.push(path.clone());
                         continue;
                     }
                     Ok(meta) if Some(&meta.etag) == recognized.as_ref() => {
+                        if self.cfg.drill_hold_gc_secs > 0 && !gc_held {
+                            gc_held = true;
+                            eprintln!(
+                                "flint-sync: DRILL: holding the GC for {}s between the HEAD of {path} and its DELETE",
+                                self.cfg.drill_hold_gc_secs
+                            );
+                            self.trace("drill_hold", serde_json::json!({"flush": flush_uuid, "where": "gc", "path": path,
+                                "secs": self.cfg.drill_hold_gc_secs}));
+                            tokio::time::sleep(std::time::Duration::from_secs(self.cfg.drill_hold_gc_secs)).await;
+                        }
                         match self.store.delete_if_match(&key, &meta.etag).await {
                             Ok(()) | Err(StoreError::NotFound(_)) => {
+                                self.trace("gc", serde_json::json!({"flush": flush_uuid, "path": path, "head": meta.etag, "result": "deleted"}));
                                 report.deleted.push(path.clone());
                                 continue;
                             }
@@ -1402,6 +1446,7 @@ impl Syncer {
                             Err(StoreError::PreconditionFailed(_)) => match self.store.head(&key).await {
                                 Ok(now) => now.etag,
                                 Err(StoreError::NotFound(_)) => {
+                                    self.trace("gc", serde_json::json!({"flush": flush_uuid, "path": path, "head": meta.etag, "result": "replaced-absent"}));
                                     report.deleted.push(path.clone());
                                     continue;
                                 }
@@ -1416,6 +1461,8 @@ impl Syncer {
                 // An ETag this syncer does not recognize is NEVER deleted
                 // (a HITL re-create landed after our CAS, or another
                 // writer's upload).
+                self.trace("gc", serde_json::json!({"flush": flush_uuid, "path": path, "head": unrecognized,
+                    "recognized": recognized, "result": "skip"}));
                 self.state.append_conflict(&ConflictRecord {
                     path: path.clone(),
                     foreign_etag: unrecognized,
@@ -1449,6 +1496,7 @@ impl Syncer {
                     put(ForeignChange { path: path.clone(), etag: None, crc64_b64: None });
                 }
                 self.state.save_foreign_queue(&q)?;
+                self.trace("queue", serde_json::json!({"flush": flush_uuid, "upserts": foreign_entries.len(), "tombstones": foreign_gone.len()}));
             }
             for (path, be) in new_baseline_entries {
                 baseline.entries.insert(path, be);
@@ -1508,7 +1556,10 @@ impl Syncer {
         // barrier is simply abandoned (its manifest never installed; its
         // uploads stand, and the next barrier adopts them by flush_uuid).
         match &commit {
-            Err(LeanError::Fenced(_)) => self.lease = None,
+            Err(LeanError::Fenced(m)) => {
+                self.trace("fence", serde_json::json!({"where": "commit", "detail": m}));
+                self.lease = None
+            }
             _ => {
                 if let Err(e) = super::lease::release(self).await {
                     eprintln!(
@@ -1519,7 +1570,22 @@ impl Syncer {
             }
         }
         commit?;
+        self.trace_barrier_end(&report, barrier_started);
         Ok(report)
+    }
+
+    fn trace_barrier_end(&self, report: &BarrierReport, started: std::time::Instant) {
+        if self.cfg.event_trace.is_none() {
+            return;
+        }
+        self.trace(
+            "barrier_end",
+            serde_json::json!({
+                "seq": report.seq, "uploaded": report.uploaded.len(), "deleted": report.deleted.len(),
+                "parked": report.parked.len(), "consumed": report.consumed, "no_change": report.no_change,
+                "ms": started.elapsed().as_millis() as u64, "requests": self.trace_requests(),
+            }),
+        );
     }
 
     /// The > whole_put_max path: contiguous `PartSource::Local` chunks

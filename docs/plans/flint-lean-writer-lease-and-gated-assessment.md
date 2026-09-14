@@ -490,7 +490,10 @@ deployed, and the user's standing decision is one mode. Departures from
   The window opens in the commit section, under the lease, not at the
   scan: the uploads race a HITL write the way two writers race each
   other (If-Match decides; `LeanNoWindowHolds` is the proof safety never
-  depended on the window).
+  depended on the window). With a SECOND writer, If-Match alone did not decide: a
+  UI write conditional on an uncited upload's etag was lost (§10.1, the
+  seventh row), and the gateway now refuses to overwrite what the
+  workspace does not track.
 - **Liveness left the cell.** With the cell released between barriers,
   neither the operator nor the gateway can read liveness from it, so
   each writer PUTs `<prefix>/.flint/lean/writers/<holder_id>` every ≤30 s
@@ -526,8 +529,10 @@ tests deleted and 11 added (174 in the syncer battery).
 
 The model tranche (§5) was run against this build, and the tests written
 to check its findings against the code found more. §3.2's "the protocol
-already tolerates two writers" was wrong in six places — none reachable
-under the life lease, because the second writer did not exist. Each is a
+already tolerates two writers" was wrong in seven places — none
+reachable under the life lease, because the second writer did not exist;
+the seventh was found by the full formal gate once the first six were
+fixed. Each is a
 test in `lean/syncer/src/tests.rs` that failed on its load-bearing
 assertion before the fix and fails again when the fix is disabled by
 exact string (the file restored by string, checksum verified):
@@ -540,6 +545,7 @@ exact string (the file restored by string, checksum verified):
 | A writer's merge queued the other writer's changes as `merge-preserved` entries in the SHARED inbox; the other writer's consume found its own bytes there and dropped them, and the first writer never converged | `a_peers_change_reaches_the_writer_whose_merge_queued_it_even_if_the_peer_consumes_first` | a writer-local queue (`state::ForeignChange`, `foreign-queue.json`), saved before the baseline; nothing merge-preserved in the shared inbox |
 | A peer's DELETE never reached the other tree | `a_peers_delete_reaches_the_other_writers_tree` | the merge records foreign deletions as tombstones in that queue; consume removes a clean copy, keeps a modified one (`consume-foreign-delete-vs-dirty`) |
 | Two idle writers traded empty generations and fence claims every tick (seq 5 → 13 in 8 idle barriers) | `two_idle_writers_do_not_trade_empty_generations` | a barrier whose merge adds nothing to theirs installs nothing; theirs becomes its merge base |
+| A UI write through the gateway lands on a path while another writer's upload of it is uncited, If-Match that upload's etag (the window opens at the claim, so nothing holds the gateway off); a second writer consumes and cites the UI write and drops its entry; the uploader's commit re-cites its own generation over it — the acked UI write is preserved nowhere (model: `Inv_HITLDurable` in `LeanBarrierLeaseSentinel`, pinned as `LeanBarrierLeaseHitlOverUncited`) | `a_ui_write_over_an_uncited_upload_is_never_silently_lost`; gateway `a_blind_write_over_an_uncited_upload_is_refused_until_it_is_cited` | the gateway overwrites only a TRACKED version (the manifest's citation or an inbox entry's etag), else the retryable `concurrent-write` 409 before any precondition; an untracked object past 600 s or with no live writer heartbeat is fair game (`inbox::hitl_may_overwrite`, used by `put_file` and `promote_draft`); model arm `HitlOverwritesTrackedOnly` |
 
 **Still open:** the 412 arm's supersede of the other writer's UPLOADED
 BUT NOT YET CITED object leaves that writer's CAS citing a generation the
@@ -548,6 +554,22 @@ the path (no bytes lost — the preserved copy exists). A commit-section
 re-read does not close it: the supersede is lease-free. The model hides
 it (its 412 arm parks, and `Inv_NoDangling` checks existence, not the
 generation).
+
+**Still open, found after the fixes (finding 10):** a writer lost for good
+between an upload and its commit — its pod replaced, its node gone — leaves
+bytes at the key that no manifest cites and no inbox entry tracks. Nothing
+acked is lost (its agent never got an ack), but the manifest keeps citing a
+generation the key no longer holds, a fresh checkout reads the orphan
+(S3-wins), and a live writer that never edits the path again keeps the
+cited version: the trees and the bucket disagree until some writer rewrites
+the path. A container restart does not produce it (the state directory
+survives and the retry adopts its own upload by `flush_uuid`), nor does a
+deleted worker pod (the plugin relaunches it over the same tree). Pinned as
+`a_writer_killed_after_its_upload_does_not_leave_the_trees_diverged`
+(`#[ignore]`, fails today). Candidates: each writer's heartbeat names its
+in-flight upload paths and a live writer reconciles a dead writer's list; or
+a live writer re-publishes over an untracked object older than a grace,
+preserving it as a conflict copy. Not built.
 
 **Not yet modelled:** the writer-local queue and the empty-install rule
 — convergence properties the safety invariants cannot see. The module's

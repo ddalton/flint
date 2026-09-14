@@ -147,6 +147,17 @@ pub struct FlintLeanWorkspaceSpec {
     #[serde(default = "default_upload_inflight_mb")]
     pub upload_inflight_mb: u64,
 
+    /// Write the syncer's protocol event trace: one JSON line on the
+    /// worker's stderr per protocol step (each consume, upload outcome,
+    /// claim, merge, CAS, garbage-collector delete, queue write, release,
+    /// fence, ack and sync), in the format pinned by
+    /// `lean/e2e/writers-live/README.md` §2. For explaining what several
+    /// writers of one workspace did to each other after the fact, when
+    /// the interleaving may not happen again. Off by default: on, it is a
+    /// line per step on the worker's log.
+    #[serde(default)]
+    pub event_trace: bool,
+
     /// Route every GET and HEAD through the syncer's raw HTTP/1.1 read
     /// path (SigV4 by hand, pooled keep-alive connections, none of the
     /// SDK's per-request machinery) instead of the AWS SDK. Writes

@@ -104,7 +104,13 @@ async fn hitl_write(
 ) -> Result<String, LeanError> {
     let key = cfg.file_key(path);
     let cond = match store.head(&key).await {
-        Ok(meta) => PutCondition::IfMatch(meta.etag),
+        Ok(meta) => {
+            // The gateway's rule for a blind write (`put_file`).
+            if !inbox::hitl_may_overwrite(store.as_ref(), cfg, path, &meta.etag, meta.last_modified_unix, now_unix(), 180).await? {
+                return Err(LeanError::State(format!("concurrent write: {path} is another writer's uncited upload")));
+            }
+            PutCondition::IfMatch(meta.etag)
+        }
         Err(_) => PutCondition::IfNoneMatchAny,
     };
     let body = Bytes::from(content.to_string());
@@ -9498,4 +9504,297 @@ async fn a_gateway_write_over_a_path_another_writer_edited_is_preserved_on_that_
     }
     assert!(found_ui, "the UI's bytes are not preserved under any record on B: {preserved:?}");
     assert_every_citation_resolves(&store, &a.cfg, "after both").await;
+}
+
+/// Finding 8 (model: `Inv_HITLDurable` in `LeanBarrierLeaseSentinel`): a
+/// UI write through the gateway lands on a path WHILE another writer's
+/// upload of it is uncited (the window now opens at the claim, so nothing
+/// holds the gateway off during uploads), and the gateway's PUT is
+/// If-Match the object's CURRENT etag — the uncited upload. A second
+/// writer consumes the UI write, cites it and drops its inbox entry; the
+/// first writer's commit then re-cites its own upload over it. The UI's
+/// acked write is uncited, untracked and preserved nowhere, and the
+/// manifest cites a generation the key no longer holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_ui_write_over_an_uncited_upload_is_never_silently_lost() {
+    let inner = Arc::new(MemoryStore::new());
+    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = hooked_syncer(&ha, dir_a.path());
+    a.cfg.upload_fanout = 1; // p1 lands before p2's PUT, deterministically
+    let b = syncer(&inner, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "p1.txt", "seed-1");
+    write(dir_a.path(), "p2.txt", "seed-2");
+    a.run_barrier().await.unwrap();
+    let mut b = b;
+    b.checkout().await.unwrap();
+    // Both writers are live, as in a running fleet: without a heartbeat an
+    // uncited upload reads as an orphan, which a UI write may overwrite.
+    lease::heartbeat(&mut a).await.unwrap();
+    lease::heartbeat(&mut b).await.unwrap();
+
+    // A's agent edits both paths; A's barrier uploads p1 then p2.
+    write(dir_a.path(), "p1.txt", "A's edit of p1");
+    backdate_baseline(&a, "p1.txt");
+    write(dir_a.path(), "p2.txt", "A's edit of p2");
+    backdate_baseline(&a, "p2.txt");
+
+    // Between A's PUT of p1 and its PUT of p2 (so p1 is uploaded, uncited,
+    // and A holds no lease): the UI writes p1 through the gateway, and B's
+    // whole barrier runs — consume, cite, drop the entry.
+    let (store_ui, cfg_ui) = (inner.clone(), a.cfg.clone());
+    let b_slot = std::sync::Mutex::new(Some(b));
+    let b_done: Arc<std::sync::Mutex<Option<Syncer>>> = Arc::new(std::sync::Mutex::new(None));
+    let b_done_in = b_done.clone();
+    ha.before_put(&a.cfg.file_key("p2.txt"), move || {
+        let mut b = b_slot.lock().unwrap().take().expect("hook ran twice");
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let cur = store_ui.head(&cfg_ui.file_key("p1.txt")).await.unwrap();
+                let (_, body) = store_ui.get_whole(&cfg_ui.file_key("p1.txt"), None).await.unwrap();
+                assert_eq!(&body[..], b"A's edit of p1", "fixture: A's upload of p1 has not landed: {cur:?}");
+                let _ = hitl_write(&store_ui, &cfg_ui, "p1.txt", "edited in the UI", "user@ui").await;
+                b.run_barrier().await.expect("B's barrier");
+            })
+        });
+        *b_done_in.lock().unwrap() = Some(b);
+    });
+    let ra = a.run_barrier().await;
+    let _b = b_done.lock().unwrap().take().expect("fixture: the hook never ran");
+
+    // Whatever the gateway did — refuse the write, or land it — nothing
+    // acked is lost: every citation resolves, and the UI's bytes, if the
+    // gateway accepted them, are cited or preserved under a record.
+    assert_every_citation_resolves(&inner, &a.cfg, "after A's commit").await;
+    let ui_accepted = {
+        let ib = super::inbox::load(inner.as_ref(), &a.cfg).await.unwrap();
+        let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+        let cited = inner.get_whole(&m.entries["p1.txt"].key, Some(&m.entries["p1.txt"].etag)).await
+            .map(|(_, b)| &b[..] == b"edited in the UI").unwrap_or(false);
+        let tracked = ib.doc.entries.iter().any(|e| e.path == "p1.txt");
+        let mut preserved = false;
+        for o in inner.list(&format!("{}/.flint/lean/conflicts/", PREFIX)).await.unwrap() {
+            if let Ok((_, body)) = inner.get_whole(&o.key, None).await {
+                preserved |= &body[..] == b"edited in the UI";
+            }
+        }
+        (cited, tracked, preserved)
+    };
+    let ui_ever_landed = {
+        // The UI write landed iff B consumed an entry for it (its record,
+        // or its adopted bytes in B's tree).
+        read(dir_b.path(), "p1.txt").as_deref() == Some("edited in the UI")
+    };
+    if ui_ever_landed {
+        assert!(
+            ui_accepted.0 || ui_accepted.1 || ui_accepted.2,
+            "the UI's acked write was silently lost: cited={} tracked={} preserved={} (A: {:?})",
+            ui_accepted.0, ui_accepted.1, ui_accepted.2, ra.as_ref().map(|r| r.uploaded.clone())
+        );
+    }
+}
+
+/// The event trace is EVIDENCE for the live drill: its oracles and its
+/// timeline read these event and field names, and a rename here would
+/// make an oracle silently count nothing. So two writers run a delete, a
+/// concurrent edit and the convergence that follows with the trace on,
+/// and the test pins what the drill's tools depend on — the prefix, the
+/// claim shape (a deposal is `verdict: claimed, how: deposed`), the GC
+/// and tombstone results, the request counter keys — and that one
+/// writer's GC of a path precedes the other writer's tombstone of it in
+/// wall-clock order, which is what a cross-node timeline is built on.
+/// `FLINT_SYNC_TRACE_FIXTURE=<path>` writes the captured lines out, for
+/// the drill's oracle self-test to read a real trace, not a hand-made one.
+#[tokio::test]
+async fn the_event_trace_reconstructs_a_two_writer_interleaving() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let buf = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    a.cfg.event_trace = Some(crate::trace::Sink::Memory(buf.clone()));
+    b.cfg.event_trace = Some(crate::trace::Sink::Memory(buf.clone()));
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "x.txt", "seed");
+    write(dir_a.path(), "keep.txt", "keep");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+
+    // A deletes x while B edits keep; then both converge.
+    std::fs::remove_file(dir_a.path().join("x.txt")).unwrap();
+    write(dir_b.path(), "keep.txt", "B's edit");
+    backdate_baseline(&b, "keep.txt");
+    // A delete publishes on its second scan (the two-scan guard), and the
+    // peer's tombstone is consumed a barrier after its merge queued it.
+    a.run_barrier().await.unwrap();
+    b.run_barrier().await.unwrap();
+    for _ in 0..3 {
+        a.run_barrier().await.unwrap();
+        b.run_barrier().await.unwrap();
+    }
+    assert_eq!(read(dir_b.path(), "x.txt"), None, "fixture: A's delete never reached B");
+    assert_eq!(read(dir_a.path(), "keep.txt").as_deref(), Some("B's edit"), "fixture: B's edit never reached A");
+
+    let lines = buf.lock().unwrap().clone();
+    if let Ok(out) = std::env::var("FLINT_SYNC_TRACE_FIXTURE") {
+        std::fs::write(&out, lines.join("\n") + "\n").unwrap();
+    }
+    let evs: Vec<serde_json::Map<String, serde_json::Value>> = lines
+        .iter()
+        .map(|l| {
+            assert!(l.starts_with("{\"ts_ms\":"), "not the pinned prefix: {l}");
+            let v: serde_json::Value = serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}"));
+            let m = v.as_object().unwrap().clone();
+            let head: Vec<&str> = m.keys().take(4).map(|k| k.as_str()).collect();
+            // serde_json's map is sorted unless preserve_order is on, so
+            // check the prefix on the TEXT, and the keys by presence.
+            for k in ["ts_ms", "mono_ms", "holder", "ev"] {
+                assert!(m.contains_key(k), "{k} missing ({head:?}): {l}");
+            }
+            let pos: Vec<usize> = ["\"ts_ms\":", "\"mono_ms\":", "\"holder\":", "\"ev\":"]
+                .iter()
+                .map(|k| l.find(k).unwrap())
+                .collect();
+            assert!(pos.windows(2).all(|w| w[0] < w[1]), "prefix out of order: {l}");
+            m
+        })
+        .collect();
+    let ev = |e: &serde_json::Map<String, serde_json::Value>| e["ev"].as_str().unwrap().to_string();
+    let s = |e: &serde_json::Map<String, serde_json::Value>, k: &str| e.get(k).and_then(|v| v.as_str()).map(str::to_string);
+
+    // Every commit-section event names its writer, and there are two.
+    let holders: std::collections::BTreeSet<String> =
+        evs.iter().filter(|e| ["claim", "cas", "gc", "release"].contains(&ev(e).as_str())).map(|e| {
+            s(e, "holder").unwrap_or_else(|| panic!("a commit-section event without a holder: {e:?}"))
+        }).collect();
+    assert_eq!(holders.len(), 2, "expected both writers in the trace: {holders:?}");
+
+    // The claim shape the oracles read.
+    for e in evs.iter().filter(|e| ev(e) == "claim") {
+        let verdict = s(e, "verdict").unwrap();
+        assert!(["claimed", "waiting", "deadline"].contains(&verdict.as_str()), "claim verdict {verdict}: {e:?}");
+        if verdict == "claimed" {
+            let how = s(e, "how").unwrap_or_else(|| panic!("a claimed claim without how: {e:?}"));
+            assert!(
+                ["fresh", "adopted-own", "deposed", "orphaned-own", "skipped-handoff", "released"].contains(&how.as_str()),
+                "claim how {how}: {e:?}"
+            );
+            assert!(e["epoch"].as_u64().is_some(), "claimed without an epoch: {e:?}");
+        }
+    }
+    for e in evs.iter().filter(|e| ev(e) == "cas") {
+        assert!(["ok", "lost"].contains(&s(e, "result").unwrap().as_str()), "cas result: {e:?}");
+    }
+    for e in evs.iter().filter(|e| ev(e) == "barrier_end") {
+        let req = e["requests"].as_object().unwrap_or_else(|| panic!("barrier_end without request counts: {e:?}"));
+        let keys: Vec<&str> = req.keys().map(|k| k.as_str()).collect();
+        let mut want = vec!["copy", "delete", "get", "head", "list", "multipart", "put"];
+        let mut got = keys.clone();
+        want.sort();
+        got.sort();
+        assert_eq!(got, want, "request counter keys: {e:?}");
+    }
+    let cas_ok_by: std::collections::BTreeSet<String> =
+        evs.iter().filter(|e| ev(e) == "cas" && s(e, "result").as_deref() == Some("ok")).filter_map(|e| s(e, "holder")).collect();
+    assert_eq!(cas_ok_by.len(), 2, "both writers must install at least once: {cas_ok_by:?}");
+
+    // Each barrier that installs, in emission order: start, scan, claimed,
+    // cas ok, release, end — per writer.
+    for h in &holders {
+        let mine: Vec<String> = evs
+            .iter()
+            .filter(|e| s(e, "holder").as_deref() == Some(h.as_str()))
+            .map(|e| match ev(e).as_str() {
+                "claim" => format!("claim:{}", s(e, "verdict").unwrap()),
+                "cas" => format!("cas:{}", s(e, "result").unwrap()),
+                other => other.to_string(),
+            })
+            .filter(|n| ["scan", "claim:claimed", "cas:ok", "release", "barrier_end"].contains(&n.as_str()))
+            .collect();
+        let joined = mine.join(" ");
+        assert!(
+            joined.contains("scan claim:claimed cas:ok release barrier_end"),
+            "{h}: no install in protocol order: {joined}"
+        );
+    }
+
+    // The cross-writer order a timeline needs: the GC that deleted x (A)
+    // precedes the tombstone that removed it from B's tree, by wall clock.
+    let gc_x = evs
+        .iter()
+        .position(|e| ev(e) == "gc" && s(e, "path").as_deref() == Some("x.txt") && s(e, "result").as_deref() == Some("deleted"))
+        .unwrap_or_else(|| panic!("no gc deleted for x.txt in:\n{}", lines.join("\n")));
+    let tomb_x = evs
+        .iter()
+        .position(|e| ev(e) == "tombstone" && s(e, "path").as_deref() == Some("x.txt") && s(e, "action").as_deref() == Some("removed"))
+        .unwrap_or_else(|| panic!("no tombstone removed for x.txt in:\n{}", lines.join("\n")));
+    assert_ne!(s(&evs[gc_x], "holder"), s(&evs[tomb_x], "holder"), "the GC and the tombstone must be different writers");
+    assert!(gc_x < tomb_x, "the tombstone was emitted before the GC");
+    assert!(
+        evs[gc_x]["ts_ms"].as_u64().unwrap() <= evs[tomb_x]["ts_ms"].as_u64().unwrap(),
+        "wall clock puts the tombstone before the GC"
+    );
+    // And B's edit crossed to A through the queue.
+    assert!(
+        evs.iter().any(|e| ev(e) == "consume" && s(e, "path").as_deref() == Some("keep.txt") && s(e, "from").as_deref() == Some("queue")),
+        "B's edit did not reach A through the local queue:\n{}",
+        lines.join("\n")
+    );
+}
+
+/// CONVERGENCE under a killed writer. Uploads hold no lease, so a writer
+/// killed after an upload lands and before its commit leaves bytes at the
+/// key that no manifest cites and no inbox entry tracks. Nothing acked is
+/// lost (the killed writer's agent never got an ack), but the bucket and
+/// the live trees must not disagree about the path forever: a fresh
+/// checkout — a new agent, a replaced pod — reads what the KEY holds,
+/// while a live writer that never touches the path again keeps the
+/// cited version. The drill's O2 compares exactly these two.
+///
+/// FAILS today (2026-09-13, finding 10, OPEN): B's tree keeps `seed-1`,
+/// the manifest keeps citing `seed-1` whose bytes the key no longer holds,
+/// and a fresh checkout reads A's unpublished edit — for as long as no
+/// writer edits p1 again. Only a writer lost for good produces it: a
+/// container restart keeps the state directory, and the retry adopts its
+/// own upload by `flush_uuid`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "finding 10, open: a killed writer's uncited upload is never reconciled"]
+async fn a_writer_killed_after_its_upload_does_not_leave_the_trees_diverged() {
+    let inner = Arc::new(MemoryStore::new());
+    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b, dir_c) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = hooked_syncer(&ha, dir_a.path());
+    a.cfg.upload_fanout = 1; // p1 lands before p2's PUT, deterministically
+    let mut b = syncer(&inner, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "p1.txt", "seed-1");
+    write(dir_a.path(), "p2.txt", "seed-2");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+
+    // A's agent edits both paths; A dies after p1's upload, before p2's
+    // and before any claim.
+    write(dir_a.path(), "p1.txt", "A's unpublished edit");
+    backdate_baseline(&a, "p1.txt");
+    write(dir_a.path(), "p2.txt", "A's other edit");
+    backdate_baseline(&a, "p2.txt");
+    let key1 = a.cfg.file_key("p1.txt");
+    ha.before_put(&a.cfg.file_key("p2.txt"), || panic!("A is killed between its uploads"));
+    assert!(barrier_on_thread(a).join().is_err(), "fixture: A was not killed");
+    let (_, body) = inner.get_whole(&key1, None).await.unwrap();
+    assert_eq!(&body[..], b"A's unpublished edit", "fixture: A's upload of p1 never landed");
+
+    // B keeps publishing; nobody touches p1 again.
+    write(dir_b.path(), "b.txt", "B works elsewhere");
+    for _ in 0..4 {
+        b.run_barrier().await.unwrap();
+    }
+    let mut c = syncer(&inner, dir_c.path()).await;
+    c.checkout().await.unwrap();
+    assert_eq!(
+        read(dir_b.path(), "p1.txt"),
+        read(dir_c.path(), "p1.txt"),
+        "a live writer's tree and a fresh checkout disagree on a path whose key holds a killed writer's uncited upload"
+    );
 }

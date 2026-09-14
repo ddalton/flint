@@ -401,6 +401,9 @@ impl Syncer {
         // Materialised files before the baseline that vouches for them.
         self.state.sync_tree()?;
         self.state.save_baseline(&baseline)?;
+        self.trace("sync", serde_json::json!({"scoped": scope.is_some(), "applied": report.applied.len(),
+            "deleted": report.deleted.len(), "conflicts": report.conflicts.len(), "seq": report.seq,
+            "hidden": hidden.len()}));
         Ok(report)
     }
 }

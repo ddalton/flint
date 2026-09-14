@@ -492,6 +492,55 @@ pub async fn drop_entries(
     Err(LeanError::State("inbox drop lost 5 CAS races".into()))
 }
 
+/// How long an object the workspace does not track may sit at a key
+/// before a HITL write may overwrite it anyway, seconds. Past a claim
+/// deadline (150 s) and the next floor's retry, which adopts an abandoned
+/// barrier's uploads, with room to spare.
+pub const UNTRACKED_GRACE_SECS: u64 = 600;
+
+/// May a HITL write — the gateway, for a UI — overwrite the object now at
+/// `path` (etag `current`, last written `last_modified_unix`)?
+///
+/// Only a version the workspace TRACKS: the one the manifest cites, or
+/// one an inbox entry names. Any other object at the key is a writer's
+/// upload that its commit has not cited yet — uploads hold no lease, so
+/// there is no window to hold the gateway off. Overwriting one lost two
+/// writes at once (the model's `Inv_HITLDurable` in the two-writer
+/// sentinel world): the uploading writer's commit re-cites its own
+/// generation over the UI's write after another writer consumed and
+/// cited it, so the manifest names bytes that are gone and the UI's
+/// acked write is uncited, untracked and preserved nowhere. Refused, the
+/// UI retries in a moment and overwrites the version that commit cites,
+/// which every writer's consume already handles.
+///
+/// An untracked object is fair game once nobody could still cite it: no
+/// writer has a live heartbeat, or it has sat untracked past
+/// `UNTRACKED_GRACE_SECS`.
+pub async fn hitl_may_overwrite(
+    store: &dyn ObjectStore,
+    cfg: &LeanConfig,
+    path: &str,
+    current: &str,
+    last_modified_unix: Option<u64>,
+    now: u64,
+    writer_stale_secs: u64,
+) -> LeanResult<bool> {
+    let same = |a: &str, b: &str| a.trim_matches('"') == b.trim_matches('"');
+    if let Some(m) = super::manifest::load(store, cfg).await? {
+        if m.manifest.entries.get(path).map(|e| same(&e.etag, current)).unwrap_or(false) {
+            return Ok(true);
+        }
+    }
+    let ib = load(store, cfg).await?;
+    if ib.doc.entries.iter().any(|e| e.path == path && same(&e.etag, current)) {
+        return Ok(true);
+    }
+    if last_modified_unix.map(|t| now.saturating_sub(t) > UNTRACKED_GRACE_SECS).unwrap_or(false) {
+        return Ok(true);
+    }
+    Ok(super::lease::live_writers(store, cfg, now, writer_stale_secs).await?.is_empty())
+}
+
 /// Clear the window (after the manifest CAS) and, in the same CAS,
 /// queue `queued` entries (the merge-preserved foreign entries handed
 /// to the next consume). Entries that arrived mid-barrier are

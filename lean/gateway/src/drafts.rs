@@ -354,11 +354,30 @@ impl Workspace {
         // answer names both versions, and the condition below carries
         // the STORE's own form of the etag — never the caller's, which
         // may or may not be quoted.
-        let current = match self.store().head(&cfg.file_key(path)).await {
-            Ok(m) => Some(m.etag),
-            Err(StoreError::NotFound(_)) => None,
+        let (current, last_modified) = match self.store().head(&cfg.file_key(path)).await {
+            Ok(m) => (Some(m.etag), m.last_modified_unix),
+            Err(StoreError::NotFound(_)) => (None, None),
             Err(e) => return Err(e.into()),
         };
+        // `put_file`'s rule: a promote replaces only a version the
+        // workspace tracks. A draft's base can equal an UNCITED upload's
+        // etag — identical bytes, identical etag — and replacing that
+        // upload loses it and this promote together.
+        if let Some(cur) = current.as_deref() {
+            if !flint_lean::inbox::hitl_may_overwrite(
+                self.store().as_ref(),
+                cfg,
+                path,
+                cur,
+                last_modified,
+                now_unix(),
+                crate::workspace::WRITER_STALE_SECS,
+            )
+            .await?
+            {
+                return Err(VerbError::ConcurrentWrite);
+            }
+        }
         let cond = match (current.as_deref(), meta.base_etag.as_deref()) {
             // Edited against this exact version: publish over it.
             (Some(cur), Some(b)) if normalize_etag(cur) == normalize_etag(b) => {

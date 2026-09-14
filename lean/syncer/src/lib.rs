@@ -53,6 +53,7 @@ pub(crate) mod safefs;
 pub mod sentinel;
 pub mod state;
 pub mod sync;
+pub mod trace;
 pub mod uds;
 pub mod verbs;
 
@@ -354,6 +355,15 @@ pub struct LeanConfig {
     /// section is milliseconds long — no drill can hit it by timing, so
     /// this is how `run-writers.sh` opens the window. 0 = off.
     pub drill_hold_commit_secs: u64,
+    /// DRILL-ONLY (`FLINT_SYNC_DRILL_HOLD_GC_SECS`, never stamped by the
+    /// operator): sleep this long between the garbage collector's HEAD of
+    /// a path and its conditional DELETE, once per barrier. That gap is
+    /// where another writer's lease-free upload can land (the model's
+    /// LeanBarrierLeaseGCUnconditional), and it is two requests long, so
+    /// a drill opens it on purpose. 0 = off.
+    pub drill_hold_gc_secs: u64,
+    /// The protocol event trace (`trace.rs`); `None` = off.
+    pub event_trace: Option<trace::Sink>,
 }
 
 impl LeanConfig {
@@ -397,6 +407,8 @@ impl LeanConfig {
             claim_quiet_spacing_secs: lease::QUIET_SPACING_SECS,
             claim_deadline_secs: lease::CLAIM_DEADLINE_SECS,
             drill_hold_commit_secs: 0,
+            drill_hold_gc_secs: 0,
+            event_trace: None,
         }
     }
 

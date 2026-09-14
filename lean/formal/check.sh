@@ -6,8 +6,11 @@
 # DELIBERATELY SEPARATE from scripts/check-tla.sh (flint's 196-run gate):
 # lean is a separate system.  Same harness discipline, its own runs.
 #
-# Eighty-three runs, ALL required (asserted at the bottom, not just
-# printed — this prose count had drifted to "fifty-five"):
+# Ninety-two runs, ALL required (asserted at the bottom, not just printed —
+# this prose count had drifted to "fifty-five", then to "eighty-three";
+# and EXPECT itself was left at 92 over 69 real runs when gated mode's
+# 23 runs were removed, so the gate at that commit failed its own count.
+# The recipe in the README is the census; EXPECT is what is checked):
 #   - strict runs must complete with every listed invariant green;
 #   - mutation runs must FIND their designated counterexample — a model
 #     that cannot rediscover its bug classes proves nothing;
@@ -222,6 +225,50 @@ mutation_run $M LeanProbeRemovalRefused.cfg "probe: a declared removal of a dirt
   "Invariant ProbeRemovalRefused is violated"
 mutation_run $M LeanProbeRename.cfg "probe: a rename's removal is actually performed" \
   "Invariant ProbeRenameApplied is violated"
+
+echo
+# ---- tranche 6: the PER-BARRIER lease (writer-lease design §4-§5) --------
+# The cell is held for one barrier's commit section, with a FIFO ticket;
+# both writers run from the start and the takeover is the generic deposal.
+# Every pre-existing run above keeps BarrierLease=FALSE (state spaces
+# preserved by construction, verified by distinct-state count).
+strict_run $M LeanBarrierLeaseHolds.cfg "barrier lease, two live writers: HITL + crash + restart, every invariant + commit exclusion"
+strict_run $M LeanBarrierLeaseSentinel.cfg "barrier lease: the sentinel's ack rules when the honoring barrier had to WAIT for the cell"
+strict_run $M LeanBarrierLeaseDeposal.cfg "barrier lease, takeover world: A freezes INSIDE its commit section, B deposes it with rotation, the thawed A abandons"
+strict_run $M LeanBarrierLeaseEpochOnly.cfg "barrier lease, rotation OFF: per-request epoch validation alone fences the deposed holder"
+strict_run $M LeanBarrierLeaseRotationOnly.cfg "barrier lease, epoch-check OFF: rotation alone fences the deposed holder's CAS"
+strict_run $M LeanBarrierLeaseAdoptVerified.cfg "barrier lease: an ADOPTED entry re-verified under the lease survives the other writer's GC (the control for the adopt race)"
+strict_run $M LeanBarrierLeaseSyncOverlayHolds.cfg "barrier lease: a sync keeps its merge base for a path an older inbox entry hid (SyncKeepsHiddenBase, sync.rs step 5) -- the control for the overlay finding"
+strict_run $M LeanBarrierLeaseLive.cfg "LIVENESS (FairSpec): with the ticket, every queued writer eventually holds the cell"
+strict_run $M LeanBarrierLeaseLiveCrash.cfg "LIVENESS with a crash: a dead holder is deposed, a dead handoff is skipped, the survivor never starves"
+mutation_run $M LeanBarrierLeaseNoRotate.cfg "barrier lease, both fences off: the thawed straggler's manifest CAS lands" \
+  "Invariant Inv_NoStragglerInstall is violated"
+mutation_run $M LeanBarrierLeaseGCUnconditional.cfg "FINDING: the shipped HEAD-then-unconditional-DELETE GC -- under the barrier lease the other writer's supersede lands between the two and its citation dangles (the life lease covered that window; a conditional delete is the fix)" \
+  "Invariant Inv_NoDangling is violated"
+mutation_run $M LeanBarrierLeaseAdoptBlind.cfg "FINDING: an adopted entry cited BLIND -- a restart between CAS and baseline makes the next barrier adopt its own upload, the other writer uncites the path and its GC deletes the object before the adopter's CAS (verify adopted entries under the lease is the fix)" \
+  "Invariant Inv_NoDangling is violated"
+mutation_run $M LeanBarrierLeaseHitlOverUncited.cfg "FINDING: the gateway overwrote whatever object was current -- a UI write over another writer's UNCITED upload, consumed and cited by a third party, is re-cited over by the uploader's commit and lost (the tracked-only overwrite rule is the fix)" \
+  "Invariant Inv_HITLDurable is violated"
+mutation_run $M LeanBarrierLeaseSyncOverlayStale.cfg "FINDING (D4 refuted with two writers): the sync's remote truth reads a queued foreign entry as newer than a manifest a second LIVE writer already moved past, verifies the path unchanged against the overlay and advances the merge base to the manifest -- the silent, permanent loss" \
+  "Invariant Inv_NoForeignLost is violated"
+mutation_run $M LeanBarrierLeaseRandomArbitration.cfg "L5, the ticket is load-bearing: release names nobody and one writer claims forever (a fair lasso under WF)" \
+  "Temporal properties were violated"
+mutation_run $M LeanBarrierLeaseDeadHandoffWedge.cfg "no dead-handoff skip: a crashed waiter named by the release wedges the cell for the survivor forever" \
+  "Temporal properties were violated"
+mutation_run $M LeanProbeWritersInterleave.cfg "probe (REQUIRED-REACHABLE): an upload lands while the other writer is in its commit section -- two writers really overlap" \
+  "Invariant ProbeWritersInterleave is violated"
+mutation_run $M LeanProbeHandoff.cfg "probe: a claim by the syncer the release NAMED actually happens" \
+  "Invariant ProbeHandoffFired is violated"
+mutation_run $M LeanProbeEnqueued.cfg "probe: a writer actually queues for the cell" \
+  "Invariant ProbeEnqueued is violated"
+mutation_run $M LeanProbeDeposalMidCommit.cfg "probe: a quiet holder in its commit section is deposed by the other writer" \
+  "Invariant ProbeDeposalMidCommit is violated"
+mutation_run $M LeanProbeFenceAbandoned.cfg "probe: a fenced holder abandons its barrier and KEEPS RUNNING (a fence is not a death)" \
+  "Invariant ProbeFenceAbandoned is violated"
+mutation_run $M LeanProbeDeadHandoffSkipped.cfg "probe: a quiet handoff is actually skipped and the cell taken by a survivor" \
+  "Invariant ProbeDeadHandoffSkipped is violated"
+mutation_run $M LeanProbeAdoptWithheld.cfg "probe: the adopt-verification actually withholds an entry whose object is gone (without it the control is green over a race never reached)" \
+  "Invariant ProbeAdoptWithheld is violated"
 
 # The expected total is ASSERTED, not printed: a hardcoded denominator
 # that drifts below the real run count turns "83/79 green" into a line

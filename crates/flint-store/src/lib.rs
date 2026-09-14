@@ -34,7 +34,10 @@
 //! test loops that only need the memory double never build the AWS
 //! SDK.
 
+pub mod counters;
 pub mod gate;
+
+pub use counters::{RequestCounter, RequestCounts, RequestKind};
 pub mod layout;
 pub mod memory;
 pub mod probe;
@@ -1018,6 +1021,12 @@ pub trait ObjectStore: Send + Sync {
     /// number rather than two that must be set together. `None` = the
     /// upload path is bounded only by its counts.
     fn upload_gate(&self) -> Option<std::sync::Arc<gate::ByteGate>> {
+        None
+    }
+
+    /// Requests this store has sent since it was built, by kind
+    /// (`counters.rs`). `None` = a store that does not count.
+    fn request_counts(&self) -> Option<RequestCounts> {
         None
     }
 }

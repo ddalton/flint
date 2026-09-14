@@ -645,6 +645,26 @@ impl MemoryStore {
 
 #[async_trait]
 impl ObjectStore for MemoryStore {
+    fn request_counts(&self) -> Option<crate::RequestCounts> {
+        // The double counts calls by method; fold them into the kinds a
+        // real store would have sent (the cell is a GET or a PUT there).
+        let mut c = crate::RequestCounts::default();
+        for (op, n) in self.op_counts() {
+            match op {
+                "get_whole" | "get_range" | "get_version" | "epoch_read" | "presign_get" => c.get += n,
+                "head" | "head_version" => c.head += n,
+                "put_whole" | "epoch_acquire" | "epoch_renew" | "epoch_release" | "epoch_handoff"
+                | "epoch_enqueue" | "presign_put" => c.put += n,
+                "copy_object" => c.copy += n,
+                "delete" | "delete_version" => c.delete += n,
+                "list" | "list_versions" | "list_uploads" => c.list += n,
+                "compose_generation" | "compose_inner" | "abort_upload" => c.multipart += n,
+                _ => {}
+            }
+        }
+        Some(c)
+    }
+
     async fn put_whole(
         &self,
         key: &str,

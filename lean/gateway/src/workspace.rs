@@ -629,14 +629,37 @@ impl Workspace {
 
         // Object FIRST (fresh read → conditional PUT), inbox entry second.
         let key = self.cfg.file_key(path);
-        let (current, prev_gen) = match self.store.head(&key).await {
+        let (current, prev_gen, last_modified) = match self.store.head(&key).await {
             Ok(meta) => {
                 let g = GenerationStamps::from_meta(&meta.meta).map(|s| s.generation).unwrap_or(0);
-                (Some(meta.etag), g)
+                (Some(meta.etag), g, meta.last_modified_unix)
             }
-            Err(StoreError::NotFound(_)) => (None, 0),
+            Err(StoreError::NotFound(_)) => (None, 0, None),
             Err(e) => return Err(e.into()),
         };
+        // An overwrite — `If-Match: *`, or a retry naming the etag a
+        // `FileChanged` handed back — replaces only a version the workspace
+        // TRACKS. What else sits at the key is a syncer's upload its commit
+        // has not cited yet, and overwriting it lost this write and that
+        // one (`inbox::hitl_may_overwrite`). Judged BEFORE the caller's
+        // precondition, so a `FileChanged` never names an untracked etag
+        // for a caller to retry with. The caller retries in a moment, over
+        // the version that commit cites.
+        if let Some(cur) = current.as_deref() {
+            if !flint_lean::inbox::hitl_may_overwrite(
+                self.store.as_ref(),
+                &self.cfg,
+                path,
+                cur,
+                last_modified,
+                now_unix(),
+                WRITER_STALE_SECS,
+            )
+            .await?
+            {
+                return Err(VerbError::ConcurrentWrite);
+            }
+        }
 
         // The CALLER's precondition, judged against what is there now.
         // The conditional PUT below still carries the freshly-read
