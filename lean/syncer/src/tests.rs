@@ -1836,6 +1836,51 @@ async fn remote_seq_ticks_without_added_requests() {
     assert!(t1.updated_unix >= t0.updated_unix);
 }
 
+/// D5 with two writers. B's merge carries A's change into the manifest
+/// and moves B's baseline to it, while the change itself waits in B's
+/// local queue for the next consume. Until then B's tree does not have
+/// it, and the ticker must say so: `.flint/AGENTS.md` tells an agent to
+/// `sync` before it starts on a path `remote.seq` says has news.
+/// Found by the formal model (`LeanBarrierLeaseSentinel`, depth 19).
+#[tokio::test]
+async fn remote_seq_reports_news_while_a_peers_change_waits_in_the_queue() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "x.txt", "seed");
+    a.floor_tick().await.unwrap();
+    b.checkout().await.unwrap();
+    b.floor_tick().await.unwrap();
+    let t0 = b.load_remote_seq();
+    assert_eq!(t0.observed_seq, t0.integrated_seq, "fixture: B has news before anyone wrote");
+
+    write(dir_a.path(), "x.txt", "A's v2");
+    backdate_baseline(&a, "x.txt");
+    a.floor_tick().await.unwrap();
+
+    // B publishes an unrelated path; its merge queues A's x.txt.
+    write(dir_b.path(), "z.txt", "z");
+    b.floor_tick().await.unwrap();
+    assert!(
+        b.state.load_foreign_queue().unwrap().iter().any(|c| c.path == "x.txt"),
+        "fixture: B's merge queued nothing for x.txt"
+    );
+    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("seed"), "fixture: the change already reached B's tree");
+    let t1 = b.load_remote_seq();
+    assert!(
+        t1.observed_seq > t1.integrated_seq,
+        "B's tree lacks A's change, yet remote.seq says no news: {t1:?}"
+    );
+
+    // The next tick consumes the queue: now there is no news, and the tree agrees.
+    b.floor_tick().await.unwrap();
+    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("A's v2"), "A's change never reached B on the floor");
+    let t2 = b.load_remote_seq();
+    assert_eq!(t2.observed_seq, t2.integrated_seq, "news that was integrated is still reported: {t2:?}");
+}
+
 /// D14 — a gateway sync request is CARRIED, never executed. The
 /// asymmetry with a boundary request is blast radius: a boundary
 /// publishes what is already on disk and touches no local file, whereas
@@ -9603,6 +9648,108 @@ async fn a_peers_change_reaches_the_writer_whose_merge_queued_it_even_if_the_pee
     let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
     let (_, body) = store.get_whole(&m.entries["x.txt"].key, Some(&m.entries["x.txt"].etag)).await.unwrap();
     assert_eq!(&body[..], b"A's v2", "the manifest reverted A's change");
+}
+
+/// The single-writer crash test above
+/// (`a_crash_between_the_cas_and_step_7_never_makes_our_own_entry_foreign`)
+/// takes the installed document as the merge base after a restart in the
+/// CAS-to-step-7 window. With a second writer that document also carries
+/// the PEER's changes this merge brought in, and step 7 is where they were
+/// to be queued for this tree. A restart in that window must not make them
+/// read as already integrated.
+///
+/// The restart is taken where the code really is: B's barrier also removes
+/// a file of its own, and the GC delete of it (step 6, after the CAS and
+/// before step 7) snapshots the state files step 7 rewrites; restoring them
+/// after the barrier is the restart.
+#[tokio::test]
+async fn a_restart_between_the_cas_and_step_7_still_delivers_a_peers_change() {
+    restart_between_the_cas_and_step_7(false).await;
+}
+
+/// The same window for a peer's DELETE: the tombstone rides the journal
+/// as the upsert does.
+#[tokio::test]
+async fn a_restart_between_the_cas_and_step_7_still_delivers_a_peers_delete() {
+    restart_between_the_cas_and_step_7(true).await;
+}
+
+async fn restart_between_the_cas_and_step_7(peer_deletes: bool) {
+    let inner = Arc::new(MemoryStore::new());
+    let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&inner, dir_a.path()).await;
+    let mut b = hooked_syncer(&hooked, dir_b.path());
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "x.txt", "seed");
+    write(dir_a.path(), "keep.txt", "keep");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("seed"));
+    write(dir_b.path(), "tmp.txt", "B's scratch");
+    b.run_barrier().await.unwrap();
+
+    // A's change, published before B's next merge.
+    if peer_deletes {
+        std::fs::remove_file(dir_a.path().join("x.txt")).unwrap();
+        a.declared_barrier().await.unwrap();
+    } else {
+        write(dir_a.path(), "x.txt", "A's v2");
+        backdate_baseline(&a, "x.txt");
+        a.run_barrier().await.unwrap();
+    }
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries.contains_key("x.txt"), !peer_deletes, "fixture: A's change never published");
+
+    // B's barrier: its merge carries A's change; its GC delete of tmp.txt
+    // snapshots the files step 7 is about to rewrite.
+    let state_dir = b.cfg.state_dir();
+    let snap: Arc<std::sync::Mutex<Vec<(std::path::PathBuf, Option<Vec<u8>>)>>> = Default::default();
+    let snap_in = snap.clone();
+    hooked.before_delete(&b.cfg.file_key("tmp.txt"), move || {
+        *snap_in.lock().unwrap() = ["intent.json", "foreign-queue.json", "baseline.json"]
+            .iter()
+            .map(|f| {
+                let p = state_dir.join(f);
+                let bytes = std::fs::read(&p).ok();
+                (p, bytes)
+            })
+            .collect();
+    });
+    write(dir_b.path(), "z.txt", "z");
+    std::fs::remove_file(dir_b.path().join("tmp.txt")).unwrap();
+    b.declared_barrier().await.unwrap();
+    let taken = std::mem::take(&mut *snap.lock().unwrap());
+    assert!(!taken.is_empty(), "fixture: B's barrier never reached its GC delete");
+    assert!(
+        b.state.load_foreign_queue().unwrap().iter().any(|c| c.path == "x.txt" && c.etag.is_some() != peer_deletes),
+        "fixture: B's merge queued nothing for x.txt"
+    );
+    // The restart: step 7 never ran.
+    for (p, bytes) in taken {
+        match bytes {
+            Some(b) => std::fs::write(&p, b).unwrap(),
+            None => {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
+
+    for _ in 0..3 {
+        b.run_barrier().await.unwrap();
+    }
+    if peer_deletes {
+        assert_eq!(read(dir_b.path(), "x.txt"), None, "a restart between B's CAS and its step 7 kept A's deleted file in B's tree");
+        let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+        assert!(!m.entries.contains_key("x.txt"), "B re-published the file A deleted");
+    } else {
+        assert_eq!(
+            read(dir_b.path(), "x.txt").as_deref(),
+            Some("A's v2"),
+            "a restart between B's CAS and its step 7 lost A's change from B's tree for good"
+        );
+    }
+    assert!(b.state.load_intent().unwrap().installed_foreign.is_empty(), "the journal kept changes the queue took");
 }
 
 /// Deletes cross between writers the way edits do: A's delete of a path

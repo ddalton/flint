@@ -613,7 +613,8 @@ checked against it (the `MineIsNotForeign` pattern).
    HITL write overwrites only a version the workspace TRACKS (the
    manifest's citation, or one an inbox entry names) and otherwise gets
    a retryable 409; an untracked object older than
-   `UNTRACKED_GRACE_SECS`, or one with no live writer, is fair game
+   `UNTRACKED_GRACE_SECS` is fair game (a second escape, "no live
+   writer", went with the writer heartbeat)
    (`flint_lean::inbox::hitl_may_overwrite`, used by `put_file` and
    `promote_draft`, with a syncer repro and a gateway test, both failing
    without it). Modelled as `HitlOverwritesTrackedOnly`, a guard on
@@ -739,7 +740,10 @@ queued for B's next consume. The ack is honest; the stamp's `#` fires in
 both directions while its harm runs in one. It did expose a small contract
 bug in the code: step 7 sets `baseline.seq = installed.seq` while the
 writer's foreign queue is non-empty, so `remote.seq` reports "no news" for
-up to one floor while the tree lags. Until the refinement lands,
+up to one floor while the tree lags — FIXED in code (2026-09-14:
+`integrated_seq` holds while anything waits in the queue;
+`remote_seq_reports_news_while_a_peers_change_waits_in_the_queue`).
+Until the invariant's refinement lands,
 `LeanBarrierLeaseSentinel` is a known red in the gate (91/92 when the box
 ran it).
 

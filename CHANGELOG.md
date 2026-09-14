@@ -56,11 +56,16 @@ covered by the stability guarantee.
   uploads stand and are adopted by `flush_uuid`). The cell gains
   `waiters` and `handoff`; `flint-store` gains `epoch_enqueue` and
   `epoch_handoff` (the plain `epoch_release` is unchanged for the tier
-  hub). Liveness moves off the cell: each writer PUTs a heartbeat under
-  `<prefix>/.flint/lean/writers/<holder_id>` every ≤30 s and deletes it
-  on a clean drain; the operator's `SyncerObserved` names the binary that
-  ran the last boundary, the CR gains `status.observedWriters`, and the
-  gateway's `wait_cited` and `/status` read the heartbeats (`writers`).
+  hub). Nothing renews a lease between barriers, and nothing replaces the
+  renewal with a liveness object: the fence judges a holder dead from its
+  own cell, and agents read `.flint/remote.seq` locally. The operator's
+  `SyncerObserved` names the binary that ran the last boundary (the echo
+  the released cell keeps). The gateway's `wait_cited` no longer refuses
+  at once when no syncer holds the lease — an idle workspace holds none,
+  and the bucket cannot tell a dead syncer from an idle one — and answers
+  202 `citation-pending` when the caller's timeout passes. An idle writer
+  never claims, so the renewal is no longer its credential probe: the
+  floor tick records and clears `authPausedSinceUnix`.
   **A fence is a retry, not a death:** a holder deposed mid-commit
   abandons that barrier (nothing installed, the pending sentinel stands)
   and its next barrier claims again — so `refused-fenced` acks, the
@@ -93,8 +98,12 @@ covered by the stability guarantee.
   `ObjectStore::delete_if_match`, whose default REFUSES rather than
   falling back, S3 sends `If-Match` on `DeleteObject`, and
   `probe::probe_conditional_delete` with its negative control;
-  `flint-sync probe-conditional` runs it after the PUT leg, with no
-  result yet recorded on S3 or Ozone); (2) an upload that found its bytes
+  `flint-sync probe-conditional` runs it after the PUT leg. S3 enforces
+  it. **Ozone 2.2.1 does not** — a `DELETE` with a wrong `If-Match` answers
+  204 and deletes (conditional DeleteObject is HDDS-14907, fix version
+  2.3.0, unreleased) — so on Ozone 2.2.x run ONE writer per workspace: a
+  second writer's collector can delete the first writer's upload there,
+  and nothing in the syncer refuses the configuration yet); (2) an upload that found its bytes
   already at the key cited that etag with no lease held, and the other
   writer's collector could remove it first — observed citations (adopts,
   citation repairs) are re-read inside the commit section and withheld
@@ -138,11 +147,15 @@ covered by the stability guarantee.
   names — and answer anything else with the retryable
   `concurrent-write` (409), before any precondition is judged; the UI
   retries and overwrites the version that commit cites. An untracked
-  object older than 600 s, or one in a workspace with no live writer
-  heartbeat, may still be overwritten. The rule is
+  object older than 600 s (`UNTRACKED_GRACE_SECS`) may still be
+  overwritten, so a UI write over a crashed writer's orphan upload
+  answers 409 for up to ten minutes. The rule is
   `flint_lean::inbox::hitl_may_overwrite`; a syncer repro and a gateway
   test fail without it, and the model gains `HitlOverwritesTrackedOnly`
-  with its mutation `LeanBarrierLeaseHitlOverUncited`.
+  with its mutation `LeanBarrierLeaseHitlOverUncited`. The grace carries
+  no safety of its own: with the commit-section re-read below, a UI write
+  that overwrites ANY object is still never lost
+  (`LeanBarrierLeaseHitlOverAnyVerified`).
 - **lean: an upload whose base a peer's garbage collector removed no
   longer wedges the writer on S3.** Found by the writers drill's host leg
   H2 on real S3: after a commit rightly withheld an adopted citation whose
@@ -202,6 +215,33 @@ covered by the stability guarantee.
   the peer's committed edit left uncited. Pinned by
   `a_peer_put_over_an_identical_bytes_upload_is_not_cited_as_the_old_version`
   and the `LeanBarrierLeaseSameBytes*` runs in `lean/formal/`.
+- **lean: a peer's change reaches the tree after a restart inside the
+  commit, and `remote.seq` no longer reports it integrated early.** Two
+  convergence defects of the writer-local foreign queue, each a failing
+  test first and mutation-checked after; neither lost bytes in the bucket.
+  (1) A barrier queues the other writers' changes its merge carried into
+  the manifest at step 7, after the manifest CAS; a restart between the
+  two left the merge base at the installed document (the single-writer
+  crash rule), where those changes read as already integrated, so the
+  tree never received them — an edit or a delete another writer made
+  stayed missing from this tree for good, and a later local edit of the
+  path would have superseded it. They are now journalled in `intent.json`
+  with the installed etag, in the same write, and the next consume
+  re-queues whatever step 7 did not take
+  (`a_restart_between_the_cas_and_step_7_still_delivers_a_peers_change`
+  and `…_delete`, which take the restart at the barrier's own GC delete).
+  This is the 2026-09-12 review's deferred barrier-7 item, which needed a
+  second manifest writer to reach. (2) The same step moved
+  `integrated_seq` in `.flint/remote.seq` to the installed seq while the
+  queued changes waited for the next consume, so for up to one floor the
+  ticker said "no news" about a tree that lacked them — and the contract
+  tells an agent to `sync` before starting on a path the ticker says has
+  news. `integrated_seq` now holds while anything waits
+  (`remote_seq_reports_news_while_a_peers_change_waits_in_the_queue`).
+  Found by the formal model's sentinel world at depth 19
+  (`Inv_AckBoundaryCoherent`), whose invariant still needs the matching
+  one-directional refinement: `LeanBarrierLeaseSentinel` stays the gate's
+  one known red.
 - **lean: `uploadPartParallelism` defaults to 8, behind a new upload
   bytes-in-flight bound `uploadInflightMb` (default 256).** v1.51.0
   shipped the 8-wide per-object upload as an opt-in, measured at 3.6–4.2x
@@ -229,37 +269,6 @@ covered by the stability guarantee.
   full-object CRC-64/NVME at `CompleteMultipartUpload`.
 
 ### Removed
-
-- **lean: the writer heartbeat.** Every syncer PUT
-  `.flint/lean/writers/<id>` every min(floor, 30) s — one PUT every 5 s
-  per idle writer at a 5 s floor — and nothing that fences read it: the
-  publish fence detects a dead holder from its own cell, and agents read
-  `.flint/remote.seq` locally. What goes with it:
-  - `flint-lean`: `lease::heartbeat`, `retire_heartbeat`, `live_writers`,
-    `WriterHeartbeat`, `LeanConfig::writers_prefix`/`writer_key`; and
-    `inbox::hitl_may_overwrite` loses its `writer_stale_secs` argument
-    and its "no writer is live" escape. An untracked object at a key is
-    now writable only after `UNTRACKED_GRACE_SECS` (600 s), so a UI write
-    over a crashed writer's orphan upload answers 409 `concurrent-write`
-    for up to ten minutes. Neither escape carried safety: the uploading
-    writer's commit re-reads its own citations and withholds one whose
-    object moved (the model's `LeanBarrierLeaseHitlOverAnyVerified`).
-  - `flint-lean-gateway`: `WRITER_STALE_SECS` and `Status.writers`.
-    `wait_cited` no longer refuses at once when no writer is live — the
-    bucket cannot tell a dead syncer from an idle one — and answers 202
-    `citation-pending` when the caller's timeout passes.
-  - The operator's `status.observedWriters` (and the field in the CRD):
-    the operator has no link from pods to a workspace to count instead.
-    `SyncerObserved` still names the binary that ran the last boundary.
-  - An idle writer never claims, so the heartbeat was its only probe of
-    its own credentials; the floor tick now records and clears
-    `authPausedSinceUnix` instead.
-
-  Heartbeat objects older syncers wrote stay in buckets until deleted;
-  nothing reads them. Upgrade the gateway with the syncers: an older
-  gateway reads no heartbeats from new syncers, so its `wait_cited`
-  refuses at once and its overwrite rule treats every uncited upload as
-  an orphan.
 
 - **lean: gated mode, and the mode axis with it.** `boundaryMode` was
   three names for two behaviours — the code never had a cadence branch,

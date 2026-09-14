@@ -142,6 +142,16 @@ pub struct IntentJournal {
     /// base IS this document.
     #[serde(default)]
     pub installed_etag: Option<String>,
+    /// The other writers' changes the install at `installed_etag` carried
+    /// into the manifest, journalled with that etag in the same write.
+    ///
+    /// Step 7 moves them into the foreign queue before the merge base
+    /// passes them. A restart before it leaves the merge base at the
+    /// installed document (above), where they read as integrated: the
+    /// tree would never receive them and `remote.seq` would say there is
+    /// no news. The next consume re-queues whatever is still here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub installed_foreign: Vec<ForeignChange>,
     /// Paths whose DECLARED removal this barrier unlinked and is about
     /// to cite out (delete/rename design §4). Journalled before the
     /// window commitment, so a crash after the cell has been told and
@@ -438,6 +448,32 @@ impl SyncerState {
         write_atomic(&self.dir.join(FOREIGN_QUEUE), &bytes)
     }
 
+    /// Upsert `changes` into the foreign queue by path — a later change to
+    /// a path replaces the queued one — and save it. Idempotent.
+    pub fn queue_foreign(&self, changes: &[ForeignChange]) -> LeanResult<()> {
+        let mut q = self.load_foreign_queue()?;
+        for c in changes {
+            q.retain(|x| x.path != c.path);
+            q.push(c.clone());
+        }
+        self.save_foreign_queue(&q)
+    }
+
+    /// Move an install's journalled foreign changes into the queue, if a
+    /// restart kept its step 7 from doing so (`installed_foreign`). The
+    /// queue is saved before the journal lets go of them.
+    pub fn requeue_installed_foreign(&self) -> LeanResult<usize> {
+        let mut j = self.load_intent()?;
+        if j.installed_foreign.is_empty() {
+            return Ok(0);
+        }
+        let n = j.installed_foreign.len();
+        self.queue_foreign(&j.installed_foreign)?;
+        j.installed_foreign.clear();
+        self.save_intent(&j)?;
+        Ok(n)
+    }
+
     pub fn load_intent(&self) -> LeanResult<IntentJournal> {
         let p = self.dir.join(INTENT);
         if !p.exists() {
@@ -470,6 +506,7 @@ impl SyncerState {
         j.flush_uuid = String::new();
         j.keys.clear();
         j.declared_deletes.clear();
+        j.installed_foreign.clear();
         self.save_intent(&j)
     }
 

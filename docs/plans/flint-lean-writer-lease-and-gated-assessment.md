@@ -555,7 +555,7 @@ exact string (the file restored by string, checksum verified):
 | A writer's merge queued the other writer's changes as `merge-preserved` entries in the SHARED inbox; the other writer's consume found its own bytes there and dropped them, and the first writer never converged | `a_peers_change_reaches_the_writer_whose_merge_queued_it_even_if_the_peer_consumes_first` | a writer-local queue (`state::ForeignChange`, `foreign-queue.json`), saved before the baseline; nothing merge-preserved in the shared inbox |
 | A peer's DELETE never reached the other tree | `a_peers_delete_reaches_the_other_writers_tree` | the merge records foreign deletions as tombstones in that queue; consume removes a clean copy, keeps a modified one (`consume-foreign-delete-vs-dirty`) |
 | Two idle writers traded empty generations and fence claims every tick (seq 5 → 13 in 8 idle barriers) | `two_idle_writers_do_not_trade_empty_generations` | a barrier whose merge adds nothing to theirs installs nothing; theirs becomes its merge base |
-| A UI write through the gateway lands on a path while another writer's upload of it is uncited, If-Match that upload's etag (the window opens at the claim, so nothing holds the gateway off); a second writer consumes and cites the UI write and drops its entry; the uploader's commit re-cites its own generation over it — the acked UI write is preserved nowhere (model: `Inv_HITLDurable` in `LeanBarrierLeaseSentinel`, pinned as `LeanBarrierLeaseHitlOverUncited`) | `a_ui_write_over_an_uncited_upload_is_never_silently_lost`; gateway `a_blind_write_over_an_uncited_upload_is_refused_until_it_is_cited` | the gateway overwrites only a TRACKED version (the manifest's citation or an inbox entry's etag), else the retryable `concurrent-write` 409 before any precondition; an untracked object past 600 s or with no live writer heartbeat is fair game (`inbox::hitl_may_overwrite`, used by `put_file` and `promote_draft`); model arm `HitlOverwritesTrackedOnly` |
+| A UI write through the gateway lands on a path while another writer's upload of it is uncited, If-Match that upload's etag (the window opens at the claim, so nothing holds the gateway off); a second writer consumes and cites the UI write and drops its entry; the uploader's commit re-cites its own generation over it — the acked UI write is preserved nowhere (model: `Inv_HITLDurable` in `LeanBarrierLeaseSentinel`, pinned as `LeanBarrierLeaseHitlOverUncited`) | `a_ui_write_over_an_uncited_upload_is_never_silently_lost`; gateway `a_blind_write_over_an_uncited_upload_is_refused_until_it_is_cited` | the gateway overwrites only a TRACKED version (the manifest's citation or an inbox entry's etag), else the retryable `concurrent-write` 409 before any precondition; an untracked object past 600 s is fair game (the "no live writer heartbeat" escape went with the heartbeat, §10) (`inbox::hitl_may_overwrite`, used by `put_file` and `promote_draft`); model arm `HitlOverwritesTrackedOnly` |
 
 **Still open:** the 412 arm's supersede of the other writer's UPLOADED
 BUT NOT YET CITED object leaves that writer's CAS citing a generation the
@@ -679,6 +679,29 @@ states, no violation, and needs the TLC box; the sentinel world has not had
 a same-bytes write and is itself VIOLATED at depth 19
 (`Inv_AckBoundaryCoherent`, an open refinement of the ack stamp —
 `lean/formal/README.md`).
+
+**Found while preparing the release (two convergence defects, FIXED):**
+(1) step 7 queues the other writers' changes a merge carried into the
+manifest, AFTER the CAS; a container restart between the two leaves the
+merge base at the installed document (the single-writer crash rule,
+`IntentJournal::installed_etag`), where those changes read as already
+integrated — the tree never receives them, and a later local edit of the
+path supersedes the peer's version (preserved, but no longer current).
+This was the 2026-09-12 review's deferred "barrier-7" item; it needed a
+second manifest writer, which §10 made routine. The changes are now
+journalled with the installed etag in the same `intent.json` write
+(`installed_foreign`) and the next consume re-queues them. Tests
+`a_restart_between_the_cas_and_step_7_still_delivers_a_peers_change` /
+`…_delete` take the restart at the barrier's own GC delete (between the
+CAS and step 7) by snapshotting the files step 7 rewrites; both fail with
+the journal write removed and with the re-queue removed. (2) The same
+step set `remote.seq`'s `integrated_seq` to the installed seq while those
+changes waited in the queue — the contract bug the sentinel world's
+depth-19 trace exposed (`lean/formal/README.md`). `integrated_seq` now
+holds while the queue or the journal is non-empty
+(`remote_seq_reports_news_while_a_peers_change_waits_in_the_queue`,
+mutation-checked on both arms). The invariant's one-directional
+refinement is still to do.
 
 **Not yet modelled:** the writer-local queue and the empty-install rule
 — convergence properties the safety invariants cannot see. The module's

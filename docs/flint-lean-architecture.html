@@ -337,7 +337,7 @@
     <rect x="1180" y="118" width="360" height="150" rx="8" class="bx"/>
     <text class="tl ctr" x="1360" y="144">the citation — ONE CAS</text>
     <text class="tx ctr" x="1360" y="168">installs the whole pending set at once,</text>
-    <text class="tx ctr" x="1360" y="184">naming version ids</text>
+    <text class="tx ctr" x="1360" y="184">naming each object&rsquo;s etag</text>
     <text class="tx ctr" x="1360" y="208">a reader sees the whole change</text>
     <text class="tx ctr" x="1360" y="224">or none of it — never a mixture</text>
     <text class="tx ctr" x="1360" y="248">no copy phase, so no half-boundary</text>
@@ -354,7 +354,7 @@
     <text class="tx" x="56" y="474">A FlintLeanWorkspace names the bucket, the prefix and the knobs; the s3.csi.chert.us node driver delivers the workspace as one csi: volume,</text>
     <text class="tx" x="56" y="492">starting the syncer as a worker pod and blocking the agent&rsquo;s containers on NodePublishVolume until the checkout marker exists; a pod</text>
     <text class="tx" x="56" y="510">whose workspace is missing or refused stays ContainerCreating, fail-closed. The controller stamps the claim and sweeps stale uploads.</text>
-    <text class="tx" x="56" y="528">Observed state rides the fence handoff and the writer heartbeat: cited seq, the binary and protocol actually running, the live writers.</text>
+    <text class="tx" x="56" y="528">Observed state rides the echo the fence&rsquo;s cell keeps: cited seq, and the binary and protocol that ran the last boundary.</text>
 
     <rect x="40" y="568" width="1520" height="150" rx="10" class="band"/>
     <text class="th" x="56" y="594">what is NOT here, and deliberately</text>
@@ -488,7 +488,7 @@
     <text class="tx" x="56" y="308">VerbError carries the status and code the wire would answer —</text>
     <text class="tx" x="56" y="324">a frontend written against the gateway keeps working in-process</text>
     <text class="tx" x="56" y="346">with_window_wait absorbs an open barrier window before writing;</text>
-    <text class="tx" x="56" y="362">wait_cited answers 202 at once when no writer has a live heartbeat</text>
+    <text class="tx" x="56" y="362">wait_cited answers 202 citation-pending when its timeout passes</text>
     <text class="tsb" x="56" y="386">the library never edits the manifest and never deletes a cited object</text>
 
     <!-- the bucket -->
@@ -562,7 +562,7 @@
     <text class="mns" x="56" y="680">409 moved · 410 foreign-write</text>
     <text class="tx" x="340" y="680">an entry the bucket has outrun yields to the citation; bytes no entry and no citation vouch for are refused, not served</text>
     <text class="mns" x="56" y="700">202 citation-pending · 409 draft-stale</text>
-    <text class="tx" x="340" y="700">wait_cited with no live writer; a promote whose recorded base has moved — the draft is kept, because saving must never destroy the edit</text>
+    <text class="tx" x="340" y="700">wait_cited past its timeout; a promote whose recorded base has moved — the draft is kept, because saving must never destroy the edit</text>
   </svg>
   <figcaption><b>What a write is.</b> <code>put_file</code> returns when the object is at <code>&lt;prefix&gt;/files/&lt;path&gt;</code> and an entry naming it is in the inbox cell. Both are in the bucket; that is the whole durability promise, and it is immediate. What the library will <i>not</i> do is edit the manifest: only a syncer holding the publish fence for its commit section writes the manifest, and that is what the protocol&rsquo;s model checks — a manifest writer outside the fence would reintroduce exactly the race the barrier exists to prevent. <b>A delete from outside is declared, never performed.</b> A cited object deleted by a caller wedges every checkout with &ldquo;the manifest cites it but it is gone&rdquo;, so <code>remove_file</code> records the intent and returns; the listing hides the path at once, the bytes stay readable by name until the syncer performs it, and a removal the syncer refuses leaves the file exactly as it was — there is no function in the crate that deletes a cited object. <b>A rename is one generation.</b> The server-side copy lands first (a 10&nbsp;GB checkpoint moves without a download), then one CAS records the destination entry and the source removal together, and the barrier cites both halves in one manifest generation: a reader sees the old name or the new, never both and never neither. <b>Drafts are the edit that must not be published yet</b> — under the reserved namespace, where no scan, checkout or sweep can see them; the base etag is recorded, never enforced at save time, and a promote is a HITL write conditioned on it. <b>The cost of the overlay on the common read is zero</b>, and it is pinned by a counting store: (inbox fetches, object fetches) of (0,&nbsp;1) for an unmodified cited file, (1,&nbsp;2) for an overwritten one; the 0.2.1 order fails the first count. Crate: <code>lean/gateway</code>; design of record for removals: <code>docs/plans/flint-lean-delete-rename-design.md</code>.</figcaption>
 </section>

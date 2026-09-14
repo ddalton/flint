@@ -135,7 +135,7 @@ impl Snapshot {
 }
 
 /// The RPO observability surface: seq, window, inbox depth, the epoch
-/// cell, the live writers, and the standing verb requests.
+/// cell, and the standing verb requests.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Status {
     pub seq: Option<u64>,

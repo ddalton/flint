@@ -874,7 +874,19 @@ impl Syncer {
     /// Move the news ticker from what the barrier already learned (D5).
     /// Never issues a request of its own.
     fn ticker_from(&self, seq: Option<u64>, etag: Option<String>) -> LeanResult<()> {
-        let integrated = self.state.load_baseline()?.seq;
+        let baseline_seq = self.state.load_baseline()?.seq;
+        // A merge that carried another writer's change into the manifest
+        // moves the baseline to that document while the change waits in
+        // this writer's queue (or, after a restart, its intent journal) for
+        // the next consume. Until then the tree is integrated only through
+        // what the ticker said while nothing waited.
+        let waiting = !self.state.load_foreign_queue()?.is_empty()
+            || !self.state.load_intent()?.installed_foreign.is_empty();
+        let integrated = if waiting {
+            baseline_seq.min(self.load_remote_seq().integrated_seq)
+        } else {
+            baseline_seq
+        };
         self.touch_remote_seq(seq, etag, integrated)
     }
 

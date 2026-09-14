@@ -156,6 +156,12 @@ impl Syncer {
         // then the shared inbox's. Both run the same rules below.
         let mut consumed: Vec<usize> = vec![];
         let mut baseline = self.state.load_baseline()?;
+        // An install whose step 7 a restart cut off left the other writers'
+        // changes it carried in the intent journal (`installed_foreign`).
+        let requeued = self.state.requeue_installed_foreign()?;
+        if requeued > 0 {
+            self.trace("queue", serde_json::json!({"requeued_from_intent": requeued}));
+        }
         // The writer-local queue: changes other writers made that this
         // workspace's own merges carried into the manifest but not yet
         // into the tree (`state::ForeignChange` says why it is not the
@@ -1018,6 +1024,7 @@ impl Syncer {
             keys: classified.uploads.iter().map(|p| self.cfg.file_key(p)).collect(),
             recent_uuids: prior_uuids.clone(),
             installed_etag: prev_installed.clone(),
+            installed_foreign: intent.installed_foreign.clone(),
             declared_deletes: removals.declared.iter().cloned().collect(),
         };
         self.state.save_intent(&intent)?;
@@ -1371,6 +1378,7 @@ impl Syncer {
                         self.trace("cas", serde_json::json!({"flush": flush_uuid, "seq": merged.seq,
                             "expected": expected.as_ref().map(|h| h.etag.clone()), "etag": meta.etag, "result": "ok"}));
                         intent.installed_etag = Some(meta.etag.clone());
+                        intent.installed_foreign = foreign_changes(&foreign, &gone);
                         self.state.save_intent(&intent)?;
                         foreign_entries = foreign;
                         foreign_gone = gone;
@@ -1502,22 +1510,7 @@ impl Syncer {
             // re-applies them idempotently, where the other order would
             // leave a base that claims changes the tree never received.
             if !foreign_entries.is_empty() || !foreign_gone.is_empty() {
-                let mut q = self.state.load_foreign_queue()?;
-                let mut put = |c: ForeignChange| {
-                    q.retain(|x| x.path != c.path);
-                    q.push(c);
-                };
-                for (path, e) in &foreign_entries {
-                    put(ForeignChange {
-                        path: path.clone(),
-                        etag: Some(e.etag.clone()),
-                        crc64_b64: Some(e.crc64_b64.clone()),
-                    });
-                }
-                for path in &foreign_gone {
-                    put(ForeignChange { path: path.clone(), etag: None, crc64_b64: None });
-                }
-                self.state.save_foreign_queue(&q)?;
+                self.state.queue_foreign(&foreign_changes(&foreign_entries, &foreign_gone))?;
                 self.trace("queue", serde_json::json!({"flush": flush_uuid, "upserts": foreign_entries.len(), "tombstones": foreign_gone.len()}));
             }
             for (path, be) in new_baseline_entries {
@@ -2274,4 +2267,17 @@ pub(super) fn write_file_atomic(
     // FAST (no per-file fsync): materialisations are made durable by
     // `sync_tree` before the marker or baseline that vouches for them.
     super::safefs::write_via_tmp_fast(path, &tmp, bytes, mode)
+}
+
+/// The queue form of a merge's foreign upserts and deletions.
+fn foreign_changes(entries: &[(String, LeanEntry)], gone: &[String]) -> Vec<ForeignChange> {
+    entries
+        .iter()
+        .map(|(path, e)| ForeignChange {
+            path: path.clone(),
+            etag: Some(e.etag.clone()),
+            crc64_b64: Some(e.crc64_b64.clone()),
+        })
+        .chain(gone.iter().map(|path| ForeignChange { path: path.clone(), etag: None, crc64_b64: None }))
+        .collect()
 }
