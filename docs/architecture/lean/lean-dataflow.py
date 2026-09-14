@@ -44,10 +44,10 @@ GLOSSARY = [
                         "as the terms of the write"),
     ("the pointer", ".flint/lean/current — the ONE mutable metadata object. "
                     "Entries live in immutable manifests"),
-    ("fence", "a lost CAS. Another syncer holds this workspace, so this one "
-              "stops publishing and says so"),
+    ("fence", "whose turn it is to commit: held for one barrier's commit, "
+              "then handed on. A deposed holder's late CAS is refused"),
 
-    ("epoch · lease", "the bucket-side single-writer cell. It lives in the "
+    ("epoch · lease", "the bucket-side commit cell: one holder, a FIFO of waiters. It lives in the "
                       "BUCKET, so it fences a writer in ANY cluster"),
     ("claim", "the project identity stamped on the prefix: adopt your own, "
               "refuse a foreign one"),
@@ -141,7 +141,7 @@ def build():
            title_size=9.6, body_size=7.4)
 
     d.node(p, "rect", 12.30, 2.40, 2.15, 4.05, "flint-sync",
-           "the ONLY writer of the prefix\n\nunprivileged, in a system "
+           "a WRITER of the prefix — several share one, taking turns at the fence to commit\n\nunprivileged, in a system "
            "namespace: non-root, all capabilities dropped, no ServiceAccount "
            "token — and it holds the S3 credential the agent must not",
            fill=d.WORK_F, line=d.WORK_L, line_weight=0.017, title_size=11.5,
@@ -168,8 +168,8 @@ def build():
     p.text(17.90, 7.20, 2.95, "\u2026workspace #1's prefix, above",
            size=7.4, color=MUTE, halign=2)
     d.node(p, "cylinder", 16.70, 8.82, 4.15, 0.85, "workspace #2's prefix",
-           "its own files/, current, epoch, claim and inbox — DISJOINT. One "
-           "writer per prefix, and these two never meet",
+           "its own files/, current, epoch, claim and inbox — DISJOINT. "
+           "Writers share one prefix, never two, and these two never meet",
            fill=d.S3_F, line=d.S3_L, line_weight=0.013, cap=0.28,
            body_size=7.4)
 
@@ -200,7 +200,7 @@ def build():
     d.flabel(p, 15.02, 4.135, "ONE CAS", DUR, w=1.00, size=7.4)
     p.arrow([(14.45, 5.375), (16.70, 5.375)], color=DUR, weight=W,
             begin_arrow=k.ARROW_FILLED)
-    d.flabel(p, 15.02, 5.135, "claim · renew", DUR, w=1.20, size=7.4)
+    d.flabel(p, 15.02, 5.135, "claim · hand off", DUR, w=1.20, size=7.4)
     p.arrow([(14.45, 6.375), (16.70, 6.375)], color=DUR, weight=WT,
             begin_arrow=k.ARROW_FILLED)
     d.flabel(p, 15.02, 6.135, "consume", DUR, w=1.10, size=7.4)
@@ -282,7 +282,7 @@ def build():
           body_size=7.4, body_color=SUB)
     p.box(15.40, 10.85, 6.50, 1.05, "lean operator — thin, and optional",
           "claim stamping · bucket posture · the MPU sweep. The syncer "
-          "claims the LEASE itself, so a workspace mounts with the operator "
+          "claims the FENCE itself, so a workspace mounts with the operator "
           "absent.",
           fill=d.OPER_F, line=d.OPER_L, line_weight=0.012, title_size=9.6,
           body_size=7.4, body_color=SUB)
@@ -378,8 +378,8 @@ def build():
 
         "THE HITL WRITE IS THREE ORDERED STEPS AND THE MANIFEST IS NOT ONE "
         "OF THEM. PUT /files/{path} writes the OBJECT first and appends an "
-        "INBOX entry second — never a manifest edit — so the syncer stays "
-        "the only writer of the pointer. The worker consumes the inbox at "
+        "INBOX entry second — never a manifest edit — so only syncers write "
+        "the pointer, one commit at a time. A worker consumes the inbox at "
         "its next barrier (HEAD each entry If-Match; a superseded entry is "
         "dropped, not an error), materialises it into the tree and cites it "
         "in the next manifest. A write is refused 409 + Retry-After while a "
@@ -499,10 +499,10 @@ def build():
         "THE GATEWAY IS A WRITER, BUT NOT THE SAME KIND OF WRITER, and "
         "the two guarantees are exact opposites: the agent's write is "
         "visible before it is durable, the UI's is durable before it is "
-        "visible. What keeps that safe is that only ONE of them may write "
-        "the manifest. The gateway stamps epoch: 0 and never edits the "
-        "pointer; the syncer holds the lease and cites the inbox at its own "
-        "barrier. So \u201cwritten\u201d means different things at the two doors, "
+        "visible. What keeps that safe is that only the SYNCERS write the "
+        "manifest, one commit at a time. The gateway stamps epoch: 0 and "
+        "never edits the pointer; a syncer holds the fence for its commit "
+        "and cites the inbox at its own barrier. So \u201cwritten\u201d means different things at the two doors, "
         "and a UI that reports success on a PUT is reporting durability, "
         "never adoption.",
 
@@ -517,15 +517,16 @@ def build():
         "volume, created by the plugin on its own node and owned by the "
         "Node so a vanished node GCs it), its own tree, its own credential, "
         "and its own prefix with its own epoch, claim, pointer and inbox. "
-        "One writer per prefix is a mechanism inside a product; across "
+        "Taking turns at one prefix's fence is a mechanism inside a product; across "
         "products it is only a convention, so what assigns prefixes is what "
         "keeps two workspaces apart.",
 
         "THREE QUESTIONS DECIDE AGAINST LEAN, cheapest disqualifier first: "
         "does the tree fit the disk, and its file count the checkout budget "
         "(the manifest is chunked and a publish is O(changed), but every "
-        "checkout still materialises every file); is one writer per subtree "
-        "enough; is snapshot freshness "
+        "checkout still materialises every file); is a shared log with "
+        "per-pod working copies enough (a same-file edit is the later "
+        "boundary's, the other kept); is snapshot freshness "
         "acceptable. A no on any of them means the hub. And a worker is "
         "never taken away from a tenant still using its tree by ORDERING, "
         "not by a PodDisruptionBudget — a PriorityClass for kubelet's "
@@ -538,7 +539,7 @@ def build():
     d.legend(p, 0.55, y, [
         ("the workspace — one directory, two views, never a wire", FLOW,
          True),
-        ("durable path — the worker is the only writer of the prefix", DUR,
+        ("durable path — only workers write the prefix, a commit at a time", DUR,
          False),
         ("control plane — never carries a file", CTL, True),
         ("the file protocol — boundary verbs in the tree, REST at the "
