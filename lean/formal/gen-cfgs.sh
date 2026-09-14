@@ -16,7 +16,7 @@ AckHonest LaneCancelsStaged GatedRepair StampBoundarySource \
 TwoScanDelete MaxNarrows NarrowAtomic NarrowUnlinkFirst \
 MaxRemovals DeclaredSkipsWalk EarlyInboxDrop RenameWaitsForDestination \
 BarrierLease Ticket DeadHandoffSkip InfiniteBarriers ConditionalGC VerifyAdoptedCitations \
-HitlOverwritesTrackedOnly SyncKeepsHiddenBase"
+HitlOverwritesTrackedOnly SyncKeepsHiddenBase MaxSameBytes VerifyUploadedCitations"
 
 emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
          # Spec=<name> selects the SPECIFICATION (default Spec; FairSpec
@@ -105,6 +105,12 @@ emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
   # overwrote whatever object was current); TRUE is the 2026-09-13 rule
   # (`inbox::hitl_may_overwrite`), on in the barrier-lease worlds with HITL.
   local c_HitlOverwritesTrackedOnly=FALSE
+  # Finding 13 (runcv A3): identical bytes share an etag.  MaxSameBytes=0
+  # in every pre-existing cfg, so AgentWriteSame is unreachable and
+  # `touched` stays {}; VerifyUploadedCitations=FALSE keeps CASInstall's
+  # withheld set to the adopted entries, as it was — both preserve the
+  # earlier state spaces by construction.  TRUE is the 79e7dac9 fix.
+  local c_MaxSameBytes=0 c_VerifyUploadedCitations=FALSE
   local c_Spec=Spec c_Props=""
   local kv
   for kv in "$@"; do eval "c_${kv%%=*}=${kv#*=}"; done
@@ -451,12 +457,12 @@ BLLIVE="BarrierLease=TRUE InfiniteBarriers=TRUE NPaths=1 MaxGen=1 MaxSeq=3 \
 MaxHitl=0 MaxBarriers=2 MaxCrashes=0 MaxRestarts=0 Spec=FairSpec Props=NoStarvation"
 BLINV="TypeOK,Inv_HITLDurable,Inv_NoDangling,Inv_NoStragglerInstall,\
 Inv_NoDeposedPut,Inv_NoResurrection,Inv_HITLTracked,\
-Inv_CommitExclusive,Inv_CellHeldByHolder"
+Inv_CommitExclusive,Inv_CellHeldByHolder,Inv_NoStaleOverride"
 BLPROBE="BarrierLease=TRUE MaxHitl=0 MaxCrashes=0 MaxRestarts=0 MaxGen=2 MaxSeq=6 MaxBarriers=2"
 BLSTALLINV="TypeOK,Inv_NoDangling,Inv_NoStragglerInstall,Inv_NoDeposedPut,\
-Inv_HITLTracked,Inv_CommitExclusive,Inv_CellHeldByHolder"
+Inv_HITLTracked,Inv_CommitExclusive,Inv_CellHeldByHolder,Inv_NoStaleOverride"
 emit LeanBarrierLeaseHolds "$BLINV" $BLWORLD
-emit LeanBarrierLeaseSentinel "$SENTINV,Inv_HITLTracked,Inv_CommitExclusive,Inv_CellHeldByHolder" \
+emit LeanBarrierLeaseSentinel "$SENTINV,Inv_HITLTracked,Inv_CommitExclusive,Inv_CellHeldByHolder,Inv_NoStaleOverride" \
   $BLSENT
 # THE FINDING of the gate run (2026-09-13).  The gateway overwrote whatever
 # object was current.  Under the barrier lease no window holds it off
@@ -500,7 +506,7 @@ emit LeanBarrierLeaseGCUnconditional "Inv_NoDangling" $BLPROBE ConditionalGC=FAL
 BLSCOPE="BarrierLease=TRUE SyncEnabled=TRUE SyncScope=TRUE MaxSyncs=1 \
 MaxHitl=0 MaxGen=2 MaxSeq=6 MaxBarriers=2 MaxCrashes=0 MaxRestarts=0"
 emit LeanBarrierLeaseSyncOverlayStale "Inv_NoForeignLost" $BLSCOPE
-emit LeanBarrierLeaseSyncOverlayHolds "TypeOK,Inv_NoForeignLost,Inv_NoDangling" $BLSCOPE \
+emit LeanBarrierLeaseSyncOverlayHolds "TypeOK,Inv_NoForeignLost,Inv_NoDangling,Inv_NoStaleOverride" $BLSCOPE \
   SyncKeepsHiddenBase=TRUE
 # THE SECOND FINDING.  A barrier that restarts between its CAS and its
 # baseline re-uploads next time and finds its own bytes already there:
@@ -517,6 +523,33 @@ MaxCrashes=0 MaxRestarts=1"
 emit LeanBarrierLeaseAdoptVerified "$BLSTALLINV,Inv_HITLDurable,Inv_NoResurrection" $BLADOPT
 emit LeanBarrierLeaseAdoptBlind "Inv_NoDangling" $BLADOPT VerifyAdoptedCitations=FALSE
 emit LeanProbeAdoptWithheld "ProbeAdoptWithheld" $BLADOPT
+# FINDING 13, from the live drill (runcv A3), not from the model: S3's
+# etag for a whole PUT is the MD5 of the bytes.  A deletes the path; B
+# rewrites it with the SAME bytes and uploads, lease-free, If-Match its
+# baseline — which is that very etag, so the PUT lands and the object
+# reads as the version A's GC recognises.  A's GC deletes it; B's commit
+# cites it.  This module minted a fresh generation for every write, so
+# no GC could ever recognise another writer's upload — the abstraction
+# was the bug.  `AgentWriteSame` writes a RECOGNISED generation; the fix
+# (79e7dac9) re-verifies every citation the commit adds, and
+# LeanBarrierLeaseSameBytesVerified is its control.  Both verifications
+# on: the adopt fix alone does not cover it.  The adopt world, so the
+# restart that makes an adopt reachable is in it too.
+BLSAME="$BLADOPT MaxSameBytes=1"
+emit LeanBarrierLeaseSameBytesVerified "$BLSTALLINV,Inv_HITLDurable,Inv_NoResurrection" $BLSAME \
+  VerifyUploadedCitations=TRUE
+emit LeanBarrierLeaseSameBytesUnverified "Inv_NoDangling" $BLSAME
+# The second route, which the drill never showed and the probe below
+# found: B's identical-bytes upload lands, A's new bytes land over it
+# If-Match the same etag and A COMMITS; B's commit cites its generation
+# over A's.  Nothing dangles, so it needs its own invariant.
+emit LeanBarrierLeaseSameBytesOverride "Inv_NoStaleOverride" $BLSAME
+emit LeanProbeUploadWithheld "ProbeUploadWithheld" $BLSAME VerifyUploadedCitations=TRUE
+# Opt-in, NOT in the gate (like LeanSubtreeDeep): the same-bytes write in
+# BLWORLD — two paths, HITL, crash, restart — with the fix.  Stopped on the
+# Mac for disk at depth 19, 30,265,184 distinct states and 11.6M queued,
+# no violation; it needs the TLC box.
+emit LeanBarrierLeaseSameBytesDeep "$BLINV" $BLWORLD MaxSameBytes=1 VerifyUploadedCitations=TRUE
 # Liveness: the ticket (falsifier L5) and the dead-handoff skip.
 emit LeanBarrierLeaseLive "TypeOK" $BLLIVE
 emit LeanBarrierLeaseLiveCrash "TypeOK" $BLLIVE MaxCrashes=1

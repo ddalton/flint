@@ -328,7 +328,7 @@ CONSTANTS
                        \* (LeanBarrierLeaseHitlOverUncited).  FALSE in every
                        \* pre-existing cfg, so earlier state spaces are
                        \* preserved by construction.
-  SyncKeepsHiddenBase  \* TRUE = a sync does NOT advance the merge base for
+  SyncKeepsHiddenBase, \* TRUE = a sync does NOT advance the merge base for
                        \* a path whose remote truth came from an inbox
                        \* overlay that differs from the manifest: the
                        \* manifest's version was hidden from it, never
@@ -337,6 +337,31 @@ CONSTANTS
                        \* FALSE in every pre-existing cfg — the shipped
                        \* advance — so earlier state spaces are preserved
                        \* by construction.
+  MaxSameBytes,        \* budget for `AgentWriteSame`: the agent writes a
+                       \* file with bytes some version it RECOGNISES
+                       \* already has.  A generation here is a unique
+                       \* mint; a real S3 etag is the MD5 of the bytes,
+                       \* so two PUTs of identical bytes carry ONE etag
+                       \* and an etag-guarded GC cannot tell them apart.
+                       \* The module modelled every write as a fresh mint
+                       \* until the live drill found what that hid
+                       \* (finding 13, runcv A3).  0 in every
+                       \* pre-existing cfg, so the action is unreachable
+                       \* and `touched` stays {} — those state spaces are
+                       \* preserved by construction.
+  VerifyUploadedCitations \* TRUE = CASInstall re-verifies EVERY citation
+                       \* its own uploads add, not only the adopted ones,
+                       \* and withholds what is gone (`barrier.rs`, the
+                       \* commit section's re-read, 79e7dac9).  FALSE =
+                       \* the rule before it: an upload that LANDED is
+                       \* cited without a look, which is sound only while
+                       \* no other writer's GC can recognise its etag.
+                       \* BarrierLease only.  FALSE in every pre-existing
+                       \* cfg: with unique mints the other writer's GC
+                       \* never recognises an uncited upload, but a HITL
+                       \* write over one does move it, and
+                       \* LeanBarrierLeaseHitlOverUncited must keep
+                       \* finding its counterexample.
 
 Syncers == {"A", "B"}
 Sources == {"none", "cadence", "sentinel"}
@@ -438,6 +463,13 @@ vars == <<cellEpoch, cellHolder, cellQueue, cellHandoff, cellReleased,
                               ADOPTED — cited without a PUT — and so is
                               re-verified under the lease (BarrierLease
                               only; {} otherwise)
+     touched  SUBSET Paths    paths the agent REWROTE with the bytes their
+                              baseline already cites (`AgentWriteSame`): the
+                              walk sees a new stat, so the path is dirty,
+                              while the generation — the etag — is the
+                              baseline's.  Leaves at Finish once an upload
+                              of it is cited; a withheld one stays dirty.
+                              {} unless MaxSameBytes > 0
      repairMoved SUBSET Paths the last install's DECLINED citation repairs:
                               paths this writer integrated whose key held a
                               newer generation at the CAS (BarrierLease
@@ -574,7 +606,20 @@ vars == <<cellEpoch, cellHolder, cellQueue, cellHandoff, cellReleased,
      abandoned 0|1         a fenced holder abandoned its barrier and kept
                             running (the fence arms, under BarrierLease)
      adoptWithheld 0|1     a CAS withheld an adopted entry whose object
-                            was gone (CASInstall, under the fix) *)
+                            was gone (CASInstall, under the fix)
+     sameBytes Nat         `AgentWriteSame`'s budget counter
+     uploadWithheld 0|1    a CAS withheld an entry its own LANDED upload
+                            added, because the object was gone or moved
+                            (CASInstall, under VerifyUploadedCitations)
+     staleOverride BOOLEAN a CAS cited its own upload's generation over a
+                            citation the key STILL HOLDS, while the key no
+                            longer held the upload (CASInstall, BarrierLease
+                            only) — see Inv_NoStaleOverride
+     hitlRetired SUBSET (Paths \X Nat)  acked UI writes whose object was
+                            deleted or overwritten by a party entitled to:
+                            a writer that integrated it, or the UI's own
+                            later write (GCDelete, Upload, HitlWrite; only
+                            under MaxSameBytes > 0) — see Inv_HITLTracked *)
 
 ------------------------------------------------------------------------------
 (* Helpers *)
@@ -687,7 +732,9 @@ FencedSc(s) ==
         ![s].gcHeaded = {}, ![s].gcSeen = [p \in Paths |-> 0],
         ![s].adopted = {}]
   ELSE [sc EXCEPT ![s].st = "dead"]
-Dirty(s)    == {p \in Paths : sc[s].local[p] # sc[s].baseline[p]}
+\* `touched` is dirt the generations cannot show: a rewrite with the bytes
+\* the baseline cites (see MaxSameBytes).  {} in every earlier cfg.
+Dirty(s)    == {p \in Paths : sc[s].local[p] # sc[s].baseline[p]} \cup sc[s].touched
 USet(s)     == {p \in Dirty(s) : sc[s].local[p] # 0}
 \* The two-consecutive-scans rule.  Under ~TwoScanDelete this is the
 \* one-scan rule every pre-existing cfg was written against, so their
@@ -730,7 +777,7 @@ Init ==
         known |-> {}, scanU |-> {}, scanD |-> {},
         scanGen |-> [p \in Paths |-> 0], upDone |-> {}, parked |-> {},
         gcDone |-> {}, gcHeaded |-> {}, gcSeen |-> [p \in Paths |-> 0],
-        adopted |-> {}, repairMoved |-> {},
+        adopted |-> {}, touched |-> {}, repairMoved |-> {},
         lastDirty |-> {}, stageCarried |-> FALSE,
         citeDone |-> {},
         sentTok |-> 0, pendN |-> {}, pendCov |-> [p \in Paths |-> 0],
@@ -763,7 +810,8 @@ Init ==
            citedPairs |-> {},
            claimed |-> {}, interleaved |-> FALSE, handoffs |-> 0,
            deposals |-> 0, deadSkips |-> 0, enqueues |-> 0, abandoned |-> 0,
-           adoptWithheld |-> 0]
+           adoptWithheld |-> 0, sameBytes |-> 0, uploadWithheld |-> 0,
+           staleOverride |-> FALSE, hitlRetired |-> {}]
 
 ------------------------------------------------------------------------------
 (* Lifecycle *)
@@ -802,6 +850,7 @@ StartLease(s) ==
        \* The document a never-installed writer's fast-path ack names.
        ![s].instSnap = [p \in Paths |-> manifest[p]], ![s].instSeq = manSeq,
        ![s].instSrc = manSrc,
+       ![s].touched = {},
        ![s].known = CitedGens]
   /\ UNCHANGED leaseVars
   /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
@@ -994,6 +1043,25 @@ AgentWrite(s, p) ==
   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
+(* Finding 13: the agent writes bytes a version it RECOGNISES already
+   has — most simply, deletes a file and writes it back unchanged.  A
+   real etag is the MD5 of the bytes, so the write carries THAT version's
+   etag, not a fresh one.  Back to the baseline's own generation, the
+   path is dirty only by its stat, which `touched` carries.  Restricted
+   to recognised generations: bytes that coincide with a version this
+   writer never saw would also have to extend `known`, which is the
+   amputation stamp's witness, and finding 13 does not need them.      *)
+AgentWriteSame(s, p) ==
+  /\ BarrierLease /\ Running(s)
+  /\ gh.sameBytes < MaxSameBytes
+  /\ \E g \in sc[s].known \ {0} :
+       /\ sc' = [sc EXCEPT ![s].local[p] = g,
+                           ![s].touched = IF g = sc[s].baseline[p]
+                                          THEN @ \cup {p} ELSE @]
+       /\ gh' = [gh EXCEPT !.sameBytes = @ + 1, !.narrowed = @ \ {p}]
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+                 window, hitlAcked, conflicts>>
+
 AgentDelete(s, p) ==
   /\ Running(s) /\ sc[s].local[p] # 0
   /\ sc' = [sc EXCEPT ![s].local[p] = 0]
@@ -1077,7 +1145,9 @@ HitlWrite(p) ==
                /\ manSrc' = "none"
                /\ UNCHANGED inbox
        /\ hitlAcked' = hitlAcked \cup {<<p, g>>}
-       /\ gh' = [gh EXCEPT !.nextGen = @ + 1, !.hitl = @ + 1]
+       /\ gh' = [gh EXCEPT !.nextGen = @ + 1, !.hitl = @ + 1,
+               !.hitlRetired = IF MaxSameBytes > 0 /\ <<p, objects[p]>> \in hitlAcked
+                               THEN @ \cup {<<p, objects[p]>>} ELSE @]
   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, window, sc, conflicts, removals>>
 
 (* The refusal the window is FOR (availability shape, bounded to keep the
@@ -1147,7 +1217,8 @@ Consume(s) ==
   /\ LET
        live == {pr \in inbox : objects[pr[1]] = pr[2]}
        adoptable == {pr \in live :
-                       sc[s].local[pr[1]] = sc[s].baseline[pr[1]]}
+                       /\ sc[s].local[pr[1]] = sc[s].baseline[pr[1]]
+                       /\ pr[1] \notin sc[s].touched}
        conflicted == live \ adoptable
        adoptPaths == {pr[1] : pr \in adoptable}
        surfPaths == IF ConflictSurfacing
@@ -1295,6 +1366,9 @@ Upload(s, p) ==
          /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
          /\ gh' = [gh EXCEPT !.narrowRecited = @ \cup ({p} \cap gh.narrowed), !.deposedPuts =
                      @ + (IF DeposedHolder(s) THEN 1 ELSE 0),
+                     !.hitlRetired = IF /\ MaxSameBytes > 0 /\ cur # want
+                                        /\ cur \in sc[s].known /\ <<p, cur>> \in hitlAcked
+                                     THEN @ \cup {<<p, cur>>} ELSE @,
                      \* the required-reachable overlap: this PUT landed
                      \* while another syncer was in its commit section
                      !.interleaved = @ \/ (BarrierLease /\ CellHeld /\ cellHolder # s)]
@@ -1378,7 +1452,10 @@ GCDelete(s, p) ==
          /\ objects' = [objects EXCEPT ![p] = 0]
          /\ sc' = [sc EXCEPT ![s].gcDone = @ \cup {p}]
          /\ gh' = [gh EXCEPT !.gc = @ + 1,
-              !.amputated = @ \/ Destroys(s, p, now)]
+              !.amputated = @ \/ Destroys(s, p, now),
+              !.hitlRetired = IF /\ MaxSameBytes > 0 /\ now \in sc[s].known
+                                 /\ <<p, now>> \in hitlAcked
+                              THEN @ \cup {<<p, now>>} ELSE @]
          /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox, removals,
                         window, hitlAcked, conflicts>>
 
@@ -1508,8 +1585,18 @@ CASInstall(s) ==
        \* If it does not, another writer's GC took it between the adopt
        \* and this CAS; the entry is withheld like a parked one and the
        \* path stays dirty for the next barrier to re-upload.
+       \*
+       \* Finding 13: an upload that LANDED is no safer.  The other
+       \* writer's GC deletes If-Match an etag it recognises, and a real
+       \* etag is the content hash — identical bytes PUT by this writer
+       \* carry it too (`AgentWriteSame`).  So every citation this
+       \* commit adds is re-verified, not only the adopted ones.
        gone == {p \in sc[s].adopted :
                   VerifyAdoptedCitations /\ objects[p] # sc[s].scanGen[p]}
+               \cup
+               {p \in (sc[s].scanU \cap sc[s].upDone) \ sc[s].adopted :
+                  /\ BarrierLease /\ VerifyUploadedCitations
+                  /\ objects[p] # sc[s].scanGen[p]}
        inst == [p \in Paths |->
          IF p \in sc[s].parked \cup gone THEN manifest[p]
          ELSE IF p \in sc[s].scanU \cap sc[s].upDone THEN sc[s].scanGen[p]
@@ -1556,7 +1643,17 @@ CASInstall(s) ==
                                               ELSE {}]
        /\ conflicts' = conflicts \cup {<<p, objects[p]>> : p \in gone}
        /\ gh' = [gh EXCEPT
-            !.adoptWithheld = IF gone # {} THEN 1 ELSE @,
+            !.adoptWithheld = IF gone \cap sc[s].adopted # {} THEN 1 ELSE @,
+            !.uploadWithheld = IF gone \ sc[s].adopted # {} THEN 1 ELSE @,
+            \* Finding 13's second route: a peer's PUT If-Match the same etag
+            \* landed over our identical-bytes upload and the peer COMMITTED
+            \* it; citing ours now replaces a citation the key holds with one
+            \* it does not, and the peer's committed bytes go uncited.
+            !.staleOverride = @ \/
+               (BarrierLease /\ \E p \in (sc[s].scanU \cap sc[s].upDone) \ gone :
+                  /\ objects[p] # sc[s].scanGen[p]
+                  /\ objects[p] # 0
+                  /\ manifest[p] = objects[p]),
             !.amputated = @ \/ amp,
             !.cited = IF cite THEN 1 ELSE @,
             !.citedPairs = @ \cup {pr \in hitlAcked : inst[pr[1]] = pr[2]},
@@ -1583,6 +1680,11 @@ Finish(s) ==
          ELSE @[p]],
        ![s].instBase = sc[s].instSnap,
        ![s].expSeq = sc[s].instSeq,
+       \* The baseline records the walk's stat for what was cited.  A
+       \* same-bytes rewrite AFTER the scan is absorbed here — an
+       \* under-approximation, named: the next barrier's own
+       \* `AgentWriteSame` reaches the same upload.
+       ![s].touched = @ \ (sc[s].scanU \cap sc[s].upDone),
        ![s].scanU = {}, ![s].scanD = {},
        ![s].scanGen = [p \in Paths |-> 0],
        ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {},
@@ -1697,7 +1799,7 @@ Sync(s) ==
                    ELSE {Paths}) :
      LET
        \* Ground truth, independent of the arm under test.
-       trueDirty == {p \in Paths : sc[s].local[p] # sc[s].baseline[p]}
+       trueDirty == Dirty(s)
        \* What THIS arm believes is dirty.
        dirt == IF SyncScanFirst THEN trueDirty ELSE sc[s].lastDirty
        \* Remote truth = the manifest, overlaid by live inbox entries (a
@@ -1750,6 +1852,7 @@ Sync(s) ==
             ![s].baseline = [p \in Paths |->
               IF p \in applicable THEN remote(p) ELSE @[p]],
             ![s].instBase = newInstBase,
+            ![s].touched = @ \ applicable,
             ![s].known = @ \cup {remote(p) : p \in applicable},
             ![s].lastDirty = {}]
        /\ conflicts' = conflicts \cup {<<p, remote(p)>> : p \in conflicted}
@@ -2415,7 +2518,7 @@ BaseNext ==
   \/ \E s \in Syncers :
        StartLease(s) \/ Claim(s) \/ Enqueue(s) \/ SkipDeadHandoff(s)
   \/ \E s \in Syncers, p \in Paths :
-       AgentWrite(s, p) \/ AgentDelete(s, p) \/ Upload(s, p)
+       AgentWrite(s, p) \/ AgentWriteSame(s, p) \/ AgentDelete(s, p) \/ Upload(s, p)
        \/ GCDelete(s, p) \/ GCHead(s, p)
   \/ \E s \in Syncers : Narrow(s)
   \/ \E p \in Paths : HitlWrite(p) \/ HitlRemove(p)
@@ -2436,6 +2539,9 @@ Spec == Init /\ [][Next]_vars
 \* Gated mode is frozen and not supported under the barrier lease (design
 \* §4.3, D3): its upload lane runs outside any barrier.
 ASSUME ~(BarrierLease /\ GatedCitation)
+\* `touched` is cleared where a barrier or a sync rewrites the baseline,
+\* not at a narrow's uncite or a declared removal — keep them apart.
+ASSUME MaxSameBytes > 0 => BarrierLease /\ MaxNarrows = 0 /\ MaxRemovals = 0
 
 (* ---- tranche 6: FAIRNESS, for the liveness runs only -------------------
    Weak fairness on each syncer's OWN barrier step — not on "some syncer
@@ -2480,6 +2586,7 @@ TypeOK ==
   /\ \A s \in Syncers : sc[s].declared \subseteq Paths
                        /\ sc[s].consumed \subseteq (Paths \X Gens)
                        /\ sc[s].repairMoved \subseteq Paths
+                       /\ sc[s].touched \subseteq Paths
 
 \* §4.2: A NARROW IS AN UNWATCH, NEVER AN ABSENCE.  No path a narrow
 \* dropped may lose its object — a workspace that stops holding a file
@@ -2509,6 +2616,11 @@ Inv_HITLDurable == ~gh.amputated
 \* Every cited manifest entry has a live object behind it: the barrier
 \* order (uploads -> CAS -> deletes) keeps checkouts satisfiable.
 Inv_NoDangling == \A p \in Paths : manifest[p] # 0 => objects[p] # 0
+\* No commit replaces a citation the key still holds with a generation of
+\* its own upload the key no longer holds (finding 13's second route).
+\* `Inv_NoDangling` cannot see it — an object exists — and the loss is the
+\* PEER's: its committed bytes stay at the key, cited by nothing.
+Inv_NoStaleOverride == ~gh.staleOverride
 
 \* A deposed writer's manifest CAS never lands.
 Inv_NoStragglerInstall == gh.stragglerInstalls = 0
@@ -2784,6 +2896,16 @@ Inv_HITLTracked ==
     \/ pr \in inbox
     \/ pr \in conflicts
     \/ \E s \in Syncers : sc[s].st # "dead" /\ sc[s].baseline[pr[1]] = pr[2]
+    \* Superseded, and sticky.  The first clause says it for unique
+    \* generations: once a writer that integrated the write deletes or
+    \* overwrites it, the key never reads as it again.  Under MaxSameBytes
+    \* it can — an agent re-creating the UI write's exact bytes after
+    \* publishing their delete carries the same generation, and TLC's first
+    \* same-bytes runs in BLWORLD stopped on exactly that twice (once with
+    \* the re-creation's pod then replaced: finding 10's loss of the
+    \* agent's own work, not the UI's).  `hitlRetired` is written only
+    \* under MaxSameBytes, so every other state space is unchanged.
+    \/ pr \in gh.hitlRetired
 
 \* A rename that was PERFORMED is one manifest generation: no reader
 \* of the manifest ever sees the moved BYTES under both names (§4, §6)
@@ -2840,5 +2962,8 @@ ProbeFenceAbandoned    == gh.abandoned = 0
 \* gone and withheld the entry.  Without this the strict runs could hold
 \* with the race never reached — which is exactly how it hid until now.
 ProbeAdoptWithheld     == gh.adoptWithheld = 0
+\* Finding 13's fix actually fired: a CAS found the object under one of
+\* its own LANDED uploads gone or moved and withheld the entry.
+ProbeUploadWithheld    == gh.uploadWithheld = 0
 
 ==============================================================================

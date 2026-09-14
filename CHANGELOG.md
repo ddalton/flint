@@ -194,8 +194,14 @@ covered by the stability guarantee.
   boundary publishes the path again. One HEAD per uploaded path, fanned
   out, inside the fence. Pinned by
   `a_peer_upload_of_identical_bytes_before_the_gc_delete_is_not_deleted`,
-  which fails with the re-read limited to adopted citations. Still open:
-  the formal model gives every write a distinct version.
+  which fails with the re-read limited to adopted citations. The formal
+  model now lets identical bytes share a version, and found a second
+  route the same re-read closes: a peer's upload of new bytes lands
+  If-Match the unchanged etag over the rewrite and is committed, and the
+  rewriting writer's commit then cited its own version over the peer's —
+  the peer's committed edit left uncited. Pinned by
+  `a_peer_put_over_an_identical_bytes_upload_is_not_cited_as_the_old_version`
+  and the `LeanBarrierLeaseSameBytes*` runs in `lean/formal/`.
 - **lean: `uploadPartParallelism` defaults to 8, behind a new upload
   bytes-in-flight bound `uploadInflightMb` (default 256).** v1.51.0
   shipped the 8-wide per-object upload as an opt-in, measured at 3.6–4.2x

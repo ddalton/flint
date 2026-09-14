@@ -647,11 +647,28 @@ the HEADs fanned out; whatever is gone or replaced is withheld
 barrier PUTs it again. Cost: one HEAD per uploaded path, inside the fence.
 Regression test: `a_peer_upload_of_identical_bytes_before_the_gc_delete_is_not_deleted`
 (fails "seq 3 cites x.txt but the object is gone" with the re-read limited
-to observed citations). Open with it: the model gives every write a
-distinct version, so equal bytes must share an etag there (a `Put` whose
-content equals the current object's leaves its etag unchanged) and
-`LeanBarrierLease` must be re-gated exhaustively; Ozone's ETag is an MD5 as
-well, so the fix is not S3-specific.
+to observed citations). Ozone's ETag is an MD5 as well, so the fix is not
+S3-specific. **Modelled after the fact** (`lean/formal/README.md`, tranche 6
+finding 5): `AgentWriteSame` writes a generation the writer already
+recognises, and `VerifyUploadedCitations` is the re-read. Pre-fix the
+module reproduces the drill's trace (`LeanBarrierLeaseSameBytesUnverified`,
+`Inv_NoDangling`, 18 steps); with the fix the same world holds exhaustively
+(5.5M states). The model then found a SECOND route the drill never showed:
+B's identical-bytes upload leaves the etag unchanged, so A's upload of new
+bytes If-Match that etag lands over it; A commits, and B's commit cites its
+own version over A's — nothing dangles, A's committed edit is cited by
+nothing. `Inv_NoStaleOverride` names it (`LeanBarrierLeaseSameBytesOverride`),
+the syncer test
+`a_peer_put_over_an_identical_bytes_upload_is_not_cited_as_the_old_version`
+reproduces it (fails with the re-read limited to adopted citations), and the
+same re-read closes it because it compares etags, not presence.
+`LeanBarrierLeaseHolds` holds with the new invariant (21.8M states). Still
+open: the same-bytes write in that richest world
+(`LeanBarrierLeaseSameBytesDeep`) was stopped for disk at depth 19, 30.3M
+states, no violation, and needs the TLC box; the sentinel world has not had
+a same-bytes write and is itself VIOLATED at depth 19
+(`Inv_AckBoundaryCoherent`, an open refinement of the ack stamp —
+`lean/formal/README.md`).
 
 **Not yet modelled:** the writer-local queue and the empty-install rule
 — convergence properties the safety invariants cannot see. The module's

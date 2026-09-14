@@ -9352,6 +9352,91 @@ async fn a_peer_upload_of_identical_bytes_before_the_gc_delete_is_not_deleted() 
     assert_eq!(&body[..], b"seed");
 }
 
+/// Finding 13's second route, found by the model (`LeanProbeUploadWithheld`)
+/// and never shown by the drill: B's upload of IDENTICAL bytes leaves the
+/// etag where it was, so A's upload of NEW bytes — If-Match that same etag
+/// — lands over it, and A commits. B's commit then merges its "modify" of
+/// the path over A's and cites a version the key no longer holds. No GC is
+/// involved and the object is not gone, so a presence check would pass it;
+/// the re-read compares etags.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_put_over_an_identical_bytes_upload_is_not_cited_as_the_old_version() {
+    let inner = Arc::new(MemoryStore::new());
+    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let hb = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = hooked_syncer(&ha, dir_a.path());
+    let mut b = hooked_syncer(&hb, dir_b.path());
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "x.txt", "seed");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("seed"));
+
+    // B rewrites x.txt with the SAME bytes; A edits it.
+    std::fs::remove_file(dir_b.path().join("x.txt")).unwrap();
+    write(dir_b.path(), "x.txt", "seed");
+    backdate_baseline(&b, "x.txt");
+    write(dir_a.path(), "x.txt", "A's edit");
+    backdate_baseline(&a, "x.txt");
+
+    let key = a.cfg.file_key("x.txt");
+    let seed_etag = inner.head(&key).await.unwrap().etag;
+    // Park each writer the moment its PUT lands: B first, then A over it.
+    let (b_landed_tx, b_landed_rx) = std::sync::mpsc::channel::<()>();
+    let (b_go_tx, b_go_rx) = std::sync::mpsc::channel::<()>();
+    let (a_landed_tx, a_landed_rx) = std::sync::mpsc::channel::<()>();
+    let (a_go_tx, a_go_rx) = std::sync::mpsc::channel::<()>();
+    let (b_landed_tx, b_go_rx) = (std::sync::Mutex::new(b_landed_tx), std::sync::Mutex::new(b_go_rx));
+    let (a_landed_tx, a_go_rx) = (std::sync::Mutex::new(a_landed_tx), std::sync::Mutex::new(a_go_rx));
+    hb.after_put(&key, move || {
+        b_landed_tx.lock().unwrap().send(()).unwrap();
+        tokio::task::block_in_place(|| {
+            b_go_rx.lock().unwrap().recv_timeout(std::time::Duration::from_secs(20)).expect("B never released")
+        });
+    });
+    ha.after_put(&key, move || {
+        a_landed_tx.lock().unwrap().send(()).unwrap();
+        tokio::task::block_in_place(|| {
+            a_go_rx.lock().unwrap().recv_timeout(std::time::Duration::from_secs(20)).expect("A never released")
+        });
+    });
+    let b_task = barrier_on_thread(b);
+    tokio::task::spawn_blocking(move || {
+        b_landed_rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("fixture: B never uploaded its rewrite of x.txt")
+    })
+    .await
+    .unwrap();
+    assert_eq!(inner.head(&key).await.unwrap().etag, seed_etag, "fixture: B's upload is not the same bytes");
+    let a_task = barrier_on_thread(a);
+    tokio::task::spawn_blocking(move || {
+        a_landed_rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("fixture: A's If-Match on the seed etag did not land over B's upload")
+    })
+    .await
+    .unwrap();
+    assert_eq!(inner.get_whole(&key, None).await.unwrap().1.as_ref(), b"A's edit");
+
+    // A commits its edit while B is parked after its PUT, before its claim.
+    a_go_tx.send(()).unwrap();
+    let (a, ra) = tokio::task::spawn_blocking(move || a_task.join().expect("A's thread")).await.unwrap();
+    ra.expect("A's barrier");
+    assert_every_citation_resolves(&inner, &a.cfg, "after A's commit").await;
+
+    b_go_tx.send(()).unwrap();
+    let (b, rb) = tokio::task::spawn_blocking(move || b_task.join().expect("B's thread")).await.unwrap();
+    let rb = rb.expect("B's barrier");
+    assert_every_citation_resolves(&inner, &b.cfg, "after B's commit").await;
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let cited = m.entries.get("x.txt").expect("A's edit is not cited");
+    let (_, body) = inner.get_whole(&cited.key, Some(&cited.etag)).await.expect("the manifest cites nothing");
+    assert_eq!(&body[..], b"A's edit");
+    assert!(rb.parked.contains(&"x.txt".to_string()), "fixture: B's upload was not withheld: {rb:?}");
+}
+
 /// Finding 2 (`LeanBarrierLeaseAdoptBlind`): an upload whose 412 found
 /// the same bytes already at the key ADOPTED them — no PUT, no lease.
 /// Before the adopter claimed, the peer's commit uncited the path and its

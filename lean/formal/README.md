@@ -13,13 +13,13 @@ a library. Nothing here is wired into `scripts/check-tla.sh`.
 ## Running
 
 ```
-./check.sh          # the 90-run gate (~8 min)
+./check.sh          # the 96-run gate
 ./gen-cfgs.sh       # regenerate the cfg matrix
 ```
 
-Ninety-two runs, ALL required: 24 strict (must hold), 36 mutations
+Ninety-six runs, ALL required: 25 strict (must hold), 38 mutations
 (must find their designated counterexample — a model that cannot
-rediscover its bug classes proves nothing), 32 probes (must be violated
+rediscover its bug classes proves nothing), 33 probes (must be violated
 — each names an ACTION via a ghost only that action writes; probe the
 action, never the situation). The three numbers are `grep -c "^strict_run "`,
 `grep "^mutation_run " | grep -vc Probe` and `grep "^mutation_run " |
@@ -28,7 +28,9 @@ so they are stated as a recipe rather than a claim. (And `EXPECT` itself
 drifted once: gated mode's removal took 23 runs out and left it at 92
 over 69 real calls, so the gate at that commit failed its own count
 check — which is what the check is for.) `LeanSubtreeDeep.cfg` is the
-rich-budget breadth run — an opt-in overnight job, not in the gate.
+rich-budget breadth run — an opt-in overnight job, not in the gate — and
+`LeanBarrierLeaseSameBytesDeep.cfg` is the same-bytes write in the richest
+barrier-lease world, also opt-in: it does not fit a laptop.
 
 ## The module: LeanChunkGC.tla
 
@@ -102,7 +104,8 @@ Invariants:
 | Invariant | Claim | Mutation that must violate it |
 | --- | --- | --- |
 | `Inv_HITLDurable` | an acked HITL write is never silently lost | `LeanAmputation` (direct manifest bump + whole-rewrite writer), `LeanLocalWins` (the inherited flush.rs LOCAL-WINS 412 arm), `LeanGCUnguarded` (unguarded GC delete); with TWO LIVE WRITERS `LeanBarrierLeaseHitlOverUncited` (a UI write over a writer's uncited upload — a FINDING, tranche 6) |
-| `Inv_NoDangling` | every cited manifest entry has a live object | `LeanDanglingOrder` (v1 order: upload→delete→CAS); under the barrier lease `LeanBarrierLeaseGCUnconditional` (the shipped HEAD-then-DELETE GC against a second writer's supersede) and `LeanBarrierLeaseAdoptBlind` (an adopted entry cited without re-verification under the lease) — both FINDINGS, tranche 6 |
+| `Inv_NoDangling` | every cited manifest entry has a live object | `LeanDanglingOrder` (v1 order: upload→delete→CAS); under the barrier lease `LeanBarrierLeaseGCUnconditional` (the shipped HEAD-then-DELETE GC against a second writer's supersede) and `LeanBarrierLeaseAdoptBlind` (an adopted entry cited without re-verification under the lease) — both FINDINGS, tranche 6; and `LeanBarrierLeaseSameBytesUnverified` (a LANDED upload of identical bytes, whose etag the other writer's GC recognises — finding 13, found by the live drill first) |
+| `Inv_NoStaleOverride` | no commit replaces a citation the key still holds with a generation of its own upload the key no longer holds (barrier lease) | `LeanBarrierLeaseSameBytesOverride` (finding 13's second route: a peer's new bytes land If-Match an identical-bytes upload's etag and are committed; nothing dangles, so `Inv_NoDangling` cannot see it) |
 | `Inv_NoStragglerInstall` | a deposed writer's manifest CAS never lands | `LeanNoRotate` (no takeover rotation); `LeanBarrierLeaseNoRotate` (the same, deposal mid-commit) |
 | `Inv_NoDeposedPut` | a deposed writer's data PUT never lands | `LeanNoEpochCheck` (rotation alone — proves rotation does NOT cover the data path). Under the barrier lease this is vacuous by design: uploads precede the claim and are never fenced (protocol of record, straggler rules) |
 | `Inv_NoResurrection` | a container restart never resurrects an unpublished delete | `LeanRematerialize` (re-checkout over a live tree) |
@@ -489,9 +492,12 @@ What the module gained, and which action writes each thing:
 | `Upload(s, p)` | changed | a NON-holder action, never fenced; `gh.interleaved` is the required-reachable probe |
 | `GCHead(s, p)`, `gcHeaded`/`gcSeen` | action/fields | the shipped two-request GC, under `~ConditionalGC` (finding 1) |
 | `adopted`, `VerifyAdoptedCitations` | field/arm | an adopted entry is re-verified inside the commit section (finding 2) |
+| `AgentWriteSame(s, p)`, `MaxSameBytes`, `touched` | action/budget/field | the agent writes a generation it RECOGNISES — identical bytes, one etag; back to the baseline's own, the path is dirty by its stat alone (`Dirty` reads `touched`; Consume does not adopt over it; Sync and Finish clear it where they rewrite the baseline) (finding 5) |
+| `VerifyUploadedCitations` | arm | CASInstall re-verifies every citation its own LANDED uploads add, not only adoptions (finding 5, the 79e7dac9 fix) |
+| `gh.staleOverride`, `Inv_NoStaleOverride` | ghost/invariant | stamped in CASInstall when a commit cites its own upload's generation over a citation the key still holds (finding 5's second route) |
 | `AckedDoc(s)`, `AckedSrc(s)`, `instSrc` | helpers/field | under the barrier lease the three ack stamps (`BoundaryBroken`, `BoundaryIncoherent`, `srcMismatch`) are judged against the document the ack NAMES (`instSnap` at `instSeq`, seeded at checkout for a never-installed writer) and its clock, never against the live manifest — see "the ack under two writers" below |
 | `InfiniteBarriers`, `FairSpec`, `NoStarvation` | liveness | see below |
-| `gh.claimed/interleaved/handoffs/deposals/deadSkips/enqueues/abandoned/adoptWithheld` | ghosts | one probe each, each written by exactly one action |
+| `gh.claimed/interleaved/handoffs/deposals/deadSkips/enqueues/abandoned/adoptWithheld/uploadWithheld` | ghosts | one probe each, each written by exactly one action |
 
 **The liveness property, and what it took.** `NoStarvation ==
 \A s : [](Waiting(s) => <>(Holding(s) \/ ~Running(s)))` under `FairSpec
@@ -522,7 +528,9 @@ needed once the loop could cycle. Results, each ~5 s:
   VIOLATED — B queues, crashes; A's release names the dead B; A queues
   behind a handoff that will never claim, and stutters there forever.
 
-**Four findings, all two-writer, none reachable under the life lease.**
+**Five findings, all two-writer, none reachable under the life lease** —
+four found by the model, and a fifth it could not see until an
+abstraction was taken back (below).
 The rule was: a real counterexample in the protocol is not "fixed" in
 the model; it is pinned as the must-fail it is, and the fix — where one
 belongs to this protocol — is modelled as an arm so the rest can be
@@ -618,6 +626,56 @@ checked against it (the `MineIsNotForeign` pattern).
    guard refuses every untracked overwrite, stricter than the code,
    which is the safe direction for a durability claim and says nothing
    about whether those escapes are themselves safe.
+5. **Identical bytes share an etag — found by the LIVE DRILL, not the
+   model** (runcv A3, `churn/p14.txt`; syncer finding 13). S3's etag for a
+   whole PUT is the MD5 of the bytes. A deletes a path; B rewrites it with
+   the SAME bytes and uploads, lease-free, If-Match its baseline — which
+   is that very etag, so the PUT lands and the object reads exactly as
+   the version A's GC recognises. A's GC deletes it; B's commit cites it.
+   This module minted a unique generation for every write, so no GC could
+   ever recognise another writer's upload and `Inv_NoDangling` held over
+   a race the product had — finding 2's text above even named the fact
+   ("a real etag is the content hash") and drew only the adopt arm's
+   conclusion from it. The abstraction was the bug, again.
+   `AgentWriteSame` (budget `MaxSameBytes`) now writes a generation the
+   writer RECOGNISES; back to the baseline's own, the path is dirty only
+   by its stat, which `touched` carries. `LeanBarrierLeaseSameBytesUnverified`
+   is `BLADOPT` with one such write and the adopt verification ON:
+   VIOLATED in 18 steps, in seconds — the trace is the
+   drill's, with the writers' names swapped. The fix (79e7dac9) re-verifies
+   EVERY citation the commit adds, uploads as well as adoptions, under the
+   lease where no GC runs, and withholds what is gone or moved:
+   `VerifyUploadedCitations`. `LeanBarrierLeaseSameBytesVerified` is the
+   same world with that constant alone moved: HOLDS, 5,498,470 distinct
+   states, depth 38, under two minutes — exhaustive on a laptop.
+
+   `LeanProbeUploadWithheld` proves the withhold fires, and its shortest
+   trace was a route the drill never showed: B's same-bytes upload lands,
+   then A's upload of NEW bytes — If-Match the same etag, which B's PUT
+   did not move — lands over it. In that trace B committed first and would
+   only have re-cited what the manifest already cited. Ordered the other
+   way it is a loss: A COMMITS its edit, and B's commit then cites its own
+   generation over A's — the manifest names a version no key holds and A's
+   committed bytes sit at the key, cited by nothing. Nothing dangles, so
+   no invariant here could see it; `Inv_NoStaleOverride` (a stamp in
+   `CASInstall`, barrier lease only) now does. `LeanBarrierLeaseSameBytesOverride`
+   is `BLSAME` pre-fix: VIOLATED in 18 steps, and the trace is exactly the
+   syncer test written from it,
+   `a_peer_put_over_an_identical_bytes_upload_is_not_cited_as_the_old_version`
+   — green with the fix, and failing "seq 3 cites x.txt at <seed etag>" with
+   the re-read limited to adopted citations. The re-read covers both routes
+   because it compares etags, not presence. The invariant is also listed
+   in every barrier-lease strict SAFETY run; re-run on the new module,
+   `LeanBarrierLeaseAdoptVerified` (641,858), `LeanBarrierLeaseDeposal`
+   (2,047,621) and `LeanBarrierLeaseSyncOverlayHolds` (1,493,045) hold with
+   their HEAD distinct-state counts unchanged, so the stamp never fired
+   there, and `LeanBarrierLeaseEpochOnly`/`RotationOnly` hold.
+   `LeanBarrierLeaseHolds` (two paths, HITL, crash, restart) holds with it
+   too, exhaustively on the Mac: 21,754,734 distinct states, depth 35,
+   eight minutes. The same world WITH a same-bytes write and the fix
+   (`LeanBarrierLeaseSameBytesDeep`, opt-in) is not exhausted: stopped for
+   disk at depth 19, 30,265,184 distinct states, 11.6M queued, no violation
+   — after two false positives it surfaced in `Inv_HITLTracked` (below).
 
 **The ack under two writers — a refinement, not a finding.** The first
 sentinel run under the barrier lease violated `Inv_AckBoundaryCoherent`
@@ -656,6 +714,21 @@ was STOPPED, not exhausted — its state queue passed 19 GB on a machine with
 10 GB of disk left. Its exhaustive run needs a larger box; until then this
 world is "no violation to depth 18", not "holds".
 
+**The larger box answered: VIOLATED at depth 19** (i4i.2xlarge, 2026-09-13,
+62,235,430 distinct states). The gate prints only the last 40 lines of a
+failing run, so the invariant's name was lost with the spot instance;
+`-simulate` reproduced it on the Mac in 21 minutes as
+`Inv_AckBoundaryCoherent` (BFS needs more than 35 GB of queue at that depth;
+`-dfid` works only with one worker). Analysed, NOT fixed — a third
+refinement: B's ok ack names a document AHEAD of B's tree by a peer's change
+queued for B's next consume. The ack is honest; the stamp's `#` fires in
+both directions while its harm runs in one. It did expose a small contract
+bug in the code: step 7 sets `baseline.seq = installed.seq` while the
+writer's foreign queue is non-empty, so `remote.seq` reports "no news" for
+up to one floor while the tree lags. Until the refinement lands,
+`LeanBarrierLeaseSentinel` is a known red in the gate (91/92 when the box
+ran it).
+
 **Budgets.** `BLWORLD` is MaxGen=2/MaxBarriers=2 with crash + restart +
 HITL — not `LeanSubtree`'s MaxGen=3: two live writers with a crash AND a
 restart passed 2.8M states at depth 16 in the first minute with the
@@ -665,7 +738,9 @@ MaxGen=2/MaxBarriers=2 (A freezes inside its commit section; a third
 barrier is only needed for the adopt race, which has its own world),
 `BLADOPT` is one path, MaxGen=2/MaxBarriers=3/MaxRestarts=1 (with two
 paths the mutation sat past 1M states at depth 20 and its strict control
-would have had to exhaust the lot). The stall world at MaxBarriers=3 was
+would have had to exhaust the lot). `BLSAME` is `BLADOPT` with
+`MaxSameBytes=1`: the adopt race and the same-bytes race in one world,
+so the control certifies both verifications together. The stall world at MaxBarriers=3 was
 4–5M states and three to four minutes per run; at 2 it keeps every stamp
 site the deposal needs.
 
@@ -677,8 +752,31 @@ parks on the FIRST foreign 412 where `upload_one` preserves and
 supersedes and parks on the second; and a vanished base (HEAD → 404) is
 a create in the code and a park here (review inbox-5) — both make the
 model more conservative than the code, and neither is this tranche's.
-Generations are unique mints where real etags are content hashes, which
-is why finding 2's fix had to be a verification and not a re-PUT.
+Generations are unique mints where real etags are content hashes — except
+under `MaxSameBytes`, which lets the agent write a generation it already
+RECOGNISES (finding 5). Bytes that coincide with a version the writer
+never saw are still not modelled: they would have to extend `known`,
+which is the amputation stamp's witness. And a same-bytes rewrite after
+the scan is absorbed at Finish rather than kept dirty; the next barrier's
+own `AgentWriteSame` reaches the same upload. Aliasing cuts the other way
+too: the HITL invariants name a UI write by (path, generation), and an
+agent that re-creates a UI write's exact bytes carries its generation. The
+first same-bytes run in `BLWORLD` stopped on `Inv_HITLTracked` for exactly
+that — A consumed a UI write, its agent deleted it, A published the delete
+and collected the object, the agent wrote the same bytes back, and A's
+upload put them at the key before its commit cited them: nothing lost, and
+nothing the invariant counted as tracking. A first repair (accept a LIVE
+tree holding those bytes) failed the next run the same way with A's pod
+replaced after the upload — finding 10's loss of the agent's own
+re-creation, not of the UI write, whose life had ended at A's published
+delete. So the invariant now says that directly: a UI write deleted or
+overwritten by a party entitled to (a writer that integrated it, or the
+UI's own later write) is RETIRED (`gh.hitlRetired`, sticky), which is what
+`objects[p] # pr[2]` always meant with unique generations. The ghost is
+written only under `MaxSameBytes > 0`, so no other state space moves. The
+relaxation was re-run on a known-bad world — `BLWORLD` with the same-bytes
+write and `EarlyInboxDrop = TRUE` — and still VIOLATES: a UI write
+consumed, then the pod replaced, nothing retired.
 Gated mode is asserted off under the barrier lease (`ASSUME`), per D3.
 `Inv_NoDeposedPut` and `Inv_NoFencedOkAck` hold vacuously under the
 barrier lease — uploads precede the claim and no refused-fenced ack
