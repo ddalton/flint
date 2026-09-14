@@ -8207,6 +8207,9 @@ type Hook = Box<dyn Fn() + Send + Sync>;
 struct Hooks {
     /// Run ONCE, before the first `put_whole` whose key ends with the suffix.
     before_put: std::sync::Mutex<Option<(String, Hook)>>,
+    /// Run ONCE, after the first `put_whole` whose key ends with the suffix
+    /// LANDED — an upload of identical bytes leaves no etag change to poll.
+    after_put: std::sync::Mutex<Option<(String, Hook)>>,
     /// Run ONCE, after `get_whole` fetched a key ending with the suffix and
     /// before the body is returned to the syncer.
     before_get_return: std::sync::Mutex<Option<(String, Hook)>>,
@@ -8236,6 +8239,9 @@ struct Hooked(Arc<MemoryStore>, Hooks);
 impl Hooked {
     fn before_put(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {
         *self.1.before_put.lock().unwrap() = Some((key.to_string(), Box::new(f)));
+    }
+    fn after_put(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {
+        *self.1.after_put.lock().unwrap() = Some((key.to_string(), Box::new(f)));
     }
     fn before_get_return(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {
         *self.1.before_get_return.lock().unwrap() = Some((key.to_string(), Box::new(f)));
@@ -8299,7 +8305,13 @@ impl ObjectStore for Hooked {
                 return Err(flint_store::StoreError::Other(format!("injected: put refused for {key}")));
             }
         }
-        self.0.put_whole(key, body, cond, stamps, crc).await
+        let r = self.0.put_whole(key, body, cond, stamps, crc).await;
+        if r.is_ok() {
+            if let Some(h) = take_hook(&self.1.after_put, key) {
+                h();
+            }
+        }
+        r
     }
     async fn compose_generation(
         &self,
@@ -9250,6 +9262,94 @@ async fn a_peer_upload_between_the_gc_head_and_its_delete_is_not_deleted() {
         .expect("the manifest cites B's edit, and A's GC deleted the object under it");
     assert_eq!(&body[..], b"B's edit, longer");
     assert_every_citation_resolves(&inner, &b.cfg, "after both commits").await;
+}
+
+/// Finding 13 (live drill A3, `churn/p14.txt`): S3's ETag for a whole PUT
+/// is the MD5 of the bytes, so a peer's upload of IDENTICAL bytes carries
+/// the very etag a GC recognizes. A deletes x.txt; B rewrites it with the
+/// same bytes (a new inode, the content unchanged) and uploads, lease-free,
+/// before A's GC. A's GC deletes B's object by that etag, and B's commit
+/// then cites an object that is gone. Finding 1's test above cannot see
+/// it: B's edit there is DIFFERENT bytes, so the If-Match refuses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_upload_of_identical_bytes_before_the_gc_delete_is_not_deleted() {
+    let inner = Arc::new(MemoryStore::new());
+    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let hb = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = hooked_syncer(&ha, dir_a.path());
+    let mut b = hooked_syncer(&hb, dir_b.path());
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "x.txt", "seed");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("seed"));
+
+    // A deletes x.txt (the first absence is withheld); B rewrites it with
+    // the SAME bytes.
+    std::fs::remove_file(dir_a.path().join("x.txt")).unwrap();
+    let first = a.run_barrier().await.unwrap();
+    assert!(first.deleted.is_empty(), "fixture: the first absence was not withheld");
+    std::fs::remove_file(dir_b.path().join("x.txt")).unwrap();
+    write(dir_b.path(), "x.txt", "seed");
+    backdate_baseline(&b, "x.txt");
+
+    let key = a.cfg.file_key("x.txt");
+    let (parked_tx, parked_rx) = std::sync::mpsc::channel::<()>();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let (landed_tx, landed_rx) = std::sync::mpsc::channel::<()>();
+    let go_rx = std::sync::Mutex::new(go_rx);
+    let parked_tx = std::sync::Mutex::new(parked_tx);
+    let landed_tx = std::sync::Mutex::new(landed_tx);
+    // A's commit has uncited x.txt and its GC is about to delete it: park
+    // it there until B's upload of the same bytes has landed.
+    ha.before_delete(&key, move || {
+        parked_tx.lock().unwrap().send(()).unwrap();
+        tokio::task::block_in_place(|| {
+            go_rx.lock().unwrap().recv_timeout(std::time::Duration::from_secs(20)).expect("never released")
+        });
+    });
+    hb.after_put(&key, move || landed_tx.lock().unwrap().send(()).unwrap());
+    let a_task = barrier_on_thread(a);
+    tokio::task::spawn_blocking(move || {
+        parked_rx.recv_timeout(std::time::Duration::from_secs(20)).expect("A never reached its GC delete")
+    })
+    .await
+    .unwrap();
+    let b_task = barrier_on_thread(b);
+    tokio::task::spawn_blocking(move || {
+        landed_rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("fixture: B never uploaded its rewrite of x.txt")
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        inner.get_whole(&key, None).await.unwrap().1.as_ref(),
+        b"seed",
+        "fixture: B's upload is not the same bytes"
+    );
+    go_tx.send(()).unwrap();
+    let ((a, ra), (b, rb)) = tokio::task::spawn_blocking(move || {
+        (a_task.join().expect("A's thread"), b_task.join().expect("B's thread"))
+    })
+    .await
+    .unwrap();
+    ra.expect("A's barrier");
+    let rb = rb.expect("B's barrier");
+    let _ = a;
+    assert_every_citation_resolves(&inner, &b.cfg, "after both commits").await;
+
+    // B's rewrite is withheld, not lost: the path stays dirty and B's next
+    // barrier publishes it with a PUT of its own.
+    assert!(rb.parked.contains(&"x.txt".to_string()), "fixture: B's upload was not withheld: {rb:?}");
+    let mut b = b;
+    b.run_barrier().await.expect("B's retry");
+    assert_every_citation_resolves(&inner, &b.cfg, "after B's retry").await;
+    let m = manifest::load(inner.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
+    let cited = m.entries.get("x.txt").expect("B's rewrite never reached the manifest");
+    let (_, body) = inner.get_whole(&cited.key, Some(&cited.etag)).await.expect("B's retry cites nothing");
+    assert_eq!(&body[..], b"seed");
 }
 
 /// Finding 2 (`LeanBarrierLeaseAdoptBlind`): an upload whose 412 found

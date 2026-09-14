@@ -1003,3 +1003,295 @@ async fn a_blind_write_over_an_uncited_upload_is_refused_until_it_is_cited() {
     let force = PutFile { if_match: Some("*".into()), ..Default::default() };
     orphan_ws.put_file("b.txt", Bytes::from("from the UI"), &force).await.expect("an orphan is writable");
 }
+
+
+/// A barrier that opens its window the moment a PUT LANDS on `trigger`:
+/// after the gateway's admission check and its object PUT, before its
+/// inbox append. The order is the hook's, never a timer's.
+struct WindowAfterPut {
+    inner: Arc<MemoryStore>,
+    trigger: String,
+    cfg: flint_lean::LeanConfig,
+    epoch: u64,
+    armed: std::sync::atomic::AtomicBool,
+    fired: std::sync::atomic::AtomicBool,
+    /// Inbox-cell reads since the window opened: the gateway's append
+    /// attempts, which is how a test knows the append has STARTED.
+    cell_reads_after: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for WindowAfterPut {
+    async fn copy_object(
+        &self,
+        src_key: &str,
+        src_if_match: Option<&str>,
+        dst_key: &str,
+        condition: &flint_store::PutCondition,
+        stamps: &flint_store::GenerationStamps,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.copy_object(src_key, src_if_match, dst_key, condition, stamps).await
+    }
+    async fn put_whole(
+        &self,
+        key: &str,
+        body: Bytes,
+        cond: &flint_store::PutCondition,
+        stamps: &flint_store::GenerationStamps,
+        crc: u64,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        let landed = self.inner.put_whole(key, body, cond, stamps, crc).await?;
+        if key == self.trigger && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            flint_lean::inbox::open_window(self.inner.as_ref(), &self.cfg, self.epoch, now + 3)
+                .await
+                .expect("the fixture's barrier opens its window");
+            self.fired.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(landed)
+    }
+    async fn compose_generation(
+        &self,
+        spec: &flint_store::ComposeSpec<'_>,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.compose_generation(spec).await
+    }
+    async fn head(&self, key: &str) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.head(key).await
+    }
+    async fn get_whole(
+        &self,
+        key: &str,
+        if_match: Option<&str>,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        if key.ends_with("/inbox") && self.fired.load(std::sync::atomic::Ordering::SeqCst) {
+            self.cell_reads_after.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.inner.get_whole(key, if_match).await
+    }
+    async fn get_range(
+        &self,
+        key: &str,
+        off: u64,
+        len: u64,
+        if_match: &str,
+    ) -> flint_store::StoreResult<Bytes> {
+        self.inner.get_range(key, off, len, if_match).await
+    }
+    fn min_part_size(&self) -> u64 {
+        self.inner.min_part_size()
+    }
+    fn max_parts(&self) -> usize {
+        self.inner.max_parts()
+    }
+    async fn list(&self, prefix: &str) -> flint_store::StoreResult<Vec<flint_store::ListedObject>> {
+        self.inner.list(prefix).await
+    }
+    async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete(key).await
+    }
+    async fn delete_if_match(&self, key: &str, etag: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete_if_match(key, etag).await
+    }
+    async fn head_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.head_version(key, v).await
+    }
+    async fn get_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        self.inner.get_version(key, v).await
+    }
+    async fn delete_version(&self, key: &str, v: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete_version(key, v).await
+    }
+    async fn list_versions(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::ListedVersion>> {
+        self.inner.list_versions(prefix).await
+    }
+    async fn list_uploads(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::PendingUpload>> {
+        self.inner.list_uploads(prefix).await
+    }
+    async fn abort_upload(&self, key: &str, id: &str) -> flint_store::StoreResult<()> {
+        self.inner.abort_upload(key, id).await
+    }
+    async fn bootstrap(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<flint_store::BootstrapReport> {
+        self.inner.bootstrap(prefix).await
+    }
+    async fn epoch_read(
+        &self,
+        key: &str,
+    ) -> flint_store::StoreResult<Option<flint_store::EpochState>> {
+        self.inner.epoch_read(key).await
+    }
+    async fn epoch_acquire(
+        &self,
+        key: &str,
+        holder: &str,
+        observed: Option<&flint_store::EpochState>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.inner.epoch_acquire(key, holder, observed).await
+    }
+    async fn epoch_renew(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+        echo: Option<&str>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.inner.epoch_renew(key, lease, echo).await
+    }
+    async fn epoch_release(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+    ) -> flint_store::StoreResult<()> {
+        self.inner.epoch_release(key, lease).await
+    }
+}
+
+
+/// FINDING 12, the writers drill's leg A2 (twice in five minutes): a UI
+/// write over a TRACKED version is PUT at the key, then its inbox append
+/// is refused because a barrier's window opened in between — 409
+/// `barrier-window-open`, "not acked, retry". The PUT already replaced
+/// the tracked bytes, and nothing preserved them: once another writer's
+/// acked, cited upload (the syncers then drop the queued install as
+/// `superseded`), once the UI's own acked write still in the inbox (the
+/// adopters' commit-section re-read withholds its citation). A refused
+/// write must leave what the workspace tracks readable; a write that
+/// replaces it must be tracked.
+#[tokio::test]
+async fn a_ui_write_refused_after_its_put_never_destroys_a_cited_version() {
+    refused_after_put_keeps_what_is_tracked("a manifest citation").await;
+}
+
+#[tokio::test]
+async fn a_ui_write_refused_after_its_put_never_destroys_an_acked_ui_write_in_the_inbox() {
+    refused_after_put_keeps_what_is_tracked("an acked UI write in the inbox").await;
+}
+
+async fn refused_after_put_keeps_what_is_tracked(tracked_by: &str) {
+    {
+        let mem = Arc::new(MemoryStore::new());
+        let plain: Arc<dyn ObjectStore> = mem.clone();
+        let w0 = ws(&plain);
+        let epoch = hold_lease(&plain, &w0).await;
+        let hook = Arc::new(WindowAfterPut {
+            inner: mem.clone(),
+            trigger: w0.config().file_key("a.txt"),
+            cfg: w0.config().clone(),
+            epoch,
+            armed: false.into(),
+            fired: false.into(),
+            cell_reads_after: 0.into(),
+        });
+        let s: Arc<dyn ObjectStore> = hook.clone();
+        let w = ws(&s);
+
+        let acked = w.put_file("a.txt", Bytes::from("acked"), &PutFile::default()).await.unwrap();
+        if tracked_by == "a manifest citation" {
+            cite(&w, epoch, 1, "a.txt", &acked, b"acked").await;
+            let entries = w.snapshot().await.unwrap().inbox.entries;
+            w.drop_inbox(epoch, &entries).await.unwrap();
+        }
+        assert_eq!(&w.get_file("a.txt").await.unwrap().body[..], b"acked", "{tracked_by}: the fixture reads it");
+
+        hook.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let edit = PutFile { if_match: Some(acked.clone()), ..Default::default() };
+        let got = w.put_file("a.txt", Bytes::from("the next edit"), &edit).await;
+        assert!(
+            hook.fired.load(std::sync::atomic::Ordering::SeqCst),
+            "{tracked_by}: the fixture never reached the race (no PUT landed after admission)"
+        );
+        match got {
+            Ok(etag) => {
+                let tracked = w.snapshot().await.unwrap().inbox.entries.iter().any(|e| e.path == "a.txt" && e.etag == etag);
+                assert!(tracked, "{tracked_by}: acked {etag} but no inbox entry tracks it");
+            }
+            Err(err) => {
+                assert!(err.is_retryable(), "{tracked_by}: {err}");
+                let read = w.get_file("a.txt").await;
+                assert!(
+                    matches!(&read, Ok(b) if &b.body[..] == b"acked"),
+                    "{tracked_by}: the write was refused ({}), yet the version it would have replaced no longer reads: {:?}",
+                    err.code(),
+                    read.map(|b| String::from_utf8_lossy(&b.body).into_owned())
+                );
+            }
+        }
+    }
+}
+
+/// Finding 12's second half: the append after a landed PUT must not
+/// belong to the caller's future. A client that disconnects (or a
+/// timeout around `put_file`) while the gateway waits out a window
+/// would otherwise cancel it between the PUT and the append — the
+/// tracked version replaced, nothing tracking its replacement. The
+/// caller here is dropped once the append has STARTED (the gateway has
+/// read the cell after the window opened), never on a timer.
+#[tokio::test]
+async fn a_ui_write_whose_caller_goes_away_after_its_put_is_still_tracked() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let mem = Arc::new(MemoryStore::new());
+    let plain: Arc<dyn ObjectStore> = mem.clone();
+    let w0 = ws(&plain);
+    let epoch = hold_lease(&plain, &w0).await;
+    let hook = Arc::new(WindowAfterPut {
+        inner: mem.clone(),
+        trigger: w0.config().file_key("a.txt"),
+        cfg: w0.config().clone(),
+        epoch,
+        armed: false.into(),
+        fired: false.into(),
+        cell_reads_after: 0.into(),
+    });
+    let s: Arc<dyn ObjectStore> = hook.clone();
+    let w = ws(&s);
+    let acked = w.put_file("a.txt", Bytes::from("acked"), &PutFile::default()).await.unwrap();
+    cite(&w, epoch, 1, "a.txt", &acked, b"acked").await;
+    let entries = w.snapshot().await.unwrap().inbox.entries;
+    w.drop_inbox(epoch, &entries).await.unwrap();
+
+    hook.armed.store(true, SeqCst);
+    let edit = PutFile { if_match: Some(acked.clone()), ..Default::default() };
+    tokio::select! {
+        got = w.put_file("a.txt", Bytes::from("the next edit"), &edit) => {
+            panic!("the fixture: put_file returned inside the open window: {got:?}")
+        }
+        _ = async {
+            while hook.cell_reads_after.load(SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        } => {}
+    }
+    // The caller is gone. What landed at the key must end up tracked
+    // once the window's deadline lets the append in.
+    let landed = plain.head(&w0.config().file_key("a.txt")).await.unwrap().etag;
+    assert_ne!(landed, acked, "the fixture: the edit's PUT landed");
+    let give_up = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let snap = w0.snapshot().await.unwrap();
+        if snap.inbox.entries.iter().any(|e| e.path == "a.txt" && e.etag == landed) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < give_up,
+            "the caller went away after the PUT and nothing tracks {landed}; the cited version is gone"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+

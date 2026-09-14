@@ -75,7 +75,7 @@ trace as built; the syncer side pins these names in a Rust test.)
 | `scan` | `flush`, `uploads`, `deletes`, `first_absence` |
 | `upload` | `flush`, `path`, `outcome` (`put`, `adopted`, `parked` — `etag` is the foreign one, `deferred` — no `etag`), `etag` |
 | `claim` | `verdict`: `claimed` with `how` (`fresh`, `adopted-own`, `deposed`, `orphaned-own`, `skipped-handoff`, `released`) and `epoch`, plus `prior` `{holder, epoch, released, handoff, waiters}` on a takeover; `waiting` with `behind`, `quiet_polls`, `waited_ms`; `deadline` with `behind`, `waited_ms`. There is no `verdict: "deposed"`: a deposal is `claimed` with `how: "deposed"` |
-| `observed` | `flush`, `path`, `etag`, `still` |
+| `observed` | `flush`, `path`, `etag`, `still`, `own_put` (bool: the barrier's own PUT rather than an adopt or a citation repair — every citation a commit adds is re-read under the fence, finding 13) |
 | `merge` | `flush`, `theirs_seq`, `upserts`, `deletes`, `foreign`, `gone`, `adds_nothing` (bool) |
 | `cas` | `flush`, `seq`, `expected`, `result`: `ok` (with `etag`) or `lost` (no `etag`) |
 | `gc` | `flush`, `path`, `head`, `result`: `absent` (`head` null), `deleted` (`head` = the etag deleted), `skip` (`head` = the unrecognized etag, plus `recognized`), `replaced-absent` (the conditional DELETE got 412 and the re-HEAD found the object gone; `head` = the etag the GC recognized). Tools treat any other `result` as informational |

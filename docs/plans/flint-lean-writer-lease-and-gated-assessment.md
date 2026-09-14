@@ -572,10 +572,15 @@ finding 11; H5 reproduced finding 10 (`lean/e2e/writers-live/results/2026-09-13/
 Ozone 2.2.1's s3g failed its DELETE leg, and the AWS CLI confirmed it with
 a control: the same `delete-object --if-match <wrong etag>` is 412 on S3
 and 204-and-deleted on Ozone. Fix 1 above (the conditional GC delete) is
-therefore VOID on Ozone: a writer's GC can delete a peer's upload there.
-Until that is solved, more than one writer on an Ozone workspace is
-unsafe; one writer is unaffected (its GC runs under its own lease and no
-peer uploads). Not yet enforced in code.
+therefore VOID on Ozone 2.2.x: a writer's GC can delete a peer's upload
+there. This is Ozone's release scope, not a bug: the conditional-request
+umbrella HDDS-13117 shipped conditional PutObject, GetObject, HeadObject,
+CopyObject and CompleteMultipartUpload in 2.2, and conditional DeleteObject
+is HDDS-14907, fix version 2.3.0 (resolved 2026-06-27; 2.2.1 of 2026-08-27
+is the latest release). Until 2.3.0, more than one writer on an Ozone
+workspace is unsafe; one writer is unaffected (its GC runs under its own
+lease and no peer uploads). Re-run `flint-sync probe-conditional` on 2.3.0
+when it ships. Not yet enforced in code.
 
 **Still open, found after the fixes (finding 10):** a writer lost for good
 between an upload and its commit — its pod replaced, its node gone — leaves
@@ -592,6 +597,61 @@ deleted worker pod (the plugin relaunches it over the same tree). Pinned as
 in-flight upload paths and a live writer reconciles a dead writer's list; or
 a live writer re-publishes over an untracked object older than a grace,
 preserving it as a conflict copy. Not built.
+
+**Found in the deployed storm (finding 12, data loss, FIXED locally):** the
+gateway's `put_file` PUTs the object, then appends the inbox entry that
+tracks it. Leg A2 (six writers editing the same files, plus a UI through
+the gateway) lost two acked writes in five minutes: each time a barrier's
+window opened between the gateway's admission check and its append, the
+append refused (409 `barrier-window-open`, "not acked"), but the PUT had
+already replaced a version the workspace TRACKED — one writer's acked,
+cited upload; the UI's own earlier acked write, still in the inbox — and
+nothing preserved it. The syncers' consume then found the key moved and
+dropped the queued install as `superseded`, and the commit-section re-read
+withheld the adopters' citation. F8 made the gateway overwrite only a
+TRACKED version; that is safe only if the replacement ends up tracked, and
+the refusal broke exactly that. Fix: after the PUT, `Workspace::track`
+waits for the window to close and appends (bounded by the window deadline,
+where `admits_hitl` admits a dead barrier's writes), in a spawned task so a
+disconnecting client cannot cancel it half way; tests in
+`lean/gateway/tests/verbs.rs` with a hook store that opens the window the
+moment the PUT lands. The model could not see it: `HitlWrite` is one
+atomic step. Open with it: (a) a request may now wait up to 180 s behind a
+dead barrier — a short wait and then 202 "durable, tracking pending" is the
+recommended shape; (b) every store write that DESTROYS bytes — gateway PUT
+then append, draft promote, upload then commit (finding 10), GC HEAD then
+DELETE, consume adopt then baseline — needs the question "what keeps those
+bytes if the process dies, is refused, or is cancelled right after"; (c)
+the model should split each such action into its two store calls, and move
+merged foreign changes into a per-writer queue as the code has since
+F5/F6 (the model still re-queues them in the shared inbox).
+
+**Found in the deployed storm (finding 13, data loss, FIXED locally):** an
+S3 whole-PUT ETag is the MD5 of the bytes, so it is not a version identity,
+and two claims in this design rested on it being one: "uploads are
+S3-guarded and need no lock" (§4) and finding 1's GC fence (delete If-Match
+the etag the collector integrated). Leg A3 (churn: writes, deletes,
+renames, same-content rewrites, plus a UI) broke both on `churn/p14.txt`.
+Writer A moved the file away and committed the delete (seq 155). Writers
+B and C had already rewritten it with IDENTICAL bytes (a new inode) and
+re-uploaded it lease-free: the If-Match succeeded and the etag did not
+change. A's GC HEADed the etag it integrated, found it, and deleted B's
+object. B's commit (seq 156) merged its modify over A's delete and cited
+the hole: a fresh checkout refuses the workspace ("manifest cites … but the
+object is gone"). Finding 1's regression test could not see it because its
+peer edit is DIFFERENT bytes; the in-memory store's etag was already a
+content hash, but no test wrote identical bytes. Fix: the commit section
+re-reads EVERY citation it adds, not only adopted and repaired ones, with
+the HEADs fanned out; whatever is gone or replaced is withheld
+(`upload-withheld`, a `partial` ack, the path left dirty) and the next
+barrier PUTs it again. Cost: one HEAD per uploaded path, inside the fence.
+Regression test: `a_peer_upload_of_identical_bytes_before_the_gc_delete_is_not_deleted`
+(fails "seq 3 cites x.txt but the object is gone" with the re-read limited
+to observed citations). Open with it: the model gives every write a
+distinct version, so equal bytes must share an etag there (a `Put` whose
+content equals the current object's leaves its etag unchanged) and
+`LeanBarrierLease` must be re-gated exhaustively; Ozone's ETag is an MD5 as
+well, so the fix is not S3-specific.
 
 **Not yet modelled:** the writer-local queue and the empty-install rule
 — convergence properties the safety invariants cannot see. The module's

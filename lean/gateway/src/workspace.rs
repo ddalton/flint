@@ -593,17 +593,43 @@ impl Workspace {
     }
 
     /// Append the inbox entry that makes a landed object a TRACKED
-    /// write. A window that opened between the admission check and
-    /// this append refuses: the object landed (an unreferenced orphan)
-    /// but the write is NOT acked — the caller retries and the retry
-    /// re-PUTs over it.
+    /// write. The object PUT has already happened, over whatever the
+    /// key held — often a version this workspace TRACKS (a citation, or
+    /// an earlier acked write in the inbox), whose bytes it replaced.
+    /// So this never refuses because a barrier window opened after the
+    /// admission check: it waits for that window to close and appends
+    /// then. A live barrier's window is one commit section; a dead
+    /// one's ends at its deadline, where `admits_hitl` lets writes in.
+    ///
+    /// Refusing here was finding 12 (the writers drill, leg A2, twice in
+    /// five minutes): the 409 said "not acked, retry", the tracked
+    /// version was already gone with no preserved copy, and the syncers
+    /// dropped their queued install of it as superseded.
+    ///
+    /// The wait runs as its own task, so a caller that stops waiting (a
+    /// client that disconnects, a timeout around `put_file`) cannot
+    /// cancel it between the PUT and the append.
     pub(crate) async fn track(&self, entry: InboxEntry) -> Result<(), VerbError> {
-        match inbox::gateway_append(self.store.as_ref(), &self.cfg, entry).await {
-            Ok(()) => Ok(()),
-            Err(LeanError::State(message)) => {
-                Err(VerbError::WindowOpen { retry_after_secs: 2, message })
+        let this = self.clone();
+        tokio::spawn(async move { this.append_when_admitted(entry).await })
+            .await
+            .map_err(|e| VerbError::Store(LeanError::State(format!("inbox append task: {e}"))))?
+    }
+
+    async fn append_when_admitted(&self, entry: InboxEntry) -> Result<(), VerbError> {
+        let give_up = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(self.cfg.window_slack_secs + 60);
+        loop {
+            match inbox::gateway_append(self.store.as_ref(), &self.cfg, entry.clone()).await {
+                Ok(()) => return Ok(()),
+                Err(LeanError::State(_)) if tokio::time::Instant::now() < give_up => {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+                Err(LeanError::State(message)) => {
+                    return Err(VerbError::WindowOpen { retry_after_secs: 2, message })
+                }
+                Err(e) => return Err(e.into()),
             }
-            Err(e) => Err(e.into()),
         }
     }
 

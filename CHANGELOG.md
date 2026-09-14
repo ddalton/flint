@@ -158,6 +158,44 @@ covered by the stability guarantee.
   answers S3's 404 by default and Ozone's 412 behind
   `with_if_match_missing_as_412`; the vanished-base test runs against both
   answers and both upload paths, each arm mutation-checked.
+- **lean gateway: a UI write refused after its PUT no longer destroys the
+  version it would have replaced.** Found by the writers drill's leg A2
+  (six writers and a UI on real S3), twice in five minutes: `put_file`
+  PUTs the object, then appends the inbox entry that tracks it, and the
+  append refused (409 `barrier-window-open`) when a barrier's window
+  opened between the admission check and the append. The PUT had already
+  replaced a version the workspace tracked — once another writer's acked,
+  cited upload, once the UI's own earlier acked write still in the inbox —
+  and nothing preserved it: the syncers found the key moved and dropped
+  their queued install as superseded, and the refused write was told it
+  was not acked. The append now waits for the window to close (a live
+  barrier's is one commit section; a dead one's ends at its deadline) and
+  runs as its own task, so a client that disconnects mid-wait cannot
+  cancel it between the PUT and the append. `promote_draft` takes the
+  same path. Three tests in `lean/gateway/tests/verbs.rs` pin it: the two
+  tracked shapes, and a caller that goes away after the PUT; a hook store
+  opens the window the moment the PUT lands, so the order is never a
+  timer's. Restoring the refusal fails all three; appending in the
+  caller's future fails the third. The model's `HitlWrite` is one atomic
+  step, which is why the gate could not see it. Still open: a request can
+  now wait up to the window deadline (180 s) behind a barrier that died
+  mid-window.
+- **lean: a writer's upload of bytes identical to a version another writer
+  just deleted is no longer collected and then cited.** Found by the
+  writers drill's leg A3 (churn on real S3) as a manifest citing an object
+  that was gone, so a fresh checkout refused the workspace. An S3
+  whole-PUT etag is the MD5 of the bytes: a same-content rewrite re-uploads
+  to the same etag, so the deleting writer's garbage collection, which
+  deletes only the etag it integrated, matched the new upload and deleted
+  it, and the rewriting writer's commit then cited it. The commit section
+  now re-reads every citation it adds — its own uploads as well as adopted
+  and repaired ones — and withholds any that is gone or replaced: the ack
+  is `partial`, the conflict record `upload-withheld`, and the next
+  boundary publishes the path again. One HEAD per uploaded path, fanned
+  out, inside the fence. Pinned by
+  `a_peer_upload_of_identical_bytes_before_the_gc_delete_is_not_deleted`,
+  which fails with the re-read limited to adopted citations. Still open:
+  the formal model gives every write a distinct version.
 - **lean: `uploadPartParallelism` defaults to 8, behind a new upload
   bytes-in-flight bound `uploadInflightMb` (default 256).** v1.51.0
   shipped the 8-wide per-object upload as an opt-in, measured at 3.6–4.2x

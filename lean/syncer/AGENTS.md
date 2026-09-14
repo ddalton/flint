@@ -134,9 +134,10 @@ JSON, not written as `[]`.
   is still an honest ok: nothing had changed since the last boundary.
 - `status: "partial"` — the boundary installed, but the paths in
   `report.dropped` are not in it: each met a newer foreign version the
-  syncer could not preserve, or the copy already in the bucket that it
-  meant to cite was replaced or removed by another writer just before
-  this boundary committed (an `adopt-withheld` record); `report.parked`
+  syncer could not preserve, or the copy in the bucket that it meant to
+  cite — one it found there, or its own upload — was replaced or removed
+  by another writer just before this boundary committed (an
+  `adopt-withheld` or `upload-withheld` record); `report.parked`
   counts them. Treat it as a failure for those paths and touch again.
 - `boundary: "sentinel-deferred"` — your touch was honoured by the
   cadence tick rather than at once: it arrived inside

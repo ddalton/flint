@@ -1209,40 +1209,63 @@ impl Syncer {
             }
             // Step 5: the manifest CAS (three-way merge; bounded retries).
             self.verify_not_deposed().await?;
-            // Citations this barrier OBSERVED rather than produced — an
-            // upload that adopted bytes already at its key, a citation
-            // repair — were read with no lease held. Another writer's
-            // commit may since have uncited the path and collected the
-            // object: its GC recognizes that very etag, having integrated
-            // it (the model's LeanBarrierLeaseAdoptBlind). Collection runs
-            // only inside a commit section, so a re-read HERE, holding the
-            // fence, cannot be overtaken before this CAS. Whatever is gone
-            // or replaced is withheld: parked, recorded, and left dirty for
-            // the next barrier to publish with a PUT of its own.
-            for path in &observed {
-                let Some(cited) = upserts.get(path) else { continue };
-                let still_there = match self.store.head(&cited.key).await {
-                    Ok(meta) => meta.etag == cited.etag,
-                    Err(StoreError::NotFound(_)) => false,
-                    Err(e) => return Err(e.into()),
-                };
-                self.trace("observed", serde_json::json!({"flush": flush_uuid, "path": path, "etag": cited.etag, "still": still_there}));
+            // EVERY citation this barrier adds was read or written with no
+            // lease held. Another writer's commit may since have uncited
+            // the path and collected the object: its GC deletes by the etag
+            // it integrated. That etag names an ADOPTED object (the model's
+            // LeanBarrierLeaseAdoptBlind) — and, since an S3 whole-PUT etag
+            // is the MD5 of the bytes, it also names this barrier's own PUT
+            // of IDENTICAL bytes (finding 13, the writers drill's A3: a
+            // same-content rewrite re-uploaded, the peer's GC deleted it,
+            // the commit cited a hole). Collection runs only inside a
+            // commit section, so a re-read HERE, holding the fence, cannot
+            // be overtaken before this CAS. Whatever is gone or replaced is
+            // withheld: parked, recorded, and left dirty for the next
+            // barrier to publish with a PUT of its own.
+            let heads: Vec<(String, LeanResult<bool>)> = {
+                use futures::stream::{self, StreamExt};
+                let this: &Syncer = &*self;
+                stream::iter(upserts.iter().map(|(path, cited)| async move {
+                    let still = match this.store.head(&cited.key).await {
+                        Ok(meta) => Ok(meta.etag == cited.etag),
+                        Err(StoreError::NotFound(_)) => Ok(false),
+                        Err(e) => Err(e.into()),
+                    };
+                    (path.clone(), still)
+                }))
+                .buffer_unordered(self.cfg.upload_fanout.max(1))
+                .collect()
+                .await
+            };
+            let mut heads = heads;
+            heads.sort_by(|a, b| a.0.cmp(&b.0));
+            for (path, still) in heads {
+                let still_there = still?;
+                let was_observed = observed.contains(&path);
+                let cited = &upserts[&path];
+                self.trace("observed", serde_json::json!({"flush": flush_uuid, "path": path, "etag": cited.etag, "still": still_there, "own_put": !was_observed}));
                 if still_there {
                     continue;
                 }
-                let gone = upserts.remove(path).expect("looked up above");
-                new_baseline_entries.remove(path);
-                report.uploaded.retain(|p| p != path);
+                let gone = upserts.remove(&path).expect("looked up above");
+                new_baseline_entries.remove(&path);
+                report.uploaded.retain(|p| p != &path);
                 report.published_bytes = report.published_bytes.saturating_sub(gone.size);
                 parked.insert(path.clone());
+                let kind = if was_observed {
+                    "adopt-withheld: the object this barrier found already at its key was \
+                     replaced or collected before its commit; nothing cited, the path stays \
+                     dirty and publishes next barrier"
+                } else {
+                    "upload-withheld: the object this barrier PUT was replaced or collected \
+                     before its commit (a peer's GC recognizes the etag of identical bytes); \
+                     nothing cited, the path stays dirty and publishes next barrier"
+                };
                 self.state.append_conflict(&ConflictRecord {
                     path: path.clone(),
                     foreign_etag: gone.etag,
                     preserved_key: None,
-                    kind: "adopt-withheld: the object this barrier found already at its key was \
-                           replaced or collected before its commit; nothing cited, the path stays \
-                           dirty and publishes next barrier"
-                        .into(),
+                    kind: kind.into(),
                     at_unix: now_unix(),
                 })?;
                 report.parked.push(path.clone());
