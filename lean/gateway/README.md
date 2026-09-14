@@ -1,8 +1,8 @@
 # flint-lean-gateway
 
 The [flint lean](https://github.com/ddalton/flint) gateway as a library.
-A backend that reads, writes, drafts and publishes files in S3-backed
-lean workspaces calls these verbs in-process, with one connection to
+A backend that reads, writes, deletes, renames, drafts and publishes
+files in S3-backed lean workspaces calls these verbs in-process, with one connection to
 the bucket, instead of running a `flint-lean-gateway` process and
 speaking HTTP to it. Ten workspaces are ten `Workspace` values, not ten
 gateways.
@@ -19,7 +19,7 @@ backend moves in-process.
 
 ```toml
 [dependencies]
-flint-lean-gateway = "0.2"
+flint-lean-gateway = "0.3"
 ```
 
 ## Quick start
@@ -263,7 +263,7 @@ serves — same routes, same bearer, same codes — inside its own server.
 A backend on another web stack turns it off and never compiles warp:
 
 ```toml
-flint-lean-gateway = { version = "0.2", default-features = false, features = ["s3"] }
+flint-lean-gateway = { version = "0.3", default-features = false, features = ["s3"] }
 ```
 
 ## What this crate is not
