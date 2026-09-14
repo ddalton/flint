@@ -886,6 +886,19 @@ pub async fn sweep_chunks(store: &dyn ObjectStore, cfg: &LeanConfig) -> LeanResu
         if refs.contains(addr) {
             continue;
         }
+        // A candidate the LISTING already shows inside the grace cannot be
+        // past it on a HEAD taken now: a rewrite only makes an object
+        // younger, so the listing's age bounds the HEAD's from above.
+        // Skipping it keeps a chunk longer — a leak, never a deleted live
+        // chunk — and every deletion still rests on the HEAD below. Without
+        // this every commit HEADed every chunk superseded within the grace,
+        // one at a time inside the fence: 700 ms of a 1 s hold after five
+        // minutes of six writers (contention drill), growing for the hour.
+        if let Some(listed) = o.last_modified_unix {
+            if now.saturating_sub(listed) < cfg.orphan_grace_secs {
+                continue;
+            }
+        }
         // The age must come from a HEAD taken NOW, never from the
         // listing above. That listing predates the fence, and rule 4
         // (adoption REWRITES what it adopts) works by refreshing a
@@ -896,8 +909,8 @@ pub async fn sweep_chunks(store: &dyn ObjectStore, cfg: &LeanConfig) -> LeanResu
         // DELETE time; reading it from a pre-fence snapshot was an
         // implementation that did not match the rule it was built to.
         //
-        // One HEAD per CANDIDATE, not per chunk: candidates are the
-        // unreferenced ones, a short list on a healthy workspace.
+        // One HEAD per CANDIDATE past the grace by the listing, not per
+        // chunk: a busy workspace supersedes chunks on every publish.
         //
         // Gone already ⇒ nothing to do. Any other HEAD failure, or no
         // timestamp ⇒ leave it: a store that cannot date its objects

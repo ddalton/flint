@@ -5264,6 +5264,64 @@ async fn the_chunk_reaper_judges_the_grace_now_not_when_it_listed() {
     assert_eq!(before, after, "chunks disappeared: {before} → {after}");
 }
 
+/// What the sweep COSTS inside the fence. Every publish of a small
+/// workspace supersedes its chunks, and each one stays inside the grace
+/// for an hour, so a reaper that HEADs every unreferenced chunk to date
+/// it pays one HEAD per publish of the last hour, per commit, one at a
+/// time: the contention drill measured 700 ms of a 1 s hold after five
+/// minutes of six writers. A chunk the LISTING already shows inside the
+/// grace needs no HEAD — a rewrite only makes an object younger, so the
+/// listing's age bounds the HEAD's from above.
+#[tokio::test]
+async fn the_chunk_reaper_does_not_head_what_the_listing_shows_inside_the_grace() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = cfg_for(dir.path());
+    cfg.chunk_target = 64;
+    cfg.chunk_min = 16;
+    cfg.chunk_max = 256;
+    cfg.orphan_grace_secs = 3600;
+
+    let mut m = manifest_of(600, 1);
+    let mut prev: Option<(super::manifest::ManifestHandle, Vec<super::chunk::ChunkRef>)> = None;
+    for seq in 1..=6u64 {
+        m.seq = seq;
+        m.entries.insert(format!("src/f{:05}.txt", seq * 97), entry_at(&format!("v{seq}"), seq));
+        let (h, c) = match &prev { Some((h, c)) => (Some(h), c.as_slice()), None => (None, &[][..]) };
+        manifest::cas_write_chunked(store.as_ref(), &cfg, &m, h, c,
+            manifest::PublishStamps { epoch: 1, flush_uuid: "u", boundary_source: None })
+            .await.unwrap();
+        let lp = manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap();
+        let chunks = match lp.pointer.entries().unwrap() {
+            super::manifest::Entries::Chunked(c) => c.to_vec(),
+            _ => panic!("not chunked"),
+        };
+        prev = Some((super::manifest::ManifestHandle { etag: lp.etag, legacy: false, prev_chunks: Vec::new() }, chunks));
+    }
+    let prefix = format!("{}/{}/chunks/", cfg.prefix, super::LEAN_DIR);
+    let live: Vec<String> = prev.as_ref().unwrap().1.iter().map(|r| r.addr.clone()).collect();
+    let orphans = store.list(&prefix).await.unwrap().iter()
+        .filter(|o| !live.iter().any(|a| o.key.ends_with(a.as_str()))).count();
+    assert!(orphans >= 5, "PRECONDITION: five publishes left {orphans} unreferenced chunks");
+
+    store.reset_op_counts();
+    assert_eq!(manifest::sweep_chunks(store.as_ref(), &cfg).await.unwrap(), 0, "a chunk inside the grace was collected");
+    let heads = store.op_counts().get("head").copied().unwrap_or(0);
+    assert_eq!(heads, 0, "the reaper HEADed {heads} chunks the listing already showed inside the grace");
+
+    // Past the grace they are still dated by a HEAD, and collected.
+    for o in store.list(&prefix).await.unwrap() {
+        store.backdate_epoch(&o.key, 3700);
+    }
+    store.reset_op_counts();
+    let n = manifest::sweep_chunks(store.as_ref(), &cfg).await.unwrap();
+    assert_eq!(n, orphans, "past the grace the reaper took {n} of {orphans}");
+    assert!(store.op_counts().get("head").copied().unwrap_or(0) >= orphans as u64, "a chunk was collected without a HEAD");
+    for a in &live {
+        assert!(store.head(&cfg.chunk_key(a)).await.is_ok(), "the reaper took a LIVE chunk {a}");
+    }
+}
+
 /// REACHABILITY: a barrier actually reaps unreferenced chunks.
 ///
 /// The reaper existed, was written to four model-established rules and
