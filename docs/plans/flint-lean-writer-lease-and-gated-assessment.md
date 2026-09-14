@@ -555,6 +555,28 @@ re-read does not close it: the supersede is lease-free. The model hides
 it (its 412 arm parks, and `Inv_NoDangling` checks existence, not the
 generation).
 
+**Found on real S3 by the drill (finding 11, FIXED):** S3 answers an
+If-Match PUT on a key that no longer exists with 404 NoSuchKey; Ozone
+2.2.1 and the in-memory double answer 412. The "vanished base is a create"
+rule lived behind the 412, so on S3 a writer whose edited path a peer's GC
+had collected failed every barrier from then on — host leg H2's fixed arm
+showed it right after the F2 re-read correctly withheld the citation. The
+404 now takes the same rule (whole PUT and compose); the double answers
+S3's 404 by default, and the vanished-base test runs against both answers.
+The drill's host legs on S3, with single-mutation controls built from the
+drill commit: H1 fixed PASS / control FAIL with F1's signature; H3 fixed
+PASS / control FAIL with F3's; H2 control FAIL with F2's, fixed FAIL on
+finding 11; H5 reproduced finding 10 (`lean/e2e/writers-live/results/2026-09-13/`).
+
+**Ozone does not enforce If-Match on DELETE.** `probe-conditional` on
+Ozone 2.2.1's s3g failed its DELETE leg, and the AWS CLI confirmed it with
+a control: the same `delete-object --if-match <wrong etag>` is 412 on S3
+and 204-and-deleted on Ozone. Fix 1 above (the conditional GC delete) is
+therefore VOID on Ozone: a writer's GC can delete a peer's upload there.
+Until that is solved, more than one writer on an Ozone workspace is
+unsafe; one writer is unaffected (its GC runs under its own lease and no
+peer uploads). Not yet enforced in code.
+
 **Still open, found after the fixes (finding 10):** a writer lost for good
 between an upload and its commit — its pod replaced, its node gone — leaves
 bytes at the key that no manifest cites and no inbox entry tracks. Nothing

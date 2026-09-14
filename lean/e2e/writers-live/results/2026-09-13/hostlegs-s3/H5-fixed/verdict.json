@@ -1,0 +1,52 @@
+{
+  "leg": "H5",
+  "arm": "fixed",
+  "dir": "/mnt/nvme/h/out/H5-fixed",
+  "probe": "flint-sync: probe-conditional PASS \u2014 PUT (h/h5-fixed-20260914T032227Z-probe/.flint/lean/probe-conditional) and DELETE (h/h5-fixed-20260914T032227Z-probe/.flint/lean/probe-conditional-delete)",
+  "facts": [
+    {
+      "name": "a-killed",
+      "ok": true,
+      "detail": "rc=137",
+      "fixture": true
+    }
+  ],
+  "expected": "FAIL",
+  "race_events": {},
+  "oracles": {
+    "O1_race": {
+      "pass": true,
+      "problems": [
+        "not judged: H5's race state is the kill"
+      ]
+    },
+    "O1_final": {
+      "pass": false,
+      "problems": [
+        "p1.txt: cited 0b58c0ded1385b945c79b539c88c0093 but HEAD d16ce8fca83055d15fa68d43ba611ea4",
+        "p2.bin: cited 82d48399cdd748600af3bff743cc57ce but HEAD 870a02c44eb1e538621fb2a71b70e1e2"
+      ]
+    },
+    "O2": {
+      "pass": false,
+      "problems": [
+        "p1.txt differs between B and C",
+        "p2.bin differs between B and C"
+      ],
+      "diffs": {
+        "B": {
+          "extra_in_writer": [],
+          "missing_in_writer": [],
+          "differ": [
+            "p1.txt",
+            "p2.bin"
+          ]
+        }
+      }
+    }
+  },
+  "post_barrier_failures": [],
+  "status": "FAIL",
+  "reason": "(expected: finding-10 residual: B and a fresh checkout disagree on ['p1.txt', 'p2.bin']; citations whose key holds other bytes: ['p1.txt', 'p2.bin']) oracles: O1 p1.txt: cited 0b58c0ded1385b945c79b539c88c0093 but HEAD d16ce8fca83055d15fa68d43ba611ea4; O1 p2.bin: cited 82d48399cdd748600af3bff743cc57ce but HEAD 870a02c44eb1e538621fb2a71b70e1e2; O2 p1.txt differs between B and C; O2 p2.bin differs between B and C",
+  "meets_expectation": true
+}

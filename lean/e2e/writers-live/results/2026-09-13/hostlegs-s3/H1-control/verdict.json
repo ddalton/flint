@@ -1,0 +1,104 @@
+{
+  "leg": "H1",
+  "arm": "control",
+  "dir": "/mnt/nvme/h/out/H1-control",
+  "probe": "flint-sync: probe-conditional PASS \u2014 PUT (h/h1-control-20260914T031955Z-probe/.flint/lean/probe-conditional) and DELETE (h/h1-control-20260914T031955Z-probe/.flint/lean/probe-conditional-delete)",
+  "facts": [
+    {
+      "name": "b-has-seed",
+      "ok": true,
+      "detail": "",
+      "fixture": true
+    },
+    {
+      "name": "first-absence-withheld",
+      "ok": true,
+      "detail": "",
+      "fixture": true
+    },
+    {
+      "name": "a-race-exit",
+      "ok": true,
+      "detail": "rc=0",
+      "fixture": false
+    },
+    {
+      "name": "b-race-exit",
+      "ok": true,
+      "detail": "rc=0",
+      "fixture": false
+    }
+  ],
+  "expected": "FAIL",
+  "race_events": {
+    "hold": {
+      "ts_ms": 1789355997854,
+      "mono_ms": 271,
+      "holder": "lean-07c5c7df-ab84-4a9c-b99d-97ab2201fefd",
+      "ev": "drill_hold",
+      "flush": "423ac793-6d1a-4ba1-a33b-fca8963018f7",
+      "path": "x.txt",
+      "secs": 20,
+      "where": "gc"
+    },
+    "put": {
+      "ts_ms": 1789355998042,
+      "mono_ms": 72,
+      "holder": "lean-19a8bb6b-7028-407e-b792-3c6fdc6e97dd",
+      "ev": "upload",
+      "etag": "\"51770cc3c38e6012bf8074494e6ce75b\"",
+      "flush": "1ad813a5-4607-4de8-8cb4-f8379199c6a4",
+      "outcome": "put",
+      "path": "x.txt"
+    },
+    "gc": {
+      "ts_ms": 1789356017883,
+      "mono_ms": 20300,
+      "holder": "lean-07c5c7df-ab84-4a9c-b99d-97ab2201fefd",
+      "ev": "gc",
+      "flush": "423ac793-6d1a-4ba1-a33b-fca8963018f7",
+      "head": "\"b32cb35b713433f6611db2f8026023ad\"",
+      "path": "x.txt",
+      "result": "deleted"
+    }
+  },
+  "oracles": {
+    "O1_race": {
+      "pass": false,
+      "problems": [
+        "x.txt: cited 51770cc3c38e6012bf8074494e6ce75b but HEAD 404"
+      ]
+    },
+    "O1_final": {
+      "pass": false,
+      "problems": [
+        "fresh checkout exit 1",
+        "x.txt: cited 51770cc3c38e6012bf8074494e6ce75b but HEAD 404"
+      ]
+    },
+    "O2": {
+      "pass": false,
+      "problems": [
+        "B has x.txt, C does not"
+      ],
+      "diffs": {
+        "A": {
+          "extra_in_writer": [],
+          "missing_in_writer": [],
+          "differ": []
+        },
+        "B": {
+          "extra_in_writer": [
+            "x.txt"
+          ],
+          "missing_in_writer": [],
+          "differ": []
+        }
+      }
+    }
+  },
+  "post_barrier_failures": [],
+  "status": "FAIL",
+  "reason": "(expected: F1 signature: A's GC deleted x.txt unconditionally (head b32cb35b713433f6611db2f8026023ad) after B's PUT 51770cc3c38e6012bf8074494e6ce75b landed; B's commit cites it and HEAD is 404) oracles: O1(race) x.txt: cited 51770cc3c38e6012bf8074494e6ce75b but HEAD 404; O1 fresh checkout exit 1; O1 x.txt: cited 51770cc3c38e6012bf8074494e6ce75b but HEAD 404; O2 B has x.txt, C does not",
+  "meets_expectation": true
+}

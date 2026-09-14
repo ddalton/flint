@@ -1,0 +1,96 @@
+{
+  "leg": "H1",
+  "arm": "fixed",
+  "dir": "/mnt/nvme/h/out/H1-fixed",
+  "probe": "flint-sync: probe-conditional PASS \u2014 PUT (h/h1-fixed-20260914T031928Z-probe/.flint/lean/probe-conditional) and DELETE (h/h1-fixed-20260914T031928Z-probe/.flint/lean/probe-conditional-delete)",
+  "facts": [
+    {
+      "name": "b-has-seed",
+      "ok": true,
+      "detail": "",
+      "fixture": true
+    },
+    {
+      "name": "first-absence-withheld",
+      "ok": true,
+      "detail": "",
+      "fixture": true
+    },
+    {
+      "name": "a-race-exit",
+      "ok": true,
+      "detail": "rc=0",
+      "fixture": false
+    },
+    {
+      "name": "b-race-exit",
+      "ok": true,
+      "detail": "rc=0",
+      "fixture": false
+    }
+  ],
+  "expected": "PASS",
+  "race_events": {
+    "hold": {
+      "ts_ms": 1789355970949,
+      "mono_ms": 259,
+      "holder": "lean-a2cfc0c3-bb53-40ef-8ea4-70ad0f9a86cf",
+      "ev": "drill_hold",
+      "flush": "c59bae84-719c-4718-a807-2a1fb5a66e91",
+      "path": "x.txt",
+      "secs": 20,
+      "where": "gc"
+    },
+    "put": {
+      "ts_ms": 1789355971148,
+      "mono_ms": 58,
+      "holder": "lean-4517186b-0f5d-434a-b2c5-6d1deb9d99b5",
+      "ev": "upload",
+      "etag": "\"b131260bf816a6e35aa22c3572a7c985\"",
+      "flush": "0186dadd-537e-498c-bca8-530f2422986a",
+      "outcome": "put",
+      "path": "x.txt"
+    },
+    "gc": {
+      "ts_ms": 1789355990988,
+      "mono_ms": 20299,
+      "holder": "lean-a2cfc0c3-bb53-40ef-8ea4-70ad0f9a86cf",
+      "ev": "gc",
+      "flush": "c59bae84-719c-4718-a807-2a1fb5a66e91",
+      "head": "\"b131260bf816a6e35aa22c3572a7c985\"",
+      "path": "x.txt",
+      "recognized": "\"1e4f909985c53fa8ecb82af058c9eba3\"",
+      "result": "skip"
+    }
+  },
+  "oracles": {
+    "O1_race": {
+      "pass": true,
+      "problems": []
+    },
+    "O1_final": {
+      "pass": true,
+      "problems": []
+    },
+    "O2": {
+      "pass": true,
+      "problems": [],
+      "diffs": {
+        "A": {
+          "extra_in_writer": [],
+          "missing_in_writer": [],
+          "differ": []
+        },
+        "B": {
+          "extra_in_writer": [],
+          "missing_in_writer": [],
+          "differ": []
+        }
+      }
+    }
+  },
+  "post_barrier_failures": [],
+  "status": "PASS",
+  "reason": "O1 O2 clean; A's GC result=skip head=b131260bf816a6e35aa22c3572a7c985 (want skip at B's b131260bf816a6e35aa22c3572a7c985)",
+  "meets_expectation": true
+}

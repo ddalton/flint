@@ -1,0 +1,12 @@
+name: f2-no-commit-reread
+file: lean/syncer/src/barrier.rs
+leg: H2
+defect: F2, the adopt window (model LeanBarrierLeaseAdoptBlind). An upload whose 412 finds its own bytes already at the key adopts that OBSERVED etag with no lease; the peer's commit uncites the path and its GC deletes the object before the adopter's claim; the adopter cites an object that is gone.
+unit_test: an_adopted_upload_deleted_by_the_peer_before_the_claim_is_not_cited
+expect_fail: but the object is gone
+note: the loop header is rewritten so the body never runs; every observed citation goes to the CAS unchecked, as before the fix (ba4f53d9 had no observed set at all). The body still compiles, so nothing else moves.
+=== OLD ===
+            for path in &observed {
+=== NEW ===
+            for path in observed.iter().filter(|_| false) {
+=== END ===

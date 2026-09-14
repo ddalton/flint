@@ -1,0 +1,6 @@
+{"name":"first-absence-withheld","ok":true,"detail":"cites b6eced839f5630598dcd7bab677ff9c9","fixture":true}
+{"name":"b-race-exit","ok":true,"detail":"rc=0","fixture":false}
+{"name":"a-race-exit","ok":true,"detail":"rc=0","fixture":false}
+{"name":"post-rc-A-1","ok":false,"detail":"A barrier round 1 exit 1","fixture":false}
+{"name":"post-rc-A-2","ok":false,"detail":"A barrier round 2 exit 1","fixture":false}
+{"name":"post-rc-A-3","ok":false,"detail":"A barrier round 3 exit 1","fixture":false}

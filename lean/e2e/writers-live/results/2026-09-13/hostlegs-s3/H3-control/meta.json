@@ -1,0 +1,21 @@
+{
+  "leg": "H3",
+  "arm": "control",
+  "bucket": "flint-lean-writers-20260914",
+  "endpoint": null,
+  "region": "us-west-1",
+  "prefix": "h/h3-control-20260914T032201Z",
+  "run_root": "/mnt/nvme/h/H3-control-20260914T032201Z",
+  "started_utc": "20260914T032201Z",
+  "writer_bin": "/mnt/nvme/rig/hbin/flint-sync-f3-sync-advances-hidden-base",
+  "writer_bin_sha256": "29b904aa4849ff79cb1486d119bc3a265ab9204ff1d5180aa76f03df36792ad0",
+  "oracle_bin": "/mnt/nvme/rig/bin/flint-sync",
+  "oracle_bin_sha256": "0c492ecd1ded1889793159232fe250366db41f69a872a8f08605c1aedf0435ea",
+  "gateway_bin": "/mnt/nvme/rig/bin/flint-lean-gateway",
+  "hold_gc_secs": 20,
+  "hold_commit_secs": 30,
+  "wait_secs": 180,
+  "quiesce_rounds": 3,
+  "h5_mode": "commit-hold",
+  "h5_big_mb": 512
+}

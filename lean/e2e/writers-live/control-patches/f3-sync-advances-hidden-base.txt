@@ -1,0 +1,38 @@
+name: f3-sync-advances-hidden-base
+file: lean/syncer/src/sync.rs
+leg: H3
+defect: F3, the sync overlay (model LeanBarrierLeaseSyncOverlayStale). `sync` judges a path against an inbox entry that hides the manifest's version, then advances its merge base to the manifest anyway; a change the tree never received (here a peer's delete) is skipped for good.
+unit_test: a_sync_does_not_advance_its_base_past_a_change_the_inbox_hid
+expect_fail: B's sync advanced its base past A's delete and kept the file
+note: ONE contiguous replacement that removes the keep-the-base rule from BOTH arms of step 5, restoring ba4f53d9's step 5 exactly: the whole-tree arm sets inst_base to the manifest's, and the scoped arm advances every applied path. `hidden` is still computed (the `sync` trace event reads it), so the build has no new warnings.
+=== OLD ===
+                let before = std::mem::take(&mut baseline.inst_base);
+                baseline.inst_base = theirs_base.clone();
+                for path in &hidden {
+                    match before.get(*path) {
+                        Some(etag) => {
+                            baseline.inst_base.insert((*path).clone(), etag.clone());
+                        }
+                        None => {
+                            baseline.inst_base.remove(*path);
+                        }
+                    }
+                }
+                baseline.seq = theirs.seq;
+                report.seq = theirs.seq;
+            }
+            Some(_) => {
+                for path in &advanced.0 {
+                    if hidden.contains(path) {
+                        continue;
+                    }
+=== NEW ===
+                // CONTROL f3-sync-advances-hidden-base: the merge base moves to
+                // the manifest even where an inbox overlay hid its version.
+                baseline.inst_base = theirs_base.clone();
+                baseline.seq = theirs.seq;
+                report.seq = theirs.seq;
+            }
+            Some(_) => {
+                for path in &advanced.0 {
+=== END ===

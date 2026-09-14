@@ -1,0 +1,12 @@
+name: f1-unconditional-gc
+file: lean/syncer/src/barrier.rs
+leg: H1
+defect: F1, the GC gap (model LeanBarrierLeaseGCUnconditional). The GC HEADs a path, recognizes the etag, then DELETEs with no condition; a peer's lease-free upload that lands between the two is deleted, and the peer's commit cites it.
+unit_test: a_peer_upload_between_the_gc_head_and_its_delete_is_not_deleted
+expect_fail: the manifest cites B's edit, and A's GC deleted the object under it
+note: the pre-fix code (ba4f53d9) was `self.store.delete(&key).await?;` with no 412 arm. The control keeps the current 412 arm (it compiles against delete's StoreResult and is simply never reached), so the ONLY moved dimension is the missing If-Match on the DELETE.
+=== OLD ===
+                        match self.store.delete_if_match(&key, &meta.etag).await {
+=== NEW ===
+                        match self.store.delete(&key).await {
+=== END ===

@@ -143,6 +143,21 @@ covered by the stability guarantee.
   `flint_lean::inbox::hitl_may_overwrite`; a syncer repro and a gateway
   test fail without it, and the model gains `HitlOverwritesTrackedOnly`
   with its mutation `LeanBarrierLeaseHitlOverUncited`.
+- **lean: an upload whose base a peer's garbage collector removed no
+  longer wedges the writer on S3.** Found by the writers drill's host leg
+  H2 on real S3: after a commit rightly withheld an adopted citation whose
+  object a peer had collected, every later barrier of that writer failed
+  with `put_whole: 404 NoSuchKey`, and it published nothing again. The
+  upload is conditional on the base's etag, and S3 answers If-Match on a
+  key that no longer exists with 404 NoSuchKey — Ozone 2.2.1 answers 412,
+  and so did the in-memory double. The syncer's "a vanished base is a
+  create" rule (the 2026-09-12 review's inbox-5 fix) sat behind the 412
+  arm, so it was green in tests and never ran on S3. The 404 now takes
+  the same rule on the whole-object PUT and on the compose path, and a 404
+  on the knowing supersede parks for the next barrier. `MemoryStore`
+  answers S3's 404 by default and Ozone's 412 behind
+  `with_if_match_missing_as_412`; the vanished-base test runs against both
+  answers and both upload paths, each arm mutation-checked.
 - **lean: `uploadPartParallelism` defaults to 8, behind a new upload
   bytes-in-flight bound `uploadInflightMb` (default 256).** v1.51.0
   shipped the 8-wide per-object upload as an opt-in, measured at 3.6–4.2x

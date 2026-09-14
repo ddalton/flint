@@ -1,0 +1,137 @@
+{
+  "leg": "H2",
+  "arm": "fixed",
+  "dir": "/mnt/nvme/h/out/H2-fixed",
+  "probe": "flint-sync: probe-conditional PASS \u2014 PUT (h/h2-fixed-20260914T032021Z-probe/.flint/lean/probe-conditional) and DELETE (h/h2-fixed-20260914T032021Z-probe/.flint/lean/probe-conditional-delete)",
+  "facts": [
+    {
+      "name": "first-absence-withheld",
+      "ok": true,
+      "detail": "cites b6eced839f5630598dcd7bab677ff9c9",
+      "fixture": true
+    },
+    {
+      "name": "b-race-exit",
+      "ok": true,
+      "detail": "rc=0",
+      "fixture": false
+    },
+    {
+      "name": "a-race-exit",
+      "ok": true,
+      "detail": "rc=0",
+      "fixture": false
+    },
+    {
+      "name": "post-rc-A-1",
+      "ok": false,
+      "detail": "A barrier round 1 exit 1",
+      "fixture": false
+    },
+    {
+      "name": "post-rc-A-2",
+      "ok": false,
+      "detail": "A barrier round 2 exit 1",
+      "fixture": false
+    },
+    {
+      "name": "post-rc-A-3",
+      "ok": false,
+      "detail": "A barrier round 3 exit 1",
+      "fixture": false
+    }
+  ],
+  "expected": "PASS",
+  "race_events": {
+    "b_claim": {
+      "ts_ms": 1789356024415,
+      "mono_ms": 104,
+      "holder": "lean-98e401d9-3cc2-406a-a08e-482f0e72b621",
+      "ev": "claim",
+      "epoch": 4,
+      "how": "released",
+      "prior": {
+        "epoch": 3,
+        "handoff": null,
+        "holder": "lean-98e401d9-3cc2-406a-a08e-482f0e72b621",
+        "released": true,
+        "waiters": []
+      },
+      "verdict": "claimed"
+    },
+    "b_gc": {
+      "ts_ms": 1789356054622,
+      "mono_ms": 30311,
+      "holder": "lean-98e401d9-3cc2-406a-a08e-482f0e72b621",
+      "ev": "gc",
+      "flush": "7d34a93a-b0b0-4cdc-b3a4-5d7b2d7581b3",
+      "head": "\"b6eced839f5630598dcd7bab677ff9c9\"",
+      "path": "x.txt",
+      "result": "deleted"
+    },
+    "adopt": {
+      "ts_ms": 1789356024586,
+      "mono_ms": 51,
+      "holder": "lean-86535d80-f040-4fcc-afcf-62cbb11b89db",
+      "ev": "upload",
+      "etag": "\"b6eced839f5630598dcd7bab677ff9c9\"",
+      "flush": "704b29b9-7a0e-4b7f-b137-8b8f96eb98da",
+      "outcome": "adopted",
+      "path": "x.txt"
+    },
+    "a_claim": {
+      "ts_ms": 1789356055434,
+      "mono_ms": 30899,
+      "holder": "lean-86535d80-f040-4fcc-afcf-62cbb11b89db",
+      "ev": "claim",
+      "epoch": 5,
+      "how": "released",
+      "prior": {
+        "epoch": 4,
+        "handoff": "lean-86535d80-f040-4fcc-afcf-62cbb11b89db",
+        "holder": "lean-98e401d9-3cc2-406a-a08e-482f0e72b621",
+        "released": true,
+        "waiters": []
+      },
+      "verdict": "claimed"
+    }
+  },
+  "oracles": {
+    "O1_race": {
+      "pass": true,
+      "problems": []
+    },
+    "O1_final": {
+      "pass": true,
+      "problems": []
+    },
+    "O2": {
+      "pass": false,
+      "problems": [
+        "A has x.txt, C does not"
+      ],
+      "diffs": {
+        "A": {
+          "extra_in_writer": [
+            "x.txt"
+          ],
+          "missing_in_writer": [],
+          "differ": []
+        },
+        "B": {
+          "extra_in_writer": [],
+          "missing_in_writer": [],
+          "differ": []
+        }
+      }
+    }
+  },
+  "post_barrier_failures": [
+    "A barrier round 1 exit 1",
+    "A barrier round 2 exit 1",
+    "A barrier round 3 exit 1"
+  ],
+  "status": "FAIL",
+  "reason": "a writer barrier after the race failed: A barrier round 1 exit 1; a writer barrier after the race failed: A barrier round 2 exit 1; a writer barrier after the race failed: A barrier round 3 exit 1; O2 A has x.txt, C does not",
+  "meets_expectation": false
+}

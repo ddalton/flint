@@ -1676,6 +1676,12 @@ impl Syncer {
                     // nothing published; the next barrier re-queues.
                     return Ok(UploadOutcome::Deferred);
                 }
+                // S3's answer to If-Match on a missing key (see upload_one):
+                // the base vanished, and a vanished base is a create.
+                Err(StoreError::NotFound(_)) if matches!(condition, PutCondition::IfMatch(_)) => {
+                    condition = PutCondition::IfNoneMatchAny;
+                    continue;
+                }
                 Err(StoreError::PreconditionFailed(_)) => {
                     // The AdoptOwn recognizer compares OUR bytes' checksum
                     // against what landed, and without the pre-pass we do
@@ -1799,6 +1805,22 @@ impl Syncer {
             Ok(meta) => Ok(UploadOutcome::published(
                 path, key, meta.etag, crc, uploaded_len, scanned, generation, epoch,
             )),
+            // S3 answers If-Match on a key that no longer exists with 404
+            // NoSuchKey, not 412 (Ozone answers 412, and so did the
+            // double): the base is gone — a peer's GC collected it, or a
+            // bucket-level delete. The same rule as the 412 arm's vanished
+            // HEAD below: a vanished base is a create. Without this arm the
+            // rule never ran on S3, and a writer whose edited path a peer
+            // deleted failed EVERY barrier (drill host leg H2, 2026-09-13).
+            Err(StoreError::NotFound(_)) if matches!(condition, PutCondition::IfMatch(_)) => {
+                let meta = self
+                    .store
+                    .put_whole(&key, body, &PutCondition::IfNoneMatchAny, &stamps, crc)
+                    .await?;
+                Ok(UploadOutcome::published(
+                    path, key, meta.etag, crc, uploaded_len, scanned, generation, epoch,
+                ))
+            }
             Err(StoreError::PreconditionFailed(_)) => {
                 // The 412 policy: my own crashed/torn PUT ⇒ adopt; a
                 // foreign version ⇒ the consume-dirty rule, at upload time
@@ -1850,7 +1872,10 @@ impl Syncer {
                     .await
                 {
                     Ok(m) => m,
-                    Err(StoreError::PreconditionFailed(_)) => {
+                    // 412 (a writer landed between) or 404 (a GC removed
+                    // it between the HEAD and this PUT): written under us
+                    // right now. Park; the next barrier retries.
+                    Err(StoreError::PreconditionFailed(_)) | Err(StoreError::NotFound(_)) => {
                         return Ok(UploadOutcome::Parked { foreign_etag: head.etag });
                     }
                     Err(e) => return Err(e.into()),

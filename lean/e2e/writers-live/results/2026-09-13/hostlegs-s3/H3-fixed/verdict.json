@@ -1,0 +1,103 @@
+{
+  "leg": "H3",
+  "arm": "fixed",
+  "dir": "/mnt/nvme/h/out/H3-fixed",
+  "probe": "flint-sync: probe-conditional PASS \u2014 PUT (h/h3-fixed-20260914T032135Z-probe/.flint/lean/probe-conditional) and DELETE (h/h3-fixed-20260914T032135Z-probe/.flint/lean/probe-conditional-delete)",
+  "facts": [
+    {
+      "name": "first-absence-withheld",
+      "ok": true,
+      "detail": "cites bea3d0e17b0468330a458b4024e79d1f",
+      "fixture": true
+    },
+    {
+      "name": "ui-write",
+      "ok": true,
+      "detail": "200 {\"etag\":\"\\\"25795306540b0b3d8ce97d8b1f59c647\\\"\"}",
+      "fixture": true
+    },
+    {
+      "name": "b-sync-exit",
+      "ok": true,
+      "detail": "rc=0",
+      "fixture": true
+    },
+    {
+      "name": "b-applied-hitl",
+      "ok": true,
+      "detail": "",
+      "fixture": true
+    },
+    {
+      "name": "a-race-exit",
+      "ok": true,
+      "detail": "rc=0",
+      "fixture": false
+    }
+  ],
+  "expected": "PASS",
+  "race_events": {
+    "hold": {
+      "ts_ms": 1789356098194,
+      "mono_ms": 342,
+      "holder": "lean-9e6acd86-fc31-495c-9903-765cc79f032e",
+      "ev": "drill_hold",
+      "flush": "1bfadda2-fa0a-4cbd-ad3d-46b0d528b641",
+      "path": "x.txt",
+      "secs": 20,
+      "where": "gc"
+    },
+    "sync": {
+      "ts_ms": 1789356098443,
+      "mono_ms": 0,
+      "holder": "lean-f2923c73-f6bf-440c-9847-774e94f258e0",
+      "ev": "sync",
+      "applied": 1,
+      "conflicts": 0,
+      "deleted": 0,
+      "hidden": 1,
+      "scoped": false,
+      "seq": 2
+    },
+    "gc": {
+      "ts_ms": 1789356118232,
+      "mono_ms": 20380,
+      "holder": "lean-9e6acd86-fc31-495c-9903-765cc79f032e",
+      "ev": "gc",
+      "flush": "1bfadda2-fa0a-4cbd-ad3d-46b0d528b641",
+      "head": "\"25795306540b0b3d8ce97d8b1f59c647\"",
+      "path": "x.txt",
+      "result": "deleted"
+    }
+  },
+  "oracles": {
+    "O1_race": {
+      "pass": true,
+      "problems": []
+    },
+    "O1_final": {
+      "pass": true,
+      "problems": []
+    },
+    "O2": {
+      "pass": true,
+      "problems": [],
+      "diffs": {
+        "A": {
+          "extra_in_writer": [],
+          "missing_in_writer": [],
+          "differ": []
+        },
+        "B": {
+          "extra_in_writer": [],
+          "missing_in_writer": [],
+          "differ": []
+        }
+      }
+    }
+  },
+  "post_barrier_failures": [],
+  "status": "PASS",
+  "reason": "O1 O2 clean; B's tree has no x.txt",
+  "meets_expectation": true
+}

@@ -8062,28 +8062,76 @@ async fn a_same_size_rewrite_within_the_scan_second_is_still_published() {
     assert_eq!(&body[..], br#"{"ok":2}"#);
 }
 
-/// inbox-5. A 412 whose follow-up HEAD finds NO object (the base object
-/// is gone: a bucket-level delete, or our own GC after a crash between
-/// the CAS and the baseline rewrite) propagated as the barrier's error
-/// — every barrier, forever, and every publish touch consumed and never
-/// acked. A vanished base is a fresh create.
-#[tokio::test]
-async fn a_412_on_a_vanished_object_recreates_instead_of_failing_forever() {
-    let store = Arc::new(MemoryStore::new());
+/// inbox-5. An upload whose base object is gone (a bucket-level delete,
+/// a peer's GC, or our own GC after a crash between the CAS and the
+/// baseline rewrite) propagated as the barrier's error — every barrier,
+/// forever, and every publish touch consumed and never acked. A vanished
+/// base is a fresh create.
+///
+/// The store's ANSWER to If-Match on a missing key differs: S3 says 404
+/// NoSuchKey, Ozone says 412. The first fix handled only the 412, because
+/// the double only gave the 412 — and the drill's host leg H2 on real S3
+/// wedged a writer on the 404 (finding 11). So every arm runs against
+/// both answers, and against both upload paths (whole PUT, compose).
+async fn vanished_base_recreates(answer_412: bool, compose: bool) {
+    let store = if answer_412 {
+        Arc::new(MemoryStore::new().with_if_match_missing_as_412())
+    } else {
+        Arc::new(MemoryStore::new())
+    };
     let dir = tempfile::tempdir().unwrap();
     let mut a = syncer(&store, dir.path()).await;
+    if compose {
+        a.cfg.whole_put_max = 4; // every body below goes through the compose arm
+    }
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
-    write(dir.path(), "x.txt", "v1");
+    write(dir.path(), "x.txt", "v1 body");
     a.run_barrier().await.unwrap();
 
     store.delete(&a.cfg.file_key("x.txt")).await.unwrap();
+    // The control: the store really gives the answer this arm is about.
+    let probe = store
+        .put_whole(
+            &a.cfg.file_key("x.txt"),
+            Bytes::from_static(b"probe"),
+            &PutCondition::IfMatch("\"gone\"".into()),
+            &GenerationStamps { generation: 0, epoch: 0, flush_uuid: "probe".into(), boundary_source: None, posix: None },
+            crc64_nvme(b"probe"),
+        )
+        .await
+        .expect_err("If-Match on a missing key must fail");
+    assert_eq!(
+        matches!(probe, flint_store::StoreError::PreconditionFailed(_)),
+        answer_412,
+        "fixture: the double's answer is not the one this arm tests: {probe:?}"
+    );
     write(dir.path(), "x.txt", "v2, longer than before");
     let r = a.run_barrier().await.expect("a vanished base object failed the whole barrier");
     assert!(r.uploaded.contains(&"x.txt".to_string()), "the edit was not published: {r:?}");
     let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
     let (_, body) = store.get_whole(&a.cfg.file_key("x.txt"), Some(&m.entries["x.txt"].etag)).await.unwrap();
     assert_eq!(&body[..], b"v2, longer than before");
+}
+
+#[tokio::test]
+async fn a_vanished_base_recreates_on_s3s_404() {
+    vanished_base_recreates(false, false).await;
+}
+
+#[tokio::test]
+async fn a_vanished_base_recreates_on_ozones_412() {
+    vanished_base_recreates(true, false).await;
+}
+
+#[tokio::test]
+async fn a_vanished_base_recreates_through_compose_on_s3s_404() {
+    vanished_base_recreates(false, true).await;
+}
+
+#[tokio::test]
+async fn a_vanished_base_recreates_through_compose_on_ozones_412() {
+    vanished_base_recreates(true, true).await;
 }
 
 /// inbox-8. Containment refused `.flint/` and nothing else: a citation

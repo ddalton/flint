@@ -1,0 +1,11 @@
+### 03:20:30 probe
+rc=1   probe: flint-sync: probe-conditional FAIL (DELETE): DELETE If-Match on a STALE etag removed the object — this store ignores the condition, so a garbage collector would delete another writer's upload
+### 03:20:32 H1 fixed
+rc=3 LEG H1 fixed VOID the store failed probe-conditional, it cannot host these races: flint-sync: probe-conditional FAIL (DELETE): DELETE If-Match on a STALE etag removed the object — this store ignores the condition, so a garbage collector would delete another writer's upload
+### 03:20:32 H1 control
+rc=3 LEG H1 control VOID the store failed probe-conditional, it cannot host these races: flint-sync: probe-conditional FAIL (DELETE): DELETE If-Match on a STALE etag removed the object — this store ignores the condition, so a garbage collector would delete another writer's upload
+### 03:20:33 H2 fixed
+rc=3 LEG H2 fixed VOID the store failed probe-conditional, it cannot host these races: flint-sync: probe-conditional FAIL (DELETE): DELETE If-Match on a STALE etag removed the object — this store ignores the condition, so a garbage collector would delete another writer's upload
+### 03:20:34 H2 control
+rc=3 LEG H2 control VOID the store failed probe-conditional, it cannot host these races: flint-sync: probe-conditional FAIL (DELETE): DELETE If-Match on a STALE etag removed the object — this store ignores the condition, so a garbage collector would delete another writer's upload
+### DONE 03:20:35

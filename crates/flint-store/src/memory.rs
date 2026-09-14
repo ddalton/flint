@@ -211,6 +211,13 @@ pub struct MemoryStore {
     /// writable (a scoped operator principal): the backstop cannot be
     /// provisioned, which is a DEGRADATION, not a torn view.
     fail_lifecycle_writes: AtomicBool,
+    /// How a conditional write answers `If-Match` on a key that does not
+    /// exist. Real S3 answers 404 `NoSuchKey`; Ozone 2.2.1 answers 412
+    /// (both measured 2026-09-13 with the AWS CLI). The double used to give
+    /// only Ozone's answer, so the syncer's "a vanished base is a create"
+    /// rule — written for the 412 — was green here and wedged every
+    /// barrier on S3 (drill host leg H2). Default: S3's 404.
+    if_match_missing_412: AtomicBool,
     /// Per-operation call counts. Cost measurement is otherwise
     /// guesswork: the request SHAPE of a tick is the thing the plan
     /// prices, and it is not derivable from the code by reading.
@@ -282,6 +289,7 @@ impl MemoryStore {
             peak_get_range: AtomicU64::new(0),
             strip_version_ids: AtomicBool::new(false),
             fail_lifecycle_writes: AtomicBool::new(false),
+            if_match_missing_412: AtomicBool::new(false),
             // Tiny granularity by default so tests compose small
             // files; S3's real limits live in the S3 backend.
             min_part: 1,
@@ -289,6 +297,13 @@ impl MemoryStore {
             part_parallelism: 1,
             upload_gate: None,
         }
+    }
+
+    /// Answer `If-Match` on a missing key with 412, as Ozone's S3 gateway
+    /// does, instead of S3's 404 `NoSuchKey`. See `if_match_missing_412`.
+    pub fn with_if_match_missing_as_412(self) -> Self {
+        self.if_match_missing_412.store(true, Ordering::SeqCst);
+        self
     }
 
     /// Stage this many parts of one compose concurrently (the S3
@@ -551,6 +566,7 @@ impl MemoryStore {
     }
 
     fn check_condition(
+        &self,
         existing: Option<&StoredObject>,
         condition: &PutCondition,
     ) -> StoreResult<()> {
@@ -559,9 +575,10 @@ impl MemoryStore {
             (PutCondition::IfMatch(_), Some(_)) => {
                 Err(StoreError::PreconditionFailed("If-Match: etag differs".into()))
             }
-            (PutCondition::IfMatch(_), None) => {
+            (PutCondition::IfMatch(_), None) if self.if_match_missing_412.load(Ordering::SeqCst) => {
                 Err(StoreError::PreconditionFailed("If-Match: no object".into()))
             }
+            (PutCondition::IfMatch(_), None) => Err(StoreError::NotFound("NoSuchKey: If-Match on a missing key".into())),
             (PutCondition::IfNoneMatchAny, None) => Ok(()),
             (PutCondition::IfNoneMatchAny, Some(_)) => {
                 Err(StoreError::PreconditionFailed("If-None-Match: object exists".into()))
@@ -611,7 +628,7 @@ impl MemoryStore {
     fn epoch_store(&self, key: &str, body: EpochBody, condition: &PutCondition) -> StoreResult<String> {
         let bytes = Bytes::from(serde_json::to_vec(&body).unwrap());
         let mut inner = self.inner.lock().unwrap();
-        Self::check_condition(inner.current(key), condition)?;
+        self.check_condition(inner.current(key), condition)?;
         let mut salted = bytes.to_vec();
         salted.extend_from_slice(&self.upload_seq.fetch_add(1, Ordering::SeqCst).to_be_bytes());
         let obj = StoredObject {
@@ -693,7 +710,7 @@ impl ObjectStore for MemoryStore {
             )));
         }
         let mut inner = self.inner.lock().unwrap();
-        Self::check_condition(inner.current(key), condition)?;
+        self.check_condition(inner.current(key), condition)?;
         let obj = StoredObject {
             etag: put_etag(&body),
             crc64,
@@ -766,7 +783,7 @@ impl ObjectStore for MemoryStore {
         // history under another's name. A double that copied the source
         // meta wholesale would pass a test the real store fails.
         let crc64 = src.crc64;
-        Self::check_condition(inner.current(dst_key), condition)?;
+        self.check_condition(inner.current(dst_key), condition)?;
         let obj = StoredObject {
             etag: put_etag(&bytes),
             crc64,
@@ -1516,7 +1533,7 @@ impl MemoryStore {
             // Fenced by a takeover sweep or lifecycle abort.
             return Err(StoreError::NoSuchUpload(upload_id.into()));
         }
-        Self::check_condition(inner.current(spec.key), &spec.condition)?;
+        self.check_condition(inner.current(spec.key), &spec.condition)?;
         let parts = spec.parts.len();
         let bytes = Bytes::from(assembled);
         let obj = StoredObject {

@@ -1,0 +1,17 @@
+### 03:19:27 probe
+rc=0 
+### 03:19:28 H1 fixed
+rc=0 LEG H1 fixed PASS O1 O2 clean; A's GC result=skip head=b131260bf816a6e35aa22c3572a7c985 (want skip at B's b131260bf816a6e35aa22c3572a7c985)
+### 03:19:55 H1 control
+rc=0 LEG H1 control FAIL (expected: F1 signature: A's GC deleted x.txt unconditionally (head b32cb35b713433f6611db2f8026023ad) after B's PUT 51770cc3c38e6012bf8074494e6ce75b landed; B's commit cites it and HEAD is 404) oracles: O1(race) x.txt: cited 51770cc3c38e6012bf8074494e6ce75b but HEAD 404; O1 fresh checkout exit 1; O1 x.txt: cited 51770cc3c38e6012bf8074494e6ce75b but HEAD 404; O2 B has x.txt, C does not
+### 03:20:21 H2 fixed
+rc=1 LEG H2 fixed FAIL a writer barrier after the race failed: A barrier round 1 exit 1; a writer barrier after the race failed: A barrier round 2 exit 1; a writer barrier after the race failed: A barrier round 3 exit 1; O2 A has x.txt, C does not
+### 03:20:58 H2 control
+rc=0 LEG H2 control FAIL (expected: F2 signature: A adopted x.txt at 144e9f82ce7c0ea7c875baa9ca198c05, B's GC deleted it before A's claim, no re-read ran, and A's commit cites it with HEAD 404) oracles: O1(race) x.txt: cited 144e9f82ce7c0ea7c875baa9ca198c05 but HEAD 404; O1 fresh checkout exit 1; O1 x.txt: cited 144e9f82ce7c0ea7c875baa9ca198c05 but HEAD 404; O2 A has x.txt, C does not
+### 03:21:35 H3 fixed
+rc=0 LEG H3 fixed PASS O1 O2 clean; B's tree has no x.txt
+### 03:22:01 H3 control
+rc=0 LEG H3 control FAIL (expected: F3 signature: B's sync advanced its base past A's delete; B keeps x.txt, the manifest and a fresh checkout do not) oracles: O2 B has x.txt, C does not
+### 03:22:27 H5 fixed
+rc=0 LEG H5 fixed FAIL (expected: finding-10 residual: B and a fresh checkout disagree on ['p1.txt', 'p2.bin']; citations whose key holds other bytes: ['p1.txt', 'p2.bin']) oracles: O1 p1.txt: cited 0b58c0ded1385b945c79b539c88c0093 but HEAD d16ce8fca83055d15fa68d43ba611ea4; O1 p2.bin: cited 82d48399cdd748600af3bff743cc57ce but HEAD 870a02c44eb1e538621fb2a71b70e1e2; O2 p1.txt differs between B and C; O2 p2.bin differs between B and C
+### DONE 03:23:33
