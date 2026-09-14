@@ -12,6 +12,8 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.52.0] - 2026-09-14
+
 ### Added
 
 - **lean: a protocol event trace and per-kind request counters, so a
@@ -299,6 +301,26 @@ covered by the stability guarantee.
   workspace (`docs/plans/flint-lean-writer-lease-and-gated-assessment.md`
   §9). The formal gate drops its 23 gated configurations; the `verbs`
   and `boundary` kind drills drop their gated legs.
+
+### Known limitations
+
+- **lean on Ozone 2.2.x: one writer per workspace.** Ozone 2.2.1 ignores
+  `If-Match` on `DeleteObject` (HDDS-14907, fix version 2.3.0), so a
+  second writer's garbage collector can delete the first writer's upload.
+  S3 enforces it. The syncer does not refuse the configuration yet.
+- **lean: a writer lost for good between an upload and its commit** (pod
+  replaced, node gone) leaves an uncited object: the manifest, a fresh
+  checkout and the live trees disagree about that path until some writer
+  rewrites it. No acknowledged write is lost. Pinned by an ignored test.
+- **lean: a writer that supersedes another writer's not-yet-cited upload**
+  leaves that writer's commit citing a generation the key no longer holds
+  until the superseding writer commits (the bytes are preserved).
+- **lean gateway: a UI write can wait up to the window deadline (180 s)**
+  behind a barrier that died mid-window before it answers.
+- **lean formal gate:** `LeanBarrierLeaseSentinel` still violates
+  `Inv_AckBoundaryCoherent` at depth 19. The code defect its trace exposed
+  is fixed in this release (`remote.seq`); the invariant's one-directional
+  refinement is not.
 
 ## [1.51.0] - 2026-09-13
 
@@ -6865,7 +6887,8 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.51.0...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.52.0...HEAD
+[1.52.0]: https://github.com/ddalton/flint/compare/v1.51.0...v1.52.0
 [1.51.0]: https://github.com/ddalton/flint/compare/v1.50.0...v1.51.0
 [1.50.0]: https://github.com/ddalton/flint/compare/v1.49.0...v1.50.0
 [1.49.0]: https://github.com/ddalton/flint/compare/v1.48.0...v1.49.0
