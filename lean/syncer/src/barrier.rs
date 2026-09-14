@@ -1541,17 +1541,25 @@ impl Syncer {
                 &removals.applied,
             )
             .await?;
+            self.trace("window_clear", serde_json::json!({"flush": flush_uuid}));
             // Reap superseded generations. Immutable metadata that is never
             // collected is a leak that grows by a whole manifest per
             // publish, and this also collects the orphan a crash between the
             // entries PUT and the pointer CAS leaves behind. Best effort by
             // design: a publish that succeeded is not un-done by a failure
             // to tidy up after it.
-            match manifest::sweep_generations(self.store.as_ref(), &self.cfg).await {
-                Ok(0) => {}
-                Ok(n) => eprintln!("flint-sync: reaped {n} superseded manifest generation(s)"),
-                Err(e) => eprintln!("flint-sync: generation sweep: {e}"),
-            }
+            let swept_generations = match manifest::sweep_generations(self.store.as_ref(), &self.cfg).await {
+                Ok(0) => 0,
+                Ok(n) => {
+                    eprintln!("flint-sync: reaped {n} superseded manifest generation(s)");
+                    n
+                }
+                Err(e) => {
+                    eprintln!("flint-sync: generation sweep: {e}");
+                    0
+                }
+            };
+            self.trace("sweep", serde_json::json!({"flush": flush_uuid, "what": "generations", "removed": swept_generations}));
             // And the CHUNK reaper, same reason, same best-effort terms.
             // `sweep_chunks` returns 0 without a request on a workspace that
             // is not chunked, so this costs nothing until the layout moves.
@@ -1562,11 +1570,18 @@ impl Syncer {
             // in the bucket forever. The rules ran in the model and in the
             // suite and never once in production. `the_barrier_reaps...`
             // below is the test that asks whether this line exists at all.
-            match manifest::sweep_chunks(self.store.as_ref(), &self.cfg).await {
-                Ok(0) => {}
-                Ok(n) => eprintln!("flint-sync: reaped {n} unreferenced manifest chunk(s)"),
-                Err(e) => eprintln!("flint-sync: chunk sweep: {e}"),
-            }
+            let swept_chunks = match manifest::sweep_chunks(self.store.as_ref(), &self.cfg).await {
+                Ok(0) => 0,
+                Ok(n) => {
+                    eprintln!("flint-sync: reaped {n} unreferenced manifest chunk(s)");
+                    n
+                }
+                Err(e) => {
+                    eprintln!("flint-sync: chunk sweep: {e}");
+                    0
+                }
+            };
+            self.trace("sweep", serde_json::json!({"flush": flush_uuid, "what": "chunks", "removed": swept_chunks}));
             Ok(())
         }
         .await;

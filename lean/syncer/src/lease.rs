@@ -529,11 +529,20 @@ pub async fn release(sc: &mut Syncer) -> LeanResult<()> {
     let Some(lease) = sc.lease.take() else { return Ok(()) };
     let echo = observed_echo(sc);
     sc.trace("release", serde_json::json!({"epoch": lease.epoch, "waiters_at_claim": lease.waiters}));
+    // `release` above is stamped before the request, `handed_off` after it
+    // lands: the gap between one holder's release and the next claim is
+    // the handoff's own latency plus the reserved waiter's poll delay.
     match sc.store.epoch_handoff(&key, &lease, echo.as_deref()).await {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            sc.trace("handed_off", serde_json::json!({"epoch": lease.epoch, "retried": false}));
+            Ok(())
+        }
         Err(StoreError::PreconditionFailed(_)) => match still_ours(sc, &key, &lease).await {
             Some(adopted) => match sc.store.epoch_handoff(&key, &adopted, echo.as_deref()).await {
-                Ok(()) => Ok(()),
+                Ok(()) => {
+                    sc.trace("handed_off", serde_json::json!({"epoch": adopted.epoch, "retried": true}));
+                    Ok(())
+                }
                 Err(StoreError::PreconditionFailed(_)) => Ok(()), // deposed meanwhile
                 Err(e) => Err(e.into()),
             },
