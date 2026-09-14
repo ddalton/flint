@@ -1,0 +1,151 @@
+{
+  "leg": "A2",
+  "oracles": {
+    "O1": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "checkout_code": 0,
+        "stderr_tail": "flint-sync: checkout \u2014 30 materialized, 0 present, live-tree=false\nflint-sync: phase manifest=0.047s fetch=0.058s commit=0.006s bytes=5042 ranged=0\n",
+        "citations": 30,
+        "heads": 30,
+        "missing_heads": [],
+        "mismatched": [],
+        "extra_heads": [],
+        "checkout_missing_cited": [],
+        "checkout_not_cited": [],
+        "manifest_seq": 148,
+        "problems": []
+      }
+    },
+    "O2": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "checkout_files": 30,
+        "trees": {
+          "agents-0": 30,
+          "agents-1": 30,
+          "agents-2": 30,
+          "agents-3": 30,
+          "agents-4": 30,
+          "agents-5": 30
+        },
+        "diffs": {},
+        "problems": []
+      }
+    },
+    "O3": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "final_source": "checkout",
+        "ops": 529,
+        "parts": 529,
+        "acked_parts": 161,
+        "acked_writes": 161,
+        "acked_writes_by_agent": {
+          "agents-0": 15,
+          "agents-1": 15,
+          "agents-2": 20,
+          "agents-3": 20,
+          "agents-4": 10,
+          "agents-5": 20,
+          "ui": 61
+        },
+        "accounted": {
+          "final": 2,
+          "superseded": 38,
+          "replaced": 44,
+          "preserved": 77
+        },
+        "unacked_parts": {
+          "no-ack": 355,
+          "refused": 13
+        },
+        "acks_by_status": {
+          "ok": 77,
+          "no-ack": 71,
+          "partial": 4,
+          "refused": 13
+        },
+        "preserved_copies": 283,
+        "preserved_unparsed_keys": 0,
+        "multiply_covered": [],
+        "losses_total": 0,
+        "losses": [],
+        "refused_landed_total": 0,
+        "refused_landed": [],
+        "malformed": [],
+        "problems": []
+      }
+    },
+    "O4": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "preserved_objects": 283,
+        "records_by_kind": {
+          "consume-dirty": 114,
+          "upload-412-preserved": 169,
+          "adopt-withheld: the object this barrier found already at its key was replaced or collected before its commit; nothing cited, the path stays dirty and publishes next barrier": 102,
+          "upload-412-parked": 1
+        },
+        "keys_named": 283,
+        "keys_recorded_by_two_writers": 0,
+        "duplicate_object_keys": [],
+        "no_record": [],
+        "missing_object": [],
+        "preserved_key_on_other_kinds": [],
+        "problems": []
+      }
+    },
+    "O5": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "faults_declared": false,
+        "claims_by_trace": {
+          "agents-0": {
+            "claimed:fresh": 1,
+            "waiting": 36,
+            "claimed:released": 30
+          },
+          "agents-1": {
+            "waiting": 39,
+            "claimed:released": 31
+          },
+          "agents-2": {
+            "waiting": 38,
+            "claimed:released": 30
+          },
+          "agents-3": {
+            "claimed:released": 31,
+            "waiting": 39
+          },
+          "agents-4": {
+            "claimed:released": 31,
+            "waiting": 38
+          },
+          "agents-5": {
+            "waiting": 39,
+            "claimed:released": 31
+          }
+        },
+        "waiting": 229,
+        "deadline": 0,
+        "deposed": 0,
+        "orphaned_own": 0,
+        "deadlines": [],
+        "deposals": [],
+        "orphaned_own_claims": [],
+        "problems": []
+      }
+    },
+    "O6": {
+      "pass": null,
+      "skipped": "not selected"
+    }
+  },
+  "pass": true
+}

@@ -1,0 +1,481 @@
+{
+  "leg": "A2",
+  "oracles": {
+    "O1": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "checkout_code": 0,
+        "stderr_tail": "flint-sync: checkout \u2014 30 materialized, 0 present, live-tree=false\nflint-sync: phase manifest=0.047s fetch=0.058s commit=0.006s bytes=5042 ranged=0\n",
+        "citations": 30,
+        "heads": 30,
+        "missing_heads": [],
+        "mismatched": [],
+        "extra_heads": [],
+        "checkout_missing_cited": [],
+        "checkout_not_cited": [],
+        "manifest_seq": 148,
+        "problems": []
+      }
+    },
+    "O2": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "checkout_files": 30,
+        "trees": {
+          "agents-0": 30,
+          "agents-1": 30,
+          "agents-2": 30,
+          "agents-3": 30,
+          "agents-4": 30,
+          "agents-5": 30
+        },
+        "diffs": {},
+        "problems": []
+      }
+    },
+    "O3": {
+      "pass": false,
+      "details": {
+        "reasons": [
+          "1 acked write(s) LOST"
+        ],
+        "final_source": "checkout",
+        "ops": 529,
+        "parts": 529,
+        "acked_parts": 161,
+        "acked_writes": 161,
+        "acked_writes_by_agent": {
+          "agents-0": 15,
+          "agents-1": 15,
+          "agents-2": 20,
+          "agents-3": 20,
+          "agents-4": 10,
+          "agents-5": 20,
+          "ui": 61
+        },
+        "accounted": {
+          "final": 2,
+          "superseded": 38,
+          "replaced": 43,
+          "preserved": 77
+        },
+        "unacked_parts": {
+          "no-ack": 355,
+          "refused": 13
+        },
+        "acks_by_status": {
+          "ok": 77,
+          "no-ack": 71,
+          "partial": 4,
+          "refused": 13
+        },
+        "preserved_copies": 283,
+        "preserved_unparsed_keys": 0,
+        "multiply_covered": [],
+        "losses_total": 1,
+        "losses": [
+          {
+            "agent": "agents-5",
+            "n": 5,
+            "path": "hot/p25.txt",
+            "sha256": "37d0a666260ae8f83d3cec44e5e1970cc968971bbb92773822bd7133bab01467",
+            "op": {
+              "k": "op",
+              "agent": "agents-5",
+              "n": 5,
+              "t_ms": 1789362058020,
+              "op": "write",
+              "path": "hot/p25.txt",
+              "sha256": "37d0a666260ae8f83d3cec44e5e1970cc968971bbb92773822bd7133bab01467",
+              "base": "absent",
+              "nonce": "agents-5-1"
+            },
+            "ack": {
+              "k": "ack",
+              "agent": "agents-5",
+              "t_ms": 1789362063050,
+              "nonce": "agents-5-1",
+              "status": "ok",
+              "seq": 5,
+              "dropped": [],
+              "covered": [
+                "agents-5-1"
+              ],
+              "report": {
+                "uploaded": 5,
+                "deleted": 0,
+                "parked": 0,
+                "consumed": 0,
+                "no_change": false
+              }
+            },
+            "final": "5a6df7a6c794002bf817a6421f126166ef50592b877a039033350711bdc698e8",
+            "unacked_op_with_base_h": true,
+            "later_ops": [
+              {
+                "agent": "agents-0",
+                "n": 30,
+                "part": "write",
+                "op": "write",
+                "path": "hot/p25.txt",
+                "to": null,
+                "base": "48384fa47ea401aebb9aba55adbab8d5f52eeedeeffef7746945964a637f72e1",
+                "sha256": "08c5b23e1f51bdc9833c82da19c04252b0e41da78133e1e39212a614a06c156c",
+                "t_ms": 1789362153500,
+                "nonce": "agents-0-6",
+                "acked": false,
+                "seq": null,
+                "why_unacked": "no-ack",
+                "base_is_h": false
+              },
+              {
+                "agent": "agents-0",
+                "n": 36,
+                "part": "write",
+                "op": "write",
+                "path": "hot/p25.txt",
+                "to": null,
+                "base": "b9981c78629c695909390079a4bf8fa6997600da23e603ae9109f206416de1be",
+                "sha256": "45d2592ca4ba4f8ce28f95a05d0eeb00757cd6123f4a0b69ca2fd2915c74286c",
+                "t_ms": 1789362199900,
+                "nonce": "agents-0-8",
+                "acked": true,
+                "seq": 79,
+                "why_unacked": null,
+                "base_is_h": false
+              },
+              {
+                "agent": "agents-0",
+                "n": 74,
+                "part": "write",
+                "op": "write",
+                "path": "hot/p25.txt",
+                "to": null,
+                "base": "ad3ffe2bd32950764ed33e335d15e6f5da88f41a5302c1be0258815ce3932bca",
+                "sha256": "5a6df7a6c794002bf817a6421f126166ef50592b877a039033350711bdc698e8",
+                "t_ms": 1789362356980,
+                "nonce": "agents-0-15",
+                "acked": false,
+                "seq": null,
+                "why_unacked": "no-ack",
+                "base_is_h": false
+              },
+              {
+                "agent": "agents-1",
+                "n": 45,
+                "part": "write",
+                "op": "write",
+                "path": "hot/p25.txt",
+                "to": null,
+                "base": "b9981c78629c695909390079a4bf8fa6997600da23e603ae9109f206416de1be",
+                "sha256": "c508130752bd2db5e33720e77a49d04b8b67e4d322747934e4a88f2eece4e11f",
+                "t_ms": 1789362217630,
+                "nonce": "agents-1-9",
+                "acked": false,
+                "seq": null,
+                "why_unacked": "no-ack",
+                "base_is_h": false
+              },
+              {
+                "agent": "agents-2",
+                "n": 1,
+                "part": "write",
+                "op": "write",
+                "path": "hot/p25.txt",
+                "to": null,
+                "base": "absent",
+                "sha256": "64ce3d22a9208172f77b35ea6cd1fd423d19335a4d518fea4961d90e6d3e2629",
+                "t_ms": 1789362058000,
+                "nonce": "agents-2-1",
+                "acked": true,
+                "seq": 7,
+                "why_unacked": null,
+                "base_is_h": false
+              },
+              {
+                "agent": "agents-2",
+                "n": 46,
+                "part": "write",
+                "op": "write",
+                "path": "hot/p25.txt",
+                "to": null,
+                "base": "b9981c78629c695909390079a4bf8fa6997600da23e603ae9109f206416de1be",
+                "sha256": "cf40a633dc0be1a2a301461e42ffd30ba4171bf24fe136905be5d307b8a66440",
+                "t_ms": 1789362238110,
+                "nonce": "agents-2-10",
+                "acked": false,
+                "seq": null,
+                "why_unacked": "no-ack",
+                "base_is_h": false
+              },
+              {
+                "agent": "agents-3",
+                "n": 4,
+                "part": "write",
+                "op": "write",
+                "path": "hot/p25.txt",
+                "to": null,
+                "base": "absent",
+                "sha256": "ba9d12c0001bf33de536a692e9678b92c5b143f9272f2ec4d11faf2ca568a15c",
+                "t_ms": 1789362058020,
+                "nonce": "agents-3-1",
+                "acked": true,
+                "seq": 3,
+                "why_unacked": null,
+                "base_is_h": false
+              },
+              {
+                "agent": "agents-3",
+                "n": 64,
+                "part": "write",
+                "op": "write",
+                "path": "hot/p25.txt",
+                "to": null,
+                "base": "0b0ebc2977f174d202ff44ef09ca0ce617a548ca505d13f1dd7dd05965f449bb",
+                "sha256": "a328d97145c5a578f3d55449a87e1ab5f13693dc35928e77de0bb9fd62689597",
+                "t_ms": 1789362290340,
+                "nonce": "agents-3-13",
+                "acked": false,
+                "seq": null,
+                "why_unacked": "no-ack",
+                "base_is_h": false
+              },
+              {
+                "agent": "agents-4",
+                "n": 8,
+                "part": "write",
+                "op": "write",
+                "path": "hot/p25.txt",
+                "to": null,
+                "base": "8243e9047e1db215daa2d02f7153123111a005991d2fd9a9fdc948eb986fc0b3",
+                "sha256": "76176a93a94bdf741149bc93c20de7feb11bc4aba616c651d6c7697f5febefd8",
+                "t_ms": 1789362067880,
+                "nonce": "agents-4-2",
+                "acked": false,
+                "seq": null,
+                "why_unacked": "no-ack",
+                "base_is_h": false
+              },
+              {
+                "agent": "agents-4",
+                "n": 26,
+                "part": "write",
+                "op": "write",
+                "path": "hot/p25.txt",
+                "to": null,
+                "base": "48384fa47ea401aebb9aba55adbab8d5f52eeedeeffef7746945964a637f72e1",
+                "sha256": "b9981c78629c695909390079a4bf8fa6997600da23e603ae9109f206416de1be",
+                "t_ms": 1789362159360,
+                "nonce": "agents-4-6",
+                "acked": false,
+                "seq": null,
+                "why_unacked": "no-ack",
+                "base_is_h": false
+              },
+              {
+                "agent": "agents-4",
+                "n": 36,
+                "part": "write",
+                "op": "write",
+                "path": "hot/p25.txt",
+                "to": null,
+                "base": "b9981c78629c695909390079a4bf8fa6997600da23e603ae9109f206416de1be",
+                "sha256": "9083715f7169aaf7c9eac4a2b28eff1c5c38ebc1dc4986e3a2560f1db081ff17",
+                "t_ms": 1789362205480,
+                "nonce": "agents-4-8",
+                "acked": false,
+                "seq": null,
+                "why_unacked": "no-ack",
+                "base_is_h": false
+              },
+              {
+                "agent": "agents-4",
+                "n": 41,
+                "part": "write",
+                "op": "write",
+                "path": "hot/p25.txt",
+                "to": null,
+                "base": "9083715f7169aaf7c9eac4a2b28eff1c5c38ebc1dc4986e3a2560f1db081ff17",
+                "sha256": "32a5e929625a1b5436b8aaa2f1d31ad6ebb55193258e4a72c7ad3e72fb63da5f",
+                "t_ms": 1789362230180,
+                "nonce": "agents-4-9",
+                "acked": true,
+                "seq": 94,
+                "why_unacked": null,
+                "base_is_h": false
+              },
+              {
+                "agent": "agents-4",
+                "n": 60,
+                "part": "write",
+                "op": "write",
+                "path": "hot/p25.txt",
+                "to": null,
+                "base": "0b0ebc2977f174d202ff44ef09ca0ce617a548ca505d13f1dd7dd05965f449bb",
+                "sha256": "530ed268c08cd70aad827e11795ce87b87dca7bdf6615d0053e2eeb7c30caaa7",
+                "t_ms": 1789362290910,
+                "nonce": "agents-4-12",
+                "acked": false,
+                "seq": null,
+                "why_unacked": "no-ack",
+                "base_is_h": false
+              },
+              {
+                "agent": "agents-5",
+                "n": 9,
+                "part": "write",
+                "op": "write",
+                "path": "hot/p25.txt",
+                "to": null,
+                "base": "37d0a666260ae8f83d3cec44e5e1970cc968971bbb92773822bd7133bab01467",
+                "sha256": "28ff866339360ed0a6f1b0847dd5d1be6fdfb26fcfd35206999fec2060864048",
+                "t_ms": 1789362070510,
+                "nonce": "agents-5-2",
+                "acked": false,
+                "seq": null,
+                "why_unacked": "no-ack",
+                "base_is_h": true
+              },
+              {
+                "agent": "ui",
+                "n": 29,
+                "part": "write",
+                "op": "write",
+                "path": "hot/p25.txt",
+                "to": null,
+                "base": "76176a93a94bdf741149bc93c20de7feb11bc4aba616c651d6c7697f5febefd8",
+                "sha256": "16dd3f456eff01ccff004f3ceacba5ed840cd3623f801cd0d403bf7eb6a249df",
+                "t_ms": 1789362142466,
+                "nonce": "ui-29",
+                "acked": false,
+                "seq": null,
+                "why_unacked": "refused",
+                "base_is_h": false
+              },
+              {
+                "agent": "ui",
+                "n": 30,
+                "part": "write",
+                "op": "write",
+                "path": "hot/p25.txt",
+                "to": null,
+                "base": "76176a93a94bdf741149bc93c20de7feb11bc4aba616c651d6c7697f5febefd8",
+                "sha256": "48384fa47ea401aebb9aba55adbab8d5f52eeedeeffef7746945964a637f72e1",
+                "t_ms": 1789362147907,
+                "nonce": "ui-30",
+                "acked": true,
+                "seq": null,
+                "why_unacked": null,
+                "base_is_h": false
+              },
+              {
+                "agent": "ui",
+                "n": 51,
+                "part": "write",
+                "op": "write",
+                "path": "hot/p25.txt",
+                "to": null,
+                "base": "cf40a633dc0be1a2a301461e42ffd30ba4171bf24fe136905be5d307b8a66440",
+                "sha256": "0b0ebc2977f174d202ff44ef09ca0ce617a548ca505d13f1dd7dd05965f449bb",
+                "t_ms": 1789362253747,
+                "nonce": "ui-51",
+                "acked": true,
+                "seq": null,
+                "why_unacked": null,
+                "base_is_h": false
+              },
+              {
+                "agent": "ui",
+                "n": 66,
+                "part": "write",
+                "op": "write",
+                "path": "hot/p25.txt",
+                "to": null,
+                "base": "a328d97145c5a578f3d55449a87e1ab5f13693dc35928e77de0bb9fd62689597",
+                "sha256": "ad3ffe2bd32950764ed33e335d15e6f5da88f41a5302c1be0258815ce3932bca",
+                "t_ms": 1789362319165,
+                "nonce": "ui-66",
+                "acked": true,
+                "seq": null,
+                "why_unacked": null,
+                "base_is_h": false
+              }
+            ],
+            "timeline": "timeline.py /private/tmp/claude-503/writers-stage/judge/A2/A2 --path hot/p25.txt --journals --context"
+          }
+        ],
+        "malformed": [],
+        "problems": []
+      }
+    },
+    "O4": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "preserved_objects": 283,
+        "records_by_kind": {
+          "consume-dirty": 114,
+          "upload-412-preserved": 169,
+          "adopt-withheld: the object this barrier found already at its key was replaced or collected before its commit; nothing cited, the path stays dirty and publishes next barrier": 102,
+          "upload-412-parked": 1
+        },
+        "keys_named": 283,
+        "keys_recorded_by_two_writers": 0,
+        "duplicate_object_keys": [],
+        "no_record": [],
+        "missing_object": [],
+        "preserved_key_on_other_kinds": [],
+        "problems": []
+      }
+    },
+    "O5": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "faults_declared": false,
+        "claims_by_trace": {
+          "agents-0": {
+            "claimed:fresh": 1,
+            "waiting": 36,
+            "claimed:released": 30
+          },
+          "agents-1": {
+            "waiting": 39,
+            "claimed:released": 31
+          },
+          "agents-2": {
+            "waiting": 38,
+            "claimed:released": 30
+          },
+          "agents-3": {
+            "claimed:released": 31,
+            "waiting": 39
+          },
+          "agents-4": {
+            "claimed:released": 31,
+            "waiting": 38
+          },
+          "agents-5": {
+            "waiting": 39,
+            "claimed:released": 31
+          }
+        },
+        "waiting": 229,
+        "deadline": 0,
+        "deposed": 0,
+        "orphaned_own": 0,
+        "deadlines": [],
+        "deposals": [],
+        "orphaned_own_claims": [],
+        "problems": []
+      }
+    },
+    "O6": {
+      "pass": null,
+      "skipped": "not selected"
+    }
+  },
+  "pass": false
+}

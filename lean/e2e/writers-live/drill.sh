@@ -29,7 +29,7 @@ EVID=${EVID:-/mnt/nvme/evidence}
 AGENTS=${AGENTS:-6}
 FLOOR=${FLOOR:-5}
 STORM_SECS=${STORM_SECS:-300}
-KILL_EVERY=${KILL_EVERY:-90}
+KILL_EVERY=${KILL_EVERY:-30}
 AGENT_IMAGE=${AGENT_IMAGE:-busybox:1.36}
 export KUBECONFIG=${KUBECONFIG:-/etc/kubernetes/admin.conf}
 export AWS_REGION=$REGION AWS_DEFAULT_REGION=$REGION AWS_MAX_ATTEMPTS=5
@@ -57,8 +57,11 @@ frozen_guard() {
 fetch() {
   mkdir -p "$RIG/bin" "$COLLECT" "$EVID" || die "mkdir under /mnt/nvme"
   mountpoint -q /mnt/nvme || log "WARNING: /mnt/nvme is not a mount — the 8 GB root takes the evidence"
-  aws s3 sync "s3://$BUCKET/_rig/scripts/" "$RIG/" --only-show-errors || die "scripts sync"
-  aws s3 sync "s3://$BUCKET/_rig/bin/" "$RIG/bin/" --only-show-errors || die "binaries sync"
+  # cp, never sync: sync skips a same-size file, and a rebuilt binary or a
+  # re-rendered chart can be exactly the old size (it shipped the old build).
+  aws s3 cp --recursive "s3://$BUCKET/_rig/scripts/" "$RIG/" --only-show-errors || die "scripts copy"
+  aws s3 cp --recursive "s3://$BUCKET/_rig/bin/" "$RIG/bin/" --only-show-errors || die "binaries copy"
+  aws s3 cp "s3://$BUCKET/_rig/TAG" "$RIG/TAG" --only-show-errors || die "tag"
   chmod +x "$RIG"/*.sh "$RIG"/*.py "$RIG"/bin/* 2>/dev/null
   # The binaries' sums were published by the Mac beside them; a truncated
   # copy is a SIGSEGV that reads like a bad cross-compile.
@@ -86,6 +89,12 @@ strip() {
 # ── setup ─────────────────────────────────────────────────────────────
 setup() {
   [ -f "$RIG/charts/lean.yaml" ] && [ -f "$RIG/charts/s3csi.yaml" ] || die "rendered charts missing under $RIG/charts"
+  # The charts must name the build this rig was staged for — a stale
+  # render applies the previous images under a green rollout.
+  local tag; tag=$(cat "$RIG/TAG" 2>/dev/null) || die "no $RIG/TAG: run fetch"
+  grep -q "flint-lean-operator:$tag" "$RIG/charts/lean.yaml" || die "charts/lean.yaml does not name $tag"
+  grep -q "flint-s3-csi:$tag" "$RIG/charts/s3csi.yaml" || die "charts/s3csi.yaml does not name $tag"
+  grep -q "flint-s3-worker-lean:$tag" "$RIG/charts/s3csi.yaml" || die "charts/s3csi.yaml's lean worker is not $tag"
   K create ns flint-system --dry-run=client -o yaml | K apply -f - >&2 || die "ns flint-system"
   # Pods cannot reach IMDS behind this CNI (runcu finding 1): the broker
   # and the operator hold the NODE role's credentials as a static Secret.
@@ -156,9 +165,13 @@ spec:
       terminationGracePeriodSeconds: 60
       securityContext: { runAsUser: 1001, runAsGroup: 1001, runAsNonRoot: true, fsGroup: 1001 }
       topologySpreadConstraints:
+        # Honor: the tainted control plane is otherwise a domain holding
+        # zero agents, so maxSkew 1 lets no worker take a second one —
+        # six agents on three workers left three Pending (two fit).
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
           whenUnsatisfiable: DoNotSchedule
+          nodeTaintsPolicy: Honor
           labelSelector: { matchLabels: { app: agents } }
       initContainers:
         # Every agent starts PAUSED: the driver lifts the pause on all six
@@ -291,29 +304,54 @@ ns=sys.argv[1]
 for p in json.load(sys.stdin)['items']:
     a=p['metadata'].get('annotations',{})
     if a.get('chert.us/tenant-pod','').startswith(ns+'/') or p['metadata'].get('labels',{}).get('chert.us/tenant-namespace')==ns:
-        print(p['metadata']['name'], a.get('chert.us/tenant-pod',''))
+        print(p['metadata']['name'], a.get('chert.us/tenant-pod',''), p['spec'].get('nodeName',''))
 " "$1"
 }
 faults_loop() { # <leg> <ns> <until_epoch>
-  local leg=$1 ns=$2 until=$3 round=0 victim tenant line
+  # Every fault must TAKE EFFECT, or the leg is VOID: the first A4 ran
+  # three, and both worker deletions were refused by the workers
+  # namespace's admission policy (only the CSI node's identity, the
+  # garbage collectors, or the node's own kubelet may delete a worker)
+  # while the loop logged the refusal and carried on — a fault leg that
+  # passed with one fault. A fault that does not land writes faults.void
+  # and stops injecting; the storm, the pause and the collect go on, and
+  # the verdict reports VOID.
+  local leg=$1 ns=$2 until=$3 round=0 victim tenant node line gone
   mkdir -p "$COLLECT/$leg/faults"
   while [ "$(date +%s)" -lt "$until" ]; do
     sleep "$KILL_EVERY"
     [ "$(date +%s)" -lt "$until" ] || break
     round=$((round + 1))
     line=$(workers_of "$ns" | shuf -n 1)
-    victim=${line%% *}; tenant=${line#* }
-    [ -n "$victim" ] || { log "fault $round: no worker found"; continue; }
+    read -r victim tenant node <<< "$line"
+    if [ -z "$victim" ] || [ -z "$node" ]; then
+      echo "round $round: no worker found" >> "$COLLECT/$leg/faults.void"; log "fault $round: no worker: VOID"; break
+    fi
     # E7 BEFORE anything is killed: what the writer believed.
     snapshot_state "$ns" "${tenant#*/}" "$COLLECT/$leg/faults/$round-before" || true
     if [ $((round % 2)) -eq 1 ]; then
-      log "fault $round: delete worker $victim (tenant $tenant)"
-      echo "{\"t_ms\":$(now_ms),\"round\":$round,\"fault\":\"delete-worker\",\"worker\":\"$victim\",\"tenant\":\"$tenant\"}" >> "$COLLECT/$leg/faults.jsonl"
-      K -n flint-workers delete pod "$victim" --wait=false >&2
+      log "fault $round: delete worker $victim on $node (tenant $tenant), as that node's kubelet"
+      if ! K --as="system:node:$node" --as-group=system:nodes --as-group=system:authenticated \
+          -n flint-workers delete pod "$victim" --wait=false >&2; then
+        echo "round $round: delete of $victim refused" >> "$COLLECT/$leg/faults.void"; log "fault $round: refused: VOID"; break
+      fi
+      gone=$(K -n flint-workers get pod "$victim" -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null || echo gone)
+      if [ -z "$gone" ]; then
+        echo "round $round: $victim has no deletionTimestamp after delete" >> "$COLLECT/$leg/faults.void"; log "fault $round: not deleting: VOID"; break
+      fi
+      echo "{\"t_ms\":$(now_ms),\"round\":$round,\"fault\":\"delete-worker\",\"worker\":\"$victim\",\"node\":\"$node\",\"tenant\":\"$tenant\"}" >> "$COLLECT/$leg/faults.jsonl"
     else
-      log "fault $round: SIGKILL flint-sync in $victim (tenant $tenant)"
+      # Aim at the commit section: wait (bounded) for the victim's trace
+      # to show it has just CLAIMED the cell, then kill at once. Whether
+      # it landed inside is judged afterwards from the traces (a claim
+      # with no release before the restart), never assumed.
+      log "fault $round: SIGKILL flint-sync in $victim (tenant $tenant) at its next claim"
+      timeout 45 kubectl -n flint-workers logs -f --since=1s "$victim" 2>/dev/null \
+        | grep -m1 -E '"ev":"claim".*"verdict":"claimed"' >/dev/null || log "fault $round: no claim seen in 45 s; killing anyway"
+      if ! K -n flint-workers exec "$victim" -- sh -c 'pkill -9 -x flint-sync || kill -9 $(pidof flint-sync)' >&2; then
+        echo "round $round: SIGKILL in $victim did not land" >> "$COLLECT/$leg/faults.void"; log "fault $round: kill failed: VOID"; break
+      fi
       echo "{\"t_ms\":$(now_ms),\"round\":$round,\"fault\":\"kill-9-syncer\",\"worker\":\"$victim\",\"tenant\":\"$tenant\"}" >> "$COLLECT/$leg/faults.jsonl"
-      K -n flint-workers exec "$victim" -- sh -c 'pkill -9 -x flint-sync || kill -9 $(pidof flint-sync)' >&2
     fi
   done
 }

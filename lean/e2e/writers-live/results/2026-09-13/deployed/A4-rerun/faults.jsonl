@@ -1,0 +1,9 @@
+{"t_ms":1789362752004,"round":1,"fault":"delete-worker","worker":"s3w-5220527e8a7db9f5","node":"runcv-aws-1","tenant":"wl-a4/agents-2"}
+{"t_ms":1789362789330,"round":2,"fault":"kill-9-syncer","worker":"s3w-eb475d7f778297b3","tenant":"wl-a4/agents-5"}
+{"t_ms":1789362820245,"round":3,"fault":"delete-worker","worker":"s3w-dd198f2ea4e815b6","node":"runcv-aws-1","tenant":"wl-a4/agents-3"}
+{"t_ms":1789362852569,"round":4,"fault":"kill-9-syncer","worker":"s3w-eb475d7f778297b3","tenant":"wl-a4/agents-5"}
+{"t_ms":1789362883158,"round":5,"fault":"delete-worker","worker":"s3w-eb475d7f778297b3","node":"runcv-aws-3","tenant":"wl-a4/agents-5"}
+{"t_ms":1789362927051,"round":6,"fault":"kill-9-syncer","worker":"s3w-491300828969fa2c","tenant":"wl-a4/agents-1"}
+{"t_ms":1789362957990,"round":7,"fault":"delete-worker","worker":"s3w-491300828969fa2c","node":"runcv-aws-3","tenant":"wl-a4/agents-1"}
+{"t_ms":1789362989534,"round":8,"fault":"kill-9-syncer","worker":"s3w-dd198f2ea4e815b6","tenant":"wl-a4/agents-3"}
+{"t_ms":1789363020219,"round":9,"fault":"delete-worker","worker":"s3w-cf8e327ef7500bd0","node":"runcv-aws-2","tenant":"wl-a4/agents-0"}

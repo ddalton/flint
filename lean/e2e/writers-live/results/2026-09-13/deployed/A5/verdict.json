@@ -1,0 +1,97 @@
+{
+  "leg": "A5",
+  "oracles": {
+    "O1": {
+      "pass": null,
+      "skipped": "not selected"
+    },
+    "O2": {
+      "pass": null,
+      "skipped": "not selected"
+    },
+    "O3": {
+      "pass": null,
+      "skipped": "not selected"
+    },
+    "O4": {
+      "pass": null,
+      "skipped": "not selected"
+    },
+    "O5": {
+      "pass": null,
+      "skipped": "not selected"
+    },
+    "O6": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "window": [
+          1789359577971.0,
+          1789360477975.0
+        ],
+        "request_baseline": 4.0,
+        "per_trace": {
+          "agents-0": {
+            "ticks": 180,
+            "max_delta": 3,
+            "deltas": 180,
+            "counter_resets": 0,
+            "seqs": [
+              126
+            ]
+          },
+          "agents-1": {
+            "ticks": 180,
+            "max_delta": 3,
+            "deltas": 180,
+            "counter_resets": 0,
+            "seqs": [
+              126
+            ]
+          },
+          "agents-2": {
+            "ticks": 180,
+            "max_delta": 3,
+            "deltas": 180,
+            "counter_resets": 0,
+            "seqs": [
+              126
+            ]
+          },
+          "agents-3": {
+            "ticks": 180,
+            "max_delta": 3,
+            "deltas": 180,
+            "counter_resets": 0,
+            "seqs": [
+              126
+            ]
+          },
+          "agents-4": {
+            "ticks": 180,
+            "max_delta": 3,
+            "deltas": 180,
+            "counter_resets": 0,
+            "seqs": [
+              126
+            ]
+          },
+          "agents-5": {
+            "ticks": 180,
+            "max_delta": 3,
+            "deltas": 180,
+            "counter_resets": 0,
+            "seqs": [
+              126
+            ]
+          }
+        },
+        "cas_ok": [],
+        "claimed": [],
+        "over_baseline": [],
+        "problems": []
+      }
+    }
+  },
+  "pass": true
+}

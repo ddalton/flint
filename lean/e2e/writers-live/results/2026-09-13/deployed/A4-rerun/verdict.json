@@ -1,0 +1,134 @@
+{
+  "leg": "A4",
+  "oracles": {
+    "O1": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "checkout_code": 0,
+        "stderr_tail": "flint-sync: checkout \u2014 18 materialized, 0 present, live-tree=false\nflint-sync: phase manifest=0.053s fetch=0.043s commit=0.003s bytes=1896 ranged=0\n",
+        "citations": 18,
+        "heads": 18,
+        "missing_heads": [],
+        "mismatched": [],
+        "extra_heads": [],
+        "checkout_missing_cited": [],
+        "checkout_not_cited": [],
+        "manifest_seq": 142,
+        "problems": []
+      }
+    },
+    "O2": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "checkout_files": 18,
+        "trees": {
+          "agents-0": 18,
+          "agents-1": 18,
+          "agents-2": 18,
+          "agents-3": 18,
+          "agents-4": 18,
+          "agents-5": 18
+        },
+        "diffs": {},
+        "problems": []
+      }
+    },
+    "O3": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "final_source": "checkout",
+        "ops": 510,
+        "parts": 510,
+        "acked_parts": 130,
+        "acked_writes": 114,
+        "acked_writes_by_agent": {
+          "agents-0": 22,
+          "agents-1": 23,
+          "agents-2": 18,
+          "agents-3": 14,
+          "agents-4": 20,
+          "agents-5": 17
+        },
+        "accounted": {
+          "final": 13,
+          "superseded": 36,
+          "replaced": 13,
+          "preserved": 52
+        },
+        "unacked_parts": {
+          "no-ack": 380
+        },
+        "acks_by_status": {
+          "ok": 24,
+          "no-ack": 76,
+          "partial": 2
+        },
+        "preserved_copies": 239,
+        "preserved_unparsed_keys": 0,
+        "multiply_covered": [],
+        "losses_total": 0,
+        "losses": [],
+        "refused_landed_total": 0,
+        "refused_landed": [],
+        "malformed": [],
+        "problems": []
+      }
+    },
+    "O4": {
+      "pass": null,
+      "skipped": "not selected"
+    },
+    "O5": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "faults_declared": true,
+        "claims_by_trace": {
+          "agents-0": {
+            "claimed:fresh": 1,
+            "claimed:adopted-own": 1,
+            "waiting": 39,
+            "claimed:released": 34
+          },
+          "agents-1": {
+            "waiting": 36,
+            "claimed:released": 31
+          },
+          "agents-2": {
+            "waiting": 39,
+            "claimed:released": 34
+          },
+          "agents-3": {
+            "waiting": 39,
+            "claimed:released": 32
+          },
+          "agents-4": {
+            "waiting": 45,
+            "claimed:released": 38
+          },
+          "agents-5": {
+            "waiting": 40,
+            "claimed:released": 34,
+            "claimed:skipped-handoff": 1
+          }
+        },
+        "waiting": 238,
+        "deadline": 0,
+        "deposed": 0,
+        "orphaned_own": 0,
+        "deadlines": [],
+        "deposals": [],
+        "orphaned_own_claims": [],
+        "problems": []
+      }
+    },
+    "O6": {
+      "pass": null,
+      "skipped": "not selected"
+    }
+  },
+  "pass": true
+}

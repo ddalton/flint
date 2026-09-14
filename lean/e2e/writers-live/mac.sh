@@ -16,6 +16,8 @@
 #   mac.sh cp <drill.sh args…>     a short drill phase on the CP, foreground
 #   mac.sh leg <A1|A2|A3|A4>       a storm on the CP in the background, polled to its end
 #   mac.sh verdict <leg>           flush evidence, pull the leg, build traces, run the oracles
+#   mac.sh evidence                shipper on every node + podwatch on the CP, no image import
+#   mac.sh verdict-idle A1 <N>     A5: O6 over A1's writers in the idle window, N requests/tick; seq +1 control
 #   mac.sh status                  one line per node: shipper, disk, pods
 #
 # Teardown is teardown.sh, run by hand. Nothing here deletes a bucket, a
@@ -128,10 +130,21 @@ stage() {
     cp "$HERE/$s" "$STAGE/scripts/$s"
   done
   cp -R "$STAGE/charts" "$STAGE/scripts/"
-  aws s3 sync "$STAGE/scripts/" "s3://$BUCKET/_rig/scripts/" --delete --only-show-errors || die "scripts"
-  aws s3 sync "$STAGE/bin/" "s3://$BUCKET/_rig/bin/" --delete --only-show-errors || die "bin"
+  # cp --recursive, never sync: sync skips a file whose size matches, and a
+  # rebuilt binary, a re-rendered chart (a tag of the same length) or an
+  # image tar (padded records) all can — each has shipped the OLD build.
+  aws s3 cp --recursive "$STAGE/scripts/" "s3://$BUCKET/_rig/scripts/" --only-show-errors || die "scripts"
+  aws s3 cp --recursive "$STAGE/bin/" "s3://$BUCKET/_rig/bin/" --only-show-errors || die "bin"
+  echo "$TAG" | aws s3 cp - "s3://$BUCKET/_rig/TAG" || die "tag"
   aws s3 cp "$STAGE/bin.SHA256SUMS" "s3://$BUCKET/_rig/bin.SHA256SUMS" --only-show-errors || die "sums"
-  aws s3 sync "$STAGE/images/" "s3://$BUCKET/_rig/images/" --only-show-errors || die "images"
+  # cp, never sync: two image tars of different builds can have the SAME
+  # size (tar pads to whole records), and sync skipped the new operator
+  # tar that way — a node imported the previous build under its old tag.
+  (cd "$STAGE/images" && shasum -a 256 *.tar > "$STAGE/images.SHA256SUMS")
+  for f in "$STAGE"/images/*.tar; do
+    aws s3 cp "$f" "s3://$BUCKET/_rig/images/$(basename "$f")" --only-show-errors || die "image $f"
+  done
+  aws s3 cp "$STAGE/images.SHA256SUMS" "s3://$BUCKET/_rig/images.SHA256SUMS" --only-show-errors || die "image sums"
   aws s3 ls --recursive "s3://$BUCKET/_rig/" | awk '{s+=$3; n++} END {print n " objects, " s/1048576 " MiB"}' >&2
 }
 
@@ -188,7 +201,7 @@ prep() {
   for id in $(targets all); do
     log "prep $id ($(node_name "$id"))"
     ssm "$id" "set -e; mkdir -p /mnt/nvme/rig && cd /mnt/nvme/rig && \
-      aws s3 sync s3://$BUCKET/_rig/scripts/ . --only-show-errors && chmod +x *.sh *.py && \
+      aws s3 cp --recursive s3://$BUCKET/_rig/scripts/ . --only-show-errors && chmod +x *.sh *.py && \
       for img in worker-lean s3csi operator; do aws s3 cp s3://$BUCKET/_rig/images/\$img.tar - | ctr -n k8s.io images import --platform linux/amd64 - ; done && \
       ctr -n k8s.io images ls -q | grep $TAG" || die "image import on $id"
     # Content, not tags: the binary inside each image equals the one built here.
@@ -197,10 +210,27 @@ prep() {
       ./verify_image.sh docker.io/dilipdalton/flint-s3-csi:$TAG /usr/local/bin/flint-s3-csi-node $(awk '$2=="flint-s3-csi-node"{print $1}' "$STAGE/bin.SHA256SUMS") && \
       ./verify_image.sh docker.io/dilipdalton/flint-lean-operator:$TAG /usr/local/bin/flint-lean-operator $(awk '$2=="flint-lean-operator"{print $1}' "$STAGE/bin.SHA256SUMS")" \
       || die "image content check failed on $id"
-    ssm "$id" "cd /mnt/nvme/rig && BUCKET=$BUCKET NODE=$(node_name "$id") EVID=/mnt/nvme/evidence ./shipper.sh start && ./shipper.sh status" \
-      || die "shipper on $id"
   done
-  ssm cp "cd /mnt/nvme/rig && BUCKET=$BUCKET ./drill.sh fetch && BUCKET=$BUCKET EVID=/mnt/nvme/evidence ./podwatch.sh start" || die "CP fetch/podwatch"
+  ssm cp "cd /mnt/nvme/rig && BUCKET=$BUCKET ./drill.sh fetch" || die "CP fetch"
+  evidence
+}
+
+# The evidence loops alone, on a fleet whose images are already imported and
+# verified: fresh scripts (cp, never sync — same-size files are skipped), the
+# three images still present (kubelet GC removes an unused one), then the
+# shipper on every node and podwatch on the CP. The shipper records NODE at
+# its first start; podwatch keeps its own EVID/STATE defaults.
+evidence() {
+  local id
+  for id in $(targets all); do
+    log "evidence $id ($(node_name "$id"))"
+    ssm "$id" "set -e; mkdir -p /mnt/nvme/rig && cd /mnt/nvme/rig && \
+      aws s3 cp --recursive s3://$BUCKET/_rig/scripts/ . --only-show-errors && chmod +x *.sh *.py && \
+      test \$(ctr -n k8s.io images ls -q | grep -c ':$TAG\$') -ge 3 && \
+      BUCKET=$BUCKET NODE=$(node_name "$id") ./shipper.sh start && ./shipper.sh status" \
+      || die "evidence on $id"
+  done
+  ssm cp "cd /mnt/nvme/rig && BUCKET=$BUCKET ./podwatch.sh start && ./podwatch.sh status" || die "CP podwatch"
 }
 
 cpdo() { ssm cp "cd /mnt/nvme/rig && BUCKET=$BUCKET ./drill.sh $*"; }
@@ -232,25 +262,83 @@ leg_oracles() {
 }
 verdict() { # <leg>
   local leg=$1 dir=$STAGE/judge/$1 want got
-  ssm all "cd /mnt/nvme/rig && BUCKET=$BUCKET NODE=\$(hostname) ./shipper.sh flush" >/dev/null || log "a shipper flush failed"
-  ssm cp "cd /mnt/nvme/rig && BUCKET=$BUCKET EVID=/mnt/nvme/evidence ./podwatch.sh flush" >/dev/null || log "podwatch flush failed"
+  ssm all "cd /mnt/nvme/rig && BUCKET=$BUCKET ./shipper.sh flush" >/dev/null || log "a shipper flush failed"
+  ssm cp "cd /mnt/nvme/rig && BUCKET=$BUCKET ./podwatch.sh flush" >/dev/null || log "podwatch flush failed"
   rm -rf "$dir" && mkdir -p "$dir"
   aws s3 cp "s3://$BUCKET/_rig/collect/$leg.tgz" "$dir/collect.tgz" --only-show-errors || die "pull collect"
   want=$(aws s3 cp "s3://$BUCKET/_rig/collect/$leg.sha256" -)
   got=$(shasum -a 256 "$dir/collect.tgz" | awk '{print $1}')
   [ "$want" = "$got" ] || die "collect tarball checksum: $want vs $got"
   tar xzf "$dir/collect.tgz" -C "$dir" || die "untar"
-  aws s3 sync "s3://$BUCKET/_rig/evidence/" "$STAGE/evidence/" --only-show-errors || die "pull evidence"
-  python3 "$HERE/extract_traces.py" --evidence "$STAGE/evidence" --collect "$dir/$leg" || die "extract traces"
+  aws s3 sync "s3://$BUCKET/_rig/evidence/" "$STAGE/evidence/" --exact-timestamps --only-show-errors || die "pull evidence"
+  # Agent pods are `agents-N` in EVERY leg's namespace, and a leg's fleet
+  # outlives it (A5 idles A1's): without the namespace and the leg's own
+  # window, another leg's (or an aborted attempt's) workers merge into this
+  # leg's traces. The window opens at the prefix's stamp (taken before the
+  # namespace is applied) and closes at collect.
+  local from_ms to_ms
+  from_ms=$(python3 -c 'import sys,datetime; s=open(sys.argv[1]).read().strip().rsplit("-",1)[1]; print(int(datetime.datetime.strptime(s,"%Y%m%d%H%M%S").replace(tzinfo=datetime.timezone.utc).timestamp()*1000))' "$dir/$leg/prefix") || die "prefix stamp"
+  to_ms=$(tr -d '[:space:]' < "$dir/$leg/t_end_ms") || die "t_end_ms"
+  python3 "$HERE/extract_traces.py" --evidence "$STAGE/evidence" --collect "$dir/$leg" \
+    --tenant-ns "^wl-$(echo "$leg" | tr 'A-Z' 'a-z')\$" --from-ms "$from_ms" --to-ms "$to_ms" || die "extract traces"
   local extra=()
   [ "$(leg_faults_of "$leg")" = 1 ] && extra+=(--faults-declared)
-  python3 "$HERE/oracle.py" "$dir/$leg" --oracles "$(leg_oracles "$leg")" "${extra[@]}" > "$dir/verdict.json"
+  # A fault leg whose faults did not land judges nothing about faults: the
+  # first A4 passed with both worker deletions refused by admission.
+  if [ "$(leg_faults_of "$leg")" = 1 ]; then
+    local void="" dels kills
+    [ -f "$dir/$leg/faults.void" ] && void="faults.void: $(tr '\n' ';' < "$dir/$leg/faults.void")"
+    dels=$(grep -c '"fault":"delete-worker"' "$dir/$leg/faults.jsonl" 2>/dev/null || true)
+    kills=$(grep -c '"fault":"kill-9-syncer"' "$dir/$leg/faults.jsonl" 2>/dev/null || true)
+    [ "${dels:-0}" -ge 1 ] && [ "${kills:-0}" -ge 1 ] || void="$void effective faults: ${dels:-0} deletions, ${kills:-0} kills"
+    if [ -n "$void" ]; then
+      log "VERDICT $leg VOID — $void"
+      echo "{\"leg\":\"$leg\",\"void\":true,\"why\":\"$void\"}" | aws s3 cp - "s3://$BUCKET/_rig/verdicts/$leg.void.json" --only-show-errors
+      return 2
+    fi
+    log "faults that landed: $dels worker deletions, $kills syncer kills"
+  fi
+  python3 "$HERE/oracle.py" "$dir/$leg" --oracles "$(leg_oracles "$leg")" --require-extract-report ${extra[@]+"${extra[@]}"} > "$dir/verdict.json"
   local rc=$?
-  python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); print("VERDICT", v["leg"], "PASS" if v["pass"] else "FAIL"); [print(" ", k, "pass" if o["pass"] else "FAIL", o.get("reasons", "")) for k, o in v["oracles"].items()]' "$dir/verdict.json"
+  python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); print("VERDICT", v["leg"], "PASS" if v["pass"] else "FAIL"); [print(" ", k, "skipped" if o["pass"] is None else "pass" if o["pass"] else "FAIL", o.get("details", {}).get("reasons", "")) for k, o in v["oracles"].items()]' "$dir/verdict.json"
   aws s3 cp "$dir/verdict.json" "s3://$BUCKET/_rig/verdicts/$leg.json" --only-show-errors
   return $rc
 }
 leg_faults_of() { case $1 in A4) echo 1;; *) echo 0;; esac; }
+
+# A5 has no collect of its own: it idles <fleet-leg>'s paused writers. Its
+# traces are that fleet's (namespace wl-<fleet>) over A5's window; O6 judges
+# the idle window against <baseline> requests per tick (measured, never
+# assumed), and the control is the one edit moving seq by exactly one.
+verdict_idle() { # <fleet-leg> <baseline-requests-per-tick>
+  local fleet=$1 baseline=$2 dir=$STAGE/judge/A5 t
+  local from to end edit
+  ssm all "cd /mnt/nvme/rig && BUCKET=$BUCKET ./shipper.sh flush" >/dev/null || log "a shipper flush failed"
+  ssm cp "cd /mnt/nvme/rig && BUCKET=$BUCKET ./podwatch.sh flush" >/dev/null || log "podwatch flush failed"
+  rm -rf "$dir" && mkdir -p "$dir/A5"
+  [ -f "$STAGE/judge/$fleet/$fleet/meta.json" ] || die "judge $fleet first (its meta.json names the fleet)"
+  python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); m["leg"]="A5"; json.dump(m, open(sys.argv[2],"w"), indent=1)' \
+    "$STAGE/judge/$fleet/$fleet/meta.json" "$dir/A5/meta.json" || die "meta"
+  cp "$STAGE/judge/$fleet/$fleet/agent_nodes.json" "$dir/A5/" 2>/dev/null || true
+  for t in t_idle_from_ms t_idle_to_ms t_end_ms; do
+    ssm cp "cat /mnt/nvme/collect/A5/$t" 2>/dev/null | grep -E '^[0-9]{13}$' > "$dir/$t" || die "A5 $t (has A5 finished?)"
+  done
+  from=$(cat "$dir/t_idle_from_ms"); to=$(cat "$dir/t_idle_to_ms"); end=$(cat "$dir/t_end_ms")
+  edit=$(aws s3 cp "s3://$BUCKET/_rig/collect/A5-edit.json" -) || die "A5 edit.json"
+  echo "$edit" > "$dir/edit.json"
+  aws s3 sync "s3://$BUCKET/_rig/evidence/" "$STAGE/evidence/" --exact-timestamps --only-show-errors || die "pull evidence"
+  # From one floor-minute before the window, so O6 has each writer's counter before its first idle tick.
+  python3 "$HERE/extract_traces.py" --evidence "$STAGE/evidence" --collect "$dir/A5" \
+    --tenant-ns "^wl-$(echo "$fleet" | tr 'A-Z' 'a-z')\$" --from-ms $((from - 60000)) --to-ms "$end" || die "extract traces"
+  python3 "$HERE/oracle.py" "$dir/A5" --oracles O6 --require-extract-report \
+    --idle-from "$from" --idle-to "$to" --request-baseline "$baseline" > "$dir/verdict.json"
+  local rc=$?
+  python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); e=json.load(open(sys.argv[2])); ok=e["seq_after"]-e["seq_before_edit"]==1
+d=v["oracles"]["O6"]; print("VERDICT A5", "PASS" if v["pass"] and ok else "FAIL"); print("  O6", "pass" if d["pass"] else "FAIL", d["details"]["reasons"]); print("  control: seq", e["seq_before_edit"], "->", e["seq_after"], "pass" if ok else "FAIL (want exactly +1)")
+sys.exit(0 if v["pass"] and ok else 1)' "$dir/verdict.json" "$dir/edit.json" || rc=1
+  aws s3 cp "$dir/verdict.json" "s3://$BUCKET/_rig/verdicts/A5.json" --only-show-errors
+  return $rc
+}
 
 status() {
   ssm all "echo \$(hostname) \$(df -h /mnt/nvme | awk 'NR==2{print \$4\" free\"}') \$(cd /mnt/nvme/rig 2>/dev/null && ./shipper.sh status 2>&1 | tr '\n' ' ')"
@@ -266,9 +354,11 @@ case "$cmd" in
   nodes) nodes ;;
   ssm) ssm "$@" ;;
   prep) prep ;;
+  evidence) evidence ;;
   cp) cpdo "$@" ;;
   leg) leg "${1:?leg}" ;;
   verdict) verdict "${1:?leg}" ;;
+  verdict-idle) verdict_idle "${1:?fleet leg}" "${2:?baseline requests per tick}" ;;
   status) status ;;
   *) sed -n '2,22p' "$0"; exit 2 ;;
 esac

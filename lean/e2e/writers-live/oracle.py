@@ -20,7 +20,17 @@ O2  every agents/*/tree.sha256 equals checkout/tree.sha256 (extra, missing,
 O3  every acked op part with content h (a write; the `to` half of a mv) is
     accounted for: the checkout's content for the path is h; OR a LATER acked
     op part on the same path has base == h; OR a preserved copy OF THAT PATH
-    has sha256 h. Acked = its nonce is in the `covered` list (or is the nonce)
+    has sha256 h; OR h was REPLACED: a chain of op parts on the path, acked or
+    merely unanswered (never refused, dropped, or any other failure the writer
+    was told of), each LATER than and based on the one before (a delete's content is
+    `absent`), starts at h and ends at the checkout's content (or a delete,
+    the path absent), or at a content a preserved copy of the path holds (a
+    peer displaced the rewrite and kept it: the rewrite landed). An agent that
+    times out on its ack and rewrites its own file replaced h; a final that
+    does not descend from h is still a loss. AND no REFUSED UI write's content
+    is the checkout's content or a preserved copy of its path (a refusal means
+    "not written"; finding 12's refused PUT landed, and the version it
+    destroyed looked replaced once a peer rewrote it). Acked = its nonce is in the `covered` list (or is the nonce)
     of an ack with status ok, or partial without the path in `dropped`.
     Later = ack seq >= when both acks carry an integer seq; otherwise (a UI
     write, a null seq) journal wall time t_ms >= (clock-corrected when the
@@ -359,6 +369,29 @@ def oracle_o3(leg, slack_ms=0):
     for p in parts:
         by_path[p["path"]].append(p)
 
+    def may_replace(y):
+        # a writer TOLD its op failed (refused, dropped, any status but a missing
+        # ack) never meant to replace anything: finding 12 was a refused UI
+        # write whose PUT had landed anyway
+        return y["acked"] or y["why"] in ("no-ack", "no-ack-line")
+
+    def replaced(x):
+        want = final.get(x["path"])
+        kept = pres_by_path.get(x["path"], set()) | pres_unparsed
+        seen, frontier = {id(x)}, [x]
+        while frontier:
+            cur = frontier.pop()
+            content = cur["h"] if cur["kind"] == "write" else "absent"
+            for y in by_path[x["path"]]:
+                if id(y) in seen or not may_replace(y) or y["base"] != content or not later(y, cur):
+                    continue
+                if (y["kind"] == "write" and (y["h"] == want or y["h"] in kept)) or (
+                        y["kind"] == "delete" and want is None):
+                    return True
+                seen.add(id(y))
+                frontier.append(y)
+        return False
+
     accounted = Counter()
     unacked = Counter()
     acked_parts = 0
@@ -385,6 +418,9 @@ def oracle_o3(leg, slack_ms=0):
         if h in pres_by_path.get(x["path"], ()) or h in pres_unparsed:
             accounted["preserved"] += 1
             continue
+        if replaced(x):
+            accounted["replaced"] += 1
+            continue
         after = [y for y in by_path[x["path"]] if y is not x and (later(y, x) or (
             y["t"] is not None and x["t"] is not None and y["t"] >= x["t"]))]
         losses.append({
@@ -399,25 +435,49 @@ def oracle_o3(leg, slack_ms=0):
                            "base_is_h": y["base"] == h} for y in after],
             "timeline": f"timeline.py {leg.root} --path {x['path']} --journals --context"})
 
+    # A gateway refusal promises "not written". A refused UI write whose bytes
+    # are the checkout's content or a preserved copy of the path LANDED anyway
+    # (finding 12) — and the version it replaced can look REPLACED when a peer
+    # had already installed it and rewritten it. Only the UI: a syncer's
+    # dropped path may have uploaded before its commit dropped it. A content
+    # another op on the path also wrote is ambiguous and skipped.
+    refused_landed = []
+    for x in parts:
+        if x["agent"] != "ui" or x["kind"] != "write" or x["why"] != "refused":
+            continue
+        h = x["h"]
+        if not isinstance(h, str) or any(y is not x and y["h"] == h for y in by_path[x["path"]]):
+            continue
+        where = "final" if final.get(x["path"]) == h else (
+            "preserved" if h in pres_by_path.get(x["path"], ()) or h in pres_unparsed else None)
+        if where:
+            refused_landed.append({"n": x["n"], "path": x["path"], "sha256": h, "where": where,
+                                   "op": clean(x["op"]), "why": x["why"]})
+
     total_writes = sum(acked_writes_by_agent.values())
     reasons = []
     if losses:
         reasons.append(f"{len(losses)} acked write(s) LOST")
+    if refused_landed:
+        reasons.append(f"{len(refused_landed)} REFUSED UI write(s) LANDED")
     if malformed:
         reasons.append(f"{len(malformed)} malformed journal op(s)")
     if total_writes == 0:
         reasons.append("no acked writes in any journal (vacuous)")
-    o3_pass = not losses and not malformed and total_writes > 0
+    o3_pass = not losses and not refused_landed and not malformed and total_writes > 0
     return {"pass": o3_pass, "details": {
         "reasons": reasons, "final_source": final_source, "ops": n_ops, "parts": len(parts),
         "acked_parts": acked_parts, "acked_writes": total_writes,
         "acked_writes_by_agent": dict(sorted(acked_writes_by_agent.items())),
         "accounted": {"final": accounted["final"], "superseded": accounted["superseded"],
+                      "replaced": accounted["replaced"],
                       "preserved": accounted["preserved"]},
         "unacked_parts": dict(unacked), "acks_by_status": dict(acks_by_status),
         "preserved_copies": len(preserved) if isinstance(preserved, list) else None,
         "preserved_unparsed_keys": len(pres_unparsed), "multiply_covered": multiply_covered,
-        "losses_total": len(losses), "losses": losses[:LOSS_CAP], "malformed": malformed[:LOSS_CAP],
+        "losses_total": len(losses), "losses": losses[:LOSS_CAP],
+        "refused_landed_total": len(refused_landed), "refused_landed": refused_landed[:LOSS_CAP],
+        "malformed": malformed[:LOSS_CAP],
         "problems": problems}}
 
 
@@ -469,7 +529,31 @@ def is_deposal(e):
     return e.get("ev") == "claim" and e.get("verdict") == "claimed" and e.get("how") == "deposed"
 
 
-def oracle_o5(leg, faults_declared):
+def extract_gaps(root, require):
+    """What the trace extractor could NOT turn into events. A spliced line (the
+    worker copies the syncer's stderr in raw chunks, and its own messages can
+    land mid-line) or an unmapped worker pod hides events — a hidden deadline
+    reads as zero deadlines, so any gap fails O5 rather than passing it."""
+    p = os.path.join(root, "extract_report.json")
+    if not os.path.exists(p):
+        return ["no extract_report.json: the traces' completeness is unknown"] if require else []
+    try:
+        with open(p) as f:
+            r = json.load(f)
+        m, u, t = int(r["malformed_count"]), len(r["unmapped_pods"]), int(r["unterminated_partials"])
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        return [f"extract_report.json unreadable: {e}"]
+    gaps = []
+    if m:
+        gaps.append(f"{m} malformed trace line(s): an event may be missing")
+    if u:
+        gaps.append(f"{u} worker pod(s) mapped to no agent: their traces are not counted")
+    if t:
+        gaps.append(f"{t} unterminated partial trace record(s)")
+    return gaps
+
+
+def oracle_o5(leg, faults_declared, require_extract_report=False):
     problems = []
     traces = timeline.load_traces(leg.root, problems)
     per, deadlines, deposals, orphaned = {}, [], [], []
@@ -494,7 +578,7 @@ def oracle_o5(leg, faults_declared):
                 orphaned.append({"trace": src, "ts_ms": e.get("ts_ms"), "holder": e.get("holder"),
                                  "epoch": e.get("epoch"), "prior": e.get("prior")})
         per[src] = dict(c)
-    reasons = []
+    reasons = extract_gaps(leg.root, require_extract_report)
     if not traces:
         reasons.append("no traces")
     if faults_declared:
@@ -585,6 +669,8 @@ def run(argv=None):
     ap.add_argument("--idle-to", type=float)
     ap.add_argument("--request-baseline", type=float)
     ap.add_argument("--faults-declared", action="store_true")
+    ap.add_argument("--require-extract-report", action="store_true",
+                    help="O5 fails without the extractor's extract_report.json (the deployed verdict)")
     ap.add_argument("--oracles", default=",".join(ORACLES))
     ap.add_argument("--wall-slack-ms", type=float, default=0.0)
     a = ap.parse_args(argv)
@@ -613,7 +699,7 @@ def run(argv=None):
         elif o == "O4":
             results[o] = oracle_o4(leg)
         elif o == "O5":
-            results[o] = oracle_o5(leg, a.faults_declared)
+            results[o] = oracle_o5(leg, a.faults_declared, a.require_extract_report)
         elif o == "O6":
             if a.idle_from is None:
                 results[o] = {"pass": None, "skipped": "no --idle-from/--idle-to window"}

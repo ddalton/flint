@@ -65,6 +65,7 @@ class Leg:
         self.traces = defaultdict(list)
         self.chrony = {}                     # node -> [(ts, off)]
         self.args = list(IDLE)
+        self.extract_report = None           # extract_report.json, when the case has one
 
     # journal lines
     def op(self, agent, n, t, op, path, nonce, sha=None, base="absent", to=None, to_base=None):
@@ -118,6 +119,8 @@ class Leg:
                     f.write(f"{files[path]}  {path}\n")
 
         dump("meta.json", self.meta)
+        if self.extract_report is not None:
+            dump("extract_report.json", self.extract_report)
         final = {p: s for p, (s, _) in self.final.items()}
         digest("checkout/tree.sha256", final)
         dump("checkout/exit.json", self.exit)
@@ -213,6 +216,109 @@ def f_lost_write(g):
     g.ack("a1", 7400, "a1-5", "ok", 17)
 
 
+def nf_replaced_unacked(g):
+    # the A1 shape: acked X, the agent's ack times out, it rewrites X -> Y -> Z
+    X, Y, Z = H("RX"), H("RY"), H("RZ")
+    g.op("a1", 5, 7000, "write", "hot/p07.txt", "a1-5", X)
+    g.ack("a1", 7400, "a1-5", "ok", 17)
+    g.op("a1", 6, 7600, "write", "hot/p07.txt", "a1-6", Y, base=X)
+    g.ack("a1", 9000, "a1-6", "no-ack")
+    g.op("a1", 7, 9200, "write", "hot/p07.txt", "a1-7", Z, base=Y)
+    g.ack("a1", 10600, "a1-7", "no-ack")
+    g.final["hot/p07.txt"] = (Z, "e-rz")
+
+
+def nf_replaced_then_preserved(g, shut=False, other_path=False):
+    # the A2-rerun shape: acked X, its agent rewrites X -> Y (unacked), a peer's
+    # upload displaces Y and preserves it; the final Z descends from neither
+    X, Y, Z = H("PX"), H("PY"), H("PZ")
+    g.op("a1", 5, 7000, "write", "hot/p07.txt", "a1-5", X)
+    g.ack("a1", 7400, "a1-5", "ok", 17)
+    g.op("a1", 6, 7600, "write", "hot/p07.txt", "a1-6", Y, base=X)
+    g.ack("a1", 9000, "a1-6", "no-ack")
+    g.op("a2", 5, 9200, "write", "hot/p07.txt", "a2-5", Z, base=H("OTHER"))
+    g.ack("a2", 10600, "a2-5", "no-ack")
+    g.final["hot/p07.txt"] = (Z, "e-pz")
+    if not shut:
+        path = "hot/p08.txt" if other_path else "hot/p07.txt"
+        g.preserved.append({"key": ckey("u7", path), "etag": '"e-py"', "sha256": Y})
+        g.conflicts["a2"].append({"path": path, "foreign_etag": '"e-py"', "preserved_key": ckey("u7", path),
+                                  "kind": "upload-412-preserved", "at_unix": 9})
+
+
+def f_refused_put_landed(g, then="preserved"):
+    # finding 12: acked X; the gateway REFUSES a UI write Y based on X after its
+    # PUT landed; Y is later preserved by a peer, or simply stays final
+    X, Y, Z = H("FX"), H("FY"), H("FZ")
+    g.op("a1", 5, 7000, "write", "hot/p07.txt", "a1-5", X)
+    g.ack("a1", 7400, "a1-5", "ok", 17)
+    g.op("ui", 3, 7600, "write", "hot/p07.txt", "ui-3", Y, base=X)
+    g.ack("ui", 7700, "ui-3", "refused")
+    if then == "final":
+        g.final["hot/p07.txt"] = (Y, "e-fy")
+        return
+    g.op("a2", 5, 9200, "write", "hot/p07.txt", "a2-5", Z, base=H("OTHER"))
+    g.ack("a2", 10600, "a2-5", "no-ack")
+    g.final["hot/p07.txt"] = (Z, "e-fz")
+    g.preserved.append({"key": ckey("u8", "hot/p07.txt"), "etag": '"e-fy"', "sha256": Y})
+    g.conflicts["a2"].append({"path": "hot/p07.txt", "foreign_etag": '"e-fy"', "preserved_key": ckey("u8", "hot/p07.txt"),
+                              "kind": "upload-412-preserved", "at_unix": 9})
+
+
+def refused_ui_masked(g, landed=True):
+    # finding 12 as A2 first saw it on hot/p00: the UI's acked X; a REFUSED UI
+    # write Y based on X whose PUT landed; a peer that had installed X rewrites
+    # it (Z, base X) and preserves Y on its 412; Z is preserved in turn; final W
+    X, Y, Z, W = H("MX"), H("MY"), H("MZ"), H("MW")
+    g.op("ui", 3, 7000, "write", "hot/p07.txt", "ui-3", X, base=H("OLD"))
+    g.ack("ui", 7100, "ui-3", "ok", etag='"e-mx"')
+    g.op("ui", 4, 7600, "write", "hot/p07.txt", "ui-4", Y, base=X)
+    g.ack("ui", 7700, "ui-4", "refused")
+    g.op("a2", 5, 8200, "write", "hot/p07.txt", "a2-5", Z, base=X)
+    g.ack("a2", 9600, "a2-5", "no-ack")
+    g.op("a1", 5, 9800, "write", "hot/p07.txt", "a1-5", W, base=H("ELSE"))
+    g.ack("a1", 11000, "a1-5", "no-ack")
+    g.final["hot/p07.txt"] = (W, "e-mw")
+    for u, c, e, who in (("u5", Y, "e-my", "a2"), ("u6", Z, "e-mz", "a1")):
+        if c == Y and not landed:
+            continue
+        g.preserved.append({"key": ckey(u, "hot/p07.txt"), "etag": f'"{e}"', "sha256": c})
+        g.conflicts[who].append({"path": "hot/p07.txt", "foreign_etag": f'"{e}"', "preserved_key": ckey(u, "hot/p07.txt"),
+                                 "kind": "upload-412-preserved", "at_unix": 9})
+
+
+def f_dropped_link_final(g):
+    # acked X; a peer's write Y based on X comes back partial with Y's path DROPPED, yet Y is final
+    X, Y = H("DX"), H("DY")
+    g.op("a1", 5, 7000, "write", "hot/p07.txt", "a1-5", X)
+    g.ack("a1", 7400, "a1-5", "ok", 17)
+    g.op("a2", 5, 7600, "write", "hot/p07.txt", "a2-5", Y, base=X)
+    g.ack("a2", 8000, "a2-5", "partial", 18, dropped=["hot/p07.txt"])
+    g.final["hot/p07.txt"] = (Y, "e-dy")
+
+
+def f_replaced_chain_broken(g):
+    # acked X rewritten to Y (base X, unacked); the final Z is based on something else
+    X, Y, Z = H("BX"), H("BY"), H("BZ")
+    g.op("a1", 5, 7000, "write", "hot/p07.txt", "a1-5", X)
+    g.ack("a1", 7400, "a1-5", "ok", 17)
+    g.op("a1", 6, 7600, "write", "hot/p07.txt", "a1-6", Y, base=X)
+    g.ack("a1", 9000, "a1-6", "no-ack")
+    g.op("a2", 5, 9200, "write", "hot/p07.txt", "a2-5", Z, base=H("OTHER"))
+    g.ack("a2", 10600, "a2-5", "no-ack")
+    g.final["hot/p07.txt"] = (Z, "e-bz")
+
+
+def f_replaced_by_an_earlier_op(g):
+    # the rewrite based on X is journaled BEFORE X: not a replacement of it
+    X, Y = H("EX"), H("EY")
+    g.op("a1", 5, 7000, "write", "hot/p07.txt", "a1-5", X)
+    g.ack("a1", 7400, "a1-5", "ok", 17)
+    g.op("a2", 5, 6000, "write", "hot/p07.txt", "a2-5", Y, base=X)
+    g.ack("a2", 6500, "a2-5", "no-ack")
+    g.final["hot/p07.txt"] = (Y, "e-ey")
+
+
 def f_later_base_earlier_seq(g):
     X, Y = H("X8"), H("Y8")
     g.op("a1", 5, 8000, "write", "hot/p08.txt", "a1-5", X)
@@ -265,6 +371,31 @@ PRIOR = {"holder": "h-a1", "epoch": 3, "released": False, "handoff": False, "wai
 def f_deadline(g):
     g.ev("a1", 50000, "claim", verdict="deadline", behind="h-a2", waited_ms=30000)
     g.ev("a1", 52000, "claim", verdict="claimed", how="fresh", epoch=4)
+
+
+def extract_report(malformed=0, unmapped=0, partials=0):
+    return {"agents": {}, "malformed_count": malformed, "malformed": [],
+            "unmapped_pods": [{"pod_dir": f"flint-workers_s3w-x_uid-{i}"} for i in range(unmapped)],
+            "unterminated_partials": partials}
+
+
+def f_trace_malformed(g):
+    g.extract_report = extract_report(malformed=1)
+    g.args += ["--require-extract-report"]
+
+
+def f_trace_unmapped(g):
+    g.extract_report = extract_report(unmapped=1)
+    g.args += ["--require-extract-report"]
+
+
+def f_extract_report_missing(g):
+    g.args += ["--require-extract-report"]
+
+
+def nf_extract_report_clean(g):
+    g.extract_report = extract_report()
+    g.args += ["--require-extract-report"]
 
 
 def f_deposed(g):
@@ -417,6 +548,29 @@ SCENARIOS = [
     ("clean", "clean", "every oracle passes", lambda g: None, set()),
     ("a-lost-acked-write", "fault", "acked write, not final, no copy, no later base", f_lost_write, {"O3"}),
     ("a-later-base-earlier-seq", "fault", "base==h only on an op acked at a LOWER seq", f_later_base_earlier_seq, {"O3"}),
+    ("a-replaced-by-unacked-rewrites", "non-fault", "acked X, unacked X->Y->Z by its agent, final Z",
+     nf_replaced_unacked, set(), lambda v: v["oracles"]["O3"]["details"]["accounted"]["replaced"] == 1),
+    ("a-replaced-then-preserved", "non-fault", "acked X, its agent's unacked X->Y, a peer displaced Y and preserved it",
+     nf_replaced_then_preserved, set(), lambda v: v["oracles"]["O3"]["details"]["accounted"]["replaced"] == 1),
+    ("a-replaced-then-preserved/ctl", "control", "same, Y's copy + record removed",
+     lambda g: nf_replaced_then_preserved(g, shut=True), {"O3"}),
+    ("a-replaced-then-preserved/ctl-path", "control", "same, Y's copy is of ANOTHER path",
+     lambda g: nf_replaced_then_preserved(g, other_path=True), {"O3"}),
+    ("a-refused-put-then-preserved", "fault", "finding 12: a REFUSED UI write based on X landed, then preserved",
+     f_refused_put_landed, {"O3"}),
+    ("a-refused-put-then-final", "fault", "finding 12: a REFUSED UI write based on X landed and stayed final",
+     lambda g: f_refused_put_landed(g, then="final"), {"O3"},
+     lambda v: v["oracles"]["O3"]["details"]["refused_landed_total"] == 1),
+    ("a-refused-ui-write-landed-masked", "fault", "finding 12 on p00: refused Y landed, X looks replaced by a peer's rewrite",
+     refused_ui_masked, {"O3"}, lambda v: v["oracles"]["O3"]["details"]["refused_landed_total"] == 1
+     and v["oracles"]["O3"]["details"]["losses_total"] == 0),
+    ("nf-refused-ui-write-never-landed", "non-fault", "same, the refused Y's bytes are nowhere",
+     lambda g: refused_ui_masked(g, landed=False), set(),
+     lambda v: v["oracles"]["O3"]["details"]["refused_landed_total"] == 0),
+    ("a-dropped-link-then-final", "fault", "a write based on X, its path DROPPED from a partial ack, is final",
+     f_dropped_link_final, {"O3"}),
+    ("a-replaced-chain-broken", "fault", "acked X -> Y unacked, final Z not based on Y", f_replaced_chain_broken, {"O3"}),
+    ("a-replaced-by-earlier-op", "fault", "the op based on X is journaled before X", f_replaced_by_an_earlier_op, {"O3"}),
     ("a-mv-destination-lost", "fault", "a mv's `to` content is gone", f_mv_destination_lost, {"O3"}),
     ("a-ui-write-lost", "fault", "a UI write acked by the gateway, gone", f_ui_lost, {"O3"}),
     ("a-covered-later-then-lost", "fault", "no-ack batch covered by a later ack, content gone",
@@ -431,6 +585,10 @@ SCENARIOS = [
     ("g-preserved-without-record", "fault", "a preserved object nobody recorded", f_preserved_no_record, {"O4"}),
     ("g-record-names-missing-key", "fault", "a record naming a key not in the bucket", f_record_missing_key, {"O4"}),
     ("h-claim-deadline", "fault", "deadline on a no-fault leg", f_deadline, {"O5"}),
+    ("h-trace-line-malformed", "fault", "a spliced trace line may hide a deadline", f_trace_malformed, {"O5"}),
+    ("h-worker-pod-unmapped", "fault", "a worker pod's traces were not counted", f_trace_unmapped, {"O5"}),
+    ("h-extract-report-missing", "fault", "--require-extract-report and no report", f_extract_report_missing, {"O5"}),
+    ("h-extract-report-clean", "non-fault", "--require-extract-report, a clean report", nf_extract_report_clean, set()),
     ("h-claim-deposed", "fault", "deposal (claimed, how=deposed) on a no-fault leg", f_deposed, {"O5"},
      lambda v: v["oracles"]["O5"]["details"]["deposed"] == 1),
     ("h-old-deposed-shape", "non-fault", "verdict=deposed is not a shape the syncer emits: not counted",

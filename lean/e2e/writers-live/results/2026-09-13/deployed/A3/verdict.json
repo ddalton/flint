@@ -1,0 +1,206 @@
+{
+  "leg": "A3",
+  "oracles": {
+    "O1": {
+      "pass": false,
+      "details": {
+        "reasons": [
+          "checkout exit code 1",
+          "1 citation(s) whose HEAD etag is not the cited etag",
+          "checkout digest paths != manifest paths"
+        ],
+        "checkout_code": 1,
+        "stderr_tail": "flint-sync: state: manifest cites writers/a3-20260914053244/files/churn/p14.txt but the object is gone \u2014 refusing a silent hole (mixed-writer bucket?)\n",
+        "citations": 30,
+        "heads": 30,
+        "missing_heads": [],
+        "mismatched": [
+          {
+            "path": "churn/p14.txt",
+            "manifest_etag": "\"83e61ec4f206dd3a4953c32cfe5eddaa\"",
+            "head_etag": null
+          }
+        ],
+        "extra_heads": [],
+        "checkout_missing_cited": [
+          "churn/p14.txt"
+        ],
+        "checkout_not_cited": [],
+        "manifest_seq": 167,
+        "problems": []
+      }
+    },
+    "O2": {
+      "pass": false,
+      "details": {
+        "reasons": [
+          "5 tree(s) differ from the checkout"
+        ],
+        "checkout_files": 29,
+        "trees": {
+          "agents-0": 30,
+          "agents-1": 31,
+          "agents-2": 30,
+          "agents-3": 30,
+          "agents-4": 29,
+          "agents-5": 30
+        },
+        "diffs": {
+          "agents-0": {
+            "extra": [
+              "churn/p14.txt"
+            ],
+            "missing": [],
+            "differing": []
+          },
+          "agents-1": {
+            "extra": [
+              "churn/p14.txt",
+              "churn/p34.txt"
+            ],
+            "missing": [],
+            "differing": []
+          },
+          "agents-2": {
+            "extra": [
+              "churn/p14.txt"
+            ],
+            "missing": [],
+            "differing": []
+          },
+          "agents-3": {
+            "extra": [
+              "churn/p14.txt"
+            ],
+            "missing": [],
+            "differing": []
+          },
+          "agents-5": {
+            "extra": [
+              "churn/p14.txt"
+            ],
+            "missing": [],
+            "differing": []
+          }
+        },
+        "problems": []
+      }
+    },
+    "O3": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "final_source": "checkout",
+        "ops": 564,
+        "parts": 623,
+        "acked_parts": 182,
+        "acked_writes": 157,
+        "acked_writes_by_agent": {
+          "agents-0": 13,
+          "agents-1": 9,
+          "agents-2": 17,
+          "agents-3": 25,
+          "agents-4": 17,
+          "agents-5": 13,
+          "ui": 63
+        },
+        "accounted": {
+          "final": 4,
+          "superseded": 54,
+          "replaced": 42,
+          "preserved": 57
+        },
+        "unacked_parts": {
+          "no-ack": 410,
+          "refused": 31
+        },
+        "acks_by_status": {
+          "ok": 80,
+          "no-ack": 72,
+          "partial": 5,
+          "refused": 31
+        },
+        "preserved_copies": 240,
+        "preserved_unparsed_keys": 0,
+        "multiply_covered": [],
+        "losses_total": 0,
+        "losses": [],
+        "refused_landed_total": 0,
+        "refused_landed": [],
+        "malformed": [],
+        "problems": []
+      }
+    },
+    "O4": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "preserved_objects": 240,
+        "records_by_kind": {
+          "consume-dirty": 152,
+          "upload-412-preserved": 88,
+          "adopt-withheld: the object this barrier found already at its key was replaced or collected before its commit; nothing cited, the path stays dirty and publishes next barrier": 71,
+          "gc-skip": 36,
+          "consume-foreign-delete-vs-dirty: another writer deleted this path; the local version has unpublished changes, so it stays and publishes": 16,
+          "consume-object-missing": 2
+        },
+        "keys_named": 240,
+        "keys_recorded_by_two_writers": 0,
+        "duplicate_object_keys": [],
+        "no_record": [],
+        "missing_object": [],
+        "preserved_key_on_other_kinds": [],
+        "problems": []
+      }
+    },
+    "O5": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "faults_declared": false,
+        "claims_by_trace": {
+          "agents-0": {
+            "claimed:fresh": 1,
+            "waiting": 41,
+            "claimed:released": 30,
+            "claimed:adopted-own": 1
+          },
+          "agents-1": {
+            "waiting": 43,
+            "claimed:released": 37
+          },
+          "agents-2": {
+            "waiting": 41,
+            "claimed:released": 30
+          },
+          "agents-3": {
+            "waiting": 42,
+            "claimed:released": 31
+          },
+          "agents-4": {
+            "waiting": 41,
+            "claimed:released": 30
+          },
+          "agents-5": {
+            "claimed:released": 31,
+            "claimed:adopted-own": 1,
+            "waiting": 40
+          }
+        },
+        "waiting": 248,
+        "deadline": 0,
+        "deposed": 0,
+        "orphaned_own": 0,
+        "deadlines": [],
+        "deposals": [],
+        "orphaned_own_claims": [],
+        "problems": []
+      }
+    },
+    "O6": {
+      "pass": null,
+      "skipped": "not selected"
+    }
+  },
+  "pass": false
+}

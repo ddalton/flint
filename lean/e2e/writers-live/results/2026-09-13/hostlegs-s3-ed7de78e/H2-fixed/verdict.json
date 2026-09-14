@@ -1,0 +1,111 @@
+{
+  "leg": "H2",
+  "arm": "fixed",
+  "dir": "/mnt/nvme/h2/out/H2-fixed",
+  "probe": "flint-sync: probe-conditional PASS \u2014 PUT (h/h2-fixed-20260914T034832Z-probe/.flint/lean/probe-conditional) and DELETE (h/h2-fixed-20260914T034832Z-probe/.flint/lean/probe-conditional-delete)",
+  "facts": [
+    {
+      "name": "first-absence-withheld",
+      "ok": true,
+      "detail": "cites f49e6a535210335755d13e414061407e",
+      "fixture": true
+    },
+    {
+      "name": "b-race-exit",
+      "ok": true,
+      "detail": "rc=0",
+      "fixture": false
+    },
+    {
+      "name": "a-race-exit",
+      "ok": true,
+      "detail": "rc=0",
+      "fixture": false
+    }
+  ],
+  "expected": "PASS",
+  "race_events": {
+    "b_claim": {
+      "ts_ms": 1789357714982,
+      "mono_ms": 84,
+      "holder": "lean-d45c0893-5e2d-4ef0-adc0-0e9913161f6f",
+      "ev": "claim",
+      "epoch": 4,
+      "how": "released",
+      "prior": {
+        "epoch": 3,
+        "handoff": null,
+        "holder": "lean-d45c0893-5e2d-4ef0-adc0-0e9913161f6f",
+        "released": true,
+        "waiters": []
+      },
+      "verdict": "claimed"
+    },
+    "b_gc": {
+      "ts_ms": 1789357745195,
+      "mono_ms": 30297,
+      "holder": "lean-d45c0893-5e2d-4ef0-adc0-0e9913161f6f",
+      "ev": "gc",
+      "flush": "c1e76e47-2571-479d-a166-616179fa6ff8",
+      "head": "\"f49e6a535210335755d13e414061407e\"",
+      "path": "x.txt",
+      "result": "deleted"
+    },
+    "adopt": {
+      "ts_ms": 1789357715168,
+      "mono_ms": 49,
+      "holder": "lean-bc368b40-7ed6-4a9f-9c28-f03cb643f165",
+      "ev": "upload",
+      "etag": "\"f49e6a535210335755d13e414061407e\"",
+      "flush": "0713b86b-2a26-4c4b-a4d5-0cb8fd07e9b7",
+      "outcome": "adopted",
+      "path": "x.txt"
+    },
+    "a_claim": {
+      "ts_ms": 1789357746021,
+      "mono_ms": 30902,
+      "holder": "lean-bc368b40-7ed6-4a9f-9c28-f03cb643f165",
+      "ev": "claim",
+      "epoch": 5,
+      "how": "released",
+      "prior": {
+        "epoch": 4,
+        "handoff": "lean-bc368b40-7ed6-4a9f-9c28-f03cb643f165",
+        "holder": "lean-d45c0893-5e2d-4ef0-adc0-0e9913161f6f",
+        "released": true,
+        "waiters": []
+      },
+      "verdict": "claimed"
+    }
+  },
+  "oracles": {
+    "O1_race": {
+      "pass": true,
+      "problems": []
+    },
+    "O1_final": {
+      "pass": true,
+      "problems": []
+    },
+    "O2": {
+      "pass": true,
+      "problems": [],
+      "diffs": {
+        "A": {
+          "extra_in_writer": [],
+          "missing_in_writer": [],
+          "differ": []
+        },
+        "B": {
+          "extra_in_writer": [],
+          "missing_in_writer": [],
+          "differ": []
+        }
+      }
+    }
+  },
+  "post_barrier_failures": [],
+  "status": "PASS",
+  "reason": "O1 O2 clean; A's commit-section re-read of x.txt: {'ts_ms': 1789357746053, 'mono_ms': 30934, 'holder': 'lean-bc368b40-7ed6-4a9f-9c28-f03cb643f165', 'ev': 'observed', 'etag': '\"f49e6a535210335755d13e414061407e\"', 'flush': '0713b86b-2a26-4c4b-a4d5-0cb8fd07e9b7', 'path': 'x.txt', 'still': False}",
+  "meets_expectation": true
+}

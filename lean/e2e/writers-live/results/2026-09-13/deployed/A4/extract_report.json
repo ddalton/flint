@@ -1,0 +1,114 @@
+{
+ "agent_filter": "--tenant-ns ^wl-a4$",
+ "agents": {
+  "agents-0": {
+   "lines": 791,
+   "nodes": [
+    "runcv-aws-2"
+   ],
+   "segments": 1,
+   "units": [
+    "runcv-aws-2/flint-workers_s3w-88b490b6b4f7401a_31179b82-7513-4456-bd1c-84d4a7db523a/worker/0"
+   ]
+  },
+  "agents-1": {
+   "lines": 807,
+   "nodes": [
+    "runcv-aws-1"
+   ],
+   "segments": 1,
+   "units": [
+    "runcv-aws-1/flint-workers_s3w-b240259e70f7449c_4e8fb225-c8c3-4249-8483-bc98c769988b/worker/0"
+   ]
+  },
+  "agents-2": {
+   "lines": 808,
+   "nodes": [
+    "runcv-aws-3"
+   ],
+   "segments": 2,
+   "units": [
+    "runcv-aws-3/flint-workers_s3w-e70b572f19210cd9_8ecbf1ef-fcc4-4b90-bd3e-8d4264679710/worker/0",
+    "runcv-aws-3/flint-workers_s3w-e70b572f19210cd9_8ecbf1ef-fcc4-4b90-bd3e-8d4264679710/worker/1"
+   ]
+  },
+  "agents-3": {
+   "lines": 827,
+   "nodes": [
+    "runcv-aws-2"
+   ],
+   "segments": 1,
+   "units": [
+    "runcv-aws-2/flint-workers_s3w-b36859140ff34ea5_b4ffaf39-08d3-4638-b49e-5987301e88af/worker/0"
+   ]
+  },
+  "agents-4": {
+   "lines": 838,
+   "nodes": [
+    "runcv-aws-1"
+   ],
+   "segments": 1,
+   "units": [
+    "runcv-aws-1/flint-workers_s3w-f0d7989b23f64e29_e1c9b0ea-21a0-4f06-a7c5-a4da534b03df/worker/0"
+   ]
+  },
+  "agents-5": {
+   "lines": 829,
+   "nodes": [
+    "runcv-aws-3"
+   ],
+   "segments": 1,
+   "units": [
+    "runcv-aws-3/flint-workers_s3w-e35d57c95b7c6827_45654fd3-eb48-4469-bb6e-2156d9bb628c/worker/0"
+   ]
+  }
+ },
+ "chrony": {
+  "runcv-aws-1": {
+   "dropped_unsynced_or_malformed": 0,
+   "kept": 55
+  },
+  "runcv-aws-2": {
+   "dropped_unsynced_or_malformed": 0,
+   "kept": 55
+  },
+  "runcv-aws-3": {
+   "dropped_unsynced_or_malformed": 0,
+   "kept": 55
+  },
+  "runcv-cp-1": {
+   "dropped_unsynced_or_malformed": 0,
+   "kept": 55
+  }
+ },
+ "duplicate_pod_dirs": [],
+ "duplicate_segments": [],
+ "excluded_by_tenant_ns": [
+  "runcv-aws-1/flint-workers_s3w-1ed26af9166b0cdc_db2126d6-e7e4-41e1-8341-863f9046f192 -> wl-a1/agents-0",
+  "runcv-aws-1/flint-workers_s3w-9a1c82e82d502965_4f966b0b-805a-4c75-bd7c-b86a39bc4630 -> wl-a2/agents-2",
+  "runcv-aws-1/flint-workers_s3w-c2f8c759fe351784_a00ee61f-c934-4743-b789-0c896d9dabe7 -> wl-a1/agents-0",
+  "runcv-aws-1/flint-workers_s3w-e36b4c06642a4e34_1d65079e-8884-455b-b63a-9e5d04b6f39f -> wl-a2/agents-4",
+  "runcv-aws-1/flint-workers_s3w-f7eb7c4b7175e54e_e193f62f-a907-4b94-a473-f846d898f636 -> wl-a1/agents-3",
+  "runcv-aws-2/flint-workers_s3w-77df6cb2dcd6b88f_e00d1d8d-661c-4e35-ac9b-7b28d5314801 -> wl-a1/agents-4",
+  "runcv-aws-2/flint-workers_s3w-7bcbf1333b61a89b_6e3b16b8-f277-4b2c-91a8-45e22c4fae69 -> wl-a1/agents-1",
+  "runcv-aws-2/flint-workers_s3w-b08e0693301221ad_3a9b90a5-4ba3-4ea3-a508-b2dbd3e4833f -> wl-a1/agents-2",
+  "runcv-aws-2/flint-workers_s3w-b7afc0fadcac1123_2ed0528e-91b3-4e8e-84a4-f9bc4653509a -> wl-a2/agents-0",
+  "runcv-aws-2/flint-workers_s3w-be38dfde775aa777_5650a9d0-88c5-4dc9-8b94-95ac0875607a -> wl-a2/agents-5",
+  "runcv-aws-3/flint-workers_s3w-05e5cc7d7d47b00f_11e69540-61e5-4e6c-92ce-54b5e5b42f82 -> wl-a2/agents-3",
+  "runcv-aws-3/flint-workers_s3w-1e6bad89841f1f0d_e8153b8b-e5b8-4da7-bde7-01fe7a75b5ef -> wl-a2/agents-1",
+  "runcv-aws-3/flint-workers_s3w-41a5007eeb5cb546_063337ce-1d89-41f1-a6a5-da9949d943ee -> wl-a1/agents-5",
+  "runcv-aws-3/flint-workers_s3w-d71cfb25621ad1cd_81f33f80-2665-4a1d-b3cc-c721b2e5c142 -> wl-a1/agents-2",
+  "runcv-aws-3/flint-workers_s3w-fc20d4b4ac5cbd09_e3eb5cf4-e263-4d9a-9013-1910699c751a -> wl-a1/agents-1"
+ ],
+ "excluded_not_in_meta_agents": [],
+ "filtered_by_time": 584,
+ "malformed": [],
+ "malformed_count": 0,
+ "non_cri_lines": 0,
+ "overlaps": [],
+ "pods_lines_unparsed": 0,
+ "tenant_conflicts": [],
+ "truncated_final_lines": 0,
+ "unmapped_pods": [],
+ "unterminated_partials": 0
+}

@@ -1,0 +1,1 @@
+{"leg":"A4","void":true,"why":"fault half VOID: both worker deletions were refused by ValidatingAdmissionPolicy flint-s3-csi-workers (the old loop recorded them before trying); one SIGKILL landed outside a commit section. Oracles O1 O2 O3 O5 passed; the adopt half (14 adopted, 7 adopt-withheld) stands."}
