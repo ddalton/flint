@@ -8995,6 +8995,32 @@ async fn a_same_path_edit_is_preserved_never_lost() {
     assert_eq!(read(dir_a.path(), "x.txt").as_deref(), Some("B's edit, longer"));
 }
 
+/// The waiter the next handoff will name polls fast; the rest of the queue
+/// does not. In the writers drill the released cell stood idle a median
+/// 614 ms (1 s polls) before its reserved waiter noticed — more than half
+/// again the 973 ms median hold — with the queue behind it.
+#[tokio::test]
+async fn only_the_queue_head_is_told_to_poll_fast() {
+    let store = Arc::new(MemoryStore::new());
+    let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+    let mut a = syncer(&store, dirs[0].path()).await;
+    let mut b = syncer(&store, dirs[1].path()).await;
+    let mut c = syncer(&store, dirs[2].path()).await;
+    let next = |o: lease::ClaimOutcome| match o {
+        lease::ClaimOutcome::Waiting { next, .. } => Some(next),
+        lease::ClaimOutcome::Claimed(_) => None,
+    };
+    assert!(claim_until_held(&mut a, 1).await);
+    assert_eq!(next(lease::claim_step(&mut b, true).await.unwrap()), Some(true), "B heads the queue behind A");
+    assert_eq!(next(lease::claim_step(&mut c, true).await.unwrap()), Some(false), "C is second");
+    assert_eq!(next(lease::claim_step(&mut b, false).await.unwrap()), Some(true), "B still heads it on a re-poll");
+    lease::release(&mut a).await.unwrap();
+    // Released and reserved for B: C waits, and is not the head of anything yet.
+    assert_eq!(next(lease::claim_step(&mut c, false).await.unwrap()), Some(false));
+    assert_eq!(next(lease::claim_step(&mut b, false).await.unwrap()), None, "B claims its reservation");
+    assert_eq!(next(lease::claim_step(&mut c, false).await.unwrap()), Some(true), "C heads the queue behind B");
+}
+
 /// L5 — the ticket is load-bearing. A released cell is reserved for the
 /// queue HEAD: a later waiter that polls first does not get it. Delete
 /// the `handoff` check in `claim_step` and C claims here.

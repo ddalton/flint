@@ -67,6 +67,14 @@ pub const HANDOFF_QUIET_POLLS: u32 = 2;
 pub const QUIET_SPACING_SECS: u64 = 10;
 /// The wait loop's poll cadence: one GET of a few-hundred-byte cell.
 pub const CLAIM_POLL_SECS: u64 = 1;
+/// The poll cadence of the waiter at the HEAD of the queue: it is the one
+/// the holder's handoff reserves the cell for, and every millisecond it
+/// takes to notice is a millisecond the cell stands idle with the rest of
+/// the queue behind it. In the writers drill (6 writers, 1 s polls) the
+/// cell sat released a median 614 ms before the next holder claimed it,
+/// on top of a 973 ms hold. Deadness is judged on `QUIET_SPACING_SECS`,
+/// not on this, so the thresholds do not move.
+pub const CLAIM_POLL_HEAD_MS: u64 = 200;
 /// Longest a barrier waits for the cell before failing (and being
 /// retried at the next floor). Comfortably past the deposal threshold
 /// plus the spacing it needs, so a dead holder is always deposed within
@@ -79,8 +87,10 @@ pub enum ClaimOutcome {
     Claimed(EpochLease),
     /// Not ours yet. `quiet_polls` is the spaced-observation count
     /// against the current verdict's threshold; `behind` names the
-    /// holder or the reserved waiter we are waiting on.
-    Waiting { quiet_polls: u32, behind: Option<String> },
+    /// holder or the reserved waiter we are waiting on; `next` says this
+    /// waiter heads the queue behind a held cell, so the holder's handoff
+    /// will name it.
+    Waiting { quiet_polls: u32, behind: Option<String>, next: bool },
 }
 
 /// Say so, loudly, if another product also writes this prefix.
@@ -171,7 +181,7 @@ pub async fn claim_step(sc: &mut Syncer, count: bool) -> LeanResult<ClaimOutcome
                 Ok(ClaimOutcome::Claimed(lease))
             }
             Err(StoreError::PreconditionFailed(_)) | Err(StoreError::Conflict(_)) => {
-                Ok(ClaimOutcome::Waiting { quiet_polls: 0, behind: None })
+                Ok(ClaimOutcome::Waiting { quiet_polls: 0, behind: None, next: false })
             }
             Err(e) => Err(e.into()),
         };
@@ -275,7 +285,7 @@ pub async fn claim_step(sc: &mut Syncer, count: bool) -> LeanResult<ClaimOutcome
                 inc.last_token = None;
                 inc.quiet_polls = 0;
                 sc.state.save_incarnation(&inc)?;
-                Ok(ClaimOutcome::Waiting { quiet_polls: 0, behind })
+                Ok(ClaimOutcome::Waiting { quiet_polls: 0, behind, next: false })
             }
             Err(e) => Err(e.into()),
         };
@@ -302,7 +312,11 @@ pub async fn claim_step(sc: &mut Syncer, count: bool) -> LeanResult<ClaimOutcome
         inc.last_token = Some(token);
         sc.state.save_incarnation(&inc)?;
     }
-    Ok(ClaimOutcome::Waiting { quiet_polls: counted_quiet, behind })
+    // First in the queue behind a HELD cell (our enqueue appended us to
+    // whatever `state.waiters` held, or we were already in it).
+    let next = !state.released
+        && state.waiters.iter().find(|w| **w != state.holder_id).map(|w| w == &inc.holder_id).unwrap_or(true);
+    Ok(ClaimOutcome::Waiting { quiet_polls: counted_quiet, behind, next })
 }
 
 /// The wait loop: claim the cell for a commit section, or give up
@@ -315,11 +329,12 @@ pub async fn claim(sc: &mut Syncer) -> LeanResult<EpochLease> {
     let spacing = Duration::from_secs(sc.cfg.claim_quiet_spacing_secs);
     let deadline = Duration::from_secs(sc.cfg.claim_deadline_secs);
     let poll = Duration::from_secs(sc.cfg.claim_poll_secs);
+    let head_poll = Duration::from_millis(sc.cfg.claim_poll_head_ms).min(poll);
     loop {
         let count = last_counted.map(|t| t.elapsed() >= spacing).unwrap_or(true);
         match claim_step(sc, count).await? {
             ClaimOutcome::Claimed(lease) => return Ok(lease),
-            ClaimOutcome::Waiting { quiet_polls, behind } => {
+            ClaimOutcome::Waiting { quiet_polls, behind, next } => {
                 if count {
                     last_counted = Some(Instant::now());
                     sc.trace("claim", serde_json::json!({"verdict": "waiting", "behind": behind, "quiet_polls": quiet_polls,
@@ -345,7 +360,7 @@ pub async fn claim(sc: &mut Syncer) -> LeanResult<EpochLease> {
                         behind.as_deref().unwrap_or("a rival claim")
                     )));
                 }
-                tokio::time::sleep(poll).await;
+                tokio::time::sleep(if next { head_poll } else { poll }).await;
             }
         }
     }

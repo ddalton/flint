@@ -341,6 +341,9 @@ pub struct LeanConfig {
     // --- the publish fence (design 2026-09-13 §4; `lease.rs`) ---
     /// How often a barrier waiting for the cell re-reads it.
     pub claim_poll_secs: u64,
+    /// The poll cadence of the waiter at the head of the queue
+    /// (`lease::CLAIM_POLL_HEAD_MS`).
+    pub claim_poll_head_ms: u64,
     /// Minimum spacing between two observations that COUNT toward the
     /// dead-holder (`QUIET_POLLS`) and abandoned-handoff thresholds.
     /// The tests set it to 0 so a deposal takes six polls, not a minute.
@@ -404,6 +407,7 @@ impl LeanConfig {
             sentinel_hourly_budget: 60,
             sentinel_poll_secs: 1,
             claim_poll_secs: lease::CLAIM_POLL_SECS,
+            claim_poll_head_ms: lease::CLAIM_POLL_HEAD_MS,
             claim_quiet_spacing_secs: lease::QUIET_SPACING_SECS,
             claim_deadline_secs: lease::CLAIM_DEADLINE_SECS,
             drill_hold_commit_secs: 0,

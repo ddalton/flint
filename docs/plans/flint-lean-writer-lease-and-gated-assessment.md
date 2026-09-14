@@ -703,17 +703,6 @@ holds while the queue or the journal is non-empty
 mutation-checked on both arms). The invariant's one-directional
 refinement is still to do.
 
-**After the release (scalability, 2026-09-14):** a PULL-ONLY barrier —
-nothing uploaded, deleted, consumed, removed or re-cited — skips the fence.
-Its merge can only add nothing, so its commit section wrote nothing to the
-bucket; what is left is local (queue the foreign changes, take theirs as
-the merge base). 18 requests (4 cell, 2 inbox writes) become 4 GETs, and
-the drill's 65/191 pull-only claims leave the queue. The one interleaving
-the fence ruled out — a pull between a peer's CAS and its GC/window clear —
-is a test (`a_pull_only_boundary_inside_a_peers_commit_section_converges`).
-The model has no empty-install rule to extend, so this rides the same
-modelling gap as below.
-
 **Not yet modelled:** the writer-local queue and the empty-install rule
 — convergence properties the safety invariants cannot see. The module's
 `foreignQ` still joins the shared inbox at install.
@@ -722,3 +711,54 @@ Verification with all of it: syncer 180/180, flint-store 33 (46 with
 `s3`), gateway 45, forge 175, operator 16, plugin 64. The assessment of
 which named protocols these rules come from, and why GC may not move
 out of the lease, is `flint-lean-consensus-protocol-assessment.md`.
+
+### 10.2 What limits scale after v1.52.0 (2026-09-14)
+
+Measured from leg A1's event traces (six writers, one cell, 5 s floor,
+191 claims in 334 s; `results/2026-09-13/deployed/A1/traces.tgz`), then
+changed where the change is correctness-neutral. Queueing figures marked
+"estimate" are M/D/1 arithmetic on the measured rates, not measurements.
+
+**1. Idle reads — analysed, not built.** An idle tick is two GETs, the
+inbox cell and the manifest pointer (pinned by
+`the_fence_costs_a_publishing_boundary_four_cell_requests_and_an_idle_one_none`):
+2 / floor requests per second per writer — 400 req/s per 1,000 writers at
+a 5 s floor, 33 at the 60 s default (the 600 in the drill notes included
+the heartbeat PUT, since removed). The lever that is left: keep scanning
+the tree every tick (free, so a local write still publishes within a
+floor) but double the interval between the two bucket reads while nothing
+changes, up to a cap, resetting on any local change. The cost is latency,
+not safety: a UI write in the inbox, a gateway `request_boundary` or
+`request_sync`, and a peer's publish reach an idle writer up to the cap
+later, and `wait_cited` answers that much later. It needs a decision on
+the cap. Reading LESS per tick (folding the pointer's seq into the inbox
+cell) would couple the manifest CAS to an inbox write — not neutral, not
+recommended; conditional GETs save bytes, not requests.
+
+**2. Pull-only barriers — BUILT.** A barrier with nothing of its own to
+upload, delete, consume, remove or re-cite merges to nothing; its commit
+section wrote nothing to the bucket, so it now skips the fence: 18 requests
+(4 cell, 2 inbox writes) become 4 GETs, and the drill's 65 of 191 claims
+leave the queue. The one interleaving the fence ruled out — a pull between
+a peer's CAS and its GC/window clear — is a test
+(`a_pull_only_boundary_inside_a_peers_commit_section_converges`). The
+model has no empty-install rule to extend, so this rides the modelling gap
+recorded at the end of §10.1.
+
+**3. Waiting within a workspace — the cause measured, two levers BUILT,
+one open.** Claim wait p50 7.2 s / p90 11.4 s. The hold is short (p50
+973 ms: claimed→merge 125 ms, merge→CAS 64 ms, CAS→release **798 ms** —
+80% of the hold is after the commit point: GC, window clear, the
+generation and chunk sweeps, the handoff), but the released cell then
+stood idle a median **614 ms** until its reserved waiter's 1 s poll saw
+it, and the cell was held 59% of the leg. Service ~1.6 s at 0.57 claims/s
+is ρ≈0.9, where a queue explodes (estimate ~8 s, measured 7.2 s). Built:
+pull-only boundaries leave the queue (0.38 claims/s, ρ≈0.6, estimate
+~1.2 s) and the queue head polls every 200 ms (`CLAIM_POLL_HEAD_MS`;
+deadness is still judged on 10 s spacing; service ~1.07 s, ρ≈0.4,
+estimate ~0.4 s) — neither re-measured live. Open: move the post-CAS
+housekeeping (generation and chunk sweeps) after the handoff to cut the
+hold itself; that changes what runs concurrently with other writers'
+installs, so the `LeanChunkGC` rules need re-checking first. Sizing for
+agents meanwhile: an ack timeout below floor + (writers × hold) will
+miss boundaries under contention.

@@ -30,6 +30,18 @@ covered by the stability guarantee.
   `a_pull_only_boundary_inside_a_peers_commit_section_converges`, which
   runs the pull between a peer's manifest CAS and its GC delete — the
   interleaving the fence used to rule out.
+- **lean: the waiter at the head of the fence queue polls every 200 ms.**
+  The holder's handoff reserves the cell for the queue head, and in the
+  writers drill (1 s polls) the released cell stood idle a median 614 ms
+  before that waiter claimed it — on top of a 973 ms median hold, with
+  the rest of the queue behind it; with the pull-only claims, that put
+  the cell near saturation and the claim wait at 7.2 s p50. Only the head
+  polls faster (`lease::CLAIM_POLL_HEAD_MS`); deadness is still judged on
+  observations spaced 10 s apart, so the deposal thresholds do not move.
+  `only_the_queue_head_is_told_to_poll_fast` pins which waiter it is.
+  Neither change is re-measured live yet; the analysis, including what is
+  left (idle bucket reads, the post-commit housekeeping inside the hold),
+  is §10.2 of `docs/plans/flint-lean-writer-lease-and-gated-assessment.md`.
 
 ## [1.52.0] - 2026-09-14
 
