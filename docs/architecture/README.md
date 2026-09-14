@@ -25,6 +25,7 @@ abbreviation on the page.
 | `passthrough/flint-passthrough-dataflow.pdf` | `python3 passthrough/passthrough-dataflow.py --pdf --emf` |
 | `migration/flint-migration-dataflow.pdf` | `python3 migration/migration-dataflow.py --pdf --emf` |
 | `acid/flint-acid-passthrough-vs-lean.pdf` | `python3 acid/acid-poster.py --pdf --emf` |
+| `lean-protocol/flint-lean-protocol.pdf` | `python3 lean-protocol/lean-protocol-poster.py --pdf --emf` |
 
 Each script writes a `.vsdx` (editable in Visio), a `.pdf` (via Chrome), and with
 `--emf` a metafile for pasting into Office. They are drawn with `vsdxkit.py`, and the
@@ -62,10 +63,24 @@ docstring names the sources every cell is drawn from (`passthrough/spec.rs`, the
 radar's Mountpoint note, the 2026-09-10 door drill, `LeanSubtree.tla`), so a cell is a
 claim that can be checked, not an opinion.
 
-### The six as one book
+The seventh is the **lean protocol** in time: `lean-protocol/` draws several writers
+on one workspace as what they are — a strongly consistent shared log with eventually
+consistent working copies, git with automatic push and pull. A swimlane sequence (two
+writers and a UI, time running down) shows who holds the fence and for how long, and
+shades the stretch in which a tree is behind the log: that band is eventual
+consistency, and a tick ends it. Beside it, one writer's tick as a state machine;
+below it, WHY the log is strong (two writers racing one conditional write on the
+pointer — one lands, the other 412s and re-merges) and WHY a copy is eventual (a tree
+hears the log only on its own ticks, and never over a file its agent modified). The
+page closes with the systems in the same class — git with a hosted remote,
+Subversion and Perforce, Dropbox, Kubernetes over etcd, Delta Lake and Apache
+Iceberg, Kafka — and the ones that are not. Its numbers are the 2026-09-14
+contention drill's (`lean/e2e/writers-live/results/2026-09-14-contention/`).
 
-`flint-dataflow-posters.pdf` is all six in one file — lite, passthrough, lean, forge,
-the migration use case, then the ACID comparison — each page kept at its own size,
+### The seven as one book
+
+`flint-dataflow-posters.pdf` is all seven in one file — lite, passthrough, lean, forge,
+the migration use case, the ACID comparison, then the lean protocol — each page kept at its own size,
 since they differ and scaling to a common sheet would shrink 7.5 pt body text to
 illegible:
 
@@ -73,10 +88,11 @@ illegible:
 pdfunite lite/flint-lite-dataflow.pdf passthrough/flint-passthrough-dataflow.pdf \
          lean/flint-lean-dataflow.pdf forge/flint-forge-dataflow.pdf \
          migration/flint-migration-dataflow.pdf \
-         acid/flint-acid-passthrough-vs-lean.pdf flint-dataflow-posters.pdf
+         acid/flint-acid-passthrough-vs-lean.pdf \
+         lean-protocol/flint-lean-protocol.pdf flint-dataflow-posters.pdf
 ```
 
-Verify it with `pdfinfo -f 1 -l 6`: six pages, and each page's size is a fingerprint
+Verify it with `pdfinfo -f 1 -l 7`: seven pages, and each page's size is a fingerprint
 of which poster it is, so the sizes are how you check the ORDER as well as the count.
 
 **The gates are the point, and they are not advisory.** Before anything is written each
