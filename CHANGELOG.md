@@ -12,6 +12,29 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.53.0] - 2026-09-14
+
+### Added
+
+- **lean: a contention drill for several writers on one workspace.**
+  `lean/e2e/writers-live/contention.sh` runs N `flint-sync run` writers on
+  one host against one prefix, each driven by the drill's agent, and
+  judges the run with a fresh checkout every writer's tree must match plus
+  a HEAD of every citation; `contention_analyze.py` reads the event traces
+  (claim wait, the hold and its parts, handoff latency, cell occupancy, ack
+  latency and timeouts, lost handoffs, deposals, idle requests). The
+  commit section's tail is now traced (`window_clear`, `sweep`,
+  `handed_off`). 19 runs on real S3 measured this release against v1.52.0
+  and found the two fixes below; the table is §10.3 of
+  `docs/plans/flint-lean-writer-lease-and-gated-assessment.md`.
+- **docs: the lean protocol poster** (`docs/architecture/lean-protocol/`) —
+  several writers on one workspace as a strongly consistent shared log with
+  eventually consistent working copies, drawn in time: a swimlane sequence
+  with the fence holds and the lag bands, one writer's tick as a state
+  machine, why the log is strong and why a copy is eventual, and the systems
+  in the same class. The book of posters is seven pages; the lean data-flow
+  poster no longer calls the syncer the only writer.
+
 ### Changed
 
 - **lean: a pull-only boundary no longer queues for the publish fence.**
@@ -63,6 +86,30 @@ covered by the stability guarantee.
   still names this holder at this epoch: 0 of 696 handoffs lost, no
   deposal, no ack past the agents' 15 s timeout in 679.
   `a_handoff_that_races_the_queue_still_hands_the_cell_on`.
+- **flint-store 0.1.2: the shared-prefix report says one prefix belongs to
+  one product.** The warning a forge repository or a lean workspace logs
+  when it finds the other product's lease cell under its own prefix said
+  "one prefix has exactly one writer", false for a lean workspace since
+  v1.52.0, whose writers take turns at one cell. What it detects, and what
+  nothing enforces, is two products on one prefix; the wording now says so.
+  flint-lean 0.6.0 and flint-lean-gateway 0.4.0 depend on it.
+
+### Known limitations
+
+- **lean on Ozone 2.2.x: one writer per workspace.** Ozone 2.2.1 ignores
+  `If-Match` on `DeleteObject` (HDDS-14907, fix version 2.3.0), so a
+  second writer's garbage collector can delete the first writer's upload.
+  S3 enforces it. The syncer does not refuse the configuration yet.
+- **lean: a writer lost for good between an upload and its commit** leaves
+  an uncited object the trees and a fresh checkout disagree about until a
+  writer rewrites the path. No acknowledged write is lost.
+- **lean gateway: a UI write can wait up to the window deadline (180 s)**
+  behind a barrier that died mid-window.
+- **lean formal model:** `LeanBarrierLeaseSentinel` still violates
+  `Inv_AckBoundaryCoherent` at depth 19 (the invariant's refinement is
+  open), and the model has no empty-install rule, so this release's
+  pull-only boundary and handoff retry are covered by tests and the drill,
+  not by the model.
 
 ## [1.52.0] - 2026-09-14
 
@@ -6939,7 +6986,8 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.52.0...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.53.0...HEAD
+[1.53.0]: https://github.com/ddalton/flint/compare/v1.52.0...v1.53.0
 [1.52.0]: https://github.com/ddalton/flint/compare/v1.51.0...v1.52.0
 [1.51.0]: https://github.com/ddalton/flint/compare/v1.50.0...v1.51.0
 [1.50.0]: https://github.com/ddalton/flint/compare/v1.49.0...v1.50.0
