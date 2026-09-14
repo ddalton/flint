@@ -521,9 +521,17 @@ pub async fn verify_claim(sc: &Syncer) -> LeanResult<()> {
 }
 
 /// Release at the end of a commit section: the cell is handed to the
-/// queue head and keeps this barrier's echo. A 412 is re-read once —
-/// a waiter's enqueue moved the token — and retried with the adopted
-/// token; a cell that is no longer ours is nobody's to release.
+/// queue head and keeps this barrier's echo.
+///
+/// Every waiter's enqueue moves the token, so under contention the handoff
+/// can 412 several times in a row, and S3 answers a conditional write that
+/// races another with 409 ConditionalRequestConflict. Each is re-read: while
+/// the cell still names this holder at this epoch, unreleased, the handoff
+/// is retried on the adopted token. Only a cell that is no longer ours ends
+/// the attempt quietly. Returning with the cell still held — what a second
+/// 412 or a 409 used to do — leaves nobody to release it: the queue waits
+/// out the deposal threshold and the takeover rotates the manifest (the
+/// contention drill, 2026-09-14).
 pub async fn release(sc: &mut Syncer) -> LeanResult<()> {
     let key = sc.cfg.epoch_key();
     let Some(lease) = sc.lease.take() else { return Ok(()) };
@@ -532,25 +540,51 @@ pub async fn release(sc: &mut Syncer) -> LeanResult<()> {
     // `release` above is stamped before the request, `handed_off` after it
     // lands: the gap between one holder's release and the next claim is
     // the handoff's own latency plus the reserved waiter's poll delay.
-    match sc.store.epoch_handoff(&key, &lease, echo.as_deref()).await {
-        Ok(()) => {
-            sc.trace("handed_off", serde_json::json!({"epoch": lease.epoch, "retried": false}));
-            Ok(())
-        }
-        Err(StoreError::PreconditionFailed(_)) => match still_ours(sc, &key, &lease).await {
-            Some(adopted) => match sc.store.epoch_handoff(&key, &adopted, echo.as_deref()).await {
-                Ok(()) => {
-                    sc.trace("handed_off", serde_json::json!({"epoch": adopted.epoch, "retried": true}));
-                    Ok(())
+    let mut current = lease;
+    for attempt in 0..RELEASE_ATTEMPTS {
+        match sc.store.epoch_handoff(&key, &current, echo.as_deref()).await {
+            Ok(()) => {
+                sc.trace("handed_off", serde_json::json!({"epoch": current.epoch, "retried": attempt > 0, "attempts": attempt + 1}));
+                return Ok(());
+            }
+            Err(StoreError::PreconditionFailed(_)) | Err(StoreError::Conflict(_)) => {
+                if attempt > 0 {
+                    // Waiters enqueue in bursts; step out of the burst.
+                    tokio::time::sleep(Duration::from_millis(20 * attempt as u64)).await;
                 }
-                Err(StoreError::PreconditionFailed(_)) => Ok(()), // deposed meanwhile
-                Err(e) => Err(e.into()),
-            },
-            None => Ok(()), // already deposed: the cell is the successor's
-        },
-        Err(e) => Err(e.into()),
+                match sc.store.epoch_read(&key).await {
+                    Ok(Some(state))
+                        if state.holder_id == current.holder_id
+                            && state.epoch == current.epoch
+                            && !state.released =>
+                    {
+                        current = EpochLease {
+                            holder_id: state.holder_id,
+                            epoch: state.epoch,
+                            token: state.token,
+                            waiters: state.waiters,
+                        };
+                    }
+                    // Released, rotated or taken: the cell is the successor's.
+                    Ok(_) => return Ok(()),
+                    Err(e) if attempt + 1 < RELEASE_ATTEMPTS => {
+                        eprintln!("flint-sync: re-reading the publish fence for its handoff: {e}; retrying");
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
     }
+    Err(LeanError::State(format!(
+        "the publish fence handoff lost {RELEASE_ATTEMPTS} races to the queue; the cell stays ours \
+         until this writer's next claim adopts it, or a waiter deposes it"
+    )))
 }
+
+/// Handoff attempts before a release gives up (each lost to a waiter's
+/// enqueue or a racing conditional write, re-read between them).
+pub const RELEASE_ATTEMPTS: u32 = 8;
 
 /// A restarted container that finds the cell HELD by its own
 /// incarnation releases it: it holds nothing in memory, the intent

@@ -8393,6 +8393,13 @@ struct Hooks {
     /// `put_whole` fails for every key containing this (the conflict
     /// preserve is a GET + guarded PUT under `.flint/lean/conflicts/`).
     put_fail_containing: std::sync::Mutex<Option<String>>,
+    /// For this many `epoch_handoff` calls, a synthetic waiter enqueues
+    /// first — the token moves under the holder, so the handoff 412s the
+    /// way it does when real waiters queue during a busy commit.
+    handoff_races: std::sync::atomic::AtomicU32,
+    /// For this many `epoch_handoff` calls, answer S3's 409
+    /// ConditionalRequestConflict without landing.
+    handoff_conflicts: std::sync::atomic::AtomicU32,
 }
 
 struct Hooked(Arc<MemoryStore>, Hooks);
@@ -8609,6 +8616,14 @@ impl ObjectStore for Hooked {
         lease: &flint_store::EpochLease,
         echo: Option<&str>,
     ) -> flint_store::StoreResult<()> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.1.handoff_conflicts.fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1)).is_ok() {
+            return Err(flint_store::StoreError::Conflict("injected: ConditionalRequestConflict".into()));
+        }
+        if let Ok(left) = self.1.handoff_races.fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1)) {
+            let state = self.0.epoch_read(key).await?.expect("a cell to race");
+            self.0.epoch_enqueue(key, &state, &format!("synthetic-waiter-{left}")).await?;
+        }
         self.0.epoch_handoff(key, lease, echo).await
     }
     async fn epoch_enqueue(
@@ -9077,6 +9092,40 @@ async fn only_the_queue_head_is_told_to_poll_fast() {
     assert_eq!(next(lease::claim_step(&mut c, false).await.unwrap()), Some(false));
     assert_eq!(next(lease::claim_step(&mut b, false).await.unwrap()), None, "B claims its reservation");
     assert_eq!(next(lease::claim_step(&mut c, false).await.unwrap()), Some(true), "C heads the queue behind B");
+}
+
+/// The handoff races the queue. Every waiter's enqueue moves the cell's
+/// token, so under contention a holder's handoff can 412 more than once in
+/// a row, and S3 answers a conditional write racing another with 409
+/// ConditionalRequestConflict. The release treated a second 412 as
+/// "deposed meanwhile" and a 409 as a failure, and returned with the cell
+/// still HELD: nobody released it, and the queue waited out the deposal
+/// threshold (the contention drill: every arm lost 0-4 handoffs a run, and
+/// once pull-only boundaries stopped re-claiming, one stood ~60 s and was
+/// deposed with a manifest rotation).
+#[tokio::test]
+async fn a_handoff_that_races_the_queue_still_hands_the_cell_on() {
+    for (races, conflicts) in [(2u32, 0u32), (0, 1), (3, 2)] {
+        let inner = Arc::new(MemoryStore::new());
+        let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
+        let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let mut a = hooked_syncer(&hooked, dir_a.path());
+        let mut b = syncer(&inner, dir_b.path()).await;
+        assert!(claim_until_held(&mut a, 1).await);
+        assert!(matches!(lease::claim_step(&mut b, true).await.unwrap(), lease::ClaimOutcome::Waiting { .. }));
+        hooked.1.handoff_races.store(races, std::sync::atomic::Ordering::SeqCst);
+        hooked.1.handoff_conflicts.store(conflicts, std::sync::atomic::Ordering::SeqCst);
+        lease::release(&mut a).await.unwrap_or_else(|e| panic!("races {races}, conflicts {conflicts}: the release failed: {e}"));
+        let cell = inner.epoch_read(&a.cfg.epoch_key()).await.unwrap().unwrap();
+        assert!(
+            cell.released,
+            "races {races}, conflicts {conflicts}: the release returned and the cell is still held by {}",
+            cell.holder_id
+        );
+        let b_id = lease::incarnation(&b).unwrap().holder_id;
+        assert_eq!(cell.handoff.as_deref(), Some(b_id.as_str()), "races {races}, conflicts {conflicts}: the head of the queue was not named");
+        assert!(matches!(lease::claim_step(&mut b, true).await.unwrap(), lease::ClaimOutcome::Claimed(_)));
+    }
 }
 
 /// L5 — the ticket is load-bearing. A released cell is reserved for the
