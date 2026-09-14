@@ -1,0 +1,414 @@
+== A-1-20260914T160815Z  arm A  writers 6  pass True 
+   barriers 373  claims 186  pull-only barriers 63 (claimed 63)  cell held 0.563  lost handoffs 3  deposals 0
+   claim_wait_ms                  p50 6260 p90 10386 n 186
+   hold_ms                        p50 999 p90 1550 n 186
+   hold_publishing_ms             p50 1069 p90 1565 n 123
+   claimed_to_merge_ms            p50 138 p90 162 n 186
+   merge_to_cas_ms                p50 62 p90 70 n 123
+   cas_to_window_clear_ms         p50 76 p90 119 n 123
+   window_clear_to_gen_sweep_ms   p50 38 p90 42 n 186
+   gen_sweep_to_chunk_sweep_ms    p50 700 p90 1213 n 186
+   sweeps_to_release_ms           p50 0 p90 0 n 186
+   handoff_request_ms             p50 38 p90 80 n 183
+   release_to_next_claim_ms       p50 655 p90 1028 n 182
+   handed_off_to_next_claim_ms    p50 622 p90 998 n 182
+   ack_latency_ms                 p50 9416 p90 13507 n 65
+   acks {'ok': 68, 'partial': 0, 'no-ack': 43, 'other': 0}
+   idle ticks 60 (+0 catch-up)  requests/tick {'get': 2.0}
+   load requests {'copy': 0, 'delete': 52, 'get': 5934, 'head': 14338, 'list': 372, 'multipart': 0, 'put': 1796}
+== A-2-20260914T164028Z  arm A  writers 6  pass True 
+   barriers 349  claims 189  pull-only barriers 61 (claimed 61)  cell held 0.549  lost handoffs 3  deposals 0
+   claim_wait_ms                  p50 7211 p90 10317 n 189
+   hold_ms                        p50 981 p90 1608 n 189
+   hold_publishing_ms             p50 1058 p90 1619 n 128
+   claimed_to_merge_ms            p50 135 p90 158 n 189
+   merge_to_cas_ms                p50 63 p90 72 n 128
+   cas_to_window_clear_ms         p50 74 p90 121 n 128
+   window_clear_to_gen_sweep_ms   p50 38 p90 42 n 189
+   gen_sweep_to_chunk_sweep_ms    p50 679 p90 1284 n 189
+   sweeps_to_release_ms           p50 0 p90 1 n 189
+   handoff_request_ms             p50 68 p90 81 n 186
+   release_to_next_claim_ms       p50 506 p90 1093 n 185
+   handed_off_to_next_claim_ms    p50 438 p90 1019 n 185
+   ack_latency_ms                 p50 7979 p90 14095 n 55
+   acks {'ok': 59, 'partial': 0, 'no-ack': 51, 'other': 0}
+   idle ticks 60 (+0 catch-up)  requests/tick {'get': 2.0}
+   load requests {'copy': 0, 'delete': 52, 'get': 5960, 'head': 14844, 'list': 376, 'multipart': 0, 'put': 1828}
+== A-3-20260914T165318Z  arm A  writers 6  pass True 
+   barriers 376  claims 202  pull-only barriers 71 (claimed 71)  cell held 0.576  lost handoffs 1  deposals 0
+   claim_wait_ms                  p50 6191 p90 10327 n 202
+   hold_ms                        p50 970 p90 1565 n 202
+   hold_publishing_ms             p50 1104 p90 1592 n 131
+   claimed_to_merge_ms            p50 135 p90 159 n 202
+   merge_to_cas_ms                p50 63 p90 72 n 131
+   cas_to_window_clear_ms         p50 76 p90 130 n 131
+   window_clear_to_gen_sweep_ms   p50 38 p90 43 n 202
+   gen_sweep_to_chunk_sweep_ms    p50 672 p90 1268 n 202
+   sweeps_to_release_ms           p50 0 p90 1 n 202
+   handoff_request_ms             p50 45 p90 81 n 201
+   release_to_next_claim_ms       p50 664 p90 1066 n 199
+   handed_off_to_next_claim_ms    p50 591 p90 1002 n 199
+   ack_latency_ms                 p50 8796 p90 13089 n 72
+   acks {'ok': 76, 'partial': 0, 'no-ack': 39, 'other': 0}
+   idle ticks 58 (+2 catch-up)  requests/tick {'get': 2.0}
+   load requests {'copy': 0, 'delete': 58, 'get': 6209, 'head': 15593, 'list': 398, 'multipart': 0, 'put': 1901}
+== B-1-20260914T161447Z  arm B  writers 6  pass True 
+   barriers 509  claims 160  pull-only barriers 172 (claimed 0)  cell held 0.609  lost handoffs 2  deposals 0
+   claim_wait_ms                  p50 3104 p90 8241 n 160
+   hold_ms                        p50 1237 p90 1924 n 160
+   hold_publishing_ms             p50 1237 p90 1924 n 160
+   claimed_to_merge_ms            p50 143 p90 160 n 160
+   merge_to_cas_ms                p50 64 p90 71 n 160
+   cas_to_window_clear_ms         p50 78 p90 123 n 160
+   window_clear_to_gen_sweep_ms   p50 38 p90 41 n 160
+   gen_sweep_to_chunk_sweep_ms    p50 876 p90 1596 n 160
+   sweeps_to_release_ms           p50 0 p90 1 n 160
+   handoff_request_ms             p50 39 p90 81 n 158
+   release_to_next_claim_ms       p50 669 p90 1080 n 131
+   handed_off_to_next_claim_ms    p50 616 p90 1017 n 131
+   ack_latency_ms                 p50 4920 p90 10019 n 142
+   acks {'ok': 148, 'partial': 0, 'no-ack': 7, 'other': 0}
+   idle ticks 60 (+0 catch-up)  requests/tick {'get': 2.0}
+   load requests {'copy': 0, 'delete': 83, 'get': 6609, 'head': 17126, 'list': 320, 'multipart': 0, 'put': 1910}
+== B-2-20260914T162736Z  arm B  writers 6  pass True 
+   barriers 498  claims 156  pull-only barriers 162 (claimed 0)  cell held 0.596  lost handoffs 2  deposals 0
+   claim_wait_ms                  p50 3103 p90 8239 n 156
+   hold_ms                        p50 1219 p90 1882 n 156
+   hold_publishing_ms             p50 1219 p90 1882 n 156
+   claimed_to_merge_ms            p50 143 p90 162 n 156
+   merge_to_cas_ms                p50 63 p90 70 n 156
+   cas_to_window_clear_ms         p50 77 p90 126 n 156
+   window_clear_to_gen_sweep_ms   p50 38 p90 42 n 156
+   gen_sweep_to_chunk_sweep_ms    p50 857 p90 1529 n 156
+   sweeps_to_release_ms           p50 0 p90 1 n 156
+   handoff_request_ms             p50 40 p90 79 n 154
+   release_to_next_claim_ms       p50 676 p90 1059 n 129
+   handed_off_to_next_claim_ms    p50 611 p90 981 n 129
+   ack_latency_ms                 p50 5120 p90 11249 n 140
+   acks {'ok': 146, 'partial': 0, 'no-ack': 6, 'other': 0}
+   idle ticks 60 (+0 catch-up)  requests/tick {'get': 2.0}
+   load requests {'copy': 0, 'delete': 79, 'get': 6432, 'head': 16384, 'list': 312, 'multipart': 0, 'put': 1860}
+== B-3-20260914T165957Z  arm B  writers 6  pass True 
+   barriers 509  claims 158  pull-only barriers 176 (claimed 0)  cell held 0.612  lost handoffs 0  deposals 0
+   claim_wait_ms                  p50 3115 p90 7248 n 158
+   hold_ms                        p50 1227 p90 1882 n 158
+   hold_publishing_ms             p50 1227 p90 1882 n 158
+   claimed_to_merge_ms            p50 142 p90 160 n 158
+   merge_to_cas_ms                p50 64 p90 71 n 158
+   cas_to_window_clear_ms         p50 78 p90 122 n 158
+   window_clear_to_gen_sweep_ms   p50 38 p90 43 n 158
+   gen_sweep_to_chunk_sweep_ms    p50 898 p90 1526 n 158
+   sweeps_to_release_ms           p50 0 p90 0 n 158
+   handoff_request_ms             p50 51 p90 81 n 158
+   release_to_next_claim_ms       p50 749 p90 1069 n 140
+   handed_off_to_next_claim_ms    p50 692 p90 1011 n 140
+   ack_latency_ms                 p50 5325 p90 10225 n 141
+   acks {'ok': 147, 'partial': 0, 'no-ack': 5, 'other': 0}
+   idle ticks 60 (+0 catch-up)  requests/tick {'get': 2.0}
+   load requests {'copy': 0, 'delete': 81, 'get': 6498, 'head': 16700, 'list': 316, 'multipart': 0, 'put': 1880}
+== C-1-20260914T162118Z  arm C  writers 6  pass True 
+   barriers 507  claims 164  pull-only barriers 209 (claimed 0)  cell held 0.656  lost handoffs 4  deposals 0
+   claim_wait_ms                  p50 1980 p90 8231 n 164
+   hold_ms                        p50 1256 p90 1891 n 164
+   hold_publishing_ms             p50 1256 p90 1891 n 164
+   claimed_to_merge_ms            p50 141 p90 159 n 164
+   merge_to_cas_ms                p50 63 p90 73 n 164
+   cas_to_window_clear_ms         p50 77 p90 122 n 164
+   window_clear_to_gen_sweep_ms   p50 37 p90 42 n 164
+   gen_sweep_to_chunk_sweep_ms    p50 920 p90 1551 n 164
+   sweeps_to_release_ms           p50 0 p90 1 n 164
+   handoff_request_ms             p50 40 p90 82 n 160
+   release_to_next_claim_ms       p50 220 p90 325 n 128
+   handed_off_to_next_claim_ms    p50 170 p90 260 n 128
+   ack_latency_ms                 p50 4106 p90 10835 n 145
+   acks {'ok': 151, 'partial': 0, 'no-ack': 7, 'other': 0}
+   idle ticks 60 (+0 catch-up)  requests/tick {'get': 2.0}
+   load requests {'copy': 0, 'delete': 84, 'get': 7292, 'head': 17804, 'list': 328, 'multipart': 0, 'put': 1923}
+== C-2-20260914T163359Z  arm C  writers 6  pass True 
+   barriers 538  claims 173  pull-only barriers 224 (claimed 0)  cell held 0.704  lost handoffs 2  deposals 0
+   claim_wait_ms                  p50 1746 p90 6174 n 173
+   hold_ms                        p50 1344 p90 1999 n 173
+   hold_publishing_ms             p50 1344 p90 1999 n 173
+   claimed_to_merge_ms            p50 143 p90 155 n 173
+   merge_to_cas_ms                p50 63 p90 72 n 173
+   cas_to_window_clear_ms         p50 79 p90 125 n 173
+   window_clear_to_gen_sweep_ms   p50 37 p90 42 n 173
+   gen_sweep_to_chunk_sweep_ms    p50 990 p90 1660 n 173
+   sweeps_to_release_ms           p50 0 p90 0 n 173
+   handoff_request_ms             p50 66 p90 81 n 171
+   release_to_next_claim_ms       p50 224 p90 320 n 136
+   handed_off_to_next_claim_ms    p50 157 p90 253 n 136
+   ack_latency_ms                 p50 4509 p90 9614 n 159
+   acks {'ok': 165, 'partial': 0, 'no-ack': 1, 'other': 0}
+   idle ticks 60 (+0 catch-up)  requests/tick {'get': 2.0}
+   load requests {'copy': 0, 'delete': 94, 'get': 7592, 'head': 19552, 'list': 346, 'multipart': 0, 'put': 2039}
+== C-3-20260914T164658Z  arm C  writers 6  pass True 
+   barriers 507  claims 164  pull-only barriers 205 (claimed 0)  cell held 0.658  lost handoffs 4  deposals 0
+   claim_wait_ms                  p50 1779 p90 7759 n 164
+   hold_ms                        p50 1320 p90 1948 n 164
+   hold_publishing_ms             p50 1320 p90 1948 n 164
+   claimed_to_merge_ms            p50 142 p90 157 n 164
+   merge_to_cas_ms                p50 64 p90 72 n 164
+   cas_to_window_clear_ms         p50 77 p90 141 n 164
+   window_clear_to_gen_sweep_ms   p50 38 p90 42 n 164
+   gen_sweep_to_chunk_sweep_ms    p50 967 p90 1600 n 164
+   sweeps_to_release_ms           p50 0 p90 0 n 164
+   handoff_request_ms             p50 40 p90 80 n 160
+   release_to_next_claim_ms       p50 210 p90 322 n 124
+   handed_off_to_next_claim_ms    p50 159 p90 252 n 124
+   ack_latency_ms                 p50 4103 p90 10624 n 147
+   acks {'ok': 153, 'partial': 0, 'no-ack': 6, 'other': 0}
+   idle ticks 60 (+0 catch-up)  requests/tick {'get': 2.0}
+   load requests {'copy': 0, 'delete': 87, 'get': 7288, 'head': 17851, 'list': 328, 'multipart': 0, 'put': 1943}
+== C-4-20260914T171317Z  arm C  writers 6  pass True 
+   barriers 535  claims 171  pull-only barriers 218 (claimed 0)  cell held 0.692  lost handoffs 3  deposals 0
+   claim_wait_ms                  p50 1729 p90 5799 n 171
+   hold_ms                        p50 1273 p90 1935 n 171
+   hold_publishing_ms             p50 1273 p90 1935 n 171
+   claimed_to_merge_ms            p50 141 p90 156 n 171
+   merge_to_cas_ms                p50 62 p90 70 n 171
+   cas_to_window_clear_ms         p50 78 p90 125 n 171
+   window_clear_to_gen_sweep_ms   p50 38 p90 42 n 171
+   gen_sweep_to_chunk_sweep_ms    p50 943 p90 1569 n 171
+   sweeps_to_release_ms           p50 0 p90 1 n 171
+   handoff_request_ms             p50 42 p90 82 n 168
+   release_to_next_claim_ms       p50 217 p90 331 n 130
+   handed_off_to_next_claim_ms    p50 157 p90 256 n 130
+   ack_latency_ms                 p50 4105 p90 9403 n 156
+   acks {'ok': 162, 'partial': 0, 'no-ack': 3, 'other': 0}
+   idle ticks 60 (+0 catch-up)  requests/tick {'get': 2.0}
+   load requests {'copy': 0, 'delete': 92, 'get': 7516, 'head': 19158, 'list': 342, 'multipart': 0, 'put': 2007}
+== C-5-20260914T172555Z  arm C  writers 6  pass True 
+   barriers 514  claims 166  pull-only barriers 209 (claimed 0)  cell held 0.658  lost handoffs 6  deposals 0
+   claim_wait_ms                  p50 1950 p90 8554 n 166
+   hold_ms                        p50 1229 p90 1897 n 166
+   hold_publishing_ms             p50 1229 p90 1897 n 166
+   claimed_to_merge_ms            p50 144 p90 158 n 166
+   merge_to_cas_ms                p50 63 p90 73 n 166
+   cas_to_window_clear_ms         p50 79 p90 125 n 166
+   window_clear_to_gen_sweep_ms   p50 38 p90 42 n 166
+   gen_sweep_to_chunk_sweep_ms    p50 907 p90 1540 n 166
+   sweeps_to_release_ms           p50 0 p90 1 n 166
+   handoff_request_ms             p50 41 p90 79 n 160
+   release_to_next_claim_ms       p50 215 p90 319 n 123
+   handed_off_to_next_claim_ms    p50 165 p90 255 n 123
+   ack_latency_ms                 p50 4307 p90 10025 n 145
+   acks {'ok': 151, 'partial': 0, 'no-ack': 8, 'other': 0}
+   idle ticks 60 (+0 catch-up)  requests/tick {'get': 2.0}
+   load requests {'copy': 0, 'delete': 85, 'get': 7364, 'head': 18145, 'list': 332, 'multipart': 0, 'put': 1933}
+== D-1-20260914T170641Z  arm D  writers 6  pass True 
+   barriers 591  claims 224  pull-only barriers 248 (claimed 0)  cell held 0.276  lost handoffs 4  deposals 1
+   claim_wait_ms                  p50 0 p90 2087 n 224
+   hold_ms                        p50 410 p90 467 n 224
+   hold_publishing_ms             p50 410 p90 467 n 224
+   claimed_to_merge_ms            p50 140 p90 155 n 224
+   merge_to_cas_ms                p50 63 p90 72 n 224
+   cas_to_window_clear_ms         p50 101 p90 147 n 224
+   window_clear_to_gen_sweep_ms   p50 37 p90 41 n 224
+   gen_sweep_to_chunk_sweep_ms    p50 71 p90 82 n 224
+   sweeps_to_release_ms           p50 0 p90 0 n 224
+   handoff_request_ms             p50 35 p90 80 n 220
+   release_to_next_claim_ms       p50 247 p90 628 n 87
+   handed_off_to_next_claim_ms    p50 188 p90 597 n 87
+   ack_latency_ms                 p50 2061 p90 3493 n 203
+   acks {'ok': 204, 'partial': 0, 'no-ack': 10, 'other': 0}
+   idle ticks 28 (+10 catch-up)  requests/tick {'get': 2.0}
+   load requests {'copy': 0, 'delete': 150, 'get': 8894, 'head': 5845, 'list': 448, 'multipart': 0, 'put': 2483}
+== D-2-20260914T171939Z  arm D  writers 6  pass True 
+   barriers 624  claims 223  pull-only barriers 237 (claimed 0)  cell held 0.302  lost handoffs 3  deposals 0
+   claim_wait_ms                  p50 0 p90 1556 n 223
+   hold_ms                        p50 410 p90 472 n 223
+   hold_publishing_ms             p50 410 p90 472 n 223
+   claimed_to_merge_ms            p50 142 p90 158 n 223
+   merge_to_cas_ms                p50 64 p90 72 n 223
+   cas_to_window_clear_ms         p50 99 p90 150 n 223
+   window_clear_to_gen_sweep_ms   p50 37 p90 42 n 223
+   gen_sweep_to_chunk_sweep_ms    p50 72 p90 81 n 223
+   sweeps_to_release_ms           p50 0 p90 0 n 223
+   handoff_request_ms             p50 38 p90 82 n 220
+   release_to_next_claim_ms       p50 243 p90 514 n 89
+   handed_off_to_next_claim_ms    p50 166 p90 480 n 89
+   ack_latency_ms                 p50 2062 p90 3291 n 207
+   acks {'ok': 213, 'partial': 0, 'no-ack': 0, 'other': 0}
+   idle ticks 60 (+0 catch-up)  requests/tick {'get': 2.0}
+   load requests {'copy': 0, 'delete': 150, 'get': 8544, 'head': 5985, 'list': 446, 'multipart': 0, 'put': 2493}
+== D-3-20260914T173219Z  arm D  writers 6  pass True 
+   barriers 637  claims 229  pull-only barriers 252 (claimed 0)  cell held 0.308  lost handoffs 1  deposals 0
+   claim_wait_ms                  p50 0 p90 1063 n 229
+   hold_ms                        p50 403 p90 462 n 229
+   hold_publishing_ms             p50 403 p90 462 n 229
+   claimed_to_merge_ms            p50 139 p90 151 n 229
+   merge_to_cas_ms                p50 61 p90 71 n 229
+   cas_to_window_clear_ms         p50 98 p90 151 n 229
+   window_clear_to_gen_sweep_ms   p50 37 p90 43 n 229
+   gen_sweep_to_chunk_sweep_ms    p50 71 p90 80 n 229
+   sweeps_to_release_ms           p50 0 p90 0 n 229
+   handoff_request_ms             p50 36 p90 78 n 228
+   release_to_next_claim_ms       p50 237 p90 498 n 82
+   handed_off_to_next_claim_ms    p50 167 p90 464 n 82
+   ack_latency_ms                 p50 1861 p90 3084 n 215
+   acks {'ok': 221, 'partial': 0, 'no-ack': 0, 'other': 0}
+   idle ticks 60 (+0 catch-up)  requests/tick {'get': 2.0}
+   load requests {'copy': 0, 'delete': 154, 'get': 8663, 'head': 6187, 'list': 458, 'multipart': 0, 'put': 2528}
+== D-4-20260914T174456Z  arm D  writers 6  pass True 
+   barriers 634  claims 222  pull-only barriers 249 (claimed 0)  cell held 0.298  lost handoffs 2  deposals 0
+   claim_wait_ms                  p50 0 p90 1541 n 222
+   hold_ms                        p50 408 p90 463 n 222
+   hold_publishing_ms             p50 408 p90 463 n 222
+   claimed_to_merge_ms            p50 140 p90 157 n 222
+   merge_to_cas_ms                p50 62 p90 70 n 222
+   cas_to_window_clear_ms         p50 97 p90 144 n 222
+   window_clear_to_gen_sweep_ms   p50 37 p90 42 n 222
+   gen_sweep_to_chunk_sweep_ms    p50 72 p90 82 n 222
+   sweeps_to_release_ms           p50 0 p90 0 n 222
+   handoff_request_ms             p50 36 p90 77 n 220
+   release_to_next_claim_ms       p50 250 p90 552 n 94
+   handed_off_to_next_claim_ms    p50 183 p90 496 n 94
+   ack_latency_ms                 p50 2062 p90 3491 n 208
+   acks {'ok': 214, 'partial': 0, 'no-ack': 0, 'other': 0}
+   idle ticks 60 (+0 catch-up)  requests/tick {'get': 2.0}
+   load requests {'copy': 0, 'delete': 150, 'get': 8548, 'head': 5999, 'list': 444, 'multipart': 0, 'put': 2466}
+== D-5-20260914T175726Z  arm D  writers 6  pass True 
+   barriers 643  claims 229  pull-only barriers 247 (claimed 0)  cell held 0.305  lost handoffs 2  deposals 0
+   claim_wait_ms                  p50 0 p90 1061 n 229
+   hold_ms                        p50 405 p90 469 n 229
+   hold_publishing_ms             p50 405 p90 469 n 229
+   claimed_to_merge_ms            p50 140 p90 155 n 229
+   merge_to_cas_ms                p50 61 p90 70 n 229
+   cas_to_window_clear_ms         p50 97 p90 146 n 229
+   window_clear_to_gen_sweep_ms   p50 37 p90 42 n 229
+   gen_sweep_to_chunk_sweep_ms    p50 71 p90 83 n 229
+   sweeps_to_release_ms           p50 0 p90 0 n 229
+   handoff_request_ms             p50 35 p90 75 n 227
+   release_to_next_claim_ms       p50 232 p90 485 n 71
+   handed_off_to_next_claim_ms    p50 174 p90 448 n 71
+   ack_latency_ms                 p50 1860 p90 3083 n 214
+   acks {'ok': 220, 'partial': 0, 'no-ack': 0, 'other': 0}
+   idle ticks 60 (+0 catch-up)  requests/tick {'get': 2.0}
+   load requests {'copy': 0, 'delete': 154, 'get': 8669, 'head': 6148, 'list': 458, 'multipart': 0, 'put': 2512}
+== E-1-20260914T173836Z  arm E  writers 6  pass True 
+   barriers 658  claims 236  pull-only barriers 264 (claimed 0)  cell held 0.316  lost handoffs 0  deposals 0
+   claim_wait_ms                  p50 0 p90 716 n 236
+   hold_ms                        p50 403 p90 476 n 236
+   hold_publishing_ms             p50 403 p90 476 n 236
+   claimed_to_merge_ms            p50 141 p90 154 n 236
+   merge_to_cas_ms                p50 63 p90 72 n 236
+   cas_to_window_clear_ms         p50 97 p90 151 n 236
+   window_clear_to_gen_sweep_ms   p50 37 p90 41 n 236
+   gen_sweep_to_chunk_sweep_ms    p50 71 p90 84 n 236
+   sweeps_to_release_ms           p50 0 p90 1 n 236
+   handoff_request_ms             p50 36 p90 80 n 236
+   release_to_next_claim_ms       p50 245 p90 442 n 73
+   handed_off_to_next_claim_ms    p50 167 p90 386 n 73
+   ack_latency_ms                 p50 1860 p90 2880 n 219
+   acks {'ok': 225, 'partial': 0, 'no-ack': 0, 'other': 0}
+   idle ticks 60 (+0 catch-up)  requests/tick {'get': 2.0}
+   load requests {'copy': 0, 'delete': 155, 'get': 8843, 'head': 6303, 'list': 472, 'multipart': 0, 'put': 2590}
+== E-2-20260914T175111Z  arm E  writers 6  pass True 
+   barriers 653  claims 232  pull-only barriers 263 (claimed 0)  cell held 0.31  lost handoffs 0  deposals 0
+   claim_wait_ms                  p50 0 p90 1057 n 232
+   hold_ms                        p50 401 p90 468 n 232
+   hold_publishing_ms             p50 401 p90 468 n 232
+   claimed_to_merge_ms            p50 141 p90 151 n 232
+   merge_to_cas_ms                p50 61 p90 68 n 232
+   cas_to_window_clear_ms         p50 95 p90 148 n 232
+   window_clear_to_gen_sweep_ms   p50 37 p90 41 n 232
+   gen_sweep_to_chunk_sweep_ms    p50 73 p90 82 n 232
+   sweeps_to_release_ms           p50 0 p90 0 n 232
+   handoff_request_ms             p50 35 p90 77 n 232
+   release_to_next_claim_ms       p50 250 p90 490 n 76
+   handed_off_to_next_claim_ms    p50 180 p90 453 n 76
+   ack_latency_ms                 p50 1860 p90 2679 n 221
+   acks {'ok': 227, 'partial': 0, 'no-ack': 0, 'other': 0}
+   idle ticks 60 (+0 catch-up)  requests/tick {'get': 2.0}
+   load requests {'copy': 0, 'delete': 157, 'get': 8856, 'head': 6359, 'list': 464, 'multipart': 0, 'put': 2576}
+== E-3-20260914T180343Z  arm E  writers 6  pass True 
+   barriers 651  claims 228  pull-only barriers 253 (claimed 0)  cell held 0.31  lost handoffs 0  deposals 0
+   claim_wait_ms                  p50 0 p90 1053 n 228
+   hold_ms                        p50 409 p90 475 n 228
+   hold_publishing_ms             p50 409 p90 475 n 228
+   claimed_to_merge_ms            p50 142 p90 153 n 228
+   merge_to_cas_ms                p50 62 p90 70 n 228
+   cas_to_window_clear_ms         p50 103 p90 150 n 228
+   window_clear_to_gen_sweep_ms   p50 38 p90 43 n 228
+   gen_sweep_to_chunk_sweep_ms    p50 72 p90 83 n 228
+   sweeps_to_release_ms           p50 0 p90 0 n 228
+   handoff_request_ms             p50 36 p90 78 n 228
+   release_to_next_claim_ms       p50 238 p90 360 n 67
+   handed_off_to_next_claim_ms    p50 168 p90 326 n 67
+   ack_latency_ms                 p50 1862 p90 2679 n 221
+   acks {'ok': 227, 'partial': 0, 'no-ack': 0, 'other': 0}
+   idle ticks 60 (+0 catch-up)  requests/tick {'get': 2.0}
+   load requests {'copy': 0, 'delete': 157, 'get': 8756, 'head': 6342, 'list': 456, 'multipart': 0, 'put': 2543}
+
+== per arm: p50 across runs [min..max], counts summed
+-- arm A: 3 run(s), pass [True, True, True]
+   claim_wait_ms                  p50 [6191..7211]  p90 [10317..10386]
+   hold_ms                        p50 [970..999]  p90 [1550..1608]
+   hold_publishing_ms             p50 [1058..1104]  p90 [1565..1619]
+   release_to_next_claim_ms       p50 [506..664]  p90 [1028..1093]
+   handoff_request_ms             p50 [38..68]  p90 [80..81]
+   handed_off_to_next_claim_ms    p50 [438..622]  p90 [998..1019]
+   cas_to_window_clear_ms         p50 [74..76]  p90 [119..130]
+   window_clear_to_gen_sweep_ms   p50 [38..38]  p90 [42..43]
+   ack_latency_ms                 p50 [7979..9416]  p90 [13089..14095]
+   claims [186, 189, 202]  pull-only claims [63, 61, 71]  cell held [0.563, 0.549, 0.576]
+   no-ack [43, 51, 39] of acks [111, 110, 115]
+   lost handoffs [3, 3, 1]  deposals [0, 0, 0]
+   idle requests/tick [{'get': 2.0}, {'get': 2.0}, {'get': 2.0}]
+-- arm B: 3 run(s), pass [True, True, True]
+   claim_wait_ms                  p50 [3103..3115]  p90 [7248..8241]
+   hold_ms                        p50 [1219..1237]  p90 [1882..1924]
+   hold_publishing_ms             p50 [1219..1237]  p90 [1882..1924]
+   release_to_next_claim_ms       p50 [669..749]  p90 [1059..1080]
+   handoff_request_ms             p50 [39..51]  p90 [79..81]
+   handed_off_to_next_claim_ms    p50 [611..692]  p90 [981..1017]
+   cas_to_window_clear_ms         p50 [77..78]  p90 [122..126]
+   window_clear_to_gen_sweep_ms   p50 [38..38]  p90 [41..43]
+   ack_latency_ms                 p50 [4920..5325]  p90 [10019..11249]
+   claims [160, 156, 158]  pull-only claims [0, 0, 0]  cell held [0.609, 0.596, 0.612]
+   no-ack [7, 6, 5] of acks [155, 152, 152]
+   lost handoffs [2, 2, 0]  deposals [0, 0, 0]
+   idle requests/tick [{'get': 2.0}, {'get': 2.0}, {'get': 2.0}]
+-- arm C: 5 run(s), pass [True, True, True, True, True]
+   claim_wait_ms                  p50 [1729..1980]  p90 [5799..8554]
+   hold_ms                        p50 [1229..1344]  p90 [1891..1999]
+   hold_publishing_ms             p50 [1229..1344]  p90 [1891..1999]
+   release_to_next_claim_ms       p50 [210..224]  p90 [319..331]
+   handoff_request_ms             p50 [40..66]  p90 [79..82]
+   handed_off_to_next_claim_ms    p50 [157..170]  p90 [252..260]
+   cas_to_window_clear_ms         p50 [77..79]  p90 [122..141]
+   window_clear_to_gen_sweep_ms   p50 [37..38]  p90 [42..42]
+   ack_latency_ms                 p50 [4103..4509]  p90 [9403..10835]
+   claims [164, 173, 164, 171, 166]  pull-only claims [0, 0, 0, 0, 0]  cell held [0.656, 0.704, 0.658, 0.692, 0.658]
+   no-ack [7, 1, 6, 3, 8] of acks [158, 166, 159, 165, 159]
+   lost handoffs [4, 2, 4, 3, 6]  deposals [0, 0, 0, 0, 0]
+   idle requests/tick [{'get': 2.0}, {'get': 2.0}, {'get': 2.0}, {'get': 2.0}, {'get': 2.0}]
+-- arm D: 5 run(s), pass [True, True, True, True, True]
+   claim_wait_ms                  p50 [0..0]  p90 [1061..2087]
+   hold_ms                        p50 [403..410]  p90 [462..472]
+   hold_publishing_ms             p50 [403..410]  p90 [462..472]
+   release_to_next_claim_ms       p50 [232..250]  p90 [485..628]
+   handoff_request_ms             p50 [35..38]  p90 [75..82]
+   handed_off_to_next_claim_ms    p50 [166..188]  p90 [448..597]
+   cas_to_window_clear_ms         p50 [97..101]  p90 [144..151]
+   window_clear_to_gen_sweep_ms   p50 [37..37]  p90 [41..43]
+   ack_latency_ms                 p50 [1860..2062]  p90 [3083..3493]
+   claims [224, 223, 229, 222, 229]  pull-only claims [0, 0, 0, 0, 0]  cell held [0.276, 0.302, 0.308, 0.298, 0.305]
+   no-ack [10, 0, 0, 0, 0] of acks [214, 213, 221, 214, 220]
+   lost handoffs [4, 3, 1, 2, 2]  deposals [1, 0, 0, 0, 0]
+   idle requests/tick [{'get': 2.0}, {'get': 2.0}, {'get': 2.0}, {'get': 2.0}, {'get': 2.0}]
+-- arm E: 3 run(s), pass [True, True, True]
+   claim_wait_ms                  p50 [0..0]  p90 [716..1057]
+   hold_ms                        p50 [401..409]  p90 [468..476]
+   hold_publishing_ms             p50 [401..409]  p90 [468..476]
+   release_to_next_claim_ms       p50 [238..250]  p90 [360..490]
+   handoff_request_ms             p50 [35..36]  p90 [77..80]
+   handed_off_to_next_claim_ms    p50 [167..180]  p90 [326..453]
+   cas_to_window_clear_ms         p50 [95..103]  p90 [148..151]
+   window_clear_to_gen_sweep_ms   p50 [37..38]  p90 [41..43]
+   ack_latency_ms                 p50 [1860..1862]  p90 [2679..2880]
+   claims [236, 232, 228]  pull-only claims [0, 0, 0]  cell held [0.316, 0.31, 0.31]
+   no-ack [0, 0, 0] of acks [225, 227, 227]
+   lost handoffs [0, 0, 0]  deposals [0, 0, 0]
+   idle requests/tick [{'get': 2.0}, {'get': 2.0}, {'get': 2.0}]

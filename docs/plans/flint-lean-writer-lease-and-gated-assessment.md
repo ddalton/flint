@@ -762,3 +762,56 @@ hold itself; that changes what runs concurrently with other writers'
 installs, so the `LeanChunkGC` rules need re-checking first. Sizing for
 agents meanwhile: an ack timeout below floor + (writers × hold) will
 miss boundaries under contention.
+
+### 10.3 The contention drill (2026-09-14): the approach, measured
+
+`lean/e2e/writers-live/contention.sh` runs six `flint-sync run` writers on
+ONE host (c7i.2xlarge spot, us-west-1a) against one workspace prefix on
+real S3, each driven by `agent.sh` in leg A1's disjoint mode, 300 s of load
+then 60 s idle, then a drain; the oracle is a fresh checkout that every
+writer's tree must digest-match and a HEAD of every citation.
+`contention_analyze.py` judges the event traces. One host is deliberate: the
+hold and the handoff are S3 round trips, so the variants differ only in the
+binary — and run A reproduced the cluster leg A1 (claim wait p50 6.3 s vs
+7.2 s, hold 999 vs 973 ms, 63/186 pull-only claims vs 65/191). Variants were
+interleaved in rotated order so none always ran first. All 19 runs passed
+the oracle. Evidence: `lean/e2e/writers-live/results/2026-09-14-contention/`.
+
+| p50 across runs [min..max] | A v1.52.0 (3) | B +pull-only (3) | C +head poll (5) | D +chunk sweep (5) | E +handoff retry (3) |
+|---|---|---|---|---|---|
+| claim wait p50 / p90 | 6.2-7.2 / 10.3-10.4 s | 3.1 / 7.2-8.2 s | 1.7-2.0 / 5.8-8.6 s | 0 / 1.1-2.1 s | 0 / 0.7-1.1 s |
+| fence hold | 0.97-1.00 s | 1.22-1.24 s | 1.23-1.34 s | 0.40-0.41 s | 0.40-0.41 s |
+| cell held | 55-58% | 60-61% | 66-70% | 28-31% | 31-32% |
+| released cell idle before next claim | 0.51-0.66 s | 0.67-0.75 s | 0.21-0.22 s | 0.23-0.25 s | 0.24-0.25 s |
+| publish ack p50 / p90 | 8.0-9.4 / 13.1-14.1 s | 4.9-5.3 / 10.0-11.2 s | 4.1-4.5 / 9.4-10.8 s | 1.9-2.1 / 3.1-3.5 s | 1.86 / 2.7-2.9 s |
+| acks past the 15 s timeout | 39-51 of ~112 | 5-7 of ~153 | 1-8 of ~161 | 10,0,0,0,0 of ~216 | 0 of 679 |
+| lost handoffs / deposals | 1-3 / 0 | 0-2 / 0 | 2-6 / 0 | 1-4 / 1 | 0 / 0 |
+| idle tick | 2 GETs | 2 GETs | 2 GETs | 2 GETs | 2 GETs |
+
+What the drill found beyond the two levers it was built to measure:
+
+- **The hold was the chunk reaper.** With the commit section's tail traced
+  (`4901a037`), 700-920 ms of the hold was `sweep_chunks` dating every
+  unreferenced chunk with a HEAD, one at a time, inside the fence — a cost
+  that grows with the last hour's publishes (the grace), and grew further as
+  faster acks made agents publish more (B and C held LONGER than A). A chunk
+  the listing already shows inside the grace now takes no HEAD (`8f72afe3`):
+  a rewrite only makes an object younger, so listing-young implies
+  HEAD-young, and every deletion still rests on a HEAD. Hold 1.3 s -> 0.4 s.
+- **Handoffs were lost in every arm, v1.52.0 included.** `release` treated a
+  second 412 (two waiters enqueuing) as "deposed" and a 409
+  ConditionalRequestConflict as a failure, leaving the cell HELD by a writer
+  that believed it had let go. The writer's own next claim usually freed
+  it; once pull-only boundaries stopped claiming, a writer whose agent had
+  gone idle never did, and in D's first run the queue waited ~60 s and the
+  cell was deposed. The handoff now retries while the cell is still ours
+  (`7f6f5e71`): E lost 0 of 696 handoffs.
+- **The estimates were wrong where the trace was blind.** §10.2 predicted a
+  ~0.4 s claim wait from pull-only plus the head poll; C measured 1.7-2.0 s,
+  because the hold it assumed constant was the reaper's. The p50 went to
+  zero only with D.
+
+Approach locked down: pull-only boundaries skip the fence, the queue head
+polls at 200 ms, the chunk reaper skips HEADs the listing makes unnecessary,
+and the handoff retries while the cell is ours. Idle bucket reads (2 GETs a
+tick) are unchanged and remain a cost decision, not a contention one.

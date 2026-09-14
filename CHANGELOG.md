@@ -39,9 +39,30 @@ covered by the stability guarantee.
   polls faster (`lease::CLAIM_POLL_HEAD_MS`); deadness is still judged on
   observations spaced 10 s apart, so the deposal thresholds do not move.
   `only_the_queue_head_is_told_to_poll_fast` pins which waiter it is.
-  Neither change is re-measured live yet; the analysis, including what is
-  left (idle bucket reads, the post-commit housekeeping inside the hold),
-  is §10.2 of `docs/plans/flint-lean-writer-lease-and-gated-assessment.md`.
+  Measured live with the two fixes below (§10.2-10.3 of
+  `docs/plans/flint-lean-writer-lease-and-gated-assessment.md`).
+- **lean: the chunk reaper no longer HEADs every chunk it will keep, inside
+  the fence.** A contention drill (six writers on one workspace, 5 s floor,
+  real S3) traced 700-920 ms of a 1.0-1.3 s commit hold to `sweep_chunks`,
+  which dated every unreferenced chunk with a HEAD, one at a time, while
+  holding the fence — and every publish supersedes chunks that then sit in
+  the hour-long grace, so the cost grew with the last hour's publishes. A
+  chunk the listing already shows inside the grace is now kept without a
+  HEAD (a rewrite only makes an object younger, so the listing bounds the
+  HEAD's age from above); every deletion still rests on a HEAD taken at
+  delete time. The hold fell to 0.40 s and the median claim wait to zero.
+  `the_chunk_reaper_does_not_head_what_the_listing_shows_inside_the_grace`.
+- **lean: a fence handoff that races the queue no longer leaves the cell
+  held.** Every waiter's enqueue moves the cell's token, so a holder's
+  handoff can 412 twice in a row, and S3 answers a racing conditional write
+  with 409 ConditionalRequestConflict; `release` read the second 412 as
+  "deposed" and the 409 as a failure and returned with the cell still held.
+  The same drill lost 0-6 handoffs a run in every build, v1.52.0 included,
+  and once a stranded cell had no next claim from its writer the queue
+  waited out the 60 s deposal. The handoff now retries while a fresh read
+  still names this holder at this epoch: 0 of 696 handoffs lost, no
+  deposal, no ack past the agents' 15 s timeout in 679.
+  `a_handoff_that_races_the_queue_still_hands_the_cell_on`.
 
 ## [1.52.0] - 2026-09-14
 
