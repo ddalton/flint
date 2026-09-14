@@ -1,15 +1,16 @@
 //! Where each flint product keeps the cell that says "I am the writer
 //! of this prefix" — and the probe that finds a NEIGHBOUR's.
 //!
-//! WHY THIS TABLE IS SHARED. One prefix has exactly one writer. Within
-//! a product that is a mechanism: every writer contends for one epoch
-//! cell, and the loser waits. ACROSS products it is a convention,
-//! because each product derives its own cell key and the keys are
-//! disjoint — forge's `git/epoch`, lean's `.flint/lean/epoch`. Point a
-//! forge repository and a lean workspace at one prefix and both
-//! acquire, both are correct that they hold THEIR cell, and neither can
-//! see the other. There is no 412, no fence and no log line
-//! (composition drill C1).
+//! WHY THIS TABLE IS SHARED. One prefix belongs to exactly one product.
+//! Within a product that is a mechanism: every writer contends for the
+//! product's one epoch cell — forge admits a single writer, lean's
+//! writers take turns at it — and the loser waits. ACROSS products it
+//! is a convention, because each product derives its own cell key and
+//! the keys are disjoint — forge's `git/epoch`, lean's
+//! `.flint/lean/epoch`. Point a forge repository and a lean workspace
+//! at one prefix and both acquire, both are correct that they hold
+//! THEIR cell, and neither can see the other. There is no 412, no
+//! fence and no log line (composition drill C1).
 //!
 //! Nothing here changes that. Prevention is left to whatever assigns
 //! prefixes — an admission policy, a GitOps path, a platform module —
@@ -103,8 +104,8 @@ impl Foreign {
         };
         format!(
             "PREFIX SHARED WITH ANOTHER PRODUCT: {} also writes this prefix. Its lease cell is \
-             {} (holder {}, epoch {}), and {}. One prefix has exactly one writer, and this is \
-             NOT enforced across products — the two arbitrate on different cells and cannot see \
+             {} (holder {}, epoch {}), and {}. One prefix belongs to exactly one product, and this \
+             is NOT enforced across products — the two arbitrate on different cells and cannot see \
              each other, so neither will ever fence the other and the loser's writes are lost \
              quietly. Give one of them its own prefix ({} names it).",
             self.kind.label(),
