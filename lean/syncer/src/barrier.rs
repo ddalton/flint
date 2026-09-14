@@ -872,6 +872,12 @@ impl Syncer {
     }
 
     async fn barrier_inner(&mut self, declared: bool, source: &str) -> LeanResult<BarrierReport> {
+        // Every publishing path ends here — cadence, sentinel, drain, the
+        // one-shot verb — so a reader is refused here before the first
+        // request, whichever of them a caller reached. The callers that
+        // owe an answer (the publish sentinel, the drain) give it before
+        // this; this is the backstop for the ones that do not.
+        self.refuse_if_read("barrier")?;
         // No lease is held until the commit section (design 2026-09-13
         // §4): the consume, the scan and the uploads below run with the
         // cell at rest, guarded by each object's own etag. What the

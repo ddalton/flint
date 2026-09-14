@@ -14,6 +14,28 @@ covered by the stability guarantee.
 
 ### Added
 
+- **lean: read access per agent pod.** A lean volume mounted with the
+  pod's standard `csi.readOnly: true` is now bound read-only into the
+  tenant (it was bound read-write whatever the pod asked — finding S1 of
+  `docs/plans/flint-lean-per-user-access-design.md`), and its syncer runs
+  with `FLINT_SYNC_ACCESS=read`: no fence, no barrier, no inbox consume,
+  no garbage collection. Each floor tick reads the inbox and the manifest
+  pointer — two GETs, as an idle writer — and runs a whole-tree `sync`
+  when either moved, so the reader's tree follows other writers and UI
+  writes. A `.flint/publish` touch is answered `refused-read-only`;
+  `capabilities.json` carries `access` and a reader advertises
+  `["sync", "remote-seq"]`; `.flint/AGENTS.md` has a "Read access"
+  section. Access is per pod: one workspace carries read-write and
+  read-only agents at once, and a reader never delays a writer. Pinned by
+  seven battery tests (a writer and a reader on one workspace with every
+  request a reader sends checked against the read verbs; an idle tick of
+  exactly two GETs; the refusal; the drain; the refused one-shot verbs;
+  the marker) and nine mutations, each failing the test meant for it.
+  **Not yet enforced by the bucket:** the broker still mints the same
+  read-write key for a reader (design phase D), and the CR cannot yet
+  say which ServiceAccounts may only read (phase B). Until then this is
+  a posture the mount and the syncer keep.
+
 - **flint-store 0.1.3: `S3Store::with_credentials(bucket, endpoint, region,
   access_key_id, secret_access_key)`** — an S3 store from an explicit key
   pair and endpoint, addressed path-style, for test rigs and integrations

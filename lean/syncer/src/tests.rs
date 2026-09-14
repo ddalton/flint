@@ -10479,3 +10479,257 @@ async fn a_writer_killed_after_its_upload_does_not_leave_the_trees_diverged() {
         "a live writer's tree and a fresh checkout disagree on a path whose key holds a killed writer's uncited upload"
     );
 }
+
+// ---------------------------------------------------------------------
+// Read access (per-user access design §4.4, refreshed 2026-09-14): a
+// syncer that follows the workspace and never writes to the bucket.
+// ---------------------------------------------------------------------
+
+/// The requests a read-only credential allows. Anything else a reader
+/// sends is a write, and on a scoped key a 403.
+const READ_OPS: &[&str] = &[
+    "get_whole", "get_range", "get_version", "head", "head_version", "list", "list_versions",
+    "list_uploads", "lifecycle_rules", "epoch_read", "presign_get",
+];
+
+fn writes_since_reset(store: &MemoryStore) -> Vec<(&'static str, u64)> {
+    store.op_counts().into_iter().filter(|(op, _)| !READ_OPS.contains(op)).collect()
+}
+
+async fn reader(store: &Arc<MemoryStore>, root: &std::path::Path) -> Syncer {
+    let mut sc = syncer(store, root).await;
+    sc.cfg.access = super::Access::Read;
+    sc
+}
+
+/// One workspace, two agents: A mounts it read-write, R read-only. Each
+/// pod has its own syncer, and access is that syncer's, not the
+/// workspace's — A publishes as ever and never learns R exists; R
+/// follows A's boundaries and the inbox and sends only reads.
+#[tokio::test]
+async fn a_reader_follows_writers_and_the_inbox_without_one_store_write() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_r) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&store, dir_a.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "x.txt", "A v1");
+    write(dir_a.path(), "gone.txt", "A deletes this");
+    a.floor_tick().await.unwrap();
+
+    store.reset_op_counts();
+    let mut r = reader(&store, dir_r.path()).await;
+    r.checkout().await.unwrap();
+    r.floor_tick().await.unwrap();
+    assert_eq!(writes_since_reset(&store), vec![], "a reader's checkout and first tick wrote to the bucket");
+    assert_eq!(read(dir_r.path(), "x.txt").as_deref(), Some("A v1"));
+
+    // A writer publishes an edit, a delete and an add; a UI write waits
+    // uncited in the inbox.
+    write(dir_a.path(), "x.txt", "A v2");
+    backdate_baseline(&a, "x.txt");
+    std::fs::remove_file(dir_a.path().join("gone.txt")).unwrap();
+    write(dir_a.path(), "new.txt", "A adds this");
+    a.declared_barrier().await.unwrap();
+    hitl_write(&store, &a.cfg, "ui.txt", "from the UI", "reviewer").await.unwrap();
+    let seq_a = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.seq;
+
+    store.reset_op_counts();
+    r.floor_tick().await.unwrap();
+    assert_eq!(writes_since_reset(&store), vec![], "a reader's pull wrote to the bucket");
+    assert_eq!(read(dir_r.path(), "x.txt").as_deref(), Some("A v2"));
+    assert_eq!(read(dir_r.path(), "gone.txt"), None);
+    assert_eq!(read(dir_r.path(), "new.txt").as_deref(), Some("A adds this"));
+    assert_eq!(read(dir_r.path(), "ui.txt").as_deref(), Some("from the UI"), "the inbox write did not reach the reader");
+    let t = r.load_remote_seq();
+    assert_eq!((t.observed_seq, t.integrated_seq), (seq_a, seq_a), "{t:?}");
+
+    // A local edit and a local file — a writable mount, or anything else
+    // that put bytes in the reader's tree — are never uploaded, and the
+    // edit is not overwritten: the foreign version is a sync-dirty record.
+    write(dir_r.path(), "x.txt", "the reader's local edit");
+    backdate_baseline(&r, "x.txt");
+    write(dir_r.path(), "local-only.txt", "never published");
+    write(dir_a.path(), "x.txt", "A v3");
+    backdate_baseline(&a, "x.txt");
+    a.declared_barrier().await.unwrap();
+    store.reset_op_counts();
+    r.floor_tick().await.unwrap();
+    assert_eq!(writes_since_reset(&store), vec![], "a reader with local changes wrote to the bucket");
+    assert_eq!(read(dir_r.path(), "x.txt").as_deref(), Some("the reader's local edit"));
+    assert!(store.head(&r.cfg.file_key("local-only.txt")).await.is_err(), "a reader published a local file");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(!m.entries.contains_key("local-only.txt"));
+    let conflicts = r.state.load_conflicts().unwrap();
+    assert!(conflicts.iter().any(|c| c.path == "x.txt" && c.kind == "sync-dirty"), "{conflicts:?}");
+}
+
+#[tokio::test]
+async fn an_idle_reader_tick_costs_the_inbox_and_the_pointer() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_r) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&store, dir_a.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "x.txt", "A v1");
+    a.floor_tick().await.unwrap();
+    hitl_write(&store, &a.cfg, "ui.txt", "from the UI", "reviewer").await.unwrap();
+    let mut r = reader(&store, dir_r.path()).await;
+    r.checkout().await.unwrap();
+    r.floor_tick().await.unwrap();
+
+    store.reset_op_counts();
+    r.floor_tick().await.unwrap();
+    let ops = store.op_counts();
+    assert_eq!(ops.into_iter().collect::<Vec<_>>(), vec![("get_whole", 2)], "an idle reader tick is two GETs");
+    let t = r.load_remote_seq();
+    assert!(t.updated_unix > 0, "the ticker's heartbeat did not move on an idle tick: {t:?}");
+
+    // News in the inbox alone — no writer has published since — is news.
+    hitl_write(&store, &a.cfg, "ui2.txt", "a second UI write", "reviewer").await.unwrap();
+    r.floor_tick().await.unwrap();
+    assert_eq!(read(dir_r.path(), "ui2.txt").as_deref(), Some("a second UI write"), "an inbox-only change never reached the reader");
+}
+
+#[tokio::test]
+async fn a_publish_touch_on_a_reader_is_answered_refused_read_only() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_r, dir_w) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut r = reader(&store, dir_r.path()).await;
+    r.checkout().await.unwrap();
+    let posture = r.sentinel_preflight().unwrap();
+    r.write_capabilities(&posture).unwrap();
+    write(dir_r.path(), "f.txt", "a local file");
+
+    store.reset_op_counts();
+    touch_sentinel(dir_r.path(), control::PUBLISH, r#"{"nonce":"n-1"}"#);
+    let acks = r.sentinel_tick().await.unwrap();
+    assert_eq!(writes_since_reset(&store), vec![], "a refused publish wrote to the bucket");
+    assert_eq!(acks.len(), 1, "{acks:?}");
+    assert_eq!(acks[0].status, "refused-read-only");
+    assert_eq!(acks[0].nonces, vec!["n-1".to_string()]);
+    assert!(acks[0].reason.as_deref().unwrap_or("").contains("read-only"), "{:?}", acks[0].reason);
+    assert!(r.load_pending(Verb::Publish).unwrap().is_none(), "the refused touch was left pending");
+    let on_disk = std::fs::read_to_string(dir_r.path().join(super::CONTROL_DIR).join(control::PUBLISH_ACK)).unwrap();
+    assert!(on_disk.contains("refused-read-only"), "{on_disk}");
+    assert!(store.head(&r.cfg.file_key("f.txt")).await.is_err());
+
+    // `sync` is a reader's verb.
+    r.cfg.sentinel_min_interval_secs = 0;
+    touch_sentinel(dir_r.path(), control::SYNC, r#"{"nonce":"s-1"}"#);
+    let acks = r.sentinel_tick().await.unwrap();
+    assert_eq!(acks.iter().map(|a| a.status.as_str()).collect::<Vec<_>>(), vec!["ok"]);
+
+    // Control: the same touch on a writer publishes.
+    let mut w = syncer(&store, dir_w.path()).await;
+    w.checkout().await.unwrap();
+    let posture = w.sentinel_preflight().unwrap();
+    w.write_capabilities(&posture).unwrap();
+    write(dir_w.path(), "g.txt", "a writer's file");
+    touch_sentinel(dir_w.path(), control::PUBLISH, r#"{"nonce":"w-1"}"#);
+    let acks = w.sentinel_tick().await.unwrap();
+    assert_eq!(acks.iter().map(|a| a.status.as_str()).collect::<Vec<_>>(), vec!["ok"]);
+}
+
+#[tokio::test]
+async fn a_barrier_on_a_reader_is_refused_before_any_write() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = reader(&store, dir.path()).await;
+    r.checkout().await.unwrap();
+    write(dir.path(), "f.txt", "would be an upload");
+    store.reset_op_counts();
+    for (name, out) in [
+        ("run_barrier", r.run_barrier().await.map(|_| ())),
+        ("cadence_barrier", r.cadence_barrier().await.map(|_| ())),
+        ("declared_barrier", r.declared_barrier().await.map(|_| ())),
+    ] {
+        assert!(matches!(out, Err(LeanError::Refused(_))), "{name} on a reader: {out:?}");
+    }
+    assert_eq!(store.total_ops(), 0, "a refused barrier sent requests: {:?}", store.op_counts());
+    assert!(store.head(&r.cfg.file_key("f.txt")).await.is_err());
+}
+
+#[tokio::test]
+async fn one_shot_verbs_that_publish_or_fence_are_refused_on_a_reader() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = reader(&store, dir.path()).await;
+    r.checkout().await.unwrap();
+    store.reset_op_counts();
+    for step in [super::verbs::Step::Barrier, super::verbs::Step::Rescope(None)] {
+        let out = super::verbs::run_verb(&mut r, step).await;
+        assert!(matches!(out, Err(LeanError::Refused(_))), "{out:?}");
+    }
+    assert_eq!(writes_since_reset(&store), vec![], "a refused verb wrote: {:?}", store.op_counts());
+    assert!(super::verbs::run_verb(&mut r, super::verbs::Step::Sync).await.is_ok(), "sync is a reader's verb");
+    assert!(super::verbs::run_verb(&mut r, super::verbs::Step::Checkout).await.is_ok());
+    assert_eq!(writes_since_reset(&store), vec![]);
+}
+
+#[tokio::test]
+async fn a_reader_drain_answers_what_it_owes_and_writes_nothing() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = reader(&store, dir.path()).await;
+    r.checkout().await.unwrap();
+    let posture = r.sentinel_preflight().unwrap();
+    r.write_capabilities(&posture).unwrap();
+    write(dir.path(), "f.txt", "local only");
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"at-sigterm"}"#);
+    r.poll_sentinels().unwrap();
+    assert!(r.load_pending(Verb::Publish).unwrap().is_some());
+
+    store.reset_op_counts();
+    let acks = r.drain().await.unwrap();
+    assert_eq!(writes_since_reset(&store), vec![], "a reader's drain wrote to the bucket");
+    assert_eq!(acks.iter().map(|a| a.status.as_str()).collect::<Vec<_>>(), vec!["refused-read-only"]);
+    assert!(store.head(&r.cfg.file_key("f.txt")).await.is_err());
+}
+
+#[tokio::test]
+async fn the_marker_says_read_access_and_the_guide_explains_it() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_r, dir_w) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut r = reader(&store, dir_r.path()).await;
+    r.checkout().await.unwrap();
+    let posture = r.sentinel_preflight().unwrap();
+    r.write_capabilities(&posture).unwrap();
+    let caps = r.read_capabilities().unwrap();
+    assert_eq!(caps.access, "read");
+    assert_eq!(caps.verbs, vec!["sync".to_string(), "remote-seq".to_string()], "a reader advertised {:?}", caps.verbs);
+
+    let mut w = syncer(&store, dir_w.path()).await;
+    w.checkout().await.unwrap();
+    let posture = w.sentinel_preflight().unwrap();
+    w.write_capabilities(&posture).unwrap();
+    let caps = w.read_capabilities().unwrap();
+    assert_eq!(caps.access, "readWrite");
+    assert!(caps.verbs.contains(&"publish".to_string()));
+
+    // An old marker (no `access`) still parses, as read-write.
+    let old: control::Capabilities = serde_json::from_str(
+        r#"{"protocol":1,"verbs":[],"state":"live","sentinel_min_interval_secs":5,
+            "sentinel_hourly_budget":60,"syncer_version":"x","boot":{"holder_id":"h","boot_unix":0}}"#,
+    )
+    .unwrap();
+    assert_eq!(old.access, "readWrite");
+
+    for needle in ["\"access\": \"read\"", "refused-read-only", "EROFS"] {
+        assert!(control::AGENT_GUIDE_TEXT.contains(needle), "the guide never says {needle}");
+    }
+}
+
+/// The CSI node plugin launches a read-only volume's syncer with
+/// `FLINT_SYNC_ACCESS=read` (`s3csi::node::lean_access_env`), and the
+/// binary exits 2 on anything it cannot parse — so a spelling drift
+/// between the two crates is a worker that never starts, not a writer.
+#[test]
+fn access_parses_exactly_what_the_plugin_writes() {
+    use super::Access;
+    assert_eq!(Access::parse("read"), Some(Access::Read));
+    assert_eq!(Access::parse("readWrite"), Some(Access::ReadWrite));
+    for bad in ["", "ro", "READ", "read-only", "readwrite", "rw"] {
+        assert_eq!(Access::parse(bad), None, "{bad:?} must not parse");
+    }
+    assert_eq!(Access::default(), Access::ReadWrite);
+    assert_eq!(Access::parse(Access::Read.as_str()), Some(Access::Read));
+}

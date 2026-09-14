@@ -905,7 +905,9 @@ impl S3Node {
             token_expiration: None,
             last_probe_ok: None,
             published_unix: None,
-            read_only: false,
+            // The pod's `csi.readOnly` (per-user access design §4.1): the
+            // tenant bind below and the syncer's access both follow it.
+            read_only: req.readonly,
             owner_uid,
             owner_gid,
             grace_secs: Some(grace),
@@ -973,6 +975,7 @@ impl S3Node {
         let mut sync_conf: BTreeMap<String, String> =
             crate::lean_operator::sync_env::sync_env(&ws, SYNCER_ROOT).into_iter().collect();
         sync_conf.insert("FLINT_SYNC_NAMESPACE".into(), pr.pod_namespace.clone());
+        lean_access_env(st.read_only, &mut sync_conf);
         st.sync_env = Some(sync_conf.clone());
         if let Err(e) = self.launch_lean_worker(dir, &mut st, pr, &req.secrets, &image, cred_mode, &sync_conf).await {
             return Err(self.fail(dir, &st, e).await);
@@ -1126,7 +1129,7 @@ impl S3Node {
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
         if !fuse::is_mountpoint(target).unwrap_or(false) {
-            if let Err(e) = fuse::bind_mount(Path::new(&st.src), target, false) {
+            if let Err(e) = fuse::bind_mount(Path::new(&st.src), target, st.read_only) {
                 return Err(self.fail(dir, &st, Status::internal(format!("bind: {e}"))).await);
             }
         }
@@ -1521,6 +1524,21 @@ pub enum PublishedAction {
     StartOver,
 }
 
+/// A lean volume published `readOnly` runs its syncer with read access
+/// (`FLINT_SYNC_ACCESS=read`): no fence, no barrier, `publish` answered
+/// `refused-read-only`. Decided from the same flag as the tenant's bind,
+/// and saved with the launch list, so a relaunched worker cannot come back
+/// as a writer behind a read-only mount. The syncer's own worker view of
+/// the tree stays read-write either way: a reader still writes what it
+/// pulls, and the two binds are independent.
+pub fn lean_access_env(read_only: bool, env: &mut BTreeMap<String, String>) {
+    if read_only {
+        env.insert("FLINT_SYNC_ACCESS".to_string(), "read".to_string());
+    } else {
+        env.remove("FLINT_SYNC_ACCESS");
+    }
+}
+
 pub fn published_action(st: &VolumeState, target_mounted: bool, src_mounted: bool, tree_exists: bool) -> PublishedAction {
     let lean = st.mode == "lean";
     if st.phase == "published" {
@@ -1667,6 +1685,21 @@ mod tests {
         assert!(c.broker.is_none());
         std::env::remove_var("FLINT_S3CSI_NODE_NAME");
         std::env::remove_var("FLINT_S3CSI_PASSTHROUGH_IMAGE");
+    }
+
+    #[test]
+    fn a_read_only_lean_volume_launches_its_syncer_with_read_access() {
+        let mut env = BTreeMap::from([("FLINT_SYNC_BUCKET".to_string(), "b".to_string())]);
+        lean_access_env(true, &mut env);
+        assert_eq!(env.get("FLINT_SYNC_ACCESS").map(String::as_str), Some("read"));
+        assert_eq!(env.get("FLINT_SYNC_BUCKET").map(String::as_str), Some("b"), "the rest of the list is kept");
+        // A read-write volume carries no access line at all (the syncer's
+        // default), and a stale one is not inherited.
+        lean_access_env(false, &mut env);
+        assert!(!env.contains_key("FLINT_SYNC_ACCESS"), "{env:?}");
+        // "read" is the string flint-lean's `Access::parse` accepts; this
+        // crate does not link flint-lean, so the syncer's
+        // `access_parses_exactly_what_the_plugin_writes` pins the other end.
     }
 
     fn st(mode: &str, phase: &str, tree_image: Option<&str>) -> VolumeState {

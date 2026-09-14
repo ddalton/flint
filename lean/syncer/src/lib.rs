@@ -48,6 +48,7 @@ pub mod inbox;
 pub mod lease;
 pub mod manifest;
 pub mod metrics;
+pub mod reader;
 pub mod scan;
 pub(crate) mod safefs;
 pub mod sentinel;
@@ -176,6 +177,41 @@ impl SentinelMode {
     }
 }
 
+/// What this syncer may do to the bucket (per-user access design §4.4).
+///
+/// `Read` is a syncer that follows the workspace and never writes to it:
+/// no fence, no barrier, no inbox consume, no garbage collection. Its
+/// floor tick pulls — the inbox and the pointer, and a `sync` when
+/// either moved — and a `publish` is answered `refused-read-only`. It is
+/// what a read-only credential is SUFFICIENT for; the credential, not
+/// this flag, is what keeps a reader's bytes out of the bucket.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Access {
+    #[default]
+    ReadWrite,
+    Read,
+}
+
+impl Access {
+    /// `FLINT_SYNC_ACCESS`: `read` | `readWrite`.
+    pub fn parse(s: &str) -> Option<Access> {
+        match s {
+            "read" => Some(Access::Read),
+            "readWrite" => Some(Access::ReadWrite),
+            _ => None,
+        }
+    }
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Access::ReadWrite => "readWrite",
+            Access::Read => "read",
+        }
+    }
+    pub fn is_read(&self) -> bool {
+        *self == Access::Read
+    }
+}
+
 #[derive(Clone)]
 pub struct LeanConfig {
     /// Bucket key prefix for this subtree (project- or subtree-scoped;
@@ -192,6 +228,8 @@ pub struct LeanConfig {
     /// reader that an object off its citation was moved by a stranger,
     /// so the reader refuses instead of adopting.
     pub sole_writer: bool,
+    /// Read or read-write (`Access`). Default read-write.
+    pub access: Access,
     /// Whole-object ceiling; larger files use multipart compose.
     pub whole_put_max: u64,
     /// Entries per manifest chunk, in expectation, and the floor and
@@ -379,6 +417,7 @@ impl LeanConfig {
             // S3-wins arm, where an object past its citation is a human
             // whose bytes should win. Only a published mirror sets it.
             sole_writer: false,
+            access: Access::ReadWrite,
             whole_put_max: WHOLE_PUT_MAX,
             chunked: true,
             orphan_grace_secs: manifest::ORPHAN_GRACE_SECS,

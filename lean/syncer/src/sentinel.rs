@@ -151,7 +151,7 @@ pub struct PendingSentinel {
 /// The ack document (`.flint/<verb>.ack`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ack {
-    /// "ok" | "partial" | "refused-scope".
+    /// "ok" | "partial" | "refused-scope" | "refused-read-only".
     ///
     /// `partial` is the honest answer when the boundary installed but a
     /// path the agent declared is not in it (D1) —
@@ -167,8 +167,8 @@ pub struct Ack {
     /// "sentinel" | "sentinel-deferred" | "drain" | "recovered".
     pub boundary: String,
     pub completed_unix: u64,
-    /// Set on a refusal that is the AGENT's to fix (`refused-scope`):
-    /// what was wrong with the request, in words.
+    /// Set on a refusal (`refused-scope`, `refused-read-only`): what was
+    /// wrong with the request, or why it cannot be done here, in words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     pub report: AckReport,
@@ -711,6 +711,27 @@ impl Syncer {
         forced: bool,
         source: Option<&str>,
     ) -> LeanResult<Ack> {
+        // A reader answers — "nothing is silent" — and publishes nothing.
+        // No budget charge: nothing was published, and a refusal must
+        // not hold back the next sync behind the min-interval.
+        if self.cfg.access.is_read() {
+            return Ok(Ack {
+                status: "refused-read-only".into(),
+                nonces: pending.nonces.clone(),
+                sentinel_mtime_unix_ns: pending.consumed_mtime_unix_ns,
+                seq: None,
+                manifest_etag: None,
+                boundary: if forced { "sentinel-deferred".into() } else { "sentinel".into() },
+                completed_unix: now_unix(),
+                reason: Some(
+                    "this pod has read-only access to the workspace (capabilities `access: read`): \
+                     nothing in its tree is published. `sync` still integrates the bucket's latest \
+                     boundary"
+                        .into(),
+                ),
+                report: AckReport::default(),
+            });
+        }
         // The DECLARED form (D1): a delete the agent made before the
         // touch is part of the coherent point it declared, so this
         // barrier confirms first-absence paths instead of acking a
@@ -968,6 +989,34 @@ impl Syncer {
                 }
             }
         }
+        // A reader's floor is its pull (`reader.rs`): no barrier, ever.
+        if self.cfg.access.is_read() {
+            return match self.reader_pull().await {
+                Ok(p) => {
+                    let _ = self.clear_auth_pause();
+                    match &p.sync {
+                        Some(r) => {
+                            out.seq = Some(r.seq);
+                            out.consumed = r.applied.len();
+                            out.deleted = r.deleted.len();
+                        }
+                        None => {
+                            out.no_change = true;
+                            out.seq = Some(self.state.load_baseline()?.seq);
+                        }
+                    }
+                    self.ticker_from(p.observed_seq, p.observed_etag)?;
+                    out.withheld_reason = self.write_gauges(None)?.withheld_reason;
+                    Ok(out)
+                }
+                Err(e) => {
+                    if e.is_auth() {
+                        let _ = self.note_auth_pause();
+                    }
+                    Err(e)
+                }
+            };
+        }
         // A publish sentinel honored on this tick already ran the fused
         // barrier the floor owed; running a second one would be pure
         // churn.
@@ -1047,7 +1096,9 @@ impl Syncer {
                 }
             }
         }
-        if !published {
+        // A reader has nothing to drain: what its tree holds is either in
+        // the bucket already or, by its access, never going there.
+        if !published && !self.cfg.access.is_read() {
             // D10: the drain publishes EVERYTHING it can, as one declared barrier.
                 let r = self.declared_barrier_as("drain").await?;
                 self.ticker_from(r.observed_seq, r.observed_etag.clone())?;

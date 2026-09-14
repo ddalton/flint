@@ -72,6 +72,14 @@
 //!   FLINT_SYNC_UPLOAD_INFLIGHT_MB upload bytes in flight — every part
 //!                                 and whole body is read into RAM before
 //!                                 its PUT (default 256; 0 = no bound)
+//!   FLINT_SYNC_ACCESS             readWrite (default) | read. `read` runs
+//!                                 a syncer that never writes to the
+//!                                 bucket: no fence, no barrier; the floor
+//!                                 tick pulls (two GETs, a sync when the
+//!                                 inbox or the manifest moved), `publish`
+//!                                 is answered `refused-read-only`, and the
+//!                                 `barrier`, `rescope` and probe verbs are
+//!                                 refused. Anything else exits 2.
 //!   FLINT_SYNC_SOLE_WRITER        "true" marks every manifest this
 //!                                 syncer installs as a PUBLISHED
 //!                                 mirror: readers then refuse an
@@ -93,7 +101,7 @@ use std::time::Duration;
 use flint_lean::state::SyncerState;
 use flint_lean::lease;
 use flint_lean::verbs;
-use flint_lean::{LeanConfig, LeanError, Syncer, SentinelMode};
+use flint_lean::{Access, LeanConfig, LeanError, Syncer, SentinelMode};
 use flint_store::s3::S3Store;
 use flint_store::ObjectStore;
 use warp::Filter;
@@ -207,6 +215,15 @@ async fn main() {
     cfg.sole_writer = std::env::var("FLINT_SYNC_SOLE_WRITER")
         .map(|v| v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
+    if let Ok(a) = std::env::var("FLINT_SYNC_ACCESS") {
+        match Access::parse(&a) {
+            Some(access) => cfg.access = access,
+            None => {
+                eprintln!("flint-sync: FLINT_SYNC_ACCESS={a:?} is not read|readWrite");
+                std::process::exit(2);
+            }
+        }
+    }
     cfg.max_bytes = env_u64("FLINT_SYNC_MAX_BYTES", 0);
     cfg.max_files = env_u64("FLINT_SYNC_MAX_FILES", 0);
     cfg.fanout = env_u64("FLINT_SYNC_FANOUT", 128).max(1) as usize;
@@ -331,6 +348,16 @@ async fn main() {
         }
     };
     let mut sc = Syncer { store, cfg, state, lease: None, noted_not_regular: Default::default() };
+
+    // Both probes PUT and DELETE under the prefix. A read-only credential
+    // would fail them with a 403 that reads as "this store does not
+    // support X" — refuse by name instead.
+    if matches!(cmd.as_str(), "probe-copy" | "probe-conditional") {
+        if let Err(e) = sc.refuse_if_read(&cmd) {
+            eprintln!("flint-sync: {e}");
+            std::process::exit(flint_lean::EXIT_REFUSED);
+        }
+    }
 
     // Conformance probes: they take NO lease and touch no tree, so they
     // run before the claim. A probe that had to depose a live syncer to
@@ -463,7 +490,13 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
     // left held is released now, before anyone waits 60 s to depose it.
     lease::verify_claim(sc).await?;
     lease::warn_if_prefix_is_shared(sc).await;
-    if let Err(e) = lease::release_stale_own(sc).await {
+    if sc.cfg.access.is_read() {
+        // Nothing to release: a reader never claims, so no container of
+        // this pod can have left the cell held — and releasing is a write.
+        eprintln!(
+            "flint-sync: read access — this syncer follows the workspace and never writes to the bucket"
+        );
+    } else if let Err(e) = lease::release_stale_own(sc).await {
         eprintln!("flint-sync: could not release a fence left held by a previous container: {e}");
     }
     // This incarnation owes its own drain attestation; one left by an
@@ -616,7 +649,8 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
             _ = floor_iv.tick() => {
                 match sc.floor_tick().await {
                     Ok(o) if !o.no_change || !o.acks.is_empty() => eprintln!(
-                        "flint-sync: barrier seq={:?} up={} del={} consumed={} acks={}{}",
+                        "flint-sync: {} seq={:?} up={} del={} consumed={} acks={}{}",
+                        if sc.cfg.access.is_read() { "pull" } else { "barrier" },
                         o.seq, o.uploaded, o.deleted, o.consumed, o.acks.len(),
                         // Structured and greppable: this line is the
                         // only signal surface an operator has without
@@ -650,6 +684,15 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
             // makes the door sugar rather than a second writer.
             Some(req) = async { match ctl_rx.as_mut() { Some(rx) => rx.recv().await, None => None } } => {
                 match req {
+                    flint_lean::uds::CtlRequest::Boundary { reply, .. } if sc.cfg.access.is_read() => {
+                        // Answered at the door: queuing a pending only to
+                        // refuse it would report the refusal inside an
+                        // envelope that says "ok".
+                        let _ = reply.send(serde_json::json!({
+                            "status": "refused-read-only",
+                            "message": "this syncer has read access: nothing in this tree is published",
+                        }));
+                    }
                     flint_lean::uds::CtlRequest::Boundary { note, reply } => {
                         let out = async {
                             sc.request_boundary(&format!("uds:{}", flint_lean_now()), note)?;

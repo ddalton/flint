@@ -1,9 +1,10 @@
 # flint-lean — per-user access through the mount, and a read-only posture: investigation and design
 
-Date: 2026-09-13. Status: **INVESTIGATION + DESIGN, no code.** Written the
-day after the protocol review (`flint-lean-protocol-review-2026-09-12.md`)
-against `37ff97d0` (v1.51.0). Every code claim below is `file:line` at
-that commit.
+Date: 2026-09-13. Status: **DESIGN; phases A and C BUILT 2026-09-14**
+(see §10, which supersedes what it names). Written the day after the
+protocol review (`flint-lean-protocol-review-2026-09-12.md`) against
+`37ff97d0` (v1.51.0). Every code claim in §0-§9 is `file:line` at that
+commit; §10 was re-verified against `75e306c8` (after v1.53.0).
 
 ## 0. The question, verbatim
 
@@ -56,11 +57,13 @@ that commit.
    pods on one workspace are two syncers that meet only in the bucket,
    so each is enforced on its own: A's syncer holds a read-only key
    and takes no lease; B's holds a read-write key and the lease (§4.8).
-   Lean has exactly one writer per workspace: a second writer pod waits
+   ~~Lean has exactly one writer per workspace: a second writer pod waits
    on the lease until the first releases it (`verbs.rs:80-97`) and
-   never becomes Ready meanwhile. Readers are unlimited. So an NLX
-   session is one writer plus N readers, or N workspaces, or (unbuilt)
-   branches.
+   never becomes Ready meanwhile.~~ **Superseded (v1.52.0):** several
+   writer pods share a workspace and take turns at a per-barrier fence;
+   none waits on another's lifetime. Readers never touch the fence. So
+   an NLX session's agents can be any mix of writers and readers on one
+   workspace, access decided per pod (§10).
 6. **The UI path is separate and simpler:** the backend uses the
    `flint-lean-gateway` crate with its own credential, so the role
    check is the backend's; the crate should offer a read-only handle
@@ -138,6 +141,9 @@ There is no such mode: the conformance probes run before the claim
 (`flint_sync.rs:311`), and `run` cannot skip the claim.
 
 ### 1.4 A second writer waits forever
+
+**Superseded 2026-09-13/14:** the lease is held per barrier and `run`
+claims nothing before checkout; see §10.1.
 
 `claim` loops on `ClaimOutcome::Waiting`, polling every 10 s
 (`verbs.rs:80-97`; the outcomes are `Claimed | Waiting`,
@@ -440,6 +446,11 @@ the orchestrator's operator are different parties.
 
 ### 4.7 Multiple agents in one session
 
+**Superseded (v1.52.0):** several writers share a workspace, so the
+orchestrator's first option is simply N agents on one workspace, each
+pod read-write or read-only by its own role (§10.3). The list below is
+the 2026-09-13 reasoning, kept for the record.
+
 The lease decides: **one writer per workspace.** The orchestrator's
 options, in order of availability:
 
@@ -590,8 +601,9 @@ since the backend is the first consumer.
 - D6 **The user's identity reaches the credential through the pod in
   phase 1 and through the customer's REST door at every mint in 1b;**
   the broker verifies people only in phase 2.
-- D7 **One writer per workspace stands.** Multi-agent sessions are one
-  writer plus readers, or many workspaces, until branching is built.
+- D7 ~~**One writer per workspace stands.**~~ **Superseded (v1.52.0):**
+  several writers per workspace; access is per pod, so one workspace
+  carries any mix of writer and reader agents.
 - D8 **The branching design's §4.5 is re-based on this document** (S4).
 
 ## Status note, 2026-09-13 (later the same day)
@@ -612,3 +624,120 @@ changes two statements above without changing the design's conclusion:
   (no heartbeat, no barrier, `refused-read-only`) remains the build.
 - **§4.8's worked scenario** stands, with B's "holds the lease" now
   reading "claims the fence for each of its commit sections".
+
+## 10. Refreshed 2026-09-14 against `75e306c8`, and what was built
+
+### 10.1 Ground truth that moved since §1
+
+- **No claim before checkout, no heartbeat.** `run_loop`
+  (`lean/syncer/src/bin/flint_sync.rs`) is `verify_claim` (a GET) →
+  `warn_if_prefix_is_shared` (a HEAD) → `release_stale_own` → checkout
+  → a loop of two timers (floor, sentinel poll), the UDS door and the
+  SIGTERM drain. The writer heartbeat was removed on 2026-09-14. Each
+  barrier claims the fence after its uploads, for its commit section.
+- **Store writes by module** (call sites of every `ObjectStore` write
+  verb, `tests.rs` excluded; control: all 14 write verbs are counted in
+  the memory double's impl): `barrier.rs` 7, `lease.rs` 6,
+  `manifest.rs` 7, `inbox.rs` 1 — and `checkout.rs` 0, `sync.rs` 0,
+  `bin/flint_sync.rs` 0 (its probes call flint-store's). A per-file
+  count is not a call graph; the reader's actual proof is the battery's
+  write census (§10.4), which counts every request a reader sends.
+- **v1.53.0's pull-only boundary** takes no fence and writes nothing
+  when a barrier has nothing of its own to publish. Useful, but not a
+  reader mode: a writer with local changes still uploads.
+- **Writers integrate foreign changes at every boundary** (AGENTS.md,
+  "Foreign changes at a boundary, and other writers"), onto paths the
+  agent has not modified. §4.4 had the reader integrate only on a
+  `.flint/sync` touch; that would leave a reader's copy further behind
+  than every writer's. Corrected in §10.2.
+- **S1 still held at HEAD** before this change: `publish_lean` stamped
+  `read_only: false` and bound the tenant with `false`
+  (`spdk-csi-driver/src/s3csi/node.rs`); the rebind path already honoured
+  `st.read_only`.
+
+### 10.2 What was built (phases A and C)
+
+**The syncer (`FLINT_SYNC_ACCESS=read`, `LeanConfig.access`,
+`lean/syncer/src/reader.rs`):**
+
+- **The floor tick pulls.** The inbox cell and the manifest pointer —
+  the two GETs an idle writer makes — and a whole-tree `sync` only when
+  either document's etag moved since the last pull (remembered in
+  `.flint-sync/reader.json`; `sync` deliberately does not advance
+  `baseline.manifest_etag`, so the baseline cannot answer "moved").
+  `remote.seq` and `gauges.json` move every tick. `sync` makes no store
+  writes, applies only onto paths the scan finds clean, and records a
+  `sync-dirty` conflict for every change it declines.
+- **Nothing publishes.** `barrier_inner` refuses a reader before its
+  first request (every publishing path ends there); `run_verb` refuses
+  `barrier` and `rescope` (the latter claims the fence); the binary
+  refuses `probe-copy` and `probe-conditional` (both PUT); `run` skips
+  `release_stale_own` (a reader never claims, and releasing is a write).
+- **Nothing is silent.** A `.flint/publish` touch is answered
+  `status: "refused-read-only"` with a `reason`, and retired; so is one
+  owed at SIGTERM. The UDS door's `boundary` answers
+  `{"status":"refused-read-only"}`; its `sync` works. The drain runs no
+  barrier.
+- **The marker and the guide.** `capabilities.json` gains `access`
+  (`"read"` | `"readWrite"`; an old marker parses as read-write); a
+  reader advertises `verbs: ["sync", "remote-seq"]`. `.flint/AGENTS.md`
+  gains a "Read access" section.
+
+**The plugin (`s3csi/node.rs`):** `publish_lean` stamps
+`read_only: req.readonly`, binds the tenant with it, and adds
+`FLINT_SYNC_ACCESS=read` to the saved launch list
+(`lean_access_env`), so a relaunched worker keeps its access. The
+worker's own hostPath view of the tree stays read-write: a reader
+writes what it pulls.
+
+**Not built here:** B (`readOnlyServiceAccounts`, registration
+`access`/`on_behalf_of`, the audit line, `AccessIsolation`), D (the
+broker's read-only credential), E (the crate's `ReadOnly` store and
+`Workspace::read_only`), F (the live drill). **Until D, read-only is a
+promise the syncer and the mount keep, not one the bucket enforces**
+(D1): the reader's credential is still read-write.
+
+### 10.3 Decisions taken while building
+
+- **D9 Access is per POD, not per workspace.** One workspace carries any
+  mix of read-write and read-only agents at once. Each pod has its own
+  worker, syncer, tree and credential; a reader never touches the fence,
+  so it never delays a writer, and a writer never learns a reader exists.
+  The battery's `a_reader_follows_writers_and_the_inbox_without_one_store_write`
+  is exactly that shape: one writer and one reader on one workspace.
+- **D10 A reader integrates at every floor**, not only on `sync` — the
+  convergence a writer gets from its boundaries. Idle cost: two GETs per
+  floor per reader, the same as an idle writer.
+- **D11 No nested read-write bind of `.flint/` in v1.** A read-only tenant
+  bind covers `.flint/` too, so an agent on a read-only mount cannot
+  create `.flint/sync` (EROFS) and relies on the floor. A second bind of
+  `tree/.flint` read-write over the read-only tree would restore
+  sync-on-demand, but it adds a mount to the publish, rebind and unpublish
+  paths (and to their crash matrix) that only a node can verify; it
+  belongs with phase F. The syncer still honours `sync` and answers
+  `publish` wherever `.flint/` IS writable, and the guide says both.
+- **D12 A reader's local change is kept, never published.** If a
+  reader's tree is writable (no bind flag, or a future `localWrites`), a
+  local edit wins over a foreign change exactly as `sync` rules, is named
+  in `conflicts.jsonl`, and is gone with the pod.
+
+### 10.4 Falsifiers, where they stand
+
+| # | status |
+|---|---|
+| F1 EROFS on a read-only lean mount | **built, not yet measured**: the bind flag is one argument at a mount call only a node can exercise — phase F |
+| F2 a reader takes no fence and is Ready in checkout time | **unit, the fence half**: the write census allows only GET/HEAD/LIST/`epoch_read`; `one_shot_verbs_that_publish_or_fence_are_refused_on_a_reader`. Readiness beside a committing writer is phase F |
+| F3 a reader's credential cannot write | needs D |
+| F4 `publish` answered `refused-read-only` | **unit**: `a_publish_touch_on_a_reader_is_answered_refused_read_only` (control: the writer's `ok`), `a_reader_drain_answers_what_it_owes_and_writes_nothing` |
+| F5 `sync` applies a foreign change onto the reader | **unit**, and at every floor: `a_reader_follows_writers_and_the_inbox_without_one_store_write` (a writer's edit, delete, add and a UI inbox write) |
+| F6-F9 | need B/D and a cluster |
+| F10 | needs E |
+
+Mutation-checked: nine mutations (floor tick without the reader branch;
+that plus the barrier guard removed; the guard alone; the publish
+refusal off; the drain running a barrier; `rescope` not refused; the pull
+memo never matching; the memo ignoring the inbox; a reader advertising
+`publish`) each fail the test meant for it. With both the reader branch
+and the guard removed, the writer-and-reader test catches the reader's
+uploads, so the no-write property is not resting on the guard alone.
+

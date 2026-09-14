@@ -63,6 +63,14 @@ impl Step {
 /// here rather than in the binary's argv match so that the battery
 /// exercises the same decision the shipped binary makes.
 pub async fn run_verb(sc: &mut Syncer, step: Step) -> Result<(), LeanError> {
+    // A reader publishes nothing and holds no fence. `rescope` writes
+    // nothing either, but it claims the fence for its whole run, and a
+    // reader's credential cannot.
+    match &step {
+        Step::Barrier => sc.refuse_if_read("barrier")?,
+        Step::Rescope(_) => sc.refuse_if_read("rescope")?,
+        Step::Checkout | Step::Sync => {}
+    }
     if step.holds_the_fence_throughout() {
         claim_then(sc, step).await
     } else {

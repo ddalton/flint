@@ -60,7 +60,7 @@ JSON record per line per conflict: `path`, `kind`, `foreign_etag`,
 
 ```json
 { "protocol": 1, "verbs": ["publish", "sync", "remote-seq"],
-  "state": "live",
+  "access": "readWrite", "state": "live",
   "sentinel_min_interval_secs": 5, "sentinel_hourly_budget": 60,
   "syncer_version": "…", "boot": { "holder_id": "…", "boot_unix": 0 } }
 ```
@@ -72,6 +72,9 @@ JSON record per line per conflict: `path`, `kind`, `foreign_etag`,
   off (the pre-flight found `.flint/` already in use by an application,
   or the operator turned sentinels off). Keep working on the files; the
   cadence still publishes. `state` is always `"live"`.
+- **`access`** is `"readWrite"`, or `"read"` for a pod that may read this
+  workspace and never publish to it; see "Read access". A marker without
+  the field is read-write.
 
 ## `publish`: declare a coherent point
 
@@ -239,6 +242,30 @@ commit takes. What that means for you:
   two floors) is retried by the cadence; touch again rather than assume
   it failed.
 
+## Read access
+
+When `capabilities.json` says `"access": "read"`, this pod follows the
+workspace and never publishes to it. Other pods on the same workspace may
+be writing; you see their boundaries, and they never see anything of
+yours.
+
+- **Nothing you write is published.** The workspace is normally mounted
+  read-only for you, so a write fails at once with `EROFS` ("Read-only
+  file system"). Put build output, caches and scratch files in a
+  directory outside the workspace.
+- **The tree follows the bucket on its own.** At every floor tick the
+  syncer integrates the latest boundary and the inbox into your tree;
+  `remote.seq` shows the news and what is integrated. `verbs` is
+  `["sync", "remote-seq"]`.
+- **`publish` is refused, never ignored.** A touch is answered with
+  `status: "refused-read-only"` and a `reason`, and nothing is published.
+- **`sync` needs a writable `.flint/`.** On a read-only mount `.flint/` is
+  read-only too, so you cannot create `.flint/sync`; the floor tick
+  integrates for you. Where the mount is writable, `sync` integrates at
+  once, a file you changed is never overwritten (a `sync-dirty` record
+  names it), and your change is still never published: it is gone when
+  the pod ends.
+
 ## What gets published, and how change is detected
 
 - **Regular files only**, with their mode bits (an executable stays
@@ -280,6 +307,7 @@ Do not:
   `sentinel_min_interval_secs`;
 - preserve timestamps when copying edited files into the tree;
 - rely on symlinks or empty directories surviving a checkout;
+- expect anything you write to be published when `access` is `"read"`;
 - treat an ack as proof for anyone but yourself: acks are files any
   process in the pod could write. The authoritative record is the
   manifest in the bucket, which outside parties read through the

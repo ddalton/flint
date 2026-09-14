@@ -67,6 +67,10 @@ pub struct BootStamp {
 pub struct Capabilities {
     pub protocol: u32,
     pub verbs: Vec<String>,
+    /// `"readWrite"` or `"read"` (`Access`). A marker written before the
+    /// field existed reads as read-write, which is what that syncer was.
+    #[serde(default = "read_write")]
+    pub access: String,
     /// Always `"live"`. It used to read `"fenced"` for a syncer deposed
     /// from a life-long lease; the lease is now held per barrier
     /// (design 2026-09-13 §4), a lost commit section is retried at the
@@ -82,6 +86,10 @@ pub struct Capabilities {
     /// restart while this stamp is UNCHANGED is looking at a stale
     /// marker left by a downgrade — the safety catch painted green.
     pub boot: BootStamp,
+}
+
+fn read_write() -> String {
+    super::Access::ReadWrite.as_str().to_string()
 }
 
 /// `.flint/remote.seq` — the news ticker (D5).
@@ -223,6 +231,9 @@ impl Syncer {
     pub fn write_capabilities(&self, posture: &SentinelPosture) -> LeanResult<()> {
         let verbs: Vec<String> = if !posture.enabled {
             vec![]
+        } else if self.cfg.access.is_read() {
+            // `publish` is answered (`refused-read-only`), never offered.
+            ["sync", "remote-seq"].iter().map(|s| s.to_string()).collect()
         } else {
             ["publish", "sync", "remote-seq"].iter().map(|s| s.to_string()).collect()
         };
@@ -237,6 +248,7 @@ impl Syncer {
         let caps = Capabilities {
             protocol: SENTINEL_PROTOCOL,
             verbs,
+            access: self.cfg.access.as_str().to_string(),
             state: "live".into(),
             reason: posture.reason.clone(),
             sentinel_min_interval_secs: self.cfg.sentinel_min_interval_secs,
