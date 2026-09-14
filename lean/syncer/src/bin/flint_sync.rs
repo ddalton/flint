@@ -664,7 +664,15 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
                     // A fence (deposed inside the commit section) is one
                     // more failed barrier: nothing was installed, the
                     // uploads stand, the next floor claims again.
-                    Err(e) => log_retry(&sc, &e, "barrier failed (retrying next floor)"),
+                    Err(e) => log_retry(
+                        &sc,
+                        &e,
+                        if sc.cfg.access.is_read() {
+                            "pull failed (retrying next floor)"
+                        } else {
+                            "barrier failed (retrying next floor)"
+                        },
+                    ),
                 }
             }
             _ = poll_iv.tick() => {

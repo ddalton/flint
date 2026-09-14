@@ -31,10 +31,43 @@ covered by the stability guarantee.
   request a reader sends checked against the read verbs; an idle tick of
   exactly two GETs; the refusal; the drain; the refused one-shot verbs;
   the marker) and nine mutations, each failing the test meant for it.
-  **Not yet enforced by the bucket:** the broker still mints the same
-  read-write key for a reader (design phase D), and the CR cannot yet
-  say which ServiceAccounts may only read (phase B). Until then this is
-  a posture the mount and the syncer keep.
+  The credential that makes the bucket enforce it is the next entry.
+
+- **s3-csi: read-only consumers, and a credential that cannot write.**
+  Both mount CRDs (`FlintLeanWorkspace`, `FlintPassthroughMount`) gain
+  `spec.consumers.readOnlyServiceAccounts`: an SA listed there mounts
+  read-only whatever its volume asks (`readOnly: false` is narrowed, not
+  refused). The most specific entry decides, and at equal specificity the
+  narrower: a name beats `"*"`, and the read-only list beats the read-write
+  one. The plugin decides one access per publish — the CR's lists
+  narrowed by `csi.readOnly` — and the bind, mount-s3's `--read-only`, the
+  syncer's mode and the broker registration all follow it (a passthrough
+  CR's own `readOnly` narrows it too). The broker narrows the
+  registration by the CR again at every exchange and mints a read grant
+  as a credential that cannot write, where the backend can express one:
+  `sts` attaches a session policy of `GetObject`/`GetObjectVersion`/
+  `GetObjectAttributes` on the CR's prefix and `ListBucket`/
+  `ListBucketVersions` conditioned on it (a session policy only narrows the
+  role); `rest` sends `"access"` and `"onBehalfOf"` and the door scopes;
+  `static` hands out `broker.static.readSecretRef`'s keys, and without
+  one hands out the one key and says `readEnforcement: cooperative` on
+  `/v1/status`. A read-write grant keeps the role's own scope, as before.
+  `issued` and `registered` lines carry `access`, `enforcement` and
+  `on_behalf_of`, from a new pod-authored, audit-only volume attribute
+  `chert.us/on-behalf-of`. The lean operator reports `AccessIsolation`:
+  `False/Cooperative` under `identity.mode` `static` or `ambient`, and
+  `Unknown/DecidedByBroker` under the broker, whose backend it cannot see.
+  Checked live against MinIO RELEASE.2025-09-07 by
+  `lean/e2e/access/read-grant-minio.sh` (13/13, twice): a read-only syncer
+  runs, checks out and follows a writer's edit, add and delete on keys
+  narrowed by the broker's exact policy; those keys are denied PUT and
+  DELETE under the prefix and GET and LIST of another prefix, while the
+  parent user's are not; and a READ-WRITE syncer on them fails its barrier
+  with `403 AccessDenied` and leaves the manifest pointer unchanged. With
+  `s3:PutObject` added to the policy, or its prefix bound removed, the
+  same script fails. Twelve unit mutations each fail their test. MinIO's
+  policy evaluator is not AWS's: AWS STS, Ceph RGW and mount-s3 under a
+  read grant are the cluster drill (design phase F), not yet run.
 
 - **flint-store 0.1.3: `S3Store::with_credentials(bucket, endpoint, region,
   access_key_id, secret_access_key)`** — an S3 store from an explicit key

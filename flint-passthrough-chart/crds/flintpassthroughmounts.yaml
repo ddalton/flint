@@ -190,6 +190,20 @@ spec:
                   properties:
                     serviceAccounts:
                       type: array
+                      description: >-
+                        May mount read-write, or read-only when the pod's
+                        volume says readOnly: true.
+                      items:
+                        type: string
+                    readOnlyServiceAccounts:
+                      type: array
+                      description: >-
+                        May mount read-only and never wider: readOnly: false
+                        is narrowed, not refused. The mount is read-only and
+                        flint-s3-broker issues a credential that cannot
+                        write where its backend can scope one (sts, rest, or
+                        static with a read key). A name beats "*", and at
+                        equal specificity the read-only list wins.
                       items:
                         type: string
                 identity:

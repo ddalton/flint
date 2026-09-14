@@ -2,8 +2,8 @@
 //! what the POD AUTHOR wrote and what KUBELET asserted (design §3.4).
 //!
 //! `volumeAttributes` are attacker-controlled input to a privileged
-//! process. Exactly two selector keys and two integer keys are accepted;
-//! every other pod-authored key is refused BY NAME. Bucket, prefix,
+//! process. Exactly two selector keys, two integer keys and one audit
+//! string are accepted; every other pod-authored key is refused BY NAME. Bucket, prefix,
 //! endpoint, region, image and credentials are never accepted from the
 //! pod — the CR is the policy object.
 //!
@@ -19,6 +19,13 @@ pub const ATTR_MOUNT: &str = "chert.us/mount";
 pub const ATTR_WORKSPACE: &str = "chert.us/workspace";
 pub const ATTR_UID: &str = "chert.us/uid";
 pub const ATTR_GID: &str = "chert.us/gid";
+/// Who the pod acts for, as its author says (per-user access design
+/// §4.2): the orchestrator's assertion of the signed-in user. AUDIT ONLY —
+/// carried to the broker's registration, its `issued` line and the `rest`
+/// backend's body, and never an input to any decision here.
+pub const ATTR_ON_BEHALF_OF: &str = "chert.us/on-behalf-of";
+/// Bytes. An issuer's `sub` or an email fits with room to spare.
+pub const ON_BEHALF_OF_MAX: usize = 256;
 
 pub const K_POD_NAME: &str = "csi.storage.k8s.io/pod.name";
 pub const K_POD_NAMESPACE: &str = "csi.storage.k8s.io/pod.namespace";
@@ -73,6 +80,9 @@ pub struct PublishRequest {
     pub pod_uid: String,
     pub service_account: String,
     pub token: Option<SaToken>,
+    /// `chert.us/on-behalf-of`, validated for length and control
+    /// characters (it lands in log lines), otherwise verbatim.
+    pub on_behalf_of: Option<String>,
 }
 
 fn name_ok(n: &str) -> bool {
@@ -95,6 +105,7 @@ pub fn parse(ctx: &HashMap<String, String>) -> Result<PublishRequest, String> {
     let mut workspace = None;
     let mut uid = None;
     let mut gid = None;
+    let mut on_behalf_of = None;
     let mut unknown = Vec::new();
     for (k, v) in ctx {
         match k.as_str() {
@@ -102,6 +113,15 @@ pub fn parse(ctx: &HashMap<String, String>) -> Result<PublishRequest, String> {
             ATTR_WORKSPACE => workspace = Some(v.clone()),
             ATTR_UID => uid = Some(parse_id(ATTR_UID, v)?),
             ATTR_GID => gid = Some(parse_id(ATTR_GID, v)?),
+            ATTR_ON_BEHALF_OF => {
+                if v.is_empty() || v.len() > ON_BEHALF_OF_MAX || v.chars().any(char::is_control) {
+                    return Err(format!(
+                        "volumeAttributes.{ATTR_ON_BEHALF_OF} must be 1-{ON_BEHALF_OF_MAX} bytes with no \
+                         control characters"
+                    ));
+                }
+                on_behalf_of = Some(v.clone());
+            }
             k if k.starts_with("csi.storage.k8s.io/") => {}
             k => unknown.push(k.to_string()),
         }
@@ -110,8 +130,9 @@ pub fn parse(ctx: &HashMap<String, String>) -> Result<PublishRequest, String> {
         unknown.sort();
         return Err(format!(
             "volumeAttributes {} not accepted — the pod may only name the CR ({ATTR_MOUNT} or \
-             {ATTR_WORKSPACE}) and a presentation uid/gid ({ATTR_UID}, {ATTR_GID}); bucket, \
-             prefix, endpoint, image and credentials come from the CR",
+             {ATTR_WORKSPACE}), a presentation uid/gid ({ATTR_UID}, {ATTR_GID}) and who it acts \
+             for ({ATTR_ON_BEHALF_OF}); bucket, prefix, endpoint, image, credentials and access \
+             come from the CR",
             unknown.join(", ")
         ));
     }
@@ -160,7 +181,7 @@ pub fn parse(ctx: &HashMap<String, String>) -> Result<PublishRequest, String> {
         None => None,
         Some(raw) => parse_tokens(raw)?,
     };
-    Ok(PublishRequest { selector, uid, gid, pod_name, pod_namespace, pod_uid, service_account, token })
+    Ok(PublishRequest { selector, uid, gid, pod_name, pod_namespace, pod_uid, service_account, token, on_behalf_of })
 }
 
 /// `{"<audience>": {"token": "...", "expirationTimestamp": "..."}}`
@@ -254,6 +275,27 @@ mod tests {
         .unwrap();
         assert_eq!((r.uid, r.gid), (Some(1001), Some(1002)));
         assert_eq!(r.selector.mode(), "lean");
+    }
+
+    #[test]
+    fn on_behalf_of_is_carried_verbatim_and_bounded() {
+        let r = parse(&kubelet(HashMap::from([(ATTR_WORKSPACE.into(), "w".into())]))).unwrap();
+        assert_eq!(r.on_behalf_of, None);
+        let r = parse(&kubelet(HashMap::from([
+            (ATTR_WORKSPACE.into(), "w".into()),
+            (ATTR_ON_BEHALF_OF.into(), "alice@example.com".into()),
+        ])))
+        .unwrap();
+        assert_eq!(r.on_behalf_of.as_deref(), Some("alice@example.com"));
+        let long = "a".repeat(ON_BEHALF_OF_MAX + 1);
+        for bad in ["", "alice\nissued ns=x", long.as_str()] {
+            let e = parse(&kubelet(HashMap::from([
+                (ATTR_WORKSPACE.into(), "w".into()),
+                (ATTR_ON_BEHALF_OF.into(), bad.into()),
+            ])))
+            .unwrap_err();
+            assert!(e.contains(ATTR_ON_BEHALF_OF), "{bad:?}: {e}");
+        }
     }
 
     #[test]

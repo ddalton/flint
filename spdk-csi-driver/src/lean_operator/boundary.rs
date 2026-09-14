@@ -60,6 +60,50 @@ pub fn validate_spec(spec: &FlintLeanWorkspaceSpec) -> Result<(), Refusal> {
     Ok(())
 }
 
+/// `AccessIsolation` (per-user access design §4.3): does the BUCKET hold
+/// this workspace's read-only pods to reads, or only their mount and
+/// syncer? Pure over the spec, so it is current on every pass.
+///
+/// Reported for every workspace with `consumers`, not only one that lists
+/// `readOnlyServiceAccounts`: a pod on a read-write ServiceAccount that
+/// mounts with `csi.readOnly: true` is a reader too. `None` without
+/// `consumers` (nobody can mount it) or with an identity mode the spec
+/// verdict refuses anyway.
+///
+/// `Unknown` under the broker is the honest answer, not a placeholder: the
+/// broker's backend decides, and this operator cannot see it. The broker
+/// reports it itself (`/v1/status` `readEnforcement`, and `access` and
+/// `enforcement` on every `issued` line).
+pub fn access_isolation(spec: &FlintLeanWorkspaceSpec, generation: Option<i64>) -> Option<LeanCondition> {
+    spec.consumers.as_ref()?;
+    let mode = spec.identity.as_ref().map(|i| i.mode.clone()).unwrap_or_default();
+    let (status, reason, message) = match crate::s3csi::policy::CredentialMode::parse(&mode).ok()? {
+        crate::s3csi::policy::CredentialMode::Static => (
+            "False",
+            "Cooperative",
+            "identity.mode is static: a pod's syncer signs with the key in its nodePublishSecretRef Secret, \
+             which flint cannot narrow. A read-only pod's mount and syncer keep it from writing; its key could \
+             write",
+        ),
+        crate::s3csi::policy::CredentialMode::Ambient => (
+            "False",
+            "Cooperative",
+            "identity.mode is ambient: a pod's syncer uses the node's own credential chain, which flint cannot \
+             narrow. A read-only pod's mount and syncer keep it from writing; its key could write",
+        ),
+        crate::s3csi::policy::CredentialMode::Broker | crate::s3csi::policy::CredentialMode::WebIdentity => (
+            "Unknown",
+            "DecidedByBroker",
+            "a read-only pod's key is minted by flint-s3-broker as a read grant, and whether the bucket enforces \
+             it depends on the broker's backend, which this operator cannot see: sts (a session policy of reads on \
+             this prefix), rest (your credential door, told access=read) and static with a read key \
+             (FLINT_S3B_STATIC_READ_*) hold a reader to reads; static without one is cooperative. The broker's \
+             /v1/status reports readEnforcement",
+        ),
+    };
+    Some(condition("AccessIsolation", status, reason, Some(message.to_string()), generation))
+}
+
 /// `SyncerObserved` (§2.6): what the RUNNING binary says about itself,
 /// read from the lease-heartbeat echo.
 ///
@@ -184,6 +228,29 @@ mod tests {
             v[k] = val.clone();
         }
         serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn access_isolation_says_cooperative_where_flint_cannot_narrow_the_key() {
+        let st = |extra| access_isolation(&spec(extra), Some(3));
+        assert_eq!(st(serde_json::json!({})), None, "no consumers: nobody mounts it");
+        let consumers = serde_json::json!({ "serviceAccounts": ["a"], "readOnlyServiceAccounts": ["r"] });
+        for (mode, status, reason) in [
+            (None, "Unknown", "DecidedByBroker"),
+            (Some("broker"), "Unknown", "DecidedByBroker"),
+            (Some("webIdentity"), "Unknown", "DecidedByBroker"),
+            (Some("static"), "False", "Cooperative"),
+            (Some("ambient"), "False", "Cooperative"),
+        ] {
+            let mut extra = serde_json::json!({ "consumers": consumers });
+            if let Some(m) = mode {
+                extra["identity"] = serde_json::json!({ "mode": m });
+            }
+            let c = st(extra).unwrap_or_else(|| panic!("{mode:?}"));
+            assert_eq!((c.r#type.as_str(), c.status.as_str(), c.reason.as_str()), ("AccessIsolation", status, reason), "{mode:?}");
+            assert_eq!(c.observed_generation, Some(3));
+        }
+        assert_eq!(st(serde_json::json!({ "consumers": consumers, "identity": { "mode": "knox" } })), None);
     }
 
     /// The default CR — the one every existing workspace already is —

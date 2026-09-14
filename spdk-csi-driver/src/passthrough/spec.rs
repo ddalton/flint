@@ -77,9 +77,10 @@ pub struct MountSpec {
     #[serde(default)]
     pub image: Option<String>,
     /// CSI delivery: which ServiceAccounts in this namespace may mount
-    /// the CR. ABSENT = DENY — never "any pod in this namespace".
+    /// the CR, read-write or read-only. ABSENT = DENY — never "any pod in
+    /// this namespace".
     #[serde(default)]
-    pub consumers: Option<crate::s3csi::policy::Consumers>,
+    pub consumers: Option<crate::s3csi::policy::MountConsumers>,
     /// CSI delivery: how the worker gets its credential (design §4.4).
     #[serde(default)]
     pub identity: Option<crate::s3csi::policy::Identity>,
@@ -233,7 +234,10 @@ mod tests {
             gid: Some(1),
             mount_options: vec!["--metadata-ttl".into(), "60".into()],
             image: Some("i".into()),
-            consumers: Some(crate::s3csi::policy::Consumers { service_accounts: vec!["a".into()] }),
+            consumers: Some(crate::s3csi::policy::MountConsumers {
+                service_accounts: vec!["a".into()],
+                read_only_service_accounts: vec!["r".into()],
+            }),
             identity: Some(crate::s3csi::policy::Identity { mode: "broker".into() }),
         };
         let value = serde_json::to_value(&all).unwrap();
@@ -253,6 +257,19 @@ mod tests {
              CR using one denies every pod: {denied:?} — add the field, or list it in \
              TOMBSTONES if refusing it is the point"
         );
+
+        // One level down, for the policy block: a consumers list the CRD
+        // does not declare is pruned, and a pruned read-only list denies
+        // the ServiceAccounts it names instead of narrowing them.
+        let in_crd_consumers: BTreeSet<String> = props["consumers"]["properties"]
+            .as_mapping()
+            .expect("the CRD must declare spec.consumers.properties")
+            .keys()
+            .map(|k| k.as_str().unwrap().to_string())
+            .collect();
+        let in_struct_consumers: BTreeSet<String> =
+            value["consumers"].as_object().unwrap().keys().cloned().collect();
+        assert_eq!(in_crd_consumers, in_struct_consumers, "spec.consumers: the CRD and the struct disagree");
     }
 
     /// A tombstone that is not actually refused is worse than no

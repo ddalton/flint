@@ -272,6 +272,12 @@ pub async fn full_pass(
         (Ok(()), false) => {}
     }
 
+    // 2. Whether the bucket holds a read-only pod to reads: pure, so on
+    //    every pass.
+    if let Some(c) = boundary::access_isolation(spec, generation) {
+        boundary::set_condition(&mut r.conditions, c);
+    }
+
     // 3. What the RUNNING syncer says. One read of a cell the operator
     //    already has a reason to look at.
     let cell = store.epoch_read(&format!("{prefix}/.flint/lean/epoch")).await?;

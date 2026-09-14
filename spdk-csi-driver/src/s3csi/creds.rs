@@ -294,6 +294,15 @@ pub struct Registration {
     pub mode: String,
     pub nonce: String,
     pub node: String,
+    /// What the plugin decided for this publish (per-user access design
+    /// §4.2). The broker narrows it again by the CR at every exchange, so
+    /// a registration can only ever ask for less. Absent from a plugin
+    /// that predates the field: `readWrite`, which the CR still narrows.
+    #[serde(default)]
+    pub access: super::policy::Access,
+    /// `chert.us/on-behalf-of`: audit only, never an input to a decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<String>,
 }
 
 pub struct BrokerClient {

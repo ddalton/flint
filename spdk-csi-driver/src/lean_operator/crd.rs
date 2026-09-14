@@ -71,10 +71,12 @@ pub struct FlintLeanWorkspaceSpec {
     pub credentials_secret_ref: Option<String>,
 
     /// CSI delivery (`s3.csi.chert.us`, docs/plans/csi-node-mount-design.md):
-    /// which ServiceAccounts in this namespace may mount the workspace.
-    /// ABSENT = DENY — never "any pod in this namespace".
+    /// which ServiceAccounts in this namespace may mount the workspace,
+    /// read-write (`serviceAccounts`) or read-only
+    /// (`readOnlyServiceAccounts`). ABSENT = DENY — never "any pod in this
+    /// namespace".
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub consumers: Option<crate::s3csi::policy::Consumers>,
+    pub consumers: Option<crate::s3csi::policy::MountConsumers>,
     /// CSI delivery: how the syncer gets its credential (design §4.4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<crate::s3csi::policy::Identity>,
@@ -365,7 +367,8 @@ pub struct FlintLeanWorkspaceStatus {
     pub last_verified_unix: Option<u64>,
 
     /// `SpecAccepted`, `SyncerObserved`, `SentinelVerbsActive`,
-    /// `MetricsExposed` (§2.6).
+    /// `MetricsExposed` (§2.6), `AccessIsolation` (whether the bucket, or
+    /// only the mount and the syncer, holds a read-only pod to reads).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Vec<LeanCondition>>,
 

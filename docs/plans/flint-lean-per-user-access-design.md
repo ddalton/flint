@@ -1,7 +1,8 @@
 # flint-lean — per-user access through the mount, and a read-only posture: investigation and design
 
-Date: 2026-09-13. Status: **DESIGN; phases A and C BUILT 2026-09-14**
-(see §10, which supersedes what it names). Written the day after the
+Date: 2026-09-13. Status: **DESIGN; phases A, B, C and D BUILT
+2026-09-14** (see §10, which supersedes what it names; E, F and G are
+not built). Written the day after the
 protocol review (`flint-lean-protocol-review-2026-09-12.md`) against
 `37ff97d0` (v1.51.0). Every code claim in §0-§9 is `file:line` at that
 commit; §10 was re-verified against `75e306c8` (after v1.53.0).
@@ -263,6 +264,11 @@ Two lists, not a list of objects: a string-or-object union is a
 schema junctor, which Kubernetes refuses for a structural CRD and
 `crd_is_structural` (`crd.rs`) guards against. An existing CR is
 byte-identical in behaviour.
+
+**Refined when built (§10.5, D13):** the function below gives a
+wildcard read-write entry precedence over a named read-only one. As
+built, the most specific entry decides, and at equal specificity the
+narrower one.
 
 The decision, one pure function beside `Consumers::allows`:
 
@@ -727,10 +733,13 @@ promise the syncer and the mount keep, not one the bucket enforces**
 |---|---|
 | F1 EROFS on a read-only lean mount | **built, not yet measured**: the bind flag is one argument at a mount call only a node can exercise — phase F |
 | F2 a reader takes no fence and is Ready in checkout time | **unit, the fence half**: the write census allows only GET/HEAD/LIST/`epoch_read`; `one_shot_verbs_that_publish_or_fence_are_refused_on_a_reader`. Readiness beside a committing writer is phase F |
-| F3 a reader's credential cannot write | needs D |
+| F3 a reader's credential cannot write | **live on MinIO** (§10.5): PUT and DELETE under the prefix denied on keys the broker's policy narrowed, the parent user's allowed; a read-write barrier on them 403s and moves nothing. AWS STS on a cluster is phase F |
 | F4 `publish` answered `refused-read-only` | **unit**: `a_publish_touch_on_a_reader_is_answered_refused_read_only` (control: the writer's `ok`), `a_reader_drain_answers_what_it_owes_and_writes_nothing` |
 | F5 `sync` applies a foreign change onto the reader | **unit**, and at every floor: `a_reader_follows_writers_and_the_inbox_without_one_store_write` (a writer's edit, delete, add and a UI inbox write) |
-| F6-F9 | need B/D and a cluster |
+| F6 a refused re-mint takes the credential away | unchanged code path (`republish` removes `creds.json` on a refusal); phase F |
+| F7 write coherence under `runsc` | phase F |
+| F8 the session policy narrows, never widens | **live on MinIO** (§10.5): the parent user's own policy is bucket-wide, and the narrowed keys are denied GET and LIST of another prefix |
+| F9 `readOnly: false` on a read-only SA does not widen | **unit, both ends**: `a_read_only_consumer_is_granted_read_whatever_the_pod_asks` (plugin), `a_grant_is_the_registration_narrowed_by_the_cr_never_widened` (broker); the bind as deployed is phase F |
 | F10 | needs E |
 
 Mutation-checked: nine mutations (floor tick without the reader branch;
@@ -741,3 +750,128 @@ memo never matching; the memo ignoring the inbox; a reader advertising
 and the guard removed, the writer-and-reader test catches the reader's
 uploads, so the no-write property is not resting on the guard alone.
 
+### 10.5 Phases B and D, as built (2026-09-14)
+
+**B — who is read-only, carried end to end.**
+
+- `s3csi::policy::MountConsumers { serviceAccounts, readOnlyServiceAccounts }`
+  is the consumers type of both mount CRDs. `FlintRepo` keeps
+  `Consumers`: forge's door has no read-only posture, and a field it
+  would accept and ignore is the kind a reader trusts. The lean CRD is
+  regenerated (`crdgen lean`; the diff is the new property and three
+  descriptions); the hand-written passthrough CRD declares it, and its
+  drift guard now compares `spec.consumers`' keys too, because a pruned
+  read-only list DENIES the ServiceAccounts it names.
+- `MountConsumers::access(sa, readOnly) -> Option<Access>` and
+  `resolve::authorize` return the grant. `node.rs` decides it once per
+  publish and everything follows that value: `VolumeState.read_only`
+  (the bind), mount-s3's `--read-only` (passthrough; the CR's own
+  `readOnly` still narrows), `FLINT_SYNC_ACCESS=read` (lean), and
+  `Registration.access`.
+- `Registration` gains `access` (default `readWrite` on the wire, which
+  the broker narrows by the CR anyway) and `on_behalf_of`, from a new
+  pod-authored volume attribute `chert.us/on-behalf-of` (1-256 bytes, no
+  control characters, since it lands in log lines). It is kept in the
+  volume state, so a re-registration after a broker restart carries it.
+  It decides nothing.
+- The lean operator reports `AccessIsolation` on every workspace with
+  `consumers` (a pod on a read-write SA with `csi.readOnly` is a reader
+  too): `False/Cooperative` under `identity.mode` `static` or `ambient`,
+  `Unknown/DecidedByBroker` under `broker` or `webIdentity`.
+
+**D — the broker mints by access.**
+
+- `decide` returns a `Grant { mode, cr, access }`: the registration's
+  access narrowed by the CR's lists. A rig without registration gets the
+  CR's access for the SA.
+- `sts`: a read grant carries `Policy` = `read_session_policy(partition,
+  bucket, prefix)` — `s3:GetObject`, `s3:GetObjectVersion`,
+  `s3:GetObjectAttributes` on `<bucket>/<prefix>/*`, and `s3:ListBucket`,
+  `s3:ListBucketVersions` on the bucket conditioned `StringLike s3:prefix
+  [<prefix>, <prefix>/*]` (no condition for a root workspace). mount-s3's
+  configuration guide says the same for a prefix mount: object actions
+  scoped by resource, `s3:ListBucket` by the `s3:prefix` condition key.
+  `FLINT_S3B_ARN_PARTITION` (chart `broker.sts.arnPartition`) for
+  `aws-cn`/`aws-us-gov`.
+- `rest`: the body gains `"access"` and `"onBehalfOf"`.
+- `static`: optional `FLINT_S3B_STATIC_READ_*` (chart
+  `broker.static.readSecretRef`), both halves or neither (half a key set
+  is a startup error).
+- `issued` gains `access`, `enforcement` (`none` for a write grant;
+  `sessionPolicy`, `restDoor`, `readKey` or `cooperative` for a read
+  grant) and `on_behalf_of`; `registered` gains `access` and
+  `on_behalf_of`; `/v1/status` gains `readEnforcement`; a `static`
+  broker without a read key warns once at start.
+
+**Decisions taken while building.**
+
+- **D13 The most specific consumer entry decides; at equal specificity
+  the narrower.** §4.1's function put `serviceAccounts: ["*"]` ahead of a
+  named read-only SA, so "everyone writes except agent-ro" would have
+  let agent-ro write. A name beats the wildcard; the read-only list
+  beats the read-write one; an SA named in both reads.
+- **D14 A read-write grant keeps the role's own scope.** §4.3 also
+  prefix-bounded writers with a session policy. That changes every
+  existing `sts` writer at upgrade, and an action it misses (a multipart
+  verb, a conformance probe) fails every writer at once — a hardening
+  with its own rollout, not part of read-only. A reader's policy has no
+  such risk: readers are new.
+- **D15 A `static` broker without a read key still serves readers, and
+  says so.** Refusing them would break every existing read-only
+  passthrough mount on a static broker (the chart's default backend).
+  The `issued` line, `/v1/status` and a start-up warning say
+  `cooperative`, and `broker.static.readSecretRef` makes it enforced.
+- **D16 `AccessIsolation` is `Unknown` under the broker.** The operator
+  cannot see the broker's backend, and the chart's default backend is
+  `static` without a read key, so `True` would be false on a default
+  install. The broker reports its own `readEnforcement`.
+
+**Verified.**
+
+- Unit: 307 passing across `s3csi`, `passthrough`, `lean_operator`,
+  `forge_operator` and `lite_gateway`. New: the precedence table
+  (13 rows), the old-CR and old-registration wire shapes, authorization
+  returning the grant, the registration narrowed by the CR in both
+  directions, the session policy's exact JSON with a check that every
+  action is a `Get` or `List`, `sts`/`rest`/`static` mints against
+  capturing servers (the `Policy` form field present for a read grant and
+  absent for a write grant), `readEnforcement`, the static read-key
+  config, `on-behalf-of` bounds, the registration's wire spelling, and
+  `AccessIsolation` per mode.
+- Mutations, each failing the test meant for it: no `Policy` on a read
+  grant; the static read key handed to writers; `rest` always told
+  `readWrite`; a read-only volume registering `readWrite`; the control
+  character check dropped; `static` reported `Unknown`; the passthrough
+  CRD's read-only list misspelled; `decide` ignoring the registration;
+  `authorize` ignoring `csi.readOnly`; `s3:PutObject` in the policy; the
+  named read-only rule dropped; the wildcard read-only rule dropped.
+- **Live, against MinIO RELEASE.2025-09-07** (`lean/e2e/access/read-grant-minio.sh`,
+  13/13 on two consecutive runs). A parent user whose own policy is
+  bucket-wide `readwrite` (the too-wide role) calls `AssumeRole` with the
+  exact policy the broker builds (written by its unit test):
+  - a `FLINT_SYNC_ACCESS=read` `run` on the narrowed keys checks out,
+    follows a writer's edit, add and delete, and is denied nothing it
+    asks for;
+  - the narrowed keys are denied PUT and DELETE under the prefix, and GET
+    and LIST of another prefix; the parent's keys are allowed all four;
+  - a READ-WRITE `barrier` on the narrowed keys fails with
+    `store: not authorized: put_whole: 403 AccessDenied`, and the manifest
+    pointer's etag is unchanged — the credential holds when flint's own
+    mode is wrong (D1).
+  - The script's own positive control: with `s3:PutObject` added to the
+    policy, B1, D1 and D2 fail; with the prefix bound removed, C1 and C2
+    fail.
+  - One earlier run (bucket named `ws`, then fixed) logged three
+    `dispatch failure`s from a reader's floor pull between successful
+    ticks; three later runs logged none. Not reproduced, recorded.
+- **Not covered:** the `authorize` call's `req.readonly` argument and
+  `read_only: access.is_read()` in `publish_lean`/`publish_passthrough`
+  (one line each at a publish only a node exercises); AWS STS's and Ceph
+  RGW's evaluation of the policy; mount-s3 under a read grant; the
+  `on-behalf-of` attribute through kubelet. All phase F.
+
+**Found on the way, not changed:** `flint-forge-chart/crds/flintrepos.yaml`
+is stale at HEAD — `crdgen forge` emits a `spec.packs` block (commit
+`40ecd7ed`) the checked-in copy lacks. The forge operator applies its
+compiled-in CRD at start, so only a fresh `helm install` is affected;
+`release.sh check` compares the lean CRD only.

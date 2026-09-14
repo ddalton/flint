@@ -21,12 +21,23 @@
 //!    the node plugin made for this pod-uid and CR — the one binding a
 //!    pod cannot self-mint (§2.4 T2).
 //! 3. The CR named by `RoleArn`, in the TOKEN'S namespace (never a
-//!    request field), must list the SA in `spec.consumers`.
+//!    request field), must list the SA in `spec.consumers`, and decides
+//!    its ACCESS: the registration's (the pod's `csi.readOnly`, as the
+//!    plugin decided it) narrowed by the CR's lists, never widened.
 //! 4. The backend mints: `static` (rig / a proxy that hands out one
 //!    key per project), `sts` (forward the pod token to an STS that
 //!    trusts the cluster issuer — MinIO/RGW/AWS, the K0 arm), or `rest`
 //!    (POST the pod token as a bearer to the application's REST API and
 //!    take the keys it returns — the customer's JWT-enforcing door).
+//!
+//! A READ grant is minted as a credential that cannot write where the
+//! backend can express one (per-user access design §4.3): `sts` attaches
+//! a session policy of reads on the CR's bucket and prefix, which can only
+//! narrow the role; `rest` tells the door `"access": "read"` and the door
+//! scopes; `static` hands out its read key set when one is configured.
+//! A `static` backend with no read key hands out its one key, and its
+//! `issued` line and `/v1/status` say `cooperative`: the mount and the
+//! syncer keep that pod read-only, the bucket does not.
 //!
 //! What it never does: read tenant Secrets, hold a bucket key of its
 //! own in `sts`/`rest` mode, or accept a `RoleArn` it did not shape.
@@ -44,14 +55,23 @@ use warp::http::StatusCode;
 use warp::{Filter, Rejection};
 
 use super::creds::{self, Creds, Registration};
-use super::policy::Consumers;
+use super::policy::{Access, MountConsumers};
 use super::resolve;
 use super::DRIVER_NAME;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticKeys {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub session_token: Option<String>,
+}
 
 #[derive(Debug, Clone)]
 pub enum Backend {
     /// One fixed key set; `Expiration` is synthetic so clients refresh.
-    Static { access_key_id: String, secret_access_key: String, session_token: Option<String> },
+    /// `read`, when set, is what a READ grant gets instead: a key set the
+    /// operator scoped to reads in the store's own IAM.
+    Static { access_key_id: String, secret_access_key: String, session_token: Option<String>, read: Option<StaticKeys> },
     /// Forward `AssumeRoleWithWebIdentity` (with the POD's token) to a
     /// real STS that trusts the cluster issuer.
     Sts { url: String, role_arn: Option<String> },
@@ -74,6 +94,9 @@ pub struct BrokerConfig {
     pub default_lifetime_secs: u64,
     /// `false` only for rigs that exercise the exchange without a plugin.
     pub require_registration: bool,
+    /// The ARN partition of a read grant's session policy (`aws`,
+    /// `aws-cn`, `aws-us-gov`). S3-compatible STS servers take `aws`.
+    pub arn_partition: String,
 }
 
 impl BrokerConfig {
@@ -85,6 +108,22 @@ impl BrokerConfig {
                 access_key_id: need("FLINT_S3B_STATIC_ACCESS_KEY_ID")?,
                 secret_access_key: need("FLINT_S3B_STATIC_SECRET_ACCESS_KEY")?,
                 session_token: opt("FLINT_S3B_STATIC_SESSION_TOKEN"),
+                read: match (opt("FLINT_S3B_STATIC_READ_ACCESS_KEY_ID"), opt("FLINT_S3B_STATIC_READ_SECRET_ACCESS_KEY")) {
+                    (Some(access_key_id), Some(secret_access_key)) => Some(StaticKeys {
+                        access_key_id,
+                        secret_access_key,
+                        session_token: opt("FLINT_S3B_STATIC_READ_SESSION_TOKEN"),
+                    }),
+                    (None, None) => None,
+                    // Half a key set would hand every reader a credential
+                    // that fails at its first request, or — read the other
+                    // way — silently fall back to the write key.
+                    _ => {
+                        return Err("FLINT_S3B_STATIC_READ_ACCESS_KEY_ID and FLINT_S3B_STATIC_READ_SECRET_ACCESS_KEY \
+                                    are set together or not at all"
+                            .into())
+                    }
+                },
             },
             "sts" => Backend::Sts { url: need("FLINT_S3B_STS_URL")?, role_arn: opt("FLINT_S3B_STS_ROLE_ARN") },
             "rest" => {
@@ -110,8 +149,77 @@ impl BrokerConfig {
             max_lifetime_secs: opt("FLINT_S3B_MAX_LIFETIME_SECS").and_then(|v| v.parse().ok()).unwrap_or(3600),
             default_lifetime_secs: opt("FLINT_S3B_DEFAULT_LIFETIME_SECS").and_then(|v| v.parse().ok()).unwrap_or(900),
             require_registration: opt("FLINT_S3B_REQUIRE_REGISTRATION").map(|v| v != "false").unwrap_or(true),
+            arn_partition: opt("FLINT_S3B_ARN_PARTITION").unwrap_or_else(|| "aws".into()),
         })
     }
+}
+
+impl Backend {
+    /// How a READ grant is held to reads — the `enforcement` of its
+    /// `issued` line and `/v1/status`.
+    pub fn read_enforcement(&self) -> &'static str {
+        match self {
+            Backend::Sts { .. } => "sessionPolicy",
+            Backend::Rest { .. } => "restDoor",
+            Backend::Static { read: Some(_), .. } => "readKey",
+            Backend::Static { read: None, .. } => "cooperative",
+        }
+    }
+}
+
+/// The session policy a READ grant carries on the `sts` backend: object
+/// reads under the CR's prefix, and listing only that prefix.
+///
+/// Every action here is a read. `s3:ListBucket` is bounded by the
+/// `s3:prefix` condition (the only way to scope it; its resource is the
+/// bucket), covering both the prefix itself and everything under it. A
+/// session policy intersects with the role's own, so a broker configured
+/// with a too-wide role still hands a reader keys that cannot write, and
+/// cannot read another prefix. A read-write grant carries no session policy:
+/// its scope is the role's, as before this field existed.
+pub fn read_session_policy(partition: &str, bucket: &str, prefix: &str) -> String {
+    let prefix = prefix.trim_matches('/');
+    let objects = if prefix.is_empty() {
+        format!("arn:{partition}:s3:::{bucket}/*")
+    } else {
+        format!("arn:{partition}:s3:::{bucket}/{prefix}/*")
+    };
+    let mut list = serde_json::json!({
+        "Effect": "Allow",
+        "Action": ["s3:ListBucket", "s3:ListBucketVersions"],
+        "Resource": format!("arn:{partition}:s3:::{bucket}"),
+    });
+    if !prefix.is_empty() {
+        list["Condition"] = serde_json::json!({ "StringLike": { "s3:prefix": [prefix, format!("{prefix}/*")] } });
+    }
+    serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Action": ["s3:GetObject", "s3:GetObjectVersion", "s3:GetObjectAttributes"],
+                "Resource": objects,
+            },
+            list,
+        ],
+    })
+    .to_string()
+}
+
+/// The CR's say in a mint: who may, and where the bucket and prefix are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub consumers: MountConsumers,
+    pub bucket: String,
+    pub prefix: String,
+}
+
+/// What one exchange is for, once decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Grant {
+    pub mode: String,
+    pub cr: String,
+    pub access: Access,
 }
 
 /// Who vouched for an identity, and therefore what KIND of principal it
@@ -196,14 +304,19 @@ pub fn identity_from_review(tr: &TokenReview, audience: &str) -> Result<Identity
 
 /// The pure decision, given what the cluster said. Every refusal names
 /// the reason — it is the tenant's error message.
+///
+/// The access is the registration's narrowed by the CR, never widened: a
+/// plugin that registered `read` gets read whatever the CR allows, and an
+/// SA the CR lists as read-only gets read whatever the registration asked.
+/// A rig that waives registration gets the CR's access for the SA.
 pub fn decide(
     id: &Identity,
     role_arn: &str,
     session_name: &str,
     registration: Option<&Registration>,
     require_registration: bool,
-    consumers: Option<&Consumers>,
-) -> Result<(String, String), String> {
+    consumers: Option<&MountConsumers>,
+) -> Result<Grant, String> {
     let (mode, cr) = creds::parse_role_arn(role_arn)
         .ok_or_else(|| format!("RoleArn {role_arn:?} is not arn:flint:iam::<mode>:role/<cr>"))?;
     if require_registration {
@@ -223,13 +336,15 @@ pub fn decide(
         }
     }
     let consumers = consumers.ok_or_else(|| format!("{mode} CR {}/{cr} does not exist", id.namespace))?;
-    if !consumers.allows(&id.service_account) {
+    let registered_read = registration.map(|r| r.access.is_read()).unwrap_or(false);
+    let Some(access) = consumers.access(&id.service_account, registered_read) else {
         return Err(format!(
-            "ServiceAccount {}/{} is not in spec.consumers.serviceAccounts of {cr}",
+            "ServiceAccount {}/{} is in neither spec.consumers.serviceAccounts nor \
+             spec.consumers.readOnlyServiceAccounts of {cr}",
             id.namespace, id.service_account
         ));
-    }
-    Ok((mode, cr))
+    };
+    Ok(Grant { mode, cr, access })
 }
 
 pub struct Broker {
@@ -284,28 +399,56 @@ impl Broker {
         identity_from_review(&out, &self.cfg.audience)
     }
 
-    async fn consumers_of(&self, mode: &str, ns: &str, cr: &str) -> Result<Option<Consumers>, String> {
+    async fn target_of(&self, mode: &str, ns: &str, cr: &str) -> Result<Option<Target>, String> {
         let sel = match mode {
             "passthrough" => super::attrs::Selector::Mount(cr.to_string()),
             "lean" => super::attrs::Selector::Workspace(cr.to_string()),
             other => return Err(format!("unknown mode {other}")),
         };
         match resolve::fetch(&self.client, &sel, ns).await {
-            Ok(r) => Ok(Some(r.policy().map_err(|e| e.message().to_string())?.consumers)),
+            Ok(r) => {
+                let consumers = r.policy().map_err(|e| e.message().to_string())?.consumers;
+                let (bucket, prefix) = match &r {
+                    resolve::Resolved::Passthrough { spec } => (spec.bucket.clone(), spec.key_prefix.clone().unwrap_or_default()),
+                    resolve::Resolved::Lean { spec, .. } => (spec.bucket.clone(), spec.key_prefix.clone()),
+                };
+                Ok(Some(Target { consumers, bucket, prefix }))
+            }
             Err(resolve::Refusal::NotFound(_)) => Ok(None),
             Err(e) => Err(e.message().to_string()),
         }
     }
 
-    async fn mint(&self, id: &Identity, mode: &str, cr: &str, pod_token: &str, session: &str, lifetime: u64) -> Result<Creds, String> {
+    /// Mint for a decided grant, from the CR it was decided against.
+    pub async fn mint(
+        &self,
+        id: &Identity,
+        grant: &Grant,
+        target: &Target,
+        on_behalf_of: Option<&str>,
+        pod_token: &str,
+        session: &str,
+        lifetime: u64,
+    ) -> Result<Creds, String> {
+        let (mode, cr) = (grant.mode.as_str(), grant.cr.as_str());
         let expiration = (chrono::Utc::now() + chrono::Duration::seconds(lifetime as i64)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         match &self.cfg.backend {
-            Backend::Static { access_key_id, secret_access_key, session_token } => Ok(Creds {
-                access_key_id: access_key_id.clone(),
-                secret_access_key: secret_access_key.clone(),
-                session_token: session_token.clone(),
-                expiration,
-            }),
+            Backend::Static { access_key_id, secret_access_key, session_token, read } => {
+                let keys = match (grant.access, read) {
+                    (Access::Read, Some(r)) => r.clone(),
+                    _ => StaticKeys {
+                        access_key_id: access_key_id.clone(),
+                        secret_access_key: secret_access_key.clone(),
+                        session_token: session_token.clone(),
+                    },
+                };
+                Ok(Creds {
+                    access_key_id: keys.access_key_id,
+                    secret_access_key: keys.secret_access_key,
+                    session_token: keys.session_token,
+                    expiration,
+                })
+            }
             Backend::Sts { url, role_arn } => {
                 let mut form = vec![
                     ("Action", "AssumeRoleWithWebIdentity".to_string()),
@@ -316,6 +459,9 @@ impl Broker {
                 ];
                 if let Some(r) = role_arn {
                     form.push(("RoleArn", r.clone()));
+                }
+                if grant.access.is_read() {
+                    form.push(("Policy", read_session_policy(&self.cfg.arn_partition, &target.bucket, &target.prefix)));
                 }
                 let resp = self.http.post(url).form(&form).send().await.map_err(|e| format!("upstream STS: {e}"))?;
                 let status = resp.status();
@@ -336,6 +482,10 @@ impl Broker {
                     "cr": cr,
                     "mode": mode,
                     "durationSeconds": lifetime,
+                    // The door decides and scopes: `read` asks it for keys
+                    // that cannot write (per-user access design §4.3).
+                    "access": grant.access.as_str(),
+                    "onBehalfOf": on_behalf_of,
                 }));
                 for (k, v) in extra_headers {
                     req = req.header(k, v);
@@ -385,20 +535,40 @@ impl Broker {
             Some(x) => x,
             None => return sts_error(StatusCode::BAD_REQUEST, "InvalidParameterValue", &format!("RoleArn {role_arn:?}")),
         };
-        let consumers = match self.consumers_of(&mode, &id.namespace, &cr).await {
-            Ok(c) => c,
+        let target = match self.target_of(&mode, &id.namespace, &cr).await {
+            Ok(t) => t,
             Err(e) => return sts_error(StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailable", &e),
         };
-        if let Err(e) = decide(&id, role_arn, &session, reg.as_ref(), self.cfg.require_registration, consumers.as_ref()) {
-            self.refused.fetch_add(1, Ordering::Relaxed);
-            tracing::warn!(ns = %id.namespace, sa = %id.service_account, pod_uid = ?id.pod_uid, cr = %cr, "exchange refused (AccessDenied): {e}");
-            return sts_error(StatusCode::FORBIDDEN, "AccessDenied", &e);
-        }
+        let grant = match decide(&id, role_arn, &session, reg.as_ref(), self.cfg.require_registration, target.as_ref().map(|t| &t.consumers)) {
+            Ok(g) => g,
+            Err(e) => {
+                self.refused.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(ns = %id.namespace, sa = %id.service_account, pod_uid = ?id.pod_uid, cr = %cr, "exchange refused (AccessDenied): {e}");
+                return sts_error(StatusCode::FORBIDDEN, "AccessDenied", &e);
+            }
+        };
+        // `decide` refuses a CR that does not exist, so a grant has one.
+        let Some(target) = target else {
+            return sts_error(StatusCode::FORBIDDEN, "AccessDenied", &format!("{mode} CR {}/{cr} does not exist", id.namespace));
+        };
+        let on_behalf_of = reg.as_ref().and_then(|r| r.on_behalf_of.clone());
         let lifetime = f.duration_seconds.unwrap_or(self.cfg.default_lifetime_secs).clamp(60, self.cfg.max_lifetime_secs);
-        match self.mint(&id, &mode, &cr, token, &session, lifetime).await {
+        let enforcement = if grant.access.is_read() { self.cfg.backend.read_enforcement() } else { "none" };
+        match self.mint(&id, &grant, &target, on_behalf_of.as_deref(), token, &session, lifetime).await {
             Ok(c) => {
                 self.issued.fetch_add(1, Ordering::Relaxed);
-                tracing::info!(ns = %id.namespace, sa = %id.service_account, pod_uid = ?id.pod_uid, cr = %cr, mode = %mode, exp = %c.expiration, "issued");
+                tracing::info!(
+                    ns = %id.namespace,
+                    sa = %id.service_account,
+                    pod_uid = ?id.pod_uid,
+                    cr = %cr,
+                    mode = %mode,
+                    access = grant.access.as_str(),
+                    enforcement,
+                    on_behalf_of = ?on_behalf_of,
+                    exp = %c.expiration,
+                    "issued"
+                );
                 (StatusCode::OK, sts_success(&id, &cr, &session, &c, &self.cfg.audience))
             }
             Err(e) => {
@@ -425,7 +595,16 @@ impl Broker {
         if let Err(e) = self.node_authenticated(bearer).await {
             return (StatusCode::FORBIDDEN, e);
         }
-        tracing::info!(volume = %reg.volume_id, ns = %reg.namespace, sa = %reg.service_account, cr = %reg.cr, node = %reg.node, "registered");
+        tracing::info!(
+            volume = %reg.volume_id,
+            ns = %reg.namespace,
+            sa = %reg.service_account,
+            cr = %reg.cr,
+            node = %reg.node,
+            access = reg.access.as_str(),
+            on_behalf_of = ?reg.on_behalf_of,
+            "registered"
+        );
         self.registrations.lock().unwrap().insert(reg.volume_id.clone(), reg);
         (StatusCode::NO_CONTENT, String::new())
     }
@@ -445,11 +624,20 @@ impl Broker {
             "issued": self.issued.load(Ordering::Relaxed),
             "refused": self.refused.load(Ordering::Relaxed),
             "backend": match &self.cfg.backend { Backend::Static{..} => "static", Backend::Sts{..} => "sts", Backend::Rest{..} => "rest" },
+            // How a read-only pod is held to reads by THIS broker:
+            // `cooperative` means its key could write.
+            "readEnforcement": self.cfg.backend.read_enforcement(),
         })
     }
 
     /// Serve. Blocks.
     pub async fn serve(self: Arc<Self>) {
+        if self.cfg.backend.read_enforcement() == "cooperative" {
+            tracing::warn!(
+                "backend static has no read key (FLINT_S3B_STATIC_READ_*): a read-only pod gets the one key, \
+                 which can write — its mount and its syncer keep it read-only, the bucket does not"
+            );
+        }
         let b = self.clone();
         let assume = warp::post()
             .and(warp::path::end())
@@ -567,7 +755,23 @@ mod tests {
     }
 
     fn reg(nonce: &str) -> Registration {
-        Registration { volume_id: "v".into(), pod_uid: "p1".into(), namespace: "team-a".into(), pod: "agent".into(), service_account: "trainer".into(), cr: "datasets".into(), mode: "passthrough".into(), nonce: nonce.into(), node: "n".into() }
+        Registration {
+            volume_id: "v".into(),
+            pod_uid: "p1".into(),
+            namespace: "team-a".into(),
+            pod: "agent".into(),
+            service_account: "trainer".into(),
+            cr: "datasets".into(),
+            mode: "passthrough".into(),
+            nonce: nonce.into(),
+            node: "n".into(),
+            access: Access::ReadWrite,
+            on_behalf_of: None,
+        }
+    }
+
+    fn rw(list: &[&str]) -> MountConsumers {
+        MountConsumers { service_accounts: list.iter().map(|s| s.to_string()).collect(), ..Default::default() }
     }
 
     #[test]
@@ -581,9 +785,12 @@ mod tests {
 
     #[test]
     fn decide_refuses_each_break_in_the_chain_by_name() {
-        let allow = Consumers { service_accounts: vec!["trainer".into()] };
+        let allow = rw(&["trainer"]);
         let arn = creds::role_arn("passthrough", "datasets");
-        assert_eq!(decide(&id(), &arn, "n1", Some(&reg("n1")), true, Some(&allow)).unwrap(), ("passthrough".into(), "datasets".into()));
+        assert_eq!(
+            decide(&id(), &arn, "n1", Some(&reg("n1")), true, Some(&allow)).unwrap(),
+            Grant { mode: "passthrough".into(), cr: "datasets".into(), access: Access::ReadWrite }
+        );
         // No registration.
         assert!(decide(&id(), &arn, "n1", None, true, Some(&allow)).unwrap_err().contains("registration"));
         // Wrong pod.
@@ -594,7 +801,7 @@ mod tests {
         let arn_b = creds::role_arn("passthrough", "other");
         assert!(decide(&id(), &arn_b, "n1", Some(&reg("n1")), true, Some(&allow)).unwrap_err().contains("not passthrough/other"));
         // Not a consumer.
-        let deny = Consumers { service_accounts: vec!["bob".into()] };
+        let deny = rw(&["bob"]);
         assert!(decide(&id(), &arn, "n1", Some(&reg("n1")), true, Some(&deny)).unwrap_err().contains("spec.consumers"));
         // CR gone.
         assert!(decide(&id(), &arn, "n1", Some(&reg("n1")), true, None).unwrap_err().contains("does not exist"));
@@ -603,6 +810,162 @@ mod tests {
         // Rigs may waive registration; consumers still apply.
         assert!(decide(&id(), &arn, "", None, false, Some(&allow)).is_ok());
         assert!(decide(&id(), &arn, "", None, false, Some(&deny)).is_err());
+    }
+
+    #[test]
+    fn a_grant_is_the_registration_narrowed_by_the_cr_never_widened() {
+        let arn = creds::role_arn("lean", "datasets");
+        let mut r = reg("n1");
+        r.mode = "lean".into();
+        let ro = MountConsumers { read_only_service_accounts: vec!["trainer".into()], ..Default::default() };
+        let access = |reg: Option<&Registration>, required: bool, c: &MountConsumers| {
+            decide(&id(), &arn, "n1", reg, required, Some(c)).unwrap().access
+        };
+        // The plugin registered read-write; the CR says read-only: read.
+        assert_eq!(access(Some(&r), true, &ro), Access::Read);
+        // The plugin registered read (the pod's csi.readOnly); the CR would
+        // allow writing: still read.
+        r.access = Access::Read;
+        assert_eq!(access(Some(&r), true, &rw(&["trainer"])), Access::Read);
+        // Control: both read-write.
+        r.access = Access::ReadWrite;
+        assert_eq!(access(Some(&r), true, &rw(&["trainer"])), Access::ReadWrite);
+        // A rig without registration gets the CR's access for the SA.
+        assert_eq!(access(None, false, &ro), Access::Read);
+        assert_eq!(access(None, false, &rw(&["trainer"])), Access::ReadWrite);
+    }
+
+    #[test]
+    fn the_read_session_policy_reads_the_prefix_and_nothing_else() {
+        let got: serde_json::Value = serde_json::from_str(&read_session_policy("aws", "b", "/ws/proj1/")).unwrap();
+        let want = serde_json::json!({
+            "Version": "2012-10-17",
+            "Statement": [
+                { "Effect": "Allow",
+                  "Action": ["s3:GetObject", "s3:GetObjectVersion", "s3:GetObjectAttributes"],
+                  "Resource": "arn:aws:s3:::b/ws/proj1/*" },
+                { "Effect": "Allow",
+                  "Action": ["s3:ListBucket", "s3:ListBucketVersions"],
+                  "Resource": "arn:aws:s3:::b",
+                  "Condition": { "StringLike": { "s3:prefix": ["ws/proj1", "ws/proj1/*"] } } },
+            ],
+        });
+        assert_eq!(got, want);
+        // No action in it writes: a future edit that adds one fails here.
+        for st in got["Statement"].as_array().unwrap() {
+            for a in st["Action"].as_array().unwrap() {
+                let a = a.as_str().unwrap();
+                assert!(a.starts_with("s3:Get") || a.starts_with("s3:List"), "{a} is not a read");
+            }
+        }
+        // A workspace at the bucket root: every object, and no condition.
+        let root: serde_json::Value = serde_json::from_str(&read_session_policy("aws-us-gov", "b", "")).unwrap();
+        assert_eq!(root["Statement"][0]["Resource"], "arn:aws-us-gov:s3:::b/*");
+        assert!(root["Statement"][1].get("Condition").is_none());
+        // Written for the live check (s3csi/e2e/local/read-policy-minio.sh).
+        if let Ok(out) = std::env::var("FLINT_S3B_WRITE_READ_POLICY") {
+            let (bucket, prefix) = std::env::var("FLINT_S3B_READ_POLICY_TARGET")
+                .ok()
+                .and_then(|t| t.split_once('/').map(|(b, p)| (b.to_string(), p.to_string())))
+                .unwrap_or(("b".into(), "ws/proj1".into()));
+            std::fs::write(out, read_session_policy("aws", &bucket, &prefix)).unwrap();
+        }
+    }
+
+    #[test]
+    fn read_enforcement_names_how_each_backend_holds_a_reader() {
+        let keys = StaticKeys { access_key_id: "R".into(), secret_access_key: "r".into(), session_token: None };
+        let st = |read| Backend::Static { access_key_id: "W".into(), secret_access_key: "w".into(), session_token: None, read };
+        assert_eq!(st(None).read_enforcement(), "cooperative");
+        assert_eq!(st(Some(keys)).read_enforcement(), "readKey");
+        assert_eq!(Backend::Sts { url: "u".into(), role_arn: None }.read_enforcement(), "sessionPolicy");
+        assert_eq!(Backend::Rest { url: "u".into(), extra_headers: BTreeMap::new() }.read_enforcement(), "restDoor");
+    }
+
+    /// A broker over `backend`, for `mint`. Its kube client points at
+    /// nothing: `mint` never calls the apiserver.
+    fn broker(backend: Backend) -> Arc<Broker> {
+        let cfg = BrokerConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            tls_cert: None,
+            tls_key: None,
+            backend,
+            audience: DRIVER_NAME.into(),
+            node_principal: "system:serviceaccount:flint-system:node".into(),
+            max_lifetime_secs: 3600,
+            default_lifetime_secs: 900,
+            require_registration: true,
+            arn_partition: "aws".into(),
+        };
+        crate::install_crypto_provider();
+        let client = Client::try_from(kube::Config::new("http://127.0.0.1:9".parse().unwrap())).unwrap();
+        Broker::new(cfg, client)
+    }
+
+    fn target() -> Target {
+        Target { consumers: MountConsumers::default(), bucket: "b".into(), prefix: "ws/proj1".into() }
+    }
+
+    fn grant(access: Access) -> Grant {
+        Grant { mode: "lean".into(), cr: "proj1".into(), access }
+    }
+
+    /// One request at a time, captured, answered with `reply`.
+    async fn capture(reply: String) -> (String, Arc<Mutex<Vec<String>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        let route = warp::post().and(warp::body::bytes()).map(move |b: bytes::Bytes| {
+            s2.lock().unwrap().push(String::from_utf8_lossy(&b).into_owned());
+            reply.clone()
+        });
+        let (addr, server) = warp::serve(route).bind_ephemeral(([127, 0, 0, 1], 0));
+        tokio::spawn(server);
+        (format!("http://{addr}/"), seen)
+    }
+
+    #[tokio::test]
+    async fn sts_attaches_the_read_policy_to_a_read_grant_and_nothing_to_a_write_grant() {
+        let c = Creds { access_key_id: "AK".into(), secret_access_key: "SK".into(), session_token: Some("t".into()), expiration: "2026-09-02T00:15:00Z".into() };
+        let (url, seen) = capture(sts_success(&id(), "proj1", "n1", &c, DRIVER_NAME)).await;
+        let b = broker(Backend::Sts { url, role_arn: Some("arn:aws:iam::1:role/agents".into()) });
+        let form = |i: usize| -> HashMap<String, String> { serde_urlencoded::from_str(&seen.lock().unwrap()[i]).unwrap() };
+
+        assert_eq!(b.mint(&id(), &grant(Access::Read), &target(), Some("alice"), "tok", "n1", 900).await.unwrap(), c);
+        let f = form(0);
+        assert_eq!(f.get("Policy"), Some(&read_session_policy("aws", "b", "ws/proj1")), "{f:?}");
+        assert_eq!(f.get("RoleArn").map(String::as_str), Some("arn:aws:iam::1:role/agents"));
+
+        b.mint(&id(), &grant(Access::ReadWrite), &target(), None, "tok", "n1", 900).await.unwrap();
+        assert_eq!(form(1).get("Policy"), None, "a write grant keeps the role's own scope");
+    }
+
+    #[tokio::test]
+    async fn rest_tells_the_door_the_access_and_who_the_pod_acts_for() {
+        let (url, seen) = capture(r#"{"accessKeyId":"AK","secretAccessKey":"SK"}"#.into()).await;
+        let b = broker(Backend::Rest { url, extra_headers: BTreeMap::new() });
+        b.mint(&id(), &grant(Access::Read), &target(), Some("alice@example.com"), "tok", "n1", 900).await.unwrap();
+        b.mint(&id(), &grant(Access::ReadWrite), &target(), None, "tok", "n1", 900).await.unwrap();
+        let body = |i: usize| -> serde_json::Value { serde_json::from_str(&seen.lock().unwrap()[i]).unwrap() };
+        assert_eq!(body(0)["access"], "read");
+        assert_eq!(body(0)["onBehalfOf"], "alice@example.com");
+        assert_eq!(body(0)["cr"], "proj1");
+        assert_eq!(body(1)["access"], "readWrite");
+        assert!(body(1)["onBehalfOf"].is_null());
+    }
+
+    #[tokio::test]
+    async fn static_hands_a_read_grant_its_read_key_when_it_has_one() {
+        let read = StaticKeys { access_key_id: "READ".into(), secret_access_key: "r".into(), session_token: Some("rt".into()) };
+        let with = broker(Backend::Static { access_key_id: "WRITE".into(), secret_access_key: "w".into(), session_token: None, read: Some(read) });
+        let r = with.mint(&id(), &grant(Access::Read), &target(), None, "tok", "n1", 900).await.unwrap();
+        assert_eq!((r.access_key_id.as_str(), r.session_token.as_deref()), ("READ", Some("rt")));
+        let w = with.mint(&id(), &grant(Access::ReadWrite), &target(), None, "tok", "n1", 900).await.unwrap();
+        assert_eq!(w.access_key_id, "WRITE");
+        // Without one, the reader gets the one key (and the status says cooperative).
+        let without = broker(Backend::Static { access_key_id: "WRITE".into(), secret_access_key: "w".into(), session_token: None, read: None });
+        assert_eq!(without.mint(&id(), &grant(Access::Read), &target(), None, "tok", "n1", 900).await.unwrap().access_key_id, "WRITE");
+        assert_eq!(without.status()["readEnforcement"], "cooperative");
+        assert_eq!(with.status()["readEnforcement"], "readKey");
     }
 
     #[test]
@@ -634,6 +997,22 @@ mod tests {
             _ => panic!(),
         }
         assert!(c.require_registration);
+        assert_eq!(c.arn_partition, "aws");
+        // Static: a read key set is both halves or neither.
+        std::env::set_var("FLINT_S3B_BACKEND", "static");
+        std::env::set_var("FLINT_S3B_STATIC_ACCESS_KEY_ID", "W");
+        std::env::set_var("FLINT_S3B_STATIC_SECRET_ACCESS_KEY", "w");
+        assert!(matches!(BrokerConfig::from_env().unwrap().backend, Backend::Static { read: None, .. }));
+        std::env::set_var("FLINT_S3B_STATIC_READ_ACCESS_KEY_ID", "R");
+        assert!(BrokerConfig::from_env().unwrap_err().contains("together"));
+        std::env::set_var("FLINT_S3B_STATIC_READ_SECRET_ACCESS_KEY", "r");
+        match BrokerConfig::from_env().unwrap().backend {
+            Backend::Static { read: Some(k), .. } => assert_eq!(k.access_key_id, "R"),
+            other => panic!("{other:?}"),
+        }
+        for k in ["FLINT_S3B_STATIC_ACCESS_KEY_ID", "FLINT_S3B_STATIC_SECRET_ACCESS_KEY", "FLINT_S3B_STATIC_READ_ACCESS_KEY_ID", "FLINT_S3B_STATIC_READ_SECRET_ACCESS_KEY"] {
+            std::env::remove_var(k);
+        }
         std::env::set_var("FLINT_S3B_BACKEND", "bogus");
         assert!(BrokerConfig::from_env().unwrap_err().contains("bogus"));
         std::env::remove_var("FLINT_S3B_BACKEND");

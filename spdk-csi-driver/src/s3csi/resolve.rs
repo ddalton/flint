@@ -3,15 +3,16 @@
 //!
 //! The pod names a CR in ITS OWN namespace (kubelet-asserted, never the
 //! pod author's word). The CR is the policy object: bucket, prefix,
-//! endpoint, presentation defaults, and the `consumers` list of
-//! ServiceAccounts allowed to mount it. `consumers` absent ⇒ deny.
+//! endpoint, presentation defaults, and the `consumers` lists of
+//! ServiceAccounts allowed to mount it and at which access. `consumers`
+//! absent ⇒ deny.
 
 use kube::api::Api;
 use kube::Client;
 use serde_json::Value;
 
 use super::attrs::Selector;
-use super::policy::{Consumers, CredentialMode};
+use super::policy::{Access, CredentialMode, MountConsumers};
 use crate::lean_operator::crd::{FlintLeanWorkspace, FlintLeanWorkspaceSpec};
 use crate::passthrough::spec::MountSpec;
 
@@ -23,7 +24,7 @@ pub enum Resolved {
 
 #[derive(Debug, Clone)]
 pub struct Policy {
-    pub consumers: Consumers,
+    pub consumers: MountConsumers,
     pub credential_mode: CredentialMode,
 }
 
@@ -136,21 +137,31 @@ pub fn decide_lean(cr: Option<FlintLeanWorkspace>, ns: &str, name: &str) -> Resu
     Ok(Resolved::Lean { spec: cr.spec, phase })
 }
 
-/// The authorization step. Names the SA and the field in every refusal:
-/// this message is the tenant's `FailedMount` event.
-pub fn authorize(policy: &Policy, service_account: &str, ns: &str, kind: &str, name: &str) -> Result<(), Refusal> {
-    if policy.consumers.allows(service_account) {
-        return Ok(());
+/// The authorization step, and the access it grants: `read_only_requested`
+/// is the pod's `csi.readOnly`, which can narrow the grant and never widen
+/// it. Names the SA and the fields in every refusal: this message is the
+/// tenant's `FailedMount` event.
+pub fn authorize(
+    policy: &Policy,
+    service_account: &str,
+    read_only_requested: bool,
+    ns: &str,
+    kind: &str,
+    name: &str,
+) -> Result<Access, Refusal> {
+    if let Some(access) = policy.consumers.access(service_account, read_only_requested) {
+        return Ok(access);
     }
-    if policy.consumers.service_accounts.is_empty() {
+    if policy.consumers.is_empty() {
         return Err(Refusal::Forbidden(format!(
-            "{kind} {ns}/{name} has no spec.consumers.serviceAccounts — under the CSI delivery an absent \
-             list denies every pod, ServiceAccount {ns}/{service_account} included; list the ServiceAccounts \
-             that may mount it (\"*\" for any in the namespace)"
+            "{kind} {ns}/{name} has no spec.consumers.serviceAccounts or readOnlyServiceAccounts — under the \
+             CSI delivery an absent list denies every pod, ServiceAccount {ns}/{service_account} included; list \
+             the ServiceAccounts that may mount it (\"*\" for any in the namespace)"
         )));
     }
     Err(Refusal::Forbidden(format!(
-        "ServiceAccount {ns}/{service_account} is not in spec.consumers.serviceAccounts of {kind} {ns}/{name}"
+        "ServiceAccount {ns}/{service_account} is in neither spec.consumers.serviceAccounts nor \
+         spec.consumers.readOnlyServiceAccounts of {kind} {ns}/{name}"
     )))
 }
 
@@ -204,7 +215,7 @@ mod tests {
         let r = decide_passthrough(Some(pt(json!({ "bucket": "b" }))), "team-a", "d").unwrap();
         let p = r.policy().unwrap();
         assert_eq!(p.credential_mode, CredentialMode::Broker);
-        let e = authorize(&p, "alice", "team-a", "FlintPassthroughMount", "d").unwrap_err();
+        let e = authorize(&p, "alice", false, "team-a", "FlintPassthroughMount", "d").unwrap_err();
         assert!(matches!(e, Refusal::Forbidden(_)));
         assert!(e.message().contains("spec.consumers.serviceAccounts"), "{e:?}");
     }
@@ -219,9 +230,35 @@ mod tests {
         .unwrap();
         let p = r.policy().unwrap();
         assert_eq!(p.credential_mode, CredentialMode::Static);
-        authorize(&p, "alice", "team-a", "FlintPassthroughMount", "d").unwrap();
-        let e = authorize(&p, "bob", "team-a", "FlintPassthroughMount", "d").unwrap_err();
+        assert_eq!(authorize(&p, "alice", false, "team-a", "FlintPassthroughMount", "d").unwrap(), Access::ReadWrite);
+        assert_eq!(authorize(&p, "alice", true, "team-a", "FlintPassthroughMount", "d").unwrap(), Access::Read);
+        let e = authorize(&p, "bob", false, "team-a", "FlintPassthroughMount", "d").unwrap_err();
         assert!(e.message().contains("team-a/bob"), "{e:?}");
+        assert!(e.message().contains("readOnlyServiceAccounts"), "{e:?}");
+    }
+
+    #[test]
+    fn a_read_only_consumer_is_granted_read_whatever_the_pod_asks() {
+        let r = decide_passthrough(
+            Some(pt(json!({ "bucket": "b", "consumers": { "serviceAccounts": ["editor"], "readOnlyServiceAccounts": ["agent-ro"] } }))),
+            "team-a",
+            "d",
+        )
+        .unwrap();
+        let p = r.policy().unwrap();
+        assert_eq!(authorize(&p, "agent-ro", false, "team-a", "FlintPassthroughMount", "d").unwrap(), Access::Read);
+        assert_eq!(authorize(&p, "editor", false, "team-a", "FlintPassthroughMount", "d").unwrap(), Access::ReadWrite);
+        // Only the read-only list set: still not an "absent list" refusal.
+        let r = decide_passthrough(
+            Some(pt(json!({ "bucket": "b", "consumers": { "readOnlyServiceAccounts": ["agent-ro"] } }))),
+            "team-a",
+            "d",
+        )
+        .unwrap();
+        let p = r.policy().unwrap();
+        assert_eq!(authorize(&p, "agent-ro", false, "team-a", "FlintPassthroughMount", "d").unwrap(), Access::Read);
+        let e = authorize(&p, "editor", false, "team-a", "FlintPassthroughMount", "d").unwrap_err();
+        assert!(e.message().contains("neither"), "{e:?}");
     }
 
     #[test]

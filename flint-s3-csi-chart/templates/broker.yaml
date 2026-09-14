@@ -96,10 +96,25 @@ spec:
             - name: FLINT_S3B_STATIC_SESSION_TOKEN
               valueFrom:
                 secretKeyRef: { name: {{ .Values.broker.static.secretRef | quote }}, key: AWS_SESSION_TOKEN, optional: true }
+{{- if .Values.broker.static.readSecretRef }}
+            # Read-only pods get these instead (FLINT_S3B_STATIC_READ_*).
+            - name: FLINT_S3B_STATIC_READ_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.broker.static.readSecretRef | quote }}, key: AWS_ACCESS_KEY_ID }
+            - name: FLINT_S3B_STATIC_READ_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.broker.static.readSecretRef | quote }}, key: AWS_SECRET_ACCESS_KEY }
+            - name: FLINT_S3B_STATIC_READ_SESSION_TOKEN
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.broker.static.readSecretRef | quote }}, key: AWS_SESSION_TOKEN, optional: true }
+{{- end }}
 {{- else if eq .Values.broker.backend "sts" }}
             - { name: FLINT_S3B_STS_URL, value: {{ .Values.broker.sts.url | quote }} }
 {{- if .Values.broker.sts.roleArn }}
             - { name: FLINT_S3B_STS_ROLE_ARN, value: {{ .Values.broker.sts.roleArn | quote }} }
+{{- end }}
+{{- if .Values.broker.sts.arnPartition }}
+            - { name: FLINT_S3B_ARN_PARTITION, value: {{ .Values.broker.sts.arnPartition | quote }} }
 {{- end }}
 {{- else if eq .Values.broker.backend "rest" }}
             - { name: FLINT_S3B_REST_URL, value: {{ .Values.broker.rest.url | quote }} }

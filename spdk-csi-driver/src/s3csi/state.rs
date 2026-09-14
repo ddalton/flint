@@ -75,6 +75,10 @@ pub struct VolumeState {
     /// it from the CR.
     #[serde(default)]
     pub sync_env: Option<BTreeMap<String, String>>,
+    /// `chert.us/on-behalf-of` as the pod said it, kept so a
+    /// re-registration after a broker restart carries it again. Audit only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<String>,
 }
 
 /// The pod-bound ServiceAccount token kubelet delivered with the latest
@@ -218,6 +222,7 @@ mod tests {
             tree_image: None,
             drain_started_unix: None,
             sync_env: Some(BTreeMap::from([("FLINT_SYNC_ROOT".to_string(), "/workspace".to_string())])),
+            on_behalf_of: Some("alice@example.com".into()),
         };
         let d = volume_dir(root.path(), "csi-1");
         assert!(VolumeState::load(&d).unwrap().is_none());
@@ -284,6 +289,7 @@ mod tests {
             tree_image: None,
             drain_started_unix: None,
             sync_env: None,
+            on_behalf_of: None,
         };
         s.save(&dest).unwrap();
         assert!(VolumeState::list(root.path()).is_empty(), "a preserved tree must not be listed for adoption");

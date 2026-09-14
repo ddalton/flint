@@ -336,6 +336,15 @@ broker:
   #            to a real STS that trusts this cluster's issuer.
   #   rest   — POST the pod's token to your own credential service and
   #            expect JSON keys back.
+  #
+  # A read-only pod (an SA in a CR's consumers.readOnlyServiceAccounts,
+  # or a volume with csi.readOnly: true) gets a READ grant, held to reads
+  # by the bucket as far as the backend allows: sts attaches a session
+  # policy of reads on the CR's bucket and prefix; rest sends
+  # "access": "read" and your service scopes the keys; static hands out
+  # static.readSecretRef's keys, and without one hands out the one key
+  # and reports readEnforcement: cooperative on /v1/status — the pod's
+  # mount and syncer keep it read-only, the bucket does not.
   backend: static
 
   # backend: static. A Secret in the RELEASE namespace with keys
@@ -345,11 +354,17 @@ broker:
   # a broker with nothing to hand out is not a healthy idle.
   static:
     secretRef: ""
+    # Optional: a Secret (same key names) whose keys the store's own IAM
+    # limits to reads. Handed to read-only pods instead of secretRef's.
+    readSecretRef: ""
 
   # backend: sts.
   sts:
     url: ""            # FLINT_S3B_STS_URL, e.g. https://sts.amazonaws.com
     roleArn: ""        # FLINT_S3B_STS_ROLE_ARN, optional
+    # The ARN partition of a read-only pod's session policy
+    # (FLINT_S3B_ARN_PARTITION): aws (default), aws-cn, aws-us-gov.
+    arnPartition: ""
 
   # backend: rest.
   rest:

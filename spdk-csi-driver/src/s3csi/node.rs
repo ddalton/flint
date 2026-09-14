@@ -30,7 +30,7 @@ use crate::csi::volume_capability::AccessType;
 use super::attrs::{self, PublishRequest};
 use super::creds::{self, BrokerClient, Creds, ExchangeError, Materialized, Registration};
 use super::fuse::{self, Launch};
-use super::policy::CredentialMode;
+use super::policy::{Access, CredentialMode};
 use super::quota;
 use super::resolve::{self, Refusal, Resolved};
 use super::state::{self, TenantRef, VolumeState, STATE_VERSION};
@@ -320,14 +320,20 @@ impl S3Node {
             Resolved::Passthrough { .. } => "FlintPassthroughMount",
             Resolved::Lean { .. } => "FlintLeanWorkspace",
         };
-        resolve::authorize(&policy, &pr.service_account, &pr.pod_namespace, kind, pr.selector.name()).map_err(refusal_status)?;
+        // The access this pod gets: the CR's list for its SA, narrowed by
+        // the volume's `csi.readOnly` and never widened by it (per-user
+        // access design §4.1). Everything downstream — the bind, the
+        // mounter's flag, the syncer's mode, the broker's credential —
+        // follows this one value.
+        let access = resolve::authorize(&policy, &pr.service_account, req.readonly, &pr.pod_namespace, kind, pr.selector.name())
+            .map_err(refusal_status)?;
 
         match resolved {
             Resolved::Passthrough { spec } => {
-                self.publish_passthrough(&dir, &vid, &target, &pr, &tenant, spec, policy.credential_mode, &req).await
+                self.publish_passthrough(&dir, &vid, &target, &pr, &tenant, spec, policy.credential_mode, access, &req).await
             }
             Resolved::Lean { spec, .. } => {
-                self.publish_lean(&dir, &vid, &target, &pr, &tenant, spec, policy.credential_mode, &req).await
+                self.publish_lean(&dir, &vid, &target, &pr, &tenant, spec, policy.credential_mode, access, &req).await
             }
         }
     }
@@ -423,11 +429,14 @@ impl S3Node {
         tenant: &TenantRef,
         spec: crate::passthrough::spec::MountSpec,
         cred_mode: CredentialMode,
+        access: Access,
         req: &csi::NodePublishVolumeRequest,
     ) -> Result<(), Status> {
         let owner_uid = pr.uid.or(spec.uid.map(|u| u as u32)).unwrap_or(DEFAULT_OWNER);
         let owner_gid = pr.gid.or(spec.gid.map(|g| g as u32)).unwrap_or(owner_uid);
-        let read_only = req.readonly || spec.read_only;
+        // `access` already carries the pod's `csi.readOnly`; the CR's own
+        // `readOnly` narrows every consumer of this mount.
+        let read_only = access.is_read() || spec.read_only;
         let src = dir.join("src");
         let mut st = VolumeState {
             version: STATE_VERSION,
@@ -454,6 +463,7 @@ impl S3Node {
             tree_image: None,
             drain_started_unix: None,
             sync_env: None,
+            on_behalf_of: pr.on_behalf_of.clone(),
         };
         st.save(dir).map_err(|e| Status::internal(format!("state: {e}")))?;
 
@@ -862,6 +872,7 @@ impl S3Node {
         tenant: &TenantRef,
         spec: crate::lean_operator::crd::FlintLeanWorkspaceSpec,
         cred_mode: CredentialMode,
+        access: Access,
         req: &csi::NodePublishVolumeRequest,
     ) -> Result<(), Status> {
         let name = pr.selector.name().to_string();
@@ -905,15 +916,17 @@ impl S3Node {
             token_expiration: None,
             last_probe_ok: None,
             published_unix: None,
-            // The pod's `csi.readOnly` (per-user access design §4.1): the
-            // tenant bind below and the syncer's access both follow it.
-            read_only: req.readonly,
+            // The decided access (per-user access design §4.1): the tenant
+            // bind below, the syncer's mode and the broker's credential all
+            // follow it.
+            read_only: access.is_read(),
             owner_uid,
             owner_gid,
             grace_secs: Some(grace),
             tree_image: None,
             drain_started_unix: None,
             sync_env: None,
+            on_behalf_of: pr.on_behalf_of.clone(),
         };
         st.save(dir).map_err(|e| Status::internal(format!("state: {e}")))?;
 
@@ -1407,6 +1420,8 @@ impl S3Node {
             mode: st.mode.clone(),
             nonce: st.nonce.clone(),
             node: self.cfg.node_name.clone(),
+            access: registered_access(st),
+            on_behalf_of: st.on_behalf_of.clone(),
         }
     }
 }
@@ -1522,6 +1537,19 @@ pub enum PublishedAction {
     ResumeCheckout,
     /// An unfinished publish: clean up and start over.
     StartOver,
+}
+
+/// The access a publish registers at the broker, which narrows it again by
+/// the CR at every exchange. A read-only volume registers `read`, so its
+/// credential cannot write where the broker's backend can scope one:
+/// the mount's flag and the syncer's mode are the presentation, the
+/// credential is the enforcement (design D1).
+pub fn registered_access(st: &VolumeState) -> Access {
+    if st.read_only {
+        Access::Read
+    } else {
+        Access::ReadWrite
+    }
 }
 
 /// A lean volume published `readOnly` runs its syncer with read access
@@ -1702,6 +1730,34 @@ mod tests {
         // `access_parses_exactly_what_the_plugin_writes` pins the other end.
     }
 
+    #[test]
+    fn a_read_only_volume_registers_a_read_grant_on_the_wire() {
+        let mut v = st("lean", "published", None);
+        assert_eq!(registered_access(&v), Access::ReadWrite);
+        v.read_only = true;
+        assert_eq!(registered_access(&v), Access::Read);
+        // The wire spelling the broker's `Registration` parses. A plugin
+        // registering read-write for this volume would get a writer's key
+        // from any CR that lists the SA in `serviceAccounts`.
+        let reg = Registration {
+            volume_id: v.volume_id.clone(),
+            pod_uid: "u".into(),
+            namespace: "ns".into(),
+            pod: "p".into(),
+            service_account: "sa".into(),
+            cr: v.cr.clone(),
+            mode: v.mode.clone(),
+            nonce: v.nonce.clone(),
+            node: "n".into(),
+            access: registered_access(&v),
+            on_behalf_of: Some("alice".into()),
+        };
+        let wire = serde_json::to_value(&reg).unwrap();
+        assert_eq!(wire["access"], "read");
+        assert_eq!(wire["onBehalfOf"], "alice");
+        assert_eq!(serde_json::from_value::<Registration>(wire).unwrap(), reg);
+    }
+
     fn st(mode: &str, phase: &str, tree_image: Option<&str>) -> VolumeState {
         VolumeState {
             version: STATE_VERSION,
@@ -1728,6 +1784,7 @@ mod tests {
             tree_image: tree_image.map(|s| s.to_string()),
             drain_started_unix: None,
             sync_env: None,
+            on_behalf_of: None,
         }
     }
 

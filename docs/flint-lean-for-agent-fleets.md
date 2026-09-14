@@ -24,6 +24,22 @@
 > and the CR gains `spec.uid` (the uid the syncer runs as — the app's)
 > and `spec.consumers.serviceAccounts`. See
 > `docs/plans/csi-node-mount-design.md` §0 and §3.5.
+>
+> **Read-only agents.** An agent that should see the workspace and never
+> change it mounts read-only: its SA is listed in
+> `spec.consumers.readOnlyServiceAccounts` (read-only whatever the pod
+> asks), or its volume sets `readOnly: true`. Its tree is bound read-only
+> (a write fails with `EROFS`), its syncer follows every writer's
+> boundary and publishes nothing (`.flint/AGENTS.md`, "Read access"), and
+> `flint-s3-broker` issues it a credential that cannot write — a session
+> policy on `sts`, `"access": "read"` to a `rest` door, or
+> `broker.static.readSecretRef` on `static`. Without a read key a
+> `static` broker says `readEnforcement: cooperative` on `/v1/status`:
+> the mount and the syncer keep that pod read-only, the bucket does not.
+> One workspace carries read-write and read-only agents at once. Set
+> `chert.us/on-behalf-of: <user>` in `volumeAttributes` to name the
+> signed-in user on the broker's audit lines. See
+> `docs/plans/flint-lean-per-user-access-design.md` §10.
 
 Give every agent pod its own workspace: **plain local files** checked out
 of your S3 bucket at pod start, published back on a cadence — or when the
