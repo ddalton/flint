@@ -55,6 +55,7 @@ pub mod sentinel;
 pub mod state;
 pub mod sync;
 pub mod trace;
+pub mod untracked;
 pub mod uds;
 pub mod verbs;
 
@@ -405,6 +406,15 @@ pub struct LeanConfig {
     pub drill_hold_gc_secs: u64,
     /// The protocol event trace (`trace.rs`); `None` = off.
     pub event_trace: Option<trace::Sink>,
+    /// How often a WRITER sweeps for an upload a lost writer left at a
+    /// cited key (`untracked.rs`, finding 10), seconds;
+    /// `FLINT_SYNC_UNTRACKED_SWEEP_SECS`, 0 = off. Each sweep is one LIST of
+    /// the files prefix plus a manifest and an inbox read.
+    pub untracked_sweep_secs: u64,
+    /// How long such an object must have sat untracked before the sweep
+    /// tracks it — the gateway's `UNTRACKED_GRACE_SECS`, past any live
+    /// writer's claim and commit.
+    pub untracked_grace_secs: u64,
 }
 
 impl LeanConfig {
@@ -452,6 +462,8 @@ impl LeanConfig {
             drill_hold_commit_secs: 0,
             drill_hold_gc_secs: 0,
             event_trace: None,
+            untracked_sweep_secs: 3600,
+            untracked_grace_secs: inbox::UNTRACKED_GRACE_SECS,
         }
     }
 

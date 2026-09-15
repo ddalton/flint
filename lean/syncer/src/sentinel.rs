@@ -1023,6 +1023,9 @@ impl Syncer {
                 }
             };
         }
+        // Finding 10's sweep (`untracked.rs`), when due: before this tick's
+        // barrier, so the barrier consumes what it tracks.
+        self.sweep_untracked_if_due(now_unix()).await;
         // A publish sentinel honored on this tick already ran the fused
         // barrier the floor owed; running a second one would be pure
         // churn.

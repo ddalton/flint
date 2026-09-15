@@ -10640,27 +10640,14 @@ async fn the_event_trace_reconstructs_a_two_writer_interleaving() {
     );
 }
 
-/// CONVERGENCE under a killed writer. Uploads hold no lease, so a writer
-/// killed after an upload lands and before its commit leaves bytes at the
-/// key that no manifest cites and no inbox entry tracks. Nothing acked is
-/// lost (the killed writer's agent never got an ack), but the bucket and
-/// the live trees must not disagree about the path forever: a fresh
-/// checkout — a new agent, a replaced pod — reads what the KEY holds,
-/// while a live writer that never touches the path again keeps the
-/// cited version. The drill's O2 compares exactly these two.
-///
-/// FAILS today (2026-09-13, finding 10, OPEN): B's tree keeps `seed-1`,
-/// the manifest keeps citing `seed-1` whose bytes the key no longer holds,
-/// and a fresh checkout reads A's unpublished edit — for as long as no
-/// writer edits p1 again. Only a writer lost for good produces it: a
-/// container restart keeps the state directory, and the retry adopts its
-/// own upload by `flush_uuid`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "finding 10, open: a killed writer's uncited upload is never reconciled"]
-async fn a_writer_killed_after_its_upload_does_not_leave_the_trees_diverged() {
+/// A killed writer's fixture: A publishes p1 and p2, B checks out, A's agent
+/// edits both and A is killed after p1's upload lands and before p2's (and
+/// before any claim); B keeps publishing elsewhere. Returns the stores and
+/// B, whose tree still holds `seed-1` while the key holds A's edit.
+async fn killed_writer_orphan() -> (Arc<MemoryStore>, Syncer, tempfile::TempDir, tempfile::TempDir) {
     let inner = Arc::new(MemoryStore::new());
     let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
-    let (dir_a, dir_b, dir_c) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let mut a = hooked_syncer(&ha, dir_a.path());
     a.cfg.upload_fanout = 1; // p1 lands before p2's PUT, deterministically
     let mut b = syncer(&inner, dir_b.path()).await;
@@ -10670,8 +10657,6 @@ async fn a_writer_killed_after_its_upload_does_not_leave_the_trees_diverged() {
     a.run_barrier().await.unwrap();
     b.checkout().await.unwrap();
 
-    // A's agent edits both paths; A dies after p1's upload, before p2's
-    // and before any claim.
     write(dir_a.path(), "p1.txt", "A's unpublished edit");
     backdate_baseline(&a, "p1.txt");
     write(dir_a.path(), "p2.txt", "A's other edit");
@@ -10682,11 +10667,39 @@ async fn a_writer_killed_after_its_upload_does_not_leave_the_trees_diverged() {
     let (_, body) = inner.get_whole(&key1, None).await.unwrap();
     assert_eq!(&body[..], b"A's unpublished edit", "fixture: A's upload of p1 never landed");
 
-    // B keeps publishing; nobody touches p1 again.
     write(dir_b.path(), "b.txt", "B works elsewhere");
     for _ in 0..4 {
         b.run_barrier().await.unwrap();
     }
+    assert_eq!(read(dir_b.path(), "p1.txt").as_deref(), Some("seed-1"), "fixture: B already has A's edit");
+    (inner, b, dir_a, dir_b)
+}
+
+/// CONVERGENCE under a killed writer (finding 10). Uploads hold no lease,
+/// so a writer killed after an upload lands and before its commit leaves
+/// bytes at the key that no manifest cites and no inbox entry tracks.
+/// Nothing acked is lost (the killed writer's agent never got an ack), but
+/// the bucket and the live trees must not disagree about the path forever:
+/// a fresh checkout reads what the KEY holds, while a live writer that
+/// never touches the path again keeps the cited version. The drill's O2
+/// compares exactly these two.
+///
+/// Failed until 2026-09-15: B's tree kept `seed-1` and the manifest kept
+/// citing it for as long as no writer checked out again. The live writer's
+/// sweep (`untracked.rs`) now tracks the upload through the inbox, its
+/// consume adopts it and its commit cites it. Without the sweep's inbox
+/// append this fails exactly as it did.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_writer_killed_after_its_upload_does_not_leave_the_trees_diverged() {
+    let (inner, mut b, _dir_a, dir_b) = killed_writer_orphan().await;
+    let key1 = b.cfg.file_key("p1.txt");
+    let orphan = inner.head(&key1).await.unwrap().etag;
+
+    let tracked = b.track_untracked(now_unix() + b.cfg.untracked_grace_secs).await.unwrap();
+    assert_eq!(tracked, vec!["p1.txt".to_string()], "the sweep did not track the killed writer's upload");
+    b.run_barrier().await.unwrap();
+
+    let dir_c = tempfile::tempdir().unwrap();
     let mut c = syncer(&inner, dir_c.path()).await;
     c.checkout().await.unwrap();
     assert_eq!(
@@ -10694,6 +10707,36 @@ async fn a_writer_killed_after_its_upload_does_not_leave_the_trees_diverged() {
         read(dir_c.path(), "p1.txt"),
         "a live writer's tree and a fresh checkout disagree on a path whose key holds a killed writer's uncited upload"
     );
+    let m = manifest::load(inner.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries["p1.txt"].etag, orphan, "the manifest does not cite what the key holds");
+    let doc = inbox::load(inner.as_ref(), &b.cfg).await.unwrap().doc;
+    assert!(doc.entries.is_empty(), "the tracked entry outlived the commit that cited it: {:?}", doc.entries);
+}
+
+/// The sweep leaves an untracked object alone inside the grace — an upload
+/// whose writer may still be claiming — and runs from the floor only when
+/// due: a writer's first tick starts the clock, and a tick past the
+/// interval sweeps and consumes in the same barrier.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_floor_sweeps_for_untracked_uploads_only_past_the_grace_and_when_due() {
+    let (inner, mut b, _dir_a, dir_b) = killed_writer_orphan().await;
+    assert_eq!(b.track_untracked(now_unix()).await.unwrap(), Vec::<String>::new(), "tracked inside the grace");
+
+    b.cfg.untracked_grace_secs = 0;
+    b.cfg.untracked_sweep_secs = 3600;
+    b.floor_tick().await.unwrap();
+    assert_eq!(read(dir_b.path(), "p1.txt").as_deref(), Some("seed-1"), "the first tick swept instead of starting the clock");
+    assert!(b.state.load_untracked_sweep_at().unwrap() > 0, "the first tick did not start the clock");
+
+    b.state.save_untracked_sweep_at(now_unix() - 3601).unwrap();
+    b.floor_tick().await.unwrap();
+    assert_eq!(
+        read(dir_b.path(), "p1.txt").as_deref(),
+        Some("A's unpublished edit"),
+        "a due floor did not track and consume the killed writer's upload"
+    );
+    let m = manifest::load(inner.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries["p1.txt"].etag, inner.head(&b.cfg.file_key("p1.txt")).await.unwrap().etag);
 }
 
 // ---------------------------------------------------------------------

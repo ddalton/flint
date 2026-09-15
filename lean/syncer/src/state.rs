@@ -224,6 +224,8 @@ const SCOPE_INTENT: &str = "scope-intent.json";
 const INCARNATION: &str = "incarnation.json";
 const INTENT: &str = "intent.json";
 const FOREIGN_QUEUE: &str = "foreign-queue.json";
+/// When this writer last swept for untracked uploads (`untracked.rs`).
+const UNTRACKED_SWEEP: &str = "untracked-sweep";
 const CONFLICTS: &str = "conflicts.jsonl";
 /// The rotated generation. `load_conflicts` reads it FIRST, so the
 /// sequence a reader sees is unbroken across a rotation — which matters
@@ -472,6 +474,20 @@ impl SyncerState {
         j.installed_foreign.clear();
         self.save_intent(&j)?;
         Ok(n)
+    }
+
+    /// Unix seconds of this writer's last untracked-upload sweep; 0 when it
+    /// has never swept.
+    pub fn load_untracked_sweep_at(&self) -> LeanResult<u64> {
+        match fs::read_to_string(self.dir.join(UNTRACKED_SWEEP)) {
+            Ok(s) => Ok(s.trim().parse().unwrap_or(0)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn save_untracked_sweep_at(&self, at: u64) -> LeanResult<()> {
+        write_atomic(&self.dir.join(UNTRACKED_SWEEP), at.to_string().as_bytes())
     }
 
     pub fn load_intent(&self) -> LeanResult<IntentJournal> {

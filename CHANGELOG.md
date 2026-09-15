@@ -32,6 +32,29 @@ covered by the stability guarantee.
   - *Pinned by:* `a_ui_write_over_a_peers_delete_survives_the_queued_tombstone`,
     which fails on 1.54.0 with the write cited by nothing, in no inbox and
     in no tree.
+- **lean: a writer lost between an upload and its commit no longer leaves
+  the trees and the bucket disagreeing (finding 10).**
+  - *The problem:* the lost writer's bytes stayed at a cited key, cited by
+    nothing and tracked by nothing. A fresh checkout read them, while a
+    live writer that never touched the path again kept the cited version.
+    Only a new writer's checkout healed it.
+  - *The fix:* a writer now sweeps for such an object every
+    `FLINT_SYNC_UNTRACKED_SWEEP_SECS` (default 3600, 0 = off; one LIST of
+    the files prefix per sweep). An object untracked past the gateway's
+    600 s grace goes into the inbox, the way a UI write is tracked. The
+    next consume adopts it where the path is clean and preserves it beside
+    the agent's edit where it is not, and the next commit cites it.
+  - *Checked first in the formal model,* tracking at any time, even while
+    a live writer's upload is in flight: every invariant holds
+    (`LeanBarrierLeaseOrphanTracked`), and without the sweep a quiet
+    workspace keeps the bytes (`LeanBarrierLeaseOrphanDiverges`).
+  - *Pinned by:*
+    - `a_writer_killed_after_its_upload_does_not_leave_the_trees_diverged`,
+      no longer ignored;
+    - `the_floor_sweeps_for_untracked_uploads_only_past_the_grace_and_when_due`.
+
+    Removing the inbox append, the grace or the floor hook each fails one
+    of them.
 - **flint-lean chart: the install notes' example workspace could not be
   mounted.** It set `endpoint: http://s3-proxy…` and `credentialsSecretRef`,
   a field nothing reads under CSI delivery (it named the webhook-era

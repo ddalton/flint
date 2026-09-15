@@ -259,6 +259,8 @@ async fn main() {
     // Drill-only: opens the mid-commit window no drill can hit by timing.
     cfg.drill_hold_commit_secs = env_u64("FLINT_SYNC_DRILL_HOLD_COMMIT_SECS", 0);
     cfg.drill_hold_gc_secs = env_u64("FLINT_SYNC_DRILL_HOLD_GC_SECS", 0);
+    // Finding 10: how often a writer tracks a lost writer's uncited upload.
+    cfg.untracked_sweep_secs = env_u64("FLINT_SYNC_UNTRACKED_SWEEP_SECS", 3600);
     if matches!(std::env::var("FLINT_SYNC_EVENT_TRACE").as_deref(), Ok("1") | Ok("true")) {
         cfg.event_trace = Some(flint_lean::trace::Sink::Stderr);
     }
