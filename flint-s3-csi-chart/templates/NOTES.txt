@@ -132,8 +132,10 @@ last publish is still on that node:
 
   <kubelet-root>/plugins/{{ include "flint-s3-csi.driverName" . }}/undrained/<volume>-<unix>
 
-That directory holds an ext4 IMAGE, not a browsable tree, so recovering
-it means mounting it read-only:
+By default (workers.quota: false) that directory holds the tree itself,
+at <...>/undrained/<volume>-<unix>/tree. With workers.quota: true it holds
+an ext4 IMAGE, not a browsable tree, so recovering it means mounting it
+read-only:
 
   mount -o loop,ro <...>/undrained/<volume>-<unix>/tree.img /mnt/recover
 
@@ -143,9 +145,10 @@ that they accumulate until an operator reviews and deletes them, and a
 node whose root filesystem fills crosses kubelet's DiskPressure
 threshold, at which point kubelet evicts pods that have nothing to do
 with the workspace that was preserved. Size the node's root filesystem
-for the workspaces it may hold (each preserved tree costs the ext4
-metadata its sizeLimitGib implies — roughly 0.5 GiB for a 20 GiB
-workspace, whatever the tree actually contains), and sweep the directory
+for the workspaces it may hold (a preserved plain tree costs what it
+contains; with workers.quota: true each costs at least the ext4 metadata
+its sizeLimitGib implies — roughly 0.5 GiB for a 20 GiB workspace — plus
+every block ever written in it), and sweep the directory
 as part of routine operations.
 
 NODE SHUTDOWN, AND WHAT SURVIVES IT. A graceful shutdown drains: the

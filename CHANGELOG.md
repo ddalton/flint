@@ -111,6 +111,29 @@ covered by the stability guarantee.
   - A writer narrowed while running got a read key at its next refresh
     and published nothing more.
 
+### Changed
+
+- **s3-csi: a lean tree is a plain directory by default; `sizeLimitGib` is
+  enforced only with `workers.quota: true`.**
+  - **Why:** the loop-mounted ext4 image that enforced the ceiling costs
+    speed. On an i4i.large, n=5 (`docs/plans/flint-lean-loop-image-perf-2026-09-15.md`):
+    - buffered sequential writes: 0.57x a plain directory on local NVMe,
+      0.54x inside a tenant pod on the EBS root;
+    - 4 KiB writes with an fsync each (git's and databases' shape):
+      0.44–0.87x on every disk. Direct I/O on the loop device recovered the
+      buffered path but not this one.
+  - **And space:** the image never returned space the tenant freed. A
+    bench's write-and-delete cycles drove an 8 GiB root disk into
+    kubelet's eviction threshold.
+  - **The cost of the default:** nothing enforces the declared ceiling. A
+    runaway tree can fill the node's root disk, and kubelet's
+    ephemeral-storage accounting does not count it.
+  - **Opting back in:** the chart comment and the `sizeLimitGib` field say
+    all of this. `run-s3csi.sh setup` sets `workers.quota=true`, since its
+    S18 tests the ceiling.
+  - **Verified:** on EC2 the default published the tenant's tree as the
+    root XFS directory, and `workers.quota=true` still gives `/dev/loop0`.
+
 ### Fixed
 
 - **s3-csi: a read-only lean bind was read-write on the host.** The plugin

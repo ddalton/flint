@@ -22,6 +22,12 @@
 //! bargain `emptyDir` sizeLimit made. The ceiling bounds one tenant's
 //! blast radius; it is not a reservation.
 //!
+//! OFF by default (chart `workers.quota`, 2026-09-15): the image costs
+//! speed a plain directory does not — buffered writes 0.57x on local
+//! NVMe, fsync-each writes ~0.6x on any disk, two journals per fsync
+//! (docs/plans/flint-lean-loop-image-perf-2026-09-15.md). A node that runs
+//! with it off enforces `sizeLimitGib` with nothing.
+//!
 //! Everything here is Linux. The non-Linux build keeps the signatures so
 //! the crate's unit tests still run on macOS, and every call refuses.
 

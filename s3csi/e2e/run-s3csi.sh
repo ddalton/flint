@@ -233,7 +233,10 @@ if [ "${1:-}" = "setup" ]; then
         --set broker.backend=static --set broker.static.secretRef=s3-broker-static \
         --set node.credsLifetimeSecs="$CREDS_LIFETIME" --set broker.replicas=1 \
         --set node.region="$S3_REGION" \
+        --set workers.quota=true \
         --set node.logLevel=debug --set broker.logLevel=debug
+    # workers.quota=true: S18 tests the ceiling, which is off by default
+    # since 2026-09-15 (a plain directory is faster; the chart says why).
     $K -n $SYS rollout status ds/flint-s3-csi-node --timeout=180s
     $K -n $SYS rollout status deploy/flint-s3-broker --timeout=180s
     apply_fx tenants.yaml

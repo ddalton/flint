@@ -1,0 +1,46 @@
+ARM plain FLINT_S3CSI_QUOTA=false
+ARM plain host bind source: xfs /dev/nvme0n1p1
+{"layout":"plain","workload": "seqw_fsync", "rep": 1, "secs": 1.082, "mib_s": 236.5}
+{"layout":"plain","workload": "seqw_buf", "rep": 1, "secs": 0.033, "mib_s": 7834.6}
+{"layout":"plain","workload": "small", "rep": 1, "secs": 0.607, "files_s": 8240}
+{"layout":"plain","workload": "randw_sync", "rep": 1, "secs": 15.001, "ops_s": 548}
+{"layout":"plain","workload": "seqw_fsync", "rep": 2, "secs": 1.154, "mib_s": 221.8}
+{"layout":"plain","workload": "seqw_buf", "rep": 2, "secs": 0.035, "mib_s": 7218.6}
+{"layout":"plain","workload": "small", "rep": 2, "secs": 0.599, "files_s": 8344}
+{"layout":"plain","workload": "randw_sync", "rep": 2, "secs": 15.001, "ops_s": 544}
+{"layout":"plain","workload": "seqw_fsync", "rep": 3, "secs": 1.169, "mib_s": 218.9}
+{"layout":"plain","workload": "seqw_buf", "rep": 3, "secs": 0.033, "mib_s": 7721.9}
+{"layout":"plain","workload": "small", "rep": 3, "secs": 0.599, "files_s": 8341}
+{"layout":"plain","workload": "randw_sync", "rep": 3, "secs": 15.001, "ops_s": 543}
+{"layout":"plain","workload": "seqw_fsync", "rep": 4, "secs": 1.125, "mib_s": 227.6}
+{"layout":"plain","workload": "seqw_buf", "rep": 4, "secs": 0.032, "mib_s": 7898.4}
+{"layout":"plain","workload": "small", "rep": 4, "secs": 0.605, "files_s": 8261}
+{"layout":"plain","workload": "randw_sync", "rep": 4, "secs": 15.001, "ops_s": 545}
+{"layout":"plain","workload": "seqw_fsync", "rep": 5, "secs": 1.175, "mib_s": 217.8}
+{"layout":"plain","workload": "seqw_buf", "rep": 5, "secs": 0.033, "mib_s": 7731.5}
+{"layout":"plain","workload": "small", "rep": 5, "secs": 0.606, "files_s": 8257}
+{"layout":"plain","workload": "randw_sync", "rep": 5, "secs": 15.0, "ops_s": 546}
+ARM loop FLINT_S3CSI_QUOTA=true
+ARM loop host bind source: ext4 /dev/loop0
+{"layout":"loop","workload": "seqw_fsync", "rep": 1, "secs": 1.162, "mib_s": 220.2}
+{"layout":"loop","workload": "seqw_buf", "rep": 1, "secs": 0.06, "mib_s": 4264.6}
+{"layout":"loop","workload": "small", "rep": 1, "secs": 0.562, "files_s": 8892}
+{"layout":"loop","workload": "randw_sync", "rep": 1, "secs": 15.004, "ops_s": 265}
+{"layout":"loop","workload": "seqw_fsync", "rep": 2, "secs": 1.165, "mib_s": 219.7}
+{"layout":"loop","workload": "seqw_buf", "rep": 2, "secs": 0.062, "mib_s": 4148.4}
+{"layout":"loop","workload": "small", "rep": 2, "secs": 0.56, "files_s": 8924}
+{"layout":"loop","workload": "randw_sync", "rep": 2, "secs": 15.0, "ops_s": 419}
+{"layout":"loop","workload": "seqw_fsync", "rep": 3, "secs": 1.163, "mib_s": 220.0}
+{"layout":"loop","workload": "seqw_buf", "rep": 3, "secs": 0.07, "mib_s": 3637.2}
+{"layout":"loop","workload": "small", "rep": 3, "secs": 0.552, "files_s": 9059}
+{"layout":"loop","workload": "randw_sync", "rep": 3, "secs": 15.001, "ops_s": 474}
+{"layout":"loop","workload": "seqw_fsync", "rep": 4, "secs": 1.163, "mib_s": 220.1}
+{"layout":"loop","workload": "seqw_buf", "rep": 4, "secs": 0.063, "mib_s": 4069.4}
+{"layout":"loop","workload": "small", "rep": 4, "secs": 0.559, "files_s": 8937}
+{"layout":"loop","workload": "randw_sync", "rep": 4, "secs": 15.002, "ops_s": 474}
+{"layout":"loop","workload": "seqw_fsync", "rep": 5, "secs": 1.164, "mib_s": 220.0}
+{"layout":"loop","workload": "seqw_buf", "rep": 5, "secs": 0.061, "mib_s": 4192.2}
+{"layout":"loop","workload": "small", "rep": 5, "secs": 0.562, "files_s": 8905}
+command terminated with exit code 137
+DONE
+rc=0

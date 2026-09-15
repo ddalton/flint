@@ -234,24 +234,25 @@ workers:
   # It never blocks a shutdown: the hook exits 0 when the budget runs out.
   prestopSecs: 60
 
-  # Enforce a lean workspace's `sizeLimitGib` (FLINT_S3CSI_QUOTA). The
-  # tree is a plugin-owned directory on the NODE's root filesystem, so
-  # without this the CR's declared ceiling is enforced by nothing and one
-  # runaway agent can fill the disk the kubelet is running on. With it,
-  # the tree is a sparse ext4 image loop-mounted at that path and an
-  # overrun is ENOSPC in the tenant's own write.
+  # Enforce a lean workspace's `sizeLimitGib` (FLINT_S3CSI_QUOTA).
+  # OFF by default: the tree is a plain directory on the NODE's root
+  # filesystem, at native speed, and `sizeLimitGib` is enforced by
+  # nothing. A runaway agent can fill the disk the kubelet runs on, and
+  # kubelet's ephemeral-storage accounting does not count the tree (it is
+  # a hostPath in the worker, not an emptyDir).
   #
-  # Sparse: the image costs what is written, not what is declared, so the
-  # ceilings on a node may sum to more than the node's disk — the same
-  # bargain emptyDir sizeLimit made. It bounds one tenant's blast radius;
-  # it is not a reservation.
-  #
-  # false ⇒ back to a plain directory and an unenforced field. A
-  # workspace that genuinely wants no ceiling should set sizeLimitGib: 0
-  # on its own CR instead, which is per-workspace and visible in the CR.
-  # Needs mkfs.ext4 and loop devices on the node; a workspace whose
-  # ceiling cannot be built is REFUSED rather than published unbounded.
-  quota: true
+  # true ⇒ the tree is a sparse ext4 image loop-mounted at that path, and
+  # an overrun is ENOSPC in the tenant's own write. It costs speed
+  # (docs/plans/flint-lean-loop-image-perf-2026-09-15.md, i4i.large, n=5):
+  # buffered sequential writes 0.57x a plain directory on local NVMe
+  # (0.90x on an EBS root), small files 0.84x, and 4 KiB writes with an
+  # fsync each 0.58-0.60x on both, which is how git and databases write.
+  # Reads are unaffected. The image is sparse, so the ceilings on a node
+  # may sum to more than its disk; it bounds one tenant's blast radius
+  # and is not a reservation. Needs mkfs.ext4 and loop devices on the
+  # node; with it on, a workspace whose ceiling cannot be built is REFUSED
+  # rather than published unbounded.
+  quota: false
   priorityClass:
     create: true
     name: flint-s3-worker

@@ -294,7 +294,12 @@ spec:
                 description: |-
                   Ceiling on the workspace tree, GiB. 0 = no limit.
 
-                  Under the CSI delivery this is a sparse ext4 image loop-mounted
+                  ENFORCED ONLY on a node whose s3.csi.chert.us plugin runs with
+                  `workers.quota: true`, which is OFF by default: the image the
+                  ceiling needs costs write speed (0.57x buffered, ~0.6x
+                  fsync-each, measured on EC2), so by default the tree is a plain
+                  directory and this field is advisory. With the quota on, this is
+                  a sparse ext4 image loop-mounted
                   at the tree, so an overrun is ENOSPC in the app's own write; it
                   was an emptyDir sizeLimit under the sidecar-injection webhook flint
                   used before v1.45.0, which is where the

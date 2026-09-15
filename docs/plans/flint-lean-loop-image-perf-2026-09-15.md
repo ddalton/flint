@@ -1,12 +1,14 @@
 # flint-lean — what the loop-mounted tree image costs, measured on EC2
 
-Date: 2026-09-15. Status: **MEASURED, decision open.** Nothing in the
-product is changed by this document.
+Date: 2026-09-15. Status: **DECIDED: a plain directory by default** (the
+user chose option a; chart `workers.quota: false`, plugin default off,
+`sizeLimitGib` advisory unless a node turns the quota on). §As deployed has
+the check on the built image.
 
 ## The question
 
 A lean workspace under the CSI driver keeps its tree on the node's root
-filesystem. With the chart's default `node.quota: true` the tree is a
+filesystem. With the chart's default `workers.quota: true` the tree is a
 sparse ext4 image loop-mounted at that path (`s3csi/quota.rs`), so a
 workspace's `sizeLimitGib` (default 20) is an `ENOSPC` in the tenant's own
 write. The loop device is set up by `mount -o loop,noatime`, which leaves
@@ -91,7 +93,7 @@ plain directory is at native speed for every shape.
 
 | | speed | a runaway tree | notes |
 |---|---|---|---|
-| **a. plain directory** (`node.quota: false` by default, or `sizeLimitGib: 0`) | native, all shapes | fills the node's root disk; `sizeLimitGib` enforced by nothing | kubelet's ephemeral-storage limit does NOT count the tree (a hostPath; measured 2026-09-13), and an emptyDir tree is deleted at the worker's termination under a live bind |
+| **a. plain directory** (`workers.quota: false` by default, or `sizeLimitGib: 0`) | native, all shapes | fills the node's root disk; `sizeLimitGib` enforced by nothing | kubelet's ephemeral-storage limit does NOT count the tree (a hostPath; measured 2026-09-13), and an emptyDir tree is deleted at the worker's termination under a live bind |
 | **b. plain directory + filesystem project quota** | native, all shapes | `EDQUOT` at the ceiling | needs the node filesystem mounted with project quotas; AL2023's root XFS is not by default (`rootflags=prjquota`), so a node-image change; not measured here |
 | **c. keep the image, turn direct I/O on** | ~native buffered and small files; fsync-heavy ~0.45–0.57x | `ENOSPC`, as today | one `losetup --direct-io=on` in quota.rs; preserved undrained trees unchanged |
 | d. today | 0.57x buffered (NVMe), 0.58–0.60x fsync-heavy | `ENOSPC` | |
@@ -100,3 +102,55 @@ The choice is between the ceiling and the fsync shape; this measurement cannot
 make it. If agents mostly build, edit and publish files, c recovers most of
 the loss at no risk. If they run git or databases in the tree, only a or b is
 at native speed, and a gives up the ceiling.
+
+## As deployed, with the plain-directory default built (image `tree-plain`)
+
+`lean/e2e/perf/tree-layout-drill.sh` installs the chart twice on the same
+node: at its new default, and with `workers.quota=true`. It checks the host's
+mount table for the tenant's volume, then runs `tree-bench-pod.py` inside a
+restricted tenant pod (python:3.12-alpine, uid 1001), through the CSI bind
+and the runtime's mount. Output: `results-tree-layout-drill-acc-aws-2.out`.
+
+- **The default is a plain directory:** the host bind's source was
+  `xfs /dev/nvme0n1p1` (the root disk); with the quota on it was
+  `ext4 /dev/loop0`. The workspace checked out and the pod started in both arms (the bench does not publish; its `floorSecs` is an hour).
+
+| workload (in the pod, root EBS) | plain (default) | loop (`workers.quota=true`) | loop/plain |
+|---|---|---|---|
+| sequential write, buffered (MiB/s) | 7,732 (7,219–7,898) | 4,148 (3,637–4,265) | **0.54** |
+| sequential write + fsync (MiB/s) | 222 (218–237) | 220 (220–220) | 0.99 (EBS-capped) |
+| small files, tmp+rename, one sync (files/s) | 8,261 (8,240–8,344) | 8,924 (8,892–9,059) | **1.08** |
+| 4 KiB writes, fsync each (ops/s) | 545 (543–548) | 447 (265–474, n=4) | 0.82 |
+
+The buffered path is the double page cache again, now at 256 MiB, which fits
+in memory: 0.54x. Three things do not match the node-level run, and are
+recorded rather than explained away:
+
+- **Small files were 8% FASTER through the loop in the pod** (ranges do not
+  overlap), against 0.84x at node level. The plain arm dropped more between
+  node and pod (11,390 → 8,261) than the loop arm (9,560 → 8,924). One
+  hypothesis, not tested: the loop device's backing-file writes are done by
+  a kernel thread outside the pod's cgroup, so the pod's own writeback
+  accounting sees less of them.
+- **fsync-each writes through a loop ramp up; a plain directory is flat.** Per
+  rep: node loop 267, 266, 329, 328, 329; node loopdio 221, 224, 246, 262,
+  269; pod loop 265, 419, 474, 474; plain 557–564 and 543–548 throughout. The
+  ratio against plain is ~0.47x on a fresh image and 0.58–0.87x later. It is
+  not lazy inode-table init: an idle fresh image on the root XFS added no root-disk
+  writes over 5 minutes, and its ext4 wrote nothing. A plausible cause, not
+  tested: the first write to each region of the sparse backing file is also
+  an XFS allocation. The node-level "settled" check watched allocated size
+  and would not have seen either.
+- **The loop arm's last rep was evicted:** the node crossed kubelet's
+  ephemeral-storage threshold (835 MiB free against 1.28 GiB) and evicted the
+  bench pod, then the broker. The image is sparse, but **a block written
+  inside it stays allocated in the backing file after the tenant deletes the
+  file**: nothing discards it. Ten 256 MiB write-and-delete cycles held
+  their high-water mark on an 8 GiB root disk. "The image costs what is
+  written" means what was ever written, not what is there now. This is a
+  second reason, beside speed, not to default to the image on small root disks.
+
+An NVMe lazy-init probe in between was void: the NVMe's own ext4 had just
+been formatted, and its initialization wrote 7 GiB in 75 s under the
+measurement.
+

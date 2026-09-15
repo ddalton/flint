@@ -66,10 +66,12 @@ pub struct Config {
     /// PodDisruptionBudget for workers.
     pub prestop_secs: Option<i64>,
     /// Enforce `sizeLimitGib` on a lean tree with a loop-mounted image
-    /// (FLINT_S3CSI_QUOTA, default on). Off ⇒ the tree is a plain
-    /// directory on the node's root filesystem and the CR's declared
-    /// ceiling is not enforced by anything — which is what shipped
-    /// before this, and why S18 exists.
+    /// (FLINT_S3CSI_QUOTA, default OFF). Off ⇒ the tree is a plain
+    /// directory on the node's root filesystem, at native speed, and the
+    /// CR's declared ceiling is enforced by nothing. On costs speed:
+    /// buffered writes 0.57x and fsync-each writes ~0.6x a plain
+    /// directory, measured on EC2
+    /// (docs/plans/flint-lean-loop-image-perf-2026-09-15.md).
     pub quota: bool,
     pub broker: Option<BrokerClient>,
     /// Lifetime asked of the broker per exchange.
@@ -115,7 +117,7 @@ impl Config {
             worker_resources,
             priority_class: opt("FLINT_S3CSI_WORKER_PRIORITY_CLASS"),
             prestop_secs: opt("FLINT_S3CSI_PRESTOP_SECS").and_then(|v| v.parse().ok()),
-            quota: opt("FLINT_S3CSI_QUOTA").map(|v| v != "false").unwrap_or(true),
+            quota: opt("FLINT_S3CSI_QUOTA").map(|v| v == "true").unwrap_or(false),
             broker: BrokerClient::from_env()?,
             creds_lifetime_secs: opt("FLINT_S3CSI_CREDS_LIFETIME_SECS").and_then(|v| v.parse().ok()).unwrap_or(900),
             region: opt("FLINT_S3CSI_REGION").unwrap_or_else(|| "us-east-1".into()),
@@ -963,7 +965,7 @@ impl S3Node {
                                 "FlintLeanWorkspace {}/{name} asks for sizeLimitGib {quota_gib} and the ceiling could \
                                  not be built: {e}. Publishing without it would hand the workspace the node's whole \
                                  root filesystem. Set sizeLimitGib: 0 to accept an unbounded tree, or install the \
-                                 chart with workers.quota=false",
+                                 chart with workers.quota=false (its default)",
                                 pr.pod_namespace
                             )),
                         )
