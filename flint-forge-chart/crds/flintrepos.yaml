@@ -305,6 +305,46 @@ spec:
                 description: '`RUST_LOG` for the server pod.'
                 nullable: true
                 type: string
+              packs:
+                description: |-
+                  PACK RESIDUE (`docs/plans/forge-pack-pinning-2026-09-08.md`).
+                  BOTH DEFAULT ON since 2026-09-09, after both were drilled on a
+                  cluster against a control. Set the block only to turn one OFF —
+                  an absent block means "take the syncer's defaults", and both
+                  values are rendered explicitly when it is present, so `false`
+                  really does disable rather than falling back to the default.
+                  Neither changes the bucket format, so a repository can be moved
+                  between them freely.
+
+                  `nameAcceptedSet` is the REDUCER: name the packs of pushes
+                  something was accepted from, rather than whatever is in
+                  `objects/pack`. git migrates a push's pack when `pre-receive`
+                  passes, before forge's verdict at `proc-receive`, so the
+                  directory also holds the packs of pushes forge REFUSED — and
+                  strict coverage supersede then pins them forever.
+
+                  `reclaimAtRest` is the COLLECTOR: at restore, before the
+                  repository serves, drop and UNLINK any named pack whose every
+                  reachable object another kept pack already holds. It builds
+                  nothing and uploads nothing. The placement is load-bearing —
+                  the same rule outside that window loses acked pushes — which is
+                  why the syncer takes an `AtRest` witness rather than a comment.
+                nullable: true
+                properties:
+                  nameAcceptedSet:
+                    default: true
+                    description: |-
+                      Direction 5, the reducer. `#[serde(default)]` makes an OMITTED
+                      key false WITHIN a block that is present — so writing the block
+                      at all opts out of anything not named in it. That is deliberate:
+                      a block is an explicit statement, and absence of the block is
+                      how a repository says "the defaults".
+                    type: boolean
+                  reclaimAtRest:
+                    default: true
+                    description: Direction 4, the collector.
+                    type: boolean
+                type: object
               projectId:
                 description: |-
                   The durable, user-declared identity the claim cell carries —

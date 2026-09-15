@@ -219,6 +219,10 @@ impl Backend {
 /// with a too-wide role still hands a reader keys that cannot write, and
 /// cannot read another prefix. A read-write grant carries no session policy:
 /// its scope is the role's, as before this field existed.
+///
+/// No `s3:GetObjectAttributes`: nothing flint runs calls it, and Ceph RGW
+/// Squid's policy parser does not know the action, so a policy naming it is
+/// refused whole (`ERR_MALFORMED_DOC`) and every read grant with it.
 pub fn read_session_policy(partition: &str, bucket: &str, prefix: &str) -> String {
     let prefix = prefix.trim_matches('/');
     let objects = if prefix.is_empty() {
@@ -239,7 +243,7 @@ pub fn read_session_policy(partition: &str, bucket: &str, prefix: &str) -> Strin
         "Statement": [
             {
                 "Effect": "Allow",
-                "Action": ["s3:GetObject", "s3:GetObjectVersion", "s3:GetObjectAttributes"],
+                "Action": ["s3:GetObject", "s3:GetObjectVersion"],
                 "Resource": objects,
             },
             list,
@@ -884,7 +888,7 @@ mod tests {
             "Version": "2012-10-17",
             "Statement": [
                 { "Effect": "Allow",
-                  "Action": ["s3:GetObject", "s3:GetObjectVersion", "s3:GetObjectAttributes"],
+                  "Action": ["s3:GetObject", "s3:GetObjectVersion"],
                   "Resource": "arn:aws:s3:::b/ws/proj1/*" },
                 { "Effect": "Allow",
                   "Action": ["s3:ListBucket", "s3:ListBucketVersions"],
@@ -898,6 +902,7 @@ mod tests {
             for a in st["Action"].as_array().unwrap() {
                 let a = a.as_str().unwrap();
                 assert!(a.starts_with("s3:Get") || a.starts_with("s3:List"), "{a} is not a read");
+                assert_ne!(a, "s3:GetObjectAttributes", "RGW Squid refuses a policy naming it, and with it every read grant");
             }
         }
         // A workspace at the bucket root: every object, and no condition.

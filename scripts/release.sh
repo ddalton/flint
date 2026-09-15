@@ -176,6 +176,25 @@ tag_digest() {  # <name> <tag> -> the manifest-list digest, or empty
         | python3 -c 'import json,sys; print(json.load(sys.stdin).get("digest") or "")' 2>/dev/null
 }
 
+# A chart's checked-in CRD is install-time bootstrap for its operator's
+# compiled-in copy; if they disagree, the chart installs a schema the
+# operator replaces at startup (or, with manageCrd: false, one that silently
+# prunes fields). A crdgen that FAILS refuses too: lean's check used to
+# swallow the failure and skip, and forge had no check at all, so its CRD
+# shipped without spec.packs from 1.48.0 on.
+refuse_stale_crd() {  # <chart> <version> <crdgen arg> <crd file>
+    local gen
+    if ! gen=$(cd "$repo_root/spdk-csi-driver" && cargo run --quiet --bin crdgen -- "$3"); then
+        echo "REFUSING to push $1 $2: crdgen $3 failed, so $4 cannot be checked." >&2
+        exit 1
+    fi
+    if [ -z "$gen" ] || [ ! -f "$4" ] || ! printf '%s\n' "$gen" | diff -q - "$4" >/dev/null; then
+        echo "REFUSING to push $1 $2: $4 is missing or stale — regenerate with:" \
+             "cargo run --bin crdgen -- $3 > $4" >&2
+        exit 1
+    fi
+}
+
 # --- check ------------------------------------------------------------------
 echo "chart $chart_version (appVersion $app_version) references:"
 missing_table=""
@@ -270,17 +289,7 @@ EOF
                 exit 1
             fi
         done
-        # The checked-in CRD is install-time bootstrap for the operator's
-        # own compiled-in copy; if they disagree, the chart would install
-        # a schema the operator immediately replaces (or, with
-        # manageCrd: false, one that silently prunes fields).
-        gen=$(cd "$repo_root/spdk-csi-driver" && cargo run --quiet --bin crdgen)
-        if ! printf '%s\n' "$gen" | diff -q - "$op_dir/crds/flintshares.yaml" >/dev/null; then
-            echo "REFUSING to push flint-lite-operator $op_version: crds/flintshares.yaml" \
-                 "is stale — regenerate with: cargo run --bin crdgen >" \
-                 "flint-lite-operator-chart/crds/flintshares.yaml" >&2
-            exit 1
-        fi
+        refuse_stale_crd flint-lite-operator "$op_version" share "$op_dir/crds/flintshares.yaml"
         helm package "$op_dir" --destination "$pkg_dir" >/dev/null
         op_pkg="$pkg_dir/flint-lite-operator-$op_version.tgz"
         push_chart "all" flint-lite-operator "$op_version" "$op_pkg"
@@ -395,6 +404,8 @@ EOF
             fi
         fi
 
+        refuse_stale_crd flint-forge "$forge_version" forge "$forge_dir/crds/flintrepos.yaml"
+
         helm package "$forge_dir" --destination "$pkg_dir" >/dev/null
         forge_pkg="$pkg_dir/flint-forge-$forge_version.tgz"
         push_chart "all forge" flint-forge "$forge_version" "$forge_pkg"
@@ -472,16 +483,7 @@ EOF
                  "and would fail every HTTPS S3 endpoint." >&2
             exit 1
         fi
-        # The checked-in CRD is install-time bootstrap for the operator's
-        # compiled-in copy — same rule as flintshares.yaml above.
-        lean_gen=$(cd "$repo_root/spdk-csi-driver" && cargo run --quiet --bin crdgen -- lean 2>/dev/null || true)
-        if [ -n "$lean_gen" ] && [ -f "$lean_dir/crds/flintleanworkspaces.yaml" ]; then
-            if ! printf '%s\n' "$lean_gen" | diff -q - "$lean_dir/crds/flintleanworkspaces.yaml" >/dev/null; then
-                echo "REFUSING to push flint-lean $lean_version:" \
-                     "crds/flintleanworkspaces.yaml is stale." >&2
-                exit 1
-            fi
-        fi
+        refuse_stale_crd flint-lean "$lean_version" lean "$lean_dir/crds/flintleanworkspaces.yaml"
         helm package "$lean_dir" --destination "$pkg_dir" >/dev/null
         lean_pkg="$pkg_dir/flint-lean-$lean_version.tgz"
         push_chart "all lean" flint-lean "$lean_version" "$lean_pkg"

@@ -50,7 +50,7 @@ up)
     for u in "$RW" "$RO" "$STS"; do aws_ iam create-user --user-name "$u" >/dev/null; done
     aws_ iam put-user-policy --user-name "$RW" --policy-name bucket-rw --policy-document "$(bucket_policy '["s3:*"]')"
     aws_ iam put-user-policy --user-name "$RO" --policy-name bucket-ro \
-        --policy-document "$(bucket_policy '["s3:GetObject","s3:GetObjectVersion","s3:GetObjectAttributes","s3:ListBucket","s3:ListBucketVersions"]')"
+        --policy-document "$(bucket_policy '["s3:GetObject","s3:GetObjectVersion","s3:ListBucket","s3:ListBucketVersions"]')"
     trust=$(printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::%s:user/%s"},"Action":"sts:AssumeRole"}]}' "$acct" "$STS")
     # The trust names a user created a moment ago; IAM can refuse it as an
     # invalid principal until the user has propagated.

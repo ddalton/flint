@@ -50,8 +50,8 @@ covered by the stability guarantee.
   CR's own `readOnly` narrows it too). The broker narrows the
   registration by the CR again at every exchange and mints a read grant
   as a credential that cannot write, where the backend can express one:
-  `sts` attaches a session policy of `GetObject`/`GetObjectVersion`/
-  `GetObjectAttributes` on the CR's prefix and `ListBucket`/
+  `sts` attaches a session policy of `GetObject`/`GetObjectVersion` on the
+  CR's prefix and `ListBucket`/
   `ListBucketVersions` conditioned on it (a session policy only narrows the
   role); `rest` sends `"access"` and `"onBehalfOf"` and the door scopes;
   `static` hands out `broker.static.readSecretRef`'s keys, and without
@@ -136,6 +136,19 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **flint-forge chart: the checked-in `FlintRepo` CRD lacked `spec.packs`**
+  since 1.48.0 (`baf11c7b`). The operator applies its compiled-in CRD at
+  start, so only a fresh install was affected, until the operator came up.
+  Regenerated with `crdgen forge`. `scripts/release.sh` never compared
+  forge's CRD, and its lean comparison skipped silently when `crdgen`
+  failed; one check now covers the share, lean and forge CRDs and refuses
+  on a stale or missing file and on a `crdgen` failure (each case run).
+- **s3-csi broker: a read grant's session policy named
+  `s3:GetObjectAttributes`**, which nothing flint runs calls and which Ceph
+  RGW Squid's policy parser does not know; RGW refuses a policy with an
+  unknown action whole, so every `sts` read grant would have been refused
+  there (read from RGW's source, not run). The policy is now `GetObject`,
+  `GetObjectVersion`, `ListBucket` and `ListBucketVersions`.
 - **s3-csi: a read-only lean bind was read-write on the host.** The plugin
   bound the tree into the tenant's target and then remounted the target
   read-only. The plugin's `/var/lib/kubelet` is a Bidirectional mount, and

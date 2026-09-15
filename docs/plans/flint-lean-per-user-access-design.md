@@ -786,8 +786,10 @@ uploads, so the no-write property is not resting on the guard alone.
   access narrowed by the CR's lists. A rig without registration gets the
   CR's access for the SA.
 - `sts`: a read grant carries `Policy` = `read_session_policy(partition,
-  bucket, prefix)` — `s3:GetObject`, `s3:GetObjectVersion`,
-  `s3:GetObjectAttributes` on `<bucket>/<prefix>/*`, and `s3:ListBucket`,
+  bucket, prefix)` — `s3:GetObject`, `s3:GetObjectVersion` on
+  `<bucket>/<prefix>/*` (no `s3:GetObjectAttributes`, which §4.3 had:
+  nothing calls it, and Ceph RGW Squid refuses a policy naming it, found
+  2026-09-14 reading RGW's parser), and `s3:ListBucket`,
   `s3:ListBucketVersions` on the bucket conditioned `StringLike s3:prefix
   [<prefix>, <prefix>/*]` (no condition for a root workspace). mount-s3's
   configuration guide says the same for a prefix mount: object actions
@@ -871,11 +873,13 @@ uploads, so the no-write property is not resting on the guard alone.
   RGW's evaluation of the policy; mount-s3 under a read grant; the
   `on-behalf-of` attribute through kubelet. All phase F.
 
-**Found on the way, not changed:** `flint-forge-chart/crds/flintrepos.yaml`
-is stale at HEAD — `crdgen forge` emits a `spec.packs` block (commit
-`40ecd7ed`) the checked-in copy lacks. The forge operator applies its
-compiled-in CRD at start, so only a fresh `helm install` is affected;
-`release.sh check` compares the lean CRD only.
+**Found on the way, fixed 2026-09-14:** `flint-forge-chart/crds/flintrepos.yaml`
+was stale — `crdgen forge` emits a `spec.packs` block (commit `baf11c7b`,
+v1.48.0) the checked-in copy lacked. The forge operator applies its
+compiled-in CRD at start, so only a fresh `helm install` was affected.
+`release.sh chart` checked the share CRD and (skipping silently when crdgen
+failed) the lean one, never forge's; one `refuse_stale_crd` now checks all
+three and refuses on a crdgen failure.
 
 ### 10.6 Phase F: the live drill on EC2 (2026-09-14/15)
 
