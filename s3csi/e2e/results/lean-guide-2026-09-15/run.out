@@ -1,0 +1,472 @@
+Not sure what to do next? 😅  Check out https://kind.sigs.k8s.io/docs/user/quick-start/
+Server Version: version.Info{Major:"1", Minor:"36", GitVersion:"v1.36.1", GitCommit:"756939600b9a7180fc2df6550a4585b638875e67", GitTreeState:"clean", BuildDate:"2026-05-12T09:51:34Z", GoVersion:"go1.26.2", Compiler:"gc", Platform:"linux/arm64"}
+stand-in bucket ready
+
+$ kubectl -n flint-system create secret generic s3 --from-literal=AWS_ACCESS_KEY_ID=guidekey --from-literal=AWS_SECRET_ACCESS_KEY=guidesecret --from-literal=AWS_REGION=us-west-1
+secret/s3 created
+[exit 0]
+
+$ helm install flint-lean oci://registry-1.docker.io/dilipdalton/flint-lean --version 0.11.0 -n flint-system --set operatorCredentialsSecret=s3 --set endpoint=http://minio.flint-system.svc:9000
+W0915 00:17:38.253659   43303 warnings.go:70] unrecognized format "uint64"
+W0915 00:17:38.253711   43303 warnings.go:70] unrecognized format "uint32"
+NAME: flint-lean
+LAST DEPLOYED: Tue Sep 15 00:17:40 2026
+NAMESPACE: flint-system
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+flint-lean is installed in namespace flint-system.
+
+Declare a workspace:
+
+  apiVersion: chert.us/v1alpha1
+  kind: FlintLeanWorkspace
+  metadata: { name: proj1 }
+  spec:
+    projectId: team-a/proj1     # DURABLE identity — the claim keys on
+                                # this, never on the CR UID, so delete
+                                # and re-apply ADOPTS its own data
+    bucket: my-bucket
+    keyPrefix: tenants/proj1
+    endpoint: http://s3-proxy.svc:9000
+    credentialsSecretRef: proj1-proxy-creds   # keys AWS_* verbatim
+    floorSecs: 60               # the RPO contract
+    maxFiles: 250000            # the measured v1 cap (0b)
+
+  kubectl get flintleanworkspace proj1
+  # PHASE Claimed | Adopted — or Refused, which means another project
+  # holds that prefix's claim. The operator NEVER adopts a foreign
+  # claim on the fly; resolve it explicitly.
+
+Then give a pod the workspace as ONE volume — no label, no injected
+container, no Secret in the pod's namespace (the s3.csi.chert.us node driver from
+flint-s3-csi-chart must be installed; the CR's spec.consumers names the
+ServiceAccounts that may mount it, and spec.uid the uid the syncer
+runs as):
+
+  spec:
+    serviceAccountName: agent          # listed in spec.consumers
+    volumes:
+      - name: ws
+        csi:
+          driver: s3.csi.chert.us
+          volumeAttributes: { chert.us/workspace: proj1 }
+    containers:
+      - volumeMounts: [{ name: ws, mountPath: /workspace }]
+
+The driver materializes the workspace before ANY container of the pod
+(init containers included) starts, and drains it when the pod is
+deleted. If the workspace is missing, Refused, or the ServiceAccount is
+not a consumer, the pod stays ContainerCreating with a FailedMount
+event naming the reason — it never starts ungated.
+[exit 0]
+
+$ helm install flint-s3-csi oci://registry-1.docker.io/dilipdalton/flint-s3-csi --version 0.3.0 -n flint-system --set broker.static.secretRef=s3 --set node.region=us-west-1
+W0915 00:17:42.612506   43309 warnings.go:70] spec.serviceAccountTokenInSecrets is unset; if supported by this CSI driver, set to true to prevent possible logging of tokens in volume attributes
+NAME: flint-s3-csi
+LAST DEPLOYED: Tue Sep 15 00:17:42 2026
+NAMESPACE: flint-system
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+flint-s3-csi is installed in namespace flint-system.
+
+Confirm the driver registered on every node (the registrar sidecar does
+this; give a fresh node a few seconds):
+
+  kubectl get csidriver s3.csi.chert.us
+  kubectl -n flint-system rollout status ds/flint-s3-csi-node
+  kubectl -n flint-system rollout status deploy/flint-s3-broker
+
+Declare a mount IN THE TENANT'S NAMESPACE, and say who may use it:
+
+  apiVersion: chert.us/v1alpha1
+  kind: FlintPassthroughMount
+  metadata: { name: datasets, namespace: team-a }
+  spec:
+    bucket: my-bucket
+    keyPrefix: datasets/imagenet
+    endpoint: http://minio.flint-system.svc:9000   # unset ⇒ AWS S3
+    readOnly: true
+    consumers:
+      serviceAccounts: ["trainer"]   # ABSENT = DENY; "*" = any SA here
+    identity:
+      mode: broker                   # broker | webIdentity | static | ambient
+
+Then a pod mounts it with a volume — no label, no sidecar:
+
+  spec:
+    serviceAccountName: trainer      # must be in consumers
+    volumes:
+      - name: data
+        csi:
+          driver: s3.csi.chert.us
+          readOnly: true
+          volumeAttributes:
+            chert.us/mount: datasets
+            # chert.us/uid: "1001"   # presentation only; default 65534
+    containers:
+      - name: app
+        volumeMounts:
+          - { name: data, mountPath: /mnt/s3, readOnly: true }
+
+volumeAttributes are a REQUEST, never an authorization: exactly one of
+chert.us/mount / chert.us/workspace, optionally chert.us/uid and
+chert.us/gid, and every other key is refused by name. bucket, keyPrefix,
+endpoint, image and credentials come from the CR and only the CR.
+
+WHERE THINGS RUN. Each mounted volume is one worker pod in
+flint-workers, pinned to the tenant's node:
+
+  kubectl -n flint-workers get pods -l app.kubernetes.io/managed-by=flint-s3-csi-node
+
+The tenant pod carries no credential and no privilege and is admissible
+under PodSecurity `restricted`. The node plugin is the privileged
+component (one per node); the broker is the one with a standing
+credential. A refused publish shows up as a FailedMount event on the
+tenant pod, retried with backoff — `kubectl describe pod` names the
+reason (a missing CR, a ServiceAccount not in consumers, a refused
+attribute).
+
+IDENTITY. Every publish registers with the broker, and every credential
+is minted from the POD's own kubelet-issued token (1 h, audience
+s3.csi.chert.us) after a TokenReview. A pod
+gets a credential only for a CR whose consumers name its ServiceAccount,
+900 s at a time.
+
+THIS INSTALL RUNS THE STATIC BACKEND: the broker hands the ONE key set in
+Secret s3 to every entitled pod. The
+pod is still authenticated and authorized per publish, but every project
+shares that key at the bucket. Move to broker.backend sts or rest when a
+per-project credential source exists.
+
+A MOUNTER CRASH IS STILL NOT RECOVERABLE IN PLACE. Containers that
+already opened the mount read ENOTCONN once the worker dies; the volume
+stays unhealthy until the pod is recreated. Run S3-mounted workloads
+under a controller.
+
+THE MOUNT PRESENTS AS ONE UID. NodePublish never sees the pod's
+securityContext, so nothing can default from runAsUser. Ownership is the
+volume's chert.us/uid attribute if set, ELSE the CR's spec.uid, else
+65534 — the ATTRIBUTE WINS over the CR. gid resolves the same way and
+defaults to whatever uid resolved to. With nothing declared, files no
+longer present as root as they did under the webhook. A lean workspace
+has no default: it refuses to publish without a uid, and refuses uid 0,
+because the syncer must run as the app's uid to read what the app wrote.
+
+IDENTITY MODES. broker, webIdentity and static are the driver's own and
+run unchanged against S3, MinIO or Ceph RGW. ambient hands the worker
+nothing: whatever the SDK's default credential chain finds on the node
+(environment, a shared file, a web-identity token, a container
+credential URI, instance metadata) is the identity, and when it finds
+nothing the FailedMount event carries the chain's own error. The
+platform must let a pod complete that chain — on a cloud instance
+behind an overlay network, the metadata service's hop limit has to
+admit pods — and the driver does not proxy or inject it.
+
+NODE LOSS. A tenant on a node that dies is Kubernetes' to reschedule; a
+Deployment's replacement pod mounts on its new node and the dead node's
+workers go with the node. What Kubernetes does NOT do without a
+cloud-controller-manager is delete the Node object of an instance that
+has vanished. Until someone does, a rolling update of this chart's
+DaemonSet stalls: the controller picks the dead node's pod first, it can
+never finish terminating, and with maxUnavailable 1 no live node is
+updated. `kubectl delete node <name>` is the operator's step on such a
+cluster; the roll then proceeds. Mounts on live nodes keep serving
+throughout — a plugin roll does not unmount tenants.
+
+WHEN A DRAIN COULD NOT BE ATTESTED. If a lean syncer dies, is evicted or
+runs out of grace before its final publish completes, the node plugin
+does NOT delete the workspace — it moves the tree aside and raises a
+DrainNotAttested event on the tenant. What the tenant wrote since its
+last publish is still on that node:
+
+  <kubelet-root>/plugins/s3.csi.chert.us/undrained/<volume>-<unix>
+
+By default (workers.quota: false) that directory holds the tree itself,
+at <...>/undrained/<volume>-<unix>/tree. With workers.quota: true it holds
+an ext4 IMAGE, not a browsable tree, so recovering it means mounting it
+read-only:
+
+  mount -o loop,ro <...>/undrained/<volume>-<unix>/tree.img /mnt/recover
+
+Nothing ever removes these, by design — losing a tenant's last writes to
+an automatic sweep would be worse than keeping them. The consequence is
+that they accumulate until an operator reviews and deletes them, and a
+node whose root filesystem fills crosses kubelet's DiskPressure
+threshold, at which point kubelet evicts pods that have nothing to do
+with the workspace that was preserved. Size the node's root filesystem
+for the workspaces it may hold (a preserved plain tree costs what it
+contains; with workers.quota: true each costs at least the ext4 metadata
+its sizeLimitGib implies — roughly 0.5 GiB for a 20 GiB workspace — plus
+every block ever written in it), and sweep the directory
+as part of routine operations.
+
+NODE SHUTDOWN, AND WHAT SURVIVES IT. A graceful shutdown drains: the
+syncer publishes its outstanding work on SIGTERM, so a reboot or a
+planned cloud-instance termination keeps it. A machine that simply
+stops — power cut, kernel panic, instance failure — runs no drain at
+all, and everything written since the last publish is gone; `floorSecs`
+on the workspace is what bounds that window. The ordering between a
+tenant and its worker during a shutdown is kubelet's graceful node
+shutdown, which is OFF unless `shutdownGracePeriod` is set on the
+kubelet; see workers.priorityClassName in values.yaml.
+[exit 0]
+
+$ kubectl -n flint-system rollout status deploy/flint-lean --timeout=300s
+Waiting for deployment "flint-lean" rollout to finish: 0 of 1 updated replicas are available...
+deployment "flint-lean" successfully rolled out
+[exit 0]
+
+$ kubectl -n flint-system rollout status ds/flint-s3-csi-node --timeout=300s
+Waiting for daemon set "flint-s3-csi-node" rollout to finish: 0 of 1 updated pods are available...
+daemon set "flint-s3-csi-node" successfully rolled out
+[exit 0]
+
+$ kubectl -n flint-system rollout status deploy/flint-s3-broker --timeout=300s
+deployment "flint-s3-broker" successfully rolled out
+[exit 0]
+
+$ kubectl get csidriver s3.csi.chert.us
+NAME              ATTACHREQUIRED   PODINFOONMOUNT   STORAGECAPACITY   TOKENREQUESTS     REQUIRESREPUBLISH   MODES       AGE
+s3.csi.chert.us   false            true             false             s3.csi.chert.us   true                Ephemeral   13s
+[exit 0]
+
+$ kubectl -n flint-system get pods
+NAME                               READY   STATUS    RESTARTS   AGE
+flint-lean-6f45c4486b-tbmkp        1/1     Running   0          14s
+flint-s3-broker-7dd5fdf688-2k6jm   1/1     Running   0          13s
+flint-s3-broker-7dd5fdf688-gg2z4   1/1     Running   0          13s
+flint-s3-csi-node-m2m97            3/3     Running   0          13s
+mc                                 1/1     Running   0          21s
+minio-76f7b5585b-mcd9c             1/1     Running   0          38s
+[exit 0]
+
+$ kubectl -n flint-system get pods -o jsonpath="{range .items[*]}{.spec.containers[*].image}{\"\\n\"}{end}" | sort -u
+dilipdalton/flint-lean-operator:1.54.0
+dilipdalton/flint-s3-csi:1.54.0
+dilipdalton/flint-s3-csi:1.54.0 registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0 registry.k8s.io/sig-storage/livenessprobe:v2.15.0
+quay.io/minio/mc:latest
+quay.io/minio/minio:latest
+[exit 0]
+
+$ kubectl -n flint-system logs deploy/flint-lean | tail -3
+2026-09-15T07:17:47.644704Z  INFO flint_lean_operator: FlintLeanWorkspace CRD updated
+2026-09-15T07:17:47.644801Z  INFO flint_lean_operator: flint-lean-operator: watching FlintLeanWorkspace
+[exit 0]
+
+$ kubectl create namespace agents
+namespace/agents created
+[exit 0]
+
+$ kubectl -n agents create serviceaccount agent
+serviceaccount/agent created
+[exit 0]
+
+$ kubectl -n agents create serviceaccount viewer
+serviceaccount/viewer created
+[exit 0]
+
+$ cat /tmp/guide-workspace.yaml; kubectl apply -f /tmp/guide-workspace.yaml
+apiVersion: chert.us/v1alpha1
+kind: FlintLeanWorkspace
+metadata:
+  name: proj1
+  namespace: agents
+spec:
+  projectId: team-a/proj1
+  bucket: my-bucket
+  keyPrefix: tenants/proj1
+  region: us-west-1
+  endpoint: http://minio.flint-system.svc:9000
+  floorSecs: 60
+  uid: 1000
+  gid: 1000
+  consumers:
+    serviceAccounts: [agent]
+    readOnlyServiceAccounts: [viewer]
+flintleanworkspace.chert.us/proj1 created
+[exit 0]
+
+$ kubectl -n agents get flintleanworkspace proj1 -o jsonpath="{range .status.conditions[*]}{.type}={.status} {.reason}{\"\\n\"}{end}"
+AccessIsolation=Unknown DecidedByBroker
+SpecAccepted=True Accepted
+SyncerObserved=Unknown NoLiveSyncer
+[exit 0]
+
+$ kubectl apply -f /tmp/guide-pod.yaml
+pod/agent-1 created
+[exit 0]
+
+$ kubectl -n agents wait --for=condition=ready pod/agent-1 --timeout=600s
+pod/agent-1 condition met
+[exit 0]
+
+$ kubectl -n agents get pod agent-1
+NAME      READY   STATUS    RESTARTS   AGE
+agent-1   1/1     Running   0          9s
+[exit 0]
+
+$ kubectl -n flint-workers get pods
+NAME                   READY   STATUS    RESTARTS   AGE
+s3w-cdc625c9ff3a2008   1/1     Running   0          9s
+[exit 0]
+
+$ kubectl -n agents exec agent-1 -- ls -la /workspace /workspace/.flint
+/workspace:
+total 16
+drwxrwxrwt    4 1000     1000          4096 Sep 15 07:18 .
+drwxr-xr-x    1 root     root          4096 Sep 15 07:18 ..
+drwxr-xr-x    2 1000     1000          4096 Sep 15 07:18 .flint
+drwxr-xr-x    2 1000     1000          4096 Sep 15 07:18 .flint-sync
+
+/workspace/.flint:
+total 32
+drwxr-xr-x    2 1000     1000          4096 Sep 15 07:18 .
+drwxrwxrwt    4 1000     1000          4096 Sep 15 07:18 ..
+-rw-r--r--    1 1000     1000         16404 Sep 15 07:18 AGENTS.md
+-rw-r--r--    1 1000     1000           328 Sep 15 07:18 capabilities.json
+[exit 0]
+
+$ kubectl -n agents exec agent-1 -- sh -c "echo hello > /workspace/notes.txt && printf %s \"{\\\"nonce\\\":\\\"task-42\\\"}\" > /workspace/.flint/publish && until grep -qs task-42 /workspace/.flint/publish.ack; do sleep 1; done; cat /workspace/.flint/publish.ack"
+{
+  "status": "ok",
+  "nonces": [
+    "task-42"
+  ],
+  "sentinel_mtime_unix_ns": 1789456705293962423,
+  "seq": 1,
+  "manifest_etag": "\"b2acc362e33c55afed3ef7a1b6516edd\"",
+  "boundary": "sentinel",
+  "completed_unix": 1789456706,
+  "report": {
+    "uploaded": 1,
+    "deleted": 0,
+    "parked": 0,
+    "consumed": 0,
+    "no_change": false,
+    "out_of_scope_foreign": 0
+  }
+}[exit 0]
+
+$ kubectl -n flint-system exec mc -- mc ls --recursive m/my-bucket/tenants/proj1/
+[2026-09-15 07:18:25 UTC]   209B STANDARD .flint/lean/chunks/703f8ee1a4414b373c82d954c9e14f00
+[2026-09-15 07:17:55 UTC]   111B STANDARD .flint/lean/claim
+[2026-09-15 07:18:25 UTC]   149B STANDARD .flint/lean/current
+[2026-09-15 07:18:26 UTC]   293B STANDARD .flint/lean/epoch
+[2026-09-15 07:18:25 UTC]    37B STANDARD .flint/lean/inbox
+[2026-09-15 07:18:25 UTC]     6B STANDARD files/notes.txt
+[exit 0]
+
+$ kubectl -n flint-system exec mc -- mc stat m/my-bucket/tenants/proj1/.flint/lean/current
+Name      : current
+Date      : 2026-09-15 07:18:25 UTC 
+Size      : 149 B  
+ETag      : b2acc362e33c55afed3ef7a1b6516edd 
+Type      : file 
+Checksum  : CRC64NVME:pBriQW9TlHg=
+Metadata  :
+  Content-Type                    : application/octet-stream 
+  X-Amz-Meta-Flint-Flush-Uuid     : 3e2aafcd-7967-46d0-aaaa-aa694d6c673c 
+  X-Amz-Meta-Flint-Epoch          : 1 
+  X-Amz-Meta-Flint-Gen            : 1 
+  X-Amz-Meta-Flint-Boundary-Source: sentinel 
+
+[exit 0]
+
+$ cat /tmp/guide-viewer.yaml; kubectl apply -f /tmp/guide-viewer.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: viewer-1
+  namespace: agents
+spec:
+  serviceAccountName: viewer
+  securityContext: { runAsUser: 1000, runAsGroup: 1000, runAsNonRoot: true }
+  volumes:
+    - name: ws
+      csi:
+        driver: s3.csi.chert.us
+        readOnly: true
+        volumeAttributes: { chert.us/workspace: proj1 }
+  containers:
+    - name: agent
+      image: busybox:1.36
+      command: ["sh", "-c", "sleep 86400"]
+      workingDir: /workspace
+      volumeMounts: [{ name: ws, mountPath: /workspace }]
+
+pod/viewer-1 created
+[exit 0]
+
+$ kubectl -n agents wait --for=condition=ready pod/viewer-1 --timeout=600s
+pod/viewer-1 condition met
+[exit 0]
+
+$ kubectl -n agents exec viewer-1 -- cat /workspace/notes.txt
+hello
+[exit 0]
+
+$ kubectl -n agents exec viewer-1 -- sh -c "echo x > /workspace/x.txt"
+sh: can't create /workspace/x.txt: Read-only file system
+command terminated with exit code 1
+[exit 1]
+
+$ kubectl -n agents exec viewer-1 -- cat /workspace/.flint/capabilities.json
+{
+  "protocol": 1,
+  "verbs": [
+    "sync",
+    "remote-seq"
+  ],
+  "access": "read",
+  "state": "live",
+  "sentinel_min_interval_secs": 5,
+  "sentinel_hourly_budget": 60,
+  "syncer_version": "0.7.0",
+  "boot": {
+    "holder_id": "unclaimed",
+    "boot_unix": 1789456707
+  }
+}[exit 0]
+
+$ kubectl apply -f /tmp/guide-viewer-rw.yaml
+pod/viewer-rw created
+[exit 0]
+
+$ kubectl -n agents get events --field-selector involvedObject.name=viewer-rw -o jsonpath="{range .items[*]}{.reason}: {.message}{\"\\n\"}{end}" | tail -2
+Scheduled: Successfully assigned agents/viewer-rw to lean-guide-control-plane
+FailedMount: MountVolume.SetUp failed for volume "ws" : rpc error: code = PermissionDenied desc = ServiceAccount agents/viewer may mount FlintLeanWorkspace agents/proj1 read-only only (spec.consumers.readOnlyServiceAccounts): set `readOnly: true` on the pod's csi volume. Only the pod's own readOnly makes a lean tree read-only inside the container
+[exit 0]
+
+$ kubectl -n flint-system exec deploy/flint-s3-broker -- true 2>/dev/null; kubectl -n flint-system run st --rm -i --restart=Never --image=busybox:1.36 -- wget -qO- http://flint-s3-broker.flint-system.svc/v1/status 2>/dev/null | head -c 400
+{"backend":"static","issued":0,"readEnforcement":"cooperative","refused":0,"registrations":0}pod "st" deleted
+[exit 0]
+
+$ kubectl -n agents delete pod agent-1 viewer-1 viewer-rw
+pod "agent-1" deleted
+pod "viewer-1" deleted
+pod "viewer-rw" deleted
+[exit 0]
+
+$ kubectl -n agents delete flintleanworkspace proj1
+flintleanworkspace.chert.us "proj1" deleted
+[exit 0]
+
+$ helm uninstall flint-s3-csi -n flint-system
+These resources were kept due to the resource policy:
+[Namespace] flint-workers
+
+release "flint-s3-csi" uninstalled
+[exit 0]
+
+$ helm uninstall flint-lean -n flint-system
+release "flint-lean" uninstalled
+[exit 0]
+
+$ kubectl -n flint-system exec mc -- mc ls --recursive m/my-bucket/tenants/proj1/files/
+[2026-09-15 07:18:25 UTC]     6B STANDARD notes.txt
+[exit 0]
+GUIDE-RUN-DONE

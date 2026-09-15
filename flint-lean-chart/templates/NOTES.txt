@@ -11,10 +11,14 @@ Declare a workspace:
                                 # and re-apply ADOPTS its own data
     bucket: my-bucket
     keyPrefix: tenants/proj1
-    endpoint: http://s3-proxy.svc:9000
-    credentialsSecretRef: proj1-proxy-creds   # keys AWS_* verbatim
+    region: us-west-1           # the bucket's; endpoint: for a non-AWS store
     floorSecs: 60               # the RPO contract
     maxFiles: 250000            # the measured v1 cap (0b)
+    uid: 1000                   # the app's uid; the syncer runs as it (required, not 0)
+    gid: 1000
+    consumers:
+      serviceAccounts: [agent]            # ABSENT = DENY
+      # readOnlyServiceAccounts: [viewer] # these must mount with readOnly: true
 
   kubectl get flintleanworkspace proj1
   # PHASE Claimed | Adopted — or Refused, which means another project

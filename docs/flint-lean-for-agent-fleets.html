@@ -96,69 +96,164 @@
 </style>
 </head>
 <body>
-<h1>flint-lean on a Kubernetes cluster</h1>
-<blockquote><p><strong>Delivery changed (2026-09-03).</strong> A workspace now reaches a pod as ONE <code>csi:</code> volume served by the <code>s3.csi.chert.us</code> node driver (<code>flint-s3-csi-chart</code>), not as a webhook-injected sidecar. The label <code>chert.us/lean-workspace</code>, the injected <code>flint-sync</code> container, the per-namespace credential Secret and the webhook described below are the RETIRED shape; the workspace protocol (claim, checkout gate, <code>.flint/publish</code>, boundaries, drain on delete) is unchanged and the syncer binary is the same. What a pod writes today:</p>
-<pre><code>spec:
-  serviceAccountName: agent            # listed in the CR's spec.consumers
-  volumes:
-    - name: ws
-      csi:
-        driver: s3.csi.chert.us
-        volumeAttributes: { chert.us/workspace: proj1 }
-  containers:
-    - volumeMounts: [{ name: ws, mountPath: /workspace }]</code></pre>
-<p>and the CR gains <code>spec.uid</code> (the uid the syncer runs as — the app&#x27;s) and <code>spec.consumers.serviceAccounts</code>. See <code>docs/plans/csi-node-mount-design.md</code> §0 and §3.5.</p></blockquote>
-<p>Give every agent pod its own workspace: <strong>plain local files</strong> checked out of your S3 bucket at pod start, published back on a cadence — or when the agent says so. No FUSE, no NFS, no privileged pods, no mount to wedge.</p>
-<pre><code>        agent pod
-        ├─ your container ──▶ /workspace   plain files, real POSIX, local speed
-        │                        ▲   │
-        │            checkout ───┘   └─── publish (cadence, or on demand)
-        │                                     │
-        └─ flint-sync sidecar ────────────────┴──▶ S3
-              injected by a webhook · unprivileged · no /dev/fuse</code></pre>
-<p>The trade, stated up front: the workspace is a <strong>local copy</strong>. It must fit the pod&#x27;s disk, writers merge at the manifest rather than editing one live tree (two agents editing one file get last-boundary-wins with the loser&#x27;s bytes preserved), and other readers see the last published boundary rather than your last write. If that is not your shape, see <a href="#when-not-to-use-lean">when not to use lean</a>.</p>
-<p>Everything below was run end to end on 2026-08-26 against the published chart. Commands are copy-pasteable, not illustrative.</p>
-<hr>
-<h2>Before you start</h2>
-<table><tr><th></th><th></th></tr><tr><td>An S3 bucket</td><td>must already exist. Versioning is not required. Nothing here creates or deletes buckets.</td></tr><tr><td>Kubernetes</td><td><strong>1.29+</strong> — the sidecar is injected as a *native sidecar* (<code>initContainer</code> with <code>restartPolicy: Always</code>), which is 1.29 or newer.</td></tr><tr><td>Tools</td><td><code>kubectl</code>, <code>helm</code> 3.8+ (OCI support)</td></tr><tr><td>Credentials</td><td>see <a href="#credentials">credentials</a> — the agent container never holds one</td></tr></table>
-<p>Nothing is installed on your nodes. The sidecar is an ordinary unprivileged container.</p>
-<hr>
-<h2>1. Install the operator</h2>
-<pre><code>kubectl create namespace flint-system
+<h1 id="flint-lean-on-a-kubernetes-cluster">flint-lean on a Kubernetes cluster</h1>
+<p>Give every agent pod its own workspace: <strong>plain local files</strong> checked out
+of your S3 bucket before the pod starts, published back on a cadence — or
+when the agent says so. No FUSE, no NFS, no sidecar in your pod, no
+credential in your pod.</p>
+<pre><code>        agent pod                                 node
+        └─ your container ──▶ /workspace  ◀── bind ── flint-sync worker ──▶ S3
+                              plain files,             (one per mounted
+                              real POSIX,               volume, in
+                              local speed               flint-workers)
+</code></pre>
+<p>A workspace reaches a pod as <strong>one <code>csi:</code> volume</strong> served by the
+<code>s3.csi.chert.us</code> node driver. The driver checks the pod's ServiceAccount
+against the workspace, starts a worker on the pod's node that checks the
+tree out, binds it into the pod before any of its containers start, and
+drains it back to the bucket when the pod is deleted.</p>
+<p>The trade, stated up front: the workspace is a <strong>local copy</strong>. It must
+fit the node's disk, writers merge at the manifest rather than editing
+one live tree (two agents editing one file get last-boundary-wins with
+the loser's bytes preserved), and other readers see the last published
+boundary rather than your last write. If that is not your shape, see
+<a href="#when-not-to-use-lean">when not to use lean</a>.</p>
+<p>Everything below was run end to end on 2026-09-15 against the published
+charts <code>flint-lean</code> 0.11.0 and <code>flint-s3-csi</code> 0.3.0 (images 1.54.0), on a
+kind cluster (Kubernetes 1.36) with MinIO standing in for the bucket — the
+only change for that was <code>endpoint:</code> and the keys. Commands are
+copy-pasteable, not illustrative.</p>
+<hr />
+<h2 id="before-you-start">Before you start</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>An S3 bucket</td>
+<td>must already exist. Versioning is not required. Nothing here creates or deletes buckets.</td>
+</tr>
+<tr>
+<td>Kubernetes</td>
+<td>a CSI node plugin runs on every node that hosts agent pods (a privileged DaemonSet). Tested on 1.34 and 1.36.</td>
+</tr>
+<tr>
+<td>Tools</td>
+<td><code>kubectl</code>, <code>helm</code> 3.8+ (OCI support)</td>
+</tr>
+<tr>
+<td>Credentials</td>
+<td>see <a href="#credentials">credentials</a> — the agent container never holds one</td>
+</tr>
+<tr>
+<td>Node disk</td>
+<td>the tree lives on the node's root filesystem, under the kubelet directory; size it for the workspaces a node hosts</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="1-install">1. Install</h2>
+<p>Two charts: <code>flint-lean</code> (the <code>FlintLeanWorkspace</code> CRD and its operator)
+and <code>flint-s3-csi</code> (the node driver that mounts workspaces, and the
+credential broker).</p>
+<pre><code class="language-sh">kubectl create namespace flint-system
 
-helm install flint-lean \
-  oci://registry-1.docker.io/dilipdalton/flint-lean --version 0.3.0 \
-  -n flint-system</code></pre>
-<p>That installs three things: the <code>FlintLeanWorkspace</code> CRD, the operator, and a mutating webhook. The webhook provisions <strong>its own TLS certificate and <code>MutatingWebhookConfiguration</code> at startup</strong> — there is no cert-manager dependency and nothing to pre-create.</p>
-<p>It pulls two images and nothing else:</p>
-<table><tr><th>image</th><th>pulled by</th><th>what runs</th></tr><tr><td><code>dilipdalton/flint-lean-operator</code></td><td>the <code>flint-system</code> deployment</td><td><code>flint-lean-operator</code> — the controller and webhook</td></tr><tr><td><code>dilipdalton/flint-sync</code></td><td>every opted-in agent pod</td><td>the syncer</td></tr></table>
-<p><strong>flint-lean does not install or require flint-lite.</strong> No CSI driver, no NFS hub, no <code>FlintShare</code> CRD — the chart bundles exactly one CRD and its RBAC covers only <code>flintleanworkspaces</code>. (The operator image is the same build artifact as <code>flint-lite-operator</code>, republished under the lean name from an identical digest: one image, two names, so nothing is duplicated and nothing called &quot;lite&quot; appears in a lean install.)</p>
-<p>Check it came up:</p>
-<pre><code>kubectl -n flint-system get pods
-# flint-lean-59d5b4f886-s5hp8   1/1   Running
-
-kubectl -n flint-system logs deploy/flint-lean | tail -3
-# webhook cert generated and stored in flint-lean-webhook-cert
-# mutating webhook flint-lean-inject applied
-# flint-lean-operator: watching FlintLeanWorkspace</code></pre>
-<blockquote><strong>If <code>helm install</code> fails with <code>permission denied</code> on <code>~/Library/Caches/helm</code></strong>, something ran <code>helm</code> as root with your <code>HOME</code> and took ownership of your cache. Either <code>sudo chown -R &quot;$USER&quot; ~/Library/Caches/helm</code>, or run with a private cache: <code>HELM_CACHE_HOME=/tmp/helmcache helm install …</code></blockquote>
-<hr>
-<h2>Credentials</h2>
-<p>The operator does bucket-admin work (posture probes, a stale-upload sweep) under its own identity. Each workspace&#x27;s syncer uses the credential its CR names. <strong>The agent container is given neither</strong> — the webhook stamps the secret onto the sidecar container only, and process namespaces are not shared, so a compromised agent cannot read it.</p>
-<pre><code>kubectl -n flint-system create secret generic s3 \
+# the keys the operator and the broker use (see Credentials)
+kubectl -n flint-system create secret generic s3 \
   --from-literal=AWS_ACCESS_KEY_ID=... \
   --from-literal=AWS_SECRET_ACCESS_KEY=... \
   --from-literal=AWS_REGION=us-west-1
 
-# and the same secret in the namespace your agents run in
-kubectl -n agents create secret generic s3 --from-literal=... </code></pre>
-<p>Point the operator at it by reinstalling (or <code>helm upgrade</code>) with <code>--set operatorCredentialsSecret=s3</code>, or leave it empty to use the pod&#x27;s ambient chain (IRSA and friends).</p>
-<p>The keys must be named <code>AWS_*</code> <strong>verbatim</strong> — they are passed to the syncer as environment.</p>
-<blockquote><strong>Plan of record:</strong> a project-scoped S3 proxy holds the real credentials and no pod stores one at all. Until that lands, <code>credentialsSecretRef</code> is the interim posture.</blockquote>
-<hr>
-<h2>2. Create a workspace</h2>
-<p>One CR per project subtree.</p>
-<pre><code>apiVersion: chert.us/v1alpha1
+helm install flint-lean \
+  oci://registry-1.docker.io/dilipdalton/flint-lean --version 0.11.0 \
+  -n flint-system \
+  --set operatorCredentialsSecret=s3
+  # add --set endpoint=http://... for a non-AWS store
+
+helm install flint-s3-csi \
+  oci://registry-1.docker.io/dilipdalton/flint-s3-csi --version 0.3.0 \
+  -n flint-system \
+  --set broker.static.secretRef=s3 \
+  --set node.region=us-west-1
+</code></pre>
+<p>Check it came up:</p>
+<pre><code class="language-sh">kubectl get csidriver s3.csi.chert.us
+kubectl -n flint-system get pods
+# flint-lean-6f45c4486b-tbmkp        1/1   Running
+# flint-s3-broker-7dd5fdf688-2k6jm   1/1   Running
+# flint-s3-broker-7dd5fdf688-gg2z4   1/1   Running
+# flint-s3-csi-node-m2m97            3/3   Running     ← one per node
+
+kubectl -n flint-system logs deploy/flint-lean | tail -1
+# flint-lean-operator: watching FlintLeanWorkspace
+</code></pre>
+<p>It pulls these images and nothing else:</p>
+<table>
+<thead>
+<tr>
+<th>image</th>
+<th>pulled by</th>
+<th>what runs</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>dilipdalton/flint-lean-operator</code></td>
+<td>the <code>flint-lean</code> deployment</td>
+<td>the operator</td>
+</tr>
+<tr>
+<td><code>dilipdalton/flint-s3-csi</code></td>
+<td>the node DaemonSet and the broker</td>
+<td>the CSI node plugin, <code>flint-s3-broker</code></td>
+</tr>
+<tr>
+<td><code>dilipdalton/flint-s3-worker-lean</code></td>
+<td>one worker pod per mounted workspace, in <code>flint-workers</code></td>
+<td><code>flint-sync</code>, the syncer</td>
+</tr>
+</tbody>
+</table>
+<p><strong>flint-lean does not install or require flint-lite</strong> — no NFS hub, no
+<code>FlintShare</code> CRD.</p>
+<blockquote>
+<p><strong>If <code>helm install</code> fails with <code>permission denied</code> on
+<code>~/Library/Caches/helm</code></strong>, something ran <code>helm</code> as root with your <code>HOME</code>
+and took ownership of your cache. Either <code>sudo chown -R "$USER"
+~/Library/Caches/helm</code>, or run with a private cache:
+<code>HELM_CACHE_HOME=/tmp/helmcache helm install …</code> (this guide's own run
+hit it).</p>
+</blockquote>
+<hr />
+<h2 id="credentials">Credentials</h2>
+<p>Three identities, and <strong>the agent container holds none of them:</strong></p>
+<ul>
+<li><strong>The operator</strong> does bucket-admin work (posture probes, a stale-upload
+  sweep) under <code>operatorCredentialsSecret</code>, or the pod's ambient chain
+  (IRSA and friends) when that is empty.</li>
+<li><strong>The broker</strong> (<code>flint-s3-broker</code>) hands each mounted workspace's
+  worker a short-lived key, after a TokenReview of the pod's own
+  kubelet-issued token and a check that its ServiceAccount is a consumer
+  of the workspace. The key goes to the worker pod, never the agent pod.</li>
+<li><strong>The broker's backend</strong> decides what that key is. <code>static</code> (the chart
+  default, used above) hands out the one key in <code>broker.static.secretRef</code>
+  to every entitled pod. <code>sts</code> exchanges the pod's token at an STS for a
+  role's session (<code>broker.sts.url</code>, <code>broker.sts.roleArn</code>), and <code>rest</code>
+  asks your own credential service (<code>broker.rest.url</code>). Move off <code>static</code>
+  when a per-project credential source exists.</li>
+</ul>
+<p>Secret keys are named <code>AWS_*</code> <strong>verbatim</strong>.</p>
+<hr />
+<h2 id="2-create-a-workspace">2. Create a workspace</h2>
+<p>One CR per project subtree, in the namespace your agents run in.</p>
+<pre><code class="language-sh">kubectl create namespace agents
+kubectl -n agents create serviceaccount agent
+</code></pre>
+<pre><code class="language-yaml">apiVersion: chert.us/v1alpha1
 kind: FlintLeanWorkspace
 metadata:
   name: proj1
@@ -167,82 +262,255 @@ spec:
   projectId: team-a/proj1        # durable claim identity
   bucket: my-bucket
   keyPrefix: tenants/proj1       # the subtree this workspace owns
-  credentialsSecretRef: s3
-  floorSecs: 60                  # publish cadence — and the RPO</code></pre>
-<pre><code>kubectl apply -f workspace.yaml
-kubectl -n agents get flintleanworkspace proj1 -o yaml | grep -A6 conditions</code></pre>
-<p>You want <code>SpecAccepted: True</code>. <code>SyncerObserved: Unknown</code> with reason <code>NoLiveSyncer</code> is normal for a workspace no pod has ever published; once one has, the condition names the binary that ran the last boundary (several pods may share one workspace; the status does not count them).</p>
-<hr>
-<h2>3. Opt a pod in</h2>
-<p>One label. That is the whole integration.</p>
-<pre><code>apiVersion: v1
+  region: us-west-1
+  floorSecs: 60                  # publish cadence — and the RPO
+  uid: 1000                      # the uid your agent runs as; the syncer runs as it too
+  gid: 1000
+  consumers:
+    serviceAccounts: [agent]     # ABSENT = DENY
+</code></pre>
+<pre><code class="language-sh">kubectl apply -f workspace.yaml
+kubectl -n agents get flintleanworkspace proj1 \
+  -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}{&quot;\n&quot;}{end}'
+# AccessIsolation=Unknown DecidedByBroker
+# SpecAccepted=True Accepted
+# SyncerObserved=Unknown NoLiveSyncer
+</code></pre>
+<p>You want <code>SpecAccepted: True</code>. <code>SyncerObserved: Unknown</code> with reason
+<code>NoLiveSyncer</code> is normal before any pod has published. <code>uid</code> is required
+(a workspace refuses to mount without one, and refuses 0): the syncer runs
+as your app's uid so it can read what the app wrote.</p>
+<hr />
+<h2 id="3-mount-it-in-a-pod">3. Mount it in a pod</h2>
+<p>One volume. That is the whole integration.</p>
+<pre><code class="language-yaml">apiVersion: v1
 kind: Pod
 metadata:
   name: agent-1
   namespace: agents
-  labels:
-    chert.us/lean-workspace: proj1     # ← the webhook keys on this
 spec:
+  serviceAccountName: agent            # listed in spec.consumers
+  securityContext: { runAsUser: 1000, runAsGroup: 1000, runAsNonRoot: true }
+  volumes:
+    - name: ws
+      csi:
+        driver: s3.csi.chert.us
+        volumeAttributes: { chert.us/workspace: proj1 }
   containers:
     - name: agent
       image: your-agent:latest
-      workingDir: /workspace</code></pre>
-<p>The webhook injects the sidecar, adds the workspace volume, and mounts it into <strong>every</strong> container in the pod. The syncer runs the checkout *before* your container starts — the injected <code>startupProbe</code> gates it — so your first line of code sees a complete tree.</p>
-<pre><code>kubectl -n agents get pod agent-1
-# agent-1   2/2   Running        ← 2/2 = your container + the sidecar</code></pre>
-<p>If the workspace is missing or refused, the pod is <strong>rejected at admission</strong> rather than started against an empty directory.</p>
-<blockquote><strong>Do not declare your own volumeMount at <code>/workspace</code></strong> — the injection would collide and admission fails. If your image needs that path, move flint&#x27;s with <code>spec.mountPath: /flint</code> on the CR.</blockquote>
-<hr>
-<h2>4. Publish on demand (optional, recommended)</h2>
-<p>Cadence alone forces a bad choice: publish often and waste work, or publish rarely and let a reader see a half-finished tree. Instead, let the agent declare a coherent point when it finishes a unit of work:</p>
-<pre><code># in the agent container
-printf &#x27;{&quot;nonce&quot;:&quot;task-42&quot;}&#x27; &gt; /workspace/.flint/publish
+      workingDir: /workspace
+      volumeMounts: [{ name: ws, mountPath: /workspace }]
+</code></pre>
+<pre><code class="language-sh">kubectl -n agents get pod agent-1
+# agent-1   1/1   Running            ← your container only
+kubectl -n flint-workers get pods
+# s3w-cdc625c9ff3a2008   1/1   Running   ← its worker, on the same node
+kubectl -n agents exec agent-1 -- ls /workspace/.flint
+# AGENTS.md  capabilities.json
+</code></pre>
+<p>The checkout completes <strong>before</strong> any container of the pod, init
+containers included, starts, so your first line of code sees a complete
+tree. If the workspace is missing or refused, or the ServiceAccount is not
+a consumer, the pod stays <code>ContainerCreating</code> with a <code>FailedMount</code> event
+naming the reason — it never starts against an empty directory.
+<code>.flint/AGENTS.md</code> is the contract for an agent working in the tree.</p>
+<hr />
+<h2 id="read-only-agents">Read-only agents</h2>
+<p>An agent that should see the workspace and never change it mounts with
+<code>readOnly: true</code>. List its ServiceAccount under
+<code>readOnlyServiceAccounts</code>:</p>
+<pre><code class="language-yaml">  consumers:
+    serviceAccounts: [agent]
+    readOnlyServiceAccounts: [viewer]
+</code></pre>
+<pre><code class="language-yaml">      csi:
+        driver: s3.csi.chert.us
+        readOnly: true
+        volumeAttributes: { chert.us/workspace: proj1 }
+</code></pre>
+<pre><code class="language-sh">kubectl -n agents exec viewer-1 -- sh -c 'echo x &gt; /workspace/x.txt'
+# sh: can't create /workspace/x.txt: Read-only file system
+kubectl -n agents exec viewer-1 -- grep access /workspace/.flint/capabilities.json
+#   &quot;access&quot;: &quot;read&quot;,
+</code></pre>
+<p>Its syncer follows every writer's boundary and publishes nothing, and a
+<code>publish</code> touch is answered <code>refused-read-only</code>. A pod on a read-only
+ServiceAccount <strong>without</strong> <code>readOnly: true</code> is refused, naming the fix:</p>
+<pre><code>FailedMount: ... PermissionDenied desc = ServiceAccount agents/viewer may mount
+FlintLeanWorkspace agents/proj1 read-only only (spec.consumers.readOnlyServiceAccounts):
+set `readOnly: true` on the pod's csi volume ...
+</code></pre>
+<p><strong>What holds it to reads at the bucket depends on the broker backend.</strong>
+<code>sts</code> attaches a session policy of reads on the workspace's prefix; <code>rest</code>
+tells your door <code>"access": "read"</code>; <code>static</code> hands out
+<code>broker.static.readSecretRef</code>'s key if you set one. A <code>static</code> broker
+without a read key says so:</p>
+<pre><code class="language-sh">kubectl -n flint-system run st --rm -i --restart=Never --image=busybox:1.36 -- \
+  wget -qO- http://flint-s3-broker.flint-system.svc/v1/status
+# {&quot;backend&quot;:&quot;static&quot;, ..., &quot;readEnforcement&quot;:&quot;cooperative&quot;, ...}
+</code></pre>
+<p><code>cooperative</code> means the mount and the syncer keep the pod read-only and
+its key could still write. One workspace carries read-write and read-only
+agents at once. Set <code>chert.us/on-behalf-of: &lt;user&gt;</code> in <code>volumeAttributes</code>
+to name the signed-in user on the broker's audit lines.</p>
+<hr />
+<h2 id="4-publish-on-demand-optional-recommended">4. Publish on demand (optional, recommended)</h2>
+<p>Cadence alone forces a bad choice: publish often and waste work, or
+publish rarely and let a reader see a half-finished tree. Instead, let
+the agent declare a coherent point when it finishes a unit of work:</p>
+<pre><code class="language-sh"># in the agent container
+echo hello &gt; /workspace/notes.txt
+printf '{&quot;nonce&quot;:&quot;task-42&quot;}' &gt; /workspace/.flint/publish
 
 # wait for the answer
-until [ -f /workspace/.flint/publish.ack ]; do sleep 1; done
+until grep -qs task-42 /workspace/.flint/publish.ack; do sleep 1; done
 cat /workspace/.flint/publish.ack
 # {
 #   &quot;status&quot;: &quot;ok&quot;,
 #   &quot;nonces&quot;: [ &quot;task-42&quot; ],
 #   &quot;seq&quot;: 1,
-#   &quot;manifest_etag&quot;: &quot;\&quot;caa5498c...\&quot;&quot;,
+#   &quot;manifest_etag&quot;: &quot;\&quot;b2acc362e33c55afed3ef7a1b6516edd\&quot;&quot;,
 #   &quot;boundary&quot;: &quot;sentinel&quot;,
-#   &quot;completed_unix&quot;: 1787772547,
-#   &quot;report&quot;: { &quot;uploaded&quot;: 0, &quot;deleted&quot;: 0, &quot;parked&quot;: 0, ... }
-# }</code></pre>
-<p><code>uploaded: 0</code> here just means nothing had changed since the last boundary — the point the agent declared is already true, which is still an honest <code>ok</code>.</p>
-<p><code>status: &quot;ok&quot;</code> means <strong>the named boundary is in the bucket</strong> — not queued, not scheduled. A boundary that lost its turn at the publish fence is retried by the cadence, so an ack is late rather than refused.</p>
-<p>Costs nothing when unused: measured at 20 bucket requests per 22 s idle with the verbs off, and 20 with them on.</p>
-<hr>
-<h2>5. Verify</h2>
-<pre><code>aws s3 ls s3://my-bucket/tenants/proj1/ --recursive
+#   &quot;completed_unix&quot;: 1789456706,
+#   &quot;report&quot;: { &quot;uploaded&quot;: 1, &quot;deleted&quot;: 0, &quot;parked&quot;: 0, ... }
+# }
+</code></pre>
+<p><code>status: "ok"</code> means <strong>the named boundary is in the bucket</strong> — not
+queued, not scheduled — and it carries your change. <code>partial</code> means the
+boundary landed without some path (named in <code>report.dropped</code>: another
+writer's edit outranked your delete, or an upload changed under the
+syncer), and the next boundary publishes it. A boundary that lost its turn
+at the publish fence is retried by the cadence, so an ack is late rather
+than refused. <code>uploaded: 0</code> on an <code>ok</code> just means nothing had changed
+since the last boundary.</p>
+<p>Costs nothing when unused: measured at 20 bucket requests per 22 s idle
+with the verbs off, and 20 with them on.</p>
+<hr />
+<h2 id="5-verify">5. Verify</h2>
+<pre><code class="language-sh">aws s3 ls s3://my-bucket/tenants/proj1/ --recursive
+# tenants/proj1/.flint/lean/chunks/703f8ee1…   ← manifest entries, write-once
 # tenants/proj1/.flint/lean/claim
-# tenants/proj1/.flint/lean/epoch
 # tenants/proj1/.flint/lean/current            ← the manifest POINTER
-# tenants/proj1/.flint/lean/manifests/000…-&lt;uuid&gt;   ← entries, write-once
-# tenants/proj1/files/...          ← your tree lives here</code></pre>
-<p>The <code>files/</code> prefix is the workspace. <code>.flint/lean/</code> is control state. To see which clock installed the current boundary:</p>
-<pre><code>aws s3api head-object --bucket my-bucket \
+# tenants/proj1/.flint/lean/epoch              ← the writers' publish fence
+# tenants/proj1/.flint/lean/inbox
+# tenants/proj1/files/notes.txt                ← your tree lives here
+</code></pre>
+<p>The <code>files/</code> prefix is the workspace. <code>.flint/lean/</code> is control state.
+To see which clock installed the current boundary:</p>
+<pre><code class="language-sh">aws s3api head-object --bucket my-bucket \
   --key tenants/proj1/.flint/lean/current \
-  --query &#x27;Metadata.&quot;flint-boundary-source&quot;&#x27;
-# &quot;cadence&quot; | &quot;sentinel&quot; | &quot;quiescence&quot; | &quot;drain&quot; | ...</code></pre>
-<p><code>current</code> is a few hundred bytes and names the generation holding the entries, so this HEAD stays cheap however large the project grows. A single <code>.flint/lean/manifest</code> object was the pre-2026-09 layout; on a migrated workspace that key holds a refusal doc, not a manifest, so read <code>current</code> and follow its <code>entries_key</code>.</p>
-<hr>
-<h2>What it costs</h2>
-<p>Measured on real S3 (us-west-1, one i4i.large node, 2026-09-12; the whole drill, its controls and its rig are in <code>lean/e2e/perf/results/door-drill-2026-09-12.md</code>). Every cell is the range over three reps, never a mean. "Host engine" is the syncer binary alone on the node; "as deployed" is the chart, the <code>s3.csi.chert.us</code> node plugin, the worker pod and the tenant pod, timed from <code>kubectl apply</code> of the tenant pod to Ready (checkout) or from the <code>publish</code> touch to its ack.</p>
-<table><tr><th></th><th>host engine</th><th>as deployed</th></tr><tr><td>checkout, 6 × 1 GiB</td><td><strong>24.1–25.0 s</strong></td><td><strong>118.4–161.1 s (n=2)</strong> (reps 2,3: rep 1 paid a lease lockout the drill itself caused)</td></tr><tr><td>checkout, 20,000 × 8 KiB</td><td><strong>5.3–5.9 s</strong></td><td><strong>22.9–24.9 s</strong></td></tr><tr><td>checkout, 4 GiB + 2,000 × 16 KiB</td><td><strong>19.6–19.9 s</strong></td><td><strong>92.4–115.1 s</strong></td></tr><tr><td>publish, 6 × 1 GiB</td><td><strong>18.3 s</strong></td><td><strong>19.0–19.4 s</strong></td></tr><tr><td>publish, 20,000 × 8 KiB</td><td><strong>19.5–20.4 s</strong></td><td><strong>20.8–22.6 s</strong></td></tr><tr><td>publish, 4 GiB + 2,000 × 16 KiB</td><td><strong>50.5–51.7 s</strong> at <code>uploadPartParallelism: 1</code> (the v1.51.0 default); <strong>13.9–14.4 s</strong> at 8, the default since the upload window gained its byte bound (<code>uploadInflightMb</code>, 256)</td><td><strong>50.8–50.9 s</strong> (at 1)</td></tr><tr><td>idle</td><td>~5 bucket requests per tick, per workspace</td><td>—</td></tr></table>
-<p>The deployed column carries what a pod pays that the engine does not — scheduling, the worker pod, the lease claim, the loop mount, the bind — a mostly fixed cost of roughly the small tree's gap. Peak worker RSS at the default read window (128 MiB in flight): 403–437 MiB on the 1 GiB objects, 229 MiB on the mixed tree, 72 MiB on the small one, under the worker's 1Gi limit.</p>
-<p><strong>The file count binds before the byte count</strong> — the manifest is exactly linear in entries, which is why the v1 cap is ~250k files. For scale, the loopback floors: 100k files check out in 49.5 s (first publish 65 s, idle tick 1.85 s); 1M files in 7 m 05 s, with a 264 MiB manifest at ~277 B/entry.</p>
-<hr>
-<h2>When not to use lean</h2>
-<table><tr><th>you need</th><th>use</th></tr><tr><td>a tree too large for the pod&#x27;s disk, or lazy access to a slice of a huge dataset</td><td>FUSE (<code>docs/flint-fuse-architecture.html</code>)</td></tr><tr><td>two pods writing one tree and seeing each other live; byte-range locks; shared sqlite/git across pods</td><td>the hub (flint-lite)</td></tr><tr><td>readers that cannot tolerate seeing the last boundary instead of the last write</td><td>the hub</td></tr></table>
-<p>All three front ends share one bucket format and are mutually convertible, so choosing lean now does not strand the data.</p>
-<p>For agents collaborating on code, do <strong>not</strong> reach for a git-over-S3 remote: use plain <code>git</code> against a real git host and let flint-lean keep the workspace durable. See <code>docs/flint-lean-git-workflow.md</code>.</p>
-<hr>
-<h2>Tearing down</h2>
-<pre><code>kubectl -n agents delete pod agent-1
+  --query 'Metadata.&quot;flint-boundary-source&quot;'
+# &quot;sentinel&quot; | &quot;cadence&quot; | &quot;quiescence&quot; | &quot;drain&quot; | ...
+</code></pre>
+<p><code>current</code> is a few hundred bytes and names the chunks holding the
+entries, so this HEAD stays cheap however large the project grows.</p>
+<hr />
+<h2 id="what-it-costs">What it costs</h2>
+<p>Measured on real S3 (us-west-1, one i4i.large node, 2026-09-12; the whole
+drill, its controls and its rig are in
+<code>lean/e2e/perf/results/door-drill-2026-09-12.md</code>). Every cell is the
+range over three reps, never a mean. "Host engine" is the syncer binary
+alone on the node; "as deployed" is the chart, the <code>s3.csi.chert.us</code> node
+plugin, the worker pod and the tenant pod, timed from <code>kubectl apply</code> of
+the tenant pod to Ready (checkout) or from the <code>publish</code> touch to its ack.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>host engine</th>
+<th>as deployed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>checkout, 6 × 1 GiB</td>
+<td><strong>24.1–25.0 s</strong></td>
+<td><strong>118.4–161.1 s (n=2)</strong> (reps 2,3: rep 1 paid a lease lockout the drill itself caused)</td>
+</tr>
+<tr>
+<td>checkout, 20,000 × 8 KiB</td>
+<td><strong>5.3–5.9 s</strong></td>
+<td><strong>22.9–24.9 s</strong></td>
+</tr>
+<tr>
+<td>checkout, 4 GiB + 2,000 × 16 KiB</td>
+<td><strong>19.6–19.9 s</strong></td>
+<td><strong>92.4–115.1 s</strong></td>
+</tr>
+<tr>
+<td>publish, 6 × 1 GiB</td>
+<td><strong>18.3 s</strong></td>
+<td><strong>19.0–19.4 s</strong></td>
+</tr>
+<tr>
+<td>publish, 20,000 × 8 KiB</td>
+<td><strong>19.5–20.4 s</strong></td>
+<td><strong>20.8–22.6 s</strong></td>
+</tr>
+<tr>
+<td>publish, 4 GiB + 2,000 × 16 KiB</td>
+<td><strong>50.5–51.7 s</strong> at <code>uploadPartParallelism: 1</code> (the v1.51.0 default); <strong>13.9–14.4 s</strong> at 8, the default since the upload window gained its byte bound (<code>uploadInflightMb</code>, 256)</td>
+<td><strong>50.8–50.9 s</strong> (at 1)</td>
+</tr>
+<tr>
+<td>idle</td>
+<td>~5 bucket requests per tick, per workspace</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<p>The deployed column carries what a pod pays that the engine does not —
+scheduling, the worker pod, the lease claim, the loop mount (the drill ran
+with <code>workers.quota: true</code>; the default tree is a plain directory), the bind —
+a mostly fixed cost of roughly the small tree's gap. Peak worker RSS at
+the default read window (128 MiB in flight): 403–437 MiB on the 1 GiB
+objects, 229 MiB on the mixed tree, 72 MiB on the small one, under the
+worker's 1Gi limit.</p>
+<p><strong>The file count binds before the byte count</strong> — the manifest is exactly
+linear in entries, which is why the v1 cap is ~250k files. For scale,
+the loopback floors: 100k files check out in 49.5 s (first publish 65 s,
+idle tick 1.85 s); 1M files in 7 m 05 s, with a 264 MiB manifest at
+~277 B/entry.</p>
+<hr />
+<h2 id="when-not-to-use-lean">When not to use lean</h2>
+<table>
+<thead>
+<tr>
+<th>you need</th>
+<th>use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>a tree too large for the pod's disk, or lazy access to a slice of a huge dataset</td>
+<td>FUSE (<code>docs/flint-fuse-architecture.html</code>)</td>
+</tr>
+<tr>
+<td>two pods writing one tree and seeing each other live; byte-range locks; shared sqlite/git across pods</td>
+<td>the hub (flint-lite)</td>
+</tr>
+<tr>
+<td>readers that cannot tolerate seeing the last boundary instead of the last write</td>
+<td>the hub</td>
+</tr>
+</tbody>
+</table>
+<p>All three front ends share one bucket format and are mutually
+convertible, so choosing lean now does not strand the data.</p>
+<p>For agents collaborating on code, do <strong>not</strong> reach for a git-over-S3
+remote: use plain <code>git</code> against a real git host and let flint-lean keep
+the workspace durable. See <code>docs/flint-lean-git-workflow.md</code>.</p>
+<hr />
+<h2 id="tearing-down">Tearing down</h2>
+<pre><code class="language-sh">kubectl -n agents delete pod agent-1
 kubectl -n agents delete flintleanworkspace proj1   # leaves bucket data intact
-helm uninstall flint-lean -n flint-system</code></pre>
-<p>Deleting the CR does not delete your data. The bucket subtree is the durable artifact; a new workspace pointed at the same <code>keyPrefix</code> picks it up.</p>
+helm uninstall flint-s3-csi -n flint-system          # keeps the flint-workers namespace
+helm uninstall flint-lean -n flint-system
+</code></pre>
+<p>Deleting a pod drains its workspace first; deleting the CR does not
+delete your data. The bucket subtree is the durable artifact; a new
+workspace pointed at the same <code>keyPrefix</code> picks it up.</p>
+<footer>flint-lean · charts flint-lean 0.11.0 + flint-s3-csi 0.3.0 · images 1.54.0 · full reference: docs/flint-lean-for-agent-fleets.md</footer>
 </body>
 </html>

@@ -75,10 +75,12 @@ spec:
                 type: object
               credentialsSecretRef:
                 description: |-
-                  Secret with the SYNCER's proxy credentials, keys AWS_* VERBATIM
-                  (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, ...). The
-                  OPERATOR never uses this — bucket-admin ops run under the
-                  operator principal (plan §2.4 principal split).
+                  NOT READ under CSI delivery: a workspace's syncer gets its
+                  credential from `identity` (the broker by default; `static` reads
+                  the pod's `nodePublishSecretRef`). This named the Secret the
+                  sidecar-injection webhook stamped onto the syncer before v1.45.0,
+                  and is kept so an old CR still applies. The OPERATOR never used
+                  it — bucket-admin ops run under the operator principal.
                 nullable: true
                 type: string
               endpoint:

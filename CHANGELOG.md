@@ -12,6 +12,22 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Fixed
+
+- **flint-lean chart: the install notes' example workspace could not be
+  mounted.** It set `endpoint: http://s3-proxy…` and `credentialsSecretRef`,
+  a field nothing reads under CSI delivery (it named the webhook-era
+  syncer Secret), and had no `uid` or `consumers`, which a mount requires.
+  The notes now show `region`, `uid`, `gid` and `consumers`, and the CRD
+  says the field is not read.
+- **docs: `docs/flint-lean-for-agent-fleets.md` described the retired
+  webhook shape** (a label, an injected sidecar, a namespace Secret, chart
+  0.3.0). Rewritten for CSI delivery and run end to end against the
+  published `flint-lean` 0.11.0 and `flint-s3-csi` 0.3.0 on kind: install,
+  credentials, a workspace, a pod, read-only agents (the refusal, EROFS,
+  `readEnforcement: cooperative` on a static broker), publish, the bucket
+  layout, teardown. The HTML and PDF are regenerated from it.
+
 ## [1.54.0] - 2026-09-14
 
 ### Added
