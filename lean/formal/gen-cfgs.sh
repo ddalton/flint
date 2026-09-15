@@ -681,6 +681,8 @@ emit LeanBarrierLeaseImplHolds "$BLINV" $BLWORLD $IMPL
 # ack is judged against the writer's own install, not the live manifest —
 # so the dropped guards may be redundant for this invariant.  Opt-in, on the
 # box, to settle which (exhausted green = a machine-checked redundancy).
+# SETTLED 2026-09-15 on a laptop: HOLDS, 37,058,304 states — redundant for
+# Inv_AckBoundaryCoherent with one path.
 BLSENTIMPL1="$BLSENT1 $IMPL AckHonest=TRUE"
 emit LeanBarrierLeaseQueueDropped "Inv_AckBoundaryCoherent" $BLSENTIMPL1 QueueForeignChanges=FALSE
 emit LeanBarrierLeaseImplFastPathUnguarded "Inv_AckBoundaryCoherent" $BLSENTIMPL1 FastPathGuards=FALSE

@@ -10244,6 +10244,98 @@ async fn a_ui_write_over_a_peers_delete_survives_the_queued_tombstone() {
     );
 }
 
+/// A declared barrier adopts a UI write, the agent deletes the file between
+/// the consume and the scan, and the peer's OLDER publish outranks the
+/// delete: the window clear drops the write's inbox entry, so for a moment
+/// the acked write is only the object at its key (the manifest cites the
+/// peer's etag, the queue carries the peer's version). The formal model
+/// stops there when the writer's pod is replaced
+/// (`LeanBarrierLeaseSentinelImplCrash1`, `Inv_HITLTracked`, 2026-09-15);
+/// the code goes on and converges either way:
+/// - replaced: the new incarnation's checkout adopts the current object
+///   (S3-wins) and its barrier cites it, so the UI write survives and the
+///   agent's delete is the one lost (the safe direction);
+/// - survivor: the queued version is superseded, the delete publishes, and
+///   GC removes the object by the etag the consume integrated.
+///
+/// With no later checkout and no survivor, the untracked sweep (finding 10)
+/// is what re-tracks the object.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adopted_ui_write_deleted_under_an_older_peer_publish_converges_when_the_pod_is_replaced() {
+    adopted_ui_write_deleted_under_an_older_peer_publish(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adopted_ui_write_deleted_under_an_older_peer_publish_converges_when_the_writer_survives() {
+    adopted_ui_write_deleted_under_an_older_peer_publish(false).await;
+}
+
+async fn adopted_ui_write_deleted_under_an_older_peer_publish(replace: bool) {
+    let inner = Arc::new(MemoryStore::new());
+    let hb = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b, dir_b2, dir_c) =
+        (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&inner, dir_a.path()).await;
+    let mut b = hooked_syncer(&hb, dir_b.path());
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "x.txt", "seed");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+
+    // A publishes a newer x.txt; B runs no barrier, so its merge base stays at the seed.
+    write(dir_a.path(), "x.txt", "from A");
+    backdate_baseline(&a, "x.txt");
+    a.run_barrier().await.unwrap();
+    let a_etag = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.entries["x.txt"].etag.clone();
+
+    // The UI writes x.txt over A's publish, then z.txt: B's consume HEADs z.txt
+    // after it has adopted x.txt, and the agent deletes x.txt there.
+    let ui_etag = hitl_write(&inner, &a.cfg, "x.txt", "from the UI", "reviewer").await.unwrap();
+    hitl_write(&inner, &a.cfg, "z.txt", "z from the UI", "reviewer").await.unwrap();
+    let root_b = dir_b.path().to_path_buf();
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let seen_in_hook = seen.clone();
+    hb.after_head("z.txt", move || {
+        *seen_in_hook.lock().unwrap() = std::fs::read_to_string(root_b.join("x.txt")).ok();
+        std::fs::remove_file(root_b.join("x.txt")).unwrap();
+    });
+    let rep = b.declared_barrier().await.unwrap();
+    assert_eq!(seen.lock().unwrap().as_deref(), Some("from the UI"), "fixture: B's consume never adopted the UI write");
+    assert_eq!(rep.outranked, vec!["x.txt".to_string()], "fixture: A's publish did not outrank B's delete: {rep:?}");
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let inbox_doc = inbox::load(inner.as_ref(), &a.cfg).await.unwrap().doc;
+    assert_eq!(m.entries.get("x.txt").map(|e| e.etag.clone()), Some(a_etag), "fixture: the manifest moved off A's x.txt");
+    assert!(inbox_doc.entries.iter().all(|e| e.path != "x.txt"), "fixture: the window clear kept the UI write's entry");
+    assert_eq!(inner.head(&a.cfg.file_key("x.txt")).await.unwrap().etag, ui_etag, "fixture: the UI write is not at its key");
+
+    let (mut b, root_b) = if replace {
+        // The pod is replaced: its tree, state and queue go.
+        drop(b);
+        let mut b2 = syncer(&inner, dir_b2.path()).await;
+        b2.checkout().await.unwrap();
+        (b2, dir_b2.path().to_path_buf())
+    } else {
+        (b, dir_b.path().to_path_buf())
+    };
+    for _ in 0..3 {
+        a.run_barrier().await.unwrap();
+        b.run_barrier().await.unwrap();
+    }
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let mut c = syncer(&inner, dir_c.path()).await;
+    c.checkout().await.unwrap();
+    let want = if replace { Some("from the UI") } else { None };
+    assert_eq!(read(dir_c.path(), "x.txt").as_deref(), want, "a fresh checkout");
+    assert_eq!(read(dir_a.path(), "x.txt").as_deref(), want, "A's tree");
+    assert_eq!(read(&root_b, "x.txt").as_deref(), want, "B's tree");
+    if replace {
+        assert_eq!(m.entries.get("x.txt").map(|e| e.etag.clone()), Some(ui_etag), "the manifest does not cite the UI write");
+    } else {
+        assert!(!m.entries.contains_key("x.txt"), "the agent's delete never published");
+        assert!(inner.head(&a.cfg.file_key("x.txt")).await.is_err(), "the deleted path's object was not collected");
+    }
+}
+
 /// Two IDLE writers settle. A barrier that finds the manifest moved but
 /// has nothing of its own to publish must not install a generation of its
 /// own — or the peer's next tick sees the manifest move, does the same,

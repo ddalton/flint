@@ -902,10 +902,17 @@ module did not have. Each changes which interleavings exist.
   `LeanBarrierLeaseQueueDropped`: the merge base moves past a peer's change
   and nothing queues it. It is violated in 14 steps.
   The unguarded fast path was to be a second known-bad and is not one on
-  this shape: no violation through 6.2M states. The shipped fast path also
-  requires an empty consume, and the ack is judged against the writer's own
-  install, so the dropped guards may be redundant for this invariant. That
-  run (`LeanBarrierLeaseImplFastPathUnguarded`) is opt-in.
+  this shape. `LeanBarrierLeaseImplFastPathUnguarded` (one path,
+  `FastPathGuards = FALSE`) HOLDS exhaustively: 37,058,304 distinct states,
+  depth 36, 26 min (2026-09-15, `results/2026-09-15-local/`). That makes it a
+  machine-checked redundancy (the 5q method):
+  - *Why the guards are redundant here:* the shipped fast path also
+    requires an empty consume, and under the barrier lease the ack is
+    judged against the writer's own install, not the live manifest. Neither
+    the "no repair owed" guard nor the "manifest unmoved" guard is what
+    keeps an ack coherent.
+  - *Scope:* one path, and `Inv_AckBoundaryCoherent` only. The guards stay
+    in the code, where they save a CAS and back other promises.
 
 **The first run of the queue found a shipped defect, in 19 steps
 (`LeanBarrierLeaseQueueTombstoneOverHitl`, `Inv_HITLTracked`):**
@@ -959,7 +966,8 @@ shape:
   **HOLDS**, exhaustively on a laptop: 5,086,371 distinct states, depth 41,
   12 min 31 s (2026-09-15), fingerprint-collision estimate 5.2E-6. The first
   three-writer world this module has checked;
-- `LeanBarrierLeaseImplFastPathUnguarded`: the redundancy question above.
+- `LeanBarrierLeaseImplFastPathUnguarded`: the redundancy question above
+  (HOLDS: the guards are redundant for the ack's coherence, one path).
 
 A box started these on 2026-09-15 at 19:27Z and was stopped after 14 minutes
 (no more cloud spend; they run locally now). Neither lane had a violation:
@@ -980,6 +988,36 @@ code's shape, with every invariant, including the refined
 - The world that has carried the gate's standing red since 2026-09-13 is
   green on the code's shape, for one path.
 - Log: `results/2026-09-15-local/impl1.log`.
+
+**`LeanBarrierLeaseSentinelImplCrash1` violates `Inv_HITLTracked`**
+(2026-09-15, laptop): 19 states, 8 min 42 s. `Crash1TwoScan.cfg` (the
+two-scan rule on) gives the same shape in 21 states, 22 min 29 s. The trace:
+1. A publishes x; B runs no barrier, so B's merge base stays at the seed.
+2. The UI writes x over A's publish.
+3. B's declared barrier consumes the UI write, and the agent deletes x
+   between the consume and the scan. `confirm_absences` puts the delete in
+   the delete set.
+4. A's older publish outranks the delete. The window clear drops the UI
+   write's inbox entry.
+5. B's pod is replaced before its queue is applied. The acked write is now
+   only the object at its key.
+
+The code reaches step 5, and then converges; the model's invariant stops
+there. Pinned by two unit tests,
+`an_adopted_ui_write_deleted_under_an_older_peer_publish_converges_when_*`:
+- *Pod replaced:* the new incarnation's checkout adopts the current object
+  (S3-wins) and its barrier cites it. The UI write survives and the agent's
+  delete is lost, the safe direction. Refusing the S3-wins arm fails this
+  test at the checkout, so that arm is the load-bearing one.
+- *Writer survives:* the queued version is superseded, the delete publishes,
+  and GC collects the object by the etag the consume integrated.
+- *No later checkout and no survivor:* the untracked sweep (finding 10)
+  re-tracks the object.
+
+So this is a model-versus-code gap, not a shipped loss: `Inv_HITLTracked`
+does not count S3-wins adoption at checkout. A stricter code rule would close
+the window itself: do not drop a consumed entry that the commit neither cited
+nor retired. It is not built. Logs: `results/2026-09-15-local/crash1*.log`.
 
 ## Finding 10 (2026-09-15): convergence after a lost writer
 

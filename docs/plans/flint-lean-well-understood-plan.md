@@ -71,6 +71,18 @@ What is not solid:
     - sentinel with crash and restart.
   - The two-path sentinel world does not fit a laptop. It is 27.7M states
     at depth 18, with 11.4M queued, after 14 minutes on 8 cores.
+  - Results on the laptop: the one-path sentinel world HOLDS (36.2M states)
+    and the unguarded fast path HOLDS (37.1M states: the guards are
+    redundant for the ack's coherence).
+  - The crash world violates `Inv_HITLTracked` in 19 states: a UI write
+    adopted, deleted by the agent, and outranked. The code reaches the same
+    state and then converges (S3-wins adoption at checkout, or the delete
+    publishing). So this is a model-versus-code gap, pinned by two unit
+    tests (README, "Crash1").
+- **Live drill (2026-09-15, running):**
+  - 4 × i4i.large spot: host legs H6/H5/H1/H2/H3, fixed and control, plus
+    storm legs S0–S5 across 3 nodes;
+  - results go to `lean/e2e/writers-live/results/2026-09-15-drill/`.
 - **W5 ledger drafted:** `lean/FINDINGS.md`.
   - 141 product defects, 21 rig defects and 15 model-only rows, each with a
     cited source and a census against the CHANGELOG.
