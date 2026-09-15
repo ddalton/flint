@@ -48,6 +48,9 @@
 //!                        SigV4 by hand, pooled keep-alive, no SDK
 //!                        per-request machinery. Writes stay on the SDK.
 //!   FLINT_SYNC_FLOOR_SECS         publish cadence floor (default 60)
+//!   FLINT_SYNC_UNTRACKED_SWEEP_SECS  how often a writer tracks a lost writer's
+//!                                 uncited upload (finding 10; default 3600, 0 = off)
+//!   FLINT_SYNC_UNTRACKED_GRACE_SECS  drill-only: that sweep's grace (default 600)
 //!   FLINT_SYNC_MAX_BYTES/_FILES   checkout budgets (0 = unlimited)
 //!   FLINT_SYNC_CHECKOUT_SCOPE     comma list of path prefixes; checkout
 //!                                 materialises ONLY what they cover.
@@ -261,6 +264,10 @@ async fn main() {
     cfg.drill_hold_gc_secs = env_u64("FLINT_SYNC_DRILL_HOLD_GC_SECS", 0);
     // Finding 10: how often a writer tracks a lost writer's uncited upload.
     cfg.untracked_sweep_secs = env_u64("FLINT_SYNC_UNTRACKED_SWEEP_SECS", 3600);
+    // Drill-only: the sweep's grace, shortened so a host leg need not wait
+    // ten minutes. The gateway's own overwrite grace does not move with it.
+    cfg.untracked_grace_secs =
+        env_u64("FLINT_SYNC_UNTRACKED_GRACE_SECS", flint_lean::inbox::UNTRACKED_GRACE_SECS);
     if matches!(std::env::var("FLINT_SYNC_EVENT_TRACE").as_deref(), Ok("1") | Ok("true")) {
         cfg.event_trace = Some(flint_lean::trace::Sink::Stderr);
     }

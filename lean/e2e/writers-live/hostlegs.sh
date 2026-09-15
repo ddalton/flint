@@ -13,9 +13,16 @@
 #   hostlegs.sh H1 fixed|control   F1 the GC gap          (FLINT_SYNC_DRILL_HOLD_GC_SECS)
 #   hostlegs.sh H2 fixed|control   F2 the adopt window    (FLINT_SYNC_DRILL_HOLD_COMMIT_SECS)
 #   hostlegs.sh H3 fixed|control   F3 the sync overlay    (gateway HITL write + GC hold + `sync`)
-#   hostlegs.sh H5 fixed           finding 10 (OPEN): a writer killed between its upload and
-#                                  its CAS. MEASURES the residual; expected to FAIL on the fixed
-#                                  binary, and that failure is the measurement.
+#   hostlegs.sh H5 fixed|control   finding 10 (FIXED bdf71176): a writer killed between its
+#                                  upload and its CAS; the survivor runs as the DAEMON, whose floor
+#                                  tick sweeps for the uncited upload. The control is the same
+#                                  binary with the sweep off (FLINT_SYNC_UNTRACKED_SWEEP_SECS=0): it
+#                                  must keep the divergence.
+#   hostlegs.sh H6 fixed|control   the queued tombstone over an adopted UI write (FIXED b52324fc):
+#                                  A deletes, B's merge queues the deletion, the UI re-creates the
+#                                  path through the gateway, B's consume adopts it and then meets
+#                                  the queued deletion (control: make_control.py
+#                                  f14-tombstone-over-adopted).
 #   hostlegs.sh probe              `flint-sync probe-conditional` -> $OUT/probe.txt
 #   hostlegs.sh selftest           the verdict code against synthetic legs (no store)
 #   hostlegs.sh fakes3 start|stop  LOCAL ONLY: the repo's fake S3 (see "fakes3" below)
@@ -27,7 +34,8 @@
 #   FSYNC_CONTROL_H1     control binary for H1 (make_control.py f1-unconditional-gc)
 #   FSYNC_CONTROL_H2     control binary for H2 (f2-no-commit-reread)
 #   FSYNC_CONTROL_H3     control binary for H3 (f3-sync-advances-hidden-base)
-#   GATEWAY_BIN          flint-lean-gateway, for H3's HITL write
+#   FSYNC_CONTROL_H6     control binary for H6 (f14-tombstone-over-adopted)
+#   GATEWAY_BIN          flint-lean-gateway, for H3's and H6's HITL writes
 #   BUCKET               (required)
 #   ENDPOINT             empty = real S3 (IMDS or env credentials); else e.g.
 #                        http://127.0.0.1:9000 (path-style; dummy credentials if none set)
@@ -58,7 +66,7 @@
 # digest.<who>.txt, meta.json, verdict.json. The last line printed is
 #   LEG <leg> <arm> PASS|FAIL|VOID <reason>
 # Exit: 0 = the arm met its expectation (fixed PASS, control FAIL with the signature,
-# H5 FAIL with the finding-10 signature); 3 = VOID; 1 = anything else.
+# with every leg's fixed arm PASS); 3 = VOID; 1 = anything else.
 #
 # fakes3 (lean/e2e/perf/fakes3): as of 2026-09-13 it does NOT model conditional PUT
 # (If-Match / If-None-Match are ignored), CopyObject, user metadata or the CRC-64 on HEAD
@@ -81,6 +89,9 @@ WAIT_SECS=${WAIT_SECS:-180}
 QUIESCE_ROUNDS=${QUIESCE_ROUNDS:-3}
 H5_MODE=${H5_MODE:-commit-hold}
 H5_BIG_MB=${H5_BIG_MB:-512}
+H5_DAEMON_SECS=${H5_DAEMON_SECS:-180}
+H5_SWEEP_SECS=${H5_SWEEP_SECS:-10}
+H5_GRACE_SECS=${H5_GRACE_SECS:-20}
 GW_PORT=${GW_PORT:-18091}
 GW_TOKEN=${GW_TOKEN:-hostlegs-drill-token-0123456789}
 
@@ -427,6 +438,13 @@ def guard_h5(ld, arm, m_race):
             h2 = norm((kill.get("heads") or {}).get("p2.bin"))
             if h2 != c2:
                 g.append("p2.bin had already landed at the kill")
+    bd, _, _ = segment(os.path.join(ld, "B.log"), "daemon")
+    swept = first(bd, ev="untracked", path="p1.txt")
+    ticks = sum(1 for e in bd if e.get("ev") == "barrier_start")
+    if ticks < 3:
+        g.append(f"B's daemon ran {ticks} barrier(s); convergence is not judged on fewer than 3")
+    if arm == "control" and swept:
+        g.append("the control's sweep ran: FLINT_SYNC_UNTRACKED_SWEEP_SECS=0 did not hold, so the arms differ in more than the sweep")
     if g:
         return False, g, {}, None, None
     dB = load_digest(os.path.join(ld, "digest.B.txt")) or {}
@@ -438,11 +456,44 @@ def guard_h5(ld, arm, m_race):
     sig = bool(div) or bool(moved)
     sig_why = (f"finding-10 residual: B and a fresh checkout disagree on {div}; "
                f"citations whose key holds other bytes: {moved}")
-    return True, [], {}, (not sig, "converged"), (sig, sig_why)
+    fixed_ok = (not sig) and bool(swept)
+    fixed_why = ("converged, and B's sweep tracked p1.txt" if fixed_ok else
+                 "converged WITHOUT B's sweep tracking p1.txt: not this fix" if not sig else "still diverged")
+    return True, [], {"swept": swept}, (fixed_ok, fixed_why), (sig, sig_why)
 
-GUARDS = {"H1": guard_h1, "H2": guard_h2, "H3": guard_h3, "H5": guard_h5}
-LIVE = {"H1": ["A", "B"], "H2": ["A", "B"], "H3": ["A", "B"], "H5": ["B"]}
-DEFECT = {"H1": "F1", "H2": "F2", "H3": "F3", "H5": "finding 10"}
+def guard_h6(ld, arm, m_race):
+    b, _, _ = segment(os.path.join(ld, "B.log"), "race-b")
+    fx = {f["name"]: f for f in facts(ld)}
+    g = []
+    for need in ("delete-published", "b-still-has-seed", "b-queued-tombstone", "ui-write"):
+        if not fx.get(need, {}).get("ok"):
+            g.append(f"fixture {need} not met")
+    adopt = first(b, ev="consume", path="x.txt", action="adopted")
+    tomb = first(b, ev="tombstone", path="x.txt")
+    if not adopt:
+        g.append("B's race barrier did not adopt the UI write")
+    if not tomb:
+        g.append("B's race barrier did not reach its queued deletion of x.txt")
+    ev = {"adopt": adopt, "tombstone": tomb}
+    if g:
+        return False, g, ev, None, None
+    ui = (fx.get("ui-sha") or {}).get("detail")
+    dB = load_digest(os.path.join(ld, "digest.B.txt")) or {}
+    dC = load_digest(os.path.join(ld, "digest.C.txt")) or {}
+    fixed_ok = ui is not None and dC.get("x.txt") == ui and dB.get("x.txt") == ui
+    fixed_why = ("a fresh checkout and B both serve the acked UI write" if fixed_ok else
+                 f"the acked UI write is not served: C x.txt={dC.get('x.txt')}, B x.txt={dB.get('x.txt')}, UI {ui}")
+    sig = tomb.get("action") == "removed" and dC.get("x.txt") != ui
+    sig_why = "the queued deletion removed the adopted UI write, and no fresh checkout serves it"
+    return True, [], ev, (fixed_ok, fixed_why), (sig, sig_why)
+
+GUARDS = {"H1": guard_h1, "H2": guard_h2, "H3": guard_h3, "H5": guard_h5, "H6": guard_h6}
+LIVE = {"H1": ["A", "B"], "H2": ["A", "B"], "H3": ["A", "B"], "H5": ["B"], "H6": ["A", "B"]}
+DEFECT = {"H1": "F1", "H2": "F2", "H3": "F3", "H5": "finding 10", "H6": "queued-tombstone"}
+# Legs whose harm no tree comparison sees: the fixed-arm check is an oracle of
+# its own (H6: an acked UI write that no tree and no checkout holds agrees
+# everywhere).
+EXTRA_ORACLE = {"H6"}
 
 def verdict(leg, arm, ld):
     v = {"leg": leg, "arm": arm, "dir": ld}
@@ -450,7 +501,7 @@ def verdict(leg, arm, ld):
     probe = open(os.path.join(ld, "probe.txt")).read().strip() if os.path.isfile(os.path.join(ld, "probe.txt")) else None
     v["probe"] = probe
     v["facts"] = fx
-    expected = "FAIL" if (arm == "control" or leg == "H5") else "PASS"
+    expected = "FAIL" if arm == "control" else "PASS"
     v["expected"] = expected
 
     def done(status, reason, meets):
@@ -487,14 +538,13 @@ def verdict(leg, arm, ld):
         "O2": {"pass": o2_ok, "problems": o2p, "diffs": diffs},
     }
     v["post_barrier_failures"] = [f["detail"] for f in post]
-    all_ok = r1_ok and f1_ok and o2_ok
+    x_ok = fixed_chk[0] if leg in EXTRA_ORACLE else True
+    if leg in EXTRA_ORACLE:
+        v["oracles"]["O3_leg"] = {"pass": x_ok, "problems": [] if x_ok else [fixed_chk[1]]}
+    all_ok = r1_ok and f1_ok and o2_ok and x_ok
     probs = [f"O1(race) {p}" for p in r1 if not r1_ok] + [f"O1 {p}" for p in f1 if not f1_ok] + [f"O2 {p}" for p in o2p]
+    probs += [] if x_ok else [f"O3 {fixed_chk[1]}"]
 
-    if leg == "H5":
-        sig, why = sig_chk
-        if sig:
-            return done("FAIL", f"(expected: {why}) oracles: " + "; ".join(probs[:6]), True)
-        return done("PASS", "UNEXPECTED: finding 10 did not reproduce — B and a fresh checkout agree; re-read the guard before believing a fix", False)
     if arm == "fixed":
         fok, fwhy = fixed_chk
         if all_ok and fok and not post:
@@ -583,20 +633,40 @@ def cmd_selftest(args):
         f["manifest.race.json"] = man({"keep.txt": '"K"'}, {"keep.txt": '"K"'})
         f["manifest.final.json"] = man({"keep.txt": '"K"'}, {"keep.txt": '"K"'})
         return f
-    def h5(cas=False, moved=True, diverged=True):
+    def h5(cas=False, moved=True, diverged=True, swept=False, ticks=4):
         al = [mark("race-a", "start", 0), tr("a", "upload", 1000, path="p1.txt", outcome="put", etag='"A1"'),
               tr("a", "claim", 1100, verdict="claimed", how="fresh", epoch=2),
               "flint-sync: DRILL: holding the fence for 30s inside the commit section"]
         if cas:
             al.append(tr("a", "cas", 1200, seq=2, expected="p", result="ok", etag="q"))
         al.append(mark("race-a", "exit", 1300, 137))
-        f = dict(base, **{"A.log": "\n".join(al), "B.log": "",
+        bl = [mark("daemon", "start", 2000)] + [tr("b", "barrier_start", 2100 + i * 5000, source="cadence", declared=False) for i in range(ticks)]
+        if swept:
+            bl.append(tr("b", "untracked", 12000, path="p1.txt", etag='"A1"', cited='"S1"'))
+        bl.append(mark("daemon", "exit", 40000, 0))
+        f = dict(base, **{"A.log": "\n".join(al), "B.log": "\n".join(bl),
                           "facts.jsonl": json.dumps({"name": "a-killed", "ok": True, "detail": "137"}) + "\n",
                           "meta.json": {"h5_mode": "commit-hold"},
                           "digest.B.txt": "s1  p1.txt\n", "digest.C.txt": ("a1  p1.txt\n" if diverged else "s1  p1.txt\n")})
         f["manifest.pre.json"] = man({"p1.txt": '"S1"', "p2.bin": '"S2"'}, {"p1.txt": '"S1"', "p2.bin": '"S2"'})
         f["manifest.at_kill.json"] = man({"p1.txt": '"S1"', "p2.bin": '"S2"'}, {"p1.txt": '"A1"' if moved else '"S1"', "p2.bin": '"A2"'})
         f["manifest.final.json"] = man({"p1.txt": '"S1"'}, {"p1.txt": '"A1"' if diverged else '"S1"'})
+        return f
+    def h6(adopted=True, tomb="superseded", served=True, fixture_ok=True):
+        bl = [mark("race-b", "start", 0)]
+        if adopted:
+            bl.append(tr("b", "consume", 100, path="x.txt", etag='"U"', action="adopted", **{"from": "inbox"}))
+        bl += [tr("b", "tombstone", 150, path="x.txt", action=tomb), mark("race-b", "exit", 300, 0)]
+        keep = "kk  keep.txt\n"
+        dig = ("uu  x.txt\n" + keep) if served else keep
+        fx = "".join(json.dumps({"name": n, "ok": fixture_ok, "detail": "x"}) + "\n"
+                     for n in ("delete-published", "b-still-has-seed", "b-queued-tombstone", "ui-write"))
+        fx += json.dumps({"name": "ui-sha", "ok": True, "detail": "uu"}) + "\n"
+        f = dict(base, **{"A.log": "", "B.log": "\n".join(bl), "facts.jsonl": fx,
+                          "digest.A.txt": dig, "digest.B.txt": dig, "digest.C.txt": dig})
+        cited = {"keep.txt": '"K"', "x.txt": '"U"'} if served else {"keep.txt": '"K"'}
+        f["manifest.race.json"] = man(cited, dict(cited))
+        f["manifest.final.json"] = man(cited, dict(cited))
         return f
     cases = [
         ("H1 fixed clean", "H1", "fixed", h1(), "PASS", True),
@@ -619,10 +689,21 @@ def cmd_selftest(args):
         ("H3 sync after the GC -> VOID", "H3", "control", h3(sync_t=21000, keepB=True), "VOID", False),
         ("H3 fixed, sync after the GC -> VOID (never a vacuous PASS)", "H3", "fixed", h3(sync_t=21000), "VOID", False),
         ("H3 fixed, B kept x", "H3", "fixed", h3(keepB=True), "FAIL", False),
-        ("H5 residual measured", "H5", "fixed", h5(), "FAIL", True),
-        ("H5 converged -> unexpected PASS", "H5", "fixed", h5(diverged=False), "PASS", False),
+        ("H5 fixed, the sweep converged it", "H5", "fixed", h5(diverged=False, swept=True), "PASS", True),
+        ("H5 fixed, still diverged", "H5", "fixed", h5(swept=True), "FAIL", False),
+        ("H5 fixed, converged without the sweep -> FAIL (not this fix)", "H5", "fixed", h5(diverged=False), "FAIL", False),
+        ("H5 control, residual measured", "H5", "control", h5(), "FAIL", True),
+        ("H5 control converged -> VOID", "H5", "control", h5(diverged=False), "VOID", False),
+        ("H5 control, the sweep ran -> VOID", "H5", "control", h5(swept=True), "VOID", False),
+        ("H5 too few daemon ticks -> VOID", "H5", "fixed", h5(diverged=False, swept=True, ticks=2), "VOID", False),
         ("H5 CAS before kill -> VOID", "H5", "fixed", h5(cas=True), "VOID", False),
         ("H5 p1 not moved -> VOID", "H5", "fixed", h5(moved=False), "VOID", False),
+        ("H6 fixed, the UI write survives", "H6", "fixed", h6(), "PASS", True),
+        ("H6 control, the tombstone removed it", "H6", "control", h6(tomb="removed", served=False), "FAIL", True),
+        ("H6 fixed, removed anyway", "H6", "fixed", h6(tomb="removed", served=False), "FAIL", False),
+        ("H6 control, the UI write survived -> VOID", "H6", "control", h6(), "VOID", False),
+        ("H6 no adopt -> VOID", "H6", "control", h6(adopted=False, tomb="removed", served=False), "VOID", False),
+        ("H6 fixture failed -> VOID", "H6", "fixed", h6(fixture_ok=False), "VOID", False),
     ]
     failed = 0
     for name, leg, arm, files, want, meets in cases:
@@ -738,10 +819,13 @@ setup_leg() { # <leg> <arm>
   case "$ARM" in
     fixed) BIN=$FSYNC_FIXED ;;
     control)
-      [ "$LEG" != H5 ] || die "H5 has no control arm: it measures an OPEN residual on the fixed binary"
-      local var="FSYNC_CONTROL_$LEG"
-      BIN=${!var:-}
-      [ -n "$BIN" ] && [ -x "$BIN" ] || die "$var must name the control flint-sync for $LEG"
+      if [ "$LEG" = H5 ]; then
+        BIN=$FSYNC_FIXED   # H5's control is the sweep turned off, not another binary
+      else
+        local var="FSYNC_CONTROL_$LEG"
+        BIN=${!var:-}
+        [ -n "$BIN" ] && [ -x "$BIN" ] || die "$var must name the control flint-sync for $LEG"
+      fi
       ;;
     *) die "arm must be fixed|control" ;;
   esac
@@ -759,7 +843,8 @@ json.dump({"leg": "$LEG", "arm": "$ARM", "bucket": "$BUCKET", "endpoint": "$ENDP
   "writer_bin": "$BIN", "writer_bin_sha256": "$(sha "$BIN")",
   "oracle_bin": "$FSYNC_FIXED", "oracle_bin_sha256": "$(sha "$FSYNC_FIXED")",
   "gateway_bin": "${GATEWAY_BIN:-}", "hold_gc_secs": $HOLD_GC_SECS, "hold_commit_secs": $HOLD_COMMIT_SECS,
-  "wait_secs": $WAIT_SECS, "quiesce_rounds": $QUIESCE_ROUNDS, "h5_mode": "$H5_MODE", "h5_big_mb": $H5_BIG_MB},
+  "wait_secs": $WAIT_SECS, "quiesce_rounds": $QUIESCE_ROUNDS, "h5_mode": "$H5_MODE", "h5_big_mb": $H5_BIG_MB,
+  "h5_daemon_secs": $H5_DAEMON_SECS, "h5_sweep_secs": $H5_SWEEP_SECS, "h5_grace_secs": $H5_GRACE_SECS},
   open(sys.argv[1], "w"), indent=2)
 EOF
   echo "== $LEG $ARM  prefix=$PFX  writers=$BIN"
@@ -881,7 +966,7 @@ gateway_start() {
   mark G gateway start
   env -u FLINT_SYNC_ENDPOINT -u FLINT_LEAN_GW_ENDPOINT "${STORE_ENV[@]}" \
     FLINT_LEAN_GW_LISTEN="127.0.0.1:$GW_PORT" FLINT_LEAN_GW_BUCKET="$BUCKET" \
-    FLINT_LEAN_GW_TOKEN="$GW_TOKEN" FLINT_LEAN_GW_WORKSPACES="h3=$PFX" \
+    FLINT_LEAN_GW_TOKEN="$GW_TOKEN" FLINT_LEAN_GW_WORKSPACES="${GW_WS:-h3}=$PFX" \
     "$GATEWAY_BIN" >> "$LD/G.log" 2>&1 &
   GW_PID=$!
   local i
@@ -986,8 +1071,65 @@ leg_h5() {
   if grep -q '"ok":false' "$LD/facts.jsonl"; then void_now; return $?; fi
 
   writefile "$B/b.txt" "B works elsewhere $TS"
-  quiesce B
+  # B runs as the DAEMON: the floor tick is where finding 10's sweep lives, and
+  # one-shot barriers never run it. The control turns the sweep off and
+  # nothing else. Both run the same time; the oracles judge what is left.
+  local sweep=$H5_SWEEP_SECS bpid
+  [ "$ARM" = control ] && sweep=0
+  fs_bg B daemon "$BIN" "$B" run FLINT_SYNC_FLOOR_SECS=5 FLINT_SYNC_UNTRACKED_SWEEP_SECS="$sweep" \
+    FLINT_SYNC_UNTRACKED_GRACE_SECS="$H5_GRACE_SECS"; bpid=$BG_PID
+  sleep "$H5_DAEMON_SECS"
+  alive "$bpid" && fact b-daemon-alive true "ran ${H5_DAEMON_SECS}s" false || fact b-daemon-alive false "B's daemon exited early: $(tail -2 "$LD/B.log" | tr '\n' ' ')"
+  kill -TERM "$bpid" 2>/dev/null
+  bg_wait B daemon "$bpid" "$WAIT_SECS"; fact b-daemon-drain true "rc=$?" false
   finish_leg B
+}
+
+# ── H6: the queued tombstone over an adopted UI write (b52324fc) ─────────
+leg_h6() {
+  setup_leg H6 || { void_now; return $?; }
+  local A=$RUN/A B=$RUN/B code
+  fs A seed-checkout "$BIN" "$A" checkout || fact a-checkout false "exit $?"
+  writefile "$A/x.txt" "seed $TS"
+  writefile "$A/keep.txt" "keep $TS"
+  fs A seed-publish "$BIN" "$A" barrier || fact a-publish false "exit $?"
+  fs B seed-checkout "$BIN" "$B" checkout || fact b-checkout false "exit $?"
+  rm -f "$A/x.txt"
+  fs A first-absence "$BIN" "$A" barrier || fact a-first-absence false "exit $?"
+  fs A publish-delete "$BIN" "$A" barrier || fact a-publish-delete false "exit $?"
+  manifest "$LD/manifest.pre.json"
+  [ -z "$(jget "$LD/manifest.pre.json" 'd["entries"].get("x.txt",{}).get("etag")')" ] \
+    && fact delete-published true "" || fact delete-published false "the manifest still cites x.txt after A's two barriers"
+  # B's next barrier merges A's delete into B's LOCAL queue; the file stays until B's next consume.
+  fs B queue-tombstone "$BIN" "$B" barrier || fact b-queue-barrier false "exit $?"
+  [ "$(readfile "$B/x.txt")" = "seed $TS" ] && fact b-still-has-seed true "" \
+    || fact b-still-has-seed false "B/x.txt=$(readfile "$B/x.txt" | head -c 60)"
+  if python3 -c 'import json,sys; q=json.load(open(sys.argv[1])); sys.exit(0 if any(c.get("path")=="x.txt" and not c.get("etag") for c in q) else 1)' "$B/.flint-sync/foreign-queue.json" 2>/dev/null; then
+    fact b-queued-tombstone true ""
+  else
+    fact b-queued-tombstone false "B's foreign queue holds no deletion of x.txt: $(cat "$B/.flint-sync/foreign-queue.json" 2>/dev/null | head -c 200)"
+  fi
+  if grep -q '"ok":false' "$LD/facts.jsonl"; then void_now; return $?; fi
+
+  # The UI creates x.txt again (the key is absent: A's GC collected it) and is acked.
+  local HITL="re-created in the UI after A's delete $TS"
+  fact ui-sha true "$(printf '%s' "$HITL" | if command -v sha256sum >/dev/null; then sha256sum; else shasum -a 256; fi | cut -d' ' -f1)"
+  GW_WS=h6
+  if gateway_start; then
+    code=$(curl -sS -o "$LD/ui.put.json" -w '%{http_code}' -X PUT \
+      -H "Authorization: Bearer $GW_TOKEN" -H "If-None-Match: *" -H "x-flint-author: hostlegs" \
+      --data-binary "$HITL" "http://127.0.0.1:$GW_PORT/lean/v1/h6/files/x.txt" 2>> "$LD/G.log")
+    [ "$code" = 200 ] && fact ui-write true "200 $(cat "$LD/ui.put.json")" \
+      || fact ui-write false "HTTP $code $(cat "$LD/ui.put.json" 2>/dev/null)"
+  fi
+  gateway_stop
+  if grep -q '"ok":false' "$LD/facts.jsonl"; then void_now; return $?; fi
+
+  # B's consume adopts the UI write, then meets its queued deletion of x.txt.
+  fs B race-b "$BIN" "$B" barrier; fact b-race-exit true "rc=$?" false
+  manifest "$LD/manifest.race.json"
+  quiesce B A
+  finish_leg A B
 }
 
 # ── fakes3, local only ───────────────────────────────────────────────────
@@ -1023,6 +1165,7 @@ case "$CMD" in
   H2) leg_h2 ;;
   H3) leg_h3 ;;
   H5) leg_h5 ;;
+  H6) leg_h6 ;;
   probe)
     store_env
     [ -n "${FSYNC_FIXED:-}" ] && [ -x "$FSYNC_FIXED" ] || die "FSYNC_FIXED must name an executable flint-sync"

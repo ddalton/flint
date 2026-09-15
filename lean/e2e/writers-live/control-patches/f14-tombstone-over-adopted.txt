@@ -1,0 +1,14 @@
+name: f14-tombstone-over-adopted
+file: lean/syncer/src/barrier.rs
+leg: H6
+defect: the queued tombstone over an adopted UI write (b52324fc; model LeanBarrierLeaseQueueTombstoneOverHitl). A peer's deletion waits in this writer's queue; the UI re-creates the path; the consume adopts the UI write and then applies the queued deletion over it, and the window clear drops its inbox entry: an acked write cited by nothing and tracked by nothing.
+unit_test: a_ui_write_over_a_peers_delete_survives_the_queued_tombstone
+expect_fail: the acked UI write is tracked by nothing
+note: the key check's condition is made false, so every queued deletion of a file on disk is applied as before the fix. The block still compiles, so nothing else moves.
+=== OLD ===
+            if std::fs::symlink_metadata(&local).is_ok() {
+                match self.store.head(&self.cfg.file_key(&change.path)).await {
+=== NEW ===
+            if false && std::fs::symlink_metadata(&local).is_ok() {
+                match self.store.head(&self.cfg.file_key(&change.path)).await {
+=== END ===
