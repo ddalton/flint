@@ -4,9 +4,9 @@ leg: H2
 defect: F2, the adopt window (model LeanBarrierLeaseAdoptBlind). An upload whose 412 finds its own bytes already at the key adopts that OBSERVED etag with no lease; the peer's commit uncites the path and its GC deletes the object before the adopter's claim; the adopter cites an object that is gone.
 unit_test: an_adopted_upload_deleted_by_the_peer_before_the_claim_is_not_cited
 expect_fail: but the object is gone
-note: the loop header is rewritten so the body never runs; every observed citation goes to the CAS unchecked, as before the fix (ba4f53d9 had no observed set at all). The body still compiles, so nothing else moves.
+note: the commit-section re-read (now one HEAD per citation, finding 13's own PUTs included) skips every OBSERVED citation, so an adopted etag goes to the CAS unchecked and emits no `observed` event, as before the fix (ba4f53d9 had no observed set at all). Own PUTs are still re-read, so finding 13's fix does not move; the H2 signature needs `observed` absent for the adopted x.txt.
 === OLD ===
-            for path in &observed {
+                stream::iter(upserts.iter().map(|(path, cited)| async move {
 === NEW ===
-            for path in observed.iter().filter(|_| false) {
+                stream::iter(upserts.iter().filter(|(path, _)| !observed.contains(*path)).map(|(path, cited)| async move {
 === END ===
