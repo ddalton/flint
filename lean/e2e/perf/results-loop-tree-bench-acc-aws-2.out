@@ -1,0 +1,171 @@
+BACKING root /dev/nvme0n1p1 xfs free= 1.9G
+LAZYINIT root t=0 allocated_kib=4428
+LAZYINIT root t=10 allocated_kib=4428
+LAZYINIT root t=20 allocated_kib=4428
+LAZYINIT root t=30 allocated_kib=4428
+LAZYINIT root t=40 allocated_kib=4428
+LAZYINIT root t=50 allocated_kib=4428
+LAZYINIT root t=60 allocated_kib=4428
+{"backing":"root","layout":"plain","workload":"seqw_fsync","rep":1,"secs":1.862,"mib_s":137.5}
+{"backing":"root","layout":"plain","workload":"seqr_cold","rep":1,"secs":1.978,"mib_s":129.4}
+{"backing":"root","layout":"plain","workload":"seqw_buf","rep":1,"secs":0.316,"mib_s":810.1}
+{"backing":"root","layout":"plain","workload":"small","rep":1,"secs":0.439,"files_s":11390}
+{"backing":"root","layout":"plain","workload":"randw_sync","rep":1,"secs":15,"iops":563}
+{"backing":"root","layout":"plain","workload":"seqw_fsync","rep":2,"secs":1.489,"mib_s":171.9}
+{"backing":"root","layout":"plain","workload":"seqr_cold","rep":2,"secs":1.957,"mib_s":130.8}
+{"backing":"root","layout":"plain","workload":"seqw_buf","rep":2,"secs":0.327,"mib_s":782.9}
+{"backing":"root","layout":"plain","workload":"small","rep":2,"secs":0.431,"files_s":11601}
+{"backing":"root","layout":"plain","workload":"randw_sync","rep":2,"secs":15,"iops":563}
+{"backing":"root","layout":"plain","workload":"seqw_fsync","rep":3,"secs":1.38,"mib_s":185.5}
+{"backing":"root","layout":"plain","workload":"seqr_cold","rep":3,"secs":1.957,"mib_s":130.8}
+{"backing":"root","layout":"plain","workload":"seqw_buf","rep":3,"secs":0.323,"mib_s":792.6}
+{"backing":"root","layout":"plain","workload":"small","rep":3,"secs":0.501,"files_s":9980}
+{"backing":"root","layout":"plain","workload":"randw_sync","rep":3,"secs":15,"iops":564}
+{"backing":"root","layout":"plain","workload":"seqw_fsync","rep":4,"secs":1.376,"mib_s":186.0}
+{"backing":"root","layout":"plain","workload":"seqr_cold","rep":4,"secs":1.943,"mib_s":131.8}
+{"backing":"root","layout":"plain","workload":"seqw_buf","rep":4,"secs":0.316,"mib_s":810.1}
+{"backing":"root","layout":"plain","workload":"small","rep":4,"secs":0.438,"files_s":11416}
+{"backing":"root","layout":"plain","workload":"randw_sync","rep":4,"secs":15,"iops":564}
+{"backing":"root","layout":"plain","workload":"seqw_fsync","rep":5,"secs":1.376,"mib_s":186.0}
+{"backing":"root","layout":"plain","workload":"seqr_cold","rep":5,"secs":2.082,"mib_s":123.0}
+{"backing":"root","layout":"plain","workload":"seqw_buf","rep":5,"secs":0.321,"mib_s":797.5}
+{"backing":"root","layout":"plain","workload":"small","rep":5,"secs":0.497,"files_s":10060}
+{"backing":"root","layout":"plain","workload":"randw_sync","rep":5,"secs":15,"iops":557}
+SETTLED root loop after 40s at allocated_kib=4428
+{"backing":"root","layout":"loop","workload":"seqw_fsync","rep":1,"secs":1.452,"mib_s":176.3}
+{"backing":"root","layout":"loop","workload":"seqr_cold","rep":1,"secs":1.961,"mib_s":130.5}
+{"backing":"root","layout":"loop","workload":"seqw_buf","rep":1,"secs":0.391,"mib_s":654.7}
+{"backing":"root","layout":"loop","workload":"small","rep":1,"secs":0.534,"files_s":9363}
+{"backing":"root","layout":"loop","workload":"randw_sync","rep":1,"secs":15,"iops":267}
+{"backing":"root","layout":"loop","workload":"seqw_fsync","rep":2,"secs":1.978,"mib_s":129.4}
+{"backing":"root","layout":"loop","workload":"seqr_cold","rep":2,"secs":1.932,"mib_s":132.5}
+{"backing":"root","layout":"loop","workload":"seqw_buf","rep":2,"secs":0.358,"mib_s":715.1}
+{"backing":"root","layout":"loop","workload":"small","rep":2,"secs":0.51,"files_s":9804}
+{"backing":"root","layout":"loop","workload":"randw_sync","rep":2,"secs":15,"iops":266}
+{"backing":"root","layout":"loop","workload":"seqw_fsync","rep":3,"secs":1.881,"mib_s":136.1}
+{"backing":"root","layout":"loop","workload":"seqr_cold","rep":3,"secs":1.951,"mib_s":131.2}
+{"backing":"root","layout":"loop","workload":"seqw_buf","rep":3,"secs":0.34,"mib_s":752.9}
+{"backing":"root","layout":"loop","workload":"small","rep":3,"secs":0.491,"files_s":10183}
+{"backing":"root","layout":"loop","workload":"randw_sync","rep":3,"secs":15,"iops":329}
+{"backing":"root","layout":"loop","workload":"seqw_fsync","rep":4,"secs":2.586,"mib_s":99.0}
+{"backing":"root","layout":"loop","workload":"seqr_cold","rep":4,"secs":2.699,"mib_s":94.8}
+{"backing":"root","layout":"loop","workload":"seqw_buf","rep":4,"secs":0.364,"mib_s":703.3}
+{"backing":"root","layout":"loop","workload":"small","rep":4,"secs":0.652,"files_s":7669}
+{"backing":"root","layout":"loop","workload":"randw_sync","rep":4,"secs":15,"iops":328}
+{"backing":"root","layout":"loop","workload":"seqw_fsync","rep":5,"secs":2.412,"mib_s":106.1}
+{"backing":"root","layout":"loop","workload":"seqr_cold","rep":5,"secs":2.486,"mib_s":103.0}
+{"backing":"root","layout":"loop","workload":"seqw_buf","rep":5,"secs":0.344,"mib_s":744.2}
+{"backing":"root","layout":"loop","workload":"small","rep":5,"secs":0.523,"files_s":9560}
+{"backing":"root","layout":"loop","workload":"randw_sync","rep":5,"secs":15,"iops":329}
+SETTLED root loopdio after 40s at allocated_kib=4428
+{"backing":"root","layout":"loopdio","workload":"seqw_fsync","rep":1,"secs":1.393,"mib_s":183.8}
+{"backing":"root","layout":"loopdio","workload":"seqr_cold","rep":1,"secs":1.967,"mib_s":130.1}
+{"backing":"root","layout":"loopdio","workload":"seqw_buf","rep":1,"secs":0.34,"mib_s":752.9}
+{"backing":"root","layout":"loopdio","workload":"small","rep":1,"secs":0.488,"files_s":10246}
+{"backing":"root","layout":"loopdio","workload":"randw_sync","rep":1,"secs":15,"iops":221}
+{"backing":"root","layout":"loopdio","workload":"seqw_fsync","rep":2,"secs":1.434,"mib_s":178.5}
+{"backing":"root","layout":"loopdio","workload":"seqr_cold","rep":2,"secs":1.961,"mib_s":130.5}
+{"backing":"root","layout":"loopdio","workload":"seqw_buf","rep":2,"secs":0.34,"mib_s":752.9}
+{"backing":"root","layout":"loopdio","workload":"small","rep":2,"secs":0.744,"files_s":6720}
+{"backing":"root","layout":"loopdio","workload":"randw_sync","rep":2,"secs":15,"iops":224}
+{"backing":"root","layout":"loopdio","workload":"seqw_fsync","rep":3,"secs":1.431,"mib_s":178.9}
+{"backing":"root","layout":"loopdio","workload":"seqr_cold","rep":3,"secs":1.947,"mib_s":131.5}
+{"backing":"root","layout":"loopdio","workload":"seqw_buf","rep":3,"secs":0.333,"mib_s":768.8}
+{"backing":"root","layout":"loopdio","workload":"small","rep":3,"secs":0.492,"files_s":10163}
+{"backing":"root","layout":"loopdio","workload":"randw_sync","rep":3,"secs":15,"iops":246}
+{"backing":"root","layout":"loopdio","workload":"seqw_fsync","rep":4,"secs":1.797,"mib_s":142.5}
+{"backing":"root","layout":"loopdio","workload":"seqr_cold","rep":4,"secs":2.022,"mib_s":126.6}
+{"backing":"root","layout":"loopdio","workload":"seqw_buf","rep":4,"secs":0.35,"mib_s":731.4}
+{"backing":"root","layout":"loopdio","workload":"small","rep":4,"secs":0.453,"files_s":11038}
+{"backing":"root","layout":"loopdio","workload":"randw_sync","rep":4,"secs":15,"iops":262}
+{"backing":"root","layout":"loopdio","workload":"seqw_fsync","rep":5,"secs":1.768,"mib_s":144.8}
+{"backing":"root","layout":"loopdio","workload":"seqr_cold","rep":5,"secs":2.054,"mib_s":124.6}
+{"backing":"root","layout":"loopdio","workload":"seqw_buf","rep":5,"secs":0.343,"mib_s":746.4}
+{"backing":"root","layout":"loopdio","workload":"small","rep":5,"secs":0.467,"files_s":10707}
+{"backing":"root","layout":"loopdio","workload":"randw_sync","rep":5,"secs":15,"iops":269}
+BACKING nvme /dev/nvme1n1 ext4 free= 407G
+LAZYINIT nvme t=0 allocated_kib=4428
+LAZYINIT nvme t=10 allocated_kib=4428
+LAZYINIT nvme t=20 allocated_kib=4428
+LAZYINIT nvme t=30 allocated_kib=4428
+LAZYINIT nvme t=40 allocated_kib=4428
+LAZYINIT nvme t=50 allocated_kib=4428
+LAZYINIT nvme t=60 allocated_kib=4428
+{"backing":"nvme","layout":"plain","workload":"seqw_fsync","rep":1,"secs":8.048,"mib_s":254.5}
+{"backing":"nvme","layout":"plain","workload":"seqr_cold","rep":1,"secs":4.662,"mib_s":439.3}
+{"backing":"nvme","layout":"plain","workload":"seqw_buf","rep":1,"secs":0.763,"mib_s":2684.1}
+{"backing":"nvme","layout":"plain","workload":"small","rep":1,"secs":1.654,"files_s":12092}
+{"backing":"nvme","layout":"plain","workload":"randw_sync","rep":1,"secs":15,"iops":25256}
+{"backing":"nvme","layout":"plain","workload":"seqw_fsync","rep":2,"secs":7.29,"mib_s":280.9}
+{"backing":"nvme","layout":"plain","workload":"seqr_cold","rep":2,"secs":5.293,"mib_s":386.9}
+{"backing":"nvme","layout":"plain","workload":"seqw_buf","rep":2,"secs":0.749,"mib_s":2734.3}
+{"backing":"nvme","layout":"plain","workload":"small","rep":2,"secs":1.373,"files_s":14567}
+{"backing":"nvme","layout":"plain","workload":"randw_sync","rep":2,"secs":15,"iops":25009}
+{"backing":"nvme","layout":"plain","workload":"seqw_fsync","rep":3,"secs":6.763,"mib_s":302.8}
+{"backing":"nvme","layout":"plain","workload":"seqr_cold","rep":3,"secs":5.253,"mib_s":389.9}
+{"backing":"nvme","layout":"plain","workload":"seqw_buf","rep":3,"secs":0.733,"mib_s":2794.0}
+{"backing":"nvme","layout":"plain","workload":"small","rep":3,"secs":1.356,"files_s":14749}
+{"backing":"nvme","layout":"plain","workload":"randw_sync","rep":3,"secs":15,"iops":25058}
+{"backing":"nvme","layout":"plain","workload":"seqw_fsync","rep":4,"secs":7.246,"mib_s":282.6}
+{"backing":"nvme","layout":"plain","workload":"seqr_cold","rep":4,"secs":5.26,"mib_s":389.4}
+{"backing":"nvme","layout":"plain","workload":"seqw_buf","rep":4,"secs":0.755,"mib_s":2712.6}
+{"backing":"nvme","layout":"plain","workload":"small","rep":4,"secs":1.352,"files_s":14793}
+{"backing":"nvme","layout":"plain","workload":"randw_sync","rep":4,"secs":15,"iops":25067}
+{"backing":"nvme","layout":"plain","workload":"seqw_fsync","rep":5,"secs":6.736,"mib_s":304.0}
+{"backing":"nvme","layout":"plain","workload":"seqr_cold","rep":5,"secs":5.223,"mib_s":392.1}
+{"backing":"nvme","layout":"plain","workload":"seqw_buf","rep":5,"secs":0.76,"mib_s":2694.7}
+{"backing":"nvme","layout":"plain","workload":"small","rep":5,"secs":1.337,"files_s":14959}
+{"backing":"nvme","layout":"plain","workload":"randw_sync","rep":5,"secs":15,"iops":25195}
+SETTLED nvme loop after 40s at allocated_kib=4428
+{"backing":"nvme","layout":"loop","workload":"seqw_fsync","rep":1,"secs":7.519,"mib_s":272.4}
+{"backing":"nvme","layout":"loop","workload":"seqr_cold","rep":1,"secs":5.283,"mib_s":387.7}
+{"backing":"nvme","layout":"loop","workload":"seqw_buf","rep":1,"secs":1.339,"mib_s":1529.5}
+{"backing":"nvme","layout":"loop","workload":"small","rep":1,"secs":1.605,"files_s":12461}
+{"backing":"nvme","layout":"loop","workload":"randw_sync","rep":1,"secs":15,"iops":13813}
+{"backing":"nvme","layout":"loop","workload":"seqw_fsync","rep":2,"secs":6.875,"mib_s":297.9}
+{"backing":"nvme","layout":"loop","workload":"seqr_cold","rep":2,"secs":5.328,"mib_s":384.4}
+{"backing":"nvme","layout":"loop","workload":"seqw_buf","rep":2,"secs":2.325,"mib_s":880.9}
+{"backing":"nvme","layout":"loop","workload":"small","rep":2,"secs":1.571,"files_s":12731}
+{"backing":"nvme","layout":"loop","workload":"randw_sync","rep":2,"secs":15,"iops":14941}
+{"backing":"nvme","layout":"loop","workload":"seqw_fsync","rep":3,"secs":7.707,"mib_s":265.7}
+{"backing":"nvme","layout":"loop","workload":"seqr_cold","rep":3,"secs":4.766,"mib_s":429.7}
+{"backing":"nvme","layout":"loop","workload":"seqw_buf","rep":3,"secs":1.336,"mib_s":1532.9}
+{"backing":"nvme","layout":"loop","workload":"small","rep":3,"secs":1.643,"files_s":12173}
+{"backing":"nvme","layout":"loop","workload":"randw_sync","rep":3,"secs":15,"iops":14588}
+{"backing":"nvme","layout":"loop","workload":"seqw_fsync","rep":4,"secs":7.157,"mib_s":286.2}
+{"backing":"nvme","layout":"loop","workload":"seqr_cold","rep":4,"secs":5.456,"mib_s":375.4}
+{"backing":"nvme","layout":"loop","workload":"seqw_buf","rep":4,"secs":1.311,"mib_s":1562.2}
+{"backing":"nvme","layout":"loop","workload":"small","rep":4,"secs":1.531,"files_s":13063}
+{"backing":"nvme","layout":"loop","workload":"randw_sync","rep":4,"secs":15,"iops":15266}
+{"backing":"nvme","layout":"loop","workload":"seqw_fsync","rep":5,"secs":7.49,"mib_s":273.4}
+{"backing":"nvme","layout":"loop","workload":"seqr_cold","rep":5,"secs":5.174,"mib_s":395.8}
+{"backing":"nvme","layout":"loop","workload":"seqw_buf","rep":5,"secs":1.269,"mib_s":1613.9}
+{"backing":"nvme","layout":"loop","workload":"small","rep":5,"secs":1.612,"files_s":12407}
+{"backing":"nvme","layout":"loop","workload":"randw_sync","rep":5,"secs":15,"iops":16129}
+SETTLED nvme loopdio after 40s at allocated_kib=4428
+{"backing":"nvme","layout":"loopdio","workload":"seqw_fsync","rep":1,"secs":7.109,"mib_s":288.1}
+{"backing":"nvme","layout":"loopdio","workload":"seqr_cold","rep":1,"secs":5.26,"mib_s":389.4}
+{"backing":"nvme","layout":"loopdio","workload":"seqw_buf","rep":1,"secs":0.727,"mib_s":2817.1}
+{"backing":"nvme","layout":"loopdio","workload":"small","rep":1,"secs":1.347,"files_s":14848}
+{"backing":"nvme","layout":"loopdio","workload":"randw_sync","rep":1,"secs":15,"iops":13599}
+{"backing":"nvme","layout":"loopdio","workload":"seqw_fsync","rep":2,"secs":6.699,"mib_s":305.7}
+{"backing":"nvme","layout":"loopdio","workload":"seqr_cold","rep":2,"secs":5.285,"mib_s":387.5}
+{"backing":"nvme","layout":"loopdio","workload":"seqw_buf","rep":2,"secs":0.76,"mib_s":2694.7}
+{"backing":"nvme","layout":"loopdio","workload":"small","rep":2,"secs":1.381,"files_s":14482}
+{"backing":"nvme","layout":"loopdio","workload":"randw_sync","rep":2,"secs":15,"iops":14390}
+{"backing":"nvme","layout":"loopdio","workload":"seqw_fsync","rep":3,"secs":6.903,"mib_s":296.7}
+{"backing":"nvme","layout":"loopdio","workload":"seqr_cold","rep":3,"secs":5.304,"mib_s":386.1}
+{"backing":"nvme","layout":"loopdio","workload":"seqw_buf","rep":3,"secs":0.769,"mib_s":2663.2}
+{"backing":"nvme","layout":"loopdio","workload":"small","rep":3,"secs":1.374,"files_s":14556}
+{"backing":"nvme","layout":"loopdio","workload":"randw_sync","rep":3,"secs":15,"iops":14639}
+{"backing":"nvme","layout":"loopdio","workload":"seqw_fsync","rep":4,"secs":6.873,"mib_s":298.0}
+{"backing":"nvme","layout":"loopdio","workload":"seqr_cold","rep":4,"secs":5.269,"mib_s":388.7}
+{"backing":"nvme","layout":"loopdio","workload":"seqw_buf","rep":4,"secs":0.742,"mib_s":2760.1}
+{"backing":"nvme","layout":"loopdio","workload":"small","rep":4,"secs":1.434,"files_s":13947}
+{"backing":"nvme","layout":"loopdio","workload":"randw_sync","rep":4,"secs":15,"iops":14258}
+{"backing":"nvme","layout":"loopdio","workload":"seqw_fsync","rep":5,"secs":6.9,"mib_s":296.8}
+{"backing":"nvme","layout":"loopdio","workload":"seqr_cold","rep":5,"secs":5.608,"mib_s":365.2}
+{"backing":"nvme","layout":"loopdio","workload":"seqw_buf","rep":5,"secs":0.836,"mib_s":2449.8}
+{"backing":"nvme","layout":"loopdio","workload":"small","rep":5,"secs":1.437,"files_s":13918}
+{"backing":"nvme","layout":"loopdio","workload":"randw_sync","rep":5,"secs":15,"iops":16522}
+DONE
