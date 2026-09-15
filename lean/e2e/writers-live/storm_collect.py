@@ -102,16 +102,23 @@ json.dump({p: {"etag": e} for p, e in (m.get("heads") or {}).items()}, open(os.p
 # 4. the listing and every preserved copy
 r = sh("aws", "s3api", "list-objects-v2", "--bucket", BUCKET, "--prefix", PFX + "/", "--output", "json", env=env)
 objs = (json.loads(r.stdout).get("Contents") or []) if r.returncode == 0 and r.stdout.strip() else []
+if r.returncode != 0:
+    facts["listing_error"] = r.stderr[-1000:]  # an unread listing is not an empty bucket
 listing = [{"key": o["Key"], "etag": o["ETag"], "size": o["Size"], "last_modified": o["LastModified"]} for o in objs]
 json.dump(listing, open(os.path.join(out, "bucket", "listing.json"), "w"))
 preserved = []
 pdir = os.path.join(out, "preserved"); os.makedirs(pdir, exist_ok=True)
+# ONE sync of the conflicts prefix: a CLI process per copy took node 0 over
+# eight minutes on a 300 s hot leg, past the other nodes' wait for the next go.
+CONFLICTS = f"{PFX}/.flint/lean/conflicts/"
+r = sh("aws", "s3", "sync", "--quiet", f"s3://{BUCKET}/{CONFLICTS}", pdir, env=env)
+if r.returncode != 0:
+    facts["preserved_sync_error"] = r.stderr[-1000:]
 for o in listing:
-    if "/.flint/lean/conflicts/" not in o["key"]:
+    if not o["key"].startswith(CONFLICTS):
         continue
-    dst = os.path.join(pdir, hashlib.sha1(o["key"].encode()).hexdigest())
-    sh("aws", "s3", "cp", "--quiet", f"s3://{BUCKET}/{o['key']}", dst, env=env)
-    h = hashlib.sha256(open(dst, "rb").read()).hexdigest() if os.path.exists(dst) else None
+    dst = os.path.join(pdir, o["key"][len(CONFLICTS):])
+    h = hashlib.sha256(open(dst, "rb").read()).hexdigest() if os.path.isfile(dst) else None
     preserved.append({"key": o["key"], "etag": o["etag"], "sha256": h})
 json.dump(preserved, open(os.path.join(out, "bucket", "preserved.json"), "w"))
 
@@ -125,6 +132,10 @@ try:
 except ValueError:
     verdict = {"pass": False, "oracle_stdout": r.stdout[-3000:], "oracle_stderr": r.stderr[-3000:]}
 if facts["missing_nodes"]:
+    verdict["pass"] = False
+# An unread copy is not an absent one: O3 and O4 would judge a hole.
+if facts.get("listing_error") or facts.get("preserved_sync_error") or any(p["sha256"] is None for p in preserved):
+    facts["preserved_unread"] = [p["key"] for p in preserved if p["sha256"] is None]
     verdict["pass"] = False
 verdict["facts"] = facts
 verdict["counts"] = {"agents": len(agents), "citations": len(m.get("entries") or {}), "objects": len(listing),

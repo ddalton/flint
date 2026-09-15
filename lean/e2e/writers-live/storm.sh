@@ -19,6 +19,8 @@
 #   RIG (this directory)  ROOT (/mnt/nvme/storm)  AWS_REGION (us-west-1)
 #   NODES (3)  WRITERS_PER_NODE (2)  MODE (hot)  UI (1)  KILLS (0)
 #   FLOOR (5)  LOAD_SECS (300)  IDLE_SECS (30)  GO_WAIT_SECS (900)
+#   GO_FOLLOW_SECS (2700: nodes 1.. wait this long for go, which node 0 writes
+#   only after judging the previous leg)
 #
 # S3 layout: s3://$BUCKET/_rig/storm/<leg>/{ready-<n>,go,done-<n>,node-<n>.tgz,verdict.json,collect.tgz}
 set -uo pipefail
@@ -39,6 +41,7 @@ FLOOR=${FLOOR:-5}
 LOAD_SECS=${LOAD_SECS:-300}
 IDLE_SECS=${IDLE_SECS:-30}
 GO_WAIT_SECS=${GO_WAIT_SECS:-900}
+GO_FOLLOW_SECS=${GO_FOLLOW_SECS:-2700}
 GW_PORT=${GW_PORT:-18092}
 GW_TOKEN=${GW_TOKEN:-storm-drill-token-0123456789abcdef}
 export AWS_REGION
@@ -110,7 +113,7 @@ if [ "$NODE" = 0 ]; then
   done
   touch_s3 "$S3/go"
 else
-  deadline=$(( $(date +%s) + GO_WAIT_SECS ))
+  deadline=$(( $(date +%s) + GO_FOLLOW_SECS ))
   until s3_exists "$S3/go"; do
     s3_exists "$S3/go-void" && { log "the leg was voided"; exit 1; }
     [ "$(date +%s)" -lt "$deadline" ] || { log "no go signal"; exit 1; }
