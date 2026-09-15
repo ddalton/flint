@@ -21,6 +21,8 @@
 #   FLOOR (5)  LOAD_SECS (300)  IDLE_SECS (30)  GO_WAIT_SECS (900)
 #   GO_FOLLOW_SECS (2700: nodes 1.. wait this long for go, which node 0 writes
 #   only after judging the previous leg)
+#   SETTLE_MAX_SECS (600: after every node's actors stop, node 0 waits for the
+#   manifest pointer to hold still for 3 floor ticks before the idle)
 #
 # S3 layout: s3://$BUCKET/_rig/storm/<leg>/{ready-<n>,go,done-<n>,node-<n>.tgz,verdict.json,collect.tgz}
 set -uo pipefail
@@ -42,6 +44,7 @@ LOAD_SECS=${LOAD_SECS:-300}
 IDLE_SECS=${IDLE_SECS:-30}
 GO_WAIT_SECS=${GO_WAIT_SECS:-900}
 GO_FOLLOW_SECS=${GO_FOLLOW_SECS:-2700}
+SETTLE_MAX_SECS=${SETTLE_MAX_SECS:-600}
 GW_PORT=${GW_PORT:-18092}
 GW_TOKEN=${GW_TOKEN:-storm-drill-token-0123456789abcdef}
 export AWS_REGION
@@ -201,6 +204,30 @@ for n in $(seq 0 $((NODES - 1))); do
   done
 done
 phase all_quiet
+# The idle ends when the BUCKET stops moving, not on a timer: a churn leg with
+# faults still publishes its backlog of parked paths minutes after the agents
+# stop, and a peer's change needs the barrier that queues it AND the consume
+# after it (storm R3-S5, 2026-09-15: the last CAS landed 4 s before the drain
+# and three trees kept a file the manifest no longer had). Node 0 watches the
+# pointer; every node then runs two more floor ticks before draining.
+if [ "$NODE" = 0 ]; then
+  ptr_etag() { aws s3api head-object --bucket "$BUCKET" --key "$PFX/.flint/lean/current" --query ETag --output text 2>/dev/null || echo none; }
+  quiet_polls=0; last=$(ptr_etag); deadline=$(( $(date +%s) + SETTLE_MAX_SECS ))
+  while [ "$quiet_polls" -lt 3 ]; do
+    sleep "$FLOOR"
+    now=$(ptr_etag)
+    if [ "$now" = "$last" ]; then quiet_polls=$((quiet_polls + 1)); else quiet_polls=0; last=$now; fi
+    [ "$(date +%s)" -lt "$deadline" ] || { log "the bucket never settled in ${SETTLE_MAX_SECS}s"; phase unsettled; break; }
+  done
+  touch_s3 "$S3/settled"
+else
+  deadline=$(( $(date +%s) + SETTLE_MAX_SECS + 120 ))
+  until s3_exists "$S3/settled"; do
+    [ "$(date +%s)" -lt "$deadline" ] || { log "no settled signal"; phase unsettled; break; }
+    sleep 3
+  done
+fi
+phase settled
 sleep "$IDLE_SECS"
 phase idle_end
 for i in $(seq 0 $((WRITERS_PER_NODE - 1))); do kill -TERM "$(cat "$RUN/w$i/sync.pid")" 2>/dev/null; done

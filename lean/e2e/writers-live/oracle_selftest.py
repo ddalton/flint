@@ -314,6 +314,22 @@ def nf_noop_write_then_earlier_delete(g, noop=True):
     g.final.pop("hot/p09.txt", None)
 
 
+def nf_ui_error_write_landed(g, landed=True):
+    # the UI's acked X, then its own write Y on base X answered with a 5xx
+    # (status error): Y's bytes are in a preserved copy, so X was replaced.
+    # Control: Y's bytes are nowhere, so X is lost.
+    X, Y = H("EX"), H("EY")
+    g.op("ui", 5, 7000, "write", "hot/p06.txt", "ui-5", X)
+    g.ack("ui", 7100, "ui-5", "ok", etag='"e-ex"')
+    g.op("ui", 6, 7600, "write", "hot/p06.txt", "ui-6", Y, base=X)
+    g.ack("ui", 7700, "ui-6", "error")
+    if landed:
+        u = "44444444-4444-4444-4444-444444444444"
+        g.preserved.append({"key": ckey(u, "hot/p06.txt"), "etag": '"e-ey"', "sha256": Y})
+        g.conflicts["a1"].append({"path": "hot/p06.txt", "foreign_etag": '"e-ey"', "preserved_key": ckey(u, "hot/p06.txt"),
+                                  "kind": "upload-412-preserved", "at_unix": 9})
+
+
 def f_replaced_chain_broken(g):
     # acked X rewritten to Y (base X, unacked); the final Z is based on something else
     X, Y, Z = H("BX"), H("BY"), H("BZ")
@@ -592,6 +608,10 @@ SCENARIOS = [
      nf_noop_write_then_earlier_delete, set()),
     ("a-noop-write-earlier-delete/ctl", "control", "same, the rewrite carries NEW bytes",
      lambda g: nf_noop_write_then_earlier_delete(g, noop=False), {"O3"}),
+    ("a-ui-error-write-landed", "non-fault", "the UI's acked X, its own Y on base X answered 5xx, Y preserved",
+     nf_ui_error_write_landed, set(), lambda v: v["oracles"]["O3"]["details"]["accounted"]["replaced"] >= 1),
+    ("a-ui-error-write-landed/ctl", "control", "same, Y's bytes are nowhere",
+     lambda g: nf_ui_error_write_landed(g, landed=False), {"O3"}),
     ("a-replaced-chain-broken", "fault", "acked X -> Y unacked, final Z not based on Y", f_replaced_chain_broken, {"O3"}),
     ("a-replaced-by-earlier-op", "fault", "the op based on X is journaled before X", f_replaced_by_an_earlier_op, {"O3"}),
     ("a-mv-destination-lost", "fault", "a mv's `to` content is gone", f_mv_destination_lost, {"O3"}),

@@ -21,7 +21,8 @@ O3  every acked op part with content h (a write; the `to` half of a mv) is
     accounted for: the checkout's content for the path is h; OR a LATER acked
     op part on the same path has base == h; OR a preserved copy OF THAT PATH
     has sha256 h; OR h was REPLACED: a chain of op parts on the path, acked or
-    merely unanswered, or a syncer's DROPPED write (withheld, left dirty, published
+    merely unanswered (no ack, or a UI write answered with a 5xx or transport
+    `error`: never a REFUSED one), or a syncer's DROPPED write (withheld, left dirty, published
     later; never refused or any other failure the writer was told of), each LATER
     than and based on the one before (a delete's content is
     `absent`), starts at h and ends at the checkout's content (or a delete,
@@ -372,15 +373,18 @@ def oracle_o3(leg, slack_ms=0):
         by_path[p["path"]].append(p)
 
     def may_replace(y):
-        # a writer TOLD its op failed (refused, any status but a missing ack)
-        # never meant to replace anything: finding 12 was a refused UI write
-        # whose PUT had landed anyway. A syncer's partial ack is not that: a
+        # a writer TOLD its op failed (REFUSED: the gateway's 409/412 promises
+        # "not written") never meant to replace anything: finding 12 was a
+        # refused UI write whose PUT had landed anyway. A 5xx or transport
+        # `error` is not that promise — the write may have landed, and storm
+        # R3-S5 (2026-09-15) had one whose bytes are in a preserved copy — so
+        # it links like an unanswered op, on the same evidence. A syncer's partial ack is not that: a
         # DROPPED write is withheld from this boundary and left dirty in the
         # agent's tree for the next barrier to publish (storm S0, 2026-09-15:
         # four writes based on X, dropped, then final or preserved, read as
         # losses of X). It links only where its content is shown to have
         # landed, which `replaced` requires of the chain's end.
-        return y["acked"] or y["why"] in ("no-ack", "no-ack-line") or (
+        return y["acked"] or y["why"] in ("no-ack", "no-ack-line", "error") or (
             y["why"] == "dropped" and y["agent"] != "ui")
 
     def noop(x):

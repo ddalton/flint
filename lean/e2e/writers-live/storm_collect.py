@@ -58,6 +58,7 @@ faults = [p for p in phases if p["ev"] == "fault"]
 facts["faults"] = faults
 facts["undrained"] = [p for p in phases if p["ev"] in ("undrained", "writer_died")]
 facts["unquiet"] = [p for p in phases if p["ev"] == "unquiet"]  # a node drained before every node's actors stopped
+facts["unsettled"] = [p for p in phases if p["ev"] == "unsettled"]  # the bucket was still moving when the idle began
 
 agents = sorted(os.path.basename(a) for a in glob.glob(os.path.join(out, "agents", "*")))
 def t(ev, pick):
@@ -132,7 +133,7 @@ try:
     verdict = json.loads(r.stdout)
 except ValueError:
     verdict = {"pass": False, "oracle_stdout": r.stdout[-3000:], "oracle_stderr": r.stderr[-3000:]}
-if facts["missing_nodes"] or facts["unquiet"]:
+if facts["missing_nodes"] or facts["unquiet"] or facts["unsettled"]:
     verdict["pass"] = False
 # An unread copy is not an absent one: O3 and O4 would judge a hole.
 if facts.get("listing_error") or facts.get("preserved_sync_error") or any(p["sha256"] is None for p in preserved):
