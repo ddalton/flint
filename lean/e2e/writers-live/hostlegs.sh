@@ -334,9 +334,16 @@ def guard_h1(ld, arm, m_race):
     fixed_why = f"A's GC result={gc.get('result')} head={norm(gc.get('head'))} (want skip at B's {norm(put.get('etag'))})"
     ent = (m_race or {}).get("entries", {}).get("x.txt")
     head = (m_race or {}).get("heads", {}).get("x.txt", "absent")
-    sig = (gc.get("result") == "deleted" and ent is not None and norm(ent.get("etag")) == norm(put.get("etag")) and head is None)
+    dangling = (gc.get("result") == "deleted" and ent is not None and norm(ent.get("etag")) == norm(put.get("etag")) and head is None)
+    # The direct fingerprint, for when finding 13's re-read of every own PUT
+    # catches the damage downstream (the drill of 2026-09-15 read that as a
+    # VOID control): A's GC deleted, and B's commit found its PUT gone.
+    gone = next((e for e in b if e.get("ev") == "observed" and e.get("path") == "x.txt" and e.get("own_put") is True
+                 and e.get("still") is False and norm(e.get("etag")) == norm(put.get("etag")) and e["ts_ms"] >= gc["ts_ms"]), None)
+    sig = gc.get("result") == "deleted" and (dangling or gone is not None)
     sig_why = (f"F1 signature: A's GC deleted x.txt unconditionally (head {norm(gc.get('head'))}) after B's PUT "
-               f"{norm(put.get('etag'))} landed; B's commit cites it and HEAD is 404")
+               f"{norm(put.get('etag'))} landed; " + ("B's commit cites it and HEAD is 404" if dangling else
+               "B's commit-section re-read found the PUT gone and withheld it"))
     return True, [], ev, (fixed_ok, fixed_why), (sig, sig_why)
 
 def guard_h2(ld, arm, m_race):
@@ -492,8 +499,9 @@ LIVE = {"H1": ["A", "B"], "H2": ["A", "B"], "H3": ["A", "B"], "H5": ["B"], "H6":
 DEFECT = {"H1": "F1", "H2": "F2", "H3": "F3", "H5": "finding 10", "H6": "queued-tombstone"}
 # Legs whose harm no tree comparison sees: the fixed-arm check is an oracle of
 # its own (H6: an acked UI write that no tree and no checkout holds agrees
-# everywhere).
-EXTRA_ORACLE = {"H6"}
+# everywhere; H1: finding 13's re-read of every own PUT repairs F1's delete
+# downstream, so the trees agree and only A's GC outcome shows it).
+EXTRA_ORACLE = {"H6", "H1"}
 
 def verdict(leg, arm, ld):
     v = {"leg": leg, "arm": arm, "dir": ld}
@@ -591,11 +599,12 @@ def cmd_selftest(args):
     same = "aa  x.txt\nbb  keep.txt\n"
     base = {"probe.txt": "flint-sync: probe-conditional PASS — PUT (k) and DELETE (k2)", "C.checkout.rc": "0",
             "digest.A.txt": same, "digest.B.txt": same, "digest.C.txt": same, "facts.jsonl": ""}
-    def h1(put_t=2000, gc_res="skip", gc_head='"EB"', race_heads=None, final_heads=None, rc="0", digB=same):
+    def h1(put_t=2000, gc_res="skip", gc_head='"EB"', race_heads=None, final_heads=None, rc="0", digB=same, obs_still=None):
         A = "\n".join([mark("race-a", "start", 0), tr("a", "drill_hold", 500, where="gc", path="x.txt", secs=20),
                        tr("a", "gc", 20500, path="x.txt", head=gc_head, result=gc_res), mark("race-a", "exit", 20600, 0)])
-        B = "\n".join([mark("race-b", "start", 600), tr("b", "upload", put_t, path="x.txt", outcome="put", etag='"EB"'),
-                       mark("race-b", "exit", 21000, 0)])
+        obs = [] if obs_still is None else [tr("b", "observed", 20700, path="x.txt", etag='"EB"', own_put=True, still=obs_still)]
+        B = "\n".join([mark("race-b", "start", 600), tr("b", "upload", put_t, path="x.txt", outcome="put", etag='"EB"')]
+                      + obs + [mark("race-b", "exit", 21000, 0)])
         f = dict(base, **{"A.log": A, "B.log": B, "C.checkout.rc": rc, "digest.B.txt": digB})
         f["manifest.race.json"] = man({"x.txt": '"EB"'}, race_heads if race_heads is not None else {"x.txt": '"EB"'})
         f["manifest.final.json"] = man({"x.txt": '"EB"'}, final_heads if final_heads is not None else {"x.txt": '"EB"'})
@@ -673,6 +682,9 @@ def cmd_selftest(args):
         ("H1 control, F1 bites", "H1", "control", h1(gc_res="deleted", gc_head='"SEED"', race_heads={"x.txt": None}, final_heads={"x.txt": None}, rc="1"), "FAIL", True),
         ("H1 fixed, dangling anyway", "H1", "fixed", h1(gc_res="deleted", gc_head='"SEED"', race_heads={"x.txt": None}, final_heads={"x.txt": None}, rc="1"), "FAIL", False),
         ("H1 control passes -> VOID", "H1", "control", h1(), "VOID", False),
+        ("H1 control, F1 bites and the re-read withholds it", "H1", "control", h1(gc_res="deleted", gc_head='"SEED"', obs_still=False), "FAIL", True),
+        ("H1 control, GC deleted but B's PUT still there: no signature", "H1", "control", h1(gc_res="deleted", gc_head='"SEED"', obs_still=True), "FAIL", False),
+        ("H1 fixed, GC deleted and the re-read withheld -> FAIL", "H1", "fixed", h1(gc_res="deleted", gc_head='"SEED"', obs_still=False), "FAIL", False),
         ("H1 fixed, B's PUT after A's GC -> VOID (never a vacuous PASS)", "H1", "fixed", h1(put_t=21000), "VOID", False),
         ("H1 control, B's PUT after A's GC -> VOID", "H1", "control", h1(put_t=21000), "VOID", False),
         ("H1 control fails w/o signature", "H1", "control", h1(digB="zz  x.txt\nbb  keep.txt\n"), "FAIL", False),
