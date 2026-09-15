@@ -10186,6 +10186,64 @@ async fn a_peers_delete_reaches_the_other_writers_tree() {
     assert!(!m.entries.contains_key("x.txt"), "B resurrected the path A deleted");
 }
 
+/// A UI write that re-creates a path a peer deleted survives the deletion
+/// still waiting in the other writer's queue. The tombstone is OLDER than
+/// the write — B's merge queued it before the UI wrote the path again — so
+/// the consume that adopts the write must not then apply the tombstone
+/// over it: the window clear drops the write's inbox entry, and an acked
+/// write is left at its key, cited by nothing and tracked by nothing.
+/// Found by the formal model with the writer-local queue modelled
+/// (2026-09-15, `Inv_HITLTracked`, 19 steps).
+#[tokio::test]
+async fn a_ui_write_over_a_peers_delete_survives_the_queued_tombstone() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_b, dir_c) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "x.txt", "seed");
+    write(dir_a.path(), "keep.txt", "keep");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+
+    std::fs::remove_file(dir_a.path().join("x.txt")).unwrap();
+    a.run_barrier().await.unwrap();
+    a.run_barrier().await.unwrap();
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(!m.entries.contains_key("x.txt"), "fixture: A's delete never published");
+
+    // B's next barrier merges A's delete into its queue; the tree keeps the
+    // file until the consume after it.
+    b.run_barrier().await.unwrap();
+    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("seed"), "fixture: the deletion reached B's tree in the barrier that queued it");
+    assert!(
+        b.state.load_foreign_queue().unwrap().iter().any(|c| c.path == "x.txt" && c.etag.is_none()),
+        "fixture: B's queue holds no tombstone for x.txt"
+    );
+
+    // The UI writes the path again, and is acked.
+    hitl_write(&store, &a.cfg, "x.txt", "from the UI", "reviewer").await.unwrap();
+
+    b.run_barrier().await.unwrap();
+    for _ in 0..2 {
+        a.run_barrier().await.unwrap();
+        b.run_barrier().await.unwrap();
+    }
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let inbox_doc = inbox::load(store.as_ref(), &a.cfg).await.unwrap().doc;
+    let mut c = syncer(&store, dir_c.path()).await;
+    c.checkout().await.unwrap();
+    assert_eq!(
+        read(dir_c.path(), "x.txt").as_deref(),
+        Some("from the UI"),
+        "the acked UI write is tracked by nothing: manifest cites x.txt {:?}, inbox {:?}, A's tree {:?}, B's tree {:?}",
+        m.entries.get("x.txt").map(|e| e.etag.clone()),
+        inbox_doc.entries.iter().map(|e| e.path.clone()).collect::<Vec<_>>(),
+        read(dir_a.path(), "x.txt"),
+        read(dir_b.path(), "x.txt"),
+    );
+}
+
 /// Two IDLE writers settle. A barrier that finds the manifest moved but
 /// has nothing of its own to publish must not install a generation of its
 /// own — or the peer's next tick sees the manifest move, does the same,

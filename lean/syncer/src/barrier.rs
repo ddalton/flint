@@ -405,6 +405,27 @@ impl Syncer {
                 continue;
             }
             let local = self.cfg.root.join(&change.path);
+            // A key that holds an object has SUPERSEDED the deletion: a
+            // newer write — a UI write, another writer's re-create — landed
+            // after the merge that queued it, and the upserts above already
+            // drop an entry whose etag the key no longer holds. Applying it
+            // anyway removes the newer bytes from the tree, which this very
+            // consume may just have adopted — and the window clear then
+            // drops their inbox entry, leaving an acked write cited and
+            // tracked by nothing (found by the formal model with this queue
+            // modelled, 2026-09-15). Only a file still on disk needs the
+            // look: an absent one settles as it always did.
+            if std::fs::symlink_metadata(&local).is_ok() {
+                match self.store.head(&self.cfg.file_key(&change.path)).await {
+                    Ok(_) => {
+                        self.trace("tombstone", serde_json::json!({"path": change.path, "action": "superseded"}));
+                        settled.insert(change.path.clone());
+                        continue;
+                    }
+                    Err(StoreError::NotFound(_)) => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
             let be = baseline.entries.get(&change.path).cloned();
             let record = |kind: String| ConflictRecord {
                 path: change.path.clone(),

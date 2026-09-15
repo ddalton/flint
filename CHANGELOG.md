@@ -14,6 +14,24 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **lean: a UI write that re-created a path another writer had deleted
+  could be lost from the workspace (since 1.52.0).**
+  - *How:* the writer-local queue carries a peer's deletion to this
+    writer's tree, and the consume applied the queued deletion after the
+    inbox's entries, over whatever they had just adopted. The file went,
+    the window clear dropped the write's inbox entry, and the acked bytes
+    stayed at their key, cited by no manifest and tracked by nothing: no
+    agent's tree and no fresh checkout would ever show them.
+  - *The fix:* a queued deletion now applies only while the key is absent.
+    A key holding an object means a newer write superseded the deletion.
+    That is the rule the queue's upserts already followed; the cost is one
+    HEAD per queued deletion of a file still on disk.
+  - *Found by:* the formal model, the first time it modelled the queue
+    (`LeanBarrierLeaseQueueTombstoneOverHitl`, `Inv_HITLTracked`,
+    19 steps). No drill had reached it.
+  - *Pinned by:* `a_ui_write_over_a_peers_delete_survives_the_queued_tombstone`,
+    which fails on 1.54.0 with the write cited by nothing, in no inbox and
+    in no tree.
 - **flint-lean chart: the install notes' example workspace could not be
   mounted.** It set `endpoint: http://s3-proxy…` and `credentialsSecretRef`,
   a field nothing reads under CSI delivery (it named the webhook-era
