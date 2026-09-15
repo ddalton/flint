@@ -1,0 +1,110 @@
+# The local access drill's extra workspaces (local-access.sh), beside
+# acc-tenants.yaml.tpl rendered for the kind rig's MinIO.
+#
+# acc-door: the UDS door on, for G4 (a runsc tenant cannot reach a host
+# socket). acc-pt-local: acc-pt on MinIO, for O5. iso-*: one workspace per
+# identity mode, for the lean operator's AccessIsolation condition (I1, I2);
+# no pod ever mounts them.
+apiVersion: chert.us/v1alpha1
+kind: FlintLeanWorkspace
+metadata: { name: acc-door, namespace: s3-tenants }
+spec:
+  projectId: team-a/acc-door
+  bucket: s3bucket
+  keyPrefix: access/door
+  endpoint: http://minio.flint-system.svc:9000
+  region: us-east-1
+  floorSecs: 15
+  uid: 1001
+  gid: 1001
+  udsDoor: true
+  consumers:
+    serviceAccounts: [editor]
+---
+# acc-pt with the rig's endpoint (the EC2 template names none: real S3).
+apiVersion: chert.us/v1alpha1
+kind: FlintPassthroughMount
+metadata: { name: acc-pt-local, namespace: s3-tenants }
+spec:
+  bucket: s3bucket
+  keyPrefix: access/pt
+  endpoint: http://minio.flint-system.svc:9000
+  region: us-east-1
+  uid: 1001
+  gid: 1001
+  consumers:
+    serviceAccounts: [editor]
+    readOnlyServiceAccounts: [viewer]
+---
+apiVersion: chert.us/v1alpha1
+kind: FlintLeanWorkspace
+metadata: { name: iso-static, namespace: s3-tenants }
+spec:
+  projectId: team-a/iso-static
+  bucket: s3bucket
+  keyPrefix: iso/static
+  endpoint: http://minio.flint-system.svc:9000
+  region: us-east-1
+  identity: { mode: static }
+  consumers: { serviceAccounts: [editor], readOnlyServiceAccounts: [viewer] }
+---
+apiVersion: chert.us/v1alpha1
+kind: FlintLeanWorkspace
+metadata: { name: iso-ambient, namespace: s3-tenants }
+spec:
+  projectId: team-a/iso-ambient
+  bucket: s3bucket
+  keyPrefix: iso/ambient
+  endpoint: http://minio.flint-system.svc:9000
+  region: us-east-1
+  identity: { mode: ambient }
+  consumers: { serviceAccounts: [editor], readOnlyServiceAccounts: [viewer] }
+---
+apiVersion: chert.us/v1alpha1
+kind: FlintLeanWorkspace
+metadata: { name: iso-broker, namespace: s3-tenants }
+spec:
+  projectId: team-a/iso-broker
+  bucket: s3bucket
+  keyPrefix: iso/broker
+  endpoint: http://minio.flint-system.svc:9000
+  region: us-east-1
+  identity: { mode: broker }
+  consumers: { serviceAccounts: [editor], readOnlyServiceAccounts: [viewer] }
+---
+apiVersion: chert.us/v1alpha1
+kind: FlintLeanWorkspace
+metadata: { name: iso-webidentity, namespace: s3-tenants }
+spec:
+  projectId: team-a/iso-webidentity
+  bucket: s3bucket
+  keyPrefix: iso/webidentity
+  endpoint: http://minio.flint-system.svc:9000
+  region: us-east-1
+  identity: { mode: webIdentity }
+  consumers: { serviceAccounts: [editor], readOnlyServiceAccounts: [viewer] }
+---
+# No identity block: the default mode, broker.
+apiVersion: chert.us/v1alpha1
+kind: FlintLeanWorkspace
+metadata: { name: iso-default, namespace: s3-tenants }
+spec:
+  projectId: team-a/iso-default
+  bucket: s3bucket
+  keyPrefix: iso/default
+  endpoint: http://minio.flint-system.svc:9000
+  region: us-east-1
+  consumers: { serviceAccounts: [editor], readOnlyServiceAccounts: [viewer] }
+---
+# No consumers: no mount path at all, so no condition (the operator still
+# reconciles it, which the leg checks so an absent condition means something).
+apiVersion: chert.us/v1alpha1
+kind: FlintLeanWorkspace
+metadata: { name: iso-noconsumers, namespace: s3-tenants }
+spec:
+  projectId: team-a/iso-noconsumers
+  bucket: s3bucket
+  keyPrefix: iso/noconsumers
+  endpoint: http://minio.flint-system.svc:9000
+  region: us-east-1
+  identity: { mode: static }

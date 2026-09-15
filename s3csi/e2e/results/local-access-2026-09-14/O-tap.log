@@ -1,0 +1,4 @@
+{"session": "90204b3af7958dbf9a2acb54d318d23f", "action": "AssumeRoleWithWebIdentity", "policy": null, "status": 200}
+{"session": "670d64c4533559b74b43932146599516", "action": "AssumeRoleWithWebIdentity", "policy": null, "status": 200}
+{"session": "defdfff8884237804c919437ec094026", "action": "AssumeRoleWithWebIdentity", "policy": null, "status": 200}
+{"session": "0add3fa795cebb65f960a220b205e50b", "action": "AssumeRoleWithWebIdentity", "policy": "{\"Statement\":[{\"Action\":[\"s3:GetObject\",\"s3:GetObjectVersion\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:s3:::s3bucket/access/lean/*\"},{\"Action\":[\"s3:ListBucket\",\"s3:ListBucketVersions\"],\"Condition\":{\"StringLike\":{\"s3:prefix\":[\"access/lean\",\"access/lean/*\"]}},\"Effect\":\"Allow\",\"Resource\":\"arn:aws:s3:::s3bucket\"}],\"Version\":\"2012-10-17\"}", "status": 200}

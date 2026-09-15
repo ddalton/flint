@@ -1,0 +1,88 @@
+flint read access on the local kind rig — kind-flint-s3csi, node flint-s3csi-control-plane, arms: O G I
+evidence: /Users/ddalton/github/flint/s3csi/e2e/results/local-access-2026-09-14
+  ok: PRECONDITION: the other-prefix fixture exists and the aws-cli pod reads it
+
+── O0 — MinIO's STS trusts the cluster issuer, and without a session policy its role writes anywhere
+  ok: a token for another audience is refused:  aws: [ERROR]: An error occurred (InvalidParameterValue) when calling the AssumeRoleWithWebIdentity operation: STS JWT Token has `azp` claim invalid, `azp` must
+  ok: a token for s3.csi.chert.us is exchanged (MinIO verified it against the cluster's issuer)
+  ok: CONTROL: without a policy the role writes under the prefix
+  ok: CONTROL: without a policy the role reads another prefix
+
+── O1 — the broker's sts backend is MinIO's STS (through a logging tap), with MinIO's role
+  ok: broker /v1/status: backend sts, readEnforcement sessionPolicy
+
+── O2 — a mixed lean workspace: a writer and a reader, each keyed by MinIO's STS
+  ok: both pods Running (each checkout needed a key from MinIO's STS)
+  ok: ow: issued 'readWrite none -'
+  ok: orr: issued access=read enforcement=sessionPolicy
+
+── O2t — the tap's record: the reader's exchange carried flint's read policy, the writer's none
+  ok: the tap saw 4 exchanges, all 200: 1 with a policy, 3 without
+  ok: the policy flint sent: reads only, on s3bucket/access/lean/* (no s3:GetObjectAttributes)
+
+── O3 — the keys each worker HOLDS: the reader's read one prefix, the writer's write
+  ok: the reader's worker holds session keys
+  ok: reader's keys: PUT under the prefix denied
+  ok: reader's keys: DELETE under the prefix denied
+  ok: reader's keys: GET under the prefix allowed
+  ok: reader's keys: GET of another prefix denied
+  ok: CONTROL: the writer's keys PUT under the prefix
+
+── O4 — the writer's publish reaches the reader
+  ok: ow wrote and published o4.txt
+  ok: orr reads o4.txt
+  ok: orr: EROFS
+
+── O5 — passthrough on a read grant: mount-s3 reads under the policy without GetObjectAttributes
+  ok: pw writes through mount-s3
+  ok: pr: issued access=read enforcement=sessionPolicy
+  ok: pr reads pw's file through mount-s3 on the read grant
+  ok: pr cannot write: sh: can't create /workspace/from-pr.txt: Read-only file system
+
+── G1 — F7 under runsc: 1000 files, an immediate publish, every file cited at its size
+  ok: PRECONDITION: fg and gr run on gVisor's kernel, fc and fr on the host's
+  ok: fr has no f7g-220216 before fg publishes (the convergence check can fail)
+  ok: fg: 1000 files written, publish touched at once, ack ok
+  ok: the manifest cites all 1000 of fg's files at the size written
+  ok: fr (runc reader) has fg's 1000 files byte for byte (5766a619b995ba6bfd77f45ace61804b)
+
+── G1c — the same from a runc writer (F7's control)
+  ok: fr has no f7c-220216 before fc publishes (the convergence check can fail)
+  ok: fc: 1000 files written, publish touched at once, ack ok
+  ok: the manifest cites all 1000 of fc's files at the size written
+  ok: fr (runc reader) has fc's 1000 files byte for byte (5f64c1e564998519bc357e5e149a9a66)
+
+── G2 — a runsc reader: EROFS in the tree and in .flint/, and it reads the writer's bytes
+  ok: gr: EROFS in the tree
+  ok: gr: EROFS in .flint/
+  ok: gr reads fg's 1000 files byte for byte
+  ok: CONTROL: fg (runsc writer) writes
+
+── G3 — the runsc reader's host bind and its gofer's mount are ro; the runsc writer's are rw
+  ok: gr: host bind 'ro,nosuid,nodev,relatime /dev/vda1'
+  ok: CONTROL fg: host bind 'rw,relatime /dev/vda1'
+  ok: gr: the gofer serves /workspace from a mount 'ro,nosuid,nodev,relatime ext4'
+  ok: CONTROL fg: the gofer's mount 'rw,nosuid,relatime ext4'
+
+── G4 — the UDS door: reachable from a runc tenant, refused to a runsc tenant
+  ok: PRECONDITION: dg's syncer bound ctl.sock in its own tree (host side)
+  ok: PRECONDITION: dr's syncer bound ctl.sock in its own tree (host side)
+  ok: CONTROL: dr (runc) connects to the door
+  ok: dg (runsc) is refused: ConnectionRefusedError [Errno 111] Connection refused
+
+── I1 — the lean operator's AccessIsolation per identity mode
+W0914 22:04:32.100337    9855 warnings.go:70] unrecognized format "uint64"
+W0914 22:04:32.100357    9855 warnings.go:70] unrecognized format "uint32"
+  ok: iso-static: AccessIsolation False/Cooperative
+  ok: iso-ambient: AccessIsolation False/Cooperative
+  ok: iso-broker: AccessIsolation Unknown/DecidedByBroker
+  ok: iso-webidentity: AccessIsolation Unknown/DecidedByBroker
+  ok: iso-default: AccessIsolation Unknown/DecidedByBroker
+  ok: iso-noconsumers: no AccessIsolation, beside [SpecAccepted SyncerObserved]
+
+── I2 — a mode change moves the condition
+  ok: iso-static: AccessIsolation Unknown/DecidedByBroker
+  ok: lastTransitionTime moved: 2026-09-15T05:04:33Z → 2026-09-15T05:04:39Z
+
+════════════════════════════════════════
+flint read access on the local kind rig: 53 ok, 0 bad, 0 skipped

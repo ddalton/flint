@@ -909,7 +909,7 @@ mod tests {
         let root: serde_json::Value = serde_json::from_str(&read_session_policy("aws-us-gov", "b", "")).unwrap();
         assert_eq!(root["Statement"][0]["Resource"], "arn:aws-us-gov:s3:::b/*");
         assert!(root["Statement"][1].get("Condition").is_none());
-        // Written for the live check (s3csi/e2e/local/read-policy-minio.sh).
+        // Written for the live check (lean/e2e/access/read-grant-minio.sh).
         if let Ok(out) = std::env::var("FLINT_S3B_WRITE_READ_POLICY") {
             let (bucket, prefix) = std::env::var("FLINT_S3B_READ_POLICY_TARGET")
                 .ok()

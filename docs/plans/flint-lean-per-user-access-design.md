@@ -1,9 +1,10 @@
 # flint-lean — per-user access through the mount, and a read-only posture: investigation and design
 
-Date: 2026-09-13. Status: **DESIGN; phases A, B, C and D BUILT
-2026-09-14, phase F DRILLED on EC2 2026-09-15** (see §10, which supersedes
-what it names; §10.6 has the drill and the three defects it found; E and G
-are not built). Written the day after the
+Date: 2026-09-13. Status: **DESIGN; phases A-E BUILT 2026-09-14, phase F
+DRILLED on EC2 2026-09-15 and on a local kind rig (OIDC STS, gVisor,
+AccessIsolation) the same night** (see §10, which supersedes what it
+names; §10.6 has the EC2 drill and the three defects it found, §10.7 phase
+E, §10.8 the local drill; G is not built). Written the day after the
 protocol review (`flint-lean-protocol-review-2026-09-12.md`) against
 `37ff97d0` (v1.51.0). Every code claim in §0-§9 is `file:line` at that
 commit; §10 was re-verified against `75e306c8` (after v1.53.0).
@@ -734,12 +735,12 @@ promise the syncer and the mount keep, not one the bucket enforces**
 |---|---|
 | F1 EROFS on a read-only lean mount | **measured, §10.6**: EROFS for a pod that asks `readOnly: true`; the plugin's bind was `rw` on the host (F-1, fixed) and cannot reach the container for a pod asking `rw` (F-2, now refused) |
 | F2 a reader takes no fence and is Ready in checkout time | **unit, the fence half**: the write census allows only GET/HEAD/LIST/`epoch_read`; `one_shot_verbs_that_publish_or_fence_are_refused_on_a_reader`. Readiness beside a committing writer is phase F |
-| F3 a reader's credential cannot write | **live on MinIO** (§10.5): PUT and DELETE under the prefix denied on keys the broker's policy narrowed, the parent user's allowed; a read-write barrier on them 403s and moves nothing. AWS STS on a cluster is phase F |
+| F3 a reader's credential cannot write | **live on AWS** (§10.6) and **on MinIO's OIDC STS with the broker as deployed** (§10.8, O3); first **live on MinIO** (§10.5): PUT and DELETE under the prefix denied on keys the broker's policy narrowed, the parent user's allowed; a read-write barrier on them 403s and moves nothing. AWS STS on a cluster is phase F |
 | F4 `publish` answered `refused-read-only` | **unit**: `a_publish_touch_on_a_reader_is_answered_refused_read_only` (control: the writer's `ok`), `a_reader_drain_answers_what_it_owes_and_writes_nothing` |
 | F5 `sync` applies a foreign change onto the reader | **unit**, and at every floor: `a_reader_follows_writers_and_the_inbox_without_one_store_write` (a writer's edit, delete, add and a UI inbox write) |
 | F6 a refused re-mint takes the credential away | unchanged code path (`republish` removes `creds.json` on a refusal); phase F |
-| F7 write coherence under `runsc` | phase F |
-| F8 the session policy narrows, never widens | **live on MinIO** (§10.5): the parent user's own policy is bucket-wide, and the narrowed keys are denied GET and LIST of another prefix |
+| F7 write coherence under `runsc` | **live on kind, arm64, runsc systrap** (§10.8, G1): 1000 files then an immediate publish, every file cited at its size, a runc reader byte-identical; the same from a runc writer as the control. Not measured on amd64 or under KVM |
+| F8 the session policy narrows, never widens | **on MinIO's OIDC STS** (§10.8, O0/O3): the same role without a policy writes and reads another prefix; the policy the broker sent, read off the wire, holds the reader to reads of its prefix. First **live on MinIO** (§10.5): the parent user's own policy is bucket-wide, and the narrowed keys are denied GET and LIST of another prefix |
 | F9 `readOnly: false` on a read-only SA does not widen | **unit, both ends**: `a_read_only_consumer_is_granted_read_whatever_the_pod_asks` (plugin), `a_grant_is_the_registration_narrowed_by_the_cr_never_widened` (broker); the bind as deployed is phase F |
 | F10 a read-only `Workspace` cannot reach the store's writers | **unit** (§10.7): every writing verb answers `ReadOnly` with nothing sent; a write through `store()` is refused by the `ReadOnly` wrapper; removing the verb guard or the wrapper each fails its own test, and the other layer still refuses |
 
@@ -1105,3 +1106,78 @@ restored, and checked byte-identical afterwards.
 cannot write (D1) is not run here; phase F measured that credential
 separately. The gateway binary has no read-only door. Filling `author`
 and the draft `user` from a verified `sub` is the embedder's job (§4.6).
+
+### 10.8 The local drill: a real OIDC STS, gVisor, AccessIsolation (2026-09-14)
+
+Three things §10.6 left uncovered, run on one kind node on the Mac (M1,
+arm64; Docker 4 GiB), images and the operator built at `135335b9`:
+`s3csi/e2e/local-access.sh` (`setup`, then the legs), fixtures
+`local-access-tenants.yaml`, evidence
+`s3csi/e2e/results/local-access-2026-09-14/` (`run.out`: **53 ok, 0 bad**).
+
+**O — the broker's `sts` backend against a real OIDC STS.** MinIO's
+OpenID provider is the cluster's own service-account issuer
+(`https://kubernetes.default.svc.cluster.local`), with client id
+`s3.csi.chert.us` and a `readwrite` role policy; the discovery document and
+JWKS are reachable in-cluster once `system:service-account-issuer-discovery`
+is bound to unauthenticated (rig only). No stand-in signs anything:
+`sts-tap.py` forwards the broker's POST byte for byte and logs the
+`Policy` it carried.
+- O0: MinIO refuses a token for another audience (`azp must match
+  configured OpenID Client ID`) and exchanges one for `s3.csi.chert.us`;
+  without a session policy those keys write under the prefix and read
+  another (the control).
+- O2/O2t: a writer and a reader on one workspace; the broker says
+  `readWrite none` and `read sessionPolicy`, and the tap independently saw
+  one exchange with a policy and three without, all 200. The policy on the
+  wire: `GetObject`, `GetObjectVersion` on `s3bucket/access/lean/*`,
+  `ListBucket`, `ListBucketVersions` on the bucket; no
+  `GetObjectAttributes`.
+- O3: the reader's HELD keys: PUT and DELETE under the prefix and GET of
+  another prefix denied, GET under it allowed; the writer's PUT.
+- O5: passthrough: mount-s3 on the read grant reads the writer's file with
+  that policy (so dropping `GetObjectAttributes`, `135335b9`, costs
+  mount-s3 nothing on this read path) and refuses a write.
+
+This settles §10.6's open question for MinIO only: community MinIO
+accepts a Kubernetes SA token as a web identity and applies the session
+policy. AWS STS with a public issuer, and Ceph RGW, are still not run.
+
+**G — gVisor (`runsc` release-20260907.0, systrap, RuntimeClass `gvisor`).**
+Installed into the kind node by `setup` (the aarch64 tarball, sha512
+checked; a containerd `runsc` handler with the systemd cgroup driver).
+Inside the sandbox the volume is a 9p mount in `directfs` mode.
+- G1 (F7): a runsc writer wrote 1000 files (17..1016 bytes) and touched
+  `publish` at once; the ack said `ok`, the manifest cited all 1000 at the
+  sizes written, and a runc reader reached the same digest. It did not have
+  the directory before the publish. G1c: the same from a runc writer.
+- G2: a runsc reader gets EROFS in the tree and in `.flint/`, and reads the
+  writer's 1000 files byte for byte.
+- G3 (D18): the runsc reader's host bind is `ro,nosuid,nodev`, and **the
+  gofer serving its container's `/workspace` mounts it `ro`** (read from
+  the gofer's own `/proc/<pid>/mountinfo`, matched to the pod through
+  `crictl inspect`); the runsc writer's are `rw`. The host-side read-only
+  bind is what a gVisor gofer serves from.
+- G4 (§5): the UDS door is bound in each tenant's own tree (host side) and
+  the socket is visible inside the sandbox, but a runsc tenant's connect is
+  refused (`ECONNREFUSED`); a runc tenant on the same workspace connects.
+  The file protocol is the interface under gVisor, as §5 said.
+
+**I — AccessIsolation.** The lean operator (built from the same tree,
+chart `flint-lean-chart`) on MinIO: `static` and `ambient` → `False` /
+`Cooperative`; `broker`, `webIdentity` and no identity → `Unknown` /
+`DecidedByBroker`; no consumers → no condition, on a workspace that
+carries `SpecAccepted` and `SyncerObserved` (so the operator did reconcile
+it). Patching `static` to `broker` moved the condition, with a new
+`lastTransitionTime`.
+
+**Two runs were killed before this one, and not by a defect:** the leg
+that first exported the read policy by running the broker's unit test
+compiled `spdk-csi-driver`'s test binary, and with the kind node up the
+Mac ran out of memory twice (macOS killed the drill). The policy now comes
+off the wire through the tap, which is also the stronger evidence.
+
+**Not covered, still:** amd64 nodes and runsc under KVM; AWS STS against a
+public issuer; Ceph RGW (the `GetObjectAttributes` finding is from RGW's
+source); the gateway binary's lack of a read-only door (§10.7).
+

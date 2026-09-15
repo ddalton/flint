@@ -1,0 +1,1 @@
+srwxr-xr-x    1 1001     1001             0 Sep 15 05:04 /workspace/.flint-sync/ctl.sock

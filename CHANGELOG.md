@@ -89,6 +89,16 @@ covered by the stability guarantee.
   the argument a wrong one.
 - **flint-lean-gateway 0.4.1: `connect_with_credentials`**, the same
   constructor returning the `Arc<dyn ObjectStore>` a `Workspace` takes.
+- **The access drill on a local kind rig** (`s3csi/e2e/local-access.sh`,
+  53 ok). The broker's `sts` backend against a real OIDC STS: MinIO trusting
+  the cluster's own service-account issuer, with `sts-tap.py` logging the
+  policy on the wire. The reader's held keys cannot write, the writer's can,
+  and mount-s3 reads under the policy without `GetObjectAttributes`.
+  gVisor: a write then an immediate publish under runsc is cited in full
+  (F7, 1000 files); a runsc reader gets EROFS; the gofer serving its
+  `/workspace` mounts it read-only; the UDS door is refused under runsc
+  and reachable under runc. The lean operator's `AccessIsolation` for each
+  identity mode, and its transition. arm64 and systrap only.
 - **flint-store 0.1.4: `ReadOnly`; flint-lean-gateway 0.5.0:
   `Workspace::read_only`** (per-user access design §4.6, phase E).
   `ReadOnly::new(Arc<S>)` wraps any `ObjectStore`. Its 15 write methods
