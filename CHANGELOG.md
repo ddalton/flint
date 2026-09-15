@@ -137,6 +137,23 @@ covered by the stability guarantee.
   names only. A test prints the configuration with every secret field set
   and fails if any value appears (mutation-checked). **Rotate a static
   broker key that was in use while a broker ran v1.45.0 through v1.53.0.**
+- **lean: a publish ack said `ok` for a boundary that did not carry the
+  agent's change.** Two routes, both answered `partial` now, with the
+  path in `report.dropped`. (1) The agent deleted a file another writer
+  had changed and the change had not reached its tree: the merge keeps
+  the other writer's version (delete/modify resolves foreign-wins) and
+  the delete publishes at the next boundary, but the ack named a seq that
+  still cited the file. Found by the formal model — the exhaustive run of
+  the sentinel world under the barrier lease, past the depth-19 stop that
+  had hidden it (`Inv_AckImpliesCited`, depth 20). (2) An upload that
+  published nothing (a large file that drifted mid-transfer, or whose
+  assembly was swept) was not counted either. **The drain had the same
+  hole, with worse consequences:** it attested a boundary missing such a
+  file, and an attested drain lets the node remove the tree that held the
+  only copy. It now refuses, and the binary's retry publishes the path.
+  Four syncer tests (two writers for the delete; a new
+  `MemoryStore::inject_compose_swept` for the upload), each failing on the
+  old code, and five mutations, each failing the test meant for it.
 
 ## [1.53.0] - 2026-09-14
 

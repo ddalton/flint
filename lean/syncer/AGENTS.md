@@ -142,7 +142,13 @@ JSON, not written as `[]`.
   cite — one it found there, or its own upload — was replaced or removed
   by another writer just before this boundary committed (an
   `adopt-withheld` or `upload-withheld` record); `report.parked`
-  counts them. Treat it as a failure for those paths and touch again.
+  counts those. A path can also be a file you deleted after another
+  writer changed it, before their change reached your tree: the
+  bucket keeps their version for now, and at the next boundary your
+  delete publishes with a `consume-dirty` record naming the preserved
+  copy. Or its upload published nothing: a large file that changed
+  while it was being sent, or whose upload was cleaned away before it
+  finished. Treat it as a failure for those paths and touch again.
 - `boundary: "sentinel-deferred"` — your touch was honoured by the
   cadence tick rather than at once: it arrived inside
   `sentinel_min_interval_secs` of the previous boundary, or the hourly

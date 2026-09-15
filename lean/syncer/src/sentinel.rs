@@ -193,7 +193,9 @@ pub struct AckReport {
     /// Foreign changes seen but deferred to the inbox flow (D4).
     #[serde(default)]
     pub out_of_scope_foreign: usize,
-    /// Declared paths the boundary does NOT carry (a standing park).
+    /// Declared paths the boundary does NOT carry (a standing park, a
+    /// delete another writer's edit outranked, or an upload that
+    /// published nothing).
     /// Non-empty ⇒ `status: "partial"`: the §2.2 rule — the
     /// conflict report rides the ack in full, never a silent loser —
     /// generalized from `sync` to the publish verb.
@@ -754,9 +756,13 @@ impl Syncer {
         // Review 2026-09-12, inbox-1: a boundary with a standing park does
         // NOT carry the agent's file — `ok` promised "the boundary is in
         // the bucket". It is `partial`, and `report.dropped` names the
-        // paths.
+        // paths. Neither is a delete another writer's edit outranked (the
+        // seq still cites the file) nor an upload that published nothing
+        // (a transfer that drifted or was swept).
+        let dropped: Vec<String> =
+            report.parked.iter().chain(&report.outranked).chain(&report.deferred).cloned().collect();
         Ok(Ack {
-            status: if report.parked.is_empty() { "ok".into() } else { "partial".into() },
+            status: if dropped.is_empty() { "ok".into() } else { "partial".into() },
             nonces: pending.nonces.clone(),
             sentinel_mtime_unix_ns: pending.consumed_mtime_unix_ns,
             seq: report.seq,
@@ -771,7 +777,7 @@ impl Syncer {
                 consumed: report.consumed,
                 no_change: report.no_change,
                 conflicts,
-                dropped: report.parked.clone(),
+                dropped,
                 ..Default::default()
             },
         })
@@ -1104,13 +1110,22 @@ impl Syncer {
                 self.ticker_from(r.observed_seq, r.observed_etag.clone())?;
                 // Review 2026-09-12, inbox-1: a drain that leaves a path
                 // parked has not published the tree; attesting it let the
-                // node remove the agent's only copy.
+                // node remove the agent's only copy. So is one whose upload
+                // published nothing, and one whose delete another writer's
+                // edit outranked: the retry publishes both.
                 if !r.parked.is_empty() {
                     return Err(LeanError::State(format!(
                         "drain: {} path(s) could not be published (parked on a foreign version whose \
                          preserve failed): {:?} — not attesting",
                         r.parked.len(),
                         r.parked
+                    )));
+                }
+                if !r.deferred.is_empty() || !r.outranked.is_empty() {
+                    return Err(LeanError::State(format!(
+                        "drain: not in this boundary — uploads that published nothing {:?}, deletes \
+                         another writer's change outranked {:?} — not attesting",
+                        r.deferred, r.outranked
                     )));
                 }
         }

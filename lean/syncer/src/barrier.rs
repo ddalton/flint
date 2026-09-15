@@ -46,6 +46,10 @@ pub struct BarrierReport {
     /// Paths whose transfer drifted or was swept mid-compose: nothing
     /// published, nothing advanced; the next scan re-queues them.
     pub deferred: Vec<String>,
+    /// Local deletes another writer's change outranked (delete/modify
+    /// resolves foreign-wins): the installed seq still cites them, and the
+    /// next consume reconciles each against the local delete.
+    pub outranked: Vec<String>,
     pub no_change: bool,
     /// Bytes this barrier actually published — the input to the
     /// sentinel work meter (boundary-verbs plan D3.1). Metering work
@@ -1436,7 +1440,10 @@ impl Syncer {
                     }
                 }
                 if installed.entries.contains_key(path) {
-                    continue; // delete/modify resolved foreign-wins: not garbage
+                    // delete/modify resolved foreign-wins: not garbage, and
+                    // not in this boundary either.
+                    report.outranked.push(path.clone());
+                    continue;
                 }
                 let key = self.cfg.file_key(path);
                 let recognized = baseline.entries.get(path).map(|b| b.etag.clone()).or_else(|| {
@@ -1622,7 +1629,8 @@ impl Syncer {
             "barrier_end",
             serde_json::json!({
                 "seq": report.seq, "uploaded": report.uploaded.len(), "deleted": report.deleted.len(),
-                "parked": report.parked.len(), "consumed": report.consumed, "no_change": report.no_change,
+                "parked": report.parked.len(), "outranked": report.outranked.len(),
+                "consumed": report.consumed, "no_change": report.no_change,
                 "ms": started.elapsed().as_millis() as u64, "requests": self.trace_requests(),
             }),
         );

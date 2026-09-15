@@ -1265,6 +1265,164 @@ async fn publish_sentinel_honored_and_acked() {
     assert_eq!(a.read_ack(Verb::Publish).unwrap().nonces, vec!["n-1".to_string()]);
 }
 
+/// Two writers, one file: B edits `shared.txt` and commits; A's agent,
+/// which has not seen B's edit, deletes it and declares a boundary. A's
+/// merge keeps B's entry (delete/modify resolves foreign-wins) and
+/// queues it, so the seq A installs still cites the file. `ok` would
+/// tell the agent its delete is in that seq; it is `partial`, and
+/// `report.dropped` names the path.
+/// Found by the formal model (`LeanBarrierLeaseSentinel` without
+/// `Inv_AckBoundaryCoherent`: `Inv_AckImpliesCited`, depth 20).
+#[tokio::test]
+async fn a_publish_whose_delete_lost_to_a_peers_edit_is_partial() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture).unwrap();
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "shared.txt", "v1");
+    a.floor_tick().await.unwrap();
+    b.checkout().await.unwrap();
+
+    write(dir_b.path(), "shared.txt", "B's v2");
+    backdate_baseline(&b, "shared.txt");
+    b.floor_tick().await.unwrap();
+    let theirs = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let b_etag = theirs.entries["shared.txt"].etag.clone();
+    assert_eq!(read(dir_a.path(), "shared.txt").as_deref(), Some("v1"), "fixture: B's edit already reached A");
+
+    std::fs::remove_file(dir_a.path().join("shared.txt")).unwrap();
+    touch_sentinel(dir_a.path(), control::PUBLISH, r#"{"nonce":"n-1"}"#);
+    a.poll_sentinels().unwrap();
+    clear_min_interval(&a);
+    let ack = a.honor_pending(Verb::Publish, false).await.unwrap().unwrap();
+
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(ack.seq, Some(m.seq), "fixture: the ack names a different seq than the one installed");
+    assert_eq!(
+        m.entries.get("shared.txt").map(|e| e.etag.as_str()),
+        Some(b_etag.as_str()),
+        "fixture: the merge did not keep B's entry, so the delete was not outranked"
+    );
+    assert_eq!(ack.status, "partial", "the ack says the delete is in seq {}, which still cites the file: {ack:?}", m.seq);
+    assert_eq!(ack.report.dropped, vec!["shared.txt".to_string()]);
+
+    // Touching again, as the guide says: the queued edit meets the local
+    // delete, the delete publishes, and B's bytes stay recoverable.
+    touch_sentinel(dir_a.path(), control::PUBLISH, r#"{"nonce":"n-2"}"#);
+    a.poll_sentinels().unwrap();
+    clear_min_interval(&a);
+    let again = a.honor_pending(Verb::Publish, false).await.unwrap().unwrap();
+    assert_eq!(again.status, "ok", "{again:?}");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(again.seq, Some(m.seq));
+    assert!(!m.entries.contains_key("shared.txt"), "the delete never published");
+    let c = again
+        .report
+        .conflicts
+        .iter()
+        .find(|c| c.kind == "consume-dirty" && c.path == "shared.txt")
+        .unwrap_or_else(|| panic!("no consume-dirty record on the ack: {again:?}"));
+    let (_, body) = store.get_whole(c.preserved_key.as_ref().expect("B's edit preserved"), None).await.unwrap();
+    assert_eq!(&body[..], b"B's v2");
+}
+
+/// A declared file whose upload published nothing — here a large one the
+/// operator's abort sweep took before Complete — is not in the seq the
+/// boundary installs either: `partial`, named in `report.dropped`, and
+/// the next touch publishes it.
+#[tokio::test]
+async fn a_publish_whose_upload_was_swept_is_partial() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.cfg.whole_put_max = 8; // 8 bytes: everything bigger composes
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture).unwrap();
+    a.checkout().await.unwrap();
+
+    let big: String = (0..200).map(|i| format!("line {i}\n")).collect();
+    write(dir.path(), "model.bin", &big);
+    write(dir.path(), "notes.txt", "n");
+    store.inject_compose_swept();
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n-1"}"#);
+    a.poll_sentinels().unwrap();
+    clear_min_interval(&a);
+    let ack = a.honor_pending(Verb::Publish, false).await.unwrap().unwrap();
+
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(ack.seq, Some(m.seq), "fixture: the ack names a different seq than the one installed");
+    assert!(m.entries.contains_key("notes.txt"), "fixture: the boundary installed nothing");
+    assert!(!m.entries.contains_key("model.bin"), "fixture: the swept upload was cited anyway");
+    assert_eq!(ack.status, "partial", "the ack says model.bin is in seq {}, which does not cite it: {ack:?}", m.seq);
+    assert_eq!(ack.report.dropped, vec!["model.bin".to_string()]);
+
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n-2"}"#);
+    a.poll_sentinels().unwrap();
+    clear_min_interval(&a);
+    let again = a.honor_pending(Verb::Publish, false).await.unwrap().unwrap();
+    assert_eq!(again.status, "ok", "{again:?}");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(again.seq, Some(m.seq));
+    assert!(m.entries.contains_key("model.bin"), "the re-touch did not publish the swept file");
+}
+
+/// The drain's own boundary: an upload that published nothing is the
+/// agent's only copy of that file, so the drain must not attest — an
+/// attested drain lets the node remove the tree. The binary retries a
+/// failed drain; the retry publishes it.
+#[tokio::test]
+async fn a_drain_whose_upload_was_swept_does_not_attest() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.cfg.whole_put_max = 8; // 8 bytes: everything bigger composes
+    a.checkout().await.unwrap();
+
+    let big: String = (0..200).map(|i| format!("line {i}\n")).collect();
+    write(dir.path(), "model.bin", &big);
+    store.inject_compose_swept();
+    let drained = a.drain().await;
+    let cited = |m: Option<manifest::LeanManifest>| m.is_some_and(|m| m.entries.contains_key("model.bin"));
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().map(|l| l.manifest);
+    assert!(!cited(m), "fixture: the swept upload was cited anyway");
+    assert!(drained.is_err(), "the drain attested a tree whose only copy of model.bin is on it: {drained:?}");
+
+    a.drain().await.expect("the retry did not drain");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().map(|l| l.manifest);
+    assert!(cited(m), "the retry did not publish model.bin");
+}
+
+/// The drain's own boundary again, for a delete another writer's edit
+/// outranked: attesting would remove the tree with the delete unpublished,
+/// and the file comes back for the next pod. The retry publishes it.
+#[tokio::test]
+async fn a_drain_whose_delete_lost_to_a_peers_edit_does_not_attest() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "shared.txt", "v1");
+    a.floor_tick().await.unwrap();
+    b.checkout().await.unwrap();
+    write(dir_b.path(), "shared.txt", "B's v2");
+    backdate_baseline(&b, "shared.txt");
+    b.floor_tick().await.unwrap();
+
+    std::fs::remove_file(dir_a.path().join("shared.txt")).unwrap();
+    let drained = a.drain().await;
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("shared.txt"), "fixture: the delete was not outranked");
+    assert!(drained.is_err(), "the drain attested a tree whose delete is not in the bucket: {drained:?}");
+
+    a.drain().await.expect("the retry did not drain");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(!m.entries.contains_key("shared.txt"), "the retry did not publish the delete");
+}
+
 /// D2 — the ack carries EVERY coalesced nonce. Under coalescing an
 /// agent whose nonce rode behind a later touch would otherwise never
 /// see it and would re-touch in a loop, feeding the storm the rate

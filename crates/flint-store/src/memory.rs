@@ -163,6 +163,7 @@ impl Inner {
 const INJECT_NONE: u8 = 0;
 const INJECT_TORN_COMPLETE: u8 = 1;
 const INJECT_CRASH_BEFORE_COMPLETE: u8 = 2;
+const INJECT_SWEPT: u8 = 3;
 
 pub struct MemoryStore {
     inner: Mutex<Inner>,
@@ -348,6 +349,12 @@ impl MemoryStore {
     /// Next compose: dies before Complete — MPU left pending.
     pub fn inject_crash_before_complete(&self) {
         self.inject.store(INJECT_CRASH_BEFORE_COMPLETE, Ordering::SeqCst);
+    }
+
+    /// Next compose: the operator's abort sweep takes the assembly
+    /// before Complete — `NoSuchUpload`, S3's answer, and nothing lands.
+    pub fn inject_compose_swept(&self) {
+        self.inject.store(INJECT_SWEPT, Ordering::SeqCst);
     }
 
     /// Step-11 drills: the NEXT get_range fails with a transport
@@ -1505,6 +1512,9 @@ impl MemoryStore {
                 // Complete lands server-side; the response is lost.
                 self.finish_complete(spec, upload_id, assembled)?;
                 return Err(StoreError::Other("injected: Complete response lost".into()));
+            }
+            INJECT_SWEPT => {
+                return Err(StoreError::NoSuchUpload(format!("upload {upload_id} (injected: swept)")));
             }
             _ => {}
         }
