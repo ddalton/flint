@@ -370,10 +370,16 @@ def oracle_o3(leg, slack_ms=0):
         by_path[p["path"]].append(p)
 
     def may_replace(y):
-        # a writer TOLD its op failed (refused, dropped, any status but a missing
-        # ack) never meant to replace anything: finding 12 was a refused UI
-        # write whose PUT had landed anyway
-        return y["acked"] or y["why"] in ("no-ack", "no-ack-line")
+        # a writer TOLD its op failed (refused, any status but a missing ack)
+        # never meant to replace anything: finding 12 was a refused UI write
+        # whose PUT had landed anyway. A syncer's partial ack is not that: a
+        # DROPPED write is withheld from this boundary and left dirty in the
+        # agent's tree for the next barrier to publish (storm S0, 2026-09-15:
+        # four writes based on X, dropped, then final or preserved, read as
+        # losses of X). It links only where its content is shown to have
+        # landed, which `replaced` requires of the chain's end.
+        return y["acked"] or y["why"] in ("no-ack", "no-ack-line") or (
+            y["why"] == "dropped" and y["agent"] != "ui")
 
     def replaced(x):
         want = final.get(x["path"])

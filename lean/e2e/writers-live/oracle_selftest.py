@@ -287,14 +287,17 @@ def refused_ui_masked(g, landed=True):
                                  "kind": "upload-412-preserved", "at_unix": 9})
 
 
-def f_dropped_link_final(g):
-    # acked X; a peer's write Y based on X comes back partial with Y's path DROPPED, yet Y is final
+def nf_dropped_link_final(g, landed=True):
+    # acked X; a peer's write Y based on X comes back partial with Y's path DROPPED
+    # (withheld, left dirty), and a later barrier publishes Y: final. Storm S0,
+    # 2026-09-15. Control: Y never landed (neither final nor preserved).
     X, Y = H("DX"), H("DY")
     g.op("a1", 5, 7000, "write", "hot/p07.txt", "a1-5", X)
     g.ack("a1", 7400, "a1-5", "ok", 17)
     g.op("a2", 5, 7600, "write", "hot/p07.txt", "a2-5", Y, base=X)
     g.ack("a2", 8000, "a2-5", "partial", 18, dropped=["hot/p07.txt"])
-    g.final["hot/p07.txt"] = (Y, "e-dy")
+    if landed:
+        g.final["hot/p07.txt"] = (Y, "e-dy")
 
 
 def f_replaced_chain_broken(g):
@@ -567,8 +570,10 @@ SCENARIOS = [
     ("nf-refused-ui-write-never-landed", "non-fault", "same, the refused Y's bytes are nowhere",
      lambda g: refused_ui_masked(g, landed=False), set(),
      lambda v: v["oracles"]["O3"]["details"]["refused_landed_total"] == 0),
-    ("a-dropped-link-then-final", "fault", "a write based on X, its path DROPPED from a partial ack, is final",
-     f_dropped_link_final, {"O3"}),
+    ("a-dropped-link-then-final", "non-fault", "a write based on X, its path DROPPED from a partial ack, is final",
+     nf_dropped_link_final, set(), lambda v: v["oracles"]["O3"]["details"]["accounted"]["replaced"] == 1),
+    ("a-dropped-link-then-final/ctl", "control", "same, the dropped write never landed",
+     lambda g: nf_dropped_link_final(g, landed=False), {"O3"}),
     ("a-replaced-chain-broken", "fault", "acked X -> Y unacked, final Z not based on Y", f_replaced_chain_broken, {"O3"}),
     ("a-replaced-by-earlier-op", "fault", "the op based on X is journaled before X", f_replaced_by_an_earlier_op, {"O3"}),
     ("a-mv-destination-lost", "fault", "a mv's `to` content is gone", f_mv_destination_lost, {"O3"}),

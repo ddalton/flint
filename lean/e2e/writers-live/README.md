@@ -143,7 +143,7 @@ Output: `{"leg":…, "oracles":{"O1":{"pass":true,"details":…}, …}, "pass":b
 Decisions made while building `agent.sh`, `ui.sh`, `oracle.py`,
 `oracle_selftest.py`, `timeline.py` and `agent_localtest.sh`, where §1–§4
 were silent or did not fit. Self-tests: `python3 oracle_selftest.py`
-(42 synthetic scenarios + 13 checks on the real trace fixture),
+(58 synthetic scenarios + 13 checks on the real trace fixture),
 `python3 timeline.py --selftest`, `bash agent_localtest.sh`.
 
 ### 5.1 The agent (`agent.sh`)
@@ -251,7 +251,13 @@ were silent or did not fit. Self-tests: `python3 oracle_selftest.py`
   because h exists from X's publish onwards and a UI GET can read it before
   X's agent has polled its ack file. The later op must itself be acked (as
   §4 says); a LOSS flags `unacked_op_with_base_h` for A4, where a killed
-  agent's unacked edit may still have published. A preserved copy accounts
+  agent's unacked edit may still have published. A chain of rewrites based
+  on X (REPLACED) may also run through ops with no ack, or through a
+  syncer's DROPPED path, when its last content is final or preserved. A
+  dropped write is withheld from the boundary and left dirty for the next
+  barrier; storm S0 (2026-09-15) had four that published after the drop. A
+  REFUSED UI write never links (finding 12). Re-judging the frozen A2
+  evidence still fails O3: 1 loss, 3 refused-landed. A preserved copy accounts
   for a write only if its key names the SAME path
   (`.flint/lean/conflicts/<uuid>/<path>`). Final content = the checkout
   digest (fallback when absent: paths where every agent tree agrees). Zero
