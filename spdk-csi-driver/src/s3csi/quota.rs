@@ -17,8 +17,11 @@
 //! cannot spend another's budget, and it is reclaimed at unpublish.
 //!
 //! Sparse matters: the image is `sizeLimitGib` in APPARENT size and
-//! costs only what the tenant actually writes, so the sum of the
-//! ceilings on a node may exceed the node's disk. That is the same
+//! costs only what the tenant has written, so the sum of the ceilings on
+//! a node may exceed the node's disk. Has written, not holds: nothing
+//! discards, so a block the tenant frees stays allocated in the backing
+//! file until unpublish (measured: write-and-delete cycles held their
+//! high-water mark and evicted pods on an 8 GiB root). That is the same
 //! bargain `emptyDir` sizeLimit made. The ceiling bounds one tenant's
 //! blast radius; it is not a reservation.
 //!

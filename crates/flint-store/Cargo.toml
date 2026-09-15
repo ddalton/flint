@@ -4,7 +4,7 @@
 # crate's Cargo.toml — keep them in step when bumping there.
 [package]
 name = "flint-store"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "The flint object-store layer: the ObjectStore trait, conditional writes, generation stamps, CRC-64/NVME, an in-memory double and the S3 backend"
 license = "MIT"

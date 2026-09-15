@@ -179,10 +179,11 @@ pub struct FlintLeanWorkspaceSpec {
     /// at the tree, so an overrun is ENOSPC in the app's own write; it
     /// was an emptyDir sizeLimit under the sidecar-injection webhook flint
     /// used before v1.45.0, which is where the
-    /// name comes from. Sparse: it costs what is written, not what is
-    /// declared, so the ceilings on a node may sum to more than the
-    /// node's disk. It bounds one workspace's blast radius; it is not a
-    /// reservation.
+    /// name comes from. Sparse: it costs what was ever written, not what
+    /// is declared, so the ceilings on a node may sum to more than the
+    /// node's disk; a block the app frees stays allocated in the image
+    /// until the volume goes. It bounds one workspace's blast radius; it
+    /// is not a reservation.
     #[serde(default = "default_size_limit_gib")]
     pub size_limit_gib: u64,
 

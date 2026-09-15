@@ -12,6 +12,8 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.54.0] - 2026-09-14
+
 ### Added
 
 - **lean: read access per agent pod.** A lean volume mounted with the
@@ -149,6 +151,13 @@ covered by the stability guarantee.
 
 ### Changed
 
+- **Crates: flint-store 0.1.4, flint-lean 0.7.0, flint-lean-gateway 0.5.0.**
+  flint-lean is breaking: `LeanConfig.access`, `BarrierReport.outranked`
+  and `Capabilities.access` are new public fields, beside the new `Access`
+  type and `reader` module. flint-lean-gateway is breaking: a new
+  `VerbError::ReadOnly` variant, and it re-exports `LeanConfig`. flint-store
+  adds `ReadOnly` and `MemoryStore::inject_compose_swept`. Publish in that
+  order: each requires the one before.
 - **s3-csi: a lean tree is a plain directory by default; `sizeLimitGib` is
   enforced only with `workers.quota: true`.**
   - **Why:** the loop-mounted ext4 image that enforced the ceiling costs
@@ -207,8 +216,7 @@ covered by the stability guarantee.
   hand: a key id shows its first four characters, secrets and session
   tokens print `<redacted>`, and a `rest` door's extra headers print their
   names only. A test prints the configuration with every secret field set
-  and fails if any value appears (mutation-checked). **Rotate a static
-  broker key that was in use while a broker ran v1.45.0 through v1.53.0.**
+  and fails if any value appears (mutation-checked).
 - **lean: a publish ack said `ok` for a boundary that did not carry the
   agent's change.** Two routes, both answered `partial` now, with the
   path in `report.dropped`. (1) The agent deleted a file another writer
@@ -226,6 +234,44 @@ covered by the stability guarantee.
   Four syncer tests (two writers for the delete; a new
   `MemoryStore::inject_compose_swept` for the upload), each failing on the
   old code, and five mutations, each failing the test meant for it.
+
+### Known limitations
+
+- **s3-csi: `sizeLimitGib` is advisory unless a node runs with
+  `workers.quota: true`.** The default tree is a plain directory on the
+  node's root filesystem. kubelet's ephemeral-storage accounting does not
+  count it, so a runaway tree can fill the node's disk. With the quota on,
+  a block the app frees stays allocated in the loop image until the volume
+  goes.
+- **s3-csi broker: a `static` backend without `broker.static.readSecretRef`
+  serves readers `cooperative`.** The mount and the syncer keep the pod
+  read-only; its key could write. `/v1/status` says so.
+- **lean gateway binary: no read-only door.** `Workspace::read_only` is in
+  the crate; the HTTP gateway serves writers only.
+- **gVisor: the UDS door is unreachable from a runsc tenant** (the socket
+  is visible, the connect is refused). The file protocol works. Read
+  access under gVisor was run on systrap only; i4i.large exposes no
+  `/dev/kvm`.
+- **Not yet run: read grants on Ceph RGW** (the `GetObjectAttributes`
+  change comes from reading RGW's policy parser) **and AWS STS against a
+  public OIDC issuer** (the drills used a SigV4 stand-in on AWS and MinIO's
+  own STS).
+- **lean on Ozone 2.2.x: one writer per workspace.** Ozone 2.2.1 ignores
+  `If-Match` on `DeleteObject` (HDDS-14907, fix version 2.3.0), so a
+  second writer's garbage collector can delete the first writer's upload.
+  S3 enforces it. The syncer does not refuse the configuration yet.
+- **lean: a writer lost for good between an upload and its commit** leaves
+  an uncited object the trees and a fresh checkout disagree about until a
+  writer rewrites the path. No acknowledged write is lost.
+- **lean gateway: a UI write can wait up to the window deadline (180 s)**
+  behind a barrier that died mid-window.
+- **lean formal model:** `LeanBarrierLeaseSentinel` still violates
+  `Inv_AckBoundaryCoherent` at depth 19 (the invariant's refinement is
+  open), and with that invariant removed the same world violates
+  `Inv_AckImpliesCited` at depth 20 — the ok ack over a delete another
+  writer's edit outranked, which the syncer now answers `partial`; the model
+  does not yet mirror that fix. The model also still has no empty-install
+  rule (every install advances the manifest seq). (TLC runs of 2026-09-14.)
 
 ## [1.53.0] - 2026-09-14
 
@@ -7201,7 +7247,8 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.53.0...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.54.0...HEAD
+[1.54.0]: https://github.com/ddalton/flint/compare/v1.53.0...v1.54.0
 [1.53.0]: https://github.com/ddalton/flint/compare/v1.52.0...v1.53.0
 [1.52.0]: https://github.com/ddalton/flint/compare/v1.51.0...v1.52.0
 [1.51.0]: https://github.com/ddalton/flint/compare/v1.50.0...v1.51.0
