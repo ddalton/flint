@@ -217,21 +217,66 @@ function in this crate that deletes a cited object.
 | Method | Gateway route | Refusals |
 |---|---|---|
 | `get_file` | `GET /files/{path}` | 404 `no-such-file`, 409 `moved`, 410 `foreign-write` |
-| `put_file` | `PUT /files/{path}` | 400 `bad-path` / `bad-precondition`, 409 `barrier-window-open` / `concurrent-write`, 412 `file-changed`, 413 `payload-too-large`, 428 `precondition-required` |
-| `remove_file`, `remove_files` | `DELETE /files/{path}` | 404 `no-such-file`, 412 `file-changed` |
-| `rename_file`, `rename_files` | `POST /rename` `{from, to}` | 404 `no-such-file`, 409 `destination-exists` / `barrier-window-open` / `concurrent-write` |
-| `withdraw_removal` | `DELETE /removals/{path}` | 404 `no-removal` |
+| `put_file` | `PUT /files/{path}` | 400 `bad-path` / `bad-precondition`, 403 `read-only`, 409 `barrier-window-open` / `concurrent-write`, 412 `file-changed`, 413 `payload-too-large`, 428 `precondition-required` |
+| `remove_file`, `remove_files` | `DELETE /files/{path}` | 403 `read-only`, 404 `no-such-file`, 412 `file-changed` |
+| `rename_file`, `rename_files` | `POST /rename` `{from, to}` | 403 `read-only`, 404 `no-such-file`, 409 `destination-exists` / `barrier-window-open` / `concurrent-write` |
+| `withdraw_removal` | `DELETE /removals/{path}` | 403 `read-only`, 404 `no-removal` |
 | `snapshot` | `GET /snapshot` | |
 | `status` | `GET /status` | |
-| `request_boundary`, `request_sync` | `POST /boundary`, `POST /sync-request` | |
-| `put_draft`, `get_draft`, `list_drafts`, `delete_draft`, `promote_draft` | `/drafts/{user}[/{path}]` | 400 `bad-user`, 404 `no-draft`, 409 `draft-stale` / `draft-moved` |
-| `open_window`, `clear_window`, `drop_inbox`, `cas_manifest` | syncer-facing | 403 `stale-epoch` / `no-holder` / `fenced`, 409 `cas-miss` |
+| `request_boundary`, `request_sync` | `POST /boundary`, `POST /sync-request` | 403 `read-only` |
+| `put_draft`, `get_draft`, `list_drafts`, `delete_draft`, `promote_draft` | `/drafts/{user}[/{path}]` | 400 `bad-user`, 403 `read-only` (`put_draft`, `delete_draft`, `promote_draft`), 404 `no-draft`, 409 `draft-stale` / `draft-moved` |
+| `open_window`, `clear_window`, `drop_inbox`, `cas_manifest` | syncer-facing | 403 `stale-epoch` / `no-holder` / `fenced` / `read-only`, 409 `cas-miss` |
 | `wait_cited` | library only | 202 `citation-pending`, 409 `superseded` |
 
 Every verb can also fail 502 `store` (the object store said no) and
 the path-taking ones 400 `bad-path`. The syncer-facing verbs are
 epoch-validated per request and exist because the gateway's HTTP layer
 is built on them; a backend serving a UI has no use for them.
+
+## Read-only workspaces
+
+For a user whose role is read access, build the workspace with
+`Workspace::read_only(store, prefix)`. The reading verbs (`get_file`,
+`snapshot`, `status`, `wait_cited`, `get_draft`, `list_drafts`) answer
+exactly as on `Workspace::new`. Every verb that writes answers
+`VerbError::ReadOnly` (403 `read-only`, not retryable) before it sends a
+request: the table's `403 read-only` rows, the syncer-facing four
+included. `is_read_only()` says which kind a workspace is.
+
+The store the workspace holds is wrapped in `flint_store::ReadOnly`
+(re-exported as `ReadOnly`), and that wrapper is what enforces it inside
+this crate: `store()` is public, and a write sent through it is refused
+with `StoreError::Auth` and never reaches the bucket. The typed refusal is
+the honest answer; the wrapper is the one that holds when a caller goes
+around the verbs.
+
+Neither is the real enforcement. The credential is: build a read-only
+workspace on a store whose credential cannot write (on S3, keys whose
+policy grants only reads on the prefix), so that the bucket refuses
+whatever this crate misses. One read-only client and one read-write
+client per bucket serve every user; nothing here needs a client per user.
+
+```rust
+use std::sync::Arc;
+use flint_lean_gateway::{Bytes, MemoryStore, ObjectStore, PutFile, StoreError, VerbError, Workspace};
+
+# tokio::runtime::Runtime::new().unwrap().block_on(async {
+let store: Arc<dyn ObjectStore> = Arc::new(MemoryStore::new());
+let editor = Workspace::new(store.clone(), "p");
+editor.put_file("a.txt", Bytes::from("one"), &PutFile::default()).await.unwrap();
+
+let viewer = Workspace::read_only(store, "p");
+assert_eq!(viewer.get_file("a.txt").await.unwrap().body, Bytes::from("one"));
+
+let err = viewer.put_file("b.txt", Bytes::from("two"), &PutFile::default()).await.unwrap_err();
+assert!(matches!(err, VerbError::ReadOnly));
+assert_eq!((err.status(), err.code()), (403, "read-only"));
+
+// Around the verbs, the store refuses too.
+let refused = viewer.store().delete("p/files/a.txt").await.unwrap_err();
+assert!(matches!(refused, StoreError::Auth(_)));
+# });
+```
 
 ## Many workspaces, one process
 

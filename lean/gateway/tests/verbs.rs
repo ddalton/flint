@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use flint_lean_gateway::{
     crc64_nvme, crc64_to_b64, Bytes, LeanEntry, LeanManifest, MemoryStore, ObjectStore, PutFile,
-    VerbError, Workspace,
+    StoreError, VerbError, Workspace,
 };
 
 const PREFIX: &str = "tenant/proj1";
@@ -1249,3 +1249,229 @@ async fn a_ui_write_whose_caller_goes_away_after_its_put_is_still_tracked() {
     }
 }
 
+
+// ---------------------------------------------------------------------
+// Read-only workspaces (per-user access design §4.6, phase E; F10): the
+// typed refusal, the store wrapper behind it, and the control that every
+// verb filed as a writer really writes.
+// ---------------------------------------------------------------------
+
+/// Every public verb that writes, in the order `each_writer` calls them.
+const WRITERS: &[&str] = &[
+    "put_file", "rename_file", "rename_files", "remove_file", "withdraw_removal", "remove_files",
+    "request_boundary", "request_sync", "put_draft", "promote_draft", "delete_draft",
+    "open_window", "clear_window", "drop_inbox", "cas_manifest",
+];
+
+/// Every public verb that only reads.
+const READERS: &[&str] = &["get_file", "snapshot", "status", "wait_cited", "get_draft", "list_drafts"];
+
+/// The requests a read-only credential allows, by `MemoryStore` op name
+/// (the syncer battery's `READ_OPS`). Anything else is a write.
+const READ_OPS: &[&str] = &[
+    "get_whole", "get_range", "get_version", "head", "head_version", "list", "list_versions",
+    "list_uploads", "lifecycle_rules", "epoch_read", "presign_get",
+];
+
+fn store_writes(mem: &MemoryStore) -> Vec<(&'static str, u64)> {
+    mem.op_counts().into_iter().filter(|(op, _)| !READ_OPS.contains(op)).collect()
+}
+
+/// The census behind `WRITERS` and `READERS`, and its control: every
+/// `pub async fn` in the verb modules is filed exactly once, so a verb
+/// added later cannot skip both the guard and these tests.
+#[test]
+fn every_public_verb_is_filed_as_a_reader_or_a_writer() {
+    let mut verbs: Vec<String> = [include_str!("../src/workspace.rs"), include_str!("../src/drafts.rs")]
+        .iter()
+        .flat_map(|src| src.lines())
+        .filter_map(|l| l.trim_start().strip_prefix("pub async fn "))
+        .map(|rest| rest[..rest.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap()].to_string())
+        .collect();
+    verbs.sort();
+    assert!(
+        verbs.contains(&"put_file".to_string()) && verbs.contains(&"promote_draft".to_string()),
+        "the parse did not find the verbs: {verbs:?}"
+    );
+    let mut filed: Vec<String> = WRITERS.iter().chain(READERS).map(|s| s.to_string()).collect();
+    filed.sort();
+    assert_eq!(verbs, filed, "a public verb is not filed as a reader or a writer, or is filed twice");
+}
+
+/// What `each_writer` needs already in the bucket, put there through a
+/// WRITABLE workspace: a tracked write for `drop_inbox` to drop, a draft
+/// for `delete_draft` to discard, a lease for the epoch-validated verbs.
+async fn seed_for_writers(w: &Workspace, store: &Arc<dyn ObjectStore>) -> (u64, Vec<flint_lean_gateway::InboxEntry>) {
+    w.put_file("seed.txt", Bytes::from("seed"), &PutFile::default()).await.unwrap();
+    w.put_draft("u", "keep.txt", Bytes::from("kept"), None, None).await.unwrap();
+    let epoch = hold_lease(store, w).await;
+    (epoch, w.snapshot().await.unwrap().inbox.entries)
+}
+
+/// Every writer once, in an order in which each SUCCEEDS on a writable
+/// workspace, so the control can say each one wrote. `after` gets each
+/// verb's name and result as it returns.
+async fn each_writer(
+    w: &Workspace,
+    epoch: u64,
+    consumed: &[flint_lean_gateway::InboxEntry],
+    mut after: impl FnMut(&'static str, Result<(), VerbError>),
+) {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    after("put_file", w.put_file("w.txt", Bytes::from("one"), &PutFile::default()).await.map(drop));
+    after("rename_file", w.rename_file("w.txt", "r1.txt", None).await.map(drop));
+    after("rename_files", w.rename_files(&[("r1.txt", "r2.txt")], None).await.map(drop));
+    after("remove_file", w.remove_file("r2.txt", None, None).await);
+    after("withdraw_removal", w.withdraw_removal("r2.txt").await);
+    after("remove_files", w.remove_files(&[("r2.txt", None)], None).await);
+    after("request_boundary", w.request_boundary(None).await.map(drop));
+    after("request_sync", w.request_sync(None).await.map(drop));
+    after("put_draft", w.put_draft("u", "d.txt", Bytes::from("draft"), None, None).await.map(drop));
+    after("promote_draft", w.promote_draft("u", "d.txt", None).await.map(drop));
+    after("delete_draft", w.delete_draft("u", "keep.txt").await);
+    after("open_window", w.open_window(epoch, now + 60).await);
+    after("clear_window", w.clear_window(epoch, &[]).await);
+    after("drop_inbox", w.drop_inbox(epoch, consumed).await);
+    let m = LeanManifest { seq: 1, ..Default::default() };
+    after("cas_manifest", w.cas_manifest(&m, None, epoch, "writers-census").await.map(drop));
+}
+
+/// F10, the typed layer: on `Workspace::read_only` every writer answers
+/// `ReadOnly` (403 `read-only`, not retryable) and the store saw NO
+/// request — not a write, not even the window read. The backstop is
+/// asserted first, so with a verb's guard deleted this fails on the
+/// typed answer while showing the store refused the write anyway.
+#[tokio::test]
+async fn a_read_only_workspace_refuses_every_writer_before_it_touches_the_store() {
+    let mem = Arc::new(MemoryStore::new());
+    let plain: Arc<dyn ObjectStore> = mem.clone();
+    let (epoch, consumed) = seed_for_writers(&ws(&plain), &plain).await;
+    let before = plain.list(PREFIX).await.unwrap();
+
+    let ro = Workspace::read_only(plain.clone(), PREFIX);
+    assert!(ro.is_read_only());
+    mem.reset_op_counts();
+    let mut seen = vec![];
+    each_writer(&ro, epoch, &consumed, |verb, r| {
+        assert_eq!(store_writes(&mem), vec![], "{verb} on a read-only workspace reached a store writer ({r:?})");
+        match &r {
+            Err(e @ VerbError::ReadOnly) => {
+                assert_eq!((e.status(), e.code(), e.is_retryable()), (403, "read-only", false))
+            }
+            other => panic!("{verb} on a read-only workspace answered {other:?}, not ReadOnly"),
+        }
+        assert_eq!(mem.total_ops(), 0, "{verb} sent {:?} before refusing", mem.op_counts());
+        seen.push(verb);
+    })
+    .await;
+    assert_eq!(seen, WRITERS);
+    assert_eq!(plain.list(PREFIX).await.unwrap(), before, "the bucket moved");
+}
+
+/// F10, the store layer: `store()` is public, so an embedder can write
+/// around the typed check. The store a read-only workspace hands out
+/// refuses that too, and sends nothing. Control: the same PUT through a
+/// writable workspace's store lands.
+#[tokio::test]
+async fn a_read_only_workspace_store_refuses_a_write_that_goes_around_the_verbs() {
+    use flint_store::{GenerationStamps, PutCondition};
+    let mem = Arc::new(MemoryStore::new());
+    let plain: Arc<dyn ObjectStore> = mem.clone();
+    let body = Bytes::from("around the verbs");
+    let stamps = GenerationStamps {
+        generation: 1,
+        epoch: 0,
+        flush_uuid: "around".into(),
+        boundary_source: None,
+        posix: None,
+    };
+
+    let ro = Workspace::read_only(plain.clone(), PREFIX);
+    let key = ro.config().file_key("around.txt");
+    let err = ro
+        .store()
+        .put_whole(&key, body.clone(), &PutCondition::IfNoneMatchAny, &stamps, crc64_nvme(&body))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, StoreError::Auth(_)), "{err}");
+    let err = ro.store().delete(&key).await.unwrap_err();
+    assert!(matches!(err, StoreError::Auth(_)), "{err}");
+    assert_eq!(mem.total_ops(), 0, "the refused writes sent {:?}", mem.op_counts());
+
+    let w = ws(&plain);
+    w.store()
+        .put_whole(&key, body.clone(), &PutCondition::IfNoneMatchAny, &stamps, crc64_nvme(&body))
+        .await
+        .unwrap();
+    assert_eq!(store_writes(&mem), vec![("put_whole", 1)]);
+}
+
+/// F10's control: the same calls on `Workspace::new` land, and each one
+/// sends at least one write. A verb filed as a writer that writes nothing
+/// would make the read-only test above vacuous for it.
+#[tokio::test]
+async fn every_writer_writes_on_a_writable_workspace() {
+    let mem = Arc::new(MemoryStore::new());
+    let plain: Arc<dyn ObjectStore> = mem.clone();
+    let w = ws(&plain);
+    assert!(!w.is_read_only());
+    let (epoch, consumed) = seed_for_writers(&w, &plain).await;
+    mem.reset_op_counts();
+    let mut seen = vec![];
+    each_writer(&w, epoch, &consumed, |verb, r| {
+        if let Err(e) = r {
+            panic!("{verb} failed on a writable workspace: {e:?}");
+        }
+        assert_ne!(store_writes(&mem), vec![], "{verb} sent no write on a writable workspace");
+        mem.reset_op_counts();
+        seen.push(verb);
+    })
+    .await;
+    assert_eq!(seen, WRITERS);
+    assert_eq!(w.snapshot().await.unwrap().manifest.seq, 1, "the last writer, the manifest CAS, landed");
+}
+
+/// A read-only workspace reads what writers wrote — a cited file, a
+/// tracked one, a draft — answers as a writable one does, and sends
+/// only reads.
+#[tokio::test]
+async fn a_read_only_workspace_reads_what_writers_wrote_and_sends_only_reads() {
+    let mem = Arc::new(MemoryStore::new());
+    let plain: Arc<dyn ObjectStore> = mem.clone();
+    let w = ws(&plain);
+    let epoch = hold_lease(&plain, &w).await;
+    let cited = w.put_file("cited.txt", Bytes::from("cited"), &PutFile::default()).await.unwrap();
+    cite(&w, epoch, 1, "cited.txt", &cited, b"cited").await;
+    let tracked = w.put_file("tracked.txt", Bytes::from("tracked"), &PutFile::default()).await.unwrap();
+    w.put_draft("u", "d.txt", Bytes::from("draft"), None, None).await.unwrap();
+    let listing = w.snapshot().await.unwrap().listing();
+
+    let ro = Workspace::read_only(plain.clone(), PREFIX);
+    mem.reset_op_counts();
+    let mut seen = vec![];
+
+    let blob = ro.get_file("cited.txt").await.unwrap();
+    assert_eq!((blob.etag.as_str(), blob.body), (cited.as_str(), Bytes::from("cited")));
+    let blob = ro.get_file("tracked.txt").await.unwrap();
+    assert_eq!((blob.etag.as_str(), blob.body), (tracked.as_str(), Bytes::from("tracked")));
+    seen.push("get_file");
+    let snap = ro.snapshot().await.unwrap();
+    assert_eq!(snap.listing(), listing);
+    assert_eq!(snap.listing().iter().map(|l| l.path.as_str()).collect::<Vec<_>>(), ["cited.txt", "tracked.txt"]);
+    seen.push("snapshot");
+    let st = ro.status().await.unwrap();
+    assert_eq!((st.seq, st.epoch), (Some(1), Some(epoch)));
+    seen.push("status");
+    let seq = ro.wait_cited("cited.txt", &cited, Duration::from_secs(5), Duration::from_millis(10)).await.unwrap();
+    assert_eq!(seq, 1);
+    seen.push("wait_cited");
+    assert_eq!(ro.get_draft("u", "d.txt").await.unwrap().body, Bytes::from("draft"));
+    seen.push("get_draft");
+    let rows = ro.list_drafts("u").await.unwrap();
+    assert_eq!(rows.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(), ["d.txt"]);
+    seen.push("list_drafts");
+    assert_eq!(seen, READERS);
+
+    assert_eq!(store_writes(&mem), vec![], "a read-only workspace's reads sent a write");
+    assert!(mem.total_ops() > 0, "the control: the reads reached the store");
+}

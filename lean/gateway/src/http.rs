@@ -793,6 +793,7 @@ mod tests {
             (VerbError::StaleEpoch { cell_epoch: 3, holder_id: "h".into(), claimed: 2 }, 403, "stale-epoch", None, None),
             (VerbError::NoHolder, 403, "no-holder", None, None),
             (VerbError::Fenced("f".into()), 403, "fenced", None, None),
+            (VerbError::ReadOnly, 403, "read-only", None, None),
             (VerbError::CasMiss { current: None }, 409, "cas-miss", Some(2), None),
             (VerbError::CitationPending { path: "p".into(), etag: "e".into(), reason: "r".into() }, 202, "citation-pending", None, None),
             (VerbError::Superseded { path: "p".into(), cited_etag: "e".into() }, 409, "superseded", Some(2), None),

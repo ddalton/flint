@@ -23,7 +23,7 @@ pub use crate::workspace::{
     normalize_etag, path_ok, Accepted, Blob, Listed, PutFile, Snapshot, Status, VerbError, Workspace,
 };
 pub use flint_lean::{LeanConfig, LeanError, LEAN_DIR};
-pub use flint_store::{crc64_nvme, crc64_to_b64, memory::MemoryStore, ObjectStore, StoreError};
+pub use flint_store::{crc64_nvme, crc64_to_b64, memory::MemoryStore, ObjectStore, ReadOnly, StoreError};
 
 #[cfg(feature = "s3")]
 pub use flint_store::s3::S3Store;

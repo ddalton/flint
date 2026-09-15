@@ -28,7 +28,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-use flint_store::{crc64_nvme, GenerationStamps, ObjectStore, PutCondition, StoreError};
+use flint_store::{crc64_nvme, GenerationStamps, ObjectStore, PutCondition, ReadOnly, StoreError};
 
 use flint_lean::inbox::{self, InboxDoc, InboxEntry, Removal, RequestedVerb, VerbRequest, Window};
 use flint_lean::manifest::{self, LeanManifest, LoadedManifest};
@@ -44,6 +44,9 @@ pub struct Workspace {
     cfg: LeanConfig,
     max_put_bytes: u64,
     window_wait: Option<std::time::Duration>,
+    /// Built by `read_only`: every writer answers `VerbError::ReadOnly`,
+    /// and `store` is wrapped in `flint_store::ReadOnly`.
+    read_only: bool,
 }
 
 /// What a HITL write brings besides its bytes. The preconditions are
@@ -273,6 +276,12 @@ pub enum VerbError {
     /// 403 `fenced`: the window verb was refused by the cell.
     #[error("{0}")]
     Fenced(String),
+    /// 403 `read-only`: the workspace was built with
+    /// `Workspace::read_only` and this verb writes. Refused before any
+    /// request: nothing was read or written. Not retryable — the caller's
+    /// access refused it, not the workspace's state.
+    #[error("this workspace is read-only; the verb writes and was not performed")]
+    ReadOnly,
     /// 409 `cas-miss`: the manifest CAS lost. `current` is the etag
     /// the manifest carries now.
     #[error("current manifest etag: {current:?}")]
@@ -301,7 +310,10 @@ impl VerbError {
     pub fn status(&self) -> u16 {
         match self {
             VerbError::BadPath(_) | VerbError::BadUser(_) | VerbError::BadPrecondition(_) => 400,
-            VerbError::StaleEpoch { .. } | VerbError::NoHolder | VerbError::Fenced(_) => 403,
+            VerbError::StaleEpoch { .. }
+            | VerbError::NoHolder
+            | VerbError::Fenced(_)
+            | VerbError::ReadOnly => 403,
             VerbError::NoSuchFile(_) | VerbError::NoDraft(_) | VerbError::NoRemoval(_) => 404,
             VerbError::WindowOpen { .. }
             | VerbError::ConcurrentWrite
@@ -343,6 +355,7 @@ impl VerbError {
             VerbError::StaleEpoch { .. } => "stale-epoch",
             VerbError::NoHolder => "no-holder",
             VerbError::Fenced(_) => "fenced",
+            VerbError::ReadOnly => "read-only",
             VerbError::CasMiss { .. } => "cas-miss",
             VerbError::CitationPending { .. } => "citation-pending",
             VerbError::Superseded { .. } => "superseded",
@@ -505,7 +518,41 @@ impl Workspace {
             cfg: LeanConfig::new(prefix, "/nonexistent"),
             max_put_bytes: WHOLE_PUT_MAX,
             window_wait: None,
+            read_only: false,
         }
+    }
+
+    /// The same workspace for a caller who may only read — a user whose
+    /// role is read access (per-user access design §4.6). Every reading
+    /// verb answers as on `new`; every writing verb — `put_file`,
+    /// `remove_file(s)`, `rename_file(s)`, `withdraw_removal`,
+    /// `request_boundary`, `request_sync`, `put_draft`, `delete_draft`,
+    /// `promote_draft` and the syncer-facing four — answers
+    /// `VerbError::ReadOnly` before it sends a request.
+    ///
+    /// Two layers. The typed refusal is the honest answer; the store is
+    /// also wrapped in `flint_store::ReadOnly`, so a write that goes
+    /// around the verbs — through `store()`, which is public — is refused
+    /// too, with `StoreError::Auth`. Neither is the enforcement: hand a
+    /// read-only workspace a store built on a credential that cannot
+    /// write, and the bucket refuses whatever this crate misses.
+    pub fn read_only(store: Arc<dyn ObjectStore>, prefix: &str) -> Self {
+        let mut ws = Self::new(Arc::new(ReadOnly::new(store)), prefix);
+        ws.read_only = true;
+        ws
+    }
+
+    /// Built by `read_only`.
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    /// The first statement of every writing verb, before any request.
+    pub(crate) fn writable(&self) -> Result<(), VerbError> {
+        if self.read_only {
+            return Err(VerbError::ReadOnly);
+        }
+        Ok(())
     }
 
     /// How long a HITL write (`put_file`, `promote_draft`) may wait for
@@ -640,6 +687,7 @@ impl Workspace {
         body: Bytes,
         opts: &PutFile,
     ) -> Result<String, VerbError> {
+        self.writable()?;
         if !path_ok(path) {
             return Err(VerbError::BadPath(path.to_string()));
         }
@@ -916,6 +964,7 @@ impl Workspace {
         paths: &[(&str, Option<&str>)],
         author: Option<&str>,
     ) -> Result<(), VerbError> {
+        self.writable()?;
         let author = author.unwrap_or("ui");
         for (path, _) in paths {
             if !path_ok(path) {
@@ -981,6 +1030,7 @@ impl Workspace {
         pairs: &[(&str, &str)],
         author: Option<&str>,
     ) -> Result<Vec<String>, VerbError> {
+        self.writable()?;
         let author = author.unwrap_or("ui");
         let mut seen_to = std::collections::BTreeSet::new();
         for (from, to) in pairs {
@@ -1101,6 +1151,7 @@ impl Workspace {
     /// applied whatever the cell says afterwards, and the next
     /// `snapshot` tells which happened.
     pub async fn withdraw_removal(&self, path: &str) -> Result<(), VerbError> {
+        self.writable()?;
         if !path_ok(path) {
             return Err(VerbError::BadPath(path.to_string()));
         }
@@ -1137,6 +1188,7 @@ impl Workspace {
         verb: RequestedVerb,
         requestor: Option<&str>,
     ) -> Result<Accepted, VerbError> {
+        self.writable()?;
         let requestor = requestor.unwrap_or("gateway");
         let req = inbox::gateway_request(self.store.as_ref(), &self.cfg, verb, requestor).await?;
         Ok(Accepted {
@@ -1259,6 +1311,7 @@ impl Workspace {
 
     /// Mark the barrier window open (`{epoch, deadline_unix}`).
     pub async fn open_window(&self, epoch: u64, deadline_unix: u64) -> Result<(), VerbError> {
+        self.writable()?;
         self.require_current_epoch(epoch).await?;
         match inbox::open_window(self.store.as_ref(), &self.cfg, epoch, deadline_unix).await {
             Ok(_) => Ok(()),
@@ -1270,6 +1323,7 @@ impl Workspace {
     /// Clear the window, re-queueing the entries the barrier did not
     /// consume.
     pub async fn clear_window(&self, epoch: u64, queued: &[InboxEntry]) -> Result<(), VerbError> {
+        self.writable()?;
         self.require_current_epoch(epoch).await?;
         match inbox::clear_window(self.store.as_ref(), &self.cfg, epoch, queued).await {
             Ok(()) => Ok(()),
@@ -1280,6 +1334,7 @@ impl Workspace {
 
     /// Drop consumed entries from the inbox.
     pub async fn drop_inbox(&self, epoch: u64, consumed: &[InboxEntry]) -> Result<(), VerbError> {
+        self.writable()?;
         self.require_current_epoch(epoch).await?;
         inbox::drop_entries(self.store.as_ref(), &self.cfg, epoch, consumed).await?;
         Ok(())
@@ -1303,6 +1358,7 @@ impl Workspace {
         epoch: u64,
         flush_uuid: &str,
     ) -> Result<String, VerbError> {
+        self.writable()?;
         self.require_current_epoch(epoch).await?;
         let legacy =
             matches!(manifest::load_pointer(self.store.as_ref(), &self.cfg).await, Ok(None));

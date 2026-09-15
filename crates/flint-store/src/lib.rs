@@ -41,6 +41,9 @@ pub use counters::{RequestCounter, RequestCounts, RequestKind};
 pub mod layout;
 pub mod memory;
 pub mod probe;
+pub mod readonly;
+
+pub use readonly::ReadOnly;
 #[cfg(feature = "s3")]
 pub mod s3;
 #[cfg(feature = "s3")]

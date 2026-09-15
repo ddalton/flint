@@ -180,6 +180,7 @@ impl Workspace {
         author: Option<&str>,
         base_etag: Option<&str>,
     ) -> Result<String, VerbError> {
+        self.writable()?;
         check_user_and_path(user, path)?;
         self.check_size(&body)?;
         let cfg = self.config();
@@ -305,6 +306,7 @@ impl Workspace {
     /// bytes that are gone. Deleting a draft that does not exist is not
     /// an error.
     pub async fn delete_draft(&self, user: &str, path: &str) -> Result<(), VerbError> {
+        self.writable()?;
         check_user_and_path(user, path)?;
         let cfg = self.config();
         self.store().delete(&cfg.draft_meta_key(user, path)).await?;
@@ -326,6 +328,7 @@ impl Workspace {
         path: &str,
         author: Option<&str>,
     ) -> Result<String, VerbError> {
+        self.writable()?;
         check_user_and_path(user, path)?;
         let cfg = self.config();
 

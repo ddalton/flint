@@ -89,6 +89,30 @@ covered by the stability guarantee.
   the argument a wrong one.
 - **flint-lean-gateway 0.4.1: `connect_with_credentials`**, the same
   constructor returning the `Arc<dyn ObjectStore>` a `Workspace` takes.
+- **flint-store 0.1.4: `ReadOnly`; flint-lean-gateway 0.5.0:
+  `Workspace::read_only`** (per-user access design §4.6, phase E).
+  `ReadOnly::new(Arc<S>)` wraps any `ObjectStore`. Its 15 write methods
+  answer `StoreError::Auth("read-only store: <verb> <key>")` and send
+  nothing; a presigned PUT and `bootstrap` count as writes. Its reads,
+  including the trait's defaulted ones (`get_range_segments`,
+  `get_version`, `lifecycle_rules` and the rest), go to the inner store,
+  so an S3 store keeps its own overrides. `Workspace::read_only(store,
+  prefix)` builds a workspace on that wrapper. The 6 reading verbs answer
+  as on `new`. The 15 writing verbs, the syncer-facing four included,
+  answer the new `VerbError::ReadOnly` (403 `read-only`, not retryable)
+  before any request, and `is_read_only()` reports which kind a
+  workspace is. Because `store()` is public, the wrapper is what refuses
+  a write sent around the verbs. The credential is still the
+  enforcement: build a read-only workspace on a client that cannot
+  write. The HTTP router is unchanged. Pinned by a store test that calls
+  every trait method through a double recording each call by name, by a
+  census filing every trait method and every public verb, by the
+  gateway's refusal, bypass and read tests, and by a control in which
+  every writer writes on `Workspace::new`. Six mutations each fail their
+  test. **Semver:** flint-store's change is additive (0.1.4). The
+  gateway's is breaking (0.5.0): `VerbError` is not `#[non_exhaustive]`,
+  so an exhaustive `match` on it stops compiling. The gateway's
+  `flint-store` requirement must move to 0.1.4 when both are published.
 - **s3-csi: the access drill on real nodes** (`s3csi/e2e/aws-access.sh`,
   `aws-access-iam.sh`, `sts-shim.py`; design §10.6). One all-spot EC2
   cluster, a real bucket, and three broker arms:

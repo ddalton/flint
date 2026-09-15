@@ -741,7 +741,7 @@ promise the syncer and the mount keep, not one the bucket enforces**
 | F7 write coherence under `runsc` | phase F |
 | F8 the session policy narrows, never widens | **live on MinIO** (§10.5): the parent user's own policy is bucket-wide, and the narrowed keys are denied GET and LIST of another prefix |
 | F9 `readOnly: false` on a read-only SA does not widen | **unit, both ends**: `a_read_only_consumer_is_granted_read_whatever_the_pod_asks` (plugin), `a_grant_is_the_registration_narrowed_by_the_cr_never_widened` (broker); the bind as deployed is phase F |
-| F10 | needs E |
+| F10 a read-only `Workspace` cannot reach the store's writers | **unit** (§10.7): every writing verb answers `ReadOnly` with nothing sent; a write through `store()` is refused by the `ReadOnly` wrapper; removing the verb guard or the wrapper each fails its own test, and the other layer still refuses |
 
 Mutation-checked: nine mutations (floor tick without the reader branch;
 that plus the barrier guard removed; the guard alone; the publish
@@ -1012,3 +1012,96 @@ running writer is only re-registered), and its run-3 finish is void.
 - AWS STS verifying a real cluster token;
 - the lean operator's `AccessIsolation` condition on a cluster (no operator
   was deployed; unit-tested only).
+
+### 10.7 Phase E, as built (2026-09-14)
+
+**The store wrapper.** `flint_store::ReadOnly<S: ?Sized>`
+(`crates/flint-store/src/readonly.rs`), re-exported at the crate root and
+by the gateway. It implements every `ObjectStore` method by name:
+- **15 writes, refused with nothing sent:** `put_whole`, `copy_object`,
+  `compose_generation`, `delete`, `delete_if_match`, `delete_version`,
+  `presign_put`, `ensure_noncurrent_retention`, `abort_upload`, `bootstrap`,
+  and the five epoch writes (`epoch_acquire`, `epoch_renew`,
+  `epoch_release`, `epoch_enqueue`, `epoch_handoff`). Each answers
+  `StoreError::Auth("read-only store: <verb> <key>")`.
+  - `presign_put` is a write: the URL is a write credential handed onward.
+  - `bootstrap` is a write: S3's writes lifecycle rules and a probe object.
+- **16 reads, forwarded:** `head`, `get_whole`, `get_range`,
+  `get_range_segments`, `list`, `head_version`, `get_version`,
+  `list_versions`, `presign_get`, `lifecycle_rules`, `list_uploads`,
+  `epoch_read`, plus `min_part_size`, `max_parts`, `upload_gate` and
+  `request_counts`, which describe the inner store and send nothing.
+  - The eight defaulted ones are forwarded explicitly. A default left in
+    place runs on the wrapper, so S3's streaming `get_range_segments` would
+    fall back to `get_range`'s copy, and `get_version` would answer "this
+    backend has no version-scoped GET".
+
+**The workspace.** `Workspace::read_only(store, prefix)` wraps the store
+and sets a `read_only` flag. `is_read_only()` reports it.
+`VerbError::ReadOnly` is 403 `read-only` and not retryable. The flag is a
+`bool`, not `flint_lean::Access`: the published flint-lean 0.6.0 that the
+gateway builds against has no `Access`. A crate-private `writable()` is the
+first statement of every writer, before path checks and before any request:
+- `put_file`;
+- `remove_files` (and `remove_file` through it), `rename_files`
+  (`rename_file`), `withdraw_removal`;
+- `request_verb` (`request_boundary`, `request_sync`);
+- `open_window`, `clear_window`, `drop_inbox`, `cas_manifest`;
+- `put_draft`, `delete_draft`, `promote_draft`.
+
+The readers are `get_file`, `snapshot`, `status`, `wait_cited`,
+`get_draft` and `list_drafts`. The router and `GatewayCore` are unchanged:
+the binary still builds writable workspaces behind its one bearer.
+
+**Corrections to §4.6.**
+- There is no `StoreError::Forbidden`. The wrapper uses the existing
+  `StoreError::Auth` (401/403, "not allowed"). A new variant would be a
+  breaking change to flint-store, whose `StoreError` is not
+  `#[non_exhaustive]`.
+- §4.6's writer list missed five verbs: `request_sync` (it writes the
+  inbox cell) and the four syncer-facing verbs.
+- The store wrapper is more than a backstop. `Workspace::store()` is
+  public, so for a caller who writes around the verbs the wrapper is the
+  only layer in this crate that refuses.
+- Size: §8 said about 150 lines. As built, the non-test code is 205 lines
+  without comments or blank lines: 165 in the wrapper, mostly the trait's
+  31 signatures, and 40 in the gateway. With comments it is 244 and 63.
+  The tests are about 630 lines.
+
+**F10, unit-tested.** Each test was checked against a mutation of the layer
+it pins:
+- flint-store:
+  - `a_read_only_store_refuses_every_write_unsent_and_forwards_every_read`
+    calls all 31 methods through a double that records each call by method
+    name. `MemoryStore` cannot see a `get_range_segments` left to its
+    default, because its op counts read `get_range` either way.
+  - `every_trait_method_is_filed_and_every_one_is_implemented_by_name` is
+    a census. It parses the trait, the wrapper's impl and the double's
+    impl, and fails when the trait gains a method nobody filed.
+- gateway (`tests/verbs.rs`):
+  - `a_read_only_workspace_refuses_every_writer_before_it_touches_the_store`
+    (zero requests; it asserts "no store write" before the typed answer);
+  - `a_read_only_workspace_store_refuses_a_write_that_goes_around_the_verbs`;
+  - `every_writer_writes_on_a_writable_workspace`, the control on
+    `Workspace::new`;
+  - `a_read_only_workspace_reads_what_writers_wrote_and_sends_only_reads`;
+  - `every_public_verb_is_filed_as_a_reader_or_a_writer`, the census of
+    `pub async fn` in `workspace.rs` and `drafts.rs`;
+  - the `ReadOnly` row of the wire table in `http.rs`, and a README doctest.
+
+**Mutations.** Each applied only where its text occurred exactly once,
+restored, and checked byte-identical afterwards.
+
+| mutation | failed | what it showed |
+|---|---|---|
+| M1 `writable()` removed from `put_file` | `a_read_only_workspace_refuses_every_writer…` | answered `Store(Auth("read-only store: put_whole tenant/proj1/files/w.txt"))`; the no-store-write assert before it held, so the wrapper refused with the typed check gone |
+| M2 `writable()` removed from `put_draft` | same test | `Store(Auth("read-only store: put_whole …/drafts/u/body/d.txt"))`; the wrapper still refused |
+| M3 `read_only` skips the wrapper | `a_read_only_workspace_store_refuses_a_write_that_goes_around_the_verbs` | the bypassing PUT landed; the typed test still passed, so each layer is load-bearing on its own |
+| M4 `ReadOnly::put_whole` forwards | `a_read_only_store_refuses_every_write_unsent_and_forwards_every_read` | `put_whole … answered Ok(()), not Auth` |
+| M5 `ReadOnly::get_version` removed (trait default) | both flint-store tests | the census names the missing method; the behavioural test got `Other("this backend has no version-scoped GET")` |
+| M6 `get_range_segments` present but running the default's body | the behavioural test only | "did not reach the inner store as itself"; the census passed, so only the recording double catches this |
+
+**Not covered.** A read-only workspace on a store whose credential really
+cannot write (D1) is not run here; phase F measured that credential
+separately. The gateway binary has no read-only door. Filling `author`
+and the draft `user` from a verified `sub` is the embedder's job (§4.6).
