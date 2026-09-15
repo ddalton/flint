@@ -21,8 +21,9 @@ O3  every acked op part with content h (a write; the `to` half of a mv) is
     accounted for: the checkout's content for the path is h; OR a LATER acked
     op part on the same path has base == h; OR a preserved copy OF THAT PATH
     has sha256 h; OR h was REPLACED: a chain of op parts on the path, acked or
-    merely unanswered (never refused, dropped, or any other failure the writer
-    was told of), each LATER than and based on the one before (a delete's content is
+    merely unanswered, or a syncer's DROPPED write (withheld, left dirty, published
+    later; never refused or any other failure the writer was told of), each LATER
+    than and based on the one before (a delete's content is
     `absent`), starts at h and ends at the checkout's content (or a delete,
     the path absent), or at a content a preserved copy of the path holds (a
     peer displaced the rewrite and kept it: the rewrite landed). An agent that
@@ -34,7 +35,8 @@ O3  every acked op part with content h (a write; the `to` half of a mv) is
     of an ack with status ok, or partial without the path in `dropped`.
     Later = ack seq >= when both acks carry an integer seq; otherwise (a UI
     write, a null seq) journal wall time t_ms >= (clock-corrected when the
-    leg carries agent_nodes + chrony samples, minus --wall-slack-ms).
+    leg carries agent_nodes + chrony samples, minus --wall-slack-ms). A no-op
+    write (h == its base) is superseded by any op based on h, earlier or later.
     A mv is a delete of `path` (base) plus a write of `to` (to_base, sha256).
 O4  bucket/preserved.json keys == the preserved_keys of every
     upload-412-preserved and consume-dirty record in agents/*/conflicts.jsonl
@@ -381,6 +383,14 @@ def oracle_o3(leg, slack_ms=0):
         return y["acked"] or y["why"] in ("no-ack", "no-ack-line") or (
             y["why"] == "dropped" and y["agent"] != "ui")
 
+    def noop(x):
+        # A write of the bytes already there changes nothing a peer can see
+        # (the etag is the content's), so an op that read those bytes before
+        # it supersedes it as well as after (storm S2, 2026-09-15: a no-op
+        # rewrite acked at seq 115, a peer's move of the same content issued
+        # earlier and published at 114). Ordering still binds every real write.
+        return x["kind"] == "write" and x["h"] is not None and x["base"] == x["h"]
+
     def replaced(x):
         want = final.get(x["path"])
         kept = pres_by_path.get(x["path"], set()) | pres_unparsed
@@ -389,7 +399,8 @@ def oracle_o3(leg, slack_ms=0):
             cur = frontier.pop()
             content = cur["h"] if cur["kind"] == "write" else "absent"
             for y in by_path[x["path"]]:
-                if id(y) in seen or not may_replace(y) or y["base"] != content or not later(y, cur):
+                if id(y) in seen or not may_replace(y) or y["base"] != content or not (
+                        later(y, cur) or (cur is x and noop(x))):
                     continue
                 if (y["kind"] == "write" and (y["h"] == want or y["h"] in kept)) or (
                         y["kind"] == "delete" and want is None):
@@ -418,7 +429,7 @@ def oracle_o3(leg, slack_ms=0):
         if final.get(x["path"]) == h:
             accounted["final"] += 1
             continue
-        if any(y is not x and y["acked"] and y["base"] == h and later(y, x) for y in by_path[x["path"]]):
+        if any(y is not x and y["acked"] and y["base"] == h and (later(y, x) or noop(x)) for y in by_path[x["path"]]):
             accounted["superseded"] += 1
             continue
         if h in pres_by_path.get(x["path"], ()) or h in pres_unparsed:

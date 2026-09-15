@@ -300,6 +300,20 @@ def nf_dropped_link_final(g, landed=True):
         g.final["hot/p07.txt"] = (Y, "e-dy")
 
 
+def nf_noop_write_then_earlier_delete(g, noop=True):
+    # a1's write of X is final; a2 rewrites X's bytes (a no-op, base X) and is acked;
+    # a3 deleted the path on a read of X issued BEFORE a2's rewrite, no-ack, final absent.
+    # Control: a2's write carries NEW bytes on base X, so the earlier delete cannot account it.
+    X, Y = H("NX"), H("NY")
+    g.op("a1", 5, 7000, "write", "hot/p09.txt", "a1-5", X)
+    g.ack("a1", 7400, "a1-5", "ok", 17)
+    g.op("a3", 5, 7600, "delete", "hot/p09.txt", "a3-5", base=X)
+    g.ack("a3", 9900, "a3-5", "no-ack")
+    g.op("a2", 5, 7800, "write", "hot/p09.txt", "a2-5", X if noop else Y, base=X)
+    g.ack("a2", 8400, "a2-5", "ok", 19)
+    g.final.pop("hot/p09.txt", None)
+
+
 def f_replaced_chain_broken(g):
     # acked X rewritten to Y (base X, unacked); the final Z is based on something else
     X, Y, Z = H("BX"), H("BY"), H("BZ")
@@ -574,6 +588,10 @@ SCENARIOS = [
      nf_dropped_link_final, set(), lambda v: v["oracles"]["O3"]["details"]["accounted"]["replaced"] == 1),
     ("a-dropped-link-then-final/ctl", "control", "same, the dropped write never landed",
      lambda g: nf_dropped_link_final(g, landed=False), {"O3"}),
+    ("a-noop-write-earlier-delete", "non-fault", "an acked no-op rewrite of X, a no-ack delete of X issued before it, final absent",
+     nf_noop_write_then_earlier_delete, set()),
+    ("a-noop-write-earlier-delete/ctl", "control", "same, the rewrite carries NEW bytes",
+     lambda g: nf_noop_write_then_earlier_delete(g, noop=False), {"O3"}),
     ("a-replaced-chain-broken", "fault", "acked X -> Y unacked, final Z not based on Y", f_replaced_chain_broken, {"O3"}),
     ("a-replaced-by-earlier-op", "fault", "the op based on X is journaled before X", f_replaced_by_an_earlier_op, {"O3"}),
     ("a-mv-destination-lost", "fault", "a mv's `to` content is gone", f_mv_destination_lost, {"O3"}),
