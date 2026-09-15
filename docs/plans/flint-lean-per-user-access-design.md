@@ -739,7 +739,7 @@ promise the syncer and the mount keep, not one the bucket enforces**
 | F4 `publish` answered `refused-read-only` | **unit**: `a_publish_touch_on_a_reader_is_answered_refused_read_only` (control: the writer's `ok`), `a_reader_drain_answers_what_it_owes_and_writes_nothing` |
 | F5 `sync` applies a foreign change onto the reader | **unit**, and at every floor: `a_reader_follows_writers_and_the_inbox_without_one_store_write` (a writer's edit, delete, add and a UI inbox write) |
 | F6 a refused re-mint takes the credential away | unchanged code path (`republish` removes `creds.json` on a refusal); phase F |
-| F7 write coherence under `runsc` | **live on kind, arm64, runsc systrap** (§10.8, G1): 1000 files then an immediate publish, every file cited at its size, a runc reader byte-identical; the same from a runc writer as the control. Not measured on amd64 or under KVM |
+| F7 write coherence under `runsc` | **live on kind arm64 and on EC2 amd64, runsc systrap** (§10.8, G1): 1000 files then an immediate publish, every file cited at its size, a runc reader byte-identical; the same from a runc writer as the control. Not measured under runsc's KVM platform |
 | F8 the session policy narrows, never widens | **on MinIO's OIDC STS** (§10.8, O0/O3): the same role without a policy writes and reads another prefix; the policy the broker sent, read off the wire, holds the reader to reads of its prefix. First **live on MinIO** (§10.5): the parent user's own policy is bucket-wide, and the narrowed keys are denied GET and LIST of another prefix |
 | F9 `readOnly: false` on a read-only SA does not widen | **unit, both ends**: `a_read_only_consumer_is_granted_read_whatever_the_pod_asks` (plugin), `a_grant_is_the_registration_narrowed_by_the_cr_never_widened` (broker); the bind as deployed is phase F |
 | F10 a read-only `Workspace` cannot reach the store's writers | **unit** (§10.7): every writing verb answers `ReadOnly` with nothing sent; a write through `store()` is refused by the `ReadOnly` wrapper; removing the verb guard or the wrapper each fails its own test, and the other layer still refuses |
@@ -1177,7 +1177,30 @@ compiled `spdk-csi-driver`'s test binary, and with the kind node up the
 Mac ran out of memory twice (macOS killed the drill). The policy now comes
 off the wire through the tap, which is also the stronger evidence.
 
-**Not covered, still:** amd64 nodes and runsc under KVM; AWS STS against a
+**Repeated on amd64 EC2, 2026-09-15: 53 ok, 0 bad**
+(`s3csi/e2e/results/local-access-ec2-amd64-2026-09-15/`). Trove cluster
+`gva` (all spot, i4i.large control plane + worker, us-west-1), AL2023, kernel
+6.18.48, containerd 2.2.7 (config version 3), runsc release-20260907.0
+x86_64 on systrap, the images built at `d31527c4` and pushed as
+`gva-20260915`, the rig's in-cluster MinIO. Every leg as on arm64. The
+tree is a plain directory on the node's root XFS, so the reader's host bind
+and the mount its gofer serves `/workspace` from are both `ro … xfs`.
+- **No KVM platform on i4i.large:** no `/dev/kvm` and no `vmx` flag (a Nitro
+  VM without nested virtualization), so runsc's KVM platform cannot run there.
+  It needs a `.metal` instance or a node that exposes `/dev/kvm`. It moves
+  system calls, not the file path these legs test.
+- **The first EC2 run was VOID, not red.** The worker's 8 GiB root hit
+  DiskPressure during setup (trove's flint SPDK chart and its images, the rig's
+  images, the gVisor tarball). Kubelet evicted the aws-cli pod, `mc-s3` and a
+  broker before the first leg, and every leg failed its precondition
+  (`void-run1-disk-pressure.out`). Uninstalling trove's unused `flint-csi`
+  release freed nothing at first. Its image content stayed pinned by 19
+  expiry-less containerd leases from the node's first pulls, and by
+  bare `sha256:` image-ID references. Removing those freed 1.2 GiB. The drill now
+  refuses to start below 1.5 GiB free or under DiskPressure, and setup
+  re-creates an evicted aws-cli pod.
+
+**Not covered, still:** runsc under KVM; AWS STS against a
 public issuer; Ceph RGW (the `GetObjectAttributes` finding is from RGW's
 source); the gateway binary's lack of a read-only door (§10.7).
 

@@ -98,7 +98,9 @@ covered by the stability guarantee.
   (F7, 1000 files); a runsc reader gets EROFS; the gofer serving its
   `/workspace` mounts it read-only; the UDS door is refused under runsc
   and reachable under runc. The lean operator's `AccessIsolation` for each
-  identity mode, and its transition. arm64 and systrap only.
+  identity mode, and its transition. Run on arm64 (kind) and on amd64 EC2
+  nodes (AL2023, containerd 2.2), 53 ok on each; runsc on systrap (i4i.large
+  exposes no `/dev/kvm`).
 - **flint-store 0.1.4: `ReadOnly`; flint-lean-gateway 0.5.0:
   `Workspace::read_only`** (per-user access design §4.6, phase E).
   `ReadOnly::new(Arc<S>)` wraps any `ObjectStore`. Its 15 write methods

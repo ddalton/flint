@@ -50,6 +50,12 @@
 #   CTX=kind-flint-s3csi ./local-access.sh setup  # runsc in the node, MinIO OIDC, operator image
 #   CTX=kind-flint-s3csi ./local-access.sh        # the legs; ARMS="O G I" by default
 #
+# On real nodes (a trove cluster, 2026-09-15): run-s3csi.sh setup with
+# STORE=minio NODE_EXEC=nodesh and images pushed under TAG, then the same two
+# commands with KUBECONFIG, CTX, NODE_EXEC=nodesh and TAG. setup downloads and
+# checks gVisor ON the node and writes the runsc handler into whichever
+# containerd config format the node has (AL2023: containerd 2.2, version 3).
+#
 # `setup` restarts containerd in the kind node once (to add the runsc
 # handler) and MinIO once (its storage is ephemeral, so it re-seeds). The
 # lean operator image is built from spdk-csi-driver's aarch64/x86_64 musl
@@ -57,7 +63,7 @@
 # --release --target <triple> --bin flint-lean-operator` first.
 set -u
 cd "$(dirname "$0")"
-export STORE=minio NODE_EXEC=docker
+export STORE=minio NODE_EXEC=${NODE_EXEC:-docker}
 REPO=$(cd ../.. && pwd)
 eval "$(sed -n '/^CTX=\${CTX:-/,/^# ── setup \/ teardown/p' run-s3csi.sh | sed '$d')"
 eval "$(sed -n '/^lobj()   {/,/^lmhas()  {/p' run-s3csi.sh)"
@@ -65,36 +71,65 @@ eval "$(sed -n '/^wenvv() {/,/^clear_pods() {/p' aws-access.sh)"
 WORK=${WORK:-/tmp/flint-local-access}
 mkdir -p "$WORK"
 GVISOR_URL=https://storage.googleapis.com/gvisor/releases/release/latest
-case "$(docker info --format '{{.Architecture}}' 2>/dev/null)" in
-    aarch64|arm64) GARCH=aarch64; TRIPLE=aarch64-unknown-linux-musl ;;
-    *)             GARCH=x86_64;  TRIPLE=x86_64-unknown-linux-musl ;;
-esac
 ARN_FILE=$WORK/minio-role-arn
+# A script from stdin, run as root on $NODE's host with "$@" as its
+# arguments: docker exec into a kind node, or scripts/nodesh.sh on a real one.
+nodex() {
+    local script; script=$(cat)
+    if [ "$NODE_EXEC" = nodesh ]; then
+        printf 'set -- %s\n%s\n' "$(printf '%q ' "$@")" "$script" | "$REPO/scripts/nodesh.sh" "$NODE" - 2>/dev/null
+    else
+        printf '%s\n' "$script" | docker exec -i "$NODE" bash -s -- "$@" 2>/dev/null
+    fi
+}
+case "$(onnode 'uname -m')" in
+    aarch64|arm64) GARCH=aarch64; TRIPLE=aarch64-unknown-linux-musl; PLATFORM=linux/arm64 ;;
+    *)             GARCH=x86_64;  TRIPLE=x86_64-unknown-linux-musl;  PLATFORM=linux/amd64 ;;
+esac
 
 # ── setup ─────────────────────────────────────────────────────────────
 if [ "${1:-}" = setup ]; then
     set -e
-    if ! docker exec "$NODE" grep -q 'runtimes.runsc' /etc/containerd/config.toml; then
+    if ! onnode "grep -q 'runtimes.runsc' /etc/containerd/config.toml"; then
         echo "installing runsc ($GARCH) into $NODE"
-        ( cd "$WORK" && curl -fsSLO "$GVISOR_URL/$GARCH/gvisor.tar.bz2" && curl -fsSLO "$GVISOR_URL/$GARCH/gvisor.tar.bz2.sha512" \
-            && shasum -a 512 -c gvisor.tar.bz2.sha512 && tar xjf gvisor.tar.bz2 runsc containerd-shim-runsc-v1 )
-        docker exec -i "$NODE" sh -c 'cat > /usr/local/bin/runsc && chmod +x /usr/local/bin/runsc' < "$WORK/runsc"
-        docker exec -i "$NODE" sh -c 'cat > /usr/local/bin/containerd-shim-runsc-v1 && chmod +x /usr/local/bin/containerd-shim-runsc-v1' < "$WORK/containerd-shim-runsc-v1"
-        docker exec "$NODE" sh -c '
-cat >> /etc/containerd/config.toml <<EOF
+        if [ "$NODE_EXEC" = nodesh ]; then
+            nodex "$GVISOR_URL/$GARCH" <<'EOF' || { echo "runsc download on $NODE failed" >&2; exit 1; }
+set -e
+mkdir -p /opt/gvisor && cd /opt/gvisor
+curl -fsSLO "$1/gvisor.tar.bz2" && curl -fsSLO "$1/gvisor.tar.bz2.sha512"
+sha512sum -c gvisor.tar.bz2.sha512
+tar xjf gvisor.tar.bz2 runsc containerd-shim-runsc-v1 2>/dev/null \
+    || python3 -c "import tarfile; t = tarfile.open('gvisor.tar.bz2'); [t.extract(n, '.') for n in ('runsc', 'containerd-shim-runsc-v1')]"
+install -m 0755 runsc containerd-shim-runsc-v1 /usr/local/bin/
+rm -f gvisor.tar.bz2
+EOF
+        else
+            ( cd "$WORK" && curl -fsSLO "$GVISOR_URL/$GARCH/gvisor.tar.bz2" && curl -fsSLO "$GVISOR_URL/$GARCH/gvisor.tar.bz2.sha512" \
+                && shasum -a 512 -c gvisor.tar.bz2.sha512 && tar xjf gvisor.tar.bz2 runsc containerd-shim-runsc-v1 )
+            docker exec -i "$NODE" sh -c 'cat > /usr/local/bin/runsc && chmod +x /usr/local/bin/runsc' < "$WORK/runsc"
+            docker exec -i "$NODE" sh -c 'cat > /usr/local/bin/containerd-shim-runsc-v1 && chmod +x /usr/local/bin/containerd-shim-runsc-v1' < "$WORK/containerd-shim-runsc-v1"
+        fi
+        # containerd's config format decides the CRI plugin's name: version 3
+        # (containerd 2.x's own) moved runtimes under io.containerd.cri.v1.runtime.
+        nodex <<'EOF'
+set -e
+cfg=/etc/containerd/config.toml
+if grep -q '^version *= *3' "$cfg"; then plug='io.containerd.cri.v1.runtime'; else plug='io.containerd.grpc.v1.cri'; fi
+cat >> "$cfg" <<TOML
 
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+[plugins."$plug".containerd.runtimes.runsc]
   runtime_type = "io.containerd.runsc.v1"
-  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc.options]
+  [plugins."$plug".containerd.runtimes.runsc.options]
     TypeUrl = "io.containerd.runsc.v1.options"
     ConfigPath = "/etc/containerd/runsc.toml"
+TOML
+printf '[runsc_config]\n  systemd-cgroup = "true"\n  platform = "systrap"\n' > /etc/containerd/runsc.toml
+systemctl restart containerd
 EOF
-printf "[runsc_config]\n  systemd-cgroup = \"true\"\n  platform = \"systrap\"\n" > /etc/containerd/runsc.toml
-systemctl restart containerd'
-        sleep 10
+        sleep 15
     fi
     printf 'apiVersion: node.k8s.io/v1\nkind: RuntimeClass\nmetadata: { name: gvisor }\nhandler: runsc\n' | $K apply -f - >/dev/null
-    echo "runsc: $(docker exec "$NODE" runsc --version | head -1)"
+    echo "runsc: $(onnode "runsc --version" | head -1)"
 
     # MinIO's OpenID provider is the cluster's service-account issuer. The
     # discovery document and the JWKS need no credential here (rig only).
@@ -137,6 +172,8 @@ for d in yaml.safe_load_all(open('rig.yaml')):
     $K -n $SYS wait --for=condition=ready pod/mc-s3 --timeout=120s >/dev/null
     echo "re-seeded: $(mcx mc ls --recursive m/$BUCKET/ | grep -c .) objects"
 
+    # An evicted or failed pod is not re-created by apply.
+    $K -n $SYS delete pod awscli --ignore-not-found --wait=true >/dev/null 2>&1
     cat <<'EOF' | $K apply -f - >/dev/null
 apiVersion: v1
 kind: Pod
@@ -153,8 +190,12 @@ EOF
     [ -x "$bin" ] || { echo "no $bin — cargo zigbuild --release --target $TRIPLE --bin flint-lean-operator" >&2; exit 1; }
     rm -rf "$WORK/opimg" && mkdir -p "$WORK/opimg" && cp "$bin" "$WORK/opimg/"
     printf 'FROM ubuntu:24.04\nRUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*\nCOPY flint-lean-operator /usr/local/bin/flint-lean-operator\nUSER 65532:65532\nENTRYPOINT ["/usr/local/bin/flint-lean-operator"]\n' > "$WORK/opimg/Dockerfile"
-    docker build -q -t "dilipdalton/flint-lean-operator:$TAG" "$WORK/opimg" >/dev/null
-    kind load docker-image --name "${CTX#kind-}" "dilipdalton/flint-lean-operator:$TAG" >/dev/null
+    if [ "$NODE_EXEC" = nodesh ]; then
+        docker buildx build -q --platform "$PLATFORM" --push -t "dilipdalton/flint-lean-operator:$TAG" "$WORK/opimg" >/dev/null
+    else
+        docker build -q -t "dilipdalton/flint-lean-operator:$TAG" "$WORK/opimg" >/dev/null
+        kind load docker-image --name "${CTX#kind-}" "dilipdalton/flint-lean-operator:$TAG" >/dev/null
+    fi
     echo "setup done"
     exit 0
 fi
@@ -189,16 +230,17 @@ tpod() { # name sa selkey cr ro runtime [image]
 # The sandbox kernel a tenant runs on: "gvisor" or "host".
 kernel_of() { case "$($K -n $NS exec "$1" -c agent -- cat /proc/version 2>/dev/null)" in *gvisor*) echo gvisor ;; "") echo none ;; *) echo host ;; esac; }
 # "opts fs" of the /workspace mount the runsc gofer for a pod's agent
-# container serves from, read from the gofer's own mount namespace.
+# container serves from, read from the gofer's own mount namespace. The
+# container is found by its OCI config, not crictl (AL2023 nodes have none).
 gofer_view() {
-    docker exec -i "$NODE" bash -s "$1" <<'EOF'
+    nodex "$1" <<'EOF'
 want=$1
 for d in /proc/[0-9]*; do
     [ "$(tr '\0' '\n' < $d/cmdline 2>/dev/null | head -1)" = runsc-gofer ] || continue
     b=$(tr '\0' '\n' < $d/cmdline | grep -o 'k8s.io/[0-9a-f]\{64\}' | head -1 | cut -d/ -f2)
-    info=$(crictl inspect "$b" 2>/dev/null)
-    echo "$info" | grep -q "\"io.kubernetes.pod.name\": \"$want\"" || continue
-    echo "$info" | grep -q '"io.kubernetes.container.name": "agent"' || continue
+    cfg=/run/containerd/io.containerd.runtime.v2.task/k8s.io/$b/config.json
+    tr -d ' \n' < "$cfg" 2>/dev/null | grep -q "\"io.kubernetes.cri.sandbox-name\":\"$want\"" || continue
+    tr -d ' \n' < "$cfg" | grep -q '"io.kubernetes.cri.container-name":"agent"' || continue
     awk '$5 == "/workspace" {for (i=1;i<=NF;i++) if ($i=="-") {print $6, $(i+1); exit}}' $d/mountinfo
 done
 EOF
@@ -224,11 +266,22 @@ cond() { # workspace field  (status | reason | lastTransitionTime)
 }
 clear_local() { $K -n $NS delete pods -l suite=acc --ignore-not-found --wait=true --timeout=600s >/dev/null 2>&1; }
 
-echo "flint read access on the local kind rig — $CTX, node $NODE, arms: $ARMS"
+echo "flint read access — $CTX, node $NODE via $NODE_EXEC, arms: $ARMS"
 echo "evidence: $OUT"
 $K get csidriver s3.csi.chert.us >/dev/null 2>&1 || { echo "no s3.csi.chert.us — run run-s3csi.sh setup first"; exit 2; }
 [ -s "$ARN_FILE" ] || { echo "no MinIO role ARN — run $0 setup first"; exit 2; }
 ARN=$(cat "$ARN_FILE")
+# A node under disk pressure evicts the rig's own pods (the first EC2 run on
+# an 8 GiB root lost the aws-cli pod, mc-s3 and a broker before its first leg,
+# and every leg after failed on its precondition). Refuse rather than run void.
+dp=$($K get node "$NODE" -o jsonpath='{.status.conditions[?(@.type=="DiskPressure")].status}' 2>/dev/null)
+free_k=$(onnode "df -Pk / | awk 'NR==2 {print \$4}'")
+# 1.5 GiB: kubelet evicts below 1.28 GiB on an 8 GiB root, and every image the legs use is
+# already pulled by setup, so the legs themselves add megabytes.
+[ "$dp" = False ] && [ "${free_k:-0}" -ge 1572864 ] \
+    || { echo "REFUSING: $NODE DiskPressure=$dp, root free ${free_k:-?} KiB (< 1.5 GiB) — the run would be void"; exit 2; }
+$K -n $SYS get pod awscli mc-s3 -o jsonpath='{range .items[*]}{.metadata.name}={.status.phase} {end}' 2>/dev/null | grep -q 'awscli=Running mc-s3=Running' \
+    || { echo "REFUSING: the aws-cli and mc-s3 pods are not both Running — run $0 setup"; exit 2; }
 sed -e "s#__B__#$BUCKET#g" -e "s#__ENDPOINT__#$S3_ENDPOINT#g" -e "s#__REGION__#$S3_REGION#g" acc-tenants.yaml.tpl | $K apply -f - >/dev/null \
     || { echo "the access tenants were refused"; exit 2; }
 $K apply -f local-access-tenants.yaml >/dev/null || { echo "the local tenants were refused"; exit 2; }
@@ -486,7 +539,7 @@ leg I1 "the lean operator's AccessIsolation per identity mode"
 $K -n $SYS create secret generic lean-operator-creds --from-literal=AWS_ACCESS_KEY_ID=drill \
     --from-literal=AWS_SECRET_ACCESS_KEY=drillsecret --from-literal=AWS_REGION="$S3_REGION" --dry-run=client -o yaml | $K apply -f - >/dev/null
 helm --kube-context "$CTX" upgrade --install flint-lean "$REPO/flint-lean-chart" -n $SYS \
-    --set image.ref="dilipdalton/flint-lean-operator:$TAG" --set image.pullPolicy=Never \
+    --set image.ref="dilipdalton/flint-lean-operator:$TAG" --set image.pullPolicy="$([ "$NODE_EXEC" = nodesh ] && echo IfNotPresent || echo Never)" \
     --set operatorCredentialsSecret=lean-operator-creds --set endpoint="$S3_ENDPOINT" >/dev/null \
     || bad "helm install flint-lean failed"
 $K -n $SYS rollout status deploy/flint-lean --timeout=300s >/dev/null 2>&1 || bad "the lean operator did not roll out"
@@ -526,5 +579,5 @@ echo " $ARMS " | grep -q " G " && want_legs="$want_legs G1 G1c G2 G3 G4"
 echo " $ARMS " | grep -q " I " && want_legs="$want_legs I1 I2"
 for want in $want_legs; do echo " $RAN_LEGS " | grep -q " $want " || bad "leg $want never ran"; done
 echo "════════════════════════════════════════"
-echo "flint read access on the local kind rig: $PASS ok, $FAILED bad, $SKIPPED skipped"
+echo "flint read access ($CTX): $PASS ok, $FAILED bad, $SKIPPED skipped"
 [ "$FAILED" = "0" ]

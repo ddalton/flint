@@ -1,0 +1,8 @@
+flint-s3-worker: credentials door on http://127.0.0.1:9911/v1/creds
+flint-s3-worker: listening on /comm/mount.sock (accept budget 300s)
+flint-s3-worker: launching /usr/bin/mount-s3 s3bucket /dev/fd/3 --foreground --allow-other --prefix access/pt/ --endpoint-url http://minio.flint-system.svc:9000 --force-path-style --region us-east-1 --allow-delete --allow-overwrite --uid 1001 --gid 1001 --read-only
+2026-09-15T06:13:11.759354Z  INFO ThreadId(01) mountpoint_s3::run: mount-s3 1.24.0
+2026-09-15T06:13:11.759948Z  WARN ThreadId(01) mountpoint_s3::cli: failed to detect network throughput. Using 10 gbps as throughput. Use --maximum-throughput-gbps CLI flag to configure a target throughput appropriate for the instance. Detection failed due to: failed to get instance type: IMDS is disabled
+2026-09-15T06:13:11.759965Z  INFO ThreadId(01) mountpoint_s3::cli: target network throughput 10 Gbps
+2026-09-15T06:13:11.817765Z  INFO ThreadId(01) mountpoint_s3::run: successfully mounted prefix access/pt/ of bucket s3bucket at /dev/fd/3
+prefix access/pt/ of bucket s3bucket is mounted at /dev/fd/3

@@ -1,0 +1,786 @@
+apiVersion: v1
+items:
+- apiVersion: chert.us/v1alpha1
+  kind: FlintLeanWorkspace
+  metadata:
+    annotations:
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"chert.us/v1alpha1","kind":"FlintLeanWorkspace","metadata":{"annotations":{},"name":"acc-direct","namespace":"s3-tenants"},"spec":{"bucket":"s3bucket","consumers":{"readOnlyServiceAccounts":["viewer"],"serviceAccounts":["editor"]},"endpoint":"http://minio.flint-system.svc:9000","expectedBytes":1048576,"expectedFiles":100,"floorSecs":15,"gid":1001,"keyPrefix":"access/direct","maxFiles":5000,"projectId":"team-a/acc-direct","region":"us-east-1","sizeLimitGib":0,"uid":1001}}
+    creationTimestamp: "2026-09-15T05:25:38Z"
+    generation: 1
+    name: acc-direct
+    namespace: s3-tenants
+    resourceVersion: "13653"
+    uid: f487bc92-ee7f-4d0e-bfd7-7afa8e113f32
+  spec:
+    bucket: s3bucket
+    consumers:
+      readOnlyServiceAccounts:
+      - viewer
+      serviceAccounts:
+      - editor
+    endpoint: http://minio.flint-system.svc:9000
+    eventTrace: false
+    expectedBytes: 1048576
+    expectedFiles: 100
+    fanout: 32
+    fetchDrivers: 0
+    fetchInflightMb: 128
+    floorSecs: 15
+    gid: 1001
+    keyPrefix: access/direct
+    maxBytes: 0
+    maxFiles: 5000
+    metrics:
+      enabled: false
+      port: 9847
+    mountPath: /workspace
+    projectId: team-a/acc-direct
+    rawReads: false
+    region: us-east-1
+    sentinelHourlyBudget: 60
+    sentinelMinIntervalSecs: 5
+    sentinels: auto
+    sizeLimitGib: 0
+    udsDoor: false
+    uid: 1001
+    uploadInflightMb: 256
+    uploadPartParallelism: 8
+  status:
+    conditions:
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: 'a read-only pod''s key is minted by flint-s3-broker as a read grant,
+        and whether the bucket enforces it depends on the broker''s backend, which
+        this operator cannot see: sts (a session policy of reads on this prefix),
+        rest (your credential door, told access=read) and static with a read key (FLINT_S3B_STATIC_READ_*)
+        hold a reader to reads; static without one is cooperative. The broker''s /v1/status
+        reports readEnforcement'
+      observedGeneration: 1
+      reason: DecidedByBroker
+      status: Unknown
+      type: AccessIsolation
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: the spec's knobs are coherent
+      observedGeneration: 1
+      reason: Accepted
+      status: "True"
+      type: SpecAccepted
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: no syncer holds the lease (the workspace is at rest, which is the design)
+      observedGeneration: 1
+      reason: NoLiveSyncer
+      status: Unknown
+      type: SyncerObserved
+    lastVerifiedUnix: 1789452746
+    message: claim created; 0 stale uploads swept
+    phase: Claimed
+- apiVersion: chert.us/v1alpha1
+  kind: FlintLeanWorkspace
+  metadata:
+    annotations:
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"chert.us/v1alpha1","kind":"FlintLeanWorkspace","metadata":{"annotations":{},"name":"acc-door","namespace":"s3-tenants"},"spec":{"bucket":"s3bucket","consumers":{"serviceAccounts":["editor"]},"endpoint":"http://minio.flint-system.svc:9000","floorSecs":15,"gid":1001,"keyPrefix":"access/door","projectId":"team-a/acc-door","region":"us-east-1","udsDoor":true,"uid":1001}}
+    creationTimestamp: "2026-09-15T05:25:38Z"
+    generation: 1
+    name: acc-door
+    namespace: s3-tenants
+    resourceVersion: "13655"
+    uid: 40d5bd09-d96b-4fa7-8433-e95ccd0e4060
+  spec:
+    bucket: s3bucket
+    consumers:
+      serviceAccounts:
+      - editor
+    endpoint: http://minio.flint-system.svc:9000
+    eventTrace: false
+    fanout: 32
+    fetchDrivers: 0
+    fetchInflightMb: 128
+    floorSecs: 15
+    gid: 1001
+    keyPrefix: access/door
+    maxBytes: 0
+    maxFiles: 250000
+    metrics:
+      enabled: false
+      port: 9847
+    mountPath: /workspace
+    projectId: team-a/acc-door
+    rawReads: false
+    region: us-east-1
+    sentinelHourlyBudget: 60
+    sentinelMinIntervalSecs: 5
+    sentinels: auto
+    sizeLimitGib: 20
+    udsDoor: true
+    uid: 1001
+    uploadInflightMb: 256
+    uploadPartParallelism: 8
+  status:
+    conditions:
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: 'a read-only pod''s key is minted by flint-s3-broker as a read grant,
+        and whether the bucket enforces it depends on the broker''s backend, which
+        this operator cannot see: sts (a session policy of reads on this prefix),
+        rest (your credential door, told access=read) and static with a read key (FLINT_S3B_STATIC_READ_*)
+        hold a reader to reads; static without one is cooperative. The broker''s /v1/status
+        reports readEnforcement'
+      observedGeneration: 1
+      reason: DecidedByBroker
+      status: Unknown
+      type: AccessIsolation
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: the spec's knobs are coherent
+      observedGeneration: 1
+      reason: Accepted
+      status: "True"
+      type: SpecAccepted
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: no syncer holds the lease (the workspace is at rest, which is the design)
+      observedGeneration: 1
+      reason: NoLiveSyncer
+      status: Unknown
+      type: SyncerObserved
+    lastVerifiedUnix: 1789452746
+    message: claim created; 0 stale uploads swept
+    phase: Claimed
+- apiVersion: chert.us/v1alpha1
+  kind: FlintLeanWorkspace
+  metadata:
+    annotations:
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"chert.us/v1alpha1","kind":"FlintLeanWorkspace","metadata":{"annotations":{},"name":"acc-lean","namespace":"s3-tenants"},"spec":{"bucket":"s3bucket","consumers":{"readOnlyServiceAccounts":["viewer"],"serviceAccounts":["editor"]},"endpoint":"http://minio.flint-system.svc:9000","expectedBytes":1048576,"expectedFiles":100,"floorSecs":15,"gid":1001,"keyPrefix":"access/lean","maxFiles":5000,"projectId":"team-a/acc-lean","region":"us-east-1","uid":1001}}
+    creationTimestamp: "2026-09-15T05:25:38Z"
+    generation: 1
+    name: acc-lean
+    namespace: s3-tenants
+    resourceVersion: "14253"
+    uid: 2f1d9945-f96c-4bd9-ae4b-4d79b5a4bb62
+  spec:
+    bucket: s3bucket
+    consumers:
+      readOnlyServiceAccounts:
+      - viewer
+      serviceAccounts:
+      - editor
+    endpoint: http://minio.flint-system.svc:9000
+    eventTrace: false
+    expectedBytes: 1048576
+    expectedFiles: 100
+    fanout: 32
+    fetchDrivers: 0
+    fetchInflightMb: 128
+    floorSecs: 15
+    gid: 1001
+    keyPrefix: access/lean
+    maxBytes: 0
+    maxFiles: 5000
+    metrics:
+      enabled: false
+      port: 9847
+    mountPath: /workspace
+    projectId: team-a/acc-lean
+    rawReads: false
+    region: us-east-1
+    sentinelHourlyBudget: 60
+    sentinelMinIntervalSecs: 5
+    sentinels: auto
+    sizeLimitGib: 20
+    udsDoor: false
+    uid: 1001
+    uploadInflightMb: 256
+    uploadPartParallelism: 8
+  status:
+    citedSeq: 4
+    conditions:
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: 'a read-only pod''s key is minted by flint-s3-broker as a read grant,
+        and whether the bucket enforces it depends on the broker''s backend, which
+        this operator cannot see: sts (a session policy of reads on this prefix),
+        rest (your credential door, told access=read) and static with a read key (FLINT_S3B_STATIC_READ_*)
+        hold a reader to reads; static without one is cooperative. The broker''s /v1/status
+        reports readEnforcement'
+      observedGeneration: 1
+      reason: DecidedByBroker
+      status: Unknown
+      type: AccessIsolation
+    - lastTransitionTime: "2026-09-15T06:14:26Z"
+      message: the workspace consumes .flint/publish and .flint/sync
+      observedGeneration: 1
+      reason: Active
+      status: "True"
+      type: SentinelVerbsActive
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: the spec's knobs are coherent
+      observedGeneration: 1
+      reason: Accepted
+      status: "True"
+      type: SpecAccepted
+    - lastTransitionTime: "2026-09-15T06:14:26Z"
+      message: syncer 0.6.0 (protocol 1) ran the last boundary (seq 4); the fence
+        is at rest
+      observedGeneration: 1
+      reason: Running
+      status: "True"
+      type: SyncerObserved
+    lastVerifiedUnix: 1789452746
+    message: claim created; 0 stale uploads swept
+    observedSyncerVersion: 0.6.0
+    phase: Claimed
+- apiVersion: chert.us/v1alpha1
+  kind: FlintLeanWorkspace
+  metadata:
+    annotations:
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"chert.us/v1alpha1","kind":"FlintLeanWorkspace","metadata":{"annotations":{},"name":"acc-narrow","namespace":"s3-tenants"},"spec":{"bucket":"s3bucket","consumers":{"serviceAccounts":["editor"]},"endpoint":"http://minio.flint-system.svc:9000","expectedBytes":1048576,"expectedFiles":100,"floorSecs":15,"gid":1001,"keyPrefix":"access/narrow","maxFiles":5000,"projectId":"team-a/acc-narrow","region":"us-east-1","uid":1001}}
+    creationTimestamp: "2026-09-15T05:25:38Z"
+    generation: 1
+    name: acc-narrow
+    namespace: s3-tenants
+    resourceVersion: "13647"
+    uid: d904c3d8-42ae-4400-a3da-3acdca250ad6
+  spec:
+    bucket: s3bucket
+    consumers:
+      serviceAccounts:
+      - editor
+    endpoint: http://minio.flint-system.svc:9000
+    eventTrace: false
+    expectedBytes: 1048576
+    expectedFiles: 100
+    fanout: 32
+    fetchDrivers: 0
+    fetchInflightMb: 128
+    floorSecs: 15
+    gid: 1001
+    keyPrefix: access/narrow
+    maxBytes: 0
+    maxFiles: 5000
+    metrics:
+      enabled: false
+      port: 9847
+    mountPath: /workspace
+    projectId: team-a/acc-narrow
+    rawReads: false
+    region: us-east-1
+    sentinelHourlyBudget: 60
+    sentinelMinIntervalSecs: 5
+    sentinels: auto
+    sizeLimitGib: 20
+    udsDoor: false
+    uid: 1001
+    uploadInflightMb: 256
+    uploadPartParallelism: 8
+  status:
+    conditions:
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: 'a read-only pod''s key is minted by flint-s3-broker as a read grant,
+        and whether the bucket enforces it depends on the broker''s backend, which
+        this operator cannot see: sts (a session policy of reads on this prefix),
+        rest (your credential door, told access=read) and static with a read key (FLINT_S3B_STATIC_READ_*)
+        hold a reader to reads; static without one is cooperative. The broker''s /v1/status
+        reports readEnforcement'
+      observedGeneration: 1
+      reason: DecidedByBroker
+      status: Unknown
+      type: AccessIsolation
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: the spec's knobs are coherent
+      observedGeneration: 1
+      reason: Accepted
+      status: "True"
+      type: SpecAccepted
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: no syncer holds the lease (the workspace is at rest, which is the design)
+      observedGeneration: 1
+      reason: NoLiveSyncer
+      status: Unknown
+      type: SyncerObserved
+    lastVerifiedUnix: 1789452746
+    message: claim created; 0 stale uploads swept
+    phase: Claimed
+- apiVersion: chert.us/v1alpha1
+  kind: FlintLeanWorkspace
+  metadata:
+    annotations:
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"chert.us/v1alpha1","kind":"FlintLeanWorkspace","metadata":{"annotations":{},"name":"acc-wild","namespace":"s3-tenants"},"spec":{"bucket":"s3bucket","consumers":{"readOnlyServiceAccounts":["viewer"],"serviceAccounts":["*"]},"endpoint":"http://minio.flint-system.svc:9000","expectedBytes":1048576,"expectedFiles":100,"floorSecs":15,"gid":1001,"keyPrefix":"access/wild","maxFiles":5000,"projectId":"team-a/acc-wild","region":"us-east-1","uid":1001}}
+    creationTimestamp: "2026-09-15T05:25:38Z"
+    generation: 1
+    name: acc-wild
+    namespace: s3-tenants
+    resourceVersion: "13657"
+    uid: 9ca4002c-97b9-48f2-8c50-75af0179f0a5
+  spec:
+    bucket: s3bucket
+    consumers:
+      readOnlyServiceAccounts:
+      - viewer
+      serviceAccounts:
+      - '*'
+    endpoint: http://minio.flint-system.svc:9000
+    eventTrace: false
+    expectedBytes: 1048576
+    expectedFiles: 100
+    fanout: 32
+    fetchDrivers: 0
+    fetchInflightMb: 128
+    floorSecs: 15
+    gid: 1001
+    keyPrefix: access/wild
+    maxBytes: 0
+    maxFiles: 5000
+    metrics:
+      enabled: false
+      port: 9847
+    mountPath: /workspace
+    projectId: team-a/acc-wild
+    rawReads: false
+    region: us-east-1
+    sentinelHourlyBudget: 60
+    sentinelMinIntervalSecs: 5
+    sentinels: auto
+    sizeLimitGib: 20
+    udsDoor: false
+    uid: 1001
+    uploadInflightMb: 256
+    uploadPartParallelism: 8
+  status:
+    conditions:
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: 'a read-only pod''s key is minted by flint-s3-broker as a read grant,
+        and whether the bucket enforces it depends on the broker''s backend, which
+        this operator cannot see: sts (a session policy of reads on this prefix),
+        rest (your credential door, told access=read) and static with a read key (FLINT_S3B_STATIC_READ_*)
+        hold a reader to reads; static without one is cooperative. The broker''s /v1/status
+        reports readEnforcement'
+      observedGeneration: 1
+      reason: DecidedByBroker
+      status: Unknown
+      type: AccessIsolation
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: the spec's knobs are coherent
+      observedGeneration: 1
+      reason: Accepted
+      status: "True"
+      type: SpecAccepted
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: no syncer holds the lease (the workspace is at rest, which is the design)
+      observedGeneration: 1
+      reason: NoLiveSyncer
+      status: Unknown
+      type: SyncerObserved
+    lastVerifiedUnix: 1789452746
+    message: claim created; 0 stale uploads swept
+    phase: Claimed
+- apiVersion: chert.us/v1alpha1
+  kind: FlintLeanWorkspace
+  metadata:
+    annotations:
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"chert.us/v1alpha1","kind":"FlintLeanWorkspace","metadata":{"annotations":{},"name":"iso-ambient","namespace":"s3-tenants"},"spec":{"bucket":"s3bucket","consumers":{"readOnlyServiceAccounts":["viewer"],"serviceAccounts":["editor"]},"endpoint":"http://minio.flint-system.svc:9000","identity":{"mode":"ambient"},"keyPrefix":"iso/ambient","projectId":"team-a/iso-ambient","region":"us-east-1"}}
+    creationTimestamp: "2026-09-15T05:25:38Z"
+    generation: 1
+    name: iso-ambient
+    namespace: s3-tenants
+    resourceVersion: "13658"
+    uid: a7a52be6-3861-49d1-8729-278bcfecbd18
+  spec:
+    bucket: s3bucket
+    consumers:
+      readOnlyServiceAccounts:
+      - viewer
+      serviceAccounts:
+      - editor
+    endpoint: http://minio.flint-system.svc:9000
+    eventTrace: false
+    fanout: 32
+    fetchDrivers: 0
+    fetchInflightMb: 128
+    floorSecs: 60
+    identity:
+      mode: ambient
+    keyPrefix: iso/ambient
+    maxBytes: 0
+    maxFiles: 250000
+    metrics:
+      enabled: false
+      port: 9847
+    mountPath: /workspace
+    projectId: team-a/iso-ambient
+    rawReads: false
+    region: us-east-1
+    sentinelHourlyBudget: 60
+    sentinelMinIntervalSecs: 5
+    sentinels: auto
+    sizeLimitGib: 20
+    udsDoor: false
+    uploadInflightMb: 256
+    uploadPartParallelism: 8
+  status:
+    conditions:
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: 'identity.mode is ambient: a pod''s syncer uses the node''s own credential
+        chain, which flint cannot narrow. A read-only pod''s mount and syncer keep
+        it from writing; its key could write'
+      observedGeneration: 1
+      reason: Cooperative
+      status: "False"
+      type: AccessIsolation
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: the spec's knobs are coherent
+      observedGeneration: 1
+      reason: Accepted
+      status: "True"
+      type: SpecAccepted
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: no syncer holds the lease (the workspace is at rest, which is the design)
+      observedGeneration: 1
+      reason: NoLiveSyncer
+      status: Unknown
+      type: SyncerObserved
+    lastVerifiedUnix: 1789452746
+    message: claim created; 0 stale uploads swept
+    phase: Claimed
+- apiVersion: chert.us/v1alpha1
+  kind: FlintLeanWorkspace
+  metadata:
+    annotations:
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"chert.us/v1alpha1","kind":"FlintLeanWorkspace","metadata":{"annotations":{},"name":"iso-broker","namespace":"s3-tenants"},"spec":{"bucket":"s3bucket","consumers":{"readOnlyServiceAccounts":["viewer"],"serviceAccounts":["editor"]},"endpoint":"http://minio.flint-system.svc:9000","identity":{"mode":"broker"},"keyPrefix":"iso/broker","projectId":"team-a/iso-broker","region":"us-east-1"}}
+    creationTimestamp: "2026-09-15T05:25:39Z"
+    generation: 1
+    name: iso-broker
+    namespace: s3-tenants
+    resourceVersion: "13650"
+    uid: 4d8aa1a6-a943-4a86-8c2b-a91238d97d32
+  spec:
+    bucket: s3bucket
+    consumers:
+      readOnlyServiceAccounts:
+      - viewer
+      serviceAccounts:
+      - editor
+    endpoint: http://minio.flint-system.svc:9000
+    eventTrace: false
+    fanout: 32
+    fetchDrivers: 0
+    fetchInflightMb: 128
+    floorSecs: 60
+    identity:
+      mode: broker
+    keyPrefix: iso/broker
+    maxBytes: 0
+    maxFiles: 250000
+    metrics:
+      enabled: false
+      port: 9847
+    mountPath: /workspace
+    projectId: team-a/iso-broker
+    rawReads: false
+    region: us-east-1
+    sentinelHourlyBudget: 60
+    sentinelMinIntervalSecs: 5
+    sentinels: auto
+    sizeLimitGib: 20
+    udsDoor: false
+    uploadInflightMb: 256
+    uploadPartParallelism: 8
+  status:
+    conditions:
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: 'a read-only pod''s key is minted by flint-s3-broker as a read grant,
+        and whether the bucket enforces it depends on the broker''s backend, which
+        this operator cannot see: sts (a session policy of reads on this prefix),
+        rest (your credential door, told access=read) and static with a read key (FLINT_S3B_STATIC_READ_*)
+        hold a reader to reads; static without one is cooperative. The broker''s /v1/status
+        reports readEnforcement'
+      observedGeneration: 1
+      reason: DecidedByBroker
+      status: Unknown
+      type: AccessIsolation
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: the spec's knobs are coherent
+      observedGeneration: 1
+      reason: Accepted
+      status: "True"
+      type: SpecAccepted
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: no syncer holds the lease (the workspace is at rest, which is the design)
+      observedGeneration: 1
+      reason: NoLiveSyncer
+      status: Unknown
+      type: SyncerObserved
+    lastVerifiedUnix: 1789452746
+    message: claim created; 0 stale uploads swept
+    phase: Claimed
+- apiVersion: chert.us/v1alpha1
+  kind: FlintLeanWorkspace
+  metadata:
+    annotations:
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"chert.us/v1alpha1","kind":"FlintLeanWorkspace","metadata":{"annotations":{},"name":"iso-default","namespace":"s3-tenants"},"spec":{"bucket":"s3bucket","consumers":{"readOnlyServiceAccounts":["viewer"],"serviceAccounts":["editor"]},"endpoint":"http://minio.flint-system.svc:9000","keyPrefix":"iso/default","projectId":"team-a/iso-default","region":"us-east-1"}}
+    creationTimestamp: "2026-09-15T05:25:39Z"
+    generation: 1
+    name: iso-default
+    namespace: s3-tenants
+    resourceVersion: "13654"
+    uid: aac7081f-38fa-49fe-bf01-fb9e6c0c2b54
+  spec:
+    bucket: s3bucket
+    consumers:
+      readOnlyServiceAccounts:
+      - viewer
+      serviceAccounts:
+      - editor
+    endpoint: http://minio.flint-system.svc:9000
+    eventTrace: false
+    fanout: 32
+    fetchDrivers: 0
+    fetchInflightMb: 128
+    floorSecs: 60
+    keyPrefix: iso/default
+    maxBytes: 0
+    maxFiles: 250000
+    metrics:
+      enabled: false
+      port: 9847
+    mountPath: /workspace
+    projectId: team-a/iso-default
+    rawReads: false
+    region: us-east-1
+    sentinelHourlyBudget: 60
+    sentinelMinIntervalSecs: 5
+    sentinels: auto
+    sizeLimitGib: 20
+    udsDoor: false
+    uploadInflightMb: 256
+    uploadPartParallelism: 8
+  status:
+    conditions:
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: 'a read-only pod''s key is minted by flint-s3-broker as a read grant,
+        and whether the bucket enforces it depends on the broker''s backend, which
+        this operator cannot see: sts (a session policy of reads on this prefix),
+        rest (your credential door, told access=read) and static with a read key (FLINT_S3B_STATIC_READ_*)
+        hold a reader to reads; static without one is cooperative. The broker''s /v1/status
+        reports readEnforcement'
+      observedGeneration: 1
+      reason: DecidedByBroker
+      status: Unknown
+      type: AccessIsolation
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: the spec's knobs are coherent
+      observedGeneration: 1
+      reason: Accepted
+      status: "True"
+      type: SpecAccepted
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: no syncer holds the lease (the workspace is at rest, which is the design)
+      observedGeneration: 1
+      reason: NoLiveSyncer
+      status: Unknown
+      type: SyncerObserved
+    lastVerifiedUnix: 1789452746
+    message: claim created; 0 stale uploads swept
+    phase: Claimed
+- apiVersion: chert.us/v1alpha1
+  kind: FlintLeanWorkspace
+  metadata:
+    annotations:
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"chert.us/v1alpha1","kind":"FlintLeanWorkspace","metadata":{"annotations":{},"name":"iso-noconsumers","namespace":"s3-tenants"},"spec":{"bucket":"s3bucket","endpoint":"http://minio.flint-system.svc:9000","identity":{"mode":"static"},"keyPrefix":"iso/noconsumers","projectId":"team-a/iso-noconsumers","region":"us-east-1"}}
+    creationTimestamp: "2026-09-15T05:25:39Z"
+    generation: 1
+    name: iso-noconsumers
+    namespace: s3-tenants
+    resourceVersion: "13649"
+    uid: 96891ee5-714b-46a6-a550-8f8a59dfef0a
+  spec:
+    bucket: s3bucket
+    endpoint: http://minio.flint-system.svc:9000
+    eventTrace: false
+    fanout: 32
+    fetchDrivers: 0
+    fetchInflightMb: 128
+    floorSecs: 60
+    identity:
+      mode: static
+    keyPrefix: iso/noconsumers
+    maxBytes: 0
+    maxFiles: 250000
+    metrics:
+      enabled: false
+      port: 9847
+    mountPath: /workspace
+    projectId: team-a/iso-noconsumers
+    rawReads: false
+    region: us-east-1
+    sentinelHourlyBudget: 60
+    sentinelMinIntervalSecs: 5
+    sentinels: auto
+    sizeLimitGib: 20
+    udsDoor: false
+    uploadInflightMb: 256
+    uploadPartParallelism: 8
+  status:
+    conditions:
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: the spec's knobs are coherent
+      observedGeneration: 1
+      reason: Accepted
+      status: "True"
+      type: SpecAccepted
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: no syncer holds the lease (the workspace is at rest, which is the design)
+      observedGeneration: 1
+      reason: NoLiveSyncer
+      status: Unknown
+      type: SyncerObserved
+    lastVerifiedUnix: 1789452746
+    message: claim created; 0 stale uploads swept
+    phase: Claimed
+- apiVersion: chert.us/v1alpha1
+  kind: FlintLeanWorkspace
+  metadata:
+    annotations:
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"chert.us/v1alpha1","kind":"FlintLeanWorkspace","metadata":{"annotations":{},"name":"iso-static","namespace":"s3-tenants"},"spec":{"bucket":"s3bucket","consumers":{"readOnlyServiceAccounts":["viewer"],"serviceAccounts":["editor"]},"endpoint":"http://minio.flint-system.svc:9000","identity":{"mode":"static"},"keyPrefix":"iso/static","projectId":"team-a/iso-static","region":"us-east-1"}}
+    creationTimestamp: "2026-09-15T05:25:38Z"
+    generation: 3
+    name: iso-static
+    namespace: s3-tenants
+    resourceVersion: "14384"
+    uid: a4986bc7-18a3-4231-a7a3-2f8ba3640984
+  spec:
+    bucket: s3bucket
+    consumers:
+      readOnlyServiceAccounts:
+      - viewer
+      serviceAccounts:
+      - editor
+    endpoint: http://minio.flint-system.svc:9000
+    eventTrace: false
+    fanout: 32
+    fetchDrivers: 0
+    fetchInflightMb: 128
+    floorSecs: 60
+    identity:
+      mode: static
+    keyPrefix: iso/static
+    maxBytes: 0
+    maxFiles: 250000
+    metrics:
+      enabled: false
+      port: 9847
+    mountPath: /workspace
+    projectId: team-a/iso-static
+    rawReads: false
+    region: us-east-1
+    sentinelHourlyBudget: 60
+    sentinelMinIntervalSecs: 5
+    sentinels: auto
+    sizeLimitGib: 20
+    udsDoor: false
+    uploadInflightMb: 256
+    uploadPartParallelism: 8
+  status:
+    conditions:
+    - lastTransitionTime: "2026-09-15T06:14:41Z"
+      message: 'identity.mode is static: a pod''s syncer signs with the key in its
+        nodePublishSecretRef Secret, which flint cannot narrow. A read-only pod''s
+        mount and syncer keep it from writing; its key could write'
+      observedGeneration: 3
+      reason: Cooperative
+      status: "False"
+      type: AccessIsolation
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: the spec's knobs are coherent
+      observedGeneration: 3
+      reason: Accepted
+      status: "True"
+      type: SpecAccepted
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: no syncer holds the lease (the workspace is at rest, which is the design)
+      observedGeneration: 3
+      reason: NoLiveSyncer
+      status: Unknown
+      type: SyncerObserved
+    lastVerifiedUnix: 1789452880
+    message: standing claim adopted; 0 stale uploads swept
+    phase: Adopted
+- apiVersion: chert.us/v1alpha1
+  kind: FlintLeanWorkspace
+  metadata:
+    annotations:
+      kubectl.kubernetes.io/last-applied-configuration: |
+        {"apiVersion":"chert.us/v1alpha1","kind":"FlintLeanWorkspace","metadata":{"annotations":{},"name":"iso-webidentity","namespace":"s3-tenants"},"spec":{"bucket":"s3bucket","consumers":{"readOnlyServiceAccounts":["viewer"],"serviceAccounts":["editor"]},"endpoint":"http://minio.flint-system.svc:9000","identity":{"mode":"webIdentity"},"keyPrefix":"iso/webidentity","projectId":"team-a/iso-webidentity","region":"us-east-1"}}
+    creationTimestamp: "2026-09-15T05:25:39Z"
+    generation: 1
+    name: iso-webidentity
+    namespace: s3-tenants
+    resourceVersion: "13648"
+    uid: a9ea68b5-99f4-44bf-8a75-02fa885a1dd3
+  spec:
+    bucket: s3bucket
+    consumers:
+      readOnlyServiceAccounts:
+      - viewer
+      serviceAccounts:
+      - editor
+    endpoint: http://minio.flint-system.svc:9000
+    eventTrace: false
+    fanout: 32
+    fetchDrivers: 0
+    fetchInflightMb: 128
+    floorSecs: 60
+    identity:
+      mode: webIdentity
+    keyPrefix: iso/webidentity
+    maxBytes: 0
+    maxFiles: 250000
+    metrics:
+      enabled: false
+      port: 9847
+    mountPath: /workspace
+    projectId: team-a/iso-webidentity
+    rawReads: false
+    region: us-east-1
+    sentinelHourlyBudget: 60
+    sentinelMinIntervalSecs: 5
+    sentinels: auto
+    sizeLimitGib: 20
+    udsDoor: false
+    uploadInflightMb: 256
+    uploadPartParallelism: 8
+  status:
+    conditions:
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: 'a read-only pod''s key is minted by flint-s3-broker as a read grant,
+        and whether the bucket enforces it depends on the broker''s backend, which
+        this operator cannot see: sts (a session policy of reads on this prefix),
+        rest (your credential door, told access=read) and static with a read key (FLINT_S3B_STATIC_READ_*)
+        hold a reader to reads; static without one is cooperative. The broker''s /v1/status
+        reports readEnforcement'
+      observedGeneration: 1
+      reason: DecidedByBroker
+      status: Unknown
+      type: AccessIsolation
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: the spec's knobs are coherent
+      observedGeneration: 1
+      reason: Accepted
+      status: "True"
+      type: SpecAccepted
+    - lastTransitionTime: "2026-09-15T06:12:26Z"
+      message: no syncer holds the lease (the workspace is at rest, which is the design)
+      observedGeneration: 1
+      reason: NoLiveSyncer
+      status: Unknown
+      type: SyncerObserved
+    lastVerifiedUnix: 1789452746
+    message: claim created; 0 stale uploads swept
+    phase: Claimed
+kind: List
+metadata:
+  resourceVersion: ""

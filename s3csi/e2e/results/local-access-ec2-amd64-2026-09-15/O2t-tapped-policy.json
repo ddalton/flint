@@ -1,0 +1,1 @@
+"{\"Statement\":[{\"Action\":[\"s3:GetObject\",\"s3:GetObjectVersion\"],\"Effect\":\"Allow\",\"Resource\":\"arn:aws:s3:::s3bucket/access/lean/*\"},{\"Action\":[\"s3:ListBucket\",\"s3:ListBucketVersions\"],\"Condition\":{\"StringLike\":{\"s3:prefix\":[\"access/lean\",\"access/lean/*\"]}},\"Effect\":\"Allow\",\"Resource\":\"arn:aws:s3:::s3bucket\"}],\"Version\":\"2012-10-17\"}"

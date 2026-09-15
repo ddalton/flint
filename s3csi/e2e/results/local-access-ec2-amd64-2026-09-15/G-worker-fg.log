@@ -1,0 +1,9 @@
+flint-s3-worker: credentials door on http://127.0.0.1:9911/v1/creds
+flint-s3-worker: listening on /comm/mount.sock (accept budget 300s)
+flint-s3-worker: launching /usr/local/bin/flint-sync run
+flint-sync: checkout complete — agent may start
+flint-sync: publish fence held (epoch 2)
+flint-sync: barrier seq=Some(2) up=1000 del=0 consumed=0 acks=0
+flint-sync: sentinel ack status=ok boundary=sentinel seq=Some(2) nonces=1
+flint-sync: publish fence held (epoch 4)
+flint-sync: barrier seq=Some(4) up=1 del=0 consumed=1000 acks=0

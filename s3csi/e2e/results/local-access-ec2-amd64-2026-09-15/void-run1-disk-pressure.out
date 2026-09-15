@@ -1,0 +1,38 @@
+flint read access on the local kind rig — gva, node gva-aws-1, arms: O G I
+evidence: /Users/ddalton/github/flint/s3csi/e2e/results/local-access-ec2-amd64-2026-09-15
+  BAD: PRECONDITION: cannot read the other-prefix fixture — every denial below would be vacuous
+
+── O0 — MinIO's STS trusts the cluster issuer, and without a session policy its role writes anywhere
+  BAD: sts-probe not ready
+
+── O1 — the broker's sts backend is MinIO's STS (through a logging tap), with MinIO's role
+  ok: broker /v1/status: backend sts, readEnforcement sessionPolicy
+
+── O2 — a mixed lean workspace: a writer and a reader, each keyed by MinIO's STS
+  BAD: ow/orr not Running: ow FailedMount: MountVolume.SetUp failed for volume "ws" : rpc error: code = Unavailable desc = checkout of acc-lean in progress (no /var/lib/kubelet/plugins/s3.csi.chert.us/volumes/csi-c6cb317e1c29daf60 / orr FailedMount: MountVolume.SetUp failed for volume "ws" : rpc error: code = Unavailable desc = checkout of acc-lean in progress (no /var/lib/kubelet/plugins/s3.csi.chert.us/volumes/csi-6f4b4099300de2fe1
+
+── O2t — the tap's record: the reader's exchange carried flint's read policy, the writer's none
+  ok: the tap saw 5 exchanges, all 200: 2 with a policy, 3 without
+  ok: the policy flint sent: reads only, on s3bucket/access/lean/* (no s3:GetObjectAttributes)
+
+── O3 — the keys each worker HOLDS: the reader's read one prefix, the writer's write
+  BAD: no workers to read keys from
+
+── O4 — the writer's publish reaches the reader
+  BAD: ow could not write and publish
+  BAD: orr write: 'error: unable to upgrade connection: container not found ("agent")'
+
+── O5 — passthrough on a read grant: mount-s3 reads under the policy without GetObjectAttributes
+  BAD: pw write: sh: can't create /workspace/from-pw.txt: Input/output error
+  ok: pr: issued access=read enforcement=sessionPolicy
+  BAD: pr cannot read from-pw.txt: ''
+  ok: pr cannot write: sh: can't create /workspace/from-pr.txt: Input/output error
+
+── G1 — F7 under runsc: 1000 files, an immediate publish, every file cited at its size
+  BAD: G tenants not Running: fg FailedMount: MountVolume.SetUp failed for volume "ws" : rpc error: code = Unavailable desc = checkout of acc-lean in progress (no /var/lib/kubelet/plugins/s3.cs / gr FailedMount: MountVolume.SetUp failed for volume "ws" : rpc error: code = Unavailable desc = checkout of acc-lean in progress (no /var/lib/kubelet/plugins/s3.cs
+
+── G4 — the UDS door: reachable from a runc tenant, refused to a runsc tenant
+  BAD: door tenants not Running
+
+── I1 — the lean operator's AccessIsolation per identity mode
+  BAD: iso-static: AccessIsolation '/', want False/Cooperative
