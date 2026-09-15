@@ -1,0 +1,12 @@
+name: f15-repair-withheld-parks
+file: lean/syncer/src/barrier.rs
+leg: storm
+defect: F15, the withheld repair. A citation repair (a consumed UI write the tree already holds) whose object is replaced between the repair's HEAD and the commit-section re-read is withheld AND parked; the park keeps the replacing version out of the writer's queue while its merge base moves past it, and the tree keeps the withheld bytes for good (storm S0-smoke O2, 2026-09-15).
+unit_test: a_repair_citation_withheld_at_the_commit_still_receives_the_version_that_replaced_it
+expect_fail: B's tree never received the version that replaced its withheld citation
+note: the integrated test is forced false, so every withheld citation parks as before the fix. No host leg stages this window; the storm's O2 is its live judge.
+=== OLD ===
+                let integrated = was_observed
+=== NEW ===
+                let integrated = false && was_observed
+=== END ===

@@ -14,6 +14,26 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **lean: a writer could keep a stale copy of a file for good after its
+  re-citation of a UI write was withheld (since 1.52.0).**
+  - *How:* a writer that consumed a UI write re-cites it at its next
+    commit. The commit re-reads that citation under the fence. If another
+    writer replaced the object in between (that writer had edited the path,
+    preserved the UI bytes and published its own version), the citation was
+    withheld and the path PARKED. Parking kept the replacing version out of
+    this writer's queue while its merge base moved past it. The tree held
+    the UI bytes, and the scan saw them as clean, so nothing ever fixed it.
+    No bytes were lost: the UI write was preserved. But one tree disagreed
+    with the manifest and every other writer.
+  - *The fix:* a withheld re-citation of bytes the tree already holds is no
+    longer parked. The merge queues the manifest's version and the next
+    consume installs it. A withheld upload of the writer's own edit still
+    parks and publishes next barrier.
+  - *Found by:* the multi-node storm drill's first leg on real S3
+    (2026-09-15, S0: six writers and a UI on 30 shared files, one writer
+    diverged on one path).
+  - *Pinned by:* `a_repair_citation_withheld_at_the_commit_still_receives_the_version_that_replaced_it`;
+    the control patch `f15-repair-withheld-parks` fails it.
 - **lean: a UI write that re-created a path another writer had deleted
   could be lost from the workspace (since 1.52.0).**
   - *How:* the writer-local queue carries a peer's deletion to this

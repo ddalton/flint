@@ -1336,6 +1336,33 @@ impl Syncer {
                 new_baseline_entries.remove(&path);
                 report.uploaded.retain(|p| p != &path);
                 report.published_bytes = report.published_bytes.saturating_sub(gone.size);
+                // A citation REPAIR re-cites bytes the tree already holds (a
+                // consumed UI write, checkout's S3-wins arm): the baseline
+                // names this etag and the scan sees the path clean, so no
+                // later barrier publishes it. Parking it kept the merge from
+                // queueing the version that replaced it while the merge base
+                // moved past that version, and the tree kept the withheld
+                // bytes for good (storm drill S0, 2026-09-15: one writer of
+                // six diverged). Not parked, the merge queues the manifest's
+                // version and the next consume installs it.
+                let integrated = was_observed
+                    && baseline
+                        .entries
+                        .get(&path)
+                        .is_some_and(|be| be.size != u64::MAX && be.etag == gone.etag);
+                if integrated {
+                    self.state.append_conflict(&ConflictRecord {
+                        path: path.clone(),
+                        foreign_etag: gone.etag,
+                        preserved_key: None,
+                        kind: "repair-withheld: the object this barrier re-cited was replaced or \
+                               collected before its commit; nothing cited, and the next consume \
+                               installs the manifest's version"
+                            .into(),
+                        at_unix: now_unix(),
+                    })?;
+                    continue;
+                }
                 parked.insert(path.clone());
                 let kind = if was_observed {
                     "adopt-withheld: the object this barrier found already at its key was \

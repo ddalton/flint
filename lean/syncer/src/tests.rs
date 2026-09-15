@@ -10336,6 +10336,65 @@ async fn adopted_ui_write_deleted_under_an_older_peer_publish(replace: bool) {
     }
 }
 
+/// A citation repair whose object is replaced before the commit converges.
+/// B consumes a UI write, so its tree and baseline hold the UI bytes, and the
+/// barrier re-cites them. Between the repair's HEAD and the commit's re-read,
+/// A (which had edited the path) preserves the UI bytes and publishes its own
+/// version. The re-read withholds B's citation. Parking the path kept A's
+/// version out of B's queue while B's merge base moved past it, and B's tree
+/// kept the UI bytes for good: the storm drill's S0 leg (2026-09-15), one
+/// writer of six diverged on one path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_repair_citation_withheld_at_the_commit_still_receives_the_version_that_replaced_it() {
+    let inner = Arc::new(MemoryStore::new());
+    let hb = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b, dir_c) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&inner, dir_a.path()).await;
+    let mut b = hooked_syncer(&hb, dir_b.path());
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "x.txt", "seed");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+
+    write(dir_a.path(), "x.txt", "from A");
+    backdate_baseline(&a, "x.txt");
+    hitl_write(&inner, &a.cfg, "x.txt", "from the UI", "reviewer").await.unwrap();
+    hitl_write(&inner, &a.cfg, "z.txt", "z from the UI", "reviewer").await.unwrap();
+    // B's consume HEADs z.txt after it has adopted x.txt; the NEXT HEAD of
+    // x.txt is the citation repair's, and A's whole barrier runs there.
+    let a_slot = Arc::new(std::sync::Mutex::new(Some(a)));
+    let (a_hook, hb_hook) = (a_slot.clone(), hb.clone());
+    hb.after_head("z.txt", move || {
+        let a_hook = a_hook.clone();
+        hb_hook.after_head("x.txt", move || {
+            let mut a = a_hook.lock().unwrap().take().unwrap();
+            let a = std::thread::spawn(move || {
+                tokio::runtime::Runtime::new().unwrap().block_on(a.run_barrier()).unwrap();
+                a
+            })
+            .join()
+            .unwrap();
+            *a_hook.lock().unwrap() = Some(a);
+        });
+    });
+    b.run_barrier().await.unwrap();
+    let mut a = a_slot.lock().unwrap().take().expect("fixture: A's barrier never ran inside B's");
+    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("from the UI"), "fixture: B never adopted the UI write");
+    assert!(
+        b.state.load_conflicts().unwrap().iter().any(|c| c.path == "x.txt" && c.kind.contains("-withheld")),
+        "fixture: B's commit did not withhold the re-cited x.txt"
+    );
+
+    for _ in 0..2 {
+        a.run_barrier().await.unwrap();
+        b.run_barrier().await.unwrap();
+    }
+    let mut c = syncer(&inner, dir_c.path()).await;
+    c.checkout().await.unwrap();
+    assert_eq!(read(dir_c.path(), "x.txt").as_deref(), Some("from A"), "fixture: A's version is not the manifest's");
+    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("from A"), "B's tree never received the version that replaced its withheld citation");
+}
+
 /// Two IDLE writers settle. A barrier that finds the manifest moved but
 /// has nothing of its own to publish must not install a generation of its
 /// own — or the peer's next tick sees the manifest move, does the same,
