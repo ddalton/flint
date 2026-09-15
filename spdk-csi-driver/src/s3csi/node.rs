@@ -202,6 +202,7 @@ impl S3Node {
         }
         tracing::warn!(volume = %st.volume_id, "cleaning up: {why}");
         let _ = fuse::unmount(Path::new(&st.target_path), true);
+        let _ = fuse::unmount(&fuse::ro_stage_of(Path::new(&st.src)), true);
         let _ = fuse::unmount(Path::new(&st.src), true);
         // A tree image left mounted holds the state dir busy, so the
         // remove below would fail and the volume would never be retried
@@ -333,6 +334,8 @@ impl S3Node {
                 self.publish_passthrough(&dir, &vid, &target, &pr, &tenant, spec, policy.credential_mode, access, &req).await
             }
             Resolved::Lean { spec, .. } => {
+                resolve::lean_read_needs_read_only_volume(access, req.readonly, &pr.service_account, &pr.pod_namespace, pr.selector.name())
+                    .map_err(refusal_status)?;
                 self.publish_lean(&dir, &vid, &target, &pr, &tenant, spec, policy.credential_mode, access, &req).await
             }
         }
@@ -1194,6 +1197,7 @@ impl S3Node {
     /// pointed the operator at it.
     async fn preserve_undrained(&self, dir: &Path, st: &VolumeState, target: &Path, why: &str) -> Result<(), Status> {
         unmount_all(target).map_err(|e| Status::internal(format!("unmount target: {e}")))?;
+        unmount_all(&fuse::ro_stage_of(Path::new(&st.src))).map_err(|e| Status::internal(format!("unmount ro stage: {e}")))?;
         if st.tree_image.is_some() {
             quota::unmount_tree(Path::new(&st.src)).map_err(|e| Status::unavailable(format!("unmount tree: {e}; retrying")))?;
         }
@@ -1334,6 +1338,7 @@ impl S3Node {
                 .await;
         }
         unmount_all(target).map_err(|e| Status::internal(format!("unmount target: {e}")))?;
+        unmount_all(&fuse::ro_stage_of(Path::new(&st.src))).map_err(|e| Status::internal(format!("unmount ro stage: {e}")))?;
         // The ceiling comes down AFTER the drain and after the tenant's
         // bind is gone: it is the filesystem the tree lives on, so
         // unmounting it earlier would pull the floor out from under a
@@ -1374,7 +1379,7 @@ impl S3Node {
             // kubelet after the file was gone. Finish it here, or the
             // mount outlives the node (the shape S9 + SU found on EC2).
             if dir.is_dir() {
-                for sub in ["src", "tree"] {
+                for sub in [fuse::RO_STAGE, "src", "tree"] {
                     let p = dir.join(sub);
                     if let Err(e) = unmount_all(&p) {
                         return Err(Status::unavailable(format!("half-removed volume {vid}: {e}")));
@@ -1390,6 +1395,7 @@ impl S3Node {
         }
         // Passthrough teardown: target, source, worker, registration, state.
         unmount_all(target).map_err(|e| Status::internal(format!("unmount target: {e}")))?;
+        unmount_all(&fuse::ro_stage_of(Path::new(&st.src))).map_err(|e| Status::internal(format!("unmount ro stage: {e}")))?;
         unmount_all(Path::new(&st.src)).map_err(|e| Status::internal(format!("unmount source: {e}")))?;
         self.release_worker(&st);
         worker::delete(&self.client, &st.worker_namespace, &st.worker_name, Some(10)).await.map_err(Status::unavailable)?;

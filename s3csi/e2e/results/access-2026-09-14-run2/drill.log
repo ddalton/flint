@@ -1,0 +1,148 @@
+flint read-only/read-write mounts on real nodes — cluster acc, nodes acc-aws-1 + acc-aws-2, CP acc-cp-1, bucket flint-access-drill-20260914, arms: A B C
+evidence: /Users/ddalton/github/flint/s3csi/e2e/results/access-2026-09-14-run2
+  ok: PRECONDITION: the other-prefix fixture exists and the rig's key reads it (the aws-cli pod works)
+
+── A0 — backend sts, answered by the STS stand-in: the broker reports sessionPolicy
+  ok: broker /v1/status: backend sts, readEnforcement sessionPolicy
+
+── A12 — (start) a writer on acc-narrow publishes while its SA is still read-write
+  ok: CONTROL: nw's publish before the narrowing is acked ok
+  ok: CONTROL: before.txt is in acc-narrow's manifest
+  NOTE: acc-narrow now lists editor as read-only; nw's keys change at its next mint (issued so far: 1)
+
+── A1 — a mixed lean workspace: writers w1 (acc-aws-1) and w2 (acc-aws-2), reader r-sa by SA (acc-aws-1), reader r-flag by csi.readOnly (acc-aws-2)
+  ok: w1 is Running
+  ok: w2 is Running
+  ok: r-sa is Running
+  ok: r-flag is Running
+
+── A2 — the presentation: writers write; readers get EROFS in the tree and in .flint/
+  ok: w1 writes its tree
+  ok: w2 writes its tree
+  BAD: r-sa write was not EROFS: 'ok'
+  BAD: r-sa .flint/sync: 'ok'
+  ok: r-flag: write refused with EROFS (sh: can't create /workspace/probe-r-flag.txt: Read-only file system)
+  ok: r-flag: .flint/sync refused with EROFS too (D11)
+  ok: w1: the HOST's copy of its bind is rw (rw,noatime /dev/loop1)
+  ok: w2: the HOST's copy of its bind is rw (rw,noatime /dev/loop0)
+  ok: r-sa: the HOST's copy of its bind is ro (ro,nosuid,nodev,noatime /dev/loop2)
+  ok: r-flag: the HOST's copy of its bind is ro (ro,nosuid,nodev,noatime /dev/loop1)
+
+── A3 — the syncer's mode: FLINT_SYNC_ACCESS and capabilities.json
+  ok: w1: syncer launched with no access line (read-write)
+  ok: w1: capabilities.json says access readWrite
+  ok: w2: syncer launched with no access line (read-write)
+  ok: w2: capabilities.json says access readWrite
+  ok: r-sa: syncer launched with FLINT_SYNC_ACCESS=read
+  ok: r-sa: capabilities.json says access read
+  ok: r-flag: syncer launched with FLINT_SYNC_ACCESS=read
+  ok: r-flag: capabilities.json says access read
+
+── A4 — the broker's record: a read grant with a session policy for each reader, a write grant for each writer
+  ok: w1: issued access=readWrite enforcement=none on_behalf_of=-
+  ok: w2: issued access=readWrite enforcement=none on_behalf_of=-
+  ok: r-sa: issued access=read enforcement=sessionPolicy on_behalf_of=alice@example.com
+  ok: r-flag: issued access=read enforcement=sessionPolicy on_behalf_of=-
+
+── A5 — the stand-in's record: AWS was asked for a policy on every reader's exchange and on no writer's
+  ok: w1: every exchange of session 339c879a5494ca3d56083249208ba3ff carried policy_present=false (1 exchange(s), all status 200 )
+  ok: w2: every exchange of session 8899cc5c3e1878fe59a466ef0f26d968 carried policy_present=false (1 exchange(s), all status 200 )
+  ok: r-sa: every exchange of session 95429132ae1b7d8324053c92177663f8 carried policy_present=true (1 exchange(s), all status 200 )
+  ok: r-flag: every exchange of session cb28fc09bdfd8615e5b217c2a8831c40 carried policy_present=true (1 exchange(s), all status 200 )
+  ok: r-sa's policy as AWS received it is byte-identical to read_session_policy(aws, flint-access-drill-20260914, access/lean)
+
+── A6 — F3/F8 with the keys each pod HOLDS, evaluated by AWS
+  ok: r-sa's keys: PUT under the prefix → AccessDenied
+  ok: r-sa's keys: DELETE under the prefix → AccessDenied
+  ok: r-sa's keys: GET of its own prefix reads the pointer
+  BAD: r-sa's keys GET other prefix: command terminated with exit code 1
+  ok: r-sa's keys: LIST of another prefix → AccessDenied
+  ok: r-flag's keys: PUT under the prefix → AccessDenied
+  ok: r-flag's keys: DELETE under the prefix → AccessDenied
+  ok: r-flag's keys: GET of its own prefix reads the pointer
+  BAD: r-flag's keys GET other prefix: command terminated with exit code 1
+  ok: r-flag's keys: LIST of another prefix → AccessDenied
+  ok: CONTROL: w1's keys PUT under the prefix
+  ok: CONTROL: w1's keys (the role, no policy) read the other prefix — the narrowing above is the session policy's
+
+── A7 — convergence: writers' publishes reach both readers and the other writer; a delete reaches the readers
+  ok: w1's publish acked ok
+  ok: w2's publish acked ok
+  ok: r-sa has w1's file
+  ok: r-sa has w2's file
+  ok: r-flag has w1's file
+  ok: r-flag has w2's file
+  ok: w2 integrated w1's file at its boundary
+  ok: w1's two delete boundaries acked ok
+  ok: shared/from-w1.txt left the manifest
+  ok: r-sa: the delete reached it
+  ok: r-flag: the delete reached it
+
+── A8 — readers took no fence and published nothing
+  ok: r-sa's syncer says read access
+  ok: r-sa's syncer never held the fence nor ran a barrier (5 pulls)
+  ok: r-sa's syncer was denied nothing on its read grant
+  ok: r-flag's syncer says read access
+  ok: r-flag's syncer never held the fence nor ran a barrier (5 pulls)
+  ok: r-flag's syncer was denied nothing on its read grant
+
+── A9 — passthrough, mixed: pw writes through mount-s3, pr reads through mount-s3 under the session policy
+  ok: pw writes through mount-s3
+  ok: from-pw.txt is in the bucket
+  ok: pr reads pw's file through mount-s3 on a read grant (list + get under the prefix condition)
+  ok: pr's write refused (sh: can't create /workspace/from-pr.txt: Read-only file system)
+  ok: pr: the HOST's copy of its bind is ro (ro,nosuid,nodev,noatime mount-s3)
+  ok: pr's mount-s3 runs with --read-only
+  ok: pr: issued access=read enforcement=sessionPolicy
+  ok: pr's keys: PUT → AccessDenied
+
+── A10 — precedence: serviceAccounts ["*"] with a NAMED read-only viewer
+  BAD: wv write: 'ok'
+  ok: wv: the HOST's copy of its bind is ro
+  ok: we (only "*"): writes
+  ok: wv: issued a read grant
+  ok: we: issued a write grant
+
+── A11 — an SA in neither list is refused, naming both lists
+  ok: st stays out, and its event names both lists
+
+── A13 — no ceiling: a writer and a reader on a plain-directory tree (sizeLimitGib 0, no loop device)
+  ok: dw: HOST bind rw on a plain directory (rw,noatime /dev/nvme0n1p1)
+  ok: dr: HOST bind ro on a plain directory (ro,nosuid,nodev,noatime /dev/nvme0n1p1)
+  BAD: dr write: 'ok'
+  ok: dw published on the plain tree
+  ok: dr follows dw
+  ok: dr: issued a read grant with a session policy
+
+── A12 — (finish) the narrowed CR: nw's next mint is a read grant, and its next publish lands nothing
+  ok: nw's volume, still registered read-write by the plugin, was minted a READ grant 687s after the narrowing (the CR narrows at the broker)
+  ok: nw's worker now holds a different key
+  NOTE: waiting 230s for the pre-narrowing key to expire
+  ok: nw's tree is still writable (the bind is decided at publish; only the key changed)
+  ok: nw's publish after the narrowing is not acked ok ('no-ack')
+  ok: after.txt is not in the manifest
+  ok: and no object after.txt exists in the bucket
+  ok: nw's syncer calls it a credential refusal: flint-sync: REFUSED reason=auth arm=barrier failed (retrying next floor) paused_secs=135: store: not authorized: put_whole: 403 AccessDenied — the store rejecte
+
+── B1 — readKey: a reader holds the read user's key, which cannot write; a writer holds the one key
+  ok: broker /v1/status: readEnforcement readKey
+  ok: br holds the READ user's key
+  ok: bw holds the one key
+  ok: br's keys: PUT → AccessDenied
+  ok: br: issued access=read enforcement=readKey
+  ok: br follows bw on the read key
+  BAD: br write: 'ok'
+  ok: br: the HOST's copy of its bind is ro
+
+── C1 — cooperative: the broker says so; the reader is read-only in its mount and syncer; its key CAN write
+  ok: broker /v1/status: readEnforcement cooperative
+  ok: the broker warned at start that a reader's key can write
+  ok: cr: issued access=read enforcement=cooperative
+  BAD: cr write: 'ok'
+  ok: cr: the HOST's copy of its bind is ro
+  ok: cr: the syncer is a reader
+  ok: cr's key CAN write (the documented limit of cooperative: only the mount and the syncer hold it)
+
+════════════════════════════════════════
+flint read-only/read-write mounts on real nodes: 98 ok, 8 bad, 0 skipped
+DRILL rc=1

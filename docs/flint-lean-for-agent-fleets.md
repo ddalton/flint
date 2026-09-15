@@ -26,9 +26,11 @@
 > `docs/plans/csi-node-mount-design.md` §0 and §3.5.
 >
 > **Read-only agents.** An agent that should see the workspace and never
-> change it mounts read-only: its SA is listed in
-> `spec.consumers.readOnlyServiceAccounts` (read-only whatever the pod
-> asks), or its volume sets `readOnly: true`. Its tree is bound read-only
+> change it mounts with `readOnly: true` on its csi volume. List its SA in
+> `spec.consumers.readOnlyServiceAccounts` to make that the only way it
+> can mount: a pod on that SA without `readOnly: true` is refused, naming
+> the fix (only the pod's own readOnly makes the tree read-only inside
+> the container). Its tree is read-only
 > (a write fails with `EROFS`), its syncer follows every writer's
 > boundary and publishes nothing (`.flint/AGENTS.md`, "Read access"), and
 > `flint-s3-broker` issues it a credential that cannot write — a session

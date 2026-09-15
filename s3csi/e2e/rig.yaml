@@ -36,7 +36,7 @@ spec:
     spec:
       containers:
         - name: minio
-          image: minio/minio
+          image: quay.io/minio/minio:latest
           args: ["server", "/data", "--address", ":9000"]
           env:
             - { name: MINIO_ROOT_USER, value: drill }
@@ -64,7 +64,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: mc
-          image: minio/mc
+          image: quay.io/minio/mc:latest
           command:
             - /bin/sh
             - -c
@@ -88,7 +88,7 @@ metadata:
 spec:
   containers:
     - name: mc
-      image: minio/mc
+      image: quay.io/minio/mc:latest
       command: ["/bin/sh", "-c"]
       args:
         - |

@@ -59,14 +59,31 @@ use super::policy::{Access, MountConsumers};
 use super::resolve;
 use super::DRIVER_NAME;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct StaticKeys {
     pub access_key_id: String,
     pub secret_access_key: String,
     pub session_token: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+/// An access key id, shortened the way `Creds` prints one: enough to tell
+/// two key sets apart in a log, never a secret.
+fn akid(k: &str) -> String {
+    format!("{}…", k.chars().take(4).collect::<String>())
+}
+
+impl std::fmt::Debug for StaticKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "StaticKeys {{ access_key_id: {}, secret: <redacted>, session_token: {} }}",
+            akid(&self.access_key_id),
+            if self.session_token.is_some() { "<redacted>" } else { "none" }
+        )
+    }
+}
+
+#[derive(Clone)]
 pub enum Backend {
     /// One fixed key set; `Expiration` is synthetic so clients refresh.
     /// `read`, when set, is what a READ grant gets instead: a key set the
@@ -78,6 +95,31 @@ pub enum Backend {
     /// `POST <url>` with `Authorization: Bearer <pod token>` and a JSON
     /// body naming the project; expects JSON keys back.
     Rest { url: String, extra_headers: BTreeMap<String, String> },
+}
+
+/// Written by hand, never derived: the broker's start-up line prints its
+/// backend, and a derived `Debug` printed the static backend's secret
+/// access key at INFO into every broker pod's log from `fcac038f` to the
+/// access drill that found it (2026-09-15). Header VALUES are redacted
+/// too: a `rest` door's extra header is where a bearer would go.
+impl std::fmt::Debug for Backend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Backend::Static { access_key_id, session_token, read, .. } => write!(
+                f,
+                "Static {{ access_key_id: {}, secret: <redacted>, session_token: {}, read: {:?} }}",
+                akid(access_key_id),
+                if session_token.is_some() { "<redacted>" } else { "none" },
+                read
+            ),
+            Backend::Sts { url, role_arn } => write!(f, "Sts {{ url: {url:?}, role_arn: {role_arn:?} }}"),
+            Backend::Rest { url, extra_headers } => write!(
+                f,
+                "Rest {{ url: {url:?}, extra_headers: {:?} (values redacted) }}",
+                extra_headers.keys().collect::<Vec<_>>()
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -869,6 +911,46 @@ mod tests {
                 .and_then(|t| t.split_once('/').map(|(b, p)| (b.to_string(), p.to_string())))
                 .unwrap_or(("b".into(), "ws/proj1".into()));
             std::fs::write(out, read_session_policy("aws", &bucket, &prefix)).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_start_up_line_never_prints_a_secret() {
+        let backends = [
+            Backend::Static {
+                access_key_id: "AKIAWRITEKEY".into(),
+                secret_access_key: "SECRET-WRITE".into(),
+                session_token: Some("TOKEN-WRITE".into()),
+                read: Some(StaticKeys {
+                    access_key_id: "AKIAREADKEY".into(),
+                    secret_access_key: "SECRET-READ".into(),
+                    session_token: Some("TOKEN-READ".into()),
+                }),
+            },
+            Backend::Rest {
+                url: "https://door".into(),
+                extra_headers: BTreeMap::from([("Authorization".to_string(), "Bearer HEADER-SECRET".to_string())]),
+            },
+        ];
+        for b in backends {
+            // As the binary prints it: the whole config, at `?`.
+            let cfg = BrokerConfig {
+                listen: "127.0.0.1:0".parse().unwrap(),
+                tls_cert: None,
+                tls_key: None,
+                backend: b,
+                audience: DRIVER_NAME.into(),
+                node_principal: "system:serviceaccount:flint-system:node".into(),
+                max_lifetime_secs: 3600,
+                default_lifetime_secs: 900,
+                require_registration: true,
+                arn_partition: "aws".into(),
+            };
+            let line = format!("{cfg:?}");
+            for secret in ["SECRET-WRITE", "TOKEN-WRITE", "SECRET-READ", "TOKEN-READ", "HEADER-SECRET"] {
+                assert!(!line.contains(secret), "{secret} printed: {line}");
+            }
+            assert!(line.contains("AKIA…") || line.contains("Authorization"), "{line}");
         }
     }
 

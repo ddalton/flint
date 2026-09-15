@@ -1,0 +1,7 @@
+flint-s3-worker: credentials door on http://127.0.0.1:9911/v1/creds
+flint-s3-worker: listening on /comm/mount.sock (accept budget 300s)
+flint-s3-worker: launching /usr/local/bin/flint-sync run
+flint-sync: read access — this syncer follows the workspace and never writes to the bucket
+flint-sync: checkout complete — agent may start
+flint-sync: pull seq=Some(1) up=0 del=0 consumed=0 acks=0
+flint-sync: pull seq=Some(2) up=0 del=0 consumed=0 acks=0

@@ -165,6 +165,36 @@ pub fn authorize(
     )))
 }
 
+/// A lean read grant must be ASKED for with the volume's `readOnly: true`.
+///
+/// The plugin cannot narrow what a lean tenant's container sees. The tree
+/// is a writable filesystem the syncer shares, and the container runtime
+/// binds a volume into the container and remounts it with the POD's
+/// `rw`/`ro`, so a read-only plugin bind reaches the container read-write
+/// (measured on EC2, access drill run 2, 2026-09-15: host copy `ro`,
+/// container copy `rw`, the write landed). Only kubelet's readOnly, from the
+/// pod spec, makes it read-only. So a ServiceAccount the CR lists as
+/// read-only that asks for read-write is REFUSED with the fix named, never
+/// published with a tree its writes vanish from. A passthrough mount is
+/// narrowed instead: mount-s3's filesystem itself is read-only, which no
+/// remount undoes.
+pub fn lean_read_needs_read_only_volume(
+    access: Access,
+    read_only_requested: bool,
+    service_account: &str,
+    ns: &str,
+    name: &str,
+) -> Result<(), Refusal> {
+    if access.is_read() && !read_only_requested {
+        return Err(Refusal::Forbidden(format!(
+            "ServiceAccount {ns}/{service_account} may mount FlintLeanWorkspace {ns}/{name} read-only only \
+             (spec.consumers.readOnlyServiceAccounts): set `readOnly: true` on the pod's csi volume. Only the \
+             pod's own readOnly makes a lean tree read-only inside the container"
+        )));
+    }
+    Ok(())
+}
+
 /// Fetch the CR the selector names, in the pod's namespace.
 pub async fn fetch(client: &Client, sel: &Selector, ns: &str) -> Result<Resolved, Refusal> {
     match sel {
@@ -259,6 +289,16 @@ mod tests {
         assert_eq!(authorize(&p, "agent-ro", false, "team-a", "FlintPassthroughMount", "d").unwrap(), Access::Read);
         let e = authorize(&p, "editor", false, "team-a", "FlintPassthroughMount", "d").unwrap_err();
         assert!(e.message().contains("neither"), "{e:?}");
+    }
+
+    #[test]
+    fn a_lean_read_grant_must_be_asked_for_with_read_only() {
+        let refuse = lean_read_needs_read_only_volume(Access::Read, false, "viewer", "team-a", "ws").unwrap_err();
+        assert!(matches!(refuse, Refusal::Forbidden(_)), "{refuse:?}");
+        assert!(refuse.message().contains("readOnly: true") && refuse.message().contains("team-a/viewer"), "{refuse:?}");
+        // Asked for read-only: published. Read-write by the CR, either way: published.
+        lean_read_needs_read_only_volume(Access::Read, true, "viewer", "team-a", "ws").unwrap();
+        lean_read_needs_read_only_volume(Access::ReadWrite, false, "editor", "team-a", "ws").unwrap();
     }
 
     #[test]

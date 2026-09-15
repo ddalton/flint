@@ -28,7 +28,7 @@ metadata: { name: mc-s3, namespace: flint-system }
 spec:
   containers:
     - name: mc
-      image: minio/mc
+      image: quay.io/minio/mc:latest
       command: ["/bin/sh", "-c"]
       args:
         - |

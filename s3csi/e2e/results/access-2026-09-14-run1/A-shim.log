@@ -1,0 +1,4 @@
+{"listening": 8080, "upstream": "https://sts.us-west-1.amazonaws.com/", "role": "arn:aws:iam::204754237123:role/flint-acc-role-20260914"}
+{"session": "ac8c7e21bb1ac5e2157d39c6c869084d", "policy_present": false, "policy_sha256": null, "status": 200, "upstream_error": null}
+{"session": "88d2699dc10900915b0302888c677ff0", "policy_present": false, "policy_sha256": null, "status": 200, "upstream_error": null}
+{"session": "8879d3e3f5c8c560442937b2f3159fcb", "policy_present": true, "policy_sha256": "66d556f1ee404ba74bede1e5c6a84de026fca53afad511750171889cadad0b2f", "status": 200, "upstream_error": null}

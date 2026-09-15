@@ -1,0 +1,10 @@
+flint-s3-worker: credentials door on http://127.0.0.1:9911/v1/creds
+flint-s3-worker: listening on /comm/mount.sock (accept budget 300s)
+flint-s3-worker: launching /usr/bin/mount-s3 flint-access-drill-20260914 /dev/fd/3 --foreground --allow-other --prefix access/pt/ --region us-west-1 --allow-delete --allow-overwrite --uid 1001 --gid 1001
+2026-09-15T00:02:32.519098Z  INFO ThreadId(01) mountpoint_s3::run: mount-s3 1.24.0
+2026-09-15T00:02:32.520129Z  WARN ThreadId(01) mountpoint_s3::cli: failed to detect network throughput. Using 10 gbps as throughput. Use --maximum-throughput-gbps CLI flag to configure a target throughput appropriate for the instance. Detection failed due to: failed to get instance type: IMDS is disabled
+2026-09-15T00:02:32.520257Z  INFO ThreadId(01) mountpoint_s3::cli: target network throughput 10 Gbps
+2026-09-15T00:02:32.644218Z  INFO ThreadId(01) mountpoint_s3_fs::memory::write_handle_limiter: max files concurrently open for write: 104 (memory target 972 MiB, write part size 8 MiB)
+2026-09-15T00:02:32.644382Z  INFO ThreadId(01) mountpoint_s3::run: successfully mounted prefix access/pt/ of bucket flint-access-drill-20260914 at /dev/fd/3
+prefix access/pt/ of bucket flint-access-drill-20260914 is mounted at /dev/fd/3
+2026-09-15T00:02:35.245316Z  WARN ThreadId(09) getxattr{req=32 ino=2 name="security.capability" pid=0}: mountpoint_s3_fs::fuse: getxattr failed: operation not supported by Mountpoint

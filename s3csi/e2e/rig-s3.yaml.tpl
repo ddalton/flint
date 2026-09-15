@@ -31,7 +31,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: mc
-          image: minio/mc
+          image: quay.io/minio/mc:latest
           command:
             - /bin/sh
             - -c
@@ -65,7 +65,7 @@ spec:
     - { key: node-role.kubernetes.io/master, operator: Exists, effect: NoSchedule }
   containers:
     - name: mc
-      image: minio/mc
+      image: quay.io/minio/mc:latest
       command: ["/bin/sh", "-c"]
       args:
         - |

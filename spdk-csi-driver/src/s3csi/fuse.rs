@@ -131,21 +131,50 @@ mod imp {
         Ok(fd)
     }
 
+    /// Bind `src` onto the tenant's `target`, read-only when asked.
+    ///
+    /// **A read-only bind is made FROM a read-only mount, never by
+    /// remounting the target.** The plugin's `/var/lib/kubelet` is a
+    /// Bidirectional (shared) mount, so the bind at `target` propagates
+    /// to the host, and the host's copy is the one kubelet hands the
+    /// container. Propagation carries MOUNT events, not a later
+    /// `MS_REMOUNT` of one instance's flags: bind-then-remount left the
+    /// plugin's instance `ro` and the host's `rw`, and a read-only
+    /// consumer wrote its tree freely (access drill A2, EC2 2026-09-15,
+    /// kernel 6.18; util-linux's one-call `mount --bind -o ro` does the
+    /// same). A propagated copy is a clone of the mount being attached,
+    /// flags included, so the target is bound from a staging bind that
+    /// is already read-only, and every copy is born `ro`. The stage sits
+    /// beside `src` in the plugin-owned volume directory and is unmounted
+    /// straight after; its unmount propagates like its mount did.
     pub fn bind_mount(src: &Path, target: &Path, read_only: bool) -> io::Result<()> {
         std::fs::create_dir_all(target)?;
-        mount(Some(src), target, None::<&str>, MsFlags::MS_BIND, None::<&str>)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("bind {} → {}: {e}", src.display(), target.display())))?;
-        if read_only {
+        if !read_only {
+            mount(Some(src), target, None::<&str>, MsFlags::MS_BIND, None::<&str>)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("bind {} → {}: {e}", src.display(), target.display())))?;
+            return Ok(());
+        }
+        let stage = ro_stage_of(src);
+        // A stage a crash left between its bind and its unmount.
+        let _ = umount2(&stage, MntFlags::MNT_DETACH);
+        std::fs::create_dir_all(&stage)?;
+        let bound = (|| -> io::Result<()> {
+            mount(Some(src), &stage, None::<&str>, MsFlags::MS_BIND, None::<&str>)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("bind {} → {}: {e}", src.display(), stage.display())))?;
             mount(
                 None::<&str>,
-                target,
+                &stage,
                 None::<&str>,
                 MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY | MsFlags::MS_NODEV | MsFlags::MS_NOSUID,
                 None::<&str>,
             )
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("remount ro {}: {e}", target.display())))?;
-        }
-        Ok(())
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("remount ro {}: {e}", stage.display())))?;
+            mount(Some(&stage), target, None::<&str>, MsFlags::MS_BIND, None::<&str>)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("bind {} → {}: {e}", stage.display(), target.display())))
+        })();
+        // The target, once bound, is its own mount: the stage goes either way.
+        let _ = umount2(&stage, MntFlags::MNT_DETACH);
+        bound
     }
 
     /// `umount2(MNT_DETACH)`; "not mounted" and "no such path" are success.
@@ -282,6 +311,15 @@ mod imp {
 
 pub use imp::{bind_mount, is_mountpoint, open_and_mount, unmount, wait_ready_opts};
 
+/// The directory a read-only bind is staged on: beside its source, in the
+/// plugin-owned volume directory (`<vid>/ro-stage` for `<vid>/tree` or
+/// `<vid>/src`). Removal paths unmount it before removing the directory.
+pub const RO_STAGE: &str = "ro-stage";
+
+pub fn ro_stage_of(src: &Path) -> std::path::PathBuf {
+    src.parent().unwrap_or(src).join(RO_STAGE)
+}
+
 /// The publish-time probe: statfs AND a bounded readdir.
 pub async fn wait_ready(src: &Path, deadline: Duration) -> Result<(), String> {
     wait_ready_opts(src, deadline, true).await
@@ -290,6 +328,14 @@ pub async fn wait_ready(src: &Path, deadline: Duration) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The stage is inside the volume directory the removal paths
+    /// unmount under, for both front ends' sources.
+    #[test]
+    fn a_read_only_bind_is_staged_inside_the_volume_directory() {
+        assert_eq!(ro_stage_of(Path::new("/p/volumes/v1/tree")), Path::new("/p/volumes/v1/ro-stage"));
+        assert_eq!(ro_stage_of(Path::new("/p/volumes/v1/src")), Path::new("/p/volumes/v1/ro-stage"));
+    }
 
     #[test]
     fn mount_data_is_the_prior_art_option_set() {

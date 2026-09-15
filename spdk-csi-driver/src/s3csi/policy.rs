@@ -68,10 +68,12 @@ pub struct MountConsumers {
     /// `readOnly: true`.
     #[serde(default)]
     pub service_accounts: Vec<String>,
-    /// May mount read-only and never wider: `readOnly: false` is narrowed,
-    /// not refused. The syncer follows the workspace and publishes
-    /// nothing, the tree is bound read-only, and the broker issues a
-    /// credential that cannot write where its backend can scope one.
+    /// May mount read-only and never wider. On a lean workspace the pod's
+    /// csi volume must say `readOnly: true`, or the mount is refused: only
+    /// the pod's own readOnly makes a lean tree read-only inside the
+    /// container. A passthrough mount is narrowed instead. The syncer
+    /// publishes nothing, and the broker issues a credential that cannot
+    /// write where its backend can scope one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read_only_service_accounts: Vec<String>,
 }

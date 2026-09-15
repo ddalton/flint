@@ -36,8 +36,13 @@ covered by the stability guarantee.
 - **s3-csi: read-only consumers, and a credential that cannot write.**
   Both mount CRDs (`FlintLeanWorkspace`, `FlintPassthroughMount`) gain
   `spec.consumers.readOnlyServiceAccounts`: an SA listed there mounts
-  read-only whatever its volume asks (`readOnly: false` is narrowed, not
-  refused). The most specific entry decides, and at equal specificity the
+  read-only and never wider. On a `FlintLeanWorkspace` its pod's csi
+  volume must say `readOnly: true`, or the mount is refused with that fix
+  named: the live drill measured that the container runtime remounts a
+  volume with the pod's own `rw`, so no plugin bind can make a lean tree
+  read-only for a pod that asked for read-write (see Fixed). On a
+  `FlintPassthroughMount` `readOnly: false` is narrowed, because
+  mount-s3's filesystem is itself read-only. The most specific entry decides, and at equal specificity the
   narrower: a name beats `"*"`, and the read-only list beats the read-write
   one. The plugin decides one access per publish — the CR's lists
   narrowed by `csi.readOnly` — and the bind, mount-s3's `--read-only`, the
@@ -65,9 +70,8 @@ covered by the stability guarantee.
   parent user's are not; and a READ-WRITE syncer on them fails its barrier
   with `403 AccessDenied` and leaves the manifest pointer unchanged. With
   `s3:PutObject` added to the policy, or its prefix bound removed, the
-  same script fails. Twelve unit mutations each fail their test. MinIO's
-  policy evaluator is not AWS's: AWS STS, Ceph RGW and mount-s3 under a
-  read grant are the cluster drill (design phase F), not yet run.
+  same script fails. Twelve unit mutations each fail their test. The same
+  mechanisms on real nodes and AWS are the next entry; Ceph RGW is not run.
 
 - **flint-store 0.1.3: `S3Store::with_credentials(bucket, endpoint, region,
   access_key_id, secret_access_key)`** — an S3 store from an explicit key
@@ -85,6 +89,54 @@ covered by the stability guarantee.
   the argument a wrong one.
 - **flint-lean-gateway 0.4.1: `connect_with_credentials`**, the same
   constructor returning the `Arc<dyn ObjectStore>` a `Workspace` takes.
+- **s3-csi: the access drill on real nodes** (`s3csi/e2e/aws-access.sh`,
+  `aws-access-iam.sh`, `sts-shim.py`; design §10.6). One all-spot EC2
+  cluster, a real bucket, and three broker arms:
+  - `sts`, answered by a stand-in that forwards the broker's session
+    policy verbatim to AWS STS `AssumeRole` on a bucket-wide role;
+  - `static` with a read key;
+  - `static` without one.
+
+  Mixed readers and writers run on a loop-image lean tree, on a
+  plain-directory one, and on passthrough. The drill judges the host's
+  copy of every tenant bind and the container's, each pod's `issued`
+  line, the stand-in's own record of which exchanges carried a policy,
+  and AWS's answer to the keys each pod actually holds. Three runs:
+  - Run 1 found the defects below.
+  - Run 3, on the fixed image, passed 90 of 90 judged checks, and arms
+    B and C passed 16 of 16. A spot reclaim voided one leg, which
+    passed in runs 1 and 2.
+  - The policy AWS received was byte-identical to the unit test's.
+  - Readers' keys were denied PUT, DELETE and other prefixes.
+  - A writer narrowed while running got a read key at its next refresh
+    and published nothing more.
+
+### Fixed
+
+- **s3-csi: a read-only lean bind was read-write on the host.** The plugin
+  bound the tree into the tenant's target and then remounted the target
+  read-only. The plugin's `/var/lib/kubelet` is a Bidirectional mount, and
+  propagation carries mount events, not a later flag change on one
+  instance: the plugin saw `ro`, the host copy kubelet hands the container
+  stayed `rw` (found on EC2, kernel 6.18, by the access drill's host-side
+  check). A read-only target is now bound FROM a staging bind that is
+  already read-only, so every propagated copy is born `ro`; the stage sits
+  in the volume directory and is unmounted straight away, and every
+  removal path unmounts it too. Measured on the node before the change: the
+  old shape left the host copy writable, the staged one refused the write,
+  and util-linux's one-call `mount --bind -o ro` behaved like the old one.
+  A pod that asked `readOnly: true` was read-only in its container anyway,
+  through kubelet; the host copy matters for anything that reads the host
+  path, such as a gVisor gofer (not measured).
+- **flint-s3-broker logged its static secret access key.** The start-up
+  line printed the whole backend configuration at INFO, including
+  `FLINT_S3B_STATIC_SECRET_ACCESS_KEY`, in every broker pod's log since the
+  broker shipped (`fcac038f`, v1.45.0). The backend's `Debug` is written by
+  hand: a key id shows its first four characters, secrets and session
+  tokens print `<redacted>`, and a `rest` door's extra headers print their
+  names only. A test prints the configuration with every secret field set
+  and fails if any value appears (mutation-checked). **Rotate a static
+  broker key that was in use while a broker ran v1.45.0 through v1.53.0.**
 
 ## [1.53.0] - 2026-09-14
 

@@ -1,0 +1,26 @@
+flint read-only/read-write mounts on real nodes — cluster acc, nodes acc-aws-2 + acc-aws-2, CP acc-cp-1, bucket flint-access-drill-20260914, arms: B C
+evidence: /Users/ddalton/github/flint/s3csi/e2e/results/access-2026-09-14-run3-bc
+  ok: PRECONDITION: the other-prefix fixture exists and the rig's key reads it (the aws-cli pod works)
+
+── B1 — readKey: a reader holds the read user's key, which cannot write; a writer holds the one key
+  ok: broker /v1/status: readEnforcement readKey
+  ok: br holds the READ user's key
+  ok: bw holds the one key
+  ok: br's keys: PUT → AccessDenied
+  ok: br: issued access=read enforcement=readKey
+  ok: br follows bw on the read key
+  ok: br: EROFS
+  ok: br: the HOST's copy of its bind is ro
+
+── C1 — cooperative: the broker says so; the reader is read-only in its mount and syncer; its key CAN write
+  ok: broker /v1/status: readEnforcement cooperative
+  ok: the broker warned at start that a reader's key can write
+  ok: cr: issued access=read enforcement=cooperative
+  ok: cr: EROFS
+  ok: cr: the HOST's copy of its bind is ro
+  ok: cr: the syncer is a reader
+  ok: cr's key CAN write (the documented limit of cooperative: only the mount and the syncer hold it)
+
+════════════════════════════════════════
+flint read-only/read-write mounts on real nodes: 16 ok, 0 bad, 0 skipped
+DRILL rc=0

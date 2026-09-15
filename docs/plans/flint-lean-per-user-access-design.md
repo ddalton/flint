@@ -1,8 +1,9 @@
 # flint-lean — per-user access through the mount, and a read-only posture: investigation and design
 
 Date: 2026-09-13. Status: **DESIGN; phases A, B, C and D BUILT
-2026-09-14** (see §10, which supersedes what it names; E, F and G are
-not built). Written the day after the
+2026-09-14, phase F DRILLED on EC2 2026-09-15** (see §10, which supersedes
+what it names; §10.6 has the drill and the three defects it found; E and G
+are not built). Written the day after the
 protocol review (`flint-lean-protocol-review-2026-09-12.md`) against
 `37ff97d0` (v1.51.0). Every code claim in §0-§9 is `file:line` at that
 commit; §10 was re-verified against `75e306c8` (after v1.53.0).
@@ -731,7 +732,7 @@ promise the syncer and the mount keep, not one the bucket enforces**
 
 | # | status |
 |---|---|
-| F1 EROFS on a read-only lean mount | **built, not yet measured**: the bind flag is one argument at a mount call only a node can exercise — phase F |
+| F1 EROFS on a read-only lean mount | **measured, §10.6**: EROFS for a pod that asks `readOnly: true`; the plugin's bind was `rw` on the host (F-1, fixed) and cannot reach the container for a pod asking `rw` (F-2, now refused) |
 | F2 a reader takes no fence and is Ready in checkout time | **unit, the fence half**: the write census allows only GET/HEAD/LIST/`epoch_read`; `one_shot_verbs_that_publish_or_fence_are_refused_on_a_reader`. Readiness beside a committing writer is phase F |
 | F3 a reader's credential cannot write | **live on MinIO** (§10.5): PUT and DELETE under the prefix denied on keys the broker's policy narrowed, the parent user's allowed; a read-write barrier on them 403s and moves nothing. AWS STS on a cluster is phase F |
 | F4 `publish` answered `refused-read-only` | **unit**: `a_publish_touch_on_a_reader_is_answered_refused_read_only` (control: the writer's `ok`), `a_reader_drain_answers_what_it_owes_and_writes_nothing` |
@@ -875,3 +876,135 @@ is stale at HEAD — `crdgen forge` emits a `spec.packs` block (commit
 `40ecd7ed`) the checked-in copy lacks. The forge operator applies its
 compiled-in CRD at start, so only a fresh `helm install` is affected;
 `release.sh check` compares the lean CRD only.
+
+### 10.6 Phase F: the live drill on EC2 (2026-09-14/15)
+
+**Rig.** trove cluster `acc`, all spot (control plane + 2 workers,
+i4i.large, us-west-1, kernel 6.18, kubeadm, containerd); a versioned
+private bucket; three IAM users and one role, made and deleted by
+`s3csi/e2e/aws-access-iam.sh`. The drill is `s3csi/e2e/aws-access.sh`, run
+after `run-s3csi.sh setup`. Three broker arms, one helm upgrade each:
+
+- **A, sessionPolicy.** Backend `sts`, answered by `s3csi/e2e/sts-shim.py`: AWS
+  STS cannot verify this cluster's pod tokens (its issuer is not
+  published), so the stand-in calls AWS `AssumeRole` on a role whose own
+  policy is bucket-wide and forwards the broker's `Policy` form field
+  unchanged. It logs which exchanges carried a policy, independently of the
+  broker. What stays real: the policy flint builds, AWS's evaluation of it,
+  and the keys the syncer and mount-s3 use. What it replaces: AWS verifying
+  the JWT, which the broker has already TokenReviewed.
+- **B, readKey.** Backend `static` with `broker.static.readSecretRef` (a
+  read-only IAM user).
+- **C, cooperative.** Backend `static` without one, the chart's default.
+
+**Three runs.** Evidence is under `s3csi/e2e/results/access-2026-09-14-run{1,2,3}/`:
+the drill log, broker and stand-in logs per arm, and each syncer's log.
+
+| run | image | result | what it found |
+|---|---|---|---|
+| 1 | `access-2dd1428b` (phases A-D as committed) | 75 ok / 17 bad | the read-only bind defect; the broker's secret key in its log; two rig timing defects |
+| 2 | `access-robind2` (+ staged ro bind, + redaction) | 98 ok / 8 bad | the host copy is now `ro`, but the container's copy is `rw`: the runtime remounts it |
+| 3 | `access-robind3` (+ lean refusal) | 90 ok / 1 void, then arms B+C 16 ok / 0 | clean through A0-A13 (A1b the refusal; every reader's container copy `ro`); a spot reclaim took worker `acc-aws-1` eight minutes after A13, voiding A12's finish and the first B/C, rerun on the surviving worker (`-run3-bc`) |
+
+**Finding F-1 (defect in phase A, fixed): a read-only lean bind was `rw` on
+the host.** `fuse::bind_mount` bound the tree into the target and then
+remounted the target `ro`. The plugin's `/var/lib/kubelet` is
+Bidirectional, and propagation carries mount EVENTS, not a later
+`MS_REMOUNT` of one instance's flags. The plugin's instance read
+`ro,nosuid,nodev`; the host copy kubelet hands the runtime read `rw`. The
+unit tests could not see this and the drill's first cut read only the
+container: for `r-flag` (`csi.readOnly: true`) kubelet's own readOnly made
+the container read-only, which hid the rw bind. `r-sa` (read-only by its
+ServiceAccount, `readOnly: false`) wrote its tree. Measured on the node,
+in a namespace sharing the plugin's propagation and then inside the plugin
+container itself:
+- bind-then-remount leaves the host copy `rw,noatime`, and a host write lands;
+- util-linux 2.39's one-call `mount --bind -o ro` gives the same result;
+- binding the target FROM a bind that is already `ro` gives a host copy
+  `ro,nosuid,nodev,noatime`, the host write is refused, and the stage's
+  unmount propagates away (0 left on the host).
+
+The fix does that last shape: the stage is `<vid>/ro-stage`, and every
+removal path unmounts it.
+
+**Finding F-2 (design, decided): the plugin cannot make a lean container's
+view read-only; only the pod's `readOnly` can.** Run 2 on the fixed bind:
+`r-sa`'s host copy was `ro`, its container's `/workspace` was `rw`, and the
+write landed. The runtime binds the volume into the container and
+remounts it with the pod's `rw`/`ro`. The lean tree's superblock is
+writable, because the syncer writes it, so nothing on the plugin's side
+survives that remount. A passthrough reader is different: `pr` got EROFS
+with `readOnly: false`, because mount-s3's FUSE superblock is mounted
+read-only.
+- **D17 A lean read grant must be asked for with `readOnly: true`, or the
+  publish is refused** (`resolve::lean_read_needs_read_only_volume`,
+  PermissionDenied, naming the fix). This supersedes §4.1's "`readOnly:
+  false` never widens" for lean, which was narrowing with no container-side
+  effect. The alternative, a published tree whose writes go nowhere, is
+  the silent discard D5 exists to prevent. Passthrough keeps narrowing
+  (§4.1), because there the narrowing reaches the container.
+- **D18 The host-side `ro` bind stays** (F-1's fix) although kubelet decides
+  the container's flags. It is correct for anything that reads the host
+  path, and gVisor's gofer is the case that matters here. Not measured:
+  this rig has no `runsc`.
+
+**Finding F-3 (security, pre-existing since v1.45.0, fixed): the broker
+logged its static secret access key at INFO.** The start-up line printed
+`backend = ?cfg.backend`, and `Backend` derived `Debug`. Found when run 1's
+evidence was scanned for the drill's own secrets before commit; it was
+redacted from the committed log. `Backend` and `StaticKeys` now implement
+`Debug` by hand, and a test plus a mutation cover it. Run 2's broker log
+reads `secret: <redacted>` for both key sets. Rotate any static broker key
+used under v1.45.0-v1.53.0.
+
+**Rig defects, found and fixed in the drill:**
+- `rollout status` returns while the outgoing broker pod is still
+  terminating and answering. Run 1's pods on the second node were minted
+  by the OLD static broker: unscoped keys, never seen by the stand-in. The
+  drill now waits for one broker pod, then 20 s for the service proxies.
+- A denied `aws s3 cp` answers `403 Forbidden` from its HeadObject, not
+  `AccessDenied`.
+- A lean delete publishes after two scans, so the drill runs two boundaries.
+- The rig's `minio/mc` image no longer pulls from Docker Hub; it now uses
+  `quay.io/minio/mc`.
+
+A12 (the narrowed writer) passed in runs 1 and 2; nothing between run 2 and
+run 3 touches its path (the lean refusal acts at a new publish, and a
+running writer is only re-registered), and its run-3 finish is void.
+
+**What held on real nodes and AWS, in every run** (run 3's count above):
+- **Grants and keys:** each pod's `issued` line carried the access and
+  enforcement its CR and volume imply; `on_behalf_of` reached the audit line.
+  Every reader's exchange carried a policy and no writer's did, per the
+  stand-in's own log. The policy AWS received was byte-identical to
+  `read_session_policy`.
+- **AWS evaluation:** the keys a reader actually HELD were denied PUT and
+  DELETE under the prefix, and GET and LIST of another prefix; they read
+  their own prefix. A writer's keys (the bucket-wide role) did all of it.
+- **Convergence and publishing:** two writers' publishes reached both
+  readers and each other, and a delete reached the readers. Readers never
+  held the fence, never ran a barrier, and were denied nothing on their
+  read grants.
+- **Passthrough:** a reader read a writer's object through mount-s3 on a
+  read grant (the `s3:prefix`-conditioned `ListBucket` is enough for
+  mount-s3), ran `--read-only`, got EROFS, and its keys were denied PUT.
+- **Precedence and refusal:** `serviceAccounts: ["*"]` with a named
+  read-only viewer gave that viewer a read grant; an SA in neither list was
+  refused with both lists named.
+- **Narrowing a live writer:** moving it to the read-only list minted it a
+  read grant at its next refresh (692 s in run 1). After its old key
+  expired its next publish was not acked, nothing landed, and its syncer
+  logged `REFUSED reason=auth … 403 AccessDenied`. Its tree stayed writable:
+  the bind is decided at publish, only the key changes.
+- **Static backends:** `readKey` handed a reader the read user's key, which
+  could not write; `cooperative` said so on `/v1/status` and at start, and
+  the reader's key could write. That is the documented limit.
+- **Plain directory (run 2 on):** a plain-directory tree (`sizeLimitGib: 0`,
+  no loop device) behaved the same as the loop-image tree.
+
+**Not covered:**
+- gVisor (`runsc`), including whether its gofer honours the host copy's `ro` (D18);
+- Ceph RGW's evaluation of the session policy;
+- AWS STS verifying a real cluster token;
+- the lean operator's `AccessIsolation` condition on a cluster (no operator
+  was deployed; unit-tested only).

@@ -1,0 +1,12 @@
+flint-s3-worker: credentials door on http://127.0.0.1:9911/v1/creds
+flint-s3-worker: listening on /comm/mount.sock (accept budget 300s)
+flint-s3-worker: launching /usr/local/bin/flint-sync run
+flint-sync: checkout complete — agent may start
+flint-sync: publish fence held (epoch 13)
+flint-sync: reaped 5 unreferenced manifest chunk(s)
+flint-sync: barrier seq=Some(13) up=1 del=0 consumed=0 acks=0
+flint-sync: publish fence held (epoch 15)
+flint-sync: sentinel ack status=ok boundary=sentinel seq=Some(15) nonces=1
+flint-sync: publish fence held (epoch 17)
+flint-sync: sentinel ack status=ok boundary=sentinel seq=Some(17) nonces=1
+flint-sync: sentinel ack status=ok boundary=sentinel seq=Some(17) nonces=1

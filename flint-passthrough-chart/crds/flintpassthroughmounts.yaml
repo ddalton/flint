@@ -198,12 +198,14 @@ spec:
                     readOnlyServiceAccounts:
                       type: array
                       description: >-
-                        May mount read-only and never wider: readOnly: false
-                        is narrowed, not refused. The mount is read-only and
-                        flint-s3-broker issues a credential that cannot
-                        write where its backend can scope one (sts, rest, or
-                        static with a read key). A name beats "*", and at
-                        equal specificity the read-only list wins.
+                        May mount read-only and never wider: on this CR a
+                        pod asking readOnly: false is narrowed (mount-s3
+                        runs --read-only). A FlintLeanWorkspace refuses such
+                        a pod instead. flint-s3-broker issues a credential
+                        that cannot write where its backend can scope one
+                        (sts, rest, or static with a read key). A name beats
+                        "*", and at equal specificity the read-only list
+                        wins.
                       items:
                         type: string
                 identity:

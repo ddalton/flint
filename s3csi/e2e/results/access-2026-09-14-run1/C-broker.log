@@ -1,0 +1,91 @@
+2026-09-15T00:20:02.973677Z  INFO flint_s3_broker: flint-s3-broker starting backend=Static { access_key_id: "AKIAS7LCNW3B3CE7NOLT", secret_access_key: "<REDACTED: the broker logged its static secret key — see design doc §10.6>", session_token: None, read: None } listen=0.0.0.0:8080 node_principal=system:serviceaccount:flint-system:flint-s3-csi-node
+2026-09-15T00:20:02.974003Z  WARN spdk_csi_driver::s3csi::broker: backend static has no read key (FLINT_S3B_STATIC_READ_*): a read-only pod gets the one key, which can write — its mount and its syncer keep it read-only, the bucket does not
+2026-09-15T00:20:02.974041Z  INFO spdk_csi_driver::s3csi::broker: flint-s3-broker serving http on 0.0.0.0:8080
+2026-09-15T00:20:02.974136Z  INFO Server::run{addr=0.0.0.0:8080}: warp::server: listening on http://0.0.0.0:8080
+2026-09-15T00:20:03.479668Z DEBUG hyper::proto::h1::io: parsed 4 headers
+2026-09-15T00:20:03.479790Z DEBUG hyper::proto::h1::conn: incoming body is empty
+2026-09-15T00:20:03.479868Z  INFO flint_s3_broker: 10.244.2.78:55968 "GET /healthz HTTP/1.1" 200 "-" "kube-probe/1.34" 44.702µs    
+2026-09-15T00:20:03.480118Z DEBUG hyper::proto::h1::io: flushed 118 bytes
+2026-09-15T00:20:04.639069Z DEBUG hyper::proto::h1::io: parsed 3 headers
+2026-09-15T00:20:04.639087Z DEBUG hyper::proto::h1::conn: incoming body is empty
+2026-09-15T00:20:04.639120Z  INFO flint_s3_broker: 10.244.1.180:42588 "GET /v1/status HTTP/1.1" 200 "-" "Wget" 22.286µs    
+2026-09-15T00:20:04.639162Z DEBUG hyper::proto::h1::io: flushed 201 bytes
+2026-09-15T00:20:08.478009Z DEBUG hyper::proto::h1::io: parsed 4 headers
+2026-09-15T00:20:08.478165Z DEBUG hyper::proto::h1::conn: incoming body is empty
+2026-09-15T00:20:08.478194Z  INFO flint_s3_broker: 10.244.2.78:55984 "GET /healthz HTTP/1.1" 200 "-" "kube-probe/1.34" 16.251µs    
+2026-09-15T00:20:08.478395Z DEBUG hyper::proto::h1::io: flushed 118 bytes
+2026-09-15T00:20:10.755604Z DEBUG hyper::proto::h1::io: parsed 5 headers
+2026-09-15T00:20:10.755722Z DEBUG hyper::proto::h1::conn: incoming body is content-length (301 bytes)
+2026-09-15T00:20:10.755813Z DEBUG hyper::proto::h1::conn: incoming body completed
+2026-09-15T00:20:10.755950Z DEBUG tower::buffer::worker: service.ready=true processing request
+2026-09-15T00:20:10.756071Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client"}: kube_client::client::builder: requesting
+2026-09-15T00:20:10.756351Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client"}: hyper_util::client::legacy::connect::http: connecting to 10.96.0.1:443
+2026-09-15T00:20:10.756701Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client"}: hyper_util::client::legacy::connect::http: connected to 10.96.0.1:443
+2026-09-15T00:20:10.756795Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client"}: rustls::client::hs: No cached session for IpAddress(V4(Ipv4Addr([10, 96, 0, 1])))    
+2026-09-15T00:20:10.756830Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client"}: rustls::client::hs: Not resuming any session    
+2026-09-15T00:20:10.822332Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client"}: rustls::client::hs: Using ciphersuite TLS13_AES_128_GCM_SHA256    
+2026-09-15T00:20:10.822544Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client"}: rustls::client::tls13: Not resuming    
+2026-09-15T00:20:10.822819Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client"}: rustls::client::tls13: TLS1.3 encrypted extensions: ServerExtensions { unknown_extensions: {}, .. }    
+2026-09-15T00:20:10.822870Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client"}: rustls::client::hs: ALPN protocol is None    
+2026-09-15T00:20:10.822920Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client"}: rustls::client::tls13: Got CertificateRequest CertificateRequestPayloadTls13 { context: , extensions: CertificateRequestExtensions { signature_algorithms: [RSA_PSS_SHA256, ECDSA_NISTP256_SHA256, ED25519, RSA_PSS_SHA384, RSA_PSS_SHA512, ECDSA_NISTP384_SHA384, ECDSA_NISTP521_SHA512], authority_names: [DistinguishedName(3015311330110603550403130a6b756265726e65746573), DistinguishedName(3019311730150603550403130e66726f6e742d70726f78792d6361)], .. } }    
+2026-09-15T00:20:10.822995Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client"}: rustls::client::common: Client auth requested but no cert/sigscheme available    
+2026-09-15T00:20:10.825626Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client" http.status_code=201}: hyper_util::client::legacy::pool: pooling idle connection for ("https", 10.96.0.1)
+2026-09-15T00:20:10.825760Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client" http.status_code=201}: kube_client::client::builder: stream closed
+2026-09-15T00:20:10.825881Z  INFO spdk_csi_driver::s3csi::broker: registered volume=csi-2130fd1b3ea4812444a9a694af39a0b15b958211e6ba838532a0be61d151bca2 ns=s3-tenants sa=viewer cr=acc-lean node=acc-aws-1 access="read" on_behalf_of=None
+2026-09-15T00:20:10.825968Z  INFO flint_s3_broker: 10.244.2.100:41174 "POST /v1/volumes HTTP/1.1" 204 "-" "-" 70.167734ms    
+2026-09-15T00:20:10.826178Z DEBUG hyper::proto::h1::io: flushed 105 bytes
+2026-09-15T00:20:10.826693Z DEBUG hyper::proto::h1::io: parsed 4 headers
+2026-09-15T00:20:10.826788Z DEBUG hyper::proto::h1::conn: incoming body is content-length (1273 bytes)
+2026-09-15T00:20:10.826863Z DEBUG hyper::proto::h1::conn: incoming body completed
+2026-09-15T00:20:10.827012Z DEBUG tower::buffer::worker: service.ready=true processing request
+2026-09-15T00:20:10.827128Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client"}: kube_client::client::builder: requesting
+2026-09-15T00:20:10.827192Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client"}: hyper_util::client::legacy::pool: reuse idle connection for ("https", 10.96.0.1)
+2026-09-15T00:20:10.828460Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client"}: hyper_util::client::legacy::pool: pooling idle connection for ("https", 10.96.0.1)
+2026-09-15T00:20:10.828537Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client" http.status_code=201}: kube_client::client::builder: stream closed
+2026-09-15T00:20:10.828689Z DEBUG tower::buffer::worker: service.ready=true processing request
+2026-09-15T00:20:10.828769Z DEBUG HTTP{http.method=GET http.url=https://10.96.0.1/apis/chert.us/v1alpha1/namespaces/s3-tenants/flintleanworkspaces/acc-lean otel.name="get" otel.kind="client"}: kube_client::client::builder: requesting
+2026-09-15T00:20:10.828828Z DEBUG HTTP{http.method=GET http.url=https://10.96.0.1/apis/chert.us/v1alpha1/namespaces/s3-tenants/flintleanworkspaces/acc-lean otel.name="get" otel.kind="client"}: hyper_util::client::legacy::pool: reuse idle connection for ("https", 10.96.0.1)
+2026-09-15T00:20:10.831144Z DEBUG HTTP{http.method=GET http.url=https://10.96.0.1/apis/chert.us/v1alpha1/namespaces/s3-tenants/flintleanworkspaces/acc-lean otel.name="get" otel.kind="client" http.status_code=200}: kube_client::client::builder: stream closed
+2026-09-15T00:20:10.831215Z  INFO spdk_csi_driver::s3csi::broker: issued ns=s3-tenants sa=viewer pod_uid=Some("fea715d0-01a6-4db3-9309-94c33a846467") cr=acc-lean mode=lean access="read" enforcement="cooperative" on_behalf_of=None exp=2026-09-15T00:22:10Z
+2026-09-15T00:20:10.831252Z  INFO flint_s3_broker: 10.244.2.100:41174 "POST / HTTP/1.1" 200 "-" "-" 4.389986ms    
+2026-09-15T00:20:10.831293Z DEBUG hyper::proto::h1::io: flushed 976 bytes
+2026-09-15T00:20:10.831300Z DEBUG HTTP{http.method=GET http.url=https://10.96.0.1/apis/chert.us/v1alpha1/namespaces/s3-tenants/flintleanworkspaces/acc-lean otel.name="get" otel.kind="client" http.status_code=200}: hyper_util::client::legacy::pool: pooling idle connection for ("https", 10.96.0.1)
+2026-09-15T00:20:12.382856Z DEBUG hyper::proto::h1::io: parsed 4 headers
+2026-09-15T00:20:12.383016Z DEBUG hyper::proto::h1::conn: incoming body is empty
+2026-09-15T00:20:12.383042Z  INFO flint_s3_broker: 10.244.2.78:56000 "GET /healthz HTTP/1.1" 200 "-" "kube-probe/1.34" 14.649µs    
+2026-09-15T00:20:12.383302Z DEBUG hyper::proto::h1::io: flushed 118 bytes
+2026-09-15T00:20:13.477822Z DEBUG hyper::proto::h1::io: parsed 4 headers
+2026-09-15T00:20:13.478027Z DEBUG hyper::proto::h1::conn: incoming body is empty
+2026-09-15T00:20:13.478078Z  INFO flint_s3_broker: 10.244.2.78:33498 "GET /healthz HTTP/1.1" 200 "-" "kube-probe/1.34" 15.471µs    
+2026-09-15T00:20:13.478333Z DEBUG hyper::proto::h1::io: flushed 118 bytes
+2026-09-15T00:20:13.610149Z DEBUG hyper::proto::h1::io: parsed 5 headers
+2026-09-15T00:20:13.610245Z DEBUG hyper::proto::h1::conn: incoming body is content-length (301 bytes)
+2026-09-15T00:20:13.610309Z DEBUG hyper::proto::h1::conn: incoming body completed
+2026-09-15T00:20:13.610419Z DEBUG tower::buffer::worker: service.ready=true processing request
+2026-09-15T00:20:13.610514Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client"}: kube_client::client::builder: requesting
+2026-09-15T00:20:13.610578Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client"}: hyper_util::client::legacy::pool: reuse idle connection for ("https", 10.96.0.1)
+2026-09-15T00:20:13.611992Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client" http.status_code=201}: kube_client::client::builder: stream closed
+2026-09-15T00:20:13.612055Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client" http.status_code=201}: hyper_util::client::legacy::pool: pooling idle connection for ("https", 10.96.0.1)
+2026-09-15T00:20:13.612174Z  INFO spdk_csi_driver::s3csi::broker: registered volume=csi-2130fd1b3ea4812444a9a694af39a0b15b958211e6ba838532a0be61d151bca2 ns=s3-tenants sa=viewer cr=acc-lean node=acc-aws-1 access="read" on_behalf_of=None
+2026-09-15T00:20:13.612234Z  INFO flint_s3_broker: 10.244.2.100:41174 "POST /v1/volumes HTTP/1.1" 204 "-" "-" 1.92654ms    
+2026-09-15T00:20:13.612331Z DEBUG hyper::proto::h1::io: flushed 105 bytes
+2026-09-15T00:20:13.612768Z DEBUG hyper::proto::h1::io: parsed 4 headers
+2026-09-15T00:20:13.612887Z DEBUG hyper::proto::h1::conn: incoming body is content-length (1273 bytes)
+2026-09-15T00:20:13.612945Z DEBUG hyper::proto::h1::conn: incoming body completed
+2026-09-15T00:20:13.613096Z DEBUG tower::buffer::worker: service.ready=true processing request
+2026-09-15T00:20:13.613157Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client"}: kube_client::client::builder: requesting
+2026-09-15T00:20:13.613225Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client"}: hyper_util::client::legacy::pool: reuse idle connection for ("https", 10.96.0.1)
+2026-09-15T00:20:13.618267Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client"}: hyper_util::client::legacy::pool: pooling idle connection for ("https", 10.96.0.1)
+2026-09-15T00:20:13.618392Z DEBUG HTTP{http.method=POST http.url=https://10.96.0.1/apis/authentication.k8s.io/v1/tokenreviews? otel.name="create" otel.kind="client" http.status_code=201}: kube_client::client::builder: stream closed
+2026-09-15T00:20:13.618516Z DEBUG tower::buffer::worker: service.ready=true processing request
+2026-09-15T00:20:13.618592Z DEBUG HTTP{http.method=GET http.url=https://10.96.0.1/apis/chert.us/v1alpha1/namespaces/s3-tenants/flintleanworkspaces/acc-lean otel.name="get" otel.kind="client"}: kube_client::client::builder: requesting
+2026-09-15T00:20:13.618647Z DEBUG HTTP{http.method=GET http.url=https://10.96.0.1/apis/chert.us/v1alpha1/namespaces/s3-tenants/flintleanworkspaces/acc-lean otel.name="get" otel.kind="client"}: hyper_util::client::legacy::pool: reuse idle connection for ("https", 10.96.0.1)
+2026-09-15T00:20:13.622613Z DEBUG HTTP{http.method=GET http.url=https://10.96.0.1/apis/chert.us/v1alpha1/namespaces/s3-tenants/flintleanworkspaces/acc-lean otel.name="get" otel.kind="client" http.status_code=200}: kube_client::client::builder: stream closed
+2026-09-15T00:20:13.622717Z DEBUG HTTP{http.method=GET http.url=https://10.96.0.1/apis/chert.us/v1alpha1/namespaces/s3-tenants/flintleanworkspaces/acc-lean otel.name="get" otel.kind="client" http.status_code=200}: hyper_util::client::legacy::pool: pooling idle connection for ("https", 10.96.0.1)
+2026-09-15T00:20:13.622871Z  INFO spdk_csi_driver::s3csi::broker: issued ns=s3-tenants sa=viewer pod_uid=Some("fea715d0-01a6-4db3-9309-94c33a846467") cr=acc-lean mode=lean access="read" enforcement="cooperative" on_behalf_of=None exp=2026-09-15T00:22:13Z
+2026-09-15T00:20:13.622944Z  INFO flint_s3_broker: 10.244.2.100:41174 "POST / HTTP/1.1" 200 "-" "-" 9.998732ms    
+2026-09-15T00:20:13.623085Z DEBUG hyper::proto::h1::io: flushed 976 bytes
+2026-09-15T00:20:18.478179Z DEBUG hyper::proto::h1::io: parsed 4 headers
+2026-09-15T00:20:18.478339Z DEBUG hyper::proto::h1::conn: incoming body is empty
+2026-09-15T00:20:18.478368Z  INFO flint_s3_broker: 10.244.2.78:33510 "GET /healthz HTTP/1.1" 200 "-" "kube-probe/1.34" 16.349µs    
+2026-09-15T00:20:18.478591Z DEBUG hyper::proto::h1::io: flushed 118 bytes
