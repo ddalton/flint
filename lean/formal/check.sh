@@ -6,7 +6,7 @@
 # DELIBERATELY SEPARATE from scripts/check-tla.sh (flint's 196-run gate):
 # lean is a separate system.  Same harness discipline, its own runs.
 #
-# Ninety-eight runs, ALL required (asserted at the bottom, not just printed —
+# A hundred and ten runs, ALL required (asserted at the bottom, not just printed —
 # this prose count had drifted to "fifty-five", then to "eighty-three";
 # and EXPECT itself was left at 92 over 69 real runs when gated mode's
 # 23 runs were removed, so the gate at that commit failed its own count.
@@ -32,6 +32,13 @@ fi
 mkdir -p states
 PASS=0
 
+# Most cfgs fingerprint through `StrictView` (the ghost-state reduction,
+# LeanSubtree.tla). A view that drops a field something still reads is
+# silently unsound, so before any run: the census must pass, and its own
+# positive controls — edits that make the view unsound — must each fail it.
+python3 view-census.py --selftest LeanSubtree.tla || { echo "FAIL: the view census has lost its teeth"; exit 1; }
+python3 view-census.py LeanSubtree.tla || { echo "FAIL: StrictView is not sound for this module"; exit 1; }
+
 run_tlc() { # <module> <cfg>
   # Per-cfg -metadir: TLC's default scratch dir is named by wall-clock
   # second — parallel or fast-successive runs collide without this.
@@ -44,6 +51,9 @@ strict_run() { # <module> <cfg> <label>
   local out rc=0
   out=$(run_tlc "$1" "$2") || rc=$?
   if [ "$rc" -ne 0 ]; then
+    # The invariant's name is at the TOP of a violation; the tail is the
+    # trace. `tail -40` alone lost the name with the 2026-09-13 box.
+    printf '%s\n' "$out" | grep -m2 '^Error:'
     printf '%s\n' "$out" | tail -40
     echo "FAIL: $3 — strict run errored or violated"
     exit 1
@@ -64,6 +74,7 @@ mutation_run() { # <module> <cfg> <label> <required-violation-substring>
   case "$out" in
     *"$4"*) PASS=$((PASS + 1)); echo "   found: $4" ;;
     *)
+      printf '%s\n' "$out" | grep -m2 '^Error:'
       printf '%s\n' "$out" | tail -40
       echo "FAIL: $3 — failed for a reason other than: $4"
       exit 1 ;;
@@ -233,7 +244,12 @@ echo
 # Every pre-existing run above keeps BarrierLease=FALSE (state spaces
 # preserved by construction, verified by distinct-state count).
 strict_run $M LeanBarrierLeaseHolds.cfg "barrier lease, two live writers: HITL + crash + restart, every invariant + commit exclusion"
-strict_run $M LeanBarrierLeaseSentinel.cfg "barrier lease: the sentinel's ack rules when the honoring barrier had to WAIT for the cell"
+# LeanBarrierLeaseSentinel (the sentinel when the honoring barrier had to WAIT
+# for the cell) left the gate on 2026-09-15: it is box-scale (62M states to
+# its depth-19 stop) and was the gate's standing red. Its successor is
+# LeanBarrierLeaseSentinelImpl — the same world on the code's shape (tranche
+# 7), with Inv_AckBoundaryCoherent refined — which runs on the TLC box, like
+# LeanBarrierLeaseSameBytesDeep. README, tranche 7.
 strict_run $M LeanBarrierLeaseDeposal.cfg "barrier lease, takeover world: A freezes INSIDE its commit section, B deposes it with rotation, the thawed A abandons"
 strict_run $M LeanBarrierLeaseEpochOnly.cfg "barrier lease, rotation OFF: per-request epoch validation alone fences the deposed holder"
 strict_run $M LeanBarrierLeaseRotationOnly.cfg "barrier lease, epoch-check OFF: rotation alone fences the deposed holder's CAS"
@@ -255,6 +271,10 @@ mutation_run $M LeanBarrierLeaseSameBytesOverride.cfg "FINDING 13, second route 
   "Invariant Inv_NoStaleOverride is violated"
 mutation_run $M LeanBarrierLeaseHitlOverAnyUnverified.cfg "the control for the strict run above: the same world without the commit's re-read loses the UI write (finding 4)" \
   "Invariant Inv_HITLDurable is violated"
+mutation_run $M LeanBarrierLeaseSentinelOutrankedOk.cfg "FINDING (2026-09-14 box run, depth 20): the merge keeps another writer's entry over the agent's delete, and the ack says ok for a seq that still cites the path" \
+  "Invariant Inv_AckImpliesCited is violated"
+mutation_run $M LeanProbeOutrankedPartial.cfg "probe: the partial ack for an outranked delete is actually written (the strict run is not green over an ack never reached)" \
+  "Invariant ProbePartialAck is violated"
 mutation_run $M LeanBarrierLeaseHitlOverUncited.cfg "FINDING: the gateway overwrote whatever object was current -- a UI write over another writer's UNCITED upload, consumed and cited by a third party, is re-cited over by the uploader's commit and lost (the tracked-only overwrite rule is the fix)" \
   "Invariant Inv_HITLDurable is violated"
 mutation_run $M LeanBarrierLeaseSyncOverlayStale.cfg "FINDING (D4 refuted with two writers): the sync's remote truth reads a queued foreign entry as newer than a manifest a second LIVE writer already moved past, verifies the path unchanged against the overlay and advances the merge base to the manifest -- the silent, permanent loss" \
@@ -280,12 +300,42 @@ mutation_run $M LeanProbeAdoptWithheld.cfg "probe: the adopt-verification actual
 mutation_run $M LeanProbeUploadWithheld.cfg "probe: the upload re-verification actually withholds an entry whose LANDED upload a GC took (finding 13's control is not green over a race never reached)" \
   "Invariant ProbeUploadWithheld is violated"
 
+echo
+# ---- tranche 7: MODEL THE IMPLEMENTATION (2026-09-15) ---------------------
+# The writer-local queue (deletions included), the pull-only boundary and
+# the commit that installs nothing — the code's shape since v1.52.0. Every
+# run above keeps all three off, and their distinct-state counts are
+# unchanged (README).
+mutation_run $M LeanBarrierLeaseQueueTombstoneOverHitl.cfg "FINDING (modelling the queue, 19 steps): a queued deletion applied after the same consume adopted a UI write that re-created the path removes it from the tree, and the window clear drops its inbox entry -- acked, tracked by nothing" \
+  "Invariant Inv_HITLTracked is violated"
+strict_run $M LeanBarrierLeaseQueueHolds.cfg "the code's shape with the fix: a queued deletion applies only while the key is absent"
+strict_run $M LeanBarrierLeaseImplHolds.cfg "the tranche-6 breadth world (two paths, HITL, crash, restart) on the code's shape"
+mutation_run $M LeanBarrierLeaseQueueDropped.cfg "known-bad for the ack's third refinement: the merge base moves past a peer's change and nothing queues it -- the queue exemption must not excuse a document ahead by NOTHING queued" \
+  "Invariant Inv_AckBoundaryCoherent is violated"
+mutation_run $M LeanProbePullOnly.cfg "probe: a pull-only boundary runs (no claim, no CAS)" \
+  "Invariant ProbePullOnly is violated"
+mutation_run $M LeanProbeEmptyInstall.cfg "probe: a commit whose merge equals theirs installs nothing" \
+  "Invariant ProbeEmptyInstall is violated"
+mutation_run $M LeanProbeTombstoneApplied.cfg "probe: a queued deletion removes a clean copy from the other writer's tree" \
+  "Invariant ProbeTombstoneApplied is violated"
+mutation_run $M LeanProbeTombstoneSuperseded.cfg "probe: the fix fires -- a queued deletion is superseded by an object at the key" \
+  "Invariant ProbeTombstoneSuperseded is violated"
+
+# FINDING 10 (open in code), as convergence: a pod replaced between its upload
+# and its commit leaves bytes at a cited key that nothing tracks, once no
+# syncer can move. The candidate fix tracks such an object through the inbox.
+mutation_run $M LeanBarrierLeaseOrphanDiverges.cfg "FINDING 10: a writer lost between its upload and its commit leaves an untracked upload at a cited key when every syncer is quiet" \
+  "Invariant Inv_QuiescentConverged is violated"
+strict_run $M LeanBarrierLeaseOrphanTracked.cfg "finding 10's candidate fix: a live writer tracks the orphan through the inbox, at ANY time (no grace), and every invariant holds"
+mutation_run $M LeanProbeOrphanTracked.cfg "probe: the orphan is actually tracked" \
+  "Invariant ProbeOrphanTracked is violated"
+
 # The expected total is ASSERTED, not printed: a hardcoded denominator
 # that drifts below the real run count turns "83/79 green" into a line
 # nobody reads as wrong. It had drifted to 79 against 79 real runs
 # before this tranche; the prose count at the top of this file had
 # drifted further still, to "Fifty-five".
-EXPECT=98
+EXPECT=110
 echo
 if [ "$PASS" -ne "$EXPECT" ]; then
   echo "lean formal gate: $PASS runs green but $EXPECT were declared — a run was"

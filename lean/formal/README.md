@@ -13,13 +13,14 @@ a library. Nothing here is wired into `scripts/check-tla.sh`.
 ## Running
 
 ```
-./check.sh          # the 98-run gate
-./gen-cfgs.sh       # regenerate the cfg matrix
+./check.sh              # the 110-run gate (runs view-census.py first)
+./gen-cfgs.sh           # regenerate the cfg matrix
+./trace/trace-check.sh  # the model against syncer traces (below)
 ```
 
-Ninety-eight runs, ALL required: 26 strict (must hold), 39 mutations
+A hundred and ten runs, ALL required: 28 strict (must hold), 43 mutations
 (must find their designated counterexample — a model that cannot
-rediscover its bug classes proves nothing), 33 probes (must be violated
+rediscover its bug classes proves nothing), 39 probes (must be violated
 — each names an ACTION via a ghost only that action writes; probe the
 action, never the situation). The three numbers are `grep -c "^strict_run "`,
 `grep "^mutation_run " | grep -vc Probe` and `grep "^mutation_run " |
@@ -753,6 +754,25 @@ Until the invariant's refinement lands,
 `LeanBarrierLeaseSentinel` is a known red in the gate (91/92 when the box
 ran it).
 
+**The two 2026-09-14/15 box runs.** An i4i.2xlarge ran this world again with
+its full log kept: `Inv_AckBoundaryCoherent` at depth 19, the name now
+observed rather than inferred, and the same world WITHOUT that invariant
+violated `Inv_AckImpliesCited` at depth 20 — an ok ack over a delete another
+writer's edit outranked (`results/2026-09-14-sentinel-box/`; fixed in the
+syncer, 231cff00, and mirrored here as `AckHonest` over CASInstall). An
+i4i.4xlarge then ran the mirrored world, two paths, every invariant except
+`Inv_AckBoundaryCoherent`, to EXHAUSTION: **no violation, 4,416,800,243
+distinct states**, depth 44, queue empty, exit 0 (15,839,180,692 generated,
+16 workers, 13 h 59 min; `results/2026-09-15-outranked-box/p2-twopath.log`).
+**Read it with its collision estimate:** TLC puts the expected number of
+fingerprint collisions at 2.7 (optimistic) and 1.0 (from the actual
+fingerprints). A collision merges two distinct states and skips the second
+one's successors, so at this size "exhausted" does not rule out one skipped
+branch. The 2026-09-14 SameBytesDeep run, at 383M states, estimated 0.0069.
+The successor world runs with the view and symmetry (well under half the
+states) and a different fingerprint seed. The run left the gate on
+2026-09-15: its successor is tranche 7's `LeanBarrierLeaseSentinelImpl`.
+
 **Budgets.** `BLWORLD` is MaxGen=2/MaxBarriers=2 with crash + restart +
 HITL — not `LeanSubtree`'s MaxGen=3: two live writers with a crash AND a
 restart passed 2.8M states at depth 16 in the first minute with the
@@ -806,6 +826,244 @@ Gated mode is asserted off under the barrier lease (`ASSUME`), per D3.
 barrier lease — uploads precede the claim and no refused-fenced ack
 exists — and are listed in its strict runs for the FALSE-world reader,
 not as coverage.
+
+## Ghost-state reduction (2026-09-15)
+
+Most of `gh` is non-vacuity bookkeeping: counters a probe reads and nothing
+else does. In a strict or must-fail run, two states that differ only there
+have the same successors and the same invariant values, and TLC explored
+both. Two fingerprint reductions, neither of which changes an action:
+
+- **`VIEW StrictView`** keeps every `gh` field an action or an invariant
+  reads (29) and drops the rest (44), plus `sc`'s `pendReRun` and
+  `stageCarried`. `gen-cfgs.sh` adds it to every safety cfg that checks no
+  probe; a probe cfg never gets it.
+- **`SYMMETRY PathSym`** (`Permutations(Paths)`): nothing in the module names
+  a path. It is added wherever the paths start interchangeable (two or more,
+  `FreePaths` empty), and never on a `FairSpec` cfg, because TLC's symmetry
+  is unsound for temporal properties.
+
+Measured before wiring:
+
+| cfg | before | VIEW | both |
+|---|---|---|---|
+| `LeanSentinelHolds` | 1,208,901 | 1,018,269 | 512,322 |
+| `LeanBarrierLeaseAdoptVerified` (one path) | 641,858 | 320,184 | — |
+
+**Counts under BOTH are not exact, and verdicts are unaffected.** TLC's
+`TLCStateMut.fingerPrint` picks the symmetry representative by comparing
+FULL states, dropped counters included, and only then fingerprints that
+representative's view. Two states with equal views can therefore pick
+different permutations and be counted twice. That is an under-merge: two
+states are never merged unless their views are permutations of each other,
+so nothing reachable is skipped. But the distinct count depends on
+exploration order. Measured on `LeanScopedSyncHolds`:
+
+| setting | distinct states |
+|---|---|
+| no reduction | 623,431 |
+| `VIEW` only | 471,015 at 1 and 4 workers |
+| `SYMMETRY` only | 318,985 at 1 and 4 workers |
+| both | 246,067–246,183 across four runs |
+
+So a count comparison between two runs that use both is not a preservation
+check. Compare verdicts there, and compare counts with the reductions
+removed (the tranche 7 check below does that).
+
+A view is sound only while no dropped field is read, so that is checked,
+not claimed. `view-census.py` runs first in `check.sh` and fails the gate
+when any field outside `StrictGh` is read anywhere except a `Probe*`
+definition or the update of another dropped field. It also fails when `sc`
+is read as a whole record, or when a variable is added to `vars` and not to
+the view. `--selftest` applies five edits that each make the view unsound,
+and each must fail the census.
+
+## Tranche 7 (2026-09-15): model the implementation
+
+The CHANGELOG named three shapes the code has had since v1.52.0 and the
+module did not have. Each changes which interleavings exist.
+
+- **`WriterQueue`: the writer-LOCAL foreign queue.** A merge's foreign
+  upserts AND deletions go to `sc[s].fq`, keyed by path. `Consume` drains
+  the queue before the shared inbox's entries, settles an entry the
+  baseline already holds first ("already"), and applies queued deletions
+  after the entries. A restart keeps the queue; a pod replacement takes it.
+- **`EmptyInstall`: a barrier that adds nothing installs nothing.** Three
+  routes:
+  - the skip-on-no-diff fast path runs on every barrier;
+  - `PullOnly` queues theirs and takes it as the merge base, with no claim,
+    no window and no CAS;
+  - a commit whose merge equals theirs skips the CAS, keeps the seq and
+    marks no boundary.
+- **`Inv_AckBoundaryCoherent`, the third refinement.** An ok ack whose
+  document is ahead of the tree by exactly a change waiting in this
+  writer's queue is excused: its reader gets newer bytes, not bytes the
+  workspace superseded. The known-bad run for the relaxation is
+  `LeanBarrierLeaseQueueDropped`: the merge base moves past a peer's change
+  and nothing queues it. It is violated in 14 steps.
+  The unguarded fast path was to be a second known-bad and is not one on
+  this shape: no violation through 6.2M states. The shipped fast path also
+  requires an empty consume, and the ack is judged against the writer's own
+  install, so the dropped guards may be redundant for this invariant. That
+  run (`LeanBarrierLeaseImplFastPathUnguarded`) is opt-in.
+
+**The first run of the queue found a shipped defect, in 19 steps
+(`LeanBarrierLeaseQueueTombstoneOverHitl`, `Inv_HITLTracked`):**
+1. A deletes p1 and publishes.
+2. B's pull-only boundary queues the deletion.
+3. The UI writes p1 again and is acked.
+4. B's next consume ADOPTS the UI write, then applies the queued deletion
+   over it.
+5. B's window clear drops the write's inbox entry. The acked bytes stay at
+   their key, cited by nothing and tracked by nothing.
+
+`a_ui_write_over_a_peers_delete_survives_the_queued_tombstone` failed on the
+1.54.0 syncer that way. The fix, in code and here as `TombstoneHeadsKey`: a
+queued deletion applies only while the key is absent. That is the rule the
+queue's upserts already followed. `LeanBarrierLeaseQueueHolds` is the
+control, and `ProbeTombstoneSuperseded` shows the fix fires.
+
+Three more constants came from trace validation (below): each is a step the
+first syncer traces took that the module could not.
+- `CommitLoadsCurrent`: the commit merges onto the manifest it loads after
+  the claim.
+- `Upload412Preserves`: a foreign version at upload is preserved as a
+  conflict copy, then superseded; the path parks only when that races.
+- `DeclaredConfirmsAbsence`: a sentinel honor deletes on a confirmed first
+  absence; the fast path refuses a pending one and still advances the
+  two-scan clock.
+
+`IMPL` in `gen-cfgs.sh` is all of these, plus `VerifyUploadedCitations`. The
+first box run of the one-path sentinel world on this shape omitted that last
+one, and stopped in 16 steps on `Inv_NoStaleOverride`: a cfg error, not a
+finding (`results/2026-09-15-outranked-box/p1-onepath.log`).
+
+Every earlier cfg keeps all of these FALSE, and that is checked, not
+claimed. Every gate run gives the same verdict on this module as on the
+module before tranche 7. Every strict run that uses the view without
+symmetry gives the same distinct count. The two strict runs whose reduced
+counts differed (`LeanScopedSyncHolds`, `LeanBarrierLeaseSyncOverlayHolds`,
+both with view and symmetry; see above) were re-run with the reductions
+removed, and give the pre-tranche counts exactly: 623,431 and 1,493,045.
+
+**Wider worlds (opt-in, box-scale).** `Writers` is now a constant: a sequence
+in start order, substituted in cfgs as `Writers <- TwoWriters`. It generalises
+the "B starts no earlier than A" symmetry break to a chain. On the code's
+shape:
+- `LeanBarrierLeaseSentinelImpl1` and `LeanBarrierLeaseSentinelImpl`: the
+  sentinel world, with one and two paths, and every invariant including the
+  refined one;
+- `LeanBarrierLeaseSentinelImplCrash` (and `...Crash1`, one path): that world
+  with a pod replacement and a restart;
+- `LeanBarrierLeaseImplThreeWriters`: one path, a UI write, three writers.
+  **HOLDS**, exhaustively on a laptop: 5,086,371 distinct states, depth 41,
+  12 min 31 s (2026-09-15), fingerprint-collision estimate 5.2E-6. The first
+  three-writer world this module has checked;
+- `LeanBarrierLeaseImplFastPathUnguarded`: the redundancy question above.
+
+A box started these on 2026-09-15 at 19:27Z and was stopped after 14 minutes
+(no more cloud spend; they run locally now). Neither lane had a violation:
+- `LeanBarrierLeaseSentinelImpl1` reached depth 28, 29,178,473 distinct
+  states;
+- `LeanBarrierLeaseSentinelImpl` (two paths) reached depth 18, 27,715,096
+  distinct states, with 11.4M queued.
+
+Logs: `results/2026-09-15-impl-box-aborted/`.
+
+**`LeanBarrierLeaseSentinelImpl1` HOLDS, run to exhaustion on a laptop**
+(2026-09-15): the one-path sentinel world under the barrier lease, on the
+code's shape, with every invariant, including the refined
+`Inv_AckBoundaryCoherent`.
+- 36,184,256 distinct states, depth 36, 39 min 50 s, 6 workers.
+- Fingerprint-collision estimate 1.7E-4 (optimistic), 0.0023 from the
+  actual fingerprints.
+- The world that has carried the gate's standing red since 2026-09-13 is
+  green on the code's shape, for one path.
+- Log: `results/2026-09-15-local/impl1.log`.
+
+## Finding 10 (2026-09-15): convergence after a lost writer
+
+A writer lost for good between its upload and its commit leaves bytes at a
+cited key that nothing tracks. That is not a safety violation (nothing
+acked is lost), and no invariant in this module could see it. It is a
+state property only once nothing can move: `Inv_QuiescentConverged`.
+- *Quiescence* is `~ENABLED SyncerProgress`, not `~ENABLED Next`: an agent
+  can always delete a file.
+- *The claim:* then every object at a CITED key is the citation or is
+  tracked by the inbox. An object at an uncited key is a delete whose GC
+  never ran: garbage no checkout serves, a leak, not this.
+
+The first three runs of the check each failed for a model reason, and each
+is recorded where it was fixed:
+1. An unstarted writer counted as quiet (`StartLease` belongs in progress).
+2. The fix's append waited forever behind the window of the writer that
+   died holding the cell (no window guard: safety never rested on it).
+3. A budget of one tracking spent itself on a live writer's in-flight
+   upload.
+
+After those, the results:
+- `LeanBarrierLeaseOrphanDiverges`: violated in 12 steps.
+- `LeanBarrierLeaseOrphanTracked`: `TrackOrphan`, allowed at ANY time,
+  holds with every barrier-lease invariant (2,357,000 states, 5 minutes).
+- `ProbeOrphanTracked` fires.
+
+The code's sweep is that rule (`lean/syncer/src/untracked.rs`). A
+measurement before it: a NEW writer's checkout already healed the
+divergence, because its citation repair cites what it adopted, but live
+writers that never check out again did not.
+
+## Trace validation (2026-09-15): the model against the code
+
+The gate says the model is internally sound. It cannot notice the Rust
+changing underneath, and findings 12 and 13 both lived in exactly that gap.
+`trace/` checks the model against what the syncer DID. The method follows
+Cirstea, Kuppe, Loillier, Merz and Ranzato, *Validating Traces of Distributed
+Programs Against TLA+ Specifications* (2024).
+
+- `lean/syncer/src/tests_conformance.rs` drives two real syncers over the
+  in-memory store with the protocol event trace on. It logs what the trace
+  cannot see (agent writes and deletes, UI writes, sentinel touches) as
+  `conf_*` events into the same stream.
+- `trace/ndjson2tla.py` turns a trace into a sequence of model steps.
+  - Etags map to generations; equal bytes get one generation.
+  - Seqs are offset from the checkout.
+  - Budgets fit the trace exactly.
+  - The event-to-action table is in its docstring.
+- `trace/TraceLean.tla` advances a cursor only through the action each step
+  names, with the reported values bound: adoptions, removals, counts, the
+  installed seq, the GC's result, the ack's status. One step is silent: the
+  GC skips a delete the merge outranked without an event.
+- **Accepted** means TLC reached the end (`TraceIncomplete` violated).
+  **Rejected** means it exhausted every way to follow the trace;
+  `TRACE-REACHED` names the step it could not take.
+
+`trace-check.sh` requires three things:
+- every committed trace in `trace/traces/` is accepted (5);
+- five mutations, each one fact of a real trace corrupted by `mutate.py`,
+  are rejected at the corrupted event: an upload's etag, a merge's foreign
+  count, a tombstone's action, a consume's action, an ack's status;
+- five controls are rejected. Each turns off one model correction a trace
+  forced (the commit token, the 412 arm, declared deletes, the tombstone
+  fix, the writer queue), and the trace that forced it must stop exactly at
+  the step that correction governs.
+
+**What it found on its first run** (before those corrections): of five
+traces, three were rejected, at the commit's CAS (step 17), an upload that
+superseded a foreign version (13) and a declared barrier's scan (14). Each
+was the model lagging the code, fixed as the three constants above. The
+queued-tombstone finding came from modelling, not from a trace; its
+scenario's trace was captured on the fixed syncer and passes.
+
+Limits, named:
+- The traces are sequential: each barrier runs to completion before the
+  other writer's starts, so they check what the actions DO, not every
+  interleaving.
+- The 6-writer contention-drill traces need `Syncers` as a constant, and
+  their agents' writes inferred from the uploads. That is the next step.
+- Regenerate with
+  `FLINT_SYNC_CONFORMANCE_DIR=$PWD/lean/formal/trace/traces cargo test --lib conformance_`
+  in `lean/syncer`. Traces from a changed syncer that the model rejects are
+  the point of the exercise.
 
 ## Tranche 3 candidates (in review-priority order)
 

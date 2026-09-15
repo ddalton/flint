@@ -16,7 +16,9 @@ AckHonest LaneCancelsStaged GatedRepair StampBoundarySource \
 TwoScanDelete MaxNarrows NarrowAtomic NarrowUnlinkFirst \
 MaxRemovals DeclaredSkipsWalk EarlyInboxDrop RenameWaitsForDestination \
 BarrierLease Ticket DeadHandoffSkip InfiniteBarriers ConditionalGC VerifyAdoptedCitations \
-HitlOverwritesTrackedOnly SyncKeepsHiddenBase MaxSameBytes VerifyUploadedCitations"
+HitlOverwritesTrackedOnly SyncKeepsHiddenBase MaxSameBytes VerifyUploadedCitations \
+WriterQueue EmptyInstall TombstoneHeadsKey CommitLoadsCurrent Upload412Preserves \
+DeclaredConfirmsAbsence Writers OrphanTrack QueueForeignChanges"
 
 emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
          # Spec=<name> selects the SPECIFICATION (default Spec; FairSpec
@@ -111,9 +113,36 @@ emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
   # withheld set to the adopted entries, as it was — both preserve the
   # earlier state spaces by construction.  TRUE is the 79e7dac9 fix.
   local c_MaxSameBytes=0 c_VerifyUploadedCitations=FALSE
+  # tranche 7, model the implementation: the writer-local queue and the
+  # empty install.  FALSE in every pre-existing cfg — `fq` stays {}, every
+  # install advances the seq, FastPath stays the sentinel's — so those
+  # state spaces are preserved by construction (checked by count, README).
+  # QueueForeignChanges=TRUE is the shipped rule; FALSE is its mutation.
+  local c_WriterQueue=FALSE c_EmptyInstall=FALSE c_QueueForeignChanges=TRUE
+  # The queue's deletion fix (2026-09-15).  FALSE outside the queue worlds,
+  # where QueuedDeletes is always {} and the constant reads nothing.
+  local c_TombstoneHeadsKey=FALSE
+  # Found by trace validation (lean/formal/trace/): the code's commit loads
+  # the manifest after the claim, its 412 arm preserves and supersedes, and
+  # a declared barrier deletes on a confirmed first absence.  FALSE in
+  # every pre-existing cfg (spaces preserved by construction).
+  local c_CommitLoadsCurrent=FALSE c_Upload412Preserves=FALSE c_DeclaredConfirmsAbsence=FALSE
+  # The writers, in start order. Two in every cfg but the third-writer worlds.
+  local c_Writers='<- TwoWriters'
+  # Finding 10's candidate fix; FALSE (what ships) in every cfg but its own.
+  local c_OrphanTrack=FALSE
   local c_Spec=Spec c_Props=""
+  # Ghost-state reduction (LeanSubtree.tla, "GHOST-STATE REDUCTION"):
+  # View=AUTO fingerprints a run through StrictView unless it checks a
+  # probe (the probe's own counter must stay distinguished); Sym=AUTO adds
+  # path symmetry when the paths start interchangeable.  Neither on a
+  # liveness run: FairSpec/PROPERTY cfgs get the full state and no
+  # symmetry (TLC's symmetry is unsound for temporal properties).  FALSE
+  # forces either off, for an A/B against the unreduced space.
+  local c_View=AUTO c_Sym=AUTO
   local kv
-  for kv in "$@"; do eval "c_${kv%%=*}=${kv#*=}"; done
+  # printf -v, not eval: a value like <<"A","B","C">> must not be re-parsed.
+  for kv in "$@"; do printf -v "c_${kv%%=*}" '%s' "${kv#*=}"; done
   {
     echo "SPECIFICATION $c_Spec"
     echo "CHECK_DEADLOCK FALSE"
@@ -125,11 +154,23 @@ emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
     local k v
     for k in $KEYS; do
       eval "v=\$c_$k"
-      echo "  $k = $v"
+      case "$v" in
+        "<-"*) echo "  $k $v" ;;
+        *) echo "  $k = $v" ;;
+      esac
     done
     local i
     for i in ${invs//,/ }; do echo "INVARIANT $i"; done
     for i in ${c_Props//,/ }; do echo "PROPERTY $i"; done
+    if [ "$c_Spec" = Spec ] && [ -z "$c_Props" ]; then
+      case "$invs" in
+        *Probe*) ;;
+        *) [ "$c_View" = AUTO ] && echo "VIEW StrictView" ;;
+      esac
+      if [ "$c_Sym" = AUTO ] && [ "$c_NPaths" -ge 2 ] && [ "$c_FreeLast" = FALSE ]; then
+        echo "SYMMETRY PathSym"
+      fi
+    fi
   } > "$name.cfg"
   echo "wrote $name.cfg"
 }
@@ -463,7 +504,27 @@ BLSTALLINV="TypeOK,Inv_NoDangling,Inv_NoStragglerInstall,Inv_NoDeposedPut,\
 Inv_HITLTracked,Inv_CommitExclusive,Inv_CellHeldByHolder,Inv_NoStaleOverride"
 emit LeanBarrierLeaseHolds "$BLINV" $BLWORLD
 emit LeanBarrierLeaseSentinel "$SENTINV,Inv_HITLTracked,Inv_CommitExclusive,Inv_CellHeldByHolder,Inv_NoStaleOverride" \
-  $BLSENT
+  $BLSENT AckHonest=TRUE
+# THE OUTRANKED DELETE (2026-09-14 box run).  The world above stops at
+# depth 19 on Inv_AckBoundaryCoherent (its refinement is owed); run to
+# exhaustion without that one invariant it violated Inv_AckImpliesCited
+# at depth 20: a UI write changes p1, B cites it, A's agent deletes p1
+# without having seen it, and A's merge keeps B's entry over the delete
+# (foreign(p) is tested before scanD) while A's ack says ok for a seq
+# that still cites p1.  One path reproduces it in minutes.  AckHonest
+# answers it partial (the syncer's `BarrierReport.outranked`); the strict
+# half leaves out Inv_AckBoundaryCoherent for the reason above, and the
+# probe pins that the partial ack is reached.  The strict half is NOT in
+# the gate (opt-in, like LeanBarrierLeaseSameBytesDeep): on a laptop it
+# passed 23.5M distinct states at depth 24 with the queue still growing
+# and 6 GB of it on disk; it runs on the TLC box.
+BLSENT1="$BLSENT NPaths=1"
+BLSENTINV="TypeOK,Inv_HITLDurable,Inv_NoDangling,Inv_NoResurrection,Inv_AckImpliesCited,\
+Inv_NoNonceOrphan,Inv_NoFencedOkAck,Inv_HITLTracked,Inv_CommitExclusive,Inv_CellHeldByHolder,\
+Inv_NoStaleOverride"
+emit LeanBarrierLeaseSentinelOutrankedOk "Inv_AckImpliesCited" $BLSENT1
+emit LeanBarrierLeaseSentinelOutrankedPartial "$BLSENTINV" $BLSENT1 AckHonest=TRUE
+emit LeanProbeOutrankedPartial "ProbePartialAck" $BLSENT1 AckHonest=TRUE
 # THE FINDING of the gate run (2026-09-13).  The gateway overwrote whatever
 # object was current.  Under the barrier lease no window holds it off
 # during a writer's uploads, so a UI write lands over A's UNCITED upload;
@@ -574,3 +635,84 @@ emit LeanProbeDeposalMidCommit "ProbeDeposalMidCommit" $BLSTALL
 emit LeanProbeFenceAbandoned "ProbeFenceAbandoned" $BLSTALL
 emit LeanProbeDeadHandoffSkipped "ProbeDeadHandoffSkipped" \
   BarrierLease=TRUE NPaths=1 MaxGen=1 MaxSeq=6 MaxHitl=0 MaxCrashes=1 MaxRestarts=0 MaxBarriers=3
+
+# ---- tranche 7: MODEL THE IMPLEMENTATION (2026-09-15) ---------------------
+# Three shapes the code has had since v1.52.0 that the module did not: the
+# writer-LOCAL foreign queue (deletions included), the pull-only boundary
+# and the commit that installs nothing.  IMPL is the code's shape after the
+# queue's deletion fix; every run above keeps all three FALSE, so their
+# state spaces are preserved by construction (checked by count).
+# VerifyUploadedCitations is the finding-13 fix (79e7dac9) and is part of the
+# code's shape: without it, the 412 arm's supersede lets a writer cite its own
+# upload after the other writer replaced it (Inv_NoStaleOverride in 16 steps —
+# the first box run of LeanBarrierLeaseSentinelImpl1, 2026-09-15, which ran
+# without it: a cfg error, not a finding).
+IMPL="WriterQueue=TRUE EmptyInstall=TRUE TombstoneHeadsKey=TRUE CommitLoadsCurrent=TRUE \
+Upload412Preserves=TRUE DeclaredConfirmsAbsence=TRUE VerifyUploadedCitations=TRUE"
+# THE FINDING modelling the queue produced at once (19 steps): A deletes
+# p1 and publishes; B's pull-only boundary queues the deletion; the UI
+# writes p1 again and is acked; B's next consume ADOPTS the UI write and
+# then applies the queued deletion over it, and B's window clear drops
+# the write's inbox entry.  The acked write is at its key, cited by
+# nothing, tracked by nothing.  The fix: a queued deletion applies only
+# while the key is absent (TombstoneHeadsKey), the rule the queue's
+# upserts already follow.  Test:
+# `a_ui_write_over_a_peers_delete_survives_the_queued_tombstone`.
+QWORLD="BarrierLease=TRUE HitlOverwritesTrackedOnly=TRUE NPaths=1 MaxGen=2 MaxSeq=6 MaxHitl=1 \
+MaxBarriers=3 MaxCrashes=0 MaxRestarts=0"
+emit LeanBarrierLeaseQueueTombstoneOverHitl "Inv_HITLTracked" $QWORLD $IMPL TombstoneHeadsKey=FALSE
+emit LeanBarrierLeaseQueueHolds "$BLINV" $QWORLD $IMPL
+emit LeanProbeTombstoneSuperseded "ProbeTombstoneSuperseded" $QWORLD $IMPL
+emit LeanProbeTombstoneApplied "ProbeTombstoneApplied" $QWORLD $IMPL
+emit LeanProbePullOnly "ProbePullOnly" $QWORLD $IMPL
+emit LeanProbeEmptyInstall "ProbeEmptyInstall" $QWORLD $IMPL
+# The tranche-6 breadth world (two paths, HITL, crash, restart) on the
+# code's shape.
+emit LeanBarrierLeaseImplHolds "$BLINV" $BLWORLD $IMPL
+# THE ACK, THIRD REFINEMENT.  Inv_AckBoundaryCoherent now excuses exactly a
+# document ahead of the tree by a change waiting in this writer's queue.
+# A relaxation is trusted only after it is re-run on a known-bad world: the
+# queue write dropped (the merge base moves past a peer's change and nothing
+# carries it to the tree), so the doc is ahead by NOTHING queued — violated
+# in 14 steps.  The fast path without its two guards was to be the second,
+# and on the code's shape it is NOT known-bad: no violation through 6.2M
+# states at depth 20 on a laptop.  The shipped fast path also requires that
+# the consume took nothing from the inbox, and under the barrier lease the
+# ack is judged against the writer's own install, not the live manifest —
+# so the dropped guards may be redundant for this invariant.  Opt-in, on the
+# box, to settle which (exhausted green = a machine-checked redundancy).
+BLSENTIMPL1="$BLSENT1 $IMPL AckHonest=TRUE"
+emit LeanBarrierLeaseQueueDropped "Inv_AckBoundaryCoherent" $BLSENTIMPL1 QueueForeignChanges=FALSE
+emit LeanBarrierLeaseImplFastPathUnguarded "Inv_AckBoundaryCoherent" $BLSENTIMPL1 FastPathGuards=FALSE
+# Opt-in, box-scale (NOT in the gate): the sentinel under the barrier lease
+# on the code's shape with EVERY invariant, the refined one included — the
+# world that has been the gate's known red since 2026-09-13 — one path and
+# two.
+emit LeanBarrierLeaseSentinelImpl1 "$BLSENTINV,Inv_AckBoundaryCoherent" $BLSENTIMPL1
+emit LeanBarrierLeaseSentinelImpl "$BLSENTINV,Inv_AckBoundaryCoherent" $BLSENT $IMPL AckHonest=TRUE
+
+# ---- wider worlds (plan W3, 2026-09-15) -----------------------------------
+# The worlds the TLC box can afford once the view and symmetry halve them.
+# Opt-in, NOT in the gate; each is sized on a laptop first.
+#  - three writers: one path, a UI write, three barriers — the queue, the
+#    ticket and the pull-only boundary with a third party in every exchange;
+#  - the sentinel on the code's shape with a pod replacement and a container
+#    restart, which no sentinel-under-the-lease world has had.
+emit LeanBarrierLeaseImplThreeWriters "$BLINV" $QWORLD $IMPL "Writers=<- ThreeWriters"
+emit LeanBarrierLeaseSentinelImplCrash "$BLSENTINV,Inv_AckBoundaryCoherent" $BLSENT $IMPL AckHonest=TRUE \
+  MaxCrashes=1 MaxRestarts=1
+emit LeanBarrierLeaseSentinelImplCrash1 "$BLSENTINV,Inv_AckBoundaryCoherent" $BLSENTIMPL1 \
+  MaxCrashes=1 MaxRestarts=1
+
+# FINDING 10 (open), as a convergence property.  A writer's pod is replaced
+# between its upload and its commit; the other writer runs on.  Once no
+# syncer can move, the upload is still at the cited key, uncited and
+# untracked: Inv_QuiescentConverged is violated as shipped.  OrphanTrack is
+# the candidate fix (the other writer tracks it through the inbox), and
+# its control must hold.  MaxSeq leaves every commit room, so a quiescent
+# state is never a commit the budget blocked.
+ORPHANWORLD="BarrierLease=TRUE HitlOverwritesTrackedOnly=TRUE NPaths=1 MaxGen=3 MaxSeq=8 MaxHitl=0 \
+MaxBarriers=3 MaxCrashes=1 MaxRestarts=0"
+emit LeanBarrierLeaseOrphanDiverges "Inv_QuiescentConverged" $ORPHANWORLD $IMPL
+emit LeanBarrierLeaseOrphanTracked "$BLINV,Inv_QuiescentConverged" $ORPHANWORLD $IMPL OrphanTrack=TRUE
+emit LeanProbeOrphanTracked "ProbeOrphanTracked" $ORPHANWORLD $IMPL OrphanTrack=TRUE

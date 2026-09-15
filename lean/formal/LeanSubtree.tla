@@ -35,7 +35,7 @@
 (*     preserve the BYTES (conflict-suffixed key or versioning), not just  *)
 (*     the reference — otherwise "both versions recoverable" is false.     *)
 (***************************************************************************)
-EXTENDS Naturals, FiniteSets, Sequences
+EXTENDS Naturals, FiniteSets, Sequences, TLC
 
 CONSTANTS
   Paths,          \* model values, e.g. {p1, p2}
@@ -172,15 +172,16 @@ CONSTANTS
                        \* cfg — including `LeanGatedInflightHitl`, whose
                        \* counterexample runs through exactly the shape
                        \* this arm closes (see the ledger note there).
-  AckHonest,           \* TRUE = a gated citation that DROPPED a path the
+  AckHonest,           \* TRUE = a boundary that does not carry a path the
                        \* agent declared is answered with a partial ack
-                       \* naming it, never with `ok`.  FALSE = the
-                       \* mutation, which is what shipped: `status: "ok"`
-                       \* unconditionally, with no field in the ack
-                       \* schema that could express the exception.
-                       \* FALSE in every pre-existing cfg; the drop only
-                       \* exists under GatedCitation, so the spaces of
-                       \* the sentinel-only runs are preserved either way.
+                       \* naming it, never with `ok`: a gated citation
+                       \* that DROPPED the path, or (2026-09-14) a fused
+                       \* install whose merge kept another writer's
+                       \* entry over the agent's delete.  FALSE = the
+                       \* mutation, which is what shipped until then:
+                       \* `status: "ok"` whenever nothing was parked.
+                       \* FALSE in every pre-existing cfg: citeDropped
+                       \* stays {} there, so their spaces are preserved.
   MineIsNotForeign,    \* TRUE = an entry that matches OUR OWN BASELINE is
                        \* not a foreign change, whatever the merge base
                        \* says.  The merge base is rewritten at step 7,
@@ -349,7 +350,7 @@ CONSTANTS
                        \* pre-existing cfg, so the action is unreachable
                        \* and `touched` stays {} — those state spaces are
                        \* preserved by construction.
-  VerifyUploadedCitations \* TRUE = CASInstall re-verifies EVERY citation
+  VerifyUploadedCitations,\* TRUE = CASInstall re-verifies EVERY citation
                        \* its own uploads add, not only the adopted ones,
                        \* and withholds what is gone (`barrier.rs`, the
                        \* commit section's re-read, 79e7dac9).  FALSE =
@@ -362,8 +363,109 @@ CONSTANTS
                        \* write over one does move it, and
                        \* LeanBarrierLeaseHitlOverUncited must keep
                        \* finding its counterexample.
+  \* ---- tranche 7: MODEL THE IMPLEMENTATION (2026-09-15) -----------------
+  \* Three things the code has done since v1.52.0 that this module did
+  \* not.  Each was a named gap in the CHANGELOG, and each changes which
+  \* interleavings exist, so a green run over the old shape was a claim
+  \* about a design the code no longer has.
+  WriterQueue,         \* TRUE = what ships: the other writers' changes a
+                       \* merge carries into the manifest go to THIS
+                       \* writer's LOCAL queue (`state::queue_foreign`,
+                       \* keyed by path, a later change replacing the
+                       \* queued one), deletions included, and the next
+                       \* consume drains it BEFORE the shared inbox's
+                       \* entries and applies its deletions AFTER them
+                       \* (`barrier.rs` `consume_counted`).  The queue is
+                       \* a file in the state directory: a restart keeps
+                       \* it, a pod replacement takes it.  FALSE = this
+                       \* module's shape until now: foreign upserts
+                       \* re-queued into the SHARED inbox, foreign
+                       \* deletions never reaching the other tree at all.
+                       \* BarrierLease only; FALSE in every pre-existing
+                       \* cfg, where `fq` stays {}.
+  EmptyInstall,        \* TRUE = what ships: a barrier that adds nothing
+                       \* installs nothing.  Three routes (`barrier.rs`):
+                       \* the skip-on-no-diff fast path on EVERY barrier
+                       \* (not only a sentinel honor); the PULL-ONLY
+                       \* boundary — nothing uploaded, deleted, consumed,
+                       \* removed or re-cited — which queues theirs and
+                       \* takes it as the merge base with no claim, no
+                       \* window and no CAS; and a commit whose merge
+                       \* equals theirs, which skips the CAS and keeps
+                       \* the seq.  FALSE = every install advanced the
+                       \* seq, the CHANGELOG's "no empty-install rule".
+                       \* Requires WriterQueue (the pull-only route
+                       \* queues locally; it has no window to write the
+                       \* inbox under).
+  TombstoneHeadsKey,   \* TRUE = the fix for what modelling the queue found
+                       \* (2026-09-15): a queued DELETION applies only
+                       \* while the key is still absent — a key holding an
+                       \* object means a newer write superseded it, which
+                       \* is the rule the queue's UPSERTS already follow
+                       \* ("superseded").  FALSE = what shipped: the
+                       \* deletion runs after the consume's entries, over
+                       \* whatever they just adopted, so a UI write that
+                       \* re-created a path a peer deleted is removed from
+                       \* the tree the same consume adopted it into, and
+                       \* the window clear then drops its inbox entry —
+                       \* acked, and tracked by nothing
+                       \* (LeanBarrierLeaseQueueTombstoneOverHitl).
+                       \* WriterQueue only.
+  \* Three more, found by TRACE VALIDATION (lean/formal/trace/): the first
+  \* syncer traces checked against this module were rejected at exactly
+  \* these steps.  Each is what the code does; FALSE keeps every earlier
+  \* state space.
+  CommitLoadsCurrent,  \* TRUE = the commit merges onto the manifest it
+                       \* LOADS after the claim and CASes against that
+                       \* (`barrier.rs` commit section), so a writer whose
+                       \* last seq is stale does not first lose a CAS.
+                       \* FALSE = CASInstall If-Matches the seq remembered
+                       \* from the writer's last boundary (CASMiss first).
+  Upload412Preserves,  \* TRUE = `upload_one`'s 412 policy since review
+                       \* 2026-09-12 (inbox-1): a FOREIGN version at the
+                       \* key is preserved as a conflict copy and then
+                       \* superseded knowingly; the path parks only when
+                       \* that races (a second 412) or the preserve fails.
+                       \* FALSE = the park this module always modelled.
+  DeclaredConfirmsAbsence, \* TRUE = a DECLARED barrier (a sentinel honor)
+                       \* confirms a first absence with a fresh stat and
+                       \* deletes it at once (`confirm_absences`); and the
+                       \* skip-on-no-diff fast path refuses a pending first
+                       \* absence and still advances the two-scan clock.
+                       \* FALSE = the two-scan rule on every barrier and a
+                       \* fast path blind to first absences.
+  OrphanTrack,         \* FINDING 10 (open): a writer lost for good between
+                       \* its upload and its commit leaves bytes at a
+                       \* CITED key that no manifest cites and nothing
+                       \* tracks.  TRUE = the candidate fix: a writer that
+                       \* finds such an object appends it to the shared
+                       \* inbox, as a UI write is tracked, and the normal
+                       \* consume integrates it.  The action is allowed
+                       \* WHENEVER the object is untracked — the grace that
+                       \* keeps a live writer's in-flight upload out of it
+                       \* is not modelled, so a green run means the grace
+                       \* is not what keeps anything safe.  FALSE = what
+                       \* ships.  BarrierLease only.
+  Writers,             \* tranche 7: the writers, IN START ORDER, as a
+                       \* sequence of names.  <<"A", "B">> in every cfg
+                       \* before the third-writer worlds, and the life
+                       \* lease's actions (StartA, ClaimB, CheckoutB) and
+                       \* the stall (A only) still name those two.
+  QueueForeignChanges  \* TRUE = what ships.  FALSE = the mutation: the
+                       \* merge base moves past the other writers'
+                       \* changes and nothing queues them, so the tree
+                       \* never receives them — the direct fingerprint of
+                       \* the harm `Inv_AckBoundaryCoherent`'s queue
+                       \* exemption must NOT excuse (the known-bad run for
+                       \* that relaxation).  WriterQueue only.
 
-Syncers == {"A", "B"}
+\* A cfg cannot write a sequence literal; it substitutes one of these
+\* (`Writers <- TwoWriters`).
+TwoWriters   == <<"A", "B">>
+ThreeWriters == <<"A", "B", "C">>
+Syncers == {Writers[i] : i \in DOMAIN Writers}
+\* The first writer, the one the stall and the life lease name.
+ASSUME Len(Writers) >= 2 /\ Writers[1] = "A" /\ Writers[2] = "B"
 Sources == {"none", "cadence", "sentinel"}
 
 VARIABLES
@@ -474,6 +576,15 @@ vars == <<cellEpoch, cellHolder, cellQueue, cellHandoff, cellReleased,
                               paths this writer integrated whose key held a
                               newer generation at the CAS (BarrierLease
                               only; {} otherwise) — see BoundaryIncoherent
+     fq       SUBSET (Paths \X Gens)  tranche 7, WriterQueue only: the
+                              writer-LOCAL foreign queue — <<p, g>> is a
+                              change another writer made that this writer's
+                              merge carried into the manifest but not yet
+                              into the tree; g = 0 is a DELETION.  At most
+                              one entry per path.  {} otherwise
+     noInst   BOOLEAN         tranche 7, EmptyInstall only: this barrier's
+                              commit found the merge equal to theirs and
+                              installed nothing (CASInstall to Finish)
      parked   SUBSET Paths    412-parked this barrier
      gcDone   SUBSET Paths    delete-set entries processed this barrier
      gcHeaded SUBSET Paths    tranche 6, ~ConditionalGC only: delete-set
@@ -619,7 +730,13 @@ vars == <<cellEpoch, cellHolder, cellQueue, cellHandoff, cellReleased,
                             deleted or overwritten by a party entitled to:
                             a writer that integrated it, or the UI's own
                             later write (GCDelete, Upload, HitlWrite; only
-                            under MaxSameBytes > 0) — see Inv_HITLTracked *)
+                            under MaxSameBytes > 0) — see Inv_HITLTracked
+     ---- tranche 7 (each written by ONE action, read only by its probe) ----
+     pullOnlys 0|1        a PULL-ONLY boundary ran (PullOnly)
+     emptyInstalls 0|1    a commit installed nothing (CASInstall)
+     tombRemoved 0|1      a queued deletion removed a clean copy (Consume)
+     tombSuperseded 0|1   a queued deletion was superseded by an object
+                            at the key — the fix firing (Consume) *)
 
 ------------------------------------------------------------------------------
 (* Helpers *)
@@ -671,6 +788,50 @@ AckedDoc(s) == IF BarrierLease THEN sc[s].instSnap ELSE manifest
 AckedSrc(s) == IF BarrierLease THEN sc[s].instSrc ELSE manSrc
 
 
+(* ---- tranche 7: the merge's per-path judgements, hoisted out of
+   CASInstall so the PULL-ONLY boundary — which merges and installs
+   nothing — reads the same rules.  CASInstall's bodies are unchanged;
+   see the comments there for why each reads as it does.                *)
+ForeignEntry(s, p) ==
+  /\ MergeCapable
+  /\ manifest[p] # sc[s].instBase[p]
+  /\ (MineIsNotForeign => manifest[p] \notin sc[s].known)
+RepairOwed(s, p) ==
+  /\ p \notin (sc[s].scanU \cup sc[s].scanD \cup sc[s].parked)
+  /\ sc[s].baseline[p] # sc[s].instBase[p]
+  /\ objects[p] = sc[s].baseline[p]
+RepairDeclined(s, p) ==
+  /\ p \notin (sc[s].scanU \cup sc[s].scanD \cup sc[s].parked)
+  /\ sc[s].baseline[p] # sc[s].instBase[p]
+  /\ objects[p] # sc[s].baseline[p]
+\* What a merge queues for the TREE (`merge_onto`'s `foreign` and `gone`):
+\* theirs moved off the merge base at a path this barrier neither uploaded,
+\* re-cited nor parked — an upsert — or dropped a path the base had that
+\* this barrier neither uploaded, deleted, re-cited nor parked — a deletion.
+\* A citation repair is one of the merge's own upserts, so it is neither.
+MineInMerge(s) == sc[s].parked \cup (sc[s].scanU \cap sc[s].upDone)
+MergeForeign(s) ==
+  {<<p, manifest[p]>> : p \in {q \in Paths :
+     /\ q \notin MineInMerge(s)
+     /\ ~RepairOwed(s, q)
+     /\ ForeignEntry(s, q)
+     /\ manifest[q] # 0}}
+MergeGone(s) ==
+  {<<p, 0>> : p \in {q \in Paths :
+     /\ MergeCapable
+     /\ q \notin MineInMerge(s) \cup sc[s].scanD
+     /\ ~RepairOwed(s, q)
+     /\ sc[s].instBase[q] # 0
+     /\ manifest[q] = 0}}
+\* `state::queue_foreign`: keyed by path, a later change replaces the
+\* queued one.  Under the mutation nothing is queued at all.
+QueueUpsert(q, new) ==
+  IF QueueForeignChanges
+  THEN {pr \in q : pr[1] \notin {x[1] : x \in new}} \cup new
+  ELSE q
+QueuedUpserts(s) == {pr \in sc[s].fq : pr[2] # 0}
+QueuedDeletes(s) == {pr[1] : pr \in {x \in sc[s].fq : x[2] = 0}}
+
 Deposed(s)  == cellEpoch > sc[s].epoch
 Running(s)  == sc[s].st = "running"
 
@@ -692,7 +853,18 @@ Without(q, s)    == SelectSeq(q, LAMBDA t : t # s)
 \* this IS `CASReady`; under the barrier lease the claim sits between.
 UploadsDone(s)   == sc[s].scanU \subseteq (sc[s].upDone \cup sc[s].parked)
 PreCommitReady(s) == sc[s].pc = "scanned" /\ UploadsDone(s)
-WantsCell(s)     == PreCommitReady(s) \/ sc[s].pc = "waiting"
+\* Tranche 7: the PULL-ONLY boundary (`barrier.rs`, before the commit
+\* section): nothing uploaded, deleted, consumed from the shared inbox,
+\* removed or re-cited — so the merge can only add nothing, and the code
+\* never claims for it.  (An adopt is an upload here: scanU = {} rules it
+\* out.)  Defined over the same helpers the commit's merge reads.
+PullOnlyReady(s) ==
+  /\ BarrierLease /\ EmptyInstall
+  /\ sc[s].pc = "scanned"
+  /\ sc[s].scanU = {} /\ sc[s].scanD = {}
+  /\ sc[s].consumed = {} /\ sc[s].declared = {}
+  /\ ~\E p \in Paths : RepairOwed(s, p)
+WantsCell(s)     == (PreCommitReady(s) /\ ~PullOnlyReady(s)) \/ sc[s].pc = "waiting"
 \* Every claim bumps the epoch; every claim follows a scan, so the
 \* barrier budget bounds it (+2 for the life lease's StartA and ClaimB).
 \* Under the liveness abstraction it saturates there instead.
@@ -730,7 +902,7 @@ FencedSc(s) ==
         ![s].scanGen = [p \in Paths |-> 0],
         ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {},
         ![s].gcHeaded = {}, ![s].gcSeen = [p \in Paths |-> 0],
-        ![s].adopted = {}]
+        ![s].adopted = {}, ![s].noInst = FALSE]
   ELSE [sc EXCEPT ![s].st = "dead"]
 \* `touched` is dirt the generations cannot show: a rewrite with the bytes
 \* the baseline cites (see MaxSameBytes).  {} in every earlier cfg.
@@ -740,7 +912,10 @@ USet(s)     == {p \in Dirty(s) : sc[s].local[p] # 0}
 \* one-scan rule every pre-existing cfg was written against, so their
 \* state spaces are unchanged by construction.
 DSet(s)     == {p \in Dirty(s) : sc[s].local[p] = 0
-                                 /\ (~TwoScanDelete \/ p \notin sc[s].prevScan)}
+                                 /\ \/ ~TwoScanDelete
+                                    \/ p \notin sc[s].prevScan
+                                    \/ DeclaredConfirmsAbsence /\ SentinelEnabled
+                                       /\ sc[s].pendN # {}}
 CitedGens   == {manifest[p] : p \in Paths} \ {0}
 
 \* The generation an acked pair refers to is destroyed by a syncer that
@@ -750,6 +925,7 @@ Destroys(s, p, cur) ==
   /\ <<p, cur>> \in hitlAcked
   /\ cur \notin sc[s].known
   /\ <<p, cur>> \notin conflicts
+
 
 ------------------------------------------------------------------------------
 (* Initial state: a project seeded with every path published at gen 1.     *)
@@ -784,6 +960,7 @@ Init ==
         pendMint |-> 0, pendDirty |-> {},
         honored |-> FALSE, pendReRun |-> FALSE, owed |-> {}, ackN |-> {},
         citeDropped |-> {},
+        fq |-> {}, noInst |-> FALSE,
         declared |-> {}, consumed |-> {}]]
   /\ hitlAcked = {} /\ conflicts = {}
   /\ gh = [amputated |-> FALSE, resurrected |-> FALSE,
@@ -811,7 +988,9 @@ Init ==
            claimed |-> {}, interleaved |-> FALSE, handoffs |-> 0,
            deposals |-> 0, deadSkips |-> 0, enqueues |-> 0, abandoned |-> 0,
            adoptWithheld |-> 0, sameBytes |-> 0, uploadWithheld |-> 0,
-           staleOverride |-> FALSE, hitlRetired |-> {}]
+           staleOverride |-> FALSE, hitlRetired |-> {},
+           pullOnlys |-> 0, emptyInstalls |-> 0,
+           tombRemoved |-> 0, tombSuperseded |-> 0, orphanTracks |-> 0]
 
 ------------------------------------------------------------------------------
 (* Lifecycle *)
@@ -839,7 +1018,8 @@ StartA ==
    are interchangeable here, except that only A can stall).             *)
 StartLease(s) ==
   /\ BarrierLease /\ sc[s].st = "unstarted"
-  /\ (s = "B" => sc["A"].st # "unstarted")
+  /\ \A i \in DOMAIN Writers :
+       Writers[i] = s => \A j \in 1..(i - 1) : sc[Writers[j]].st # "unstarted"
   /\ sc' = [sc EXCEPT
        ![s].st = "running", ![s].expSeq = manSeq,
        ![s].local = [p \in Paths |-> manifest[p]],
@@ -869,6 +1049,8 @@ CrashPod(s) ==
        ![s].pendMint = 0, ![s].pendDirty = {},
        ![s].honored = FALSE, ![s].pendReRun = FALSE,
        ![s].owed = {}, ![s].ackN = {},
+       \* Tranche 7: the writer-local queue is a file in the same emptyDir.
+       ![s].fq = {}, ![s].noInst = FALSE,
        ![s].declared = {}, ![s].consumed = {}]
   /\ gh' = [gh EXCEPT !.crashes = @ + 1]
   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
@@ -935,9 +1117,10 @@ Restart(s) ==
             ![s].scanGen = [p \in Paths |-> 0],
             ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {},
             ![s].gcHeaded = {}, ![s].gcSeen = [p \in Paths |-> 0],
-            ![s].adopted = {},
+            ![s].adopted = {}, ![s].noInst = FALSE,
             \* `consumed` is in-memory barrier state; `declared` is the
-            \* intent journal, a FILE in the surviving emptyDir.
+            \* intent journal, a FILE in the surviving emptyDir (and so is
+            \* tranche 7's queue, `fq`, which this leaves alone).
             ![s].consumed = {}]
        /\ gh' = [gh EXCEPT !.restarts = @ + 1,
             !.resurrected = @ \/ (RematerializeOnRestart /\ res)]
@@ -1194,6 +1377,33 @@ HitlRename(p, q) ==
                           !.renamed = @ \cup {<<p, q, objects[p], g>>}]
   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, window, sc, conflicts>>
 
+(* Finding 10's candidate fix.  An object sits at a CITED key under a
+   generation the manifest does not cite and no inbox entry names: a
+   writer's upload whose commit never came.  Any live writer may track it —
+   an inbox entry, appended like the gateway's — and
+   the consume that follows adopts it (clean) or preserves it (dirty), and
+   the next commit cites it. *)
+TrackOrphan(p) ==
+  /\ BarrierLease /\ OrphanTrack
+  /\ \E s \in Syncers : Running(s)
+  \* No window guard.  The append the code would use waits for the window
+  \* and admits past a dead barrier's at its deadline (`admits_hitl`); the
+  \* model has no deadline, and its first run of this arm parked forever
+  \* behind the window of the very writer that died holding the cell.
+  \* Safety never rested on the window (LeanNoWindowHolds), so allowing the
+  \* append at any time is the stronger check.
+  /\ manifest[p] # 0 /\ objects[p] # 0 /\ objects[p] # manifest[p]
+  /\ <<p, objects[p]>> \notin inbox
+  /\ inbox' = inbox \cup {<<p, objects[p]>>}
+  \* No budget: each firing adds a (path, generation) pair the inbox did
+  \* not hold, and generations are budgeted, so the arm is finite.  A
+  \* budget of one spent itself on a LIVE writer's in-flight upload in the
+  \* first run and left the real orphan untracked — the code's sweep runs
+  \* again, so the model must too.
+  /\ gh' = [gh EXCEPT !.orphanTracks = 1]
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, removals,
+                 window, sc, hitlAcked, conflicts>>
+
 ------------------------------------------------------------------------------
 (* The publish barrier (plan §2.1, seven steps; scan+intent merged, the
    consume->scan gap preserved — that gap is where strict-world parks
@@ -1215,7 +1425,19 @@ Consume(s) ==
   /\ ~(SentinelEnabled /\ sc[s].honored)
   /\ gh.barriers < MaxBarriers \/ InfiniteBarriers
   /\ LET
-       live == {pr \in inbox : objects[pr[1]] = pr[2]}
+       \* Tranche 7: the writer-LOCAL queue's upserts join the entries (the
+       \* code runs them first; with one entry per path and the key holding
+       \* one generation, order among them changes nothing here), and an
+       \* entry whose etag the baseline already holds is settled BEFORE
+       \* every other arm, with no record — `consume_counted`'s "already".
+       \* An entry whose object is gone leaves a `consume-object-missing`
+       \* record.  Under ~WriterQueue: the rules as they were.
+       cand == IF WriterQueue THEN inbox \cup QueuedUpserts(s) ELSE inbox
+       already == IF WriterQueue
+                  THEN {pr \in cand : sc[s].baseline[pr[1]] = pr[2]} ELSE {}
+       missing == IF WriterQueue
+                  THEN {pr \in cand \ already : objects[pr[1]] = 0} ELSE {}
+       live == {pr \in cand \ already : objects[pr[1]] = pr[2]}
        adoptable == {pr \in live :
                        /\ sc[s].local[pr[1]] = sc[s].baseline[pr[1]]
                        /\ pr[1] \notin sc[s].touched}
@@ -1228,6 +1450,23 @@ Consume(s) ==
                     IF p \in adoptPaths THEN objects[p] ELSE sc[s].local[p]]
        base1  == [p \in Paths |->
                     IF p \in advPaths THEN objects[p] ELSE sc[s].baseline[p]]
+       \* ...then the queued DELETIONS, against the tree the entries left
+       \* (the code's second loop): nothing on disk settles; a copy that is
+       \* dirty — or was never in the baseline — stays and publishes, with
+       \* a `consume-foreign-delete-vs-dirty` record; a clean copy goes.
+       tAbsent  == {p \in QueuedDeletes(s) : local1[p] = 0}
+       \* Under the fix a key that holds an object has superseded the
+       \* deletion: settled, nothing removed, no record.
+       tSuper   == IF TombstoneHeadsKey
+                   THEN {p \in QueuedDeletes(s) \ tAbsent : objects[p] # 0}
+                   ELSE {}
+       tKept    == {p \in QueuedDeletes(s) \ (tAbsent \cup tSuper) :
+                      \/ base1[p] = 0
+                      \/ local1[p] # base1[p]
+                      \/ p \in sc[s].touched}
+       tRemoved == QueuedDeletes(s) \ (tAbsent \cup tSuper \cup tKept)
+       local2 == [p \in Paths |-> IF p \in tRemoved THEN 0 ELSE local1[p]]
+       base2  == [p \in Paths |-> IF p \in tAbsent \cup tRemoved THEN 0 ELSE base1[p]]
        \* ---- the DECLARED removals (tranche 5, design §4-§6) ---------
        \* After the entries, so a rename's destination is in the tree
        \* before its source leaves it (§5).  A rename's removal waits
@@ -1240,32 +1479,36 @@ Consume(s) ==
        \* performed removals leave it at Finish, after the manifest.
        dstOf(p) == {pr[2] : pr \in {x \in gh.renamed : x[1] = p}}
        dstReady(p) == ~RenameWaitsForDestination
-                      \/ \A q \in dstOf(p) : base1[q] = objects[q] /\ local1[q] = base1[q]
+                      \/ \A q \in dstOf(p) : base2[q] = objects[q] /\ local2[q] = base2[q]
        dstTaken(p) == \E q \in dstOf(p) :
-                        q \in surfPaths \/ (base1[q] = objects[q] /\ local1[q] # base1[q])
+                        q \in surfPaths \/ (base2[q] = objects[q] /\ local2[q] # base2[q])
        refused == {p \in removals :
-                     \/ (local1[p] # 0 /\ local1[p] # base1[p])
+                     \/ (local2[p] # 0 /\ local2[p] # base2[p])
                      \/ dstTaken(p)}
        applied == {p \in removals \ refused :
-                     /\ (local1[p] = 0 \/ local1[p] = base1[p])
+                     /\ (local2[p] = 0 \/ local2[p] = base2[p])
                      /\ dstReady(p)}
        declaredNow == IF DeclaredSkipsWalk THEN applied ELSE {}
      IN
        /\ sc' = [sc EXCEPT ![s].pc = "consumed",
-            ![s].local = [p \in Paths |-> IF p \in applied THEN 0 ELSE local1[p]],
-            ![s].baseline = base1,
+            ![s].local = [p \in Paths |-> IF p \in applied THEN 0 ELSE local2[p]],
+            ![s].baseline = base2,
+            ![s].fq = IF WriterQueue THEN {} ELSE @,
             ![s].known = @ \cup {objects[p] : p \in advPaths},
             \* `baseline.prev_scan.insert(entry.path)`: a consumed path
             \* gets the two-scan protection as if the walk had seen it,
             \* so an agent delete right after the consume is a FIRST
             \* absence.  Gated like Scan's write, for the same reason.
-            ![s].prevScan = IF TwoScanDelete THEN @ \cup adoptPaths ELSE @,
+            ![s].prevScan = IF TwoScanDelete
+                            THEN (@ \cup adoptPaths) \ (tAbsent \cup tRemoved) ELSE @,
             ![s].declared = @ \cup declaredNow,
             \* What this barrier consumed, to leave the cell at Finish.
             ![s].consumed = IF EarlyInboxDrop THEN {} ELSE inbox]
        /\ conflicts' = conflicts
             \cup (IF ConflictSurfacing THEN conflicted ELSE {})
-            \cup {<<p, local1[p]>> : p \in refused}
+            \cup {<<p, local2[p]>> : p \in refused}
+            \cup missing
+            \cup {<<p, 0>> : p \in tKept}
        \* The rule that shipped cleared the cell here ("durably in the
        \* baseline"); the baseline dies with the pod.  See EarlyInboxDrop.
        /\ inbox' = IF EarlyInboxDrop THEN {} ELSE inbox
@@ -1279,7 +1522,9 @@ Consume(s) ==
             !.removalsApplied = @ + Cardinality(applied),
             !.removalsRefused = @ + Cardinality(refused),
             !.renamesApplied = @ + Cardinality({pr \in gh.renamed : pr[1] \in applied}),
-            !.renameRefused = @ \cup {pr \in gh.renamed : pr[1] \in refused}]
+            !.renameRefused = @ \cup {pr \in gh.renamed : pr[1] \in refused},
+            !.tombRemoved = IF tRemoved # {} THEN 1 ELSE @,
+            !.tombSuperseded = IF tSuper # {} THEN 1 ELSE @]
   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, window,
                  hitlAcked>>
 
@@ -1388,10 +1633,22 @@ Upload(s, p) ==
        ELSE IF ConflictSurfacing
        THEN \* foreign ETag: park the path, surface the conflict, never
             \* overwrite an ETag this syncer did not itself publish.
-         /\ sc' = [sc EXCEPT ![s].parked = @ \cup {p}]
-         /\ conflicts' = conflicts \cup {<<p, cur>>}
-         /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
-                        inbox, removals, window, hitlAcked, gh>>
+            \* Under Upload412Preserves the conflict record IS the preserved
+            \* copy, and the upload then supersedes the foreign version
+            \* knowingly — or parks, when that second PUT races (either).
+         \/ /\ sc' = [sc EXCEPT ![s].parked = @ \cup {p}]
+            /\ conflicts' = conflicts \cup {<<p, cur>>}
+            /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
+                           inbox, removals, window, hitlAcked, gh>>
+         \/ /\ Upload412Preserves
+            /\ objects' = [objects EXCEPT ![p] = want]
+            /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
+            /\ conflicts' = conflicts \cup {<<p, cur>>}
+            /\ gh' = [gh EXCEPT !.narrowRecited = @ \cup ({p} \cap gh.narrowed),
+                        !.deposedPuts = @ + (IF DeposedHolder(s) THEN 1 ELSE 0),
+                        !.interleaved = @ \/ (BarrierLease /\ CellHeld /\ cellHolder # s)]
+            /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest,
+                           inbox, removals, window, hitlAcked>>
        ELSE \* MUTATION: the inherited LOCAL-WINS arbitration — re-read
             \* the ETag and overwrite blind.  known does NOT grow.
          /\ objects' = [objects EXCEPT ![p] = want]
@@ -1532,12 +1789,8 @@ CASInstall(s) ==
   /\ ~GatedCitation          \* gated replaces this with CitePassStep
   /\ Running(s) /\ CASReady(s)
   /\ ~Fenced(s)
-  /\ manSeq = sc[s].expSeq
-  /\ manSeq < MaxSeq \/ InfiniteBarriers
+  /\ CommitLoadsCurrent \/ manSeq = sc[s].expSeq
   /\ LET
-       \* Under the liveness abstraction the seq saturates (see the
-       \* constant): with nothing to merge the token is never contended.
-       seq2 == IF InfiniteBarriers THEN manSeq ELSE manSeq + 1
        \* Merge semantics: base = instBase (the last-installed view), mine
        \* = the scan-time walk, theirs = the current bucket manifest.  The
        \* merge STARTS FROM THEIRS (untouched paths keep theirs' entry —
@@ -1566,20 +1819,12 @@ CASInstall(s) ==
        \* higher one); and the entry's etag can equal what our own
        \* baseline holds for the path.  Two routes, and the model
        \* produced one counterexample for each.
-       foreign(p) == /\ MergeCapable
-                     /\ manifest[p] # sc[s].instBase[p]
-                     /\ (MineIsNotForeign => manifest[p] \notin sc[s].known)
-       repair(p) ==
-         /\ p \notin (sc[s].scanU \cup sc[s].scanD \cup sc[s].parked)
-         /\ sc[s].baseline[p] # sc[s].instBase[p]
-         /\ objects[p] = sc[s].baseline[p]
+       foreign(p) == ForeignEntry(s, p)
+       repair(p) == RepairOwed(s, p)
        \* The same candidate with its HEAD guard failed: the key moved past
        \* what this writer integrated.  The code declines silently ("the
        \* next consume reconciles it"); recorded for the ack's judgement.
-       declined(p) ==
-         /\ p \notin (sc[s].scanU \cup sc[s].scanD \cup sc[s].parked)
-         /\ sc[s].baseline[p] # sc[s].instBase[p]
-         /\ objects[p] # sc[s].baseline[p]
+       declined(p) == RepairDeclined(s, p)
        \* Tranche 6: an adopted entry is re-verified HERE, under the
        \* lease — the object must still hold the bytes the adopt found.
        \* If it does not, another writer's GC took it between the adopt
@@ -1605,8 +1850,14 @@ CASInstall(s) ==
          ELSE IF p \in sc[s].scanD THEN 0
          ELSE IF MergeCapable THEN manifest[p]  \* start-from-theirs
          ELSE sc[s].scanGen[p]]                 \* whole-rewrite walk view
+       \* Under the liveness abstraction the seq saturates (see the
+       \* constant): with nothing to merge the token is never contended.
+       \* Tranche 7: a merge equal to theirs installs NOTHING — no CAS, so
+       \* no seq, no stamp, and the budget does not bind.
+       nothing == EmptyInstall /\ inst = manifest
+       seq2 == IF InfiniteBarriers \/ nothing THEN manSeq ELSE manSeq + 1
        foreignQ ==
-         IF MergeCapable /\ InboxEnabled
+         IF MergeCapable /\ InboxEnabled /\ ~WriterQueue
          THEN {<<p, manifest[p]>> : p \in
                 {q \in Paths :
                    /\ q \notin sc[s].parked \cup (sc[s].scanU \cap sc[s].upDone)
@@ -1627,22 +1878,46 @@ CASInstall(s) ==
                 /\ pr[2] \notin sc[s].known
        cite == \E pr \in hitlAcked : inst[pr[1]] = pr[2]
      IN
+       /\ manSeq < MaxSeq \/ InfiniteBarriers \/ nothing
        /\ manifest' = inst
        /\ manSeq' = seq2
-       /\ manSrc' = InstallSource(s)
+       /\ manSrc' = IF nothing THEN manSrc ELSE InstallSource(s)
        /\ inbox' = inbox2
        /\ window' = 0
        \* A withheld adoption leaves the path dirty (upDone loses it, so
        \* Finish does not advance its baseline) and a record behind.
        /\ sc' = [sc EXCEPT ![s].pc = "cased",
                            ![s].upDone = @ \ gone,
+                           \* A delete the merge outranked (foreign(p) is
+                           \* tested before scanD in `inst`): the install
+                           \* still cites the path, so this boundary does
+                           \* not carry the agent's delete.  The syncer's
+                           \* `BarrierReport.outranked`; the 2026-09-14 box run
+                           \* found the ok ack over it (Inv_AckImpliesCited,
+                           \* depth 20).
+                           ![s].citeDropped = IF AckHonest
+                                              THEN {p \in sc[s].scanD : inst[p] # 0}
+                                              ELSE @,
                            ![s].instSnap = inst, ![s].instSeq = seq2,
-                           ![s].instSrc = IF BarrierLease THEN InstallSource(s) ELSE @,
+                           ![s].instSrc = IF ~BarrierLease THEN @
+                                          ELSE IF nothing THEN manSrc
+                                          ELSE InstallSource(s),
+                           \* Tranche 7: the other writers' changes go to
+                           \* THIS writer's queue, deletions included, in
+                           \* the step that moves the merge base past them
+                           \* (the code journals them with the CAS and
+                           \* queues them at step 7; a restart between
+                           \* re-queues from the journal).
+                           ![s].fq = IF WriterQueue
+                                     THEN QueueUpsert(@, MergeForeign(s) \cup MergeGone(s))
+                                     ELSE @,
+                           ![s].noInst = nothing,
                            ![s].repairMoved = IF BarrierLease
                                               THEN {p \in Paths : declined(p)}
                                               ELSE {}]
        /\ conflicts' = conflicts \cup {<<p, objects[p]>> : p \in gone}
        /\ gh' = [gh EXCEPT
+            !.emptyInstalls = IF nothing THEN 1 ELSE @,
             !.adoptWithheld = IF gone \cap sc[s].adopted # {} THEN 1 ELSE @,
             !.uploadWithheld = IF gone \ sc[s].adopted # {} THEN 1 ELSE @,
             \* Finding 13's second route: a peer's PUT If-Match the same etag
@@ -1673,7 +1948,9 @@ Finish(s) ==
        \* A barrier that BEGAN after the consume has now completed: this
        \* is the only thing that entitles an ok ack (D2's uniform rule).
        ![s].honored = IF SentinelEnabled /\ PendLive(s) THEN TRUE ELSE @,
-       ![s].installed = TRUE,
+       \* Tranche 7: a commit that installed nothing marks no boundary of
+       \* its own (`note_boundary` is skipped), so its ack names no clock.
+       ![s].installed = ~sc[s].noInst, ![s].noInst = FALSE,
        ![s].baseline = [p \in Paths |->
          IF p \in sc[s].scanU \cap sc[s].upDone THEN sc[s].scanGen[p]
          ELSE IF p \in sc[s].scanD /\ sc[s].instSnap[p] = 0 THEN 0
@@ -2289,11 +2566,17 @@ TakeSentinel(s) ==
    installed.                                                           *)
 FastPathClean(s) ==
   /\ USet(s) = {} /\ DSet(s) = {}
+  /\ DeclaredConfirmsAbsence => {p \in Dirty(s) : sc[s].local[p] = 0} = {}
   /\ (~FastPathGuards \/ \A p \in Paths : sc[s].baseline[p] = sc[s].instBase[p])
   /\ (~FastPathGuards \/ manSeq = sc[s].expSeq)
 
 FastPath(s) ==
-  /\ SentinelEnabled /\ ~GatedCitation
+  \* Tranche 7: the shipped skip-on-no-diff runs on EVERY barrier, not only
+  \* a sentinel honor — and it also requires that the consume took nothing
+  \* from the shared inbox (`consumed.is_empty()`), stale entries included.
+  /\ SentinelEnabled \/ (BarrierLease /\ EmptyInstall)
+  /\ EmptyInstall => sc[s].consumed = {}
+  /\ ~GatedCitation
   /\ Running(s) /\ sc[s].pc = "consumed"
   \* A no-diff pass IS a barrier tick and charges the barrier budget.
   \* Not bookkeeping: without it Consume -> FastPath -> Consume is a
@@ -2303,13 +2586,43 @@ FastPath(s) ==
   /\ gh.barriers < MaxBarriers \/ InfiniteBarriers
   /\ FastPathClean(s)
   /\ sc' = [sc EXCEPT ![s].pc = "idle",
-       ![s].honored = IF PendLive(s) THEN TRUE ELSE @,
+       ![s].honored = IF SentinelEnabled /\ PendLive(s) THEN TRUE ELSE @,
        \* No boundary was installed, so this honor stamps nothing.
        ![s].installed = FALSE,
+       ![s].prevScan = IF DeclaredConfirmsAbsence /\ TwoScanDelete
+                       THEN {q \in Paths : sc[s].local[q] # 0} ELSE @,
        ![s].lastDirty = IF SyncEnabled THEN {} ELSE @]
   /\ gh' = [gh EXCEPT !.barriers = IF InfiniteBarriers THEN @ ELSE @ + 1,
                       !.fastPaths = IF InfiniteBarriers THEN @ ELSE @ + 1,
                       !.fastHonor = @ \/ PendLive(s)]
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+                 window, hitlAcked, conflicts>>
+
+(* Tranche 7: the PULL-ONLY boundary.  The barrier found nothing of its
+   own to publish and the manifest moved (else the fast path took it), so
+   the merge can only add nothing: queue the other writers' changes and
+   take theirs as the merge base.  No claim, no window, no CAS — the code
+   returns before its commit section, which is what took 65 of 191 claims
+   out of the writers drill's cell queue.  A sentinel it honors is
+   answered against theirs: the ack names `theirs.seq`.                  *)
+PullOnly(s) ==
+  /\ Running(s) /\ PullOnlyReady(s)
+  /\ sc' = [sc EXCEPT ![s].pc = "idle",
+       ![s].fq = QueueUpsert(@, MergeForeign(s) \cup MergeGone(s)),
+       ![s].instBase = manifest,
+       ![s].expSeq = manSeq,
+       ![s].instSnap = manifest, ![s].instSeq = manSeq, ![s].instSrc = manSrc,
+       ![s].repairMoved = {p \in Paths : RepairDeclined(s, p)},
+       ![s].citeDropped = IF AckHonest THEN {} ELSE @,
+       ![s].honored = IF SentinelEnabled /\ PendLive(s) THEN TRUE ELSE @,
+       ![s].installed = FALSE,
+       ![s].scanU = {}, ![s].scanD = {},
+       ![s].scanGen = [p \in Paths |-> 0],
+       ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {},
+       ![s].gcHeaded = {}, ![s].gcSeen = [p \in Paths |-> 0],
+       ![s].adopted = {},
+       ![s].declared = {}, ![s].consumed = {}]
+  /\ gh' = [gh EXCEPT !.pullOnlys = 1]
   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
@@ -2407,6 +2720,15 @@ BoundaryIncoherent(s) ==
     \* the two-writer sentinel world with HitlOverwritesTrackedOnly found
     \* this in 16 steps (README, tranche 6).
     /\ p \notin sc[s].repairMoved
+    \* Tranche 7, the third refinement: the acked document is AHEAD of the
+    \* tree at p by exactly a change another writer made that waits in THIS
+    \* writer's queue for its next consume.  A reader of that document gets
+    \* the newer bytes, not bytes this workspace superseded, so the stamp's
+    \* harm runs the other way (the 2026-09-13 box run's depth-19 trace).
+    \* Only the queued generation is excused: the doc ahead by anything the
+    \* queue does not hold still fires, and the QueueForeignChanges mutation
+    \* is the run that proves it.
+    /\ ~(WriterQueue /\ <<p, AckedDoc(s)[p]>> \in sc[s].fq)
 
 AckOk(s) ==
   /\ SentinelEnabled /\ Running(s) /\ sc[s].pc = "idle"
@@ -2521,13 +2843,13 @@ BaseNext ==
        AgentWrite(s, p) \/ AgentWriteSame(s, p) \/ AgentDelete(s, p) \/ Upload(s, p)
        \/ GCDelete(s, p) \/ GCHead(s, p)
   \/ \E s \in Syncers : Narrow(s)
-  \/ \E p \in Paths : HitlWrite(p) \/ HitlRemove(p)
+  \/ \E p \in Paths : HitlWrite(p) \/ HitlRemove(p) \/ TrackOrphan(p)
   \/ \E p, q \in Paths : HitlRename(p, q)
   \/ HitlRefused
   \/ \E s \in Syncers :
        Consume(s) \/ Scan(s) \/ UploadFenced(s) \/ GCDeleteFenced(s)
        \/ PreDeletesDone(s) \/ CASFenced(s) \/ CASMiss(s) \/ CASInstall(s)
-       \/ Finish(s) \/ Sync(s)
+       \/ Finish(s) \/ Sync(s) \/ PullOnly(s)
   \/ SentinelNext
 
 Next ==
@@ -2542,6 +2864,10 @@ ASSUME ~(BarrierLease /\ GatedCitation)
 \* `touched` is cleared where a barrier or a sync rewrites the baseline,
 \* not at a narrow's uncite or a declared removal — keep them apart.
 ASSUME MaxSameBytes > 0 => BarrierLease /\ MaxNarrows = 0 /\ MaxRemovals = 0
+\* Tranche 7: the queue and the empty install are the barrier lease's code.
+ASSUME WriterQueue => BarrierLease /\ MergeCapable /\ InboxEnabled
+ASSUME EmptyInstall => WriterQueue
+ASSUME ~QueueForeignChanges => WriterQueue
 
 (* ---- tranche 6: FAIRNESS, for the liveness runs only -------------------
    Weak fairness on each syncer's OWN barrier step — not on "some syncer
@@ -2554,7 +2880,8 @@ BarrierStep(s) ==
   /\ \/ Consume(s) \/ Scan(s) \/ Claim(s) \/ Enqueue(s) \/ SkipDeadHandoff(s)
      \/ \E p \in Paths : Upload(s, p) \/ GCDelete(s, p) \/ GCHead(s, p)
      \/ PreDeletesDone(s) \/ CASMiss(s) \/ CASInstall(s) \/ Finish(s)
-     \/ CASFenced(s) \/ GCDeleteFenced(s) \/ RenewDiscover(s)
+     \/ CASFenced(s) \/ GCDeleteFenced(s) \/ RenewDiscover(s) \/ PullOnly(s)
+     \/ FastPath(s)
   /\ VersionsFollow /\ UNCHANGED gatedVars
 
 FairSpec == Spec /\ \A s \in Syncers : WF_vars(BarrierStep(s))
@@ -2587,6 +2914,8 @@ TypeOK ==
                        /\ sc[s].consumed \subseteq (Paths \X Gens)
                        /\ sc[s].repairMoved \subseteq Paths
                        /\ sc[s].touched \subseteq Paths
+                       /\ sc[s].fq \subseteq (Paths \X Gens)
+                       /\ \A x, y \in sc[s].fq : x[1] = y[1] => x = y
 
 \* §4.2: A NARROW IS AN UNWATCH, NEVER AN ABSENCE.  No path a narrow
 \* dropped may lose its object — a workspace that stops holding a file
@@ -2732,6 +3061,36 @@ Inv_CommitExclusive ==
 \* dead there.  A restart releases, a failed commit releases, a fence
 \* yields; nothing else may leave a held cell behind a syncer that is not
 \* committing.
+\* FINDING 10, as a CONVERGENCE property a safety run can check: once
+\* nothing at all can move (every budget spent, every writer idle), each
+\* object at a cited key is the citation or is tracked by the inbox — no
+\* bytes are left that the manifest, a fresh checkout and the live trees
+\* disagree about.  A pod replaced between its upload and its commit
+\* violates it as shipped; `OrphanTrack` is the candidate fix.
+\* "Nothing can move" is the SYNCERS' progress, not `Next`: an agent can
+\* always delete a file, and a budget-bounded world ends with barriers, not
+\* with agents.
+SyncerProgress ==
+  \/ \E s \in Syncers :
+       \* A writer that has not started yet can still start: its first
+       \* run of this check called that quiescence and reported a world
+       \* whose only live writer had not checked out.
+       \/ StartLease(s)
+       \/ BarrierStep(s)
+       \/ PullOnly(s) \/ FastPath(s) \/ TakeSentinel(s)
+       \/ AckOk(s) \/ AckPartial(s) \/ RetirePending(s)
+  \/ \E p \in Paths : TrackOrphan(p)
+Inv_QuiescentConverged ==
+  ~ENABLED SyncerProgress =>
+    \A p \in Paths :
+      \/ objects[p] = manifest[p]
+      \/ objects[p] = 0
+      \* An object at a key the manifest does not cite is garbage no
+      \* checkout serves — a delete's CAS whose GC never ran (the crash
+      \* between them) — a leak, not the disagreement this is about.
+      \/ manifest[p] = 0
+      \/ \E pr \in inbox : pr = <<p, objects[p]>>
+
 Inv_CellHeldByHolder ==
   BarrierLease /\ CellHeld =>
     (Holding(cellHolder) /\ sc[cellHolder].epoch = cellEpoch)
@@ -2965,5 +3324,66 @@ ProbeAdoptWithheld     == gh.adoptWithheld = 0
 \* Finding 13's fix actually fired: a CAS found the object under one of
 \* its own LANDED uploads gone or moved and withheld the entry.
 ProbeUploadWithheld    == gh.uploadWithheld = 0
+\* Finding 10's candidate fix fires.
+ProbeOrphanTracked     == gh.orphanTracks = 0
+
+\* ---- tranche 7: model the implementation -------------------------------
+\* Each new arm is REQUIRED-REACHABLE in the world whose strict run leans
+\* on it: a pull-only boundary, a commit that installed nothing, a queued
+\* deletion that removed a clean copy, and one the key superseded.
+ProbePullOnly          == gh.pullOnlys = 0
+ProbeEmptyInstall      == gh.emptyInstalls = 0
+ProbeTombstoneApplied  == gh.tombRemoved = 0
+ProbeTombstoneSuperseded == gh.tombSuperseded = 0
+
+------------------------------------------------------------------------------
+(* GHOST-STATE REDUCTION (2026-09-15).  Two fingerprint reductions the cfgs
+   opt into; neither changes an action, and neither is read by one.
+
+   `StrictView` is the state as TLC should DISTINGUISH it in a run that
+   checks no probe.  Most of `gh` is non-vacuity bookkeeping: counters a
+   probe reads and nothing else does.  In a strict or must-fail run two
+   states that differ only there have identical futures and identical
+   invariant values, and TLC explored both — `LeanBarrierLeaseAdoptVerified`
+   was 641,858 states with them and is 320,184 without.  The view keeps
+   every `gh` field an ACTION reads (budgets, `nextGen`, `renamed`, ...)
+   and every field an INVARIANT reads (the sticky stamps, `citedPairs`,
+   `hitlRetired`, ...), and drops `sc`'s `pendReRun` and `stageCarried`,
+   which only feed probe counters.
+
+   That is sound only while it stays true, and a guard added next month
+   that reads a dropped counter would make it silently unsound — so it is
+   not a comment's claim: `view-census.py` (run first by `check.sh`) fails
+   the gate when any field outside `StrictGh` is read anywhere but a probe
+   definition or its own (or another dropped field's) update.  A probe cfg
+   never gets the view: the field it names must be distinguished.
+
+   `PathSym`: nothing in the module names a path, so the paths are
+   interchangeable wherever they START interchangeable (`FreePaths` is {}
+   or all of `Paths`).  Symmetry is unsound for liveness, so the FairSpec
+   cfgs never get it.                                                     *)
+StrictGh ==
+  [amputated |-> gh.amputated, resurrected |-> gh.resurrected,
+   stragglerInstalls |-> gh.stragglerInstalls, deposedPuts |-> gh.deposedPuts,
+   barriers |-> gh.barriers, crashes |-> gh.crashes, restarts |-> gh.restarts,
+   stallUsed |-> gh.stallUsed, nextGen |-> gh.nextGen, hitl |-> gh.hitl,
+   refusals |-> gh.refusals, syncs |-> gh.syncs,
+   syncDestroyed |-> gh.syncDestroyed, foreignLost |-> gh.foreignLost,
+   touches |-> gh.touches, ackEarly |-> gh.ackEarly,
+   ackIncoherent |-> gh.ackIncoherent, fencedOkAck |-> gh.fencedOkAck,
+   srcMismatch |-> gh.srcMismatch, narrows |-> gh.narrows,
+   narrowed |-> gh.narrowed, narrowRecited |-> gh.narrowRecited,
+   removals |-> gh.removals, renamed |-> gh.renamed,
+   renameRefused |-> gh.renameRefused, citedPairs |-> gh.citedPairs,
+   sameBytes |-> gh.sameBytes, staleOverride |-> gh.staleOverride,
+   hitlRetired |-> gh.hitlRetired]
+StrictSc ==
+  [s \in Syncers |-> [sc[s] EXCEPT !.pendReRun = FALSE, !.stageCarried = FALSE]]
+StrictView ==
+  <<cellEpoch, cellHolder, cellQueue, cellHandoff, cellReleased,
+    manSeq, manSrc, manifest, objects, inbox, removals, window,
+    StrictSc, versions, stage, stageBase, withheldDel, hitlAcked,
+    conflicts, StrictGh>>
+PathSym == Permutations(Paths)
 
 ==============================================================================

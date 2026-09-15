@@ -1,0 +1,7 @@
+2026-09-15T17:08:56Z
+               total        used        free      shared  buff/cache   available
+Mem:             123          88          33           0           1          33
+Swap:              0           0           0
+/dev/nvme0n1    3.5T   26G  3.4T   1% /data
+ 17:08:56 up 14:42,  0 users,  load average: 20.95, 17.95, 17.40
+[always] madvise never

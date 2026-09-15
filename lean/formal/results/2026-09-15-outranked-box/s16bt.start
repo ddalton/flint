@@ -1,0 +1,2 @@
+2026-09-15T03:00:49Z
+workers=16 thp=[always] madvise never jvm=-Dtlc2.tool.ModelChecker.BAQueue=true -XX:+UseTransparentHugePages -XX:+AlwaysPreTouch

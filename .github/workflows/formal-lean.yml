@@ -57,6 +57,15 @@ jobs:
         env:
           TLA_TOOLS_JAR: ${{ github.workspace }}/.tla2tools.jar
         run: bash check.sh
+      # The model against recorded syncer traces (lean/formal/trace/): every
+      # trace accepted, every mutation and control rejected. A model edit
+      # that makes the model unable to do what the code did fails here, even
+      # when every gate run above stays green.
+      - name: lean trace validation
+        working-directory: lean/formal/trace
+        env:
+          TLA_TOOLS_JAR: ${{ github.workspace }}/.tla2tools.jar
+        run: bash trace-check.sh
       - name: the gate must have RUN something
         working-directory: lean/formal
         # Anti-vacuity, the same guard store-tests carries: a check.sh

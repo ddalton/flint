@@ -1,0 +1,1 @@
+generated in 8 min: s8=129692010 s16=137152707 s16b=147618503 s16bt=156439508 -> workers=16 thp=always opts=-Dtlc2.tool.ModelChecker.BAQueue=true -XX:+UseTransparentHugePages -XX:+AlwaysPreTouch

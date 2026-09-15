@@ -18,7 +18,7 @@ use super::{now_unix, LeanConfig, LeanError, Syncer};
 
 const PREFIX: &str = "tenant/proj1";
 
-fn cfg_for(root: &std::path::Path) -> LeanConfig {
+pub(super) fn cfg_for(root: &std::path::Path) -> LeanConfig {
     let mut c = LeanConfig::new(PREFIX, root);
     instant_fence(&mut c);
     c
@@ -49,7 +49,7 @@ fn cfg_single(root: &std::path::Path) -> LeanConfig {
     c
 }
 
-async fn syncer(store: &Arc<MemoryStore>, root: &std::path::Path) -> Syncer {
+pub(super) async fn syncer(store: &Arc<MemoryStore>, root: &std::path::Path) -> Syncer {
     let cfg = cfg_for(root);
     let state = SyncerState::open(cfg.state_dir()).unwrap();
     Syncer {
@@ -73,19 +73,19 @@ async fn claim_until_held(sc: &mut Syncer, max_steps: u32) -> bool {
     false
 }
 
-fn write(root: &std::path::Path, rel: &str, content: &str) {
+pub(super) fn write(root: &std::path::Path, rel: &str, content: &str) {
     let p = root.join(rel);
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
     std::fs::write(p, content).unwrap();
 }
 
-fn read(root: &std::path::Path, rel: &str) -> Option<String> {
+pub(super) fn read(root: &std::path::Path, rel: &str) -> Option<String> {
     std::fs::read_to_string(root.join(rel)).ok()
 }
 
 /// Bump a file's mtime past the 1-second stat granularity so the scan
 /// sees the change without sleeping.
-fn backdate_baseline(sc: &Syncer, rel: &str) {
+pub(super) fn backdate_baseline(sc: &Syncer, rel: &str) {
     let mut b = sc.state.load_baseline().unwrap();
     if let Some(e) = b.entries.get_mut(rel) {
         e.mtime_unix -= 10;
@@ -95,7 +95,7 @@ fn backdate_baseline(sc: &Syncer, rel: &str) {
 
 /// Simulate the GATEWAY's HITL write: object PUT first (fresh read →
 /// If-Match current / If-None-Match for a create), then the inbox entry.
-async fn hitl_write(
+pub(super) async fn hitl_write(
     store: &Arc<MemoryStore>,
     cfg: &LeanConfig,
     path: &str,
@@ -889,7 +889,7 @@ async fn sync_scan_first_dirty_wins_clean_applies() {
 use super::control;
 use super::sentinel::{Due, Verb};
 
-fn touch_sentinel(root: &std::path::Path, name: &str, body: &str) {
+pub(super) fn touch_sentinel(root: &std::path::Path, name: &str, body: &str) {
     let dir = root.join(super::CONTROL_DIR);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(name), body).unwrap();
@@ -1216,7 +1216,7 @@ async fn preexisting_flint_disables_sentinels() {
 /// Zero the min-interval clock so a test can honor back-to-back without
 /// sleeping. (The interval itself is exercised by
 /// `min_interval_coalesces_into_one_barrier`.)
-fn clear_min_interval(sc: &Syncer) {
+pub(super) fn clear_min_interval(sc: &Syncer) {
     let mut b = sc.load_budget().unwrap();
     b.last_honor_unix = 0;
     let bytes = serde_json::to_vec(&b).unwrap();

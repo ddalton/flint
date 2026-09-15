@@ -1,0 +1,24 @@
+20260915T150800Z: p1-onepath SUPERSEDED before it started. The run named p1-onepath executes
+LeanBarrierLeaseSentinelImpl1.cfg (tranche 7: writer-local queue, empty install, the
+tombstone fix, every Sentinel invariant incl. the refined Inv_AckBoundaryCoherent) over
+the tranche-7 LeanSubtree.tla, installed under the old file names because the running
+runner3.sh cannot be edited. Originals: /data/payload/replaced-20260915T150800Z/. p2 (running) loaded
+its model at start and is unaffected.
+14c0b7a24a16fa1bb85177d51a5cd0d2a8f5b899f6493170e6f13e3e50f644f9  /data/payload/LeanSubtree.tla
+c5743747b4592feb95bc96aa20f245508f9b92f4e7914556faff4e8b7b8c55d8  /data/payload/LeanBarrierLeaseSentinelOutrankedPartial.cfg
+14338d3d3abbe368c34877008f42f3c84844608fffb35d9dfe244ff59bac2e49  /data/payload/replaced-20260915T150800Z/LeanBarrierLeaseSentinelOutrankedPartial.cfg
+a5c2825b40757fe726dad4a38dd692918fecd11fdcc02361ab9de7a69abdbecb  /data/payload/replaced-20260915T150800Z/LeanSubtree.tla
+java still running p2:
+32256 java -XX:+UseParallelGC -Xmx24g -XX:MaxDirectMemorySize=80g -Dtlc2.tool.ModelChecker.BAQueue=true -XX:+UseTransparentHugePages -XX:+AlwaysPreTouch -Dtlc2.tool.fp.FPSet.impl=tlc2.tool.fp.OffHeapD
+20260915T152340Z: p1-onepath SUPERSEDED before it started (second swap: model + trace-validation fidelity constants). The run named p1-onepath executes
+LeanBarrierLeaseSentinelImpl1.cfg (tranche 7: writer-local queue, empty install, the
+tombstone fix, every Sentinel invariant incl. the refined Inv_AckBoundaryCoherent) over
+the tranche-7 LeanSubtree.tla, installed under the old file names because the running
+runner3.sh cannot be edited. Originals: /data/payload/replaced-20260915T152340Z/. p2 (running) loaded
+its model at start and is unaffected.
+5dd9fdf0b74513b1179d71d1f921f504a377cea35e759eb10d45bed7d43f879d  /data/payload/LeanSubtree.tla
+7df86e192929f5ba7e0d004dd41c986a8814bb1783b0f3465778d6fe0af1fb41  /data/payload/LeanBarrierLeaseSentinelOutrankedPartial.cfg
+c5743747b4592feb95bc96aa20f245508f9b92f4e7914556faff4e8b7b8c55d8  /data/payload/replaced-20260915T152340Z/LeanBarrierLeaseSentinelOutrankedPartial.cfg
+14c0b7a24a16fa1bb85177d51a5cd0d2a8f5b899f6493170e6f13e3e50f644f9  /data/payload/replaced-20260915T152340Z/LeanSubtree.tla
+java still running p2:
+32256 java -XX:+UseParallelGC -Xmx24g -XX:MaxDirectMemorySize=80g -Dtlc2.tool.ModelChecker.BAQueue=true -XX:+UseTransparentHugePages -XX:+AlwaysPreTouch -Dtlc2.tool.fp.FPSet.impl=tlc2.tool.fp.OffHeapD

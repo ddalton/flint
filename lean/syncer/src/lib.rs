@@ -62,6 +62,7 @@ pub mod verbs;
 #[cfg(test)]
 mod tests;
 #[cfg(test)] mod tests_upload_gate;
+#[cfg(test)] mod tests_conformance;
 
 use std::path::PathBuf;
 use std::sync::Arc;
