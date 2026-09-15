@@ -120,7 +120,11 @@ else
     sleep 2
   done
 fi
-phase load_start
+# Every node ends its load at the same wall time: go's body is node 0's
+# clock at go, and a follower that polls for it every 2 s must not run later.
+go_ms=$(aws s3 cp --quiet "$S3/go" - 2>/dev/null | tr -dc 0-9)
+[ -n "$go_ms" ] || go_ms=$(now_ms)
+phase load_start "\"go_ms\":$go_ms"
 
 # ── load ────────────────────────────────────────────────────────────────
 for i in $(seq 0 $((WRITERS_PER_NODE - 1))); do start_agent "$i"; done
@@ -143,7 +147,7 @@ if [ "$KILLS" -gt 0 ]; then
   for k in $(seq 1 "$KILLS"); do kill_at+=( $(( $(date +%s) + LOAD_SECS * k / (KILLS + 1) )) ); done
 fi
 k=0
-end=$(( $(date +%s) + LOAD_SECS ))
+end=$(( go_ms / 1000 + LOAD_SECS ))
 while [ "$(date +%s)" -lt "$end" ]; do
   if [ "$k" -lt "$KILLS" ] && [ "$(date +%s)" -ge "${kill_at[$k]}" ]; then
     i=$(( k % WRITERS_PER_NODE )); w="$RUN/w$i"
@@ -184,6 +188,19 @@ for f in "$RUN"/w*/agent.pid "$RUN"/ui.pid; do
 done
 [ -f "$RUN/gateway.pid" ] && kill "$(cat "$RUN/gateway.pid")" 2>/dev/null
 phase load_end
+# The idle starts only once EVERY node's actors have stopped: an agent's final
+# publish on one node must reach the writers of every other before they drain
+# (storm S1, 2026-09-15: node 0 drained while two other nodes still published,
+# and its trees missed 16 paths).
+touch_s3 "$S3/quiet-$NODE"
+deadline=$(( $(date +%s) + 300 ))
+for n in $(seq 0 $((NODES - 1))); do
+  until s3_exists "$S3/quiet-$n"; do
+    [ "$(date +%s)" -lt "$deadline" ] || { log "node $n never went quiet"; phase unquiet "\"node\":$n"; break; }
+    sleep 2
+  done
+done
+phase all_quiet
 sleep "$IDLE_SECS"
 phase idle_end
 for i in $(seq 0 $((WRITERS_PER_NODE - 1))); do kill -TERM "$(cat "$RUN/w$i/sync.pid")" 2>/dev/null; done
