@@ -1,0 +1,503 @@
+{
+ "leg": "R3-S5-churn-kills",
+ "oracles": {
+  "O1": {
+   "pass": true,
+   "details": {
+    "reasons": [],
+    "checkout_code": 0,
+    "stderr_tail": "flint-sync: checkout \u2014 32 materialized, 0 present, live-tree=false\nflint-sync: phase manifest=0.053s fetch=0.040s commit=0.008s bytes=4696 ranged=0\n",
+    "citations": 32,
+    "heads": 32,
+    "missing_heads": [],
+    "mismatched": [],
+    "extra_heads": [],
+    "checkout_missing_cited": [],
+    "checkout_not_cited": [],
+    "manifest_seq": 248,
+    "problems": []
+   }
+  },
+  "O2": {
+   "pass": false,
+   "details": {
+    "reasons": [
+     "3 tree(s) differ from the checkout"
+    ],
+    "checkout_files": 32,
+    "trees": {
+     "n0w0": 32,
+     "n0w1": 33,
+     "n1w0": 33,
+     "n1w1": 32,
+     "n2w0": 32,
+     "n2w1": 32
+    },
+    "diffs": {
+     "n0w1": {
+      "extra": [
+       "churn/p15.txt"
+      ],
+      "missing": [],
+      "differing": [
+       {
+        "path": "churn/p21.txt",
+        "tree": "5ff4080dc5320bdea0d039348e4703fe0e7c4ca63b97ff3668edd7bd54d39a2c",
+        "checkout": "4194ad50d18fc42d8ec01b4048651146fb91d029e51434a9668a92d3ed68e559"
+       }
+      ]
+     },
+     "n1w0": {
+      "extra": [
+       "churn/p15.txt"
+      ],
+      "missing": [],
+      "differing": []
+     },
+     "n2w1": {
+      "extra": [],
+      "missing": [],
+      "differing": [
+       {
+        "path": "churn/p30.txt",
+        "tree": "52193839c7609046a9e118fc39f73bcfcb5ba6770943ed57bfaba958e0aac7e1",
+        "checkout": "36f5434efa7a8ef23af69489630c4e8e7b16505907d5e12fc19cdaa7a667a35c"
+       }
+      ]
+     }
+    },
+    "problems": []
+   }
+  },
+  "O3": {
+   "pass": false,
+   "details": {
+    "reasons": [
+     "1 acked write(s) LOST"
+    ],
+    "final_source": "checkout",
+    "ops": 717,
+    "parts": 791,
+    "acked_parts": 474,
+    "acked_writes": 345,
+    "acked_writes_by_agent": {
+     "n0w0": 48,
+     "n0w1": 53,
+     "n1w0": 45,
+     "n1w1": 50,
+     "n2w0": 44,
+     "n2w1": 45,
+     "ui": 60
+    },
+    "accounted": {
+     "final": 15,
+     "superseded": 195,
+     "replaced": 19,
+     "preserved": 115
+    },
+    "unacked_parts": {
+     "dropped": 100,
+     "no-ack": 170,
+     "no-ack-line": 10,
+     "refused": 34,
+     "error": 3
+    },
+    "acks_by_status": {
+     "ok": 84,
+     "partial": 74,
+     "no-ack": 30,
+     "refused": 34,
+     "error": 3
+    },
+    "preserved_copies": 988,
+    "preserved_unparsed_keys": 0,
+    "multiply_covered": [],
+    "losses_total": 1,
+    "losses": [
+     {
+      "agent": "ui",
+      "n": 37,
+      "path": "churn/p00.txt",
+      "sha256": "aa6b882b91332fbc146f611708757a3195fd04c4e39c71b0c861523e8a1ccbd8",
+      "op": {
+       "k": "op",
+       "agent": "ui",
+       "n": 37,
+       "t_ms": 1789514673145,
+       "op": "write",
+       "path": "churn/p00.txt",
+       "sha256": "aa6b882b91332fbc146f611708757a3195fd04c4e39c71b0c861523e8a1ccbd8",
+       "base": "absent",
+       "base_etag": "",
+       "nonce": "ui-37"
+      },
+      "ack": {
+       "k": "ack",
+       "agent": "ui",
+       "t_ms": 1789514673260,
+       "nonce": "ui-37",
+       "status": "ok",
+       "etag": "\"d4e8444f6a5862a0044bd96b48470b94\"",
+       "http": 200
+      },
+      "final": "absent",
+      "unacked_op_with_base_h": true,
+      "later_ops": [
+       {
+        "agent": "n0w0",
+        "n": 93,
+        "part": "delete",
+        "op": "delete",
+        "path": "churn/p00.txt",
+        "to": null,
+        "base": "dfe3883fd92587b685c7ba7873b378454eacfe6c18631d7bec97696b7350c179",
+        "sha256": null,
+        "t_ms": 1789514839960,
+        "nonce": "n0w0-19",
+        "acked": true,
+        "seq": 214,
+        "why_unacked": null,
+        "base_is_h": false
+       },
+       {
+        "agent": "n0w1",
+        "n": 52,
+        "part": "write",
+        "op": "write",
+        "path": "churn/p00.txt",
+        "to": null,
+        "base": "absent",
+        "sha256": "80978845588353b79bec6e96890841d8094b3da1b081e6b8a8d41c249e06ec8b",
+        "t_ms": 1789514694808,
+        "nonce": "n0w1-11",
+        "acked": true,
+        "seq": 132,
+        "why_unacked": null,
+        "base_is_h": false
+       },
+       {
+        "agent": "n0w1",
+        "n": 70,
+        "part": "write",
+        "op": "write",
+        "path": "churn/p00.txt",
+        "to": null,
+        "base": "absent",
+        "sha256": "375a722dd907a8f8026b3930794e451a03cd6c0230b83692ebca2fb72f8b078e",
+        "t_ms": 1789514737889,
+        "nonce": "n0w1-14",
+        "acked": true,
+        "seq": 170,
+        "why_unacked": null,
+        "base_is_h": false
+       },
+       {
+        "agent": "n0w1",
+        "n": 75,
+        "part": "delete",
+        "op": "delete",
+        "path": "churn/p00.txt",
+        "to": null,
+        "base": "375a722dd907a8f8026b3930794e451a03cd6c0230b83692ebca2fb72f8b078e",
+        "sha256": null,
+        "t_ms": 1789514749966,
+        "nonce": "n0w1-15",
+        "acked": true,
+        "seq": 182,
+        "why_unacked": null,
+        "base_is_h": false
+       },
+       {
+        "agent": "n0w1",
+        "n": 94,
+        "part": "write",
+        "op": "write",
+        "path": "churn/p00.txt",
+        "to": null,
+        "base": "absent",
+        "sha256": "fca7fa3be21e0af7454c6db78acd9dec3985f4545c29090fe01acfea7f833875",
+        "t_ms": 1789514810237,
+        "nonce": "n0w1-19",
+        "acked": false,
+        "seq": null,
+        "why_unacked": "no-ack",
+        "base_is_h": false
+       },
+       {
+        "agent": "n1w0",
+        "n": 69,
+        "part": "delete",
+        "op": "delete",
+        "path": "churn/p00.txt",
+        "to": null,
+        "base": "9ad02c123c4a5924f0af85c5b3197c270b34b12c122c2cb01860e34a4d7b3832",
+        "sha256": null,
+        "t_ms": 1789514721704,
+        "nonce": "n1w0-14",
+        "acked": true,
+        "seq": 152,
+        "why_unacked": null,
+        "base_is_h": false
+       },
+       {
+        "agent": "n1w0",
+        "n": 93,
+        "part": "write",
+        "op": "write",
+        "path": "churn/p00.txt",
+        "to": null,
+        "base": "absent",
+        "sha256": "7bb222721db4a7ffa29aca1694ce43addb453f26627236bd8a19f801021a1365",
+        "t_ms": 1789514814035,
+        "nonce": "n1w0-19",
+        "acked": false,
+        "seq": null,
+        "why_unacked": "no-ack",
+        "base_is_h": false
+       },
+       {
+        "agent": "n2w1",
+        "n": 90,
+        "part": "write",
+        "op": "write",
+        "path": "churn/p00.txt",
+        "to": null,
+        "base": "absent",
+        "sha256": "268ae6e7f267428f1ec52061aadec3924be8e25f96e144e23160ad531328798a",
+        "t_ms": 1789514792930,
+        "nonce": "n2w1-18",
+        "acked": false,
+        "seq": null,
+        "why_unacked": "no-ack",
+        "base_is_h": false
+       },
+       {
+        "agent": "n2w1",
+        "n": 93,
+        "part": "delete",
+        "op": "delete",
+        "path": "churn/p00.txt",
+        "to": null,
+        "base": "268ae6e7f267428f1ec52061aadec3924be8e25f96e144e23160ad531328798a",
+        "sha256": null,
+        "t_ms": 1789514812561,
+        "nonce": "n2w1-19",
+        "acked": true,
+        "seq": 204,
+        "why_unacked": null,
+        "base_is_h": false
+       },
+       {
+        "agent": "ui",
+        "n": 44,
+        "part": "write",
+        "op": "write",
+        "path": "churn/p00.txt",
+        "to": null,
+        "base": "aa6b882b91332fbc146f611708757a3195fd04c4e39c71b0c861523e8a1ccbd8",
+        "sha256": "930c2df238c5c50d0a147301fc57a655efaef51ebf979f3fa2ea7a825cb15ddc",
+        "t_ms": 1789514691832,
+        "nonce": "ui-44",
+        "acked": false,
+        "seq": null,
+        "why_unacked": "error",
+        "base_is_h": true
+       },
+       {
+        "agent": "ui",
+        "n": 77,
+        "part": "write",
+        "op": "write",
+        "path": "churn/p00.txt",
+        "to": null,
+        "base": "absent",
+        "sha256": "6965e09dd12ef7b8e9f2ba21e294249810acbe5215193e43dadccb0c0c6888f5",
+        "t_ms": 1789514798567,
+        "nonce": "ui-77",
+        "acked": true,
+        "seq": null,
+        "why_unacked": null,
+        "base_is_h": false
+       },
+       {
+        "agent": "ui",
+        "n": 79,
+        "part": "write",
+        "op": "write",
+        "path": "churn/p00.txt",
+        "to": null,
+        "base": "6965e09dd12ef7b8e9f2ba21e294249810acbe5215193e43dadccb0c0c6888f5",
+        "sha256": "dfe3883fd92587b685c7ba7873b378454eacfe6c18631d7bec97696b7350c179",
+        "t_ms": 1789514803076,
+        "nonce": "ui-79",
+        "acked": true,
+        "seq": null,
+        "why_unacked": null,
+        "base_is_h": false
+       }
+      ],
+      "timeline": "timeline.py /mnt/nvme/storm/R3-S5-churn-kills/collect --path churn/p00.txt --journals --context"
+     }
+    ],
+    "refused_landed_total": 0,
+    "refused_landed": [],
+    "malformed": [],
+    "problems": []
+   }
+  },
+  "O4": {
+   "pass": true,
+   "details": {
+    "reasons": [],
+    "preserved_objects": 988,
+    "records_by_kind": {
+     "consume-dirty": 143,
+     "repair-withheld: the object this barrier re-cited was replaced or collected before its commit; nothing cited, and the next consume installs the manifest's version": 56,
+     "upload-412-preserved": 845,
+     "upload-withheld: the object this barrier PUT was replaced or collected before its commit (a peer's GC recognizes the etag of identical bytes); nothing cited, the path stays dirty and publishes next barrier": 756,
+     "consume-foreign-delete-vs-dirty: another writer deleted this path; the local version has unpublished changes, so it stays and publishes": 12,
+     "gc-skip": 74,
+     "upload-412-parked": 6,
+     "consume-object-missing": 8,
+     "adopt-withheld: the object this barrier found already at its key was replaced or collected before its commit; nothing cited, the path stays dirty and publishes next barrier": 1
+    },
+    "keys_named": 988,
+    "keys_recorded_by_two_writers": 0,
+    "duplicate_object_keys": [],
+    "no_record": [],
+    "missing_object": [],
+    "preserved_key_on_other_kinds": [],
+    "problems": []
+   }
+  },
+  "O5": {
+   "pass": true,
+   "details": {
+    "reasons": [],
+    "faults_declared": true,
+    "claims_by_trace": {
+     "n0w0": {
+      "waiting": 66,
+      "claimed:released": 60
+     },
+     "n0w1": {
+      "claimed:fresh": 1,
+      "waiting": 64,
+      "claimed:released": 57
+     },
+     "n1w0": {
+      "claimed:released": 56,
+      "waiting": 63,
+      "claimed:skipped-handoff": 1
+     },
+     "n1w1": {
+      "waiting": 61,
+      "claimed:released": 52,
+      "claimed:skipped-handoff": 1
+     },
+     "n2w0": {
+      "waiting": 62,
+      "claimed:released": 54,
+      "claimed:skipped-handoff": 1
+     },
+     "n2w1": {
+      "waiting": 66,
+      "claimed:released": 59,
+      "claimed:deposed": 1
+     }
+    },
+    "waiting": 382,
+    "deadline": 0,
+    "deposed": 1,
+    "orphaned_own": 0,
+    "deadlines": [],
+    "deposals": [
+     {
+      "trace": "n2w1",
+      "ts_ms": 1789514831407,
+      "holder": "lean-3c36860f-5218-4544-86b9-417b97782dfb",
+      "epoch": 237,
+      "prior": {
+       "epoch": 236,
+       "handoff": null,
+       "holder": "lean-638f69d7-c5d2-4d25-b98e-83f4edf14000",
+       "released": false,
+       "waiters": [
+        "lean-9b1fe33a-3984-4696-af68-0f8748605e90",
+        "lean-c9e18d3c-be34-494c-b18c-149b5cfd7bcd",
+        "lean-3f3464da-ceb3-47a8-99f3-36a7ab867983",
+        "lean-7746c2e0-9f2b-44dd-bf04-bda920231902",
+        "lean-a97765e7-56ab-40a6-bb33-92ee9ffa4d66",
+        "lean-032a4530-5018-420d-8885-57d6eca0ee76",
+        "lean-3c36860f-5218-4544-86b9-417b97782dfb"
+       ]
+      }
+     }
+    ],
+    "orphaned_own_claims": [],
+    "problems": []
+   }
+  },
+  "O6": {
+   "pass": null,
+   "skipped": "not selected"
+  }
+ },
+ "pass": false,
+ "facts": {
+  "missing_nodes": [],
+  "faults": [
+   {
+    "ev": "fault",
+    "node": 0,
+    "ts_ms": 1789514663856,
+    "fault": "kill-9-syncer",
+    "writer": "n0w0"
+   },
+   {
+    "ev": "fault",
+    "node": 0,
+    "ts_ms": 1789514764134,
+    "fault": "pod-replacement",
+    "writer": "n0w1"
+   },
+   {
+    "ev": "fault",
+    "node": 1,
+    "ts_ms": 1789514665708,
+    "fault": "pod-replacement",
+    "writer": "n1w0"
+   },
+   {
+    "ev": "fault",
+    "node": 1,
+    "ts_ms": 1789514766979,
+    "fault": "kill-9-syncer",
+    "writer": "n1w1"
+   },
+   {
+    "ev": "fault",
+    "node": 2,
+    "ts_ms": 1789514665897,
+    "fault": "kill-9-syncer",
+    "writer": "n2w0"
+   },
+   {
+    "ev": "fault",
+    "node": 2,
+    "ts_ms": 1789514766167,
+    "fault": "pod-replacement",
+    "writer": "n2w1"
+   }
+  ],
+  "undrained": [],
+  "unquiet": []
+ },
+ "counts": {
+  "agents": 7,
+  "citations": 32,
+  "objects": 1270,
+  "preserved": 988,
+  "faults": 6
+ }
+}

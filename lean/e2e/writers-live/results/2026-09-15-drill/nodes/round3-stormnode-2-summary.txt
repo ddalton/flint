@@ -1,0 +1,6 @@
+R3-S0-smoke rc=0 MODE=hot UI=1 KILLS=1 LOAD_SECS=60 IDLE_SECS=15
+R3-S1-hot-ui rc=0 MODE=hot UI=1 KILLS=0
+R3-S2-churn-ui rc=0 MODE=churn UI=1 KILLS=0
+R3-S3-vocab rc=0 MODE=vocab UI=0 KILLS=0
+R3-S4-hot-kills rc=0 MODE=hot UI=1 KILLS=2
+R3-S5-churn-kills rc=0 MODE=churn UI=1 KILLS=2

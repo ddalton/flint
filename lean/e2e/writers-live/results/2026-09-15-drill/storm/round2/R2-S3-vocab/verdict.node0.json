@@ -1,0 +1,190 @@
+{
+ "leg": "R2-S3-vocab",
+ "oracles": {
+  "O1": {
+   "pass": true,
+   "details": {
+    "reasons": [],
+    "checkout_code": 0,
+    "stderr_tail": "flint-sync: checkout \u2014 15 materialized, 0 present, live-tree=false\nflint-sync: phase manifest=0.059s fetch=0.033s commit=0.008s bytes=1427 ranged=0\n",
+    "citations": 15,
+    "heads": 15,
+    "missing_heads": [],
+    "mismatched": [],
+    "extra_heads": [],
+    "checkout_missing_cited": [],
+    "checkout_not_cited": [],
+    "manifest_seq": 293,
+    "problems": []
+   }
+  },
+  "O2": {
+   "pass": false,
+   "details": {
+    "reasons": [
+     "3 tree(s) differ from the checkout"
+    ],
+    "checkout_files": 15,
+    "trees": {
+     "n0w0": 15,
+     "n0w1": 16,
+     "n1w0": 15,
+     "n1w1": 15,
+     "n2w0": 16,
+     "n2w1": 16
+    },
+    "diffs": {
+     "n0w1": {
+      "extra": [
+       "vocab/p24.txt"
+      ],
+      "missing": [],
+      "differing": []
+     },
+     "n2w0": {
+      "extra": [
+       "vocab/p24.txt"
+      ],
+      "missing": [],
+      "differing": []
+     },
+     "n2w1": {
+      "extra": [
+       "vocab/p24.txt"
+      ],
+      "missing": [],
+      "differing": []
+     }
+    },
+    "problems": []
+   }
+  },
+  "O3": {
+   "pass": true,
+   "details": {
+    "reasons": [],
+    "final_source": "checkout",
+    "ops": 755,
+    "parts": 755,
+    "acked_parts": 543,
+    "acked_writes": 417,
+    "acked_writes_by_agent": {
+     "n0w0": 69,
+     "n0w1": 75,
+     "n1w0": 62,
+     "n1w1": 77,
+     "n2w0": 76,
+     "n2w1": 58
+    },
+    "accounted": {
+     "final": 32,
+     "superseded": 312,
+     "replaced": 7,
+     "preserved": 66
+    },
+    "unacked_parts": {
+     "dropped": 202,
+     "no-ack": 10
+    },
+    "acks_by_status": {
+     "ok": 21,
+     "partial": 134,
+     "no-ack": 2
+    },
+    "preserved_copies": 1160,
+    "preserved_unparsed_keys": 0,
+    "multiply_covered": [],
+    "losses_total": 0,
+    "losses": [],
+    "refused_landed_total": 0,
+    "refused_landed": [],
+    "malformed": [],
+    "problems": []
+   }
+  },
+  "O4": {
+   "pass": true,
+   "details": {
+    "reasons": [],
+    "preserved_objects": 1160,
+    "records_by_kind": {
+     "upload-412-preserved": 1006,
+     "consume-object-missing": 8,
+     "consume-dirty": 154,
+     "upload-withheld: the object this barrier PUT was replaced or collected before its commit (a peer's GC recognizes the etag of identical bytes); nothing cited, the path stays dirty and publishes next barrier": 962,
+     "gc-skip": 137,
+     "consume-foreign-delete-vs-dirty: another writer deleted this path; the local version has unpublished changes, so it stays and publishes": 15,
+     "repair-withheld: the object this barrier re-cited was replaced or collected before its commit; nothing cited, and the next consume installs the manifest's version": 16,
+     "adopt-withheld: the object this barrier found already at its key was replaced or collected before its commit; nothing cited, the path stays dirty and publishes next barrier": 8,
+     "upload-412-parked": 7
+    },
+    "keys_named": 1160,
+    "keys_recorded_by_two_writers": 0,
+    "duplicate_object_keys": [],
+    "no_record": [],
+    "missing_object": [],
+    "preserved_key_on_other_kinds": [],
+    "problems": []
+   }
+  },
+  "O5": {
+   "pass": true,
+   "details": {
+    "reasons": [],
+    "faults_declared": false,
+    "claims_by_trace": {
+     "n0w0": {
+      "waiting": 72,
+      "claimed:released": 78
+     },
+     "n0w1": {
+      "claimed:fresh": 1,
+      "waiting": 73,
+      "claimed:released": 73
+     },
+     "n1w0": {
+      "waiting": 75,
+      "claimed:released": 78
+     },
+     "n1w1": {
+      "waiting": 70,
+      "claimed:released": 72
+     },
+     "n2w0": {
+      "claimed:released": 77,
+      "waiting": 75
+     },
+     "n2w1": {
+      "waiting": 71,
+      "claimed:released": 74
+     }
+    },
+    "waiting": 436,
+    "deadline": 0,
+    "deposed": 0,
+    "orphaned_own": 0,
+    "deadlines": [],
+    "deposals": [],
+    "orphaned_own_claims": [],
+    "problems": []
+   }
+  },
+  "O6": {
+   "pass": null,
+   "skipped": "not selected"
+  }
+ },
+ "pass": false,
+ "facts": {
+  "missing_nodes": [],
+  "faults": [],
+  "undrained": []
+ },
+ "counts": {
+  "agents": 6,
+  "citations": 15,
+  "objects": 1471,
+  "preserved": 1160,
+  "faults": 0
+ }
+}

@@ -1,0 +1,165 @@
+{
+  "leg": "S0-smoke",
+  "oracles": {
+    "O1": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "checkout_code": 0,
+        "stderr_tail": "flint-sync: checkout \u2014 30 materialized, 0 present, live-tree=false\nflint-sync: phase manifest=0.038s fetch=0.038s commit=0.004s bytes=4713 ranged=0\n",
+        "citations": 30,
+        "heads": 30,
+        "missing_heads": [],
+        "mismatched": [],
+        "extra_heads": [],
+        "checkout_missing_cited": [],
+        "checkout_not_cited": [],
+        "manifest_seq": 72,
+        "problems": []
+      }
+    },
+    "O2": {
+      "pass": false,
+      "details": {
+        "reasons": [
+          "1 tree(s) differ from the checkout"
+        ],
+        "checkout_files": 30,
+        "trees": {
+          "n0w0": 30,
+          "n0w1": 30,
+          "n1w0": 30,
+          "n1w1": 30,
+          "n2w0": 30,
+          "n2w1": 30
+        },
+        "diffs": {
+          "n2w0": {
+            "extra": [],
+            "missing": [],
+            "differing": [
+              {
+                "path": "hot/p29.txt",
+                "tree": "612bfd46578db9ccabb3f0622f6958f5485a6d45241c7f366cea8bc749658505",
+                "checkout": "3150c4844fb07079b1d9aec237805583c105679a0e2d74a005bf58db663fed91"
+              }
+            ]
+          }
+        },
+        "problems": []
+      }
+    },
+    "O3": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "final_source": "checkout",
+        "ops": 228,
+        "parts": 228,
+        "acked_parts": 200,
+        "acked_writes": 200,
+        "acked_writes_by_agent": {
+          "n0w0": 31,
+          "n0w1": 32,
+          "n1w0": 34,
+          "n1w1": 30,
+          "n2w0": 30,
+          "n2w1": 32,
+          "ui": 11
+        },
+        "accounted": {
+          "final": 25,
+          "superseded": 104,
+          "replaced": 4,
+          "preserved": 67
+        },
+        "unacked_parts": {
+          "dropped": 21,
+          "refused": 7
+        },
+        "acks_by_status": {
+          "ok": 42,
+          "partial": 17,
+          "refused": 7
+        },
+        "preserved_copies": 152,
+        "preserved_unparsed_keys": 0,
+        "multiply_covered": [],
+        "losses_total": 0,
+        "losses": [],
+        "refused_landed_total": 0,
+        "refused_landed": [],
+        "malformed": [],
+        "problems": []
+      }
+    },
+    "O4": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "preserved_objects": 152,
+        "records_by_kind": {
+          "upload-412-preserved": 116,
+          "upload-withheld: the object this barrier PUT was replaced or collected before its commit (a peer's GC recognizes the etag of identical bytes); nothing cited, the path stays dirty and publishes next barrier": 47,
+          "consume-dirty": 36,
+          "upload-412-parked": 2,
+          "adopt-withheld: the object this barrier found already at its key was replaced or collected before its commit; nothing cited, the path stays dirty and publishes next barrier": 2
+        },
+        "keys_named": 152,
+        "keys_recorded_by_two_writers": 0,
+        "duplicate_object_keys": [],
+        "no_record": [],
+        "missing_object": [],
+        "preserved_key_on_other_kinds": [],
+        "problems": []
+      }
+    },
+    "O5": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "faults_declared": true,
+        "claims_by_trace": {
+          "n0w0": {
+            "waiting": 12,
+            "claimed:released": 16
+          },
+          "n0w1": {
+            "claimed:fresh": 1,
+            "waiting": 7,
+            "claimed:released": 9
+          },
+          "n1w0": {
+            "waiting": 12,
+            "claimed:released": 15
+          },
+          "n1w1": {
+            "waiting": 11,
+            "claimed:released": 13
+          },
+          "n2w0": {
+            "waiting": 13,
+            "claimed:released": 17
+          },
+          "n2w1": {
+            "waiting": 9,
+            "claimed:released": 14
+          }
+        },
+        "waiting": 64,
+        "deadline": 0,
+        "deposed": 0,
+        "orphaned_own": 0,
+        "deadlines": [],
+        "deposals": [],
+        "orphaned_own_claims": [],
+        "problems": []
+      }
+    },
+    "O6": {
+      "pass": null,
+      "skipped": "not selected"
+    }
+  },
+  "pass": false
+}

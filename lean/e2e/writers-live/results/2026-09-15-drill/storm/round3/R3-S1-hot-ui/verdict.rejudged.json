@@ -1,0 +1,153 @@
+{
+  "leg": "R3-S1-hot-ui",
+  "oracles": {
+    "O1": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "checkout_code": 0,
+        "stderr_tail": "flint-sync: checkout \u2014 30 materialized, 0 present, live-tree=false\nflint-sync: phase manifest=0.048s fetch=0.039s commit=0.010s bytes=5673 ranged=0\n",
+        "citations": 30,
+        "heads": 30,
+        "missing_heads": [],
+        "mismatched": [],
+        "extra_heads": [],
+        "checkout_missing_cited": [],
+        "checkout_not_cited": [],
+        "manifest_seq": 319,
+        "problems": []
+      }
+    },
+    "O2": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "checkout_files": 30,
+        "trees": {
+          "n0w0": 30,
+          "n0w1": 30,
+          "n1w0": 30,
+          "n1w1": 30,
+          "n2w0": 30,
+          "n2w1": 30
+        },
+        "diffs": {},
+        "problems": []
+      }
+    },
+    "O3": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "final_source": "checkout",
+        "ops": 966,
+        "parts": 966,
+        "acked_parts": 748,
+        "acked_writes": 748,
+        "acked_writes_by_agent": {
+          "n0w0": 115,
+          "n0w1": 107,
+          "n1w0": 116,
+          "n1w1": 115,
+          "n2w0": 129,
+          "n2w1": 110,
+          "ui": 56
+        },
+        "accounted": {
+          "final": 29,
+          "superseded": 409,
+          "replaced": 13,
+          "preserved": 297
+        },
+        "unacked_parts": {
+          "dropped": 198,
+          "refused": 18,
+          "error": 2
+        },
+        "acks_by_status": {
+          "ok": 153,
+          "partial": 87,
+          "refused": 18,
+          "error": 2
+        },
+        "preserved_copies": 1651,
+        "preserved_unparsed_keys": 0,
+        "multiply_covered": [],
+        "losses_total": 0,
+        "losses": [],
+        "refused_landed_total": 0,
+        "refused_landed": [],
+        "malformed": [],
+        "problems": []
+      }
+    },
+    "O4": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "preserved_objects": 1651,
+        "records_by_kind": {
+          "upload-412-preserved": 1440,
+          "consume-dirty": 211,
+          "upload-withheld: the object this barrier PUT was replaced or collected before its commit (a peer's GC recognizes the etag of identical bytes); nothing cited, the path stays dirty and publishes next barrier": 1099,
+          "repair-withheld: the object this barrier re-cited was replaced or collected before its commit; nothing cited, and the next consume installs the manifest's version": 27,
+          "upload-412-parked": 25
+        },
+        "keys_named": 1651,
+        "keys_recorded_by_two_writers": 0,
+        "duplicate_object_keys": [],
+        "no_record": [],
+        "missing_object": [],
+        "preserved_key_on_other_kinds": [],
+        "problems": []
+      }
+    },
+    "O5": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "faults_declared": false,
+        "claims_by_trace": {
+          "n0w0": {
+            "waiting": 53,
+            "claimed:released": 64
+          },
+          "n0w1": {
+            "claimed:fresh": 1,
+            "claimed:released": 58,
+            "waiting": 50
+          },
+          "n1w0": {
+            "waiting": 54,
+            "claimed:released": 67
+          },
+          "n1w1": {
+            "waiting": 54,
+            "claimed:released": 62
+          },
+          "n2w0": {
+            "waiting": 49,
+            "claimed:released": 66
+          },
+          "n2w1": {
+            "waiting": 58,
+            "claimed:released": 65
+          }
+        },
+        "waiting": 318,
+        "deadline": 0,
+        "deposed": 0,
+        "orphaned_own": 0,
+        "deadlines": [],
+        "deposals": [],
+        "orphaned_own_claims": [],
+        "problems": []
+      }
+    },
+    "O6": {
+      "pass": null,
+      "skipped": "not selected"
+    }
+  },
+  "pass": true
+}

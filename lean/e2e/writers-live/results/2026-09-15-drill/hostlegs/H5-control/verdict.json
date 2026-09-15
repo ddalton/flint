@@ -1,0 +1,66 @@
+{
+  "leg": "H5",
+  "arm": "control",
+  "dir": "/mnt/nvme/out/hostlegs/H5-control",
+  "probe": "flint-sync: probe-conditional PASS \u2014 PUT (h/h5-control-20260915T215433Z-probe/.flint/lean/probe-conditional) and DELETE (h/h5-control-20260915T215433Z-probe/.flint/lean/probe-conditional-delete)",
+  "facts": [
+    {
+      "name": "a-killed",
+      "ok": true,
+      "detail": "rc=137",
+      "fixture": true
+    },
+    {
+      "name": "b-daemon-alive",
+      "ok": true,
+      "detail": "ran 180s",
+      "fixture": false
+    },
+    {
+      "name": "b-daemon-drain",
+      "ok": true,
+      "detail": "rc=0",
+      "fixture": false
+    }
+  ],
+  "expected": "FAIL",
+  "race_events": {
+    "swept": null
+  },
+  "oracles": {
+    "O1_race": {
+      "pass": true,
+      "problems": [
+        "not judged: H5's race state is the kill"
+      ]
+    },
+    "O1_final": {
+      "pass": false,
+      "problems": [
+        "p1.txt: cited 215086f9934de331827e90229b9bca30 but HEAD b206623b9b24b1e494ba636058805751",
+        "p2.bin: cited d7e75ca00f29cb32272d457201a59048 but HEAD 5ed7afef1ce23de504a3a394a2477b3c"
+      ]
+    },
+    "O2": {
+      "pass": false,
+      "problems": [
+        "p1.txt differs between B and C",
+        "p2.bin differs between B and C"
+      ],
+      "diffs": {
+        "B": {
+          "extra_in_writer": [],
+          "missing_in_writer": [],
+          "differ": [
+            "p1.txt",
+            "p2.bin"
+          ]
+        }
+      }
+    }
+  },
+  "post_barrier_failures": [],
+  "status": "FAIL",
+  "reason": "(expected: finding-10 residual: B and a fresh checkout disagree on ['p1.txt', 'p2.bin']; citations whose key holds other bytes: ['p1.txt', 'p2.bin']) oracles: O1 p1.txt: cited 215086f9934de331827e90229b9bca30 but HEAD b206623b9b24b1e494ba636058805751; O1 p2.bin: cited d7e75ca00f29cb32272d457201a59048 but HEAD 5ed7afef1ce23de504a3a394a2477b3c; O2 p1.txt differs between B and C; O2 p2.bin differs between B and C",
+  "meets_expectation": true
+}

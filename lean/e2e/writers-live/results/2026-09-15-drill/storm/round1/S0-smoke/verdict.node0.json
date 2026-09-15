@@ -1,0 +1,577 @@
+{
+ "leg": "S0-smoke",
+ "oracles": {
+  "O1": {
+   "pass": true,
+   "details": {
+    "reasons": [],
+    "checkout_code": 0,
+    "stderr_tail": "flint-sync: checkout \u2014 30 materialized, 0 present, live-tree=false\nflint-sync: phase manifest=0.038s fetch=0.038s commit=0.004s bytes=4713 ranged=0\n",
+    "citations": 30,
+    "heads": 30,
+    "missing_heads": [],
+    "mismatched": [],
+    "extra_heads": [],
+    "checkout_missing_cited": [],
+    "checkout_not_cited": [],
+    "manifest_seq": 72,
+    "problems": []
+   }
+  },
+  "O2": {
+   "pass": false,
+   "details": {
+    "reasons": [
+     "1 tree(s) differ from the checkout"
+    ],
+    "checkout_files": 30,
+    "trees": {
+     "n0w0": 30,
+     "n0w1": 30,
+     "n1w0": 30,
+     "n1w1": 30,
+     "n2w0": 30,
+     "n2w1": 30
+    },
+    "diffs": {
+     "n2w0": {
+      "extra": [],
+      "missing": [],
+      "differing": [
+       {
+        "path": "hot/p29.txt",
+        "tree": "612bfd46578db9ccabb3f0622f6958f5485a6d45241c7f366cea8bc749658505",
+        "checkout": "3150c4844fb07079b1d9aec237805583c105679a0e2d74a005bf58db663fed91"
+       }
+      ]
+     }
+    },
+    "problems": []
+   }
+  },
+  "O3": {
+   "pass": false,
+   "details": {
+    "reasons": [
+     "4 acked write(s) LOST"
+    ],
+    "final_source": "checkout",
+    "ops": 228,
+    "parts": 228,
+    "acked_parts": 200,
+    "acked_writes": 200,
+    "acked_writes_by_agent": {
+     "n0w0": 31,
+     "n0w1": 32,
+     "n1w0": 34,
+     "n1w1": 30,
+     "n2w0": 30,
+     "n2w1": 32,
+     "ui": 11
+    },
+    "accounted": {
+     "final": 25,
+     "superseded": 104,
+     "replaced": 0,
+     "preserved": 67
+    },
+    "unacked_parts": {
+     "dropped": 21,
+     "refused": 7
+    },
+    "acks_by_status": {
+     "ok": 42,
+     "partial": 17,
+     "refused": 7
+    },
+    "preserved_copies": 152,
+    "preserved_unparsed_keys": 0,
+    "multiply_covered": [],
+    "losses_total": 4,
+    "losses": [
+     {
+      "agent": "n0w1",
+      "n": 19,
+      "path": "hot/p28.txt",
+      "sha256": "8d7a821976c8efc1db07370d8a440db7ec181793cb5bf1d0f74bf101788e59ef",
+      "op": {
+       "k": "op",
+       "agent": "n0w1",
+       "n": 19,
+       "t_ms": 1789509117496,
+       "op": "write",
+       "path": "hot/p28.txt",
+       "sha256": "8d7a821976c8efc1db07370d8a440db7ec181793cb5bf1d0f74bf101788e59ef",
+       "base": "2eb7fc6e5646d2ca800d108b0d95ce52ae319dcb0de124d79e779b7147b75ada",
+       "nonce": "n0w1-4"
+      },
+      "ack": {
+       "k": "ack",
+       "agent": "n0w1",
+       "t_ms": 1789509120785,
+       "nonce": "n0w1-4",
+       "status": "partial",
+       "seq": 35,
+       "dropped": [
+        "hot/p07.txt",
+        "hot/p18.txt"
+       ],
+       "covered": [
+        "n0w1-4"
+       ],
+       "report": {
+        "uploaded": 3,
+        "deleted": 0,
+        "parked": 2,
+        "consumed": 9,
+        "no_change": false
+       }
+      },
+      "final": "9ca40ef13e6e21bb48f5ca605078c60f2cfb458f92440be2ae11bb0821e77b8f",
+      "unacked_op_with_base_h": true,
+      "later_ops": [
+       {
+        "agent": "n1w1",
+        "n": 30,
+        "part": "write",
+        "op": "write",
+        "path": "hot/p28.txt",
+        "to": null,
+        "base": "8d7a821976c8efc1db07370d8a440db7ec181793cb5bf1d0f74bf101788e59ef",
+        "sha256": "4ef8a5b2f16482184bf2c3e59ef4de3ad88104055aac2a22008f7d5d5fc3a84e",
+        "t_ms": 1789509135924,
+        "nonce": "n1w1-6",
+        "acked": false,
+        "seq": 54,
+        "why_unacked": "dropped",
+        "base_is_h": true
+       },
+       {
+        "agent": "n2w0",
+        "n": 28,
+        "part": "write",
+        "op": "write",
+        "path": "hot/p28.txt",
+        "to": null,
+        "base": "8d7a821976c8efc1db07370d8a440db7ec181793cb5bf1d0f74bf101788e59ef",
+        "sha256": "9ca40ef13e6e21bb48f5ca605078c60f2cfb458f92440be2ae11bb0821e77b8f",
+        "t_ms": 1789509136834,
+        "nonce": "n2w0-6",
+        "acked": false,
+        "seq": 54,
+        "why_unacked": "dropped",
+        "base_is_h": true
+       }
+      ],
+      "timeline": "timeline.py /mnt/nvme/storm/S0-smoke/collect --path hot/p28.txt --journals --context"
+     },
+     {
+      "agent": "n1w0",
+      "n": 22,
+      "path": "hot/p17.txt",
+      "sha256": "edaf00bfc03126ca5132bffae7c74958bf37ecf985bfe29505f8c25ce6f76032",
+      "op": {
+       "k": "op",
+       "agent": "n1w0",
+       "n": 22,
+       "t_ms": 1789509124913,
+       "op": "write",
+       "path": "hot/p17.txt",
+       "sha256": "edaf00bfc03126ca5132bffae7c74958bf37ecf985bfe29505f8c25ce6f76032",
+       "base": "1afc4022127d0ea3838073445793d71051f5e03293babcf8730bbe273c355a12",
+       "nonce": "n1w0-5"
+      },
+      "ack": {
+       "k": "ack",
+       "agent": "n1w0",
+       "t_ms": 1789509125770,
+       "nonce": "n1w0-5",
+       "status": "ok",
+       "seq": 38,
+       "dropped": [],
+       "covered": [
+        "n1w0-5"
+       ],
+       "report": {
+        "uploaded": 5,
+        "deleted": 0,
+        "parked": 0,
+        "consumed": 1,
+        "no_change": false
+       }
+      },
+      "final": "e2721ce77d4462adedd3d1839391ea550957c86dcc3f1e5df4bd38f9d9d12ce0",
+      "unacked_op_with_base_h": true,
+      "later_ops": [
+       {
+        "agent": "n2w0",
+        "n": 29,
+        "part": "write",
+        "op": "write",
+        "path": "hot/p17.txt",
+        "to": null,
+        "base": "edaf00bfc03126ca5132bffae7c74958bf37ecf985bfe29505f8c25ce6f76032",
+        "sha256": "e2721ce77d4462adedd3d1839391ea550957c86dcc3f1e5df4bd38f9d9d12ce0",
+        "t_ms": 1789509136842,
+        "nonce": "n2w0-6",
+        "acked": false,
+        "seq": 54,
+        "why_unacked": "dropped",
+        "base_is_h": true
+       },
+       {
+        "agent": "n2w1",
+        "n": 27,
+        "part": "write",
+        "op": "write",
+        "path": "hot/p17.txt",
+        "to": null,
+        "base": "edaf00bfc03126ca5132bffae7c74958bf37ecf985bfe29505f8c25ce6f76032",
+        "sha256": "441e74f8b9477954d4ba338fecdae68d81d7ea66023a7fdd0f25df3fc9ab140a",
+        "t_ms": 1789509140375,
+        "nonce": "n2w1-6",
+        "acked": false,
+        "seq": 55,
+        "why_unacked": "dropped",
+        "base_is_h": true
+       }
+      ],
+      "timeline": "timeline.py /mnt/nvme/storm/S0-smoke/collect --path hot/p17.txt --journals --context"
+     },
+     {
+      "agent": "n1w1",
+      "n": 14,
+      "path": "hot/p18.txt",
+      "sha256": "89efb13d5bc7a49920f7350d07a61fbd9fb6bcf74e358beb24020d1b287cff5c",
+      "op": {
+       "k": "op",
+       "agent": "n1w1",
+       "n": 14,
+       "t_ms": 1789509110969,
+       "op": "write",
+       "path": "hot/p18.txt",
+       "sha256": "89efb13d5bc7a49920f7350d07a61fbd9fb6bcf74e358beb24020d1b287cff5c",
+       "base": "2fd93059c3eb20f86e0966b9b69e0ccaf3efd3dec83f25e763e83a9b3bc5355d",
+       "nonce": "n1w1-3"
+      },
+      "ack": {
+       "k": "ack",
+       "agent": "n1w1",
+       "t_ms": 1789509113848,
+       "nonce": "n1w1-3",
+       "status": "ok",
+       "seq": 28,
+       "dropped": [],
+       "covered": [
+        "n1w1-3"
+       ],
+       "report": {
+        "uploaded": 0,
+        "deleted": 0,
+        "parked": 0,
+        "consumed": 17,
+        "no_change": true
+       }
+      },
+      "final": "c0a50d711f11bd1940607753807081ba34c75e200d7a900fe39283b59bedcd8c",
+      "unacked_op_with_base_h": true,
+      "later_ops": [
+       {
+        "agent": "n0w1",
+        "n": 16,
+        "part": "write",
+        "op": "write",
+        "path": "hot/p18.txt",
+        "to": null,
+        "base": "f93059e612b66edab55066498b9d40fbfd58e9af131f8d8ba3c16aaec659fe70",
+        "sha256": "3b10249fe9aa1419e7898102ffa23015c4e25b0fca97dc74f4af1d48b355b158",
+        "t_ms": 1789509117470,
+        "nonce": "n0w1-4",
+        "acked": false,
+        "seq": 35,
+        "why_unacked": "dropped",
+        "base_is_h": false
+       },
+       {
+        "agent": "n0w1",
+        "n": 25,
+        "part": "write",
+        "op": "write",
+        "path": "hot/p18.txt",
+        "to": null,
+        "base": "3b10249fe9aa1419e7898102ffa23015c4e25b0fca97dc74f4af1d48b355b158",
+        "sha256": "7364c47993e1b961634bf6eea6b6736c73f72d3d05b423dfa67eaa0b314112f0",
+        "t_ms": 1789509125544,
+        "nonce": "n0w1-5",
+        "acked": true,
+        "seq": 39,
+        "why_unacked": null,
+        "base_is_h": false
+       },
+       {
+        "agent": "n0w1",
+        "n": 34,
+        "part": "write",
+        "op": "write",
+        "path": "hot/p18.txt",
+        "to": null,
+        "base": "7364c47993e1b961634bf6eea6b6736c73f72d3d05b423dfa67eaa0b314112f0",
+        "sha256": "c0a50d711f11bd1940607753807081ba34c75e200d7a900fe39283b59bedcd8c",
+        "t_ms": 1789509143364,
+        "nonce": "n0w1-7",
+        "acked": true,
+        "seq": 57,
+        "why_unacked": null,
+        "base_is_h": false
+       },
+       {
+        "agent": "n1w1",
+        "n": 20,
+        "part": "write",
+        "op": "write",
+        "path": "hot/p18.txt",
+        "to": null,
+        "base": "89efb13d5bc7a49920f7350d07a61fbd9fb6bcf74e358beb24020d1b287cff5c",
+        "sha256": "acb8d440a03bfe240b5b97bc737a90088231ef51d9d191c40deb0c5d2a70ad18",
+        "t_ms": 1789509116928,
+        "nonce": "n1w1-4",
+        "acked": false,
+        "seq": 33,
+        "why_unacked": "dropped",
+        "base_is_h": true
+       },
+       {
+        "agent": "n2w1",
+        "n": 17,
+        "part": "write",
+        "op": "write",
+        "path": "hot/p18.txt",
+        "to": null,
+        "base": "5f98d8aff5a78a68e757eeec7678856640a2cbbf7c020548a59f23b5d13fa1ed",
+        "sha256": "e02f02d5b5ea58774f953550f0b21cfe599f8dfeb354a8e402a8fc88b3157c41",
+        "t_ms": 1789509119036,
+        "nonce": "n2w1-4",
+        "acked": true,
+        "seq": 36,
+        "why_unacked": null,
+        "base_is_h": false
+       },
+       {
+        "agent": "n2w1",
+        "n": 30,
+        "part": "write",
+        "op": "write",
+        "path": "hot/p18.txt",
+        "to": null,
+        "base": "7364c47993e1b961634bf6eea6b6736c73f72d3d05b423dfa67eaa0b314112f0",
+        "sha256": "79c6542bd369a30b21259eaa10b24dbe0a0525f6b376a384d5149824ad5fcb53",
+        "t_ms": 1789509140401,
+        "nonce": "n2w1-6",
+        "acked": true,
+        "seq": 55,
+        "why_unacked": null,
+        "base_is_h": false
+       }
+      ],
+      "timeline": "timeline.py /mnt/nvme/storm/S0-smoke/collect --path hot/p18.txt --journals --context"
+     },
+     {
+      "agent": "n2w0",
+      "n": 13,
+      "path": "hot/p25.txt",
+      "sha256": "9684eadfc67bc607d32d64a1fb792a71a15a2739c21ebf0ee3d9aaf7c8b74bfe",
+      "op": {
+       "k": "op",
+       "agent": "n2w0",
+       "n": 13,
+       "t_ms": 1789509107988,
+       "op": "write",
+       "path": "hot/p25.txt",
+       "sha256": "9684eadfc67bc607d32d64a1fb792a71a15a2739c21ebf0ee3d9aaf7c8b74bfe",
+       "base": "c66545bf70cb55888a6f9c57c9c2d971d9234f8abbda43bf1d26f2380ba61d4c",
+       "nonce": "n2w0-3"
+      },
+      "ack": {
+       "k": "ack",
+       "agent": "n2w0",
+       "t_ms": 1789509110063,
+       "nonce": "n2w0-3",
+       "status": "ok",
+       "seq": 24,
+       "dropped": [],
+       "covered": [
+        "n2w0-3"
+       ],
+       "report": {
+        "uploaded": 5,
+        "deleted": 0,
+        "parked": 0,
+        "consumed": 10,
+        "no_change": false
+       }
+      },
+      "final": "d9630f9a79f937e800a8b2e59732e0816ade9353aeb324d8cb4b47226ba908c4",
+      "unacked_op_with_base_h": true,
+      "later_ops": [
+       {
+        "agent": "n0w0",
+        "n": 30,
+        "part": "write",
+        "op": "write",
+        "path": "hot/p25.txt",
+        "to": null,
+        "base": "9684eadfc67bc607d32d64a1fb792a71a15a2739c21ebf0ee3d9aaf7c8b74bfe",
+        "sha256": "03734e0e20272740eb8cd167c3246c42d2e5b575054b6da8ca8baac28ad92bcd",
+        "t_ms": 1789509136748,
+        "nonce": "n0w0-6",
+        "acked": false,
+        "seq": 53,
+        "why_unacked": "dropped",
+        "base_is_h": true
+       },
+       {
+        "agent": "n1w1",
+        "n": 31,
+        "part": "write",
+        "op": "write",
+        "path": "hot/p25.txt",
+        "to": null,
+        "base": "9684eadfc67bc607d32d64a1fb792a71a15a2739c21ebf0ee3d9aaf7c8b74bfe",
+        "sha256": "1f418ad7b519775e719bcdf2c5344e22095786a8e5ad606028eeaa17329fc71a",
+        "t_ms": 1789509147513,
+        "nonce": "n1w1-7",
+        "acked": false,
+        "seq": 64,
+        "why_unacked": "dropped",
+        "base_is_h": true
+       },
+       {
+        "agent": "n2w0",
+        "n": 27,
+        "part": "write",
+        "op": "write",
+        "path": "hot/p25.txt",
+        "to": null,
+        "base": "9684eadfc67bc607d32d64a1fb792a71a15a2739c21ebf0ee3d9aaf7c8b74bfe",
+        "sha256": "d9630f9a79f937e800a8b2e59732e0816ade9353aeb324d8cb4b47226ba908c4",
+        "t_ms": 1789509136825,
+        "nonce": "n2w0-6",
+        "acked": false,
+        "seq": 54,
+        "why_unacked": "dropped",
+        "base_is_h": true
+       }
+      ],
+      "timeline": "timeline.py /mnt/nvme/storm/S0-smoke/collect --path hot/p25.txt --journals --context"
+     }
+    ],
+    "refused_landed_total": 0,
+    "refused_landed": [],
+    "malformed": [],
+    "problems": []
+   }
+  },
+  "O4": {
+   "pass": true,
+   "details": {
+    "reasons": [],
+    "preserved_objects": 152,
+    "records_by_kind": {
+     "upload-412-preserved": 116,
+     "upload-withheld: the object this barrier PUT was replaced or collected before its commit (a peer's GC recognizes the etag of identical bytes); nothing cited, the path stays dirty and publishes next barrier": 47,
+     "consume-dirty": 36,
+     "upload-412-parked": 2,
+     "adopt-withheld: the object this barrier found already at its key was replaced or collected before its commit; nothing cited, the path stays dirty and publishes next barrier": 2
+    },
+    "keys_named": 152,
+    "keys_recorded_by_two_writers": 0,
+    "duplicate_object_keys": [],
+    "no_record": [],
+    "missing_object": [],
+    "preserved_key_on_other_kinds": [],
+    "problems": []
+   }
+  },
+  "O5": {
+   "pass": true,
+   "details": {
+    "reasons": [],
+    "faults_declared": true,
+    "claims_by_trace": {
+     "n0w0": {
+      "waiting": 12,
+      "claimed:released": 16
+     },
+     "n0w1": {
+      "claimed:fresh": 1,
+      "waiting": 7,
+      "claimed:released": 9
+     },
+     "n1w0": {
+      "waiting": 12,
+      "claimed:released": 15
+     },
+     "n1w1": {
+      "waiting": 11,
+      "claimed:released": 13
+     },
+     "n2w0": {
+      "waiting": 13,
+      "claimed:released": 17
+     },
+     "n2w1": {
+      "waiting": 9,
+      "claimed:released": 14
+     }
+    },
+    "waiting": 64,
+    "deadline": 0,
+    "deposed": 0,
+    "orphaned_own": 0,
+    "deadlines": [],
+    "deposals": [],
+    "orphaned_own_claims": [],
+    "problems": []
+   }
+  },
+  "O6": {
+   "pass": null,
+   "skipped": "not selected"
+  }
+ },
+ "pass": false,
+ "facts": {
+  "missing_nodes": [],
+  "faults": [
+   {
+    "ev": "fault",
+    "node": 0,
+    "ts_ms": 1789509120401,
+    "fault": "kill-9-syncer",
+    "writer": "n0w0"
+   },
+   {
+    "ev": "fault",
+    "node": 1,
+    "ts_ms": 1789509121875,
+    "fault": "pod-replacement",
+    "writer": "n1w0"
+   },
+   {
+    "ev": "fault",
+    "node": 2,
+    "ts_ms": 1789509122955,
+    "fault": "kill-9-syncer",
+    "writer": "n2w0"
+   }
+  ],
+  "undrained": []
+ },
+ "counts": {
+  "agents": 7,
+  "citations": 30,
+  "objects": 257,
+  "preserved": 152,
+  "faults": 3
+ }
+}

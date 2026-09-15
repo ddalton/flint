@@ -1,0 +1,220 @@
+{
+  "leg": "R3-S5-churn-kills",
+  "oracles": {
+    "O1": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "checkout_code": 0,
+        "stderr_tail": "flint-sync: checkout \u2014 32 materialized, 0 present, live-tree=false\nflint-sync: phase manifest=0.053s fetch=0.040s commit=0.008s bytes=4696 ranged=0\n",
+        "citations": 32,
+        "heads": 32,
+        "missing_heads": [],
+        "mismatched": [],
+        "extra_heads": [],
+        "checkout_missing_cited": [],
+        "checkout_not_cited": [],
+        "manifest_seq": 248,
+        "problems": []
+      }
+    },
+    "O2": {
+      "pass": false,
+      "details": {
+        "reasons": [
+          "3 tree(s) differ from the checkout"
+        ],
+        "checkout_files": 32,
+        "trees": {
+          "n0w0": 32,
+          "n0w1": 33,
+          "n1w0": 33,
+          "n1w1": 32,
+          "n2w0": 32,
+          "n2w1": 32
+        },
+        "diffs": {
+          "n0w1": {
+            "extra": [
+              "churn/p15.txt"
+            ],
+            "missing": [],
+            "differing": [
+              {
+                "path": "churn/p21.txt",
+                "tree": "5ff4080dc5320bdea0d039348e4703fe0e7c4ca63b97ff3668edd7bd54d39a2c",
+                "checkout": "4194ad50d18fc42d8ec01b4048651146fb91d029e51434a9668a92d3ed68e559"
+              }
+            ]
+          },
+          "n1w0": {
+            "extra": [
+              "churn/p15.txt"
+            ],
+            "missing": [],
+            "differing": []
+          },
+          "n2w1": {
+            "extra": [],
+            "missing": [],
+            "differing": [
+              {
+                "path": "churn/p30.txt",
+                "tree": "52193839c7609046a9e118fc39f73bcfcb5ba6770943ed57bfaba958e0aac7e1",
+                "checkout": "36f5434efa7a8ef23af69489630c4e8e7b16505907d5e12fc19cdaa7a667a35c"
+              }
+            ]
+          }
+        },
+        "problems": []
+      }
+    },
+    "O3": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "final_source": "checkout",
+        "ops": 717,
+        "parts": 791,
+        "acked_parts": 474,
+        "acked_writes": 345,
+        "acked_writes_by_agent": {
+          "n0w0": 48,
+          "n0w1": 53,
+          "n1w0": 45,
+          "n1w1": 50,
+          "n2w0": 44,
+          "n2w1": 45,
+          "ui": 60
+        },
+        "accounted": {
+          "final": 15,
+          "superseded": 195,
+          "replaced": 20,
+          "preserved": 115
+        },
+        "unacked_parts": {
+          "dropped": 100,
+          "no-ack": 170,
+          "no-ack-line": 10,
+          "refused": 34,
+          "error": 3
+        },
+        "acks_by_status": {
+          "ok": 84,
+          "partial": 74,
+          "no-ack": 30,
+          "refused": 34,
+          "error": 3
+        },
+        "preserved_copies": 988,
+        "preserved_unparsed_keys": 0,
+        "multiply_covered": [],
+        "losses_total": 0,
+        "losses": [],
+        "refused_landed_total": 0,
+        "refused_landed": [],
+        "malformed": [],
+        "problems": []
+      }
+    },
+    "O4": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "preserved_objects": 988,
+        "records_by_kind": {
+          "consume-dirty": 143,
+          "repair-withheld: the object this barrier re-cited was replaced or collected before its commit; nothing cited, and the next consume installs the manifest's version": 56,
+          "upload-412-preserved": 845,
+          "upload-withheld: the object this barrier PUT was replaced or collected before its commit (a peer's GC recognizes the etag of identical bytes); nothing cited, the path stays dirty and publishes next barrier": 756,
+          "consume-foreign-delete-vs-dirty: another writer deleted this path; the local version has unpublished changes, so it stays and publishes": 12,
+          "gc-skip": 74,
+          "upload-412-parked": 6,
+          "consume-object-missing": 8,
+          "adopt-withheld: the object this barrier found already at its key was replaced or collected before its commit; nothing cited, the path stays dirty and publishes next barrier": 1
+        },
+        "keys_named": 988,
+        "keys_recorded_by_two_writers": 0,
+        "duplicate_object_keys": [],
+        "no_record": [],
+        "missing_object": [],
+        "preserved_key_on_other_kinds": [],
+        "problems": []
+      }
+    },
+    "O5": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "faults_declared": true,
+        "claims_by_trace": {
+          "n0w0": {
+            "waiting": 66,
+            "claimed:released": 60
+          },
+          "n0w1": {
+            "claimed:fresh": 1,
+            "waiting": 64,
+            "claimed:released": 57
+          },
+          "n1w0": {
+            "claimed:released": 56,
+            "waiting": 63,
+            "claimed:skipped-handoff": 1
+          },
+          "n1w1": {
+            "waiting": 61,
+            "claimed:released": 52,
+            "claimed:skipped-handoff": 1
+          },
+          "n2w0": {
+            "waiting": 62,
+            "claimed:released": 54,
+            "claimed:skipped-handoff": 1
+          },
+          "n2w1": {
+            "waiting": 66,
+            "claimed:released": 59,
+            "claimed:deposed": 1
+          }
+        },
+        "waiting": 382,
+        "deadline": 0,
+        "deposed": 1,
+        "orphaned_own": 0,
+        "deadlines": [],
+        "deposals": [
+          {
+            "trace": "n2w1",
+            "ts_ms": 1789514831407,
+            "holder": "lean-3c36860f-5218-4544-86b9-417b97782dfb",
+            "epoch": 237,
+            "prior": {
+              "epoch": 236,
+              "handoff": null,
+              "holder": "lean-638f69d7-c5d2-4d25-b98e-83f4edf14000",
+              "released": false,
+              "waiters": [
+                "lean-9b1fe33a-3984-4696-af68-0f8748605e90",
+                "lean-c9e18d3c-be34-494c-b18c-149b5cfd7bcd",
+                "lean-3f3464da-ceb3-47a8-99f3-36a7ab867983",
+                "lean-7746c2e0-9f2b-44dd-bf04-bda920231902",
+                "lean-a97765e7-56ab-40a6-bb33-92ee9ffa4d66",
+                "lean-032a4530-5018-420d-8885-57d6eca0ee76",
+                "lean-3c36860f-5218-4544-86b9-417b97782dfb"
+              ]
+            }
+          }
+        ],
+        "orphaned_own_claims": [],
+        "problems": []
+      }
+    },
+    "O6": {
+      "pass": null,
+      "skipped": "not selected"
+    }
+  },
+  "pass": false
+}

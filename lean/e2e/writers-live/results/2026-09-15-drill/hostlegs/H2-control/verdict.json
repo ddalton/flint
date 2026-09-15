@@ -1,0 +1,120 @@
+{
+  "leg": "H2",
+  "arm": "control",
+  "dir": "/mnt/nvme/out/hostlegs/H2-control",
+  "probe": "flint-sync: probe-conditional PASS \u2014 PUT (h/h2-control-20260915T215903Z-probe/.flint/lean/probe-conditional) and DELETE (h/h2-control-20260915T215903Z-probe/.flint/lean/probe-conditional-delete)",
+  "facts": [
+    {
+      "name": "first-absence-withheld",
+      "ok": true,
+      "detail": "cites 141311c6be78968b2f253f6e0a6bce96",
+      "fixture": true
+    },
+    {
+      "name": "b-race-exit",
+      "ok": true,
+      "detail": "rc=0",
+      "fixture": false
+    },
+    {
+      "name": "a-race-exit",
+      "ok": true,
+      "detail": "rc=0",
+      "fixture": false
+    }
+  ],
+  "expected": "FAIL",
+  "race_events": {
+    "b_claim": {
+      "ts_ms": 1789509545320,
+      "mono_ms": 77,
+      "holder": "lean-c28491c0-beef-4a10-a0f7-a46ef6631726",
+      "ev": "claim",
+      "epoch": 3,
+      "how": "released",
+      "prior": {
+        "epoch": 2,
+        "handoff": null,
+        "holder": "lean-c28491c0-beef-4a10-a0f7-a46ef6631726",
+        "released": true,
+        "waiters": []
+      },
+      "verdict": "claimed"
+    },
+    "b_gc": {
+      "ts_ms": 1789509575542,
+      "mono_ms": 30299,
+      "holder": "lean-c28491c0-beef-4a10-a0f7-a46ef6631726",
+      "ev": "gc",
+      "flush": "ff7dc4f2-2ed8-4aa4-9862-d07fd78ed177",
+      "head": "\"141311c6be78968b2f253f6e0a6bce96\"",
+      "path": "x.txt",
+      "result": "deleted"
+    },
+    "adopt": {
+      "ts_ms": 1789509545511,
+      "mono_ms": 54,
+      "holder": "lean-14d92b45-45ff-4ffc-bae5-0b6156e2bc3c",
+      "ev": "upload",
+      "etag": "\"141311c6be78968b2f253f6e0a6bce96\"",
+      "flush": "efd5bd92-6257-4f40-bf52-eda42a74132a",
+      "outcome": "adopted",
+      "path": "x.txt"
+    },
+    "a_claim": {
+      "ts_ms": 1789509575784,
+      "mono_ms": 30326,
+      "holder": "lean-14d92b45-45ff-4ffc-bae5-0b6156e2bc3c",
+      "ev": "claim",
+      "epoch": 4,
+      "how": "released",
+      "prior": {
+        "epoch": 3,
+        "handoff": "lean-14d92b45-45ff-4ffc-bae5-0b6156e2bc3c",
+        "holder": "lean-c28491c0-beef-4a10-a0f7-a46ef6631726",
+        "released": true,
+        "waiters": []
+      },
+      "verdict": "claimed"
+    }
+  },
+  "oracles": {
+    "O1_race": {
+      "pass": false,
+      "problems": [
+        "x.txt: cited 141311c6be78968b2f253f6e0a6bce96 but HEAD 404"
+      ]
+    },
+    "O1_final": {
+      "pass": false,
+      "problems": [
+        "fresh checkout exit 1",
+        "x.txt: cited 141311c6be78968b2f253f6e0a6bce96 but HEAD 404"
+      ]
+    },
+    "O2": {
+      "pass": false,
+      "problems": [
+        "A has x.txt, C does not"
+      ],
+      "diffs": {
+        "A": {
+          "extra_in_writer": [
+            "x.txt"
+          ],
+          "missing_in_writer": [],
+          "differ": []
+        },
+        "B": {
+          "extra_in_writer": [],
+          "missing_in_writer": [],
+          "differ": []
+        }
+      }
+    }
+  },
+  "post_barrier_failures": [],
+  "status": "FAIL",
+  "reason": "(expected: F2 signature: A adopted x.txt at 141311c6be78968b2f253f6e0a6bce96, B's GC deleted it before A's claim, no re-read ran, and A's commit cites it with HEAD 404) oracles: O1(race) x.txt: cited 141311c6be78968b2f253f6e0a6bce96 but HEAD 404; O1 fresh checkout exit 1; O1 x.txt: cited 141311c6be78968b2f253f6e0a6bce96 but HEAD 404; O2 A has x.txt, C does not",
+  "meets_expectation": true
+}

@@ -1,0 +1,65 @@
+{
+  "leg": "H5",
+  "arm": "fixed",
+  "dir": "/mnt/nvme/out/hostlegs/H5-fixed",
+  "probe": "flint-sync: probe-conditional PASS \u2014 PUT (h/h5-fixed-20260915T215129Z-probe/.flint/lean/probe-conditional) and DELETE (h/h5-fixed-20260915T215129Z-probe/.flint/lean/probe-conditional-delete)",
+  "facts": [
+    {
+      "name": "a-killed",
+      "ok": true,
+      "detail": "rc=137",
+      "fixture": true
+    },
+    {
+      "name": "b-daemon-alive",
+      "ok": true,
+      "detail": "ran 180s",
+      "fixture": false
+    },
+    {
+      "name": "b-daemon-drain",
+      "ok": true,
+      "detail": "rc=0",
+      "fixture": false
+    }
+  ],
+  "expected": "PASS",
+  "race_events": {
+    "swept": {
+      "ts_ms": 1789509158191,
+      "mono_ms": 61351,
+      "holder": "lean-64cf1610-0fa2-433f-ba8c-9143d9e5603e",
+      "ev": "untracked",
+      "cited": "\"60c233d801dbca257c29801833b7f694\"",
+      "etag": "\"06431abc4861edf35f8bb60bcbcdf4da\"",
+      "path": "p1.txt"
+    }
+  },
+  "oracles": {
+    "O1_race": {
+      "pass": true,
+      "problems": [
+        "not judged: H5's race state is the kill"
+      ]
+    },
+    "O1_final": {
+      "pass": true,
+      "problems": []
+    },
+    "O2": {
+      "pass": true,
+      "problems": [],
+      "diffs": {
+        "B": {
+          "extra_in_writer": [],
+          "missing_in_writer": [],
+          "differ": []
+        }
+      }
+    }
+  },
+  "post_barrier_failures": [],
+  "status": "PASS",
+  "reason": "O1 O2 clean; converged, and B's sweep tracked p1.txt",
+  "meets_expectation": true
+}

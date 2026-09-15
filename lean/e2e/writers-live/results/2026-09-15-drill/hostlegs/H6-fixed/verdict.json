@@ -1,0 +1,99 @@
+{
+  "leg": "H6",
+  "arm": "fixed",
+  "dir": "/mnt/nvme/out/hostlegs/H6-fixed",
+  "probe": "flint-sync: probe-conditional PASS \u2014 PUT (h/h6-fixed-20260915T215118Z-probe/.flint/lean/probe-conditional) and DELETE (h/h6-fixed-20260915T215118Z-probe/.flint/lean/probe-conditional-delete)",
+  "facts": [
+    {
+      "name": "delete-published",
+      "ok": true,
+      "detail": "",
+      "fixture": true
+    },
+    {
+      "name": "b-still-has-seed",
+      "ok": true,
+      "detail": "",
+      "fixture": true
+    },
+    {
+      "name": "b-queued-tombstone",
+      "ok": true,
+      "detail": "",
+      "fixture": true
+    },
+    {
+      "name": "ui-sha",
+      "ok": true,
+      "detail": "45aeb87ce52accc2042bf036b90acf09ebb79abec3e622932e8edd43abd9f3ca",
+      "fixture": true
+    },
+    {
+      "name": "ui-write",
+      "ok": true,
+      "detail": "200 {\"etag\":\"\\\"ec6193a29c2095e335a3645ca6039641\\\"\"}",
+      "fixture": true
+    },
+    {
+      "name": "b-race-exit",
+      "ok": true,
+      "detail": "rc=0",
+      "fixture": false
+    }
+  ],
+  "expected": "PASS",
+  "race_events": {
+    "adopt": {
+      "ts_ms": 1789509081715,
+      "mono_ms": 56,
+      "holder": "lean-0f4f628b-b837-4fff-aef6-ecdb9659e807",
+      "ev": "consume",
+      "action": "adopted",
+      "etag": "\"ec6193a29c2095e335a3645ca6039641\"",
+      "from": "inbox",
+      "path": "x.txt"
+    },
+    "tombstone": {
+      "ts_ms": 1789509081724,
+      "mono_ms": 65,
+      "holder": "lean-0f4f628b-b837-4fff-aef6-ecdb9659e807",
+      "ev": "tombstone",
+      "action": "superseded",
+      "path": "x.txt"
+    }
+  },
+  "oracles": {
+    "O1_race": {
+      "pass": true,
+      "problems": []
+    },
+    "O1_final": {
+      "pass": true,
+      "problems": []
+    },
+    "O2": {
+      "pass": true,
+      "problems": [],
+      "diffs": {
+        "A": {
+          "extra_in_writer": [],
+          "missing_in_writer": [],
+          "differ": []
+        },
+        "B": {
+          "extra_in_writer": [],
+          "missing_in_writer": [],
+          "differ": []
+        }
+      }
+    },
+    "O3_leg": {
+      "pass": true,
+      "problems": []
+    }
+  },
+  "post_barrier_failures": [],
+  "status": "PASS",
+  "reason": "O1 O2 clean; a fresh checkout and B both serve the acked UI write",
+  "meets_expectation": true
+}

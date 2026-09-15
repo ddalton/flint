@@ -1,0 +1,6 @@
+{"name":"delete-published","ok":true,"detail":"","fixture":true}
+{"name":"b-still-has-seed","ok":true,"detail":"","fixture":true}
+{"name":"b-queued-tombstone","ok":true,"detail":"","fixture":true}
+{"name":"ui-sha","ok":true,"detail":"a3dc819dc6bbf3cb6efd41b4b6294b6bbc3d168bb172b2574d6101021388bac0","fixture":true}
+{"name":"ui-write","ok":true,"detail":"200 {\"etag\":\"\\\"4955bd9118184eba993ed853c1852549\\\"\"}","fixture":true}
+{"name":"b-race-exit","ok":true,"detail":"rc=0","fixture":false}

@@ -1,0 +1,5 @@
+{"name":"first-absence-withheld","ok":true,"detail":"cites 24726819d5fa29b1a6c3b267f6638185","fixture":true}
+{"name":"ui-write","ok":true,"detail":"200 {\"etag\":\"\\\"47086c598aec6f2fdf03a90584cd6ffd\\\"\"}","fixture":true}
+{"name":"b-sync-exit","ok":true,"detail":"rc=0","fixture":true}
+{"name":"b-applied-hitl","ok":true,"detail":"","fixture":true}
+{"name":"a-race-exit","ok":true,"detail":"rc=0","fixture":false}

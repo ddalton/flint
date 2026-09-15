@@ -1,0 +1,151 @@
+{
+  "leg": "R3-S3-vocab",
+  "oracles": {
+    "O1": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "checkout_code": 0,
+        "stderr_tail": "flint-sync: checkout \u2014 25 materialized, 0 present, live-tree=false\nflint-sync: phase manifest=0.046s fetch=0.039s commit=0.007s bytes=2571 ranged=0\n",
+        "citations": 25,
+        "heads": 25,
+        "missing_heads": [],
+        "mismatched": [],
+        "extra_heads": [],
+        "checkout_missing_cited": [],
+        "checkout_not_cited": [],
+        "manifest_seq": 308,
+        "problems": []
+      }
+    },
+    "O2": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "checkout_files": 25,
+        "trees": {
+          "n0w0": 25,
+          "n0w1": 25,
+          "n1w0": 25,
+          "n1w1": 25,
+          "n2w0": 25,
+          "n2w1": 25
+        },
+        "diffs": {},
+        "problems": []
+      }
+    },
+    "O3": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "final_source": "checkout",
+        "ops": 1060,
+        "parts": 1060,
+        "acked_parts": 1001,
+        "acked_writes": 794,
+        "acked_writes_by_agent": {
+          "n0w0": 139,
+          "n0w1": 144,
+          "n1w0": 123,
+          "n1w1": 129,
+          "n2w0": 125,
+          "n2w1": 134
+        },
+        "accounted": {
+          "final": 103,
+          "superseded": 595,
+          "replaced": 0,
+          "preserved": 96
+        },
+        "unacked_parts": {
+          "dropped": 59
+        },
+        "acks_by_status": {
+          "partial": 55,
+          "ok": 163
+        },
+        "preserved_copies": 429,
+        "preserved_unparsed_keys": 0,
+        "multiply_covered": [],
+        "losses_total": 0,
+        "losses": [],
+        "refused_landed_total": 0,
+        "refused_landed": [],
+        "malformed": [],
+        "problems": []
+      }
+    },
+    "O4": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "preserved_objects": 429,
+        "records_by_kind": {
+          "upload-withheld: the object this barrier PUT was replaced or collected before its commit (a peer's GC recognizes the etag of identical bytes); nothing cited, the path stays dirty and publishes next barrier": 32,
+          "upload-412-preserved": 195,
+          "consume-dirty": 234,
+          "consume-object-missing": 104,
+          "consume-foreign-delete-vs-dirty: another writer deleted this path; the local version has unpublished changes, so it stays and publishes": 35,
+          "gc-skip": 7,
+          "adopt-withheld: the object this barrier found already at its key was replaced or collected before its commit; nothing cited, the path stays dirty and publishes next barrier": 1,
+          "upload-412-parked": 1
+        },
+        "keys_named": 429,
+        "keys_recorded_by_two_writers": 0,
+        "duplicate_object_keys": [],
+        "no_record": [],
+        "missing_object": [],
+        "preserved_key_on_other_kinds": [],
+        "problems": []
+      }
+    },
+    "O5": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "faults_declared": false,
+        "claims_by_trace": {
+          "n0w0": {
+            "waiting": 29,
+            "claimed:released": 60
+          },
+          "n0w1": {
+            "waiting": 23,
+            "claimed:released": 51
+          },
+          "n1w0": {
+            "claimed:fresh": 1,
+            "waiting": 31,
+            "claimed:released": 54
+          },
+          "n1w1": {
+            "waiting": 25,
+            "claimed:released": 51
+          },
+          "n2w0": {
+            "waiting": 33,
+            "claimed:released": 56
+          },
+          "n2w1": {
+            "waiting": 28,
+            "claimed:released": 55
+          }
+        },
+        "waiting": 169,
+        "deadline": 0,
+        "deposed": 0,
+        "orphaned_own": 0,
+        "deadlines": [],
+        "deposals": [],
+        "orphaned_own_claims": [],
+        "problems": []
+      }
+    },
+    "O6": {
+      "pass": null,
+      "skipped": "not selected"
+    }
+  },
+  "pass": true
+}

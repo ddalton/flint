@@ -1,0 +1,101 @@
+{
+  "leg": "H1",
+  "arm": "control",
+  "dir": "/private/tmp/claude-503/-Users-ddalton-github-flint/b25aeb34-6dcb-467c-b104-d9e895ac26b6/scratchpad/rejudge/H1-control",
+  "probe": "flint-sync: probe-conditional PASS \u2014 PUT (h/h1-control-20260915T215801Z-probe/.flint/lean/probe-conditional) and DELETE (h/h1-control-20260915T215801Z-probe/.flint/lean/probe-conditional-delete)",
+  "facts": [
+    {
+      "name": "b-has-seed",
+      "ok": true,
+      "detail": "",
+      "fixture": true
+    },
+    {
+      "name": "first-absence-withheld",
+      "ok": true,
+      "detail": "",
+      "fixture": true
+    },
+    {
+      "name": "a-race-exit",
+      "ok": true,
+      "detail": "rc=0",
+      "fixture": false
+    },
+    {
+      "name": "b-race-exit",
+      "ok": true,
+      "detail": "rc=0",
+      "fixture": false
+    }
+  ],
+  "expected": "FAIL",
+  "race_events": {
+    "hold": {
+      "ts_ms": 1789509483896,
+      "mono_ms": 251,
+      "holder": "lean-46110aae-c85a-4e69-af0a-ef0c1f9d1627",
+      "ev": "drill_hold",
+      "flush": "0f02b4cd-af21-4549-b35f-c0fa387044c6",
+      "path": "x.txt",
+      "secs": 20,
+      "where": "gc"
+    },
+    "put": {
+      "ts_ms": 1789509484083,
+      "mono_ms": 59,
+      "holder": "lean-66a9f6fa-f7bb-4f4f-9f96-09f4b088608d",
+      "ev": "upload",
+      "etag": "\"daa977f4b05b15a4cd8b5b06b578e767\"",
+      "flush": "35063a7f-9d45-4869-bf31-a4e313e6a6a6",
+      "outcome": "put",
+      "path": "x.txt"
+    },
+    "gc": {
+      "ts_ms": 1789509503928,
+      "mono_ms": 20283,
+      "holder": "lean-46110aae-c85a-4e69-af0a-ef0c1f9d1627",
+      "ev": "gc",
+      "flush": "0f02b4cd-af21-4549-b35f-c0fa387044c6",
+      "head": "\"2998dd1589d04fc3c0276f505e291c8e\"",
+      "path": "x.txt",
+      "result": "deleted"
+    }
+  },
+  "oracles": {
+    "O1_race": {
+      "pass": true,
+      "problems": []
+    },
+    "O1_final": {
+      "pass": true,
+      "problems": []
+    },
+    "O2": {
+      "pass": true,
+      "problems": [],
+      "diffs": {
+        "A": {
+          "extra_in_writer": [],
+          "missing_in_writer": [],
+          "differ": []
+        },
+        "B": {
+          "extra_in_writer": [],
+          "missing_in_writer": [],
+          "differ": []
+        }
+      }
+    },
+    "O3_leg": {
+      "pass": false,
+      "problems": [
+        "A's GC result=deleted head=2998dd1589d04fc3c0276f505e291c8e (want skip at B's daa977f4b05b15a4cd8b5b06b578e767)"
+      ]
+    }
+  },
+  "post_barrier_failures": [],
+  "status": "FAIL",
+  "reason": "(expected: F1 signature: A's GC deleted x.txt unconditionally (head 2998dd1589d04fc3c0276f505e291c8e) after B's PUT daa977f4b05b15a4cd8b5b06b578e767 landed; B's commit-section re-read found the PUT gone and withheld it) oracles: O3 A's GC result=deleted head=2998dd1589d04fc3c0276f505e291c8e (want skip at B's daa977f4b05b15a4cd8b5b06b578e767)",
+  "meets_expectation": true
+}

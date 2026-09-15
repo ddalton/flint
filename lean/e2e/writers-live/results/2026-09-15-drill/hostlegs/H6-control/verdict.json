@@ -1,0 +1,101 @@
+{
+  "leg": "H6",
+  "arm": "control",
+  "dir": "/mnt/nvme/out/hostlegs/H6-control",
+  "probe": "flint-sync: probe-conditional PASS \u2014 PUT (h/h6-control-20260915T215124Z-probe/.flint/lean/probe-conditional) and DELETE (h/h6-control-20260915T215124Z-probe/.flint/lean/probe-conditional-delete)",
+  "facts": [
+    {
+      "name": "delete-published",
+      "ok": true,
+      "detail": "",
+      "fixture": true
+    },
+    {
+      "name": "b-still-has-seed",
+      "ok": true,
+      "detail": "",
+      "fixture": true
+    },
+    {
+      "name": "b-queued-tombstone",
+      "ok": true,
+      "detail": "",
+      "fixture": true
+    },
+    {
+      "name": "ui-sha",
+      "ok": true,
+      "detail": "a3dc819dc6bbf3cb6efd41b4b6294b6bbc3d168bb172b2574d6101021388bac0",
+      "fixture": true
+    },
+    {
+      "name": "ui-write",
+      "ok": true,
+      "detail": "200 {\"etag\":\"\\\"4955bd9118184eba993ed853c1852549\\\"\"}",
+      "fixture": true
+    },
+    {
+      "name": "b-race-exit",
+      "ok": true,
+      "detail": "rc=0",
+      "fixture": false
+    }
+  ],
+  "expected": "FAIL",
+  "race_events": {
+    "adopt": {
+      "ts_ms": 1789509087438,
+      "mono_ms": 65,
+      "holder": "lean-94da2197-7aa9-4332-a443-0be1615da0bb",
+      "ev": "consume",
+      "action": "adopted",
+      "etag": "\"4955bd9118184eba993ed853c1852549\"",
+      "from": "inbox",
+      "path": "x.txt"
+    },
+    "tombstone": {
+      "ts_ms": 1789509087438,
+      "mono_ms": 65,
+      "holder": "lean-94da2197-7aa9-4332-a443-0be1615da0bb",
+      "ev": "tombstone",
+      "action": "removed",
+      "path": "x.txt"
+    }
+  },
+  "oracles": {
+    "O1_race": {
+      "pass": true,
+      "problems": []
+    },
+    "O1_final": {
+      "pass": true,
+      "problems": []
+    },
+    "O2": {
+      "pass": true,
+      "problems": [],
+      "diffs": {
+        "A": {
+          "extra_in_writer": [],
+          "missing_in_writer": [],
+          "differ": []
+        },
+        "B": {
+          "extra_in_writer": [],
+          "missing_in_writer": [],
+          "differ": []
+        }
+      }
+    },
+    "O3_leg": {
+      "pass": false,
+      "problems": [
+        "the acked UI write is not served: C x.txt=None, B x.txt=None, UI a3dc819dc6bbf3cb6efd41b4b6294b6bbc3d168bb172b2574d6101021388bac0"
+      ]
+    }
+  },
+  "post_barrier_failures": [],
+  "status": "FAIL",
+  "reason": "(expected: the queued deletion removed the adopted UI write, and no fresh checkout serves it) oracles: O3 the acked UI write is not served: C x.txt=None, B x.txt=None, UI a3dc819dc6bbf3cb6efd41b4b6294b6bbc3d168bb172b2574d6101021388bac0",
+  "meets_expectation": true
+}

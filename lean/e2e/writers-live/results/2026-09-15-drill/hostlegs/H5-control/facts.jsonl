@@ -1,0 +1,3 @@
+{"name":"a-killed","ok":true,"detail":"rc=137","fixture":true}
+{"name":"b-daemon-alive","ok":true,"detail":"ran 180s","fixture":false}
+{"name":"b-daemon-drain","ok":true,"detail":"rc=0","fixture":false}

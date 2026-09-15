@@ -1,0 +1,107 @@
+{
+  "leg": "H3",
+  "arm": "control",
+  "dir": "/mnt/nvme/out/hostlegs/H3-control",
+  "probe": "flint-sync: probe-conditional PASS \u2014 PUT (h/h3-control-20260915T220003Z-probe/.flint/lean/probe-conditional) and DELETE (h/h3-control-20260915T220003Z-probe/.flint/lean/probe-conditional-delete)",
+  "facts": [
+    {
+      "name": "first-absence-withheld",
+      "ok": true,
+      "detail": "cites 24726819d5fa29b1a6c3b267f6638185",
+      "fixture": true
+    },
+    {
+      "name": "ui-write",
+      "ok": true,
+      "detail": "200 {\"etag\":\"\\\"47086c598aec6f2fdf03a90584cd6ffd\\\"\"}",
+      "fixture": true
+    },
+    {
+      "name": "b-sync-exit",
+      "ok": true,
+      "detail": "rc=0",
+      "fixture": true
+    },
+    {
+      "name": "b-applied-hitl",
+      "ok": true,
+      "detail": "",
+      "fixture": true
+    },
+    {
+      "name": "a-race-exit",
+      "ok": true,
+      "detail": "rc=0",
+      "fixture": false
+    }
+  ],
+  "expected": "FAIL",
+  "race_events": {
+    "hold": {
+      "ts_ms": 1789509605943,
+      "mono_ms": 336,
+      "holder": "lean-0bea275b-7866-446b-b051-5e52961960e5",
+      "ev": "drill_hold",
+      "flush": "d75921be-e2da-41cf-bd9a-4637355b1faa",
+      "path": "x.txt",
+      "secs": 20,
+      "where": "gc"
+    },
+    "sync": {
+      "ts_ms": 1789509606183,
+      "mono_ms": 0,
+      "holder": "lean-65f6ac17-80b3-4886-a7c2-ee9892131d8d",
+      "ev": "sync",
+      "applied": 1,
+      "conflicts": 0,
+      "deleted": 0,
+      "hidden": 1,
+      "scoped": false,
+      "seq": 2
+    },
+    "gc": {
+      "ts_ms": 1789509625981,
+      "mono_ms": 20374,
+      "holder": "lean-0bea275b-7866-446b-b051-5e52961960e5",
+      "ev": "gc",
+      "flush": "d75921be-e2da-41cf-bd9a-4637355b1faa",
+      "head": "\"47086c598aec6f2fdf03a90584cd6ffd\"",
+      "path": "x.txt",
+      "result": "deleted"
+    }
+  },
+  "oracles": {
+    "O1_race": {
+      "pass": true,
+      "problems": []
+    },
+    "O1_final": {
+      "pass": true,
+      "problems": []
+    },
+    "O2": {
+      "pass": false,
+      "problems": [
+        "B has x.txt, C does not"
+      ],
+      "diffs": {
+        "A": {
+          "extra_in_writer": [],
+          "missing_in_writer": [],
+          "differ": []
+        },
+        "B": {
+          "extra_in_writer": [
+            "x.txt"
+          ],
+          "missing_in_writer": [],
+          "differ": []
+        }
+      }
+    }
+  },
+  "post_barrier_failures": [],
+  "status": "FAIL",
+  "reason": "(expected: F3 signature: B's sync advanced its base past A's delete; B keeps x.txt, the manifest and a fresh checkout do not) oracles: O2 B has x.txt, C does not",
+  "meets_expectation": true
+}

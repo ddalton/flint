@@ -1,0 +1,158 @@
+{
+  "leg": "R3-S2-churn-ui",
+  "oracles": {
+    "O1": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "checkout_code": 0,
+        "stderr_tail": "flint-sync: checkout \u2014 32 materialized, 0 present, live-tree=false\nflint-sync: phase manifest=0.043s fetch=0.040s commit=0.009s bytes=5365 ranged=0\n",
+        "citations": 32,
+        "heads": 32,
+        "missing_heads": [],
+        "mismatched": [],
+        "extra_heads": [],
+        "checkout_missing_cited": [],
+        "checkout_not_cited": [],
+        "manifest_seq": 336,
+        "problems": []
+      }
+    },
+    "O2": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "checkout_files": 32,
+        "trees": {
+          "n0w0": 32,
+          "n0w1": 32,
+          "n1w0": 32,
+          "n1w1": 32,
+          "n2w0": 32,
+          "n2w1": 32
+        },
+        "diffs": {},
+        "problems": []
+      }
+    },
+    "O3": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "final_source": "checkout",
+        "ops": 768,
+        "parts": 855,
+        "acked_parts": 631,
+        "acked_writes": 460,
+        "acked_writes_by_agent": {
+          "n0w0": 74,
+          "n0w1": 60,
+          "n1w0": 69,
+          "n1w1": 68,
+          "n2w0": 69,
+          "n2w1": 60,
+          "ui": 60
+        },
+        "accounted": {
+          "final": 22,
+          "superseded": 297,
+          "replaced": 14,
+          "preserved": 127
+        },
+        "unacked_parts": {
+          "dropped": 138,
+          "no-ack": 48,
+          "refused": 35,
+          "error": 3
+        },
+        "acks_by_status": {
+          "ok": 70,
+          "partial": 121,
+          "no-ack": 9,
+          "refused": 35,
+          "error": 3
+        },
+        "preserved_copies": 1549,
+        "preserved_unparsed_keys": 0,
+        "multiply_covered": [],
+        "losses_total": 0,
+        "losses": [],
+        "refused_landed_total": 0,
+        "refused_landed": [],
+        "malformed": [],
+        "problems": []
+      }
+    },
+    "O4": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "preserved_objects": 1549,
+        "records_by_kind": {
+          "consume-dirty": 150,
+          "upload-412-preserved": 1399,
+          "upload-withheld: the object this barrier PUT was replaced or collected before its commit (a peer's GC recognizes the etag of identical bytes); nothing cited, the path stays dirty and publishes next barrier": 1333,
+          "gc-skip": 170,
+          "repair-withheld: the object this barrier re-cited was replaced or collected before its commit; nothing cited, and the next consume installs the manifest's version": 30,
+          "consume-foreign-delete-vs-dirty: another writer deleted this path; the local version has unpublished changes, so it stays and publishes": 19,
+          "upload-412-parked": 14,
+          "consume-object-missing": 7
+        },
+        "keys_named": 1549,
+        "keys_recorded_by_two_writers": 0,
+        "duplicate_object_keys": [],
+        "no_record": [],
+        "missing_object": [],
+        "preserved_key_on_other_kinds": [],
+        "problems": []
+      }
+    },
+    "O5": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "faults_declared": false,
+        "claims_by_trace": {
+          "n0w0": {
+            "claimed:fresh": 1,
+            "claimed:released": 71,
+            "waiting": 69
+          },
+          "n0w1": {
+            "waiting": 69,
+            "claimed:released": 71
+          },
+          "n1w0": {
+            "claimed:released": 70,
+            "waiting": 68
+          },
+          "n1w1": {
+            "waiting": 70,
+            "claimed:released": 71
+          },
+          "n2w0": {
+            "claimed:released": 72,
+            "waiting": 69
+          },
+          "n2w1": {
+            "waiting": 71,
+            "claimed:released": 73
+          }
+        },
+        "waiting": 416,
+        "deadline": 0,
+        "deposed": 0,
+        "orphaned_own": 0,
+        "deadlines": [],
+        "deposals": [],
+        "orphaned_own_claims": [],
+        "problems": []
+      }
+    },
+    "O6": {
+      "pass": null,
+      "skipped": "not selected"
+    }
+  },
+  "pass": true
+}

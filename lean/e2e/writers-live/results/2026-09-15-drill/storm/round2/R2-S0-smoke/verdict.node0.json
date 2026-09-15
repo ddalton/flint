@@ -1,0 +1,187 @@
+{
+ "leg": "R2-S0-smoke",
+ "oracles": {
+  "O1": {
+   "pass": true,
+   "details": {
+    "reasons": [],
+    "checkout_code": 0,
+    "stderr_tail": "flint-sync: checkout \u2014 30 materialized, 0 present, live-tree=false\nflint-sync: phase manifest=0.048s fetch=0.065s commit=0.005s bytes=4649 ranged=0\n",
+    "citations": 30,
+    "heads": 30,
+    "missing_heads": [],
+    "mismatched": [],
+    "extra_heads": [],
+    "checkout_missing_cited": [],
+    "checkout_not_cited": [],
+    "manifest_seq": 70,
+    "problems": []
+   }
+  },
+  "O2": {
+   "pass": true,
+   "details": {
+    "reasons": [],
+    "checkout_files": 30,
+    "trees": {
+     "n0w0": 30,
+     "n0w1": 30,
+     "n1w0": 30,
+     "n1w1": 30,
+     "n2w0": 30,
+     "n2w1": 30
+    },
+    "diffs": {},
+    "problems": []
+   }
+  },
+  "O3": {
+   "pass": true,
+   "details": {
+    "reasons": [],
+    "final_source": "checkout",
+    "ops": 210,
+    "parts": 210,
+    "acked_parts": 165,
+    "acked_writes": 165,
+    "acked_writes_by_agent": {
+     "n0w0": 28,
+     "n0w1": 28,
+     "n1w0": 21,
+     "n1w1": 28,
+     "n2w0": 27,
+     "n2w1": 23,
+     "ui": 10
+    },
+    "accounted": {
+     "final": 28,
+     "superseded": 79,
+     "replaced": 0,
+     "preserved": 58
+    },
+    "unacked_parts": {
+     "dropped": 35,
+     "no-ack-line": 5,
+     "refused": 5
+    },
+    "acks_by_status": {
+     "ok": 36,
+     "partial": 18,
+     "refused": 5
+    },
+    "preserved_copies": 169,
+    "preserved_unparsed_keys": 0,
+    "multiply_covered": [],
+    "losses_total": 0,
+    "losses": [],
+    "refused_landed_total": 0,
+    "refused_landed": [],
+    "malformed": [],
+    "problems": []
+   }
+  },
+  "O4": {
+   "pass": true,
+   "details": {
+    "reasons": [],
+    "preserved_objects": 169,
+    "records_by_kind": {
+     "upload-412-preserved": 133,
+     "consume-dirty": 36,
+     "adopt-withheld: the object this barrier found already at its key was replaced or collected before its commit; nothing cited, the path stays dirty and publishes next barrier": 1,
+     "upload-withheld: the object this barrier PUT was replaced or collected before its commit (a peer's GC recognizes the etag of identical bytes); nothing cited, the path stays dirty and publishes next barrier": 67,
+     "upload-412-parked": 1,
+     "repair-withheld: the object this barrier re-cited was replaced or collected before its commit; nothing cited, and the next consume installs the manifest's version": 5
+    },
+    "keys_named": 169,
+    "keys_recorded_by_two_writers": 0,
+    "duplicate_object_keys": [],
+    "no_record": [],
+    "missing_object": [],
+    "preserved_key_on_other_kinds": [],
+    "problems": []
+   }
+  },
+  "O5": {
+   "pass": true,
+   "details": {
+    "reasons": [],
+    "faults_declared": true,
+    "claims_by_trace": {
+     "n0w0": {
+      "waiting": 8,
+      "claimed:released": 11
+     },
+     "n0w1": {
+      "claimed:fresh": 1,
+      "waiting": 13,
+      "claimed:released": 14
+     },
+     "n1w0": {
+      "waiting": 13,
+      "claimed:released": 14
+     },
+     "n1w1": {
+      "waiting": 11,
+      "claimed:released": 14
+     },
+     "n2w0": {
+      "waiting": 12,
+      "claimed:released": 13
+     },
+     "n2w1": {
+      "waiting": 11,
+      "claimed:released": 13
+     }
+    },
+    "waiting": 68,
+    "deadline": 0,
+    "deposed": 0,
+    "orphaned_own": 0,
+    "deadlines": [],
+    "deposals": [],
+    "orphaned_own_claims": [],
+    "problems": []
+   }
+  },
+  "O6": {
+   "pass": null,
+   "skipped": "not selected"
+  }
+ },
+ "pass": true,
+ "facts": {
+  "missing_nodes": [],
+  "faults": [
+   {
+    "ev": "fault",
+    "node": 0,
+    "ts_ms": 1789511532830,
+    "fault": "kill-9-syncer",
+    "writer": "n0w0"
+   },
+   {
+    "ev": "fault",
+    "node": 1,
+    "ts_ms": 1789511533447,
+    "fault": "pod-replacement",
+    "writer": "n1w0"
+   },
+   {
+    "ev": "fault",
+    "node": 2,
+    "ts_ms": 1789511533097,
+    "fault": "kill-9-syncer",
+    "writer": "n2w0"
+   }
+  ],
+  "undrained": []
+ },
+ "counts": {
+  "agents": 7,
+  "citations": 30,
+  "objects": 272,
+  "preserved": 169,
+  "faults": 3
+ }
+}

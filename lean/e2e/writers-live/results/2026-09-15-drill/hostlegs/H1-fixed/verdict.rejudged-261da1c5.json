@@ -1,0 +1,100 @@
+{
+  "leg": "H1",
+  "arm": "fixed",
+  "dir": "/private/tmp/claude-503/-Users-ddalton-github-flint/b25aeb34-6dcb-467c-b104-d9e895ac26b6/scratchpad/rejudge/H1-fixed",
+  "probe": "flint-sync: probe-conditional PASS \u2014 PUT (h/h1-fixed-20260915T215736Z-probe/.flint/lean/probe-conditional) and DELETE (h/h1-fixed-20260915T215736Z-probe/.flint/lean/probe-conditional-delete)",
+  "facts": [
+    {
+      "name": "b-has-seed",
+      "ok": true,
+      "detail": "",
+      "fixture": true
+    },
+    {
+      "name": "first-absence-withheld",
+      "ok": true,
+      "detail": "",
+      "fixture": true
+    },
+    {
+      "name": "a-race-exit",
+      "ok": true,
+      "detail": "rc=0",
+      "fixture": false
+    },
+    {
+      "name": "b-race-exit",
+      "ok": true,
+      "detail": "rc=0",
+      "fixture": false
+    }
+  ],
+  "expected": "PASS",
+  "race_events": {
+    "hold": {
+      "ts_ms": 1789509458025,
+      "mono_ms": 264,
+      "holder": "lean-76c58c1c-9bab-42f4-8de6-236e92fc1c72",
+      "ev": "drill_hold",
+      "flush": "a340a5a6-fdc3-49e2-8668-7f21205b8b3b",
+      "path": "x.txt",
+      "secs": 20,
+      "where": "gc"
+    },
+    "put": {
+      "ts_ms": 1789509458219,
+      "mono_ms": 70,
+      "holder": "lean-10ea9d90-221d-4faf-a01b-0b3a374754a2",
+      "ev": "upload",
+      "etag": "\"a7c0aba2a05a0b52ffe01243b2ccbe60\"",
+      "flush": "b0a28e9c-fc3e-4da0-be73-dd85638e5020",
+      "outcome": "put",
+      "path": "x.txt"
+    },
+    "gc": {
+      "ts_ms": 1789509478065,
+      "mono_ms": 20305,
+      "holder": "lean-76c58c1c-9bab-42f4-8de6-236e92fc1c72",
+      "ev": "gc",
+      "flush": "a340a5a6-fdc3-49e2-8668-7f21205b8b3b",
+      "head": "\"a7c0aba2a05a0b52ffe01243b2ccbe60\"",
+      "path": "x.txt",
+      "recognized": "\"0d0835ec3674aaf7ea02fb8323865f02\"",
+      "result": "skip"
+    }
+  },
+  "oracles": {
+    "O1_race": {
+      "pass": true,
+      "problems": []
+    },
+    "O1_final": {
+      "pass": true,
+      "problems": []
+    },
+    "O2": {
+      "pass": true,
+      "problems": [],
+      "diffs": {
+        "A": {
+          "extra_in_writer": [],
+          "missing_in_writer": [],
+          "differ": []
+        },
+        "B": {
+          "extra_in_writer": [],
+          "missing_in_writer": [],
+          "differ": []
+        }
+      }
+    },
+    "O3_leg": {
+      "pass": true,
+      "problems": []
+    }
+  },
+  "post_barrier_failures": [],
+  "status": "PASS",
+  "reason": "O1 O2 clean; A's GC result=skip head=a7c0aba2a05a0b52ffe01243b2ccbe60 (want skip at B's a7c0aba2a05a0b52ffe01243b2ccbe60)",
+  "meets_expectation": true
+}

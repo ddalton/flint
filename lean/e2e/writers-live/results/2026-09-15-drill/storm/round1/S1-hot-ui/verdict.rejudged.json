@@ -1,0 +1,321 @@
+{
+  "leg": "S1-hot-ui",
+  "oracles": {
+    "O1": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "checkout_code": 0,
+        "stderr_tail": "flint-sync: checkout \u2014 30 materialized, 0 present, live-tree=false\nflint-sync: phase manifest=0.053s fetch=0.039s commit=0.013s bytes=4737 ranged=0\n",
+        "citations": 30,
+        "heads": 30,
+        "missing_heads": [],
+        "mismatched": [],
+        "extra_heads": [],
+        "checkout_missing_cited": [],
+        "checkout_not_cited": [],
+        "manifest_seq": 288,
+        "problems": []
+      }
+    },
+    "O2": {
+      "pass": false,
+      "details": {
+        "reasons": [
+          "2 tree(s) differ from the checkout"
+        ],
+        "checkout_files": 30,
+        "trees": {
+          "n0w0": 30,
+          "n0w1": 30,
+          "n1w0": 30,
+          "n1w1": 30,
+          "n2w0": 30,
+          "n2w1": 30
+        },
+        "diffs": {
+          "n0w0": {
+            "extra": [],
+            "missing": [],
+            "differing": [
+              {
+                "path": "hot/p00.txt",
+                "tree": "eaa101624a9380980b6ea2e708bae8a8a289ae2044bf10a2c84ecdf415457e26",
+                "checkout": "91cf54ebbb15a31de619c96cd9a08c0a419726c22354643f83e8ed6e826f4a8b"
+              },
+              {
+                "path": "hot/p03.txt",
+                "tree": "e66df086bede63ff89d0e085198d2aaf1d25472467c62f5571fbca6dd54ddd3f",
+                "checkout": "b832ceef55952c1358ab3b9624fbd800262ce4341c4367da269945aaa483f986"
+              },
+              {
+                "path": "hot/p05.txt",
+                "tree": "83b5019f335064037a03a0de43cc31d18dc8d6cd45a2c113e21efd0cbe47fad0",
+                "checkout": "6cae5e5a466c92c34d37ec10f64c42abf03c5db3927d97f15037650ecd66d0c0"
+              },
+              {
+                "path": "hot/p06.txt",
+                "tree": "aff88ffa1287659812c05fa92f7a4c32fed57df922e606b05ee8a9453e55ad1f",
+                "checkout": "eca85966fd962e1c3861c946ba58c3ee11f77ce840e7b0d3e31b25a1661e7990"
+              },
+              {
+                "path": "hot/p08.txt",
+                "tree": "b050979b18615b24c280e9f0d7624ad1f3a8d097b8f5e664a87ff2f164aafcce",
+                "checkout": "54f7056aa9de629df1d18a7370286c33db5a8c7269859e4b451353cd892ae834"
+              },
+              {
+                "path": "hot/p11.txt",
+                "tree": "e6841f92fe4d4c3bde256007e0b4014897906cf8154e1cb4d6ca6a750d84a227",
+                "checkout": "969bd2c5a6f70310bef187b1e090c5981eb8fe961a39f71050e75eefc008799b"
+              },
+              {
+                "path": "hot/p12.txt",
+                "tree": "48dc8914779eff1b23102f3da0e29a7083bd3cc5f294e94ac16d47ae18d16c77",
+                "checkout": "f9d8689cc26acd053f45ca20ecdad7e17bbf1f38de62baee6449b41f39b19683"
+              },
+              {
+                "path": "hot/p15.txt",
+                "tree": "17a81a9419d2b7e227fe13efd3525ad88ea7c43e8efaa73540351c3d90be21c5",
+                "checkout": "fc17c938a0a5963b305889501e34838007bbfc75d0f73f7505531c753fcb58cf"
+              },
+              {
+                "path": "hot/p17.txt",
+                "tree": "4b8ce13097fed9f717e327d25a5881d845a2d0d3dbd397fc959808c7c97ddcb5",
+                "checkout": "ab9fad876b4eff4f15f9b0b3850e82f834ae86636faad7193f6c4110217eedf1"
+              },
+              {
+                "path": "hot/p18.txt",
+                "tree": "2fd93059c3eb20f86e0966b9b69e0ccaf3efd3dec83f25e763e83a9b3bc5355d",
+                "checkout": "548645d40b68f668e42375697b6015d0cd98db85b1fd30abed3661d2402d4c5e"
+              },
+              {
+                "path": "hot/p19.txt",
+                "tree": "872d8378a18f186192dd5d84bf7c5fd8500b6afc0d2c7373492f8fa9d08ef99c",
+                "checkout": "ded922dd4e3431cd05be18aac454d135ef5f0973443139fed8e5ffbbe238649f"
+              },
+              {
+                "path": "hot/p21.txt",
+                "tree": "5cab9eda283232b20b16c3a58194b0b5dac64a203458afeeed6aba3dd76cb303",
+                "checkout": "f9913e783ba7c65adcf6b1148468f275c45e499db792dfd7f44006e2db57c522"
+              },
+              {
+                "path": "hot/p24.txt",
+                "tree": "6c235f8ab1863710009c7e51714800eade7d8a569d7850e2f6b899df3e0c2a21",
+                "checkout": "6781baa3c868ba37004b92ba957c9d3688e4a99ed1d49988aa64a21d81b0098c"
+              },
+              {
+                "path": "hot/p26.txt",
+                "tree": "12690a7b20060d4468993056668fb6bce54ee68670c0dfd87c28a6654abca8d8",
+                "checkout": "d91ae6f3a3514ffaa0ece79225c281a720c57c62aa28ae352036129cc9236b12"
+              },
+              {
+                "path": "hot/p28.txt",
+                "tree": "94cf0bc50377063ccf8d609ff9b6247fe5aa93b466098e744c15ec6a46764996",
+                "checkout": "73d58f4bfe5e708dbae2b624d1fff60d64ed5072daf50ef7856bc7e428064185"
+              }
+            ]
+          },
+          "n0w1": {
+            "extra": [],
+            "missing": [],
+            "differing": [
+              {
+                "path": "hot/p00.txt",
+                "tree": "25f54e6722f5ff1e7818f279cd3a93c69910843e645459957a47c7722d7df17c",
+                "checkout": "91cf54ebbb15a31de619c96cd9a08c0a419726c22354643f83e8ed6e826f4a8b"
+              },
+              {
+                "path": "hot/p03.txt",
+                "tree": "905ca55d5258450f0543992bde6880f882f5bd647d2c4ccc64aa3fbae2a08806",
+                "checkout": "b832ceef55952c1358ab3b9624fbd800262ce4341c4367da269945aaa483f986"
+              },
+              {
+                "path": "hot/p05.txt",
+                "tree": "e1e74421654c807c7c42760020e0decf7f6a970edceed2edb7ee3500f9cef9f9",
+                "checkout": "6cae5e5a466c92c34d37ec10f64c42abf03c5db3927d97f15037650ecd66d0c0"
+              },
+              {
+                "path": "hot/p06.txt",
+                "tree": "cc4471305a61e903c8494fa1e03b721752a19b2d1f311e532aae353b87800668",
+                "checkout": "eca85966fd962e1c3861c946ba58c3ee11f77ce840e7b0d3e31b25a1661e7990"
+              },
+              {
+                "path": "hot/p07.txt",
+                "tree": "30578313b1a04d973f5b34cdef53cc81c87f718c09073ae345eb11f8f3af2742",
+                "checkout": "703c553009b8aa7d2673114361681fa70be4af88fe46adc91b3c2f1d886e756f"
+              },
+              {
+                "path": "hot/p08.txt",
+                "tree": "808a78c751d58d18a399faa70e23c2fa52be69acaa8f3277e0978dd5a44efa08",
+                "checkout": "54f7056aa9de629df1d18a7370286c33db5a8c7269859e4b451353cd892ae834"
+              },
+              {
+                "path": "hot/p11.txt",
+                "tree": "94d23da37f1a8410887c733f054a9ba84cac23f545076c7ae5cc5140da1fd416",
+                "checkout": "969bd2c5a6f70310bef187b1e090c5981eb8fe961a39f71050e75eefc008799b"
+              },
+              {
+                "path": "hot/p12.txt",
+                "tree": "971ffacd36bd8e4d8349283fc883b1a75ebda62e488246876b6ffb5884f911bb",
+                "checkout": "f9d8689cc26acd053f45ca20ecdad7e17bbf1f38de62baee6449b41f39b19683"
+              },
+              {
+                "path": "hot/p15.txt",
+                "tree": "6b579ab836e8243e0a11cfb733f8abc376f4c2b2d062098522f8d3a1f25c4bb0",
+                "checkout": "fc17c938a0a5963b305889501e34838007bbfc75d0f73f7505531c753fcb58cf"
+              },
+              {
+                "path": "hot/p17.txt",
+                "tree": "c7a0b3bb0383676e655ff6a76cb3e4fce6f337d3060849485485f3dae238195d",
+                "checkout": "ab9fad876b4eff4f15f9b0b3850e82f834ae86636faad7193f6c4110217eedf1"
+              },
+              {
+                "path": "hot/p18.txt",
+                "tree": "d392a59220a2266e953c17aa59818905e0b326bfa4846bbc380cfd88d2952d48",
+                "checkout": "548645d40b68f668e42375697b6015d0cd98db85b1fd30abed3661d2402d4c5e"
+              },
+              {
+                "path": "hot/p19.txt",
+                "tree": "b19cbc9edfa1043d57d969d5db2cc0c8452b0ffb96d70867a9b47fc83198fda7",
+                "checkout": "ded922dd4e3431cd05be18aac454d135ef5f0973443139fed8e5ffbbe238649f"
+              },
+              {
+                "path": "hot/p21.txt",
+                "tree": "4d8e57372e4d23503c1219ff8e640bb6f8da420c219ebf661dbc26a05544f7b1",
+                "checkout": "f9913e783ba7c65adcf6b1148468f275c45e499db792dfd7f44006e2db57c522"
+              },
+              {
+                "path": "hot/p24.txt",
+                "tree": "5b3173fc260aeb633ee63b60cb61990255c854b761d1781d4694ad850f96ffa3",
+                "checkout": "6781baa3c868ba37004b92ba957c9d3688e4a99ed1d49988aa64a21d81b0098c"
+              },
+              {
+                "path": "hot/p26.txt",
+                "tree": "a60c5ab3e14cc356dccd57f4a16f0b48b764d7d382d4a81eb74e33cef0c12fdd",
+                "checkout": "d91ae6f3a3514ffaa0ece79225c281a720c57c62aa28ae352036129cc9236b12"
+              },
+              {
+                "path": "hot/p28.txt",
+                "tree": "1c1b7d102e4533e5bfb6dda29d0467d35aa4c31c7552ea0ea3b900af9dc2af07",
+                "checkout": "73d58f4bfe5e708dbae2b624d1fff60d64ed5072daf50ef7856bc7e428064185"
+              }
+            ]
+          }
+        },
+        "problems": []
+      }
+    },
+    "O3": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "final_source": "checkout",
+        "ops": 776,
+        "parts": 776,
+        "acked_parts": 334,
+        "acked_writes": 334,
+        "acked_writes_by_agent": {
+          "n0w0": 47,
+          "n0w1": 48,
+          "n1w0": 50,
+          "n1w1": 56,
+          "n2w0": 45,
+          "n2w1": 46,
+          "ui": 42
+        },
+        "accounted": {
+          "final": 6,
+          "superseded": 206,
+          "replaced": 20,
+          "preserved": 102
+        },
+        "unacked_parts": {
+          "dropped": 433,
+          "refused": 9
+        },
+        "acks_by_status": {
+          "ok": 48,
+          "partial": 145,
+          "refused": 9
+        },
+        "preserved_copies": 4985,
+        "preserved_unparsed_keys": 0,
+        "multiply_covered": [],
+        "losses_total": 0,
+        "losses": [],
+        "refused_landed_total": 0,
+        "refused_landed": [],
+        "malformed": [],
+        "problems": []
+      }
+    },
+    "O4": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "preserved_objects": 4985,
+        "records_by_kind": {
+          "upload-412-preserved": 4904,
+          "consume-dirty": 81,
+          "upload-withheld: the object this barrier PUT was replaced or collected before its commit (a peer's GC recognizes the etag of identical bytes); nothing cited, the path stays dirty and publishes next barrier": 4412,
+          "adopt-withheld: the object this barrier found already at its key was replaced or collected before its commit; nothing cited, the path stays dirty and publishes next barrier": 50,
+          "upload-412-parked": 171
+        },
+        "keys_named": 4985,
+        "keys_recorded_by_two_writers": 0,
+        "duplicate_object_keys": [],
+        "no_record": [],
+        "missing_object": [],
+        "preserved_key_on_other_kinds": [],
+        "problems": []
+      }
+    },
+    "O5": {
+      "pass": true,
+      "details": {
+        "reasons": [],
+        "faults_declared": false,
+        "claims_by_trace": {
+          "n0w0": {
+            "waiting": 74,
+            "claimed:released": 76
+          },
+          "n0w1": {
+            "claimed:fresh": 1,
+            "waiting": 72,
+            "claimed:released": 72
+          },
+          "n1w0": {
+            "waiting": 75,
+            "claimed:released": 76
+          },
+          "n1w1": {
+            "claimed:released": 77,
+            "waiting": 76
+          },
+          "n2w0": {
+            "waiting": 76,
+            "claimed:released": 78
+          },
+          "n2w1": {
+            "claimed:released": 72,
+            "waiting": 71
+          }
+        },
+        "waiting": 444,
+        "deadline": 0,
+        "deposed": 0,
+        "orphaned_own": 0,
+        "deadlines": [],
+        "deposals": [],
+        "orphaned_own_claims": [],
+        "problems": []
+      }
+    },
+    "O6": {
+      "pass": null,
+      "skipped": "not selected"
+    }
+  },
+  "pass": false
+}

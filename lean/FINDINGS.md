@@ -5,8 +5,8 @@ gateway (`lean/gateway`), their store and its double (`crates/flint-store`), and
 (`lean/formal`) found. Compiled 2026-09-15 for W5 of `docs/plans/flint-lean-well-understood-plan.md`: the
 finding rate per release and per campaign is computed from Table 1 in [Rate](#rate).
 
-**Counts:** Table 1, 141 product defects (9 OPEN, 1 unreleased, 34 fixed before any published build
-carried them). Table 2, 21 rig defects. Table 3, 15 model-only bug rows (21 bugs counting the three rows that each hold
+**Counts:** Table 1, 142 product defects (8 OPEN, 3 unreleased, 34 fixed before any published build
+carried them). Table 2, 27 rig defects. Table 3, 16 model-only bug rows (22 bugs counting the three rows that each hold
 three), and 6 abstractions that hid code defects (Table 3b).
 
 **Columns.**
@@ -36,7 +36,8 @@ of HEAD `86d731b3` plus the working tree of 2026-09-15.
 
 | id | found | found by | class | summary | fix commit | shipped in | pinned by |
 |----|-------|----------|-------|---------|------------|------------|-----------|
-| L-1 | 2026-09-15 | model | data loss | A UI write that re-created a path another writer had deleted could be lost: the writer-local queue applied a peer's deletion after the inbox's adoptions, the window clear dropped the inbox entry, and the acked bytes stayed cited by no manifest (since 1.52.0). Tranche 7, the first run that modelled the writer-local queue (lean/formal/README.md:883). CHANGELOG.md:17 | uncommitted (working tree: `lean/syncer/src/barrier.rs`) | unreleased | `a_ui_write_over_a_peers_delete_survives_the_queued_tombstone`; cfg `LeanBarrierLeaseQueueTombstoneOverHitl` (`Inv_HITLTracked`, 19 steps) |
+| L-1 | 2026-09-15 | model | data loss | A UI write that re-created a path another writer had deleted could be lost: the writer-local queue applied a peer's deletion after the inbox's adoptions, the window clear dropped the inbox entry, and the acked bytes stayed cited by no manifest (since 1.52.0). Tranche 7, the first run that modelled the writer-local queue (lean/formal/README.md:883). CHANGELOG.md:17 | b52324fc | unreleased | `a_ui_write_over_a_peers_delete_survives_the_queued_tombstone`; cfg `LeanBarrierLeaseQueueTombstoneOverHitl` (`Inv_HITLTracked`, 19 steps); host leg H6 on S3 (fixed PASS, control `f14-tombstone-over-adopted` FAIL, 2026-09-15) |
+| F15 (L-100) | 2026-09-15 | live drill | convergence | A writer kept a stale copy for good after its re-citation of a consumed UI write was withheld at the commit: another writer replaced the object between the repair's HEAD and the commit-section re-read, the path was PARKED, the park kept the replacing version out of the queue while the merge base moved past it, and the tree (clean against its baseline) kept the UI bytes (since 1.52.0). No bytes lost. Storm drill S0 on real S3, one writer of six, one path. CHANGELOG.md:17 | 6fb3f8e7 | unreleased | `a_repair_citation_withheld_at_the_commit_still_receives_the_version_that_replaced_it`; control patch `f15-repair-withheld-parks`; storm O2 |
 | L-2 | 2026-09-14 | model | contract | A publish ack said `ok` for a boundary that did not carry the agent's change, route (1): the agent deleted a file another writer had changed that had not reached its tree; delete/modify resolves foreign-wins but the ack named a seq still citing the file. Now `partial` with the path in `report.dropped`. TLC box 2026-09-14 (`results/2026-09-14-sentinel-box/`, lean/formal/README.md:757). CHANGELOG.md:251 | 231cff00 | v1.54.0 | `a_publish_whose_delete_lost_to_a_peers_edit_is_partial` and three siblings; cfg `LeanBarrierLeaseSentinelOutrankedOk` (must-fail, `Inv_AckImpliesCited`) |
 | L-3 | 2026-09-14 | code reading (unverified) | contract | Publish ack said `ok` over an upload that published nothing (large file drifted mid-transfer, or its assembly was swept). CHANGELOG.md:259 | 231cff00 | v1.54.0 | syncer test using `MemoryStore::inject_compose_swept` |
 | L-4 | 2026-09-14 | code reading (unverified) | data loss | The drain attested a boundary missing such a file (routes of L-2/L-3); an attested drain lets the node remove the tree holding the only copy. Drain now refuses; the binary's retry publishes the path. CHANGELOG.md:262 | 231cff00 | v1.54.0 | syncer drain test (one of four) |
@@ -60,7 +61,7 @@ of HEAD `86d731b3` plus the working tree of 2026-09-15.
 | L-22 | 2026-09-13 | model | contract | `.flint/remote.seq` `integrated_seq` advanced to the installed seq while queued peer changes still waited for the next consume, so the ticker said "no news" about a tree that lacked them. Sentinel world depth 19 (`Inv_AckBoundaryCoherent`), i4i.2xlarge TLC box 2026-09-13; lean/formal/README.md:739. CHANGELOG.md:639 | 8792c5f7 | v1.52.0 (never shipped broken: introduced by the per-barrier fence in the same release) | `remote_seq_reports_news_while_a_peers_change_waits_in_the_queue`; cfg `LeanBarrierLeaseSentinel` |
 | L-23 | 2026-09-13 | code reading (unverified) | availability | Opt-in `uploadPartParallelism` (v1.51.0) had no byte bound: every part and whole body read whole into memory, peak RSS `min(large objects, fanout) x parts x part_size`, 16 GiB at 8 wide. Now `ByteGate` / `uploadInflightMb` 256. CHANGELOG.md:652 | b50c2faf | v1.52.0 | fake-S3 RSS measurement (no named test) |
 | L-24 | 2026-09-13 | test (unverified) | convergence | OPEN (known limitation v1.52.0): a writer that supersedes a peer's not-yet-cited upload leaves that peer's commit citing a generation the key no longer holds until the superseding writer commits (bytes preserved). Not repeated in the v1.53.0/v1.54.0 limitations, but the assessment (docs/plans/flint-lean-writer-lease-and-gated-assessment.md:560) calls it still open and the model hides it (its 412 arm parks; `Inv_NoDangling` checks existence, not generation). CHANGELOG.md:707 | OPEN | — | none |
-| finding 10 (L-25) | 2026-09-13 | model (unverified) | convergence | OPEN (known limitation v1.52.0-v1.54.0): a writer lost for good between an upload and its commit leaves an uncited object that the manifest, a fresh checkout and the live trees disagree about until a writer rewrites the path. No acked write lost. CHANGELOG.md:702 docs/plans/flint-lean-writer-lease-and-gated-assessment.md:595 | OPEN | — | `a_writer_killed_after_its_upload_does_not_leave_the_trees_diverged` (`#[ignore]`, fails today); host leg H5 reproduced it |
+| finding 10 (L-25) | 2026-09-13 | model (unverified) | convergence | Known limitation v1.52.0-v1.54.0, fixed unreleased: a writer lost for good between an upload and its commit leaves an uncited object that the manifest, a fresh checkout and the live trees disagree about until a writer rewrites the path. No acked write lost. The floor tick now sweeps for untracked uploads. CHANGELOG.md:702 docs/plans/flint-lean-writer-lease-and-gated-assessment.md:595 | bdf71176 | unreleased | `a_writer_killed_after_its_upload_does_not_leave_the_trees_diverged` (un-ignored); host leg H5 on S3 (fixed PASS, sweep-off control FAIL, 2026-09-15) |
 | L-26 | 2026-09-13 | live drill | availability | OPEN (known limitation v1.52.0-v1.54.0; introduced by the L-18 fix): a gateway UI write can wait up to the window deadline (180 s) behind a barrier that died mid-window. CHANGELOG.md:710 | OPEN | — | none |
 | L-27 | 2026-09-13 | host leg | data loss | OPEN (known limitation v1.52.0-v1.54.0): on Ozone 2.2.x a second writer's GC can delete the first writer's upload (Ozone ignores `If-Match` on DeleteObject, HDDS-14907); the syncer does not refuse the configuration. `probe-conditional` on Ozone 2.2.1 s3g plus an AWS CLI control (assessment:581). CHANGELOG.md:698 | OPEN | — | `probe::probe_conditional_delete` detects it (does not refuse) |
 | L-28 | 2026-09-12 | test | contract | Gateway 0.2.0: an overwrite of a cited file read 409 `moved` until the syncer re-cited it (`get_file` preferred the citation over the tracked inbox entry), for every reader for up to a barrier, and forever with no syncer running. A battery leg had documented the 409 as expected. CHANGELOG.md:975 | ebb42b30 | v1.51.0 (gateway 0.2.1) | one API test with both mutations as controls; the battery leg now asserts the bytes |
@@ -182,6 +183,12 @@ of HEAD `86d731b3` plus the working tree of 2026-09-15.
 
 | found | summary | fix |
 |-------|---------|-----|
+| 2026-09-15 | Host leg H1's control was judged only by F1's end state (a dangling citation), which finding 13's re-read of every own PUT now repairs downstream: on S3 the control's GC did delete B's PUT and the leg read VOID. | the H1 signature also accepts the direct fingerprint (GC deleted, B's re-read found its PUT gone); frozen H1 evidence re-judged (261da1c5) |
+| 2026-09-15 | Storm nodes ended their load 9-13 s apart (node 0 started at go, followers polled for it) and drained independently: 16 false O2 divergences on node 0 in S1, 1 in R2-S3, every path published within ~2 s of that node's drain or after it. | load ends at go's timestamp on every node; idle starts after every node writes quiet-<n> (1f6d8c2f) |
+| 2026-09-15 | Storm judge: one CLI process per preserved copy (4,985 in S1, over 30 min) delayed the next leg's go past the followers' 900 s wait, desynchronising every later leg; a failed listing read as an empty bucket. | one sync of the conflicts prefix, unread listing or copy fails the verdict, followers wait 2700 s (45420060) |
+| 2026-09-15 | O3 ordered an unanswered delete by op time against a no-op rewrite of the same bytes (etag = content), calling the rewrite lost (R2-S2). | a no-op write is superseded by any op that read its bytes; A2/A3 known-bad re-judged unchanged (929efe4b) |
+| 2026-09-15 | O3 refused to link a rewrite chain through a syncer's DROPPED write (withheld from the boundary, published later): four false losses in storm S0. | the chain may pass through a dropped write that landed; refused UI writes still never link; A2 re-judged still fails (e2fa0878) |
+| 2026-09-15 | Control patch `f2-no-commit-reread` was anchored on a loop header that finding 13's per-citation re-read had replaced; `make_control` refused it (0 occurrences), so H2 had no control binary. | re-anchored to skip observed citations only; its unit test watched fail (dbe6b84f) |
 | 2026-09-15 | Release tooling: `release.sh`'s lean CRD comparison skipped SILENTLY when `crdgen` failed, so a stale lean CRD would have passed the release check. CHANGELOG.md:223 | one check over share, lean and forge CRDs refuses on a stale/missing file and on a `crdgen` failure (v1.54.0) |
 | 2026-09-13 | `MemoryStore` (the `crates/flint-store` double) answered If-Match on a missing key with 412 (Ozone's answer) where S3 answers 404 NoSuchKey, so the vanished-base rule was green in tests and never ran on S3 (finding 11). CHANGELOG.md:563 | double answers 404 by default, 412 behind `with_if_match_missing_as_412`; the test runs both (ed7de78e, v1.52.0) |
 | 2026-09-13 | Finding 1's regression test used DIFFERENT peer bytes; no test wrote identical bytes, so finding 13 passed the battery (the double's etag was already a content hash). assessment:651 | `a_peer_upload_of_identical_bytes_before_the_gc_delete_is_not_deleted` (79e7dac9, v1.52.0) |
@@ -208,6 +215,7 @@ of HEAD `86d731b3` plus the working tree of 2026-09-15.
 
 | found | summary | fix |
 |-------|---------|-----|
+| 2026-09-15 | `LeanBarrierLeaseSentinelImplCrash1` violated `Inv_HITLTracked` (19 states; 21 with the two-scan rule): a UI write adopted, deleted by the agent, outranked, its entry dropped, the writer's pod replaced. The code reaches that state and converges: checkout's S3-wins arm adopts the object (pod replaced) or the delete publishes (writer survives). The invariant does not credit S3-wins adoption. README "Crash1" | pinned by `an_adopted_ui_write_deleted_under_an_older_peer_publish_converges_when_*` (25848817); the invariant is not yet corrected |
 | 2026-09-15 | Trace validation, first run: three of five syncer traces rejected (at the commit's CAS, an upload superseding a foreign version, a declared barrier's scan). Each was the model lagging the code: 3 bugs. lean/formal/README.md:964 | constants `CommitLoadsCurrent`, `Upload412Preserves`, `DeclaredConfirmsAbsence` |
 | 2026-09-15 | The first box run of the one-path sentinel world on the IMPL shape omitted `VerifyUploadedCitations` and stopped on `Inv_NoStaleOverride` in 16 steps: a cfg error. README:911 | cfg corrected |
 | 2026-09-13 | `Inv_AckBoundaryCoherent` third refinement: VIOLATED at depth 19 because the stamp fires when an ok ack's document is ahead of the tree by a queued peer change (the ack is honest). It did expose a real contract bug (L-22). README:739 | refinement landed in tranche 7 (2026-09-15, README:871); known-bad `LeanBarrierLeaseQueueDropped` |
@@ -237,7 +245,7 @@ of HEAD `86d731b3` plus the working tree of 2026-09-15.
 
 ## Rate
 
-Computed from Table 1 by script (141 rows; each id unique). Normalisation: "shipped in" is the release whose tag first contains the fix (`git tag --contains <hash> | sort -V | head -1`, cross-checked against the CHANGELOG section; for 1.40.0/1.41.0, which share a date, the CHANGELOG's lean-scoped 1.41.0 is used); a row whose fix is OPEN counts under OPEN. "found by" strips "(unverified)".
+Computed from Table 1 by script (142 rows; each id unique). Normalisation: "shipped in" is the release whose tag first contains the fix (`git tag --contains <hash> | sort -V | head -1`, cross-checked against the CHANGELOG section; for 1.40.0/1.41.0, which share a date, the CHANGELOG's lean-scoped 1.41.0 is used); a row whose fix is OPEN counts under OPEN. "found by" strips "(unverified)".
 
 ### Per shipped-in release
 
@@ -245,8 +253,8 @@ Computed from Table 1 by script (141 rows; each id unique). Normalisation: "ship
 
 | release | rows | of which pre | ids |
 |---|---|---|---|
-| OPEN | 9 | 0 | L-24, finding 10 (L-25), L-26, L-27, ack-7, ack-10 / U37, inbox-9, lease-4 / arbitration-5, lease-5 / audit #6 |
-| unreleased | 1 | 0 | L-1 |
+| OPEN | 8 | 0 | L-24, L-26, L-27, ack-7, ack-10 / U37, inbox-9, lease-4 / arbitration-5, lease-5 / audit #6 |
+| unreleased | 3 | 0 | L-1, finding 10 (L-25), F15 (L-100) |
 | v1.54.0 | 3 | 0 | L-2, L-3, L-4 |
 | v1.53.0 | 5 | 0 | L-5, L-6, L-7, L-8, L-9 |
 | v1.52.0 | 14 | 10 | F1 / finding 1 (L-10), F2 (L-11), F3 (L-12), F5 (L-13), F6 (L-14), F7 (L-15), F8 (L-16), finding 11 (L-17), finding 12 (L-18), finding 13 (L-19), finding 13, second route (L-20), atomicity-5 / inbox-4 / barrier-7 (L-21), L-22, L-23 |
@@ -259,7 +267,7 @@ Computed from Table 1 by script (141 rows; each id unique). Normalisation: "ship
 | v1.41.0 | 4 | 0 | L-67, L-68, L-69, L-70 |
 | v1.39.0 | 7 | 0 | L-71, L-72, L-73, L-74, L-75, L-76, L-77 |
 | v1.38.0 | 29 | 21 | L-78, L-79, L-80, L-81, L-82, L-83, L-84, L-85, L-86, L-87, L-88, L-89, L-90, L-91, L-92, C1, C2, C3, C3-inversion, C4, C5, C6, L-93, L-94, L-95, L-96, L-97, L-98, L-99 |
-| **total** | **141** | **34** | |
+| **total** | **142** | **34** | |
 
 ### Per class
 
@@ -269,7 +277,7 @@ Computed from Table 1 by script (141 rows; each id unique). Normalisation: "ship
 | data loss | 35 | 2 | L-1, L-4, F1 / finding 1 (L-10), F2 (L-11), F8 (L-16), finding 12 (L-18), finding 13 (L-19), finding 13, second route (L-20), L-27, L-29, L-33, L-34, atomicity-2, atomicity-3 / inbox-2, atomicity-4, inbox-1, gated-1, gated-2, inbox-9, L-38, L-48, L-54, L-56, L-57, L-60, L-71, L-72, L-85, L-89, C1, C2, C3, C3-inversion, C5, L-97 |
 | availability | 27 | 3 | L-5, finding 11 (L-17), L-23, L-26, L-36, atomicity-1, ack-1 / inbox-3, inbox-5, lease-2, atomicity-9 / csi-6, lease-4 / arbitration-5, lease-5 / audit #6, L-47, L-49, L-55, L-67, L-68, L-73, L-75, L-77, L-78, L-79, L-80, L-81, L-91, L-93, L-99 |
 | performance | 16 | 0 | L-6, L-7, L-8, F7 (L-15), L-30, L-31, L-35, L-41, L-42, L-43, L-44, L-50, L-61, L-69, L-76, L-94 |
-| convergence | 7 | 2 | F3 (L-12), F5 (L-13), F6 (L-14), atomicity-5 / inbox-4 / barrier-7 (L-21), L-24, finding 10 (L-25), L-39 |
+| convergence | 8 | 1 | F15 (L-100), F3 (L-12), F5 (L-13), F6 (L-14), atomicity-5 / inbox-4 / barrier-7 (L-21), L-24, finding 10 (L-25), L-39 |
 | security | 5 | 0 | atomicity-6, inbox-8, L-40, L-58, C4 |
 
 ### Per found by
@@ -278,7 +286,7 @@ Computed from Table 1 by script (141 rows; each id unique). Normalisation: "ship
 |---|---|---|---|
 | review/audit | 59 | 0 | atomicity-5 / inbox-4 / barrier-7 (L-21), atomicity-1, ack-1 / inbox-3, atomicity-2, atomicity-3 / inbox-2, atomicity-4, inbox-1, atomicity-6, gated-1, gated-2, ack-2 / gated-4, inbox-5, inbox-7, inbox-8, gated-3 / lease-6, lease-1, lease-2, lease-3 / audit #7, ack-3 / atomicity-8 / inbox-6, ack-4, ack-5 / gated-5, ack-6, ack-7, ack-8, ack-9, ack-10 / U37, ack-11, atomicity-7, atomicity-9 / csi-6, gated-6, gated-7, gated-8, inbox-9, inbox-10, lease-4 / arbitration-5, lease-5 / audit #6, L-38, L-39, L-40, L-51, L-52, L-54, L-55, L-56, L-57, L-58, L-60, L-61, L-71, L-72, C1, C2, C3, C4, C5, C6, L-97, L-98, L-99 |
 | code reading | 29 | 28 | L-3, L-4, L-9, L-23, L-33, L-34, L-37, L-44, L-45, L-46, L-48, L-59, L-62, L-63, L-64, L-65, L-68, L-69, L-70, L-73, L-74, L-75, L-76, L-77, L-80, L-86, L-90, L-91, L-96 |
-| live drill | 19 | 0 | L-5, L-6, L-7, L-8, finding 12 (L-18), finding 13 (L-19), L-26, L-35, L-36, L-53, L-78, L-79, L-81, L-82, L-83, L-84, L-85, L-87, L-88 |
+| live drill | 20 | 0 | F15 (L-100), L-5, L-6, L-7, L-8, finding 12 (L-18), finding 13 (L-19), L-26, L-35, L-36, L-53, L-78, L-79, L-81, L-82, L-83, L-84, L-85, L-87, L-88 |
 | model | 16 | 1 | L-1, L-2, F1 / finding 1 (L-10), F2 (L-11), F3 (L-12), F5 (L-13), F6 (L-14), F7 (L-15), F8 (L-16), finding 13, second route (L-20), L-22, finding 10 (L-25), L-29, L-89, L-92, C3-inversion |
 | host leg | 11 | 0 | finding 11 (L-17), L-27, L-30, L-31, L-32, L-41, L-42, L-43, L-47, L-50, L-67 |
 | test | 7 | 1 | L-24, L-28, L-49, L-66, L-93, L-94, L-95 |
@@ -287,8 +295,8 @@ Computed from Table 1 by script (141 rows; each id unique). Normalisation: "ship
 
 | release | model | live drill | host leg | test | code reading | review/audit | total |
 |---|---|---|---|---|---|---|---|
-| OPEN | 1 | 1 | 1 | 1 | 0 | 5 | 9 |
-| unreleased | 1 | 0 | 0 | 0 | 0 | 0 | 1 |
+| OPEN | 0 | 1 | 1 | 1 | 0 | 5 | 8 |
+| unreleased | 2 | 1 | 0 | 0 | 0 | 0 | 3 |
 | v1.54.0 | 1 | 0 | 0 | 0 | 2 | 0 | 3 |
 | v1.53.0 | 0 | 4 | 0 | 0 | 1 | 0 | 5 |
 | v1.52.0 | 9 | 2 | 1 | 0 | 1 | 1 | 14 |
@@ -306,8 +314,8 @@ Computed from Table 1 by script (141 rows; each id unique). Normalisation: "ship
 
 | release | data loss | contract | convergence | availability | performance | security | total |
 |---|---|---|---|---|---|---|---|
-| OPEN | 2 | 2 | 2 | 3 | 0 | 0 | 9 |
-| unreleased | 1 | 0 | 0 | 0 | 0 | 0 | 1 |
+| OPEN | 2 | 2 | 1 | 3 | 0 | 0 | 8 |
+| unreleased | 1 | 0 | 2 | 0 | 0 | 0 | 3 |
 | v1.54.0 | 1 | 2 | 0 | 0 | 0 | 0 | 3 |
 | v1.53.0 | 0 | 1 | 0 | 1 | 3 | 0 | 5 |
 | v1.52.0 | 6 | 1 | 4 | 2 | 1 | 0 | 14 |
@@ -351,8 +359,9 @@ Campaign is not a column of Table 1; this mapping assigns each row to the campai
 | 2026-09-13 | TLC runs, the i4i box and the laptop (sentinel world, same-bytes world) | 5 | finding 13, second route (L-20), L-2, L-3, L-4, L-22 |
 | 2026-09-14 | contention drill, 19 runs on real S3 | 4 | L-5, L-6, L-7, L-8 |
 | 2026-09-15 | tranche 7: the writer-local queue modelled | 1 | L-1 |
+| 2026-09-15 | live drill on real S3, i4i spot: host legs H1-H6 and the multi-node storm (3 rounds) | 1 | F15 (L-100) |
 | — | no named campaign (mostly "code reading (unverified)") | 22 | L-9, L-23, L-28, L-33, L-34, L-37, L-44, L-45, L-46, L-48, L-59, L-62, L-63, L-64, L-65, L-73, L-74, L-75, L-76, L-77, L-80, L-86 |
-| | **total** | **141** | |
+| | **total** | **142** | |
 
 ## How this was compiled
 
