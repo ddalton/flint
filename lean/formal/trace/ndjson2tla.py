@@ -264,7 +264,7 @@ def convert(lines):
                             "FiveWriters", "SixWriters"][nwriters],
         "OrphanTrack": False, "ProjectedTrace": projected,
         # The handoff rule the code implements (found by replaying the storm).
-        "HandoffAtClaim": True, "AbandonOnStoreError": True,
+        "AbandonOnStoreError": True,
         "BaselineKeepsUncollected": True,
         "QueueForeignChanges": True,
     }

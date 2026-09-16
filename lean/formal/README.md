@@ -1124,22 +1124,28 @@ each rejected. Logs: `results/2026-09-15-trace-phase2/`.
 Getting there took four corrections to the MODEL, each a place where the
 model described something the code does not do:
 
-1. **The handoff names the waiters the holder read at its CLAIM**
-   (`HandoffAtClaim`). `epoch_handoff` hands the cell to the head of
-   `lease.waiters` — the list as of the claim — and writes the REST OF THAT
-   LIST back as the queue. The model handed off to the head of the queue as
-   it stands at the release. **This breaks the ticket's whole purpose:**
-   with the shipped rule modelled, `NoStarvation` — "with the ticket, every
-   queued writer eventually holds the cell" — is VIOLATED. TLC's
-   counterexample is a two-state cycle: B holds the cell having read an
-   empty waiter list, A takes a ticket while B runs, B's release writes the
-   stale (empty) list back and names nobody, B claims again, A waits
-   forever. Not observed in any drill (the storm's waits are tens of
-   milliseconds and O5 requires zero claim deadlines), and the code's
-   handoff DOES re-read on a 412, so a waiter whose enqueue moved the token
-   is normally honoured. The fix belongs in `release`: name the head of the
-   list as of the handoff, not as of the claim. Log:
-   `results/2026-09-15-trace-phase2/liveness-handoff-at-claim.log`.
+1. **The handoff, and a claim a waiter never queued for.** The first
+   rejection was a claim the model refused: its release had reserved the
+   cell for the queue head, and the trace showed another writer taking it
+   while the reserved one waited. `epoch_handoff` writes the waiter list
+   the holder read AT ITS CLAIM, minus the head it names — which looked
+   like the bug, and modelling that payload made TLC report `NoStarvation`
+   violated. **That was a mis-model, not a defect:** the handoff's write is
+   conditional on the lease token (`PutCondition::IfMatch`), so a ticket
+   taken since the claim forces a 412, a re-read and a retry on the adopted
+   list (`release`, 8 attempts) — within that budget the code and the
+   model's FIFO agree, and the storm's own handoffs land on attempt 1 with
+   an empty queue. The real difference is on the WAITER's side: the model's
+   `Enqueue` always succeeds, while several arms of `claim_step` answer
+   Waiting without reaching the enqueue at all, and an enqueue that loses
+   its CAS takes no ticket either. So the code's reserved handoff can name
+   nobody while a writer waits, which is what the trace shows. A projected
+   replay therefore lets any writer claim a RELEASED cell
+   (`ProjectedTrace`), and the model's stronger ticket is left as an open
+   question rather than a finding. What is NOT modelled, and is the
+   residual worth a look: a holder that loses all 8 handoff races returns
+   an error with the cell still held, and the fleet waits out the 60 s
+   deposal.
 2. **A commit section can end without installing** (`AbandonOnStoreError`).
    S3 answered a window-open PUT with 409 ConditionalRequestConflict; the
    barrier returned the error, released the cell and kept its pending

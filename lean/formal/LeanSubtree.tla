@@ -472,15 +472,6 @@ CONSTANTS
                        \* nothing is acked.  FALSE = the model as it was: a
                        \* claimed barrier only ever installs, misses the CAS
                        \* or is fenced.  BarrierLease only.
-  HandoffAtClaim,      \* TRUE = what SHIPS, as the 2026-09-15 storm traces
-                       \* show it: `epoch_handoff` hands the cell to the head
-                       \* of the waiter list THE HOLDER READ AT ITS CLAIM
-                       \* (`lease.waiters`), and writes the rest of that same
-                       \* stale list back as the queue — so a writer that took
-                       \* a ticket after the claim is neither handed the cell
-                       \* nor kept in the queue.  FALSE = the FIFO the model
-                       \* assumed: the head of the queue as it stands at the
-                       \* release.  BarrierLease + Ticket only.
   ProjectedTrace,      \* Trace validation only (W4 phase 2).  TRUE = this
                        \* run replays ONE PATH of a live leg, so a barrier's
                        \* reason to claim may lie in a path the projection
@@ -515,10 +506,6 @@ VARIABLES
   cellEpoch,   \* subtree lease cell: current epoch (0 = never claimed)
   cellHolder,  \* "A" | "B" | "none"
   cellQueue,   \* tranche 6: the FIFO ticket — a sequence of waiters
-  cellSeen,    \* the queue AS THE HOLDER READ IT at its claim (the code's
-               \* `lease.waiters`).  Always <<>> under ~HandoffAtClaim, so
-               \* that world's state space is the one every earlier run
-               \* explored.
   cellHandoff, \* tranche 6: "none" | the syncer a release named
   cellReleased,\* tranche 6: TRUE between a release and the next claim.
                \* HELD = cellEpoch > 0 /\ ~cellReleased; FRESH = epoch 0.
@@ -558,9 +545,9 @@ VARIABLES
   gh           \* ghost/counter record, fields below
 
 gatedVars == <<stage, stageBase, withheldDel>>
-leaseVars == <<cellQueue, cellHandoff, cellReleased, cellSeen>>
+leaseVars == <<cellQueue, cellHandoff, cellReleased>>
 
-vars == <<cellEpoch, cellHolder, cellQueue, cellHandoff, cellReleased, cellSeen,
+vars == <<cellEpoch, cellHolder, cellQueue, cellHandoff, cellReleased,
           manSeq, manSrc, manifest, objects, inbox, removals, window,
           sc, versions, stage, stageBase, withheldDel, hitlAcked,
           conflicts, gh>>
@@ -929,6 +916,14 @@ ClaimEnabled(s) ==
   \/ CellFresh
   \/ cellReleased /\ cellHandoff \in {"none", s}
   \/ CellHeld /\ cellHolder # s /\ Quiet(cellHolder)
+  \* A projected replay (W4 phase 2): a RELEASED cell is anyone's here,
+  \* because the code's waiter does not always hold a ticket — several
+  \* arms of `claim_step` answer Waiting without reaching the enqueue, and
+  \* an enqueue that loses its CAS takes none either — so the handoff can
+  \* name nobody while a writer waits.  The model's Enqueue always
+  \* succeeds; that difference is an OPEN question, not a relaxation of
+  \* anything the gate checks (no gate cfg sets ProjectedTrace).
+  \/ ProjectedTrace /\ cellReleased
 \* The 20 s rule on a handoff: the named waiter is quiet, so the released
 \* cell is anybody's and the waiter is dropped.
 SkipEnabled(s) ==
@@ -939,19 +934,14 @@ SkipEnabled(s) ==
 \* ticket), or nobody under the mutation.
 ReleaseCell ==
   /\ cellReleased' = TRUE
-  \* What ships (HandoffAtClaim): `epoch_handoff` names the head of the
-  \* list the holder read at its CLAIM and writes the REST OF THAT LIST
-  \* back as the queue, so a ticket taken after the claim is dropped.
-  \* The model's original rule is the head of the queue as it stands.
-  /\ cellHandoff' = IF ~Ticket THEN "none"
-                    ELSE IF HandoffAtClaim
-                         THEN (IF cellSeen = <<>> THEN "none" ELSE Head(cellSeen))
-                         ELSE (IF cellQueue = <<>> THEN "none" ELSE Head(cellQueue))
-  /\ cellQueue'   = IF ~Ticket THEN cellQueue
-                    ELSE IF HandoffAtClaim
-                         THEN (IF cellSeen = <<>> THEN <<>> ELSE Tail(cellSeen))
-                         ELSE (IF cellQueue = <<>> THEN cellQueue ELSE Tail(cellQueue))
-  /\ cellSeen'    = <<>>
+  \* `epoch_handoff` writes the waiter list the holder read at its CLAIM,
+  \* minus the head it names — but the write is conditional on the lease's
+  \* token, so a ticket taken since forces a 412, a re-read and a retry on
+  \* the adopted list (`release`, RELEASE_ATTEMPTS = 8).  Within that budget
+  \* the two agree, which is why this is the head of the queue AS IT
+  \* STANDS.  Verified against the storm traces, W4 phase 2.
+  /\ cellHandoff' = IF Ticket /\ cellQueue # <<>> THEN Head(cellQueue) ELSE "none"
+  /\ cellQueue'   = IF Ticket /\ cellQueue # <<>> THEN Tail(cellQueue) ELSE cellQueue
 \* What a fence does to the incarnation.  Life lease: the process exits.
 \* Barrier lease: the barrier is ABANDONED — its manifest never installed,
 \* its uploads standing as uncited generations the next barrier adopts —
@@ -994,7 +984,6 @@ Destroys(s, p, cur) ==
 Init ==
   /\ cellEpoch = 0 /\ cellHolder = "none" /\ manSeq = 1
   /\ cellQueue = <<>> /\ cellHandoff = "none" /\ cellReleased = FALSE
-  /\ cellSeen = <<>>
   /\ manSrc = "none"
   /\ manifest = [p \in Paths |-> IF p \in FreePaths THEN 0 ELSE 1]
   /\ objects  = [p \in Paths |-> IF p \in FreePaths THEN 0 ELSE 1]
@@ -1060,7 +1049,7 @@ Init ==
 StartA ==
   /\ ~BarrierLease           \* the life lease: claim, then checkout
   /\ sc["A"].st = "unstarted" /\ cellHolder = "none"
-  /\ cellHolder' = "A" /\ cellEpoch' = 1 /\ UNCHANGED cellSeen
+  /\ cellHolder' = "A" /\ cellEpoch' = 1
   /\ sc' = [sc EXCEPT
        !["A"].st = "running", !["A"].epoch = 1, !["A"].expSeq = manSeq,
        !["A"].local = [p \in Paths |-> manifest[p]],
@@ -1249,7 +1238,7 @@ ClaimB ==
   /\ sc["B"].st = "unstarted" /\ cellHolder = "A"
   /\ sc["A"].st \in {"stalled", "dead"}
   /\ (Rotation => manSeq < MaxSeq)
-  /\ cellHolder' = "B" /\ cellEpoch' = cellEpoch + 1 /\ UNCHANGED cellSeen
+  /\ cellHolder' = "B" /\ cellEpoch' = cellEpoch + 1
   /\ manSeq' = IF Rotation THEN manSeq + 1 ELSE manSeq
   \* A rotation is a fence, not a boundary: it publishes nothing, so it
   \* clears the stamp rather than inheriting the deposed holder's.
@@ -2096,8 +2085,6 @@ Claim(s) ==
        /\ cellEpoch' = e /\ cellHolder' = s
        /\ cellReleased' = FALSE /\ cellHandoff' = "none"
        /\ cellQueue' = Without(cellQueue, s)
-       \* The waiter list this holder carries to its release.
-       /\ cellSeen' = IF HandoffAtClaim THEN Without(cellQueue, s) ELSE <<>>
        /\ window' = e
        /\ manSeq' = IF deposal /\ Rotation THEN manSeq + 1 ELSE manSeq
        /\ manSrc' = IF deposal /\ Rotation THEN "none" ELSE manSrc
@@ -2117,7 +2104,7 @@ Enqueue(s) ==
   /\ cellQueue' = IF InQueue(s) THEN cellQueue ELSE Append(cellQueue, s)
   /\ sc' = [sc EXCEPT ![s].pc = "waiting"]
   /\ gh' = [gh EXCEPT !.enqueues = 1]
-  /\ UNCHANGED <<cellSeen, cellEpoch, cellHolder, cellHandoff, cellReleased,
+  /\ UNCHANGED <<cellEpoch, cellHolder, cellHandoff, cellReleased,
                  manSeq, manSrc, manifest, objects, inbox, removals, window,
                  hitlAcked, conflicts>>
 
@@ -2131,7 +2118,6 @@ SkipDeadHandoff(s) ==
        /\ cellEpoch' = e /\ cellHolder' = s
        /\ cellReleased' = FALSE /\ cellHandoff' = "none"
        /\ cellQueue' = Without(cellQueue, s)
-       /\ cellSeen' = IF HandoffAtClaim THEN Without(cellQueue, s) ELSE <<>>
        /\ window' = e
        /\ sc' = [sc EXCEPT ![s].pc = "claimed", ![s].epoch = e]
        /\ gh' = [gh EXCEPT !.claimed = @ \cup {s}, !.deadSkips = 1]
@@ -2988,7 +2974,6 @@ NoStarvation ==
 TypeOK ==
   /\ cellEpoch \in 0..EpochBound /\ cellHolder \in Syncers \cup {"none"}
   /\ cellQueue \in Seq(Syncers) /\ Len(cellQueue) <= Cardinality(Syncers)
-  /\ cellSeen \in Seq(Syncers) /\ Len(cellSeen) <= Cardinality(Syncers)
   /\ \A i, j \in 1..Len(cellQueue) : cellQueue[i] = cellQueue[j] => i = j
   /\ cellHandoff \in Syncers \cup {"none"} /\ cellReleased \in BOOLEAN
   /\ manSeq \in 1..MaxSeq+1 /\ manSrc \in Sources
@@ -3470,7 +3455,7 @@ StrictGh ==
 StrictSc ==
   [s \in Syncers |-> [sc[s] EXCEPT !.pendReRun = FALSE, !.stageCarried = FALSE]]
 StrictView ==
-  <<cellEpoch, cellHolder, cellQueue, cellHandoff, cellReleased, cellSeen,
+  <<cellEpoch, cellHolder, cellQueue, cellHandoff, cellReleased,
     manSeq, manSrc, manifest, objects, inbox, removals, window,
     StrictSc, versions, stage, stageBase, withheldDel, hitlAcked,
     conflicts, StrictGh>>

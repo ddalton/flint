@@ -55,12 +55,14 @@ What is not solid:
 - **W4 phase 2 done (2026-09-15).** A live storm leg replayed against the
   model: `churn/p23.txt` of round 3's churn leg — six writers, 3,258 model
   steps — is accepted to the end, and three mutations of it are rejected.
-  It found FOUR places where the model was not the code: the handoff names
-  the waiters read at the CLAIM (and with that modelled, `NoStarvation` is
-  violated — the ticket's own purpose), a commit section can end without
-  installing on a store error (which the event trace does not record at
-  all), a published delete clears the baseline only for objects the GC
-  collected, and a projection cannot check whole-leg counts. One path
+  It found three places where the model was not the code: a commit section
+  can end without installing on a store error (which the event trace does
+  not record at all), a published delete clears the baseline only for the
+  objects the GC collected, and the model's `Enqueue` always succeeds where
+  the code's waiter often holds no ticket. A fourth — the handoff writing
+  back the claim-time waiter list — was RETRACTED: modelling its payload
+  without its `IfMatch` precondition made `NoStarvation` fail; the
+  precondition makes the code and the model agree. One path
   (`churn/p47.txt`) is still rejected: open.
 - **W4 phase 1 done.**
   - Five syncer scenarios are traced and accepted; five mutations and five

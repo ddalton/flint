@@ -19,7 +19,7 @@ BarrierLease Ticket DeadHandoffSkip InfiniteBarriers ConditionalGC VerifyAdopted
 HitlOverwritesTrackedOnly SyncKeepsHiddenBase MaxSameBytes VerifyUploadedCitations \
 WriterQueue EmptyInstall TombstoneHeadsKey CommitLoadsCurrent Upload412Preserves \
 DeclaredConfirmsAbsence Writers OrphanTrack QueueForeignChanges ProjectedTrace \
-HandoffAtClaim AbandonOnStoreError BaselineKeepsUncollected"
+AbandonOnStoreError BaselineKeepsUncollected"
 
 emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
          # Spec=<name> selects the SPECIFICATION (default Spec; FairSpec
@@ -125,7 +125,7 @@ emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
   # The handoff rule the storm traces show (W4 phase 2).  FALSE in every
   # pre-existing cfg: cellSeen stays <<>> and the release keeps the FIFO the
   # earlier runs explored, so their state spaces are preserved by construction.
-  local c_HandoffAtClaim=FALSE c_AbandonOnStoreError=FALSE c_BaselineKeepsUncollected=FALSE
+  local c_AbandonOnStoreError=FALSE c_BaselineKeepsUncollected=FALSE
   # The queue's deletion fix (2026-09-15).  FALSE outside the queue worlds,
   # where QueuedDeletes is always {} and the constant reads nothing.
   local c_TombstoneHeadsKey=FALSE
