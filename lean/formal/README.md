@@ -13,14 +13,14 @@ a library. Nothing here is wired into `scripts/check-tla.sh`.
 ## Running
 
 ```
-./check.sh              # the 110-run gate (runs view-census.py first)
+./check.sh              # the 116-run gate (runs view-census.py first)
 ./gen-cfgs.sh           # regenerate the cfg matrix
 ./trace/trace-check.sh  # the model against syncer traces (below)
 ```
 
-A hundred and ten runs, ALL required: 28 strict (must hold), 43 mutations
+A hundred and sixteen runs, ALL required: 30 strict (must hold), 46 mutations
 (must find their designated counterexample — a model that cannot
-rediscover its bug classes proves nothing), 39 probes (must be violated
+rediscover its bug classes proves nothing), 40 probes (must be violated
 — each names an ACTION via a ghost only that action writes; probe the
 action, never the situation). The three numbers are `grep -c "^strict_run "`,
 `grep "^mutation_run " | grep -vc Probe` and `grep "^mutation_run " |

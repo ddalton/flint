@@ -461,6 +461,21 @@ CONSTANTS
                        \* consume and an incoming version is PRESERVED
                        \* rather than adopted.  FALSE = the model as it was:
                        \* every published delete clears the baseline.
+  CollectorOff,        \* TRUE = the collector GIVES WAY: it recognises the
+                       \* object and still does not delete it.  Not a
+                       \* mutation and not a defect — it is what the syncer
+                       \* does on a store that accepts `If-Match` on DELETE
+                       \* and ignores it (`conformance.rs`, Ozone 2.2.x,
+                       \* HDDS-14907).  There the shipped DELETE would be
+                       \* `ConditionalGC=FALSE`, which this module refutes,
+                       \* so the code leaves the object where it is.  The
+                       \* question this constant exists to answer is whether
+                       \* LEAKING is safe: the object survives, cited by no
+                       \* manifest, and because it is not in `gcTook` the
+                       \* baseline keeps its entry under
+                       \* BaselineKeepsUncollected — exactly the arm a
+                       \* SKIPPED etag already takes.  FALSE everywhere
+                       \* else, so every earlier state space is preserved.
   ClaimMintsEpoch,     \* TRUE = what ships: every claim writes a NEW epoch
                        \* (`lease.rs`'s acquire increments).  FALSE = the
                        \* mutation: a claim REUSES the cell's epoch, so two
@@ -1052,7 +1067,8 @@ Init ==
            adoptWithheld |-> 0, sameBytes |-> 0, uploadWithheld |-> 0,
            staleOverride |-> FALSE, hitlRetired |-> {},
            pullOnlys |-> 0, emptyInstalls |-> 0,
-           tombRemoved |-> 0, tombSuperseded |-> 0, orphanTracks |-> 0]
+           tombRemoved |-> 0, tombSuperseded |-> 0, orphanTracks |-> 0,
+           leaked |-> 0]
 
 ------------------------------------------------------------------------------
 (* Lifecycle *)
@@ -1760,13 +1776,25 @@ GCDelete(s, p) ==
        \* resolved foreign-wins) is NOT garbage.  The v1 order cannot make
        \* this check (no new manifest yet) — that asymmetry is part of the
        \* defect the DeletesAfterCAS mutation pins.
-       IF \/ cur = 0
-          \/ GuardedGC /\ cur \notin sc[s].known
-          \/ DeletesAfterCAS /\ manifest[p] # 0
-       THEN \* already absent, still referenced, or unrecognized ETag
+       \* `wouldCollect` is the collector's own decision, kept separate
+       \* from CollectorOff so the leak can be COUNTED: a world where the
+       \* collector gives way proves nothing unless it gave way on a path
+       \* it would otherwise have taken (`ProbeCollectorLeaked`).
+       LET wouldCollect == /\ cur # 0
+                           /\ (~GuardedGC \/ cur \in sc[s].known)
+                           /\ (~DeletesAfterCAS \/ manifest[p] = 0)
+       IN
+       IF ~wouldCollect \/ CollectorOff
+       THEN \* already absent, still referenced, an unrecognized ETag —
+            \* or a store whose conditional DELETE is not enforced, where
+            \* the object is LEFT (`barrier.rs`, report.leaked).  Either
+            \* way nothing is deleted and p is not in gcTook, so under
+            \* BaselineKeepsUncollected the baseline keeps its entry.
          /\ sc' = [sc EXCEPT ![s].gcDone = @ \cup {p}]
+         /\ gh' = [gh EXCEPT !.leaked = IF CollectorOff /\ wouldCollect
+                                        THEN @ + 1 ELSE @]
          /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
-                        inbox, removals, window, hitlAcked, conflicts, gh>>
+                        inbox, removals, window, hitlAcked, conflicts>>
        ELSE
          /\ objects' = [objects EXCEPT ![p] = 0]
          /\ sc' = [sc EXCEPT ![s].gcDone = @ \cup {p},
@@ -3415,6 +3443,10 @@ ProbeAdoptWithheld     == gh.adoptWithheld = 0
 ProbeUploadWithheld    == gh.uploadWithheld = 0
 \* Finding 10's candidate fix fires.
 ProbeOrphanTracked     == gh.orphanTracks = 0
+\* Non-vacuity for the CollectorOff world: the collector actually gave way
+\* on a path it would otherwise have deleted.  Without this, "every
+\* invariant holds" could mean "the collector was never asked".
+ProbeCollectorLeaked   == gh.leaked = 0
 
 \* ---- tranche 7: model the implementation -------------------------------
 \* Each new arm is REQUIRED-REACHABLE in the world whose strict run leans

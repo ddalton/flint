@@ -6,7 +6,7 @@
 # DELIBERATELY SEPARATE from scripts/check-tla.sh (flint's 196-run gate):
 # lean is a separate system.  Same harness discipline, its own runs.
 #
-# A hundred and ten runs, ALL required (asserted at the bottom, not just printed —
+# A hundred and sixteen runs, ALL required (asserted at the bottom, not just printed —
 # this prose count had drifted to "fifty-five", then to "eighty-three";
 # and EXPECT itself was left at 92 over 69 real runs when gated mode's
 # 23 runs were removed, so the gate at that commit failed its own count.
@@ -320,6 +320,31 @@ mutation_run $M LeanBarrierLeaseQueueTombstoneOverHitl.cfg "FINDING (modelling t
   "Invariant Inv_HITLTracked is violated"
 strict_run $M LeanBarrierLeaseQueueHolds.cfg "the code's shape with the fix: a queued deletion applies only while the key is absent"
 strict_run $M LeanBarrierLeaseImplHolds.cfg "the tranche-6 breadth world (two paths, HITL, crash, restart) on the code's shape"
+# IS LEAKING SAFE?  On a store that does not enforce If-Match on DELETE the
+# syncer stops collecting (`conformance.rs`, L-27): the object is LEFT.
+# The world below is that store (ConditionalGC=FALSE) plus the give-way
+# (CollectorOff=TRUE), in the breadth world, on the shipped baseline rule.
+#
+# NINE of the ten invariants hold, exhaustively (6.5M distinct states,
+# depth 39) -- including Inv_HITLDurable, Inv_NoResurrection and
+# Inv_NoDangling, which is the claim the mitigation needed.
+#
+# The tenth, Inv_HITLTracked, does NOT, and it is listed as a must-fail
+# below rather than quietly dropped.  Its clause for "legitimately
+# superseded" is `objects[p] # gen` -- the object is GONE -- so a
+# collector that never destroys anything can never satisfy it, even where
+# the write was superseded by a published delete.  That is the invariant
+# stated over the wrong thing for this world, not a loss: the leaked
+# bytes are cited by no manifest, so no checkout serves them and the
+# untracked sweep passes them over (it skips uncited keys by rule).
+# Refining the clause is a CLAIM-level change and must be re-run against
+# the mutations that require this invariant to fail before it is trusted
+# -- SAFETY.md open item 3 now carries both arms.
+strict_run $M LeanBarrierLeaseCollectorOff.cfg "the collector GIVES WAY on a store without a conditional DELETE: nine invariants hold, exhaustively"
+mutation_run $M LeanProbeCollectorLeaked.cfg "probe: the collector actually gave way on a path it would have collected (or the run above proves nothing)" \
+  "Invariant ProbeCollectorLeaked is violated"
+mutation_run $M LeanBarrierLeaseCollectorOffHitlTracked.cfg "RECORDED, not fixed: with the collector off, Inv_HITLTracked fails -- its supersede clause is physical destruction, which a leak never performs" \
+  "Invariant Inv_HITLTracked is violated"
 mutation_run $M LeanBarrierLeaseQueueDropped.cfg "known-bad for the ack's third refinement: the merge base moves past a peer's change and nothing queues it -- the queue exemption must not excuse a document ahead by NOTHING queued" \
   "Invariant Inv_AckBoundaryCoherent is violated"
 mutation_run $M LeanProbePullOnly.cfg "probe: a pull-only boundary runs (no claim, no CAS)" \
@@ -352,7 +377,7 @@ if ! python3 "$(dirname "$0")/coverage.py" --check; then
   exit 1
 fi
 
-EXPECT=113
+EXPECT=116
 echo
 if [ "$PASS" -ne "$EXPECT" ]; then
   echo "lean formal gate: $PASS runs green but $EXPECT were declared — a run was"

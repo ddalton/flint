@@ -1,0 +1,9 @@
+116/116 green, 2026-09-15.
+  LeanBarrierLeaseCollectorOff             strict, ok (nine invariants)
+  LeanProbeCollectorLeaked                 must-fail, violated (non-vacuity)
+  LeanBarrierLeaseCollectorOffHitlTracked  must-fail, violated (RECORDED, not fixed)
+Isolation (one dimension at a time):
+  a  BaselineKeepsUncollected=TRUE alone, collector ON   -> HOLDS
+  b  CollectorOff=TRUE alone, old baseline rule          -> VIOLATES Inv_HITLTracked
+Nine invariants with Inv_HITLTracked removed: exhausted,
+6,499,616 distinct states, depth 39, no violation.

@@ -2,7 +2,7 @@
 
 This is the safety claim for the lean protocol: the syncer (`lean/syncer`),
 the gateway (`lean/gateway`) and the store contract they rest on
-(`crates/flint-store`). It exists because "113 model runs are green" is not
+(`crates/flint-store`). It exists because "116 model runs are green" is not
 a claim anybody can act on. A claim names the property, the thing that
 enforces it, the worlds it was checked in, and — the part usually missing —
 what is still assumed and what is not covered at all.
@@ -89,12 +89,12 @@ A claim with unnamed assumptions is a claim about nothing.
 
 | evidence | what it covers | size |
 |---|---|---|
-| the formal gate (`lean/formal/check.sh`) | every invariant above, exhaustively, per world | 113 runs: 27 strict `LeanSubtree` worlds, 72 mutations, 14 chunk-module runs |
-| refutation | that an invariant CAN fail — a mutation that must violate it | 72 mutations; **every invariant in §1 has at least one** (`refuted by` in `COVERAGE.md`) |
+| the formal gate (`lean/formal/check.sh`) | every invariant above, exhaustively, per world | 116 runs: 28 strict `LeanSubtree` worlds, 74 mutations, 14 chunk-module runs |
+| refutation | that an invariant CAN fail — a mutation that must violate it | 74 mutations; **every invariant in §1 has at least one** (`refuted by` in `COVERAGE.md`) |
 | trace validation, phase 1 | the model is the code, on 5 scenario traces, in CI | 5 accepted, 5 mutations + 5 controls rejected |
 | trace validation, phase 2 | the model is the code on a REAL 6-writer run on S3, with the invariants checked while replaying | one leg, one path: 3,258 steps, no invariant violated |
 | the live drill | the binary is the code: each fix has a control arm that fails | host legs H1-H6, storm legs S0-S5 (2026-09-15) |
-| the unit battery | each finding pinned by a test whose control fails it | 222 lean tests |
+| the unit battery | each finding pinned by a test whose control fails it | 223 lean tests |
 
 ## 4. What is NOT claimed
 
@@ -109,9 +109,17 @@ A claim with unnamed assumptions is a claim about nothing.
    §1 has at least one mutation that must make it fail. Until 2026-09-15
    two did not (`Inv_CommitExclusive`, `Inv_CellHeldByHolder`), and their
    nine green worlds each proved nothing.
-4. **The crash world disagrees with the code.** `Inv_HITLTracked` flags a
-   state the code recovers from (a checkout adopting an object newer than
-   its citation); the invariant does not credit that arm.
+4. **`Inv_HITLTracked` is stricter than the code, in two arms.** In the
+   crash world it flags a state the code recovers from (a checkout
+   adopting an object newer than its citation). And where the collector
+   gives way (§2, a store without a conditional DELETE) it flags every
+   leaked object: its clause for "legitimately superseded" is
+   `objects[p] # gen` — the object is GONE — which a collector that never
+   destroys can never satisfy, even for a write a published delete
+   retired. `LeanBarrierLeaseCollectorOff` runs that world with the other
+   nine invariants (exhaustive: 6.5M distinct states, depth 39), and
+   `LeanBarrierLeaseCollectorOffHitlTracked` pins the failure so it is
+   recorded rather than quietly unasked.
 5. **One replay is open.** `churn/p47.txt` — deletes, a skipped GC and a
    preserve — is still rejected mid-trace.
 6. **Liveness.** Two runs, and the ticket's fairness is weaker in the code
@@ -134,7 +142,7 @@ A claim with unnamed assumptions is a claim about nothing.
 |---|---|---|
 | 1 | ~~run the three-writer world in the gate~~ **done 2026-09-15** | — |
 | 2 | ~~a refutation for `Inv_CommitExclusive` and for `Inv_CellHeldByHolder`~~ **done 2026-09-15**: a claim that reuses the cell's epoch breaks the first, a claim that does not stamp it breaks the second | — |
-| 3 | correct `Inv_HITLTracked` to credit checkout's S3-wins adoption, then re-run the crash world | an afternoon |
+| 3 | correct `Inv_HITLTracked` in BOTH arms — credit checkout's S3-wins adoption, and credit a write a published delete retired even where the object survives — then re-run the crash world AND the collector-off world. A relaxation is trusted only after it is re-run on the mutations that require this invariant to fail (4 of them, `COVERAGE.md`) | an afternoon |
 | 4 | finish the `churn/p47.txt` replay: decide whether the model's consume or the code's is wrong | unknown until read |
 | 5 | replay every path of every storm leg in CI, invariants on | a day, then free |
 | 6 | exhaust the two-path sentinel world (box-scale) | a TLC box, ~$5-20 |

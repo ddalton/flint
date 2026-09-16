@@ -19,7 +19,7 @@ BarrierLease Ticket DeadHandoffSkip InfiniteBarriers ConditionalGC VerifyAdopted
 HitlOverwritesTrackedOnly SyncKeepsHiddenBase MaxSameBytes VerifyUploadedCitations \
 WriterQueue EmptyInstall TombstoneHeadsKey CommitLoadsCurrent Upload412Preserves \
 DeclaredConfirmsAbsence Writers OrphanTrack QueueForeignChanges ProjectedTrace \
-AbandonOnStoreError BaselineKeepsUncollected ClaimMintsEpoch ClaimStampsEpoch"
+AbandonOnStoreError BaselineKeepsUncollected ClaimMintsEpoch ClaimStampsEpoch CollectorOff"
 
 emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
          # Spec=<name> selects the SPECIFICATION (default Spec; FairSpec
@@ -96,6 +96,12 @@ emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
   # modelled; FALSE is the shipped HEAD-then-DELETE, modelled only under
   # BarrierLease, where the model found it unsafe.
   local c_ConditionalGC=TRUE
+  # CollectorOff=FALSE everywhere except the world that asks whether
+  # LEAKING is safe: the collector recognises the object and leaves it,
+  # which is what the syncer does on a store that does not enforce the
+  # conditional DELETE (`conformance.rs`).  FALSE preserves every earlier
+  # state space by construction.
+  local c_CollectorOff=FALSE
   # VerifyAdoptedCitations=TRUE re-verifies an adopted entry under the
   # lease; FALSE is the shipped blind adopt, which the model refuted at
   # depth 28 of the first two-writer stall run.  BarrierLease only.
@@ -685,6 +691,40 @@ emit LeanProbeEmptyInstall "ProbeEmptyInstall" $QWORLD $IMPL
 # The tranche-6 breadth world (two paths, HITL, crash, restart) on the
 # code's shape.
 emit LeanBarrierLeaseImplHolds "$BLINV" $BLWORLD $IMPL
+# IS LEAKING SAFE?  The store that ignores `If-Match` on DELETE is the
+# world ConditionalGC=FALSE describes, and this module REFUTES that world
+# (LeanBarrierLeaseGCUnconditional): the delete takes the version another
+# writer's commit is about to cite.  So the syncer does not delete there
+# at all (`conformance.rs`, finding L-27, Ozone 2.2.x/HDDS-14907), and
+# the pairing below is the claim that mitigation rests on: the store's
+# reality (ConditionalGC=FALSE) AND the give-way (CollectorOff=TRUE), in
+# the breadth world, with every invariant.  The object survives, cited by
+# no manifest and not in gcTook, so the baseline keeps its entry — the
+# arm a SKIPPED etag already takes.  The probe is the non-vacuity: the
+# collector must actually have given way on a path it would have taken,
+# or "every invariant holds" would only mean "it was never asked".
+#
+# BaselineKeepsUncollected=TRUE is not optional here: it IS the claim.
+# With the collector off nothing is ever in gcTook, so every published
+# delete keeps its baseline entry — which is what the code does on such a
+# store, and the arm the model says ships.
+# BLINV minus Inv_HITLTracked: it is not dropped, it is MOVED to the
+# must-fail below, so the gate records that it fails here instead of
+# quietly not asking.
+BLINV_LEAK="TypeOK,Inv_HITLDurable,Inv_NoDangling,Inv_NoStragglerInstall,\
+Inv_NoDeposedPut,Inv_NoResurrection,\
+Inv_CommitExclusive,Inv_CellHeldByHolder,Inv_NoStaleOverride"
+emit LeanBarrierLeaseCollectorOff "$BLINV_LEAK" $BLWORLD $IMPL \
+  ConditionalGC=FALSE CollectorOff=TRUE BaselineKeepsUncollected=TRUE
+emit LeanProbeCollectorLeaked "ProbeCollectorLeaked" $BLWORLD $IMPL \
+  ConditionalGC=FALSE CollectorOff=TRUE BaselineKeepsUncollected=TRUE
+# The tenth invariant, RECORDED as a must-fail rather than dropped in
+# silence: with the collector off, Inv_HITLTracked fails, because its
+# "legitimately superseded" clause is `objects[p] # gen` — the object is
+# GONE — and a leak never destroys anything.  If someone later refines
+# that clause, this run flips and forces them to look here.
+emit LeanBarrierLeaseCollectorOffHitlTracked "Inv_HITLTracked" $BLWORLD $IMPL \
+  ConditionalGC=FALSE CollectorOff=TRUE BaselineKeepsUncollected=TRUE
 # THE ACK, THIRD REFINEMENT.  Inv_AckBoundaryCoherent now excuses exactly a
 # document ahead of the tree by a change waiting in this writer's queue.
 # A relaxation is trusted only after it is re-run on a known-bad world: the
