@@ -30,7 +30,10 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 
 {{- define "flint-lean.image" -}}
 {{- if .Values.image.ref }}{{ .Values.image.ref }}
-{{- else }}{{ printf "%s/%s:%s" .Values.image.repository .Values.image.name (.Values.image.tag | default .Chart.AppVersion) }}
+{{- else -}}
+{{- $reg := coalesce .Values.global.imageRegistry .Values.image.registry -}}
+{{- $tag := .Values.image.tag | default .Chart.AppVersion -}}
+{{- if $reg }}{{ printf "%s/%s:%s" $reg .Values.image.repository $tag }}{{ else }}{{ printf "%s:%s" .Values.image.repository $tag }}{{ end -}}
 {{- end }}
 {{- end }}
 
