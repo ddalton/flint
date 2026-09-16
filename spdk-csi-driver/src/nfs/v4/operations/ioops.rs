@@ -451,6 +451,26 @@ impl IoOperationHandler {
         };
 
         let fd_cache = Arc::new(FdCache::new());
+        fd_cache.set_self_ref();
+        // Every cached descriptor becomes OWNED by the state it belongs
+        // to: `insert` mints an `FdLease` and this hands it to the state
+        // record, so dropping that record releases the descriptor. The
+        // release hooks below are now a backstop for entries no state
+        // claims, not the mechanism.
+        {
+            let sm = Arc::clone(&state_mgr);
+            fd_cache.install_lease_attach(Arc::new(move |other, lease| {
+                // No state owns this stateid — a descriptor cached under
+                // something `states` does not know. DISARM before
+                // dropping, or the lease would evict the entry that was
+                // just inserted and quietly turn the cache off for that
+                // path. Unowned entries stay covered by the capacity
+                // bound and the backstop hook.
+                if !sm.stateids.attach_fd_lease(&other, Arc::clone(&lease)) {
+                    lease.disarm();
+                }
+            }));
+        }
 
         // Reap the fd cached under a delegation stateid when that
         // delegation goes away — returned, revoked-and-freed, or torn
@@ -3232,8 +3252,18 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         worker.join().unwrap();
-        // Every distinct stateid now maps to the shared fd.
-        assert_eq!(handler.fd_cache.len(), 513);
+        // Every distinct stateid mapped to the shared fd; how many
+        // SURVIVE depends on the capacity bound added 2026-09-16. The
+        // flat 513 this used to assert quietly encoded "the cache is
+        // unbounded", which is the property that exhausted
+        // RLIMIT_NOFILE and got the server fenced. Derive it from the
+        // budget so the test is right on any rlimit.
+        //
+        // The property under test is unchanged and is the watchdog
+        // above: a same-shard iter+insert must not deadlock.
+        let b = handler.fd_cache.budget();
+        let expected = if 513 > b.hiwat { b.lowat } else { 513 };
+        assert_eq!(handler.fd_cache.len(), expected);
     }
 
     /// change_info4 must carry the directory's REAL change bracket —

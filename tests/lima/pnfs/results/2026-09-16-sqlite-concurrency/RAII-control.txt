@@ -1,0 +1,34 @@
+RAII fd lease — is it the MECHANISM or a PASSENGER?  (2026-09-16)
+
+The first live run with the lease in place looked like success and
+proved nothing:
+
+    FD LEASE (RAII, state ownership) : 123
+    FD CACHE SWEEP (backstop hook)   : 184
+    fds 16 -> 139 -> 17
+
+Both mechanisms were live. `remove_master` calls the hook EXPLICITLY
+before the state entry drops, so the hook usually won the race and the
+lease then found nothing to remove. Descriptors returning to baseline
+was therefore equally consistent with "RAII works" and with "RAII does
+nothing and the hook carries it".
+
+THE CONTROL. Rebuild with the open-stateid backstop hook REMOVED, so
+the lease has to carry the release alone:
+
+    FD LEASE (RAII, state ownership) : 303
+    FD CACHE SWEEP (backstop hook)   : 0     <- control is valid
+    laundromat retirements           : 1
+    fds: baseline 16 -> 139 after 60 txns -> 17 at +120s
+
+RAII alone returns descriptors to baseline. And the lease count rising
+123 -> 303 is the internal confirmation: the releases the hook used to
+win are now done by the lease. The hook is a backstop, not the
+mechanism.
+
+WHAT THE HOOK IS STILL FOR: entries no state record claims — a
+descriptor cached under a stateid `states` does not know. Those leases
+are DISARMED at mint (see `FdLease::armed`), so nothing owns them and
+the capacity bound plus this hook are what cover them.
+
+Shipping code (hook restored): full library suite 2533 passed, 0 failed.

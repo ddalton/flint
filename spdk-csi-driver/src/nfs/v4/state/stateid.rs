@@ -92,6 +92,22 @@ pub struct StateEntry {
 
     /// Is this state revoked?
     pub revoked: bool,
+
+    /// RAII claim on the descriptor cached for this stateid.
+    ///
+    /// THE POINT: when this record is dropped — by CLOSE, by
+    /// FREE_STATEID, by lease expiry, by client removal, by revoke, or
+    /// by a path written next year — the lease drops with it and the
+    /// descriptor is released. No notification, nothing to remember.
+    ///
+    /// Runtime-only: `to_record()` maps the persisted fields explicitly
+    /// and does not include this, which is what we want — a descriptor
+    /// cannot survive a restart anyway.
+    ///
+    /// `Arc` because `StateEntry: Clone` and persistence takes
+    /// snapshots; the descriptor is released when the LAST clone dies,
+    /// so a snapshot in flight never closes a live file.
+    pub(crate) fd_lease: Option<Arc<crate::nfs::v4::operations::fd_cache::FdLease>>,
 }
 
 impl StateEntry {
@@ -132,6 +148,7 @@ impl StateEntry {
             seqid: r.seqid,
             filehandle: r.filehandle,
             revoked: r.revoked,
+            fd_lease: None,
         }
     }
 
@@ -149,6 +166,7 @@ impl StateEntry {
             seqid: stateid.seqid,
             filehandle,
             revoked: false,
+            fd_lease: None,
         }
     }
 
@@ -956,10 +974,43 @@ impl StateIdManager {
 
     /// Install the cached-fd release sink (io handler, once).
     ///
-    /// See the `fd_release` field: this is the open-stateid half of the
-    /// leak whose delegation half `delegation.rs` already closed.
+    /// BACKSTOP ONLY, since `StateEntry::fd_lease` made release a
+    /// consequence of ownership. It still fires for entries that never
+    /// got a lease — a descriptor cached before its state existed, or
+    /// under a stateid the cache knows and `states` does not. Keeping it
+    /// costs an idempotent map lookup; removing it would trade a proven
+    /// net for a tidier diagram.
     pub fn install_fd_release(&self, sink: Arc<dyn Fn(&[u8; 12]) + Send + Sync>) {
         let _ = self.fd_release.set(sink);
+    }
+
+    /// Hand a stateid's record the RAII claim on its cached descriptor.
+    ///
+    /// The ONE attach point. Everything about release follows from the
+    /// record's lifetime after this — which is the whole reason the
+    /// lease exists rather than a fourth hook.
+    ///
+    /// Returns false when there is no such state, so the caller can drop
+    /// the lease immediately rather than leave an unowned cache entry.
+    pub(crate) fn attach_fd_lease(
+        &self,
+        other: &[u8; 12],
+        lease: Arc<crate::nfs::v4::operations::fd_cache::FdLease>,
+    ) -> bool {
+        // The displaced lease is moved OUT and dropped only after the
+        // shard guard is gone. Dropping it in place would run
+        // `FdLease::drop` — which takes FdCache's locks — underneath a
+        // `states` write guard, and lock order is the one thing this
+        // module has already been burned by (F24: a read guard alive
+        // across an insert on the same map froze the server outright).
+        let displaced = {
+            match self.states.get_mut(other) {
+                Some(mut e) => e.fd_lease.replace(lease),
+                None => return false,
+            }
+        };
+        drop(displaced);
+        true
     }
 
     /// Announce that a stateid's record is gone, so the descriptor

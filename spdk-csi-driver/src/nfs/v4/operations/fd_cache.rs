@@ -49,6 +49,77 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// An RAII claim on one cache entry, held BY THE STATE that the entry
+/// belongs to. When the state record dies — by ANY path, including one
+/// nobody has written yet — this drops and the descriptor goes with it.
+///
+/// WHY THIS EXISTS RATHER THAN ANOTHER HOOK. The cache is keyed by
+/// stateid but lives beside the state, so the two only stay in step if
+/// every removal path remembers to announce itself. That is not a
+/// hypothetical failure mode: it happened TWICE. `delegation.rs` needed
+/// an `fd_release` hook for the delegation half; the open-stateid half
+/// then leaked through lease expiry until 2026-09-16, when a drill
+/// measured 2.04 descriptors lost per sqlite transaction and the server
+/// fenced itself on the resulting EMFILE. A design that needs a new hook
+/// per stateid flavour will need a third.
+///
+/// knfsd does not do it with hooks either: the file lives INSIDE the
+/// state object (`nfs4_file->fi_fds[]`, refcounted by `fi_access[]`), so
+/// `expire_client` → `release_openowner` → `release_all_access` →
+/// `nfsd_file_put` falls out of dropping the state. This is the same
+/// idea expressed as Rust ownership, which is stronger: there is no
+/// "remember to call it" left to get wrong.
+///
+/// Held as `Arc<FdLease>` because `StateEntry` is CLONED (persistence
+/// snapshots take one). The entry is released when the LAST clone dies,
+/// so a snapshot in flight can never close a live file.
+pub(crate) struct FdLease {
+    other: [u8; 12],
+    /// Weak: the cache outlives states in practice, but a lease must
+    /// never keep the cache alive, and shutdown order is not ours to
+    /// assume.
+    cache: std::sync::Weak<FdCache>,
+    /// False = this lease owns nothing and must NOT evict on drop.
+    ///
+    /// Needed because a lease is minted on every insert, but not every
+    /// insert has a state record to give it to — a descriptor can be
+    /// cached under a stateid `states` does not know. Dropping an
+    /// unclaimed lease would evict the entry that was just inserted,
+    /// turning the cache off for that path. Disarming leaves the entry
+    /// alive and unowned, where the capacity bound and the backstop hook
+    /// still cover it.
+    armed: std::sync::atomic::AtomicBool,
+}
+
+impl FdLease {
+    /// This lease found no owner: let the entry live, unowned.
+    pub(crate) fn disarm(&self) {
+        self.armed.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl std::fmt::Debug for FdLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "FdLease({:02x?})", &self.other[..4])
+    }
+}
+
+impl Drop for FdLease {
+    fn drop(&mut self) {
+        if !self.armed.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        if let Some(cache) = self.cache.upgrade() {
+            if cache.remove(&self.other).is_some() {
+                tracing::debug!(
+                    "🗑️ FD LEASE: state dropped, descriptor released for {:02x?}",
+                    &self.other[..4]
+                );
+            }
+        }
+    }
+}
+
 /// One cached open fd, keyed by the open stateid's `other` field.
 #[derive(Clone)]
 pub(crate) struct CachedFile {
@@ -94,6 +165,10 @@ pub(crate) struct FdCache {
     order: DashMap<[u8; 12], u64>,
     seq: std::sync::atomic::AtomicU64,
     budget: FdBudget,
+    /// Weak self-reference, so `insert` can mint an `FdLease`.
+    me: std::sync::OnceLock<std::sync::Weak<FdCache>>,
+    /// Hands each minted lease to the state that owns the stateid.
+    attach: std::sync::OnceLock<Arc<dyn Fn([u8; 12], Arc<FdLease>) + Send + Sync>>,
 }
 
 /// How large this cache may grow, derived at startup.
@@ -181,7 +256,59 @@ impl FdCache {
             order: DashMap::new(),
             seq: std::sync::atomic::AtomicU64::new(0),
             budget,
+            me: std::sync::OnceLock::new(),
+            attach: std::sync::OnceLock::new(),
         }
+    }
+
+    /// A cache with an explicit budget. Tests only.
+    ///
+    /// The alternative — setting `FLINT_FD_CACHE_MAX` — is process
+    /// global, and `cargo test` runs tests in PARALLEL, so any cache
+    /// another test constructed while the var was set would silently
+    /// inherit it. That is a flaky-test generator, not a fixture.
+    #[cfg(test)]
+    pub(crate) fn with_budget(budget: FdBudget) -> Self {
+        let mut c = Self::new();
+        c.budget = budget;
+        c
+    }
+
+    /// Let the cache mint leases: it needs a `Weak` to itself. Called
+    /// once, immediately after the `Arc` is built.
+    pub(crate) fn set_self_ref(self: &Arc<Self>) {
+        let _ = self.me.set(Arc::downgrade(self));
+    }
+
+    /// Install the sink that hands a freshly minted lease to the state
+    /// that owns the stateid. Called once, at handler construction.
+    ///
+    /// Deliberately inside `insert` rather than at the call sites: there
+    /// are seven of them, one is inside a moved closure with no access
+    /// to the state manager, and the failure mode of missing one is a
+    /// silent descriptor leak — which is the bug this whole exercise is
+    /// about. Wiring it once here means an insert added later is leased
+    /// automatically instead of correctly-by-accident.
+    pub(crate) fn install_lease_attach(
+        &self,
+        sink: Arc<dyn Fn([u8; 12], Arc<FdLease>) + Send + Sync>,
+    ) {
+        let _ = self.attach.set(sink);
+    }
+
+    /// Mint a lease for `other` and offer it to the owning state.
+    fn lease(&self, other: [u8; 12]) {
+        let (Some(me), Some(attach)) = (self.me.get(), self.attach.get()) else {
+            return;
+        };
+        attach(
+            other,
+            Arc::new(FdLease {
+                other,
+                cache: me.clone(),
+                armed: std::sync::atomic::AtomicBool::new(true),
+            }),
+        );
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -270,6 +397,10 @@ impl FdCache {
                 self.by_ino.entry(ino).or_default().push(other);
             }
         }
+        // Every insert is leased, so the descriptor is released when the
+        // owning state record dies — by any path, including one written
+        // later. See `FdLease`.
+        self.lease(other);
         // Enforce the bound AFTER the indexes are consistent — reaping
         // walks them. Doing it on every insert, rather than at the
         // (unknown, possibly future) leak site, is the point: the
@@ -510,6 +641,139 @@ mod tests {
         }
     }
 
+    // ---- FdLease: release as a consequence of OWNERSHIP ---------------
+    //
+    // The property under test is the one the hook design could not give:
+    // a descriptor is released when the thing that owns it dies, by ANY
+    // path, including paths these tests do not know about. So the tests
+    // drop leases the way real code does — by letting the owner go out of
+    // scope — rather than by calling a release function.
+
+    /// Stand-in for whatever owns a stateid's record. Holding the lease
+    /// by `Arc` is the shape `StateEntry` uses, because it is Clone.
+    struct Owner {
+        _lease: Arc<FdLease>,
+    }
+
+    /// Wire a cache the way the handler does: self-ref + an attach sink.
+    /// Returns the cache and the parked leases, so a test can decide who
+    /// "owns" what.
+    fn leased_cache() -> (Arc<FdCache>, Arc<std::sync::Mutex<Vec<([u8; 12], Arc<FdLease>)>>>) {
+        let cache = Arc::new(FdCache::new());
+        cache.set_self_ref();
+        let parked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let p = Arc::clone(&parked);
+        cache.install_lease_attach(Arc::new(move |other, lease| {
+            p.lock().unwrap().push((other, lease));
+        }));
+        (cache, parked)
+    }
+
+    #[test]
+    fn dropping_the_owner_releases_the_descriptor() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (cache, parked) = leased_cache();
+        cache.insert([7; 12], entry(dir.path(), "owned", true));
+        assert_eq!(cache.len(), 1, "inserted");
+
+        let lease = parked.lock().unwrap().pop().unwrap().1;
+        let owner = Owner { _lease: lease };
+        assert_eq!(cache.len(), 1, "an owner holding its lease keeps the entry");
+
+        drop(owner);
+        assert_eq!(
+            cache.len(),
+            0,
+            "dropping the OWNER — not calling any release function — must \
+             release the descriptor. This is the whole point: no removal \
+             path has to remember anything."
+        );
+    }
+
+    #[test]
+    fn a_clone_in_flight_cannot_close_a_live_file() {
+        // StateEntry is Clone and persistence snapshots one. If the
+        // snapshot's drop released the fd, a routine persist would close
+        // a file the client is still using.
+        let dir = tempfile::TempDir::new().unwrap();
+        let (cache, parked) = leased_cache();
+        cache.insert([8; 12], entry(dir.path(), "cloned", true));
+        let lease = parked.lock().unwrap().pop().unwrap().1;
+
+        let live = Owner { _lease: Arc::clone(&lease) };
+        let snapshot = Owner { _lease: Arc::clone(&lease) };
+        drop(lease);
+        drop(snapshot);
+        assert_eq!(cache.len(), 1, "the LIVE owner still holds it");
+
+        drop(live);
+        assert_eq!(cache.len(), 0, "released only when the LAST holder dies");
+    }
+
+    #[test]
+    fn an_unclaimed_lease_must_not_evict_what_was_just_inserted() {
+        // A lease is minted on every insert, but a descriptor can be
+        // cached under a stateid no state record knows. If that lease
+        // evicted on drop it would silently turn the cache off for that
+        // path — a performance cliff with no error anywhere.
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = Arc::new(FdCache::new());
+        cache.set_self_ref();
+        cache.install_lease_attach(Arc::new(move |_other, lease| {
+            lease.disarm(); // nobody claimed it
+        }));
+        cache.insert([9; 12], entry(dir.path(), "unowned", true));
+        assert_eq!(
+            cache.len(),
+            1,
+            "a disarmed lease leaves the entry alive and unowned"
+        );
+    }
+
+    #[test]
+    fn a_lease_outliving_its_cache_does_not_panic() {
+        // Shutdown order is not ours to assume; the lease holds a Weak.
+        let dir = tempfile::TempDir::new().unwrap();
+        let (cache, parked) = leased_cache();
+        cache.insert([10; 12], entry(dir.path(), "orphan", true));
+        let lease = parked.lock().unwrap().pop().unwrap().1;
+        drop(cache);
+        drop(lease); // must be a no-op, not an upgrade on a dead Weak
+    }
+
+    #[test]
+    fn the_cache_is_bounded_and_reaps_least_recently_used() {
+        // The containment net: whatever leaks, it cannot reach the
+        // descriptor table. And recency must beat insertion order — a
+        // FIFO would evict the HOTTEST entry simply for being oldest.
+        let dir = tempfile::TempDir::new().unwrap();
+        // Injected, NOT via FLINT_FD_CACHE_MAX: that variable is process
+        // global and tests run in parallel, so setting it here would
+        // shrink any cache another test built at the same moment.
+        let cache = FdCache::with_budget(FdBudget { hiwat: 64, lowat: 48 });
+        let b = cache.budget();
+        assert_eq!(b.hiwat, 64);
+
+        let hot = entry(dir.path(), "hot", true);
+        cache.insert([0; 12], hot.clone());
+        for i in 1..200u8 {
+            cache.insert([i; 12], entry(dir.path(), &format!("f{i}"), true));
+            // Keep [0;12] the most-recently-USED entry.
+            let _ = cache.get(&[0; 12]);
+        }
+        assert!(
+            cache.len() <= b.hiwat,
+            "bounded: len {} must not exceed hiwat {}",
+            cache.len(),
+            b.hiwat
+        );
+        assert!(
+            cache.contains(&[0; 12]),
+            "the most-recently-USED entry survived 199 insertions — this is \
+             what distinguishes LRU from FIFO, which would have evicted it first"
+        );
+    }
+
     #[test]
     fn insert_get_remove_keep_index_in_step() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -617,7 +881,26 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         worker.join().unwrap();
-        assert_eq!(cache.len(), 513);
+        // 513 inserts happened. How many SURVIVE now depends on the
+        // capacity bound added 2026-09-16 — this used to assert a flat
+        // 513, which silently encoded "the cache is unbounded". It is
+        // not, deliberately: an unbounded fd cache is what exhausted
+        // RLIMIT_NOFILE and got the server fenced. Derive the
+        // expectation from the budget rather than swapping one magic
+        // number for another, so the test stays correct on a box with a
+        // different rlimit.
+        //
+        // The property under test is unchanged and is the watchdog
+        // above: a same-shard lookup+insert must not deadlock.
+        let b = cache.budget();
+        let expected = if 513 > b.hiwat { b.lowat } else { 513 };
+        assert_eq!(
+            cache.len(),
+            expected,
+            "bounded cache: 513 inserts, hiwat {} → expected {}",
+            b.hiwat,
+            expected
+        );
     }
 
     /// Guard-discipline lint (identity.rs precedent): no `if let` /
