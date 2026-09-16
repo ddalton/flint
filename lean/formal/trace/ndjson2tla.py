@@ -283,6 +283,19 @@ def write_out(steps, consts, paths, free, gen, evs_count, outdir: Path, name: st
            f"  Paths = {tla(set(paths))}", f"  FreePaths = {tla(set(free))}"]
     cfg += [f"  {k} {v}" if isinstance(v, str) and v.startswith("<-") else f"  {k} = {tla(v)}"
             for k, v in c.items()]
+    # THE SAFETY INVARIANTS, CHECKED WHILE THE TRACE IS REPLAYED. Following
+    # the trace only shows the model CAN do what the code did; these ask
+    # whether the run the code actually performed ever entered a state the
+    # model calls unsafe — a dangling citation, an acked UI write nothing
+    # tracks, a resurrection, two writers in one commit section. That is the
+    # check a data-loss defect would fail, on real bytes rather than in a
+    # world TLC invented.
+    cfg += [f"INVARIANT {i}" for i in (
+        "TypeOK", "Inv_HITLDurable", "Inv_NoDangling", "Inv_NoStragglerInstall",
+        "Inv_NoDeposedPut", "Inv_NoResurrection", "Inv_HITLTracked",
+        "Inv_CommitExclusive", "Inv_CellHeldByHolder", "Inv_NoStaleOverride",
+        # Convergence, which only bites where the replay comes to rest.
+        "Inv_QuiescentConverged")]
     cfg += ["INVARIANT TraceProgress", "INVARIANT TraceIncomplete"]
     (outdir / "TraceLean.cfg").write_text("\n".join(cfg) + "\n")
     m = [f"{n + 1}\t{r['ev']}\tline {i + 1}" for n, (r, i) in enumerate(steps)]
