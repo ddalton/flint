@@ -50,3 +50,12 @@ deliberately does not excuse it and it should still violate. If it
 holds at TRUE and violates at FALSE, the untracked sweep is
 LOAD-BEARING for S1 there rather than the churn control SAFETY.md §3
 calls it. Neither run has been made.
+
+---
+ADDENDUM 2026-09-16: FRESH SINGLE-PROCESS RUN, unqualified.
+
+`gate-fresh-single-process.txt` is a full 117/117 with GATE_RESUME unset:
+every run executed in one process, rc=0, 0 FAIL, and no "NOT A FRESH RUN"
+line. The split-across-two-processes provenance described above is
+therefore superseded as the evidence of record; it is kept because it is
+what the journal machinery was first proved on.
