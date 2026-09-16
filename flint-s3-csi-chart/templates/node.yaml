@@ -123,7 +123,7 @@ spec:
               mountPath: /var/run/secrets/flint-s3
               readOnly: true
         - name: node-driver-registrar
-          image: "{{ .Values.csiSidecars.repository }}/{{ .Values.csiSidecars.nodeDriverRegistrar.name }}:{{ .Values.csiSidecars.nodeDriverRegistrar.tag }}"
+          image: "{{ with (coalesce .Values.global.imageRegistry .Values.csiSidecars.registry) }}{{ . }}/{{ end }}{{ .Values.csiSidecars.repository }}/{{ .Values.csiSidecars.nodeDriverRegistrar.name }}:{{ .Values.csiSidecars.nodeDriverRegistrar.tag }}"
           imagePullPolicy: IfNotPresent
           args:
             - "--csi-address=/csi/csi.sock"
@@ -134,7 +134,7 @@ spec:
             - name: registration-dir
               mountPath: /registration
         - name: liveness-probe
-          image: "{{ .Values.csiSidecars.repository }}/{{ .Values.csiSidecars.livenessprobe.name }}:{{ .Values.csiSidecars.livenessprobe.tag }}"
+          image: "{{ with (coalesce .Values.global.imageRegistry .Values.csiSidecars.registry) }}{{ . }}/{{ end }}{{ .Values.csiSidecars.repository }}/{{ .Values.csiSidecars.livenessprobe.name }}:{{ .Values.csiSidecars.livenessprobe.tag }}"
           imagePullPolicy: IfNotPresent
           args:
             - "--csi-address=/csi/csi.sock"

@@ -66,12 +66,20 @@
 
 # ── The node plugin ──────────────────────────────────────────────────
 
+# global.imageRegistry, when set, is prepended to every image below (overriding
+# each image's own `registry`). Consumers that mirror images to a private
+# registry (e.g. awc-core) set this once instead of editing `repository` — no
+# registry host is hardcoded in this chart.
+global:
+  imageRegistry: ""
+
 node:
-  # The plugin image, {repository}:{tag|appVersion}. Carries BOTH
+  # The plugin image, {registry}/{repository}:{tag|appVersion}. Carries BOTH
   # binaries: /usr/local/bin/flint-s3-csi-node (this DaemonSet) and
   # /usr/local/bin/flint-s3-broker (the broker Deployment below). Built
   # from spdk-csi-driver/docker/Dockerfile.s3csi.prebuilt.
   image:
+    registry: ""
     repository: dilipdalton/flint-s3-csi
     tag: ""
     pullPolicy: IfNotPresent
@@ -118,7 +126,8 @@ node:
 # The sig-storage sidecars. Pinned; a moving sidecar next to a
 # privileged container is a change nobody chose.
 csiSidecars:
-  repository: registry.k8s.io/sig-storage
+  registry: registry.k8s.io
+  repository: sig-storage
   nodeDriverRegistrar:
     name: csi-node-driver-registrar
     tag: v2.13.0
@@ -155,6 +164,7 @@ workers:
   # flint-passthrough-mounter image, so the mount-s3 pin is that
   # image's; built from spdk-csi-driver/docker/Dockerfile.s3worker.
   passthroughImage:
+    registry: ""
     repository: dilipdalton/flint-s3-worker
     tag: ""
 
@@ -164,6 +174,7 @@ workers:
   # is design milestone M5; the plugin in this release refuses lean
   # volumes with a message that says so.
   leanImage:
+    registry: ""
     repository: dilipdalton/flint-s3-worker-lean
     tag: ""
 

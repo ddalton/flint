@@ -9,19 +9,27 @@
 # Formal model:     lean/formal/  (65-run TLC gate)
 # Measurements:     docs/plans/flint-lean-0b-measurements.md
 
-# The operator image. Composed as {repository}/{name}:{tag|appVersion};
-# `ref` overrides the whole reference (e.g. a kind-loaded
-# "flint-lean-operator:e2e").
+# global.imageRegistry, when set, is prepended to every image below (overriding
+# each image's own `registry`). Consumers that mirror images to a private
+# registry (e.g. awc-core) set this once instead of editing `repository` — no
+# registry host is hardcoded in this chart.
+global:
+  imageRegistry: ""
+
+# The operator image. Composed as {registry}/{repository}:{tag|appVersion}
+# (empty registry => the repository's implicit registry, Docker Hub);
+# global.imageRegistry overrides `registry`, and `ref` overrides the whole
+# reference (e.g. a kind-loaded "flint-lean-operator:e2e").
 #
-# This is an ALIAS of dilipdalton/flint-lite-operator, published from the
-# identical manifest digest — same crate, same build, one image, two
-# names. Nothing flint-lite runs from it: the chart execs
-# /usr/local/bin/flint-lean-operator (and -gateway), never the image's
-# own flint-lite-operator ENTRYPOINT. The alias exists so that
-# installing flint-lean never asks you to pull something called "lite".
+# repository is an ALIAS of dilipdalton/flint-lite-operator, published from the
+# identical manifest digest — same crate, same build, one image, two names.
+# Nothing flint-lite runs from it: the chart execs
+# /usr/local/bin/flint-lean-operator (and -gateway), never the image's own
+# flint-lite-operator ENTRYPOINT. The alias exists so that installing flint-lean
+# never asks you to pull something called "lite".
 image:
-  repository: dilipdalton
-  name: flint-lean-operator
+  registry: ""
+  repository: dilipdalton/flint-lean-operator
   tag: ""
   ref: ""
   pullPolicy: IfNotPresent

@@ -62,18 +62,26 @@ app.kubernetes.io/name: {{ include "flint-s3-csi.broker.name" . }}
 app.kubernetes.io/component: broker
 {{- end }}
 
-{{/* Images: {repository}:{tag|appVersion}. The node plugin and the
-     broker run from ONE image (different binaries). */}}
+{{/* Images: {registry}/{repository}:{tag|appVersion} — empty registry => the
+     repository's implicit registry (Docker Hub); global.imageRegistry overrides
+     each image's own registry. The node plugin and the broker run from ONE
+     image (different binaries). */}}
+{{- define "flint-s3-csi.imageRef" -}}
+{{- $reg := coalesce .root.Values.global.imageRegistry .img.registry -}}
+{{- $tag := .img.tag | default .root.Chart.AppVersion -}}
+{{- if $reg }}{{ printf "%s/%s:%s" $reg .img.repository $tag }}{{ else }}{{ printf "%s:%s" .img.repository $tag }}{{ end -}}
+{{- end }}
+
 {{- define "flint-s3-csi.node.image" -}}
-{{- printf "%s:%s" .Values.node.image.repository (.Values.node.image.tag | default .Chart.AppVersion) }}
+{{- include "flint-s3-csi.imageRef" (dict "root" . "img" .Values.node.image) -}}
 {{- end }}
 
 {{- define "flint-s3-csi.passthroughImage" -}}
-{{- printf "%s:%s" .Values.workers.passthroughImage.repository (.Values.workers.passthroughImage.tag | default .Chart.AppVersion) }}
+{{- include "flint-s3-csi.imageRef" (dict "root" . "img" .Values.workers.passthroughImage) -}}
 {{- end }}
 
 {{- define "flint-s3-csi.leanImage" -}}
-{{- printf "%s:%s" .Values.workers.leanImage.repository (.Values.workers.leanImage.tag | default .Chart.AppVersion) }}
+{{- include "flint-s3-csi.imageRef" (dict "root" . "img" .Values.workers.leanImage) -}}
 {{- end }}
 
 {{/* The node plugin's principal as TokenReview and the audit log spell
