@@ -12,6 +12,23 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Fixed
+
+- **lean: the garbage collector's `outranked` branch is traced.** Every
+  other outcome of the collector's loop says what it did — absent,
+  deleted, replaced-absent, skipped, and now leaked. The one that
+  resolves a delete foreign-wins (`installed.entries.contains_key`) took
+  its `continue` in silence, so a trace could not tell "this barrier
+  resolved the delete as outranked" from "this barrier never looked at
+  the path". Not a correctness defect; it made that branch unverifiable.
+  - *Found by:* replaying `churn/p47.txt` from the 2026-09-15 storm
+    against the TLA+ model, which owes a GC step for every path in its
+    delete set and had no event to take one with (W4 phase 2, R3-S2;
+    `lean/formal/results/2026-09-15-p47/`).
+  - The model needed no change: `GCDelete`'s skip arm already covers
+    "the new manifest still references it", and the replay already maps
+    any non-`deleted` result to "objects unchanged".
+
 ### Added
 
 - **lean: the syncer asks the store whether it enforces conditional

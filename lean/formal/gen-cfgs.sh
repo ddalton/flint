@@ -19,7 +19,7 @@ BarrierLease Ticket DeadHandoffSkip InfiniteBarriers ConditionalGC VerifyAdopted
 HitlOverwritesTrackedOnly SyncKeepsHiddenBase MaxSameBytes VerifyUploadedCitations \
 WriterQueue EmptyInstall TombstoneHeadsKey CommitLoadsCurrent Upload412Preserves \
 DeclaredConfirmsAbsence Writers OrphanTrack QueueForeignChanges ProjectedTrace \
-AbandonOnStoreError BaselineKeepsUncollected ClaimMintsEpoch ClaimStampsEpoch CollectorOff"
+AbandonOnStoreError BaselineKeepsUncollected ClaimMintsEpoch ClaimStampsEpoch CollectorOff InboxSnapshot"
 
 emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
          # Spec=<name> selects the SPECIFICATION (default Spec; FairSpec
@@ -102,6 +102,13 @@ emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
   # conditional DELETE (`conformance.rs`).  FALSE preserves every earlier
   # state space by construction.
   local c_CollectorOff=FALSE
+  # InboxSnapshot=FALSE everywhere except the world that asks whether the
+  # code's snapshot read is safe: the barrier reads the cell ONCE and
+  # consumes from that, so another writer's window clear can empty the
+  # shared inbox in between (`barrier.rs` step 1). FALSE preserves every
+  # earlier state space by construction — LoadInbox is disabled and the
+  # consume reads `inbox`, as it always did.
+  local c_InboxSnapshot=FALSE
   # VerifyAdoptedCitations=TRUE re-verifies an adopted entry under the
   # lease; FALSE is the shipped blind adopt, which the model refuted at
   # depth 28 of the first two-writer stall run.  BarrierLease only.
@@ -725,6 +732,15 @@ emit LeanProbeCollectorLeaked "ProbeCollectorLeaked" $BLWORLD $IMPL \
 # that clause, this run flips and forces them to look here.
 emit LeanBarrierLeaseCollectorOffHitlTracked "Inv_HITLTracked" $BLWORLD $IMPL \
   ConditionalGC=FALSE CollectorOff=TRUE BaselineKeepsUncollected=TRUE
+# IS THE SNAPSHOT READ SAFE?  `barrier.rs` step 1 reads the cell ONCE and
+# the consume integrates THAT, so a peer's window clear can drop an entry
+# between the read and the consume and this writer still adopts it. The
+# replay of churn/p47.txt is what forced the model to have that window
+# (W4 phase 2, R3-S2: the model read `inbox` at the instant of the
+# consume and could not take a step the code took). Now that it does, the
+# question it raises gets asked: every invariant, in the breadth world.
+emit LeanBarrierLeaseInboxSnapshot "$BLINV" $BLWORLD $IMPL InboxSnapshot=TRUE
+emit LeanProbeStaleInboxAdopt "ProbeStaleInboxAdopt" $BLWORLD $IMPL InboxSnapshot=TRUE
 # THE ACK, THIRD REFINEMENT.  Inv_AckBoundaryCoherent now excuses exactly a
 # document ahead of the tree by a change waiting in this writer's queue.
 # A relaxation is trusted only after it is re-run on a known-bad world: the

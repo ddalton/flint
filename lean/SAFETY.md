@@ -79,7 +79,7 @@ A claim with unnamed assumptions is a claim about nothing.
 | assumption | how it is verified | if it is false |
 |---|---|---|
 | the store honours `If-None-Match` / `If-Match` on PUT (every upload, the manifest CAS, the lease cell) | probed by the syncer before its first verb (`conformance.rs`), and by `flint-sync probe-conditional` | **no guarantee holds** — arbitration degrades silently to last-writer-wins. The syncer now REFUSES the workspace (`EXIT_REFUSED`) rather than run on such a store |
-| the store honours `If-Match` on DELETE (the file collector, and only it) | the same probe | the collector could take the version another writer's commit is about to cite — precisely the model's refuted `LeanBarrierLeaseGCUnconditional`. The syncer now turns the COLLECTOR off instead of refusing the workspace: retired objects are left in the bucket, cited by nothing (`leaked=` on the barrier line, one warning per barrier). Ozone 2.2.x is this case (HDDS-14907, L-27) — and so is **MinIO** (RELEASE.2025-09-07, measured: it enforces `If-Match` on GET and `If-None-Match` on PUT, and ignores `If-Match` on DELETE — `lean/e2e/results/minio-conditional-delete-2026-09-15.md`), which is most of the e2e rig. The loss becomes storage growth |
+| the store honours `If-Match` on DELETE (the file collector, and only it) — **FALSE on two of the three stores we actually run against**: S3 enforces it; Ozone 2.2.x (L-27) and MinIO (L-102, measured 2026-09-15) both accept the header and ignore it | the same probe | the collector could take the version another writer's commit is about to cite — precisely the model's refuted `LeanBarrierLeaseGCUnconditional`. The syncer now turns the COLLECTOR off instead of refusing the workspace: retired objects are left in the bucket, cited by nothing (`leaked=` on the barrier line, one warning per barrier). Ozone 2.2.x is this case (HDDS-14907, L-27) — and so is **MinIO** (RELEASE.2025-09-07, measured: it enforces `If-Match` on GET and `If-None-Match` on PUT, and ignores `If-Match` on DELETE — `lean/e2e/results/minio-conditional-delete-2026-09-15.md`), which is most of the e2e rig. The loss becomes storage growth |
 | an etag names the bytes (a content hash), so identical bytes share one | modelled (`MaxSameBytes`), which is what makes finding 13 reachable | the same-bytes findings would not apply; a different set would |
 | the local filesystem gives atomic rename and honest `lstat` | assumed | the scan's two-scan rule and the temp-then-rename writes lose their basis |
 | exactly one syncer owns a workspace tree on a node, and nothing else edits it mid-barrier | the CSI driver's worker-per-volume | a scan can publish a half-written file |
@@ -120,8 +120,13 @@ A claim with unnamed assumptions is a claim about nothing.
    nine invariants (exhaustive: 6.5M distinct states, depth 39), and
    `LeanBarrierLeaseCollectorOffHitlTracked` pins the failure so it is
    recorded rather than quietly unasked.
-5. **One replay is open.** `churn/p47.txt` — deletes, a skipped GC and a
-   preserve — is still rejected mid-trace.
+5. **Replays are still open, and further along.** `churn/p47.txt` cleared
+   two blockers on 2026-09-15 (the model gained the inbox-snapshot
+   window; the GC's outranked branch gained a trace event) and now
+   stops at a third: the model's manifest does not cite the path
+   where the code's installed manifest does, so they had already
+   diverged. `R2-S2-churn-ui` stops elsewhere again, at an `abandon`.
+   See `lean/formal/results/2026-09-15-p47/`.
 6. **Liveness.** Two runs, and the ticket's fairness is weaker in the code
    than in the model (a waiting writer does not always hold a ticket). No
    starvation has been observed; none is ruled out.
@@ -143,7 +148,7 @@ A claim with unnamed assumptions is a claim about nothing.
 | 1 | ~~run the three-writer world in the gate~~ **done 2026-09-15** | — |
 | 2 | ~~a refutation for `Inv_CommitExclusive` and for `Inv_CellHeldByHolder`~~ **done 2026-09-15**: a claim that reuses the cell's epoch breaks the first, a claim that does not stamp it breaks the second | — |
 | 3 | correct `Inv_HITLTracked` in BOTH arms — credit checkout's S3-wins adoption, and credit a write a published delete retired even where the object survives — then re-run the crash world AND the collector-off world. A relaxation is trusted only after it is re-run on the mutations that require this invariant to fail (4 of them, `COVERAGE.md`) | an afternoon |
-| 4 | finish the `churn/p47.txt` replay: decide whether the model's consume or the code's is wrong | unknown until read |
+| 4 | finish the replays: bisect the earliest step where the model's manifest disagrees with the leg's for a path (the `cas` seqs and `observed` etags make it mechanical), then the `abandon` in R2-S2. Two blockers closed 2026-09-15 | a day |
 | 5 | replay every path of every storm leg in CI, invariants on | a day, then free |
 | 6 | exhaust the two-path sentinel world (box-scale) | a TLC box, ~$5-20 |
 | 7 | ~~refuse a store that fails `probe-conditional` instead of documenting it~~ **done 2026-09-15**: the syncer probes before its first verb — a broken conditional PUT refuses the workspace, a broken conditional DELETE turns the collector off (`conformance.rs`) | — |

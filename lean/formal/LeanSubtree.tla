@@ -461,6 +461,19 @@ CONSTANTS
                        \* consume and an incoming version is PRESERVED
                        \* rather than adopted.  FALSE = the model as it was:
                        \* every published delete clears the baseline.
+  InboxSnapshot,       \* TRUE = what SHIPS: the barrier reads the cell ONCE,
+                       \* at its first step (`barrier.rs` step 1, "the cell,
+                       \* read ONCE"), and consumes from that SNAPSHOT.
+                       \* Another writer's window clear can empty the shared
+                       \* inbox in between, and the code still integrates
+                       \* what it read.  FALSE = the model as it was: the
+                       \* consume reads the inbox at the instant it runs, so
+                       \* it has nothing to adopt and the step is not
+                       \* enabled.  THE REPLAY OF churn/p47.txt FOUND THIS
+                       \* (W4 phase 2, R3-S2): the model was less faithful
+                       \* than the code, not wrong about it.  FALSE
+                       \* everywhere else, so every earlier state space is
+                       \* preserved by construction.
   CollectorOff,        \* TRUE = the collector GIVES WAY: it recognises the
                        \* object and still does not delete it.  Not a
                        \* mutation and not a defect — it is what the syncer
@@ -1038,7 +1051,8 @@ Init ==
         honored |-> FALSE, pendReRun |-> FALSE, owed |-> {}, ackN |-> {},
         citeDropped |-> {},
         fq |-> {}, noInst |-> FALSE,
-        declared |-> {}, consumed |-> {}]]
+        declared |-> {}, consumed |-> {},
+        inboxSeen |-> {}, inboxLoaded |-> FALSE]]
   /\ hitlAcked = {} /\ conflicts = {}
   /\ gh = [amputated |-> FALSE, resurrected |-> FALSE,
            stragglerInstalls |-> 0, stragglerCas |-> 0, deposedPuts |-> 0,
@@ -1068,7 +1082,7 @@ Init ==
            staleOverride |-> FALSE, hitlRetired |-> {},
            pullOnlys |-> 0, emptyInstalls |-> 0,
            tombRemoved |-> 0, tombSuperseded |-> 0, orphanTracks |-> 0,
-           leaked |-> 0]
+           leaked |-> 0, staleAdopt |-> 0]
 
 ------------------------------------------------------------------------------
 (* Lifecycle *)
@@ -1491,6 +1505,21 @@ TrackOrphan(p) ==
    local (locally-dirty wins) and surface a conflict record; stale
    entries (superseded object) drop.  A barrier never runs against an
    unconsumed inbox.                                                     *)
+\* `barrier.rs` step 1: "the cell, read ONCE".  Its own step ONLY under
+\* InboxSnapshot, so that the window between the read and the consume —
+\* where another writer's window clear empties the shared inbox — is a
+\* window the model has too.  Without it the model reads `inbox` at the
+\* instant of the consume and cannot take a step the code takes.
+LoadInbox(s) ==
+  /\ InboxSnapshot
+  /\ Running(s) /\ sc[s].pc = "idle" /\ ~sc[s].inboxLoaded
+  /\ ~(SentinelEnabled /\ sc[s].honored)
+  /\ gh.barriers < MaxBarriers \/ InfiniteBarriers
+  /\ sc' = [sc EXCEPT ![s].inboxSeen = inbox, ![s].inboxLoaded = TRUE]
+  /\ UNCHANGED leaseVars
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
+                 removals, window, hitlAcked, conflicts, gh>>
+
 Consume(s) ==
   /\ Running(s) /\ sc[s].pc = "idle"
   \* An honored boundary owes its ack BEFORE anything else runs: the
@@ -1502,7 +1531,11 @@ Consume(s) ==
   \* it names.
   /\ ~(SentinelEnabled /\ sc[s].honored)
   /\ gh.barriers < MaxBarriers \/ InfiniteBarriers
+  /\ InboxSnapshot => sc[s].inboxLoaded
   /\ LET
+       \* What the cell held when THIS barrier read it (InboxSnapshot), or
+       \* what it holds now (the model as it was).
+       seen == IF InboxSnapshot THEN sc[s].inboxSeen ELSE inbox
        \* Tranche 7: the writer-LOCAL queue's upserts join the entries (the
        \* code runs them first; with one entry per path and the key holding
        \* one generation, order among them changes nothing here), and an
@@ -1510,7 +1543,7 @@ Consume(s) ==
        \* every other arm, with no record — `consume_counted`'s "already".
        \* An entry whose object is gone leaves a `consume-object-missing`
        \* record.  Under ~WriterQueue: the rules as they were.
-       cand == IF WriterQueue THEN inbox \cup QueuedUpserts(s) ELSE inbox
+       cand == IF WriterQueue THEN seen \cup QueuedUpserts(s) ELSE seen
        already == IF WriterQueue
                   THEN {pr \in cand : sc[s].baseline[pr[1]] = pr[2]} ELSE {}
        missing == IF WriterQueue
@@ -1581,7 +1614,9 @@ Consume(s) ==
                             THEN (@ \cup adoptPaths) \ (tAbsent \cup tRemoved) ELSE @,
             ![s].declared = @ \cup declaredNow,
             \* What this barrier consumed, to leave the cell at Finish.
-            ![s].consumed = IF EarlyInboxDrop THEN {} ELSE inbox]
+            ![s].consumed = IF EarlyInboxDrop THEN {} ELSE seen,
+            \* The next barrier reads the cell again.
+            ![s].inboxLoaded = FALSE, ![s].inboxSeen = {}]
        /\ conflicts' = conflicts
             \cup (IF ConflictSurfacing THEN conflicted ELSE {})
             \cup {<<p, local2[p]>> : p \in refused}
@@ -1595,6 +1630,13 @@ Consume(s) ==
        \* out of scope is integrated HERE, one consume later — which is
        \* the only reason deferring it was not simply losing it.
        /\ gh' = [gh EXCEPT
+            \* Adopted from the SNAPSHOT an entry the cell no longer holds:
+            \* a peer's window clear dropped it between this barrier's read
+            \* and this step.  The non-vacuity for the InboxSnapshot world —
+            \* without it, "every invariant holds" could mean "the window
+            \* never opened".
+            !.staleAdopt = @ + Cardinality({pr \in adoptable :
+                                              pr \in seen /\ pr \notin inbox}),
             !.deferredLater = @ + Cardinality(advPaths \cap gh.deferredPaths),
             !.deferredPaths = @ \ advPaths,
             !.removalsApplied = @ + Cardinality(applied),
@@ -2964,7 +3006,7 @@ BaseNext ==
   \/ \E p, q \in Paths : HitlRename(p, q)
   \/ HitlRefused
   \/ \E s \in Syncers :
-       Consume(s) \/ Scan(s) \/ UploadFenced(s) \/ GCDeleteFenced(s)
+       LoadInbox(s) \/ Consume(s) \/ Scan(s) \/ UploadFenced(s) \/ GCDeleteFenced(s)
        \/ PreDeletesDone(s) \/ CASFenced(s) \/ CASMiss(s) \/ CASInstall(s)
        \/ Finish(s) \/ Sync(s) \/ PullOnly(s) \/ AbandonBarrier(s)
   \/ SentinelNext
@@ -2994,7 +3036,7 @@ ASSUME ~QueueForeignChanges => WriterQueue
    mutation the claim is enabled only between one release and the next
    claim, WF asks nothing, and one writer claims forever.               *)
 BarrierStep(s) ==
-  /\ \/ Consume(s) \/ Scan(s) \/ Claim(s) \/ Enqueue(s) \/ SkipDeadHandoff(s)
+  /\ \/ LoadInbox(s) \/ Consume(s) \/ Scan(s) \/ Claim(s) \/ Enqueue(s) \/ SkipDeadHandoff(s)
      \/ \E p \in Paths : Upload(s, p) \/ GCDelete(s, p) \/ GCHead(s, p)
      \/ PreDeletesDone(s) \/ CASMiss(s) \/ CASInstall(s) \/ Finish(s)
      \/ CASFenced(s) \/ GCDeleteFenced(s) \/ RenewDiscover(s) \/ PullOnly(s)
@@ -3447,6 +3489,7 @@ ProbeOrphanTracked     == gh.orphanTracks = 0
 \* on a path it would otherwise have deleted.  Without this, "every
 \* invariant holds" could mean "the collector was never asked".
 ProbeCollectorLeaked   == gh.leaked = 0
+ProbeStaleInboxAdopt   == gh.staleAdopt = 0
 
 \* ---- tranche 7: model the implementation -------------------------------
 \* Each new arm is REQUIRED-REACHABLE in the world whose strict run leans

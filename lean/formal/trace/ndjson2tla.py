@@ -147,6 +147,11 @@ def convert(lines):
         elif ev == "barrier_start":
             open_consume[w] = {"adopted": set(), "removed": set(), "dirty": set(), "kept": set()}
             barrier[w] = {"claimed": False, "observed": {}, "merge": None, "scanned": False}
+            # `barrier.rs` step 1 reads the cell ONCE, here, and the consume
+            # below integrates THAT snapshot. Its own step, so a peer's
+            # window clear can land in between — which is what the replay
+            # of churn/p47.txt needed (W4 phase 2).
+            steps.append(({"ev": "load", "w": w}, i))
         elif ev == "consume":
             c = open_consume[w]
             p, et, act = e["path"], e["etag"], e["action"]
@@ -266,6 +271,17 @@ def convert(lines):
         # The handoff rule the code implements (found by replaying the storm).
         "AbandonOnStoreError": True,
         "BaselineKeepsUncollected": True,
+        # The epoch discipline, as it ships: every claim mints a new epoch
+        # and stamps it on the claimant (`lease.rs`'s acquire).
+        "ClaimMintsEpoch": True, "ClaimStampsEpoch": True,
+        # The barrier reads the cell once, at its first step, and consumes
+        # from that snapshot — which is what churn/p47.txt needed.
+        "InboxSnapshot": True,
+        # The replayed runs are all on S3, which enforces the conditional
+        # DELETE, so the collector collects. A trace from a store that
+        # fails `probe-conditional` would need this TRUE and the leg's
+        # gc events would say "leaked" rather than "deleted".
+        "CollectorOff": False,
         "QueueForeignChanges": True,
     }
     return steps, consts, paths, free, gen

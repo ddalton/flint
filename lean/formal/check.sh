@@ -6,7 +6,7 @@
 # DELIBERATELY SEPARATE from scripts/check-tla.sh (flint's 196-run gate):
 # lean is a separate system.  Same harness discipline, its own runs.
 #
-# A hundred and sixteen runs, ALL required (asserted at the bottom, not just printed —
+# A hundred and eighteen runs, ALL required (asserted at the bottom, not just printed —
 # this prose count had drifted to "fifty-five", then to "eighty-three";
 # and EXPECT itself was left at 92 over 69 real runs when gated mode's
 # 23 runs were removed, so the gate at that commit failed its own count.
@@ -38,11 +38,24 @@ PASS=0
 # positive controls — edits that make the view unsound — must each fail it.
 python3 view-census.py --selftest LeanSubtree.tla || { echo "FAIL: the view census has lost its teeth"; exit 1; }
 python3 view-census.py LeanSubtree.tla || { echo "FAIL: StrictView is not sound for this module"; exit 1; }
+# And every constant the module declares must be known to BOTH cfg
+# generators — this one and `trace/ndjson2tla.py`. A constant added to
+# only one leaves the other's runs refused by TLC, in a gate you did not
+# happen to run: that broke trace-check.sh (which is in CI) twice on
+# 2026-09-15 and was found days later by a replay, not by a gate.
+python3 constants-census.py --selftest || { echo "FAIL: the constants census has lost its teeth"; exit 1; }
+python3 constants-census.py || { echo "FAIL: a cfg generator does not know every constant"; exit 1; }
 
+# TLC_HEAP and TLC_WORKERS exist because this gate has to be runnable on a
+# memory-constrained laptop: TLC sizes its heap from system RAM and takes
+# every core, and on an 8 GiB box that is what the OS kills — twice on
+# 2026-09-15, at runs 109 and 62, with nothing else of ours running. Unset
+# = the old behaviour exactly, so a big box is unaffected.
 run_tlc() { # <module> <cfg>
   # Per-cfg -metadir: TLC's default scratch dir is named by wall-clock
   # second — parallel or fast-successive runs collide without this.
-  java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC -workers auto \
+  java -XX:+UseParallelGC ${TLC_HEAP:+-Xmx$TLC_HEAP} -cp "$JAR" tlc2.TLC \
+    -workers "${TLC_WORKERS:-auto}" \
     -metadir "states/${2%.cfg}" -config "$2" "$1.tla" 2>&1
 }
 
@@ -345,6 +358,15 @@ mutation_run $M LeanProbeCollectorLeaked.cfg "probe: the collector actually gave
   "Invariant ProbeCollectorLeaked is violated"
 mutation_run $M LeanBarrierLeaseCollectorOffHitlTracked.cfg "RECORDED, not fixed: with the collector off, Inv_HITLTracked fails -- its supersede clause is physical destruction, which a leak never performs" \
   "Invariant Inv_HITLTracked is violated"
+# IS THE SNAPSHOT READ SAFE?  `barrier.rs` step 1 reads the cell ONCE and
+# the consume integrates THAT snapshot, so a peer's window clear can drop
+# an entry in between and this writer still adopts it. The replay of
+# churn/p47.txt forced the model to have that window at all (W4 phase 2):
+# before InboxSnapshot the model read `inbox` at the instant of the
+# consume and could not take a step the code took. It holds.
+strict_run $M LeanBarrierLeaseInboxSnapshot.cfg "the barrier consumes the cell it read at its FIRST step, and a peer's window clear in between changes nothing"
+mutation_run $M LeanProbeStaleInboxAdopt.cfg "probe: a consume actually adopted an entry the cell no longer holds (or the run above proves nothing)" \
+  "Invariant ProbeStaleInboxAdopt is violated"
 mutation_run $M LeanBarrierLeaseQueueDropped.cfg "known-bad for the ack's third refinement: the merge base moves past a peer's change and nothing queues it -- the queue exemption must not excuse a document ahead by NOTHING queued" \
   "Invariant Inv_AckBoundaryCoherent is violated"
 mutation_run $M LeanProbePullOnly.cfg "probe: a pull-only boundary runs (no claim, no CAS)" \
@@ -377,7 +399,7 @@ if ! python3 "$(dirname "$0")/coverage.py" --check; then
   exit 1
 fi
 
-EXPECT=116
+EXPECT=118
 echo
 if [ "$PASS" -ne "$EXPECT" ]; then
   echo "lean formal gate: $PASS runs green but $EXPECT were declared — a run was"

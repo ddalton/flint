@@ -1504,6 +1504,17 @@ impl Syncer {
                 if installed.entries.contains_key(path) {
                     // delete/modify resolved foreign-wins: not garbage, and
                     // not in this boundary either.
+                    //
+                    // Traced like every other outcome of this loop. It is
+                    // the one the loop used to take in SILENCE, and a
+                    // replay cannot then tell "this barrier resolved the
+                    // delete as outranked" from "this barrier never looked
+                    // at the path": the model owes a GC step for every
+                    // path in its delete set, and there was no event to
+                    // take it with. Found replaying `churn/p47.txt`
+                    // against the model (W4 phase 2, R3-S2).
+                    self.trace("gc", serde_json::json!({"flush": flush_uuid, "path": path,
+                        "head": null, "result": "outranked"}));
                     report.outranked.push(path.clone());
                     continue;
                 }

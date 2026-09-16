@@ -1,0 +1,10 @@
+118/118 green.
+  LeanBarrierLeaseInboxSnapshot  strict, ok  — the barrier consumes the cell
+                                 it read at its FIRST step; a peer's window
+                                 clear in between changes nothing
+  LeanProbeStaleInboxAdopt       must-fail, violated — a consume really does
+                                 adopt an entry the cell no longer holds
+Run with TLC_HEAP=1200m TLC_WORKERS=2: the default (heap sized from system
+RAM, every core) was killed by the OS twice on this 8 GiB laptop, at runs
+109 and 62, with nothing else of ours running. No in-run OutOfMemory at
+1200m; the largest world here exhausts 6.5M distinct states.

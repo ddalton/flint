@@ -39,6 +39,7 @@ Match(e) ==
   \/ e.ev = "agent_write" /\ e.same /\ AgentWriteSame(e.w, e.p) /\ sc'[e.w].local[e.p] = e.g
   \/ e.ev = "agent_delete" /\ AgentDelete(e.w, e.p)
   \/ e.ev = "hitl_write" /\ gh.nextGen = e.g /\ HitlWrite(e.p)
+  \/ e.ev = "load" /\ LoadInbox(e.w)
   \/ e.ev = "touch" /\ Touch(e.w)
   \/ e.ev = "take" /\ TakeSentinel(e.w)
   \/ /\ e.ev = "consume"
