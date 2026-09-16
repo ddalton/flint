@@ -44,6 +44,12 @@ covered by the stability guarantee.
     writer's bytes, which is a loss.
   - Apache Ozone 2.2.x is exactly the second case (HDDS-14907, finding
     L-27), which is why it degrades rather than being refused outright.
+    So is **MinIO** (measured on RELEASE.2025-09-07: it enforces
+    `If-Match` on GET and `If-None-Match` on PUT, and ignores
+    `If-Match` on DELETE), which backs most of the e2e rig — so those
+    legs had been running the refuted collector, and now leak instead.
+    `lean/e2e/run-chaos.sh`'s two-scan leg judges the CITATION rather
+    than the object, and asserts the give-way where the store has one.
   - *Pinned by:*
     `a_store_that_ignores_if_match_on_delete_leaks_the_object_instead_of_collecting_it`,
     whose control arm requires the enforced store to actually collect.

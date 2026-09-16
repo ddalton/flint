@@ -434,17 +434,36 @@ c4_restart_and_two_scan_delete() {
   [ "$tree" = "a.txt c.txt " ] || { bad "tree is '$tree' — the unpublished delete was RESURRECTED"; return 1; }
   ok "no resurrection: tree is 'a.txt c.txt' after restart"
 
+  # Claim B: one scan of absence is NOT enough.  The two-scan rule is
+  # about the BOUNDARY, so the citation is what carries it; the object is
+  # only its usual proxy — and on a store that fails `probe-conditional`
+  # on DELETE the collector is off (`conformance.rs`), so the object
+  # stays whatever the rule did and the proxy says nothing. MinIO is such
+  # a store (results/minio-conditional-delete-2026-09-15.md), which is
+  # most of this rig.
   sy chaos-a $P $R barrier > /dev/null || { bad "post-restart barrier 1"; return 1; }
-  # Claim B: one scan of absence is NOT enough.
-  objexists "$P/files/b.txt" || { bad "b.txt deleted after ONE absent scan — the two-scan guard is gone"; return 1; }
-  ok "barrier 1: b.txt still in the bucket (first absence only)"
+  local cited1
+  cited1=$(manif "$P" | jq -r '.entries|keys[]' | tr '\n' ' ')
+  [ "$cited1" = "a.txt b.txt c.txt " ] ||
+    { bad "manifest cites '$cited1' after ONE absent scan — the two-scan guard is gone"; return 1; }
+  objexists "$P/files/b.txt" || { bad "b.txt's object went after ONE absent scan"; return 1; }
+  ok "barrier 1: b.txt still cited and still in the bucket (first absence only)"
 
-  sy chaos-a $P $R barrier > /dev/null || { bad "post-restart barrier 2"; return 1; }
-  if objexists "$P/files/b.txt"; then bad "b.txt survived two absent scans — the delete never happened"; return 1; fi
+  local b2
+  b2=$(sy chaos-a $P $R barrier) || { bad "post-restart barrier 2"; return 1; }
   local cited
   cited=$(manif "$P" | jq -r '.entries|keys[]' | tr '\n' ' ')
   [ "$cited" = "a.txt c.txt " ] || { bad "manifest cites '$cited' after the delete"; return 1; }
-  ok "barrier 2: b.txt GC'd and un-cited — two consecutive scans, exactly"
+  # Then the object, judged against what THIS store can do. `leaked=` is
+  # the syncer saying it recognised the object and left it on purpose.
+  if has "leaked=" "$b2"; then
+    objexists "$P/files/b.txt" ||
+      { bad "the barrier reported a LEAKED object but b.txt is gone — it was collected anyway"; return 1; }
+    ok "barrier 2: b.txt un-cited, object LEFT (this store has no conditional DELETE) — two scans, exactly"
+  else
+    if objexists "$P/files/b.txt"; then bad "b.txt survived two absent scans — the delete never happened"; return 1; fi
+    ok "barrier 2: b.txt GC'd and un-cited — two consecutive scans, exactly"
+  fi
 }
 
 # ─────────────────────────────────────────────────────────────────────
