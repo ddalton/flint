@@ -254,6 +254,33 @@ pub fn spawn_with_probe(
                 Ok(()) => {
                     prober_last.store(start.elapsed().as_millis() as u64, Ordering::SeqCst);
                 }
+                // EMFILE/ENFILE are NOT evidence about the backing store.
+                // They say we have no descriptor to probe WITH — a
+                // self-inflicted resource condition — so the probe is
+                // INCONCLUSIVE, not failed. Letting it accumulate
+                // staleness fences the server on no evidence at all:
+                // measured 2026-09-16, where an FdCache leak exhausted
+                // RLIMIT_NOFILE, every probe returned EMFILE, and the
+                // watchdog killed a hub whose ext4 export was perfectly
+                // healthy ("backing store unresponsive past deadline",
+                // exit 59). The reference implementations degrade instead
+                // of dying here: NFS-Ganesha DENIES requests above
+                // FD_Limit_Percent, knfsd reaps its filecache via an LRU
+                // shrinker. Neither self-terminates.
+                //
+                // So: hold the staleness clock and say so loudly. A real
+                // store failure that outlives the fd exhaustion still
+                // fences the moment a probe can be attempted again.
+                Err(e) if matches!(e.raw_os_error(), Some(libc::EMFILE) | Some(libc::ENFILE)) => {
+                    prober_last.store(start.elapsed().as_millis() as u64, Ordering::SeqCst);
+                    error!(
+                        error = %e,
+                        "[FENCE] probe INCONCLUSIVE — no file descriptor available to probe \
+                         with. This is self-inflicted (see FdCache), NOT evidence about the \
+                         backing store; the watchdog clock is held rather than fencing a \
+                         healthy store"
+                    );
+                }
                 Err(e) => {
                     // EIO-style failures don't update last_ok; staleness
                     // accumulates and the monitor fences. Log at warn so

@@ -86,15 +86,140 @@ pub(crate) struct FdCache {
     /// ino → stateids holding an fd for it. Same index discipline as
     /// `by_path`; consumers are the v4-handle stale-resolve fallbacks.
     by_ino: DashMap<u64, Vec<[u8; 12]>>,
+    /// stateid → last-use tick, for reaping least-recently-used once the
+    /// cache is over its high-water mark. Written on insert AND on every
+    /// `get` hit, which is what makes it recency rather than insertion
+    /// order. Kept beside the entry rather than inside `CachedFile` so
+    /// the entry type (cloned on every `get`) does not grow.
+    order: DashMap<[u8; 12], u64>,
+    seq: std::sync::atomic::AtomicU64,
+    budget: FdBudget,
+}
+
+/// How large this cache may grow, derived at startup.
+///
+/// WHY A BOUND AT ALL. Until 2026-09-16 there was none — the module's
+/// own sibling said so (`state/delegation.rs`: "`FdCache` has neither a
+/// capacity bound nor an LRU, so the server leaked one open fd per
+/// delegated file for the life of the process"). A drill then measured
+/// ~2 descriptors leaked per sqlite transaction, which exhausted
+/// `RLIMIT_NOFILE` and took the hub down: every operation returned
+/// EMFILE, and the F33 watchdog read its own failing probe as a dead
+/// backing store and exited 59 on a perfectly healthy ext4 export.
+///
+/// A bound turns "leak until death" into "evict the oldest", which is
+/// what both reference implementations do — knfsd reaps its filecache
+/// with an LRU shrinker, NFS-Ganesha with an LRU reaper thread at
+/// `FD_LWMark_Percent` / `FD_HWMark_Percent`, denying requests only at
+/// `FD_Limit_Percent`. Neither self-terminates.
+///
+/// It is safe to close a cached fd here: flint keeps byte-range locks in
+/// its own in-memory table (`lockops.rs:23`), NOT as kernel fcntl locks
+/// on the backing file, so dropping a descriptor releases no lock. An
+/// in-flight op holding its own `Arc<File>` clone finishes normally, and
+/// a miss just re-opens — this is a cache, not state.
+///
+/// DIVERGENCE FROM GANESHA, deliberate: its marks are percentages of the
+/// rlimit because it assumes an operator-set `nofile`. We now raise the
+/// soft limit to the hard limit at startup (1,048,576 on the drill
+/// host), and 90% of that is not a sane number of open files to hold. So
+/// the cap is the MINIMUM of a percentage and an absolute ceiling.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FdBudget {
+    /// Reap once the cache exceeds this.
+    pub(crate) hiwat: usize,
+    /// Reap down to this.
+    pub(crate) lowat: usize,
+}
+
+/// Absolute ceiling regardless of how generous the rlimit is.
+/// `FLINT_FD_CACHE_MAX` overrides it.
+const FD_CACHE_ABS_MAX: usize = 16384;
+
+impl FdBudget {
+    fn from_rlimit() -> Self {
+        let rlim = current_nofile().unwrap_or(1024);
+        let abs = std::env::var("FLINT_FD_CACHE_MAX")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(FD_CACHE_ABS_MAX);
+        // Half the descriptor budget at most: sockets, the state db and
+        // the log need the rest, and a cache that can consume the whole
+        // table is the defect this exists to prevent.
+        let hiwat = std::cmp::min(rlim / 2, abs).max(64);
+        Self { hiwat, lowat: (hiwat * 3) / 4 }
+    }
+}
+
+#[cfg(unix)]
+fn current_nofile() -> Option<usize> {
+    let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } == 0 {
+        Some(lim.rlim_cur as usize)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(unix))]
+fn current_nofile() -> Option<usize> {
+    None
 }
 
 impl FdCache {
     pub(crate) fn new() -> Self {
+        let budget = FdBudget::from_rlimit();
+        tracing::info!(
+            hiwat = budget.hiwat,
+            lowat = budget.lowat,
+            "fd cache bounded (reaps least-recently-used above hiwat; see FdBudget)"
+        );
         Self {
             by_stateid: DashMap::new(),
             by_path: DashMap::new(),
             by_ino: DashMap::new(),
+            order: DashMap::new(),
+            seq: std::sync::atomic::AtomicU64::new(0),
+            budget,
         }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn budget(&self) -> FdBudget {
+        self.budget
+    }
+
+    /// Reap least-recently-used down to `lowat`. Called from `insert` once the
+    /// cache goes over `hiwat`, so the bound holds no matter WHICH path
+    /// inserted — the point is that no future leak can reach the
+    /// descriptor table, not that every leak has been found.
+    fn reap_to_lowat(&self) -> usize {
+        let len = self.by_stateid.len();
+        if len <= self.budget.hiwat {
+            return 0;
+        }
+        let target = len.saturating_sub(self.budget.lowat);
+        let mut victims: Vec<(u64, [u8; 12])> =
+            self.order.iter().map(|e| (*e.value(), *e.key())).collect();
+        victims.sort_unstable_by_key(|(s, _)| *s);
+        let mut reaped = 0;
+        for (_, id) in victims.into_iter().take(target) {
+            if self.remove(&id).is_some() {
+                reaped += 1;
+            }
+        }
+        if reaped > 0 {
+            tracing::warn!(
+                reaped,
+                len_before = len,
+                len_now = self.by_stateid.len(),
+                hiwat = self.budget.hiwat,
+                composition = %self.key_histogram(),
+                "fd cache over its high-water mark — reaped least-recently-used entries \
+                 (a cache miss re-opens; no lock is released, locks are server-side state)"
+            );
+        }
+        reaped
     }
 
     pub(crate) fn contains(&self, other: &[u8; 12]) -> bool {
@@ -103,7 +228,21 @@ impl FdCache {
 
     /// Owned clone of the entry for this stateid, if any.
     pub(crate) fn get(&self, other: &[u8; 12]) -> Option<CachedFile> {
-        self.by_stateid.get(other).map(|e| e.clone())
+        let hit = self.by_stateid.get(other).map(|e| e.clone());
+        if hit.is_some() {
+            // TOUCH: this makes the reap least-RECENTLY-used rather than
+            // oldest-inserted. FIFO would happily evict the hottest
+            // descriptor in the cache purely because it was inserted
+            // first, forcing a re-open of the file most in use — which
+            // is the opposite of what a cache is for. Both reference
+            // implementations order by recency (knfsd's LRU shrinker,
+            // NFS-Ganesha's LRU reaper), and the cost here is one atomic
+            // fetch_add plus a map write on a path that already took a
+            // map read.
+            self.order
+                .insert(*other, self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        }
+        hit
     }
 
     /// Insert (or replace) the fd for a stateid, keeping the path and
@@ -111,6 +250,8 @@ impl FdCache {
     pub(crate) fn insert(&self, other: [u8; 12], entry: CachedFile) {
         let path = entry.path.clone();
         let ino = entry.ino;
+        self.order
+            .insert(other, self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
         let prev = self.by_stateid.insert(other, entry);
         if let Some(prev) = prev {
             if prev.path != path {
@@ -123,17 +264,23 @@ impl FdCache {
                     self.by_ino.entry(ino).or_default().push(other);
                 }
             }
-            return;
+        } else {
+            self.by_path.entry(path).or_default().push(other);
+            if ino != 0 {
+                self.by_ino.entry(ino).or_default().push(other);
+            }
         }
-        self.by_path.entry(path).or_default().push(other);
-        if ino != 0 {
-            self.by_ino.entry(ino).or_default().push(other);
-        }
+        // Enforce the bound AFTER the indexes are consistent — reaping
+        // walks them. Doing it on every insert, rather than at the
+        // (unknown, possibly future) leak site, is the point: the
+        // descriptor table stays safe even for a leak nobody has found.
+        self.reap_to_lowat();
     }
 
     /// Remove the fd for a stateid, returning it.
     pub(crate) fn remove(&self, other: &[u8; 12]) -> Option<CachedFile> {
         let removed = self.by_stateid.remove(other)?.1;
+        self.order.remove(other);
         self.unindex(&removed.path, other);
         self.unindex_ino(removed.ino, other);
         Some(removed)
@@ -218,6 +365,80 @@ impl FdCache {
             }
         }
         evicted
+    }
+
+    /// Reap cached fds held under LOCK stateids for `ino`.
+    ///
+    /// THE LEAK THIS CLOSES (measured 2026-09-16, 2.04 fds per sqlite
+    /// transaction, single client). READ and WRITE seed this cache under
+    /// the stateid of the operation, and a LOCK mints its OWN stateid —
+    /// `other[..4] == [0xFC, b'l', b'k', 0]` (`lockops.rs`, and see
+    /// `minted_entry_counter` there). CLOSE reaps only the OPEN
+    /// stateid's entry, so every fd cached under a lock stateid stayed
+    /// for the life of the process. sqlite takes a shared then an
+    /// exclusive lock per transaction, which is exactly the two
+    /// descriptors per transaction that were measured.
+    ///
+    /// This is the same shape as the delegation leak already fixed with
+    /// `fd_release` (`state/delegation.rs`): "the fd is cached under the
+    /// DELEGATION stateid ... while CLOSE only reaps the OPEN stateid's
+    /// entry. Nothing else was ever going to reap it." One layer over.
+    ///
+    /// Safe to close: flint keeps byte-range locks in its own in-memory
+    /// table (`lockops.rs:23`), NOT as kernel fcntl locks on the backing
+    /// file, so dropping a descriptor releases no lock. In-flight ops
+    /// holding their own `Arc<File>` clone finish normally — same
+    /// contract as [`evict_by_path`].
+    /// Scans `by_stateid`, the AUTHORITATIVE map — not `by_ino`.
+    ///
+    /// The first cut of this walked `by_ino` and evicted exactly zero,
+    /// which is how the fd count stayed at 2.04/txn after the "fix".
+    /// `insert` only indexes by ino `if ino != 0`, so an entry cached
+    /// with an unknown inode is invisible from that side. The plateau
+    /// test then proved the entries ARE in this cache, so the index —
+    /// not the theory — was what was wrong. Matching on path OR ino off
+    /// the authoritative map cannot miss them. The cache is bounded now,
+    /// so the scan is over at most `hiwat` entries.
+    pub(crate) fn evict_lock_fds_for(&self, path: &Path, ino: u64) -> usize {
+        let victims: Vec<[u8; 12]> = self
+            .by_stateid
+            .iter()
+            // Only LOCK stateids (`lockops.rs` mints `other[..4] =
+            // [0xFC,'l','k',0]`). An OPEN stateid's entry is reaped by
+            // its own CLOSE and must not be taken from a peer that still
+            // holds the file open.
+            .filter(|e| e.key()[..4] == [0xFC, b'l', b'k', 0])
+            .filter(|e| e.value().path == *path || (ino != 0 && e.value().ino == ino))
+            .map(|e| *e.key())
+            .collect();
+        let mut evicted = 0;
+        for id in victims {
+            if self.remove(&id).is_some() {
+                evicted += 1;
+            }
+        }
+        evicted
+    }
+
+    /// What is actually IN this cache, by stateid-key prefix. Logged on
+    /// reap so the composition is observable rather than inferred —
+    /// three successive hypotheses about which key the leaked entries
+    /// sat under were wrong before anyone simply looked.
+    fn key_histogram(&self) -> String {
+        let mut lock = 0usize;
+        let mut other = 0usize;
+        let mut zero_ino = 0usize;
+        for e in self.by_stateid.iter() {
+            if e.key()[..4] == [0xFC, b'l', b'k', 0] {
+                lock += 1;
+            } else {
+                other += 1;
+            }
+            if e.value().ino == 0 {
+                zero_ino += 1;
+            }
+        }
+        format!("lock_stateids={lock} other_stateids={other} entries_with_ino_0={zero_ino}")
     }
 
     /// A4/A5 (tier): purge every cached fd whose OPEN-time inode is

@@ -475,6 +475,24 @@ impl IoOperationHandler {
                     }
                 }));
         }
+        // The OPEN-stateid half of the same bug — the one the LEASE
+        // SWEEP owns. `seed_open_fd` caches an fd under the open stateid
+        // at OPEN time (F17c) and CLOSE reaped only its own entry, so a
+        // lease expiry, client removal or revoke dropped the STATE and
+        // left the DESCRIPTOR for the life of the process. That is the
+        // residual `seed_open_fd`'s own comment named: "lease sweep
+        // doesn't reach this cache yet". It reaches it now.
+        {
+            let cache = Arc::clone(&fd_cache);
+            state_mgr.stateids.install_fd_release(Arc::new(move |other: &[u8; 12]| {
+                if let Some(cached) = cache.remove(other) {
+                    debug!(
+                        "🗑️ FD CACHE SWEEP: released fd for a retired stateid (path: {:?})",
+                        cached.path
+                    );
+                }
+            }));
+        }
 
         Self {
             state_mgr,
@@ -1974,6 +1992,20 @@ impl IoOperationHandler {
                         "🗑️ FD CACHE CLOSE: Removed and closed FD for {:?} (path: {:?})",
                         op.stateid, cached.path
                     );
+                    // And the fds cached under this file's LOCK stateids,
+                    // which nothing else reaps: CLOSE only ever removed
+                    // the OPEN stateid's entry, so a client that locked —
+                    // every sqlite transaction does — stranded a
+                    // descriptor per lock for the life of the process.
+                    // Measured at 2.04 fds/txn on 2026-09-16, which
+                    // exhausted RLIMIT_NOFILE and took the server down.
+                    let reaped = self.fd_cache.evict_lock_fds_for(&cached.path, cached.ino);
+                    if reaped > 0 {
+                        debug!(
+                            "🗑️ FD CACHE CLOSE: also reaped {} lock-stateid fd(s) for ino {}",
+                            reaped, cached.ino
+                        );
+                    }
                 }
                 debug!("CLOSE: Removed open state for {:?}", op.stateid);
                 CloseRes {

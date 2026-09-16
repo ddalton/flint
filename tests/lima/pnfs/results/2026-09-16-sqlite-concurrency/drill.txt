@@ -1,0 +1,44 @@
+
+== preflight
+  sqlite3 present on both; workload installed
+  TXNS=200 per writer, 2 writers, busy_timeout=30000ms
+
+== A0 CONTROL — local ext4 on C1 (is the workload itself sound?)
+     writers_rc=0  integrity=ok  rows=400/400
+  PASS  A0 local ext4
+
+== B CONTROL — knfsd, two clients (is this just how NFS behaves?)
+     writers_rc=1  integrity=ok  rows=216/400
+     --- first writer errors ---
+     ==> /tmp/sqlc-1.log <==
+     
+     ==> /tmp/sqlc-2.log <==
+     writer w2 txn 17 FAILED: Error: stepping, disk I/O error (10)
+  FAIL  B knfsd 2 clients — rc=1 integrity='ok' rows=216/400
+
+== C flint lite, two clients — THE MEASUREMENT
+     writers_rc=1  integrity=ok  rows=204/400
+     --- first writer errors ---
+     ==> /tmp/sqlc-1.log <==
+     
+     ==> /tmp/sqlc-2.log <==
+     writer w2 txn 5 FAILED: Error: stepping, disk I/O error (10)
+  FAIL  C flint 2 clients — rc=1 integrity='ok' rows=204/400
+
+== A1 the SAME-CLIENT trap — 2 procs on C1 only, over the flint mount
+  If this passes while C fails, the client kernel arbitrated
+  locally and never asked the server. Recorded, not judged.
+     writers_rc=1  integrity=Error: in prepare, disk I/O error (10)  rows=Error: in prepare, disk I/O error (10)/400
+     --- first writer errors ---
+     ==> /tmp/sqlc-1.log <==
+     writer w1 txn 127 FAILED: Error: stepping, unable to open database file (14)
+     
+     ==> /tmp/sqlc-2.log <==
+     writer w2 txn 147 FAILED: Error: stepping, database disk image is malformed (11)
+     (RECORDED, not judged — this arm exists to be observed)
+
+== E WAL probe — is journal_mode=WAL even accepted over the mount?
+     journal_mode returned: 'Error: unable to open database "/mnt/flint/e.db": unable to open database file'
+  PASS  E WAL refused/downgraded to 'Error: unable to open database "/mnt/flint/e.db": unable to open database file' — the safe answer
+
+summary: PASS=2 FAIL=2 INCONCLUSIVE=0

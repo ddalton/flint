@@ -243,6 +243,31 @@ pub struct StateIdManager {
     /// the client's next WRITE after an MDS pod roll.
     backend: Arc<dyn StateBackend>,
 
+    /// Called with a stateid's `other` the moment its record stops
+    /// existing, by EVERY removal path. The io handler installs a sink
+    /// that drops the descriptor cached under it.
+    ///
+    /// WHY IT HAS TO BE A HOOK. `seed_open_fd` (F17c) caches an fd
+    /// under the OPEN stateid at OPEN time so the file keeps serving
+    /// across a rename-over. Its own comment named the gap it left:
+    /// "fds of clients that die without CLOSE outlive the state entries
+    /// (lease sweep doesn't reach this cache yet)." CLOSE reaped its
+    /// own entry, but a lease expiry, a client removal, or a revoke
+    /// dropped the STATE while the descriptor stayed — for the life of
+    /// the process.
+    ///
+    /// Measured 2026-09-16 on a two-client sqlite drill: ~2 descriptors
+    /// stranded per transaction, `RLIMIT_NOFILE` exhausted, every op
+    /// returning EMFILE, and the F33 watchdog reading its own failing
+    /// probe as a dead backing store and exiting 59 on a healthy ext4
+    /// export. `delegation.rs` already had exactly this hook for the
+    /// delegation-stateid half of the same bug; this is the open-stateid
+    /// half, which is the one the lease sweep owns.
+    ///
+    /// Invariant for callers: fire it with NO entry lock held — the
+    /// sink reaches into the fd cache, which takes its own map locks.
+    fd_release: std::sync::OnceLock<Arc<dyn Fn(&[u8; 12]) + Send + Sync>>,
+
     /// F31: ring of recently-closed `other` values. A CLOSE (or any
     /// stateful op) presenting one of these is a reorder/replay
     /// artifact → OLD_STATEID, not BAD_STATEID. Bounded FIFO; touched
@@ -280,6 +305,7 @@ impl StateIdManager {
             fhs_by_ident: DashMap::new(),
             idents_by_fh: DashMap::new(),
             backend,
+            fd_release: std::sync::OnceLock::new(),
             closed_recently: Mutex::new((
                 VecDeque::with_capacity(CLOSED_TOMBSTONES),
                 HashSet::with_capacity(CLOSED_TOMBSTONES),
@@ -928,6 +954,27 @@ impl StateIdManager {
         }
     }
 
+    /// Install the cached-fd release sink (io handler, once).
+    ///
+    /// See the `fd_release` field: this is the open-stateid half of the
+    /// leak whose delegation half `delegation.rs` already closed.
+    pub fn install_fd_release(&self, sink: Arc<dyn Fn(&[u8; 12]) + Send + Sync>) {
+        let _ = self.fd_release.set(sink);
+    }
+
+    /// Announce that a stateid's record is gone, so the descriptor
+    /// cached under it can be dropped. Called from EVERY removal path —
+    /// that "every" is the whole point, since the paths that leaked were
+    /// the ones nobody thought about: lease expiry, client removal and
+    /// revocation, not CLOSE.
+    ///
+    /// Always called with no entry lock held.
+    fn release_fd(&self, other: &[u8; 12]) {
+        if let Some(sink) = self.fd_release.get() {
+            sink(other);
+        }
+    }
+
     /// Remove a stateid completely (cleanup)
     ///
     /// LOCK-FREE: Removal only locks specific shards, not entire map
@@ -939,6 +986,9 @@ impl StateIdManager {
             }
 
             self.persist_delete(stateid.other);
+            // The shard guard from `states.remove` is dropped by now and
+            // `client_states` is out of scope: safe to call out.
+            self.release_fd(&stateid.other);
 
             debug!("StateId removed: {:?}", stateid);
         }
@@ -1154,12 +1204,18 @@ impl StateIdManager {
     }
 
     /// Remove the master `states` record + client index + persistence.
+    ///
+    /// The common tail of both close paths, so the fd release lives here
+    /// rather than being repeated at each caller — a removal path added
+    /// later inherits it instead of quietly leaking a descriptor, which
+    /// is exactly how the original gap happened.
     fn remove_master(&self, other: &[u8; 12]) {
         if let Some((_, entry)) = self.states.remove(other) {
             if let Some(mut state_list) = self.client_states.get_mut(&entry.client_id) {
                 state_list.retain(|o| o != other);
             }
             self.persist_delete(*other);
+            self.release_fd(other);
         }
     }
 
@@ -1217,6 +1273,11 @@ impl StateIdManager {
             for other in &state_list {
                 self.states.remove(other);
                 self.persist_delete(*other);
+                // THE LEASE-SWEEP LINKAGE. This is the path that leaked:
+                // a client whose lease expired had its state removed here
+                // while its cached descriptors stayed for the life of the
+                // process (`seed_open_fd`'s named residual).
+                self.release_fd(other);
             }
 
             // Remove client mapping

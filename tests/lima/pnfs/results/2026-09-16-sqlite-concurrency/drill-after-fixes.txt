@@ -1,0 +1,48 @@
+
+== preflight
+  TXNS=200 per writer, 2 writers, busy_timeout=30000ms
+  hub healthy, fds=17
+
+== A0 CONTROL — local ext4 on C1 (is the workload itself sound?)
+     writers_rc=0  integrity='ok'  rows=400/400
+  PASS  A0 local ext4
+
+== B CONTROL — knfsd, two clients (is this just how NFS behaves?)
+     writers_rc=1  integrity='ok'  rows=228/400
+     --- writer errors ---
+     writer w1 txn 29 FAILED: Error: stepping, disk I/O error (10)
+  FAIL  B knfsd 2 clients — rc=1 integrity='ok' rows=228/400
+
+== C flint lite, two clients — THE MEASUREMENT
+     writers_rc=1  integrity='ok'  rows=204/400
+     hub fds: 17 -> 436 (FdCache has no bound; recorded, not judged)
+     --- writer errors ---
+     writer w2 txn 5 FAILED: Error: stepping, disk I/O error (10)
+  FAIL  C flint 2 clients — rc=1 integrity='ok' rows=204/400
+     *** NOT ATTRIBUTABLE TO FLINT: the knfsd control did not pass,
+     *** so any failure here is shared with a stock kernel NFS server.
+
+== A1 the SAME-CLIENT trap — 2 procs on C1 only, over the flint mount
+  If this passes while C fails, the client kernel arbitrated locally
+  and never asked the server. Recorded, not judged.
+     writers_rc=1  integrity='ok'  rows=82/400
+     hub fds: 436 -> 635 (FdCache has no bound; recorded, not judged)
+     --- writer errors ---
+     writer w1 txn 43 FAILED: Error: stepping, database is locked (5)
+     writer w2 txn 41 FAILED: Error: stepping, database is locked (5)
+     (RECORDED, not judged — this arm exists to be observed)
+
+== E WAL probe — is journal_mode=WAL accepted over the mount?
+     journal_mode returned: 'wal'
+     WAL ACCEPTED — the risky answer. Testing two clients under it.
+     writers_rc=1  integrity='ok'  rows=200/400
+     hub fds: 638 -> 1047 (FdCache has no bound; recorded, not judged)
+     --- writer errors ---
+     writer w2 txn 1 FAILED: Error: stepping, disk I/O error (10)
+     (RECORDED, not judged — this arm exists to be observed)
+     NOTE: WAL needs a coherent shared-memory -shm mapping, which does
+     not exist between hosts over NFS. A clean run here means corruption
+     was not provoked by THIS workload — a much weaker claim than safety.
+
+summary: PASS=1 FAIL=2 INCONCLUSIVE=0
+NOTE: the knfsd control did NOT pass — no result here is attributable to flint alone.

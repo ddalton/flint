@@ -79,6 +79,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .block_on(async_main(threads))
 }
 
+/// Raise `RLIMIT_NOFILE` to the hard limit at startup.
+///
+/// A file server's working set IS open descriptors, and it inherits
+/// whatever soft limit the container runtime hands it — 1024 on a stock
+/// host, while the HARD limit there was 1,048,576. The server could
+/// always have raised its own and never asked anyone to tune anything.
+///
+/// This is also how the reference implementations expect to be run:
+/// NFS-Ganesha derives every fd threshold (`FD_LWMark_Percent`,
+/// `FD_HWMark_Percent`, `FD_Limit_Percent`) as a PERCENTAGE of this
+/// rlimit, so the rlimit is the input the whole policy hangs off.
+///
+/// Measured 2026-09-16: a hub pinned at the inherited 1024, every
+/// operation returned EMFILE, and the F33 watchdog read its own failing
+/// probe as a dead backing store and exited 59 — on a healthy ext4
+/// export. `fence.rs` no longer fences on EMFILE; this stops it being
+/// reached so easily in the first place.
+#[cfg(unix)]
+fn raise_fd_limit() {
+    let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } != 0 {
+        warn!("could not read RLIMIT_NOFILE; leaving it as inherited");
+        return;
+    }
+    let was = lim.rlim_cur;
+    if lim.rlim_cur >= lim.rlim_max {
+        info!(soft = was, hard = lim.rlim_max, "RLIMIT_NOFILE already at the hard limit");
+        return;
+    }
+    lim.rlim_cur = lim.rlim_max;
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lim) } == 0 {
+        info!(from = was, to = lim.rlim_max, "raised RLIMIT_NOFILE to the hard limit");
+    } else {
+        warn!(soft = was, hard = lim.rlim_max, "could not raise RLIMIT_NOFILE");
+    }
+}
+
+#[cfg(not(unix))]
+fn raise_fd_limit() {}
+
 async fn async_main(worker_threads: usize) -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
@@ -101,6 +141,8 @@ async fn async_main(worker_threads: usize) -> Result<(), Box<dyn std::error::Err
     info!("║      NFSv4.1+ Parallel NFS - Control Plane               ║");
     info!("╚═══════════════════════════════════════════════════════════╝");
     info!("");
+
+    raise_fd_limit();
 
     // Load configuration
     let config = if let Some(config_path) = args.config {

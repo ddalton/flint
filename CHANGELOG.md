@@ -14,6 +14,85 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **lite: the hub never expired a client that went away, so it never gave
+  its file descriptors back — and then the watchdog killed it for a disk
+  fault that never happened.** `courtesy_release_expired()` reaps every
+  expired client, but its only production caller was the top of every
+  COMPOUND, so expiry was entirely TRAFFIC-DRIVEN. Its own comment said
+  so: "it is the other cluster's traffic that releases this cluster's
+  locks." That cannot reap the case that matters — a volume whose only
+  client unmounted, died or partitioned sends nothing, so nothing ever
+  expires it, its open state is never retired, and the descriptors
+  cached under that state are held for the life of the process.
+  - *Measured* on two EC2 hosts with separate kernel NFS clients: **2.04
+    descriptors leaked per sqlite transaction**, single client. At the
+    inherited `RLIMIT_NOFILE` of 1024 every operation then returned
+    EMFILE — including the F33 watchdog's own backing-store probe, which
+    it diagnosed as an unresponsive store and **killed the server**
+    (`fencing (F33) stale_secs=99 … exit_code=59`) on a perfectly
+    healthy local ext4 export.
+  - *The control that made it a defect rather than a guess:* knfsd's
+    `/proc/fs/nfsd/filecache` over the same workload reads
+    **acquisitions 660, releases 659, total inodes 0** — a reference NFS
+    server returns to zero. flint held 122 and never gave them back.
+  - **The cure is the laundromat**: traffic-independent lease expiry on
+    a 30s timer (`pnfs/mds/server.rs`). knfsd has exactly this; flint had
+    every other link in the chain and not the timer. Verified: 16
+    baseline → 139 after 60 txns → **17 at +120s after unmount** (a 90s
+    lease plus at most one sweep).
+  - A `fd_release` hook on `StateIdManager`, fired from `remove_master`
+    — the common tail of both close paths, so a removal path added later
+    inherits it rather than silently leaking. `delegation.rs` already had
+    this hook for the delegation half of the same bug; this is the
+    open-stateid half, which is the one the lease sweep owns.
+  - `FdCache` is now **bounded with LRU reaping** (`FLINT_FD_CACHE_MAX`,
+    default `min(RLIMIT_NOFILE/2, 16384)`) — containment for any leak not
+    yet found. The module's own sibling had said for months that it "has
+    neither a capacity bound nor an LRU". Safe to evict: byte-range locks
+    live in flint's in-memory table, not as kernel fcntl locks, so
+    dropping a descriptor releases no lock.
+  - `raise_fd_limit()` at startup, soft → hard. The drill host's hard
+    limit was **1,048,576** while the server sat at the inherited 1,024.
+  - **EMFILE is no longer fatal.** `fence.rs` treats it as INCONCLUSIVE
+    — it says we have no descriptor to probe WITH, which is not evidence
+    about the disk — and `io_error_to_nfs4` answers `NFS4ERR_DELAY`,
+    which kernel clients retry silently. knfsd returns `nfserr_jukebox`;
+    NFS-Ganesha denies above `FD_Limit_Percent`; neither self-terminates.
+  - *Why conformance never caught it:* pynfs and pjdfstest test protocol
+    correctness. No conformance suite asserts "the descriptor count
+    returns to baseline after CLOSE" — that is a resource-lifecycle
+    property, invisible to them by construction. The scale is wrong too:
+    ~500 sustained transactions are needed to reach 1024, and the only
+    sqlite the tree ever ran was `tier-drill.sh:245` — one process, two
+    rows.
+  - **Follow-up, not done here** (`results/2026-09-16-sqlite-concurrency/`):
+    knfsd does not notify a side cache at all — the file lives INSIDE the
+    state object (`nfs4_file->fi_fds[]`, refcounted), so dropping state
+    drops the reference automatically. flint keys a side cache by
+    stateid, which stays correct only while every removal path remembers
+    to announce itself; that is how this bug happened *twice*. Making the
+    state own the `Arc<File>` would retire both hooks and the bug class.
+
+### Added
+
+- **lite: a SQLite *concurrency* drill** (`tests/lima/pnfs/sqlite-\
+  concurrency-drill.sh`). flint-lite's pitch names sqlite three times and
+  the operator mandates `hard` mounts *because* "agents run git and
+  sqlite", but the only sqlite the tree ever ran was one process
+  inserting two rows. The drill runs two writers from **two separate
+  kernel NFS clients** — two processes on one client prove nothing, since
+  the client kernel can arbitrate fcntl locally and never emit a LOCK —
+  with a local-ext4 control that hard-stops the run, a **knfsd control**
+  that decides whether a failure is flint's or NFS's, the same-client
+  trap recorded rather than assumed, and a WAL probe.
+  - *First result:* concurrent multi-client sqlite writes fail on a stock
+    Linux kernel NFS server too (`disk I/O error`, 228/400 rows), so this
+    is NFS, not flint. `PRAGMA integrity_check` returned `ok` in **every**
+    arm — transactions fail, the database is not corrupted. And
+    `journal_mode=WAL` is **accepted** over the mount, which is the
+    dangerous answer: WAL needs a coherent `-shm` mapping that does not
+    exist across hosts.
+
 - **lean formal: `Inv_HITLTracked` judged supersession by DESTRUCTION,
   and destruction is not what retires a write.** Its only test for
   "legitimately superseded" was `objects[p] # gen` — the object at that

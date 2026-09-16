@@ -721,6 +721,26 @@ pub fn io_error_to_nfs4(e: &std::io::Error) -> Nfs4Status {
     if e.raw_os_error() == Some(libc::EDQUOT) {
         return Nfs4Status::DQuot;
     }
+    // EMFILE/ENFILE — the server is out of descriptors. This is a
+    // TRANSIENT, SELF-INFLICTED resource condition, not a statement
+    // about the file or the disk, so the honest answer is "ask again"
+    // and not "your I/O failed": NFS4ERR_DELAY, which kernel clients
+    // retry silently. Same reasoning as the ENOSPC arm below (F55: EIO
+    // on a full volume made postgres PANIC rather than degrade).
+    //
+    // Both reference implementations degrade here rather than failing
+    // hard or dying: NFS-Ganesha denies requests above
+    // `FD_Limit_Percent`, and knfsd returns nfserr_jukebox — NFS4ERR_
+    // DELAY — when it cannot get a cache entry. Neither self-terminates.
+    // flint used to do neither: it returned NFS4ERR_IO and then the F33
+    // watchdog, seeing its own probe fail with EMFILE, fenced the server
+    // and exited 59 on a healthy export (measured 2026-09-16).
+    // `fence.rs` now ignores EMFILE; this makes the client side graceful
+    // too, and `FdCache`'s bound should keep us from ever arriving here.
+    #[cfg(unix)]
+    if matches!(e.raw_os_error(), Some(libc::EMFILE) | Some(libc::ENFILE)) {
+        return Nfs4Status::Delay;
+    }
     match e.kind() {
         std::io::ErrorKind::NotFound => Nfs4Status::NoEnt,
         std::io::ErrorKind::PermissionDenied => Nfs4Status::Access,

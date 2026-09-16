@@ -18,6 +18,13 @@ use crate::nfs::v4::operations::lockops::LockManager;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
+
+/// How often the laundromat sweeps expired client state, independent of
+/// traffic. Leases are 90s, so a 30s sweep retires a departed client
+/// within half a lease of its expiry without being chatty; the sweep is
+/// a no-op when nothing has expired. knfsd's equivalent laundromat runs
+/// on the same order.
+const LAUNDROMAT_SECS: u64 = 30;
 use tracing::{error, info, warn};
 
 /// Metadata Server
@@ -339,6 +346,45 @@ impl MetadataServer {
             lock_mgr,
             pnfs_ops,
         ));
+
+        // THE LAUNDROMAT. `courtesy_release_expired` reaps every expired
+        // client — but until now its ONLY production caller was the top
+        // of every COMPOUND, so expiry was entirely TRAFFIC-DRIVEN. Its
+        // own comment says as much: "it is the other cluster's traffic
+        // that releases this cluster's locks." That cannot reap the one
+        // case that matters — a volume whose only client unmounted,
+        // died, or partitioned sends nothing, so nothing ever expires
+        // it. (The pre-existing periodic sweep does not cover this: it
+        // retires LAYOUT GRANT rows, and flint-lite standalone turns
+        // layouts off entirely, so in that posture it swept nothing.)
+        //
+        // Measured 2026-09-16: after the last client unmounted, the hub
+        // held 98 descriptors for its retired state and never gave one
+        // back — 160s of watching, no expiry. knfsd does not have this
+        // problem because it runs a laundromat on a timer
+        // (`expire_client` → `release_openowner` → `release_all_access`
+        // → `nfsd_file_put`); its own filecache stats over the same
+        // workload read acquisitions 660 / releases 659 / held 0.
+        //
+        // So: drive the same sweep on a timer, independent of traffic.
+        // The fd-release hook on the stateid manager then returns the
+        // descriptors. Idempotent and cheap — it returns immediately
+        // when nothing is expired.
+        {
+            let d = Arc::clone(&base_dispatcher);
+            tokio::spawn(async move {
+                let mut iv = interval(Duration::from_secs(LAUNDROMAT_SECS));
+                iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    iv.tick().await;
+                    let n = d.courtesy_release_expired();
+                    if n > 0 {
+                        info!(clients = n, "laundromat: retired expired client state");
+                    }
+                }
+            });
+            info!(every_secs = LAUNDROMAT_SECS, "🧺 laundromat armed (traffic-independent lease expiry)");
+        }
 
         // Build the callback fan-out manager once we know the
         // dispatcher's back-channel registry exists. CallbackManager
