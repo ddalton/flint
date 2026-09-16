@@ -11,7 +11,7 @@
 #   cargo build --release                       # the shippable binary
 [package]
 name = "flint-lean-gateway"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "The flint lean gateway: read, write, delete, rename, draft and publish files in S3-backed lean workspaces from your own process, or run the binary"
 license = "MIT"
@@ -40,7 +40,7 @@ name = "battery"
 required-features = ["http"]
 
 [dependencies]
-flint-lean = { version = "0.7.0", path = "../syncer", default-features = false }
+flint-lean = { version = "0.8.0", path = "../syncer", default-features = false }
 flint-store = { version = "0.1.4", path = "../../crates/flint-store" }
 bytes = "1.0"
 serde = { version = "1.0", features = ["derive"] }

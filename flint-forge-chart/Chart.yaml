@@ -20,12 +20,12 @@ type: application
 #        as the principal. Both off by default; `door.jwt.issuer` is
 #        also passed to the operator, which audits `spec.consumers`
 #        against it and reports `ConsumersSound`.
-version: 0.6.4
+version: 0.6.5
 
 # The flint release whose images this chart runs. The operator, the
 # syncer and the gateway ship from the same build and speak the same
 # bucket format and the same status document — keep them in step.
-appVersion: "1.54.0"
+appVersion: "1.55.0"
 
 keywords:
   - git

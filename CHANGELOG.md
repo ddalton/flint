@@ -12,6 +12,8 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.55.0] - 2026-09-15
+
 ### Fixed
 
 - **lean: a writer could keep a stale copy of a file for good after its
@@ -88,6 +90,29 @@ covered by the stability guarantee.
   credentials, a workspace, a pod, read-only agents (the refusal, EROFS,
   `readEnforcement: cooperative` on a static broker), publish, the bucket
   layout, teardown. The HTML and PDF are regenerated from it.
+
+### Known limitations
+
+- **lean on Ozone 2.2.x: one writer per workspace.** Ozone 2.2.1 ignores
+  `If-Match` on `DeleteObject` (HDDS-14907, fix version 2.3.0), so a
+  second writer's garbage collector can delete the first writer's upload.
+  S3 enforces it. The syncer does not refuse the configuration yet.
+- **lean gateway: a UI write can wait up to the window deadline (180 s)**
+  behind a barrier that died mid-window.
+- **lean: conflict copies under `.flint/lean/conflicts/` are never
+  collected.** Every concurrent overwrite keeps both versions, by design;
+  a 300-second drill leg with six writers and a UI over 30 shared paths
+  left 4,985 of them. A bucket lifecycle rule on that prefix is the
+  answer for a workload that contended that hard.
+- **lean formal model:** the gate's standing red is gone — the sentinel
+  world on the code's shape (`LeanBarrierLeaseSentinelImpl1`, one path)
+  holds exhaustively with the refined `Inv_AckBoundaryCoherent`, as do a
+  three-writer world and the unguarded fast path. Two worlds are open:
+  the two-path sentinel world does not fit a laptop, and the crash world
+  (`LeanBarrierLeaseSentinelImplCrash1`) violates `Inv_HITLTracked` in 19
+  states at a point the code recovers from — the invariant does not
+  credit a checkout's adoption of an object newer than its citation. Both
+  branches of that recovery are pinned by tests.
 
 ## [1.54.0] - 2026-09-14
 
@@ -7324,7 +7349,8 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.54.0...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.55.0...HEAD
+[1.55.0]: https://github.com/ddalton/flint/compare/v1.54.0...v1.55.0
 [1.54.0]: https://github.com/ddalton/flint/compare/v1.53.0...v1.54.0
 [1.53.0]: https://github.com/ddalton/flint/compare/v1.52.0...v1.53.0
 [1.52.0]: https://github.com/ddalton/flint/compare/v1.51.0...v1.52.0
