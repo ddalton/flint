@@ -48,10 +48,12 @@ Match(e) ==
      /\ \A pr \in e.dirty : pr \in conflicts' /\ sc'[e.w].baseline[pr[1]] = pr[2]
      /\ \A p \in e.kept : <<p, 0>> \in conflicts'
      /\ sc'[e.w].fq = {}
+  \* A PROJECTED trace (one path of a live leg) omits counts taken over
+  \* every path of the leg; each is checked exactly when the trace carries it.
   \/ /\ e.ev = "scan"
      /\ Scan(e.w)
-     /\ Cardinality(sc'[e.w].scanU) = e.uploads
-     /\ Cardinality(sc'[e.w].scanD) = e.deletes
+     /\ "uploads" \in DOMAIN e => Cardinality(sc'[e.w].scanU) = e.uploads
+     /\ "deletes" \in DOMAIN e => Cardinality(sc'[e.w].scanD) = e.deletes
   \/ e.ev = "fastpath" /\ FastPath(e.w)
   \/ /\ e.ev = "upload"
      /\ Upload(e.w, e.p)
@@ -59,23 +61,37 @@ Match(e) ==
      /\ e.outcome = "adopted" => e.p \in sc'[e.w].adopted
      /\ e.outcome = "parked" => e.p \in sc'[e.w].parked
   \/ e.ev = "claim" /\ (Claim(e.w) \/ SkipDeadHandoff(e.w))
-  \/ e.ev = "wait" /\ IF sc[e.w].pc = "waiting" THEN UNCHANGED vars ELSE Enqueue(e.w)
+  \/ /\ e.ev = "wait"
+     /\ \/ sc[e.w].pc = "waiting" /\ UNCHANGED vars
+        \/ Enqueue(e.w)
+        \* A projected replay: this waiter's poll read the cell at a moment
+        \* the projection cannot reproduce — the claim it lost may have been
+        \* made for a path this run does not model.
+        \/ ProjectedTrace /\ UNCHANGED vars
   \/ /\ e.ev = "pullonly"
-     /\ Cardinality(MergeForeign(e.w)) = e.foreign
-     /\ Cardinality(MergeGone(e.w)) = e.gone
+     /\ "foreign" \in DOMAIN e => Cardinality(MergeForeign(e.w)) = e.foreign
+     /\ "gone" \in DOMAIN e => Cardinality(MergeGone(e.w)) = e.gone
      /\ PullOnly(e.w)
   \/ /\ e.ev = "install"
-     /\ Cardinality(MergeForeign(e.w)) = e.foreign
-     /\ Cardinality(MergeGone(e.w)) = e.gone
+     /\ "foreign" \in DOMAIN e => Cardinality(MergeForeign(e.w)) = e.foreign
+     /\ "gone" \in DOMAIN e => Cardinality(MergeGone(e.w)) = e.gone
      /\ CASInstall(e.w)
-     /\ IF e.nothing THEN manSeq' = manSeq ELSE manSeq' = e.seq
+     \* Whether the merge added anything, and the seq it took, are facts
+     \* about EVERY path: a projected replay carries neither.
+     /\ "seq" \in DOMAIN e => (IF e.nothing THEN manSeq' = manSeq ELSE manSeq' = e.seq)
      /\ sc[e.w].upDone \ sc'[e.w].upDone = e.withheld
   \/ e.ev = "cas_lost" /\ CASMiss(e.w)
+  \* A commit the store refused: the cell goes back and the work is redone.
+  \/ e.ev = "abandon" /\ AbandonBarrier(e.w)
   \/ /\ e.ev = "gc"
      /\ GCDelete(e.w, e.p)
      /\ IF e.result = "deleted" THEN objects'[e.p] = 0 ELSE objects' = objects
   \/ e.ev = "finish" /\ Finish(e.w)
-  \/ e.ev = "ack" /\ IF e.status = "ok" THEN AckOk(e.w) ELSE AckPartial(e.w)
+  \* "projected": the ack speaks for the whole barrier, so one path cannot
+  \* say which of the two it was.
+  \/ e.ev = "ack" /\ e.status = "projected" /\ (AckOk(e.w) \/ AckPartial(e.w))
+  \/ e.ev = "ack" /\ e.status # "projected"
+                  /\ IF e.status = "ok" THEN AckOk(e.w) ELSE AckPartial(e.w)
   \/ e.ev = "retire" /\ RetirePending(e.w)
 
 TraceNext ==
@@ -99,7 +115,8 @@ ASSUME TLCSet(1, 0)
 \* registers are per worker).
 TraceProgress ==
   \/ TLCGet(1) >= l
-  \/ /\ PrintT(<<"TRACE-REACHED", l - 1, IF l <= Len(Trace) THEN Trace[l] ELSE "end">>)
+  \/ /\ PrintT(<<"TRACE-REACHED", l - 1, IF l <= Len(Trace) THEN Trace[l] ELSE "end",
+                 [w \in Syncers |-> sc[w].pc], cellHolder, cellHandoff, cellQueue>>)
      /\ TLCSet(1, l)
 \* VIOLATED means the whole trace was followed: accepted.
 TraceIncomplete == l <= Len(Trace)

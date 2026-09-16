@@ -451,6 +451,42 @@ CONSTANTS
                        \* before the third-writer worlds, and the life
                        \* lease's actions (StartA, ClaimB, CheckoutB) and
                        \* the stall (A only) still name those two.
+  BaselineKeepsUncollected, \* TRUE = what SHIPS, found by replaying the
+                       \* storm (W4 phase 2): step 7 drops a path from the
+                       \* baseline only for the deletes whose OBJECT the GC
+                       \* actually collected (`report.deleted`).  A delete
+                       \* whose GC SKIPPED — the key held bytes this writer
+                       \* does not recognize — keeps its baseline entry, so
+                       \* the tree reads as locally deleted at the next
+                       \* consume and an incoming version is PRESERVED
+                       \* rather than adopted.  FALSE = the model as it was:
+                       \* every published delete clears the baseline.
+  AbandonOnStoreError, \* TRUE = the code's other way out of a commit
+                       \* section, which the 2026-09-15 storm traces show
+                       \* and the model had no step for: the store REFUSES
+                       \* a request the commit makes (S3 answered the
+                       \* window-open PUT with 409 ConditionalRequestConflict),
+                       \* the barrier returns the error, releases the cell
+                       \* and keeps its pending sentinel, and the next
+                       \* barrier redoes the work.  Nothing is installed and
+                       \* nothing is acked.  FALSE = the model as it was: a
+                       \* claimed barrier only ever installs, misses the CAS
+                       \* or is fenced.  BarrierLease only.
+  HandoffAtClaim,      \* TRUE = what SHIPS, as the 2026-09-15 storm traces
+                       \* show it: `epoch_handoff` hands the cell to the head
+                       \* of the waiter list THE HOLDER READ AT ITS CLAIM
+                       \* (`lease.waiters`), and writes the rest of that same
+                       \* stale list back as the queue — so a writer that took
+                       \* a ticket after the claim is neither handed the cell
+                       \* nor kept in the queue.  FALSE = the FIFO the model
+                       \* assumed: the head of the queue as it stands at the
+                       \* release.  BarrierLease + Ticket only.
+  ProjectedTrace,      \* Trace validation only (W4 phase 2).  TRUE = this
+                       \* run replays ONE PATH of a live leg, so a barrier's
+                       \* reason to claim may lie in a path the projection
+                       \* dropped: `WantsCell` then holds on a scanned
+                       \* barrier whatever the projected paths show.  It
+                       \* relaxes NOTHING else, and no gate run sets it.
   QueueForeignChanges  \* TRUE = what ships.  FALSE = the mutation: the
                        \* merge base moves past the other writers'
                        \* changes and nothing queues them, so the tree
@@ -463,6 +499,12 @@ CONSTANTS
 \* (`Writers <- TwoWriters`).
 TwoWriters   == <<"A", "B">>
 ThreeWriters == <<"A", "B", "C">>
+\* Trace validation only (W4 phase 2): a storm leg runs six writers, and a
+\* replay is driven step by step, so the state space is the trace's length
+\* rather than the world's.  No GATE run uses these.
+FourWriters  == <<"A", "B", "C", "D">>
+FiveWriters  == <<"A", "B", "C", "D", "E">>
+SixWriters   == <<"A", "B", "C", "D", "E", "F">>
 Syncers == {Writers[i] : i \in DOMAIN Writers}
 \* The first writer, the one the stall and the life lease name.
 ASSUME Len(Writers) >= 2 /\ Writers[1] = "A" /\ Writers[2] = "B"
@@ -473,6 +515,10 @@ VARIABLES
   cellEpoch,   \* subtree lease cell: current epoch (0 = never claimed)
   cellHolder,  \* "A" | "B" | "none"
   cellQueue,   \* tranche 6: the FIFO ticket — a sequence of waiters
+  cellSeen,    \* the queue AS THE HOLDER READ IT at its claim (the code's
+               \* `lease.waiters`).  Always <<>> under ~HandoffAtClaim, so
+               \* that world's state space is the one every earlier run
+               \* explored.
   cellHandoff, \* tranche 6: "none" | the syncer a release named
   cellReleased,\* tranche 6: TRUE between a release and the next claim.
                \* HELD = cellEpoch > 0 /\ ~cellReleased; FRESH = epoch 0.
@@ -512,9 +558,9 @@ VARIABLES
   gh           \* ghost/counter record, fields below
 
 gatedVars == <<stage, stageBase, withheldDel>>
-leaseVars == <<cellQueue, cellHandoff, cellReleased>>
+leaseVars == <<cellQueue, cellHandoff, cellReleased, cellSeen>>
 
-vars == <<cellEpoch, cellHolder, cellQueue, cellHandoff, cellReleased,
+vars == <<cellEpoch, cellHolder, cellQueue, cellHandoff, cellReleased, cellSeen,
           manSeq, manSrc, manifest, objects, inbox, removals, window,
           sc, versions, stage, stageBase, withheldDel, hitlAcked,
           conflicts, gh>>
@@ -864,7 +910,11 @@ PullOnlyReady(s) ==
   /\ sc[s].scanU = {} /\ sc[s].scanD = {}
   /\ sc[s].consumed = {} /\ sc[s].declared = {}
   /\ ~\E p \in Paths : RepairOwed(s, p)
-WantsCell(s)     == (PreCommitReady(s) /\ ~PullOnlyReady(s)) \/ sc[s].pc = "waiting"
+WantsCell(s)     == \/ PreCommitReady(s) /\ ~PullOnlyReady(s)
+                    \/ sc[s].pc = "waiting"
+                    \* A projected replay: the claim's reason may be a path
+                    \* this run does not model (see the constant).
+                    \/ ProjectedTrace /\ sc[s].pc = "scanned"
 \* Every claim bumps the epoch; every claim follows a scan, so the
 \* barrier budget bounds it (+2 for the life lease's StartA and ClaimB).
 \* Under the liveness abstraction it saturates there instead.
@@ -889,8 +939,19 @@ SkipEnabled(s) ==
 \* ticket), or nobody under the mutation.
 ReleaseCell ==
   /\ cellReleased' = TRUE
-  /\ cellHandoff' = IF Ticket /\ cellQueue # <<>> THEN Head(cellQueue) ELSE "none"
-  /\ cellQueue'   = IF Ticket /\ cellQueue # <<>> THEN Tail(cellQueue) ELSE cellQueue
+  \* What ships (HandoffAtClaim): `epoch_handoff` names the head of the
+  \* list the holder read at its CLAIM and writes the REST OF THAT LIST
+  \* back as the queue, so a ticket taken after the claim is dropped.
+  \* The model's original rule is the head of the queue as it stands.
+  /\ cellHandoff' = IF ~Ticket THEN "none"
+                    ELSE IF HandoffAtClaim
+                         THEN (IF cellSeen = <<>> THEN "none" ELSE Head(cellSeen))
+                         ELSE (IF cellQueue = <<>> THEN "none" ELSE Head(cellQueue))
+  /\ cellQueue'   = IF ~Ticket THEN cellQueue
+                    ELSE IF HandoffAtClaim
+                         THEN (IF cellSeen = <<>> THEN <<>> ELSE Tail(cellSeen))
+                         ELSE (IF cellQueue = <<>> THEN cellQueue ELSE Tail(cellQueue))
+  /\ cellSeen'    = <<>>
 \* What a fence does to the incarnation.  Life lease: the process exits.
 \* Barrier lease: the barrier is ABANDONED — its manifest never installed,
 \* its uploads standing as uncited generations the next barrier adopts —
@@ -900,7 +961,7 @@ FencedSc(s) ==
   THEN [sc EXCEPT ![s].pc = "idle",
         ![s].scanU = {}, ![s].scanD = {},
         ![s].scanGen = [p \in Paths |-> 0],
-        ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {},
+        ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}, ![s].gcTook = {},
         ![s].gcHeaded = {}, ![s].gcSeen = [p \in Paths |-> 0],
         ![s].adopted = {}, ![s].noInst = FALSE]
   ELSE [sc EXCEPT ![s].st = "dead"]
@@ -933,6 +994,7 @@ Destroys(s, p, cur) ==
 Init ==
   /\ cellEpoch = 0 /\ cellHolder = "none" /\ manSeq = 1
   /\ cellQueue = <<>> /\ cellHandoff = "none" /\ cellReleased = FALSE
+  /\ cellSeen = <<>>
   /\ manSrc = "none"
   /\ manifest = [p \in Paths |-> IF p \in FreePaths THEN 0 ELSE 1]
   /\ objects  = [p \in Paths |-> IF p \in FreePaths THEN 0 ELSE 1]
@@ -952,7 +1014,7 @@ Init ==
         instSnap |-> [p \in Paths |-> 0], instSeq |-> 0, instSrc |-> "none",
         known |-> {}, scanU |-> {}, scanD |-> {},
         scanGen |-> [p \in Paths |-> 0], upDone |-> {}, parked |-> {},
-        gcDone |-> {}, gcHeaded |-> {}, gcSeen |-> [p \in Paths |-> 0],
+        gcDone |-> {}, gcTook |-> {}, gcHeaded |-> {}, gcSeen |-> [p \in Paths |-> 0],
         adopted |-> {}, touched |-> {}, repairMoved |-> {},
         lastDirty |-> {}, stageCarried |-> FALSE,
         citeDone |-> {},
@@ -998,7 +1060,7 @@ Init ==
 StartA ==
   /\ ~BarrierLease           \* the life lease: claim, then checkout
   /\ sc["A"].st = "unstarted" /\ cellHolder = "none"
-  /\ cellHolder' = "A" /\ cellEpoch' = 1
+  /\ cellHolder' = "A" /\ cellEpoch' = 1 /\ UNCHANGED cellSeen
   /\ sc' = [sc EXCEPT
        !["A"].st = "running", !["A"].epoch = 1, !["A"].expSeq = manSeq,
        !["A"].local = [p \in Paths |-> manifest[p]],
@@ -1115,7 +1177,7 @@ Restart(s) ==
             ![s].known = IF RematerializeOnRestart THEN @ \cup CitedGens ELSE @,
             ![s].scanU = {}, ![s].scanD = {},
             ![s].scanGen = [p \in Paths |-> 0],
-            ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {},
+            ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}, ![s].gcTook = {},
             ![s].gcHeaded = {}, ![s].gcSeen = [p \in Paths |-> 0],
             ![s].adopted = {}, ![s].noInst = FALSE,
             \* `consumed` is in-memory barrier state; `declared` is the
@@ -1187,7 +1249,7 @@ ClaimB ==
   /\ sc["B"].st = "unstarted" /\ cellHolder = "A"
   /\ sc["A"].st \in {"stalled", "dead"}
   /\ (Rotation => manSeq < MaxSeq)
-  /\ cellHolder' = "B" /\ cellEpoch' = cellEpoch + 1
+  /\ cellHolder' = "B" /\ cellEpoch' = cellEpoch + 1 /\ UNCHANGED cellSeen
   /\ manSeq' = IF Rotation THEN manSeq + 1 ELSE manSeq
   \* A rotation is a fence, not a boundary: it publishes nothing, so it
   \* clears the stamp rather than inheriting the deposed holder's.
@@ -1560,7 +1622,7 @@ Scan(s) ==
        \* split actually ACCUMULATED across ticks, which is the claim
        \* ProbeCitationInstalled has to make non-vacuous.
        ![s].stageCarried = \E q \in Paths : stage[s][q] # 0,
-       ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}]
+       ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}, ![s].gcTook = {}]
   /\ window' = IF BarrierLease THEN window ELSE sc[s].epoch
   /\ gh' = [gh EXCEPT !.barriers = IF InfiniteBarriers THEN @ ELSE @ + 1]
   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
@@ -1707,7 +1769,9 @@ GCDelete(s, p) ==
                         inbox, removals, window, hitlAcked, conflicts, gh>>
        ELSE
          /\ objects' = [objects EXCEPT ![p] = 0]
-         /\ sc' = [sc EXCEPT ![s].gcDone = @ \cup {p}]
+         /\ sc' = [sc EXCEPT ![s].gcDone = @ \cup {p},
+                            ![s].gcTook = IF BaselineKeepsUncollected
+                                          THEN @ \cup {p} ELSE @]
          /\ gh' = [gh EXCEPT !.gc = @ + 1,
               !.amputated = @ \/ Destroys(s, p, now),
               !.hitlRetired = IF /\ MaxSameBytes > 0 /\ now \in sc[s].known
@@ -1754,6 +1818,26 @@ CASFenced(s) ==
   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
+(* The commit section's OTHER exit (2026-09-15, W4 phase 2).  A request    *)
+(* the commit makes is refused by the store — S3's 409 on the window-open  *)
+(* PUT in the storm leg — so the barrier fails, releases the cell and      *)
+(* keeps the pending sentinel; its uploads stand as uncited generations    *)
+(* the next barrier adopts, exactly as a fenced barrier's do.  The syncer  *)
+(* emits no trace event for this, only prose (`Publish honor failed`).     *)
+AbandonBarrier(s) ==
+  /\ AbandonOnStoreError /\ BarrierLease
+  /\ Running(s) /\ sc[s].pc # "idle"
+  /\ sc' = FencedSc(s)
+  /\ gh' = [gh EXCEPT !.abandoned = 1]
+  \* Holding the cell, the failed barrier hands it back; the failure can
+  \* equally happen BEFORE the claim (an upload the store refused), and
+  \* then there is nothing to release.
+  /\ IF cellHolder = s /\ ~cellReleased
+     THEN ReleaseCell /\ window' = 0
+     ELSE UNCHANGED leaseVars /\ UNCHANGED window
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
+                 inbox, removals, hitlAcked, conflicts>>
+
 CASMiss(s) ==
   /\ Running(s) /\ CASReady(s)
   /\ ~Fenced(s)
@@ -1776,7 +1860,7 @@ CASMiss(s) ==
        /\ sc' = [sc EXCEPT ![s].expSeq = manSeq, ![s].pc = "idle",
             ![s].scanU = {}, ![s].scanD = {},
             ![s].scanGen = [p \in Paths |-> 0],
-            ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {},
+            ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}, ![s].gcTook = {},
             ![s].gcHeaded = {}, ![s].gcSeen = [p \in Paths |-> 0],
             ![s].adopted = {}]
        /\ window' = 0
@@ -1953,7 +2037,9 @@ Finish(s) ==
        ![s].installed = ~sc[s].noInst, ![s].noInst = FALSE,
        ![s].baseline = [p \in Paths |->
          IF p \in sc[s].scanU \cap sc[s].upDone THEN sc[s].scanGen[p]
-         ELSE IF p \in sc[s].scanD /\ sc[s].instSnap[p] = 0 THEN 0
+         ELSE IF /\ p \in sc[s].scanD /\ sc[s].instSnap[p] = 0
+                 /\ (~BaselineKeepsUncollected \/ p \in sc[s].gcTook)
+              THEN 0
          ELSE @[p]],
        ![s].instBase = sc[s].instSnap,
        ![s].expSeq = sc[s].instSeq,
@@ -1964,7 +2050,7 @@ Finish(s) ==
        ![s].touched = @ \ (sc[s].scanU \cap sc[s].upDone),
        ![s].scanU = {}, ![s].scanD = {},
        ![s].scanGen = [p \in Paths |-> 0],
-       ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {},
+       ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}, ![s].gcTook = {},
        ![s].gcHeaded = {}, ![s].gcSeen = [p \in Paths |-> 0],
        ![s].adopted = {},
        ![s].declared = {}, ![s].consumed = {}]
@@ -2010,6 +2096,8 @@ Claim(s) ==
        /\ cellEpoch' = e /\ cellHolder' = s
        /\ cellReleased' = FALSE /\ cellHandoff' = "none"
        /\ cellQueue' = Without(cellQueue, s)
+       \* The waiter list this holder carries to its release.
+       /\ cellSeen' = IF HandoffAtClaim THEN Without(cellQueue, s) ELSE <<>>
        /\ window' = e
        /\ manSeq' = IF deposal /\ Rotation THEN manSeq + 1 ELSE manSeq
        /\ manSrc' = IF deposal /\ Rotation THEN "none" ELSE manSrc
@@ -2029,7 +2117,7 @@ Enqueue(s) ==
   /\ cellQueue' = IF InQueue(s) THEN cellQueue ELSE Append(cellQueue, s)
   /\ sc' = [sc EXCEPT ![s].pc = "waiting"]
   /\ gh' = [gh EXCEPT !.enqueues = 1]
-  /\ UNCHANGED <<cellEpoch, cellHolder, cellHandoff, cellReleased,
+  /\ UNCHANGED <<cellSeen, cellEpoch, cellHolder, cellHandoff, cellReleased,
                  manSeq, manSrc, manifest, objects, inbox, removals, window,
                  hitlAcked, conflicts>>
 
@@ -2043,6 +2131,7 @@ SkipDeadHandoff(s) ==
        /\ cellEpoch' = e /\ cellHolder' = s
        /\ cellReleased' = FALSE /\ cellHandoff' = "none"
        /\ cellQueue' = Without(cellQueue, s)
+       /\ cellSeen' = IF HandoffAtClaim THEN Without(cellQueue, s) ELSE <<>>
        /\ window' = e
        /\ sc' = [sc EXCEPT ![s].pc = "claimed", ![s].epoch = e]
        /\ gh' = [gh EXCEPT !.claimed = @ \cup {s}, !.deadSkips = 1]
@@ -2290,7 +2379,7 @@ LaneOnly(s) ==
   /\ sc' = [sc EXCEPT ![s].pc = "idle",
        ![s].scanU = {}, ![s].scanD = {},
        ![s].scanGen = [p \in Paths |-> 0],
-       ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}]
+       ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}, ![s].gcTook = {}]
   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, versions,
                  inbox, removals, stage, stageBase, withheldDel, hitlAcked, conflicts,
                  gh>>
@@ -2444,7 +2533,7 @@ CiteFinish(s) ==
             ![s].known = @ \cup {stage[s][p] : p \in sc[s].citeDone},
             ![s].scanU = {}, ![s].scanD = {},
             ![s].scanGen = [p \in Paths |-> 0],
-            ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {},
+            ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}, ![s].gcTook = {},
             ![s].declared = {}, ![s].consumed = {}]
        /\ inbox' = inbox \ sc[s].consumed
        /\ removals' = removals \ sc[s].declared
@@ -2618,7 +2707,7 @@ PullOnly(s) ==
        ![s].installed = FALSE,
        ![s].scanU = {}, ![s].scanD = {},
        ![s].scanGen = [p \in Paths |-> 0],
-       ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {},
+       ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}, ![s].gcTook = {},
        ![s].gcHeaded = {}, ![s].gcSeen = [p \in Paths |-> 0],
        ![s].adopted = {},
        ![s].declared = {}, ![s].consumed = {}]
@@ -2849,7 +2938,7 @@ BaseNext ==
   \/ \E s \in Syncers :
        Consume(s) \/ Scan(s) \/ UploadFenced(s) \/ GCDeleteFenced(s)
        \/ PreDeletesDone(s) \/ CASFenced(s) \/ CASMiss(s) \/ CASInstall(s)
-       \/ Finish(s) \/ Sync(s) \/ PullOnly(s)
+       \/ Finish(s) \/ Sync(s) \/ PullOnly(s) \/ AbandonBarrier(s)
   \/ SentinelNext
 
 Next ==
@@ -2899,6 +2988,7 @@ NoStarvation ==
 TypeOK ==
   /\ cellEpoch \in 0..EpochBound /\ cellHolder \in Syncers \cup {"none"}
   /\ cellQueue \in Seq(Syncers) /\ Len(cellQueue) <= Cardinality(Syncers)
+  /\ cellSeen \in Seq(Syncers) /\ Len(cellSeen) <= Cardinality(Syncers)
   /\ \A i, j \in 1..Len(cellQueue) : cellQueue[i] = cellQueue[j] => i = j
   /\ cellHandoff \in Syncers \cup {"none"} /\ cellReleased \in BOOLEAN
   /\ manSeq \in 1..MaxSeq+1 /\ manSrc \in Sources
@@ -3380,7 +3470,7 @@ StrictGh ==
 StrictSc ==
   [s \in Syncers |-> [sc[s] EXCEPT !.pendReRun = FALSE, !.stageCarried = FALSE]]
 StrictView ==
-  <<cellEpoch, cellHolder, cellQueue, cellHandoff, cellReleased,
+  <<cellEpoch, cellHolder, cellQueue, cellHandoff, cellReleased, cellSeen,
     manSeq, manSrc, manifest, objects, inbox, removals, window,
     StrictSc, versions, stage, stageBase, withheldDel, hitlAcked,
     conflicts, StrictGh>>

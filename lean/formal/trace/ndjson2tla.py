@@ -79,9 +79,12 @@ def convert(lines):
         if e["ev"] == "conf_start":
             writer_of[e["holder"]] = e["writer"]
             seed, seq0 = e["entries"], e["seq"]
-    if len(writer_of) != 2 or sorted(writer_of.values()) != ["A", "B"]:
-        raise Unsupported(f"two writers named A and B expected, got {writer_of}")
+    names = sorted(set(writer_of.values()))
+    if names != list("ABCDEF"[:len(names)]) or len(names) < 2:
+        raise Unsupported(f"writers must be A, B, ... in order, got {writer_of}")
+    nwriters = len(names)
 
+    projected = any(e["ev"] == "conf_projected" for e in evs)
     gen = {(p, et): 1 for p, et in seed.items()}
     nxt = 2
     paths = set(seed)
@@ -107,6 +110,12 @@ def convert(lines):
     for i, e in enumerate(evs):
         ev = e["ev"]
         w = writer_of.get(e.get("holder"))
+        if ev == "conf_projected":
+            continue
+        if ev == "conf_abandon":
+            steps.append(({"ev": "abandon", "w": e["writer"]}, i))
+            barrier.pop(writer_of.get(e.get("holder"), e["writer"]), None)
+            continue
         if ev == "conf_start":
             steps.append(({"ev": "start", "w": e["writer"]}, i))
         elif ev == "conf_agent_write":
@@ -164,7 +173,10 @@ def convert(lines):
             close_consume(w, i)
             barrier[w]["scanned"] = True
             scans += 1
-            steps.append(({"ev": "scan", "w": w, "uploads": e["uploads"], "deletes": e["deletes"]}, i))
+            rec = {"ev": "scan", "w": w}
+            if "uploads" in e:      # absent in a PROJECTED trace: a whole-leg count
+                rec.update({"uploads": e["uploads"], "deletes": e["deletes"]})
+            steps.append((rec, i))
         elif ev == "upload":
             out = e["outcome"]
             p = e["path"]
@@ -188,19 +200,23 @@ def convert(lines):
         elif ev == "merge":
             b = barrier[w]
             b["merge"] = e
+            counts = {"foreign": e["foreign"], "gone": e["gone"]} if "foreign" in e else {}
+            seqf = {} if projected else {"seq": 0, "nothing": True}
             if not b["claimed"]:
-                steps.append(({"ev": "pullonly", "w": w, "foreign": e["foreign"], "gone": e["gone"]}, i))
+                steps.append(({"ev": "pullonly", "w": w, **counts}, i))
             elif e["adds_nothing"]:
-                steps.append(({"ev": "install", "w": w, "nothing": True, "seq": 0, "foreign": e["foreign"],
-                               "gone": e["gone"], "withheld": {p for p, s in b["observed"].items() if not s}}, i))
+                steps.append(({"ev": "install", "w": w, **seqf, **counts,
+                               "withheld": {p for p, s in b["observed"].items() if not s}}, i))
         elif ev == "cas":
             b = barrier[w]
             m = b["merge"]
             if e["result"] == "ok":
                 s = e["seq"] - seq0 + 1
                 max_seq = max(max_seq, s)
-                steps.append(({"ev": "install", "w": w, "nothing": False, "seq": s, "foreign": m["foreign"],
-                               "gone": m["gone"], "withheld": {p for p, st in b["observed"].items() if not st}}, i))
+                counts = {"foreign": m["foreign"], "gone": m["gone"]} if "foreign" in m else {}
+                seqf = {} if projected else {"seq": s, "nothing": False}
+                steps.append(({"ev": "install", "w": w, **seqf, **counts,
+                               "withheld": {p for p, st in b["observed"].items() if not st}}, i))
             else:
                 steps.append(({"ev": "cas_lost", "w": w}, i))
             b["merge"] = None
@@ -244,7 +260,12 @@ def convert(lines):
         "SyncKeepsHiddenBase": True, "MaxSameBytes": same, "VerifyUploadedCitations": True,
         "WriterQueue": True, "EmptyInstall": True, "TombstoneHeadsKey": True,
         "CommitLoadsCurrent": True, "Upload412Preserves": True, "DeclaredConfirmsAbsence": True,
-        "Writers": "<- TwoWriters", "OrphanTrack": False,
+        "Writers": "<- " + ["", "", "TwoWriters", "ThreeWriters", "FourWriters",
+                            "FiveWriters", "SixWriters"][nwriters],
+        "OrphanTrack": False, "ProjectedTrace": projected,
+        # The handoff rule the code implements (found by replaying the storm).
+        "HandoffAtClaim": True, "AbandonOnStoreError": True,
+        "BaselineKeepsUncollected": True,
         "QueueForeignChanges": True,
     }
     return steps, consts, paths, free, gen

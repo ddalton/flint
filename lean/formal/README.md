@@ -1095,13 +1095,78 @@ scenario's trace was captured on the fixed syncer and passes.
 Limits, named:
 - The traces are sequential: each barrier runs to completion before the
   other writer's starts, so they check what the actions DO, not every
-  interleaving.
-- The 6-writer contention-drill traces need `Syncers` as a constant, and
-  their agents' writes inferred from the uploads. That is the next step.
+  interleaving. Phase 2, below, is the concurrent case.
 - Regenerate with
   `FLINT_SYNC_CONFORMANCE_DIR=$PWD/lean/formal/trace/traces cargo test --lib conformance_`
   in `lean/syncer`. Traces from a changed syncer that the model rejects are
   the point of the exercise.
+
+## Trace validation, phase 2 (2026-09-15): a LIVE leg of the storm drill
+
+Phase 1 replayed the conformance harness: two writers, one barrier at a
+time, on a double. Phase 2 replays what six writers and a UI actor did to
+real S3 — `lean/e2e/writers-live/results/2026-09-15-drill/`, round 3, the
+churn leg with the fixed binary.
+
+`trace/drill2tla.py` projects a leg onto ONE PATH and writes the NDJSON
+phase 1 already validates, so the checked converter does the rest. Nothing
+is inferred that the drill logged: the agents' writes come from their
+journals, the UI's from its own (with the etag the gateway answered).
+`trace/drill-check.sh` runs it and then corrupts it.
+
+**The leg is a behaviour of the model.** `churn/p23.txt` of `R3-S2-churn-ui`:
+5,940 trace lines, 3,258 model steps, six writers, accepted to the end
+(depth 3,259, 20,311 distinct states, 3 s). Three mutations of that same
+projection — a consume that adopted reported as superseded, a withheld
+citation reported as still there, a skipped GC reported as a delete — are
+each rejected. Logs: `results/2026-09-15-trace-phase2/`.
+
+Getting there took four corrections to the MODEL, each a place where the
+model described something the code does not do:
+
+1. **The handoff names the waiters the holder read at its CLAIM**
+   (`HandoffAtClaim`). `epoch_handoff` hands the cell to the head of
+   `lease.waiters` — the list as of the claim — and writes the REST OF THAT
+   LIST back as the queue. The model handed off to the head of the queue as
+   it stands at the release. **This breaks the ticket's whole purpose:**
+   with the shipped rule modelled, `NoStarvation` — "with the ticket, every
+   queued writer eventually holds the cell" — is VIOLATED. TLC's
+   counterexample is a two-state cycle: B holds the cell having read an
+   empty waiter list, A takes a ticket while B runs, B's release writes the
+   stale (empty) list back and names nobody, B claims again, A waits
+   forever. Not observed in any drill (the storm's waits are tens of
+   milliseconds and O5 requires zero claim deadlines), and the code's
+   handoff DOES re-read on a 412, so a waiter whose enqueue moved the token
+   is normally honoured. The fix belongs in `release`: name the head of the
+   list as of the handoff, not as of the claim. Log:
+   `results/2026-09-15-trace-phase2/liveness-handoff-at-claim.log`.
+2. **A commit section can end without installing** (`AbandonOnStoreError`).
+   S3 answered a window-open PUT with 409 ConditionalRequestConflict; the
+   barrier returned the error, released the cell and kept its pending
+   sentinel. The model had no such step — its only abandon was a fence.
+   **The event trace does not record this at all**: only the prose line
+   `Publish honor failed (pending kept, retrying)` says so, which is why
+   the projector has to infer it from a barrier that never ends. A trace
+   event for it is the obvious rig fix.
+3. **A published delete clears the baseline only if the GC COLLECTED the
+   object** (`BaselineKeepsUncollected`). `report.deleted` is pushed by the
+   GC's collect arms, and step 7 clears the baseline from that list — so a
+   delete whose GC skipped (the key held bytes this writer does not
+   recognize) keeps its baseline entry, the tree reads as locally deleted at
+   the next consume, and an incoming version is PRESERVED rather than
+   adopted. The model cleared the baseline for every published delete.
+4. **A claim, a wait and the counts are facts about every path**
+   (`ProjectedTrace`). A projected replay cannot recompute a scan's upload
+   count, a merge's foreign count, an ack's status, or why a barrier
+   claimed, so those checks are dropped WHERE THE TRACE CANNOT CARRY THEM
+   and only there; everything path-scoped is checked as phase 1 checks it.
+
+Open: `churn/p47.txt` — a path with deletes, a skipped GC and a preserve —
+is still rejected, now at a consume that adopts after that skipped GC
+(`results/2026-09-15-trace-phase2/p47-open.log`). Either the model's
+consume or the code's is wrong there; the trace says exactly which step to
+read. Constants 1-3 are FALSE in every gate cfg, so the gate's 110 runs
+explore the state spaces they always did.
 
 ## Tranche 3 candidates (in review-priority order)
 
