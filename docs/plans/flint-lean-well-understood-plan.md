@@ -52,6 +52,16 @@ What is not solid:
       is un-ignored, and three mutations each fail a test.
     - Measured first: a new writer's checkout already healed it; live
       writers did not.
+- **W4 phase 2 done (2026-09-15).** A live storm leg replayed against the
+  model: `churn/p23.txt` of round 3's churn leg — six writers, 3,258 model
+  steps — is accepted to the end, and three mutations of it are rejected.
+  It found FOUR places where the model was not the code: the handoff names
+  the waiters read at the CLAIM (and with that modelled, `NoStarvation` is
+  violated — the ticket's own purpose), a commit section can end without
+  installing on a store error (which the event trace does not record at
+  all), a published delete clears the baseline only for objects the GC
+  collected, and a projection cannot check whole-leg counts. One path
+  (`churn/p47.txt`) is still rejected: open.
 - **W4 phase 1 done.**
   - Five syncer scenarios are traced and accepted; five mutations and five
     controls are rejected.

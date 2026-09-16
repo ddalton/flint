@@ -6,7 +6,7 @@ gateway (`lean/gateway`), their store and its double (`crates/flint-store`), and
 finding rate per release and per campaign is computed from Table 1 in [Rate](#rate).
 
 **Counts:** Table 1, 142 product defects (8 OPEN, 3 shipped in v1.55.0, 34 fixed before any published build
-carried them). Table 2, 27 rig defects. Table 3, 16 model-only bug rows (22 bugs counting the three rows that each hold
+carried them). Table 2, 27 rig defects. Table 3, 19 model-only bug rows (25 bugs counting the three rows that each hold
 three), and 6 abstractions that hid code defects (Table 3b).
 
 **Columns.**
@@ -215,6 +215,9 @@ of HEAD `86d731b3` plus the working tree of 2026-09-15.
 
 | found | summary | fix |
 |-------|---------|-----|
+| 2026-09-15 | W4 phase 2, replaying a live storm leg: the model handed the cell to the queue head AS OF THE RELEASE; `epoch_handoff` names the head of the list the holder read AT ITS CLAIM and writes that stale list back as the queue. With the shipped rule modelled (`HandoffAtClaim`), the liveness property the ticket exists for — `NoStarvation` — is VIOLATED. Never observed in a drill. README "phase 2" | modelled; the CODE fix (name the head as of the handoff) is OPEN |
+| 2026-09-15 | W4 phase 2: the model had no step for a commit section that ends WITHOUT installing — the store refused a request (S3's 409 on the window-open PUT), the barrier released and kept its pending sentinel. The syncer emits no trace event for it either, only prose. README "phase 2" | `AbandonOnStoreError`; a trace event for the abort is OPEN |
+| 2026-09-15 | W4 phase 2: the model cleared a deleted path's baseline on every published delete; the code clears it only for deletes whose OBJECT the GC collected, so a skipped GC leaves the path reading as locally deleted and the next consume PRESERVES an incoming version. README "phase 2" | `BaselineKeepsUncollected` |
 | 2026-09-15 | `LeanBarrierLeaseSentinelImplCrash1` violated `Inv_HITLTracked` (19 states; 21 with the two-scan rule): a UI write adopted, deleted by the agent, outranked, its entry dropped, the writer's pod replaced. The code reaches that state and converges: checkout's S3-wins arm adopts the object (pod replaced) or the delete publishes (writer survives). The invariant does not credit S3-wins adoption. README "Crash1" | pinned by `an_adopted_ui_write_deleted_under_an_older_peer_publish_converges_when_*` (25848817); the invariant is not yet corrected |
 | 2026-09-15 | Trace validation, first run: three of five syncer traces rejected (at the commit's CAS, an upload superseding a foreign version, a declared barrier's scan). Each was the model lagging the code: 3 bugs. lean/formal/README.md:964 | constants `CommitLoadsCurrent`, `Upload412Preserves`, `DeclaredConfirmsAbsence` |
 | 2026-09-15 | The first box run of the one-path sentinel world on the IMPL shape omitted `VerifyUploadedCitations` and stopped on `Inv_NoStaleOverride` in 16 steps: a cfg error. README:911 | cfg corrected |
