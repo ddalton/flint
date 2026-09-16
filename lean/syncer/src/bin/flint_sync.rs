@@ -102,6 +102,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use flint_lean::state::SyncerState;
+use flint_lean::conformance;
 use flint_lean::lease;
 use flint_lean::verbs;
 use flint_lean::{Access, LeanConfig, LeanError, Syncer, SentinelMode};
@@ -172,6 +173,12 @@ async fn main() {
     let prefix = env_req("FLINT_SYNC_PREFIX");
     let root = env_req("FLINT_SYNC_ROOT");
     let endpoint = std::env::var("FLINT_SYNC_ENDPOINT").ok();
+    // Which store a cached conformance verdict belongs to. A workspace
+    // re-pointed at another endpoint, bucket or prefix is a different
+    // store and is asked again rather than inheriting an answer about
+    // the old one.
+    let store_identity =
+        format!("{}|{bucket}|{prefix}", endpoint.as_deref().unwrap_or("aws"));
 
     // Parts of ONE object uploaded concurrently. `fanout` already
     // spreads uploads ACROSS objects, so this only moves a tree whose
@@ -416,6 +423,35 @@ async fn main() {
                 eprintln!("flint-sync: probe-conditional FAIL (DELETE): {e}");
                 std::process::exit(1);
             }
+        }
+    }
+
+    // What this store does with a condition it cannot satisfy, ASKED
+    // rather than assumed (`conformance.rs`). Before the first verb,
+    // because a barrier that has published cannot un-publish and the
+    // collector's DELETE happens inside the commit section. The verdict
+    // is cached in the state dir, so this costs ~10 requests once per
+    // workspace, not once per barrier.
+    //
+    // It sits AFTER the verbs that return above it — `status`, `ctl`,
+    // `manifest` and the two `probe-*` commands. That is load-bearing,
+    // not incidental: `s3csi/e2e/run-s3csi.sh` pipes `status 2>&1` into
+    // `jq`, so a line printed before that JSON breaks it.
+    match conformance::gate(&mut sc, &store_identity).await {
+        Ok(conformance::Decision::Conformant) => {}
+        Ok(d @ conformance::Decision::Unknown(_)) => {
+            eprintln!("flint-sync: {}", conformance::message(&d, &sc.cfg.prefix));
+        }
+        Ok(d @ conformance::Decision::CollectorOff(_)) => {
+            eprintln!("flint-sync: {}", conformance::message(&d, &sc.cfg.prefix));
+        }
+        Ok(d @ conformance::Decision::Refuse(_)) => {
+            eprintln!("flint-sync: {}", conformance::message(&d, &sc.cfg.prefix));
+            std::process::exit(flint_lean::EXIT_REFUSED);
+        }
+        Err(e) => {
+            eprintln!("flint-sync: the conditional-write probe could not run: {e}");
+            std::process::exit(1);
         }
     }
 

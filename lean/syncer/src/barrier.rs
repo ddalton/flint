@@ -50,6 +50,20 @@ pub struct BarrierReport {
     /// resolves foreign-wins): the installed seq still cites them, and the
     /// next consume reconciles each against the local delete.
     pub outranked: Vec<String>,
+    /// Paths whose object the collector LEFT BEHIND because this store
+    /// does not enforce `If-Match` on DELETE (`conformance.rs`). The
+    /// delete still reached the boundary; only the object survives.
+    ///
+    /// NOT added to `deleted`, and so NOT dropped from the merge base:
+    /// the rule step 7 follows is "drop the entry once the key no longer
+    /// holds our bytes", which is why the absent and replaced-absent
+    /// arms drop it and the skipped-etag arm does not. A leaked key
+    /// still holds them. The model names that rule
+    /// `BaselineKeepsUncollected` and it is what ships, so a leak
+    /// follows the arm that already exists rather than inventing a
+    /// third; the cost is that the collector re-offers the path (one
+    /// HEAD) at every later barrier, exactly as a skipped one is.
+    pub leaked: Vec<String>,
     pub no_change: bool,
     /// Bytes this barrier actually published — the input to the
     /// sentinel work meter (boundary-verbs plan D3.1). Metering work
@@ -1519,6 +1533,34 @@ impl Syncer {
                         continue;
                     }
                     Ok(meta) if Some(&meta.etag) == recognized.as_ref() => {
+                        // A store that ACCEPTS `If-Match` on DELETE and
+                        // ignores it turns the request below into exactly
+                        // the model's LeanBarrierLeaseGCUnconditional: it
+                        // takes whatever is at the key, including the
+                        // upload another writer's commit is about to
+                        // cite. So the COLLECTOR gives way, not the
+                        // workspace. The object stays where it is, cited
+                        // by no manifest — no checkout serves an uncited
+                        // key and the untracked sweep passes it over by
+                        // the same rule (`untracked.rs`: "a delete whose
+                        // GC never ran leaves one, and it is garbage").
+                        // Storage growth, which is a cost; not a delete
+                        // of somebody else's bytes, which is a loss.
+                        if !self.cfg.conditional_delete_enforced {
+                            // Traced and counted, deliberately NOT a
+                            // conflict record: a leak is one store-wide
+                            // condition, not a per-path disagreement
+                            // anybody resolves. A mass delete here would
+                            // append thousands of records and rotate the
+                            // log (`CONFLICTS_MAX_BYTES`) — evicting the
+                            // records that name where preserved UI bytes
+                            // went, which is the one thing that log is
+                            // load-bearing for.
+                            self.trace("gc", serde_json::json!({"flush": flush_uuid, "path": path,
+                                "head": meta.etag, "result": "leaked-no-conditional-delete"}));
+                            report.leaked.push(path.clone());
+                            continue;
+                        }
                         if self.cfg.drill_hold_gc_secs > 0 && !gc_held {
                             gc_held = true;
                             eprintln!(
@@ -1565,6 +1607,19 @@ impl Syncer {
                     kind: "gc-skip".into(),
                     at_unix: now_unix(),
                 })?;
+            }
+
+            // One line per barrier, not one per path: the condition is
+            // the store's, and the operator needs the count and the
+            // reason, not a thousand copies of it.
+            if !report.leaked.is_empty() {
+                eprintln!(
+                    "flint-sync: left {} object(s) in the bucket that this barrier retired: \
+                     this store does not enforce If-Match on DELETE, so collecting them could \
+                     take a version another writer is about to cite. They are cited by no \
+                     manifest and served to nobody (lean/SAFETY.md §2)",
+                    report.leaked.len()
+                );
             }
 
             // Step 7: the foreign queue, then the baseline rewrite, intent
@@ -1678,6 +1733,7 @@ impl Syncer {
             serde_json::json!({
                 "seq": report.seq, "uploaded": report.uploaded.len(), "deleted": report.deleted.len(),
                 "parked": report.parked.len(), "outranked": report.outranked.len(),
+                "leaked": report.leaked.len(),
                 "consumed": report.consumed, "no_change": report.no_change,
                 "ms": started.elapsed().as_millis() as u64, "requests": self.trace_requests(),
             }),

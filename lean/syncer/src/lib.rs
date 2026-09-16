@@ -41,6 +41,7 @@
 pub mod barrier;
 pub mod checkout;
 pub mod chunk;
+pub mod conformance;
 pub mod control;
 pub mod gauges;
 pub use gauges::{status_report, Gauges, StatusReport};
@@ -416,6 +417,20 @@ pub struct LeanConfig {
     /// tracks it — the gateway's `UNTRACKED_GRACE_SECS`, past any live
     /// writer's claim and commit.
     pub untracked_grace_secs: u64,
+    /// Whether this store was OBSERVED to enforce `If-Match` on DELETE
+    /// (`conformance.rs` runs `probe::probe_conditional_delete` once per
+    /// store identity and caches the verdict).
+    ///
+    /// True is the default because every test double and every S3 that
+    /// has ever been measured enforces it; it is set FALSE only by a
+    /// probe that watched the store ignore the header. When false the
+    /// file collector leaves its objects behind rather than issue a
+    /// delete the store would apply unconditionally — the model calls
+    /// that variant `LeanBarrierLeaseGCUnconditional` and refutes it, so
+    /// this is not a precaution but the one code path the model already
+    /// proved loses another writer's bytes (Ozone 2.2.x, HDDS-14907,
+    /// finding L-27).
+    pub conditional_delete_enforced: bool,
 }
 
 impl LeanConfig {
@@ -465,6 +480,7 @@ impl LeanConfig {
             event_trace: None,
             untracked_sweep_secs: 3600,
             untracked_grace_secs: inbox::UNTRACKED_GRACE_SECS,
+            conditional_delete_enforced: true,
         }
     }
 

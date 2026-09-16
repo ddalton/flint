@@ -78,7 +78,8 @@ A claim with unnamed assumptions is a claim about nothing.
 
 | assumption | how it is verified | if it is false |
 |---|---|---|
-| the store honours `If-Match` / `If-None-Match` on PUT, `If-Match` on DELETE, and a conditional write on the pointer | `flint-sync probe-conditional`, run before every drill leg | **no guarantee holds.** Ozone 2.2.x ignores `If-Match` on DELETE (HDDS-14907): a second writer's GC can delete the first writer's upload. Documented, NOT refused by the syncer |
+| the store honours `If-None-Match` / `If-Match` on PUT (every upload, the manifest CAS, the lease cell) | probed by the syncer before its first verb (`conformance.rs`), and by `flint-sync probe-conditional` | **no guarantee holds** — arbitration degrades silently to last-writer-wins. The syncer now REFUSES the workspace (`EXIT_REFUSED`) rather than run on such a store |
+| the store honours `If-Match` on DELETE (the file collector, and only it) | the same probe | the collector could take the version another writer's commit is about to cite — precisely the model's refuted `LeanBarrierLeaseGCUnconditional`. The syncer now turns the COLLECTOR off instead of refusing the workspace: retired objects are left in the bucket, cited by nothing (`leaked=` on the barrier line, one warning per barrier). Ozone 2.2.x is this case (HDDS-14907, L-27) — the loss becomes storage growth |
 | an etag names the bytes (a content hash), so identical bytes share one | modelled (`MaxSameBytes`), which is what makes finding 13 reachable | the same-bytes findings would not apply; a different set would |
 | the local filesystem gives atomic rename and honest `lstat` | assumed | the scan's two-scan rule and the temp-then-rename writes lose their basis |
 | exactly one syncer owns a workspace tree on a node, and nothing else edits it mid-barrier | the CSI driver's worker-per-volume | a scan can publish a half-written file |
@@ -117,7 +118,8 @@ A claim with unnamed assumptions is a claim about nothing.
    than in the model (a waiting writer does not always hold a ticket). No
    starvation has been observed; none is ruled out.
 7. **Storage growth.** Conflict copies under `.flint/lean/conflicts/` are
-   never collected. Not a loss; a cost.
+   never collected. On a store without a conditional DELETE, neither are
+   the objects the collector gives way on. Not a loss; a cost.
 8. **The untracked window.** A writer lost between its upload and its
    commit leaves an object nothing tracks until the sweep runs
    (`FLINT_SYNC_UNTRACKED_SWEEP_SECS`, 3600 s by default) or some writer
@@ -136,7 +138,7 @@ A claim with unnamed assumptions is a claim about nothing.
 | 4 | finish the `churn/p47.txt` replay: decide whether the model's consume or the code's is wrong | unknown until read |
 | 5 | replay every path of every storm leg in CI, invariants on | a day, then free |
 | 6 | exhaust the two-path sentinel world (box-scale) | a TLC box, ~$5-20 |
-| 7 | refuse a store that fails `probe-conditional` instead of documenting it | a day |
+| 7 | ~~refuse a store that fails `probe-conditional` instead of documenting it~~ **done 2026-09-15**: the syncer probes before its first verb — a broken conditional PUT refuses the workspace, a broken conditional DELETE turns the collector off (`conformance.rs`) | — |
 | 8 | an inductive invariant (TLAPS) for S2 and S5, the two that are stated over states rather than ghosts | weeks; the only route to a claim that does not say "in this world" |
 
 Regenerate `COVERAGE.md` with `python3 lean/formal/coverage.py` and check

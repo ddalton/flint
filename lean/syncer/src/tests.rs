@@ -11143,3 +11143,90 @@ fn access_parses_exactly_what_the_plugin_writes() {
     assert_eq!(Access::default(), Access::ReadWrite);
     assert_eq!(Access::parse(Access::Read.as_str()), Some(Access::Read));
 }
+
+/// The store, not the code, is what can make the collector unsafe. A
+/// backend that ACCEPTS `If-Match` on DELETE and ignores it (Apache
+/// Ozone 2.2.x, HDDS-14907 — finding L-27) turns the collector's delete
+/// into exactly the variant the model refutes,
+/// `LeanBarrierLeaseGCUnconditional`: it takes whatever is at the key,
+/// including a peer's upload that a commit is about to cite. So when the
+/// probe has SEEN that (`conformance.rs`), the collector gives way — and
+/// three things must hold at once, which is why they are asserted
+/// together:
+///
+///   1. the object is LEFT in the bucket, not deleted;
+///   2. the path still leaves the boundary, exactly as if collected;
+///   3. the merge base drops it anyway, so the next barrier does not
+///      re-classify the same path as a delete forever.
+///
+/// The second arm is the control: the identical sequence on a store
+/// whose conditional delete is enforced must actually collect the
+/// object. Without it this test would pass against a collector that had
+/// simply stopped working.
+#[tokio::test]
+async fn a_store_that_ignores_if_match_on_delete_leaks_the_object_instead_of_collecting_it() {
+    for enforced in [false, true] {
+        let store = Arc::new(MemoryStore::new());
+        let dir = tempfile::tempdir().unwrap();
+        let mut sc = syncer(&store, dir.path()).await;
+        sc.cfg.conditional_delete_enforced = enforced;
+        sc.checkout().await.unwrap();
+        write(dir.path(), "x.txt", "seed");
+        sc.run_barrier().await.unwrap();
+        let key = sc.cfg.file_key("x.txt");
+        store.head(&key).await.expect("fixture: the seed was published");
+
+        std::fs::remove_file(dir.path().join("x.txt")).unwrap();
+        let withheld = sc.run_barrier().await.unwrap();
+        assert!(
+            withheld.deleted.is_empty() && withheld.leaked.is_empty(),
+            "fixture: the two-scan rule must withhold the first absence (enforced={enforced})"
+        );
+        let r = sc.run_barrier().await.unwrap();
+
+        // (2) The boundary drops the path either way: what the store
+        // cannot do is collect the object, not publish the delete.
+        let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
+        assert!(
+            !m.entries.contains_key("x.txt"),
+            "the delete must reach the boundary (enforced={enforced})"
+        );
+
+        if enforced {
+            assert_eq!(r.deleted, vec!["x.txt".to_string()], "the control must COLLECT");
+            assert!(r.leaked.is_empty(), "nothing is leaked when the store enforces the delete");
+            assert!(
+                matches!(store.head(&key).await, Err(flint_store::StoreError::NotFound(_))),
+                "the control's object must be gone — otherwise the leak arm proves nothing"
+            );
+        } else {
+            // (1) left behind, and NAMED: a leak nobody can count is a
+            // leak that reads as a collection.
+            assert_eq!(r.leaked, vec!["x.txt".to_string()], "the collector must name what it left");
+            assert!(r.deleted.is_empty(), "a leaked path was not deleted");
+            store.head(&key).await.expect("the object must be LEFT, not deleted");
+        }
+
+        // (3) The merge base follows the rule step 7 already had: an
+        // entry is dropped once the key no longer holds our bytes. A
+        // collected path is gone from the base and never spoken of
+        // again; a LEAKED one still holds them, so it is re-offered to
+        // the collector at every later barrier — the same standing
+        // condition a skipped etag produces, and the reason this arm
+        // asserts a repeat rather than silence.
+        let again = sc.run_barrier().await.unwrap();
+        if enforced {
+            assert!(
+                again.deleted.is_empty() && again.leaked.is_empty(),
+                "a collected path must leave the merge base and stay gone"
+            );
+        } else {
+            assert_eq!(
+                again.leaked,
+                vec!["x.txt".to_string()],
+                "a leaked path keeps its baseline entry, so the collector must re-offer it \
+                 (dropping it would forget bytes the key still holds)"
+            );
+        }
+    }
+}

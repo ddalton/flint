@@ -214,7 +214,11 @@ syncer "$R_AK" "$R_SK" "$R_TOK" "$D" "$SYNC" checkout >$WORK/d-checkout.log 2>&1
 echo "should never land" >"$D/src/landed.txt"
 if syncer "$R_AK" "$R_SK" "$R_TOK" "$D" "$SYNC" barrier >$WORK/d-barrier.log 2>&1; then
     bad "D1 a read-write barrier on the read keys EXITED 0"
-elif grep -qiE "not authorized|AccessDenied|403" $WORK/d-barrier.log; then
+# The conformance probe (`conformance.rs`) runs first and is denied by the
+# same keys, so its line carries a 403 too. Filtered out, or this leg would
+# have its specimen supplied by the probe and pass however the barrier failed.
+elif grep -v 'could not ask this store' $WORK/d-barrier.log |
+    grep -qiE "not authorized|AccessDenied|403"; then
     ok "D1 a read-write barrier on the read keys was denied: $(tail -1 $WORK/d-barrier.log)"
 else
     bad "D1 the barrier failed, but not with a denial — A3's grep has no specimen: $(tail -1 $WORK/d-barrier.log)"

@@ -12,6 +12,42 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Added
+
+- **lean: the syncer asks the store whether it enforces conditional
+  writes, and acts on the answer** (`lean/syncer/src/conformance.rs`).
+  Every guarantee the protocol makes rests on a conditional write being
+  REFUSED when its condition does not hold, and a store that accepts the
+  header and ignores it answers identically to one that enforces it.
+  This was an assumption in `lean/SAFETY.md` §2 and a verb an operator
+  could remember to run; it is now a gate the binary runs before its
+  first verb, cached in the state dir per store identity (~10 requests
+  once per workspace).
+  - *Conditional PUT not enforced* → the workspace is REFUSED
+    (`EXIT_REFUSED`). The manifest CAS, the publish fence and every
+    upload are conditional writes; the degraded mode is
+    last-writer-wins wearing arbitration's clothes.
+  - *`If-Match` on DELETE not enforced* → the WORKSPACE still runs and
+    publishes; the file collector gives way. An object a delete retires
+    is left in the bucket and counted on the barrier line (`leaked=`),
+    with one warning per barrier rather than one record per path — a
+    leak is the store's standing condition, not a per-path
+    disagreement, and a record per path would rotate the conflict log
+    past the entries that name where preserved UI bytes went. This is
+    not caution: the model
+    refutes the collector's unconditional variant
+    (`LeanBarrierLeaseGCUnconditional`), so on such a store the shipped
+    binary WAS that mutation — it could delete the version another
+    writer's commit was about to cite. Leaked objects are cited by no
+    manifest, so no checkout serves them and the untracked sweep passes
+    over them: storage growth, which is a cost, in place of another
+    writer's bytes, which is a loss.
+  - Apache Ozone 2.2.x is exactly the second case (HDDS-14907, finding
+    L-27), which is why it degrades rather than being refused outright.
+  - *Pinned by:*
+    `a_store_that_ignores_if_match_on_delete_leaks_the_object_instead_of_collecting_it`,
+    whose control arm requires the enforced store to actually collect.
+
 ## [1.55.0] - 2026-09-15
 
 ### Fixed

@@ -93,6 +93,36 @@ pub struct Incarnation {
     pub quiet_polls: u32,
 }
 
+/// What the conditional-write probes saw this store do
+/// (`conformance.rs`). Cached because the probes cost ~10 requests and
+/// a store does not change its mind between two barriers — but keyed by
+/// `identity`, because a workspace re-pointed at a different endpoint or
+/// bucket is a different store and must be asked again.
+///
+/// `probe_version` is what makes the cache safe to extend: a build that
+/// asks a NEW question must not read an old verdict as the answer to
+/// it, so a bump invalidates every cached verdict rather than inheriting
+/// a silent pass.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoreConformance {
+    pub identity: String,
+    pub probe_version: u32,
+    /// Whether the probe got an ANSWER at all. False means it could not
+    /// write its own object — a credential, a policy, the network — and
+    /// the two flags below say nothing. Never cached false: an outage
+    /// must not become this workspace's standing verdict.
+    pub answered: bool,
+    /// `If-None-Match:*` and `If-Match` on PUT — the manifest CAS, the
+    /// upload gate, the lease cell. Nothing works without it.
+    pub conditional_put: bool,
+    /// `If-Match` on DELETE — the file collector, and only it.
+    pub conditional_delete: bool,
+    /// What the failing probe said, for the operator message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub at_unix: u64,
+}
+
 /// The intent journal written BEFORE uploads: which keys this barrier
 /// will touch and under which flush_uuid, so a restarted container can
 /// recognize its own crashed/torn PUT at the 412 (AdoptOwn) instead of
@@ -226,6 +256,8 @@ const INTENT: &str = "intent.json";
 const FOREIGN_QUEUE: &str = "foreign-queue.json";
 /// When this writer last swept for untracked uploads (`untracked.rs`).
 const UNTRACKED_SWEEP: &str = "untracked-sweep";
+/// The cached conditional-write verdict for this store (`conformance.rs`).
+const CONFORMANCE: &str = "conformance.json";
 const CONFLICTS: &str = "conflicts.jsonl";
 /// The rotated generation. `load_conflicts` reads it FIRST, so the
 /// sequence a reader sees is unbroken across a rotation — which matters
@@ -488,6 +520,24 @@ impl SyncerState {
 
     pub fn save_untracked_sweep_at(&self, at: u64) -> LeanResult<()> {
         write_atomic(&self.dir.join(UNTRACKED_SWEEP), at.to_string().as_bytes())
+    }
+
+    /// A verdict that cannot be parsed reads as ABSENT, never as a pass:
+    /// the probe runs again. The expensive outcome of a corrupt cache is
+    /// ten requests; the cheap one would be running the collector on a
+    /// store nobody asked.
+    pub fn load_conformance(&self) -> LeanResult<Option<StoreConformance>> {
+        match fs::read(self.dir.join(CONFORMANCE)) {
+            Ok(b) => Ok(serde_json::from_slice(&b).ok()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn save_conformance(&self, c: &StoreConformance) -> LeanResult<()> {
+        let bytes = serde_json::to_vec_pretty(c)
+            .map_err(|e| LeanError::State(format!("conformance: {e}")))?;
+        write_atomic(&self.dir.join(CONFORMANCE), &bytes)
     }
 
     pub fn load_intent(&self) -> LeanResult<IntentJournal> {

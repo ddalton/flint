@@ -17,6 +17,16 @@ use bytes::Bytes;
 
 use crate::{crc64_nvme, GenerationStamps, ObjectStore, PutCondition, StoreError};
 
+/// The prefix a probe uses when it could not write its OWN object.
+///
+/// This is not a verdict about the store's conditional writes: it is a
+/// credential, a bucket policy, or the network. A caller that refuses on
+/// it has refused an ERROR while reporting an ANSWER — which is how a
+/// read-only credential comes to be described as "this store does not
+/// enforce conditional writes". Callers that act on a verdict must tell
+/// the two apart; `lean/syncer/src/conformance.rs` does.
+pub const PROBE_UNREACHABLE: &str = "cannot write the probe object";
+
 /// Run the probe against `key`. `Ok(())` means the whole surface is
 /// present; `Err` names the exact step that failed, for a condition
 /// message an operator can act on.
@@ -154,7 +164,7 @@ pub async fn probe_conditional_writes(store: &dyn ObjectStore, key: &str) -> Res
     let m1 = store
         .put_whole(key, b1, &PutCondition::IfNoneMatchAny, &stamps, c1)
         .await
-        .map_err(|_| refuse("cannot write the probe object"))?;
+        .map_err(|e| refuse(&format!("{PROBE_UNREACHABLE}: {e}")))?;
 
     // If-None-Match:* over an object that now EXISTS must be refused.
     // A store that ignores the header answers Ok here, and that is the
@@ -236,7 +246,7 @@ pub async fn probe_conditional_delete(store: &dyn ObjectStore, key: &str) -> Res
             crc64_nvme(b"cond-delete-probe"),
         )
         .await
-        .map_err(|e| refuse(&format!("cannot write the probe object: {e}")))?;
+        .map_err(|e| refuse(&format!("{PROBE_UNREACHABLE}: {e}")))?;
 
     // A STALE etag must be refused, and the object must still be there.
     let stale = "\"0000000000000000000000000000dead\"";

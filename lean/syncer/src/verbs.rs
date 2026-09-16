@@ -156,12 +156,23 @@ pub async fn run_step(sc: &mut Syncer, step: Step) -> Result<(), LeanError> {
             Step::Barrier => {
                 let r = sc.run_barrier().await?;
                 eprintln!(
-                    "flint-sync: barrier seq={:?} up={} del={} parked={} consumed={}",
+                    "flint-sync: barrier seq={:?} up={} del={} parked={} consumed={}{}",
                     r.seq,
                     r.uploaded.len(),
                     r.deleted.len(),
                     r.parked.len(),
-                    r.consumed
+                    r.consumed,
+                    // Only on a store whose collector had to give way
+                    // (`conformance.rs`), so the ordinary line stays
+                    // byte-identical for whatever greps it. `del` counts
+                    // objects COLLECTED; these left the boundary and
+                    // stayed in the bucket, and a barrier that said
+                    // nothing about them would read as a tidy delete.
+                    if r.leaked.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" leaked={}", r.leaked.len())
+                    }
                 );
             }
             Step::Sync => {
