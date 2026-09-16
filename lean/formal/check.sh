@@ -250,6 +250,10 @@ strict_run $M LeanBarrierLeaseHolds.cfg "barrier lease, two live writers: HITL +
 # LeanBarrierLeaseSentinelImpl — the same world on the code's shape (tranche
 # 7), with Inv_AckBoundaryCoherent refined — which runs on the TLC box, like
 # LeanBarrierLeaseSameBytesDeep. README, tranche 7.
+# A THIRD WRITER in the gate (COVERAGE.md, 2026-09-15: every invariant read
+# 0 in the "3 writers" column because this world was opt-in).  One path, a
+# UI write, the queue and the ticket with a third party in every exchange.
+strict_run $M LeanBarrierLeaseImplThreeWriters.cfg "barrier lease on the code's shape, THREE writers: the queue, the ticket and the pull-only boundary with a third party in every exchange"
 strict_run $M LeanBarrierLeaseDeposal.cfg "barrier lease, takeover world: A freezes INSIDE its commit section, B deposes it with rotation, the thawed A abandons"
 strict_run $M LeanBarrierLeaseEpochOnly.cfg "barrier lease, rotation OFF: per-request epoch validation alone fences the deposed holder"
 strict_run $M LeanBarrierLeaseRotationOnly.cfg "barrier lease, epoch-check OFF: rotation alone fences the deposed holder's CAS"
@@ -259,6 +263,12 @@ strict_run $M LeanBarrierLeaseSameBytesVerified.cfg "barrier lease, identical by
 strict_run $M LeanBarrierLeaseSyncOverlayHolds.cfg "barrier lease: a sync keeps its merge base for a path an older inbox entry hid (SyncKeepsHiddenBase, sync.rs step 5) -- the control for the overlay finding"
 strict_run $M LeanBarrierLeaseLive.cfg "LIVENESS (FairSpec): with the ticket, every queued writer eventually holds the cell"
 strict_run $M LeanBarrierLeaseLiveCrash.cfg "LIVENESS with a crash: a dead holder is deposed, a dead handoff is skipped, the survivor never starves"
+# The epoch discipline itself, refuted (COVERAGE.md found both of these
+# invariants checked in nine strict worlds with NO mutation behind them).
+mutation_run $M LeanBarrierLeaseEpochReused.cfg "barrier lease, a claim REUSES the cell's epoch: two writers hold the commit section at one epoch and neither reads as deposed" \
+  "Invariant Inv_CommitExclusive is violated"
+mutation_run $M LeanBarrierLeaseClaimUnstamped.cfg "barrier lease, a claim does not STAMP its epoch on the claimant: the cell names a holder whose own epoch is older, and every later fence compares against the wrong one" \
+  "Invariant Inv_CellHeldByHolder is violated"
 mutation_run $M LeanBarrierLeaseNoRotate.cfg "barrier lease, both fences off: the thawed straggler's manifest CAS lands" \
   "Invariant Inv_NoStragglerInstall is violated"
 mutation_run $M LeanBarrierLeaseGCUnconditional.cfg "FINDING: the shipped HEAD-then-unconditional-DELETE GC -- under the barrier lease the other writer's supersede lands between the two and its citation dangles (the life lease covered that window; a conditional delete is the fix)" \
@@ -335,7 +345,14 @@ mutation_run $M LeanProbeOrphanTracked.cfg "probe: the orphan is actually tracke
 # nobody reads as wrong. It had drifted to 79 against 79 real runs
 # before this tranche; the prose count at the top of this file had
 # drifted further still, to "Fifty-five".
-EXPECT=110
+# The coverage matrix is part of the gate: a cfg added without regenerating
+# it leaves a hole nobody can see (COVERAGE.md, lean/SAFETY.md).
+if ! python3 "$(dirname "$0")/coverage.py" --check; then
+  echo "FAIL: lean/formal/COVERAGE.md is stale — run lean/formal/coverage.py"
+  exit 1
+fi
+
+EXPECT=113
 echo
 if [ "$PASS" -ne "$EXPECT" ]; then
   echo "lean formal gate: $PASS runs green but $EXPECT were declared — a run was"

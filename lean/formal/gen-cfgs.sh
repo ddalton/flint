@@ -19,7 +19,7 @@ BarrierLease Ticket DeadHandoffSkip InfiniteBarriers ConditionalGC VerifyAdopted
 HitlOverwritesTrackedOnly SyncKeepsHiddenBase MaxSameBytes VerifyUploadedCitations \
 WriterQueue EmptyInstall TombstoneHeadsKey CommitLoadsCurrent Upload412Preserves \
 DeclaredConfirmsAbsence Writers OrphanTrack QueueForeignChanges ProjectedTrace \
-AbandonOnStoreError BaselineKeepsUncollected"
+AbandonOnStoreError BaselineKeepsUncollected ClaimMintsEpoch ClaimStampsEpoch"
 
 emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
          # Spec=<name> selects the SPECIFICATION (default Spec; FairSpec
@@ -126,6 +126,9 @@ emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
   # pre-existing cfg: cellSeen stays <<>> and the release keeps the FIFO the
   # earlier runs explored, so their state spaces are preserved by construction.
   local c_AbandonOnStoreError=FALSE c_BaselineKeepsUncollected=FALSE
+  # The epoch discipline every fence rests on.  TRUE ships; the two
+  # mutations below are the refutations COVERAGE.md found missing.
+  local c_ClaimMintsEpoch=TRUE c_ClaimStampsEpoch=TRUE
   # The queue's deletion fix (2026-09-15).  FALSE outside the queue worlds,
   # where QueuedDeletes is always {} and the constant reads nothing.
   local c_TombstoneHeadsKey=FALSE
@@ -558,6 +561,12 @@ emit LeanBarrierLeaseRotationOnly "$BLSTALLINV" $BLSTALL EpochCheck=FALSE
 # Both fences off: the thawed straggler's manifest CAS lands.
 emit LeanBarrierLeaseNoRotate "Inv_NoStragglerInstall" $BLSTALL \
   Rotation=FALSE EpochCheck=FALSE
+# THE EPOCH DISCIPLINE, refuted (2026-09-15, from COVERAGE.md: both of these
+# invariants had nine strict runs and no mutation, so nothing showed either
+# could fail).  A claim MINTS a new epoch and STAMPS it on the claimant;
+# every fence compares against that stamp.
+emit LeanBarrierLeaseEpochReused "Inv_CommitExclusive" $BLWORLD ClaimMintsEpoch=FALSE
+emit LeanBarrierLeaseClaimUnstamped "Inv_CellHeldByHolder" $BLWORLD ClaimStampsEpoch=FALSE
 # THE FINDING.  The shipped GC delete is a HEAD then an unconditional
 # DELETE (barrier.rs step 6).  Under the life lease the lease covered that
 # window; under the barrier lease the other writer's uploads hold no lease,

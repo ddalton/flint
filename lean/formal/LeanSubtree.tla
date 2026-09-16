@@ -461,6 +461,17 @@ CONSTANTS
                        \* consume and an incoming version is PRESERVED
                        \* rather than adopted.  FALSE = the model as it was:
                        \* every published delete clears the baseline.
+  ClaimMintsEpoch,     \* TRUE = what ships: every claim writes a NEW epoch
+                       \* (`lease.rs`'s acquire increments).  FALSE = the
+                       \* mutation: a claim REUSES the cell's epoch, so two
+                       \* writers hold at the same epoch and neither reads as
+                       \* deposed — the refutation `Inv_CommitExclusive` had
+                       \* none of (COVERAGE.md, 2026-09-15).
+  ClaimStampsEpoch,    \* TRUE = what ships: the claimant records the epoch it
+                       \* claimed at, which is what every later fence compares
+                       \* against.  FALSE = the mutation: the cell names a
+                       \* holder whose own epoch is older, and
+                       \* `Inv_CellHeldByHolder` catches it.
   AbandonOnStoreError, \* TRUE = the code's other way out of a commit
                        \* section, which the 2026-09-15 storm traces show
                        \* and the model had no step for: the store REFUSES
@@ -2079,7 +2090,8 @@ Claim(s) ==
   /\ ClaimEnabled(s)
   /\ LET deposal == CellHeld /\ cellHolder # s
          handoff == cellReleased /\ cellHandoff = s
-         e == NextEpoch
+         e == IF ClaimMintsEpoch THEN NextEpoch
+              ELSE IF cellEpoch = 0 THEN 1 ELSE cellEpoch
      IN
        /\ (deposal /\ Rotation => manSeq < MaxSeq)
        /\ cellEpoch' = e /\ cellHolder' = s
@@ -2088,7 +2100,8 @@ Claim(s) ==
        /\ window' = e
        /\ manSeq' = IF deposal /\ Rotation THEN manSeq + 1 ELSE manSeq
        /\ manSrc' = IF deposal /\ Rotation THEN "none" ELSE manSrc
-       /\ sc' = [sc EXCEPT ![s].pc = "claimed", ![s].epoch = e]
+       /\ sc' = [sc EXCEPT ![s].pc = "claimed",
+                          ![s].epoch = IF ClaimStampsEpoch THEN e ELSE @]
        /\ gh' = [gh EXCEPT !.claimed = @ \cup {s},
                            !.handoffs = IF handoff THEN 1 ELSE @,
                            !.deposals = @ + (IF deposal THEN 1 ELSE 0)]
@@ -2119,7 +2132,8 @@ SkipDeadHandoff(s) ==
        /\ cellReleased' = FALSE /\ cellHandoff' = "none"
        /\ cellQueue' = Without(cellQueue, s)
        /\ window' = e
-       /\ sc' = [sc EXCEPT ![s].pc = "claimed", ![s].epoch = e]
+       /\ sc' = [sc EXCEPT ![s].pc = "claimed",
+                          ![s].epoch = IF ClaimStampsEpoch THEN e ELSE @]
        /\ gh' = [gh EXCEPT !.claimed = @ \cup {s}, !.deadSkips = 1]
   /\ UNCHANGED <<manSeq, manSrc, manifest, objects, inbox, removals,
                  hitlAcked, conflicts>>
