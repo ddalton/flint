@@ -718,19 +718,15 @@ emit LeanBarrierLeaseImplHolds "$BLINV" $BLWORLD $IMPL
 # BLINV minus Inv_HITLTracked: it is not dropped, it is MOVED to the
 # must-fail below, so the gate records that it fails here instead of
 # quietly not asking.
-BLINV_LEAK="TypeOK,Inv_HITLDurable,Inv_NoDangling,Inv_NoStragglerInstall,\
-Inv_NoDeposedPut,Inv_NoResurrection,\
-Inv_CommitExclusive,Inv_CellHeldByHolder,Inv_NoStaleOverride"
-emit LeanBarrierLeaseCollectorOff "$BLINV_LEAK" $BLWORLD $IMPL \
+# Inv_HITLTracked is back in this world (2026-09-16): its only test for
+# "legitimately superseded" was `objects[p] # gen` — physical destruction
+# — which a collector that GIVES WAY never performs, so every leaked
+# object read as untracked forever. Retirement now follows the collector's
+# DECISION, so the full set runs here and the give-way design carries no
+# recorded exception.
+emit LeanBarrierLeaseCollectorOff "$BLINV" $BLWORLD $IMPL \
   ConditionalGC=FALSE CollectorOff=TRUE BaselineKeepsUncollected=TRUE
 emit LeanProbeCollectorLeaked "ProbeCollectorLeaked" $BLWORLD $IMPL \
-  ConditionalGC=FALSE CollectorOff=TRUE BaselineKeepsUncollected=TRUE
-# The tenth invariant, RECORDED as a must-fail rather than dropped in
-# silence: with the collector off, Inv_HITLTracked fails, because its
-# "legitimately superseded" clause is `objects[p] # gen` — the object is
-# GONE — and a leak never destroys anything.  If someone later refines
-# that clause, this run flips and forces them to look here.
-emit LeanBarrierLeaseCollectorOffHitlTracked "Inv_HITLTracked" $BLWORLD $IMPL \
   ConditionalGC=FALSE CollectorOff=TRUE BaselineKeepsUncollected=TRUE
 # IS THE SNAPSHOT READ SAFE?  `barrier.rs` step 1 reads the cell ONCE and
 # the consume integrates THAT, so a peer's window clear can drop an entry

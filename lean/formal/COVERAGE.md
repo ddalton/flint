@@ -6,7 +6,7 @@ invariant in a world with that feature on. Some pairs are meaningless
 (a rename invariant in a world with no renames); the rest are holes, and
 `lean/SAFETY.md` is where each is either argued away or listed as open.
 
-Worlds: 114 cfgs over `LeanSubtree.tla` — 29 strict (must hold), 75 mutations (must fail), 0 probes, 10 not run by the gate.
+Worlds: 113 cfgs over `LeanSubtree.tla` — 29 strict (must hold), 74 mutations (must fail), 0 probes, 10 not run by the gate.
 
 | invariant | strict runs | refuted by | 2+ writers | 3 writers | 2+ paths | crash | restart | UI write | sentinel | same bytes | barrier lease | writer queue | sync verb | declared removal | narrow (scoped) |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -16,7 +16,7 @@ Worlds: 114 cfgs over `LeanSubtree.tla` — 29 strict (must hold), 75 mutations 
 | `Inv_CellHeldByHolder` | 12 | 1 | 12 | 1 | 7 | 5 | 6 | 6 | **0** | 1 | 12 | 6 | **0** | **0** | **0** |
 | `Inv_CommitExclusive` | 12 | 1 | 12 | 1 | 7 | 5 | 6 | 6 | **0** | 1 | 12 | 6 | **0** | **0** | **0** |
 | `Inv_HITLDurable` | 19 | 6 | 19 | 1 | 14 | 7 | 9 | 13 | 3 | 1 | 10 | 6 | 1 | 2 | 1 |
-| `Inv_HITLTracked` | 16 | 4 | 16 | 1 | 11 | 6 | 7 | 9 | **0** | 1 | 12 | 5 | 1 | 2 | **0** |
+| `Inv_HITLTracked` | 17 | 3 | 17 | 1 | 12 | 7 | 8 | 10 | **0** | 1 | 13 | 6 | 1 | 2 | **0** |
 | `Inv_NarrowNeverDeletes` | 1 | 1 | 1 | **0** | 1 | **0** | **0** | **0** | **0** | **0** | **0** | **0** | **0** | **0** | 1 |
 | `Inv_NarrowNeverRecites` | 1 | 1 | 1 | **0** | 1 | **0** | **0** | **0** | **0** | **0** | **0** | **0** | **0** | **0** | 1 |
 | `Inv_NoDangling` | 26 | 4 | 26 | 1 | 21 | 7 | 9 | 13 | 3 | 1 | 14 | 6 | 3 | 2 | 1 |
@@ -42,7 +42,7 @@ Probe markers (must-fail reachability checks, not safety): 37 — `ProbeAckAfter
 | cfg | invariants | writers | paths | features |
 |---|---|---|---|---|
 | `LeanBarrierLeaseAdoptVerified.cfg` | 10 | TwoWriters | 1 | restart, barrier lease |
-| `LeanBarrierLeaseCollectorOff.cfg` | 9 | TwoWriters | 2 | 2+ paths, crash, restart, UI write, barrier lease, writer queue |
+| `LeanBarrierLeaseCollectorOff.cfg` | 10 | TwoWriters | 2 | 2+ paths, crash, restart, UI write, barrier lease, writer queue |
 | `LeanBarrierLeaseDeposal.cfg` | 8 | TwoWriters | 2 | 2+ paths, barrier lease |
 | `LeanBarrierLeaseEpochOnly.cfg` | 8 | TwoWriters | 2 | 2+ paths, barrier lease |
 | `LeanBarrierLeaseHitlOverAnyVerified.cfg` | 4 | TwoWriters | 2 | 2+ paths, UI write, barrier lease |

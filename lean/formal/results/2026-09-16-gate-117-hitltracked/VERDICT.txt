@@ -1,0 +1,52 @@
+117/117 GREEN — Inv_HITLTracked repaired in both arms (2026-09-16)
+
+WHAT CHANGED. Inv_HITLTracked judged "legitimately superseded" by
+`objects[p] # gen` — the object at that key is no longer these bytes,
+i.e. physical DESTRUCTION. That is not what retires a write:
+
+  * a writer retires an acked UI write by RECOGNISING the bytes and
+    taking the path out of its boundary. Whether the store can then
+    carry the delete out is the store's business, not the protocol's.
+    On a store with no conditional DELETE the collector gives way
+    (`conformance.rs`) and destroys nothing, so a write a published
+    delete had properly retired read as untracked FOREVER.
+  * in the crash world it flagged a state the code recovers from — a
+    checkout adopting an object newer than its citation.
+
+Arm A: retirement is now recorded where the collector DECIDES.
+Arm B: bytes at a key the manifest still cites count as tracked —
+       exactly `TrackOrphan`'s enabling condition and the checkout's
+       S3-wins arm. Gated on OrphanTrack: a world with no sweep has no
+       recovery to credit.
+
+The delete branch's MaxSameBytes gate was deliberately KEPT: after a
+real delete `objects[p] = 0` and clause 1 already covers the pair, so
+widening a sticky excuse nothing needs would be a free relaxation.
+
+RE-RUN ON THE KNOWN-BAD WORLDS (an oracle relaxation is trusted only
+after it is). All three mutations that require this invariant to fail
+still find it violated:
+    LeanEarlyInboxDropLosesHitl              ok (violated)
+    LeanEarlyInboxDropLosesRename            ok (violated)
+    LeanBarrierLeaseQueueTombstoneOverHitl   ok (violated)
+
+LeanBarrierLeaseCollectorOff now carries ALL TEN invariants
+exhaustively (19,526,764 states, 6,802,540 distinct) — the
+collector-give-way design no longer has a recorded exception, and
+LeanBarrierLeaseCollectorOffHitlTracked, which existed only to pin
+this invariant's own overreach, is deleted. EXPECT 118 -> 117.
+
+PROVENANCE OF THIS LOG. 117/117 green, 0 FAIL. 56 runs executed in
+this process; 61 replayed from the gate journal, all proved minutes
+earlier by a FRESH run at the SAME fingerprint (check.sh + every .tla,
+plus each cfg's own hash) which the OS killed at run 89 when the disk
+filled. Between the two processes every one of the 117 ran fresh at
+this fingerprint; none is stale. The gate says so itself on its last
+lines rather than reporting "117/117" as if it had done all the work.
+
+STILL OPEN. The crash world (LeanBarrierLeaseSentinelImplCrash1, a
+manual world, not in the gate) sets OrphanTrack = FALSE, so arm B
+deliberately does not excuse it and it should still violate. If it
+holds at TRUE and violates at FALSE, the untracked sweep is
+LOAD-BEARING for S1 there rather than the churn control SAFETY.md §3
+calls it. Neither run has been made.

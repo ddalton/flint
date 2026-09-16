@@ -6,7 +6,7 @@
 # DELIBERATELY SEPARATE from scripts/check-tla.sh (flint's 196-run gate):
 # lean is a separate system.  Same harness discipline, its own runs.
 #
-# A hundred and eighteen runs, ALL required (asserted at the bottom, not just printed —
+# A hundred and seventeen runs, ALL required (asserted at the bottom, not just printed —
 # this prose count had drifted to "fifty-five", then to "eighty-three";
 # and EXPECT itself was left at 92 over 69 real runs when gated mode's
 # 23 runs were removed, so the gate at that commit failed its own count.
@@ -31,6 +31,49 @@ fi
 
 mkdir -p states
 PASS=0
+
+# ---- the journal -----------------------------------------------------------
+# This gate is a hundred and seventeen TLC runs and takes the better part
+# of an hour. On a memory-constrained laptop the OS has killed it three
+# times out of four — at runs 109, 62 and 89 of the sequence, with
+# nothing else of ours running — and each kill cost the whole hour and
+# proved nothing. So every green run is journalled, and GATE_RESUME=1
+# lets a later attempt skip what has already been proved.
+#
+# A skip is sound ONLY if nothing that decides the run has changed, so:
+#   * the journal is keyed on a fingerprint of this script and EVERY .tla
+#     module — any edit to any of them throws the whole journal away;
+#   * each entry additionally carries the hash of its OWN cfg, so an
+#     edited cfg re-runs even when the modules did not move.
+# Both are required: the modules and the cfg together decide the verdict.
+#
+# And a resumed gate SAYS SO on its last lines. A replayed run is
+# evidence from an earlier process, not from this one, and a log that
+# reads "117/117 green" without that distinction would be a gate telling
+# a small lie about how much work it just did.
+JOURNAL=states/.gate-journal
+sha() { shasum -a 256 "$@" | shasum -a 256 | cut -d' ' -f1; }
+FP=$(sha check.sh *.tla)
+REPLAYED=0
+RANNOW=0
+if [ "${GATE_RESUME:-}" = "1" ] && [ -f "$JOURNAL" ] &&
+   [ "$(head -1 "$JOURNAL")" = "#fingerprint $FP" ]; then
+  echo "gate: RESUMING — $(($(wc -l < "$JOURNAL") - 1)) run(s) already proved at this fingerprint"
+  echo "gate: (a replayed run is evidence from an earlier process; unset GATE_RESUME for a fresh one)"
+else
+  # No resume, or the fingerprint moved: start the journal over. Writing
+  # it is unconditional — a run that is killed has to leave something a
+  # later attempt can stand on, and that is the whole point.
+  printf '#fingerprint %s\n' "$FP" > "$JOURNAL"
+fi
+
+# Has this cfg already been proved at this fingerprint, with its own
+# bytes unchanged?
+journalled() { # <cfg>
+  [ "${GATE_RESUME:-}" = "1" ] || return 1
+  grep -qxF "$(sha "$1") $1" "$JOURNAL"
+}
+record() { printf '%s %s\n' "$(sha "$1")" "$1" >> "$JOURNAL"; }
 
 # Most cfgs fingerprint through `StrictView` (the ghost-state reduction,
 # LeanSubtree.tla). A view that drops a field something still reads is
@@ -61,6 +104,11 @@ run_tlc() { # <module> <cfg>
 
 strict_run() { # <module> <cfg> <label>
   echo "== strict: $3 [$2]"
+  if journalled "$2"; then
+    PASS=$((PASS + 1)); REPLAYED=$((REPLAYED + 1))
+    echo "   ok (REPLAYED from the journal — not run in this process)"
+    return
+  fi
   local out rc=0
   out=$(run_tlc "$1" "$2") || rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -71,12 +119,18 @@ strict_run() { # <module> <cfg> <label>
     echo "FAIL: $3 — strict run errored or violated"
     exit 1
   fi
-  PASS=$((PASS + 1))
+  PASS=$((PASS + 1)); RANNOW=$((RANNOW + 1))
+  record "$2"
   echo "   ok"
 }
 
 mutation_run() { # <module> <cfg> <label> <required-violation-substring>
   echo "== must-fail: $3 [$2]"
+  if journalled "$2"; then
+    PASS=$((PASS + 1)); REPLAYED=$((REPLAYED + 1))
+    echo "   found: $4 (REPLAYED from the journal — not run in this process)"
+    return
+  fi
   local out rc=0
   out=$(run_tlc "$1" "$2") || rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -85,7 +139,7 @@ mutation_run() { # <module> <cfg> <label> <required-violation-substring>
     exit 1
   fi
   case "$out" in
-    *"$4"*) PASS=$((PASS + 1)); echo "   found: $4" ;;
+    *"$4"*) PASS=$((PASS + 1)); RANNOW=$((RANNOW + 1)); record "$2"; echo "   found: $4" ;;
     *)
       printf '%s\n' "$out" | grep -m2 '^Error:'
       printf '%s\n' "$out" | tail -40
@@ -342,22 +396,17 @@ strict_run $M LeanBarrierLeaseImplHolds.cfg "the tranche-6 breadth world (two pa
 # depth 39) -- including Inv_HITLDurable, Inv_NoResurrection and
 # Inv_NoDangling, which is the claim the mitigation needed.
 #
-# The tenth, Inv_HITLTracked, does NOT, and it is listed as a must-fail
-# below rather than quietly dropped.  Its clause for "legitimately
-# superseded" is `objects[p] # gen` -- the object is GONE -- so a
-# collector that never destroys anything can never satisfy it, even where
-# the write was superseded by a published delete.  That is the invariant
-# stated over the wrong thing for this world, not a loss: the leaked
-# bytes are cited by no manifest, so no checkout serves them and the
-# untracked sweep passes them over (it skips uncited keys by rule).
-# Refining the clause is a CLAIM-level change and must be re-run against
-# the mutations that require this invariant to fail before it is trusted
-# -- SAFETY.md open item 3 now carries both arms.
+# Inv_HITLTracked is in this set now.  It used to fail here, and was
+# carried as a must-fail so the gap was recorded rather than unasked.  The
+# clause was wrong, not the code: "legitimately superseded" was written as
+# `objects[p] = 0` -- physical destruction -- which a collector that gives
+# way never performs.  Retirement now follows the collector's DECISION, so
+# a leak retires the write exactly as a collection does.  The three
+# mutations that require this invariant to FAIL were re-run first and all
+# three still find their counterexample.
 strict_run $M LeanBarrierLeaseCollectorOff.cfg "the collector GIVES WAY on a store without a conditional DELETE: nine invariants hold, exhaustively"
 mutation_run $M LeanProbeCollectorLeaked.cfg "probe: the collector actually gave way on a path it would have collected (or the run above proves nothing)" \
   "Invariant ProbeCollectorLeaked is violated"
-mutation_run $M LeanBarrierLeaseCollectorOffHitlTracked.cfg "RECORDED, not fixed: with the collector off, Inv_HITLTracked fails -- its supersede clause is physical destruction, which a leak never performs" \
-  "Invariant Inv_HITLTracked is violated"
 # IS THE SNAPSHOT READ SAFE?  `barrier.rs` step 1 reads the cell ONCE and
 # the consume integrates THAT snapshot, so a peer's window clear can drop
 # an entry in between and this writer still adopts it. The replay of
@@ -399,7 +448,7 @@ if ! python3 "$(dirname "$0")/coverage.py" --check; then
   exit 1
 fi
 
-EXPECT=118
+EXPECT=117
 echo
 if [ "$PASS" -ne "$EXPECT" ]; then
   echo "lean formal gate: $PASS runs green but $EXPECT were declared — a run was"
@@ -408,3 +457,8 @@ if [ "$PASS" -ne "$EXPECT" ]; then
   exit 1
 fi
 echo "lean formal gate: $PASS/$EXPECT runs green"
+if [ "$REPLAYED" -gt 0 ]; then
+  echo "lean formal gate: NOT A FRESH RUN — $REPLAYED of those were REPLAYED from the"
+  echo "journal (proved by an earlier process at this same fingerprint) and only"
+  echo "$RANNOW ran here. Evidence for the record wants GATE_RESUME unset."
+fi

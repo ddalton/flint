@@ -28,7 +28,7 @@ an agent's publish ack, and the gateway's answer to a UI write.
 | a consumed publish request is always answered | `Inv_NoNonceOrphan` | the pending record, `sentinel.rs` |
 | the ack and the bucket name the same clock | `Inv_BoundaryNamesItsClock` | `boundary_source` stamped on the install |
 | an acked UI write is never destroyed unrecorded | `Inv_HITLDurable` | the 412 preserve, `consume-dirty`, `preserve_conflict_copy` |
-| an acked UI write stays tracked until legitimately superseded | `Inv_HITLTracked` | the inbox, the writer queue, the untracked sweep |
+| an acked UI write stays tracked until a writer RETIRES it | `Inv_HITLTracked` | the inbox, the writer queue, the untracked sweep, and the collector's decision — not its success (§4.4) |
 
 **S2. A citation always resolves to the bytes it names.** A reader that
 follows the manifest never gets a hole or the wrong version.
@@ -109,17 +109,45 @@ A claim with unnamed assumptions is a claim about nothing.
    §1 has at least one mutation that must make it fail. Until 2026-09-15
    two did not (`Inv_CommitExclusive`, `Inv_CellHeldByHolder`), and their
    nine green worlds each proved nothing.
-4. **`Inv_HITLTracked` is stricter than the code, in two arms.** In the
-   crash world it flags a state the code recovers from (a checkout
-   adopting an object newer than its citation). And where the collector
-   gives way (§2, a store without a conditional DELETE) it flags every
-   leaked object: its clause for "legitimately superseded" is
-   `objects[p] # gen` — the object is GONE — which a collector that never
-   destroys can never satisfy, even for a write a published delete
-   retired. `LeanBarrierLeaseCollectorOff` runs that world with the other
-   nine invariants (exhaustive: 6.5M distinct states, depth 39), and
-   `LeanBarrierLeaseCollectorOffHitlTracked` pins the failure so it is
-   recorded rather than quietly unasked.
+4. **`Inv_HITLTracked` judged supersession by DESTRUCTION; repaired
+   2026-09-16 to judge it by the collector's DECISION.** The clause for
+   "legitimately superseded" was `objects[p] # gen` — the object is
+   GONE. That is not what retires a write. A writer retires it by
+   recognising the bytes and taking the path out of its boundary; whether
+   the store can then carry the delete out is the store's business. So on
+   a store without a conditional DELETE (§2), where the collector gives
+   way and destroys nothing, the invariant flagged every leaked object
+   forever — and in the crash world it flagged a state the code recovers
+   from, a checkout adopting an object newer than its citation.
+
+   Both arms now read the mechanism instead of the rubble: retirement is
+   recorded where the collector DECIDES, and bytes sitting at a path the
+   manifest still cites count as tracked — which is exactly the untracked
+   sweep's condition and the checkout's S3-wins arm. The delete branch
+   was deliberately left alone: after a real delete `objects[p] = 0` and
+   the first clause already covers it, so widening a sticky excuse there
+   would have been a relaxation nothing needed.
+
+   The three known-bad worlds that require this invariant to fail still
+   find it violated (`LeanEarlyInboxDropLosesHitl`,
+   `LeanEarlyInboxDropLosesRename`,
+   `LeanBarrierLeaseQueueTombstoneOverHitl`) — the repair kept its teeth.
+   `LeanBarrierLeaseCollectorOff` now carries all ten invariants
+   exhaustively (19,526,764 states, 6,802,540 distinct), so the
+   collector-give-way design no longer has a recorded exception, and the
+   run that pinned one (`…CollectorOffHitlTracked`) is gone.
+
+   The second arm is gated on `OrphanTrack`: a world with no sweep has no
+   recovery to credit, and crediting one there would be the relaxation
+   this clause is trying not to be. **Open, and load-bearing for how the
+   sweep is described:** the crash world
+   (`LeanBarrierLeaseSentinelImplCrash1`, a manual world — not in the
+   gate) sets `OrphanTrack = FALSE`, so this arm deliberately does not
+   excuse it and it should still violate. If it holds at `OrphanTrack =
+   TRUE` and violates at `FALSE`, then the untracked sweep is load-bearing
+   for S1 in that world rather than the churn control that §3's
+   `LeanBarrierLeaseOrphanTracked` note calls it — which is a change to
+   what the sweep IS, not a footnote. Neither run has been made yet.
 5. **Replays are still open, and further along.** `churn/p47.txt` cleared
    two blockers on 2026-09-15 (the model gained the inbox-snapshot
    window; the GC's outranked branch gained a trace event) and now
@@ -147,7 +175,7 @@ A claim with unnamed assumptions is a claim about nothing.
 |---|---|---|
 | 1 | ~~run the three-writer world in the gate~~ **done 2026-09-15** | — |
 | 2 | ~~a refutation for `Inv_CommitExclusive` and for `Inv_CellHeldByHolder`~~ **done 2026-09-15**: a claim that reuses the cell's epoch breaks the first, a claim that does not stamp it breaks the second | — |
-| 3 | correct `Inv_HITLTracked` in BOTH arms — credit checkout's S3-wins adoption, and credit a write a published delete retired even where the object survives — then re-run the crash world AND the collector-off world. A relaxation is trusted only after it is re-run on the mutations that require this invariant to fail (4 of them, `COVERAGE.md`) | an afternoon |
+| 3 | ~~correct `Inv_HITLTracked` in BOTH arms~~ **done 2026-09-16** (§4.4): supersession now follows the collector's DECISION, not physical destruction, and bytes at a still-cited path count as tracked. Re-run on all three mutations that require this invariant to fail — each still finds it violated — and the collector-off world now holds with all ten. The count in `COVERAGE.md` went 4→3 refutations because the fourth, `…CollectorOffHitlTracked`, never refuted the protocol: it pinned this invariant's own overreach, and the repair is what retires it. **Still open:** the crash world at `OrphanTrack` TRUE and FALSE — see §4.4 | half done |
 | 4 | finish the replays: bisect the earliest step where the model's manifest disagrees with the leg's for a path (the `cas` seqs and `observed` etags make it mechanical), then the `abandon` in R2-S2. Two blockers closed 2026-09-15 | a day |
 | 5 | replay every path of every storm leg in CI, invariants on | a day, then free |
 | 6 | exhaust the two-path sentinel world (box-scale) | a TLC box, ~$5-20 |

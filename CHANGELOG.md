@@ -14,6 +14,52 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **lean formal: `Inv_HITLTracked` judged supersession by DESTRUCTION,
+  and destruction is not what retires a write.** Its only test for
+  "legitimately superseded" was `objects[p] # gen` — the object at that
+  key is no longer these bytes. A writer retires an acked UI write by
+  recognising the bytes and taking the path out of its boundary; whether
+  the store can then carry the delete out is the store's business, not
+  the protocol's. So on a store with no conditional DELETE, where the
+  collector gives way and destroys nothing (`conformance.rs`), a write a
+  published delete had properly retired read as untracked forever.
+  Retirement now follows the collector's DECISION.
+  - A second arm: bytes sitting at a key the manifest still cites now
+    count as tracked. That is exactly the untracked sweep's condition —
+    it tracks an object at a CITED key whose etag the manifest does not
+    cite — and what a fresh checkout's S3-wins arm adopts. Gated on
+    `OrphanTrack`, because a world with no sweep has no recovery to
+    credit.
+  - The delete branch's `MaxSameBytes` gate was deliberately KEPT: after
+    a real delete the invariant's first clause already covers the pair,
+    so widening a sticky excuse nothing needs would have been a
+    relaxation for free.
+  - *Re-run on the known-bad worlds, per the rule that an oracle
+    relaxation is trusted only after it is:* all three mutations that
+    require this invariant to fail still find it violated
+    (`LeanEarlyInboxDropLosesHitl`, `LeanEarlyInboxDropLosesRename`,
+    `LeanBarrierLeaseQueueTombstoneOverHitl`).
+  - `LeanBarrierLeaseCollectorOff` now carries all ten invariants
+    exhaustively (19,526,764 states, 6,802,540 distinct), so the
+    collector-give-way design no longer has a recorded exception, and
+    `LeanBarrierLeaseCollectorOffHitlTracked` — which existed only to pin
+    this invariant's own overreach — is deleted. Gate `EXPECT` 118 → 117.
+
+### Added
+
+- **lean formal: the gate journals every green run, and `GATE_RESUME=1`
+  replays them.** The 117 runs take the better part of an hour, and on a
+  memory-constrained laptop the OS killed the gate three times out of
+  four — at runs 109, 62 and 89 — each kill costing the whole hour and
+  proving nothing. A skip is sound only if nothing that decides the run
+  has changed, so the journal is keyed on a fingerprint of `check.sh` and
+  every `.tla` module, and each entry additionally carries its own cfg's
+  hash; any edit to any of them throws the journal away. Journal WRITES
+  are unconditional (a killed run has to leave something to stand on);
+  reads require `GATE_RESUME=1`, so the default behaviour and output are
+  unchanged. A resumed gate says so on its last lines rather than
+  reporting "117/117 green" as if it had just done the work.
+
 - **lean: the garbage collector's `outranked` branch is traced.** Every
   other outcome of the collector's loop says what it did — absent,
   deleted, replaced-absent, skipped, and now leaked. The one that

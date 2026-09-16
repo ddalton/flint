@@ -1,0 +1,255 @@
+gate: RESUMING — 61 run(s) already proved at this fingerprint
+gate: (a replayed run is evidence from an earlier process; unset GATE_RESUME for a fresh one)
+selftest ok: 'a guard reads a dropped counter' fails the census (line 2698 (Touch): gh.acks is DROPPED from StrictView but read here (update target gh:None sc:None))
+selftest ok: 'a KEPT field's update reads a dropped counter' fails the census (line 1393 (Narrow): gh.done is DROPPED from StrictView but read here (update target gh:narrows sc:No)
+selftest ok: 'a dropped sc field feeds a kept one' fails the census (line 1203 (Restart): sc.pendReRun is DROPPED from StrictView but read here (update target gh:None sc)
+selftest ok: 'a dropped sc field read through a nested index' fails the census (line 2698 (Touch): sc.pendReRun is DROPPED from StrictView but read here (update target gh:None sc:N)
+selftest ok: 'a whole sc record compared in a guard' fails the census (line 2698 (Touch): whole-record read of sc[...] reads the dropped fields too)
+selftest ok: 'a variable added to vars but not to the view' fails the census (StrictView is not vars with sc/gh projected:
+  vars ~ ['cellEpoch', 'cellHolder', 'cellQueue', 'cell)
+view census ok: 29 gh fields kept, 47 dropped (abandoned, ackAfterRestart, acks, adoptOwn, adoptWithheld, carriedCite, citeSpan, cited, cites, claimed, coalesced, deadSkips, declaredDrops, deferredLater, deferredPaths, deposals, done, emptyInstalls, enqueues, fastHonor, fastPaths, forcedCites, gc, gcCited, handoffs, honors, interleaved, leaked, orphanTracks, partialAcks, pullOnlys, reaped, refusedAcks, removalsApplied, removalsRefused, renamesApplied, scopedDeferrals, staged, staleAdopt, stragglerCas, syncApplied, syncConflicts, takeovers, tombRemoved, tombSuperseded, uploadWithheld, withheld); sc fields dropped: pendReRun, stageCarried
+selftest ok: an unsupplied constant would be reported (70 real constants read from LeanSubtree.tla)
+constants census ok: 70 constants, all known to gen-cfgs.sh and trace/ndjson2tla.py
+== strict: core breadth (crash+restart+HITL, all arms on) [LeanSubtree.cfg]
+   ok (REPLAYED from the journal — not run in this process)
+== strict: stall/takeover world: rotation + per-request epoch hold [LeanSubtreeTakeover.cfg]
+   ok (REPLAYED from the journal — not run in this process)
+== strict: window OFF: inbox + guards still carry safety (the window is availability/defense-in-depth at whole-PUT atomicity) [LeanNoWindowHolds.cfg]
+   ok (REPLAYED from the journal — not run in this process)
+== strict: rotation OFF, epoch-check ON: per-request validation alone fences the straggler (redundancy A/B) [LeanEpochOnlyHolds.cfg]
+   ok (REPLAYED from the journal — not run in this process)
+== must-fail: HITL amputation: direct bump + whole-rewrite 412/re-seed/overwrite [LeanAmputation.cfg]
+   found: Invariant Inv_HITLDurable is violated (REPLAYED from the journal — not run in this process)
+== must-fail: merge WITHOUT the inbox: preservation is one barrier deep (delete-after-absorption) — the inbox is load-bearing [LeanDirectMergeInsufficient.cfg]
+   found: Invariant Inv_HITLDurable is violated (REPLAYED from the journal — not run in this process)
+== must-fail: the inherited LOCAL-WINS 412 arbitration destroys a user upload [LeanLocalWins.cfg]
+   found: Invariant Inv_HITLDurable is violated (REPLAYED from the journal — not run in this process)
+== must-fail: unguarded GC delete destroys a HITL re-create [LeanGCUnguarded.cfg]
+   found: Invariant Inv_HITLDurable is violated (REPLAYED from the journal — not run in this process)
+== must-fail: v1 order (upload->delete->CAS) dangles the standing manifest [LeanDanglingOrder.cfg]
+   found: Invariant Inv_NoDangling is violated (REPLAYED from the journal — not run in this process)
+== must-fail: no takeover rotation: the deposed straggler's manifest CAS lands [LeanNoRotate.cfg]
+   found: Invariant Inv_NoStragglerInstall is violated (REPLAYED from the journal — not run in this process)
+== must-fail: rotation alone: the deposed straggler's data PUT lands [LeanNoEpochCheck.cfg]
+   found: Invariant Inv_NoDeposedPut is violated (REPLAYED from the journal — not run in this process)
+== must-fail: re-checkout over a live tree resurrects an unpublished delete [LeanRematerialize.cfg]
+   found: Invariant Inv_NoResurrection is violated (REPLAYED from the journal — not run in this process)
+== must-fail: probe: a full 7-step barrier completes [LeanProbeBarrier.cfg]
+   found: Invariant ProbeBarrierDone is violated (REPLAYED from the journal — not run in this process)
+== must-fail: probe: an acked HITL write becomes manifest-cited [LeanProbeHITLCited.cfg]
+   found: Invariant ProbeHITLCited is violated (REPLAYED from the journal — not run in this process)
+== must-fail: probe: the takeover fires [LeanProbeTakeover.cfg]
+   found: Invariant ProbeTakeover is violated (REPLAYED from the journal — not run in this process)
+== must-fail: probe: a deposed CAS attempt is exercised (and fenced) [LeanProbeStragglerAttempt.cfg]
+   found: Invariant ProbeStragglerAttempt is violated (REPLAYED from the journal — not run in this process)
+== must-fail: probe: the 412-park/conflict-surface arm fires [LeanProbePark.cfg]
+   found: Invariant ProbePark is violated (REPLAYED from the journal — not run in this process)
+== must-fail: probe: the GC delete fires [LeanProbeGC.cfg]
+   found: Invariant ProbeGC is violated (REPLAYED from the journal — not run in this process)
+== must-fail: probe: a HITL write is refused while the window is open [LeanProbeRefusal.cfg]
+   found: Invariant ProbeRefusal is violated (REPLAYED from the journal — not run in this process)
+== must-fail: probe: the own-crashed-PUT 412 adoption fires after restart [LeanProbeAdoptOwn.cfg]
+   found: Invariant ProbeAdoptOwn is violated (REPLAYED from the journal — not run in this process)
+== strict: sync verb: scan-first + locally-dirty-wins holds against the barrier/HITL product [LeanSyncHolds.cfg]
+   ok (REPLAYED from the journal — not run in this process)
+== must-fail: sync judging dirt from the LAST BARRIER's snapshot destroys un-scanned live work [LeanSyncStaleDirt.cfg]
+   found: Invariant Inv_SyncNeverDestroysDirty is violated (REPLAYED from the journal — not run in this process)
+== must-fail: probe: sync actually applies a remote change [LeanProbeSyncApplied.cfg]
+   found: Invariant ProbeSyncApplied is violated (REPLAYED from the journal — not run in this process)
+== must-fail: probe: sync actually surfaces a dirty-path conflict [LeanProbeSyncConflict.cfg]
+   found: Invariant ProbeSyncConflict is violated (REPLAYED from the journal — not run in this process)
+== strict: scoped sync: the merge base advances ONLY for paths applied or verified in scope [LeanScopedSyncHolds.cfg]
+   ok (REPLAYED from the journal — not run in this process)
+== must-fail: a scoped sync advancing the WHOLE merge base loses every out-of-scope foreign entry from the inbox flow, permanently [LeanScopedSyncWholeBase.cfg]
+   found: Invariant Inv_NoForeignLost is violated (REPLAYED from the journal — not run in this process)
+== must-fail: probe: a scoped sync actually defers an out-of-scope remote change [LeanProbeScopedDeferral.cfg]
+   found: Invariant ProbeScopedDeferral is violated (REPLAYED from the journal — not run in this process)
+== strict: narrow: a narrow is an UNWATCH — the dropped path keeps its object and is never re-cited [LeanNarrowHolds.cfg]
+   ok (REPLAYED from the journal — not run in this process)
+== must-fail: unlink-then-uncite: the surviving citation makes the path delete-eligible and the GC publishes it [LeanNarrowUnlinkFirst.cfg]
+   found: Invariant Inv_NarrowNeverDeletes is violated (REPLAYED from the journal — not run in this process)
+== must-fail: uncite-then-unlink: the surviving file reads as a local ADD and the barrier re-cites everything just dropped [LeanNarrowUncieFirst.cfg]
+   found: Invariant Inv_NarrowNeverRecites is violated (REPLAYED from the journal — not run in this process)
+== must-fail: probe: the narrow verb actually fires [LeanProbeNarrow.cfg]
+   found: Invariant ProbeNarrow is violated (REPLAYED from the journal — not run in this process)
+== strict: boundary verb: consume/honor/ack/retire against the barrier, the inbox and a restart [LeanSentinelHolds.cfg]
+   ok (REPLAYED from the journal — not run in this process)
+== strict: boundary verb across a RESTART: the pending file outlives it, the in-memory honored flag does not [LeanSentinelRestart.cfg]
+   ok (REPLAYED from the journal — not run in this process)
+== strict: boundary verb across a FENCE: the deposal arm the draft's cfgs never had [LeanSentinelDeposal.cfg]
+   ok (REPLAYED from the journal — not run in this process)
+== must-fail: a consume that CLOBBERS the standing pending record instead of folding into it orphans the first agent's nonce forever [LeanSentinelOrphan.cfg]
+   found: Invariant Inv_NoNonceOrphan is violated (REPLAYED from the journal — not run in this process)
+== must-fail: acking from persisted state: pending-and-no-matching-ack is the SAME observable state for crash-before-CAS as for crash-after-step-7, so it asserts publication of writes that never uploaded (the crash matrix the review retracted) [LeanSentinelAckEarly.cfg]
+   found: Invariant Inv_AckImpliesCited is violated (REPLAYED from the journal — not run in this process)
+== must-fail: success-ack-after-fence: a deposed incarnation telling a waiting agent its boundary landed [LeanSentinelFencedAck.cfg]
+   found: Invariant Inv_NoFencedOkAck is violated (REPLAYED from the journal — not run in this process)
+== must-fail: the skip-on-no-diff fast path WITHOUT its citation-repair and manifest-unchanged guards acks a boundary the manifest does not carry -- section 10.1's deliberate deviation from section 2.1, machine-checked instead of argued [LeanSentinelFastPathUnguarded.cfg]
+   found: Invariant Inv_AckBoundaryCoherent is violated (REPLAYED from the journal — not run in this process)
+== must-fail: a restart between the manifest CAS and step 7 leaves our OWN install looking foreign at the next merge, and delete/modify then drops the agent's delete from the boundary it is about to be acked for (found in shipped code) [LeanSentinelStaleMergeBase.cfg]
+   found: Invariant Inv_AckImpliesCited is violated (REPLAYED from the journal — not run in this process)
+== must-fail: probe: an ack was written off a REAL barrier install [LeanProbeSentinelHonored.cfg]
+   found: Invariant ProbeSentinelHonored is violated (REPLAYED from the journal — not run in this process)
+== must-fail: probe: the refusal fires -- deposal answers a waiting agent [LeanProbeRefusedAck.cfg]
+   found: Invariant ProbeRefusedAck is violated (REPLAYED from the journal — not run in this process)
+== must-fail: probe: an ack was written for a pending record that SURVIVED a restart [LeanProbeAckAfterCrash.cfg]
+   found: Invariant ProbeAckAfterCrash is violated (REPLAYED from the journal — not run in this process)
+== must-fail: probe: two touches actually coalesced into one pending record (without this the orphan mutation checks a world with only one live nonce) [LeanProbeCoalescedAck.cfg]
+   found: Invariant ProbeCoalescedAck is violated (REPLAYED from the journal — not run in this process)
+== must-fail: probe: a pending sentinel was honored by the skip-on-no-diff pass rather than a full barrier [LeanProbeFastPathHonor.cfg]
+   found: Invariant ProbeFastPathHonor is violated (REPLAYED from the journal — not run in this process)
+== strict: the ack and the manifest name the SAME clock -- the agent reads the ack, the fleet reads the stamp [LeanSentinelClockHolds.cfg]
+   ok (REPLAYED from the journal — not run in this process)
+== must-fail: the barrier installs through an UNSTAMPED CAS: the bucket reports the default clock while the ack tells the agent otherwise (found by the bucket drill, twice in one session) [LeanSentinelClockUnstamped.cfg]
+   found: Invariant Inv_BoundaryNamesItsClock is violated (REPLAYED from the journal — not run in this process)
+== strict: chunk GC is safe iff ALL FOUR arms hold: refs read AT the delete, a grace, the grace outliving the publish, and adoption REWRITING what it adopts [LeanChunkGC.cfg]
+   ok (REPLAYED from the journal — not run in this process)
+== must-fail: the reference set is carried from a snapshot taken before a CAS the delete follows -- the rule §8.1 actually named (list-before-refs) does NOT save it [LeanChunkGCStaleRefs.cfg]
+   found: Invariant Inv_LiveComplete is violated (REPLAYED from the journal — not run in this process)
+== must-fail: refs snapshotted before the listing: the other order, equally unsafe -- which is the point, the ordering was never the load-bearing property [LeanChunkGCRefsFirst.cfg]
+   found: Invariant Inv_LiveComplete is violated (REPLAYED from the journal — not run in this process)
+== must-fail: no grace: a chunk written and not yet referenced is collected out from under its own publish [LeanChunkGCNoGrace.cfg]
+   found: Invariant Inv_LiveComplete is violated (REPLAYED from the journal — not run in this process)
+== must-fail: a grace that does NOT outlive the publish: the chunk ages while its publisher is still writing [LeanChunkGCRacyGrace.cfg]
+   found: Invariant Inv_LiveComplete is violated (REPLAYED from the journal — not run in this process)
+== must-fail: adoption SKIPS the rewrite: a crashed publish leaves an aged orphan, a later publish adopts it by content address and references it without touching it, and the sweep collects it as the orphan it still looks like [LeanChunkGCAdoptSkips.cfg]
+   found: Invariant Inv_LiveComplete is violated (REPLAYED from the journal — not run in this process)
+== must-fail: probe: the reaper actually deletes something -- without it every run above is green over a GC that never fired [LeanChunkGCProbeCollect.cfg]
+   found: Invariant Probe_Collected is violated (REPLAYED from the journal — not run in this process)
+== must-fail: probe: a publisher actually references a chunk it did not upload (adoption is REACHABLE, and only a crash makes it so) [LeanChunkGCProbeAdopt.cfg]
+   found: Invariant Probe_Adopted is violated (REPLAYED from the journal — not run in this process)
+== must-fail: the reader does NOT revalidate: its generation is swept out from under it and it reads a hole -- a reader safe for 'Retain' PUBLISHES rather than for a duration, which is the wrong unit when a checkout runs minutes and the floor is seconds [LeanChunkGCSlowReader.cfg]
+   found: Invariant Inv_NoTornRead is violated (REPLAYED from the journal — not run in this process)
+== must-fail: probe: a reader actually restarts onto a newer generation -- without it the strict run is green over a reader that never raced a sweep [LeanChunkGCProbeRestart.cfg]
+   found: Invariant Probe_Restarted is violated (REPLAYED from the journal — not run in this process)
+== strict: merge at ENTRY level and re-chunk: the published key set is exactly the whole-document merge's, over every base/add/delete combination [LeanChunkMerge.cfg]
+   ok (REPLAYED from the journal — not run in this process)
+== must-fail: splice the chunk LISTS instead -- keep theirs where my change did not touch, substitute mine where it did: base {}, A adds {1}, B adds {1,2}; A's chunk {1} and B's chunk {1,2} cover the same range under different boundaries, so substituting drops B's key 2 entirely [LeanChunkMergeSplice.cfg]
+   found: Invariant Inv_ChunkedMergeMatches is violated (REPLAYED from the journal — not run in this process)
+== must-fail: probe: the two writers' chunk BOUNDARIES actually diverge -- without it the strict run is green over inputs where splicing could not have gone wrong [LeanChunkMergeProbeDiverge.cfg]
+   found: Invariant Probe_BoundariesDiverged is violated (REPLAYED from the journal — not run in this process)
+== must-fail: probe: both writers actually wrote (a merge with one idle side proves nothing) [LeanChunkMergeProbeBoth.cfg]
+   found: Invariant Probe_BothWrote is violated (REPLAYED from the journal — not run in this process)
+
+== strict: declared removals + rename: one generation, no hole, every acked write tracked [LeanRemovalHolds.cfg]
+   ok (REPLAYED from the journal — not run in this process)
+== strict: declared removals + rename under crash + restart: the late inbox drop and the intent journal [LeanRemovalCrashHolds.cfg]
+   ok
+== must-fail: mutation: a declared removal routed through the walk lands a rename in two generations [LeanRemovalViaWalk.cfg]
+   found: Invariant Inv_RenameAtomic is violated
+== must-fail: mutation: the early inbox drop loses a consumed write to a pod replacement [LeanEarlyInboxDropLosesHitl.cfg]
+   found: Invariant Inv_HITLTracked is violated
+== must-fail: mutation: the early inbox drop loses a rename's destination to a pod replacement [LeanEarlyInboxDropLosesRename.cfg]
+   found: Invariant Inv_HITLTracked is violated
+== must-fail: mutation: a rename that does not wait for its destination leaves a HOLE under that crash [LeanRenameNoDestinationGuard.cfg]
+   found: Invariant Inv_RenameNoHole is violated
+== must-fail: probe: a declared removal is actually performed [LeanProbeRemoval.cfg]
+   found: Invariant ProbeRemovalApplied is violated
+== must-fail: probe: a declared removal of a dirty path is actually refused [LeanProbeRemovalRefused.cfg]
+   found: Invariant ProbeRemovalRefused is violated
+== must-fail: probe: a rename's removal is actually performed [LeanProbeRename.cfg]
+   found: Invariant ProbeRenameApplied is violated
+
+== strict: barrier lease, two live writers: HITL + crash + restart, every invariant + commit exclusion [LeanBarrierLeaseHolds.cfg]
+   ok
+== strict: barrier lease on the code's shape, THREE writers: the queue, the ticket and the pull-only boundary with a third party in every exchange [LeanBarrierLeaseImplThreeWriters.cfg]
+   ok
+== strict: barrier lease, takeover world: A freezes INSIDE its commit section, B deposes it with rotation, the thawed A abandons [LeanBarrierLeaseDeposal.cfg]
+   ok
+== strict: barrier lease, rotation OFF: per-request epoch validation alone fences the deposed holder [LeanBarrierLeaseEpochOnly.cfg]
+   ok
+== strict: barrier lease, epoch-check OFF: rotation alone fences the deposed holder's CAS [LeanBarrierLeaseRotationOnly.cfg]
+   ok
+== strict: barrier lease: an ADOPTED entry re-verified under the lease survives the other writer's GC (the control for the adopt race) [LeanBarrierLeaseAdoptVerified.cfg]
+   ok
+== strict: barrier lease: a UI write may overwrite ANY current object and is still never lost -- the uploader's commit re-reads its citation (so the gateway's untracked-object escapes carry no safety -- which is why the writer heartbeat could go) [LeanBarrierLeaseHitlOverAnyVerified.cfg]
+   ok
+== strict: barrier lease, identical bytes share an etag: every citation the commit adds is re-verified under the lease (the control for finding 13) [LeanBarrierLeaseSameBytesVerified.cfg]
+   ok
+== strict: barrier lease: a sync keeps its merge base for a path an older inbox entry hid (SyncKeepsHiddenBase, sync.rs step 5) -- the control for the overlay finding [LeanBarrierLeaseSyncOverlayHolds.cfg]
+   ok
+== strict: LIVENESS (FairSpec): with the ticket, every queued writer eventually holds the cell [LeanBarrierLeaseLive.cfg]
+   ok
+== strict: LIVENESS with a crash: a dead holder is deposed, a dead handoff is skipped, the survivor never starves [LeanBarrierLeaseLiveCrash.cfg]
+   ok
+== must-fail: barrier lease, a claim REUSES the cell's epoch: two writers hold the commit section at one epoch and neither reads as deposed [LeanBarrierLeaseEpochReused.cfg]
+   found: Invariant Inv_CommitExclusive is violated
+== must-fail: barrier lease, a claim does not STAMP its epoch on the claimant: the cell names a holder whose own epoch is older, and every later fence compares against the wrong one [LeanBarrierLeaseClaimUnstamped.cfg]
+   found: Invariant Inv_CellHeldByHolder is violated
+== must-fail: barrier lease, both fences off: the thawed straggler's manifest CAS lands [LeanBarrierLeaseNoRotate.cfg]
+   found: Invariant Inv_NoStragglerInstall is violated
+== must-fail: FINDING: the shipped HEAD-then-unconditional-DELETE GC -- under the barrier lease the other writer's supersede lands between the two and its citation dangles (the life lease covered that window; a conditional delete is the fix) [LeanBarrierLeaseGCUnconditional.cfg]
+   found: Invariant Inv_NoDangling is violated
+== must-fail: FINDING: an adopted entry cited BLIND -- a restart between CAS and baseline makes the next barrier adopt its own upload, the other writer uncites the path and its GC deletes the object before the adopter's CAS (verify adopted entries under the lease is the fix) [LeanBarrierLeaseAdoptBlind.cfg]
+   found: Invariant Inv_NoDangling is violated
+== must-fail: FINDING 13 (live drill runcv A3): an upload of the SAME bytes carries the etag the other writer's GC recognises -- the GC deletes the landed upload and its commit cites nothing (the adopt verification alone does not cover it; re-verify every citation is the fix) [LeanBarrierLeaseSameBytesUnverified.cfg]
+   found: Invariant Inv_NoDangling is violated
+== must-fail: FINDING 13, second route (model-found): B's identical-bytes upload is overwritten by A's new bytes If-Match the same etag, A commits, and B's commit cites its generation over A's -- nothing dangles, A's committed bytes are cited by nothing [LeanBarrierLeaseSameBytesOverride.cfg]
+   found: Invariant Inv_NoStaleOverride is violated
+== must-fail: the control for the strict run above: the same world without the commit's re-read loses the UI write (finding 4) [LeanBarrierLeaseHitlOverAnyUnverified.cfg]
+   found: Invariant Inv_HITLDurable is violated
+== must-fail: FINDING (2026-09-14 box run, depth 20): the merge keeps another writer's entry over the agent's delete, and the ack says ok for a seq that still cites the path [LeanBarrierLeaseSentinelOutrankedOk.cfg]
+   found: Invariant Inv_AckImpliesCited is violated
+== must-fail: probe: the partial ack for an outranked delete is actually written (the strict run is not green over an ack never reached) [LeanProbeOutrankedPartial.cfg]
+   found: Invariant ProbePartialAck is violated
+== must-fail: FINDING: the gateway overwrote whatever object was current -- a UI write over another writer's UNCITED upload, consumed and cited by a third party, is re-cited over by the uploader's commit and lost (the tracked-only overwrite rule is the fix) [LeanBarrierLeaseHitlOverUncited.cfg]
+   found: Invariant Inv_HITLDurable is violated
+== must-fail: FINDING (D4 refuted with two writers): the sync's remote truth reads a queued foreign entry as newer than a manifest a second LIVE writer already moved past, verifies the path unchanged against the overlay and advances the merge base to the manifest -- the silent, permanent loss [LeanBarrierLeaseSyncOverlayStale.cfg]
+   found: Invariant Inv_NoForeignLost is violated
+== must-fail: L5, the ticket is load-bearing: release names nobody and one writer claims forever (a fair lasso under WF) [LeanBarrierLeaseRandomArbitration.cfg]
+   found: Temporal properties were violated
+== must-fail: no dead-handoff skip: a crashed waiter named by the release wedges the cell for the survivor forever [LeanBarrierLeaseDeadHandoffWedge.cfg]
+   found: Temporal properties were violated
+== must-fail: probe (REQUIRED-REACHABLE): an upload lands while the other writer is in its commit section -- two writers really overlap [LeanProbeWritersInterleave.cfg]
+   found: Invariant ProbeWritersInterleave is violated
+== must-fail: probe: a claim by the syncer the release NAMED actually happens [LeanProbeHandoff.cfg]
+   found: Invariant ProbeHandoffFired is violated
+== must-fail: probe: a writer actually queues for the cell [LeanProbeEnqueued.cfg]
+   found: Invariant ProbeEnqueued is violated
+== must-fail: probe: a quiet holder in its commit section is deposed by the other writer [LeanProbeDeposalMidCommit.cfg]
+   found: Invariant ProbeDeposalMidCommit is violated
+== must-fail: probe: a fenced holder abandons its barrier and KEEPS RUNNING (a fence is not a death) [LeanProbeFenceAbandoned.cfg]
+   found: Invariant ProbeFenceAbandoned is violated
+== must-fail: probe: a quiet handoff is actually skipped and the cell taken by a survivor [LeanProbeDeadHandoffSkipped.cfg]
+   found: Invariant ProbeDeadHandoffSkipped is violated
+== must-fail: probe: the adopt-verification actually withholds an entry whose object is gone (without it the control is green over a race never reached) [LeanProbeAdoptWithheld.cfg]
+   found: Invariant ProbeAdoptWithheld is violated
+== must-fail: probe: the upload re-verification actually withholds an entry whose LANDED upload a GC took (finding 13's control is not green over a race never reached) [LeanProbeUploadWithheld.cfg]
+   found: Invariant ProbeUploadWithheld is violated
+
+== must-fail: FINDING (modelling the queue, 19 steps): a queued deletion applied after the same consume adopted a UI write that re-created the path removes it from the tree, and the window clear drops its inbox entry -- acked, tracked by nothing [LeanBarrierLeaseQueueTombstoneOverHitl.cfg]
+   found: Invariant Inv_HITLTracked is violated
+== strict: the code's shape with the fix: a queued deletion applies only while the key is absent [LeanBarrierLeaseQueueHolds.cfg]
+   ok
+== strict: the tranche-6 breadth world (two paths, HITL, crash, restart) on the code's shape [LeanBarrierLeaseImplHolds.cfg]
+   ok
+== strict: the collector GIVES WAY on a store without a conditional DELETE: nine invariants hold, exhaustively [LeanBarrierLeaseCollectorOff.cfg]
+   ok
+== must-fail: probe: the collector actually gave way on a path it would have collected (or the run above proves nothing) [LeanProbeCollectorLeaked.cfg]
+   found: Invariant ProbeCollectorLeaked is violated
+== strict: the barrier consumes the cell it read at its FIRST step, and a peer's window clear in between changes nothing [LeanBarrierLeaseInboxSnapshot.cfg]
+   ok
+== must-fail: probe: a consume actually adopted an entry the cell no longer holds (or the run above proves nothing) [LeanProbeStaleInboxAdopt.cfg]
+   found: Invariant ProbeStaleInboxAdopt is violated
+== must-fail: known-bad for the ack's third refinement: the merge base moves past a peer's change and nothing queues it -- the queue exemption must not excuse a document ahead by NOTHING queued [LeanBarrierLeaseQueueDropped.cfg]
+   found: Invariant Inv_AckBoundaryCoherent is violated
+== must-fail: probe: a pull-only boundary runs (no claim, no CAS) [LeanProbePullOnly.cfg]
+   found: Invariant ProbePullOnly is violated
+== must-fail: probe: a commit whose merge equals theirs installs nothing [LeanProbeEmptyInstall.cfg]
+   found: Invariant ProbeEmptyInstall is violated
+== must-fail: probe: a queued deletion removes a clean copy from the other writer's tree [LeanProbeTombstoneApplied.cfg]
+   found: Invariant ProbeTombstoneApplied is violated
+== must-fail: probe: the fix fires -- a queued deletion is superseded by an object at the key [LeanProbeTombstoneSuperseded.cfg]
+   found: Invariant ProbeTombstoneSuperseded is violated
+== must-fail: FINDING 10: a writer lost between its upload and its commit leaves an untracked upload at a cited key when every syncer is quiet [LeanBarrierLeaseOrphanDiverges.cfg]
+   found: Invariant Inv_QuiescentConverged is violated
+== strict: finding 10's candidate fix: a live writer tracks the orphan through the inbox, at ANY time (no grace), and every invariant holds [LeanBarrierLeaseOrphanTracked.cfg]
+   ok
+== must-fail: probe: the orphan is actually tracked [LeanProbeOrphanTracked.cfg]
+   found: Invariant ProbeOrphanTracked is violated
+COVERAGE.md is current
+
+lean formal gate: 117/117 runs green
+lean formal gate: NOT A FRESH RUN — 61 of those were REPLAYED from the
+journal (proved by an earlier process at this same fingerprint) and only
+56 ran here. Evidence for the record wants GATE_RESUME unset.

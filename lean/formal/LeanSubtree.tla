@@ -1834,7 +1834,19 @@ GCDelete(s, p) ==
             \* BaselineKeepsUncollected the baseline keeps its entry.
          /\ sc' = [sc EXCEPT ![s].gcDone = @ \cup {p}]
          /\ gh' = [gh EXCEPT !.leaked = IF CollectorOff /\ wouldCollect
-                                        THEN @ + 1 ELSE @]
+                                        THEN @ + 1 ELSE @,
+              \* RETIREMENT is the collector's DECISION, not the DELETE.
+              \* A writer that recognises these bytes and takes the path
+              \* out of its boundary has retired the write whether or not
+              \* the store carries the delete out — so a leak retires it
+              \* exactly as a collection does.  Only the CollectorOff arm:
+              \* the other reasons to skip (still referenced, an etag this
+              \* writer does not recognise) are not decisions ABOUT these
+              \* bytes at all.
+              !.hitlRetired = IF /\ CollectorOff /\ wouldCollect
+                                 /\ cur \in sc[s].known
+                                 /\ <<p, cur>> \in hitlAcked
+                              THEN @ \cup {<<p, cur>>} ELSE @]
          /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
                         inbox, removals, window, hitlAcked, conflicts>>
        ELSE
@@ -1844,6 +1856,13 @@ GCDelete(s, p) ==
                                           THEN @ \cup {p} ELSE @]
          /\ gh' = [gh EXCEPT !.gc = @ + 1,
               !.amputated = @ \/ Destroys(s, p, now),
+              \* Gate KEPT here, deliberately.  After a real delete
+              \* `objects[p] = 0`, so the invariant's first clause already
+              \* covers the pair and this ghost is needed only where a
+              \* generation can reappear — same bytes.  Widening a STICKY
+              \* excuse that nothing needs would be a relaxation for free.
+              \* The leak branch above is the opposite case: the object
+              \* stays, so nothing else covers it.
               !.hitlRetired = IF /\ MaxSameBytes > 0 /\ now \in sc[s].known
                                  /\ <<p, now>> \in hitlAcked
                               THEN @ \cup {<<p, now>>} ELSE @]
@@ -3414,16 +3433,32 @@ Inv_HITLTracked ==
     \/ pr \in inbox
     \/ pr \in conflicts
     \/ \E s \in Syncers : sc[s].st # "dead" /\ sc[s].baseline[pr[1]] = pr[2]
-    \* Superseded, and sticky.  The first clause says it for unique
-    \* generations: once a writer that integrated the write deletes or
-    \* overwrites it, the key never reads as it again.  Under MaxSameBytes
-    \* it can — an agent re-creating the UI write's exact bytes after
-    \* publishing their delete carries the same generation, and TLC's first
-    \* same-bytes runs in BLWORLD stopped on exactly that twice (once with
-    \* the re-creation's pod then replaced: finding 10's loss of the
-    \* agent's own work, not the UI's).  `hitlRetired` is written only
-    \* under MaxSameBytes, so every other state space is unchanged.
+    \* RETIRED: a writer that had integrated these bytes took the path out
+    \* of its boundary.  The first clause says that for unique generations
+    \* whenever the object is actually destroyed — but "destroyed" is the
+    \* wrong test twice over, which is why this clause exists and why it is
+    \* written at the collector's DECISION:
+    \*   * under MaxSameBytes an agent re-creating the write's exact bytes
+    \*     carries the same generation, so the key reads as it again (TLC's
+    \*     first same-bytes runs in BLWORLD stopped on exactly that twice);
+    \*   * on a store with no conditional DELETE the collector GIVES WAY
+    \*     (`CollectorOff`, `conformance.rs`) and the object is never
+    \*     destroyed at all, so a write a published delete properly retired
+    \*     would read as untracked forever.
     \/ pr \in gh.hitlRetired
+    \* RECOVERABLE: the acked bytes are the object at a key the manifest
+    \* cites.  That is exactly the untracked sweep's condition — it tracks
+    \* an object at a CITED key whose etag the manifest does not cite, and
+    \* passes over uncited keys — and exactly what a fresh checkout's
+    \* S3-wins arm adopts.  So the write is reachable and will be
+    \* integrated, not lost.  Gated on `OrphanTrack` because that is the
+    \* mechanism: a world without the sweep has no such promise, and
+    \* crediting a recovery that world cannot perform would be the
+    \* relaxation this clause is trying not to be (SAFETY.md §4, the crash
+    \* arm; `untracked.rs`, finding 10).
+    \/ /\ OrphanTrack
+       /\ objects[pr[1]] = pr[2]
+       /\ manifest[pr[1]] # 0
 
 \* A rename that was PERFORMED is one manifest generation: no reader
 \* of the manifest ever sees the moved BYTES under both names (§4, §6)
