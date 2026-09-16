@@ -2,7 +2,7 @@
 
 This is the safety claim for the lean protocol: the syncer (`lean/syncer`),
 the gateway (`lean/gateway`) and the store contract they rest on
-(`crates/flint-store`). It exists because "110 model runs are green" is not
+(`crates/flint-store`). It exists because "113 model runs are green" is not
 a claim anybody can act on. A claim names the property, the thing that
 enforces it, the worlds it was checked in, and — the part usually missing —
 what is still assumed and what is not covered at all.
@@ -88,8 +88,8 @@ A claim with unnamed assumptions is a claim about nothing.
 
 | evidence | what it covers | size |
 |---|---|---|
-| the formal gate (`lean/formal/check.sh`) | every invariant above, exhaustively, per world | 110 runs: 26 strict `LeanSubtree` worlds, 70 mutations, 14 chunk-module runs |
-| refutation | that an invariant CAN fail — a mutation that must violate it | 70 mutations; see the `refuted by` column in `COVERAGE.md` |
+| the formal gate (`lean/formal/check.sh`) | every invariant above, exhaustively, per world | 113 runs: 27 strict `LeanSubtree` worlds, 72 mutations, 14 chunk-module runs |
+| refutation | that an invariant CAN fail — a mutation that must violate it | 72 mutations; **every invariant in §1 has at least one** (`refuted by` in `COVERAGE.md`) |
 | trace validation, phase 1 | the model is the code, on 5 scenario traces, in CI | 5 accepted, 5 mutations + 5 controls rejected |
 | trace validation, phase 2 | the model is the code on a REAL 6-writer run on S3, with the invariants checked while replaying | one leg, one path: 3,258 steps, no invariant violated |
 | the live drill | the binary is the code: each fix has a control arm that fails | host legs H1-H6, storm legs S0-S5 (2026-09-15) |
@@ -101,12 +101,13 @@ A claim with unnamed assumptions is a claim about nothing.
    two paths, two barriers, a handful of generations. TLC exhausts the
    world, not the protocol. There is no inductive proof, so nothing here
    rules out a failure that needs a fourth writer or a third path.
-2. **Three writers, at the gate.** `COVERAGE.md` reads 0 for every
-   invariant in the "3 writers" column: the three-writer world exists and
-   holds, but it is opt-in and `check.sh` does not run it.
-3. **Two invariants have no refutation.** `Inv_CommitExclusive` and
-   `Inv_CellHeldByHolder` are checked in 9 strict worlds each and no
-   mutation makes either fail, so a green run over them may be vacuous.
+2. **Three writers, only in one world.** The gate now runs the
+   three-writer world (2026-09-15); it carries 9 of the 21 invariants. The
+   other 12 are still checked with two writers only.
+3. **Refutation is now complete, and that is recent.** Every invariant in
+   §1 has at least one mutation that must make it fail. Until 2026-09-15
+   two did not (`Inv_CommitExclusive`, `Inv_CellHeldByHolder`), and their
+   nine green worlds each proved nothing.
 4. **The crash world disagrees with the code.** `Inv_HITLTracked` flags a
    state the code recovers from (a checkout adopting an object newer than
    its citation); the invariant does not credit that arm.
@@ -129,8 +130,8 @@ A claim with unnamed assumptions is a claim about nothing.
 
 | # | what would close it | cost |
 |---|---|---|
-| 1 | run the three-writer world in `check.sh` | minutes of gate time |
-| 2 | a mutation for `Inv_CommitExclusive` and one for `Inv_CellHeldByHolder` | an afternoon |
+| 1 | ~~run the three-writer world in the gate~~ **done 2026-09-15** | — |
+| 2 | ~~a refutation for `Inv_CommitExclusive` and for `Inv_CellHeldByHolder`~~ **done 2026-09-15**: a claim that reuses the cell's epoch breaks the first, a claim that does not stamp it breaks the second | — |
 | 3 | correct `Inv_HITLTracked` to credit checkout's S3-wins adoption, then re-run the crash world | an afternoon |
 | 4 | finish the `churn/p47.txt` replay: decide whether the model's consume or the code's is wrong | unknown until read |
 | 5 | replay every path of every storm leg in CI, invariants on | a day, then free |
