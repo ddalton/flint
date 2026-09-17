@@ -1,0 +1,13 @@
+host kernel: 7.0.0-1012-aws
+distro: Ubuntu 24.04.4 LTS
+=== XFS via the wrapper (what the code execs BY NAME) ===
+versionnum [0xb4b5+0x18a] = V5,NLINK,DIRV2,ATTR,ALIGN,LOGV2,EXTFLG,MOREBITS,LAZYSBCOUNT,PROJID32BIT,CRC,FTYPE,FINOBT,SPARSE_INODES,RMAPBT,REFLINK,INOBTCNT,BIGTIME
+=== XFS bypassing the wrapper (control) ===
+versionnum [0xb4b5+0x18a] = V5,NLINK,DIRV2,ATTR,ALIGN,LOGV2,EXTFLG,MOREBITS,LAZYSBCOUNT,PROJID32BIT,CRC,FTYPE,FINOBT,SPARSE_INODES,RMAPBT,REFLINK,INOBTCNT,BIGTIME,NREXT64,EXCHANGE,PARENT
+=== ext4 pinned vs stock (control) ===
+Filesystem features:      has_journal ext_attr resize_inode dir_index filetype extent 64bit flex_bg sparse_super large_file huge_file dir_nlink extra_isize metadata_csum
+=== passthrough: the PRODUCTION fd-passing path ===
+bucket flint-cg-drill-1789603588 is mounted at /dev/fd/3
+2026-09-17T00:12:20.890693Z  WARN ThreadId(09) mknod{req=40 parent=1 name="nope" pid=6980}: mountpoint_s3_fs::fuse: mknod failed with errno 30: inode error: mount is read-only
+1001     mount-s3 --foreground --read-only flint-cg-drill-1789603588 /dev/fd/3
+flint-s3 on /mnt/s3pt type fuse (rw,nosuid,nodev,relatime,user_id=1001,group_id=1001,default_permissions,allow_other)

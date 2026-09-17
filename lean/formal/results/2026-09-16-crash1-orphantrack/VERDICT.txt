@@ -1,0 +1,21 @@
+SAFETY.md §4.4 — the crash world at OrphanTrack TRUE and FALSE.
+Spec: LeanSubtree.tla @ cc43dd8d (the 2026-09-16 Inv_HITLTracked repair).
+Both arms differ in exactly one constant (diff Crash1OrphanFalse.cfg
+Crash1OrphanTrue.cfg is one line).
+
+ARM 1 — OrphanTrack = FALSE ........ VIOLATED Inv_HITLTracked
+  66,054,918 states generated, 19,116,125 distinct, 20-step counterexample,
+  14min 47s. The repaired invariant KEEPS ITS TEETH in the crash world:
+  the arm that should still violate does.
+
+ARM 2 — OrphanTrack = TRUE ......... INCONCLUSIVE (not a verdict)
+  Stopped by the harness's disk guard at 158,208,515 states generated,
+  44,687,161 distinct, depth 21, 17,336,521 still on the queue; the
+  states directory had reached 27 GB on a laptop with 22 GiB to spare.
+  It did NOT violate in 2.4x the states arm 1 needed to violate, which is
+  suggestive and is NOT the same as holding. An exhaustive verdict needs
+  a box with more disk; the checkpoint was discarded with the scratch.
+
+So §4.4's question — "if it holds at TRUE and violates at FALSE, the
+untracked sweep is load-bearing for S1 in this world rather than the
+churn control §3 calls it" — is HALF answered. The FALSE half is done.

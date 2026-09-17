@@ -4,7 +4,18 @@
 (`tests/lima/pnfs/sqlite-concurrency-drill.sh`) on real EC2, two
 separate kernel NFS clients, two pure-spot instances in us-west-1a.
 
-**Status: root-caused and fixed, verified by measurement.**
+**Status: root-caused and fixed, verified by measurement — for the
+DEPARTURE path only.**
+
+> **Corrected 2026-09-16 by a 4000-transaction soak.** Everything below
+> holds: a client that goes away does get its descriptors back, and the
+> RAII lease returns them (measured: 3982 released at lease expiry). But
+> the 60-transaction window used here was too short to see that a client
+> which *stays mounted* accumulates descriptors at +2 per transaction
+> indefinitely, at a rate a build with this fix surgically removed
+> matches exactly. knfsd holds 2 for the same workload. See
+> [`../2026-09-16-fd-soak-proof/FINDING-live-client-fd-growth.md`](../2026-09-16-fd-soak-proof/FINDING-live-client-fd-growth.md).
+> Do not read this document as "the descriptor leak is fixed".
 
 ## The chain, and how each link was established
 

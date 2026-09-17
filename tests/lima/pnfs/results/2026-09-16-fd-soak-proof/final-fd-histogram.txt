@@ -1,0 +1,6 @@
+      2 /tmp/hub.log
+      2 socket:[92161]
+      2 pipe:[87717]
+      2 anon_inode:[eventpoll]
+      1 /srv/flintstate/state.db-wal
+      1 /srv/flintstate/state.db-shm

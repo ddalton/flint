@@ -1,0 +1,46 @@
+hub listening on 20493
+127.0.0.1:/ on /mnt/flint type nfs4 (rw,relatime,vers=4.1,rsize=1048576,wsize=1048576,namlen=255,hard,fatal_neterrors=none,proto=tcp,port=20493,timeo=150,retrans=3,sec=sys,clientaddr=127.0.0.1,local_lock=none,addr=127.0.0.1)
+
+########## 1. THE DRILL THAT CAUGHT THE ALIASING BUG (delete + recreate)
+start: flint_fds_on_db=1  knfsd_total_inodes=2
+txn,flint_fds_on_db,knfsd_total_inodes
+500,1,2
+1000,1,2
+1500,1,2
+end: flint_fds_on_db=1  knfsd_total_inodes=2
+flint rows=1500 failures=0 / knfsd rows=1500 failures=0  (both must be 1500)
+knfsd filecache:
+  total inodes:  2
+  hash buckets:  256
+  lru entries:   0
+  cache hits:    96
+  acquisitions:  10075
+  allocations:   9980
+  releases:      9978
+  evictions:     0
+  mean age (ms): 21
+VERDICT=MEASURED
+
+########## 2. SOAK 4000
+OPTA2 baseline_fds=20
+OPTA2 txns,fds
+OPTA2 1000,20
+OPTA2 2000,20
+OPTA2 3000,20
+OPTA2 4000,20
+OPTA2 final_fds=20 baseline=20 delta=0
+OPTA2 rows=4000 expected=4000 insert_failures=0
+OPTA2 VERDICT=MEASURED
+
+########## 3. PEER CLOSE HAZARD
+want=880821a6500f8d2e12ce6ad10933f4da
+after peer closes   =880821a6500f8d2e12ce6ad10933f4da
+after peer exits    =880821a6500f8d2e12ce6ad10933f4da
+PEER DRILL: PASS (a peer's CLOSE did not take the descriptor)
+
+########## 4. GIT BREADTH
+  at 40 commits: fds=20
+commits: 40  expected: 40
+git fsck: CLEAN
+fds after 40 commits: 20  baseline=20  delta=0
+VERDICT=MEASURED

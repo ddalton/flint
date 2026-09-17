@@ -1,0 +1,4 @@
+spec: LeanSubtree.tla @ cc43dd8dc1c3ddc6236e20186190a99fb89fd546
+205091740fef9b211a45808b57639a4427a1caa6b6e90dedda92c6facb257978  results/2026-09-16-crash1-orphantrack/LeanSubtree.tla
+db721fe3d1ee3adc9467ae02a163a7610009a8cfcb59020125ac408f54e60822  results/2026-09-16-crash1-orphantrack/Crash1OrphanFalse.cfg
+d6f709a2688d11db6dd335437897c313280c4071ff0592ff0aa6d0f07e1d467f  results/2026-09-16-crash1-orphantrack/Crash1OrphanTrue.cfg

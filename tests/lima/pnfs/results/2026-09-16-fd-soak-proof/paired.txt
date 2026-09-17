@@ -1,0 +1,23 @@
+start: flint_fds_on_db=1  knfsd_total_inodes=2
+txn,flint_fds_on_db,knfsd_total_inodes
+250,501,2
+500,1001,2
+750,1501,2
+1000,2001,2
+1250,2501,2
+1500,3001,2
+1750,3501,2
+2000,4001,2
+end: flint_fds_on_db=4003  knfsd_total_inodes=2
+flint rows=2000 failures=0 / knfsd rows=2000 failures=0  (both must be 2000)
+knfsd filecache:
+  total inodes:  2
+  hash buckets:  256
+  lru entries:   0
+  cache hits:    66
+  acquisitions:  7038
+  allocations:   6972
+  releases:      6970
+  evictions:     0
+  mean age (ms): 3
+VERDICT=MEASURED
