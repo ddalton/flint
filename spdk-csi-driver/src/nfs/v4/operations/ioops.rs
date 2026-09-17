@@ -607,6 +607,86 @@ impl IoOperationHandler {
         }
     }
 
+    /// Adopt an fd this server already holds open on `path`, whatever
+    /// stateid opened it, instead of opening the file again.
+    ///
+    /// WHY. READ and WRITE looked the cache up by the PRESENTING
+    /// STATEID alone and opened a fresh descriptor on a miss. Each
+    /// sqlite transaction arrives on a new stateid, so a 4000-txn soak
+    /// left 8003 descriptors open on ONE file — measured, and a build
+    /// with the whole 2026-09-16 lease/laundromat fix removed matched it
+    /// to within 0.03%, because that fix addresses client DEPARTURE and
+    /// this is a live client. knfsd, same kernel client and same
+    /// workload, held 2: its filecache is hashed by inode and a hit
+    /// takes a REFERENCE (`nfsd_file_get`) rather than opening again.
+    ///
+    /// This is that reference, expressed as the `Arc<File>` the entry
+    /// already carries — so the descriptor closes exactly when the last
+    /// stateid referencing it goes away, with no hand-rolled refcount.
+    /// `seed_open_fd` has always done this at OPEN time; the two hottest
+    /// paths simply never did.
+    ///
+    /// Safe on the axis that usually forbids sharing a descriptor: all
+    /// I/O here is POSITIONED (`read_at`/`write_at`, `read_segment`) and
+    /// nothing seeks, so two stateids on one fd cannot move each other's
+    /// offset.
+    ///
+    /// Prefers a writable entry so a later WRITE on this stateid reuses
+    /// it, keeping the intent of the "prefer read+write" open below.
+    ///
+    /// NOT a credential check: the cache carries no cred/uid/client
+    /// dimension, where knfsd additionally matches `nfsd_match_cred`.
+    /// That gap predates this function — `seed_open_fd` shares the same
+    /// way — and is tracked separately; it is not widened to any file
+    /// this server does not already hold open for the same export.
+    fn adopt_open_fd(
+        &self,
+        stateid_other: &[u8; 12],
+        path: &PathBuf,
+        require_writable: bool,
+        cacheable: bool,
+    ) -> Option<Arc<File>> {
+        // BY INODE, NEVER BY PATH ALONE. A path is not an identity: the
+        // first version of this adopted `find_by_path`, and a drill
+        // deleted `paired.db` and recreated it at the same path. The
+        // cached entry still carried that path, so every WRITE landed in
+        // the DELETED inode and every read came back "no such table" —
+        // 1500 of 1500 transactions lost, with the file on disk empty.
+        // `seed_open_fd`'s own comment names the same trap for
+        // CLAIM_FH: "fresh-opening the path would alias the NEW file
+        // under the old handle."
+        //
+        // So: stat the path, and only ever adopt a descriptor whose
+        // OPEN-TIME inode is the inode that path names RIGHT NOW. This
+        // is knfsd's key (`nf_inode`) and it cannot alias. A path that
+        // does not resolve adopts nothing and falls through to the
+        // ordinary open, which is also the create case.
+        use std::os::unix::fs::MetadataExt;
+        let cur_ino = std::fs::metadata(path).ok().map(|m| m.ino())?;
+        let hit = self.fd_cache.find_by_ino(cur_ino, require_writable)?;
+        // `find_by_ino` re-checks against the authoritative entry, but
+        // be explicit: an entry that is not this inode is not this file.
+        if hit.ino != cur_ino {
+            return None;
+        }
+        // Anchor it under THIS stateid too, so CLOSE, the lease sweep
+        // and the stale-resolve fallbacks all still find an entry keyed
+        // the way every one of those call sites expects. The entry is
+        // new; the DESCRIPTOR is the same one.
+        if cacheable {
+            self.fd_cache.insert(
+                *stateid_other,
+                CachedFile {
+                    file: Arc::clone(&hit.file),
+                    path: path.clone(),
+                    writable: hit.writable,
+                    ino: hit.ino,
+                },
+            );
+        }
+        Some(hit.file)
+    }
+
     /// F17b fallback for READ/WRITE when the filehandle no longer
     /// resolves (object renamed-over or removed): the handle's embedded
     /// path names the ORIGINAL file, which is still alive if any open
@@ -2163,16 +2243,21 @@ impl IoOperationHandler {
         // same file; otherwise open and cache. The path check guards
         // against a stateid presented with a different filehandle.
         let cacheable = cacheable_stateid(&op.stateid.other);
-        let cached = stale_fd.or_else(|| {
-            if cacheable {
-                self.fd_cache
-                    .get(&op.stateid.other)
-                    .filter(|e| e.path == path)
-                    .map(|e| Arc::clone(&e.file))
-            } else {
-                None
-            }
-        });
+        let cached = stale_fd
+            .or_else(|| {
+                if cacheable {
+                    self.fd_cache
+                        .get(&op.stateid.other)
+                        .filter(|e| e.path == path)
+                        .map(|e| Arc::clone(&e.file))
+                } else {
+                    None
+                }
+            })
+            // A miss on THIS stateid does not mean the server has no fd
+            // for this file — see `adopt_open_fd`. Opening again here is
+            // what put 8003 descriptors on one file.
+            .or_else(|| self.adopt_open_fd(&op.stateid.other, &path, false, cacheable));
 
         // Perform positioned read using blocking I/O
         // Uses positioned I/O (pread) for concurrent access without seek
@@ -2515,16 +2600,21 @@ impl IoOperationHandler {
         // read-only fd, and a stateid presented with a different
         // filehandle must not reuse another file's fd.
         let cacheable = cacheable_stateid(&op.stateid.other);
-        let cached_entry = stale_fd.or_else(|| {
-            if cacheable {
-                self.fd_cache
-                    .get(&op.stateid.other)
-                    .filter(|e| e.writable && e.path == path)
-                    .map(|e| Arc::clone(&e.file))
-            } else {
-                None
-            }
-        });
+        let cached_entry = stale_fd
+            .or_else(|| {
+                if cacheable {
+                    self.fd_cache
+                        .get(&op.stateid.other)
+                        .filter(|e| e.writable && e.path == path)
+                        .map(|e| Arc::clone(&e.file))
+                } else {
+                    None
+                }
+            })
+            // Writable only: a read-only entry cannot serve a WRITE, and
+            // the open below would still be reached for a file nothing
+            // holds open for writing. See `adopt_open_fd`.
+            .or_else(|| self.adopt_open_fd(&op.stateid.other, &path, true, cacheable));
 
         let file_arc = if let Some(file) = cached_entry {
             // Found in cache - reuse existing FD!
@@ -3060,6 +3150,12 @@ mod tests {
     #[tokio::test]
     async fn write_notes_tier_capture() {
         use std::os::unix::fs::MetadataExt;
+        // Capture is process-global and keyed by (dev, ino), and TempDir
+        // inodes are reused, so a test that enables it and then touches
+        // files collides with whatever tier rig is running beside it.
+        // `capture::test_exclusive` says so itself: "Every test that
+        // queues OR drains must take this — not just the tier ones."
+        let _excl = crate::tier::capture::test_exclusive();
         crate::tier::capture::force_enable();
         let (handler, fh_mgr, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
@@ -3115,6 +3211,12 @@ mod tests {
     #[tokio::test]
     async fn write_refused_with_delay_while_excluded() {
         use std::os::unix::fs::MetadataExt;
+        // Capture is process-global and keyed by (dev, ino), and TempDir
+        // inodes are reused, so a test that enables it and then touches
+        // files collides with whatever tier rig is running beside it.
+        // `capture::test_exclusive` says so itself: "Every test that
+        // queues OR drains must take this — not just the tier ones."
+        let _excl = crate::tier::capture::test_exclusive();
         crate::tier::capture::force_enable();
         let (handler, fh_mgr, _temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);
@@ -3640,6 +3742,64 @@ mod tests {
             handler.fd_cache.find_by_ino(ino, true).is_none(),
             "a stale writable entry still answers the tier's open-hot probe, which is how \
              one read under a delegation made a file permanently non-evictable"
+        );
+    }
+
+    /// A PATH IS NOT AN IDENTITY.
+    ///
+    /// The first cut of `adopt_open_fd` reused any cached fd whose
+    /// OPEN-TIME path matched. A drill then deleted `paired.db` and
+    /// recreated it at the same path: the stale entry was adopted, every
+    /// WRITE landed in the deleted inode, and all 1500 transactions came
+    /// back "no such table" with the file on disk empty. Silent data
+    /// loss, from a cache hit.
+    ///
+    /// Adoption is keyed on the inode the path names RIGHT NOW, so a
+    /// recreated file must adopt NOTHING and open for itself.
+    #[test]
+    fn adoption_refuses_a_descriptor_for_a_file_that_was_replaced() {
+        use std::os::unix::fs::MetadataExt;
+        let (handler, _fh_mgr, temp) = create_test_handler();
+        let path = temp.path().join("replaced.db");
+
+        std::fs::write(&path, b"ORIGINAL").unwrap();
+        let original = Arc::new(
+            std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap(),
+        );
+        let original_ino = original.metadata().unwrap().ino();
+        let old_sid = [0x11u8; 12];
+        handler.test_seed_fd(old_sid, Arc::clone(&original), path.clone(), true);
+
+        // Same path, brand new object.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"REPLACEMENT").unwrap();
+        let new_ino = std::fs::metadata(&path).unwrap().ino();
+        assert_ne!(
+            original_ino, new_ino,
+            "precondition: the recreated file must be a different inode"
+        );
+
+        let adopted = handler.adopt_open_fd(&[0x22u8; 12], &path, false, true);
+        assert!(
+            adopted.is_none(),
+            "adopted a descriptor for the DELETED inode — writes would land in a file \
+             nothing can read back"
+        );
+
+        // And the still-live original is adopted for its own inode, so
+        // the guard refuses the stale case without disabling adoption.
+        let same = handler.adopt_open_fd(&[0x33u8; 12], &path, false, true);
+        assert!(same.is_none(), "the replacement is not in the cache yet either");
+        handler.test_seed_fd([0x44u8; 12], Arc::new(
+            std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap(),
+        ), path.clone(), true);
+        let now = handler
+            .adopt_open_fd(&[0x55u8; 12], &path, false, true)
+            .expect("the CURRENT inode's descriptor is adoptable");
+        assert_eq!(
+            now.metadata().unwrap().ino(),
+            new_ino,
+            "adoption must hand back the descriptor for the file that is there now"
         );
     }
 
