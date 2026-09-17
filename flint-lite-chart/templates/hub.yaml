@@ -39,7 +39,10 @@ chart_tier_knob_list_matches_tier_config. */}}
 {{- $img := .Values.image.ref }}
 {{- if not $img }}
 {{- $tag := .Values.image.tag | default .Chart.AppVersion }}
-{{- $img = printf "%s/%s:%s" .Values.image.repository .Values.image.name $tag }}
+{{- $img = printf "%s:%s" .Values.image.repository $tag }}
+{{- with (coalesce .Values.global.imageRegistry .Values.image.registry) }}
+{{- $img = printf "%s/%s" . $img }}
+{{- end }}
 {{- end }}
 ---
 apiVersion: v1

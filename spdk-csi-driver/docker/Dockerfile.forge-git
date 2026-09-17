@@ -30,9 +30,16 @@
 #
 # The git FLOOR is 2.43 (`merge-tree -X`). The syncer asserts it on ITS
 # git at start; the git that runs `receive-pack` and `index-pack` is
-# this image's, so this build asserts it here too. alpine:3.20 ships
-# 2.45.
-FROM alpine:3.20
+# this image's, so this build asserts it here too.
+#
+# BASE: Chainguard `wolfi-base` (glibc, busybox, apk), not `static`:
+# git is a package, http-backend is a subprocess, and agents run a shell
+# in this image. Wolfi tracks git upstream closely (2.55 at this pin, where
+# alpine:3.20 shipped 2.45), which is the CVE point of the move and also
+# a git upgrade forge's e2e must cover. Pinned by the multi-arch index
+# digest; override with --build-arg BASE_IMAGE.
+ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:1d95114038f76513a9ace6fca107d5582b08c65981f81f61cb56bf7fd2ef216d
+FROM ${BASE_IMAGE}
 
 ARG BIN_DIR=docker/prebuilt
 ARG TARGETARCH
@@ -42,8 +49,9 @@ ARG TARGETARCH
 # carries an LFS batch API at all. Without it the server answers the
 # batch endpoint correctly and the agent cannot use it — which is
 # exactly what the first cluster run found. git-daemon carries
-# http-backend on Alpine.
-RUN apk add --no-cache git git-lfs git-daemon \
+# http-backend on Wolfi, as it did on Alpine; ca-certificates-bundle is
+# named because agents clone and fetch over HTTPS from this image.
+RUN apk add --no-cache git git-lfs git-daemon ca-certificates-bundle \
     && mkdir -p /repo
 RUN git --version | awk '{ split($3, v, "."); if (v[1] + 0 < 2 || (v[1] + 0 == 2 && v[2] + 0 < 43)) exit 1 }' \
     || { echo "git $(git --version) is below the 2.43 floor (merge-tree -X)" >&2; exit 1; }

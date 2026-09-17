@@ -27,17 +27,17 @@
 # deployment needs one built from a tree that HAS the `Door::Git` arm.
 # Publishing it here lets forge stand up its own door without touching
 # the gateway a lite fleet is already running.
-FROM ubuntu:24.04
+#
+# BASE: Chainguard `static`, as Dockerfile.operator.prebuilt — no shell,
+# no package manager, a CA bundle (in-cluster the API server is verified
+# with the service account's mounted CA; an out-of-cluster kubeconfig
+# needs the system store), and musl-static binaries on top. Pinned by
+# the multi-arch index digest; override with --build-arg BASE_IMAGE.
+ARG BASE_IMAGE=cgr.dev/chainguard/static:latest@sha256:bf639cba19ba56329e6907ac26a7afcdde57a80b6aa66d5100da6883196e6b82
+FROM ${BASE_IMAGE}
 
 ARG BIN_DIR=docker/prebuilt
 ARG TARGETARCH
-
-# ca-certificates only. In-cluster the API server is verified with the
-# service account's mounted CA; an out-of-cluster kubeconfig needs the
-# system store.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
 
 COPY ${BIN_DIR}/${TARGETARCH}/flint-forge-operator /usr/local/bin/flint-forge-operator
 COPY ${BIN_DIR}/${TARGETARCH}/flint-hub-gateway /usr/local/bin/flint-hub-gateway

@@ -29,10 +29,19 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 {{- end }}
 
+{{/* {registry}/{repository}:{tag} — empty registry => the repository's
+     implicit registry (Docker Hub); global.imageRegistry overrides the
+     image's own registry. Called with (dict "root" . "registry" …
+     "repository" … "tag" …). */}}
+{{- define "flint-lite-operator.imageRef" -}}
+{{- $reg := coalesce .root.Values.global.imageRegistry .registry -}}
+{{- if $reg }}{{ printf "%s/%s:%s" $reg .repository .tag }}{{ else }}{{ printf "%s:%s" .repository .tag }}{{ end -}}
+{{- end }}
+
 {{/* The operator image reference. */}}
 {{- define "flint-lite-operator.image" -}}
 {{- if .Values.image.ref }}{{ .Values.image.ref }}
-{{- else }}{{ printf "%s/%s:%s" .Values.image.repository .Values.image.name (.Values.image.tag | default .Chart.AppVersion) }}
+{{- else }}{{ include "flint-lite-operator.imageRef" (dict "root" . "registry" .Values.image.registry "repository" .Values.image.repository "tag" (.Values.image.tag | default .Chart.AppVersion)) }}
 {{- end }}
 {{- end }}
 
@@ -42,7 +51,9 @@ operator upgrade moves the fleet's hubs with it — which is the point of
 having one default instead of N pinned specs.
 */}}
 {{- define "flint-lite-operator.hubImage" -}}
-{{- .Values.hubImage | default (printf "dilipdalton/flint-pnfs:%s" .Chart.AppVersion) }}
+{{- if .Values.hubImage }}{{ .Values.hubImage }}
+{{- else }}{{ include "flint-lite-operator.imageRef" (dict "root" . "registry" .Values.hubImageRegistry "repository" .Values.hubImageRepository "tag" .Chart.AppVersion) }}
+{{- end }}
 {{- end }}
 
 {{/* flint-hub-gateway: its own name and labels, so it is never selected

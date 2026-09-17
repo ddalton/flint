@@ -11,16 +11,25 @@
 # the CSI driver — the hub's PVC comes from ANY CSI driver. A full
 # pNFS cluster is the flint-csi-driver-chart's job, its own release.
 
+# global.imageRegistry, when set, is prepended to every image below
+# (overriding each image's own `registry`). A consumer that mirrors the
+# images to a private registry sets this once instead of editing
+# `repository` — no registry host is hardcoded in this chart.
+global:
+  imageRegistry: ""
+
 image:
-  # Composed as {repository}/{name}:{tag|Chart.appVersion}. `ref`
-  # overrides the whole reference verbatim when set (e.g. a
-  # kind-loaded local image "flint-lite-dev:local").
+  # Composed as {registry}/{repository}:{tag|Chart.appVersion} (empty
+  # registry => the repository's implicit registry, Docker Hub);
+  # global.imageRegistry overrides `registry`, and `ref` overrides the
+  # whole reference verbatim when set (e.g. a kind-loaded local image
+  # "flint-lite-dev:local").
   # NOTE: `mode: standalone` and the S3 tier need image 1.26.0 or
   # newer (multi-arch: amd64 + arm64); the warm-fill knobs
   # (hydrateWarmAfterImport/hydrateWarmConcurrency) need 1.27.0.
   # Older MDS binaries refuse the mode at boot.
-  repository: dilipdalton
-  name: flint-pnfs
+  registry: ""
+  repository: dilipdalton/flint-pnfs
   tag: ""
   ref: ""
   pullPolicy: IfNotPresent

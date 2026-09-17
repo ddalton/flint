@@ -55,7 +55,7 @@ spec:
       serviceAccountName: flint-csi-controller
       containers:
         - name: dashboard-backend
-          image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
+          image: "{{ include "flint-csi-driver-chart.imagePrefix" . }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
           imagePullPolicy: Always
           env:
             # CSI_MODE=controller here buys the controller-side QUERY
@@ -122,7 +122,7 @@ spec:
           resources:
             {{- toYaml .Values.dashboard.resources.backend | nindent 12 }}
         - name: dashboard-frontend
-          image: "{{ .Values.images.repository }}/{{ .Values.dashboard.frontend.name }}:{{ .Values.dashboard.frontend.tag }}"
+          image: "{{ include "flint-csi-driver-chart.imagePrefix" . }}/{{ .Values.dashboard.frontend.name }}:{{ .Values.dashboard.frontend.tag }}"
           imagePullPolicy: Always
           ports:
             - name: http

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
-# flint-passthrough-mounter — the FUSE mounter the passthrough webhook
-# injects. NOT `flint-passthrough`: that Docker Hub repo holds the Helm
+# flint-passthrough-mounter — the FUSE mounter, and the base of
+# flint-s3-worker. NOT `flint-passthrough`: that Docker Hub repo holds the Helm
 # chart as an OCI artifact, and one repo cannot sanely hold both.
 #
 #   docker build --platform linux/arm64 -f docker/Dockerfile.passthrough \
@@ -9,47 +9,85 @@
 # WHY OUR OWN IMAGE. Mountpoint for S3 publishes no official container
 # image, so the alternative is defaulting a chart to somebody's
 # unpinned personal build — in a PRIVILEGED container. This one carries
-# one mounter, from AWS's own pinned .deb, and nothing else.
+# one mounter, from AWS's own pinned release, and nothing else.
 #
-# This image carries a shell ON PURPOSE (the injected startupProbe
-# execs `grep` over /proc/mounts, and the launcher is `sh -c`),
-# unlike the operator image which carries nothing.
-FROM debian:bookworm-slim
+# WHO RUNS IT NOW. The webhook is gone: this image is the BASE of
+# flint-s3-worker (Dockerfile.s3worker), whose worker execs mount-s3 on
+# an fd the node plugin already mounted. The shell, grep and fusermount
+# stay ON PURPOSE: the s3csi rigs `kubectl exec` `sh -c`, `grep`, `tr`
+# and `cat` inside passthrough workers (s3csi/e2e/run-rights.sh,
+# aws-passthrough.sh), and fusermount is how a human clears a stale
+# mount by hand.
+#
+# BASE: Chainguard `wolfi-base` (glibc, busybox, apk). mount-s3 is a
+# glibc binary that links libfuse.so.2, so neither `static` nor a musl
+# base can run it; Wolfi's `fuse2` provides libfuse.so.2 and fusermount.
+# Pinned by the multi-arch index digest; override with --build-arg
+# BASE_IMAGE.
+#
+# THE MOUNTER is AWS's release TARBALL, not the .deb (apk cannot install
+# a .deb) and not Wolfi's `mountpoint-s3` package (a Chainguard rebuild,
+# whose -rN revision moves under a fixed upstream version). The tarball's
+# bin/mount-s3 is byte-identical to the .deb's for 1.24.0 on both arches,
+# and its sha256 is pinned below, so a version bump that forgets the
+# checksums fails the BUILD.
+ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:1d95114038f76513a9ace6fca107d5582b08c65981f81f61cb56bf7fd2ef216d
+
+# The download runs on the BUILD platform: it only fetches and unpacks,
+# so an amd64 image built on an arm64 host emulates nothing here.
+FROM --platform=$BUILDPLATFORM ${BASE_IMAGE} AS fetch
 
 ARG TARGETARCH
 # Pinned, not `latest`. A moving mounter version inside a privileged
 # container is a change nobody in this chart's release notes chose.
 ARG MOUNT_S3_VERSION=1.24.0
+# sha256 of mount-s3-${MOUNT_S3_VERSION}-<arch>.tar.gz. Bump WITH the version.
+ARG MOUNT_S3_SHA256_AMD64=a99bea20510eaabaf9d7cbfe95ab221a11005cacaa77cfc311a2912bbbdbfd72
+ARG MOUNT_S3_SHA256_ARM64=9f97026c9feabd0e4d128206f1846ee317e6c4f21846914dfe4268d110c892c4
 
 RUN set -eux; \
-    apt-get update; \
-    # `fuse` explicitly, not merely as mount-s3's dependency: it is
-    # what provides /etc/fuse.conf and the `fusermount` the injected
-    # stale-mount cleanup calls. A dependency that stops being one is
-    # a pod that cannot clear its own corpse.
-    apt-get install -y --no-install-recommends \
-        fuse ca-certificates curl; \
+    apk add --no-cache curl; \
     case "$TARGETARCH" in \
-        amd64) ma=x86_64 ;; \
-        arm64) ma=arm64 ;; \
+        amd64) ma=x86_64; sum="$MOUNT_S3_SHA256_AMD64" ;; \
+        arm64) ma=arm64;  sum="$MOUNT_S3_SHA256_ARM64" ;; \
         *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL -o /tmp/mount-s3.deb \
-        "https://s3.amazonaws.com/mountpoint-s3-release/${MOUNT_S3_VERSION}/${ma}/mount-s3-${MOUNT_S3_VERSION}-${ma}.deb"; \
-    apt-get install -y --no-install-recommends /tmp/mount-s3.deb; \
-    rm -f /tmp/mount-s3.deb; \
-    rm -rf /var/lib/apt/lists/*; \
+    curl -fsSL -o /tmp/mount-s3.tar.gz \
+        "https://s3.amazonaws.com/mountpoint-s3-release/${MOUNT_S3_VERSION}/${ma}/mount-s3-${MOUNT_S3_VERSION}-${ma}.tar.gz"; \
+    echo "$sum  /tmp/mount-s3.tar.gz" | sha256sum -c -; \
+    mkdir -p /opt/aws/mountpoint-s3; \
+    tar -xzf /tmp/mount-s3.tar.gz -C /opt/aws/mountpoint-s3; \
+    test "$(cat /opt/aws/mountpoint-s3/VERSION)" = "$MOUNT_S3_VERSION"
+
+FROM ${BASE_IMAGE}
+
+# `fuse2` explicitly, not merely as a library: it is libfuse.so.2, which
+# mount-s3 cannot load without, AND the `fusermount` that clears a stale
+# mount. A dependency that stops being one is a pod that cannot clear its
+# own corpse.
+RUN apk add --no-cache fuse2 ca-certificates-bundle
+
+# The .deb's layout, so FLINT_S3W_MOUNTER=/usr/bin/mount-s3 (Dockerfile.
+# s3worker, s3csi::worker) is unchanged.
+COPY --from=fetch /opt/aws/mountpoint-s3 /opt/aws/mountpoint-s3
+
+RUN set -eux; \
+    ln -s /opt/aws/mountpoint-s3/bin/mount-s3 /usr/bin/mount-s3; \
     # allow_other lets the APP container's uid traverse a mount made by
     # root in the MOUNTER. Without it the mount exists and everything
     # in it is EACCES to the workload, which reads as a bucket policy
     # problem and is not one.
     echo user_allow_other >> /etc/fuse.conf; \
     # Fail the BUILD, not a pod at 3am, if the mounter or the tools the
-    # injected launcher calls are missing.
+    # rigs and the operator call are missing. `--version` goes through
+    # the dynamic loader, so it is also the check that libfuse.so.2 and
+    # glibc resolve (wolfi-base has no `ldd`).
     mount-s3 --version; \
     command -v fusermount; \
-    command -v grep
+    command -v grep; \
+    test -s /etc/ssl/certs/ca-certificates.crt
 
-# No ENTRYPOINT: the webhook supplies command+args. An ENTRYPOINT here
-# would only be something to override.
-CMD ["/bin/sh", "-c", "echo 'flint-passthrough-mounter: run me via the flint-passthrough webhook' >&2; exit 1"]
+# No ENTRYPOINT: flint-s3-worker (Dockerfile.s3worker) is the entrypoint
+# of the image built on this one. An ENTRYPOINT here would only be
+# something to override.
+CMD ["/bin/sh", "-c", "echo 'flint-passthrough-mounter: a base image; run flint-s3-worker (Dockerfile.s3worker)' >&2; exit 1"]

@@ -126,6 +126,30 @@ tag_exists() {  # <name> <tag> -> 0 if published on Docker Hub
         "https://hub.docker.com/v2/repositories/$hub_ns/$1/tags/$2" 2>/dev/null
 }
 
+# The Docker Hub name a chart's `image` block pulls, for tag_exists.
+# The charts compose {registry}/{repository}:{tag}, repository being
+# "<namespace>/<name>". tag_exists can only vouch for $hub_ns on Docker
+# Hub, so a shipped values.yaml that names another registry (image.registry
+# or global.imageRegistry — both install-time knobs for a mirror) or
+# another namespace would pass the gate while the chart pulled something
+# nobody checked. Refuse those instead of reading the name out of them.
+values_image_name() {  # <chart-label> <values.yaml> -> prints <name>
+    python3 - "$1" "$2" "$hub_ns" <<'PYEOF'
+import sys, yaml
+label, path, hub_ns = sys.argv[1:4]
+v = yaml.safe_load(open(path))
+img = v.get("image") or {}
+reg = (v.get("global") or {}).get("imageRegistry") or img.get("registry") or ""
+repo = img.get("repository") or ""
+ns, _, name = repo.rpartition("/")
+if reg or ns != hub_ns or not name:
+    sys.exit(f"REFUSING to push {label}: values.yaml image is registry={reg!r} "
+             f"repository={repo!r}; the gate checks only {hub_ns}/<name> on Docker Hub. "
+             f"A registry override belongs at install time, not in the shipped chart.")
+print(name)
+PYEOF
+}
+
 # Push one chart, or say precisely why not.
 #
 # TWO refusals, and the second is the one that bit 1.39.0:
@@ -321,7 +345,15 @@ EOF
     if [ -d "$forge_dir" ] && in_scope "all forge"; then
         forge_version=$(python3 -c "import yaml; print(yaml.safe_load(open('$forge_dir/Chart.yaml'))['version'])")
         forge_app=$(python3 -c "import yaml; print(yaml.safe_load(open('$forge_dir/Chart.yaml'))['appVersion'])")
-        forge_img=$(python3 -c "import yaml; print(yaml.safe_load(open('$forge_dir/values.yaml'))['image']['name'])")
+        forge_img=$(values_image_name "flint-forge $forge_version" "$forge_dir/values.yaml")
+        # The server images are <server.registry>/<server.repository>/flint-forge-{git,syncer};
+        # the tag_exists loop below checks them under $hub_ns on Docker Hub only.
+        forge_server=$(python3 -c "import yaml; s=yaml.safe_load(open('$forge_dir/values.yaml')).get('server') or {}; print((s.get('registry') or '') + '|' + (s.get('repository') or ''))")
+        if [ "$forge_server" != "|$hub_ns" ]; then
+            echo "REFUSING to push flint-forge $forge_version: values.yaml server.registry|repository" \
+                 "is '$forge_server', but the gate checks only $hub_ns on Docker Hub." >&2
+            exit 1
+        fi
         forge_tag=$(python3 -c "import yaml; print(yaml.safe_load(open('$forge_dir/values.yaml'))['image'].get('tag') or '')")
 
         # THE GATE THE OTHERS DO NOT HAVE, and the one this chart
@@ -415,7 +447,7 @@ EOF
     if [ -d "$lean_dir" ] && in_scope "all lean"; then
         lean_version=$(python3 -c "import yaml; print(yaml.safe_load(open('$lean_dir/Chart.yaml'))['version'])")
         lean_app=$(python3 -c "import yaml; print(yaml.safe_load(open('$lean_dir/Chart.yaml'))['appVersion'])")
-        lean_op_img=$(python3 -c "import yaml; print(yaml.safe_load(open('$lean_dir/values.yaml'))['image']['name'])")
+        lean_op_img=$(values_image_name "flint-lean $lean_version" "$lean_dir/values.yaml")
         lean_sc_img=flint-sync
         for img in "$lean_op_img" "$lean_sc_img"; do
             if ! tag_exists "$img" "$lean_app"; then

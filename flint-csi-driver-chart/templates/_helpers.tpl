@@ -119,3 +119,21 @@ branch renders it as a YAML list.
 {{- $args = concat $args $extra -}}
 {{- toJson $args -}}
 {{- end -}}
+
+{{/* "<registry>/" or "" — global.imageRegistry overrides the image's own
+     registry; empty means the repository's implicit registry (Docker Hub).
+     Called with (dict "root" $ "registry" …). */}}
+{{- define "flint-csi-driver-chart.registryPrefix" -}}
+{{- with (coalesce .root.Values.global.imageRegistry .registry) -}}{{ . }}/{{- end -}}
+{{- end }}
+
+{{/* [registry/]images.repository — the prefix every flint image is named
+     under, and what the controller receives as IMAGE_REPOSITORY. */}}
+{{- define "flint-csi-driver-chart.imagePrefix" -}}
+{{- include "flint-csi-driver-chart.registryPrefix" (dict "root" . "registry" .Values.images.registry) }}{{ .Values.images.repository }}
+{{- end }}
+
+{{/* [registry/]csiSidecars.repository */}}
+{{- define "flint-csi-driver-chart.sidecarPrefix" -}}
+{{- include "flint-csi-driver-chart.registryPrefix" (dict "root" . "registry" .Values.csiSidecars.registry) }}{{ .Values.csiSidecars.repository }}
+{{- end }}

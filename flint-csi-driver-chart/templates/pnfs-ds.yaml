@@ -182,7 +182,7 @@ spec:
       {{- end }}
       containers:
         - name: ds
-          image: "{{ .Values.images.repository }}/{{ .Values.pnfs.server.image.name }}:{{ required "pnfs.server.image.tag is required when pnfs.server.enabled" .Values.pnfs.server.image.tag }}"
+          image: "{{ include "flint-csi-driver-chart.imagePrefix" . }}/{{ .Values.pnfs.server.image.name }}:{{ required "pnfs.server.image.tag is required when pnfs.server.enabled" .Values.pnfs.server.image.tag }}"
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/flint-pnfs-ds"]
           args: ["--config", "/etc/flint/ds.yaml"]

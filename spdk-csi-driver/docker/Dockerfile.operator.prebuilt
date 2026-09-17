@@ -24,17 +24,22 @@
 # nothing to disk, so this image carries no tools: the chart runs it
 # as non-root with a read-only root filesystem and every capability
 # dropped.
-FROM ubuntu:24.04
+#
+# BASE: Chainguard `static` — distroless, no shell, no package manager,
+# nonroot (65532) passwd entry, and a CA bundle at
+# /etc/ssl/certs/ca-certificates.crt. Every binary below is musl-static,
+# so the base provides only the certs and a filesystem. In-cluster the
+# API server is verified with the service account's mounted CA, but an
+# out-of-cluster kubeconfig (dev, `kubectl proxy`-less debugging) needs
+# the system store, which is why it is the bundle and not `scratch`.
+# Pinned by the multi-arch INDEX digest (`docker buildx imagetools
+# inspect cgr.dev/chainguard/static:latest`); a bump is that digest
+# and nothing else. Override with --build-arg BASE_IMAGE=<mirror>.
+ARG BASE_IMAGE=cgr.dev/chainguard/static:latest@sha256:bf639cba19ba56329e6907ac26a7afcdde57a80b6aa66d5100da6883196e6b82
+FROM ${BASE_IMAGE}
 
 ARG BIN_DIR=docker/prebuilt
 ARG TARGETARCH
-
-# ca-certificates only. In-cluster the API server is verified with the
-# service account's mounted CA, but an out-of-cluster kubeconfig
-# (dev, `kubectl proxy`-less debugging) needs the system store.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
 
 COPY ${BIN_DIR}/${TARGETARCH}/flint-lite-operator /usr/local/bin/flint-lite-operator
 

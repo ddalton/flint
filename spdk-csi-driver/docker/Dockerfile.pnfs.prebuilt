@@ -23,37 +23,95 @@
 #
 # NOTE the musl/glibc difference from the canonical file: Dockerfile.pnfs
 # links against the builder's glibc, this one produces static musl binaries.
-# Both run on the ubuntu:24.04 runtime; the musl build is if anything the
+# Both run on the wolfi-base runtime (glibc 2.44, newer than the bookworm
+# builder's 2.36, so the canonical build's binaries still load); the musl build is if anything the
 # safer of the two (no runtime libc coupling at all).
 #
 # The runtime stage below must stay IDENTICAL to Dockerfile.pnfs's — same
-# base, same packages, same entrypoint. If you change one, change both.
-FROM ubuntu:24.04
+# base (and BASE_IMAGE digest), same packages, same format pins, same
+# entrypoint. If you change one, change both.
+ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:1d95114038f76513a9ace6fca107d5582b08c65981f81f61cb56bf7fd2ef216d
+# BASE: Chainguard `wolfi-base` (glibc, busybox, apk) instead of
+# ubuntu:24.04 — the binaries are musl-static, so the base only carries
+# the tools below. Pinned by the multi-arch index digest; override with
+# --build-arg BASE_IMAGE. Default user root, as ubuntu's was.
+FROM ${BASE_IMAGE}
 
 # BIN_DIR holds per-arch subdirs (amd64/, arm64/); TARGETARCH is buildx's
 # per-platform value.
 ARG BIN_DIR=docker/prebuilt
 ARG TARGETARCH
 
-# Install runtime dependencies
-# Includes NFS client/server tools, gRPC requirements, and Kerberos support
-RUN apt-get update && apt-get install -y \
-    nfs-common \
-    e2fsprogs \
-    xfsprogs \
-    ca-certificates \
-    curl \
-    krb5-user \
-    # tcpdump is not a debugging luxury here. Every failure mode this
-    # server has that matters is on the wire, and the F65 audit showed
-    # why reading the server's own logs is not a substitute: a
-    # CB_LAYOUTRECALL the client REFUSED was scored and logged as an ack
-    # for as long as the bug existed. tests/k8s/pnfs-drills/truncate-recall.sh
-    # reads the CB_COMPOUND status directly and hard-fails without this.
-    tcpdump \
-    # setcap, for the file capabilities below.
-    libcap2-bin \
-    && rm -rf /var/lib/apt/lists/*
+# Runtime dependencies: NFS client/server tools (nfs-utils + rpcbind for
+# ubuntu's nfs-common), Kerberos clients (Wolfi `krb5` carries kinit/klist/
+# ktutil, as krb5-user did), filesystem tools, and the bash/GNU coreutils
+# ubuntu:24.04 carried — the pnfs-bench rigs `kubectl exec ... bash -lc`
+# into these pods. The build fails if any named tool is missing.
+#
+# tcpdump is not a debugging luxury here. Every failure mode this
+# server has that matters is on the wire, and the F65 audit showed
+# why reading the server's own logs is not a substitute: a
+# CB_LAYOUTRECALL the client REFUSED was scored and logged as an ack
+# for as long as the bug existed. tests/k8s/pnfs-drills/truncate-recall.sh
+# reads the CB_COMPOUND status directly and hard-fails without this.
+#
+# libcap-utils: setcap, for the file capabilities below.
+#
+# THE ON-DISK FORMAT IS PINNED to what ubuntu:24.04's e2fsprogs 1.47.0 and
+# xfsprogs 6.6.0 made, because a filesystem made here is mounted by the
+# NODE's kernel, not this image's. Wolfi's newer tools default to features
+# older kernels refuse: ext4 `orphan_file` (>= 5.15) and
+# `metadata_csum_seed`; XFS `nrext64` (>= 5.19), `exchange` (>= 6.10) and
+# `parent` (>= 6.12). ext4 reads its defaults from /etc/mke2fs.conf, so
+# that line is rewritten; mkfs.xfs has no default config file, only `-c
+# options=`, so /usr/local/bin/mkfs.xfs (first on PATH) passes a profile
+# with ubuntu 6.6.0's feature set to /usr/bin/mkfs.xfs. The build formats
+# a scratch image with each and fails on any drift. (xfsprogs >= 7 no
+# longer sets the legacy ATTR2 superblock bit; V5 implies attr2 and no
+# option restores the bit.) A caller that passes its own `-c` to
+# mkfs.xfs, or `mkfs -t xfs` (which searches /sbin first), bypasses the
+# profile.
+RUN apk add --no-cache \
+        bash \
+        coreutils \
+        util-linux \
+        util-linux-misc \
+        mount \
+        umount \
+        blkid \
+        blockdev \
+        findmnt \
+        lsblk \
+        losetup \
+        wipefs \
+        nfs-utils \
+        rpcbind \
+        e2fsprogs \
+        e2fsprogs-extra \
+        xfsprogs \
+        xfsprogs-core \
+        xfsprogs-extra \
+        ca-certificates-bundle \
+        curl \
+        krb5 \
+        tcpdump \
+        libcap-utils \
+    && sed -i 's/^\([[:space:]]*features = \)has_journal,extent,huge_file,flex_bg,metadata_csum,metadata_csum_seed,64bit,dir_nlink,extra_isize,orphan_file$/\1has_journal,extent,huge_file,flex_bg,metadata_csum,64bit,dir_nlink,extra_isize/' /etc/mke2fs.conf \
+    && grep -q '^[[:space:]]*features = has_journal,extent,huge_file,flex_bg,metadata_csum,64bit,dir_nlink,extra_isize$' /etc/mke2fs.conf \
+    && mkdir -p /etc/flint /usr/local/bin \
+    && printf '%s\n' '[metadata]' 'bigtime=1' 'crc=1' 'finobt=1' 'inobtcount=1' 'metadir=0' 'reflink=1' 'rmapbt=1' 'autofsck=0' '[inode]' 'sparse=1' 'nrext64=0' 'exchange=0' '[naming]' 'parent=0' > /etc/flint/mkfs.xfs.conf \
+    && printf '%s\n' '#!/bin/sh' '# flint: pin the XFS feature set to what nodes can mount (see Dockerfile).' 'exec /usr/bin/mkfs.xfs -c options=/etc/flint/mkfs.xfs.conf "$@"' > /usr/local/bin/mkfs.xfs \
+    && chmod 0755 /usr/local/bin/mkfs.xfs \
+    && truncate -s 512M /tmp/fmt.img \
+    && mkfs.ext4 -F -q /tmp/fmt.img \
+    && dumpe2fs -h /tmp/fmt.img 2>/dev/null | grep '^Filesystem features:' | tee /dev/stderr | grep -q metadata_csum \
+    && ! dumpe2fs -h /tmp/fmt.img 2>/dev/null | grep '^Filesystem features:' | grep -qE 'orphan_file|metadata_csum_seed' \
+    && mkfs.xfs -q -f /tmp/fmt.img \
+    && xfs_db -r -c version /tmp/fmt.img | tee /dev/stderr | grep -q ',RMAPBT,REFLINK,INOBTCNT,BIGTIME$' \
+    && rm -f /tmp/fmt.img \
+    && timeout --version | grep -q 'GNU coreutils' \
+    && for t in timeout mount umount mountpoint findmnt blkid mkfs.ext4 e2fsck resize2fs dumpe2fs mkfs.xfs xfs_growfs xfs_db mount.nfs mount.nfs4 showmount nfsstat rpc.gssd rpcinfo curl kinit klist ktutil tcpdump setcap getcap bash sh; do command -v "$t" >/dev/null || { echo "missing $t" >&2; exit 1; }; done \
+    && test -s /etc/ssl/certs/ca-certificates.crt
 
 COPY ${BIN_DIR}/${TARGETARCH}/flint-pnfs-mds /usr/local/bin/flint-pnfs-mds
 COPY ${BIN_DIR}/${TARGETARCH}/flint-pnfs-ds /usr/local/bin/flint-pnfs-ds

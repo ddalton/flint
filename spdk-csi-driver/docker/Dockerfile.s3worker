@@ -38,8 +38,9 @@ ARG TARGETARCH
 
 COPY ${BIN_DIR}/${TARGETARCH}/flint-s3-worker /usr/local/bin/flint-s3-worker
 
-# Where the base image's .deb put the mounter; the worker's own default
-# is the same path, spelled here so the contract is visible.
+# Where the base image puts the mounter (a symlink into
+# /opt/aws/mountpoint-s3, the layout AWS's .deb used); the worker's own
+# default is the same path, spelled here so the contract is visible.
 ENV FLINT_S3W_MOUNTER=/usr/bin/mount-s3
 
 # The base has no ENTRYPOINT (the webhook used to supply command+args);

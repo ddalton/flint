@@ -19,7 +19,7 @@ spec:
       serviceAccountName: flint-csi-controller # Re-using the same service account
       containers:
         - name: snapshot-controller
-          image: "{{ .Values.csiSidecars.repository }}/snapshot-controller:{{ .Values.csiSidecars.externalSnapshotter.tag }}" # Note: The tag is often the same as the snapshotter
+          image: "{{ include "flint-csi-driver-chart.sidecarPrefix" . }}/snapshot-controller:{{ .Values.csiSidecars.externalSnapshotter.tag }}" # Note: The tag is often the same as the snapshotter
           imagePullPolicy: Always
           args:
             - "--v=5"

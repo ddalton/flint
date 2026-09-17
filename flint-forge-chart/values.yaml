@@ -8,15 +8,28 @@
 #
 # Design of record: docs/plans/flint-forge-design.md
 
+# global.imageRegistry, when set, is prepended to every image below
+# (overriding each image's own registry), including the two server
+# images the operator renders into every repository. A consumer that
+# mirrors the images to a private registry sets this once instead of
+# editing `repository` — no registry host is hardcoded in this chart.
+global:
+  imageRegistry: ""
+
 # The operator image, which carries the FlintRepo controller AND the
 # git door (flint-hub-gateway built from a tree that has the Door::Git
 # arm). It is its OWN image rather than another name for
 # flint-lite-operator: that one COPYs each binary unconditionally, so
 # adding forge's would make every lite and lean release depend on a
 # pre-release component.
+#
+# Composed as {registry}/{repository}:{tag|appVersion} (empty registry
+# => the repository's implicit registry, Docker Hub);
+# global.imageRegistry overrides `registry`, and `ref` overrides the
+# whole reference.
 image:
-  repository: dilipdalton
-  name: flint-forge-operator
+  registry: ""
+  repository: dilipdalton/flint-forge-operator
   tag: "1.55.0"
   ref: ""
   pullPolicy: IfNotPresent
@@ -33,11 +46,15 @@ image:
 # exist for a drill that pins a digest, and the operator warns when
 # what it was handed carries two different tags.
 server:
+  # `repository` is the namespace both server images live under; the
+  # registry in front of it is `registry`, or global.imageRegistry.
+  registry: ""
   repository: dilipdalton
   tag: ""
-  # Full-reference overrides. Empty = <repository>/flint-forge-git:<tag>
+  # Full-reference overrides, used verbatim (global.imageRegistry does
+  # not rewrite them). Empty = [<registry>/]<repository>/flint-forge-git:<tag>
   # (flint-forge-gitcgi in front of git http-backend, plus the two hooks) and
-  # <repository>/flint-forge-syncer:<tag> (the one writer of the
+  # [<registry>/]<repository>/flint-forge-syncer:<tag> (the one writer of the
   # repository's S3 state; the pod's main container, so its exit
   # restarts the pod; it also carries flint-sync for the legible export).
   gitImage: ""

@@ -78,7 +78,8 @@ Rules that matter (details and the why in `docs/flint-lite.md`):
 
 | Key | Default | Meaning |
 |---|---|---|
-| `image.repository` / `image.name` / `image.tag` | `dilipdalton` / `flint-pnfs` / chart appVersion | Hub image; `image.ref` overrides the whole reference |
+| `global.imageRegistry` | `""` | Registry host prepended to the hub image (a private mirror); overrides `image.registry` |
+| `image.registry` / `image.repository` / `image.tag` | `""` / `dilipdalton/flint-pnfs` / chart appVersion | Hub image; `image.ref` overrides the whole reference |
 | `service.type` / `service.port` | `ClusterIP` / `2049` | `LoadBalancer` for cross-cluster; `service.nodePort` with `NodePort` |
 | `persistence.storageClassName` | `""` (cluster default) | Any CSI driver's RWO class |
 | `persistence.size` | `20Gi` | Size for the working set, not the dataset |

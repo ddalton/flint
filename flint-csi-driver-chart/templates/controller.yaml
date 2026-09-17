@@ -37,7 +37,7 @@ spec:
       priorityClassName: {{ .Values.controller.priorityClassName | default "system-cluster-critical" }}
       containers:
         - name: flint-csi-controller
-          image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
+          image: "{{ include "flint-csi-driver-chart.imagePrefix" . }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
           imagePullPolicy: Always
           env:
             - name: CSI_MODE
@@ -116,14 +116,14 @@ spec:
             # NFS server uses CSI driver image (includes flint-nfs-server binary)
             # Can be overridden with nfs.image.* if a separate image is needed
             - name: IMAGE_REPOSITORY
-              value: {{ .Values.images.repository | quote }}
+              value: {{ include "flint-csi-driver-chart.imagePrefix" . | quote }}
             - name: CSI_DRIVER_IMAGE_NAME
               value: {{ .Values.images.flintCsiDriver.name | quote }}
             - name: CSI_DRIVER_IMAGE_TAG
               value: {{ .Values.images.flintCsiDriver.tag | quote }}
             {{- if .Values.images.flintNfsServer }}
             - name: NFS_IMAGE_REPOSITORY
-              value: {{ .Values.images.repository | quote }}
+              value: {{ include "flint-csi-driver-chart.imagePrefix" . | quote }}
             - name: NFS_IMAGE_NAME
               value: {{ .Values.images.flintNfsServer.name | quote }}
             - name: NFS_IMAGE_TAG
@@ -214,7 +214,7 @@ spec:
             - name: socket-dir
               mountPath: /csi
         - name: csi-provisioner
-          image: "{{ .Values.csiSidecars.repository }}/{{ .Values.csiSidecars.externalProvisioner.name }}:{{ .Values.csiSidecars.externalProvisioner.tag }}"
+          image: "{{ include "flint-csi-driver-chart.sidecarPrefix" . }}/{{ .Values.csiSidecars.externalProvisioner.name }}:{{ .Values.csiSidecars.externalProvisioner.tag }}"
           imagePullPolicy: Always
           args:
             - "--csi-address=/csi/csi.sock"
@@ -226,7 +226,7 @@ spec:
             - name: socket-dir
               mountPath: /csi
         - name: csi-attacher
-          image: "{{ .Values.csiSidecars.repository }}/{{ .Values.csiSidecars.externalAttacher.name }}:{{ .Values.csiSidecars.externalAttacher.tag }}"
+          image: "{{ include "flint-csi-driver-chart.sidecarPrefix" . }}/{{ .Values.csiSidecars.externalAttacher.name }}:{{ .Values.csiSidecars.externalAttacher.tag }}"
           imagePullPolicy: Always
           args:
             - "--csi-address=/csi/csi.sock"
@@ -235,7 +235,7 @@ spec:
             - name: socket-dir
               mountPath: /csi
         - name: csi-resizer
-          image: "{{ .Values.csiSidecars.repository }}/{{ .Values.csiSidecars.externalResizer.name }}:{{ .Values.csiSidecars.externalResizer.tag }}"
+          image: "{{ include "flint-csi-driver-chart.sidecarPrefix" . }}/{{ .Values.csiSidecars.externalResizer.name }}:{{ .Values.csiSidecars.externalResizer.tag }}"
           imagePullPolicy: Always
           args:
             - "--csi-address=/csi/csi.sock"
@@ -244,7 +244,7 @@ spec:
             - name: socket-dir
               mountPath: /csi
         - name: csi-snapshotter
-          image: "{{ .Values.csiSidecars.repository }}/{{ .Values.csiSidecars.externalSnapshotter.name }}:{{ .Values.csiSidecars.externalSnapshotter.tag }}"
+          image: "{{ include "flint-csi-driver-chart.sidecarPrefix" . }}/{{ .Values.csiSidecars.externalSnapshotter.name }}:{{ .Values.csiSidecars.externalSnapshotter.tag }}"
           imagePullPolicy: Always
           args:
             - "--csi-address=/csi/csi.sock"
@@ -253,7 +253,7 @@ spec:
             - name: socket-dir
               mountPath: /csi
         - name: liveness-probe
-          image: "{{ .Values.csiSidecars.repository }}/{{ .Values.csiSidecars.livenessprobe.name }}:{{ .Values.csiSidecars.livenessprobe.tag }}"
+          image: "{{ include "flint-csi-driver-chart.sidecarPrefix" . }}/{{ .Values.csiSidecars.livenessprobe.name }}:{{ .Values.csiSidecars.livenessprobe.tag }}"
           imagePullPolicy: Always
           args:
             - "--csi-address=/csi/csi.sock"
@@ -263,7 +263,7 @@ spec:
         {{- if .Values.driver.enableSanityTestProxy }}
         # Proxy sidecar for CSI Sanity testing - exposes Unix socket via TCP
         - name: grpc-proxy
-          image: alpine/socat:latest
+          image: "{{ include "flint-csi-driver-chart.registryPrefix" (dict "root" . "registry" .Values.driver.sanityProxyImage.registry) }}{{ .Values.driver.sanityProxyImage.repository }}:{{ .Values.driver.sanityProxyImage.tag }}"
           command:
             - socat
             - TCP-LISTEN:{{ .Values.driver.sanityProxyPort }},reuseaddr,fork

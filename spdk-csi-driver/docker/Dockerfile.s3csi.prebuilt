@@ -19,8 +19,10 @@
 #  · flint-s3-csi-node — the ENTRYPOINT. Runs as a PRIVILEGED DaemonSet
 #    (flint-s3-csi-chart/templates/node.yaml): it performs the mount(2)
 #    itself, opens /dev/fuse and hands the fd to an unprivileged worker
-#    pod. It needs `mount`/`umount` from util-linux for the bind and the
-#    unpublish ladder, and ca-certificates for an https broker. It needs
+#    pod. The bind and the unpublish ladder are syscalls (s3csi/fuse.rs);
+#    the programs it EXECS are `mkfs.ext4` and util-linux `mount -o
+#    loop` (s3csi/quota.rs, the lean sizeLimitGib ceiling), and it needs
+#    ca-certificates for an https broker. It needs
 #    NO nfs-common and NO nvme-cli — this is not the block driver's
 #    image, and the packages it does not carry are the packages a
 #    privileged process cannot be tricked into running.
@@ -29,10 +31,15 @@
 #    `restricted`-admissible, non-root (65532). The STS-shaped identity
 #    exchange; the only component with a standing credential.
 #
-# Neither binary carries a shell requirement; ubuntu is here for
-# util-linux's mount and the CA bundle, and to stay on the base the
-# other privileged flint image (Dockerfile.csi.prebuilt) already uses.
-FROM ubuntu:24.04
+# Neither binary carries a shell requirement. BASE: Chainguard
+# `wolfi-base` (glibc, busybox, apk) — not `static`, because the node
+# needs util-linux's mount (loop setup lives in libmount; busybox's
+# mount is not a substitute) and e2fsprogs, which only a package manager
+# brings. Pinned by the multi-arch index digest; override with
+# --build-arg BASE_IMAGE. Default user root, as before: the DaemonSet is
+# privileged and the broker Deployment sets its own non-root user.
+ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:1d95114038f76513a9ace6fca107d5582b08c65981f81f61cb56bf7fd2ef216d
+FROM ${BASE_IMAGE}
 
 # BIN_DIR holds per-arch subdirs (amd64/, arm64/); TARGETARCH is buildx's
 # per-platform value. Single-arch callers can still point BIN_DIR at a dir
@@ -40,16 +47,29 @@ FROM ubuntu:24.04
 ARG BIN_DIR=docker/prebuilt
 ARG TARGETARCH
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    util-linux \
-    mount \
-    # e2fsprogs: mkfs.ext4 builds a lean workspace's sizeLimitGib ceiling
-    # (s3csi/quota.rs). It is present in ubuntu:24.04 already — named here
-    # so a base-image change cannot take it away silently, which would
-    # turn every quota'd lean publish into a refusal at the node.
-    e2fsprogs \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# Wolfi splits util-linux: `mount` and `umount` are their own packages
+# and `util-linux` alone installs neither. `umount` is not exec'd by the
+# node (unmount is umount2(2)); it is here so a human on the node pod
+# can undo what `mount -o loop` did.
+#
+# e2fsprogs: mkfs.ext4 builds a lean workspace's sizeLimitGib ceiling
+# (s3csi/quota.rs). Named so a base-image change cannot take it away
+# silently, which would turn every quota'd lean publish into a refusal
+# at the node.
+#
+# THE ext4 FEATURE SET IS PINNED to what ubuntu:24.04's e2fsprogs 1.47.0
+# made. Wolfi's mke2fs.conf also enables `orphan_file` (kernel >= 5.15)
+# and `metadata_csum_seed`, and the image is loop-mounted by the NODE's
+# kernel, not this one's: on a 5.10 node (EKS AL2) a fresh quota image
+# would fail `mount -o loop` with "unsupported optional features". The
+# build fails if the rewrite does not take.
+RUN apk add --no-cache mount umount e2fsprogs ca-certificates-bundle \
+    && sed -i 's/^\([[:space:]]*features = \)has_journal,extent,huge_file,flex_bg,metadata_csum,metadata_csum_seed,64bit,dir_nlink,extra_isize,orphan_file$/\1has_journal,extent,huge_file,flex_bg,metadata_csum,64bit,dir_nlink,extra_isize/' /etc/mke2fs.conf \
+    && grep -q '^[[:space:]]*features = has_journal,extent,huge_file,flex_bg,metadata_csum,64bit,dir_nlink,extra_isize$' /etc/mke2fs.conf \
+    && ! grep -q 'orphan_file' /etc/mke2fs.conf \
+    && test "$(readlink -f "$(command -v mount)")" = /usr/bin/mount \
+    && command -v mkfs.ext4 umount \
+    && test -s /etc/ssl/certs/ca-certificates.crt
 
 COPY ${BIN_DIR}/${TARGETARCH}/flint-s3-csi-node /usr/local/bin/flint-s3-csi-node
 COPY ${BIN_DIR}/${TARGETARCH}/flint-s3-broker /usr/local/bin/flint-s3-broker

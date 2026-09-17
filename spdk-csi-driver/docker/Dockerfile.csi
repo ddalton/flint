@@ -1,5 +1,10 @@
 # syntax=docker/dockerfile:1
 # Multi-stage build for CSI driver
+#
+# The runtime base, used by the SECOND stage; declared before the first
+# FROM so it is in scope there. The builder stage is not shipped.
+ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:1d95114038f76513a9ace6fca107d5582b08c65981f81f61cb56bf7fd2ef216d
+
 FROM rust:1.92-alpine AS builder
 
 # --- System-level setup ---
@@ -37,21 +42,77 @@ RUN --mount=type=cache,target=/app/target,uid=65532,gid=65532 \
     && cp target/release/flint-nfs-server /tmp/flint-nfs-server
 
 # --- Runtime image ---
-FROM ubuntu:24.04
+# BASE: Chainguard `wolfi-base` (glibc, busybox, apk) instead of
+# ubuntu:24.04 — the binaries are musl-static, so the base only carries
+# the tools below. Pinned by the multi-arch index digest; override with
+# --build-arg BASE_IMAGE. Default user root, as ubuntu's was.
+FROM ${BASE_IMAGE}
 
-# Install runtime dependencies for the CSI driver (controller + node modes)
-RUN apt-get update && apt-get install -y \
-    nvme-cli \
-    util-linux \
-    e2fsprogs \
-    xfsprogs \
-    mount \
-    nfs-common \
-    pciutils \
-    curl \
-    ca-certificates \
-    libcap2-bin \
-    && rm -rf /var/lib/apt/lists/*
+# Runtime dependencies for the CSI driver (controller + node modes). Wolfi
+# splits util-linux, e2fsprogs and xfsprogs into subpackages, so each tool
+# the driver EXECS is named by the package that carries it (timeout
+# [GNU: the mount ladder reads exit 124], mount, umount, mountpoint,
+# blockdev, blkid, findmnt, wipefs, nvme, lspci/setpci, mkfs.ext4, e2fsck,
+# resize2fs, dumpe2fs, mkfs.xfs, xfs_growfs; mount.nfs from nfs-utils),
+# plus what ubuntu:24.04 + nfs-common gave a human or a rig (bash, lsblk,
+# losetup, nsenter, showmount, rpcinfo, curl). The build fails if any is
+# missing.
+#
+# THE ON-DISK FORMAT IS PINNED to what ubuntu:24.04's e2fsprogs 1.47.0 and
+# xfsprogs 6.6.0 made, because a filesystem made here is mounted by the
+# NODE's kernel, not this image's. Wolfi's newer tools default to features
+# older kernels refuse: ext4 `orphan_file` (>= 5.15) and
+# `metadata_csum_seed`; XFS `nrext64` (>= 5.19), `exchange` (>= 6.10) and
+# `parent` (>= 6.12). ext4 reads its defaults from /etc/mke2fs.conf, so
+# that line is rewritten; mkfs.xfs has no default config file, only `-c
+# options=`, so /usr/local/bin/mkfs.xfs (first on PATH) passes a profile
+# with ubuntu 6.6.0's feature set to /usr/bin/mkfs.xfs. The build formats
+# a scratch image with each and fails on any drift. (xfsprogs >= 7 no
+# longer sets the legacy ATTR2 superblock bit; V5 implies attr2 and no
+# option restores the bit.) A caller that passes its own `-c` to
+# mkfs.xfs, or `mkfs -t xfs` (which searches /sbin first), bypasses the
+# profile.
+RUN apk add --no-cache \
+        bash \
+        coreutils \
+        nvme-cli \
+        util-linux \
+        util-linux-misc \
+        mount \
+        umount \
+        blkid \
+        blockdev \
+        findmnt \
+        lsblk \
+        losetup \
+        wipefs \
+        e2fsprogs \
+        e2fsprogs-extra \
+        xfsprogs \
+        xfsprogs-core \
+        xfsprogs-extra \
+        nfs-utils \
+        rpcbind \
+        pciutils \
+        curl \
+        ca-certificates-bundle \
+        libcap-utils \
+    && sed -i 's/^\([[:space:]]*features = \)has_journal,extent,huge_file,flex_bg,metadata_csum,metadata_csum_seed,64bit,dir_nlink,extra_isize,orphan_file$/\1has_journal,extent,huge_file,flex_bg,metadata_csum,64bit,dir_nlink,extra_isize/' /etc/mke2fs.conf \
+    && grep -q '^[[:space:]]*features = has_journal,extent,huge_file,flex_bg,metadata_csum,64bit,dir_nlink,extra_isize$' /etc/mke2fs.conf \
+    && mkdir -p /etc/flint /usr/local/bin \
+    && printf '%s\n' '[metadata]' 'bigtime=1' 'crc=1' 'finobt=1' 'inobtcount=1' 'metadir=0' 'reflink=1' 'rmapbt=1' 'autofsck=0' '[inode]' 'sparse=1' 'nrext64=0' 'exchange=0' '[naming]' 'parent=0' > /etc/flint/mkfs.xfs.conf \
+    && printf '%s\n' '#!/bin/sh' '# flint: pin the XFS feature set to what nodes can mount (see Dockerfile).' 'exec /usr/bin/mkfs.xfs -c options=/etc/flint/mkfs.xfs.conf "$@"' > /usr/local/bin/mkfs.xfs \
+    && chmod 0755 /usr/local/bin/mkfs.xfs \
+    && truncate -s 512M /tmp/fmt.img \
+    && mkfs.ext4 -F -q /tmp/fmt.img \
+    && dumpe2fs -h /tmp/fmt.img 2>/dev/null | grep '^Filesystem features:' | tee /dev/stderr | grep -q metadata_csum \
+    && ! dumpe2fs -h /tmp/fmt.img 2>/dev/null | grep '^Filesystem features:' | grep -qE 'orphan_file|metadata_csum_seed' \
+    && mkfs.xfs -q -f /tmp/fmt.img \
+    && xfs_db -r -c version /tmp/fmt.img | tee /dev/stderr | grep -q ',RMAPBT,REFLINK,INOBTCNT,BIGTIME$' \
+    && rm -f /tmp/fmt.img \
+    && timeout --version | grep -q 'GNU coreutils' \
+    && for t in timeout mount umount mountpoint blockdev blkid findmnt lsblk losetup wipefs nsenter nvme setpci lspci mkfs.ext4 e2fsck resize2fs dumpe2fs mkfs.xfs xfs_growfs xfs_db mount.nfs mount.nfs4 showmount nfsstat rpc.gssd rpcinfo curl setcap getcap bash sh chmod chgrp test sync; do command -v "$t" >/dev/null || { echo "missing $t" >&2; exit 1; }; done \
+    && test -s /etc/ssl/certs/ca-certificates.crt
 
 # Copy the built binaries from the builder stage
 COPY --from=builder /tmp/csi-driver /usr/local/bin/csi-driver

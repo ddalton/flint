@@ -23,11 +23,18 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
+{{/* The registry prefix for an image whose own registry is `.registry`:
+     "<host>/" or "" (the repository's implicit registry, Docker Hub).
+     global.imageRegistry overrides the image's own. */}}
+{{- define "flint-forge.registryPrefix" -}}
+{{- with (coalesce .root.Values.global.imageRegistry .registry) -}}{{ . }}/{{- end -}}
+{{- end -}}
+
 {{- define "flint-forge.image" -}}
 {{- if .Values.image.ref -}}
 {{- .Values.image.ref -}}
 {{- else -}}
-{{- printf "%s/%s:%s" .Values.image.repository .Values.image.name (default .Chart.AppVersion .Values.image.tag) -}}
+{{- printf "%s%s:%s" (include "flint-forge.registryPrefix" (dict "root" . "registry" .Values.image.registry)) .Values.image.repository (default .Chart.AppVersion .Values.image.tag) -}}
 {{- end -}}
 {{- end -}}
 
@@ -39,7 +46,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if .Values.server.gitImage -}}
 {{- .Values.server.gitImage -}}
 {{- else -}}
-{{- printf "%s/flint-forge-git:%s" .Values.server.repository (include "flint-forge.serverTag" .) -}}
+{{- printf "%s%s/flint-forge-git:%s" (include "flint-forge.registryPrefix" (dict "root" . "registry" .Values.server.registry)) .Values.server.repository (include "flint-forge.serverTag" .) -}}
 {{- end -}}
 {{- end -}}
 
@@ -47,7 +54,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if .Values.server.syncerImage -}}
 {{- .Values.server.syncerImage -}}
 {{- else -}}
-{{- printf "%s/flint-forge-syncer:%s" .Values.server.repository (include "flint-forge.serverTag" .) -}}
+{{- printf "%s%s/flint-forge-syncer:%s" (include "flint-forge.registryPrefix" (dict "root" . "registry" .Values.server.registry)) .Values.server.repository (include "flint-forge.serverTag" .) -}}
 {{- end -}}
 {{- end -}}
 

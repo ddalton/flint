@@ -77,7 +77,7 @@ spec:
       # Saves ~3GB RAM per node — suitable for Kind/dev clusters
       containers:
         - name: flint-csi-driver
-          image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
+          image: "{{ include "flint-csi-driver-chart.imagePrefix" . }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
           imagePullPolicy: Always
           env:
             - name: CSI_MODE
@@ -167,9 +167,9 @@ spec:
         - name: spdk-tgt
           restartPolicy: Always  # Native sidecar: starts first, stays running
           {{- if .Values.spdkTarget.kindMode.enabled }}
-          image: "{{ .Values.images.repository }}/{{ .Values.spdkTarget.kindMode.image.name }}:{{ .Values.spdkTarget.kindMode.image.tag }}"
+          image: "{{ include "flint-csi-driver-chart.imagePrefix" . }}/{{ .Values.spdkTarget.kindMode.image.name }}:{{ .Values.spdkTarget.kindMode.image.tag }}"
           {{- else }}
-          image: "{{ .Values.images.repository }}/{{ .Values.images.spdkTarget.name }}:{{ .Values.images.spdkTarget.tag }}"
+          image: "{{ include "flint-csi-driver-chart.imagePrefix" . }}/{{ .Values.images.spdkTarget.name }}:{{ .Values.images.spdkTarget.tag }}"
           {{- end }}
           imagePullPolicy: Always
           {{- $spdkArgs := include "flint-csi-driver-chart.spdkTargetArgs" . | fromJsonArray }}
@@ -357,7 +357,7 @@ spec:
       containers:
         # CSI Driver Container (Node Mode) - Includes integrated node agent on port {{ .Values.healthCheck.nodeAgentPort | default 9081 }}
         - name: flint-csi-driver
-          image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
+          image: "{{ include "flint-csi-driver-chart.imagePrefix" . }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
           imagePullPolicy: Always
           env:
             - name: CSI_MODE
@@ -470,9 +470,9 @@ spec:
         - name: spdk-tgt
           restartPolicy: Always  # Native sidecar: starts first, stays running
           {{- if .Values.spdkTarget.kindMode.enabled }}
-          image: "{{ .Values.images.repository }}/{{ .Values.spdkTarget.kindMode.image.name }}:{{ .Values.spdkTarget.kindMode.image.tag }}"
+          image: "{{ include "flint-csi-driver-chart.imagePrefix" . }}/{{ .Values.spdkTarget.kindMode.image.name }}:{{ .Values.spdkTarget.kindMode.image.tag }}"
           {{- else }}
-          image: "{{ .Values.images.repository }}/{{ .Values.images.spdkTarget.name }}:{{ .Values.images.spdkTarget.tag }}"
+          image: "{{ include "flint-csi-driver-chart.imagePrefix" . }}/{{ .Values.images.spdkTarget.name }}:{{ .Values.images.spdkTarget.tag }}"
           {{- end }}
           imagePullPolicy: Always
           {{- $spdkArgs := include "flint-csi-driver-chart.spdkTargetArgs" . | fromJsonArray }}
@@ -565,7 +565,7 @@ spec:
       containers:
         # CSI Node Agent Container (Legacy - both CSI + Disk Management)
         - name: node-agent
-          image: "{{ .Values.images.repository }}/{{ .Values.images.nodeAgent.name }}:{{ .Values.images.nodeAgent.tag }}"
+          image: "{{ include "flint-csi-driver-chart.imagePrefix" . }}/{{ .Values.images.nodeAgent.name }}:{{ .Values.images.nodeAgent.tag }}"
           imagePullPolicy: Always
           env:
             - name: CSI_ENDPOINT
@@ -599,7 +599,7 @@ spec:
       containers:
         # Legacy Embedded Mode Container (Single container with both SPDK + CSI)
         - name: flint-csi-driver
-          image: "{{ .Values.images.repository }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
+          image: "{{ include "flint-csi-driver-chart.imagePrefix" . }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
           imagePullPolicy: Always
           env:
             - name: CSI_MODE
@@ -648,7 +648,7 @@ spec:
               mountPath: /var/tmp
       {{- end }}
         - name: node-driver-registrar
-          image: "{{ .Values.csiSidecars.repository }}/{{ .Values.csiSidecars.nodeDriverRegistrar.name }}:{{ .Values.csiSidecars.nodeDriverRegistrar.tag }}"
+          image: "{{ include "flint-csi-driver-chart.sidecarPrefix" . }}/{{ .Values.csiSidecars.nodeDriverRegistrar.name }}:{{ .Values.csiSidecars.nodeDriverRegistrar.tag }}"
           imagePullPolicy: Always
           args:
             - "--v=5"
@@ -660,7 +660,7 @@ spec:
             - name: registration-dir
               mountPath: /registration
         - name: liveness-probe
-          image: "{{ .Values.csiSidecars.repository }}/{{ .Values.csiSidecars.livenessprobe.name }}:{{ .Values.csiSidecars.livenessprobe.tag }}"
+          image: "{{ include "flint-csi-driver-chart.sidecarPrefix" . }}/{{ .Values.csiSidecars.livenessprobe.name }}:{{ .Values.csiSidecars.livenessprobe.tag }}"
           imagePullPolicy: Always
           args:
             - "--csi-address=/csi/csi.sock"
