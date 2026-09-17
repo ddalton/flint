@@ -1909,6 +1909,13 @@ mod tests {
     #[tokio::test]
     async fn copy_notes_tier_capture() {
         use std::os::unix::fs::MetadataExt;
+        // Capture is process-global and keyed by (dev, ino), and TempDir
+        // inodes are reused, so a test that enables it and then touches
+        // files collides with whatever tier rig runs beside it — the
+        // marker this clears may be one an evict test is asserting on.
+        // `capture::test_exclusive`: "Every test that queues OR drains
+        // must take this — not just the tier ones."
+        let _excl = crate::tier::capture::test_exclusive();
         crate::tier::capture::force_enable();
         let (handler, _temp) = create_test_handler();
         let ctx = CompoundContext::new(2);
@@ -1949,6 +1956,13 @@ mod tests {
     #[tokio::test]
     async fn clone_notes_tier_capture() {
         use std::os::unix::fs::MetadataExt;
+        // Capture is process-global and keyed by (dev, ino), and TempDir
+        // inodes are reused, so a test that enables it and then touches
+        // files collides with whatever tier rig runs beside it — the
+        // marker this clears may be one an evict test is asserting on.
+        // `capture::test_exclusive`: "Every test that queues OR drains
+        // must take this — not just the tier ones."
+        let _excl = crate::tier::capture::test_exclusive();
         crate::tier::capture::force_enable();
         let (handler, _temp) = create_test_handler();
         let ctx = CompoundContext::new(2);
@@ -1988,6 +2002,13 @@ mod tests {
     #[tokio::test]
     async fn allocate_and_deallocate_note_tier_capture() {
         use std::os::unix::fs::MetadataExt;
+        // Capture is process-global and keyed by (dev, ino), and TempDir
+        // inodes are reused, so a test that enables it and then touches
+        // files collides with whatever tier rig runs beside it — the
+        // marker this clears may be one an evict test is asserting on.
+        // `capture::test_exclusive`: "Every test that queues OR drains
+        // must take this — not just the tier ones."
+        let _excl = crate::tier::capture::test_exclusive();
         crate::tier::capture::force_enable();
         let (handler, temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);

@@ -1225,11 +1225,19 @@ mod tests {
         root: PathBuf,
         mem: Arc<MemoryStore>,
         backend: Arc<dyn StateBackend>,
-        /// Serialises against every other tier rig: the capture pending
-        /// queue is process-global and a drain takes all of it. Last
-        /// field so it outlives the rest of the rig.
-        _excl: std::sync::MutexGuard<'static, ()>,
         orch: FlushOrchestrator,
+        /// Serialises against every other tier rig: the capture pending
+        /// queue is process-global and a drain takes all of it.
+        ///
+        /// GENUINELY last, as in `import.rs`: fields drop in DECLARATION
+        /// order, so anything declared after this tears down with the
+        /// lock already released — which is the window this guard exists
+        /// to close. It was declared before `orch`, under a comment
+        /// claiming it was last, and `FlushOrchestrator`'s teardown
+        /// touches the process-global capture map — so a rig dropping
+        /// here raced the next rig's `reset_for_tests`. Measured at
+        /// 3 failures in 5 full-suite runs.
+        _excl: std::sync::MutexGuard<'static, ()>,
     }
 
     fn rig() -> Rig {

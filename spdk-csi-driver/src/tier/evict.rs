@@ -1346,11 +1346,16 @@ mod tests {
         root: PathBuf,
         mem: Arc<MemoryStore>,
         backend: Arc<dyn StateBackend>,
-        /// Serialises against every other tier rig: the capture pending
-        /// queue is process-global and a drain takes all of it. Last
-        /// field so it outlives the rest of the rig.
-        _excl: std::sync::MutexGuard<'static, ()>,
         orch: FlushOrchestrator,
+        /// Serialises against every other tier rig: the capture pending
+        /// queue is process-global and a drain takes all of it.
+        ///
+        /// GENUINELY last: fields drop in declaration order, so anything
+        /// declared after this would tear down with the lock already
+        /// released — which is the window this guard exists to close.
+        /// Was declared before `orch` under a comment claiming it was
+        /// last, the same way `hydrate.rs` was.
+        _excl: std::sync::MutexGuard<'static, ()>,
     }
 
     fn rig() -> Rig {

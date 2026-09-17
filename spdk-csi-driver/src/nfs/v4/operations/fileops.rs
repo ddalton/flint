@@ -4692,6 +4692,12 @@ mod tests {
     #[test]
     fn setattr_size_notes_tier_capture_shrink_and_grow() {
         use std::os::unix::fs::MetadataExt;
+        // Capture is process-global and keyed by (dev, ino), and TempDir
+        // inodes are reused, so a test that enables it and then touches
+        // files collides with whatever tier rig is running beside it.
+        // `capture::test_exclusive` says so itself: "Every test that
+        // queues OR drains must take this — not just the tier ones."
+        let _excl = crate::tier::capture::test_exclusive();
         crate::tier::capture::force_enable();
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("census-size.bin");
@@ -5376,6 +5382,12 @@ mod tests {
     #[tokio::test]
     async fn a_created_but_never_written_file_is_dirty() {
         use std::os::unix::fs::MetadataExt;
+        // Capture is process-global and keyed by (dev, ino), and TempDir
+        // inodes are reused, so a test that enables it and then touches
+        // files collides with whatever tier rig is running beside it.
+        // `capture::test_exclusive` says so itself: "Every test that
+        // queues OR drains must take this — not just the tier ones."
+        let _excl = crate::tier::capture::test_exclusive();
         crate::tier::capture::force_enable();
         let (handler, temp) = create_test_handler();
         let mut ctx = CompoundContext::new(0);

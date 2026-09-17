@@ -7641,6 +7641,12 @@ mod tests {
     /// let eviction/hydration corrupt through the other name.
     #[tokio::test]
     async fn link_refused_while_tier_enabled() {
+        // Capture is process-global and keyed by (dev, ino), and TempDir
+        // inodes are reused, so a test that enables it and then touches
+        // files collides with whatever tier rig is running beside it.
+        // `capture::test_exclusive` says so itself: "Every test that
+        // queues OR drains must take this — not just the tier ones."
+        let _excl = crate::tier::capture::test_exclusive();
         crate::tier::capture::force_enable();
         let (d, _temp) = create_test_dispatcher();
         let mut ctx = CompoundContext::new(2);
