@@ -121,9 +121,23 @@ if pnfs.get("image", {}).get("tag"):
 PYEOF
 )
 
-tag_exists() {  # <name> <tag> -> 0 if published on Docker Hub
-    curl -fsS -o /dev/null \
-        "https://hub.docker.com/v2/repositories/$hub_ns/$1/tags/$2" 2>/dev/null
+tag_exists() {  # <name> <tag> -> 0 if the tag can actually be PULLED
+    # ASK THE REGISTRY, NOT THE INDEX. This used to curl
+    # hub.docker.com/v2/repositories/.../tags/..., which is Docker Hub's
+    # METADATA INDEX and not the thing `docker pull` talks to. On
+    # 2026-09-17 that index did not register any push to
+    # flint-lite-operator for over 45 minutes — its last_updated stayed
+    # on the previous day — while the same index picked up
+    # flint-forge-syncer within ten minutes, and while
+    # `imagetools inspect` served the new manifest the whole time. The
+    # gate refused five charts whose images were pullable.
+    #
+    # The question this gate exists to ask is "will an install find this
+    # image", so ask the registry that would serve that pull. Note
+    # `docker manifest inspect` is NOT a substitute: it answers from a
+    # local cache and told us the tag existed before it had been pushed
+    # at all.
+    docker buildx imagetools inspect "$hub_ns/$1:$2" >/dev/null 2>&1
 }
 
 # The Docker Hub name a chart's `image` block pulls, for tag_exists.
@@ -196,8 +210,13 @@ in_scope() {  # <space-separated scopes>
 }
 
 tag_digest() {  # <name> <tag> -> the manifest-list digest, or empty
-    curl -fsS "https://hub.docker.com/v2/repositories/$hub_ns/$1/tags/$2" 2>/dev/null \
-        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("digest") or "")' 2>/dev/null
+    # ASK THE REGISTRY, for the same reason as tag_exists above: Hub's
+    # metadata index can sit stale for a repo indefinitely while the
+    # registry serves the tag. On 2026-09-17 this is what stopped the
+    # flint-lean chart — the alias digest comparison 404'd on an index
+    # that had not moved since the previous day, for an image
+    # `docker pull` fetched successfully.
+    docker buildx imagetools inspect "$hub_ns/$1:$2" --format '{{.Manifest.Digest}}' 2>/dev/null
 }
 
 # A chart's checked-in CRD is install-time bootstrap for its operator's
