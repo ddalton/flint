@@ -30,7 +30,7 @@ Everything below was run end to end on 2026-09-15 against the published
 charts `flint-lean` 0.11.0 and `flint-s3-csi` 0.3.0 (images 1.54.0), on a
 kind cluster (Kubernetes 1.36) with MinIO standing in for the bucket — the
 only change for that was `endpoint:` and the keys. The commands pin
-`flint-lean` 0.12.0 and `flint-s3-csi` 0.3.1 (images 1.55.0), this
+`flint-lean` 0.13.0 and `flint-s3-csi` 0.3.2 (images 1.56.0), this
 release: it carries lean syncer fixes and the same install surface.
 Commands are copy-pasteable, not illustrative.
 

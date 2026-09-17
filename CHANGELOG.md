@@ -12,6 +12,63 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.56.0] - 2026-09-17
+
+Every shipped image moves to a Chainguard base, and the two fixes beside
+it are the kind a base migration does not usually carry.
+
+### Changed
+
+- **Every shipped runtime image now builds on Chainguard.** The two
+  operator images take `cgr.dev/chainguard/static`, the rest `wolfi-base`,
+  each pinned by index digest through `ARG BASE_IMAGE`.
+  `scripts/refresh-chainguard-bases.sh` rolls the pins and is deliberately
+  not wired into the release gate. `docker scout`, amd64, C/H/M/L:
+  passthrough-mounter and s3-worker 3/13/10/49 to 0/0/0/0; s3-csi
+  0/0/13/2 to 0/0/0/0 — base packages only, not the Rust dependencies.
+- **The mkfs defaults are pinned back to what node kernels accept.**
+  Wolfi's are NEWER than the kernels flint runs on: mke2fs.conf enables
+  `orphan_file` and `metadata_csum_seed`, and xfsprogs 7.1.1 enables
+  `nrext64`, `exchange` and `parent`, which want 5.19, 6.10 and 6.12. A
+  volume formatted with those and mounted on an older node is not slow,
+  it is refused. ext4 gets a `features =` rewrite; XFS gets a
+  `/usr/local/bin/mkfs.xfs` wrapper passing
+  `-c options=/etc/flint/mkfs.xfs.conf`, which works only because the
+  callers exec mkfs BY NAME. Measured on an i4i.large's real NVMe against
+  a bypass control: via the wrapper `…INOBTCNT,BIGTIME`; bypassing it
+  `…BIGTIME,NREXT64,EXCHANGE,PARENT`. Residual: xfsprogs 7.1.1 no longer
+  sets ATTR2 where Ubuntu's 6.6.0 does — xattrs still store and read back,
+  so it is a flag difference, not a behaviour one, and nothing has yet
+  mounted on a kernel older than 5.18.
+- **All seven charts take `global.imageRegistry`**, and `release.sh` reads
+  chart image names through `values_image_name()`.
+- `flint-passthrough-mounter` takes mount-s3 1.24.0 from AWS's release
+  tarball rather than the .deb, with a per-arch sha256 pinned so a version
+  bump that forgets the checksums fails the build. The binary is
+  byte-identical to the .deb's.
+
+### Fixed
+
+- **lite: a client that stayed mounted accumulated a file descriptor
+  every two SQLite transactions, for as long as it stayed.** READ and
+  WRITE looked the fd cache up by the PRESENTING STATEID alone and opened
+  a fresh descriptor on a miss, so a 4000-transaction soak left 8003
+  descriptors open on ONE file — and a build with the 2026-09-16
+  lease/laundromat fix surgically removed matched it to within 0.03%,
+  because that fix addresses the client that LEAVES. knfsd, same kernel
+  client and same workload, held 2. `adopt_open_fd` reuses the `Arc<File>`
+  the cache entry already carries, which is knfsd's `nf_ref` for free.
+  Measured: with it 17 to 19 descriptors over 4000 transactions, without
+  it 17 to 8021. Adoption is keyed on the inode the path names RIGHT NOW,
+  because the first cut keyed on the PATH and a delete-then-recreate at
+  the same name sent 1500 of 1500 transactions into the deleted inode.
+- **A guard that a comment about the bug could satisfy.** The pnfs
+  file-capability test read the whole Dockerfile for `libcap2-bin`, so it
+  passed on `Dockerfile.pnfs.prebuilt` purely because that file's
+  narrative comment about the original defect contains the words. It now
+  strips comments and accepts either ecosystem's package.
+
+
 ### Fixed
 
 - **lite: the hub never expired a client that went away, so it never gave

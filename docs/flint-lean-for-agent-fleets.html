@@ -122,7 +122,7 @@ boundary rather than your last write. If that is not your shape, see
 charts <code>flint-lean</code> 0.11.0 and <code>flint-s3-csi</code> 0.3.0 (images 1.54.0), on a
 kind cluster (Kubernetes 1.36) with MinIO standing in for the bucket — the
 only change for that was <code>endpoint:</code> and the keys. The commands pin
-<code>flint-lean</code> 0.12.0 and <code>flint-s3-csi</code> 0.3.1 (images 1.55.0), this
+<code>flint-lean</code> 0.12.0 and <code>flint-s3-csi</code> 0.3.1 (images 1.56.0), this
 release: it carries lean syncer fixes and the same install surface. Commands are
 copy-pasteable, not illustrative.</p>
 <hr />
@@ -513,6 +513,6 @@ helm uninstall flint-lean -n flint-system
 <p>Deleting a pod drains its workspace first; deleting the CR does not
 delete your data. The bucket subtree is the durable artifact; a new
 workspace pointed at the same <code>keyPrefix</code> picks it up.</p>
-<footer>flint-lean · charts flint-lean 0.12.0 + flint-s3-csi 0.3.1 · images 1.55.0 · full reference: docs/flint-lean-for-agent-fleets.md</footer>
+<footer>flint-lean · charts flint-lean 0.12.0 + flint-s3-csi 0.3.1 · images 1.56.0 · full reference: docs/flint-lean-for-agent-fleets.md</footer>
 </body>
 </html>
