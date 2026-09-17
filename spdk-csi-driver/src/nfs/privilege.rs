@@ -207,9 +207,26 @@ mod tests {
             let path = root.join(name);
             let text = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("unreadable {}: {e}", path.display()));
+            // Comments STRIPPED before the package check. This guard used
+            // to read the whole file for `libcap2-bin`, and when the base
+            // moved to Wolfi (`libcap-utils`, apk) it failed on
+            // Dockerfile.pnfs and still PASSED on Dockerfile.pnfs.prebuilt
+            // — whose narrative comment about the b52a423 defect happens
+            // to contain the old package name. A guard satisfied by a
+            // comment about the bug it guards against is not a guard.
+            let instructions: String = text
+                .lines()
+                .filter(|l| !l.trim_start().starts_with('#'))
+                .collect::<Vec<_>>()
+                .join("\n");
+            // Either ecosystem's package for setcap: Debian's libcap2-bin
+            // or Wolfi/apk's libcap-utils. The point is that SOMETHING
+            // provides setcap, not which distro we are on this month.
             assert!(
-                text.contains("libcap2-bin"),
-                "{name}: setcap needs libcap2-bin in the base, or the RUN fails at build"
+                instructions.contains("libcap2-bin") || instructions.contains("libcap-utils"),
+                "{name}: setcap needs its package (libcap2-bin on Debian, \
+                 libcap-utils on Wolfi) INSTALLED — not merely mentioned in \
+                 a comment — or the setcap RUN fails at build"
             );
             for bin in ["flint-pnfs-mds", "flint-pnfs-ds"] {
                 assert!(
