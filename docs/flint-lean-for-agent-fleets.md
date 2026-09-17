@@ -64,13 +64,13 @@ kubectl -n flint-system create secret generic s3 \
   --from-literal=AWS_REGION=us-west-1
 
 helm install flint-lean \
-  oci://registry-1.docker.io/dilipdalton/flint-lean --version 0.12.0 \
+  oci://registry-1.docker.io/dilipdalton/flint-lean --version 0.13.0 \
   -n flint-system \
   --set operatorCredentialsSecret=s3
   # add --set endpoint=http://... for a non-AWS store
 
 helm install flint-s3-csi \
-  oci://registry-1.docker.io/dilipdalton/flint-s3-csi --version 0.3.1 \
+  oci://registry-1.docker.io/dilipdalton/flint-s3-csi --version 0.3.2 \
   -n flint-system \
   --set broker.static.secretRef=s3 \
   --set node.region=us-west-1
