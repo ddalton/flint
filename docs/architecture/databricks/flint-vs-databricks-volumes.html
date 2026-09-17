@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>POSIX over object storage — Databricks and flint</title>
+<style>
+  @page { size: A3 landscape; margin: 8mm; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #ffffff; }
+  body {
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    color: #0f172a;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .page { break-after: page; page-break-after: always; }
+  .page:last-child { break-after: auto; page-break-after: auto; }
+  .ph { border-bottom: 2px solid #0f172a; padding-bottom: 5px; margin-bottom: 9px; display: flex; align-items: baseline; justify-content: space-between; }
+  .ph h1 { font-size: 19px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  .ph .kicker { font-size: 10.5px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: #64748b; }
+  .dek { font-size: 11.5px; line-height: 1.45; color: #334155; margin: 0 0 8px; }
+  figure { margin: 0; }
+  figure img { width: 100%; height: auto; max-height: 182mm; object-fit: contain; object-position: left top; display: block; }
+  figcaption { font-size: 11.2px; line-height: 1.45; color: #475569; margin-top: 7px; border-top: 1px solid #e2e8f0; padding-top: 6px; column-count: 3; column-gap: 9mm; }
+  figcaption b { color: #0f172a; font-weight: 600; }
+  figcaption p { margin: 0 0 5px; break-inside: avoid-column; }
+  code { font-family: Menlo, "SF Mono", Consolas, monospace; font-size: 0.92em; color: #0f172a; }
+  a { color: #1d4ed8; text-decoration: none; }
+  .g { display: inline-block; font-size: 8.5px; font-weight: 700; letter-spacing: .06em; padding: 0 4px; border-radius: 6px; border: 1px solid; line-height: 12px; vertical-align: 1px; white-space: nowrap; }
+  .g.doc { color: #2F7D4A; background: #E3F2E8; border-color: #2F7D4A; }
+  .g.seen { color: #2E6FB7; background: #E4EEF9; border-color: #2E6FB7; }
+  .g.infer { color: #A8741A; background: #FFF1D6; border-color: #A8741A; }
+
+  .cover { padding: 26mm 0 0 0; }
+  .cover h1 { font-size: 44px; font-weight: 600; margin: 0 0 10px; letter-spacing: -0.02em; }
+  .cover .sub { font-size: 17px; color: #475569; margin: 0 0 20px; max-width: 330mm; line-height: 1.5; }
+  .notice { max-width: 330mm; border: 1.5px solid #A8741A; background: #FFF8EA; border-radius: 6px; padding: 11px 15px; margin: 0 0 20px; font-size: 13px; line-height: 1.5; color: #4a3a1a; }
+  .notice b { color: #2b2110; }
+  .cover .meta { font-size: 13px; color: #64748b; border-top: 1px solid #e2e8f0; padding-top: 12px; max-width: 330mm; }
+  .cover .meta b { color: #0f172a; }
+  .cover .meta p { margin: 0 0 9px; line-height: 1.5; }
+  .toc { margin-top: 18px; font-size: 13.5px; color: #475569; column-count: 2; column-gap: 30mm; max-width: 330mm; }
+  .toc div { margin-bottom: 7px; break-inside: avoid; }
+  .toc b { color: #0f172a; }
+
+  table.m { width: 100%; border-collapse: collapse; font-size: 12.6px; line-height: 1.4; }
+  table.m th, table.m td { border: 1px solid #dfe3e8; padding: 6px 9px; vertical-align: top; text-align: left; }
+  table.m thead th { color: #fff; font-size: 13.5px; font-weight: 600; padding: 8px 9px; }
+  table.m thead th.k { background: #f1f5f9; color: #475569; }
+  table.m thead th.dbx { background: #3F4B5B; }
+  table.m thead th.pass { background: #7d530c; }
+  table.m thead th.lean { background: #0f7a55; }
+  table.m tbody th { background: #f8fafc; color: #334155; font-weight: 600; width: 13%; }
+  table.m td { width: 29%; color: #1e293b; }
+  table.m tr.band td, table.m tr.band th { background: #fbfcfd; }
+  .after { font-size: 12.6px; line-height: 1.45; color: #475569; margin-top: 8px; }
+  .after p { margin: 0 0 5px; }
+
+  table.e { width: 100%; border-collapse: collapse; font-size: 11px; line-height: 1.36; }
+  table.e th, table.e td { border-bottom: 1px solid #e5e9ee; padding: 4px 6px; vertical-align: top; text-align: left; }
+  table.e thead th { background: #f1f5f9; color: #334155; font-weight: 600; font-size: 11.5px; }
+  table.e td.n { color: #94a3b8; width: 2%; }
+  table.e td.c { width: 50%; color: #1e293b; }
+  table.e td.gr { width: 5%; }
+  table.e td.s { width: 43%; color: #475569; }
+  .efoot { font-size: 11.2px; line-height: 1.45; color: #475569; margin-top: 7px; column-count: 2; column-gap: 12mm; }
+  .efoot p { margin: 0 0 5px; break-inside: avoid-column; }
+  .efoot b { color: #0f172a; }
+</style>
+</head>
+<body>
+
+<!-- ============================================================ COVER -->
+<section class="page cover">
+  <h1>POSIX over object storage — Databricks and flint</h1>
+  <p class="sub">How Databricks mounts buckets for <code>/Volumes</code>, whether it uses a sidecar or a CSI node driver, where its compute runs — Kubernetes and on-premises included — and how the whole design compares with <b>flint passthrough</b> (FUSE) and <b>flint lean</b> (a synced local tree).</p>
+  <div class="notice"><b>Based on public sources only.</b> Everything this document says about Databricks was gleaned from public sources — Databricks documentation, knowledge-base articles, engineering and product blogs, the SIGMOD 2025 Lakeguard paper, a KubeCon EU 2023 talk, community forum threads and third-party write-ups — read on 2026-09-16. Databricks' implementation is closed: nothing here comes from Databricks source code, from a Databricks employee in private, or from a test on a Databricks workspace. Each Databricks claim is graded <span class="g doc">DOC</span> <span class="g seen">SEEN</span> or <span class="g infer">INFER</span>, and page 9 lists the source behind every one. Where Databricks has not said how something works, this document says so rather than guessing silently.</div>
+  <div class="meta">
+    <p><b>The question.</b> Databricks gives its users POSIX paths over object storage through FUSE — <code>/Volumes</code> for Unity Catalog volumes, <code>/Workspace</code> for workspace files, <code>/dbfs</code> for the legacy DBFS — and that covers much of what flint's front ends exist to provide. How does it mount the buckets? Is the daemon a sidecar, a CSI node driver, or something else? Does Databricks run on Kubernetes, and does any of it run on-premises? What carries over to flint, and what does not?</p>
+    <p><b>The grades.</b> <span class="g doc">DOC</span> stated by Databricks — documentation, KB, blog, paper, talk, or a Databricks employee in public. <span class="g seen">SEEN</span> observed or reported by a third party — a forum answer, a blog's command output, a community project. <span class="g infer">INFER</span> inferred in this document from documented behaviour and stated nowhere. flint's claims carry no grade: their source of record is this repository — <code>spdk-csi-driver/src/s3csi/</code>, <code>crates/flint-s3-worker/</code>, <code>lean/</code>, <code>docs/flint-lean-for-agent-fleets.md</code>, <code>docs/plans/csi-node-mount-design.md</code> and the passthrough, lean and ACID posters beside this directory.</p>
+    <p><b>Regenerating.</b> <code>docs/architecture/databricks/databricks-visio.py</code> draws the seven figures as one Visio file (<code>flint-vs-databricks.vsdx</code>), with the family's kit (<code>vsdxkit.py</code>, <code>dataflowkit.py</code>) and its gates; it also writes the SVGs this document references and an EMF per figure for Office. <code>build.sh</code> runs the gates, checks every reference, renders this PDF with Chrome and checks one PDF page per section. Edit the HTML or the script, never the SVGs or the PDF.</p>
+  </div>
+  <div class="toc">
+    <div><b>1 · The short answer</b> — FUSE is a feature of Databricks' managed service; three places a FUSE daemon can live, and which one Databricks and flint use.</div>
+    <div><b>2 · Where Databricks compute runs</b> — VMs on AWS and Azure, GKE on Google Cloud until 2025, Kubernetes with Kata micro-VMs for serverless, and nothing on-premises.</div>
+    <div><b>3 · A classic Databricks node</b> — the three FUSE trees, the Spark runtime that bypasses them, the per-user sandboxes, and the one box nobody outside can draw.</div>
+    <div><b>4 · Six doors, one contract</b> — a volume is a catalog object; the doors that reach it; what the FUSE door refuses, why, and the documented way round.</div>
+    <div><b>5 · flint on Kubernetes</b> — one CSI node plugin, a worker pod per mount, a broker for credentials; passthrough mounts FUSE, lean checks out a local tree.</div>
+    <div><b>6 · Where a write lands</b> — /Volumes and passthrough make the same promise; lean makes a different one, and automates Databricks' own workaround.</div>
+    <div><b>7 · Side by side</b> — Databricks /Volumes, flint passthrough and flint lean across seventeen rows.</div>
+    <div><b>8 · What carries over</b> — why the shared mount does not port to a shared Kubernetes node, what is worth borrowing, and the experiment that would settle the inferences.</div>
+    <div><b>9 · Sources</b> — every Databricks claim, its grade, and where it comes from.</div>
+  </div>
+</section>
+
+<!-- ============================================================ PAGE 1 -->
+<section class="page">
+  <header class="ph">
+    <h1>The short answer</h1>
+    <span class="kicker">1 / 9 · delivery</span>
+  </header>
+  <p class="dek">Databricks' FUSE support is a feature of its managed service: the mounts exist only on compute Databricks provisions and runs, and there is no Databricks FUSE client for your own machines. On classic compute the daemons are started by Databricks' own runtime inside its container — neither a sidecar nor a CSI driver. Where Databricks does run Kubernetes, for serverless, the one CSI driver it has described serves local disk, not a bucket. flint does the Kubernetes-native thing: a CSI node plugin makes the mount, and a worker pod serves it.</p>
+  <figure>
+    <img src="diagrams/01-delivery-models.svg" alt="Three places a FUSE daemon can live. A: a privileged FUSE sidecar injected by a mutating webhook into the tenant's pod, with the S3 credential in the tenant's namespace — flint's delivery until v1.45.0, retired. B: a CSI node plugin, privileged and one per node, that kubelet calls with the pod's ServiceAccount token; it creates a non-root worker pod, hands it the FUSE descriptor, and binds the mount into the tenant pod — flint passthrough and lean today. C: a daemon the platform's runtime starts inside its own container on a VM it provisioned, serving every user on the node — Databricks classic compute. Below, four rows compare where the privilege is, how many mounts there are, how the caller is known and where the credential is.">
+    <figcaption>
+      <p><b>It is a SaaS feature.</b> <code>/Volumes</code>, <code>/Workspace</code> and <code>/dbfs</code> exist on classic clusters — VMs Databricks creates in your cloud account and controls from its hosted control plane — and on serverless compute in Databricks' own account <span class="g doc">DOC</span>. The mounts also lean on hosted services: Unity Catalog decides who may read or write a volume and issues the short-lived storage credentials. Nothing is published to install on your own servers or Kubernetes clusters, and no Databricks compute runs on-premises (page 2). Outside Databricks compute the same files are reached through the Files API, the SDKs and the CLI, or a community FUSE client such as fuse4dbricks <span class="g seen">SEEN</span>.</p>
+      <p><b>Model C, not A or B.</b> Databricks owns the whole machine, so FUSE is plumbing the runtime starts: <code>goofys-dbr</code> for <code>/dbfs</code>, <code>wsfs</code> for <code>/Workspace</code> <span class="g doc">DOC</span>, and a daemon Databricks has not named for <code>/Volumes</code> (page 3). One mount per filesystem serves every user on the node, which is safe only because Databricks creates the users (page 8). No public source shows a sidecar or a CSI driver serving <code>/Volumes</code> in any Databricks shape. Databricks' KubeCon EU 2023 talk does describe a CSI driver of its own — for serverless pods in Kata micro-VMs, handing them local SSD through SPDK vhost-user <span class="g doc">DOC</span> — which is block storage, not a bucket.</p>
+      <p><b>flint is model B, and was model A until v1.45.0.</b> A sidecar needs a privileged container in the tenant's pod (the only way to get <code>Bidirectional</code> mount propagation), runs an image the tenant controls, keeps the credential in the tenant's namespace, and needs a mutating webhook to inject it. The <code>s3.csi.chert.us</code> node plugin removes all four: it performs the one privileged act, <code>mount(2)</code>, itself; hands the descriptor to a non-root worker pod; and leaves the tenant pod declaring nothing but a <code>csi:</code> volume (page 5).</p>
+      <p><b>“FuseMounter.”</b> No public Databricks document, KB article, forum thread or repository found for this document names a component called FuseMounter. If the name appears in a cluster's driver log it is most likely an internal class, and the experiment on page 8 would place it.</p>
+    </figcaption>
+  </figure>
+</section>
+
+<!-- ============================================================ PAGE 2 -->
+<section class="page">
+  <header class="ph">
+    <h1>Where Databricks compute runs</h1>
+    <span class="kicker">2 / 9 · Kubernetes and on-premises</span>
+  </header>
+  <p class="dek">Databricks runs on Kubernetes in some shapes and not in others, and none of it runs on-premises. Classic compute on AWS and Azure is documented as VMs with a host address and a container address. Classic compute on Google Cloud ran on GKE from its 2021 launch until GKE-based compute was deprecated on 2025-03-17 in favour of GCE VMs. Serverless compute runs on Kubernetes in Databricks' own account, each customer pod in a Kata Containers micro-VM. Databricks' own services run on Kubernetes on all three clouds.</p>
+  <figure>
+    <img src="diagrams/02-deployment-shapes.svg" alt="Four shapes of Databricks compute. Classic on AWS and Azure: one VM per cluster node, a host with a host-subnet IP for Databricks management traffic and a runtime container with a container-subnet IP holding Spark and the FUSE daemons. Classic on Google Cloud, 2021 to 2025: a GKE cluster in the customer's project with a system node pool and cluster nodes as pods, deprecated on 2025-03-17 for GCE VMs. Serverless: Kubernetes in Databricks' account on bare-metal cloud machines, each customer pod in a Kata VM, and Databricks' own CSI driver passing SPDK vhost-user local SSD into the VM. On-premises: no Databricks compute; S3-compatible storage behind an OpenSharing endpoint that Databricks' cloud compute reads, and a community FUSE client on your own servers. Rows below say what orchestrates each shape, where its FUSE daemons run, and the source.">
+    <figcaption>
+      <p><b>Classic, AWS and Azure.</b> Every cluster node needs two addresses, “one IP address for the host in the host subnet and one IP address for the container in the container subnet”, and Spark's driver and executors take the container addresses <span class="g doc">DOC</span>. With Container Services the launch order is documented: acquire VMs, pull the image, create a container, copy the runtime in, run init scripts — Docker's <code>CMD</code> and <code>ENTRYPOINT</code> are ignored and the container must start as root <span class="g doc">DOC</span>. No public source says these VMs run a kubelet; asked whether Azure Databricks can use Kubernetes instead of VMs, a Databricks MVP answered “it's VM's and you can't choose” <span class="g seen">SEEN</span>, which describes what customers see rather than what the host runs.</p>
+      <p><b>Classic, Google Cloud.</b> The 2021 launch was “built on Google Kubernetes Engine (GKE) … the first fully container-based Databricks runtime on any cloud” <span class="g doc">DOC</span>, with a system node pool for workspace-wide trusted services <span class="g doc">DOC</span>. A Databricks employee confirmed on the community forum that GKE-based compute was deprecated as of 2025-03-17 and that classic compute on Google Cloud is moving to a pure GCE VM architecture <span class="g doc">DOC</span>. How <code>/dbfs</code> or <code>/Volumes</code> reached those pods was never described.</p>
+      <p><b>Serverless.</b> The KubeCon EU 2023 talk (Shuo Chen, Databricks) describes Kubernetes clusters in Databricks' account running untrusted customer pods beside trusted Databricks services: each customer pod in a Kata micro-VM with dedicated cores, memory and disk partitions on a bare-metal cloud machine, tenants separated by NetworkPolicy and cloud security groups <span class="g doc">DOC</span>. Vanilla volume support through virtio-fs was too slow for Spark's scratch disk, so Databricks wrote its own CSI driver that passes an SPDK vhost-user block device into the VM (Kata Direct Volume) — the same SPDK-and-CSI pairing flint's block driver is built on. The talk says nothing about <code>/Volumes</code>. A host mount reaches a Kata guest only through the shared filesystem the talk found slow, so the <code>/Volumes</code> daemon plausibly runs inside the VM <span class="g infer">INFER</span>. Separately, Databricks' engineering blog says it orchestrates its services with Kubernetes on AWS, Azure and GCP, with OS images that bootstrap cloud VMs into Kubernetes nodes <span class="g doc">DOC</span>.</p>
+      <p><b>On-premises.</b> Databricks sells no on-premises deployment <span class="g seen">SEEN</span>. Its June 2026 storage-ecosystem announcement brings on-premises data <i>to</i> Databricks' cloud compute — a storage partner (MinIO generally available; Pure, Qumulo and VAST in preview) exposes an OpenSharing endpoint that is registered in Unity Catalog — rather than bringing compute or mounts on-premises <span class="g doc">DOC</span>. A “Private Cloud” legal schedule describes platform services “fully deployed into a Customer Cloud Environment” and operated by the customer <span class="g doc">DOC</span>; it has no public technical documentation.</p>
+    </figcaption>
+  </figure>
+</section>
+
+<!-- ============================================================ PAGE 3 -->
+<section class="page">
+  <header class="ph">
+    <h1>A classic Databricks node</h1>
+    <span class="kicker">3 / 9 · anatomy</span>
+  </header>
+  <p class="dek">One classic node carries three FUSE trees, a Spark runtime that uses none of them, and — on standard access mode — a sandbox per user. Unity Catalog, in the control plane, is where a volume's permissions and credentials come from. The one box on the page nobody outside Databricks can draw with confidence is the one this document is about: the <code>/Volumes</code> daemon, drawn dashed.</p>
+  <figure>
+    <img src="diagrams/03-classic-node.svg" alt="A classic Databricks node. The control plane holds the cluster manager, which provisions VMs and creates sandboxes; Unity Catalog, which grants READ and WRITE VOLUME and issues short-lived credentials knowing who asks and what compute asks; and the workspace. The VM holds sandbox containers for each user's Python REPL and UDFs, running as distinct low-privilege Linux users; the Databricks Runtime container with the Spark driver or executor, goofys-dbr serving /dbfs and wsfs serving /Workspace; and a dashed /Volumes FUSE daemon whose name and placement are not public. User code opens /Volumes paths; the daemon asks Unity Catalog and reads or writes whole objects in the volumes' storage; Spark reaches Delta tables and volumes by URI, not through FUSE; goofys-dbr reaches the legacy DBFS root; wsfs reaches the workspace.">
+    <figcaption>
+      <p><b>Three trees, two named.</b> <code>/dbfs</code> is served by <code>goofys-dbr</code>, Databricks' internal fork of the open-source goofys S3 filesystem, extended for Azure storage <span class="g doc">DOC</span>; the KB calls the mode FUSE v2, available since DBR 6.0. <code>/Workspace</code> is served by <code>wsfs</code>, started as <code>/databricks/spark/scripts/fuse/wsfs /Workspace</code> with its log in <code>/databricks/data/logs/wsfs.log</code> <span class="g doc">DOC</span> (the KB article has since been withdrawn). <code>/Volumes</code> is served by a daemon no public source names. Its documented limits — no direct append, no random write, no sparse files — are exactly FUSE v2's, which is the whole basis for inferring goofys lineage <span class="g infer">INFER</span>.</p>
+      <p><b>Spark does not use FUSE.</b> Tables, and volume files read by Spark, are addressed by URI (<code>dbfs:/Volumes/…</code>, <code>s3://…</code>) and go from the JVM to storage directly <span class="g doc">DOC</span>. On standard compute JVM file APIs cannot open <code>/Volumes</code> paths at all, and Scala gets FUSE only on dedicated compute from DBR 14.3 — except in subprocesses it starts <span class="g doc">DOC</span>. FUSE exists for the Python libraries and shell tools that insist on a local path.</p>
+      <p><b>The users are the platform's.</b> On standard access mode, user code — the Python REPL and UDFs — runs in sandbox containers the cluster manager creates and proxies, with egress controlled through network namespaces, as a low-privilege user that cannot reach the instance metadata service <span class="g doc">DOC</span>. A 2022 blog showed two users' notebooks running as distinct Linux users, <code>spark-6166cfd7-…</code> and <code>spark-5a9eefa7-…</code> <span class="g seen">SEEN</span>. DBFS root and DBFS mounts get no FUSE on this compute at all <span class="g doc">DOC</span>: a DBFS mount carried one credential for the whole cluster, which cannot be checked per user.</p>
+      <p><b>What is inferred.</b> Where the <code>/Volumes</code> daemon runs, and how it tells users apart. Either one daemon per node authorises each request by the caller's uid — every FUSE request carries the caller's uid, gid and pid — or each sandbox gets its own daemon carrying its user's identity <span class="g infer">INFER</span>. Both fit the public record. Either way the answer comes from Unity Catalog, which the Lakeguard paper says identifies “the individual identity and compute type” behind every storage-credential request <span class="g doc">DOC</span>.</p>
+    </figcaption>
+  </figure>
+</section>
+
+<!-- ============================================================ PAGE 4 -->
+<section class="page">
+  <header class="ph">
+    <h1>Six doors, one contract</h1>
+    <span class="kicker">4 / 9 · the volume</span>
+  </header>
+  <p class="dek">FUSE is one of six ways into a volume, and every one of them is authorised by Unity Catalog grants on the volume. The FUSE door is the narrowest: it writes whole files front to back and refuses the rest — and Databricks documents the refusals, the reason for them, and the way round.</p>
+  <figure>
+    <img src="diagrams/04-volume-doors.svg" alt="Six doors to one volume, each authorised by Unity Catalog: FUSE under /Volumes on Databricks compute; Spark and dbutils.fs by URI; the Files API over REST, used by the SDKs, CLI and Databricks Apps; SQL connectors; the workspace UI; and external engines through temporary volume credentials. On the right, what the FUSE door refuses: sequential write then close becomes one object; append fails with errno 95; random writes are unsupported so zip and Excel writers fail; sparse files are unsupported; JVM file APIs cannot open /Volumes on standard compute; DBFS has no FUSE on standard compute. The documented way round: write under /local_disk0, then copy into the volume; for cross-session appends, ask for an NFS mount.">
+    <figcaption>
+      <p><b>A volume is a catalog object, not a mount.</b> A volume is a governed path — managed, in Unity Catalog's storage location, or external, in a location the customer registered — and <code>/Volumes/&lt;catalog&gt;/&lt;schema&gt;/&lt;volume&gt;</code> is the catalog's own namespace <span class="g doc">DOC</span>. So one mount on a node covers every volume a user can see, no mount is made per volume, and no credential lives in any mount's configuration. A user needs <code>USE CATALOG</code>, <code>USE SCHEMA</code> and <code>READ VOLUME</code>, plus <code>WRITE VOLUME</code> to write; an external engine also needs <code>EXTERNAL USE SCHEMA</code> and receives a credential scoped to the volume's path from <code>temporary-volume-credentials</code>, in Public Preview <span class="g doc">DOC</span>.</p>
+      <p><b>The other doors reach beyond Databricks compute.</b> The Files API takes <code>PUT</code> and <code>GET</code> on <code>/api/2.0/fs/files/Volumes/…</code>, up to 5 GiB a request, and is what the SDKs and the CLI use <span class="g doc">DOC</span>. A Databricks App is granted a volume as a resource, and its service principal receives <code>USE CATALOG</code>, <code>USE SCHEMA</code> and <code>READ</code> or <code>WRITE VOLUME</code> <span class="g doc">DOC</span>; a community thread reports that writing <code>/dbfs/Volumes</code> from inside an App fails with Errno 5 <span class="g seen">SEEN</span>. SQL connectors can <code>PUT</code>, <code>GET</code> and <code>REMOVE</code>, while the notebook and SQL editor run <code>LIST</code> only; the UI uploads files up to 5 GB <span class="g doc">DOC</span>.</p>
+      <p><b>The contract is small on purpose, and written down.</b> Sequential write then close is supported; append fails with errno 95, random writes are not supported (so zip and Excel writers fail), and sparse files are not supported <span class="g doc">DOC</span>. The KB gives the reason: the underlying storage has no append, so honouring one would mean downloading the object, changing it and uploading it again, and on a mount shared across nodes concurrent appends could corrupt the file. The documented way round is to write under <code>/local_disk0</code> and copy the result into the volume; for appends that must outlive a session, the KB says to ask the account team for an NFS mount. What is worth noticing is not the limit — every S3 FUSE shares it — but that the limit, its reason and the workaround are all published.</p>
+    </figcaption>
+  </figure>
+</section>
+
+<!-- ============================================================ PAGE 5 -->
+<section class="page">
+  <header class="ph">
+    <h1>flint on Kubernetes</h1>
+    <span class="kicker">5 / 9 · passthrough and lean</span>
+  </header>
+  <p class="dek">flint cannot own the machine, so it uses the hook Kubernetes gives a storage system: a CSI node plugin that kubelet calls before a pod's containers start. Passthrough and lean share the plugin, the worker namespace and the broker, and differ in one thing — whether the pod gets a FUSE mount or a plain local directory. Both run against any S3-compatible store, in any cluster, on-premises included.</p>
+  <figure>
+    <img src="diagrams/05-flint-on-kubernetes.svg" alt="flint on one Kubernetes node. The s3.csi.chert.us node plugin, privileged and one per node, is called by kubelet with the pod's ServiceAccount token. In the tenant namespace under PodSecurity restricted, a passthrough pod has /mnt/s3 as a FUSE mount and a lean pod has /workspace as plain local disk; the plugin binds each into its pod. In flint-workers, a non-root mount-s3 worker serves the /dev/fuse descriptor the plugin handed it over SCM_RIGHTS, and a flint-sync worker checks the tree out before any container starts. flint-s3-broker gives short-lived keys to workers only. The mount-s3 worker issues GET and PUT against prefix/key objects; the flint-sync worker uploads files/path objects, then one CAS on .flint/lean/current, in an S3-compatible bucket such as AWS S3, MinIO or Ozone.">
+    <figcaption>
+      <p><b>One privileged act, done by the plugin.</b> kubelet calls <code>NodePublishVolume</code> with a ServiceAccount token bound to the pod. The plugin resolves the <code>FlintPassthroughMount</code> or <code>FlintLeanWorkspace</code> the pod names in its <code>volumeAttributes</code>, in the token's own namespace, and refuses unless <code>spec.consumers</code> lists the pod's ServiceAccount — absent means deny. For passthrough it opens <code>/dev/fuse</code> and calls <code>mount(2)</code> itself, then passes the descriptor over <code>SCM_RIGHTS</code> to a worker pod it creates in <code>flint-workers</code>, where an unchanged <code>mount-s3</code> serves it with no privilege. The result is bound into the tenant pod, which stays admissible under PodSecurity <code>restricted</code>.</p>
+      <p><b>Lean skips FUSE entirely.</b> Its worker is <code>flint-sync</code>. It checks the tree out to local disk inside <code>NodePublishVolume</code>, which kubelet blocks every container on, so the agent's first line sees a complete tree. It publishes a boundary at its cadence or when the agent writes <code>.flint/publish</code> — the changed files uploaded, then one CAS on <code>.flint/lean/current</code> citing them all — and drains in <code>NodeUnpublishVolume</code>, which runs only after every container has exited. The pod sees real local POSIX, with no interception at all.</p>
+      <p><b>Credentials reach workers only.</b> <code>flint-s3-broker</code>, one Deployment, verifies the token online (TokenReview), checks a registration nonce the pod cannot mint and <code>spec.consumers</code>, and issues short-lived keys on a loopback credentials endpoint only the worker can reach; what a given pod is actually given is decided by the broker's backend. No credential and no privileged container exists in the tenant namespace. This is flint's counterpart to Unity Catalog's credential issuing, cut to what one mount needs: an identity in, short-lived keys out.</p>
+      <p><b>Runs anywhere.</b> Nothing here needs a hosted control plane: the charts install into any Kubernetes cluster, and the bucket can be AWS S3, MinIO or Apache Ozone. This is the one comparison that is not close. Databricks' mounts do not exist off Databricks' own compute; flint's exist wherever there is a Kubernetes node and an S3 endpoint, including a data center with no public cloud in it.</p>
+    </figcaption>
+  </figure>
+</section>
+
+<!-- ============================================================ PAGE 6 -->
+<section class="page">
+  <header class="ph">
+    <h1>Where a write lands</h1>
+    <span class="kicker">6 / 9 · the write path</span>
+  </header>
+  <p class="dek">Databricks <code>/Volumes</code> and flint passthrough make the same promise, because both are FUSE over whole objects: a file becomes an object when it is closed, and anything that needs to edit an object in place is refused. flint lean makes a different promise: a write is visible at once on local disk and durable at the next boundary, and nothing is refused.</p>
+  <figure>
+    <img src="diagrams/06-write-path.svg" alt="Three write paths. Databricks /Volumes: user code writes and closes, the /Volumes FUSE daemon writes sequentially and the object is written whole, and readers see the new file once written; refused: append with errno 95, random write, sparse files, with the documented workaround of writing under /local_disk0 and copying. flint passthrough: the tenant pod writes and closes, the mount-s3 worker completes the upload on close or fsync, and the object is old or new, never torn; refused: rename, append, in-place modification. flint lean: the agent pod writes, appends, renames, mmaps and runs sqlite and git on local disk; the flint-sync worker at its cadence or on .flint/publish uploads the changed files then makes one CAS citing them all; nothing is refused, at the cost of a recovery point at the last boundary, a tree that must fit the node's disk and about 250k files. A note says flint lean is Databricks' documented workaround done automatically for a whole tree.">
+    <figcaption>
+      <p><b>Same contract, two implementations.</b> A write through <code>/Volumes</code> or through passthrough goes to a FUSE daemon that writes one object and completes it at close <span class="g infer">INFER</span> for Databricks' daemon. Until then no other reader sees the new file; after it, the store's per-object guarantees hold — the old object or the new one, never a torn one. Neither has a transaction across files: three edited files are three independent objects landing in close order, and a reader between them sees a mix. Passthrough documents the same refusals Databricks does, plus one more, rename — and, like Databricks, says so in its own documentation rather than leaving users to find out.</p>
+      <p><b>Lean inverts the trade.</b> The agent writes local disk, so append, random write, rename, <code>mmap</code>, sqlite and git all work at local speed. Durability waits for the boundary — at the worker's cadence, or when the agent writes <code>.flint/publish</code>, whose ack says when the bytes are in S3 — and the boundary is atomic: the changed files are uploaded, then one CAS on the manifest pointer cites them all, so a reader sees the whole boundary or none of it. Lean's own guide states the cost: the recovery point is the last boundary, not the last write; the tree must fit the node's disk; and v1 is capped near 250k files.</p>
+      <p><b>Lean is Databricks' workaround, automated.</b> For every write <code>/Volumes</code> refuses, Databricks tells users to work on local disk and copy the result in. Lean does exactly that for a whole tree, continuously, and adds what a hand-made copy lacks: a manifest that makes the copy one transaction, a lease that says who may write, and the losing writer's bytes kept when two writers touch one file. Where that shape is wrong — a tree larger than the node's disk, or lazy reads of a slice of a huge dataset — passthrough's contract, which is Databricks' contract, is the right one.</p>
+    </figcaption>
+  </figure>
+</section>
+
+<!-- ============================================================ PAGE 7 -->
+<section class="page">
+  <header class="ph">
+    <h1>Side by side</h1>
+    <span class="kicker">7 / 9 · the matrix</span>
+  </header>
+  <p class="dek">Databricks <code>/Volumes</code> against flint's two object-store front ends. Grades apply to the Databricks column only; flint's cells are taken from this repository.</p>
+  <table class="m">
+    <thead>
+      <tr><th class="k"></th><th class="dbx">Databricks /Volumes</th><th class="pass">flint passthrough</th><th class="lean">flint lean</th></tr>
+    </thead>
+    <tbody>
+      <tr><th>Where it runs</th><td>Databricks-operated compute only: classic VMs in your cloud account, serverless in Databricks' account <span class="g doc">DOC</span></td><td>any Kubernetes cluster, in a cloud or on-premises</td><td>any Kubernetes cluster, in a cloud or on-premises</td></tr>
+      <tr class="band"><th>Control plane</th><td>hosted by Databricks: cluster manager, Unity Catalog <span class="g doc">DOC</span></td><td>nothing hosted: a CRD, the node plugin and the broker, in your cluster</td><td>the same, plus a thin optional operator</td></tr>
+      <tr><th>Backing store</th><td>S3, ADLS or GCS; on-premises storage only as a data source for cloud compute, over OpenSharing <span class="g doc">DOC</span></td><td>any S3-compatible store: AWS S3, MinIO, Ozone</td><td>any S3-compatible store: AWS S3, MinIO, Ozone</td></tr>
+      <tr class="band"><th>How the mount arrives</th><td>started by Databricks' runtime; no public source shows a sidecar or CSI driver serving it <span class="g doc">DOC</span> <span class="g infer">INFER</span></td><td>a CSI inline volume: the node plugin mounts, a worker pod serves</td><td>a CSI inline volume: the worker checks the tree out before any container starts</td></tr>
+      <tr><th>Privileged part</th><td>Databricks' runtime, on a VM Databricks provisioned</td><td>the node plugin, one per node</td><td>the node plugin, one per node</td></tr>
+      <tr class="band"><th>Mounts</th><td>one <code>/Volumes</code> per node for every user and volume <span class="g infer">INFER</span></td><td>one per pod</td><td>one per pod</td></tr>
+      <tr><th>Caller identity</th><td>a Linux user the platform created <span class="g seen">SEEN</span>; how the daemon checks it <span class="g infer">INFER</span></td><td>the pod's ServiceAccount, asserted by kubelet, checked against <code>spec.consumers</code></td><td>the same</td></tr>
+      <tr class="band"><th>Authorisation</th><td>Unity Catalog grants: <code>READ VOLUME</code>, <code>WRITE VOLUME</code> <span class="g doc">DOC</span></td><td><code>spec.consumers</code>; the broker's backend decides what a pod is given</td><td>the same, plus the workspace's claim and lease</td></tr>
+      <tr><th>Credential</th><td>short-lived, scoped to a path, from Unity Catalog <span class="g doc">DOC</span></td><td>short-lived keys from <code>flint-s3-broker</code>, to the worker only</td><td>the same</td></tr>
+      <tr class="band"><th>Data path</th><td>FUSE: each operation is an object-store request <span class="g infer">INFER</span></td><td>FUSE: each operation is an S3 request</td><td>local disk; S3 only at checkout and at a boundary</td></tr>
+      <tr><th>Refused</th><td>append (errno 95), random write, sparse files <span class="g doc">DOC</span></td><td>rename, append, in-place modification</td><td>nothing</td></tr>
+      <tr class="band"><th>Other readers see a write</th><td>when the file is closed <span class="g infer">INFER</span></td><td>when the file is closed</td><td>at the next boundary; at once on the pod's own disk</td></tr>
+      <tr><th>Atomic unit</th><td>one object</td><td>one object</td><td>one boundary: N files, one CAS</td></tr>
+      <tr class="band"><th>Two writers, one file</th><td>last close wins <span class="g infer">INFER</span></td><td>last close wins, undetected</td><td>last boundary wins, the loser's bytes kept</td></tr>
+      <tr><th>Size</th><td>bucket-sized, read on demand</td><td>bucket-sized, read on demand</td><td>must fit the node's disk; about 250k files in v1</td></tr>
+      <tr class="band"><th>Other doors to the bytes</th><td>Files API, Spark and <code>dbutils.fs</code>, SQL connectors, the UI, credential vending <span class="g doc">DOC</span></td><td>the bucket itself: any S3 client, with its own credential</td><td><code>flint-lean-gateway</code>, as a REST service or a crate</td></tr>
+      <tr><th>Where it wins</th><td>zero setup for the user; one namespace for every volume; one authority for grants and credentials</td><td>no copy and no disk limit; plain objects other tools can read</td><td>full POSIX at local speed; a transaction per boundary</td></tr>
+    </tbody>
+  </table>
+  <div class="after">
+    <p><b>The other two front ends.</b> flint lite (an NFS hub per share) is the answer when two pods must see one live tree, with byte-range locks — the shape Databricks reaches for when its KB tells a customer to ask for an NFS mount. flint forge (git over S3) has no Databricks counterpart.</p>
+  </div>
+</section>
+
+<!-- ============================================================ PAGE 8 -->
+<section class="page">
+  <header class="ph">
+    <h1>What carries over</h1>
+    <span class="kicker">8 / 9 · lessons</span>
+  </header>
+  <p class="dek">The part of Databricks worth copying is not its FUSE daemon, which by every public sign is a goofys descendant with goofys' limits. It is everything around the mount: identity from the platform, grants and short-lived credentials from one authority, a small contract written down, and other doors to the same bytes. flint already has most of that in Kubernetes form. The one thing that does not carry over is the shared mount.</p>
+  <figure>
+    <img src="diagrams/07-identity.svg" alt="Why one shared mount is safe on Databricks and not on a shared Kubernetes node. On a Databricks node, user A's and user B's code run as Linux users Databricks created; the kernel's FUSE request carries the caller's uid, gid and pid; a /Volumes daemon maps the uid to the user and that user's Unity Catalog grants — a uid names a person because nobody but the platform can pick one. On a shared Kubernetes node, tenant 1's and tenant 2's pods both set runAsUser 1000; the FUSE request carries uid 1000 twice; one shared node daemon cannot tell the tenants apart. So flint mounts once per pod, and identity is the ServiceAccount token kubelet hands NodePublishVolume, checked against spec.consumers; NodePublishVolume never sees the pod's securityContext, so a passthrough mount is one uid per pod.">
+    <figcaption>
+      <p><b>Keep the mount per pod.</b> Databricks can serve every user from one mount because a uid on its node names a person: the platform created both the user and the sandbox <span class="g infer">INFER</span>. On a shared Kubernetes node every pod picks its own <code>runAsUser</code>, so two tenants can present the same uid and a shared daemon could not tell them apart. Kubernetes' version of “the platform created the user” is the pod-bound ServiceAccount token kubelet hands to <code>NodePublishVolume</code> — and it identifies a pod, not a user inside one. That is why flint mounts per pod, and why a passthrough mount is one uid rather than per user.</p>
+      <p><b>Worth borrowing: scope credentials by what the compute can enforce.</b> Unity Catalog issues storage credentials knowing both the user and the compute type <span class="g doc">DOC</span>, so compute that cannot enforce a policy can be given less. flint lean already reports <code>readEnforcement: cooperative</code> for a workspace whose read-only posture is not enforced. Whether <code>flint-s3-broker</code> issues narrower keys in that case was not checked for this document, and is worth checking.</p>
+      <p><b>Already matched: the contract and the other doors.</b> Databricks writes down what FUSE refuses and how to get around it; the passthrough poster and lean's “when not to use lean” table do the same. Databricks gives code that cannot mount a Files API; flint's counterparts are the bucket itself for passthrough, <code>flint-lean-gateway</code> for lean, and forge's file API. Where flint is ahead is portability: no hosted control plane, any S3-compatible store, on-premises included.</p>
+      <p><b>Settling the inferences.</b> Three claims here are inferred: the <code>/Volumes</code> daemon's goofys lineage, where it runs, and how it tells users apart. One notebook cell on a standard-access cluster and one on a dedicated cluster would settle all three, and would place “FuseMounter” if it exists: <code>%sh id; mount | grep -i fuse; ps -eo user,pid,args | grep -iE 'fuse|goofys|wsfs'</code>. The same cell in a serverless notebook, with <code>cat /proc/mounts</code>, would show how a Kata pod gets <code>/Volumes</code>. It needs a Databricks workspace; none was used for this document.</p>
+    </figcaption>
+  </figure>
+</section>
+
+<!-- ============================================================ PAGE 9 -->
+<section class="page">
+  <header class="ph">
+    <h1>Sources</h1>
+    <span class="kicker">9 / 9 · evidence</span>
+  </header>
+  <p class="dek">Every Databricks claim in this document, its grade, and the public source it rests on. All sources were read on 2026-09-16. Nothing here comes from Databricks source code, a private conversation, or a test on a Databricks workspace.</p>
+  <table class="e">
+    <thead><tr><th></th><th>claim</th><th>grade</th><th>source</th></tr></thead>
+    <tbody>
+      <tr><td class="n">1</td><td class="c"><code>/Volumes/&lt;catalog&gt;/&lt;schema&gt;/&lt;volume&gt;</code> is a FUSE mount giving POSIX paths to Python libraries and tools; JVM file APIs cannot use it; Scala FUSE only on dedicated compute from DBR 14.3</td><td class="gr"><span class="g doc">DOC</span></td><td class="s"><a href="https://docs.databricks.com/aws/en/files/">Work with files on Databricks</a></td></tr>
+      <tr><td class="n">2</td><td class="c">No direct append or random write (zip, Excel); no sparse files, copy with <code>cp --sparse=never</code>; UI uploads up to 5 GB; the <code>/local_disk0</code> workaround</td><td class="gr"><span class="g doc">DOC</span></td><td class="s"><a href="https://docs.databricks.com/aws/en/volumes/volume-files">Work with files in Unity Catalog volumes</a></td></tr>
+      <tr><td class="n">3</td><td class="c">Append fails with errno 95; FUSE v2 (DBR 6.0+) has no append or random write; why; ask for an NFS mount for cross-session appends</td><td class="gr"><span class="g doc">DOC</span></td><td class="s"><a href="https://kb.databricks.com/dbfs/errno95-operation-not-supported">KB: Operation not supported during append</a></td></tr>
+      <tr><td class="n">4</td><td class="c"><code>goofys-dbr</code> is Databricks' internal fork of goofys, adding Azure storage; <code>/databricks/spark/scripts/fuse/wsfs /Workspace</code> logging to <code>/databricks/data/logs/wsfs.log</code></td><td class="gr"><span class="g doc">DOC</span></td><td class="s">KB: Use Databricks Repos with Docker container services — withdrawn (404 on 2026-09-16); text as quoted by the search index</td></tr>
+      <tr><td class="n">5</td><td class="c">Standard compute runs user commands as a low-privilege user, cannot reach the instance metadata service, and gives DBFS root and mounts no FUSE</td><td class="gr"><span class="g doc">DOC</span></td><td class="s"><a href="https://docs.databricks.com/aws/en/compute/standard-limitations">Standard compute limitations</a></td></tr>
+      <tr><td class="n">6</td><td class="c">Shared-access notebooks run as distinct Linux users, <code>spark-6166cfd7-…</code> and <code>spark-5a9eefa7-…</code> (2022)</td><td class="gr"><span class="g seen">SEEN</span></td><td class="s"><a href="https://copdips.com/2022/09/databricks-cluster-access-mode.html">copdips: Databricks cluster access mode</a></td></tr>
+      <tr><td class="n">7</td><td class="c">User code runs in sandbox containers the cluster manager creates and proxies; egress via network namespaces; Spark reached over Spark Connect; Unity Catalog sees identity and compute type on credential requests</td><td class="gr"><span class="g doc">DOC</span></td><td class="s"><a href="https://www.databricks.com/jp/sites/default/files/2025-06/databricks-lakeguard-supporting-fine-grained-access-control-multi-user-capabilities-apache-spark-workloads.pdf">Lakeguard, SIGMOD 2025</a> · <a href="https://docs.databricks.com/aws/en/compute/custom-containers-standard">Container Services for standard compute</a></td></tr>
+      <tr><td class="n">8</td><td class="c">Volume credentials for external engines: <code>temporary-volume-credentials</code>, path-scoped, expiring, <code>EXTERNAL USE SCHEMA</code>, Public Preview</td><td class="gr"><span class="g doc">DOC</span></td><td class="s"><a href="https://docs.databricks.com/aws/en/external-access/credential-vending">Unity Catalog credential vending</a></td></tr>
+      <tr><td class="n">9</td><td class="c">Files API: <code>/api/2.0/fs/files</code> with volume paths, up to 5 GiB per upload, ranged GET</td><td class="gr"><span class="g doc">DOC</span></td><td class="s"><a href="https://docs.databricks.com/api/workspace/files">Files API reference</a></td></tr>
+      <tr><td class="n">10</td><td class="c">Apps get a volume as a resource; the service principal receives USE CATALOG, USE SCHEMA, READ or WRITE VOLUME</td><td class="gr"><span class="g doc">DOC</span></td><td class="s"><a href="https://docs.databricks.com/aws/en/dev-tools/databricks-apps/uc-volumes">Add a Unity Catalog volume resource to an app</a></td></tr>
+      <tr><td class="n">11</td><td class="c">Writing <code>/dbfs/Volumes</code> from a Databricks App fails with Errno 5</td><td class="gr"><span class="g seen">SEEN</span></td><td class="s"><a href="https://community.databricks.com/t5/generative-ai/error-when-logging-artifact-oserror-errno-5-input-output-error/td-p/113968">community thread 113968</a></td></tr>
+      <tr><td class="n">12</td><td class="c">Two IP addresses per classic node: host subnet and container subnet</td><td class="gr"><span class="g doc">DOC</span></td><td class="s"><a href="https://learn.microsoft.com/en-us/azure/databricks/security/network/classic/vnet-inject">Azure Databricks VNet injection</a></td></tr>
+      <tr><td class="n">13</td><td class="c">Container Services launch order; <code>CMD</code> and <code>ENTRYPOINT</code> ignored; the container must start as root</td><td class="gr"><span class="g doc">DOC</span></td><td class="s"><a href="https://docs.databricks.com/aws/en/compute/custom-containers">Container Services</a> · <a href="https://kb.databricks.com/en_US/clusters/custom-docker-requires-root">KB: custom Docker image requires root</a></td></tr>
+      <tr><td class="n">14</td><td class="c">Classic compute is VMs and customers cannot choose Kubernetes; SQL Serverless uses Kubernetes</td><td class="gr"><span class="g seen">SEEN</span></td><td class="s"><a href="https://community.databricks.com/t5/get-started-discussions/in-azure-databricks-for-when-to-use-kubernetes-instead-of/td-p/74956">community thread 74956</a> (a Databricks MVP)</td></tr>
+      <tr><td class="n">15</td><td class="c">Databricks on Google Cloud “built on GKE … the first fully container-based Databricks runtime on any cloud” (2021-02-17)</td><td class="gr"><span class="g doc">DOC</span></td><td class="s"><a href="https://www.databricks.com/blog/2021/02/17/announcing-the-launch-of-databricks-on-google-cloud.html">Databricks on Google Cloud launch</a></td></tr>
+      <tr><td class="n">15b</td><td class="c">A GKE cluster bootstrapped with a system node pool for workspace-wide trusted services</td><td class="gr"><span class="g doc">DOC</span></td><td class="s">Databricks blog “How We Built Databricks on Google Kubernetes Engine (GKE)”, 2021-08-06 — the URL now redirects; text as quoted by the search index</td></tr>
+      <tr><td class="n">16</td><td class="c">GKE-based compute deprecated as of 2025-03-17; classic compute on Google Cloud moving to GCE VMs</td><td class="gr"><span class="g doc">DOC</span></td><td class="s"><a href="https://community.databricks.com/t5/administration-architecture/how-do-i-get-rid-of-the-gke-cluster/td-p/111137">community thread 111137</a> (a Databricks employee)</td></tr>
+      <tr><td class="n">17</td><td class="c">Serverless on Kubernetes in Databricks' account; customer pods in Kata micro-VMs; NetworkPolicy and security groups; virtio-fs too slow; Databricks' own CSI driver with SPDK vhost-user and Kata Direct Volume</td><td class="gr"><span class="g doc">DOC</span></td><td class="s"><a href="https://kccnceu2023.sched.com/event/1Hydz/experience-with-hard-multi-tenancy-in-kubernetes-using-kata-containers-shuo-chen-databricks">KubeCon EU 2023, Shuo Chen</a> (slides linked there)</td></tr>
+      <tr><td class="n">18</td><td class="c">Databricks orchestrates its services on Kubernetes clusters on AWS, Azure and GCP; OS images bootstrap cloud VMs into Kubernetes nodes</td><td class="gr"><span class="g doc">DOC</span></td><td class="s"><a href="https://www.databricks.com/blog/scalable-kubernetes-upgrade-using-operators">Kubernetes node upgrade using operators</a> · <a href="https://www.databricks.com/blog/intelligent-kubernetes-load-balancing-databricks">Intelligent Kubernetes load balancing</a></td></tr>
+      <tr><td class="n">19</td><td class="c">No on-premises deployment of Databricks</td><td class="gr"><span class="g seen">SEEN</span></td><td class="s"><a href="https://community.databricks.com/t5/administration-architecture/databricks-on-prem-version/td-p/140642">community thread 140642</a></td></tr>
+      <tr><td class="n">20</td><td class="c">Storage ecosystem (2026-06-10): on-premises data reached by Databricks' cloud compute over OpenSharing; MinIO GA, Pure, Qumulo, VAST in preview</td><td class="gr"><span class="g doc">DOC</span></td><td class="s"><a href="https://www.databricks.com/blog/announcing-databricks-storage-ecosystem-governing-enterprise-data-estate-wherever-it-lives">Announcing the Databricks storage ecosystem</a></td></tr>
+      <tr><td class="n">21</td><td class="c">“Private Cloud”: platform services fully deployed into a customer cloud environment, operated by the customer</td><td class="gr"><span class="g doc">DOC</span></td><td class="s"><a href="https://www.databricks.com/legal/private-cloud-schedule">Private Cloud Schedule</a></td></tr>
+      <tr><td class="n">22</td><td class="c">A community FUSE client mounts <code>/Volumes</code> outside Databricks over the Files API, with personal access tokens</td><td class="gr"><span class="g seen">SEEN</span></td><td class="s"><a href="https://github.com/zeehio/fuse4dbricks">zeehio/fuse4dbricks</a></td></tr>
+      <tr><td class="n">23</td><td class="c">The <code>/Volumes</code> daemon descends from goofys; where it runs; how it tells users apart; that <code>/Volumes</code> readers see a file at close and concurrent writers are last-close-wins</td><td class="gr"><span class="g infer">INFER</span></td><td class="s">from rows 1–7; settled by the notebook cell on page 8</td></tr>
+    </tbody>
+  </table>
+  <div class="efoot">
+    <p><b>What was searched and not found.</b> A Databricks component named “FuseMounter”; a public description of how <code>/Volumes</code> is served on serverless compute or reached a GKE pod; any sidecar or CSI driver serving object storage in any Databricks shape. Absence from public sources is not absence from the product.</p>
+    <p><b>flint's side.</b> Every flint claim comes from this repository: <code>spdk-csi-driver/src/s3csi/</code> (the node plugin, <code>fuse.rs</code>, the broker), <code>crates/flint-s3-worker/</code>, <code>lean/</code>, <code>docs/flint-lean-for-agent-fleets.md</code> (the cost table and “when not to use lean”), <code>docs/plans/csi-node-mount-design.md</code> (why the sidecar was retired), and the posters in <code>docs/architecture/passthrough/</code>, <code>lean/</code> and <code>acid/</code>.</p>
+  </div>
+</section>
+
+</body>
+</html>

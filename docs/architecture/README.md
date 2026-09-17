@@ -10,6 +10,24 @@ Start with **`flint-front-ends-architecture.pdf`** (13 pages, A3 landscape).
 
 The forge front end has its own document under **`forge/`** — `forge/flint-forge-architecture.pdf` (8 pages, A3 landscape): the components on three planes (data plane, durable path, control plane), the push transaction and its theorems, the lease, the operator and the door, the boundaries and every campaign, and the prior art with a verdict. It is drawn with this deck's kit (`forge/forge-diagrams.py` imports `diagrams.py`) and built by `forge/build.sh` with the same checks.
 
+## The Databricks comparison
+
+**`databricks/flint-vs-databricks-volumes.pdf`** (10 pages, A3 landscape) asks how Databricks
+gives its users POSIX paths over object storage — `/Volumes`, `/Workspace`, `/dbfs` — whether
+the daemon is a sidecar or a CSI node driver, where Databricks compute runs (Kubernetes and
+on-premises included), and how the whole design compares with flint passthrough and flint lean.
+It is built from **public sources only**: every Databricks claim carries a grade — DOC (Databricks
+said it), SEEN (a third party observed it) or INFER (inferred in the document) — and the last
+page gives the source behind each one.
+
+Its seven figures are Visio pages: `databricks/databricks-visio.py` writes
+`flint-vs-databricks.vsdx`, an EMF per figure and the SVGs the HTML references, drawn with this
+directory's kit and gated by its checks. `databricks/build.sh` renders the PDF and checks one page
+per section; `build.sh --geometry` measures every line of figure text against its box in Chrome.
+That probe reads `<path>` as well as `<rect>`: every symbol the kit draws — a `rect` node, a
+cylinder, a block arrow — is a path, and a `<rect>`-only probe passed a line of capitals touching
+its box because it never saw the box. It failed on that line once it could.
+
 ## The one-page data-flow posters
 
 Beside the deck there is one **data-flow poster per front end** — a single sheet you
