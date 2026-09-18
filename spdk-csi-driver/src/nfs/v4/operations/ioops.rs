@@ -672,6 +672,13 @@ impl IoOperationHandler {
         path: &PathBuf,
         require_writable: bool,
         cacheable: bool,
+        // `cur_ino`: the inode `path` names now, resolved ONCE by the
+        // caller. The hot path already stats to check its own cache
+        // entry, and this used to stat the same path again — two
+        // `newfstatat` per READ/WRITE miss for one question. `None`
+        // means the path did not resolve: adopt nothing and fall
+        // through to the ordinary open, which is also the create case.
+        cur_ino: Option<u64>,
     ) -> Option<Arc<File>> {
         // BY INODE, NEVER BY PATH ALONE. A path is not an identity: the
         // first version of this adopted `find_by_path`, and a drill
@@ -688,8 +695,7 @@ impl IoOperationHandler {
         // is knfsd's key (`nf_inode`) and it cannot alias. A path that
         // does not resolve adopts nothing and falls through to the
         // ordinary open, which is also the create case.
-        use std::os::unix::fs::MetadataExt;
-        let cur_ino = std::fs::metadata(path).ok().map(|m| m.ino())?;
+        let cur_ino = cur_ino?;
         let hit = self.fd_cache.find_by_ino(cur_ino, require_writable)?;
         // `find_by_ino` re-checks against the authoritative entry, but
         // be explicit: an entry that is not this inode is not this file.
@@ -2277,7 +2283,7 @@ impl IoOperationHandler {
             // A miss on THIS stateid does not mean the server has no fd
             // for this file — see `adopt_open_fd`. Opening again here is
             // what put 8003 descriptors on one file.
-            .or_else(|| self.adopt_open_fd(&op.stateid.other, &path, false, cacheable));
+            .or_else(|| self.adopt_open_fd(&op.stateid.other, &path, false, cacheable, ino_now));
 
         // Perform positioned read using blocking I/O
         // Uses positioned I/O (pread) for concurrent access without seek
@@ -2633,7 +2639,7 @@ impl IoOperationHandler {
             // Writable only: a read-only entry cannot serve a WRITE, and
             // the open below would still be reached for a file nothing
             // holds open for writing. See `adopt_open_fd`.
-            .or_else(|| self.adopt_open_fd(&op.stateid.other, &path, true, cacheable));
+            .or_else(|| self.adopt_open_fd(&op.stateid.other, &path, true, cacheable, ino_now));
 
         let file_arc = if let Some(file) = cached_entry {
             // Found in cache - reuse existing FD!
@@ -3799,7 +3805,7 @@ mod tests {
             "precondition: the recreated file must be a different inode"
         );
 
-        let adopted = handler.adopt_open_fd(&[0x22u8; 12], &path, false, true);
+        let adopted = handler.adopt_open_fd(&[0x22u8; 12], &path, false, true, FdCache::ino_now(&path));
         assert!(
             adopted.is_none(),
             "adopted a descriptor for the DELETED inode — writes would land in a file \
@@ -3808,13 +3814,13 @@ mod tests {
 
         // And the still-live original is adopted for its own inode, so
         // the guard refuses the stale case without disabling adoption.
-        let same = handler.adopt_open_fd(&[0x33u8; 12], &path, false, true);
+        let same = handler.adopt_open_fd(&[0x33u8; 12], &path, false, true, FdCache::ino_now(&path));
         assert!(same.is_none(), "the replacement is not in the cache yet either");
         handler.test_seed_fd([0x44u8; 12], Arc::new(
             std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap(),
         ), path.clone(), true);
         let now = handler
-            .adopt_open_fd(&[0x55u8; 12], &path, false, true)
+            .adopt_open_fd(&[0x55u8; 12], &path, false, true, FdCache::ino_now(&path))
             .expect("the CURRENT inode's descriptor is adoptable");
         assert_eq!(
             now.metadata().unwrap().ino(),
