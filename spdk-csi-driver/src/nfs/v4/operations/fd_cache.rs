@@ -133,10 +133,39 @@ pub(crate) struct CachedFile {
     /// for v4 kernel handles, whose F17b/c stale-resolve fallbacks
     /// can't extract a path (no path is embedded) — they look the
     /// open file up by ino instead. 0 = unknown (never matches).
-    pub(crate) ino: u64,
+    ///
+    /// PRIVATE, and deliberately: it is derived from the DESCRIPTOR by
+    /// [`CachedFile::new`] and can never be set independently of it.
+    /// `seed_open_fd` used to hand-build an entry carrying one file's
+    /// descriptor and inode under ANOTHER file's path — an entry whose
+    /// own fields disagreed about which file it was. Every path-based
+    /// guard downstream was then defeated by construction, and a client
+    /// that replaced a file it held open had its writes land in the
+    /// replaced inode with `write()` and `fsync()` both reporting
+    /// success (2026-09-18 live drill, `tests/lima/pnfs/results/
+    /// 2026-09-18-commit-write-inode-aliasing/`). Making this field
+    /// private is what stops that combination being expressible at all;
+    /// the guards at the selection sites are the second line, not the
+    /// first.
+    ino: u64,
 }
 
 impl CachedFile {
+    /// The ONLY way to build an entry: the inode always describes the
+    /// descriptor, because it is read from it here.
+    pub(crate) fn new(file: Arc<File>, path: PathBuf, writable: bool) -> Self {
+        let ino = Self::ino_of(&file);
+        Self { file, path, writable, ino }
+    }
+
+    /// The inode the DESCRIPTOR names — captured at open, so it still
+    /// names the original object after a later rename. It is NOT
+    /// necessarily the inode `self.path` names now; that is exactly the
+    /// difference every caller selecting by path has to check.
+    pub(crate) fn ino(&self) -> u64 {
+        self.ino
+    }
+
     /// Capture the fd's inode for the ino index. On the open fd, so
     /// it names the OPEN-time object even across later renames.
     pub(crate) fn ino_of(file: &File) -> u64 {
@@ -465,6 +494,51 @@ impl FdCache {
         None
     }
 
+    /// The inode `path` names RIGHT NOW, or `None` if it does not
+    /// resolve. `None` is the create case and every caller treats it as
+    /// a miss.
+    pub(crate) fn ino_now(path: &Path) -> Option<u64> {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).ok().map(|m| m.ino())
+    }
+
+    /// [`find_by_path`], restricted to an entry whose DESCRIPTOR names
+    /// the inode that path names right now.
+    ///
+    /// The plain path lookup answers "is there an fd filed under this
+    /// name", which is not the same question as "is there an fd for
+    /// this file" the moment anything renames. A client replacing a
+    /// file it holds open makes the kernel silly-rename the old one
+    /// (`data.db` -> `.nfs0000...`), and nothing evicts on rename, so
+    /// the old entry keeps claiming the name while its descriptor has
+    /// moved elsewhere. Selecting on the name alone then hands out a
+    /// descriptor for the REPLACED inode — writes and fsyncs land there
+    /// and the client is told they succeeded.
+    ///
+    /// Same rule as `adopt_open_fd`, which learned it the same way:
+    /// a path is not an identity.
+    /// Resolve the name to an inode, then look the descriptor up BY THAT
+    /// INODE. Deliberately not "take the first entry filed under this
+    /// name and then check it": a stale entry can sit ahead of the live
+    /// one in the path index, and checking only the first would report a
+    /// miss while the server still holds the right descriptor open —
+    /// safe, but it reopens a file needlessly and walks back the
+    /// descriptor sharing `adopt_open_fd` exists to provide. Pinned by
+    /// `a_replaced_files_descriptor_is_not_selected_by_its_old_name`,
+    /// which failed against exactly that first cut.
+    ///
+    /// An entry reached this way may have been filed under a different
+    /// name (a hard link, or a rename since the open). That is correct:
+    /// the inode is the file, whatever it is currently called.
+    pub(crate) fn find_by_path_current(
+        &self,
+        path: &Path,
+        require_writable: bool,
+    ) -> Option<CachedFile> {
+        let now = Self::ino_now(path)?;
+        self.find_by_ino(now, require_writable)
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn len(&self) -> usize {
         self.by_stateid.len()
@@ -481,7 +555,6 @@ impl FdCache {
     /// come from the index and are re-checked against the
     /// authoritative entry; a racing re-insert can at worst cost a
     /// later cache miss, never yield a wrong fd.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn evict_by_path(&self, path: &Path) -> usize {
         let candidates: Vec<[u8; 12]> = self
             .by_path
@@ -575,7 +648,6 @@ impl FdCache {
     /// A4/A5 (tier): purge every cached fd whose OPEN-time inode is
     /// `ino` — the other half of eviction's purge (see
     /// [`evict_by_path`]).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn evict_by_ino(&self, ino: u64) -> usize {
         if ino == 0 {
             return 0;
@@ -639,6 +711,103 @@ mod tests {
             writable,
             ino,
         }
+    }
+
+    /// A descriptor for a REPLACED file must never be selected by the
+    /// name it used to answer to.
+    ///
+    /// The 2026-09-18 live drill: a client replaces a file it holds
+    /// open, the kernel silly-renames the old one, and the stale entry
+    /// keeps claiming the live name. Selecting on the name alone handed
+    /// out the dead file's descriptor — writes and fsyncs landed in the
+    /// replaced inode with the client told they succeeded.
+    #[test]
+    fn a_replaced_files_descriptor_is_not_selected_by_its_old_name() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = FdCache::new();
+
+        std::fs::write(dir.path().join("data.db"), b"v1").unwrap();
+        let a = entry(dir.path(), "data.db", true);
+        let (ino_a, p) = (a.ino(), a.path.clone());
+        cache.insert([1; 12], a);
+
+        std::fs::remove_file(&p).unwrap();
+        std::fs::write(&p, b"v2").unwrap();
+        let b = entry(dir.path(), "data.db", true);
+        let ino_b = b.ino();
+        cache.insert([2; 12], b);
+        // Anti-vacuity: an inode reuse would make every assertion below
+        // pass without the guard doing anything.
+        assert_ne!(ino_a, ino_b, "the recreate must yield a NEW inode");
+
+        let picked = cache
+            .find_by_path_current(&p, false)
+            .expect("an fd for the CURRENT file exists and must be found");
+        assert_eq!(
+            picked.ino(),
+            ino_b,
+            "selected the descriptor for ino {} (replaced) over ino {} (current)",
+            picked.ino(),
+            ino_b
+        );
+    }
+
+    /// The guard must not work by refusing everything: with no stale
+    /// entry present the same lookup still finds the live descriptor.
+    /// Without this, a `find_by_path_current` that always returned None
+    /// would satisfy the test above.
+    #[test]
+    fn the_current_path_lookup_still_finds_a_live_descriptor() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = FdCache::new();
+        let a = entry(dir.path(), "live.db", true);
+        let (ino, p) = (a.ino(), a.path.clone());
+        cache.insert([1; 12], a);
+        assert_eq!(cache.find_by_path_current(&p, false).unwrap().ino(), ino);
+    }
+
+    /// A stale entry is a MISS, not a wrong answer — the caller opens
+    /// fresh. Pins that the guard degrades safely when the only entry
+    /// for a name is the replaced file's.
+    #[test]
+    fn a_name_whose_only_entry_is_stale_reads_as_a_miss() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = FdCache::new();
+        let a = entry(dir.path(), "gone.db", true);
+        let p = a.path.clone();
+        cache.insert([1; 12], a);
+        std::fs::remove_file(&p).unwrap();
+        std::fs::write(&p, b"replacement").unwrap();
+        assert!(
+            cache.find_by_path_current(&p, false).is_none(),
+            "a descriptor for the replaced inode must not be served under this name"
+        );
+    }
+
+    /// The inode always describes the DESCRIPTOR, because `new` reads it
+    /// from there. The field is private precisely so the disagreeing
+    /// combination cannot be written by hand, which is how the entry
+    /// that carried one file's fd under another file's path was built.
+    #[test]
+    fn an_entrys_inode_always_describes_its_descriptor() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join("real");
+        std::fs::write(&real, b"x").unwrap();
+        let file = Arc::new(File::open(&real).unwrap());
+        let truth = CachedFile::ino_of(&file);
+
+        // Build it under a DIFFERENT name, the shape seed_open_fd used.
+        let other = dir.path().join("someone-elses-name");
+        std::fs::write(&other, b"y").unwrap();
+        let e = CachedFile::new(file, other.clone(), true);
+
+        assert_eq!(e.ino(), truth, "the inode must name the descriptor's file");
+        assert_ne!(
+            e.ino(),
+            std::fs::metadata(&other).unwrap().ino(),
+            "and must NOT silently adopt the inode of the path it was filed under"
+        );
     }
 
     // ---- FdLease: release as a consequence of OWNERSHIP ---------------

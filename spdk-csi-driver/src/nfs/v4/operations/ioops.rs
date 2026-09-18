@@ -242,6 +242,26 @@ impl OpenFileView {
         self.fd_cache.find_by_ino(ino, false).map(|e| (e.path, e.file))
     }
 
+    /// Drop every cached descriptor for a file that has just been
+    /// unlinked or renamed over.
+    ///
+    /// knfsd does this from an fsnotify mark — `FS_ATTRIB|FS_DELETE_SELF`
+    /// driving `nfsd_file_close_inode` (filecache.c:188). We have no
+    /// notifier, so the mutating operations call it directly. Until
+    /// 2026-09-18 nothing called it at all: `evict_by_path`/`evict_by_ino`
+    /// were written, tested, and had zero production callers, so a stale
+    /// entry outlived its file for the life of the process.
+    ///
+    /// BOTH indexes, because they catch different entries: an fd cached
+    /// BEFORE a rename is reachable only by its OPEN-time ino, one cached
+    /// after only by path. `evict_by_ino(0)` never matches, so an unknown
+    /// inode is skipped rather than wildcarding.
+    pub fn evict_for(&self, path: &std::path::Path, ino: u64) -> usize {
+        let by_path = self.fd_cache.evict_by_path(path);
+        let by_ino = if ino != 0 { self.fd_cache.evict_by_ino(ino) } else { 0 };
+        by_path + by_ino
+    }
+
     /// **NOT the tier's writable-open probe. Do not reach for it as
     /// one — that is what this comment exists to stop.**
     ///
@@ -551,8 +571,7 @@ impl IoOperationHandler {
         path: PathBuf,
         writable: bool,
     ) {
-        let ino = CachedFile::ino_of(&file);
-        self.fd_cache.insert(other, CachedFile { file, path, writable, ino });
+        self.fd_cache.insert(other, CachedFile::new(file, path, writable));
     }
 
     /// F17c: anchor the open — cache an fd under the open stateid AT
@@ -575,15 +594,25 @@ impl IoOperationHandler {
         // Point lookup via the path index; FdCache's API never hands
         // out a guard, so the F24 iter-guard-across-insert deadlock is
         // structurally impossible here.
-        if let Some(existing) = self.fd_cache.find_by_path(path, false) {
+        //
+        // BY THE CURRENT INODE, NEVER BY PATH ALONE. This share is where
+        // the 2026-09-18 data loss came from. `find_by_path` answers "is
+        // an fd filed under this name", and after a rename that is a
+        // different question from "is there an fd for this file": a
+        // client replacing a file it holds open makes the kernel
+        // silly-rename the old one (`data.db` -> `.nfs0000...`), nothing
+        // evicts on rename, and the stale entry keeps claiming the name.
+        // Seeding a FRESH stateid from it handed the new file's opens a
+        // descriptor on the REPLACED inode, and every write and fsync
+        // landed there while the client was told they succeeded.
+        //
+        // `adopt_open_fd` already keyed on the inode the path names NOW.
+        // This is the same rule at the site that seeds it — and the one
+        // the 2026-09-16 wave left behind when it hardened the copies.
+        if let Some(existing) = self.fd_cache.find_by_path_current(path, false) {
             self.fd_cache.insert(
                 stateid.other,
-                CachedFile {
-                    file: existing.file,
-                    path: path.clone(),
-                    writable: existing.writable,
-                    ino: existing.ino,
-                },
+                CachedFile::new(existing.file, path.clone(), existing.writable),
             );
             return;
         }
@@ -598,11 +627,9 @@ impl IoOperationHandler {
         .map(|f| (f, true))
         .or_else(|_| open_beneath::open_read(path).map(|f| (f, false)));
         if let Ok((f, writable)) = opened {
-            let file = Arc::new(f);
-            let ino = CachedFile::ino_of(&file);
             self.fd_cache.insert(
                 stateid.other,
-                CachedFile { file, path: path.clone(), writable, ino },
+                CachedFile::new(Arc::new(f), path.clone(), writable),
             );
         }
     }
@@ -666,7 +693,7 @@ impl IoOperationHandler {
         let hit = self.fd_cache.find_by_ino(cur_ino, require_writable)?;
         // `find_by_ino` re-checks against the authoritative entry, but
         // be explicit: an entry that is not this inode is not this file.
-        if hit.ino != cur_ino {
+        if hit.ino() != cur_ino {
             return None;
         }
         // Anchor it under THIS stateid too, so CLOSE, the lease sweep
@@ -676,12 +703,7 @@ impl IoOperationHandler {
         if cacheable {
             self.fd_cache.insert(
                 *stateid_other,
-                CachedFile {
-                    file: Arc::clone(&hit.file),
-                    path: path.clone(),
-                    writable: hit.writable,
-                    ino: hit.ino,
-                },
+                CachedFile::new(Arc::clone(&hit.file), path.clone(), hit.writable),
             );
         }
         Some(hit.file)
@@ -725,7 +747,7 @@ impl IoOperationHandler {
         let ino = FileHandleManager::object_ino(fh);
         if let Some(e) = self.fd_cache.get(stateid_other) {
             let same_object = embedded.as_ref().is_some_and(|p| e.path == *p)
-                || ino.is_some_and(|i| i != 0 && e.ino == i);
+                || ino.is_some_and(|i| i != 0 && e.ino() == i);
             if same_object && (!want_writable || e.writable) {
                 return Some((e.path, e.file));
             }
@@ -1370,15 +1392,9 @@ impl IoOperationHandler {
                                 // hands one back so both doors (sync
                                 // and async) return the same type.
                                 let file = Arc::new(created);
-                                let ino = CachedFile::ino_of(&file);
                                 self.fd_cache.insert(
                                     stateid.other,
-                                    CachedFile {
-                                        file,
-                                        path: file_path.clone(),
-                                        writable: true,
-                                        ino,
-                                    },
+                                    CachedFile::new(file, file_path.clone(), true),
                                 );
                             } else {
                                 self.seed_open_fd(&stateid, &file_path, true);
@@ -2099,11 +2115,11 @@ impl IoOperationHandler {
                     // descriptor per lock for the life of the process.
                     // Measured at 2.04 fds/txn on 2026-09-16, which
                     // exhausted RLIMIT_NOFILE and took the server down.
-                    let reaped = self.fd_cache.evict_lock_fds_for(&cached.path, cached.ino);
+                    let reaped = self.fd_cache.evict_lock_fds_for(&cached.path, cached.ino());
                     if reaped > 0 {
                         debug!(
                             "🗑️ FD CACHE CLOSE: also reaped {} lock-stateid fd(s) for ino {}",
-                            reaped, cached.ino
+                            reaped, cached.ino()
                         );
                     }
                 }
@@ -2243,12 +2259,16 @@ impl IoOperationHandler {
         // same file; otherwise open and cache. The path check guards
         // against a stateid presented with a different filehandle.
         let cacheable = cacheable_stateid(&op.stateid.other);
+        // The inode this path names NOW — the identity every cache
+        // selection below is checked against. `None` (path gone) is a
+        // miss, which falls through to the ordinary open.
+        let ino_now = FdCache::ino_now(&path);
         let cached = stale_fd
             .or_else(|| {
                 if cacheable {
                     self.fd_cache
                         .get(&op.stateid.other)
-                        .filter(|e| e.path == path)
+                        .filter(|e| e.path == path && Some(e.ino()) == ino_now)
                         .map(|e| Arc::clone(&e.file))
                 } else {
                     None
@@ -2308,12 +2328,10 @@ impl IoOperationHandler {
                     };
                     let file = Arc::new(file);
                     if cacheable {
-                        fd_cache.insert(stateid_other, CachedFile {
-                            file: Arc::clone(&file),
-                            path: path.clone(),
-                            writable,
-                            ino: CachedFile::ino_of(&file),
-                        });
+                        fd_cache.insert(
+                            stateid_other,
+                            CachedFile::new(Arc::clone(&file), path.clone(), writable),
+                        );
                     }
                     file
                 }
@@ -2600,12 +2618,13 @@ impl IoOperationHandler {
         // read-only fd, and a stateid presented with a different
         // filehandle must not reuse another file's fd.
         let cacheable = cacheable_stateid(&op.stateid.other);
+        let ino_now = FdCache::ino_now(&path);
         let cached_entry = stale_fd
             .or_else(|| {
                 if cacheable {
                     self.fd_cache
                         .get(&op.stateid.other)
-                        .filter(|e| e.writable && e.path == path)
+                        .filter(|e| e.writable && e.path == path && Some(e.ino()) == ino_now)
                         .map(|e| Arc::clone(&e.file))
                 } else {
                     None
@@ -2637,12 +2656,10 @@ impl IoOperationHandler {
                     let file_arc = Arc::new(f);
                     // Cache the file descriptor (never under special stateids)
                     if cacheable {
-                        self.fd_cache.insert(op.stateid.other, CachedFile {
-                            file: Arc::clone(&file_arc),
-                            path: path.clone(),
-                            writable: true,
-                            ino: CachedFile::ino_of(&file_arc),
-                        });
+                        self.fd_cache.insert(
+                            op.stateid.other,
+                            CachedFile::new(Arc::clone(&file_arc), path.clone(), true),
+                        );
                         debug!("WRITE: Cached new FD for {:?} (path: {:?})", op.stateid, path);
                     }
                     file_arc
@@ -2677,12 +2694,7 @@ impl IoOperationHandler {
                             if cacheable {
                                 self.fd_cache.insert(
                                     op.stateid.other,
-                                    CachedFile {
-                                        file: Arc::clone(&hit.file),
-                                        path: path.clone(),
-                                        writable: true,
-                                        ino: hit.ino,
-                                    },
+                                    CachedFile::new(Arc::clone(&hit.file), path.clone(), true),
                                 );
                             }
                             hit.file
@@ -2998,7 +3010,15 @@ impl IoOperationHandler {
         // fsync-heavy workloads is measurable. Falls back to the
         // open-fresh path if no cached fd exists (e.g. the file was
         // committed by a different connection or the cache evicted).
-        let cached_fd = self.fd_cache.find_by_path(&path, false).map(|e| e.file);
+        // BY THE CURRENT INODE. Selecting on the name alone fsynced the
+        // REPLACED inode after a rename and answered NFS4_OK, so the client
+        // dropped dirty pages that were never made durable — traced on the
+        // server's fsync path, which never touched the live inode at all
+        // (2026-09-18 drill). A miss here just opens fresh, one line below.
+        let cached_fd = self
+            .fd_cache
+            .find_by_path_current(&path, false)
+            .map(|e| e.file);
 
         let commit_result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
             if let Some(file_arc) = cached_fd {
@@ -3816,6 +3836,140 @@ mod tests {
         (handler, fh_mgr, temp_dir)
     }
 
+
+    /// `seed_open_fd` must never seed a stateid with a descriptor for a
+    /// file that is no longer the one this path names.
+    ///
+    /// Pins the ROOT CAUSE directly, because the end-to-end test does
+    /// not: once `CachedFile::new` derives the inode from the descriptor,
+    /// the ino checks at READ/WRITE catch a poisoned entry and re-open,
+    /// so the bytes still land correctly and the end-to-end assertion
+    /// passes with this guard removed. Defence in depth is why that
+    /// works — it is not a reason to leave the seed unpinned, because
+    /// the next consumer added downstream may not check.
+    #[tokio::test]
+    async fn seeding_an_open_never_adopts_a_replaced_files_descriptor() {
+        use std::os::unix::fs::MetadataExt;
+        let _excl = crate::tier::capture::test_exclusive();
+        let (handler, fh_mgr, _temp) = create_test_handler();
+        let path = fh_mgr.get_export_path().join("seed.db");
+
+        std::fs::write(&path, b"v1").unwrap();
+        let f1 = Arc::new(std::fs::File::open(&path).unwrap());
+        let ino_a = CachedFile::ino_of(&f1);
+        handler.test_seed_fd([0x11; 12], f1, path.clone(), true);
+
+        // Replaced at the same name; the [0x11] entry still claims it.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"v2").unwrap();
+        let ino_b = std::fs::metadata(&path).unwrap().ino();
+        assert_ne!(ino_a, ino_b, "the replace must yield a NEW inode");
+
+        // A fresh OPEN seeds this stateid.
+        let sid = StateId { seqid: 1, other: [0x22; 12] };
+        handler.seed_open_fd(&sid, &path, true);
+
+        let seeded = handler
+            .fd_cache
+            .get(&sid.other)
+            .expect("the open must be anchored with a descriptor (F17c)");
+        assert_eq!(
+            seeded.ino(),
+            ino_b,
+            "seeded a descriptor for ino {} (REPLACED) under a path that names ino {} — \
+             the entry every later READ/WRITE/COMMIT for this stateid starts from",
+            seeded.ino(),
+            ino_b
+        );
+    }
+
+    /// A client replaces a file at a path it still holds open, then
+    /// writes to the NEW file. The bytes must land in the file that path
+    /// names now.
+    ///
+    /// This is the 2026-09-18 data loss, driven through the real
+    /// handlers. Live against a kernel NFSv4.1 client it went: write +
+    /// fsync both returned SUCCESS, the 4096 bytes landed in the
+    /// REPLACED inode, and the file at the path stayed empty. The route
+    /// is `seed_open_fd` — the fresh OPEN of the replacement was seeded
+    /// from the stale entry still filed under that name, so every guard
+    /// downstream compared a path that matched and an inode that did not.
+    #[tokio::test]
+    async fn a_write_after_a_replace_lands_in_the_file_that_path_names_now() {
+        use std::os::unix::fs::MetadataExt;
+        let _excl = crate::tier::capture::test_exclusive();
+        let (handler, fh_mgr, _temp) = create_test_handler();
+        let export = fh_mgr.get_export_path().to_path_buf();
+        let dbpath = export.join("data.db");
+
+        let mut ctx = CompoundContext::new(0);
+        ctx.current_fh = Some(fh_mgr.path_to_filehandle(&export).unwrap());
+
+        let open = |owner: &[u8]| OpenOp {
+            seqid: 0,
+            share_access: OPEN4_SHARE_ACCESS_BOTH,
+            share_deny: OPEN4_SHARE_DENY_NONE,
+            owner: owner.to_vec(),
+            openhow: OpenHow::Create(Fattr4 { attrmask: vec![], attr_vals: vec![] }),
+            claim: OpenClaim::Null("data.db".to_string()),
+        };
+
+        // v1: open and write. The descriptor is cached under this stateid
+        // and, crucially, filed under the name "data.db".
+        let r1 = handler.handle_open(open(b"owner-1"), &mut ctx).await;
+        assert_eq!(r1.status, Nfs4Status::Ok);
+        let w1 = handler
+            .handle_write(
+                WriteOp {
+                    stateid: r1.stateid.unwrap(),
+                    offset: 0,
+                    stable: FILE_SYNC4,
+                    data: Bytes::from(vec![1u8; 32]),
+                },
+                &ctx,
+            )
+            .await;
+        assert_eq!(w1.status, Nfs4Status::Ok, "the first WRITE must land");
+        let ino_a = std::fs::metadata(&dbpath).unwrap().ino();
+
+        // The file is replaced at the same path. No CLOSE, so the v1
+        // entry survives — the shape a client that holds the file open
+        // produces (live, the kernel silly-renames it out of the way).
+        std::fs::remove_file(&dbpath).unwrap();
+        std::fs::write(&dbpath, b"").unwrap();
+        let ino_b = std::fs::metadata(&dbpath).unwrap().ino();
+        // Anti-vacuity: an inode reuse would make the assertions below
+        // pass with the defect fully present.
+        assert_ne!(ino_a, ino_b, "the replace must yield a NEW inode");
+
+        // v2: a FRESH open of the replacement, then a write.
+        ctx.current_fh = Some(fh_mgr.path_to_filehandle(&export).unwrap());
+        let r2 = handler.handle_open(open(b"owner-2"), &mut ctx).await;
+        assert_eq!(r2.status, Nfs4Status::Ok);
+        let w2 = handler
+            .handle_write(
+                WriteOp {
+                    stateid: r2.stateid.unwrap(),
+                    offset: 0,
+                    stable: FILE_SYNC4,
+                    data: Bytes::from(vec![2u8; 32]),
+                },
+                &ctx,
+            )
+            .await;
+        assert_eq!(w2.status, Nfs4Status::Ok, "the second WRITE must land");
+
+        let md = std::fs::metadata(&dbpath).unwrap();
+        assert_eq!(md.ino(), ino_b, "the path must still name the replacement");
+        assert_eq!(
+            std::fs::read(&dbpath).unwrap(),
+            vec![2u8; 32],
+            "the write went somewhere other than the file at this path — with the \
+             defect present these bytes are in ino {ino_a} (replaced) and this file \
+             is empty, while the client was told the write succeeded"
+        );
+    }
+
     /// The write verifier's two obligations, pinned CLOCK-INDEPENDENTLY.
     ///
     /// Across incarnations: the shipped mint was wall-clock SECONDS, so
@@ -4328,12 +4482,10 @@ mod tests {
         // open-time fd for the inode survives under another key.
         let seeded = handler.fd_cache.remove(&stateid.other)
             .expect("OPEN should have seeded an fd (F17c)");
-        handler.fd_cache.insert([0xAB; 12], CachedFile {
-            file: Arc::clone(&seeded.file),
-            path: seeded.path.clone(),
-            writable: seeded.writable,
-            ino: seeded.ino,
-        });
+        handler.fd_cache.insert(
+            [0xAB; 12],
+            CachedFile::new(Arc::clone(&seeded.file), seeded.path.clone(), seeded.writable),
+        );
         assert!(seeded.writable, "seed must be a write-open fd");
 
         // The chmod lands before the flush, as git does it.

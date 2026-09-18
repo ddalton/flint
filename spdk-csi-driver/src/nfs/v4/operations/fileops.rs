@@ -3985,6 +3985,24 @@ impl FileOperationHandler {
 
                 match result {
                     Ok(_) => {
+                        // knfsd's fsnotify hook, by hand (filecache.c:188
+                        // -> nfsd_file_close_inode). The name no longer
+                        // resolves to this file, so no cached descriptor
+                        // may still be findable under it: an entry that
+                        // outlives its name is what let a later OPEN of a
+                        // REPLACEMENT file be seeded with the dead file's
+                        // descriptor. Before its own ino, because the
+                        // entry is evicted by both indexes.
+                        if let Some(view) = &self.open_files {
+                            use std::os::unix::fs::MetadataExt;
+                            let evicted = view.evict_for(&target_path, metadata.ino());
+                            if evicted > 0 {
+                                debug!(
+                                    "REMOVE: evicted {} cached fd(s) for the unlinked {:?}",
+                                    evicted, target_path
+                                );
+                            }
+                        }
                         // Blocker 2: the unlink is not durable until the
                         // parent is. An ACKed REMOVE that rolls back
                         // resurrects a file the client believes is gone.
@@ -4288,8 +4306,37 @@ impl FileOperationHandler {
             .parent()
             .and_then(crate::nfs::v4::change_counter::current_of_path)
             .unwrap_or(0);
+        // The inode the DESTINATION name resolves to before the rename —
+        // i.e. the file this rename is about to replace, if any. It has
+        // to be sampled here: once the rename lands, that name resolves
+        // to the source's inode and the replaced one is unreachable by
+        // name. 0 when the destination does not exist (the common case),
+        // and `evict_for` skips a 0 rather than wildcarding.
+        let replaced_ino = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(&dest_path).map(|m| m.ino()).unwrap_or(0)
+        };
         match tokio::fs::rename(&source_path, &dest_path).await {
             Ok(_) => {
+                // knfsd's fsnotify hook, by hand (filecache.c:188). A
+                // rename invalidates cached descriptors under BOTH names:
+                // the source name no longer resolves to that file, and
+                // the destination name no longer resolves to whatever it
+                // replaced. Leaving either behind is what produced the
+                // 2026-09-18 data loss — a client replacing a file it
+                // holds open makes the kernel silly-rename the old one,
+                // and the stale entry kept claiming the live name until
+                // the next OPEN was seeded from it.
+                if let Some(view) = &self.open_files {
+                    let evicted = view.evict_for(&source_path, 0)
+                        + view.evict_for(&dest_path, replaced_ino);
+                    if evicted > 0 {
+                        debug!(
+                            "RENAME: evicted {} cached fd(s) across {:?} -> {:?}",
+                            evicted, source_path, dest_path
+                        );
+                    }
+                }
                 // Blocker 2: a rename mutates TWO parents, and both must
                 // be stable before the ACK. Committing only one leaves a
                 // crash window in which the file is reachable under both
