@@ -2202,7 +2202,29 @@ impl IoOperationHandler {
         // (F17b); only when no open exists is STALE the answer.
         let mut stale_fd: Option<Arc<File>> = None;
         let path = match self.fh_mgr.resolve_handle(current_fh) {
-            Ok(p) => p,
+            Ok(p) => {
+                // knfsd's nfs4_check_fh, and ONLY on a handle that
+                // resolves. A resolvable handle names some OTHER live
+                // file, which is the hole: a client opened a.bin,
+                // presented that stateid against b.bin's handle and
+                // wrote b.bin — never having opened it, so no OPEN-time
+                // check on b.bin applied and no share reservation on it
+                // was consulted. An UNRESOLVABLE handle names no file to
+                // cross to: the F17b fallback below serves the stateid's
+                // OWN descriptor, so there is nothing to protect and
+                // refusing would break the renamed-over-file path this
+                // server deliberately supports.
+                if let Err(e) = self.state_mgr.stateids.validate_fh(&op.stateid, &current_fh.data)
+                {
+                    warn!("READ: {}", e);
+                    return ReadRes {
+                        status: Nfs4Status::BadStateId,
+                        eof: false,
+                        data: Bytes::new().into(),
+                    };
+                }
+                p
+            }
             Err(e) => match self.stale_open_fallback(current_fh, &op.stateid.other, false) {
                 Some((p, f)) => {
                     debug!("READ: {:?} replaced on disk; serving via open fd", p);
@@ -2549,7 +2571,6 @@ impl IoOperationHandler {
                 writeverf: 0,
             };
         }
-
         // A READ-delegation stateid on WRITE is an access-mode violation
         // (RFC 8881 §18.32.3): the delegation conveys read rights only,
         // and RFC requires OPENMODE, not a recall of the writer's own
@@ -2570,7 +2591,21 @@ impl IoOperationHandler {
         // inode, never fail the client's flush.
         let mut stale_fd: Option<Arc<File>> = None;
         let path = match self.fh_mgr.resolve_handle(current_fh) {
-            Ok(p) => p,
+            Ok(p) => {
+                // knfsd's nfs4_check_fh — see handle_read for why this
+                // is on the RESOLVED arm only.
+                if let Err(e) = self.state_mgr.stateids.validate_fh(&op.stateid, &current_fh.data)
+                {
+                    warn!("WRITE: {}", e);
+                    return WriteRes {
+                        status: Nfs4Status::BadStateId,
+                        count: 0,
+                        committed: UNSTABLE4,
+                        writeverf: 0,
+                    };
+                }
+                p
+            }
             Err(e) => match self.stale_open_fallback(current_fh, &op.stateid.other, true) {
                 Some((p, f)) => {
                     debug!("WRITE: {:?} replaced on disk; writing via open fd", p);
@@ -3840,6 +3875,69 @@ mod tests {
         let state_mgr = Arc::new(StateManager::new_in_memory(""));
         let handler = IoOperationHandler::new(state_mgr, fh_mgr.clone());
         (handler, fh_mgr, temp_dir)
+    }
+
+    /// A stateid names a FILE. Presenting one for file A against file
+    /// B's filehandle must be refused.
+    ///
+    /// knfsd checks this on every stateid-bearing op:
+    /// `nfs4_check_fh` (nfs4state.c:6304) is `fh_match` or
+    /// `nfserr_bad_stateid`, called from `nfs4_preprocess_stateid_op`.
+    /// flint's `validate()` checks existence, revocation and seqid — and
+    /// is not even passed the current filehandle, though `StateEntry`
+    /// has carried `filehandle: Option<Vec<u8>>` all along.
+    #[tokio::test]
+    async fn a_stateid_for_one_file_must_not_be_usable_against_another() {
+        let _excl = crate::tier::capture::test_exclusive();
+        let (handler, fh_mgr, _temp) = create_test_handler();
+        let export = fh_mgr.get_export_path().to_path_buf();
+
+        let mut ctx = CompoundContext::new(0);
+        ctx.current_fh = Some(fh_mgr.path_to_filehandle(&export).unwrap());
+
+        // The client legitimately opens A, and gets a stateid for A.
+        let ra = handler
+            .handle_open(
+                OpenOp {
+                    seqid: 0,
+                    share_access: OPEN4_SHARE_ACCESS_BOTH,
+                    share_deny: OPEN4_SHARE_DENY_NONE,
+                    owner: b"owner-a".to_vec(),
+                    openhow: OpenHow::Create(Fattr4 { attrmask: vec![], attr_vals: vec![] }),
+                    claim: OpenClaim::Null("a.bin".to_string()),
+                },
+                &mut ctx,
+            )
+            .await;
+        assert_eq!(ra.status, Nfs4Status::Ok);
+        let sid_a = ra.stateid.unwrap();
+
+        // B exists and this client has NEVER opened it.
+        let bpath = export.join("b.bin");
+        std::fs::write(&bpath, b"B's original contents").unwrap();
+
+        // Present A's stateid against B's filehandle.
+        ctx.current_fh = Some(fh_mgr.path_to_filehandle(&bpath).unwrap());
+        let w = handler
+            .handle_write(
+                WriteOp {
+                    stateid: sid_a,
+                    offset: 0,
+                    stable: FILE_SYNC4,
+                    data: Bytes::from(vec![0xEEu8; 8]),
+                },
+                &ctx,
+            )
+            .await;
+
+        assert_eq!(
+            w.status,
+            Nfs4Status::BadStateId,
+            "a stateid for a.bin wrote b.bin, which this client never opened — so no \
+             OPEN-time check on b.bin applied to it, and any share reservation another \
+             client holds on b.bin was not consulted either. B now reads: {:?}",
+            String::from_utf8_lossy(&std::fs::read(&bpath).unwrap())
+        );
     }
 
 

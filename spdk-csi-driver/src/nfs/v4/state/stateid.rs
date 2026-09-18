@@ -896,6 +896,57 @@ impl StateIdManager {
     /// The previous implementation also accepted any unknown stateid with
     /// `seqid == 0` and any seqid mismatch with a `warn!()` — both are RFC
     /// violations that hide client bugs.
+    /// A stateid names a FILE: refuse one presented against a different
+    /// filehandle.
+    ///
+    /// knfsd's `nfs4_check_fh` (fs/nfsd/nfs4state.c:6304 at v6.8) is
+    /// `fh_match(&fhp->fh_handle, &stp->sc_file->fi_fhandle)` or
+    /// `nfserr_bad_stateid`, called from `nfs4_preprocess_stateid_op` on
+    /// every stateid-bearing operation. flint had no equivalent:
+    /// `validate` checks existence, revocation and seqid, and was not
+    /// even passed the current filehandle — though `StateEntry` has
+    /// carried `filehandle` all along.
+    ///
+    /// What that cost, measured rather than argued
+    /// (`a_stateid_for_one_file_must_not_be_usable_against_another`):
+    /// a client opened `a.bin`, presented that stateid against `b.bin`'s
+    /// filehandle, and WROTE b.bin — a file it had never opened. So no
+    /// OPEN-time authorization on b.bin applied to it, and any share
+    /// reservation another client held on b.bin was never consulted:
+    /// the deny was registered against b.bin's own opens, and this write
+    /// arrived carrying a.bin's.
+    ///
+    /// SPECIAL STATEIDS are exempt, as they are in knfsd: the anonymous
+    /// and READ-bypass stateids are not bound to any open and carry no
+    /// file of their own. They remain subject to every other check on
+    /// the path.
+    ///
+    /// AN ENTRY WITH NO RECORDED FILEHANDLE is allowed through, because
+    /// a mismatch cannot be shown. Every production path records one —
+    /// OPEN stores `target_fh_data`, LOCK stores `current_fh.data`,
+    /// delegations store theirs — so this arm is not expected to fire;
+    /// it is deliberately permissive rather than guessing, and it is the
+    /// one gap left in this check.
+    pub fn validate_fh(&self, stateid: &StateId, current_fh: &[u8]) -> Result<(), String> {
+        if stateid == &ANONYMOUS_STATEID || stateid == &READ_BYPASS_STATEID {
+            return Ok(());
+        }
+        let entry = match self.states.get(&stateid.other) {
+            Some(e) => e,
+            // Not found is `validate`'s error to report, not this one's.
+            None => return Ok(()),
+        };
+        match &entry.filehandle {
+            Some(fh) if fh.as_slice() != current_fh => Err(format!(
+                "stateid is bound to another file (its filehandle is {} bytes, the \
+                 current filehandle is {} bytes, and they differ)",
+                fh.len(),
+                current_fh.len()
+            )),
+            _ => Ok(()),
+        }
+    }
+
     pub fn validate_for_read(&self, stateid: &StateId) -> Result<(), String> {
         if stateid == &ANONYMOUS_STATEID {
             return Ok(());
