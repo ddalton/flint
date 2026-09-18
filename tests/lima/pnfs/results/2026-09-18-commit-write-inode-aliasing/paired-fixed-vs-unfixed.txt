@@ -1,0 +1,41 @@
+Paired arms, 10.0.0.249 (kernel 6.12.0), same drill, same kernel NFSv4.1
+client, run back to back. Each arm verifies that the process listening on
+the port is the one IT started, and prints the binary it is running.
+
+############ ARM: unfixed ############
+BINARY UNDER TEST: /mnt/nvme/drill/flint-pnfs-mds.UNFIXED  (875040384 bytes, mtime 2026-09-18 21:41:29)
+  server pid=190283 owns port 20490
+  client: write+fsync returned SUCCESS
+  ino_A(replaced)=36175899 ino_B(current)=36175900 client-view=36175900
+  data.db: size=0 first=[]
+  oldlink(replaced inode): first=[BBBB]
+  RESULT[unfixed]: DATA LOSS — the write landed in the REPLACED inode
+
+############ ARM: fixed ############
+BINARY UNDER TEST: /home/ddalton/flint/spdk-csi-driver/target/debug/flint-pnfs-mds  (874645888 bytes, mtime 2026-09-18 21:42:30)
+  server pid=190430 owns port 20490
+  client: write+fsync returned SUCCESS
+  ino_A(replaced)=36175899 ino_B(current)=36175900 client-view=36175900
+  data.db: size=4096 first=[BBBB]
+  oldlink(replaced inode): first=[AAAA]
+  RESULT[fixed]: CORRECT — the write landed in the file the path names
+
+----------------------------------------------------------------------
+TWO RIG DEFECTS THIS RUN CAUGHT, both of which produced a WRONG VERDICT
+before they were fixed. Recorded because each would have been reported as
+a finding about the code:
+
+1. `pgrep -x flint-pnfs-mds` cannot match a process named
+   `flint-pnfs-mds.UNFIXED` — `-x` is an exact match. The control arm's
+   server DID start, the arm declared "SERVER DID NOT START" and exited
+   BEFORE its cleanup, leaving that server holding port 20490. The next
+   arm could not bind, and its client talked to the PREVIOUS arm's
+   binary. The fixed arm reported DATA LOSS — the unfixed binary's
+   behaviour, under the fixed binary's label.
+   Fix: every arm copies its binary to ONE name (`mds-under-test`) so
+   `pgrep -x` matches both, and asserts the pid on the port is the pid
+   it started.
+
+2. `sudo pkill -f flint-pnfs-mds` in the cleanup matched the SSH command
+   line that contained that string, killing the session. Third time in
+   this repo. Only `pkill -x <exact name>` is used now.
