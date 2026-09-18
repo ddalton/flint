@@ -1,0 +1,111 @@
+--- /tmp/fd_cache.rs.bak	2026-09-18 13:39:53
++++ src/nfs/v4/operations/fd_cache.rs	2026-09-18 13:39:53
+@@ -638,8 +638,108 @@
+             path: p,
+             writable,
+             ino,
++        }
++    }
++
++    // ================= PROOF TESTS (verification only) =================
++    // Each asserts the CORRECT behaviour, so a FAILURE is the defect.
++
++    /// CLAIM 1 — COMMIT picks its descriptor by path alone
++    /// (ioops.rs:3001 `find_by_path(&path, false)`), and `find_by_path`
++    /// never re-checks the inode. After a delete-and-recreate at the
++    /// same path, COMMIT should fsync the inode the path names NOW.
++    #[test]
++    fn proof1_commits_path_lookup_must_not_return_a_replaced_files_descriptor() {
++        let dir = tempfile::TempDir::new().unwrap();
++        let cache = FdCache::new();
++
++        std::fs::write(dir.path().join("data.db"), b"v1").unwrap();
++        let a = entry(dir.path(), "data.db", true);
++        let ino_a = a.ino;
++        let p = a.path.clone();
++        cache.insert([1; 12], a);
++
++        // `write tmp; mv over` / unlink+recreate — sqlite, git, agents.
++        std::fs::remove_file(&p).unwrap();
++        std::fs::write(&p, b"v2").unwrap();
++        let b = entry(dir.path(), "data.db", true);
++        let ino_b = b.ino;
++        cache.insert([2; 12], b);
++
++        // Anti-vacuity: if the recreate reused the inode this proves nothing.
++        assert_ne!(ino_a, ino_b, "recreate must yield a NEW inode for this test to mean anything");
++
++        let picked = cache.find_by_path(&p, false).expect("COMMIT finds a cached fd");
++        assert_eq!(
++            picked.ino, ino_b,
++            "COMMIT would fsync ino {} (DELETED) instead of ino {} (the file at this path now), \
++             and return NFS4_OK — the client then drops dirty pages that were never made durable",
++            picked.ino, ino_b
++        );
++    }
++
++    /// POSITIVE CONTROL for CLAIM 1: the same expression must return the
++    /// new inode when no stale entry was seeded. Without this, a
++    /// `find_by_path` that always returned None would satisfy proof1.
++    #[test]
++    fn proof1_control_the_same_lookup_is_correct_with_no_stale_entry() {
++        let dir = tempfile::TempDir::new().unwrap();
++        let cache = FdCache::new();
++        std::fs::write(dir.path().join("data.db"), b"v1").unwrap();
++        let p = dir.path().join("data.db");
++        std::fs::remove_file(&p).unwrap();
++        std::fs::write(&p, b"v2").unwrap();
++        let b = entry(dir.path(), "data.db", true);
++        let ino_b = b.ino;
++        cache.insert([2; 12], b);
++        assert_eq!(cache.find_by_path(&p, false).unwrap().ino, ino_b);
++    }
++
++    /// CLAIM 2 — nothing evicts a cache entry when the file is unlinked.
++    /// `evict_by_path`/`evict_by_ino` exist and have ZERO production
++    /// callers, so the stale entry that makes CLAIM 1 reachable never
++    /// goes away on its own.
++    #[test]
++    fn proof2_unlinking_a_file_must_not_leave_its_descriptor_findable() {
++        let dir = tempfile::TempDir::new().unwrap();
++        let cache = FdCache::new();
++        let a = entry(dir.path(), "gone.db", true);
++        let p = a.path.clone();
++        cache.insert([1; 12], a);
++        std::fs::remove_file(&p).unwrap();
++        assert!(
++            cache.find_by_path(&p, false).is_none(),
++            "the file at this path was unlinked, but its descriptor is still served by the cache"
++        );
++    }
++
++    /// CLAIM 3 — the LRU reap has no liveness check. knfsd's
++    /// nfsd_file_lru_cb refuses three ways (writeback -> LRU_SKIP,
++    /// REFERENCED -> LRU_ROTATE, refcount_dec_and_test). Ours sorts by
++    /// last-use tick and removes. An entry whose descriptor is still
++    /// strongly referenced by an in-flight operation is reaped anyway.
++    #[test]
++    fn proof3_the_reap_must_not_evict_an_entry_whose_descriptor_is_still_in_use() {
++        let dir = tempfile::TempDir::new().unwrap();
++        let cache = FdCache::with_budget(FdBudget { hiwat: 64, lowat: 48 });
++        let victim = entry(dir.path(), "inflight", true);
++        // An in-flight READ/WRITE holds its own strong ref to the fd.
++        let _inflight: Arc<File> = Arc::clone(&victim.file);
++        cache.insert([0; 12], victim);
++
++        // Push well past hiwat without ever touching the victim.
++        for i in 1..200u8 {
++            cache.insert([i; 12], entry(dir.path(), &format!("f{i}"), true));
+         }
++
++        assert!(
++            cache.contains(&[0; 12]),
++            "the reap evicted an entry whose descriptor an operation is still holding \
++             (Arc strong_count > 1) — knfsd's refcount_dec_and_test refuses exactly this"
++        );
+     }
++    // =============== END PROOF TESTS ===============
++
+ 
+     // ---- FdLease: release as a consequence of OWNERSHIP ---------------
+     //

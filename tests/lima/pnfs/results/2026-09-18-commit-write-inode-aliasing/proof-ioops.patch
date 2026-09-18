@@ -1,0 +1,85 @@
+--- /tmp/ioops.rs.bak	2026-09-18 13:42:16
++++ src/nfs/v4/operations/ioops.rs	2026-09-18 13:42:33
+@@ -3814,8 +3814,82 @@
+         let state_mgr = Arc::new(StateManager::new_in_memory(""));
+         let handler = IoOperationHandler::new(state_mgr, fh_mgr.clone());
+         (handler, fh_mgr, temp_dir)
++    }
++
++    /// REACHABILITY PROOF for the COMMIT path-aliasing claim.
++    ///
++    /// The fd_cache unit proof shows `find_by_path` returns a replaced
++    /// file's descriptor. This asks the question that decides whether
++    /// that is a BUG or a curiosity: does a realistic NFS sequence
++    /// actually leave the cache in that state, and does COMMIT then
++    /// report success?
++    #[tokio::test]
++    async fn proof_commit_reachability_after_a_replace_through_the_real_handler() {
++        use std::os::unix::fs::MetadataExt;
++        let _excl = crate::tier::capture::test_exclusive();
++        let (handler, fh_mgr, _temp) = create_test_handler();
++        let export = fh_mgr.get_export_path().to_path_buf();
++        let dbpath = export.join("data.db");
++
++        let mut ctx = CompoundContext::new(0);
++        ctx.current_fh = Some(fh_mgr.path_to_filehandle(&export).unwrap());
++
++        let open = |name: &str, owner: &[u8]| OpenOp {
++            seqid: 0,
++            share_access: OPEN4_SHARE_ACCESS_BOTH,
++            share_deny: OPEN4_SHARE_DENY_NONE,
++            owner: owner.to_vec(),
++            openhow: OpenHow::Create(Fattr4 { attrmask: vec![], attr_vals: vec![] }),
++            claim: OpenClaim::Null(name.to_string()),
++        };
++
++        // ── 1. a client opens and writes data.db (inode A) ───────────
++        let r1 = handler.handle_open(open("data.db", b"owner-1"), &mut ctx).await;
++        assert_eq!(r1.status, Nfs4Status::Ok);
++        let sid1 = r1.stateid.unwrap();
++        let w1 = handler.handle_write(WriteOp {
++            stateid: sid1.clone(), offset: 0, stable: FILE_SYNC4,
++            data: Bytes::from(vec![1u8; 32]),
++        }, &ctx).await;
++        assert_eq!(w1.status, Nfs4Status::Ok, "first WRITE must land");
++        let ino_a = std::fs::metadata(&dbpath).unwrap().ino();
++
++        // ── 2. the file is REPLACED at the same path (no CLOSE) ──────
++        std::fs::remove_file(&dbpath).unwrap();
++        std::fs::write(&dbpath, b"").unwrap();
++        let ino_b = std::fs::metadata(&dbpath).unwrap().ino();
++        assert_ne!(ino_a, ino_b, "the replace must yield a new inode or this proves nothing");
++
++        // ── 3. a client opens and writes the NEW data.db (inode B) ───
++        ctx.current_fh = Some(fh_mgr.path_to_filehandle(&export).unwrap());
++        let r2 = handler.handle_open(open("data.db", b"owner-2"), &mut ctx).await;
++        assert_eq!(r2.status, Nfs4Status::Ok);
++        let sid2 = r2.stateid.unwrap();
++        let w2 = handler.handle_write(WriteOp {
++            stateid: sid2.clone(), offset: 0, stable: UNSTABLE4,
++            data: Bytes::from(vec![2u8; 32]),
++        }, &ctx).await;
++        assert_eq!(w2.status, Nfs4Status::Ok, "second WRITE must land");
++
++        // ── 4. COMMIT the new file ───────────────────────────────────
++        ctx.current_fh = Some(fh_mgr.path_to_filehandle(&dbpath).unwrap());
++        let c = handler.handle_commit(CommitOp { offset: 0, count: 0 }, &ctx).await;
++
++        let picked = handler.fd_cache.find_by_path(&dbpath, false)
++            .expect("COMMIT's lookup must find something");
++
++        println!("REACHABILITY: ino_a(replaced)={ino_a} ino_b(current)={ino_b} \
++                  commit_picked={} commit_status={:?}", picked.ino, c.status);
++
++        assert_eq!(
++            picked.ino, ino_b,
++            "reached through real OPEN/WRITE ops: COMMIT fsyncs ino {} (REPLACED) \
++             instead of ino {} (the file at this path now) and returns {:?}",
++            picked.ino, ino_b, c.status
++        );
+     }
+ 
++
+     /// The write verifier's two obligations, pinned CLOCK-INDEPENDENTLY.
+     ///
+     /// Across incarnations: the shipped mint was wall-clock SECONDS, so
