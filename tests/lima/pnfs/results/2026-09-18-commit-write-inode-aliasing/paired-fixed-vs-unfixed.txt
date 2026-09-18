@@ -39,3 +39,24 @@ a finding about the code:
 2. `sudo pkill -f flint-pnfs-mds` in the cleanup matched the SSH command
    line that contained that string, killing the session. Third time in
    this repo. Only `pkill -x <exact name>` is used now.
+
+----------------------------------------------------------------------
+BOTH FIXES (inode guard + stateid/filehandle binding), same drill,
+2026-09-18 22:27:
+
+  BINARY: mds-BOTH-FIXES (874672808 bytes)
+  server pid=247954 owns port 20490
+  client: write+fsync returned SUCCESS
+  ino_A(replaced)=36175912 ino_B(current)=36175916 client-view=36175916
+  data.db: size=4096 first=[BBBB]
+  oldlink(replaced inode): first=[AAAA]
+  RESULT: CORRECT — the write landed in the file the path names
+
+  "bound to another file" refusals during ordinary traffic: 0
+  BadStateId responses:                                     0
+
+The zero-refusal count is evidence for the paths this drill exercises —
+create, write, fsync, hardlink, rename-over (incl. the client's
+silly-rename), read. It does NOT exercise LOCK, delegations, SETATTR or
+CLAIM_PREVIOUS, so it is not evidence that the binding check is
+transparent to those. The check is applied only to READ and WRITE.
