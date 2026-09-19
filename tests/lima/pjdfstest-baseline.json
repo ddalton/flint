@@ -1,9 +1,9 @@
 {
   "_note": "Ceilings for flint-ONLY pjdfstest failures, differenced against a knfsd control on the same rig. Two numbers because the server has two postures: FLINT_NFS_ENFORCE_PERMISSIONS defaults to warn, under which permission checks are evaluated and logged but never enforced — so the default-mode count is the pre-fix one BY DESIGN, not a regression.",
   "flint_only_max": 645,
-  "flint_only_max_enforcing": 239,
+  "flint_only_max_enforcing": 238,
   "measured": "2026-08-24",
-  "knfsd_control_failures": 149,
+  "knfsd_control_failures": 137,
   "_enforcing_breakdown": {
     "special-file stand-ins (deliberate)": 148,
     "EIO on ~4KB paths (pre-existing, unrelated)": 52,
@@ -11,6 +11,9 @@
     "other": 13,
     "authorization still missing": 4,
     "EEXIST": 2,
-    "_comment": "Authorization was 265 of 646 before the checks landed and is 4 now. What remains is dominated by CREATE(SOCK|FIFO|BLK|CHR) being a regular-file STAND-IN — a deliberate choice (mknod needs root and a CSI export must not let callers dereference host devices) — and by a separate pre-existing bug returning EIO on paths near PATH_MAX. Neither is an authorization gap; do not read the total as one."
-  }
+    "_comment": "Authorization was 265 of 646 before the checks landed and is 4 now. What remains is dominated by CREATE(SOCK|FIFO|BLK|CHR) being a regular-file STAND-IN — a deliberate choice (mknod needs root and a CSI export must not let callers dereference host devices) — and by a separate pre-existing bug returning EIO on paths near PATH_MAX. Neither is an authorization gap; do not read the total as one.",
+    "_sums_to": "239 — the hand categorisation is one over the differenced 238; the reproducible shape-based split of the 238 is: fifo/socket 76, block/char 68, path >=1000 chars 52, other 42."
+  },
+  "_method": "flint-ONLY = per-file set difference of failed test NUMBERS (flint minus knfsd) over prove's Test Summary Report, which is what tests/lima/pnfs/pjdfstest-differential.sh computes. Raw totals for the 2026-08-24 files: knfsd 137, warn 651, enforcing 244; shared with knfsd 6 in both arms.",
+  "_corrected_2026-09-08": "knfsd_control_failures was 149 and flint_only_max_enforcing was 239. 149 was a PARSER DEFECT, not a stale run: the differential's summary-report parser swept the continuation lines of prove's 'TODO passed:' list into the failed set, inflating chown/00.t by 12 in every arm — in the enforcing run that file failed NOTHING and was counted as 12. The phantoms appeared identically in both arms, so they CANCELLED in the differential: flint_only_max 645 was never wrong and the gate never mis-fired. Only the raw counts were. Parser fixed and given a self-audit against prove's own per-file 'Failed: N' in the same commit. 239 -> 238 is a separate one-off: _enforcing_breakdown below was hand-categorised and sums to 239, one more than the differenced total."
 }

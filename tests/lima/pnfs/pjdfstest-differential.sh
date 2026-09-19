@@ -11,7 +11,7 @@
 # filesystem semantics, and NFS legitimately differs in places (AUTH_SYS
 # carries at most 16 supplementary gids, no atomic O_EXCL over some
 # paths, etc). Run against knfsd, the reference implementation, it still
-# fails ~149 assertions. Scoring flint's raw failure count against zero
+# fails ~137 assertions. Scoring flint's raw failure count against zero
 # would therefore charge it for NFS being NFS. Only the per-test
 # DIFFERENTIAL — failing here and NOT on knfsd — is evidence.
 #
@@ -69,7 +69,15 @@ vm "umount -f /mnt/knfsd 2>/dev/null||true
     grep -q /srv/knfsd-export /etc/exports 2>/dev/null || \
       echo '/srv/knfsd-export 127.0.0.1/32(rw,sync,no_subtree_check,no_root_squash,fsid=7)' >> /etc/exports
     exportfs -ra; systemctl restart nfs-kernel-server; sleep 3
-    mount -t nfs -o vers=4.1,nolock 127.0.0.1:/srv/knfsd-export /mnt/knfsd
+    mount -t nfs -o vers=4.1,nolock 127.0.0.1:/srv/knfsd-export /mnt/knfsd || exit 9
+    # Guard the CONTROL's mount exactly as arm A guards flint's. Without
+    # this the suite happily runs on the plain ext4 directory underneath
+    # /mnt/knfsd, where pjdfstest passes EVERYTHING ('All tests
+    # successful') — a control reporting zero failures, which then either
+    # VOIDs the run or, worse, would flatter flint by differencing
+    # against nothing. Observed 2026-09-08: nfs-kernel-server was not
+    # installed and this arm measured local ext4 for a full 167s.
+    mountpoint -q /mnt/knfsd || exit 9
     mkdir -p /mnt/knfsd/pjd
     rm -f /tmp/pjd-knfsd.txt
     cd /mnt/knfsd/pjd && timeout 2400 prove -r -f /opt/pjdfstest/tests > /tmp/pjd-knfsd.txt 2>&1
@@ -91,16 +99,40 @@ done
 python3 - "$TMP/flint.txt" "$TMP/knfsd.txt" "$BASELINE" <<'PYEOF'
 import re, sys, json, os, collections
 def parse(p):
-    out, cur, started = {}, None, False
+    # `in_failed` matters: prove prints OTHER labelled number lists in the
+    # same block, and "TODO passed:" is the one that bites. Its continuation
+    # lines are bare numbers, indistinguishable from a failed-test list's, so
+    # a parser that only looks for indented digits counts TODO-PASSING tests
+    # as failures. That inflated chown/00.t by 12 in all three 2026-08-24
+    # runs — including the enforcing arm, where that file failed NOTHING and
+    # was reported as 12. It cancelled in the differential (same phantoms in
+    # both arms) but corrupted every raw count printed below.
+    out, cur, started, in_failed = {}, None, False, False
     for line in open(p, errors="replace").read().splitlines():
         if "Test Summary Report" in line: started = True; continue
         if not started: continue
         m = re.match(r"^(/opt/pjdfstest/tests/\S+\.t)\s+\(Wstat", line)
-        if m: cur = m.group(1); out.setdefault(cur, set()); continue
+        if m: cur = m.group(1); out.setdefault(cur, set()); in_failed = False; continue
         m = re.search(r"Failed tests?:\s+(.*)$", line)
-        if m and cur: out[cur] |= exp(m.group(1)); continue
-        if cur and re.match(r"^\s+[\d,\s-]+$", line): out[cur] |= exp(line)
+        if m and cur: out[cur] |= exp(m.group(1)); in_failed = True; continue
+        if re.match(r"^\s+\w[\w ]*:", line): in_failed = False; continue
+        if cur and in_failed and re.match(r"^\s+[\d,\s-]+$", line): out[cur] |= exp(line)
     return out
+
+def audit(p, got):
+    """The parser's own control. prove states `Failed: N` per file in the
+    summary header; if the expanded list disagrees, the PARSER is wrong and
+    every number below is fiction. Say so rather than gate on it."""
+    hdr = {m[0]: int(m[1]) for m in re.findall(
+        r"(/opt/pjdfstest/tests/\S+\.t)\s+\(Wstat: \d+ Tests: \d+ Failed: (\d+)\)",
+        open(p, errors="replace").read())}
+    bad = {f: (len(got.get(f, set())), n) for f, n in hdr.items()
+           if len(got.get(f, set())) != n}
+    if bad:
+        print(f"VOID: {p} — parsed counts disagree with prove's own per-file totals:")
+        for f, (mine, theirs) in sorted(bad.items())[:5]:
+            print(f"      {f}: parsed {mine}, prove says {theirs}")
+        sys.exit(1)
 def exp(s):
     g = set()
     for p in s.replace(" ", "").split(","):
@@ -112,15 +144,16 @@ def exp(s):
     return g
 
 f, k, base = parse(sys.argv[1]), parse(sys.argv[2]), sys.argv[3]
+audit(sys.argv[1], f); audit(sys.argv[2], k)
 nf = sum(len(v) for v in f.values()); nk = sum(len(v) for v in k.values())
 
 # ANTI-VACUITY. A run that produced nothing parses as zero failures and
-# would look like a clean sweep. knfsd is known to fail ~149; if either
+# would look like a clean sweep. knfsd is known to fail ~137; if either
 # arm reports implausibly few, the run did not happen.
 if nf == 0 and nk == 0:
     print("VOID: both arms reported zero failures — the suite did not run"); sys.exit(1)
 if nk < 50:
-    print(f"VOID: the knfsd control arm reported only {nk} failures (expected ~149).")
+    print(f"VOID: the knfsd control arm reported only {nk} failures (expected ~137).")
     print("      Either it did not run or the mount is wrong. Without a trustworthy")
     print("      control, flint's number cannot be attributed to flint.")
     sys.exit(1)
