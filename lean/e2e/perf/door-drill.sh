@@ -77,10 +77,33 @@ declare -A WANT_FILES=( [big]=6           [small]=20000     [mixed]=2001       )
 declare -A WANT_BYTES=( [big]=6442450944  [small]=163840000 [mixed]=4327735296 )
 WORKLOADS="big small mixed"
 
-# The kubelet bind path for one FlintPassthroughMount volume. Resolved
-# fresh every call: the pod UID changes the moment the pod is recreated,
-# and a stale path is an empty directory, which is a 0.00s "win".
+# Where the passthrough door's bytes come from.
+#
+# Two shapes, because the DATA PATH is identical in both and the cluster
+# is not always worth its price: under Kubernetes this is the kubelet
+# bind path for a FlintPassthroughMount volume; with DRILL_MOUNT_BASE
+# set it is a mount-s3 run directly on the host. flint-passthrough IS
+# mount-s3 (`passthrough/mounter.rs` hands it the FUSE fd), and the CSI
+# plugin performs the mount once and then never touches an I/O — so the
+# two differ in provisioning, not in what is being timed. Stated here
+# rather than in the write-up, because a reader comparing this run to
+# the 2026-09-10 numbers needs to know which shape produced them.
+#
+# Either way it is RESOLVED FRESH and VERIFIED NON-EMPTY: a pod UID
+# changes the moment the pod is recreated and a stale path is an empty
+# directory, which times as a 0.00s "win" — the single most likely way
+# this arm reports a result it did not measure.
 mnt_path() { # <volume name>
+  local m
+  if [ -n "${DRILL_MOUNT_BASE:-}" ]; then
+    m="$DRILL_MOUNT_BASE/$1"
+    # The mount must be REAL and POPULATED. `mountpoint` alone is not
+    # enough: an aborted mount-s3 leaves the mount up and the listing
+    # empty, and an empty listing reads as an instant read.
+    mountpoint -q "$m" 2>/dev/null || { echo ""; return; }
+    [ -n "$(find "$m" -maxdepth 2 -type f -print -quit 2>/dev/null)" ] || { echo ""; return; }
+    echo "$m"; return
+  fi
   awk -v v="/$1/mount" '$1=="mount-s3" && index($2,"/pods/") && index($2,v){print $2}' /proc/mounts | head -1
 }
 

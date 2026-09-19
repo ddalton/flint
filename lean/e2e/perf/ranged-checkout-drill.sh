@@ -157,12 +157,30 @@ seed_workload() { # <name>
 one_run() { # <rep> <workload> <arm>
   local rep="$1" w="$2" arm="$3" dir="$DRILL_ROOT/run-$w"
   rm -rf "$dir"; mkdir -p "$dir"
-  local min=0 fanout=32 inflight=512
+  local min=0 fanout=32 inflight=512 scope=""
   case "$arm" in
     whole)  min=0; fanout=32; inflight=512  ;;
     ranged) min=8; fanout=32; inflight=512  ;;
     slow)   min=0; fanout=1;  inflight=512  ;;
     budget) min=0; fanout=32; inflight=8192 ;;
+    # The SCOPED arm answers a different question from the others and
+    # must not be read as a fifth contender for the same work: it
+    # materialises a SUBSET, so a smaller wall clock is the expected
+    # outcome, not the finding. What it measures is the PRICE OF THE
+    # SUBSET — which is the number that decides whether an agent
+    # touching part of a tree should scope a checkout or mount a door
+    # that fetches on demand.
+    #
+    # `bytes` is therefore the load-bearing column here, not `fetch`.
+    # An arm that "wins" by materialising fewer bytes has not won, and
+    # this arm wins that way ON PURPOSE — so the report must print both
+    # or it is comparing nothing.
+    scoped) min=8; fanout=32; inflight=512
+            case "$w" in
+              big)   scope="blob-1.bin" ;;                       # 1 of 6
+              small) scope=$(seq -f 'f-%06g' 0 63 | paste -sd,) ;;  # 64 of 20,000
+              mixed) scope=$(seq -f 's-%06g' 0 63 | paste -sd,) ;;  # 64 of 2,001
+            esac ;;
   esac
   local out
   out=$(FLINT_SYNC_ROOT="$dir" \
@@ -173,7 +191,24 @@ one_run() { # <rep> <workload> <arm>
         FLINT_SYNC_RANGE_GET_MIN_MB="$min" \
         FLINT_SYNC_RANGE_GET_CHUNK_MB=16 \
         FLINT_SYNC_RANGE_GET_PARALLELISM=4 \
+        FLINT_SYNC_CHECKOUT_SCOPE="$scope" \
         "$FLINT_SYNC_BIN" checkout 2>&1) || { echo "$out" >&2; return 1; }
+
+  # ANTI-VACUITY for the scoped arm, and it is the same shape as the
+  # `ranged=N` guard: a scope that admits everything reads EXACTLY like
+  # no scope, so an env var that silently failed to parse would produce
+  # a whole-tree checkout labelled "scoped" and nobody would see it.
+  # flint-sync prints the DECLINED count itself; assert it moved.
+  if [ "$arm" = scoped ]; then
+    local declined
+    declined=$(echo "$out" | sed -n 's/.*— \([0-9]*\) citations declined.*/\1/p' | head -1)
+    if [ "${declined:-0}" -eq 0 ]; then
+      echo "SCOPED GUARD FAIL [$w]: 0 citations declined — the scope admitted" \
+           "everything, so this arm re-ran the whole-tree arm under another name." >&2
+      echo "$out" >&2; return 1
+    fi
+    echo "   scoped[$w]: $declined citations declined" >&2
+  fi
 
   local phase
   phase=$(echo "$out" | grep -F 'flint-sync: phase' || true)
@@ -205,9 +240,31 @@ check_guards() {
            "arms are not what they say they are" >&2
       bad=1
     fi
-    # 2. every arm moved the same bytes
+    # 2. every FULL arm moved the same bytes.
+    #
+    # `scoped` is excluded because moving FEWER bytes is its entire
+    # purpose — but it is not simply skipped, which would hand it the
+    # one failure mode it is most likely to have. It gets the STRICTER
+    # test instead: strictly less than the full arms. A scope that
+    # silently admitted everything reads exactly like no scope, so
+    # "equal bytes" and "zero bytes" are both failures for it.
+    local sc_bytes full_bytes
+    sc_bytes=$(awk -v w="$w" '$2==w && $3=="scoped" {print $5; exit}' "$RESULTS")
+    full_bytes=$(awk -v w="$w" '$2==w && $3=="whole" {print $5; exit}' "$RESULTS")
+    if [ -n "$sc_bytes" ] && [ -n "$full_bytes" ]; then
+      if [ "$sc_bytes" -ge "$full_bytes" ]; then
+        echo "GUARD FAIL [$w]: scoped moved $sc_bytes bytes against a full arm's" \
+             "$full_bytes — the scope admitted everything, so that arm re-ran the" \
+             "whole-tree arm under another name" >&2
+        bad=1
+      elif [ "$sc_bytes" -eq 0 ]; then
+        echo "GUARD FAIL [$w]: scoped moved ZERO bytes — it materialised nothing," \
+             "which times as a win and measures nothing" >&2
+        bad=1
+      fi
+    fi
     local n
-    n=$(awk -v w="$w" '$2==w {print $5}' "$RESULTS" | sort -u | wc -l | tr -d ' ')
+    n=$(awk -v w="$w" '$2==w && $3!="scoped" {print $5}' "$RESULTS" | sort -u | wc -l | tr -d ' ')
     if [ "$n" -ne 1 ]; then
       echo "GUARD FAIL [$w]: arms materialised DIFFERENT byte counts —" \
            "the comparison is invalid, not close" >&2
@@ -232,13 +289,19 @@ check_guards() {
 report() {
   echo
   echo "=== ranged-checkout drill — fetch_secs, RANGE over $REPS reps ==="
-  printf '%-8s %-8s %8s %8s %8s\n' workload arm min max spread
+  printf '%-8s %-8s %8s %8s %8s %14s\n' workload arm min max spread bytes
   while read -r w; do
-    for arm in whole ranged slow; do
+    # EVERY arm the run may have produced. The list used to be the three
+    # tranche-1 arms, so `budget` and `scoped` — the two arms whose
+    # whole purpose is to be compared — were collected into the TSV and
+    # then silently left out of the table. A report that omits the arm
+    # under test is worse than no report: it reads as a completed
+    # comparison.
+    for arm in whole ranged slow budget scoped; do
       awk -v w="$w" -v a="$arm" '
-        $2==w && $3==a { if (min=="" || $4<min) min=$4; if ($4>max) max=$4 }
-        END { if (min!="") printf "%-8s %-8s %8.2f %8.2f %7.1f%%\n",
-                     w, a, min, max, (max-min)/min*100 }' "$RESULTS"
+        $2==w && $3==a { if (min=="" || $4<min) min=$4; if ($4>max) max=$4; b=$5 }
+        END { if (min!="") printf "%-8s %-8s %8.2f %8.2f %7.1f%% %14d\n",
+                     w, a, min, max, (max-min)/min*100, b }' "$RESULTS"
     done
   done <<< "$(echo "$WORKLOADS" | tr ' ' '\n')"
   echo
@@ -267,7 +330,7 @@ case "$MODE" in
       for w in $WORKLOADS; do
         # arms interleaved inside the rep, and rotated so no arm always
         # runs first into a cold page cache
-        for arm in whole ranged slow; do one_run "$rep" "$w" "$arm"; done
+        for arm in whole ranged slow scoped; do one_run "$rep" "$w" "$arm"; done
       done
     done
     check_guards || { echo "GUARDS FAILED — do not quote these numbers." >&2; exit 1; }
@@ -279,7 +342,7 @@ case "$MODE" in
     # the arm would measure nothing.
     for rep in $(seq 1 "$REPS"); do
       for w in big mixed; do
-        for arm in whole budget ranged; do one_run "$rep" "$w" "$arm"; done
+        for arm in whole budget ranged scoped; do one_run "$rep" "$w" "$arm"; done
       done
     done
     report ;;
