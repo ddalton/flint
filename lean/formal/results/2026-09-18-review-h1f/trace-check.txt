@@ -1,0 +1,17 @@
+== both_edit_one_file: accept (as required) — last: <<"TRACE-REACHED", 40, "end", [A |-> "idle", B |-> "idle"], "B", "none", <<>>>>
+== edit_and_delete_cross: accept (as required) — last: <<"TRACE-REACHED", 38, "end", [A |-> "idle", B |-> "idle"], "A", "none", <<>>>>
+== outranked_delete_publish: accept (as required) — last: <<"TRACE-REACHED", 36, "end", [A |-> "idle", B |-> "idle"], "A", "none", <<>>>>
+== ui_write_cited: accept (as required) — last: <<"TRACE-REACHED", 25, "end", [A |-> "idle", B |-> "idle"], "A", "none", <<>>>>
+== ui_write_over_a_queued_delete: accept (as required) — last: <<"TRACE-REACHED", 41, "end", [A |-> "idle", B |-> "idle"], "B", "none", <<>>>>
+== both_edit_one_file.upload-wrong-etag: reject (as required) — last: << "TRACE-REACHED", 6, [w |-> "A", p |-> "shared.txt", ev |-> "upload", g |-> 1, outcome |-> "put"], [A |-> "scanned", B |-> "idle"], "none", "none", <<>> >>
+== edit_and_delete_cross.merge-foreign-plus-one: reject (as required) — last: << "TRACE-REACHED", 19, [ w |-> "A", ev |-> "install", foreign |-> 2, gone |-> 0, nothing |-> FALSE, seq |-> 3, withheld |-> {} ], [A |-> "claimed", B |-> "idle
+== outranked_delete_publish.ack-ok: reject (as required) — last: << "TRACE-REACHED", 19, [w |-> "A", ev |-> "ack", status |-> "ok"], [A |-> "idle", B |-> "idle"], "A", "none", <<>> >>
+== ui_write_cited.consume-not-adopted: reject (as required) — last: << "TRACE-REACHED", 4, [ w |-> "A", ev |-> "consume", adopted |-> {}, removed |-> {}, dirty |-> {}, kept |-> {} ], [A |-> "idle", B |-> "idle"], "none", "none",
+== ui_write_over_a_queued_delete.tombstone-removed: reject (as required) — last: << "TRACE-REACHED", 20, [ w |-> "B", ev |-> "consume", adopted |-> {<<"x.txt", 2>>}, removed |-> {"x.txt"}, dirty |-> {}, kept |-> {} ], [A |-> "idle", B |-> "i
+== control-commit-token: reject (as required) — last: << "TRACE-REACHED", 19, [ w |-> "A", ev |-> "install", foreign |-> 1, gone |-> 0, nothing |-> FALSE, seq |-> 3, withheld |-> {} ], [A |-> "claimed", B |-> "idle
+== control-412-parks: reject (as required) — last: << "TRACE-REACHED", 14, [w |-> "B", p |-> "shared.txt", ev |-> "upload", g |-> 3, outcome |-> "put"], [A |-> "idle", B |-> "scanned"], "A", "none", <<>> >>
+== control-two-scan-declared: reject (as required) — last: << "TRACE-REACHED", 15, [w |-> "A", ev |-> "scan", uploads |-> 0, deletes |-> 1], [A |-> "consumed", B |-> "idle"], "B", "none", <<>> >>
+== control-tombstone-unfixed: reject (as required) — last: << "TRACE-REACHED", 20, [ w |-> "B", ev |-> "consume", adopted |-> {<<"x.txt", 2>>}, removed |-> {}, dirty |-> {}, kept |-> {} ], [A |-> "idle", B |-> "idle"], 
+== control-shared-inbox: reject (as required) — last: << "TRACE-REACHED", 7, [w |-> "A", ev |-> "pullonly", foreign |-> 0, gone |-> 0], [A |-> "scanned", B |-> "idle"], "none", "none", <<>> >>
+work dir: /tmp/tmp.sJYtEIQUIy
+trace check: ok

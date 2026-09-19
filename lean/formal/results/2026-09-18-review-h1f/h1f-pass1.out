@@ -1,0 +1,44 @@
+== LeanBarrierLeaseSupersedeDropsBase 00:05:29
+rc=12
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+== LeanProbeBaseRestored 00:07:11
+rc=12
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+== LeanBarrierLeaseOrphanConverges 00:07:23
+rc=0
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+THREEDONE bad=0
+== LeanBarrierLeaseCollectorOffNoTombstone 00:12:31
+rc=12
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+== LeanBarrierLeaseCollectorOff 00:12:59
+rc=0
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+== LeanBarrierLeaseImplHolds 00:17:15
+rc=0
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+== LeanBarrierLeaseInboxSnapshot 00:20:40
+rc=0
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+== LeanBarrierLeaseOrphanStaleCopy 00:24:23
+rc=0
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+UNEXPECTED: LeanBarrierLeaseOrphanStaleCopy should violate
+EIGHTDONE bad=1
+stopping before the gate

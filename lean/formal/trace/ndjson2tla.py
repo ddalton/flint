@@ -267,7 +267,7 @@ def convert(lines):
         "CommitLoadsCurrent": True, "Upload412Preserves": True, "DeclaredConfirmsAbsence": True,
         "Writers": "<- " + ["", "", "TwoWriters", "ThreeWriters", "FourWriters",
                             "FiveWriters", "SixWriters"][nwriters],
-        "OrphanTrack": False, "ProjectedTrace": projected,
+        "OrphanTrack": False, "OrphanEntryCited": True, "LeakSupersedesNothing": True, "ManifestTombstones": True, "SupersedeRestoresBase": True, "ProjectedTrace": projected,
         # The handoff rule the code implements (found by replaying the storm).
         "AbandonOnStoreError": True,
         "BaselineKeepsUncollected": True,
@@ -283,6 +283,11 @@ def convert(lines):
         # gc events would say "leaked" rather than "deleted".
         "CollectorOff": False,
         "QueueForeignChanges": True,
+        # Review 2026-09-18: the code after C2 and H1 (a fence before every
+        # delete is the module's shape; the tombstone carries what the
+        # peer's delete retired).  A trace's "superseded" tombstone is a
+        # DIFFERENT etag at the key on S3, so the replays are unchanged.
+        "GCFencePerDelete": True, "TombstoneNamesRetired": True,
     }
     return steps, consts, paths, free, gen
 
@@ -295,6 +300,11 @@ def write_out(steps, consts, paths, free, gen, evs_count, outdir: Path, name: st
         f"Trace == <<\n  {body}\n>>\n====\n")
     c = dict(consts)
     c.update(overrides or {})
+    # The retired-etag rule is a sub-arm of the key rule under the writer
+    # queue (the module's ASSUME): a control that turns either off turns
+    # it off too, or the replay errors instead of rejecting.
+    if not (c.get("TombstoneHeadsKey") and c.get("WriterQueue")):
+        c["TombstoneNamesRetired"] = False
     cfg = ["INIT TraceInit", "NEXT TraceNext", "CHECK_DEADLOCK FALSE", "CONSTANTS",
            f"  Paths = {tla(set(paths))}", f"  FreePaths = {tla(set(free))}"]
     cfg += [f"  {k} {v}" if isinstance(v, str) and v.startswith("<-") else f"  {k} = {tla(v)}"

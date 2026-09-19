@@ -1,0 +1,55 @@
+selftest ok: 'a guard reads a dropped counter' fails the census (line 2933 (Touch): gh.acks is DROPPED from StrictView but read here (update target gh:None sc:None))
+selftest ok: 'a KEPT field's update reads a dropped counter' fails the census (line 1499 (Narrow): gh.done is DROPPED from StrictView but read here (update target gh:narrows sc:No)
+selftest ok: 'a dropped sc field feeds a kept one' fails the census (line 1307 (Restart): sc.pendReRun is DROPPED from StrictView but read here (update target gh:None sc)
+selftest ok: 'a dropped sc field read through a nested index' fails the census (line 2933 (Touch): sc.pendReRun is DROPPED from StrictView but read here (update target gh:None sc:N)
+selftest ok: 'a whole sc record compared in a guard' fails the census (line 2933 (Touch): whole-record read of sc[...] reads the dropped fields too)
+selftest ok: 'a variable added to vars but not to the view' fails the census (StrictView is not vars with sc/gh projected:
+  vars ~ ['cellEpoch', 'cellHolder', 'cellQueue', 'cell)
+view census ok: 31 gh fields kept, 50 dropped (Paths, abandoned, ackAfterRestart, acks, adoptOwn, adoptWithheld, carriedCite, citeSpan, cited, cites, claimed, coalesced, deadSkips, declaredDrops, deferredLater, deferredPaths, deposals, done, emptyInstalls, enqueues, fastHonor, fastPaths, forcedCites, gc, gcCited, handoffs, honors, interleaved, leakApplied, leaked, orphanOutlived, orphanTracks, partialAcks, pullOnlys, reaped, refusedAcks, removalsApplied, removalsRefused, renamesApplied, scopedDeferrals, staged, staleAdopt, stragglerCas, syncApplied, syncConflicts, takeovers, tombRemoved, tombSuperseded, uploadWithheld, withheld); sc fields dropped: pendReRun, stageCarried
+selftest ok: an unsupplied constant would be reported (76 real constants read from LeanSubtree.tla)
+constants census ok: 76 constants, all known to gen-cfgs.sh and trace/ndjson2tla.py
+== strict: core breadth (crash+restart+HITL, all arms on) [LeanSubtree.cfg]
+   ok
+== strict: stall/takeover world: rotation + per-request epoch hold [LeanSubtreeTakeover.cfg]
+   ok
+== strict: window OFF: inbox + guards still carry safety (the window is availability/defense-in-depth at whole-PUT atomicity) [LeanNoWindowHolds.cfg]
+   ok
+== strict: rotation OFF, epoch-check ON: per-request validation alone fences the straggler (redundancy A/B) [LeanEpochOnlyHolds.cfg]
+   ok
+== must-fail: HITL amputation: direct bump + whole-rewrite 412/re-seed/overwrite [LeanAmputation.cfg]
+   found: Invariant Inv_HITLDurable is violated
+== must-fail: merge WITHOUT the inbox: preservation is one barrier deep (delete-after-absorption) — the inbox is load-bearing [LeanDirectMergeInsufficient.cfg]
+   found: Invariant Inv_HITLDurable is violated
+== must-fail: the inherited LOCAL-WINS 412 arbitration destroys a user upload [LeanLocalWins.cfg]
+   found: Invariant Inv_HITLDurable is violated
+== must-fail: unguarded GC delete destroys a HITL re-create [LeanGCUnguarded.cfg]
+   found: Invariant Inv_HITLDurable is violated
+== must-fail: v1 order (upload->delete->CAS) dangles the standing manifest [LeanDanglingOrder.cfg]
+   found: Invariant Inv_NoDangling is violated
+== must-fail: no takeover rotation: the deposed straggler's manifest CAS lands [LeanNoRotate.cfg]
+   found: Invariant Inv_NoStragglerInstall is violated
+== must-fail: rotation alone: the deposed straggler's data PUT lands [LeanNoEpochCheck.cfg]
+   found: Invariant Inv_NoDeposedPut is violated
+== must-fail: re-checkout over a live tree resurrects an unpublished delete [LeanRematerialize.cfg]
+   found: Invariant Inv_NoResurrection is violated
+== must-fail: probe: a full 7-step barrier completes [LeanProbeBarrier.cfg]
+   found: Invariant ProbeBarrierDone is violated
+== must-fail: probe: an acked HITL write becomes manifest-cited [LeanProbeHITLCited.cfg]
+   found: Invariant ProbeHITLCited is violated
+== must-fail: probe: the takeover fires [LeanProbeTakeover.cfg]
+   found: Invariant ProbeTakeover is violated
+== must-fail: probe: a deposed CAS attempt is exercised (and fenced) [LeanProbeStragglerAttempt.cfg]
+   found: Invariant ProbeStragglerAttempt is violated
+== must-fail: probe: the 412-park/conflict-surface arm fires [LeanProbePark.cfg]
+   found: Invariant ProbePark is violated
+== must-fail: probe: the GC delete fires [LeanProbeGC.cfg]
+   found: Invariant ProbeGC is violated
+== must-fail: probe: a HITL write is refused while the window is open [LeanProbeRefusal.cfg]
+   found: Invariant ProbeRefusal is violated
+== must-fail: probe: the own-crashed-PUT 412 adoption fires after restart [LeanProbeAdoptOwn.cfg]
+   found: Invariant ProbeAdoptOwn is violated
+== strict: sync verb: scan-first + locally-dirty-wins holds against the barrier/HITL product [LeanSyncHolds.cfg]
+   ok
+== must-fail: sync judging dirt from the LAST BARRIER's snapshot destroys un-scanned live work [LeanSyncStaleDirt.cfg]
+   found: Invariant Inv_SyncNeverDestroysDirty is violated
+== must-fail: probe: sync actually applies a remote change [LeanProbeSyncApplied.cfg]

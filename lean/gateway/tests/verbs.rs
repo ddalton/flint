@@ -133,7 +133,11 @@ async fn an_overwrite_must_name_what_it_read() {
 async fn path_hygiene_the_size_cap_and_a_missing_file() {
     let s = store();
     let w = ws(&s).with_max_put_bytes(4);
-    for bad in ["../x", "/abs", "a//b", ".flint/x", ".flint", "a/./b", ".flint-sync/state"] {
+    // The last two are the consume's temp-sibling name (review 2026-09-18,
+    // C1): the syncer's walk skips it at every depth, so an acked write
+    // under it was cited once and then collected as a delete.
+    for bad in ["../x", "/abs", "a//b", ".flint/x", ".flint", "a/./b", ".flint-sync/state",
+                "notes/report.flint-sync-tmp", "a.flint-sync-tmp/b"] {
         let err = w.put_file(bad, Bytes::from("x"), &PutFile::default()).await.unwrap_err();
         assert!(matches!(err, VerbError::BadPath(_)), "{bad}: {err}");
         assert_eq!(err.status(), 400);

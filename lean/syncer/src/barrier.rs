@@ -8,10 +8,7 @@ use std::path::Path;
 
 use bytes::Bytes;
 
-use flint_store::{
-    EpochState,
-    crc64_nvme, crc64_to_b64, GenerationStamps, PosixStamps, PutCondition, StoreError,
-};
+use flint_store::{crc64_nvme, crc64_to_b64, GenerationStamps, PosixStamps, PutCondition, StoreError};
 
 use super::inbox::{self, InboxDoc, InboxEntry, Refusal, Removal};
 use super::manifest::{self, LeanEntry};
@@ -116,10 +113,6 @@ pub struct RemovalPass {
 /// still saturates fan-out and the sync point between chunks is rare.
 const UPLOAD_CHUNK_WAVES: usize = 16;
 
-/// How stale the lease may get inside a barrier before it is renewed:
-/// comfortably below the 6-poll (~60 s) takeover window, so a holder
-/// busy in a long commit section never reads as quiet to a waiter.
-const RENEW_WITHIN_SECS: u64 = 20;
 
 impl Syncer {
     /// Verify the cell still names us at OUR epoch; anything else is a
@@ -194,11 +187,19 @@ impl Syncer {
                     author: "merge-preserved".into(),
                     added_unix: 0,
                     crc64_b64: c.crc64_b64.clone(),
+                    cited: None,
                 })
             })
             .collect();
         let n_queued = queued.len();
         let entries: Vec<InboxEntry> = queued.into_iter().chain(doc.entries.iter().cloned()).collect();
+        // The manifest's citations, read once and only if an entry asks
+        // (the untracked sweep's do; a gateway's never does).
+        let mut citations: Option<BTreeMap<String, String>> = None;
+        // Entries this consume settled WITHOUT integrating (superseded,
+        // missing, outlived, refused): they track nothing, which the
+        // tombstone pass below needs to know.
+        let mut dropped: BTreeSet<(String, String)> = BTreeSet::new();
         for (idx, entry) in entries.iter().enumerate() {
             let key = self.cfg.file_key(&entry.path);
             // Containment BEFORE anything else: a path we could never
@@ -218,6 +219,7 @@ impl Syncer {
                     at_unix: now_unix(),
                 })?;
                 self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "refused"}));
+                dropped.insert((entry.path.clone(), entry.etag.clone()));
                 consumed.push(idx);
                 continue;
             }
@@ -226,6 +228,28 @@ impl Syncer {
                 self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "already"}));
                 consumed.push(idx);
                 continue;
+            }
+            // Review 2026-09-18, H1b: the untracked sweep's entry is honoured
+            // only while the manifest still cites at its path exactly what
+            // the sweep judged the object against. The citation moving on —
+            // to the object itself (the upload it tracked was a live
+            // writer's, since committed), to a newer one, or to nothing (a
+            // delete) — ends it, with a trace line and no record: nobody
+            // acked these bytes, and adopting them here was how a
+            // generation the manifest had cited and then dropped came back
+            // through the citation repair.
+            if let Some(judged) = entry.cited.as_deref() {
+                if citations.is_none() {
+                    citations = Some(self.current_citations().await?);
+                }
+                let cited_now = citations.as_ref().and_then(|c| c.get(entry.path.as_str()).cloned());
+                let same = |a: &str, b: &str| a.trim_matches('"') == b.trim_matches('"');
+                if !cited_now.as_deref().is_some_and(|c| same(c, judged)) {
+                    self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "outlived", "judged": judged, "cited": cited_now}));
+                    dropped.insert((entry.path.clone(), entry.etag.clone()));
+                    consumed.push(idx);
+                    continue;
+                }
             }
             let head = match self.store.head(&key).await {
                 Ok(m) => m,
@@ -240,6 +264,7 @@ impl Syncer {
                         at_unix: now_unix(),
                     })?;
                     self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "missing"}));
+                    dropped.insert((entry.path.clone(), entry.etag.clone()));
                     consumed.push(idx);
                     continue;
                 }
@@ -249,6 +274,7 @@ impl Syncer {
                 // Superseded by a newer write (its own inbox entry
                 // follows, or it is the syncer's): drop.
                 self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "superseded"}));
+                dropped.insert((entry.path.clone(), entry.etag.clone()));
                 consumed.push(idx);
                 continue;
             }
@@ -302,6 +328,7 @@ impl Syncer {
                         // The sentinel's bytes are the LOCAL edit; the
                         // publish that supersedes hashes them itself.
                         crc64_b64: None,
+                        judged: None,
                     },
                 );
                 self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "dirty-preserved"}));
@@ -397,6 +424,7 @@ impl Syncer {
                         mtime_unix: mtime_of(&st),
                         mtime_nanos: Some(mtime_nanos_of(&st)),
                         crc64_b64: Some(got),
+                        judged: entry.cited.clone(),
                     },
                 );
                 baseline.prev_scan.insert(entry.path.clone());
@@ -431,12 +459,60 @@ impl Syncer {
             // look: an absent one settles as it always did.
             if std::fs::symlink_metadata(&local).is_ok() {
                 match self.store.head(&self.cfg.file_key(&change.path)).await {
-                    Ok(_) => {
-                        self.trace("tombstone", serde_json::json!({"path": change.path, "action": "superseded"}));
-                        settled.insert(change.path.clone());
-                        continue;
+                    // Review 2026-09-18, H1: the generation the delete
+                    // RETIRED is not a newer write. A collector that gave
+                    // way (a store without a conditional DELETE) leaves it
+                    // at the key; reading that as "superseded" kept the
+                    // path in this tree and its baseline, the repair
+                    // re-cited it, and the two writers flapped the path
+                    // forever. Only a DIFFERENT object supersedes.
+                    Ok(meta) if change.retired.as_deref() != Some(meta.etag.as_str()) => {
+                        // Review 2026-09-18, H1b: a DIFFERENT object supersedes
+                        // the deletion only if something will integrate it —
+                        // the manifest cites it at the path, or an entry this
+                        // consume honoured names it. An object nothing cites
+                        // and nothing tracks is a leak (a delete's GC that
+                        // never ran; a generation this tree never integrated,
+                        // so the tombstone names an older one), and a leak
+                        // supersedes nothing: the delete applies. A live
+                        // writer's upload still in flight goes with the old
+                        // copy and returns as the foreign change its commit
+                        // queues.
+                        if citations.is_none() {
+                            citations = Some(self.current_citations().await?);
+                        }
+                        let same = |a: &str, b: &str| a.trim_matches('"') == b.trim_matches('"');
+                        let cited = citations.as_ref().and_then(|c| c.get(&change.path)).is_some_and(|c| same(c, &meta.etag));
+                        let tracked = doc.entries.iter().any(|e| {
+                            e.path == change.path && same(&e.etag, &meta.etag) && !dropped.contains(&(e.path.clone(), e.etag.clone()))
+                        });
+                        if cited || tracked {
+                            self.trace("tombstone", serde_json::json!({"path": change.path, "action": "superseded"}));
+                            // Review 2026-09-18, H1f: settled, but the copy it
+                            // named is still in the tree, derived from the
+                            // generation the delete retired. The merge base
+                            // moved past the path in the install that queued
+                            // the deletion; it must say so again here, or the
+                            // next install — onto a manifest that dropped the
+                            // path a SECOND time before the re-cite reached
+                            // this tree — has nothing at the path to diff, and
+                            // the clean copy stays forever, uncited and a
+                            // repair candidate at every barrier. Restored, that
+                            // install queues the deletion again, or the upsert
+                            // if the re-cite still stands.
+                            if let Some(retired) = change
+                                .retired
+                                .clone()
+                                .or_else(|| baseline.entries.get(&change.path).map(|b| b.etag.clone()))
+                            {
+                                baseline.inst_base.insert(change.path.clone(), retired);
+                            }
+                            settled.insert(change.path.clone());
+                            continue;
+                        }
+                        self.trace("tombstone", serde_json::json!({"path": change.path, "action": "applies-over-leak", "leaked": meta.etag}));
                     }
-                    Err(StoreError::NotFound(_)) => {}
+                    Ok(_) | Err(StoreError::NotFound(_)) => {}
                     Err(e) => return Err(e.into()),
                 }
             }
@@ -819,66 +895,15 @@ impl Syncer {
         Ok(confirmed)
     }
 
-    /// Renew the lease if it has gone stale MID-BARRIER, and hand back
-    /// the cell as it was read so the CALLER can fence on it.
-    ///
-    /// Costs nothing on a short barrier: the renewal is skipped unless
-    /// it was already due, so the request count is unchanged — this
-    /// moves WHEN the renewal can happen, not how often.
-    ///
-    /// What this does NOT do, stated because the previous comment
-    /// claimed it did: it never raises `Fenced` for a deposed holder.
-    /// `lease::renew` can only 412 when the cell is still at OUR epoch
-    /// with a token we do not hold; a cell at a FOREIGN epoch is
-    /// skipped here (renewing it would be nonsense), so a deposed
-    /// straggler passed straight through. The 2026-09-03 audit found
-    /// the cadence barrier relying on exactly that phantom fence
-    /// between upload chunks and completing every remaining data PUT
-    /// after a takeover. The cell is returned so the caller can compare
-    /// it against its lease — the cadence barrier uses the read it
-    /// already paid for rather than a separate fence. `None` when there is
-    /// no lease or the read failed: neither is a fence, and the
-    /// ordinary renewal arm will try again.
-    pub(crate) async fn renew_if_due(&mut self) -> LeanResult<Option<EpochState>> {
-        let Some(lease) = self.lease.clone() else { return Ok(None) };
-        let state = match self.store.epoch_read(&self.cfg.epoch_key()).await {
-            Ok(Some(s)) => s,
-            _ => return Ok(None),
-        };
-        let now = super::now_unix();
-        let fresh = state
-            .last_renew_unix
-            .map(|t| now.saturating_sub(t) < RENEW_WITHIN_SECS)
-            .unwrap_or(false);
-        if fresh || state.epoch != lease.epoch {
-            // Not due, or not ours to renew. The caller decides what a
-            // foreign cell means; this function only knows it cannot
-            // renew one.
-            return Ok(Some(state));
-        }
-        super::lease::renew(self).await?;
-        Ok(Some(state))
-    }
-
-    /// The between-chunk fence of the cadence barrier: a cell that no
-    /// longer names this holder at this epoch stops the upload set
-    /// HERE, before the next chunk's PUTs. Every one of those PUTs
-    /// carries If-Match on a baseline etag that still matches — the
-    /// successor has published nothing yet — so without this a deposed
-    /// straggler overwrites the cited generation of every key it still
-    /// had to upload, and every reader's S3-wins arm then adopts the
-    /// uncited bytes silently (audit 2026-09-03, finding 1).
-    fn fence_on_cell(&self, cell: &EpochState) -> LeanResult<()> {
-        let Some(lease) = self.lease.as_ref() else {
-            return Err(LeanError::Fenced("lease dropped mid-barrier".into()));
-        };
-        if cell.epoch != lease.epoch || cell.holder_id != lease.holder_id {
-            return Err(LeanError::Fenced(format!(
-                "deposed between upload chunks: cell at epoch {} holder {} (we are epoch {})",
-                cell.epoch, cell.holder_id, lease.epoch
-            )));
-        }
-        Ok(())
+    /// The last cell WRITE (a claim or a renew) is older than the renew
+    /// spacing — or unknown, which an adopted claim is. A deposal needs
+    /// the token still for six spaced polls, so a write younger than the
+    /// spacing is proof that none has happened; anything else must renew
+    /// before it deletes (review 2026-09-18, C2).
+    fn cell_write_is_stale(&self) -> bool {
+        self.cell_written_at
+            .map(|t| t.elapsed() >= std::time::Duration::from_secs(self.cfg.renew_within_secs))
+            .unwrap_or(true)
     }
 
     /// Steps 2–7. `barrier` = one full publish cycle (the cadence arm).
@@ -1190,6 +1215,10 @@ impl Syncer {
         // Without this, an adopted upload is clean-vs-baseline, never
         // enters the upload set, and the manifest silently drops it —
         // the battery's amputation leg caught exactly that.
+        // H1b/H1e: every repair, judged again at the merge against the
+        // document it builds on — a sweep adoption's citation (`judged`)
+        // and the document's tombstones.
+        let mut judged_repairs: BTreeMap<String, (Option<String>, String)> = BTreeMap::new();
         let repair_candidates: Vec<String> = baseline
             .entries
             .iter()
@@ -1227,6 +1256,7 @@ impl Syncer {
                             epoch: epoch_hint,
                         },
                     );
+                    judged_repairs.insert(path.clone(), (be.judged.clone(), be.etag.clone()));
                     observed.insert(path.clone());
                 }
                 // Moved again or gone: the next consume reconciles it.
@@ -1401,7 +1431,7 @@ impl Syncer {
             let deadline = now_unix() + self.cfg.window_slack_secs;
             inbox::open_window(self.store.as_ref(), &self.cfg, epoch, deadline).await?;
             let mut foreign_entries: Vec<(String, LeanEntry)> = vec![];
-            let mut foreign_gone: Vec<String> = vec![];
+            let mut foreign_gone: Vec<(String, String)> = vec![];
             // Set when the merge added nothing to the document: nothing is
             // installed, and theirs becomes the merge base as it stands.
             let mut installed_nothing = false;
@@ -1414,6 +1444,7 @@ impl Syncer {
                     ));
                 }
                 let current = manifest::load(self.store.as_ref(), &self.cfg).await?;
+                let voided = self.void_stale_repairs(current.as_ref(), &mut upserts, &judged_repairs, &flush_uuid);
                 let MergeOnto { theirs, expected, merged, foreign, gone } = self.merge_onto(
                     current.as_ref(),
                     prev_installed.as_deref(),
@@ -1423,6 +1454,15 @@ impl Syncer {
                     &parked,
                     &flush_uuid,
                 );
+                // A voided adoption of a path the manifest no longer cites is
+                // queued as a tombstone (the merge base may never have had it).
+                let gone = {
+                    let mut g = gone;
+                    let extra: Vec<(String, String)> =
+                        voided.into_iter().filter(|(p, _)| !g.iter().any(|(q, _)| q == p)).collect();
+                    g.extend(extra);
+                    g
+                };
                 // Nothing of ours changes the document — a barrier that only
                 // found the manifest moved by another writer. Installing it
                 // anyway was an empty generation, and the peer's next tick
@@ -1489,17 +1529,30 @@ impl Syncer {
 
             // Step 6: deletes LAST — GC of keys the NEW manifest no longer
             // references, HEAD-guarded on the recognized ETag.
-            let mut swept = 0usize;
             let mut gc_held = false;
             for path in &classified.deletes {
-                // A mass delete is the one long stretch of the commit
-                // section: keep the token moving so a waiter does not count
-                // a live holder dead, and fence on what the read returns.
-                swept += 1;
-                if swept % 200 == 0 {
-                    if let Some(cell) = self.renew_if_due().await? {
-                        self.fence_on_cell(&cell)?;
-                    }
+                // Review 2026-09-18, C2: the fence is an OBSERVATION, and
+                // it used to be made every 200 deletes — a COUNT, while a
+                // deposal is a CLOCK. A holder whose token has not moved
+                // for six spaced polls is deposed, and one that stalled
+                // past that AFTER its pointer CAS landed came back to a
+                // delete set whose etags the successor had just re-cited
+                // (the same bytes, or an adoption); its If-Match DELETE
+                // took them and the citation dangled (the model's
+                // LeanBarrierLeaseStragglerGC). So before every delete: if
+                // the last cell WRITE is older than the renew spacing,
+                // renew — a conditional write on our token, which a
+                // deposal has moved, so it fences. A write inside the
+                // spacing is proof no deposal happened, not a guess; the
+                // cost is one PUT per spacing, never one per delete, and
+                // the mass-delete renewal this replaces came for free.
+                //
+                // What remains is a stall between this renew and the
+                // DELETE it licenses: the request carries no epoch (S3's
+                // DeleteObject has no fencing token), and that window is
+                // the protocol's, named in SAFETY.md.
+                if self.cell_write_is_stale() {
+                    super::lease::renew(self).await?;
                 }
                 if installed.entries.contains_key(path) {
                     // delete/modify resolved foreign-wins: not garbage, and
@@ -2147,6 +2200,7 @@ impl UploadOutcome {
                 mtime_unix: scanned.mtime_unix,
                 mtime_nanos: Some(scanned.mtime_nanos),
                 crc64_b64: Some(crc64_to_b64(crc)),
+                judged: None,
             },
         }
     }
@@ -2331,6 +2385,15 @@ fn resolve_contained(
         // inbox entry naming it is surfaced, never materialized (D0.3).
         return refuse("reserved control namespace");
     }
+    if rel.split('/').any(|seg| seg.ends_with(super::scan::TMP_SUFFIX)) {
+        // Review 2026-09-18, C1: the walk skips this suffix at every
+        // depth (the consume's own temp sibling, atomicity-7), so a file
+        // materialised under it is absent from every scan — cited once
+        // by the repair as a first absence, then classified a delete and
+        // its object collected. Surfaced and never materialised, like the
+        // control namespace; the gateway refuses the name at the door.
+        return refuse("a name reserved for the syncer's temporary files");
+    }
     let relp = Path::new(rel);
     let mut cur = root.to_path_buf();
     let mut comps: Vec<&std::ffi::OsStr> = vec![];
@@ -2418,15 +2481,21 @@ pub(super) fn write_file_atomic(
 }
 
 /// The queue form of a merge's foreign upserts and deletions.
-fn foreign_changes(entries: &[(String, LeanEntry)], gone: &[String]) -> Vec<ForeignChange> {
+fn foreign_changes(entries: &[(String, LeanEntry)], gone: &[(String, String)]) -> Vec<ForeignChange> {
     entries
         .iter()
         .map(|(path, e)| ForeignChange {
             path: path.clone(),
             etag: Some(e.etag.clone()),
             crc64_b64: Some(e.crc64_b64.clone()),
+            retired: None,
         })
-        .chain(gone.iter().map(|path| ForeignChange { path: path.clone(), etag: None, crc64_b64: None }))
+        .chain(gone.iter().map(|(path, retired)| ForeignChange {
+            path: path.clone(),
+            etag: None,
+            crc64_b64: None,
+            retired: Some(retired.clone()),
+        }))
         .collect()
 }
 
@@ -2438,8 +2507,9 @@ struct MergeOnto {
     merged: manifest::LeanManifest,
     /// Other writers' changes since the merge base that the tree lacks.
     foreign: Vec<(String, LeanEntry)>,
-    /// Other writers' deletions since the merge base.
-    gone: Vec<String>,
+    /// Other writers' deletions since the merge base, each with the etag
+    /// the base cited — what the deletion retired.
+    gone: Vec<(String, String)>,
 }
 
 impl MergeOnto {
@@ -2452,6 +2522,60 @@ impl MergeOnto {
 
 impl Syncer {
     #[allow(clippy::too_many_arguments)]
+    /// Review 2026-09-18, H1b: a citation repair for an entry the consume
+    /// adopted from the untracked sweep is honoured only while the manifest
+    /// still cites at its path exactly what the sweep judged the object
+    /// against. The citation moving on — to the object itself (a live
+    /// writer's upload, since committed), to a newer one, or to nothing (a
+    /// delete) — voids the adoption: nobody acked those bytes. The repair is
+    /// withheld, and where the manifest now cites nothing the path is
+    /// returned for the tombstone queue, so the next consume removes the
+    /// clean copy (a dirty one stays and publishes, as any tombstone leaves
+    /// it). Judged against the manifest the merge is about to build on, on
+    /// every attempt.
+    /// The manifest's citations, path to etag, for the consume's judgements
+    /// (one GET, made only when an entry asks for it).
+    async fn current_citations(&self) -> LeanResult<BTreeMap<String, String>> {
+        Ok(manifest::load(self.store.as_ref(), &self.cfg)
+            .await?
+            .map(|l| l.manifest.entries.iter().map(|(p, e)| (p.clone(), e.etag.clone())).collect())
+            .unwrap_or_default())
+    }
+
+    ///
+    /// Review 2026-09-18, H1e: and a repair whose generation the document's
+    /// TOMBSTONE names is void too — that generation was published and
+    /// then deleted, knowingly (a delete that merely raced the adopted
+    /// write leaves no tombstone for it, and there the repair stands:
+    /// modify wins). Without the tombstone the two are the same view.
+    fn void_stale_repairs(
+        &self,
+        current: Option<&manifest::LoadedManifest>,
+        upserts: &mut BTreeMap<String, LeanEntry>,
+        repairs: &BTreeMap<String, (Option<String>, String)>,
+        flush_uuid: &str,
+    ) -> Vec<(String, String)> {
+        let same = |a: &str, b: &str| a.trim_matches('"') == b.trim_matches('"');
+        let mut gone = vec![];
+        for (path, (judged, adopted)) in repairs {
+            let cited_now = current.and_then(|c| c.manifest.entries.get(path)).map(|e| e.etag.clone());
+            let judged_moved = judged.as_deref().is_some_and(|j| !cited_now.as_deref().is_some_and(|c| same(c, j)));
+            let entombed = cited_now.is_none()
+                && current.and_then(|c| c.manifest.tombstones.get(path)).is_some_and(|t| same(&t.etag, adopted));
+            if !judged_moved && !entombed {
+                continue;
+            }
+            if upserts.remove(path).is_some() {
+                self.trace("repair", serde_json::json!({"flush": flush_uuid, "path": path, "etag": adopted, "judged": judged, "cited": cited_now,
+                    "action": if entombed { "entombed" } else { "voided" }}));
+            }
+            if cited_now.is_none() {
+                gone.push((path.clone(), adopted.clone()));
+            }
+        }
+        gone
+    }
+
     fn merge_onto(
         &self,
         current: Option<&manifest::LoadedManifest>,
@@ -2490,15 +2614,15 @@ impl Syncer {
         // for them — theirs already lacks the path — but the TREE
         // does: they reach it through the local queue, as the
         // foreign upserts do.
-        let gone: Vec<String> = base
-            .keys()
-            .filter(|p| {
+        let gone: Vec<(String, String)> = base
+            .iter()
+            .filter(|(p, _)| {
                 !theirs.entries.contains_key(*p)
                     && !upserts.contains_key(*p)
                     && !deletes.contains(*p)
                     && !parked.contains(*p)
             })
-            .cloned()
+            .map(|(p, retired)| (p.clone(), retired.clone()))
             .collect();
         // `merge` clears it; the installing pass owns it. A mirror
         // is a property of how this workspace is DEPLOYED, so it

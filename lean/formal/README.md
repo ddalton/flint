@@ -13,14 +13,14 @@ a library. Nothing here is wired into `scripts/check-tla.sh`.
 ## Running
 
 ```
-./check.sh              # the 116-run gate (runs view-census.py first)
+./check.sh              # the 123-run gate (runs view-census.py first)
 ./gen-cfgs.sh           # regenerate the cfg matrix
 ./trace/trace-check.sh  # the model against syncer traces (below)
 ```
 
-A hundred and sixteen runs, ALL required: 30 strict (must hold), 46 mutations
+A hundred and thirty-six runs, ALL required: 37 strict (must hold), 54 mutations
 (must find their designated counterexample — a model that cannot
-rediscover its bug classes proves nothing), 40 probes (must be violated
+rediscover its bug classes proves nothing), 45 probes (must be violated
 — each names an ACTION via a ghost only that action writes; probe the
 action, never the situation). The three numbers are `grep -c "^strict_run "`,
 `grep "^mutation_run " | grep -vc Probe` and `grep "^mutation_run " |
@@ -1173,6 +1173,310 @@ is still rejected, now at a consume that adopts after that skipped GC
 consume or the code's is wrong there; the trace says exactly which step to
 read. Constants 1-3 are FALSE in every gate cfg, so the gate's 110 runs
 explore the state spaces they always did.
+
+
+## Review 2026-09-18: the fence is a count (C2), and the leak flap (H1)
+
+The protocol review of 2026-09-18 (`docs/plans/flint-lean-protocol-review-2026-09-18.md`)
+found two routes this module could not exhibit, each because an
+abstraction stood where the code has a mechanism. Six runs (117 → **123**).
+
+**C2. The GC fence was an atomic guard; the code's was a count.**
+`GCDelete` carried `~Fenced(s)` as a conjunct, so a deposed holder could
+never delete in any `EpochCheck` world. The code read the cell before the
+pointer CAS and then every 200 deletes, and the DELETE request carries no
+epoch (S3's DeleteObject has no fencing token). So a holder that stalled
+past the deposal threshold AFTER its CAS landed came back to a delete set
+whose etags the successor had just re-cited — its agent rewrote the path
+with the same bytes, so the upload landed as the same content-hash etag,
+and the successor's commit re-verified it "under the lease, where no GC
+runs" — and its If-Match DELETE took it. `GCFencePerDelete` is the arm:
+TRUE is the module as it was (and the code after the fix), FALSE removes
+the guard and disables `GCDeleteFenced`. A second faithfulness fix rode
+with it: the collector's "still referenced" test read the LIVE manifest
+(`manifest[p] = 0`), where `barrier.rs` step 6 reads the document THIS
+barrier installed (`installed.entries`); it now reads `sc[s].instSnap[p]`.
+Identical while the fence is atomic — nobody installs between a holder's
+CAS and its deletes — and verified by count on seven census worlds
+(below).
+
+- `LeanBarrierLeaseStragglerGC` (BLSTALL, one path, `MaxSameBytes = 1`,
+  IMPL, `GCFencePerDelete = FALSE`): **`Inv_NoDangling` VIOLATED in 17
+  steps.** A's CAS uncites p, A stalls, B deposes A and cites p at the same
+  generation, A thaws and its delete zeroes the object under B's citation.
+- `LeanBarrierLeaseStragglerGCFenced` (the same world, fence on): HOLDS,
+  276,622 distinct states, depth 30, every IMPL invariant.
+- `LeanProbeStragglerGCFenced`: `ProbeFenceAbandoned` violated — the thawed
+  straggler reaches its GC and is fenced THERE, not earlier.
+
+The code's fence is a CLOCK now (`barrier.rs` step 6): before every delete,
+if the last cell WRITE is older than `renew_within_secs` (20 s), renew — a
+conditional write on our token, which a deposal has moved. A deposal needs
+the token still for six spaced polls, so a write inside the spacing is
+proof, not a guess, and the cost is one PUT per spacing. What remains is a
+stall between that renew and the DELETE it licenses; the model's per-delete
+observation is that residual's upper bound, and SAFETY.md §4 names it.
+
+**H1. The tombstone looked at the key, not at what the delete retired.**
+On a store without a conditional DELETE the collector gives way and the
+peer's own retired object stays at the key. The other writer queues the
+deletion; its consume finds AN object there and, under `TombstoneHeadsKey`
+(the L-1 fix), calls the tombstone superseded. Its baseline keeps the path
+while its merge base does not, so the path is a citation-repair candidate
+and the next commit re-cites the deleted generation; the first writer's
+delete is outranked, then applies, then leaks again: the two flap forever.
+`TombstoneNamesRetired` is the arm: the tombstone carries `sc[s].fqRetired[p]`,
+the merge base's citation the deletion retired (written where the
+tombstone is queued: `CASInstall` and `PullOnly`), and an object at the key
+supersedes it only when it is a DIFFERENT generation. IMPL carries TRUE.
+
+The invariant that sees it is new, and it is stated over the manifest and
+ONE history variable rather than over the action that resurrects:
+`Inv_NoDeleteResurrected == \A p : manifest[p] = 0 \/ manifest[p] # gh.retired[p]`,
+where `gh.retired[p]` is the generation a writer's own delete uncited at its
+CAS and any agent or UI write of p clears it. It took three known-good
+routes to state the record rule: a delete is recorded only if UNCONTESTED
+at its publication — no other writer dirty at the path or uploading it (a
+same-bytes upload that landed before the delete's CAS and was cited after
+it is modify-wins); the publisher's own tree still without the path (an
+agent that re-created the file between the scan and the CAS has a write
+the next barrier publishes); and no other writer holding a generation of
+the path it INTEGRATED and has not yet cited (a consumed UI write: its
+citation repair is the "modify" of delete/modify, and modify wins — the
+acked write survives and the agent's delete is the one lost, the stance
+the Crash1 note above already takes). The C2 control world found the first
+two; the collector-off breadth world found the third on the gate's first
+run, twice — once through a restart between the CAS and step 7 that left
+the merge base behind the writer's own install, and once with an honestly
+old base — and both have the same observable history (cited, deleted by a
+writer that had integrated it, re-cited by one that had too), so both are
+the rule working. A restart-recovers-the-base arm was modelled for the
+first and withdrawn: with the third contest in the rule it had no
+counterexample to demand — and it returned the same evening as `BaseAtCas`,
+once that contest was tightened (below). A repair-only-over-the-expected-citation arm
+was tried before that and refuted by `Inv_HITLTracked` in two worlds: it
+also blocks the repair that keeps a consumed UI write tracked when a peer
+that never saw it deletes the OLD citation, and the window clear then
+drops the entry. Each of these is recorded here because a relaxation is
+only trusted after its known-bad runs: the LeakHolds world holds with the
+final rule and LeakResurrects still fails.
+
+- `LeanBarrierLeaseLeakResurrects` (one path, four barriers,
+  `ConditionalGC = FALSE`, `CollectorOff`, IMPL, `TombstoneNamesRetired = FALSE`):
+  **`Inv_NoDeleteResurrected` VIOLATED in 18 steps** — the flap's first turn.
+- `LeanBarrierLeaseLeakHolds` (the same world with the fix): HOLDS, 91,097
+  distinct states, depth 42, every IMPL invariant (the count with the
+  final contest rule; the Mac log beside it in `results/` is 91,497 from
+  the rule before the third contest).
+- `LeanProbeTombstoneOverLeak`: `ProbeTombstoneApplied` violated — a queued
+  deletion is actually applied over a leaked object there.
+
+The six IMPL strict worlds carry `Inv_NoDeleteResurrected` too (`IMPLINV`).
+Its ghost `gh.retired` is written only under `WriterQueue`, and so is the
+tombstone's `sc[s].fqRetired` at `CASInstall`; the `PullOnly` write of the
+same field is unguarded, but `PullOnly` needs `EmptyInstall`, which no
+queue-free world in the gate sets — so every state space without the
+writer queue is preserved by construction, and the census below has the
+control arm a census needs: the two worlds WITH the queue must move, and
+do. Seven worlds, the module before and after (reductions as the gate runs
+them): LeanSubtreeTakeover 566,405; LeanEpochOnlyHolds 92,863;
+LeanBarrierLeaseDeposal 619,637; LeanBarrierLeaseSameBytesVerified
+2,366,702; LeanRemovalHolds 324,499 — all unchanged;
+LeanBarrierLeaseQueueHolds moves 69,490 → 94,846 and
+LeanBarrierLeaseCollectorOff 6,802,540 → 12,325,522 (33,684,562 generated,
+depth 39), the two worlds that carry the queue, because IMPL now carries
+the H1 fix and its ghost (see `results/2026-09-18-review-c2-h1/`; the
+after-counts are the Linux box's runs with the final contest rule).
+
+## Review 2026-09-18, evening: the invariant kept finding routes (H1b–H1f)
+
+`Inv_NoDeleteResurrected` was written for H1 and carried by the six IMPL
+strict worlds. The first full run on the Linux box put it in front of the
+untracked sweep's world (`LeanBarrierLeaseOrphanTracked`, finding 10's
+shape with `OrphanTrack = TRUE`) and it went red in 21 steps. Every route
+below is a published delete coming back through a citation repair; each
+got a test that fails on the tree before it, a fix line whose reversion
+fails exactly that test, and an arm with a known-bad world. The record
+rule's third contest was tightened on the way, and three routes it had
+been excusing came out from behind it.
+
+**H1b — the sweep's entry outlives the citation it was judged against.**
+The sweep tracks an object at a CITED key whose etag the manifest does not
+cite (`untracked.rs`). A live writer's upload still in flight is exactly
+that once its grace elapses; the grace is a timer and a long step 3 beats
+it. The uploader then commits that very generation, the entry stays — the
+window clear removes only what a barrier CONSUMED — the uploader's agent
+deletes the file, the delete is published, and the other writer's consume
+adopts the entry (a crash before the uploader's GC and clear keeps both the
+object and the entry) or had adopted it while it was still pending (no
+crash: the consumer's step 3 spans the uploader's two barriers). Its
+citation repair re-cites the deleted generation on every tree. Three rules,
+one arm (`OrphanEntryCited`):
+
+- the entry carries the citation the sweep judged against
+  (`gh.orphanAt[p]`, the code's `InboxEntry::cited`) and a consume DROPS
+  an entry whose citation has moved (`outlived`; `ProbeOrphanOutlived`
+  shows it firing);
+- an adoption made while the entry still stood is PROVISIONAL
+  (`sc[s].judged`, the code's `BaselineEntry::judged`): `RepairOwed`
+  requires `JudgedStands`, and `MergeGone` queues a voided path the
+  manifest no longer cites as a tombstone, since the merge base may never
+  have had it;
+- and (`LeakSupersedesNothing`, its own arm) an object at the key
+  supersedes a queued deletion only if the manifest cites it or an entry
+  this consume honours names it. A leak — a delete's GC that never ran, a
+  generation this tree never integrated so its tombstone named an older
+  one — supersedes nothing, and the delete reaches the tree. This subsumes
+  H1's retired-etag rule for the leak; H1e's tombstone and H1f's restored
+  base (below) each close the RESURRECTION half on their own as well, so
+  `LeanBarrierLeaseLeakResurrects` now sets all four arms off. What each
+  rule still carries is pinned one arm from a neighbour. For the
+  resurrection: `…LeakRetiredOnly` (the other three off) — the retired-etag
+  rule alone closes it, which is what the code's no-GET fast path relies
+  on; `…LeakRestoreOnly` (the other three off) — the restore alone closes it
+  too, an honest base leaving no repair to ride. For the convergence, only
+  the leak rule: `…LeakFlaps` (the restore alone, under `Inv_TreesConverged`)
+  is red — the retired generation the collector left supersedes the
+  deletion at every consume and the next install queues it again, forever —
+  and `…LeakRuleConverges`, one arm from it, holds; `…LeakSkippedGeneration`
+  (one arm from `…LeakHolds`, the leak rule off) is red too — a writer that
+  never installed the generation the collector left holds a tombstone
+  naming an OLDER one, so the retired-etag rule cannot recognise the leak.
+  And the tombstone closes H1b's own resurrection route as well: with it
+  on, `LeanBarrierLeaseOrphanResurrects` (the sweep-entry arm off) HELD in
+  the first 2026-09-19 gate, so that world now turns the tombstone off too.
+  What `OrphanEntryCited` still carries is the sweep's POLICY — an entry
+  nobody acked does not outlive the citation it was judged against, and an
+  adoption made while it stood is provisional — pinned by the code's tests
+  (each rule's mutation fails one), not by a world of its own. Whether to
+  keep the policy or drop the two rules as redundant, the way `BaseAtCas`
+  and the consume-time pull were dropped, is OPEN (review doc, H1b).
+
+The consume-time drop's mutation SURVIVED its test once the repair-time
+rule was in: with the adoption voided later anyway, dropping it early is a
+cleanliness rule (the agent never sees a deleted file reappear for a
+barrier), and the test now pins that with a "never materialised" assertion
+rather than pretending the line carries safety.
+
+**`Inv_TreesConverged`** — a peer's published delete reaches every live
+tree — is the invariant the leak rule needed, and it took four drafts: at
+quiescence no running writer keeps a clean copy of a path the manifest no
+longer cites, UNLESS it still holds the queued deletion — one the next
+consume would APPLY, not one the key's leak would supersede again
+(`DeletionPending`, the fourth draft, forced by H1f below) — or an owed
+repair (budget quiescence, not the protocol), AND only where its merge base
+has seen the manifest without the path (a writer that never ran a barrier
+after the delete is behind, not stale). Its first world was VACUOUS: at
+three barriers the consume that applies the tombstone is the fourth, and
+`LeanBarrierLeaseOrphanStaleCopy` held with exactly the fixed world's
+state count (2,717,456) — the pair moved to a four-barrier world, and
+`LeanProbeLeakApplied` now shows the rule reached.
+
+**The third contest, tightened.** "Another writer holds a generation of
+the path it integrated but has not cited yet" also excused a writer that
+merely held the CURRENT citation early — through a redundant entry, or
+through a restart that left its merge base behind its own install. That is
+not a modify. The contest is now `baseline[p] # instBase[p] /\ baseline[p]
+# manifest[p]`, and three worlds went red:
+
+**H1c, H1d and H1e — a pending adoption, cited and then knowingly
+deleted.** A writer adopts a UI write while it is still pending, and the
+writer that cites it later deletes it KNOWINGLY: the adopter itself, after
+a restart between its CAS and step 7 left its merge base a generation
+behind the document it installed (H1c); a writer that restarted before its
+window clear, so the entry outlived the citation and was adopted after it
+(H1d); or plainly another writer (H1e). In every case the adopter's merge
+sees "baseline ≠ merge base, object at the key" — the very view a delete
+that merely RACED the write leaves, where modify rightly wins — and its
+repair resurrects the deleted generation. Nothing in the bucket told the
+two apart. `ManifestTombstones`: a published delete names the generation it
+retired, in the document (`gh.tomb[p]`; the code's
+`LeanManifest::tombstones`, inline in the single-object layout and a
+content-addressed object beside the chunks in the chunked one, kept until
+the path is cited again or `TOMBSTONE_KEEP_SEQS` generations pass), and a
+repair whose generation the tombstone names is void (`Entombed`); `MergeGone`
+queues the path as a tombstone for the tree. Two arms written on the way
+were DROPPED as redundant once this one was in, each found the same way —
+its known-bad world would not go red: `BaseAtCas` (the merge base persisted
+at the CAS, for H1c; the arm first withdrawn under the broad contest) and a
+consume-time "pull" (an entry the manifest already cites becomes the merge
+base, for H1d). `LeanBarrierLeaseCollectorOffNoTombstone` is the run that
+stays red.
+
+**H1f — a superseded tombstone left the merge base dishonest, and the copy
+stayed.** Found by the final run of the four-barrier orphan world
+(`LeanBarrierLeaseOrphanConverges`, every arm above on) — the one route of
+the evening that is not a resurrection: `Inv_TreesConverged`, written for
+H1b, went red in 30 steps. A queued deletion is superseded when the key
+holds a DIFFERENT object the manifest cites (the peer re-created the path),
+and the consume settles it: the pull that replaces it is the next install's
+diff from the merge base. But the base moved past the path in the install
+that queued the deletion, so when the path is deleted AGAIN before this
+writer installs, the diff has nothing at it — the clean copy of the retired
+generation stays forever, uncited, and (baseline ≠ base) a repair candidate
+at every barrier, so the skip-on-no-diff never fires either.
+`SupersedeRestoresBase`: superseding a deletion restores the merge base to
+the generation the delete retired (`fqRetired`; the code's
+`ForeignChange.retired`), so the next install queues the deletion again — or
+the upsert, if the re-cite still stands. `LeanBarrierLeaseSupersedeDropsBase`
+is the same world with the arm off and stays red (30 steps);
+`…OrphanConverges` holds with the arm (10,475,529 distinct states, depth
+43); `LeanProbeBaseRestored` shows the restore fires (22 steps). The arm
+then turned `LeanBarrierLeaseOrphanStaleCopy` GREEN: with the base restored,
+the leak rule as shipped no longer leaves a settled stale copy — it queues
+the same deletion again at every install and the leak supersedes it again,
+forever — and the invariant's "a queued deletion is pending work" exception
+excused the flap. The exception now counts a queued deletion as pending
+only if the next consume would apply it, or an entry names what supersedes
+it: `DeletionPending`, evaluated with the tombstone pass's own rule
+(`ObjectSupersedes`, shared with `Consume` so the two cannot drift). The
+leak world is red again.
+
+**The crash world, both arms, after the gate** (`results/2026-09-18-crash1-orphantrack/`,
+SAFETY §4.4's open half). `OrphanTrack = FALSE` violates `Inv_HITLTracked`
+at 21, as it should. `OrphanTrack = TRUE` ran 52 minutes to depth 25 —
+148,870,390 distinct states, 549,890,823 generated, 45M queued — without
+violating it, and stopped there on `Inv_AckImpliesCited`: the agent's
+declared write is published, the writer RESTARTS after step 7 and before
+the ack, a peer deletes the path, the re-run honours the pending with a
+pull-only install of the peer's document and acks ok over a boundary that
+no longer cites the declared bytes while the tree still holds them. No
+sweep action is in the trace; `AckHonest` cannot see a pull-only. Open as
+H10 (review doc); the TRUE half of §4.4 is still not a hold.
+
+**Fallout the killed local gate never reached, found by the box's first
+full run:** `LeanBarrierLeaseQueueTombstoneOverHitl` turned the tombstone
+key rule off while IMPL now carried the retired-etag rule, which ASSUMEs
+it, and two trace controls did the same — TLC errored instead of
+rejecting. The mutation sets both off, and `ndjson2tla.py` derives the
+retired rule from the two it depends on.
+
+**Counts** (the final gate, `results/2026-09-18-review-h1f/gate.txt`):
+Distinct states per world on the final module (`results/2026-09-18-review-h1f/`;
+the gate keeps only a failing run's output, so the counts are that
+directory's `census/` runs and the deciding batches). The five queue-free
+worlds are unchanged from the morning's census — the control arm:
+LeanSubtreeTakeover 566,405; LeanEpochOnlyHolds 92,863;
+LeanBarrierLeaseDeposal 619,637; LeanBarrierLeaseSameBytesVerified
+2,366,702; LeanRemovalHolds 324,499; and LeanBarrierLeaseStragglerGCFenced
+276,442. The worlds that carry the queue moved with the evening's arms:
+LeanBarrierLeaseQueueHolds 94,846 → 94,858; LeanBarrierLeaseOrphanTracked
+2,717,456 → 2,718,984 (three barriers); the four-barrier
+LeanBarrierLeaseOrphanConverges 10,475,529 (31,092,979 generated, depth
+43); LeanBarrierLeaseLeakHolds 90,249, `…LeakRuleConverges` the same
+90,249 (the retired-etag rule adds no state once the leak rule is on),
+`…LeakRetiredOnly` 91,097, `…LeakRestoreOnly` 95,185. The three big IMPL
+worlds, run on the module one invariant-only refactor before the final one
+(the actions are identical): LeanBarrierLeaseCollectorOff 12,447,478
+(33,982,392 generated, depth 39) — from 12,325,522 before H1c–H1f;
+LeanBarrierLeaseImplHolds 8,936,778 (25,912,345, depth 32);
+LeanBarrierLeaseInboxSnapshot 9,978,206 (28,908,051, depth 35). The
+counterexamples: `…OrphanResurrects` 23 (tombstone off), `…OrphanStaleCopy`
+21, `…SupersedeDropsBase` 30, `…LeakResurrects` 19 (all four rules off),
+`…LeakFlaps` 19, `…LeakSkippedGeneration` 24, `…CollectorOffNoTombstone`
+20; the probes `ProbeBaseRestored` 22, `ProbeLeakApplied` 20,
+`ProbeOrphanOutlived` 13. Gate: 136/136 green, trace replays ok
+(2026-09-19 01:29–02:20 UTC on the Linux box).
 
 ## Tranche 3 candidates (in review-priority order)
 

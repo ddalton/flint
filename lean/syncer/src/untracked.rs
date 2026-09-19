@@ -75,6 +75,7 @@ impl Syncer {
                 // consume checks them against its attestation, as it does
                 // any entry without a writer's CRC.
                 crc64_b64: None,
+                cited: Some(cited_etag.to_string()),
             };
             match inbox::gateway_append(self.store.as_ref(), &self.cfg, entry).await {
                 Ok(()) => {

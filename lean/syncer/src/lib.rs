@@ -431,6 +431,14 @@ pub struct LeanConfig {
     /// proved loses another writer's bytes (Ozone 2.2.x, HDDS-14907,
     /// finding L-27).
     pub conditional_delete_enforced: bool,
+    /// How old the last cell WRITE (claim or renew) may be before a
+    /// delete in the commit section renews first (review 2026-09-18,
+    /// C2). A deposal needs the token still for six spaced polls (60 s),
+    /// so a write younger than this is proof no deposal has happened;
+    /// an older one is renewed — a conditional write that a deposal has
+    /// moved, so it fences. Comfortably below the threshold. Tests set 0
+    /// to collapse a stall.
+    pub renew_within_secs: u64,
 }
 
 impl LeanConfig {
@@ -481,6 +489,7 @@ impl LeanConfig {
             untracked_sweep_secs: 3600,
             untracked_grace_secs: inbox::UNTRACKED_GRACE_SECS,
             conditional_delete_enforced: true,
+            renew_within_secs: 20,
         }
     }
 
@@ -587,6 +596,11 @@ pub struct Syncer {
     /// nothing else (design 2026-09-13 §4), so a barrier claims after
     /// its uploads and releases after its baseline rewrite.
     pub lease: Option<flint_store::EpochLease>,
+    /// When this process last WROTE the cell (a claim, a renew): the
+    /// clock the commit section's deletes fence on (review 2026-09-18,
+    /// C2). `None` while no write is known — an adopted claim writes
+    /// nothing — so the first delete renews.
+    pub cell_written_at: Option<std::time::Instant>,
     /// Standing conditions already written to `conflicts.jsonl` by THIS
     /// process, so a condition that persists across every poll tick is
     /// recorded once rather than per tick. Deliberately in-memory: a

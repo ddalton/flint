@@ -463,6 +463,7 @@ impl Syncer {
                                 mtime_unix: mtime_of(&st),
                                 mtime_nanos: Some(mtime_nanos_of(&st)),
                                 crc64_b64: Some(entry.crc64_b64.clone()),
+                                judged: None,
                             }),
                             skipped: true,
                             bytes: 0,
@@ -514,6 +515,7 @@ impl Syncer {
                             // The fold above equalled it, or we would
                             // not be here.
                             crc64_b64: Some(entry.crc64_b64.clone()),
+                            judged: None,
                         }),
                         skipped: false,
                         bytes: n,
@@ -663,6 +665,7 @@ impl Syncer {
                         mtime_unix: mtime_of(&st),
                         mtime_nanos: Some(mtime_nanos_of(&st)),
                         crc64_b64: Some(got),
+                        judged: None,
                     }),
                     skipped: false,
                     bytes: body.len() as u64,

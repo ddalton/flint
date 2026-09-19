@@ -69,7 +69,32 @@ pub struct LeanManifest {
     /// stamped on the object's metadata so it is readable by HEAD.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boundary_source: Option<String>,
+    /// What each published delete RETIRED, path -> the etag the document
+    /// cited before the delete, kept until the path is cited again (or
+    /// `TOMBSTONE_KEEP_SEQS` generations pass). Review 2026-09-18, H1e: a
+    /// writer that adopted a UI write while it was still pending, and
+    /// merges after another writer cited it and then deleted it knowingly,
+    /// otherwise sees only "baseline ≠ merge base, object at the key" —
+    /// the same view a delete that RACED the write leaves, where modify
+    /// rightly wins — and its citation repair resurrects the deleted
+    /// generation. The tombstone is the one fact that tells the two apart.
+    /// Empty on every document written before this field existed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tombstones: BTreeMap<String, Tombstone>,
 }
+
+/// A published delete's record in the document: the generation it retired
+/// and the generation of the document that published it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Tombstone {
+    pub etag: String,
+    pub seq: u64,
+}
+
+/// How many document generations a tombstone outlives its delete. A writer
+/// whose merge base is older than this can still re-cite what it holds —
+/// the residual, named in SAFETY.md §4.14.
+pub const TOMBSTONE_KEEP_SEQS: u64 = 10_000;
 
 impl LeanManifest {
     /// COMPACT, not pretty. This document is O(entries) and it moves on
@@ -136,6 +161,11 @@ pub struct Pointer {
     /// The epoch that installed this pointer. Diagnostic; the fence is
     /// the CAS, not this field.
     pub epoch: u64,
+    /// The content address of the document's tombstones in the chunked
+    /// layout (`chunk::TombstoneBody`, at `chunk_key`), `None` when the
+    /// document has none. The single-object layout carries them inline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tombstones: Option<String>,
 }
 
 /// Where a pointer's entries actually live.
@@ -360,12 +390,35 @@ pub async fn load(
                     continue;
                 }
                 let entries = super::chunk::assemble(refs, &bodies)?;
+                let tombstones = match &p.tombstones {
+                    None => BTreeMap::new(),
+                    Some(addr) => match store.get_whole(&cfg.chunk_key(addr), None).await {
+                        Ok((_, b)) => super::chunk::decode_tombstones(&b, addr)?,
+                        // The same two cases as a missing chunk, decided the
+                        // same way: by whether the pointer moved.
+                        Err(StoreError::NotFound(_)) => {
+                            let moved = match load_pointer(store, cfg).await? {
+                                Some(now) => now.etag != etag,
+                                None => true,
+                            };
+                            if moved && attempt + 1 < LOAD_ATTEMPTS {
+                                continue;
+                            }
+                            return Err(super::LeanError::State(format!(
+                                "manifest pointer at seq {} names tombstones {addr}, which do not exist",
+                                p.seq
+                            )));
+                        }
+                        Err(e) => return Err(e.into()),
+                    },
+                };
                 (
                     LeanManifest {
                         seq: p.seq,
                         entries,
                         sole_writer: p.sole_writer,
                         boundary_source: p.boundary_source.clone(),
+                        tombstones,
                     },
                     None,
                 )
@@ -515,6 +568,7 @@ pub async fn cas_write_stamped(
         sole_writer: m.sole_writer,
         boundary_source: m.boundary_source.clone(),
         epoch,
+        tombstones: None,
     };
     put_pointer(store, cfg, &pointer, expected, &stamps).await
 }
@@ -592,6 +646,16 @@ pub async fn cas_write_chunked(
         store.put_whole(&key, body.clone().into(), &PutCondition::Unconditional, &stamps, crc).await?;
     }
 
+    // The tombstones, one object beside the chunks (rewritten like an
+    // adopted chunk: the sweep reads age, and the bytes are identical).
+    let tombstones = if m.tombstones.is_empty() {
+        None
+    } else {
+        let (addr, body) = super::chunk::encode_tombstones(&m.tombstones)?;
+        let crc = crc64_nvme(&body);
+        store.put_whole(&cfg.chunk_key(&addr), body.into(), &PutCondition::Unconditional, &stamps, crc).await?;
+        Some(addr)
+    };
     let pointer = Pointer {
         seq: m.seq,
         entries_key: None,
@@ -600,6 +664,7 @@ pub async fn cas_write_chunked(
         sole_writer: m.sole_writer,
         boundary_source: m.boundary_source.clone(),
         epoch,
+        tombstones,
     };
     put_pointer(store, cfg, &pointer, expected, &stamps).await
 }
@@ -857,13 +922,18 @@ pub async fn sweep_chunks(store: &dyn ObjectStore, cfg: &LeanConfig) -> LeanResu
     let Some(before) = load_pointer(store, cfg).await? else {
         return Ok(0);
     };
-    let refs: std::collections::HashSet<String> = match before.pointer.entries()? {
+    let mut refs: std::collections::HashSet<String> = match before.pointer.entries()? {
         Entries::Chunked(c) => c.iter().map(|r| r.addr.clone()).collect(),
         // The single-object layout has no chunks; `sweep_generations`
         // owns it, and running both over one workspace would have each
         // reasoning about objects the other manages.
         Entries::Single { .. } => return Ok(0),
     };
+    // The tombstone object lives beside the chunks and is referenced
+    // the same way.
+    if let Some(t) = &before.pointer.tombstones {
+        refs.insert(t.clone());
+    }
 
     let prefix = format!("{}/{}/chunks/", cfg.prefix, super::LEAN_DIR);
     let listed = store.list(&prefix).await?;
@@ -981,6 +1051,8 @@ pub fn merge(
 
     for (p, e) in mine_upserts {
         merged.entries.insert(p.clone(), e.clone());
+        // A path cited again has no delete to remember.
+        merged.tombstones.remove(p);
     }
     for p in mine_deletes {
         if parked.contains(p) {
@@ -996,9 +1068,13 @@ pub fn merge(
             _ => false,
         };
         if theirs_unchanged {
-            merged.entries.remove(p);
+            if let Some(retired) = merged.entries.remove(p) {
+                // H1e: the document says what this delete retired.
+                merged.tombstones.insert(p.clone(), Tombstone { etag: retired.etag, seq: merged.seq });
+            }
         }
     }
+    merged.tombstones.retain(|_, t| merged.seq.saturating_sub(t.seq) <= TOMBSTONE_KEEP_SEQS);
     (merged, foreign)
 }
 

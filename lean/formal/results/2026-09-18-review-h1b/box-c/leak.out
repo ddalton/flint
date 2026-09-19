@@ -1,0 +1,25 @@
+== LeanBarrierLeaseLeakResurrects 22:57:13
+rc=12
+Error: Invariant Inv_NoDeleteResurrected is violated.
+The depth of the complete state graph search is 18.
+== LeanBarrierLeaseLeakRetiredOnly 22:57:16
+rc=0
+276459 states generated, 91097 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 42.
+== LeanBarrierLeaseLeakHolds 22:57:23
+rc=0
+274621 states generated, 90457 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 43.
+== LeanProbeLeakApplied 22:57:30
+rc=12
+Error: Invariant ProbeLeakApplied is violated.
+The depth of the complete state graph search is 20.
+== LeanBarrierLeaseOrphanStaleCopy 22:57:42
+rc=0
+31152887 states generated, 10494637 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 43.
+== LeanBarrierLeaseOrphanConverges 23:05:14
+rc=0
+31088343 states generated, 10472489 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 43.
+CDONE

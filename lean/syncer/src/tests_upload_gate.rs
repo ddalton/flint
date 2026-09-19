@@ -39,6 +39,7 @@ async fn syncer(store: &Arc<MemoryStore>, root: &std::path::Path) -> Syncer {
         cfg,
         state,
         lease: None,
+        cell_written_at: None,
         noted_not_regular: Default::default(),
     }
 }

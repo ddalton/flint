@@ -422,7 +422,15 @@ pub fn path_ok(path: &str) -> bool {
     !path.is_empty()
         && !path.starts_with('/')
         && !path.split('/').any(|seg| {
-            seg.is_empty() || seg == "." || seg == ".." || seg == flint_lean::STATE_DIR
+            seg.is_empty()
+                || seg == "."
+                || seg == ".."
+                || seg == flint_lean::STATE_DIR
+                // The syncer's temp-sibling suffix (review 2026-09-18, C1):
+                // the walk skips the name at every depth, so a write under
+                // it was materialised by the consume, cited once as a first
+                // absence, and collected as a delete at the next barrier.
+                || seg.ends_with(flint_lean::scan::TMP_SUFFIX)
         })
         && !path.starts_with(".flint/")
         && path != ".flint"
@@ -765,6 +773,7 @@ impl Workspace {
             author,
             added_unix: now_unix(),
             crc64_b64: Some(flint_store::crc64_to_b64(crc)),
+            cited: None,
         };
         self.track(entry).await?;
         Ok(meta.etag)
@@ -1126,6 +1135,7 @@ impl Workspace {
                 // them is the attestation every backend gets; the copy's
                 // own is the fallback for a source only the inbox knew.
                 crc64_b64: src_crc.or(copied.crc64_b64),
+                cited: None,
             });
             removals.push(Removal {
                 path: from.to_string(),

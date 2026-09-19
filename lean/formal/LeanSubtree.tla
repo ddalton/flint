@@ -434,7 +434,8 @@ CONSTANTS
                        \* absence and still advances the two-scan clock.
                        \* FALSE = the two-scan rule on every barrier and a
                        \* fast path blind to first absences.
-  OrphanTrack,         \* FINDING 10 (open): a writer lost for good between
+  OrphanTrack,         \* FINDING 10 (shipped 2026-09-16 as `untracked.rs`;
+                       \* IMPL keeps it FALSE, SAFETY.md §4.11): a writer lost for good between
                        \* its upload and its commit leaves bytes at a
                        \* CITED key that no manifest cites and nothing
                        \* tracks.  TRUE = the candidate fix: a writer that
@@ -517,13 +518,114 @@ CONSTANTS
                        \* dropped: `WantsCell` then holds on a scanned
                        \* barrier whatever the projected paths show.  It
                        \* relaxes NOTHING else, and no gate run sets it.
-  QueueForeignChanges  \* TRUE = what ships.  FALSE = the mutation: the
+  QueueForeignChanges, \* TRUE = what ships.  FALSE = the mutation: the
                        \* merge base moves past the other writers'
                        \* changes and nothing queues them, so the tree
                        \* never receives them — the direct fingerprint of
                        \* the harm `Inv_AckBoundaryCoherent`'s queue
                        \* exemption must NOT excuse (the known-bad run for
                        \* that relaxation).  WriterQueue only.
+  \* ---- review 2026-09-18: C2 and H1 -----------------------------------
+  GCFencePerDelete,    \* TRUE = the fix: the collector observes the cell
+                       \* before EVERY delete (the code: a renew whenever
+                       \* the last cell WRITE is older than the renew
+                       \* spacing, which a deposal's 60 s stillness always
+                       \* exceeds).  FALSE = what shipped: the cell is read
+                       \* before the CAS and then every 200 deletes, and
+                       \* the DELETE itself carries no epoch — so a holder
+                       \* deposed AFTER its CAS landed still deletes, and
+                       \* takes an etag the successor has just re-cited
+                       \* (same bytes, or an adoption).  The module's
+                       \* atomic `~Fenced` guard on GCDelete hid it.
+  TombstoneNamesRetired, \* TRUE = the fix: a queued deletion carries the
+                       \* generation the peer's delete RETIRED (the merge
+                       \* base's citation), and an object at the key
+                       \* supersedes it only when it is a DIFFERENT
+                       \* generation.  FALSE = what shipped: any object
+                       \* at the key supersedes it — including the peer's
+                       \* own leaked object on a store without a
+                       \* conditional DELETE, so the tombstone settles,
+                       \* the baseline keeps the path, the citation repair
+                       \* re-cites it, and the two writers flap forever.
+  OrphanEntryCited,    \* Review 2026-09-18, H1b (found by the model once
+                       \* Inv_NoDeleteResurrected reached the OrphanTracked
+                       \* world).  TRUE = the fix: the untracked sweep's
+                       \* entry carries the citation it judged the object
+                       \* against (`gh.orphanAt[p]`, real state the code
+                       \* keeps in `InboxEntry.cited`), and a consume
+                       \* honours it only while the manifest still cites
+                       \* exactly that at the path.  FALSE = what shipped:
+                       \* the entry outlives the commit that cites its
+                       \* object — the window clear removes only what a
+                       \* barrier CONSUMED — and after the uploader's own
+                       \* delete of the path (and a crash before its GC
+                       \* and clear, or a peer's consume that straddles
+                       \* the delete) the other writer adopts a generation
+                       \* the manifest cited and then dropped, and its
+                       \* citation repair re-cites it on every tree.
+                       \* Inert without OrphanTrack.  The rule applies
+                       \* twice: at the consume (an outlived entry is
+                       \* dropped) and at the repair (an adoption made
+                       \* while the entry was still pending is VOID once
+                       \* the citation moves — `sc[s].judged`, the code's
+                       \* `BaselineEntry.judged`), and a voided path the
+                       \* manifest no longer cites is queued as a
+                       \* tombstone.
+  LeakSupersedesNothing, \* Review 2026-09-18, H1b's convergence half.
+                       \* TRUE = the fix: an object at the key supersedes
+                       \* a queued deletion only if something will
+                       \* integrate it — the manifest cites it, or an
+                       \* entry this consume honoured names it.  FALSE =
+                       \* what shipped: ANY different object superseded,
+                       \* so a leaked generation this tree never
+                       \* integrated (a delete whose GC never ran; the
+                       \* tombstone names the older one this tree had)
+                       \* kept a clean stale copy in the tree forever,
+                       \* uncited — Inv_TreesConverged sees it.
+  ManifestTombstones,  \* Review 2026-09-18, H1e (the collector-off world
+                       \* with every arm above on): a writer adopts a UI
+                       \* write while it is still PENDING, another writer
+                       \* cites it and later deletes it KNOWINGLY, and the
+                       \* adopter's repair re-cites it — nothing in the
+                       \* bucket tells the adopter that the generation it
+                       \* holds was published and then removed; a delete
+                       \* that raced the write (its author never saw it)
+                       \* leaves the same manifest, and there modify
+                       \* rightly wins.  The same tombstone answers H1c
+                       \* (the adopter itself cited the write and
+                       \* restarted between its CAS and step 7, so its
+                       \* merge base lagged the document it installed)
+                       \* and H1d (the citer restarted before its window
+                       \* clear, so the entry outlived the citation and
+                       \* another writer adopted it as pending): a
+                       \* base-at-CAS arm and a consume-time "pull" arm,
+                       \* written for those two, were each dropped as
+                       \* redundant once this one was in — their
+                       \* known-bad worlds would not go red.  TRUE = the
+                       \* fix: a published
+                       \* delete names the generation it retired, in the
+                       \* manifest (`gh.tomb[p]`, real bucket state; the
+                       \* document's `tombstones`), until the path is
+                       \* cited again; a repair whose generation the
+                       \* tombstone names is void.  FALSE = what shipped.
+  SupersedeRestoresBase \* Review 2026-09-18, H1f (the four-barrier orphan
+                       \* world, every arm above on): a queued deletion
+                       \* is SUPERSEDED — the manifest re-cited the path
+                       \* with a newer generation — and settled; the pull
+                       \* it defers to is the next install's diff from the
+                       \* merge base.  But the base moved past the path
+                       \* when the deletion was queued, and when the path
+                       \* is deleted AGAIN before that install, the diff
+                       \* has nothing at it: the clean copy of the retired
+                       \* generation stays in the tree forever, uncited,
+                       \* and (baseline # base) a repair candidate at
+                       \* every barrier — Inv_TreesConverged sees it.
+                       \* TRUE = the fix: superseding a deletion restores
+                       \* the merge base to the generation it retired
+                       \* (`fqRetired`, the code's `ForeignChange.retired`),
+                       \* so the next install queues the deletion again,
+                       \* or the upsert if the re-cite still stands.
+                       \* FALSE = what shipped.
 
 \* A cfg cannot write a sequence literal; it substitutes one of these
 \* (`Writers <- TwoWriters`).
@@ -868,14 +970,25 @@ ForeignEntry(s, p) ==
   /\ MergeCapable
   /\ manifest[p] # sc[s].instBase[p]
   /\ (MineIsNotForeign => manifest[p] \notin sc[s].known)
+\* H1b: an adoption made from the untracked sweep's entry is provisional —
+\* `judged[p]` is the citation the sweep judged the object against, and the
+\* repair cites the adoption only while the manifest still cites exactly
+\* that.  A citation that moved on voids it (`void_stale_repairs`).
+JudgedStands(s, p) == sc[s].judged[p] = 0 \/ manifest[p] = sc[s].judged[p]
+\* H1e: the manifest's tombstone names the generation this writer holds —
+\* it was published and then removed, knowingly.
+Entombed(s, p) == ManifestTombstones /\ manifest[p] = 0 /\ gh.tomb[p] = sc[s].baseline[p]
 RepairOwed(s, p) ==
   /\ p \notin (sc[s].scanU \cup sc[s].scanD \cup sc[s].parked)
   /\ sc[s].baseline[p] # sc[s].instBase[p]
   /\ objects[p] = sc[s].baseline[p]
+  /\ JudgedStands(s, p)
+  /\ ~Entombed(s, p)
 RepairDeclined(s, p) ==
   /\ p \notin (sc[s].scanU \cup sc[s].scanD \cup sc[s].parked)
   /\ sc[s].baseline[p] # sc[s].instBase[p]
-  /\ objects[p] # sc[s].baseline[p]
+  /\ (objects[p] # sc[s].baseline[p] \/ ~JudgedStands(s, p) \/ Entombed(s, p))
+
 \* What a merge queues for the TREE (`merge_onto`'s `foreign` and `gone`):
 \* theirs moved off the merge base at a path this barrier neither uploaded,
 \* re-cited nor parked — an upsert — or dropped a path the base had that
@@ -893,8 +1006,18 @@ MergeGone(s) ==
      /\ MergeCapable
      /\ q \notin MineInMerge(s) \cup sc[s].scanD
      /\ ~RepairOwed(s, q)
-     /\ sc[s].instBase[q] # 0
-     /\ manifest[q] = 0}}
+     /\ manifest[q] = 0
+     /\ \/ sc[s].instBase[q] # 0
+        \* H1b: a voided sweep adoption of a path the manifest no longer
+        \* cites — the merge base never had it, so nothing else would
+        \* queue the deletion that removes the clean copy.
+        \/ ((sc[s].judged[q] # 0 \/ Entombed(s, q)) /\ sc[s].baseline[q] # 0)}}
+GonePaths(s) == {pr[1] : pr \in MergeGone(s)}
+\* What the peer's delete retired: the generation the merge base cited.
+\* (Not the baseline's: a consumed UI write not yet re-cited is newer than
+\* what a peer who never saw it deleted, and must survive that delete.)
+\* For a voided adoption the base has nothing: the adopted generation.
+Retired(s, p) == IF sc[s].instBase[p] # 0 THEN sc[s].instBase[p] ELSE sc[s].baseline[p]
 \* `state::queue_foreign`: keyed by path, a later change replaces the
 \* queued one.  Under the mutation nothing is queued at all.
 QueueUpsert(q, new) ==
@@ -903,6 +1026,34 @@ QueueUpsert(q, new) ==
   ELSE q
 QueuedUpserts(s) == {pr \in sc[s].fq : pr[2] # 0}
 QueuedDeletes(s) == {pr[1] : pr \in {x \in sc[s].fq : x[2] = 0}}
+\* The tombstone pass's rule for ONE queued deletion: does the object at the
+\* key supersede it?  `tracked` = an entry the consume honours names that
+\* object.  Under the fix (H1) the generation the delete retired does not; a
+\* collector that gave way left it there, and the tombstone is about it.
+\* Under LeakSupersedesNothing (H1b) a different object supersedes only if
+\* something will integrate it — the manifest cites it, or an entry names
+\* it; a leak supersedes nothing.  Shared by Consume, where it decides, and
+\* Inv_TreesConverged, where a deletion it would supersede AGAIN is not
+\* pending work (H1f).
+ObjectSupersedes(s, p, tracked) ==
+  /\ TombstoneHeadsKey
+  /\ objects[p] # 0
+  /\ (~TombstoneNamesRetired \/ objects[p] # sc[s].fqRetired[p])
+  /\ (\/ ~LeakSupersedesNothing
+      \/ objects[p] = manifest[p]
+      \/ tracked)
+\* Review 2026-09-18, H1f: a queued deletion is pending work — the budget,
+\* not the protocol, stopped it — only if the next consume would APPLY it,
+\* or an entry names what supersedes it (that will be integrated or
+\* dropped).  One the key's uncited, untracked object would supersede again
+\* is the leak rule as shipped FLAPPING: superseded, base restored, queued
+\* again at the next install, superseded...  The restore turned the stale
+\* copy into a stale copy with a queue entry, and the exception as first
+\* written excused it.
+DeletionPending(s, p) ==
+  /\ p \in QueuedDeletes(s)
+  /\ LET tracked == \E e \in inbox : e[1] = p /\ e[2] = objects[p]
+     IN ~ObjectSupersedes(s, p, tracked) \/ tracked
 
 Deposed(s)  == cellEpoch > sc[s].epoch
 Running(s)  == sc[s].st = "running"
@@ -1051,6 +1202,8 @@ Init ==
         honored |-> FALSE, pendReRun |-> FALSE, owed |-> {}, ackN |-> {},
         citeDropped |-> {},
         fq |-> {}, noInst |-> FALSE,
+        fqRetired |-> [p \in Paths |-> 0],
+        judged |-> [p \in Paths |-> 0],
         declared |-> {}, consumed |-> {},
         inboxSeen |-> {}, inboxLoaded |-> FALSE]]
   /\ hitlAcked = {} /\ conflicts = {}
@@ -1082,7 +1235,10 @@ Init ==
            staleOverride |-> FALSE, hitlRetired |-> {},
            pullOnlys |-> 0, emptyInstalls |-> 0,
            tombRemoved |-> 0, tombSuperseded |-> 0, orphanTracks |-> 0,
-           leaked |-> 0, staleAdopt |-> 0]
+           leaked |-> 0, staleAdopt |-> 0,
+           retired |-> [p \in Paths |-> 0],
+           orphanAt |-> [p \in Paths |-> 0], orphanOutlived |-> 0,
+           leakApplied |-> 0, baseRestored |-> 0, tomb |-> [p \in Paths |-> 0]]
 
 ------------------------------------------------------------------------------
 (* Lifecycle *)
@@ -1142,7 +1298,7 @@ CrashPod(s) ==
        ![s].honored = FALSE, ![s].pendReRun = FALSE,
        ![s].owed = {}, ![s].ackN = {},
        \* Tranche 7: the writer-local queue is a file in the same emptyDir.
-       ![s].fq = {}, ![s].noInst = FALSE,
+       ![s].fq = {}, ![s].fqRetired = [p \in Paths |-> 0], ![s].noInst = FALSE,
        ![s].declared = {}, ![s].consumed = {}]
   /\ gh' = [gh EXCEPT !.crashes = @ + 1]
   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
@@ -1314,7 +1470,8 @@ AgentWrite(s, p) ==
   \* out-of-scope changes), so it leaves the narrow ledger — otherwise
   \* Inv_NarrowNeverRecites would fire on legitimate widening and the
   \* invariant would be unsound rather than strong.
-  /\ gh' = [gh EXCEPT !.nextGen = @ + 1, !.narrowed = @ \ {p}]
+  /\ gh' = [gh EXCEPT !.nextGen = @ + 1, !.narrowed = @ \ {p},
+                     !.retired = IF WriterQueue THEN [@ EXCEPT ![p] = 0] ELSE @]
   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
@@ -1333,7 +1490,8 @@ AgentWriteSame(s, p) ==
        /\ sc' = [sc EXCEPT ![s].local[p] = g,
                            ![s].touched = IF g = sc[s].baseline[p]
                                           THEN @ \cup {p} ELSE @]
-       /\ gh' = [gh EXCEPT !.sameBytes = @ + 1, !.narrowed = @ \ {p}]
+       /\ gh' = [gh EXCEPT !.sameBytes = @ + 1, !.narrowed = @ \ {p},
+                          !.retired = IF WriterQueue THEN [@ EXCEPT ![p] = 0] ELSE @]
   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
@@ -1421,6 +1579,8 @@ HitlWrite(p) ==
                /\ UNCHANGED inbox
        /\ hitlAcked' = hitlAcked \cup {<<p, g>>}
        /\ gh' = [gh EXCEPT !.nextGen = @ + 1, !.hitl = @ + 1,
+               !.retired = IF WriterQueue THEN [@ EXCEPT ![p] = 0] ELSE @,
+               !.orphanAt = IF OrphanEntryCited THEN [@ EXCEPT ![p] = 0] ELSE @,
                !.hitlRetired = IF MaxSameBytes > 0 /\ <<p, objects[p]>> \in hitlAcked
                                THEN @ \cup {<<p, objects[p]>>} ELSE @]
   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, window, sc, conflicts, removals>>
@@ -1466,6 +1626,8 @@ HitlRename(p, q) ==
        \* atomicity is about those bytes, not the name — an agent that
        \* re-creates the old name after the unlink has made a new file.
        /\ gh' = [gh EXCEPT !.nextGen = @ + 1, !.removals = @ + 1,
+                          !.retired = IF WriterQueue THEN [@ EXCEPT ![q] = 0] ELSE @,
+                          !.orphanAt = IF OrphanEntryCited THEN [@ EXCEPT ![q] = 0] ELSE @,
                           !.renamed = @ \cup {<<p, q, objects[p], g>>}]
   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, window, sc, conflicts>>
 
@@ -1492,7 +1654,9 @@ TrackOrphan(p) ==
   \* budget of one spent itself on a LIVE writer's in-flight upload in the
   \* first run and left the real orphan untracked — the code's sweep runs
   \* again, so the model must too.
-  /\ gh' = [gh EXCEPT !.orphanTracks = 1]
+  /\ gh' = [gh EXCEPT !.orphanTracks = 1,
+       \* H1b: the entry carries the citation it was judged against.
+       !.orphanAt = IF OrphanEntryCited THEN [@ EXCEPT ![p] = manifest[p]] ELSE @]
   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, removals,
                  window, sc, hitlAcked, conflicts>>
 
@@ -1549,10 +1713,27 @@ Consume(s) ==
        missing == IF WriterQueue
                   THEN {pr \in cand \ already : objects[pr[1]] = 0} ELSE {}
        live == {pr \in cand \ already : objects[pr[1]] = pr[2]}
-       adoptable == {pr \in live :
+       \* Review 2026-09-18, H1b: an entry the untracked sweep appended is
+       \* honoured only while the manifest still cites at its path exactly
+       \* what the sweep judged the object against.  A citation that moved
+       \* on — to the object itself, to a newer one, or to nothing — ends
+       \* it, with no record: nobody acked those bytes.  A gateway's entry
+       \* carries no such clause (an acked write survives a concurrent
+       \* delete: modify wins), and the queue's upserts are not in `seen`.
+       outlived == IF OrphanEntryCited
+                   THEN {pr \in (live \cap seen) \ QueuedUpserts(s) :
+                           /\ gh.orphanAt[pr[1]] # 0
+                           /\ manifest[pr[1]] # gh.orphanAt[pr[1]]}
+                   ELSE {}
+       \* ...and an adoption made from a sweep entry that still stands is
+       \* PROVISIONAL: it carries the citation the sweep judged against.
+       judgedOf(p) == IF /\ OrphanEntryCited /\ gh.orphanAt[p] # 0
+                         /\ <<p, objects[p]>> \in seen \ QueuedUpserts(s)
+                      THEN gh.orphanAt[p] ELSE 0
+       adoptable == {pr \in live \ outlived :
                        /\ sc[s].local[pr[1]] = sc[s].baseline[pr[1]]
                        /\ pr[1] \notin sc[s].touched}
-       conflicted == live \ adoptable
+       conflicted == (live \ outlived) \ adoptable
        adoptPaths == {pr[1] : pr \in adoptable}
        surfPaths == IF ConflictSurfacing
                     THEN {pr[1] : pr \in conflicted} ELSE {}
@@ -1568,9 +1749,16 @@ Consume(s) ==
        tAbsent  == {p \in QueuedDeletes(s) : local1[p] = 0}
        \* Under the fix a key that holds an object has superseded the
        \* deletion: settled, nothing removed, no record.
-       tSuper   == IF TombstoneHeadsKey
-                   THEN {p \in QueuedDeletes(s) \ tAbsent : objects[p] # 0}
-                   ELSE {}
+       \* Review 2026-09-18, H1: under the fix the object supersedes the
+       \* deletion only when it is NOT the generation the delete retired —
+       \* the peer's own leaked object (a store without a conditional
+       \* DELETE) is what the tombstone was written about, and applies it.
+       \* Review 2026-09-18, H1b: under LeakSupersedesNothing a different
+       \* object supersedes only if something will integrate it — the
+       \* manifest cites it, or an entry this consume honours names it.
+       \* A leak (uncited, untracked) supersedes nothing: the delete applies.
+       tSuper   == {p \in QueuedDeletes(s) \ tAbsent :
+                      ObjectSupersedes(s, p, <<p, objects[p]>> \in live \ outlived)}
        tKept    == {p \in QueuedDeletes(s) \ (tAbsent \cup tSuper) :
                       \/ base1[p] = 0
                       \/ local1[p] # base1[p]
@@ -1605,6 +1793,19 @@ Consume(s) ==
             ![s].local = [p \in Paths |-> IF p \in applied THEN 0 ELSE local2[p]],
             ![s].baseline = base2,
             ![s].fq = IF WriterQueue THEN {} ELSE @,
+            ![s].fqRetired = IF WriterQueue THEN [p \in Paths |-> 0] ELSE @,
+            \* H1f: a superseded deletion leaves the copy it named in the
+            \* tree, derived from the generation it retired — the merge
+            \* base says so again, or the next install onto a manifest
+            \* that dropped the path a second time has nothing to diff.
+            ![s].instBase = IF SupersedeRestoresBase
+                            THEN [p \in Paths |->
+                                    IF p \in tSuper /\ sc[s].fqRetired[p] # 0
+                                    THEN sc[s].fqRetired[p] ELSE @[p]]
+                            ELSE @,
+            ![s].judged = [p \in Paths |->
+                             IF p \in tAbsent \cup tRemoved \cup applied THEN 0
+                             ELSE IF p \in advPaths THEN judgedOf(p) ELSE @[p]],
             ![s].known = @ \cup {objects[p] : p \in advPaths},
             \* `baseline.prev_scan.insert(entry.path)`: a consumed path
             \* gets the two-scan protection as if the walk had seen it,
@@ -1630,6 +1831,16 @@ Consume(s) ==
        \* out of scope is integrated HERE, one consume later — which is
        \* the only reason deferring it was not simply losing it.
        /\ gh' = [gh EXCEPT
+            !.orphanOutlived = @ + Cardinality(outlived),
+            \* H1b: a deletion applied over a DIFFERENT object at the key —
+            \* one nothing cites and nothing tracks, i.e. a leak.
+            !.leakApplied = @ + Cardinality({p \in tRemoved :
+                                               objects[p] # 0 /\ objects[p] # sc[s].fqRetired[p]}),
+            \* H1f: a superseded deletion actually moved the merge base.
+            !.baseRestored = @ + Cardinality({p \in tSuper :
+                                                /\ SupersedeRestoresBase
+                                                /\ sc[s].fqRetired[p] # 0
+                                                /\ sc[s].instBase[p] # sc[s].fqRetired[p]}),
             \* Adopted from the SNAPSHOT an entry the cell no longer holds:
             \* a peer's window clear dropped it between this barrier's read
             \* and this step.  The non-vacuity for the InboxSnapshot world —
@@ -1806,7 +2017,11 @@ GCDelete(s, p) ==
   /\ Running(s)
   /\ GCPhase(s)
   /\ p \in sc[s].scanD \ sc[s].gcDone
-  /\ ~Fenced(s)
+  \* Review 2026-09-18, C2: the fence is an OBSERVATION the collector
+  \* makes, not a property of the request.  Under the fix it looks
+  \* before every delete; as shipped it looked every 200, so a deposed
+  \* holder's delete lands.
+  /\ GCFencePerDelete => ~Fenced(s)
   \* Two requests (the shipped shape) or one: with If-Match the guard and
   \* the delete are the same request and `cur` is what is there.
   /\ ConditionalGC \/ ~BarrierLease \/ p \in sc[s].gcHeaded
@@ -1822,9 +2037,16 @@ GCDelete(s, p) ==
        \* from CollectorOff so the leak can be COUNTED: a world where the
        \* collector gives way proves nothing unless it gave way on a path
        \* it would otherwise have taken (`ProbeCollectorLeaked`).
+       \* "Keys the NEW manifest no longer references" is judged against
+       \* the document THIS barrier installed (`installed.entries`,
+       \* barrier.rs step 6), not against the live pointer: a holder
+       \* deposed after its CAS landed cannot see the successor's
+       \* re-citation, which is C2's whole mechanism.  Identical while
+       \* the fence is atomic (nobody installs between a holder's CAS
+       \* and its deletes); verified by count on the census worlds.
        LET wouldCollect == /\ cur # 0
                            /\ (~GuardedGC \/ cur \in sc[s].known)
-                           /\ (~DeletesAfterCAS \/ manifest[p] = 0)
+                           /\ (~DeletesAfterCAS \/ sc[s].instSnap[p] = 0)
        IN
        IF ~wouldCollect \/ CollectorOff
        THEN \* already absent, still referenced, an unrecognized ETag —
@@ -1870,6 +2092,7 @@ GCDelete(s, p) ==
                         window, hitlAcked, conflicts>>
 
 GCDeleteFenced(s) ==
+  /\ GCFencePerDelete
   /\ Running(s) /\ Fenced(s)
   /\ GCPhase(s)
   /\ sc[s].scanD \ sc[s].gcDone # {}
@@ -2084,6 +2307,14 @@ CASInstall(s) ==
                            ![s].fq = IF WriterQueue
                                      THEN QueueUpsert(@, MergeForeign(s) \cup MergeGone(s))
                                      ELSE @,
+                           \* Review 2026-09-18, H1: what the peer's delete
+                           \* retired — the merge base's citation for the
+                           \* path — travels with the tombstone.
+                           ![s].fqRetired = IF WriterQueue
+                                            THEN [p \in Paths |->
+                                                    IF p \in GonePaths(s)
+                                                    THEN Retired(s, p) ELSE @[p]]
+                                            ELSE @,
                            ![s].noInst = nothing,
                            ![s].repairMoved = IF BarrierLease
                                               THEN {p \in Paths : declined(p)}
@@ -2103,6 +2334,52 @@ CASInstall(s) ==
                   /\ objects[p] # 0
                   /\ manifest[p] = objects[p]),
             !.amputated = @ \/ amp,
+            \* Review 2026-09-18, H1: a delete this writer PUBLISHES retires
+            \* the generation it uncites.  WriterQueue only, so every
+            \* earlier state space is preserved by construction (the
+            \* resurrection needs the queue's tombstone to be superseded).
+            \* A delete another writer has ALREADY contested — its tree is
+            \* dirty at the path, or its upload of it is in flight — is not
+            \* recorded: that writer's commit re-citing the generation is
+            \* modify-wins at the merge, not a resurrection (the C2 control
+            \* world found this: a same-bytes upload landed before the
+            \* delete's CAS and was cited after it).
+            \* H1e: the document names what each delete retired, until the
+            \* path is cited again.
+            !.tomb = IF ManifestTombstones
+                     THEN [p \in Paths |->
+                             IF inst[p] # 0 THEN 0
+                             ELSE IF manifest[p] # 0 THEN manifest[p]
+                             ELSE @[p]]
+                     ELSE @,
+            !.retired = IF WriterQueue
+                        THEN [p \in Paths |->
+                                IF /\ p \in sc[s].scanD /\ inst[p] = 0 /\ manifest[p] # 0
+                                   \* ...and not by the publisher's own agent either:
+                                   \* a re-creation between the scan and the CAS is
+                                   \* a write the next barrier will publish.
+                                   /\ sc[s].local[p] = 0
+                                   /\ ~\E t \in Syncers \ {s} :
+                                        \/ p \in Dirty(t) \/ p \in sc[t].scanU
+                                        \* ...or holds a generation of p it
+                                        \* integrated (a consumed UI write)
+                                        \* and has not cited yet: its repair
+                                        \* is the modify in delete/modify,
+                                        \* and modify wins — the acked write
+                                        \* survives, the agent's delete is
+                                        \* lost (the README's Crash1 stance).
+                                        \* ...unless what it holds IS the
+                                        \* generation this delete retires:
+                                        \* then it integrated the current
+                                        \* citation early, through an entry
+                                        \* that was already redundant, and
+                                        \* modified nothing.  H1b's no-crash
+                                        \* variant hid behind the clause as
+                                        \* first written.
+                                        \/ /\ sc[t].baseline[p] # sc[t].instBase[p]
+                                           /\ sc[t].baseline[p] # manifest[p]
+                                THEN manifest[p] ELSE @[p]]
+                        ELSE @,
             !.cited = IF cite THEN 1 ELSE @,
             !.citedPairs = @ \cup {pr \in hitlAcked : inst[pr[1]] = pr[2]},
             !.stragglerCas = @ + (IF DeposedHolder(s) THEN 1 ELSE 0),
@@ -2131,6 +2408,9 @@ Finish(s) ==
               THEN 0
          ELSE @[p]],
        ![s].instBase = sc[s].instSnap,
+       ![s].judged = [p \in Paths |->
+         IF p \in sc[s].scanU \cup sc[s].scanD \/ sc[s].instSnap[p] = sc[s].baseline[p]
+         THEN 0 ELSE @[p]],
        ![s].expSeq = sc[s].instSeq,
        \* The baseline records the walk's stat for what was cited.  A
        \* same-bytes rewrite AFTER the scan is absorbed here — an
@@ -2148,7 +2428,12 @@ Finish(s) ==
   \* the performed removals.
   /\ inbox' = inbox \ sc[s].consumed
   /\ removals' = removals \ sc[s].declared
-  /\ gh' = [gh EXCEPT !.done = IF InfiniteBarriers THEN @ ELSE @ + 1]
+  /\ gh' = [gh EXCEPT !.done = IF InfiniteBarriers THEN @ ELSE @ + 1,
+       !.orphanAt = IF OrphanEntryCited
+                    THEN [p \in Paths |->
+                            IF \E g \in Gens : <<p, g>> \in (inbox \ sc[s].consumed)
+                            THEN @[p] ELSE 0]
+                    ELSE @]
   \* Tranche 6: the RELEASE is the last step of the commit section, so a
   \* crash anywhere between the CAS and here leaves the cell HELD by a
   \* dead holder — the deposal's whole subject.  A holder deposed after
@@ -2615,6 +2900,9 @@ CiteFinish(s) ==
             ![s].citeDropped = dropped,
             ![s].citeDone = {}, ![s].stageCarried = FALSE,
             ![s].instBase = man2,
+            ![s].judged = [p \in Paths |->
+              IF p \in sc[s].citeDone \/ p \in uncite \/ man2[p] = sc[s].baseline[p]
+              THEN 0 ELSE @[p]],
             ![s].baseline = [p \in Paths |->
               IF p \in sc[s].citeDone THEN stage[s][p]
               ELSE IF p \in uncite THEN 0
@@ -2627,6 +2915,11 @@ CiteFinish(s) ==
        /\ inbox' = inbox \ sc[s].consumed
        /\ removals' = removals \ sc[s].declared
        /\ gh' = [gh EXCEPT !.done = @ + 1,
+            !.orphanAt = IF OrphanEntryCited
+                         THEN [p \in Paths |->
+                                 IF \E g \in Gens : <<p, g>> \in (inbox \ sc[s].consumed)
+                                 THEN @[p] ELSE 0]
+                         ELSE @,
             !.gc = @ + Cardinality(dels),
             !.gcCited = @ + Cardinality(dels),
             !.reaped = @ + Cardinality(UNION {versions[p] \ ver2[p] : p \in Paths}),
@@ -2787,6 +3080,8 @@ PullOnly(s) ==
   /\ Running(s) /\ PullOnlyReady(s)
   /\ sc' = [sc EXCEPT ![s].pc = "idle",
        ![s].fq = QueueUpsert(@, MergeForeign(s) \cup MergeGone(s)),
+       ![s].fqRetired = [p \in Paths |->
+                           IF p \in GonePaths(s) THEN Retired(s, p) ELSE @[p]],
        ![s].instBase = manifest,
        ![s].expSeq = manSeq,
        ![s].instSnap = manifest, ![s].instSeq = manSeq, ![s].instSrc = manSrc,
@@ -3046,6 +3341,8 @@ ASSUME MaxSameBytes > 0 => BarrierLease /\ MaxNarrows = 0 /\ MaxRemovals = 0
 ASSUME WriterQueue => BarrierLease /\ MergeCapable /\ InboxEnabled
 ASSUME EmptyInstall => WriterQueue
 ASSUME ~QueueForeignChanges => WriterQueue
+\* Review 2026-09-18: the tombstone's retired generation is the queue's.
+ASSUME TombstoneNamesRetired => TombstoneHeadsKey /\ WriterQueue
 
 (* ---- tranche 6: FAIRNESS, for the liveness runs only -------------------
    Weak fairness on each syncer's OWN barrier step — not on "some syncer
@@ -3094,6 +3391,11 @@ TypeOK ==
                        /\ sc[s].touched \subseteq Paths
                        /\ sc[s].fq \subseteq (Paths \X Gens)
                        /\ \A x, y \in sc[s].fq : x[1] = y[1] => x = y
+                       /\ sc[s].fqRetired \in [Paths -> Gens]
+                       /\ sc[s].judged \in [Paths -> Gens]
+  /\ gh.retired \in [Paths -> Gens]
+  /\ gh.orphanAt \in [Paths -> Gens]
+  /\ gh.tomb \in [Paths -> Gens]
 
 \* §4.2: A NARROW IS AN UNWATCH, NEVER AN ABSENCE.  No path a narrow
 \* dropped may lose its object — a workspace that stops holding a file
@@ -3268,6 +3570,47 @@ Inv_QuiescentConverged ==
       \* between them) — a leak, not the disagreement this is about.
       \/ manifest[p] = 0
       \/ \E pr \in inbox : pr = <<p, objects[p]>>
+
+\* Review 2026-09-18, H1b: A PEER'S PUBLISHED DELETE REACHES EVERY LIVE TREE.
+\* Once nothing can move — and not because the barrier budget ran out — no
+\* running writer keeps a CLEAN copy of a path the manifest no longer
+\* cites.  A dirty copy is the agent's and publishes.  What it saw: a leaked
+\* generation this tree never integrated superseded the tombstone (which
+\* named the older one the tree had), and the clean copy stayed forever.
+Inv_TreesConverged ==
+  ~ENABLED SyncerProgress =>
+    \A s \in Syncers : Running(s) =>
+      \A p \in Paths :
+        (/\ sc[s].local[p] # 0 /\ sc[s].local[p] = sc[s].baseline[p]
+         /\ manifest[p] = 0
+         \* ...and this writer has merged onto a manifest without the path
+         \* (one that never ran a barrier after the delete is not stale, it
+         \* is behind — the budget, not the protocol, stopped it).
+         /\ sc[s].instBase[p] = 0)
+          \* ...unless the writer still holds the work that removes it and
+          \* the budget, not the protocol, is what stopped it: a queued
+          \* deletion the next consume would apply (H1f: not one a leak
+          \* would supersede again), or a repair it is owed (a consumed UI
+          \* write not yet re-cited: modify wins, the copy is right to stay).
+          => DeletionPending(s, p) \/ RepairOwed(s, p)
+
+\* Review 2026-09-18, H1: A PUBLISHED DELETE STAYS PUBLISHED until somebody
+\* writes the path again.  `gh.retired[p]` is the generation a writer's own
+\* delete uncited at its CAS; every agent or UI write of p clears it.  A
+\* manifest that cites that generation again with no write in between has
+\* resurrected the delete.  A delete that was already contested when it
+\* published — another writer dirty at the path, uploading it, or holding
+\* an integrated, not-yet-cited generation of it (its repair is the
+\* "modify" of delete/modify) — is not recorded: that writer's re-cite is
+\* modify-wins, the acked write surviving over the agent's delete.  Stated over the
+\* manifest and ONE history variable, not over the action that does it —
+\* the collector-off flap
+\* (a leaked object supersedes the peer's tombstone; the citation repair
+\* re-cites what the baseline kept) is the route that found it, and it is
+\* not the only one the predicate would catch.  Written only under
+\* WriterQueue, where the tombstone exists.
+Inv_NoDeleteResurrected ==
+  \A p \in Paths : manifest[p] = 0 \/ manifest[p] # gh.retired[p]
 
 Inv_CellHeldByHolder ==
   BarrierLease /\ CellHeld =>
@@ -3520,6 +3863,11 @@ ProbeAdoptWithheld     == gh.adoptWithheld = 0
 ProbeUploadWithheld    == gh.uploadWithheld = 0
 \* Finding 10's candidate fix fires.
 ProbeOrphanTracked     == gh.orphanTracks = 0
+\* H1b's fix fires: a sweep entry whose citation moved on was dropped.
+ProbeOrphanOutlived    == gh.orphanOutlived = 0
+\* H1b's leak rule fires: a tombstone applied over a leaked generation.
+ProbeLeakApplied       == gh.leakApplied = 0
+ProbeBaseRestored     == gh.baseRestored = 0
 \* Non-vacuity for the CollectorOff world: the collector actually gave way
 \* on a path it would otherwise have deleted.  Without this, "every
 \* invariant holds" could mean "the collector was never asked".
@@ -3575,7 +3923,8 @@ StrictGh ==
    removals |-> gh.removals, renamed |-> gh.renamed,
    renameRefused |-> gh.renameRefused, citedPairs |-> gh.citedPairs,
    sameBytes |-> gh.sameBytes, staleOverride |-> gh.staleOverride,
-   hitlRetired |-> gh.hitlRetired]
+   hitlRetired |-> gh.hitlRetired, retired |-> gh.retired,
+   orphanAt |-> gh.orphanAt, tomb |-> gh.tomb]
 StrictSc ==
   [s \in Syncers |-> [sc[s] EXCEPT !.pendReRun = FALSE, !.stageCarried = FALSE]]
 StrictView ==

@@ -177,6 +177,7 @@ pub async fn claim_step(sc: &mut Syncer, count: bool) -> LeanResult<ClaimOutcome
                 inc.quiet_polls = 0;
                 sc.state.save_incarnation(&inc)?;
                 sc.lease = Some(lease.clone());
+                sc.cell_written_at = Some(std::time::Instant::now());
                 sc.trace("claim", serde_json::json!({"verdict": "claimed", "how": "fresh", "epoch": lease.epoch}));
                 Ok(ClaimOutcome::Claimed(lease))
             }
@@ -222,6 +223,9 @@ pub async fn claim_step(sc: &mut Syncer, count: bool) -> LeanResult<ClaimOutcome
         inc.quiet_polls = 0;
         sc.state.save_incarnation(&inc)?;
         sc.lease = Some(lease.clone());
+        // Adopted, not written: the commit section's first delete renews
+        // before it trusts the token (review 2026-09-18, C2 and L8).
+        sc.cell_written_at = None;
         sc.trace("claim", serde_json::json!({"verdict": "claimed", "how": "adopted-own", "epoch": lease.epoch}));
         return Ok(ClaimOutcome::Claimed(lease));
     }
@@ -276,6 +280,7 @@ pub async fn claim_step(sc: &mut Syncer, count: bool) -> LeanResult<ClaimOutcome
                 inc.quiet_polls = 0;
                 sc.state.save_incarnation(&inc)?;
                 sc.lease = Some(lease.clone());
+                sc.cell_written_at = Some(std::time::Instant::now());
                 sc.trace("claim", serde_json::json!({"verdict": "claimed", "how": how, "epoch": lease.epoch, "prior": prior}));
                 Ok(ClaimOutcome::Claimed(lease))
             }
@@ -428,6 +433,7 @@ pub async fn renew(sc: &mut Syncer) -> LeanResult<()> {
     match sc.store.epoch_renew(&key, &lease, echo.as_deref()).await {
         Ok(l) => {
             sc.lease = Some(l);
+            sc.cell_written_at = Some(std::time::Instant::now());
             // The renewal is a probe of our own credentials, so it is
             // also a place a pause can be observed to have ENDED.
             // Best-effort: a gauge that failed to write must not fail a
@@ -457,12 +463,13 @@ pub async fn renew(sc: &mut Syncer) -> LeanResult<()> {
                     // count a live holder dead. One renew moves it; if
                     // that write fails the adopted token stands and the
                     // next tick tries again.
-                    sc.lease = Some(
-                        sc.store
-                            .epoch_renew(&key, &adopted, echo.as_deref())
-                            .await
-                            .unwrap_or(adopted),
-                    );
+                    match sc.store.epoch_renew(&key, &adopted, echo.as_deref()).await {
+                        Ok(l) => {
+                            sc.lease = Some(l);
+                            sc.cell_written_at = Some(std::time::Instant::now());
+                        }
+                        Err(_) => sc.lease = Some(adopted),
+                    }
                     let _ = sc.clear_auth_pause();
                     Ok(())
                 }

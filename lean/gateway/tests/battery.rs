@@ -31,6 +31,7 @@ async fn syncer(store: &Arc<MemoryStore>, root: &std::path::Path) -> Syncer {
         cfg,
         state,
         lease: None,
+        cell_written_at: None,
         noted_not_regular: Default::default(),
     }
 }
@@ -90,6 +91,7 @@ async fn hitl_write(
             author: author.to_string(),
             added_unix: now_unix(),
             crc64_b64: Some(flint_store::crc64_to_b64(crc)),
+            cited: None,
         },
     )
     .await?;

@@ -1,0 +1,35 @@
+== LeanBarrierLeaseOrphanStaleCopy 00:32:11
+rc=12
+Error: Invariant Inv_TreesConverged is violated.
+The depth of the complete state graph search is 21.
+== LeanBarrierLeaseSupersedeDropsBase 00:32:22
+rc=12
+Error: Invariant Inv_TreesConverged is violated.
+The depth of the complete state graph search is 30.
+== LeanBarrierLeaseLeakResurrects 00:34:14
+rc=0
+293129 states generated, 95185 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 42.
+UNEXPECTED: LeanBarrierLeaseLeakResurrects should violate
+== LeanBarrierLeaseLeakRetiredOnly 00:34:18
+rc=0
+275851 states generated, 90781 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 42.
+== LeanBarrierLeaseLeakHolds 00:34:21
+rc=0
+274217 states generated, 90249 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 42.
+== LeanProbeLeakApplied 00:34:25
+rc=12
+Error: Invariant ProbeLeakApplied is violated.
+The depth of the complete state graph search is 20.
+== LeanProbeBaseRestored 00:34:31
+rc=12
+Error: Invariant ProbeBaseRestored is violated.
+The depth of the complete state graph search is 22.
+== LeanBarrierLeaseOrphanConverges 00:34:44
+rc=0
+31092979 states generated, 10475529 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 43.
+EIGHTDONE bad=1
+stopping before the gate

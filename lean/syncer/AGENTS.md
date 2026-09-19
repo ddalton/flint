@@ -290,6 +290,9 @@ yours.
   under the new path: the object key is the path. Moving a large
   directory re-uploads it. Edit in place where you can.
 - Files under `.flint/` and `.flint-sync/` are never published.
+- A name ending in `.flint-sync-tmp` is reserved for the syncer's own
+  temporary files at every depth: it is never published, never
+  materialised from the bucket, and the gateway refuses it.
 - The whole tree lives on the pod's disk; keep it within the workspace's
   size limit and the file-count budget the operator set.
 

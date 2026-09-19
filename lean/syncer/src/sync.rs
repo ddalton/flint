@@ -227,6 +227,7 @@ impl Syncer {
                             mtime_unix: mtime_of(&st),
                             mtime_nanos: Some(mtime_nanos_of(&st)),
                             crc64_b64: local_crc,
+                            judged: None,
                         },
                     );
                     advanced.0.insert(path.clone());
@@ -295,6 +296,7 @@ impl Syncer {
                     mtime_unix: mtime_of(&st),
                     mtime_nanos: Some(mtime_nanos_of(&st)),
                     crc64_b64: Some(got),
+                    judged: None,
                 },
             );
             advanced.0.insert(path.clone());

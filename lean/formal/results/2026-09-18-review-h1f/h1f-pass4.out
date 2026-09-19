@@ -1,0 +1,44 @@
+== LeanBarrierLeaseLeakResurrects 00:46:55
+rc=12
+Error: Invariant Inv_NoDeleteResurrected is violated.
+The depth of the complete state graph search is 19.
+== LeanBarrierLeaseLeakHolds 00:46:57
+rc=0
+274217 states generated, 90249 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 42.
+== LeanBarrierLeaseLeakRetiredOnly 00:47:01
+rc=0
+276459 states generated, 91097 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 42.
+== LeanBarrierLeaseLeakRestoreOnly 00:47:05
+rc=0
+293129 states generated, 95185 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 42.
+== LeanBarrierLeaseLeakFlaps 00:47:08
+rc=12
+Error: Invariant Inv_TreesConverged is violated.
+The depth of the complete state graph search is 19.
+== LeanBarrierLeaseLeakRuleConverges 00:47:10
+rc=0
+274217 states generated, 90249 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 42.
+== LeanBarrierLeaseLeakSkippedGeneration 00:47:14
+rc=12
+Error: Invariant Inv_TreesConverged is violated.
+The depth of the complete state graph search is 24.
+== LeanProbeTombstoneOverLeak 00:47:17
+rc=12
+Error: Invariant ProbeTombstoneApplied is violated.
+The depth of the complete state graph search is 14.
+LEAKDONE bad=0
+== gate 00:47:18
+gate rc=1 01:25:53
+FAIL: H1b: the sweep's entry outlives the citation it was judged against and a published delete is resurrected through it — did NOT find its counterexample (a green mutation proves nothing)
+== trace-check 01:25:53
+trace-check rc=0
+== control-shared-inbox: reject (as required) — last: << "TRACE-REACHED", 7, [w |-> "A", ev |-> "pullonly", foreign |-> 0, gone |-> 0], [A |-> "scanned", B |-> "idle"], "none", "none", <<>> >>
+work dir: /tmp/tmp.1ZadwkPBib
+trace check: ok
+GATEDONE
+== crash1 01:26:07
+== Crash1OrphanFalse 01:26:07

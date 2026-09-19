@@ -1,0 +1,61 @@
+== both_edit_one_file: TLC ERROR
+Semantic errors:
+Semantic errors:
+Semantic errors:
+Error: Parsing or semantic analysis failed.
+== edit_and_delete_cross: TLC ERROR
+Semantic errors:
+Semantic errors:
+Semantic errors:
+Error: Parsing or semantic analysis failed.
+== outranked_delete_publish: TLC ERROR
+Semantic errors:
+Semantic errors:
+Semantic errors:
+Error: Parsing or semantic analysis failed.
+== ui_write_cited: TLC ERROR
+Semantic errors:
+Semantic errors:
+Semantic errors:
+Error: Parsing or semantic analysis failed.
+== ui_write_over_a_queued_delete: TLC ERROR
+Semantic errors:
+Semantic errors:
+Semantic errors:
+Error: Parsing or semantic analysis failed.
+== both_edit_one_file.upload-wrong-etag: TLC ERROR
+Semantic errors:
+Semantic errors:
+Semantic errors:
+Error: Parsing or semantic analysis failed.
+== edit_and_delete_cross.merge-foreign-plus-one: TLC ERROR
+Semantic errors:
+Semantic errors:
+Semantic errors:
+Error: Parsing or semantic analysis failed.
+== outranked_delete_publish.ack-ok: TLC ERROR
+Semantic errors:
+Semantic errors:
+Semantic errors:
+Error: Parsing or semantic analysis failed.
+== ui_write_cited.consume-not-adopted: TLC ERROR
+Semantic errors:
+Semantic errors:
+Semantic errors:
+Error: Parsing or semantic analysis failed.
+== ui_write_over_a_queued_delete.tombstone-removed: TLC ERROR
+Semantic errors:
+Semantic errors:
+Semantic errors:
+Error: Parsing or semantic analysis failed.
+== control-commit-token: TLC ERROR
+Semantic errors:
+Semantic errors:
+Semantic errors:
+Error: Parsing or semantic analysis failed.
+== control-412-parks: reject (as required) — last: << "TRACE-REACHED", 14, [w |-> "B", p |-> "shared.txt", ev |-> "upload", g |-> 3, outcome |-> "put"], [A |-> "idle", B |-> "scanned"], "A", "none", <<>> >>
+== control-two-scan-declared: reject (as required) — last: << "TRACE-REACHED", 15, [w |-> "A", ev |-> "scan", uploads |-> 0, deletes |-> 1], [A |-> "consumed", B |-> "idle"], "B", "none", <<>> >>
+== control-tombstone-unfixed: reject (as required) — last: << "TRACE-REACHED", 20, [ w |-> "B", ev |-> "consume", adopted |-> {<<"x.txt", 2>>}, removed |-> {}, dirty |-> {}, kept |-> {} ], [A |-> "idle", B |-> "idle"], 
+== control-shared-inbox: reject (as required) — last: << "TRACE-REACHED", 7, [w |-> "A", ev |-> "pullonly", foreign |-> 0, gone |-> 0], [A |-> "scanned", B |-> "idle"], "none", "none", <<>> >>
+work dir: /tmp/tmp.UwElCpLkAw
+trace check: 11 FAILED

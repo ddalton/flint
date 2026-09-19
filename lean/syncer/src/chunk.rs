@@ -93,7 +93,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::manifest::LeanEntry;
+use super::manifest::{LeanEntry, Tombstone};
 use super::{LeanError, LeanResult};
 
 /// One entry of the pointer's chunk list.
@@ -122,6 +122,32 @@ pub struct ChunkBody {
 
 fn encode(body: &ChunkBody) -> LeanResult<Vec<u8>> {
     serde_json::to_vec(body).map_err(|e| LeanError::State(format!("chunk encode: {e}")))
+}
+
+/// The document's tombstones (review 2026-09-18, H1e) in the chunked
+/// layout: one content-addressed object beside the chunks, named by the
+/// pointer, so an unchanged set re-addresses to the object that already
+/// exists and the chunk reaper keeps it as it keeps a referenced chunk.
+/// The single-object layout carries them inline in the document.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TombstoneBody {
+    pub tombstones: BTreeMap<String, Tombstone>,
+}
+
+pub fn encode_tombstones(tombstones: &BTreeMap<String, Tombstone>) -> LeanResult<(String, Vec<u8>)> {
+    let body = serde_json::to_vec(&TombstoneBody { tombstones: tombstones.clone() })
+        .map_err(|e| LeanError::State(format!("tombstones encode: {e}")))?;
+    Ok((chunk_address(&body), body))
+}
+
+pub fn decode_tombstones(bytes: &[u8], addr: &str) -> LeanResult<BTreeMap<String, Tombstone>> {
+    let got = chunk_address(bytes);
+    if got != addr {
+        return Err(LeanError::State(format!("tombstones {addr} do not match their address (body hashes to {got})")));
+    }
+    let body: TombstoneBody =
+        serde_json::from_slice(bytes).map_err(|e| LeanError::State(format!("tombstones {addr} parse: {e}")))?;
+    Ok(body.tombstones)
 }
 
 /// Split entries into chunk bodies and their references.

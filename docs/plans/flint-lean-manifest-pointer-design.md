@@ -210,3 +210,24 @@ and a PUT of the entire document.
 
 What is NOT yet measured is the end-to-end shape on a real bucket, which
 is the drill leg this design still owes.
+
+## Addendum 2026-09-18: the pointer names the document's tombstones
+
+Review 2026-09-18 (H1c–H1e, `lean/FINDINGS.md` L-107/L-108) added a field
+to the document: `tombstones`, path → the etag a published delete retired
+and the generation that published it, kept until the path is cited again
+or 10,000 generations pass. A writer that adopted a UI write while it was
+still pending, and merges after another writer cited it and then deleted
+it knowingly, otherwise sees exactly what a delete that RACED the write
+leaves, and its citation repair resurrects the deleted generation; the
+tombstone is the one fact in the bucket that tells the two apart.
+
+In the single-object layout the field rides inside the generation object.
+In the chunked layout it is one content-addressed object beside the chunks
+(`chunk::TombstoneBody`, at `chunk_key(addr)`), and the pointer carries its
+address in `tombstones: Option<String>` — `None` when the document has
+none, `serde(default)` so every pointer written before the field parses.
+`manifest::load` fetches it with the chunks (a missing object is judged
+like a missing chunk: retry if the pointer moved, else a hole), and
+`sweep_chunks` keeps it as it keeps a referenced chunk. A rotation copies
+the pointer and so carries the address unchanged.

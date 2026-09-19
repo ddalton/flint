@@ -1,0 +1,17 @@
+== LeanBarrierLeaseOrphanResurrects 22:38:33
+rc=12
+Error: Invariant Inv_NoDeleteResurrected is violated.
+The depth of the complete state graph search is 22.
+== LeanBarrierLeaseOrphanTracked 22:38:52
+rc=12
+Error: Invariant Inv_NoDeleteResurrected is violated.
+The depth of the complete state graph search is 22.
+== LeanProbeOrphanTracked 22:39:17
+rc=12
+Error: Invariant ProbeOrphanTracked is violated.
+The depth of the complete state graph search is 9.
+== LeanProbeOrphanOutlived 22:39:19
+rc=12
+Error: Invariant ProbeOrphanOutlived is violated.
+The depth of the complete state graph search is 11.
+ORPHANDONE

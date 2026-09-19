@@ -37,6 +37,19 @@ pub struct InboxEntry {
     /// hand (a draft promote is a server-side copy).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crc64_b64: Option<String>,
+    /// For an entry the untracked sweep appended (`untracked.rs`): the etag
+    /// the manifest cited at this path when the object was judged
+    /// untracked. A consume honours the entry only while the manifest still
+    /// cites exactly that — nobody acked these bytes, so a citation that
+    /// moved on (to the object itself, to a newer one, or to nothing) is the
+    /// end of them. Without this clause the entry outlived the commit that
+    /// cited its object and, after the uploader's own delete of the path,
+    /// re-cited the retired generation through the other writer's consume
+    /// (review 2026-09-18, H1b). `None` for a gateway's write, which an
+    /// acked write's guarantee keeps tracked through a concurrent delete,
+    /// and for a merge-preserved entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cited: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

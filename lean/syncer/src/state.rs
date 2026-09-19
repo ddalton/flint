@@ -37,6 +37,15 @@ pub struct BaselineEntry {
     /// the bytes on disk are the LOCAL edit, about to publish under a
     /// CRC of its own, and the sentinel never repairs.
     pub crc64_b64: Option<String>,
+    /// Set by a consume that adopted the untracked sweep's entry
+    /// (`untracked.rs`): the etag the manifest cited at this path when the
+    /// sweep judged the object untracked. The citation repair cites this
+    /// entry only while the manifest still cites exactly that; a citation
+    /// that moved on voids the adoption, and the path is queued as a
+    /// tombstone where the manifest now cites nothing (review 2026-09-18,
+    /// H1b). `None` for everything a writer integrated on its own account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judged: Option<String>,
 }
 
 /// The persisted baseline snapshot: what this syncer believes the
@@ -149,6 +158,15 @@ pub struct ForeignChange {
     pub etag: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crc64_b64: Option<String>,
+    /// For a deletion: the etag the merge base cited — what the peer's
+    /// delete RETIRED. A tombstone is superseded only by a DIFFERENT
+    /// object at the key; the retired generation itself, left behind by
+    /// a collector that gave way (a store without a conditional DELETE),
+    /// is exactly what the tombstone is about (review 2026-09-18, H1).
+    /// `None` on a queue file written before this field: the old rule,
+    /// any object supersedes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

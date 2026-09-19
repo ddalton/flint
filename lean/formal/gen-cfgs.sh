@@ -18,8 +18,9 @@ MaxRemovals DeclaredSkipsWalk EarlyInboxDrop RenameWaitsForDestination \
 BarrierLease Ticket DeadHandoffSkip InfiniteBarriers ConditionalGC VerifyAdoptedCitations \
 HitlOverwritesTrackedOnly SyncKeepsHiddenBase MaxSameBytes VerifyUploadedCitations \
 WriterQueue EmptyInstall TombstoneHeadsKey CommitLoadsCurrent Upload412Preserves \
-DeclaredConfirmsAbsence Writers OrphanTrack QueueForeignChanges ProjectedTrace \
-AbandonOnStoreError BaselineKeepsUncollected ClaimMintsEpoch ClaimStampsEpoch CollectorOff InboxSnapshot"
+DeclaredConfirmsAbsence Writers OrphanTrack OrphanEntryCited LeakSupersedesNothing ManifestTombstones SupersedeRestoresBase QueueForeignChanges ProjectedTrace \
+AbandonOnStoreError BaselineKeepsUncollected ClaimMintsEpoch ClaimStampsEpoch CollectorOff InboxSnapshot \
+GCFencePerDelete TombstoneNamesRetired"
 
 emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
          # Spec=<name> selects the SPECIFICATION (default Spec; FairSpec
@@ -153,7 +154,14 @@ emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
   # The writers, in start order. Two in every cfg but the third-writer worlds.
   local c_Writers='<- TwoWriters'
   # Finding 10's candidate fix; FALSE (what ships) in every cfg but its own.
-  local c_OrphanTrack=FALSE
+  local c_OrphanTrack=FALSE c_OrphanEntryCited=FALSE c_LeakSupersedesNothing=FALSE c_ManifestTombstones=FALSE
+  local c_SupersedeRestoresBase=FALSE
+  # Review 2026-09-18.  GCFencePerDelete=TRUE is the module as it always
+  # was (an atomic fence on every delete) and the code after the fix;
+  # FALSE is the shape that shipped, run only as C2's mutation.
+  # TombstoneNamesRetired=FALSE outside the queue worlds (it reads nothing
+  # there) and inside them only in H1's mutation; IMPL carries TRUE.
+  local c_GCFencePerDelete=TRUE c_TombstoneNamesRetired=FALSE
   local c_Spec=Spec c_Props=""
   # Ghost-state reduction (LeanSubtree.tla, "GHOST-STATE REDUCTION"):
   # View=AUTO fingerprints a run through StrictView unless it checks a
@@ -676,8 +684,12 @@ emit LeanProbeDeadHandoffSkipped "ProbeDeadHandoffSkipped" \
 # upload after the other writer replaced it (Inv_NoStaleOverride in 16 steps —
 # the first box run of LeanBarrierLeaseSentinelImpl1, 2026-09-15, which ran
 # without it: a cfg error, not a finding).
-IMPL="WriterQueue=TRUE EmptyInstall=TRUE TombstoneHeadsKey=TRUE CommitLoadsCurrent=TRUE \
-Upload412Preserves=TRUE DeclaredConfirmsAbsence=TRUE VerifyUploadedCitations=TRUE"
+IMPL="WriterQueue=TRUE EmptyInstall=TRUE TombstoneHeadsKey=TRUE TombstoneNamesRetired=TRUE CommitLoadsCurrent=TRUE \
+Upload412Preserves=TRUE DeclaredConfirmsAbsence=TRUE VerifyUploadedCitations=TRUE OrphanEntryCited=TRUE LeakSupersedesNothing=TRUE ManifestTombstones=TRUE SupersedeRestoresBase=TRUE"
+# Review 2026-09-18: the strict worlds on the code's shape also carry H1's
+# invariant (a published delete stays published); its ghost is written only
+# under WriterQueue, so it reads nothing in the older worlds.
+IMPLINV="$BLINV,Inv_NoDeleteResurrected"
 # THE FINDING modelling the queue produced at once (19 steps): A deletes
 # p1 and publishes; B's pull-only boundary queues the deletion; the UI
 # writes p1 again and is acked; B's next consume ADOPTS the UI write and
@@ -689,15 +701,15 @@ Upload412Preserves=TRUE DeclaredConfirmsAbsence=TRUE VerifyUploadedCitations=TRU
 # `a_ui_write_over_a_peers_delete_survives_the_queued_tombstone`.
 QWORLD="BarrierLease=TRUE HitlOverwritesTrackedOnly=TRUE NPaths=1 MaxGen=2 MaxSeq=6 MaxHitl=1 \
 MaxBarriers=3 MaxCrashes=0 MaxRestarts=0"
-emit LeanBarrierLeaseQueueTombstoneOverHitl "Inv_HITLTracked" $QWORLD $IMPL TombstoneHeadsKey=FALSE
-emit LeanBarrierLeaseQueueHolds "$BLINV" $QWORLD $IMPL
+emit LeanBarrierLeaseQueueTombstoneOverHitl "Inv_HITLTracked" $QWORLD $IMPL TombstoneHeadsKey=FALSE TombstoneNamesRetired=FALSE
+emit LeanBarrierLeaseQueueHolds "$IMPLINV" $QWORLD $IMPL
 emit LeanProbeTombstoneSuperseded "ProbeTombstoneSuperseded" $QWORLD $IMPL
 emit LeanProbeTombstoneApplied "ProbeTombstoneApplied" $QWORLD $IMPL
 emit LeanProbePullOnly "ProbePullOnly" $QWORLD $IMPL
 emit LeanProbeEmptyInstall "ProbeEmptyInstall" $QWORLD $IMPL
 # The tranche-6 breadth world (two paths, HITL, crash, restart) on the
 # code's shape.
-emit LeanBarrierLeaseImplHolds "$BLINV" $BLWORLD $IMPL
+emit LeanBarrierLeaseImplHolds "$IMPLINV" $BLWORLD $IMPL
 # IS LEAKING SAFE?  The store that ignores `If-Match` on DELETE is the
 # world ConditionalGC=FALSE describes, and this module REFUTES that world
 # (LeanBarrierLeaseGCUnconditional): the delete takes the version another
@@ -724,8 +736,18 @@ emit LeanBarrierLeaseImplHolds "$BLINV" $BLWORLD $IMPL
 # object read as untracked forever. Retirement now follows the collector's
 # DECISION, so the full set runs here and the give-way design carries no
 # recorded exception.
-emit LeanBarrierLeaseCollectorOff "$BLINV" $BLWORLD $IMPL \
+emit LeanBarrierLeaseCollectorOff "$IMPLINV" $BLWORLD $IMPL \
   ConditionalGC=FALSE CollectorOff=TRUE BaselineKeepsUncollected=TRUE
+# Review 2026-09-18, H1c/H1d/H1e: a UI write adopted while PENDING and later
+# deleted KNOWINGLY by the writer that cited it — the adopter itself, after
+# a restart between its CAS and step 7 left its merge base behind (H1c, 19
+# steps); a writer that restarted before its window clear so the entry
+# outlived the citation and was adopted after it (H1d, 21 steps); or plainly
+# another writer (H1e, 19 steps).  The adopter's repair re-cites the deleted
+# generation, and only a tombstone in the document — what the delete
+# retired — tells it the generation was published and removed.
+emit LeanBarrierLeaseCollectorOffNoTombstone "Inv_NoDeleteResurrected" $BLWORLD $IMPL \
+  ConditionalGC=FALSE CollectorOff=TRUE BaselineKeepsUncollected=TRUE ManifestTombstones=FALSE
 emit LeanProbeCollectorLeaked "ProbeCollectorLeaked" $BLWORLD $IMPL \
   ConditionalGC=FALSE CollectorOff=TRUE BaselineKeepsUncollected=TRUE
 # IS THE SNAPSHOT READ SAFE?  `barrier.rs` step 1 reads the cell ONCE and
@@ -735,7 +757,7 @@ emit LeanProbeCollectorLeaked "ProbeCollectorLeaked" $BLWORLD $IMPL \
 # (W4 phase 2, R3-S2: the model read `inbox` at the instant of the
 # consume and could not take a step the code took). Now that it does, the
 # question it raises gets asked: every invariant, in the breadth world.
-emit LeanBarrierLeaseInboxSnapshot "$BLINV" $BLWORLD $IMPL InboxSnapshot=TRUE
+emit LeanBarrierLeaseInboxSnapshot "$IMPLINV" $BLWORLD $IMPL InboxSnapshot=TRUE
 emit LeanProbeStaleInboxAdopt "ProbeStaleInboxAdopt" $BLWORLD $IMPL InboxSnapshot=TRUE
 # THE ACK, THIRD REFINEMENT.  Inv_AckBoundaryCoherent now excuses exactly a
 # document ahead of the tree by a change waiting in this writer's queue.
@@ -768,7 +790,7 @@ emit LeanBarrierLeaseSentinelImpl "$BLSENTINV,Inv_AckBoundaryCoherent" $BLSENT $
 #    ticket and the pull-only boundary with a third party in every exchange;
 #  - the sentinel on the code's shape with a pod replacement and a container
 #    restart, which no sentinel-under-the-lease world has had.
-emit LeanBarrierLeaseImplThreeWriters "$BLINV" $QWORLD $IMPL "Writers=<- ThreeWriters"
+emit LeanBarrierLeaseImplThreeWriters "$IMPLINV" $QWORLD $IMPL "Writers=<- ThreeWriters"
 emit LeanBarrierLeaseSentinelImplCrash "$BLSENTINV,Inv_AckBoundaryCoherent" $BLSENT $IMPL AckHonest=TRUE \
   MaxCrashes=1 MaxRestarts=1
 emit LeanBarrierLeaseSentinelImplCrash1 "$BLSENTINV,Inv_AckBoundaryCoherent" $BLSENTIMPL1 \
@@ -784,5 +806,103 @@ emit LeanBarrierLeaseSentinelImplCrash1 "$BLSENTINV,Inv_AckBoundaryCoherent" $BL
 ORPHANWORLD="BarrierLease=TRUE HitlOverwritesTrackedOnly=TRUE NPaths=1 MaxGen=3 MaxSeq=8 MaxHitl=0 \
 MaxBarriers=3 MaxCrashes=1 MaxRestarts=0"
 emit LeanBarrierLeaseOrphanDiverges "Inv_QuiescentConverged" $ORPHANWORLD $IMPL
-emit LeanBarrierLeaseOrphanTracked "$BLINV,Inv_QuiescentConverged" $ORPHANWORLD $IMPL OrphanTrack=TRUE
+# Review 2026-09-18, H1b: with Inv_NoDeleteResurrected in IMPLINV this world
+# went red on the gate's first run (21 steps): the sweep tracked a live
+# writer's in-flight upload, the entry outlived the commit that cited it,
+# the uploader's own delete and a crash before its GC left both behind, and
+# the other writer's consume adopted the retired generation and re-cited
+# it.  OrphanResurrects keeps that run; OrphanTracked carries the fix (IMPL)
+# and must hold with every invariant incl. convergence; the probe shows the
+# outlived drop actually fires.
+# H1b's shipped shape.  H1e's tombstone (later the same night) closes H1b's
+# resurrection half on its own — the adopter's baseline is the generation
+# the delete retired, and the tombstone names it — so this world turns the
+# tombstone off too; with it on the world held (the 2026-09-19 gate).  What
+# the arm still carries is the sweep's POLICY (an entry nobody acked does
+# not outlive the citation it was judged against; an adoption made while
+# it stood is provisional), pinned by the code's tests, not by a world.
+emit LeanBarrierLeaseOrphanResurrects "$IMPLINV" $ORPHANWORLD $IMPL OrphanTrack=TRUE OrphanEntryCited=FALSE ManifestTombstones=FALSE
+emit LeanBarrierLeaseOrphanTracked "$IMPLINV,Inv_QuiescentConverged" $ORPHANWORLD $IMPL OrphanTrack=TRUE
 emit LeanProbeOrphanTracked "ProbeOrphanTracked" $ORPHANWORLD $IMPL OrphanTrack=TRUE
+emit LeanProbeOrphanOutlived "ProbeOrphanOutlived" $ORPHANWORLD $IMPL OrphanTrack=TRUE
+# H1b's convergence half needs a FOURTH barrier: the writer that drops the
+# outlived entry queues the tombstone at that barrier and applies it at the
+# next.  At three the leak rule is never reached (the StaleCopy arm held
+# with the state count of the fixed one, 2,717,456 — a vacuous pair).  With
+# the leak rule as shipped the tombstone is superseded by a leaked
+# generation the tree never integrated and the clean copy stays forever;
+# with the fix the trees converge; the probe shows the rule actually fired.
+ORPHANLEAKWORLD="BarrierLease=TRUE HitlOverwritesTrackedOnly=TRUE NPaths=1 MaxGen=3 MaxSeq=10 MaxHitl=0 \
+MaxBarriers=4 MaxCrashes=1 MaxRestarts=0"
+emit LeanBarrierLeaseOrphanStaleCopy "Inv_TreesConverged" $ORPHANLEAKWORLD $IMPL OrphanTrack=TRUE LeakSupersedesNothing=FALSE
+emit LeanBarrierLeaseOrphanConverges "$IMPLINV,Inv_QuiescentConverged,Inv_TreesConverged" $ORPHANLEAKWORLD $IMPL OrphanTrack=TRUE
+# H1f (the same world, one arm off): a superseded deletion that does not
+# restore the merge base leaves a clean copy of the retired generation when
+# the path is deleted again before the install; the probe shows the restore
+# actually fired.
+emit LeanBarrierLeaseSupersedeDropsBase "Inv_TreesConverged" $ORPHANLEAKWORLD $IMPL OrphanTrack=TRUE SupersedeRestoresBase=FALSE
+emit LeanProbeBaseRestored "ProbeBaseRestored" $ORPHANLEAKWORLD $IMPL OrphanTrack=TRUE
+emit LeanProbeLeakApplied "ProbeLeakApplied" $ORPHANLEAKWORLD $IMPL OrphanTrack=TRUE
+
+# ---- review 2026-09-18: C2 (the fence is a count) and H1 (the leak flap) --
+# C2.  Inside the commit section the code reads the cell before the CAS and
+# then every 200 deletes, and the DELETE carries no epoch.  A holder that
+# stalls AFTER its pointer CAS landed (>60 s, the deposal rule) is deposed;
+# the successor's commit cites the same etag the straggler's delete set
+# recognises (its agent rewrote the path with the same bytes, or adopted
+# it), re-verifies it under the lease — where "no GC runs" — and installs;
+# the straggler thaws and its If-Match DELETE lands.  Inv_NoDangling.  The
+# module's GCDelete carried `~Fenced(s)` atomically, so no world could see
+# it; GCFencePerDelete=FALSE is that cadence.  The control is the same
+# world with the fence observed before every delete (the code after the
+# fix: a renew whenever the last cell WRITE is older than the renew
+# spacing, which a deposal's stillness always exceeds), and the probe pins
+# that the thawed straggler reaches its GC and is fenced THERE.
+BLSTRAGGLER="BarrierLease=TRUE AllowStall=TRUE NPaths=1 MaxHitl=0 MaxGen=2 MaxSeq=6 \
+MaxBarriers=2 MaxCrashes=0 MaxRestarts=0 MaxSameBytes=1"
+emit LeanBarrierLeaseStragglerGC "Inv_NoDangling" $BLSTRAGGLER $IMPL GCFencePerDelete=FALSE
+emit LeanBarrierLeaseStragglerGCFenced "$IMPLINV" $BLSTRAGGLER $IMPL
+emit LeanProbeStragglerGCFenced "ProbeFenceAbandoned" $BLSTRAGGLER $IMPL
+# H1.  On a store without a conditional DELETE the collector gives way and
+# the peer's own retired object stays at the key.  The other writer queues
+# the deletion, and its consume finds AN object at the key — the leak —
+# and calls the tombstone superseded (the L-1 rule looked at the key, not
+# at what the delete retired).  Its baseline keeps the path, its merge base
+# does not, so the path is a citation-repair candidate and the next commit
+# RE-CITES the deleted generation; the first writer's delete is outranked,
+# then applies, then leaks again: the two flap forever.  S4 and S6, on the
+# e2e rig's own store.  TombstoneNamesRetired=FALSE is the shipped rule;
+# the control carries the retired generation and applies the tombstone
+# over it; the probe pins that a tombstone is actually applied over a
+# leaked object there.  Four barriers: the delete, the pull-only that
+# queues it, the consume that must apply it, and the one that would
+# re-cite.
+LEAKWORLD="BarrierLease=TRUE HitlOverwritesTrackedOnly=TRUE NPaths=1 MaxGen=2 MaxSeq=8 MaxHitl=0 \
+MaxBarriers=4 MaxCrashes=0 MaxRestarts=0 ConditionalGC=FALSE CollectorOff=TRUE BaselineKeepsUncollected=TRUE"
+# H1's shipped shape: none of the FOUR rules that each close its
+# resurrection half on their own — the retired-etag rule (H1), the leak rule
+# (H1b), the manifest's tombstone (H1e), the restored merge base (H1f).
+# Each later rule subsumed the earlier ones for THIS invariant, so the
+# known-bad world turns them all off.
+emit LeanBarrierLeaseLeakResurrects "Inv_NoDeleteResurrected" $LEAKWORLD $IMPL TombstoneNamesRetired=FALSE LeakSupersedesNothing=FALSE SupersedeRestoresBase=FALSE ManifestTombstones=FALSE
+emit LeanBarrierLeaseLeakHolds "$IMPLINV,Inv_TreesConverged" $LEAKWORLD $IMPL
+# What each rule carries on its own, one arm from a neighbour:
+# - the retired-etag rule ALONE (the other three off) closes the resurrection
+#   half, as the code's no-GET fast path relies on;
+# - the restore ALONE (the other three off) closes the resurrection half too:
+#   with the base honest there is no repair to ride;
+# - neither converges the tree without the LEAK RULE.  The restore alone
+#   (LeakFlaps): the retired generation the collector left supersedes the
+#   deletion at every consume, the base is restored, the next install
+#   queues it again — forever; one arm on (LeakRuleConverges) and the
+#   deletion applies.  The retired-etag rule with the leak rule off
+#   (LeakSkippedGeneration, one arm from LeakHolds): a writer that never
+#   installed the generation the collector left holds a tombstone naming an
+#   OLDER one, so the rule cannot recognise the leak and it supersedes
+#   forever.
+emit LeanBarrierLeaseLeakRetiredOnly "$IMPLINV" $LEAKWORLD $IMPL LeakSupersedesNothing=FALSE SupersedeRestoresBase=FALSE ManifestTombstones=FALSE
+emit LeanBarrierLeaseLeakRestoreOnly "$IMPLINV" $LEAKWORLD $IMPL TombstoneNamesRetired=FALSE LeakSupersedesNothing=FALSE ManifestTombstones=FALSE
+emit LeanBarrierLeaseLeakFlaps "Inv_TreesConverged" $LEAKWORLD $IMPL TombstoneNamesRetired=FALSE LeakSupersedesNothing=FALSE
+emit LeanBarrierLeaseLeakRuleConverges "$IMPLINV,Inv_TreesConverged" $LEAKWORLD $IMPL TombstoneNamesRetired=FALSE
+emit LeanBarrierLeaseLeakSkippedGeneration "Inv_TreesConverged" $LEAKWORLD $IMPL LeakSupersedesNothing=FALSE
+emit LeanProbeTombstoneOverLeak "ProbeTombstoneApplied" $LEAKWORLD $IMPL

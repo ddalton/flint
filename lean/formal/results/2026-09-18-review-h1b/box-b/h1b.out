@@ -1,0 +1,57 @@
+== LeanBarrierLeaseOrphanResurrects 22:52:06
+rc=12
+Error: Invariant Inv_NoDeleteResurrected is violated.
+The depth of the complete state graph search is 22.
+== LeanBarrierLeaseOrphanTracked 22:52:15
+rc=0
+8003267 states generated, 2717456 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 36.
+== LeanProbeOrphanTracked 22:53:31
+rc=12
+Error: Invariant ProbeOrphanTracked is violated.
+The depth of the complete state graph search is 10.
+== LeanProbeOrphanOutlived 22:53:32
+rc=12
+Error: Invariant ProbeOrphanOutlived is violated.
+The depth of the complete state graph search is 13.
+== LeanBarrierLeaseOrphanStaleCopy 22:53:34
+rc=0
+8003267 states generated, 2717456 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 36.
+== LeanBarrierLeaseQueueTombstoneOverHitl 22:54:35
+rc=12
+Error: Invariant Inv_HITLTracked is violated.
+The depth of the complete state graph search is 20.
+== LeanBarrierLeaseLeakResurrects 22:54:37
+rc=0
+274621 states generated, 90457 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 42.
+== LeanBarrierLeaseLeakHolds 22:54:41
+rc=0
+274621 states generated, 90457 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 42.
+== LeanBarrierLeaseQueueHolds 22:54:44
+rc=0
+287479 states generated, 95334 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 33.
+== LeanBarrierLeaseStragglerGCFenced 22:54:48
+rc=0
+984891 states generated, 276442 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 30.
+== LeanBarrierLeaseCollectorOff 22:54:57
+rc=12
+Error: Invariant Inv_NoDeleteResurrected is violated.
+The depth of the complete state graph search is 20.
+== LeanBarrierLeaseImplHolds 22:55:26
+rc=12
+Error: Invariant Inv_NoDeleteResurrected is violated.
+The depth of the complete state graph search is 21.
+== LeanBarrierLeaseInboxSnapshot 22:56:00
+rc=12
+Error: Invariant Inv_NoDeleteResurrected is violated.
+The depth of the complete state graph search is 23.
+== LeanBarrierLeaseImplThreeWriters 22:56:48
+rc=0
+31404048 states generated, 7799621 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 41.
+H1BDONE

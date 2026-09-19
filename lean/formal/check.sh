@@ -33,7 +33,7 @@ mkdir -p states
 PASS=0
 
 # ---- the journal -----------------------------------------------------------
-# This gate is a hundred and seventeen TLC runs and takes the better part
+# This gate is a hundred and thirty-six TLC runs and takes the better part
 # of an hour. On a memory-constrained laptop the OS has killed it three
 # times out of four — at runs 109, 62 and 89 of the sequence, with
 # nothing else of ours running — and each kill cost the whole hour and
@@ -405,6 +405,8 @@ strict_run $M LeanBarrierLeaseImplHolds.cfg "the tranche-6 breadth world (two pa
 # mutations that require this invariant to FAIL were re-run first and all
 # three still find their counterexample.
 strict_run $M LeanBarrierLeaseCollectorOff.cfg "the collector GIVES WAY on a store without a conditional DELETE: nine invariants hold, exhaustively"
+mutation_run $M LeanBarrierLeaseCollectorOffNoTombstone.cfg "H1c/H1d/H1e: a UI write adopted while pending, cited and then knowingly deleted by the writer that cited it (the adopter after a restart, a citer that restarted before its window clear, or plainly another writer), is re-cited by the adopter's repair -- without a tombstone in the document nothing tells it" \
+  "Invariant Inv_NoDeleteResurrected is violated"
 mutation_run $M LeanProbeCollectorLeaked.cfg "probe: the collector actually gave way on a path it would have collected (or the run above proves nothing)" \
   "Invariant ProbeCollectorLeaked is violated"
 # IS THE SNAPSHOT READ SAFE?  `barrier.rs` step 1 reads the cell ONCE and
@@ -427,14 +429,59 @@ mutation_run $M LeanProbeTombstoneApplied.cfg "probe: a queued deletion removes 
 mutation_run $M LeanProbeTombstoneSuperseded.cfg "probe: the fix fires -- a queued deletion is superseded by an object at the key" \
   "Invariant ProbeTombstoneSuperseded is violated"
 
-# FINDING 10 (open in code), as convergence: a pod replaced between its upload
-# and its commit leaves bytes at a cited key that nothing tracks, once no
-# syncer can move. The candidate fix tracks such an object through the inbox.
+# FINDING 10 (shipped 2026-09-16 as untracked.rs), as convergence: a pod
+# replaced between its upload and its commit leaves bytes at a cited key that
+# nothing tracks, once no syncer can move. The sweep tracks such an object
+# through the inbox.
 mutation_run $M LeanBarrierLeaseOrphanDiverges.cfg "FINDING 10: a writer lost between its upload and its commit leaves an untracked upload at a cited key when every syncer is quiet" \
   "Invariant Inv_QuiescentConverged is violated"
-strict_run $M LeanBarrierLeaseOrphanTracked.cfg "finding 10's candidate fix: a live writer tracks the orphan through the inbox, at ANY time (no grace), and every invariant holds"
+# Review 2026-09-18, H1b: the sweep's entry outlived the commit that cited its
+# object and, after the uploader's own delete, re-cited the retired generation
+# through the other writer's consume.  The known-bad run is kept; the fix
+# (the entry carries the citation it was judged against) is in IMPL.
+mutation_run $M LeanBarrierLeaseOrphanResurrects.cfg "H1b as shipped (the tombstone off too -- with it on, H1e closes this route as well): the sweep's entry outlives the citation it was judged against and a published delete is resurrected through it" \
+  "Invariant Inv_NoDeleteResurrected is violated"
+strict_run $M LeanBarrierLeaseOrphanTracked.cfg "finding 10's sweep with H1b's fix: a live writer tracks the orphan through the inbox, at ANY time (no grace), and every invariant holds"
 mutation_run $M LeanProbeOrphanTracked.cfg "probe: the orphan is actually tracked" \
   "Invariant ProbeOrphanTracked is violated"
+mutation_run $M LeanProbeOrphanOutlived.cfg "probe: a sweep entry whose citation moved on is actually dropped" \
+  "Invariant ProbeOrphanOutlived is violated"
+mutation_run $M LeanBarrierLeaseOrphanStaleCopy.cfg "H1b, convergence (four barriers): a leaked generation the tree never integrated supersedes the tombstone and a clean stale copy stays forever" \
+  "Invariant Inv_TreesConverged is violated"
+strict_run $M LeanBarrierLeaseOrphanConverges.cfg "H1b's leak rule: a peer's published delete reaches every live tree, and every IMPL invariant holds (four barriers)"
+mutation_run $M LeanBarrierLeaseSupersedeDropsBase.cfg "H1f (review 2026-09-18): a queued deletion superseded by a re-cite is settled without restoring the merge base; the path is deleted again before the install and the clean copy of the retired generation stays forever" \
+  "Invariant Inv_TreesConverged is violated"
+mutation_run $M LeanProbeBaseRestored.cfg "probe: superseding a deletion actually restores the merge base" \
+  "Invariant ProbeBaseRestored is violated"
+mutation_run $M LeanProbeLeakApplied.cfg "probe: a tombstone is actually applied over a leaked generation" \
+  "Invariant ProbeLeakApplied is violated"
+
+# ---- review 2026-09-18: C2 and H1 ------------------------------------------
+# C2: THE FENCE IS A COUNT, NOT A CLOCK.  The code read the cell before the
+# CAS and then every 200 deletes; the DELETE carries no epoch.  A holder
+# deposed AFTER its CAS landed still deletes, and takes the etag the
+# successor just re-cited (same bytes, or an adoption).  The module fenced
+# every GCDelete atomically, so it could not see it.
+mutation_run $M LeanBarrierLeaseStragglerGC.cfg "C2 (review 2026-09-18): a holder deposed after its CAS landed runs its deletes unfenced and takes an etag the successor's commit has just re-cited -- the citation dangles" \
+  "Invariant Inv_NoDangling is violated"
+strict_run $M LeanBarrierLeaseStragglerGCFenced.cfg "C2's fix: the collector observes the cell before every delete (a renew by time in the code), and the thawed straggler is fenced there"
+mutation_run $M LeanProbeStragglerGCFenced.cfg "probe: the thawed straggler actually reaches its GC and is fenced THERE (or the run above proves nothing)" \
+  "Invariant ProbeFenceAbandoned is violated"
+# H1: COLLECTOR-OFF IS NOT A COST.  On a store without a conditional DELETE
+# the peer's leaked object supersedes its own tombstone and the citation
+# repair re-cites the deleted generation; the two writers flap forever.
+mutation_run $M LeanBarrierLeaseLeakResurrects.cfg "H1 (review 2026-09-18): on a collector-off store a peer's published delete is superseded by its own leaked object and RE-CITED by the other writer's repair -- the delete is resurrected with no write" \
+  "Invariant Inv_NoDeleteResurrected is violated"
+strict_run $M LeanBarrierLeaseLeakHolds.cfg "H1's fix: the tombstone carries the generation the delete retired and applies over the leak; every invariant holds on the code's shape, and the tree converges"
+strict_run $M LeanBarrierLeaseLeakRetiredOnly.cfg "H1 with the leak rule, the tombstone and the restored base off: the retired-etag rule alone closes the resurrection (each later rule subsumed it, so the pair above no longer isolates it)"
+strict_run $M LeanBarrierLeaseLeakRestoreOnly.cfg "H1f's restored base with H1's, H1b's and H1e's rules off: the base being honest, there is no repair for the resurrection to ride -- it closes that half alone"
+mutation_run $M LeanBarrierLeaseLeakFlaps.cfg "H1f's restored base with H1's and H1b's rules off, under the convergence invariant: the retired generation the collector left supersedes the deletion at every consume and the next install queues it again -- the leak flaps and the tree never converges" \
+  "Invariant Inv_TreesConverged is violated"
+strict_run $M LeanBarrierLeaseLeakRuleConverges.cfg "one arm from LeakFlaps: with the leak rule back on the deletion applies over the leak and the tree converges"
+mutation_run $M LeanBarrierLeaseLeakSkippedGeneration.cfg "one arm from LeakHolds (the leak rule off): a writer that never installed the generation the collector left holds a tombstone naming an older one, the retired-etag rule cannot recognise the leak, and it supersedes the deletion forever" \
+  "Invariant Inv_TreesConverged is violated"
+mutation_run $M LeanProbeTombstoneOverLeak.cfg "probe: a queued deletion is actually applied over a leaked object (or the run above proves nothing)" \
+  "Invariant ProbeTombstoneApplied is violated"
 
 # The expected total is ASSERTED, not printed: a hardcoded denominator
 # that drifts below the real run count turns "83/79 green" into a line
@@ -448,7 +495,7 @@ if ! python3 "$(dirname "$0")/coverage.py" --check; then
   exit 1
 fi
 
-EXPECT=117
+EXPECT=136
 echo
 if [ "$PASS" -ne "$EXPECT" ]; then
   echo "lean formal gate: $PASS runs green but $EXPECT were declared — a run was"

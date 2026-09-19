@@ -363,7 +363,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let mut sc = Syncer { store, cfg, state, lease: None, noted_not_regular: Default::default() };
+    let mut sc = Syncer { store, cfg, state, lease: None, cell_written_at: None, noted_not_regular: Default::default() };
 
     // Both probes PUT and DELETE under the prefix. A read-only credential
     // would fail them with a 403 that reads as "this store does not

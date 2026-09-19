@@ -1,0 +1,33 @@
+== LeanSubtreeTakeover 01:31:40
+rc=0
+2204399 states generated, 566405 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 29.
+== LeanEpochOnlyHolds 01:32:20
+rc=0
+333281 states generated, 92863 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 26.
+== LeanBarrierLeaseDeposal 01:32:30
+rc=0
+2341926 states generated, 619637 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 33.
+== LeanBarrierLeaseSameBytesVerified 01:33:24
+rc=0
+8939332 states generated, 2366702 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 37.
+== LeanRemovalHolds 01:36:13
+rc=0
+946735 states generated, 324499 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 21.
+== LeanBarrierLeaseQueueHolds 01:36:39
+rc=0
+286389 states generated, 94858 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 33.
+== LeanBarrierLeaseOrphanTracked 01:36:50
+rc=0
+8005719 states generated, 2718984 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 36.
+== LeanBarrierLeaseStragglerGCFenced 01:41:11
+rc=0
+984891 states generated, 276442 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 30.
+CENSUSSMALLDONE

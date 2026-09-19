@@ -381,3 +381,13 @@ only what none of them names — which means retained pointers have to be
 enumerable, i.e. the generation objects the pointer reaper already keeps
 must become pointer snapshots. Design that before writing the reaper,
 not after.
+
+## Addendum 2026-09-18: one more object beside the chunks
+
+The document gained `tombstones` (review 2026-09-18, H1c–H1e; see the
+pointer design's addendum). In this layout it is a single content-addressed
+object under the chunks prefix, `chunk::TombstoneBody`, written
+unconditionally on every publish whose document has tombstones (like an
+adopted chunk: identical bytes, and the sweep reads age), named by
+`Pointer::tombstones`, and treated by `sweep_chunks` as referenced. An
+unchanged set re-addresses to the object that already exists.

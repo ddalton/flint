@@ -1,0 +1,27 @@
+== LeanBarrierLeaseCollectorOffNoTombstone 23:37:01
+rc=12
+Error: Invariant Inv_NoDeleteResurrected is violated.
+The depth of the complete state graph search is 21.
+== LeanBarrierLeaseCollectorOff 23:37:30
+rc=0
+33982392 states generated, 12447478 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 39.
+== LeanBarrierLeaseImplHolds 23:41:47
+rc=0
+25912345 states generated, 8936778 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 32.
+== LeanBarrierLeaseInboxSnapshot 23:45:07
+rc=0
+28908051 states generated, 9978206 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 35.
+== LeanBarrierLeaseOrphanStaleCopy 23:48:50
+rc=12
+Error: Invariant Inv_TreesConverged is violated.
+The depth of the complete state graph search is 23.
+== LeanBarrierLeaseOrphanConverges 23:49:09
+rc=12
+Error: Invariant Inv_TreesConverged is violated.
+The depth of the complete state graph search is 30.
+UNEXPECTED: LeanBarrierLeaseOrphanConverges should hold
+SEVENDONE bad=1
+stopping before the gate

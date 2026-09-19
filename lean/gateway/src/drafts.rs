@@ -464,6 +464,7 @@ impl Workspace {
             // offers one, else nothing — consume then verifies against
             // nothing and records its own hash for the repair.
             crc64_b64: published.crc64_b64.clone(),
+            cited: None,
         };
         self.track(entry).await?;
 
