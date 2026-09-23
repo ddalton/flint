@@ -6753,3 +6753,101 @@ async fn an_open_door_forwards_the_push_to_the_serving_loop() {
     );
     assert!(loop_task.await.expect("join"), "the loop really received it");
 }
+
+// ── review 2026-09-23: the residue rules against their own contracts ──
+
+/// Claim the lease on a store another rig holds (after `backdate_epoch`)
+/// and restore, returning the restore's verdict instead of panicking on
+/// it — the verdict is what these tests are about.
+async fn take_over_and_restore(heir: &mut Rig) -> Result<(), ForgeError> {
+    for _ in 0..16 {
+        match lease::claim_step(&mut heir.sc).await.expect("claim") {
+            lease::ClaimOutcome::Claimed(_) => break,
+            lease::ClaimOutcome::Waiting { .. } => continue,
+        }
+    }
+    assert!(heir.sc.lease().is_ok(), "the heir must hold the lease");
+    restore::restore(&mut heir.sc).await.map(|_| ())
+}
+
+/// Two pushes judged in ONE batch, the second of which may or may not
+/// have had its pack recorded by `pre-receive`. Returns the two packs'
+/// names and the batch's reports.
+async fn d5_mixed_batch(
+    rig: &mut Rig,
+    second_recorded: bool,
+) -> (String, String, String, Vec<batch::PushReport>) {
+    let before: std::collections::BTreeSet<String> =
+        rig.sc.git.local_packs().expect("packs").into_iter().collect();
+    let a = rig.stage_commit(None, &[("a.txt", "alpha\n")], "a").await;
+    let mid: std::collections::BTreeSet<String> =
+        rig.sc.git.local_packs().expect("packs").into_iter().collect();
+    let b = rig.stage_commit(None, &[("b.txt", "bravo\n")], "b").await;
+    let after: std::collections::BTreeSet<String> =
+        rig.sc.git.local_packs().expect("packs").into_iter().collect();
+    let pa: Vec<&String> = mid.difference(&before).collect();
+    let pb: Vec<&String> = after.difference(&mid).collect();
+    // THE PREMISE: each push brought exactly one pack of its own.
+    assert_eq!((pa.len(), pb.len()), (1, 1), "setup: one pack per push, got {pa:?} {pb:?}");
+    let (pa, pb) = (pa[0].clone(), pb[0].clone());
+
+    let mut p1 = push(1, vec![RefUpdate { name: "refs/heads/a".into(), old_oid: zero(), new_oid: a }]);
+    p1.packs = vec![pa.clone()];
+    let mut p2 = push(2, vec![RefUpdate { name: "refs/heads/b".into(), old_oid: zero(), new_oid: b.clone() }]);
+    if second_recorded {
+        p2.packs = vec![pb.clone()];
+    }
+    let reports = rig.run(vec![p1, p2]).await;
+    (pa, pb, b, reports)
+}
+
+/// DIRECTION 5 — an empty record is "no information", never "no pack".
+///
+/// `pre-receive` records a push's packs best-effort: every failure to
+/// write or read the record leaves it EMPTY, and `PushRequest::packs`
+/// and `record_push_packs` both say the batch must read that as "no
+/// information" and fall back to naming the directory. The fallback
+/// was taken for the whole BATCH, though, and only when NO push had
+/// recorded — so an unrecorded push judged beside a recorded one had
+/// its pack neither named nor uploaded, while its ref landed and it was
+/// told ok. The next restore then refuses the repository.
+#[tokio::test]
+async fn an_unrecorded_push_beside_a_recorded_one_is_still_named_and_uploaded() {
+    let store = Arc::new(MemoryStore::new());
+    let mut rig = Rig::with_store(store.clone(), "a").await;
+    assert!(rig.sc.cfg.name_accepted_set, "the shipped default is under test");
+    rig.start().await;
+
+    let (_pa, pb, b, reports) = d5_mixed_batch(&mut rig, false).await;
+    assert!(is_ok(&reports[0].results[0]), "push 1: {:?}", reports[0].results[0]);
+    assert!(is_ok(&reports[1].results[0]), "push 2 is TOLD OK: {:?}", reports[1].results[0]);
+
+    let snap = rig.sc.cell().unwrap().snap.clone();
+    assert_eq!(snap.refs.get("refs/heads/b"), Some(&b), "and its ref landed");
+    assert!(snap.packs.contains(&pb), "so its pack must be named: {:?}", snap.packs);
+    rig.store.head(&rig.sc.cfg.pack_key(&pb)).await.expect("and in the bucket");
+
+    // What the client was promised: a successor can serve it.
+    let mut heir = Rig::with_store(store.clone(), "b").await;
+    store.backdate_epoch(&rig.sc.cfg.epoch_key(), 10_000);
+    take_over_and_restore(&mut heir).await.expect("an acknowledged push is restorable");
+    assert_eq!(heir.sc.git.refs().await.unwrap().get("refs/heads/b"), Some(&b));
+}
+
+/// The control for the test above: the SAME batch with the second push
+/// recorded is named, uploaded and restorable — so a failure above is
+/// the empty record and not the two-push batch or the rig.
+#[tokio::test]
+async fn a_batch_whose_pushes_all_recorded_names_both_packs() {
+    let store = Arc::new(MemoryStore::new());
+    let mut rig = Rig::with_store(store.clone(), "a").await;
+    rig.start().await;
+    let (pa, pb, b, reports) = d5_mixed_batch(&mut rig, true).await;
+    assert!(reports.iter().all(|r| is_ok(&r.results[0])), "{reports:?}");
+    let snap = rig.sc.cell().unwrap().snap.clone();
+    assert!(snap.packs.contains(&pa) && snap.packs.contains(&pb), "{:?}", snap.packs);
+    let mut heir = Rig::with_store(store.clone(), "b").await;
+    store.backdate_epoch(&rig.sc.cfg.epoch_key(), 10_000);
+    take_over_and_restore(&mut heir).await.expect("restorable");
+    assert_eq!(heir.sc.git.refs().await.unwrap().get("refs/heads/b"), Some(&b));
+}

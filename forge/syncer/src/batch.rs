@@ -393,9 +393,27 @@ pub async fn run_batch(
     // recorded a pack, the hook told us nothing (an older hook, no
     // quarantine) and we name the directory as before: naming too much
     // costs bytes, naming too little loses objects.
-    let recorded: BTreeSet<&String> =
-        pushes.iter().filter(|p| accepted_ids.contains(&p.id)).flat_map(|p| p.packs.iter()).collect();
-    let use_accepted = sc.cfg.name_accepted_set && !recorded.is_empty();
+    //
+    // And the fallback is PER PUSH, not per batch. An empty record is
+    // "no information" for THAT push — its record write or read failed
+    // (both are best effort and swallowed), or it moved a ref onto
+    // objects it did not bring — so ONE such push beside a recorded one
+    // is enough to name the directory. Deciding it for the batch as a
+    // whole named only the recorded packs, and the unrecorded push's
+    // pack was neither named nor uploaded while its ref landed and it
+    // was told ok (review 2026-09-23; pinned by
+    // `an_unrecorded_push_beside_a_recorded_one_is_still_named_and_uploaded`).
+    // A push that only deletes needs no objects, and one whose every
+    // new tip the server built has them in `server_pack`.
+    let accepted_pushes = || pushes.iter().filter(|p| accepted_ids.contains(&p.id));
+    let recorded: BTreeSet<&String> = accepted_pushes().flat_map(|p| p.packs.iter()).collect();
+    let unrecorded = accepted_pushes().any(|p| {
+        p.packs.is_empty()
+            && p.commands
+                .iter()
+                .any(|c| !is_zero(&c.new_oid) && !p.server_created.contains(&c.new_oid))
+    });
+    let use_accepted = sc.cfg.name_accepted_set && !recorded.is_empty() && !unrecorded;
     let named_set: Vec<String> = if use_accepted {
         let on_disk: BTreeSet<&String> = local_packs.iter().collect();
         let mut keep: BTreeSet<String> = cell.snap.packs.iter().cloned().collect();
