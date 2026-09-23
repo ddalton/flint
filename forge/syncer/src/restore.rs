@@ -546,6 +546,18 @@ async fn reclaim_inner(sc: &mut Syncer) -> ForgeResult<ReclaimReport> {
         }
     }
 
+    // One renewal before the write, exactly as `fold::commit` takes
+    // before its CAS and for the same reason. This runs straight after
+    // the restore, and a holder deposed while its restore ran may have
+    // READ ITS SUCCESSOR'S ROTATED SNAPSHOT (a claim of a released cell
+    // does not rotate, so its restore loads the bucket) — its If-Match
+    // then matches and the snapshot CAS alone lets it land after the
+    // successor restored, fencing the successor with its predecessor's
+    // write. The renewal is the check against the CELL
+    // (`Inv_NoStragglerLandAfterRestore`; review 2026-09-23, pinned by
+    // `a_deposed_holders_reclaim_is_refused_by_its_renewal`).
+    sc.check_fence()?;
+    super::lease::renew(sc).await?;
     let epoch = sc.lease()?.epoch;
     let writer = sc.holder_id.clone();
     let mut next = cell.snap.clone();

@@ -6269,7 +6269,17 @@ async fn d4_rig(reclaim: bool) -> (Rig, restore::ReclaimReport, Vec<String>) {
     let mut rig = Rig::new().await;
     rig.sc.cfg.reclaim_at_rest = reclaim;
     rig.start().await;
+    let all = d4_shape(&mut rig).await;
+    let report = restore::reclaim_at_rest(&mut rig.sc, restore::AtRest::before_serving())
+        .await
+        .expect("reclaim");
+    (rig, report, all)
+}
 
+/// The collector's premise, built on a started rig: the snapshot names
+/// three uploaded packs, two of them wholly covered by the third.
+/// Returns the three names.
+async fn d4_shape(rig: &mut Rig) -> Vec<String> {
     let c1 = rig.push_commit("refs/heads/main", None, "c1").await;
     let c2 = rig.push_commit("refs/heads/main", Some(&c1), "c2").await;
 
@@ -6357,10 +6367,7 @@ async fn d4_rig(reclaim: bool) -> (Rig, restore::ReclaimReport, Vec<String>) {
         );
     }
 
-    let report = restore::reclaim_at_rest(&mut rig.sc, restore::AtRest::before_serving())
-        .await
-        .expect("reclaim");
-    (rig, report, all)
+    all
 }
 
 #[tokio::test]
@@ -6850,4 +6857,66 @@ async fn a_batch_whose_pushes_all_recorded_names_both_packs() {
     store.backdate_epoch(&rig.sc.cfg.epoch_key(), 10_000);
     take_over_and_restore(&mut heir).await.expect("restorable");
     assert_eq!(heir.sc.git.refs().await.unwrap().get("refs/heads/b"), Some(&b));
+}
+
+/// DIRECTION 4 — the collector's CAS renews the lease first, as the
+/// fold's does (`a_deposed_holders_fold_commit_is_refused_by_its_renewal`).
+///
+/// The hazard is the one `fold::commit` documents: a holder deposed
+/// while its restore ran reads the SUCCESSOR's rotated snapshot, so its
+/// If-Match matches and its CAS lands after the successor restored —
+/// the successor is then fenced by its own predecessor. The reclaim
+/// runs at exactly that moment, straight after the restore.
+///
+/// The path, as the code allows it: an incarnation claims a CLEANLY
+/// RELEASED cell, which is the one claim that does not rotate, so it
+/// has no snapshot in hand and its restore reads the bucket. Its
+/// restore stalls past the takeover window; an heir claims (and
+/// rotates); the straggler's restore then loads the HEIR's snapshot.
+#[tokio::test]
+async fn a_deposed_holders_reclaim_is_refused_by_its_renewal() {
+    let store = Arc::new(MemoryStore::new());
+    let mut first = Rig::with_store(store.clone(), "a").await;
+    first.sc.cfg.reclaim_at_rest = false;
+    first.start().await;
+    let all = d4_shape(&mut first).await;
+    lease::release(&mut first.sc).await.expect("a clean release");
+
+    // The straggler claims the released cell: no rotation, no cell.
+    let mut straggler = Rig::with_store(store.clone(), "s").await;
+    straggler.sc.cfg.reclaim_at_rest = true;
+    for _ in 0..16 {
+        match lease::claim_step(&mut straggler.sc).await.expect("claim") {
+            lease::ClaimOutcome::Claimed(_) => break,
+            lease::ClaimOutcome::Waiting { .. } => continue,
+        }
+    }
+    assert!(straggler.sc.cell.is_none(), "premise: a released claim does not rotate or load");
+
+    // Its restore stalls; an heir takes over, rotates and restores with
+    // its own reclaim OFF, so what it serves is exactly its rotation.
+    let mut heir = Rig::with_store(store.clone(), "b").await;
+    heir.sc.cfg.reclaim_at_rest = false;
+    store.backdate_epoch(&straggler.sc.cfg.epoch_key(), 10_000);
+    heir.start().await;
+    assert!(heir.sc.lease().unwrap().epoch > straggler.sc.lease().unwrap().epoch);
+    let heirs = heir.sc.cell().unwrap().etag.clone();
+
+    // The straggler's restore now reads the heir's rotated snapshot.
+    restore::restore(&mut straggler.sc).await.expect("the straggler's restore reads the bucket");
+    assert_eq!(straggler.sc.cell().unwrap().etag, heirs, "premise: the straggler's belief IS the heir's etag");
+
+    let got = restore::reclaim_at_rest(&mut straggler.sc, restore::AtRest::before_serving()).await;
+    let now = snapshot::load(store.as_ref(), &straggler.sc.cfg).await.unwrap();
+    assert_eq!(now.etag, heirs, "no straggler CAS landed over the heir (reclaim returned {got:?})");
+    assert_eq!(now.snap.packs.len(), all.len(), "the heir's snapshot still names all three");
+    assert!(matches!(got, Err(ForgeError::Fenced(_))), "deposed at renew is the fence, got {got:?}");
+    assert!(straggler.sc.fenced().is_some());
+
+    // The control: the heir, which holds the lease, reclaims.
+    heir.sc.cfg.reclaim_at_rest = true;
+    let report = restore::reclaim_at_rest(&mut heir.sc, restore::AtRest::before_serving())
+        .await
+        .expect("the holder's reclaim lands");
+    assert_eq!(report.dropped, 2, "the holder collects both covered packs");
 }
