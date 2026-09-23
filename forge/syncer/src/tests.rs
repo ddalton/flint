@@ -6920,3 +6920,70 @@ async fn a_deposed_holders_reclaim_is_refused_by_its_renewal() {
         .expect("the holder's reclaim lands");
     assert_eq!(report.dropped, 2, "the holder collects both covered packs");
 }
+
+/// LFS — an upload URL grants the bytes its oid names, once.
+///
+/// The key is `lfs/objects/<sha256>`, so the NAME claims the content;
+/// the presigned PUT is the only write that reaches it, and it is a
+/// bearer grant for an hour. Unbound, whoever holds it — a buggy
+/// client, a pusher, anyone the URL leaks to — may put OTHER bytes of
+/// the same size there (`verify` checks only the size), or overwrite a
+/// good object later, and the batch API's dedupe then serves those
+/// bytes to every client and never offers anyone a URL to repair them
+/// (review 2026-09-23).
+///
+/// Played against `redeem_presigned_put`, which enforces what S3 does
+/// and nothing more: the holder presents the headers the URL SIGNED
+/// (or is refused), and omits every other one.
+#[tokio::test]
+async fn an_lfs_upload_url_grants_only_the_bytes_its_oid_names_and_only_once() {
+    use sha2::Digest;
+    let rig = Rig::new().await;
+    let good = b"the checkpoint the pointer names\n".to_vec();
+    let oid: String = sha2::Sha256::digest(&good).iter().map(|b| format!("{b:02x}")).collect();
+    let key = super::lfs::object_key(&rig.sc.cfg.prefix, &oid);
+    let mut evil = good.clone();
+    evil[0] ^= 1;
+    let none = std::collections::BTreeMap::new();
+
+    let res = super::lfs::batch(
+        rig.store.as_ref(),
+        &rig.sc.cfg.prefix,
+        &batch_req("upload", &[(&oid, good.len() as u64)]),
+        600,
+    )
+    .await
+    .expect("batch");
+    let up = res.objects[0].actions["upload"].clone();
+
+    // The substitution: other bytes, the right size, presenting only
+    // what the signature forces.
+    let signed_only = &up.header;
+    let sub = rig.store.redeem_presigned_put(&up.href, signed_only, evil.clone().into());
+    assert!(sub.is_err(), "other bytes under a content-named key must be refused, not stored");
+    assert!(rig.store.head(&key).await.is_err(), "and nothing landed");
+    // …and with nothing presented at all.
+    assert!(
+        rig.store.redeem_presigned_put(&up.href, &none, evil.clone().into()).is_err(),
+        "a holder that sends no headers must be refused too"
+    );
+
+    // The honest client presents the action's headers verbatim.
+    rig.store
+        .redeem_presigned_put(&up.href, &up.header, good.clone().into())
+        .expect("the bytes the oid names land");
+    super::lfs::verify(
+        rig.store.as_ref(),
+        &rig.sc.cfg.prefix,
+        &super::lfs::ObjectSpec { oid: oid.clone(), size: good.len() as u64 },
+    )
+    .await
+    .expect("and verify");
+
+    // The overwrite: the same URL, later, other bytes — with or without
+    // the headers.
+    assert!(rig.store.redeem_presigned_put(&up.href, &none, evil.clone().into()).is_err());
+    assert!(rig.store.redeem_presigned_put(&up.href, &up.header, evil.clone().into()).is_err());
+    let (_, stored) = rig.store.get_whole(&key, None).await.expect("still there");
+    assert_eq!(&stored[..], &good[..], "a good object is never overwritten through its upload URL");
+}

@@ -606,6 +606,31 @@ pub enum StoreError {
 
 pub type StoreResult<T> = Result<T, StoreError>;
 
+/// A presigned PUT: the URL, and the headers its signature covers —
+/// every one of which the holder must present exactly, or the store
+/// refuses the request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresignedPut {
+    pub url: String,
+    pub headers: std::collections::BTreeMap<String, String>,
+}
+
+/// Standard base64 with padding — the encoding S3's `x-amz-checksum-*`
+/// headers carry. A dozen lines rather than a dependency: the only
+/// inputs are digests.
+pub fn base64_std(bytes: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for c in bytes.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        out.push(A[(n >> 18) as usize & 63] as char);
+        out.push(A[(n >> 12) as usize & 63] as char);
+        out.push(if c.len() > 1 { A[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if c.len() > 2 { A[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
 // ── the epoch surface (A8; the step-7 state machine drives these) ────
 
 /// Observed epoch state (read side — takeover judgment input).
@@ -891,12 +916,22 @@ pub trait ObjectStore: Send + Sync {
     /// straight to the object store and never crosses the repository
     /// server's network interface.
     ///
-    /// **The URL carries no content check.** Whoever holds it may put
-    /// anything at that key until it expires, so the caller must issue
-    /// it only for a key whose NAME already constrains the content —
-    /// a content-addressed one — and must verify after the fact.
-    async fn presign_put(&self, key: &str, ttl_secs: u64) -> StoreResult<String> {
-        let _ = (key, ttl_secs);
+    /// **The URL grants exactly one body, once.** It is issued only for
+    /// a content-addressed key, and the signature covers the body's
+    /// SHA-256 (`x-amz-checksum-sha256`, so the store refuses any other
+    /// bytes) and `If-None-Match: *` (so it refuses a second write).
+    /// A header the URL does not sign binds nothing — the holder leaves
+    /// it out — which is why both are SIGNED and returned in
+    /// [`PresignedPut::headers`] for the caller to hand to the client.
+    /// Without them the URL was a bearer grant to put anything at that
+    /// key for its whole lifetime (review 2026-09-23).
+    async fn presign_put(
+        &self,
+        key: &str,
+        ttl_secs: u64,
+        sha256: &[u8; 32],
+    ) -> StoreResult<PresignedPut> {
+        let _ = (key, ttl_secs, sha256);
         Err(StoreError::Other("this backend cannot presign a URL".into()))
     }
 

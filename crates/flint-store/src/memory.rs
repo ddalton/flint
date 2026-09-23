@@ -482,6 +482,60 @@ impl MemoryStore {
         m
     }
 
+    /// Test surface: REDEEM a URL from [`ObjectStore::presign_put`] the
+    /// way S3 does, so a test can play the client — or the attacker —
+    /// who holds it.
+    ///
+    /// Without this the double's presigned URL was a string nothing
+    /// ever used, and "the URL grants only the bytes it was issued for"
+    /// could not be asked of it at all. What S3 enforces, and so what
+    /// this enforces (and nothing more):
+    ///
+    /// - every header the URL SIGNED must be presented, with the signed
+    ///   value, or the signature does not match (403). An unsigned
+    ///   header binds nothing: the holder simply leaves it out.
+    /// - a presented `x-amz-checksum-sha256` must be the base64 SHA-256
+    ///   of the body (400 BadDigest).
+    /// - a presented `If-None-Match: *` refuses a key that exists (412).
+    ///
+    /// Header names are compared case-insensitively, as HTTP does.
+    pub fn redeem_presigned_put(
+        &self,
+        url: &str,
+        headers: &BTreeMap<String, String>,
+        body: Bytes,
+    ) -> StoreResult<ObjectMeta> {
+        let rest = url
+            .strip_prefix("memory://presigned-put/")
+            .ok_or_else(|| StoreError::Other(format!("not a memory presigned PUT: {url}")))?;
+        let (key, query) = rest.split_once('?').unwrap_or((rest, ""));
+        let presented: BTreeMap<String, &String> =
+            headers.iter().map(|(k, v)| (k.to_ascii_lowercase(), v)).collect();
+        for param in query.split('&') {
+            if let Some((name, want)) = param.split_once('=').and_then(|(k, v)| Some((k.strip_prefix("h.")?, v))) {
+                if presented.get(name).map(|v| v.as_str()) != Some(want) {
+                    return Err(StoreError::Auth(format!(
+                        "SignatureDoesNotMatch: signed header {name} not presented as signed"
+                    )));
+                }
+            }
+        }
+        if let Some(sum) = presented.get("x-amz-checksum-sha256") {
+            let actual = crate::base64_std(&Sha256::digest(&body));
+            if **sum != actual {
+                return Err(StoreError::ChecksumMismatch(format!(
+                    "BadDigest: {key}: x-amz-checksum-sha256 {sum} but the body hashes to {actual}"
+                )));
+            }
+        }
+        if presented.get("if-none-match").map(|v| v.as_str()) == Some("*")
+            && self.inner.lock().unwrap().current(key).is_some()
+        {
+            return Err(StoreError::PreconditionFailed(format!("{key} exists")));
+        }
+        Ok(self.raw_put(key, body, Vec::new()))
+    }
+
     /// Test surface: the NONCURRENT-VERSION LIFECYCLE BACKSTOP (D8),
     /// modelled as an explicit method because it is a timer in reality
     /// and an untestable one if left implicit.
@@ -867,11 +921,27 @@ impl ObjectStore for MemoryStore {
 
     /// A stand-in URL for a write. Unlike the read side it does NOT
     /// require the object to exist — that is the whole point of an
-    /// upload — so what a test can assert is the key, and that an
-    /// object already present was not offered one.
-    async fn presign_put(&self, key: &str, ttl_secs: u64) -> StoreResult<String> {
+    /// upload. The headers it binds are written INTO the URL as `h.`
+    /// parameters, which is how `redeem_presigned_put` plays S3's
+    /// signature: a signed header must be presented as signed.
+    async fn presign_put(
+        &self,
+        key: &str,
+        ttl_secs: u64,
+        sha256: &[u8; 32],
+    ) -> StoreResult<PresignedPut> {
         self.bump("presign_put");
-        Ok(format!("memory://presigned-put/{key}?ttl={ttl_secs}"))
+        let headers: BTreeMap<String, String> = [
+            ("x-amz-checksum-sha256".to_string(), crate::base64_std(sha256)),
+            ("if-none-match".to_string(), "*".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let mut url = format!("memory://presigned-put/{key}?ttl={ttl_secs}");
+        for (k, v) in &headers {
+            url.push_str(&format!("&h.{k}={v}"));
+        }
+        Ok(PresignedPut { url, headers })
     }
 
     async fn get_whole(

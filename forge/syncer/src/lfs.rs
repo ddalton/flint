@@ -129,6 +129,16 @@ pub fn valid_oid(oid: &str) -> bool {
     oid.len() == 64 && oid.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// The 32 bytes a [`valid_oid`] spells. Called only after that check,
+/// so every pair is two hex digits.
+fn oid_bytes(oid: &str) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&oid[2 * i..2 * i + 2], 16).expect("a valid oid is hex");
+    }
+    out
+}
+
 fn refuse(oid: &str, size: u64, code: u16, message: impl Into<String>) -> ObjectResponse {
     ObjectResponse {
         oid: oid.to_string(),
@@ -212,11 +222,18 @@ pub async fn batch(
                 // makes LFS cheap — a rebased branch re-pushing the
                 // same checkpoint uploads nothing.
                 Some(_) => {}
-                None => match store.presign_put(&key, ttl_secs).await {
-                    Ok(href) => {
+                // The URL grants THESE bytes, ONCE: its signature covers
+                // the oid as `x-amz-checksum-sha256` and `If-None-Match:
+                // *`, and git-lfs sends an action's `header` map with the
+                // PUT. Unbound, it let its holder put any bytes of the
+                // right size here, or overwrite a good object, for an
+                // hour — and the dedupe above then served them to
+                // everyone (review 2026-09-23).
+                None => match store.presign_put(&key, ttl_secs, &oid_bytes(&spec.oid)).await {
+                    Ok(signed) => {
                         actions.insert(
                             "upload".to_string(),
-                            Action { href, header: BTreeMap::new(), expires_in: ttl_secs },
+                            Action { href: signed.url, header: signed.headers, expires_in: ttl_secs },
                         );
                         // `verify` turns "the client says it uploaded"
                         // into "the server HEADed it". Without it a

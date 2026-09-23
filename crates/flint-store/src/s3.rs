@@ -445,12 +445,39 @@ mod with_credentials_tests {
         // A name, not an IP literal (see `by_name`); nothing is sent.
         let url = "http://minio.test:9000";
         let store = S3Store::with_credentials("bkt", url, REGION, AK, "secret").unwrap();
-        let signed = store.presign_put("dir/obj", 60).await.unwrap();
+        let signed = store.presign_put("dir/obj", 60, &[7; 32]).await.unwrap().url;
         assert!(signed.starts_with(&format!("{url}/bkt/dir/obj?")), "path-style on the endpoint: {signed}");
         assert!(
             signed.contains(&format!("X-Amz-Credential={AK}%2F")) && signed.contains(&format!("%2F{REGION}%2Fs3%2Faws4_request")),
             "the explicit key and region: {signed}"
         );
+    }
+
+    /// An LFS upload URL binds the content its key names, and the key
+    /// itself: the SIGNATURE covers `x-amz-checksum-sha256` (S3 then
+    /// refuses any body that does not hash to it) and `if-none-match`
+    /// (S3 then refuses a second write). An unsigned header binds
+    /// nothing — the holder leaves it out. Nothing is sent.
+    #[tokio::test]
+    async fn a_presigned_put_signs_its_content_checksum_and_create_only() {
+        let url = "http://minio.test:9000";
+        let store = S3Store::with_credentials("bkt", url, REGION, AK, "secret").unwrap();
+        let got = store.presign_put("dir/obj", 60, &[7; 32]).await.unwrap();
+        let signed = got.url;
+        let list = signed
+            .split(['?', '&'])
+            .find_map(|p| p.strip_prefix("X-Amz-SignedHeaders="))
+            .unwrap_or("")
+            .replace("%3B", ";");
+        let names: Vec<&str> = list.split(';').collect();
+        assert!(names.contains(&"x-amz-checksum-sha256"), "the checksum is signed: {names:?}");
+        assert!(names.contains(&"if-none-match"), "create-only is signed: {names:?}");
+        // And the caller is handed exactly what to send.
+        assert_eq!(
+            got.headers.get("x-amz-checksum-sha256").map(String::as_str),
+            Some(crate::base64_std(&[7; 32]).as_str())
+        );
+        assert_eq!(got.headers.get("if-none-match").map(String::as_str), Some("*"));
     }
 
     #[test]
@@ -903,20 +930,35 @@ impl ObjectStore for S3Store {
         Ok(req.uri().to_string())
     }
 
-    async fn presign_put(&self, key: &str, ttl_secs: u64) -> StoreResult<String> {
+    async fn presign_put(
+        &self,
+        key: &str,
+        ttl_secs: u64,
+        sha256: &[u8; 32],
+    ) -> StoreResult<PresignedPut> {
         let cfg = aws_sdk_s3::presigning::PresigningConfig::expires_in(
             std::time::Duration::from_secs(ttl_secs),
         )
         .map_err(|e| StoreError::Other(format!("presign config: {e}")))?;
+        // Both SIGNED, so the holder must send them: S3 then refuses a
+        // body that does not hash to the key's name, and a second write
+        // to a key that exists (the trait's doc says why).
         let req = self
             .presign_client
             .put_object()
             .bucket(&self.bucket)
             .key(key)
+            .checksum_sha256(crate::base64_std(sha256))
+            .if_none_match("*")
             .presigned(cfg)
             .await
             .map_err(|e| map_err("presign_put", e))?;
-        Ok(req.uri().to_string())
+        let headers = req
+            .headers()
+            .filter(|(k, _)| !k.eq_ignore_ascii_case("host"))
+            .map(|(k, v)| (k.to_ascii_lowercase(), v.to_string()))
+            .collect();
+        Ok(PresignedPut { url: req.uri().to_string(), headers })
     }
 
     async fn get_whole(

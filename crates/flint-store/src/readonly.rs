@@ -36,7 +36,7 @@ use bytes::Bytes;
 
 use crate::{
     gate, BootstrapReport, ComposeSpec, EpochLease, EpochState, GenerationStamps, LifecycleView,
-    ListedObject, ListedVersion, ObjectMeta, ObjectStore, PendingUpload, PutCondition,
+    ListedObject, ListedVersion, ObjectMeta, ObjectStore, PendingUpload, PresignedPut, PutCondition,
     RequestCounts, RetentionOutcome, StoreError, StoreResult,
 };
 
@@ -100,7 +100,12 @@ impl<S: ObjectStore + ?Sized> ObjectStore for ReadOnly<S> {
         refuse("delete_version", key)
     }
 
-    async fn presign_put(&self, key: &str, _ttl_secs: u64) -> StoreResult<String> {
+    async fn presign_put(
+        &self,
+        key: &str,
+        _ttl_secs: u64,
+        _sha256: &[u8; 32],
+    ) -> StoreResult<PresignedPut> {
         refuse("presign_put", key)
     }
 
@@ -421,9 +426,14 @@ mod tests {
             self.saw("presign_get");
             self.inner.presign_get(key, ttl_secs).await
         }
-        async fn presign_put(&self, key: &str, ttl_secs: u64) -> StoreResult<String> {
+        async fn presign_put(
+            &self,
+            key: &str,
+            ttl_secs: u64,
+            sha256: &[u8; 32],
+        ) -> StoreResult<PresignedPut> {
             self.saw("presign_put");
-            self.inner.presign_put(key, ttl_secs).await
+            self.inner.presign_put(key, ttl_secs, sha256).await
         }
         async fn lifecycle_rules(&self) -> StoreResult<Vec<LifecycleView>> {
             self.saw("lifecycle_rules");
@@ -562,7 +572,7 @@ mod tests {
         expect_refused("delete", ro.delete("p/k").await);
         expect_refused("delete_if_match", ro.delete_if_match("p/k", &v2.etag).await);
         expect_refused("delete_version", ro.delete_version("p/k", v1.version_id.as_deref().unwrap()).await);
-        expect_refused("presign_put", ro.presign_put("p/k", 60).await.map(drop));
+        expect_refused("presign_put", ro.presign_put("p/k", 60, &[0; 32]).await.map(drop));
         expect_refused("ensure_noncurrent_retention", ro.ensure_noncurrent_retention("p/", 30).await.map(drop));
         expect_refused("abort_upload", ro.abort_upload("p/mpu", &upload_id).await);
         expect_refused("bootstrap", ro.bootstrap("p/").await.map(drop));
