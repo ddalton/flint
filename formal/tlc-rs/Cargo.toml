@@ -1,0 +1,19 @@
+[package]
+name = "tlc-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "An explicit-state model checker for a subset of TLA+, measured against TLC"
+
+# Standalone: not a member of any flint workspace.
+[workspace]
+
+[dependencies]
+mimalloc = { version = "0.1", default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
