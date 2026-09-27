@@ -1,0 +1,27 @@
+# LFS presigned PUT against live servers, 2026-09-27 (crates/flint-store/tests/presign_live.rs)
+# MinIO RELEASE.2026-09-22T19-25-18Z (chainguard/minio@sha256:bd014394a808...; quay.io and Docker Hub minio images refuse pulls, dl.min.io answers 410)
+# RustFS rustfs/rustfs@sha256:8cc9801755448b71... (2026-09-16)
+
+===== MinIO (fixed presign)
+signed headers: if-none-match,x-amz-checksum-sha256
+LEG honest upload lands: HTTP 200 (as required) 
+LEG second redemption refused: HTTP 412 (as required) <?xml version="1.0" encoding="UTF-8"?> <Error><Code>PreconditionFailed</Code><Message>At least one of the pre-conditions you specified did not hol
+LEG wrong bytes refused: HTTP 400 (as required) <?xml version="1.0" encoding="UTF-8"?> <Error><Code>XAmzContentChecksumMismatch</Code><Message>The provided &#39;x-amz-checksum&#39; header does not mat
+LEG checksum header dropped refused: HTTP 400 (as required) <?xml version="1.0" encoding="UTF-8"?> <Error><Code>AccessDenied</Code><Message>There were headers present in the request which were not sig
+LEG if-none-match dropped refused: HTTP 400 (as required) <?xml version="1.0" encoding="UTF-8"?> <Error><Code>AccessDenied</Code><Message>There were headers present in the request which were not signe
+STORED wrong-bytes: no
+STORED no-checksum: no
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.64s
+
+===== RustFS (fixed presign)
+signed headers: if-none-match,x-amz-checksum-sha256
+LEG honest upload lands: HTTP 200 (as required) 
+LEG second redemption refused: HTTP 412 (as required) <?xml version="1.0" encoding="UTF-8"?><Error><Code>PreconditionFailed</Code><Message>At least one of the pre-conditions you specified did not hold
+LEG wrong bytes refused: HTTP 400 (as required) <?xml version="1.0" encoding="UTF-8"?><Error><Code>BadDigest</Code><Message>The Content-Md5 you specified did not match what we received.</Message></Err
+LEG checksum header dropped refused: HTTP 403 (as required) <?xml version="1.0" encoding="UTF-8"?><Error><Code>SignatureDoesNotMatch</Code><Message>missing signed header: x-amz-checksum-sha256</Messag
+LEG if-none-match dropped refused: HTTP 403 (as required) <?xml version="1.0" encoding="UTF-8"?><Error><Code>SignatureDoesNotMatch</Code><Message>missing signed header: if-none-match</Message></Error>
+STORED wrong-bytes: no
+STORED no-checksum: no
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.14s
+
+# CONTROL: the same test with the pre-fix presign (no checksum, no If-None-Match signed) made every misuse land on BOTH servers: second redemption 200, wrong bytes 200 and STORED, dropped headers 200 and STORED.
