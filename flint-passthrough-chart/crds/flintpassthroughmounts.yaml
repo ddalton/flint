@@ -166,6 +166,30 @@ spec:
                     two entries: ["--metadata-ttl", "60"].
                   items:
                     type: string
+                cache:
+                  type: object
+                  description: >-
+                    Mountpoint's local block cache, in the worker's own
+                    scratch emptyDir (/tmp, workers.scratchSize, default
+                    1Gi). OFF unless enabled. For a dataset mounted
+                    read-only and read many times this is the largest
+                    single performance lever available; without it every
+                    repeated read re-fetches from S3.
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    maxSizeMib:
+                      type: integer
+                      minimum: 1
+                      description: >-
+                        The cache ceiling in MiB. REQUIRED when enabled:
+                        an unbounded cache fills the emptyDir, whose
+                        sizeLimit then EVICTS the worker — and an evicted
+                        passthrough worker is an unrecoverable mount
+                        (restartPolicy: Never). Leave headroom under
+                        workers.scratchSize.
+                  required: [enabled]
                 image:
                   type: string
                   description: >-

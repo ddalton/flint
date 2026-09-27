@@ -33,6 +33,19 @@ fn default_mount_path() -> String {
     "/mnt/s3".into()
 }
 
+/// Mountpoint's local block cache. See [`MountSpec::cache`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CacheSpec {
+    #[serde(default)]
+    pub enabled: bool,
+    /// The cache ceiling in MiB. Required when `enabled`, because the
+    /// unbounded default would fill the worker's emptyDir and get it
+    /// EVICTED — and an evicted passthrough worker cannot be restarted.
+    #[serde(default)]
+    pub max_size_mib: Option<u64>,
+}
+
 // Serialize is here for ONE reason: it is what lets
 // `the_crd_and_the_struct_agree_on_every_field` enumerate this
 // struct's fields at runtime and compare them against the hand-written
@@ -70,6 +83,22 @@ pub struct MountSpec {
     /// concatenated into a shell string. See `mounter::mounter_args_for`.
     #[serde(default)]
     pub mount_options: Vec<String>,
+    /// Mountpoint's local block cache, in the worker's own `scratch`
+    /// emptyDir (`/tmp`, `workers.scratchSize`, default 1Gi). OFF by
+    /// default and opt-in per mount.
+    ///
+    /// The emptyDir was provisioned and documented as "mount-s3's cache"
+    /// from the start and `--cache` was never passed, so every repeated
+    /// read re-fetched from S3 and the gigabyte was dead weight. For a
+    /// dataset mounted read-only and read many times — the flagship
+    /// case — this is the largest single performance lever available.
+    ///
+    /// `maxSizeMib` must leave room under `workers.scratchSize`: the
+    /// emptyDir's `sizeLimit` EVICTS the worker pod when exceeded, and
+    /// an evicted passthrough worker is an unrecoverable mount
+    /// (`restartPolicy: Never`).
+    #[serde(default)]
+    pub cache: Option<CacheSpec>,
     /// Per-mount image override (the chart's default otherwise).
     /// WEBHOOK DELIVERY ONLY: the CSI node driver never reads it — the
     /// worker image is chart-pinned, because this field is the
@@ -173,6 +202,31 @@ impl MountSpec {
                 return Err(format!("spec.keyPrefix {p:?} must not contain a .. segment"));
             }
         }
+        // An enabled cache with no ceiling is unbounded, and the worker's
+        // scratch emptyDir has a `sizeLimit`: exceeding it EVICTS the
+        // worker, and an evicted passthrough worker cannot be restarted
+        // (`restartPolicy: Never`), so the tenant's mount is gone for
+        // good. The CRD requires only `enabled`, so this is the check
+        // that closes it.
+        if let Some(c) = self.cache.as_ref().filter(|c| c.enabled) {
+            match c.max_size_mib {
+                None => {
+                    return Err(
+                        "spec.cache.enabled is true but spec.cache.maxSizeMib is unset — an \
+                         unbounded cache fills the worker's scratch emptyDir, whose sizeLimit \
+                         then evicts the worker, and an evicted passthrough worker cannot be \
+                         restarted. Set maxSizeMib with headroom under workers.scratchSize"
+                            .into(),
+                    )
+                }
+                Some(0) => {
+                    return Err("spec.cache.maxSizeMib is 0 — set a real ceiling in MiB, or set \
+                                spec.cache.enabled to false"
+                        .into())
+                }
+                Some(_) => {}
+            }
+        }
 
         Ok(())
     }
@@ -200,6 +254,42 @@ mod tests {
     ///   hits `deny_unknown_fields`, denying every pod that opts into
     ///   the mount.
     #[test]
+    /// An enabled cache with no ceiling is unbounded: it fills the
+    /// worker's scratch emptyDir, whose sizeLimit then EVICTS the
+    /// worker — and an evicted passthrough worker cannot be restarted
+    /// (`restartPolicy: Never`), so the tenant's mount is gone for good.
+    /// The CRD requires only `enabled`, so this is the check that closes
+    /// it.
+    #[test]
+    fn an_enabled_cache_without_a_ceiling_is_refused() {
+        let mut s = MountSpec {
+            bucket: "b".into(),
+            key_prefix: None,
+            endpoint: None,
+            region: None,
+            mount_path: "/mnt/s3".into(),
+            read_only: false,
+            path_style: None,
+            credentials_secret_ref: None,
+            uid: None,
+            gid: None,
+            mount_options: vec![],
+            cache: None,
+            image: None,
+            consumers: None,
+            identity: None,
+        };
+        s.cache = Some(CacheSpec { enabled: true, max_size_mib: None });
+        let e = s.validate().expect_err("an unbounded cache must be refused");
+        assert!(e.contains("maxSizeMib"), "the message must name the field to set: {e}");
+        s.cache = Some(CacheSpec { enabled: true, max_size_mib: Some(0) });
+        assert!(s.validate().is_err(), "a zero ceiling is not a ceiling");
+        s.cache = Some(CacheSpec { enabled: true, max_size_mib: Some(512) });
+        assert!(s.validate().is_ok(), "a bounded cache is fine");
+        s.cache = Some(CacheSpec { enabled: false, max_size_mib: None });
+        assert!(s.validate().is_ok(), "disabled needs no ceiling");
+    }
+
     fn the_crd_and_the_struct_agree_on_every_field() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -233,6 +323,7 @@ mod tests {
             uid: Some(1),
             gid: Some(1),
             mount_options: vec!["--metadata-ttl".into(), "60".into()],
+            cache: Some(CacheSpec { enabled: true, max_size_mib: Some(512) }),
             image: Some("i".into()),
             consumers: Some(crate::s3csi::policy::MountConsumers {
                 service_accounts: vec!["a".into()],

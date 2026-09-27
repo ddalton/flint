@@ -19,6 +19,13 @@ use super::spec::MountSpec;
 /// rig: with the daemon at uid 1001 and no flag, root's `statfs` on
 /// the mount is refused, so the driver's readiness probe can never
 /// pass; with the flag, root, the owner and a third uid all read.
+/// Where Mountpoint's block cache goes: the worker's own `scratch`
+/// emptyDir, mounted at `/tmp` (`worker.rs`, sized by
+/// `workers.scratchSize`). Never a hostPath — AWS moved their own cache
+/// off the host for isolation, and a shared host cache would be a
+/// cross-tenant read channel.
+pub const CACHE_DIR: &str = "/tmp/mountpoint-cache";
+
 pub fn mounter_args_for(spec: &MountSpec, owner: (Option<i64>, Option<i64>), target: &str) -> Vec<String> {
     let mut a: Vec<String> = vec![spec.bucket.clone(), target.to_string(), "--foreground".into(), "--allow-other".into()];
     if let Some(p) = spec.key_prefix.as_deref().filter(|p| !p.is_empty()) {
@@ -56,6 +63,18 @@ pub fn mounter_args_for(spec: &MountSpec, owner: (Option<i64>, Option<i64>), tar
     if let Some(gid) = owner.1 {
         a.push("--gid".into());
         a.push(gid.to_string());
+    }
+    // Mountpoint's block cache, in the worker's own scratch emptyDir.
+    // Opt-in: the cardinality of a block-per-object cache is a real cost
+    // for a mount with many small objects, so the operator asks for it
+    // per mount rather than inheriting it.
+    if let Some(c) = spec.cache.as_ref().filter(|c| c.enabled) {
+        a.push("--cache".into());
+        a.push(CACHE_DIR.into());
+        if let Some(mib) = c.max_size_mib {
+            a.push("--max-cache-size".into());
+            a.push(mib.to_string());
+        }
     }
     a.extend(spec.mount_options.iter().cloned());
     a
@@ -119,6 +138,31 @@ mod tests {
         assert!(ro.contains(&"--read-only".to_string()));
         assert!(!ro.contains(&"--allow-delete".to_string()));
         assert!(!ro.contains(&"--allow-overwrite".to_string()));
+    }
+
+    /// The `scratch` emptyDir has always been provisioned at `/tmp` and
+    /// documented in values.yaml as "mount-s3's cache" — and `--cache`
+    /// was never passed, so every repeated read re-fetched from S3 and
+    /// the gigabyte was dead weight (found reviewing passthrough,
+    /// 2026-09-22). Opt-in per mount, and OFF unless asked.
+    #[test]
+    fn the_cache_is_wired_to_the_scratch_dir_when_asked_and_absent_otherwise() {
+        let mut s = spec();
+        let off = mounter_args_for(&s, (None, None), "t");
+        assert!(!off.iter().any(|a| a == "--cache"), "the cache must stay OPT-IN: {off:?}");
+        assert!(!off.iter().any(|a| a == "--max-cache-size"));
+
+        s.cache = Some(crate::passthrough::spec::CacheSpec { enabled: true, max_size_mib: Some(512) });
+        let on = mounter_args_for(&s, (None, None), "t");
+        let i = on.iter().position(|x| x == "--cache").expect("--cache is not passed");
+        assert_eq!(on[i + 1], CACHE_DIR, "the cache must live in the worker's writable scratch");
+        let j = on.iter().position(|x| x == "--max-cache-size").expect("--max-cache-size is not passed");
+        assert_eq!(on[j + 1], "512", "an unbounded cache fills the emptyDir and gets the worker EVICTED");
+
+        // Asked for but disabled is the same as not asked for.
+        s.cache = Some(crate::passthrough::spec::CacheSpec { enabled: false, max_size_mib: Some(512) });
+        let disabled = mounter_args_for(&s, (None, None), "t");
+        assert!(!disabled.iter().any(|a| a == "--cache"), "{disabled:?}");
     }
 
     /// Extra mount options from the CR survive verbatim as ARGUMENTS —
