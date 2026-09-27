@@ -12,7 +12,235 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Added
+
+- **lean: immutable object handles — the store type, the syncer's commit
+  section and the gateway's verbs (H6's structural fix, tranches 1, 3 and 4
+  of `docs/plans/flint-lean-immutable-objects-design.md`; NOT the drills).**
+  Every write lands at a HANDLE nobody else writes (`files/<path>@<flush>`),
+  the manifest cites handles, and a handle a landed document stopped citing
+  is collected unconditionally in one batch (`ObjectStore::delete_many`:
+  `DeleteObjects` on S3, one request per thousand keys) — no HEAD, no
+  If-Match, no fence, no collector that gives way. The upload's 412/404
+  arms, the park, adopt-own by flush id, `hitl_may_overwrite`, the
+  HEAD-guarded delete, the collector-off leak, the rename by copy and the
+  tracked-orphan sweep are gone with the slot. In their place: the commit
+  re-reads its own uploads and withholds what a peer's orphan sweep took
+  (R4, the sweep runs inside the commit section when due); the commit
+  surfaces, by a server-side copy and a record, what it publishes over and
+  never integrated (R7); a citation repair cites the baseline's handle and
+  is void when the document cites it at another path this install keeps
+  (R2); a rename takes the source's pending entry with the citation it
+  moves, and a removal one writer refused still moves the named version
+  out of another tree that holds it clean at the source — one handle, one
+  name (L-117: the model's rename world and then the new core model,
+  `lean/formal/LeanCore.tla`, on the code after it was built); a citation
+  repair yields to a later UI write the document already cites (L-118, the
+  rename world's eighth run); a refused rename's destination stays PENDING
+  in the cell until its source leaves, instead of being dropped as gone
+  when its adopter commits first (L-119, the tenth run: the rule is in
+  both models, gated by `PendingAdoptionStays` with its mutation world and
+  reachability probe in each); a
+  gateway entry is judged against the citation the gateway saw
+  (live, superseded, or a preserved conflict; class 5); a rename is a
+  citation move (R6); an outside writer's object at the bare path is
+  copied to a handle and tracked (R5); the checkout re-resolves the pointer
+  when a handle it was fetching was collected under a moved pointer; the
+  gateway judges the caller's precondition again at the cell's CAS (L-48).
+  A parked path keeps its citation — nothing of that barrier lands there,
+  its declared delete included — and the scan gives an agent's re-created
+  file precedence over the removal that named the file it replaced; both
+  were already true of the code, and the core model's two-path world found
+  that deleting either one cites ONE handle at BOTH names (the new test
+  `a_rename_whose_parked_source_keeps_its_citation_does_not_cite_one_handle_twice`
+  pins it, and fails with exactly that message when the line is removed).
+  The syncer battery is 244 green and the gateway's 56; twenty-five
+  same-key tests are retired and the design doc's §3.1 names what stands in
+  each place. Uncommitted; the live drill on the three stores is next.
+- **lean formal: the core model, the refinement, and the protocol on one
+  page.** `lean/formal/LeanCore.tla` is the handles protocol as it ships,
+  once, with no arms — the objects and the rules, one action each — with
+  invariants written over state (every citation names a live handle; one
+  handle is never cited under two names; an acknowledged handle that is
+  gone is accounted for by something in the state that names it), each rule
+  a constant whose mutation world violates the invariant it holds up — the
+  shipped world, ten mutations and four reachability probes, all in the
+  gate since 2026-09-20. `lean/formal/LeanRefine.tla` maps the history
+  model's shipped worlds onto it and TLC checks the refinement (the queue
+  and probe worlds are in the gate). Its
+  first run found two rules the code lacked (L-117's final form) and the
+  consume-dirty sentinel the model had never carried. `lean/PROTOCOL.md` is
+  the page written from it. `SAFETY.md` §3.1 now says, per promise, what is
+  certified on the shipped shape, what the core states, and what nothing
+  checks; three gated-lane invariants are retired (H9) and the
+  no-resurrection claim is an action property instead of a tautology.
+- **lean formal: the immutable-object-handles design, modelled before its
+  code.** `docs/plans/flint-lean-immutable-objects-design.md` is the
+  structural fix for review finding H6 (a multi-writer checkout that adopts a
+  peer's mid-barrier uploads path by path): every write lands at a handle
+  nobody else writes, the manifest cites handles, and a handle a landed
+  document cites is never overwritten. `LeanSubtree.tla` gained the
+  `ImmutableObjects` arm (with `RetirePerPath`, `SweepSparesTracked`,
+  `SweepUnderLease`, `CommitSurfacesForeign`): the slot is frozen,
+  `versions[p]` is the set of live handles, and `UploadIO`/`HitlWriteIO`/
+  `HitlRenameIO`/`VerifyUploads`/`GCCollect`/`SweepOrphan` replace the
+  shipped same-key arms. Twenty-one gate runs (EXPECT 162): the design's
+  rules each refuted by a mutation, six known-bad shapes of the classes it
+  retires (F1/L-10, F2/L-11, F8/L-16, H1/L-105, C2/L-104, finding 10/H6) run
+  under handles and holding, five probes. The arm corrected the design four
+  times before any code (the orphan rule, the retirement of an integrated UI
+  write, a rename onto an in-flight create, and the commit surfacing what it
+  publishes over — the slot's 412 arm, taken at the CAS, found by the
+  HitlOverAny world at depth 18) and withdrew one of its own refutations: the
+  first per-path-retirement trace had the collector reading the seed
+  generation's NUMBER as one handle at every path; a handle is a name, and
+  the refutation now goes through the rename it was written about —
+  `lean/formal/README.md` "Immutable object handles".
+  Not the code's shape: IMPL is unchanged, and the shipped claim is the other
+  141 runs. Fetch-by-bare-path is relaxed everywhere by decision, one
+  realisation (fresh keys) is to be built.
+- **lean formal: the 2026-09-19 review's final pipeline** — gate 141/141
+  green on the fixed module, trace validation ok, and the census control arm
+  identical to the 2026-09-18 baseline on all seven shipped-shape worlds
+  (`lean/formal/results/2026-09-19-review-final/`). Its first attempt caught
+  a view-soundness gap in the same evening's H4 arm: `gh.removalOverreach`
+  was read by an invariant but dropped from `StrictGh`; the census self-test
+  refused the gate, the field is now kept, and the two removal worlds re-ran
+  under the sound view with unchanged counts.
+
 ### Fixed
+
+- **forge: a snapshot CAS cannot be written without a lease renewal**
+  (2026-09-27). "Renew before the CAS" was an obligation each of the three
+  call sites had to remember, and two forgot it (the fold, `FoldNoRenew`;
+  the at-rest reclaim, review 2026-09-23). `lease::renew` now returns a
+  `Renewed` token that only it can make, and `snapshot::cas` consumes one,
+  so a CAS without a renewal does not compile. The takeover rotation writes
+  through the module-private path: the claim it follows is its check
+  against the cell. No new request on any path: every site already renewed.
+  - Checked: constructing the token outside `lease.rs`, and calling
+    `Renewed::for_test()` outside a test build, both fail to compile.
+  - Tests: lib 179 (1 ignored), file_api 12, push_chain 12. The first full
+    run had one known flake in each of file_api and push_chain; both passed
+    alone twice and in a full rerun.
+- **forge LFS: the upload URL's binding is enforced by MinIO and RustFS**
+  (2026-09-27). The fix (b36c677b) signs the object's sha256 checksum and
+  `If-None-Match: *` into the presigned PUT. Until now nobody had checked
+  that a real server enforces them.
+  - The new ignored live test `crates/flint-store/tests/presign_live.rs`
+    presigns through `S3Store::presign_put` and redeems the URL with curl,
+    as git-lfs does.
+  - On MinIO RELEASE.2026-09-22 and RustFS (2026-09-16), all four misuses
+    were refused and nothing was stored under them:
+    - a second redemption: 412;
+    - other bytes: 400 (`XAmzContentChecksumMismatch` / `BadDigest`);
+    - either signed header dropped: 400 or 403.
+  - Control: with the pre-fix presign put back, every misuse landed on both
+    servers and the wrong bytes were stored.
+  - A refusal counts only if the server judged it: the first run counted
+    404 `NoSuchBucket` as enforcement.
+  - Log: `forge/e2e/results/lfs-presign-live-2026-09-27.log`. Not run
+    against S3 or Ozone.
+- **forge formal: the gate now checks the rules that ship** (2026-09-27).
+  The five rules `ForgeConfig::default` turns on (NameAcceptedSet,
+  ReclaimAtRestore, ReclaimBySet, ReclaimUnlinks, RestoreLosesQueue) were
+  OFF in every gated ForgeSync world, and the shipped combination had been
+  one hand run. All 24 gated worlds are rebased onto them
+  (`formal/WORLDS-ForgeSyncShipped.tsv`, written before the run).
+  - `ForgeSync.tla` gains the code's per-push fallback: a lost hook record
+    names the directory for that push (4af0f309). `ForgetPushPack` is now
+    that loss going unnoticed. Without the fallback, the directory listing
+    was unreachable in the model and live in the code. That is why
+    `ReclaimWhileServing` went green on 2026-09-23 under the accepted set:
+    at tiny bounds it fires again.
+  - The first smoke found a model infidelity. `AcceptedListing` added the
+    push's pack unconditionally; the code adds a recorded pack only if the
+    listing (which leaves out retained packs) has it. Corrected
+    (md5 1c201e9d).
+  - The two flags stay as test-only controls: five measurement tests pin
+    them off to reproduce the unfixed residue. Neither is settable from
+    config.
+  - The runs are queued on the box.
+
+- **lean: a UI rename after a restart could publish the file under neither
+  name** (L-124, 2026-09-24). After a restart between a writer's CAS and its
+  step 7, the merge uses the document that writer installed as its base, but
+  the check for whether that merge applies a declared delete used the older
+  persisted base. A UI rename of a path the install had changed then held
+  the destination back as pending while the merge removed the source: the
+  next document cited the file at neither name and its object was collected,
+  until the writer re-uploaded its own copy barriers later. Both now use one
+  merge base.
+- **lean: a `sync` could let an older peer change revert a newer one for
+  every writer** (L-123, 2026-09-23). A writer's merge queues a peer's
+  change in its writer-local queue; `sync` reads the manifest and the inbox
+  but never that queue. When the peer published again and this writer's
+  `sync` fetched the newer version, the next consume still adopted the
+  queued older one wherever its handle had not yet been collected, and the
+  next barrier published it — the manifest went back a version and the
+  peer's newer write was undone in every tree, with no record. Where the
+  older handle was already collected, the same consume instead reported the
+  superseded bytes as `consume-object-missing`. `sync` now prunes the queue,
+  and the intent journal's carried changes, wherever it moved a path's merge
+  base to a different version, saved before the baseline. No existing model
+  invariant saw the revert; `Inv_ConsumeNeverRegresses` does.
+- **lean: a citation repair could put one handle under two names** (L-122,
+  found by the model 2026-09-22: `Inv_OneName` at depth 18, 68,272,476
+  distinct). R2 asks whether this install still keeps the handle at some
+  other path, and `void_stale_repairs` answered "no" for any path in the
+  barrier's DECLARED delete set. But `manifest::merge` only APPLIES a delete
+  where theirs is unchanged against the merge base — delete/modify resolves
+  conservative, theirs wins. So a delete the commit was about to have
+  OUTRANKED still took its path out of the "keeps it" set, the repair at a
+  rename's destination went ahead, and the document cited one handle at both
+  names — which is exactly what the rename's atomicity claim forbids. Now
+  `void_stale_repairs` takes the merge base and a declared delete only
+  removes the citation where the merge would apply it. The same
+  declared-vs-applied confusion has now been found in all three conjuncts of
+  the model's corresponding rule, on three separate days.
+
+- **lean: the UI could not turn a published file into a directory** (review
+  2026-09-18, M5's gateway half). The human deletes `build` and writes
+  `build/log.txt` — the correct order — and both land in the cell. The consume
+  takes entries BEFORE removals, so the write arrived while the file was still
+  there, containment refused it, and the entry was dropped with only a
+  pod-local record: the acked write was lost and no barrier ever retried it.
+  An entry blocked by a path the cell is already removing is now DEFERRED
+  rather than dropped — it stays in the cell and is materialised at the next
+  barrier, once the removal pass has taken the file away. A removal the tree
+  REFUSED is not about to clear the way, so an entry under one is still
+  recorded and dropped rather than left pending forever.
+
+- **lean: a published file replaced by a directory left a document no
+  workspace could hold** (review 2026-09-18, M5's agent-side twin). The scan
+  saw `a` absent and `a/x` new; the two-scan guard withholds a FIRST absence,
+  so the barrier published the upload and not the delete, and the installed
+  document cited both `a` and `a/x` — a fresh checkout would have had to
+  create a directory where its own manifest says a file goes. The commit now
+  judges the merged document's final shape and withholds THIS barrier's side
+  of any path/prefix clash (`upload-withheld-path-clash`, with a conflict
+  record); the path stays dirty and publishes at the next barrier, by which
+  time the withheld absence is confirmed and its citation gone. Both
+  directions — file→directory and directory→file — and the convergence of
+  each are pinned by tests.
+
+- **lean, forge, csi: a multipart upload re-opened its file BY PATH, once per
+  part, so a directory swapped for a symlink published bytes from outside the
+  workspace** (review 2026-09-18, H5's residual; `lean/FINDINGS.md` L-115).
+  The whole-PUT path was fixed on 2026-09-19 by opening the file through a
+  walk that follows no link at any depth and taking the stamps, the size and
+  the bytes from that one descriptor. Above `whole_put_max` the syncer then
+  handed the store a PATH (`ComposeSpec::local_path`) and the store opened it
+  again for every part, with `O_NOFOLLOW` guarding the LAST COMPONENT ONLY —
+  the same window, reopened between the syncer's open and the store's read,
+  and wider, because it spans every part of a large upload. `ComposeSpec` no
+  longer carries a path: `local_path: &Path` became
+  `local: Option<Arc<File>>`, both backends read their parts with
+  `read_exact_at` on the caller's descriptor, and a `Local` part with no
+  descriptor is refused before any part moves. Callers updated: lean's
+  `upload_compose`, forge's pack push (`packio`), the CSI tier's flush.
+  `ObjectStore::delete_many` is now filed as a write in the read-only store,
+  which its own census caught.
 
 - **lean: a gateway PUT to a name ending `.flint-sync-tmp` was acked and then
   collected** (review 2026-09-18, C1; `lean/FINDINGS.md` L-103). The walk
@@ -135,6 +363,60 @@ covered by the stability guarantee.
   violating `Inv_HITLTracked`, and stopped there on `Inv_AckImpliesCited`:
   an ok ack written by a restarted incarnation, honoured by a pull-only
   install of a peer's later delete — open as H10 in the review record.
+- **lean: an `ok` ack could name a document without the declared bytes**
+  (H10; L-110; the crash world at `OrphanTrack = TRUE`). The ack read the
+  barrier that honoured the pending, not always the one that carried it —
+  after a restart past step 7, an ack write that failed, or an honor that
+  failed before the floor's cadence barrier published the declaration. A
+  peer's delete of a declared path in between was merged by that later
+  barrier and queued for this tree, and `ok` said the declared point was in
+  the seq. Each carrying install now journals the paths it published with
+  its CAS (`IntentJournal::carrier`), and the ack is `partial`, naming a
+  carried path whose deletion waits in the queue. A barrier that begins
+  with a publish declaration standing is a declared barrier (it confirms
+  first absences) and is stamped `sentinel-deferred`. `AGENTS.md` names the
+  case. Model: `AckFromCarrier`; a first cut that named the first carrying
+  install was refuted on `Inv_AckBoundaryCoherent`.
+- **lean: a deposed holder's manifest CAS could land** (H2; L-111). The
+  commit read the cell once, before its HEAD fan-out and window, then
+  loaded and CASed with no fence; a holder deposed in between loaded its
+  successor's rotated document and installed on top of it. The cell is now
+  read after each manifest load, before the CAS. A restarted container that
+  releases a cell held under its id at an epoch it never recorded (an
+  acquire that died before its takeover rotation) rotates first, and the
+  rotation retries S3's 409. Model: `FenceAfterLoad`,
+  `LeanBarrierLeaseStragglerLoadsSuccessor`.
+- **lean: S3's 409 on the inbox cell failed a UI write whose object had
+  landed** (H3; L-112): the entry of the earlier acked write it replaced was
+  then dropped as superseded. Every CAS loop on the cell retries a 409 as a
+  lost race. **And a late append no longer replaces the entry of a newer
+  write to the same path** (M7; L-113): the untracked sweep's append after a
+  UI write had replaced its orphan left the UI's write tracked by nothing;
+  the object at the key now decides which entry stays.
+- **lean: a declared delete or rename could remove a version nobody asked
+  about** (H4; L-114): a UI re-upload after the delete, an agent write
+  published in between, a rename's source changed after the copy. A
+  removal now carries the version the gateway resolved (`Removal::etag`)
+  and removes only that one; a newer version refuses it
+  (`removal-refused-superseded`). Model: `RemovalNamesGen`,
+  `Inv_RemovalNamesItsVersion`.
+- **lean (security): a directory on an upload's path swapped for a symlink
+  published a file outside the workspace** (H5; L-115) — `/proc/self/environ`
+  included. Upload reads open through a walk that follows no link at any
+  depth and take everything from one descriptor. The multipart compose
+  path still hands `flint-store` a path (open; a short read bounds it to
+  targets at least one part long).
+- **lean: the consume and `sync` could overwrite an agent write made
+  during their own write, or record one made just after it as clean** (H7;
+  L-116). The licence to overwrite is re-checked with the temp written,
+  immediately before the rename, and the baseline records the fstat of what
+  was written. `sync` judged dirt by one scan at its start, so its window
+  was the whole run; a write since then is now `sync-dirty`, and a remote
+  delete never removes it.
+- **lean formal: the gate is 141 runs** (136 + H10's three, H2's and H4's
+  known-bad worlds). IMPL carries `AckFromCarrier`, `RemovalNamesGen` and
+  `FenceAfterLoad`; the census control arm (seven worlds) reproduces its
+  state counts.
 - **lean formal: the gate is 136 runs** (117 + the nineteen of 2026-09-18),
   and the claim doc says which promises are certified on the shipped shape
   and which enforcers it names are checked by no run (`lean/SAFETY.md`
@@ -149,6 +431,480 @@ Every shipped image moves to a Chainguard base, and the two fixes beside
 it are the kind a base migration does not usually carry.
 
 ### Changed
+
+- **lean: the merge decides each delete ONCE, and says what it decided (P5
+  stage A, 2026-09-24).** `manifest::merge` returns a `Merged` with every
+  declared delete's `DeleteOutcome` (applied, outranked, parked), decided by
+  `manifest::delete_outcome`. The repair rule used to re-derive "does this
+  delete apply" beside the merge, against a different base, which was M5 and
+  L-124. It now asks `delete_outcome` with the base the barrier hands to both
+  it and the merge. No behaviour changes. The `merge` trace event names the
+  deletes theirs outranked (`outranked`).
+- **lean formal: the code's traces are checked against `LeanCore.tla`**
+  (`lean/formal/trace/trace-check-core.sh`: `TraceCore.tla`, `ndjson2core.py`,
+  `mutate_core.py`, and the current code's traces in `traces-core/`).
+  - All 5 conformance traces are behaviours of the core, and the core's
+    invariants and no-silent-revert hold along every one.
+  - Each install is checked for the deletes the merge outranked and the
+    versions R7 surfaced.
+  - All 11 one-fact mutations are rejected.
+  - Turning R7 off in the model rejects the trace that exercises it.
+  - Breaking R7 in the code (the inverted `integrated` guard) leaves all 5
+    conformance tests green, but the trace check rejects the regenerated
+    trace at that install.
+  - Five scenarios were added the same day: UI delete (applied, and refused
+    as dirty), UI rename, an orphan sweep of a superseded UI write, and a
+    pending adoption behind a superseded removal (L-119 without a fault). The
+    syncer now traces each removal decision (`removal`: applied, refused,
+    declined or deferred, and whether the tree unlinked) and names the
+    handles the orphan sweep took (`keys`).
+  - The check's tally is 10 traces accepted, 16 mutations rejected and 5
+    controls rejected (R7, CollectorSparesCited, RepairRespectsMoves,
+    AnsweredRecordsApply, PendingAdoptionStays).
+  - Five more scenarios close the coverage gap, one per rule no trace
+    exercised:
+    - a repair that yields to a later UI write (RepairYieldsToLaterUI);
+    - a commit that withholds an upload a peer's sweep took
+      (CommitVerifiesUploads);
+    - R7 across a rename, where the tree held the moved version at the
+      source (ForeignPerPath);
+    - a rename of a pending UI write, plain and onto a dirty destination
+      (RenameMovesEntry).
+    The first three run one writer's barrier inside another's, from the
+    hooked store's `after_put`. The `upload` trace event now carries the
+    handle `key`, so the converter can place a peer's sweep of an upload
+    whose event the code emits only after the whole batch.
+  - Adoptions are now compared as <<path, handle>> pairs. As bare handles,
+    the RenameMovesEntry control was ACCEPTED: adopting the moved write at
+    both names looked the same as adopting it at one.
+  - Tally: 15 traces accepted, 16 mutations rejected, 10 controls rejected
+    (41/41). Only SweepUnderLease and SweepSparesNamed have no control; they
+    only restrict the model, so no trace can show they are needed.
+  - The refused-delete scenario found L-125, fixed the same day (below).
+- **lean: the consume's cheap path is now the SCAN TRIGGER; `behind` is
+  gone.**
+  - Why: both of the day's convergence gaps (a skipped dirty path, a
+    withheld upload) were one rule missed at a skip site. The rule was that
+    every place that leaves a change untaken must set `behind`, and it lived
+    at six places in three files. Only three things can make a path newly
+    owed:
+    - the document moved;
+    - this tree's own commit merged someone else's change;
+    - a path the agent was working on went clean again.
+    The first two are one pointer comparison; the third is a stat of the
+    paths the last derive skipped.
+  - `Baseline::behind` is replaced by `derived_etag` (the document the last
+    full consume derived against; none after a failure) and `skipped` (the
+    paths it left as the agent's work).
+    - Only the consume writes them, and a whole-tree `sync`, which records
+      them as a consume would.
+    - The commit advances `derived_etag` only when its CAS replaced exactly
+      that document. The installed one is then it plus this tree's own
+      changes, so a busy agent's publishes stay cheap.
+    - The ticker's "waiting" is now "the pointer is not the derived
+      document".
+  - Removed: the three `behind` marks in the barrier (including the
+    parked-path line added earlier the same day), `sync`'s three, `owes()`,
+    `MergeOnto::gone`, and the model's `MergeMarksOwed` / `MergeOwes`.
+  - Tests: three new ones, and every new condition is mutation-checked
+    against a named test (M1–M6, M8).
+    - `a_busy_agents_idle_tick_after_its_own_publish_is_the_pointer_alone`
+    - `a_skipped_path_this_barrier_publishes_leaves_the_next_tick_cheap`
+    - `a_path_a_sync_declined_as_dirty_arrives_when_the_agent_reverts`
+    - One condition (an empty-workspace shortcut) changed nothing when
+      broken, and was removed.
+    - Syncer 267, gateway 24/31/5, clippy unchanged at 20.
+  - The model: `CheapPath(s)` is `derived = seq /\ (RecheckSkipped => every
+    skipped path is still dirty)`. `Install` sets `adv` (guarded by
+    `CommitAdvanceGuarded`), and `Finish` advances `derived` only on `adv`.
+    - Controls: `LeanP1OwedUnmarked` (`RecheckSkipped = FALSE`) and the new
+      `LeanP1AdvanceUnguarded`. Both violate `Inv_ShortcutSound` at tiny
+      bounds, and `LeanP1Holds` holds there (4,974,734 distinct).
+    - The trace check passes 41/41. Its control is now
+      `control-advance-unguarded`.
+    - LeanP1.tla md5 3f6af642. Gate rerun d, 30 worlds.
+  - Performance: no change. The bench (`tests_bench.rs`, in-memory store,
+    3 paired reps per arm, `behind` against scan, the box, 2026-09-26) has
+    the same request count in every leg of both arms: idle 2 GETs, a
+    publish 54–55 (200k) and 226–227 (1M), checkout one GET per file.
+    Times are within the noise: 200k idle 0.9 s both, publish 1.8–2.3 s
+    both; 1M idle 4.9–5.0 s both, arrival 7.3–18.2 s against 9.0–17.7 s,
+    busy publishes 9.6–23.2 s against 9.5–20.6 s. The idle tick after
+    three busy publishes stays on the cheap path in both (2 GETs, 5.0 s at
+    1M). Logs: `lean/e2e/perf/results-2026-09-25-barrier-bench/scantrigger/`.
+- **lean: a withheld upload that theirs changed now marks the syncer
+  behind (found by `MCLeanP1Like`, `Inv_ShortcutSound`, 22 states).**
+  - The defect: when verify withholds an upload (its handle is swept before
+    the commit), the path is parked, and the merge leaves parked paths out
+    of `foreign`. If theirs had changed the path and the agent then backed
+    out (deleted its new file, or reverted its edit), theirs was owed, but
+    `behind` stayed clear and the cheap path skipped it until someone else
+    committed. This is the same class as the dirty-skip gap: a convergence
+    gap, not data loss.
+  - Fix, in `barrier.rs` step 7: a parked path whose citation in the
+    installed document differs from the baseline sets `behind`.
+  - Test-first: two tests fail on the old code, and each arm of the new
+    line is mutation-checked against its own test.
+    - `a_peers_version_behind_a_withheld_upload_arrives_when_the_agent_drops_its_file`
+    - `a_peers_version_behind_a_withheld_edit_arrives_when_the_agent_reverts`
+    - The first draft of the test passed on the old code, because a side
+      commit in the fixture set `behind` for an unrelated path. The fixture
+      now re-publishes identical bytes, and asserts that.
+  - The model: `MergeOwes` also counts a withheld (`gone`) path theirs
+    changed. The model md5 is now e9f47335. The tiny world holds
+    (267,189 distinct), as does `LeanP1Holds` at tiny bounds (4,775,250).
+    The trace check still passes 41/41
+    (`summary-parked-marks-behind.txt`).
+  - `MCLeanP1Like.tla`/`.cfg`: LeanP1 cut down to LeanCore's shape (no
+    reader loads, the retire age off, no copies, `seq` <= 3) through a state
+    constraint, to compare against `LeanCoreHoldsSmall`'s 49,030,962
+    distinct states. Gate rerun c runs it first.
+  - Result: `MCLeanP1Like` HOLDS with 25,744,473 distinct states, depth 34,
+    in 7 min 3 s (`results/2026-09-25-leanp1-gate/MCLeanP1Like.out`).
+    That is 0.53x `LeanCoreHoldsSmall`'s 49,030,962 at the same bounds.
+    Caveat: the old model enforced `MaxSeq` as a guard, and this one uses
+    a state constraint.
+- **lean: a commit's file/directory clash check was quadratic in the
+  workspace (found by the barrier benchmark).**
+  - Every committing barrier compared every cited path against every other
+    one, looking for `p/` under `p` (the 2026-09-18 review's M5 twin, never
+    committed).
+    - At 200k paths a one-file publish took about 80 s. The code at HEAD,
+      which lacks the check, took about 3 s.
+    - At 20k it cost 0.45 s, which is why no test noticed.
+  - `barrier::path_clashes` now does a range lookup on the sorted map: all
+    keys under `p/` are one contiguous run, O(N log N). At 60k paths a
+    one-file publish went from about 10.8 s to 0.64 s.
+  - Two tests:
+    - `the_clash_check_answers_as_the_every_pair_scan_did` compares the new
+      check with the old one on every subset of a name set, including
+      `a-b` and `a.txt`, which sort between `a` and `a/`. It catches a
+      next-key-only check, which the two directory tests let through.
+    - `the_clash_check_is_not_quadratic_in_the_document`: 30k paths
+      under a 5 s bound. The every-pair scan takes 45 s.
+  - Bench: `lean/syncer/src/tests_bench.rs` (`#[ignore]`), run on the
+    box against the in-memory store, HEAD against the working tree. Logs
+    are in `lean/e2e/perf/results-2026-09-25-barrier-bench/`.
+    - An apparent 2x checkout slowdown at 200k was the bench itself. The
+      two trees share a disk, checkout ends in syncfs(2), and the new
+      arm's 3 s seed publish left the whole seed tree unflushed for
+      checkout to pay for.
+    - The bench now flushes after the seed publish (`seed_flush_ms`).
+      That flush takes 25–33 s in the new arm and about 35 ms in the old.
+    - Once flushed, checkout is faster in the new arm: 21.6–30.3 s against
+      33.2–39.6 s (`flushed/`).
+- **lean: a consume that skips an agent's dirty path now marks the syncer
+  behind (found by the LeanP1 gate, `Inv_ShortcutSound`, 9 states).**
+  - The defect: a consume skipped a path the agent had dirtied, took the
+    pointer, and left `behind` clear. If the agent then backed out (a
+    revert, or deleting a new file it never published), the peer's version
+    was owed again, but the cheap path derived nothing until someone else
+    committed. It was a convergence gap, not a safety one: the peer's
+    version stayed in S3.
+  - Three places in `consume_owed` now set `left`: a dirty path whose
+    bytes differ from the document, a delete kept for a dirty path, and a
+    write that lost to the agent (H7's `Ok(None)`).
+  - Test-first: three new tests fail on the old code, and each fix line is
+    mutation-checked against its own test:
+    - `a_peers_file_skipped_under_an_agents_new_one_arrives_when_the_agent_drops_it`
+    - `a_peers_delete_skipped_under_an_agents_edit_lands_when_the_agent_reverts`
+    - `a_peers_version_whose_write_lost_to_the_agent_arrives_when_the_agent_reverts`
+  - The model: `LeanP1.tla`'s `Consume` sets `behind` when a diverged path
+    is left untaken, the rule `Sync` already had. It is gated on
+    `MergeMarksOwed`, so `LeanP1OwedUnmarked` stays the control. The model
+    md5 is now 16780139. The trace check still passes 41/41
+    (`results/2026-09-25-tracecore-on-leanp1/summary-consume-marks-behind.txt`),
+    and the counterexample is kept under `results/2026-09-25-leanp1-gate/`.
+  - Cleanup in the same pass: removed the dead `InboxEntry` type, and
+    rewrote the source comments that still described the inbox, the window
+    or the citation repair.
+  - Dead code removed. Each item was checked by finding every read and write
+    of it in both crates:
+    - `BaselineEntry::judged`: nine writes, all `None`, and no reads.
+    - The consume-dirty sentinel guard (`size != u64::MAX`): nothing
+      has written the sentinel since P1-lite.
+    - `VerbError::NoRemoval` (404 `no-removal`): its verb,
+      `withdraw_removal`, is gone.
+    - `BarrierReport::outranked`: since M3 a delete always leaves the
+      document, and only uploads are parked.
+  - The collector's still-cited-delete branch is KEPT but renamed. If it
+    ever fires, it reports the path as `parked`, which the ack already
+    treats as not carried, and traces it as `still-cited`. Deleting it
+    would rest on a "by construction" argument.
+  - The adopted-and-integrated branch (`observed`) is NOT dead: a file
+    touched without changing, then re-uploaded by a restarted barrier,
+    reaches it. Only its comment changed.
+- **lean gateway docs: an editor autosaves to a draft, never with a
+  commit.** Every commit moves the pointer that all syncers and readers
+  check, and costs about four writes. So `put_file` and `promote_draft` are
+  for when the person saves (`lean/gateway/README.md`). The simplification
+  plan's 1 Hz autosave measurement leg is dropped.
+- **lean docs: the step-5 shape (P2, P1-lite, M3, M1, M8) written into
+  the documents that describe the protocol as it ships.**
+  - `lean/PROTOCOL.md` is rewritten from `LeanP1.tla`: objects, rules and
+    invariants, with the world that pins each rule. The inbox entries,
+    the queue, `instBase` and repairs are gone.
+  - `lean/SAFETY.md`:
+    - The §1 rows now name the step-5 enforcers.
+    - Two new S2 rows: the retire-age reader and the gateway's CRC
+      refusal.
+    - A new S3 row for M3.
+    - A new §3.2 for the shipped shape. It says the LeanP1 gate has not
+      passed.
+    - §3.1 is marked as the pre-step-5 record.
+    - The evidence table has the TraceCore 41/41 result and today's
+      battery counts.
+  - `lean/formal/README.md` has a LeanP1 section, placed first.
+  - `docs/flint-lean-architecture.html`: the gateway panels and the
+    overview no longer describe the inbox, declared removals or the
+    barrier window. The scope column now says the baseline narrows with
+    the held set.
+  - `lean/gateway/README.md`:
+    - One barrier, not two, for a tree to take a UI change.
+    - M3 and the retire age are described.
+    - 502 `corrupt` is in the wire table.
+  - `docs/flint-lean-for-agent-fleets.html`: `partial` no longer blames
+    an outranked delete, and the bucket listing shows handles and
+    `retired/`.
+  - `docs/plans/flint-lean-scoped-read-design.md` and
+    `flint-lean-delete-rename-design.md` are annotated where step 5
+    superseded them. C2 is retired; the test is now
+    `a_narrow_owes_nothing_it_dropped`; a scoped tree no longer receives
+    out-of-scope peer changes or promotes.
+- **lean: the retire age G, the gateway's read door, and the dead journal
+  fields (step 5, slice 5: M1, M8, M6).**
+  - M1, the retire age:
+    - Every commit, by a writer or the gateway, now writes a retire log.
+      It is one immutable object under `retired/` naming the handles the
+      commit stopped citing and the chunks (and tombstones object) its
+      pointer stopped referencing.
+    - A retired handle or chunk is collected only once its retirement is
+      `retire_grace_secs` old (default 600, `FLINT_SYNC_RETIRE_GRACE_SECS`,
+      0 = at once). Until then the orphan sweep and the chunk reaper spare
+      it. They used to judge by write age, which for a long-lived file or
+      chunk is long past the save that superseded it.
+    - A writer's commit section reaps handles from due logs, sparing any
+      handle still cited, then drops the logs. Logs are cached locally, so
+      each is read once.
+    - The single-object layout keeps a superseded generation until its
+      successor is G old.
+    - A commit that crashes before writing its log falls back to the
+      write-age rule. The syncer-facing `cas_manifest` verb also logs
+      nothing.
+    - Cost: every replaced version is kept for G.
+  - M8, the read door:
+    - The gateway caches the manifest by pointer etag, and a server shares
+      one cache per workspace. A warm read is now the pointer plus the
+      object, where every read used to load the whole manifest.
+    - Reads verify the bytes against the citation's CRC. A mismatch is a
+      new 502 `corrupt` error, and the bytes are not served.
+  - M6: the journal's `keys`, `recent_uuids` and `declared_deletes` are
+    gone, along with a vestigial AdoptOwn test that pinned nothing.
+  - Tests:
+    - New and failing on the old code: `a_replaced_handle_outlives_its_retirement_by_the_retire_age`,
+      `a_superseded_chunk_outlives_…`, `a_superseded_generation_outlives_…`.
+    - `a_retire_log_naming_a_cited_handle_deletes_nothing` was added when
+      its line survived mutation.
+    - Two gateway read tests.
+    - Mutation checks: all 9 retire-age mutants and all 4 read-door
+      mutants are killed.
+    - Syncer 257 green. Gateway: battery 24, verbs 31, doctests 5.
+  - Model: `LeanP1.tla` gains the retire age as state (`RetUpdate`, `Age`,
+    `Reap`) and a reader ghost with `Inv_ReaderFetches`. With
+    `RetireAge = FALSE`, TLC shows a reader losing a handle. The trace check
+    reads reap events: 41/41 (15 traces, 19 mutations, 7 controls). The
+    28-world gate is running on the box.
+  - Box: the LeanSubtree and LeanCore runs (the patch gate, r54, core gate
+    B) were stopped as invalid, and every TLC checkpoint directory was
+    deleted, about 600 GB.
+- **lean: P1-lite — the baseline is the merge base, and what the tree is
+  owed is derived, not queued (step 5, slice 4).**
+  - Removed: the separate merge base (`inst_base`), the writer-local queue
+    (`foreign-queue.json`), and the journal's `installed_etag`,
+    `installed_foreign` and `installed_parked`. Also removed: L-126's
+    parked-base overlay and the sync's L-123 prune. Neither has anything
+    left to guard: there is no merge base to move past a parked path, and
+    no stored change that a newer one can overtake.
+  - The consume derives each barrier's owed set from the current document.
+    A path is owed where the document differs from the baseline, the tree
+    is clean, and the tree holds the path or its scope covers it. A dirty
+    path is the agent's work: it publishes, and the merge records what it
+    publishes over.
+  - Content convergence: a dirty path whose bytes already are the
+    document's moves the baseline without republishing. With no journal,
+    this is what recovers a restart between the CAS and step 7.
+  - M3, the user's rule for deletes: an agent's delete over a version theirs
+    published since the baseline applies at once, and theirs is preserved
+    and recorded (`commit-deleted-over-theirs`). Before, the delete was
+    outranked for a barrier and the ack was `partial`; now the ack is `ok`.
+  - `Baseline::behind` marks a merge that saw a change the tree has not
+    taken, so the next consume derives even if the pointer has not moved.
+    The news ticker reads it. The H10 ack reads `Carrier::uncited`, which
+    each barrier computes from the document in hand.
+  - Behaviour changes:
+    - A scoped tree no longer receives a peer's change, or a promoted
+      draft, outside its scope. Before, the queue carried both in, and a
+      test pinned the widening.
+    - An idle tick still costs two GETs: the consume hands the pointer it
+      read to the fast path.
+  - Tests:
+    - New: `an_agents_delete_over_a_peers_newer_version_lands_and_preserves_theirs`,
+      `a_scoped_tree_never_receives_a_peers_change_outside_its_scope`,
+      `a_restart_after_the_cas_converges_on_its_own_upload_without_republishing`,
+      `a_pull_only_barrier_leaves_a_change_it_saw_owed`, and a sync
+      positive control whose two arms differ only in the scope record.
+    - The first two failed on the old code. The other two were added when
+      their lines (convergence, the pull-only flag) survived mutation, and
+      each fails with its line removed. Ten mutants in all, each killed.
+    - About 25 queue-era tests are rewritten. Where a peer's change used
+      to wait in the queue, the fixture lands it inside the barrier through
+      the `before-scan` test window. That window is the one gap P1-lite
+      leaves.
+  - Syncer 253 green. Gateway: battery 24, verbs 29, doctests 5.
+  - Model: `lean/formal/LeanP1.tla` is the shipped P1-lite shape. It
+    includes the consume's cheap path as state, with `Inv_ShortcutSound`,
+    and a mutation world for each rule. The trace check now targets it:
+    40/40 (15 traces, 19 mutations, 6 controls). The new scenario
+    `ui_save_lands_inside_a_barrier` is the only one that exercises the
+    mark a merge leaves when it sees an untaken change. The 26-world gate is
+    queued on the box. The LeanP2 gate was cancelled before it ran, because
+    LeanP2 no longer describes the code.
+- **lean formal: the trace check now targets the P2 code (`LeanP2.tla`).**
+  - After slice 3 no code trace could be a `LeanCore` behaviour: there, a UI
+    write never moves the document. `LeanP2.tla` is LeanCore's writer loop
+    without the cell, plus the P2 sandbox's gateway, restart, sync and
+    re-upload copies. It follows the code where the sandbox did not: a save
+    is judged against the version it read, and the gateway deletes nothing
+    (the orphan sweep does).
+  - 38/38: 14 traces accepted, 18 mutations and 6 controls rejected. The
+    LeanCore version and its last run (44/44) are archived in
+    `lean/formal/results/2026-09-25-tracecore-on-leancore/`.
+  - The re-basing found three gaps:
+    - The delete-override record's control was ACCEPTED: P2 removed the
+      scenario's route to it. The new scenario
+      `agent_edit_over_a_ui_delete` takes the user's rule's route, and the
+      control rejects again.
+    - The runner checked only the mutations generated before a missing
+      anchor. In the first run it silently skipped 9 of 17. A generator
+      failure now fails the run.
+    - `CollectorSparesCited` is no longer exercised by any trace.
+  - The harness logs the seed's keys and the seq of each gateway commit;
+    both are now checked.
+  - `LeanP2`'s own gate (23 worlds: the claims, one mutation per rule,
+    probes) is queued on the box. Syncer 249 green.
+- **lean: the syncer's inbox machinery is gone — P2, step 5, slice 3.**
+  - With every UI verb committing (slices 1 and 2), nothing reaches a
+    writer through the cell any more. Removed:
+    - the syncer's cell overlay, the entry judge, the removal pass, the
+      window open/clear, citation repairs and their voiding, and the
+      L-125 step-7 loop;
+    - the gateway's `open_window`, `clear_window`, `drop_inbox` and their
+      routes, and `VerbError::WindowOpen` / `Fenced`, which nothing
+      produced any more.
+  - The cell keeps only the standing boundary and sync requests. The
+    writers' own queue (merge → queue → consume) is unchanged.
+  - A read no longer fetches the cell: one object fetch, pinned by
+    `a_read_costs_one_object_fetch_and_no_cell_fetch`.
+  - A writer that loses the manifest CAS now backs off (10 ms doubling,
+    jittered, twelve attempts). UI commits make contention the writers' to
+    absorb (G1).
+  - Checkout no longer adopts bytes that no manifest cites when a handle was
+    overwritten from outside. It refuses (M4: that arm was a repair source).
+  - The ingress sweep commits through `manifest::commit_edit`.
+  - New tests pin the surviving behaviour on the queue path: backoff, rename
+    over a dirty source, rename onto a taken destination, a failed unlink of
+    a queued deletion, the overwritten-handle refusal, and a verb request
+    retrying a 409 on the cell.
+  - Model: `ProbeDeleteOverridden`, a reachability probe for the
+    delete-override record's arm (no invariant judges the record; the trace
+    control pins the code).
+  - Syncer 248 green. Gateway: verbs 29, battery 24, doctests 5.
+- **lean gateway: a UI delete and a rename COMMIT — P2, step 5, slice 2.**
+  - What changed:
+    - `remove_file(s)` is one manifest CAS. The path is no longer cited,
+      and its tombstone names what was deleted.
+    - `rename_file(s)` is one CAS that moves the citation: the destination
+      names the source's handle, and no bytes move.
+    - Both are refused whole before anything changes, re-judged at every
+      CAS attempt, and never wait on the writers.
+    - Every UI edit now goes through one routine (`commit_edit`), which
+      keeps tombstones to the writers' window (`TOMBSTONE_KEEP_SEQS`).
+    - Removed: `withdraw_removal` with its route (`DELETE /removals/…`),
+      `with_window_wait`, and the window admission. Nothing is pending any
+      more.
+  - Tests: the gateway tests are rewritten, and every slice-2 line is
+    mutation-checked. Gateway: verbs 29, battery 24, doctests 5.
+- **lean: a writer that publishes over a DELETE it never integrated
+  records it** (`commit-recreated-deleted`). This is the user's rule of
+  2026-09-24: a UI delete over a path the agent is editing lands, and the
+  agent's edit comes back with a record.
+  - `manifest::merge` reports `recreated`, and the barrier records each one,
+    naming the deleted version (theirs' tombstone, else the base).
+  - Tests: the pin `my_edit_meeting_a_peers_delete_recreates_the_path` now
+    demands the record and failed before the fix; a pure `merge` test pins
+    which version is named.
+  - Model: `LeanCore` gains `CommitRecordsDeleteOverride`, with TraceCore's
+    install check and a trace control (core trace check 44/44).
+  - Syncer 275 green.
+- **lean gateway: a UI save COMMITS — P2, simplification step 5, slice 1.**
+  - What changed:
+    - `put_file` PUTs a fresh handle, then CASes the manifest itself and
+      acknowledges after the CAS. There is no inbox entry and no syncer
+      in the path.
+    - It never waits on the writers' lease or their commit window (G1): a
+      writer mid-commit loses its CAS and re-merges instead (G2).
+    - The caller's precondition is judged again at every CAS attempt, so a
+      version a writer published after the read is refused
+      (`FileChanged`), never overwritten unseen.
+    - `promote_draft` commits through the same routine. The draft's
+      metadata now records the body's CRC, because a server-side copy is
+      not attested by every backend.
+    - A mirror (a sole-writer workspace) refuses UI writes (`ReadOnly`).
+    - A save that keeps losing its CAS answers `ConcurrentWrite`
+      (retryable).
+    - The inbox-append path (`track_expecting`) is deleted.
+  - Tests: the gateway tests that pinned the old design are rewritten to
+    P2's guarantees.
+    - A refused save never destroys what the workspace cites.
+    - A caller that goes away after the PUT leaves the citation untouched.
+    - A promote is cited at once.
+    - A failed consume write is still retried, now through the queue.
+    - The out-of-scope promote still widens a scoped tree. That is by
+      design (D4): barrier consume materialises every peer change.
+  - The new commit path is pinned by 4 new tests, and every line of it is
+    mutation-checked. Gateway: verbs 28, battery 24, doctests 5, all green.
+  - Open, for the user:
+    - A UI write's AUTHOR is no longer recorded. It lived in the inbox entry
+      only, and a manifest entry has no author.
+    - A writer's commit gives up after 4 lost merges, so heavy saving can
+      fail writer barriers. That is G2, to be measured.
+  - Delete and rename still go through the cell (slice 2).
+- **lean: a withheld upload re-published the next barrier no longer silently replaces a
+  UI write the writer never integrated (L-126).**
+  - The cause: an upload a peer's sweep took is withheld and its path parked,
+    but the merge base still moved to the installed document, which cites
+    theirs there. The next re-upload then saw theirs as unchanged, and R7
+    never looked.
+  - The fix: a parked path keeps the merge base it had (or none). This
+    applies at step 7, and in `merge_base`'s journal route through a new
+    `IntentJournal::installed_parked`.
+  - Tests: 5 new tests, each failing unfixed, with every fix line
+    mutation-checked. Syncer 274 green.
+  - Model: `LeanCore` gains `ParkedKeepsMergeBase`, with a holds world and a
+    known-bad world at one path and three barriers (every earlier core world
+    had two).
+  - Traces: a new conformance scenario (`withheld_republished_over_a_ui_save`)
+    and its trace control. The core trace check is 43/43.
+  - This is the interim fix. P2 + P1-lite, where the merge base IS the
+    baseline, remove the class.
+- **lean: a UI delete one writer refused no longer removes that writer's newer
+  work through a peer (L-125).** A writer that applies a declared removal (an
+  answered record) whose delete the merge outranks now drops the named version
+  from its baseline at step 7. The newer version then arrives as a clean
+  adoption, not as an "absence" read as dirty and then deleted. An agent's own
+  outranked delete is unchanged (mine wins, theirs preserved). LeanCore models
+  it as `OutrankedRemovalLeavesBaseline`; the LeanSubtree half is staged in
+  `lean/formal/pending/`.
 
 - **Every shipped runtime image now builds on Chainguard.** The two
   operator images take `cgr.dev/chainguard/static`, the rest `wolfi-base`,
