@@ -1,0 +1,8 @@
+ws-a write after revoke: [Errno 5] Input/output error
+ws-a lock re-take: ok
+ws-b write after revoke: [Errno 5] Input/output error
+ws-b lock re-take: ok
+Exception ignored in: <_io.TextIOWrapper name='/mnt/ka/f' mode='r+' encoding='UTF-8'>
+OSError: [Errno 5] Input/output error
+Exception ignored in: <_io.TextIOWrapper name='/mnt/kb/f' mode='r+' encoding='UTF-8'>
+OSError: [Errno 5] Input/output error

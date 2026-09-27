@@ -57,7 +57,7 @@ lite hub:
 |---|---|---|
 | Every filehandle carries the hub's `instance_id` **in the clear at bytes [1..9]**, all four formats (v1/v2/v3 and v4 kernel handles) | `nfs/v4/filehandle.rs:12-35`, `nfs/v4/fh_kernel.rs:12-14` | A routing key in every PUTFH. **The proxy never rewrites a filehandle.** |
 | `instance_id` is stable per volume (`stable_nfs_instance_id`, a hash of the volume id) | `rwx_nfs.rs:53` | The key survives hub restarts, so a routing table stays valid. |
-| Clientids, stateids and locks are **persisted**; only sessions are dropped on restart | `state.db`, see NFSv4 persistence (2026-06-12) | A hub restart looks to its clients like `BADSESSION` → `CREATE_SESSION` on the same clientid. No reclaim. |
+| Clientids, stateids and locks are **persisted**; only sessions are dropped on restart | `state.db`, see NFSv4 persistence (2026-06-12) | A hub restart looks to its clients like `BADSESSION` → `CREATE_SESSION` on the same clientid. No reclaim. **Measured** in census Part 2, with one exception: `CLOSE` of an open held across the restart with a lock returns `BAD_STATEID` (defect D2). |
 | With one export, `PUTROOTFH` returns the export root directly | `nfs/v4/operations/fileops.rs:2031` | A hub's root **is** the workspace root; the proxy owns the only pseudo-root. |
 | Delegations are gated off (`FLINT_NFS_DELEGATIONS` unset; lite's render does not set it) and standalone hands out no pNFS layouts | `nfs/v4/state` `delegations_enabled()` | **No callbacks to relay.** The back channel can be accepted and left idle in v1. |
 
@@ -71,7 +71,8 @@ and `fsid_major` is the backing file's `st_dev`
 
 **The pseudo-root belongs to the proxy.** `/` lists one entry per
 workspace. The proxy answers `PUTROOTFH`, `LOOKUP`, `GETATTR`,
-`ACCESS`, `READDIR`, `SECINFO_NO_NAME` and `GETFH` on it itself. Its
+`ACCESS`, `READDIR`, `SECINFO_NO_NAME` and `GETFH` on it itself, and
+does **not** advertise `xattr_support`, matching the hubs. Its
 filehandle uses a marker byte no hub mints, and its `fsid` is distinct
 from every hub's.
 
@@ -82,7 +83,7 @@ op by op and tracks which target the current FH belongs to:
 |---|---|
 | `PUTROOTFH` | proxy (pseudo-root) |
 | `PUTFH fh` | hub named by `fh[1..9]`; unknown instance → `NFS4ERR_STALE` |
-| `LOOKUP name` at the pseudo-root | **crossing**: hub `name`; the proxy replaces `PUTROOTFH, LOOKUP name` with `PUTROOTFH` to that hub |
+| `LOOKUP name` while the current FH is the pseudo-root | **crossing**: hub `name`; the proxy sends `PUTROOTFH` to that hub in place of the pseudo-root FH and the `LOOKUP`. Linux never sends `PUTROOTFH, LOOKUP` together: it sends **`PUTFH(pseudo-root), LOOKUP`** (census s1, s4) |
 | `LOOKUPP` at a hub's root | proxy (pseudo-root) — answered by the proxy |
 | `SAVEFH` / `RESTOREFH` | the saved target travels with the saved FH |
 | any other op | same target as the current FH |
@@ -114,7 +115,12 @@ synthesised prefix results (`PUTROOTFH`/`LOOKUP` → `NFS4_OK`), with
 `numres` and the status fixed up. **The proxy never decodes a READ,
 WRITE, GETATTR or READDIR body.** An op the decoder cannot parse ends
 routing: the rest of the compound goes opaque to the current target,
-which runs the same decoder and fails the same way.
+which runs the same decoder and fails the same way. (Against knfsd,
+every `ls -la` sent `LISTXATTRS`, which the hub's decoder does not
+know. That is because knfsd advertises `xattr_support` and the hub
+does not. Neither the proxy's pseudo-root nor the hubs advertise it,
+so re-capture against a real hub to confirm the client never sends
+it; census s1–s4.)
 
 ## 4. Sessions, identity and state
 
@@ -178,7 +184,7 @@ backend seqids are tracked per hub, never copied from the client.
 |---|---|---|
 | **Hub restarts** (state persisted) | `BADSESSION` → `CREATE_SESSION`, no reclaim | Hub returns `BADSESSION` to the proxy; proxy re-`CREATE_SESSION`s on the same backend clientid and retries. **The client sees nothing but latency.** |
 | **Proxy restarts** | — | The client sees `BADSESSION`, re-`CREATE_SESSION`s on its clientid. That works because the proxy's client table is **persisted** (small SQLite DB on a PVC, written only at `EXCHANGE_ID` confirm and `DESTROY_CLIENTID`). Backend clients are re-attached with the same owner and verifier, so the hubs return the **same** clientid with state intact — no reclaim anywhere. |
-| **Hub loses a client's state** (hibernate deleted the PVC, `state.db` quarantined) | Remount, not resume (hibernate already means this) | Hub returns `STALE_CLIENTID`; proxy re-registers. The client's stateids for that hub now come back as `BAD_STATEID`, and the proxy sets `SEQ4_STATUS_ADMIN_STATE_REVOKED`, which sends Linux into no-grace recovery (`TEST_STATEID`, re-open) for **that workspace only**. Expiring the whole downstream client instead would make the client reclaim state on every other hub, which is not in grace. **Drill-verify** the Linux recovery path. |
+| **Hub loses a client's state** (hibernate deleted the PVC, `state.db` quarantined) | Remount, not resume (hibernate already means this) | Hub returns `STALE_CLIENTID`; proxy re-registers. **The proxy must NOT set `SEQ4_STATUS_ADMIN_STATE_REVOKED`.** The census measured Linux 6.12 treating that flag client-wide: revoking one export's state lost byte-range locks in the *other* export on the same session (census Part 3). Behind the proxy, that means every workspace the node mounts. Instead: (1) **hibernation requires zero live leases** (the HIB-1 fix), so hibernation never destroys state a client holds; (2) for the remaining losses, return per-op errors on that hub's stateids only, with no SEQUENCE flag. Whether Linux keeps that recovery per-state is **unmeasured** and is the step-3 drill. |
 | **Hub parked** (idle ladder, replicas 0) | `hard` mount hangs; nothing can wake it (an NFS client cannot write an annotation) | Proxy gets connection refused, stamps `chert.us/requested-at` on the FlintShare (the hub-gateway's `/wake` code), and returns **`NFS4ERR_DELAY`** until the hub is Ready. **This fixes the agent-mount hazard** for proxied clients. |
 
 The last row is an improvement over direct mounts: the proxy is the
@@ -205,12 +211,18 @@ no tier or state_backend test changes.
   first open. A learned stateid→hub map does not fix it: one downstream
   client can hold the **same** `other` on two hubs. Fan-out is wrong
   too, because `FREE_STATEID` on the wrong hub frees real state.
-  **Fix: seed the hub's `next_stateid` counter's top 32 bits from
-  `instance_id`**, so `other[0..4]` names the hub. A census of every
-  place that mints `other` is owed before code. There are at least
-  four layouts: `stateid.rs:704`, `stateid.rs:757` (delegation, epoch
-  XOR), `state/mod.rs:243`, and `BREAKER_MARKER_TAG` at
-  `stateid.rs:645`, which already uses `other[0]` as a tag.
+  **Fix (census 2026-09-27): put a hub tag in `other[8..12]`**, where
+  `allocate` now writes `client_id as u32`. Production code writes
+  that field but never reads it. The counter keeps 64 bits (the rejected
+  alternative, a tag in the counter's top bits, wraps a persisted
+  32-bit counter in about 50 days at 1,000 opens/s). The tag is
+  **assigned** by the operator (unique u32, recorded in the share's
+  status and passed as env), never hashed. The delegation mint's
+  anti-reuse epoch moves out of `[8..12]`. Only `allocate` and
+  `allocate_delegation` mint client-visible stateids; the `0xFC`
+  lock-table keys and the breaker marker never reach the wire.
+  `LAYOUTRETURN` FSID/ALL and `DELEGPURGE` are also FH-less, but
+  carry no live state in lite, so the proxy answers them itself.
 - **Decoder byte ranges** (§3). This is additive and changes no
   behaviour.
 
@@ -408,6 +420,13 @@ intact.
   credential into each backend call. An RPCSEC_GSS context is bound to
   the server principal and cannot be passed through. krb5 means the
   proxy terminates GSS itself, which is v2.
+- **One client for every workspace on a node.** Behind the proxy, all
+  workspaces a node mounts share one NFS client and one session
+  (census s2). Any client-wide event now spans workspaces. The one
+  measured so far: Linux's recovery after
+  `SEQ4_STATUS_ADMIN_STATE_REVOKED` loses locks in every export on the
+  session, not only the revoked one (census Part 3). §4 avoids ever
+  sending it. Direct mounts never had this coupling.
 - **Delegations stay off behind the proxy.** Enabling them means
   relaying `CB_RECALL` from hub to client over the back channel, which
   is v2.
@@ -519,7 +538,10 @@ port are still wanted for capacity and failure isolation.
    §4, and `NFS4ERR_DELAY` + wake.
 4. Chart/operator wiring, with **headless hub Services** (§7a).
 5. **Scale prerequisites (§7a):** hibernate as the inactive default,
-   with HIB-1 re-derived first; operator-driven hub restart after a
+   with **zero live leases as a hibernation precondition** (the HIB-1
+   fix, and now required by §4); hub defects **D1** (`FREE_STATEID` →
+   `LOCKS_HELD` after the last `LOCKU`) and **D2** (`CLOSE` →
+   `BAD_STATEID` after a restart) fixed test-first; operator-driven hub restart after a
    flint-csi-node roll; hibernated share = CR only.
 6. **Real-hub rig** (never run: the 3,000-share rig used stubs): 10–30
    real hubs behind the proxy at 1,000–10,000 files each, measuring
@@ -555,10 +577,16 @@ Drills. Each one needs an arm that fails when the mechanism is removed:
 
 - Whether Linux's no-grace recovery after `SEQ4_STATUS_ADMIN_STATE_REVOKED`
   recovers opens on the affected workspace **without** disturbing the
-  others. This decides the hibernate row in §4.
+  others. **Answered by the census (Part 3): NO.** Linux 6.12 lost
+  locks in the other export too. So §4 never sets the flag. The open
+  question is now whether per-op stateid errors *without* the flag stay
+  per-state. That is the step-3 drill.
 - Whether the hub accepts a `CREATE_SESSION` without a back channel,
   and behaves correctly with one. With delegations off it should never
   use it; confirm that.
 - The hub's lease time and the proxy margin, as concrete numbers.
-- Whether any real client compound crosses targets in a way §3 refuses.
-  Step 0's capture answers this.
+- ~~Whether any real client compound crosses targets in a way §3
+  refuses.~~ **Answered by the census:** none did. Crossings are
+  `PUTFH(pseudo-root), LOOKUP`; a cross-workspace rename never leaves
+  the client when the fsids differ; `LOOKUPP` did not appear. See
+  `flint-lite-nfs-proxy-census-2026-09-27.md`.

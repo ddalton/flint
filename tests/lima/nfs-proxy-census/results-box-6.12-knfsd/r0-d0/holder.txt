@@ -1,0 +1,4 @@
+ws-a write after revoke: ok
+ws-a lock re-take: ok
+ws-b write after revoke: ok
+ws-b lock re-take: ok
