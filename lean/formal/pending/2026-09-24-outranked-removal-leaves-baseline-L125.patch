@@ -1,0 +1,23 @@
+--- a/LeanSubtree.tla	2026-09-24 17:36:49
++++ b/LeanSubtree.tla	2026-09-24 17:36:49
+@@ -673,6 +673,7 @@
+                        \* the CAS with no fence at all.  A holder deposed in
+                        \* between loads its successor's ROTATED document
+                        \* and its CAS lands on it.
++  OutrankedRemovalLeavesBaseline, \* L-125: TRUE = the code since 2026-09-24
+   RemovalNamesGen,     \* Review 2026-09-18, H4: TRUE = a declared removal
+                        \* carries the generation it was judged against (the
+                        \* code's `Removal::etag`, in the cell; here
+@@ -3213,6 +3214,12 @@
+          ELSE IF /\ p \in sc[s].scanD /\ sc[s].instSnap[p] = 0
+                  /\ (~BaselineKeepsUncollected \/ p \in sc[s].gcTook)
+               THEN 0
++         \* L-125 (2026-09-24): a DECLARED removal whose delete the merge
++         \* outranked -- the tree has left the version it named, so the
++         \* newer one adopts at a clean path (`barrier.rs` step 7).
++         ELSE IF /\ OutrankedRemovalLeavesBaseline
++                 /\ p \in sc[s].scanD \cap sc[s].declared /\ sc[s].instSnap[p] # 0
++              THEN 0
+          ELSE @[p]],
+        ![s].instBase = sc[s].instSnap,
+        ![s].surfaced = @ \ ((sc[s].scanU \cap sc[s].upDone)

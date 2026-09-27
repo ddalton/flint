@@ -182,15 +182,23 @@ CONSTANTS
                        \* `status: "ok"` whenever nothing was parked.
                        \* FALSE in every pre-existing cfg: citeDropped
                        \* stays {} there, so their spaces are preserved.
-  MineIsNotForeign,    \* TRUE = an entry that matches OUR OWN BASELINE is
-                       \* not a foreign change, whatever the merge base
+  MineIsNotForeign,    \* TRUE = a commit that finds the pointer still at
+                       \* the document IT installed merges onto THAT
+                       \* document, whatever the persisted merge base
                        \* says.  The merge base is rewritten at step 7,
                        \* so a barrier that crashed between its manifest
                        \* CAS and that rewrite leaves the workspace's own
                        \* installed entry looking like somebody else's —
                        \* and delete/modify then resolves conservatively
                        \* AGAINST the agent's own delete.  FALSE = the
-                       \* shipped rule THIS MODEL REFUTED.
+                       \* shipped rule THIS MODEL REFUTED
+                       \* (`LeanSentinelStaleMergeBase`).  2026-09-21: the
+                       \* MECHANISM is now the code's — the intent
+                       \* journal's `installed_etag`, read at the merge
+                       \* (`MergeBase`) — and not a flat set of every
+                       \* generation the writer ever knew, which excused
+                       \* far more than this window and hid the defect
+                       \* `LeanCoreForeignFlat` prices.
   BackstopEnabled,     \* TRUE = the noncurrent-retention lifecycle rule
                        \* fires.  It is a BACKSTOP, never the reaper, and
                        \* enabling it is a mutation: on `files/` it cannot
@@ -608,7 +616,7 @@ CONSTANTS
                        \* document's `tombstones`), until the path is
                        \* cited again; a repair whose generation the
                        \* tombstone names is void.  FALSE = what shipped.
-  SupersedeRestoresBase \* Review 2026-09-18, H1f (the four-barrier orphan
+  SupersedeRestoresBase, \* Review 2026-09-18, H1f (the four-barrier orphan
                        \* world, every arm above on): a queued deletion
                        \* is SUPERSEDED — the manifest re-cited the path
                        \* with a newer generation — and settled; the pull
@@ -626,6 +634,149 @@ CONSTANTS
                        \* so the next install queues the deletion again,
                        \* or the upsert if the re-cite still stands.
                        \* FALSE = what shipped.
+  AckFromCarrier,      \* Review 2026-09-18, H10 (the crash world at
+                       \* OrphanTrack = TRUE, depth 25): the barrier that
+                       \* CARRIED a declaration is not always the one whose
+                       \* report the ack reads.  A restart after step 7
+                       \* and before the ack loses the in-memory honor;
+                       \* the re-run finds the manifest moved by a peer's
+                       \* delete of the declared path and answers with a
+                       \* PULL-ONLY — `ok`, naming the peer's document,
+                       \* while the tree still holds the declared bytes.
+                       \* (The code has two more routes to the same ack:
+                       \* the ack write failing after the install, and the
+                       \* floor's cadence barrier publishing a declaration
+                       \* whose honor had just failed.)  TRUE = the fix:
+                       \* every install whose barrier began after the
+                       \* consume journals, with its CAS (the code's
+                       \* `IntentJournal::carrier`), the declared paths it
+                       \* published and the ones it dropped; a restart
+                       \* keeps them; and the ack — still naming the
+                       \* writer's latest document — reports as dropped a
+                       \* carried path whose deletion by another writer
+                       \* waits in this writer's queue.  (A first cut named
+                       \* the FIRST carrying install instead; its world
+                       \* went red on Inv_AckBoundaryCoherent in 18 steps:
+                       \* a restart between the CAS and step 7 made the
+                       \* re-run publish the agent's later write, and the
+                       \* ack then named a document older than the tree.)
+                       \* FALSE = what shipped.
+  FenceAfterLoad,      \* Review 2026-09-18, H2 (the fence's position):
+                       \* TRUE = the commit's fence is observed AFTER the
+                       \* manifest load it merges onto — the cell read
+                       \* between that load and the CAS, whose expected
+                       \* etag a successor's rotation moves — which is
+                       \* this module's atomic `~Fenced(s)` on the CAS.
+                       \* FALSE = what shipped: ONE read of the cell at the
+                       \* start of the commit section (`VerifyCell`), then
+                       \* the HEAD fan-out and the window, then the load and
+                       \* the CAS with no fence at all.  A holder deposed in
+                       \* between loads its successor's ROTATED document
+                       \* and its CAS lands on it.
+  OutrankedRemovalLeavesBaseline, \* L-125: TRUE = the code since 2026-09-24
+  RemovalNamesGen,     \* Review 2026-09-18, H4: TRUE = a declared removal
+                       \* carries the generation it was judged against (the
+                       \* code's `Removal::etag`, in the cell; here
+                       \* `gh.remJudged`, kept in the view as the real state
+                       \* it stands for, and recorded in both arms so the
+                       \* shipped one can be judged) and removes only that
+                       \* generation:
+                       \* a newer one refuses it, one still in the inbox
+                       \* defers it.  FALSE = what shipped: any CLEAN
+                       \* version is removed — a UI re-upload after the
+                       \* delete, or an agent write another barrier
+                       \* published in between, was deleted.  The
+                       \* amputation stamp cannot see it (the installer
+                       \* had consumed the write, which reads as ordinary
+                       \* editing), hence `Inv_RemovalNamesItsVersion`.
+  \* ---- immutable object handles (design 2026-09-19, the fix for H6) ----
+  \* `docs/plans/flint-lean-immutable-objects-design.md`.  Every write lands
+  \* at a HANDLE nobody else writes; the manifest cites handles; a handle a
+  \* landed document cites is never overwritten and is deleted only once no
+  \* document cites it.  `objects` (the one slot per path that every 412,
+  \* adopt, park, HEAD-guarded GC and S3-wins arm arbitrates) is FROZEN, and
+  \* `versions[p]` — the substrate the gated tranche left behind — is the
+  \* set of live handles at p.  The shipped Upload/HitlWrite/HitlRename/GC
+  \* are replaced by UploadIO/HitlWriteIO/HitlRenameIO/GCCollect, and an
+  \* orphan sweep (SweepOrphan) collects what nothing cites or tracks.
+  ImmutableObjects,    \* FALSE in every pre-existing cfg: the IO actions are
+                       \* disabled, `versions` stays frozen at Init and the
+                       \* new sc fields at their Init values, so every earlier
+                       \* state space is preserved by construction.
+  RetirePerPath,       \* FALSE = the design: an install retires a handle
+                       \* only if no path of the installed document cites it
+                       \* and no inbox entry names it.  TRUE = the mutation:
+                       \* retirement is judged path by path, so a RENAME —
+                       \* which cites the source's handle at the destination
+                       \* — has its handle collected under the destination's
+                       \* citation (Inv_NoDangling).
+  SweepSparesTracked,  \* TRUE = the design: the sweep never takes a handle an
+                       \* inbox entry names.  FALSE = the mutation: an acked
+                       \* UI write's handle is collected before any barrier
+                       \* consumes it (Inv_HITLDurable).
+  SweepUnderLease,     \* TRUE = the design: the orphan sweep runs inside a
+                       \* barrier's commit section, under the cell, so the
+                       \* commit's re-verification of its own uploads
+                       \* (VerifyUploads) and its CAS are race-free against
+                       \* it.  FALSE = the mutation: a lease-free sweep lands
+                       \* between a writer's verify and its CAS, and the
+                       \* installed document cites a collected handle
+                       \* (Inv_NoDangling).
+  CommitSurfacesForeign, \* TRUE = the design (rule 5): a commit whose
+                       \* upload's path was published past what it
+                       \* integrated surfaces the published version and cites
+                       \* its upload over it knowingly — the slot's 412 arm,
+                       \* taken at the CAS.  FALSE = the mutation, the shape
+                       \* the first HitlOverAny run had: cited over blind
+                       \* (Inv_HITLDurable for an acked write,
+                       \* Inv_NoStaleOverride for a peer's).
+  RenameMovesEntry,    \* TRUE = the design: a rename takes the source's
+                       \* PENDING entry with the citation it moves (the
+                       \* entry is that citation), and the removal names
+                       \* the version the entry was written over.  FALSE =
+                       \* the mutation: the entry stays at the source, and
+                       \* a writer consuming after the move adopts the
+                       \* handle at both names (the core model's first run).
+  AnsweredRecordsApply,\* TRUE = the design: a removal one writer REFUSED
+                       \* still moves the named version out of another tree
+                       \* that holds it clean at the source — a refusal is
+                       \* one tree's answer, not the document's.  FALSE =
+                       \* the mutation, the rule as shipped: every writer
+                       \* skipped an answered record, and a tree that had
+                       \* adopted the source's write before the rename kept
+                       \* it at the old name beside the destination's
+                       \* (Inv_OneName; L-117's shape is its one-barrier
+                       \* lag, closed by the same rule).
+  RepairYieldsToLaterUI,\* TRUE = the design: a citation repair yields to a
+                       \* LATER acked UI write the document already cites at
+                       \* the path (the UI's own hand; the tree takes it
+                       \* through its queue).  FALSE = the mutation, the rule
+                       \* as shipped (the rename world's eighth box run,
+                       \* Inv_HITLDurable at depth 18): the repair re-cited
+                       \* an older adoption over the user's newer write,
+                       \* published by a peer, with no record.
+  RepairRespectsMoves, \* TRUE = the design (R2): a citation repair never
+                       \* re-cites a handle the document cites at another
+                       \* path this install keeps (MovedElsewhere).  FALSE =
+                       \* the mutation, the rename world's fourth box run: an
+                       \* adopter that never saw the removal re-cites the
+                       \* moved handle at its old name (Inv_OneName).
+  QueueYieldsToSync,   \* 2026-09-23: TRUE = a sync prunes the writer-local queue
+                       \* where it moved a path's merge base to a version other
+                       \* than the queued one (`sync.rs` step 6, the L-123 fix).
+                       \* FALSE = the shape before it: sync never read the queue.
+  PendingAdoptionStays \* TRUE = the design: an adoption declined for the
+                       \* MOVE ALONE, at the destination of a rename whose
+                       \* record still waits at its source, keeps its entry
+                       \* in the cell — the collector spares what an entry
+                       \* names, and the next barrier of any writer cites it
+                       \* once the source has left.  FALSE = the mutation,
+                       \* the rule as shipped (the rename world's tenth box
+                       \* run, L-119): the entry left the cell with the rest
+                       \* of the consumed, nothing but the source's citation
+                       \* named the handle, the peer applying the answered
+                       \* record removed that, and the collector took it —
+                       \* the rename lost with no record (Inv_HITLDurable).
 
 \* A cfg cannot write a sequence literal; it substitutes one of these
 \* (`Writers <- TwoWriters`).
@@ -746,6 +897,17 @@ vars == <<cellEpoch, cellHolder, cellQueue, cellHandoff, cellReleased,
                               baseline's.  Leaves at Finish once an upload
                               of it is cited; a withheld one stays dirty.
                               {} unless MaxSameBytes > 0
+     surfaced SUBSET Paths   the code's consume-dirty SENTINEL (`size ==
+                            u64::MAX` on the baseline entry): the baseline
+                            names a version this tree SURFACED — the local
+                            edit publishes over it knowingly — not one it
+                            holds, so the path is never a citation repair
+                            (and never a repair's "moves off" either); it
+                            clears when the baseline entry is rewritten (an
+                            upload, a landed delete, an adoption).  Without
+                            it the first run of the core model (LeanCore)
+                            re-cited a refused rename's moved handle at the
+                            source after the agent deleted its edit there.
      repairMoved SUBSET Paths the last install's DECLINED citation repairs:
                               paths this writer integrated whose key held a
                               newer generation at the CAS (BarrierLease
@@ -815,6 +977,31 @@ vars == <<cellEpoch, cellHolder, cellQueue, cellHandoff, cellReleased,
                               makes the uniform crash rule reachable.
      pendReRun BOOLEAN        this pending record survived a restart —
                               the ghost `ProbeAckAfterCrash` names.
+     verifiedAt Nat           H2 (FenceAfterLoad = FALSE only): the epoch of
+                              the commit section whose one cell read
+                              (`VerifyCell`) found it still held.  A claim
+                              mints a new epoch, so a stamp from an earlier
+                              section never matches.
+     carryPaths SUBSET Paths  H10 (AckFromCarrier only): the dirty paths
+                              the installs whose barriers began after the
+                              latest consume published, journalled with
+                              each CAS.  Survives a restart (the intent
+                              journal); cleared by the next consume, the
+                              ack, the retire and a pod replacement.
+     carryDropped SUBSET Paths the declared deletes those installs'
+                              merges outranked (their `citeDropped`): a
+                              `partial` survives the restart too.
+     retire   [Paths -> Nat]  ImmutableObjects only: per path, the handle
+                              the document THIS barrier installed stopped
+                              citing (0 = none) — computed at the CAS from
+                              the document it merged onto, exactly as the
+                              code's step 6 would read `current` — and
+                              collected by GCCollect.  All 0 otherwise.
+     upGone   SUBSET Paths    ImmutableObjects only: the uploads this
+                              commit's VerifyUploads found collected (the
+                              sweep took them); the CAS withholds them.
+     upVerified BOOLEAN       ImmutableObjects only: VerifyUploads has run
+                              in this commit section.
      owed     SUBSET Nonces   every nonce this incarnation has CONSUMED.
                               Never shrinks while the pod lives; dies
                               with the pod, because a pod replacement
@@ -829,7 +1016,6 @@ vars == <<cellEpoch, cellHolder, cellQueue, cellHandoff, cellReleased,
                               This is what the refuted sync reads.
    gh fields:
      amputated  BOOLEAN  an acked HITL write silently lost (either stamp site)
-     resurrected BOOLEAN an unpublished delete undone by re-materialize
      stragglerInstalls, stragglerCas, deposedPuts : Nat
      barriers, done, gc, gcCited, refusals, cited, takeovers, crashes, restarts : Nat
      adoptOwn : Nat      the own-crashed-PUT 412 adoption fired
@@ -910,7 +1096,27 @@ vars == <<cellEpoch, cellHolder, cellQueue, cellHandoff, cellReleased,
      emptyInstalls 0|1    a commit installed nothing (CASInstall)
      tombRemoved 0|1      a queued deletion removed a clean copy (Consume)
      tombSuperseded 0|1   a queued deletion was superseded by an object
-                            at the key — the fix firing (Consume) *)
+                            at the key — the fix firing (Consume)
+     ---- immutable object handles ----
+     swept    Nat         the orphan sweep collected a handle (SweepOrphan;
+                            read only by its probe)
+     answered SUBSET Paths  the paths with an ANSWERED (refused) removal
+                            record standing in the cell — real cell state
+                            (`Removal.refused`), superseded by a fresh
+                            request for the path
+     remOver  [Paths -> Gens] for a rename of a pending entry: the version
+                            that entry was written over (`Removal.over`);
+                            a tree holding it holds a version the request
+                            covers.  0 = none
+     uiBase   SUBSET (Paths \X Gens \X Gens)  ImmutableObjects only: for
+                            each entry the gateway appended, <<p, g, b>> —
+                            the version the UI READ when it wrote g at p
+                            (the code's `InboxEntry.cited`, real cell
+                            state).  A consume adopts g only while that is
+                            still the truth at p: a citation that moved to
+                            a later UI write supersedes it, one that moved
+                            to a writer's publish makes it a conflict.  A
+                            rename's destination entry has base 0. *)
 
 ------------------------------------------------------------------------------
 (* Helpers *)
@@ -966,10 +1172,44 @@ AckedSrc(s) == IF BarrierLease THEN sc[s].instSrc ELSE manSrc
    CASInstall so the PULL-ONLY boundary — which merges and installs
    nothing — reads the same rules.  CASInstall's bodies are unchanged;
    see the comments there for why each reads as it does.                *)
+(* The MERGE BASE this commit merges onto, which is not always the
+   persisted one.  Step 7 rewrites `instBase` AFTER the CAS and the
+   collector, so a restart in that window leaves it a generation behind a
+   document THIS workspace installed — and then every entry in that
+   document reads as somebody else's change: the writer's own publish is
+   foreign, its agent's delete is outranked by it (delete/modify resolves
+   conservative), and the ack still says ok.  The code recovers exactly
+   here, at the merge, from the one record that survives that window:
+   `IntentJournal::installed_etag`, written immediately after the CAS
+   returns and before the deletes (`barrier.rs`: "If the bucket is still
+   at the document THIS workspace installed, that document IS the merge
+   base — whatever the persisted one says").  The test is the pointer's,
+   not the path's: the seq this writer installed is still the seq the
+   pointer carries.  `MineIsNotForeign = FALSE` is the shape without
+   it, and `LeanSentinelStaleMergeBase` is the world that refutes it —
+   the route above, `Inv_AckImpliesCited` at depth 18.
+
+   It was invisible until 2026-09-21 because the flat `known` hid it: a
+   writer recognised its own publish by GENERATION, anywhere, so a stale
+   merge base cost nothing.  Asking per path, as the code does, took that
+   cover away.                                                          *)
+MergeBase(s) ==
+  IF MineIsNotForeign /\ sc[s].jSeq # 0 /\ sc[s].jSeq = manSeq
+  THEN manifest ELSE sc[s].instBase
+\* 2026-09-21: `MineIsNotForeign`'s exemption asks PER PATH, because that
+\* is what the code asks.  `manifest.rs::merge` has no exemption at all —
+\* changed against the merge base is theirs, full stop — and the one the
+\* commit applies lives in its R7 surfacing loop (`barrier.rs`): does my
+\* baseline hold THAT handle AT THIS PATH, right now?  It used to read
+\* `manifest[p] \notin sc[s].known`, one flat set per writer, which let a
+\* peer that held the seed at a rename's SOURCE publish over the renamed
+\* destination and surface nothing (`LeanCoreForeignFlat`, depth 20).
+\* `sc[s].known` keeps its other jobs — the 412 resume, the GC guard, the
+\* adopt — where "this incarnation minted or saw this generation" is the
+\* right question and it is not about a path.
 ForeignEntry(s, p) ==
   /\ MergeCapable
-  /\ manifest[p] # sc[s].instBase[p]
-  /\ (MineIsNotForeign => manifest[p] \notin sc[s].known)
+  /\ manifest[p] # MergeBase(s)[p]
 \* H1b: an adoption made from the untracked sweep's entry is provisional —
 \* `judged[p]` is the citation the sweep judged the object against, and the
 \* repair cites the adoption only while the manifest still cites exactly
@@ -978,16 +1218,154 @@ JudgedStands(s, p) == sc[s].judged[p] = 0 \/ manifest[p] = sc[s].judged[p]
 \* H1e: the manifest's tombstone names the generation this writer holds —
 \* it was published and then removed, knowingly.
 Entombed(s, p) == ManifestTombstones /\ manifest[p] = 0 /\ gh.tomb[p] = sc[s].baseline[p]
+\* Immutable handles: the ONE question every same-key read used to ask —
+\* "does the key still hold the generation I integrated / the entry names?"
+\* — becomes "does that handle still exist at the path?".  Under the shipped
+\* arm the two are the same test written the old way.
+HoldsGen(p, g) == IF ImmutableObjects THEN g \in versions[p] ELSE objects[p] = g
+\* A generation number stands for a handle NAME.  Every mint is unique, so
+\* two paths hold the same handle only through a rename — a citation move,
+\* which keeps the generation (`renamed` records <<p, q, g, g>>).  The seed
+\* generation is one NUMBER at every path but a different handle at each
+\* (`files/p2@1` is not `files/p1@1`), so retiring or sweeping it at one
+\* path never touches another.  The first RetirePerPath run said otherwise
+\* at depth 9 with no rename in its trace: the collector was reading the
+\* model's numbers as names.
+Aliased(p, q, g) == p # q /\ \E r \in gh.renamed : r[3] = g /\ r[4] = g /\ {r[1], r[2]} = {p, q}
+SameHandle(p, q, g) == p = q \/ Aliased(p, q, g)
+\* The newest tracked version at p, or the citation: what the read door
+\* serves (`TrackedGen` reads the same), and, under handles, what the
+\* rename and the sync verb read where the shipped model read the slot.
+TrackedOrCited(p) ==
+  IF \E pr \in inbox : pr[1] = p /\ HoldsGen(p, pr[2])
+  THEN CHOOSE g \in {pr[2] : pr \in {x \in inbox : x[1] = p /\ HoldsGen(p, x[2])}} :
+         \A h \in {pr[2] : pr \in {x \in inbox : x[1] = p /\ HoldsGen(p, x[2])}} : h <= g
+  ELSE manifest[p]
+\* Handles: the handle this tree would re-cite at p is cited by the document
+\* at ANOTHER path — a rename moved it there (a citation move is the only
+\* way one handle reaches two names), and p was its source.  Not p's to
+\* re-cite.  The slot expressed this by being collected at the source; a
+\* handle kept for the destination is still there to be found (the third
+\* box run of the rename world: an adopted UI write, renamed by the UI and
+\* performed by a peer, was re-cited at its old name by the adopter's
+\* repair, and Inv_RenameAtomic saw one handle under both names).
+\* ...unless THIS install moves that other path off the handle: it deletes
+\* q (this writer performs the rename, p is its destination, and the source
+\* leaves in the same generation — `LeanImmutableProbeRename` and
+\* Inv_RenameNoHole are what the rule without this clause broke), uploads
+\* another generation at q, or repairs q to another generation (the UI
+\* wrote the source again after the move, H4's kept-both-versions shape).
+\* An upload the re-read WITHHELD (`upGone`) moves nothing: the merge drops
+\* it and q keeps the citation it had.  Reading the scan's set instead said
+\* a rename's source had moved off the handle when it had not, and the same
+\* install cited the destination's repair beside it — one handle under two
+\* names (found in the core model's two-path world, `Inv_OneName` at depth
+\* 21, 2026-09-20; the code reads the same thing, a withheld upload leaving
+\* `upserts` before `void_stale_repairs` walks it).
+KeepsAt(s, q, g) ==
+  \* A declared delete only removes the citation if the merge APPLIES it,
+  \* and delete/modify resolves conservative: theirs wins where theirs
+  \* moved off the merge base.  Reading `scanD` alone said "this install
+  \* moves q off the handle" for a delete the install was about to
+  \* OUTRANK, so the repair at the source went ahead and one handle was
+  \* cited under two names (`LeanImmutableRenameHolds`, `Inv_OneName` at
+  \* depth 18, found when the merge stopped exempting versions the tree
+  \* had integrated and more deletes began to be outranked).  This
+  \* mirrors `inst`, where `foreign(q)` is read BEFORE `q \in scanD`.
+  /\ (q \notin sc[s].scanD \/ ForeignEntry(s, q))
+  /\ ~(q \in sc[s].scanU \ sc[s].upGone /\ sc[s].scanGen[q] # g)
+  \* ...and the THIRD conjunct had the same defect as the other two, which
+  \* is why this rule kept being wrong one route at a time: it reads an
+  \* OWED REPAIR at q as one that HAPPENS.  `RepairOwed` refuses a path the
+  \* scan is already publishing or that is parked, so where q is in `scanU`
+  \* or `parked` this install repairs q to NOTHING and q keeps the citation
+  \* it had.  Reading the baselines alone said the source of a rename had
+  \* moved off the handle when no mechanism moved it — the upload was
+  \* WITHHELD (`upGone`) and the repair was blocked by that same upload —
+  \* and the destination's repair was cited beside it: one handle under two
+  \* names (`LeanImmutableRenameHolds`, `Inv_OneName` at depth 21,
+  \* 2026-09-22, a COMPLETE depth-21 graph at 182,220,773 distinct).
+  \* Gating on `RepairOwed` itself would not elaborate: it calls
+  \* `MovedElsewhere`, which calls this.  These are its two non-recursive
+  \* blockers, and neither loses a case — an upload at q that STANDS is
+  \* conjunct 2's business, and nothing publishes at a parked path.
+  /\ ~(/\ q \notin sc[s].surfaced
+       /\ q \notin sc[s].scanU /\ q \notin sc[s].parked
+       /\ sc[s].baseline[q] # sc[s].instBase[q] /\ sc[s].baseline[q] # g)
+\* By NAME (SameHandle), as the collector and the sweep judge: the seed
+\* generation at a third path is another handle, and the sixth box run of
+\* the rename world found the rename's own destination declined for it
+\* (Inv_RenameNoHole at depth 13).
+\* The DESTINATION of a rename that was REFUSED meets this rule only while
+\* the source is kept at the handle (L-117, the rename world's seventh box
+\* run: the adopted copy declined while the agent's later delete of the
+\* source waited under the two-scan guard) — one barrier at most, because
+\* an answered record still moves the handle out of the tree once the
+\* tree no longer holds an edit at the source (AnsweredRecordsApply).
+\* Without the rule at all (RepairRespectsMoves=FALSE, the fourth run's
+\* shape) the adopter re-cites the moved handle at its old name: Inv_OneName.
+MovedElsewhere(s, p) ==
+  /\ RepairRespectsMoves /\ ImmutableObjects
+  /\ \E q \in Paths \ {p} : /\ manifest[q] = sc[s].baseline[p]
+                            /\ SameHandle(p, q, sc[s].baseline[p])
+                            /\ KeepsAt(s, q, sc[s].baseline[p])
+\* Handles: the document cites a LATER acked UI write at p than the version
+\* this tree adopted — the UI's own hand.  The repair yields; the queue
+\* brings the newer version to the tree (the rename world's eighth box run:
+\* a repair re-cited an older adoption over it, published by a peer, and
+\* Inv_HITLDurable saw the user's newer write retired with no record).
+SupersededByUI(s, p) ==
+  /\ ImmutableObjects /\ RepairYieldsToLaterUI
+  /\ manifest[p] # 0 /\ <<p, manifest[p]>> \in hitlAcked
+  /\ manifest[p] > sc[s].baseline[p]
 RepairOwed(s, p) ==
-  /\ p \notin (sc[s].scanU \cup sc[s].scanD \cup sc[s].parked)
+  /\ p \notin (sc[s].scanU \cup sc[s].scanD \cup sc[s].parked \cup sc[s].surfaced)
   /\ sc[s].baseline[p] # sc[s].instBase[p]
-  /\ objects[p] = sc[s].baseline[p]
+  /\ HoldsGen(p, sc[s].baseline[p])
   /\ JudgedStands(s, p)
   /\ ~Entombed(s, p)
+  /\ ~MovedElsewhere(s, p)
+  /\ ~SupersededByUI(s, p)
 RepairDeclined(s, p) ==
-  /\ p \notin (sc[s].scanU \cup sc[s].scanD \cup sc[s].parked)
+  /\ p \notin (sc[s].scanU \cup sc[s].scanD \cup sc[s].parked \cup sc[s].surfaced)
   /\ sc[s].baseline[p] # sc[s].instBase[p]
-  /\ (objects[p] # sc[s].baseline[p] \/ ~JudgedStands(s, p) \/ Entombed(s, p))
+  /\ (\/ ~HoldsGen(p, sc[s].baseline[p]) \/ ~JudgedStands(s, p) \/ Entombed(s, p)
+      \/ MovedElsewhere(s, p) \/ SupersededByUI(s, p))
+\* L-119, the rename world's TENTH box run.  A decline is not always a
+\* verdict that the adoption is gone.  Where the ONLY reason is the move —
+\* the handle is live, no tombstone names it, no later UI write took the
+\* path, and the document cites it at the SOURCE of a rename whose record
+\* is still in the cell — the citation is not lost but EARLY: the source
+\* leaves as soon as a tree holding it clean applies the record, and this
+\* path is where the handle is going.  So the adoption is PENDING: the
+\* tree keeps its copy, the entry stays in the cell (the collector spares
+\* what an entry names, and the sweep too), and the next barrier of ANY
+\* writer cites it once the source has gone.  Without the rule the entry
+\* left with the rest of the consumed, the source's citation was the only
+\* thing naming the handle, the peer that applied the answered record
+\* removed it, and the collector took the handle: the rename lost with no
+\* record at either name (Inv_HITLDurable, depth 18).
+\*
+\* Judged at the DESTINATION's decline and nowhere else: a handle moved
+\* AWAY from the adopted path — the document cites it at a path this
+\* install keeps and no record is coming back for it — is gone as before,
+\* which is what the move rule (R2) is for.
+PendingAdoption(s, p) ==
+  /\ PendingAdoptionStays /\ ImmutableObjects
+  /\ RepairDeclined(s, p)
+  \* declined for the MOVE ALONE: every other reason to decline is absent
+  /\ HoldsGen(p, sc[s].baseline[p]) /\ JudgedStands(s, p)
+  /\ ~Entombed(s, p) /\ ~SupersededByUI(s, p)
+  \* ...at the destination of a rename still WAITING at its source: the
+  \* citing path is that source, and its record has not been performed
+  \* (`removals`), or was answered and still applies (`gh.answered` — the
+  \* code's refused record, which stays in the cell for the human).
+  /\ \E q \in Paths \ {p} :
+       /\ manifest[q] = sc[s].baseline[p]
+       /\ SameHandle(p, q, sc[s].baseline[p])
+       /\ KeepsAt(s, q, sc[s].baseline[p])
+       /\ q \in removals \cup gh.answered
+       /\ \E r \in gh.renamed : r[1] = q /\ r[2] = p
 
 \* What a merge queues for the TREE (`merge_onto`'s `foreign` and `gone`):
 \* theirs moved off the merge base at a path this barrier neither uploaded,
@@ -1007,7 +1385,7 @@ MergeGone(s) ==
      /\ q \notin MineInMerge(s) \cup sc[s].scanD
      /\ ~RepairOwed(s, q)
      /\ manifest[q] = 0
-     /\ \/ sc[s].instBase[q] # 0
+     /\ \/ MergeBase(s)[q] # 0
         \* H1b: a voided sweep adoption of a path the manifest no longer
         \* cites — the merge base never had it, so nothing else would
         \* queue the deletion that removes the clean copy.
@@ -1017,7 +1395,7 @@ GonePaths(s) == {pr[1] : pr \in MergeGone(s)}
 \* (Not the baseline's: a consumed UI write not yet re-cited is newer than
 \* what a peer who never saw it deleted, and must survive that delete.)
 \* For a voided adoption the base has nothing: the adopted generation.
-Retired(s, p) == IF sc[s].instBase[p] # 0 THEN sc[s].instBase[p] ELSE sc[s].baseline[p]
+Retired(s, p) == IF MergeBase(s)[p] # 0 THEN MergeBase(s)[p] ELSE sc[s].baseline[p]
 \* `state::queue_foreign`: keyed by path, a later change replaces the
 \* queued one.  Under the mutation nothing is queued at all.
 QueueUpsert(q, new) ==
@@ -1026,6 +1404,16 @@ QueueUpsert(q, new) ==
   ELSE q
 QueuedUpserts(s) == {pr \in sc[s].fq : pr[2] # 0}
 QueuedDeletes(s) == {pr[1] : pr \in {x \in sc[s].fq : x[2] = 0}}
+\* Review 2026-09-18, H10: the declared paths the acked document does not
+\* carry.  Besides this barrier's own drops, under `AckFromCarrier`: what
+\* an earlier carrying install dropped, and a carried path whose deletion
+\* by another writer waits in this writer's queue — the tree still holds
+\* the declared bytes, the acked document does not.
+CarrierDropped(s) ==
+  IF AckFromCarrier
+  THEN sc[s].carryDropped \cup (sc[s].carryPaths \cap QueuedDeletes(s))
+  ELSE {}
+AckDropped(s) == sc[s].citeDropped \cup CarrierDropped(s)
 \* The tombstone pass's rule for ONE queued deletion: does the object at the
 \* key supersede it?  `tracked` = an entry the consume honours names that
 \* object.  Under the fix (H1) the generation the delete retired does not; a
@@ -1036,12 +1424,22 @@ QueuedDeletes(s) == {pr[1] : pr \in {x \in sc[s].fq : x[2] = 0}}
 \* Inv_TreesConverged, where a deletion it would supersede AGAIN is not
 \* pending work (H1f).
 ObjectSupersedes(s, p, tracked) ==
-  /\ TombstoneHeadsKey
-  /\ objects[p] # 0
-  /\ (~TombstoneNamesRetired \/ objects[p] # sc[s].fqRetired[p])
-  /\ (\/ ~LeakSupersedesNothing
-      \/ objects[p] = manifest[p]
-      \/ tracked)
+  IF ImmutableObjects
+  THEN \* No slot to look at: what supersedes a queued deletion is a
+       \* citation of the path again — a DIFFERENT handle than the one the
+       \* delete retired — or an entry this consume honours.  A leaked or
+       \* orphaned handle is invisible here by construction, which is the
+       \* H1/H1b rules with nothing left for them to say.
+       /\ TombstoneHeadsKey
+       /\ \/ (manifest[p] # 0 /\ manifest[p] # sc[s].fqRetired[p])
+          \/ tracked
+  ELSE
+       /\ TombstoneHeadsKey
+       /\ objects[p] # 0
+       /\ (~TombstoneNamesRetired \/ objects[p] # sc[s].fqRetired[p])
+       /\ (\/ ~LeakSupersedesNothing
+           \/ objects[p] = manifest[p]
+           \/ tracked)
 \* Review 2026-09-18, H1f: a queued deletion is pending work — the budget,
 \* not the protocol, stopped it — only if the next consume would APPLY it,
 \* or an entry names what supersedes it (that will be integrated or
@@ -1052,7 +1450,7 @@ ObjectSupersedes(s, p, tracked) ==
 \* written excused it.
 DeletionPending(s, p) ==
   /\ p \in QueuedDeletes(s)
-  /\ LET tracked == \E e \in inbox : e[1] = p /\ e[2] = objects[p]
+  /\ LET tracked == \E e \in inbox : e[1] = p /\ HoldsGen(p, e[2])
      IN ~ObjectSupersedes(s, p, tracked) \/ tracked
 
 Deposed(s)  == cellEpoch > sc[s].epoch
@@ -1143,6 +1541,7 @@ FencedSc(s) ==
         ![s].scanGen = [p \in Paths |-> 0],
         ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}, ![s].gcTook = {},
         ![s].gcHeaded = {}, ![s].gcSeen = [p \in Paths |-> 0],
+        ![s].retire = [p \in Paths |-> 0], ![s].upGone = {}, ![s].upVerified = FALSE,
         ![s].adopted = {}, ![s].noInst = FALSE]
   ELSE [sc EXCEPT ![s].st = "dead"]
 \* `touched` is dirt the generations cannot show: a rewrite with the bytes
@@ -1191,6 +1590,14 @@ Init ==
         scope |-> Paths, prevScan |-> {},
         instBase |-> [p \in Paths |-> 0],
         instSnap |-> [p \in Paths |-> 0], instSeq |-> 0, instSrc |-> "none",
+        \* The intent journal's `installed_etag`: the pointer
+        \* generation this workspace last INSTALLED.  Not instSeq,
+        \* which a checkout and a PULL-ONLY also set — those name
+        \* the document an ACK points at, and the code's journal
+        \* records CASes only (`clear_intent_keys` leaves
+        \* `installed_etag` alone).  Survives a restart: it is a
+        \* file in the workspace.
+        jSeq |-> 0,
         known |-> {}, scanU |-> {}, scanD |-> {},
         scanGen |-> [p \in Paths |-> 0], upDone |-> {}, parked |-> {},
         gcDone |-> {}, gcTook |-> {}, gcHeaded |-> {}, gcSeen |-> [p \in Paths |-> 0],
@@ -1201,13 +1608,15 @@ Init ==
         pendMint |-> 0, pendDirty |-> {},
         honored |-> FALSE, pendReRun |-> FALSE, owed |-> {}, ackN |-> {},
         citeDropped |-> {},
+        carryPaths |-> {}, carryDropped |-> {}, verifiedAt |-> 0,
+        retire |-> [p \in Paths |-> 0], upGone |-> {}, upVerified |-> FALSE,
         fq |-> {}, noInst |-> FALSE,
         fqRetired |-> [p \in Paths |-> 0],
         judged |-> [p \in Paths |-> 0],
-        declared |-> {}, consumed |-> {},
+        declared |-> {}, consumed |-> {}, surfaced |-> {},
         inboxSeen |-> {}, inboxLoaded |-> FALSE]]
   /\ hitlAcked = {} /\ conflicts = {}
-  /\ gh = [amputated |-> FALSE, resurrected |-> FALSE,
+  /\ gh = [amputated |-> FALSE,
            stragglerInstalls |-> 0, stragglerCas |-> 0, deposedPuts |-> 0,
            barriers |-> 0, done |-> 0, gc |-> 0, gcCited |-> 0, refusals |-> 0,
            cited |-> 0, takeovers |-> 0, crashes |-> 0, restarts |-> 0,
@@ -1225,7 +1634,7 @@ Init ==
            ackIncoherent |-> FALSE, fencedOkAck |-> FALSE,
            srcMismatch |-> FALSE,
            partialAcks |-> 0, declaredDrops |-> 0,
-           narrows |-> 0, narrowed |-> {}, narrowRecited |-> {},
+           narrows |-> 0, narrowed |-> {}, narrowRecited |-> {}, narrowDeleted |-> {}, consumeRegressed |-> FALSE,
            removals |-> 0, removalsApplied |-> 0, removalsRefused |-> 0,
            renamed |-> {}, renamesApplied |-> 0, renameRefused |-> {},
            citedPairs |-> {},
@@ -1238,7 +1647,14 @@ Init ==
            leaked |-> 0, staleAdopt |-> 0,
            retired |-> [p \in Paths |-> 0],
            orphanAt |-> [p \in Paths |-> 0], orphanOutlived |-> 0,
-           leakApplied |-> 0, baseRestored |-> 0, tomb |-> [p \in Paths |-> 0]]
+           leakApplied |-> 0, baseRestored |-> 0, tomb |-> [p \in Paths |-> 0],
+           carrierAck |-> FALSE,
+           remJudged |-> [p \in Paths |-> 0], removalOverreach |-> FALSE,
+           swept |-> 0, answered |-> {}, remOver |-> [p \in Paths |-> 0], uiBase |-> {},
+           \* L-119: entries a barrier consumed, declined for the move
+           \* alone, and left in the cell.  A probe counter — nothing
+           \* reads it but the world that must reach the rule.
+           pendingKept |-> 0]
 
 ------------------------------------------------------------------------------
 (* Lifecycle *)
@@ -1295,7 +1711,7 @@ CrashPod(s) ==
   /\ sc' = [sc EXCEPT ![s].st = "dead",
        ![s].sentTok = 0, ![s].pendN = {}, ![s].pendCov = NoPend,
        ![s].pendMint = 0, ![s].pendDirty = {},
-       ![s].honored = FALSE, ![s].pendReRun = FALSE,
+       ![s].honored = FALSE, ![s].pendReRun = FALSE, ![s].carryPaths = {}, ![s].carryDropped = {},
        ![s].owed = {}, ![s].ackN = {},
        \* Tranche 7: the writer-local queue is a file in the same emptyDir.
        ![s].fq = {}, ![s].fqRetired = [p \in Paths |-> 0], ![s].noInst = FALSE,
@@ -1326,7 +1742,7 @@ CrashPodGated(s) ==
   /\ sc' = [sc EXCEPT ![s].st = "dead",
        ![s].sentTok = 0, ![s].pendN = {}, ![s].pendCov = NoPend,
        ![s].pendMint = 0, ![s].pendDirty = {},
-       ![s].honored = FALSE, ![s].pendReRun = FALSE,
+       ![s].honored = FALSE, ![s].pendReRun = FALSE, ![s].carryPaths = {}, ![s].carryDropped = {},
        ![s].owed = {}, ![s].ackN = {},
        ![s].citeDone = {},
        ![s].declared = {}, ![s].consumed = {}]
@@ -1365,13 +1781,13 @@ Restart(s) ==
             ![s].scanGen = [p \in Paths |-> 0],
             ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}, ![s].gcTook = {},
             ![s].gcHeaded = {}, ![s].gcSeen = [p \in Paths |-> 0],
+            ![s].retire = [p \in Paths |-> 0], ![s].upGone = {}, ![s].upVerified = FALSE,
             ![s].adopted = {}, ![s].noInst = FALSE,
             \* `consumed` is in-memory barrier state; `declared` is the
             \* intent journal, a FILE in the surviving emptyDir (and so is
             \* tranche 7's queue, `fq`, which this leaves alone).
             ![s].consumed = {}]
-       /\ gh' = [gh EXCEPT !.restarts = @ + 1,
-            !.resurrected = @ \/ (RematerializeOnRestart /\ res)]
+       /\ gh' = [gh EXCEPT !.restarts = @ + 1]
   \* Tranche 6: a restarted container that finds the cell HELD by its own
   \* holder_id releases it at startup — it holds nothing in memory, and
   \* the intent journal replays what the previous container left.
@@ -1559,6 +1975,7 @@ Narrow(s) ==
    manifest bump (the refuted v1 reading, InboxEnabled = FALSE).  The
    user reads fresh, so the PUT always matches the current object.      *)
 HitlWrite(p) ==
+  /\ ~ImmutableObjects       \* handles replace this with HitlWriteIO
   /\ gh.hitl < MaxHitl /\ gh.nextGen <= MaxGen
   /\ ~(WindowCheck /\ window # 0)
   /\ HitlOverwritesTrackedOnly =>
@@ -1598,12 +2015,20 @@ HitlRefused ==
    the syncer performs it at its next consume.  Not window-gated (§12):
    a removal touches nothing when it is recorded.                        *)
 Tracked(p) == manifest[p] # 0 \/ \E pr \in inbox : pr[1] = p
+\* H4: the version the gateway resolves for a path — the newest tracked UI
+\* write, else the citation.
+TrackedGen(p) ==
+  LET gs == {pr[2] : pr \in {x \in inbox : x[1] = p}}
+  IN IF gs = {} THEN manifest[p] ELSE CHOOSE g \in gs : \A h \in gs : h <= g
 
 HitlRemove(p) ==
   /\ gh.removals < MaxRemovals
   /\ p \notin removals /\ Tracked(p)
   /\ removals' = removals \cup {p}
-  /\ gh' = [gh EXCEPT !.removals = @ + 1]
+  /\ gh' = [gh EXCEPT !.removals = @ + 1,
+                      !.remJudged = [@ EXCEPT ![p] = TrackedGen(p)],
+                      !.remOver = [@ EXCEPT ![p] = 0],
+                      !.answered = @ \ {p}]
   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox,
                  window, sc, hitlAcked, conflicts>>
 
@@ -1613,6 +2038,7 @@ HitlRemove(p) ==
    destination is acked as a HITL write is.  Window-gated, because it
    carries an entry.                                                    *)
 HitlRename(p, q) ==
+  /\ ~ImmutableObjects       \* handles replace this with HitlRenameIO
   /\ gh.removals < MaxRemovals /\ gh.nextGen <= MaxGen
   /\ p # q /\ p \notin removals /\ q \notin removals
   /\ Tracked(p) /\ ~Tracked(q) /\ objects[q] = 0
@@ -1626,6 +2052,7 @@ HitlRename(p, q) ==
        \* atomicity is about those bytes, not the name — an agent that
        \* re-creates the old name after the unlink has made a new file.
        /\ gh' = [gh EXCEPT !.nextGen = @ + 1, !.removals = @ + 1,
+                          !.remJudged = [@ EXCEPT ![p] = TrackedGen(p)],
                           !.retired = IF WriterQueue THEN [@ EXCEPT ![q] = 0] ELSE @,
                           !.orphanAt = IF OrphanEntryCited THEN [@ EXCEPT ![q] = 0] ELSE @,
                           !.renamed = @ \cup {<<p, q, objects[p], g>>}]
@@ -1638,7 +2065,7 @@ HitlRename(p, q) ==
    the consume that follows adopts it (clean) or preserves it (dirty), and
    the next commit cites it. *)
 TrackOrphan(p) ==
-  /\ BarrierLease /\ OrphanTrack
+  /\ BarrierLease /\ OrphanTrack /\ ~ImmutableObjects
   /\ \E s \in Syncers : Running(s)
   \* No window guard.  The append the code would use waits for the window
   \* and admits past a dead barrier's at its deadline (`admits_hitl`); the
@@ -1658,6 +2085,92 @@ TrackOrphan(p) ==
        \* H1b: the entry carries the citation it was judged against.
        !.orphanAt = IF OrphanEntryCited THEN [@ EXCEPT ![p] = manifest[p]] ELSE @]
   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, removals,
+                 window, sc, hitlAcked, conflicts>>
+
+(* ---- IMMUTABLE HANDLES: the gateway and the sweep ---------------------- *)
+(* A UI write mints a fresh handle at p and REPLACES the cell's entry for
+   p (`gateway_append` keeps one entry per path); the entry it replaced
+   was the UI's own earlier write, superseded by a party entitled.  The
+   entry records the citation the gateway saw (`InboxEntry.cited`), which
+   is what the consume judges it against.  No guard on what sits at a key:
+   nothing sits at a key, so `hitl_may_overwrite` and the HEAD-to-PUT
+   window have nothing to guard.                                         *)
+HitlWriteIO(p) ==
+  /\ ImmutableObjects
+  /\ gh.hitl < MaxHitl /\ gh.nextGen <= MaxGen
+  /\ ~(WindowCheck /\ window # 0)
+  /\ LET g == gh.nextGen
+         old == {e \in inbox : e[1] = p}
+     IN
+       /\ versions' = [versions EXCEPT ![p] = @ \cup {g}]
+       /\ inbox' = (inbox \ old) \cup {<<p, g>>}
+       /\ hitlAcked' = hitlAcked \cup {<<p, g>>}
+       /\ gh' = [gh EXCEPT !.nextGen = @ + 1, !.hitl = @ + 1,
+               !.retired = IF WriterQueue THEN [@ EXCEPT ![p] = 0] ELSE @,
+               !.uiBase = @ \cup {<<p, g, manifest[p]>>},
+               !.hitlRetired = @ \cup old]
+  /\ UNCHANGED leaseVars
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, removals,
+                 window, sc, conflicts>>
+
+(* A rename is a CITATION MOVE: the destination's entry names the SOURCE's
+   handle, registered at the destination too; no bytes move and nothing is
+   minted.  The source's removal is recorded exactly as before.          *)
+HitlRenameIO(p, q) ==
+  /\ ImmutableObjects
+  /\ gh.removals < MaxRemovals
+  /\ p # q /\ p \notin removals /\ q \notin removals
+  /\ Tracked(p) /\ ~Tracked(q)
+  /\ ~(WindowCheck /\ window # 0)
+  /\ LET src == TrackedGen(p)
+         \* The source's PENDING entry is the citation being moved: it
+         \* goes with it (RenameMovesEntry), retired by the UI's own hand,
+         \* and the removal names what that entry was written over.
+         old == IF RenameMovesEntry THEN {<<p, src>>} \cap inbox ELSE {}
+         fromEntry == <<p, src>> \in inbox
+     IN
+       /\ versions' = [versions EXCEPT ![q] = @ \cup {src}]
+       /\ inbox' = (inbox \ old) \cup {<<q, src>>}
+       /\ removals' = removals \cup {p}
+       /\ hitlAcked' = hitlAcked \cup {<<q, src>>}
+       /\ gh' = [gh EXCEPT !.removals = @ + 1,
+                          !.remJudged = [@ EXCEPT ![p] = src],
+                          !.remOver = [@ EXCEPT ![p] = IF fromEntry THEN manifest[p] ELSE 0],
+                          !.answered = @ \ {p},
+                          !.retired = IF WriterQueue THEN [@ EXCEPT ![q] = 0] ELSE @,
+                          !.uiBase = @ \cup {<<q, src, 0>>},
+                          !.renamed = @ \cup {<<p, q, src, src>>},
+                          !.hitlRetired = @ \cup old]
+  /\ UNCHANGED leaseVars
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, window, sc, conflicts>>
+
+(* The orphan sweep.  A handle nothing cites, no entry names and no
+   conflict record preserves is garbage: a lost writer's upload, a UI
+   write's superseded predecessor, a removal's leftover.  It runs inside a
+   commit section (SweepUnderLease), which is what makes that commit's
+   VerifyUploads and CAS race-free against it; a writer never sweeps its
+   own in-flight uploads (the code knows its flush id).  No grace is
+   modelled — a green run means the grace is not what keeps anything safe;
+   VerifyUploads is (LeanImmutableCasCitesBlind).  Taking an acked write
+   nothing has surfaced or retired is the amputation stamp's third site. *)
+SweepOrphan(s, p, h) ==
+  /\ ImmutableObjects /\ Running(s)
+  /\ SweepUnderLease => (Holding(s) /\ ~Fenced(s))
+  /\ h \in versions[p]
+  \* By name: the handle at p and at any path a rename aliased it to.
+  /\ \A r \in Paths : SameHandle(p, r, h) =>
+       /\ manifest[r] # h
+       /\ SweepSparesTracked => <<r, h>> \notin inbox
+       /\ <<r, h>> \notin conflicts
+       /\ ~(r \in sc[s].upDone /\ sc[s].scanGen[r] = h)
+  /\ versions' = [r \in Paths |-> IF SameHandle(p, r, h) THEN versions[r] \ {h} ELSE versions[r]]
+  /\ gh' = [gh EXCEPT !.swept = @ + 1,
+            !.amputated = @ \/ (/\ <<p, h>> \in hitlAcked
+                                /\ <<p, h>> \notin conflicts
+                                /\ <<p, h>> \notin gh.hitlRetired
+                                /\ <<p, h>> \notin gh.citedPairs)]
+  /\ UNCHANGED leaseVars
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, sc, hitlAcked, conflicts>>
 
 ------------------------------------------------------------------------------
@@ -1711,8 +2224,38 @@ Consume(s) ==
        already == IF WriterQueue
                   THEN {pr \in cand : sc[s].baseline[pr[1]] = pr[2]} ELSE {}
        missing == IF WriterQueue
-                  THEN {pr \in cand \ already : objects[pr[1]] = 0} ELSE {}
-       live == {pr \in cand \ already : objects[pr[1]] = pr[2]}
+                  THEN {pr \in cand \ already :
+                          IF ImmutableObjects THEN ~HoldsGen(pr[1], pr[2])
+                          ELSE objects[pr[1]] = 0}
+                  ELSE {}
+       live0 == {pr \in cand \ already : HoldsGen(pr[1], pr[2])}
+       \* Handles: a gateway entry is judged against the citation the
+       \* gateway saw when it appended (`InboxEntry.cited`).  A citation
+       \* that moved to a LATER UI WRITE supersedes it (dropped, retired by
+       \* the UI's own hand); one that moved to a writer's publish makes it
+       \* a CONFLICT — the acked bytes stay at their own handle, surfaced,
+       \* never adopted over the published version and never dropped in
+       \* silence.  A delete (citation 0) is modify-wins, as it always was.
+       \* A citation that moved to THE ENTRY ITSELF is a peer's publish of
+       \* this very write: the entry is LIVE and the ordinary rules apply
+       \* (a clean tree adopts it, a dirty one surfaces it and publishes
+       \* over it knowingly).  The first HitlOverAny run under handles read
+       \* that as "superseded" and dropped it, and the writer then cited
+       \* its own edit over a version it had never learned (depth 18).  A
+       \* citation that moved to an EARLIER UI write is live the same way:
+       \* this entry is the newer of the two.  "Later" is mint order here;
+       \* the code reads it from the handle's name (design doc, R7).
+       uiOf(pr) == CHOOSE b \in Gens : <<pr[1], pr[2], b>> \in gh.uiBase
+       judgedUI == IF ImmutableObjects
+                   THEN {pr \in (live0 \cap seen) \ QueuedUpserts(s) :
+                           /\ \E b \in Gens : <<pr[1], pr[2], b>> \in gh.uiBase
+                           /\ manifest[pr[1]] \notin {0, uiOf(pr), pr[2]}
+                           /\ ~(/\ <<pr[1], manifest[pr[1]]>> \in hitlAcked
+                                /\ manifest[pr[1]] < pr[2])}
+                   ELSE {}
+       superUI == {pr \in judgedUI : <<pr[1], manifest[pr[1]]>> \in hitlAcked}
+       staleUI == judgedUI \ superUI
+       live == live0 \ judgedUI
        \* Review 2026-09-18, H1b: an entry the untracked sweep appended is
        \* honoured only while the manifest still cites at its path exactly
        \* what the sweep judged the object against.  A citation that moved
@@ -1727,21 +2270,35 @@ Consume(s) ==
                    ELSE {}
        \* ...and an adoption made from a sweep entry that still stands is
        \* PROVISIONAL: it carries the citation the sweep judged against.
-       judgedOf(p) == IF /\ OrphanEntryCited /\ gh.orphanAt[p] # 0
+       judgedOf(p) == IF /\ OrphanEntryCited /\ gh.orphanAt[p] # 0 /\ ~ImmutableObjects
                          /\ <<p, objects[p]>> \in seen \ QueuedUpserts(s)
                       THEN gh.orphanAt[p] ELSE 0
        adoptable == {pr \in live \ outlived :
                        /\ sc[s].local[pr[1]] = sc[s].baseline[pr[1]]
                        /\ pr[1] \notin sc[s].touched}
-       conflicted == (live \ outlived) \ adoptable
+       \* A dirty local copy: local wins, the entry is surfaced, and the
+       \* baseline advances past it so the local version publishes over it
+       \* knowingly.  A stale UI entry (handles) is surfaced only: the path
+       \* is clean at the published version and nothing re-publishes.
+       dirtyConf == (live \ outlived) \ adoptable
+       conflicted == dirtyConf \cup staleUI
        adoptPaths == {pr[1] : pr \in adoptable}
        surfPaths == IF ConflictSurfacing
-                    THEN {pr[1] : pr \in conflicted} ELSE {}
+                    THEN {pr[1] : pr \in dirtyConf} ELSE {}
        advPaths == adoptPaths \cup surfPaths
+       \* Handles: the version a path adopts or advances to is the ENTRY's
+       \* — the newest live one at the path (a queued upsert and a current
+       \* UI entry can both be live; the UI's is the later mint).  The slot
+       \* held exactly that under the shipped arm.
+       Cands(p, S) == {pr[2] : pr \in {x \in S : x[1] = p}}
+       Newest(S) == CHOOSE g \in S : \A h \in S : h <= g
+       GenAt(p) == IF ~ImmutableObjects THEN objects[p]
+                   ELSE IF p \in adoptPaths THEN Newest(Cands(p, adoptable))
+                   ELSE Newest(Cands(p, dirtyConf))
        local1 == [p \in Paths |->
-                    IF p \in adoptPaths THEN objects[p] ELSE sc[s].local[p]]
+                    IF p \in adoptPaths THEN GenAt(p) ELSE sc[s].local[p]]
        base1  == [p \in Paths |->
-                    IF p \in advPaths THEN objects[p] ELSE sc[s].baseline[p]]
+                    IF p \in advPaths THEN GenAt(p) ELSE sc[s].baseline[p]]
        \* ...then the queued DELETIONS, against the tree the entries left
        \* (the code's second loop): nothing on disk settles; a copy that is
        \* dirty — or was never in the baseline — stays and publishes, with
@@ -1757,8 +2314,10 @@ Consume(s) ==
        \* object supersedes only if something will integrate it — the
        \* manifest cites it, or an entry this consume honours names it.
        \* A leak (uncited, untracked) supersedes nothing: the delete applies.
-       tSuper   == {p \in QueuedDeletes(s) \ tAbsent :
-                      ObjectSupersedes(s, p, <<p, objects[p]>> \in live \ outlived)}
+       trackedAt(p) == IF ImmutableObjects
+                       THEN \E pr \in live \ outlived : pr[1] = p
+                       ELSE <<p, objects[p]>> \in live \ outlived
+       tSuper   == {p \in QueuedDeletes(s) \ tAbsent : ObjectSupersedes(s, p, trackedAt(p))}
        tKept    == {p \in QueuedDeletes(s) \ (tAbsent \cup tSuper) :
                       \/ base1[p] = 0
                       \/ local1[p] # base1[p]
@@ -1777,16 +2336,38 @@ Consume(s) ==
        \* declared.  Refusals leave the cell now, with a record;
        \* performed removals leave it at Finish, after the manifest.
        dstOf(p) == {pr[2] : pr \in {x \in gh.renamed : x[1] = p}}
+       \* What the destination reads as: the slot, or under handles the
+       \* newest tracked version there, else its citation.
+       AtKey(q) == IF ImmutableObjects THEN TrackedOrCited(q) ELSE objects[q]
        dstReady(p) == ~RenameWaitsForDestination
-                      \/ \A q \in dstOf(p) : base2[q] = objects[q] /\ local2[q] = base2[q]
+                      \/ \A q \in dstOf(p) : base2[q] = AtKey(q) /\ local2[q] = base2[q]
+       \* Handles: a rename's destination entry that is itself STALE (the
+       \* path was cited by a writer's publish since) is a taken destination.
+       staleAt(q) == \E pr \in staleUI : pr[1] = q
        dstTaken(p) == \E q \in dstOf(p) :
-                        q \in surfPaths \/ (base2[q] = objects[q] /\ local2[q] # base2[q])
+                        \/ q \in surfPaths \/ staleAt(q)
+                        \/ (base2[q] = AtKey(q) /\ local2[q] # base2[q])
+       \* H4: the generation this tree holds is not the one the removal
+       \* named.  Still in the inbox, the named one has not arrived: wait.
+       \* Otherwise it was replaced: refuse, and the newer one stays.
+       \* Handles: a tree holding the version a moved entry was written
+       \* over holds a version the request covers (`Removal.over`).
+       moved(p) == /\ RemovalNamesGen /\ base2[p] # 0 /\ base2[p] # gh.remJudged[p]
+                   /\ ~(ImmutableObjects /\ base2[p] = gh.remOver[p])
+       arriving(p) == <<p, gh.remJudged[p]>> \in inbox
        refused == {p \in removals :
                      \/ (local2[p] # 0 /\ local2[p] # base2[p])
-                     \/ dstTaken(p)}
-       applied == {p \in removals \ refused :
+                     \/ dstTaken(p)
+                     \/ moved(p) /\ ~arriving(p)}
+       \* An ANSWERED record is one tree's answer, not the document's: it
+       \* still moves the named version out of a tree that holds it clean
+       \* at the source (AnsweredRecordsApply), and is never answered twice.
+       applicable == removals \cup (IF ImmutableObjects /\ AnsweredRecordsApply
+                                   THEN gh.answered ELSE {})
+       applied == {p \in applicable \ refused :
                      /\ (local2[p] = 0 \/ local2[p] = base2[p])
-                     /\ dstReady(p)}
+                     /\ dstReady(p)
+                     /\ ~moved(p)}
        declaredNow == IF DeclaredSkipsWalk THEN applied ELSE {}
      IN
        /\ sc' = [sc EXCEPT ![s].pc = "consumed",
@@ -1806,7 +2387,7 @@ Consume(s) ==
             ![s].judged = [p \in Paths |->
                              IF p \in tAbsent \cup tRemoved \cup applied THEN 0
                              ELSE IF p \in advPaths THEN judgedOf(p) ELSE @[p]],
-            ![s].known = @ \cup {objects[p] : p \in advPaths},
+            ![s].known = @ \cup {GenAt(p) : p \in advPaths},
             \* `baseline.prev_scan.insert(entry.path)`: a consumed path
             \* gets the two-scan protection as if the walk had seen it,
             \* so an agent delete right after the consume is a FIRST
@@ -1816,6 +2397,9 @@ Consume(s) ==
             ![s].declared = @ \cup declaredNow,
             \* What this barrier consumed, to leave the cell at Finish.
             ![s].consumed = IF EarlyInboxDrop THEN {} ELSE seen,
+            \* The consume-dirty sentinel: set where a live entry was
+            \* SURFACED, cleared where the baseline was rewritten.
+            ![s].surfaced = (@ \ (adoptPaths \cup tAbsent \cup tRemoved)) \cup surfPaths,
             \* The next barrier reads the cell again.
             ![s].inboxLoaded = FALSE, ![s].inboxSeen = {}]
        /\ conflicts' = conflicts
@@ -1835,7 +2419,8 @@ Consume(s) ==
             \* H1b: a deletion applied over a DIFFERENT object at the key —
             \* one nothing cites and nothing tracks, i.e. a leak.
             !.leakApplied = @ + Cardinality({p \in tRemoved :
-                                               objects[p] # 0 /\ objects[p] # sc[s].fqRetired[p]}),
+                                               /\ ~ImmutableObjects
+                                               /\ objects[p] # 0 /\ objects[p] # sc[s].fqRetired[p]}),
             \* H1f: a superseded deletion actually moved the merge base.
             !.baseRestored = @ + Cardinality({p \in tSuper :
                                                 /\ SupersedeRestoresBase
@@ -1851,11 +2436,41 @@ Consume(s) ==
             !.deferredLater = @ + Cardinality(advPaths \cap gh.deferredPaths),
             !.deferredPaths = @ \ advPaths,
             !.removalsApplied = @ + Cardinality(applied),
+            \* H4's stamp: a removal took a generation it was not judged
+            \* against.  Written only with removals in the world.
+            !.removalOverreach = @ \/ (MaxRemovals > 0 /\
+                                      \E p \in applied : /\ base2[p] # 0 /\ base2[p] # gh.remJudged[p]
+                                                         /\ ~(ImmutableObjects /\ base2[p] = gh.remOver[p])),
+            !.answered = (@ \cup refused) \ applied,
+            \* 2026-09-23: a consume never adopts a version OLDER than the one
+            \* the tree already holds (generations are minted in order): the
+            \* queued peer change a later sync overtook (`sync.rs` never reads
+            \* the writer-local queue).
+            !.consumeRegressed = @ \/ \E p \in adoptPaths :
+                                   /\ sc[s].baseline[p] # 0 /\ GenAt(p) < sc[s].baseline[p]
+                                   \* Mint order is not publish order: a version
+                                   \* displaced KNOWINGLY carries a conflict record.
+                                   /\ <<p, sc[s].baseline[p]>> \notin conflicts,
             !.removalsRefused = @ + Cardinality(refused),
             !.renamesApplied = @ + Cardinality({pr \in gh.renamed : pr[1] \in applied}),
             !.renameRefused = @ \cup {pr \in gh.renamed : pr[1] \in refused},
             !.tombRemoved = IF tRemoved # {} THEN 1 ELSE @,
-            !.tombSuperseded = IF tSuper # {} THEN 1 ELSE @]
+            !.tombSuperseded = IF tSuper # {} THEN 1 ELSE @,
+            \* Handles: an entry a later UI write superseded, and the version
+            \* a DECLARED removal took (a rename's source keeps its handle at
+            \* the destination, so no collector will ever say so), are
+            \* retired here, by the decision that retired them.
+            \* ...and a version this tree had INTEGRATED that a LATER UI
+            \* write at the same path replaces here (the UI's own hand,
+            \* one consume after the slot's overwrite would have said so).
+            !.hitlRetired = @ \cup (IF ImmutableObjects
+                                    THEN superUI \cup {<<p, base2[p]>> : p \in applied}
+                                         \cup {<<p, sc[s].baseline[p]>> :
+                                                 p \in {q \in advPaths :
+                                                          /\ <<q, sc[s].baseline[q]>> \in hitlAcked
+                                                          /\ \E b \in Gens : <<q, GenAt(q), b>> \in gh.uiBase
+                                                          /\ GenAt(q) > sc[s].baseline[q]}}
+                                    ELSE {})]
   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, window,
                  hitlAcked>>
 
@@ -1870,8 +2485,18 @@ Scan(s) ==
   /\ sc' = [sc EXCEPT ![s].pc = "scanned",
        \* A declared removal skips the two-scan guard (§4): the guard
        \* protects against absence INFERRED by a walk, and a
-       \* declaration is not an inference.
-       ![s].scanU = USet(s), ![s].scanD = DSet(s) \cup sc[s].declared,
+       \* declaration is not an inference.  It is NOT a delete, though,
+       \* where the agent re-created the path between the removal pass
+       \* and this walk: the declaration named the file that is gone,
+       \* and what is there now publishes as the agent's own upload
+       \* (`barrier.rs`'s scan skips exactly this, "the model's install
+       \* gives the upload the same precedence").  Modelled as both, the
+       \* path was an upload the re-read could withhold AND a delete,
+       \* and a rename's source then kept its citation while the
+       \* destination was repaired beside it — one handle, two names
+       \* (the core model's two-path world, 2026-09-20).
+       ![s].scanU = USet(s),
+       ![s].scanD = DSet(s) \cup {p \in sc[s].declared : sc[s].local[p] = 0},
        ![s].lastDirty = IF SyncEnabled THEN USet(s) \cup DSet(s) ELSE {},
        ![s].scanGen = [p \in Paths |-> sc[s].local[p]],
        \* `prev_scan = scanned.keys()`.  Read UNPRIMED above by DSet, so
@@ -1891,9 +2516,13 @@ Scan(s) ==
        \* split actually ACCUMULATED across ticks, which is the claim
        \* ProbeCitationInstalled has to make non-vacuous.
        ![s].stageCarried = \E q \in Paths : stage[s][q] # 0,
-       ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}, ![s].gcTook = {}]
+       ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}, ![s].gcTook = {},
+       ![s].retire = [p \in Paths |-> 0], ![s].upGone = {}, ![s].upVerified = FALSE]
   /\ window' = IF BarrierLease THEN window ELSE sc[s].epoch
-  /\ gh' = [gh EXCEPT !.barriers = IF InfiniteBarriers THEN @ ELSE @ + 1]
+  \* A walk that reads a path THIS writer narrowed as a delete: the
+  \* unlink-first narrow's harm, at the one step that decides it.
+  /\ gh' = [gh EXCEPT !.barriers = IF InfiniteBarriers THEN @ ELSE @ + 1,
+                      !.narrowDeleted = @ \cup ((DSet(s) \cap gh.narrowed) \ sc[s].scope)]
   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  hitlAcked, conflicts>>
 
@@ -1918,6 +2547,7 @@ UploadFenced(s) ==
    the commit section only (protocol of record, straggler rules).       *)
 Upload(s, p) ==
   /\ ~GatedCitation          \* gated replaces this with StagePut
+  /\ ~ImmutableObjects       \* handles replace this with UploadIO
   /\ Running(s) /\ sc[s].pc = "scanned"
   /\ p \in sc[s].scanU \ (sc[s].upDone \cup sc[s].parked)
   /\ ~Fenced(s)
@@ -1940,7 +2570,7 @@ Upload(s, p) ==
        THEN \* If-Match passes: the PUT lands
          /\ objects' = [objects EXCEPT ![p] = want]
          /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
-         /\ gh' = [gh EXCEPT !.narrowRecited = @ \cup ({p} \cap gh.narrowed), !.deposedPuts =
+         /\ gh' = [gh EXCEPT !.narrowRecited = @ \cup (({p} \cap gh.narrowed) \ sc[s].scope), !.deposedPuts =
                      @ + (IF DeposedHolder(s) THEN 1 ELSE 0),
                      !.hitlRetired = IF /\ MaxSameBytes > 0 /\ cur # want
                                         /\ cur \in sc[s].known /\ <<p, cur>> \in hitlAcked
@@ -1958,7 +2588,7 @@ Upload(s, p) ==
             \* to GC until this barrier's CAS cites it.
          /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p},
                              ![s].adopted = IF BarrierLease THEN @ \cup {p} ELSE @]
-         /\ gh' = [gh EXCEPT !.narrowRecited = @ \cup ({p} \cap gh.narrowed), !.adoptOwn = @ + 1]
+         /\ gh' = [gh EXCEPT !.narrowRecited = @ \cup (({p} \cap gh.narrowed) \ sc[s].scope), !.adoptOwn = @ + 1]
          /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
                         inbox, removals, window, hitlAcked, conflicts>>
        ELSE IF ConflictSurfacing
@@ -1975,7 +2605,7 @@ Upload(s, p) ==
             /\ objects' = [objects EXCEPT ![p] = want]
             /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
             /\ conflicts' = conflicts \cup {<<p, cur>>}
-            /\ gh' = [gh EXCEPT !.narrowRecited = @ \cup ({p} \cap gh.narrowed),
+            /\ gh' = [gh EXCEPT !.narrowRecited = @ \cup (({p} \cap gh.narrowed) \ sc[s].scope),
                         !.deposedPuts = @ + (IF DeposedHolder(s) THEN 1 ELSE 0),
                         !.interleaved = @ \/ (BarrierLease /\ CellHeld /\ cellHolder # s)]
             /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest,
@@ -1989,6 +2619,23 @@ Upload(s, p) ==
               !.deposedPuts = @ + (IF DeposedHolder(s) THEN 1 ELSE 0)]
          /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, inbox, removals,
                         window, hitlAcked, conflicts>>
+
+(* Immutable handles: the upload is a PUT to a fresh handle — no If-Match,
+   no 412, no adopt, no park, nothing to preserve.  Lease-free as before
+   and never fenced; `Inv_NoDeposedPut` stays the commit section's.     *)
+UploadIO(s, p) ==
+  /\ ImmutableObjects
+  /\ Running(s) /\ sc[s].pc = "scanned"
+  /\ p \in sc[s].scanU \ sc[s].upDone
+  /\ LET want == sc[s].scanGen[p] IN
+       /\ versions' = [versions EXCEPT ![p] = @ \cup {want}]
+       /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
+       /\ gh' = [gh EXCEPT !.narrowRecited = @ \cup (({p} \cap gh.narrowed) \ sc[s].scope),
+                          !.deposedPuts = @ + (IF DeposedHolder(s) THEN 1 ELSE 0),
+                          !.interleaved = @ \/ (CellHeld /\ cellHolder # s)]
+  /\ UNCHANGED leaseVars
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+                 window, hitlAcked, conflicts>>
 
 (* Steps 5+6 in the chosen order.  The GC delete (etag-guarded HEAD:
    refuse any ETag the syncer does not recognize).  Under
@@ -2005,7 +2652,7 @@ GCPhase(s) ==
    GC.  Reads the object's generation and remembers it; the DELETE below
    is then guarded on what was SEEN, not on what is there.              *)
 GCHead(s, p) ==
-  /\ BarrierLease /\ ~ConditionalGC
+  /\ BarrierLease /\ ~ConditionalGC /\ ~ImmutableObjects
   /\ Running(s) /\ GCPhase(s)
   /\ p \in sc[s].scanD \ (sc[s].gcDone \cup sc[s].gcHeaded)
   /\ sc' = [sc EXCEPT ![s].gcHeaded = @ \cup {p},
@@ -2014,6 +2661,7 @@ GCHead(s, p) ==
                  inbox, removals, window, hitlAcked, conflicts, gh>>
 
 GCDelete(s, p) ==
+  /\ ~ImmutableObjects       \* handles replace this with GCCollect
   /\ Running(s)
   /\ GCPhase(s)
   /\ p \in sc[s].scanD \ sc[s].gcDone
@@ -2121,7 +2769,85 @@ CASReady(s) ==
   THEN (IF BarrierLease THEN sc[s].pc = "claimed" ELSE PreCommitReady(s))
   ELSE sc[s].pc = "delDone"
 
+(* ---- IMMUTABLE HANDLES: the commit section's two new steps ------------- *)
+(* The commit re-reads every citation its own uploads add — one HEAD per
+   uploaded handle, the code's `verify_observed_citations` — and withholds
+   what the sweep has taken (VerifyUploadedCitations; FALSE is the mutation
+   LeanImmutableCasCitesBlind).  Its own step, deliberately: a sweep in
+   another writer's commit section cannot land between this and the CAS
+   (SweepUnderLease), and the mutation that lets it is one an atomic
+   verify-and-install could never show — the C2 lesson, applied.         *)
+VerifyUploads(s) ==
+  /\ ImmutableObjects
+  /\ Running(s) /\ CASReady(s) /\ ~sc[s].upVerified
+  /\ sc' = [sc EXCEPT ![s].upVerified = TRUE,
+              ![s].upGone = IF VerifyUploadedCitations
+                            THEN {p \in sc[s].scanU \cap sc[s].upDone :
+                                    ~HoldsGen(p, sc[s].scanGen[p])}
+                            ELSE {}]
+  /\ UNCHANGED leaseVars
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, versions, inbox,
+                 removals, window, hitlAcked, conflicts, gh>>
+
+(* Step 6 under handles.  The retired set — every handle the document this
+   barrier installed stopped citing, minus what it still cites at another
+   path (a rename) and what an inbox entry names — is deleted
+   UNCONDITIONALLY, in one batch, with no HEAD, no fence and no lease: a
+   retired handle is never re-cited (nothing discovers handles from
+   paths), so a deposed straggler's delete is as safe as the holder's.
+   RetirePerPath is the mutation that forgets the rename.                *)
+GCCollect(s) ==
+  /\ ImmutableObjects
+  /\ Running(s) /\ sc[s].pc = "cased"
+  /\ \/ sc[s].scanD \ sc[s].gcDone # {}
+     \/ \E p \in Paths : sc[s].retire[p] # 0
+  /\ LET retiredPairs == {<<p, sc[s].retire[p]>> : p \in {q \in Paths : sc[s].retire[q] # 0}}
+         \* Kept: the installed document cites the handle at another path
+         \* (a rename's destination), or an inbox entry names it.  By NAME
+         \* (SameHandle): the seed generation at another path is another
+         \* handle.  The first run of the RetirePerPath world found this
+         \* collector taking p2's seed for p1's with no rename in the trace
+         \* — the refutation stood, but for the rename it names, not for
+         \* the trace it showed.
+         \* An entry THIS barrier consumed names nothing here: it is judged
+         \* (adopted and cited, surfaced, or declined) and leaves the cell
+         \* at Finish, so a handle only it names is garbage now, not after
+         \* the sweep — the code's `named` excludes the consumed set.
+         kept(p, g) == /\ ~RetirePerPath
+                       /\ \E q \in Paths : /\ SameHandle(p, q, g)
+                                           /\ (\/ sc[s].instSnap[q] = g
+                                               \/ <<q, g>> \in inbox /\ <<q, g>> \notin sc[s].consumed)
+         R == {pr \in retiredPairs : ~kept(pr[1], pr[2])}
+         takes(r) == {pr[2] : pr \in {x \in R : SameHandle(x[1], r, x[2])}}
+     IN
+       /\ versions' = [r \in Paths |-> versions[r] \ takes(r)]
+       /\ sc' = [sc EXCEPT ![s].gcDone = sc[s].scanD, ![s].gcTook = sc[s].scanD,
+                           ![s].retire = [p \in Paths |-> 0]]
+       /\ gh' = [gh EXCEPT !.gc = @ + Cardinality(R),
+                 !.amputated = @ \/ \E pr \in R : Destroys(s, pr[1], pr[2]),
+                 \* RETIREMENT is the collector's decision: the pairs this
+                 \* install stopped citing, collected or moved.
+                 !.hitlRetired = @ \cup retiredPairs]
+  /\ UNCHANGED leaseVars
+  /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+                 window, hitlAcked, conflicts>>
+
+
+\* Review 2026-09-18, H2: the shipped commit section's one cell read.
+Verified(s) == sc[s].verifiedAt = sc[s].epoch
+VerifyCell(s) ==
+  /\ ~FenceAfterLoad /\ BarrierLease
+  /\ Running(s) /\ CASReady(s) /\ ~Verified(s)
+  /\ IF DeposedHolder(s)
+     THEN /\ sc' = FencedSc(s)
+          /\ gh' = [gh EXCEPT !.stragglerCas = @ + 1, !.abandoned = 1]
+     ELSE /\ sc' = [sc EXCEPT ![s].verifiedAt = sc[s].epoch]
+          /\ UNCHANGED gh
+  /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+                 window, hitlAcked, conflicts>>
+
 CASFenced(s) ==
+  /\ FenceAfterLoad
   /\ Running(s) /\ CASReady(s)
   /\ Fenced(s)
   /\ sc' = FencedSc(s)
@@ -2152,7 +2878,7 @@ AbandonBarrier(s) ==
 
 CASMiss(s) ==
   /\ Running(s) /\ CASReady(s)
-  /\ ~Fenced(s)
+  /\ IF FenceAfterLoad THEN ~Fenced(s) ELSE Verified(s)
   /\ manSeq # sc[s].expSeq
   /\ IF DeposedHolder(s)
      THEN \* the 412 handler re-reads the cell and discovers deposal
@@ -2174,6 +2900,7 @@ CASMiss(s) ==
             ![s].scanGen = [p \in Paths |-> 0],
             ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}, ![s].gcTook = {},
             ![s].gcHeaded = {}, ![s].gcSeen = [p \in Paths |-> 0],
+            ![s].retire = [p \in Paths |-> 0], ![s].upGone = {}, ![s].upVerified = FALSE,
             ![s].adopted = {}]
        /\ window' = 0
        /\ UNCHANGED <<conflicts, gh>>
@@ -2184,8 +2911,10 @@ CASMiss(s) ==
 CASInstall(s) ==
   /\ ~GatedCitation          \* gated replaces this with CitePassStep
   /\ Running(s) /\ CASReady(s)
-  /\ ~Fenced(s)
+  /\ IF FenceAfterLoad THEN ~Fenced(s) ELSE Verified(s)
   /\ CommitLoadsCurrent \/ manSeq = sc[s].expSeq
+  \* Handles: the commit has re-read its own uploads first (VerifyUploads).
+  /\ ImmutableObjects => sc[s].upVerified
   /\ LET
        \* Merge semantics: base = instBase (the last-installed view), mine
        \* = the scan-time walk, theirs = the current bucket manifest.  The
@@ -2221,6 +2950,14 @@ CASInstall(s) ==
        \* what this writer integrated.  The code declines silently ("the
        \* next consume reconciles it"); recorded for the ack's judgement.
        declined(p) == RepairDeclined(s, p)
+       \* ...except where the decline is only the MOVE, at the destination
+       \* of a rename still waiting at its source (L-119).  That adoption
+       \* is PENDING, not gone: its entry leaves this barrier's consumed
+       \* set HERE, at the CAS that declined it — before the collector,
+       \* which spares what an entry it did not consume names, and before
+       \* the window clear, which drops what it did.  The code does the
+       \* same, filtering `consumed` on the way out of its CAS loop.
+       pendingNow == {pr \in sc[s].consumed : PendingAdoption(s, pr[1])}
        \* Tranche 6: an adopted entry is re-verified HERE, under the
        \* lease — the object must still hold the bytes the adopt found.
        \* If it does not, another writer's GC took it between the adopt
@@ -2232,12 +2969,46 @@ CASInstall(s) ==
        \* etag is the content hash — identical bytes PUT by this writer
        \* carry it too (`AgentWriteSame`).  So every citation this
        \* commit adds is re-verified, not only the adopted ones.
-       gone == {p \in sc[s].adopted :
+       gone == IF ImmutableObjects THEN sc[s].upGone ELSE
+               {p \in sc[s].adopted :
                   VerifyAdoptedCitations /\ objects[p] # sc[s].scanGen[p]}
                \cup
                {p \in (sc[s].scanU \cap sc[s].upDone) \ sc[s].adopted :
                   /\ BarrierLease /\ VerifyUploadedCitations
                   /\ objects[p] # sc[s].scanGen[p]}
+       \* Handles: the conflict record for a withheld upload names the
+       \* handle the sweep took; the slot named the foreign object.
+       goneRec == IF ImmutableObjects THEN {<<p, sc[s].scanGen[p]>> : p \in gone}
+                  ELSE {<<p, objects[p]>> : p \in gone}
+       \* Handles, rule 5: a path this commit uploaded whose citation moved
+       \* past what it integrated — a peer's publish it never consumed (the
+       \* UI write's entry left the cell before this barrier's consume, or
+       \* the peer's own edit).  The shipped arm met this at the PUT: the
+       \* slot's If-Match failed, and under Upload412Preserves the foreign
+       \* version was surfaced and superseded knowingly.  A fresh handle has
+       \* no slot to fail on, so the CAS — the one place the citation is
+       \* read — takes the same decision: the foreign handle is SURFACED
+       \* (the record is the preserved copy; the handle outlives the CAS
+       \* for the fetch, the collector runs after) and the upload is cited
+       \* over it.  The first HitlOverAny run under handles had no such
+       \* step: an acked write a peer had published was cited over blind,
+       \* at depth 18.  ~CommitSurfacesForeign is that shape.
+       \* ...an upload OR a citation repair: the code's merge surfaces every
+       \* upsert it publishes over a version the tree never integrated (the
+       \* rename world's eighth box run found the model surfacing uploads only).
+       published == (sc[s].scanU \cap sc[s].upDone) \cup {q \in Paths : repair(q)}
+       \* R7's own filter, and it is NOT `foreign`: the code's merge
+       \* reports everything it publishes over (`overridden`), and the
+       \* CALLER surfaces the ones it never integrated — per path, by the
+       \* CURRENT baseline (`barrier.rs`: `baseline.entries.get(path).key
+       \* == was.key`).  A version this tree holds at this path needs no
+       \* record; every other one does.
+       contested == IF ImmutableObjects /\ CommitSurfacesForeign
+                    THEN {p \in published \ gone :
+                            /\ foreign(p) /\ manifest[p] # 0
+                            /\ manifest[p] # sc[s].baseline[p]}
+                    ELSE {}
+       surfaced == {<<p, manifest[p]>> : p \in contested}
        inst == [p \in Paths |->
          IF p \in sc[s].parked \cup gone THEN manifest[p]
          ELSE IF p \in sc[s].scanU \cap sc[s].upDone THEN sc[s].scanGen[p]
@@ -2271,8 +3042,18 @@ CASInstall(s) ==
                 /\ inst[pr[1]] # pr[2]
                 /\ pr \notin inbox2
                 /\ pr \notin conflicts
+                /\ pr \notin surfaced
                 /\ pr[2] \notin sc[s].known
        cite == \E pr \in hitlAcked : inst[pr[1]] = pr[2]
+       dropped == IF AckHonest THEN {p \in sc[s].scanD : inst[p] # 0}
+                  ELSE sc[s].citeDropped
+       \* Review 2026-09-18, H10: an install whose barrier began after the
+       \* consume (a consume needs `pc = "idle"`, so a pending live here was
+       \* consumed before this barrier's own) carries the declaration, and
+       \* says so in the journal write that follows its CAS.  A commit that
+       \* installed nothing made no CAS and carries nothing.
+       carrying == /\ AckFromCarrier /\ SentinelEnabled /\ PendLive(s)
+                   /\ ~nothing
      IN
        /\ manSeq < MaxSeq \/ InfiniteBarriers \/ nothing
        /\ manifest' = inst
@@ -2291,10 +3072,21 @@ CASInstall(s) ==
                            \* `BarrierReport.outranked`; the 2026-09-14 box run
                            \* found the ok ack over it (Inv_AckImpliesCited,
                            \* depth 20).
-                           ![s].citeDropped = IF AckHonest
-                                              THEN {p \in sc[s].scanD : inst[p] # 0}
-                                              ELSE @,
+                           ![s].citeDropped = dropped,
+                           ![s].carryPaths = IF carrying
+                                             THEN @ \cup sc[s].scanU \cup sc[s].scanD
+                                             ELSE @,
+                           ![s].carryDropped = IF carrying THEN @ \cup dropped ELSE @,
                            ![s].instSnap = inst, ![s].instSeq = seq2,
+                           ![s].jSeq = seq2,
+                           \* Handles: what this install stopped citing,
+                           \* read from the document it merged onto — the
+                           \* code's step 6 reads `current` the same way.
+                           ![s].retire = IF ImmutableObjects
+                                         THEN [p \in Paths |->
+                                                 IF manifest[p] # 0 /\ inst[p] # manifest[p]
+                                                 THEN manifest[p] ELSE 0]
+                                         ELSE @,
                            ![s].instSrc = IF ~BarrierLease THEN @
                                           ELSE IF nothing THEN manSrc
                                           ELSE InstallSource(s),
@@ -2316,12 +3108,15 @@ CASInstall(s) ==
                                                     THEN Retired(s, p) ELSE @[p]]
                                             ELSE @,
                            ![s].noInst = nothing,
+                           ![s].consumed = @ \ pendingNow,
                            ![s].repairMoved = IF BarrierLease
                                               THEN {p \in Paths : declined(p)}
                                               ELSE {}]
-       /\ conflicts' = conflicts \cup {<<p, objects[p]>> : p \in gone}
+       /\ conflicts' = conflicts \cup goneRec \cup surfaced
        /\ gh' = [gh EXCEPT
             !.emptyInstalls = IF nothing THEN 1 ELSE @,
+            \* L-119's non-vacuity: the world REACHED a pending adoption.
+            !.pendingKept = @ + Cardinality(pendingNow),
             !.adoptWithheld = IF gone \cap sc[s].adopted # {} THEN 1 ELSE @,
             !.uploadWithheld = IF gone \ sc[s].adopted # {} THEN 1 ELSE @,
             \* Finding 13's second route: a peer's PUT If-Match the same etag
@@ -2329,10 +3124,22 @@ CASInstall(s) ==
             \* it; citing ours now replaces a citation the key holds with one
             \* it does not, and the peer's committed bytes go uncited.
             !.staleOverride = @ \/
-               (BarrierLease /\ \E p \in (sc[s].scanU \cap sc[s].upDone) \ gone :
+               (BarrierLease /\ ~ImmutableObjects /\ \E p \in (sc[s].scanU \cap sc[s].upDone) \ gone :
                   /\ objects[p] # sc[s].scanGen[p]
                   /\ objects[p] # 0
-                  /\ manifest[p] = objects[p]),
+                  /\ manifest[p] = objects[p])
+               \* Handles: the same override read at the CAS — this commit
+               \* cites its upload over a citation it never integrated, and
+               \* no record says so.  Written only under ~CommitSurfacesForeign.
+               \* ...and it asks R7's question, not the merge's: a version
+               \* the tree HOLDS at that path is no override, recorded or
+               \* not.  `contested` carries the same filter, so under
+               \* `CommitSurfacesForeign` this never fires and under the
+               \* mutation it fires for exactly the unrecorded overrides.
+               \/ (ImmutableObjects /\ \E p \in published \ gone :
+                     /\ foreign(p) /\ manifest[p] # 0
+                     /\ manifest[p] # sc[s].baseline[p]
+                     /\ p \notin contested),
             !.amputated = @ \/ amp,
             \* Review 2026-09-18, H1: a delete this writer PUBLISHES retires
             \* the generation it uncites.  WriterQueue only, so every
@@ -2382,6 +3189,20 @@ CASInstall(s) ==
                         ELSE @,
             !.cited = IF cite THEN 1 ELSE @,
             !.citedPairs = @ \cup {pr \in hitlAcked : inst[pr[1]] = pr[2]},
+            \* Handles: a writer that INTEGRATED an acked write (its baseline
+            \* holds it) and now publishes its own edit or delete of the path
+            \* has retired it — integration followed by ordinary editing.  The
+            \* slot expressed this by being overwritten; a handle is not, so
+            \* the decision is stamped here (the first handles run of the
+            \* queue world found the gap: a consumed-then-deleted UI write
+            \* left as garbage with no decision recorded).
+            !.hitlRetired = @ \cup (IF ImmutableObjects
+                                    THEN {<<p, sc[s].baseline[p]>> :
+                                            p \in {q \in sc[s].scanU \cup sc[s].scanD :
+                                                     /\ sc[s].baseline[q] # 0
+                                                     /\ sc[s].baseline[q] \in sc[s].known
+                                                     /\ inst[q] # sc[s].baseline[q]}}
+                                    ELSE {}),
             !.stragglerCas = @ + (IF DeposedHolder(s) THEN 1 ELSE 0),
             !.stragglerInstalls = @ + (IF DeposedHolder(s) THEN 1 ELSE 0)]
   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, objects, hitlAcked, removals>>
@@ -2394,6 +3215,9 @@ CASInstall(s) ==
 Finish(s) ==
   /\ Running(s) /\ sc[s].pc = "cased"
   /\ DeletesAfterCAS => sc[s].scanD \subseteq sc[s].gcDone
+  \* Handles: the retired set is collected before the barrier ends (GCCollect
+  \* is the code's step 6; it needs no lease, but it is this barrier's work).
+  /\ ImmutableObjects => \A p \in Paths : sc[s].retire[p] = 0
   /\ sc' = [sc EXCEPT ![s].pc = "idle",
        \* A barrier that BEGAN after the consume has now completed: this
        \* is the only thing that entitles an ok ack (D2's uniform rule).
@@ -2406,8 +3230,16 @@ Finish(s) ==
          ELSE IF /\ p \in sc[s].scanD /\ sc[s].instSnap[p] = 0
                  /\ (~BaselineKeepsUncollected \/ p \in sc[s].gcTook)
               THEN 0
+         \* L-125 (2026-09-24): a DECLARED removal whose delete the merge
+         \* outranked -- the tree has left the version it named, so the
+         \* newer one adopts at a clean path (`barrier.rs` step 7).
+         ELSE IF /\ OutrankedRemovalLeavesBaseline
+                 /\ p \in sc[s].scanD \cap sc[s].declared /\ sc[s].instSnap[p] # 0
+              THEN 0
          ELSE @[p]],
        ![s].instBase = sc[s].instSnap,
+       ![s].surfaced = @ \ ((sc[s].scanU \cap sc[s].upDone)
+                            \cup {p \in sc[s].scanD : sc[s].instSnap[p] = 0}),
        ![s].judged = [p \in Paths |->
          IF p \in sc[s].scanU \cup sc[s].scanD \/ sc[s].instSnap[p] = sc[s].baseline[p]
          THEN 0 ELSE @[p]],
@@ -2421,11 +3253,15 @@ Finish(s) ==
        ![s].scanGen = [p \in Paths |-> 0],
        ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}, ![s].gcTook = {},
        ![s].gcHeaded = {}, ![s].gcSeen = [p \in Paths |-> 0],
+       ![s].upGone = {}, ![s].upVerified = FALSE,
        ![s].adopted = {},
        ![s].declared = {}, ![s].consumed = {}]
   \* The window clear's CAS: what this barrier integrated leaves the
   \* cell now, after the manifest cites it — the consumed entries and
-  \* the performed removals.
+  \* the performed removals.  A PENDING adoption's entry is not among
+  \* them: the CAS dropped it from `consumed` when it declined to cite
+  \* it for the move alone (L-119), so it stays in the cell for the
+  \* barrier that can cite it.
   /\ inbox' = inbox \ sc[s].consumed
   /\ removals' = removals \ sc[s].declared
   /\ gh' = [gh EXCEPT !.done = IF InfiniteBarriers THEN @ ELSE @ + 1,
@@ -2544,7 +3380,8 @@ Sync(s) ==
        dirt == IF SyncScanFirst THEN trueDirty ELSE sc[s].lastDirty
        \* Remote truth = the manifest, overlaid by live inbox entries (a
        \* HITL write no barrier has re-cited yet is still remote truth).
-       remote(p) == IF \E pr \in inbox : pr[1] = p /\ objects[p] = pr[2]
+       remote(p) == IF ImmutableObjects THEN TrackedOrCited(p)
+                    ELSE IF \E pr \in inbox : pr[1] = p /\ objects[p] = pr[2]
                     THEN objects[p] ELSE manifest[p]
        changed == {p \in Paths : remote(p) # sc[s].instBase[p]}
        \* Out-of-scope remote changes are NOT integrated and NOT
@@ -2592,6 +3429,10 @@ Sync(s) ==
             ![s].baseline = [p \in Paths |->
               IF p \in applicable THEN remote(p) ELSE @[p]],
             ![s].instBase = newInstBase,
+            ![s].fq = IF QueueYieldsToSync
+                      THEN {pr \in @ : ~(/\ newInstBase[pr[1]] # sc[s].instBase[pr[1]]
+                                         /\ newInstBase[pr[1]] # pr[2])}
+                      ELSE @,
             ![s].touched = @ \ applicable,
             ![s].known = @ \cup {remote(p) : p \in applicable},
             ![s].lastDirty = {}]
@@ -2819,7 +3660,8 @@ CitePassStep(s) ==
             /\ sc' = [sc EXCEPT ![s].citeDone = @ \cup sub,
                                 ![s].expSeq = manSeq + 1,
                                 ![s].instSnap = inst,
-                                ![s].instSeq = manSeq + 1]
+                                ![s].instSeq = manSeq + 1,
+                                ![s].jSeq = manSeq + 1]
             /\ gh' = [gh EXCEPT
                  !.cites = @ + 1,
                  !.amputated = @ \/ staleWin,
@@ -3017,6 +3859,9 @@ TakeSentinel(s) ==
             ![s].pendMint = gh.nextGen,
             ![s].pendDirty = Dirty(s),
             ![s].honored = FALSE,
+            \* H10: the code matches the carrier on the pending record's
+            \* covered mtime, which a fold moves.
+            ![s].carryPaths = {}, ![s].carryDropped = {},
             ![s].owed = @ \cup {t}]
        /\ gh' = [gh EXCEPT !.coalesced = @ + (IF fold THEN 1 ELSE 0)]
   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
@@ -3093,6 +3938,7 @@ PullOnly(s) ==
        ![s].scanGen = [p \in Paths |-> 0],
        ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}, ![s].gcTook = {},
        ![s].gcHeaded = {}, ![s].gcSeen = [p \in Paths |-> 0],
+       ![s].retire = [p \in Paths |-> 0], ![s].upGone = {}, ![s].upVerified = FALSE,
        ![s].adopted = {},
        ![s].declared = {}, ![s].consumed = {}]
   /\ gh' = [gh EXCEPT !.pullOnlys = 1]
@@ -3159,7 +4005,7 @@ BoundaryBroken(s) ==
     \* shape: the drop DEFEATS the exemption, it does not exclude the
     \* path from the search.  Writing it as a plain conjunct excuses
     \* exactly the case the clause exists to catch.
-    /\ (p \in sc[s].citeDropped \/ ~\E pr \in conflicts : pr[1] = p)
+    /\ (p \in AckDropped(s) \/ ~\E pr \in conflicts : pr[1] = p)
 
 (* The OTHER half of what an ok ack asserts, and it is not the same
    claim.  `BoundaryBroken` asks whether the agent's own declared work
@@ -3211,9 +4057,9 @@ AckOk(s) ==
   \* D1, at the one place a gated boundary can break it: a citation
   \* that dropped a declared path installed a point that does not
   \* carry it, and `ok` would assert the opposite.
-  /\ (AckHonest => sc[s].pendDirty \cap sc[s].citeDropped = {})
+  /\ (AckHonest => sc[s].pendDirty \cap AckDropped(s) = {})
   /\ sc' = [sc EXCEPT ![s].ackN = @ \cup sc[s].pendN, ![s].honored = FALSE,
-       ![s].installed = FALSE, ![s].citeDropped = {}]
+       ![s].installed = FALSE, ![s].citeDropped = {}, ![s].carryPaths = {}, ![s].carryDropped = {}]
   /\ gh' = [gh EXCEPT
        !.acks = @ + 1,
        !.honors = @ + (IF sc[s].honored THEN 1 ELSE 0),
@@ -3247,10 +4093,13 @@ AckPartial(s) ==
   /\ SentinelEnabled /\ AckHonest /\ Running(s) /\ sc[s].pc = "idle"
   /\ PendLive(s) /\ ~AckMatches(s)
   /\ ~(RefuseOnFence /\ DeposedHolder(s))
-  /\ sc[s].pendDirty \cap sc[s].citeDropped # {}
+  /\ sc[s].pendDirty \cap AckDropped(s) # {}
   /\ sc' = [sc EXCEPT ![s].ackN = @ \cup sc[s].pendN, ![s].honored = FALSE,
-       ![s].installed = FALSE, ![s].citeDropped = {}]
-  /\ gh' = [gh EXCEPT !.acks = @ + 1, !.partialAcks = @ + 1]
+       ![s].installed = FALSE, ![s].citeDropped = {}, ![s].carryPaths = {}, ![s].carryDropped = {}]
+  /\ gh' = [gh EXCEPT !.acks = @ + 1, !.partialAcks = @ + 1,
+       \* H10's non-vacuity: the journalled carrier made this ack partial —
+       \* the barrier's own drops alone would have said ok.
+       !.carrierAck = @ \/ (sc[s].pendDirty \cap sc[s].citeDropped = {})]
   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts>>
 
@@ -3263,7 +4112,7 @@ RetirePending(s) ==
   /\ PendLive(s) /\ AckMatches(s)
   /\ sc' = [sc EXCEPT ![s].pendN = {}, ![s].pendCov = NoPend,
        ![s].pendMint = 0, ![s].pendDirty = {},
-       ![s].honored = FALSE, ![s].pendReRun = FALSE]
+       ![s].honored = FALSE, ![s].pendReRun = FALSE, ![s].carryPaths = {}, ![s].carryDropped = {}]
   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
                  window, hitlAcked, conflicts, gh>>
 
@@ -3279,7 +4128,7 @@ AckRefused(s) ==
   /\ sc' = [sc EXCEPT ![s].ackN = @ \cup sc[s].pendN,
        ![s].pendN = {}, ![s].pendCov = NoPend, ![s].pendMint = 0,
        ![s].pendDirty = {},
-       ![s].honored = FALSE, ![s].pendReRun = FALSE,
+       ![s].honored = FALSE, ![s].pendReRun = FALSE, ![s].carryPaths = {}, ![s].carryDropped = {},
        ![s].st = "dead"]
   /\ gh' = [gh EXCEPT !.refusedAcks = @ + 1]
   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
@@ -3306,6 +4155,15 @@ VersionsFollow ==
          ELSE versions[p] \cup {objects'[p]}]
   ELSE versions' = versions
 
+(* Immutable handles: the actions that write the handle set themselves,
+   composed OUTSIDE `VersionsFollow` (which would freeze it).            *)
+ImmutableNext ==
+  \/ \E s \in Syncers, p \in Paths : UploadIO(s, p)
+  \/ \E p \in Paths : HitlWriteIO(p)
+  \/ \E p, q \in Paths : HitlRenameIO(p, q)
+  \/ \E s \in Syncers : VerifyUploads(s) \/ GCCollect(s)
+  \/ \E s \in Syncers, p \in Paths, h \in Gens : SweepOrphan(s, p, h)
+
 BaseNext ==
   \/ StartA
   \/ \E s \in Syncers : CrashPod(s) \/ Restart(s) \/ RenewDiscover(s)
@@ -3321,13 +4179,14 @@ BaseNext ==
   \/ HitlRefused
   \/ \E s \in Syncers :
        LoadInbox(s) \/ Consume(s) \/ Scan(s) \/ UploadFenced(s) \/ GCDeleteFenced(s)
-       \/ PreDeletesDone(s) \/ CASFenced(s) \/ CASMiss(s) \/ CASInstall(s)
+       \/ PreDeletesDone(s) \/ VerifyCell(s) \/ CASFenced(s) \/ CASMiss(s) \/ CASInstall(s)
        \/ Finish(s) \/ Sync(s) \/ PullOnly(s) \/ AbandonBarrier(s)
   \/ SentinelNext
 
 Next ==
   \/ (BaseNext /\ VersionsFollow /\ UNCHANGED gatedVars)
   \/ GatedNext
+  \/ (ImmutableNext /\ UNCHANGED gatedVars)
 
 Spec == Init /\ [][Next]_vars
 
@@ -3343,6 +4202,15 @@ ASSUME EmptyInstall => WriterQueue
 ASSUME ~QueueForeignChanges => WriterQueue
 \* Review 2026-09-18: the tombstone's retired generation is the queue's.
 ASSUME TombstoneNamesRetired => TombstoneHeadsKey /\ WriterQueue
+\* Review 2026-09-18, H2: the shipped fence position is the barrier lease's.
+ASSUME ~FenceAfterLoad => BarrierLease /\ EpochCheck
+\* Immutable handles are the barrier lease's code, on the inbox, with the
+\* deletes after the CAS; gated mode and the sweep's predecessor are gone
+\* under them; a same-bytes write cannot alias a handle, so its budget is 0;
+\* the narrow verb is not modelled over handles (its worlds are life-lease).
+ASSUME ImmutableObjects =>
+  /\ BarrierLease /\ InboxEnabled /\ DeletesAfterCAS /\ ~GatedCitation
+  /\ ~OrphanTrack /\ MaxSameBytes = 0 /\ ~InfiniteBarriers
 
 (* ---- tranche 6: FAIRNESS, for the liveness runs only -------------------
    Weak fairness on each syncer's OWN barrier step — not on "some syncer
@@ -3352,12 +4220,16 @@ ASSUME TombstoneNamesRetired => TombstoneHeadsKey /\ WriterQueue
    mutation the claim is enabled only between one release and the next
    claim, WF asks nothing, and one writer claims forever.               *)
 BarrierStep(s) ==
-  /\ \/ LoadInbox(s) \/ Consume(s) \/ Scan(s) \/ Claim(s) \/ Enqueue(s) \/ SkipDeadHandoff(s)
-     \/ \E p \in Paths : Upload(s, p) \/ GCDelete(s, p) \/ GCHead(s, p)
-     \/ PreDeletesDone(s) \/ CASMiss(s) \/ CASInstall(s) \/ Finish(s)
-     \/ CASFenced(s) \/ GCDeleteFenced(s) \/ RenewDiscover(s) \/ PullOnly(s)
-     \/ FastPath(s)
-  /\ VersionsFollow /\ UNCHANGED gatedVars
+  \/ /\ \/ LoadInbox(s) \/ Consume(s) \/ Scan(s) \/ Claim(s) \/ Enqueue(s) \/ SkipDeadHandoff(s)
+        \/ \E p \in Paths : Upload(s, p) \/ GCDelete(s, p) \/ GCHead(s, p)
+        \/ PreDeletesDone(s) \/ CASMiss(s) \/ CASInstall(s) \/ Finish(s)
+        \/ CASFenced(s) \/ VerifyCell(s) \/ GCDeleteFenced(s) \/ RenewDiscover(s) \/ PullOnly(s)
+        \/ FastPath(s)
+     /\ VersionsFollow /\ UNCHANGED gatedVars
+  \* Immutable handles: the barrier's own steps that write the handle set.
+  \/ /\ \/ \E p \in Paths : UploadIO(s, p)
+        \/ VerifyUploads(s) \/ GCCollect(s)
+     /\ UNCHANGED gatedVars
 
 FairSpec == Spec /\ \A s \in Syncers : WF_vars(BarrierStep(s))
 
@@ -3387,12 +4259,23 @@ TypeOK ==
   /\ removals \subseteq Paths
   /\ \A s \in Syncers : sc[s].declared \subseteq Paths
                        /\ sc[s].consumed \subseteq (Paths \X Gens)
+                       /\ sc[s].surfaced \subseteq Paths
                        /\ sc[s].repairMoved \subseteq Paths
                        /\ sc[s].touched \subseteq Paths
                        /\ sc[s].fq \subseteq (Paths \X Gens)
                        /\ \A x, y \in sc[s].fq : x[1] = y[1] => x = y
                        /\ sc[s].fqRetired \in [Paths -> Gens]
                        /\ sc[s].judged \in [Paths -> Gens]
+                       /\ sc[s].carryPaths \subseteq Paths
+                       /\ sc[s].verifiedAt \in 0..EpochBound
+                       /\ sc[s].carryDropped \subseteq Paths
+                       /\ sc[s].retire \in [Paths -> Gens]
+                       /\ sc[s].upGone \subseteq Paths
+                       /\ sc[s].upVerified \in BOOLEAN
+  \* Handles: there is no slot, and nothing may write one.  A shipped-arm
+  \* update that slipped past its `~ImmutableObjects` guard fails here.
+  /\ ImmutableObjects => objects = [p \in Paths |-> IF p \in FreePaths THEN 0 ELSE 1]
+  /\ gh.uiBase \subseteq (Paths \X Gens \X Gens)
   /\ gh.retired \in [Paths -> Gens]
   /\ gh.orphanAt \in [Paths -> Gens]
   /\ gh.tomb \in [Paths -> Gens]
@@ -3402,15 +4285,29 @@ TypeOK ==
 \* must not take the bucket's copy with it.  This is what the
 \* unlink-first arm violates: the citation survives the unlink, the
 \* next scan classifies the path delete-eligible, and GC publishes it.
-Inv_NarrowNeverDeletes == \A p \in gh.narrowed : objects[p] # 0
+Inv_NarrowNeverDeletes ==
+  \* 2026-09-23: was `\A p \in gh.narrowed : the object at p lives`, which
+  \* a PEER's legitimate delete of a path this writer narrowed violates
+  \* (the handles narrow world, 14 steps: the collector takes what the
+  \* peer's CAS retired).  Narrowing is one writer's scope, so the claim
+  \* is that the narrowing writer never classifies such a path as a
+  \* delete — which is how the unlink-first order destroyed it.
+  gh.narrowDeleted = {}
 
 \* The other half.  A narrowed path must not be re-uploaded and
+\* re-cited BY THE WRITER THAT NARROWED IT (2026-09-23): narrowing is a
+\* writer's scope, so a peer that still watches the path uploads it
+\* legitimately; the stamp sites count only an upload of a path outside
+\* the uploader's own scope (the handles narrow world found the global
+\* form firing on a peer's edit in 8 steps).  Originally:
 \* re-cited, which is what the uncite-first arm does: the file survives
 \* the uncite, the next scan reads present-and-not-in-baseline as a
 \* local ADD, and the barrier silently undoes the narrow.  A path the
 \* agent legitimately re-creates leaves `gh.narrowed` at AgentWrite, so
 \* this never fires on widening.
 Inv_NarrowNeverRecites == gh.narrowRecited = {}
+
+Inv_ConsumeNeverRegresses == ~gh.consumeRegressed
 
 \* Non-vacuity: the verb actually fires.  Probed via a ghost only
 \* Narrow writes — probe the ACTION, never the situation.
@@ -3423,8 +4320,15 @@ ProbeNarrow == gh.narrows = 0
 Inv_HITLDurable == ~gh.amputated
 
 \* Every cited manifest entry has a live object behind it: the barrier
-\* order (uploads -> CAS -> deletes) keeps checkouts satisfiable.
-Inv_NoDangling == \A p \in Paths : manifest[p] # 0 => objects[p] # 0
+\* order (uploads -> CAS -> deletes) keeps checkouts satisfiable.  On the
+\* same-key shape the question is whether the KEY exists (its bytes may be
+\* a later generation's: a UI write over a cited key is that shape's
+\* accepted loss, `Inv_HITLTracked`'s subject, not a dangling citation).
+\* Handles: the cited handle still exists at the path (the gated tranche's
+\* `Inv_CitedVersionLives`, which is the same question asked of a
+\* versioned substrate — and under handles the only question).
+Inv_NoDangling == \A p \in Paths : manifest[p] # 0 =>
+  IF ImmutableObjects THEN HoldsGen(p, manifest[p]) ELSE objects[p] # 0
 \* No commit replaces a citation the key still holds with a generation of
 \* its own upload the key no longer holds (finding 13's second route).
 \* `Inv_NoDangling` cannot see it — an object exists — and the loss is the
@@ -3433,12 +4337,24 @@ Inv_NoStaleOverride == ~gh.staleOverride
 
 \* A deposed writer's manifest CAS never lands.
 Inv_NoStragglerInstall == gh.stragglerInstalls = 0
+\* Review 2026-09-18, H4: a declared removal removes the version it named.
+Inv_RemovalNamesItsVersion == ~gh.removalOverreach
 
 \* A deposed writer's data PUT never lands.
 Inv_NoDeposedPut == gh.deposedPuts = 0
 
 \* A container restart never resurrects an unpublished delete.
-Inv_NoResurrection == ~gh.resurrected
+\* S4: a restart never republishes a delete the agent made.  An ACTION
+\* property, not a stamp (H9, 2026-09-19): no step that is a restart creates
+\* a local file — the checkout runs only on an empty tree, and a restart
+\* over a live tree materialises nothing (`checkout.rs`).  The invariant it
+\* replaces read a ghost written only under the mutation constant, so its
+\* strict runs were tautologies; this one reads the step.  The rematerialise
+\* mutation (LeanRematerialize) is the step that does, and must violate it.
+NoResurrectionStep ==
+  \A s \in Syncers, p \in Paths :
+    (sc[s].local[p] = 0 /\ sc'[s].local[p] # 0) => gh'.restarts = gh.restarts
+Prop_NoResurrection == [][NoResurrectionStep]_vars
 
 \* The sync verb never destroys genuinely-dirty local work without
 \* surfacing it (tranche 2).
@@ -3452,37 +4368,6 @@ Inv_SyncNeverDestroysDirty == ~gh.syncDestroyed
 Inv_NoForeignLost == ~gh.foreignLost
 
 \* ---- tranche 3, product 2: version lifetime (D7/D8) ---------------------
-
-\* THE invariant of this product.  Every cited generation is still
-\* STORED — which on a versioned bucket is a strictly stronger claim
-\* than Inv_NoDangling's "the object exists".  Gated staging makes the
-\* cited version NONCURRENT, so an object can exist, read as newer
-\* uncited bytes, and have nothing at all behind its citation.
-\*
-\* Not hypothetical: the shipped implementation violated this for one
-\* session, because the store reported its ObjectMeta before the version
-\* id was minted, every citation named the empty version, and the exact
-\* reaper — matching nothing — deleted every live version of every cited
-\* key.  The unit tests caught it only because assertions happened to sit
-\* in the right places.
-Inv_CitedVersionLives ==
-  \A p \in Paths : manifest[p] # 0 => manifest[p] \in versions[p]
-
-\* The reaper never removes the version a path currently READS as.  That
-\* generation is either the citation it just installed or live
-\* staged-uncited work; either way it is not garbage.
-Inv_NoUncitedGC ==
-  \A p \in Paths : objects[p] # 0 => objects[p] \in versions[p]
-
-\* A boundary is all-or-nothing.  No reachable state may show a citation
-\* that has installed SOME of its pending set and not the rest — that is
-\* a reader seeing half a logical change, which is the one thing gated
-\* mode exists to prevent.  The single-CAS design makes it true by
-\* construction; the split-install mutation is what keeps that from
-\* being an untested claim.
-Inv_BoundaryAtomic ==
-  \A s \in Syncers :
-    sc[s].citeDone = {} \/ sc[s].citeDone = Valid(s)
 
 \* ---- tranche 3, product 1: the boundary verb (D1/D2/D12) ----------------
 
@@ -3560,9 +4445,19 @@ SyncerProgress ==
        \/ PullOnly(s) \/ FastPath(s) \/ TakeSentinel(s)
        \/ AckOk(s) \/ AckPartial(s) \/ RetirePending(s)
   \/ \E p \in Paths : TrackOrphan(p)
+  \* Handles: a sweep still owed is progress, so quiescence means swept.
+  \/ \E s \in Syncers, p \in Paths, h \in Gens : SweepOrphan(s, p, h)
 Inv_QuiescentConverged ==
   ~ENABLED SyncerProgress =>
     \A p \in Paths :
+      IF ImmutableObjects
+      THEN \* Handles: once nothing can move, every live handle is cited by
+           \* some path or named by some entry — a lost writer's uploads
+           \* have been SWEPT, not adopted, and nothing is left that a
+           \* checkout, the manifest and the trees could disagree about.
+           \A g \in versions[p] :
+             \E r \in Paths : SameHandle(p, r, g) /\ (manifest[r] = g \/ <<r, g>> \in inbox)
+      ELSE
       \/ objects[p] = manifest[p]
       \/ objects[p] = 0
       \* An object at a key the manifest does not cite is garbage no
@@ -3684,8 +4579,9 @@ ProbeWithheldDelete    == gh.withheld = 0
 \* the delete-application half of the gated design — manifest entry
 \* removed, object deleted, version reaped — is never shown reachable.
 \* That is the one step where `Inv_CitedVersionLives` and
-\* `Inv_NoUncitedGC` are most at risk, so its reachability is not
-\* something to assume. `gcCited` is bumped ONLY by `CiteFinish`, so
+\* `Inv_NoUncitedGC` (the gated lane's invariants, retired 2026-09-19 with
+\* it — H9) were most at risk, so its reachability is not something to
+\* assume. `gcCited` is bumped ONLY by `CiteFinish`, so
 \* unlike a `ProbeGC` re-run this cannot be satisfied by the cadence
 \* GC path.
 ProbeGatedGC           == gh.gcCited = 0
@@ -3770,7 +4666,11 @@ ProbeRawReaderSeesUncited ==
 \* durable, and known to nothing — never cited, never to be.
 Inv_HITLTracked ==
   \A pr \in hitlAcked :
-    \/ objects[pr[1]] # pr[2]
+    \* Handles: a handle that is GONE is never an excuse on its own — nothing
+    \* overwrites one, so "destroyed" is either the collector's decision
+    \* (`hitlRetired`, stamped by GCCollect, a later UI write, a consume
+    \* that saw it superseded) or a loss.
+    \/ ~ImmutableObjects /\ objects[pr[1]] # pr[2]
     \/ manifest[pr[1]] = pr[2]
     \/ pr \in gh.citedPairs
     \/ pr \in inbox
@@ -3799,7 +4699,7 @@ Inv_HITLTracked ==
     \* crediting a recovery that world cannot perform would be the
     \* relaxation this clause is trying not to be (SAFETY.md §4, the crash
     \* arm; `untracked.rs`, finding 10).
-    \/ /\ OrphanTrack
+    \/ /\ OrphanTrack /\ ~ImmutableObjects
        /\ objects[pr[1]] = pr[2]
        /\ manifest[pr[1]] # 0
 
@@ -3809,9 +4709,16 @@ Inv_HITLTracked ==
 \* name is cited.  A refused rename legitimately leaves both — an extra
 \* file, never a hole (§5) — and an agent that re-creates the old name
 \* after the unlink has made a NEW file, which is cited as its own.
+\* Handles: the destination cites the SOURCE's handle, so the claim reads
+\* "the same handle is never cited under both names".  The shipped form's
+\* "the new name is cited by anything" is unreachable there — a rename lands
+\* while another writer's create of the destination is in flight (the
+\* gateway cannot see a handle nobody cites or tracks), the install cites the
+\* agent's file, and the rename's entry is then a conflict, its source refused.
 Inv_RenameAtomic ==
   \A r \in gh.renamed \ gh.renameRefused :
-    ~(manifest[r[1]] = r[3] /\ manifest[r[2]] # 0)
+    ~(manifest[r[1]] = r[3] /\ (IF ImmutableObjects THEN manifest[r[2]] = r[4]
+                                ELSE manifest[r[2]] # 0))
 
 \* ...and never neither: the old name stays cited until the new name
 \* has been cited (or is still tracked in the cell for the barrier
@@ -3829,11 +4736,48 @@ Inv_RenameNoHole ==
     \* The copy was overwritten by a later write to the new name before
     \* any barrier cited it: that writer read the name, and the bytes
     \* it replaced are its to have replaced.
-    \/ objects[r[2]] # r[4]
+    \/ ~ImmutableObjects /\ objects[r[2]] # r[4]
+    \* ...and the same case under handles, which the entry clause above
+    \* was assumed to cover and does not.  A later write REPLACES the
+    \* entry, so while the entry waits the clause holds — but once a
+    \* writer has CONSUMED it the entry is gone, and if that writer's
+    \* agent then deletes the path and publishes the delete, neither
+    \* name is cited and nothing in the cell names the destination.
+    \* That is not a hole: the human superseded the rename's own version
+    \* at the destination, by hand, before any barrier cited it, and the
+    \* delete after it is the agent's to make.  `hitlRetired` is the
+    \* stamp for exactly "this acked version was retired KNOWINGLY" —
+    \* by a later UI write at the same name, or by a tree that
+    \* integrated it and then edited or deleted it.  A destination LOST
+    \* (the crash the `RenameWaitsForDestination` mutation opens) is
+    \* stamped by nobody, so `LeanRenameNoDestinationGuard` still
+    \* violates this.  Found 2026-09-21 by `LeanImmutableRenameHolds` at
+    \* depth 19, 108M states.
+    \/ ImmutableObjects /\ <<r[2], r[4]>> \in gh.hitlRetired
+
+\* Handles: one handle, one name — unconditionally, in every installed
+\* document.  A performed rename drops the source in the generation that
+\* cites the destination; a refused one leaves the destination a COPY under
+\* moved OUT of the tree by the answered record (AnsweredRecordsApply,
+\* L-117), and the moved entry never reaches a tree at the old name
+\* (RenameMovesEntry); an adopter that never saw the
+\* removal has its repair declined (MovedElsewhere — RepairRespectsMoves=FALSE
+\* is the mutation).  The seed generation is one number at every path but a
+\* handle at each (SameHandle), so only an aliased pair counts.
+Inv_OneName ==
+  ImmutableObjects =>
+    \A p, q \in Paths :
+      p # q /\ manifest[p] # 0 /\ manifest[p] = manifest[q] => ~SameHandle(p, q, manifest[p])
 
 ProbeRemovalApplied == gh.removalsApplied = 0
 ProbeRemovalRefused == gh.removalsRefused = 0
 ProbeRenameApplied  == gh.renamesApplied = 0
+\* L-119: a barrier declined an adoption for the move alone, at the
+\* destination of a rename still waiting at its source, and left the entry
+\* in the cell.  The rule's own reachability — the world that checks the
+\* rule's absence (PendingAdoptionStays=FALSE) proves nothing unless the
+\* shipped world reaches the rule at all.
+ProbePendingKept == gh.pendingKept = 0
 
 \* ---- tranche 6: the per-barrier lease -----------------------------------
 \* REQUIRED-REACHABLE: an upload landed while the other writer was in
@@ -3868,11 +4812,16 @@ ProbeOrphanOutlived    == gh.orphanOutlived = 0
 \* H1b's leak rule fires: a tombstone applied over a leaked generation.
 ProbeLeakApplied       == gh.leakApplied = 0
 ProbeBaseRestored     == gh.baseRestored = 0
+\* H10: an ack went partial on the journalled carrier alone.
+ProbeCarrierAck       == ~gh.carrierAck
 \* Non-vacuity for the CollectorOff world: the collector actually gave way
 \* on a path it would otherwise have deleted.  Without this, "every
 \* invariant holds" could mean "the collector was never asked".
 ProbeCollectorLeaked   == gh.leaked = 0
 ProbeStaleInboxAdopt   == gh.staleAdopt = 0
+\* Immutable handles: the orphan sweep actually collected a handle (or a
+\* handles world that "converges" never had anything to converge from).
+ProbeSwept             == gh.swept = 0
 
 \* ---- tranche 7: model the implementation -------------------------------
 \* Each new arm is REQUIRED-REACHABLE in the world whose strict run leans
@@ -3910,7 +4859,7 @@ ProbeTombstoneSuperseded == gh.tombSuperseded = 0
    or all of `Paths`).  Symmetry is unsound for liveness, so the FairSpec
    cfgs never get it.                                                     *)
 StrictGh ==
-  [amputated |-> gh.amputated, resurrected |-> gh.resurrected,
+  [amputated |-> gh.amputated,
    stragglerInstalls |-> gh.stragglerInstalls, deposedPuts |-> gh.deposedPuts,
    barriers |-> gh.barriers, crashes |-> gh.crashes, restarts |-> gh.restarts,
    stallUsed |-> gh.stallUsed, nextGen |-> gh.nextGen, hitl |-> gh.hitl,
@@ -3920,9 +4869,13 @@ StrictGh ==
    ackIncoherent |-> gh.ackIncoherent, fencedOkAck |-> gh.fencedOkAck,
    srcMismatch |-> gh.srcMismatch, narrows |-> gh.narrows,
    narrowed |-> gh.narrowed, narrowRecited |-> gh.narrowRecited,
-   removals |-> gh.removals, renamed |-> gh.renamed,
+   narrowDeleted |-> gh.narrowDeleted,
+   consumeRegressed |-> gh.consumeRegressed,
+   removals |-> gh.removals, renamed |-> gh.renamed, remJudged |-> gh.remJudged,
+   answered |-> gh.answered, remOver |-> gh.remOver,
    renameRefused |-> gh.renameRefused, citedPairs |-> gh.citedPairs,
    sameBytes |-> gh.sameBytes, staleOverride |-> gh.staleOverride,
+   removalOverreach |-> gh.removalOverreach, uiBase |-> gh.uiBase,
    hitlRetired |-> gh.hitlRetired, retired |-> gh.retired,
    orphanAt |-> gh.orphanAt, tomb |-> gh.tomb]
 StrictSc ==

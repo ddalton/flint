@@ -19,7 +19,7 @@ use flint_store::{
     crc64_nvme, GenerationStamps, ObjectMeta, ObjectStore, PutCondition, StoreError,
 };
 
-use super::{LeanConfig, LeanResult};
+use super::{LeanConfig, LeanError, LeanResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LeanEntry {
@@ -76,8 +76,9 @@ pub struct LeanManifest {
     /// merges after another writer cited it and then deleted it knowingly,
     /// otherwise sees only "baseline ≠ merge base, object at the key" —
     /// the same view a delete that RACED the write leaves, where modify
-    /// rightly wins — and its citation repair resurrects the deleted
-    /// generation. The tombstone is the one fact that tells the two apart.
+    /// rightly wins — and the citation repair (removed in step 5) resurrected
+    /// the deleted generation. The tombstone is the one fact that tells the
+    /// two apart.
     /// Empty on every document written before this field existed.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tombstones: BTreeMap<String, Tombstone>,
@@ -226,6 +227,9 @@ pub struct ManifestHandle {
     /// This is what makes a publish O(changed): a chunk whose address
     /// is already here is not sent.
     pub prev_chunks: Vec<super::chunk::ChunkRef>,
+    /// The tombstones object the superseded pointer names, if any: retired
+    /// with the chunks when the new pointer names another (M1).
+    pub prev_tombstones: Option<String>,
 }
 
 /// What the legacy key is overwritten with once a workspace has moved to
@@ -267,6 +271,7 @@ impl LoadedManifest {
                 Some(Ok(Entries::Chunked(c))) => c.to_vec(),
                 _ => Vec::new(),
             },
+            prev_tombstones: self.pointer.as_ref().and_then(|p| p.tombstones.clone()),
         }
     }
 }
@@ -465,6 +470,55 @@ pub async fn load(
   )))
 }
 
+/// How many lost races a one-CAS edit re-reads and retries before it gives
+/// up `Contended`.
+pub const EDIT_CAS_ATTEMPTS: usize = 16;
+
+/// Why a one-CAS edit did not land.
+#[derive(Debug)]
+pub enum EditError<E> {
+    /// The edit refused the document it was shown.
+    Refused(E),
+    Store(LeanError),
+    /// Lost `EDIT_CAS_ATTEMPTS` races in a row.
+    Contended,
+}
+
+/// ONE manifest CAS for an edit by a party that holds no lease (P2): the
+/// gateway's UI saves, deletes and renames, and the ingress sweep's
+/// adoptions. Load the current document; let `edit` judge it and change a
+/// copy — the next generation, with the installing party's fields reset as
+/// `merge` resets them; keep tombstones to `TOMBSTONE_KEEP_SEQS`; CAS it in
+/// with epoch 0; on a lost race do it all again against what won, so every
+/// precondition is judged against the document the CAS replaces.
+pub async fn commit_edit<E>(
+    store: &dyn ObjectStore,
+    cfg: &LeanConfig,
+    flush: &str,
+    edit: impl Fn(Option<&LoadedManifest>, &mut LeanManifest) -> Result<(), E>,
+) -> Result<(), EditError<E>> {
+    for _ in 0..EDIT_CAS_ATTEMPTS {
+        let current = load(store, cfg).await.map_err(EditError::Store)?;
+        let mut doc = current.as_ref().map(|l| l.manifest.clone()).unwrap_or_default();
+        doc.seq += 1;
+        doc.sole_writer = false;
+        doc.boundary_source = None;
+        edit(current.as_ref(), &mut doc).map_err(EditError::Refused)?;
+        let seq = doc.seq;
+        doc.tombstones.retain(|_, t| seq.saturating_sub(t.seq) <= TOMBSTONE_KEEP_SEQS);
+        let expected = current.as_ref().map(|l| l.handle());
+        let before = current.as_ref().map(|l| &l.manifest);
+        match cas_write_retiring(store, cfg, &doc, before, expected.as_ref(), 0, flush, None).await {
+            Ok(_) => return Ok(()),
+            Err(LeanError::Store(StoreError::PreconditionFailed(_))) | Err(LeanError::Store(StoreError::Conflict(_))) => {
+                continue
+            }
+            Err(e) => return Err(EditError::Store(e)),
+        }
+    }
+    Err(EditError::Contended)
+}
+
 /// CAS-write the manifest document. `expected`: None ⇒ first write
 /// (If-None-Match:*); Some(etag) ⇒ If-Match. The caller owns 412
 /// handling (merge-retry or fence — never blind re-seed).
@@ -493,6 +547,21 @@ pub async fn cas_write_stamped(
     flush_uuid: &str,
     boundary_source: Option<&str>,
 ) -> LeanResult<ObjectMeta> {
+    Ok(cas_write_refs(store, cfg, m, expected, epoch, flush_uuid, boundary_source).await?.0)
+}
+
+/// `cas_write_stamped`, also returning the chunk objects the new pointer
+/// references (its chunks and its tombstones object) — `None` on the
+/// single-object layout.
+async fn cas_write_refs(
+    store: &dyn ObjectStore,
+    cfg: &LeanConfig,
+    m: &LeanManifest,
+    expected: Option<&ManifestHandle>,
+    epoch: u64,
+    flush_uuid: &str,
+    boundary_source: Option<&str>,
+) -> LeanResult<(ObjectMeta, Option<Vec<String>>)> {
     // The manifest's own document must agree with its object stamp:
     // a reader that GETs and a reader that HEADs must never disagree
     // about how coherent the citation claims to be.
@@ -502,7 +571,7 @@ pub async fn cas_write_stamped(
     // server-side on receipt" falls out rather than needing its own
     // path.
     if cfg.chunked {
-        return cas_write_chunked(
+        let (meta, refs) = cas_write_chunked_refs(
             store,
             cfg,
             m,
@@ -510,7 +579,8 @@ pub async fn cas_write_stamped(
             expected.map(|h| h.prev_chunks.as_slice()).unwrap_or(&[]),
             PublishStamps { epoch, flush_uuid, boundary_source },
         )
-        .await;
+        .await?;
+        return Ok((meta, Some(refs)));
     }
     let mut m = m.clone();
     if boundary_source.is_some() {
@@ -570,7 +640,7 @@ pub async fn cas_write_stamped(
         epoch,
         tombstones: None,
     };
-    put_pointer(store, cfg, &pointer, expected, &stamps).await
+    Ok((put_pointer(store, cfg, &pointer, expected, &stamps).await?, None))
 }
 
 /// Who is publishing, and under what coherence claim. Grouped because
@@ -604,6 +674,19 @@ pub async fn cas_write_chunked(
     prev: &[super::chunk::ChunkRef],
     pub_stamps: PublishStamps<'_>,
 ) -> LeanResult<ObjectMeta> {
+    Ok(cas_write_chunked_refs(store, cfg, m, expected, prev, pub_stamps).await?.0)
+}
+
+/// `cas_write_chunked`, also returning the chunk addresses the new pointer
+/// references, its tombstones object included.
+async fn cas_write_chunked_refs(
+    store: &dyn ObjectStore,
+    cfg: &LeanConfig,
+    m: &LeanManifest,
+    expected: Option<&ManifestHandle>,
+    prev: &[super::chunk::ChunkRef],
+    pub_stamps: PublishStamps<'_>,
+) -> LeanResult<(ObjectMeta, Vec<String>)> {
     let PublishStamps { epoch, flush_uuid, boundary_source } = pub_stamps;
     let mut m = m.clone();
     if boundary_source.is_some() {
@@ -664,9 +747,94 @@ pub async fn cas_write_chunked(
         sole_writer: m.sole_writer,
         boundary_source: m.boundary_source.clone(),
         epoch,
-        tombstones,
+        tombstones: tombstones.clone(),
     };
-    put_pointer(store, cfg, &pointer, expected, &stamps).await
+    let meta = put_pointer(store, cfg, &pointer, expected, &stamps).await?;
+    let mut refs: Vec<String> = pointer.chunks.iter().flatten().map(|r| r.addr.clone()).collect();
+    refs.extend(tombstones);
+    Ok((meta, refs))
+}
+
+/// What a commit retired (M1): the handles its document no longer cites
+/// and the chunk objects its pointer no longer references. One immutable
+/// log object per commit, under `retired/`, keyed by the unix second it
+/// was written — the retirement's clock. The sweeps spare everything a
+/// log younger than `retire_grace_secs` names; a writer reaps the older
+/// ones (`untracked.rs`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RetireLog {
+    pub at_unix: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handles: Vec<String>,
+    /// Chunk ADDRESSES (`LeanConfig::chunk_key` names the object).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chunks: Vec<String>,
+}
+
+pub fn retired_prefix(cfg: &LeanConfig) -> String {
+    format!("{}/{}/retired/", cfg.prefix, super::LEAN_DIR)
+}
+
+/// The unix second a retire log's KEY carries (`<at:020>-...`): a listing
+/// dates every log with no GET.
+pub fn retire_log_at(cfg: &LeanConfig, key: &str) -> Option<u64> {
+    key.strip_prefix(&retired_prefix(cfg))?.get(..20)?.parse().ok()
+}
+
+/// A commit, and the log of what it retired, written right after the CAS.
+/// A crash between the two leaves those handles and chunks to the sweeps'
+/// write-age rule — the shape before the retire age — and nothing worse.
+/// The log is best effort for the same reason: a failure to write it costs
+/// a lagging reader a re-resolve, never the commit.
+#[allow(clippy::too_many_arguments)]
+pub async fn cas_write_retiring(
+    store: &dyn ObjectStore,
+    cfg: &LeanConfig,
+    m: &LeanManifest,
+    before: Option<&LeanManifest>,
+    expected: Option<&ManifestHandle>,
+    epoch: u64,
+    flush_uuid: &str,
+    boundary_source: Option<&str>,
+) -> LeanResult<ObjectMeta> {
+    let (meta, refs) = cas_write_refs(store, cfg, m, expected, epoch, flush_uuid, boundary_source).await?;
+    let still: std::collections::HashSet<&str> = m.entries.values().map(|e| e.key.as_str()).collect();
+    let mut handles: Vec<String> = before
+        .map(|b| b.entries.values().map(|e| e.key.clone()).filter(|k| !still.contains(k.as_str())).collect())
+        .unwrap_or_default();
+    handles.sort();
+    handles.dedup();
+    let mut chunks: Vec<String> = vec![];
+    if let (Some(refs), Some(h)) = (refs.as_ref(), expected) {
+        let now: std::collections::HashSet<&str> = refs.iter().map(|a| a.as_str()).collect();
+        chunks = h
+            .prev_chunks
+            .iter()
+            .map(|r| r.addr.clone())
+            .chain(h.prev_tombstones.clone())
+            .filter(|a| !now.contains(a.as_str()))
+            .collect();
+        chunks.sort();
+        chunks.dedup();
+    }
+    if !handles.is_empty() || !chunks.is_empty() {
+        let at = super::now_unix();
+        let log = RetireLog { at_unix: at, handles, chunks };
+        let key = format!("{}{at:020}-{flush_uuid}-{}.json", retired_prefix(cfg), uuid::Uuid::new_v4());
+        let body = serde_json::to_vec(&log).map_err(|e| LeanError::State(format!("retire log: {e}")))?;
+        let crc = crc64_nvme(&body);
+        let stamps = GenerationStamps {
+            generation: m.seq,
+            epoch,
+            flush_uuid: flush_uuid.to_string(),
+            boundary_source: None,
+            posix: None,
+        };
+        if let Err(e) = store.put_whole(&key, body.into(), &PutCondition::IfNoneMatchAny, &stamps, crc).await {
+            eprintln!("flint-sync: could not log what seq {} retired ({e}); the sweeps judge it by write age", m.seq);
+        }
+    }
+    Ok(meta)
 }
 
 /// CAS the pointer. Split out because a takeover rotation writes ONLY
@@ -743,7 +911,7 @@ pub async fn rotate_for_takeover(
             let h = loaded.handle();
             match cas_write(store, cfg, &rotated, Some(&h), epoch, "takeover-rotation").await {
                 Ok(meta) => return Ok(Some((rotated, meta.etag))),
-                Err(super::LeanError::Store(StoreError::PreconditionFailed(_))) => continue,
+                Err(super::LeanError::Store(StoreError::PreconditionFailed(_) | StoreError::Conflict(_))) => continue,
                 Err(e) => return Err(e),
             }
         };
@@ -755,7 +923,7 @@ pub async fn rotate_for_takeover(
             boundary_source: next.boundary_source.clone(),
             posix: None,
         };
-        let h = ManifestHandle { etag, legacy: false, prev_chunks: Vec::new() };
+        let h = ManifestHandle { etag, legacy: false, prev_chunks: Vec::new(), prev_tombstones: None };
         match put_pointer(store, cfg, &next, Some(&h), &stamps).await {
             Ok(meta) => {
                 // The document the caller gets back is the standing one
@@ -767,7 +935,10 @@ pub async fn rotate_for_takeover(
                 m.boundary_source = next.boundary_source.clone();
                 return Ok(Some((m, meta.etag)));
             }
-            Err(super::LeanError::Store(StoreError::PreconditionFailed(_))) => continue,
+            // S3 answers a conditional write racing another on the key with 409,
+            // and a takeover whose acquire has LANDED must not fail on a lost race
+            // (review 2026-09-18, H2).
+            Err(super::LeanError::Store(StoreError::PreconditionFailed(_) | StoreError::Conflict(_))) => continue,
             Err(e) => return Err(e),
         }
     }
@@ -796,6 +967,13 @@ pub const KEEP_GENERATIONS: usize = 5;
 /// past any plausible manifest PUT, including a 264 MiB one over a slow
 /// link.
 pub const ORPHAN_GRACE_SECS: u64 = 3600;
+
+/// Retire-age G's default (`LeanConfig::retire_grace_secs`): how long a
+/// handle or chunk stays after the commit that stopped referencing it.
+/// Past a large checkout's manifest load and a UI read's two GETs; a
+/// reader that lags longer re-resolves the pointer, as it always has. It
+/// costs storage: every version a commit replaced, kept this long.
+pub const RETIRE_GRACE_SECS: u64 = 600;
 
 /// Delete superseded generation objects, and orphans left by a publish
 /// that died between its entries PUT and its pointer CAS.
@@ -869,9 +1047,15 @@ pub async fn sweep_generations(store: &dyn ObjectStore, cfg: &LeanConfig) -> Lea
                     doomed.push(o.key.clone());
                 }
             }
-            // Older than the live pointer: superseded. Keep a window.
+            // Older than the live pointer: superseded. Keep a window — by
+            // count, and (M1) until the generation that superseded it is
+            // `retire_grace_secs` old: at one UI save a second, the count
+            // alone is seconds. No date on the successor ⇒ keep it.
             Some(ix) => {
-                if ix.saturating_sub(i) > KEEP_GENERATIONS {
+                let superseded_for = listed[i + 1].last_modified_unix.map(|t| now.saturating_sub(t));
+                if ix.saturating_sub(i) > KEEP_GENERATIONS
+                    && superseded_for.is_some_and(|a| a >= cfg.retire_grace_secs)
+                {
                     doomed.push(o.key.clone());
                 }
             }
@@ -919,6 +1103,18 @@ pub async fn sweep_generations(store: &dyn ObjectStore, cfg: &LeanConfig) -> Lea
 /// (§9) — chunks are shared, so "what the live pointer does not name"
 /// is the only reference set available without them.
 pub async fn sweep_chunks(store: &dyn ObjectStore, cfg: &LeanConfig) -> LeanResult<usize> {
+    sweep_chunks_sparing(store, cfg, &std::collections::HashSet::new()).await
+}
+
+/// `sweep_chunks`, sparing the chunk KEYS a young retire log names (M1):
+/// a chunk a commit superseded less than `retire_grace_secs` ago, however
+/// long ago it was written. A reader mid-load of the previous pointer
+/// finds it.
+pub async fn sweep_chunks_sparing(
+    store: &dyn ObjectStore,
+    cfg: &LeanConfig,
+    spared: &std::collections::HashSet<String>,
+) -> LeanResult<usize> {
     let Some(before) = load_pointer(store, cfg).await? else {
         return Ok(0);
     };
@@ -953,7 +1149,7 @@ pub async fn sweep_chunks(store: &dyn ObjectStore, cfg: &LeanConfig) -> LeanResu
     let mut removed = 0;
     for o in listed {
         let Some(addr) = o.key.rsplit('/').next() else { continue };
-        if refs.contains(addr) {
+        if refs.contains(addr) || spared.contains(&o.key) {
             continue;
         }
         // A candidate the LISTING already shows inside the grace cannot be
@@ -1022,15 +1218,20 @@ pub async fn sweep_chunks(store: &dyn ObjectStore, cfg: &LeanConfig) -> LeanResu
 /// overlap here —
 /// in either direction — cites a deleted file half the time and
 /// amputates a live one the other half. TLC found both halves.
-/// Returns the merged document plus the foreign entries a consume must
-/// integrate next (present in theirs, changed vs base, not mine).
+/// Returns (as `Merged`) the merged document, the foreign entries a consume must
+/// integrate next (present in theirs, changed vs base, not mine), each
+/// declared delete's outcome, and the entries MINE PUBLISHES OVER: theirs' version at a path this barrier
+/// uploaded, changed since the merge base. The slot's 412 used to catch
+/// those at the PUT; under handles the merge is the one place they show,
+/// and the caller decides which it never integrated and must surface
+/// (design 2026-09-19, R7).
 pub fn merge(
     base: &BTreeMap<String, String>,
     theirs: &LeanManifest,
     mine_upserts: &BTreeMap<String, LeanEntry>,
     mine_deletes: &BTreeSet<String>,
     parked: &BTreeSet<String>,
-) -> (LeanManifest, Vec<(String, LeanEntry)>) {
+) -> Merged {
     let mut merged = theirs.clone();
     merged.seq = theirs.seq + 1;
     // Same discipline, and for a sharper reason: inheriting it would
@@ -1042,10 +1243,26 @@ pub fn merge(
     merged.boundary_source = None;
 
     let mut foreign: Vec<(String, LeanEntry)> = vec![];
+    let mut overridden: Vec<(String, LeanEntry)> = vec![];
+    // The DELETES mine publishes over: a path mine uploads that the merge
+    // base cited and theirs no longer does. Named by the version the
+    // delete removed — theirs' tombstone, else the base's citation.
+    let recreated: Vec<(String, String)> = mine_upserts
+        .keys()
+        .filter(|p| !theirs.entries.contains_key(*p))
+        .filter_map(|p| {
+            let base_etag = base.get(p)?;
+            let deleted = theirs.tombstones.get(p).map(|t| t.etag.clone()).unwrap_or_else(|| base_etag.clone());
+            Some((p.clone(), deleted))
+        })
+        .collect();
     for (p, e) in &theirs.entries {
         let changed = base.get(p).map(|b| b != &e.etag).unwrap_or(true);
         if changed && !mine_upserts.contains_key(p) && !parked.contains(p) {
             foreign.push((p.clone(), e.clone()));
+        }
+        if changed && mine_upserts.contains_key(p) {
+            overridden.push((p.clone(), e.clone()));
         }
     }
 
@@ -1054,20 +1271,17 @@ pub fn merge(
         // A path cited again has no delete to remember.
         merged.tombstones.remove(p);
     }
+    let mut deletes = BTreeMap::new();
+    let mut over_theirs: Vec<(String, LeanEntry)> = vec![];
     for p in mine_deletes {
-        if parked.contains(p) {
-            continue;
+        let outcome = delete_outcome(base, theirs, p, parked);
+        deletes.insert(p.clone(), outcome);
+        if outcome == DeleteOutcome::OverTheirs {
+            if let Some(e) = theirs.entries.get(p) {
+                over_theirs.push((p.clone(), e.clone()));
+            }
         }
-
-        let theirs_unchanged = match (theirs.entries.get(p), base.get(p)) {
-            (Some(e), Some(b)) => &e.etag == b,
-            (None, None) => true,
-            // Present in theirs but not in base (foreign add), or
-            // vanished from theirs (someone else already deleted):
-            // either way our delete does not apply.
-            _ => false,
-        };
-        if theirs_unchanged {
+        if outcome != DeleteOutcome::Parked {
             if let Some(retired) = merged.entries.remove(p) {
                 // H1e: the document says what this delete retired.
                 merged.tombstones.insert(p.clone(), Tombstone { etag: retired.etag, seq: merged.seq });
@@ -1075,7 +1289,69 @@ pub fn merge(
         }
     }
     merged.tombstones.retain(|_, t| merged.seq.saturating_sub(t.seq) <= TOMBSTONE_KEEP_SEQS);
-    (merged, foreign)
+    Merged { doc: merged, foreign, overridden, deletes, recreated, over_theirs }
+}
+
+/// What `merge` returns: the document, and what it decided per path.
+pub struct Merged {
+    pub doc: LeanManifest,
+    /// Entries a consume must integrate next: present in theirs, changed
+    /// vs base, not mine.
+    pub foreign: Vec<(String, LeanEntry)>,
+    /// Theirs' version at a path this barrier uploaded, changed since the
+    /// merge base (R7).
+    pub overridden: Vec<(String, LeanEntry)>,
+    /// Every declared delete, and what the merge did with it.
+    pub deletes: BTreeMap<String, DeleteOutcome>,
+    /// The deletes mine publishes over: `(path, the deleted version's
+    /// etag)` for a path mine uploads that the merge base cited and theirs
+    /// deleted. Mine wins; the caller records each (the user's rule: a
+    /// delete over a dirty path lands, with a record).
+    pub recreated: Vec<(String, String)>,
+    /// The versions mine DELETES over: theirs at a path this barrier
+    /// deletes, changed since the merge base (M3, P1-lite). Mine wins; the
+    /// caller preserves and records each before the collector takes it.
+    pub over_theirs: Vec<(String, LeanEntry)>,
+}
+
+/// What the merge does with one of my deletes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteOutcome {
+    /// Theirs is unchanged since my merge base, or already gone: the
+    /// citation goes.
+    Applied,
+    /// Theirs moved off my merge base to a version this tree never had
+    /// (M3, P1-lite): the delete still applies — mine wins — and theirs is
+    /// preserved and recorded (`Merged::over_theirs`). Before P1-lite theirs
+    /// stayed cited (outranked), and under a derived owed set that never
+    /// settles: the tree lacks the path, the document cites theirs, the
+    /// path is dirty so nothing is owed, and every barrier repeats.
+    OverTheirs,
+    /// Withheld this barrier.
+    Parked,
+}
+
+/// The ONE place a delete's outcome is decided. `merge` applies it, and
+/// a caller that must know whether an install moves a path off its
+/// citation asks this with the same base — never re-derives it. Re-deriving
+/// it is how the repair rule came to read a different base from the merge
+/// (M5, L-124).
+pub fn delete_outcome(
+    base: &BTreeMap<String, String>,
+    theirs: &LeanManifest,
+    p: &str,
+    parked: &BTreeSet<String>,
+) -> DeleteOutcome {
+    if parked.contains(p) {
+        return DeleteOutcome::Parked;
+    }
+    match (theirs.entries.get(p), base.get(p)) {
+        (Some(e), Some(b)) if &e.etag == b => DeleteOutcome::Applied,
+        // Already deleted by someone else: nothing is left to cite.
+        (None, _) => DeleteOutcome::Applied,
+        // Changed since base, or present in theirs and not in base.
+        (Some(_), _) => DeleteOutcome::OverTheirs,
+    }
 }
 
 

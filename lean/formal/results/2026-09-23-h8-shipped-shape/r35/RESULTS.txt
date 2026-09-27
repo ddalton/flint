@@ -1,0 +1,6 @@
+LeanImmutableProbeSentinelHonored        OK-FIRES           rc=12 | Invariant ProbeSentinelHonored is violated | 7278 states generated, 3152 distinct | Finished in 02s at 
+LeanImmutableSentinelQueueDropped        OK-FIRES           rc=12 | Invariant Inv_AckBoundaryCoherent is violated | 1603645 states generated, 549314 distinct | Finished in 53s at 
+LeanImmutableSentinelOutrankedOk         OK-FIRES           rc=12 | Invariant Inv_AckImpliesCited is violated | 34954323 states generated, 10645182 distinct | Finished in 16min 50s at 
+LeanImmutableSentinelUnstamped           OK-FIRES           rc=12 | Invariant Inv_BoundaryNamesItsClock is violated | 814052 states generated, 284789 distinct | Finished in 29s at 
+LeanImmutableSentinelImpl1               OK-HOLDS           rc=0 | No error has been found | 201742446 states generated, 56491448 distinct | Finished in 01h 35min at 
+R35DONE

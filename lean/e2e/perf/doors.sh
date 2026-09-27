@@ -56,6 +56,10 @@ REPS="${2:-3}"
 : "${PREFIX:=ranged-drill}"
 : "${ROOT:=/mnt/nvme/drill}"
 : "${BIN:=/mnt/nvme/rig/flint-sync}"
+# 2026-09-24: an older binary to re-run beside $BIN (arm L-0912). It cannot
+# read what $BIN publishes, so it seeds and reads its own prefix, <w>-0912:
+# the same seed tree, the same bytes and file count, its own layout.
+: "${BIN_0912:=}"
 : "${AWS_REGION:=us-west-1}"
 export AWS_REGION AWS_DEFAULT_REGION="$AWS_REGION" AWS_MAX_ATTEMPTS=5
 WORKLOADS="${WORKLOADS:-big small mixed}"
@@ -103,13 +107,17 @@ seed_workload() { # <w>
   # keeps citing the previous run's bytes — every arm would then measure
   # a tree nobody intended. `parked` and `up` are on the barrier's own
   # summary line; default to the FAILING value when unparsed.
-  local out parked up
-  out=$(FLINT_SYNC_ROOT="$dir" FLINT_SYNC_BUCKET="$BUCKET" FLINT_SYNC_PREFIX="$PREFIX/$w" "$BIN" barrier 2>&1)
-  echo "$out" >&2
-  parked=$(sed -n 's/.*parked=\([0-9]*\).*/\1/p' <<<"$out" | head -1)
-  up=$(sed -n 's/.*up=\([0-9]*\).*/\1/p' <<<"$out" | head -1)
-  [ "${parked:-1}" = 0 ] && [ "${up:-0}" = "$n" ] \
-    || { log "SEED GUARD FAIL [$w]: up=${up:-?} parked=${parked:-?}, want up=$n parked=0 (prefix not fresh?)"; return 1; }
+  local out parked up bin suffix
+  for suffix in "" ${BIN_0912:+-0912}; do
+    bin=$BIN; [ -n "$suffix" ] && bin=$BIN_0912
+    rm -rf "$dir/.flint-sync" "$dir/.flint"
+    out=$(FLINT_SYNC_ROOT="$dir" FLINT_SYNC_BUCKET="$BUCKET" FLINT_SYNC_PREFIX="$PREFIX/$w$suffix" "$bin" barrier 2>&1)
+    echo "$out" >&2
+    parked=$(sed -n 's/.*parked=\([0-9]*\).*/\1/p' <<<"$out" | head -1)
+    up=$(sed -n 's/.*up=\([0-9]*\).*/\1/p' <<<"$out" | head -1)
+    [ "${parked:-1}" = 0 ] && [ "${up:-0}" = "$n" ] \
+      || { log "SEED GUARD FAIL [$w$suffix]: up=${up:-?} parked=${parked:-?}, want up=$n parked=0 (prefix not fresh?)"; return 1; }
+  done
   # The write arms reuse this tree as a PLAIN tree: no baseline, so a
   # barrier from it uploads everything, which is the measurement.
   rm -rf "$dir/.flint-sync"
@@ -123,8 +131,10 @@ lean_run() { # <rep> <w> <arm>
   local rep="$1" w="$2" arm="$3" dir="$ROOT/run-$w"
   rm -rf "$dir"; mkdir -p "$dir"
   local -a e=(FLINT_SYNC_ROOT="$dir" FLINT_SYNC_BUCKET="$BUCKET" FLINT_SYNC_PREFIX="$PREFIX/$w")
+  local bin=$BIN
   case "$arm" in
     L-ship) ;;
+    L-0912) bin=$BIN_0912; e=(FLINT_SYNC_ROOT="$dir" FLINT_SYNC_BUCKET="$BUCKET" FLINT_SYNC_PREFIX="$PREFIX/$w-0912") ;;
     L-raw)  e+=(FLINT_SYNC_RAW_READS=true) ;;
     L-0910) e+=(FLINT_SYNC_FANOUT=32 FLINT_SYNC_FETCH_INFLIGHT_MB=512 FLINT_SYNC_RANGE_GET_MIN_MB=8
                 FLINT_SYNC_RANGE_GET_CHUNK_MB=16 FLINT_SYNC_RANGE_GET_PARALLELISM=4) ;;
@@ -134,7 +144,7 @@ lean_run() { # <rep> <w> <arm>
   drop_caches
   local t0 t1 out
   t0=$(now_ms)
-  out=$(env "${e[@]}" "$BIN" checkout 2>&1) || { log "CHECKOUT FAILED [$w/$arm]"; echo "$out" >&2; row "$rep" "$w" "$arm" FAIL - - - -; return 1; }
+  out=$(env "${e[@]}" "$bin" checkout 2>&1) || { log "CHECKOUT FAILED [$w/$arm]"; echo "$out" >&2; row "$rep" "$w" "$arm" FAIL - - - -; return 1; }
   t1=$(now_ms)
   local phase; phase=$(grep -F 'flint-sync: phase' <<<"$out" | tail -1)
   [ -n "$phase" ] || { log "NO PHASE LINE [$w/$arm]"; echo "$out" >&2; row "$rep" "$w" "$arm" FAIL - - - -; return 1; }
@@ -207,9 +217,15 @@ s3_copy() { # <w> -> "ms bytes files"
 }
 
 # ── the cache-drop control, on the load-bearing path ─────────────────
-cold_control() { # -> "cold_ms warm_ms"
-  local dir="$ROOT/s3arm-big"
-  [ -d "$dir" ] && [ -n "$(ls -A "$dir" 2>/dev/null)" ] || { echo "0 0"; return; }
+cold_control() { # -> "cold_ms warm_ms", or "- -" when there is no tree to read
+  # `big` when it ran, else `small`. It was `big` only, and a `small`-only
+  # drill (2026-09-24) got "0 0": a control that never read a byte, and a
+  # guard that called that "drop_caches is not dropping".
+  local dir="" w
+  for w in big small; do
+    [ -d "$ROOT/s3arm-$w" ] && [ -n "$(ls -A "$ROOT/s3arm-$w" 2>/dev/null)" ] && { dir="$ROOT/s3arm-$w"; break; }
+  done
+  [ -n "$dir" ] || { echo "- -"; return; }
   local t0 t1 cold warm
   drop_caches
   t0=$(now_ms); cat "$dir"/* > /dev/null; t1=$(now_ms); cold=$(( t1 - t0 ))
@@ -292,7 +308,10 @@ guards() {
     done < <(awk -F'\t' -v w="$w" '$2==w' "$RESULTS")
   done
   local c wm
-  read -r c wm <<<"$(awk -F'\t' '$3=="ctl" {c+=$4; w+=$5; n++} END {if (n) printf "%d %d", c/n, w/n}' "$RESULTS")"
+  if awk -F'\t' '$3=="ctl" && $4=="-" {x=1} END {exit !x}' "$RESULTS"; then
+    echo "GUARD FAIL [ctl]: the control had no local tree to read — drop_caches is UNCHECKED" >&2; fail=1
+  fi
+  read -r c wm <<<"$(awk -F'\t' '$3=="ctl" && $4!="-" {c+=$4; w+=$5; n++} END {if (n) printf "%d %d", c/n, w/n}' "$RESULTS")"
   if [ -n "${c:-}" ] && [ "$c" -le $(( ${wm:-0} * 2 )) ]; then
     echo "GUARD FAIL [ctl]: local cold ${c}ms vs warm ${wm}ms — drop_caches is not dropping; every 'cold' here is a warm read" >&2; fail=1
   fi
@@ -342,6 +361,7 @@ do_read() {
     for w in $WORKLOADS; do
       log "rep $rep / $w"
       lean_run "$rep" "$w" L-ship
+      [ -n "$BIN_0912" ] && lean_run "$rep" "$w" L-0912
       lean_run "$rep" "$w" L-raw
       lean_run "$rep" "$w" L-0910
       [ "$rep" = 1 ] && lean_run "$rep" "$w" L-slow

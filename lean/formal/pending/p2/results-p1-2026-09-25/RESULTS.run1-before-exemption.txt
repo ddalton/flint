@@ -1,0 +1,10 @@
+P2RSyncNoPrune             OK-FIRES  rc=12  Error: Invariant Inv_NoRegress is violated | 247087 distinct states found | depth 18 | 17 steps
+P2RSyncPruned              MISMATCH  rc=12  Error: Invariant Inv_NoRegress is violated | 1008584 distinct states found | depth 21 | 20 steps
+P1SyncNoRegress            MISMATCH  rc=12  Error: Invariant Inv_NoRegress is violated | 1160666 distinct states found | depth 21 | 20 steps
+P1WithoutP2                OK-FIRES  rc=12  Error: Invariant Inv_NoRegress is violated | 294 distinct states found | depth 6 | 5 steps
+P1DeleteOutranked          OK-FIRES  rc=13  Error: Action property Prop_DeleteSettles is violated | 277935 distinct states found | depth 11 | 11 steps
+P1CommitBlind              OK-FIRES  rc=13  Error: Action property Prop_NoSilentRevert is violated | 217900 distinct states found | depth 11 | 11 steps
+P1ProbeConverged           OK-FIRES  rc=13  Error: Action property ProbeConverged is violated | 3804 distinct states found | depth 8 | 6 steps
+P1ProbeDeleteOverTheirs    OK-FIRES  rc=13  Error: Action property ProbeDeleteOverTheirs is violated | 98194 distinct states found | depth 11 | 10 steps
+P1ProbeRestartAfterCas     OK-FIRES  rc=13  Error: Action property ProbeRestartAfterCas is violated | 98475 distinct states found | depth 11 | 10 steps
+P2RProbeRestartAfterCas    OK-FIRES  rc=13  Error: Action property ProbeRestartAfterCas is violated | 106589 distinct states found | depth 10 | 10 steps

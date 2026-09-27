@@ -35,8 +35,7 @@ let store = connect("my-bucket", None).await?;
 // One value per workspace: the subtree prefix the syncer was started with.
 let ws = Workspace::new(store.clone(), "teams/alpha/project-1");
 
-// A read resolves through the manifest citation, falling back to a
-// write no barrier has cited yet.
+// A read resolves through the manifest citation.
 let blob = ws.get_file("notes/todo.md").await?;
 
 // An overwrite must say what it read. The tag comes back quoted, as
@@ -82,10 +81,9 @@ let ws = Workspace::new(store, "p");
 let etag = ws.put_file("a.txt", Bytes::from("one"), &PutFile::default()).await.unwrap();
 assert_eq!(ws.get_file("a.txt").await.unwrap().body, Bytes::from("one"));
 
-// The write is tracked in the inbox until the syncer's next barrier cites it.
+// The write is CITED when `put_file` returns: the gateway commits it.
 let snap = ws.snapshot().await.unwrap();
-assert_eq!(snap.inbox.entries[0].etag, etag);
-assert!(snap.manifest.entries.is_empty());
+assert_eq!(snap.manifest.entries["a.txt"].etag, etag);
 
 // An overwrite without If-Match is refused, and the refusal says so.
 let err = ws.put_file("a.txt", Bytes::from("two"), &PutFile::default()).await.unwrap_err();
@@ -96,61 +94,59 @@ assert_eq!((err.status(), err.code()), (428, "precondition-required"));
 
 ## What a write is, and when others see it
 
-`put_file` returns when the object is at `<prefix>/files/<path>` and an
-entry naming it is in the inbox cell at `<prefix>/.flint/lean/inbox`.
-Both are in the bucket; there is no other channel. That is the whole
-durability promise, and it is immediate.
+`put_file` COMMITS. The bytes land at a fresh handle under
+`<prefix>/files/<path>`, then the verb CASes the workspace's manifest
+(`<prefix>/.flint/lean/current`) to cite them, and it returns only after
+that CAS. That is the whole durability promise, and it is immediate: every
+reader through this crate or the gateway, every agent pod that runs
+`sync`, and every fresh checkout sees the write the moment `put_file`
+returns, with or without a syncer running.
 
-Visibility has two tiers, by design:
+An agent pod's TREE takes it as it takes any other writer's publish: the
+syncer's next barrier sees the pointer has moved and, in its first step,
+writes the change into the tree wherever the tree is clean and the path is
+in its scope (by default within one cadence tick, or sooner on a
+`request_boundary`). Nothing is queued: what a tree is owed is derived from
+the manifest at each barrier (P1-lite). A path the agent has dirtied is its
+work, and its next publish records what it publishes over (R7).
 
-- **Now**: any reader through this crate or through the gateway, and
-  any agent pod that runs `sync`. Both overlay the tracked inbox entry
-  on the manifest citation, so an overwrite of a file the manifest
-  already cites reads as the new bytes the moment `put_file` returns,
-  for every reader, with or without a syncer running. The cell is
-  consulted only when the cited fetch fails its precondition, so a
-  read of a file nobody has overwritten costs what it did before the
-  overlay. (Before 0.2.1 `get_file` preferred the citation and
-  answered 409 `moved` until the syncer re-cited the path.)
-- **At the next barrier**: the manifest. The workspace's syncer
-  consumes the inbox at the start of every barrier — on its cadence
-  (default 60 s) or sooner on a `request_boundary` — fetches the object,
-  verifies its CRC-64, cites it in `<prefix>/.flint/lean/current`, and
-  from then on a fresh checkout sees it.
+A UI save never waits for the syncers (simplification step 5, P2). It
+does not take their lease and is not held back by a barrier in progress:
+a syncer mid-publish loses its CAS instead, merges again onto the save,
+and retries. So the cost of heavy saving falls on the writers, never on
+the person saving.
 
-The library never edits the manifest for a HITL write. The syncer that
-holds the workspace's lease is the manifest's only writer, and that is
-what the protocol's model checks: a second manifest writer would
-reintroduce exactly the race the barrier exists to prevent. What the
-library offers instead:
+**An editor autosaves to a draft, never with `put_file`.** A commit is
+about four writes (the bytes, the changed manifest chunk, the pointer,
+the retire log), moves the pointer every syncer and reader checks, costs
+each of them a full manifest load, makes a publishing agent lose its CAS
+and retry, and keeps the version it replaced for the retire age (600 s
+by default). At an editor's autosave rate that is paid by everyone
+holding the workspace, for keystrokes nobody else needs to see yet. A
+draft save (`put_draft`, below) is two small PUTs under the user's own
+keys and touches nothing shared, and it never refuses. Commit — `put_file`,
+or `promote_draft` — when the person saves, at the pace a person saves.
 
-- `request_boundary(requestor)` asks the syncer to cite now. It answers
-  `recorded`, never `done`; the syncer honours it at its next poll
+- `request_boundary(requestor)` asks the syncers to publish now. It
+  answers `recorded`, never `done`; a syncer honours it at its next poll
   (about a second) outside its min-interval and hourly budget.
-- `wait_cited(path, etag, timeout, poll)` waits until the manifest cites
-  the write, for a status view that wants to show "published", and
-  answers `CitationPending` (HTTP 202) when `timeout` passes — the write
-  is durable and tracked either way. Not for the request path of a UI.
-- `status()` reports the cited seq, the inbox depth, whether a barrier
-  window is open, the fence's state (who ran the last boundary, and
-  whether a commit section is in progress).
-
-A workspace no syncer ever runs on takes writes and keeps them; the
-manifest catches up when a syncer next starts.
+- `wait_cited(path, etag, timeout, poll)` answers at once for a save
+  (it is cited when acknowledged), and `CitationPending` (HTTP 202) for a
+  version nothing cites when `timeout` passes.
+- `status()` reports the cited seq and the fence's state.
 
 ## When an immediate answer is not possible
 
-- **A barrier window is open** (the syncer is mid-publish, usually
-  well under a second): `VerbError::WindowOpen` with `retry_after_secs`,
-  before anything is written. A frontend retries after the hint, or the
-  backend sets `Workspace::with_window_wait(Some(duration))` and the
-  verb polls the cell until the window closes or the bound passes.
 - **The file changed under the user**: `PreconditionRequired` (no
   `If-Match` on an overwrite) or `FileChanged { current }` (a stale one).
-  A UI decision — re-read and reconcile — never a retry.
-- **The object moved inside the HEAD-to-PUT window**:
-  `ConcurrentWrite`, retryable as is. `VerbError::is_retryable` says
-  which refusals are.
+  The precondition is judged again at the commit, so a version a syncer
+  published after the read is named here, never overwritten unseen. A UI
+  decision — re-read and reconcile — never a retry.
+- **The syncers kept winning the commit**: `ConcurrentWrite`, after
+  several lost CASes in a row (each re-reads and re-judges). Retryable as
+  is. `VerbError::is_retryable` says which refusals are.
+- **A mirror**: a workspace published by exactly one writer takes no UI
+  writes, `ReadOnly` (403 `read-only`).
 
 ## Drafts
 
@@ -166,66 +162,58 @@ checkout, no manifest and no sweep can see them. Per user, per path.
   file has moved since (`stale`).
 - `get_draft(user, path)` returns the bytes, the recorded base, and
   whether the draft is incomplete (a body whose meta never landed).
-- `promote_draft(user, path, author)` publishes it as a HITL write
-  conditioned on the recorded base: `DraftStale { current }` if the
-  file moved, and the draft is kept.
+- `promote_draft(user, path, author)` publishes it as a save does — it
+  COMMITS, conditioned on the recorded base, judged again at the commit:
+  `DraftStale { current }` if the file moved, and the draft is kept.
 - `delete_draft(user, path)` discards it.
 
 ## Delete and rename
 
-A caller outside the pod cannot touch the agent's tree and must never
-delete an object itself: a cited object deleted from outside wedges
-every checkout with "the manifest cites it but it is gone". So a delete
-is DECLARED. `remove_file` records the intent in the inbox cell and
-returns; the syncer performs it at its next barrier — unlink, cite out,
-GC — and the listing hides the path from the moment it is recorded,
-whatever the syncer's cadence. A read of the path by name still answers
-until then: the object and its citation are untouched, and a removal
-the syncer refuses leaves the file exactly as it was, with nothing to
-undo in a reader that never saw it vanish. `rename_file` is a server-side copy to
-the destination (the bytes never traverse your process, so a 10 GB
-checkpoint moves without a download) followed by one CAS that records
-the destination entry and the source removal together, so the cell
-never holds half a rename and the barrier cites both halves in ONE
-manifest generation: a manifest reader sees the old name or the new,
-never both and never neither.
+A delete and a rename COMMIT, as a save does (P2): each is one CAS on the
+workspace's manifest, and each returns once it is committed. Neither
+deletes an object: a cited object deleted from outside would wedge every
+checkout with "the manifest cites it but it is gone". A delete stops
+citing the path (the document's tombstone names what was deleted), and
+the object goes to the orphan sweep once nothing cites it. A rename is a
+CITATION MOVE: the destination cites the source's handle and the source
+is no longer cited, in the same generation, so no bytes move — a 10 GB
+checkpoint moves as fast as a text file — and a manifest reader sees the
+old name or the new, never both and never neither.
 
 - `remove_file(path, author, if_match)` and `remove_files(pairs,
-  author)`: a folder delete is one transaction, recorded whole or not
-  at all.
+  author)`: a folder delete is ONE commit, or none — one unknown path or
+  failed precondition deletes nothing.
 - `rename_file(from, to, author)` and `rename_files(pairs, author)`: a
-  folder move likewise. The destination is readable at once;
-  `DestinationExists` if something is already there.
-- `withdraw_removal(path)` takes a recorded removal back, best effort
-  against a barrier already performing it.
-- `Snapshot::listing()` is the file browser's list: citations, overlaid
-  by tracked writes, minus pending removals. `pending_removals()` and
-  `refused_removals()` are the rest of the story.
+  folder move likewise. `DestinationExists` if something is already
+  there, `NoSuchFile` for a source that is not.
+- `Snapshot::listing()` is the file browser's list.
 
-**A removal can be refused.** If the agent has unpublished edits on the
-path, or created a file there, the syncer applies nothing, keeps the
-agent's work, and writes the reason back into the cell — the same rule
-it applies to a write over dirty bytes. A refused removal is never
-retried (a retry that waited for the agent to publish would delete the
-very edit the refusal protected); it stays readable with its `refused`
-reason until a newer removal of the path supersedes it or you withdraw
-it. `status()` counts pending and refused removals. There is no
-function in this crate that deletes a cited object.
+Neither waits on the syncers (G1). An agent whose tree holds the path
+follows at its next barrier, as it follows any writer's publish. **An
+agent that is EDITING a path the UI deleted keeps its work:** its next
+publish brings the path back — its bytes win — and it records the delete
+it overrode, naming the deleted version (a `commit-recreated-deleted`
+conflict record). The other way round, an agent that DELETES a path the
+UI saved since the agent last took it: the delete stands, and the UI's
+version is preserved under a `commit-deleted-over-theirs` record (M3).
+There is no function in this crate that deletes a cited object; what a
+commit stops citing is kept for the retire age (600 s by default) and
+only then collected, so a reader that loaded the manifest just before
+can still fetch it.
 
 ## Every verb and its wire code
 
 | Method | Gateway route | Refusals |
 |---|---|---|
-| `get_file` | `GET /files/{path}` | 404 `no-such-file`, 409 `moved`, 410 `foreign-write` |
-| `put_file` | `PUT /files/{path}` | 400 `bad-path` / `bad-precondition`, 403 `read-only`, 409 `barrier-window-open` / `concurrent-write`, 412 `file-changed`, 413 `payload-too-large`, 428 `precondition-required` |
-| `remove_file`, `remove_files` | `DELETE /files/{path}` | 403 `read-only`, 404 `no-such-file`, 412 `file-changed` |
-| `rename_file`, `rename_files` | `POST /rename` `{from, to}` | 403 `read-only`, 404 `no-such-file`, 409 `destination-exists` / `barrier-window-open` / `concurrent-write` |
-| `withdraw_removal` | `DELETE /removals/{path}` | 403 `read-only`, 404 `no-removal` |
+| `get_file` | `GET /files/{path}` | 404 `no-such-file`, 409 `moved`, 410 `foreign-write`, 502 `corrupt` (the bytes do not match the citation's CRC-64; never served) |
+| `put_file` | `PUT /files/{path}` | 400 `bad-path` / `bad-precondition`, 403 `read-only`, 409 `concurrent-write`, 412 `file-changed`, 413 `payload-too-large`, 428 `precondition-required` |
+| `remove_file`, `remove_files` | `DELETE /files/{path}` | 403 `read-only`, 404 `no-such-file`, 409 `concurrent-write`, 412 `file-changed` |
+| `rename_file`, `rename_files` | `POST /rename` `{from, to}` | 403 `read-only`, 404 `no-such-file`, 409 `destination-exists` / `concurrent-write` |
 | `snapshot` | `GET /snapshot` | |
 | `status` | `GET /status` | |
 | `request_boundary`, `request_sync` | `POST /boundary`, `POST /sync-request` | 403 `read-only` |
 | `put_draft`, `get_draft`, `list_drafts`, `delete_draft`, `promote_draft` | `/drafts/{user}[/{path}]` | 400 `bad-user`, 403 `read-only` (`put_draft`, `delete_draft`, `promote_draft`), 404 `no-draft`, 409 `draft-stale` / `draft-moved` |
-| `open_window`, `clear_window`, `drop_inbox`, `cas_manifest` | syncer-facing | 403 `stale-epoch` / `no-holder` / `fenced` / `read-only`, 409 `cas-miss` |
+| `cas_manifest` | syncer-facing | 403 `stale-epoch` / `no-holder` / `read-only`, 409 `cas-miss` |
 | `wait_cited` | library only | 202 `citation-pending`, 409 `superseded` |
 
 Every verb can also fail 502 `store` (the object store said no) and

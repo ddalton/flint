@@ -1,0 +1,6 @@
+R35DONE
+LeanImmutableProbeSyncApplied            OK-FIRES           rc=12 | Invariant ProbeSyncApplied is violated | 194 states generated, 87 distinct | Finished in 01s at 
+LeanImmutableSyncStaleDirt               OK-FIRES           rc=12 | Invariant Inv_SyncNeverDestroysDirty is violated | 415 states generated, 167 distinct | Finished in 01s at 
+LeanImmutableSyncOverlayStale            MISMATCH           rc=0 | No error has been found | 9763881 states generated, 2570348 distinct | Finished in 06min 01s at 
+LeanImmutableSyncHolds                   OK-HOLDS           rc=0 | No error has been found | 9486848 states generated, 2497753 distinct | Finished in 07min 14s at 
+R36DONE

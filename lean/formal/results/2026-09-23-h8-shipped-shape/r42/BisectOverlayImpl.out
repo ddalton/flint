@@ -1,0 +1,26 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 12 and seed 4076409529641822741 with 2 workers on 8 cores with 1820MB heap and 64MB offheap memory [pid: 66536] (Linux 6.12.0-061200-generic amd64, Ubuntu 21.0.11 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file /home/ddalton/lean-io-sent/formal/LeanSubtree.tla
+Parsing file /tmp/Naturals.tla
+Parsing file /tmp/FiniteSets.tla
+Parsing file /tmp/Sequences.tla
+Parsing file /tmp/TLC.tla
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module LeanSubtree
+Starting... (2026-09-23 18:55:53)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-09-23 18:55:53.
+Progress(13) at 2026-09-23 18:55:56: 51,309 states generated (51,309 s/min), 15,277 distinct states found (15,277 ds/min), 6,719 states left on queue.
+Progress(28) at 2026-09-23 18:56:56: 1,834,896 states generated (1,783,587 s/min), 513,242 distinct states found (497,965 ds/min), 14,315 states left on queue.
+Model checking completed. No error has been found.
+  Estimates of the probability that TLC did not check all reachable states
+  because two distinct states had the same fingerprint:
+  calculated (optimistic):  val = 3.9E-8
+  based on the actual fingerprints:  val = 9.0E-9
+1878217 states generated, 525258 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 32.
+The average outdegree of the complete state graph is 1 (minimum is 0, the maximum 8 and the 95th percentile is 3).
+Finished in 01min 06s at (2026-09-23 18:56:58)

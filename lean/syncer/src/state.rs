@@ -15,11 +15,19 @@ use serde::{Deserialize, Serialize};
 
 use super::{LeanError, LeanResult};
 
-/// One published path as this syncer last knew it: the recognized ETag
-/// is the If-Match guard for the next publish and the HEAD-guard for GC.
+/// One published path as this syncer last knew it: the handle it
+/// integrated (the citation repair re-cites it, the merge recognises it
+/// as this tree's own) and the ETag that attests its bytes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BaselineEntry {
     pub etag: String,
+    /// The HANDLE this tree integrated at the path — its own upload, the
+    /// entry it consumed, the citation it checked out (design 2026-09-19,
+    /// R1-R2). The merge counts a document citing it as citing THIS tree's
+    /// version, not a foreign one. `None` only on a baseline written
+    /// before handles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     pub generation: u64,
     pub size: u64,
     pub mtime_unix: i64,
@@ -29,32 +37,20 @@ pub struct BaselineEntry {
     pub mtime_nanos: Option<u32>,
     /// CRC-64/NVME (wire form) of the object bytes this syncer
     /// integrated at this path — computed from the bytes it wrote or
-    /// uploaded, never from a HEAD. A citation repair cites it, which
-    /// is what lets the manifest carry a CRC for an object whose
-    /// backend returns none (Ozone) or whose HITL uploader sent none.
-    ///
-    /// `None` only on the consume-dirty sentinel (`size == u64::MAX`):
-    /// the bytes on disk are the LOCAL edit, about to publish under a
-    /// CRC of its own, and the sentinel never repairs.
+    /// uploaded, never from a HEAD: content convergence compares it, and
+    /// it is what lets the manifest carry a CRC for an object whose
+    /// backend returns none (Ozone). Every writer sets it; `None` only on
+    /// a baseline from before it existed.
     pub crc64_b64: Option<String>,
-    /// Set by a consume that adopted the untracked sweep's entry
-    /// (`untracked.rs`): the etag the manifest cited at this path when the
-    /// sweep judged the object untracked. The citation repair cites this
-    /// entry only while the manifest still cites exactly that; a citation
-    /// that moved on voids the adoption, and the path is queued as a
-    /// tombstone where the manifest now cites nothing (review 2026-09-18,
-    /// H1b). `None` for everything a writer integrated on its own account.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub judged: Option<String>,
 }
 
 /// The persisted baseline snapshot: what this syncer believes the
-/// bucket holds AND has integrated locally. Distinct from `inst_base`
-/// (the manifest view at our last install — the three-way merge base):
-/// consuming a HITL entry advances the baseline for that path but not
-/// the merge base. The formal model carries the same split
-/// (baseline vs instBase in LeanSubtree.tla) — collapsing them made a
-/// syncer mistake its own consumed adoption for a foreign entry.
+/// bucket holds AND has integrated locally — and, since P1-lite
+/// (2026-09-25), the three-way MERGE BASE too. A separate merge base
+/// existed because a tree could adopt a UI write the document did not
+/// cite yet; under P2 every UI edit commits first, so no tree holds a
+/// version the document never cited, and the split had nothing left to
+/// keep apart (the sandbox pair `LeanCoreP1`/`LeanCoreP2R`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Baseline {
     /// Manifest seq at our last install/checkout.
@@ -62,9 +58,20 @@ pub struct Baseline {
     /// Manifest document ETag we expect at the next CAS.
     pub manifest_etag: Option<String>,
     pub entries: BTreeMap<String, BaselineEntry>,
-    /// The merge base: path -> ETag as cited by the manifest we last
-    /// installed (or checked out).
-    pub inst_base: BTreeMap<String, String>,
+    /// THE CHEAP PATH'S RECORD (scan trigger). The pointer etag of the
+    /// document the last full consume derived against, with nothing left
+    /// but the agent's own work; `None` = derive at the next consume (a
+    /// failed fetch, a sync, a baseline from before this field). Only the
+    /// consume writes it — and the commit, when its CAS replaced exactly
+    /// this document, so the new one is it plus this tree's own changes.
+    #[serde(default)]
+    pub derived_etag: Option<String>,
+    /// The paths that derive left untaken because the agent is working on
+    /// them (dirty against the baseline where the document differs). The
+    /// cheap path holds only while every one is still dirty: an agent that
+    /// backs out makes the document's version owed.
+    #[serde(default)]
+    pub skipped: BTreeSet<String>,
     /// Paths present at the PREVIOUS scan (the two-consecutive-scans
     /// deletion rule: absence must survive two scans).
     pub prev_scan: BTreeSet<String>,
@@ -132,82 +139,50 @@ pub struct StoreConformance {
     pub at_unix: u64,
 }
 
-/// The intent journal written BEFORE uploads: which keys this barrier
-/// will touch and under which flush_uuid, so a restarted container can
-/// recognize its own crashed/torn PUT at the 412 (AdoptOwn) instead of
-/// mistaking it for a foreign write. `recent_uuids` keeps the last few
-/// barriers' uuids for the same reason.
-/// A change ANOTHER writer made that this workspace's merge carried into
-/// the manifest but not yet into the tree: the next consume fetches it
-/// (or, for a deletion, removes a clean local copy).
-///
-/// Writer-local on purpose. These rode the SHARED inbox as
-/// `merge-preserved` entries, which was right while one syncer wrote a
-/// workspace and wrong the moment two did: the other writer's consume
-/// found its own bytes there, called the entry integrated and dropped
-/// it, and the writer that needed it never fetched the change; a
-/// `sync` read it as remote truth after the manifest had moved past it.
-/// And a peer's DELETE had no carrier at all. A pod replacement loses
-/// this file with the baseline, which is correct: the replacement's
-/// checkout materializes the whole manifest.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ForeignChange {
-    pub path: String,
-    /// The etag the manifest cites; `None` means the path was deleted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub etag: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crc64_b64: Option<String>,
-    /// For a deletion: the etag the merge base cited — what the peer's
-    /// delete RETIRED. A tombstone is superseded only by a DIFFERENT
-    /// object at the key; the retired generation itself, left behind by
-    /// a collector that gave way (a store without a conditional DELETE),
-    /// is exactly what the tombstone is about (review 2026-09-18, H1).
-    /// `None` on a queue file written before this field: the old rule,
-    /// any object supersedes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retired: Option<String>,
-}
-
+/// The intent journal: the flush id of the barrier in flight, and the H10
+/// carrier. (Its `keys`, `recent_uuids` and `declared_deletes` served the
+/// slot's AdoptOwn and the cell's declared removals; nothing read them
+/// once both were gone — M6 of the 2026-09-24 simplification analysis.)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IntentJournal {
     pub flush_uuid: String,
-    pub keys: Vec<String>,
-    pub recent_uuids: Vec<String>,
-    /// The ETag of the manifest document THIS workspace last installed,
-    /// written immediately after the CAS.
-    ///
-    /// The merge base (`Baseline::inst_base`) and the baseline are both
-    /// rewritten at step 7, after the CAS and after the GC deletes. A
-    /// container restart in that window leaves the bucket holding a
-    /// document we wrote and our persisted merge base one generation
-    /// behind it — so at the next merge our own entries read as foreign
-    /// changes, delete/modify resolves conservatively against the
-    /// agent's own delete, and the path is queued into the inbox as a
-    /// conflict nobody else ever touched. Recording the installed ETag
-    /// costs one small local write and restores exactly what step 7 was
-    /// going to say: if the bucket is still at this document, the merge
-    /// base IS this document.
-    #[serde(default)]
-    pub installed_etag: Option<String>,
-    /// The other writers' changes the install at `installed_etag` carried
-    /// into the manifest, journalled with that etag in the same write.
-    ///
-    /// Step 7 moves them into the foreign queue before the merge base
-    /// passes them. A restart before it leaves the merge base at the
-    /// installed document (above), where they read as integrated: the
-    /// tree would never receive them and `remote.seq` would say there is
-    /// no news. The next consume re-queues whatever is still here.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub installed_foreign: Vec<ForeignChange>,
-    /// Paths whose DECLARED removal this barrier unlinked and is about
-    /// to cite out (delete/rename design §4). Journalled before the
-    /// window commitment, so a crash after the cell has been told and
-    /// before the manifest CAS still produces ONE generation without
-    /// them, instead of handing the deletion to the two-scan path and
-    /// citing a file the tree no longer has for a barrier.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub declared_deletes: Vec<String>,
+    /// What the installs that CARRIED the standing publish declaration
+    /// published, journalled in the write that follows each CAS (review
+    /// 2026-09-18, H10). The ack reads the barrier that honors the
+    /// declaration, and that is not always the one that carried it: a
+    /// restart after step 7, an ack write that failed, or an honor that
+    /// failed before the floor's cadence barrier published the
+    /// declaration, each left the ack to a later barrier — and when a
+    /// peer had deleted a declared path in between, that barrier was a
+    /// pull of the peer's document, answered `ok` while the tree still
+    /// held the declared bytes. Carried forward across barriers; matched
+    /// on the pending record's `id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carrier: Option<Carrier>,
+}
+
+/// See `IntentJournal::carrier`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Carrier {
+    /// `PendingSentinel::id` of the declaration these installs carried.
+    pub pending_id: String,
+    /// The dirty paths they published — uploads and deletes.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub paths: BTreeSet<String>,
+    /// Which of `paths` were DELETES: a document that does not cite one
+    /// of those is the declaration honoured, not dropped.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub deletes: BTreeSet<String>,
+    /// Carried uploads the document the LAST barrier ended at does not
+    /// cite: a peer deleted them after this writer published them. The
+    /// ack's document is that one, so it says so (H10). Recomputed at
+    /// every barrier's end from the document in hand; no request.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub uncited: BTreeSet<String>,
+    /// Declared paths they did not carry (parked, deferred, or a delete
+    /// the merge outranked) — the ack's `report.dropped` survives them.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub dropped: BTreeSet<String>,
 }
 
 /// One surfaced conflict: both versions stay recoverable (local bytes in
@@ -271,9 +246,12 @@ const SCOPE: &str = "scope.json";
 const SCOPE_INTENT: &str = "scope-intent.json";
 const INCARNATION: &str = "incarnation.json";
 const INTENT: &str = "intent.json";
-const FOREIGN_QUEUE: &str = "foreign-queue.json";
 /// When this writer last swept for untracked uploads (`untracked.rs`).
 const UNTRACKED_SWEEP: &str = "untracked-sweep";
+const ORPHAN_SWEEP: &str = "orphan-sweep";
+/// The retire logs this writer has read (`untracked.rs`): immutable, so each
+/// is fetched once.
+const RETIRE_CACHE: &str = "retire-cache.json";
 /// The cached conditional-write verdict for this store (`conformance.rs`).
 const CONFORMANCE: &str = "conformance.json";
 const CONFLICTS: &str = "conflicts.jsonl";
@@ -482,50 +460,6 @@ impl SyncerState {
         write_atomic(&self.dir.join(INCARNATION), &bytes)
     }
 
-    /// The writer-local foreign-change queue. Only NotFound means empty
-    /// (an unreadable queue answered as empty would strand every change
-    /// in it).
-    pub fn load_foreign_queue(&self) -> LeanResult<Vec<ForeignChange>> {
-        match fs::read(self.dir.join(FOREIGN_QUEUE)) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|e| LeanError::State(format!("foreign queue: {e}"))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    pub fn save_foreign_queue(&self, q: &[ForeignChange]) -> LeanResult<()> {
-        let bytes =
-            serde_json::to_vec(q).map_err(|e| LeanError::State(format!("foreign queue: {e}")))?;
-        write_atomic(&self.dir.join(FOREIGN_QUEUE), &bytes)
-    }
-
-    /// Upsert `changes` into the foreign queue by path — a later change to
-    /// a path replaces the queued one — and save it. Idempotent.
-    pub fn queue_foreign(&self, changes: &[ForeignChange]) -> LeanResult<()> {
-        let mut q = self.load_foreign_queue()?;
-        for c in changes {
-            q.retain(|x| x.path != c.path);
-            q.push(c.clone());
-        }
-        self.save_foreign_queue(&q)
-    }
-
-    /// Move an install's journalled foreign changes into the queue, if a
-    /// restart kept its step 7 from doing so (`installed_foreign`). The
-    /// queue is saved before the journal lets go of them.
-    pub fn requeue_installed_foreign(&self) -> LeanResult<usize> {
-        let mut j = self.load_intent()?;
-        if j.installed_foreign.is_empty() {
-            return Ok(0);
-        }
-        let n = j.installed_foreign.len();
-        self.queue_foreign(&j.installed_foreign)?;
-        j.installed_foreign.clear();
-        self.save_intent(&j)?;
-        Ok(n)
-    }
-
     /// Unix seconds of this writer's last untracked-upload sweep; 0 when it
     /// has never swept.
     pub fn load_untracked_sweep_at(&self) -> LeanResult<u64> {
@@ -538,6 +472,31 @@ impl SyncerState {
 
     pub fn save_untracked_sweep_at(&self, at: u64) -> LeanResult<()> {
         write_atomic(&self.dir.join(UNTRACKED_SWEEP), at.to_string().as_bytes())
+    }
+
+    /// The orphan sweep's clock (`untracked.rs`, `sweep_orphans_if_due`):
+    /// 0 = never swept, and the first commit starts it.
+    pub fn load_orphan_sweep_at(&self) -> LeanResult<u64> {
+        match fs::read_to_string(self.dir.join(ORPHAN_SWEEP)) {
+            Ok(s) => Ok(s.trim().parse().unwrap_or(0)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn save_orphan_sweep_at(&self, at: u64) -> LeanResult<()> {
+        write_atomic(&self.dir.join(ORPHAN_SWEEP), at.to_string().as_bytes())
+    }
+
+    /// The retire logs read so far, by key. A cache: unreadable reads as
+    /// empty (the logs are fetched again), never as an error.
+    pub fn load_retire_cache(&self) -> BTreeMap<String, super::manifest::RetireLog> {
+        fs::read(self.dir.join(RETIRE_CACHE)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    }
+
+    pub fn save_retire_cache(&self, c: &BTreeMap<String, super::manifest::RetireLog>) -> LeanResult<()> {
+        let bytes = serde_json::to_vec(c).map_err(|e| LeanError::State(format!("retire cache: {e}")))?;
+        write_atomic(&self.dir.join(RETIRE_CACHE), &bytes)
     }
 
     /// A verdict that cannot be parsed reads as ABSENT, never as a pass:
@@ -573,24 +532,10 @@ impl SyncerState {
         write_atomic(&self.dir.join(INTENT), &bytes)
     }
 
-    /// Clear the per-barrier key list but KEEP the uuid history (the
-    /// AdoptOwn recognizer needs uuids from completed barriers whose
-    /// baseline rewrite raced a crash).
+    /// The barrier is over: no flush in flight. The carrier stays.
     pub fn clear_intent_keys(&self) -> LeanResult<()> {
         let mut j = self.load_intent()?;
-        if !j.flush_uuid.is_empty() {
-            if !j.recent_uuids.contains(&j.flush_uuid) {
-                j.recent_uuids.push(j.flush_uuid.clone());
-            }
-            let excess = j.recent_uuids.len().saturating_sub(8);
-            if excess > 0 {
-                j.recent_uuids.drain(..excess);
-            }
-        }
         j.flush_uuid = String::new();
-        j.keys.clear();
-        j.declared_deletes.clear();
-        j.installed_foreign.clear();
         self.save_intent(&j)
     }
 

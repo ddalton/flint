@@ -1,0 +1,14 @@
+P2Holds	HOLDS
+P2LiveHolds	HOLDS
+P2LiveWaitsOnLease	Temporal
+P2SweepNoGrace	Inv_CitationsLive
+P2GatewayBlind	Prop_NoSilentRevert
+P2RenameTwoCAS	Inv_OneName
+P2CommitBlind	Prop_NoSilentRevert
+P2VerifyOff	Inv_CitationsLive
+P2SweepFree	Inv_CitationsLive
+P2ForeignFlat	?
+P2ProbeStalledSave	ProbeStalledSave
+P2ProbeSavedUnderLease	ProbeSavedUnderLease
+P2ProbeRenamed	ProbeRenamed
+P2ProbeSurfaced	ProbeSurfaced

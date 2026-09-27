@@ -607,6 +607,16 @@ pub async fn release_stale_own(sc: &mut Syncer) -> LeanResult<()> {
                  (epoch {}); releasing it",
                 state.epoch
             );
+            // Review 2026-09-18, H2: an epoch this incarnation never
+            // recorded is an acquire whose container died before its
+            // takeover rotation — `claim_step`'s orphaned-own arm, which a
+            // restart never reaches. The holder it deposed may still be
+            // mid-commit, and neither this release nor the next claim of
+            // a released cell rotates, so its CAS on the unmoved pointer
+            // landed. Rotate first, as that arm does.
+            if state.epoch != inc.epoch {
+                manifest::rotate_for_takeover(sc.store.as_ref(), &sc.cfg, state.epoch).await?;
+            }
             sc.lease = Some(EpochLease {
                 holder_id: state.holder_id,
                 epoch: state.epoch,

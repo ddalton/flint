@@ -1,0 +1,7 @@
+LeanImmutableNarrowUncieFirst            OK-FIRES           rc=12 | Invariant Inv_NarrowNeverRecites is violated | 2653 states generated, 1066 distinct | Finished in 03s at 
+LeanNarrowUncieFirst                     OK-FIRES           rc=12 | Invariant Inv_NarrowNeverRecites is violated | 262 states generated, 139 distinct | Finished in 02s at 
+LeanImmutableNarrowUnlinkFirst           OK-FIRES           rc=12 | Invariant Inv_NarrowNeverDeletes is violated | 8914 states generated, 3165 distinct | Finished in 04s at 
+LeanNarrowUnlinkFirst                    OK-FIRES           rc=12 | Invariant Inv_NarrowNeverDeletes is violated | 1909 states generated, 865 distinct | Finished in 02s at 
+LeanNarrowHolds                          OK-HOLDS           rc=0 | No error has been found | 11209 states generated, 4349 distinct | Finished in 03s at 
+LeanImmutableNarrowHolds                 OK-HOLDS           rc=0 | No error has been found | 10791476 states generated, 2676330 distinct | Finished in 08min 35s at 
+R40DONE

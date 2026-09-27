@@ -1,0 +1,12 @@
+P2RSyncNoPrune             OK-FIRES  rc=12  Error: Invariant Inv_NoRegress is violated | 232282 distinct states found | depth 17 | 17 steps
+P2RSyncPruned              MISMATCH  rc=12  Error: Invariant Inv_NoRegress is violated | 4274028 distinct states found | depth 28 | 27 steps
+P1SyncNoRegress            OK-HOLDS  rc=0   No error has been found | 8771473 distinct states found | depth 41 | 0 steps
+P1WithoutP2                OK-FIRES  rc=12  Error: Invariant Inv_NoRegress is violated | 410 distinct states found | depth 6 | 5 steps
+P1ProbeRestartAfterCas     OK-FIRES  rc=13  Error: Action property ProbeRestartAfterCas is violated | 110201 distinct states found | depth 11 | 10 steps
+P2RProbeRestartAfterCas    OK-FIRES  rc=13  Error: Action property ProbeRestartAfterCas is violated | 77854 distinct states found | depth 11 | 10 steps
+P1ProbeRepublish           RECORDED  rc=13  Error: Action property ProbeRepublish is violated | 51123658 distinct states found | depth 20 | 18 steps
+P2RProbeRepublish          RECORDED  rc=13  Error: Action property ProbeRepublish is violated | 33820604 distinct states found | depth 20 | 18 steps
+P1VerifyOff                OK-FIRES  rc=12  Error: Invariant Inv_CitationsLive is violated | 18584897 distinct states found | depth 18 | 17 steps
+P1Holds                    MISMATCH  rc=12  Error: Invariant Inv_OneName is violated | 33424105 distinct states found | depth 19 | 17 steps
+P2RHolds                   MISMATCH  rc=12  Error: Invariant Inv_CitationsLive is violated | 15874231 distinct states found | depth 19 | 18 steps
+BATCHDONE P2RSyncNoPrune P2RSyncPruned P1SyncNoRegress P1WithoutP2 P1ProbeRestartAfterCas P2RProbeRestartAfterCas P1ProbeRepublish P2RProbeRepublish P1VerifyOff P1Holds P2RHolds

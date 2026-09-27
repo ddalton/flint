@@ -1,0 +1,44 @@
+== agent_edit_over_a_ui_delete: accept (as required) — last: <<"TRACE-REACHED", 18, "end", [A |-> "idle", B |-> "idle"], "none">>
+== both_edit_one_file: accept (as required) — last: <<"TRACE-REACHED", 36, "end", [A |-> "idle", B |-> "idle"], "none">>
+== commit_withholds_a_swept_upload: accept (as required) — last: <<"TRACE-REACHED", 34, "end", [A |-> "idle", B |-> "idle"], "none">>
+== delete_over_a_peers_edit: accept (as required) — last: <<"TRACE-REACHED", 23, "end", [A |-> "idle", B |-> "idle"], "none">>
+== edit_and_delete_cross: accept (as required) — last: <<"TRACE-REACHED", 34, "end", [A |-> "idle", B |-> "idle"], "none">>
+== r7_is_per_path_across_a_rename: accept (as required) — last: <<"TRACE-REACHED", 23, "end", [A |-> "idle", B |-> "idle"], "none">>
+== rename_of_a_pending_ui_write: accept (as required) — last: <<"TRACE-REACHED", 17, "end", [A |-> "idle", B |-> "idle"], "none">>
+== repair_yields_to_a_later_ui_write: accept (as required) — last: <<"TRACE-REACHED", 27, "end", [A |-> "idle", B |-> "idle"], "none">>
+== superseded_ui_write_swept: accept (as required) — last: <<"TRACE-REACHED", 24, "end", [A |-> "idle", B |-> "idle"], "none">>
+== ui_delete_applied: accept (as required) — last: <<"TRACE-REACHED", 15, "end", [A |-> "idle", B |-> "idle"], "none">>
+== ui_rename: accept (as required) — last: <<"TRACE-REACHED", 15, "end", [A |-> "idle", B |-> "idle"], "none">>
+== ui_save_lands_inside_a_barrier: accept (as required) — last: <<"TRACE-REACHED", 19, "end", [A |-> "idle", B |-> "idle"], "none">>
+== ui_write_cited: accept (as required) — last: <<"TRACE-REACHED", 16, "end", [A |-> "idle", B |-> "idle"], "none">>
+== ui_write_over_a_queued_delete: accept (as required) — last: <<"TRACE-REACHED", 30, "end", [A |-> "idle", B |-> "idle"], "none">>
+== withheld_republished_over_a_ui_save: accept (as required) — last: <<"TRACE-REACHED", 43, "end", [A |-> "idle", B |-> "idle"], "none">>
+== agent_edit_over_a_ui_delete.delete-override-unrecorded: reject (as required) — last: << "TRACE-REACHED", 9, [ ev |-> "install", w |-> "A", seq |-> 3, outranked |-> {}, over |-> {}, foreign |-> 0, gone |-> 0, surfaced |-> {} ], [A |-> "claimed", 
+== both_edit_one_file.cas-seq-skips: reject (as required) — last: << "TRACE-REACHED", 8, [ ev |-> "install", w |-> "A", outranked |-> {}, over |-> {}, seq |-> 3, foreign |-> 0, gone |-> 0, surfaced |-> {} ], [A |-> "claimed", 
+== both_edit_one_file.gc-retired-plus-one: reject (as required) — last: << "TRACE-REACHED", 10, [ev |-> "collect", w |-> "A", retired |-> 2], [A |-> "cased", B |-> "idle"], "A" >>
+== both_edit_one_file.surface-dropped: reject (as required) — last: << "TRACE-REACHED", 18, [ ev |-> "install", w |-> "B", outranked |-> {}, over |-> {}, seq |-> 3, foreign |-> 0, gone |-> 0, surfaced |-> {} ], [A |-> "idle", B 
+== both_edit_one_file.upload-wrong-etag: reject (as required) — last: << "TRACE-REACHED", 5, [ ev |-> "upload", w |-> "A", p |-> "shared.txt", h |-> <<"shared.txt", 1>>, at |-> <<"shared.txt", 4>> ], [A |-> "scanned", B |-> "idle"
+== delete_over_a_peers_edit.outranked-invented: reject (as required) — last: << "TRACE-REACHED", 17, [ ev |-> "install", w |-> "A", outranked |-> {"shared.txt"}, over |-> {"shared.txt"}, seq |-> 3, foreign |-> 1, gone |-> 0, surfaced |->
+== delete_over_a_peers_edit.over-delete-unrecorded: reject (as required) — last: << "TRACE-REACHED", 17, [ ev |-> "install", w |-> "A", outranked |-> {}, over |-> {"shared.txt"}, seq |-> 3, foreign |-> 1, gone |-> 0, surfaced |-> {} ], [A |-
+== delete_over_a_peers_edit.over-theirs-dropped: reject (as required) — last: << "TRACE-REACHED", 17, [ ev |-> "install", w |-> "A", outranked |-> {}, over |-> {}, seq |-> 3, foreign |-> 1, gone |-> 0, surfaced |-> {<<"shared.txt", <<"sha
+== edit_and_delete_cross.scan-delete-dropped: reject (as required) — last: << "TRACE-REACHED", 18, [ev |-> "claim", w |-> "A"], [A |-> "scanned", B |-> "idle"], "none" >>
+== edit_and_delete_cross.tombstone-kept: reject (as required) — last: << "TRACE-REACHED", 24, [ev |-> "consume", w |-> "B", adopted |-> {}, removed |-> {}], [A |-> "idle", B |-> "idle"], "none" >>
+== superseded_ui_write_swept.reap-takes-the-cited-write: reject (as required) — last: << "TRACE-REACHED", 13, [ev |-> "reap", w |-> "A", h |-> <<"doc.txt", 3>>], [A |-> "cased", B |-> "idle"], "A" >>
+== ui_delete_applied.ui-delete-not-unlinked: reject (as required) — last: << "TRACE-REACHED", 3, [ev |-> "consume", w |-> "A", adopted |-> {}, removed |-> {}], [A |-> "idle", B |-> "idle"], "none" >>
+== ui_delete_applied.ui-delete-seq-skips: reject (as required) — last: << "TRACE-REACHED", 2, [ev |-> "ui_delete", p |-> "x.txt", seq |-> 3], [A |-> "idle", B |-> "idle"], "none" >>
+== ui_rename.rename-destination-not-adopted: reject (as required) — last: << "TRACE-REACHED", 3, [ev |-> "consume", w |-> "A", adopted |-> {}, removed |-> {"x.txt"}], [A |-> "idle", B |-> "idle"], "none" >>
+== ui_save_lands_inside_a_barrier.merge-foreign-plus-one: reject (as required) — last: << "TRACE-REACHED", 10, [ ev |-> "install", w |-> "B", seq |-> 3, outranked |-> {}, over |-> {}, foreign |-> 2, gone |-> 0, surfaced |-> {} ], [A |-> "idle", B 
+== ui_save_lands_inside_a_barrier.owed-never-taken: reject (as required) — last: << "TRACE-REACHED", 15, [ev |-> "consume", w |-> "B", adopted |-> {}, removed |-> {}], [A |-> "idle", B |-> "idle"], "none" >>
+== ui_write_cited.consume-not-adopted: reject (as required) — last: << "TRACE-REACHED", 4, [ev |-> "consume", w |-> "A", adopted |-> {}, removed |-> {}], [A |-> "idle", B |-> "idle"], "none" >>
+== ui_write_cited.ui-commit-seq-skips: reject (as required) — last: << "TRACE-REACHED", 3, [ev |-> "ui_commit", p |-> "doc.txt", seq |-> 3], [A |-> "idle", B |-> "idle"], "none" >>
+UNSUPPORTED withheld_republished_over_a_ui_save.reupload-same-key.ndjson: an upload to a key already written: tenant/proj1/files/p.txt@14b1cc76-a0a5-47f5-b6d6-e5213d25c15e (a handle is immutable)
+   ok (rejected at conversion)
+== control-no-r7: reject (as required) — last: << "TRACE-REACHED", 18, [ ev |-> "install", w |-> "B", outranked |-> {}, over |-> {}, seq |-> 3, foreign |-> 0, gone |-> 0, surfaced |-> {<<"shared.txt", <<"sha
+== control-commit-blind: reject (as required) — last: << "TRACE-REACHED", 18, [ev |-> "verify", w |-> "A", withheld |-> {"x.txt"}], [A |-> "claimed", B |-> "idle"], "A" >>
+== control-delete-override-unrecorded: reject (as required) — last: << "TRACE-REACHED", 9, [ ev |-> "install", w |-> "A", seq |-> 3, outranked |-> {}, over |-> {}, foreign |-> 0, gone |-> 0, surfaced |-> {<<"x.txt", <<"x.txt", 1
+== control-delete-outranked: reject (as required) — last: << "TRACE-REACHED", 17, [ ev |-> "install", w |-> "A", outranked |-> {}, over |-> {"shared.txt"}, seq |-> 3, foreign |-> 1, gone |-> 0, surfaced |-> {<<"shared.
+== control-advance-unguarded: UNSAFE: Invariant Inv_ShortcutSound is violated (as required) — last: << "TRACE-REACHED", 14, [ev |-> "finish", w |-> "B"], [A |-> "idle", B |-> "cased"], "B" >>
+== control-retire-age-off: reject (as required) — last: << "TRACE-REACHED", 13, [ev |-> "reap", w |-> "A", h |-> <<"doc.txt", 1>>], [A |-> "cased", B |-> "idle"], "A" >>
+== control-rename-two-cas: UNSAFE: Invariant Inv_OneName is violated (as required) — last: << "TRACE-REACHED", 2, [ev |-> "ui_rename", p |-> "x.txt", q |-> "y.txt", seq |-> 2], [A |-> "idle", B |-> "idle"], "none" >>
+work dir: /private/tmp/claude-503/-Users-ddalton-github-flint/04b1b4fc-8045-4244-87a1-599b98585b0c/scratchpad/tw
+trace check (core): ok

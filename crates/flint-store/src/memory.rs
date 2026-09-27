@@ -1087,6 +1087,21 @@ impl ObjectStore for MemoryStore {
         Ok(())
     }
 
+    /// One request per thousand keys, as S3's `DeleteObjects` costs — so
+    /// a request census over the double reads what the wire would.
+    async fn delete_many(&self, keys: &[String]) -> StoreResult<DeleteManyReport> {
+        let mut report = DeleteManyReport::default();
+        for chunk in keys.chunks(1000) {
+            self.bump("delete");
+            let mut inner = self.inner.lock().unwrap();
+            for key in chunk {
+                inner.push_delete_marker(key);
+                report.deleted += 1;
+            }
+        }
+        Ok(report)
+    }
+
     async fn head_version(&self, key: &str, version_id: &str) -> StoreResult<ObjectMeta> {
         self.bump("head_version");
         self.inner
@@ -1414,9 +1429,14 @@ impl MemoryStore {
                     Some(g) => Some(g.acquire(*len).await),
                     None => None,
                 };
-                let path = spec.local_path.to_path_buf();
+                let file = spec.local.clone().ok_or_else(|| {
+                    StoreError::Other(format!(
+                        "compose of {}: a Local part with no open descriptor",
+                        spec.key
+                    ))
+                })?;
                 let (offset, len) = (*offset, *len);
-                let bytes = tokio::task::spawn_blocking(move || read_local(&path, offset, len))
+                let bytes = tokio::task::spawn_blocking(move || read_local(&file, offset, len))
                     .await
                     .map_err(|e| StoreError::Other(format!("local read join: {e}")))??;
                 self.land_part(spec, upload_id, i, len, bytes)
@@ -1632,14 +1652,13 @@ impl MemoryStore {
     }
 }
 
-fn read_local(path: &std::path::Path, offset: u64, len: u64) -> StoreResult<Bytes> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(path)
-        .map_err(|e| StoreError::Other(format!("local open {:?}: {}", path, e)))?;
-    f.seek(SeekFrom::Start(offset))
-        .map_err(|e| StoreError::Other(format!("local seek: {}", e)))?;
+/// One part, from the descriptor the caller opened — the S3 backend's
+/// rule in the double, so a test that plants a swap in the window sees
+/// what the real backend does (review 2026-09-18, H5).
+fn read_local(file: &std::sync::Arc<std::fs::File>, offset: u64, len: u64) -> StoreResult<Bytes> {
+    use std::os::unix::fs::FileExt;
     let mut buf = vec![0u8; len as usize];
-    f.read_exact(&mut buf)
+    file.read_exact_at(&mut buf, offset)
         .map_err(|e| StoreError::Other(format!("local read: {}", e)))?;
     Ok(Bytes::from(buf))
 }
@@ -1650,6 +1669,35 @@ mod tests {
 
     fn stamps(generation: u64) -> GenerationStamps {
         GenerationStamps { generation, epoch: 1, flush_uuid: format!("u-{}", generation), boundary_source: None, posix: None }
+    }
+
+    /// The handles collector's delete: every named key goes, an absent
+    /// key is not an error, nothing else is touched, and the request
+    /// census reads one DELETE per thousand keys — what `DeleteObjects`
+    /// costs on the wire, and what a request-count test over this double
+    /// must therefore see.
+    #[tokio::test]
+    async fn delete_many_takes_every_key_tolerates_absent_ones_and_costs_one_request_per_batch() {
+        let s = MemoryStore::new();
+        let body = Bytes::from_static(b"bytes");
+        let crc = crc64_nvme(&body);
+        for k in ["h/a@1", "h/a@2", "h/b@1"] {
+            s.put_whole(k, body.clone(), &PutCondition::IfNoneMatchAny, &stamps(1), crc).await.unwrap();
+        }
+        s.reset_op_counts();
+        let keys: Vec<String> = ["h/a@1", "h/b@1", "h/never-existed@9"].iter().map(|k| k.to_string()).collect();
+        let report = s.delete_many(&keys).await.unwrap();
+        assert_eq!(report, DeleteManyReport { deleted: 3, failed: vec![] });
+        assert!(matches!(s.head("h/a@1").await, Err(StoreError::NotFound(_))));
+        assert!(matches!(s.head("h/b@1").await, Err(StoreError::NotFound(_))));
+        assert!(s.head("h/a@2").await.is_ok(), "a key the batch did not name must stay");
+        assert_eq!(s.op_counts().get("delete").copied(), Some(1), "one request for a batch under a thousand");
+
+        let big: Vec<String> = (0..2001).map(|i| format!("h/x@{i}")).collect();
+        s.reset_op_counts();
+        let report = s.delete_many(&big).await.unwrap();
+        assert_eq!(report.deleted, 2001);
+        assert_eq!(s.op_counts().get("delete").copied(), Some(3), "a thousand keys per request");
     }
 
     #[tokio::test]
@@ -1821,7 +1869,7 @@ mod tests {
         let spec = ComposeSpec {
             progress: None,
             key: "f",
-            local_path: &local,
+            local: Some(std::sync::Arc::new(std::fs::File::open(&local).unwrap())),
             parts: vec![
                 PartSource::Local { offset: 0, len: 4 },
                 PartSource::BaseCopy { offset: 4, len: 4 },
@@ -1861,7 +1909,7 @@ mod tests {
         let spec = ComposeSpec {
             progress: None,
             key: "g",
-            local_path: &local,
+            local: Some(std::sync::Arc::new(std::fs::File::open(&local).unwrap())),
             parts: vec![
                 PartSource::Local { offset: 0, len: 8 },
                 PartSource::Local { offset: 8, len: 8 },
@@ -1889,7 +1937,7 @@ mod tests {
             .compose_generation(&ComposeSpec {
                 progress: None,
                 key: "h",
-                local_path: &local,
+                local: Some(std::sync::Arc::new(std::fs::File::open(&local).unwrap())),
                 parts: vec![
                     PartSource::Local { offset: 0, len: 4 },
                     PartSource::BaseCopy { offset: 4, len: 4 },
@@ -2016,12 +2064,11 @@ mod copy_tests {
             .await
             .unwrap();
 
-        let dir = tempfile::TempDir::new().unwrap();
         let spec = ComposeSpec {
             progress: None,
             key: "new/name",
             // Never read: every part is a BaseCopy.
-            local_path: &dir.path().join("nothing-here"),
+            local: None,
             parts: vec![PartSource::BaseCopy { offset: 0, len: 8 }],
             base_key: Some("old/name"),
             base_etag: Some(src.etag.clone()),

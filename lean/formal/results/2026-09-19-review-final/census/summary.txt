@@ -1,0 +1,8 @@
+LeanSubtreeTakeover rc=0 2204399 states generated, 566405 distinct states found, 0 states left on queue.
+LeanEpochOnlyHolds rc=0 333281 states generated, 92863 distinct states found, 0 states left on queue.
+LeanBarrierLeaseDeposal rc=0 2341926 states generated, 619637 distinct states found, 0 states left on queue.
+LeanBarrierLeaseSameBytesVerified rc=0 8939332 states generated, 2366702 distinct states found, 0 states left on queue.
+LeanBarrierLeaseQueueHolds rc=0 286389 states generated, 94858 distinct states found, 0 states left on queue.
+LeanBarrierLeaseOrphanTracked rc=0 8005719 states generated, 2718984 distinct states found, 0 states left on queue.
+LeanBarrierLeaseStragglerGCFenced rc=0 984891 states generated, 276442 distinct states found, 0 states left on queue.
+CENSUSDONE

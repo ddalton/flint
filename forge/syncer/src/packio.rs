@@ -104,9 +104,14 @@ pub async fn upload_file(
     // first shape ticked no progress, so the gated renewer let the
     // token go quiet for a whole takeover window mid-push.
     let parts = part_grid(size, store.min_part_size(), store.max_parts());
+    // ONE descriptor for every part. A pack is forge's own file under
+    // its own directory, not a workspace a user writes, but the store's
+    // contract is the same either way: it reads what the caller opened
+    // and never reopens a path (flint-lean review 2026-09-18, H5).
+    let file = std::sync::Arc::new(std::fs::File::open(path)?);
     let spec = ComposeSpec {
         key,
-        local_path: path,
+        local: Some(file),
         parts,
         base_key: None,
         base_etag: None,

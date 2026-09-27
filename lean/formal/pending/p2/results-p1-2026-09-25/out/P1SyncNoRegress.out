@@ -1,0 +1,26 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 38 and seed -3545483326127016958 with 4 workers on 8 cores with 3641MB heap and 64MB offheap memory [pid: 68033] (Mac OS X 26.3.1 aarch64, Oracle Corporation 25.0.1 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file /Users/ddalton/github/flint/lean/formal/pending/p2/LeanCoreP1.tla
+Parsing file /private/var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/Naturals.tla
+Parsing file /private/var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/FiniteSets.tla
+Parsing file /private/var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/Sequences.tla
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module LeanCoreP1
+Starting... (2026-09-24 23:46:37)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-09-24 23:46:37.
+Progress(16) at 2026-09-24 23:46:40: 516,051 states generated (516,051 s/min), 177,773 distinct states found (177,773 ds/min), 66,495 states left on queue.
+Progress(26) at 2026-09-24 23:47:40: 11,215,864 states generated (10,699,813 s/min), 3,990,578 distinct states found (3,812,805 ds/min), 753,204 states left on queue.
+Progress(30) at 2026-09-24 23:48:40: 20,347,423 states generated (9,131,559 s/min), 7,266,449 distinct states found (3,275,871 ds/min), 799,543 states left on queue.
+Progress(37) at 2026-09-24 23:49:41: 28,069,015 states generated (7,721,592 s/min), 9,967,453 distinct states found (2,701,004 ds/min), 69,921 states left on queue.
+Model checking completed. No error has been found.
+  Estimates of the probability that TLC did not check all reachable states
+  because two distinct states had the same fingerprint:
+  calculated (optimistic):  val = 9.9E-6
+  based on the actual fingerprints:  val = 4.0E-6
+28286631 states generated, 10058919 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 41.
+The average outdegree of the complete state graph is 1 (minimum is 0, the maximum 10 and the 95th percentile is 3).
+Finished in 03min 05s at (2026-09-24 23:49:43)

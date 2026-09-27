@@ -1,0 +1,11 @@
+P1CommitBlind              OK-FIRES  rc=13  Error: Action property Prop_NoSilentRevert is violated | 293955 distinct states found | depth 12 | 11 steps
+P2RSyncNoPrune             OK-FIRES  rc=12  Error: Invariant Inv_NoRegress is violated | 227786 distinct states found | depth 17 | 17 steps
+P1WithoutP2                OK-FIRES  rc=12  Error: Invariant Inv_NoRegress is violated | 472 distinct states found | depth 6 | 5 steps
+P1DeleteOutranked          OK-FIRES  rc=13  Error: Action property Prop_DeleteSettles is violated | 269148 distinct states found | depth 12 | 11 steps
+P1Holds1p3b                OK-HOLDS  rc=0   No error has been found | 10058919 distinct states found | depth 41 | 0 steps
+P2RHolds1p3b               OK-FIRES  rc=13  Error: Action property Prop_NoSilentRevert is violated | 2641713 distinct states found | depth 25 | 25 steps
+P1Holds                    MISMATCH  rc=1   Error: when writing the disk (StatePoolWriter | 75,056,198 distinct states found | depth  | 0 steps
+P2RHolds                   MISMATCH  rc=1   Error: Successor state is not completely specified by the next-state action | 38 distinct states found | depth 5 | 4 steps
+P1ProbeRepublish           RECORDED  rc=1   Error: Successor state is not completely specified by the next-state action | 42 distinct states found | depth 5 | 4 steps
+P2RProbeRepublish          RECORDED  rc=1   Error: Successor state is not completely specified by the next-state action | 33 distinct states found | depth 5 | 4 steps
+BATCHDONE P1CommitBlind P2RSyncNoPrune P1WithoutP2 P1DeleteOutranked P1Holds1p3b P2RHolds1p3b P1Holds P2RHolds P1ProbeRepublish P2RProbeRepublish

@@ -1,0 +1,147 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 101 and seed -4588732106793654032 with 2 workers on 8 cores with 3641MB heap and 64MB offheap memory [pid: 40939] (Linux 6.12.0-061200-generic amd64, Ubuntu 21.0.11 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file /home/ddalton/lean-p2-2026-09-24/LeanCoreP2.tla
+Parsing file /tmp/Naturals.tla
+Parsing file /tmp/FiniteSets.tla
+Parsing file /tmp/Sequences.tla
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module LeanCoreP2
+Starting... (2026-09-24 15:53:53)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-09-24 15:53:53.
+Error: Invariant Inv_OneName is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ udel = {}
+/\ seq = 1
+/\ mv = Nil
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ reqs = 0
+/\ minted = {<<p1, 1>>}
+/\ w = ( A :>
+      [ st |-> "off",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> Nil @@ p2 :> Nil),
+        instBase |-> (p1 :> Nil @@ p2 :> Nil),
+        integrated |-> {},
+        queue |-> {},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 0,
+        jSeq |-> 0 ] @@
+  B :>
+      [ st |-> "off",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> Nil @@ p2 :> Nil),
+        instBase |-> (p1 :> Nil @@ p2 :> Nil),
+        integrated |-> {},
+        queue |-> {},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 0,
+        jSeq |-> 0 ] )
+/\ conflicts = {}
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ holder = "none"
+/\ took = (A :> (p1 :> {} @@ p2 :> {}) @@ B :> (p1 :> {} @@ p2 :> {}))
+/\ gw = (p1 :> Nil @@ p2 :> Nil)
+/\ barriers = 0
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> Nil @@
+  <<p1, 3>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil )
+/\ nextGen = 2
+/\ ui = 0
+/\ acked = {}
+/\ live = {<<p1, 1>>}
+
+State 2: <Next line 502, col 9 to line 502, col 49 of module LeanCoreP2>
+/\ udel = {}
+/\ seq = 2
+/\ mv = <<p1, <<p1, 1>>>>
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> <<p1, 1>>)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>}
+/\ w = ( A :>
+      [ st |-> "off",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> Nil @@ p2 :> Nil),
+        instBase |-> (p1 :> Nil @@ p2 :> Nil),
+        integrated |-> {},
+        queue |-> {},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 0,
+        jSeq |-> 0 ] @@
+  B :>
+      [ st |-> "off",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> Nil @@ p2 :> Nil),
+        instBase |-> (p1 :> Nil @@ p2 :> Nil),
+        integrated |-> {},
+        queue |-> {},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 0,
+        jSeq |-> 0 ] )
+/\ conflicts = {}
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ holder = "none"
+/\ took = (A :> (p1 :> {} @@ p2 :> {}) @@ B :> (p1 :> {} @@ p2 :> {}))
+/\ gw = (p1 :> Nil @@ p2 :> Nil)
+/\ barriers = 0
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> Nil @@
+  <<p1, 3>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil )
+/\ nextGen = 2
+/\ ui = 0
+/\ acked = {}
+/\ live = {<<p1, 1>>}
+
+14 states generated, 12 distinct states found, 8 states left on queue.
+The depth of the complete state graph search is 3.
+The average outdegree of the complete state graph is 4 (minimum is 3, the maximum 4 and the 95th percentile is 4).
+Finished in 00s at (2026-09-24 15:53:53)

@@ -1,0 +1,97 @@
+--- a/lean/formal/LeanSubtree.tla
++++ b/lean/formal/LeanSubtree.tla
+@@ -760,6 +760,10 @@
+                        \* the mutation, the rename world's fourth box run: an
+                        \* adopter that never saw the removal re-cites the
+                        \* moved handle at its old name (Inv_OneName).
++  QueueYieldsToSync,   \* 2026-09-23: TRUE = a sync prunes the writer-local queue
++                       \* where it moved a path's merge base to a version other
++                       \* than the queued one (`sync.rs` step 6).  FALSE = shipped:
++                       \* sync never reads the queue.
+   PendingAdoptionStays \* TRUE = the design: an adoption declined for the
+                        \* MOVE ALONE, at the destination of a rename whose
+                        \* record still waits at its source, keeps its entry
+@@ -1629,7 +1633,7 @@
+            ackIncoherent |-> FALSE, fencedOkAck |-> FALSE,
+            srcMismatch |-> FALSE,
+            partialAcks |-> 0, declaredDrops |-> 0,
+-           narrows |-> 0, narrowed |-> {}, narrowRecited |-> {},
++           narrows |-> 0, narrowed |-> {}, narrowRecited |-> {}, consumeRegressed |-> FALSE,
+            removals |-> 0, removalsApplied |-> 0, removalsRefused |-> 0,
+            renamed |-> {}, renamesApplied |-> 0, renameRefused |-> {},
+            citedPairs |-> {},
+@@ -2437,6 +2441,15 @@
+                                       \E p \in applied : /\ base2[p] # 0 /\ base2[p] # gh.remJudged[p]
+                                                          /\ ~(ImmutableObjects /\ base2[p] = gh.remOver[p])),
+             !.answered = (@ \cup refused) \ applied,
++            \* 2026-09-23: a consume never adopts a version OLDER than the one
++            \* the tree already holds (generations are minted in order): the
++            \* queued peer change a later sync overtook (`sync.rs` never reads
++            \* the writer-local queue).
++            !.consumeRegressed = @ \/ \E p \in adoptPaths :
++                                   /\ sc[s].baseline[p] # 0 /\ GenAt(p) < sc[s].baseline[p]
++                                   \* Mint order is not publish order: a version
++                                   \* displaced KNOWINGLY carries a conflict record.
++                                   /\ <<p, sc[s].baseline[p]>> \notin conflicts,
+             !.removalsRefused = @ + Cardinality(refused),
+             !.renamesApplied = @ + Cardinality({pr \in gh.renamed : pr[1] \in applied}),
+             !.renameRefused = @ \cup {pr \in gh.renamed : pr[1] \in refused},
+@@ -3406,6 +3419,10 @@
+             ![s].baseline = [p \in Paths |->
+               IF p \in applicable THEN remote(p) ELSE @[p]],
+             ![s].instBase = newInstBase,
++            ![s].fq = IF QueueYieldsToSync
++                      THEN {pr \in @ : ~(/\ newInstBase[pr[1]] # sc[s].instBase[pr[1]]
++                                         /\ newInstBase[pr[1]] # pr[2])}
++                      ELSE @,
+             ![s].touched = @ \ applicable,
+             ![s].known = @ \cup {remote(p) : p \in applicable},
+             ![s].lastDirty = {}]
+@@ -4268,6 +4285,8 @@
+ \* agent legitimately re-creates leaves `gh.narrowed` at AgentWrite, so
+ \* this never fires on widening.
+ Inv_NarrowNeverRecites == gh.narrowRecited = {}
++
++Inv_ConsumeNeverRegresses == ~gh.consumeRegressed
+ 
+ \* Non-vacuity: the verb actually fires.  Probed via a ghost only
+ \* Narrow writes — probe the ACTION, never the situation.
+@@ -4829,6 +4848,7 @@
+    ackIncoherent |-> gh.ackIncoherent, fencedOkAck |-> gh.fencedOkAck,
+    srcMismatch |-> gh.srcMismatch, narrows |-> gh.narrows,
+    narrowed |-> gh.narrowed, narrowRecited |-> gh.narrowRecited,
++   consumeRegressed |-> gh.consumeRegressed,
+    removals |-> gh.removals, renamed |-> gh.renamed, remJudged |-> gh.remJudged,
+    answered |-> gh.answered, remOver |-> gh.remOver,
+    renameRefused |-> gh.renameRefused, citedPairs |-> gh.citedPairs,
+--- a/lean/formal/gen-cfgs.sh
++++ b/lean/formal/gen-cfgs.sh
+@@ -21,7 +21,7 @@
+ DeclaredConfirmsAbsence Writers OrphanTrack OrphanEntryCited LeakSupersedesNothing ManifestTombstones SupersedeRestoresBase QueueForeignChanges ProjectedTrace \
+ AbandonOnStoreError BaselineKeepsUncollected ClaimMintsEpoch ClaimStampsEpoch CollectorOff InboxSnapshot \
+ GCFencePerDelete TombstoneNamesRetired AckFromCarrier FenceAfterLoad RemovalNamesGen \
+-ImmutableObjects RetirePerPath SweepSparesTracked SweepUnderLease CommitSurfacesForeign RenameMovesEntry AnsweredRecordsApply RepairYieldsToLaterUI RepairRespectsMoves PendingAdoptionStays"
++ImmutableObjects RetirePerPath SweepSparesTracked SweepUnderLease CommitSurfacesForeign RenameMovesEntry AnsweredRecordsApply RepairYieldsToLaterUI RepairRespectsMoves QueueYieldsToSync PendingAdoptionStays"
+ 
+ emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
+          # Spec=<name> selects the SPECIFICATION (default Spec; FairSpec
+@@ -183,7 +183,7 @@
+   local c_ImmutableObjects=FALSE c_RetirePerPath=FALSE
+   local c_SweepSparesTracked=TRUE c_SweepUnderLease=TRUE c_CommitSurfacesForeign=TRUE
+   local c_RenameMovesEntry=TRUE c_AnsweredRecordsApply=TRUE c_RepairYieldsToLaterUI=TRUE c_RepairRespectsMoves=TRUE
+-  local c_PendingAdoptionStays=TRUE
++  local c_PendingAdoptionStays=TRUE c_QueueYieldsToSync=FALSE
+   local c_Spec=Spec c_Props=""
+   # Ghost-state reduction (LeanSubtree.tla, "GHOST-STATE REDUCTION"):
+   # View=AUTO fingerprints a run through StrictView unless it checks a
+@@ -1233,4 +1233,10 @@
+ emit_refine LeanImmutableQueueHolds LeanRefineQueue
+ emit_refine LeanImmutableCasVerifies LeanRefineProbe
+ emit_refine LeanImmutableRenameHolds LeanRefineRename
++
+ 
++SYNCQ="BarrierLease=TRUE HitlOverwritesTrackedOnly=TRUE NPaths=1 MaxGen=3 MaxSeq=6 MaxHitl=0 \
++MaxBarriers=4 MaxCrashes=0 MaxRestarts=0 SyncEnabled=TRUE MaxSyncs=1 SyncKeepsHiddenBase=TRUE $IMPL $IO"
++emit LeanImmutableSyncQueueRegress "Inv_ConsumeNeverRegresses" $SYNCQ
++emit LeanImmutableSyncQueueShippedInvs "$IOINV,Inv_SyncNeverDestroysDirty" $SYNCQ
++emit LeanImmutableSyncQueueHolds "$IOINV,Inv_SyncNeverDestroysDirty,Inv_ConsumeNeverRegresses" $SYNCQ QueueYieldsToSync=TRUE

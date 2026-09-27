@@ -1,0 +1,18 @@
+LeanCoreProbeRemovalOutranked    OK-FIRES           exp=ProbeRemovalOutranked  rc=12  | Error: Invariant ProbeRemovalOutranked is violated | 6474258 states generated, 2390774 distinct | Finished in 56s at 
+LeanCoreProbeRenamed             OK-FIRES           exp=ProbeRenamed           rc=12  | Error: Invariant ProbeRenamed is violated | 41120 states generated, 19467 distinct | Finished in 02s at 
+LeanCoreProbeGone                OK-FIRES           exp=ProbeGone              rc=12  | Error: Invariant ProbeGone is violated | 69 states generated, 47 distinct | Finished in 00s at 
+LeanCoreProbeRefused             OK-FIRES           exp=ProbeRefused           rc=12  | Error: Invariant ProbeRefused is violated | 240 states generated, 162 distinct | Finished in 00s at 
+LeanCoreProbePending             OK-FIRES           exp=ProbePending           rc=12  | Error: Invariant ProbePending is violated | 47 states generated, 42 distinct | Finished in 00s at 
+LeanCoreRepairRecites            OK-FIRES           exp=Inv_OneName            rc=12  | Error: Invariant Inv_OneName is violated | 159137 states generated, 69084 distinct | Finished in 04s at 
+LeanCoreCommitBlind              OK-FIRES           exp=Inv_AckedNamed         rc=12  | Error: Invariant Inv_AckedNamed is violated | 16525537 states generated, 6058688 distinct | Finished in 02min 43s at 
+LeanCoreCommitBlindReverts       OK-FIRES           exp=Prop_NoSilentRevert    rc=13  | Error: Action property Prop_NoSilentRevert is violated | 7732315 states generated, 2847176 distinct | Finished in 01min 24s at 
+LeanCoreSweepTakesNamed          OK-FIRES           exp=Inv_AckedNamed         rc=12  | Error: Invariant Inv_AckedNamed is violated | 3288 states generated, 1842 distinct | Finished in 01s at 
+LeanCoreForeignFlat              OK-FIRES           exp=Inv_AckedNamed         rc=12  | Error: Invariant Inv_AckedNamed is violated | 30469521 states generated, 11236653 distinct | Finished in 04min 58s at 
+LeanCorePendingDropped           OK-FIRES           exp=Inv_AckedNamed         rc=12  | Error: Invariant Inv_AckedNamed is violated | 17063306 states generated, 6282527 distinct | Finished in 02min 50s at 
+LeanCoreCitesBlind               OK-FIRES           exp=Inv_CitationsLive      rc=12  | Error: Invariant Inv_CitationsLive is violated | 5011583 states generated, 1806901 distinct | Finished in 43s at 
+LeanCoreSweepLeaseFree           OK-FIRES           exp=Inv_CitationsLive      rc=12  | Error: Invariant Inv_CitationsLive is violated | 149952 states generated, 59504 distinct | Finished in 03s at 
+LeanCoreRetirePerPath            OK-FIRES           exp=Inv_CitationsLive      rc=12  | Error: Invariant Inv_CitationsLive is violated | 62749 states generated, 28729 distinct | Finished in 03s at 
+LeanRefineQueue                  OK-HOLDS           exp=HOLDS                  rc=0   | No error has been found | 1768710 states generated, 606916 distinct | Finished in 02min 56s at 
+LeanCoreHoldsSmall               OK-HOLDS           exp=HOLDS                  rc=0   | No error has been found | 137048639 states generated, 49030962 distinct | Finished in 13min 18s at 
+LeanRefineProbe                  OK-HOLDS           exp=HOLDS                  rc=0   | No error has been found | 6638145 states generated, 1965383 distinct | Finished in 13min 39s at 
+L125DONE

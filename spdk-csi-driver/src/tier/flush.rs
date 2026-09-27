@@ -1292,12 +1292,18 @@ impl FlushOrchestrator {
                 // CRC from a streaming pass over local truth; a
                 // mutation racing the part reads fails the publish
                 // server-side (BadDigest) instead of landing torn.
-                match file_crc(&path).await {
-                    Ok(crc) => {
+                // One descriptor for every part: the store reads what
+                // this opened and never reopens the path (flint-lean
+                // review 2026-09-18, H5). The CRC pass above is still
+                // by path — a change between the two is what the
+                // server-side validation is there to catch.
+                let opened = std::fs::File::open(&path).map(std::sync::Arc::new);
+                match (file_crc(&path).await, opened) {
+                    (Ok(crc), Ok(file)) => {
                         let spec = ComposeSpec {
                             progress: None,
                             key: &key,
-                            local_path: &path,
+                            local: Some(file),
                             parts: parts.clone(),
                             base_key: rekey_from.as_deref(),
                             base_etag: base.as_ref().map(|b| b.etag.clone()),
@@ -1327,7 +1333,8 @@ impl FlushOrchestrator {
                         }
                         r
                     }
-                    Err(e) => Err(StoreError::Other(e)),
+                    (Err(e), _) => Err(StoreError::Other(e)),
+                    (_, Err(e)) => Err(StoreError::Other(format!("open {}: {e}", path.display()))),
                 }
             }
         };

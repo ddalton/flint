@@ -117,7 +117,6 @@ pub async fn gate(sc: &mut Syncer, identity: &str) -> LeanResult<Decision> {
         return Ok(Decision::Refuse(verdict.detail.unwrap_or_default()));
     }
     if !verdict.conditional_delete {
-        sc.cfg.conditional_delete_enforced = false;
         return Ok(Decision::CollectorOff(verdict.detail.unwrap_or_default()));
     }
     Ok(Decision::Conformant)
@@ -180,12 +179,14 @@ pub fn message(d: &Decision, prefix: &str) -> String {
     match d {
         Decision::Conformant => "conditional writes enforced (PUT and DELETE)".into(),
         Decision::CollectorOff(why) => format!(
-            "this store does not enforce If-Match on DELETE ({why}). The syncer runs and \
-             publishes normally, but the file collector is OFF: an object a delete retires \
-             is LEFT in the bucket rather than removed, because a delete this store applies \
-             unconditionally could take the version another writer is about to cite (the \
-             model's LeanBarrierLeaseGCUnconditional). Expect storage growth under \
-             {prefix}/files/, and see lean/SAFETY.md §2"
+            "this store does not enforce If-Match on DELETE ({why}). Under immutable object \
+             handles that costs nothing: every write lands at a handle nobody else writes, \
+             and a handle the installed document stopped citing can never be cited again, so \
+             the collector's DELETE has nothing left to guard and runs unconditionally here \
+             as everywhere. The syncer publishes and collects normally under {prefix}/files/. \
+             Reported because it is a real property of this store — it was the posture switch \
+             before handles, and the one the conditional-DELETE row of lean/SAFETY.md §2 was \
+             written for"
         ),
         Decision::Refuse(why) => format!(
             "this store does not enforce conditional writes ({why}). Lean arbitrates \

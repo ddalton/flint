@@ -1,0 +1,4 @@
+LeanImmutableProbeNarrow                 OK-FIRES           rc=12 | Invariant ProbeNarrow is violated | 17 states generated, 11 distinct | Finished in 01s at 
+LeanImmutableNarrowUnlinkFirst           OK-FIRES           rc=12 | Invariant Inv_NarrowNeverDeletes is violated | 299286 states generated, 92218 distinct | Finished in 15s at 
+LeanImmutableNarrowUncieFirst            OK-FIRES           rc=12 | Invariant Inv_NarrowNeverRecites is violated | 1254 states generated, 564 distinct | Finished in 02s at 
+R37DONE

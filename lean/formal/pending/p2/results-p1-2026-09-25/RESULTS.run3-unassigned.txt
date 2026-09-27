@@ -1,0 +1,17 @@
+P2RSyncNoPrune             MISMATCH  rc=75  Error: Successor state is not completely specified by the next-state action | 13 distinct states found | depth 4 | 3 steps
+P1SyncNoRegress            MISMATCH  rc=75  Error: Successor state is not completely specified by the next-state action | 11 distinct states found | depth 4 | 5 steps
+P1WithoutP2                MISMATCH  rc=75  Error: Successor state is not completely specified by the next-state action | 38 distinct states found | depth 5 | 4 steps
+P1DeleteOutranked          MISMATCH  rc=75  Error: Successor state is not completely specified by the next-state action | 39 distinct states found | depth 5 | 4 steps
+P1CommitBlind              MISMATCH  rc=75  Error: Successor state is not completely specified by the next-state action | 37 distinct states found | depth 5 | 4 steps
+P1ProbeConverged           MISMATCH  rc=75  Error: Successor state is not completely specified by the next-state action | 39 distinct states found | depth 5 | 4 steps
+P1ProbeDeleteOverTheirs    MISMATCH  rc=75  Error: Successor state is not completely specified by the next-state action | 39 distinct states found | depth 5 | 4 steps
+P1ProbeRestartAfterCas     MISMATCH  rc=75  Error: Successor state is not completely specified by the next-state action | 37 distinct states found | depth 5 | 4 steps
+P2RProbeRestartAfterCas    MISMATCH  rc=75  Error: Successor state is not completely specified by the next-state action | 39 distinct states found | depth 5 | 4 steps
+P1VerifyOff                MISMATCH  rc=75  Error: Successor state is not completely specified by the next-state action | 42 distinct states found | depth 5 | 4 steps
+P1Holds1p3b                MISMATCH  rc=75  Error: Successor state is not completely specified by the next-state action | 13 distinct states found | depth 4 | 3 steps
+P2RHolds1p3b               MISMATCH  rc=75  Error: Successor state is not completely specified by the next-state action | 13 distinct states found | depth 4 | 3 steps
+P1Holds                    MISMATCH  rc=75  Error: Successor state is not completely specified by the next-state action | 42 distinct states found | depth 5 | 4 steps
+P2RHolds                   MISMATCH  rc=75  Error: Successor state is not completely specified by the next-state action | 38 distinct states found | depth 5 | 4 steps
+P1ProbeRepublish           RECORDED  rc=75  Error: Successor state is not completely specified by the next-state action | 42 distinct states found | depth 5 | 4 steps
+P2RProbeRepublish          RECORDED  rc=75  Error: Successor state is not completely specified by the next-state action | 33 distinct states found | depth 5 | 4 steps
+BATCHDONE P2RSyncNoPrune P1SyncNoRegress P1WithoutP2 P1DeleteOutranked P1CommitBlind P1ProbeConverged P1ProbeDeleteOverTheirs P1ProbeRestartAfterCas P2RProbeRestartAfterCas P1VerifyOff P1Holds1p3b P2RHolds1p3b P1Holds P2RHolds P1ProbeRepublish P2RProbeRepublish

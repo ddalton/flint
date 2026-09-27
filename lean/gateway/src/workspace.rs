@@ -17,21 +17,32 @@
 //! What this module deliberately is NOT: a client of the gateway. It
 //! talks to the BUCKET, with the same CAS cells the syncer uses, and it
 //! needs the same credentials the gateway needed. Every guarantee the
-//! gateway made — object first and inbox entry second, never a manifest
-//! edit from a HITL write, the barrier window read from the cell on
-//! every write, epoch-validated syncer verbs — is made here, because
-//! this is where it was always made.
+//! gateway makes — the object first and its citation second, each UI
+//! verb one manifest CAS at epoch 0 that never waits on the writers'
+//! lease (P2), epoch-validated syncer verbs — is made here.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-use flint_store::{crc64_nvme, GenerationStamps, ObjectStore, PutCondition, ReadOnly, StoreError};
+use flint_store::{crc64_nvme, crc64_to_b64, GenerationStamps, ObjectStore, PutCondition, ReadOnly, StoreError};
 
-use flint_lean::inbox::{self, InboxDoc, InboxEntry, Removal, RequestedVerb, VerbRequest, Window};
-use flint_lean::manifest::{self, LeanManifest, LoadedManifest};
+use flint_lean::inbox::{self, InboxDoc, RequestedVerb, VerbRequest};
+use flint_lean::manifest::{self, LeanEntry, LeanManifest, LoadedManifest};
+
+/// A UI save's fresh handle, ready to cite (`Workspace::commit_save`).
+pub(crate) struct Save<'a> {
+    pub path: &'a str,
+    pub key: String,
+    pub etag: String,
+    pub crc64_b64: String,
+    pub size: u64,
+    pub mtime_unix: i64,
+    pub flush: String,
+}
+
+
 use flint_lean::{now_unix, LeanConfig, LeanError, WHOLE_PUT_MAX};
 
 /// One lean workspace: a subtree prefix on an object store, seen from
@@ -43,10 +54,31 @@ pub struct Workspace {
     store: Arc<dyn ObjectStore>,
     cfg: LeanConfig,
     max_put_bytes: u64,
-    window_wait: Option<std::time::Duration>,
     /// Built by `read_only`: every writer answers `VerbError::ReadOnly`,
     /// and `store` is wrapped in `flint_store::ReadOnly`.
     read_only: bool,
+    /// The manifest this workspace last loaded (M8). A server shares one
+    /// per workspace across requests (`with_manifest_cache`).
+    manifests: Arc<ManifestCache>,
+}
+
+/// The manifest a gateway last loaded, keyed by the pointer etag it was
+/// loaded at (M8 of the 2026-09-24 simplification analysis). A document is
+/// immutable per pointer etag, so a read checks the pointer — a few hundred
+/// bytes — and reuses the entries while it has not moved. Under P2 the
+/// gateway is a publisher and every UI read went through a full load.
+#[derive(Default)]
+pub struct ManifestCache(std::sync::Mutex<Option<Arc<LoadedManifest>>>);
+
+/// One `ManifestCache` per workspace prefix, for a server that builds a
+/// `Workspace` per request.
+#[derive(Default)]
+pub struct ManifestCaches(std::sync::Mutex<std::collections::BTreeMap<String, Arc<ManifestCache>>>);
+
+impl ManifestCaches {
+    pub fn for_prefix(&self, prefix: &str) -> Arc<ManifestCache> {
+        self.0.lock().unwrap().entry(prefix.to_string()).or_default().clone()
+    }
 }
 
 /// What a HITL write brings besides its bytes. The preconditions are
@@ -55,7 +87,8 @@ pub struct Workspace {
 /// judgement of it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PutFile {
-    /// Recorded on the inbox entry (the audit surface). `None` ⇒ `ui`.
+    /// Accepted and not recorded: no UI verb and no mount write records
+    /// an author, so the two flows stay uniform.
     pub author: Option<String>,
     /// `If-Match`: the entity-tag the caller read, or `*`. An overwrite
     /// MUST carry one — see `VerbError::PreconditionRequired`.
@@ -71,7 +104,8 @@ pub struct Blob {
     pub body: Bytes,
 }
 
-/// The sync verb's one-stop read: the cited manifest and the inbox.
+/// The sync verb's one-stop read: the cited manifest, and the cell's
+/// standing boundary and sync requests.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Snapshot {
     pub manifest: LeanManifest,
@@ -85,65 +119,30 @@ pub struct Snapshot {
 pub struct Listed {
     pub path: String,
     pub etag: String,
-    /// Known when the manifest cites the path; a tracked write no
-    /// barrier has integrated yet carries none.
+    /// Always known: the manifest cites every listed path.
     pub size: Option<u64>,
-    /// Cited by the manifest (a fresh checkout sees it), as opposed to
-    /// tracked in the inbox only.
+    /// Always true since P2 (a UI verb commits); kept for the wire.
     pub cited: bool,
 }
 
 impl Snapshot {
-    /// The listing a file browser shows: the manifest's citations,
-    /// overlaid by the tracked writes no barrier has cited yet, MINUS
-    /// every path a pending removal names — so a deleted or
-    /// renamed-away file leaves the listing the moment its removal is
-    /// recorded, and a rename's destination appears in the same
-    /// instant, whatever the syncer's cadence.
+    /// The listing a file browser shows: the manifest's citations. A UI
+    /// save, delete or rename COMMITS (P2), so the document is the whole
+    /// story the moment the verb returns.
     pub fn listing(&self) -> Vec<Listed> {
-        let mut rows: BTreeMap<String, Listed> = self
-            .manifest
+        self.manifest
             .entries
             .iter()
-            .map(|(p, e)| {
-                (
-                    p.clone(),
-                    Listed { path: p.clone(), etag: e.etag.clone(), size: Some(e.size), cited: true },
-                )
-            })
-            .collect();
-        for e in &self.inbox.entries {
-            rows.insert(
-                e.path.clone(),
-                Listed { path: e.path.clone(), etag: e.etag.clone(), size: None, cited: false },
-            );
-        }
-        for r in &self.inbox.removals {
-            if r.refused.is_none() {
-                rows.remove(&r.path);
-            }
-        }
-        rows.into_values().collect()
-    }
-
-    /// Removals recorded and not yet performed.
-    pub fn pending_removals(&self) -> impl Iterator<Item = &Removal> {
-        self.inbox.removals.iter().filter(|r| r.refused.is_none())
-    }
-
-    /// Removals the syncer refused, with the reason on each.
-    pub fn refused_removals(&self) -> impl Iterator<Item = &Removal> {
-        self.inbox.removals.iter().filter(|r| r.refused.is_some())
+            .map(|(p, e)| Listed { path: p.clone(), etag: e.etag.clone(), size: Some(e.size), cited: true })
+            .collect()
     }
 }
 
-/// The RPO observability surface: seq, window, inbox depth, the epoch
-/// cell, and the standing verb requests.
+/// The RPO observability surface: seq, the epoch cell, and the
+/// standing verb requests.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Status {
     pub seq: Option<u64>,
-    pub window: Option<Window>,
-    pub inbox_depth: usize,
     /// The publish fence: its epoch advances once per barrier, and
     /// `holder_id`/`holder_released` name the LAST barrier's writer and
     /// whether its commit section is over (the cell is at rest between
@@ -167,12 +166,6 @@ pub struct Status {
     /// Whether a boundary/sync request is standing (§2.5).
     pub boundary_request: Option<VerbRequest>,
     pub sync_request: Option<VerbRequest>,
-    /// Declared removals recorded and not yet performed.
-    #[serde(default)]
-    pub removals_pending: usize,
-    /// Declared removals the syncer refused (the cell carries why).
-    #[serde(default)]
-    pub removals_refused: usize,
 }
 
 /// A recorded verb request. `status` is always `recorded`, never
@@ -217,10 +210,6 @@ pub enum VerbError {
     /// header.
     #[error("the file changed since you read it; re-read it and try again")]
     FileChanged { current: Option<String> },
-    /// 409 `barrier-window-open` (+ `Retry-After`): a publish barrier
-    /// is in flight. Nothing was written; retry after the window.
-    #[error("{message}")]
-    WindowOpen { retry_after_secs: u64, message: String },
     /// 409 `concurrent-write`: the precondition held when judged and
     /// the object moved inside the HEAD-to-PUT window. Retrying the
     /// same request can succeed, which is the opposite of the advice a
@@ -249,9 +238,6 @@ pub enum VerbError {
     /// did not put there. `current` is its entity-tag.
     #[error("{path} already exists; a rename does not overwrite (current {current:?})")]
     DestinationExists { path: String, current: Option<String> },
-    /// 404 `no-removal`: nothing to withdraw for the path.
-    #[error("no removal of {0} is recorded")]
-    NoRemoval(String),
     /// 404 `no-draft`. The message says which shape: no draft at all,
     /// a body whose meta never landed, or a meta whose body is gone.
     #[error("{0}")]
@@ -273,9 +259,6 @@ pub enum VerbError {
     /// cell at all.
     #[error("no lease cell exists for this workspace")]
     NoHolder,
-    /// 403 `fenced`: the window verb was refused by the cell.
-    #[error("{0}")]
-    Fenced(String),
     /// 403 `read-only`: the workspace was built with
     /// `Workspace::read_only` and this verb writes. Refused before any
     /// request: nothing was read or written. Not retryable — the caller's
@@ -292,13 +275,17 @@ pub enum VerbError {
     /// Only `wait_cited` produces this; `put_file` never does.
     #[error("{path} at {etag} is durable and tracked but not yet cited: {reason}")]
     CitationPending { path: String, etag: String, reason: String },
-    /// 409 `superseded`: the manifest cites `path` at another etag and
-    /// the awaited write is no longer in the inbox — a later write won.
+    /// 409 `superseded`: the manifest cites `path` at another etag — a
+    /// later write won.
     #[error("{path} is cited at {cited_etag}, not at the awaited etag; a later write superseded it")]
     Superseded { path: String, cited_etag: String },
     /// 500 `encode`: a document this crate builds failed to serialise.
     #[error("{0}")]
     Encode(String),
+    /// 502 `corrupt`: the bytes the store returned for a cited handle do not
+    /// hash to the CRC the citation carries (M8). Nothing was served.
+    #[error("{path}: the stored bytes hash to CRC-64 {got}, the citation says {want}; refusing to serve them")]
+    Corrupt { path: String, want: String, got: String },
     /// 502 `store`: the object store failed. Retryable in general; the
     /// source says why.
     #[error("{0}")]
@@ -312,11 +299,9 @@ impl VerbError {
             VerbError::BadPath(_) | VerbError::BadUser(_) | VerbError::BadPrecondition(_) => 400,
             VerbError::StaleEpoch { .. }
             | VerbError::NoHolder
-            | VerbError::Fenced(_)
             | VerbError::ReadOnly => 403,
-            VerbError::NoSuchFile(_) | VerbError::NoDraft(_) | VerbError::NoRemoval(_) => 404,
-            VerbError::WindowOpen { .. }
-            | VerbError::ConcurrentWrite
+            VerbError::NoSuchFile(_) | VerbError::NoDraft(_) => 404,
+            VerbError::ConcurrentWrite
             | VerbError::Moved
             | VerbError::DraftStale { .. }
             | VerbError::DraftMoved(_)
@@ -329,6 +314,7 @@ impl VerbError {
             VerbError::CitationPending { .. } => 202,
             VerbError::Superseded { .. } => 409,
             VerbError::Encode(_) => 500,
+            VerbError::Corrupt { .. } => 502,
             VerbError::Store(_) => 502,
         }
     }
@@ -341,35 +327,31 @@ impl VerbError {
             VerbError::BadPrecondition(_) => "bad-precondition",
             VerbError::PreconditionRequired => "precondition-required",
             VerbError::FileChanged { .. } => "file-changed",
-            VerbError::WindowOpen { .. } => "barrier-window-open",
             VerbError::ConcurrentWrite => "concurrent-write",
             VerbError::Moved => "moved",
             VerbError::NoSuchFile(_) => "no-such-file",
             VerbError::ForeignWrite { .. } => "foreign-write",
             VerbError::TooLarge { .. } => "payload-too-large",
             VerbError::DestinationExists { .. } => "destination-exists",
-            VerbError::NoRemoval(_) => "no-removal",
             VerbError::NoDraft(_) => "no-draft",
             VerbError::DraftStale { .. } => "draft-stale",
             VerbError::DraftMoved(_) => "draft-moved",
             VerbError::StaleEpoch { .. } => "stale-epoch",
             VerbError::NoHolder => "no-holder",
-            VerbError::Fenced(_) => "fenced",
             VerbError::ReadOnly => "read-only",
             VerbError::CasMiss { .. } => "cas-miss",
             VerbError::CitationPending { .. } => "citation-pending",
             VerbError::Superseded { .. } => "superseded",
             VerbError::Encode(_) => "encode",
+            VerbError::Corrupt { .. } => "corrupt",
             VerbError::Store(_) => "store",
         }
     }
 
     /// The pacing hint a 409 carries: the wire's `Retry-After`. Every
-    /// conflict says 2 s (callers poll; a default beats a stampede);
-    /// an open window says how long the window has left.
+    /// conflict says 2 s (callers poll; a default beats a stampede).
     pub fn retry_after_secs(&self) -> Option<u64> {
         match self {
-            VerbError::WindowOpen { retry_after_secs, .. } => Some(*retry_after_secs),
             e if e.status() == 409 => Some(2),
             _ => None,
         }
@@ -392,8 +374,7 @@ impl VerbError {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            VerbError::WindowOpen { .. }
-                | VerbError::ConcurrentWrite
+            VerbError::ConcurrentWrite
                 | VerbError::Moved
                 | VerbError::DraftMoved(_)
                 | VerbError::Store(_)
@@ -418,6 +399,16 @@ impl From<StoreError> for VerbError {
 
 /// Workspace-relative path hygiene: no traversal, no absolute, no
 /// reserved namespaces, no empty segments.
+/// A path as the workspace tracks it: the handle its newest tracked or
+/// cited bytes live at, their etag, and their CRC when a writer recorded
+/// one (`Workspace::lookup`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Tracked {
+    pub key: String,
+    pub etag: String,
+    pub crc64_b64: Option<String>,
+}
+
 pub fn path_ok(path: &str) -> bool {
     !path.is_empty()
         && !path.starts_with('/')
@@ -504,16 +495,6 @@ pub fn judge_preconditions(
     }
 }
 
-/// What the read door's overlay found for a path.
-enum Overlay {
-    /// The newest tracked write, served.
-    Served(Blob),
-    /// A tracked write the bucket has outrun.
-    Outrun,
-    /// No tracked write, or its object is gone.
-    Absent,
-}
-
 impl Workspace {
     /// A workspace at `prefix` on `store`. The prefix is the subtree's
     /// bucket key prefix — the same string the syncer was started with
@@ -525,15 +506,15 @@ impl Workspace {
             // Verbs never touch a local tree; the root is unused.
             cfg: LeanConfig::new(prefix, "/nonexistent"),
             max_put_bytes: WHOLE_PUT_MAX,
-            window_wait: None,
             read_only: false,
+            manifests: Arc::default(),
         }
     }
 
     /// The same workspace for a caller who may only read — a user whose
     /// role is read access (per-user access design §4.6). Every reading
     /// verb answers as on `new`; every writing verb — `put_file`,
-    /// `remove_file(s)`, `rename_file(s)`, `withdraw_removal`,
+    /// `remove_file(s)`, `rename_file(s)`,
     /// `request_boundary`, `request_sync`, `put_draft`, `delete_draft`,
     /// `promote_draft` and the syncer-facing four — answers
     /// `VerbError::ReadOnly` before it sends a request.
@@ -563,23 +544,17 @@ impl Workspace {
         Ok(())
     }
 
-    /// How long a HITL write (`put_file`, `promote_draft`) may wait for
-    /// an open barrier window to close before it is refused
-    /// `WindowOpen`. `None` (the default, and the HTTP gateway's
-    /// behaviour) refuses at once with the `Retry-After` the caller
-    /// would have used; a UI that would rather not see the 409 at all
-    /// sets a bound here, and the wait happens BEFORE anything is
-    /// written, so it changes nothing about what the write does.
-    pub fn with_window_wait(mut self, wait: Option<std::time::Duration>) -> Self {
-        self.window_wait = wait;
-        self
-    }
-
     /// Whole-object ceiling for HITL writes and draft saves (default
     /// 64 MiB, the gateway's `FLINT_LEAN_GW_MAX_PUT_MB`). Multipart
     /// through this door is deferred, so a larger body is refused.
     pub fn with_max_put_bytes(mut self, max: u64) -> Self {
         self.max_put_bytes = max;
+        self
+    }
+
+    /// Share a manifest cache (a server: one per workspace, across requests).
+    pub fn with_manifest_cache(mut self, cache: Arc<ManifestCache>) -> Self {
+        self.manifests = cache;
         self
     }
 
@@ -607,88 +582,26 @@ impl Workspace {
         Ok(())
     }
 
-    /// The window check every HITL write makes: read the CELL (never a
-    /// replica's memory — the statelessness contract) and refuse while
-    /// a barrier window is open, saying how long it has left.
-    pub(crate) async fn admit_hitl(&self) -> Result<(), VerbError> {
-        let deadline = self.window_wait.map(|w| tokio::time::Instant::now() + w);
-        loop {
-            let loaded = inbox::load(self.store.as_ref(), &self.cfg).await?;
-            if inbox::admits_hitl(&loaded.doc) {
-                return Ok(());
-            }
-            let retry_after_secs = loaded
-                .doc
-                .window
-                .as_ref()
-                .map(|w| w.deadline_unix.saturating_sub(now_unix()).max(1))
-                .unwrap_or(2);
-            match deadline {
-                Some(d) if tokio::time::Instant::now() < d => {
-                    // A window is short (one barrier's manifest CAS);
-                    // re-read the cell often enough to notice it close.
-                    let left = d.saturating_duration_since(tokio::time::Instant::now());
-                    tokio::time::sleep(std::time::Duration::from_millis(250).min(left)).await;
-                }
-                _ => {
-                    return Err(VerbError::WindowOpen {
-                        retry_after_secs,
-                        message: "a publish barrier is in flight; retry after the window".into(),
-                    })
-                }
-            }
-        }
-    }
-
-    /// Append the inbox entry that makes a landed object a TRACKED
-    /// write. The object PUT has already happened, over whatever the
-    /// key held — often a version this workspace TRACKS (a citation, or
-    /// an earlier acked write in the inbox), whose bytes it replaced.
-    /// So this never refuses because a barrier window opened after the
-    /// admission check: it waits for that window to close and appends
-    /// then. A live barrier's window is one commit section; a dead
-    /// one's ends at its deadline, where `admits_hitl` lets writes in.
-    ///
-    /// Refusing here was finding 12 (the writers drill, leg A2, twice in
-    /// five minutes): the 409 said "not acked, retry", the tracked
-    /// version was already gone with no preserved copy, and the syncers
-    /// dropped their queued install of it as superseded.
-    ///
-    /// The wait runs as its own task, so a caller that stops waiting (a
-    /// client that disconnects, a timeout around `put_file`) cannot
-    /// cancel it between the PUT and the append.
-    pub(crate) async fn track(&self, entry: InboxEntry) -> Result<(), VerbError> {
-        let this = self.clone();
-        tokio::spawn(async move { this.append_when_admitted(entry).await })
-            .await
-            .map_err(|e| VerbError::Store(LeanError::State(format!("inbox append task: {e}"))))?
-    }
-
-    async fn append_when_admitted(&self, entry: InboxEntry) -> Result<(), VerbError> {
-        let give_up = tokio::time::Instant::now()
-            + std::time::Duration::from_secs(self.cfg.window_slack_secs + 60);
-        loop {
-            match inbox::gateway_append(self.store.as_ref(), &self.cfg, entry.clone()).await {
-                Ok(()) => return Ok(()),
-                Err(LeanError::State(_)) if tokio::time::Instant::now() < give_up => {
-                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                }
-                Err(LeanError::State(message)) => {
-                    return Err(VerbError::WindowOpen { retry_after_secs: 2, message })
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
-    }
-
     // ── HITL / UI-facing ─────────────────────────────────────────────
 
-    /// The HITL write: object PUT first, inbox entry second, NEVER a
-    /// manifest edit. Returns the entity-tag the write produced.
+    /// The UI save COMMITS (P2, simplification step 5, 2026-09-25): the
+    /// bytes land at a fresh handle, then the gateway CASes the manifest
+    /// itself and acknowledges AFTER the CAS. Returns the entity-tag.
     ///
-    /// Refused `WindowOpen` while a live barrier window is open;
-    /// `PreconditionRequired` for an overwrite that names nothing;
-    /// `FileChanged` when what it names is not what is there.
+    /// It never waits on the writers' lease or their commit window (the
+    /// user's G1): a writer mid-commit loses its CAS instead and re-merges,
+    /// so the pressure of heavy saving falls on the writers (G2). Nothing
+    /// goes through the cell; a writer takes the save the way it takes a
+    /// peer's publish, through its merge.
+    ///
+    /// Mine wins only over what the caller read: an overwrite must name
+    /// the version (`PreconditionRequired` otherwise), and the name is
+    /// judged against the CURRENT document at every CAS attempt, so a
+    /// version written since the read is never replaced unseen —
+    /// `FileChanged` names it, and the fresh handle is an orphan the sweep
+    /// collects. A mirror (a sole-writer workspace) takes no UI writes
+    /// (`ReadOnly`). A save that keeps losing its CAS to writers answers
+    /// `ConcurrentWrite`, which a retry can clear.
     pub async fn put_file(
         &self,
         path: &str,
@@ -700,160 +613,150 @@ impl Workspace {
             return Err(VerbError::BadPath(path.to_string()));
         }
         self.check_size(&body)?;
-        self.admit_hitl().await?;
-
-        // Object FIRST (fresh read → conditional PUT), inbox entry second.
-        let key = self.cfg.file_key(path);
-        let (current, prev_gen, last_modified) = match self.store.head(&key).await {
-            Ok(meta) => {
-                let g = GenerationStamps::from_meta(&meta.meta).map(|s| s.generation).unwrap_or(0);
-                (Some(meta.etag), g, meta.last_modified_unix)
-            }
-            Err(StoreError::NotFound(_)) => (None, 0, None),
-            Err(e) => return Err(e.into()),
-        };
-        // An overwrite — `If-Match: *`, or a retry naming the etag a
-        // `FileChanged` handed back — replaces only a version the workspace
-        // TRACKS. What else sits at the key is a syncer's upload its commit
-        // has not cited yet, and overwriting it lost this write and that
-        // one (`inbox::hitl_may_overwrite`). Judged BEFORE the caller's
-        // precondition, so a `FileChanged` never names an untracked etag
-        // for a caller to retry with. The caller retries in a moment, over
-        // the version that commit cites.
-        if let Some(cur) = current.as_deref() {
-            if !flint_lean::inbox::hitl_may_overwrite(
-                self.store.as_ref(),
-                &self.cfg,
-                path,
-                cur,
-                last_modified,
-                now_unix(),
-            )
-            .await?
-            {
-                return Err(VerbError::ConcurrentWrite);
-            }
-        }
-
-        // The CALLER's precondition, judged against what is there now.
-        // The conditional PUT below still carries the freshly-read
-        // etag, which is what closes the window between this HEAD and
-        // that PUT — but it is no longer the ONLY guard, and that is
-        // the point of this check: a stale caller is told 412 here
-        // rather than winning.
-        let cond = match judge_preconditions(
-            current.as_deref(),
-            opts.if_match.as_deref(),
-            opts.if_none_match.as_deref(),
-        )? {
-            Some(etag) => PutCondition::IfMatch(etag),
-            None => PutCondition::IfNoneMatchAny,
-        };
+        // Judged once before any bytes move, so a stale caller costs no PUT.
+        let read = manifest::load(self.store.as_ref(), &self.cfg).await?;
+        self.judge_save(read.as_ref(), path, opts)?;
+        let prev = read.as_ref().and_then(|l| l.manifest.entries.get(path)).cloned();
         let crc = crc64_nvme(&body);
-        let author = opts.author.clone().unwrap_or_else(|| "ui".into());
+        let size = body.len() as u64;
+        let added_unix = now_unix();
+        let flush = flint_lean::ui_flush(added_unix);
+        let key = self.cfg.handle_key(path, &flush);
         let stamps = GenerationStamps {
-            generation: prev_gen + 1,
-            epoch: 0, // a HITL write carries no lease epoch — it is the second writer
-            flush_uuid: format!("gateway-{}", uuid::Uuid::new_v4()),
+            generation: prev.as_ref().map(|e| e.generation).unwrap_or(0) + 1,
+            epoch: 0, // a UI save carries no lease epoch
+            flush_uuid: flush.clone(),
             boundary_source: None,
             posix: None,
         };
-        let meta = match self.store.put_whole(&key, body, &cond, &stamps, crc).await {
-            Ok(m) => m,
-            // NOT `FileChanged`: the caller's precondition held when it
-            // was judged, and the object moved inside the HEAD-to-PUT
-            // window. Retrying the same request can succeed, which is
-            // the opposite of the advice a 412 carries.
-            Err(StoreError::PreconditionFailed(_)) => return Err(VerbError::ConcurrentWrite),
-            Err(e) => return Err(e.into()),
-        };
-        let entry = InboxEntry {
-            path: path.to_string(),
+        let meta = self.store.put_whole(&key, body, &PutCondition::IfNoneMatchAny, &stamps, crc).await?;
+        let save = Save {
+            path,
+            key,
             etag: meta.etag.clone(),
-            author,
-            added_unix: now_unix(),
-            crc64_b64: Some(flint_store::crc64_to_b64(crc)),
-            cited: None,
+            crc64_b64: flint_store::crc64_to_b64(crc),
+            size,
+            mtime_unix: added_unix as i64,
+            flush,
         };
-        self.track(entry).await?;
+        self.commit_save(&save, |doc| self.judge_save(doc, path, opts)).await?;
         Ok(meta.etag)
     }
 
-    /// Read the newest bytes the workspace tracks for `path`: a HITL
-    /// write in the inbox cell first (a write no barrier has re-cited
-    /// yet), else the manifest citation. The read door overlays the
-    /// inbox on the citation exactly as the listing and the sync verb
-    /// do, so an overwrite of a cited file is readable by everyone the
-    /// moment `put_file` returns — not 409 `moved` until the syncer
-    /// re-cites, which is what preferring the citation answered
-    /// (0.2.0), and forever in a workspace no syncer runs on. An entry
-    /// the bucket has outrun (the syncer published over it and its
-    /// citation now names the newer bytes; entries leave the cell only
-    /// after that CAS) yields to the citation: the overlay never serves
-    /// bytes an entry no longer describes. The common read — a cited
-    /// path nobody has overwritten — costs what it did before the
-    /// overlay: the cell is fetched only when the cited fetch fails
-    /// its precondition, which is the overwritten case itself.
-    ///
+    /// Cite a save's fresh handle in ONE manifest CAS (`commit_edit`).
+    /// `judge` sees the document the CAS would replace; a refusal leaves
+    /// the handle an orphan for the sweep and the document untouched.
+    pub(crate) async fn commit_save(
+        &self,
+        save: &Save<'_>,
+        judge: impl Fn(Option<&LoadedManifest>) -> Result<(), VerbError>,
+    ) -> Result<(), VerbError> {
+        self.commit_edit(&save.flush, |current, doc| {
+            judge(current)?;
+            let was = doc.entries.get(save.path);
+            let entry = LeanEntry {
+                key: save.key.clone(),
+                etag: save.etag.clone(),
+                crc64_b64: save.crc64_b64.clone(),
+                size: save.size,
+                mode: was.map(|e| e.mode).unwrap_or(0o644),
+                mtime_unix: save.mtime_unix,
+                generation: was.map(|e| e.generation).unwrap_or(0) + 1,
+                epoch: 0,
+            };
+            doc.tombstones.remove(save.path);
+            doc.entries.insert(save.path.to_string(), entry);
+            Ok(())
+        })
+        .await
+    }
+
+    /// ONE manifest CAS for a UI edit (P2): load the current document,
+    /// let `edit` judge it and change a copy (the next generation, with
+    /// the installing party's fields reset, as `manifest::merge` does),
+    /// CAS it in, and on a lost race do it all again against what won.
+    /// Never takes the writers' lease and never waits on their window;
+    /// `ConcurrentWrite` after `manifest::EDIT_CAS_ATTEMPTS` lost races.
+    pub(crate) async fn commit_edit(
+        &self,
+        flush: &str,
+        edit: impl Fn(Option<&LoadedManifest>, &mut LeanManifest) -> Result<(), VerbError>,
+    ) -> Result<(), VerbError> {
+        match manifest::commit_edit(self.store.as_ref(), &self.cfg, flush, edit).await {
+            Ok(()) => Ok(()),
+            Err(manifest::EditError::Refused(e)) => Err(e),
+            Err(manifest::EditError::Store(e)) => Err(e.into()),
+            Err(manifest::EditError::Contended) => Err(VerbError::ConcurrentWrite),
+        }
+    }
+
+    /// A save's preconditions against a document: a mirror takes none; an
+    /// overwrite must name what it read, and what it names must be what the
+    /// document cites NOW.
+    fn judge_save(&self, doc: Option<&LoadedManifest>, path: &str, opts: &PutFile) -> Result<(), VerbError> {
+        if doc.is_some_and(|l| l.manifest.sole_writer) {
+            return Err(VerbError::ReadOnly);
+        }
+        let current = doc.and_then(|l| l.manifest.entries.get(path)).map(|e| e.etag.clone());
+        judge_preconditions(current.as_deref(), opts.if_match.as_deref(), opts.if_none_match.as_deref())?;
+        Ok(())
+    }
+
+    /// Read the bytes the manifest cites for `path`, by their handle.
+    /// Every UI edit commits (P2), so the citation is the newest version
+    /// the workspace has, and a read costs one object fetch.
     pub async fn get_file(&self, path: &str) -> Result<Blob, VerbError> {
         if !path_ok(path) {
             return Err(VerbError::BadPath(path.to_string()));
         }
-        let key = self.cfg.file_key(path);
-        let (cited, sole_writer) = match manifest::load(self.store.as_ref(), &self.cfg).await? {
-            Some(l) => (l.manifest.entries.get(path).map(|e| e.etag.clone()), l.manifest.sole_writer),
-            None => (None, false),
-        };
+        // The bytes the manifest cites, read by their HANDLE (design
+        // 2026-09-19); no cell is read. A handle is immutable, so a fetch
+        // guarded on its etag fails only for a handle something overwrote from outside
+        // (`moved`: a sole-writer workspace names the stranger), and a
+        // handle that is gone is one the collector took after the
+        // pointer moved on — re-resolve once, then it is a hole.
+        let m = self.view().await?;
+        let sole_writer = m.as_ref().map(|l| l.manifest.sole_writer).unwrap_or(false);
         let moved = |path: &str| -> VerbError {
-            // A sole-writer workspace (forge's export) never has a
-            // second legitimate writer, so "retry" is wrong: the cited
-            // etag is not coming back on its own.
             if sole_writer {
                 VerbError::ForeignWrite { path: path.to_string() }
             } else {
                 VerbError::Moved
             }
         };
-        let Some(etag) = cited else {
-            // Never cited: the cell is the only place the path can be.
-            return match self.read_tracked(&key, path).await? {
-                Overlay::Served(blob) => Ok(blob),
-                Overlay::Outrun => Err(moved(path)),
-                Overlay::Absent => Err(VerbError::NoSuchFile(path.to_string())),
-            };
+        let Some(tracked) = self.lookup(m.as_deref(), path) else {
+            return Err(VerbError::NoSuchFile(path.to_string()));
         };
-        match self.store.get_whole(&key, Some(&etag)).await {
-            Ok((meta, body)) => Ok(Blob { etag: meta.etag, body }),
-            // The citation is no longer current: a tracked write is the
-            // newest bytes the workspace knows, and failing that the
-            // object moved under an upload no entry describes.
-            Err(StoreError::PreconditionFailed(_)) => match self.read_tracked(&key, path).await? {
-                Overlay::Served(blob) => Ok(blob),
-                Overlay::Outrun | Overlay::Absent => Err(moved(path)),
-            },
-            Err(StoreError::NotFound(_)) => Err(VerbError::NoSuchFile(path.to_string())),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// The read door's overlay: the newest inbox entry for `path`, read
-    /// guarded on its own etag — one GET for the cell, one for the
-    /// bytes. A tracked write is complete bytes under a known tag; the
-    /// agent's mid-change upload has no entry, so nothing uncited can
-    /// come through this arm.
-    async fn read_tracked(&self, key: &str, path: &str) -> Result<Overlay, VerbError> {
-        let ib = inbox::load(self.store.as_ref(), &self.cfg).await?;
-        let Some(entry) = ib.doc.entries.iter().rev().find(|e| e.path == path) else {
-            return Ok(Overlay::Absent);
+        // M8: the bytes are verified against the CRC the citation carries,
+        // as checkout's and the consume's fetches are. A mismatch is refused,
+        // never served.
+        let verified = |t: &Tracked, meta: flint_store::ObjectMeta, body: Bytes| -> Result<Blob, VerbError> {
+            if let Some(want) = t.crc64_b64.as_deref().filter(|c| !c.is_empty()) {
+                let got = crc64_to_b64(crc64_nvme(&body));
+                if got != want {
+                    return Err(VerbError::Corrupt { path: path.to_string(), want: want.to_string(), got });
+                }
+            }
+            Ok(Blob { etag: meta.etag, body })
         };
-        match self.store.get_whole(key, Some(&entry.etag)).await {
-            Ok((meta, body)) => Ok(Overlay::Served(Blob { etag: meta.etag, body })),
-            // The object moved past the entry: the citation is the
-            // newer truth if the barrier has installed it, and the
-            // read is `moved` if it has not.
-            Err(StoreError::PreconditionFailed(_)) => Ok(Overlay::Outrun),
-            // Gone from the bucket (a consume found it missing).
-            Err(StoreError::NotFound(_)) => Ok(Overlay::Absent),
+        match self.store.get_whole(&tracked.key, Some(&tracked.etag)).await {
+            Ok((meta, body)) => verified(&tracked, meta, body),
+            Err(StoreError::PreconditionFailed(_)) => Err(moved(path)),
+            Err(StoreError::NotFound(_)) => {
+                let m = self.view().await?;
+                let Some(again) = self.lookup(m.as_deref(), path) else {
+                    return Err(VerbError::NoSuchFile(path.to_string()));
+                };
+                if again.key == tracked.key {
+                    return Err(VerbError::NoSuchFile(path.to_string()));
+                }
+                match self.store.get_whole(&again.key, Some(&again.etag)).await {
+                    Ok((meta, body)) => verified(&again, meta, body),
+                    Err(StoreError::PreconditionFailed(_)) => Err(moved(path)),
+                    Err(StoreError::NotFound(_)) => Err(VerbError::NoSuchFile(path.to_string())),
+                    Err(e) => Err(e.into()),
+                }
+            }
             Err(e) => Err(e.into()),
         }
     }
@@ -869,7 +772,7 @@ impl Workspace {
         Ok(Snapshot { manifest, manifest_etag, inbox: ib.doc })
     }
 
-    /// Seq, window, inbox depth, the epoch cell, standing requests.
+    /// Seq, the epoch cell, standing requests.
     ///
     /// ONE manifest request for all the manifest-derived fields, and
     /// under the pointer layout it reads the POINTER — a few hundred
@@ -901,8 +804,6 @@ impl Workspace {
         let cell = self.store.epoch_read(&self.cfg.epoch_key()).await?;
         Ok(Status {
             seq,
-            window: ib.doc.window.clone(),
-            inbox_depth: ib.doc.entries.len(),
             epoch: cell.as_ref().map(|c| c.epoch),
             holder_id: cell.as_ref().map(|c| c.holder_id.clone()),
             holder_released: cell.as_ref().map(|c| c.released),
@@ -912,8 +813,6 @@ impl Workspace {
             boundary_source,
             boundary_request: ib.doc.boundary_request.clone(),
             sync_request: ib.doc.sync_request.clone(),
-            removals_pending: ib.doc.removals.iter().filter(|r| r.refused.is_none()).count(),
-            removals_refused: ib.doc.removals.iter().filter(|r| r.refused.is_some()).count(),
         })
     }
 
@@ -922,39 +821,44 @@ impl Workspace {
     // A caller outside the pod cannot touch the tree, and must never
     // delete an object itself (§9: a cited object deleted from outside
     // wedges every checkout with "manifest cites it but it is gone").
-    // So a removal is DECLARED: recorded in the inbox cell, performed
-    // by the syncer at its next barrier — unlink, cite out, GC, in ONE
-    // manifest generation — and refused there, with the reason written
-    // back to the cell, if the agent has unpublished edits on the path.
-    // This crate exposes no function that deletes a cited object.
+    // So a removal COMMITS as a save does (P2): one CAS that stops citing
+    // the path (the tombstone names what it retired) and deletes nothing;
+    // the object goes to the retire reap once nothing cites it. Each
+    // syncer's next consume unlinks the file where its tree is clean, and
+    // an agent's unpublished edit on the path publishes over the delete
+    // with a record. This crate exposes no function that deletes a cited
+    // object.
 
-    /// What the workspace knows about a path: the etag it is tracked or
-    /// cited at, and the CRC of those bytes when the manifest has it.
-    /// `None` = not a file here, or a removal of it is pending.
-    fn lookup(m: Option<&LoadedManifest>, ib: &InboxDoc, path: &str) -> Option<(String, Option<String>)> {
-        if ib.pending_removal(path).is_some() {
-            return None;
-        }
-        if let Some(e) = ib.entries.iter().rev().find(|e| e.path == path) {
-            return Some((e.etag.clone(), e.crc64_b64.clone()));
-        }
+    /// What the workspace knows about a path: the HANDLE and etag it is
+    /// cited at, and the CRC of those bytes. Under P2 every UI edit
+    /// commits, so the citation is the whole story. `None` = not a file here.
+    pub(crate) fn lookup(&self, m: Option<&LoadedManifest>, path: &str) -> Option<Tracked> {
         m.and_then(|l| l.manifest.entries.get(path))
-            .map(|e| (e.etag.clone(), Some(e.crc64_b64.clone())))
+            .map(|e| Tracked { key: e.key.clone(), etag: e.etag.clone(), crc64_b64: Some(e.crc64_b64.clone()) })
     }
 
-    async fn view(&self) -> Result<(Option<LoadedManifest>, InboxDoc), VerbError> {
-        let m = manifest::load(self.store.as_ref(), &self.cfg).await?;
-        let ib = inbox::load(self.store.as_ref(), &self.cfg).await?;
-        Ok((m, ib.doc))
+    /// The current manifest: the cached one while the pointer has not moved
+    /// (one small GET), else a load, cached by the etag it was loaded at. A
+    /// legacy single-object workspace has no pointer to key on and loads.
+    pub(crate) async fn view(&self) -> Result<Option<Arc<LoadedManifest>>, VerbError> {
+        let Some(p) = manifest::load_pointer(self.store.as_ref(), &self.cfg).await? else {
+            return Ok(manifest::load(self.store.as_ref(), &self.cfg).await?.map(Arc::new));
+        };
+        if let Some(hit) = self.manifests.0.lock().unwrap().as_ref().filter(|c| c.etag == p.etag) {
+            return Ok(Some(hit.clone()));
+        }
+        let loaded = manifest::load(self.store.as_ref(), &self.cfg).await?.map(Arc::new);
+        if let Some(l) = &loaded {
+            *self.manifests.0.lock().unwrap() = Some(l.clone());
+        }
+        Ok(loaded)
     }
 
-    /// Delete a file: record its removal for the syncer to perform.
-    /// Returns as soon as the intent is durable; the listing hides the
-    /// path from then on, the object and the citation go at the next
-    /// barrier. `if_match` is judged against the file as the workspace
-    /// tracks it (`FileChanged` names the current tag); `None` skips
-    /// the check. Not window-gated: a removal touches nothing when it
-    /// is recorded.
+    /// Delete a file: it COMMITS (P2) — one manifest CAS stops citing it,
+    /// and the document's tombstone names what was deleted. `if_match` is
+    /// judged against the citation (`FileChanged` names the current tag),
+    /// again at every CAS attempt; `None` skips the check. The object goes
+    /// to the sweep once nothing cites it. Never waits on the writers.
     pub async fn remove_file(
         &self,
         path: &str,
@@ -964,54 +868,51 @@ impl Workspace {
         self.remove_files(&[(path, if_match)], author).await
     }
 
-    /// `remove_file` for many paths in ONE transaction — a folder
-    /// delete is one CAS on the cell, and one manifest generation at
-    /// the barrier. Every path is checked before anything is recorded:
-    /// one unknown path or failed precondition records none of them.
+    /// `remove_file` for many paths in ONE commit — a folder delete is one
+    /// manifest generation. Every path is judged before anything changes:
+    /// one unknown path or failed precondition deletes none of them.
     pub async fn remove_files(
         &self,
         paths: &[(&str, Option<&str>)],
-        author: Option<&str>,
+        _author: Option<&str>,
     ) -> Result<(), VerbError> {
         self.writable()?;
-        let author = author.unwrap_or("ui");
         for (path, _) in paths {
             if !path_ok(path) {
                 return Err(VerbError::BadPath(path.to_string()));
             }
         }
-        let (m, ib) = self.view().await?;
-        let mut removals = Vec::with_capacity(paths.len());
-        for (path, if_match) in paths {
-            let Some((current, _)) = Self::lookup(m.as_ref(), &ib, path) else {
-                return Err(VerbError::NoSuchFile(path.to_string()));
-            };
-            if let Some(tag) = if_match {
-                let t = normalize_etag(tag);
-                if t != "*" && t != normalize_etag(&current) {
-                    return Err(VerbError::FileChanged { current: Some(current) });
-                }
-            }
-            removals.push(Removal {
-                path: path.to_string(),
-                author: author.to_string(),
-                requested_unix: now_unix(),
-                moved_to: None,
-                refused: None,
-            });
-        }
-        if removals.is_empty() {
+        if paths.is_empty() {
             return Ok(());
         }
-        inbox::gateway_remove(self.store.as_ref(), &self.cfg, removals).await?;
-        Ok(())
+        let flush = flint_lean::ui_flush(now_unix());
+        self.commit_edit(&flush, |current, doc| {
+            if current.is_some_and(|l| l.manifest.sole_writer) {
+                return Err(VerbError::ReadOnly);
+            }
+            for (path, if_match) in paths {
+                let Some(cited) = doc.entries.get(*path) else {
+                    return Err(VerbError::NoSuchFile(path.to_string()));
+                };
+                if let Some(tag) = if_match {
+                    let t = normalize_etag(tag);
+                    if t != "*" && t != normalize_etag(&cited.etag) {
+                        return Err(VerbError::FileChanged { current: Some(cited.etag.clone()) });
+                    }
+                }
+            }
+            for (path, _) in paths {
+                let gone = doc.entries.remove(*path).expect("judged above");
+                doc.tombstones.insert(path.to_string(), manifest::Tombstone { etag: gone.etag, seq: doc.seq });
+            }
+            Ok(())
+        })
+        .await
     }
 
-    /// Rename or move a file. Returns the destination's entity-tag; the
-    /// destination is readable at once, the source leaves the listing
-    /// at once, and the syncer's next barrier cites both halves in ONE
-    /// manifest generation — a manifest reader sees the old name or the
-    /// new, never both and never neither.
+    /// Rename or move a file. Returns the destination's entity-tag. It
+    /// COMMITS (P2): one manifest CAS moves the citation — a manifest
+    /// reader sees the old name or the new, never both and never neither.
     pub async fn rename_file(
         &self,
         from: &str,
@@ -1022,25 +923,20 @@ impl Workspace {
         Ok(etags.pop().expect("one pair, one etag"))
     }
 
-    /// `rename_file` for many pairs in ONE transaction — a folder move.
+    /// `rename_file` for many pairs in ONE commit — a folder move.
     ///
-    /// Create first, removal second (design §5): every destination is
-    /// written by a server-side copy — the bytes never traverse this
-    /// process, and a 10 GB checkpoint moves without a download — and
-    /// then ONE CAS records the destination entries and the source
-    /// removals together (§6), so the cell never holds half a rename.
-    /// Refused before anything is written: `NoSuchFile` for a source
-    /// that is not here, `DestinationExists` for a destination that
-    /// is, `BadPath` for either, `WindowOpen` while a barrier is in
-    /// flight. A copy that lands and then loses its CAS to a window is
-    /// an orphan the retry overwrites, exactly as a HITL write's is.
+    /// A rename is a CITATION MOVE (design 2026-09-19, R6): the
+    /// destination's entry names the SOURCE's handle, the source is no
+    /// longer cited and its tombstone names what moved, and no bytes move.
+    /// Refused whole, before anything changes: `NoSuchFile` for a source
+    /// that is not cited, `DestinationExists` for a destination that is,
+    /// `BadPath` for either. Never waits on the writers (G1).
     pub async fn rename_files(
         &self,
         pairs: &[(&str, &str)],
-        author: Option<&str>,
+        _author: Option<&str>,
     ) -> Result<Vec<String>, VerbError> {
         self.writable()?;
-        let author = author.unwrap_or("ui");
         let mut seen_to = std::collections::BTreeSet::new();
         for (from, to) in pairs {
             if !path_ok(from) {
@@ -1050,125 +946,33 @@ impl Workspace {
                 return Err(VerbError::BadPath(to.to_string()));
             }
         }
-        self.admit_hitl().await?;
-        let (m, ib) = self.view().await?;
-        // Every source resolved and every destination checked BEFORE
-        // the first copy: a batch that can be refused is refused whole.
-        let mut plan = Vec::with_capacity(pairs.len());
-        for (from, to) in pairs {
-            let Some(src) = Self::lookup(m.as_ref(), &ib, from) else {
-                return Err(VerbError::NoSuchFile(from.to_string()));
-            };
-            if let Some((current, _)) = Self::lookup(m.as_ref(), &ib, to) {
-                return Err(VerbError::DestinationExists {
-                    path: to.to_string(),
-                    current: Some(current),
-                });
+        let flush = flint_lean::ui_flush(now_unix());
+        let moved: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(vec![]);
+        self.commit_edit(&flush, |current, doc| {
+            if current.is_some_and(|l| l.manifest.sole_writer) {
+                return Err(VerbError::ReadOnly);
             }
-            plan.push((*from, *to, src));
-        }
-        let mut entries = Vec::with_capacity(plan.len());
-        let mut removals = Vec::with_capacity(plan.len());
-        let mut etags = Vec::with_capacity(plan.len());
-        for (from, to, (src_etag, src_crc)) in plan {
-            let src_key = self.cfg.file_key(from);
-            let dst_key = self.cfg.file_key(to);
-            let stamps = GenerationStamps {
-                generation: 1,
-                epoch: 0, // a HITL act carries no lease epoch
-                flush_uuid: format!("gateway-rename-{}", uuid::Uuid::new_v4()),
-                boundary_source: None,
-                posix: None,
-            };
-            let copied = match self
-                .store
-                .copy_object(&src_key, Some(&src_etag), &dst_key, &PutCondition::IfNoneMatchAny, &stamps)
-                .await
-            {
-                Ok(meta) => meta,
-                Err(StoreError::PreconditionFailed(_)) => {
-                    // The source moved past what was resolved, or an
-                    // object sits at the destination. Nothing cites or
-                    // tracks `to` (checked above), so an object there is
-                    // either this verb's own orphan — a copy whose CAS
-                    // was refused — or a stranger's. Only the former is
-                    // overwritten: its stamps say which.
-                    match self.store.head(&dst_key).await {
-                        Ok(orphan) => {
-                            let ours = GenerationStamps::from_meta(&orphan.meta)
-                                .map(|s| s.flush_uuid.starts_with("gateway-rename-"))
-                                .unwrap_or(false);
-                            if !ours {
-                                return Err(VerbError::DestinationExists {
-                                    path: to.to_string(),
-                                    current: Some(orphan.etag),
-                                });
-                            }
-                            self.store
-                                .copy_object(
-                                    &src_key,
-                                    Some(&src_etag),
-                                    &dst_key,
-                                    &PutCondition::IfMatch(orphan.etag),
-                                    &stamps,
-                                )
-                                .await
-                                .map_err(|e| match e {
-                                    StoreError::PreconditionFailed(_) => VerbError::ConcurrentWrite,
-                                    StoreError::NotFound(_) => VerbError::NoSuchFile(from.to_string()),
-                                    e => e.into(),
-                                })?
-                        }
-                        Err(StoreError::NotFound(_)) => return Err(VerbError::ConcurrentWrite),
-                        Err(e) => return Err(e.into()),
-                    }
+            for (from, to) in pairs {
+                if !doc.entries.contains_key(*from) {
+                    return Err(VerbError::NoSuchFile(from.to_string()));
                 }
-                Err(StoreError::NotFound(_)) => return Err(VerbError::NoSuchFile(from.to_string())),
-                Err(e) => return Err(e.into()),
-            };
-            entries.push(InboxEntry {
-                path: to.to_string(),
-                etag: copied.etag.clone(),
-                author: author.to_string(),
-                added_unix: now_unix(),
-                // The bytes are the source's, and the manifest's CRC of
-                // them is the attestation every backend gets; the copy's
-                // own is the fallback for a source only the inbox knew.
-                crc64_b64: src_crc.or(copied.crc64_b64),
-                cited: None,
-            });
-            removals.push(Removal {
-                path: from.to_string(),
-                author: author.to_string(),
-                requested_unix: now_unix(),
-                moved_to: Some(to.to_string()),
-                refused: None,
-            });
-            etags.push(copied.etag);
-        }
-        match inbox::gateway_rename(self.store.as_ref(), &self.cfg, entries, removals).await {
-            Ok(()) => Ok(etags),
-            Err(LeanError::State(message)) => {
-                Err(VerbError::WindowOpen { retry_after_secs: 2, message })
+                if let Some(there) = doc.entries.get(*to) {
+                    return Err(VerbError::DestinationExists { path: to.to_string(), current: Some(there.etag.clone()) });
+                }
             }
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// Take back a recorded removal, pending or refused. `NoRemoval`
-    /// when there is none. Best effort against a barrier that is
-    /// already performing it: a removal the syncer has unlinked is
-    /// applied whatever the cell says afterwards, and the next
-    /// `snapshot` tells which happened.
-    pub async fn withdraw_removal(&self, path: &str) -> Result<(), VerbError> {
-        self.writable()?;
-        if !path_ok(path) {
-            return Err(VerbError::BadPath(path.to_string()));
-        }
-        match inbox::withdraw_removal(self.store.as_ref(), &self.cfg, path).await? {
-            true => Ok(()),
-            false => Err(VerbError::NoRemoval(path.to_string())),
-        }
+            let mut etags = vec![];
+            for (from, to) in pairs {
+                let entry = doc.entries.remove(*from).expect("judged above");
+                doc.tombstones.insert(from.to_string(), manifest::Tombstone { etag: entry.etag.clone(), seq: doc.seq });
+                doc.tombstones.remove(*to);
+                etags.push(entry.etag.clone());
+                doc.entries.insert(to.to_string(), entry);
+            }
+            *moved.lock().unwrap() = etags;
+            Ok(())
+        })
+        .await?;
+        Ok(moved.into_inner().unwrap())
     }
 
     /// Ask the workspace to publish (§2.5).
@@ -1271,17 +1075,8 @@ impl Workspace {
                         if normalize_etag(&e.etag) == want {
                             return Ok(l.manifest.seq);
                         }
-                        // Cited, but not our bytes. Either a later write
-                        // won, or ours was dropped as superseded before
-                        // consume — the inbox says which, and it is not
-                        // this verb's to guess.
-                        let ours_pending = inbox::load(self.store.as_ref(), &self.cfg)
-                            .await?
-                            .doc
-                            .entries
-                            .iter()
-                            .any(|i| i.path == path && normalize_etag(&i.etag) == want);
-                        if !ours_pending {
+                        // Cited, but not our bytes: a later write won.
+                        {
                             return Err(VerbError::Superseded {
                                 path: path.to_string(),
                                 cited_etag: e.etag.clone(),
@@ -1319,37 +1114,6 @@ impl Workspace {
         }
     }
 
-    /// Mark the barrier window open (`{epoch, deadline_unix}`).
-    pub async fn open_window(&self, epoch: u64, deadline_unix: u64) -> Result<(), VerbError> {
-        self.writable()?;
-        self.require_current_epoch(epoch).await?;
-        match inbox::open_window(self.store.as_ref(), &self.cfg, epoch, deadline_unix).await {
-            Ok(_) => Ok(()),
-            Err(LeanError::Fenced(m)) => Err(VerbError::Fenced(m)),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// Clear the window, re-queueing the entries the barrier did not
-    /// consume.
-    pub async fn clear_window(&self, epoch: u64, queued: &[InboxEntry]) -> Result<(), VerbError> {
-        self.writable()?;
-        self.require_current_epoch(epoch).await?;
-        match inbox::clear_window(self.store.as_ref(), &self.cfg, epoch, queued).await {
-            Ok(()) => Ok(()),
-            Err(LeanError::Fenced(m)) => Err(VerbError::Fenced(m)),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// Drop consumed entries from the inbox.
-    pub async fn drop_inbox(&self, epoch: u64, consumed: &[InboxEntry]) -> Result<(), VerbError> {
-        self.writable()?;
-        self.require_current_epoch(epoch).await?;
-        inbox::drop_entries(self.store.as_ref(), &self.cfg, epoch, consumed).await?;
-        Ok(())
-    }
-
     /// CAS the manifest. Returns the new handle's etag; `CasMiss`
     /// carries the etag the manifest has now.
     ///
@@ -1360,7 +1124,9 @@ impl Workspace {
     /// present exactly what a local writer would. The previous chunk
     /// list is not carried, so a chunked HITL CAS re-sends every chunk:
     /// §6 chose exactly this trade, because the path is rare and
-    /// correctness beats throughput on it.
+    /// correctness beats throughput on it. Nor is the document it replaces,
+    /// so this path logs no retirements (M1): what it retires falls to the
+    /// sweeps' write-age rule, the shape before the retire age.
     pub async fn cas_manifest(
         &self,
         manifest: &LeanManifest,
@@ -1376,6 +1142,7 @@ impl Workspace {
             etag: e.to_string(),
             legacy,
             prev_chunks: Vec::new(),
+            prev_tombstones: None,
         });
         match manifest::cas_write(
             self.store.as_ref(),

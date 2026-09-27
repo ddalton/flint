@@ -96,7 +96,7 @@ async fn main() {
     };
 
     let n = workspaces.len();
-    let core = Arc::new(GatewayCore { store, workspaces, token, max_put_bytes });
+    let core = Arc::new(GatewayCore { store, workspaces, token, max_put_bytes, manifests: Default::default() });
     eprintln!("flint-lean-gateway: serving {n} workspaces on {listen}");
     warp::serve(routes(core)).run(listen).await;
 }

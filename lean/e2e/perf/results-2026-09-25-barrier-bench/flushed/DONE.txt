@@ -1,0 +1,7 @@
+old n=200000 rep=1 rc=0
+new n=200000 rep=1 rc=0
+new n=200000 rep=2 rc=0
+old n=200000 rep=2 rc=0
+old n=200000 rep=3 rc=0
+new n=200000 rep=3 rc=0
+BENCHDONE

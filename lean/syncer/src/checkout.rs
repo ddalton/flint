@@ -40,6 +40,11 @@ pub struct CheckoutReport {
     pub manifest_secs: f64,
     pub fetch_secs: f64,
     pub commit_secs: f64,
+    /// Passes re-run because the pointer moved past the document a
+    /// pass read and a handle it cited was collected (handles design
+    /// 2026-09-19): the checkout re-resolves instead of asking the
+    /// caller to.
+    pub reresolved: u32,
     /// The admitted set this checkout was scoped to, or `None` for the
     /// whole manifest.
     pub scope: Option<Vec<String>>,
@@ -458,12 +463,12 @@ impl Syncer {
                             path: path.clone(),
                             be: Some(BaselineEntry {
                                 etag: entry.etag.clone(),
+                                key: Some(entry.key.clone()),
                                 generation: entry.generation,
                                 size: st.len(),
                                 mtime_unix: mtime_of(&st),
                                 mtime_nanos: Some(mtime_nanos_of(&st)),
                                 crc64_b64: Some(entry.crc64_b64.clone()),
-                                judged: None,
                             }),
                             skipped: true,
                             bytes: 0,
@@ -508,6 +513,7 @@ impl Syncer {
                         path: path.clone(),
                         be: Some(BaselineEntry {
                             etag: entry.etag.clone(),
+                            key: Some(entry.key.clone()),
                             generation: entry.generation,
                             size: st.len(),
                             mtime_unix: mtime_of(&st),
@@ -515,7 +521,6 @@ impl Syncer {
                             // The fold above equalled it, or we would
                             // not be here.
                             crc64_b64: Some(entry.crc64_b64.clone()),
-                            judged: None,
                         }),
                         skipped: false,
                         bytes: n,
@@ -549,38 +554,32 @@ impl Syncer {
                 }
                 let _permit = permit;
 
-                // `cited` is whether these are the bytes the manifest
-                // describes — every arm but S3-wins adoption.
-                let ((meta, body), cited) = match store.get_whole(&entry.key, Some(&entry.etag)).await {
-                        Ok(ok) => (ok, true),
-                        Err(StoreError::PreconditionFailed(_)) if sole_writer => {
-                            // Nothing was staged here, the citation is
-                            // intact, and the thing to go and find is
-                            // the second writer.
+                let (meta, body) = match store.get_whole(&entry.key, Some(&entry.etag)).await {
+                        Ok(ok) => ok,
+                        // A cited HANDLE is immutable: nothing in the
+                        // protocol writes one twice (P2: a UI save goes to
+                        // a fresh handle and commits), so a handle whose
+                        // etag moved was written by something outside it.
+                        // Refused, never adopted — adopting bytes no
+                        // manifest cites was a citation-repair source
+                        // (M4), and the S3-wins arm that did it served a
+                        // HITL write the inbox had not re-cited yet, which
+                        // no longer exists.
+                        Err(StoreError::PreconditionFailed(_)) => {
+                            let who = if sole_writer {
+                                " This workspace is published by a SOLE WRITER — if this is \
+                                 forge's legible export, look for a read-write mount over its \
+                                 prefix; the export republishes only what git changed and will \
+                                 not repair this on its own."
+                            } else {
+                                ""
+                            };
                             return Err(LeanError::State(format!(
-                                "manifest cites {} at an etag the object no longer \
-                                 carries, and this workspace is published by a SOLE \
-                                 WRITER — so something other than its publisher wrote \
-                                 that object. Refusing to adopt bytes no manifest \
-                                 cites. If this is forge's legible export, look for a \
-                                 read-write mount over its prefix; the export \
-                                 republishes only what git changed and will not repair \
-                                 this on its own",
+                                "manifest cites {} at an etag the object no longer carries: \
+                                 something outside the protocol overwrote an immutable handle. \
+                                 Refusing to adopt bytes no manifest cites.{who}",
                                 entry.key
                             )));
-                        }
-                        Err(StoreError::PreconditionFailed(_)) => {
-                            // S3-wins: the object moved past the
-                            // manifest (a HITL write not yet
-                            // re-cited). Adopt the CURRENT version
-                            // — its inbox entry reconciles the
-                            // manifest at the next barrier. Reached
-                            // only for cadence/hybrid/legacy
-                            // manifests, so the shipped
-                            // `hitl_upload_survives_two_barriers`
-                            // behaviour is untouched in the default
-                            // mode.
-                            (store.get_whole(&entry.key, None).await?, false)
                         }
                         Err(StoreError::NotFound(_)) => {
                             return Err(LeanError::State(format!(
@@ -610,14 +609,7 @@ impl Syncer {
                 // 2026-09-12 the manifest's CRC was compared only on the
                 // RESUME path, so a corrupt fresh fetch was written, cited
                 // in the baseline and read by the agent as the file.
-                // Adopted (uncited) bytes are not the manifest's to
-                // describe: they are checked against the backend's own
-                // attestation when it offers one, and hashed either way,
-                // because the baseline records the CRC of what was
-                // written and the next barrier's citation repair cites
-                // THAT — never a HEAD's, which Ozone does not return.
-                let expect_crc =
-                    if cited { Some(entry.crc64_b64.clone()) } else { meta.crc64_b64.clone() };
+                let expect_crc = Some(entry.crc64_b64.clone());
                 let (st, got) = {
                     let target_w = target.clone();
                     let body_w = body.clone(); // Bytes: a refcount bump, not a copy
@@ -631,11 +623,7 @@ impl Syncer {
                             let got = flint_store::crc64_to_b64(flint_store::crc64_nvme(&body_w));
                             if let Some(want) = expect_crc {
                                 if got != want {
-                                    let who = if cited {
-                                        format!("manifest cites {rel_err} ({key_crc} at etag {etag_err}) with")
-                                    } else {
-                                        format!("the store attests {rel_err} ({key_crc} at etag {etag_err}) with")
-                                    };
+                                    let who = format!("manifest cites {rel_err} ({key_crc} at etag {etag_err}) with");
                                     return Err(LeanError::State(format!(
                                         "{who} CRC-64 {want}, but the bytes fetched under that \
                                          etag hash to {got} — the object is corrupt or the store \
@@ -660,12 +648,12 @@ impl Syncer {
                     path: path.clone(),
                     be: Some(BaselineEntry {
                         etag: meta.etag.clone(),
+                        key: Some(entry.key.clone()),
                         generation: entry.generation,
                         size: st.len(),
                         mtime_unix: mtime_of(&st),
                         mtime_nanos: Some(mtime_nanos_of(&st)),
                         crc64_b64: Some(got),
-                        judged: None,
                     }),
                     skipped: false,
                     bytes: body.len() as u64,
@@ -732,6 +720,16 @@ impl Syncer {
     /// not moved leaves the original refusal exactly as written — the
     /// stranger accusation is still the right one, and softening it for
     /// every caller to buy this would be the worse trade.
+    /// Has the pointer moved past the document this checkout read? One
+    /// GET of the pointer; unreadable reads as "no", so nothing is
+    /// retried on a store that cannot answer.
+    async fn pointer_moved_past(&self, read_seq: u64) -> bool {
+        match manifest::load_pointer(self.store.as_ref(), &self.cfg).await {
+            Ok(Some(p)) => p.pointer.seq > read_seq,
+            Ok(None) | Err(_) => false,
+        }
+    }
+
     async fn say_who_moved_it(&self, read_seq: u64, e: LeanError) -> LeanError {
         let now = match manifest::load_pointer(self.store.as_ref(), &self.cfg).await {
             Ok(Some(p)) => p.pointer.seq,
@@ -804,49 +802,67 @@ impl Syncer {
             return Ok(report);
         }
 
-        let t_start = std::time::Instant::now();
-        let loaded = manifest::load(self.store.as_ref(), &self.cfg).await?;
-        report.manifest_secs = t_start.elapsed().as_secs_f64();
         let mut baseline = self.state.load_baseline()?;
-        let (m, metag) = match loaded {
-            Some(l) => (l.manifest, Some(l.etag)),
-            None => (Default::default(), None),
-        };
-
-        // ADMISSION FIRST, budgets second. The order is load-bearing:
-        // a budget is a promise about what THIS checkout will write, and
-        // a 3-file scoped checkout summed over the whole 2001-file
-        // manifest is refused for bytes it was never going to fetch.
-        let admission: Vec<(&String, &super::manifest::LeanEntry)> = match &scope {
-            None => m.entries.iter().collect(),
-            Some(s) => m.entries.iter().filter(|(p, _)| s.covers(p)).collect(),
-        };
-        report.out_of_scope = m.entries.len() - admission.len();
-
-        // Budgets: refuse before materializing anything.
-        let total_bytes: u64 = admission.iter().map(|(_, e)| e.size).sum();
-        if self.cfg.max_bytes > 0 && total_bytes > self.cfg.max_bytes {
-            return Err(LeanError::Budget(format!(
-                "checkout is {} bytes; budget {}",
-                total_bytes, self.cfg.max_bytes
-            )));
-        }
-        if self.cfg.max_files > 0 && admission.len() as u64 > self.cfg.max_files {
-            return Err(LeanError::Budget(format!(
-                "checkout is {} files; budget {}",
-                admission.len(),
-                self.cfg.max_files
-            )));
-        }
-
         let mut present: BTreeSet<String> = BTreeSet::new();
-        let t_fetch = std::time::Instant::now();
-        // A mirror's publisher is the only party entitled to write it,
-        // so an object off its citation was moved by a stranger.
-        // Adopting it would copy bytes no manifest cites into this
-        // tree, silently — drill C4.
-        let results = self.materialize(admission, m.sole_writer).await;
-        report.fetch_secs = t_fetch.elapsed().as_secs_f64();
+        let mut attempt = 0u32;
+        let (m, metag, results) = loop {
+            attempt += 1;
+            let t_start = std::time::Instant::now();
+            let loaded = manifest::load(self.store.as_ref(), &self.cfg).await?;
+            report.manifest_secs = t_start.elapsed().as_secs_f64();
+            let (m, metag) = match loaded {
+                Some(l) => (l.manifest, Some(l.etag)),
+                None => (Default::default(), None),
+            };
+
+            // ADMISSION FIRST, budgets second. The order is load-bearing:
+            // a budget is a promise about what THIS checkout will write, and
+            // a 3-file scoped checkout summed over the whole 2001-file
+            // manifest is refused for bytes it was never going to fetch.
+            let admission: Vec<(&String, &super::manifest::LeanEntry)> = match &scope {
+                None => m.entries.iter().collect(),
+                Some(s) => m.entries.iter().filter(|(p, _)| s.covers(p)).collect(),
+            };
+            report.out_of_scope = m.entries.len() - admission.len();
+
+            // Budgets: refuse before materializing anything.
+            let total_bytes: u64 = admission.iter().map(|(_, e)| e.size).sum();
+            if self.cfg.max_bytes > 0 && total_bytes > self.cfg.max_bytes {
+                return Err(LeanError::Budget(format!(
+                    "checkout is {} bytes; budget {}",
+                    total_bytes, self.cfg.max_bytes
+                )));
+            }
+            if self.cfg.max_files > 0 && admission.len() as u64 > self.cfg.max_files {
+                return Err(LeanError::Budget(format!(
+                    "checkout is {} files; budget {}",
+                    admission.len(),
+                    self.cfg.max_files
+                )));
+            }
+
+            let t_fetch = std::time::Instant::now();
+            // A mirror's publisher is the only party entitled to write it,
+            // so an object off its citation was moved by a stranger.
+            // Adopting it would copy bytes no manifest cites into this
+            // tree, silently — drill C4.
+            let results = self.materialize(admission, m.sole_writer).await;
+            report.fetch_secs += t_fetch.elapsed().as_secs_f64();
+            // A citation that could not be served has a second explanation
+            // under handles (design 2026-09-19): the workspace's own
+            // publisher moved the pointer past the document this pass read
+            // and its collector took the handle. Then the pass is simply
+            // re-run against the new document — bounded, and cheap: every
+            // file already on disk at the cited bytes is adopted, not
+            // fetched again — instead of telling the caller to. A pointer
+            // that has not moved leaves the refusal exactly as written.
+            let moved = results.iter().any(|r| r.is_err()) && self.pointer_moved_past(m.seq).await;
+            if moved && attempt < 3 {
+                report.reresolved += 1;
+                continue;
+            }
+            break (m, metag, results);
+        };
         let t_commit = std::time::Instant::now();
         for r in results {
             let f = match r {
@@ -881,15 +897,12 @@ impl Syncer {
 
         baseline.seq = m.seq;
         baseline.manifest_etag = metag;
-        // THE WHOLE MANIFEST, scope or no scope. `manifest.rs` reads an
-        // entry absent from the merge base as CHANGED
-        // (`base.get(p).map(..).unwrap_or(true)`), so an `inst_base`
-        // narrowed to the admitted set makes every unadmitted citation
-        // read as foreign, queue into the inbox, and land in the tree at
-        // the next barrier — a scoped checkout that downloads everything
-        // one barrier later. The constraint is not a refinement: the
-        // fast path and the safe path are the same line.
-        baseline.inst_base = m.entries.iter().map(|(p, e)| (p.clone(), e.etag.clone())).collect();
+        // Checked out whole or scoped, the tree owes nothing: the baseline
+        // (the merge base since P1-lite) holds what was materialised, and the
+        // consume never owes a path the scope declined. So this document is
+        // derived, and nothing is skipped.
+        baseline.derived_etag = Some(baseline.manifest_etag.clone().unwrap_or_default());
+        baseline.skipped.clear();
         baseline.prev_scan = present;
         // Every materialised file reaches stable storage BEFORE the
         // baseline and the marker that vouch for it: after a power loss
@@ -1159,12 +1172,6 @@ impl Syncer {
 
         baseline.seq = m.seq;
         baseline.manifest_etag = metag;
-        // C2, unchanged and non-negotiable: the merge base is the WHOLE
-        // manifest. Narrow it with the held set and every unadmitted
-        // citation reads as foreign at the next merge, queues into the
-        // inbox, and lands in the tree one barrier later — a narrow
-        // that downloads everything it just dropped.
-        baseline.inst_base = m.entries.iter().map(|(p, e)| (p.clone(), e.etag.clone())).collect();
 
         self.state.sync_tree()?;
         self.state.save_baseline(&baseline)?;

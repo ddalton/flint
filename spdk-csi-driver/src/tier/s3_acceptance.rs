@@ -106,7 +106,7 @@ mod tests {
         let spec = ComposeSpec {
             progress: None,
             key: &key,
-            local_path: &local,
+            local: Some(std::sync::Arc::new(std::fs::File::open(&local).unwrap())),
             parts: vec![
                 PartSource::Local { offset: 0, len: 6 * MB },
                 PartSource::BaseCopy { offset: 6 * MB, len: 6 * MB },

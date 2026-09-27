@@ -14,7 +14,7 @@
 //! sweeps are prefix-scoped (`manifests/`, `chunks/`). A draft is
 //! therefore durable in the bucket and simultaneously invisible to the
 //! agent, to the manifest, to every other user, and to the collector.
-//! No barrier change, no `classify` change, no inbox change.
+//! No barrier change and no `classify` change.
 //!
 //! ## The base etag is RECORDED, never enforced at save time
 //!
@@ -45,7 +45,7 @@
 //! design for *that*, and it is a different and much larger build.
 //!
 //! Not merged, either. A `DraftStale` from `promote` says the file
-//! moved; it does not say how to reconcile. `inst_base` is the
+//! moved; it does not say how to reconcile. The writer's baseline is the
 //! three-way base for the AGENT's tree and does not cover drafts. The
 //! caller shows both versions and the human redoes the edit.
 //!
@@ -62,8 +62,8 @@ use serde::{Deserialize, Serialize};
 
 use flint_store::{crc64_nvme, GenerationStamps, ObjectStore, PutCondition, StoreError};
 
-use flint_lean::inbox::InboxEntry;
-use crate::workspace::{normalize_etag, path_ok, VerbError, Workspace};
+use crate::workspace::{normalize_etag, path_ok, Save, VerbError, Workspace};
+use flint_lean::manifest::{self, LoadedManifest};
 use flint_lean::{now_unix, LeanConfig};
 
 /// What a draft was edited against, and by whom.
@@ -84,6 +84,39 @@ pub struct DraftMeta {
     /// this request never saw.
     pub body_etag: String,
     pub size: u64,
+    /// The body's CRC-64/NVME, wire form, computed where the bytes were
+    /// in hand: promote cites it (P2), and a server-side copy is not
+    /// attested by every backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crc64_b64: Option<String>,
+}
+
+/// Is a draft taken against `base` still publishable over `current`?
+/// Everything but "the same version" and "still new" is stale, and each
+/// shape is a real one.
+fn judge_promote(path: &str, current: Option<&str>, base: Option<&str>) -> Result<(), VerbError> {
+    match (current, base) {
+        (Some(cur), Some(b)) if normalize_etag(cur) == normalize_etag(b) => Ok(()),
+        (None, None) => Ok(()),
+        (cur, b) => {
+            let message = match (cur, b) {
+                (None, Some(b)) => format!(
+                    "{path} was DELETED since this draft was taken (draft base {b}); \
+                     the draft is KEPT — re-create the file or discard the draft"
+                ),
+                (Some(cur), None) => format!(
+                    "{path} was CREATED since this draft was taken, which expected no \
+                     file (now {cur}); the draft is KEPT — re-read and reconcile"
+                ),
+                (Some(cur), Some(b)) => format!(
+                    "{path} changed since this draft was taken (draft base {b}, now \
+                     {cur}); the draft is KEPT — re-read the file and reconcile"
+                ),
+                (None, None) => unreachable!("matched by the create arm above"),
+            };
+            Err(VerbError::DraftStale { current: cur.map(str::to_string), message })
+        }
+    }
 }
 
 /// One row of the resume view.
@@ -225,6 +258,7 @@ impl Workspace {
             updated_unix: now_unix(),
             body_etag: body_meta.etag.clone(),
             size,
+            crc64_b64: Some(flint_store::crc64_to_b64(crc)),
         };
         let doc = serde_json::to_vec(&meta).map(Bytes::from).map_err(|e| VerbError::Encode(e.to_string()))?;
         let crc = crc64_nvme(&doc);
@@ -271,17 +305,16 @@ impl Workspace {
         let cfg = self.config();
         let prefix = cfg.draft_meta_prefix(user);
         let listed = self.store().list(&prefix).await?;
+        // The version the workspace cites at each path — one read of the
+        // manifest for the whole listing, never a HEAD per draft.
+        let m = self.view().await?;
         let mut drafts = vec![];
         for o in listed {
             let Some(path) = o.key.strip_prefix(&prefix) else { continue };
             let Ok(Some(meta)) = load_meta(self.store().as_ref(), cfg, user, path).await else {
                 continue;
             };
-            let current = match self.store().head(&cfg.file_key(path)).await {
-                Ok(m) => Some(m.etag),
-                Err(StoreError::NotFound(_)) => None,
-                Err(e) => return Err(e.into()),
-            };
+            let current = self.lookup(m.as_deref(), path).map(|t| t.etag);
             let stale = match (current.as_deref(), meta.base_etag.as_deref()) {
                 (None, None) => false,
                 (Some(c), Some(b)) => normalize_etag(c) != normalize_etag(b),
@@ -317,8 +350,7 @@ impl Workspace {
     /// Publish a draft. Returns the entity-tag of the published file.
     ///
     /// This IS a HITL write and takes the whole HITL discipline: the
-    /// barrier window gate, the conditional publish, the inbox entry
-    /// second. The one addition is that the precondition comes from
+    /// conditional publish first, the manifest commit second. The one addition is that the precondition comes from
     /// the DRAFT's recorded base rather than from a header the caller
     /// still remembers — which is the entire point, since the caller
     /// may be a browser that was closed for a week.
@@ -347,90 +379,45 @@ impl Workspace {
             }
         };
 
-        // The window check, exactly as `put_file` does it: every
-        // stateless replica reads the CELL.
-        self.admit_hitl().await?;
-
-        // Resolve the base against what is there NOW, and compare
-        // through the crate's one normalisation rule. Deciding
-        // staleness HERE rather than inferring it from a 412 means the
-        // answer names both versions, and the condition below carries
-        // the STORE's own form of the etag — never the caller's, which
-        // may or may not be quoted.
-        let (current, last_modified) = match self.store().head(&cfg.file_key(path)).await {
-            Ok(m) => (Some(m.etag), m.last_modified_unix),
-            Err(StoreError::NotFound(_)) => (None, None),
-            Err(e) => return Err(e.into()),
+        // Staleness is decided against the CITATION (P2: the manifest is
+        // the only record of what the workspace holds), here before any
+        // bytes move, and AGAIN at every CAS attempt below. Deciding it
+        // rather than inferring it from a 412 means the answer names both
+        // versions.
+        let judge = |doc: Option<&LoadedManifest>| -> Result<(), VerbError> {
+            if doc.is_some_and(|l| l.manifest.sole_writer) {
+                return Err(VerbError::ReadOnly);
+            }
+            let current = doc.and_then(|l| l.manifest.entries.get(path)).map(|e| e.etag.clone());
+            judge_promote(path, current.as_deref(), meta.base_etag.as_deref())
         };
-        // `put_file`'s rule: a promote replaces only a version the
-        // workspace tracks. A draft's base can equal an UNCITED upload's
-        // etag — identical bytes, identical etag — and replacing that
-        // upload loses it and this promote together.
-        if let Some(cur) = current.as_deref() {
-            if !flint_lean::inbox::hitl_may_overwrite(
-                self.store().as_ref(),
-                cfg,
-                path,
-                cur,
-                last_modified,
-                now_unix(),
-            )
-            .await?
-            {
-                return Err(VerbError::ConcurrentWrite);
-            }
-        }
-        let cond = match (current.as_deref(), meta.base_etag.as_deref()) {
-            // Edited against this exact version: publish over it.
-            (Some(cur), Some(b)) if normalize_etag(cur) == normalize_etag(b) => {
-                PutCondition::IfMatch(cur.to_string())
-            }
-            // Edited as a new file, and still new: create it.
-            (None, None) => PutCondition::IfNoneMatchAny,
-            // Everything else is stale, and each shape is a real one:
-            // the file moved under the draft, it was deleted under the
-            // draft, or it appeared where the draft expected nothing.
-            (cur, b) => {
-                let message = match (cur, b) {
-                    (None, Some(b)) => format!(
-                        "{path} was DELETED since this draft was taken (draft base {b}); \
-                         the draft is KEPT — re-create the file or discard the draft"
-                    ),
-                    (Some(cur), None) => format!(
-                        "{path} was CREATED since this draft was taken, which expected no \
-                         file (now {cur}); the draft is KEPT — re-read and reconcile"
-                    ),
-                    (Some(cur), Some(b)) => format!(
-                        "{path} changed since this draft was taken (draft base {b}, now \
-                         {cur}); the draft is KEPT — re-read the file and reconcile"
-                    ),
-                    (None, None) => unreachable!("matched by the create arm above"),
-                };
-                return Err(VerbError::DraftStale { current: cur.map(str::to_string), message });
-            }
-        };
+        let read = manifest::load(self.store().as_ref(), cfg).await?;
+        judge(read.as_ref())?;
 
         let author = author.map(str::to_string).unwrap_or_else(|| meta.author.clone());
+        let added_unix = now_unix();
+        let flush = flint_lean::ui_flush(added_unix);
+        let key = cfg.handle_key(path, &flush);
         let publish_stamps = GenerationStamps {
             generation: 0,
             epoch: 0,
-            flush_uuid: format!("draft-promote-{}", uuid::Uuid::new_v4()),
+            flush_uuid: flush,
             boundary_source: None,
             posix: None,
         };
 
-        // Server-side copy: the bytes never traverse this process. The
-        // source guard is the body etag the meta recorded, so a second
-        // tab that re-saved this draft after we read the meta publishes
-        // nothing — it fails here instead of silently shipping bytes
-        // this request never saw.
+        // Server-side copy to a FRESH handle: the bytes never traverse
+        // this process. The source guard is the body etag the meta
+        // recorded, so a second tab that re-saved this draft after we
+        // read the meta publishes nothing — it fails here instead of
+        // silently shipping bytes this request never saw.
         let published = match self
             .store()
             .copy_object(
                 &cfg.draft_body_key(user, path),
                 Some(&meta.body_etag),
-                &cfg.file_key(path),
-                &cond,
+                &key,
+                &PutCondition::IfNoneMatchAny,
                 &publish_stamps,
             )
             .await
@@ -438,9 +425,8 @@ impl Workspace {
             Ok(m) => m,
             // Staleness was already ruled out above, so this is the
             // SOURCE guard: the draft body moved under us (a second tab
-            // re-saved it), or the destination moved inside the
-            // HEAD-to-copy window. Both are retryable, which is the
-            // opposite of the advice `DraftStale` carries.
+            // re-saved it). Retryable, which is the opposite of the
+            // advice `DraftStale` carries.
             Err(StoreError::PreconditionFailed(_)) => {
                 return Err(VerbError::DraftMoved(path.to_string()))
             }
@@ -452,21 +438,24 @@ impl Workspace {
             Err(e) => return Err(e.into()),
         };
 
-        // Inbox entry second — the object-first ordering every HITL
-        // write uses. A crash between leaves an orphan object, never a
-        // tracked-but-absent entry.
-        let entry = InboxEntry {
-            path: path.to_string(),
+        // Cite it, in one CAS. A crash before leaves an orphan handle for
+        // the sweep; the draft is kept either way until the citation lands.
+        let crc64_b64 = published
+            .crc64_b64
+            .clone()
+            .or_else(|| meta.crc64_b64.clone())
+            .ok_or_else(|| VerbError::NoDraft(format!("{user}: {path} carries no checksum — re-save the draft")))?;
+        let save = Save {
+            path,
+            key,
             etag: published.etag.clone(),
-            author,
-            added_unix: now_unix(),
-            // A server-side copy: the backend's attestation when it
-            // offers one, else nothing — consume then verifies against
-            // nothing and records its own hash for the repair.
-            crc64_b64: published.crc64_b64.clone(),
-            cited: None,
+            crc64_b64,
+            size: meta.size,
+            mtime_unix: added_unix as i64,
+            flush: publish_stamps.flush_uuid.clone(),
         };
-        self.track(entry).await?;
+        self.commit_save(&save, judge).await?;
+        let _ = author;
 
         // Best-effort cleanup. If it fails the draft survives with a
         // base etag that no longer matches what we just published, so

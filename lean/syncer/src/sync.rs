@@ -11,25 +11,23 @@
 //! a surfaced conflict, never silent.
 //!
 //! **The scope rule (D4) is a correctness rule, not an optimization.**
-//! A scoped sync advances `inst_base` only for the paths it actually
-//! applied or verified in scope, and leaves `baseline.seq` /
-//! `baseline.manifest_etag` UNTOUCHED. `inst_base` is the three-way
-//! merge base; if a scoped sync advanced the whole merge base to
-//! bucket-current, every out-of-scope foreign change would look
-//! already-integrated to the next merge and would be silently lost from
-//! the inbox flow forever. With D4 those changes remain "foreign" and
-//! flow through the normal merge → inbox → consume path at the next
-//! barrier, untouched from today.
+//! A scoped sync moves the baseline — which is also the merge base since
+//! P1-lite — only for the paths it applied or verified in scope, and
+//! leaves `baseline.seq` / `baseline.manifest_etag` UNTOUCHED. What it
+//! leaves out stays OWED: the next barrier's consume derives it and takes
+//! it, untouched from today. And a path the WORKSPACE'S scope declined
+//! (a scoped checkout) is never fetched here either: the baseline does
+//! not hold it, and only the held set and the scope's cover are owed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
 use flint_store::{crc64_nvme, crc64_to_b64, GenerationStamps, PosixStamps, StoreError};
 
-use super::barrier::{mtime_nanos_of, mtime_of, write_file_atomic_in};
+use super::barrier::{mtime_nanos_of, mtime_of};
 use super::state::{BaselineEntry, ConflictRecord};
-use super::{inbox, manifest, now_unix, scan, LeanError, LeanResult, Syncer};
+use super::{manifest, now_unix, scan, LeanError, LeanResult, Syncer};
 
 #[derive(Debug, Default, Serialize)]
 pub struct SyncReport {
@@ -37,8 +35,9 @@ pub struct SyncReport {
     pub deleted: Vec<String>,
     pub conflicts: Vec<String>,
     pub seq: u64,
-    /// Remote changes seen but deferred to the inbox flow because they
-    /// fell outside the requested scope (D4). Zero for a whole-tree
+    /// Remote changes seen but left owed because they fell outside the
+    /// requested scope (D4): the next barrier's consume takes those the
+    /// tree holds. Zero for a whole-tree
     /// sync.
     #[serde(default)]
     pub out_of_scope_foreign: usize,
@@ -136,49 +135,92 @@ impl Syncer {
         // 2. Remote truth: manifest + inbox overlay (an inbox entry is
         //    a write the manifest has not re-cited yet).
         let loaded = manifest::load(self.store.as_ref(), &self.cfg).await?;
-        let (theirs, _metag) = match loaded {
+        // The agent's paths this sync leaves untaken (dirty), for the
+        // consume's cheap path: owed again if the agent backs out.
+        let mut dirty_skips: BTreeSet<String> = BTreeSet::new();
+        let (theirs, metag) = match loaded {
             Some(l) => (l.manifest, Some(l.etag)),
             None => (Default::default(), None),
         };
-        let ib = inbox::load(self.store.as_ref(), &self.cfg).await?;
-        let mut remote: BTreeMap<String, String> =
-            theirs.entries.iter().map(|(p, e)| (p.clone(), e.etag.clone())).collect();
-        // The writer's CRC for each remote etag, overlaid in the same
-        // order as the etags so the two maps always describe the same
-        // object: the manifest's for a cited entry, the inbox entry's
-        // for an overlay (`None` if that writer had none to give).
-        let mut remote_crc: BTreeMap<String, Option<String>> = theirs
+        // Path -> (etag, HANDLE): the entry's own key, which is what the
+        // fetch below reads (design 2026-09-19: a handle is fetched by
+        // name; the bare path is nobody's to read).
+        let remote: BTreeMap<String, (String, String)> =
+            theirs.entries.iter().map(|(p, e)| (p.clone(), (e.etag.clone(), e.key.clone()))).collect();
+        // The writer's CRC for each remote etag: the manifest's.
+        let remote_crc: BTreeMap<String, Option<String>> = theirs
             .entries
             .iter()
             .map(|(p, e)| (p.clone(), Some(e.crc64_b64.clone())))
             .collect();
-        for e in &ib.doc.entries {
-            remote.insert(e.path.clone(), e.etag.clone());
-            remote_crc.insert(e.path.clone(), e.crc64_b64.clone());
-        }
 
-        /// Paths whose `inst_base` this sync is entitled to advance:
-        /// under D4, exactly those it applied or verified in scope.
-        struct Advanced(std::collections::BTreeSet<String>);
-        let mut advanced = Advanced(Default::default());
+        // The workspace's own scope (a scoped checkout): a path it neither
+        // holds nor covers is not this tree's to fetch.
+        let held_scope = self.state.load_scope()?.map(|v| Scope::new(&v));
+        let held = |b: &super::state::Baseline, p: &str| {
+            b.entries.contains_key(p) || held_scope.as_ref().is_none_or(|s| s.covers(p))
+        };
 
-        // 3. Apply adds/changes (remote differs from OUR merge base).
-        for (path, etag) in &remote {
-            let base = baseline.inst_base.get(path);
-            let unchanged_remotely = base.map(|b| b == etag).unwrap_or(false);
-            if unchanged_remotely {
-                advanced.0.insert(path.clone());
+        // 3. Remote deletions: in the baseline, gone from the manifest —
+        //    apply only on locally-clean paths.
+        //
+        //    BEFORE the adds, and that order is a correctness rule, not
+        //    a tidiness one. A remote generation that turned the file
+        //    `build` into the directory `build/log.txt` sends both a
+        //    deletion and an add; with the adds first, the add is
+        //    refused for containment (`sync-refused-containment`) while
+        //    the file is still there, and the deletion then takes the
+        //    file away — one sync leaves the workspace without either,
+        //    and sync is harness-invoked, never background, so "the next
+        //    sync fixes it" may be never. The two passes act on disjoint
+        //    path sets (this one takes what is NOT in `remote`, that one
+        //    what IS), so nothing else moves with the order.
+        let base_paths: Vec<String> = baseline.entries.keys().cloned().collect();
+        for path in base_paths {
+            if remote.contains_key(&path) {
                 continue;
             }
-            if !in_scope(path) {
-                // D4: NOT integrated, NOT advanced — it stays foreign
-                // and reaches this workspace through the next barrier's
-                // merge → inbox → consume path.
+            if !in_scope(&path) {
                 report.out_of_scope_foreign += 1;
                 continue;
             }
+            let local = self.cfg.root.join(&path);
+            if !local.exists() {
+                baseline.entries.remove(&path);
+                continue;
+            }
+            super::barrier::consume_window("before-delete", &path);
+            // H7: judged by the step-1 scan AND by a fresh stat now — a
+            // write since the scan is the agent's, and it stays.
+            if locally_dirty(&path) || super::barrier::local_dirty(&local, baseline.entries.get(&path)) {
+                self.state.append_conflict(&ConflictRecord {
+                    path: path.clone(),
+                    foreign_etag: String::new(),
+                    preserved_key: None,
+                    kind: "sync-remote-delete-vs-dirty".into(),
+                    at_unix: now_unix(),
+                })?;
+                report.conflicts.push(path.clone());
+                dirty_skips.insert(path.clone());
+                continue;
+            }
+            std::fs::remove_file(&local)?;
+            baseline.entries.remove(&path);
+            report.deleted.push(path.clone());
+        }
+
+        // 4. Apply adds/changes (remote differs from the baseline).
+        for (path, (etag, key)) in &remote {
             if baseline.entries.get(path).map(|b| &b.etag == etag).unwrap_or(false) {
-                advanced.0.insert(path.clone()); // already integrated (e.g. our own publish)
+                continue;
+            }
+            if !held(&baseline, path) {
+                continue;
+            }
+            if !in_scope(path) {
+                // D4: NOT integrated — it stays owed, and the next
+                // barrier's consume takes it.
+                report.out_of_scope_foreign += 1;
                 continue;
             }
             if locally_dirty(path) {
@@ -195,7 +237,7 @@ impl Syncer {
                 // remote truth is an INBOX overlay, the manifest entry
                 // is a generation behind and its crc would never match.
                 // One HEAD, only on the dirty-vs-remote path.
-                let remote_meta = match self.store.head(&self.cfg.file_key(path)).await {
+                let remote_meta = match self.store.head(key).await {
                     Ok(m) if m.etag == *etag => Some(m),
                     _ => None,
                 };
@@ -219,6 +261,7 @@ impl Syncer {
                         path.clone(),
                         BaselineEntry {
                             etag: etag.clone(),
+                            key: Some(key.clone()),
                             generation: stamps
                                 .map(|s| s.generation)
                                 .or_else(|| theirs.entries.get(path).map(|e| e.generation))
@@ -227,11 +270,9 @@ impl Syncer {
                             mtime_unix: mtime_of(&st),
                             mtime_nanos: Some(mtime_nanos_of(&st)),
                             crc64_b64: local_crc,
-                            judged: None,
                         },
                     );
-                    advanced.0.insert(path.clone());
-                    report.applied.push(path.clone());
+                        report.applied.push(path.clone());
                     continue;
                 }
                 self.state.append_conflict(&ConflictRecord {
@@ -242,10 +283,10 @@ impl Syncer {
                     at_unix: now_unix(),
                 })?;
                 report.conflicts.push(path.clone());
+                dirty_skips.insert(path.clone());
                 continue;
             }
-            let key = self.cfg.file_key(path);
-            let fetched = self.store.get_whole(&key, Some(etag)).await;
+            let fetched = self.store.get_whole(key, Some(etag)).await;
             let (meta, body) = match fetched {
                 Ok(ok) => ok,
                 Err(StoreError::PreconditionFailed(_)) | Err(StoreError::NotFound(_)) => {
@@ -259,7 +300,7 @@ impl Syncer {
             // manifest's for a cited entry, the gateway's for an inbox
             // overlay), else the backend's attestation when it offers
             // one. What the baseline records is OURS, over the bytes
-            // written; the next citation repair cites that.
+            // written.
             let got = crc64_to_b64(crc64_nvme(&body));
             let want =
                 remote_crc.get(path).cloned().flatten().or_else(|| meta.crc64_b64.clone());
@@ -272,129 +313,79 @@ impl Syncer {
                     )));
                 }
             }
-            if let Err(e) = write_file_atomic_in(&self.cfg.root, path, &body, mode) {
-                // Containment refusal: surfaced, never a wedge.
-                self.state.append_conflict(&ConflictRecord {
-                    path: path.clone(),
-                    foreign_etag: etag.clone(),
-                    preserved_key: None,
-                    kind: format!("sync-refused-containment: {e}"),
-                    at_unix: now_unix(),
-                })?;
-                report.conflicts.push(path.clone());
-                continue;
-            }
+            super::barrier::consume_window("before-write", path);
+            // Review 2026-09-18, H7: dirt was judged by the scan at step 1,
+            // and a whole-tree sync fetches for minutes after it; a path
+            // the agent writes since then is modified, and its version
+            // wins. So the licence is checked once more against a fresh
+            // stat, with the temp written, immediately before the rename.
             let local = self.cfg.root.join(path);
-            let st = std::fs::metadata(&local)?;
+            let base = baseline.entries.get(path).cloned();
+            let still_clean = || !super::barrier::local_dirty(&local, base.as_ref());
+            let written = super::barrier::contained_path(&self.cfg.root, path)
+                .and_then(|target| super::barrier::write_file_atomic_if(&target, &body, mode, &still_clean));
+            let st = match written {
+                Ok(Some(st)) => st,
+                Ok(None) => {
+                    self.state.append_conflict(&ConflictRecord {
+                        path: path.clone(),
+                        foreign_etag: etag.clone(),
+                        preserved_key: None, // remote version stays in the bucket
+                        kind: "sync-dirty".into(),
+                        at_unix: now_unix(),
+                    })?;
+                    report.conflicts.push(path.clone());
+                    dirty_skips.insert(path.clone());
+                    continue;
+                }
+                Err(e) => {
+                    // Containment refusal: surfaced, never a wedge.
+                    self.state.append_conflict(&ConflictRecord {
+                        path: path.clone(),
+                        foreign_etag: etag.clone(),
+                        preserved_key: None,
+                        kind: format!("sync-refused-containment: {e}"),
+                        at_unix: now_unix(),
+                    })?;
+                    report.conflicts.push(path.clone());
+                    continue;
+                }
+            };
+            // The baseline records the inode this sync wrote (its fstat),
+            // never a fresh stat of the path an agent may have written
+            // since (H7).
+            super::barrier::consume_window("after-rename", path);
             let stamps = GenerationStamps::from_meta(&meta.meta);
             baseline.entries.insert(
                 path.clone(),
                 BaselineEntry {
                     etag: meta.etag.clone(),
+                    key: Some(key.clone()),
                     generation: stamps.map(|s| s.generation).unwrap_or(0),
                     size: st.len(),
                     mtime_unix: mtime_of(&st),
                     mtime_nanos: Some(mtime_nanos_of(&st)),
                     crc64_b64: Some(got),
-                    judged: None,
                 },
             );
-            advanced.0.insert(path.clone());
             report.applied.push(path.clone());
         }
 
-        // 4. Remote deletions: in our merge base, gone from the
-        //    manifest, and not overlaid by an inbox entry — apply only
-        //    on locally-clean paths.
-        let base_paths: Vec<String> = baseline.inst_base.keys().cloned().collect();
-        for path in base_paths {
-            if remote.contains_key(&path) {
-                continue;
-            }
-            if !in_scope(&path) {
-                report.out_of_scope_foreign += 1;
-                continue;
-            }
-            let local = self.cfg.root.join(&path);
-            if !local.exists() {
-                baseline.entries.remove(&path);
-                advanced.0.insert(path.clone());
-                continue;
-            }
-            if locally_dirty(&path) {
-                self.state.append_conflict(&ConflictRecord {
-                    path: path.clone(),
-                    foreign_etag: String::new(),
-                    preserved_key: None,
-                    kind: "sync-remote-delete-vs-dirty".into(),
-                    at_unix: now_unix(),
-                })?;
-                report.conflicts.push(path.clone());
-                continue;
-            }
-            std::fs::remove_file(&local)?;
-            baseline.entries.remove(&path);
-            advanced.0.insert(path.clone());
-            report.deleted.push(path.clone());
-        }
-
-        // 5. Advance the merge base.
-        //
-        //    Whole-tree: to the manifest we synced against, exactly as
-        //    shipped. Scoped (D4): ONLY for the paths this sync applied
-        //    or verified, and seq/manifest_etag stay put — otherwise
-        //    every out-of-scope foreign change reads as
-        //    already-integrated at the next merge and is lost.
-        let theirs_base: BTreeMap<String, String> =
-            theirs.entries.iter().map(|(p, e)| (p.clone(), e.etag.clone())).collect();
-        //    Except where an inbox OVERLAY hid the manifest's version. This
-        //    sync judged those paths against the overlay's etag, never the
-        //    manifest's, so the base must not claim the manifest's: an
-        //    entry can be OLDER than the manifest (the commit that cited
-        //    past it drops it only after its CAS), and advancing there
-        //    skipped a change the tree never received — for good, since
-        //    nothing later compares against it again (the model's
-        //    LeanBarrierLeaseSyncOverlayStale). Left where it was, the next
-        //    barrier's merge sees the manifest's change as foreign and
-        //    brings it in.
-        let hidden: std::collections::BTreeSet<&String> = ib
-            .doc
-            .entries
-            .iter()
-            .map(|e| &e.path)
-            .filter(|p| theirs_base.get(*p) != remote.get(*p))
-            .collect();
+        // 5. What this sync leaves owed. Whole-tree, the sync derived against
+        //    this document: what it left is the agent's (dirty) and is owed
+        //    the moment the agent backs out — the consume's cheap path record,
+        //    as a consume would write it. Scoped, it derived only part: the
+        //    next consume derives again (D4 keeps manifest_etag where it was).
         match &scope {
             None => {
-                let before = std::mem::take(&mut baseline.inst_base);
-                baseline.inst_base = theirs_base.clone();
-                for path in &hidden {
-                    match before.get(*path) {
-                        Some(etag) => {
-                            baseline.inst_base.insert((*path).clone(), etag.clone());
-                        }
-                        None => {
-                            baseline.inst_base.remove(*path);
-                        }
-                    }
-                }
                 baseline.seq = theirs.seq;
+                baseline.derived_etag = Some(metag.clone().unwrap_or_default());
+                baseline.skipped = dirty_skips;
                 report.seq = theirs.seq;
             }
             Some(_) => {
-                for path in &advanced.0 {
-                    if hidden.contains(path) {
-                        continue;
-                    }
-                    match theirs_base.get(path) {
-                        Some(etag) => {
-                            baseline.inst_base.insert(path.clone(), etag.clone());
-                        }
-                        None => {
-                            baseline.inst_base.remove(path);
-                        }
-                    }
-                }
+                baseline.derived_etag = None;
+                baseline.skipped.clear();
                 report.seq = baseline.seq;
             }
         }
@@ -404,8 +395,7 @@ impl Syncer {
         self.state.sync_tree()?;
         self.state.save_baseline(&baseline)?;
         self.trace("sync", serde_json::json!({"scoped": scope.is_some(), "applied": report.applied.len(),
-            "deleted": report.deleted.len(), "conflicts": report.conflicts.len(), "seq": report.seq,
-            "hidden": hidden.len()}));
+            "deleted": report.deleted.len(), "conflicts": report.conflicts.len(), "seq": report.seq}));
         Ok(report)
     }
 }

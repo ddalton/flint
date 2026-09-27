@@ -79,7 +79,7 @@
   </header>
   <p class="dek">The third front end over the flint bucket format, split out of the flint-fuse architecture doc: if the workspace fits on disk, no interception is needed at all. Materialize plain files at pod start, publish changed files at a boundary with an unprivileged <b>syncer</b> — a worker pod the CSI node driver starts beside the tenant, never a container injected into it — and give writers outside the pod a stateless gateway that is, since 0.2, a library. Most of FUSE's value at a fraction of its risk surface — same bucket format, same engine.</p>
   <figure>
-  <svg viewBox="0 0 1600 810" role="img" aria-label="An agent pod holds an app container working on plain files; an unprivileged flint-sync syncer, a worker pod the CSI node driver created, checks the workspace out at start and publishes changed files at a boundary; the flint-lean-gateway crate is the door for writers outside the pod and talks to the bucket only; the bucket holds the pointer, chunks, inbox and files; a bottom band lists what the lean variant gives up relative to FUSE.">
+  <svg viewBox="0 0 1600 810" role="img" aria-label="An agent pod holds an app container working on plain files; an unprivileged flint-sync syncer, a worker pod the CSI node driver created, checks the workspace out at start and publishes changed files at a boundary; the flint-lean-gateway crate is the door for writers outside the pod and talks to the bucket only; the bucket holds the pointer, chunks, the request cell, the retire logs and files; a bottom band lists what the lean variant gives up relative to FUSE.">
     <defs>
       <marker id="f6-ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
       <marker id="f6-av" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6d4aa8"/></marker>
@@ -133,15 +133,15 @@
     <text class="tx" x="656" y="172">or runs the same router as a binary — one implementation</text>
     <line class="hair" x1="656" y1="184" x2="1024" y2="184"/>
     <text class="thv" x="656" y="206">a write from outside the pod</text>
-    <text class="tx" x="656" y="224">PUT files/&lt;path&gt; + one inbox entry — durable at once</text>
-    <text class="tx" x="656" y="240">never a manifest edit: the syncer cites it at its next barrier</text>
-    <text class="tx" x="656" y="256">428 no version · 412 stale · 409 barrier window open</text>
+    <text class="tx" x="656" y="224">PUT files/&lt;path&gt;@&lt;flush&gt;, then ONE manifest CAS: it commits</text>
+    <text class="tx" x="656" y="240">judged against the version read; never waits for the syncers</text>
+    <text class="tx" x="656" y="256">428 no version · 412 stale · 409 lost to the writers, retry</text>
     <text class="thv" x="656" y="280">reads, removals, renames, drafts</text>
-    <text class="tx" x="656" y="298">GET reads the citation first, guarded on its etag; the cell only</text>
-    <text class="tx" x="656" y="314">when that fails — an overwrite reads at once, at no common cost</text>
-    <text class="tx" x="656" y="330">a delete or rename is DECLARED and the syncer performs it; a</text>
-    <text class="tx" x="656" y="346">rename is one manifest generation; a removal over dirty bytes</text>
-    <text class="tx" x="656" y="362">is refused, never retried</text>
+    <text class="tx" x="656" y="298">GET: the pointer, the cached manifest, the handle — CRC-checked,</text>
+    <text class="tx" x="656" y="314">a mismatch refused (502 corrupt), never served</text>
+    <text class="tx" x="656" y="330">a delete or rename is ONE CAS too, deleting no object; a rename</text>
+    <text class="tx" x="656" y="346">moves the citation; an agent editing a deleted path keeps its</text>
+    <text class="tx" x="656" y="362">work, and its publish records the delete it overrode</text>
     <text class="tx" x="656" y="378">drafts: durable edits no scan, checkout or sweep can see</text>
     <text class="tsb" x="656" y="398">it talks to the BUCKET, never to a syncer — page 5</text>
 
@@ -162,7 +162,7 @@
     <text class="tx" x="1100" y="180">cells — hub-mode, FUSE-mode and lean-mode volumes</text>
     <text class="tx" x="1100" y="196">stay mutually convertible; DR import is the same verb</text>
     <line class="hair" x1="1100" y1="210" x2="1540" y2="210"/>
-    <text class="mns" x="1100" y="234">.flint/lean/{epoch · claim · current · inbox} · chunks/ · files/</text>
+    <text class="mns" x="1100" y="234">.flint/lean/{epoch·claim·current·inbox·retired/} · chunks/ · files/</text>
     <text class="tx" x="1100" y="258">current is the ONE mutable pointer; entries live in immutable,</text>
     <text class="tx" x="1100" y="274">content-addressed chunks, so a publish costs O(changed)</text>
     <text class="tx" x="1100" y="298">the project service browses exactly as before —</text>
@@ -463,9 +463,9 @@
     <h1>Outside the pod — the gateway is a crate</h1>
     <span class="kicker">5 / 7 · architecture · shipped 2026-09-12</span>
   </header>
-  <p class="dek">A UI, a reviewer, a backend serving a thousand workspaces: none of them is in the pod, and none of them may touch the agent&rsquo;s tree or edit the manifest. <b><code>flint-lean-gateway</code> is the door for them, and since 0.2 it is a library</b> — a backend depends on the crate and calls the verbs in-process; the <code>flint-lean-gateway</code> binary is <code>main</code> around the same router, so there is one implementation and one set of refusals. The door talks to the <b>bucket</b>, never to a syncer: it can run on another cluster, or on none.</p>
+  <p class="dek">A UI, a reviewer, a backend serving a thousand workspaces: none of them is in the pod, and none of them may touch the agent&rsquo;s tree. <b><code>flint-lean-gateway</code> is the door for them, and since 0.2 it is a library</b> — a backend depends on the crate and calls the verbs in-process; the <code>flint-lean-gateway</code> binary is <code>main</code> around the same router, so there is one implementation and one set of refusals. The door talks to the <b>bucket</b>, never to a syncer: each verb commits one manifest CAS of its own, it can run on another cluster, or on none.</p>
   <figure>
-  <svg viewBox="0 0 1600 740" role="img" aria-label="A backend embedding the flint-lean-gateway crate writes an object and an inbox entry to the bucket, durable at once; the syncer consumes the inbox at its next barrier and is the only writer of the manifest pointer; reads resolve the citation first and the inbox only when the citation is outrun; a band lists the two visibility tiers and a band lists the refusals on the wire.">
+  <svg viewBox="0 0 1600 740" role="img" aria-label="A backend embedding the flint-lean-gateway crate writes a fresh object and commits it with one manifest CAS, durable and visible at once; the syncer brings the change into the agent&rsquo;s tree at its next barrier, deriving what the tree is owed from the manifest; reads load the pointer, use a cached manifest and check each object&rsquo;s CRC; a band lists the visibility of a write and a band lists the refusals on the wire.">
     <defs>
       <marker id="p6-av" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6d4aa8"/></marker>
       <marker id="p6-ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a5f9e"/></marker>
@@ -477,56 +477,56 @@
     <text class="th" x="56" y="96">a backend, in-process — the crate</text>
     <text class="mns" x="56" y="120">Workspace::new(store, "teams/alpha/p1")</text>
     <text class="tx" x="56" y="140">an Arc and a config: a thousand workspaces cost nothing to hold,</text>
-    <text class="tx" x="56" y="156">one connection per bucket, N backend replicas, every verb reads the cell</text>
+    <text class="tx" x="56" y="156">one connection per bucket, N backend replicas, a manifest cache each</text>
     <line class="hair" x1="56" y1="168" x2="524" y2="168"/>
     <text class="thv" x="56" y="190">the verbs — the gateway&rsquo;s, exactly</text>
     <text class="mns" x="56" y="212">put_file · get_file · snapshot · status</text>
-    <text class="mns" x="56" y="232">remove_file(s) · rename_file(s) · withdraw_removal</text>
+    <text class="mns" x="56" y="232">remove_file(s) · rename_file(s)</text>
     <text class="mns" x="56" y="252">put_draft · list · get · promote · delete_draft</text>
     <text class="mns" x="56" y="272">request_boundary · request_sync · wait_cited</text>
     <line class="hair" x1="56" y1="286" x2="524" y2="286"/>
     <text class="tx" x="56" y="308">VerbError carries the status and code the wire would answer —</text>
     <text class="tx" x="56" y="324">a frontend written against the gateway keeps working in-process</text>
-    <text class="tx" x="56" y="346">with_window_wait absorbs an open barrier window before writing;</text>
-    <text class="tx" x="56" y="362">wait_cited answers 202 citation-pending when its timeout passes</text>
-    <text class="tsb" x="56" y="386">the library never edits the manifest and never deletes a cited object</text>
+    <text class="tx" x="56" y="346">a verb that loses its CAS to the writers re-reads, re-judges, retries;</text>
+    <text class="tx" x="56" y="362">wait_cited answers at once for a save: it is cited when acknowledged</text>
+    <text class="tsb" x="56" y="386">the library commits the manifest, and never deletes an object</text>
 
     <!-- the bucket -->
     <rect x="590" y="70" width="480" height="330" rx="12" class="bx-oo"/>
     <text class="tt" x="610" y="98">the bucket — the only channel</text>
-    <text class="mns" x="610" y="126">files/&lt;path&gt;</text>
-    <text class="tx" x="610" y="144">the object itself, whole — the same key the syncer publishes to</text>
-    <text class="mns" x="610" y="172">.flint/lean/inbox</text>
-    <text class="tx" x="610" y="190">the cell: tracked writes (object + etag + the writer&rsquo;s CRC-64),</text>
-    <text class="tx" x="610" y="206">declared removals, and the barrier window with its deadline</text>
-    <text class="mns" x="610" y="234">.flint/lean/current</text>
-    <text class="tx" x="610" y="252">the pointer — the syncer&rsquo;s alone; a HITL write never touches it</text>
+    <text class="mns" x="610" y="126">files/&lt;path&gt;@&lt;flush&gt;</text>
+    <text class="tx" x="610" y="144">a fresh immutable handle per save — nothing ever overwrites one</text>
+    <text class="mns" x="610" y="172">.flint/lean/current</text>
+    <text class="tx" x="610" y="190">the pointer: the gateway CASes it once per verb, a syncer once per</text>
+    <text class="tx" x="610" y="206">publish; a save lands only over the version the UI read, else 412</text>
+    <text class="mns" x="610" y="234">.flint/lean/retired/</text>
+    <text class="tx" x="610" y="252">what each commit stopped citing, kept for the retire age G (600 s)</text>
     <text class="mns" x="610" y="280">.flint/lean/drafts/&lt;user&gt;/…</text>
     <text class="tx" x="610" y="298">under the reserved namespace, so no scan, checkout or sweep sees it</text>
     <line class="hair" x1="610" y1="312" x2="1050" y2="312"/>
-    <text class="tx" x="610" y="334">a rename is a server-side copy, then ONE CAS recording the destination</text>
-    <text class="tx" x="610" y="350">entry and the source removal together — the cell never holds half</text>
-    <text class="tx" x="610" y="372">a removal of a path the agent has dirtied is REFUSED, the reason written</text>
-    <text class="tx" x="610" y="388">back to the cell, and never retried — a retry would delete the edit</text>
+    <text class="tx" x="610" y="334">a rename is ONE CAS moving the citation: no copy, no bytes move —</text>
+    <text class="tx" x="610" y="350">a reader sees the old name or the new, never both, never neither</text>
+    <text class="tx" x="610" y="372">a delete stops citing the path, its tombstone naming the version;</text>
+    <text class="tx" x="610" y="388">the object goes once nothing cites it and G has passed</text>
 
     <!-- the syncer -->
     <rect x="1120" y="70" width="440" height="330" rx="10" class="bx-blue"/>
-    <text class="th" x="1136" y="96">the syncer — the manifest&rsquo;s only writer</text>
+    <text class="th" x="1136" y="96">the syncer — brings the change into the tree</text>
     <text class="tx" x="1136" y="120">at its next barrier — on cadence, or sooner on request_boundary:</text>
-    <text class="tx" x="1136" y="144">1 · consume the inbox: fetch each tracked object, verify its</text>
-    <text class="tx" x="1136" y="160">    CRC-64, write it into the tree, cite it in current</text>
-    <text class="tx" x="1136" y="184">2 · perform declared removals: clean ⇒ unlink, confirm by lstat,</text>
-    <text class="tx" x="1136" y="200">    straight into the delete set — no two-scan guard, a declaration</text>
-    <text class="tx" x="1136" y="216">    is not an absence a walk inferred; so a rename is ONE generation</text>
-    <text class="tx" x="1136" y="240">3 · the manifest CAS — then, and only then, the consumed entries</text>
-    <text class="tx" x="1136" y="256">    and performed removals leave the cell</text>
+    <text class="tx" x="1136" y="144">1 · the pointer moved: load the manifest; a path where it differs</text>
+    <text class="tx" x="1136" y="160">    from the baseline, clean in the tree and in scope, is OWED</text>
+    <text class="tx" x="1136" y="184">2 · fetch each owed object, verify its CRC-64, write it into the</text>
+    <text class="tx" x="1136" y="200">    tree; a dirty path is the agent&rsquo;s work, and its publish records</text>
+    <text class="tx" x="1136" y="216">    what it publishes over (R7), or the delete it overrode</text>
+    <text class="tx" x="1136" y="240">3 · nothing is queued and nothing waits in a cell: the owed set</text>
+    <text class="tx" x="1136" y="256">    is derived from the document at every barrier (P1-lite)</text>
     <line class="hair" x1="1136" y1="270" x2="1544" y2="270"/>
-    <text class="tsb" x="1136" y="292">why the order matters — found by the model, not by a test</text>
-    <text class="tx" x="1136" y="312">dropping consumed entries at window-open was safe for a container</text>
-    <text class="tx" x="1136" y="328">restart and unsafe for a POD REPLACEMENT, whose emptyDir takes the</text>
-    <text class="tx" x="1136" y="344">baseline with it: an acked, consumed, uncited write with nothing left</text>
-    <text class="tx" x="1136" y="360">tracking it. Entries leave after the CAS; a successor re-consumes</text>
-    <text class="tx" x="1136" y="376">idempotently. Inv_HITLTracked pins it (LeanSubtree.tla, tranche 5).</text>
+    <text class="tsb" x="1136" y="292">why nothing is stored — found by the model, and by L-123</text>
+    <text class="tx" x="1136" y="312">a stored list of what the tree still owes can be overtaken: a newer</text>
+    <text class="tx" x="1136" y="328">version lands before the old one is taken, and taking it then</text>
+    <text class="tx" x="1136" y="344">reverts the newer one. Derived from the manifest at each barrier,</text>
+    <text class="tx" x="1136" y="360">it cannot be. The cheap path — the pointer is the document last</text>
+    <text class="tx" x="1136" y="376">derived, skips still dirty — is one GET: Inv_ShortcutSound.</text>
 
     <!-- arrows -->
     <line class="ln-violet" x1="540" y1="150" x2="586" y2="150" marker-end="url(#p6-av)"/>
@@ -536,35 +536,35 @@
 
     <!-- visibility -->
     <rect x="40" y="424" width="1520" height="140" rx="10" class="band"/>
-    <text class="th" x="56" y="450">visibility has two tiers, by design — and durability has one</text>
-    <text class="tsb" x="56" y="474">durable: when put_file returns</text>
-    <text class="tx" x="56" y="492">the object and the entry are in the bucket; there is no other channel,</text>
-    <text class="tx" x="56" y="508">and no syncer needs to be running. A workspace nobody syncs keeps the</text>
-    <text class="tx" x="56" y="524">writes; the manifest catches up when a syncer next starts.</text>
-    <text class="tsb" x="560" y="474">visible NOW: the crate, the gateway, and any pod that runs sync</text>
-    <text class="tx" x="560" y="492">get_file reads the citation first, guarded on its etag. Success means no entry</text>
-    <text class="tx" x="560" y="508">can be newer, so the cell is never fetched: two requests, as before the overlay.</text>
-    <text class="tx" x="560" y="524">Only the precondition failure — the overwritten case — reads the cell (0.2.2).</text>
-    <text class="tx" x="560" y="544">Before 0.2.1 the door preferred the citation and answered 409 until the next barrier.</text>
-    <text class="tsb" x="1120" y="474">visible at the NEXT BARRIER: the manifest</text>
-    <text class="tx" x="1120" y="492">a fresh checkout sees the write once current cites it —</text>
+    <text class="th" x="56" y="450">durability and visibility are one moment — the trees follow at a barrier</text>
+    <text class="tsb" x="56" y="474">durable and visible: when put_file returns</text>
+    <text class="tx" x="56" y="492">the object is in the bucket and the manifest cites it: every reader,</text>
+    <text class="tx" x="56" y="508">every fresh checkout and every pod that runs sync sees it, with no</text>
+    <text class="tx" x="56" y="524">syncer running. There is no second channel to catch up with.</text>
+    <text class="tsb" x="560" y="474">a read: the pointer, the cached manifest, the handle</text>
+    <text class="tx" x="560" y="492">get_file loads the pointer; the manifest is cached by its etag, so a warm read</text>
+    <text class="tx" x="560" y="508">is two requests. The bytes are checked against the citation&rsquo;s CRC-64, and a</text>
+    <text class="tx" x="560" y="524">mismatch is 502 corrupt, never served (M8). A handle gone since the load</text>
+    <text class="tx" x="560" y="544">re-resolves once; the retire age keeps it for G, so a fresh load never sees that.</text>
+    <text class="tsb" x="1120" y="474">in the agent&rsquo;s TREE: at the NEXT BARRIER</text>
+    <text class="tx" x="1120" y="492">a pod&rsquo;s tree takes the change at its syncer&rsquo;s next barrier —</text>
     <text class="tx" x="1120" y="508">about a second after request_boundary, at most a cadence</text>
-    <text class="tx" x="1120" y="524">otherwise. wait_cited is the status view&rsquo;s way to show</text>
-    <text class="tx" x="1120" y="544">&ldquo;published&rdquo;; it is not for the request path of a UI.</text>
+    <text class="tx" x="1120" y="524">otherwise — where the tree is clean and the path in scope.</text>
+    <text class="tx" x="1120" y="544">wait_cited is for the status view, not a UI&rsquo;s request path.</text>
 
     <!-- refusals -->
     <rect x="40" y="588" width="1520" height="132" rx="10" class="bx-ochre"/>
     <text class="th" x="56" y="614">the refusals are the wire — every one typed, every one a decision the caller can make</text>
-    <text class="mns" x="56" y="640">409 barrier-window-open</text>
-    <text class="tx" x="340" y="640">the syncer is mid-publish, usually well under a second; retry_after says when, with_window_wait absorbs it</text>
+    <text class="mns" x="56" y="640">409 concurrent-write</text>
+    <text class="tx" x="340" y="640">the writers kept winning the manifest CAS; the verb re-read and re-judged each time — retry as is, retry_after says when</text>
     <text class="mns" x="56" y="660">428 · 412 file-changed</text>
     <text class="tx" x="340" y="660">an overwrite named no version, or a stale one (the current etag rides the 412) — re-read and reconcile, never retry</text>
-    <text class="mns" x="56" y="680">409 moved · 410 foreign-write</text>
-    <text class="tx" x="340" y="680">an entry the bucket has outrun yields to the citation; bytes no entry and no citation vouch for are refused, not served</text>
+    <text class="mns" x="56" y="680">409 moved · 410 · 502 corrupt</text>
+    <text class="tx" x="340" y="680">bytes at the cited handle that are not the ones cited — overwritten from outside, or failing the CRC-64 — are refused, not served</text>
     <text class="mns" x="56" y="700">202 citation-pending · 409 draft-stale</text>
     <text class="tx" x="340" y="700">wait_cited past its timeout; a promote whose recorded base has moved — the draft is kept, because saving must never destroy the edit</text>
   </svg>
-  <figcaption><b>What a write is.</b> <code>put_file</code> returns when the object is at <code>&lt;prefix&gt;/files/&lt;path&gt;</code> and an entry naming it is in the inbox cell. Both are in the bucket; that is the whole durability promise, and it is immediate. What the library will <i>not</i> do is edit the manifest: only a syncer holding the publish fence for its commit section writes the manifest, and that is what the protocol&rsquo;s model checks — a manifest writer outside the fence would reintroduce exactly the race the barrier exists to prevent. <b>A delete from outside is declared, never performed.</b> A cited object deleted by a caller wedges every checkout with &ldquo;the manifest cites it but it is gone&rdquo;, so <code>remove_file</code> records the intent and returns; the listing hides the path at once, the bytes stay readable by name until the syncer performs it, and a removal the syncer refuses leaves the file exactly as it was — there is no function in the crate that deletes a cited object. <b>A rename is one generation.</b> The server-side copy lands first (a 10&nbsp;GB checkpoint moves without a download), then one CAS records the destination entry and the source removal together, and the barrier cites both halves in one manifest generation: a reader sees the old name or the new, never both and never neither. <b>Drafts are the edit that must not be published yet</b> — under the reserved namespace, where no scan, checkout or sweep can see them; the base etag is recorded, never enforced at save time, and a promote is a HITL write conditioned on it. <b>The cost of the overlay on the common read is zero</b>, and it is pinned by a counting store: (inbox fetches, object fetches) of (0,&nbsp;1) for an unmodified cited file, (1,&nbsp;2) for an overwritten one; the 0.2.1 order fails the first count. Crate: <code>lean/gateway</code>; design of record for removals: <code>docs/plans/flint-lean-delete-rename-design.md</code>.</figcaption>
+  <figcaption><b>What a write is.</b> <code>put_file</code> returns when the object is at a fresh handle under <code>&lt;prefix&gt;/files/&lt;path&gt;</code> and the manifest cites it: the gateway commits (P2, since 2026-09-25). The commit is one pointer CAS, judged against the version the UI read — a save over a version someone else published since is a 412 that records nothing, and the UI re-reads and reconciles. It never takes the writers&rsquo; lease and never waits for a barrier: a syncer mid-publish loses its CAS instead, merges again onto the save, and retries, so the cost of heavy saving falls on the writers, never on the person saving. <b>An editor autosaves to a draft, never with a commit</b>: every commit moves the pointer every syncer and reader checks. <b>A delete from outside deletes no object.</b> A cited object deleted by a caller would wedge every checkout with &ldquo;the manifest cites it but it is gone&rdquo;, so a delete stops citing the path, the tombstone names the version it retired, and the object is collected only once nothing cites it and the retire age G has passed. An agent editing a path the UI deleted keeps its work, and its publish records the delete it overrode; an agent deleting a path the UI saved since deletes it, and the UI&rsquo;s version is preserved under a record (M3). <b>A rename is one generation</b>: one CAS moves the citation (a 10&nbsp;GB checkpoint moves without a byte copied), and a reader sees the old name or the new, never both and never neither. <b>Drafts are the edit that must not be published yet</b> — under the reserved namespace, where no scan, checkout or sweep can see them; the base etag is recorded, never enforced at save time, and a promote commits conditioned on it. Before step 5 a write was an object plus an entry in the inbox cell that a syncer later cited; that cell now carries only the two verb requests. Crate: <code>lean/gateway</code>; protocol: <code>lean/PROTOCOL.md</code>.</figcaption>
 </section>
 
 <!-- ============================================================ PAGE 6 -->
@@ -616,9 +616,9 @@
     <text class="tx" x="446" y="340">in a replayable intent, not re-derived; a path with</text>
     <text class="tx" x="446" y="356">unpublished changes is refused at the door, kept on replay</text>
     <text class="tx" x="446" y="380">two constraints: the scope matches path COMPONENTS,</text>
-    <text class="tx" x="446" y="396">not prefixes; and the manifest baseline stays WHOLE —</text>
-    <text class="tx" x="446" y="412">narrowing it would queue every unadmitted citation into</text>
-    <text class="tx" x="446" y="428">the inbox and land it one barrier later</text>
+    <text class="tx" x="446" y="396">not prefixes; and since P1-lite the baseline narrows with</text>
+    <text class="tx" x="446" y="412">the held set — the scope declines what a narrow dropped,</text>
+    <text class="tx" x="446" y="428">so no barrier owes it back, and no peer change lands there</text>
 
     <!-- throughput -->
     <rect x="820" y="70" width="370" height="380" rx="10" class="bx-violet"/>
@@ -668,7 +668,7 @@
     <rect x="40" y="474" width="1520" height="200" rx="10" class="band"/>
     <text class="th" x="56" y="500">the model is the gate — lean/formal, TLA+ checked before the code, and the code written to it</text>
     <text class="tx" x="56" y="524">check.sh runs 94 configurations, ALL required: 20 strict runs that must hold, and mutations and probes that must FAIL — a model that cannot rediscover its own bug classes proves</text>
-    <text class="tx" x="56" y="540">nothing, and a probe names an action through a ghost only that action writes. LeanSubtree.tla is the protocol (lease, barrier, inbox, removals, renames); LeanChunkGC.tla and</text>
+    <text class="tx" x="56" y="540">nothing, and a probe names an action through a ghost only that action writes. LeanSubtree.tla was the protocol then (lease, barrier, inbox, removals, renames; LeanP1.tla since step 5); LeanChunkGC.tla and</text>
     <text class="tx" x="56" y="556">LeanChunkMerge.tla are the chunked manifest&rsquo;s reaper and its 412 merge. Three times the abstraction found what no test had:</text>
     <text class="tsb" x="56" y="584">the early inbox drop</text>
     <text class="tx" x="56" y="602">consumed entries left the cell at window-open, &ldquo;durably in the</text>

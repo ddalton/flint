@@ -1,0 +1,3 @@
+LeanImplSyncOverlayStaleCtl              MISMATCH           rc=0 | No error has been found | 6107433 states generated, 1800227 distinct | Finished in 06min 08s at 
+LeanBarrierLeaseSyncOverlayStale         OK-FIRES           rc=12 | Invariant Inv_NoForeignLost is violated | 1243099 states generated, 325459 distinct | Finished in 45s at 
+R41DONE

@@ -6,6 +6,22 @@ Written 2026-09-11, after the adversarial audit in
 `lean/e2e/perf/results/scoped-read-write-audit-2026-09-11.md` and the
 scan-split investigation that followed it.
 
+**Since simplification step 5 (2026-09-25), two things here are no longer
+true of the code.** Read C2, §4.1, §5's cliff and phase 0 with them:
+
+- *C2 is gone, not violated.* `inst_base` was removed (P1-lite): the
+  baseline IS the merge base, and it narrows with the held set. What a
+  tree is owed is derived at each barrier from the manifest and filtered
+  by the held scope, so an unadmitted citation is never owed and never
+  downloaded. The test that pinned C2, `a_narrow_leaves_the_merge_base_whole`,
+  is now `a_narrow_owes_nothing_it_dropped` (`lean/syncer/src/tests.rs`).
+- *§4.1's drift no longer happens.* A scoped tree no longer receives a
+  peer's change, or a UI promote, outside its scope: the owed set is
+  filtered by the held scope, and there is no inbox for a change to
+  arrive through (`a_scoped_tree_never_receives_a_peers_change_outside_its_scope`;
+  the gateway battery's `promoting_an_out_of_scope_draft_does_not_widen_the_held_set`).
+  The only way to obtain a path outside the scope is `rescope`.
+
 The question that started this: *does lean really need to materialize
 everything in the manifest just to make a small file change and write it
 back?* The answer is no, and the change that makes it no is smaller than
@@ -33,7 +49,9 @@ Three scope-shaped things, and none of them scopes a read:
 1. `sync_scoped(Some(paths))` (`sync.rs:97`) — D4, the publish side. A
    **per-call argument**: it scopes one sync and persists nothing.
    Remote changes outside the scope are deferred to the inbox
-   (`sync.rs:167`, `sync.rs:294`).
+   (`sync.rs:167`, `sync.rs:294`). *(Since step 5: they stay owed — a
+   scoped sync marks the tree `Baseline::behind` — and the next barrier's
+   consume derives them again.)*
 2. `Scope` / `Scope::covers` (`sync.rs:52-88`) — a normalized prefix set
    matched on component boundaries, so `"in"` never matches
    `internal/`. Capped at `MAX_SCOPE_ENTRIES = 64` entries of
@@ -63,7 +81,9 @@ the admission filter already provides, it measured 0.94–1.10x across
 four tree shapes, and it would have made `lstat` the primary delete
 oracle — which is exactly the bug fixed in `14b3637c`.
 
-**C2. `inst_base` must stay the WHOLE manifest.** `manifest.rs:996`
+**C2. `inst_base` must stay the WHOLE manifest.** *(Retired by step 5:
+see the note at the top. There is no `inst_base`, and the owed set is
+scope-filtered.)* `manifest.rs:996`
 treats an entry absent from the installed base as changed. Narrow
 `inst_base` alongside the baseline and all 1,998 unadmitted entries read
 as foreign, queue into the inbox, and the next barrier downloads the
@@ -143,8 +163,9 @@ records what building it changed.
 
 ### 4.1 The workspace widens anyway, just not under your control
 
-A path outside the scope that changes **remotely** arrives through the
-inbox and lands in the tree; from then on it is cited and it is yours.
+*(No longer true since step 5: see the note at the top.)* A path outside
+the scope that changes **remotely** arrives through the inbox and lands in
+the tree; from then on it is cited and it is yours.
 A path that never changes remotely can never be obtained. So a scoped
 workspace's held set drifts by whatever the remote happens to touch, and
 the one operation unavailable is *asking for a specific file*. That
@@ -327,7 +348,8 @@ and still cannot be made load-bearing without changing `Dirty` itself.
 
 The precise answer: **two of the rule's three conjuncts are
 machine-checked; the third is carried by the code and by
-`a_narrow_leaves_the_merge_base_whole` plus the three Rust mutation
+`a_narrow_leaves_the_merge_base_whole` (since step 5,
+`a_narrow_owes_nothing_it_dropped`) plus the three Rust mutation
 checks in §4.7, and by nothing in TLA+.**
 
 ### 4.7 The mutation checks, run
@@ -370,16 +392,17 @@ walk plus a stat per file.
 unlinks, one scope write. No network. **Widen** costs one whole-manifest
 load plus a materialize of only the added paths.
 
-**The one cliff is C2**, and it is correctness-shaped rather than
-perf-shaped: narrowing `inst_base` turns the next barrier into a
-whole-tree download.
+**The one cliff was C2**, and it was correctness-shaped rather than
+perf-shaped: narrowing `inst_base` turned the next barrier into a
+whole-tree download. Step 5 removed it: the owed set is scope-filtered.
 
 ## 6. Phases, each with the control that makes it mean something
 
 **Phase 0 — verify the audit's spine.** Apply `scoped-audit-probes.patch`
 and run `probe_` on real Linux. The load-bearing one is the H1 mutation
 control: mutate `manifest.rs:999` to `if false &&` and watch
-`foreign_queued` go 1 -> 0. That is what establishes C2. The audit's two
+`foreign_queued` go 1 -> 0. That is what establishes C2. (Historical:
+the queue and `inst_base` are gone since step 5.) The audit's two
 "fix regardless" defects are already shipped (`14b3637c`, `28be02b7`).
 
 **Phase 1 — refactor, zero behaviour change.** Lift the fetch loop into

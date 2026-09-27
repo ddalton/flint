@@ -1,0 +1,112 @@
+--- a/lean/formal/LeanSubtree.tla
++++ b/lean/formal/LeanSubtree.tla
+@@ -1629,7 +1629,7 @@
+            ackIncoherent |-> FALSE, fencedOkAck |-> FALSE,
+            srcMismatch |-> FALSE,
+            partialAcks |-> 0, declaredDrops |-> 0,
+-           narrows |-> 0, narrowed |-> {}, narrowRecited |-> {},
++           narrows |-> 0, narrowed |-> {}, narrowRecited |-> {}, narrowDeleted |-> {},
+            removals |-> 0, removalsApplied |-> 0, removalsRefused |-> 0,
+            renamed |-> {}, renamesApplied |-> 0, renameRefused |-> {},
+            citedPairs |-> {},
+@@ -2505,7 +2505,10 @@
+        ![s].upDone = {}, ![s].parked = {}, ![s].gcDone = {}, ![s].gcTook = {},
+        ![s].retire = [p \in Paths |-> 0], ![s].upGone = {}, ![s].upVerified = FALSE]
+   /\ window' = IF BarrierLease THEN window ELSE sc[s].epoch
+-  /\ gh' = [gh EXCEPT !.barriers = IF InfiniteBarriers THEN @ ELSE @ + 1]
++  \* A walk that reads a path THIS writer narrowed as a delete: the
++  \* unlink-first narrow's harm, at the one step that decides it.
++  /\ gh' = [gh EXCEPT !.barriers = IF InfiniteBarriers THEN @ ELSE @ + 1,
++                      !.narrowDeleted = @ \cup ((DSet(s) \cap gh.narrowed) \ sc[s].scope)]
+   /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects, inbox, removals,
+                  hitlAcked, conflicts>>
+ 
+@@ -2553,7 +2556,7 @@
+        THEN \* If-Match passes: the PUT lands
+          /\ objects' = [objects EXCEPT ![p] = want]
+          /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
+-         /\ gh' = [gh EXCEPT !.narrowRecited = @ \cup ({p} \cap gh.narrowed), !.deposedPuts =
++         /\ gh' = [gh EXCEPT !.narrowRecited = @ \cup (({p} \cap gh.narrowed) \ sc[s].scope), !.deposedPuts =
+                      @ + (IF DeposedHolder(s) THEN 1 ELSE 0),
+                      !.hitlRetired = IF /\ MaxSameBytes > 0 /\ cur # want
+                                         /\ cur \in sc[s].known /\ <<p, cur>> \in hitlAcked
+@@ -2571,7 +2574,7 @@
+             \* to GC until this barrier's CAS cites it.
+          /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p},
+                              ![s].adopted = IF BarrierLease THEN @ \cup {p} ELSE @]
+-         /\ gh' = [gh EXCEPT !.narrowRecited = @ \cup ({p} \cap gh.narrowed), !.adoptOwn = @ + 1]
++         /\ gh' = [gh EXCEPT !.narrowRecited = @ \cup (({p} \cap gh.narrowed) \ sc[s].scope), !.adoptOwn = @ + 1]
+          /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest, objects,
+                         inbox, removals, window, hitlAcked, conflicts>>
+        ELSE IF ConflictSurfacing
+@@ -2588,7 +2591,7 @@
+             /\ objects' = [objects EXCEPT ![p] = want]
+             /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
+             /\ conflicts' = conflicts \cup {<<p, cur>>}
+-            /\ gh' = [gh EXCEPT !.narrowRecited = @ \cup ({p} \cap gh.narrowed),
++            /\ gh' = [gh EXCEPT !.narrowRecited = @ \cup (({p} \cap gh.narrowed) \ sc[s].scope),
+                         !.deposedPuts = @ + (IF DeposedHolder(s) THEN 1 ELSE 0),
+                         !.interleaved = @ \/ (BarrierLease /\ CellHeld /\ cellHolder # s)]
+             /\ UNCHANGED leaseVars /\ UNCHANGED <<cellEpoch, cellHolder, manSeq, manSrc, manifest,
+@@ -2613,7 +2616,7 @@
+   /\ LET want == sc[s].scanGen[p] IN
+        /\ versions' = [versions EXCEPT ![p] = @ \cup {want}]
+        /\ sc' = [sc EXCEPT ![s].upDone = @ \cup {p}]
+-       /\ gh' = [gh EXCEPT !.narrowRecited = @ \cup ({p} \cap gh.narrowed),
++       /\ gh' = [gh EXCEPT !.narrowRecited = @ \cup (({p} \cap gh.narrowed) \ sc[s].scope),
+                           !.deposedPuts = @ + (IF DeposedHolder(s) THEN 1 ELSE 0),
+                           !.interleaved = @ \/ (CellHeld /\ cellHolder # s)]
+   /\ UNCHANGED leaseVars
+@@ -4183,7 +4186,7 @@
+ \* the narrow verb is not modelled over handles (its worlds are life-lease).
+ ASSUME ImmutableObjects =>
+   /\ BarrierLease /\ InboxEnabled /\ DeletesAfterCAS /\ ~GatedCitation
+-  /\ ~OrphanTrack /\ MaxSameBytes = 0 /\ MaxNarrows = 0 /\ ~InfiniteBarriers
++  /\ ~OrphanTrack /\ MaxSameBytes = 0 /\ ~InfiniteBarriers
+ 
+ (* ---- tranche 6: FAIRNESS, for the liveness runs only -------------------
+    Weak fairness on each syncer's OWN barrier step — not on "some syncer
+@@ -4259,9 +4262,20 @@
+ \* unlink-first arm violates: the citation survives the unlink, the
+ \* next scan classifies the path delete-eligible, and GC publishes it.
+ Inv_NarrowNeverDeletes ==
+-  \A p \in gh.narrowed : IF ImmutableObjects THEN versions[p] # {} ELSE objects[p] # 0
++  \* 2026-09-23: was `\A p \in gh.narrowed : the object at p lives`, which
++  \* a PEER's legitimate delete of a path this writer narrowed violates
++  \* (the handles narrow world, 14 steps: the collector takes what the
++  \* peer's CAS retired).  Narrowing is one writer's scope, so the claim
++  \* is that the narrowing writer never classifies such a path as a
++  \* delete — which is how the unlink-first order destroyed it.
++  gh.narrowDeleted = {}
+ 
+ \* The other half.  A narrowed path must not be re-uploaded and
++\* re-cited BY THE WRITER THAT NARROWED IT (2026-09-23): narrowing is a
++\* writer's scope, so a peer that still watches the path uploads it
++\* legitimately; the stamp sites count only an upload of a path outside
++\* the uploader's own scope (the handles narrow world found the global
++\* form firing on a peer's edit in 8 steps).  Originally:
+ \* re-cited, which is what the uncite-first arm does: the file survives
+ \* the uncite, the next scan reads present-and-not-in-baseline as a
+ \* local ADD, and the barrier silently undoes the narrow.  A path the
+@@ -4829,6 +4843,7 @@
+    ackIncoherent |-> gh.ackIncoherent, fencedOkAck |-> gh.fencedOkAck,
+    srcMismatch |-> gh.srcMismatch, narrows |-> gh.narrows,
+    narrowed |-> gh.narrowed, narrowRecited |-> gh.narrowRecited,
++   narrowDeleted |-> gh.narrowDeleted,
+    removals |-> gh.removals, renamed |-> gh.renamed, remJudged |-> gh.remJudged,
+    answered |-> gh.answered, remOver |-> gh.remOver,
+    renameRefused |-> gh.renameRefused, citedPairs |-> gh.citedPairs,
+--- a/lean/formal/gen-cfgs.sh
++++ b/lean/formal/gen-cfgs.sh
+@@ -1034,6 +1034,11 @@
+ emit LeanImmutableProbeSyncApplied "ProbeSyncApplied" $SYNCIO
+ emit LeanImmutableSyncStaleDirt "Inv_SyncNeverDestroysDirty" $SYNCIO SyncScanFirst=FALSE
+ emit LeanImmutableSyncOverlayStale "Inv_NoForeignLost" $SYNCIO SyncKeepsHiddenBase=FALSE
++NARROWIO="$NARROWWORLD BarrierLease=TRUE $IMPL $IO"
++emit LeanImmutableNarrowHolds "$IOINV,Inv_NarrowNeverDeletes,Inv_NarrowNeverRecites" $NARROWIO
++emit LeanImmutableProbeNarrow "ProbeNarrow" $NARROWIO
++emit LeanImmutableNarrowUnlinkFirst "Inv_NarrowNeverDeletes" $NARROWIO NarrowAtomic=FALSE NarrowUnlinkFirst=TRUE
++emit LeanImmutableNarrowUncieFirst "Inv_NarrowNeverRecites" $NARROWIO NarrowAtomic=FALSE NarrowUnlinkFirst=FALSE
+ # Renames under handles are CITATION MOVES: the destination cites the
+ # source's handle.  The removal world under the barrier lease on the code's
+ # shape (the life-lease removal worlds cannot carry handles).

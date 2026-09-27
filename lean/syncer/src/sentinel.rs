@@ -146,6 +146,13 @@ pub struct PendingSentinel {
     /// scoped touches must not narrow it (review 2026-09-12, inbox-7).
     #[serde(default)]
     pub whole_tree: bool,
+    /// Fresh on every fold: each touch declares the tree as it stands
+    /// when it is consumed, so an install that carried an earlier fold of
+    /// this record does not carry this one (`IntentJournal::carrier`).
+    /// Empty on a record written before the field, or torn: then nothing
+    /// matches it and the ack reads the honoring barrier's own report.
+    #[serde(default)]
+    pub id: String,
 }
 
 /// The ack document (`.flint/<verb>.ack`).
@@ -190,7 +197,7 @@ pub struct AckReport {
     pub conflicts: Vec<ConflictRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<Vec<String>>,
-    /// Foreign changes seen but deferred to the inbox flow (D4).
+    /// Foreign changes seen but left owed to the next consume (D4).
     #[serde(default)]
     pub out_of_scope_foreign: usize,
     /// Declared paths the boundary does NOT carry (a standing park, a
@@ -349,6 +356,7 @@ impl Syncer {
                 scope: None,
                 torn: true,
                 whole_tree: false,
+                id: String::new(),
             })),
         }
     }
@@ -544,7 +552,9 @@ impl Syncer {
             scope: None,
             torn: false,
             whole_tree: false,
+            id: String::new(),
         });
+        pending.id = uuid::Uuid::new_v4().to_string();
         pending.consumed_mtime_unix_ns = pending.consumed_mtime_unix_ns.max(ns);
         pending.consumed_at = now_unix();
         pending.torn |= torn;
@@ -756,11 +766,32 @@ impl Syncer {
         // Review 2026-09-12, inbox-1: a boundary with a standing park does
         // NOT carry the agent's file — `ok` promised "the boundary is in
         // the bucket". It is `partial`, and `report.dropped` names the
-        // paths. Neither is a delete another writer's edit outranked (the
-        // seq still cites the file) nor an upload that published nothing
-        // (a transfer that drifted or was swept).
+        // paths, as it does an upload that published nothing (a transfer
+        // that drifted or was swept).
         let dropped: Vec<String> =
-            report.parked.iter().chain(&report.outranked).chain(&report.deferred).cloned().collect();
+            report.parked.iter().chain(&report.deferred).cloned().collect();
+        // Review 2026-09-18, H10: the installs that CARRIED this declaration
+        // are journalled with their CAS, and are not always this barrier —
+        // a restart past step 7, an ack write that failed, or an honor that
+        // failed before the floor's cadence barrier published the
+        // declaration, each leave the ack to a later barrier. When a peer
+        // deleted a declared path in between, the document that barrier
+        // ended at does not cite it — the tree may still hold the declared
+        // bytes — and `ok` said it was there. Each barrier records which
+        // carried uploads its document does not cite (`Carrier::uncited`).
+        let mut dropped = dropped;
+        let carrier = self
+            .state
+            .load_intent()?
+            .carrier
+            .filter(|c| !pending.id.is_empty() && c.pending_id == pending.id);
+        if let Some(c) = carrier {
+            for p in c.dropped.iter().chain(c.uncited.iter()) {
+                if !dropped.contains(p) {
+                    dropped.push(p.clone());
+                }
+            }
+        }
         Ok(Ack {
             status: if dropped.is_empty() { "ok".into() } else { "partial".into() },
             nonces: pending.nonces.clone(),
@@ -903,12 +934,19 @@ impl Syncer {
     fn ticker_from(&self, seq: Option<u64>, etag: Option<String>) -> LeanResult<()> {
         let baseline_seq = self.state.load_baseline()?.seq;
         // A merge that carried another writer's change into the manifest
-        // moves the baseline to that document while the change waits in
-        // this writer's queue (or, after a restart, its intent journal) for
-        // the next consume. Until then the tree is integrated only through
-        // what the ticker said while nothing waited.
-        let waiting = !self.state.load_foreign_queue()?.is_empty()
-            || !self.state.load_intent()?.installed_foreign.is_empty();
+        // moves the baseline's seq to that document while the tree is still
+        // OWED the change until the next consume derives against it. Until
+        // then the tree is integrated only through what the ticker said
+        // while nothing was owed: waiting = the document named is not the
+        // one last derived against. (A path the agent is working on is its
+        // own, not waited on.)
+        let b = self.state.load_baseline()?;
+        let same = |a: &str, b: &str| a.trim_matches('"') == b.trim_matches('"');
+        let waiting = match (etag.as_deref(), b.derived_etag.as_deref()) {
+            (Some(e), Some(d)) => !same(e, d),
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
         let integrated = if waiting {
             baseline_seq.min(self.load_remote_seq().integrated_seq)
         } else {
@@ -1124,11 +1162,11 @@ impl Syncer {
                         r.parked
                     )));
                 }
-                if !r.deferred.is_empty() || !r.outranked.is_empty() {
+                if !r.deferred.is_empty() {
                     return Err(LeanError::State(format!(
-                        "drain: not in this boundary — uploads that published nothing {:?}, deletes \
-                         another writer's change outranked {:?} — not attesting",
-                        r.deferred, r.outranked
+                        "drain: not in this boundary — uploads that published nothing {:?} — not \
+                         attesting",
+                        r.deferred
                     )));
                 }
         }

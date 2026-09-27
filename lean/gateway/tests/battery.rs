@@ -10,12 +10,12 @@ use bytes::Bytes;
 use flint_store::memory::MemoryStore;
 use flint_store::{crc64_nvme, GenerationStamps, ObjectStore, PutCondition};
 
-use flint_lean::inbox::{self, InboxEntry};
 use flint_lean::lease::{self, ClaimOutcome};
 use flint_lean::manifest;
 use flint_lean::state::SyncerState;
-use flint_lean::{now_unix, LeanConfig, LeanError, Syncer, LEAN_DIR};
+use flint_lean::{LeanConfig, Syncer, LEAN_DIR};
 use flint_lean_gateway::http::{routes, GatewayCore};
+use flint_lean_gateway::{PutFile, VerbError, Workspace};
 
 const PREFIX: &str = "tenant/proj1";
 
@@ -58,49 +58,39 @@ fn read(root: &std::path::Path, rel: &str) -> Option<String> {
     std::fs::read_to_string(root.join(rel)).ok()
 }
 
-/// Simulate the GATEWAY's HITL write: object PUT first (fresh read →
-/// If-Match current / If-None-Match for a create), then the inbox entry.
+/// A UI save through the gateway's own verb (P2: it commits), naming the
+/// version it overwrites when there is one.
 async fn hitl_write(
     store: &Arc<MemoryStore>,
     cfg: &LeanConfig,
     path: &str,
     content: &str,
     author: &str,
-) -> Result<String, LeanError> {
-    let key = cfg.file_key(path);
-    let cond = match store.head(&key).await {
-        Ok(meta) => PutCondition::IfMatch(meta.etag),
-        Err(_) => PutCondition::IfNoneMatchAny,
-    };
-    let body = Bytes::from(content.to_string());
-    let crc = crc64_nvme(&body);
-    let stamps = GenerationStamps {
-        generation: 0,
-        epoch: 0,
-        flush_uuid: format!("gateway-{author}"),
-        boundary_source: None,
-        posix: None,
-    };
-    let meta = store.put_whole(&key, body, &cond, &stamps, crc).await?;
-    inbox::gateway_append(
-        store.as_ref(),
-        cfg,
-        InboxEntry {
-            path: path.to_string(),
-            etag: meta.etag.clone(),
-            author: author.to_string(),
-            added_unix: now_unix(),
-            crc64_b64: Some(flint_store::crc64_to_b64(crc)),
-            cited: None,
-        },
-    )
-    .await?;
-    Ok(meta.etag)
+) -> Result<String, VerbError> {
+    let w = Workspace::new(store.clone(), &cfg.prefix);
+    let if_match = tracked(store, cfg, path).await.map(|(_, etag)| etag);
+    w.put_file(path, Bytes::from(content.to_string()), &PutFile { author: Some(author.into()), if_match, if_none_match: None })
+        .await
+}
+
+/// The version the workspace cites at `path`, as `(handle, etag)`.
+async fn tracked(store: &Arc<MemoryStore>, cfg: &LeanConfig, path: &str) -> Option<(String, String)> {
+    flint_lean::manifest::load(store.as_ref(), cfg)
+        .await
+        .unwrap()
+        .and_then(|l| l.manifest.entries.get(path).map(|e| (e.key.clone(), e.etag.clone())))
 }
 
 async fn current_etag(store: &Arc<MemoryStore>, cfg: &LeanConfig, path: &str) -> String {
-    store.head(&cfg.file_key(path)).await.unwrap().etag
+    tracked(store, cfg, path).await.expect("tracked or cited").1
 }
+
+/// The bytes the workspace tracks at `path`, read by their handle.
+async fn tracked_bytes(store: &Arc<MemoryStore>, cfg: &LeanConfig, path: &str) -> Bytes {
+    let (key, etag) = tracked(store, cfg, path).await.expect("tracked or cited");
+    store.get_whole(&key, Some(&etag)).await.unwrap().1
+}
+
 
 /// Publishes a tree with a clear in-scope / out-of-scope split: two
 /// small files under `inputs/` and six 4 KiB files under `outputs/`.
@@ -132,6 +122,7 @@ fn gw_core(store: &Arc<MemoryStore>) -> Arc<GatewayCore> {
         workspaces,
         token: GW_TOKEN.to_string(),
         max_put_bytes: 8 * 1024 * 1024,
+        manifests: Default::default(),
     })
 }
 
@@ -167,12 +158,11 @@ async fn gateway_auth_tenancy_and_path_hygiene() {
     }
 }
 
-/// The full HITL flow THROUGH the gateway: PUT lands object + inbox
-/// entry, the syncer's next barrier consumes and cites it, and the
-/// gateway serves it back — first from the inbox fallback, then from
-/// the manifest citation.
+/// The full UI flow THROUGH the gateway (P2): the PUT commits — cited when
+/// it returns — and the syncer takes it as any peer's change: its next
+/// barrier's merge queues it, the one after writes it into the tree.
 #[tokio::test]
-async fn gateway_hitl_put_consumed_and_cited_by_barrier() {
+async fn gateway_put_is_cited_at_once_and_reaches_the_agent_tree() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
     let mut sc = syncer(&store, dir.path()).await;
@@ -188,21 +178,16 @@ async fn gateway_hitl_put_consumed_and_cited_by_barrier() {
         .reply(&routes)
         .await;
     assert_eq!(res.status(), 200, "{:?}", res.body());
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    assert!(m.manifest.entries.contains_key("docs/spec.md"), "the save is not cited");
 
-    // Readable immediately via the inbox fallback (uncited yet).
     let res = gw_req().method("GET").path("/lean/v1/proj1/files/docs/spec.md").reply(&routes).await;
     assert_eq!(res.status(), 200);
     assert_eq!(&res.body()[..], b"user upload via gateway");
 
-    // The barrier consumes + cites; the file lands in the agent tree.
+    sc.run_barrier().await.unwrap();
     sc.run_barrier().await.unwrap();
     assert_eq!(read(dir.path(), "docs/spec.md").unwrap(), "user upload via gateway");
-    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
-    assert!(m.manifest.entries.contains_key("docs/spec.md"));
-
-    // Still readable — now via the citation.
-    let res = gw_req().method("GET").path("/lean/v1/proj1/files/docs/spec.md").reply(&routes).await;
-    assert_eq!(res.status(), 200);
 }
 
 /// A consume whose WRITE fails is transient, and must not be recorded as
@@ -255,7 +240,10 @@ async fn a_failed_consume_write_is_retried_not_silently_dropped() {
         .await;
     assert_eq!(res.status(), 200, "{:?}", res.body());
 
-    // The barrier must not wedge on it.
+    // The barrier must not wedge on it. The save is COMMITTED (P2), so it
+    // reaches the tree as any peer's change does: the first barrier's
+    // merge queues it, the second's consume writes it.
+    sc.run_barrier().await.unwrap();
     sc.run_barrier().await.unwrap();
 
     let conflicts = sc.state.load_conflicts().unwrap();
@@ -280,42 +268,25 @@ async fn a_failed_consume_write_is_retried_not_silently_dropped() {
     );
 }
 
-/// The window gate: a PUT during a live barrier window is refused with
-/// Retry-After; an expired window admits (the dead-syncer unwedge).
+/// G1: a PUT is never refused for a barrier window — live or expired — nor
+/// delayed by one. The window is the writers' business.
 #[tokio::test]
-async fn gateway_put_refused_while_window_open() {
+async fn gateway_put_is_not_refused_while_a_window_is_open() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
     let sc = syncer(&store, dir.path()).await;
     let routes = routes(gw_core(&store));
 
-    inbox::open_window(store.as_ref(), &sc.cfg, 1, now_unix() + 120).await.unwrap();
     let res = gw_req()
         .method("PUT")
         .path("/lean/v1/proj1/files/a.txt")
         .body("x")
         .reply(&routes)
         .await;
-    assert_eq!(res.status(), 409);
-    assert!(res.headers().contains_key("retry-after"));
-
-    inbox::clear_window(store.as_ref(), &sc.cfg, 1, &[]).await.unwrap();
-    let res = gw_req()
-        .method("PUT")
-        .path("/lean/v1/proj1/files/a.txt")
-        .body("x")
-        .reply(&routes)
-        .await;
-    assert_eq!(res.status(), 200);
-
-    inbox::open_window(store.as_ref(), &sc.cfg, 1, now_unix() - 5).await.unwrap();
-    let res = gw_req()
-        .method("PUT")
-        .path("/lean/v1/proj1/files/b.txt")
-        .body("y")
-        .reply(&routes)
-        .await;
-    assert_eq!(res.status(), 200, "an expired window must not wedge HITL");
+    assert_eq!(res.status(), 200, "{:?}", res.body());
+    assert!(!res.headers().contains_key("retry-after"));
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    assert!(m.manifest.entries.contains_key("a.txt"));
 }
 
 /// P5's teeth: the manifest CAS verb validates the claimed epoch
@@ -481,16 +452,15 @@ async fn gateway_status_and_snapshot() {
     let res = gw_req().method("GET").path("/lean/v1/proj1/status").reply(&routes).await;
     assert_eq!(res.status(), 200);
     let v: serde_json::Value = serde_json::from_slice(res.body()).unwrap();
-    assert_eq!(v["seq"], 1);
-    assert_eq!(v["inbox_depth"], 1);
+    // P2: the save committed, so it is seq 2 and nothing waits in a cell.
+    assert_eq!(v["seq"], 2);
     assert_eq!(v["epoch"], 1);
-    assert!(v["window"].is_null());
 
     let res = gw_req().method("GET").path("/lean/v1/proj1/snapshot").reply(&routes).await;
     assert_eq!(res.status(), 200);
     let v: serde_json::Value = serde_json::from_slice(res.body()).unwrap();
     assert!(v["manifest"]["entries"]["f.txt"].is_object());
-    assert_eq!(v["inbox"]["entries"][0]["path"], "pending.txt");
+    assert!(v["manifest"]["entries"]["pending.txt"].is_object(), "the save is not cited");
 }
 
 /// A published tree plus a live gateway. Returns (dir, routes) — the
@@ -575,8 +545,8 @@ async fn a_saved_draft_is_durable_in_s3_and_invisible_until_promoted() {
     assert_eq!(res.headers()["x-flint-base-etag"].to_str().unwrap(), base);
 }
 
-/// Promote is the publish: it lands at the live key, the inbox tracks
-/// it, the barrier cites it and the agent gets the bytes — and the
+/// Promote is the publish: it lands at a handle of its own and is cited
+/// when it returns (P2), the syncer takes it into the tree — and the
 /// draft is gone afterwards, so a second promote cannot republish it.
 #[tokio::test]
 async fn promote_publishes_the_draft_and_the_barrier_cites_it() {
@@ -593,10 +563,12 @@ async fn promote_publishes_the_draft_and_the_barrier_cites_it() {
         .await;
     assert_eq!(res.status(), 200, "{:?}", res.body());
 
-    // The bytes are LIVE at the real key immediately: read the object
-    // directly, below any door.
-    let (_, live) = store.get_whole(&sc.cfg.file_key("inputs/wanted.txt"), None).await.unwrap();
-    assert_eq!(&live[..], b"alice's edit", "promote must publish at the live key at once");
+    // The bytes are LIVE at a handle of their own and CITED when the
+    // promote returns (P2): read the object directly, below any door.
+    let live = tracked_bytes(&store, &sc.cfg, "inputs/wanted.txt").await;
+    assert_eq!(&live[..], b"alice's edit", "promote must publish at a cited handle at once");
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
+    assert_ne!(m.entries["inputs/wanted.txt"].etag, base, "the promote is not cited");
 
     // `GET /files/{path}` serves the promoted bytes at once: the read
     // door overlays the inbox entry on the manifest citation, as the
@@ -623,10 +595,10 @@ async fn promote_publishes_the_draft_and_the_barrier_cites_it() {
     assert_eq!(res.status(), 200, "the plain HITL door must answer the same as promote's: {:?}", res.body());
     assert_eq!(&res.body()[..], b"plain HITL overwrite");
 
-    // The barrier consumes both entries and cites them; the read is the
-    // same bytes, now through the citation.
-    let r = sc.run_barrier().await.unwrap();
-    assert_eq!(r.consumed, 2, "promote must land an inbox entry like any HITL write");
+    // The syncer takes both as peers' changes: one barrier's merge queues
+    // them, the next writes them into the tree.
+    sc.run_barrier().await.unwrap();
+    sc.run_barrier().await.unwrap();
     let res = gw_req().method("GET").path("/lean/v1/proj1/files/inputs/wanted.txt").reply(&routes).await;
     assert_eq!(res.status(), 200, "{:?}", res.body());
     assert_eq!(&res.body()[..], b"alice's edit");
@@ -763,38 +735,22 @@ async fn an_incomplete_draft_reads_but_refuses_to_promote() {
     );
 }
 
-/// Promote IS a HITL write, so it takes the HITL discipline: refused
-/// while a barrier window is live, admitted once the window clears.
-/// Without the arm that clears it, a test asserting only the 409 would
-/// pass against a promote that ALWAYS refuses.
+/// Promote is a UI write, so it takes the UI discipline under P2: it
+/// commits whatever a barrier window says (G1).
 #[tokio::test]
-async fn a_promote_is_refused_while_the_barrier_window_is_open() {
+async fn a_promote_is_not_delayed_by_an_open_barrier_window() {
     let store = Arc::new(MemoryStore::new());
     let (_dir, sc, routes) = draft_fixture(&store).await;
     let base = current_etag(&store, &sc.cfg, "inputs/wanted.txt").await;
     save_draft(&routes, "alice", "inputs/wanted.txt", Some(&base), "alice's edit").await;
 
-    inbox::open_window(store.as_ref(), &sc.cfg, 1, now_unix() + 120).await.unwrap();
     let res = gw_req()
         .method("POST")
         .path("/lean/v1/proj1/drafts/alice/inputs/wanted.txt")
         .reply(&routes)
         .await;
-    assert_eq!(res.status(), 409);
-    assert!(res.headers().contains_key("retry-after"));
-    assert_eq!(
-        current_etag(&store, &sc.cfg, "inputs/wanted.txt").await,
-        base,
-        "a windowed refusal must publish nothing"
-    );
-
-    inbox::clear_window(store.as_ref(), &sc.cfg, 1, &[]).await.unwrap();
-    let res = gw_req()
-        .method("POST")
-        .path("/lean/v1/proj1/drafts/alice/inputs/wanted.txt")
-        .reply(&routes)
-        .await;
-    assert_eq!(res.status(), 200, "the window must not wedge promote forever: {:?}", res.body());
+    assert_eq!(res.status(), 200, "{:?}", res.body());
+    assert_ne!(current_etag(&store, &sc.cfg, "inputs/wanted.txt").await, base, "the promote is not cited");
 }
 
 /// The arm that justifies the UNCONDITIONAL save. A second tab re-saves
@@ -1055,21 +1011,15 @@ async fn an_unpromoted_draft_never_widens_a_scoped_workspace() {
     assert_eq!(b.state.load_scope().unwrap().as_deref(), Some(&["inputs".to_string()][..]));
 }
 
-/// The complement, and an HONEST one: PROMOTING an out-of-scope draft
-/// DOES widen a scoped workspace's held set.
-///
-/// Not a defect of drafts — promote lands an ordinary inbox entry, and
-/// merge → inbox → consume is the DESIGNED destination for out-of-scope
-/// foreign changes (`sync.rs:13-22`). The gateway is stateless and
-/// reads only the bucket, while the scope is LOCAL to the pod
-/// (`scope.json`), so the gateway could not filter on it even if that
-/// were wanted. Promote is a fourth mouth on the door the inbox already
-/// is, and the consequence is the one probe P3 confirmed: once a path
-/// is in the baseline, removing it locally publishes the object DELETE.
-///
-/// This test exists so the behaviour is PINNED rather than rediscovered.
+/// PROMOTING an out-of-scope draft does NOT widen a scoped workspace's held
+/// set since P1-lite (2026-09-25): the barrier's consume owes a path only
+/// where the tree holds it or its scope covers it. The promote is cited —
+/// the file is in the workspace — and this tree keeps declining it. (Before,
+/// the merge → queue → consume path materialised every peer's change, and
+/// this test pinned the widening, naming P1-lite's `Owed ⊆ Scope` as the
+/// change that would end it.)
 #[tokio::test]
-async fn promoting_an_out_of_scope_draft_widens_the_held_set() {
+async fn promoting_an_out_of_scope_draft_does_not_widen_the_held_set() {
     let store = Arc::new(MemoryStore::new());
     let _keep = scoped_fixture(&store).await;
     let routes = routes(gw_core(&store));
@@ -1089,35 +1039,26 @@ async fn promoting_an_out_of_scope_draft_widens_the_held_set() {
         .await;
     assert_eq!(res.status(), 200, "{:?}", res.body());
 
-    let r = b.run_barrier().await.unwrap();
-    assert_eq!(r.consumed, 1);
-    assert_eq!(
-        read(dir_b.path(), "outputs/big-0.bin").as_deref(),
-        Some("promoted out of scope"),
-        "consume materialises an out-of-scope promote — the documented widening"
-    );
-    assert!(
-        b.state.load_baseline().unwrap().entries.contains_key("outputs/big-0.bin"),
-        "and it is now CITED, which is what makes the widening load-bearing"
-    );
-    // The scope RECORD is untouched: what drifts is the held set, not
-    // the declaration. That asymmetry is the design's, not a bug here.
+    assert_ne!(current_etag(&store, &b.cfg, "outputs/big-0.bin").await, base, "fixture: the promote is not cited");
+    b.run_barrier().await.unwrap();
+    b.run_barrier().await.unwrap();
+    assert!(read(dir_b.path(), "outputs/big-0.bin").is_none(), "an out-of-scope promote reached a scoped tree");
+    assert!(!b.state.load_baseline().unwrap().entries.contains_key("outputs/big-0.bin"), "the held set widened");
     assert_eq!(b.state.load_scope().unwrap().as_deref(), Some(&["inputs".to_string()][..]));
 }
 
 // ── delete and rename through the wire, performed by a real barrier ──
 
-/// DELETE records a removal, POST /rename copies and records both
-/// halves, and ONE barrier cites the delete out and the rename across
-/// in ONE manifest generation. The HTTP reads agree at every step:
-/// the destination reads before the barrier, the old names 404 after.
+/// DELETE and POST /rename COMMIT (P2): each is one manifest CAS, the HTTP
+/// reads agree at once, and the agent's tree follows at its next barriers
+/// as it follows any peer's publish.
 #[tokio::test]
-async fn a_ui_delete_and_a_rename_ride_one_barrier_through_the_wire() {
+async fn a_ui_delete_and_a_rename_commit_through_the_wire_and_reach_the_tree() {
     let store = Arc::new(MemoryStore::new());
-    let (_dir, mut sc, routes) = draft_fixture(&store).await;
-    let before = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest.seq;
+    let (dir, mut sc, routes) = draft_fixture(&store).await;
+    let before = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
 
-    // A stale If-Match: 412 with the current tag; nothing recorded.
+    // A stale If-Match: 412 with the current tag; nothing committed.
     let res = gw_req()
         .method("DELETE")
         .path("/lean/v1/proj1/files/outputs/report.bin")
@@ -1126,7 +1067,7 @@ async fn a_ui_delete_and_a_rename_ride_one_barrier_through_the_wire() {
         .await;
     assert_eq!(res.status(), 412);
     assert!(res.headers().get("etag").is_some());
-    // The delete: 204 as soon as the intent is durable.
+    // The delete: 204 once committed.
     let res = gw_req()
         .method("DELETE")
         .path("/lean/v1/proj1/files/outputs/report.bin")
@@ -1146,7 +1087,7 @@ async fn a_ui_delete_and_a_rename_ride_one_barrier_through_the_wire() {
     let res = gw_req().method("GET").path("/lean/v1/proj1/files/inputs/renamed.txt").reply(&routes).await;
     assert_eq!(res.status(), 200);
     assert_eq!(&res.body()[..], b"published v1");
-    // A source under a pending removal is gone to a second rename.
+    // A deleted source is gone to a second rename.
     let res = gw_req()
         .method("POST")
         .path("/lean/v1/proj1/rename")
@@ -1155,41 +1096,36 @@ async fn a_ui_delete_and_a_rename_ride_one_barrier_through_the_wire() {
         .reply(&routes)
         .await;
     assert_eq!(res.status(), 404);
-    let res = gw_req().method("GET").path("/lean/v1/proj1/status").reply(&routes).await;
-    let v: serde_json::Value = serde_json::from_slice(res.body()).unwrap();
-    assert_eq!(v["removals_pending"], 2);
-    assert_eq!(v["removals_refused"], 0);
 
-    // ONE barrier, ONE generation, both halves.
-    let r = sc.run_barrier().await.unwrap();
-    assert_eq!(r.consumed, 1);
-    assert_eq!(r.removed.len(), 2, "{r:?}");
+    // Two commits, and the document says so at once.
     let after = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
-    assert_eq!(after.manifest.seq, before + 1);
-    assert!(after.manifest.entries.contains_key("inputs/renamed.txt"));
+    assert_eq!(after.manifest.seq, before.seq + 2);
     assert!(!after.manifest.entries.contains_key("inputs/wanted.txt"));
     assert!(!after.manifest.entries.contains_key("outputs/report.bin"));
+    let moved = after.manifest.entries["inputs/renamed.txt"].key.clone();
+    assert_eq!(moved, before.entries["inputs/wanted.txt"].key, "the rename is a citation move");
     for gone in ["inputs/wanted.txt", "outputs/report.bin"] {
         let res = gw_req().method("GET").path(&format!("/lean/v1/proj1/files/{gone}")).reply(&routes).await;
         assert_eq!(res.status(), 404, "{gone}");
-        assert!(store.head(&sc.cfg.file_key(gone)).await.is_err(), "{gone} GC'd");
     }
-    let res = gw_req().method("GET").path("/lean/v1/proj1/files/inputs/renamed.txt").reply(&routes).await;
-    assert_eq!(res.status(), 200);
-    // Settled: nothing left to withdraw.
-    let res = gw_req().method("DELETE").path("/lean/v1/proj1/removals/outputs/report.bin").reply(&routes).await;
-    assert_eq!(res.status(), 404);
-    let v: serde_json::Value = serde_json::from_slice(res.body()).unwrap();
-    assert_eq!(v["error"], "no-removal");
+
+    // The agent's tree follows.
+    sc.run_barrier().await.unwrap();
+    sc.run_barrier().await.unwrap();
+    assert_eq!(read(dir.path(), "inputs/renamed.txt").as_deref(), Some("published v1"));
+    assert_eq!(read(dir.path(), "inputs/wanted.txt"), None);
+    assert_eq!(read(dir.path(), "outputs/report.bin"), None);
 }
 
-/// A removal the syncer REFUSES — the agent has unpublished edits on
-/// the path — is answered in the cell, where `/snapshot` shows it with
-/// the reason and the author, and `/status` counts it.
+/// A UI delete of a file the agent is EDITING lands (P2, the user's rule):
+/// the document stops citing it at once. The agent's unpublished edit is
+/// never touched; its next publish brings the path back — mine wins — and
+/// RECORDS the delete it overrode, naming the deleted version.
 #[tokio::test]
-async fn a_refused_removal_is_readable_through_the_wire() {
+async fn a_ui_delete_over_a_dirty_path_lands_and_the_agents_edit_comes_back_with_a_record() {
     let store = Arc::new(MemoryStore::new());
     let (dir, mut sc, routes) = draft_fixture(&store).await;
+    let deleted = current_etag(&store, &sc.cfg, "inputs/wanted.txt").await;
     write(dir.path(), "inputs/wanted.txt", "the agent's unpublished edit");
     let res = gw_req()
         .method("DELETE")
@@ -1198,27 +1134,22 @@ async fn a_refused_removal_is_readable_through_the_wire() {
         .reply(&routes)
         .await;
     assert_eq!(res.status(), 204);
-    let r = sc.run_barrier().await.unwrap();
-    assert_eq!(r.removals_refused, 1);
-    assert!(r.removed.is_empty());
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
+    assert!(!m.entries.contains_key("inputs/wanted.txt"), "the delete did not land");
+
+    for _ in 0..2 {
+        sc.run_barrier().await.unwrap();
+    }
     assert_eq!(read(dir.path(), "inputs/wanted.txt").unwrap(), "the agent's unpublished edit");
-    let res = gw_req().method("GET").path("/lean/v1/proj1/snapshot").reply(&routes).await;
-    let v: serde_json::Value = serde_json::from_slice(res.body()).unwrap();
-    let removals = v["inbox"]["removals"].as_array().unwrap();
-    assert_eq!(removals.len(), 1);
-    assert_eq!(removals[0]["path"], "inputs/wanted.txt");
-    assert_eq!(removals[0]["author"], "dilip");
-    assert_eq!(removals[0]["refused"]["kind"], "removal-refused-dirty");
-    let res = gw_req().method("GET").path("/lean/v1/proj1/status").reply(&routes).await;
-    let v: serde_json::Value = serde_json::from_slice(res.body()).unwrap();
-    assert_eq!(v["removals_pending"], 0);
-    assert_eq!(v["removals_refused"], 1);
-    // Withdrawing a refused record clears it.
-    let res = gw_req().method("DELETE").path("/lean/v1/proj1/removals/inputs/wanted.txt").reply(&routes).await;
-    assert_eq!(res.status(), 204);
-    let res = gw_req().method("GET").path("/lean/v1/proj1/status").reply(&routes).await;
-    let v: serde_json::Value = serde_json::from_slice(res.body()).unwrap();
-    assert_eq!(v["removals_refused"], 0);
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("inputs/wanted.txt"), "the agent's edit was not published");
+    assert!(
+        sc.state.load_conflicts().unwrap().iter().any(|c| {
+            c.path == "inputs/wanted.txt" && c.foreign_etag == deleted && c.kind.starts_with("commit-recreated-deleted")
+        }),
+        "the edit overrode the UI's delete with no record: {:?}",
+        sc.state.load_conflicts().unwrap()
+    );
 }
 
 /// Phase D control: the path rule is ONE predicate. Every traversal or

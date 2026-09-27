@@ -1,0 +1,1264 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 80 and seed -6047425955777816375 with 6 workers on 8 cores with 14564MB heap and 64MB offheap memory [pid: 119398] (Linux 6.12.0-061200-generic amd64, Ubuntu 21.0.11 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file /home/ddalton/lean-l125-2026-09-24/LeanCore.tla
+Parsing file /tmp/Naturals.tla
+Parsing file /tmp/FiniteSets.tla
+Parsing file /tmp/Sequences.tla
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module LeanCore
+Starting... (2026-09-25 00:44:29)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-09-25 00:44:29.
+Progress(11) at 2026-09-25 00:44:32: 94,170 states generated (94,170 s/min), 42,345 distinct states found (42,345 ds/min), 26,137 states left on queue.
+Progress(16) at 2026-09-25 00:45:32: 5,873,468 states generated (5,779,298 s/min), 2,177,227 distinct states found (2,134,882 ds/min), 870,206 states left on queue.
+Progress(18) at 2026-09-25 00:46:32: 12,313,292 states generated (6,439,824 s/min), 4,529,329 distinct states found (2,352,102 ds/min), 1,568,944 states left on queue.
+Error: Invariant Inv_AckedNamed is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ seq = 1
+/\ removals = {}
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ reqs = 0
+/\ minted = {<<p1, 1>>}
+/\ w = ( A :>
+      [ st |-> "off",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> Nil @@ p2 :> Nil),
+        instBase |-> (p1 :> Nil @@ p2 :> Nil),
+        integrated |-> {},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 0,
+        jSeq |-> 0 ] @@
+  B :>
+      [ st |-> "off",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> Nil @@ p2 :> Nil),
+        instBase |-> (p1 :> Nil @@ p2 :> Nil),
+        integrated |-> {},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 0,
+        jSeq |-> 0 ] )
+/\ conflicts = {}
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ holder = "none"
+/\ took = (A :> (p1 :> {} @@ p2 :> {}) @@ B :> (p1 :> {} @@ p2 :> {}))
+/\ barriers = 0
+/\ saw = {}
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> Nil @@
+  <<p1, 3>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil )
+/\ nextGen = 2
+/\ ui = 0
+/\ acked = {}
+/\ live = {<<p1, 1>>}
+/\ entries = {}
+/\ refused = {}
+
+State 2: <Next line 805, col 9 to line 805, col 26 of module LeanCore>
+/\ seq = 1
+/\ removals = {[path |-> p1, handle |-> <<p1, 1>>, to |-> p2, over |-> Nil]}
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>}
+/\ w = ( A :>
+      [ st |-> "off",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> Nil @@ p2 :> Nil),
+        instBase |-> (p1 :> Nil @@ p2 :> Nil),
+        integrated |-> {},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 0,
+        jSeq |-> 0 ] @@
+  B :>
+      [ st |-> "off",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> Nil @@ p2 :> Nil),
+        instBase |-> (p1 :> Nil @@ p2 :> Nil),
+        integrated |-> {},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 0,
+        jSeq |-> 0 ] )
+/\ conflicts = {}
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ holder = "none"
+/\ took = (A :> (p1 :> {} @@ p2 :> {}) @@ B :> (p1 :> {} @@ p2 :> {}))
+/\ barriers = 0
+/\ saw = {<<p2, <<p1, 1>>, Nil>>}
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> Nil @@
+  <<p1, 3>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil )
+/\ nextGen = 2
+/\ ui = 0
+/\ acked = {<<p2, <<p1, 1>>>>}
+/\ live = {<<p1, 1>>}
+/\ entries = {<<p2, <<p1, 1>>>>}
+/\ refused = {}
+
+State 3: <Next line 805, col 9 to line 805, col 26 of module LeanCore>
+/\ seq = 1
+/\ removals = {[path |-> p1, handle |-> <<p1, 1>>, to |-> p2, over |-> Nil]}
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>, <<p1, 2>>}
+/\ w = ( A :>
+      [ st |-> "off",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> Nil @@ p2 :> Nil),
+        instBase |-> (p1 :> Nil @@ p2 :> Nil),
+        integrated |-> {},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 0,
+        jSeq |-> 0 ] @@
+  B :>
+      [ st |-> "off",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> Nil @@ p2 :> Nil),
+        instBase |-> (p1 :> Nil @@ p2 :> Nil),
+        integrated |-> {},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 0,
+        jSeq |-> 0 ] )
+/\ conflicts = {}
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ holder = "none"
+/\ took = (A :> (p1 :> {} @@ p2 :> {}) @@ B :> (p1 :> {} @@ p2 :> {}))
+/\ barriers = 0
+/\ saw = {<<p1, <<p1, 2>>, <<p1, 1>>>>, <<p2, <<p1, 1>>, Nil>>}
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> <<p1, 1>> @@
+  <<p1, 3>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil )
+/\ nextGen = 3
+/\ ui = 1
+/\ acked = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ live = {<<p1, 1>>, <<p1, 2>>}
+/\ entries = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ refused = {}
+
+State 4: <Next line 805, col 9 to line 805, col 26 of module LeanCore>
+/\ seq = 1
+/\ removals = {[path |-> p1, handle |-> <<p1, 1>>, to |-> p2, over |-> Nil]}
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>, <<p1, 2>>}
+/\ w = ( A :>
+      [ st |-> "off",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> Nil @@ p2 :> Nil),
+        instBase |-> (p1 :> Nil @@ p2 :> Nil),
+        integrated |-> {},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 0,
+        jSeq |-> 0 ] @@
+  B :>
+      [ st |-> "on",
+        pc |-> "idle",
+        local |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 0 ] )
+/\ conflicts = {}
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ holder = "none"
+/\ took = (A :> (p1 :> {} @@ p2 :> {}) @@ B :> (p1 :> {1} @@ p2 :> {}))
+/\ barriers = 0
+/\ saw = {<<p1, <<p1, 2>>, <<p1, 1>>>>, <<p2, <<p1, 1>>, Nil>>}
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> <<p1, 1>> @@
+  <<p1, 3>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil )
+/\ nextGen = 3
+/\ ui = 1
+/\ acked = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ live = {<<p1, 1>>, <<p1, 2>>}
+/\ entries = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ refused = {}
+
+State 5: <Next line 805, col 9 to line 805, col 26 of module LeanCore>
+/\ seq = 1
+/\ removals = {[path |-> p1, handle |-> <<p1, 1>>, to |-> p2, over |-> Nil]}
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>, <<p1, 2>>}
+/\ w = ( A :>
+      [ st |-> "off",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> Nil @@ p2 :> Nil),
+        instBase |-> (p1 :> Nil @@ p2 :> Nil),
+        integrated |-> {},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 0,
+        jSeq |-> 0 ] @@
+  B :>
+      [ st |-> "on",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 0 ] )
+/\ conflicts = {}
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ holder = "none"
+/\ took = (A :> (p1 :> {} @@ p2 :> {}) @@ B :> (p1 :> {1} @@ p2 :> {}))
+/\ barriers = 0
+/\ saw = {<<p1, <<p1, 2>>, <<p1, 1>>>>, <<p2, <<p1, 1>>, Nil>>}
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> <<p1, 1>> @@
+  <<p1, 3>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil )
+/\ nextGen = 3
+/\ ui = 1
+/\ acked = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ live = {<<p1, 1>>, <<p1, 2>>}
+/\ entries = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ refused = {}
+
+State 6: <Next line 805, col 9 to line 805, col 26 of module LeanCore>
+/\ seq = 1
+/\ removals = {[path |-> p1, handle |-> <<p1, 1>>, to |-> p2, over |-> Nil]}
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>, <<p1, 2>>}
+/\ w = ( A :>
+      [ st |-> "on",
+        pc |-> "idle",
+        local |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 0 ] @@
+  B :>
+      [ st |-> "on",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 0 ] )
+/\ conflicts = {}
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ holder = "none"
+/\ took = (A :> (p1 :> {1} @@ p2 :> {}) @@ B :> (p1 :> {1} @@ p2 :> {}))
+/\ barriers = 0
+/\ saw = {<<p1, <<p1, 2>>, <<p1, 1>>>>, <<p2, <<p1, 1>>, Nil>>}
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> <<p1, 1>> @@
+  <<p1, 3>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil )
+/\ nextGen = 3
+/\ ui = 1
+/\ acked = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ live = {<<p1, 1>>, <<p1, 2>>}
+/\ entries = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ refused = {}
+
+State 7: <Next line 805, col 9 to line 805, col 26 of module LeanCore>
+/\ seq = 1
+/\ removals = {}
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>, <<p1, 2>>}
+/\ w = ( A :>
+      [ st |-> "on",
+        pc |-> "idle",
+        local |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 0 ] @@
+  B :>
+      [ st |-> "on",
+        pc |-> "consumed",
+        local |-> (p1 :> Nil @@ p2 :> <<p1, 1>>),
+        baseline |-> (p1 :> <<p1, 2>> @@ p2 :> <<p1, 1>>),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1, 2},
+        queue |-> {},
+        consumed |-> {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>},
+        declared |-> {},
+        surfaced |-> {p1},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 0 ] )
+/\ conflicts = {<<p1, Nil>>, <<p1, <<p1, 2>>>>}
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ holder = "none"
+/\ took = (A :> (p1 :> {1} @@ p2 :> {}) @@ B :> (p1 :> {1, 2} @@ p2 :> {1}))
+/\ barriers = 0
+/\ saw = {<<p1, <<p1, 2>>, <<p1, 1>>>>, <<p2, <<p1, 1>>, Nil>>}
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> <<p1, 1>> @@
+  <<p1, 3>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil )
+/\ nextGen = 3
+/\ ui = 1
+/\ acked = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ live = {<<p1, 1>>, <<p1, 2>>}
+/\ entries = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ refused = {[path |-> p1, handle |-> <<p1, 1>>, to |-> p2, over |-> Nil]}
+
+State 8: <Next line 805, col 9 to line 805, col 26 of module LeanCore>
+/\ seq = 1
+/\ removals = {}
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>, <<p1, 2>>}
+/\ w = ( A :>
+      [ st |-> "on",
+        pc |-> "idle",
+        local |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 0 ] @@
+  B :>
+      [ st |-> "on",
+        pc |-> "scanned",
+        local |-> (p1 :> Nil @@ p2 :> <<p1, 1>>),
+        baseline |-> (p1 :> <<p1, 2>> @@ p2 :> <<p1, 1>>),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1, 2},
+        queue |-> {},
+        consumed |-> {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>},
+        declared |-> {},
+        surfaced |-> {p1},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> <<p1, 1>>),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 0 ] )
+/\ conflicts = {<<p1, Nil>>, <<p1, <<p1, 2>>>>}
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ holder = "none"
+/\ took = (A :> (p1 :> {1} @@ p2 :> {}) @@ B :> (p1 :> {1, 2} @@ p2 :> {1}))
+/\ barriers = 1
+/\ saw = {<<p1, <<p1, 2>>, <<p1, 1>>>>, <<p2, <<p1, 1>>, Nil>>}
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> <<p1, 1>> @@
+  <<p1, 3>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil )
+/\ nextGen = 3
+/\ ui = 1
+/\ acked = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ live = {<<p1, 1>>, <<p1, 2>>}
+/\ entries = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ refused = {[path |-> p1, handle |-> <<p1, 1>>, to |-> p2, over |-> Nil]}
+
+State 9: <Next line 805, col 9 to line 805, col 26 of module LeanCore>
+/\ seq = 1
+/\ removals = {}
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>, <<p1, 2>>}
+/\ w = ( A :>
+      [ st |-> "on",
+        pc |-> "idle",
+        local |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 0 ] @@
+  B :>
+      [ st |-> "on",
+        pc |-> "claimed",
+        local |-> (p1 :> Nil @@ p2 :> <<p1, 1>>),
+        baseline |-> (p1 :> <<p1, 2>> @@ p2 :> <<p1, 1>>),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1, 2},
+        queue |-> {},
+        consumed |-> {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>},
+        declared |-> {},
+        surfaced |-> {p1},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> <<p1, 1>>),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 0 ] )
+/\ conflicts = {<<p1, Nil>>, <<p1, <<p1, 2>>>>}
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ holder = B
+/\ took = (A :> (p1 :> {1} @@ p2 :> {}) @@ B :> (p1 :> {1, 2} @@ p2 :> {1}))
+/\ barriers = 1
+/\ saw = {<<p1, <<p1, 2>>, <<p1, 1>>>>, <<p2, <<p1, 1>>, Nil>>}
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> <<p1, 1>> @@
+  <<p1, 3>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil )
+/\ nextGen = 3
+/\ ui = 1
+/\ acked = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ live = {<<p1, 1>>, <<p1, 2>>}
+/\ entries = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ refused = {[path |-> p1, handle |-> <<p1, 1>>, to |-> p2, over |-> Nil]}
+
+State 10: <Next line 805, col 9 to line 805, col 26 of module LeanCore>
+/\ seq = 1
+/\ removals = {}
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>, <<p1, 2>>}
+/\ w = ( A :>
+      [ st |-> "on",
+        pc |-> "idle",
+        local |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 0 ] @@
+  B :>
+      [ st |-> "on",
+        pc |-> "claimed",
+        local |-> (p1 :> Nil @@ p2 :> <<p1, 1>>),
+        baseline |-> (p1 :> <<p1, 2>> @@ p2 :> <<p1, 1>>),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1, 2},
+        queue |-> {},
+        consumed |-> {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>},
+        declared |-> {},
+        surfaced |-> {p1},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> <<p1, 1>>),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> TRUE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 0 ] )
+/\ conflicts = {<<p1, Nil>>, <<p1, <<p1, 2>>>>}
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ holder = B
+/\ took = (A :> (p1 :> {1} @@ p2 :> {}) @@ B :> (p1 :> {1, 2} @@ p2 :> {1}))
+/\ barriers = 1
+/\ saw = {<<p1, <<p1, 2>>, <<p1, 1>>>>, <<p2, <<p1, 1>>, Nil>>}
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> <<p1, 1>> @@
+  <<p1, 3>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil )
+/\ nextGen = 3
+/\ ui = 1
+/\ acked = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ live = {<<p1, 1>>, <<p1, 2>>}
+/\ entries = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ refused = {[path |-> p1, handle |-> <<p1, 1>>, to |-> p2, over |-> Nil]}
+
+State 11: <Next line 805, col 9 to line 805, col 26 of module LeanCore>
+/\ seq = 1
+/\ removals = {}
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>, <<p1, 2>>}
+/\ w = ( A :>
+      [ st |-> "on",
+        pc |-> "idle",
+        local |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 0 ] @@
+  B :>
+      [ st |-> "on",
+        pc |-> "cased",
+        local |-> (p1 :> Nil @@ p2 :> <<p1, 1>>),
+        baseline |-> (p1 :> <<p1, 2>> @@ p2 :> <<p1, 1>>),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1, 2},
+        queue |-> {},
+        consumed |-> {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>},
+        declared |-> {},
+        surfaced |-> {p1},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> <<p1, 1>>),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> TRUE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> TRUE,
+        seen |-> 1,
+        jSeq |-> 1 ] )
+/\ conflicts = {<<p1, Nil>>, <<p1, <<p1, 2>>>>}
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ holder = B
+/\ took = (A :> (p1 :> {1} @@ p2 :> {}) @@ B :> (p1 :> {1, 2} @@ p2 :> {1}))
+/\ barriers = 1
+/\ saw = {<<p1, <<p1, 2>>, <<p1, 1>>>>, <<p2, <<p1, 1>>, Nil>>}
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> <<p1, 1>> @@
+  <<p1, 3>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil )
+/\ nextGen = 3
+/\ ui = 1
+/\ acked = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ live = {<<p1, 1>>, <<p1, 2>>}
+/\ entries = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ refused = {[path |-> p1, handle |-> <<p1, 1>>, to |-> p2, over |-> Nil]}
+
+State 12: <Next line 805, col 9 to line 805, col 26 of module LeanCore>
+/\ seq = 1
+/\ removals = {}
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>, <<p1, 2>>}
+/\ w = ( A :>
+      [ st |-> "on",
+        pc |-> "idle",
+        local |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 0 ] @@
+  B :>
+      [ st |-> "on",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> <<p1, 1>>),
+        baseline |-> (p1 :> <<p1, 2>> @@ p2 :> <<p1, 1>>),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1, 2},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {p1},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 1 ] )
+/\ conflicts = {<<p1, Nil>>, <<p1, <<p1, 2>>>>}
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ holder = "none"
+/\ took = (A :> (p1 :> {1} @@ p2 :> {}) @@ B :> (p1 :> {1, 2} @@ p2 :> {1}))
+/\ barriers = 1
+/\ saw = {<<p1, <<p1, 2>>, <<p1, 1>>>>, <<p2, <<p1, 1>>, Nil>>}
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> <<p1, 1>> @@
+  <<p1, 3>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil )
+/\ nextGen = 3
+/\ ui = 1
+/\ acked = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ live = {<<p1, 1>>, <<p1, 2>>}
+/\ entries = {}
+/\ refused = {[path |-> p1, handle |-> <<p1, 1>>, to |-> p2, over |-> Nil]}
+
+State 13: <Next line 805, col 9 to line 805, col 26 of module LeanCore>
+/\ seq = 1
+/\ removals = {}
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>, <<p1, 2>>}
+/\ w = ( A :>
+      [ st |-> "on",
+        pc |-> "consumed",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {p1},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 0 ] @@
+  B :>
+      [ st |-> "on",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> <<p1, 1>>),
+        baseline |-> (p1 :> <<p1, 2>> @@ p2 :> <<p1, 1>>),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1, 2},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {p1},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 1 ] )
+/\ conflicts = {<<p1, Nil>>, <<p1, <<p1, 2>>>>}
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ holder = "none"
+/\ took = (A :> (p1 :> {1} @@ p2 :> {}) @@ B :> (p1 :> {1, 2} @@ p2 :> {1}))
+/\ barriers = 1
+/\ saw = {<<p1, <<p1, 2>>, <<p1, 1>>>>, <<p2, <<p1, 1>>, Nil>>}
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> <<p1, 1>> @@
+  <<p1, 3>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil )
+/\ nextGen = 3
+/\ ui = 1
+/\ acked = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ live = {<<p1, 1>>, <<p1, 2>>}
+/\ entries = {}
+/\ refused = {}
+
+State 14: <Next line 805, col 9 to line 805, col 26 of module LeanCore>
+/\ seq = 1
+/\ removals = {}
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>, <<p1, 2>>}
+/\ w = ( A :>
+      [ st |-> "on",
+        pc |-> "scanned",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {p1},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {p1},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 0 ] @@
+  B :>
+      [ st |-> "on",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> <<p1, 1>>),
+        baseline |-> (p1 :> <<p1, 2>> @@ p2 :> <<p1, 1>>),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1, 2},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {p1},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 1 ] )
+/\ conflicts = {<<p1, Nil>>, <<p1, <<p1, 2>>>>}
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ holder = "none"
+/\ took = (A :> (p1 :> {1} @@ p2 :> {}) @@ B :> (p1 :> {1, 2} @@ p2 :> {1}))
+/\ barriers = 2
+/\ saw = {<<p1, <<p1, 2>>, <<p1, 1>>>>, <<p2, <<p1, 1>>, Nil>>}
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> <<p1, 1>> @@
+  <<p1, 3>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil )
+/\ nextGen = 3
+/\ ui = 1
+/\ acked = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ live = {<<p1, 1>>, <<p1, 2>>}
+/\ entries = {}
+/\ refused = {}
+
+State 15: <Next line 805, col 9 to line 805, col 26 of module LeanCore>
+/\ seq = 1
+/\ removals = {}
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>, <<p1, 2>>}
+/\ w = ( A :>
+      [ st |-> "on",
+        pc |-> "claimed",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {p1},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {p1},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 0 ] @@
+  B :>
+      [ st |-> "on",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> <<p1, 1>>),
+        baseline |-> (p1 :> <<p1, 2>> @@ p2 :> <<p1, 1>>),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1, 2},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {p1},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 1 ] )
+/\ conflicts = {<<p1, Nil>>, <<p1, <<p1, 2>>>>}
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ holder = A
+/\ took = (A :> (p1 :> {1} @@ p2 :> {}) @@ B :> (p1 :> {1, 2} @@ p2 :> {1}))
+/\ barriers = 2
+/\ saw = {<<p1, <<p1, 2>>, <<p1, 1>>>>, <<p2, <<p1, 1>>, Nil>>}
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> <<p1, 1>> @@
+  <<p1, 3>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil )
+/\ nextGen = 3
+/\ ui = 1
+/\ acked = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ live = {<<p1, 1>>, <<p1, 2>>}
+/\ entries = {}
+/\ refused = {}
+
+State 16: <Next line 805, col 9 to line 805, col 26 of module LeanCore>
+/\ seq = 1
+/\ removals = {}
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>, <<p1, 2>>}
+/\ w = ( A :>
+      [ st |-> "on",
+        pc |-> "claimed",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {p1},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {p1},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> TRUE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 0 ] @@
+  B :>
+      [ st |-> "on",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> <<p1, 1>>),
+        baseline |-> (p1 :> <<p1, 2>> @@ p2 :> <<p1, 1>>),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1, 2},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {p1},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 1 ] )
+/\ conflicts = {<<p1, Nil>>, <<p1, <<p1, 2>>>>}
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ holder = A
+/\ took = (A :> (p1 :> {1} @@ p2 :> {}) @@ B :> (p1 :> {1, 2} @@ p2 :> {1}))
+/\ barriers = 2
+/\ saw = {<<p1, <<p1, 2>>, <<p1, 1>>>>, <<p2, <<p1, 1>>, Nil>>}
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> <<p1, 1>> @@
+  <<p1, 3>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil )
+/\ nextGen = 3
+/\ ui = 1
+/\ acked = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ live = {<<p1, 1>>, <<p1, 2>>}
+/\ entries = {}
+/\ refused = {}
+
+State 17: <Next line 805, col 9 to line 805, col 26 of module LeanCore>
+/\ seq = 2
+/\ removals = {}
+/\ doc = (p1 :> Nil @@ p2 :> Nil)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>, <<p1, 2>>}
+/\ w = ( A :>
+      [ st |-> "on",
+        pc |-> "cased",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {p1},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {p1},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> TRUE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {<<p1, 1>>},
+        collected |-> FALSE,
+        seen |-> 2,
+        jSeq |-> 2 ] @@
+  B :>
+      [ st |-> "on",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> <<p1, 1>>),
+        baseline |-> (p1 :> <<p1, 2>> @@ p2 :> <<p1, 1>>),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1, 2},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {p1},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 1 ] )
+/\ conflicts = {<<p1, Nil>>, <<p1, <<p1, 2>>>>}
+/\ tomb = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ holder = A
+/\ took = (A :> (p1 :> {1} @@ p2 :> {}) @@ B :> (p1 :> {1, 2} @@ p2 :> {1}))
+/\ barriers = 2
+/\ saw = {<<p1, <<p1, 2>>, <<p1, 1>>>>, <<p2, <<p1, 1>>, Nil>>}
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> <<p1, 1>> @@
+  <<p1, 3>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil )
+/\ nextGen = 3
+/\ ui = 1
+/\ acked = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ live = {<<p1, 1>>, <<p1, 2>>}
+/\ entries = {}
+/\ refused = {}
+
+State 18: <Next line 805, col 9 to line 805, col 26 of module LeanCore>
+/\ seq = 2
+/\ removals = {}
+/\ doc = (p1 :> Nil @@ p2 :> Nil)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>, <<p1, 2>>}
+/\ w = ( A :>
+      [ st |-> "on",
+        pc |-> "cased",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {p1},
+        surfaced |-> {},
+        uploads |-> {},
+        deletes |-> {p1},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> TRUE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> TRUE,
+        seen |-> 2,
+        jSeq |-> 2 ] @@
+  B :>
+      [ st |-> "on",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> <<p1, 1>>),
+        baseline |-> (p1 :> <<p1, 2>> @@ p2 :> <<p1, 1>>),
+        instBase |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1, 2},
+        queue |-> {},
+        consumed |-> {},
+        declared |-> {},
+        surfaced |-> {p1},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        seen |-> 1,
+        jSeq |-> 1 ] )
+/\ conflicts = {<<p1, Nil>>, <<p1, <<p1, 2>>>>}
+/\ tomb = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ holder = A
+/\ took = (A :> (p1 :> {1} @@ p2 :> {}) @@ B :> (p1 :> {1, 2} @@ p2 :> {1}))
+/\ barriers = 2
+/\ saw = {<<p1, <<p1, 2>>, <<p1, 1>>>>, <<p2, <<p1, 1>>, Nil>>}
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> <<p1, 1>> @@
+  <<p1, 3>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil )
+/\ nextGen = 3
+/\ ui = 1
+/\ acked = {<<p1, <<p1, 2>>>>, <<p2, <<p1, 1>>>>}
+/\ live = {<<p1, 2>>}
+/\ entries = {}
+/\ refused = {}
+
+17063306 states generated, 6282527 distinct states found, 2081598 states left on queue.
+The depth of the complete state graph search is 19.
+The average outdegree of the complete state graph is 1 (minimum is 0, the maximum 14 and the 95th percentile is 4).
+Finished in 02min 50s at (2026-09-25 00:47:19)

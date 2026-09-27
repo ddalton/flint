@@ -22,18 +22,14 @@
 //! Verbs (all under `/lean/v1/{workspace}`; bearer-authenticated):
 //!
 //! UI/HITL-facing:
-//! - `PUT  /files/{path}`  — the HITL write: object PUT first, inbox
-//!   entry second, NEVER a manifest edit. Refused 409+Retry-After
-//!   while a live barrier window is open (every replica reads the
-//!   window from the CELL — the statelessness contract).
-//! - `GET  /files/{path}`  — read via the manifest citation, falling
-//!   back to an uncited-but-tracked inbox entry.
-//! - `DELETE /files/{path}` — record a DECLARED removal (delete/rename
-//!   design): the syncer performs it at its next barrier. `If-Match`
-//!   optional. 204 as soon as the intent is durable.
-//! - `POST /rename` {from, to} — server-side copy, then one CAS with
-//!   the destination entry and the source removal; `{etag}`.
-//! - `DELETE /removals/{path}` — withdraw a recorded removal.
+//! - `PUT  /files/{path}`  — the HITL write: object PUT at a fresh
+//!   handle first, then ONE manifest CAS cites it (P2, epoch 0; it never
+//!   waits on the writers' lease). Acknowledged once it is cited.
+//! - `GET  /files/{path}`  — read via the manifest citation.
+//! - `DELETE /files/{path}` — delete: ONE manifest CAS stops citing the
+//!   path (P2). `If-Match` optional. 204 once it is committed.
+//! - `POST /rename` {from, to} — ONE manifest CAS moves the citation
+//!   (the destination names the source's handle; no bytes move); `{etag}`.
 //! - `PUT  /drafts/{user}/{path}` — save a DURABLE UNPUBLISHED edit
 //!   (`drafts.rs`). Unlike `PUT /files`, nothing about this is live:
 //!   the bytes sit under the reserved namespace where no scan, no
@@ -46,8 +42,9 @@
 //!   no `/promote` suffix — see the router note.
 //! - `DELETE /drafts/{user}/{path}` — discard.
 //! - `GET  /snapshot`      — {manifest, manifest_etag, inbox}: the
-//!   sync verb's one-stop read.
-//! - `GET  /status`        — seq/window/inbox depth/epoch cell: the
+//!   sync verb's one-stop read (`inbox` carries only the standing
+//!   boundary and sync requests).
+//! - `GET  /status`        — seq/epoch cell/standing requests: the
 //!   RPO observability surface.
 //! - `POST /boundary`, `POST /sync-request` — §2.5's door: a boundary
 //!   is PERFORMED by the syncer, a sync is CARRIED to the agent as
@@ -57,9 +54,6 @@
 //! whose claimed epoch is not the cell's CURRENT epoch is rejected,
 //! closing the deposed-straggler door the model's LeanNoEpochCheck
 //! mutation proves rotation alone leaves open):
-//! - `POST /window/open`   {epoch, deadline_unix}
-//! - `POST /window/clear`  {epoch, queued: [entry]}
-//! - `POST /inbox/drop`    {epoch, consumed: [entry]}
 //! - `POST /manifest`      {manifest, expected_etag?, epoch, flush_uuid}
 //!
 //! NOT a verb, deliberately: there is no gateway-triggered `rescope`.
@@ -71,7 +65,7 @@
 //! v1 deliberate limits (recorded, not hidden): HITL writes are
 //! whole-object ≤ the configured cap (multipart via the gateway is
 //! deferred); one shared bearer (per-workspace tokens arrive with the
-//! SigV4/TokenReview deferral); HITL deletes are not a verb yet.
+//! SigV4/TokenReview deferral).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -84,7 +78,6 @@ use warp::{Filter, Reply};
 use flint_store::ObjectStore;
 
 use crate::drafts::DraftRow;
-use flint_lean::inbox::InboxEntry;
 use flint_lean::manifest::LeanManifest;
 use crate::workspace::{PutFile, VerbError, Workspace};
 
@@ -97,6 +90,8 @@ pub struct GatewayCore {
     pub token: String,
     /// Whole-object ceiling for HITL PUTs.
     pub max_put_bytes: u64,
+    /// One manifest cache per workspace, shared by its requests (M8).
+    pub manifests: crate::workspace::ManifestCaches,
 }
 
 impl GatewayCore {
@@ -105,7 +100,11 @@ impl GatewayCore {
     pub fn workspace(&self, ws: &str) -> Option<Workspace> {
         self.workspaces
             .get(ws)
-            .map(|p| Workspace::new(self.store.clone(), p).with_max_put_bytes(self.max_put_bytes))
+            .map(|p| {
+                Workspace::new(self.store.clone(), p)
+                    .with_max_put_bytes(self.max_put_bytes)
+                    .with_manifest_cache(self.manifests.for_prefix(p))
+            })
     }
 }
 
@@ -181,25 +180,6 @@ fn token_ok(expected: &str, header: Option<&str>) -> bool {
 }
 
 // ── request bodies ───────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct WindowOpenReq {
-    epoch: u64,
-    deadline_unix: u64,
-}
-
-#[derive(Deserialize)]
-struct WindowClearReq {
-    epoch: u64,
-    #[serde(default)]
-    queued: Vec<InboxEntry>,
-}
-
-#[derive(Deserialize)]
-struct InboxDropReq {
-    epoch: u64,
-    consumed: Vec<InboxEntry>,
-}
 
 #[derive(Deserialize)]
 struct ManifestCasReq {
@@ -321,15 +301,6 @@ pub fn routes(
         .and(warp::body::json::<RenameReq>())
         .then(handle_rename).boxed();
 
-    let removal_withdraw = warp::delete()
-        .and(authed.clone())
-        .and(with_core.clone())
-        .and(warp::path!("lean" / "v1" / String / "removals" / ..))
-        .and(warp::path::tail())
-        .then(|_auth, core: Arc<GatewayCore>, ws: String, tail: warp::path::Tail| {
-            handle_removal_withdraw(core, ws, tail.as_str().to_string())
-        }).boxed();
-
     // ── drafts (`drafts.rs`) ─────────────────────────────────────────
     //
     // Method-keyed, with the workspace path in the tail and NO verb
@@ -417,27 +388,6 @@ pub fn routes(
         .and(warp::path!("lean" / "v1" / String / "status"))
         .then(handle_status).boxed();
 
-    let window_open = warp::post()
-        .and(authed.clone())
-        .and(with_core.clone())
-        .and(warp::path!("lean" / "v1" / String / "window" / "open"))
-        .and(warp::body::json::<WindowOpenReq>())
-        .then(handle_window_open).boxed();
-
-    let window_clear = warp::post()
-        .and(authed.clone())
-        .and(with_core.clone())
-        .and(warp::path!("lean" / "v1" / String / "window" / "clear"))
-        .and(warp::body::json::<WindowClearReq>())
-        .then(handle_window_clear).boxed();
-
-    let inbox_drop = warp::post()
-        .and(authed.clone())
-        .and(with_core.clone())
-        .and(warp::path!("lean" / "v1" / String / "inbox" / "drop"))
-        .and(warp::body::json::<InboxDropReq>())
-        .then(handle_inbox_drop).boxed();
-
     // §2.5's gateway door. Two verbs, deliberately asymmetric: a
     // boundary is PERFORMED by the syncer, a sync is CARRIED to the
     // agent as advisory news (D14).
@@ -471,7 +421,6 @@ pub fn routes(
         .or(files_get).unify()
         .or(files_delete).unify()
         .or(rename).unify()
-        .or(removal_withdraw).unify()
         // The exact-match list route goes BEFORE the tail routes: a
         // tail filter matches `/drafts/{u}` with an EMPTY tail, which
         // `path_ok` then refuses as a bad path instead of listing.
@@ -482,9 +431,6 @@ pub fn routes(
         .or(draft_promote).unify()
         .or(snapshot).unify()
         .or(status).unify()
-        .or(window_open).unify()
-        .or(window_clear).unify()
-        .or(inbox_drop).unify()
         .or(boundary_req).unify()
         .or(sync_req).unify()
         .or(manifest_cas).unify()
@@ -562,18 +508,6 @@ async fn handle_rename(
     let Some(w) = core.workspace(&ws) else { return unknown_workspace(ws) };
     match w.rename_file(&req.from, &req.to, author.as_deref()).await {
         Ok(etag) => ok_json(&EtagResp { etag }),
-        Err(e) => reply_err(e),
-    }
-}
-
-async fn handle_removal_withdraw(
-    core: Arc<GatewayCore>,
-    ws: String,
-    path: String,
-) -> warp::reply::Response {
-    let Some(w) = core.workspace(&ws) else { return unknown_workspace(ws) };
-    match w.withdraw_removal(&path).await {
-        Ok(()) => warp::reply::with_status("", StatusCode::NO_CONTENT).into_response(),
         Err(e) => reply_err(e),
     }
 }
@@ -705,45 +639,6 @@ async fn handle_sync_request(
     }
 }
 
-async fn handle_window_open(
-    _auth: (),
-    core: Arc<GatewayCore>,
-    ws: String,
-    req: WindowOpenReq,
-) -> warp::reply::Response {
-    let Some(w) = core.workspace(&ws) else { return unknown_workspace(ws) };
-    match w.open_window(req.epoch, req.deadline_unix).await {
-        Ok(()) => ok_json(&serde_json::json!({"open": true})),
-        Err(e) => reply_err(e),
-    }
-}
-
-async fn handle_window_clear(
-    _auth: (),
-    core: Arc<GatewayCore>,
-    ws: String,
-    req: WindowClearReq,
-) -> warp::reply::Response {
-    let Some(w) = core.workspace(&ws) else { return unknown_workspace(ws) };
-    match w.clear_window(req.epoch, &req.queued).await {
-        Ok(()) => ok_json(&serde_json::json!({"cleared": true})),
-        Err(e) => reply_err(e),
-    }
-}
-
-async fn handle_inbox_drop(
-    _auth: (),
-    core: Arc<GatewayCore>,
-    ws: String,
-    req: InboxDropReq,
-) -> warp::reply::Response {
-    let Some(w) = core.workspace(&ws) else { return unknown_workspace(ws) };
-    match w.drop_inbox(req.epoch, &req.consumed).await {
-        Ok(()) => ok_json(&serde_json::json!({"dropped": true})),
-        Err(e) => reply_err(e),
-    }
-}
-
 async fn handle_manifest_cas(
     _auth: (),
     core: Arc<GatewayCore>,
@@ -779,22 +674,20 @@ mod tests {
             (VerbError::PreconditionRequired, 428, "precondition-required", None, None),
             (VerbError::FileChanged { current: Some("\"e1\"".into()) }, 412, "file-changed", None, Some("\"e1\"")),
             (VerbError::FileChanged { current: None }, 412, "file-changed", None, None),
-            (VerbError::WindowOpen { retry_after_secs: 17, message: "w".into() }, 409, "barrier-window-open", Some(17), None),
             (VerbError::ConcurrentWrite, 409, "concurrent-write", Some(2), None),
             (VerbError::Moved, 409, "moved", Some(2), None),
             (VerbError::NoSuchFile("p".into()), 404, "no-such-file", None, None),
             (VerbError::ForeignWrite { path: "p".into() }, 410, "foreign-write", None, None),
             (VerbError::TooLarge { size: 2, max: 1 }, 413, "payload-too-large", None, None),
             (VerbError::DestinationExists { path: "p".into(), current: Some("\"e3\"".into()) }, 409, "destination-exists", Some(2), None),
-            (VerbError::NoRemoval("p".into()), 404, "no-removal", None, None),
             (VerbError::NoDraft("d".into()), 404, "no-draft", None, None),
             (VerbError::DraftStale { current: Some("\"e2\"".into()), message: "s".into() }, 409, "draft-stale", Some(2), Some("\"e2\"")),
             (VerbError::DraftMoved("p".into()), 409, "draft-moved", Some(2), None),
             (VerbError::StaleEpoch { cell_epoch: 3, holder_id: "h".into(), claimed: 2 }, 403, "stale-epoch", None, None),
             (VerbError::NoHolder, 403, "no-holder", None, None),
-            (VerbError::Fenced("f".into()), 403, "fenced", None, None),
             (VerbError::ReadOnly, 403, "read-only", None, None),
             (VerbError::CasMiss { current: None }, 409, "cas-miss", Some(2), None),
+            (VerbError::Corrupt { path: "p".into(), want: "a".into(), got: "b".into() }, 502, "corrupt", None, None),
             (VerbError::CitationPending { path: "p".into(), etag: "e".into(), reason: "r".into() }, 202, "citation-pending", None, None),
             (VerbError::Superseded { path: "p".into(), cited_etag: "e".into() }, 409, "superseded", Some(2), None),
             (VerbError::Encode("e".into()), 500, "encode", None, None),

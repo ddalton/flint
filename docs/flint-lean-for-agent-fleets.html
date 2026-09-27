@@ -380,9 +380,12 @@ cat /workspace/.flint/publish.ack
 </code></pre>
 <p><code>status: "ok"</code> means <strong>the named boundary is in the bucket</strong> — not
 queued, not scheduled — and it carries your change. <code>partial</code> means the
-boundary landed without some path (named in <code>report.dropped</code>: another
-writer's edit outranked your delete, or an upload changed under the
-syncer), and the next boundary publishes it. A boundary that lost its turn
+boundary landed without some path, named in <code>report.dropped</code>: an upload
+that changed under the syncer, which the next boundary publishes, or a
+path another writer or the UI deleted after your boundary carried it,
+where their delete stands (write the file again to bring it back). Your
+delete over their newer version is not dropped: it lands, and their
+version is kept under a conflict record. A boundary that lost its turn
 at the publish fence is retried by the cadence, so an ack is late rather
 than refused. <code>uploaded: 0</code> on an <code>ok</code> just means nothing had changed
 since the last boundary.</p>
@@ -395,8 +398,9 @@ with the verbs off, and 20 with them on.</p>
 # tenants/proj1/.flint/lean/claim
 # tenants/proj1/.flint/lean/current            ← the manifest POINTER
 # tenants/proj1/.flint/lean/epoch              ← the writers' publish fence
-# tenants/proj1/.flint/lean/inbox
-# tenants/proj1/files/notes.txt                ← your tree lives here
+# tenants/proj1/.flint/lean/inbox              ← "please publish" / "please pull" requests
+# tenants/proj1/.flint/lean/retired/…          ← what a commit stopped citing, kept 10 min
+# tenants/proj1/files/notes.txt@6f1c…          ← your tree lives here, one object per version
 </code></pre>
 <p>The <code>files/</code> prefix is the workspace. <code>.flint/lean/</code> is control state.
 To see which clock installed the current boundary:</p>

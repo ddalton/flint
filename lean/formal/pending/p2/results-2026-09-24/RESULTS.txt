@@ -1,0 +1,17 @@
+P2LiveHolds              MISMATCH           exp=HOLDS                  rc=1   |  |  | 
+P2DONE
+P2RenameTwoCAS           OK-FIRES           exp=Inv_OneName            rc=12  | Error: Invariant Inv_OneName is violated | 14 states generated, 12 distinct | Finished in 00s at 
+P2SweepNoGrace           OK-FIRES           exp=Inv_CitationsLive      rc=12  | Error: Invariant Inv_CitationsLive is violated | 41977 states generated, 16584 distinct | Finished in 01s at 
+P2GatewayBlind           OK-FIRES           exp=Prop_NoSilentRevert    rc=13  | Error: Action property Prop_NoSilentRevert is violated | 208860 states generated, 72639 distinct | Finished in 04s at 
+P2CommitBlind            OK-FIRES           exp=Prop_NoSilentRevert    rc=13  | Error: Action property Prop_NoSilentRevert is violated | 187897 states generated, 65513 distinct | Finished in 03s at 
+P2VerifyOff              OK-FIRES           exp=Inv_CitationsLive      rc=12  | Error: Invariant Inv_CitationsLive is violated | 11782291 states generated, 3934843 distinct | Finished in 02min 14s at 
+P2SweepFree              OK-FIRES           exp=Inv_CitationsLive      rc=12  | Error: Invariant Inv_CitationsLive is violated | 424215 states generated, 143381 distinct | Finished in 06s at 
+P2ProbeStalledSave       OK-FIRES           exp=ProbeStalledSave       rc=12  | Error: Invariant ProbeStalledSave is violated | 4694 states generated, 2278 distinct | Finished in 01s at 
+P2ProbeSavedUnderLease   OK-FIRES           exp=ProbeSavedUnderLease   rc=13  | Error: Action property ProbeSavedUnderLease is violated | 12885 states generated, 5615 distinct | Finished in 01s at 
+P2ProbeRenamed           OK-FIRES           exp=ProbeRenamed           rc=12  | Error: Invariant ProbeRenamed is violated | 17 states generated, 14 distinct | Finished in 00s at 
+P2ProbeSurfaced          OK-FIRES           exp=ProbeSurfaced          rc=12  | Error: Invariant ProbeSurfaced is violated | 31340 states generated, 12501 distinct | Finished in 01s at 
+P2LiveWaitsOnLease       OK-FIRES           exp=Temporal               rc=13  | Error: Temporal properties were violated | 83170 states generated, 34274 distinct | Finished in 03s at 
+P2ForeignFlat            RECORDED           exp=?                      rc=13  | Error: Action property Prop_NoSilentRevert is violated | 232567 states generated, 81221 distinct | Finished in 04s at 
+P2Holds                  OK-HOLDS           exp=HOLDS                  rc=0   | No error has been found | 35636399 states generated, 11642977 distinct | Finished in 07min 25s at 
+P2LiveHolds              OK-HOLDS           exp=HOLDS                  rc=0   | No error has been found | 35636399 states generated, 11642977 distinct | Finished in 18min 08s at 
+P2DONE

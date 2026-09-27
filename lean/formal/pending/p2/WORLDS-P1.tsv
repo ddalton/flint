@@ -1,0 +1,22 @@
+P1ProbeRestartAfterCas	Action property ProbeRestartAfterCas
+P2RProbeRestartAfterCas	Action property ProbeRestartAfterCas
+P1ProbeConverged	Action property ProbeConverged
+P1ProbeDeleteOverTheirs	Action property ProbeDeleteOverTheirs
+P1WithoutP2	Invariant Inv_NoRegress
+P1DeleteOutranked	Action property Prop_DeleteSettles
+P1CommitBlind	Action property Prop_NoSilentRevert
+P1VerifyOff	Invariant Inv_CitationsLive
+P1ProbeRepublish	?
+P2RProbeRepublish	?
+P1ForeignFlat	?
+P1NoConvergence	?
+P1Holds	HOLDS
+P2RHolds	HOLDS
+P1LiveHolds	HOLDS
+P2RSyncNoPrune	Invariant Inv_NoRegress
+P2RSyncPruned	HOLDS
+P1SyncNoRegress	HOLDS
+P1Holds1p3b	HOLDS
+P2RHolds1p3b	Action property Prop_NoSilentRevert
+P1Holds2pNoRestart	HOLDS
+P2RHolds2pNoRestart	HOLDS

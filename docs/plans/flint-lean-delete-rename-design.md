@@ -8,6 +8,15 @@ this document says why, what the shape of the fix is, and the one thing
 about it that turns out to be better than the agent-side behaviour it
 copies.
 
+**Superseded in mechanism by simplification step 5 (P2, 2026-09-25).** A
+delete or rename is no longer DECLARED in the inbox cell and performed by a
+syncer: the gateway commits it as one manifest CAS of its own, deleting no
+object (`lean/gateway/README.md`, "Delete and rename"; `lean/PROTOCOL.md`).
+What this document says about why a caller must never delete a cited
+object, and why a rename is a citation move in one generation, still
+holds; the declare-then-perform machinery, `withdraw_removal` and the
+refused-removal records are gone.
+
 Scope note: everything here is equally a library and an HTTP feature.
 `gateway.rs` is a shell over `inbox.rs` (§8), so a verb that lands in
 the library is reachable from both without a second implementation.

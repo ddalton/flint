@@ -35,7 +35,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::{
-    gate, BootstrapReport, ComposeSpec, EpochLease, EpochState, GenerationStamps, LifecycleView,
+    gate, BootstrapReport, ComposeSpec, DeleteManyReport, EpochLease, EpochState,
+    GenerationStamps, LifecycleView,
     ListedObject, ListedVersion, ObjectMeta, ObjectStore, PendingUpload, PresignedPut, PutCondition,
     RequestCounts, RetentionOutcome, StoreError, StoreResult,
 };
@@ -94,6 +95,12 @@ impl<S: ObjectStore + ?Sized> ObjectStore for ReadOnly<S> {
 
     async fn delete_if_match(&self, key: &str, _etag: &str) -> StoreResult<()> {
         refuse("delete_if_match", key)
+    }
+
+    async fn delete_many(&self, keys: &[String]) -> StoreResult<DeleteManyReport> {
+        // Refused whole: a partial batch is a write either way, and the
+        // report's `failed` list is for a backend's refusal, not ours.
+        refuse("delete_many", keys.first().map(String::as_str).unwrap_or("(no keys)"))
     }
 
     async fn delete_version(&self, key: &str, _version_id: &str) -> StoreResult<()> {
@@ -257,7 +264,8 @@ mod tests {
     /// The trait's writes. Each must be refused without a request.
     const WRITES: &[&str] = &[
         "put_whole", "copy_object", "compose_generation", "delete", "delete_if_match",
-        "delete_version", "presign_put", "ensure_noncurrent_retention", "abort_upload",
+        "delete_many", "delete_version", "presign_put", "ensure_noncurrent_retention",
+        "abort_upload",
         "bootstrap", "epoch_acquire", "epoch_renew", "epoch_release", "epoch_enqueue",
         "epoch_handoff",
     ];
@@ -405,6 +413,10 @@ mod tests {
         async fn delete_if_match(&self, key: &str, etag: &str) -> StoreResult<()> {
             self.saw("delete_if_match");
             self.inner.delete_if_match(key, etag).await
+        }
+        async fn delete_many(&self, keys: &[String]) -> StoreResult<DeleteManyReport> {
+            self.saw("delete_many");
+            self.inner.delete_many(keys).await
         }
         async fn head_version(&self, key: &str, version_id: &str) -> StoreResult<ObjectMeta> {
             self.saw("head_version");
@@ -556,7 +568,8 @@ mod tests {
         };
         let spec = ComposeSpec {
             key: "p/composed",
-            local_path: std::path::Path::new("/nonexistent"),
+            // Refused before any part moves: nothing is ever read.
+            local: None,
             parts: vec![PartSource::Local { offset: 0, len: 1 }],
             base_key: None,
             base_etag: None,
@@ -571,6 +584,7 @@ mod tests {
         expect_refused("compose_generation", ro.compose_generation(&spec).await.map(drop));
         expect_refused("delete", ro.delete("p/k").await);
         expect_refused("delete_if_match", ro.delete_if_match("p/k", &v2.etag).await);
+        expect_refused("delete_many", ro.delete_many(&["p/k".to_string()]).await.map(drop));
         expect_refused("delete_version", ro.delete_version("p/k", v1.version_id.as_deref().unwrap()).await);
         expect_refused("presign_put", ro.presign_put("p/k", 60, &[0; 32]).await.map(drop));
         expect_refused("ensure_noncurrent_retention", ro.ensure_noncurrent_retention("p/", 30).await.map(drop));

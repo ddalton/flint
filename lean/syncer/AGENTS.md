@@ -148,7 +148,11 @@ JSON, not written as `[]`.
   delete publishes with a `consume-dirty` record naming the preserved
   copy. Or its upload published nothing: a large file that changed
   while it was being sent, or whose upload was cleaned away before it
-  finished. Treat it as a failure for those paths and touch again.
+  finished. Or another writer deleted a file of yours after your
+  boundary published it, and before this answer was written (the
+  syncer restarted, or its first answer failed): the file is still in
+  your tree, and leaves it at the next boundary. Treat it as a failure
+  for those paths and touch again.
 - `boundary: "sentinel-deferred"` — your touch was honoured by the
   cadence tick rather than at once: it arrived inside
   `sentinel_min_interval_secs` of the previous boundary, or the hourly

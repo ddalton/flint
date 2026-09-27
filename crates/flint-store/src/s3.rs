@@ -612,18 +612,20 @@ fn dt_unix(dt: Option<&aws_sdk_s3::primitives::DateTime>) -> Option<u64> {
 
 /// Read one local range on the blocking pool (parts can be hundreds of
 /// MiB; never on the executor).
-async fn read_local(path: &std::path::Path, offset: u64, len: u64) -> StoreResult<Bytes> {
-    let pb = path.to_path_buf();
-    let label = pb.display().to_string();
+/// Read one part from the descriptor the caller opened. NO open, no
+/// path, and so no window between the caller's open and this read: the
+/// reopen this replaced followed a swapped DIRECTORY component and
+/// published bytes from outside the workspace (review 2026-09-18, H5).
+async fn read_local(
+    file: &std::sync::Arc<std::fs::File>,
+    key: &str,
+    offset: u64,
+    len: u64,
+) -> StoreResult<Bytes> {
+    let f = file.clone();
+    let label = key.to_string();
     tokio::task::spawn_blocking(move || -> std::io::Result<Bytes> {
-        use std::os::unix::fs::{FileExt, OpenOptionsExt};
-        // Never follow a symlink at the final component: the syncer's
-        // scan skipped symlinks and a swap after the scan must not read
-        // the link's target (flint-lean review 2026-09-12, atomicity-6).
-        let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&pb)?;
-        if !f.metadata()?.is_file() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"));
-        }
+        use std::os::unix::fs::FileExt;
         let mut buf = vec![0u8; len as usize];
         f.read_exact_at(&mut buf, offset)?;
         Ok(Bytes::from(buf))
@@ -825,7 +827,7 @@ impl ObjectStore for S3Store {
             key: dst_key,
             // Unused: every part is a BaseCopy, so nothing is read
             // locally. Named so a future Local part fails loudly.
-            local_path: std::path::Path::new("/nonexistent/copy-object-reads-nothing-locally"),
+            local: None, // a pure BaseCopy spec reads nothing locally
             parts,
             base_key: Some(src_key),
             base_etag: guard,
@@ -1123,6 +1125,72 @@ impl ObjectStore for S3Store {
             .await
             .map_err(|e| map_err("delete-if-match", e))?;
         Ok(())
+    }
+
+    /// `DeleteObjects`, a thousand keys per request. A backend that has
+    /// no batch verb (Ozone's support is probed by the drill, not
+    /// assumed) answers the first batch with an error that is not a
+    /// credential problem; that chunk and every later one then go key
+    /// by key through the plain DELETE, which every S3 dialect has.
+    async fn delete_many(&self, keys: &[String]) -> StoreResult<DeleteManyReport> {
+        use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+        let mut report = DeleteManyReport::default();
+        let mut batch_verb = true;
+        for chunk in keys.chunks(1000) {
+            if batch_verb {
+                self.requests.bump(crate::RequestKind::Delete);
+                let mut objects = Vec::with_capacity(chunk.len());
+                for k in chunk {
+                    objects.push(
+                        ObjectIdentifier::builder()
+                            .key(k)
+                            .build()
+                            .map_err(|e| StoreError::Other(format!("delete_many: {e}")))?,
+                    );
+                }
+                let del = Delete::builder()
+                    .set_objects(Some(objects))
+                    .quiet(true)
+                    .build()
+                    .map_err(|e| StoreError::Other(format!("delete_many: {e}")))?;
+                match self.client.delete_objects().bucket(&self.bucket).delete(del).send().await {
+                    Ok(out) => {
+                        let failed: Vec<(String, String)> = out
+                            .errors()
+                            .iter()
+                            .map(|e| {
+                                (
+                                    e.key().unwrap_or_default().to_string(),
+                                    format!(
+                                        "{}: {}",
+                                        e.code().unwrap_or_default(),
+                                        e.message().unwrap_or_default()
+                                    ),
+                                )
+                            })
+                            .collect();
+                        report.deleted += chunk.len() - failed.len();
+                        report.failed.extend(failed);
+                        continue;
+                    }
+                    Err(e) => {
+                        let mapped = map_err("delete_many", e);
+                        if matches!(mapped, StoreError::Auth(_)) {
+                            return Err(mapped);
+                        }
+                        warn!("delete_many: the batch verb failed ({mapped}); collecting key by key");
+                        batch_verb = false;
+                    }
+                }
+            }
+            for key in chunk {
+                match self.delete(key).await {
+                    Ok(()) | Err(StoreError::NotFound(_)) => report.deleted += 1,
+                    Err(e) => report.failed.push((key.clone(), e.to_string())),
+                }
+            }
+        }
+        Ok(report)
     }
 
     async fn head_version(&self, key: &str, version_id: &str) -> StoreResult<ObjectMeta> {
@@ -1781,7 +1849,13 @@ impl S3Store {
                     Some(g) => Some(g.acquire(*len).await),
                     None => None,
                 };
-                let bytes = read_local(spec.local_path, *offset, *len).await?;
+                let file = spec.local.as_ref().ok_or_else(|| {
+                    StoreError::Other(format!(
+                        "compose of {}: a Local part with no open descriptor",
+                        spec.key
+                    ))
+                })?;
+                let bytes = read_local(file, spec.key, *offset, *len).await?;
                 // Hashed on a blocking thread while this part's PUT is
                 // in flight, so hashing costs the upload nothing on the
                 // wire.

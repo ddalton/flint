@@ -51,6 +51,9 @@
 //!   FLINT_SYNC_UNTRACKED_SWEEP_SECS  how often a writer tracks a lost writer's
 //!                                 uncited upload (finding 10; default 3600, 0 = off)
 //!   FLINT_SYNC_UNTRACKED_GRACE_SECS  drill-only: that sweep's grace (default 600)
+//!   FLINT_SYNC_RETIRE_GRACE_SECS  how long a replaced handle or chunk stays
+//!                                 after the commit that retired it (M1;
+//!                                 default 600, 0 = at once)
 //!   FLINT_SYNC_MAX_BYTES/_FILES   checkout budgets (0 = unlimited)
 //!   FLINT_SYNC_CHECKOUT_SCOPE     comma list of path prefixes; checkout
 //!                                 materialises ONLY what they cover.
@@ -271,6 +274,8 @@ async fn main() {
     cfg.drill_hold_gc_secs = env_u64("FLINT_SYNC_DRILL_HOLD_GC_SECS", 0);
     // Finding 10: how often a writer tracks a lost writer's uncited upload.
     cfg.untracked_sweep_secs = env_u64("FLINT_SYNC_UNTRACKED_SWEEP_SECS", 3600);
+    // M1: a replaced handle or chunk stays this long after its retirement.
+    cfg.retire_grace_secs = env_u64("FLINT_SYNC_RETIRE_GRACE_SECS", flint_lean::manifest::RETIRE_GRACE_SECS);
     // Drill-only: the sweep's grace, shortened so a host leg need not wait
     // ten minutes. The gateway's own overwrite grace does not move with it.
     cfg.untracked_grace_secs =
@@ -570,7 +575,7 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
     sc.checkout_scoped(verbs::env_list("FLINT_SYNC_CHECKOUT_SCOPE")).await?;
     // RE-RUN the preflight rather than republishing the pre-checkout
     // snapshot (review: U25). Two of the preflight's inputs are written
-    // BY checkout — `baseline.inst_base` wholesale, and the posture file
+    // BY checkout — the baseline's citations wholesale, and the posture file
     // itself, from checkout's own fresher verdict — so passing the
     // `posture` computed above clobbered a newer answer with an older
     // one, and D0.4's fleet-visible verdict could advertise verbs as

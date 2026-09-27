@@ -288,6 +288,25 @@ def convert(lines):
         # peer's delete retired).  A trace's "superseded" tombstone is a
         # DIFFERENT etag at the key on S3, so the replays are unchanged.
         "GCFencePerDelete": True, "TombstoneNamesRetired": True,
+        # Review 2026-09-18, H10: the code journals what each carrying
+        # install published, and the ack reads it.
+        "AckFromCarrier": True,
+        # Review 2026-09-18, H2: the commit's fence read follows its load.
+        "FenceAfterLoad": True,
+        # Review 2026-09-18, H4: a removal carries the version it named.
+        "RemovalNamesGen": True,
+        # Immutable object handles (design 2026-09-19): NOT the code's shape
+        # yet.  A trace is the shipped syncer's, so the arm is off and the
+        # design's three rules carry their defaults.
+        "ImmutableObjects": False, "RetirePerPath": False,
+        "SweepSparesTracked": True, "SweepUnderLease": True,
+        "CommitSurfacesForeign": True, "RenameMovesEntry": True,
+        "AnsweredRecordsApply": True, "RepairRespectsMoves": True,
+        "RepairYieldsToLaterUI": True, "PendingAdoptionStays": True,
+        # L-123 (sync prunes the queue) and L-125 (step 7 drops an outranked
+        # declared removal's baseline) are fixes of 2026-09-23/24; the traces
+        # in traces/ are the 2026-09-15 code's, which had neither.
+        "QueueYieldsToSync": False, "OutrankedRemovalLeavesBaseline": False,
     }
     return steps, consts, paths, free, gen
 
@@ -318,10 +337,12 @@ def write_out(steps, consts, paths, free, gen, evs_count, outdir: Path, name: st
     # world TLC invented.
     cfg += [f"INVARIANT {i}" for i in (
         "TypeOK", "Inv_HITLDurable", "Inv_NoDangling", "Inv_NoStragglerInstall",
-        "Inv_NoDeposedPut", "Inv_NoResurrection", "Inv_HITLTracked",
+        "Inv_NoDeposedPut", "Inv_HITLTracked",
         "Inv_CommitExclusive", "Inv_CellHeldByHolder", "Inv_NoStaleOverride",
         # Convergence, which only bites where the replay comes to rest.
         "Inv_QuiescentConverged")]
+    # H9 (2026-09-19): no-resurrection is an ACTION property now.
+    cfg += ["PROPERTY Prop_NoResurrection"]
     cfg += ["INVARIANT TraceProgress", "INVARIANT TraceIncomplete"]
     (outdir / "TraceLean.cfg").write_text("\n".join(cfg) + "\n")
     m = [f"{n + 1}\t{r['ev']}\tline {i + 1}" for n, (r, i) in enumerate(steps)]

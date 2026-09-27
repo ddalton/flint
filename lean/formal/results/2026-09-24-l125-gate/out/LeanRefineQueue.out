@@ -1,0 +1,31 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 82 and seed 4532273972138138931 with 6 workers on 8 cores with 14564MB heap and 64MB offheap memory [pid: 120278] (Linux 6.12.0-061200-generic amd64, Ubuntu 21.0.11 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file /home/ddalton/lean-l125-2026-09-24/LeanRefine.tla
+Parsing file /home/ddalton/lean-l125-2026-09-24/LeanSubtree.tla
+Parsing file /tmp/Naturals.tla
+Parsing file /tmp/FiniteSets.tla
+Parsing file /tmp/Sequences.tla
+Parsing file /tmp/TLC.tla
+Parsing file /home/ddalton/lean-l125-2026-09-24/LeanCore.tla
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module LeanSubtree
+Semantic processing of module LeanCore
+Semantic processing of module LeanRefine
+Starting... (2026-09-25 00:48:13)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-09-25 00:48:13.
+Progress(15) at 2026-09-25 00:48:16: 21,388 states generated (21,388 s/min), 8,446 distinct states found (8,446 ds/min), 3,219 states left on queue.
+Progress(24) at 2026-09-25 00:49:16: 653,307 states generated (631,919 s/min), 237,499 distinct states found (229,053 ds/min), 49,772 states left on queue.
+Progress(28) at 2026-09-25 00:50:16: 1,261,700 states generated (608,393 s/min), 433,708 distinct states found (196,209 ds/min), 41,179 states left on queue.
+Model checking completed. No error has been found.
+  Estimates of the probability that TLC did not check all reachable states
+  because two distinct states had the same fingerprint:
+  calculated (optimistic):  val = 3.8E-8
+  based on the actual fingerprints:  val = 8.9E-9
+1768710 states generated, 606916 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 40.
+The average outdegree of the complete state graph is 1 (minimum is 0, the maximum 6 and the 95th percentile is 2).
+Finished in 02min 56s at (2026-09-25 00:51:09)

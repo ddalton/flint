@@ -1,9 +1,9 @@
 //! Read access (per-user access design §4.4): the floor tick of a syncer
 //! that follows the workspace and never writes to the bucket.
 //!
-//! A writer's boundary integrates other writers' changes and the inbox
-//! into its tree as a side effect of publishing. A reader has nothing to
-//! publish, so its tick is the pull alone: the inbox cell and the
+//! A writer's boundary takes other writers' and the gateway's commits into
+//! its tree in its first step (the consume). A reader has nothing to
+//! publish, so its tick is the pull alone: the request cell and the
 //! manifest pointer — the same two GETs an idle writer's tick makes —
 //! and a whole-tree `sync` when either has moved since the last pull.
 //! `sync` makes no store writes (`sync.rs`), applies only onto paths the
@@ -13,8 +13,7 @@
 //!
 //! What moved is judged by the two documents' etags, remembered here
 //! rather than read off the baseline: `sync` deliberately leaves
-//! `baseline.manifest_etag` where it was (a writer's next merge must
-//! still see a manifest change an inbox overlay hid), so the baseline
+//! `baseline.manifest_etag` where it was (`sync.rs`), so the baseline
 //! would report "moved" on every tick and turn an idle reader into a
 //! manifest download per floor.
 

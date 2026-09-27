@@ -10,17 +10,42 @@ review's confirmed counterexamples, and the syncer implementation
 196-run gate): lean is a separate system that consumes `tier::store` as
 a library. Nothing here is wired into `scripts/check-tla.sh`.
 
+## The shipped shape: LeanP1.tla (step 5, 2026-09-25)
+
+**Read this first.** Since simplification step 5 the code is modelled by
+`LeanP1.tla`: the gateway commits each UI verb (P2), a writer's baseline is
+its merge base and what its tree is owed is derived at each consume
+(P1-lite, with the cheap path as state: `derived`, `skipped` — the scan trigger), a delete over
+theirs applies and theirs is recorded (M3), and a commit's retirements are
+collected only after the retire age G (M1, with a reader ghost).
+`../PROTOCOL.md` is written from it. Everything below this section —
+`LeanSubtree.tla`, `LeanCore.tla`, the 182-run `check.sh` gate — models the
+shape before step 5 (the inbox cell, the writer-local queue, citation
+repairs) and is the record of what was checked on it.
+
+```
+./gen-leanp1.sh                                   # the 28 worlds' cfgs
+results/2026-09-25-leanp1-gate/run-leanp1.sh      # the gate (a big box)
+./trace/trace-check-core.sh                       # the code's traces against it
+```
+
+Expectations were written before any run (`WORLDS-LeanP1.tsv`). The trace
+check accepts 41/41 (`results/2026-09-25-tracecore-on-leanp1/`). **The
+gate has not passed:** its first run (2026-09-25) reports
+`Inv_ShortcutSound` violated in both shipped worlds (`LeanP1Holds`,
+`LeanP1Holds1p3b`).
+
 ## Running
 
 ```
-./check.sh              # the 123-run gate (runs view-census.py first)
+./check.sh              # the 141-run gate (runs view-census.py first)
 ./gen-cfgs.sh           # regenerate the cfg matrix
 ./trace/trace-check.sh  # the model against syncer traces (below)
 ```
 
-A hundred and thirty-six runs, ALL required: 37 strict (must hold), 54 mutations
+A hundred and eighty-two runs, ALL required: 51 strict (must hold), 74 mutations
 (must find their designated counterexample — a model that cannot
-rediscover its bug classes proves nothing), 45 probes (must be violated
+rediscover its bug classes proves nothing), 57 probes (must be violated
 — each names an ACTION via a ghost only that action writes; probe the
 action, never the situation). The three numbers are `grep -c "^strict_run "`,
 `grep "^mutation_run " | grep -vc Probe` and `grep "^mutation_run " |
@@ -110,7 +135,7 @@ Invariants:
 | `Inv_NoStaleOverride` | no commit replaces a citation the key still holds with a generation of its own upload the key no longer holds (barrier lease) | `LeanBarrierLeaseSameBytesOverride` (finding 13's second route: a peer's new bytes land If-Match an identical-bytes upload's etag and are committed; nothing dangles, so `Inv_NoDangling` cannot see it) |
 | `Inv_NoStragglerInstall` | a deposed writer's manifest CAS never lands | `LeanNoRotate` (no takeover rotation); `LeanBarrierLeaseNoRotate` (the same, deposal mid-commit) |
 | `Inv_NoDeposedPut` | a deposed writer's data PUT never lands | `LeanNoEpochCheck` (rotation alone — proves rotation does NOT cover the data path). Under the barrier lease this is vacuous by design: uploads precede the claim and are never fenced (protocol of record, straggler rules) |
-| `Inv_NoResurrection` | a container restart never resurrects an unpublished delete | `LeanRematerialize` (re-checkout over a live tree) |
+| `Prop_NoResurrection` (an ACTION property since 2026-09-19, H9: no step that is a restart creates a local file; it replaced `Inv_NoResurrection`, a ghost written only under the mutation constant, whose strict runs were tautologies) | a container restart never resurrects an unpublished delete | `LeanRematerialize` (re-checkout over a live tree) |
 | `Inv_SyncNeverDestroysDirty` | the sync verb never destroys genuinely-dirty local work without surfacing it | `LeanSyncStaleDirt` (sync judging dirt from the last barrier's snapshot) |
 | `Inv_NoForeignLost` | a sync never advances the merge base for a path it did not integrate or surface (D4) | `LeanScopedSyncWholeBase`; and with TWO LIVE WRITERS the shipped rule itself: `LeanBarrierLeaseSyncOverlayStale` (a FINDING, tranche 6; its control `LeanBarrierLeaseSyncOverlayHolds` moves `SyncKeepsHiddenBase` alone) |
 | `Inv_CommitExclusive` | one writer in the commit section at a time (D1, the lease's safety half) | none needed yet: it is what every deposal run checks, and it held in every world |
@@ -240,7 +265,10 @@ a versioned bucket is a different question from what the key reads as.
 `Inv_NoDangling` ("the object exists") was the right question until D7;
 gated staging makes the CITED version noncurrent, so an object can
 exist, read as newer uncited bytes, and have nothing behind its
-citation. `Inv_CitedVersionLives` is the corrected question.
+citation. `Inv_CitedVersionLives` was the corrected question. It retired
+with the gated lane (2026-09-19, H9): under handles `Inv_NoDangling`
+asks exactly that of `versions[p]`, and the core's `Inv_CitationsLive`
+says it over state (`SAFETY.md` §3.1).
 
 **It found a live defect on its first strict run, in shipped code.**
 The reaper's rule was *"delete every version of a touched key except the
@@ -1477,6 +1505,501 @@ counterexamples: `…OrphanResurrects` 23 (tombstone off), `…OrphanStaleCopy`
 20; the probes `ProbeBaseRestored` 22, `ProbeLeakApplied` 20,
 `ProbeOrphanOutlived` 13. Gate: 136/136 green, trace replays ok
 (2026-09-19 01:29–02:20 UTC on the Linux box).
+
+## Review 2026-09-19: the ack, the fence's position, and removals (H10, H2, H4)
+
+Three more arms, each FALSE as the code shipped and TRUE in `IMPL` once the
+code matched; each has a known-bad world in the gate. Every one preserves
+the worlds that do not use it: the census control arm (seven worlds, the
+C2/H1 census's) reproduces its counts on the final module.
+
+**`AckFromCarrier` (H10).** The crash world at `OrphanTrack = TRUE` stopped
+at depth 25 on `Inv_AckImpliesCited`: A's declared write is installed, A
+restarts after step 7 and before the ack, B deletes the path, and A's
+re-run honours the pending with a PULL-ONLY — `ok`, naming B's document,
+while A's tree still holds the declared bytes. `honored` is in-memory and
+dies at `Restart`, and the pull-only sets `instSnap` to theirs. Every
+barrier that ran while a pending stood set `honored` and the ack followed
+at once, so no world had an ack answered by a barrier other than the one
+that carried the declaration except across a restart; the code has two
+more routes (a failed ack write; the floor's cadence barrier after a failed
+honor), found by tracing it. The arm journals, with each carrying install's
+CAS, the dirty paths it published (`carryPaths`) and its outranked deletes
+(`carryDropped`), kept across `Restart`, cleared by the next consume, the
+ack, the retire and a pod replacement; `AckDropped` adds a carried path
+whose deletion waits in `fq`, which disables `AckOk` and enables
+`AckPartial`. **The first cut named the FIRST carrying install as
+`AckedDoc` and was refuted** by `…AckCarried` on `Inv_AckBoundaryCoherent`
+in 18 steps: a restart between the CAS and `Finish` made the re-run publish
+the agent's post-declaration write, and the ack named a document older than
+the tree. Once a peer has deleted a declared path, no document satisfies
+both halves of an ok ack; the latest document, `partial`, is the honest
+one. (That run was first read on a stale module — `$B:lean-…` in zsh is
+the `:l` modifier, and the rsync went to a local directory — and the
+module's md5 is now checked on the box before any result is read.)
+`LeanBarrierLeaseAckAfterRestart` (one touch, one restart, no HITL: the
+crash world's route, reduced) violates at 24; `…AckCarried` holds every
+sentinel invariant with `Inv_AckBoundaryCoherent` and
+`Inv_NoDeleteResurrected` (4,449,692 distinct, depth 32); `LeanProbeCarrierAck`
+shows the journal alone made an ack partial.
+
+**`FenceAfterLoad` (H2).** `CASInstall` carried `~Fenced(s)`, an epoch fence
+atomic with the load and the CAS. The code read the cell once, before its
+HEAD fan-out and its window, and then loaded and CASed with no fence: a
+holder deposed in between loaded its successor's ROTATED document, so the
+rotation fenced nothing. With the arm FALSE the one read is `VerifyCell`, a
+step of its own, stamping `verifiedAt` with the section's epoch (a claim
+mints a new one, so an old stamp never matches), and `CASInstall` and
+`CASMiss` require the stamp instead of the fence; `CASFenced` exists only
+with the arm on. `LeanBarrierLeaseStragglerLoadsSuccessor` (the C2 straggler
+world, the arm off) violates `Inv_NoStragglerInstall` at 16: claim, verify,
+stall; B deposes and rotates; A thaws and installs onto B's document.
+`…StragglerGCFenced` holds at 276,442 with the arm on, its old count. The
+code's fix is the read after the load, which is this module's atomic fence
+given the rotation. A restart that releases a deposal before its rotation
+(the review's route) is not modelled: `Claim` acquires and rotates in one
+action.
+
+**`RemovalNamesGen` and `Inv_RemovalNamesItsVersion` (H4).** A removal was a
+bare path, applied if clean, and the amputation stamp excused a delete of
+any generation the installer had consumed ("integration followed by
+ordinary editing") — so a removal asked for before a UI write, performed
+after the consume adopted that write, looked like the agent's own edit.
+`gh.remJudged[p]` is the generation the gateway resolved when the removal
+was recorded (`TrackedGen`: the newest inbox entry, else the citation); it
+stands for the cell's `Removal::etag`, is written in both arms (so the
+shipped arm can be judged) and is KEPT in `StrictGh`, so the removal
+worlds' counts move (`LeanRemovalHolds` 324,499 → 360,007). With the arm
+on, a removal whose generation the tree no longer holds is refused, or
+deferred while that generation is still in the inbox. `LeanRemovalOverreaches`
+violates at 6 (remove, UI write, consume + apply); `LeanRemovalHolds` and
+`LeanRemovalCrashHolds` hold with the arm on.
+
+Gate 141 (38 strict, 56 mutations, 47 probes, by the recipe above; the
+136-run split was printed as 37/54/45, one off the recipe's 37/53/46). Results:
+`results/2026-09-19-review-h10c/` (the H10 worlds), `…-review-h2/`,
+`…-review-final/` (the final module's deciders, gate, census, trace replays).
+
+## Immutable object handles (2026-09-19): the design's arm, built before its code
+
+`docs/plans/flint-lean-immutable-objects-design.md` — the structural fix for
+review finding H6, and with it six classes the same-key layout produced. Every
+write lands at a HANDLE nobody else writes; the manifest cites handles; a
+handle a landed document cites is never overwritten and is collected only once
+no document cites it. The owner decided (2026-09-19) to relax fetch-by-bare-
+path everywhere and build the model arm first; this section is that arm.
+
+**What the arm is.** `ImmutableObjects` (FALSE in every pre-existing cfg and
+NOT in IMPL: IMPL is the code's shape today). Under it `objects` — the one
+slot per path that every 412, adopt, park, HEAD-guarded GC and S3-wins arm
+arbitrates — is FROZEN (TypeOK pins it), and `versions[p]`, the substrate the
+gated tranche left behind, is the set of live handles at `p`. The shipped
+`Upload`/`HitlWrite`/`HitlRename`/`GCHead`/`GCDelete`/`TrackOrphan` are
+disabled and replaced:
+
+- `UploadIO` / `HitlWriteIO`: register a fresh handle, no condition. The UI
+  write REPLACES the cell's entry for its path (one entry per path, as
+  `gateway_append` keeps it), retiring the entry it replaced, and records the
+  citation the gateway saw (`gh.uiBase`, the entry's `cited`).
+- `HitlRenameIO`: a CITATION MOVE — the destination's entry names the
+  source's handle, registered at the destination too; nothing is minted.
+- `CASInstall` records per path what the install stopped citing
+  (`sc.retire`, read from the document it merged onto, as the code's step 6
+  reads `current`), and SURFACES what it publishes over: a path it uploaded
+  whose citation is neither its merge base nor a generation it integrated
+  gets a conflict record naming the cited handle before the upload is cited
+  over it — the slot's 412/`Upload412Preserves` arm, taken at the CAS
+  (`CommitSurfacesForeign`); `VerifyUploads` is the commit's own re-read of
+  every handle its uploads cite, a step of its own BEFORE the CAS;
+  `GCCollect` deletes the retired set in one unconditional batch — no HEAD,
+  no fence, no lease — sparing what the installed document cites at another
+  path and what an inbox entry names, by NAME (`SameHandle`: a generation
+  number is a handle name, two paths share one only through a rename, and
+  the seed generation at another path is another handle).
+- `SweepOrphan`: a handle nothing cites, no entry names and no conflict
+  record preserves is collected, by a writer INSIDE its commit section, never
+  its own in-flight uploads. No grace is modelled.
+- The consume judges a gateway entry against the citation the gateway saw: a
+  citation that moved to a later UI write supersedes it (dropped, retired);
+  one that moved to a writer's publish makes it a CONFLICT (surfaced, its
+  handle preserved), never an adoption over the published version; one that
+  moved to the entry's OWN handle — a peer's publish of that very write — is
+  LIVE, and the ordinary rules apply (the second box run found the arm
+  reading it as "superseded"); one that moved to an EARLIER UI write leaves
+  the entry live too — the newer write wins.
+- `Inv_NoDangling` reads `manifest[p] \in versions[p]`; `Inv_HITLTracked`'s
+  "the object is gone" excuse is gone with the slot — under handles a
+  destruction is either the collector's decision (`hitlRetired`) or a loss.
+
+**The rules, each refuted by its mutation** (laptop pilot depths; the box run
+is `results/2026-09-19-immutable/`):
+
+| rule | mutation | world | violates |
+|---|---|---|---|
+| R3: retirement spares a handle the installed document cites at another path | `RetirePerPath` | `LeanImmutableRetirePerPath` (the removal world under the barrier lease) | `Inv_NoDangling`, a 9-state trace (box depth 11) — a UI rename's destination cites the source's handle, the source's removal retires it, the collector takes it at both names. The FIRST trace, same depth, had NO rename in it: the collector was taking p2's seed generation for p1's (see the second box run below) |
+| R4a: the commit re-reads its uploads before citing them | `VerifyUploadedCitations=FALSE` | `LeanImmutableCasCitesBlind` | `Inv_NoDangling` at 19 |
+| R4b: the sweep runs under the lease | `SweepUnderLease=FALSE` | `LeanImmutableSweepLeaseFree` | `Inv_NoDangling` at 11 — a lease-free sweep between the re-read and the CAS |
+| R4c: the sweep spares what an inbox entry names | `SweepSparesTracked=FALSE` | `LeanImmutableSweepTakesTracked` | `Inv_HITLDurable` at 9 — an acked UI write collected before any consume |
+| R7: the commit surfaces what it publishes over | `CommitSurfacesForeign=FALSE` | `LeanImmutableCasOverridesUI` (the HitlOverAny world) | `Inv_HITLDurable` at 18 (box 19) — an acked UI write a peer published, cited over blind by a writer that never learned it: the second box run's own trace |
+| R7, a peer's publish | `CommitSurfacesForeign=FALSE` | `LeanImmutableCasOverridesPeer` (the probe world with a two-mint budget: both writers edit) | `Inv_NoStaleOverride` at 20 (box) — both writers edit the path, one publishes, the other's CAS cites its upload over that with no record; the breadth world's one-mint budget cannot reach it (still searching at depth 24 with nothing found when that was read off the mint guard) |
+| R2: a repair never re-cites a handle the document cites at another path this install keeps | `RepairRespectsMoves=FALSE` | `LeanImmutableRepairRecites` (the rename world) | `Inv_OneName` (box, the fourth run's shape at 18) — an adopter that never saw the removal re-cites the moved handle at its old name |
+| L-117: an answered removal record still moves the named version out of a tree that holds it clean | `AnsweredRecordsApply=FALSE` | `LeanImmutableAnsweredRecordSkipped` (the rename world) | `Inv_OneName` — a tree that adopted the source's write before the rename keeps it at the old name beside the destination's (the core model's trace); the seventh run's own shape is the same rule's one-barrier lag |
+| L-118: a citation repair yields to a later UI write the document already cites | `RepairYieldsToLaterUI=FALSE` | `LeanImmutableRepairOverridesUI` (the rename world) | `Inv_HITLDurable` at 18 (box, the eighth run) — an older adoption re-cited over the user's newer write, published by a peer, with no record |
+| L-119: an adoption declined for the MOVE ALONE, at the destination of a rename still waiting at its source, is PENDING — its entry stays in the cell | `PendingAdoptionStays=FALSE` | `LeanImmutablePendingAdoptionDropped` (the rename world), `LeanCorePendingDropped` (the core) | `Inv_HITLDurable` / `Inv_AckedNamed` — the entry left the cell with the rest of the consumed, the peer that applied the answered record uncited the source, and the collector took the handle: the rename lost at both names (the tenth box run's route, reached through `LeanImmutableRepairOverridesUI` because no step in it reads a mutated constant) |
+
+R4 as FIRST DRAFTED ("judge an orphan by the lease epoch stamped on it; below
+the cell's epoch is a dead writer's") was refuted by writing the arm, before
+any run: under the per-barrier lease the uploads precede the claim, so a live
+writer's uploads carry its previous epoch. The design document was corrected.
+
+**What the first box run found** (`results/2026-09-19-immutable-attempt1/`,
+module `b22870eb…`): every holds world with a UI write went red on
+`Inv_HITLTracked` (QueueHolds at depth 13, Holds at 14, HitlOverAny at 13),
+and the rename world on `Inv_RenameAtomic` at 14.
+
+- The HITL route: a writer consumes a UI write, its agent deletes the path,
+  the install retires only the OLD citation (the UI handle was never cited),
+  and the consumed UI handle is left as garbage with no decision recorded.
+  Under the slot the overwrite WAS the decision; under handles nothing is
+  overwritten, and the invariant — deliberately — no longer excuses a gone
+  handle. Rule: a writer that integrated an acked write (its baseline holds
+  it, it is in `known`) and publishes its own edit or delete of the path
+  retires it at its CAS (`CASInstall`'s `hitlRetired` stamp). QueueHolds then
+  holds, 154,860 distinct, depth 38 (laptop).
+- The rename route: a UI rename to a destination another writer is
+  concurrently CREATING. The gateway cannot see an in-flight upload (nothing
+  sits at a key: `~Tracked(q)` is all it can ask), so the rename lands; the
+  install cites the agent's file at the destination while the source still
+  cites the moved handle. The shipped invariant read "the new name is cited
+  by anything", which the shipped model could never reach (the key was
+  occupied). Under handles the claim is "the same handle is never cited under
+  both names" (`manifest[q] = r[4]`, the IO arm of `Inv_RenameAtomic`), and a
+  rename's destination entry that the consume finds STALE is a taken
+  destination (`staleAt(q)` in `dstTaken`): the source's removal is refused,
+  the source stays, the moved bytes survive as a conflict copy — the
+  delete/rename design's §5 outcome, by the consume rule instead of the key.
+
+**What the second box run found** (`results/2026-09-19-immutable-attempt2/`,
+module `8a0324ca…`, the two rules above in place): `Inv_HITLDurable` at
+depth 18 in HitlOverAny and RenameHolds; every other holds world green
+(Holds 13,956,600 distinct at depth 35, OrphanCollected 891,356, LeakHolds
+64,731, QueueHolds 154,860).
+
+- The trace: the UI writes p1 and is acked; B consumes the entry and
+  publishes it; A — dirty at p1 from an edit made against the OLD version —
+  consumes the same entry, and the consume read "the citation moved to the
+  entry itself" (a peer's publish of that very write) as "superseded":
+  dropped, stamped retired, nothing learned. A then uploaded to a fresh
+  handle and its CAS cited that over the published UI write. Under the slot
+  A's PUT would have failed If-Match on the old etag, a 412, and
+  `Upload412Preserves` would have surfaced the UI's version and superseded
+  it knowingly; a fresh handle has no slot to fail on. Two rules (R7 in the
+  design): an entry whose citation moved to its own handle is LIVE (the
+  ordinary consume applies — a dirty tree surfaces it and publishes over it
+  knowingly), and the CAS SURFACES what it publishes over — every uploaded
+  path whose citation is neither its merge base nor a generation it
+  integrated gets a conflict record naming the cited handle before the
+  upload is cited (`CommitSurfacesForeign`; `amp` excludes what this CAS
+  surfaced). `…CasOverridesUI` (the run's own trace) and `…CasOverridesPeer`
+  (a peer's own publish cited over, `Inv_NoStaleOverride` — the ghost's
+  handles form, so the invariant is back in `IOINV`) are the shape without
+  it.
+- A refutation withdrawn and re-established: the `…RetirePerPath` trace had
+  NO rename in it. A removal of p1 retired the seed generation, and the
+  collector removed "1" from p2 as well — a generation number is a handle
+  NAME, and the seed's is one number at every path but a different handle at
+  each. `SameHandle` (a rename's citation move, `renamed` `<<p, q, g, g>>`,
+  is the only aliasing) now governs `GCCollect`'s spare-and-take,
+  `SweepOrphan`'s guards and `Inv_QuiescentConverged`; the per-path
+  refutation goes through the rename it was written about (the table above).
+
+**What the later box runs found** (`results/2026-09-19-immutable-attempt3/`
+to `…-attempt7/`; the module of each is in its `module.md5`):
+
+- The third: `…CasOverridesPeer` had been emitted in the breadth world,
+  where `gh.nextGen <= MaxGen` with MaxGen=2 allows ONE mint and the route
+  needs both writers' edits — unreachable, a mutation that could never
+  find anything. Moved to the probe world with MaxGen=3; it violates
+  `Inv_NoStaleOverride` at depth 20 in under a minute.
+- The fourth: `Inv_RenameAtomic` at depth 18 in RenameHolds — an adopted UI
+  write, renamed by the UI and performed by a peer, re-cited at its old
+  name by the adopter's citation repair. R2 gained its clause: a repair
+  never re-cites a handle the document cites at another path
+  (`MovedElsewhere`).
+- The fifth, killed before its verdict: that clause as first written
+  declined the rename PERFORMER's own destination (the source leaves in the
+  same install). `KeepsAt`: the clause holds only while this install keeps
+  the other path at the handle.
+- The sixth: `Inv_RenameNoHole` at depth 13 — the seed generation at a
+  third path read as the same handle. `MovedElsewhere` judges by name
+  (`SameHandle`), as the collector and the sweep do.
+- The seventh: `Inv_HITLTracked` at depth 13, and this one was in the CODE
+  too (L-117). The agent dirties p1; the UI renames p1 to p3; the consume
+  adopts p3 WITH p1's handle and REFUSES the removal (a dirty source); the
+  agent then deletes p1. At the barrier the two-scan guard keeps p1 cited,
+  the repair at p3 is declined as "moved elsewhere" (p1 holds the handle
+  and this install keeps it), the consumed entry leaves the cell, and a UI
+  write at p3 in the next round replaces an acked version nothing had
+  cited. The first fix re-minted the destination as a server-side copy
+  under a handle of its own, to keep one handle under one name; the core
+  model (`LeanCore.tla`, written the same evening) then found in five
+  minutes on the laptop that the copy answered the wrong question. Its two
+  traces: a rename left the source's PENDING entry in the cell beside the
+  destination's, and a writer consuming after the move adopted the handle
+  at both names; and a removal one writer had refused was skipped by every
+  other writer, so a tree that had adopted the source's write before the
+  rename kept it at the old name beside the destination's — one handle
+  cited twice either way, copy or no copy. The rules that close both
+  (L-117): a rename takes the source's pending entry with it, the entry
+  being the citation it moves, and the removal names the version that
+  entry was written over (`RenameMovesEntry`, `remOver`); and an answered
+  record still moves the named version out of a tree that holds it clean
+  at the source (`AnsweredRecordsApply`, `gh.answered`) — with which the
+  seventh run's own shape resolves in ONE barrier, the agent's delete
+  making the source a declared removal, and the copy is not needed. The
+  consume also stamps a version the tree had integrated that a LATER UI
+  write at the same path replaces (the UI's own hand, the slot's
+  overwrite one consume late) — the seventh run's pair. The naming claim
+  itself is now an invariant of every handles world, `Inv_OneName`; R2's
+  clause got the pin it never had (`RepairRespectsMoves=FALSE`,
+  `…RepairRecites`, the fourth run's shape), and the answered-record rule
+  its own (`…AnsweredRecordSkipped`). Three syncer tests written from the
+  traces fail on the shipped rules. With the same fix, `GCCollect` stopped
+  sparing a handle named only by an entry THIS barrier consumed — the
+  code's collector never had (the entry leaves the cell at Finish) — and
+  `sc.surfaced` carries the code's consume-dirty sentinel: a baseline that
+  names a version the tree SURFACED is never a repair, which the core's
+  first trace also found (the model re-cited a moved handle at the refused
+  source after the agent deleted its edit there).
+- The eighth: `Inv_HITLDurable` at depth 18 in RenameHolds, on the module
+  with the copy — and independent of it. The UI's rename lands its entry at
+  p3; A adopts it; the UI writes p3 again; B adopts the later write and
+  publishes it; A's barrier re-cites its older adoption OVER it: the merge
+  let a citation repair beat a foreign citation as an upload does, and the
+  user's newer write was retired by a writer that never saw it, with no
+  record. A repair now YIELDS to a later acked UI write the document cites
+  at the path (`SupersededByUI`, `RepairYieldsToLaterUI`; its mutation
+  `…RepairOverridesUI`), the tree taking the newer version through its
+  queue; and the CAS surfaces a repair it publishes over a version the tree
+  never integrated, as the code's merge always did for every upsert
+  (`published` in `contested`). L-118.
+- The tenth run's first world, `LeanImmutableRepairOverridesUI`, violated
+  `Inv_HITLDurable` at depth 18 after 61 minutes and 76 million states —
+  by a route that reads no mutated constant, so the rename world has it
+  too. A refused rename's DESTINATION, adopted by the refusing tree, is
+  committed while the source is still cited (the agent deleted the source
+  between Consume and Scan; a first absence is withheld): the move rule
+  rightly declines to cite the handle beside its source, and the model —
+  like the code — then dropped the adoption as gone (the entry consumed).
+  Nothing named the handle but the source's citation; the peer applying the
+  answered record removed that, and the collector took the handle. The
+  code is fixed and tested (a repair declined for a move whose rename
+  still waits at its source is PENDING: the entry stays in the cell, the
+  tree keeps its copy). Both models now carry the rule, at the CAS that
+  declines: the pending entry leaves that barrier's consumed set there —
+  before the collector, which spares what an entry it did not consume
+  names, and before the window clear, which drops what it did
+  (`PendingAdoptionStays`, TRUE shipped; the mutation worlds
+  `LeanImmutablePendingAdoptionDropped` and `LeanCorePendingDropped`, and
+  the probes `…ProbePending` that say the shipped world reaches the rule
+  at all). The core's `Inv_AckedNamed` was too weak to see this route: a
+  tombstone at ANOTHER path accounted for the destination's ack. It is
+  tightened — a citation or tombstone elsewhere counts only where the move
+  was acked there. (The same edit first over-tightened the OTHER disjunct,
+  to a delete or an edit on top; `LeanCoreHolds` then failed on a route
+  that is not a defect — the agent deletes the renamed destination, the
+  barrier publishes that delete, and the agent writes a FRESH file at the
+  path, which erases the "this tree deleted it" witness. A tree accounts
+  for a handle by no longer HOLDING it; only holding it unchanged, which
+  can never be published, does not.) L-119.
+  The same side check that ran the previous shape's base world against the
+  staged module found `Inv_NoDangling` violated at state 2: the handles
+  refactor had rewritten its same-key arm to demand the key hold the exact
+  cited generation, which that shape never promised. Restored
+  (`objects[p] # 0` on the same-key shape; the exact handle under handles).
+
+**What the core's own two-path world found** (2026-09-20). `LeanCoreHolds`
+on three paths is a BOX world — 120 million states and still climbing at
+depth 19 — so the gate gets `LeanCoreHoldsSmall`, the same shape on two
+paths (48,995,156 states, depth 34, twenty-odd minutes on the box's
+workers; twenty-five on the laptop's four before `took` was added). Its first run refuted the core's own merge vocabulary twice,
+both times in the MODEL and not in the code:
+
+- `KeepsAt` — "this install keeps q at handle h", the premise the move rule
+  (R2) declines a repair on — was two guesses: the scan's upload set, and
+  any path whose baseline had moved. An upload the re-read WITHHELD moves
+  nothing (the merge drops it and q keeps its citation), and a path this
+  barrier uploaded has no repair to make. Read that way, a rename's source
+  looked moved off the handle when the install left it exactly where it
+  was, and the same install cited the destination's repair beside it: one
+  handle under two names. It is now `inst[q] = h` in the order the CAS
+  builds `inst` — gone, then mine, then the repair, then the delete theirs
+  outranks — which is the order the code reads off its own upsert map
+  (`void_stale_repairs` walks `upserts`, which a withheld upload has left).
+- `Scan` made a declared removal a delete even where the agent had
+  RE-CREATED the path, so one path was an upload AND a delete. The code
+  does not: `barrier.rs`'s scan skips it, "what is here now is a new file
+  the agent wrote, and it publishes as one". Deleting that `continue` in
+  the code reproduces the model's counterexample exactly — one handle cited
+  at both names — which is now pinned by
+  `a_rename_whose_parked_source_keeps_its_citation_does_not_cite_one_handle_twice`
+  (the syncer battery, 244 green).
+
+Its second run refuted the core's accounting invariant instead — twice, in
+both directions — which is what `took` (below) exists for. Its third found
+the last of the three: **theirs-or-mine was judged by ONE FLAT SET per
+writer.** `Foreign(s, p)` asked whether this tree had ever integrated the
+document's generation, anywhere; the code asks at the path (its merge
+compares the base with theirs at p, and reads the baseline AT p to decide
+whether it integrated what it is publishing over). Flat, a peer that held
+the seed at a rename's SOURCE published its own file over the renamed
+DESTINATION and surfaced nothing — the version it published over was
+familiar, just not at that path — and the handle was retired with no record
+(`Inv_AckedNamed` at depth 19). The core now asks per path, under the
+constant `ForeignPerPath`.
+
+**The debt this left, paid the next day — and what it was hiding.** For a
+day `LeanSubtree` still judged theirs-or-mine by its flat `sc[s].known` and
+`LeanRefine` mapped onto that shape (`ForeignPerPath <- FALSE`). Paying it
+turned out to be one line per model rather than the per-path rewrite of
+`known` this paragraph used to predict, because neither model's exemption
+was what the code does. `manifest.rs::merge` has NO exemption — changed
+against the merge base is theirs, full stop — and the exemption the commit
+applies lives one level up, in R7's surfacing loop: `baseline.entries
+.get(path).key == was.key`, the CURRENT baseline AT THAT PATH. So the merge
+asks one question and R7 asks another, and both models now split them the
+same way. `ForeignPerPath` mutates R7's, and `LeanCoreForeignFlat` prices
+the flat form at depth 20.
+
+Then the gate stopped at `LeanSentinelRestart`, a STRICT world, on
+`Inv_AckImpliesCited` at depth 18 — and that is the more interesting
+finding, because it is about the model. `MineIsNotForeign` is the rule for a
+restart between the CAS and step 7: the writer must not read its own install
+as a peer's change, or delete/modify outranks its agent's delete and the ack
+still says ok. The model implemented that rule by asking whether the
+GENERATION was in `sc[s].known`. The code implements it somewhere else
+entirely — the intent journal's `installed_etag`, written the instant the
+CAS returns and read at the merge: "if the bucket is still at the document
+THIS workspace installed, that document IS the merge base, whatever the
+persisted one says." The flat set was covering a mechanism the model did not
+have, and covering far more besides. Asking per path took the cover away and
+the hole showed in eight seconds.
+
+`MergeBase(s)` now carries the journal's rule (still gated by
+`MineIsNotForeign`, so `LeanSentinelStaleMergeBase` still refutes it —
+at depth 18 or 19 depending on which counterexample the workers reach
+first), `ForeignEntry` has no exemption at all, and `LeanSentinelRestart`
+holds at 218,762 states. A model can carry the right rule with the wrong
+mechanism, and a stronger rule elsewhere will hide it: that is the general
+lesson, and it is why the flat set had to go even though every world was
+green with it.
+
+**The core model and the refinement** (`LeanCore.tla`, `LeanRefine.tla`;
+2026-09-19 evening). `LeanSubtree.tla` is a history: every design the
+protocol ever had is still inside it as an arm, and most of its invariants
+are ghost stamps that certify the action that wrote the stamp rather than
+the harm it names. `LeanCore.tla` is the protocol as it ships, once, with no
+arms — the objects (immutable handles named `<<birth path, gen>>`, the
+document and its pointer, the cell's entries and removals, the trees) and
+the rules, one action each, on one page — with invariants written over
+STATE: `Inv_CitationsLive` (every citation names a live handle),
+`Inv_OneName` (one handle is never cited under two names) and
+`Inv_AckedNamed` (an acknowledged handle that is gone is accounted for by
+something in the state that names it: a conflict record, a citation or
+tombstone derived from it through recorded provenance, a later acknowledged
+write at its path, or a tree that TOOK IT IN AT THAT PATH and no longer
+holds it). That last disjunct is the one the 2026-09-20 session had to get
+right three times. It began as "a tree that integrated it and deleted it or
+EDITED on top of it", which `LeanCoreHolds` refuted on a route that is not a
+defect: the agent deletes the renamed destination, the barrier publishes
+that delete, and the agent writes a FRESH file at the path, which erases the
+"this tree deleted it" witness. Weakened to "integrated it and no longer
+holds it", it went the other way and had nothing to say: `integrated` is one
+flat set per writer, so a writer that never held the path answered for it,
+and the L-119 mutation went GREEN. The core now keeps `took` — per writer
+and path, every version that writer's baseline has named there — written by
+one conjunct of `Next` off the step itself (a baseline that moved to a new
+version at p), not by any action; `LeanRefine` carries the same rule as a
+third history variable. With it the three routes come apart: the tree that
+deleted the destination is accounted for, the tree that replaced it is
+accounted for, and the tree left holding a pending adoption that nothing
+names — L-119 — is not.
+
+Each rule is a constant, TRUE in the design, with a world that violates the
+invariant it holds up when the rule is off (`LeanCore*.cfg`, emitted by
+`gen-cfgs.sh`'s `emit_core`) — seventeen worlds. Thirteen are in the gate
+since 2026-09-20: the shipped world on two paths, eight mutations and four
+probes. The other four are decided on the box — the three-path holds world,
+and three mutations that need a third name — `…AnsweredSkipped`,
+`…RenameLeavesEntry` and `…RepairOverridesUI`, whose routes TLC had not
+found on two paths at 67, 45 and 31 million states. The rules they refute are not left unchecked: the history model
+refutes all three (`LeanImmutableAnsweredRecordSkipped`,
+`LeanImmutableRepairOverridesUI`, and `LeanImmutableRenameLeavesEntry`,
+which the box sizes first). The L-119 mutation
+(`LeanCorePendingDropped`) is two paths and three barriers: its route is
+depth 18 and it finds it in four minutes, where the three-path shape was
+still climbing past 41 million states. Its first run — five minutes on
+the laptop, the world of the rename holds run — found two rules the code and
+the history model both lacked (L-117: a rename moves the source's pending
+entry with it; an answered removal record still applies to a tree holding
+the named version clean) and the consume-dirty sentinel the model had never
+carried, before the history model's box run reached any of them.
+
+`LeanRefine.tla` is the refinement: `LeanSubtree` under its shipped constants
+(`IMPL` + `ImmutableObjects`, crash-free) maps to `LeanCore`, every core
+variable a function of the history model's state (a handle's birth path
+through `gh.renamed` for the seed and a history variable for mints;
+provenance as a second history variable, written only at mints), and TLC
+checks `Core!Spec` as a property: each history-model step is a core step or
+a stutter, and the core's three invariants hold through the mapping. The
+mapping is itself a census of which `LeanSubtree` state the shipped shape
+reads. It found, in its first runs, the fast path the core lacked (skip on
+no diff) and the tree's "seen" pointer generation, both now in the core.
+`lean/PROTOCOL.md` is the page written from the core: the objects, the rules
+as guard and effect with the invariant each holds up and the world that pins
+it, and the invariants as predicates.
+Worlds: `LeanRefineQueue` (the queue world: 606,916 states, depth 40, a
+minute on the laptop — 636,652 before the merge asked per path) and `LeanRefineProbe` (the probe world: 1,965,383
+states, depth 36, twenty-nine minutes on three laptop workers — re-run
+2026-09-21 on the settled modules and again on the aligned ones, at
+exactly the same count both times: two paths, no UI write and no removal
+never reach what the alignment changed), both in
+the gate; `LeanRefineRename` (the rename world — run on the box first, a
+gate entry once its size is known). A world with a crash or a stall is out
+of the core's scope: its writers have no "dead" state.
+
+**The retired classes**, each in its own known-bad world with the same-key
+mutation left ON and inert, holding every handles invariant (`IOINV` = BLINV
+plus `Inv_NoDeleteResurrected`; `Inv_NoStaleOverride` stays, its ghost
+written under handles by a CAS that cites an upload over a citation the
+writer never integrated with no record — the shape `…CasOverridesPeer` runs):
+`LeanImmutableGCUnconditional` (F1/L-10), `…AdoptBlind` (F2/L-11),
+`…HitlOverAny` (F8/L-16), `…LeakHolds` (H1/L-105, L-27, L-102; both leak
+rules off, `Inv_TreesConverged` included), `…StragglerGC` (C2/L-104),
+`…OrphanCollected` (finding 10 / H6: a writer's pod replaced between its
+upload and its commit). Plus the breadth, queue and rename holds worlds
+(`…Holds`, `…QueueHolds`, `…RenameHolds`, the last with the rename
+invariants) and `…CasVerifies` (the R4a control: 182,906 distinct, depth 33
+on the laptop). `Inv_QuiescentConverged` is deliberately NOT checked under
+handles: with a lease-bound sweep, quiescence precedes the sweep, and the
+harm the invariant named has no state to occupy — the probe below is the
+convergence evidence instead.
+
+**Probes**: `…ProbeSwept` (the sweep collected a lost writer's handle),
+`…ProbeGC` (a retired handle collected), `…ProbeUploadWithheld` (the re-read
+withheld a swept upload), `…ProbeHITLCited`, `…ProbeRename`.
+
+Gate 182 (51 strict, 74 mutations, 57 probes). The census control arm — the
+seven shipped-shape worlds — must be unchanged from the 2026-09-19 review's
+counts (`results/2026-09-19-review-final/NOTES.md`); the arm is FALSE in all
+of them and `versions` stays frozen, so by construction it is.
+
+**What the arm does NOT say.** Nothing about the ingress namespace (outside
+writers to `files/` are not modelled, as they never were), nothing about the
+sweep's grace (a cost lever), and nothing about the gateway's door
+precondition (judged in the cell CAS in the design; the model's UI write is
+one step). The manifest-level rules — the tombstone, the queue, the merge —
+are unchanged and their worlds still run under handles.
 
 ## Tranche 3 candidates (in review-priority order)
 

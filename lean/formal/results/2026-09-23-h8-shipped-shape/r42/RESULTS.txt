@@ -1,0 +1,4 @@
+BisectOverlayHitl                        OK-FIRES           rc=12 | Invariant Inv_NoForeignLost is violated | 3062941 states generated, 885342 distinct | Finished in 01min 22s at 
+BisectOverlayImpl                        MISMATCH           rc=0 | No error has been found | 1878217 states generated, 525258 distinct | Finished in 01min 06s at 
+BisectOverlayImplNoQueue                 OK-FIRES           rc=12 | Invariant Inv_NoForeignLost is violated | 1182377 states generated, 303727 distinct | Finished in 31s at 
+R42DONE

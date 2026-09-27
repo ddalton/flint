@@ -1,0 +1,2 @@
+LeanImmutableNarrowHolds                 MISMATCH           rc=12 | Invariant Inv_NarrowNeverRecites is violated | 5106 states generated, 1892 distinct | Finished in 03s at 
+R38DONE

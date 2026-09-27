@@ -8,9 +8,9 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use flint_store::memory::MemoryStore;
-use flint_store::{crc64_nvme, GenerationStamps, ObjectStore, PutCondition};
+use flint_store::{crc64_nvme, GenerationStamps, ObjectStore, PutCondition, StoreError};
 
-use super::inbox::{self, InboxEntry};
+use super::inbox;
 use super::lease::{self, ClaimOutcome};
 use super::manifest;
 use super::state::SyncerState;
@@ -21,6 +21,9 @@ const PREFIX: &str = "tenant/proj1";
 pub(super) fn cfg_for(root: &std::path::Path) -> LeanConfig {
     let mut c = LeanConfig::new(PREFIX, root);
     instant_fence(&mut c);
+    // Collect retired handles and chunks at once, as before the retire age
+    // (the battery asserts collection); its own tests set it.
+    c.retire_grace_secs = 0;
     c
 }
 
@@ -46,6 +49,7 @@ fn cfg_single(root: &std::path::Path) -> LeanConfig {
     let mut c = LeanConfig::new(PREFIX, root);
     c.chunked = false;
     instant_fence(&mut c);
+    c.retire_grace_secs = 0;
     c
 }
 
@@ -80,6 +84,16 @@ pub(super) fn write(root: &std::path::Path, rel: &str, content: &str) {
     std::fs::write(p, content).unwrap();
 }
 
+/// A derive is pending: the pointer names a document the last consume did
+/// not derive against (or it left something it could not take). What
+/// `Baseline::behind` said before the scan trigger.
+pub(super) async fn derive_pending(sc: &Syncer) -> bool {
+    let p = manifest::load_pointer(sc.store.as_ref(), &sc.cfg).await.unwrap().map(|p| p.etag);
+    let d = sc.state.load_baseline().unwrap().derived_etag;
+    let norm = |e: Option<String>| e.map(|e| e.trim_matches('"').to_string());
+    norm(p) != norm(d)
+}
+
 pub(super) fn read(root: &std::path::Path, rel: &str) -> Option<String> {
     std::fs::read_to_string(root.join(rel)).ok()
 }
@@ -94,8 +108,11 @@ pub(super) fn backdate_baseline(sc: &Syncer, rel: &str) {
     sc.state.save_baseline(&b).unwrap();
 }
 
-/// Simulate the GATEWAY's HITL write: object PUT first (fresh read →
-/// If-Match current / If-None-Match for a create), then the inbox entry.
+/// What the GATEWAY does for a UI save under P2 (simplification step 5,
+/// 2026-09-25): a fresh handle, then ONE manifest CAS citing it (epoch 0,
+/// no lease), acknowledged after the CAS — `flint-lean-gateway`'s
+/// `put_file`, which this crate cannot depend on. Returns the etag;
+/// `hitl_write_at` also the handle.
 pub(super) async fn hitl_write(
     store: &Arc<MemoryStore>,
     cfg: &LeanConfig,
@@ -103,41 +120,169 @@ pub(super) async fn hitl_write(
     content: &str,
     author: &str,
 ) -> Result<String, LeanError> {
-    let key = cfg.file_key(path);
-    let cond = match store.head(&key).await {
-        Ok(meta) => {
-            // The gateway's rule for a blind write (`put_file`).
-            if !inbox::hitl_may_overwrite(store.as_ref(), cfg, path, &meta.etag, meta.last_modified_unix, now_unix()).await? {
-                return Err(LeanError::State(format!("concurrent write: {path} is another writer's uncited upload")));
-            }
-            PutCondition::IfMatch(meta.etag)
-        }
-        Err(_) => PutCondition::IfNoneMatchAny,
-    };
+    hitl_write_at(store, cfg, path, content, author, now_unix()).await.map(|(etag, _)| etag)
+}
+
+/// `hitl_write` with the gateway's clock supplied — the order two UI
+/// writes of one path carry in their handles' names (`ui_flush`).
+pub(super) async fn hitl_write_at(
+    store: &Arc<MemoryStore>,
+    cfg: &LeanConfig,
+    path: &str,
+    content: &str,
+    _author: &str,
+    added_unix: u64,
+) -> Result<(String, String), LeanError> {
+    let flush = super::ui_flush(added_unix);
+    let key = cfg.handle_key(path, &flush);
     let body = Bytes::from(content.to_string());
+    let size = body.len() as u64;
     let crc = crc64_nvme(&body);
     let stamps = GenerationStamps {
         generation: 0,
         epoch: 0,
-        flush_uuid: format!("gateway-{author}"),
+        flush_uuid: flush.clone(),
         boundary_source: None,
         posix: None,
     };
-    let meta = store.put_whole(&key, body, &cond, &stamps, crc).await?;
-    inbox::gateway_append(
-        store.as_ref(),
-        cfg,
-        InboxEntry {
-            path: path.to_string(),
-            etag: meta.etag.clone(),
-            author: author.to_string(),
-            added_unix: now_unix(),
-            crc64_b64: Some(flint_store::crc64_to_b64(crc)),
-            cited: None,
-        },
-    )
+    let meta = store.put_whole(&key, body, &PutCondition::IfNoneMatchAny, &stamps, crc).await?;
+    let entry_key = key.clone();
+    let etag = meta.etag.clone();
+    gateway_commit(store, cfg, &flush, move |doc| {
+        let was = doc.entries.get(path).cloned();
+        doc.tombstones.remove(path);
+        doc.entries.insert(
+            path.to_string(),
+            manifest::LeanEntry {
+                key: entry_key.clone(),
+                etag: etag.clone(),
+                crc64_b64: flint_store::crc64_to_b64(crc),
+                size,
+                mode: was.as_ref().map(|e| e.mode).unwrap_or(0o644),
+                mtime_unix: added_unix as i64,
+                generation: was.map(|e| e.generation).unwrap_or(0) + 1,
+                epoch: 0,
+            },
+        );
+    })
     .await?;
-    Ok(meta.etag)
+    Ok((meta.etag, key))
+}
+
+/// The gateway's one-CAS commit of a UI edit (`Workspace::commit_edit`):
+/// load, the next generation with the installing party's fields reset,
+/// the edit, tombstones kept to the writers' window, CAS with epoch 0, and
+/// again from the top on a lost race.
+pub(super) async fn gateway_commit(
+    store: &Arc<MemoryStore>,
+    cfg: &LeanConfig,
+    flush: &str,
+    edit: impl Fn(&mut manifest::LeanManifest),
+) -> Result<(), LeanError> {
+    manifest::commit_edit(store.as_ref(), cfg, flush, |_, doc| {
+        edit(doc);
+        Ok::<(), ()>(())
+    })
+    .await
+    .map_err(|e| match e {
+        manifest::EditError::Store(e) => e,
+        other => LeanError::State(format!("the gateway's commit did not land: {other:?}")),
+    })
+}
+
+/// The key the manifest cites for `path` — the handle a stranger would
+/// have to overwrite to reach a reader — or the bare path when uncited.
+pub(super) async fn cited_key(store: &Arc<MemoryStore>, cfg: &LeanConfig, path: &str) -> String {
+    manifest::load(store.as_ref(), cfg)
+        .await
+        .unwrap()
+        .and_then(|l| l.manifest.entries.get(path).map(|e| e.key.clone()))
+        .unwrap_or_else(|| cfg.file_key(path))
+}
+
+/// Every handle of `path` the bucket still holds, in key order — what a
+/// collector or a sweep leaves behind is read here, never through a HEAD
+/// of a bare path nothing writes any more.
+pub(super) async fn handles_for(store: &Arc<MemoryStore>, cfg: &LeanConfig, path: &str) -> Vec<String> {
+    let mut keys: Vec<String> = store
+        .list(&cfg.files_prefix())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|o| o.key)
+        .filter(|k| cfg.handle_parts(k).map(|(p, _)| p == path).unwrap_or(false))
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// The bytes the manifest cites for `path`, if the citation resolves.
+pub(super) async fn cited_bytes(store: &Arc<MemoryStore>, cfg: &LeanConfig, path: &str) -> Option<Bytes> {
+    let l = manifest::load(store.as_ref(), cfg).await.unwrap()?;
+    let e = l.manifest.entries.get(path)?;
+    store.get_whole(&e.key, Some(&e.etag)).await.ok().map(|(_, b)| b)
+}
+
+/// Does the manifest cite a handle for `path` that the bucket still holds?
+/// What `store.head(&cfg.file_key(path))` asked before handles.
+pub(super) async fn object_at(store: &Arc<MemoryStore>, cfg: &LeanConfig, path: &str) -> bool {
+    match manifest::load(store.as_ref(), cfg).await.unwrap().and_then(|l| l.manifest.entries.get(path).cloned()) {
+        Some(e) => store.head(&e.key).await.is_ok(),
+        None => false,
+    }
+}
+
+/// Another writer's publish of `content` at `path`, as the bucket sees it
+/// under handles: a fresh handle and a manifest generation citing it (the
+/// model's peer `UploadIO` then `CASInstall`), with no tree of its own.
+/// Returns the handle's etag and key.
+pub(super) async fn peer_publish(
+    store: &Arc<MemoryStore>,
+    cfg: &LeanConfig,
+    path: &str,
+    content: &str,
+    flush: &str,
+) -> (String, String) {
+    let key = cfg.handle_key(path, flush);
+    let body = Bytes::from(content.to_string());
+    let crc = crc64_nvme(&body);
+    let loaded = manifest::load(store.as_ref(), cfg).await.unwrap();
+    let prev_gen =
+        loaded.as_ref().and_then(|l| l.manifest.entries.get(path)).map(|e| e.generation).unwrap_or(0);
+    let stamps = GenerationStamps {
+        generation: prev_gen + 1,
+        epoch: 0,
+        flush_uuid: flush.to_string(),
+        boundary_source: None,
+        posix: None,
+    };
+    let meta = store.put_whole(&key, body, &PutCondition::IfNoneMatchAny, &stamps, crc).await.unwrap();
+    let mut theirs = loaded.as_ref().map(|l| l.manifest.clone()).unwrap_or_default();
+    theirs.seq += 1;
+    theirs.entries.insert(
+        path.to_string(),
+        manifest::LeanEntry {
+            key: key.clone(),
+            etag: meta.etag.clone(),
+            crc64_b64: flint_store::crc64_to_b64(crc),
+            size: meta.size,
+            mode: 0o644,
+            mtime_unix: 0,
+            generation: prev_gen + 1,
+            epoch: 0,
+        },
+    );
+    let handle = loaded.as_ref().map(|l| l.handle());
+    let retired = loaded.as_ref().and_then(|l| l.manifest.entries.get(path)).map(|e| e.key.clone());
+    manifest::cas_write(store.as_ref(), cfg, &theirs, handle.as_ref(), 0, flush).await.unwrap();
+    // ...and its collector takes the handle the document stopped citing
+    // (R3), unless the document still cites it at another path.
+    if let Some(old) = retired {
+        if !theirs.entries.values().any(|e| e.key == old) {
+            store.delete(&old).await.unwrap();
+        }
+    }
+    (meta.etag, key)
 }
 
 // ── the battery ──────────────────────────────────────────────────────
@@ -174,7 +319,7 @@ async fn checkout_publish_roundtrip_and_two_scan_delete() {
     assert_eq!(r2.deleted, vec!["README.md".to_string()]);
     let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
     assert!(!m.manifest.entries.contains_key("README.md"));
-    assert!(store.head(&a.cfg.file_key("README.md")).await.is_err());
+    assert!(!object_at(&store, &a.cfg, "README.md").await);
 }
 
 /// The review's worst finding, as a drill leg: a HITL upload with NO
@@ -214,7 +359,9 @@ async fn hitl_upload_survives_two_barriers_without_sync() {
 /// writer, and with no inbox entry to make it legitimate. This is what
 /// a read-write passthrough mount over a published prefix does.
 async fn foreign_overwrite(store: &Arc<MemoryStore>, cfg: &LeanConfig, path: &str, content: &str) {
-    let key = cfg.file_key(path);
+    // Under handles a stranger that reaches a reader overwrites the HANDLE
+    // the manifest cites — a key nobody else should write.
+    let key = cited_key(store, cfg, path).await;
     let body = Bytes::from(content.to_string());
     let crc = crc64_nvme(&body);
     let stamps = GenerationStamps {
@@ -270,15 +417,16 @@ async fn a_published_workspace_refuses_a_foreign_write_instead_of_adopting_it() 
     );
 }
 
-/// The control for the leg above, and the guard on the shipped
-/// behaviour it must not disturb.
-///
-/// With the flag unset — every workspace an agent actually works in —
-/// an object past its citation is a human whose bytes should win, and
-/// the S3-wins arm still adopts it. If this ever fails, the fix for C4
-/// has leaked out of published mirrors and into ordinary workspaces.
+/// M4 (P2, 2026-09-25): a checkout adopts nothing the manifest does not
+/// cite, in ANY workspace. A cited handle is immutable — a UI save goes to a
+/// fresh handle and commits, an outside `aws s3 cp` lands at a bare path the
+/// ingress sweep adopts by a commit — so a handle whose etag moved was
+/// overwritten from outside the protocol, and the checkout refuses, naming
+/// it. (Before P2 an ordinary workspace adopted it as "a human whose bytes
+/// should win": the S3-wins arm, a citation-repair source the P2 design
+/// deletes.)
 #[tokio::test]
-async fn an_ordinary_workspace_still_adopts_bytes_that_moved_past_the_manifest() {
+async fn an_overwritten_handle_is_refused_by_checkout_in_every_workspace() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
     let mut sc = syncer(&store, dir.path()).await;
@@ -288,12 +436,13 @@ async fn an_ordinary_workspace_still_adopts_bytes_that_moved_past_the_manifest()
     write(dir.path(), "README.md", "the real readme");
     sc.run_barrier().await.unwrap();
 
-    foreign_overwrite(&store, &sc.cfg, "README.md", "newer human bytes").await;
+    foreign_overwrite(&store, &sc.cfg, "README.md", "bytes from outside").await;
 
     let dir2 = tempfile::tempdir().unwrap();
     let mut sc2 = syncer(&store, dir2.path()).await;
-    sc2.checkout().await.expect("an ordinary workspace adopts");
-    assert_eq!(read(dir2.path(), "README.md").unwrap(), "newer human bytes");
+    let err = sc2.checkout().await.expect_err("an overwritten handle was adopted");
+    assert!(err.to_string().contains("immutable handle"), "{err}");
+    assert_eq!(read(dir2.path(), "README.md"), None, "uncited bytes were written");
 }
 
 /// The flag has to survive the pointer, because that is what a reader
@@ -384,9 +533,11 @@ async fn ui_edit_vs_agent_edit_never_a_silent_winner() {
     assert_eq!(&body[..], b"agent version");
 
     // ...but the conflict is surfaced and the USER's bytes were
-    // preserved at the conflict key before being superseded.
+    // preserved at the conflict key before being superseded. Under P2 the
+    // user's save is cited when the agent publishes, so the COMMIT meets
+    // it (R7), not a consume.
     let conflicts = sc.state.load_conflicts().unwrap();
-    let c = conflicts.iter().find(|c| c.kind == "consume-dirty").expect("conflict surfaced");
+    let c = conflicts.iter().find(|c| c.kind.starts_with("commit-surfaced-foreign")).expect("conflict surfaced");
     assert_eq!(c.path, "notes.md");
     let preserved = c.preserved_key.as_ref().expect("foreign bytes preserved");
     let (_, body) = store.get_whole(preserved, None).await.unwrap();
@@ -486,111 +637,65 @@ async fn takeover_rotation_fences_the_straggler() {
     assert_eq!(&body[..], b"A, after the fence");
 }
 
-/// The 412 AdoptOwn arm: a crashed/torn earlier PUT (our flush_uuid,
-/// same bytes) is recognized and cited without a conflict and without
-/// a blind overwrite.
+/// Rule R7 of the handles design: a version another writer published
+/// under the agent's edit — which this tree never integrated — is
+/// PRESERVED and recorded at the commit, then the agent's version is
+/// cited over it. The slot's 412 met this at the PUT (`Upload412Preserves`);
+/// a fresh handle has no slot to fail on, so the CAS, the one place the
+/// citation is read, takes the same decision. The inherited LOCAL-WINS
+/// overwrite — silent, the other version gone — is what lean must NOT do
+/// (the model's `LeanImmutableCasOverridesPeer`), and a park had no way out
+/// (review 2026-09-12, inbox-1). Preservation keeps both, and the retired
+/// handle is collected once its copy exists.
 #[tokio::test]
-async fn adopt_own_412_converges_without_conflict() {
+async fn a_version_published_under_the_agents_edit_is_surfaced_at_the_commit_never_silently_overwritten() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
     let mut sc = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut sc, 3).await);
     sc.checkout().await.unwrap();
+    write(dir.path(), "f.txt", "seed");
+    sc.run_barrier().await.unwrap();
 
-    // A "previous incarnation's" torn barrier: the PUT landed, the
-    // response was lost, the baseline was never advanced. Its uuid is
-    // in our intent history (the persisted journal).
-    write(dir.path(), "big.bin", "payload");
-    let crashed_uuid = "crashed-barrier-uuid".to_string();
-    let mut intent = sc.state.load_intent().unwrap();
-    intent.flush_uuid = crashed_uuid.clone();
-    intent.keys = vec![sc.cfg.file_key("big.bin")];
-    sc.state.save_intent(&intent).unwrap();
-    sc.state.clear_intent_keys().unwrap(); // uuid moves into history
-    let body = Bytes::from("payload");
-    let crc = crc64_nvme(&body);
-    let stamps = GenerationStamps {
-        generation: 1,
-        epoch: 1,
-        flush_uuid: crashed_uuid,
-        boundary_source: None,
-        posix: None,
-    };
-    store
-        .put_whole(&sc.cfg.file_key("big.bin"), body, &PutCondition::IfNoneMatchAny, &stamps, crc)
-        .await
-        .unwrap();
-
-    // The restarted barrier: If-None-Match 412s (object exists), HEAD
-    // recognizes our uuid + crc ⇒ adopt and cite.
-    let r = sc.run_barrier().await.unwrap();
-    assert_eq!(r.uploaded, vec!["big.bin".to_string()]);
-    assert!(r.parked.is_empty());
-    assert!(sc.state.load_conflicts().unwrap().is_empty(), "AdoptOwn must not conflict");
-    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
-    assert!(m.manifest.entries.contains_key("big.bin"));
-}
-
-/// A foreign 412 is the consume-dirty rule met at upload time: the
-/// foreign bytes are PRESERVED and recorded, then the agent's version is
-/// published over them. The inherited LOCAL-WINS overwrite — silent, the
-/// foreign write gone — is exactly what lean must NOT do
-/// (LeanLocalWins.cfg's counterexample); the park it was replaced with
-/// had no way out (review 2026-09-12, inbox-1). Preservation keeps both.
-#[tokio::test]
-async fn foreign_412_is_preserved_and_superseded_never_silently_overwritten() {
-    let store = Arc::new(MemoryStore::new());
-    let dir = tempfile::tempdir().unwrap();
-    let mut sc = syncer(&store, dir.path()).await;
-    assert!(claim_until_held(&mut sc, 3).await);
-    sc.checkout().await.unwrap();
-
-    // An unknown writer's object sits at the key (no inbox entry — a
-    // mixed-writer bucket, or a write our consume missed).
-    let body = Bytes::from("foreign bytes");
-    let crc = crc64_nvme(&body);
-    let stamps = GenerationStamps {
-        generation: 9,
-        epoch: 0,
-        flush_uuid: "someone-else".into(),
-        boundary_source: None,
-        posix: None,
-    };
-    let foreign =
-        store.put_whole(&sc.cfg.file_key("f.txt"), body, &PutCondition::IfNoneMatchAny, &stamps, crc)
-            .await
-            .unwrap();
-
+    // A peer publishes a version this tree never consumes...
+    let (peer_etag, peer_key) = peer_publish(&store, &sc.cfg, "f.txt", "peer bytes", "someone-else").await;
+    // ...and the agent edits the path against the seed.
     write(dir.path(), "f.txt", "agent bytes");
+    backdate_baseline(&sc, "f.txt");
     let r = sc.run_barrier().await.unwrap();
     assert!(r.parked.is_empty(), "parked with no way out: {:?}", r.parked);
     assert_eq!(r.uploaded, vec!["f.txt".to_string()]);
+    assert_eq!(r.surfaced, vec!["f.txt".to_string()], "the commit did not surface what it published over");
 
-    // The agent's version is current and cited...
-    let (meta, body) = store.get_whole(&sc.cfg.file_key("f.txt"), None).await.unwrap();
-    assert_ne!(meta.etag, foreign.etag);
-    assert_eq!(&body[..], b"agent bytes");
+    // The agent's version is current and cited at its own handle...
+    assert_eq!(cited_bytes(&store, &sc.cfg, "f.txt").await.as_deref(), Some(&b"agent bytes"[..]));
     let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
-    assert_eq!(m.manifest.entries["f.txt"].etag, meta.etag);
-    // ...and the foreign bytes are not lost: preserved, and the record
-    // says where.
+    assert_ne!(m.manifest.entries["f.txt"].key, peer_key);
+    // ...the peer's bytes are not lost: preserved, and the record says
+    // where...
     let rec = sc
         .state
         .load_conflicts()
         .unwrap()
         .into_iter()
-        .find(|c| c.kind == "upload-412-preserved" && c.path == "f.txt")
-        .expect("no record surfaces the foreign write");
-    assert_eq!(rec.foreign_etag, foreign.etag);
+        .find(|c| c.kind.starts_with("commit-surfaced-foreign") && c.path == "f.txt")
+        .expect("no record surfaces the version published over");
+    assert_eq!(rec.foreign_etag, peer_etag);
     let (_, kept) = store.get_whole(&rec.preserved_key.expect("not preserved"), None).await.unwrap();
-    assert_eq!(&kept[..], b"foreign bytes", "the preserved copy is not the foreign version");
+    assert_eq!(&kept[..], b"peer bytes", "the preserved copy is not the peer's version");
+    // ...and the retired handle was collected, unconditionally, once the
+    // copy existed: one handle of the path remains, the cited one.
+    assert!(matches!(store.head(&peer_key).await, Err(StoreError::NotFound(_))), "the retired handle survived");
+    assert_eq!(handles_for(&store, &sc.cfg, "f.txt").await, vec![m.manifest.entries["f.txt"].key.clone()]);
+    assert_eq!(r.collected, 1, "the peer's handle was the one this commit retired: {r:?}");
 }
 
-/// The GC HEAD-guard: a delete-eligible key whose current ETag the
-/// syncer does not recognize is NEVER deleted (LeanGCUnguarded.cfg's
-/// counterexample — the HITL re-create).
+/// A delete retires exactly the handle the document cited — never a UI
+/// re-creation of the path, which lands at a handle of its own. The GC
+/// HEAD-guard (`gc-skip`, LeanGCUnguarded's counterexample) guarded a
+/// shared key against exactly this; a handle needs no guard.
 #[tokio::test]
-async fn gc_refuses_unrecognized_etag() {
+async fn a_delete_retires_only_the_handle_it_cited_never_a_ui_re_creation() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
     let mut sc = syncer(&store, dir.path()).await;
@@ -598,49 +703,803 @@ async fn gc_refuses_unrecognized_etag() {
     sc.checkout().await.unwrap();
     write(dir.path(), "doc.txt", "v1");
     sc.run_barrier().await.unwrap();
+    let seed = cited_key(&store, &sc.cfg, "doc.txt").await;
 
     // The agent deletes; absence ages through one scan.
     std::fs::remove_file(dir.path().join("doc.txt")).unwrap();
     sc.run_barrier().await.unwrap(); // first absence
 
-    // A UI write re-creates the path AFTER our consume window — model
-    // it as a direct foreign PUT (etag the syncer never learned).
-    let body = Bytes::from("user re-created");
-    let crc = crc64_nvme(&body);
-    let stamps = GenerationStamps {
-        generation: 0,
-        epoch: 0,
-        flush_uuid: "gateway-late".into(),
-        boundary_source: None,
-        posix: None,
-    };
-    let cur = store.head(&sc.cfg.file_key("doc.txt")).await.unwrap();
-    store
-        .put_whole(
-            &sc.cfg.file_key("doc.txt"),
-            body,
-            &PutCondition::IfMatch(cur.etag),
-            &stamps,
-            crc,
-        )
-        .await
-        .unwrap();
+    // A UI write re-creates the path at a handle of its own.
+    let (_, ui_key) = hitl_write_at(&store, &sc.cfg, "doc.txt", "user re-created", "dilip", now_unix()).await.unwrap();
 
-    // Second-absence barrier: the manifest uncites, but the DELETE must
-    // refuse the unrecognized ETag.
-    let r = sc.run_barrier().await.unwrap();
-    assert!(r.deleted.is_empty(), "GC deleted a foreign re-create!");
-    let (_, body) = store.get_whole(&sc.cfg.file_key("doc.txt"), None).await.unwrap();
-    assert_eq!(&body[..], b"user re-created");
+    // P2: the UI's re-creation is COMMITTED, so the agent's delete meets
+    // it as theirs changed since the base (the path is dirty in the tree,
+    // so nothing is owed); M3: the delete publishes over it — mine wins,
+    // theirs preserved under a record.
+    let _ = &ui_key;
+    for _ in 0..4 {
+        sc.run_barrier().await.unwrap();
+    }
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    assert!(!m.manifest.entries.contains_key("doc.txt"), "the agent's delete never published");
+    // The seed was retired by the UI's commit, and the gateway deletes
+    // nothing: the handle is cited by no one and left to the orphan sweep
+    // (slice 5 makes that a retire-age rule).
+    assert!(!m.manifest.entries.values().any(|e| e.key == seed), "the seed is still cited");
     let conflicts = sc.state.load_conflicts().unwrap();
-    assert!(conflicts.iter().any(|c| c.kind == "gc-skip" && c.path == "doc.txt"));
+    assert!(!conflicts.iter().any(|c| c.kind == "gc-skip"), "no guard, no skip: {conflicts:?}");
+    let rec = conflicts
+        .iter()
+        .find(|c| c.kind.starts_with("commit-deleted-over-theirs") && c.path == "doc.txt")
+        .expect("the UI write over the deleted path was not surfaced");
+    let (_, kept) = store.get_whole(rec.preserved_key.as_ref().unwrap(), None).await.unwrap();
+    assert_eq!(&kept[..], b"user re-created");
 }
 
-/// Delete/modify across writers: a local delete loses to a foreign
-/// manifest change — the entry is preserved, queued for consume, and
-/// the object survives GC (the model's merge counterexample).
+
+
+
+
+
+
+
+
+// ── The retired classes under handles (design 2026-09-19 §3) ─────────────
+//
+// Each test below stands where a same-key test stood: the slot's race, its
+// 412 arm, its HEAD-guarded delete, its collector-off leak and its tracked
+// orphan are gone with the slot, and what is checked instead is the rule
+// that replaced them. The test-name census in the design doc names each
+// retired test and the test that stands in its place.
+
+/// Rule R4's pair, the withheld half (`LeanImmutableProbeUploadWithheld`):
+/// an upload the peer's orphan sweep took between its landing and its
+/// commit is WITHHELD by the commit's own re-read — never cited, recorded,
+/// and the path stays dirty for the next barrier to upload afresh. Under
+/// the slot this was the "adopt/upload withheld" arm against the peer's
+/// If-Match GC; the sweep runs under the cell, so the re-read and the CAS
+/// are race-free against it, and with no grace modelled it can take any
+/// in-flight upload — the grace is a cost lever, not a safety one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_commit_withholds_an_upload_a_peers_sweep_took_and_uploads_afresh_next_barrier() {
+    let inner = Arc::new(MemoryStore::new());
+    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = hooked_syncer(&ha, dir_a.path());
+    let mut b = syncer(&inner, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "seed.txt", "seed");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+    // B's orphan sweep is due at its next commit, with no grace.
+    b.cfg.untracked_grace_secs = 0;
+    b.state.save_orphan_sweep_at(now_unix() - b.cfg.untracked_sweep_secs - 1).unwrap();
+    write(dir_b.path(), "b.txt", "B publishes");
+    write(dir_a.path(), "x.txt", "A's upload");
+    // A's upload lands; before A claims, B's commit sweeps it.
+    let b_slot = std::sync::Mutex::new(Some(b));
+    let b_back: Arc<std::sync::Mutex<Option<Syncer>>> = Arc::new(std::sync::Mutex::new(None));
+    let b_back_in = b_back.clone();
+    ha.after_put(&a.cfg.file_key("x.txt"), move || {
+        let mut b = b_slot.lock().unwrap().take().expect("hook ran twice");
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let rb = b.run_barrier().await.expect("B's barrier");
+                assert!(rb.swept >= 1, "fixture: B's sweep did not take A's in-flight upload: {rb:?}");
+            })
+        });
+        *b_back_in.lock().unwrap() = Some(b);
+    });
+    let ra = a.run_barrier().await.expect("A's barrier");
+    assert!(b_back.lock().unwrap().is_some(), "fixture: the hook never ran");
+    assert_eq!(ra.parked, vec!["x.txt".to_string()], "the commit cited a handle the sweep took: {ra:?}");
+    assert!(ra.uploaded.is_empty(), "{ra:?}");
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(!m.entries.contains_key("x.txt"), "cited a collected handle");
+    assert!(
+        a.state.load_conflicts().unwrap().iter().any(|c| c.kind.starts_with("upload-withheld")),
+        "the withheld upload left no record"
+    );
+    // The path stayed dirty: the next barrier uploads afresh.
+    let ra2 = a.run_barrier().await.unwrap();
+    assert_eq!(ra2.uploaded, vec!["x.txt".to_string()], "{ra2:?}");
+    assert_eq!(cited_bytes(&inner, &a.cfg, "x.txt").await.as_deref(), Some(&b"A's upload"[..]));
+}
+
+/// A withheld upload is PARKED: the path is the agent's work and "publishes
+/// next barrier", so the merge does not count theirs there as owed. If the
+/// agent then backs out, theirs IS owed, and nothing else may move the
+/// pointer: a barrier that parks a path theirs changed must leave the
+/// syncer behind (MCLeanP1Like, 2026-09-25, Inv_ShortcutSound, 22 states).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peers_version_behind_a_withheld_upload_arrives_when_the_agent_drops_its_file() {
+    let inner = Arc::new(MemoryStore::new());
+    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = hooked_syncer(&ha, dir_a.path());
+    let mut b = syncer(&inner, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "seed.txt", "seed");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+    b.cfg.untracked_grace_secs = 0;
+    b.state.save_orphan_sweep_at(now_unix() - b.cfg.untracked_sweep_secs - 1).unwrap();
+    // B's commit (which runs its sweep) carries nothing A lacks: the same
+    // bytes, re-published, so the etag theirs cites is the one A has.
+    write(dir_b.path(), "seed.txt", "seed");
+    backdate_baseline(&b, "seed.txt");
+    write(dir_a.path(), "x.txt", "A's draft");
+    // A's upload lands; before A claims, B's commit sweeps it and a peer
+    // commits its own x.txt.
+    let b_slot = std::sync::Mutex::new(Some(b));
+    let (store2, cfg_a) = (inner.clone(), a.cfg.clone());
+    ha.after_put(&a.cfg.file_key("x.txt"), move || {
+        let mut b = b_slot.lock().unwrap().take().expect("hook ran twice");
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let rb = b.run_barrier().await.expect("B's barrier");
+                assert!(rb.swept >= 1, "fixture: B's sweep did not take A's in-flight upload: {rb:?}");
+                peer_publish(&store2, &cfg_a, "x.txt", "the peer's x", "peer").await;
+            })
+        });
+    });
+    let ra = a.run_barrier().await.expect("A's barrier");
+    assert_eq!(ra.parked, vec!["x.txt".to_string()], "fixture: the upload was not withheld: {ra:?}");
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries.keys().collect::<Vec<_>>(), ["seed.txt", "x.txt"], "fixture: something else changed");
+    assert_eq!(m.entries["seed.txt"].etag, a.state.load_baseline().unwrap().entries["seed.txt"].etag, "fixture: B's commit changed seed.txt's bytes");
+    assert_eq!(read(dir_a.path(), "x.txt").as_deref(), Some("A's draft"), "fixture");
+
+    // The agent drops its draft; nothing else commits.
+    std::fs::remove_file(dir_a.path().join("x.txt")).unwrap();
+    for _ in 0..2 {
+        a.run_barrier().await.unwrap();
+    }
+    assert_eq!(read(dir_a.path(), "x.txt").as_deref(), Some("the peer's x"), "the peer's version never arrived");
+}
+
+/// The same, where the tree had the path: the agent reverts its edit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peers_version_behind_a_withheld_edit_arrives_when_the_agent_reverts() {
+    let inner = Arc::new(MemoryStore::new());
+    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = hooked_syncer(&ha, dir_a.path());
+    let mut b = syncer(&inner, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "seed.txt", "seed");
+    write(dir_a.path(), "x.txt", "x v1");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+    b.cfg.untracked_grace_secs = 0;
+    b.state.save_orphan_sweep_at(now_unix() - b.cfg.untracked_sweep_secs - 1).unwrap();
+    // B's commit (which runs its sweep) carries nothing A lacks: the same
+    // bytes, re-published, so the etag theirs cites is the one A has.
+    write(dir_b.path(), "seed.txt", "seed");
+    backdate_baseline(&b, "seed.txt");
+    write(dir_a.path(), "x.txt", "A's edit");
+    // A's upload lands; before A claims, B's commit sweeps it and a peer
+    // commits its own x.txt.
+    let b_slot = std::sync::Mutex::new(Some(b));
+    let (store2, cfg_a) = (inner.clone(), a.cfg.clone());
+    ha.after_put(&a.cfg.file_key("x.txt"), move || {
+        let mut b = b_slot.lock().unwrap().take().expect("hook ran twice");
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let rb = b.run_barrier().await.expect("B's barrier");
+                assert!(rb.swept >= 1, "fixture: B's sweep did not take A's in-flight upload: {rb:?}");
+                peer_publish(&store2, &cfg_a, "x.txt", "the peer's x", "peer").await;
+            })
+        });
+    });
+    let ra = a.run_barrier().await.expect("A's barrier");
+    assert_eq!(ra.parked, vec!["x.txt".to_string()], "fixture: the upload was not withheld: {ra:?}");
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries.keys().collect::<Vec<_>>(), ["seed.txt", "x.txt"], "fixture: something else changed");
+    assert_eq!(m.entries["seed.txt"].etag, a.state.load_baseline().unwrap().entries["seed.txt"].etag, "fixture: B's commit changed seed.txt's bytes");
+    assert_eq!(read(dir_a.path(), "x.txt").as_deref(), Some("A's edit"), "fixture");
+
+    // The agent reverts its edit; nothing else commits.
+    restore_to_baseline(&a, "x.txt", "x v1");
+    for _ in 0..2 {
+        a.run_barrier().await.unwrap();
+    }
+    assert_eq!(read(dir_a.path(), "x.txt").as_deref(), Some("the peer's x"), "the peer's version never arrived");
+}
+
+/// A UI rename over a DIRTY source lands (P2, the user's rule): the
+/// document moves the citation at once. The agent's unpublished edit at the
+/// source is never touched; its next publish brings the source path back —
+/// mine wins over the rename's delete of it, RECORDED — and the moved
+/// version stays at the destination. Both versions are kept.
 #[tokio::test]
-async fn local_delete_loses_to_foreign_modify() {
+async fn a_ui_rename_over_a_dirty_source_keeps_both_versions_with_a_record() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.checkout().await.unwrap();
+    write(dir.path(), "x.txt", "seed");
+    a.run_barrier().await.unwrap();
+    let seed = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.entries["x.txt"].etag.clone();
+    write(dir.path(), "x.txt", "the agent's edit");
+    backdate_baseline(&a, "x.txt");
+    hitl_rename(&store, &a.cfg, "x.txt", "y.txt", "dilip").await;
+    for _ in 0..3 {
+        a.run_barrier().await.unwrap();
+    }
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries["y.txt"].etag, seed, "the rename's destination lost the moved version");
+    assert_eq!(read(dir.path(), "y.txt").as_deref(), Some("seed"));
+    assert_eq!(read(dir.path(), "x.txt").as_deref(), Some("the agent's edit"), "the agent's edit was touched");
+    assert!(m.entries.contains_key("x.txt"), "the agent's edit was never published");
+    assert!(
+        a.state.load_conflicts().unwrap().iter().any(|c| c.path == "x.txt" && c.foreign_etag == seed && c.kind.starts_with("commit-recreated-deleted")),
+        "the edit overrode the rename's move with no record: {:?}",
+        a.state.load_conflicts().unwrap()
+    );
+}
+
+/// A UI rename onto a destination the agent has TAKEN — an uncited file of
+/// its own there — lands (P2): the document moves the citation. The agent's
+/// file wins the destination at its next publish, and the moved version,
+/// which it never integrated, is preserved under R7's record: nothing is
+/// lost, nothing is silent.
+#[tokio::test]
+async fn a_ui_rename_onto_a_destination_the_agent_took_preserves_the_moved_version() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.checkout().await.unwrap();
+    write(dir.path(), "x.txt", "seed");
+    a.run_barrier().await.unwrap();
+    let seed = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.entries["x.txt"].etag.clone();
+    write(dir.path(), "y.txt", "the agent's own y");
+    hitl_rename(&store, &a.cfg, "x.txt", "y.txt", "dilip").await;
+    for _ in 0..3 {
+        a.run_barrier().await.unwrap();
+    }
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(read(dir.path(), "y.txt").as_deref(), Some("the agent's own y"), "the agent's file was touched");
+    assert!(!m.entries.contains_key("x.txt"), "the rename's source is cited again");
+    let rec = a
+        .state
+        .load_conflicts()
+        .unwrap()
+        .into_iter()
+        .find(|c| c.path == "y.txt" && c.foreign_etag == seed)
+        .expect("the moved version was lost with no record");
+    let (_, kept) = store.get_whole(rec.preserved_key.as_ref().expect("not preserved"), None).await.unwrap();
+    assert_eq!(&kept[..], b"seed");
+}
+
+/// G2 (P2, 2026-09-25): a UI save never waits on the lease, so a writer
+/// mid-commit can lose its CAS to saves several times in a row. It backs off
+/// and retries rather than failing the barrier after a few losses (the cap
+/// was 4). Six lost races here; the barrier still installs.
+#[tokio::test]
+async fn a_writer_that_loses_several_cas_races_backs_off_and_installs() {
+    let inner = Arc::new(MemoryStore::new());
+    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = hooked_syncer(&ha, dir.path());
+    a.checkout().await.unwrap();
+    write(dir.path(), "seed.txt", "seed");
+    a.run_barrier().await.unwrap();
+    write(dir.path(), "x.txt", "the writer's publish");
+    *ha.1.put_conflicts.lock().unwrap() = Some((a.cfg.current_key(), 6));
+    let t0 = std::time::Instant::now();
+    let r = a.run_barrier().await.expect("the barrier gave up on lost CAS races");
+    assert!(t0.elapsed() >= std::time::Duration::from_millis(630), "no backoff between the lost races: {:?}", t0.elapsed());
+    assert_eq!(r.uploaded, vec!["x.txt".to_string()], "{r:?}");
+    assert_eq!(ha.1.put_conflicts.lock().unwrap().as_ref().map(|(_, n)| *n), Some(0), "fixture: not every race was lost");
+    assert!(manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.entries.contains_key("x.txt"));
+}
+
+/// L-126 (found by the P1-lite sandbox's baseline, 2026-09-24, and then in
+/// `LeanCore` itself at one path and THREE barriers — every LeanCore world
+/// in the gate has two). A's upload over a version it never integrated is
+/// WITHHELD (a peer's sweep took it); the path is parked, so the merge
+/// neither queues theirs nor reports it overridden, and step 7 still moves
+/// the merge base (`inst_base`) to the installed document — theirs
+/// included — while the baseline keeps the version A's edit derives from.
+/// At the next barrier theirs EQUALS the merge base: `merge` reports
+/// nothing overridden, R7 never looks, and A's re-upload replaces an
+/// acknowledged UI write it never saw, with no record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_withheld_upload_republished_next_barrier_surfaces_the_version_it_never_integrated() {
+    let inner = Arc::new(MemoryStore::new());
+    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = hooked_syncer(&ha, dir_a.path());
+    let mut b = syncer(&inner, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "p.txt", "seed");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+    // The UI saves p; B adopts and publishes it. A never consumes it.
+    let (ui_etag, ui_key) = hitl_write_at(&inner, &a.cfg, "p.txt", "the user's save", "dilip", now_unix()).await.unwrap();
+    b.run_barrier().await.unwrap();
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries["p.txt"].key, ui_key, "fixture: B did not publish the UI write");
+    // A's agent edits p (from the seed). A's upload lands; before A claims,
+    // B's commit sweeps it.
+    b.cfg.untracked_grace_secs = 0;
+    b.state.save_orphan_sweep_at(now_unix() - b.cfg.untracked_sweep_secs - 1).unwrap();
+    write(dir_b.path(), "b.txt", "B publishes");
+    write(dir_a.path(), "p.txt", "A's edit");
+    backdate_baseline(&a, "p.txt");
+    let b_slot = std::sync::Mutex::new(Some(b));
+    let b_back: Arc<std::sync::Mutex<Option<Syncer>>> = Arc::new(std::sync::Mutex::new(None));
+    let b_back_in = b_back.clone();
+    ha.after_put(&a.cfg.file_key("p.txt"), move || {
+        let mut b = b_slot.lock().unwrap().take().expect("hook ran twice");
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let rb = b.run_barrier().await.expect("B's barrier");
+                assert!(rb.swept >= 1, "fixture: B's sweep did not take A's in-flight upload: {rb:?}");
+            })
+        });
+        *b_back_in.lock().unwrap() = Some(b);
+    });
+    let ra = a.run_barrier().await.unwrap();
+    assert!(b_back.lock().unwrap().is_some(), "fixture: the hook never ran");
+    assert_eq!(ra.parked, vec!["p.txt".to_string()], "fixture: the upload was not withheld: {ra:?}");
+    // The next barrier publishes A's edit again — over the user's save.
+    let ra2 = a.run_barrier().await.unwrap();
+    assert_eq!(ra2.uploaded, vec!["p.txt".to_string()], "fixture: {ra2:?}");
+    assert_eq!(cited_bytes(&inner, &a.cfg, "p.txt").await.as_deref(), Some(&b"A's edit"[..]));
+    assert!(
+        a.state.load_conflicts().unwrap().iter().any(|c| c.path == "p.txt" && c.foreign_etag == ui_etag),
+        "A's edit replaced the user's acknowledged save with no record: {:?}",
+        a.state.load_conflicts().unwrap()
+    );
+}
+
+/// L-126 through the journal: the withheld barrier ALSO publishes another
+/// file, so it CASes and journals `installed_etag`. Nothing moves the pointer
+/// before the re-upload, so `merge_base` takes the installed document as the
+/// base — and that document cites the user's save at the parked path. The
+/// parked path must keep its earlier base there too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_withheld_upload_beside_a_published_one_surfaces_the_version_it_never_integrated() {
+    let inner = Arc::new(MemoryStore::new());
+    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = hooked_syncer(&ha, dir_a.path());
+    let mut b = syncer(&inner, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "p.txt", "seed");
+    write(dir_a.path(), "q.txt", "seed q");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+    let (ui_etag, ui_key) = hitl_write_at(&inner, &a.cfg, "p.txt", "the user's save", "dilip", now_unix()).await.unwrap();
+    b.run_barrier().await.unwrap();
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries["p.txt"].key, ui_key, "fixture: B did not publish the UI write");
+    b.cfg.untracked_grace_secs = 0;
+    b.state.save_orphan_sweep_at(now_unix() - b.cfg.untracked_sweep_secs - 1).unwrap();
+    write(dir_b.path(), "b.txt", "B publishes");
+    write(dir_a.path(), "p.txt", "A's edit");
+    write(dir_a.path(), "q.txt", "A's q");
+    backdate_baseline(&a, "p.txt");
+    backdate_baseline(&a, "q.txt");
+    let b_slot = std::sync::Mutex::new(Some(b));
+    let b_back: Arc<std::sync::Mutex<Option<Syncer>>> = Arc::new(std::sync::Mutex::new(None));
+    let b_back_in = b_back.clone();
+    ha.after_put(&a.cfg.file_key("p.txt"), move || {
+        let mut b = b_slot.lock().unwrap().take().expect("hook ran twice");
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let rb = b.run_barrier().await.expect("B's barrier");
+                assert!(rb.swept >= 1, "fixture: B's sweep did not take A's in-flight upload: {rb:?}");
+            })
+        });
+        *b_back_in.lock().unwrap() = Some(b);
+    });
+    let ra = a.run_barrier().await.unwrap();
+    assert!(b_back.lock().unwrap().is_some(), "fixture: the hook never ran");
+    assert_eq!(ra.parked, vec!["p.txt".to_string()], "fixture: p was not withheld: {ra:?}");
+    assert_eq!(ra.uploaded, vec!["q.txt".to_string()], "fixture: q did not publish beside it: {ra:?}");
+    let ra2 = a.run_barrier().await.unwrap();
+    assert_eq!(ra2.uploaded, vec!["p.txt".to_string()], "fixture: {ra2:?}");
+    assert!(
+        a.state.load_conflicts().unwrap().iter().any(|c| c.path == "p.txt" && c.foreign_etag == ui_etag),
+        "A's edit replaced the user's acknowledged save with no record: {:?}",
+        a.state.load_conflicts().unwrap()
+    );
+}
+
+/// The shared fixture for L-126's journal routes: B publishes `peer_bytes` at
+/// p (as the UI's save when `ui`, else as B's own new file); A's agent writes
+/// p and q, A's upload of p is swept before A claims, and A publishes q
+/// beside it — so A's barrier CASes, journals `installed_etag` and parks p.
+/// Returns the peer version's etag, with A and the store.
+async fn l126_withheld_beside_a_cas(
+    ui: bool,
+) -> (Arc<MemoryStore>, Arc<Hooked>, Syncer, tempfile::TempDir, tempfile::TempDir, String) {
+    let inner = Arc::new(MemoryStore::new());
+    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = hooked_syncer(&ha, dir_a.path());
+    let mut b = syncer(&inner, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    if ui {
+        write(dir_a.path(), "p.txt", "seed");
+    }
+    write(dir_a.path(), "q.txt", "seed q");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+    let peer_etag = if ui {
+        let (etag, _) = hitl_write_at(&inner, &a.cfg, "p.txt", "the user's save", "dilip", now_unix()).await.unwrap();
+        b.run_barrier().await.unwrap();
+        etag
+    } else {
+        write(dir_b.path(), "p.txt", "B's p");
+        b.run_barrier().await.unwrap();
+        manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.entries["p.txt"].etag.clone()
+    };
+    b.cfg.untracked_grace_secs = 0;
+    b.state.save_orphan_sweep_at(now_unix() - b.cfg.untracked_sweep_secs - 1).unwrap();
+    write(dir_b.path(), "b.txt", "B publishes");
+    write(dir_a.path(), "p.txt", "A's p");
+    write(dir_a.path(), "q.txt", "A's q");
+    backdate_baseline(&a, "p.txt");
+    backdate_baseline(&a, "q.txt");
+    let b_slot = std::sync::Mutex::new(Some(b));
+    let b_back: Arc<std::sync::Mutex<Option<Syncer>>> = Arc::new(std::sync::Mutex::new(None));
+    let b_back_in = b_back.clone();
+    ha.after_put(&a.cfg.file_key("p.txt"), move || {
+        let mut b = b_slot.lock().unwrap().take().expect("hook ran twice");
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let rb = b.run_barrier().await.expect("B's barrier");
+                assert!(rb.swept >= 1, "fixture: B's sweep did not take A's in-flight upload: {rb:?}");
+            })
+        });
+        *b_back_in.lock().unwrap() = Some(b);
+    });
+    let ra = a.run_barrier().await.unwrap();
+    assert!(b_back.lock().unwrap().is_some(), "fixture: the hook never ran");
+    assert_eq!(ra.parked, vec!["p.txt".to_string()], "fixture: p was not withheld: {ra:?}");
+    assert_eq!(ra.uploaded, vec!["q.txt".to_string()], "fixture: q did not publish beside it: {ra:?}");
+    (inner, ha, a, dir_a, dir_b, peer_etag)
+}
+
+/// The journal route for a NEW file: the installed document cites B's p,
+/// which A's merge base never cited, so the base must stay without p.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_withheld_new_file_beside_a_published_one_surfaces_the_peers_file() {
+    let (_inner, _ha, mut a, _da, _db, peer_etag) = l126_withheld_beside_a_cas(false).await;
+    let ra2 = a.run_barrier().await.unwrap();
+    assert_eq!(ra2.uploaded, vec!["p.txt".to_string()], "fixture: {ra2:?}");
+    assert!(
+        a.state.load_conflicts().unwrap().iter().any(|c| c.path == "p.txt" && c.foreign_etag == peer_etag),
+        "A's new file replaced B's with no record: {:?}",
+        a.state.load_conflicts().unwrap()
+    );
+}
+
+/// The parked set is CARRIED with `installed_etag` when the next barrier
+/// rewrites the journal: that barrier fails at its CAS (the pointer's PUT is
+/// refused, nothing lands), and the retry still keeps p's base.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_barrier_that_fails_before_its_cas_keeps_the_parked_set_for_the_retry() {
+    let (_inner, ha, mut a, _da, _db, peer_etag) = l126_withheld_beside_a_cas(true).await;
+    *ha.1.put_fail_containing.lock().unwrap() = Some(a.cfg.current_key());
+    assert!(a.run_barrier().await.is_err(), "fixture: the barrier's CAS did not fail");
+    *ha.1.put_fail_containing.lock().unwrap() = None;
+    let ra3 = a.run_barrier().await.unwrap();
+    assert_eq!(ra3.uploaded, vec!["p.txt".to_string()], "fixture: {ra3:?}");
+    assert!(
+        a.state.load_conflicts().unwrap().iter().any(|c| c.path == "p.txt" && c.foreign_etag == peer_etag),
+        "A's edit replaced the user's acknowledged save with no record: {:?}",
+        a.state.load_conflicts().unwrap()
+    );
+}
+
+/// L-126's other arm: a path the merge base did NOT cite. B creates p and
+/// publishes it; A's agent creates p too, and A's upload is withheld. The
+/// merge base must stay WITHOUT p — not take B's version, which A never
+/// integrated — so the re-upload's merge sees B's p as a change and R7
+/// records it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_withheld_new_file_republished_next_barrier_surfaces_the_peers_file() {
+    let inner = Arc::new(MemoryStore::new());
+    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = hooked_syncer(&ha, dir_a.path());
+    let mut b = syncer(&inner, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "seed.txt", "seed");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+    write(dir_b.path(), "p.txt", "B's p");
+    b.run_barrier().await.unwrap();
+    let b_etag = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.entries["p.txt"].etag.clone();
+    b.cfg.untracked_grace_secs = 0;
+    b.state.save_orphan_sweep_at(now_unix() - b.cfg.untracked_sweep_secs - 1).unwrap();
+    write(dir_b.path(), "b.txt", "B publishes");
+    write(dir_a.path(), "p.txt", "A's p");
+    let b_slot = std::sync::Mutex::new(Some(b));
+    let b_back: Arc<std::sync::Mutex<Option<Syncer>>> = Arc::new(std::sync::Mutex::new(None));
+    let b_back_in = b_back.clone();
+    ha.after_put(&a.cfg.file_key("p.txt"), move || {
+        let mut b = b_slot.lock().unwrap().take().expect("hook ran twice");
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let rb = b.run_barrier().await.expect("B's barrier");
+                assert!(rb.swept >= 1, "fixture: B's sweep did not take A's in-flight upload: {rb:?}");
+            })
+        });
+        *b_back_in.lock().unwrap() = Some(b);
+    });
+    let ra = a.run_barrier().await.unwrap();
+    assert!(b_back.lock().unwrap().is_some(), "fixture: the hook never ran");
+    assert_eq!(ra.parked, vec!["p.txt".to_string()], "fixture: the upload was not withheld: {ra:?}");
+    let ra2 = a.run_barrier().await.unwrap();
+    assert_eq!(ra2.uploaded, vec!["p.txt".to_string()], "fixture: {ra2:?}");
+    assert!(
+        a.state.load_conflicts().unwrap().iter().any(|c| c.path == "p.txt" && c.foreign_etag == b_etag),
+        "A's new file replaced B's with no record: {:?}",
+        a.state.load_conflicts().unwrap()
+    );
+}
+
+/// The crash journal's recognisers are gone with the slot: a barrier that
+/// restarts after some of its uploads landed does not adopt them by flush
+/// id (`AdoptOwn`, the torn-compose arm), it uploads afresh at handles of
+/// its own and cites those; what it left behind is nobody's, and the
+/// orphan sweep takes it. Stood where "a claim that reaches the deadline
+/// ... the retry adopts the uploads" and "a crashed compose is adopted
+/// after an edit" stood.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restarted_barrier_uploads_afresh_and_leaves_its_earlier_handles_to_the_sweep() {
+    let (inner, mut b, dir_a, dir_b, orphan) = killed_writer_orphan().await;
+    // A restarts on the same tree.
+    let mut a = syncer(&inner, dir_a.path()).await;
+    let ra = a.run_barrier().await.expect("A's retry");
+    assert_eq!(ra.uploaded, vec!["p1.txt".to_string(), "p2.txt".to_string()], "{ra:?}");
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_ne!(m.entries["p1.txt"].key, orphan, "the retry cited its orphan instead of uploading afresh");
+    assert_eq!(cited_bytes(&inner, &a.cfg, "p1.txt").await.as_deref(), Some(&b"A's unpublished edit"[..]));
+    assert!(inner.head(&orphan).await.is_ok(), "the retry is not the collector of its predecessor");
+    // The orphan is the sweep's: due at B's next commit, it goes.
+    b.cfg.untracked_grace_secs = 0;
+    b.state.save_orphan_sweep_at(now_unix() - b.cfg.untracked_sweep_secs - 1).unwrap();
+    write(dir_b.path(), "b2.txt", "B commits again");
+    let rb = b.run_barrier().await.unwrap();
+    assert_eq!(rb.swept, 1, "{rb:?}");
+    assert!(matches!(inner.head(&orphan).await, Err(StoreError::NotFound(_))), "the orphan survived the sweep");
+}
+
+/// Retired classes F1/L-10, F2/L-11 and finding 13 (`LeanImmutableGCUnconditional`
+/// holding): a peer's in-flight upload sits at a handle of its own, so
+/// another writer's collector — which deletes only what its OWN document
+/// stopped citing, unconditionally — cannot touch it, whatever bytes it
+/// holds and whatever the etag. B's commit then cites it over A's racing
+/// delete: modify wins.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peers_in_flight_upload_is_untouched_by_anothers_collector() {
+    let inner = Arc::new(MemoryStore::new());
+    let hb = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&inner, dir_a.path()).await;
+    let mut b = hooked_syncer(&hb, dir_b.path());
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "x.txt", "seed");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+    let seed = cited_key(&inner, &a.cfg, "x.txt").await;
+    // B edits x with the seed's OWN bytes plus a byte (finding 13's shape
+    // needs identical bytes; a handle makes the etag irrelevant either way).
+    write(dir_b.path(), "x.txt", "seed!");
+    backdate_baseline(&b, "x.txt");
+    std::fs::remove_file(dir_a.path().join("x.txt")).unwrap();
+    a.run_barrier().await.unwrap(); // first absence
+    let a_slot = std::sync::Mutex::new(Some(a));
+    let a_back: Arc<std::sync::Mutex<Option<Syncer>>> = Arc::new(std::sync::Mutex::new(None));
+    let a_back_in = a_back.clone();
+    hb.after_put(&b.cfg.file_key("x.txt"), move || {
+        let mut a = a_slot.lock().unwrap().take().expect("hook ran twice");
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let ra = a.run_barrier().await.expect("A's delete barrier");
+                assert_eq!(ra.deleted, vec!["x.txt".to_string()], "fixture: A did not publish its delete: {ra:?}");
+                assert_eq!(ra.collected, 1, "fixture: A's collector took nothing: {ra:?}");
+            })
+        });
+        *a_back_in.lock().unwrap() = Some(a);
+    });
+    let rb = b.run_barrier().await.expect("B's barrier");
+    assert!(a_back.lock().unwrap().is_some(), "fixture: the hook never ran");
+    assert_eq!(rb.uploaded, vec!["x.txt".to_string()], "{rb:?}");
+    assert!(rb.parked.is_empty(), "A's collector took B's in-flight upload: {rb:?}");
+    assert_eq!(
+        cited_bytes(&inner, &b.cfg, "x.txt").await.as_deref(),
+        Some(&b"seed!"[..]),
+        "modify wins over the racing delete, and the bytes are B's"
+    );
+    assert!(matches!(inner.head(&seed).await, Err(StoreError::NotFound(_))), "A's collector did not take what A retired");
+}
+
+/// Retired class H1/L-102 (`LeanImmutableLeakHolds`): a store without a
+/// conditional DELETE used to make the collector give way, leaking the
+/// retired object at the key — and the leak superseded the peer's
+/// tombstone (H1) unless three rules told it apart. A retired handle can
+/// never be re-cited, so the collector deletes it unconditionally on every
+/// store, nothing leaks, and the delete reaches the other tree with no rule
+/// to apply.
+#[tokio::test]
+async fn a_store_without_a_conditional_delete_collects_just_the_same() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "x.txt", "seed");
+    write(dir_a.path(), "keep.txt", "keep");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+    let seed = cited_key(&store, &a.cfg, "x.txt").await;
+    std::fs::remove_file(dir_a.path().join("x.txt")).unwrap();
+    a.run_barrier().await.unwrap(); // first absence
+    let ra = a.run_barrier().await.unwrap();
+    assert_eq!(ra.deleted, vec!["x.txt".to_string()]);
+    assert!(ra.leaked.is_empty(), "the collector gave way: {ra:?}");
+    assert_eq!(ra.collected, 1, "{ra:?}");
+    assert!(matches!(store.head(&seed).await, Err(StoreError::NotFound(_))), "the retired handle leaked");
+    for _ in 0..2 {
+        b.run_barrier().await.unwrap();
+    }
+    assert!(read(dir_b.path(), "x.txt").is_none(), "the peer's delete did not reach B's tree");
+    assert_eq!(read(dir_b.path(), "keep.txt").as_deref(), Some("keep"));
+    let m = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
+    assert!(!m.entries.contains_key("x.txt"), "the delete flapped back");
+}
+
+
+/// An INGRESS object's copy is COMMITTED by the sweep (P2), judged against
+/// the citation the sweep saw. A writer that then publishes the path from a
+/// base that never held the ingress copy publishes over it — mine wins — and
+/// R7 preserves the outside bytes under a record. Every tree follows the
+/// document. The ingress object itself is never touched.
+#[tokio::test]
+async fn an_ingress_copy_a_writer_publishes_over_is_preserved_with_a_record() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    b.cfg.untracked_grace_secs = 0;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "p1.txt", "v1");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+    // An outside writer's object at the bare path; B's sweep commits a copy
+    // of it, judged against v1's citation, and B's tree takes it.
+    let body = Bytes::from_static(b"outside bytes");
+    let stamps = GenerationStamps { generation: 0, epoch: 0, flush_uuid: "aws-cli".into(), boundary_source: None, posix: None };
+    let ingress = store
+        .put_whole(&b.cfg.file_key("p1.txt"), body.clone(), &PutCondition::Unconditional, &stamps, crc64_nvme(&body))
+        .await
+        .unwrap();
+    let tracked = b.track_untracked(now_unix() + 1).await.unwrap();
+    assert_eq!(tracked, vec!["p1.txt".to_string()], "fixture: the ingress object was not tracked");
+    assert_eq!(cited_bytes(&store, &b.cfg, "p1.txt").await.as_deref(), Some(&b"outside bytes"[..]), "the copy is not cited");
+    for _ in 0..2 {
+        b.run_barrier().await.unwrap();
+    }
+    assert_eq!(read(dir_b.path(), "p1.txt").as_deref(), Some("outside bytes"));
+    // A publishes v2 from a base that never held the ingress copy.
+    write(dir_a.path(), "p1.txt", "v2 by A's agent");
+    backdate_baseline(&a, "p1.txt");
+    let ra = a.run_barrier().await.unwrap();
+    assert_eq!(ra.surfaced, vec!["p1.txt".to_string()], "A published over the ingress copy with no record: {ra:?}");
+    assert_eq!(cited_bytes(&store, &b.cfg, "p1.txt").await.as_deref(), Some(&b"v2 by A's agent"[..]));
+    for _ in 0..2 {
+        b.run_barrier().await.unwrap();
+    }
+    assert_eq!(read(dir_b.path(), "p1.txt").as_deref(), Some("v2 by A's agent"), "B's tree did not follow the document");
+    let (at_key, _) = store.get_whole(&b.cfg.file_key("p1.txt"), None).await.unwrap();
+    assert_eq!(at_key.etag, ingress.etag, "the ingress object was touched");
+}
+
+/// Retired class F8/L-16 (`LeanImmutableHitlOverAny`): the gateway's write
+/// lands at a handle of its own beside a writer's in-flight upload of the
+/// same path — nothing is overwritten, nothing is refused (the
+/// `hitl_may_overwrite` rule guarded a slot). The writer's commit cites its
+/// own upload; its next consume finds the entry's citation moved past what
+/// the gateway saw and treats it as the CONFLICT it is: preserved by a
+/// copy, surfaced by a record, never adopted over the published version
+/// and never dropped in silence (class 5, R7).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_ui_write_landing_beside_an_in_flight_upload_is_preserved_never_lost() {
+    let inner = Arc::new(MemoryStore::new());
+    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = hooked_syncer(&ha, dir_a.path());
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "p1.txt", "v1");
+    a.run_barrier().await.unwrap();
+    write(dir_a.path(), "p1.txt", "A's edit");
+    backdate_baseline(&a, "p1.txt");
+    let ui = Arc::new(std::sync::Mutex::new(None));
+    {
+        let (store, cfg, ui) = (inner.clone(), a.cfg.clone(), ui.clone());
+        ha.after_put(&a.cfg.file_key("p1.txt"), move || {
+            let (store, cfg) = (store.clone(), cfg.clone());
+            let landed = std::thread::spawn(move || {
+                tokio::runtime::Runtime::new()
+                    .unwrap()
+                    .block_on(hitl_write_at(&store, &cfg, "p1.txt", "the UI's version", "dilip", now_unix()))
+                    .unwrap()
+            })
+            .join()
+            .unwrap();
+            *ui.lock().unwrap() = Some(landed);
+        });
+    }
+    // P2: the UI's save COMMITS mid-barrier, so A's CAS loses, re-merges
+    // onto it, and publishes over a version A never integrated — which R7
+    // preserves and records at this very commit.
+    let ra = a.run_barrier().await.unwrap();
+    ui.lock().unwrap().clone().expect("fixture: the UI write never landed mid-barrier");
+    assert_eq!(ra.uploaded, vec!["p1.txt".to_string()], "{ra:?}");
+    assert_eq!(ra.surfaced, vec!["p1.txt".to_string()], "A published over the UI's save with no record: {ra:?}");
+    assert_eq!(cited_bytes(&inner, &a.cfg, "p1.txt").await.as_deref(), Some(&b"A's edit"[..]));
+    let rec = a
+        .state
+        .load_conflicts()
+        .unwrap()
+        .into_iter()
+        .find(|c| c.kind.starts_with("commit-surfaced-foreign") && c.path == "p1.txt")
+        .expect("the UI write was dropped in silence");
+    let (_, kept) = inner.get_whole(rec.preserved_key.as_ref().expect("not preserved"), None).await.unwrap();
+    assert_eq!(&kept[..], b"the UI's version");
+    a.run_barrier().await.unwrap();
+    assert_eq!(read(dir_a.path(), "p1.txt").as_deref(), Some("A's edit"), "adopted over the published version");
+}
+
+
+/// M3, the user's rule "mine wins, theirs is preserved", for a DELETE
+/// (P1-lite, 2026-09-25): the agent's delete meets a peer's newer version
+/// and lands at ONCE; the peer's version is preserved under a record that
+/// names it. (Before P1-lite the delete was outranked for a barrier, and
+/// won the next one through the queue's consume-dirty preservation.)
+#[tokio::test]
+async fn an_agents_delete_over_a_peers_newer_version_lands_and_preserves_theirs() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+    write(dir.path(), "shared.txt", "v1");
+    sc.run_barrier().await.unwrap();
+    let (their_etag, _) = peer_publish(&store, &sc.cfg, "shared.txt", "their v2", "other-writer").await;
+    std::fs::remove_file(dir.path().join("shared.txt")).unwrap();
+    let r = sc.declared_barrier().await.unwrap();
+    assert_eq!(r.deleted, vec!["shared.txt".to_string()], "the delete lands in this barrier");
+    assert!(r.parked.is_empty(), "{:?}", r.parked);
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    assert!(!m.manifest.entries.contains_key("shared.txt"));
+    let c = sc
+        .state
+        .load_conflicts()
+        .unwrap()
+        .into_iter()
+        .find(|c| c.path == "shared.txt" && c.foreign_etag == their_etag)
+        .expect("the peer's version is named by a record");
+    let preserved = c.preserved_key.expect("and preserved");
+    let (_, body) = store.get_whole(&preserved, None).await.unwrap();
+    assert_eq!(&body[..], b"their v2");
+    assert!(read(dir.path(), "shared.txt").is_none(), "the tree keeps the agent's delete");
+}
+
+/// Delete/modify across writers, on the cadence path: the first barrier
+/// sees only a FIRST absence and publishes nothing, so the foreign version
+/// stays cited; the second publishes the delete OVER it (M3), and the
+/// foreign bytes are preserved first. Never a silent winner.
+#[tokio::test]
+async fn local_delete_meets_foreign_modify_and_preserves_it() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
     let mut sc = syncer(&store, dir.path()).await;
@@ -649,49 +1508,21 @@ async fn local_delete_loses_to_foreign_modify() {
     write(dir.path(), "shared.txt", "v1");
     sc.run_barrier().await.unwrap();
 
-    // A second writer edits the object AND re-cites it in the manifest
-    // (a hub-style writer or a future gateway manifest reconciler).
-    let body = Bytes::from("their v2");
-    let crc = crc64_nvme(&body);
-    let stamps = GenerationStamps {
-        generation: 2,
-        epoch: 0,
-        flush_uuid: "other-writer".into(),
-        boundary_source: None,
-        posix: None,
-    };
-    let cur = store.head(&sc.cfg.file_key("shared.txt")).await.unwrap();
-    let newmeta = store
-        .put_whole(&sc.cfg.file_key("shared.txt"), body, &PutCondition::IfMatch(cur.etag), &stamps, crc)
-        .await
-        .unwrap();
-    let loaded = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
-    let mut theirs = loaded.manifest.clone();
-    theirs.seq += 1;
-    theirs.entries.get_mut("shared.txt").unwrap().etag = newmeta.etag.clone();
-    manifest::cas_write(store.as_ref(), &sc.cfg, &theirs, Some(&loaded.handle()), 0, "other-writer")
-        .await
-        .unwrap();
+    // A second writer publishes a new version of the path (a handle of
+    // its own, cited by a new manifest generation).
+    let (their_etag, _) = peer_publish(&store, &sc.cfg, "shared.txt", "their v2", "other-writer").await;
 
-    // The agent deletes locally; the FIRST barrier sees first-absence
-    // AND an un-consumed foreign manifest change: the merge must
-    // PRESERVE the foreign entry and queue it (never blind-delete —
-    // the model's GC-vs-merge counterexample).
+    // The agent deletes locally; the FIRST barrier sees a first absence:
+    // nothing publishes, and the foreign version stays cited.
     std::fs::remove_file(dir.path().join("shared.txt")).unwrap();
     let r1 = sc.run_barrier().await.unwrap();
     assert!(r1.deleted.is_empty());
     let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
-    assert_eq!(m.manifest.entries["shared.txt"].etag, newmeta.etag, "foreign entry dropped!");
-    let (_, body) = store.get_whole(&sc.cfg.file_key("shared.txt"), None).await.unwrap();
-    assert_eq!(&body[..], b"their v2");
-    // Queued for THIS writer's next consume, in its own queue.
-    let queued = sc.state.load_foreign_queue().unwrap();
-    assert!(queued.iter().any(|c| c.path == "shared.txt" && c.etag.as_deref() == Some(newmeta.etag.as_str())), "{queued:?}");
+    assert_eq!(m.manifest.entries["shared.txt"].etag, their_etag, "foreign entry dropped!");
+    assert_eq!(cited_bytes(&store, &sc.cfg, "shared.txt").await.as_deref(), Some(&b"their v2"[..]));
 
-    // The SECOND barrier consumes the queued foreign edit against the
-    // local delete: the decided policy is locally-dirty wins WITH the
-    // conflict surfaced and the foreign bytes preserved first — the
-    // delete then publishes. Never a silent winner.
+    // The SECOND barrier publishes the delete over it: mine wins, WITH
+    // the foreign bytes preserved first and a record naming them.
     let r2 = sc.run_barrier().await.unwrap();
     assert_eq!(r2.deleted, vec!["shared.txt".to_string()]);
     let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
@@ -699,41 +1530,13 @@ async fn local_delete_loses_to_foreign_modify() {
     let conflicts = sc.state.load_conflicts().unwrap();
     let c = conflicts
         .iter()
-        .find(|c| c.kind == "consume-dirty" && c.path == "shared.txt")
+        .find(|c| c.kind.starts_with("commit-deleted-over-theirs") && c.path == "shared.txt")
         .expect("delete-vs-edit conflict must surface");
     let preserved = c.preserved_key.as_ref().expect("foreign bytes preserved");
     let (_, body) = store.get_whole(preserved, None).await.unwrap();
     assert_eq!(&body[..], b"their v2", "the edit must stay recoverable after the delete wins");
 }
 
-/// The window cell: a gateway replica must refuse a UI write while a
-/// live barrier window is open, and admit it again after the clear —
-/// and an expired window never wedges HITL.
-#[tokio::test]
-async fn window_refuses_hitl_and_expiry_unwedges() {
-    let store = Arc::new(MemoryStore::new());
-    let dir = tempfile::tempdir().unwrap();
-    let sc = syncer(&store, dir.path()).await;
-    let entry = |p: &str| InboxEntry {
-        path: p.into(),
-        etag: "e".into(),
-        author: "dilip".into(),
-        added_unix: now_unix(),
-        crc64_b64: None,
-        cited: None,
-    };
-
-    inbox::open_window(store.as_ref(), &sc.cfg, 1, now_unix() + 300).await.unwrap();
-    let err = inbox::gateway_append(store.as_ref(), &sc.cfg, entry("a.txt")).await.unwrap_err();
-    assert!(matches!(err, LeanError::State(_)), "live window must refuse");
-
-    inbox::clear_window(store.as_ref(), &sc.cfg, 1, &[]).await.unwrap();
-    inbox::gateway_append(store.as_ref(), &sc.cfg, entry("a.txt")).await.unwrap();
-
-    // A dead syncer's window (deadline in the past) does not wedge.
-    inbox::open_window(store.as_ref(), &sc.cfg, 1, now_unix() - 10).await.unwrap();
-    inbox::gateway_append(store.as_ref(), &sc.cfg, entry("b.txt")).await.unwrap();
-}
 
 /// Files over whole_put_max go through the streaming multipart compose
 /// (never put_whole): publish, guarded update, and roundtrip must all
@@ -936,7 +1739,7 @@ async fn flint_dir_never_scanned() {
         "a control path was CITED: {:?}",
         m.entries.keys().collect::<Vec<_>>()
     );
-    assert!(store.head(&a.cfg.file_key(".flint/publish")).await.is_err());
+    assert!(!object_at(&store, &a.cfg, ".flint/publish").await);
 }
 
 /// D0.2 — an upgrade must never delete data. A workspace that legally
@@ -995,15 +1798,14 @@ async fn legacy_flint_citation_survives_upgrade() {
         ".flint/legacy.txt".into(),
         super::state::BaselineEntry {
             etag: meta.etag.clone(),
+            key: None,
             generation: 1,
             size: meta.size,
             mtime_unix: 0,
             mtime_nanos: None,
             crc64_b64: meta.crc64_b64.clone(),
-            judged: None,
         },
     );
-    b.inst_base.insert(".flint/legacy.txt".into(), meta.etag.clone());
     b.prev_scan.insert(".flint/legacy.txt".into());
     b.seq = m.seq;
     b.manifest_etag = Some(installed.etag.clone());
@@ -1270,15 +2072,14 @@ async fn publish_sentinel_honored_and_acked() {
 }
 
 /// Two writers, one file: B edits `shared.txt` and commits; A's agent,
-/// which has not seen B's edit, deletes it and declares a boundary. A's
-/// merge keeps B's entry (delete/modify resolves foreign-wins) and
-/// queues it, so the seq A installs still cites the file. `ok` would
-/// tell the agent its delete is in that seq; it is `partial`, and
-/// `report.dropped` names the path.
-/// Found by the formal model (`LeanBarrierLeaseSentinel` without
-/// `Inv_AckBoundaryCoherent`: `Inv_AckImpliesCited`, depth 20).
+/// which has not seen B's edit, deletes it and declares a boundary. M3
+/// (P1-lite): the delete lands over B's version, which is preserved under a
+/// record on the ack — so the seq A installs does not cite the file and
+/// `ok` is true. (Before M3 the delete was outranked, and the ack had to be
+/// `partial`: the model's `Inv_AckImpliesCited`, depth 20, is the claim
+/// this still pins.)
 #[tokio::test]
-async fn a_publish_whose_delete_lost_to_a_peers_edit_is_partial() {
+async fn a_publish_whose_delete_meets_a_peers_edit_is_ok_with_theirs_preserved() {
     let store = Arc::new(MemoryStore::new());
     let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let mut a = syncer(&store, dir_a.path()).await;
@@ -1305,30 +2106,16 @@ async fn a_publish_whose_delete_lost_to_a_peers_edit_is_partial() {
 
     let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
     assert_eq!(ack.seq, Some(m.seq), "fixture: the ack names a different seq than the one installed");
-    assert_eq!(
-        m.entries.get("shared.txt").map(|e| e.etag.as_str()),
-        Some(b_etag.as_str()),
-        "fixture: the merge did not keep B's entry, so the delete was not outranked"
-    );
-    assert_eq!(ack.status, "partial", "the ack says the delete is in seq {}, which still cites the file: {ack:?}", m.seq);
-    assert_eq!(ack.report.dropped, vec!["shared.txt".to_string()]);
-
-    // Touching again, as the guide says: the queued edit meets the local
-    // delete, the delete publishes, and B's bytes stay recoverable.
-    touch_sentinel(dir_a.path(), control::PUBLISH, r#"{"nonce":"n-2"}"#);
-    a.poll_sentinels().unwrap();
-    clear_min_interval(&a);
-    let again = a.honor_pending(Verb::Publish, false).await.unwrap().unwrap();
-    assert_eq!(again.status, "ok", "{again:?}");
-    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-    assert_eq!(again.seq, Some(m.seq));
-    assert!(!m.entries.contains_key("shared.txt"), "the delete never published");
-    let c = again
+    assert!(!m.entries.contains_key("shared.txt"), "the ack's seq still cites the deleted file: {ack:?}");
+    assert_eq!(ack.status, "ok", "{ack:?}");
+    assert!(ack.report.dropped.is_empty(), "{ack:?}");
+    let c = ack
         .report
         .conflicts
         .iter()
-        .find(|c| c.kind == "consume-dirty" && c.path == "shared.txt")
-        .unwrap_or_else(|| panic!("no consume-dirty record on the ack: {again:?}"));
+        .find(|c| c.kind.starts_with("commit-deleted-over-theirs") && c.path == "shared.txt")
+        .unwrap_or_else(|| panic!("no record of B's version on the ack: {ack:?}"));
+    assert_eq!(c.foreign_etag, b_etag);
     let (_, body) = store.get_whole(c.preserved_key.as_ref().expect("B's edit preserved"), None).await.unwrap();
     assert_eq!(&body[..], b"B's v2");
 }
@@ -1399,11 +2186,12 @@ async fn a_drain_whose_upload_was_swept_does_not_attest() {
     assert!(cited(m), "the retry did not publish model.bin");
 }
 
-/// The drain's own boundary again, for a delete another writer's edit
-/// outranked: attesting would remove the tree with the delete unpublished,
-/// and the file comes back for the next pod. The retry publishes it.
+/// The drain's own boundary, for a delete that meets another writer's edit:
+/// M3 lands the delete (theirs preserved), so the drain attests at once and
+/// no pod finds the file again. (Before M3 the delete was outranked and the
+/// drain had to refuse; `drained.is_err()` pinned that.)
 #[tokio::test]
-async fn a_drain_whose_delete_lost_to_a_peers_edit_does_not_attest() {
+async fn a_drain_whose_delete_meets_a_peers_edit_attests_with_theirs_preserved() {
     let store = Arc::new(MemoryStore::new());
     let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let mut a = syncer(&store, dir_a.path()).await;
@@ -1417,14 +2205,13 @@ async fn a_drain_whose_delete_lost_to_a_peers_edit_does_not_attest() {
     b.floor_tick().await.unwrap();
 
     std::fs::remove_file(dir_a.path().join("shared.txt")).unwrap();
-    let drained = a.drain().await;
+    a.drain().await.expect("the drain refused a delete that landed");
     let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-    assert!(m.entries.contains_key("shared.txt"), "fixture: the delete was not outranked");
-    assert!(drained.is_err(), "the drain attested a tree whose delete is not in the bucket: {drained:?}");
-
-    a.drain().await.expect("the retry did not drain");
-    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-    assert!(!m.entries.contains_key("shared.txt"), "the retry did not publish the delete");
+    assert!(!m.entries.contains_key("shared.txt"), "the drain attested a tree whose delete is not in the bucket");
+    assert!(
+        a.state.load_conflicts().unwrap().iter().any(|c| c.kind.starts_with("commit-deleted-over-theirs") && c.path == "shared.txt"),
+        "B's version was not preserved"
+    );
 }
 
 /// D2 — the ack carries EVERY coalesced nonce. Under coalescing an
@@ -1747,12 +2534,10 @@ async fn fifo_sentinel_skipped() {
 }
 
 /// D4 — THE correctness rule, not an optimization. A scoped sync must
-/// advance `inst_base` only for what it applied in scope. `inst_base`
-/// is the three-way MERGE BASE: if a scoped sync advanced it wholesale
-/// to bucket-current, `manifest::merge` would compute
-/// `changed = base != theirs` as FALSE for every out-of-scope foreign
-/// entry, never queue it, and the change would be silently lost from
-/// the inbox flow forever.
+/// move the baseline only for what it applied in scope. The baseline is
+/// the three-way MERGE BASE (P1-lite): if a scoped sync moved it
+/// wholesale to bucket-current, nothing would read as owed at an
+/// out-of-scope path and the change would be silently lost forever.
 ///
 /// The foreign change here is a MANIFEST install by another writer, not
 /// a HITL inbox entry — a first draft of this test used an inbox entry
@@ -1774,49 +2559,15 @@ async fn scoped_sync_preserves_out_of_scope_foreign_flow() {
     write(dir_a.path(), "outputs/result.txt", "v1");
     a.run_barrier().await.unwrap();
 
-    // A sibling writer installs new generations of BOTH paths directly
-    // into the manifest.
-    let loaded = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
-    let mut theirs = loaded.manifest.clone();
-    theirs.seq += 1;
-    for (path, content) in
-        [("inputs/data.txt", "foreign inputs v2"), ("outputs/result.txt", "foreign outputs v2")]
-    {
-        let key = a.cfg.file_key(path);
-        let body = Bytes::from(content.to_string());
-        let crc = crc64_nvme(&body);
-        let cur = store.head(&key).await.unwrap();
-        let meta = store
-            .put_whole(
-                &key,
-                body,
-                &PutCondition::IfMatch(cur.etag),
-                &GenerationStamps {
-                    generation: 2,
-                    epoch: 0,
-                    flush_uuid: "sibling".into(),
-                    boundary_source: None,
-                    posix: None,
-                },
-                crc,
-            )
-            .await
-            .unwrap();
-        let e = theirs.entries.get_mut(path).unwrap();
-        e.etag = meta.etag.clone();
-        e.crc64_b64 = meta.crc64_b64.clone().unwrap();
-        e.size = meta.size;
-        e.generation = 2;
-    }
-    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.handle()), 0, "sibling")
-        .await
-        .unwrap();
-    let foreign_out_etag = theirs.entries["outputs/result.txt"].etag.clone();
+    // A sibling writer publishes new generations of BOTH paths.
+    peer_publish(&store, &a.cfg, "inputs/data.txt", "foreign inputs v2", "sibling").await;
+    let (foreign_out_etag, _) =
+        peer_publish(&store, &a.cfg, "outputs/result.txt", "foreign outputs v2", "sibling").await;
 
     // (1) the out-of-scope change genuinely existed pre-sync.
     assert_ne!(
         foreign_out_etag,
-        a.state.load_baseline().unwrap().inst_base["outputs/result.txt"]
+        a.state.load_baseline().unwrap().entries["outputs/result.txt"].etag
     );
 
     let r = a.sync_scoped(Some(vec!["inputs/".into()])).await.unwrap();
@@ -1829,21 +2580,21 @@ async fn scoped_sync_preserves_out_of_scope_foreign_flow() {
     assert!(r.out_of_scope_foreign >= 1);
     // The merge base was NOT advanced for it — this is the whole rule.
     assert_ne!(
-        a.state.load_baseline().unwrap().inst_base["outputs/result.txt"],
+        a.state.load_baseline().unwrap().entries["outputs/result.txt"].etag,
         foreign_out_etag,
         "a scoped sync advanced the MERGE BASE for an out-of-scope path"
     );
     // A scoped sync leaves seq/manifest_etag alone.
     assert_eq!(r.seq, a.state.load_baseline().unwrap().seq);
 
-    // (3) present after the normal merge → inbox → consume flow: the
-    // first barrier's merge queues it, the second consumes it.
+    // (3) present after the next barrier's consume, which derives it as
+    // owed.
     a.run_barrier().await.unwrap();
     a.run_barrier().await.unwrap();
     assert_eq!(
         read(dir_a.path(), "outputs/result.txt").unwrap(),
         "foreign outputs v2",
-        "the out-of-scope foreign change was LOST from the inbox flow"
+        "the out-of-scope foreign change was LOST"
     );
 }
 
@@ -1902,6 +2653,8 @@ async fn write_file_atomic_refuses_symlink_escape() {
     hitl_write(&store, &a.cfg, "inputs/secret.txt", "ATTACKER PAYLOAD", "attacker")
         .await
         .unwrap();
+    // P2: the write is committed; one barrier queues it, the next consumes.
+    a.run_barrier().await.unwrap();
     a.run_barrier().await.unwrap();
     assert_eq!(
         std::fs::read_to_string(&secret).unwrap(),
@@ -1933,6 +2686,7 @@ async fn sync_rehonor_no_phantom_conflicts() {
 
     // A foreign change lands and IS applied...
     hitl_write(&store, &a.cfg, "shared.txt", "foreign v2", "ci").await.unwrap();
+    let pre = a.state.load_baseline().unwrap();
     let r = a.sync().await.unwrap();
     assert!(r.applied.contains(&"shared.txt".to_string()));
 
@@ -1945,6 +2699,11 @@ async fn sync_rehonor_no_phantom_conflicts() {
     stale.etag = "\"stale-pre-sync-etag\"".into();
     stale.mtime_unix -= 10;
     stale.size = 1;
+    // The rest of the baseline is the pre-sync one too: seq and pointer
+    // (under P2 the change is a committed document, so a baseline that
+    // kept the new seq would say there is no news).
+    b.seq = pre.seq;
+    b.manifest_etag = pre.manifest_etag.clone();
     a.state.save_baseline(&b).unwrap();
     let scanned = super::scan::scan(dir.path()).unwrap();
     let c = super::scan::classify(&scanned, &a.state.load_baseline().unwrap());
@@ -1998,10 +2757,11 @@ async fn remote_seq_ticks_without_added_requests() {
     assert!(t1.updated_unix >= t0.updated_unix);
 }
 
-/// D5 with two writers. B's merge carries A's change into the manifest
-/// and moves B's baseline to it, while the change itself waits in B's
-/// local queue for the next consume. Until then B's tree does not have
-/// it, and the ticker must say so: `.flint/AGENTS.md` tells an agent to
+/// D5 with two writers. A's change lands between B's consume and B's merge
+/// (the one place P1-lite leaves a gap), so B's merge carries it into the
+/// manifest and B's baseline takes that seq while the tree is still OWED
+/// the change (`Baseline::behind`) until the next consume. Until then B's
+/// tree does not have it, and the ticker must say so: `.flint/AGENTS.md` tells an agent to
 /// `sync` before it starts on a path `remote.seq` says has news.
 /// Found by the formal model (`LeanBarrierLeaseSentinel`, depth 19).
 #[tokio::test]
@@ -2018,17 +2778,22 @@ async fn remote_seq_reports_news_while_a_peers_change_waits_in_the_queue() {
     let t0 = b.load_remote_seq();
     assert_eq!(t0.observed_seq, t0.integrated_seq, "fixture: B has news before anyone wrote");
 
-    write(dir_a.path(), "x.txt", "A's v2");
-    backdate_baseline(&a, "x.txt");
-    a.floor_tick().await.unwrap();
-
-    // B publishes an unrelated path; its merge queues A's x.txt.
+    // B publishes an unrelated path; A's x.txt lands after B's consume and
+    // before B's merge.
     write(dir_b.path(), "z.txt", "z");
+    let (store2, cfg_a) = (store.clone(), a.cfg.clone());
+    super::barrier::CONSUME_WINDOW_HOOK.with(|h| {
+        *h.borrow_mut() = Some((
+            String::new(),
+            "before-scan",
+            Box::new(move || {
+                futures::executor::block_on(peer_publish(&store2, &cfg_a, "x.txt", "A's v2", "A"));
+            }),
+        ))
+    });
     b.floor_tick().await.unwrap();
-    assert!(
-        b.state.load_foreign_queue().unwrap().iter().any(|c| c.path == "x.txt"),
-        "fixture: B's merge queued nothing for x.txt"
-    );
+    assert!(super::barrier::CONSUME_WINDOW_HOOK.with(|h| h.borrow().is_none()), "fixture: the window never ran");
+    assert!(derive_pending(&b).await, "fixture: B's merge left nothing owed for x.txt");
     assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("seed"), "fixture: the change already reached B's tree");
     let t1 = b.load_remote_seq();
     assert!(
@@ -2479,16 +3244,16 @@ async fn the_drain_carries_a_delete_made_before_it() {
     );
 }
 
-/// The merge base is rewritten at step 7 — after the manifest CAS and
-/// after the GC deletes. A container restart in that window leaves the
-/// bucket holding a document THIS workspace wrote and the persisted
-/// merge base one generation behind it, so our own entries read as
-/// foreign changes at the next merge. delete/modify then resolves
-/// conservatively against the agent's own delete: the delete is dropped
-/// from a boundary about to be acked, and the path is queued into the
-/// inbox as a conflict nobody else ever touched.
-///
-/// Found by the formal model (tranche 3, product 1) on a strict run.
+/// The baseline (the merge base) is rewritten at step 7 — after the
+/// manifest CAS and after the GC deletes. A container restart in that
+/// window leaves the bucket holding a document THIS workspace wrote and
+/// the baseline one generation behind it, so our own entry reads as a
+/// change since the base at the next merge. Before M3 delete/modify then
+/// resolved conservatively against the agent's own delete, and the delete
+/// was dropped from a boundary about to be acked (found by the formal
+/// model, tranche 3, product 1; the intent journal's `installed_etag`
+/// fixed it). Under P1-lite there is no journal: the delete applies over
+/// the version the base does not know (M3), which is our own, recorded.
 #[tokio::test]
 async fn a_crash_between_the_cas_and_step_7_never_makes_our_own_entry_foreign() {
     let store = Arc::new(MemoryStore::new());
@@ -2507,14 +3272,12 @@ async fn a_crash_between_the_cas_and_step_7_never_makes_our_own_entry_foreign() 
     let installed = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
 
     // ...whose step 7 never ran. The manifest carries the install; the
-    // persisted baseline and merge base are as they were before it.
-    // The intent journal is NOT rolled back: it is written before the
-    // deletes, which is exactly the point.
+    // persisted baseline is as it was before it.
     a.state.save_baseline(&stale).unwrap();
     assert_ne!(
-        stale.inst_base.get("f.txt"),
+        stale.entries.get("f.txt").map(|e| &e.etag),
         Some(&installed.manifest.entries["f.txt"].etag),
-        "fixture: the merge base is not actually behind the install"
+        "fixture: the baseline is not actually behind the install"
     );
 
     // The agent removes the file and declares.
@@ -2528,11 +3291,6 @@ async fn a_crash_between_the_cas_and_step_7_never_makes_our_own_entry_foreign() 
          (deleted={:?}, foreign_queued={})",
         r.deleted,
         r.foreign_queued
-    );
-    let ib = inbox::load(store.as_ref(), &a.cfg).await.unwrap();
-    assert!(
-        !ib.doc.entries.iter().any(|e| e.path == "f.txt"),
-        "a phantom foreign entry was queued for a path only this workspace ever wrote"
     );
 }
 
@@ -2742,7 +3500,7 @@ async fn a_uds_boundary_and_a_file_sentinel_coalesce_into_one_ack() {
 }
 
 /// The gateway's boundary request is a FIELD on the inbox document, not
-/// a fake no-object entry: `consume_inbox` HEADs `file_key(path)` for
+/// a fake no-object entry: the old `consume_inbox` HEADed `file_key(path)` for
 /// every entry, so an entry naming no object lands in the NotFound arm
 /// as a spurious `consume-object-missing` conflict.
 ///
@@ -2767,7 +3525,7 @@ async fn a_gateway_boundary_request_becomes_a_pending_sentinel_with_no_conflict(
     .unwrap();
 
     write(dir.path(), "work.txt", "W1");
-    a.consume_inbox().await.unwrap();
+    a.read_cell_requests().await.unwrap();
 
     let pending = a.load_pending(super::sentinel::Verb::Publish).unwrap();
     let pending = pending.expect("the gateway request minted no pending sentinel");
@@ -2785,7 +3543,7 @@ async fn a_gateway_boundary_request_becomes_a_pending_sentinel_with_no_conflict(
     // Idempotent state, not a queue: a second consume of the SAME
     // request must not mint a second boundary.
     let before = pending.nonces.len();
-    a.consume_inbox().await.unwrap();
+    a.read_cell_requests().await.unwrap();
     assert_eq!(
         a.load_pending(super::sentinel::Verb::Publish).unwrap().unwrap().nonces.len(),
         before,
@@ -2822,7 +3580,7 @@ async fn a_gateway_sync_request_is_carried_and_never_executed() {
     inbox::gateway_request(store.as_ref(), &a.cfg, inbox::RequestedVerb::Sync, "ci@example")
         .await
         .unwrap();
-    a.consume_inbox().await.unwrap();
+    a.read_cell_requests().await.unwrap();
 
     assert_eq!(
         read(dir.path(), "keep.txt"),
@@ -3170,42 +3928,9 @@ async fn sync_refuses_to_clobber_a_locally_dirty_path_and_says_so() {
     write(dir.path(), "clean.txt", "published v1");
     a.run_barrier().await.unwrap();
 
-    // A sibling installs new generations of BOTH paths.
-    let loaded = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
-    let mut theirs = loaded.manifest.clone();
-    theirs.seq += 1;
-    for (path, content) in
-        [("dirty.txt", "foreign bytes for dirty"), ("clean.txt", "foreign bytes for clean")]
-    {
-        let key = a.cfg.file_key(path);
-        let body = Bytes::from(content.to_string());
-        let crc = crc64_nvme(&body);
-        let cur = store.head(&key).await.unwrap();
-        let meta = store
-            .put_whole(
-                &key,
-                body,
-                &PutCondition::IfMatch(cur.etag),
-                &GenerationStamps {
-                    generation: 2,
-                    epoch: 0,
-                    flush_uuid: "sibling".into(),
-                    boundary_source: None,
-                    posix: None,
-                },
-                crc,
-            )
-            .await
-            .unwrap();
-        let e = theirs.entries.get_mut(path).unwrap();
-        e.etag = meta.etag.clone();
-        e.crc64_b64 = meta.crc64_b64.clone().unwrap();
-        e.size = meta.size;
-        e.generation = 2;
-    }
-    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.handle()), 0, "sibling")
-        .await
-        .unwrap();
+    // A sibling publishes new generations of BOTH paths.
+    peer_publish(&store, &a.cfg, "dirty.txt", "foreign bytes for dirty", "sibling").await;
+    peer_publish(&store, &a.cfg, "clean.txt", "foreign bytes for clean", "sibling").await;
 
     // The agent edits one of them locally and does NOT publish. A
     // different length, so the scan can actually see it.
@@ -3259,8 +3984,43 @@ async fn sync_refuses_to_clobber_a_locally_dirty_path_and_says_so() {
 /// the whole battery stays green. `merge` is a pure function over plain
 /// maps, so every arm is pinned here directly rather than reached
 /// through a barrier that can only produce the easy one.
+/// `merge` names the DELETES mine publishes over, by the version the delete
+/// removed: theirs' tombstone when it has one (the path may have moved on
+/// from the base before it was deleted), else the base's citation. A path
+/// the base never cited, or one theirs still cites, is not one.
+#[test]
+fn merge_names_the_deletes_mine_publishes_over() {
+    fn e(etag: &str) -> manifest::LeanEntry {
+        manifest::LeanEntry {
+            key: "tenant/proj1/files/p.txt".into(),
+            etag: etag.into(),
+            crc64_b64: "AAAAAAAAAAA=".into(),
+            size: 3,
+            mode: 0o644,
+            mtime_unix: 0,
+            generation: 1,
+            epoch: 0,
+        }
+    }
+    let base: std::collections::BTreeMap<String, String> =
+        [("gone.txt", "e1"), ("tomb.txt", "e1"), ("kept.txt", "e1")].iter().map(|(p, t)| (p.to_string(), t.to_string())).collect();
+    let mut theirs = manifest::LeanManifest::default();
+    theirs.entries.insert("kept.txt".into(), e("e1"));
+    theirs.tombstones.insert("tomb.txt".into(), manifest::Tombstone { etag: "e2".into(), seq: 3 });
+    let upserts: std::collections::BTreeMap<String, manifest::LeanEntry> =
+        ["gone.txt", "tomb.txt", "kept.txt", "new.txt"].iter().map(|p| (p.to_string(), e("mine"))).collect();
+    let out = manifest::merge(&base, &theirs, &upserts, &Default::default(), &Default::default());
+    let mut got = out.recreated.clone();
+    got.sort();
+    assert_eq!(got, vec![("gone.txt".to_string(), "e1".to_string()), ("tomb.txt".to_string(), "e2".to_string())]);
+}
+
+/// M3 (P1-lite): a local delete APPLIES wherever it is not parked — over
+/// theirs too, which the merge then names (`over_theirs`) for the caller to
+/// preserve and record. Before M3 a delete over a version changed since the
+/// base was outranked: theirs stayed cited.
 #[tokio::test]
-async fn merge_applies_a_local_delete_only_where_theirs_is_unchanged() {
+async fn merge_applies_a_local_delete_and_names_the_version_it_deleted_over() {
     fn entry(etag: &str) -> manifest::LeanEntry {
         manifest::LeanEntry {
             key: "tenant/proj1/files/p.txt".into(),
@@ -3273,16 +4033,18 @@ async fn merge_applies_a_local_delete_only_where_theirs_is_unchanged() {
             epoch: 0,
         }
     }
-    // (name, theirs entry, base etag, parked, must_survive_our_delete)
-    let cases: Vec<(&str, Option<&str>, Option<&str>, bool, bool)> = vec![
-        ("theirs unchanged since our base", Some("e1"), Some("e1"), false, false),
-        ("FOREIGN MODIFY under our delete", Some("e2"), Some("e1"), false, true),
-        ("FOREIGN ADD under our delete", Some("e2"), None, false, true),
-        ("absent from both", None, None, false, false),
-        ("already deleted by someone else", None, Some("e1"), false, false),
-        ("parked: never resolved this pass", Some("e1"), Some("e1"), true, true),
+    use manifest::DeleteOutcome::{Applied, OverTheirs, Parked};
+    // (name, theirs entry, base etag, parked, survives our delete, the outcome, the version named over)
+    #[allow(clippy::type_complexity)]
+    let cases: Vec<(&str, Option<&str>, Option<&str>, bool, bool, manifest::DeleteOutcome, Option<&str>)> = vec![
+        ("theirs unchanged since our base", Some("e1"), Some("e1"), false, false, Applied, None),
+        ("FOREIGN MODIFY under our delete", Some("e2"), Some("e1"), false, false, OverTheirs, Some("e2")),
+        ("FOREIGN ADD under our delete", Some("e2"), None, false, false, OverTheirs, Some("e2")),
+        ("absent from both", None, None, false, false, Applied, None),
+        ("already deleted by someone else", None, Some("e1"), false, false, Applied, None),
+        ("parked: never resolved this pass", Some("e1"), Some("e1"), true, true, Parked, None),
     ];
-    for (name, theirs_etag, base_etag, is_parked, must_survive) in cases {
+    for (name, theirs_etag, base_etag, is_parked, must_survive, expected, named) in cases {
         let mut theirs = manifest::LeanManifest::default();
         if let Some(e) = theirs_etag {
             theirs.entries.insert("p.txt".to_string(), entry(e));
@@ -3297,26 +4059,21 @@ async fn merge_applies_a_local_delete_only_where_theirs_is_unchanged() {
         if is_parked {
             parked.insert("p.txt".to_string());
         }
-
         // ANTI-VACUITY: the case is only the case if the inputs say so.
         assert_eq!(theirs.entries.contains_key("p.txt"), theirs_etag.is_some(), "{name}");
         assert_eq!(base.contains_key("p.txt"), base_etag.is_some(), "{name}");
 
-        let (merged, _foreign) =
-            manifest::merge(&base, &theirs, &Default::default(), &deletes, &parked);
-
-        assert_eq!(
-            merged.entries.contains_key("p.txt"),
-            must_survive,
-            "{name}: our local delete {} the entry",
-            if must_survive { "destroyed" } else { "failed to remove" }
-        );
-        // Where it survives because THEIRS moved, it must survive as
-        // THEIRS — not as some merged-in ghost of our own.
-        if must_survive {
-            if let Some(e) = theirs_etag {
-                assert_eq!(merged.entries["p.txt"].etag, e, "{name}: wrong bytes survived");
-            }
+        let out = manifest::merge(&base, &theirs, &Default::default(), &deletes, &parked);
+        assert_eq!(out.deletes.get("p.txt"), Some(&expected), "{name}: reported outcome");
+        assert_eq!(out.doc.entries.contains_key("p.txt"), must_survive, "{name}: the entry");
+        let over: Vec<&str> = out.over_theirs.iter().map(|(_, e)| e.etag.as_str()).collect();
+        assert_eq!(over, named.into_iter().collect::<Vec<_>>(), "{name}: the version named over");
+        if !must_survive && theirs_etag.is_some() {
+            assert_eq!(
+                out.doc.tombstones.get("p.txt").map(|t| t.etag.as_str()),
+                theirs_etag,
+                "{name}: the tombstone names what the delete retired"
+            );
         }
     }
 }
@@ -3350,35 +4107,8 @@ async fn a_resumed_checkout_adopts_identical_bytes_and_refetches_same_size_impos
     a.run_barrier().await.unwrap();
 
     // A sibling replaces impostor.txt with the SAME NUMBER OF BYTES.
-    let loaded = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
-    let mut theirs = loaded.manifest.clone();
-    theirs.seq += 1;
-    let key = a.cfg.file_key("impostor.txt");
-    let body = Bytes::from_static(b"BBBB");
-    let meta = store
-        .put_whole(
-            &key,
-            body,
-            &PutCondition::IfMatch(store.head(&key).await.unwrap().etag),
-            &GenerationStamps {
-                generation: 2,
-                epoch: 0,
-                flush_uuid: "sibling".into(),
-                boundary_source: None,
-                posix: None,
-            },
-            crc64_nvme(&Bytes::from_static(b"BBBB")),
-        )
-        .await
-        .unwrap();
-    let e = theirs.entries.get_mut("impostor.txt").unwrap();
-    e.etag = meta.etag.clone();
-    e.crc64_b64 = meta.crc64_b64.clone().unwrap();
-    e.size = meta.size;
-    e.generation = 2;
-    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.handle()), 0, "sibling")
-        .await
-        .unwrap();
+    peer_publish(&store, &a.cfg, "impostor.txt", "BBBB", "sibling").await;
+    let theirs = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
 
     // ANTI-VACUITY: size alone cannot tell these apart. If the manifest
     // entry and the on-disk file differed in length, the cheap check
@@ -3693,7 +4423,7 @@ async fn superseded_generations_are_reaped_but_the_live_one_and_a_window_survive
         )
         .await
         .unwrap();
-        handle = Some(manifest::ManifestHandle { etag: meta.etag, legacy: false, prev_chunks: Vec::new() });
+        handle = Some(manifest::ManifestHandle { etag: meta.etag, legacy: false, prev_chunks: Vec::new(), prev_tombstones: None });
     }
     // Twelve publishes, no sweep yet: twelve generations.
     assert_eq!(store.list(&prefix).await.unwrap().len(), 12);
@@ -4351,7 +5081,7 @@ async fn a_three_file_publish_writes_chunks_proportional_to_the_change() {
     for i in [7usize, 1500, 3900] {
         m1.entries.insert(format!("src/f{i:05}.txt"), entry_at(&format!("f{i:05}"), 99));
     }
-    let h = super::manifest::ManifestHandle { etag: meta.etag.clone(), legacy: false, prev_chunks: Vec::new() };
+    let h = super::manifest::ManifestHandle { etag: meta.etag.clone(), legacy: false, prev_chunks: Vec::new(), prev_tombstones: None };
     inner.reset_op_counts();
     manifest::cas_write_chunked(store.as_ref(), &cfg, &m1, Some(&h), &chunks0,
         manifest::PublishStamps { epoch: 1, flush_uuid: "u2", boundary_source: None })
@@ -4706,7 +5436,7 @@ async fn a_reader_swept_mid_read_restarts_onto_the_current_generation() {
         let mut m2 = m1.clone();
         m2.seq = 2;
         m2.entries.insert("src/f00003.txt".into(), entry_at("changed", 42));
-        let h = super::manifest::ManifestHandle { etag: meta1.etag.clone(), legacy: false, prev_chunks: Vec::new() };
+        let h = super::manifest::ManifestHandle { etag: meta1.etag.clone(), legacy: false, prev_chunks: Vec::new(), prev_tombstones: None };
         manifest::cas_write_chunked(plain.as_ref(), &cfg, &m2, Some(&h), &c1,
             manifest::PublishStamps { epoch: 1, flush_uuid: "u2", boundary_source: None })
             .await
@@ -4803,7 +5533,7 @@ async fn the_chunk_reaper_takes_orphans_and_nothing_else() {
     let mut m2 = m1.clone();
     m2.seq = 2;
     m2.entries.insert("src/f00003.txt".into(), entry_at("changed", 42));
-    let h = super::manifest::ManifestHandle { etag: meta1.etag.clone(), legacy: false, prev_chunks: Vec::new() };
+    let h = super::manifest::ManifestHandle { etag: meta1.etag.clone(), legacy: false, prev_chunks: Vec::new(), prev_tombstones: None };
     manifest::cas_write_chunked(store.as_ref(), &cfg, &m2, Some(&h), &c1,
         manifest::PublishStamps { epoch: 1, flush_uuid: "u2", boundary_source: None })
         .await.unwrap();
@@ -4839,7 +5569,7 @@ async fn the_chunk_reaper_takes_orphans_and_nothing_else() {
     // with a real grace — nothing may go.
     let meta2 = {
         let lp = manifest::load_pointer(store.as_ref(), &cfg).await.unwrap().unwrap();
-        super::manifest::ManifestHandle { etag: lp.etag, legacy: false, prev_chunks: Vec::new() }
+        super::manifest::ManifestHandle { etag: lp.etag, legacy: false, prev_chunks: Vec::new(), prev_tombstones: None }
     };
     let mut m3 = m2.clone();
     m3.seq = 3;
@@ -4888,7 +5618,7 @@ async fn the_chunk_reaper_aborts_when_a_publish_lands_under_it() {
     let mut m2 = m1.clone();
     m2.seq = 2;
     m2.entries.insert("src/f00003.txt".into(), entry_at("changed", 42));
-    let h = super::manifest::ManifestHandle { etag: meta1.etag.clone(), legacy: false, prev_chunks: Vec::new() };
+    let h = super::manifest::ManifestHandle { etag: meta1.etag.clone(), legacy: false, prev_chunks: Vec::new(), prev_tombstones: None };
     manifest::cas_write_chunked(plain.as_ref(), &cfg, &m2, Some(&h), &c1,
         manifest::PublishStamps { epoch: 1, flush_uuid: "u2", boundary_source: None })
         .await.unwrap();
@@ -5150,6 +5880,179 @@ async fn a_chunked_barrier_keeps_a_foreign_write_it_never_read() {
     assert_eq!(&body[..], b"v2", "the local edit did not land");
 }
 
+/// RETIRE-AGE G, handles (M1 of the 2026-09-24 simplification analysis).
+/// A reader that loaded a document less than G ago must find every handle
+/// it cites: the one a WRITER's commit replaced (collected at once before)
+/// and the one a UI SAVE replaced (the orphan sweep took it by its write
+/// age, which for a long-lived file is long past). Past G both go, and so
+/// do the retire logs that protected them.
+#[tokio::test]
+async fn a_replaced_handle_outlives_its_retirement_by_the_retire_age() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = syncer(&store, dir.path()).await;
+    sc.cfg.retire_grace_secs = 600;
+    sc.cfg.untracked_grace_secs = 0;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+    write(dir.path(), "f.txt", "v1");
+    write(dir.path(), "g.txt", "g1");
+    sc.run_barrier().await.unwrap();
+    // The reader's document.
+    let seen = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
+
+    // A writer's commit replaces f; a UI save replaces g.
+    write(dir.path(), "f.txt", "v2 by the writer");
+    backdate_baseline(&sc, "f.txt");
+    hitl_write(&store, &sc.cfg, "g.txt", "g2 by the ui", "ui").await.unwrap();
+    // The orphan sweep is due in this barrier.
+    sc.state.save_orphan_sweep_at(now_unix() - sc.cfg.untracked_sweep_secs - 1).unwrap();
+    sc.run_barrier().await.unwrap();
+    for p in ["f.txt", "g.txt"] {
+        let e = &seen.entries[p];
+        assert!(
+            store.get_whole(&e.key, Some(&e.etag)).await.is_ok(),
+            "{p}: a reader of the document from before the commit found its handle gone"
+        );
+    }
+
+    // Past G: both are collected, and the logs with them.
+    sc.cfg.retire_grace_secs = 0;
+    write(dir.path(), "h.txt", "a later publish");
+    sc.state.save_orphan_sweep_at(now_unix() - sc.cfg.untracked_sweep_secs - 1).unwrap();
+    sc.run_barrier().await.unwrap();
+    for p in ["f.txt", "g.txt"] {
+        assert!(
+            matches!(store.head(&seen.entries[p].key).await, Err(StoreError::NotFound(_))),
+            "{p}: a retired handle outlived the retire age"
+        );
+    }
+    let logs = format!("{}/{}/retired/", sc.cfg.prefix, super::LEAN_DIR);
+    assert!(store.list(&logs).await.unwrap().is_empty(), "the retire logs were never reaped");
+}
+
+/// A retire log is data in the bucket, not a licence: one naming a handle
+/// the document still cites — malformed, planted, or written by a party
+/// that got it wrong — must not delete a live file when it comes due.
+#[tokio::test]
+async fn a_retire_log_naming_a_cited_handle_deletes_nothing() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+    write(dir.path(), "f.txt", "live");
+    sc.run_barrier().await.unwrap();
+    let cited = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest.entries["f.txt"].clone();
+    let log = manifest::RetireLog { at_unix: 1, handles: vec![cited.key.clone()], chunks: vec![] };
+    let key = format!("{}{:020}-planted.json", manifest::retired_prefix(&sc.cfg), 1);
+    let body = serde_json::to_vec(&log).unwrap();
+    let crc = crc64_nvme(&body);
+    let stamps = GenerationStamps { generation: 0, epoch: 0, flush_uuid: "planted".into(), boundary_source: None, posix: None };
+    store.put_whole(&key, body.into(), &PutCondition::IfNoneMatchAny, &stamps, crc).await.unwrap();
+
+    write(dir.path(), "g.txt", "a later publish, so a commit section runs");
+    sc.run_barrier().await.unwrap();
+    assert!(
+        store.get_whole(&cited.key, Some(&cited.etag)).await.is_ok(),
+        "a due retire log deleted a handle the document cites"
+    );
+}
+
+/// RETIRE-AGE G, generations (M1, the single-object layout). A superseded
+/// generation was kept by COUNT (`KEEP_GENERATIONS` behind the live one):
+/// at one UI save a second that is seconds, and a reader that resolved the
+/// pointer before a burst found its generation gone. Now one is also kept
+/// until its SUCCESSOR — the commit that superseded it — is G old.
+#[tokio::test]
+async fn a_superseded_generation_outlives_its_supersession_by_the_retire_age() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = cfg_single(dir.path());
+    let state = SyncerState::open(cfg.state_dir()).unwrap();
+    let mut sc = Syncer {
+        store: store.clone() as Arc<dyn ObjectStore>,
+        cfg,
+        state,
+        lease: None,
+        cell_written_at: None,
+        noted_not_regular: Default::default(),
+    };
+    sc.cfg.retire_grace_secs = 600;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+    write(dir.path(), "f.txt", "v0");
+    sc.run_barrier().await.unwrap();
+    let first = manifest::load_pointer(store.as_ref(), &sc.cfg).await.unwrap().unwrap().pointer.entries_key.unwrap();
+    for i in 1..=(manifest::KEEP_GENERATIONS + 3) {
+        write(dir.path(), "f.txt", &format!("v{i} {}", "x".repeat(i)));
+        backdate_baseline(&sc, "f.txt");
+        sc.run_barrier().await.unwrap();
+    }
+    assert!(
+        store.head(&first).await.is_ok(),
+        "a generation superseded seconds ago was reaped by count alone"
+    );
+    sc.cfg.retire_grace_secs = 0;
+    manifest::sweep_generations(store.as_ref(), &sc.cfg).await.unwrap();
+    assert!(
+        matches!(store.head(&first).await, Err(StoreError::NotFound(_))),
+        "past the retire age the count rule applies again"
+    );
+}
+
+/// RETIRE-AGE G, chunks (M1). A chunk a commit supersedes is protected for
+/// G from its RETIREMENT; the reaper judged it by its write, so under
+/// frequent pointer moves a checkout mid-load of the previous pointer found
+/// it gone and, after `LOAD_ATTEMPTS`, failed.
+#[tokio::test]
+async fn a_superseded_chunk_outlives_its_retirement_by_the_retire_age() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = syncer(&store, dir.path()).await;
+    sc.cfg.chunked = true;
+    sc.cfg.chunk_target = 8;
+    sc.cfg.chunk_min = 2;
+    sc.cfg.chunk_max = 32;
+    sc.cfg.orphan_grace_secs = 0;
+    sc.cfg.retire_grace_secs = 600;
+    assert!(claim_until_held(&mut sc, 3).await);
+    sc.checkout().await.unwrap();
+    for i in 0..60 {
+        write(dir.path(), &format!("src/f{i:03}.txt"), "v1");
+    }
+    sc.run_barrier().await.unwrap();
+    let chunks_of = |p: super::manifest::Pointer| match p.entries().unwrap() {
+        super::manifest::Entries::Chunked(c) => c.iter().map(|r| r.addr.clone()).collect::<Vec<_>>(),
+        super::manifest::Entries::Single { .. } => panic!("not chunked"),
+    };
+    let before = chunks_of(manifest::load_pointer(store.as_ref(), &sc.cfg).await.unwrap().unwrap().pointer);
+
+    write(dir.path(), "src/f030.txt", "v2");
+    backdate_baseline(&sc, "src/f030.txt");
+    sc.run_barrier().await.unwrap();
+    let after = chunks_of(manifest::load_pointer(store.as_ref(), &sc.cfg).await.unwrap().unwrap().pointer);
+    let superseded: Vec<&String> = before.iter().filter(|a| !after.contains(a)).collect();
+    assert!(!superseded.is_empty(), "PRECONDITION: the commit superseded no chunk");
+    for a in &superseded {
+        assert!(
+            store.head(&sc.cfg.chunk_key(a)).await.is_ok(),
+            "a chunk the previous pointer names was reaped inside the retire age"
+        );
+    }
+
+    sc.cfg.retire_grace_secs = 0;
+    write(dir.path(), "src/f031.txt", "v2");
+    backdate_baseline(&sc, "src/f031.txt");
+    sc.run_barrier().await.unwrap();
+    for a in &superseded {
+        assert!(
+            matches!(store.head(&sc.cfg.chunk_key(a)).await, Err(StoreError::NotFound(_))),
+            "a superseded chunk outlived the retire age"
+        );
+    }
+}
+
 /// Migrating a workspace from one generation object to a chunk list,
 /// and the pre-migration generations not leaking forever.
 ///
@@ -5399,7 +6302,7 @@ async fn the_chunk_reaper_judges_the_grace_now_not_when_it_listed() {
     let mut m2 = m1.clone();
     m2.seq = 2;
     m2.entries.insert("src/f00003.txt".into(), entry_at("changed", 42));
-    let h = super::manifest::ManifestHandle { etag: meta1.etag.clone(), legacy: false, prev_chunks: Vec::new() };
+    let h = super::manifest::ManifestHandle { etag: meta1.etag.clone(), legacy: false, prev_chunks: Vec::new(), prev_tombstones: None };
     manifest::cas_write_chunked(plain.as_ref(), &cfg, &m2, Some(&h), &c1,
         manifest::PublishStamps { epoch: 1, flush_uuid: "u2", boundary_source: None })
         .await.unwrap();
@@ -5462,7 +6365,7 @@ async fn the_chunk_reaper_does_not_head_what_the_listing_shows_inside_the_grace(
             super::manifest::Entries::Chunked(c) => c.to_vec(),
             _ => panic!("not chunked"),
         };
-        prev = Some((super::manifest::ManifestHandle { etag: lp.etag, legacy: false, prev_chunks: Vec::new() }, chunks));
+        prev = Some((super::manifest::ManifestHandle { etag: lp.etag, legacy: false, prev_chunks: Vec::new(), prev_tombstones: None }, chunks));
     }
     let prefix = format!("{}/{}/chunks/", cfg.prefix, super::LEAN_DIR);
     let live: Vec<String> = prev.as_ref().unwrap().1.iter().map(|r| r.addr.clone()).collect();
@@ -5960,35 +6863,39 @@ async fn a_live_tree_refuses_a_checkout_whose_scope_disagrees() {
     assert!(r.resumed_live_tree);
 }
 
+/// A scoped checkout owes nothing its scope declined: the held set is the
+/// baseline (the merge base since P1-lite), and the consume derives owed
+/// paths only there and under the scope's cover. (C2 — "the merge base is
+/// the whole manifest" — was the same guarantee from the other side.)
 #[tokio::test]
-async fn a_scoped_checkout_leaves_the_merge_base_whole() {
+async fn a_scoped_checkout_owes_nothing_the_scope_declined() {
     let store = Arc::new(MemoryStore::new());
     let _keep = scoped_fixture(&store).await;
 
     let dir_b = tempfile::tempdir().unwrap();
     let mut b = syncer(&store, dir_b.path()).await;
     b.checkout_scoped(Some(vec!["inputs".into()])).await.unwrap();
-
+    assert_eq!(b.state.load_baseline().unwrap().entries.len(), 2, "the CITATIONS are scoped");
+    for _ in 0..2 {
+        b.run_barrier().await.unwrap();
+    }
+    assert!(read(dir_b.path(), "outputs/big-0.bin").is_none(), "a barrier fetched a declined citation");
     let base = b.state.load_baseline().unwrap();
-    assert_eq!(base.entries.len(), 2, "the CITATIONS are scoped");
-    assert_eq!(
-        base.inst_base.len(),
-        8,
-        "the MERGE BASE is not: {:?}",
-        base.inst_base.keys().collect::<Vec<_>>()
-    );
+    assert_eq!(base.entries.len(), 2);
+    assert!(!derive_pending(&b).await, "the scope's declined citations read as owed");
 }
 
-/// The positive control for the rule above, and the reason it is a rule
-/// rather than a preference: narrow the merge base to match the scope
-/// and the very next whole-tree sync pulls everything the scope
-/// declined. Arms differ in `inst_base` alone.
+/// A whole-tree SYNC of a scoped workspace leaves the declined citations
+/// declined, and the positive control for why: the arms differ in the
+/// workspace's scope record ALONE. Without it, everything the baseline
+/// does not hold reads as owed — the cliff C2 guarded against when the
+/// merge base was a separate field.
 #[tokio::test]
-async fn a_narrowed_merge_base_makes_every_unadmitted_citation_foreign() {
+async fn a_sync_never_fetches_what_the_scope_declined() {
     let store = Arc::new(MemoryStore::new());
     let _keep = scoped_fixture(&store).await;
 
-    // Arm A — as shipped: inst_base whole.
+    // Arm A — as shipped.
     let dir_a = tempfile::tempdir().unwrap();
     let mut a = syncer(&store, dir_a.path()).await;
     a.checkout_scoped(Some(vec!["inputs".into()])).await.unwrap();
@@ -5998,24 +6905,43 @@ async fn a_narrowed_merge_base_makes_every_unadmitted_citation_foreign() {
         "a whole-tree sync must leave the declined citations declined"
     );
 
-    // Arm B — inst_base narrowed to the scope, and NOTHING else changed.
+    // Arm B — the scope record dropped, and NOTHING else changed.
     let dir_b = tempfile::tempdir().unwrap();
     let mut b = syncer(&store, dir_b.path()).await;
     b.checkout_scoped(Some(vec!["inputs".into()])).await.unwrap();
-    {
-        let mut base = b.state.load_baseline().unwrap();
-        base.inst_base.retain(|p, _| p.starts_with("inputs/"));
-        b.state.save_baseline(&base).unwrap();
-    }
+    b.state.save_scope(None).unwrap();
     b.sync().await.unwrap();
     assert!(
         read(dir_b.path(), "outputs/big-0.bin").is_some(),
-        "THE CLIFF: absent from the merge base reads as CHANGED \
-         (manifest.rs `unwrap_or(true)`, sync.rs `unwrap_or(false)`), so every \
-         declined citation comes back one sync later"
+        "THE CLIFF: a citation the baseline does not hold reads as owed, so \
+         without the scope every declined citation comes back one sync later"
     );
     let base = b.state.load_baseline().unwrap();
     assert_eq!(base.entries.len(), 8, "and the scope is gone entirely");
+}
+
+/// What the scope declined stays declined when a PEER changes it: a
+/// scoped tree receives neither a new version of a path it does not hold
+/// nor a new file outside its scope. (Before P1-lite both arrived: the
+/// whole-manifest merge base made the change foreign, and the queue
+/// carried it into the tree.) A path it holds still arrives.
+#[tokio::test]
+async fn a_scoped_tree_never_receives_a_peers_change_outside_its_scope() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = syncer(&store, dir_b.path()).await;
+    b.checkout_scoped(Some(vec!["inputs".into()])).await.unwrap();
+
+    peer_publish(&store, &b.cfg, "outputs/big-0.bin", "a peer's new version", "peer").await;
+    peer_publish(&store, &b.cfg, "outputs/new.bin", "a peer's new file", "peer").await;
+    peer_publish(&store, &b.cfg, "inputs/wanted.txt", "a peer's edit in scope", "peer").await;
+    for _ in 0..2 {
+        b.run_barrier().await.unwrap();
+    }
+    assert!(read(dir_b.path(), "outputs/big-0.bin").is_none(), "a declined path arrived");
+    assert!(read(dir_b.path(), "outputs/new.bin").is_none(), "a file outside the scope arrived");
+    assert_eq!(read(dir_b.path(), "inputs/wanted.txt").as_deref(), Some("a peer's edit in scope"));
 }
 
 #[tokio::test]
@@ -6487,7 +7413,7 @@ async fn a_widen_materialises_and_cites_what_it_newly_admits() {
 /// every unadmitted citation reads as foreign one merge later and the
 /// whole tree comes back.
 #[tokio::test]
-async fn a_narrow_leaves_the_merge_base_whole() {
+async fn a_narrow_owes_nothing_it_dropped() {
     let store = Arc::new(MemoryStore::new());
     let _keep = scoped_fixture(&store).await;
     let (_dir, mut b) = rescope_fixture(&store).await;
@@ -6495,10 +7421,14 @@ async fn a_narrow_leaves_the_merge_base_whole() {
     b.rescope(Some(vec!["inputs".into()])).await.unwrap();
     let base = b.state.load_baseline().unwrap();
     assert_eq!(base.entries.len(), 2, "the HELD set narrows");
-    assert_eq!(base.inst_base.len(), 8, "the MERGE BASE does not");
-    assert!(base.inst_base.contains_key("outputs/big-0.bin"));
     assert!(!base.entries.contains_key("outputs/big-0.bin"));
     assert!(!base.prev_scan.contains("outputs/big-0.bin"), "prev_scan must drop with entries");
+    // ...and what it dropped is not owed back (the merge base narrows with
+    // it since P1-lite; the scope keeps the dropped citations declined).
+    for _ in 0..2 {
+        b.run_barrier().await.unwrap();
+    }
+    assert_eq!(b.state.load_baseline().unwrap().entries.len(), 2, "a barrier fetched a dropped path back");
 }
 
 /// The design's SECOND mutation check: a crash between the intent and
@@ -6839,8 +7769,10 @@ impl ObjectStore for PublishMidCheckout {
         if key == self.trigger_key
             && !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst)
         {
-            // What a publisher does, in the order a publisher does it:
-            // the object, then the manifest that cites it.
+            // What a publisher does under handles, in the order it does
+            // it: a fresh handle, the manifest that cites it, and then its
+            // collector takes the handle the document stopped citing —
+            // the one this reader is asking for.
             let loaded = manifest::load(self.inner.as_ref(), &self.cfg)
                 .await
                 .expect("the publisher reads the standing manifest")
@@ -6848,19 +7780,25 @@ impl ObjectStore for PublishMidCheckout {
             let body = Bytes::from_static(b"the publisher's next generation");
             let crc = crc64_nvme(&body);
             let stamps = GenerationStamps {
-                generation: 1,
+                generation: 2,
                 epoch: 1,
                 flush_uuid: "the-publisher".into(),
                 boundary_source: None,
                 posix: None,
             };
+            let new_key = self.cfg.handle_key(&self.trigger_path, "the-publisher");
             let meta = self
                 .inner
-                .put_whole(&self.trigger_key, body, &PutCondition::Unconditional, &stamps, crc)
+                .put_whole(&new_key, body, &PutCondition::IfNoneMatchAny, &stamps, crc)
                 .await?;
             let mut m = loaded.manifest.clone();
             m.seq += 1;
-            m.entries.get_mut(&self.trigger_path).expect("the path is cited").etag = meta.etag;
+            let e = m.entries.get_mut(&self.trigger_path).expect("the path is cited");
+            let retired = std::mem::replace(&mut e.key, new_key);
+            e.etag = meta.etag;
+            e.crc64_b64 = flint_store::crc64_to_b64(crc);
+            e.size = meta.size;
+            e.generation = 2;
             manifest::cas_write(
                 self.inner.as_ref(),
                 &self.cfg,
@@ -6871,6 +7809,7 @@ impl ObjectStore for PublishMidCheckout {
             )
             .await
             .expect("the publish lands");
+            self.inner.delete(&retired).await?;
         }
         self.inner.get_whole(key, if_match).await
     }
@@ -6998,18 +7937,22 @@ impl ObjectStore for PublishMidCheckout {
     }
 }
 
-/// A reader that loses a race with its OWN publisher is told that, not
-/// told a stranger wrote the bucket.
+/// A reader that loses a race with its OWN publisher re-resolves the
+/// pointer and delivers the publisher's next generation — under handles
+/// (design 2026-09-19) the handle it was fetching is simply GONE, taken
+/// by the publisher's collector, and a gone handle whose pointer moved is
+/// the publisher's doing, never a stranger's.
 ///
 /// Dropping the claim from `checkout` made this window reachable for
 /// the first time, and the message waiting in it was
 /// `a_published_workspace_refuses_a_foreign_write_instead_of_adopting_it`'s
 /// — "something other than its publisher wrote that object", pointing
-/// an operator at a second writer that does not exist. That leg is this
-/// one's control: same refusal, same fixture shape, and the ONE thing
-/// that differs is whether the manifest pointer moved.
+/// an operator at a second writer that does not exist. Then the reader
+/// was told to re-run; now it re-runs itself. That leg is this one's
+/// control: same fixture shape, and the ONE thing that differs is whether
+/// the manifest pointer moved.
 #[tokio::test]
-async fn a_publish_that_lands_mid_checkout_names_the_publisher_not_a_stranger() {
+async fn a_publish_that_lands_mid_checkout_is_re_resolved_not_blamed_on_a_stranger() {
     let inner = Arc::new(MemoryStore::new());
     let pdir = tempfile::tempdir().unwrap();
     let mut publisher = syncer(&inner, pdir.path()).await;
@@ -7024,31 +7967,23 @@ async fn a_publish_that_lands_mid_checkout_names_the_publisher_not_a_stranger() 
     let racing = Arc::new(PublishMidCheckout {
         inner: inner.clone(),
         cfg: reader.cfg.clone(),
-        trigger_key: reader.cfg.file_key("README.md"),
+        trigger_key: cited_key(&inner, &reader.cfg, "README.md").await,
         trigger_path: "README.md".to_string(),
         fired: std::sync::atomic::AtomicBool::new(false),
     });
-    reader.store = racing as Arc<dyn ObjectStore>;
+    reader.store = racing.clone() as Arc<dyn ObjectStore>;
 
-    let err = reader.checkout().await.expect_err("the citation it loaded is one generation stale");
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("its publisher published while the checkout was running"),
-        "the reader was not told who moved it: {msg}"
+    let r = reader.checkout().await.expect("a reader one generation behind re-resolves and delivers");
+    assert!(racing.fired.load(std::sync::atomic::Ordering::SeqCst), "fixture: the publish never landed mid-checkout");
+    assert_eq!(r.reresolved, 1, "the pass was not re-run against the moved pointer: {r:?}");
+    assert_eq!(
+        read(rdir.path(), "README.md").as_deref(),
+        Some("the publisher's next generation"),
+        "the reader delivered a generation the pointer no longer names"
     );
-    assert!(msg.contains("seq 1") && msg.contains("seq 2"), "name both generations: {msg}");
-    assert!(
-        msg.contains("Re-run checkout"),
-        "a reader one generation behind has a remedy; say it: {msg}"
-    );
-    // The stranger accusation is still in there, quoted and labelled as
-    // the thing it is NOT — dropping it would lose the only evidence of
-    // which refusal actually fired.
-    assert!(msg.contains("SOLE WRITER"), "the underlying refusal must survive: {msg}");
-    assert!(
-        read(rdir.path(), "README.md").is_none(),
-        "it materialized a file it could not verify"
-    );
+    let b = reader.state.load_baseline().unwrap();
+    assert_eq!(b.seq, 2, "the baseline names the generation the tree holds");
+    assert!(reader.state.load_conflicts().unwrap().is_empty(), "nothing to surface: the publisher moved it");
 }
 
 /// Two fetches racing into one directory that does not exist yet.
@@ -7170,7 +8105,7 @@ async fn a_fresh_fetch_whose_bytes_do_not_match_the_manifest_crc_is_refused() {
 
     // Same length, one bit flipped, same etag, same stored checksum
     // claim: nothing on the wire changes.
-    store.inject_corrupt_body(&a.cfg.file_key("model/config.json"), |b| b[10] ^= 0x01);
+    store.inject_corrupt_body(&cited_key(&store, &a.cfg, "model/config.json").await, |b| b[10] ^= 0x01);
 
     let dir_b = tempfile::tempdir().unwrap();
     let mut b = syncer(&store, dir_b.path()).await;
@@ -7205,7 +8140,7 @@ async fn a_ranged_fetch_whose_bytes_do_not_match_the_manifest_crc_is_refused() {
     std::fs::write(dir_a.path().join("weights.bin"), &big).unwrap();
     a.run_barrier().await.unwrap();
 
-    store.inject_corrupt_body(&a.cfg.file_key("weights.bin"), |b| {
+    store.inject_corrupt_body(&cited_key(&store, &a.cfg, "weights.bin").await, |b| {
         let i = b.len() / 2 + 777;
         b[i] ^= 0x01;
     });
@@ -7432,8 +8367,9 @@ async fn a_hitl_upload_on_a_backend_that_attests_no_checksum_is_cited_with_the_b
     write(dir.path(), "agent.txt", "agent work");
     sc.run_barrier().await.unwrap();
 
-    // The upload lands object-first, then an inbox entry that names
-    // only the etag.
+    // The upload lands object-first, then ONE manifest CAS cites it (P2):
+    // the gateway hashed the bytes it sent, so the citation carries their
+    // CRC though the backend attests none.
     let key = sc.cfg.file_key("docs/upload.pdf");
     let body = Bytes::from_static(b"user bytes");
     let stamps = GenerationStamps {
@@ -7447,18 +8383,13 @@ async fn a_hitl_upload_on_a_backend_that_attests_no_checksum_is_cited_with_the_b
         .put_whole(&key, body.clone(), &PutCondition::IfNoneMatchAny, &stamps, crc64_nvme(&body))
         .await
         .unwrap();
-    inbox::gateway_append(
-        store.as_ref(),
-        &sc.cfg,
-        InboxEntry {
-            path: "docs/upload.pdf".into(),
-            etag: meta.etag.clone(),
-            author: "dilip".into(),
-            added_unix: now_unix(),
-            crc64_b64: None,
-            cited: None,
-        },
-    )
+    let (etag, k) = (meta.etag.clone(), key.clone());
+    gateway_commit(&mem, &sc.cfg, "gateway-old", move |doc| {
+        doc.entries.insert("docs/upload.pdf".into(), manifest::LeanEntry {
+            key: k.clone(), etag: etag.clone(), crc64_b64: crc_of("user bytes"), size: 10,
+            mode: 0o644, mtime_unix: 0, generation: 1, epoch: 0,
+        });
+    })
     .await
     .unwrap();
     assert_attests_nothing(&mem, &store, &key).await;
@@ -7476,7 +8407,7 @@ async fn a_hitl_upload_on_a_backend_that_attests_no_checksum_is_cited_with_the_b
     );
     let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
     let e = m.entries.get("docs/upload.pdf").expect("amputated!");
-    assert_eq!(e.crc64_b64, crc_of("user bytes"), "the repair cited the bytes' CRC");
+    assert_eq!(e.crc64_b64, crc_of("user bytes"), "the citation carries the bytes' CRC");
 
     // A fresh reader verifies against exactly that and gets the file.
     let dir2 = tempfile::tempdir().unwrap();
@@ -7502,8 +8433,9 @@ async fn sync_on_a_backend_that_attests_no_checksum_still_sees_identical_bytes()
     a.run_barrier().await.unwrap();
 
     // The gateway hashes what it sends; the backend attests nothing.
-    hitl_write(&mem, &a.cfg, "shared.txt", "foreign v2", "ci").await.unwrap();
-    assert_attests_nothing(&mem, &store, &a.cfg.file_key("shared.txt")).await;
+    let (_, ui_key) = hitl_write_at(&mem, &a.cfg, "shared.txt", "foreign v2", "ci", now_unix()).await.unwrap();
+    assert_attests_nothing(&mem, &store, &ui_key).await;
+    let pre = a.state.load_baseline().unwrap();
     let r = a.sync().await.unwrap();
     assert!(r.applied.contains(&"shared.txt".to_string()));
 
@@ -7512,6 +8444,11 @@ async fn sync_on_a_backend_that_attests_no_checksum_still_sees_identical_bytes()
     stale.etag = "\"stale-pre-sync-etag\"".into();
     stale.mtime_unix -= 10;
     stale.size = 1;
+    // The rest of the baseline is the pre-sync one too: seq and pointer
+    // (under P2 the change is a committed document, so a baseline that
+    // kept the new seq would say there is no news).
+    b.seq = pre.seq;
+    b.manifest_etag = pre.manifest_etag.clone();
     a.state.save_baseline(&b).unwrap();
     let scanned = super::scan::scan(dir.path()).unwrap();
     let c = super::scan::classify(&scanned, &a.state.load_baseline().unwrap());
@@ -7526,8 +8463,7 @@ async fn sync_on_a_backend_that_attests_no_checksum_still_sees_identical_bytes()
 }
 
 /// A consume whose bytes do not match the writer's CRC is refused: not
-/// written, not consumed (the entry stays in the cell so the failure
-/// repeats visibly), and recorded. The corruption keeps the etag and
+/// written, left OWED (so the failure repeats visibly), and recorded. The corruption keeps the etag and
 /// the store's attestation intact, the shape of bit-rot or a broken
 /// gateway.
 #[tokio::test]
@@ -7540,22 +8476,23 @@ async fn a_consume_whose_bytes_do_not_match_the_writers_crc_is_refused() {
     write(dir.path(), "agent.txt", "agent work");
     sc.run_barrier().await.unwrap();
 
-    hitl_write(&store, &sc.cfg, "docs/upload.pdf", "user bytes", "dilip").await.unwrap();
-    store.inject_corrupt_body(&sc.cfg.file_key("docs/upload.pdf"), |b| b[3] ^= 0x40);
+    let (_, ui_key) =
+        hitl_write_at(&store, &sc.cfg, "docs/upload.pdf", "user bytes", "dilip", now_unix()).await.unwrap();
+    store.inject_corrupt_body(&ui_key, |b| b[3] ^= 0x40);
 
+    // P2: the gateway cited the save with the CRC of what it PUT; the bucket
+    // then corrupted the body. The next consume owes it and fetches it.
     sc.run_barrier().await.unwrap();
     assert!(read(dir.path(), "docs/upload.pdf").is_none(), "corrupt bytes were written");
     assert!(
         sc.state.load_conflicts().unwrap().iter().any(|c| c.kind.starts_with("consume-refused-checksum")),
         "the refusal was silent"
     );
-    let ib = inbox::load(store.as_ref(), &sc.cfg).await.unwrap();
-    assert!(
-        ib.doc.entries.iter().any(|e| e.path == "docs/upload.pdf"),
-        "a refused entry must stay in the inbox, not be consumed away"
-    );
-    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
-    assert!(!m.entries.contains_key("docs/upload.pdf"), "refused bytes were cited");
+    assert!(derive_pending(&sc).await, "a refused change must stay owed, not be consumed away");
+    let n = sc.state.load_conflicts().unwrap().len();
+    sc.run_barrier().await.unwrap();
+    assert!(read(dir.path(), "docs/upload.pdf").is_none());
+    assert!(sc.state.load_conflicts().unwrap().len() > n, "the refusal did not repeat");
 }
 
 /// A sync whose fetched bytes do not match the manifest's CRC is
@@ -7574,7 +8511,7 @@ async fn a_sync_whose_bytes_do_not_match_the_manifest_crc_is_refused() {
 
     write(dir_a.path(), "f.txt", "published bytes");
     a.run_barrier().await.unwrap();
-    store.inject_corrupt_body(&a.cfg.file_key("f.txt"), |bytes| bytes[0] ^= 0x01);
+    store.inject_corrupt_body(&cited_key(&store, &a.cfg, "f.txt").await, |bytes| bytes[0] ^= 0x01);
 
     let err = b.sync().await.expect_err("a sync of corrupt bytes must refuse");
     assert!(err.to_string().contains("refusing to apply it"), "{err}");
@@ -7587,186 +8524,45 @@ async fn a_sync_whose_bytes_do_not_match_the_manifest_crc_is_refused() {
 // barrier — one manifest generation, never a hole.
 // ---------------------------------------------------------------------
 
-/// What the gateway crate's `remove_file` records: a removal in the
-/// cell, nothing else. The caller never touches the object.
-async fn hitl_remove(store: &Arc<MemoryStore>, cfg: &LeanConfig, path: &str, author: &str) {
-    inbox::gateway_remove(
-        store.as_ref(),
-        cfg,
-        vec![inbox::Removal {
-            path: path.to_string(),
-            author: author.to_string(),
-            requested_unix: now_unix(),
-            moved_to: None,
-            refused: None,
-        }],
-    )
+/// What the gateway's `remove_file` does under P2: ONE manifest CAS stops
+/// citing the path; its tombstone names what was deleted.
+pub(super) async fn hitl_remove(store: &Arc<MemoryStore>, cfg: &LeanConfig, path: &str, _author: &str) {
+    gateway_commit(store, cfg, &super::ui_flush(now_unix()), |doc| {
+        let gone = doc.entries.remove(path).expect("the gateway deletes only what is cited");
+        doc.tombstones.insert(path.to_string(), manifest::Tombstone { etag: gone.etag, seq: doc.seq });
+    })
     .await
     .unwrap();
 }
 
-/// What the gateway crate's `rename_file` does: a server-side copy to
-/// the destination (create first), then ONE CAS carrying the
-/// destination entry and the source removal (removal second).
-async fn hitl_rename(store: &Arc<MemoryStore>, cfg: &LeanConfig, from: &str, to: &str, author: &str) {
-    let m = manifest::load(store.as_ref(), cfg).await.unwrap().unwrap();
-    let src = m.manifest.entries.get(from).expect("source is cited");
-    let stamps = GenerationStamps {
-        generation: 1,
-        epoch: 0,
-        flush_uuid: format!("gateway-rename-{author}"),
-        boundary_source: None,
-        posix: None,
-    };
-    let dst = store
-        .copy_object(
-            &cfg.file_key(from),
-            Some(&src.etag),
-            &cfg.file_key(to),
-            &PutCondition::IfNoneMatchAny,
-            &stamps,
-        )
-        .await
-        .unwrap();
-    inbox::gateway_rename(
-        store.as_ref(),
-        cfg,
-        vec![InboxEntry {
-            path: to.to_string(),
-            etag: dst.etag,
-            author: author.to_string(),
-            added_unix: now_unix(),
-            crc64_b64: Some(src.crc64_b64.clone()),
-            cited: None,
-        }],
-        vec![inbox::Removal {
-            path: from.to_string(),
-            author: author.to_string(),
-            requested_unix: now_unix(),
-            moved_to: Some(to.to_string()),
-            refused: None,
-        }],
-    )
+/// The version the gateway resolves for a path under P2: the citation.
+pub(super) async fn gateway_current(store: &Arc<MemoryStore>, cfg: &LeanConfig, path: &str) -> Option<String> {
+    manifest::load(store.as_ref(), cfg).await.unwrap().and_then(|m| m.manifest.entries.get(path).map(|e| e.etag.clone()))
+}
+
+/// What the gateway's `rename_file` does under P2: ONE manifest CAS moves
+/// the citation — the destination names the source's handle, the source is
+/// no longer cited and its tombstone names what moved. No bytes move.
+pub(super) async fn hitl_rename(store: &Arc<MemoryStore>, cfg: &LeanConfig, from: &str, to: &str, _author: &str) {
+    gateway_commit(store, cfg, &super::ui_flush(now_unix()), |doc| {
+        let entry = doc.entries.remove(from).expect("the source is cited");
+        assert!(!doc.entries.contains_key(to), "the gateway refuses a destination that exists");
+        doc.tombstones.insert(from.to_string(), manifest::Tombstone { etag: entry.etag.clone(), seq: doc.seq });
+        doc.tombstones.remove(to);
+        doc.entries.insert(to.to_string(), entry);
+    })
     .await
     .unwrap();
 }
 
-/// Phase B control (1): a DECLARED removal reaches the delete set in
-/// ONE barrier — it skips the two-scan guard, because a declaration is
-/// not an absence inferred by a walk. Mutation: route it through
-/// `first_absence` and the one-barrier assertions fail.
+
+
+/// A UI delete COMMITS (P2); the tree follows through its queue. An unlink
+/// that FAILS must leave the deletion queued for the next barrier — and must
+/// never read as the agent's own file, or the next scan would publish it
+/// again and undo the user's delete. Once the unlink can succeed, it does.
 #[tokio::test]
-async fn a_declared_removal_is_cited_out_in_one_barrier() {
-    let store = Arc::new(MemoryStore::new());
-    let dir = tempfile::tempdir().unwrap();
-    let mut sc = syncer(&store, dir.path()).await;
-    assert!(claim_until_held(&mut sc, 3).await);
-    sc.checkout().await.unwrap();
-    write(dir.path(), "README.md", "hello");
-    write(dir.path(), "src/main.rs", "fn main() {}");
-    sc.run_barrier().await.unwrap();
-    let before = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest.seq;
-
-    hitl_remove(&store, &sc.cfg, "README.md", "dilip").await;
-    // Recorded, not performed: the object and the citation stand until
-    // the syncer gets to it, and the cell says a removal is pending.
-    assert!(store.head(&sc.cfg.file_key("README.md")).await.is_ok());
-    let ib = inbox::load(store.as_ref(), &sc.cfg).await.unwrap();
-    assert!(ib.doc.pending_removal("README.md").is_some());
-
-    let r = sc.run_barrier().await.unwrap();
-    assert_eq!(r.removed, vec!["README.md".to_string()], "declared this barrier");
-    assert_eq!(r.deleted, vec!["README.md".to_string()], "and GC'd this barrier, not next");
-    assert!(r.first_absence.is_empty(), "a declaration is not a first absence");
-    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
-    assert_eq!(m.manifest.seq, before + 1, "exactly one generation");
-    assert!(!m.manifest.entries.contains_key("README.md"));
-    assert!(m.manifest.entries.contains_key("src/main.rs"));
-    assert!(store.head(&sc.cfg.file_key("README.md")).await.is_err(), "object GC'd");
-    assert!(read(dir.path(), "README.md").is_none(), "unlinked from the agent's tree");
-    let ib = inbox::load(store.as_ref(), &sc.cfg).await.unwrap();
-    assert!(ib.doc.removals.is_empty(), "settled out of the cell");
-    assert!(!sc.state.load_baseline().unwrap().entries.contains_key("README.md"));
-
-    // Nothing left to do: the next barrier is a no-change tick.
-    let r2 = sc.run_barrier().await.unwrap();
-    assert!(r2.no_change, "{r2:?}");
-
-    // A fresh checkout agrees.
-    let dir_b = tempfile::tempdir().unwrap();
-    let mut b = syncer(&store, dir_b.path()).await;
-    let cr = b.checkout().await.unwrap();
-    assert_eq!(cr.materialized, 1);
-    assert!(read(dir_b.path(), "README.md").is_none());
-}
-
-/// Phase B control (2): a removal of a LOCALLY-DIRTY path applies
-/// NOTHING and is refused with the reason in the cell — the agent's
-/// unpublished edit is kept and published. Never retried: a retry that
-/// waited for the publish would delete the very edit the refusal
-/// protected. Mutation: drop the dirty check and the agent's edit
-/// disappears.
-#[tokio::test]
-async fn a_declared_removal_of_a_dirty_path_applies_nothing_and_is_refused() {
-    let store = Arc::new(MemoryStore::new());
-    let dir = tempfile::tempdir().unwrap();
-    let mut sc = syncer(&store, dir.path()).await;
-    assert!(claim_until_held(&mut sc, 3).await);
-    sc.checkout().await.unwrap();
-    write(dir.path(), "shared.txt", "v1");
-    sc.run_barrier().await.unwrap();
-
-    // The agent edits (a different size: dirty whatever the mtime says).
-    write(dir.path(), "shared.txt", "the agent's unpublished v2");
-    backdate_baseline(&sc, "shared.txt");
-    hitl_remove(&store, &sc.cfg, "shared.txt", "dilip").await;
-
-    let r = sc.run_barrier().await.unwrap();
-    assert!(r.removed.is_empty(), "nothing declared");
-    assert!(r.deleted.is_empty(), "nothing deleted");
-    assert_eq!(r.removals_refused, 1);
-    assert_eq!(read(dir.path(), "shared.txt").unwrap(), "the agent's unpublished v2");
-    assert_eq!(r.uploaded, vec!["shared.txt".to_string()], "the agent's edit publishes");
-    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
-    let (_, body) = store.get_whole(&sc.cfg.file_key("shared.txt"), None).await.unwrap();
-    assert_eq!(&body[..], b"the agent's unpublished v2");
-    assert!(m.manifest.entries.contains_key("shared.txt"));
-
-    // The cell carries the answer, attributed and reasoned.
-    let ib = inbox::load(store.as_ref(), &sc.cfg).await.unwrap();
-    assert!(ib.doc.pending_removal("shared.txt").is_none(), "not pending any more");
-    let rm = ib.doc.removals.iter().find(|r| r.path == "shared.txt").expect("kept, annotated");
-    let refusal = rm.refused.as_ref().expect("refused");
-    assert_eq!(refusal.kind, "removal-refused-dirty");
-    assert!(refusal.message.contains("dilip"), "names who asked: {}", refusal.message);
-    assert!(refusal.message.contains("kept"), "{}", refusal.message);
-    assert!(
-        sc.state.load_conflicts().unwrap().iter().any(|c| c.kind.starts_with("removal-refused-dirty")),
-        "the pod-side record too"
-    );
-
-    // Never retried: now that the edit is published the path is CLEAN,
-    // and a retry would delete it. Two more barriers change nothing.
-    for _ in 0..2 {
-        let r = sc.run_barrier().await.unwrap();
-        assert!(r.deleted.is_empty() && r.removed.is_empty(), "{r:?}");
-    }
-    assert_eq!(read(dir.path(), "shared.txt").unwrap(), "the agent's unpublished v2");
-    assert!(store.head(&sc.cfg.file_key("shared.txt")).await.is_ok());
-
-    // A NEW removal of the path supersedes the refused one and, the
-    // path now being clean, is performed.
-    hitl_remove(&store, &sc.cfg, "shared.txt", "dilip").await;
-    let r = sc.run_barrier().await.unwrap();
-    assert_eq!(r.deleted, vec!["shared.txt".to_string()]);
-    assert!(inbox::load(store.as_ref(), &sc.cfg).await.unwrap().doc.removals.is_empty());
-}
-
-/// Phase B control (3): an unlink that fails publishes NO deletion. The
-/// removal stays pending (transient), the manifest keeps citing, the
-/// object stays; once the unlink can succeed the removal goes through.
-#[tokio::test]
-async fn a_failed_unlink_publishes_no_deletion() {
+async fn a_failed_unlink_of_a_queued_deletion_is_retried_and_never_republishes() {
     if unsafe { libc::geteuid() } == 0 {
         eprintln!("skipped: root ignores directory permissions");
         return;
@@ -7781,441 +8577,34 @@ async fn a_failed_unlink_publishes_no_deletion() {
 
     use std::os::unix::fs::PermissionsExt;
     let locked = dir.path().join("locked");
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
     hitl_remove(&store, &sc.cfg, "locked/f.txt", "dilip").await;
-    let r = sc.run_barrier().await.unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    for _ in 0..3 {
+        sc.run_barrier().await.unwrap();
+    }
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert!(r.removed.is_empty() && r.deleted.is_empty(), "{r:?}");
-    assert_eq!(read(dir.path(), "locked/f.txt").unwrap(), "keep");
+    assert_eq!(read(dir.path(), "locked/f.txt").as_deref(), Some("keep"), "fixture: the unlink did not fail");
     let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
-    assert!(m.manifest.entries.contains_key("locked/f.txt"), "still cited");
-    assert!(store.head(&sc.cfg.file_key("locked/f.txt")).await.is_ok(), "object untouched");
-    let ib = inbox::load(store.as_ref(), &sc.cfg).await.unwrap();
-    assert!(ib.doc.pending_removal("locked/f.txt").is_some(), "deferred, not refused");
-    assert!(sc
-        .state
-        .load_conflicts()
-        .unwrap()
-        .iter()
-        .any(|c| c.kind.starts_with("removal-unlink-failed")));
+    assert!(!m.manifest.entries.contains_key("locked/f.txt"), "a failed unlink re-published the deleted file");
 
-    // Unlockable now: the same pending removal is performed.
-    let r = sc.run_barrier().await.unwrap();
-    assert_eq!(r.deleted, vec!["locked/f.txt".to_string()]);
-    assert!(read(dir.path(), "locked/f.txt").is_none());
-}
-
-/// Phase C control: a rename is ONE manifest generation. A reader
-/// resolving through the manifest sees {source} or {destination},
-/// never both and never neither; the bytes are the same bytes (the
-/// CRC the destination cites is the source's), the source object is
-/// GC'd, and the agent's tree has the file under its new name.
-#[tokio::test]
-async fn a_rename_rides_one_manifest_generation() {
-    let store = Arc::new(MemoryStore::new());
-    let dir = tempfile::tempdir().unwrap();
-    let mut sc = syncer(&store, dir.path()).await;
-    assert!(claim_until_held(&mut sc, 3).await);
-    sc.checkout().await.unwrap();
-    write(dir.path(), "notes/a.txt", "the same bytes");
-    sc.run_barrier().await.unwrap();
-    let before = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
-    let src_crc = before.manifest.entries["notes/a.txt"].crc64_b64.clone();
-
-    hitl_rename(&store, &sc.cfg, "notes/a.txt", "docs/b.txt", "dilip").await;
-    // Before the barrier: destination readable, source still cited —
-    // an extra file, never a hole.
-    assert!(store.head(&sc.cfg.file_key("docs/b.txt")).await.is_ok());
-    assert!(store.head(&sc.cfg.file_key("notes/a.txt")).await.is_ok());
-    let ib = inbox::load(store.as_ref(), &sc.cfg).await.unwrap();
-    assert_eq!(ib.doc.entries.len(), 1);
-    assert_eq!(ib.doc.removals.len(), 1);
-    assert_eq!(ib.doc.removals[0].moved_to.as_deref(), Some("docs/b.txt"));
-
-    let r = sc.run_barrier().await.unwrap();
-    assert_eq!(r.consumed, 1);
-    assert_eq!(r.removed, vec!["notes/a.txt".to_string()]);
-    assert_eq!(r.deleted, vec!["notes/a.txt".to_string()]);
-    let after = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
-    assert_eq!(after.manifest.seq, before.manifest.seq + 1, "ONE generation carries both halves");
-    assert!(!after.manifest.entries.contains_key("notes/a.txt"));
-    let dst = &after.manifest.entries["docs/b.txt"];
-    assert_eq!(dst.crc64_b64, src_crc, "the same bytes, attested");
-    assert!(store.head(&sc.cfg.file_key("notes/a.txt")).await.is_err(), "source GC'd");
-    assert_eq!(read(dir.path(), "docs/b.txt").unwrap(), "the same bytes");
-    assert!(read(dir.path(), "notes/a.txt").is_none());
-    assert!(inbox::load(store.as_ref(), &sc.cfg).await.unwrap().doc.removals.is_empty());
-
-    // A fresh checkout materialises exactly the destination.
-    let dir_b = tempfile::tempdir().unwrap();
-    let mut b = syncer(&store, dir_b.path()).await;
-    let cr = b.checkout().await.unwrap();
-    assert_eq!(cr.materialized, 1);
-    assert_eq!(read(dir_b.path(), "docs/b.txt").unwrap(), "the same bytes");
-}
-
-/// Phase C control, the crash: the syncer dies after the destination
-/// landed in the tree and before the source was unlinked. On restart
-/// the source still exists (an extra file, never a hole) and the
-/// transaction re-applies as ONE generation.
-#[tokio::test]
-async fn a_rename_interrupted_before_the_source_unlink_re_applies() {
-    let store = Arc::new(MemoryStore::new());
-    let dir = tempfile::tempdir().unwrap();
-    let mut sc = syncer(&store, dir.path()).await;
-    assert!(claim_until_held(&mut sc, 3).await);
-    sc.checkout().await.unwrap();
-    write(dir.path(), "a.txt", "bytes");
-    sc.run_barrier().await.unwrap();
-    let before = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest.seq;
-
-    hitl_rename(&store, &sc.cfg, "a.txt", "b.txt", "dilip").await;
-    // Step 1 only: the destination is integrated; then the pod dies.
-    sc.consume_inbox().await.unwrap();
-    assert_eq!(read(dir.path(), "b.txt").unwrap(), "bytes");
-    assert_eq!(read(dir.path(), "a.txt").unwrap(), "bytes", "the source is still there");
-    drop(sc);
-
-    // Restart on the same tree (marker present: reload, never re-materialise).
-    let mut sc = syncer(&store, dir.path()).await;
-    assert!(claim_until_held(&mut sc, 3).await);
-    let r = sc.run_barrier().await.unwrap();
-    assert_eq!(r.removed, vec!["a.txt".to_string()]);
-    let after = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
-    assert_eq!(after.manifest.seq, before + 1, "still one generation");
-    assert!(after.manifest.entries.contains_key("b.txt"));
-    assert!(!after.manifest.entries.contains_key("a.txt"));
-    assert!(read(dir.path(), "a.txt").is_none());
-    assert_eq!(read(dir.path(), "b.txt").unwrap(), "bytes");
-}
-
-/// The journal half of the crash story: a barrier that unlinked and
-/// journalled its declared deletes, then died before the manifest CAS
-/// — and whose removal has meanwhile left the cell (withdrawn, or
-/// superseded). The next barrier still cites the path out in ONE
-/// generation from the journal, rather than handing an already-absent
-/// file to the two-scan path and citing it for a barrier it no longer
-/// has. Mutation: ignore `declared_deletes` and the first barrier
-/// reports a first absence instead of a delete.
-#[tokio::test]
-async fn a_journalled_declared_delete_survives_a_crash() {
-    let store = Arc::new(MemoryStore::new());
-    let dir = tempfile::tempdir().unwrap();
-    let mut sc = syncer(&store, dir.path()).await;
-    assert!(claim_until_held(&mut sc, 3).await);
-    sc.checkout().await.unwrap();
-    write(dir.path(), "gone.txt", "bytes");
-    write(dir.path(), "kept.txt", "bytes");
-    sc.run_barrier().await.unwrap();
-    let before = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest.seq;
-
-    // What the crashed barrier left behind: the unlink and the journal.
-    std::fs::remove_file(dir.path().join("gone.txt")).unwrap();
-    let mut intent = sc.state.load_intent().unwrap();
-    intent.declared_deletes = vec!["gone.txt".to_string()];
-    sc.state.save_intent(&intent).unwrap();
-    drop(sc);
-
-    let mut sc = syncer(&store, dir.path()).await;
-    assert!(claim_until_held(&mut sc, 3).await);
-    let r = sc.run_barrier().await.unwrap();
-    assert_eq!(r.deleted, vec!["gone.txt".to_string()], "one barrier, from the journal");
-    assert!(r.first_absence.is_empty());
-    let after = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
-    assert_eq!(after.manifest.seq, before + 1);
-    assert!(!after.manifest.entries.contains_key("gone.txt"));
-    assert!(after.manifest.entries.contains_key("kept.txt"));
-    assert!(sc.state.load_intent().unwrap().declared_deletes.is_empty(), "cleared with the keys");
-}
-
-/// A removal recorded from outside for a path the agent ALSO removed,
-/// or that a scoped tree never held, is declared as it stands; and a
-/// removal of nothing at all is applied as a no-op rather than left
-/// pending forever.
-#[tokio::test]
-async fn a_declared_removal_of_an_already_absent_path_declares_as_it_stands() {
-    let store = Arc::new(MemoryStore::new());
-    let dir = tempfile::tempdir().unwrap();
-    let mut sc = syncer(&store, dir.path()).await;
-    assert!(claim_until_held(&mut sc, 3).await);
-    sc.checkout().await.unwrap();
-    write(dir.path(), "both.txt", "bytes");
-    sc.run_barrier().await.unwrap();
-
-    // The agent deletes it AND the UI asks for the same: one barrier,
-    // not the two the walk alone would take.
-    std::fs::remove_file(dir.path().join("both.txt")).unwrap();
-    hitl_remove(&store, &sc.cfg, "both.txt", "dilip").await;
-    hitl_remove(&store, &sc.cfg, "never/there.txt", "dilip").await;
-    let r = sc.run_barrier().await.unwrap();
-    assert_eq!(r.deleted, vec!["both.txt".to_string()]);
-    assert!(r.first_absence.is_empty());
-    let ib = inbox::load(store.as_ref(), &sc.cfg).await.unwrap();
-    assert!(ib.doc.removals.is_empty(), "both settled: {:?}", ib.doc.removals);
-}
-
-/// A rename whose destination the agent had ALREADY taken with an
-/// unpublished file: the consume resolves the destination the way it
-/// resolves every HITL write over dirty bytes (the agent's version
-/// wins, the moved bytes are preserved), and the removal is REFUSED so
-/// the source stays — the user's file is still in the tree under its
-/// old name, never only under `conflicts/`.
-#[tokio::test]
-async fn a_rename_whose_destination_the_agent_took_keeps_the_source() {
-    let store = Arc::new(MemoryStore::new());
-    let dir = tempfile::tempdir().unwrap();
-    let mut sc = syncer(&store, dir.path()).await;
-    assert!(claim_until_held(&mut sc, 3).await);
-    sc.checkout().await.unwrap();
-    write(dir.path(), "a.txt", "the user's bytes");
-    sc.run_barrier().await.unwrap();
-
-    // The agent creates b.txt locally (unpublished) ...
-    write(dir.path(), "b.txt", "the agent's unpublished file");
-    // ... and the UI moves a.txt to b.txt.
-    hitl_rename(&store, &sc.cfg, "a.txt", "b.txt", "dilip").await;
-
-    let r = sc.run_barrier().await.unwrap();
-    assert_eq!(r.consumed, 1, "the destination entry is consumed (as a conflict)");
-    assert_eq!(r.removals_refused, 1);
-    assert!(r.removed.is_empty() && r.deleted.is_empty(), "{r:?}");
-    assert_eq!(read(dir.path(), "a.txt").unwrap(), "the user's bytes", "the source stays");
-    assert_eq!(read(dir.path(), "b.txt").unwrap(), "the agent's unpublished file");
+    // Unlockable now: the queued deletion goes through.
+    for _ in 0..2 {
+        sc.run_barrier().await.unwrap();
+    }
+    assert!(read(dir.path(), "locked/f.txt").is_none(), "the deletion was dropped, not retried");
     let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
-    assert!(m.manifest.entries.contains_key("a.txt"), "still cited");
-    let (_, b) = store.get_whole(&sc.cfg.file_key("b.txt"), None).await.unwrap();
-    assert_eq!(&b[..], b"the agent's unpublished file", "the agent's version publishes");
-    let ib = inbox::load(store.as_ref(), &sc.cfg).await.unwrap();
-    let rm = ib.doc.removals.iter().find(|r| r.path == "a.txt").expect("refused, kept");
-    assert_eq!(rm.refused.as_ref().unwrap().kind, "removal-refused-destination-conflict");
-    let conflicts = sc.state.load_conflicts().unwrap();
-    let c = conflicts.iter().find(|c| c.kind == "consume-dirty" && c.path == "b.txt").unwrap();
-    let (_, kept) = store.get_whole(c.preserved_key.as_ref().unwrap(), None).await.unwrap();
-    assert_eq!(&kept[..], b"the user's bytes", "the moved bytes are preserved too");
-}
-
-/// A store that fails every `put_whole` to keys ending in `suffix`
-/// once armed — the way to stop a real barrier at the manifest CAS,
-/// after its commitment point, and see what the cell holds then.
-struct FailPutTo(Arc<MemoryStore>, String, std::sync::atomic::AtomicBool);
-
-impl FailPutTo {
-    fn arm(&self) {
-        self.2.store(true, std::sync::atomic::Ordering::SeqCst);
-    }
+    assert!(!m.manifest.entries.contains_key("locked/f.txt"));
 }
 
 
-#[async_trait::async_trait]
-impl ObjectStore for FailPutTo {
-    async fn copy_object(
-        &self,
-        src_key: &str,
-        src_if_match: Option<&str>,
-        dst_key: &str,
-        condition: &PutCondition,
-        stamps: &GenerationStamps,
-    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
-        self.0.copy_object(src_key, src_if_match, dst_key, condition, stamps).await
-    }
-    async fn put_whole(
-        &self,
-        key: &str,
-        body: Bytes,
-        cond: &PutCondition,
-        stamps: &GenerationStamps,
-        crc: u64,
-    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
-        if self.2.load(std::sync::atomic::Ordering::SeqCst) && key.ends_with(&self.1) {
-            return Err(flint_store::StoreError::Other(format!("injected failure on {key}")));
-        }
-        self.0.put_whole(key, body, cond, stamps, crc).await
-    }
-    async fn compose_generation(
-        &self,
-        spec: &flint_store::ComposeSpec<'_>,
-    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
-        self.0.compose_generation(spec).await
-    }
-    async fn head(&self, key: &str) -> flint_store::StoreResult<flint_store::ObjectMeta> {
-        self.0.head(key).await
-    }
-    async fn get_whole(
-        &self,
-        key: &str,
-        if_match: Option<&str>,
-    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
-        self.0.get_whole(key, if_match).await.map(|(m, b)| (unattested(m), b))
-    }
-    async fn get_range(
-        &self,
-        key: &str,
-        off: u64,
-        len: u64,
-        if_match: &str,
-    ) -> flint_store::StoreResult<Bytes> {
-        self.0.get_range(key, off, len, if_match).await
-    }
-    fn min_part_size(&self) -> u64 {
-        self.0.min_part_size()
-    }
-    fn max_parts(&self) -> usize {
-        self.0.max_parts()
-    }
-    async fn list(&self, prefix: &str) -> flint_store::StoreResult<Vec<flint_store::ListedObject>> {
-        self.0.list(prefix).await
-    }
-    async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
-        self.0.delete(key).await
-    }
-    async fn delete_if_match(&self, key: &str, etag: &str) -> flint_store::StoreResult<()> {
-        self.0.delete_if_match(key, etag).await
-    }
-    async fn head_version(
-        &self,
-        key: &str,
-        v: &str,
-    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
-        self.0.head_version(key, v).await
-    }
-    async fn get_version(
-        &self,
-        key: &str,
-        v: &str,
-    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
-        self.0.get_version(key, v).await.map(|(m, b)| (unattested(m), b))
-    }
-    async fn delete_version(&self, key: &str, v: &str) -> flint_store::StoreResult<()> {
-        self.0.delete_version(key, v).await
-    }
-    async fn list_versions(
-        &self,
-        prefix: &str,
-    ) -> flint_store::StoreResult<Vec<flint_store::ListedVersion>> {
-        self.0.list_versions(prefix).await
-    }
-    async fn list_uploads(
-        &self,
-        prefix: &str,
-    ) -> flint_store::StoreResult<Vec<flint_store::PendingUpload>> {
-        self.0.list_uploads(prefix).await
-    }
-    async fn abort_upload(&self, key: &str, id: &str) -> flint_store::StoreResult<()> {
-        self.0.abort_upload(key, id).await
-    }
-    async fn bootstrap(
-        &self,
-        prefix: &str,
-    ) -> flint_store::StoreResult<flint_store::BootstrapReport> {
-        self.0.bootstrap(prefix).await
-    }
-    async fn epoch_read(
-        &self,
-        key: &str,
-    ) -> flint_store::StoreResult<Option<flint_store::EpochState>> {
-        self.0.epoch_read(key).await
-    }
-    async fn epoch_acquire(
-        &self,
-        key: &str,
-        holder: &str,
-        observed: Option<&flint_store::EpochState>,
-    ) -> flint_store::StoreResult<flint_store::EpochLease> {
-        self.0.epoch_acquire(key, holder, observed).await
-    }
-    async fn epoch_renew(
-        &self,
-        key: &str,
-        lease: &flint_store::EpochLease,
-        echo: Option<&str>,
-    ) -> flint_store::StoreResult<flint_store::EpochLease> {
-        self.0.epoch_renew(key, lease, echo).await
-    }
-    async fn epoch_release(
-        &self,
-        key: &str,
-        lease: &flint_store::EpochLease,
-    ) -> flint_store::StoreResult<()> {
-        self.0.epoch_release(key, lease).await
-    }
-    async fn epoch_handoff(
-        &self,
-        key: &str,
-        lease: &flint_store::EpochLease,
-        echo: Option<&str>,
-    ) -> flint_store::StoreResult<()> {
-        self.0.epoch_handoff(key, lease, echo).await
-    }
-    async fn epoch_enqueue(
-        &self,
-        key: &str,
-        observed: &flint_store::EpochState,
-        holder_id: &str,
-    ) -> flint_store::StoreResult<flint_store::EpochState> {
-        self.0.epoch_enqueue(key, observed, holder_id).await
-    }
-}
 
-/// The pod-REPLACEMENT window the early drop left open. A HITL write
-/// is consumed into A's tree and baseline; A's barrier passes its
-/// commitment point and dies at the manifest CAS; the pod is replaced
-/// — the emptyDir, and the baseline in it, are gone. The entry must
-/// still be in the cell for the successor to consume, or the write is
-/// acked, durable in the bucket, and tracked by nothing: every
-/// checkout blind to it forever. Mutation: drop consumed entries at
-/// the window-open commitment (the old rule) and the successor never
-/// learns the write.
-#[tokio::test]
-async fn a_consumed_hitl_write_survives_pod_replacement_before_the_cas() {
-    let inner = Arc::new(MemoryStore::new());
-    let failing = Arc::new(FailPutTo(
-        inner.clone(),
-        "/current".into(),
-        std::sync::atomic::AtomicBool::new(false),
-    ));
-    let dir_a = tempfile::tempdir().unwrap();
-    let cfg = cfg_for(dir_a.path());
-    let mut a = Syncer {
-        store: failing.clone() as Arc<dyn ObjectStore>,
-        state: SyncerState::open(cfg.state_dir()).unwrap(),
-        cfg,
-        lease: None,
-        cell_written_at: None,
-        noted_not_regular: Default::default(),
-    };
-    assert!(claim_until_held(&mut a, 3).await);
-    a.checkout().await.unwrap();
-    write(dir_a.path(), "base.txt", "published");
-    a.run_barrier().await.unwrap();
 
-    let etag = hitl_write(&inner, &a.cfg, "ui/upload.txt", "acked to the user", "dilip").await.unwrap();
-    // The REAL barrier: consume, window open, ... and the manifest CAS
-    // fails. Everything before it ran as shipped.
-    failing.arm();
-    let err = a.run_barrier().await.unwrap_err();
-    assert!(err.to_string().contains("injected"), "{err}");
-    assert_eq!(read(dir_a.path(), "ui/upload.txt").unwrap(), "acked to the user", "consumed into A's tree");
-    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap();
-    assert!(!m.manifest.entries.contains_key("ui/upload.txt"), "and not cited");
-    // The pod dies: emptyDir and baseline gone with it.
-    drop(a);
-    drop(dir_a);
 
-    // The replacement: fresh emptyDir, fresh identity. The failed commit
-    // handed the cell on (a commit that fails for any reason but a fence
-    // releases), so there is nothing to wait out.
-    let dir_b = tempfile::tempdir().unwrap();
-    let mut b = syncer(&inner, dir_b.path()).await;
-    assert!(claim_until_held(&mut b, 3).await, "a released cell is claimable at once");
-    b.checkout().await.unwrap();
-    assert!(read(dir_b.path(), "ui/upload.txt").is_none(), "not cited, so not materialised");
-    let r = b.run_barrier().await.unwrap();
-    assert_eq!(r.consumed, 1, "the entry was still in the cell for the successor");
-    assert_eq!(read(dir_b.path(), "ui/upload.txt").unwrap(), "acked to the user");
-    let m = manifest::load(inner.as_ref(), &b.cfg).await.unwrap().unwrap();
-    assert_eq!(m.manifest.entries["ui/upload.txt"].etag, etag, "cited by the successor");
-    assert!(inbox::load(inner.as_ref(), &b.cfg).await.unwrap().doc.entries.is_empty(), "and then dropped");
-}
+
+
+
+
+
 
 
 // ── protocol review 2026-09-12: reproductions ───────────────────────
@@ -8348,7 +8737,8 @@ async fn a_publish_ack_carries_the_boundarys_conflict_records() {
     let ack = a.read_ack(Verb::Publish).expect("no publish ack");
     assert_eq!(ack.status, "ok");
     assert!(
-        ack.report.conflicts.iter().any(|c| c.path == "shared.txt" && c.kind == "consume-dirty"),
+        // P2: the UI's write is committed, so the publish's COMMIT meets it (R7).
+        ack.report.conflicts.iter().any(|c| c.path == "shared.txt" && c.kind.starts_with("commit-surfaced-foreign")),
         "the publish ack carries no conflict record for the path the agent won: {:?}",
         ack.report.conflicts
     );
@@ -8389,22 +8779,20 @@ async fn a_same_size_rewrite_within_the_scan_second_is_still_published() {
     // THE OTHER ARM SHUT: the untouched file is not re-uploaded.
     assert!(!r.uploaded.contains(&"other.txt".to_string()), "nanosecond compare re-uploads everything");
     let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-    let (_, body) = store.get_whole(&a.cfg.file_key("status.json"), Some(&m.entries["status.json"].etag)).await.unwrap();
+    let (_, body) = store.get_whole(&m.entries["status.json"].key, Some(&m.entries["status.json"].etag)).await.unwrap();
     assert_eq!(&body[..], br#"{"ok":2}"#);
 }
 
-/// inbox-5. An upload whose base object is gone (a bucket-level delete,
-/// a peer's GC, or our own GC after a crash between the CAS and the
-/// baseline rewrite) propagated as the barrier's error — every barrier,
-/// forever, and every publish touch consumed and never acked. A vanished
-/// base is a fresh create.
-///
-/// The store's ANSWER to If-Match on a missing key differs: S3 says 404
-/// NoSuchKey, Ozone says 412. The first fix handled only the 412, because
-/// the double only gave the 412 — and the drill's host leg H2 on real S3
-/// wedged a writer on the 404 (finding 11). So every arm runs against
-/// both answers, and against both upload paths (whole PUT, compose).
-async fn vanished_base_recreates(answer_412: bool, compose: bool) {
+/// Retired class 1 (inbox-5, finding 11 / L-17, drill host leg H2): an
+/// upload whose base object a peer's collector had taken. Under the slot
+/// the PUT named that base with If-Match; S3 answered 404 NoSuchKey and
+/// Ozone 412, each answer needed its own recovery arm, and a writer whose
+/// edited path a peer deleted failed every barrier until both existed.
+/// Under handles (design 2026-09-19, R1) an upload names NO base: it lands
+/// at a fresh handle whatever became of its predecessor — through the
+/// whole-PUT arm and the compose arm alike, on a store that answers a
+/// missing key either way.
+async fn a_collected_predecessor_costs_the_upload_nothing(answer_412: bool, compose: bool) {
     let store = if answer_412 {
         Arc::new(MemoryStore::new().with_if_match_missing_as_412())
     } else {
@@ -8420,49 +8808,35 @@ async fn vanished_base_recreates(answer_412: bool, compose: bool) {
     write(dir.path(), "x.txt", "v1 body");
     a.run_barrier().await.unwrap();
 
-    store.delete(&a.cfg.file_key("x.txt")).await.unwrap();
-    // The control: the store really gives the answer this arm is about.
-    let probe = store
-        .put_whole(
-            &a.cfg.file_key("x.txt"),
-            Bytes::from_static(b"probe"),
-            &PutCondition::IfMatch("\"gone\"".into()),
-            &GenerationStamps { generation: 0, epoch: 0, flush_uuid: "probe".into(), boundary_source: None, posix: None },
-            crc64_nvme(b"probe"),
-        )
-        .await
-        .expect_err("If-Match on a missing key must fail");
-    assert_eq!(
-        matches!(probe, flint_store::StoreError::PreconditionFailed(_)),
-        answer_412,
-        "fixture: the double's answer is not the one this arm tests: {probe:?}"
-    );
+    // A peer's commit retired v1 and its collector took the handle.
+    let v1 = cited_key(&store, &a.cfg, "x.txt").await;
+    store.delete(&v1).await.unwrap();
+    assert!(handles_for(&store, &a.cfg, "x.txt").await.is_empty(), "fixture: the predecessor is gone");
     write(dir.path(), "x.txt", "v2, longer than before");
-    let r = a.run_barrier().await.expect("a vanished base object failed the whole barrier");
+    let r = a.run_barrier().await.expect("a collected predecessor failed the whole barrier");
     assert!(r.uploaded.contains(&"x.txt".to_string()), "the edit was not published: {r:?}");
-    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-    let (_, body) = store.get_whole(&a.cfg.file_key("x.txt"), Some(&m.entries["x.txt"].etag)).await.unwrap();
-    assert_eq!(&body[..], b"v2, longer than before");
+    assert_eq!(cited_bytes(&store, &a.cfg, "x.txt").await.as_deref(), Some(&b"v2, longer than before"[..]));
+    // ANTI-VACUITY: the upload went to a handle of its own and named no
+    // base — nothing parked, nothing deferred, no recovery arm ran.
+    let cited = cited_key(&store, &a.cfg, "x.txt").await;
+    assert_ne!(cited, v1);
+    assert!(a.cfg.handle_parts(&cited).is_some(), "not a handle: {cited}");
+    assert!(r.parked.is_empty() && r.deferred.is_empty(), "{r:?}");
 }
 
 #[tokio::test]
-async fn a_vanished_base_recreates_on_s3s_404() {
-    vanished_base_recreates(false, false).await;
+async fn a_collected_predecessor_costs_the_upload_nothing_on_s3s_404() {
+    a_collected_predecessor_costs_the_upload_nothing(false, false).await;
 }
 
 #[tokio::test]
-async fn a_vanished_base_recreates_on_ozones_412() {
-    vanished_base_recreates(true, false).await;
+async fn a_collected_predecessor_costs_the_upload_nothing_on_ozones_412() {
+    a_collected_predecessor_costs_the_upload_nothing(true, false).await;
 }
 
 #[tokio::test]
-async fn a_vanished_base_recreates_through_compose_on_s3s_404() {
-    vanished_base_recreates(false, true).await;
-}
-
-#[tokio::test]
-async fn a_vanished_base_recreates_through_compose_on_ozones_412() {
-    vanished_base_recreates(true, true).await;
+async fn a_collected_predecessor_costs_the_upload_nothing_through_compose() {
+    a_collected_predecessor_costs_the_upload_nothing(false, true).await;
 }
 
 /// inbox-8. Containment refused `.flint/` and nothing else: a citation
@@ -8535,7 +8909,7 @@ type Hook = Box<dyn Fn() + Send + Sync>;
 /// scan and the upload (the inbox window-open PUT), inside a consume's
 /// fetch, at a torn compose or acquire response, at a failed preserve.
 #[derive(Default)]
-struct Hooks {
+pub(super) struct Hooks {
     /// Run ONCE, before the first `put_whole` whose key ends with the suffix.
     before_put: std::sync::Mutex<Option<(String, Hook)>>,
     /// Run ONCE, after the first `put_whole` whose key ends with the suffix
@@ -8552,6 +8926,12 @@ struct Hooks {
     /// and before the answer is returned — the moment an upload's 412
     /// arm decides to adopt what it saw.
     after_head: std::sync::Mutex<Option<(String, Hook)>>,
+    /// Run ONCE, BEFORE `compose_generation` delegates for a key ending
+    /// with the suffix: the window between `upload_one`'s one safe open
+    /// (`open_beneath_nofollow`, which follows no link at any depth) and
+    /// the store's own read of the local file. Review 2026-09-18 H5's
+    /// residual lives in exactly this gap.
+    before_compose: std::sync::Mutex<Option<(String, Hook)>>,
     /// `compose_generation` delegates (the object LANDS) and then reports a
     /// torn response, once.
     compose_err_once: std::sync::atomic::AtomicBool,
@@ -8570,16 +8950,23 @@ struct Hooks {
     /// For this many `epoch_handoff` calls, answer S3's 409
     /// ConditionalRequestConflict without landing.
     handoff_conflicts: std::sync::atomic::AtomicU32,
+    /// For this many `put_whole` calls on a key ending with the suffix,
+    /// answer S3's 409 ConditionalRequestConflict without landing — what
+    /// S3 says to a conditional write racing another on the same key.
+    put_conflicts: std::sync::Mutex<Option<(String, u32)>>,
 }
 
-struct Hooked(Arc<MemoryStore>, Hooks);
+pub(super) struct Hooked(pub(super) Arc<MemoryStore>, pub(super) Hooks);
 
 impl Hooked {
     fn before_put(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {
         *self.1.before_put.lock().unwrap() = Some((key.to_string(), Box::new(f)));
     }
-    fn after_put(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {
+    pub(super) fn after_put(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {
         *self.1.after_put.lock().unwrap() = Some((key.to_string(), Box::new(f)));
+    }
+    fn before_compose(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {
+        *self.1.before_compose.lock().unwrap() = Some((key.to_string(), Box::new(f)));
     }
     fn before_get_return(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {
         *self.1.before_get_return.lock().unwrap() = Some((key.to_string(), Box::new(f)));
@@ -8592,16 +8979,26 @@ impl Hooked {
     }
 }
 
+/// A hook armed on `<prefix>/files/<path>` fires for that key AND for
+/// any HANDLE of the path (`<prefix>/files/<path>@<flush>`): a fixture
+/// names the path, and the flush a barrier mints is nobody's to predict.
+fn hook_matches(key: &str, suffix: &str) -> bool {
+    if key.ends_with(suffix) {
+        return true;
+    }
+    key.rsplit_once('@').map(|(path, _)| path.ends_with(suffix)).unwrap_or(false)
+}
+
 fn take_hook(slot: &std::sync::Mutex<Option<(String, Hook)>>, key: &str) -> Option<Hook> {
     let mut g = slot.lock().unwrap();
-    if g.as_ref().map(|(suf, _)| key.ends_with(suf.as_str())).unwrap_or(false) {
+    if g.as_ref().map(|(suf, _)| hook_matches(key, suf)).unwrap_or(false) {
         g.take().map(|(_, h)| h)
     } else {
         None
     }
 }
 
-fn hooked_syncer(store: &Arc<Hooked>, root: &std::path::Path) -> Syncer {
+pub(super) fn hooked_syncer(store: &Arc<Hooked>, root: &std::path::Path) -> Syncer {
     let cfg = cfg_for(root);
     Syncer {
         store: store.clone() as Arc<dyn ObjectStore>,
@@ -8644,6 +9041,17 @@ impl ObjectStore for Hooked {
                 return Err(flint_store::StoreError::Other(format!("injected: put refused for {key}")));
             }
         }
+        {
+            let mut g = self.1.put_conflicts.lock().unwrap();
+            if let Some((suffix, n)) = g.as_mut() {
+                if *n > 0 && key.ends_with(suffix.as_str()) {
+                    *n -= 1;
+                    return Err(flint_store::StoreError::Conflict(format!(
+                        "injected: ConditionalRequestConflict on {key}"
+                    )));
+                }
+            }
+        }
         let r = self.0.put_whole(key, body, cond, stamps, crc).await;
         if r.is_ok() {
             if let Some(h) = take_hook(&self.1.after_put, key) {
@@ -8656,6 +9064,9 @@ impl ObjectStore for Hooked {
         &self,
         spec: &flint_store::ComposeSpec<'_>,
     ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        if let Some(h) = take_hook(&self.1.before_compose, spec.key) {
+            h();
+        }
         let r = self.0.compose_generation(spec).await;
         if self.1.compose_err_once.swap(false, std::sync::atomic::Ordering::SeqCst) {
             return Err(flint_store::StoreError::Other("injected: torn compose response".into()));
@@ -8709,6 +9120,16 @@ impl ObjectStore for Hooked {
             h();
         }
         self.0.delete_if_match(key, etag).await
+    }
+    /// The handles collector's batch: the before-delete hook fires for
+    /// the first key of the batch it matches, before anything is deleted.
+    async fn delete_many(&self, keys: &[String]) -> flint_store::StoreResult<flint_store::DeleteManyReport> {
+        for key in keys {
+            if let Some(h) = take_hook(&self.1.before_delete, key) {
+                h();
+            }
+        }
+        self.0.delete_many(keys).await
     }
     async fn head_version(
         &self,
@@ -8843,7 +9264,7 @@ async fn the_manifest_cites_the_uploaded_length_not_the_scanned_one() {
     });
     a.run_barrier().await.unwrap();
 
-    let head = inner.head(&a.cfg.file_key("ckpt.bin")).await.unwrap();
+    let head = inner.head(&cited_key(&inner, &a.cfg, "ckpt.bin").await).await.unwrap();
     assert_eq!(head.size, 6 << 20, "fixture: the upload did not carry the grown file");
     let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
     assert_eq!(
@@ -8862,42 +9283,6 @@ async fn the_manifest_cites_the_uploaded_length_not_the_scanned_one() {
     assert_eq!(std::fs::metadata(dir_b.path().join("ckpt.bin")).unwrap().len(), 6 << 20);
 }
 
-/// atomicity-2. The compose path's 412 recognizer compared only the
-/// CURRENT flush uuid; the whole-object path also consults the crash
-/// journal (`prior_uuids`). A > whole_put_max file whose compose landed
-/// but whose response was torn, then edited, 412'd at the next barrier
-/// against its own earlier version and was parked as "foreign" — at
-/// every barrier, forever.
-#[tokio::test]
-async fn a_crashed_compose_is_adopted_after_an_edit_not_parked_forever() {
-    let inner = Arc::new(MemoryStore::new());
-    let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
-    let dir = tempfile::tempdir().unwrap();
-    let mut a = hooked_syncer(&hooked, dir.path());
-    a.cfg.whole_put_max = 1 << 20;
-    assert!(claim_until_held(&mut a, 3).await);
-    a.checkout().await.unwrap();
-    let path = dir.path().join("big.bin");
-    std::fs::write(&path, vec![1u8; 3 << 20]).unwrap();
-
-    hooked.1.compose_err_once.store(true, std::sync::atomic::Ordering::SeqCst);
-    a.run_barrier().await.expect_err("fixture: the torn compose did not fail the barrier");
-    inner.head(&a.cfg.file_key("big.bin")).await.expect("fixture: the compose did not land");
-
-    // The agent edits; the next barrier must publish, not park.
-    {
-        use std::io::Write;
-        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&vec![2u8; 1 << 20]).unwrap();
-    }
-    let r = a.run_barrier().await.unwrap();
-    assert!(r.parked.is_empty(), "the crashed compose parked the path: {:?}", r.parked);
-    assert!(r.uploaded.contains(&"big.bin".to_string()), "not published: {r:?}");
-    let head = inner.head(&a.cfg.file_key("big.bin")).await.unwrap();
-    assert_eq!(head.size, 4 << 20, "the bucket holds the pre-edit bytes");
-    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-    assert_eq!(m.entries["big.bin"].size, 4 << 20);
-}
-
 /// atomicity-3 / inbox-2. The consume stat'd the path clean, fetched the
 /// foreign bytes over the network, and renamed them over the path
 /// without looking again. An agent write inside the fetch was gone, with
@@ -8914,6 +9299,7 @@ async fn a_consume_never_overwrites_a_write_that_landed_during_its_fetch() {
     a.run_barrier().await.unwrap();
 
     hitl_write(&inner, &a.cfg, "shared.txt", "UI", "ui").await.unwrap();
+    // P2: the save is committed; the next consume owes it and fetches it.
     let late = dir.path().join("shared.txt");
     hooked.before_get_return(&a.cfg.file_key("shared.txt"), move || {
         std::fs::write(&late, "AGENT-LATE, a different length").unwrap();
@@ -8925,9 +9311,11 @@ async fn a_consume_never_overwrites_a_write_that_landed_during_its_fetch() {
         Some("AGENT-LATE, a different length"),
         "the agent's write was overwritten by a consume that checked the path before its fetch"
     );
+    // The consume stepped aside; the same barrier publishes the agent's
+    // version over the UI's, which R7 preserves and names.
     let recs = a.state.load_conflicts().unwrap();
     assert!(
-        recs.iter().any(|c| c.path == "shared.txt" && c.kind == "consume-dirty" && c.preserved_key.is_some()),
+        recs.iter().any(|c| c.path == "shared.txt" && c.kind.starts_with("commit-surfaced-foreign") && c.preserved_key.is_some()),
         "no record names the foreign version that lost: {recs:?}"
     );
 }
@@ -9014,125 +9402,6 @@ async fn a_lost_acquire_response_still_rotates() {
     );
 }
 
-/// inbox-1. A 412 against a version this syncer did not write "parked"
-/// the path: no un-park existed, every later ack said `ok` with
-/// `parked: n`, and the agent's file stayed unpublished for the life of
-/// the workspace. The contract's rule for a foreign write to a modified
-/// path is "your version wins, the foreign bytes are preserved" — the
-/// consume-dirty rule — and a park is the same case met at upload time.
-#[tokio::test]
-async fn a_parked_path_is_preserved_and_published_over_not_abandoned() {
-    let store = Arc::new(MemoryStore::new());
-    let dir = tempfile::tempdir().unwrap();
-    let mut a = syncer(&store, dir.path()).await;
-    assert!(claim_until_held(&mut a, 3).await);
-    a.checkout().await.unwrap();
-    write(dir.path(), "dirty.txt", "published v1");
-    a.run_barrier().await.unwrap();
-
-    // A sibling installs a new generation of the path, with no inbox entry.
-    let loaded = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
-    let mut theirs = loaded.manifest.clone();
-    theirs.seq += 1;
-    let key = a.cfg.file_key("dirty.txt");
-    let body = Bytes::from("foreign bytes".to_string());
-    let crc = crc64_nvme(&body);
-    let cur = store.head(&key).await.unwrap();
-    let meta = store
-        .put_whole(
-            &key,
-            body,
-            &PutCondition::IfMatch(cur.etag),
-            &GenerationStamps { generation: 2, epoch: 0, flush_uuid: "sibling".into(), boundary_source: None, posix: None },
-            crc,
-        )
-        .await
-        .unwrap();
-    let foreign_etag = meta.etag.clone();
-    let e = theirs.entries.get_mut("dirty.txt").unwrap();
-    e.etag = meta.etag.clone();
-    e.crc64_b64 = meta.crc64_b64.clone().unwrap();
-    e.size = meta.size;
-    e.generation = 2;
-    manifest::cas_write(store.as_ref(), &a.cfg, &theirs, Some(&loaded.handle()), 0, "sibling").await.unwrap();
-
-    // The agent's unpublished edit, then a boundary.
-    write(dir.path(), "dirty.txt", "the agent's own unpublished work, longer");
-    let r = a.run_barrier().await.unwrap();
-    assert!(r.parked.is_empty(), "the path was parked: {:?}", r.parked);
-    assert!(r.uploaded.contains(&"dirty.txt".to_string()), "the agent's version was not published: {r:?}");
-    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-    let (_, got) = store.get_whole(&key, Some(&m.entries["dirty.txt"].etag)).await.unwrap();
-    assert_eq!(&got[..], b"the agent's own unpublished work, longer", "the boundary does not carry the agent's bytes");
-    let rec = a
-        .state
-        .load_conflicts()
-        .unwrap()
-        .into_iter()
-        .find(|c| c.path == "dirty.txt" && c.kind == "upload-412-preserved")
-        .expect("no record names the foreign version that was superseded");
-    assert_eq!(rec.foreign_etag, foreign_etag);
-    let preserved = rec.preserved_key.expect("the foreign bytes were not preserved");
-    let (_, kept) = store.get_whole(&preserved, None).await.unwrap();
-    assert_eq!(&kept[..], b"foreign bytes", "the preserved copy is not the foreign version");
-}
-
-/// inbox-1, the drain half. When a park DOES stand (the preserve failed,
-/// so the foreign version could not be kept), the boundary is not the
-/// coherent point the agent declared: the ack says so (`partial`, the
-/// path in `report.dropped`), and the drain does not attest a tree it
-/// did not publish — the node keeps it.
-#[tokio::test]
-async fn a_boundary_with_a_standing_park_is_partial_and_the_drain_does_not_attest_it() {
-    let inner = Arc::new(MemoryStore::new());
-    let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
-    let dir = tempfile::tempdir().unwrap();
-    let mut a = hooked_syncer(&hooked, dir.path());
-    a.cfg.sentinel_min_interval_secs = 0;
-    assert!(claim_until_held(&mut a, 3).await);
-    a.checkout().await.unwrap();
-    let posture = a.sentinel_preflight().unwrap();
-    a.write_capabilities(&posture).unwrap();
-    write(dir.path(), "dirty.txt", "published v1");
-    a.run_barrier().await.unwrap();
-
-    // A foreign current version lands with no inbox entry (a straggler's
-    // PUT, or a gateway write whose inbox append the window refused).
-    let key = a.cfg.file_key("dirty.txt");
-    let body = Bytes::from("foreign bytes".to_string());
-    let crc = crc64_nvme(&body);
-    let cur = inner.head(&key).await.unwrap();
-    inner
-        .put_whole(
-            &key,
-            body,
-            &PutCondition::IfMatch(cur.etag),
-            &GenerationStamps { generation: 2, epoch: 0, flush_uuid: "straggler".into(), boundary_source: None, posix: None },
-            crc,
-        )
-        .await
-        .unwrap();
-    write(dir.path(), "dirty.txt", "the agent's own unpublished work, longer");
-    *hooked.1.put_fail_containing.lock().unwrap() = Some("/conflicts/".into());
-
-    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"p1"}"#);
-    a.sentinel_tick().await.unwrap();
-    let ack = a.read_ack(Verb::Publish).expect("no ack");
-    assert_eq!(ack.status, "partial", "a boundary that does not carry the agent's file acked ok: {ack:?}");
-    assert_eq!(ack.report.dropped, vec!["dirty.txt".to_string()]);
-    assert_eq!(ack.report.parked, 1);
-
-    // The drain at SIGTERM: the same park stands; nothing is attested.
-    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"p2"}"#);
-    assert!(a.consume_sentinel(Verb::Publish).unwrap());
-    let drained = a.drain().await;
-    assert!(drained.is_err(), "the drain attested a boundary with a standing park: {drained:?}");
-    assert!(
-        !a.cfg.state_dir().join(super::state::DRAINED).exists(),
-        "drained.json written: the node will remove a tree whose only copy of dirty.txt is on it"
-    );
-}
-
 // ── the per-barrier lease (design 2026-09-13 §4): the falsifiers L1–L8
 // in their local form, each with the control that makes it non-vacuous ──
 
@@ -9168,9 +9437,9 @@ async fn two_writers_publish_without_waiting_for_each_other() {
     assert!(a.lease.is_none() && b.lease.is_none());
 }
 
-/// L3 — disjoint edits cross: what B published reaches A's tree at A's
-/// next consume, and vice versa, with nothing but the ordinary
-/// merge → inbox → consume path (`report.foreign_queued` names it).
+/// L3 — disjoint edits cross: what A published reaches B's tree at B's
+/// next consume, and vice versa — derived from the document (P1-lite), in
+/// the barrier that also publishes the writer's own edit.
 #[tokio::test]
 async fn disjoint_edits_cross_at_the_next_consume() {
     let store = Arc::new(MemoryStore::new());
@@ -9184,15 +9453,11 @@ async fn disjoint_edits_cross_at_the_next_consume() {
     write(dir_b.path(), "b/one.txt", "from B");
     a.run_barrier().await.unwrap();
     let rb = b.run_barrier().await.unwrap();
-    assert_eq!(rb.foreign_queued, 1, "B's merge did not preserve A's entry as foreign");
-    assert!(read(dir_b.path(), "a/one.txt").is_none(), "the merge alone must not touch B's tree");
-    let rb2 = b.run_barrier().await.unwrap();
-    assert_eq!(rb2.consumed, 1, "B's next consume did not integrate A's file");
+    assert_eq!(rb.consumed, 1, "B's consume did not integrate A's file");
     assert_eq!(read(dir_b.path(), "a/one.txt").as_deref(), Some("from A"));
+    assert!(rb.uploaded.contains(&"b/one.txt".to_string()), "B's own edit did not publish: {rb:?}");
     let ra2 = a.run_barrier().await.unwrap();
-    assert_eq!(ra2.foreign_queued, 1);
-    let ra3 = a.run_barrier().await.unwrap();
-    assert_eq!(ra3.consumed, 1);
+    assert_eq!(ra2.consumed, 1, "A's consume did not integrate B's file");
     assert_eq!(read(dir_a.path(), "b/one.txt").as_deref(), Some("from B"));
 }
 
@@ -9219,16 +9484,19 @@ async fn a_same_path_edit_is_preserved_never_lost() {
     a.run_barrier().await.unwrap();
     let rb = b.run_barrier().await.unwrap();
     assert!(rb.parked.is_empty(), "B's upload parked instead of preserving: {rb:?}");
+    assert_eq!(rb.surfaced, vec!["x.txt".to_string()], "B's commit did not surface what it published over: {rb:?}");
     let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
     let cited = &m.entries["x.txt"];
     let (_, body) = store.get_whole(&cited.key, Some(&cited.etag)).await.unwrap();
     assert_eq!(&body[..], b"B's edit, longer", "the later commit is current");
+    // The record is written at the COMMIT under handles (R7): the slot's
+    // 412 met the same version at the PUT.
     let rec = b
         .state
         .load_conflicts()
         .unwrap()
         .into_iter()
-        .find(|c| c.path == "x.txt" && c.kind.starts_with("upload-412-preserved"))
+        .find(|c| c.path == "x.txt" && c.kind.starts_with("commit-surfaced-foreign"))
         .expect("B wrote no record of the version it superseded");
     let preserved = rec.preserved_key.expect("the record names no preserved key");
     let (_, kept) = store.get_whole(&preserved, None).await.unwrap();
@@ -9543,9 +9811,9 @@ async fn a_pull_only_boundary_takes_no_fence_and_writes_nothing() {
         ops.keys().filter(|k| !matches!(**k, "get_whole" | "get_range" | "head" | "list")).collect();
     assert!(writes.is_empty(), "a pull-only boundary wrote to the bucket: {ops:?}");
     assert_eq!(pulled.seq, Some(seq_a), "{pulled:?}");
-    let queued = b.state.load_foreign_queue().unwrap();
-    assert!(queued.iter().any(|c| c.path == "x.txt" && c.etag.is_some()), "A's edit was not queued: {queued:?}");
-    assert!(queued.iter().any(|c| c.path == "gone.txt" && c.etag.is_none()), "A's delete was not queued: {queued:?}");
+    // P1-lite: the boundary's consume took A's edit and A's delete at once.
+    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("A's v2"), "A's edit was not taken");
+    assert_eq!(read(dir_b.path(), "gone.txt"), None, "A's delete was not taken");
 
     // It converges exactly as the fenced path did, and installs nothing.
     b.floor_tick().await.unwrap();
@@ -9622,37 +9890,6 @@ async fn a_pull_only_boundary_inside_a_peers_commit_section_converges() {
     assert_eq!(t.observed_seq, t.integrated_seq, "{t:?}");
 }
 
-/// The wait is bounded: a holder that never hands the cell on turns
-/// into a FAILED barrier at the deadline, retried at the next floor,
-/// never a hang — and its uploads stand, so the retry adopts them by
-/// flush_uuid instead of re-sending the bytes.
-#[tokio::test]
-async fn a_claim_that_reaches_the_deadline_fails_the_barrier_and_the_retry_adopts_the_uploads() {
-    let store = Arc::new(MemoryStore::new());
-    let dir_a = tempfile::tempdir().unwrap();
-    let dir_b = tempfile::tempdir().unwrap();
-    let mut a = syncer(&store, dir_a.path()).await;
-    let mut b = syncer(&store, dir_b.path()).await;
-    b.cfg.claim_deadline_secs = 0;
-    a.checkout().await.unwrap();
-    b.checkout().await.unwrap();
-    assert!(claim_until_held(&mut a, 1).await); // A holds and keeps holding
-    write(dir_b.path(), "b.txt", "B's bytes");
-    let err = b.run_barrier().await.expect_err("the wait must give up at the deadline");
-    assert!(err.to_string().contains("publish fence"), "{err}");
-    assert!(b.lease.is_none());
-    // The bytes are already in the bucket, uncited.
-    let landed = store.head(&b.cfg.file_key("b.txt")).await.expect("the upload did not land before the claim");
-    assert!(manifest::load(store.as_ref(), &b.cfg).await.unwrap().is_none(), "a manifest was installed without the fence");
-    // A hands the cell on; B's retry adopts its own earlier PUT (a 412
-    // on the create, own flush_uuid) and cites it without re-sending.
-    lease::release(&mut a).await.unwrap();
-    let r = b.run_barrier().await.expect("the retry");
-    assert_eq!(r.uploaded, vec!["b.txt"]);
-    let m = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
-    assert_eq!(m.entries["b.txt"].etag, landed.etag, "the retry re-sent the bytes instead of citing its own earlier PUT");
-}
-
 /// A restarted container that finds the cell HELD by its own pod
 /// releases it at startup, so the other writers do not wait out a
 /// deposal for a holder that holds nothing in memory.
@@ -9711,321 +9948,11 @@ async fn assert_every_citation_resolves(store: &Arc<MemoryStore>, cfg: &LeanConf
     }
 }
 
-/// Finding 1 (`LeanBarrierLeaseGCUnconditional`): the GC was a HEAD then
-/// an UNCONDITIONAL delete. A peer's upload of the same path landing
-/// between the two was deleted, and the peer's commit then cited it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_peer_upload_between_the_gc_head_and_its_delete_is_not_deleted() {
-    let inner = Arc::new(MemoryStore::new());
-    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
-    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let mut a = hooked_syncer(&ha, dir_a.path());
-    let mut b = syncer(&inner, dir_b.path()).await;
-    a.checkout().await.unwrap();
-    write(dir_a.path(), "x.txt", "seed");
-    a.run_barrier().await.unwrap();
-    b.checkout().await.unwrap();
-    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("seed"));
-
-    // A deletes x.txt (the two-scan rule withholds the first absence);
-    // B edits it.
-    std::fs::remove_file(dir_a.path().join("x.txt")).unwrap();
-    let first = a.run_barrier().await.unwrap();
-    assert!(first.deleted.is_empty(), "fixture: the first absence was not withheld");
-    write(dir_b.path(), "x.txt", "B's edit, longer");
-    backdate_baseline(&b, "x.txt");
-
-    let key = a.cfg.file_key("x.txt");
-    let seed_etag = inner.head(&key).await.unwrap().etag;
-    let (parked_tx, parked_rx) = std::sync::mpsc::channel::<()>();
-    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
-    let go_rx = std::sync::Mutex::new(go_rx);
-    let parked_tx = std::sync::Mutex::new(parked_tx);
-    // A's GC has HEADed x.txt at the etag it recognizes and not yet sent
-    // its delete: park it there until B's upload has landed.
-    ha.before_delete(&key, move || {
-        parked_tx.lock().unwrap().send(()).unwrap();
-        tokio::task::block_in_place(|| {
-            go_rx.lock().unwrap().recv_timeout(std::time::Duration::from_secs(20)).expect("never released")
-        });
-    });
-    let a_task = barrier_on_thread(a);
-    tokio::task::spawn_blocking(move || {
-        parked_rx.recv_timeout(std::time::Duration::from_secs(20)).expect("A never reached its GC delete")
-    })
-    .await
-    .unwrap();
-    // B's barrier: its upload holds no lease and lands now; its claim
-    // then queues behind A.
-    let b_task = barrier_on_thread(b);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    loop {
-        if inner.head(&key).await.map(|m| m.etag != seed_etag).unwrap_or(false) {
-            break;
-        }
-        assert!(std::time::Instant::now() < deadline, "B's upload never landed");
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
-    go_tx.send(()).unwrap();
-    let ((a, ra), (b, rb)) = tokio::task::spawn_blocking(move || {
-        (a_task.join().expect("A's thread"), b_task.join().expect("B's thread"))
-    })
-    .await
-    .unwrap();
-    ra.expect("A's barrier");
-    rb.expect("B's barrier");
-
-    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-    let cited = m.entries.get("x.txt").expect("B's edit is not cited: a modify must beat the delete");
-    let (_, body) = inner
-        .get_whole(&cited.key, Some(&cited.etag))
-        .await
-        .expect("the manifest cites B's edit, and A's GC deleted the object under it");
-    assert_eq!(&body[..], b"B's edit, longer");
-    assert_every_citation_resolves(&inner, &b.cfg, "after both commits").await;
-}
-
-/// Finding 13 (live drill A3, `churn/p14.txt`): S3's ETag for a whole PUT
-/// is the MD5 of the bytes, so a peer's upload of IDENTICAL bytes carries
-/// the very etag a GC recognizes. A deletes x.txt; B rewrites it with the
-/// same bytes (a new inode, the content unchanged) and uploads, lease-free,
-/// before A's GC. A's GC deletes B's object by that etag, and B's commit
-/// then cites an object that is gone. Finding 1's test above cannot see
-/// it: B's edit there is DIFFERENT bytes, so the If-Match refuses.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_peer_upload_of_identical_bytes_before_the_gc_delete_is_not_deleted() {
-    let inner = Arc::new(MemoryStore::new());
-    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
-    let hb = Arc::new(Hooked(inner.clone(), Hooks::default()));
-    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let mut a = hooked_syncer(&ha, dir_a.path());
-    let mut b = hooked_syncer(&hb, dir_b.path());
-    a.checkout().await.unwrap();
-    write(dir_a.path(), "x.txt", "seed");
-    a.run_barrier().await.unwrap();
-    b.checkout().await.unwrap();
-    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("seed"));
-
-    // A deletes x.txt (the first absence is withheld); B rewrites it with
-    // the SAME bytes.
-    std::fs::remove_file(dir_a.path().join("x.txt")).unwrap();
-    let first = a.run_barrier().await.unwrap();
-    assert!(first.deleted.is_empty(), "fixture: the first absence was not withheld");
-    std::fs::remove_file(dir_b.path().join("x.txt")).unwrap();
-    write(dir_b.path(), "x.txt", "seed");
-    backdate_baseline(&b, "x.txt");
-
-    let key = a.cfg.file_key("x.txt");
-    let (parked_tx, parked_rx) = std::sync::mpsc::channel::<()>();
-    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
-    let (landed_tx, landed_rx) = std::sync::mpsc::channel::<()>();
-    let go_rx = std::sync::Mutex::new(go_rx);
-    let parked_tx = std::sync::Mutex::new(parked_tx);
-    let landed_tx = std::sync::Mutex::new(landed_tx);
-    // A's commit has uncited x.txt and its GC is about to delete it: park
-    // it there until B's upload of the same bytes has landed.
-    ha.before_delete(&key, move || {
-        parked_tx.lock().unwrap().send(()).unwrap();
-        tokio::task::block_in_place(|| {
-            go_rx.lock().unwrap().recv_timeout(std::time::Duration::from_secs(20)).expect("never released")
-        });
-    });
-    hb.after_put(&key, move || landed_tx.lock().unwrap().send(()).unwrap());
-    let a_task = barrier_on_thread(a);
-    tokio::task::spawn_blocking(move || {
-        parked_rx.recv_timeout(std::time::Duration::from_secs(20)).expect("A never reached its GC delete")
-    })
-    .await
-    .unwrap();
-    let b_task = barrier_on_thread(b);
-    tokio::task::spawn_blocking(move || {
-        landed_rx
-            .recv_timeout(std::time::Duration::from_secs(20))
-            .expect("fixture: B never uploaded its rewrite of x.txt")
-    })
-    .await
-    .unwrap();
-    assert_eq!(
-        inner.get_whole(&key, None).await.unwrap().1.as_ref(),
-        b"seed",
-        "fixture: B's upload is not the same bytes"
-    );
-    go_tx.send(()).unwrap();
-    let ((a, ra), (b, rb)) = tokio::task::spawn_blocking(move || {
-        (a_task.join().expect("A's thread"), b_task.join().expect("B's thread"))
-    })
-    .await
-    .unwrap();
-    ra.expect("A's barrier");
-    let rb = rb.expect("B's barrier");
-    let _ = a;
-    assert_every_citation_resolves(&inner, &b.cfg, "after both commits").await;
-
-    // B's rewrite is withheld, not lost: the path stays dirty and B's next
-    // barrier publishes it with a PUT of its own.
-    assert!(rb.parked.contains(&"x.txt".to_string()), "fixture: B's upload was not withheld: {rb:?}");
-    let mut b = b;
-    b.run_barrier().await.expect("B's retry");
-    assert_every_citation_resolves(&inner, &b.cfg, "after B's retry").await;
-    let m = manifest::load(inner.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
-    let cited = m.entries.get("x.txt").expect("B's rewrite never reached the manifest");
-    let (_, body) = inner.get_whole(&cited.key, Some(&cited.etag)).await.expect("B's retry cites nothing");
-    assert_eq!(&body[..], b"seed");
-}
-
-/// Finding 13's second route, found by the model (`LeanProbeUploadWithheld`)
-/// and never shown by the drill: B's upload of IDENTICAL bytes leaves the
-/// etag where it was, so A's upload of NEW bytes — If-Match that same etag
-/// — lands over it, and A commits. B's commit then merges its "modify" of
-/// the path over A's and cites a version the key no longer holds. No GC is
-/// involved and the object is not gone, so a presence check would pass it;
-/// the re-read compares etags.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_peer_put_over_an_identical_bytes_upload_is_not_cited_as_the_old_version() {
-    let inner = Arc::new(MemoryStore::new());
-    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
-    let hb = Arc::new(Hooked(inner.clone(), Hooks::default()));
-    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let mut a = hooked_syncer(&ha, dir_a.path());
-    let mut b = hooked_syncer(&hb, dir_b.path());
-    a.checkout().await.unwrap();
-    write(dir_a.path(), "x.txt", "seed");
-    a.run_barrier().await.unwrap();
-    b.checkout().await.unwrap();
-    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("seed"));
-
-    // B rewrites x.txt with the SAME bytes; A edits it.
-    std::fs::remove_file(dir_b.path().join("x.txt")).unwrap();
-    write(dir_b.path(), "x.txt", "seed");
-    backdate_baseline(&b, "x.txt");
-    write(dir_a.path(), "x.txt", "A's edit");
-    backdate_baseline(&a, "x.txt");
-
-    let key = a.cfg.file_key("x.txt");
-    let seed_etag = inner.head(&key).await.unwrap().etag;
-    // Park each writer the moment its PUT lands: B first, then A over it.
-    let (b_landed_tx, b_landed_rx) = std::sync::mpsc::channel::<()>();
-    let (b_go_tx, b_go_rx) = std::sync::mpsc::channel::<()>();
-    let (a_landed_tx, a_landed_rx) = std::sync::mpsc::channel::<()>();
-    let (a_go_tx, a_go_rx) = std::sync::mpsc::channel::<()>();
-    let (b_landed_tx, b_go_rx) = (std::sync::Mutex::new(b_landed_tx), std::sync::Mutex::new(b_go_rx));
-    let (a_landed_tx, a_go_rx) = (std::sync::Mutex::new(a_landed_tx), std::sync::Mutex::new(a_go_rx));
-    hb.after_put(&key, move || {
-        b_landed_tx.lock().unwrap().send(()).unwrap();
-        tokio::task::block_in_place(|| {
-            b_go_rx.lock().unwrap().recv_timeout(std::time::Duration::from_secs(20)).expect("B never released")
-        });
-    });
-    ha.after_put(&key, move || {
-        a_landed_tx.lock().unwrap().send(()).unwrap();
-        tokio::task::block_in_place(|| {
-            a_go_rx.lock().unwrap().recv_timeout(std::time::Duration::from_secs(20)).expect("A never released")
-        });
-    });
-    let b_task = barrier_on_thread(b);
-    tokio::task::spawn_blocking(move || {
-        b_landed_rx
-            .recv_timeout(std::time::Duration::from_secs(20))
-            .expect("fixture: B never uploaded its rewrite of x.txt")
-    })
-    .await
-    .unwrap();
-    assert_eq!(inner.head(&key).await.unwrap().etag, seed_etag, "fixture: B's upload is not the same bytes");
-    let a_task = barrier_on_thread(a);
-    tokio::task::spawn_blocking(move || {
-        a_landed_rx
-            .recv_timeout(std::time::Duration::from_secs(20))
-            .expect("fixture: A's If-Match on the seed etag did not land over B's upload")
-    })
-    .await
-    .unwrap();
-    assert_eq!(inner.get_whole(&key, None).await.unwrap().1.as_ref(), b"A's edit");
-
-    // A commits its edit while B is parked after its PUT, before its claim.
-    a_go_tx.send(()).unwrap();
-    let (a, ra) = tokio::task::spawn_blocking(move || a_task.join().expect("A's thread")).await.unwrap();
-    ra.expect("A's barrier");
-    assert_every_citation_resolves(&inner, &a.cfg, "after A's commit").await;
-
-    b_go_tx.send(()).unwrap();
-    let (b, rb) = tokio::task::spawn_blocking(move || b_task.join().expect("B's thread")).await.unwrap();
-    let rb = rb.expect("B's barrier");
-    assert_every_citation_resolves(&inner, &b.cfg, "after B's commit").await;
-    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-    let cited = m.entries.get("x.txt").expect("A's edit is not cited");
-    let (_, body) = inner.get_whole(&cited.key, Some(&cited.etag)).await.expect("the manifest cites nothing");
-    assert_eq!(&body[..], b"A's edit");
-    assert!(rb.parked.contains(&"x.txt".to_string()), "fixture: B's upload was not withheld: {rb:?}");
-}
-
-/// Finding 2 (`LeanBarrierLeaseAdoptBlind`): an upload whose 412 found
-/// the same bytes already at the key ADOPTED them — no PUT, no lease.
-/// Before the adopter claimed, the peer's commit uncited the path and its
-/// GC (recognizing that very etag) deleted the object; the adopter's
-/// merge then cited nothing.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_adopted_upload_deleted_by_the_peer_before_the_claim_is_not_cited() {
-    let inner = Arc::new(MemoryStore::new());
-    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
-    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let mut a = hooked_syncer(&ha, dir_a.path());
-    let mut b = syncer(&inner, dir_b.path()).await;
-    a.checkout().await.unwrap();
-    write(dir_a.path(), "x.txt", "seed");
-    a.run_barrier().await.unwrap();
-    b.checkout().await.unwrap();
-
-    // B publishes "same"; A — which has not integrated B's boundary —
-    // writes the SAME bytes, so its upload will 412 on the seed etag and
-    // adopt B's object on the CRC match.
-    write(dir_b.path(), "x.txt", "same");
-    backdate_baseline(&b, "x.txt");
-    b.run_barrier().await.unwrap();
-    write(dir_a.path(), "x.txt", "same");
-    backdate_baseline(&a, "x.txt");
-    // B deletes x.txt; the first absence is withheld.
-    std::fs::remove_file(dir_b.path().join("x.txt")).unwrap();
-    let first = b.run_barrier().await.unwrap();
-    assert!(first.deleted.is_empty(), "fixture: the first absence was not withheld");
-
-    // At the HEAD that licenses A's adopt, B's whole delete barrier runs:
-    // the cell is free (A is still uploading), B's CAS uncites x.txt and
-    // its GC deletes the object A is about to cite.
-    let key = a.cfg.file_key("x.txt");
-    let b_slot = std::sync::Mutex::new(Some(b));
-    let b_done: Arc<std::sync::Mutex<Option<Syncer>>> = Arc::new(std::sync::Mutex::new(None));
-    let b_done_in = b_done.clone();
-    ha.after_head(&key, move || {
-        let mut b = b_slot.lock().unwrap().take().expect("hook ran twice");
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let r = b.run_barrier().await.expect("B's delete barrier");
-                assert!(r.deleted.contains(&"x.txt".to_string()), "fixture: B did not delete x.txt: {r:?}");
-            })
-        });
-        *b_done_in.lock().unwrap() = Some(b);
-    });
-    let ra = a.run_barrier().await.expect("A's barrier");
-    let b = b_done.lock().unwrap().take().expect("fixture: the adopt's HEAD never ran");
-    assert!(inner.head(&key).await.is_err(), "fixture: B's GC did not delete the object");
-    assert_every_citation_resolves(&inner, &a.cfg, "after A's commit").await;
-    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-    assert!(!m.entries.contains_key("x.txt"), "A cited an object that is gone: {ra:?}");
-
-    // A's bytes are not lost: the path stays dirty and the next barrier
-    // publishes them for real.
-    let _ = b;
-    a.run_barrier().await.expect("A's retry");
-    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-    let cited = m.entries.get("x.txt").expect("A's edit never reached the manifest");
-    let (_, body) = inner.get_whole(&cited.key, Some(&cited.etag)).await.expect("A's retry cites nothing");
-    assert_eq!(&body[..], b"same");
-}
-
-/// A merge-preserved entry lives in the SHARED inbox, and every writer
-/// consumes the inbox. The writer whose merge queued it (B) and the
-/// writer whose change it carries (A) both see it; A's consume finds it
-/// already integrated and drops it. B must still end up with A's bytes.
+/// A merge-preserved entry once lived in the SHARED inbox, and the writer
+/// whose change it carried (A) found it integrated and dropped it before
+/// the writer that needed it (B) consumed it. Under P1-lite nothing is
+/// carried: B's consume derives A's change from the document. B must still
+/// end up with A's bytes, and the document must keep them.
 #[tokio::test]
 async fn a_peers_change_reaches_the_writer_whose_merge_queued_it_even_if_the_peer_consumes_first() {
     let store = Arc::new(MemoryStore::new());
@@ -10040,23 +9967,9 @@ async fn a_peers_change_reaches_the_writer_whose_merge_queued_it_even_if_the_pee
     write(dir_a.path(), "x.txt", "A's v2");
     backdate_baseline(&a, "x.txt");
     a.run_barrier().await.unwrap();
-    // B publishes an unrelated path: its merge preserves A's x.txt and
-    // queues it for B's next consume — in B's OWN queue, and nothing in
-    // the shared inbox for another writer's consume to drop.
+    // B publishes an unrelated path.
     write(dir_b.path(), "z.txt", "z");
     b.run_barrier().await.unwrap();
-    let queued = b.state.load_foreign_queue().unwrap();
-    assert!(
-        queued.iter().any(|c| c.path == "x.txt" && c.etag.is_some()),
-        "fixture: B's merge queued nothing for x.txt: {queued:?}"
-    );
-    let ib = super::inbox::load(store.as_ref(), &b.cfg).await.unwrap();
-    assert!(
-        !ib.doc.entries.iter().any(|e| e.path == "x.txt"),
-        "B's merge put its own queue in the shared inbox: {:?}",
-        ib.doc.entries
-    );
-    // A's barrier consumes the shared inbox first.
     a.run_barrier().await.unwrap();
     // B converges on A's bytes within a couple of barriers.
     b.run_barrier().await.unwrap();
@@ -10066,6 +9979,122 @@ async fn a_peers_change_reaches_the_writer_whose_merge_queued_it_even_if_the_pee
     let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
     let (_, body) = store.get_whole(&m.entries["x.txt"].key, Some(&m.entries["x.txt"].etag)).await.unwrap();
     assert_eq!(&body[..], b"A's v2", "the manifest reverted A's change");
+}
+
+/// H8 follow-up (2026-09-23), L-123: B's merge queued A's v2; A published
+/// v3; B's sync fetched v3; B's next consume still held the queued v2 and
+/// wrote it over v3 (fixed then by the sync's prune). Under P1-lite nothing
+/// is queued — the next consume derives against the CURRENT document — so
+/// the regress has no route; this keeps the scenario as its pin.
+#[tokio::test]
+async fn a_queued_peer_change_never_lands_over_a_newer_version_a_sync_fetched() {
+    queued_change_behind_a_sync(true).await;
+}
+
+/// The same with v2 collected, as A's collector normally leaves it: the
+/// consume must not report the superseded handle as lost bytes.
+#[tokio::test]
+async fn a_queued_peer_change_a_sync_overtook_is_not_reported_missing() {
+    queued_change_behind_a_sync(false).await;
+}
+
+/// Land a peer's publish of `path` between `sc`'s next consume and its
+/// merge — the one gap P1-lite leaves, where a merge sees a change the
+/// tree has not taken (`Baseline::behind`). Armed on the `before-scan`
+/// test window; the caller runs the barrier.
+/// `land_during_next_barrier`'s delete: another party's one-CAS delete of
+/// `path` (a UI delete commits exactly so under P2).
+pub(super) fn land_delete_during_next_barrier(store: &Arc<MemoryStore>, sc: &Syncer, path: &'static str) {
+    let (store, cfg) = (store.clone(), sc.cfg.clone());
+    super::barrier::CONSUME_WINDOW_HOOK.with(|h| {
+        *h.borrow_mut() = Some((
+            String::new(),
+            "before-scan",
+            Box::new(move || futures::executor::block_on(hitl_remove(&store, &cfg, path, "A"))),
+        ))
+    });
+}
+
+pub(super) fn land_during_next_barrier(store: &Arc<MemoryStore>, sc: &Syncer, path: &'static str, content: &'static str) {
+    let (store, cfg) = (store.clone(), sc.cfg.clone());
+    super::barrier::CONSUME_WINDOW_HOOK.with(|h| {
+        *h.borrow_mut() = Some((
+            String::new(),
+            "before-scan",
+            Box::new(move || {
+                futures::executor::block_on(peer_publish(&store, &cfg, path, content, "A"));
+            }),
+        ))
+    });
+}
+
+async fn queued_change_behind_a_sync(v2_still_at_its_handle: bool) {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "x.txt", "seed");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+
+    // A's v2 lands after B's consume and before B's merge: B's merge sees
+    // it, B's tree does not have it.
+    write(dir_b.path(), "z.txt", "z");
+    land_during_next_barrier(&store, &b, "x.txt", "A's v2");
+    b.run_barrier().await.unwrap();
+    assert!(super::barrier::CONSUME_WINDOW_HOOK.with(|h| h.borrow().is_none()), "fixture: the window never ran");
+    assert!(derive_pending(&b).await, "fixture: B's merge left nothing owed for x.txt");
+    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("seed"), "fixture: v2 already reached B's tree");
+    let v2 = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.entries["x.txt"].clone();
+    let v2_key = v2.key.clone();
+    let (_, v2_body) = store.get_whole(&v2_key, Some(&v2.etag)).await.unwrap();
+
+    write(dir_a.path(), "x.txt", "A's v3");
+    backdate_baseline(&a, "x.txt");
+    a.run_barrier().await.unwrap();
+    if v2_still_at_its_handle {
+        // A's collector has not run yet: v2's handle holds v2's bytes.
+        if store.head(&v2_key).await.is_err() {
+            let crc = crc64_nvme(&v2_body);
+            let stamps = GenerationStamps {
+                generation: 0,
+                epoch: 0,
+                flush_uuid: "a-before-its-collector".to_string(),
+                boundary_source: None,
+                posix: None,
+            };
+            store
+                .put_whole(&v2_key, v2_body.clone(), &PutCondition::Unconditional, &stamps, crc)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            store.head(&v2_key).await.unwrap().etag,
+            v2.etag.clone(),
+            "fixture: v2's handle does not attest v2"
+        );
+    }
+
+    b.sync().await.unwrap();
+    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("A's v3"), "fixture: B's sync did not fetch v3");
+    let conflicts_before = b.state.load_conflicts().unwrap().len();
+    b.run_barrier().await.unwrap();
+
+    assert_eq!(
+        read(dir_b.path(), "x.txt").as_deref(),
+        Some("A's v3"),
+        "B's consume wrote the queued v2 over the v3 its sync fetched"
+    );
+    b.run_barrier().await.unwrap();
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let (_, body) = store.get_whole(&m.entries["x.txt"].key, Some(&m.entries["x.txt"].etag)).await.unwrap();
+    assert_eq!(&body[..], b"A's v3", "the manifest reverted A's v3");
+    let new_conflicts: Vec<_> = b.state.load_conflicts().unwrap().into_iter().skip(conflicts_before).collect();
+    assert!(
+        new_conflicts.is_empty(),
+        "a queued change the sync overtook was surfaced as a conflict: {new_conflicts:?}"
+    );
 }
 
 /// The single-writer crash test above
@@ -10092,7 +10121,52 @@ async fn a_restart_between_the_cas_and_step_7_still_delivers_a_peers_delete() {
     restart_between_the_cas_and_step_7(true).await;
 }
 
+/// What happens between the restart and B's next barriers.
+#[derive(Clone, Copy, PartialEq)]
+enum AfterRestart {
+    Nothing,
+    /// A scoped sync of another path: the merge base at x.txt never moves,
+    /// so the change the journal carries is still owed.
+    ScopedSyncElsewhere,
+    /// A publishes v3 (v2's handle still at its key) and B's sync fetches it:
+    /// the journalled v2 is overtaken and must not land over v3.
+    PeerV3ThenSync,
+    /// The UI renames x.txt (A's v2, the change the journal carries) to
+    /// w.txt: B's next barrier declares the delete of x.txt and re-cites
+    /// v2's handle at w.txt, while the pointer still holds B's own install.
+    UiRenamesTheCarriedChange,
+}
+
+/// 2026-09-23: the journal's `installed_foreign` is re-queued by the next
+/// consume, so a sync in between must prune it as it prunes the queue.
+#[tokio::test]
+async fn a_change_the_journal_carries_past_a_restart_never_lands_over_a_newer_sync() {
+    restart_between_the_cas_and_step_7_then(false, AfterRestart::PeerV3ThenSync).await;
+}
+
+/// ...and a sync that never moved the path's base prunes nothing.
+#[tokio::test]
+async fn a_scoped_sync_elsewhere_after_a_restart_still_delivers_a_peers_change() {
+    restart_between_the_cas_and_step_7_then(false, AfterRestart::ScopedSyncElsewhere).await;
+}
+
+/// 2026-09-24, the simplification review's M5: after a restart between the
+/// CAS and step 7, `merge_onto` merges onto the document this workspace
+/// installed (`installed_etag`), but `void_stale_repairs` judged whether a
+/// declared delete APPLIES against the persisted merge base, which step 7
+/// never advanced. A rename of a path that install changed then read as
+/// "the source keeps the handle": the destination's repair was voided while
+/// the merge applied the source's delete, and the handle was cited nowhere.
+#[tokio::test]
+async fn a_ui_rename_after_a_restart_between_the_cas_and_step_7_keeps_the_file() {
+    restart_between_the_cas_and_step_7_then(false, AfterRestart::UiRenamesTheCarriedChange).await;
+}
+
 async fn restart_between_the_cas_and_step_7(peer_deletes: bool) {
+    restart_between_the_cas_and_step_7_then(peer_deletes, AfterRestart::Nothing).await;
+}
+
+async fn restart_between_the_cas_and_step_7_then(peer_deletes: bool, then: AfterRestart) {
     let inner = Arc::new(MemoryStore::new());
     let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
     let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -10107,17 +10181,13 @@ async fn restart_between_the_cas_and_step_7(peer_deletes: bool) {
     write(dir_b.path(), "tmp.txt", "B's scratch");
     b.run_barrier().await.unwrap();
 
-    // A's change, published before B's next merge.
+    // A's change lands after B's next consume and before its merge (the one
+    // gap P1-lite leaves): B's merge carries it, B's tree does not have it.
     if peer_deletes {
-        std::fs::remove_file(dir_a.path().join("x.txt")).unwrap();
-        a.declared_barrier().await.unwrap();
+        land_delete_during_next_barrier(&inner, &b, "x.txt");
     } else {
-        write(dir_a.path(), "x.txt", "A's v2");
-        backdate_baseline(&a, "x.txt");
-        a.run_barrier().await.unwrap();
+        land_during_next_barrier(&inner, &b, "x.txt", "A's v2");
     }
-    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-    assert_eq!(m.entries.contains_key("x.txt"), !peer_deletes, "fixture: A's change never published");
 
     // B's barrier: its merge carries A's change; its GC delete of tmp.txt
     // snapshots the files step 7 is about to rewrite.
@@ -10125,7 +10195,7 @@ async fn restart_between_the_cas_and_step_7(peer_deletes: bool) {
     let snap: Arc<std::sync::Mutex<Vec<(std::path::PathBuf, Option<Vec<u8>>)>>> = Default::default();
     let snap_in = snap.clone();
     hooked.before_delete(&b.cfg.file_key("tmp.txt"), move || {
-        *snap_in.lock().unwrap() = ["intent.json", "foreign-queue.json", "baseline.json"]
+        *snap_in.lock().unwrap() = ["intent.json", "baseline.json"]
             .iter()
             .map(|f| {
                 let p = state_dir.join(f);
@@ -10139,10 +10209,10 @@ async fn restart_between_the_cas_and_step_7(peer_deletes: bool) {
     b.declared_barrier().await.unwrap();
     let taken = std::mem::take(&mut *snap.lock().unwrap());
     assert!(!taken.is_empty(), "fixture: B's barrier never reached its GC delete");
-    assert!(
-        b.state.load_foreign_queue().unwrap().iter().any(|c| c.path == "x.txt" && c.etag.is_some() != peer_deletes),
-        "fixture: B's merge queued nothing for x.txt"
-    );
+    assert!(super::barrier::CONSUME_WINDOW_HOOK.with(|h| h.borrow().is_none()), "fixture: the window never ran");
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries.contains_key("x.txt"), !peer_deletes, "fixture: A's change never landed");
+    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("seed"), "fixture: A's change already reached B's tree");
     // The restart: step 7 never ran.
     for (p, bytes) in taken {
         match bytes {
@@ -10153,10 +10223,77 @@ async fn restart_between_the_cas_and_step_7(peer_deletes: bool) {
         }
     }
 
+    match then {
+        AfterRestart::Nothing => {}
+        AfterRestart::ScopedSyncElsewhere => {
+            b.sync_scoped(Some(vec!["keep.txt".into()])).await.unwrap();
+        }
+        AfterRestart::PeerV3ThenSync => {
+            let v2 = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.entries["x.txt"].clone();
+            let v2_key = v2.key.clone();
+            let (_, v2_body) = inner.get_whole(&v2_key, Some(&v2.etag)).await.unwrap();
+            write(dir_a.path(), "x.txt", "A's v3");
+            backdate_baseline(&a, "x.txt");
+            a.run_barrier().await.unwrap();
+            if inner.head(&v2_key).await.is_err() {
+                let crc = crc64_nvme(&v2_body);
+                let stamps = GenerationStamps {
+                    generation: 0,
+                    epoch: 0,
+                    flush_uuid: "a-before-its-collector".to_string(),
+                    boundary_source: None,
+                    posix: None,
+                };
+                inner.put_whole(&v2_key, v2_body, &PutCondition::Unconditional, &stamps, crc).await.unwrap();
+            }
+            b.sync().await.unwrap();
+            assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("A's v3"), "fixture: B's sync did not fetch v3");
+        }
+        AfterRestart::UiRenamesTheCarriedChange => {
+            let before = manifest::load(inner.as_ref(), &b.cfg).await.unwrap().unwrap();
+            let v2 = before.manifest.entries.get("x.txt").cloned().expect("fixture: x.txt is not cited");
+            assert_ne!(
+                b.state.load_baseline().unwrap().entries.get("x.txt").map(|e| &e.etag),
+                Some(&v2.etag),
+                "fixture: B's baseline already holds v2"
+            );
+            hitl_rename(&inner, &b.cfg, "x.txt", "w.txt", "dilip").await;
+            // The barrier that performs the rename: judged in the state it
+            // leaves, as the model's invariants are, not three barriers on,
+            // when the tree's pending copy has been uploaded again.
+            let r = b.run_barrier().await.unwrap();
+            let m = manifest::load(inner.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
+            assert!(!m.entries.contains_key("x.txt"), "fixture: the rename's source was not removed ({r:?})");
+            assert_eq!(
+                m.entries.get("w.txt").map(|e| e.key.as_str()),
+                Some(v2.key.as_str()),
+                "the acked rename's handle is cited at neither name ({r:?})"
+            );
+            assert!(inner.head(&v2.key).await.is_ok(), "the collector took the renamed file's handle ({r:?})");
+        }
+    }
+
     for _ in 0..3 {
         b.run_barrier().await.unwrap();
     }
-    if peer_deletes {
+    if then == AfterRestart::PeerV3ThenSync {
+        assert_eq!(
+            read(dir_b.path(), "x.txt").as_deref(),
+            Some("A's v3"),
+            "the change the journal carried past the restart landed over the v3 B's sync fetched"
+        );
+        let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+        let (_, body) = inner.get_whole(&m.entries["x.txt"].key, Some(&m.entries["x.txt"].etag)).await.unwrap();
+        assert_eq!(&body[..], b"A's v3", "the manifest reverted A's v3");
+    } else if then == AfterRestart::UiRenamesTheCarriedChange {
+        let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+        assert!(!m.entries.contains_key("x.txt"), "the rename's source is still cited");
+        let w = m.entries.get("w.txt").unwrap_or_else(|| panic!("the renamed file is cited nowhere: {:?}", m.entries.keys()));
+        let (_, body) = inner.get_whole(&w.key, Some(&w.etag)).await.unwrap();
+        assert_eq!(&body[..], b"A's v2", "the rename's destination cites the wrong bytes");
+        assert_eq!(read(dir_b.path(), "w.txt").as_deref(), Some("A's v2"), "the renamed file left B's tree");
+        assert_eq!(read(dir_b.path(), "x.txt"), None, "the rename's source stayed in B's tree");
+    } else if peer_deletes {
         assert_eq!(read(dir_b.path(), "x.txt"), None, "a restart between B's CAS and its step 7 kept A's deleted file in B's tree");
         let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
         assert!(!m.entries.contains_key("x.txt"), "B re-published the file A deleted");
@@ -10167,7 +10304,157 @@ async fn restart_between_the_cas_and_step_7(peer_deletes: bool) {
             "a restart between B's CAS and its step 7 lost A's change from B's tree for good"
         );
     }
-    assert!(b.state.load_intent().unwrap().installed_foreign.is_empty(), "the journal kept changes the queue took");
+    assert!(!derive_pending(&b).await, "B still owes a change after three barriers");
+}
+
+/// P1-lite has no journal, so a restart between a writer's CAS and its step
+/// 7 leaves its baseline behind a document it wrote itself. Its own upload
+/// must then CONVERGE: the tree's bytes are the document's, the baseline
+/// follows, and nothing is published again — no second generation of the
+/// same bytes, no record of its own version as a stranger's.
+#[tokio::test]
+async fn a_restart_after_the_cas_converges_on_its_own_upload_without_republishing() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "f.txt", "v1");
+    a.run_barrier().await.unwrap();
+
+    write(dir.path(), "f.txt", "v2 is longer");
+    backdate_baseline(&a, "f.txt");
+    let stale = a.state.load_baseline().unwrap();
+    a.run_barrier().await.unwrap();
+    let installed = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    // The restart: step 7 never ran.
+    a.state.save_baseline(&stale).unwrap();
+    let conflicts_before = a.state.load_conflicts().unwrap().len();
+
+    let r = a.run_barrier().await.unwrap();
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.seq, installed.seq, "the converged upload was published again: {r:?}");
+    assert_eq!(m.entries["f.txt"].key, installed.entries["f.txt"].key);
+    let new: Vec<_> = a.state.load_conflicts().unwrap().into_iter().skip(conflicts_before).collect();
+    assert!(new.is_empty(), "its own version was recorded as a stranger's: {new:?}");
+    assert_eq!(a.state.load_baseline().unwrap().entries["f.txt"].etag, installed.entries["f.txt"].etag);
+}
+
+/// A PULL-ONLY barrier (nothing to publish; here the agent's delete is only
+/// a first absence) that finds a peer's change the consume did not take —
+/// it landed after the consume — takes theirs as the document it is
+/// integrated with. It must mark the change OWED, or the next consume sees
+/// the pointer unmoved and never takes it.
+#[tokio::test]
+async fn a_pull_only_barrier_leaves_a_change_it_saw_owed() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut b = syncer(&store, dir.path()).await;
+    b.checkout().await.unwrap();
+    write(dir.path(), "x.txt", "seed");
+    write(dir.path(), "gone.txt", "the agent deletes this");
+    b.run_barrier().await.unwrap();
+
+    std::fs::remove_file(dir.path().join("gone.txt")).unwrap();
+    land_during_next_barrier(&store, &b, "x.txt", "A's v2");
+    let r = b.run_barrier().await.unwrap();
+    assert!(super::barrier::CONSUME_WINDOW_HOOK.with(|h| h.borrow().is_none()), "fixture: the window never ran");
+    assert!(r.uploaded.is_empty() && r.deleted.is_empty(), "fixture: not a pull-only barrier: {r:?}");
+    assert_eq!(read(dir.path(), "x.txt").as_deref(), Some("seed"), "fixture: the change already reached the tree");
+
+    // Nothing else moves the pointer. The agent restores the file, so the
+    // next barrier has nothing to publish either.
+    write(dir.path(), "gone.txt", "the agent deletes this");
+    backdate_baseline(&b, "gone.txt");
+    b.run_barrier().await.unwrap();
+    assert_eq!(read(dir.path(), "x.txt").as_deref(), Some("A's v2"), "the change the pull-only barrier saw was never taken");
+}
+
+/// Put back what the baseline records: the bytes, and the mtime the
+/// baseline stamped, so the path is CLEAN again by stat.
+fn restore_to_baseline(sc: &Syncer, rel: &str, content: &str) {
+    write(&sc.cfg.root, rel, content);
+    let e = sc.state.load_baseline().unwrap().entries[rel].clone();
+    let at = std::time::UNIX_EPOCH
+        + std::time::Duration::new(e.mtime_unix as u64, e.mtime_nanos.unwrap_or(0));
+    std::fs::File::options().write(true).open(sc.cfg.root.join(rel)).unwrap().set_modified(at).unwrap();
+    assert!(!super::barrier::local_dirty(&sc.cfg.root.join(rel), Some(&e)), "fixture: still dirty");
+}
+
+// A consume that skips a path because the agent is working on it must
+// leave the syncer BEHIND: once the agent backs out, the peer's version is
+// owed, and nothing else will move the pointer (LeanP1 gate 2026-09-25,
+// Inv_ShortcutSound, 9 states).
+#[tokio::test]
+async fn a_peers_file_skipped_under_an_agents_new_one_arrives_when_the_agent_drops_it() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut b = syncer(&store, dir.path()).await;
+    b.checkout().await.unwrap();
+    write(dir.path(), "x.txt", "the agent's draft, never published");
+    peer_publish(&store, &b.cfg, "x.txt", "the peer's file", "peer").await;
+    b.consume_owed().await.unwrap();
+    assert_eq!(read(dir.path(), "x.txt").as_deref(), Some("the agent's draft, never published"), "fixture: the consume took it");
+
+    std::fs::remove_file(dir.path().join("x.txt")).unwrap();
+    for _ in 0..2 {
+        b.run_barrier().await.unwrap();
+    }
+    assert_eq!(read(dir.path(), "x.txt").as_deref(), Some("the peer's file"), "the peer's file never arrived");
+}
+
+#[tokio::test]
+async fn a_peers_delete_skipped_under_an_agents_edit_lands_when_the_agent_reverts() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut b = syncer(&store, dir.path()).await;
+    b.checkout().await.unwrap();
+    write(dir.path(), "x.txt", "seed");
+    b.run_barrier().await.unwrap();
+
+    write(dir.path(), "x.txt", "the agent's edit");
+    hitl_remove(&store, &b.cfg, "x.txt", "peer").await;
+    b.consume_owed().await.unwrap();
+    assert_eq!(read(dir.path(), "x.txt").as_deref(), Some("the agent's edit"), "fixture: the consume removed it");
+
+    restore_to_baseline(&b, "x.txt", "seed");
+    for _ in 0..2 {
+        b.run_barrier().await.unwrap();
+    }
+    assert_eq!(read(dir.path(), "x.txt"), None, "the peer's delete never landed");
+}
+
+#[tokio::test]
+async fn a_peers_version_whose_write_lost_to_the_agent_arrives_when_the_agent_reverts() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut b = syncer(&store, dir.path()).await;
+    b.checkout().await.unwrap();
+    write(dir.path(), "x.txt", "seed");
+    b.run_barrier().await.unwrap();
+
+    peer_publish(&store, &b.cfg, "x.txt", "the peer's v2", "peer").await;
+    // The agent writes between the fetch and the rename: the consume's
+    // write stands down (H7).
+    let root = b.cfg.root.clone();
+    super::barrier::CONSUME_WINDOW_HOOK.with(|h| {
+        *h.borrow_mut() = Some((
+            "x.txt".into(),
+            "before-write",
+            Box::new(move || {
+                std::fs::write(root.join("x.txt"), "the agent's edit").unwrap();
+            }),
+        ))
+    });
+    b.consume_owed().await.unwrap();
+    assert!(super::barrier::CONSUME_WINDOW_HOOK.with(|h| h.borrow().is_none()), "fixture: the window never ran");
+    assert_eq!(read(dir.path(), "x.txt").as_deref(), Some("the agent's edit"), "fixture: the consume overwrote it");
+
+    restore_to_baseline(&b, "x.txt", "seed");
+    for _ in 0..2 {
+        b.run_barrier().await.unwrap();
+    }
+    assert_eq!(read(dir.path(), "x.txt").as_deref(), Some("the peer's v2"), "the peer's version never arrived");
 }
 
 /// Deletes cross between writers the way edits do: A's delete of a path
@@ -10199,14 +10486,97 @@ async fn a_peers_delete_reaches_the_other_writers_tree() {
     assert!(!m.entries.contains_key("x.txt"), "B resurrected the path A deleted");
 }
 
+/// A delete/modify race, MY DELETE meeting THEIR EDIT. Before P1-lite the
+/// delete was outranked for a barrier and won the next through the queue's
+/// consume-dirty preservation (this test pinned that, 2026-09-24, with the
+/// note that the merge table replacing it must keep the row). M3 keeps the
+/// row — mine wins, theirs preserved — and drops the lag: the delete lands
+/// in the FIRST barrier.
+#[tokio::test]
+async fn my_delete_meeting_a_peers_edit_wins_at_once_with_the_edit_preserved() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "x.txt", "seed");
+    write(dir_a.path(), "keep.txt", "keep");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+
+    write(dir_b.path(), "x.txt", "B's edit");
+    backdate_baseline(&b, "x.txt");
+    b.run_barrier().await.unwrap();
+    let v2 = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap().manifest.entries["x.txt"].clone();
+
+    std::fs::remove_file(dir_a.path().join("x.txt")).unwrap();
+    a.declared_barrier().await.unwrap();
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(!m.entries.contains_key("x.txt"), "A's delete never won: {:?}", m.entries.get("x.txt"));
+    let records = a.state.load_conflicts().unwrap();
+    assert!(
+        records.iter().any(|r| r.path == "x.txt" && r.foreign_etag.trim_matches('"') == v2.etag.trim_matches('"')),
+        "B's edit was not preserved with a record: {records:?}"
+    );
+    for _ in 0..3 {
+        b.run_barrier().await.unwrap();
+    }
+    assert_eq!(read(dir_b.path(), "x.txt"), None, "A's delete never reached B's tree");
+}
+
+/// The other direction, MY EDIT meeting THEIR DELETE: A's edit re-creates
+/// the path B deleted — mine wins — and B's tree takes it back. And A
+/// RECORDS the delete it overrode, naming the version the delete removed
+/// (the user's rule, 2026-09-24: a delete over a dirty path lands, with a
+/// record). Under P2 a UI delete commits at once, so this is the route
+/// every UI delete of a file an agent is editing takes. Before, there was
+/// no record: the merge reported what mine publishes over only among
+/// theirs' ENTRIES, and a deleted path has none.
+#[tokio::test]
+async fn my_edit_meeting_a_peers_delete_recreates_the_path() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "x.txt", "seed");
+    write(dir_a.path(), "keep.txt", "keep");
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+
+    std::fs::remove_file(dir_b.path().join("x.txt")).unwrap();
+    b.declared_barrier().await.unwrap();
+    let m = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
+    assert!(!m.entries.contains_key("x.txt"), "fixture: B's delete never published");
+
+    write(dir_a.path(), "x.txt", "A's edit");
+    backdate_baseline(&a, "x.txt");
+    for _ in 0..3 {
+        a.run_barrier().await.unwrap();
+    }
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let x = m.entries.get("x.txt").unwrap_or_else(|| panic!("A's edit lost to B's delete: {:?}", m.entries.keys()));
+    let (_, body) = store.get_whole(&x.key, Some(&x.etag)).await.unwrap();
+    assert_eq!(&body[..], b"A's edit");
+    let seed_etag = format!("\"{:x}\"", <sha2::Sha256 as sha2::Digest>::digest(b"seed"));
+    assert!(
+        a.state.load_conflicts().unwrap().iter().any(|c| c.path == "x.txt" && c.foreign_etag == seed_etag && c.kind.starts_with("commit-recreated-deleted")),
+        "A's edit overrode B's delete with no record: {:?}",
+        a.state.load_conflicts().unwrap()
+    );
+    assert_eq!(read(dir_a.path(), "x.txt").as_deref(), Some("A's edit"));
+    for _ in 0..3 {
+        b.run_barrier().await.unwrap();
+    }
+    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("A's edit"), "B's tree never took the re-created path");
+}
+
 /// A UI write that re-creates a path a peer deleted survives the deletion
-/// still waiting in the other writer's queue. The tombstone is OLDER than
-/// the write — B's merge queued it before the UI wrote the path again — so
-/// the consume that adopts the write must not then apply the tombstone
-/// over it: the window clear drops the write's inbox entry, and an acked
-/// write is left at its key, cited by nothing and tracked by nothing.
-/// Found by the formal model with the writer-local queue modelled
-/// (2026-09-15, `Inv_HITLTracked`, 19 steps).
+/// the other writer's merge saw but its tree has not taken. The deletion is
+/// OLDER than the write, so the consume must take the write, never the
+/// deletion over it. Found by the formal model with the writer-local queue
+/// modelled (2026-09-15, `Inv_HITLTracked`, 19 steps); under P1-lite the
+/// deletion is derived from the CURRENT document, which cites the write.
 #[tokio::test]
 async fn a_ui_write_over_a_peers_delete_survives_the_queued_tombstone() {
     let store = Arc::new(MemoryStore::new());
@@ -10219,20 +10589,15 @@ async fn a_ui_write_over_a_peers_delete_survives_the_queued_tombstone() {
     a.run_barrier().await.unwrap();
     b.checkout().await.unwrap();
 
-    std::fs::remove_file(dir_a.path().join("x.txt")).unwrap();
-    a.run_barrier().await.unwrap();
-    a.run_barrier().await.unwrap();
-    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-    assert!(!m.entries.contains_key("x.txt"), "fixture: A's delete never published");
-
-    // B's next barrier merges A's delete into its queue; the tree keeps the
-    // file until the consume after it.
+    // A peer's delete lands inside B's next barrier: B's merge sees it, and
+    // B's tree keeps the file until a later consume.
+    write(dir_b.path(), "z.txt", "z");
+    land_delete_during_next_barrier(&store, &b, "x.txt");
     b.run_barrier().await.unwrap();
-    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("seed"), "fixture: the deletion reached B's tree in the barrier that queued it");
-    assert!(
-        b.state.load_foreign_queue().unwrap().iter().any(|c| c.path == "x.txt" && c.etag.is_none()),
-        "fixture: B's queue holds no tombstone for x.txt"
-    );
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(!m.entries.contains_key("x.txt"), "fixture: the delete never landed");
+    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("seed"), "fixture: the deletion already reached B's tree");
+    assert!(derive_pending(&b).await, "fixture: B owes nothing for x.txt");
 
     // The UI writes the path again, and is acked.
     hitl_write(&store, &a.cfg, "x.txt", "from the UI", "reviewer").await.unwrap();
@@ -10243,169 +10608,16 @@ async fn a_ui_write_over_a_peers_delete_survives_the_queued_tombstone() {
         b.run_barrier().await.unwrap();
     }
     let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-    let inbox_doc = inbox::load(store.as_ref(), &a.cfg).await.unwrap().doc;
     let mut c = syncer(&store, dir_c.path()).await;
     c.checkout().await.unwrap();
     assert_eq!(
         read(dir_c.path(), "x.txt").as_deref(),
         Some("from the UI"),
-        "the acked UI write is tracked by nothing: manifest cites x.txt {:?}, inbox {:?}, A's tree {:?}, B's tree {:?}",
+        "the acked UI write is tracked by nothing: manifest cites x.txt {:?}, A's tree {:?}, B's tree {:?}",
         m.entries.get("x.txt").map(|e| e.etag.clone()),
-        inbox_doc.entries.iter().map(|e| e.path.clone()).collect::<Vec<_>>(),
         read(dir_a.path(), "x.txt"),
         read(dir_b.path(), "x.txt"),
     );
-}
-
-/// A declared barrier adopts a UI write, the agent deletes the file between
-/// the consume and the scan, and the peer's OLDER publish outranks the
-/// delete: the window clear drops the write's inbox entry, so for a moment
-/// the acked write is only the object at its key (the manifest cites the
-/// peer's etag, the queue carries the peer's version). The formal model
-/// stops there when the writer's pod is replaced
-/// (`LeanBarrierLeaseSentinelImplCrash1`, `Inv_HITLTracked`, 2026-09-15);
-/// the code goes on and converges either way:
-/// - replaced: the new incarnation's checkout adopts the current object
-///   (S3-wins) and its barrier cites it, so the UI write survives and the
-///   agent's delete is the one lost (the safe direction);
-/// - survivor: the queued version is superseded, the delete publishes, and
-///   GC removes the object by the etag the consume integrated.
-///
-/// With no later checkout and no survivor, the untracked sweep (finding 10)
-/// is what re-tracks the object.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_adopted_ui_write_deleted_under_an_older_peer_publish_converges_when_the_pod_is_replaced() {
-    adopted_ui_write_deleted_under_an_older_peer_publish(true).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_adopted_ui_write_deleted_under_an_older_peer_publish_converges_when_the_writer_survives() {
-    adopted_ui_write_deleted_under_an_older_peer_publish(false).await;
-}
-
-async fn adopted_ui_write_deleted_under_an_older_peer_publish(replace: bool) {
-    let inner = Arc::new(MemoryStore::new());
-    let hb = Arc::new(Hooked(inner.clone(), Hooks::default()));
-    let (dir_a, dir_b, dir_b2, dir_c) =
-        (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let mut a = syncer(&inner, dir_a.path()).await;
-    let mut b = hooked_syncer(&hb, dir_b.path());
-    a.checkout().await.unwrap();
-    write(dir_a.path(), "x.txt", "seed");
-    a.run_barrier().await.unwrap();
-    b.checkout().await.unwrap();
-
-    // A publishes a newer x.txt; B runs no barrier, so its merge base stays at the seed.
-    write(dir_a.path(), "x.txt", "from A");
-    backdate_baseline(&a, "x.txt");
-    a.run_barrier().await.unwrap();
-    let a_etag = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.entries["x.txt"].etag.clone();
-
-    // The UI writes x.txt over A's publish, then z.txt: B's consume HEADs z.txt
-    // after it has adopted x.txt, and the agent deletes x.txt there.
-    let ui_etag = hitl_write(&inner, &a.cfg, "x.txt", "from the UI", "reviewer").await.unwrap();
-    hitl_write(&inner, &a.cfg, "z.txt", "z from the UI", "reviewer").await.unwrap();
-    let root_b = dir_b.path().to_path_buf();
-    let seen = Arc::new(std::sync::Mutex::new(None));
-    let seen_in_hook = seen.clone();
-    hb.after_head("z.txt", move || {
-        *seen_in_hook.lock().unwrap() = std::fs::read_to_string(root_b.join("x.txt")).ok();
-        std::fs::remove_file(root_b.join("x.txt")).unwrap();
-    });
-    let rep = b.declared_barrier().await.unwrap();
-    assert_eq!(seen.lock().unwrap().as_deref(), Some("from the UI"), "fixture: B's consume never adopted the UI write");
-    assert_eq!(rep.outranked, vec!["x.txt".to_string()], "fixture: A's publish did not outrank B's delete: {rep:?}");
-    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-    let inbox_doc = inbox::load(inner.as_ref(), &a.cfg).await.unwrap().doc;
-    assert_eq!(m.entries.get("x.txt").map(|e| e.etag.clone()), Some(a_etag), "fixture: the manifest moved off A's x.txt");
-    assert!(inbox_doc.entries.iter().all(|e| e.path != "x.txt"), "fixture: the window clear kept the UI write's entry");
-    assert_eq!(inner.head(&a.cfg.file_key("x.txt")).await.unwrap().etag, ui_etag, "fixture: the UI write is not at its key");
-
-    let (mut b, root_b) = if replace {
-        // The pod is replaced: its tree, state and queue go.
-        drop(b);
-        let mut b2 = syncer(&inner, dir_b2.path()).await;
-        b2.checkout().await.unwrap();
-        (b2, dir_b2.path().to_path_buf())
-    } else {
-        (b, dir_b.path().to_path_buf())
-    };
-    for _ in 0..3 {
-        a.run_barrier().await.unwrap();
-        b.run_barrier().await.unwrap();
-    }
-    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-    let mut c = syncer(&inner, dir_c.path()).await;
-    c.checkout().await.unwrap();
-    let want = if replace { Some("from the UI") } else { None };
-    assert_eq!(read(dir_c.path(), "x.txt").as_deref(), want, "a fresh checkout");
-    assert_eq!(read(dir_a.path(), "x.txt").as_deref(), want, "A's tree");
-    assert_eq!(read(&root_b, "x.txt").as_deref(), want, "B's tree");
-    if replace {
-        assert_eq!(m.entries.get("x.txt").map(|e| e.etag.clone()), Some(ui_etag), "the manifest does not cite the UI write");
-    } else {
-        assert!(!m.entries.contains_key("x.txt"), "the agent's delete never published");
-        assert!(inner.head(&a.cfg.file_key("x.txt")).await.is_err(), "the deleted path's object was not collected");
-    }
-}
-
-/// A citation repair whose object is replaced before the commit converges.
-/// B consumes a UI write, so its tree and baseline hold the UI bytes, and the
-/// barrier re-cites them. Between the repair's HEAD and the commit's re-read,
-/// A (which had edited the path) preserves the UI bytes and publishes its own
-/// version. The re-read withholds B's citation. Parking the path kept A's
-/// version out of B's queue while B's merge base moved past it, and B's tree
-/// kept the UI bytes for good: the storm drill's S0 leg (2026-09-15), one
-/// writer of six diverged on one path.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_repair_citation_withheld_at_the_commit_still_receives_the_version_that_replaced_it() {
-    let inner = Arc::new(MemoryStore::new());
-    let hb = Arc::new(Hooked(inner.clone(), Hooks::default()));
-    let (dir_a, dir_b, dir_c) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let mut a = syncer(&inner, dir_a.path()).await;
-    let mut b = hooked_syncer(&hb, dir_b.path());
-    a.checkout().await.unwrap();
-    write(dir_a.path(), "x.txt", "seed");
-    a.run_barrier().await.unwrap();
-    b.checkout().await.unwrap();
-
-    write(dir_a.path(), "x.txt", "from A");
-    backdate_baseline(&a, "x.txt");
-    hitl_write(&inner, &a.cfg, "x.txt", "from the UI", "reviewer").await.unwrap();
-    hitl_write(&inner, &a.cfg, "z.txt", "z from the UI", "reviewer").await.unwrap();
-    // B's consume HEADs z.txt after it has adopted x.txt; the NEXT HEAD of
-    // x.txt is the citation repair's, and A's whole barrier runs there.
-    let a_slot = Arc::new(std::sync::Mutex::new(Some(a)));
-    let (a_hook, hb_hook) = (a_slot.clone(), hb.clone());
-    hb.after_head("z.txt", move || {
-        let a_hook = a_hook.clone();
-        hb_hook.after_head("x.txt", move || {
-            let mut a = a_hook.lock().unwrap().take().unwrap();
-            let a = std::thread::spawn(move || {
-                tokio::runtime::Runtime::new().unwrap().block_on(a.run_barrier()).unwrap();
-                a
-            })
-            .join()
-            .unwrap();
-            *a_hook.lock().unwrap() = Some(a);
-        });
-    });
-    b.run_barrier().await.unwrap();
-    let mut a = a_slot.lock().unwrap().take().expect("fixture: A's barrier never ran inside B's");
-    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("from the UI"), "fixture: B never adopted the UI write");
-    assert!(
-        b.state.load_conflicts().unwrap().iter().any(|c| c.path == "x.txt" && c.kind.contains("-withheld")),
-        "fixture: B's commit did not withhold the re-cited x.txt"
-    );
-
-    for _ in 0..2 {
-        a.run_barrier().await.unwrap();
-        b.run_barrier().await.unwrap();
-    }
-    let mut c = syncer(&inner, dir_c.path()).await;
-    c.checkout().await.unwrap();
-    assert_eq!(read(dir_c.path(), "x.txt").as_deref(), Some("from A"), "fixture: A's version is not the manifest's");
-    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("from A"), "B's tree never received the version that replaced its withheld citation");
 }
 
 /// Two IDLE writers settle. A barrier that finds the manifest moved but
@@ -10437,68 +10649,6 @@ async fn two_idle_writers_do_not_trade_empty_generations() {
     assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("from A"));
 }
 
-/// Finding 3 (`LeanBarrierLeaseSyncOverlayStale`): `sync` takes the
-/// manifest OVERLAID by live inbox entries as remote truth, then advanced
-/// its merge base to the manifest. An inbox entry can be older than the
-/// manifest while the commit that cited past it has not yet dropped it —
-/// here A's delete, between its CAS and its window clear — and a sync in
-/// that window advanced B's base past a change B never applied: B kept
-/// the file forever, the manifest did not.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_sync_does_not_advance_its_base_past_a_change_the_inbox_hid() {
-    let inner = Arc::new(MemoryStore::new());
-    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
-    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let mut a = hooked_syncer(&ha, dir_a.path());
-    let mut b = syncer(&inner, dir_b.path()).await;
-    a.checkout().await.unwrap();
-    write(dir_a.path(), "x.txt", "seed");
-    write(dir_a.path(), "keep.txt", "keep");
-    a.run_barrier().await.unwrap();
-    b.checkout().await.unwrap();
-
-    // A deletes x.txt (first absence withheld); a HITL write of x.txt then
-    // lands in the inbox. A's next barrier consumes it against the local
-    // delete (the delete wins, the HITL bytes are preserved) and publishes
-    // the delete.
-    std::fs::remove_file(dir_a.path().join("x.txt")).unwrap();
-    a.run_barrier().await.unwrap();
-    hitl_write(&inner, &a.cfg, "x.txt", "hitl", "user").await.unwrap();
-
-    // Inside A's commit — the manifest no longer cites x.txt, the inbox
-    // entry for it is not yet dropped — B syncs the whole tree.
-    let key = a.cfg.file_key("x.txt");
-    let b_slot = std::sync::Mutex::new(Some(b));
-    let b_done: Arc<std::sync::Mutex<Option<Syncer>>> = Arc::new(std::sync::Mutex::new(None));
-    let b_done_in = b_done.clone();
-    let cfg = a.cfg.clone();
-    let probe = inner.clone();
-    ha.before_delete(&key, move || {
-        let mut b = b_slot.lock().unwrap().take().expect("hook ran twice");
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let m = manifest::load(probe.as_ref(), &cfg).await.unwrap().unwrap().manifest;
-                assert!(!m.entries.contains_key("x.txt"), "fixture: A's CAS has not uncited x.txt");
-                let ib = super::inbox::load(probe.as_ref(), &cfg).await.unwrap();
-                assert!(ib.doc.entries.iter().any(|e| e.path == "x.txt"), "fixture: the entry is gone");
-                b.sync_scoped(None).await.expect("B's sync");
-            })
-        });
-        *b_done_in.lock().unwrap() = Some(b);
-    });
-    let ra = a.run_barrier().await.expect("A's delete barrier");
-    assert!(ra.deleted.contains(&"x.txt".to_string()), "fixture: A did not publish the delete: {ra:?}");
-    let mut b = b_done.lock().unwrap().take().expect("fixture: A's GC never reached x.txt");
-
-    // A's delete stands, and reaches B.
-    for _ in 0..3 {
-        b.run_barrier().await.expect("B's barrier");
-    }
-    let m = manifest::load(inner.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
-    assert!(!m.entries.contains_key("x.txt"), "the delete was undone");
-    assert_eq!(read(dir_b.path(), "x.txt"), None, "B's sync advanced its base past A's delete and kept the file");
-    assert_eq!(read(dir_b.path(), "keep.txt").as_deref(), Some("keep"));
-}
 
 /// A UI write through the gateway reaches EVERY writer of the workspace,
 /// not only the one whose consume took the inbox entry. The first
@@ -10518,13 +10668,13 @@ async fn a_gateway_write_reaches_every_writer_not_only_the_first_consumer() {
 
     hitl_write(&store, &a.cfg, "doc.md", "edited in the UI", "user@ui").await.unwrap();
     hitl_write(&store, &a.cfg, "new-from-ui.md", "created in the UI", "user@ui").await.unwrap();
-    // A's barrier consumes both entries, cites them, and drops them.
+    // P2: both are committed; A's tree takes them as peers' changes (one
+    // barrier queues, the next writes).
     a.run_barrier().await.unwrap();
-    let ib = super::inbox::load(store.as_ref(), &a.cfg).await.unwrap();
-    assert!(ib.doc.entries.is_empty(), "fixture: A did not drop the consumed entries: {:?}", ib.doc.entries);
+    a.run_barrier().await.unwrap();
     assert_eq!(read(dir_a.path(), "doc.md").as_deref(), Some("edited in the UI"));
 
-    // B never saw the entries; it must still converge on both writes.
+    // B must converge on both writes too.
     b.run_barrier().await.unwrap();
     b.run_barrier().await.unwrap();
     assert_eq!(read(dir_b.path(), "doc.md").as_deref(), Some("edited in the UI"), "the UI edit never reached B");
@@ -10569,91 +10719,6 @@ async fn a_gateway_write_over_a_path_another_writer_edited_is_preserved_on_that_
     }
     assert!(found_ui, "the UI's bytes are not preserved under any record on B: {preserved:?}");
     assert_every_citation_resolves(&store, &a.cfg, "after both").await;
-}
-
-/// Finding 8 (model: `Inv_HITLDurable` in `LeanBarrierLeaseSentinel`): a
-/// UI write through the gateway lands on a path WHILE another writer's
-/// upload of it is uncited (the window now opens at the claim, so nothing
-/// holds the gateway off during uploads), and the gateway's PUT is
-/// If-Match the object's CURRENT etag — the uncited upload. A second
-/// writer consumes the UI write, cites it and drops its inbox entry; the
-/// first writer's commit then re-cites its own upload over it. The UI's
-/// acked write is uncited, untracked and preserved nowhere, and the
-/// manifest cites a generation the key no longer holds.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_ui_write_over_an_uncited_upload_is_never_silently_lost() {
-    let inner = Arc::new(MemoryStore::new());
-    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
-    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let mut a = hooked_syncer(&ha, dir_a.path());
-    a.cfg.upload_fanout = 1; // p1 lands before p2's PUT, deterministically
-    let b = syncer(&inner, dir_b.path()).await;
-    a.checkout().await.unwrap();
-    write(dir_a.path(), "p1.txt", "seed-1");
-    write(dir_a.path(), "p2.txt", "seed-2");
-    a.run_barrier().await.unwrap();
-    let mut b = b;
-    b.checkout().await.unwrap();
-
-    // A's agent edits both paths; A's barrier uploads p1 then p2.
-    write(dir_a.path(), "p1.txt", "A's edit of p1");
-    backdate_baseline(&a, "p1.txt");
-    write(dir_a.path(), "p2.txt", "A's edit of p2");
-    backdate_baseline(&a, "p2.txt");
-
-    // Between A's PUT of p1 and its PUT of p2 (so p1 is uploaded, uncited,
-    // and A holds no lease): the UI writes p1 through the gateway, and B's
-    // whole barrier runs — consume, cite, drop the entry.
-    let (store_ui, cfg_ui) = (inner.clone(), a.cfg.clone());
-    let b_slot = std::sync::Mutex::new(Some(b));
-    let b_done: Arc<std::sync::Mutex<Option<Syncer>>> = Arc::new(std::sync::Mutex::new(None));
-    let b_done_in = b_done.clone();
-    ha.before_put(&a.cfg.file_key("p2.txt"), move || {
-        let mut b = b_slot.lock().unwrap().take().expect("hook ran twice");
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let cur = store_ui.head(&cfg_ui.file_key("p1.txt")).await.unwrap();
-                let (_, body) = store_ui.get_whole(&cfg_ui.file_key("p1.txt"), None).await.unwrap();
-                assert_eq!(&body[..], b"A's edit of p1", "fixture: A's upload of p1 has not landed: {cur:?}");
-                let _ = hitl_write(&store_ui, &cfg_ui, "p1.txt", "edited in the UI", "user@ui").await;
-                b.run_barrier().await.expect("B's barrier");
-            })
-        });
-        *b_done_in.lock().unwrap() = Some(b);
-    });
-    let ra = a.run_barrier().await;
-    let _b = b_done.lock().unwrap().take().expect("fixture: the hook never ran");
-
-    // Whatever the gateway did — refuse the write, or land it — nothing
-    // acked is lost: every citation resolves, and the UI's bytes, if the
-    // gateway accepted them, are cited or preserved under a record.
-    assert_every_citation_resolves(&inner, &a.cfg, "after A's commit").await;
-    let ui_accepted = {
-        let ib = super::inbox::load(inner.as_ref(), &a.cfg).await.unwrap();
-        let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-        let cited = inner.get_whole(&m.entries["p1.txt"].key, Some(&m.entries["p1.txt"].etag)).await
-            .map(|(_, b)| &b[..] == b"edited in the UI").unwrap_or(false);
-        let tracked = ib.doc.entries.iter().any(|e| e.path == "p1.txt");
-        let mut preserved = false;
-        for o in inner.list(&format!("{}/.flint/lean/conflicts/", PREFIX)).await.unwrap() {
-            if let Ok((_, body)) = inner.get_whole(&o.key, None).await {
-                preserved |= &body[..] == b"edited in the UI";
-            }
-        }
-        (cited, tracked, preserved)
-    };
-    let ui_ever_landed = {
-        // The UI write landed iff B consumed an entry for it (its record,
-        // or its adopted bytes in B's tree).
-        read(dir_b.path(), "p1.txt").as_deref() == Some("edited in the UI")
-    };
-    if ui_ever_landed {
-        assert!(
-            ui_accepted.0 || ui_accepted.1 || ui_accepted.2,
-            "the UI's acked write was silently lost: cited={} tracked={} preserved={} (A: {:?})",
-            ui_accepted.0, ui_accepted.1, ui_accepted.2, ra.as_ref().map(|r| r.uploaded.clone())
-        );
-    }
 }
 
 /// The event trace is EVIDENCE for the live drill: its oracles and its
@@ -10784,8 +10849,8 @@ async fn the_event_trace_reconstructs_a_two_writer_interleaving() {
     // precedes the tombstone that removed it from B's tree, by wall clock.
     let gc_x = evs
         .iter()
-        .position(|e| ev(e) == "gc" && s(e, "path").as_deref() == Some("x.txt") && s(e, "result").as_deref() == Some("deleted"))
-        .unwrap_or_else(|| panic!("no gc deleted for x.txt in:\n{}", lines.join("\n")));
+        .position(|e| ev(e) == "gc" && s(e, "path").as_deref() == Some("x.txt") && s(e, "result").as_deref() == Some("retired"))
+        .unwrap_or_else(|| panic!("no gc retired for x.txt in:\n{}", lines.join("\n")));
     let tomb_x = evs
         .iter()
         .position(|e| ev(e) == "tombstone" && s(e, "path").as_deref() == Some("x.txt") && s(e, "action").as_deref() == Some("removed"))
@@ -10796,19 +10861,20 @@ async fn the_event_trace_reconstructs_a_two_writer_interleaving() {
         evs[gc_x]["ts_ms"].as_u64().unwrap() <= evs[tomb_x]["ts_ms"].as_u64().unwrap(),
         "wall clock puts the tombstone before the GC"
     );
-    // And B's edit crossed to A through the queue.
+    // And B's edit crossed to A, derived from the document (P1-lite).
     assert!(
-        evs.iter().any(|e| ev(e) == "consume" && s(e, "path").as_deref() == Some("keep.txt") && s(e, "from").as_deref() == Some("queue")),
-        "B's edit did not reach A through the local queue:\n{}",
+        evs.iter().any(|e| ev(e) == "consume" && s(e, "path").as_deref() == Some("keep.txt") && s(e, "from").as_deref() == Some("manifest")),
+        "B's edit did not reach A through the consume:\n{}",
         lines.join("\n")
     );
 }
 
 /// A killed writer's fixture: A publishes p1 and p2, B checks out, A's agent
 /// edits both and A is killed after p1's upload lands and before p2's (and
-/// before any claim); B keeps publishing elsewhere. Returns the stores and
-/// B, whose tree still holds `seed-1` while the key holds A's edit.
-async fn killed_writer_orphan() -> (Arc<MemoryStore>, Syncer, tempfile::TempDir, tempfile::TempDir) {
+/// before any claim); B keeps publishing elsewhere. Returns the stores, B
+/// — whose tree still holds `seed-1` — and the ORPHAN: the handle A's
+/// upload of p1 landed at, which nothing cites and nothing names.
+async fn killed_writer_orphan() -> (Arc<MemoryStore>, Syncer, tempfile::TempDir, tempfile::TempDir, String) {
     let inner = Arc::new(MemoryStore::new());
     let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
     let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -10820,70 +10886,87 @@ async fn killed_writer_orphan() -> (Arc<MemoryStore>, Syncer, tempfile::TempDir,
     write(dir_a.path(), "p2.txt", "seed-2");
     a.run_barrier().await.unwrap();
     b.checkout().await.unwrap();
+    let seed1 = cited_key(&inner, &a.cfg, "p1.txt").await;
 
     write(dir_a.path(), "p1.txt", "A's unpublished edit");
     backdate_baseline(&a, "p1.txt");
     write(dir_a.path(), "p2.txt", "A's other edit");
     backdate_baseline(&a, "p2.txt");
-    let key1 = a.cfg.file_key("p1.txt");
+    let cfg = a.cfg.clone();
     ha.before_put(&a.cfg.file_key("p2.txt"), || panic!("A is killed between its uploads"));
     assert!(barrier_on_thread(a).join().is_err(), "fixture: A was not killed");
-    let (_, body) = inner.get_whole(&key1, None).await.unwrap();
-    assert_eq!(&body[..], b"A's unpublished edit", "fixture: A's upload of p1 never landed");
+    let handles = handles_for(&inner, &cfg, "p1.txt").await;
+    let orphan = handles.iter().find(|k| **k != seed1).cloned().expect("fixture: A's upload of p1 never landed");
+    let (_, body) = inner.get_whole(&orphan, None).await.unwrap();
+    assert_eq!(&body[..], b"A's unpublished edit", "fixture: not A's upload");
 
     write(dir_b.path(), "b.txt", "B works elsewhere");
     for _ in 0..4 {
         b.run_barrier().await.unwrap();
     }
     assert_eq!(read(dir_b.path(), "p1.txt").as_deref(), Some("seed-1"), "fixture: B already has A's edit");
-    (inner, b, dir_a, dir_b)
+    (inner, b, dir_a, dir_b, orphan)
 }
 
-/// CONVERGENCE under a killed writer (finding 10). Uploads hold no lease,
-/// so a writer killed after an upload lands and before its commit leaves
-/// bytes at the key that no manifest cites and no inbox entry tracks.
-/// Nothing acked is lost (the killed writer's agent never got an ack), but
-/// the bucket and the live trees must not disagree about the path forever:
-/// a fresh checkout reads what the KEY holds, while a live writer that
-/// never touches the path again keeps the cited version. The drill's O2
-/// compares exactly these two.
-///
-/// Failed until 2026-09-15: B's tree kept `seed-1` and the manifest kept
-/// citing it for as long as no writer checked out again. The live writer's
-/// sweep (`untracked.rs`) now tracks the upload through the inbox, its
-/// consume adopts it and its commit cites it. Without the sweep's inbox
-/// append this fails exactly as it did.
+/// CONVERGENCE under a killed writer (finding 10, and H6's class). Uploads
+/// hold no lease, so a writer killed after an upload lands and before its
+/// commit leaves bytes nothing cites and nothing names. Under the slot
+/// those bytes sat AT THE CITED KEY: a fresh checkout read them (S3-wins)
+/// while a live writer kept the cited version, and the sweep's answer was
+/// to TRACK them through the inbox so every tree adopted them. Under
+/// handles (design 2026-09-19, R4) they sit at a handle of their own, no
+/// reader can reach them — a checkout reads what the manifest cites and
+/// nothing else — and the orphan sweep COLLECTS them from inside a commit
+/// section once they are older than the grace. A lost writer's set is
+/// never adopted, path by path or at all: nothing acked is lost (its
+/// agent never got an ack), and the trees and the bucket agree throughout.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_writer_killed_after_its_upload_does_not_leave_the_trees_diverged() {
-    let (inner, mut b, _dir_a, dir_b) = killed_writer_orphan().await;
-    let key1 = b.cfg.file_key("p1.txt");
-    let orphan = inner.head(&key1).await.unwrap().etag;
+    let (inner, mut b, _dir_a, dir_b, orphan) = killed_writer_orphan().await;
 
-    let tracked = b.track_untracked(now_unix() + b.cfg.untracked_grace_secs).await.unwrap();
-    assert_eq!(tracked, vec!["p1.txt".to_string()], "the sweep did not track the killed writer's upload");
-    b.run_barrier().await.unwrap();
-
+    // Before any sweep: a fresh checkout and the live tree agree already,
+    // because neither can see the orphan.
     let dir_c = tempfile::tempdir().unwrap();
     let mut c = syncer(&inner, dir_c.path()).await;
     c.checkout().await.unwrap();
-    assert_eq!(
-        read(dir_b.path(), "p1.txt"),
-        read(dir_c.path(), "p1.txt"),
-        "a live writer's tree and a fresh checkout disagree on a path whose key holds a killed writer's uncited upload"
-    );
+    assert_eq!(read(dir_b.path(), "p1.txt").as_deref(), Some("seed-1"));
+    assert_eq!(read(dir_c.path(), "p1.txt").as_deref(), Some("seed-1"), "a fresh checkout read the orphan");
+    assert!(inner.head(&orphan).await.is_ok(), "fixture: the orphan is still there");
+
+    // The ingress sweep has nothing to say about a handle...
+    let tracked = b.track_untracked(now_unix() + b.cfg.untracked_grace_secs).await.unwrap();
+    assert!(tracked.is_empty(), "the ingress sweep tracked a lost writer's handle: {tracked:?}");
+    // ...and the orphan sweep, due, collects it inside B's next commit.
+    b.cfg.untracked_grace_secs = 0;
+    b.state.save_orphan_sweep_at(now_unix() - b.cfg.untracked_sweep_secs - 1).unwrap();
+    write(dir_b.path(), "b2.txt", "B publishes again");
+    let r = b.run_barrier().await.unwrap();
+    assert_eq!(r.swept, 1, "the orphan sweep did not collect the killed writer's handle: {r:?}");
+    assert!(matches!(inner.head(&orphan).await, Err(StoreError::NotFound(_))), "the orphan survived the sweep");
+
     let m = manifest::load(inner.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
-    assert_eq!(m.entries["p1.txt"].etag, orphan, "the manifest does not cite what the key holds");
-    let doc = inbox::load(inner.as_ref(), &b.cfg).await.unwrap().doc;
-    assert!(doc.entries.is_empty(), "the tracked entry outlived the commit that cited it: {:?}", doc.entries);
+    assert_eq!(cited_bytes(&inner, &b.cfg, "p1.txt").await.as_deref(), Some(&b"seed-1"[..]), "the manifest adopted the orphan");
+    assert_eq!(m.entries["p1.txt"].key, cited_key(&inner, &b.cfg, "p1.txt").await);
+    assert_eq!(read(dir_b.path(), "p1.txt").as_deref(), Some("seed-1"));
 }
 
-/// The sweep leaves an untracked object alone inside the grace — an upload
-/// whose writer may still be claiming — and runs from the floor only when
-/// due: a writer's first tick starts the clock, and a tick past the
-/// interval sweeps and consumes in the same barrier.
+/// The INGRESS sweep (design 2026-09-19, R5): an outside writer's object at
+/// the bare path — `aws s3 cp` into `files/`, the one write nothing in this
+/// crate makes any more — is left alone inside the grace, and tracked from
+/// the floor only when due: a writer's first tick starts the clock, and a
+/// tick past the interval copies it to a handle of its own, appends the
+/// entry, and consumes it in the same barrier. The ingress object itself
+/// is never touched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_floor_sweeps_for_untracked_uploads_only_past_the_grace_and_when_due() {
-    let (inner, mut b, _dir_a, dir_b) = killed_writer_orphan().await;
+async fn the_floor_sweeps_for_ingress_objects_only_past_the_grace_and_when_due() {
+    let (inner, mut b, _dir_a, dir_b, _orphan) = killed_writer_orphan().await;
+    // An outside writer overwrites the bare path.
+    let body = Bytes::from_static(b"an outside writer's bytes");
+    let stamps = GenerationStamps { generation: 0, epoch: 0, flush_uuid: "aws-cli".into(), boundary_source: None, posix: None };
+    let ingress = inner
+        .put_whole(&b.cfg.file_key("p1.txt"), body.clone(), &PutCondition::Unconditional, &stamps, crc64_nvme(&body))
+        .await
+        .unwrap();
     assert_eq!(b.track_untracked(now_unix()).await.unwrap(), Vec::<String>::new(), "tracked inside the grace");
 
     b.cfg.untracked_grace_secs = 0;
@@ -10894,13 +10977,23 @@ async fn the_floor_sweeps_for_untracked_uploads_only_past_the_grace_and_when_due
 
     b.state.save_untracked_sweep_at(now_unix() - 3601).unwrap();
     b.floor_tick().await.unwrap();
+    // P2: the sweep commits; B's tree takes the copy at its next barriers.
+    for _ in 0..2 {
+        b.run_barrier().await.unwrap();
+    }
     assert_eq!(
         read(dir_b.path(), "p1.txt").as_deref(),
-        Some("A's unpublished edit"),
-        "a due floor did not track and consume the killed writer's upload"
+        Some("an outside writer's bytes"),
+        "a due floor did not track and consume the ingress object"
     );
     let m = manifest::load(inner.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
-    assert_eq!(m.entries["p1.txt"].etag, inner.head(&b.cfg.file_key("p1.txt")).await.unwrap().etag);
+    let cited = &m.entries["p1.txt"];
+    assert_eq!(b.cfg.handle_parts(&cited.key).map(|(_, f)| f), Some(super::untracked::ingress_flush(&ingress.etag).as_str()),
+        "the manifest cites something other than the ingress object's adopted copy: {}", cited.key);
+    let (at_key, _) = inner.get_whole(&b.cfg.file_key("p1.txt"), None).await.unwrap();
+    assert_eq!(at_key.etag, ingress.etag, "the ingress object was touched");
+    // Idempotent: a second sweep of the same ingress version adopts nothing.
+    assert_eq!(b.track_untracked(now_unix()).await.unwrap(), Vec::<String>::new(), "adopted twice");
 }
 
 // ---------------------------------------------------------------------
@@ -10979,7 +11072,7 @@ async fn a_reader_follows_writers_and_the_inbox_without_one_store_write() {
     r.floor_tick().await.unwrap();
     assert_eq!(writes_since_reset(&store), vec![], "a reader with local changes wrote to the bucket");
     assert_eq!(read(dir_r.path(), "x.txt").as_deref(), Some("the reader's local edit"));
-    assert!(store.head(&r.cfg.file_key("local-only.txt")).await.is_err(), "a reader published a local file");
+    assert!(!object_at(&store, &r.cfg, "local-only.txt").await, "a reader published a local file");
     let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
     assert!(!m.entries.contains_key("local-only.txt"));
     let conflicts = r.state.load_conflicts().unwrap();
@@ -11033,7 +11126,7 @@ async fn a_publish_touch_on_a_reader_is_answered_refused_read_only() {
     assert!(r.load_pending(Verb::Publish).unwrap().is_none(), "the refused touch was left pending");
     let on_disk = std::fs::read_to_string(dir_r.path().join(super::CONTROL_DIR).join(control::PUBLISH_ACK)).unwrap();
     assert!(on_disk.contains("refused-read-only"), "{on_disk}");
-    assert!(store.head(&r.cfg.file_key("f.txt")).await.is_err());
+    assert!(!object_at(&store, &r.cfg, "f.txt").await);
 
     // `sync` is a reader's verb.
     r.cfg.sentinel_min_interval_secs = 0;
@@ -11068,7 +11161,7 @@ async fn a_barrier_on_a_reader_is_refused_before_any_write() {
         assert!(matches!(out, Err(LeanError::Refused(_))), "{name} on a reader: {out:?}");
     }
     assert_eq!(store.total_ops(), 0, "a refused barrier sent requests: {:?}", store.op_counts());
-    assert!(store.head(&r.cfg.file_key("f.txt")).await.is_err());
+    assert!(!object_at(&store, &r.cfg, "f.txt").await);
 }
 
 #[tokio::test]
@@ -11105,7 +11198,7 @@ async fn a_reader_drain_answers_what_it_owes_and_writes_nothing() {
     let acks = r.drain().await.unwrap();
     assert_eq!(writes_since_reset(&store), vec![], "a reader's drain wrote to the bucket");
     assert_eq!(acks.iter().map(|a| a.status.as_str()).collect::<Vec<_>>(), vec!["refused-read-only"]);
-    assert!(store.head(&r.cfg.file_key("f.txt")).await.is_err());
+    assert!(!object_at(&store, &r.cfg, "f.txt").await);
 }
 
 #[tokio::test]
@@ -11157,242 +11250,7 @@ fn access_parses_exactly_what_the_plugin_writes() {
     assert_eq!(Access::parse(Access::Read.as_str()), Some(Access::Read));
 }
 
-/// The store, not the code, is what can make the collector unsafe. A
-/// backend that ACCEPTS `If-Match` on DELETE and ignores it (Apache
-/// Ozone 2.2.x, HDDS-14907 — finding L-27) turns the collector's delete
-/// into exactly the variant the model refutes,
-/// `LeanBarrierLeaseGCUnconditional`: it takes whatever is at the key,
-/// including a peer's upload that a commit is about to cite. So when the
-/// probe has SEEN that (`conformance.rs`), the collector gives way — and
-/// three things must hold at once, which is why they are asserted
-/// together:
-///
-///   1. the object is LEFT in the bucket, not deleted;
-///   2. the path still leaves the boundary, exactly as if collected;
-///   3. the merge base drops it anyway, so the next barrier does not
-///      re-classify the same path as a delete forever.
-///
-/// The second arm is the control: the identical sequence on a store
-/// whose conditional delete is enforced must actually collect the
-/// object. Without it this test would pass against a collector that had
-/// simply stopped working.
-#[tokio::test]
-async fn a_store_that_ignores_if_match_on_delete_leaks_the_object_instead_of_collecting_it() {
-    for enforced in [false, true] {
-        let store = Arc::new(MemoryStore::new());
-        let dir = tempfile::tempdir().unwrap();
-        let mut sc = syncer(&store, dir.path()).await;
-        sc.cfg.conditional_delete_enforced = enforced;
-        sc.checkout().await.unwrap();
-        write(dir.path(), "x.txt", "seed");
-        sc.run_barrier().await.unwrap();
-        let key = sc.cfg.file_key("x.txt");
-        store.head(&key).await.expect("fixture: the seed was published");
-
-        std::fs::remove_file(dir.path().join("x.txt")).unwrap();
-        let withheld = sc.run_barrier().await.unwrap();
-        assert!(
-            withheld.deleted.is_empty() && withheld.leaked.is_empty(),
-            "fixture: the two-scan rule must withhold the first absence (enforced={enforced})"
-        );
-        let r = sc.run_barrier().await.unwrap();
-
-        // (2) The boundary drops the path either way: what the store
-        // cannot do is collect the object, not publish the delete.
-        let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
-        assert!(
-            !m.entries.contains_key("x.txt"),
-            "the delete must reach the boundary (enforced={enforced})"
-        );
-
-        if enforced {
-            assert_eq!(r.deleted, vec!["x.txt".to_string()], "the control must COLLECT");
-            assert!(r.leaked.is_empty(), "nothing is leaked when the store enforces the delete");
-            assert!(
-                matches!(store.head(&key).await, Err(flint_store::StoreError::NotFound(_))),
-                "the control's object must be gone — otherwise the leak arm proves nothing"
-            );
-        } else {
-            // (1) left behind, and NAMED: a leak nobody can count is a
-            // leak that reads as a collection.
-            assert_eq!(r.leaked, vec!["x.txt".to_string()], "the collector must name what it left");
-            assert!(r.deleted.is_empty(), "a leaked path was not deleted");
-            store.head(&key).await.expect("the object must be LEFT, not deleted");
-        }
-
-        // (3) The merge base follows the rule step 7 already had: an
-        // entry is dropped once the key no longer holds our bytes. A
-        // collected path is gone from the base and never spoken of
-        // again; a LEAKED one still holds them, so it is re-offered to
-        // the collector at every later barrier — the same standing
-        // condition a skipped etag produces, and the reason this arm
-        // asserts a repeat rather than silence.
-        let again = sc.run_barrier().await.unwrap();
-        if enforced {
-            assert!(
-                again.deleted.is_empty() && again.leaked.is_empty(),
-                "a collected path must leave the merge base and stay gone"
-            );
-        } else {
-            assert_eq!(
-                again.leaked,
-                vec!["x.txt".to_string()],
-                "a leaked path keeps its baseline entry, so the collector must re-offer it \
-                 (dropping it would forget bytes the key still holds)"
-            );
-        }
-    }
-}
-
 // ---- review 2026-09-18 -------------------------------------------------------
-
-/// C2 (review 2026-09-18): THE FENCE IS A COUNT, NOT A CLOCK. Inside the
-/// commit section the cell was read before the pointer CAS and then every
-/// 200 deletes, and the DELETE itself carries no epoch. A holder that stalls
-/// AFTER its CAS landed (past the 60 s deposal rule) is deposed; the
-/// successor's commit cites the very etag the straggler's delete set
-/// recognises — its agent rewrote the path with the same bytes, so the
-/// upload lands as the same content-hash etag — re-verifies it under the
-/// lease, "where no GC runs", and installs; the straggler thaws and its
-/// If-Match DELETE lands. The successor's citation dangles, and nothing
-/// records it: the straggler's release answers Ok on a foreign cell.
-///
-/// The stall is collapsed by `renew_within_secs = 0`: every delete finds
-/// the last cell WRITE stale and must observe the cell first. The rival's
-/// whole barrier runs inside the straggler's CAS response.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_holder_deposed_after_its_cas_landed_does_not_collect_what_the_successor_re_cited() {
-    let inner = Arc::new(MemoryStore::new());
-    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
-    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let mut a = hooked_syncer(&ha, dir_a.path());
-    a.cfg.renew_within_secs = 0;
-    let b = syncer(&inner, dir_b.path()).await;
-    a.checkout().await.unwrap();
-    write(dir_a.path(), "x.txt", "same bytes");
-    write(dir_a.path(), "keep.txt", "keep");
-    a.run_barrier().await.unwrap();
-    let key = a.cfg.file_key("x.txt");
-    let e0 = inner.head(&key).await.unwrap().etag;
-
-    // B checks the seed out, then A's agent deletes x.txt (the two-scan
-    // rule withholds the first absence).
-    {
-        let mut b = b;
-        b.checkout().await.unwrap();
-        assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("same bytes"));
-        std::fs::remove_file(dir_a.path().join("x.txt")).unwrap();
-        let withheld = a.run_barrier().await.unwrap();
-        assert!(withheld.deleted.is_empty(), "fixture: the first absence must be withheld");
-
-        // Between A's pointer CAS landing (seq without x.txt) and its GC's
-        // first delete, A is quiet past the deposal threshold and B runs a
-        // whole barrier: its agent rewrote x.txt with the SAME bytes, it
-        // deposes A, re-verifies e0 under the lease and cites it.
-        let (dir_b_path, b_slot) = (dir_b.path().to_path_buf(), std::sync::Mutex::new(Some(b)));
-        let b_done: Arc<std::sync::Mutex<Option<Syncer>>> = Arc::new(std::sync::Mutex::new(None));
-        let b_done_in = b_done.clone();
-        ha.after_put(&a.cfg.current_key(), move || {
-            let mut b = b_slot.lock().unwrap().take().expect("hook ran twice");
-            std::fs::remove_file(dir_b_path.join("x.txt")).unwrap();
-            write(&dir_b_path, "x.txt", "same bytes");
-            backdate_baseline(&b, "x.txt");
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    let rb = b.run_barrier().await.expect("B's barrier (it deposes the stalled A)");
-                    assert_eq!(rb.uploaded, vec!["x.txt".to_string()], "fixture: B did not re-upload x.txt");
-                })
-            });
-            *b_done_in.lock().unwrap() = Some(b);
-        });
-        let ra = a.run_barrier().await;
-        let b = b_done.lock().unwrap().take().expect("fixture: the hook never ran");
-        assert!(b.lease.is_none());
-
-        let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-        assert_eq!(
-            m.entries.get("x.txt").map(|e| e.etag.as_str()),
-            Some(e0.as_str()),
-            "fixture: B's commit did not cite x.txt at the seed etag"
-        );
-        // THE CLAIM: the citation resolves. The deposed straggler's delete
-        // must not have taken it.
-        assert!(
-            inner.head(&key).await.is_ok(),
-            "the successor's citation dangles: the deposed straggler's If-Match DELETE took x.txt \
-             (manifest cites {e0}; A's barrier: {ra:?})"
-        );
-        // And the straggler learned it was deposed at the delete, not later.
-        assert!(matches!(ra, Err(LeanError::Fenced(_))), "the deposed straggler's step 6 was not fenced: {ra:?}");
-        assert!(a.lease.is_none());
-    }
-    assert_every_citation_resolves(&inner, &a.cfg, "after the straggler thawed").await;
-}
-
-/// H1 (review 2026-09-18): COLLECTOR-OFF IS NOT "A COST". On a store that
-/// does not enforce `If-Match` on DELETE (MinIO, Ozone — most of the e2e
-/// rig) the collector gives way and the peer's own retired object stays at
-/// the key. The other writer queues the deletion; its consume finds AN
-/// object at the key — the leak — and called the tombstone superseded (the
-/// L-1 rule looked at the key, not at what the delete retired). Its
-/// baseline kept the path while its merge base did not, so the path was a
-/// citation-repair candidate and the next commit RE-CITED the deleted
-/// generation; the first writer's delete was outranked, then applied, then
-/// leaked again: one `rm` flapped forever. A published delete must reach
-/// the other tree and stay published.
-#[tokio::test]
-async fn a_peers_delete_on_a_collector_off_store_reaches_the_other_tree_and_is_not_resurrected() {
-    let store = Arc::new(MemoryStore::new());
-    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let mut a = syncer(&store, dir_a.path()).await;
-    let mut b = syncer(&store, dir_b.path()).await;
-    a.cfg.conditional_delete_enforced = false;
-    b.cfg.conditional_delete_enforced = false;
-    a.checkout().await.unwrap();
-    write(dir_a.path(), "x.txt", "seed");
-    write(dir_a.path(), "keep.txt", "keep");
-    a.run_barrier().await.unwrap();
-    b.checkout().await.unwrap();
-    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("seed"));
-    let key = a.cfg.file_key("x.txt");
-
-    std::fs::remove_file(dir_a.path().join("x.txt")).unwrap();
-    a.run_barrier().await.unwrap();
-    let r = a.run_barrier().await.unwrap();
-    assert_eq!(r.leaked, vec!["x.txt".to_string()], "fixture: the collector must give way on this store");
-    assert!(store.head(&key).await.is_ok(), "fixture: the leaked object must still be at the key");
-    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-    assert!(!m.entries.contains_key("x.txt"), "fixture: A's delete never published");
-
-    // B's next barrier queues the deletion; the one after it must APPLY it
-    // over the leak — the key holds exactly the generation the delete
-    // retired, which is no newer write.
-    b.run_barrier().await.unwrap();
-    assert!(
-        b.state.load_foreign_queue().unwrap().iter().any(|c| c.path == "x.txt" && c.etag.is_none()),
-        "fixture: B's queue holds no tombstone for x.txt"
-    );
-    b.run_barrier().await.unwrap();
-    assert!(
-        read(dir_b.path(), "x.txt").is_none(),
-        "the peer's published delete never reached B's tree: its own leaked object superseded the tombstone"
-    );
-    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-    assert!(
-        !m.entries.contains_key("x.txt"),
-        "B's citation repair resurrected the delete: the manifest cites x.txt at {:?}",
-        m.entries.get("x.txt").map(|e| e.etag.clone())
-    );
-    // No flap: two more rounds and the delete is still published, in both trees.
-    for _ in 0..2 {
-        a.run_barrier().await.unwrap();
-        b.run_barrier().await.unwrap();
-    }
-    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-    assert!(!m.entries.contains_key("x.txt"), "the path flapped back into the manifest");
-    assert!(read(dir_a.path(), "x.txt").is_none() && read(dir_b.path(), "x.txt").is_none());
-    assert_eq!(read(dir_b.path(), "keep.txt").as_deref(), Some("keep"));
-}
 
 /// C1 (review 2026-09-18): A NAME RULE WITH NO OWNER. The walk skips every
 /// name ending in `.flint-sync-tmp` (the consume's temp sibling, atomicity-7)
@@ -11412,8 +11270,8 @@ async fn a_consumed_entry_named_like_a_consume_temp_is_surfaced_never_collected(
     write(dir.path(), "agent.txt", "agent work");
     sc.run_barrier().await.unwrap();
 
-    // An older gateway, or a client that chose the name: object first,
-    // then the inbox entry, acked.
+    // An older gateway, or a client that chose the name: a document that
+    // CITES it (P2: a UI write commits).
     let path = "notes/report.flint-sync-tmp";
     let key = sc.cfg.file_key(path);
     let body = Bytes::from_static(b"user bytes");
@@ -11428,11 +11286,14 @@ async fn a_consumed_entry_named_like_a_consume_temp_is_surfaced_never_collected(
         .put_whole(&key, body.clone(), &PutCondition::IfNoneMatchAny, &stamps, crc64_nvme(&body))
         .await
         .unwrap();
-    inbox::gateway_append(
-        store.as_ref(),
-        &sc.cfg,
-        InboxEntry { path: path.into(), etag: meta.etag.clone(), author: "reviewer".into(), added_unix: now_unix(), crc64_b64: None, cited: None },
-    )
+    let (etag, crc) = (meta.etag.clone(), crc_of("user bytes"));
+    let k = key.clone();
+    gateway_commit(&store, &sc.cfg, "gateway-old", move |doc| {
+        doc.entries.insert(path.into(), manifest::LeanEntry {
+            key: k.clone(), etag: etag.clone(), crc64_b64: crc.clone(), size: 10,
+            mode: 0o644, mtime_unix: 0, generation: 1, epoch: 0,
+        });
+    })
     .await
     .unwrap();
 
@@ -11446,7 +11307,7 @@ async fn a_consumed_entry_named_like_a_consume_temp_is_surfaced_never_collected(
     );
     assert!(read(dir.path(), path).is_none(), "a reserved name was materialised into the tree");
     let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
-    assert!(!m.entries.contains_key(path), "a reserved name was cited");
+    assert!(m.entries.contains_key(path), "the walk's blind spot became a delete of the citation");
     let recs = std::fs::read_to_string(sc.cfg.state_dir().join("conflicts.jsonl")).unwrap_or_default();
     assert!(
         recs.contains("consume-refused-containment") && recs.contains(path),
@@ -11454,709 +11315,900 @@ async fn a_consumed_entry_named_like_a_consume_temp_is_surfaced_never_collected(
     );
 }
 
-/// H1b (review 2026-09-18, found by the model once `Inv_NoDeleteResurrected`
-/// reached `LeanBarrierLeaseOrphanTracked`): THE SWEEP'S ENTRY OUTLIVES THE
-/// CITATION IT WAS JUDGED AGAINST. The untracked sweep (finding 10) tracks an
-/// object at a CITED key whose etag the manifest does not cite — and a live
-/// writer's upload still in flight is exactly that once its grace elapses; a
-/// long step 3 is enough, no stall needed. The uploader then commits the
-/// very generation and the entry is redundant but stays: the window clear
-/// removes what a barrier CONSUMED, and this barrier read the cell before
-/// the entry existed. The uploader's agent deletes the file, its barrier
-/// publishes the delete, and a crash between that CAS and its GC leaves the
-/// object at the key and the entry in the cell. The other writer's consume
-/// finds an entry, a live object and a clean path, and adopts a generation
-/// the manifest cited and then deliberately dropped; its baseline moves,
-/// its merge base does not, and its citation repair re-cites the deleted
-/// generation on every tree.
-///
-/// The entry now carries the citation the sweep judged the object against
-/// (`InboxEntry::cited`), and a consume honours it only while the manifest
-/// still cites exactly that: nobody acked these bytes, so a citation that
-/// moved on — to the object itself, to a newer one, or to nothing — is the
-/// end of them. A gateway's entry carries no such clause (an acked write
-/// survives a concurrent delete: modify wins), and neither does a
-/// merge-preserved one.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_sweep_entry_that_outlived_the_citation_it_was_judged_against_does_not_resurrect_a_delete() {
-    let inner = Arc::new(MemoryStore::new());
-    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
-    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let mut a = hooked_syncer(&ha, dir_a.path());
-    let mut b = syncer(&inner, dir_b.path()).await;
-    b.cfg.untracked_grace_secs = 0;
-    a.checkout().await.unwrap();
-    write(dir_a.path(), "p1.txt", "v1");
-    write(dir_a.path(), "keep.txt", "keep");
-    a.run_barrier().await.unwrap();
-    b.checkout().await.unwrap();
-    assert_eq!(read(dir_b.path(), "p1.txt").as_deref(), Some("v1"));
-    let key = a.cfg.file_key("p1.txt");
-    let e1 = inner.head(&key).await.unwrap().etag;
 
-    // A's agent edits p1. A's upload lands and, before A commits it, B's
-    // sweep runs: the grace is a timer, and a barrier's step 3 outlasts it.
-    write(dir_a.path(), "p1.txt", "v2 by A's agent");
-    backdate_baseline(&a, "p1.txt");
-    let b_slot = std::sync::Mutex::new(Some(b));
-    let b_done: Arc<std::sync::Mutex<Option<Syncer>>> = Arc::new(std::sync::Mutex::new(None));
-    let b_done_in = b_done.clone();
-    let tracked: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(vec![]));
-    let tracked_in = tracked.clone();
-    ha.after_put(&key, move || {
-        let b = b_slot.lock().unwrap().take().expect("hook ran twice");
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                *tracked_in.lock().unwrap() = b.track_untracked(now_unix() + 1).await.expect("B's sweep");
-            })
-        });
-        *b_done_in.lock().unwrap() = Some(b);
-    });
-    a.run_barrier().await.unwrap();
-    let mut b = b_done.lock().unwrap().take().expect("fixture: the hook never ran");
-    assert_eq!(*tracked.lock().unwrap(), vec!["p1.txt".to_string()], "fixture: the sweep did not track A's in-flight upload");
-    let e2 = inner.head(&key).await.unwrap().etag;
-    assert_ne!(e1, e2);
-    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-    assert_eq!(m.entries["p1.txt"].etag, e2, "fixture: A's commit did not cite its upload");
-    let doc = inbox::load(inner.as_ref(), &a.cfg).await.unwrap().doc;
-    assert!(
-        doc.entries.iter().any(|e| e.path == "p1.txt" && e.etag == e2 && e.author == super::untracked::UNTRACKED_AUTHOR),
-        "fixture: the sweep's entry did not outlive the commit that cited it: {:?}",
-        doc.entries
+// ---- review 2026-09-18, H10: an ack after the barrier that carried the declaration
+
+/// Two writers on one published file; A's agent edits it (and deletes a
+/// second one) and declares a boundary, and the sentinel is consumed.
+async fn h10_declared_edit(store: &Arc<MemoryStore>, dir_a: &std::path::Path, dir_b: &std::path::Path) -> (Syncer, Syncer) {
+    let mut a = syncer(store, dir_a).await;
+    let mut b = syncer(store, dir_b).await;
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture).unwrap();
+    a.checkout().await.unwrap();
+    write(dir_a, "shared.txt", "v1");
+    write(dir_a, "gone.txt", "published, then deleted by A's agent before the touch");
+    a.floor_tick().await.unwrap();
+    a.floor_tick().await.unwrap();
+    b.checkout().await.unwrap();
+
+    write(dir_a, "shared.txt", "A's declared v2");
+    backdate_baseline(&a, "shared.txt");
+    std::fs::remove_file(dir_a.join("gone.txt")).unwrap();
+    touch_sentinel(dir_a, control::PUBLISH, r#"{"nonce":"n-1"}"#);
+    a.poll_sentinels().unwrap();
+    assert!(a.load_pending(Verb::Publish).unwrap().is_some(), "fixture: the sentinel was not consumed");
+    (a, b)
+}
+
+/// The install carried the whole declaration.
+async fn h10_assert_carried(store: &Arc<MemoryStore>, a: &Syncer) {
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries["shared.txt"].crc64_b64, crc_of("A's declared v2"), "fixture: the declared edit was not installed");
+    assert!(!m.entries.contains_key("gone.txt"), "the install withheld the delete the agent declared");
+}
+
+/// B integrates A's install, then deletes the declared file knowingly, in
+/// a boundary of its own. Returns the seq of B's delete.
+async fn h10_peer_deletes(store: &Arc<MemoryStore>, b: &mut Syncer, dir_b: &std::path::Path) -> u64 {
+    b.floor_tick().await.unwrap();
+    b.floor_tick().await.unwrap();
+    assert_eq!(read(dir_b, "shared.txt").as_deref(), Some("A's declared v2"), "fixture: A's edit never reached B");
+    std::fs::remove_file(dir_b.join("shared.txt")).unwrap();
+    b.declared_barrier().await.unwrap();
+    let m = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
+    assert!(!m.entries.contains_key("shared.txt"), "fixture: B's delete did not publish");
+    m.seq
+}
+
+/// The claim every H10 route shares: the document the ack names does not
+/// cite the declared file (B deleted it; under P1-lite A's consume takes
+/// the delete too). `ok` says the declared point is in it; it is
+/// `partial`, and `report.dropped` names the path.
+fn h10_assert_ack_is_honest(_dir_a: &std::path::Path, ack: &super::sentinel::Ack, peer_seq: u64) {
+    assert!(ack.seq >= Some(peer_seq), "fixture: the ack names a document older than B's delete: {ack:?}");
+    assert_eq!(
+        ack.status, "partial",
+        "the ack says the declared boundary is in seq {:?}, which no longer cites shared.txt: {ack:?}",
+        ack.seq
+    );
+    assert_eq!(ack.report.dropped, vec!["shared.txt".to_string()], "{ack:?}");
+}
+
+/// Review 2026-09-18, H10, as the model found it (the crash world at
+/// OrphanTrack = TRUE, depth 25): the honor's barrier installs A's
+/// declared edit and runs step 7, and the container restarts before the
+/// ack. B deletes the file. The restarted incarnation's re-run has nothing
+/// of its own to publish and finds the manifest moved: it pulls B's
+/// document and queues the delete — and acked that seq `ok`.
+#[tokio::test]
+async fn a_restart_between_the_install_and_the_ack_does_not_ack_a_peers_later_delete_as_the_declaration() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (mut a, mut b) = h10_declared_edit(&store, dir_a.path(), dir_b.path()).await;
+
+    // The honor's barrier, through step 7; the ack is never written.
+    a.declared_barrier_as("sentinel").await.unwrap();
+    h10_assert_carried(&store, &a).await;
+    assert!(a.read_ack(Verb::Publish).is_none(), "fixture: an ack was written");
+    drop(a);
+
+    let peer_seq = h10_peer_deletes(&store, &mut b, dir_b.path()).await;
+
+    // The restart.
+    let mut a = syncer(&store, dir_a.path()).await;
+    a.settle_pending_at_startup().await.unwrap();
+    let ack = a.read_ack(Verb::Publish).expect("the restart answered nothing");
+    h10_assert_ack_is_honest(dir_a.path(), &ack, peer_seq);
+    assert!(a.load_pending(Verb::Publish).unwrap().is_none());
+}
+
+/// H10 with no restart: the honor's barrier installs, and the ack write
+/// fails (a directory squats on the ack path). The pending stands; B
+/// deletes the file; the next honor re-runs, pulls B's document — and
+/// acked that seq `ok`.
+#[tokio::test]
+async fn an_ack_write_that_failed_is_not_answered_later_with_a_peers_delete_as_the_declaration() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (mut a, mut b) = h10_declared_edit(&store, dir_a.path(), dir_b.path()).await;
+
+    let squat = dir_a.path().join(super::CONTROL_DIR).join(control::PUBLISH_ACK);
+    let _ = std::fs::remove_file(&squat);
+    std::fs::create_dir_all(squat.join("occupied")).unwrap();
+    clear_min_interval(&a);
+    assert!(a.honor_pending(Verb::Publish, false).await.is_err(), "fixture: the ack write did not fail");
+    h10_assert_carried(&store, &a).await;
+    assert!(a.load_pending(Verb::Publish).unwrap().is_some(), "fixture: the pending was retired");
+    std::fs::remove_dir_all(&squat).unwrap();
+
+    let peer_seq = h10_peer_deletes(&store, &mut b, dir_b.path()).await;
+
+    let ack = a.honor_pending(Verb::Publish, true).await.unwrap().expect("nothing was answered");
+    h10_assert_ack_is_honest(dir_a.path(), &ack, peer_seq);
+}
+
+/// H10's third route: the honor fails before its commit, and the floor
+/// tick runs its cadence barrier anyway (`floor_tick`; review 2026-09-12
+/// ack-1: an honor error must not cost the cadence boundary). That
+/// barrier began after the consume, so it carries the declaration — ALL
+/// of it: it used to withhold the delete the agent declared (a first
+/// absence waits for a second scan outside a declared barrier; the
+/// model's `DSet` confirms it whenever a declaration stands). The re-run
+/// honor then acked B's later delete `ok`.
+#[tokio::test]
+async fn the_floors_cadence_barrier_after_a_failed_honor_carries_the_whole_declaration() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (mut a, mut b) = h10_declared_edit(&store, dir_a.path(), dir_b.path()).await;
+
+    // What `floor_tick` runs when the honor before it failed.
+    a.cadence_barrier().await.unwrap();
+    h10_assert_carried(&store, &a).await;
+    let carried = manifest::load_pointer(store.as_ref(), &a.cfg).await.unwrap().unwrap();
+    assert_eq!(
+        carried.pointer.boundary_source.as_deref(),
+        Some("sentinel-deferred"),
+        "the install is stamped with the clock that published the declaration"
     );
 
-    // A's agent deletes p1 and declares it; the barrier that publishes the
-    // delete is cut off between its CAS and its GC — the object stays at
-    // the key, the entry stays in the cell, and A holds the cell, dead.
-    std::fs::remove_file(dir_a.path().join("p1.txt")).unwrap();
-    ha.before_delete(&key, || panic!("A is replaced between its CAS and its GC"));
-    let ja = std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
-        rt.block_on(a.declared_barrier())
-    });
-    assert!(ja.join().is_err(), "fixture: A was not cut off between its CAS and its GC");
-    let m = manifest::load(inner.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
-    assert!(!m.entries.contains_key("p1.txt"), "fixture: A's delete never published");
-    assert_eq!(inner.head(&key).await.unwrap().etag, e2, "fixture: the object did not survive A's crash");
-    let doc = inbox::load(inner.as_ref(), &b.cfg).await.unwrap().doc;
-    assert!(doc.entries.iter().any(|e| e.path == "p1.txt" && e.etag == e2), "fixture: the entry did not survive A's crash");
+    let peer_seq = h10_peer_deletes(&store, &mut b, dir_b.path()).await;
 
-    // B consumes the cell (deposing the dead holder on its way to the
-    // commit). THE CLAIM: a generation the manifest cited and then dropped
-    // is not re-cited through an entry nobody acked — and the entry's bytes
-    // never reach the tree either: the consume drops an entry whose
-    // citation has moved, rather than adopting it and voiding it later
-    // (which would show the agent a deleted file for a barrier).
-    b.run_barrier().await.unwrap();
-    let m = manifest::load(inner.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
+    let ack = a.honor_pending(Verb::Publish, true).await.unwrap().expect("nothing was answered");
+    h10_assert_ack_is_honest(dir_a.path(), &ack, peer_seq);
+}
+
+// ---- review 2026-09-18, H4: a declared removal removes the version it named
+
+
+
+
+
+
+// ---- review 2026-09-18, H3: S3's 409 on the inbox cell is a lost race
+
+
+
+/// H3, the cell's one remaining writer (under P2 the cell carries only the
+/// verb requests): one 409 is a lost race, retried, never an error.
+#[tokio::test]
+async fn a_verb_request_retries_a_409_on_the_cell() {
+    let inner = Arc::new(MemoryStore::new());
+    let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = cfg_for(dir.path());
+    let st: &dyn ObjectStore = hooked.as_ref();
+    *hooked.1.put_conflicts.lock().unwrap() = Some((cfg.inbox_key(), 1));
+    inbox::gateway_request(st, &cfg, inbox::RequestedVerb::Boundary, "ui")
+        .await
+        .expect("a 409 on the cell was an error, not a lost race");
+    assert_eq!(hooked.1.put_conflicts.lock().unwrap().as_ref().map(|x| x.1), Some(0), "fixture: no 409 was injected");
+    assert!(inbox::load(inner.as_ref(), &cfg).await.unwrap().doc.boundary_request.is_some());
+}
+
+// ---- review 2026-09-18, H7: the consume never overwrites a write it did not see
+
+/// A clean path, a UI write of it committed (P2) and QUEUED by the syncer's
+/// merge, and the syncer whose next barrier consumes it.
+async fn h7_fixture(path: &str) -> (Arc<MemoryStore>, tempfile::TempDir, Syncer) {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = syncer(&store, dir.path()).await;
+    sc.checkout().await.unwrap();
+    write(dir.path(), path, "v0");
+    sc.run_barrier().await.unwrap();
+    // The UI's save COMMITS; the next barrier's consume owes it to the tree.
+    hitl_write(&store, &sc.cfg, path, "the ui's version", "ui").await.unwrap();
+    assert_eq!(read(dir.path(), path).as_deref(), Some("v0"), "fixture: the UI write already reached the tree");
+    (store, dir, sc)
+}
+
+fn h7_hook(stage: &'static str, root: &std::path::Path, path: &str, agent_bytes: &'static str) {
+    let target = root.join(path);
+    super::barrier::CONSUME_WINDOW_HOOK.with(|h| {
+        *h.borrow_mut() = Some((
+            path.to_string(),
+            stage,
+            Box::new(move || std::fs::write(&target, agent_bytes).unwrap()),
+        ))
+    });
+}
+
+/// Review 2026-09-18, H7. The consume's post-fetch re-stat (the
+/// atomicity-3 fix) is followed by the CRC over the body, the containment
+/// walk and a temp write of the whole body, then a rename over the path —
+/// tens to hundreds of milliseconds for a large file. An agent write in
+/// that window was overwritten with no record. It is the dirty case: the
+/// agent's version stays and publishes, the UI's is preserved.
+#[tokio::test]
+async fn the_consume_never_overwrites_an_agent_write_made_while_it_writes() {
+    let (store, dir, mut sc) = h7_fixture("h7-a.txt").await;
+    h7_hook("before-write", dir.path(), "h7-a.txt", "the agent's write, inside the consume's window");
+    sc.run_barrier().await.unwrap();
     assert!(
-        !m.entries.contains_key("p1.txt"),
-        "B's citation repair resurrected A's delete through the sweep's entry: the manifest cites p1.txt at {:?}",
-        m.entries.get("p1.txt").map(|e| e.etag.clone())
+        super::barrier::CONSUME_WINDOW_HOOK.with(|h| h.borrow().is_none()),
+        "fixture: the consume never reached its write window"
     );
     assert_eq!(
-        read(dir_b.path(), "p1.txt").as_deref(),
-        Some("v1"),
-        "B's consume materialised a generation the manifest had cited and dropped"
+        read(dir.path(), "h7-a.txt").as_deref(),
+        Some("the agent's write, inside the consume's window"),
+        "the consume overwrote an agent write it never saw"
     );
-    // No flap, and the entry is spent: two more rounds and the delete is still published.
-    for _ in 0..2 {
-        b.run_barrier().await.unwrap();
-    }
-    let m = manifest::load(inner.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
-    assert!(!m.entries.contains_key("p1.txt"), "the path flapped back into the manifest");
-    let doc = inbox::load(inner.as_ref(), &b.cfg).await.unwrap().doc;
-    assert!(!doc.entries.iter().any(|e| e.path == "p1.txt"), "the spent entry is still in the cell: {:?}", doc.entries);
-    // And the delete REACHES B's tree: the leaked generation at the key —
-    // one this tree never integrated, so its tombstone names the older
-    // one — is cited by nothing and tracked by nothing, and supersedes no
-    // deletion.
+    let c = sc.state.load_conflicts().unwrap();
+    // The consume stepped aside; the barrier's publish of the agent's
+    // version preserves the UI's under R7's record.
+    let rec = c
+        .iter()
+        .find(|r| r.path == "h7-a.txt" && r.kind.starts_with("commit-surfaced-foreign"))
+        .expect("no record of the UI's version");
+    let (_, body) = store.get_whole(rec.preserved_key.as_ref().unwrap(), None).await.unwrap();
+    assert_eq!(&body[..], b"the ui's version");
+    // ...and the agent's version is what the manifest cites once published.
+    sc.run_barrier().await.unwrap();
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries["h7-a.txt"].crc64_b64, crc_of("the agent's write, inside the consume's window"));
+}
+
+/// H7's second window: after the rename, the baseline recorded a FRESH
+/// stat of the path — so an agent write that landed between the rename
+/// and that stat was recorded as the consumed version, read as clean by
+/// every later scan, and never published.
+#[tokio::test]
+async fn an_agent_write_just_after_the_consume_is_published() {
+    let (store, dir, mut sc) = h7_fixture("h7-b.txt").await;
+    h7_hook("after-rename", dir.path(), "h7-b.txt", "the agent's write, after the rename, much longer");
+    sc.run_barrier().await.unwrap();
     assert!(
-        read(dir_b.path(), "p1.txt").is_none(),
-        "the peer's published delete never reached B's tree: the leaked generation superseded the tombstone"
+        super::barrier::CONSUME_WINDOW_HOOK.with(|h| h.borrow().is_none()),
+        "fixture: the consume never reached its write window"
     );
-    assert_eq!(read(dir_b.path(), "keep.txt").as_deref(), Some("keep"));
+    sc.run_barrier().await.unwrap();
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(
+        m.entries["h7-b.txt"].crc64_b64,
+        crc_of("the agent's write, after the rename, much longer"),
+        "an agent write made just after the consume was recorded as the consumed version and never published"
+    );
 }
 
-/// H1b, the shape that needs no crash and that the consume-time rule cannot
-/// see: the other writer consumes the sweep's entry while it is still
-/// genuinely pending (the manifest cites what the sweep judged against), so
-/// it adopts; the uploader then commits the very generation, its agent
-/// deletes the file and the delete is published — all while the consumer
-/// is between its consume and its claim (a long step 3). The consumer's
-/// repair would re-cite the deleted generation. A sweep adoption is
-/// provisional now: the baseline entry carries the citation the sweep
-/// judged against (`BaselineEntry::judged`), the repair is withheld once
-/// that citation has moved, and the path is queued as a tombstone that the
-/// next consume applies over the leaked object, which nothing cites and
-/// nothing tracks — a leak supersedes nothing.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_sweep_adoption_is_void_once_the_citation_it_was_judged_against_moves() {
-    sweep_adoption_voided(false).await;
-}
+// ---- review 2026-09-18, H5: no component of an upload's path is a symlink
 
-/// The same, with B's merge base never having had the path: B checked out
-/// before A created p1, and its first merge is the one that voids the
-/// adoption. Nothing else queues the deletion that removes the clean copy —
-/// the merge base has no entry for the tombstone to come from — so the void
-/// itself queues it (`void_stale_repairs`' returned `gone`).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_voided_sweep_adoption_of_a_path_the_merge_base_never_had_is_removed() {
-    sweep_adoption_voided(true).await;
-}
-
-async fn sweep_adoption_voided(b_checks_out_before_p1: bool) {
+/// Review 2026-09-18, H5 — atomicity-6 one directory up. The upload's
+/// lstat and its O_NOFOLLOW open guard the LAST component only; `mv d
+/// d.bak; ln -s <outside> d` between the scan and the upload makes
+/// `d/cfg.yaml` a regular file OUTSIDE the workspace (`/proc/self` works
+/// the same way, and `environ` is the syncer's credentials), and it was
+/// published and cited. Every component is resolved without following a
+/// link.
+#[tokio::test]
+async fn the_upload_refuses_a_directory_swapped_for_a_symlink_after_the_scan() {
     let inner = Arc::new(MemoryStore::new());
-    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
-    let hb = Arc::new(Hooked(inner.clone(), Hooks::default()));
-    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let mut a = hooked_syncer(&ha, dir_a.path());
-    let mut b = hooked_syncer(&hb, dir_b.path());
-    b.cfg.untracked_grace_secs = 0;
-    let cfg = a.cfg.clone();
+    let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = hooked_syncer(&hooked, dir.path());
     a.checkout().await.unwrap();
-    write(dir_a.path(), "seed.txt", "seed");
-    a.run_barrier().await.unwrap();
-    if b_checks_out_before_p1 {
-        b.checkout().await.unwrap();
-    }
-    write(dir_a.path(), "p1.txt", "v1");
-    a.run_barrier().await.unwrap();
-    if b_checks_out_before_p1 {
-        assert!(read(dir_b.path(), "p1.txt").is_none(), "fixture: B's tree must predate p1");
-        assert!(
-            !b.state.load_baseline().unwrap().inst_base.contains_key("p1.txt"),
-            "fixture: B's merge base already has p1"
-        );
-    } else {
-        b.checkout().await.unwrap();
-        assert_eq!(read(dir_b.path(), "p1.txt").as_deref(), Some("v1"));
-    }
-    let key = cfg.file_key("p1.txt");
-    let e1 = inner.head(&key).await.unwrap().etag;
-
-    // A's agent edits p1. A's upload lands and, before A commits it, B's
-    // sweep tracks it and B's barrier consumes it — adopting v2 as the
-    // pending write it looks like — then parks in its own step 3, uploading
-    // b.txt, until A is done.
-    write(dir_a.path(), "p1.txt", "v2 by A's agent");
-    backdate_baseline(&a, "p1.txt");
-    write(dir_b.path(), "b.txt", "B works elsewhere");
-    let reached = Arc::new(std::sync::Barrier::new(2));
-    let gate = Arc::new(std::sync::Barrier::new(2));
-    let (reached_in, gate_in) = (reached.clone(), gate.clone());
-    hb.after_put(&cfg.file_key("b.txt"), move || {
-        reached_in.wait();
-        gate_in.wait();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("cfg.yaml"), "SECRET, outside the workspace").unwrap();
+    write(dir.path(), "d/cfg.yaml", "harmless");
+    write(dir.path(), "aaa-first.txt", "uploads before d/cfg.yaml");
+    a.cfg.upload_fanout = 1;
+    let (d, bak, target) = (dir.path().join("d"), dir.path().join("d.bak"), outside.path().to_path_buf());
+    hooked.before_put(&a.cfg.file_key("aaa-first.txt"), move || {
+        std::fs::rename(&d, &bak).unwrap();
+        std::os::unix::fs::symlink(&target, &d).unwrap();
     });
-    let b_slot = std::sync::Mutex::new(Some(b));
-    type Parked = std::thread::JoinHandle<(Syncer, crate::LeanResult<super::barrier::BarrierReport>)>;
-    let b_thread: Arc<std::sync::Mutex<Option<Parked>>> = Arc::new(std::sync::Mutex::new(None));
-    let b_thread_in = b_thread.clone();
-    let reached_a = reached.clone();
-    ha.after_put(&key, move || {
-        let b = b_slot.lock().unwrap().take().expect("hook ran twice");
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let t = b.track_untracked(now_unix() + 1).await.expect("B's sweep");
-                assert_eq!(t, vec!["p1.txt".to_string()], "fixture: the sweep did not track A's in-flight upload");
-            })
-        });
-        *b_thread_in.lock().unwrap() = Some(barrier_on_thread(b));
-        reached_a.wait(); // B has consumed and is parked in its upload.
-    });
-    a.run_barrier().await.unwrap();
-    let e2 = inner.head(&key).await.unwrap().etag;
-    assert_ne!(e1, e2);
-    let m = manifest::load(inner.as_ref(), &cfg).await.unwrap().unwrap().manifest;
-    assert_eq!(m.entries["p1.txt"].etag, e2, "fixture: A's commit did not cite its upload");
-    assert_eq!(read(dir_b.path(), "p1.txt").as_deref(), Some("v2 by A's agent"), "fixture: B's consume did not adopt the pending write");
 
-    // A's agent deletes p1 and declares it; the delete is published and A
-    // is cut off between its CAS and its GC, so the object leaks at the key.
-    std::fs::remove_file(dir_a.path().join("p1.txt")).unwrap();
-    ha.before_delete(&key, || panic!("A is replaced between its CAS and its GC"));
-    let ja = std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
-        rt.block_on(a.declared_barrier())
-    });
-    assert!(ja.join().is_err(), "fixture: A was not cut off between its CAS and its GC");
-    let m = manifest::load(inner.as_ref(), &cfg).await.unwrap().unwrap().manifest;
-    assert!(!m.entries.contains_key("p1.txt"), "fixture: A's delete never published");
-    assert_eq!(inner.head(&key).await.unwrap().etag, e2, "fixture: the object did not survive A's crash");
+    let r = a.run_barrier().await.expect("a planted directory link must not fail the barrier");
+    assert!(dir.path().join("d.bak").exists(), "fixture: the swap never ran");
+    assert!(!r.uploaded.contains(&"d/cfg.yaml".to_string()), "the link's target was published: {r:?}");
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(!m.entries.contains_key("d/cfg.yaml"), "the manifest cites a file outside the workspace");
+    assert!(inner.head(&a.cfg.file_key("d/cfg.yaml")).await.is_err(), "the outside bytes reached the bucket");
+    let recs = a.state.load_conflicts().unwrap();
+    assert!(recs.iter().any(|c| c.path == "d/cfg.yaml"), "nothing recorded the refusal: {recs:?}");
+}
 
-    // B resumes: claims (deposing the dead holder), merges, commits. THE
-    // CLAIM: its adoption is void — the citation it was judged against has
-    // moved on — and the deleted generation is not re-cited.
-    gate.wait();
-    let (mut b, rb) = b_thread.lock().unwrap().take().unwrap().join().unwrap();
-    rb.expect("B's barrier");
-    let m = manifest::load(inner.as_ref(), &cfg).await.unwrap().unwrap().manifest;
-    assert!(
-        !m.entries.contains_key("p1.txt"),
-        "B's citation repair resurrected A's delete through a sweep adoption whose citation had moved: the manifest cites p1.txt at {:?}",
-        m.entries.get("p1.txt").map(|e| e.etag.clone())
+/// Review 2026-09-18, H5's RESIDUAL. The fix above gave the whole-PUT
+/// path one descriptor from a walk that follows no link at any depth,
+/// and takes the stamps, the size and the bytes from it. The COMPOSE
+/// path (`> whole_put_max`) then hands the store a PATH
+/// (`ComposeSpec::local_path`) and the store opens it again, once per
+/// part, with `O_NOFOLLOW` on the LAST COMPONENT ONLY
+/// (`flint-store/src/s3.rs::read_local`, and the same in `memory.rs`).
+/// So the window the fix closed reopens between the syncer's open and
+/// the store's read, and it is wider than the original: it spans every
+/// part of a large upload.
+///
+/// The swap is planted in exactly that window — after `upload_one` has
+/// opened the file safely, before the store reads a byte. A large file
+/// under a directory swapped for a symlink out of the workspace must
+/// never publish the LINK TARGET's bytes; publishing its own, from the
+/// descriptor already open, is the right outcome and what the fix does.
+///
+/// MUTATION: give `ComposeSpec` back a path and reopen it in
+/// `read_local`; this test publishes "SECRET, outside the workspace"
+/// under `files/d/cfg.yaml` and fails on the body assertion.
+#[tokio::test]
+async fn the_compose_path_reads_the_descriptor_it_was_given_not_the_path_it_was_named() {
+    let inner = Arc::new(MemoryStore::new());
+    let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = hooked_syncer(&hooked, dir.path());
+    a.checkout().await.unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let mine = "harmless bytes, inside the workspace";
+    // The same LENGTH as the workspace's own file: the store reads the
+    // part sizes the syncer measured through its descriptor, so a
+    // shorter target fails the read and hides the harm behind an error.
+    let theirs = format!("{:!<1$}", "SECRET, outside the workspace", mine.len());
+    assert_eq!(theirs.len(), mine.len());
+    std::fs::write(outside.path().join("cfg.yaml"), &theirs).unwrap();
+    write(dir.path(), "d/cfg.yaml", mine);
+    a.cfg.upload_fanout = 1;
+    a.cfg.whole_put_max = 8; // 8 bytes: everything bigger composes
+    let (d, bak, target) =
+        (dir.path().join("d"), dir.path().join("d.bak"), outside.path().to_path_buf());
+    hooked.before_compose(&a.cfg.file_key("d/cfg.yaml"), move || {
+        std::fs::rename(&d, &bak).unwrap();
+        std::os::unix::fs::symlink(&target, &d).unwrap();
+    });
+
+    let r = a.run_barrier().await.expect("a planted directory link must not fail the barrier");
+    assert!(dir.path().join("d.bak").exists(), "fixture: the swap never ran");
+    assert!(r.uploaded.contains(&"d/cfg.yaml".to_string()), "fixture: the compose path never ran: {r:?}");
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let key = m.entries.get("d/cfg.yaml").expect("the file was not published at all").key.clone();
+    let (_, body) = inner.get_whole(&key, None).await.unwrap();
+    assert_eq!(
+        std::str::from_utf8(&body).unwrap(),
+        mine,
+        "the compose path published the link target's bytes: it reopened the path instead of \
+         reading the descriptor the syncer opened"
     );
-    assert_eq!(m.entries["b.txt"].etag, inner.head(&cfg.file_key("b.txt")).await.unwrap().etag, "B's own upload was not cited");
-    // And the delete reaches B's tree: the leaked object, cited by nothing
-    // and tracked by nothing, supersedes no tombstone.
-    for _ in 0..2 {
-        b.run_barrier().await.unwrap();
+}
+
+// ---- review 2026-09-18, H2: the commit's fence, and the rotation a restart skipped
+
+/// Review 2026-09-18, H2 (the fence's position). The commit section read
+/// the cell ONCE, before its HEAD fan-out and its window, and then loaded
+/// the manifest and CASed onto it with no fence. A holder deposed in
+/// between — a long fan-out is enough; nothing renews there — loaded its
+/// SUCCESSOR's document, rotation included, so the rotation fenced
+/// nothing and the deposed holder's install landed on top of the
+/// successor's commit. The model's CAS carried an atomic fence and could
+/// not see it (`LeanBarrierLeaseStragglerLoadsSuccessor`).
+#[tokio::test]
+async fn a_holder_deposed_during_its_commit_heads_does_not_install_onto_its_successors_document() {
+    let inner = Arc::new(MemoryStore::new());
+    let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = hooked_syncer(&hooked, dir_a.path());
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "base.txt", "x");
+    a.run_barrier().await.unwrap();
+    syncer(&inner, dir_b.path()).await.checkout().await.unwrap();
+
+    // A's next barrier holds the cell; while its commit re-reads the
+    // citation it adds, B deposes it (six quiet polls, rotation) and
+    // commits a change of its own.
+    write(dir_a.path(), "a.txt", "A's upload");
+    {
+        let (inner, root_b) = (inner.clone(), dir_b.path().to_path_buf());
+        hooked.after_head(&a.cfg.file_key("a.txt"), move || {
+            let (inner, root_b) = (inner.clone(), root_b.clone());
+            std::thread::spawn(move || {
+                tokio::runtime::Runtime::new().unwrap().block_on(async {
+                    let mut b = syncer(&inner, &root_b).await;
+                    assert!(claim_until_held(&mut b, 10).await, "fixture: B never deposed A");
+                    write(&root_b, "b.txt", "B's commit");
+                    b.run_barrier().await.unwrap();
+                })
+            })
+            .join()
+            .unwrap();
+        });
     }
+    let before = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.seq;
+    let r = a.run_barrier().await;
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("b.txt"), "fixture: B's commit did not land (seq {before} -> {})", m.seq);
     assert!(
-        read(dir_b.path(), "p1.txt").is_none(),
-        "the peer's published delete never reached B's tree: {}",
-        if b_checks_out_before_p1 {
-            "the voided adoption was never queued as a tombstone, and the merge base had no entry to queue one from"
-        } else {
-            "the leaked generation superseded the tombstone"
+        !m.entries.contains_key("a.txt"),
+        "A, deposed during its commit, installed onto its successor's rotated document: {r:?}"
+    );
+    assert!(matches!(r, Err(LeanError::Fenced(_))), "a deposed holder's barrier must end fenced: {r:?}");
+}
+
+/// Review 2026-09-18, H2 (the rotation a restart skipped). B deposes A —
+/// its acquire LANDS — and B's container dies before the takeover
+/// rotation. The restarted container finds the cell under its own holder
+/// id and released it (`release_stale_own`) with NO rotation; the next
+/// claimant took the released cell without one either. A, alive and
+/// slow, had loaded and verified before the deposal: its CAS on the
+/// unmoved pointer landed. The orphaned-own arm of `claim_step`, written
+/// for exactly this state, was never reached from the restart.
+#[tokio::test]
+async fn a_restart_between_a_deposal_and_its_rotation_still_rotates() {
+    let inner = Arc::new(MemoryStore::new());
+    let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b, dir_c) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = hooked_syncer(&hooked, dir_a.path());
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "f.txt", "x");
+    a.run_barrier().await.unwrap();
+    // A holds a commit section: it has loaded the manifest (and read the
+    // cell), and stalls before its CAS.
+    assert!(claim_until_held(&mut a, 3).await);
+    let straggler = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap();
+
+    // B deposes A; the acquire lands and B dies before rotating.
+    let mut b = hooked_syncer(&hooked, dir_b.path());
+    loop {
+        match lease::claim_step(&mut b, true).await.unwrap() {
+            lease::ClaimOutcome::Waiting { quiet_polls, .. } if quiet_polls >= 5 => break,
+            lease::ClaimOutcome::Waiting { .. } => {}
+            lease::ClaimOutcome::Claimed(_) => panic!("fixture: claimed before the threshold"),
         }
+    }
+    hooked.1.acquire_err_once.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(lease::claim_step(&mut b, true).await.is_err(), "fixture: the acquire's response was not lost");
+    let b_id = b.state.load_incarnation().unwrap().unwrap().holder_id;
+    assert_eq!(inner.epoch_read(&a.cfg.epoch_key()).await.unwrap().unwrap().holder_id, b_id, "fixture: B's acquire did not land");
+    drop(b);
+
+    // B's container restarts and releases what it finds held under its id;
+    // C claims the released cell.
+    let mut b2 = hooked_syncer(&hooked, dir_b.path());
+    lease::release_stale_own(&mut b2).await.unwrap();
+    let mut c = syncer(&inner, dir_c.path()).await;
+    assert!(claim_until_held(&mut c, 3).await, "fixture: C could not claim the released cell");
+
+    // A's CAS, on the document it loaded before it was deposed.
+    let mut mine = straggler.manifest.clone();
+    mine.seq += 1;
+    let r = manifest::cas_write(inner.as_ref(), &a.cfg, &mine, Some(&straggler.handle()), 1, "straggler").await;
+    assert!(
+        matches!(r, Err(LeanError::Store(flint_store::StoreError::PreconditionFailed(_)))),
+        "a deposed holder's CAS landed: the restart released the deposal without its rotation ({:?})",
+        r.map(|m| m.etag)
     );
-    let m = manifest::load(inner.as_ref(), &cfg).await.unwrap().unwrap().manifest;
-    assert!(!m.entries.contains_key("p1.txt"), "the path flapped back into the manifest");
-    let doc = inbox::load(inner.as_ref(), &cfg).await.unwrap().doc;
-    assert!(!doc.entries.iter().any(|e| e.path == "p1.txt"), "the spent entry is still in the cell: {:?}", doc.entries);
-    assert_eq!(read(dir_b.path(), "seed.txt").as_deref(), Some("seed"));
 }
 
+/// H2's other door into the same state: the takeover rotation met S3's
+/// 409 on the pointer and failed the claim AFTER the acquire had landed —
+/// the cell named the new holder at an epoch it never recorded, no
+/// rotation had run, and a restart then released it (the test above).
+/// A 409 is a lost race: the rotation retries.
+#[tokio::test]
+async fn a_takeover_rotation_that_meets_a_409_retries_it() {
+    let inner = Arc::new(MemoryStore::new());
+    let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = hooked_syncer(&hooked, dir_a.path());
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "f.txt", "x");
+    a.run_barrier().await.unwrap();
+    let seq0 = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.seq;
+    assert!(claim_until_held(&mut a, 3).await);
 
-/// H1c (review 2026-09-18; found by the model in `LeanBarrierLeaseCollectorOff`
-/// once `Inv_NoDeleteResurrected`'s third contest was tightened): THE MERGE
-/// BASE LAGGED THE CAS. The persisted merge base was rewritten at step 7,
-/// after the pointer CAS and the GC. B cites a UI write and its container
-/// restarts in that window: the bucket holds the document B installed, B's
-/// merge base is a generation behind it, and the entry it adopted reads as a
-/// repair still owed. A integrates the write, its agent deletes the file and
-/// A publishes the delete — knowingly — and on a collector-off store the
-/// object stays at the key. B's next barrier re-cites it: a deleted
-/// generation, back on every tree. The document's tombstone (H1e) answers
-/// this shape as it answers the others: A's delete names the generation it
-/// retired, and B's repair of exactly that generation is void. (A merge base
-/// persisted at the CAS closed it too, and was dropped as redundant once
-/// the tombstone was in.)
+    let mut b = hooked_syncer(&hooked, dir_b.path());
+    loop {
+        match lease::claim_step(&mut b, true).await.unwrap() {
+            lease::ClaimOutcome::Waiting { quiet_polls, .. } if quiet_polls >= 5 => break,
+            lease::ClaimOutcome::Waiting { .. } => {}
+            lease::ClaimOutcome::Claimed(_) => panic!("fixture: claimed before the threshold"),
+        }
+    }
+    *hooked.1.put_conflicts.lock().unwrap() = Some((b.cfg.current_key(), 1));
+    let outcome = lease::claim_step(&mut b, true).await;
+    assert_eq!(hooked.1.put_conflicts.lock().unwrap().as_ref().map(|x| x.1), Some(0), "fixture: no 409 was injected");
+    assert!(
+        matches!(outcome, Ok(lease::ClaimOutcome::Claimed(_))),
+        "a 409 on the takeover rotation failed a claim whose acquire had landed: {:?}",
+        outcome.err()
+    );
+    let seq1 = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.seq;
+    assert!(seq1 > seq0, "the takeover did not rotate");
+}
+
+// ---- review 2026-09-18, H7 in `sync`: the agent's write inside the sync's own window
+
+/// A published path, a remote change of it (a UI write in the inbox), and
+/// the syncer about to `sync`.
+async fn h7_sync_fixture(path: &str) -> (Arc<MemoryStore>, tempfile::TempDir, Syncer) {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = syncer(&store, dir.path()).await;
+    sc.checkout().await.unwrap();
+    write(dir.path(), path, "v0");
+    sc.run_barrier().await.unwrap();
+    hitl_write(&store, &sc.cfg, path, "the remote version", "ui").await.unwrap();
+    (store, dir, sc)
+}
+
+/// H7's first window, in `sync`: dirt was judged by ONE scan at the
+/// start, and every write after it — a whole-tree sync fetches for
+/// minutes — overwrote whatever the agent had written since, with no
+/// record. "The syncer never overwrites a file you modified": the licence
+/// is re-checked immediately before the rename, and a write there is a
+/// `sync-dirty` conflict like any other.
+#[tokio::test]
+async fn sync_never_overwrites_an_agent_write_made_while_it_writes() {
+    let (_store, dir, mut sc) = h7_sync_fixture("h7-s1.txt").await;
+    h7_hook("before-write", dir.path(), "h7-s1.txt", "the agent's write, during the sync");
+    let r = sc.sync().await.unwrap();
+    assert!(
+        super::barrier::CONSUME_WINDOW_HOOK.with(|h| h.borrow().is_none()),
+        "fixture: the sync never reached its write window"
+    );
+    assert_eq!(
+        read(dir.path(), "h7-s1.txt").as_deref(),
+        Some("the agent's write, during the sync"),
+        "sync overwrote an agent write it never saw"
+    );
+    assert!(r.conflicts.contains(&"h7-s1.txt".to_string()), "{r:?}");
+}
+
+/// H7's second window, in `sync`: the baseline recorded a FRESH stat
+/// after the write, so an agent write between the rename and that stat
+/// was recorded as the synced version and never published.
+#[tokio::test]
+async fn an_agent_write_just_after_a_sync_applies_is_published() {
+    let (store, dir, mut sc) = h7_sync_fixture("h7-s2.txt").await;
+    h7_hook("after-rename", dir.path(), "h7-s2.txt", "the agent's write, after the sync's rename, longer");
+    sc.sync().await.unwrap();
+    assert!(
+        super::barrier::CONSUME_WINDOW_HOOK.with(|h| h.borrow().is_none()),
+        "fixture: the sync never reached its write window"
+    );
+    sc.run_barrier().await.unwrap();
+    let m = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(
+        m.entries["h7-s2.txt"].crc64_b64,
+        crc_of("the agent's write, after the sync's rename, longer"),
+        "an agent write made just after the sync applied was recorded as the synced version and never published"
+    );
+}
+
+/// And the delete arm: a remote deletion applied to a path the agent
+/// wrote after the sync's scan removed the agent's write.
+#[tokio::test]
+async fn sync_never_deletes_an_agent_write_made_after_its_scan() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut sc = syncer(&store, dir.path()).await;
+    sc.checkout().await.unwrap();
+    write(dir.path(), "h7-s3.txt", "v0");
+    sc.run_barrier().await.unwrap();
+    let loaded = manifest::load(store.as_ref(), &sc.cfg).await.unwrap().unwrap();
+    let mut theirs = loaded.manifest.clone();
+    theirs.seq += 1;
+    theirs.entries.remove("h7-s3.txt");
+    manifest::cas_write(store.as_ref(), &sc.cfg, &theirs, Some(&loaded.handle()), 0, "remote-delete").await.unwrap();
+
+    h7_hook("before-delete", dir.path(), "h7-s3.txt", "the agent's write, after the sync's scan");
+    let r = sc.sync().await.unwrap();
+    assert!(
+        super::barrier::CONSUME_WINDOW_HOOK.with(|h| h.borrow().is_none()),
+        "fixture: the sync never reached its delete"
+    );
+    assert_eq!(
+        read(dir.path(), "h7-s3.txt").as_deref(),
+        Some("the agent's write, after the sync's scan"),
+        "sync applied a remote delete over an agent write made after its scan"
+    );
+    assert!(r.conflicts.contains(&"h7-s3.txt".to_string()), "{r:?}");
+}
+
+/// Review 2026-09-18, M5's agent-side twin. The consume half is fixed —
+/// a containment refusal writes a durable `consume-refused-containment`
+/// record. This is the other half: the agent replaces a published FILE
+/// with a DIRECTORY of the same name. The scan sees `a` gone and `a/x`
+/// new, but the two-scan guard withholds a first absence, so the barrier
+/// publishes the upload and not the delete. If nothing catches it, the
+/// installed document cites both `a` and `a/x`, and no workspace can
+/// hold both: a fresh checkout of that document must create a directory
+/// where its own manifest says a file goes.
 ///
-/// The restart lands inside step 6: B's barrier also publishes a delete of
-/// its own, and B is cut off at that delete — after the CAS, before step 7.
-/// (Between the CAS and step 7's baseline write the only bucket operations
-/// are the GC's, so a barrier that deletes nothing cannot be cut there.)
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_pending_adoption_cited_by_its_own_writer_that_restarted_is_not_re_cited_over_a_knowing_delete() {
-    let inner = Arc::new(MemoryStore::new());
-    let hb = Arc::new(Hooked(inner.clone(), Hooks::default()));
+/// The invariant this pins is one no model world can state — the core
+/// has no name alphabet, so "a cited path is never a prefix of another
+/// cited path" is a code-level claim (review doc, H5's row).
+#[tokio::test]
+async fn a_published_file_replaced_by_a_directory_never_leaves_a_document_no_checkout_can_hold() {
+    let store = Arc::new(MemoryStore::new());
     let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let mut a = syncer(&inner, dir_a.path()).await;
-    a.cfg.conditional_delete_enforced = false; // the collector gives way: the object stays
-    let mut b = hooked_syncer(&hb, dir_b.path());
-    let cfg = a.cfg.clone();
+    let mut a = syncer(&store, dir_a.path()).await;
     a.checkout().await.unwrap();
-    write(dir_a.path(), "p1.txt", "v1");
-    write(dir_a.path(), "keep.txt", "keep");
-    write(dir_a.path(), "gone.txt", "B deletes this");
-    a.run_barrier().await.unwrap();
-    b.checkout().await.unwrap();
-    assert_eq!(read(dir_b.path(), "p1.txt").as_deref(), Some("v1"));
-    let key = cfg.file_key("p1.txt");
-    let e1 = inner.head(&key).await.unwrap().etag;
-
-    // A UI write of p1 lands: object first, then the entry, acked.
-    let body = Bytes::from_static(b"v2 from the UI");
-    let stamps = GenerationStamps { generation: 0, epoch: 0, flush_uuid: "gateway".into(), boundary_source: None, posix: None };
-    let e2 = inner
-        .put_whole(&key, body.clone(), &PutCondition::IfMatch(e1.clone()), &stamps, crc64_nvme(&body))
-        .await
-        .unwrap()
-        .etag;
-    inbox::gateway_append(
-        inner.as_ref(),
-        &cfg,
-        InboxEntry { path: "p1.txt".into(), etag: e2.clone(), author: "reviewer".into(), added_unix: now_unix(), crc64_b64: None, cited: None },
-    )
-    .await
-    .unwrap();
-
-    // B consumes it, cites it (and publishes its own delete of gone.txt),
-    // and its container restarts in step 6, at that delete: after the
-    // pointer CAS, before step 7.
-    std::fs::remove_file(dir_b.path().join("gone.txt")).unwrap();
-    hb.before_delete(&cfg.file_key("gone.txt"), || panic!("B's container restarts between its CAS and step 7"));
-    let jb = std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
-        rt.block_on(b.declared_barrier())
-    });
-    assert!(jb.join().is_err(), "fixture: B did not restart between its CAS and step 7");
-    let m = manifest::load(inner.as_ref(), &cfg).await.unwrap().unwrap().manifest;
-    assert_eq!(m.entries["p1.txt"].etag, e2, "fixture: B's commit did not cite the UI write");
-    assert!(!m.entries.contains_key("gone.txt"), "fixture: B's own delete did not publish");
-    assert_eq!(read(dir_b.path(), "p1.txt").as_deref(), Some("v2 from the UI"), "fixture: B's consume did not adopt the UI write");
-
-    // A integrates it (queued at its merge, adopted at its next consume);
-    // then A's agent deletes the file and A publishes the delete, knowingly.
-    a.run_barrier().await.unwrap();
-    a.run_barrier().await.unwrap();
-    assert_eq!(read(dir_a.path(), "p1.txt").as_deref(), Some("v2 from the UI"), "fixture: A did not integrate the UI write");
-    std::fs::remove_file(dir_a.path().join("p1.txt")).unwrap();
-    let r = a.declared_barrier().await.unwrap();
-    assert_eq!(r.leaked, vec!["p1.txt".to_string()], "fixture: the collector must give way on this store");
-    let m = manifest::load(inner.as_ref(), &cfg).await.unwrap().unwrap().manifest;
-    assert!(!m.entries.contains_key("p1.txt"), "fixture: A's delete never published");
-    assert_eq!(inner.head(&key).await.unwrap().etag, e2, "fixture: the leaked object is not at the key");
-
-    // B comes back over the same tree and state. THE CLAIM: what it cited
-    // before the restart is its merge base, not a repair still owed.
-    let mut b = syncer(&inner, dir_b.path()).await;
-    b.run_barrier().await.unwrap();
-    let m = manifest::load(inner.as_ref(), &cfg).await.unwrap().unwrap().manifest;
-    assert!(
-        !m.entries.contains_key("p1.txt"),
-        "B's citation repair resurrected A's knowing delete of a write B had cited itself before a restart left its merge base behind (the manifest cites p1.txt at {:?})",
-        m.entries.get("p1.txt").map(|e| e.etag.clone())
-    );
-    // And the delete reaches B's tree: the leak is the retired generation.
-    for _ in 0..2 {
-        b.run_barrier().await.unwrap();
-    }
-    assert!(read(dir_b.path(), "p1.txt").is_none(), "the peer's published delete never reached B's tree");
-    let m = manifest::load(inner.as_ref(), &cfg).await.unwrap().unwrap().manifest;
-    assert!(!m.entries.contains_key("p1.txt"), "the path flapped back into the manifest");
-    assert_eq!(read(dir_b.path(), "keep.txt").as_deref(), Some("keep"));
-}
-
-/// H1d (review 2026-09-18; the collector-off world once the merge base was
-/// persisted at the CAS): AN ENTRY THAT OUTLIVED ITS CITER'S RESTART. A
-/// consumes a UI write, cites it and restarts before its window clear, so
-/// the entry outlives its own citation. B consumes it — the manifest cites
-/// exactly what B adopts, but B's merge base never learns that — and parks
-/// in its step 3. A comes back, its agent deletes the file and A publishes
-/// the delete, knowingly, on a collector-off store. B's merge found
-/// baseline ≠ merge base and the object at the key, and its repair re-cited
-/// the deleted generation. The document's tombstone (H1e) is what answers
-/// this shape too: A's delete names the generation it retired, and B's
-/// repair of exactly that generation is void. (A consume-time "pull" rule —
-/// an entry the manifest already cites becomes the merge base — closed it
-/// as well, and was dropped as redundant once the tombstone was in.)
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_pending_adoption_of_an_entry_that_outlived_its_citers_restart_is_not_re_cited() {
-    let inner = Arc::new(MemoryStore::new());
-    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
-    let hb = Arc::new(Hooked(inner.clone(), Hooks::default()));
-    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    // A's first incarnation collects (its step-6 delete is where it is cut
-    // off); the one that comes back runs collector-off, so p1's object stays.
-    let mut a = hooked_syncer(&ha, dir_a.path());
-    let mut b = hooked_syncer(&hb, dir_b.path());
-    let cfg = a.cfg.clone();
-    a.checkout().await.unwrap();
-    write(dir_a.path(), "p1.txt", "v1");
-    write(dir_a.path(), "keep.txt", "keep");
-    write(dir_a.path(), "gone.txt", "A deletes this");
-    a.run_barrier().await.unwrap();
-    b.checkout().await.unwrap();
-    assert_eq!(read(dir_b.path(), "p1.txt").as_deref(), Some("v1"));
-    let key = cfg.file_key("p1.txt");
-    let e1 = inner.head(&key).await.unwrap().etag;
-
-    // A UI write of p1 lands: object first, then the entry, acked.
-    let body = Bytes::from_static(b"v2 from the UI");
-    let stamps = GenerationStamps { generation: 0, epoch: 0, flush_uuid: "gateway".into(), boundary_source: None, posix: None };
-    let e2 = inner
-        .put_whole(&key, body.clone(), &PutCondition::IfMatch(e1.clone()), &stamps, crc64_nvme(&body))
-        .await
-        .unwrap()
-        .etag;
-    inbox::gateway_append(
-        inner.as_ref(),
-        &cfg,
-        InboxEntry { path: "p1.txt".into(), etag: e2.clone(), author: "reviewer".into(), added_unix: now_unix(), crc64_b64: None, cited: None },
-    )
-    .await
-    .unwrap();
-
-    // A consumes it, cites it (and publishes its own delete of gone.txt),
-    // and restarts in step 6 at that delete: the entry outlives its citation.
-    std::fs::remove_file(dir_a.path().join("gone.txt")).unwrap();
-    ha.before_delete(&cfg.file_key("gone.txt"), || panic!("A's container restarts between its CAS and step 7"));
-    let ja = std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
-        rt.block_on(a.declared_barrier())
-    });
-    assert!(ja.join().is_err(), "fixture: A did not restart between its CAS and step 7");
-    let m = manifest::load(inner.as_ref(), &cfg).await.unwrap().unwrap().manifest;
-    assert_eq!(m.entries["p1.txt"].etag, e2, "fixture: A's commit did not cite the UI write");
-    let doc = inbox::load(inner.as_ref(), &cfg).await.unwrap().doc;
-    assert!(doc.entries.iter().any(|e| e.path == "p1.txt" && e.etag == e2), "fixture: the entry did not outlive A's restart");
-
-    // B consumes the entry — the manifest cites exactly what it adopts —
-    // and parks in its step 3, uploading b.txt.
-    write(dir_b.path(), "b.txt", "B works elsewhere");
-    let reached = Arc::new(std::sync::Barrier::new(2));
-    let gate = Arc::new(std::sync::Barrier::new(2));
-    let (reached_in, gate_in) = (reached.clone(), gate.clone());
-    hb.after_put(&cfg.file_key("b.txt"), move || {
-        reached_in.wait();
-        gate_in.wait();
-    });
-    let jb = barrier_on_thread(b);
-    tokio::task::spawn_blocking(move || reached.wait()).await.unwrap();
-    assert_eq!(read(dir_b.path(), "p1.txt").as_deref(), Some("v2 from the UI"), "fixture: B's consume did not adopt the UI write");
-
-    // A comes back over its tree; its agent deletes p1 and A publishes the
-    // delete, knowingly (its merge base cites what it installed).
-    let mut a = syncer(&inner, dir_a.path()).await;
-    a.cfg.conditional_delete_enforced = false;
-    a.run_barrier().await.unwrap(); // the walk sees p1: its absence next is no first absence
-    std::fs::remove_file(dir_a.path().join("p1.txt")).unwrap();
-    let r = a.declared_barrier().await.unwrap();
-    assert!(r.leaked.contains(&"p1.txt".to_string()), "fixture: the collector must give way on this store: {r:?}");
-    let m = manifest::load(inner.as_ref(), &cfg).await.unwrap().unwrap().manifest;
-    assert!(!m.entries.contains_key("p1.txt"), "fixture: A's delete never published");
-    assert_eq!(inner.head(&key).await.unwrap().etag, e2, "fixture: the leaked object is not at the key");
-
-    // B resumes: claims, merges, commits. THE CLAIM: what it adopted was
-    // the cited version, its merge base knows it, and nothing re-cites it.
-    tokio::task::spawn_blocking(move || gate.wait()).await.unwrap();
-    let (mut b, rb) = jb.join().unwrap();
-    rb.expect("B's barrier");
-    let m = manifest::load(inner.as_ref(), &cfg).await.unwrap().unwrap().manifest;
-    assert!(
-        !m.entries.contains_key("p1.txt"),
-        "B's citation repair resurrected A's knowing delete of a write it had adopted from an entry that outlived A's restart (the manifest cites p1.txt at {:?})",
-        m.entries.get("p1.txt").map(|e| e.etag.clone())
-    );
-    assert_eq!(m.entries["b.txt"].etag, inner.head(&cfg.file_key("b.txt")).await.unwrap().etag, "B's own upload was not cited");
-    // And the delete reaches B's tree: the leak is the retired generation.
-    for _ in 0..2 {
-        b.run_barrier().await.unwrap();
-    }
-    assert!(read(dir_b.path(), "p1.txt").is_none(), "the peer's published delete never reached B's tree");
-    let m = manifest::load(inner.as_ref(), &cfg).await.unwrap().unwrap().manifest;
-    assert!(!m.entries.contains_key("p1.txt"), "the path flapped back into the manifest");
-    assert_eq!(read(dir_b.path(), "keep.txt").as_deref(), Some("keep"));
-}
-
-/// H1e (review 2026-09-18; the collector-off world with every other arm
-/// on): A PENDING ADOPTION, CITED BY ANOTHER WRITER AND THEN KNOWINGLY
-/// DELETED. B consumes a UI write while it is still pending and parks in
-/// its step 3. A consumes the same write, cites it, and its agent then
-/// deletes the file; A publishes the delete knowingly, on a collector-off
-/// store. B's merge sees baseline ≠ merge base and the object at the key —
-/// the very view a delete that merely RACED the write would leave, where
-/// modify rightly wins — and its citation repair resurrected the deleted
-/// generation. The document now carries, per published delete, the etag it
-/// retired (`LeanManifest::tombstones`), and a repair whose generation the
-/// tombstone names is void: the write was published and removed.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_pending_adoption_cited_and_then_knowingly_deleted_is_not_re_cited() {
-    let inner = Arc::new(MemoryStore::new());
-    let hb = Arc::new(Hooked(inner.clone(), Hooks::default()));
-    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let mut a = syncer(&inner, dir_a.path()).await;
-    a.cfg.conditional_delete_enforced = false; // the collector gives way: the object stays
-    let mut b = hooked_syncer(&hb, dir_b.path());
-    let cfg = a.cfg.clone();
-    a.checkout().await.unwrap();
-    write(dir_a.path(), "p1.txt", "v1");
+    write(dir_a.path(), "a", "a file, published");
     write(dir_a.path(), "keep.txt", "keep");
     a.run_barrier().await.unwrap();
-    b.checkout().await.unwrap();
-    assert_eq!(read(dir_b.path(), "p1.txt").as_deref(), Some("v1"));
-    let key = cfg.file_key("p1.txt");
-    let e1 = inner.head(&key).await.unwrap().etag;
 
-    // A UI write of p1 lands: object first, then the entry, acked.
-    let body = Bytes::from_static(b"v2 from the UI");
-    let stamps = GenerationStamps { generation: 0, epoch: 0, flush_uuid: "gateway".into(), boundary_source: None, posix: None };
-    let e2 = inner
-        .put_whole(&key, body.clone(), &PutCondition::IfMatch(e1.clone()), &stamps, crc64_nvme(&body))
-        .await
-        .unwrap()
-        .etag;
-    inbox::gateway_append(
-        inner.as_ref(),
-        &cfg,
-        InboxEntry { path: "p1.txt".into(), etag: e2.clone(), author: "reviewer".into(), added_unix: now_unix(), crc64_b64: None, cited: None },
-    )
-    .await
-    .unwrap();
+    // The agent turns the file into a directory and puts a file in it.
+    std::fs::remove_file(dir_a.path().join("a")).unwrap();
+    write(dir_a.path(), "a/x", "now a directory");
+    let r = a.run_barrier().await.unwrap();
 
-    // B consumes it while it is still pending and parks in its step 3.
-    write(dir_b.path(), "b.txt", "B works elsewhere");
-    let reached = Arc::new(std::sync::Barrier::new(2));
-    let gate = Arc::new(std::sync::Barrier::new(2));
-    let (reached_in, gate_in) = (reached.clone(), gate.clone());
-    hb.after_put(&cfg.file_key("b.txt"), move || {
-        reached_in.wait();
-        gate_in.wait();
-    });
-    let jb = barrier_on_thread(b);
-    tokio::task::spawn_blocking(move || reached.wait()).await.unwrap();
-    assert_eq!(read(dir_b.path(), "p1.txt").as_deref(), Some("v2 from the UI"), "fixture: B's consume did not adopt the UI write");
-    let m = manifest::load(inner.as_ref(), &cfg).await.unwrap().unwrap().manifest;
-    assert_eq!(m.entries["p1.txt"].etag, e1, "fixture: the write must still be pending when B adopts it");
-
-    // A consumes it too and cites it; then A's agent deletes the file and A
-    // publishes the delete, knowingly.
-    a.run_barrier().await.unwrap();
-    let m = manifest::load(inner.as_ref(), &cfg).await.unwrap().unwrap().manifest;
-    assert_eq!(m.entries["p1.txt"].etag, e2, "fixture: A's commit did not cite the UI write");
-    std::fs::remove_file(dir_a.path().join("p1.txt")).unwrap();
-    let r = a.declared_barrier().await.unwrap();
-    assert_eq!(r.leaked, vec!["p1.txt".to_string()], "fixture: the collector must give way on this store");
-    let m = manifest::load(inner.as_ref(), &cfg).await.unwrap().unwrap().manifest;
-    assert!(!m.entries.contains_key("p1.txt"), "fixture: A's delete never published");
-    assert_eq!(inner.head(&key).await.unwrap().etag, e2, "fixture: the leaked object is not at the key");
-
-    // B resumes: claims, merges, commits. THE CLAIM: the generation it
-    // holds was published and then removed, and it is not re-cited.
-    tokio::task::spawn_blocking(move || gate.wait()).await.unwrap();
-    let (mut b, rb) = jb.join().unwrap();
-    rb.expect("B's barrier");
-    let m = manifest::load(inner.as_ref(), &cfg).await.unwrap().unwrap().manifest;
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let cited: Vec<&String> = m.entries.keys().collect();
+    let clash: Vec<(&String, &String)> = cited
+        .iter()
+        .flat_map(|p| cited.iter().map(move |q| (*p, *q)))
+        .filter(|(p, q)| p != q && q.starts_with(&format!("{p}/")))
+        .collect();
     assert!(
-        !m.entries.contains_key("p1.txt"),
-        "B's citation repair resurrected A's knowing delete of a write B had adopted while pending (the manifest cites p1.txt at {:?})",
-        m.entries.get("p1.txt").map(|e| e.etag.clone())
+        clash.is_empty(),
+        "the document cites a path and something under it, which no filesystem can hold: \
+         {clash:?} (barrier: {r:?})"
     );
-    assert_eq!(m.entries["b.txt"].etag, inner.head(&cfg.file_key("b.txt")).await.unwrap().etag, "B's own upload was not cited");
-    // And the delete reaches B's tree.
-    for _ in 0..2 {
-        b.run_barrier().await.unwrap();
-    }
-    assert!(read(dir_b.path(), "p1.txt").is_none(), "the peer's published delete never reached B's tree");
-    let m = manifest::load(inner.as_ref(), &cfg).await.unwrap().unwrap().manifest;
-    assert!(!m.entries.contains_key("p1.txt"), "the path flapped back into the manifest");
+
+    // The harm, stated as the reader sees it: a fresh workspace must be
+    // able to materialise whatever the document says.
+    let mut b = syncer(&store, dir_b.path()).await;
+    b.checkout().await.expect("a fresh checkout could not materialise the published document");
     assert_eq!(read(dir_b.path(), "keep.txt").as_deref(), Some("keep"));
+
+    // Withheld is not lost: the next barrier confirms the absence, the
+    // citation goes, and the file under the new directory publishes. A
+    // rule that only refuses would trade one silent break for a stall.
+    let r2 = a.run_barrier().await.unwrap();
+    assert_eq!(r2.deleted, vec!["a".to_string()], "the absence never confirmed: {r2:?}");
+    assert_eq!(r2.uploaded, vec!["a/x".to_string()], "the withheld path never published: {r2:?}");
+    let m2 = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(!m2.entries.contains_key("a"), "the file citation outlived its file");
+    assert!(m2.entries.contains_key("a/x"));
+    let dir_c = tempfile::tempdir().unwrap();
+    syncer(&store, dir_c.path()).await.checkout().await.unwrap();
+    assert_eq!(read(dir_c.path(), "a/x").as_deref(), Some("now a directory"));
 }
 
-/// H1f (review 2026-09-18; found by the model in the four-barrier orphan
-/// world once every other arm was on): A SUPERSEDED TOMBSTONE MUST LEAVE
-/// THE MERGE BASE HONEST. A queued deletion is superseded when the key
-/// holds a DIFFERENT object the manifest cites — the peer re-created the
-/// path — and the consume settles it: the pull that replaces it is the next
-/// install's diff from the merge base. But the base moved past the path in
-/// the install that queued the deletion, so when the path is deleted AGAIN
-/// before this writer installs, that diff has nothing at it. The clean copy
-/// of the retired generation stayed in the tree forever — uncited, and a
-/// citation-repair candidate at every barrier (baseline ≠ merge base), so
-/// the skip-on-no-diff never fired either. Superseding a deletion now
-/// restores the merge base to the generation the delete retired; the next
-/// install queues the deletion again, or the upsert if the re-cite still
-/// stands.
+/// The other direction, and the other arm of the same guard: a
+/// published DIRECTORY (`a/x` cited) replaced by a FILE at `a`. Here it
+/// is the PARENT that this barrier is publishing and the child that the
+/// document still cites, so the parent is the side that yields.
+#[tokio::test]
+async fn a_published_directory_replaced_by_a_file_never_leaves_a_document_no_checkout_can_hold() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_c) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&store, dir_a.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "a/x", "a directory, published");
+    a.run_barrier().await.unwrap();
+
+    std::fs::remove_dir_all(dir_a.path().join("a")).unwrap();
+    write(dir_a.path(), "a", "now a file");
+    let r = a.run_barrier().await.unwrap();
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(
+        !(m.entries.contains_key("a") && m.entries.contains_key("a/x")),
+        "the document cites a file and a path inside it: {:?} ({r:?})",
+        m.entries.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(r.parked, vec!["a".to_string()], "the parent did not yield: {r:?}");
+
+    let r2 = a.run_barrier().await.unwrap();
+    assert_eq!(r2.deleted, vec!["a/x".to_string()], "{r2:?}");
+    assert_eq!(r2.uploaded, vec!["a".to_string()], "{r2:?}");
+    syncer(&store, dir_c.path()).await.checkout().await.unwrap();
+    assert_eq!(read(dir_c.path(), "a").as_deref(), Some("now a file"));
+}
+
+/// Review 2026-09-18, M5's gateway half, asked as the UI would do it
+/// CORRECTLY: to turn the published file `build` into a directory, the
+/// human deletes `build` and then writes `build/log.txt`. Both land in
+/// the cell — a removal and an entry — and the consume takes entries
+/// first and removals after, so the entry is materialised while the file
+/// is still there and containment refuses it. The write is acked, then
+/// dropped with a pod-local record (L6), and the human is never told.
 ///
-/// The second delete lands between B's consume (which superseded) and B's
-/// install: B has a file of its own to upload, and A's two barriers run
-/// inside that upload's PUT.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_queued_delete_superseded_by_a_re_cite_that_is_deleted_again_before_the_install_still_leaves_the_tree() {
-    let inner = Arc::new(MemoryStore::new());
-    let hb = Arc::new(Hooked(inner.clone(), Hooks::default()));
-    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let mut a = syncer(&inner, dir_a.path()).await;
-    let mut b = hooked_syncer(&hb, dir_b.path());
+/// The published shape must end up as the human asked: the file gone,
+/// the directory there, and the document citing `build/log.txt` alone.
+#[tokio::test]
+async fn a_ui_delete_then_a_write_under_that_name_turns_the_file_into_a_directory() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
     a.checkout().await.unwrap();
-    write(dir_a.path(), "x.txt", "v1");
+    write(dir.path(), "build", "a file, published");
+    a.run_barrier().await.unwrap();
+
+    hitl_remove(&store, &a.cfg, "build", "human").await;
+    hitl_write(&store, &a.cfg, "build/log.txt", "now a directory", "human").await.unwrap();
+
+    // However many barriers the protocol needs, it must converge.
+    for _ in 0..4 {
+        a.run_barrier().await.unwrap();
+    }
+    let recs = a.state.load_conflicts().unwrap();
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(
+        read(dir.path(), "build/log.txt").as_deref(),
+        Some("now a directory"),
+        "the acked UI write never reached the tree; records: {:?}",
+        recs.iter().map(|c| (&c.path, &c.kind)).collect::<Vec<_>>()
+    );
+    assert!(!m.entries.contains_key("build"), "the deleted file is still cited");
+    assert!(m.entries.contains_key("build/log.txt"), "the UI's write was never published: {m:?}");
+}
+
+
+/// The same ordering in the SYNC verb. Sync applies adds (pass 3)
+/// before remote deletions (pass 4), so a remote generation that turned
+/// the file `build` into the directory `build/log.txt` refuses the add
+/// for containment and then deletes the file — the workspace is left
+/// without the remote's file until some later sync, and sync is
+/// harness-invoked, never background (review 2026-09-18, the critic's
+/// `sync.rs` item; the consume's twin is L-121).
+#[tokio::test]
+async fn sync_turns_a_file_into_a_directory_in_one_pass() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&store, dir_a.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "build", "a file, published");
     write(dir_a.path(), "keep.txt", "keep");
     a.run_barrier().await.unwrap();
-    let key = a.cfg.file_key("x.txt");
-    let e1 = inner.head(&key).await.unwrap().etag;
+
+    // B starts from that document, so its merge base cites `build`.
+    let mut b = syncer(&store, dir_b.path()).await;
     b.checkout().await.unwrap();
-    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("v1"));
+    assert_eq!(read(dir_b.path(), "build").as_deref(), Some("a file, published"));
 
-    // A deletes x.txt and publishes (the two-scan rule withholds the first
-    // absence).
-    std::fs::remove_file(dir_a.path().join("x.txt")).unwrap();
+    // A replaces the file with a directory and publishes it (two
+    // barriers: the first withholds the clash, the second converges).
+    std::fs::remove_file(dir_a.path().join("build")).unwrap();
+    write(dir_a.path(), "build/log.txt", "now a directory");
     a.run_barrier().await.unwrap();
     a.run_barrier().await.unwrap();
-    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-    assert!(!m.entries.contains_key("x.txt"), "fixture: A's delete never published");
 
-    // B's barrier merges the delete into its queue: the tree keeps the copy
-    // until the consume after it, and the merge base moves past the path.
-    b.run_barrier().await.unwrap();
-    let q = b.state.load_foreign_queue().unwrap();
-    assert!(
-        q.iter().any(|c| c.path == "x.txt" && c.etag.is_none() && c.retired.as_deref() == Some(e1.as_str())),
-        "fixture: B's queue holds no tombstone naming {e1} for x.txt: {q:?}"
-    );
+    // ONE sync must leave B's workspace as the document says.
+    let r = b.sync().await.unwrap();
     assert_eq!(
-        read(dir_b.path(), "x.txt").as_deref(),
-        Some("v1"),
-        "fixture: the deletion reached B's tree in the barrier that queued it"
+        read(dir_b.path(), "build/log.txt").as_deref(),
+        Some("now a directory"),
+        "sync refused the add and then deleted the file: {r:?}"
     );
-    assert!(
-        !b.state.load_baseline().unwrap().inst_base.contains_key("x.txt"),
-        "fixture: B's merge base did not move past the path"
-    );
+    assert!(dir_b.path().join("build").is_dir(), "the file was not replaced by the directory");
+}
 
-    // A re-creates the path: the manifest cites x.txt again, at a new
-    // generation.
-    write(dir_a.path(), "x.txt", "v2");
+/// The clash check as it was first written: every key against every key.
+/// The oracle for `path_clashes`, which must answer the same.
+fn path_clashes_quadratic(cited: &std::collections::BTreeMap<String, ()>, upserts: &std::collections::BTreeMap<String, ()>) -> Vec<String> {
+    let cited: Vec<&String> = cited.keys().collect();
+    let mut mine: Vec<String> = vec![];
+    for p in &cited {
+        let pfx = format!("{p}/");
+        if cited.iter().any(|q| q.starts_with(&pfx)) {
+            let child = cited.iter().find(|q| q.starts_with(&pfx) && upserts.contains_key(**q)).map(|q| (*q).clone());
+            if upserts.contains_key(*p) {
+                mine.push((*p).clone());
+            } else if let Some(c) = child {
+                mine.push(c);
+            }
+        }
+    }
+    mine.sort();
+    mine.dedup();
+    mine
+}
+
+#[test]
+fn the_clash_check_answers_as_the_every_pair_scan_did() {
+    // Names chosen so a check that looks only just past `a` misses: `a-b`
+    // and `a.txt` sort between `a` and `a/x`.
+    let names = ["a", "a-b", "a.txt", "a/x", "a/x/y", "a/z", "ab", "ab/c", "b", "b0", "b/c"];
+    let n = names.len();
+    // Every subset of the names as the document, every subset of that as
+    // this barrier's upserts.
+    for cited_bits in 0u32..(1 << n) {
+        let cited: std::collections::BTreeMap<String, ()> =
+            (0..n).filter(|i| cited_bits & (1 << i) != 0).map(|i| (names[i].to_string(), ())).collect();
+        let keys: Vec<&String> = cited.keys().collect();
+        // All upsert subsets is 3^11; one in five cited sets, all of theirs, stays well under a second.
+        if cited_bits % 5 != 0 {
+            continue;
+        }
+        for up_bits in 0u32..(1 << keys.len()) {
+            let upserts: std::collections::BTreeMap<String, ()> = keys
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| up_bits & (1 << i) != 0)
+                .map(|(_, k)| ((*k).clone(), ()))
+                .collect();
+            assert_eq!(
+                super::barrier::path_clashes(&cited, &upserts),
+                path_clashes_quadratic(&cited, &upserts),
+                "cited {keys:?}, upserts {:?}",
+                upserts.keys().collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+#[test]
+fn the_clash_check_is_not_quadratic_in_the_document() {
+    // 30k paths, no clash, the shape of a large workspace. Every pair is
+    // 9x10^8 comparisons (tens of seconds); the range lookup is milliseconds. The
+    // bound is loose on purpose: it separates the two, nothing finer.
+    let cited: std::collections::BTreeMap<String, ()> =
+        (0..30_000).map(|i| (format!("d{:04}/f{i:07}.txt", i / 1000), ())).collect();
+    let upserts: std::collections::BTreeMap<String, ()> = [("d0015/f0015000.txt".to_string(), ())].into();
+    let t = std::time::Instant::now();
+    assert!(super::barrier::path_clashes(&cited, &upserts).is_empty());
+    assert!(t.elapsed() < std::time::Duration::from_secs(5), "took {:?}", t.elapsed());
+}
+
+/// The scan trigger's commit-side advance: a busy agent publishing over the
+/// document its consume derived against keeps the next tick cheap (the
+/// pointer and nothing else), instead of a full derive after each of its
+/// own publishes.
+#[tokio::test]
+async fn a_busy_agents_idle_tick_after_its_own_publish_is_the_pointer_alone() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.checkout().await.unwrap();
+    for i in 0..20 {
+        write(dir.path(), &format!("f{i}.txt"), "seed");
+    }
     a.run_barrier().await.unwrap();
-    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-    let e2 = m.entries.get("x.txt").map(|e| e.etag.clone()).expect("fixture: A's re-create never published");
-    assert_ne!(e1, e2, "fixture: the re-create landed as the retired generation");
+    // Two publishes of its own, over a document nobody else moved.
+    for v in ["v2", "v3"] {
+        write(dir.path(), "f1.txt", v);
+        backdate_baseline(&a, "f1.txt");
+        let r = a.run_barrier().await.unwrap();
+        assert_eq!(r.uploaded, vec!["f1.txt".to_string()], "fixture: {r:?}");
+    }
+    store.reset_op_counts();
+    a.run_barrier().await.unwrap();
+    let gets = store.op_counts().get("get_whole").copied().unwrap_or(0);
+    assert_eq!(gets, 2, "an idle tick after its own publish re-derived: {:?}", store.op_counts());
+}
 
-    // B's next barrier: its consume finds e2 at the key, cited — the
-    // tombstone is superseded. Between that consume and B's install, A
-    // deletes the path again and publishes, collecting e2; B's own upload
-    // is where A's two barriers run.
-    write(dir_b.path(), "b.txt", "b");
-    let (dir_a_path, a_slot) = (dir_a.path().to_path_buf(), std::sync::Mutex::new(Some(a)));
-    let a_done: Arc<std::sync::Mutex<Option<Syncer>>> = Arc::new(std::sync::Mutex::new(None));
-    let a_done_in = a_done.clone();
-    let store_in = inner.clone();
-    hb.before_put(&b.cfg.file_key("b.txt"), move || {
-        let mut a = a_slot.lock().unwrap().take().expect("hook ran twice");
-        std::fs::remove_file(dir_a_path.join("x.txt")).unwrap();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let withheld = a.run_barrier().await.expect("A's first barrier inside B's upload");
-                assert!(withheld.deleted.is_empty(), "fixture: the first absence must be withheld");
-                let r = a.run_barrier().await.expect("A's second barrier inside B's upload");
-                assert_eq!(r.deleted, vec!["x.txt".to_string()], "fixture: A's second delete did not collect {e2}: {r:?}");
-                let m = manifest::load(store_in.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-                assert!(!m.entries.contains_key("x.txt"), "fixture: A's second delete never published");
-            })
-        });
-        *a_done_in.lock().unwrap() = Some(a);
-    });
-    let rb = b.run_barrier().await.unwrap();
-    let a = a_done.lock().unwrap().take().expect("fixture: the hook never ran");
-    assert_eq!(rb.uploaded, vec!["b.txt".to_string()], "fixture: B's own upload did not publish");
-    // The consume SUPERSEDED the tombstone rather than applying it: the copy
-    // is still in the tree after the barrier that settled the deletion.
-    assert_eq!(
-        read(dir_b.path(), "x.txt").as_deref(),
-        Some("v1"),
-        "fixture: B's consume applied the tombstone instead of superseding it"
-    );
-    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-    assert!(!m.entries.contains_key("x.txt"), "fixture: B's commit cited x.txt");
+/// A path the consume skipped as the agent's work and that this barrier
+/// then PUBLISHES is not the agent's pending work any more: the next tick
+/// must not re-derive for it.
+#[tokio::test]
+async fn a_skipped_path_this_barrier_publishes_leaves_the_next_tick_cheap() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.checkout().await.unwrap();
+    write(dir.path(), "x.txt", "seed");
+    a.run_barrier().await.unwrap();
+    // A peer's version, and the agent's edit over it: the consume skips x.
+    peer_publish(&store, &a.cfg, "x.txt", "the peer's v2", "peer").await;
+    write(dir.path(), "x.txt", "the agent's edit");
+    backdate_baseline(&a, "x.txt");
+    a.consume_owed().await.unwrap();
+    assert!(a.state.load_baseline().unwrap().skipped.contains("x.txt"), "fixture: x was not skipped");
+    // This barrier publishes the agent's x over theirs (with a record).
+    let r = a.run_barrier().await.unwrap();
+    assert_eq!(r.uploaded, vec!["x.txt".to_string()], "fixture: {r:?}");
+    store.reset_op_counts();
+    a.run_barrier().await.unwrap();
+    let gets = store.op_counts().get("get_whole").copied().unwrap_or(0);
+    assert_eq!(gets, 2, "the published path still read as the agent's pending work: {:?}", store.op_counts());
+}
 
-    // THE CLAIM: A's published delete reaches B's tree. B's next barrier
-    // applies the deletion its install re-queued; the copy of the retired
-    // generation does not stay.
-    b.run_barrier().await.unwrap();
-    assert_eq!(
-        read(dir_b.path(), "x.txt"),
-        None,
-        "a clean copy of a path the manifest dropped stayed in B's tree: the superseded tombstone \
-         settled without restoring the merge base, and the install that followed had nothing to diff"
-    );
-    // ...and the tree is at rest: the baseline no longer vouches for the
-    // copy, nothing is queued, and a barrier with nothing to do publishes
-    // nothing.
-    assert!(
-        !b.state.load_baseline().unwrap().entries.contains_key("x.txt"),
-        "the baseline still vouches for the removed copy"
-    );
-    assert!(b.state.load_foreign_queue().unwrap().is_empty(), "the queue still holds work");
-    let seq = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.seq;
-    let r = b.run_barrier().await.unwrap();
-    assert!(r.uploaded.is_empty() && r.deleted.is_empty(), "B's barrier after convergence still publishes: {r:?}");
-    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
-    assert_eq!(m.seq, seq, "a barrier with nothing to do moved the manifest");
-    assert!(!m.entries.contains_key("x.txt"), "the path flapped back into the manifest");
-    assert_eq!(read(dir_a.path(), "keep.txt").as_deref(), Some("keep"));
-    assert_eq!(read(dir_b.path(), "keep.txt").as_deref(), Some("keep"));
+/// A whole-tree `sync` that declines a path the agent is working on records
+/// it as the consume would: when the agent backs out, theirs arrives.
+#[tokio::test]
+async fn a_path_a_sync_declined_as_dirty_arrives_when_the_agent_reverts() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.checkout().await.unwrap();
+    write(dir.path(), "x.txt", "seed");
+    a.run_barrier().await.unwrap();
+    peer_publish(&store, &a.cfg, "x.txt", "the peer's v2", "peer").await;
+    write(dir.path(), "x.txt", "the agent's edit");
+    let r = a.sync().await.unwrap();
+    assert_eq!(r.conflicts, vec!["x.txt".to_string()], "fixture: the sync took x: {r:?}");
+    assert_eq!(read(dir.path(), "x.txt").as_deref(), Some("the agent's edit"), "fixture");
+
+    restore_to_baseline(&a, "x.txt", "seed");
+    for _ in 0..2 {
+        a.run_barrier().await.unwrap();
+    }
+    assert_eq!(read(dir.path(), "x.txt").as_deref(), Some("the peer's v2"), "the peer's version never arrived");
 }

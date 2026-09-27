@@ -1,0 +1,4 @@
+LeanImmutableSyncQueueRegress            OK-FIRES           rc=12 | Invariant Inv_ConsumeNeverRegresses is violated | 1361715 states generated, 386693 distinct | Finished in 42s at 
+LeanImmutableSyncQueueShippedInvs        OK-HOLDS           rc=0 | No error has been found | 8797830 states generated, 2522269 distinct | Finished in 04min 49s at 
+LeanImmutableSyncQueueHolds              OK-HOLDS           rc=0 | No error has been found | 8723950 states generated, 2497941 distinct | Finished in 04min 46s at 
+R44DONE

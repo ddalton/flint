@@ -40,6 +40,50 @@ fn refuse(path: &Path, why: &str) -> LeanError {
     LeanError::State(format!("refusing write to {}: {why} (containment)", path.display()))
 }
 
+/// Open `rel` under `root` for reading with NO symbolic link anywhere in
+/// the path: each directory is opened `O_NOFOLLOW|O_DIRECTORY` relative
+/// to the one before it, the file `O_NOFOLLOW|O_NONBLOCK` relative to its
+/// directory, and only a regular file is returned. An lstat, or an
+/// `O_NOFOLLOW` open of the whole path, guards the LAST component only:
+/// `mv d d.bak; ln -s /proc/self d` between a scan and a read made
+/// `d/environ` a regular file outside the workspace (review 2026-09-18,
+/// H5). Resolving from a held directory descriptor leaves no name to
+/// swap. `O_NONBLOCK` because a FIFO swapped in at the last moment must
+/// be refused by the type check, not block the open forever.
+pub(crate) fn open_beneath_nofollow(root: &Path, rel: &str) -> std::io::Result<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::OpenOptionsExt;
+    let invalid = |why: &str| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{rel}: {why}"));
+    let comps: Vec<&str> = rel.split('/').filter(|c| !c.is_empty()).collect();
+    if comps.is_empty() || comps.iter().any(|c| *c == "." || *c == "..") {
+        return Err(invalid("not a plain relative path"));
+    }
+    let mut dir = OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC).open(root)?;
+    for (i, c) in comps.iter().enumerate() {
+        let last = i + 1 == comps.len();
+        let name = std::ffi::CString::new(*c).map_err(|_| invalid("a component holds a NUL"))?;
+        let flags = libc::O_RDONLY
+            | libc::O_NOFOLLOW
+            | libc::O_CLOEXEC
+            | if last { libc::O_NONBLOCK } else { libc::O_DIRECTORY };
+        // SAFETY: a NUL-terminated name relative to a directory fd we own.
+        let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `fd` was just returned by openat and is owned by nobody else.
+        let f = unsafe { std::fs::File::from_raw_fd(fd) };
+        if last {
+            if !f.metadata()?.is_file() {
+                return Err(invalid("not a regular file"));
+            }
+            return Ok(f);
+        }
+        dir = f;
+    }
+    unreachable!("the loop returns at the last component")
+}
+
 /// Refuse a write whose parent directory is a symlink. Callers that
 /// `create_dir_all(parent)` must ask FIRST: an app that replaces
 /// `.flint` (or the state dir) with a link to `/etc` would otherwise
@@ -79,7 +123,7 @@ pub(crate) fn write_via_tmp(
     bytes: &[u8],
     mode: Option<u32>,
 ) -> LeanResult<std::fs::Metadata> {
-    write_via_tmp_opts(path, tmp, bytes, mode, true, false)
+    write_via_tmp_opts(path, tmp, bytes, mode, true, false, None).map(|m| m.expect("unguarded"))
 }
 
 /// The same write without the per-file fsync: for checkout, consume and
@@ -95,7 +139,23 @@ pub(crate) fn write_via_tmp_fast(
     bytes: &[u8],
     mode: Option<u32>,
 ) -> LeanResult<std::fs::Metadata> {
-    write_via_tmp_opts(path, tmp, bytes, mode, false, true)
+    write_via_tmp_opts(path, tmp, bytes, mode, false, true, None).map(|m| m.expect("unguarded"))
+}
+
+/// `write_via_tmp_fast`, but the rename happens only if `proceed()` still
+/// says so once the temp is written — the last check before the name
+/// moves, for a caller whose licence to overwrite the target can lapse
+/// while the bytes are written (the consume: the agent may write the path
+/// meanwhile). `Ok(None)` when it did not: the temp is removed and the
+/// target is untouched.
+pub(crate) fn write_via_tmp_fast_if(
+    path: &Path,
+    tmp: &Path,
+    bytes: &[u8],
+    mode: Option<u32>,
+    proceed: &dyn Fn() -> bool,
+) -> LeanResult<Option<std::fs::Metadata>> {
+    write_via_tmp_opts(path, tmp, bytes, mode, false, true, Some(proceed))
 }
 
 /// `O_CREAT|O_EXCL` at `tmp`, and the two retries the common path never
@@ -260,7 +320,8 @@ fn write_via_tmp_opts(
     mode: Option<u32>,
     durable: bool,
     mkdir_parent: bool,
-) -> LeanResult<std::fs::Metadata> {
+    proceed: Option<&dyn Fn() -> bool>,
+) -> LeanResult<Option<std::fs::Metadata>> {
     let mut f = create_exclusive(tmp, mkdir_parent)?;
     #[cfg(unix)]
     if let Some(mode) = mode {
@@ -281,6 +342,10 @@ fn write_via_tmp_opts(
         .metadata()
         .map_err(|e| LeanError::State(format!("fstat tmp for {}: {e}", path.display())))?;
     drop(f);
+    if proceed.is_some_and(|p| !p()) {
+        let _ = std::fs::remove_file(tmp);
+        return Ok(None);
+    }
     std::fs::rename(tmp, path)
         .map_err(|e| LeanError::State(format!("rename into {}: {e}", path.display())))?;
     if durable {
@@ -292,5 +357,5 @@ fn write_via_tmp_opts(
             }
         }
     }
-    Ok(meta)
+    Ok(Some(meta))
 }

@@ -6,7 +6,7 @@
 # DELIBERATELY SEPARATE from scripts/check-tla.sh (flint's 196-run gate):
 # lean is a separate system.  Same harness discipline, its own runs.
 #
-# A hundred and seventeen runs, ALL required (asserted at the bottom, not just printed —
+# A hundred and eighty-two runs, ALL required (asserted at the bottom, not just printed —
 # this prose count had drifted to "fifty-five", then to "eighty-three";
 # and EXPECT itself was left at 92 over 69 real runs when gated mode's
 # 23 runs were removed, so the gate at that commit failed its own count.
@@ -33,7 +33,7 @@ mkdir -p states
 PASS=0
 
 # ---- the journal -----------------------------------------------------------
-# This gate is a hundred and thirty-six TLC runs and takes the better part
+# This gate is a hundred and eighty-two TLC runs and takes the better part
 # of an hour. On a memory-constrained laptop the OS has killed it three
 # times out of four — at runs 109, 62 and 89 of the sequence, with
 # nothing else of ours running — and each kill cost the whole hour and
@@ -171,8 +171,8 @@ mutation_run $M LeanNoRotate.cfg     "no takeover rotation: the deposed straggle
   "Invariant Inv_NoStragglerInstall is violated"
 mutation_run $M LeanNoEpochCheck.cfg "rotation alone: the deposed straggler's data PUT lands" \
   "Invariant Inv_NoDeposedPut is violated"
-mutation_run $M LeanRematerialize.cfg "re-checkout over a live tree resurrects an unpublished delete" \
-  "Invariant Inv_NoResurrection is violated"
+mutation_run $M LeanRematerialize.cfg "re-checkout over a live tree resurrects an unpublished delete (the no-resurrection claim is an ACTION property since 2026-09-19: a restart creates no local file)" \
+  "Action property"
 
 # ---- probes (non-vacuity: TLC must violate each) ---------------------------
 mutation_run $M LeanProbeBarrier.cfg          "probe: a full 7-step barrier completes" \
@@ -246,6 +246,59 @@ mutation_run $M LeanProbeFastPathHonor.cfg "probe: a pending sentinel was honore
 strict_run $M LeanSentinelClockHolds.cfg "the ack and the manifest name the SAME clock -- the agent reads the ack, the fleet reads the stamp"
 mutation_run $M LeanSentinelClockUnstamped.cfg "the barrier installs through an UNSTAMPED CAS: the bucket reports the default clock while the ack tells the agent otherwise (found by the bucket drill, twice in one session)" \
   "Invariant Inv_BoundaryNamesItsClock is violated"
+# ---- the core model and the refinement (LeanCore.tla, LeanRefine.tla) -----
+# The shipped shape once, with no arms, and state-based invariants; then the
+# proof that the history model's shipped worlds refine it.  The queue world
+# first (606,916 states, depth 40, a minute), then the probe world
+# (1,937,311 states, depth 36, half an hour on two workers); the rename
+# world follows once its size is known (the box runs it first).
+# The core's own worlds first: the shipped shape with one rule removed at a
+# time.  Two of them are NOT here -- `…AnsweredSkipped`,
+# `…RenameLeavesEntry` and `…RepairOverridesUI` need a third name and tens of millions of states, so
+# `run-io.sh` decides them on the box; the same two rules are refuted here on
+# the history model (`LeanImmutableAnsweredRecordSkipped`, and
+# `LeanImmutableRenameLeavesEntry` once the box has sized it).  Each names the invariant the rule holds up, and the probes say the
+# world REACHED the step the rule is about (a mutation that never reaches
+# its rule is green for the wrong reason).
+# The two-path shape: 48,995,156 states, depth 34, twenty-odd minutes on
+# of the box's workers.  The three-path world (LeanCoreHolds.cfg) is the
+# same claims with room for a third name and runs on the box -- 120 million
+# states and still climbing at depth 19, which is not a gate a laptop runs.
+strict_run LeanCore LeanCoreHoldsSmall.cfg "the core model: the shipped shape, no arms -- every citation names a live handle, one handle is never cited under two names, an acked handle that is gone is accounted for by the state, and the commit section is one writer's -- and (2026-09-23) a published version is never silently reverted: replaced only by an edit derived from it, a recorded override, or a move"
+mutation_run LeanCore LeanCoreRepairRecites.cfg "core rule R2 refuted: a repair re-cites a handle the document cites at another path this install keeps" \
+  "Invariant Inv_OneName is violated"
+mutation_run LeanCore LeanCoreCommitBlind.cfg "core rule R7 refuted: the commit publishes over a version the tree never integrated with no record naming it" \
+  "Invariant Inv_AckedNamed is violated"
+mutation_run LeanCore LeanCoreCommitBlindReverts.cfg "core rule R7 refuted, read by the no-lost-update claim: the commit replaces a published version it never took in THERE with one not derived from it, and no record names it (2026-09-23, after L-123)" \
+  "Action property Prop_NoSilentRevert is violated"
+mutation_run LeanCore LeanCoreSweepTakesNamed.cfg "core rule R4c refuted: the sweep takes a handle an unconsumed entry names" \
+  "Invariant Inv_AckedNamed is violated"
+mutation_run LeanCore LeanCoreForeignFlat.cfg "core: theirs-or-mine judged by ONE FLAT SET per writer instead of per path -- a peer that had the seed at a rename's source publishes its own file over the renamed destination, surfaces nothing because the version it published over was familiar (just not at that path), and the handle is retired with no record. This is the approximation LeanSubtree still makes, so the refinement worlds map onto it: the debt, priced" \
+  "Invariant Inv_AckedNamed is violated"
+mutation_run LeanCore LeanCorePendingDropped.cfg "core: an adoption declined for the MOVE ALONE, at the destination of a rename still waiting at its source, refuted as gone -- the entry leaves the cell, the peer's record uncites the source, and the collector takes the handle (L-119, the rename world's tenth box run)" \
+  "Invariant Inv_AckedNamed is violated"
+mutation_run LeanCore LeanCoreCitesBlind.cfg "core rule R4a refuted: the commit cites its own uploads without re-reading them and a sweep has taken one" \
+  "Invariant Inv_CitationsLive is violated"
+mutation_run LeanCore LeanCoreSweepLeaseFree.cfg "core rule R4b refuted: a lease-free sweep lands between a commit's re-read and its CAS" \
+  "Invariant Inv_CitationsLive is violated"
+mutation_run LeanCore LeanCoreRetirePerPath.cfg "core rule R3 refuted: retirement forgets that a rename's destination cites the source's handle, and the collector takes it" \
+  "Invariant Inv_CitationsLive is violated"
+mutation_run LeanCore LeanCoreProbeRenamed.cfg "probe: the core's worlds actually perform a rename (the document cites a handle minted at another path)" \
+  "Invariant ProbeRenamed is violated"
+mutation_run LeanCore LeanCoreProbeGone.cfg "probe: a handle is actually collected or swept (minted is not a subset of live)" \
+  "Invariant ProbeGone is violated"
+mutation_run LeanCore LeanCoreProbeRefused.cfg "probe: a removal is actually refused, and the record is durable" \
+  "Invariant ProbeRefused is violated"
+mutation_run LeanCore LeanCoreProbePending.cfg "probe: the SHAPE L-119 is about is reachable here -- an entry in the cell whose handle the document cites at the source of a rename still waiting there (it fires at depth 3, on the rename itself; the evidence that the RULE fires is the history model's ProbePendingKept, a counter only the declining CAS writes)" \
+  "Invariant ProbePending is violated"
+mutation_run LeanCore LeanCoreProbeRemovalOutranked.cfg "probe: a declared removal is actually outranked at the CAS, the arm L-125's step 7 takes (or the holds world proves nothing about it)" \
+  "Invariant ProbeRemovalOutranked is violated"
+strict_run LeanCore LeanCoreWithheldHolds.cfg "L-126's fix: at one path and three barriers, a withheld upload re-published next barrier records the version it never integrated"
+mutation_run LeanCore LeanCoreWithheldReverts.cfg "L-126 (the shape before the fix): step 7 moves a parked path's merge base to theirs, and the re-upload replaces an acked UI write with no record" \
+  "Action property Prop_NoSilentRevert is violated"
+strict_run LeanRefine LeanRefineQueue.cfg "refinement: every step of LeanSubtree's queue world (IMPL + handles, one path, three barriers, a UI write) is a LeanCore step or a stutter, and the core's three state-based invariants hold through the mapping"
+strict_run LeanRefine LeanRefineProbe.cfg "refinement: every step of LeanSubtree's probe world (IMPL + handles, two paths, two barriers, no UI write, the commit re-reading every upload it cites, the sweep under the lease) is a LeanCore step or a stutter, and the core's three state-based invariants hold through the mapping"
+
 # ---- chunk GC (LeanChunkGC.tla) -------------------------------------------
 # Chunks are SHARED between generations, which is what makes LeanSubtree's GC
 # reasoning not carry over: there, every generation object had exactly one
@@ -289,6 +342,8 @@ echo
 # ---- tranche 5: DECLARED removals (delete/rename design, phase E) ---------
 strict_run $M LeanRemovalHolds.cfg "declared removals + rename: one generation, no hole, every acked write tracked"
 strict_run $M LeanRemovalCrashHolds.cfg "declared removals + rename under crash + restart: the late inbox drop and the intent journal"
+mutation_run $M LeanRemovalOverreaches.cfg "H4 (review 2026-09-18): a declared removal as it shipped removes any clean version -- a UI write made after the delete was asked for is consumed and then removed with it" \
+  "Invariant Inv_RemovalNamesItsVersion is violated"
 mutation_run $M LeanRemovalViaWalk.cfg "mutation: a declared removal routed through the walk lands a rename in two generations" \
   "Invariant Inv_RenameAtomic is violated"
 mutation_run $M LeanEarlyInboxDropLosesHitl.cfg "mutation: the early inbox drop loses a consumed write to a pod replacement" \
@@ -465,6 +520,8 @@ mutation_run $M LeanProbeLeakApplied.cfg "probe: a tombstone is actually applied
 mutation_run $M LeanBarrierLeaseStragglerGC.cfg "C2 (review 2026-09-18): a holder deposed after its CAS landed runs its deletes unfenced and takes an etag the successor's commit has just re-cited -- the citation dangles" \
   "Invariant Inv_NoDangling is violated"
 strict_run $M LeanBarrierLeaseStragglerGCFenced.cfg "C2's fix: the collector observes the cell before every delete (a renew by time in the code), and the thawed straggler is fenced there"
+mutation_run $M LeanBarrierLeaseStragglerLoadsSuccessor.cfg "H2 (review 2026-09-18): the commit read the cell BEFORE its HEAD fan-out and window; a holder deposed in between loads its successor's rotated document and its CAS lands -- the rotation fences nothing" \
+  "Invariant Inv_NoStragglerInstall is violated"
 mutation_run $M LeanProbeStragglerGCFenced.cfg "probe: the thawed straggler actually reaches its GC and is fenced THERE (or the run above proves nothing)" \
   "Invariant ProbeFenceAbandoned is violated"
 # H1: COLLECTOR-OFF IS NOT A COST.  On a store without a conditional DELETE
@@ -483,6 +540,89 @@ mutation_run $M LeanBarrierLeaseLeakSkippedGeneration.cfg "one arm from LeakHold
 mutation_run $M LeanProbeTombstoneOverLeak.cfg "probe: a queued deletion is actually applied over a leaked object (or the run above proves nothing)" \
   "Invariant ProbeTombstoneApplied is violated"
 
+# ---- review 2026-09-18: H10 ------------------------------------------------
+# THE ACK READS THE WRONG BARRIER.  The barrier that carried a declaration is
+# not always the one whose report the ack reads: a restart after step 7 (the
+# crash world at OrphanTrack=TRUE, depth 25), an ack write that failed, or an
+# honor that failed before the floor's cadence barrier published it.  When a
+# peer deleted a declared path in between, the later barrier merged the
+# delete and the ack said `ok` while the tree still held the declared bytes.
+# The first sentinel world on the code's shape in the gate (H8).
+mutation_run $M LeanBarrierLeaseAckAfterRestart.cfg "H10 (review 2026-09-18): a restart between the install and the ack; a peer deletes the declared path; the re-run's pull-only is acked ok while the tree still holds the declared bytes" \
+  "Invariant Inv_AckImpliesCited is violated"
+strict_run $M LeanBarrierLeaseAckCarried.cfg "H10's fix: each carrying install journals the declared paths with its CAS, and the ack reports one whose deletion by another writer waits in the queue as dropped -- every sentinel invariant holds on the code's shape with a restart"
+mutation_run $M LeanProbeCarrierAck.cfg "probe: the journalled carrier alone actually makes an ack partial (or the run above proves nothing)" \
+  "Invariant ProbeCarrierAck is violated"
+
+# ---- immutable object handles (design 2026-09-19, the structural fix for H6)
+# Every write lands at a handle nobody else writes; the manifest cites
+# handles; a cited handle is never overwritten and is collected only once no
+# document cites it (docs/plans/flint-lean-immutable-objects-design.md).  The
+# arm is NOT in IMPL — it is the design, not the code — and this block is its
+# evidence: the design's rules each refuted by one mutation, the known-bad
+# shapes of the same-key classes run again under handles and holding, and
+# the new steps shown to fire.
+strict_run $M LeanImmutableHolds.cfg "immutable handles: the breadth world (two paths, a UI write, a crash, a restart) on the code's shape, every handles invariant"
+strict_run $M LeanImmutableQueueHolds.cfg "immutable handles: the queue world (one path, three barriers, a UI write)"
+strict_run $M LeanImmutableRenameHolds.cfg "immutable handles: a rename is a citation move -- the removal world under the barrier lease, rename atomicity and no-hole included"
+# H8 (2026-09-23): the narrow verb ships (verbs.rs) and had been checked on
+# the life lease only.  Narrowing is ONE writer's scope, so both claims are
+# the narrowing writer's: it never classifies a path it narrowed as a
+# delete, and never re-uploads one (a peer that still watches the path may).
+strict_run $M LeanImmutableNarrowHolds.cfg "narrow over handles: a narrow is an UNWATCH for the writer that narrowed -- it never deletes or re-cites the dropped path"
+mutation_run $M LeanImmutableNarrowUnlinkFirst.cfg "narrow over handles, unlink-then-uncite: the narrowing writer's next walk reads the dropped path as a delete" \
+  "Invariant Inv_NarrowNeverDeletes is violated"
+mutation_run $M LeanImmutableNarrowUncieFirst.cfg "narrow over handles, uncite-then-unlink: the surviving file reads as a local ADD and the narrowing writer re-cites it" \
+  "Invariant Inv_NarrowNeverRecites is violated"
+mutation_run $M LeanImmutableProbeNarrow.cfg "probe: the narrow verb actually fires over handles" \
+  "Invariant ProbeNarrow is violated"
+# L-123 (2026-09-23): a sync that moves a path's merge base past a queued
+# peer change must prune it, or the next consume adopts the OLDER version
+# over the newer one -- a peer's v3 reverted for everyone.
+strict_run $M LeanImmutableSyncQueueHolds.cfg "L-123's fix: a sync prunes the writer-local queue where it moved the merge base, and no consume ever adopts an older version than the tree holds"
+mutation_run $M LeanImmutableSyncQueueRegress.cfg "L-123 (the shape before the fix): sync never reads the queue, and a consume adopts a queued version the sync already overtook" \
+  "Invariant Inv_ConsumeNeverRegresses is violated"
+strict_run $M LeanImmutableSyncQueueShippedInvs.cfg "L-123's blind spot: on the unfixed shape every invariant that existed before it HOLDS -- only Inv_ConsumeNeverRegresses sees the revert"
+mutation_run $M LeanImmutableRepairRecites.cfg "handles rule 2 refuted: an adopter that never saw the removal re-cites the moved handle at its old name -- one handle under two names (the rename world's fourth box run, depth 18)" \
+  "Invariant Inv_OneName is violated"
+mutation_run $M LeanImmutableRepairOverridesUI.cfg "a citation repair refuted as an upload's equal: it re-cited an older adoption over a later UI write the document cited, published by a peer, with no record (the rename world's eighth box run, depth 18)" \
+  "Invariant Inv_HITLDurable is violated"
+mutation_run $M LeanImmutablePendingAdoptionDropped.cfg "a pending adoption refuted as gone: an adoption declined for the MOVE ALONE, at the destination of a rename still waiting at its source, left the cell with the rest of the consumed -- the peer that applied the answered record uncited the source, and the collector took the handle (the rename world's tenth box run, L-119)" \
+  "Invariant Inv_HITLDurable is violated"
+mutation_run $M LeanImmutableProbePending.cfg "probe: a barrier actually declines an adoption for the move alone and leaves its entry in the cell (L-119's rule, reached)" \
+  "Invariant ProbePendingKept is violated"
+mutation_run $M LeanImmutableAnsweredRecordSkipped.cfg "an answered removal record refuted as final: a tree that adopted the source's write before the rename keeps it at the old name beside the destination's and cites one handle twice (the core model's first run; L-117 is the same rule's one-barrier lag)" \
+  "Invariant Inv_OneName is violated"
+mutation_run $M LeanImmutableRetirePerPath.cfg "handles rule 1 refuted: retirement judged path by path forgets that the rename's destination cites the source's handle, and the collector takes it" \
+  "Invariant Inv_NoDangling is violated"
+mutation_run $M LeanImmutableCasCitesBlind.cfg "handles rule 2 refuted: the commit cites its own uploads without re-reading them and the other writer's sweep has taken one (no grace is modelled: the grace is not what keeps this safe)" \
+  "Invariant Inv_NoDangling is violated"
+strict_run $M LeanImmutableCasVerifies.cfg "handles rule 2: the commit re-reads every upload it cites (its own step, before the CAS) and withholds what the sweep took"
+mutation_run $M LeanImmutableSweepLeaseFree.cfg "handles rule 3 refuted: a LEASE-FREE sweep lands between a writer's re-read and its CAS, and the installed document cites a collected handle" \
+  "Invariant Inv_NoDangling is violated"
+mutation_run $M LeanImmutableSweepTakesTracked.cfg "handles rule 4 refuted: a sweep that does not spare what an inbox entry names takes an acked UI write before any barrier consumes it" \
+  "Invariant Inv_HITLDurable is violated"
+strict_run $M LeanImmutableGCUnconditional.cfg "retired class (F1/L-10): the HEAD-then-DELETE collector's world under handles, the mutation left on and inert -- every handles invariant holds"
+strict_run $M LeanImmutableAdoptBlind.cfg "retired class (F2/L-11): the blind adopt's restart world under handles, the mutation left on and inert"
+strict_run $M LeanImmutableHitlOverAny.cfg "retired class (F8/L-16): the gateway overwriting any current object, under handles there is no object to overwrite"
+mutation_run $M LeanImmutableCasOverridesUI.cfg "handles rule 5 refuted: a commit cites its upload over an acked UI write a peer published and it never integrated -- no slot, no 412, no record; the first HitlOverAny run under handles, depth 18" \
+  "Invariant Inv_HITLDurable is violated"
+mutation_run $M LeanImmutableCasOverridesPeer.cfg "handles rule 5 refuted (peer): the same commit over a peer's own publish, with no record" \
+  "Invariant Inv_NoStaleOverride is violated"
+strict_run $M LeanImmutableLeakHolds.cfg "retired class (H1/L-105, L-27, L-102): the collector-off store's leak world under handles with both leak rules off; the tree converges and no delete is resurrected"
+strict_run $M LeanImmutableStragglerGC.cfg "retired class (C2/L-104): a holder deposed after its CAS runs its deletes unfenced; a retired handle is never re-cited, so nothing dangles"
+strict_run $M LeanImmutableOrphanCollected.cfg "retired class (finding 10 / H6): a writer's pod replaced between its upload and its commit leaves a handle nothing cites; it is collected, never adopted path by path"
+mutation_run $M LeanImmutableProbeSwept.cfg "probe: the sweep actually collected a lost writer's handle (or the run above proves nothing)" \
+  "Invariant ProbeSwept is violated"
+mutation_run $M LeanImmutableProbeGC.cfg "probe: a retired handle is actually collected under handles" \
+  "Invariant ProbeGC is violated"
+mutation_run $M LeanImmutableProbeUploadWithheld.cfg "probe: the commit's re-read actually withheld a swept upload" \
+  "Invariant ProbeUploadWithheld is violated"
+mutation_run $M LeanImmutableProbeHITLCited.cfg "probe: a UI write is actually cited under handles" \
+  "Invariant ProbeHITLCited is violated"
+mutation_run $M LeanImmutableProbeRename.cfg "probe: a rename is actually performed under handles" \
+  "Invariant ProbeRenameApplied is violated"
+
 # The expected total is ASSERTED, not printed: a hardcoded denominator
 # that drifts below the real run count turns "83/79 green" into a line
 # nobody reads as wrong. It had drifted to 79 against 79 real runs
@@ -495,7 +635,7 @@ if ! python3 "$(dirname "$0")/coverage.py" --check; then
   exit 1
 fi
 
-EXPECT=136
+EXPECT=182
 echo
 if [ "$PASS" -ne "$EXPECT" ]; then
   echo "lean formal gate: $PASS runs green but $EXPECT were declared — a run was"

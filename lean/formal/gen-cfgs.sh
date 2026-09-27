@@ -20,7 +20,8 @@ HitlOverwritesTrackedOnly SyncKeepsHiddenBase MaxSameBytes VerifyUploadedCitatio
 WriterQueue EmptyInstall TombstoneHeadsKey CommitLoadsCurrent Upload412Preserves \
 DeclaredConfirmsAbsence Writers OrphanTrack OrphanEntryCited LeakSupersedesNothing ManifestTombstones SupersedeRestoresBase QueueForeignChanges ProjectedTrace \
 AbandonOnStoreError BaselineKeepsUncollected ClaimMintsEpoch ClaimStampsEpoch CollectorOff InboxSnapshot \
-GCFencePerDelete TombstoneNamesRetired"
+GCFencePerDelete TombstoneNamesRetired AckFromCarrier FenceAfterLoad RemovalNamesGen \
+ImmutableObjects RetirePerPath SweepSparesTracked SweepUnderLease CommitSurfacesForeign RenameMovesEntry AnsweredRecordsApply RepairYieldsToLaterUI RepairRespectsMoves QueueYieldsToSync PendingAdoptionStays OutrankedRemovalLeavesBaseline"
 
 emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
          # Spec=<name> selects the SPECIFICATION (default Spec; FairSpec
@@ -162,6 +163,32 @@ emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
   # TombstoneNamesRetired=FALSE outside the queue worlds (it reads nothing
   # there) and inside them only in H1's mutation; IMPL carries TRUE.
   local c_GCFencePerDelete=TRUE c_TombstoneNamesRetired=FALSE
+  # Review 2026-09-18, H10: the ack names the install that carried the
+  # declaration.  FALSE (what shipped) everywhere but IMPL; it reads
+  # nothing without SentinelEnabled, so the sentinel-free worlds are
+  # preserved by construction.
+  local c_AckFromCarrier=FALSE
+  # Review 2026-09-18, H2: TRUE is the module as it always was (the commit's
+  # fence atomic with its CAS) and the code after the fix; FALSE is the
+  # shape that shipped, run only as H2's known-bad world.
+  local c_FenceAfterLoad=TRUE
+  # Review 2026-09-18, H4: a declared removal removes the version it named.
+  # FALSE (what shipped) outside IMPL and the removal worlds' fixed arm.
+  local c_RemovalNamesGen=FALSE
+  # Immutable object handles (design 2026-09-19, the fix for H6).  FALSE in
+  # every pre-existing cfg: the handle actions are disabled, `versions` and
+  # the new sc fields stay frozen at Init, so every earlier state space is
+  # preserved by construction.  The three rules are the design's (TRUE /
+  # FALSE / TRUE); each has its mutation world below.
+  local c_ImmutableObjects=FALSE c_RetirePerPath=FALSE
+  local c_SweepSparesTracked=TRUE c_SweepUnderLease=TRUE c_CommitSurfacesForeign=TRUE
+  local c_RenameMovesEntry=TRUE c_AnsweredRecordsApply=TRUE c_RepairYieldsToLaterUI=TRUE c_RepairRespectsMoves=TRUE
+  local c_PendingAdoptionStays=TRUE
+  # Two code fixes, each FALSE outside the handles shape so every earlier
+  # world keeps the state space it was run with; $IO turns both on.
+  # L-123 (2026-09-23): a sync prunes the writer-local queue.  L-125
+  # (2026-09-24): step 7 drops an outranked declared removal's baseline.
+  local c_QueueYieldsToSync=FALSE c_OutrankedRemovalLeavesBaseline=FALSE
   local c_Spec=Spec c_Props=""
   # Ghost-state reduction (LeanSubtree.tla, "GHOST-STATE REDUCTION"):
   # View=AUTO fingerprints a run through StrictView unless it checks a
@@ -191,8 +218,19 @@ emit() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
       esac
     done
     local i
-    for i in ${invs//,/ }; do echo "INVARIANT $i"; done
+    # H9 (2026-09-19): S4's no-resurrection claim is an ACTION property
+    # (`Prop_NoResurrection`), listed as a PROPERTY wherever the invariant
+    # it replaced was listed.  An action property reads kept state only,
+    # so it keeps the view; the liveness rule below reads `c_Props` alone.
+    local invs2=",$invs," extra=""
+    case "$invs2" in
+      *,Inv_NoResurrection,*)
+        invs2=${invs2/,Inv_NoResurrection,/,}; extra="Prop_NoResurrection" ;;
+    esac
+    invs2=${invs2#,}; invs2=${invs2%,}
+    for i in ${invs2//,/ }; do echo "INVARIANT $i"; done
     for i in ${c_Props//,/ }; do echo "PROPERTY $i"; done
+    [ -n "$extra" ] && echo "PROPERTY $extra"
     if [ "$c_Spec" = Spec ] && [ -z "$c_Props" ]; then
       case "$invs" in
         *Probe*) ;;
@@ -405,6 +443,17 @@ emit LeanProbeFastPathHonor "ProbeFastPathHonor" $SENTWORLD
 # conservatively against the agent's own delete, dropping it from the
 # boundary it is about to be acked for. TLC found this in shipped code
 # on the third strict run of this product.
+#
+# 2026-09-21: the RULE is unchanged and this world still refutes it at
+# depth 19; the MECHANISM behind `MineIsNotForeign` is now the code's.
+# It used to excuse the writer's own install by asking whether the
+# GENERATION was in `sc[s].known` — one flat set per writer, every
+# generation it ever knew anywhere — where the code reads the intent
+# journal's `installed_etag` and takes the document IT installed as the
+# merge base while the pointer still carries that seq (`MergeBase`).
+# The flat set covered this missing mechanism and much else: with it
+# gone, `LeanSentinelRestart` failed at depth 18 until `MergeBase` went
+# in.
 emit LeanSentinelStaleMergeBase "Inv_AckImpliesCited" \
   $SENTRESTART MineIsNotForeign=FALSE
 
@@ -476,8 +525,13 @@ MaxGen=3 MaxSeq=6 MaxBarriers=2 MaxCrashes=0 MaxRestarts=0"
 # earn their keep, and MaxHitl=1 on top of it is an hour of TLC.
 REMOVALCRASH="TwoScanDelete=TRUE NPaths=3 FreeLast=TRUE MaxRemovals=1 MaxHitl=0 \
 MaxGen=3 MaxSeq=6 MaxBarriers=2 MaxCrashes=1 MaxRestarts=1"
-emit LeanRemovalHolds "$ALLINV,Inv_RenameAtomic,Inv_RenameNoHole" $REMOVALWORLD
-emit LeanRemovalCrashHolds "$ALLINV,Inv_RenameAtomic,Inv_RenameNoHole" $REMOVALCRASH
+emit LeanRemovalHolds "$ALLINV,Inv_RenameAtomic,Inv_RenameNoHole,Inv_RemovalNamesItsVersion" $REMOVALWORLD RemovalNamesGen=TRUE
+emit LeanRemovalCrashHolds "$ALLINV,Inv_RenameAtomic,Inv_RenameNoHole,Inv_RemovalNamesItsVersion" $REMOVALCRASH RemovalNamesGen=TRUE
+# H4 (review 2026-09-18): the removal as it shipped removes any CLEAN version
+# — a UI write made after the delete was asked for, consumed first, was
+# removed with it.  The amputation stamp calls that ordinary editing (the
+# installer had consumed the write), so the claim is its own invariant.
+emit LeanRemovalOverreaches "Inv_RemovalNamesItsVersion" $REMOVALWORLD
 # §4's claim, pinned: route the declared removal through the walk and a
 # performed rename lands in two generations — the manifest cites both
 # names for a barrier.
@@ -685,7 +739,8 @@ emit LeanProbeDeadHandoffSkipped "ProbeDeadHandoffSkipped" \
 # the first box run of LeanBarrierLeaseSentinelImpl1, 2026-09-15, which ran
 # without it: a cfg error, not a finding).
 IMPL="WriterQueue=TRUE EmptyInstall=TRUE TombstoneHeadsKey=TRUE TombstoneNamesRetired=TRUE CommitLoadsCurrent=TRUE \
-Upload412Preserves=TRUE DeclaredConfirmsAbsence=TRUE VerifyUploadedCitations=TRUE OrphanEntryCited=TRUE LeakSupersedesNothing=TRUE ManifestTombstones=TRUE SupersedeRestoresBase=TRUE"
+Upload412Preserves=TRUE DeclaredConfirmsAbsence=TRUE VerifyUploadedCitations=TRUE OrphanEntryCited=TRUE LeakSupersedesNothing=TRUE ManifestTombstones=TRUE SupersedeRestoresBase=TRUE \
+AckFromCarrier=TRUE RemovalNamesGen=TRUE"
 # Review 2026-09-18: the strict worlds on the code's shape also carry H1's
 # invariant (a published delete stays published); its ghost is written only
 # under WriterQueue, so it reads nothing in the older worlds.
@@ -796,6 +851,24 @@ emit LeanBarrierLeaseSentinelImplCrash "$BLSENTINV,Inv_AckBoundaryCoherent" $BLS
 emit LeanBarrierLeaseSentinelImplCrash1 "$BLSENTINV,Inv_AckBoundaryCoherent" $BLSENTIMPL1 \
   MaxCrashes=1 MaxRestarts=1
 
+# Review 2026-09-18, H10 (the crash world above at OrphanTrack=TRUE, depth
+# 25, 52 minutes on the box): A's declared write is installed (seq 2), A
+# restarts after step 7 and before the ack, B deletes the path (seq 3), and
+# A's re-run honours the pending with a PULL-ONLY and acks `ok` naming B's
+# document while A's tree still holds the declared bytes.  No HITL write
+# and no pod replacement are in that trace, so the world keeps one touch,
+# one restart and nothing else.  The known-bad arm is what shipped; the
+# fix journals, with each carrying install's CAS, the declared paths it
+# published, and the ack reports as dropped one whose deletion by another
+# writer waits in this writer's queue; the probe pins that the journal
+# alone made an ack partial.  (The first cut named the FIRST carrying
+# install instead, and this world refuted it: Inv_AckBoundaryCoherent,
+# 18 steps.)
+BLACKRESTART="$BLSENTIMPL1 MaxHitl=0 MaxTouches=1 MaxCrashes=0 MaxRestarts=1"
+emit LeanBarrierLeaseAckAfterRestart "Inv_AckImpliesCited" $BLACKRESTART AckFromCarrier=FALSE
+emit LeanBarrierLeaseAckCarried "$BLSENTINV,Inv_AckBoundaryCoherent,Inv_NoDeleteResurrected" $BLACKRESTART
+emit LeanProbeCarrierAck "ProbeCarrierAck" $BLACKRESTART
+
 # FINDING 10 (open), as a convergence property.  A writer's pod is replaced
 # between its upload and its commit; the other writer runs on.  Once no
 # syncer can move, the upload is still at the cited key, uncited and
@@ -863,6 +936,13 @@ MaxBarriers=2 MaxCrashes=0 MaxRestarts=0 MaxSameBytes=1"
 emit LeanBarrierLeaseStragglerGC "Inv_NoDangling" $BLSTRAGGLER $IMPL GCFencePerDelete=FALSE
 emit LeanBarrierLeaseStragglerGCFenced "$IMPLINV" $BLSTRAGGLER $IMPL
 emit LeanProbeStragglerGCFenced "ProbeFenceAbandoned" $BLSTRAGGLER $IMPL
+# H2 (review 2026-09-18), the fence's POSITION.  The code read the cell once,
+# before the commit's HEAD fan-out and window, then loaded the manifest and
+# CASed onto it with no fence: a holder deposed in between loads its
+# successor's ROTATED document, so the rotation fences nothing, and the CAS
+# lands.  The fix reads the cell after the load (the module's atomic fence,
+# FenceAfterLoad=TRUE, which LeanBarrierLeaseStragglerGCFenced checks).
+emit LeanBarrierLeaseStragglerLoadsSuccessor "Inv_NoStragglerInstall" $BLSTRAGGLER $IMPL FenceAfterLoad=FALSE
 # H1.  On a store without a conditional DELETE the collector gives way and
 # the peer's own retired object stays at the key.  The other writer queues
 # the deletion, and its consume finds AN object at the key — the leak —
@@ -906,3 +986,301 @@ emit LeanBarrierLeaseLeakFlaps "Inv_TreesConverged" $LEAKWORLD $IMPL TombstoneNa
 emit LeanBarrierLeaseLeakRuleConverges "$IMPLINV,Inv_TreesConverged" $LEAKWORLD $IMPL TombstoneNamesRetired=FALSE
 emit LeanBarrierLeaseLeakSkippedGeneration "Inv_TreesConverged" $LEAKWORLD $IMPL LeakSupersedesNothing=FALSE
 emit LeanProbeTombstoneOverLeak "ProbeTombstoneApplied" $LEAKWORLD $IMPL
+
+# ---- IMMUTABLE OBJECT HANDLES (design 2026-09-19, the structural fix for H6)
+# docs/plans/flint-lean-immutable-objects-design.md.  Every write lands at a
+# handle nobody else writes; the manifest cites handles; a handle a landed
+# document cites is never overwritten and is collected only once no document
+# cites it.  The same-key arbitration — 412/adopt/park, the HEAD-guarded GC,
+# the collector-off store, S3-wins, the gateway's overwrite rule — has nothing
+# to arbitrate, and this block is the evidence: the known-bad SHAPES of those
+# classes run under handles and must HOLD, the design's own three rules each
+# have a mutation that must FAIL, and the probes show the new steps fire.
+# `ImmutableObjects=TRUE` is NOT in IMPL: IMPL is the code's shape today.
+# The handles shape is the code's, so it carries the two code fixes that
+# came after it (L-123, L-125); their known-bad worlds turn them off.
+IO="ImmutableObjects=TRUE QueueYieldsToSync=TRUE OutrankedRemovalLeavesBaseline=TRUE"
+# BLINV plus H1's invariant.  Inv_NoStaleOverride STAYS: the slot's
+# same-bytes route is gone under handles, but the ghost has a handles form
+# — the CAS citing an upload over a citation the writer never integrated,
+# with no record (rule 5; CommitSurfacesForeign=FALSE is the shape the
+# first HitlOverAny run had, and its mutation world below writes it).
+IOINV="TypeOK,Inv_HITLDurable,Inv_NoDangling,Inv_NoStragglerInstall,\
+Inv_NoDeposedPut,Inv_NoResurrection,Inv_HITLTracked,Inv_NoStaleOverride,\
+Inv_CommitExclusive,Inv_CellHeldByHolder,Inv_NoDeleteResurrected,Inv_OneName"
+# The breadth world (two paths, a UI write, a crash, a restart) and the
+# queue world (one path, three barriers) on the code's shape, with handles.
+emit LeanImmutableHolds "$IOINV" $BLWORLD $IMPL $IO
+emit LeanImmutableQueueHolds "$IOINV" $QWORLD $IMPL $IO
+# H8 (review 2026-09-18), the ack rows on the SHIPPED shape: until
+# 2026-09-23 no handles world carried the sentinel, so S1's ack invariants
+# were certified only on the slot shape (SAFETY.md §3.1). The one-path
+# sentinel world on the code's shape (LeanBarrierLeaseSentinelImpl1, which
+# holds on slots), with handles and every ack invariant; the probe pins that
+# an ack is written off a real install here, and each of the three
+# mutations must still fail with handles on — the ack stamps read the
+# manifest and the baseline, which handles keep, so a green holds world
+# without red controls would prove only that the stamps went quiet.
+IOSENTINV="$IOINV,Inv_AckImpliesCited,Inv_NoNonceOrphan,Inv_NoFencedOkAck,\
+Inv_AckBoundaryCoherent,Inv_BoundaryNamesItsClock"
+emit LeanImmutableSentinelImpl1 "$IOSENTINV" $BLSENTIMPL1 $IO
+emit LeanImmutableProbeSentinelHonored "ProbeSentinelHonored" $BLSENTIMPL1 $IO
+emit LeanImmutableSentinelQueueDropped "Inv_AckBoundaryCoherent" $BLSENTIMPL1 $IO QueueForeignChanges=FALSE
+emit LeanImmutableSentinelOutrankedOk "Inv_AckImpliesCited" $BLSENTIMPL1 $IO AckHonest=FALSE
+emit LeanImmutableSentinelUnstamped "Inv_BoundaryNamesItsClock" $BLSENTIMPL1 $IO StampBoundarySource=FALSE
+# The two ack rows the one-path world holds but cannot refute: it has no
+# stall, so no writer is ever fenced, and it folds every consume. A stall
+# world on the code's shape with handles (one touch, one path) must hold
+# every ack invariant with the refusal on and violate the fenced-ok one
+# without it; the clobbering consume must orphan a nonce.
+IOSTALL="BarrierLease=TRUE SentinelEnabled=TRUE MaxTouches=1 MaxGen=2 MaxSeq=6 MaxHitl=0 \
+MaxBarriers=2 MaxCrashes=0 MaxRestarts=0 AllowStall=TRUE NPaths=1 AckHonest=TRUE $IMPL $IO"
+emit LeanImmutableSentinelStallHolds "$IOSENTINV" $IOSTALL
+# No fenced-ack mutation here: under the barrier lease `DeposedHolder` needs
+# the writer INSIDE its commit section and `AckOk` runs only at idle, so
+# `Inv_NoFencedOkAck` cannot be violated on this shape (r47: RefuseOnFence
+# off, 561,039 distinct, clean). The promise reduces to Inv_AckImpliesCited.
+emit LeanImmutableSentinelOrphan "Inv_NoNonceOrphan" $BLSENTIMPL1 $IO FoldPending=FALSE
+# H8, the sync rows (S3) on the shipped shape: the scoped sync of BLSCOPE
+# with its shipped fix (SyncKeepsHiddenBase), the code's shape, handles and
+# a UI write — the sync's remote truth is the manifest overlaid by the
+# inbox, so the UI write is what gives the overlay something to read. The
+# two mutations are the sync's two refuted designs: judging dirt by a stale
+# scan, and advancing the base for a path the overlay hid.
+# (The narrow rows cannot follow yet: the module ASSUMEs MaxNarrows = 0
+# under ImmutableObjects, and the verb ships — `verbs.rs`.)
+SYNCIO="$BLSCOPE $IMPL $IO SyncKeepsHiddenBase=TRUE HitlOverwritesTrackedOnly=TRUE MaxHitl=1"
+emit LeanImmutableSyncHolds "$IOINV,Inv_SyncNeverDestroysDirty,Inv_NoForeignLost" $SYNCIO
+emit LeanImmutableProbeSyncApplied "ProbeSyncApplied" $SYNCIO
+emit LeanImmutableSyncStaleDirt "Inv_SyncNeverDestroysDirty" $SYNCIO SyncScanFirst=FALSE
+emit LeanImmutableSyncOverlayStale "Inv_NoForeignLost" $SYNCIO SyncKeepsHiddenBase=FALSE
+NARROWIO="$NARROWWORLD BarrierLease=TRUE $IMPL $IO"
+emit LeanImmutableNarrowHolds "$IOINV,Inv_NarrowNeverDeletes,Inv_NarrowNeverRecites" $NARROWIO
+emit LeanImmutableProbeNarrow "ProbeNarrow" $NARROWIO
+emit LeanImmutableNarrowUnlinkFirst "Inv_NarrowNeverDeletes" $NARROWIO NarrowAtomic=FALSE NarrowUnlinkFirst=TRUE
+emit LeanImmutableNarrowUncieFirst "Inv_NarrowNeverRecites" $NARROWIO NarrowAtomic=FALSE NarrowUnlinkFirst=FALSE
+# Renames under handles are CITATION MOVES: the destination cites the
+# source's handle.  The removal world under the barrier lease on the code's
+# shape (the life-lease removal worlds cannot carry handles).
+IORENAME="TwoScanDelete=TRUE NPaths=3 FreeLast=TRUE MaxRemovals=1 MaxHitl=1 \
+MaxGen=3 MaxSeq=6 MaxBarriers=2 MaxCrashes=0 MaxRestarts=0 BarrierLease=TRUE HitlOverwritesTrackedOnly=TRUE"
+emit LeanImmutableRenameHolds "$IOINV,Inv_RenameAtomic,Inv_RenameNoHole,Inv_RemovalNamesItsVersion" \
+  $IORENAME $IMPL $IO
+# RULE 2's clause, refuted without it (the rename world's fourth box run,
+# depth 18): a citation repair never re-cites a handle the document cites at
+# another path this install keeps.  Without it an adopter that never saw the
+# removal re-cites the moved handle at its old name: one handle, two names.
+emit LeanImmutableRepairRecites "Inv_OneName" $IORENAME $IMPL $IO RepairRespectsMoves=FALSE
+# An ANSWERED record still moves the named version out of a tree that holds
+# it clean at the source (the core model's first run; L-117's shape is the
+# same rule's one-barrier lag).  Refuted with every writer skipping answered
+# records, the rule as shipped: a tree that adopted the source's write before
+# the rename keeps it at the old name beside the destination's, and cites the
+# one handle twice.
+emit LeanImmutableAnsweredRecordSkipped "Inv_OneName" $IORENAME $IMPL $IO AnsweredRecordsApply=FALSE
+# A rename is a citation MOVE: it takes the source's pending entry with it.
+# Refuted with the entry left behind, the core model's first run found it in
+# five minutes: a writer consuming after the move adopts the handle at both
+# names.  Sized on the box before it joins the gate.
+emit LeanImmutableRenameLeavesEntry "Inv_OneName" $IORENAME $IMPL $IO RenameMovesEntry=FALSE
+# A citation repair yields to a LATER acked UI write the document already
+# cites at the path (the rename world's eighth box run, depth 18).  Refuted
+# with the repair winning as an upload does: an older adoption re-cited over
+# the user's newer write, published by a peer, with no record.
+emit LeanImmutableRepairOverridesUI "Inv_HITLDurable" $IORENAME $IMPL $IO RepairYieldsToLaterUI=FALSE
+# An adoption declined for the MOVE ALONE, at the destination of a rename
+# still waiting at its source, stays PENDING in the cell (the rename world's
+# tenth box run, L-119, depth 18).  Refuted with the rule as shipped: the
+# entry left the cell with the rest of the consumed, the source's citation
+# was the only thing naming the handle, the peer that applied the answered
+# record removed it, and the collector took it — the rename lost at both
+# names.  The probe world beside it is the rule's own reachability: the
+# shipped world must REACH a pending adoption for the mutation to mean
+# anything (`gh.pendingKept`, written only by the CAS that declines).
+emit LeanImmutablePendingAdoptionDropped "Inv_HITLDurable" $IORENAME $IMPL $IO PendingAdoptionStays=FALSE
+emit LeanImmutableProbePending "ProbePendingKept" $IORENAME $IMPL $IO
+# RULE 1, refuted: retirement judged path by path forgets that a rename's
+# destination cites the source's handle, and the collector takes it.  (The
+# first run of this world failed at depth 9 with no rename in its trace:
+# the collector took p2's SEED generation for p1's, reading the model's
+# numbers as names.  A handle is a name — SameHandle — and the refutation
+# now goes through the rename it was written about.)
+emit LeanImmutableRetirePerPath "Inv_NoDangling" $IORENAME $IMPL $IO RetirePerPath=TRUE
+# RULE 2, refuted: the commit cites its own uploads without re-reading them,
+# and the other writer's sweep has taken one (no grace is modelled, so the
+# grace is not what keeps this safe — the re-read is).  The control is the
+# same world with the re-read on.
+emit LeanImmutableCasCitesBlind "Inv_NoDangling" $BLPROBE $IMPL $IO VerifyUploadedCitations=FALSE
+emit LeanImmutableCasVerifies "$IOINV" $BLPROBE $IMPL $IO
+# RULE 3, refuted: a LEASE-FREE sweep lands between a writer's re-read and
+# its CAS, and the installed document cites a collected handle.
+emit LeanImmutableSweepLeaseFree "Inv_NoDangling" $BLPROBE $IMPL $IO SweepUnderLease=FALSE
+# RULE 4, refuted: a sweep that does not spare what an inbox entry names
+# takes an acked UI write before any barrier consumes it.
+emit LeanImmutableSweepTakesTracked "Inv_HITLDurable" $QWORLD $IMPL $IO SweepSparesTracked=FALSE
+# THE RETIRED CLASSES, each in its own known-bad world with the same-key
+# mutation left ON — inert under handles, which is the point: the shape
+# that violated is run again and every handles invariant holds.  A world
+# whose mutation is inert proves nothing by itself; each carries the full
+# IOINV, so it is a strict run of the protocol in that world, not a claim
+# about the constant.
+#  - the HEAD-then-DELETE collector (F1 / L-10, ConditionalGC=FALSE)
+emit LeanImmutableGCUnconditional "$IOINV" $BLPROBE $IMPL $IO ConditionalGC=FALSE
+#  - the blind adopt (F2 / L-11, VerifyAdoptedCitations=FALSE), in the
+#    restart world that made an adopt reachable
+emit LeanImmutableAdoptBlind "$IOINV" $BLADOPT $IMPL $IO VerifyAdoptedCitations=FALSE
+#  - the gateway overwriting ANY current object (F8 / L-16,
+#    HitlOverwritesTrackedOnly=FALSE)
+emit LeanImmutableHitlOverAny "$IOINV" $BLOVER $IMPL $IO
+# RULE 5 (found by the first HitlOverAny run, depth 18): a commit whose
+# upload's path was published past what it integrated — the UI write's
+# entry left the cell before this barrier's consume, or a peer's own edit
+# landed — surfaces the published version and cites its upload over it
+# knowingly.  The shipped arm took that decision at the PUT (If-Match on
+# the slot, 412, Upload412Preserves); a fresh handle has no slot to fail
+# on, so the CAS takes it.  Refuted with the step left out: the acked
+# write is cited over blind (Inv_HITLDurable), and a peer's own publish
+# likewise, with no record (Inv_NoStaleOverride — in the probe world with a
+# TWO-mint budget: the route needs both writers' edits, and MaxGen=2 mints
+# one; the breadth world was still searching at depth 24 with nothing found
+# when that was read off the mint guard).
+emit LeanImmutableCasOverridesUI "Inv_HITLDurable" $BLOVER $IMPL $IO CommitSurfacesForeign=FALSE
+emit LeanImmutableCasOverridesPeer "Inv_NoStaleOverride" $BLPROBE $IMPL $IO MaxGen=3 CommitSurfacesForeign=FALSE
+#  - the collector-off store's leak flap (H1 / L-105, L-27, L-102): the
+#    store's reality and the give-way both on, the two leak rules off
+emit LeanImmutableLeakHolds "$IOINV,Inv_TreesConverged" $LEAKWORLD $IMPL $IO \
+  TombstoneNamesRetired=FALSE LeakSupersedesNothing=FALSE
+#  - the deposed straggler's unfenced delete (C2 / L-104,
+#    GCFencePerDelete=FALSE); no same-bytes route exists under handles
+emit LeanImmutableStragglerGC "$IOINV" $BLSTRAGGLER $IMPL $IO GCFencePerDelete=FALSE MaxSameBytes=0
+#  - the lost writer (finding 10 / H6): its uploads are collected, never
+#    adopted path by path; the probe shows the sweep actually took one
+emit LeanImmutableOrphanCollected "$IOINV" $ORPHANWORLD $IMPL $IO
+emit LeanImmutableProbeSwept "ProbeSwept" $ORPHANWORLD $IMPL $IO
+# Probes: the new steps fire — a retired handle is collected, a swept
+# upload is withheld by the re-read, a UI write is cited, a rename lands.
+emit LeanImmutableProbeGC "ProbeGC" $BLPROBE $IMPL $IO
+emit LeanImmutableProbeUploadWithheld "ProbeUploadWithheld" $BLPROBE $IMPL $IO
+emit LeanImmutableProbeHITLCited "ProbeHITLCited" $QWORLD $IMPL $IO
+emit LeanImmutableProbeRename "ProbeRenameApplied" $IORENAME $IMPL $IO
+
+# ---- the core model (LeanCore.tla): the shipped shape only ------------------
+# Its own cfgs: a different constant set, so a separate emitter.  Each rule
+# constant is TRUE in the design; its mutation world names the invariant the
+# rule holds up.  Probes name an action through what only it changes.
+emit_core() { # <name> <invariants (comma-sep)> <overrides (key=val ...)>
+  # TWO paths by default -- a rename's source and its destination, which is
+  # what every rule here is about.  The three-path shape is the same claims
+  # with room for a third name and it is a BOX world: `LeanCoreHolds` was
+  # still climbing at 120 million states and depth 19 where the two-path
+  # shape finishes at 47.5 million and depth 34, and `…AnsweredSkipped` had
+  # not found its 11-step route at 47 million.  A gate a laptop cannot run
+  # is not a gate (check.sh's TLC_HEAP exists for the same reason).
+  local name=$1 inv=$2; shift 2
+  local c_Paths='{p1, p2}' c_Free='{p2}' c_Writers='{A, B}'
+  local c_MaxMint=3 c_MaxSeq=3 c_MaxUI=1 c_MaxRemovals=1 c_MaxBarriers=2
+  local c_CommitSurfacesForeign=TRUE c_RepairRespectsMoves=TRUE
+  local c_RenameMovesEntry=TRUE c_AnsweredRecordsApply=TRUE c_RepairYieldsToLaterUI=TRUE
+  local c_CollectorSparesCited=TRUE c_SweepSparesNamed=TRUE
+  local c_CommitVerifiesUploads=TRUE c_SweepUnderLease=TRUE
+  local c_PendingAdoptionStays=TRUE c_ForeignPerPath=TRUE c_OutrankedRemovalLeavesBaseline=TRUE
+  local c_ParkedKeepsMergeBase=TRUE c_CommitRecordsDeleteOverride=TRUE c_Props=""
+  local kv k v
+  for kv in "$@"; do k=${kv%%=*}; v=${kv#*=}; eval "c_$k=\"\$v\""; done
+  {
+    echo "SPECIFICATION Spec"
+    echo "CHECK_DEADLOCK FALSE"
+    echo "CONSTANTS"
+    echo "  Nil = Nil"
+    for k in Paths Free Writers MaxMint MaxSeq MaxUI MaxRemovals MaxBarriers \
+             CommitSurfacesForeign RepairRespectsMoves RenameMovesEntry AnsweredRecordsApply \
+             RepairYieldsToLaterUI CollectorSparesCited SweepSparesNamed CommitVerifiesUploads SweepUnderLease \
+             PendingAdoptionStays ForeignPerPath OutrankedRemovalLeavesBaseline ParkedKeepsMergeBase \
+             CommitRecordsDeleteOverride; do
+      eval "echo \"  $k = \$c_$k\""
+    done
+    local i
+    for i in ${inv//,/ }; do echo "INVARIANT $i"; done
+    for i in ${c_Props//,/ }; do echo "PROPERTY $i"; done
+  } > "$name.cfg"
+}
+COREINV="TypeOK,Inv_CitationsLive,Inv_OneName,Inv_AckedNamed,Inv_OneHolder"
+# The gate's holds world (two paths), then the box's (three, and a longer
+# pointer budget): the same claims with room for a third name.
+emit_core LeanCoreHoldsSmall "$COREINV" Props=Prop_NoSilentRevert
+emit_core LeanCoreHolds "$COREINV" Paths='{p1, p2, p3}' Free='{p3}' MaxSeq=4 Props=Prop_NoSilentRevert
+emit_core LeanCoreRepairRecites "Inv_OneName" RepairRespectsMoves=FALSE MaxBarriers=3
+# Three paths, and BOX worlds: on two paths, with three barriers each, TLC
+# had not found either route at 67 and 45 million states.  The rules they
+# refute are not left unchecked -- `LeanImmutableAnsweredRecordSkipped` and
+# `LeanImmutableRenameLeavesEntry` refute the same two on the history model
+# -- and `run-io.sh` decides these on the box.
+emit_core LeanCoreAnsweredSkipped "Inv_OneName" AnsweredRecordsApply=FALSE MaxBarriers=3 \
+  Paths='{p1, p2, p3}' Free='{p3}' MaxSeq=4
+emit_core LeanCoreRepairOverridesUI "Inv_AckedNamed" RepairYieldsToLaterUI=FALSE MaxBarriers=3 \
+  Paths='{p1, p2, p3}' Free='{p3}' MaxSeq=4
+emit_core LeanCoreRenameLeavesEntry "Inv_OneName" RenameMovesEntry=FALSE MaxBarriers=3 \
+  Paths='{p1, p2, p3}' Free='{p3}' MaxSeq=4
+emit_core LeanCoreCommitBlind "Inv_AckedNamed" CommitSurfacesForeign=FALSE MaxBarriers=3
+# The core's no-lost-update claim (2026-09-23, after L-123) has R7 as its
+# rule: a commit that publishes over a peer's version without surfacing it
+# replaces that version with one not derived from it, and no record names it.
+emit_core LeanCoreCommitBlindReverts "TypeOK" CommitSurfacesForeign=FALSE MaxBarriers=3 Props=Prop_NoSilentRevert
+emit_core LeanCoreSweepTakesNamed "Inv_AckedNamed" SweepSparesNamed=FALSE MaxBarriers=3
+emit_core LeanCoreCitesBlind "Inv_CitationsLive" CommitVerifiesUploads=FALSE MaxUI=0 MaxBarriers=3
+emit_core LeanCoreSweepLeaseFree "Inv_CitationsLive" SweepUnderLease=FALSE MaxUI=0 MaxBarriers=3
+emit_core LeanCoreRetirePerPath "Inv_CitationsLive" CollectorSparesCited=FALSE MaxBarriers=3
+# Every mutation world gets THREE barriers: two was not enough for the
+# answered-record route (48 million states, depth 34, green — a mutation
+# world that does not fire is a failed test, not a passing one).
+emit_core LeanCorePendingDropped "Inv_AckedNamed" PendingAdoptionStays=FALSE MaxBarriers=3
+# The history model's approximation, refuted: a citation judged theirs-or-mine
+# by ONE FLAT SET per writer instead of per path.  A peer that had the seed at
+# a rename's SOURCE publishes its own file over the renamed DESTINATION and
+# surfaces nothing -- the version it published over was familiar, just not at
+# that path -- and the handle is retired with no record.  `LeanRefine` maps
+# onto that shape, so its worlds set it FALSE too (and this is the debt).
+emit_core LeanCoreForeignFlat "Inv_AckedNamed" ForeignPerPath=FALSE MaxBarriers=3
+emit_core LeanCoreProbeRenamed "ProbeRenamed"
+emit_core LeanCoreProbeGone "ProbeGone"
+emit_core LeanCoreProbeRefused "ProbeRefused"
+emit_core LeanCoreProbePending "ProbePending"
+# L-125: a declared removal outranked at the CAS, the arm step 7 now takes.
+emit_core LeanCoreProbeRemovalOutranked "ProbeRemovalOutranked"
+# The delete-override record's arm is reachable (non-vacuity; see the probe).
+emit_core LeanCoreProbeDeleteOverridden "ProbeDeleteOverridden"
+# L-126 (2026-09-25): a withheld upload re-published over a version the tree
+# never integrated.  Its route needs THREE barriers (a peer's sweep, the
+# withholding commit, the re-upload); every world above has two.  One path.
+emit_core LeanCoreWithheldHolds "$COREINV" Paths='{p1}' Free='{}' MaxRemovals=0 MaxBarriers=3 Props=Prop_NoSilentRevert
+emit_core LeanCoreWithheldReverts "TypeOK" ParkedKeepsMergeBase=FALSE Paths='{p1}' Free='{}' MaxRemovals=0 MaxBarriers=3 Props=Prop_NoSilentRevert
+
+# ---- the refinement (LeanRefine.tla): LeanSubtree's shipped worlds map to
+# LeanCore.  Each cfg is the world it refines with the VIEW and SYMMETRY
+# dropped (a history variable makes both unsound), its own invariants and
+# the no-resurrection property dropped (the world it refines checks them),
+# the core's Nil, and the core's invariants read through the mapping.
+emit_refine() { # <base world cfg name> <refine cfg name>
+  { grep -v "^SPECIFICATION\|^VIEW\|^INVARIANT\|^SYMMETRY\|^PROPERTY" "$1.cfg"
+    echo "  CoreNil = CoreNil"
+    echo "SPECIFICATION HSpec"
+    echo "PROPERTY CoreRefinement"
+    echo "INVARIANT TypeOK"
+    echo "INVARIANT CoreCitationsLive"
+    echo "INVARIANT CoreOneName"
+    echo "INVARIANT CoreAckedNamed"
+    echo "PROPERTY CoreNoSilentRevert"
+  } > "$2.cfg"
+}
+emit_refine LeanImmutableQueueHolds LeanRefineQueue
+emit_refine LeanImmutableCasVerifies LeanRefineProbe
+emit_refine LeanImmutableRenameHolds LeanRefineRename
+
+
+SYNCQ="BarrierLease=TRUE HitlOverwritesTrackedOnly=TRUE NPaths=1 MaxGen=3 MaxSeq=6 MaxHitl=0 \
+MaxBarriers=4 MaxCrashes=0 MaxRestarts=0 SyncEnabled=TRUE MaxSyncs=1 SyncKeepsHiddenBase=TRUE $IMPL $IO"
+# L-123's known-bad (the shape before the fix) and the blind spot it had:
+# the shipped invariants hold on it.
+emit LeanImmutableSyncQueueRegress "Inv_ConsumeNeverRegresses" $SYNCQ QueueYieldsToSync=FALSE
+emit LeanImmutableSyncQueueShippedInvs "$IOINV,Inv_SyncNeverDestroysDirty" $SYNCQ QueueYieldsToSync=FALSE
+emit LeanImmutableSyncQueueHolds "$IOINV,Inv_SyncNeverDestroysDirty,Inv_ConsumeNeverRegresses" $SYNCQ

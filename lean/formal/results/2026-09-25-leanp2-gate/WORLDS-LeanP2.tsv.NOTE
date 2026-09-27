@@ -1,0 +1,3 @@
+NOT RUN. The LeanP2 gate was queued on 2026-09-25 and cancelled before it
+started: slice 4 (P1-lite) landed the same evening, so LeanP2 no longer
+describes the code. LeanP1's gate replaces it (../2026-09-25-leanp1-gate/).

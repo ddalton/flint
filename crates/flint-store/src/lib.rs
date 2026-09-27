@@ -457,6 +457,21 @@ pub struct ListedObject {
     pub last_modified_unix: Option<u64>,
 }
 
+/// What a batched delete did ([`ObjectStore::delete_many`]).
+///
+/// A key that was already absent counts as `deleted`: the call is
+/// idempotent, so a collector that crashed mid-batch re-runs it whole.
+/// A per-key refusal is a REPORT entry, not an error — the handle it
+/// names is cited by nothing and named by nothing, so the orphan sweep
+/// collects it later; failing the whole call would fail a publish that
+/// has already landed over a tidy-up.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeleteManyReport {
+    pub deleted: usize,
+    /// `(key, why)` for each key the backend refused.
+    pub failed: Vec<(String, String)>,
+}
+
 /// An in-progress multipart assembly (A9's hygiene surface).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingUpload {
@@ -516,10 +531,23 @@ pub enum PartSource {
 #[derive(Debug, Clone)]
 pub struct ComposeSpec<'a> {
     pub key: &'a str,
-    /// Local source of `Local` parts. Clean ranges are byte-identical
-    /// local and remote by definition, so `crc64` is computable from
-    /// this file alone.
-    pub local_path: &'a std::path::Path,
+    /// Local source of `Local` parts: the OPEN DESCRIPTOR, read at
+    /// offsets, never a path reopened per part. Clean ranges are
+    /// byte-identical local and remote by definition, so `crc64` is
+    /// computable from this file alone.
+    ///
+    /// It is a descriptor and not a path because a path is reopened,
+    /// and everything between the caller's open and the store's read is
+    /// a window: `mv d d.bak; ln -s /elsewhere d` in it made a store
+    /// that reopened `d/cfg.yaml` publish bytes from outside the
+    /// workspace, with `O_NOFOLLOW` on the last component guarding
+    /// nothing (flint-lean review 2026-09-18, H5). The caller opens the
+    /// file once, by a walk that follows no link at any depth, and every
+    /// read — size, stamps, bytes, checksum — comes from that one
+    /// descriptor. `None` is legal only for a spec with no `Local` part
+    /// (a pure `BaseCopy` compose), and a `Local` part without it is
+    /// refused before any part moves.
+    pub local: Option<std::sync::Arc<std::fs::File>>,
     /// Contiguous from offset 0, sizes within the backend's part
     /// granularity (the A11 part-size grid upstream owns that).
     pub parts: Vec<PartSource>,
@@ -841,6 +869,31 @@ pub trait ObjectStore: Send + Sync {
     async fn delete_if_match(&self, key: &str, etag: &str) -> StoreResult<()> {
         let _ = (key, etag);
         Err(StoreError::Other("this backend has no conditional DELETE".into()))
+    }
+
+    /// DELETE every key in `keys`, unconditionally, in as few requests
+    /// as the backend allows (S3: `DeleteObjects`, a thousand keys per
+    /// request). Absent keys succeed; see [`DeleteManyReport`].
+    ///
+    /// This is the immutable-handles collector's delete (lean design
+    /// 2026-09-19, rule R3): every write lands at a handle nobody else
+    /// writes, a handle a landed document stopped citing can never be
+    /// cited again, and so the If-Match that [`delete_if_match`] exists
+    /// for has nothing left to guard. The default runs [`delete`] per
+    /// key, so every backend collects; one with a batch verb overrides
+    /// it and counts one request per batch.
+    ///
+    /// [`delete`]: ObjectStore::delete
+    /// [`delete_if_match`]: ObjectStore::delete_if_match
+    async fn delete_many(&self, keys: &[String]) -> StoreResult<DeleteManyReport> {
+        let mut report = DeleteManyReport::default();
+        for key in keys {
+            match self.delete(key).await {
+                Ok(()) | Err(StoreError::NotFound(_)) => report.deleted += 1,
+                Err(e) => report.failed.push((key.clone(), e.to_string())),
+            }
+        }
+        Ok(report)
     }
 
     // ── version-scoped operations (boundary-verbs plan D7/D8) ────────

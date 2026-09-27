@@ -64,6 +64,7 @@ pub mod verbs;
 mod tests;
 #[cfg(test)] mod tests_upload_gate;
 #[cfg(test)] mod tests_conformance;
+#[cfg(test)] mod tests_bench;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -107,6 +108,12 @@ pub enum LeanError {
     Io(#[from] std::io::Error),
     #[error("state: {0}")]
     State(String),
+    /// A gateway write's precondition, judged against the version the
+    /// workspace tracked, was lost at the inbox CELL's CAS: a different
+    /// write is tracked at the path now (design 2026-09-19, class 5 —
+    /// L-48's two browsers, decided atomically where the entry lands).
+    #[error("{path} is now tracked at {current}; re-read it and try again")]
+    Lost { path: String, current: String },
     /// The cell moved under a commit section: this barrier is
     /// abandoned — its manifest is never installed, its uploads stand
     /// as uncited generations the next barrier adopts by `flush_uuid`.
@@ -268,6 +275,14 @@ pub struct LeanConfig {
     /// outlive the LONGEST publish, not the longest plausible one
     /// (`LeanChunkGCRacyGrace`).
     pub orphan_grace_secs: u64,
+    /// RETIRE-AGE G (M1 of the 2026-09-24 simplification analysis): a
+    /// handle or chunk a commit stopped referencing is collected only once
+    /// its RETIREMENT is this old — not its write, which for a long-lived
+    /// file or chunk is long past the moment a UI save supersedes it. A
+    /// reader that loaded a document less than G ago can fetch everything
+    /// it cites. 0 = collect at once (the shape before; the battery's
+    /// default). `FLINT_SYNC_RETIRE_GRACE_SECS`.
+    pub retire_grace_secs: u64,
     pub chunk_target: usize,
     pub chunk_min: usize,
     pub chunk_max: usize,
@@ -400,11 +415,12 @@ pub struct LeanConfig {
     /// this is how `run-writers.sh` opens the window. 0 = off.
     pub drill_hold_commit_secs: u64,
     /// DRILL-ONLY (`FLINT_SYNC_DRILL_HOLD_GC_SECS`, never stamped by the
-    /// operator): sleep this long between the garbage collector's HEAD of
-    /// a path and its conditional DELETE, once per barrier. That gap is
-    /// where another writer's lease-free upload can land (the model's
-    /// LeanBarrierLeaseGCUnconditional), and it is two requests long, so
-    /// a drill opens it on purpose. 0 = off.
+    /// operator): sleep this long before the collector's batched DELETE
+    /// of what the install retired, once per barrier. Under immutable
+    /// handles the collector is one unconditional `delete_many` with no
+    /// HEAD before it, so the window a drill wants is the one between
+    /// the CAS and that batch — a peer's sweep, or its commit, running
+    /// while this barrier still owes its tidy-up. 0 = off.
     pub drill_hold_gc_secs: u64,
     /// The protocol event trace (`trace.rs`); `None` = off.
     pub event_trace: Option<trace::Sink>,
@@ -417,20 +433,6 @@ pub struct LeanConfig {
     /// tracks it — the gateway's `UNTRACKED_GRACE_SECS`, past any live
     /// writer's claim and commit.
     pub untracked_grace_secs: u64,
-    /// Whether this store was OBSERVED to enforce `If-Match` on DELETE
-    /// (`conformance.rs` runs `probe::probe_conditional_delete` once per
-    /// store identity and caches the verdict).
-    ///
-    /// True is the default because every test double and every S3 that
-    /// has ever been measured enforces it; it is set FALSE only by a
-    /// probe that watched the store ignore the header. When false the
-    /// file collector leaves its objects behind rather than issue a
-    /// delete the store would apply unconditionally — the model calls
-    /// that variant `LeanBarrierLeaseGCUnconditional` and refutes it, so
-    /// this is not a precaution but the one code path the model already
-    /// proved loses another writer's bytes (Ozone 2.2.x, HDDS-14907,
-    /// finding L-27).
-    pub conditional_delete_enforced: bool,
     /// How old the last cell WRITE (claim or renew) may be before a
     /// delete in the commit section renews first (review 2026-09-18,
     /// C2). A deposal needs the token still for six spaced polls (60 s),
@@ -439,6 +441,38 @@ pub struct LeanConfig {
     /// moved, so it fences. Comfortably below the threshold. Tests set 0
     /// to collapse a stall.
     pub renew_within_secs: u64,
+}
+
+/// The gateway's flush id for a UI write's handle: `ui-<added_unix>-<uuid>`.
+/// The time is the order a consume reads off two UI handles of one path
+/// (design 2026-09-19, R7's "later"): a citation that moved to a LATER
+/// gateway write supersedes an entry, one that moved to an earlier one
+/// leaves it live. One gateway's clock orders its own writes exactly;
+/// two replicas' clocks are the residual, and a tie or an inversion
+/// between them costs a surfaced conflict, never a silent drop.
+pub fn ui_flush(added_unix: u64) -> String {
+    format!("ui-{added_unix}-{}", uuid::Uuid::new_v4())
+}
+
+/// The `added_unix` a UI flush id carries; `None` for any other flush.
+pub fn ui_flush_added(flush: &str) -> Option<u64> {
+    let rest = flush.strip_prefix("ui-")?;
+    let (t, _) = rest.split_once('-')?;
+    t.parse().ok()
+}
+
+/// Does `flush` read as a flush id this crate or the gateway mints — a
+/// uuid, the `ui-…` form, or the gateway's `gateway-…` forms — rather than
+/// a tail of a path that happens to follow an `@`?
+fn flush_looks_minted(flush: &str) -> bool {
+    if flush.starts_with("ui-")
+        || flush.starts_with("gateway-")
+        || flush.starts_with("ingress-")
+        || flush == "conflict-preserve"
+    {
+        return true;
+    }
+    uuid::Uuid::parse_str(flush).is_ok()
 }
 
 impl LeanConfig {
@@ -455,6 +489,7 @@ impl LeanConfig {
             whole_put_max: WHOLE_PUT_MAX,
             chunked: true,
             orphan_grace_secs: manifest::ORPHAN_GRACE_SECS,
+            retire_grace_secs: manifest::RETIRE_GRACE_SECS,
             chunk_target: chunk::CHUNK_TARGET,
             chunk_min: chunk::CHUNK_MIN,
             chunk_max: chunk::CHUNK_MAX,
@@ -487,14 +522,47 @@ impl LeanConfig {
             drill_hold_gc_secs: 0,
             event_trace: None,
             untracked_sweep_secs: 3600,
-            untracked_grace_secs: inbox::UNTRACKED_GRACE_SECS,
-            conditional_delete_enforced: true,
+            untracked_grace_secs: untracked::UNTRACKED_GRACE_SECS,
             renew_within_secs: 20,
         }
     }
 
+    /// The INGRESS key of a path: where an outside writer's `aws s3 cp`
+    /// lands, and where every object of this workspace lived before the
+    /// immutable-handles layout (design 2026-09-19, R5). Nothing this
+    /// crate publishes writes it any more; the read door, the consume and
+    /// the checkout fetch HANDLES.
     pub fn file_key(&self, path: &str) -> String {
         format!("{}/files/{}", self.prefix, path)
+    }
+    /// A HANDLE: the one key a write lands at, `files/<path>@<flush>`
+    /// (design 2026-09-19, R1). Nobody else ever writes it, the manifest
+    /// cites it by name, and it is deleted only once no document cites it
+    /// (R3). It sorts beside the bare path, so a listing of a directory
+    /// shows every live version of a file together. `flush` is the
+    /// writer's flush id: a barrier's uuid, or the gateway's `ui-…` form
+    /// ([`ui_flush`]), whose ORDER a consume can read off the name.
+    pub fn handle_key(&self, path: &str, flush: &str) -> String {
+        format!("{}/files/{}@{}", self.prefix, path, flush)
+    }
+    /// The files namespace this workspace's handles and ingress objects
+    /// live under, with its trailing slash — what a sweep lists.
+    pub fn files_prefix(&self) -> String {
+        format!("{}/files/", self.prefix)
+    }
+    /// `(path, flush)` of a handle under this prefix; `None` for a key
+    /// that is not a handle here — the bare path of an ingress object
+    /// included, so a sweep can tell the two apart by the name alone. A
+    /// path may itself contain `@`: the flush is the LAST `@`-suffix, and
+    /// a flush is a uuid or the gateway's `ui-` form, neither of which a
+    /// path component would be mistaken for in the same position.
+    pub fn handle_parts<'a>(&self, key: &'a str) -> Option<(&'a str, &'a str)> {
+        let rest = key.strip_prefix(&self.files_prefix())?;
+        let (path, flush) = rest.rsplit_once('@')?;
+        if path.is_empty() || !flush_looks_minted(flush) {
+            return None;
+        }
+        Some((path, flush))
     }
     /// The LEGACY single-object manifest key. Still read (a workspace
     /// written before the pointer layout has one) and, once migrated,

@@ -117,7 +117,7 @@ mod tests {
         let spec = ComposeSpec {
             progress: None,
             key: "v/f",
-            local_path: &local,
+            local: Some(std::sync::Arc::new(std::fs::File::open(&local).unwrap())),
             parts: vec![PartSource::Local { offset: 0, len: content.len() as u64 }],
             base_key: None,
             base_etag: Some(base.etag.clone()),
@@ -167,7 +167,7 @@ mod tests {
         let spec = ComposeSpec {
             progress: None,
             key: "v/g",
-            local_path: &local,
+            local: Some(std::sync::Arc::new(std::fs::File::open(&local).unwrap())),
             parts: vec![PartSource::Local { offset: 0, len: content.len() as u64 }],
             base_key: None,
             base_etag: Some(base.etag.clone()),

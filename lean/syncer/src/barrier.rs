@@ -10,10 +10,10 @@ use bytes::Bytes;
 
 use flint_store::{crc64_nvme, crc64_to_b64, GenerationStamps, PosixStamps, PutCondition, StoreError};
 
-use super::inbox::{self, InboxDoc, InboxEntry, Refusal, Removal};
+use super::inbox;
 use super::manifest::{self, LeanEntry};
 use super::scan;
-use super::state::{BaselineEntry, ConflictRecord, ForeignChange, IntentJournal};
+use super::state::{BaselineEntry, Carrier, ConflictRecord, IntentJournal};
 use super::{now_unix, LeanError, LeanResult, Syncer};
 
 /// The last gateway request this workspace acted on, per verb. A
@@ -43,10 +43,6 @@ pub struct BarrierReport {
     /// Paths whose transfer drifted or was swept mid-compose: nothing
     /// published, nothing advanced; the next scan re-queues them.
     pub deferred: Vec<String>,
-    /// Local deletes another writer's change outranked (delete/modify
-    /// resolves foreign-wins): the installed seq still cites them, and the
-    /// next consume reconciles each against the local delete.
-    pub outranked: Vec<String>,
     /// Paths whose object the collector LEFT BEHIND because this store
     /// does not enforce `If-Match` on DELETE (`conformance.rs`). The
     /// delete still reached the boundary; only the object survives.
@@ -61,6 +57,13 @@ pub struct BarrierReport {
     /// third; the cost is that the collector re-offers the path (one
     /// HEAD) at every later barrier, exactly as a skipped one is.
     pub leaked: Vec<String>,
+    /// Paths this barrier published OVER a version it never integrated;
+    /// each has a conflict record naming the preserved copy (R7).
+    pub surfaced: Vec<String>,
+    /// Retired handles the batch delete took.
+    pub collected: usize,
+    /// Orphan handles the sweep took, when it was due.
+    pub swept: usize,
     pub no_change: bool,
     /// Bytes this barrier actually published — the input to the
     /// sentinel work meter (boundary-verbs plan D3.1). Metering work
@@ -89,26 +92,6 @@ pub struct BarrierReport {
     pub rescope_replayed: bool,
 }
 
-/// What a pass over the cell's DECLARED removals did (`apply_removals`).
-#[derive(Debug, Default)]
-pub struct RemovalPass {
-    /// Performed: the local file is gone (or already was) and the path
-    /// is in `declared`. Dropped from the cell with the window clear —
-    /// AFTER the manifest CAS — so a listing keeps hiding the path
-    /// until the manifest stops citing it.
-    pub applied: Vec<Removal>,
-    /// Refused for good, `refused` filled in: the cell is told at once
-    /// and the removal is never retried.
-    pub refused: Vec<Removal>,
-    /// Left in the cell for the next barrier: a rename whose
-    /// destination is not integrated yet, or an unlink that failed for
-    /// a transient reason.
-    pub deferred: usize,
-    /// The paths this barrier cites OUT: `applied`, plus any a crashed
-    /// earlier barrier had unlinked and journalled.
-    pub declared: BTreeSet<String>,
-}
-
 /// Upload waves per chunk. The chunk is `fanout * this`, so a wave
 /// still saturates fan-out and the sync point between chunks is rare.
 const UPLOAD_CHUNK_WAVES: usize = 16;
@@ -135,390 +118,75 @@ impl Syncer {
         }
     }
 
-    /// Step 1: consume the inbox. A barrier NEVER runs against an
-    /// unconsumed inbox — this is what makes HITL uploads structurally
-    /// un-amputatable. Returns the entries integrated (dropped from the
-    /// cell at the window-open CAS).
-    pub async fn consume_inbox(&mut self) -> LeanResult<Vec<InboxEntry>> {
-        let loaded = inbox::load(self.store.as_ref(), &self.cfg).await?;
-        self.consume_inbox_doc(&loaded.doc).await
-    }
-
-    /// `consume_inbox` over a cell the caller has already read — the
-    /// barrier reads it once and hands the same document to
-    /// `apply_removals`, so the removal pass adds no request.
-    pub async fn consume_inbox_doc(&mut self, doc: &InboxDoc) -> LeanResult<Vec<InboxEntry>> {
-        Ok(self.consume_counted(doc).await?.0)
-    }
-
-    /// `consume_inbox_doc`, plus how many changes from this writer's LOCAL
-    /// queue it settled. Those leave no entry in the cell to drop, so they
-    /// are not in the returned list — but they are consumptions, and the
-    /// report (and the ack) count them.
-    async fn consume_counted(&mut self, doc: &InboxDoc) -> LeanResult<(Vec<InboxEntry>, usize)> {
-        // §2.5's layered doors ride the inbox GET this function already
-        // pays for: promptness is one tick, and the added request count
-        // is ZERO. A failure here must never fail the consume — the
-        // request is idempotent state and the next tick re-reads it.
-        if let Err(e) = self.note_verb_requests(doc) {
-            eprintln!("flint-sync: verb request not consumed (retrying next tick): {e}");
-        }
-        // Indices into `entries`: the writer-local queue's upserts first,
-        // then the shared inbox's. Both run the same rules below.
-        let mut consumed: Vec<usize> = vec![];
+    /// Step 1 (P1-lite, 2026-09-25): what the tree is OWED, derived from
+    /// the document and taken in one pass. A path is owed where the
+    /// document differs from the baseline — which is also the merge base —
+    /// and the tree is clean there; only a path the tree HOLDS or its
+    /// scope covers (what the scope declined stays declined). Nothing is
+    /// stored between deriving it and taking it, so nothing can be
+    /// overtaken: the queue this replaces needed a prune for that (L-123).
+    /// A DIRTY path is the agent's newer work and is not owed: it
+    /// publishes, and the merge records what it publishes over (R7, the
+    /// delete override). Unless its bytes already ARE the document's —
+    /// a restart between this writer's CAS and step 7 leaves exactly
+    /// that — and then the baseline simply follows (content convergence).
+    /// Returns how many paths it took, and the pointer's (seq, etag) as it
+    /// read them — the barrier's fast path needs exactly that, and must not
+    /// pay a second GET for it (an idle tick is the cell and the pointer).
+    pub async fn consume_owed(&mut self) -> LeanResult<(usize, Option<(u64, String)>)> {
         let mut baseline = self.state.load_baseline()?;
-        // An install whose step 7 a restart cut off left the other writers'
-        // changes it carried in the intent journal (`installed_foreign`).
-        let requeued = self.state.requeue_installed_foreign()?;
-        if requeued > 0 {
-            self.trace("queue", serde_json::json!({"requeued_from_intent": requeued}));
+        // THE CHEAP PATH (scan trigger). Only three things make a path
+        // newly owed: the document moved (the pointer is not the one last
+        // derived against — a peer, a UI save, or this tree's own commit
+        // over a document that had moved), the baseline moved (only this
+        // tree's own commit, which moves the pointer too), or the agent
+        // backed out of a path the last derive skipped as its work. So: one
+        // small GET, a stat per skipped path, never the entries.
+        if let Some(d) = baseline.derived_etag.clone() {
+            if let Some(p) = manifest::load_pointer(self.store.as_ref(), &self.cfg).await? {
+                let still_theirs = baseline.skipped.iter().all(|path| {
+                    check_contained(&self.cfg.root, path).is_ok()
+                        && local_dirty(&self.cfg.root.join(path), baseline.entries.get(path))
+                });
+                if d == p.etag && still_theirs {
+                    return Ok((0, Some((p.pointer.seq, p.etag))));
+                }
+            }
         }
-        // The writer-local queue: changes other writers made that this
-        // workspace's own merges carried into the manifest but not yet
-        // into the tree (`state::ForeignChange` says why it is not the
-        // shared inbox any more).
-        let queue = self.state.load_foreign_queue()?;
-        let queued: Vec<InboxEntry> = queue
-            .iter()
-            .filter_map(|c| {
-                c.etag.as_ref().map(|etag| InboxEntry {
-                    path: c.path.clone(),
-                    etag: etag.clone(),
-                    author: "merge-preserved".into(),
-                    added_unix: 0,
-                    crc64_b64: c.crc64_b64.clone(),
-                    cited: None,
-                })
-            })
-            .collect();
-        let n_queued = queued.len();
-        let entries: Vec<InboxEntry> = queued.into_iter().chain(doc.entries.iter().cloned()).collect();
-        // The manifest's citations, read once and only if an entry asks
-        // (the untracked sweep's do; a gateway's never does).
-        let mut citations: Option<BTreeMap<String, String>> = None;
-        // Entries this consume settled WITHOUT integrating (superseded,
-        // missing, outlived, refused): they track nothing, which the
-        // tombstone pass below needs to know.
-        let mut dropped: BTreeSet<(String, String)> = BTreeSet::new();
-        for (idx, entry) in entries.iter().enumerate() {
-            let key = self.cfg.file_key(&entry.path);
-            // Containment BEFORE anything else: a path we could never
-            // safely materialize must be surfaced and dropped, not
-            // routed through the locally-dirty branch — which would
-            // "preserve" it with a GET+PUT and leave a baseline entry
-            // for a path the scanner can never see (the planted-symlink
-            // shape: `inputs -> /root/.aws` reads as locally-present,
-            // therefore dirty, therefore a conflict-preserve of someone
-            // else's file).
-            if let Err(e) = check_contained(&self.cfg.root, &entry.path) {
-                self.state.append_conflict(&ConflictRecord {
-                    path: entry.path.clone(),
-                    foreign_etag: entry.etag.clone(),
-                    preserved_key: None,
-                    kind: format!("consume-refused-containment: {e}"),
-                    at_unix: now_unix(),
-                })?;
-                self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "refused"}));
-                dropped.insert((entry.path.clone(), entry.etag.clone()));
-                consumed.push(idx);
-                continue;
-            }
-            // Already integrated (a crashed earlier consume): idempotent.
-            if baseline.entries.get(&entry.path).map(|b| b.etag == entry.etag).unwrap_or(false) {
-                self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "already"}));
-                consumed.push(idx);
-                continue;
-            }
-            // Review 2026-09-18, H1b: the untracked sweep's entry is honoured
-            // only while the manifest still cites at its path exactly what
-            // the sweep judged the object against. The citation moving on —
-            // to the object itself (the upload it tracked was a live
-            // writer's, since committed), to a newer one, or to nothing (a
-            // delete) — ends it, with a trace line and no record: nobody
-            // acked these bytes, and adopting them here was how a
-            // generation the manifest had cited and then dropped came back
-            // through the citation repair.
-            if let Some(judged) = entry.cited.as_deref() {
-                if citations.is_none() {
-                    citations = Some(self.current_citations().await?);
-                }
-                let cited_now = citations.as_ref().and_then(|c| c.get(entry.path.as_str()).cloned());
-                let same = |a: &str, b: &str| a.trim_matches('"') == b.trim_matches('"');
-                if !cited_now.as_deref().is_some_and(|c| same(c, judged)) {
-                    self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "outlived", "judged": judged, "cited": cited_now}));
-                    dropped.insert((entry.path.clone(), entry.etag.clone()));
-                    consumed.push(idx);
-                    continue;
-                }
-            }
-            let head = match self.store.head(&key).await {
-                Ok(m) => m,
-                Err(StoreError::NotFound(_)) => {
-                    // The object vanished under a tracked entry: surface
-                    // it — the bytes are NOT recoverable from here.
-                    self.state.append_conflict(&ConflictRecord {
-                        path: entry.path.clone(),
-                        foreign_etag: entry.etag.clone(),
-                        preserved_key: None,
-                        kind: "consume-object-missing".into(),
-                        at_unix: now_unix(),
-                    })?;
-                    self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "missing"}));
-                    dropped.insert((entry.path.clone(), entry.etag.clone()));
-                    consumed.push(idx);
-                    continue;
-                }
-                Err(e) => return Err(e.into()),
-            };
-            if head.etag != entry.etag {
-                // Superseded by a newer write (its own inbox entry
-                // follows, or it is the syncer's): drop.
-                self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "superseded"}));
-                dropped.insert((entry.path.clone(), entry.etag.clone()));
-                consumed.push(idx);
-                continue;
-            }
-            let local_path = self.cfg.root.join(&entry.path);
-            let mut dirty = local_dirty(&local_path, baseline.entries.get(&entry.path));
-            // Review 2026-09-12, atomicity-3 / inbox-2: the fetch is a
-            // network round trip and the agent may write the path inside
-            // it. The stat that licenses the adopt is repeated AFTER the
-            // fetch, before anything touches the file: a write in that
-            // window makes this the dirty case — the foreign bytes are
-            // preserved and a record names them, the agent's stay.
-            let mut fetched = None;
-            if !dirty {
-                let got = self.store.get_whole(&key, Some(&entry.etag)).await.map_err(|e| match e {
-                    StoreError::PreconditionFailed(m) => {
-                        StoreError::Other(format!("consume raced a newer write: {m}"))
-                    }
-                    other => other,
-                })?;
-                if local_dirty(&local_path, baseline.entries.get(&entry.path)) {
-                    dirty = true;
-                } else {
-                    fetched = Some(got);
-                }
-            }
-            if dirty {
-                // Locally-dirty wins; preserve the FOREIGN bytes first
-                // (a conflict record must keep both versions
-                // recoverable), then advance the recognized ETag so our
-                // eventual publish supersedes it KNOWINGLY.
-                let preserved = self.preserve_conflict_copy(&entry.path, &head.etag).await?;
-                self.state.append_conflict(&ConflictRecord {
-                    path: entry.path.clone(),
-                    foreign_etag: entry.etag.clone(),
-                    preserved_key: Some(preserved),
-                    kind: "consume-dirty".into(),
-                    at_unix: now_unix(),
-                })?;
-                let stamps = GenerationStamps::from_meta(&head.meta);
-                baseline.entries.insert(
-                    entry.path.clone(),
-                    BaselineEntry {
-                        etag: head.etag.clone(),
-                        generation: stamps.map(|s| s.generation).unwrap_or(0),
-                        // Deliberately NOT the local file's stat: the
-                        // path must still scan as dirty so the local
-                        // version publishes.
-                        size: u64::MAX,
-                        mtime_unix: 0,
-                        mtime_nanos: None,
-                        // The sentinel's bytes are the LOCAL edit; the
-                        // publish that supersedes hashes them itself.
-                        crc64_b64: None,
-                        judged: None,
-                    },
-                );
-                self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "dirty-preserved"}));
-            } else {
-                // Clean, re-checked after the fetch: adopt the foreign
-                // content into the tree.
-                let (meta, body) = fetched.expect("fetched while clean");
-                let mode = PosixStamps::from_meta(&meta.meta).map(|p| p.mode);
-                // VERIFIED before it is written, as checkout's fresh
-                // fetch is: against the writer's CRC when the inbox
-                // entry carries one (the gateway hashes what it sent),
-                // else the backend's attestation when it offers one.
-                // Ozone offers none, so the inbox's is what a HITL
-                // upload gets checked against there. What the baseline
-                // records — and the next citation repair cites — is
-                // OURS, over the bytes actually written.
-                let got = crc64_to_b64(crc64_nvme(&body));
-                let want = entry.crc64_b64.clone().or_else(|| meta.crc64_b64.clone());
-                if let Some(want) = want {
-                    if want != got {
-                        // NOT consumed: the entry stays in the cell and
-                        // the record repeats — a permanent, visible
-                        // contradiction is the right failure for
-                        // bytes nobody vouches for.
-                        self.state.append_conflict(&ConflictRecord {
-                            path: entry.path.clone(),
-                            foreign_etag: entry.etag.clone(),
-                            preserved_key: None,
-                            kind: format!(
-                                "consume-refused-checksum: etag {} is attested with CRC-64 \
-                                 {want} but the bytes fetched under it hash to {got}",
-                                entry.etag
-                            ),
-                            at_unix: now_unix(),
-                        })?;
-                        self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "refused-checksum"}));
-                        continue;
-                    }
-                }
-                // CONTAINMENT and I/O are split, because the answers are
-                // opposite. Containment was already decided above by
-                // `check_contained`, so a refusal reaching here is a
-                // path that only became unsafe once parents were
-                // created — still a permanent property of the path, so
-                // it is surfaced and DROPPED, exactly as above.
-                //
-                // Everything else — ENOSPC, EACCES, EIO, a read-only
-                // filesystem — is TRANSIENT, and dropping the entry for
-                // one is silent permanent loss: the foreign bytes stay
-                // in the bucket, the workspace never adopts them, and
-                // nothing ever re-offers the entry. It used to be
-                // recorded as `consume-refused-containment`, which sent
-                // whoever read it looking for a hostile path that was
-                // never there. A full disk is not a planted symlink.
-                let target = match contained_path(&self.cfg.root, &entry.path) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        self.state.append_conflict(&ConflictRecord {
-                            path: entry.path.clone(),
-                            foreign_etag: entry.etag.clone(),
-                            preserved_key: None,
-                            kind: format!("consume-refused-containment: {e}"),
-                            at_unix: now_unix(),
-                        })?;
-                        self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "refused"}));
-                        consumed.push(idx);
-                        continue;
-                    }
-                };
-                if let Err(e) = write_file_atomic(&target, &body, mode) {
-                    // NOT consumed: the entry stays in the cell so the
-                    // next barrier retries it. A visible conflict record
-                    // that repeats is a far better failure than one
-                    // silent drop.
-                    self.state.append_conflict(&ConflictRecord {
-                        path: entry.path.clone(),
-                        foreign_etag: entry.etag.clone(),
-                        preserved_key: None,
-                        kind: format!("consume-write-failed (will retry): {e}"),
-                        at_unix: now_unix(),
-                    })?;
-                    self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "deferred"}));
-                    continue;
-                }
-                let st = std::fs::metadata(&local_path)?;
-                let stamps = GenerationStamps::from_meta(&meta.meta);
-                baseline.entries.insert(
-                    entry.path.clone(),
-                    BaselineEntry {
-                        etag: meta.etag.clone(),
-                        generation: stamps.map(|s| s.generation).unwrap_or(0),
-                        size: st.len(),
-                        mtime_unix: mtime_of(&st),
-                        mtime_nanos: Some(mtime_nanos_of(&st)),
-                        crc64_b64: Some(got),
-                        judged: entry.cited.clone(),
-                    },
-                );
-                baseline.prev_scan.insert(entry.path.clone());
-                self.trace("consume", serde_json::json!({"path": entry.path, "etag": entry.etag, "from": if idx < n_queued { "queue" } else { "inbox" }, "action": "adopted"}));
-            }
-            consumed.push(idx);
-        }
-        let mut settled: BTreeSet<String> =
-            consumed.iter().filter(|i| **i < n_queued).map(|i| entries[*i].path.clone()).collect();
+        let Some(current) = manifest::load(self.store.as_ref(), &self.cfg).await? else {
+            return Ok((0, None));
+        };
+        let doc = &current.manifest;
+        // H10: whatever this barrier does next — the fast path included —
+        // the ack names this document or a later one.
+        self.note_carrier_uncited(doc)?;
+        let scope = self.state.load_scope()?.map(|v| super::sync::Scope::new(&v));
+        let same = |a: &str, b: &str| a.trim_matches('"') == b.trim_matches('"');
+        let mut taken = 0usize;
+        // Something owed could not be taken now (a fetch that lost to a
+        // newer document, an unreadable path, a failed write): the next
+        // consume derives again even if the pointer does not move.
+        let mut left = false;
+        // What is not owed because the agent is working on it: owed the
+        // moment it backs out, which the cheap path checks.
+        let mut skipped: BTreeSet<String> = BTreeSet::new();
 
-        // A queued DELETION: another writer removed the path and this
-        // workspace's merge cited that. A clean local copy goes; a dirty
-        // one is the agent's newer work and stays — it publishes, and a
-        // modify beats a delete at the merge. Never a declared removal of
-        // our own: the deletion is already in the manifest.
-        for change in queue.iter().filter(|c| c.etag.is_none()) {
-            if check_contained(&self.cfg.root, &change.path).is_err() {
+        // Deletions first: a document that turned the file `build` into
+        // the directory `build/log.txt` owes both, and the file must go
+        // before the directory can be made.
+        let gone: Vec<String> =
+            baseline.entries.keys().filter(|p| !doc.entries.contains_key(*p)).cloned().collect();
+        for path in gone {
+            if check_contained(&self.cfg.root, &path).is_err() {
                 // Never materializable here, so nothing to remove.
-                settled.insert(change.path.clone());
+                baseline.entries.remove(&path);
+                baseline.prev_scan.remove(&path);
                 continue;
             }
-            let local = self.cfg.root.join(&change.path);
-            // A key that holds an object has SUPERSEDED the deletion: a
-            // newer write — a UI write, another writer's re-create — landed
-            // after the merge that queued it, and the upserts above already
-            // drop an entry whose etag the key no longer holds. Applying it
-            // anyway removes the newer bytes from the tree, which this very
-            // consume may just have adopted — and the window clear then
-            // drops their inbox entry, leaving an acked write cited and
-            // tracked by nothing (found by the formal model with this queue
-            // modelled, 2026-09-15). Only a file still on disk needs the
-            // look: an absent one settles as it always did.
-            if std::fs::symlink_metadata(&local).is_ok() {
-                match self.store.head(&self.cfg.file_key(&change.path)).await {
-                    // Review 2026-09-18, H1: the generation the delete
-                    // RETIRED is not a newer write. A collector that gave
-                    // way (a store without a conditional DELETE) leaves it
-                    // at the key; reading that as "superseded" kept the
-                    // path in this tree and its baseline, the repair
-                    // re-cited it, and the two writers flapped the path
-                    // forever. Only a DIFFERENT object supersedes.
-                    Ok(meta) if change.retired.as_deref() != Some(meta.etag.as_str()) => {
-                        // Review 2026-09-18, H1b: a DIFFERENT object supersedes
-                        // the deletion only if something will integrate it —
-                        // the manifest cites it at the path, or an entry this
-                        // consume honoured names it. An object nothing cites
-                        // and nothing tracks is a leak (a delete's GC that
-                        // never ran; a generation this tree never integrated,
-                        // so the tombstone names an older one), and a leak
-                        // supersedes nothing: the delete applies. A live
-                        // writer's upload still in flight goes with the old
-                        // copy and returns as the foreign change its commit
-                        // queues.
-                        if citations.is_none() {
-                            citations = Some(self.current_citations().await?);
-                        }
-                        let same = |a: &str, b: &str| a.trim_matches('"') == b.trim_matches('"');
-                        let cited = citations.as_ref().and_then(|c| c.get(&change.path)).is_some_and(|c| same(c, &meta.etag));
-                        let tracked = doc.entries.iter().any(|e| {
-                            e.path == change.path && same(&e.etag, &meta.etag) && !dropped.contains(&(e.path.clone(), e.etag.clone()))
-                        });
-                        if cited || tracked {
-                            self.trace("tombstone", serde_json::json!({"path": change.path, "action": "superseded"}));
-                            // Review 2026-09-18, H1f: settled, but the copy it
-                            // named is still in the tree, derived from the
-                            // generation the delete retired. The merge base
-                            // moved past the path in the install that queued
-                            // the deletion; it must say so again here, or the
-                            // next install — onto a manifest that dropped the
-                            // path a SECOND time before the re-cite reached
-                            // this tree — has nothing at the path to diff, and
-                            // the clean copy stays forever, uncited and a
-                            // repair candidate at every barrier. Restored, that
-                            // install queues the deletion again, or the upsert
-                            // if the re-cite still stands.
-                            if let Some(retired) = change
-                                .retired
-                                .clone()
-                                .or_else(|| baseline.entries.get(&change.path).map(|b| b.etag.clone()))
-                            {
-                                baseline.inst_base.insert(change.path.clone(), retired);
-                            }
-                            settled.insert(change.path.clone());
-                            continue;
-                        }
-                        self.trace("tombstone", serde_json::json!({"path": change.path, "action": "applies-over-leak", "leaked": meta.etag}));
-                    }
-                    Ok(_) | Err(StoreError::NotFound(_)) => {}
-                    Err(e) => return Err(e.into()),
-                }
-            }
-            let be = baseline.entries.get(&change.path).cloned();
+            let local = self.cfg.root.join(&path);
+            let be = baseline.entries.get(&path).cloned();
             let record = |kind: String| ConflictRecord {
-                path: change.path.clone(),
+                path: path.clone(),
                 foreign_etag: String::new(),
                 preserved_key: None,
                 kind,
@@ -526,24 +194,23 @@ impl Syncer {
             };
             match std::fs::symlink_metadata(&local) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    self.trace("tombstone", serde_json::json!({"path": change.path, "action": "absent"}));
+                    self.trace("tombstone", serde_json::json!({"path": path, "action": "absent"}));
                 }
                 Err(e) => {
-                    // Unreadable is not absent: keep it queued.
-                    self.trace("tombstone", serde_json::json!({"path": change.path, "action": "deferred"}));
+                    // Unreadable is not absent.
+                    self.trace("tombstone", serde_json::json!({"path": path, "action": "deferred"}));
                     self.state.append_conflict(&record(format!(
                         "consume-foreign-delete-deferred: cannot stat the path: {e}"
                     )))?;
+                    left = true;
                     continue;
                 }
-                Ok(m) if !m.is_file() || be.is_none() || local_dirty(&local, be.as_ref()) => {
-                    self.state.append_conflict(&record(
-                        "consume-foreign-delete-vs-dirty: another writer deleted this path; the \
-                         local version has unpublished changes, so it stays and publishes"
-                            .into(),
-                    ))?;
-                    self.trace("tombstone", serde_json::json!({"path": change.path, "action": "kept-dirty"}));
-                    settled.insert(change.path.clone());
+                Ok(m) if !m.is_file() || local_dirty(&local, be.as_ref()) => {
+                    // The agent's newer work: not owed. It publishes over
+                    // the delete, with a record (`commit-recreated-deleted`).
+                    // Owed again if the agent backs out.
+                    self.trace("tombstone", serde_json::json!({"path": path, "action": "kept-dirty"}));
+                    skipped.insert(path.clone());
                     continue;
                 }
                 Ok(_) => {
@@ -551,6 +218,7 @@ impl Syncer {
                         self.state.append_conflict(&record(format!(
                             "consume-foreign-delete-failed (will retry): {e}"
                         )))?;
+                        left = true;
                         continue;
                     }
                     // CONFIRM: only NotFound is absence.
@@ -561,204 +229,172 @@ impl Syncer {
                         self.state.append_conflict(&record(
                             "consume-foreign-delete-unconfirmed (will retry)".into(),
                         ))?;
+                        left = true;
                         continue;
                     }
-                    self.trace("tombstone", serde_json::json!({"path": change.path, "action": "removed"}));
+                    self.trace("tombstone", serde_json::json!({"path": path, "action": "removed"}));
+                    taken += 1;
                 }
             }
-            baseline.entries.remove(&change.path);
-            baseline.prev_scan.remove(&change.path);
-            settled.insert(change.path.clone());
+            baseline.entries.remove(&path);
+            baseline.prev_scan.remove(&path);
         }
 
-        // The files this baseline vouches for reached the disk before
-        // the baseline does (audit 2026-09-03, finding 9).
-        self.state.sync_tree()?;
-        self.state.save_baseline(&baseline)?;
-        // After the baseline: a crash between the two re-applies a
-        // settled change, and both arms are idempotent (an upsert the
-        // baseline holds is "already integrated"; a deletion with nothing
-        // on disk only drops a baseline entry that is already gone).
-        if !settled.is_empty() {
-            let remaining: Vec<_> =
-                queue.into_iter().filter(|c| !settled.contains(&c.path)).collect();
-            self.state.save_foreign_queue(&remaining)?;
-        }
-        // Only the SHARED inbox's entries leave the cell at the window
-        // clear; the local queue was settled above.
-        let n_settled = settled.len();
-        let shared = consumed.into_iter().filter(|i| *i >= n_queued).map(|i| entries[i].clone()).collect();
-        Ok((shared, n_settled))
-    }
-
-    /// Step 1b: perform the DECLARED removals (delete/rename design
-    /// §4-§6). Runs after `consume_inbox_doc`, so a rename's destination
-    /// is in the tree before its source leaves it — §5: create first,
-    /// removal second; a partial application leaves an EXTRA file,
-    /// never a missing one.
-    ///
-    /// Per removal, in order:
-    /// - the path must be containable, as a consume's must;
-    /// - a rename WAITS until its destination is integrated (in the
-    ///   baseline): a consume that deferred the destination defers the
-    ///   removal with it;
-    /// - a locally-DIRTY path — unpublished edits, or a file the agent
-    ///   created there — is REFUSED, nothing applied, the agent's work
-    ///   untouched. The same rule a consume applies to a HITL write
-    ///   over dirty bytes, and the reason a declared removal cannot be
-    ///   "just a delete". Refused for good: the cell is told, and a
-    ///   retry that waited for the agent to publish would delete the
-    ///   very edit the refusal protected;
-    /// - a clean file is unlinked, and the unlink is CONFIRMED by lstat
-    ///   before the path is declared — an unlink that did not take
-    ///   publishes no deletion (`confirm_absences`' rule, kept);
-    /// - a path already absent locally and known to the baseline or the
-    ///   merge base is declared as it stands: the agent got there
-    ///   first, or this tree never held it (a scoped workspace).
-    ///
-    /// A declared path skips the two-scan guard (§4): that guard
-    /// protects against absence INFERRED by a walk, and a declaration
-    /// is not an inference. That is what lets a rename's two halves
-    /// ride one manifest generation.
-    pub async fn apply_removals(&mut self, doc: &InboxDoc) -> LeanResult<RemovalPass> {
-        let mut pass = RemovalPass::default();
-        let baseline = self.state.load_baseline()?;
-        // A crashed earlier barrier that had unlinked and journalled but
-        // not installed: its declarations are still deletions with a
-        // recorded basis — unless the agent has since put a file back.
-        for p in self.state.load_intent()?.declared_deletes {
-            let gone = matches!(
-                std::fs::symlink_metadata(self.cfg.root.join(&p)),
-                Err(ref e) if e.kind() == std::io::ErrorKind::NotFound
-            );
-            if gone && (baseline.entries.contains_key(&p) || baseline.inst_base.contains_key(&p)) {
-                pass.declared.insert(p);
-            }
-        }
-        for r in &doc.removals {
-            if r.refused.is_some() {
+        for (path, e) in &doc.entries {
+            let be = baseline.entries.get(path).cloned();
+            if be.as_ref().is_some_and(|b| same(&b.etag, &e.etag)) {
                 continue;
             }
-            let refusal = |kind: &str, message: String| Removal {
-                refused: Some(Refusal { kind: kind.into(), message, at_unix: now_unix() }),
-                ..r.clone()
-            };
-            let mut refuse = |kind: &str, message: String| -> LeanResult<()> {
+            let held = be.is_some() || scope.as_ref().is_none_or(|s| s.covers(path));
+            if !held {
+                continue;
+            }
+            if let Err(err) = check_contained(&self.cfg.root, path) {
+                // A path this tree can never safely materialise: surfaced,
+                // and not left owed — nothing here will ever take it.
                 self.state.append_conflict(&ConflictRecord {
-                    path: r.path.clone(),
-                    foreign_etag: String::new(),
+                    path: path.clone(),
+                    foreign_etag: e.etag.clone(),
                     preserved_key: None,
-                    kind: format!("{kind}: {message}"),
+                    kind: format!("consume-refused-containment: {err}"),
                     at_unix: now_unix(),
                 })?;
-                pass.refused.push(refusal(kind, message));
-                Ok(())
-            };
-            if let Err(e) = check_contained(&self.cfg.root, &r.path) {
-                refuse("removal-refused-containment", e.to_string())?;
+                self.trace("consume", serde_json::json!({"path": path, "etag": e.etag, "from": "manifest", "action": "refused"}));
                 continue;
             }
-            if let Some(dst) = &r.moved_to {
-                match baseline.entries.get(dst) {
-                    // Not integrated yet (a consume deferred it): wait.
-                    None => {
-                        pass.deferred += 1;
-                        continue;
-                    }
-                    // Integrated as a CONFLICT: the agent had an
-                    // unpublished file at the destination, its version
-                    // won, and the moved bytes are preserved under
-                    // `conflicts/`. Deleting the source now would leave
-                    // the user's file nowhere in the tree — so the move
-                    // is refused and the source stays. The sentinel is
-                    // the consume-dirty baseline entry's `u64::MAX`.
-                    Some(b) if b.size == u64::MAX => {
-                        refuse(
-                            "removal-refused-destination-conflict",
-                            format!(
-                                "{} was not moved to {dst}: the agent has an unpublished                                  file at the destination and it wins; the moved bytes are                                  preserved under the conflict record and the source is kept",
-                                r.path
-                            ),
-                        )?;
-                        continue;
-                    }
-                    Some(_) => {}
+            let local = self.cfg.root.join(path);
+            if local_dirty(&local, be.as_ref()) {
+                // CONTENT CONVERGENCE: the tree's bytes are the document's.
+                let converged = std::fs::symlink_metadata(&local).is_ok_and(|m| m.is_file() && m.len() == e.size)
+                    && file_crc(&self.cfg.root, path).is_ok_and(|c| same(&crc64_to_b64(c), &e.crc64_b64));
+                if converged {
+                    let st = std::fs::metadata(&local)?;
+                    baseline.entries.insert(
+                        path.clone(),
+                        BaselineEntry {
+                            etag: e.etag.clone(),
+                            key: Some(e.key.clone()),
+                            generation: e.generation,
+                            size: st.len(),
+                            mtime_unix: mtime_of(&st),
+                            mtime_nanos: Some(mtime_nanos_of(&st)),
+                            crc64_b64: Some(e.crc64_b64.clone()),
+                        },
+                    );
+                    baseline.prev_scan.insert(path.clone());
+                    self.trace("consume", serde_json::json!({"path": path, "etag": e.etag, "from": "manifest", "action": "converged"}));
+                    taken += 1;
+                } else {
+                    // The agent's work, not owed — until it backs out.
+                    skipped.insert(path.clone());
                 }
+                continue;
             }
-            let local = self.cfg.root.join(&r.path);
-            let be = baseline.entries.get(&r.path);
-            match std::fs::symlink_metadata(&local) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    if be.is_some() || baseline.inst_base.contains_key(&r.path) {
-                        pass.declared.insert(r.path.clone());
-                    }
-                    // Nothing here and nothing cited: a removal of a path
-                    // that was never there, or that a sibling already
-                    // removed. Applied as a no-op.
-                    pass.applied.push(r.clone());
+            let (meta, body) = match self.store.get_whole(&e.key, Some(&e.etag)).await {
+                Ok(got) => got,
+                // A newer document replaced it (and its collector took the
+                // handle): owed again against that one.
+                Err(StoreError::NotFound(_)) | Err(StoreError::PreconditionFailed(_)) => {
+                    self.trace("consume", serde_json::json!({"path": path, "etag": e.etag, "from": "manifest", "action": "missing"}));
+                    left = true;
+                    continue;
                 }
-                Err(e) => {
-                    // Unreadable is not absent (`confirm_absences`' rule):
-                    // fail closed, and say so where the pod-side reader
-                    // looks. Transient, so deferred rather than refused.
+                Err(err) => return Err(err.into()),
+            };
+            // VERIFIED before it is written, as checkout's fetch is: against
+            // the CRC the document cites, else the backend's attestation.
+            let got = crc64_to_b64(crc64_nvme(&body));
+            let want = Some(e.crc64_b64.clone()).filter(|c| !c.is_empty()).or_else(|| meta.crc64_b64.clone());
+            if let Some(want) = want {
+                if want != got {
                     self.state.append_conflict(&ConflictRecord {
-                        path: r.path.clone(),
-                        foreign_etag: String::new(),
+                        path: path.clone(),
+                        foreign_etag: e.etag.clone(),
                         preserved_key: None,
-                        kind: format!("removal-deferred: cannot stat the path: {e}"),
+                        kind: format!(
+                            "consume-refused-checksum: etag {} is cited with CRC-64 {want} but the \
+                             bytes fetched under it hash to {got}",
+                            e.etag
+                        ),
                         at_unix: now_unix(),
                     })?;
-                    pass.deferred += 1;
-                }
-                Ok(m) if !m.is_file() => {
-                    refuse(
-                        "removal-refused-not-a-file",
-                        format!("{} is not a regular file in the workspace", r.path),
-                    )?;
-                }
-                Ok(_) => {
-                    if local_dirty(&local, be) {
-                        refuse(
-                            "removal-refused-dirty",
-                            format!(
-                                "{} has unpublished local changes; the removal {} asked for                                  was not applied and the agent's work is kept — publish or                                  discard the local version, then ask again",
-                                r.path, r.author
-                            ),
-                        )?;
-                        continue;
-                    }
-                    if let Err(e) = std::fs::remove_file(&local) {
-                        self.state.append_conflict(&ConflictRecord {
-                            path: r.path.clone(),
-                            foreign_etag: String::new(),
-                            preserved_key: None,
-                            kind: format!("removal-unlink-failed (will retry): {e}"),
-                            at_unix: now_unix(),
-                        })?;
-                        pass.deferred += 1;
-                        continue;
-                    }
-                    // CONFIRM: only NotFound is absence.
-                    match std::fs::symlink_metadata(&local) {
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                            pass.declared.insert(r.path.clone());
-                            pass.applied.push(r.clone());
-                        }
-                        _ => {
-                            self.state.append_conflict(&ConflictRecord {
-                                path: r.path.clone(),
-                                foreign_etag: String::new(),
-                                preserved_key: None,
-                                kind: "removal-unlink-unconfirmed (will retry)".into(),
-                                at_unix: now_unix(),
-                            })?;
-                            pass.deferred += 1;
-                        }
-                    }
+                    self.trace("consume", serde_json::json!({"path": path, "etag": e.etag, "from": "manifest", "action": "refused-checksum"}));
+                    left = true;
+                    continue;
                 }
             }
+            let mode = PosixStamps::from_meta(&meta.meta).map(|p| p.mode);
+            consume_window("before-write", path);
+            // H7: the licence to overwrite is re-checked with the temp
+            // written, immediately before the rename; a write since is the
+            // agent's, and it stays (and publishes).
+            let still_clean = || !local_dirty(&local, be.as_ref());
+            let st = match contained_path(&self.cfg.root, path)
+                .and_then(|target| write_file_atomic_if(&target, &body, mode, &still_clean))
+            {
+                Ok(Some(st)) => st,
+                // The agent wrote first: as a dirty path above.
+                Ok(None) => {
+                    skipped.insert(path.clone());
+                    continue;
+                }
+                Err(err) => {
+                    // TRANSIENT (a full disk is not a planted symlink): the
+                    // path stays owed and the record repeats.
+                    self.state.append_conflict(&ConflictRecord {
+                        path: path.clone(),
+                        foreign_etag: e.etag.clone(),
+                        preserved_key: None,
+                        kind: format!("consume-write-failed (will retry): {err}"),
+                        at_unix: now_unix(),
+                    })?;
+                    self.trace("consume", serde_json::json!({"path": path, "etag": e.etag, "from": "manifest", "action": "deferred"}));
+                    left = true;
+                    continue;
+                }
+            };
+            consume_window("after-rename", path);
+            // The baseline records the inode this consume WROTE (H7).
+            let stamps = GenerationStamps::from_meta(&meta.meta);
+            baseline.entries.insert(
+                path.clone(),
+                BaselineEntry {
+                    etag: meta.etag.clone(),
+                    key: Some(e.key.clone()),
+                    generation: stamps.map(|s| s.generation).unwrap_or(e.generation),
+                    size: st.len(),
+                    mtime_unix: mtime_of(&st),
+                    mtime_nanos: Some(mtime_nanos_of(&st)),
+                    crc64_b64: Some(got),
+                },
+            );
+            baseline.prev_scan.insert(path.clone());
+            self.trace("consume", serde_json::json!({"path": path, "etag": e.etag, "from": "manifest", "action": "adopted"}));
+            taken += 1;
         }
-        Ok(pass)
+        baseline.derived_etag = (!left).then(|| current.etag.clone());
+        baseline.skipped = skipped;
+        if !left {
+            // Everything owed is taken: the tree is integrated with this
+            // document (its dirty paths are the agent's, about to publish).
+            baseline.seq = doc.seq;
+            baseline.manifest_etag = Some(current.etag.clone());
+        }
+        // The files this baseline vouches for reached the disk before the
+        // baseline does (audit 2026-09-03, finding 9).
+        self.state.sync_tree()?;
+        self.state.save_baseline(&baseline)?;
+        // The pointer as this load saw it (a legacy single object has none,
+        // and the fast path asks the bucket itself).
+        let seen = current.pointer.as_ref().map(|_| (doc.seq, current.etag.clone()));
+        Ok((taken, seen))
+    }
+
+    /// The cell's verb requests alone (§2.5), as a barrier's step 1 reads
+    /// them: no consume, no fetch.
+    pub async fn read_cell_requests(&mut self) -> LeanResult<()> {
+        let doc = inbox::load(self.store.as_ref(), &self.cfg).await?.doc;
+        self.note_verb_requests(&doc)
     }
 
     /// Act on the inbox document's two request fields (§2.5, D14).
@@ -814,14 +450,17 @@ impl Syncer {
         super::control::write_atomic(&self.verb_watermark_path(), &bytes)
     }
 
-    async fn preserve_conflict_copy(&self, path: &str, etag: &str) -> LeanResult<String> {
-        let key = self.cfg.file_key(path);
+    /// The consume's dirty case: the agent's local version wins; the
+    /// FOREIGN bytes are preserved first (a conflict record keeps both
+    /// recoverable), then the recognized ETag advances so the eventual
+    /// publish supersedes them KNOWINGLY.
+    /// Preserve the bytes at `key` (a handle, or an ingress object) under
+    /// `conflicts/<uuid>/<path>`, by a server-side copy guarded on `etag`:
+    /// no bytes cross this process, and a 10 GB checkpoint is preserved
+    /// in one request. The copy is what a conflict record names, and what
+    /// outlives the handle once the collector or the orphan sweep takes it.
+    async fn preserve_conflict_copy(&self, path: &str, key: &str, etag: &str) -> LeanResult<String> {
         let dst = self.cfg.conflict_key(&uuid::Uuid::new_v4().to_string(), path);
-        // v1: client-side copy (GET + guarded PUT). The server-side
-        // CopyObject lever is the designed v2 optimization for large
-        // files.
-        let (meta, body) = self.store.get_whole(&key, Some(etag)).await?;
-        let crc = crc64_nvme(&body);
         let stamps = GenerationStamps {
             generation: 0,
             epoch: self
@@ -832,10 +471,10 @@ impl Syncer {
                 .unwrap_or(0),
             flush_uuid: "conflict-preserve".into(),
             boundary_source: None,
-            posix: PosixStamps::from_meta(&meta.meta),
+            posix: None,
         };
         self.store
-            .put_whole(&dst, body, &PutCondition::IfNoneMatchAny, &stamps, crc)
+            .copy_object(key, Some(etag), &dst, &PutCondition::IfNoneMatchAny, &stamps)
             .await?;
         Ok(dst)
     }
@@ -895,17 +534,6 @@ impl Syncer {
         Ok(confirmed)
     }
 
-    /// The last cell WRITE (a claim or a renew) is older than the renew
-    /// spacing — or unknown, which an adopted claim is. A deposal needs
-    /// the token still for six spaced polls, so a write younger than the
-    /// spacing is proof that none has happened; anything else must renew
-    /// before it deletes (review 2026-09-18, C2).
-    fn cell_write_is_stale(&self) -> bool {
-        self.cell_written_at
-            .map(|t| t.elapsed() >= std::time::Duration::from_secs(self.cfg.renew_within_secs))
-            .unwrap_or(true)
-    }
-
     /// Steps 2–7. `barrier` = one full publish cycle (the cadence arm).
     pub async fn run_barrier(&mut self) -> LeanResult<BarrierReport> {
         self.barrier_inner(false, "manual").await
@@ -942,6 +570,22 @@ impl Syncer {
         // owe an answer (the publish sentinel, the drain) give it before
         // this; this is the backstop for the ones that do not.
         self.refuse_if_read("barrier")?;
+        // Review 2026-09-18, H10: a barrier that begins while a publish
+        // declaration stands CARRIES it, whoever called — the floor's
+        // cadence barrier after a failed honor as much as the honor itself
+        // (the model's `DSet` and `InstallSource` read the live pending,
+        // not the caller). So it confirms first absences as a declared
+        // barrier does, stamps the deferred clock, and journals itself
+        // with its CAS as the install the ack names (`IntentJournal::
+        // carrier`). A torn record has no id and carries nothing.
+        let carries: Option<String> = self
+            .load_pending(super::sentinel::Verb::Publish)
+            .ok()
+            .flatten()
+            .map(|p| p.id)
+            .filter(|id| !id.is_empty());
+        let declared = declared || carries.is_some();
+        let source = if carries.is_some() && source == "cadence" { "sentinel-deferred" } else { source };
         // No lease is held until the commit section (design 2026-09-13
         // §4): the consume, the scan and the uploads below run with the
         // cell at rest, guarded by each object's own etag. What the
@@ -970,21 +614,23 @@ impl Syncer {
             );
         }
 
-        // Step 1: the cell, read ONCE — HITL entries into the tree, then
-        // the DECLARED removals (delete/rename design §4-§6).
+        // Step 1: the cell's verb requests (§2.5's doors ride this GET), then
+        // what the tree is owed. A UI save, delete or rename COMMITS (P2), so
+        // it reaches the tree as a peer's change does: derived, not queued.
         let inbox_doc = inbox::load(self.store.as_ref(), &self.cfg).await?.doc;
-        let (consumed, settled_locally) = self.consume_counted(&inbox_doc).await?;
-        report.consumed = consumed.len() + settled_locally;
-        let removals = self.apply_removals(&inbox_doc).await?;
-        report.removed = removals.declared.iter().cloned().collect();
-        report.removals_refused = removals.refused.len();
-        // A refusal is settled NOW, whatever else this barrier does: the
-        // cell is where the human who asked reads the answer, and a
-        // refused removal is never retried, so saying so before the
-        // no-diff return below loses nothing.
-        inbox::settle_removals(self.store.as_ref(), &self.cfg, epoch_hint, &[], &removals.refused)
-            .await?;
-
+        // A failure here must never fail the barrier: the request is
+        // idempotent state and the next tick re-reads it.
+        if let Err(e) = self.note_verb_requests(&inbox_doc) {
+            eprintln!("flint-sync: verb request not consumed (retrying next tick): {e}");
+        }
+        let (consumed, seen_pointer) = self.consume_owed().await?;
+        report.consumed = consumed;
+        // The agent runs alongside: what it does to the tree between the
+        // removal pass above and the scan below is the model's interleaving
+        // of a local edit between Consume and Scan (the rename world's
+        // tenth box run reached its counterexample through it). A test
+        // window, like the consume's (H7); nothing in it calls the store.
+        consume_window("before-scan", "");
         // Step 2: scan-diff against the persisted baseline.
         let mut baseline = self.state.load_baseline()?;
         let scanned = scan::scan(&self.cfg.root)?;
@@ -992,39 +638,13 @@ impl Syncer {
         if declared {
             report.absences_confirmed = self.confirm_absences(&mut classified)?;
         }
-        // A declared removal is a deletion with its basis RECORDED, so
-        // it skips the two-scan guard the walk needs and goes straight
-        // into the delete set — which is what lets a rename's two halves
-        // ride ONE manifest generation (§4).
-        for p in &removals.declared {
-            classified.first_absence.remove(p);
-            if classified.uploads.contains(p) {
-                // The agent re-created the path between the unlink and
-                // the scan. The declaration named the OLD file, which is
-                // gone from the tree (and, for a rename, moved); what is
-                // here now is a new file the agent wrote, and it
-                // publishes as one — its PUT supersedes the old object
-                // under the same key. Deleting it would un-cite the
-                // agent's work for a barrier and GC-skip its object; the
-                // model's install gives the upload the same precedence.
-                continue;
-            }
-            classified.deletes.insert(p.clone());
-        }
         report.first_absence = classified.first_absence.iter().cloned().collect();
 
-        // Skip-on-no-diff: nothing local, nothing consumed, no pending
-        // citation repair, and the bucket manifest where we left it.
-        let repairs_pending = baseline
-            .entries
-            .iter()
-            .any(|(p, be)| be.size != u64::MAX && baseline.inst_base.get(p) != Some(&be.etag));
+        // Skip-on-no-diff: nothing local, and the bucket manifest where the
+        // consume left it.
         if classified.uploads.is_empty()
             && classified.deletes.is_empty()
-            && consumed.is_empty()
             && classified.first_absence.is_empty()
-            && removals.applied.is_empty()
-            && !repairs_pending
         {
             // Read the POINTER, never the entries: the 0b rig measured
             // the idle tick at 1M entries as 27 s / 1.3 GiB — dominated
@@ -1034,11 +654,16 @@ impl Syncer {
             // answers strictly more than a HEAD of the old object did.
             //
             // Legacy workspaces (no pointer yet) keep the HEAD they had.
-            let unchanged = match manifest::load_pointer(self.store.as_ref(), &self.cfg).await? {
-                Some(manifest::LoadedPointer { pointer: p, etag, .. }) => {
+            let pointer = match seen_pointer {
+                // The consume just read it: no second GET.
+                Some((seq, etag)) => Some((seq, etag)),
+                None => manifest::load_pointer(self.store.as_ref(), &self.cfg).await?.map(|l| (l.pointer.seq, l.etag)),
+            };
+            let unchanged = match pointer {
+                Some((seq, etag)) => {
                     // The news ticker rides this request for free — D5's
                     // "zero added bucket requests" is still literal.
-                    report.observed_seq = Some(p.seq);
+                    report.observed_seq = Some(seq);
                     report.observed_etag = Some(etag.clone());
                     baseline.manifest_etag.as_deref() == Some(etag.as_str())
                 }
@@ -1079,38 +704,12 @@ impl Syncer {
         self.trace("scan", serde_json::json!({"flush": flush_uuid, "uploads": classified.uploads.len(),
             "deletes": classified.deletes.len(), "first_absence": classified.first_absence.len()}));
         let mut intent = self.state.load_intent()?;
-        let prior_uuids = {
-            let mut v = intent.recent_uuids.clone();
-            if !intent.flush_uuid.is_empty() {
-                v.push(intent.flush_uuid.clone());
-            }
-            v
-        };
-        // Carried forward, not dropped: it stays true until we install
-        // again, and the merge below is what reads it.
-        let prev_installed = intent.installed_etag.clone();
-        intent = IntentJournal {
-            flush_uuid: flush_uuid.clone(),
-            keys: classified.uploads.iter().map(|p| self.cfg.file_key(p)).collect(),
-            recent_uuids: prior_uuids.clone(),
-            installed_etag: prev_installed.clone(),
-            installed_foreign: intent.installed_foreign.clone(),
-            declared_deletes: removals.declared.iter().cloned().collect(),
-        };
+        intent = IntentJournal { flush_uuid: flush_uuid.clone(), carrier: intent.carrier.clone() };
         self.state.save_intent(&intent)?;
-        // The window is NOT opened here any more. It is the bucket's
-        // "a barrier is committing" sign for HITL writers, and it opens
-        // in the commit section, under the lease, at the epoch the
-        // commit really holds. The uploads below race a HITL write the
-        // way two writers race each other: If-Match decides, the loser
-        // is preserved and recorded (`LeanNoWindowHolds` proves safety
-        // never depended on the window).
-        //
-        // The consumed entries are not dropped here either — "durably
-        // in the baseline" is true of a container restart and false of
-        // a pod REPLACEMENT: the emptyDir goes with the pod. They leave
-        // the cell with the window clear, after the manifest cites
-        // them; a successor that finds them re-consumes, idempotently.
+        // No window (P2): a UI save commits without the lease, and the
+        // uploads below race it the way two writers race each other —
+        // the commit's CAS decides, and the loser is preserved and
+        // recorded.
 
         // Step 4: guarded uploads, fanned out under a bounded window
         // (each key's guard chain is independent; the 412 policy and
@@ -1154,13 +753,9 @@ impl Syncer {
                             let scanned_entry = &scanned[path];
                             let base = baseline.entries.get(path);
                             let flush_uuid = &flush_uuid;
-                            let prior_uuids = &prior_uuids;
                             async move {
                                 let r = this
-                                    .upload_one(
-                                        path, scanned_entry, base, epoch_hint, flush_uuid,
-                                        prior_uuids,
-                                    )
+                                    .upload_one(path, scanned_entry, base, epoch_hint, flush_uuid)
                                     .await;
                                 (path.clone(), r)
                             }
@@ -1180,7 +775,7 @@ impl Syncer {
             match outcome? {
                 UploadOutcome::Published { entry, baseline_entry, adopted } => {
                     self.trace("upload", serde_json::json!({"flush": flush_uuid, "path": path, "etag": entry.etag,
-                        "outcome": if adopted { "adopted" } else { "put" }}));
+                        "key": entry.key, "outcome": if adopted { "adopted" } else { "put" }}));
                     if adopted {
                         observed.insert(path.clone());
                     }
@@ -1189,18 +784,6 @@ impl Syncer {
                     new_baseline_entries.insert(path.clone(), baseline_entry);
                     report.uploaded.push(path.clone());
                 }
-                UploadOutcome::Parked { foreign_etag } => {
-                    self.trace("upload", serde_json::json!({"flush": flush_uuid, "path": path, "etag": foreign_etag, "outcome": "parked"}));
-                    parked.insert(path.clone());
-                    self.state.append_conflict(&ConflictRecord {
-                        path: path.clone(),
-                        foreign_etag,
-                        preserved_key: None, // parking preserves in place
-                        kind: "upload-412-parked".into(),
-                        at_unix: now_unix(),
-                    })?;
-                    report.parked.push(path.clone());
-                }
                 UploadOutcome::Deferred => {
                     self.trace("upload", serde_json::json!({"flush": flush_uuid, "path": path, "outcome": "deferred"}));
                     report.deferred.push(path.clone());
@@ -1208,67 +791,10 @@ impl Syncer {
             }
         }
 
-        // Citation repairs: paths whose integrated object (the
-        // baseline) differs from the manifest's citation — consumed
-        // HITL adoptions and checkout's S3-wins arm. No bytes move; the
-        // manifest re-cites what this syncer already integrated.
-        // Without this, an adopted upload is clean-vs-baseline, never
-        // enters the upload set, and the manifest silently drops it —
-        // the battery's amputation leg caught exactly that.
-        // H1b/H1e: every repair, judged again at the merge against the
-        // document it builds on — a sweep adoption's citation (`judged`)
-        // and the document's tombstones.
-        let mut judged_repairs: BTreeMap<String, (Option<String>, String)> = BTreeMap::new();
-        let repair_candidates: Vec<String> = baseline
-            .entries
-            .iter()
-            .filter(|(path, be)| {
-                !classified.uploads.contains(*path)
-                    && !classified.deletes.contains(*path)
-                    && be.size != u64::MAX // consume-dirty sentinel: publishes via upload
-                    && baseline.inst_base.get(*path) != Some(&be.etag)
-            })
-            .map(|(path, _)| path.clone())
-            .collect();
-        for path in repair_candidates {
-            let key = self.cfg.file_key(&path);
-            let be = baseline.entries[&path].clone();
-            match self.store.head(&key).await {
-                Ok(meta) if meta.etag == be.etag => {
-                    let crc = repair_crc(&path, &be, &meta)?;
-                    let stamps = GenerationStamps::from_meta(&meta.meta);
-                    let scan_entry = scanned.get(&path);
-                    upserts.insert(
-                        path.clone(),
-                        LeanEntry {
-                            key,
-                            etag: meta.etag.clone(),
-                            crc64_b64: crc,
-                            size: meta.size,
-                            mode: stamps
-                                .as_ref()
-                                .and_then(|s| s.posix)
-                                .map(|p| p.mode)
-                                .or(scan_entry.map(|s| s.mode))
-                                .unwrap_or(0o644),
-                            mtime_unix: scan_entry.map(|s| s.mtime_unix).unwrap_or(0),
-                            generation: stamps.map(|s| s.generation).unwrap_or(be.generation),
-                            epoch: epoch_hint,
-                        },
-                    );
-                    judged_repairs.insert(path.clone(), (be.judged.clone(), be.etag.clone()));
-                    observed.insert(path.clone());
-                }
-                // Moved again or gone: the next consume reconciles it.
-                _ => {}
-            }
-        }
-
-        // A PULL-ONLY boundary: nothing uploaded, deleted, consumed, removed
-        // or re-cited, so the merge can only add nothing — and then the
-        // commit section writes nothing to the bucket (no CAS, no GC, no
-        // inbox entry to drop) and what remains is local: queue the other
-        // writers' changes and take theirs as the merge base. That needs no
+        // A PULL-ONLY boundary: nothing uploaded or deleted, so the merge
+        // can only add nothing — and then the commit section writes nothing
+        // to the bucket (no CAS, no GC) and what remains is local: note what
+        // theirs owes this tree and take its seq. That needs no
         // fence and no window; claiming for it queued every such writer
         // behind the publishing ones (65 of 191 claims in the writers drill).
         // A merge that does add something (a mirror flag to restamp, say)
@@ -1276,32 +802,28 @@ impl Syncer {
         if classified.uploads.is_empty()
             && classified.deletes.is_empty()
             && upserts.is_empty()
-            && consumed.is_empty()
-            && removals.applied.is_empty()
             && observed.is_empty()
         {
             let current = manifest::load(self.store.as_ref(), &self.cfg).await?;
             let m = self.merge_onto(
                 current.as_ref(),
-                prev_installed.as_deref(),
-                &baseline.inst_base,
+                &merge_base(&baseline),
                 &upserts,
                 &classified.deletes,
                 &parked,
                 &flush_uuid,
             );
             if let Some(handle) = m.expected.as_ref().filter(|_| m.adds_nothing()) {
-                if !m.foreign.is_empty() || !m.gone.is_empty() {
-                    self.state.queue_foreign(&foreign_changes(&m.foreign, &m.gone))?;
-                    self.trace("queue", serde_json::json!({"flush": flush_uuid, "upserts": m.foreign.len(), "tombstones": m.gone.len(), "fence": false}));
-                }
+                // What theirs changed at a path this tree holds is owed: the
+                // next consume derives it, because theirs is not the document
+                // it last derived against (or is, and there is nothing).
+                self.note_carrier_uncited(&m.theirs)?;
                 report.seq = Some(m.theirs.seq);
                 report.no_change = true;
                 report.manifest_etag = Some(handle.etag.clone());
                 report.observed_seq = Some(m.theirs.seq);
                 report.observed_etag = Some(handle.etag.clone());
                 report.foreign_queued = m.foreign.len();
-                baseline.inst_base = m.theirs.entries.iter().map(|(p, e)| (p.clone(), e.etag.clone())).collect();
                 baseline.seq = m.theirs.seq;
                 baseline.manifest_etag = Some(handle.etag.clone());
                 baseline.prev_scan = scanned.keys().cloned().collect();
@@ -1337,7 +859,10 @@ impl Syncer {
                 e.epoch = epoch;
             }
             // Step 5: the manifest CAS (three-way merge; bounded retries).
-            self.verify_not_deposed().await?;
+            // The cell is read after each manifest load below, not here: a
+            // read here preceded the HEAD fan-out and the window, and a
+            // holder deposed after it CASed onto its successor's document
+            // (review 2026-09-18, H2).
             // EVERY citation this barrier adds was read or written with no
             // lease held. Another writer's commit may since have uncited
             // the path and collected the object: its GC deletes by the etag
@@ -1348,7 +873,10 @@ impl Syncer {
             // same-content rewrite re-uploaded, the peer's GC deleted it,
             // the commit cited a hole). Collection runs only inside a
             // commit section, so a re-read HERE, holding the fence, cannot
-            // be overtaken before this CAS. Whatever is gone or replaced is
+            // be overtaken before this CAS — held, that is, until the read
+            // of the cell after the load: a deposal before it is seen
+            // there, and after it the successor's rotation moves the
+            // pointer the CAS expects (H2). Whatever is gone or replaced is
             // withheld: parked, recorded, and left dirty for the next
             // barrier to publish with a PUT of its own.
             let heads: Vec<(String, LeanResult<bool>)> = {
@@ -1380,20 +908,15 @@ impl Syncer {
                 new_baseline_entries.remove(&path);
                 report.uploaded.retain(|p| p != &path);
                 report.published_bytes = report.published_bytes.saturating_sub(gone.size);
-                // A citation REPAIR re-cites bytes the tree already holds (a
-                // consumed UI write, checkout's S3-wins arm): the baseline
-                // names this etag and the scan sees the path clean, so no
-                // later barrier publishes it. Parking it kept the merge from
-                // queueing the version that replaced it while the merge base
-                // moved past that version, and the tree kept the withheld
-                // bytes for good (storm drill S0, 2026-09-15: one writer of
-                // six diverged). Not parked, the merge queues the manifest's
-                // version and the next consume installs it.
+                // ADOPTED bytes that are the baseline's own (a file touched
+                // without a change, re-uploaded by a restarted barrier under
+                // the same flush) that went before the commit: nothing new
+                // is lost, so the path is not parked, and the next consume
+                // takes the manifest's version. (Once this was the citation
+                // repair's arm; storm drill S0, 2026-09-15, showed parking
+                // it kept a writer on withheld bytes for good.)
                 let integrated = was_observed
-                    && baseline
-                        .entries
-                        .get(&path)
-                        .is_some_and(|be| be.size != u64::MAX && be.etag == gone.etag);
+                    && baseline.entries.get(&path).is_some_and(|be| be.etag == gone.etag);
                 if integrated {
                     self.state.append_conflict(&ConflictRecord {
                         path: path.clone(),
@@ -1426,43 +949,87 @@ impl Syncer {
                 })?;
                 report.parked.push(path.clone());
             }
-            // The window: the bucket-visible "a barrier is committing" sign
-            // HITL writers wait on, at the epoch this commit holds.
-            let deadline = now_unix() + self.cfg.window_slack_secs;
-            inbox::open_window(self.store.as_ref(), &self.cfg, epoch, deadline).await?;
             let mut foreign_entries: Vec<(String, LeanEntry)> = vec![];
-            let mut foreign_gone: Vec<(String, String)> = vec![];
             // Set when the merge added nothing to the document: nothing is
             // installed, and theirs becomes the merge base as it stands.
             let mut installed_nothing = false;
             let mut attempt = 0;
-            let (installed, installed_etag) = loop {
+            // The last value carried out: the adoptions this install
+            // declined for a move, whose entries stay in the cell.
+            let (theirs_at_cas, installed, installed_etag, overridden, recreated, over_theirs, replaced_etag) = loop {
                 attempt += 1;
-                if attempt > 4 {
-                    return Err(LeanError::State(
-                        "manifest CAS lost 4 merge races — refusing this barrier".into(),
-                    ));
+                if attempt > CAS_ATTEMPTS {
+                    return Err(LeanError::State(format!(
+                        "manifest CAS lost {CAS_ATTEMPTS} merge races — refusing this barrier"
+                    )));
                 }
                 let current = manifest::load(self.store.as_ref(), &self.cfg).await?;
-                let voided = self.void_stale_repairs(current.as_ref(), &mut upserts, &judged_repairs, &flush_uuid);
-                let MergeOnto { theirs, expected, merged, foreign, gone } = self.merge_onto(
+                // Review 2026-09-18, H2: THE fence — the cell read AFTER the
+                // load this CAS merges onto. The read at the top of step 5
+                // comes before the HEAD fan-out and the window, and a holder
+                // deposed in between loaded its successor's document,
+                // rotation included, and CASed onto it: the rotation fences
+                // only a load that PRECEDES it. Read here, the order closes
+                // both ways: deposed before this load, and this read sees
+                // it; deposed after, and the successor's rotation has moved
+                // the pointer this CAS expects.
+                self.verify_not_deposed().await?;
+                // The baseline IS the merge base (P1-lite).
+                let base = merge_base(&baseline);
+                let MergeOnto { theirs, expected, merged, foreign, overridden, recreated, over_theirs } = self.merge_onto(
                     current.as_ref(),
-                    prev_installed.as_deref(),
-                    &baseline.inst_base,
+                    &base,
                     &upserts,
                     &classified.deletes,
                     &parked,
                     &flush_uuid,
                 );
-                // A voided adoption of a path the manifest no longer cites is
-                // queued as a tombstone (the merge base may never have had it).
-                let gone = {
-                    let mut g = gone;
-                    let extra: Vec<(String, String)> =
-                        voided.into_iter().filter(|(p, _)| !g.iter().any(|(q, _)| q == p)).collect();
-                    g.extend(extra);
-                    g
-                };
+                // A DOCUMENT MUST BE MATERIALISABLE. No filesystem can hold
+                // a file `a` and a file `a/x`, so no document may cite
+                // both — a fresh checkout would have to create a directory
+                // where its own manifest says a file goes. The agent makes
+                // exactly that shape by replacing a published file with a
+                // directory (or the reverse): the scan sees the old path
+                // absent and the new one new, the two-scan guard withholds a
+                // FIRST absence, and the upload lands beside the citation it
+                // was meant to replace (review 2026-09-18, M5's agent-side
+                // twin). Judged here because this is where the document's
+                // final shape is known — theirs, my upserts and the deletes
+                // that actually applied. Mine is the side that yields: the
+                // path stays dirty and publishes at the next barrier, by
+                // which time the withheld absence is confirmed and its
+                // citation gone. This re-merges without spending a CAS
+                // attempt; the clash is decided, not raced.
+                let clash = path_clashes(&merged.entries, &upserts);
+                if !clash.is_empty() {
+                    for path in clash {
+                        let gone = upserts.remove(&path).expect("named from upserts above");
+                        new_baseline_entries.remove(&path);
+                        report.uploaded.retain(|p| p != &path);
+                        report.published_bytes =
+                            report.published_bytes.saturating_sub(gone.size);
+                        parked.insert(path.clone());
+                        report.parked.push(path.clone());
+                        self.state.append_conflict(&ConflictRecord {
+                            path: path.clone(),
+                            foreign_etag: gone.etag,
+                            preserved_key: None,
+                            kind: "upload-withheld-path-clash: the document still cites a path \
+                                   this one would sit inside (or around) — a published file \
+                                   replaced by a directory, or the reverse. No workspace can \
+                                   hold both, so nothing is cited here until that citation \
+                                   goes; the path stays dirty and publishes next barrier"
+                                .into(),
+                            at_unix: now_unix(),
+                        })?;
+                        self.trace(
+                            "path_clash",
+                            serde_json::json!({"flush": flush_uuid, "path": path}),
+                        );
+                    }
+                    attempt -= 1;
+                    continue;
+                }
                 // Nothing of ours changes the document — a barrier that only
                 // found the manifest moved by another writer. Installing it
                 // anyway was an empty generation, and the peer's next tick
@@ -1472,15 +1039,15 @@ impl Syncer {
                 if let Some(handle) = expected.as_ref() {
                     if merged.entries == theirs.entries && merged.sole_writer == theirs.sole_writer {
                         foreign_entries = foreign;
-                        foreign_gone = gone;
                         installed_nothing = true;
-                        break (theirs, handle.etag.clone());
+                        break (theirs.clone(), theirs, handle.etag.clone(), vec![], vec![], vec![], Some(handle.etag.clone()));
                     }
                 }
-                match manifest::cas_write_stamped(
+                match manifest::cas_write_retiring(
                     self.store.as_ref(),
                     &self.cfg,
                     &merged,
+                    Some(&theirs),
                     expected.as_ref(),
                     epoch,
                     &flush_uuid,
@@ -1493,21 +1060,42 @@ impl Syncer {
                         // only record that survives a crash in that window.
                         self.trace("cas", serde_json::json!({"flush": flush_uuid, "seq": merged.seq,
                             "expected": expected.as_ref().map(|h| h.etag.clone()), "etag": meta.etag, "result": "ok"}));
-                        intent.installed_etag = Some(meta.etag.clone());
-                        intent.installed_foreign = foreign_changes(&foreign, &gone);
+                        // H10: what this install carried of the standing
+                        // declaration survives a restart, for the ack.
+                        if let Some(id) = carries.as_ref() {
+                            let mut c = intent
+                                .carrier
+                                .take()
+                                .filter(|c| &c.pending_id == id)
+                                .unwrap_or_else(|| Carrier { pending_id: id.clone(), ..Default::default() });
+                            c.paths.extend(classified.uploads.iter().chain(&classified.deletes).cloned());
+                            c.deletes.extend(classified.deletes.iter().cloned());
+                            // `honor_publish`'s dropped set, decided here:
+                            // parks and deferrals are settled before the
+                            // CAS, and an outranked delete is one the merged
+                            // document still cites.
+                            c.dropped.extend(report.parked.iter().chain(&report.deferred).cloned());
+                            c.dropped.extend(
+                                classified.deletes.iter().filter(|p| merged.entries.contains_key(p.as_str())).cloned(),
+                            );
+                            intent.carrier = Some(c);
+                        }
                         self.state.save_intent(&intent)?;
                         foreign_entries = foreign;
-                        foreign_gone = gone;
-                        break (merged, meta.etag);
+                        let replaced = expected.as_ref().map(|h| h.etag.clone());
+                        break (theirs, merged, meta.etag, overridden, recreated, over_theirs, replaced);
                     }
                     Err(LeanError::Store(StoreError::PreconditionFailed(_)))
                     | Err(LeanError::Store(StoreError::Conflict(_))) => {
                         self.trace("cas", serde_json::json!({"flush": flush_uuid, "seq": merged.seq,
                             "expected": expected.as_ref().map(|h| h.etag.clone()), "result": "lost"}));
-                        // Re-verify the cell before retrying: a rotation is
-                        // exactly this 412, and re-merging past it would be
-                        // the straggler install.
-                        self.verify_not_deposed().await?;
+                        // A rotation is exactly this 412, and re-merging past
+                        // it would be the straggler install: the next
+                        // attempt's read after its load is the fence.
+                        // Back off first: under P2 a UI save never waits on
+                        // the lease, so the race is usually lost to saves,
+                        // and the gap between two of them is the way in (G2).
+                        tokio::time::sleep(cas_backoff(attempt)).await;
                         continue;
                     }
                     Err(e) => return Err(e),
@@ -1527,175 +1115,175 @@ impl Syncer {
             report.observed_etag = Some(installed_etag.clone());
             report.foreign_queued = foreign_entries.len();
 
-            // Step 6: deletes LAST — GC of keys the NEW manifest no longer
-            // references, HEAD-guarded on the recognized ETag.
-            let mut gc_held = false;
-            for path in &classified.deletes {
-                // Review 2026-09-18, C2: the fence is an OBSERVATION, and
-                // it used to be made every 200 deletes — a COUNT, while a
-                // deposal is a CLOCK. A holder whose token has not moved
-                // for six spaced polls is deposed, and one that stalled
-                // past that AFTER its pointer CAS landed came back to a
-                // delete set whose etags the successor had just re-cited
-                // (the same bytes, or an adoption); its If-Match DELETE
-                // took them and the citation dangled (the model's
-                // LeanBarrierLeaseStragglerGC). So before every delete: if
-                // the last cell WRITE is older than the renew spacing,
-                // renew — a conditional write on our token, which a
-                // deposal has moved, so it fences. A write inside the
-                // spacing is proof no deposal happened, not a guess; the
-                // cost is one PUT per spacing, never one per delete, and
-                // the mass-delete renewal this replaces came for free.
-                //
-                // What remains is a stall between this renew and the
-                // DELETE it licenses: the request carries no epoch (S3's
-                // DeleteObject has no fencing token), and that window is
-                // the protocol's, named in SAFETY.md.
-                if self.cell_write_is_stale() {
-                    super::lease::renew(self).await?;
+            // Step 6: RETIREMENT and collection (design 2026-09-19, R3 and
+            // R7). What the document this CAS merged onto cited and the
+            // installed document does not — a modified path's old handle,
+            // a deleted path's — is retired, minus every handle the
+            // installed document still cites at another path (a rename
+            // cites the source's handle at the destination) and every
+            // handle an inbox entry names (a rename whose destination is
+            // still only in the cell). A retired handle can never be cited
+            // again: nothing discovers handles from paths, and the merge
+            // carries forward only what the base cites. So the collector
+            // deletes it UNCONDITIONALLY, in one batch — no HEAD, no
+            // If-Match, no fence, no renew (a straggler deposed after its
+            // CAS has an exact retired set too; the model's
+            // `LeanImmutableStragglerGC`). The HEAD-then-If-Match dance,
+            // the collector that gave way on a store without a conditional
+            // DELETE (review H1's leak) and the C2 renew-before-delete
+            // clock all went with the slot.
+            //
+            // And what this barrier published OVER without ever integrating
+            // it — a peer's publish, a UI write consumed elsewhere — is
+            // preserved by a server-side copy and a record BEFORE the batch
+            // takes the handle. The slot's 412 caught that at the PUT and
+            // `Upload412Preserves` did the same; a fresh handle has no slot
+            // to fail on, so the CAS, the one place the citation is read,
+            // takes the decision (R7; the model's first HitlOverAny run
+            // under handles cited an acked write over blind without it).
+            let still_cited: BTreeSet<&str> = installed.entries.values().map(|e| e.key.as_str()).collect();
+            let mut retired: Vec<String> = vec![];
+            for (path, was) in &theirs_at_cas.entries {
+                let dropped = installed.entries.get(path).map(|now| now.key != was.key).unwrap_or(true);
+                if dropped && !still_cited.contains(was.key.as_str()) {
+                    retired.push(was.key.clone());
                 }
-                if installed.entries.contains_key(path) {
-                    // delete/modify resolved foreign-wins: not garbage, and
-                    // not in this boundary either.
-                    //
-                    // Traced like every other outcome of this loop. It is
-                    // the one the loop used to take in SILENCE, and a
-                    // replay cannot then tell "this barrier resolved the
-                    // delete as outranked" from "this barrier never looked
-                    // at the path": the model owes a GC step for every
-                    // path in its delete set, and there was no event to
-                    // take it with. Found replaying `churn/p47.txt`
-                    // against the model (W4 phase 2, R3-S2).
-                    self.trace("gc", serde_json::json!({"flush": flush_uuid, "path": path,
-                        "head": null, "result": "outranked"}));
-                    report.outranked.push(path.clone());
+            }
+            for (path, was) in &overridden {
+                let integrated = baseline
+                    .entries
+                    .get(path)
+                    .is_some_and(|be| be.key.as_deref() == Some(was.key.as_str()));
+                if integrated || parked.contains(path) {
                     continue;
                 }
-                let key = self.cfg.file_key(path);
-                let recognized = baseline.entries.get(path).map(|b| b.etag.clone()).or_else(|| {
-                    // A DECLARED removal of a path this tree never held (a
-                    // scoped workspace's out-of-scope citation): what the
-                    // declaration named is the object the manifest cited
-                    // when this barrier began, and that is the merge base.
-                    removals
-                        .declared
-                        .contains(path)
-                        .then(|| baseline.inst_base.get(path).cloned())
-                        .flatten()
-                });
-                // The HEAD answers most paths in one request (gone, or an
-                // etag we do not recognize). The DELETE itself carries
-                // If-Match on the recognized etag: another writer's
-                // upload holds no lease and can replace the object
-                // between the two requests, and an unconditional delete
-                // then removed bytes that writer's commit cites (the
-                // model's LeanBarrierLeaseGCUnconditional).
-                let unrecognized = match self.store.head(&key).await {
-                    Err(StoreError::NotFound(_)) => {
-                        self.trace("gc", serde_json::json!({"flush": flush_uuid, "path": path, "head": null, "result": "absent"}));
-                        report.deleted.push(path.clone());
-                        continue;
-                    }
-                    Ok(meta) if Some(&meta.etag) == recognized.as_ref() => {
-                        // A store that ACCEPTS `If-Match` on DELETE and
-                        // ignores it turns the request below into exactly
-                        // the model's LeanBarrierLeaseGCUnconditional: it
-                        // takes whatever is at the key, including the
-                        // upload another writer's commit is about to
-                        // cite. So the COLLECTOR gives way, not the
-                        // workspace. The object stays where it is, cited
-                        // by no manifest — no checkout serves an uncited
-                        // key and the untracked sweep passes it over by
-                        // the same rule (`untracked.rs`: "a delete whose
-                        // GC never ran leaves one, and it is garbage").
-                        // Storage growth, which is a cost; not a delete
-                        // of somebody else's bytes, which is a loss.
-                        if !self.cfg.conditional_delete_enforced {
-                            // Traced and counted, deliberately NOT a
-                            // conflict record: a leak is one store-wide
-                            // condition, not a per-path disagreement
-                            // anybody resolves. A mass delete here would
-                            // append thousands of records and rotate the
-                            // log (`CONFLICTS_MAX_BYTES`) — evicting the
-                            // records that name where preserved UI bytes
-                            // went, which is the one thing that log is
-                            // load-bearing for.
-                            self.trace("gc", serde_json::json!({"flush": flush_uuid, "path": path,
-                                "head": meta.etag, "result": "leaked-no-conditional-delete"}));
-                            report.leaked.push(path.clone());
-                            continue;
-                        }
-                        if self.cfg.drill_hold_gc_secs > 0 && !gc_held {
-                            gc_held = true;
-                            eprintln!(
-                                "flint-sync: DRILL: holding the GC for {}s between the HEAD of {path} and its DELETE",
-                                self.cfg.drill_hold_gc_secs
-                            );
-                            self.trace("drill_hold", serde_json::json!({"flush": flush_uuid, "where": "gc", "path": path,
-                                "secs": self.cfg.drill_hold_gc_secs}));
-                            tokio::time::sleep(std::time::Duration::from_secs(self.cfg.drill_hold_gc_secs)).await;
-                        }
-                        match self.store.delete_if_match(&key, &meta.etag).await {
-                            Ok(()) | Err(StoreError::NotFound(_)) => {
-                                self.trace("gc", serde_json::json!({"flush": flush_uuid, "path": path, "head": meta.etag, "result": "deleted"}));
-                                report.deleted.push(path.clone());
-                                continue;
-                            }
-                            // Replaced between the HEAD and the DELETE:
-                            // whatever is there now is not ours to
-                            // collect. Name it, if it still exists.
-                            Err(StoreError::PreconditionFailed(_)) => match self.store.head(&key).await {
-                                Ok(now) => now.etag,
-                                Err(StoreError::NotFound(_)) => {
-                                    self.trace("gc", serde_json::json!({"flush": flush_uuid, "path": path, "head": meta.etag, "result": "replaced-absent"}));
-                                    report.deleted.push(path.clone());
-                                    continue;
-                                }
-                                Err(e) => return Err(e.into()),
-                            },
-                            Err(e) => return Err(e.into()),
-                        }
-                    }
-                    Ok(meta) => meta.etag,
-                    Err(e) => return Err(e.into()),
-                };
-                // An ETag this syncer does not recognize is NEVER deleted
-                // (a HITL re-create landed after our CAS, or another
-                // writer's upload).
-                self.trace("gc", serde_json::json!({"flush": flush_uuid, "path": path, "head": unrecognized,
-                    "recognized": recognized, "result": "skip"}));
+                let preserved = self.preserve_conflict_copy(path, &was.key, &was.etag).await?;
                 self.state.append_conflict(&ConflictRecord {
                     path: path.clone(),
-                    foreign_etag: unrecognized,
-                    preserved_key: None,
-                    kind: "gc-skip".into(),
+                    foreign_etag: was.etag.clone(),
+                    preserved_key: Some(preserved),
+                    kind: "commit-surfaced-foreign: this barrier published over a version it never \
+                           integrated (another writer's publish, or a UI write consumed elsewhere); \
+                           that version is preserved under this record and superseded knowingly"
+                        .into(),
                     at_unix: now_unix(),
                 })?;
+                report.surfaced.push(path.clone());
+                self.trace("surface", serde_json::json!({"flush": flush_uuid, "path": path, "etag": was.etag, "key": was.key}));
             }
-
-            // One line per barrier, not one per path: the condition is
-            // the store's, and the operator needs the count and the
-            // reason, not a thousand copies of it.
-            if !report.leaked.is_empty() {
+            for (path, deleted) in &recreated {
+                self.state.append_conflict(&ConflictRecord {
+                    path: path.clone(),
+                    foreign_etag: deleted.clone(),
+                    preserved_key: None,
+                    kind: "commit-recreated-deleted: this barrier published over a DELETE it never \
+                           integrated (another writer's, or the UI's); mine wins, the path is cited \
+                           again with this tree's bytes, and the deleted version is named here"
+                        .into(),
+                    at_unix: now_unix(),
+                })?;
+                report.surfaced.push(path.clone());
+                self.trace("surface", serde_json::json!({"flush": flush_uuid, "path": path, "etag": deleted, "deleted": true}));
+            }
+            // M3: what this barrier's DELETE removed that it never
+            // integrated — theirs, changed since the baseline — is preserved
+            // before the batch below takes the handle, and named.
+            for (path, was) in &over_theirs {
+                let preserved = self.preserve_conflict_copy(path, &was.key, &was.etag).await?;
+                self.state.append_conflict(&ConflictRecord {
+                    path: path.clone(),
+                    foreign_etag: was.etag.clone(),
+                    preserved_key: Some(preserved),
+                    kind: "commit-deleted-over-theirs: this barrier deleted a path whose version it \
+                           never integrated (another writer's publish, or a UI save); the delete \
+                           stands, and that version is preserved under this record"
+                        .into(),
+                    at_unix: now_unix(),
+                })?;
+                report.surfaced.push(path.clone());
+                self.trace("surface", serde_json::json!({"flush": flush_uuid, "path": path, "etag": was.etag, "key": was.key, "over_delete": true}));
+            }
+            for path in &classified.deletes {
+                if installed.entries.contains_key(path) {
+                    // Never expected: since M3 a delete applies over theirs,
+                    // and only uploads are parked, so every delete leaves the
+                    // document. Were one still cited it is not in this
+                    // boundary — PARKED, which the ack names as not carried —
+                    // and the next scan classifies it again. Traced like
+                    // every outcome: a replay owes a GC step for every path
+                    // in the delete set (W4 phase 2, R3-S2).
+                    self.trace("gc", serde_json::json!({"flush": flush_uuid, "path": path, "result": "still-cited"}));
+                    report.parked.push(path.clone());
+                } else {
+                    let key = theirs_at_cas.entries.get(path).map(|e| e.key.clone());
+                    self.trace("gc", serde_json::json!({"flush": flush_uuid, "path": path, "key": key, "result": "retired"}));
+                    report.deleted.push(path.clone());
+                }
+            }
+            if self.cfg.drill_hold_gc_secs > 0 && !retired.is_empty() {
                 eprintln!(
-                    "flint-sync: left {} object(s) in the bucket that this barrier retired: \
-                     this store does not enforce If-Match on DELETE, so collecting them could \
-                     take a version another writer is about to cite. They are cited by no \
-                     manifest and served to nobody (lean/SAFETY.md §2)",
-                    report.leaked.len()
+                    "flint-sync: DRILL: holding the GC for {}s before the batch delete",
+                    self.cfg.drill_hold_gc_secs
                 );
+                self.trace("drill_hold", serde_json::json!({"flush": flush_uuid, "where": "gc",
+                    "secs": self.cfg.drill_hold_gc_secs}));
+                tokio::time::sleep(std::time::Duration::from_secs(self.cfg.drill_hold_gc_secs)).await;
+            }
+            // RETIRE-AGE G (M1): what this commit retired was LOGGED with its
+            // CAS (`manifest::cas_write_retiring`), as the gateway's commits
+            // log theirs. It is collected once the retirement is
+            // `retire_grace_secs` old — at once when that is 0 — by whichever
+            // writer's commit section comes next; until then the sweeps spare
+            // it, so a reader that loaded the document before this CAS can
+            // still fetch it. No ledger, no sweep: a leak, never a deletion
+            // a lagging reader meets.
+            let ledger = match self.retire_ledger(now_unix()).await {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    eprintln!("flint-sync: could not read the retire logs ({e}); no sweep this time");
+                    None
+                }
+            };
+            if let Some(l) = &ledger {
+                match self.reap_retired(l, &installed, &flush_uuid).await {
+                    Ok(n) => report.collected = n,
+                    Err(e) => eprintln!("flint-sync: retired handles not collected (next time): {e}"),
+                }
+            }
+            if !retired.is_empty() {
+                self.trace("gc", serde_json::json!({"flush": flush_uuid, "retired": retired.len(),
+                    "collected": report.collected}));
+            }
+            // The orphan sweep (R4): a handle nothing cites, no young retire
+            // log names, older than its grace — left by a writer that never
+            // committed. Inside the commit section, under the cell, so the
+            // commit's re-read of its own uploads above and this CAS are
+            // race-free against it; never this barrier's own handles.
+            if let Some(l) = &ledger {
+                match self.sweep_orphans_if_due(&installed, &flush_uuid, now_unix(), &l.spared).await {
+                    Ok(n) => report.swept = n,
+                    Err(e) => eprintln!("flint-sync: orphan sweep (retrying next time it is due): {e}"),
+                }
             }
 
-            // Step 7: the foreign queue, then the baseline rewrite, intent
-            // clear and window clear.
-            //
-            // Other writers' changes go to THIS writer's queue BEFORE the
-            // merge base below moves past them: a crash between the two
-            // re-applies them idempotently, where the other order would
-            // leave a base that claims changes the tree never received.
-            if !foreign_entries.is_empty() || !foreign_gone.is_empty() {
-                self.state.queue_foreign(&foreign_changes(&foreign_entries, &foreign_gone))?;
-                self.trace("queue", serde_json::json!({"flush": flush_uuid, "upserts": foreign_entries.len(), "tombstones": foreign_gone.len()}));
+            // Step 7: the baseline follows what this barrier published. What
+            // theirs changed is owed, and the next consume derives it: the
+            // pointer now names a document it never derived against. UNLESS
+            // this CAS replaced exactly the document the consume derived
+            // against — then the installed one is that plus this tree's own
+            // changes, nothing new is owed, and the next tick stays cheap
+            // (a busy agent's publishes would otherwise each cost a full
+            // derive). The paths published or deleted here are no longer the
+            // agent's pending work.
+            let same = |a: &str, b: &str| a.trim_matches('"') == b.trim_matches('"');
+            // No document replaced ("") is the empty workspace's derive.
+            let over_derived = matches!(&baseline.derived_etag,
+                Some(d) if same(replaced_etag.as_deref().unwrap_or(""), d));
+            if over_derived {
+                baseline.derived_etag = Some(installed_etag.clone());
+                for path in new_baseline_entries.keys().chain(&report.deleted) {
+                    baseline.skipped.remove(path);
+                }
             }
             for (path, be) in new_baseline_entries {
                 baseline.entries.insert(path, be);
@@ -1703,24 +1291,14 @@ impl Syncer {
             for path in &report.deleted {
                 baseline.entries.remove(path);
             }
-            baseline.inst_base =
-                installed.entries.iter().map(|(p, e)| (p.clone(), e.etag.clone())).collect();
+            self.note_carrier_uncited(&installed)?;
             baseline.seq = installed.seq;
             baseline.manifest_etag = Some(installed_etag);
             baseline.prev_scan = scanned.keys().cloned().collect();
             self.state.save_baseline(&baseline)?;
             self.state.clear_intent_keys()?;
-            // No `merge-preserved` entries into the SHARED inbox any more:
-            // they are this writer's, and sit in its local queue.
-            inbox::clear_window_settling(
-                self.store.as_ref(),
-                &self.cfg,
-                epoch,
-                &[],
-                &consumed,
-                &removals.applied,
-            )
-            .await?;
+            // The commit section's end (the model's `Finish`). No window is
+            // written: under P2 a UI save never waits on one (G1).
             self.trace("window_clear", serde_json::json!({"flush": flush_uuid}));
             // Reap superseded generations. Immutable metadata that is never
             // collected is a leak that grows by a whole manifest per
@@ -1750,7 +1328,11 @@ impl Syncer {
             // in the bucket forever. The rules ran in the model and in the
             // suite and never once in production. `the_barrier_reaps...`
             // below is the test that asks whether this line exists at all.
-            let swept_chunks = match manifest::sweep_chunks(self.store.as_ref(), &self.cfg).await {
+            let swept_chunks = match ledger.as_ref() {
+                None => Ok(0),
+                Some(l) => manifest::sweep_chunks_sparing(self.store.as_ref(), &self.cfg, &l.spared).await,
+            };
+            let swept_chunks = match swept_chunks {
                 Ok(0) => 0,
                 Ok(n) => {
                     eprintln!("flint-sync: reaped {n} unreferenced manifest chunk(s)");
@@ -1796,7 +1378,7 @@ impl Syncer {
             "barrier_end",
             serde_json::json!({
                 "seq": report.seq, "uploaded": report.uploaded.len(), "deleted": report.deleted.len(),
-                "parked": report.parked.len(), "outranked": report.outranked.len(),
+                "parked": report.parked.len(),
                 "leaked": report.leaked.len(),
                 "consumed": report.consumed, "no_change": report.no_change,
                 "ms": started.elapsed().as_millis() as u64, "requests": self.trace_requests(),
@@ -1817,14 +1399,15 @@ impl Syncer {
         &self,
         path: &str,
         key: &str,
-        local_path: &Path,
+        // The ONE descriptor `upload_one` opened by a walk that follows
+        // no link at any depth. The store reads its parts from this and
+        // never reopens the path (review 2026-09-18, H5's residual).
+        file: std::sync::Arc<std::fs::File>,
         size: u64,
         scanned: &scan::ScanEntry,
-        condition: PutCondition,
         stamps: GenerationStamps,
         generation: u64,
         epoch: u64,
-        prior_uuids: &[String],
     ) -> LeanResult<UploadOutcome> {
         // NO PRE-PASS. The store accumulates the full-object CRC from
         // the parts as it reads them for upload, so this file is read
@@ -1848,95 +1431,72 @@ impl Syncer {
         }
 
 
-        // At most three attempts: the caller's condition; then once more
-        // If-Match on what a 412 showed us — our own torn Complete
-        // (recognized through the crash journal, review 2026-09-12
-        // atomicity-2), or a foreign version now PRESERVED (inbox-1) —
-        // or a create if the base object vanished (inbox-5). A 412 on
-        // the retry means the path is being written under us: park.
-        let mut condition = condition;
-        for attempt in 0..3u32 {
-            let spec = flint_store::ComposeSpec {
-                progress: None,
-                key,
-                local_path,
-                parts: parts.clone(),
-                base_key: None,
-                base_etag: None,
-                condition: condition.clone(),
-                stamps: stamps.clone(),
-                crc64: None,
-            };
-            match self.store.compose_generation(&spec).await {
-                Ok(meta) => {
-                    // The store computed it; refuse to cite bytes nothing
-                    // vouched for rather than invent a number for the
-                    // manifest. A backend that returns no checksum has not
-                    // validated the publish server-side either.
-                    let crc = meta
-                        .crc64_b64
-                        .as_deref()
-                        .and_then(flint_store::crc64_from_b64)
-                        .ok_or_else(|| {
-                            LeanError::State(format!(
-                                "compose of {key} returned no full-object checksum — refusing to \
-                                 cite bytes nothing vouched for"
-                            ))
-                        })?;
-                    return Ok(UploadOutcome::published(
-                        path, key.to_string(), meta.etag, crc, size, scanned, generation, epoch,
+        // A fresh handle: the Complete lands on a key nobody else writes
+        // (design 2026-09-19, R1). The one thing that can already sit
+        // there is this barrier's OWN Complete whose response was lost —
+        // a torn response — and the recogniser is the bytes' checksum:
+        // the same, cite them (re-read under the fence first, like every
+        // citation); different, nothing minted this key but us, so the
+        // barrier refuses rather than guess. The 412 arms this replaced
+        // — adopt-own through the crash journal, preserve-a-foreign-
+        // version, park — arbitrated a slot that no longer exists.
+        let spec = flint_store::ComposeSpec {
+            progress: None,
+            key,
+            local: Some(file),
+            parts: parts.clone(),
+            base_key: None,
+            base_etag: None,
+            condition: PutCondition::IfNoneMatchAny,
+            stamps: stamps.clone(),
+            crc64: None,
+        };
+        match self.store.compose_generation(&spec).await {
+            Ok(meta) => {
+                // The store computed it; refuse to cite bytes nothing
+                // vouched for rather than invent a number for the
+                // manifest. A backend that returns no checksum has not
+                // validated the publish server-side either.
+                let crc = meta
+                    .crc64_b64
+                    .as_deref()
+                    .and_then(flint_store::crc64_from_b64)
+                    .ok_or_else(|| {
+                        LeanError::State(format!(
+                            "compose of {key} returned no full-object checksum — refusing to \
+                             cite bytes nothing vouched for"
+                        ))
+                    })?;
+                Ok(UploadOutcome::published(
+                    path, key.to_string(), meta.etag, crc, size, scanned, generation, epoch,
+                ))
+            }
+            Err(StoreError::ChecksumMismatch(_)) | Err(StoreError::NoSuchUpload(_)) => {
+                // Drift mid-compose, or the operator sweep aborted us:
+                // nothing published; the next barrier re-queues.
+                Ok(UploadOutcome::Deferred)
+            }
+            Err(StoreError::PreconditionFailed(_)) => {
+                // The torn-response recogniser compares OUR bytes' checksum
+                // against what landed, and without the pre-pass we do not
+                // have one — so the file is read HERE, on the rare recovery
+                // path, instead of on every publish.
+                let crc = file_crc(&self.cfg.root, path)?;
+                let head = self.store.head(key).await?;
+                if head.crc64_b64.as_deref() == Some(crc64_to_b64(crc).as_str()) {
+                    let g = GenerationStamps::from_meta(&head.meta).map(|s| s.generation).unwrap_or(generation);
+                    return Ok(UploadOutcome::adopted(
+                        path, key.to_string(), head.etag, crc, head.size, scanned, g, epoch,
                     ));
                 }
-                Err(StoreError::ChecksumMismatch(_)) | Err(StoreError::NoSuchUpload(_)) => {
-                    // Drift mid-compose, or the operator sweep aborted us:
-                    // nothing published; the next barrier re-queues.
-                    return Ok(UploadOutcome::Deferred);
-                }
-                // S3's answer to If-Match on a missing key (see upload_one):
-                // the base vanished, and a vanished base is a create.
-                Err(StoreError::NotFound(_)) if matches!(condition, PutCondition::IfMatch(_)) => {
-                    condition = PutCondition::IfNoneMatchAny;
-                    continue;
-                }
-                Err(StoreError::PreconditionFailed(_)) => {
-                    // The AdoptOwn recognizer compares OUR bytes' checksum
-                    // against what landed, and without the pre-pass we do
-                    // not have one — so the file is read HERE, on the rare
-                    // recovery path, instead of on every publish.
-                    let crc = file_crc(local_path)?;
-                    let head = match self.store.head(key).await {
-                        Ok(h) => h,
-                        Err(StoreError::NotFound(_)) => {
-                            condition = PutCondition::IfNoneMatchAny;
-                            continue;
-                        }
-                        Err(e) => return Err(e.into()),
-                    };
-                    let head_stamps = GenerationStamps::from_meta(&head.meta);
-                    if head.crc64_b64.as_deref() == Some(crc64_to_b64(crc).as_str()) {
-                        // These bytes are already there (a torn Complete):
-                        // cite them — re-read under the fence first.
-                        let g = head_stamps.map(|s| s.generation).unwrap_or(generation);
-                        return Ok(UploadOutcome::adopted(
-                            path, key.to_string(), head.etag, crc, head.size, scanned, g, epoch,
-                        ));
-                    }
-                    if attempt >= 1 {
-                        return Ok(UploadOutcome::Parked { foreign_etag: head.etag });
-                    }
-                    let own = head_stamps
-                        .as_ref()
-                        .map(|s| s.flush_uuid == stamps.flush_uuid || prior_uuids.contains(&s.flush_uuid))
-                        .unwrap_or(false);
-                    if !own && self.preserve_foreign_412(path, &head).await.is_none() {
-                        return Ok(UploadOutcome::Parked { foreign_etag: head.etag });
-                    }
-                    condition = PutCondition::IfMatch(head.etag);
-                }
-                Err(e) => return Err(e.into()),
+                Err(LeanError::State(format!(
+                    "handle {key} already holds different bytes (etag {}): a handle is minted once \
+                     per flush, so something other than this barrier wrote it; refusing",
+                    head.etag
+                )))
             }
+            Err(e) => Err(e.into()),
         }
-        Ok(UploadOutcome::Deferred)
     }
 
 
@@ -1947,9 +1507,8 @@ impl Syncer {
         base: Option<&BaselineEntry>,
         epoch: u64,
         flush_uuid: &str,
-        prior_uuids: &[String],
     ) -> LeanResult<UploadOutcome> {
-        let key = self.cfg.file_key(path);
+        let key = self.cfg.handle_key(path, flush_uuid);
         let local_path = self.cfg.root.join(path);
         let generation = base.map(|b| b.generation + 1).unwrap_or(1);
         // Review 2026-09-12, atomicity-6: the scan skipped symlinks; this
@@ -1959,20 +1518,38 @@ impl Syncer {
         // stat here is an lstat and the read opens O_NOFOLLOW; a path that
         // is no longer a regular file is refused, recorded, and deferred
         // (the next scan skips it, and the two-scan rule retires it).
-        let lmeta = std::fs::symlink_metadata(&local_path)
+        //
+        // Review 2026-09-18, H5: and not only the last component. A
+        // DIRECTORY on the path swapped for a link (`mv d d.bak; ln -s
+        // /proc/self d`) made `d/environ` a regular file outside the
+        // workspace; the lstat and the O_NOFOLLOW open guarded the last
+        // component only. The file is opened by a walk that follows no
+        // link at any depth, and everything below — the stamps, the
+        // size, the bytes — comes from that one descriptor.
+        let file = match super::safefs::open_beneath_nofollow(&self.cfg.root, path) {
+            Ok(f) => f,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::InvalidInput
+                    || matches!(e.raw_os_error(), Some(libc::ELOOP) | Some(libc::ENOTDIR)) =>
+            {
+                self.state.append_conflict(&ConflictRecord {
+                    path: path.to_string(),
+                    foreign_etag: String::new(),
+                    preserved_key: None,
+                    kind: format!(
+                        "upload-refused-not-regular: no longer a regular file inside the workspace after \
+                         the scan (a symlink or special file replaced it or a directory above it: {e}); \
+                         nothing published"
+                    ),
+                    at_unix: now_unix(),
+                })?;
+                return Ok(UploadOutcome::Deferred);
+            }
+            Err(e) => return Err(LeanError::State(format!("stat {}: {e}", local_path.display()))),
+        };
+        let lmeta = file
+            .metadata()
             .map_err(|e| LeanError::State(format!("stat {}: {e}", local_path.display())))?;
-        if !lmeta.is_file() {
-            self.state.append_conflict(&ConflictRecord {
-                path: path.to_string(),
-                foreign_etag: String::new(),
-                preserved_key: None,
-                kind: "upload-refused-not-regular: no longer a regular file after the scan (a symlink \
-                       or special file replaced it); nothing published"
-                    .into(),
-                at_unix: now_unix(),
-            })?;
-            return Ok(UploadOutcome::Deferred);
-        }
         let posix = Some(PosixStamps::from_metadata(&lmeta));
         let stamps = GenerationStamps {
             generation,
@@ -1981,19 +1558,12 @@ impl Syncer {
             boundary_source: None,
             posix,
         };
-        let condition = match base {
-            Some(b) => PutCondition::IfMatch(b.etag.clone()),
-            None => PutCondition::IfNoneMatchAny,
-        };
         let size = lmeta.len();
         if size > self.cfg.whole_put_max {
             // Streaming multipart compose: put_whole is never fed past
             // whole_put_max (unbounded memory + S3's 5 GiB wall).
             return self
-                .upload_compose(
-                    path, &key, &local_path, size, scanned, condition, stamps, generation, epoch,
-                    prior_uuids,
-                )
+                .upload_compose(path, &key, std::sync::Arc::new(file), size, scanned, stamps, generation, epoch)
                 .await;
         }
         // The upload byte gate — the store's own, shared with the compose
@@ -2010,150 +1580,57 @@ impl Syncer {
         // published file body — bought solely to leave `body` intact for
         // the 412 retry below, which is reached almost never. Build the
         // `Bytes` once; the retry gets a refcount clone.
-        let body = Bytes::from(read_nofollow(&local_path)?);
+        let body = Bytes::from({
+            use std::io::Read;
+            let mut v = Vec::with_capacity(size as usize);
+            (&file).read_to_end(&mut v)?;
+            v
+        });
         let uploaded_len = body.len() as u64;
         let crc = crc64_nvme(&body);
+        // A fresh handle (design 2026-09-19, R1): no If-Match, because
+        // nothing else ever writes this key. The one thing that can sit
+        // there is this barrier's OWN PUT whose response was lost, and
+        // the bytes' checksum recognises it: the same, cite it (re-read
+        // under the fence first, like every citation); different, nothing
+        // minted this key but us, so refuse rather than guess. The 412
+        // policy this replaced — adopt-own, preserve-then-supersede a
+        // foreign version, park, the 404-on-If-Match create arm —
+        // arbitrated a slot that no longer exists; a foreign version is
+        // now met at the CAS, the one place a citation is read (R7).
         match self
             .store
-            .put_whole(&key, body.clone(), &condition, &stamps, crc)
+            .put_whole(&key, body, &PutCondition::IfNoneMatchAny, &stamps, crc)
             .await
         {
             Ok(meta) => Ok(UploadOutcome::published(
                 path, key, meta.etag, crc, uploaded_len, scanned, generation, epoch,
             )),
-            // S3 answers If-Match on a key that no longer exists with 404
-            // NoSuchKey, not 412 (Ozone answers 412, and so did the
-            // double): the base is gone — a peer's GC collected it, or a
-            // bucket-level delete. The same rule as the 412 arm's vanished
-            // HEAD below: a vanished base is a create. Without this arm the
-            // rule never ran on S3, and a writer whose edited path a peer
-            // deleted failed EVERY barrier (drill host leg H2, 2026-09-13).
-            Err(StoreError::NotFound(_)) if matches!(condition, PutCondition::IfMatch(_)) => {
-                let meta = self
-                    .store
-                    .put_whole(&key, body, &PutCondition::IfNoneMatchAny, &stamps, crc)
-                    .await?;
-                Ok(UploadOutcome::published(
-                    path, key, meta.etag, crc, uploaded_len, scanned, generation, epoch,
-                ))
-            }
             Err(StoreError::PreconditionFailed(_)) => {
-                // The 412 policy: my own crashed/torn PUT ⇒ adopt; a
-                // foreign version ⇒ the consume-dirty rule, at upload time
-                // (preserve it, then supersede it knowingly). NEVER the
-                // inherited LOCAL-WINS overwrite, and never a park with
-                // no way out.
-                let head = match self.store.head(&key).await {
-                    Ok(h) => h,
-                    Err(StoreError::NotFound(_)) => {
-                        // Review 2026-09-12, inbox-5: the base object is
-                        // gone (a bucket-level delete, or our own GC after
-                        // a crash between the CAS and the baseline
-                        // rewrite). Failing the barrier here failed EVERY
-                        // barrier, forever. A vanished base is a create.
-                        let meta = self
-                            .store
-                            .put_whole(&key, body, &PutCondition::IfNoneMatchAny, &stamps, crc)
-                            .await?;
-                        return Ok(UploadOutcome::published(
-                            path, key, meta.etag, crc, uploaded_len, scanned, generation, epoch,
-                        ));
-                    }
-                    Err(e) => return Err(e.into()),
-                };
-                let head_stamps = GenerationStamps::from_meta(&head.meta);
-                let own = head_stamps
-                    .as_ref()
-                    .map(|s| s.flush_uuid == flush_uuid || prior_uuids.contains(&s.flush_uuid))
-                    .unwrap_or(false);
+                let head = self.store.head(&key).await?;
                 if head.crc64_b64.as_deref() == Some(crc64_to_b64(crc).as_str()) {
-                    // Bytes already there (a torn response, ours or a
-                    // foreign write of the same content): cite it — re-read
-                    // under the fence first.
-                    let g = head_stamps.map(|s| s.generation).unwrap_or(generation);
+                    let g = GenerationStamps::from_meta(&head.meta).map(|s| s.generation).unwrap_or(generation);
                     return Ok(UploadOutcome::adopted(
                         path, key, head.etag, crc, head.size, scanned, g, epoch,
                     ));
                 }
-                if !own && self.preserve_foreign_412(path, &head).await.is_none() {
-                    return Ok(UploadOutcome::Parked { foreign_etag: head.etag });
-                }
-                // Our earlier PUT (older content), or a foreign version
-                // now preserved: supersede it knowingly, If-Match on what
-                // we saw. A second 412 means the path is being written
-                // under us right now; that one parks.
-                let meta = match self
-                    .store
-                    .put_whole(&key, body, &PutCondition::IfMatch(head.etag.clone()), &stamps, crc)
-                    .await
-                {
-                    Ok(m) => m,
-                    // 412 (a writer landed between) or 404 (a GC removed
-                    // it between the HEAD and this PUT): written under us
-                    // right now. Park; the next barrier retries.
-                    Err(StoreError::PreconditionFailed(_)) | Err(StoreError::NotFound(_)) => {
-                        return Ok(UploadOutcome::Parked { foreign_etag: head.etag });
-                    }
-                    Err(e) => return Err(e.into()),
-                };
-                Ok(UploadOutcome::published(
-                    path, key, meta.etag, crc, uploaded_len, scanned, generation, epoch,
-                ))
+                Err(LeanError::State(format!(
+                    "handle {key} already holds different bytes (etag {}): a handle is minted once \
+                     per flush, so something other than this barrier wrote it; refusing",
+                    head.etag
+                )))
             }
             Err(e) => Err(e.into()),
         }
     }
-
-    /// A 412 against a version this syncer did not write, met at upload
-    /// time. The contract's rule for a foreign write to a path the agent
-    /// modified is the consume-dirty rule — the agent's version wins and
-    /// the foreign bytes are preserved — and a "park" was that case with
-    /// no resolution: nothing ever un-parked, and every ack said `ok`
-    /// (review 2026-09-12, inbox-1). Preserve, record, and let the caller
-    /// supersede. `None` = the preserve failed; the caller parks, and the
-    /// boundary is `partial`.
-    async fn preserve_foreign_412(&self, path: &str, head: &flint_store::ObjectMeta) -> Option<()> {
-        let preserved = match self.preserve_conflict_copy(path, &head.etag).await {
-            Ok(k) => k,
-            Err(e) => {
-                eprintln!("flint-sync: {path}: foreign version {} could not be preserved ({e}); parking", head.etag);
-                return None;
-            }
-        };
-        self.state
-            .append_conflict(&ConflictRecord {
-                path: path.to_string(),
-                foreign_etag: head.etag.clone(),
-                preserved_key: Some(preserved),
-                kind: "upload-412-preserved".into(),
-                at_unix: now_unix(),
-            })
-            .ok()?;
-        Some(())
-    }
-}
-
-/// Read a workspace file for upload without following a symlink at the
-/// final component, and refuse anything that is not a regular file once
-/// open (review 2026-09-12, atomicity-6).
-fn read_nofollow(p: &Path) -> std::io::Result<Vec<u8>> {
-    use std::io::Read;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(p)?;
-    if !f.metadata()?.is_file() {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"));
-    }
-    let mut v = Vec::new();
-    f.read_to_end(&mut v)?;
-    Ok(v)
 }
 
 enum UploadOutcome {
-    /// `adopted`: the etag was OBSERVED at the key (bytes already there,
-    /// no PUT of ours produced it), so the commit section must re-read it
-    /// before citing — see `verify_observed_citations` in the barrier.
+    /// `adopted`: the etag was OBSERVED at the handle (bytes already
+    /// there, no PUT of ours produced them — a torn response), so the
+    /// commit section re-reads it before citing, as it does every
+    /// citation.
     Published { entry: LeanEntry, baseline_entry: BaselineEntry, adopted: bool },
-    Parked { foreign_etag: String },
     /// The source drifted mid-transfer (checksum refused server-side)
     /// or the assembly was swept: publish nothing, advance nothing —
     /// the next scan re-queues the path.
@@ -2176,7 +1653,7 @@ impl UploadOutcome {
         UploadOutcome::Published {
             adopted: false,
             entry: LeanEntry {
-                key,
+                key: key.clone(),
                 etag: etag.clone(),
                 crc64_b64: crc64_to_b64(crc),
                 // The length the object HAS (review 2026-09-12,
@@ -2192,6 +1669,7 @@ impl UploadOutcome {
             },
             baseline_entry: BaselineEntry {
                 etag,
+                key: Some(key),
                 generation,
                 // The PRE-read stat: if the agent wrote during our read,
                 // the next scan sees the drift and re-queues (the
@@ -2200,7 +1678,6 @@ impl UploadOutcome {
                 mtime_unix: scanned.mtime_unix,
                 mtime_nanos: Some(scanned.mtime_nanos),
                 crc64_b64: Some(crc64_to_b64(crc)),
-                judged: None,
             },
         }
     }
@@ -2229,7 +1706,42 @@ impl UploadOutcome {
     }
 }
 
-fn local_dirty(local: &Path, base: Option<&BaselineEntry>) -> bool {
+/// The paths THIS barrier must withhold because the document would cite a
+/// file and something under it (a published file replaced by a directory,
+/// or the reverse). Whichever side is this barrier's upsert yields; if both
+/// are, so does the parent.
+///
+/// Every key under `p/` sits in one contiguous run of the sorted map, so a
+/// range lookup finds them: O(N log N). The first version scanned every
+/// key for every key, and a 200k-path commit spent 80 s here (bench
+/// 2026-09-25). The run does NOT start right after `p`: `p-b` and `p.txt`
+/// sort between `p` and `p/`.
+pub(super) fn path_clashes<V, U>(
+    cited: &BTreeMap<String, V>,
+    upserts: &BTreeMap<String, U>,
+) -> Vec<String> {
+    let mut mine: Vec<String> = vec![];
+    for p in cited.keys() {
+        let pfx = format!("{p}/");
+        let mut under = cited.range::<str, _>((std::ops::Bound::Included(pfx.as_str()), std::ops::Bound::Unbounded))
+            .map(|(k, _)| k)
+            .take_while(|q| q.starts_with(&pfx))
+            .peekable();
+        if under.peek().is_none() {
+            continue;
+        }
+        if upserts.contains_key(p) {
+            mine.push(p.clone());
+        } else if let Some(c) = under.find(|q| upserts.contains_key(*q)) {
+            mine.push(c.clone());
+        }
+    }
+    mine.sort();
+    mine.dedup();
+    mine
+}
+
+pub(super) fn local_dirty(local: &Path, base: Option<&BaselineEntry>) -> bool {
     match (std::fs::metadata(local), base) {
         (Err(_), None) => false,                   // both absent: clean
         (Err(_), Some(_)) => true,                 // locally deleted vs baseline
@@ -2240,52 +1752,12 @@ fn local_dirty(local: &Path, base: Option<&BaselineEntry>) -> bool {
     }
 }
 
-/// Full-object CRC-64/NVME of a local file, streamed.
-///
-/// Reached only by the 412 recovery path: the ordinary publish gets its
-/// checksum from the store, which computes one while uploading.
-/// The CRC a citation repair cites: the bytes this syncer integrated,
-/// as the baseline recorded them when it wrote or uploaded them. The
-/// HEAD's own checksum is a cross-check when the backend offers one,
-/// never the source — Ozone offers none, a HITL uploader may have sent
-/// none, and the manifest must carry a CRC either way, because every
-/// reader now verifies a fresh fetch against it.
-///
-/// A baseline entry with no CRC is refused loudly rather than cited
-/// bare: the only entry built without one is the consume-dirty sentinel,
-/// which the candidate filters exclude, so reaching this is a defect.
-/// A HEAD that attests a DIFFERENT value is refused the same way — the
-/// workspace holds bytes the object does not, and citing either would
-/// make one reader or another refuse the path forever.
-pub(crate) fn repair_crc(
-    path: &str,
-    be: &BaselineEntry,
-    head: &flint_store::ObjectMeta,
-) -> LeanResult<String> {
-    let Some(ours) = be.crc64_b64.clone() else {
-        return Err(LeanError::State(format!(
-            "citation repair of {path}: the baseline records no CRC for the bytes it \
-             integrated at etag {} — refusing to cite bytes nothing hashed",
-            be.etag
-        )));
-    };
-    if let Some(theirs) = head.crc64_b64.as_deref() {
-        if theirs != ours {
-            return Err(LeanError::State(format!(
-                "citation repair of {path}: the store attests CRC-64 {theirs} for etag {} but \
-                 the bytes this workspace integrated under that etag hash to {ours} — the \
-                 workspace holds bytes the object does not; refusing to cite either",
-                be.etag
-            )));
-        }
-    }
-    Ok(ours)
-}
-
-fn file_crc(local_path: &Path) -> LeanResult<u64> {
+fn file_crc(root: &Path, rel: &str) -> LeanResult<u64> {
     use std::io::Read;
     let mut crc = flint_store::Crc64Nvme::new();
-    let mut f = std::fs::File::open(local_path)?;
+    // No link anywhere on the path (H5): this hashes what a 412 recovery
+    // is about to call "already there".
+    let mut f = super::safefs::open_beneath_nofollow(root, rel)?;
     let mut buf = vec![0u8; 4 << 20];
     loop {
         let n = f.read(&mut buf)?;
@@ -2311,30 +1783,6 @@ pub(super) fn mtime_of(m: &std::fs::Metadata) -> i64 {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
-}
-
-/// Containment-safe workspace write (boundary-verbs plan §2.2 security
-/// gate). `rel` is a workspace-relative path; the target may not escape
-/// the root, traverse a symlink component, or land in the reserved
-/// control namespace.
-///
-/// The hazard this closes is pre-existing and reachable from three
-/// callers (checkout, inbox consume, sync): `write_file_atomic` did
-/// `create_dir_all(parent)` + write with no `O_NOFOLLOW` and no
-/// root-containment check, while the scanner SKIPS symlinks — so a
-/// planted symlink is invisible to the syncer. An unprivileged app
-/// that plants `inputs -> /root/.aws`, lands an object at
-/// `inputs/<path>` and drops a scoped sync turns the credential-holding
-/// syncer into an on-demand arbitrary-file-write primitive outside the
-/// workspace.
-pub(super) fn write_file_atomic_in(
-    root: &Path,
-    rel: &str,
-    bytes: &[u8],
-    mode: Option<u32>,
-) -> LeanResult<()> {
-    let target = contained_path(root, rel)?;
-    write_file_atomic(&target, bytes, mode).map(|_| ())
 }
 
 /// Validate `rel` under `root` WITHOUT creating anything — for callers
@@ -2480,23 +1928,77 @@ pub(super) fn write_file_atomic(
     super::safefs::write_via_tmp_fast(path, &tmp, bytes, mode)
 }
 
-/// The queue form of a merge's foreign upserts and deletions.
-fn foreign_changes(entries: &[(String, LeanEntry)], gone: &[(String, String)]) -> Vec<ForeignChange> {
-    entries
-        .iter()
-        .map(|(path, e)| ForeignChange {
-            path: path.clone(),
-            etag: Some(e.etag.clone()),
-            crc64_b64: Some(e.crc64_b64.clone()),
-            retired: None,
-        })
-        .chain(gone.iter().map(|(path, retired)| ForeignChange {
-            path: path.clone(),
-            etag: None,
-            crc64_b64: None,
-            retired: Some(retired.clone()),
-        }))
-        .collect()
+/// `write_file_atomic`, renamed over `path` only if `proceed()` holds once
+/// the temp is written (`safefs::write_via_tmp_fast_if`).
+pub(super) fn write_file_atomic_if(
+    path: &Path,
+    bytes: &[u8],
+    mode: Option<u32>,
+    proceed: &dyn Fn() -> bool,
+) -> LeanResult<Option<std::fs::Metadata>> {
+    super::safefs::check_parent(path)?;
+    let tmp = path.with_file_name(format!(
+        "{}.flint-sync-tmp",
+        path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
+    ));
+    super::safefs::write_via_tmp_fast_if(path, &tmp, bytes, mode, proceed)
+}
+
+// Test-only: run a closure inside a write window for one path —
+// `"before-write"` (the licence to overwrite checked, the temp not yet
+// written), `"after-rename"` (before the baseline records the write), or
+// `"before-delete"` (`sync`'s remote-delete arm). The consume and `sync`
+// both open them. Nothing in either window calls the store, so the hooked double
+// cannot reach them (review 2026-09-18, H7).
+#[cfg(test)]
+thread_local! {
+    pub(super) static CONSUME_WINDOW_HOOK: std::cell::RefCell<Option<(String, &'static str, Box<dyn Fn()>)>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(super) fn consume_window(stage: &'static str, path: &str) {
+    let hook = CONSUME_WINDOW_HOOK.with(|h| {
+        let mut h = h.borrow_mut();
+        if matches!(&*h, Some((p, s, _)) if p == path && *s == stage) {
+            h.take().map(|(_, _, f)| f)
+        } else {
+            None
+        }
+    });
+    if let Some(f) = hook {
+        f();
+    }
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+pub(super) fn consume_window(_: &'static str, _: &str) {}
+
+/// How many merge races a commit may lose before its barrier gives up (the
+/// next tick tries again). Under P2 the UI saves without the lease (G1), so
+/// the races are lost to saves, and backing off finds the gaps between them.
+const CAS_ATTEMPTS: u32 = 12;
+
+/// The wait after the `attempt`-th lost race: 10 ms, doubling, capped at
+/// 640 ms, plus up to half again of jitter from the clock's nanoseconds, so
+/// a writer and a stream of saves do not fall into lockstep.
+fn cas_backoff(attempt: u32) -> std::time::Duration {
+    let base = 10u64 << attempt.saturating_sub(1).min(6);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    std::time::Duration::from_millis(base + nanos % (base / 2 + 1))
+}
+
+
+/// The merge base, P1-lite: the baseline's own citations. A tree holds no
+/// version the document never cited (P2), so what it integrated IS what it
+/// merges from; one base serves the merge and every reader of its outcome
+/// (M5, L-124).
+fn merge_base(baseline: &super::state::Baseline) -> BTreeMap<String, String> {
+    baseline.entries.iter().map(|(p, e)| (p.clone(), e.etag.clone())).collect()
 }
 
 /// One three-way merge of a barrier's changes onto the bucket's manifest.
@@ -2507,9 +2009,15 @@ struct MergeOnto {
     merged: manifest::LeanManifest,
     /// Other writers' changes since the merge base that the tree lacks.
     foreign: Vec<(String, LeanEntry)>,
-    /// Other writers' deletions since the merge base, each with the etag
-    /// the base cited — what the deletion retired.
-    gone: Vec<(String, String)>,
+    /// Theirs' version at a path this barrier uploaded, changed since the
+    /// merge base: what mine publishes OVER. The caller surfaces those it
+    /// never integrated (design 2026-09-19, R7).
+    overridden: Vec<(String, LeanEntry)>,
+    /// Theirs' DELETES this barrier's uploads publish over (`merge`).
+    recreated: Vec<(String, String)>,
+    /// Theirs' version at a path this barrier DELETES, changed since the
+    /// merge base (M3): the caller preserves and records each.
+    over_theirs: Vec<(String, LeanEntry)>,
 }
 
 impl MergeOnto {
@@ -2521,66 +2029,31 @@ impl MergeOnto {
 }
 
 impl Syncer {
-    #[allow(clippy::too_many_arguments)]
-    /// Review 2026-09-18, H1b: a citation repair for an entry the consume
-    /// adopted from the untracked sweep is honoured only while the manifest
-    /// still cites at its path exactly what the sweep judged the object
-    /// against. The citation moving on — to the object itself (a live
-    /// writer's upload, since committed), to a newer one, or to nothing (a
-    /// delete) — voids the adoption: nobody acked those bytes. The repair is
-    /// withheld, and where the manifest now cites nothing the path is
-    /// returned for the tombstone queue, so the next consume removes the
-    /// clean copy (a dirty one stays and publishes, as any tombstone leaves
-    /// it). Judged against the manifest the merge is about to build on, on
-    /// every attempt.
-    /// The manifest's citations, path to etag, for the consume's judgements
-    /// (one GET, made only when an entry asks for it).
-    async fn current_citations(&self) -> LeanResult<BTreeMap<String, String>> {
-        Ok(manifest::load(self.store.as_ref(), &self.cfg)
-            .await?
-            .map(|l| l.manifest.entries.iter().map(|(p, e)| (p.clone(), e.etag.clone())).collect())
-            .unwrap_or_default())
-    }
-
-    ///
-    /// Review 2026-09-18, H1e: and a repair whose generation the document's
-    /// TOMBSTONE names is void too — that generation was published and
-    /// then deleted, knowingly (a delete that merely raced the adopted
-    /// write leaves no tombstone for it, and there the repair stands:
-    /// modify wins). Without the tombstone the two are the same view.
-    fn void_stale_repairs(
-        &self,
-        current: Option<&manifest::LoadedManifest>,
-        upserts: &mut BTreeMap<String, LeanEntry>,
-        repairs: &BTreeMap<String, (Option<String>, String)>,
-        flush_uuid: &str,
-    ) -> Vec<(String, String)> {
-        let same = |a: &str, b: &str| a.trim_matches('"') == b.trim_matches('"');
-        let mut gone = vec![];
-        for (path, (judged, adopted)) in repairs {
-            let cited_now = current.and_then(|c| c.manifest.entries.get(path)).map(|e| e.etag.clone());
-            let judged_moved = judged.as_deref().is_some_and(|j| !cited_now.as_deref().is_some_and(|c| same(c, j)));
-            let entombed = cited_now.is_none()
-                && current.and_then(|c| c.manifest.tombstones.get(path)).is_some_and(|t| same(&t.etag, adopted));
-            if !judged_moved && !entombed {
-                continue;
-            }
-            if upserts.remove(path).is_some() {
-                self.trace("repair", serde_json::json!({"flush": flush_uuid, "path": path, "etag": adopted, "judged": judged, "cited": cited_now,
-                    "action": if entombed { "entombed" } else { "voided" }}));
-            }
-            if cited_now.is_none() {
-                gone.push((path.clone(), adopted.clone()));
-            }
+    /// H10: the carried uploads the document this barrier ended at does not
+    /// cite (a peer deleted them since). The ack names that document, so it
+    /// reads this; no request is made for it.
+    fn note_carrier_uncited(&self, doc: &manifest::LeanManifest) -> LeanResult<()> {
+        let mut intent = self.state.load_intent()?;
+        let Some(c) = intent.carrier.as_mut() else { return Ok(()) };
+        let uncited: BTreeSet<String> = c
+            .paths
+            .iter()
+            .filter(|p| !c.deletes.contains(*p) && !doc.entries.contains_key(p.as_str()))
+            .cloned()
+            .collect();
+        if uncited != c.uncited {
+            c.uncited = uncited;
+            self.state.save_intent(&intent)?;
         }
-        gone
+        Ok(())
     }
 
     fn merge_onto(
         &self,
         current: Option<&manifest::LoadedManifest>,
-        prev_installed: Option<&str>,
-        inst_base: &BTreeMap<String, String>,
+        // `merge_base`'s answer, which the caller also gives every other
+        // reader of this merge's outcome.
+        base: &BTreeMap<String, String>,
         upserts: &BTreeMap<String, LeanEntry>,
         deletes: &BTreeSet<String>,
         parked: &BTreeSet<String>,
@@ -2593,21 +2066,16 @@ impl Syncer {
             Some(l) => (l.manifest.clone(), Some(l.handle())),
             None => (Default::default(), None),
         };
-        // If the bucket is still at the document THIS workspace
-        // installed, that document IS the merge base — whatever the
-        // persisted one says. Step 7 rewrites the merge base after
-        // the CAS, so a restart in between leaves it behind a
-        // document we wrote, and every entry in it would read as
-        // somebody else's change. See `IntentJournal::installed_etag`.
-        let own_base: BTreeMap<String, String>;
-        let base: &BTreeMap<String, String> =
-            if prev_installed.is_some() && prev_installed == expected.as_ref().map(|h| h.etag.as_str()) {
-                own_base = theirs.entries.iter().map(|(p, e)| (p.clone(), e.etag.clone())).collect();
-                &own_base
-            } else {
-                inst_base
-            };
-        let (mut merged, foreign) = manifest::merge(base, &theirs, upserts, deletes, parked);
+        let manifest::Merged { doc: mut merged, foreign, overridden, deletes: outcomes, recreated, over_theirs } =
+            manifest::merge(base, &theirs, upserts, deletes, parked);
+        // The deletes theirs outranked, named: the trace's record of the
+        // merge's per-path decision (`TraceCore.tla` checks it against
+        // `Install`'s `Foreign(s, p)`).
+        // Since M3 no delete is outranked; the trace keeps the field (empty)
+        // and names the deletes that went over theirs.
+        let outranked: Vec<&String> = vec![];
+        let deleted_over: Vec<&String> =
+            outcomes.iter().filter(|(_, o)| **o == manifest::DeleteOutcome::OverTheirs).map(|(p, _)| p).collect();
         // Deletions another writer made since this workspace's
         // merge base: in the base, gone from theirs, and not this
         // barrier's own upsert, delete or park. `merge` has no use
@@ -2630,8 +2098,8 @@ impl Syncer {
         // inherited from whatever wrote last.
         merged.sole_writer = self.cfg.sole_writer;
         self.trace("merge", serde_json::json!({"flush": flush_uuid, "theirs_seq": theirs.seq, "upserts": upserts.len(),
-            "deletes": deletes.len(), "foreign": foreign.len(), "gone": gone.len(),
-            "adds_nothing": merged.entries == theirs.entries}));
-        MergeOnto { theirs, expected, merged, foreign, gone }
+            "deletes": deletes.len(), "foreign": foreign.len(), "gone": gone.len(), "overridden": overridden.len(),
+            "outranked": outranked, "over_theirs": deleted_over, "adds_nothing": merged.entries == theirs.entries}));
+        MergeOnto { theirs, expected, merged, foreign, overridden, recreated, over_theirs }
     }
 }
