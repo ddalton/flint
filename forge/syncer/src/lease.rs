@@ -175,13 +175,41 @@ fn observed_echo(f: &Facts) -> Option<String> {
     .ok()
 }
 
-/// The batch's own renewal (design §4 step 3): one per batch, before
-/// anything is uploaded, so a deposed server learns it before it pays
-/// for the upload. Goes through the same serialised path as the
-/// renewer task.
-pub async fn renew(sc: &mut Syncer) -> ForgeResult<()> {
+/// What `snapshot::cas` takes to be called: proof that this holder
+/// renewed the lease for that ONE commit. Only `renew` makes one, and
+/// the CAS consumes it.
+///
+/// "Renew before the CAS" used to be an obligation each call site had
+/// to remember, and two of three forgot it: the fold (`FoldNoRenew`,
+/// `ForgeSync.tla`) and the at-rest reclaim (review 2026-09-23, pinned
+/// by `a_deposed_holders_reclaim_is_refused_by_its_renewal`). Each time
+/// a holder deposed while its restore ran read its successor's rotated
+/// snapshot, and its If-Match then matched. As a type, a fourth CAS
+/// site that does not renew does not compile. The takeover rotation is
+/// the one CAS without it: the claim it follows IS the check against
+/// the cell (`snapshot::rotate_for_takeover`).
+#[must_use = "a renewal is taken for a snapshot CAS; pass it to `snapshot::cas`"]
+pub struct Renewed {
+    _only_renew_makes_one: (),
+}
+
+#[cfg(test)]
+impl Renewed {
+    /// For tests that drive `snapshot::cas` directly, with no lease.
+    pub(crate) fn for_test() -> Self {
+        Renewed { _only_renew_makes_one: () }
+    }
+}
+
+/// The renewal a snapshot CAS takes: a batch's at its step 3 (design
+/// §4), one per batch, before anything is uploaded, so a deposed server
+/// learns it before it pays for the upload; a fold's and a reclaim's
+/// just before their commit. Goes through the same serialised path as
+/// the renewer task.
+pub async fn renew(sc: &mut Syncer) -> ForgeResult<Renewed> {
     let echo = observed_echo(&super::status::facts(sc, Phase::Pushing));
-    renew_shared(sc.store.as_ref(), &sc.cfg.epoch_key(), &sc.hold, echo).await
+    renew_shared(sc.store.as_ref(), &sc.cfg.epoch_key(), &sc.hold, echo).await?;
+    Ok(Renewed { _only_renew_makes_one: () })
 }
 
 /// Renew the held lease. A 412 that is not our own lost response is

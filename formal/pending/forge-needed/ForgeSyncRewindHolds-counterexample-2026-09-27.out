@@ -1,0 +1,2612 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 104 and seed -4646328319503686306 with 2 workers on 8 cores with 5461MB heap and 64MB offheap memory [pid: 50792] (Linux 6.12.0-061200-generic amd64, Ubuntu 21.0.11 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file /home/ddalton/forge-needed-2026-09-26/ForgeSyncRewind.tla
+Parsing file /tmp/Naturals.tla
+Parsing file /tmp/FiniteSets.tla
+Parsing file /tmp/TLC.tla
+Parsing file /tmp/Sequences.tla
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module ForgeSyncRewind
+Starting... (2026-09-26 19:42:26)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-09-26 19:42:26.
+Progress(17) at 2026-09-26 19:42:29: 145,522 states generated (145,522 s/min), 49,267 distinct states found (49,267 ds/min), 18,216 states left on queue.
+Progress(25) at 2026-09-26 19:43:29: 4,214,360 states generated (4,068,838 s/min), 1,165,375 distinct states found (1,116,108 ds/min), 387,763 states left on queue.
+Progress(26) at 2026-09-26 19:44:29: 8,411,149 states generated (4,196,789 s/min), 2,294,494 distinct states found (1,129,119 ds/min), 836,755 states left on queue.
+Progress(27) at 2026-09-26 19:45:29: 12,468,631 states generated (4,057,482 s/min), 3,388,654 distinct states found (1,094,160 ds/min), 1,272,972 states left on queue.
+Progress(28) at 2026-09-26 19:46:29: 17,347,908 states generated (4,879,277 s/min), 4,692,866 distinct states found (1,304,212 ds/min), 1,795,366 states left on queue.
+Progress(28) at 2026-09-26 19:47:29: 21,577,478 states generated (4,229,570 s/min), 5,756,237 distinct states found (1,063,371 ds/min), 2,226,413 states left on queue.
+Progress(29) at 2026-09-26 19:48:29: 25,757,474 states generated (4,179,996 s/min), 6,872,495 distinct states found (1,116,258 ds/min), 2,642,650 states left on queue.
+Progress(29) at 2026-09-26 19:49:29: 29,950,686 states generated (4,193,212 s/min), 7,927,410 distinct states found (1,054,915 ds/min), 3,069,773 states left on queue.
+Progress(29) at 2026-09-26 19:50:29: 34,233,675 states generated (4,282,989 s/min), 8,984,795 distinct states found (1,057,385 ds/min), 3,463,251 states left on queue.
+Progress(30) at 2026-09-26 19:51:29: 39,230,467 states generated (4,996,792 s/min), 10,199,575 distinct states found (1,214,780 ds/min), 3,927,836 states left on queue.
+Progress(30) at 2026-09-26 19:52:29: 43,827,705 states generated (4,597,238 s/min), 11,377,269 distinct states found (1,177,694 ds/min), 4,330,623 states left on queue.
+Progress(30) at 2026-09-26 19:53:29: 47,650,403 states generated (3,822,698 s/min), 12,303,560 distinct states found (926,291 ds/min), 4,686,789 states left on queue.
+Progress(30) at 2026-09-26 19:54:29: 51,584,613 states generated (3,934,210 s/min), 13,228,050 distinct states found (924,490 ds/min), 5,018,156 states left on queue.
+Progress(30) at 2026-09-26 19:55:29: 55,472,466 states generated (3,887,853 s/min), 14,150,326 distinct states found (922,276 ds/min), 5,344,636 states left on queue.
+Progress(30) at 2026-09-26 19:56:29: 60,220,591 states generated (4,748,125 s/min), 15,232,091 distinct states found (1,081,765 ds/min), 5,742,050 states left on queue.
+Progress(31) at 2026-09-26 19:57:29: 64,346,673 states generated (4,126,082 s/min), 16,226,337 distinct states found (994,246 ds/min), 6,100,356 states left on queue.
+Progress(31) at 2026-09-26 19:58:29: 68,203,494 states generated (3,856,821 s/min), 17,164,641 distinct states found (938,304 ds/min), 6,411,698 states left on queue.
+Progress(31) at 2026-09-26 19:59:29: 71,969,458 states generated (3,765,964 s/min), 18,094,422 distinct states found (929,781 ds/min), 6,672,277 states left on queue.
+Progress(31) at 2026-09-26 20:00:29: 75,825,154 states generated (3,855,696 s/min), 18,995,724 distinct states found (901,302 ds/min), 6,985,099 states left on queue.
+Progress(31) at 2026-09-26 20:01:29: 79,822,503 states generated (3,997,349 s/min), 19,890,218 distinct states found (894,494 ds/min), 7,294,266 states left on queue.
+Progress(31) at 2026-09-26 20:02:29: 83,927,700 states generated (4,105,197 s/min), 20,822,281 distinct states found (932,063 ds/min), 7,596,386 states left on queue.
+Progress(31) at 2026-09-26 20:03:29: 87,734,165 states generated (3,806,465 s/min), 21,692,099 distinct states found (869,818 ds/min), 7,873,082 states left on queue.
+Progress(31) at 2026-09-26 20:04:29: 91,542,812 states generated (3,808,647 s/min), 22,596,826 distinct states found (904,727 ds/min), 8,175,828 states left on queue.
+Progress(31) at 2026-09-26 20:05:29: 95,321,270 states generated (3,778,458 s/min), 23,403,376 distinct states found (806,550 ds/min), 8,454,998 states left on queue.
+Progress(31) at 2026-09-26 20:06:29: 99,174,032 states generated (3,852,762 s/min), 24,280,809 distinct states found (877,433 ds/min), 8,745,691 states left on queue.
+Progress(32) at 2026-09-26 20:07:29: 103,127,128 states generated (3,953,096 s/min), 25,150,725 distinct states found (869,916 ds/min), 9,032,734 states left on queue.
+Progress(32) at 2026-09-26 20:08:29: 106,858,108 states generated (3,730,980 s/min), 26,025,526 distinct states found (874,801 ds/min), 9,262,989 states left on queue.
+Progress(32) at 2026-09-26 20:09:29: 110,808,256 states generated (3,950,148 s/min), 26,963,791 distinct states found (938,265 ds/min), 9,541,859 states left on queue.
+Progress(32) at 2026-09-26 20:10:29: 114,787,080 states generated (3,978,824 s/min), 27,894,185 distinct states found (930,394 ds/min), 9,776,778 states left on queue.
+Progress(32) at 2026-09-26 20:11:29: 118,477,653 states generated (3,690,573 s/min), 28,734,626 distinct states found (840,441 ds/min), 10,019,442 states left on queue.
+Checkpointing of run /mnt/nvme2/forge-rewind/ForgeSyncRewindHolds/26-09-26-19-42-25
+Checkpointing completed at (2026-09-26 20:12:29)
+Progress(32) at 2026-09-26 20:12:29: 122,202,501 states generated (3,724,848 s/min), 29,519,019 distinct states found (784,393 ds/min), 10,274,193 states left on queue.
+Progress(32) at 2026-09-26 20:13:29: 125,926,522 states generated (3,724,021 s/min), 30,334,434 distinct states found (815,415 ds/min), 10,547,253 states left on queue.
+Progress(32) at 2026-09-26 20:14:29: 129,634,588 states generated (3,708,066 s/min), 31,108,238 distinct states found (773,804 ds/min), 10,762,642 states left on queue.
+Progress(32) at 2026-09-26 20:15:29: 133,485,340 states generated (3,850,752 s/min), 32,011,534 distinct states found (903,296 ds/min), 11,010,715 states left on queue.
+Progress(32) at 2026-09-26 20:16:29: 137,488,420 states generated (4,003,080 s/min), 32,891,863 distinct states found (880,329 ds/min), 11,266,663 states left on queue.
+Progress(32) at 2026-09-26 20:17:29: 141,312,578 states generated (3,824,158 s/min), 33,759,833 distinct states found (867,970 ds/min), 11,536,566 states left on queue.
+Progress(32) at 2026-09-26 20:18:29: 145,253,548 states generated (3,940,970 s/min), 34,634,821 distinct states found (874,988 ds/min), 11,799,109 states left on queue.
+Progress(32) at 2026-09-26 20:19:29: 149,032,707 states generated (3,779,159 s/min), 35,413,778 distinct states found (778,957 ds/min), 12,036,583 states left on queue.
+Progress(32) at 2026-09-26 20:20:29: 153,288,427 states generated (4,255,720 s/min), 36,333,665 distinct states found (919,887 ds/min), 12,301,518 states left on queue.
+Progress(32) at 2026-09-26 20:21:29: 157,239,328 states generated (3,950,901 s/min), 37,188,224 distinct states found (854,559 ds/min), 12,564,192 states left on queue.
+Progress(33) at 2026-09-26 20:22:29: 161,284,014 states generated (4,044,686 s/min), 38,066,730 distinct states found (878,506 ds/min), 12,825,591 states left on queue.
+Progress(33) at 2026-09-26 20:23:29: 165,395,400 states generated (4,111,386 s/min), 38,960,479 distinct states found (893,749 ds/min), 12,994,735 states left on queue.
+Progress(33) at 2026-09-26 20:24:29: 169,342,326 states generated (3,946,926 s/min), 39,829,815 distinct states found (869,336 ds/min), 13,275,802 states left on queue.
+Progress(33) at 2026-09-26 20:25:29: 173,279,848 states generated (3,937,522 s/min), 40,772,528 distinct states found (942,713 ds/min), 13,446,511 states left on queue.
+Progress(33) at 2026-09-26 20:26:29: 177,660,713 states generated (4,380,865 s/min), 41,763,694 distinct states found (991,166 ds/min), 13,674,767 states left on queue.
+Progress(33) at 2026-09-26 20:27:29: 181,811,080 states generated (4,150,367 s/min), 42,641,114 distinct states found (877,420 ds/min), 13,872,380 states left on queue.
+Progress(33) at 2026-09-26 20:28:29: 186,403,473 states generated (4,592,393 s/min), 43,575,631 distinct states found (934,517 ds/min), 14,158,413 states left on queue.
+Progress(33) at 2026-09-26 20:29:29: 190,539,922 states generated (4,136,449 s/min), 44,423,526 distinct states found (847,895 ds/min), 14,394,781 states left on queue.
+Progress(33) at 2026-09-26 20:30:29: 195,097,146 states generated (4,557,224 s/min), 45,397,505 distinct states found (973,979 ds/min), 14,631,274 states left on queue.
+Progress(33) at 2026-09-26 20:31:29: 199,079,586 states generated (3,982,440 s/min), 46,219,472 distinct states found (821,967 ds/min), 14,828,939 states left on queue.
+Progress(33) at 2026-09-26 20:32:29: 203,713,711 states generated (4,634,125 s/min), 47,277,432 distinct states found (1,057,960 ds/min), 15,107,839 states left on queue.
+Progress(33) at 2026-09-26 20:33:29: 207,658,126 states generated (3,944,415 s/min), 48,144,191 distinct states found (866,759 ds/min), 15,339,258 states left on queue.
+Progress(33) at 2026-09-26 20:34:29: 211,579,190 states generated (3,921,064 s/min), 49,008,184 distinct states found (863,993 ds/min), 15,573,851 states left on queue.
+Progress(33) at 2026-09-26 20:35:29: 215,512,262 states generated (3,933,072 s/min), 49,892,513 distinct states found (884,329 ds/min), 15,824,441 states left on queue.
+Progress(33) at 2026-09-26 20:36:29: 219,566,762 states generated (4,054,500 s/min), 50,727,303 distinct states found (834,790 ds/min), 16,044,868 states left on queue.
+Progress(33) at 2026-09-26 20:37:29: 223,452,428 states generated (3,885,666 s/min), 51,511,263 distinct states found (783,960 ds/min), 16,243,783 states left on queue.
+Progress(33) at 2026-09-26 20:38:29: 227,329,606 states generated (3,877,178 s/min), 52,274,643 distinct states found (763,380 ds/min), 16,442,137 states left on queue.
+Progress(33) at 2026-09-26 20:39:29: 231,098,270 states generated (3,768,664 s/min), 53,121,263 distinct states found (846,620 ds/min), 16,646,824 states left on queue.
+Progress(33) at 2026-09-26 20:40:29: 234,998,305 states generated (3,900,035 s/min), 53,918,912 distinct states found (797,649 ds/min), 16,862,609 states left on queue.
+Progress(34) at 2026-09-26 20:41:29: 238,972,067 states generated (3,973,762 s/min), 54,768,449 distinct states found (849,537 ds/min), 17,092,898 states left on queue.
+Checkpointing of run /mnt/nvme2/forge-rewind/ForgeSyncRewindHolds/26-09-26-19-42-25
+Checkpointing completed at (2026-09-26 20:42:30)
+Progress(34) at 2026-09-26 20:42:30: 243,437,255 states generated (4,465,188 s/min), 55,700,081 distinct states found (931,632 ds/min), 17,207,223 states left on queue.
+Progress(34) at 2026-09-26 20:43:30: 248,028,815 states generated (4,591,560 s/min), 56,652,282 distinct states found (952,201 ds/min), 17,467,232 states left on queue.
+Progress(34) at 2026-09-26 20:44:30: 252,283,883 states generated (4,255,068 s/min), 57,529,943 distinct states found (877,661 ds/min), 17,691,302 states left on queue.
+Progress(34) at 2026-09-26 20:45:30: 256,500,178 states generated (4,216,295 s/min), 58,505,895 distinct states found (975,952 ds/min), 17,821,935 states left on queue.
+Progress(34) at 2026-09-26 20:46:30: 261,489,974 states generated (4,989,796 s/min), 59,599,766 distinct states found (1,093,871 ds/min), 18,022,038 states left on queue.
+Progress(34) at 2026-09-26 20:47:30: 265,322,031 states generated (3,832,057 s/min), 60,430,832 distinct states found (831,066 ds/min), 18,176,077 states left on queue.
+Progress(34) at 2026-09-26 20:48:30: 269,234,717 states generated (3,912,686 s/min), 61,206,735 distinct states found (775,903 ds/min), 18,309,164 states left on queue.
+Progress(34) at 2026-09-26 20:49:30: 273,433,189 states generated (4,198,472 s/min), 62,016,790 distinct states found (810,055 ds/min), 18,529,675 states left on queue.
+Progress(34) at 2026-09-26 20:50:30: 277,370,615 states generated (3,937,426 s/min), 62,808,495 distinct states found (791,705 ds/min), 18,709,674 states left on queue.
+Progress(34) at 2026-09-26 20:51:30: 281,746,965 states generated (4,376,350 s/min), 63,685,975 distinct states found (877,480 ds/min), 18,963,509 states left on queue.
+Progress(34) at 2026-09-26 20:52:30: 285,459,454 states generated (3,712,489 s/min), 64,461,029 distinct states found (775,054 ds/min), 19,099,309 states left on queue.
+Progress(34) at 2026-09-26 20:53:30: 289,213,322 states generated (3,753,868 s/min), 65,163,536 distinct states found (702,507 ds/min), 19,218,522 states left on queue.
+Progress(34) at 2026-09-26 20:54:30: 293,221,670 states generated (4,008,348 s/min), 66,083,801 distinct states found (920,265 ds/min), 19,437,918 states left on queue.
+Progress(34) at 2026-09-26 20:55:30: 297,601,285 states generated (4,379,615 s/min), 67,077,799 distinct states found (993,998 ds/min), 19,671,135 states left on queue.
+Progress(34) at 2026-09-26 20:56:30: 301,504,193 states generated (3,902,908 s/min), 67,918,265 distinct states found (840,466 ds/min), 19,872,318 states left on queue.
+Progress(34) at 2026-09-26 20:57:30: 305,363,637 states generated (3,859,444 s/min), 68,698,095 distinct states found (779,830 ds/min), 20,064,986 states left on queue.
+Progress(34) at 2026-09-26 20:58:30: 309,079,332 states generated (3,715,695 s/min), 69,519,624 distinct states found (821,529 ds/min), 20,262,246 states left on queue.
+Progress(34) at 2026-09-26 20:59:30: 312,782,161 states generated (3,702,829 s/min), 70,349,904 distinct states found (830,280 ds/min), 20,470,356 states left on queue.
+Progress(34) at 2026-09-26 21:00:30: 316,583,286 states generated (3,801,125 s/min), 71,130,475 distinct states found (780,571 ds/min), 20,658,952 states left on queue.
+Progress(34) at 2026-09-26 21:01:30: 320,532,829 states generated (3,949,543 s/min), 71,912,982 distinct states found (782,507 ds/min), 20,817,291 states left on queue.
+Progress(34) at 2026-09-26 21:02:30: 324,222,035 states generated (3,689,206 s/min), 72,614,466 distinct states found (701,484 ds/min), 20,966,921 states left on queue.
+Progress(34) at 2026-09-26 21:03:30: 327,949,094 states generated (3,727,059 s/min), 73,346,512 distinct states found (732,046 ds/min), 21,131,954 states left on queue.
+Progress(34) at 2026-09-26 21:04:30: 331,596,219 states generated (3,647,125 s/min), 74,130,067 distinct states found (783,555 ds/min), 21,291,886 states left on queue.
+Progress(34) at 2026-09-26 21:05:30: 335,327,101 states generated (3,730,882 s/min), 74,926,968 distinct states found (796,901 ds/min), 21,455,209 states left on queue.
+Progress(34) at 2026-09-26 21:06:30: 339,123,898 states generated (3,796,797 s/min), 75,674,255 distinct states found (747,287 ds/min), 21,637,945 states left on queue.
+Progress(35) at 2026-09-26 21:07:30: 343,360,143 states generated (4,236,245 s/min), 76,563,121 distinct states found (888,866 ds/min), 21,854,905 states left on queue.
+Progress(35) at 2026-09-26 21:08:30: 347,252,142 states generated (3,891,999 s/min), 77,320,600 distinct states found (757,479 ds/min), 21,967,399 states left on queue.
+Progress(35) at 2026-09-26 21:09:30: 352,074,235 states generated (4,822,093 s/min), 78,272,849 distinct states found (952,249 ds/min), 22,056,139 states left on queue.
+Progress(35) at 2026-09-26 21:10:30: 358,464,941 states generated (6,390,706 s/min), 79,567,783 distinct states found (1,294,934 ds/min), 22,333,205 states left on queue.
+Progress(35) at 2026-09-26 21:11:30: 364,789,129 states generated (6,324,188 s/min), 80,951,438 distinct states found (1,383,655 ds/min), 22,508,219 states left on queue.
+Checkpointing of run /mnt/nvme2/forge-rewind/ForgeSyncRewindHolds/26-09-26-19-42-25
+Checkpointing completed at (2026-09-26 21:12:30)
+Progress(35) at 2026-09-26 21:12:30: 368,810,320 states generated (4,021,191 s/min), 81,807,354 distinct states found (855,916 ds/min), 22,629,292 states left on queue.
+Progress(35) at 2026-09-26 21:13:30: 373,207,752 states generated (4,397,432 s/min), 82,760,566 distinct states found (953,212 ds/min), 22,782,656 states left on queue.
+Progress(35) at 2026-09-26 21:14:30: 377,598,107 states generated (4,390,355 s/min), 83,613,559 distinct states found (852,993 ds/min), 22,849,667 states left on queue.
+Progress(35) at 2026-09-26 21:15:30: 382,139,532 states generated (4,541,425 s/min), 84,480,174 distinct states found (866,615 ds/min), 22,996,756 states left on queue.
+Progress(35) at 2026-09-26 21:16:30: 386,166,583 states generated (4,027,051 s/min), 85,250,245 distinct states found (770,071 ds/min), 23,190,971 states left on queue.
+Progress(35) at 2026-09-26 21:17:30: 390,687,875 states generated (4,521,292 s/min), 86,126,321 distinct states found (876,076 ds/min), 23,345,984 states left on queue.
+Progress(35) at 2026-09-26 21:18:30: 394,859,258 states generated (4,171,383 s/min), 86,912,881 distinct states found (786,560 ds/min), 23,544,994 states left on queue.
+Progress(35) at 2026-09-26 21:19:30: 399,981,606 states generated (5,122,348 s/min), 87,975,368 distinct states found (1,062,487 ds/min), 23,746,849 states left on queue.
+Progress(35) at 2026-09-26 21:20:30: 404,299,465 states generated (4,317,859 s/min), 88,778,922 distinct states found (803,554 ds/min), 23,818,726 states left on queue.
+Progress(35) at 2026-09-26 21:21:30: 409,154,536 states generated (4,855,071 s/min), 89,870,704 distinct states found (1,091,782 ds/min), 24,059,650 states left on queue.
+Progress(35) at 2026-09-26 21:22:30: 413,051,808 states generated (3,897,272 s/min), 90,760,616 distinct states found (889,912 ds/min), 24,246,101 states left on queue.
+Progress(35) at 2026-09-26 21:23:30: 417,522,887 states generated (4,471,079 s/min), 91,708,563 distinct states found (947,947 ds/min), 24,417,355 states left on queue.
+Progress(35) at 2026-09-26 21:24:30: 421,703,434 states generated (4,180,547 s/min), 92,573,909 distinct states found (865,346 ds/min), 24,623,868 states left on queue.
+Progress(35) at 2026-09-26 21:25:30: 426,026,548 states generated (4,323,114 s/min), 93,426,216 distinct states found (852,307 ds/min), 24,809,558 states left on queue.
+Progress(35) at 2026-09-26 21:26:30: 429,958,020 states generated (3,931,472 s/min), 94,303,752 distinct states found (877,536 ds/min), 24,992,463 states left on queue.
+Progress(35) at 2026-09-26 21:27:30: 434,541,207 states generated (4,583,187 s/min), 95,250,928 distinct states found (947,176 ds/min), 25,202,341 states left on queue.
+Progress(35) at 2026-09-26 21:28:30: 438,537,290 states generated (3,996,083 s/min), 96,102,515 distinct states found (851,587 ds/min), 25,363,419 states left on queue.
+Progress(35) at 2026-09-26 21:29:30: 442,465,187 states generated (3,927,897 s/min), 96,866,703 distinct states found (764,188 ds/min), 25,516,402 states left on queue.
+Progress(35) at 2026-09-26 21:30:30: 446,324,229 states generated (3,859,042 s/min), 97,617,894 distinct states found (751,191 ds/min), 25,643,144 states left on queue.
+Progress(35) at 2026-09-26 21:31:30: 450,659,752 states generated (4,335,523 s/min), 98,444,643 distinct states found (826,749 ds/min), 25,793,326 states left on queue.
+Progress(35) at 2026-09-26 21:32:30: 455,234,442 states generated (4,574,690 s/min), 99,326,566 distinct states found (881,923 ds/min), 25,959,094 states left on queue.
+Progress(35) at 2026-09-26 21:33:30: 459,642,820 states generated (4,408,378 s/min), 100,259,358 distinct states found (932,792 ds/min), 26,097,673 states left on queue.
+Progress(35) at 2026-09-26 21:34:30: 464,566,330 states generated (4,923,510 s/min), 101,269,300 distinct states found (1,009,942 ds/min), 26,255,915 states left on queue.
+Progress(35) at 2026-09-26 21:35:30: 468,332,586 states generated (3,766,256 s/min), 102,006,898 distinct states found (737,598 ds/min), 26,422,147 states left on queue.
+Progress(35) at 2026-09-26 21:36:30: 472,193,419 states generated (3,860,833 s/min), 102,804,092 distinct states found (797,194 ds/min), 26,594,443 states left on queue.
+Progress(36) at 2026-09-26 21:37:30: 476,863,461 states generated (4,670,042 s/min), 103,704,331 distinct states found (900,239 ds/min), 26,730,186 states left on queue.
+Progress(36) at 2026-09-26 21:38:30: 481,156,695 states generated (4,293,234 s/min), 104,503,040 distinct states found (798,709 ds/min), 26,728,824 states left on queue.
+Progress(36) at 2026-09-26 21:39:30: 486,072,586 states generated (4,915,891 s/min), 105,457,690 distinct states found (954,650 ds/min), 26,907,811 states left on queue.
+Progress(36) at 2026-09-26 21:40:30: 490,055,859 states generated (3,983,273 s/min), 106,272,734 distinct states found (815,044 ds/min), 27,049,639 states left on queue.
+Progress(36) at 2026-09-26 21:41:30: 494,058,021 states generated (4,002,162 s/min), 107,040,901 distinct states found (768,167 ds/min), 27,143,274 states left on queue.
+Checkpointing of run /mnt/nvme2/forge-rewind/ForgeSyncRewindHolds/26-09-26-19-42-25
+Checkpointing completed at (2026-09-26 21:42:30)
+Progress(36) at 2026-09-26 21:42:30: 497,662,174 states generated (3,604,153 s/min), 107,823,288 distinct states found (782,387 ds/min), 27,172,833 states left on queue.
+Progress(36) at 2026-09-26 21:43:30: 501,224,004 states generated (3,561,830 s/min), 108,641,798 distinct states found (818,510 ds/min), 27,242,015 states left on queue.
+Progress(36) at 2026-09-26 21:44:30: 505,496,224 states generated (4,272,220 s/min), 109,475,643 distinct states found (833,845 ds/min), 27,351,620 states left on queue.
+Progress(36) at 2026-09-26 21:45:30: 509,422,449 states generated (3,926,225 s/min), 110,307,818 distinct states found (832,175 ds/min), 27,455,658 states left on queue.
+Progress(36) at 2026-09-26 21:46:30: 513,210,113 states generated (3,787,664 s/min), 111,013,883 distinct states found (706,065 ds/min), 27,472,431 states left on queue.
+Progress(36) at 2026-09-26 21:47:30: 517,671,837 states generated (4,461,724 s/min), 111,855,361 distinct states found (841,478 ds/min), 27,543,270 states left on queue.
+Progress(36) at 2026-09-26 21:48:30: 521,666,945 states generated (3,995,108 s/min), 112,590,856 distinct states found (735,495 ds/min), 27,671,607 states left on queue.
+Progress(36) at 2026-09-26 21:49:30: 525,441,240 states generated (3,774,295 s/min), 113,291,226 distinct states found (700,370 ds/min), 27,825,461 states left on queue.
+Progress(36) at 2026-09-26 21:50:30: 529,985,799 states generated (4,544,559 s/min), 114,152,491 distinct states found (861,265 ds/min), 27,940,424 states left on queue.
+Progress(36) at 2026-09-26 21:51:30: 534,111,388 states generated (4,125,589 s/min), 114,918,132 distinct states found (765,641 ds/min), 28,111,466 states left on queue.
+Progress(36) at 2026-09-26 21:52:30: 538,619,781 states generated (4,508,393 s/min), 115,824,531 distinct states found (906,399 ds/min), 28,280,013 states left on queue.
+Progress(36) at 2026-09-26 21:53:30: 542,881,419 states generated (4,261,638 s/min), 116,663,347 distinct states found (838,816 ds/min), 28,342,173 states left on queue.
+Progress(36) at 2026-09-26 21:54:30: 547,539,966 states generated (4,658,547 s/min), 117,551,878 distinct states found (888,531 ds/min), 28,392,015 states left on queue.
+Progress(36) at 2026-09-26 21:55:30: 551,293,741 states generated (3,753,775 s/min), 118,453,632 distinct states found (901,754 ds/min), 28,645,414 states left on queue.
+Progress(36) at 2026-09-26 21:56:30: 554,943,810 states generated (3,650,069 s/min), 119,256,847 distinct states found (803,215 ds/min), 28,779,257 states left on queue.
+Progress(36) at 2026-09-26 21:57:30: 558,912,349 states generated (3,968,539 s/min), 120,133,274 distinct states found (876,427 ds/min), 28,951,181 states left on queue.
+Progress(36) at 2026-09-26 21:58:30: 562,678,860 states generated (3,766,511 s/min), 120,891,470 distinct states found (758,196 ds/min), 29,079,538 states left on queue.
+Progress(36) at 2026-09-26 21:59:30: 566,415,207 states generated (3,736,347 s/min), 121,659,088 distinct states found (767,618 ds/min), 29,234,099 states left on queue.
+Progress(36) at 2026-09-26 22:00:30: 569,814,076 states generated (3,398,869 s/min), 122,294,149 distinct states found (635,061 ds/min), 29,361,743 states left on queue.
+Progress(36) at 2026-09-26 22:01:30: 573,314,094 states generated (3,500,018 s/min), 122,980,202 distinct states found (686,053 ds/min), 29,500,086 states left on queue.
+Progress(36) at 2026-09-26 22:02:30: 577,060,817 states generated (3,746,723 s/min), 123,819,669 distinct states found (839,467 ds/min), 29,642,069 states left on queue.
+Progress(36) at 2026-09-26 22:03:30: 580,986,716 states generated (3,925,899 s/min), 124,580,365 distinct states found (760,696 ds/min), 29,784,493 states left on queue.
+Progress(36) at 2026-09-26 22:04:30: 584,583,659 states generated (3,596,943 s/min), 125,354,103 distinct states found (773,738 ds/min), 29,929,684 states left on queue.
+Progress(36) at 2026-09-26 22:05:30: 588,230,427 states generated (3,646,768 s/min), 126,109,183 distinct states found (755,080 ds/min), 30,044,349 states left on queue.
+Progress(36) at 2026-09-26 22:06:30: 592,176,217 states generated (3,945,790 s/min), 126,860,107 distinct states found (750,924 ds/min), 30,171,969 states left on queue.
+Progress(36) at 2026-09-26 22:07:30: 595,866,628 states generated (3,690,411 s/min), 127,573,405 distinct states found (713,298 ds/min), 30,278,073 states left on queue.
+Progress(36) at 2026-09-26 22:08:30: 599,878,946 states generated (4,012,318 s/min), 128,328,432 distinct states found (755,027 ds/min), 30,370,709 states left on queue.
+Progress(36) at 2026-09-26 22:09:30: 604,759,651 states generated (4,880,705 s/min), 129,267,462 distinct states found (939,030 ds/min), 30,529,216 states left on queue.
+Progress(36) at 2026-09-26 22:10:30: 609,501,068 states generated (4,741,417 s/min), 130,173,695 distinct states found (906,233 ds/min), 30,648,552 states left on queue.
+Progress(36) at 2026-09-26 22:11:30: 613,321,001 states generated (3,819,933 s/min), 130,981,760 distinct states found (808,065 ds/min), 30,738,830 states left on queue.
+Checkpointing of run /mnt/nvme2/forge-rewind/ForgeSyncRewindHolds/26-09-26-19-42-25
+Checkpointing completed at (2026-09-26 22:12:31)
+Progress(36) at 2026-09-26 22:12:31: 617,771,504 states generated (4,450,503 s/min), 131,900,501 distinct states found (918,741 ds/min), 30,818,690 states left on queue.
+Progress(36) at 2026-09-26 22:13:31: 621,609,032 states generated (3,837,528 s/min), 132,597,339 distinct states found (696,838 ds/min), 30,935,311 states left on queue.
+Progress(36) at 2026-09-26 22:14:31: 625,377,056 states generated (3,768,024 s/min), 133,352,334 distinct states found (754,995 ds/min), 31,093,918 states left on queue.
+Progress(36) at 2026-09-26 22:15:31: 629,669,505 states generated (4,292,449 s/min), 134,197,859 distinct states found (845,525 ds/min), 31,258,954 states left on queue.
+Progress(37) at 2026-09-26 22:16:31: 633,280,583 states generated (3,611,078 s/min), 134,914,026 distinct states found (716,167 ds/min), 31,346,282 states left on queue.
+Progress(37) at 2026-09-26 22:17:31: 636,985,164 states generated (3,704,581 s/min), 135,559,346 distinct states found (645,320 ds/min), 31,304,934 states left on queue.
+Progress(37) at 2026-09-26 22:18:31: 640,947,487 states generated (3,962,323 s/min), 136,321,740 distinct states found (762,394 ds/min), 31,377,030 states left on queue.
+Progress(37) at 2026-09-26 22:19:31: 644,722,308 states generated (3,774,821 s/min), 137,045,833 distinct states found (724,093 ds/min), 31,503,327 states left on queue.
+Progress(37) at 2026-09-26 22:20:31: 648,348,263 states generated (3,625,955 s/min), 137,766,320 distinct states found (720,487 ds/min), 31,587,854 states left on queue.
+Progress(37) at 2026-09-26 22:21:31: 652,742,933 states generated (4,394,670 s/min), 138,618,873 distinct states found (852,553 ds/min), 31,671,394 states left on queue.
+Progress(37) at 2026-09-26 22:22:31: 657,256,373 states generated (4,513,440 s/min), 139,616,936 distinct states found (998,063 ds/min), 31,709,041 states left on queue.
+Progress(37) at 2026-09-26 22:23:31: 662,285,476 states generated (5,029,103 s/min), 140,678,087 distinct states found (1,061,151 ds/min), 31,739,763 states left on queue.
+Progress(37) at 2026-09-26 22:24:31: 666,719,399 states generated (4,433,923 s/min), 141,531,120 distinct states found (853,033 ds/min), 31,840,765 states left on queue.
+Progress(37) at 2026-09-26 22:25:31: 670,774,822 states generated (4,055,423 s/min), 142,333,000 distinct states found (801,880 ds/min), 31,901,619 states left on queue.
+Progress(37) at 2026-09-26 22:26:31: 674,886,170 states generated (4,111,348 s/min), 143,088,974 distinct states found (755,974 ds/min), 31,886,648 states left on queue.
+Progress(37) at 2026-09-26 22:27:31: 678,662,096 states generated (3,775,926 s/min), 143,789,374 distinct states found (700,400 ds/min), 31,925,036 states left on queue.
+Progress(37) at 2026-09-26 22:28:31: 683,088,819 states generated (4,426,723 s/min), 144,594,263 distinct states found (804,889 ds/min), 32,030,080 states left on queue.
+Progress(37) at 2026-09-26 22:29:31: 687,280,151 states generated (4,191,332 s/min), 145,353,336 distinct states found (759,073 ds/min), 32,176,542 states left on queue.
+Progress(37) at 2026-09-26 22:30:31: 691,004,599 states generated (3,724,448 s/min), 146,065,341 distinct states found (712,005 ds/min), 32,250,715 states left on queue.
+Progress(37) at 2026-09-26 22:31:31: 695,603,180 states generated (4,598,581 s/min), 146,899,459 distinct states found (834,118 ds/min), 32,359,817 states left on queue.
+Progress(37) at 2026-09-26 22:32:31: 699,602,813 states generated (3,999,633 s/min), 147,635,367 distinct states found (735,908 ds/min), 32,491,477 states left on queue.
+Progress(37) at 2026-09-26 22:33:31: 703,428,759 states generated (3,825,946 s/min), 148,411,231 distinct states found (775,864 ds/min), 32,592,659 states left on queue.
+Progress(37) at 2026-09-26 22:34:31: 706,844,208 states generated (3,415,449 s/min), 149,102,523 distinct states found (691,292 ds/min), 32,653,099 states left on queue.
+Progress(37) at 2026-09-26 22:35:31: 710,662,236 states generated (3,818,028 s/min), 149,770,231 distinct states found (667,708 ds/min), 32,621,402 states left on queue.
+Progress(37) at 2026-09-26 22:36:31: 714,672,682 states generated (4,010,446 s/min), 150,663,997 distinct states found (893,766 ds/min), 32,731,186 states left on queue.
+Progress(37) at 2026-09-26 22:37:31: 718,263,060 states generated (3,590,378 s/min), 151,568,186 distinct states found (904,189 ds/min), 33,040,219 states left on queue.
+Progress(37) at 2026-09-26 22:38:31: 722,196,284 states generated (3,933,224 s/min), 152,421,355 distinct states found (853,169 ds/min), 33,173,504 states left on queue.
+Progress(37) at 2026-09-26 22:39:31: 725,823,107 states generated (3,626,823 s/min), 153,239,993 distinct states found (818,638 ds/min), 33,332,559 states left on queue.
+Progress(37) at 2026-09-26 22:40:31: 729,377,276 states generated (3,554,169 s/min), 153,950,957 distinct states found (710,964 ds/min), 33,414,922 states left on queue.
+Progress(37) at 2026-09-26 22:41:31: 733,256,545 states generated (3,879,269 s/min), 154,696,713 distinct states found (745,756 ds/min), 33,541,065 states left on queue.
+Checkpointing of run /mnt/nvme2/forge-rewind/ForgeSyncRewindHolds/26-09-26-19-42-25
+Checkpointing completed at (2026-09-26 22:42:31)
+Progress(37) at 2026-09-26 22:42:31: 736,916,886 states generated (3,660,341 s/min), 155,411,138 distinct states found (714,425 ds/min), 33,669,281 states left on queue.
+Progress(37) at 2026-09-26 22:43:31: 740,755,726 states generated (3,838,840 s/min), 156,103,682 distinct states found (692,544 ds/min), 33,790,615 states left on queue.
+Progress(37) at 2026-09-26 22:44:31: 744,395,463 states generated (3,639,737 s/min), 156,797,944 distinct states found (694,262 ds/min), 33,907,482 states left on queue.
+Progress(37) at 2026-09-26 22:45:31: 748,073,910 states generated (3,678,447 s/min), 157,583,281 distinct states found (785,337 ds/min), 34,042,507 states left on queue.
+Progress(37) at 2026-09-26 22:46:31: 751,835,203 states generated (3,761,293 s/min), 158,332,244 distinct states found (748,963 ds/min), 34,136,477 states left on queue.
+Progress(37) at 2026-09-26 22:47:31: 755,964,797 states generated (4,129,594 s/min), 159,145,532 distinct states found (813,288 ds/min), 34,262,590 states left on queue.
+Progress(37) at 2026-09-26 22:48:31: 759,718,060 states generated (3,753,263 s/min), 159,954,282 distinct states found (808,750 ds/min), 34,386,774 states left on queue.
+Progress(37) at 2026-09-26 22:49:31: 763,571,086 states generated (3,853,026 s/min), 160,711,952 distinct states found (757,670 ds/min), 34,482,111 states left on queue.
+Progress(37) at 2026-09-26 22:50:31: 767,230,565 states generated (3,659,479 s/min), 161,393,263 distinct states found (681,311 ds/min), 34,567,883 states left on queue.
+Progress(37) at 2026-09-26 22:51:31: 770,967,230 states generated (3,736,665 s/min), 162,117,271 distinct states found (724,008 ds/min), 34,656,915 states left on queue.
+Progress(37) at 2026-09-26 22:52:31: 774,778,498 states generated (3,811,268 s/min), 162,821,483 distinct states found (704,212 ds/min), 34,712,043 states left on queue.
+Progress(37) at 2026-09-26 22:53:31: 778,502,643 states generated (3,724,145 s/min), 163,540,237 distinct states found (718,754 ds/min), 34,824,519 states left on queue.
+Progress(37) at 2026-09-26 22:54:31: 782,027,681 states generated (3,525,038 s/min), 164,204,697 distinct states found (664,460 ds/min), 34,917,159 states left on queue.
+Progress(37) at 2026-09-26 22:55:31: 785,970,568 states generated (3,942,887 s/min), 164,946,304 distinct states found (741,607 ds/min), 35,005,388 states left on queue.
+Progress(37) at 2026-09-26 22:56:31: 789,510,092 states generated (3,539,524 s/min), 165,639,772 distinct states found (693,468 ds/min), 35,040,975 states left on queue.
+Progress(37) at 2026-09-26 22:57:31: 793,196,116 states generated (3,686,024 s/min), 166,434,160 distinct states found (794,388 ds/min), 35,066,311 states left on queue.
+Progress(37) at 2026-09-26 22:58:31: 797,077,821 states generated (3,881,705 s/min), 167,211,613 distinct states found (777,453 ds/min), 35,143,500 states left on queue.
+Progress(37) at 2026-09-26 22:59:31: 800,703,982 states generated (3,626,161 s/min), 167,847,393 distinct states found (635,780 ds/min), 35,235,557 states left on queue.
+Progress(37) at 2026-09-26 23:00:31: 804,333,796 states generated (3,629,814 s/min), 168,558,900 distinct states found (711,507 ds/min), 35,382,045 states left on queue.
+Progress(37) at 2026-09-26 23:01:31: 808,124,097 states generated (3,790,301 s/min), 169,326,160 distinct states found (767,260 ds/min), 35,505,323 states left on queue.
+Progress(37) at 2026-09-26 23:02:31: 811,817,597 states generated (3,693,500 s/min), 170,003,837 distinct states found (677,677 ds/min), 35,622,306 states left on queue.
+Progress(38) at 2026-09-26 23:03:31: 815,633,293 states generated (3,815,696 s/min), 170,728,247 distinct states found (724,410 ds/min), 35,667,773 states left on queue.
+Progress(38) at 2026-09-26 23:04:31: 819,539,149 states generated (3,905,856 s/min), 171,399,525 distinct states found (671,278 ds/min), 35,601,755 states left on queue.
+Progress(38) at 2026-09-26 23:05:31: 823,277,012 states generated (3,737,863 s/min), 172,110,965 distinct states found (711,440 ds/min), 35,660,945 states left on queue.
+Progress(38) at 2026-09-26 23:06:31: 826,971,781 states generated (3,694,769 s/min), 172,839,208 distinct states found (728,243 ds/min), 35,784,632 states left on queue.
+Progress(38) at 2026-09-26 23:07:31: 830,563,732 states generated (3,591,951 s/min), 173,543,960 distinct states found (704,752 ds/min), 35,851,669 states left on queue.
+Progress(38) at 2026-09-26 23:08:31: 834,297,892 states generated (3,734,160 s/min), 174,304,895 distinct states found (760,935 ds/min), 35,923,913 states left on queue.
+Progress(38) at 2026-09-26 23:09:31: 837,974,970 states generated (3,677,078 s/min), 175,063,855 distinct states found (758,960 ds/min), 35,899,570 states left on queue.
+Progress(38) at 2026-09-26 23:10:31: 841,387,988 states generated (3,413,018 s/min), 175,853,340 distinct states found (789,485 ds/min), 35,950,576 states left on queue.
+Progress(38) at 2026-09-26 23:11:31: 845,006,484 states generated (3,618,496 s/min), 176,583,431 distinct states found (730,091 ds/min), 35,936,696 states left on queue.
+Checkpointing of run /mnt/nvme2/forge-rewind/ForgeSyncRewindHolds/26-09-26-19-42-25
+Checkpointing completed at (2026-09-26 23:12:31)
+Progress(38) at 2026-09-26 23:12:31: 848,612,353 states generated (3,605,869 s/min), 177,216,152 distinct states found (632,721 ds/min), 35,984,930 states left on queue.
+Progress(38) at 2026-09-26 23:13:31: 852,254,169 states generated (3,641,816 s/min), 177,922,247 distinct states found (706,095 ds/min), 36,045,595 states left on queue.
+Progress(38) at 2026-09-26 23:14:31: 856,016,811 states generated (3,762,642 s/min), 178,622,967 distinct states found (700,720 ds/min), 36,022,357 states left on queue.
+Progress(38) at 2026-09-26 23:15:31: 859,734,742 states generated (3,717,931 s/min), 179,325,693 distinct states found (702,726 ds/min), 36,013,645 states left on queue.
+Progress(38) at 2026-09-26 23:16:31: 863,592,411 states generated (3,857,669 s/min), 180,012,508 distinct states found (686,815 ds/min), 36,061,234 states left on queue.
+Progress(38) at 2026-09-26 23:17:31: 867,535,499 states generated (3,943,088 s/min), 180,735,229 distinct states found (722,721 ds/min), 36,130,146 states left on queue.
+Progress(38) at 2026-09-26 23:18:31: 871,327,632 states generated (3,792,133 s/min), 181,416,622 distinct states found (681,393 ds/min), 36,230,640 states left on queue.
+Progress(38) at 2026-09-26 23:19:31: 875,289,791 states generated (3,962,159 s/min), 182,149,389 distinct states found (732,767 ds/min), 36,303,045 states left on queue.
+Progress(38) at 2026-09-26 23:20:31: 878,848,914 states generated (3,559,123 s/min), 182,799,836 distinct states found (650,447 ds/min), 36,345,055 states left on queue.
+Progress(38) at 2026-09-26 23:21:31: 882,804,444 states generated (3,955,530 s/min), 183,519,087 distinct states found (719,251 ds/min), 36,441,217 states left on queue.
+Progress(38) at 2026-09-26 23:22:31: 886,693,755 states generated (3,889,311 s/min), 184,235,259 distinct states found (716,172 ds/min), 36,545,848 states left on queue.
+Progress(38) at 2026-09-26 23:23:31: 890,595,927 states generated (3,902,172 s/min), 185,028,254 distinct states found (792,995 ds/min), 36,604,563 states left on queue.
+Progress(38) at 2026-09-26 23:24:31: 894,267,381 states generated (3,671,454 s/min), 185,752,345 distinct states found (724,091 ds/min), 36,647,533 states left on queue.
+Progress(38) at 2026-09-26 23:25:31: 897,925,167 states generated (3,657,786 s/min), 186,400,160 distinct states found (647,815 ds/min), 36,603,414 states left on queue.
+Progress(38) at 2026-09-26 23:26:31: 901,424,489 states generated (3,499,322 s/min), 187,189,284 distinct states found (789,124 ds/min), 36,678,701 states left on queue.
+Progress(38) at 2026-09-26 23:27:31: 904,883,486 states generated (3,458,997 s/min), 188,090,971 distinct states found (901,687 ds/min), 36,974,219 states left on queue.
+Progress(38) at 2026-09-26 23:28:31: 908,481,937 states generated (3,598,451 s/min), 188,920,607 distinct states found (829,636 ds/min), 37,191,600 states left on queue.
+Progress(38) at 2026-09-26 23:29:31: 912,140,594 states generated (3,658,657 s/min), 189,706,780 distinct states found (786,173 ds/min), 37,302,103 states left on queue.
+Progress(38) at 2026-09-26 23:30:31: 915,751,570 states generated (3,610,976 s/min), 190,552,739 distinct states found (845,959 ds/min), 37,477,568 states left on queue.
+Progress(38) at 2026-09-26 23:31:31: 919,369,136 states generated (3,617,566 s/min), 191,250,753 distinct states found (698,014 ds/min), 37,520,281 states left on queue.
+Progress(38) at 2026-09-26 23:32:31: 922,991,753 states generated (3,622,617 s/min), 191,912,928 distinct states found (662,175 ds/min), 37,591,926 states left on queue.
+Progress(38) at 2026-09-26 23:33:31: 926,665,704 states generated (3,673,951 s/min), 192,624,455 distinct states found (711,527 ds/min), 37,702,991 states left on queue.
+Progress(38) at 2026-09-26 23:34:31: 930,250,426 states generated (3,584,722 s/min), 193,293,231 distinct states found (668,776 ds/min), 37,805,943 states left on queue.
+Progress(38) at 2026-09-26 23:35:31: 933,797,507 states generated (3,547,081 s/min), 193,909,781 distinct states found (616,550 ds/min), 37,896,231 states left on queue.
+Progress(38) at 2026-09-26 23:36:31: 937,065,370 states generated (3,267,863 s/min), 194,519,484 distinct states found (609,703 ds/min), 38,010,150 states left on queue.
+Progress(38) at 2026-09-26 23:37:31: 940,756,694 states generated (3,691,324 s/min), 195,235,430 distinct states found (715,946 ds/min), 38,102,982 states left on queue.
+Progress(38) at 2026-09-26 23:38:31: 943,530,539 states generated (2,773,845 s/min), 195,827,547 distinct states found (592,117 ds/min), 38,182,883 states left on queue.
+Progress(38) at 2026-09-26 23:39:31: 946,130,242 states generated (2,599,703 s/min), 196,384,834 distinct states found (557,287 ds/min), 38,234,985 states left on queue.
+Progress(38) at 2026-09-26 23:40:31: 949,358,825 states generated (3,228,583 s/min), 196,932,236 distinct states found (547,402 ds/min), 38,314,311 states left on queue.
+Progress(38) at 2026-09-26 23:41:31: 952,584,840 states generated (3,226,015 s/min), 197,566,306 distinct states found (634,070 ds/min), 38,389,280 states left on queue.
+Checkpointing of run /mnt/nvme2/forge-rewind/ForgeSyncRewindHolds/26-09-26-19-42-25
+Checkpointing completed at (2026-09-26 23:42:32)
+Progress(38) at 2026-09-26 23:42:32: 956,196,449 states generated (3,611,609 s/min), 198,332,689 distinct states found (766,383 ds/min), 38,477,714 states left on queue.
+Progress(38) at 2026-09-26 23:43:32: 960,652,449 states generated (4,456,000 s/min), 199,226,183 distinct states found (893,494 ds/min), 38,568,230 states left on queue.
+Progress(38) at 2026-09-26 23:44:32: 964,527,892 states generated (3,875,443 s/min), 199,938,288 distinct states found (712,105 ds/min), 38,634,258 states left on queue.
+Progress(38) at 2026-09-26 23:45:32: 968,155,928 states generated (3,628,036 s/min), 200,638,125 distinct states found (699,837 ds/min), 38,717,109 states left on queue.
+Progress(38) at 2026-09-26 23:46:32: 971,697,605 states generated (3,541,677 s/min), 201,311,467 distinct states found (673,342 ds/min), 38,767,922 states left on queue.
+Progress(38) at 2026-09-26 23:47:32: 975,788,265 states generated (4,090,660 s/min), 202,070,979 distinct states found (759,512 ds/min), 38,848,725 states left on queue.
+Progress(38) at 2026-09-26 23:48:32: 979,981,254 states generated (4,192,989 s/min), 202,862,003 distinct states found (791,024 ds/min), 38,955,414 states left on queue.
+Progress(38) at 2026-09-26 23:49:32: 983,543,775 states generated (3,562,521 s/min), 203,551,397 distinct states found (689,394 ds/min), 39,018,045 states left on queue.
+Progress(38) at 2026-09-26 23:50:32: 987,322,919 states generated (3,779,144 s/min), 204,220,003 distinct states found (668,606 ds/min), 39,050,777 states left on queue.
+Progress(38) at 2026-09-26 23:51:32: 990,584,600 states generated (3,261,681 s/min), 204,875,392 distinct states found (655,389 ds/min), 39,077,399 states left on queue.
+Progress(38) at 2026-09-26 23:52:32: 993,426,787 states generated (2,842,187 s/min), 205,490,009 distinct states found (614,617 ds/min), 39,064,345 states left on queue.
+Progress(38) at 2026-09-26 23:53:32: 995,710,585 states generated (2,283,798 s/min), 205,980,321 distinct states found (490,312 ds/min), 39,096,679 states left on queue.
+Progress(38) at 2026-09-26 23:54:32: 999,471,701 states generated (3,761,116 s/min), 206,646,205 distinct states found (665,884 ds/min), 39,154,188 states left on queue.
+Progress(38) at 2026-09-26 23:55:32: 1,003,123,840 states generated (3,652,139 s/min), 207,286,816 distinct states found (640,611 ds/min), 39,259,489 states left on queue.
+Progress(38) at 2026-09-26 23:56:32: 1,006,701,984 states generated (3,578,144 s/min), 208,006,117 distinct states found (719,301 ds/min), 39,392,568 states left on queue.
+Progress(38) at 2026-09-26 23:57:32: 1,010,438,158 states generated (3,736,174 s/min), 208,731,334 distinct states found (725,217 ds/min), 39,492,629 states left on queue.
+Progress(38) at 2026-09-26 23:58:32: 1,013,832,445 states generated (3,394,287 s/min), 209,334,311 distinct states found (602,977 ds/min), 39,567,913 states left on queue.
+Progress(39) at 2026-09-26 23:59:32: 1,017,073,038 states generated (3,240,593 s/min), 209,962,330 distinct states found (628,019 ds/min), 39,651,279 states left on queue.
+Progress(39) at 2026-09-27 00:00:32: 1,021,310,215 states generated (4,237,177 s/min), 210,709,512 distinct states found (747,182 ds/min), 39,589,984 states left on queue.
+Progress(39) at 2026-09-27 00:01:32: 1,024,986,701 states generated (3,676,486 s/min), 211,368,725 distinct states found (659,213 ds/min), 39,582,522 states left on queue.
+Progress(39) at 2026-09-27 00:02:32: 1,028,499,300 states generated (3,512,599 s/min), 212,061,364 distinct states found (692,639 ds/min), 39,676,976 states left on queue.
+Progress(39) at 2026-09-27 00:03:32: 1,031,978,668 states generated (3,479,368 s/min), 212,762,310 distinct states found (700,946 ds/min), 39,758,342 states left on queue.
+Progress(39) at 2026-09-27 00:04:32: 1,035,603,222 states generated (3,624,554 s/min), 213,466,655 distinct states found (704,345 ds/min), 39,817,273 states left on queue.
+Progress(39) at 2026-09-27 00:05:32: 1,039,217,559 states generated (3,614,337 s/min), 214,203,169 distinct states found (736,514 ds/min), 39,884,222 states left on queue.
+Progress(39) at 2026-09-27 00:06:32: 1,042,897,942 states generated (3,680,383 s/min), 214,983,241 distinct states found (780,072 ds/min), 39,830,091 states left on queue.
+Progress(39) at 2026-09-27 00:07:32: 1,046,708,068 states generated (3,810,126 s/min), 215,886,415 distinct states found (903,174 ds/min), 39,889,321 states left on queue.
+Progress(39) at 2026-09-27 00:08:32: 1,050,306,824 states generated (3,598,756 s/min), 216,554,944 distinct states found (668,529 ds/min), 39,848,897 states left on queue.
+Progress(39) at 2026-09-27 00:09:32: 1,053,090,638 states generated (2,783,814 s/min), 217,024,721 distinct states found (469,777 ds/min), 39,870,676 states left on queue.
+Progress(39) at 2026-09-27 00:10:32: 1,055,178,102 states generated (2,087,464 s/min), 217,422,494 distinct states found (397,773 ds/min), 39,884,595 states left on queue.
+Progress(39) at 2026-09-27 00:11:32: 1,058,365,369 states generated (3,187,267 s/min), 217,989,220 distinct states found (566,726 ds/min), 39,886,667 states left on queue.
+Checkpointing of run /mnt/nvme2/forge-rewind/ForgeSyncRewindHolds/26-09-26-19-42-25
+Checkpointing completed at (2026-09-27 00:12:33)
+Progress(39) at 2026-09-27 00:12:33: 1,061,491,910 states generated (3,126,541 s/min), 218,551,452 distinct states found (562,232 ds/min), 39,836,875 states left on queue.
+Progress(39) at 2026-09-27 00:13:33: 1,065,044,053 states generated (3,552,143 s/min), 219,239,105 distinct states found (687,653 ds/min), 39,827,374 states left on queue.
+Progress(39) at 2026-09-27 00:14:33: 1,067,511,578 states generated (2,467,525 s/min), 219,687,745 distinct states found (448,640 ds/min), 39,859,132 states left on queue.
+Progress(39) at 2026-09-27 00:15:33: 1,070,771,536 states generated (3,259,958 s/min), 220,266,403 distinct states found (578,658 ds/min), 39,917,096 states left on queue.
+Progress(39) at 2026-09-27 00:16:33: 1,074,480,244 states generated (3,708,708 s/min), 220,943,848 distinct states found (677,445 ds/min), 39,965,507 states left on queue.
+Progress(39) at 2026-09-27 00:17:33: 1,078,162,588 states generated (3,682,344 s/min), 221,611,176 distinct states found (667,328 ds/min), 40,050,174 states left on queue.
+Progress(39) at 2026-09-27 00:18:33: 1,081,695,436 states generated (3,532,848 s/min), 222,270,801 distinct states found (659,625 ds/min), 40,100,951 states left on queue.
+Progress(39) at 2026-09-27 00:19:33: 1,085,200,480 states generated (3,505,044 s/min), 222,905,110 distinct states found (634,309 ds/min), 40,112,790 states left on queue.
+Progress(39) at 2026-09-27 00:20:33: 1,088,447,956 states generated (3,247,476 s/min), 223,498,341 distinct states found (593,231 ds/min), 40,183,655 states left on queue.
+Progress(39) at 2026-09-27 00:21:33: 1,092,438,648 states generated (3,990,692 s/min), 224,235,703 distinct states found (737,362 ds/min), 40,284,452 states left on queue.
+Progress(39) at 2026-09-27 00:22:33: 1,096,221,268 states generated (3,782,620 s/min), 224,963,690 distinct states found (727,987 ds/min), 40,311,132 states left on queue.
+Progress(39) at 2026-09-27 00:23:33: 1,099,700,222 states generated (3,478,954 s/min), 225,677,423 distinct states found (713,733 ds/min), 40,344,705 states left on queue.
+Progress(39) at 2026-09-27 00:24:33: 1,102,906,257 states generated (3,206,035 s/min), 226,245,439 distinct states found (568,016 ds/min), 40,307,157 states left on queue.
+Progress(39) at 2026-09-27 00:25:33: 1,106,142,187 states generated (3,235,930 s/min), 226,868,760 distinct states found (623,321 ds/min), 40,308,744 states left on queue.
+Progress(39) at 2026-09-27 00:26:33: 1,108,428,006 states generated (2,285,819 s/min), 227,433,669 distinct states found (564,909 ds/min), 40,366,412 states left on queue.
+Progress(39) at 2026-09-27 00:27:33: 1,110,724,639 states generated (2,296,633 s/min), 227,967,580 distinct states found (533,911 ds/min), 40,455,361 states left on queue.
+Progress(39) at 2026-09-27 00:28:33: 1,112,698,323 states generated (1,973,684 s/min), 228,479,096 distinct states found (511,516 ds/min), 40,626,241 states left on queue.
+Progress(39) at 2026-09-27 00:29:33: 1,115,662,979 states generated (2,964,656 s/min), 229,225,677 distinct states found (746,581 ds/min), 40,875,674 states left on queue.
+Progress(39) at 2026-09-27 00:30:33: 1,118,531,598 states generated (2,868,619 s/min), 229,859,361 distinct states found (633,684 ds/min), 41,006,830 states left on queue.
+Progress(39) at 2026-09-27 00:31:33: 1,121,590,465 states generated (3,058,867 s/min), 230,457,208 distinct states found (597,847 ds/min), 41,028,456 states left on queue.
+Progress(39) at 2026-09-27 00:32:33: 1,124,862,579 states generated (3,272,114 s/min), 231,291,466 distinct states found (834,258 ds/min), 41,261,311 states left on queue.
+Progress(39) at 2026-09-27 00:33:33: 1,128,184,598 states generated (3,322,019 s/min), 231,993,287 distinct states found (701,821 ds/min), 41,345,114 states left on queue.
+Progress(39) at 2026-09-27 00:34:33: 1,131,662,966 states generated (3,478,368 s/min), 232,661,093 distinct states found (667,806 ds/min), 41,366,282 states left on queue.
+Progress(39) at 2026-09-27 00:35:33: 1,133,788,721 states generated (2,125,755 s/min), 233,037,717 distinct states found (376,624 ds/min), 41,390,203 states left on queue.
+Progress(39) at 2026-09-27 00:36:33: 1,136,614,236 states generated (2,825,515 s/min), 233,546,073 distinct states found (508,356 ds/min), 41,452,060 states left on queue.
+Progress(39) at 2026-09-27 00:37:33: 1,139,913,933 states generated (3,299,697 s/min), 234,178,438 distinct states found (632,365 ds/min), 41,523,541 states left on queue.
+Progress(39) at 2026-09-27 00:38:33: 1,143,464,746 states generated (3,550,813 s/min), 234,802,285 distinct states found (623,847 ds/min), 41,604,483 states left on queue.
+Progress(39) at 2026-09-27 00:39:33: 1,146,908,854 states generated (3,444,108 s/min), 235,411,618 distinct states found (609,333 ds/min), 41,670,578 states left on queue.
+Progress(39) at 2026-09-27 00:40:33: 1,150,341,472 states generated (3,432,618 s/min), 236,001,031 distinct states found (589,413 ds/min), 41,761,731 states left on queue.
+Progress(39) at 2026-09-27 00:41:33: 1,153,779,219 states generated (3,437,747 s/min), 236,660,675 distinct states found (659,644 ds/min), 41,836,324 states left on queue.
+Checkpointing of run /mnt/nvme2/forge-rewind/ForgeSyncRewindHolds/26-09-26-19-42-25
+Checkpointing completed at (2026-09-27 00:42:33)
+Progress(39) at 2026-09-27 00:42:33: 1,157,388,496 states generated (3,609,277 s/min), 237,365,925 distinct states found (705,250 ds/min), 41,914,031 states left on queue.
+Progress(39) at 2026-09-27 00:43:33: 1,160,809,671 states generated (3,421,175 s/min), 238,109,739 distinct states found (743,814 ds/min), 41,997,886 states left on queue.
+Progress(39) at 2026-09-27 00:44:33: 1,164,343,274 states generated (3,533,603 s/min), 238,746,227 distinct states found (636,488 ds/min), 42,053,553 states left on queue.
+Progress(39) at 2026-09-27 00:45:33: 1,167,842,219 states generated (3,498,945 s/min), 239,388,772 distinct states found (642,545 ds/min), 42,147,876 states left on queue.
+Progress(39) at 2026-09-27 00:46:33: 1,171,032,440 states generated (3,190,221 s/min), 239,992,875 distinct states found (604,103 ds/min), 42,190,853 states left on queue.
+Progress(39) at 2026-09-27 00:47:33: 1,173,512,204 states generated (2,479,764 s/min), 240,534,747 distinct states found (541,872 ds/min), 42,242,509 states left on queue.
+Progress(39) at 2026-09-27 00:48:33: 1,176,813,223 states generated (3,301,019 s/min), 241,207,915 distinct states found (673,168 ds/min), 42,293,712 states left on queue.
+Progress(39) at 2026-09-27 00:49:33: 1,180,310,619 states generated (3,497,396 s/min), 241,888,211 distinct states found (680,296 ds/min), 42,350,481 states left on queue.
+Progress(39) at 2026-09-27 00:50:33: 1,183,788,728 states generated (3,478,109 s/min), 242,510,703 distinct states found (622,492 ds/min), 42,399,599 states left on queue.
+Error: Invariant Inv_ProofNeverRestsOnRetention is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ resendBudget = 1
+/\ claimBudget = 3
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 1
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 0, main |-> 0, packs |-> {}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> NoSyncer @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 1
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "new" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 0, tok |-> 0] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {} @@ p2 :> {})
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "idle" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ rewound = {}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 3
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 0, tok |-> 0, held |-> FALSE, holder |-> NoSyncer, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 2: <AcquireCreate line 395, col 3 to line 405, col 60 of module ForgeSyncRewind>
+/\ resendBudget = 1
+/\ claimBudget = 2
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 2
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 0, main |-> 0, packs |-> {}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> NoSyncer @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 1
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "new" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {} @@ p2 :> {})
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "claimed" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ rewound = {}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 3
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 1, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 3: <SweepDone line 537, col 3 to line 544, col 60 of module ForgeSyncRewind>
+/\ resendBudget = 1
+/\ claimBudget = 2
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 2
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 0, main |-> 0, packs |-> {}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> NoSyncer @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 1
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "new" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {} @@ p2 :> {})
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "restoring" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ rewound = {}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 3
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 1, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 4: <Restore line 553, col 3 to line 625, col 27 of module ForgeSyncRewind>
+/\ resendBudget = 1
+/\ claimBudget = 2
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 2
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 0, main |-> 0, packs |-> {}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> NoSyncer @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 1
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "new" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {} @@ p2 :> {})
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "serving" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ rewound = {}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 3
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 1, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 5: <PushSend line 677, col 3 to line 686, col 60 of module ForgeSyncRewind>
+/\ resendBudget = 1
+/\ claimBudget = 2
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 2
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 0, main |-> 0, packs |-> {}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s1 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 1
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {} @@ p2 :> {})
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "serving" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {p1} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ rewound = {}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 3
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 1, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 6: <IdxLand line 691, col 3 to line 698, col 60 of module ForgeSyncRewind>
+/\ resendBudget = 1
+/\ claimBudget = 2
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 2
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 0, main |-> 0, packs |-> {}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s1 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 1
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {} @@ p2 :> {})
+/\ idxObj = {}
+/\ localPacks = (s1 :> {p1} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "serving" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ rewound = {}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 3
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 1, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 7: <BatchStart line 730, col 3 to line 749, col 60 of module ForgeSyncRewind>
+/\ resendBudget = 1
+/\ claimBudget = 2
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 2
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 0, main |-> 0, packs |-> {}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s1 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 1
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {} @@ p2 :> {})
+/\ idxObj = {}
+/\ localPacks = (s1 :> {p1} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "pushing" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ rewound = {}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 3
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> TRUE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> p1, stage |-> "judged", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 1, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> TRUE @@ s2 :> FALSE)
+
+State 8: <BatchRenew line 753, col 3 to line 768, col 50 of module ForgeSyncRewind>
+/\ resendBudget = 1
+/\ claimBudget = 2
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 3
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 0, main |-> 0, packs |-> {}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s1 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 1
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 2] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {} @@ p2 :> {})
+/\ idxObj = {}
+/\ localPacks = (s1 :> {p1} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "pushing" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ rewound = {}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 2
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> p1, stage |-> "renewed", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 2, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 9: <BatchHash line 847, col 3 to line 869, col 50 of module ForgeSyncRewind>
+/\ resendBudget = 1
+/\ claimBudget = 2
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 3
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 0, main |-> 0, packs |-> {}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s1 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 1
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 2] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {} @@ p2 :> {})
+/\ idxObj = {}
+/\ localPacks = (s1 :> {p1} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "pushing" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ rewound = {}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 2
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> TRUE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> p1, stage |-> "hashed", listed |-> {p1}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 2, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> TRUE @@ s2 :> FALSE)
+
+State 10: <BatchInit line 876, col 3 to line 885, col 60 of module ForgeSyncRewind>
+/\ resendBudget = 1
+/\ claimBudget = 2
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 3
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 0, main |-> 0, packs |-> {}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s1 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 1
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 2] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {} @@ p2 :> {})
+/\ idxObj = {}
+/\ localPacks = (s1 :> {p1} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "pushing" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ rewound = {}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 2
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {[ep |-> 1, s |-> s1, p |-> p1]}
+/\ sensorMoved = (s1 :> TRUE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> p1, stage |-> "initiated", listed |-> {p1}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 2, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> TRUE @@ s2 :> FALSE)
+
+State 11: <BatchComplete line 895, col 3 to line 909, col 50 of module ForgeSyncRewind>
+/\ resendBudget = 1
+/\ claimBudget = 2
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 3
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 0, main |-> 0, packs |-> {}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s1 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 1
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 2] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {} @@ p2 :> {})
+/\ idxObj = {p1}
+/\ localPacks = (s1 :> {p1} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "pushing" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ rewound = {}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 2
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> TRUE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> p1, stage |-> "uploaded", listed |-> {p1}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 2, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> TRUE @@ s2 :> FALSE)
+
+State 12: <BatchCas line 922, col 3 to line 950, col 64 of module ForgeSyncRewind>
+/\ resendBudget = 1
+/\ claimBudget = 2
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 4
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 3, main |-> p1, packs |-> {p1}, history |-> {p1}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s1 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 1
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 2] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1}
+/\ localPacks = (s1 :> {p1} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "pushing" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 3, main |-> p1, packs |-> {p1}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ rewound = {}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 2
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> TRUE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> p1, stage |-> "cas", listed |-> {p1}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 2, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> TRUE @@ s2 :> FALSE)
+
+State 13: <BatchRefs line 970, col 3 to line 978, col 60 of module ForgeSyncRewind>
+/\ resendBudget = 1
+/\ claimBudget = 2
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 4
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 3, main |-> p1, packs |-> {p1}, history |-> {p1}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s1 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 1
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 2] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1}
+/\ localPacks = (s1 :> {p1} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> p1 @@ s2 :> 0)
+/\ st = (s1 :> "pushing" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 3, main |-> p1, packs |-> {p1}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ rewound = {}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 2
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> TRUE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> p1, stage |-> "refs", listed |-> {p1}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 2, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> TRUE @@ s2 :> FALSE)
+
+State 14: <BatchAck line 983, col 3 to line 996, col 37 of module ForgeSyncRewind>
+/\ resendBudget = 1
+/\ claimBudget = 2
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 4
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 3, main |-> p1, packs |-> {p1}, history |-> {p1}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s1 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 1
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "acked" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 2] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1}
+/\ localPacks = (s1 :> {p1} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> p1 @@ s2 :> 0)
+/\ st = (s1 :> "serving" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 3, main |-> p1, packs |-> {p1}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ rewound = {}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 2
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> TRUE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 2, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> TRUE @@ s2 :> FALSE)
+
+State 15: <Rewind line 1482, col 3 to line 1508, col 37 of module ForgeSyncRewind>
+/\ resendBudget = 1
+/\ claimBudget = 2
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 6
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 4, main |-> 0, packs |-> {p1}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s1 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "acked" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 5] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1}
+/\ localPacks = (s1 :> {p1} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "serving" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 4, main |-> 0, packs |-> {p1}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ rewound = {p1}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 2
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> TRUE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 5, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> TRUE @@ s2 :> FALSE)
+
+State 16: <FoldPlan line 1038, col 3 to line 1077, col 24 of module ForgeSyncRewind>
+/\ resendBudget = 1
+/\ claimBudget = 2
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 6
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 4, main |-> 0, packs |-> {p1}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s1 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "acked" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "planned",
+        id |-> f1,
+        inputs |-> {p1},
+        base |-> TRUE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 5] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1}
+/\ localPacks = (s1 :> {p1} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "serving" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 0
+/\ belief = ( s1 :> [etag |-> 4, main |-> 0, packs |-> {p1}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ rewound = {p1}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 2
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> TRUE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 5, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> TRUE @@ s2 :> FALSE)
+
+State 17: <FoldInit line 1096, col 3 to line 1103, col 50 of module ForgeSyncRewind>
+/\ resendBudget = 1
+/\ claimBudget = 2
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 6
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 4, main |-> 0, packs |-> {p1}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s1 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "acked" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "initiated",
+        id |-> f1,
+        inputs |-> {p1},
+        base |-> TRUE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 5] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1}
+/\ localPacks = (s1 :> {p1} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "serving" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 0
+/\ belief = ( s1 :> [etag |-> 4, main |-> 0, packs |-> {p1}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ rewound = {p1}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 2
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {[ep |-> 1, s |-> s1, p |-> f1]}
+/\ sensorMoved = (s1 :> TRUE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 5, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> TRUE @@ s2 :> FALSE)
+
+State 18: <FoldComplete line 1110, col 3 to line 1123, col 50 of module ForgeSyncRewind>
+/\ resendBudget = 1
+/\ claimBudget = 2
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 6
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 4, main |-> 0, packs |-> {p1}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s1 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "acked" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "uploaded",
+        id |-> f1,
+        inputs |-> {p1},
+        base |-> TRUE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 5] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1, f1}
+/\ localPacks = (s1 :> {p1} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "serving" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, f1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 0
+/\ belief = ( s1 :> [etag |-> 4, main |-> 0, packs |-> {p1}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ rewound = {p1}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 2
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> TRUE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 5, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> TRUE @@ s2 :> FALSE)
+
+State 19: <FoldRenew line 1164, col 3 to line 1185, col 50 of module ForgeSyncRewind>
+/\ resendBudget = 1
+/\ claimBudget = 2
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 7
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 4, main |-> 0, packs |-> {p1}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s1 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "acked" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "renewed",
+        id |-> f1,
+        inputs |-> {p1},
+        base |-> TRUE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 6] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1, f1}
+/\ localPacks = (s1 :> {p1} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "serving" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, f1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 0
+/\ belief = ( s1 :> [etag |-> 4, main |-> 0, packs |-> {p1}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ rewound = {p1}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 1
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> TRUE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 6, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> TRUE @@ s2 :> FALSE)
+
+State 20: <FoldCommit line 1229, col 3 to line 1360, col 27 of module ForgeSyncRewind>
+/\ resendBudget = 1
+/\ claimBudget = 2
+/\ retained = (s1 :> {p1} @@ s2 :> {})
+/\ nextTok = 8
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 7, main |-> 0, packs |-> {f1}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s1 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "acked" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 6] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1, f1}
+/\ localPacks = (s1 :> {p1, f1} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "serving" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, f1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 0
+/\ belief = ( s1 :> [etag |-> 7, main |-> 0, packs |-> {f1}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ rewound = {p1}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 1
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> TRUE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 6, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> TRUE @@ s2 :> FALSE)
+
+State 21: <CleanRelease line 1005, col 3 to line 1013, col 50 of module ForgeSyncRewind>
+/\ resendBudget = 1
+/\ claimBudget = 2
+/\ retained = (s1 :> {p1} @@ s2 :> {})
+/\ nextTok = 9
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 7, main |-> 0, packs |-> {f1}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s1 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "acked" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 0, tok |-> 0] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1, f1}
+/\ localPacks = (s1 :> {p1, f1} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "idle" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, f1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 0
+/\ belief = ( s1 :> [etag |-> 7, main |-> 0, packs |-> {f1}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ rewound = {p1}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 1
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 8, held |-> TRUE, holder |-> s1, released |-> TRUE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 22: <ClaimReleased line 432, col 3 to line 443, col 60 of module ForgeSyncRewind>
+/\ resendBudget = 1
+/\ claimBudget = 1
+/\ retained = (s1 :> {p1} @@ s2 :> {})
+/\ nextTok = 10
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 7, main |-> 0, packs |-> {f1}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s1 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "acked" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 0, tok |-> 0] @@ s2 :> [ep |-> 2, tok |-> 9])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1, f1}
+/\ localPacks = (s1 :> {p1, f1} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "idle" @@ s2 :> "claimed")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, f1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 0
+/\ belief = ( s1 :> [etag |-> 7, main |-> 0, packs |-> {f1}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ rewound = {p1}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 1
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 2, tok |-> 9, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 23: <SweepDone line 537, col 3 to line 544, col 60 of module ForgeSyncRewind>
+/\ resendBudget = 1
+/\ claimBudget = 1
+/\ retained = (s1 :> {p1} @@ s2 :> {})
+/\ nextTok = 10
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 7, main |-> 0, packs |-> {f1}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s1 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "acked" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 0, tok |-> 0] @@ s2 :> [ep |-> 2, tok |-> 9])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1, f1}
+/\ localPacks = (s1 :> {p1, f1} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "idle" @@ s2 :> "restoring")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, f1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 0
+/\ belief = ( s1 :> [etag |-> 7, main |-> 0, packs |-> {f1}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ rewound = {p1}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 1
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 2, tok |-> 9, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 24: <Restore line 553, col 3 to line 625, col 27 of module ForgeSyncRewind>
+/\ resendBudget = 1
+/\ claimBudget = 1
+/\ retained = (s1 :> {p1} @@ s2 :> {})
+/\ nextTok = 10
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 7, main |-> 0, packs |-> {f1}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s1 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "acked" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 0, tok |-> 0] @@ s2 :> [ep |-> 2, tok |-> 9])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1, f1}
+/\ localPacks = (s1 :> {p1, f1} @@ s2 :> {f1})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "idle" @@ s2 :> "serving")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, f1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 0
+/\ belief = ( s1 :> [etag |-> 7, main |-> 0, packs |-> {f1}] @@
+  s2 :> [etag |-> 7, main |-> 0, packs |-> {f1}] )
+/\ rewound = {p1}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 1
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> TRUE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 2, tok |-> 9, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> TRUE)
+
+State 25: <PushResend line 1515, col 3 to line 1528, col 24 of module ForgeSyncRewind>
+/\ resendBudget = 0
+/\ claimBudget = 1
+/\ retained = (s1 :> {p1} @@ s2 :> {})
+/\ nextTok = 10
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 7, main |-> 0, packs |-> {f1}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s2 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 0, tok |-> 0] @@ s2 :> [ep |-> 2, tok |-> 9])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1, f1}
+/\ localPacks = (s1 :> {p1, f1} @@ s2 :> {f1})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "idle" @@ s2 :> "serving")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, f1}
+/\ migrating = (s1 :> {} @@ s2 :> {p1})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 0
+/\ belief = ( s1 :> [etag |-> 7, main |-> 0, packs |-> {f1}] @@
+  s2 :> [etag |-> 7, main |-> 0, packs |-> {f1}] )
+/\ rewound = {p1}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 1
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> TRUE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 2, tok |-> 9, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> TRUE)
+
+State 26: <IdxLand line 691, col 3 to line 698, col 60 of module ForgeSyncRewind>
+/\ resendBudget = 0
+/\ claimBudget = 1
+/\ retained = (s1 :> {p1} @@ s2 :> {})
+/\ nextTok = 10
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 7, main |-> 0, packs |-> {f1}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s2 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 0, tok |-> 0] @@ s2 :> [ep |-> 2, tok |-> 9])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1, f1}
+/\ localPacks = (s1 :> {p1, f1} @@ s2 :> {p1, f1})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "idle" @@ s2 :> "serving")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, f1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 0
+/\ belief = ( s1 :> [etag |-> 7, main |-> 0, packs |-> {f1}] @@
+  s2 :> [etag |-> 7, main |-> 0, packs |-> {f1}] )
+/\ rewound = {p1}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 1
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> TRUE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 2, tok |-> 9, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> TRUE)
+
+State 27: <BatchStart line 730, col 3 to line 749, col 60 of module ForgeSyncRewind>
+/\ resendBudget = 0
+/\ claimBudget = 1
+/\ retained = (s1 :> {p1} @@ s2 :> {})
+/\ nextTok = 10
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 7, main |-> 0, packs |-> {f1}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s2 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 0, tok |-> 0] @@ s2 :> [ep |-> 2, tok |-> 9])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1, f1}
+/\ localPacks = (s1 :> {p1, f1} @@ s2 :> {p1, f1})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "idle" @@ s2 :> "pushing")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, f1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 0
+/\ belief = ( s1 :> [etag |-> 7, main |-> 0, packs |-> {f1}] @@
+  s2 :> [etag |-> 7, main |-> 0, packs |-> {f1}] )
+/\ rewound = {p1}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 1
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> TRUE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> p1, stage |-> "judged", listed |-> {}] )
+/\ cell = [ep |-> 2, tok |-> 9, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> TRUE)
+
+State 28: <BatchRenew line 753, col 3 to line 768, col 50 of module ForgeSyncRewind>
+/\ resendBudget = 0
+/\ claimBudget = 1
+/\ retained = (s1 :> {p1} @@ s2 :> {})
+/\ nextTok = 11
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 7, main |-> 0, packs |-> {f1}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s2 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 0, tok |-> 0] @@ s2 :> [ep |-> 2, tok |-> 10])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1, f1}
+/\ localPacks = (s1 :> {p1, f1} @@ s2 :> {p1, f1})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "idle" @@ s2 :> "pushing")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, f1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 0
+/\ belief = ( s1 :> [etag |-> 7, main |-> 0, packs |-> {f1}] @@
+  s2 :> [etag |-> 7, main |-> 0, packs |-> {f1}] )
+/\ rewound = {p1}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 0
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> p1, stage |-> "renewed", listed |-> {}] )
+/\ cell = [ep |-> 2, tok |-> 10, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 29: <BatchHash line 847, col 3 to line 869, col 50 of module ForgeSyncRewind>
+/\ resendBudget = 0
+/\ claimBudget = 1
+/\ retained = (s1 :> {p1} @@ s2 :> {})
+/\ nextTok = 11
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 7, main |-> 0, packs |-> {f1}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s2 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 0, tok |-> 0] @@ s2 :> [ep |-> 2, tok |-> 10])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1, f1}
+/\ localPacks = (s1 :> {p1, f1} @@ s2 :> {p1, f1})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "idle" @@ s2 :> "pushing")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, f1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 0
+/\ belief = ( s1 :> [etag |-> 7, main |-> 0, packs |-> {f1}] @@
+  s2 :> [etag |-> 7, main |-> 0, packs |-> {f1}] )
+/\ rewound = {p1}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 0
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> TRUE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> p1, stage |-> "hashed", listed |-> {p1, f1}] )
+/\ cell = [ep |-> 2, tok |-> 10, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> TRUE)
+
+State 30: <BatchInit line 876, col 3 to line 885, col 60 of module ForgeSyncRewind>
+/\ resendBudget = 0
+/\ claimBudget = 1
+/\ retained = (s1 :> {p1} @@ s2 :> {})
+/\ nextTok = 11
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 7, main |-> 0, packs |-> {f1}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s2 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 0, tok |-> 0] @@ s2 :> [ep |-> 2, tok |-> 10])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1, f1}
+/\ localPacks = (s1 :> {p1, f1} @@ s2 :> {p1, f1})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "idle" @@ s2 :> "pushing")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, f1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 0
+/\ belief = ( s1 :> [etag |-> 7, main |-> 0, packs |-> {f1}] @@
+  s2 :> [etag |-> 7, main |-> 0, packs |-> {f1}] )
+/\ rewound = {p1}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 0
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {[ep |-> 2, s |-> s2, p |-> p1]}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> TRUE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> p1, stage |-> "initiated", listed |-> {p1, f1}] )
+/\ cell = [ep |-> 2, tok |-> 10, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> TRUE)
+
+State 31: <BatchComplete line 895, col 3 to line 909, col 50 of module ForgeSyncRewind>
+/\ resendBudget = 0
+/\ claimBudget = 1
+/\ retained = (s1 :> {p1} @@ s2 :> {})
+/\ nextTok = 11
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 7, main |-> 0, packs |-> {f1}, history |-> {}]
+/\ resurrected = FALSE
+/\ pushTo = (p1 :> s2 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 0, tok |-> 0] @@ s2 :> [ep |-> 2, tok |-> 10])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1, f1}
+/\ localPacks = (s1 :> {p1, f1} @@ s2 :> {p1, f1})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "idle" @@ s2 :> "pushing")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, f1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 0
+/\ belief = ( s1 :> [etag |-> 7, main |-> 0, packs |-> {f1}] @@
+  s2 :> [etag |-> 7, main |-> 0, packs |-> {f1}] )
+/\ rewound = {p1}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 0
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> TRUE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> p1, stage |-> "uploaded", listed |-> {p1, f1}] )
+/\ cell = [ep |-> 2, tok |-> 10, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> TRUE)
+
+State 32: <BatchCas line 922, col 3 to line 950, col 64 of module ForgeSyncRewind>
+/\ resendBudget = 0
+/\ claimBudget = 1
+/\ retained = (s1 :> {p1} @@ s2 :> {})
+/\ nextTok = 12
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 11, main |-> p1, packs |-> {p1, f1}, history |-> {p1}]
+/\ resurrected = TRUE
+/\ pushTo = (p1 :> s2 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 0, tok |-> 0] @@ s2 :> [ep |-> 2, tok |-> 10])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1, f1}
+/\ localPacks = (s1 :> {p1, f1} @@ s2 :> {p1, f1})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "idle" @@ s2 :> "pushing")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, f1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 0
+/\ belief = ( s1 :> [etag |-> 7, main |-> 0, packs |-> {f1}] @@
+  s2 :> [etag |-> 11, main |-> p1, packs |-> {p1, f1}] )
+/\ rewound = {}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 0
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> TRUE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> p1, stage |-> "cas", listed |-> {p1, f1}] )
+/\ cell = [ep |-> 2, tok |-> 10, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> TRUE)
+
+State 33: <BatchRefs line 970, col 3 to line 978, col 60 of module ForgeSyncRewind>
+/\ resendBudget = 0
+/\ claimBudget = 1
+/\ retained = (s1 :> {p1} @@ s2 :> {})
+/\ nextTok = 12
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 11, main |-> p1, packs |-> {p1, f1}, history |-> {p1}]
+/\ resurrected = TRUE
+/\ pushTo = (p1 :> s2 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 0, tok |-> 0] @@ s2 :> [ep |-> 2, tok |-> 10])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1, f1}
+/\ localPacks = (s1 :> {p1, f1} @@ s2 :> {p1, f1})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> p1)
+/\ st = (s1 :> "idle" @@ s2 :> "pushing")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, f1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 0
+/\ belief = ( s1 :> [etag |-> 7, main |-> 0, packs |-> {f1}] @@
+  s2 :> [etag |-> 11, main |-> p1, packs |-> {p1, f1}] )
+/\ rewound = {}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 0
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> TRUE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> p1, stage |-> "refs", listed |-> {p1, f1}] )
+/\ cell = [ep |-> 2, tok |-> 10, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> TRUE)
+
+State 34: <BatchAck line 983, col 3 to line 996, col 37 of module ForgeSyncRewind>
+/\ resendBudget = 0
+/\ claimBudget = 1
+/\ retained = (s1 :> {p1} @@ s2 :> {})
+/\ nextTok = 12
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 11, main |-> p1, packs |-> {p1, f1}, history |-> {p1}]
+/\ resurrected = TRUE
+/\ pushTo = (p1 :> s2 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "acked" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 0, tok |-> 0] @@ s2 :> [ep |-> 2, tok |-> 10])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1, f1}
+/\ localPacks = (s1 :> {p1, f1} @@ s2 :> {p1, f1})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> p1)
+/\ st = (s1 :> "idle" @@ s2 :> "serving")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, f1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 0
+/\ belief = ( s1 :> [etag |-> 7, main |-> 0, packs |-> {f1}] @@
+  s2 :> [etag |-> 11, main |-> p1, packs |-> {p1, f1}] )
+/\ rewound = {}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 0
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> TRUE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 2, tok |-> 10, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> TRUE)
+
+State 35: <CleanRelease line 1005, col 3 to line 1013, col 50 of module ForgeSyncRewind>
+/\ resendBudget = 0
+/\ claimBudget = 1
+/\ retained = (s1 :> {p1} @@ s2 :> {})
+/\ nextTok = 13
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 11, main |-> p1, packs |-> {p1, f1}, history |-> {p1}]
+/\ resurrected = TRUE
+/\ pushTo = (p1 :> s2 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "acked" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 0, tok |-> 0] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1, f1}
+/\ localPacks = (s1 :> {p1, f1} @@ s2 :> {p1, f1})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> p1)
+/\ st = (s1 :> "idle" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, f1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 0
+/\ belief = ( s1 :> [etag |-> 7, main |-> 0, packs |-> {f1}] @@
+  s2 :> [etag |-> 11, main |-> p1, packs |-> {p1, f1}] )
+/\ rewound = {}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 0
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 2, tok |-> 12, held |-> TRUE, holder |-> s2, released |-> TRUE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 36: <ClaimReleased line 432, col 3 to line 443, col 60 of module ForgeSyncRewind>
+/\ resendBudget = 0
+/\ claimBudget = 0
+/\ retained = (s1 :> {p1} @@ s2 :> {})
+/\ nextTok = 14
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 11, main |-> p1, packs |-> {p1, f1}, history |-> {p1}]
+/\ resurrected = TRUE
+/\ pushTo = (p1 :> s2 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "acked" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 3, tok |-> 13] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1, f1}
+/\ localPacks = (s1 :> {p1, f1} @@ s2 :> {p1, f1})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> p1)
+/\ st = (s1 :> "claimed" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, f1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 0
+/\ belief = ( s1 :> [etag |-> 7, main |-> 0, packs |-> {f1}] @@
+  s2 :> [etag |-> 11, main |-> p1, packs |-> {p1, f1}] )
+/\ rewound = {}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 0
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 3, tok |-> 13, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 37: <SweepDone line 537, col 3 to line 544, col 60 of module ForgeSyncRewind>
+/\ resendBudget = 0
+/\ claimBudget = 0
+/\ retained = (s1 :> {p1} @@ s2 :> {})
+/\ nextTok = 14
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 11, main |-> p1, packs |-> {p1, f1}, history |-> {p1}]
+/\ resurrected = TRUE
+/\ pushTo = (p1 :> s2 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "acked" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 3, tok |-> 13] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1, f1}
+/\ localPacks = (s1 :> {p1, f1} @@ s2 :> {p1, f1})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> p1)
+/\ st = (s1 :> "restoring" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, f1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 0
+/\ belief = ( s1 :> [etag |-> 7, main |-> 0, packs |-> {f1}] @@
+  s2 :> [etag |-> 11, main |-> p1, packs |-> {p1, f1}] )
+/\ rewound = {}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 0
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 3, tok |-> 13, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 38: <Restore line 553, col 3 to line 625, col 27 of module ForgeSyncRewind>
+/\ resendBudget = 0
+/\ claimBudget = 0
+/\ retained = (s1 :> {p1} @@ s2 :> {})
+/\ nextTok = 14
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 11, main |-> p1, packs |-> {p1, f1}, history |-> {p1}]
+/\ resurrected = TRUE
+/\ pushTo = (p1 :> s2 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "acked" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 3, tok |-> 13] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1, f1}
+/\ localPacks = (s1 :> {p1, f1} @@ s2 :> {p1, f1})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> p1 @@ s2 :> p1)
+/\ st = (s1 :> "serving" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, f1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 0
+/\ belief = ( s1 :> [etag |-> 11, main |-> p1, packs |-> {p1, f1}] @@
+  s2 :> [etag |-> 11, main |-> p1, packs |-> {p1, f1}] )
+/\ rewound = {}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 0
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> TRUE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 3, tok |-> 13, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> TRUE @@ s2 :> FALSE)
+
+State 39: <Checkpoint line 1392, col 3 to line 1409, col 37 of module ForgeSyncRewind>
+/\ resendBudget = 0
+/\ claimBudget = 0
+/\ retained = (s1 :> {p1} @@ s2 :> {})
+/\ nextTok = 14
+/\ par = (p1 :> 0 @@ p2 :> 0)
+/\ snap = [etag |-> 11, main |-> p1, packs |-> {p1, f1}, history |-> {p1}]
+/\ resurrected = TRUE
+/\ pushTo = (p1 :> s2 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ rewindBudget = 0
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "acked" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 3, tok |-> 13] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ anc = (p1 :> {p1} @@ p2 :> {})
+/\ idxObj = {p1, f1}
+/\ localPacks = (s1 :> {p1, f1} @@ s2 :> {p1, f1})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> p1 @@ s2 :> p1)
+/\ st = (s1 :> "serving" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, f1}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 0
+/\ belief = ( s1 :> [etag |-> 11, main |-> p1, packs |-> {p1, f1}] @@
+  s2 :> [etag |-> 11, main |-> p1, packs |-> {p1, f1}] )
+/\ rewound = {}
+/\ renewOverWedge = FALSE
+/\ renewBudget = 0
+/\ provedOverRetained = TRUE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> TRUE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 3, tok |-> 13, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> TRUE @@ s2 :> FALSE)
+
+1185622087 states generated, 242891987 distinct states found, 42455030 states left on queue.
+The depth of the complete state graph search is 39.
+The average outdegree of the complete state graph is 1 (minimum is 0, the maximum 31 and the 95th percentile is 4).
+Finished in 05h 08min at (2026-09-27 00:51:00)

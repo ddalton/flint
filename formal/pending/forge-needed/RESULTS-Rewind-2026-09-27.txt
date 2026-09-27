@@ -1,0 +1,7 @@
+ForgeSyncRewindTrustsDisk            OK-FOUND  exp=Inv_LandedPackComplete   rc=12  | Invariant Inv_LandedPackComplete is violated | 20813801 states generated, 5574384 distinct | Finished in 04min 57s at (2026-09-26 17:46:00)
+ForgeSyncRewindSkipsRetained         RECORDED  exp=RECORD                   | STOPPED 2026-09-26 19:45: no violation at 98,803,527 distinct states found, depth 35 (queue growing); dropped to free the box for Holds
+ForgeSyncRewindProbeCollected        OK-FOUND  exp=ProbeRewoundCollected    rc=12  | Invariant ProbeRewoundCollected is violated | 597688 states generated, 182735 distinct | Finished in 08s at (2026-09-26 19:39:25)
+ForgeSyncRewindProbeResurrected      OK-FOUND  exp=ProbeResurrected         rc=12  | Invariant ProbeResurrected is violated | 12657623 states generated, 3433090 distinct | Finished in 02min 58s at (2026-09-26 19:42:25)
+ForgeSyncRewindHolds                 MISMATCH  exp=HOLDS                    rc=12  | Invariant Inv_ProofNeverRestsOnRetention is violated | 1185622087 states generated, 242891987 distinct | Finished in 05h 08min at (2026-09-27 00:51:00)
+ForgeSyncRewindStrict DEFERRED 2026-09-27: its slot went to the shipped ForgeSync gate
+FORGEREWINDDONE

@@ -703,7 +703,7 @@ pub async fn commit(sc: &mut Syncer, res: FoldResult, now: u64) -> ForgeResult<O
     // pushes — but the commit retains its inputs and the ledger sweep
     // then deletes from the bucket packs the true holder still names.
     // One conditional PUT per fold, never per push.
-    lease::renew(sc).await?;
+    let renewed = lease::renew(sc).await?;
     let cell = sc.cell()?.clone();
     let f = res.pack.clone();
     let stem_of = |p: &str| p.trim_end_matches(".pack").to_string();
@@ -831,7 +831,7 @@ pub async fn commit(sc: &mut Syncer, res: FoldResult, now: u64) -> ForgeResult<O
     batch::carry_pending(sc, &mut next);
     let epoch = sc.lease()?.epoch;
     let writer = sc.holder_id.clone();
-    let new_cell = match snapshot::cas(sc.store.as_ref(), &sc.cfg, &cell, next.clone(), epoch, &writer).await {
+    let new_cell = match snapshot::cas(sc.store.as_ref(), &sc.cfg, &cell, next.clone(), epoch, &writer, renewed).await {
         Ok(c) => c,
         Err(ForgeError::Store(StoreError::PreconditionFailed(e))) => {
             return Err(sc.fence(format!(

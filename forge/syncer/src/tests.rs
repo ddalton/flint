@@ -373,7 +373,7 @@ async fn a_push_that_matches_the_local_ref_but_not_the_bucket_is_refused() {
     let mut next = cell.snap.clone();
     next.refs.insert("refs/heads/main".into(), other);
     let writer = rig.sc.holder_id.clone();
-    cell = snapshot::cas(rig.store.as_ref(), &rig.sc.cfg, &cell, next, 1, &writer).await.unwrap();
+    cell = snapshot::cas(rig.store.as_ref(), &rig.sc.cfg, &cell, next, 1, &writer, lease::Renewed::for_test()).await.unwrap();
     // The syncer still believes what it last read, but re-reads the
     // snapshot's refs at batch time through its own cell — so plant
     // the disagreement in the cell the way a restart would find it.
@@ -992,7 +992,7 @@ async fn a_lost_renew_response_is_adopted_rather_than_fenced() {
         .epoch_renew(&rig.sc.cfg.epoch_key(), &lease_before, None)
         .await
         .expect("renew");
-    lease::renew(&mut rig.sc).await.expect("a lost response must be adopted");
+    let _renewed = lease::renew(&mut rig.sc).await.expect("a lost response must be adopted");
     assert!(rig.sc.fenced().is_none());
     assert_eq!(rig.sc.lease().unwrap().epoch, lease_before.epoch);
     assert_ne!(rig.sc.lease().unwrap().token, lease_before.token);
@@ -3345,7 +3345,7 @@ async fn a_force_push_leaves_the_previous_state_recoverable_from_the_bucket() {
             next.packs.retain(|p| p != &c1_pack);
             let cell = rig.sc.cell().unwrap().clone();
             let epoch = rig.sc.lease().unwrap().epoch;
-            let c = snapshot::cas(rig.sc.store.as_ref(), &rig.sc.cfg, &cell, next, epoch, "test").await.unwrap();
+            let c = snapshot::cas(rig.sc.store.as_ref(), &rig.sc.cfg, &cell, next, epoch, "test", lease::Renewed::for_test()).await.unwrap();
             rig.sc.cell = Some(c);
             sweep::sweep(&mut rig.sc).await.expect("sweep");
             assert!(
@@ -3367,7 +3367,7 @@ async fn a_force_push_leaves_the_previous_state_recoverable_from_the_bucket() {
         next.packs.retain(|q| q != &c1_pack);
         let cell = rig.sc.cell().unwrap().clone();
         let epoch = rig.sc.lease().unwrap().epoch;
-        let c = snapshot::cas(rig.sc.store.as_ref(), &rig.sc.cfg, &cell, next, epoch, "test").await.unwrap();
+        let c = snapshot::cas(rig.sc.store.as_ref(), &rig.sc.cfg, &cell, next, epoch, "test", lease::Renewed::for_test()).await.unwrap();
         rig.sc.cell = Some(c);
         sweep::sweep(&mut rig.sc).await.expect("sweep");
         rig.store
@@ -3473,7 +3473,7 @@ async fn an_undo_point_expires_before_its_packs_do() {
     next.packs.retain(|q| q != &c1_pack);
     let cell = rig.sc.cell().unwrap().clone();
     let epoch = rig.sc.lease().unwrap().epoch;
-    let c = snapshot::cas(rig.sc.store.as_ref(), &rig.sc.cfg, &cell, next, epoch, "test").await.unwrap();
+    let c = snapshot::cas(rig.sc.store.as_ref(), &rig.sc.cfg, &cell, next, epoch, "test", lease::Renewed::for_test()).await.unwrap();
     rig.sc.cell = Some(c);
     sweep::sweep(&mut rig.sc).await.unwrap();
     rig.store.head(&point_key).await.expect("the point stands");
@@ -6321,7 +6321,7 @@ async fn d4_shape(rig: &mut Rig) -> Vec<String> {
     let epoch = rig.sc.lease().expect("lease").epoch;
     let writer = rig.sc.holder_id.clone();
     let new_cell =
-        snapshot::cas(rig.sc.store.as_ref(), &rig.sc.cfg, &cell, next, epoch, &writer)
+        snapshot::cas(rig.sc.store.as_ref(), &rig.sc.cfg, &cell, next, epoch, &writer, lease::Renewed::for_test())
             .await
             .expect("cas");
     rig.sc.cell = Some(new_cell);

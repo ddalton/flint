@@ -1,4 +1,20 @@
------------------------------- MODULE ForgeSync ------------------------------
+--------------------------- MODULE ForgeSyncNeeded ---------------------------
+(***************************************************************************)
+(* SANDBOX (2026-09-26): ForgeSync.tla with ONE change of naming rule,     *)
+(* NameNeeded — a batch names what its push NEEDS: the local packs holding *)
+(* an object of the new tip that no named pack holds (in the code: `rev-  *)
+(* list --objects <new tips> --not <snapshot tips>`, then the packs whose  *)
+(* index holds one).  It is derived from git and the snapshot at the      *)
+(* batch, so there is no hook record to lose and no fallback (D5's), and  *)
+(* no directory listing whose retained packs must be subtracted (F6).     *)
+(* The question: with nothing named that no ref reaches                   *)
+(* (Inv_NamedIsLanded), is the REACHABLE supersede rule (the refuted      *)
+(* FoldReachableCoverage) safe while serving?  If so the whole direction-4 *)
+(* reclaim family is unnecessary for a refused push's residue.  The       *)
+(* teeth: NeededNamesQueued, the rev-list taken over a QUEUED push's tip  *)
+(* too (a multi-push batch's) — its pack named before its ref moves, the  *)
+(* runcd gap.  Everything else is ForgeSync.tla as of 6cc4a70c.            *)
+(***************************************************************************)
 (***************************************************************************)
 (* flint forge's push path: hook -> batch -> pack upload -> ONE snapshot   *)
 (* CAS -> ref update -> acknowledgement, with a crash at every step; the   *)
@@ -181,7 +197,9 @@ CONSTANTS
   ForgetPushPack,       \* mutation: direction 5 without the push->pack mapping
   ProveFromDisk,        \* mutation: a proof is taken over the object DIRECTORY, not the named packs (F2)
   ListingKeepsRetained, \* mutation: a batch lists the packs retention holds on disk
-  GraceOutlivesUpload   \* the grace axiom; FALSE is lean's RacyGrace mutation
+  GraceOutlivesUpload,  \* the grace axiom; FALSE is lean's RacyGrace mutation
+  NameNeeded,           \* SANDBOX: a batch names what its push needs (overrides the two above)
+  NeededNamesQueued     \* SANDBOX mutation: the need is taken over the queued pushes' tips too
 
 Stages == {"none", "judged", "renewed", "hashed", "initiated", "uploaded",
            "cas", "refs"}
@@ -765,35 +783,30 @@ Listing(s) == (IF ListingKeepsRetained THEN localPacks[s]
 (* Inv_LandedPackComplete is the question, and the mutation below is the   *)
 (* teeth: keep the rule and LOSE the mapping.                              *)
 (***************************************************************************)
-\*
-\* THE RECORD CAN BE LOST (2026-09-27, the shipped shape). The hook's
-\* record is written and read with errors swallowed (hook.rs), so a
-\* batch may find no record for its push; the code then names the
-\* DIRECTORY for that push (batch.rs, the per-push fallback of
-\* 4af0f309). Before this the model had no fallback, so with the
-\* accepted set on, the directory listing was unreachable here and live
-\* in the code.  `ForgetPushPack` is now its mutation: a lost record goes
-\* unnoticed and the push's pack is named by nothing.
-AcceptedListing(s, lost) ==
+AcceptedListing(s) ==
   LET kept == belief[s].packs \ retained[s] IN
-  \* A recorded pack is added only if the LISTING has it (batch.rs:
-  \* `recorded.filter(on_disk)`, and `listed_packs` leaves out what
-  \* retention holds).  Before the fallback a push's own pack could never
-  \* be retained, so the unconditional `{batch[s].push}` this replaced was
-  \* the same set; with it, a lost record names a QUEUED push's pack early,
-  \* a fold supersedes it, and its own batch then re-named the retained
-  \* pack, which the code never does (2026-09-27, the rebase's first
-  \* smoke: Inv_NamedIsUploaded).
-  IF ~lost THEN kept \cup ({batch[s].push} \cap (localPacks[s] \ retained[s]))
-  ELSE IF ForgetPushPack THEN kept ELSE Listing(s)
+  IF ForgetPushPack THEN kept ELSE kept \cup {batch[s].push}
+
+\* SANDBOX: NAME WHAT IS NEEDED.  What the snapshot already names, plus
+\* every pack on the DISK (retention included: nothing is subtracted)
+\* holding a pushed object no named pack holds.  History is linear, so
+\* the tip's ancestors have landed and are held (Inv_LandedPackComplete);
+\* the new objects are the push's own.  The mutation takes the tips of
+\* every push queued here as well.
+NeededListing(s) ==
+  LET kept == belief[s].packs
+      have == UNION {holds[q] : q \in kept}
+      tips == {batch[s].push} \cup (IF NeededNamesQueued THEN Queued(s) ELSE {})
+      need == tips \ have IN
+  kept \cup {q \in localPacks[s] : holds[q] \cap need # {}}
 
 \* The checksum pass over every pack above the whole-PUT ceiling: real
 \* work; it ticks progress only in the fixed tree.
 BatchHash(s) ==
   /\ st[s] = "pushing" /\ batch[s].stage = "renewed"
-  /\ \E lost \in (IF NameAcceptedSet THEN BOOLEAN ELSE {FALSE}) :
-       batch' = [batch EXCEPT ![s].stage = "hashed",
-                   ![s].listed = IF NameAcceptedSet THEN AcceptedListing(s, lost) ELSE Listing(s)]
+  /\ batch' = [batch EXCEPT ![s].stage = "hashed",
+                 ![s].listed = IF NameNeeded THEN NeededListing(s)
+                               ELSE IF NameAcceptedSet THEN AcceptedListing(s) ELSE Listing(s)]
   /\ realMoved' = [realMoved EXCEPT ![s] = TRUE]
   /\ sensorMoved' = [sensorMoved EXCEPT ![s] = @ \/ TickOnHash]
   /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease,
@@ -1513,6 +1526,14 @@ Inv_ProofIsOfTheBucket          == ~provedOffBucket
 \* above and checked separately, because TLC reaches that one by a
 \* shorter route (see Checkpoint).
 Inv_ProofNeverRestsOnRetention  == ~provedOverRetained
+
+\* SANDBOX: NOTHING NAMED THAT NO REF REACHES.  History is linear and
+\* fast-forward only, so "reached" is "landed".  Where it holds, a pack's
+\* reachable content IS its content, the reachable supersede rule and the
+\* strict one choose the same inputs, and a refused push's residue is
+\* never named — the pinning directions 1, 4 and 5 were built against
+\* cannot arise.
+Inv_NamedIsLanded == \A q \in snap.packs : holds[q] \subseteq snap.history
 
 Inv_NoSkipOverMovement          == ~skipOverMovement
 Inv_NoRenewOverWedge            == ~renewOverWedge

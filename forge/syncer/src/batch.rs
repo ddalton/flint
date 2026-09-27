@@ -366,7 +366,7 @@ pub async fn run_batch(
     }
 
     // ── step 3: one lease renewal for the batch ──────────────────────
-    lease::renew(sc).await?;
+    let renewed = lease::renew(sc).await?;
 
     // ── step 4: upload every pack the bucket does not have ───────────
     // The listing minus what a fold superseded and retention keeps on
@@ -511,7 +511,7 @@ pub async fn run_batch(
     let writer = sc.holder_id.clone();
     let want_seq = cell.snap.seq + 1;
     let new_cell =
-        match snapshot::cas(sc.store.as_ref(), &sc.cfg, &cell, next, epoch, &writer).await {
+        match snapshot::cas(sc.store.as_ref(), &sc.cfg, &cell, next, epoch, &writer, renewed).await {
             Ok(c) => c,
             Err(ForgeError::Store(flint_store::StoreError::PreconditionFailed(e))) => {
                 // Under the writer lock this cannot be a concurrent

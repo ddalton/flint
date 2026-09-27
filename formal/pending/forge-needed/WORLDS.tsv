@@ -1,0 +1,6 @@
+ForgeSyncNeededHolds	HOLDS
+ForgeSyncNeededReachable	HOLDS
+ForgeSyncNeededQueuedReachable	Inv_LandedPackComplete
+ForgeSyncNeededQueuedNamed	Inv_NamedIsLanded
+ForgeSyncNeededDirectoryNamed	Inv_NamedIsLanded
+ForgeSyncNeededDirectoryReachable	Inv_LandedPackComplete

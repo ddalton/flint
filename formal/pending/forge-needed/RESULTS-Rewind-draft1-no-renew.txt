@@ -1,0 +1,4 @@
+ForgeSyncRewindTrustsDisk            MISMATCH  exp=Inv_LandedPackComplete   rc=12  | Invariant Inv_NoStragglerLandAfterRestore is violated | 1066388 states generated, 311915 distinct | Finished in 16s at (2026-09-26 17:35:32)
+ForgeSyncRewindSkipsRetained         RECORDED  exp=RECORD                   rc=12  | Invariant Inv_NoStragglerLandAfterRestore is violated | 1137402 states generated, 331962 distinct | Finished in 16s at (2026-09-26 17:35:49)
+ForgeSyncRewindProbeCollected        OK-FOUND  exp=ProbeRewoundCollected    rc=12  | Invariant ProbeRewoundCollected is violated | 589097 states generated, 180260 distinct | Finished in 09s at (2026-09-26 17:35:59)
+STOPPED 2026-09-26: model defect in Rewind (straggler); see below

@@ -1,0 +1,6 @@
+ForgeSyncRewindHolds	HOLDS
+ForgeSyncRewindStrict	HOLDS
+ForgeSyncRewindTrustsDisk	Inv_LandedPackComplete
+ForgeSyncRewindSkipsRetained	RECORD
+ForgeSyncRewindProbeCollected	ProbeRewoundCollected
+ForgeSyncRewindProbeResurrected	ProbeResurrected

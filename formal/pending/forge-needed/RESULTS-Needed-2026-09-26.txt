@@ -1,0 +1,7 @@
+ForgeSyncNeededQueuedReachable       OK-FOUND  exp=Inv_LandedPackComplete   rc=12  | Invariant Inv_LandedPackComplete is violated | 9805760 states generated, 2723422 distinct | Finished in 02min 13s at (2026-09-26 16:33:16)
+ForgeSyncNeededQueuedNamed           OK-FOUND  exp=Inv_NamedIsLanded        rc=12  | Invariant Inv_NamedIsLanded is violated | 34878 states generated, 12967 distinct | Finished in 02s at (2026-09-26 16:33:18)
+ForgeSyncNeededDirectoryNamed        OK-FOUND  exp=Inv_NamedIsLanded        rc=12  | Invariant Inv_NamedIsLanded is violated | 34866 states generated, 13028 distinct | Finished in 02s at (2026-09-26 16:33:21)
+ForgeSyncNeededDirectoryReachable    OK-FOUND  exp=Inv_LandedPackComplete   rc=12  | Invariant Inv_LandedPackComplete is violated | 6874526 states generated, 1909780 distinct | Finished in 01min 37s at (2026-09-26 16:34:58)
+ForgeSyncNeededHolds                 OK-HOLDS  exp=HOLDS                    rc=0   |  | 115995536 states generated, 25203710 distinct | Finished in 29min 05s at (2026-09-26 17:04:04)
+ForgeSyncNeededReachable             OK-HOLDS  exp=HOLDS                    rc=0   |  | 115995536 states generated, 25203710 distinct | Finished in 29min 14s at (2026-09-26 17:33:20)
+FORGENEEDEDDONE

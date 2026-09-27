@@ -557,13 +557,13 @@ async fn reclaim_inner(sc: &mut Syncer) -> ForgeResult<ReclaimReport> {
     // (`Inv_NoStragglerLandAfterRestore`; review 2026-09-23, pinned by
     // `a_deposed_holders_reclaim_is_refused_by_its_renewal`).
     sc.check_fence()?;
-    super::lease::renew(sc).await?;
+    let renewed = super::lease::renew(sc).await?;
     let epoch = sc.lease()?.epoch;
     let writer = sc.holder_id.clone();
     let mut next = cell.snap.clone();
     next.packs.retain(|p| !drop.contains(p));
     let new_cell =
-        snapshot::cas(sc.store.as_ref(), &sc.cfg, &cell, next, epoch, &writer).await?;
+        snapshot::cas(sc.store.as_ref(), &sc.cfg, &cell, next, epoch, &writer, renewed).await?;
     sc.cell = Some(new_cell);
 
     // Only now, and NOT into `retained`: a retained pack is excluded

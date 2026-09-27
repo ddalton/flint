@@ -127,12 +127,26 @@ pub async fn load(store: &dyn ObjectStore, cfg: &ForgeConfig) -> ForgeResult<Cel
     }
 }
 
-/// Replace the snapshot, guarded on the etag this holder last saw.
+/// Replace the snapshot, guarded on the etag this holder last saw, and
+/// only with a renewal in hand (`lease::Renewed`: the etag alone lets a
+/// deposed holder that read its successor's snapshot land).
 ///
 /// The caller passes the NEXT snapshot; `seq`, `epoch`, `writer` and
 /// `unix` are stamped here so no call site can forget the bump that
 /// makes a rotation's bytes differ.
 pub async fn cas(
+    store: &dyn ObjectStore,
+    cfg: &ForgeConfig,
+    cell: &Cell,
+    next: Snapshot,
+    epoch: u64,
+    writer: &str,
+    _renewed: super::lease::Renewed,
+) -> ForgeResult<Cell> {
+    write(store, cfg, cell, next, epoch, writer).await
+}
+
+async fn write(
     store: &dyn ObjectStore,
     cfg: &ForgeConfig,
     cell: &Cell,
@@ -193,7 +207,9 @@ pub async fn rotate_for_takeover(
 ) -> ForgeResult<Cell> {
     let cell = load(store, cfg).await?;
     let next = cell.snap.clone();
-    match cas(store, cfg, &cell, next, epoch, writer).await {
+    // The one CAS with no `Renewed`: the claim this follows took the
+    // cell at `epoch` a moment ago, and that is the check a renewal is.
+    match write(store, cfg, &cell, next, epoch, writer).await {
         Ok(c) => {
             // A rotation moves the seq without moving anything else. A
             // follower needs the entry all the same: without it the

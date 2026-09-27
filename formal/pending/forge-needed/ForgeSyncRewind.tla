@@ -1,4 +1,35 @@
------------------------------- MODULE ForgeSync ------------------------------
+--------------------------- MODULE ForgeSyncRewind ---------------------------
+(***************************************************************************)
+(* SANDBOX (2026-09-26): ForgeSyncNeeded.tla with REF REWINDS.  The ref    *)
+(* may move to a proper ancestor or be deleted (a force-push, a reset, a   *)
+(* branch delete), so what the ref REACHES (`snap.history`, now the        *)
+(* reachable set) can shrink and a named pack can hold objects no ref      *)
+(* reaches without any refusal.  And a rewound commit can come BACK: the   *)
+(* client re-pushes it, sending what the server does not advertise, which *)
+(* is a pack of the same content and so the SAME NAME (names are many-to- *)
+(* one) — possibly still on the disk as a retained pack.  The question:    *)
+(* with NameNeeded, is the reachable supersede (FoldReachableCoverage)     *)
+(* safe while serving once reachable and landed differ?  If so direction  *)
+(* 4's reclaim family is not needed for a force-push's garbage either.     *)
+(* Not modelled: undo points (X15), which pin a force-push's packs for a   *)
+(* while — only more pinning, so leaving them out is the stricter world.  *)
+(***************************************************************************)
+(***************************************************************************)
+(* SANDBOX (2026-09-26): ForgeSync.tla with ONE change of naming rule,     *)
+(* NameNeeded — a batch names what its push NEEDS: the local packs holding *)
+(* an object of the new tip that no named pack holds (in the code: `rev-  *)
+(* list --objects <new tips> --not <snapshot tips>`, then the packs whose  *)
+(* index holds one).  It is derived from git and the snapshot at the      *)
+(* batch, so there is no hook record to lose and no fallback (D5's), and  *)
+(* no directory listing whose retained packs must be subtracted (F6).     *)
+(* The question: with nothing named that no ref reaches                   *)
+(* (Inv_NamedIsLanded), is the REACHABLE supersede rule (the refuted      *)
+(* FoldReachableCoverage) safe while serving?  If so the whole direction-4 *)
+(* reclaim family is unnecessary for a refused push's residue.  The       *)
+(* teeth: NeededNamesQueued, the rev-list taken over a QUEUED push's tip  *)
+(* too (a multi-push batch's) — its pack named before its ref moves, the  *)
+(* runcd gap.  Everything else is ForgeSync.tla as of 6cc4a70c.            *)
+(***************************************************************************)
 (***************************************************************************)
 (* flint forge's push path: hook -> batch -> pack upload -> ONE snapshot   *)
 (* CAS -> ref update -> acknowledgement, with a crash at every step; the   *)
@@ -181,7 +212,13 @@ CONSTANTS
   ForgetPushPack,       \* mutation: direction 5 without the push->pack mapping
   ProveFromDisk,        \* mutation: a proof is taken over the object DIRECTORY, not the named packs (F2)
   ListingKeepsRetained, \* mutation: a batch lists the packs retention holds on disk
-  GraceOutlivesUpload   \* the grace axiom; FALSE is lean's RacyGrace mutation
+  GraceOutlivesUpload,  \* the grace axiom; FALSE is lean's RacyGrace mutation
+  NameNeeded,           \* SANDBOX: a batch names what its push needs (overrides the two above)
+  NeededNamesQueued,    \* SANDBOX mutation: the need is taken over the queued pushes' tips too
+  MaxRewinds,           \* REWIND: ref moves to a proper ancestor, or deletes
+  MaxResends,           \* REWIND: re-pushes of a commit no ref reaches
+  NeededTrustsDisk,     \* REWIND mutation: a need no local pack holds is not an error
+  NeededSkipsRetained   \* REWIND mutation: the need is looked for outside retention only (F6's subtraction)
 
 Stages == {"none", "judged", "renewed", "hashed", "initiated", "uploaded",
            "cas", "refs"}
@@ -223,14 +260,21 @@ VARIABLES
   crashes, renewBudget, claimBudget,
   ackNotDurable, skipOverMovement,
   stragglerLand, unrestorable, toldFailedButDurable, renewOverWedge,
-  provedOffBucket, provedOverRetained
+  provedOffBucket, provedOverRetained,
+  \* ── REWIND ──
+  anc,          \* [Pushes -> SUBSET Pushes] what a commit reaches ({} = never landed)
+  par,          \* [Pushes -> PushIds] its parent: the tip it first landed on
+  rewound,      \* pushes a rewind took off the ref (acked ones may go)
+  rewindBudget, resendBudget,
+  resurrected   \* witness: a re-push landed while nothing named held it
 
+RW == <<anc, par, rewound, rewindBudget, resendBudget, resurrected>>
 vars == <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease, lastTok,
           quiet, belief, localMain, localPacks, migrating, batch, sensorMoved,
           realMoved, hbDue, pushState, pushTo, holds, fold, foldBudget,
           crashes, renewBudget, claimBudget, ackNotDurable, skipOverMovement,
           stragglerLand, unrestorable, toldFailedButDurable, renewOverWedge,
-          retained, provedOffBucket, provedOverRetained>>
+          retained, provedOffBucket, provedOverRetained, RW>>
 
 NoBatch   == [push |-> 0, stage |-> "none", listed |-> {}]
 ZeroLease == [ep |-> 0, tok |-> 0]
@@ -258,6 +302,9 @@ TypeOK ==
   /\ migrating \in [Syncers -> SUBSET Pushes]
   /\ batch \in [Syncers -> [push: PushIds, stage: Stages, listed: SUBSET PackIds]]
   /\ holds \in [PackIds -> SUBSET Pushes]
+  /\ anc \in [Pushes -> SUBSET Pushes] /\ par \in [Pushes -> PushIds]
+  /\ rewound \subseteq Pushes /\ rewindBudget \in 0..MaxRewinds
+  /\ resendBudget \in 0..MaxResends /\ resurrected \in BOOLEAN
   /\ fold \in [Syncers -> [id: FoldIds \cup {0}, inputs: SUBSET PackIds, stage: FoldStages,
                           base: BOOLEAN, at: SUBSET Pushes, atRest: BOOLEAN]]
   /\ foldBudget \in 0..MaxFolds
@@ -297,6 +344,9 @@ Init ==
   /\ stragglerLand = FALSE
   /\ unrestorable = FALSE /\ toldFailedButDurable = FALSE
   /\ renewOverWedge = FALSE
+  /\ anc = [p \in Pushes |-> {}] /\ par = [p \in Pushes |-> 0]
+  /\ rewound = {} /\ rewindBudget = MaxRewinds /\ resendBudget = MaxResends
+  /\ resurrected = FALSE
 
 Witnesses == <<ackNotDurable, skipOverMovement, stragglerLand, unrestorable,
                toldFailedButDurable, renewOverWedge, provedOffBucket,
@@ -307,7 +357,7 @@ Witnesses == <<ackNotDurable, skipOverMovement, stragglerLand, unrestorable,
 \* already named `Witnesses`.
 Untouched == <<Witnesses, retained>>
 \* What no action but the plan changes.
-FoldPlanVars == <<holds, foldBudget>>
+FoldPlanVars == <<holds, foldBudget, RW>>
 Bucket    == <<cell, nextTok, snap, packObj, idxObj, uploads>>
 Client    == <<pushState, pushTo>>
 Budgets   == <<crashes, renewBudget, claimBudget>>
@@ -666,6 +716,10 @@ ClientHangup(p) ==
 Queued(s) == {p \in Pushes : pushState[p] # "new" /\ pushTo[p] = s
                              /\ p \in localPacks[s]
                              /\ p \notin snap.history
+                             \* REWIND: an answered push a rewind took off the
+                             \* ref is not waiting for anything; only a re-push
+                             \* (sent again) is.
+                             /\ (p \notin rewound \/ pushState[p] = "sent")
                              /\ batch[s].push # p}
 
 \* Step 2: the judgement under the agreed view.  A ref the bucket and the
@@ -675,7 +729,11 @@ Queued(s) == {p \in Pushes : pushState[p] # "new" /\ pushTo[p] = s
 BatchStart(s) ==
   /\ st[s] = "serving" /\ batch[s].stage = "none"
   /\ \E p \in Queued(s) :
-       IF localMain[s] # belief[s].main
+       IF \/ localMain[s] # belief[s].main
+          \* REWIND: a commit that landed before is a fast-forward only
+          \* onto the tip it first landed on (a force-push the door
+          \* refuses is a refusal like any other).
+          \/ (anc[p] # {} /\ par[p] # localMain[s])
          THEN /\ pushState' = [pushState EXCEPT ![p] =
                                  IF @ = "sent" THEN "failed" ELSE @]
               /\ UNCHANGED <<st, batch, sensorMoved, realMoved>>
@@ -765,41 +823,50 @@ Listing(s) == (IF ListingKeepsRetained THEN localPacks[s]
 (* Inv_LandedPackComplete is the question, and the mutation below is the   *)
 (* teeth: keep the rule and LOSE the mapping.                              *)
 (***************************************************************************)
-\*
-\* THE RECORD CAN BE LOST (2026-09-27, the shipped shape). The hook's
-\* record is written and read with errors swallowed (hook.rs), so a
-\* batch may find no record for its push; the code then names the
-\* DIRECTORY for that push (batch.rs, the per-push fallback of
-\* 4af0f309). Before this the model had no fallback, so with the
-\* accepted set on, the directory listing was unreachable here and live
-\* in the code.  `ForgetPushPack` is now its mutation: a lost record goes
-\* unnoticed and the push's pack is named by nothing.
-AcceptedListing(s, lost) ==
+AcceptedListing(s) ==
   LET kept == belief[s].packs \ retained[s] IN
-  \* A recorded pack is added only if the LISTING has it (batch.rs:
-  \* `recorded.filter(on_disk)`, and `listed_packs` leaves out what
-  \* retention holds).  Before the fallback a push's own pack could never
-  \* be retained, so the unconditional `{batch[s].push}` this replaced was
-  \* the same set; with it, a lost record names a QUEUED push's pack early,
-  \* a fold supersedes it, and its own batch then re-named the retained
-  \* pack, which the code never does (2026-09-27, the rebase's first
-  \* smoke: Inv_NamedIsUploaded).
-  IF ~lost THEN kept \cup ({batch[s].push} \cap (localPacks[s] \ retained[s]))
-  ELSE IF ForgetPushPack THEN kept ELSE Listing(s)
+  IF ForgetPushPack THEN kept ELSE kept \cup {batch[s].push}
+
+\* SANDBOX: NAME WHAT IS NEEDED.  What the snapshot already names, plus
+\* every pack on the DISK (retention included: nothing is subtracted)
+\* holding a pushed object no named pack holds.  History is linear, so
+\* the tip's ancestors have landed and are held (Inv_LandedPackComplete);
+\* the new objects are the push's own.  The mutation takes the tips of
+\* every push queued here as well.
+NeededListing(s) ==
+  LET kept == belief[s].packs
+      have == UNION {holds[q] : q \in kept}
+      tips == {batch[s].push} \cup (IF NeededNamesQueued THEN Queued(s) ELSE {})
+      need == tips \ have IN
+  kept \cup {q \in (IF NeededSkipsRetained THEN localPacks[s] \ retained[s]
+                  ELSE localPacks[s]) : holds[q] \cap need # {}}
 
 \* The checksum pass over every pack above the whole-PUT ceiling: real
 \* work; it ticks progress only in the fixed tree.
 BatchHash(s) ==
   /\ st[s] = "pushing" /\ batch[s].stage = "renewed"
-  /\ \E lost \in (IF NameAcceptedSet THEN BOOLEAN ELSE {FALSE}) :
-       batch' = [batch EXCEPT ![s].stage = "hashed",
-                   ![s].listed = IF NameAcceptedSet THEN AcceptedListing(s, lost) ELSE Listing(s)]
-  /\ realMoved' = [realMoved EXCEPT ![s] = TRUE]
-  /\ sensorMoved' = [sensorMoved EXCEPT ![s] = @ \/ TickOnHash]
-  /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease,
-                 lastTok, quiet, belief, localMain, localPacks, migrating,
-                 hbDue, pushState, pushTo, crashes, renewBudget, claimBudget>>
-  /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Untouched
+  /\ LET l == IF NameNeeded THEN NeededListing(s)
+              ELSE IF NameAcceptedSet THEN AcceptedListing(s) ELSE Listing(s) IN
+     \* REWIND: the need is computed by `rev-list --objects`, which FAILS on
+     \* an object the disk does not have (retention's unlink can take a
+     \* re-pushed pack of the same name after the door accepted it).  The
+     \* batch errors, every push in it is told ng, the process exits.
+     IF NameNeeded /\ ~NeededTrustsDisk
+        /\ batch[s].push \notin UNION {holds[q] : q \in l}
+       THEN /\ Fall(s)
+            /\ UNCHANGED retained
+       ELSE /\ batch' = [batch EXCEPT ![s].stage = "hashed", ![s].listed = l]
+            \* REWIND: a pack a batch names leaves retention (a re-pushed
+            \* commit's pack may still be on the disk, retained): named
+            \* again, it is no longer on its way out.
+            /\ retained' = IF NameNeeded THEN [retained EXCEPT ![s] = @ \ l] ELSE retained
+            /\ realMoved' = [realMoved EXCEPT ![s] = TRUE]
+            /\ sensorMoved' = [sensorMoved EXCEPT ![s] = @ \/ TickOnHash]
+            /\ UNCHANGED <<st, lease, quiet, pushState, fold>>
+  /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads,
+                 lastTok, belief, localMain, localPacks, migrating,
+                 hbDue, pushTo, crashes, renewBudget, claimBudget>>
+  /\ UNCHANGED FoldPlanVars /\ UNCHANGED Witnesses
 
 ToUpload(s) == batch[s].listed \ belief[s].packs
 
@@ -855,8 +922,15 @@ BatchCas(s) ==
   /\ st[s] = "pushing" /\ CasReady(s)
   /\ LET p == batch[s].push IN
      IF snap.etag = belief[s].etag
-       THEN /\ snap' = [etag |-> nextTok, main |-> p,
-                        packs |-> batch[s].listed, history |-> snap.history \cup {p}]
+       THEN \* REWIND: a commit landing AGAIN reaches what it reached the
+            \* first time (the judge made it a fast-forward onto its parent).
+            /\ LET h == IF anc[p] = {} THEN snap.history \cup {p} ELSE anc[p] IN
+                 /\ snap' = [etag |-> nextTok, main |-> p,
+                              packs |-> batch[s].listed, history |-> h]
+                 /\ anc' = [anc EXCEPT ![p] = h]
+            /\ par' = IF anc[p] = {} THEN [par EXCEPT ![p] = snap.main] ELSE par
+            /\ rewound' = rewound \ {p}
+            /\ resurrected' = (resurrected \/ (anc[p] # {} /\ ~\E q \in snap.packs : p \in holds[q]))
             /\ nextTok' = nextTok + 1
             /\ belief' = [belief EXCEPT ![s] =
                             [etag |-> nextTok, main |-> p, packs |-> batch[s].listed]]
@@ -866,14 +940,14 @@ BatchCas(s) ==
             /\ stragglerLand' = (stragglerLand \/ SuccessorRestored(s))
             /\ UNCHANGED <<st, lease, fold, pushState, quiet>>
        ELSE /\ Fall(s)
-            /\ UNCHANGED <<snap, nextTok, belief, stragglerLand>>
+            /\ UNCHANGED <<snap, nextTok, belief, stragglerLand, anc, par, rewound, resurrected>>
   /\ UNCHANGED <<cell, packObj, idxObj, uploads, lastTok, localMain, localPacks,
                  migrating, hbDue, pushTo, crashes, renewBudget, claimBudget,
                  ackNotDurable, skipOverMovement,
                  unrestorable, toldFailedButDurable, renewOverWedge,
                  retained, provedOffBucket,
                  provedOverRetained>>
-  /\ UNCHANGED FoldPlanVars
+  /\ UNCHANGED <<holds, foldBudget, rewindBudget, resendBudget>>
 
 \* The reversed ordering (mutation): packs go up AFTER the CAS named them.
 BatchLateUpload(s) ==
@@ -999,7 +1073,7 @@ FoldPlan(s) ==
   /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease,
                  lastTok, quiet, belief, localMain, localPacks, migrating,
                  batch, sensorMoved, realMoved, hbDue, pushState, pushTo,
-                 crashes, renewBudget, claimBudget>>
+                 crashes, renewBudget, claimBudget, RW>>
   /\ UNCHANGED Untouched
 
 \* The task's upload, through the multipart path: initiated, then
@@ -1148,7 +1222,7 @@ FoldAbandon(s) ==
   /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease,
                  lastTok, quiet, belief, localMain, localPacks, migrating,
                  batch, sensorMoved, realMoved, hbDue, pushState, pushTo,
-                 crashes, renewBudget, claimBudget, holds, foldBudget>>
+                 crashes, renewBudget, claimBudget, holds, foldBudget, RW>>
   /\ UNCHANGED Untouched
 
 FoldCommit(s) ==
@@ -1392,6 +1466,67 @@ SweepDelete(s) ==
                  claimBudget>>
   /\ UNCHANGED <<fold, FoldPlanVars>> /\ UNCHANGED Untouched
 
+(***************************************************************************)
+(* REWIND: the ref moves back, and a commit it left comes back.            *)
+(***************************************************************************)
+
+\* A rewind (force-push to an ancestor, reset, branch delete), as a batch
+\* with nothing to upload: judged, RENEWED, one CAS naming what the
+\* snapshot named, the ref moved.  Collapsed to one step — no pack is
+\* involved, and the gap between a renewal and its CAS is the batch's,
+\* which the module has.  The renewal is NOT optional: the first draft
+\* left it out and a deposed holder, restored onto the successor's etag,
+\* rewound after the successor served (Inv_NoStragglerLandAfterRestore,
+\* 2026-09-26) — the FoldNoRenew class, made again in the model.
+Rewind(s) ==
+  /\ rewindBudget > 0
+  /\ cell.held /\ cell.holder = s /\ cell.tok = lease[s].tok
+  /\ st[s] = "serving" /\ batch[s].stage = "none"
+  /\ localMain[s] = belief[s].main /\ snap.main # 0
+  /\ snap.etag = belief[s].etag
+  /\ \E c \in (snap.history \ {snap.main}) \cup {0} :
+       LET h == IF c = 0 THEN {} ELSE anc[c] IN
+       /\ snap' = [snap EXCEPT !.etag = nextTok, !.main = c, !.history = h]
+       /\ belief' = [belief EXCEPT ![s].etag = nextTok, ![s].main = c]
+       /\ localMain' = [localMain EXCEPT ![s] = c]
+       /\ rewound' = rewound \cup (snap.history \ h)
+  \* the renewal and the CAS draw two values from the one counter
+  /\ cell' = [cell EXCEPT !.tok = nextTok + 1]
+  /\ lease' = [lease EXCEPT ![s].tok = nextTok + 1]
+  \* (bounded by MaxRewinds, so it does not draw on MaxRenews)
+  /\ nextTok' = nextTok + 2
+  /\ rewindBudget' = rewindBudget - 1
+  /\ realMoved' = [realMoved EXCEPT ![s] = TRUE]
+  /\ sensorMoved' = [sensorMoved EXCEPT ![s] = TRUE]
+  /\ stragglerLand' = (stragglerLand \/ SuccessorRestored(s))
+  /\ UNCHANGED <<packObj, idxObj, uploads, st, lastTok, quiet,
+                 localPacks, migrating, batch, hbDue, pushState, pushTo,
+                 crashes, renewBudget, claimBudget, fold, holds, foldBudget,
+                 anc, par, resendBudget, resurrected, retained,
+                 ackNotDurable, skipOverMovement, unrestorable,
+                 toldFailedButDurable, renewOverWedge, provedOffBucket,
+                 provedOverRetained>>
+
+\* A rewound commit pushed again.  The server does not advertise it, so
+\* the client sends its objects: a pack of the same content, hence the
+\* same NAME.  If retention still holds that pack on the disk, the new
+\* one lands on top of it and the directory is unchanged.
+PushResend(p, s) ==
+  /\ resendBudget > 0
+  /\ anc[p] # {} /\ p \notin snap.history
+  /\ pushState[p] \in {"acked", "failed"}
+  /\ st[s] \in {"serving", "pushing"}
+  /\ pushState' = [pushState EXCEPT ![p] = "sent"]
+  /\ pushTo' = [pushTo EXCEPT ![p] = s]
+  /\ migrating' = [migrating EXCEPT ![s] = @ \cup {p}]
+  /\ resendBudget' = resendBudget - 1
+  /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease,
+                 lastTok, quiet, belief, localMain, localPacks, batch,
+                 sensorMoved, realMoved, hbDue, crashes, renewBudget,
+                 claimBudget, fold, holds, foldBudget, anc, par, rewound,
+                 rewindBudget, resurrected>>
+  /\ UNCHANGED Untouched
+
 Next ==
   \/ \E s \in Syncers :
        \/ AcquireCreate(s) \/ SupersedeOwn(s) \/ ClaimReleased(s) \/ ObserveForeign(s)
@@ -1404,7 +1539,8 @@ Next ==
        \/ FoldRenew(s) \/ FoldCommit(s) \/ FoldAbandon(s)
        \/ SweepDelete(s) \/ Checkpoint(s) \/ UnlinkRetained(s)
        \/ CleanRelease(s) \/ Crash(s)
-       \/ \E p \in Pushes : PushSend(p, s) \/ IdxLand(s, p)
+       \/ \E p \in Pushes : PushSend(p, s) \/ IdxLand(s, p) \/ PushResend(p, s)
+       \/ Rewind(s)
   \/ \E p \in Pushes : ClientHangup(p)
 
 \* Protocol machinery is weakly fair; crashes, hangups and pushes are the
@@ -1467,7 +1603,7 @@ View == <<[cell EXCEPT !.tok = Rank(cell.tok)],
           crashes, renewBudget, claimBudget,
           ackNotDurable, skipOverMovement, stragglerLand, unrestorable,
           toldFailedButDurable, renewOverWedge, provedOffBucket,
-          provedOverRetained>>
+          provedOverRetained, RW>>
 
 (***************************************************************************)
 (* Theorems, and the probe.                                                *)
@@ -1484,8 +1620,15 @@ Durable(p) ==
 \* Told ok => in the bucket, with the pack complete.  Stated over the
 \* state rather than a witness so that a later transition (a rotation, a
 \* restore) cannot un-durable an acknowledged push either.
+\* REWIND: an acknowledged push a rewind took off the ref is released.
 Inv_AckedIsDurable ==
-  \A p \in Pushes : pushState[p] = "acked" => Durable(p)
+  \A p \in Pushes : pushState[p] = "acked" /\ p \notin rewound => Durable(p)
+
+\* Probes: each must be violated in the world it names.
+\* A rewound commit is held by nothing named (the reclaim collected it).
+ProbeRewoundCollected == ~\E p \in rewound : ~\E q \in snap.packs : p \in holds[q]
+\* A re-push landed while nothing named held it.
+ProbeResurrected == ~resurrected
 
 \* Every landed push's pack is in the bucket with its index — a restore
 \* can see its objects.
@@ -1513,6 +1656,14 @@ Inv_ProofIsOfTheBucket          == ~provedOffBucket
 \* above and checked separately, because TLC reaches that one by a
 \* shorter route (see Checkpoint).
 Inv_ProofNeverRestsOnRetention  == ~provedOverRetained
+
+\* SANDBOX: NOTHING NAMED THAT NO REF REACHES.  History is linear and
+\* fast-forward only, so "reached" is "landed".  Where it holds, a pack's
+\* reachable content IS its content, the reachable supersede rule and the
+\* strict one choose the same inputs, and a refused push's residue is
+\* never named — the pinning directions 1, 4 and 5 were built against
+\* cannot arise.
+Inv_NamedIsLanded == \A q \in snap.packs : holds[q] \subseteq snap.history
 
 Inv_NoSkipOverMovement          == ~skipOverMovement
 Inv_NoRenewOverWedge            == ~renewOverWedge
