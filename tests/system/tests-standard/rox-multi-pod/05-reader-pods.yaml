@@ -6,16 +6,17 @@ metadata:
     test: rox-reader
 spec:
   restartPolicy: Never
-  # Try to schedule on different nodes for true multi-node ROX testing
+  # REQUIRED, not preferred (F71): with `preferred` both readers land on
+  # one node of a one-node rig and the multi-node claim is tested by
+  # nothing. A rig with fewer than two schedulable nodes now fails at the
+  # assert below (a reader stays Pending) instead of passing vacuously.
   affinity:
     podAntiAffinity:
-      preferredDuringSchedulingIgnoredDuringExecution:
-        - weight: 100
-          podAffinityTerm:
-            labelSelector:
-              matchLabels:
-                test: rox-reader
-            topologyKey: kubernetes.io/hostname
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              test: rox-reader
+          topologyKey: kubernetes.io/hostname
   containers:
     - name: reader
       image: busybox:latest
@@ -43,16 +44,17 @@ metadata:
     test: rox-reader
 spec:
   restartPolicy: Never
-  # Try to schedule on different node than reader-pod-1
+  # REQUIRED, not preferred (F71): with `preferred` both readers land on
+  # one node of a one-node rig and the multi-node claim is tested by
+  # nothing. A rig with fewer than two schedulable nodes now fails at the
+  # assert below (a reader stays Pending) instead of passing vacuously.
   affinity:
     podAntiAffinity:
-      preferredDuringSchedulingIgnoredDuringExecution:
-        - weight: 100
-          podAffinityTerm:
-            labelSelector:
-              matchLabels:
-                test: rox-reader
-            topologyKey: kubernetes.io/hostname
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              test: rox-reader
+          topologyKey: kubernetes.io/hostname
   containers:
     - name: reader
       image: busybox:latest

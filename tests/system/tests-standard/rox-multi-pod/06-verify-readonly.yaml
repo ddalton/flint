@@ -1,22 +1,25 @@
 apiVersion: kuttl.dev/v1beta1
 kind: TestStep
+# F71 (2026-09-27): this step used to grep the readers' logs and attempt no
+# write, so it passed whether or not the volume was read-only. Each check
+# below can now FAIL, and says which claim it is about.
 commands:
   - command: |
-      echo "=== Verifying both pods can access ROX volume ==="
-      
-      # Verify data is readable from both pods
-      if kubectl logs reader-pod-1 | grep -q "ROX_TEST_DATA"; then
-        echo "✅ Reader pod 1 can read data"
-      else
-        echo "❌ Reader pod 1 cannot read data"
-        exit 1
-      fi
-      
-      if kubectl logs reader-pod-2 | grep -q "ROX_TEST_DATA"; then
-        echo "✅ Reader pod 2 can read data"
-      else
-        echo "❌ Reader pod 2 cannot read data"
-        exit 1
-      fi
-      
-      echo "✅ Both pods successfully reading from ROX PVC"
+      set -u
+      echo "=== 1. both readers read the snapshot's data ==="
+      for p in reader-pod-1 reader-pod-2; do
+        kubectl -n "$NAMESPACE" logs $p | grep -q "ROX_TEST_DATA" || { echo "FAIL: $p cannot read the data"; exit 1; }
+      done
+      echo "=== 2. the readers are on DIFFERENT nodes ==="
+      n1=$(kubectl -n "$NAMESPACE" get pod reader-pod-1 -o jsonpath='{.spec.nodeName}')
+      n2=$(kubectl -n "$NAMESPACE" get pod reader-pod-2 -o jsonpath='{.spec.nodeName}')
+      echo "reader-pod-1 on '$n1', reader-pod-2 on '$n2'"
+      [ -n "$n1" ] && [ "$n1" != "$n2" ] || { echo "FAIL: not multi-node ($n1 / $n2)"; exit 1; }
+      echo "=== 3. a write through a readOnly pod mount is refused ==="
+      for p in reader-pod-1 reader-pod-2; do
+        if kubectl -n "$NAMESPACE" exec $p -- sh -c 'echo F71 > /data/f71-readonly-probe' 2>/tmp/f71-err-$p; then
+          echo "FAIL: $p WROTE to the ROX volume"; exit 1
+        fi
+        echo "$p refused: $(cat /tmp/f71-err-$p | tr '\n' ' ')"
+      done
+      echo "PASS: readable from two nodes, and a readOnly mount refuses writes"

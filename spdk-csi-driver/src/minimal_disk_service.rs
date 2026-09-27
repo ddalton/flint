@@ -17,19 +17,63 @@ enum DiscoveryMode {
     All,
     /// Only discover SCSI/SATA devices (for testing)
     ScsiOnly,
+    /// Discover no physical device at all (kind mode, F73: a kind node
+    /// sees the HOST's PCI bus and `/dev`, and its storage is the malloc
+    /// virtual disk the spdk-tgt container creates)
+    None,
 }
 
 impl DiscoveryMode {
     fn from_env() -> Self {
-        match std::env::var("DEVICE_DISCOVERY_MODE")
-            .unwrap_or_else(|_| "nvme".to_string())
-            .to_lowercase()
-            .as_str()
-        {
+        Self::parse(&std::env::var("DEVICE_DISCOVERY_MODE").unwrap_or_else(|_| "nvme".to_string()))
+    }
+
+    fn parse(v: &str) -> Self {
+        match v.to_lowercase().as_str() {
             "all" => DiscoveryMode::All,
             "scsi" => DiscoveryMode::ScsiOnly,
+            "none" | "off" => DiscoveryMode::None,
             _ => DiscoveryMode::NvmeOnly,  // Default to existing behavior
         }
+    }
+}
+
+/// Whether the host is using a block device (F73).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HostHold {
+    /// The exclusive open succeeded: nothing mounts or holds it.
+    Free,
+    /// `EBUSY`: mounted, a dm/md/LVM member, or claimed by another
+    /// exclusive opener.
+    Held,
+    /// It could not be told (no device node, no permission): treated as
+    /// held — a disk whose use is unknown is not touched.
+    Unknown(String),
+}
+
+/// Ask the kernel, not a mount table: an `O_EXCL` open of a block device
+/// fails with `EBUSY` while it is mounted or held (open(2), "O_EXCL can be
+/// used without O_CREAT if pathname refers to a block device"). It works
+/// from inside a container, where the host's mounts are not visible. The
+/// descriptor is closed at once.
+fn host_holds_block_device(path: &str) -> HostHold {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+        match std::fs::metadata(path) {
+            Ok(m) if m.file_type().is_block_device() => {}
+            Ok(_) => return HostHold::Unknown(format!("{path} is not a block device")),
+            Err(e) => return HostHold::Unknown(format!("{path}: {e}")),
+        }
+        match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_EXCL).open(path) {
+            Ok(_) => HostHold::Free,
+            Err(e) if e.raw_os_error() == Some(libc::EBUSY) => HostHold::Held,
+            Err(e) => HostHold::Unknown(format!("{path}: {e}")),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        HostHold::Unknown(format!("{path}: exclusive-open probe is Linux-only"))
     }
 }
 
@@ -571,6 +615,10 @@ impl MinimalDiskService {
 
         // Discover devices based on mode
         let devices = match mode {
+            DiscoveryMode::None => {
+                info!("[AUTO_RECOVERY] Physical discovery is off (DEVICE_DISCOVERY_MODE=none)");
+                return Ok(());
+            }
             DiscoveryMode::NvmeOnly => {
                 // Existing path - no changes
                 self.discover_physical_nvme_devices().await?
@@ -905,6 +953,38 @@ impl MinimalDiskService {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_micros() as u32);
+
+        // F73: a disk the KERNEL drives may be the host's — mounted, root,
+        // an LVM member. Before it is unbound or opened by SPDK: keep a bdev
+        // SPDK already has for it (an agent restart beside a running
+        // target), and otherwise touch it only if an exclusive open says
+        // nothing holds it. `is_system_disk_physical` answers false for
+        // everything and is not trusted here.
+        let kernel_bound = matches!(device.driver.as_str(), "nvme" | "ahci" | "ata_piix")
+            || device.driver.contains("sata");
+        if kernel_bound {
+            let uring = format!("uring_{}", device.device_name);
+            let nvme_prefix = format!("nvme_{}", device.pci_address.replace(":", "_").replace(".", "_"));
+            let bdevs = self.get_spdk_bdevs().await?;
+            if let Some(name) = bdevs["result"].as_array().into_iter().flatten()
+                .filter_map(|b| b["name"].as_str())
+                .find(|n| *n == uring || n.starts_with(&nvme_prefix))
+            {
+                info!(correlation_id = %correlation_id, bdev_name = name, "[BDEV_RECOVERY] SPDK already has a bdev for this device");
+                return Ok(name.to_string());
+            }
+            let dev = format!("/dev/{}", device.device_name);
+            match host_holds_block_device(&dev) {
+                HostHold::Free => {}
+                hold => {
+                    warn!(correlation_id = %correlation_id, device = %dev, pci_address = %device.pci_address, hold = ?hold,
+                          "[BDEV_RECOVERY] The host is using this disk (or it cannot be told): not unbound, not opened");
+                    return Err(MinimalStateError::InternalError {
+                        message: format!("{dev} is in use by the host or its use cannot be told ({hold:?}); not touched")
+                    });
+                }
+            }
+        }
 
         // Check if this is an NVMe device (by device name pattern)
         let is_nvme_device = device.device_name.starts_with("nvme");
@@ -2197,6 +2277,59 @@ struct PhysicalDevice {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    /// F73: kind mode turns physical discovery off; everything else keeps
+    /// its meaning, and an unknown value still means NVMe.
+    #[test]
+    fn discovery_mode_none_turns_physical_discovery_off() {
+        assert_eq!(DiscoveryMode::parse("none"), DiscoveryMode::None);
+        assert_eq!(DiscoveryMode::parse("OFF"), DiscoveryMode::None);
+        assert_eq!(DiscoveryMode::parse("all"), DiscoveryMode::All);
+        assert_eq!(DiscoveryMode::parse("scsi"), DiscoveryMode::ScsiOnly);
+        assert_eq!(DiscoveryMode::parse("nvme"), DiscoveryMode::NvmeOnly);
+        assert_eq!(DiscoveryMode::parse("anything"), DiscoveryMode::NvmeOnly);
+    }
+
+    /// F73: the block device under `/` is mounted, so it must never read
+    /// as FREE. As root the exclusive open answers EBUSY (HELD); without
+    /// permission to open it the answer is UNKNOWN, which touches nothing
+    /// either. Skips only where `/` is not on a block device (an overlay
+    /// in a container).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_disk_under_root_is_never_free() {
+        let Some(dev) = root_block_device() else {
+            eprintln!("skipped: / is not on a block device here");
+            return;
+        };
+        let got = host_holds_block_device(&dev);
+        eprintln!("{dev}: {got:?}");
+        assert_ne!(got, HostHold::Free, "{dev} is mounted on / and read as free");
+        if unsafe { libc::geteuid() } == 0 {
+            assert_eq!(got, HostHold::Held, "as root, a mounted {dev} must be HELD");
+        }
+    }
+
+    /// F73: a disk whose use cannot be told is not touched.
+    #[test]
+    fn a_missing_device_is_unknown_not_free() {
+        assert!(matches!(
+            host_holds_block_device("/dev/flint-f73-no-such-device"),
+            HostHold::Unknown(_)
+        ));
+    }
+
+    /// The device mounted on `/`, as `/dev/<name>`, from mountinfo's
+    /// major:minor and sysfs's DEVNAME.
+    #[cfg(target_os = "linux")]
+    fn root_block_device() -> Option<String> {
+        let info = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+        let line = info.lines().find(|l| l.split_whitespace().nth(4) == Some("/"))?;
+        let majmin = line.split_whitespace().nth(2)?;
+        let uevent = std::fs::read_to_string(format!("/sys/dev/block/{majmin}/uevent")).ok()?;
+        let name = uevent.lines().find_map(|l| l.strip_prefix("DEVNAME="))?;
+        Some(format!("/dev/{name}"))
+    }
 
     /// Live SPDK v26.05 shape: lvols carry `lvol_store_uuid` and a
     /// `"<lvs>/<name>"` alias — NOT `lvol_store_name`. The counter used to

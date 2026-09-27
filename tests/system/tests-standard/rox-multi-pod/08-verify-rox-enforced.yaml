@@ -1,0 +1,23 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+# F70 (2026-09-27, F71's fix): the ROX volume refuses a write from a pod that
+# did not ask for readOnly. FAILS while F70 is open.
+commands:
+  - command: |
+      set -u
+      for i in $(seq 1 30); do
+        out=$(kubectl -n "$NAMESPACE" logs rox-forgetful-writer 2>/dev/null)
+        [ -n "$out" ] && break; sleep 2
+      done
+      echo "rox-forgetful-writer: $out"
+      case "$out" in
+        WRITE_REFUSED*) ;;
+        WRITE_LANDED*) echo "FAIL (F70): a pod without readOnly WROTE to a ReadOnlyMany volume"; exit 1 ;;
+        *) echo "FAIL: no verdict from the writer"; exit 1 ;;
+      esac
+      # Independent of the writer's own view: another node's reader must
+      # not see the probe (informative only when the write was refused).
+      if kubectl -n "$NAMESPACE" exec reader-pod-1 -- test -e /data/f71-rw-probe; then
+        echo "FAIL (F70): the probe file is visible to reader-pod-1"; exit 1
+      fi
+      echo "PASS: ROX is enforced whatever the pod asks for"

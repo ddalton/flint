@@ -1,0 +1,34 @@
+# F70's load-bearing leg (F71, 2026-09-27). A ROX volume must be read-only
+# because it IS ROX, not because the pod remembered `readOnly: true`. The
+# driver's only read-only switch is kubelet's `readonly` bit, which comes
+# from the POD SPEC; NodePublishVolume never reads the access mode
+# (MULTI_NODE_READER_ONLY), and the NFS server never reads its own
+# `read_only` config. This pod mounts the ROX PVC the ordinary way, without
+# `readOnly`, and tries to write. Step 08 requires the write to be REFUSED.
+# While F70 is open it LANDS, and this test FAILS — which is the point.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rox-forgetful-writer
+spec:
+  restartPolicy: Never
+  containers:
+    - name: writer
+      image: busybox:latest
+      command:
+        - /bin/sh
+        - -c
+        - |
+          if echo "F71_WROTE_THROUGH_ROX" > /data/f71-rw-probe 2>/tmp/err && sync; then
+            echo "WRITE_LANDED"
+          else
+            echo "WRITE_REFUSED: $(cat /tmp/err)"
+          fi
+          sleep 3600
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: rox-pvc

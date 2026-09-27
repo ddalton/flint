@@ -376,8 +376,10 @@ spec:
               value: "{{ .Values.logging.level | default "info" }}"
             - name: HEALTH_PORT
               value: "{{ .Values.healthCheck.csiDriverPort | default 9809 }}"
+            # F73: a kind node sees the HOST's PCI bus and /dev; kind's
+            # storage is the spdk-tgt container's malloc virtual disk.
             - name: DEVICE_DISCOVERY_MODE
-              value: "{{ .Values.blockDevice.discoveryMode | default "nvme" }}"
+              value: "{{ if .Values.spdkTarget.kindMode.enabled }}none{{ else }}{{ .Values.blockDevice.discoveryMode | default "nvme" }}{{ end }}"
             - name: BLOCK_DEVICE_BACKEND
               value: "{{ .Values.blockDevice.backend | default "ublk" }}"
             - name: UBLK_NUM_QUEUES

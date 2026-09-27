@@ -1,5 +1,13 @@
 # ReadOnlyMany (ROX) Multi-Node Test
 
+> **F71 fixed in the test, 2026-09-27 (not yet run on a cluster).** Until
+> then this test could not fail in the ways its claim table implied. See
+> [F71](../../../../spdk-csi-driver/docs/f71-rox-multi-pod-cannot-fail.md).
+> **Step 08 is EXPECTED TO FAIL while
+> [F70](../../../../spdk-csi-driver/docs/f70-rox-export-is-not-enforced-server-side.md)
+> is open:** a pod that mounts the ROX PVC without `readOnly: true` can
+> write to it.
+
 ## Purpose
 
 Validates that Flint CSI driver correctly supports ReadOnlyMany (ROX) access mode, allowing multiple pods on different nodes to simultaneously mount and read from the same volume.
@@ -30,9 +38,12 @@ Step 01: Write data + assert bound
 Step 02: Create snapshot  
 Step 03: Delete writer pod
 Step 04: Create ROX PVC from snapshot + assert bound
-Step 05: Create 2 reader pods (anti-affinity for different nodes)
-Step 06: Verify both pods can read data
-Step 07: Cleanup
+Step 05: Create 2 reader pods (REQUIRED anti-affinity: two nodes or the step fails)
+Step 06: Both read the data; their nodeNames differ; a write through each
+         readOnly mount is refused
+Step 07: A pod mounts the ROX PVC WITHOUT readOnly and tries to write
+Step 08: That write must be REFUSED (fails while F70 is open)
+Step 09: Cleanup
 ```
 
 ## Success Criteria
@@ -43,8 +54,10 @@ Step 07: Cleanup
 | Data write | Writer pod completes |
 | Snapshot creation | Snapshot readyToUse=true |
 | ROX PVC creation | ROX PVC binds from snapshot |
-| Multi-node readers | Pods on different nodes, both Running |
-| Data access | All pods read identical data |
+| Multi-node readers | Pods on different nodes (step 06 compares `spec.nodeName`) |
+| Data access | Both readers read the snapshot's data |
+| Read-only mount | A write through a `readOnly` pod mount is refused (step 06) |
+| ROX enforced | A write from a pod that did NOT ask for `readOnly` is refused (step 08) |
 
 ## What This Tests
 
@@ -52,7 +65,8 @@ Step 07: Cleanup
 - ✅ **ReadOnlyMany support** - MULTI_NODE_READER_ONLY capability
 - ✅ **Snapshot restoration** - Create volume from snapshot
 - ✅ **Multi-node attachment** - Same volume on multiple nodes
-- ✅ **Read-only mounts** - Proper `-o ro` mount options
+- ✅ **Read-only mounts** - a write through a `readOnly` mount is refused
+- ❌ **ROX enforced by the volume** - step 08; F70 (open)
 
 ### Real-World ROX Use Cases
 - Shared configuration across pods
