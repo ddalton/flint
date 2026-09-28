@@ -1,3 +1,4 @@
+MCLeanP1Like	HOLDS
 LeanP1Holds	HOLDS
 LeanP1Holds1p3b	HOLDS
 LeanP1LiveHolds	HOLDS
@@ -9,6 +10,7 @@ LeanP1DeleteOverrideOff	HOLDS
 LeanP1DeleteOutranked	Prop_DeleteSettles
 LeanP1NoConvergence	RECORD
 LeanP1OwedUnmarked	Inv_ShortcutSound
+LeanP1AdvanceUnguarded	Inv_ShortcutSound
 LeanP1ReaderLoses	Inv_ReaderFetches
 LeanP1LiveWaitsOnLease	Temporal
 LeanP1GatewayBlind	Prop_NoSilentRevert
@@ -26,3 +28,5 @@ LeanP1ProbeReaped	ProbeReaped
 LeanP1ProbeConverged	ProbeConverged
 LeanP1ProbeRepublish	ProbeRepublish
 LeanP1ProbeRestartAfterCas	ProbeRestartAfterCas
+LeanP1LiveHoldsSmall	HOLDS
+LeanP1LiveWaitsOnLeaseSmall	Temporal

@@ -27,3 +27,5 @@ LeanP1ProbeReaped	ProbeReaped
 LeanP1ProbeConverged	ProbeConverged
 LeanP1ProbeRepublish	ProbeRepublish
 LeanP1ProbeRestartAfterCas	ProbeRestartAfterCas
+LeanP1LiveHoldsSmall	HOLDS
+LeanP1LiveWaitsOnLeaseSmall	Temporal

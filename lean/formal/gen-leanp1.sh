@@ -52,6 +52,13 @@ emit OwedUnmarked Spec TypeOK,Inv_ShortcutSound "" RecheckSkipped=FALSE
 emit AdvanceUnguarded Spec TypeOK,Inv_ShortcutSound "" CommitAdvanceGuarded=FALSE
 emit ReaderLoses Spec TypeOK,Inv_ReaderFetches "" RetireAge=FALSE
 emit LiveWaitsOnLease LSpec TypeOK Prop_UISaveCompletes GatewayIgnoresLease=FALSE
+# 2026-09-28: the liveness claim at a bound TLC can finish. LiveHolds has
+# LeanP1Holds's bounds (>1B states; its final liveness check cannot fit 20
+# GB). One path, no removals: 10,676,334 distinct, depth 36 (tlc-rs, safety
+# only). The control must still fire at the same bound.
+LS="Paths={p1} Free={} MaxRemovals=0"
+emit LiveHoldsSmall LSpec TypeOK Prop_UISaveCompletes $LS
+emit LiveWaitsOnLeaseSmall LSpec TypeOK Prop_UISaveCompletes GatewayIgnoresLease=FALSE $LS
 emit GatewayBlind Spec TypeOK Prop_NoSilentRevert GatewayJudgesRead=FALSE
 emit SweepNoGrace Spec "$INV" "" GatewaySweepGrace=FALSE
 emit RenameTwoCAS Spec "$INV" "" RenameAtomic=FALSE
