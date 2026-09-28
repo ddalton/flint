@@ -210,6 +210,17 @@ impl MetadataServer {
         // embed — resolve through a table persisted alongside the rest
         // of the NFS state, so they survive MDS restart.
         fh_manager.attach_backend(Arc::clone(&backend)).await;
+        // H1 (nfs-proxy design §5): report the export's fsid as the
+        // persistent server id rather than st_dev, which hubs can
+        // share. Off by default; a hub behind the NFS proxy needs it,
+        // because there every workspace is a mount of one server and
+        // fsid is how the client tells them apart.
+        if std::env::var("FLINT_NFS_FSID_FROM_VOLUME").as_deref() == Ok("1") {
+            let major = fh_manager.enable_volume_fsid().map_err(|e| {
+                crate::pnfs::Error::Config(format!("FLINT_NFS_FSID_FROM_VOLUME: stat export: {}", e))
+            })?;
+            info!("📇 export fsid = ({:#x}, 0) — the persistent server id (FLINT_NFS_FSID_FROM_VOLUME=1)", major);
+        }
 
         // The server identity is the PERSISTENT server id, not "".
         //
@@ -248,7 +259,21 @@ impl MetadataServer {
             &server_id.to_string(),
             Arc::clone(&backend),
         ));
-        
+        // H2 (nfs-proxy design §5): stamp the share's operator-assigned
+        // tag into every stateid, so the proxy can route the
+        // filehandle-less TEST_STATEID / FREE_STATEID. Set before any
+        // stateid is minted. A malformed value refuses to start: a typo
+        // must not silently serve untagged stateids a proxy cannot route.
+        if let Ok(raw) = std::env::var("FLINT_NFS_STATEID_TAG") {
+            let tag: u32 = raw.trim().parse().map_err(|e| {
+                crate::pnfs::Error::Config(format!(
+                    "FLINT_NFS_STATEID_TAG={raw:?} is not a u32: {e}"
+                ))
+            })?;
+            state_mgr.stateids.set_stateid_tag(tag);
+            info!("🏷️  stateid tag {tag} (FLINT_NFS_STATEID_TAG) — stamped into other[8..12]");
+        }
+
         // Initialize lock manager through the SHARED bring-up path that
         // `NfsServer` uses, so the backend binding and the restore can
         // never drift apart again. Until this call landed, the hub built

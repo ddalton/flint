@@ -221,6 +221,14 @@ pub struct StateIdManager {
     /// Counter for generating unique stateid identifiers (lock-free atomic)
     next_stateid: AtomicU64,
 
+    /// H2 (nfs-proxy design §5): the hub tag stamped into `other[8..12]`
+    /// of every client-visible stateid, so a proxy can route the
+    /// filehandle-less TEST_STATEID / FREE_STATEID to the hub that
+    /// minted it. Assigned once per share by the operator; set once, and
+    /// never changed — restored stateids carry it. Unset = the historical
+    /// `client_id as u32` there, which two hubs mint identically.
+    stateid_tag: std::sync::OnceLock<u32>,
+
     /// Active stateids (stateid.other → state entry)
     /// We use 'other' as key since seqid changes
     /// DashMap enables lock-free concurrent access
@@ -323,6 +331,7 @@ impl StateIdManager {
 
         Self {
             next_stateid: AtomicU64::new(1),
+            stateid_tag: std::sync::OnceLock::new(),
             states: DashMap::new(),
             client_states: DashMap::new(),
             open_states: DashMap::new(),
@@ -761,6 +770,19 @@ impl StateIdManager {
         self.backend.enqueue_write(WriteOp::DeleteStateid(other));
     }
 
+    /// Set the hub tag (H2) for every stateid minted from now on.
+    /// Set-once: `false` if a DIFFERENT tag is already set, because
+    /// stateids already issued carry the first one.
+    pub fn set_stateid_tag(&self, tag: u32) -> bool {
+        let _ = self.stateid_tag.set(tag);
+        self.stateid_tag.get() == Some(&tag)
+    }
+
+    /// The hub tag, when set.
+    pub fn stateid_tag(&self) -> Option<u32> {
+        self.stateid_tag.get().copied()
+    }
+
     /// Allocate a new stateid
     ///
     /// LOCK-FREE: Concurrent allocations use atomic counter + per-shard DashMap locks
@@ -776,7 +798,8 @@ impl StateIdManager {
         // Build 'other' field (96 bits = 12 bytes)
         let mut other = [0u8; 12];
         other[0..8].copy_from_slice(&id.to_be_bytes());
-        other[8..12].copy_from_slice(&(client_id as u32).to_be_bytes());
+        let low = self.stateid_tag.get().copied().unwrap_or(client_id as u32);
+        other[8..12].copy_from_slice(&low.to_be_bytes());
 
         // Create stateid with seqid=1
         let stateid = StateId {
@@ -828,8 +851,23 @@ impl StateIdManager {
         });
         let id = self.next_stateid.fetch_add(1, Ordering::SeqCst);
         let mut other = [0u8; 12];
-        other[0..8].copy_from_slice(&id.to_be_bytes());
-        other[8..12].copy_from_slice(&((client_id as u32) ^ epoch).to_be_bytes());
+        match self.stateid_tag.get() {
+            // H2: the tag owns [8..12], so the epoch moves into the
+            // counter's high half. Delegation ids are never persisted,
+            // so the counter's restart recovery never reads these; a
+            // post-restart OPEN drawing the same counter value has a
+            // zero high half and cannot match (`| 1` keeps the epoch
+            // non-zero).
+            Some(tag) => {
+                let mixed = id ^ (u64::from(epoch | 1) << 32);
+                other[0..8].copy_from_slice(&mixed.to_be_bytes());
+                other[8..12].copy_from_slice(&tag.to_be_bytes());
+            }
+            None => {
+                other[0..8].copy_from_slice(&id.to_be_bytes());
+                other[8..12].copy_from_slice(&((client_id as u32) ^ epoch).to_be_bytes());
+            }
+        }
         let stateid = StateId { seqid: 1, other };
         let entry = StateEntry::new(stateid, StateType::Delegation, client_id, Some(filehandle));
         self.states.insert(other, entry);
@@ -1514,6 +1552,56 @@ impl StateIdManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// H2 (nfs-proxy design §5): TEST_STATEID and FREE_STATEID carry a
+    /// stateid and no filehandle, so the proxy can only route them by
+    /// something inside the stateid. The control arm is the census
+    /// finding: two hubs mint byte-identical `other`s for their first
+    /// client's first open, and FREE_STATEID on the wrong hub frees real
+    /// state. With a tag, every client-visible mint — open, lock and
+    /// delegation — carries it in `other[8..12]`, and the delegation's
+    /// anti-reuse property (never equal to a post-restart OPEN with the
+    /// same counter value) survives the move of its epoch.
+    #[test]
+    fn every_minted_stateid_carries_the_hub_tag_once_set() {
+        let tag_of = |sid: &StateId| u32::from_be_bytes(sid.other[8..12].try_into().unwrap());
+
+        // Control: untagged hubs collide.
+        let a = StateIdManager::new(crate::state_backend::memory_backend());
+        let b = StateIdManager::new(crate::state_backend::memory_backend());
+        assert_eq!(
+            a.allocate(StateType::Open, 1, None).other,
+            b.allocate(StateType::Open, 1, None).other,
+            "control: two untagged hubs mint the same stateid"
+        );
+
+        let a = StateIdManager::new(crate::state_backend::memory_backend());
+        let b = StateIdManager::new(crate::state_backend::memory_backend());
+        assert!(a.set_stateid_tag(0xA11CE));
+        assert!(b.set_stateid_tag(0xB0B));
+        assert!(a.set_stateid_tag(0xA11CE), "setting the same tag again is fine");
+        assert!(!a.set_stateid_tag(0xB0B), "a tag never changes once set");
+        let (oa, ob) = (a.allocate(StateType::Open, 1, None), b.allocate(StateType::Open, 1, None));
+        assert_ne!(oa.other, ob.other, "the tag separates the two hubs");
+        assert_eq!(tag_of(&oa), 0xA11CE);
+        assert_eq!(tag_of(&ob), 0xB0B);
+        assert_eq!(tag_of(&a.allocate(StateType::Lock, 1, None)), 0xA11CE);
+        let deleg = a.allocate_delegation(1, b"fh".to_vec());
+        assert_eq!(tag_of(&deleg), 0xA11CE);
+
+        // A post-restart hub on the same tag re-issues the delegation's
+        // counter value for an OPEN: the two must still differ.
+        let restarted = StateIdManager::new(crate::state_backend::memory_backend());
+        assert!(restarted.set_stateid_tag(0xA11CE));
+        let counter = u64::from_be_bytes(deleg.other[0..8].try_into().unwrap());
+        let mut open = restarted.allocate(StateType::Open, 1, None);
+        while u64::from_be_bytes(open.other[0..8].try_into().unwrap()) < 3 {
+            open = restarted.allocate(StateType::Open, 1, None);
+        }
+        assert_eq!(counter & 0xFFFF_FFFF, 3, "the delegation drew counter 3");
+        assert_eq!(u64::from_be_bytes(open.other[0..8].try_into().unwrap()), 3);
+        assert_ne!(deleg.other, open.other, "delegation vs post-restart OPEN");
+    }
 
     /// Two kinds of Delegation-typed marker share the stateid table.
     /// If the loader could not tell them apart, the breaker row would

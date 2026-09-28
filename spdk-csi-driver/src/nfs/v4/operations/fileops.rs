@@ -1326,7 +1326,8 @@ fn encode_export_entry_attributes(name: &str, requested_attrs: &[u32], pnfs_enab
     };
 
     // Use the standard snapshot encoder for consistency
-    encode_attributes_from_snapshot(requested_attrs, &snapshot, pnfs_enabled, None, None)
+    // A synthetic export entry of the pseudo-filesystem: fsid (0, 0).
+    encode_attributes_from_snapshot(requested_attrs, &snapshot, pnfs_enabled, None, None, None)
 }
 
 /// Encode attributes from a snapshot (NO VFS I/O)
@@ -1361,6 +1362,11 @@ fn encode_attributes_from_snapshot(
     // GETATTR callers pass None: a client asks for the handle there via
     // GETFH, and the bit is simply omitted from the reply bitmap.
     entry_fh: Option<&[u8]>,
+    // H1: `(export device, fsid major)` when the volume fsid is enabled
+    // (`FileHandleManager::volume_fsid`). An object on the export's own
+    // device reports `(major, 0)`; anything else — the pseudo-root, a
+    // mount nested in the export — keeps its own. None = `st_dev`.
+    volume_fsid: Option<(u64, u64)>,
 ) -> (Vec<u8>, Vec<u32>) {
     let scsi = scsi_fsid.is_some();
     use std::collections::BTreeSet;
@@ -1446,10 +1452,16 @@ fn encode_attributes_from_snapshot(
                         attr_vals.put_u64(SCSI_FSID_MAJOR);
                         attr_vals.put_u64(minor);
                     }
-                    None => {
-                        attr_vals.put_u64(snapshot.fsid_major);
-                        attr_vals.put_u64(snapshot.fsid_minor);
-                    }
+                    None => match volume_fsid {
+                        Some((export_dev, major)) if snapshot.fsid_major == export_dev => {
+                            attr_vals.put_u64(major);
+                            attr_vals.put_u64(0);
+                        }
+                        _ => {
+                            attr_vals.put_u64(snapshot.fsid_major);
+                            attr_vals.put_u64(snapshot.fsid_minor);
+                        }
+                    },
                 }
                 true
             }
@@ -2707,6 +2719,7 @@ impl FileOperationHandler {
                                         // handle_getattr; not derived here.
                                         None,
                                         Some(&current_fh.data),
+                                        self.fh_mgr.volume_fsid(),
                                     );
                                 return GetAttrRes {
                                     status: Nfs4Status::Ok,
@@ -2776,6 +2789,7 @@ impl FileOperationHandler {
             self.scsi_fsid_for_path(&path),
             // The op's own filehandle IS the answer to FATTR4_FILEHANDLE.
             Some(&current_fh.data),
+            self.fh_mgr.volume_fsid(),
         );
         
         let fattr = Fattr4 {
@@ -3422,6 +3436,7 @@ impl FileOperationHandler {
                 // filesystem it is not in.
                 self.scsi_fsid_for_path(&dir_path.join(file_name)),
                 entry_fh.as_deref(),
+                self.fh_mgr.volume_fsid(),
             );
 
             debug!("READDIR: Encoding '{}': {} attribute bytes, bitmap={:?}",
@@ -4711,6 +4726,8 @@ impl FileOperationHandler {
             // at the fsid crossing into each scsi volume dir.
             None,
             None,
+            // The pseudo-root is its own synthetic filesystem, (0, 0).
+            None,
         );
         
         let fattr = Fattr4 {
@@ -4731,6 +4748,60 @@ impl FileOperationHandler {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// H1 (nfs-proxy design §5): behind one proxy every workspace is a
+    /// mount of ONE server, so the client tells workspaces apart only by
+    /// fsid. The census measured it: distinct fsids made Linux refuse a
+    /// cross-workspace rename locally (EXDEV, nothing on the wire), a
+    /// shared one sent the RENAME and it succeeded. `st_dev` is not
+    /// distinct across hubs. With the volume fsid enabled, objects on
+    /// the export's device report `(server_id, 0)`; the control arm
+    /// (not enabled) keeps `st_dev`, so the test sees the gate.
+    #[tokio::test]
+    async fn the_export_reports_its_server_id_as_fsid_once_enabled() {
+        use std::os::unix::fs::MetadataExt;
+        const SERVER_ID: u64 = 0x5eed_f00d_0000_0001;
+        let temp = TempDir::new().unwrap();
+        let file = temp.path().join("f");
+        std::fs::write(&file, b"x").unwrap();
+        let dev = std::fs::metadata(&file).unwrap().dev();
+        assert_ne!(dev, SERVER_ID);
+
+        async fn fsid_of(fh_mgr: &Arc<FileHandleManager>, path: &Path) -> (u64, u64) {
+            let handler = FileOperationHandler::new(fh_mgr.clone(), false);
+            let mut ctx = CompoundContext::new(1);
+            ctx.current_fh = Some(fh_mgr.get_or_create_handle(path).unwrap());
+            let res = handler
+                .handle_getattr(GetAttrOp { attr_request: vec![1 << FATTR4_FSID] }, &ctx)
+                .await;
+            assert_eq!(res.status, Nfs4Status::Ok);
+            let v = res.obj_attributes.expect("attrs").attr_vals;
+            (
+                u64::from_be_bytes(v[0..8].try_into().unwrap()),
+                u64::from_be_bytes(v[8..16].try_into().unwrap()),
+            )
+        }
+
+        let off = Arc::new(FileHandleManager::new_with_instance_id(
+            temp.path().to_path_buf(),
+            "volume".to_string(),
+            SERVER_ID,
+        ));
+        assert_eq!(fsid_of(&off, &file).await, (dev, 0), "control: gate off reports st_dev");
+
+        let on = Arc::new(FileHandleManager::new_with_instance_id(
+            temp.path().to_path_buf(),
+            "volume".to_string(),
+            SERVER_ID,
+        ));
+        assert_eq!(on.enable_volume_fsid().unwrap(), SERVER_ID);
+        assert_eq!(fsid_of(&on, &file).await, (SERVER_ID, 0), "a file in the export");
+        assert_eq!(
+            fsid_of(&on, temp.path()).await,
+            (SERVER_ID, 0),
+            "the export root itself — the crossing the client compares against"
+        );
+    }
 
     /// A2 census (design review C5): the shared size chokepoint — the
     /// lane both SETATTR-size and OPEN-createattrs land in — must note
@@ -5540,7 +5611,7 @@ mod tests {
         let snapshot = AttributeSnapshot::pseudo_root(1);
         let requested = vec![(1u32 << FATTR4_LINK_SUPPORT) | (1u32 << FATTR4_SYMLINK_SUPPORT)];
         let (vals, supported) =
-            encode_attributes_from_snapshot(&requested, &snapshot, false, None, None);
+            encode_attributes_from_snapshot(&requested, &snapshot, false, None, None, None);
 
         assert_eq!(
             supported.first().copied().unwrap_or(0) & (1 << FATTR4_LINK_SUPPORT),

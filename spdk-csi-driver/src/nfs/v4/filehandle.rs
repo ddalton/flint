@@ -223,6 +223,14 @@ pub struct FileHandleManager {
     /// keep resolving for upgrade continuity (persisted stateids
     /// embed old-format fh bytes — no state-DB migration needed).
     kernel: Option<Arc<crate::nfs::v4::fh_kernel::KernelFh>>,
+
+    /// H1 (nfs-proxy design §5): `(export device, fsid major)` once
+    /// [`FileHandleManager::enable_volume_fsid`] has run. Objects on the
+    /// export's own device then report `fsid = (instance_id, 0)` instead
+    /// of `st_dev`, which two hubs can share. Behind one proxy the fsid
+    /// is how a client tells one workspace from another. Unset = the
+    /// historical `st_dev`.
+    volume_fsid: std::sync::OnceLock<(u64, u64)>,
 }
 
 impl FileHandleManager {
@@ -374,6 +382,7 @@ impl FileHandleManager {
             rename_aliases: Arc::new(RwLock::new(HashMap::new())),
             backend: RwLock::new(None),
             kernel,
+            volume_fsid: std::sync::OnceLock::new(),
             #[cfg(target_os = "linux")]
             export_root_fd,
         }
@@ -590,6 +599,23 @@ impl FileHandleManager {
     /// Get the export root path
     pub fn get_export_path(&self) -> &Path {
         &self.export_path
+    }
+
+    /// Enable H1: report the export's fsid as `(instance_id, 0)`. On a
+    /// lite hub `instance_id` is the persistent `server_id` — stable
+    /// across restarts and builds (no hash), new exactly when the
+    /// volume is new, and non-zero, so it never collides with the
+    /// pseudo-root's `(0, 0)`. Returns the fsid major.
+    pub fn enable_volume_fsid(&self) -> std::io::Result<u64> {
+        use std::os::unix::fs::MetadataExt;
+        let dev = std::fs::metadata(&self.export_path)?.dev();
+        let _ = self.volume_fsid.set((dev, self.instance_id));
+        Ok(self.instance_id)
+    }
+
+    /// `(export device, fsid major)` when H1 is enabled.
+    pub fn volume_fsid(&self) -> Option<(u64, u64)> {
+        self.volume_fsid.get().copied()
     }
     
     /// Check if a filehandle represents the pseudo-root

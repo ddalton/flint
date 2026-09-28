@@ -1120,7 +1120,26 @@ impl CompoundRequest {
     ///   * recover from a per-operation decode failure by replacing it with
     ///     `Operation::Unsupported(opcode)`, so the COMPOUND can still produce
     ///     a well-formed reply.
-    pub fn decode(mut decoder: XdrDecoder) -> Result<Self, String> {
+    pub fn decode(decoder: XdrDecoder) -> Result<Self, String> {
+        Self::decode_with_ranges(decoder).map(|(req, _)| req)
+    }
+
+    /// [`CompoundRequest::decode`], plus each decoded op's byte span in
+    /// the decoder's buffer (offsets from where the decoder started),
+    /// opcode included. The spans tile the op array with no gap. The op
+    /// decoding STOPS at (`Unsupported` / `BadXdr`) leaves the cursor
+    /// mid-argument, so its span runs to the END of the buffer: that
+    /// tail is opaque.
+    ///
+    /// Why: the NFS proxy (nfs-proxy design §3) decodes only to route,
+    /// then forwards the client's ORIGINAL op bytes to a hub, which runs
+    /// this same decoder — so an op the proxy cannot parse fails at the
+    /// hub exactly as it would have on a direct mount.
+    pub fn decode_with_ranges(
+        mut decoder: XdrDecoder,
+    ) -> Result<(Self, Vec<std::ops::Range<usize>>), String> {
+        let total = decoder.remaining();
+        let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
         tracing::trace!("DEBUG CompoundRequest::decode: Starting with {} bytes", decoder.remaining());
 
         // Decode tag as opaque bytes; lossy-convert to UTF-8 so a non-UTF-8
@@ -1145,7 +1164,10 @@ impl CompoundRequest {
         // that pair a bogus minor version with malformed operations
         // (pynfs COMP4b sends `version=50` with `op.illegal()`).
         if minor_version > NFS_V4_MINOR_VERSION_2 {
-            return Ok(Self { tag, tag_valid, minor_version, operations: Vec::new(), wire_size: 0 });
+            return Ok((
+                Self { tag, tag_valid, minor_version, operations: Vec::new(), wire_size: 0 },
+                ranges,
+            ));
         }
 
         // Decode operation count. Bounded against the bytes actually
@@ -1171,6 +1193,7 @@ impl CompoundRequest {
                 return Err(err);
             }
 
+            let start = total - decoder.remaining();
             let opcode = decoder.decode_u32()?;
             tracing::trace!("DEBUG CompoundRequest::decode: Operation {}/{}: opcode={}, {} bytes remaining",
                      i + 1, op_count, opcode, decoder.remaining());
@@ -1195,21 +1218,25 @@ impl CompoundRequest {
             // failing op) — stop decoding here.
             let stop = matches!(op, Operation::Unsupported(_) | Operation::BadXdr(_));
             operations.push(op);
+            ranges.push(start..if stop { total } else { total - decoder.remaining() });
             if stop {
                 break;
             }
         }
 
-        Ok(Self {
-            tag,
-            tag_valid,
-            minor_version,
-            operations,
-            // The decoder doesn't see the original wire bytes' length;
-            // the caller (handle_compound in server_v4 / pnfs/mds/server)
-            // knows it and sets it post-decode.
-            wire_size: 0,
-        })
+        Ok((
+            Self {
+                tag,
+                tag_valid,
+                minor_version,
+                operations,
+                // The decoder doesn't see the original wire bytes' length;
+                // the caller (handle_compound in server_v4 / pnfs/mds/server)
+                // knows it and sets it post-decode.
+                wire_size: 0,
+            },
+            ranges,
+        ))
     }
 
     /// Consume a `netloc4<>` array and return its length.
@@ -3113,6 +3140,69 @@ mod deleg_wire_tests {
 
     fn sid() -> StateId {
         StateId { seqid: 7, other: [0xab; 12] }
+    }
+
+    /// Step 1 of the nfs-proxy design (§3): the proxy decodes a COMPOUND
+    /// with this decoder only to route it, then forwards the ORIGINAL op
+    /// bytes. So each decoded op must come with its exact span of the
+    /// buffer — opcode included — and the spans must tile the op array
+    /// with no gap. An op the decoder stops at (op 74, LISTXATTRS, which
+    /// it does not know) leaves the cursor untrustworthy, so ITS span
+    /// runs to the end of the buffer: everything behind it travels to
+    /// the hub opaque, and the hub's own decoder fails there the same way.
+    #[test]
+    fn decode_with_ranges_gives_each_op_its_exact_bytes_and_the_rest_opaque() {
+        let mut e = XdrEncoder::new();
+        e.encode_opaque(b"t");
+        e.encode_u32(1);
+        e.encode_u32(5);
+        let header = e.finish().len();
+        let mut ops: Vec<Vec<u8>> = Vec::new();
+        let mut one = |f: &dyn Fn(&mut XdrEncoder)| {
+            let mut o = XdrEncoder::new();
+            f(&mut o);
+            ops.push(o.finish().to_vec());
+        };
+        one(&|o| o.encode_u32(opcode::PUTROOTFH));
+        one(&|o| {
+            o.encode_u32(opcode::LOOKUP);
+            o.encode_opaque(b"ws-a");
+        });
+        one(&|o| o.encode_u32(opcode::GETFH));
+        // Unknown to this decoder, with argument bytes and a trailing op
+        // behind it that must NOT be split out.
+        one(&|o| {
+            o.encode_u32(74);
+            o.encode_u64(0x1122_3344_5566_7788);
+            o.encode_u32(opcode::GETFH);
+        });
+
+        let mut w = XdrEncoder::new();
+        w.encode_opaque(b"t");
+        w.encode_u32(1);
+        w.encode_u32(5);
+        for op in &ops {
+            w.append_raw(op);
+        }
+        let wire = w.finish().to_vec();
+
+        let (r, ranges) =
+            CompoundRequest::decode_with_ranges(XdrDecoder::new(bytes::Bytes::from(wire.clone())))
+                .expect("decodes");
+        assert_eq!(r.operations.len(), 4, "decoding stops at the unknown op");
+        assert_eq!(ranges.len(), 4);
+        assert_eq!(ranges[0].start, header, "spans are offsets into the decoder's buffer");
+        for (i, op) in ops.iter().enumerate() {
+            assert_eq!(&wire[ranges[i].clone()], op.as_slice(), "op {i}'s exact bytes");
+        }
+        for pair in ranges.windows(2) {
+            assert_eq!(pair[0].end, pair[1].start, "no gap between ops");
+        }
+        assert_eq!(ranges[3].end, wire.len(), "the stopped op's span runs to the end");
+
+        // The plain decoder is unchanged.
+        let plain = CompoundRequest::decode(XdrDecoder::new(bytes::Bytes::from(wire))).unwrap();
+        assert_eq!(plain.operations.len(), 4);
     }
 
     #[test]

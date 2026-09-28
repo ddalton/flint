@@ -198,8 +198,14 @@ Both are env-gated. With them off, a hub is byte-identical to today, so
 no tier or state_backend test changes.
 
 - **H1 — fsid from the volume.** `FLINT_NFS_FSID_FROM_VOLUME=1` reports
-  `fsid = (stable hash of volume id, 0)` instead of `st_dev`
-  (`fileops.rs:151`). Without it, two workspaces can share an fsid:
+  `fsid = (server_id, 0)` for objects on the export's own device,
+  instead of `st_dev` (`fileops.rs:151`). `server_id` is the random,
+  non-zero u64 persisted in `state.db`, already the FH `instance_id`
+  and `status.serverId`. So it is stable across restarts and builds
+  (no hash involved), and changes exactly when the volume is new. The
+  pseudo-root keeps `(0, 0)`, which is also the proxy's pseudo-root
+  fsid. Scsi volumes and any mount nested in the export keep their
+  own. Without it, two workspaces can share an fsid:
   Linux may then share a superblock between the two mounts, merge
   `statfs`, and send cross-workspace renames to the wire. The
   alternative (the proxy rewriting `FATTR4_FSID` inside every `GETATTR`
@@ -217,7 +223,12 @@ no tier or state_backend test changes.
   alternative, a tag in the counter's top bits, wraps a persisted
   32-bit counter in about 50 days at 1,000 opens/s). The tag is
   **assigned** by the operator (unique u32, recorded in the share's
-  status and passed as env), never hashed. The delegation mint's
+  status and passed as env), never hashed. **It never changes for the
+  life of the volume:** stateids restored from `state.db` carry it, so a
+  tag that changed across a hub restart would strand them. It is tied
+  to the share, not the pod. Only a new volume (hibernation deletes the
+  PVC) may get a new one. The operator writes `status.stateidTag` once
+  and never rewrites it; that set-once write is what the test pins. The delegation mint's
   anti-reuse epoch moves out of `[8..12]`. Only `allocate` and
   `allocate_delegation` mint client-visible stateids; the `0xFC`
   lock-table keys and the breaker marker never reach the wire.
@@ -236,13 +247,22 @@ hydrator, credentials, idle ladder and operator model.
   `LoadBalancer` Service on 2049, and a small PVC for the client table.
   It ships in the operator image as another `command`, like
   `flint-hub-gateway`.
-- The **routing table** comes from watching FlintShares (reuse
-  `lite_gateway/resolve.rs`): workspace name (label
-  `chert.us/volume-id`, defaulting to the CR name) → hub Service. The
-  `instance_id` → workspace map is **learned** at the crossing (the
-  root FH the hub returns) and persisted. It is not recomputed from
-  `stable_nfs_instance_id`, because `DefaultHasher` is not a stable
-  hash across Rust releases.
+- **Where each identifier lives (decided 2026-09-27).** Everything the
+  proxy routes by comes from **FlintShare status**, so the proxy's whole
+  routing table is derived from a watch (reuse
+  `lite_gateway/resolve.rs`) and rebuilt from scratch on restart:
+
+  | Key | Source of truth | Hub | Proxy |
+  |---|---|---|---|
+  | workspace name → hub Service | the CR (label `chert.us/volume-id`, defaulting to the CR name) | — | in memory, from the watch |
+  | `instance_id` (FH bytes 1..9) → hub | **already there:** a lite hub's FH `instance_id` is its persistent `server_id` (`state.db`), which `/status` publishes and the operator already copies to `status.serverId` | as today | in memory, from the watch |
+  | stateid tag (H2) → hub | the operator **assigns** it once per share, into `status.stateidTag` | reads it from env and stamps every stateid | in memory, from the watch |
+  | fsid (H1) | the same persistent `server_id` | reports it as the export's fsid | stores nothing; passes attributes through |
+
+  The proxy computes nothing from a hash of the volume id
+  (`stable_nfs_instance_id` uses `DefaultHasher`, which is not stable
+  across Rust releases); it reads what the hub reports. **The only
+  state the proxy persists is the client table (§4).**
 - The hub NetworkPolicy auto-admits the proxy on 2049, using the same
   mechanism the gateway peer uses.
 - RBAC: `get,list,watch,patch` on flintshares, the same as the gateway.
@@ -531,7 +551,22 @@ port are still wanted for capacity and failure isolation.
    crossing, rename, `ls -la` at `/`, and state recovery. This confirms
    the one-target rule covers them.
 1. H1 + H2 + decoder byte ranges, gated, with a positive control for
-   each gate: flip it and watch its test fail.
+   each gate: flip it and watch its test fail. **Hub side DONE
+   2026-09-27:**
+   - **Mutation controls.** Each test fails with its load-bearing line
+     mutated out (H2 twice: the tag in `allocate`, and the delegation
+     epoch's move).
+   - **Lib suite** 2554/0/6.
+   - **Live on a real hub** (`tests/lima/nfs-proxy-census/step1-live.sh`,
+     `results-box-6.12-step1/`):
+     - GETATTR fsid = the persistent server id, where the control
+       arm shows `st_dev` (44);
+     - OPEN stateids end in the tag (`…000a11ce`), where the control
+       arm shows the client id (`…00000002`, the census collision);
+     - a malformed `FLINT_NFS_STATEID_TAG` refuses to start.
+   - **Remaining:** the operator assigning the tag (`status.stateidTag`,
+     set once) and passing both env vars. That lands with step 4's
+     `nfsProxy.enabled`, since nothing sets them before a proxy exists.
 2. Proxy core: downstream sessions (reused), pseudo-root, routing,
    backend clients, slot mapping, splice.
 3. Restarts and wake: lease keepalive, status-flag OR, the table in
