@@ -816,6 +816,23 @@ spec:
                   `None` = not observed yet, or a hub too old to report it.
                 nullable: true
                 type: string
+              stateidTag:
+                description: |-
+                  The share's stateid tag for the NFS proxy (nfs-proxy design §5
+                  H2): a fleet-unique u32 the hub stamps into every stateid it
+                  mints, so the proxy can route TEST_STATEID / FREE_STATEID, which
+                  carry no filehandle. Assigned ONCE, when the proxy is enabled,
+                  and never rewritten: stateids restored from the hub's state.db
+                  carry it, so a tag that changed would strand them.
+
+                  It is the one status field the operator reads back, and it is
+                  written by its own field manager (`flint-lite-operator/stateid-tag`)
+                  so the status applies that rebuild everything else each pass —
+                  which never set it — cannot remove it.
+                format: uint32
+                minimum: 0.0
+                nullable: true
+                type: integer
             type: object
         required:
         - spec

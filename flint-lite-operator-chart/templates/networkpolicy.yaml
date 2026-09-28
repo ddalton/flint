@@ -70,6 +70,22 @@ spec:
         - protocol: TCP
           port: 2049
 {{- end }}
+{{- if $.Values.nfsProxy.enabled }}
+    # flint-nfs-proxy on 2049, admitted automatically, for the same
+    # reason as the gateway below: both halves are this chart's. With
+    # the proxy on, it is meant to be the ONLY NFS client of a hub
+    # (design §7) — leave nfsClientCIDRs/Selectors empty to make it so.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $.Release.Namespace }}
+          podSelector:
+            matchLabels:
+              {{- include "flint-lite-operator.nfsProxySelectorLabels" $ | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 2049
+{{- end }}
     # The hub's HTTP surface: /status, /health, the file API. The
     # OPERATOR must reach it — it polls the pod ip directly for
     # rpoClean, idleness and lease counts, and a hub it cannot poll is

@@ -9,6 +9,8 @@
 //! hub rows come from FlintShare status instead (step 4).
 
 use clap::Parser;
+use spdk_csi_driver::nfs_proxy::kube as kube_source;
+use spdk_csi_driver::nfs_proxy::kube::KubeWaker;
 use spdk_csi_driver::nfs_proxy::server::{Proxy, ProxyConfig};
 
 #[derive(Parser)]
@@ -19,6 +21,9 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Before any kube client exists (the 1.26/1.27 startup panic; the
+    // lib's crypto_provider_tests guard every binary for it).
+    spdk_csi_driver::install_crypto_provider();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -30,7 +35,25 @@ async fn main() -> anyhow::Result<()> {
     // Before any state exists: every lease the proxy hands out uses it.
     // The same as the hubs' (ProxyConfig::lease_secs says why).
     spdk_csi_driver::nfs::v4::state::lease::set_lease_time(std::time::Duration::from_secs(cfg.lease_secs));
-    let proxy = Proxy::new(&cfg).await.map_err(anyhow::Error::msg)?;
+    let proxy = match &cfg.kube {
+        None => Proxy::new(&cfg).await.map_err(anyhow::Error::msg)?,
+        Some(k) => {
+            let client = kube::Client::try_default().await?;
+            let p = Proxy::new_with(&cfg, std::sync::Arc::new(KubeWaker { client: client.clone() }))
+                .await
+                .map_err(anyhow::Error::msg)?;
+            let (table, ns) = (p.table().clone(), k.namespace.clone());
+            tokio::spawn(async move {
+                if let Err(e) = kube_source::watch(client, ns, table, std::time::Duration::from_secs(2)).await {
+                    // Without the watch the root is empty forever; die so
+                    // the Deployment restarts us and the failure is visible.
+                    tracing::error!("FlintShare watch failed: {e}");
+                    std::process::exit(1);
+                }
+            });
+            p
+        }
+    };
     proxy.serve(&cfg.listen).await?;
     Ok(())
 }

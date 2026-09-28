@@ -87,6 +87,12 @@ struct Args {
         default_value_t = true
     )]
     manage_crd: bool,
+
+    /// The NFS proxy fronts this fleet (flint-lite-operator-chart
+    /// `nfsProxy.enabled`): hubs get H1 + their assigned stateid tag, and
+    /// headless NFS Services. See `RenderDefaults::nfs_proxy`.
+    #[arg(long, env = "FLINT_LITE_NFS_PROXY", action = clap::ArgAction::Set, default_value_t = false)]
+    nfs_proxy: bool,
 }
 
 #[tokio::main]
@@ -169,6 +175,7 @@ async fn main() -> anyhow::Result<()> {
             image: args.hub_image.clone(),
             image_pull_policy: args.hub_image_pull_policy.clone(),
             startup_failure_threshold: args.startup_failure_threshold,
+            nfs_proxy: args.nfs_proxy,
             ..Default::default()
         },
         recorder: Recorder::new(
@@ -181,6 +188,7 @@ async fn main() -> anyhow::Result<()> {
         fleet: store.clone(),
         admit_cache: std::sync::Mutex::new(None),
         failures: dashmap::DashMap::new(),
+        assigned_tags: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
 
     info!(

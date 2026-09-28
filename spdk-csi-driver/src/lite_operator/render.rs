@@ -87,6 +87,12 @@ pub struct RenderDefaults {
     /// it killable.
     pub hub_cpu_request: String,
     pub hub_memory_request: String,
+    /// The NFS proxy fronts this fleet (nfs-proxy design §6): hubs
+    /// report their volume fsid (H1) and stamp their stateid tag (H2),
+    /// and their NFS Services are headless — clients mount the proxy's
+    /// address, so a hub needs no stable ClusterIP, and past ~4,000
+    /// shares a ClusterIP each overflows a default Service range (§7a).
+    pub nfs_proxy: bool,
 }
 
 impl Default for RenderDefaults {
@@ -107,6 +113,7 @@ impl Default for RenderDefaults {
             service_port: NFS_PORT,
             hub_cpu_request: "100m".to_string(),
             hub_memory_request: "128Mi".to_string(),
+            nfs_proxy: false,
         }
     }
 }
@@ -368,13 +375,16 @@ pub fn mds_yaml(share: &FlintShare, d: &RenderDefaults) -> String {
     // golden test compares the two, because two hand-written emitters
     // of one schema drift, and the drift is silent: this parser ignores
     // keys it does not recognise.
-    if let Some(m) = s.monitoring.as_ref().filter(|m| m.enabled.unwrap_or(false)) {
+    if let Some(port) = health_port(share, d) {
         let _ = writeln!(y, "monitoring:");
         let _ = writeln!(y, "  health:");
         let _ = writeln!(y, "    enabled: true");
-        let _ = writeln!(y, "    port: {}", m.port.unwrap_or(HEALTH_PORT));
+        let _ = writeln!(y, "    port: {port}");
         let _ = writeln!(y, "    path: {}", yaml_str(HEALTH_PATH));
-        if let Some(api) = m.file_api.as_ref().filter(|a| a.enabled.unwrap_or(false)) {
+        // The file API only ever from the SPEC: the proxy turning the
+        // status listener on must never open a door onto tenant files.
+        let spec_monitoring = s.monitoring.as_ref().filter(|m| m.enabled.unwrap_or(false));
+        if let Some(api) = spec_monitoring.and_then(|m| m.file_api.as_ref()).filter(|a| a.enabled.unwrap_or(false)) {
             let _ = writeln!(y, "  fileApi:");
             let _ = writeln!(y, "    enabled: true");
             // The path the Secret is projected at, below. The server
@@ -534,9 +544,15 @@ pub fn service(share: &FlintShare, d: &RenderDefaults) -> Service {
         m.annotations = Some(a);
     }
 
+    // Headless behind the proxy (see `RenderDefaults::nfs_proxy`). Only
+    // for the default type: a share that asked for a NodePort or a
+    // LoadBalancer of its own still gets one.
+    let cluster_ip = (d.nfs_proxy && ty == ServiceType::ClusterIP).then(|| "None".to_string());
+
     Service {
         metadata: m,
         spec: Some(K8sServiceSpec {
+            cluster_ip,
             type_: Some(
                 match ty {
                     ServiceType::ClusterIP => "ClusterIP",
@@ -557,6 +573,24 @@ pub fn service(share: &FlintShare, d: &RenderDefaults) -> Service {
             ..Default::default()
         }),
         ..Default::default()
+    }
+}
+
+/// The port the hub's status listener (`/status`, `/health`) is on, if
+/// it has one — THE one answer the hub config, the container port and
+/// the operator's poll all read, so they cannot disagree.
+///
+/// On when the spec turns monitoring on, AND whenever the NFS proxy
+/// fronts the fleet: behind the proxy `status.serverId` is the routing
+/// key, `/status` is the only place it comes from, and a share without
+/// monitoring was never routable (step-4 kind drill: every share Ready,
+/// `HubReachable=False: spec.monitoring is off`, no serverId anywhere).
+/// Only the status listener: the file API stays the spec's decision.
+pub fn health_port(share: &FlintShare, d: &RenderDefaults) -> Option<i32> {
+    match share.spec.monitoring.as_ref().filter(|m| m.enabled.unwrap_or(false)) {
+        Some(m) => Some(m.port.unwrap_or(HEALTH_PORT)),
+        None if d.nfs_proxy => Some(HEALTH_PORT),
+        None => None,
     }
 }
 
@@ -822,6 +856,27 @@ pub fn deployment(
         value: Some("1".to_string()),
         ..Default::default()
     });
+    // Behind the NFS proxy: H1 (the export's fsid is the persistent
+    // server id, so every workspace is its own filesystem to a client
+    // that sees them all through one server) and H2 (the share's tag in
+    // every stateid). The tag is assigned before the first render with
+    // the proxy on (`reconcile::ensure_stateid_tag`); a hub is never
+    // rendered with H1 and an unassigned tag's stand-in. Off, the render
+    // is byte-identical to before (the chart parity fixture).
+    if d.nfs_proxy {
+        env.push(EnvVar {
+            name: "FLINT_NFS_FSID_FROM_VOLUME".to_string(),
+            value: Some("1".to_string()),
+            ..Default::default()
+        });
+        if let Some(tag) = share.status.as_ref().and_then(|st| st.stateid_tag) {
+            env.push(EnvVar {
+                name: "FLINT_NFS_STATEID_TAG".to_string(),
+                value: Some(tag.to_string()),
+                ..Default::default()
+            });
+        }
+    }
     if let Some(region) = s.region.as_deref().filter(|r| !r.is_empty() && s.tiered()) {
         env.push(EnvVar {
             name: "AWS_REGION".to_string(),
@@ -874,9 +929,9 @@ pub fn deployment(
         name: Some("nfs".to_string()),
         ..Default::default()
     }];
-    if let Some(m) = monitoring {
+    if let Some(port) = health_port(share, d) {
         ports.push(ContainerPort {
-            container_port: m.port.unwrap_or(HEALTH_PORT),
+            container_port: port,
             name: Some("http".to_string()),
             ..Default::default()
         });
@@ -1097,6 +1152,58 @@ mod tests {
         FlintShareSpec, PersistenceSpec, ServiceSpec, TierSettings,
     };
     use serde_json::Value;
+
+    fn env_of(dep: &Deployment) -> BTreeMap<String, String> {
+        dep.spec.as_ref().unwrap().template.spec.as_ref().unwrap().containers[0]
+            .env
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| (e.name, e.value.unwrap_or_default()))
+            .collect()
+    }
+
+    /// nfs-proxy step 4: with the proxy on, a hub carries H1 and its
+    /// assigned H2 tag, and its NFS Service is headless. Off, none of it
+    /// — the render the chart parity fixture pins.
+    #[test]
+    fn behind_the_proxy_a_hub_reports_h1_h2_and_its_service_is_headless() {
+        let mut share = share("ws-a", base_spec());
+        share.status = Some(crate::lite_operator::crd::FlintShareStatus {
+            stateid_tag: Some(659918),
+            ..Default::default()
+        });
+        let off = render(&share, &RenderDefaults::default(), None, None);
+        let e = env_of(&off.deployment);
+        assert!(!e.contains_key("FLINT_NFS_FSID_FROM_VOLUME") && !e.contains_key("FLINT_NFS_STATEID_TAG"));
+        assert_eq!(off.service.spec.as_ref().unwrap().cluster_ip, None);
+
+        let d = RenderDefaults { nfs_proxy: true, ..Default::default() };
+        let on = render(&share, &d, None, None);
+        let e = env_of(&on.deployment);
+        assert_eq!(e.get("FLINT_NFS_FSID_FROM_VOLUME").map(String::as_str), Some("1"));
+        assert_eq!(e.get("FLINT_NFS_STATEID_TAG").map(String::as_str), Some("659918"));
+        assert_eq!(on.service.spec.as_ref().unwrap().cluster_ip.as_deref(), Some("None"));
+
+        // The status listener is on (the operator reads serverId from
+        // it), and the file API is NOT.
+        assert!(on.mds_yaml.contains("  health:\n    enabled: true"), "{}", on.mds_yaml);
+        assert!(!on.mds_yaml.contains("fileApi"));
+        assert!(!off.mds_yaml.contains("health:"), "control: off, no listener the spec did not ask for");
+        assert_eq!(health_port(&share, &d), Some(HEALTH_PORT));
+        assert_eq!(health_port(&share, &RenderDefaults::default()), None);
+
+        // A share that asked for its own LoadBalancer keeps it.
+        share.spec.service = Some(ServiceSpec {
+            r#type: Some(ServiceType::LoadBalancer),
+            port: None,
+            node_port: None,
+            annotations: None,
+            advertise_address: None,
+        });
+        let lb = render(&share, &d, None, None);
+        assert_eq!(lb.service.spec.as_ref().unwrap().cluster_ip, None);
+    }
 
     fn share(name: &str, spec: FlintShareSpec) -> FlintShare {
         let mut s = FlintShare::new(name, spec);

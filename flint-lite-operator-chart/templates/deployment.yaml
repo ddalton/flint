@@ -88,6 +88,8 @@ spec:
             {{- end }}
             - --election={{ ternary "enabled" "disabled" .Values.leaderElection }}
             - --manage-crd={{ .Values.manageCrd }}
+            # H1 + the stateid tag on every hub, headless hub Services.
+            - --nfs-proxy={{ .Values.nfsProxy.enabled }}
           env:
             - name: RUST_LOG
               value: {{ .Values.logLevel | default "info" | quote }}

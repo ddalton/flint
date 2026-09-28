@@ -1,0 +1,38 @@
+== images
+== cluster
+kind v0.30.0 go1.24.6 linux/amd64
+== install
+ws-a: phase=Ready serverId=15343865209360445091 stateidTag=2274162381
+ws-b: phase=Ready serverId=14197070616606856241 stateidTag=2439126599
+ws-c: phase=Ready serverId=5065840379933123255 stateidTag=3541231457
+ws-hidden: phase=Ready serverId=12063079410799284325 stateidTag=2939023200
+== operator wiring
+PASS every share got a stateidTag
+PASS the tags are distinct
+managers owning status.stateidTag: [flint-lite-operator/stateid-tag]
+PASS status.stateidTag is owned by the tag manager alone
+PASS hub A runs with H1 and its OWN tag
+PASS hub Services are headless
+== mount through the proxy
+proxy at 172.18.0.5:31000 (externalTrafficPolicy Local: the node that runs it)
+PASS mount
+ls /: ws-a ws-b ws-c 
+PASS / lists exactly the allowed, routable workspaces
+PASS bytes landed in the right hubs
+== set-once: operator restart, hub restart
+PASS tags unchanged after an operator and a hub restart
+PASS the mount still reads after the hub restart
+== wake: ws-c idles out, the proxy wakes it
+ws-c phase: IdleSuspended
+PASS ws-c went IdleSuspended (precondition)
+PASS the proxy stamped chert.us/requested-at on ws-c
+wake write: rc=0 18:39:05→18:39:19 err=[]
+PASS the write to the woken workspace completed
+== hub lockdown (NetworkPolicy)
+a stranger pod: closed; a pod with the proxy's labels: open
+PASS a stranger cannot reach a hub's 2049; the proxy's peer can
+proxy warnings:
+      7  WARN spdk_csi_driver::nfs_proxy::server: hub 0x464d7afc4ebe62b7: hub down: ws-c.workspaces.svc.cluster.local:2049: failed to lookup address information: Name does not reso
+      1  WARN spdk_csi_driver::nfs::v4::dispatcher: CREATE_SESSION: client requested CONN_BACK_CHAN but no back-channel writer is available for session SessionId([0, 0, 0, 0, 0, 0,
+RESULT: 14 passed, 0 failed, 0 inconclusive
+exit=0

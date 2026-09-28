@@ -1,0 +1,201 @@
+{{- if .Values.nfsProxy.enabled }}
+{{- /*
+flint-nfs-proxy — ONE NFS port in front of every hub
+(docs/plans/flint-lite-nfs-proxy-design.md).
+
+Like the gateway: a fleet-scope singleton in the operator's image, a
+different `command`, its own ServiceAccount and RBAC. Unlike it, ONE
+replica: the client table is not shared yet (design §7, multi-replica
+is step 7), and the PVC holding it is RWO — hence `Recreate`.
+
+It reads FlintShare status (serverId, stateidTag, address) and patches
+one annotation to wake a parked hub. Nothing else.
+*/}}
+{{- if not .Values.nfsProxy.identities }}
+{{- fail "nfsProxy.enabled requires nfsProxy.identities — without one, every client sees an empty root. There is no allow-all default: this port reaches every workspace." }}
+{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "flint-lite-operator.nfsProxyName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-lite-operator.nfsProxyLabels" . | nindent 4 }}
+---
+{{- if .Values.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "flint-lite-operator.nfsProxyName" . }}
+  labels:
+    {{- include "flint-lite-operator.nfsProxyLabels" . | nindent 4 }}
+rules:
+  # Read the fleet; `patch` only for the wake annotation.
+  - apiGroups: ["chert.us"]
+    resources: ["flintshares"]
+    verbs: ["get", "list", "watch", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "flint-lite-operator.nfsProxyName" . }}
+  labels:
+    {{- include "flint-lite-operator.nfsProxyLabels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "flint-lite-operator.nfsProxyName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "flint-lite-operator.nfsProxyName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "flint-lite-operator.nfsProxyName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-lite-operator.nfsProxyLabels" . | nindent 4 }}
+data:
+  config.yaml: |
+    listen: 0.0.0.0:2049
+    stateDir: /var/lib/flint-nfs-proxy
+    leaseSecs: {{ int .Values.nfsProxy.leaseSecs }}
+    kube:
+      {{- with .Values.nfsProxy.watchNamespace }}
+      namespace: {{ . | quote }}
+      {{- else }}
+      {}
+      {{- end }}
+    identities:
+      {{- toYaml .Values.nfsProxy.identities | nindent 6 }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "flint-lite-operator.nfsProxyName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-lite-operator.nfsProxyLabels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with .Values.nfsProxy.persistence.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.nfsProxy.persistence.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "flint-lite-operator.nfsProxyName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-lite-operator.nfsProxyLabels" . | nindent 4 }}
+  {{- with .Values.nfsProxy.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.nfsProxy.service.type }}
+  {{- if and (ne .Values.nfsProxy.service.type "ClusterIP") .Values.nfsProxy.service.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ .Values.nfsProxy.service.externalTrafficPolicy }}
+  {{- end }}
+  selector:
+    {{- include "flint-lite-operator.nfsProxySelectorLabels" . | nindent 4 }}
+  ports:
+    - name: nfs
+      port: {{ .Values.nfsProxy.service.port }}
+      targetPort: nfs
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "flint-lite-operator.nfsProxyName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-lite-operator.nfsProxyLabels" . | nindent 4 }}
+spec:
+  replicas: 1
+  # RWO client table: the old pod must be gone before the new one mounts it.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "flint-lite-operator.nfsProxySelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "flint-lite-operator.nfsProxySelectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ .Values.nfsProxy | toJson | sha256sum }}
+        {{- with .Values.nfsProxy.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "flint-lite-operator.nfsProxyName" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+      containers:
+        - name: nfs-proxy
+          image: {{ include "flint-lite-operator.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # The SAME image as the operator, a different binary in it.
+          command: ["/usr/local/bin/flint-nfs-proxy"]
+          args:
+            - --config=/etc/flint-nfs-proxy/config.yaml
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.nfsProxy.logLevel | default .Values.logLevel | default "info" | quote }}
+          ports:
+            - name: nfs
+              containerPort: 2049
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /etc/flint-nfs-proxy
+              readOnly: true
+            - name: state
+              mountPath: /var/lib/flint-nfs-proxy
+          # A TCP accept is all the proxy promises before the watch has
+          # listed; the binary exits if the watch cannot start, so a pod
+          # that stays up has a table.
+          readinessProbe:
+            tcpSocket:
+              port: nfs
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: nfs
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          {{- with .Values.nfsProxy.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "flint-lite-operator.nfsProxyName" . }}
+        - name: state
+          persistentVolumeClaim:
+            claimName: {{ include "flint-lite-operator.nfsProxyName" . }}
+      {{- with .Values.nfsProxy.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nfsProxy.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

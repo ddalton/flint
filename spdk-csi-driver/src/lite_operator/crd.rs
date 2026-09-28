@@ -807,6 +807,20 @@ pub struct FlintShareStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_id: Option<String>,
 
+    /// The share's stateid tag for the NFS proxy (nfs-proxy design §5
+    /// H2): a fleet-unique u32 the hub stamps into every stateid it
+    /// mints, so the proxy can route TEST_STATEID / FREE_STATEID, which
+    /// carry no filehandle. Assigned ONCE, when the proxy is enabled,
+    /// and never rewritten: stateids restored from the hub's state.db
+    /// carry it, so a tag that changed would strand them.
+    ///
+    /// It is the one status field the operator reads back, and it is
+    /// written by its own field manager (`flint-lite-operator/stateid-tag`)
+    /// so the status applies that rebuild everything else each pass —
+    /// which never set it — cannot remove it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stateid_tag: Option<u32>,
+
     /// Set while `Conflict` is True: who owns this bucket subtree, and
     /// whether this share's bytes are already being served by them.
     ///

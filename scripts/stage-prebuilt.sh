@@ -42,7 +42,7 @@ dest="$crate/docker/prebuilt"
 # flint-s3-csi-node and flint-s3-broker are the s3.csi.chert.us image
 # (Dockerfile.s3csi.prebuilt); the worker that image's plugin launches
 # comes from its own crate, below.
-BINS="csi-driver flint-nfs-server flint-pnfs-mds flint-pnfs-ds flint-lite-operator flint-hub-gateway flint-lean-operator flint-s3-csi-node flint-s3-broker"
+BINS="csi-driver flint-nfs-server flint-pnfs-mds flint-pnfs-ds flint-lite-operator flint-hub-gateway flint-nfs-proxy flint-lean-operator flint-s3-csi-node flint-s3-broker"
 
 # A LEAN-SCOPED release (the 1.38.0 shape: only the flint-lean chart and
 # the two images it pulls) republishes the operator image and the syncer
@@ -61,7 +61,7 @@ BINS="csi-driver flint-nfs-server flint-pnfs-mds flint-pnfs-ds flint-lite-operat
 SCOPE=${1:-all}
 case "$SCOPE" in
     all)  ;;
-    lean) BINS="flint-lite-operator flint-hub-gateway flint-lean-operator" ;;
+    lean) BINS="flint-lite-operator flint-hub-gateway flint-nfs-proxy flint-lean-operator" ;;
     s3csi|passthrough)
           SCOPE=s3csi; BINS="flint-s3-csi-node flint-s3-broker" ;;
     # A FORGE-scoped release publishes three images of its own and

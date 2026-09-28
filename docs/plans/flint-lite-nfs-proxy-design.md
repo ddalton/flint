@@ -632,6 +632,41 @@ port are still wanted for capacity and failure isolation.
    (and, under ambient, the L4 `AuthorizationPolicy`) admitting only
    the proxy's ServiceAccount. Drill control: a pod beside the proxy,
    under a different ServiceAccount, must fail to connect to a hub.
+   **DONE 2026-09-28** (`--nfs-proxy` / chart `nfsProxy.enabled`):
+   - the operator assigns each share a random, fleet-unique
+     `status.stateidTag` ONCE, written by its own field manager
+     (`flint-lite-operator/stateid-tag`) so the main status apply —
+     server-side, forced, and rebuilt every pass — can never remove it;
+     tags assigned in-process are remembered by uid, so a lagging store
+     cannot cause a second pick;
+   - hubs get H1 + their tag as env and headless NFS Services;
+   - **with the proxy on, every hub runs its status listener and is
+     polled**: `serverId` is the routing key and `/status` its only
+     source (the first kind run found every share Ready with no
+     `serverId` — monitoring is off by default and the ladder polled
+     only shares with an idle policy); the file API stays the spec's;
+   - the proxy's kube mode derives its rows from a FlintShare watch
+     (routable once a share has an address, `serverId` and tag; parked
+     shares stay listed; a collision drops the later share, not the
+     table) and wakes by stamping `chert.us/requested-at` (not for an
+     admin's `Suspended`); a root whose instance id disagrees with the
+     table is DELAY (a woken share's new `serverId` not yet published);
+   - the chart: the proxy Deployment (1 replica, Recreate), a
+     LoadBalancer on 2049 (`externalTrafficPolicy: Local`), the client
+     table PVC, RBAC, and the hub NetworkPolicy admitting the proxy on
+     2049; it refuses to install without identities. The binary ships in
+     the operator image, and `release.sh` refuses to push the chart if
+     the image lacks any binary the chart execs.
+   **Kind drill 14/14** (`step4-kind.sh`, `results-kind-step4/`): tags
+   distinct and owned by the tag manager alone, unchanged across an
+   operator and a hub restart; `/` lists exactly the allowed workspaces;
+   bytes land in the right hub; an idle-suspended workspace is woken by
+   the proxy and the write completes (14 s); a stranger pod cannot reach
+   a hub's 2049 while a pod with the proxy's labels can (kindnet
+   enforces NetworkPolicy — this is a real result, not a vacuous one).
+   **Not done:** the ambient `AuthorizationPolicy` (the NetworkPolicy
+   peer is label-based, not ServiceAccount-based) and the §6a Istio
+   checks.
 5. **Scale prerequisites (§7a):** hibernate as the inactive default,
    with **zero live leases as a hibernation precondition** (the HIB-1
    fix, and now required by §4); hub defects **D1** (`FREE_STATEID` →

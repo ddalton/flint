@@ -27,6 +27,17 @@ pub struct HubRow {
     pub address: String,
     pub server_id: u64,
     pub stateid_tag: u32,
+    /// The FlintShare (namespace, name) behind the row, in kube mode:
+    /// what a wake stamps.
+    #[serde(default)]
+    pub share: Option<(String, String)>,
+    /// False for an admin's `Suspended`: the proxy does not wake it.
+    #[serde(default = "yes")]
+    pub wakeable: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// Who a connection is, and what it may see.
@@ -223,7 +234,7 @@ mod tests {
     use super::*;
 
     fn row(name: &str, id: u64, tag: u32) -> HubRow {
-        HubRow { name: name.into(), address: format!("10.1.0.{id}:2049"), server_id: id, stateid_tag: tag }
+        HubRow { name: name.into(), address: format!("10.1.0.{id}:2049"), server_id: id, stateid_tag: tag, share: None, wakeable: true }
     }
 
     fn table() -> Arc<Table> {

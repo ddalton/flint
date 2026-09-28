@@ -6,12 +6,12 @@
 #   # from spdk-csi-driver, flint-lean-gateway from lean/gateway.
 #   for T in x86_64 aarch64; do
 #     cargo zigbuild --release --target $T-unknown-linux-musl \
-#       --bin flint-lite-operator --bin flint-hub-gateway \
+#       --bin flint-lite-operator --bin flint-hub-gateway --bin flint-nfs-proxy \
 #       --bin flint-lean-operator
 #     (cd ../lean/gateway && cargo zigbuild --release --features s3 \
 #       --target $T-unknown-linux-musl --bin flint-lean-gateway); done
-#   # stage: docker/prebuilt/amd64/{flint-lite-operator,flint-hub-gateway}
-#   #        docker/prebuilt/arm64/{flint-lite-operator,flint-hub-gateway}
+#   # stage: docker/prebuilt/amd64/{flint-lite-operator,flint-hub-gateway,flint-nfs-proxy}
+#   #        docker/prebuilt/arm64/{flint-lite-operator,flint-hub-gateway,flint-nfs-proxy}
 #   for A in amd64 arm64; do
 #     docker build --platform linux/$A -f docker/Dockerfile.operator.prebuilt \
 #       --build-arg BIN_DIR=docker/prebuilt \
@@ -50,6 +50,11 @@ COPY ${BIN_DIR}/${TARGETARCH}/flint-lite-operator /usr/local/bin/flint-lite-oper
 # nothing at runtime (different ServiceAccount, different RBAC,
 # different pods), so this is packaging and not coupling.
 COPY ${BIN_DIR}/${TARGETARCH}/flint-hub-gateway /usr/local/bin/flint-hub-gateway
+
+# flint-nfs-proxy, the same way: one NFS port in front of every hub
+# (docs/plans/flint-lite-nfs-proxy-design.md), chosen by `command:` when
+# the chart's nfsProxy.enabled is on.
+COPY ${BIN_DIR}/${TARGETARCH}/flint-nfs-proxy /usr/local/bin/flint-nfs-proxy
 
 # flint-lean's operator and gateway ride here too, and the chart already
 # says so: flint-lean-chart/values.yaml names THIS image and its

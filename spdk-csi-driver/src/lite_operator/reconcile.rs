@@ -314,6 +314,75 @@ pub struct Ctx {
     /// Consecutive reconcile failures per share, for [`error_policy`]'s
     /// backoff. Keyed `namespace/name`; cleared on any success.
     pub failures: dashmap::DashMap<String, u32>,
+    /// Stateid tags this process assigned, by share uid. Two reasons the
+    /// fleet store alone is not enough: 32 reconciles run at once, so two
+    /// shares can pick before either write reaches the store; and the
+    /// store can lag this share's OWN write, so its next pass would see
+    /// no tag and pick a second one — the one thing a set-once tag must
+    /// never do.
+    pub assigned_tags: std::sync::Mutex<std::collections::HashMap<String, u32>>,
+}
+
+/// The field manager that owns `status.stateidTag`, and nothing else.
+pub const TAG_MANAGER: &str = "flint-lite-operator/stateid-tag";
+
+/// A fresh stateid tag: non-zero (0 would read as "untagged" in a dump)
+/// and not in `used`. Random, not hashed from anything: the proxy routes
+/// by what the status SAYS (design §6).
+pub fn pick_stateid_tag(used: &std::collections::HashSet<u32>, mut next: impl FnMut() -> u32) -> u32 {
+    loop {
+        let t = next();
+        if t != 0 && !used.contains(&t) {
+            return t;
+        }
+    }
+}
+
+/// nfs-proxy H2: give the share its stateid tag, once, before the first
+/// render that could start its hub behind the proxy. Returns the share as
+/// the render must see it.
+async fn ensure_stateid_tag(ctx: &Ctx, share: Arc<FlintShare>) -> Result<Arc<FlintShare>> {
+    if share.status.as_ref().and_then(|s| s.stateid_tag).is_some() {
+        return Ok(share);
+    }
+    let uid = share.uid().unwrap_or_else(|| format!("{}/{}", share.namespace().unwrap_or_default(), share.name_any()));
+    let (tag, fresh) = {
+        let mut assigned = ctx.assigned_tags.lock().unwrap();
+        match assigned.get(&uid) {
+            // Assigned by this process already; the store has not caught
+            // up with our write. The SAME tag, written again.
+            Some(t) => (*t, false),
+            None => {
+                let mut used: std::collections::HashSet<u32> = ctx
+                    .fleet
+                    .state()
+                    .iter()
+                    .filter_map(|s| s.status.as_ref()?.stateid_tag)
+                    .collect();
+                used.extend(assigned.values().copied());
+                let t = pick_stateid_tag(&used, rand::random);
+                assigned.insert(uid, t);
+                (t, true)
+            }
+        }
+    };
+    let ns = share.namespace().unwrap_or_default();
+    let api: Api<FlintShare> = Api::namespaced(ctx.client.clone(), &ns);
+    let patch = json!({
+        "apiVersion": "chert.us/v1alpha1",
+        "kind": "FlintShare",
+        "status": { "stateidTag": tag },
+    });
+    // Its own manager, NOT forced: if anything else ever claims this
+    // field, the conflict must surface rather than be overwritten.
+    api.patch_status(&share.name_any(), &PatchParams::apply(TAG_MANAGER), &Patch::Apply(&patch))
+        .await?;
+    if fresh {
+        event(ctx, &share, EventType::Normal, "StateidTagAssigned", &format!("stateid tag {tag} (nfs proxy H2); set once")).await;
+    }
+    let mut s = (*share).clone();
+    s.status.get_or_insert_with(Default::default).stateid_tag = Some(tag);
+    Ok(Arc::new(s))
 }
 
 /// The arbitration table for the current fleet, rebuilt only when the
@@ -946,6 +1015,8 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
                 observed_generation: generation,
                 claim_name: None,
                 server_id: carry_server_id(&share, None),
+                // Owned by the tag's own field manager, never this one.
+                stateid_tag: None,
                 conflict_with: redirect,
                 conditions: Some(conds),
             },
@@ -1011,6 +1082,8 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
                     observed_generation: generation,
                     claim_name: Some(names.claim.clone()),
                     server_id: carry_server_id(&share, None),
+                    // Owned by the tag's own field manager, never this one.
+                    stateid_tag: None,
                     conflict_with: None,
                     conditions: Some(conds),
                 },
@@ -1087,6 +1160,10 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
     }
 
     // --- 4. Render -----------------------------------------------------
+    // Behind the NFS proxy the hub needs its stateid tag before it is
+    // rendered at all: a hub that ever started untagged would have
+    // minted stateids the proxy cannot route.
+    let share = if ctx.defaults.nfs_proxy { ensure_stateid_tag(&ctx, share).await? } else { share };
     // A pre-existing Deployment keeps its selector: selectors are
     // immutable, and an adopted chart Deployment was born with
     // `app: flint-lite`.
@@ -1341,6 +1418,8 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
                 observed_generation: generation,
                 claim_name: Some(names.claim.clone()),
                 server_id: carry_server_id(&share, None),
+                // Owned by the tag's own field manager, never this one.
+                stateid_tag: None,
                 conflict_with: None,
                 conditions: Some(conds),
             },
@@ -1451,6 +1530,8 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
             observed_generation: generation,
             claim_name: Some(names.claim.clone()),
             server_id: carry_server_id(&share, idle_outcome.server_id.clone()),
+            // Owned by the tag's own field manager, never this one.
+            stateid_tag: None,
             conflict_with: None,
             conditions: Some(conds.clone()),
         },
@@ -1571,7 +1652,7 @@ async fn drive_idle_ladder(
     // pay the poll — but forgetting it here is silent, and it was:
     // this branch is why the first drill run watched a 1Gi claim sit
     // at 1Gi under a 600 MiB project, with every unit test passing.
-    if !needs_hub_poll(share, state) {
+    if !needs_hub_poll(share, state, ctx.defaults.nfs_proxy) {
         return Ok(IdleOutcome {
             phase: ladder_phase.unwrap_or(Phase::Pending),
             short_circuit: None,
@@ -2101,8 +2182,16 @@ async fn drive_reprovision(
 /// of auto-expand watched a 1Gi claim sit at 1Gi under a 600 MiB
 /// project, with every unit test green, purely because this function's
 /// third arm did not exist.
-pub fn needs_hub_poll(share: &FlintShare, state: IdleState) -> bool {
-    if share.spec.idle.is_some() || state != IdleState::Active {
+pub fn needs_hub_poll(share: &FlintShare, state: IdleState, nfs_proxy: bool) -> bool {
+    // Behind the NFS proxy, `status.serverId` is the ROUTING KEY (the FH
+    // instance id), not a hint: every running hub is polled so it is
+    // observed at all — a share with no idle policy never was, and the
+    // proxy could not route to it (step-4 kind drill) — and so a NEW id
+    // after a reprovision onto a fresh disk is picked up rather than
+    // left stale, which the proxy would answer with DELAY forever. The
+    // cost is the round trip the ladder already makes for every share
+    // with an idle policy, which §7a makes the fleet default.
+    if nfs_proxy || share.spec.idle.is_some() || state != IdleState::Active {
         return true;
     }
     share
@@ -2395,14 +2484,13 @@ async fn poll_hub(
     names: &render::Names,
     dep: Option<&Deployment>,
 ) -> std::result::Result<hubstatus::HubSnapshot, String> {
-    let Some(m) = share.spec.monitoring.as_ref().filter(|m| m.enabled.unwrap_or(false)) else {
+    let Some(port) = render::health_port(share, &ctx.defaults) else {
         return Err(
             "spec.monitoring is off, so the hub publishes no status — the idle ladder cannot \
              tell whether anyone is using this share"
                 .to_string(),
         );
     };
-    let port = m.port.unwrap_or(render::HEALTH_PORT);
 
     // SELECTED, not the whole namespace. This runs once per poll per
     // share, so at fleet scale it is the dominant API-server term — and
@@ -2538,6 +2626,8 @@ async fn cleanup(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
             observed_generation: share.metadata.generation,
             claim_name: Some(names.claim.clone()),
             server_id: carry_server_id(&share, None),
+            // Owned by the tag's own field manager, never this one.
+            stateid_tag: None,
             conflict_with: None,
             conditions: Some(conds),
         },
@@ -2860,6 +2950,18 @@ pub fn shares_using_claim(
 }
 
 #[cfg(test)]
+mod stateid_tag_tests {
+    use super::pick_stateid_tag;
+
+    #[test]
+    fn a_picked_tag_is_never_zero_and_never_one_already_in_use() {
+        let used: std::collections::HashSet<u32> = [7, 9].into_iter().collect();
+        let mut seq = [0u32, 7, 9, 7, 42].into_iter();
+        assert_eq!(pick_stateid_tag(&used, || seq.next().unwrap()), 42);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::lite_operator::crd::{FlintShareSpec, IdleSpec, PersistenceSpec};
@@ -3037,30 +3139,41 @@ mod tests {
     fn an_auto_expand_share_is_polled_even_with_no_idle_policy() {
         let plain = share_named("p");
         assert!(
-            !needs_hub_poll(&plain, IdleState::Active),
+            !needs_hub_poll(&plain, IdleState::Active, false),
             "the common case must still cost nothing"
         );
 
         let ae = with_auto_expand(share_named("p"), "50Gi");
         assert!(
-            needs_hub_poll(&ae, IdleState::Active),
+            needs_hub_poll(&ae, IdleState::Active, false),
             "auto-expand needs the gauges, so it needs the poll"
         );
 
         // Off means off: no poll bought by merely mentioning the block.
         let mut off = with_auto_expand(share_named("p"), "50Gi");
         off.spec.persistence.auto_expand.as_mut().unwrap().enabled = Some(false);
-        assert!(!needs_hub_poll(&off, IdleState::Active));
+        assert!(!needs_hub_poll(&off, IdleState::Active, false));
 
         // The other two reasons still stand on their own.
-        assert!(needs_hub_poll(&plain, IdleState::Suspended));
+        assert!(needs_hub_poll(&plain, IdleState::Suspended, false));
         let mut idle_cfg = share_named("p");
         idle_cfg.spec.idle = Some(crate::lite_operator::crd::IdleSpec {
             suspend_after_secs: Some(900),
             hibernate_after_secs: None,
             suspend_with_sessions: None,
         });
-        assert!(needs_hub_poll(&idle_cfg, IdleState::Active));
+        assert!(needs_hub_poll(&idle_cfg, IdleState::Active, false));
+    }
+
+    /// Behind the NFS proxy, `serverId` routes: a plain share (no idle
+    /// policy, no auto-expand) must be polled or it is never routable.
+    /// Found on the step-4 kind drill: every share Ready, none with a
+    /// serverId, and a proxy with nothing to route to.
+    #[test]
+    fn behind_the_proxy_every_running_hub_is_polled_for_its_server_id() {
+        let plain = share_named("p");
+        assert!(!needs_hub_poll(&plain, IdleState::Active, false), "control: off, the plain share costs nothing");
+        assert!(needs_hub_poll(&plain, IdleState::Active, true));
     }
 
     /// The interaction that loops if nobody guards it: the user lowers

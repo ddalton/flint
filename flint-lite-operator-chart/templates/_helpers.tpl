@@ -75,3 +75,22 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
+
+{{/* flint-nfs-proxy: its own name and labels, like the gateway. */}}
+{{- define "flint-lite-operator.nfsProxyName" -}}
+{{- printf "%s-nfs-proxy" (include "flint-lite-operator.name" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "flint-lite-operator.nfsProxySelectorLabels" -}}
+app.kubernetes.io/name: {{ include "flint-lite-operator.nfsProxyName" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{- define "flint-lite-operator.nfsProxyLabels" -}}
+helm.sh/chart: {{ include "flint-lite-operator.chart" . }}
+{{ include "flint-lite-operator.nfsProxySelectorLabels" . }}
+{{- if .Chart.AppVersion }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{- end }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}

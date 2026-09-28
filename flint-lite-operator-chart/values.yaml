@@ -275,6 +275,65 @@ gateway:
   tolerations: []
   podAnnotations: {}
 
+
+# flint-nfs-proxy: ONE NFS port in front of every hub
+# (docs/plans/flint-lite-nfs-proxy-design.md). Clients mount the proxy,
+# `/` lists the workspaces their identity may use, and each workspace is
+# its own filesystem. Off by default.
+#
+# Turning it on also switches the OPERATOR: hubs get H1 (a per-volume
+# fsid) and their stateid tag (assigned once, into status.stateidTag),
+# and their NFS Services become headless. The hub NetworkPolicy admits
+# the proxy on 2049 (networkPolicy.enabled).
+nfsProxy:
+  enabled: false
+
+  # Who may see which workspace. REQUIRED: a client that matches no
+  # identity sees an empty `/`. `sources` are the addresses the proxy
+  # sees — keep them real with service.externalTrafficPolicy: Local (or
+  # an NLB with IP targets). A remote cluster behind a NAT gateway is
+  # one address. Workspace patterns: exact names, or a trailing `*`.
+  # (Client certificates — RPC-with-TLS — are design §6a, not yet built.)
+  identities: []
+  #  - name: cluster-a
+  #    sources: ["10.20.0.0/16"]
+  #    workspaces: ["team-a-*"]
+
+  # FlintShares to serve. "" = every namespace.
+  watchNamespace: ""
+
+  # MUST equal the hubs' lease (90 unless FLINT_NFS_LEASE_SECS is set on
+  # them). The kernel renews on the lease of the last fsinfo it ran,
+  # which for a workspace is the hub's; a proxy lease that differs reaps
+  # live clients or holds dead ones (design §4 Leases).
+  leaseSecs: 90
+
+  service:
+    type: LoadBalancer
+    port: 2049
+    # Local keeps the client address, which is the identity above.
+    externalTrafficPolicy: Local
+    annotations: {}
+
+  # The persisted client table (proxy.db): a proxy restart costs clients
+  # one CREATE_SESSION, not a reclaim. Small; RWO.
+  persistence:
+    size: 1Gi
+    storageClassName: ""
+
+  logLevel: ""
+  resources:
+    requests:
+      cpu: 200m
+      memory: 128Mi
+    limits:
+      memory: 1Gi
+  nodeSelector: {}
+  tolerations: []
+  # Under Istio ambient: ambient.istio.io/bypass-inbound-capture: "true"
+  # (design §6a — the proxy terminates its own clients).
+  podAnnotations: {}
+
 rbac:
   # Create the ClusterRole/Binding. The operator needs cluster scope:
   # shares live in tenant namespaces and uniqueness spans all of them.

@@ -59,6 +59,14 @@ impl Waker for LogWaker {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KubeSource {
+    /// Watch one namespace; unset = every namespace.
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -87,8 +95,13 @@ pub struct ProxyConfig {
     /// The persisted client table (`proxy.db`) and the empty export the
     /// session dispatcher is built over.
     pub state_dir: PathBuf,
+    /// Static rows (the box rig, tests). Ignored when `kube` is set.
     #[serde(default)]
     pub hubs: Vec<HubRow>,
+    /// Derive the rows from a FlintShare watch (design §6) and wake
+    /// parked hubs through the API server.
+    #[serde(default)]
+    pub kube: Option<KubeSource>,
     #[serde(default)]
     pub identities: Vec<IdentityRule>,
 }
@@ -160,6 +173,10 @@ enum Piece {
 
 impl Proxy {
     pub async fn new(cfg: &ProxyConfig) -> Result<Arc<Self>, String> {
+        Self::new_with(cfg, Arc::new(LogWaker)).await
+    }
+
+    pub async fn new_with(cfg: &ProxyConfig, waker: Arc<dyn Waker>) -> Result<Arc<Self>, String> {
         // The process lease (`lease::set_lease_time`) is the BINARY's to
         // set, before this: tests share one process.
         let root = cfg.state_dir.join("empty-root");
@@ -184,7 +201,7 @@ impl Proxy {
             setup: tokio::sync::Mutex::new(()),
             slots: Mutex::new(HashMap::new()),
             second_target: AtomicU64::new(0),
-            waker: Arc::new(LogWaker),
+            waker,
             last_wake: Mutex::new(HashMap::new()),
             hub_lease: std::time::Duration::from_secs(cfg.lease_secs),
             keepalive: cfg.keepalive,
@@ -696,8 +713,13 @@ impl Proxy {
             let root = client.root_fh().await?;
             if route::hub_of_fh(&root) != Some(hub) {
                 // The table's serverId is not the hub's instance id: every
-                // handle it mints would route elsewhere (or nowhere).
-                return Err(BackendError::Protocol(format!(
+                // handle it mints would route elsewhere (or nowhere). The
+                // usual cause is a share woken from hibernation onto a new
+                // disk, whose new serverId the operator has not published
+                // yet — which clears by itself, so this is DELAY (Down),
+                // not an error. A table that is simply WRONG shows up as
+                // this line repeating in the log.
+                return Err(BackendError::Down(format!(
                     "{}: root handle instance {:?} != serverId {hub:#x} (is FLINT_NFS_FSID_FROM_VOLUME / the table right?)",
                     row.name,
                     route::hub_of_fh(&root)
@@ -810,7 +832,8 @@ mod tests {
             lease_secs: 90,
             keepalive: false,
             state_dir: dir.join("proxy"),
-            hubs: vec![HubRow { name: "ws-a".into(), address: hub_addr.into(), server_id: HUB_ID, stateid_tag: 10 }],
+            hubs: vec![HubRow { name: "ws-a".into(), address: hub_addr.into(), server_id: HUB_ID, stateid_tag: 10, share: None, wakeable: true }],
+            kube: None,
             identities: vec![IdentityRule { name: "t".into(), sources: vec!["127.0.0.1/32".into()], workspaces: vec!["ws-*".into()] }],
         };
         let p = Proxy::new(&cfg).await.unwrap();
@@ -973,5 +996,21 @@ mod tests {
         assert_eq!(st, 0, "status {st} (10008 = DELAY, the forever-loop)");
         assert!(dir.path().join("export/b").is_dir());
         assert!(hub_state.clients.id_of_owner(b"flint-proxy/test-client").is_some(), "registered again");
+    }
+
+    /// The config the chart renders (flint-lite-operator-chart
+    /// templates/nfs-proxy.yaml, `helm template` output verbatim) is the
+    /// config this binary parses — kube mode, all namespaces.
+    #[test]
+    fn the_charts_rendered_config_parses() {
+        let rendered = "listen: 0.0.0.0:2049\nstateDir: /var/lib/flint-nfs-proxy\nleaseSecs: 90\nkube:\n  {}\nidentities:\n  - name: local\n    sources:\n    - 10.0.0.0/8\n    workspaces:\n    - ws-*\n";
+        let cfg: ProxyConfig = serde_yaml::from_str(rendered).unwrap();
+        assert_eq!(cfg.lease_secs, 90);
+        assert!(cfg.kube.as_ref().is_some_and(|k| k.namespace.is_none()), "kube mode, every namespace");
+        assert!(cfg.hubs.is_empty() && cfg.keepalive);
+        assert_eq!(cfg.identities[0].workspaces, vec!["ws-*"]);
+        let one_ns = rendered.replace("kube:\n  {}", "kube:\n  namespace: \"workspaces\"");
+        let cfg: ProxyConfig = serde_yaml::from_str(&one_ns).unwrap();
+        assert_eq!(cfg.kube.unwrap().namespace.as_deref(), Some("workspaces"));
     }
 }
