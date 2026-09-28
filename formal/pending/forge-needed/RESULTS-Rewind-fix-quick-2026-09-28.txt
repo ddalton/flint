@@ -1,0 +1,5 @@
+# 2026-09-28, the Mac, tlc-rs badaa979 (1 worker), ForgeSyncRewind.tla md5 5ee1b260 (RestoreDropsNamedRetention added, TRUE here).
+# The teeth and probes after the change; counts differ from TLC's 09-26 run (SYMMETRY+VIEW at 1 worker without -var-order; the verdict is the comparison).
+ForgeSyncRewindProbeCollected        Error: Invariant ProbeRewoundCollected is violated. | 581116 states generated, 179107 distinct states found. Depth 19. Checked in 12.661s (14146 distinct/s).
+ForgeSyncRewindProbeResurrected      Error: Invariant ProbeResurrected is violated. | 11652022 states generated, 3189392 distinct states found. Depth 26. Checked in 267.751s (11912 distinct/s).
+ForgeSyncRewindTrustsDisk            Error: Invariant Inv_LandedPackComplete is violated. | 19120696 states generated, 5172342 distinct states found. Depth 27. Checked in 533.798s (9690 distinct/s).

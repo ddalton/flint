@@ -218,7 +218,8 @@ CONSTANTS
   MaxRewinds,           \* REWIND: ref moves to a proper ancestor, or deletes
   MaxResends,           \* REWIND: re-pushes of a commit no ref reaches
   NeededTrustsDisk,     \* REWIND mutation: a need no local pack holds is not an error
-  NeededSkipsRetained   \* REWIND mutation: the need is looked for outside retention only (F6's subtraction)
+  NeededSkipsRetained,  \* REWIND mutation: the need is looked for outside retention only (F6's subtraction)
+  RestoreDropsNamedRetention \* REWIND: a restore takes every pack the snapshot names out of `retained`
 
 Stages == {"none", "judged", "renewed", "hashed", "initiated", "uploaded",
            "cas", "refs"}
@@ -556,7 +557,7 @@ Restore(s) ==
             /\ localMain' = [localMain EXCEPT ![s] = 0]
             /\ st' = [st EXCEPT ![s] = "serving"]
             /\ UNCHANGED <<lease, batch, fold, unrestorable, pushState, localPacks,
-                           migrating, sensorMoved, realMoved, quiet>>
+                           migrating, sensorMoved, realMoved, quiet, retained>>
        ELSE LET fetched == snap.packs \cap packObj
                 usable  == fetched \cap idxObj IN
             IF \/ snap.packs # fetched                       \* a named pack is absent
@@ -579,7 +580,7 @@ Restore(s) ==
               THEN \* exit 78: refused, and the restart refuses again.
                    /\ unrestorable' = TRUE
                    /\ Fall(s)
-                   /\ UNCHANGED <<belief, localMain, localPacks, migrating>>
+                   /\ UNCHANGED <<belief, localMain, localPacks, migrating, retained>>
               ELSE /\ belief' = [belief EXCEPT ![s] =
                                    [etag |-> snap.etag, main |-> snap.main, packs |-> snap.packs]]
                    /\ localMain' = [localMain EXCEPT ![s] = snap.main]
@@ -588,6 +589,20 @@ Restore(s) ==
                    \* list comes back from the state file a restart
                    \* inherits — so retention survives a restore.
                    /\ localPacks' = [localPacks EXCEPT ![s] = usable \cup retained[s]]
+                   \* A NAMED PACK IS NOT ON ITS WAY OUT. With rewinds a pack
+                   \* this syncer's fold superseded can be named again by
+                   \* another syncer: the rewound commit is re-pushed there
+                   \* and its needed listing names the same pack (names are
+                   \* many-to-one). Naming cancels retention only on the
+                   \* syncer that named it, so the state file this restore
+                   \* inherits still lists the pack as retained, and the
+                   \* next batch here names `belief.packs \ retained`,
+                   \* unnaming the pack the ref needs; retention then unlinks
+                   \* it. ForgeSyncRewindHolds found it on 2026-09-27
+                   \* (39 states). FALSE is that model, kept as the mutation.
+                   /\ retained' = IF RestoreDropsNamedRetention
+                                    THEN [retained EXCEPT ![s] = @ \ snap.packs]
+                                    ELSE retained
                    /\ migrating' = [migrating EXCEPT ![s] = {}]
                    /\ realMoved' = [realMoved EXCEPT ![s] = TRUE]
                    /\ sensorMoved' = [sensorMoved EXCEPT ![s] = TRUE]
@@ -620,7 +635,7 @@ Restore(s) ==
   /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, lastTok, hbDue,
                  pushTo, crashes, renewBudget, claimBudget, ackNotDurable,
                  skipOverMovement, stragglerLand, toldFailedButDurable,
-                 renewOverWedge, retained, provedOffBucket,
+                 renewOverWedge, provedOffBucket,
                  provedOverRetained>>
   /\ UNCHANGED FoldPlanVars
 
