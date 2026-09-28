@@ -16,8 +16,10 @@
 //!  - `[]<>P` fails iff some fair component lies within ~P.
 
 use crate::eval::{Act, Bufs, Expr, FairTree, Program, TProp};
+use crate::store::{io, put_var, Meta};
 use crate::value::{Value, R};
 use std::collections::HashMap;
+use std::io::Write;
 
 pub type State = Box<[Value]>;
 
@@ -163,54 +165,347 @@ pub fn is_graph_leaf(t: &TProp) -> bool {
     matches!(t, TProp::LeadsTo(..) | TProp::EventuallyAlways(_) | TProp::AlwaysEventually(_))
 }
 
-// ---- the graph ----------------------------------------------------------------
+// ---- which state predicates the graph carries ------------------------------
 
+/// Where each graph-leaf instance's predicates sit in a node's bit words:
+/// `P ~> Q` has two bits (P, Q), `[]<>P` and `<>[]P` one.
+pub struct Layout {
+    /// per instance (indexes into the checker's `props`): its first bit
+    pub base: Vec<Option<usize>>,
+    pub words: usize,
+}
+
+pub fn layout(props: &[Inst]) -> Layout {
+    let mut next = 0;
+    let base = props
+        .iter()
+        .map(|i| match i.leaf {
+            TProp::LeadsTo(..) => {
+                next += 2;
+                Some(next - 2)
+            }
+            TProp::AlwaysEventually(_) | TProp::EventuallyAlways(_) => {
+                next += 1;
+                Some(next - 1)
+            }
+            _ => None,
+        })
+        .collect();
+    Layout { base, words: next.div_ceil(64) }
+}
+
+/// A node's predicate bits, evaluated once, when the state is expanded:
+/// the graph never needs the state again.
+pub fn node_bits(p: &Program, props: &[Inst], lay: &Layout, st: &[Value], bufs: &mut Bufs, out: &mut Vec<u64>) -> R<()> {
+    out.clear();
+    out.resize(lay.words, 0);
+    for (i, inst) in props.iter().enumerate() {
+        let Some(b) = lay.base[i] else { continue };
+        let mut set = |k: usize, e: &Expr, bufs: &mut Bufs| -> R<()> {
+            if eval_env(p, e, inst.frame, &inst.env, st, None, bufs)?.as_bool()? {
+                out[k / 64] |= 1 << (k % 64);
+            }
+            Ok(())
+        };
+        match inst.leaf {
+            TProp::LeadsTo(pe, qe) => {
+                set(b, pe, bufs)?;
+                set(b + 1, qe, bufs)?;
+            }
+            TProp::AlwaysEventually(pe) | TProp::EventuallyAlways(pe) => set(b, pe, bufs)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+// ---- the graph on disk --------------------------------------------------------
+
+/// Per worker, an append-only log of expanded nodes, one record each:
+/// trace index, key, enabled fairness actions, predicate bits, and the
+/// edges out (target key, fairness actions the step is a step of).
+/// Nothing of the graph stays in memory during the search.
+pub struct GraphLogs {
+    pub logs: Vec<std::sync::Mutex<GLog>>,
+}
+
+pub struct GLog {
+    slot: usize,
+    file: Option<std::fs::File>,
+    buf: Vec<u8>,
+    /// bytes in the file
+    pub flushed: u64,
+    /// records written (flushed or not)
+    pub records: u64,
+}
+
+impl GraphLogs {
+    pub fn new(workers: usize) -> GraphLogs {
+        GraphLogs {
+            logs: (0..workers.max(1))
+                .map(|slot| std::sync::Mutex::new(GLog { slot, file: None, buf: Vec::new(), flushed: 0, records: 0 }))
+                .collect(),
+        }
+    }
+    pub fn records(&self) -> u64 {
+        self.logs.iter().map(|l| l.lock().unwrap().records).sum()
+    }
+    pub fn flush_all(&self, meta: &Meta) -> R<()> {
+        for l in &self.logs {
+            l.lock().unwrap().flush(meta)?;
+        }
+        Ok(())
+    }
+    pub fn lengths(&self) -> Vec<(u64, u64)> {
+        self.logs.iter().map(|l| { let l = l.lock().unwrap(); (l.flushed, l.records) }).collect()
+    }
+    /// After a checkpoint's recovery: each log cut back to the checkpoint's
+    /// length. Records written after it (by expansions in progress when
+    /// the run stopped) are not part of it; TLC's own disk graph is not
+    /// cut, and its recovery then fails reading it (seen by flint-27).
+    pub fn truncate(&mut self, meta: &Meta, lens: &[(u64, u64)]) -> R<()> {
+        while self.logs.len() < lens.len() {
+            let slot = self.logs.len();
+            self.logs.push(std::sync::Mutex::new(GLog { slot, file: None, buf: Vec::new(), flushed: 0, records: 0 }));
+        }
+        for (slot, &(len, records)) in lens.iter().enumerate() {
+            let p = meta.dir.join(format!("graph-{slot}.bin"));
+            let mut l = self.logs[slot].lock().unwrap();
+            if len == 0 {
+                let _ = std::fs::remove_file(&p);
+                continue;
+            }
+            let f = io("graph log", std::fs::OpenOptions::new().read(true).append(true).open(&p))?;
+            io("graph log", f.set_len(len))?;
+            l.file = Some(f);
+            l.flushed = len;
+            l.records = records;
+        }
+        Ok(())
+    }
+    fn paths(&self, meta: &Meta) -> Vec<std::path::PathBuf> {
+        self.logs.iter().filter(|l| l.lock().unwrap().flushed > 0).map(|l| meta.dir.join(format!("graph-{}.bin", l.lock().unwrap().slot))).collect()
+    }
+}
+
+impl GLog {
+    /// One node's record.
+    pub fn append(&mut self, meta: &Meta, tidx: u64, key: u64, en: u128, bits: &[u64], edges: &[(u64, u128)]) -> R<()> {
+        let b = &mut self.buf;
+        put_var(b, tidx);
+        b.extend_from_slice(&key.to_le_bytes());
+        put_var(b, en as u64);
+        put_var(b, (en >> 64) as u64);
+        for &w in bits {
+            put_var(b, w);
+        }
+        put_var(b, edges.len() as u64);
+        for &(t, m) in edges {
+            b.extend_from_slice(&t.to_le_bytes());
+            put_var(b, m as u64);
+            put_var(b, (m >> 64) as u64);
+        }
+        self.records += 1;
+        if self.buf.len() >= 4 << 20 {
+            self.flush(meta)?;
+        }
+        Ok(())
+    }
+    fn flush(&mut self, meta: &Meta) -> R<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        if self.file.is_none() {
+            let p = meta.path(&format!("graph-{}.bin", self.slot))?;
+            self.file = Some(io("graph log", std::fs::OpenOptions::new().create(true).read(true).append(true).open(p))?);
+        }
+        io("graph log", self.file.as_mut().unwrap().write_all(&self.buf))?;
+        self.flushed += self.buf.len() as u64;
+        self.buf.clear();
+        Ok(())
+    }
+}
+
+/// Reads the records of one graph log, in order, streaming.
+fn each_record(path: &std::path::Path, words: usize, mut f: impl FnMut(u64, u64, u128, &[u64], &[(u64, u128)]) -> R<()>) -> R<()> {
+    use std::io::Read;
+    let mut r = std::io::BufReader::with_capacity(1 << 20, io("graph log", std::fs::File::open(path))?);
+    let mut byte = [0u8; 1];
+    // Ok(None) at a clean end of file
+    let mut var = |r: &mut std::io::BufReader<std::fs::File>, first: bool| -> R<Option<u64>> {
+        let (mut n, mut shift) = (0u64, 0);
+        loop {
+            match r.read_exact(&mut byte) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof && first && shift == 0 => return Ok(None),
+                Err(e) => return Err(format!("graph log: {e}")),
+            }
+            n |= ((byte[0] & 0x7f) as u64) << shift;
+            if byte[0] < 0x80 {
+                return Ok(Some(n));
+            }
+            shift += 7;
+        }
+    };
+    let u64le = |r: &mut std::io::BufReader<std::fs::File>| -> R<u64> {
+        let mut b = [0u8; 8];
+        io("graph log", r.read_exact(&mut b))?;
+        Ok(u64::from_le_bytes(b))
+    };
+    let (mut bits, mut edges) = (Vec::with_capacity(words), Vec::new());
+    loop {
+        let Some(tidx) = var(&mut r, true)? else { return Ok(()) };
+        let key = u64le(&mut r)?;
+        let en = var(&mut r, false)?.unwrap() as u128 | (var(&mut r, false)?.unwrap() as u128) << 64;
+        bits.clear();
+        for _ in 0..words {
+            bits.push(var(&mut r, false)?.unwrap());
+        }
+        let ne = var(&mut r, false)?.unwrap();
+        edges.clear();
+        for _ in 0..ne {
+            let t = u64le(&mut r)?;
+            let m = var(&mut r, false)?.unwrap() as u128 | (var(&mut r, false)?.unwrap() as u128) << 64;
+            edges.push((t, m));
+        }
+        f(tidx, key, en, &bits, &edges)?;
+    }
+}
+
+/// Distinct fairness masks (there are few), so an edge carries 4 bytes.
+struct Palette {
+    v: Vec<u128>,
+    map: HashMap<u128, u32>,
+}
+
+impl Palette {
+    fn idx(&mut self, m: u128) -> u32 {
+        if let Some(&i) = self.map.get(&m) {
+            return i;
+        }
+        self.v.push(m);
+        self.map.insert(m, self.v.len() as u32 - 1);
+        self.v.len() as u32 - 1
+    }
+}
+
+/// The graph, compact: nodes by sorted key (the node id is the position),
+/// edges in one array (CSR), fairness masks through a small palette.
 pub struct Graph {
     pub keys: Vec<u64>,
-    pub states: Vec<State>,
-    pub index: HashMap<u64, u32>,
-    /// successors, each with the fairness actions the edge is a step of
-    pub adj: Vec<Vec<(u32, u128)>>,
-    /// per node: the fairness actions enabled there
-    pub enabled: Vec<u128>,
+    /// per node: its trace index (to rebuild its state for a counterexample)
+    pub tidx: Vec<u64>,
+    /// per node: `words` words of predicate bits
+    pub bits: Vec<u64>,
+    pub words: usize,
+    /// per node: palette index of the fairness actions enabled there
+    en: Vec<u32>,
+    off: Vec<u64>,
+    tgt: Vec<u32>,
+    /// per edge: palette index of the fairness actions it is a step of
+    emask: Vec<u32>,
+    palette: Vec<u128>,
 }
 
 impl Graph {
-    pub fn build(nodes: Vec<(u64, State)>, edges: Vec<(u64, u64, u128)>, enabled: Vec<(u64, u128)>) -> Graph {
-        let mut index = HashMap::with_capacity(nodes.len());
-        let (mut keys, mut states) = (Vec::with_capacity(nodes.len()), Vec::with_capacity(nodes.len()));
-        for (k, s) in nodes {
-            if let std::collections::hash_map::Entry::Vacant(e) = index.entry(k) {
-                e.insert(keys.len() as u32);
-                keys.push(k);
-                states.push(s);
-            }
+    /// Two passes over the logs: the keys (sorted, they give the ids),
+    /// then the edges, resolved to ids; an edge to a state that was never
+    /// expanded (not admitted, or not reached yet) is dropped.
+    pub fn load(logs: &GraphLogs, meta: &Meta, words: usize) -> R<Graph> {
+        let paths = logs.paths(meta);
+        let mut rows: Vec<(u64, u64, u128, u64)> = Vec::new(); // key, tidx, en, degree
+        let mut bits_by_row: Vec<u64> = Vec::new();
+        for p in &paths {
+            each_record(p, words, |tidx, key, en, bits, edges| {
+                rows.push((key, tidx, en, edges.len() as u64));
+                bits_by_row.extend_from_slice(bits);
+                Ok(())
+            })?;
         }
-        let mut adj: Vec<Vec<(u32, u128)>> = vec![Vec::new(); keys.len()];
-        for (a, b, m) in edges {
-            if let (Some(&x), Some(&y)) = (index.get(&a), index.get(&b)) {
-                adj[x as usize].push((y, m));
-            }
+        let mut order: Vec<u32> = (0..rows.len() as u32).collect();
+        order.sort_unstable_by_key(|&r| rows[r as usize].0);
+        // each state is expanded once; a key recorded twice means the logs
+        // hold records a checkpoint's recovery should have cut, and the
+        // graph would silently split that node's edges
+        if let Some(w) = order.windows(2).find(|w| rows[w[0] as usize].0 == rows[w[1] as usize].0) {
+            return Err(format!("the graph logs record the state with key {:016x} twice (logs not cut back to the checkpoint?)", rows[w[0] as usize].0));
         }
-        for v in adj.iter_mut() {
-            v.sort_unstable_by_key(|e| e.0);
-            // one edge per target, carrying the union of its steps' labels
-            v.dedup_by(|b, a| {
-                if a.0 == b.0 {
-                    a.1 |= b.1;
-                    true
-                } else {
-                    false
+        let n = order.len();
+        let mut pal = Palette { v: vec![0], map: HashMap::from([(0, 0)]) };
+        let (mut keys, mut tidx, mut en, mut bits) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n * words));
+        let mut off = Vec::with_capacity(n + 1);
+        off.push(0u64);
+        for &r in &order {
+            let (k, t, e, d) = rows[r as usize];
+            keys.push(k);
+            tidx.push(t);
+            en.push(pal.idx(e));
+            bits.extend_from_slice(&bits_by_row[r as usize * words..(r as usize + 1) * words]);
+            off.push(off.last().unwrap() + d);
+        }
+        drop(rows);
+        drop(bits_by_row);
+        let id = |k: u64| keys.binary_search(&k).ok().map(|i| i as u32);
+        let total = *off.last().unwrap() as usize;
+        let (mut tgt, mut emask) = (vec![u32::MAX; total], vec![0u32; total]);
+        for p in &paths {
+            each_record(p, words, |_, key, _, _, edges| {
+                let u = id(key).ok_or("graph log: a node without its key")? as usize;
+                let at = off[u] as usize;
+                for (j, &(t, m)) in edges.iter().enumerate() {
+                    if let Some(v) = id(t) {
+                        tgt[at + j] = v;
+                        emask[at + j] = pal.idx(m);
+                    }
                 }
-            });
+                Ok(())
+            })?;
         }
-        let mut en = vec![0u128; keys.len()];
-        for (k, m) in enabled {
-            if let Some(&x) = index.get(&k) {
-                en[x as usize] |= m;
+        // per node: edges to one target merged (their masks OR-ed), the
+        // dropped ones (u32::MAX) removed
+        let mut out_off = Vec::with_capacity(n + 1);
+        out_off.push(0u64);
+        let (mut t2, mut m2) = (Vec::with_capacity(total), Vec::with_capacity(total));
+        let mut row: Vec<(u32, u128)> = Vec::new();
+        for u in 0..n {
+            row.clear();
+            for e in off[u] as usize..off[u + 1] as usize {
+                if tgt[e] != u32::MAX {
+                    row.push((tgt[e], pal.v[emask[e] as usize]));
+                }
             }
+            row.sort_unstable_by_key(|e| e.0);
+            let mut i = 0;
+            while i < row.len() {
+                let (v, mut m) = row[i];
+                i += 1;
+                while i < row.len() && row[i].0 == v {
+                    m |= row[i].1;
+                    i += 1;
+                }
+                t2.push(v);
+                m2.push(pal.idx(m));
+            }
+            out_off.push(t2.len() as u64);
         }
-        Graph { keys, states, index, adj, enabled: en }
+        Ok(Graph { keys, tidx, bits, words, en, off: out_off, tgt: t2, emask: m2, palette: pal.v })
+    }
+
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+    pub fn index(&self, key: u64) -> Option<u32> {
+        self.keys.binary_search(&key).ok().map(|i| i as u32)
+    }
+    fn enabled(&self, u: u32) -> u128 {
+        self.palette[self.en[u as usize] as usize]
+    }
+    fn succ(&self, u: u32) -> impl Iterator<Item = (u32, u128)> + '_ {
+        let r = self.off[u as usize] as usize..self.off[u as usize + 1] as usize;
+        self.tgt[r.clone()].iter().zip(self.emask[r].iter()).map(|(&v, &m)| (v, self.palette[m as usize]))
+    }
+    fn bit(&self, u: u32, k: usize) -> bool {
+        self.bits[u as usize * self.words + k / 64] & (1 << (k % 64)) != 0
     }
 
     /// Strongly connected components of the subgraph induced by `nodes`
@@ -219,7 +514,7 @@ impl Graph {
         for &u in nodes {
             member[u as usize] = stamp;
         }
-        let n = self.keys.len();
+        let n = self.len();
         let mut idx = vec![u32::MAX; 0];
         idx.resize(n, u32::MAX);
         let mut low = vec![0u32; n];
@@ -238,9 +533,10 @@ impl Graph {
             stack.push(root);
             on[root as usize] = true;
             while let Some(&mut (u, ref mut ei)) = call.last_mut() {
-                let edges = &self.adj[u as usize];
-                if *ei < edges.len() {
-                    let v = edges[*ei].0;
+                let start = self.off[u as usize] as usize;
+                let deg = self.off[u as usize + 1] as usize - start;
+                if *ei < deg {
+                    let v = self.tgt[start + *ei];
                     *ei += 1;
                     if member[v as usize] != stamp {
                         continue;
@@ -281,8 +577,8 @@ impl Graph {
     /// The fair components within `allowed`, each containing an
     /// `accept` node when that is given.
     pub fn fair_sccs(&self, allowed: &[bool], accept: Option<&[bool]>, fair: &[FairInst]) -> Vec<Vec<u32>> {
-        let nodes: Vec<u32> = (0..self.keys.len() as u32).filter(|&u| allowed[u as usize]).collect();
-        let mut member = vec![0u32; self.keys.len()];
+        let nodes: Vec<u32> = (0..self.len() as u32).filter(|&u| allowed[u as usize]).collect();
+        let mut member = vec![0u32; self.len()];
         let mut stamp = 1;
         let mut work = self.sccs(&nodes, &mut member, stamp);
         let mut result = Vec::new();
@@ -299,7 +595,7 @@ impl Graph {
             // which fairness actions have a step inside c
             let mut stepped: u128 = 0;
             for &u in &c {
-                for &(v, mask) in &self.adj[u as usize] {
+                for (v, mask) in self.succ(u) {
                     if member[v as usize] == stamp {
                         stepped |= mask;
                     }
@@ -312,8 +608,8 @@ impl Graph {
                 if stepped & bit != 0 {
                     continue;
                 }
-                let any = c.iter().any(|&u| self.enabled[u as usize] & bit != 0);
-                let all = c.iter().all(|&u| self.enabled[u as usize] & bit != 0);
+                let any = c.iter().any(|&u| self.enabled(u) & bit != 0);
+                let all = c.iter().all(|&u| self.enabled(u) & bit != 0);
                 if !f.strong && all {
                     ok = false; // continuously enabled, never taken: no sub-cycle helps
                     break;
@@ -326,7 +622,7 @@ impl Graph {
                 continue;
             }
             if drop != 0 {
-                let rest: Vec<u32> = c.iter().copied().filter(|&u| self.enabled[u as usize] & drop == 0).collect();
+                let rest: Vec<u32> = c.iter().copied().filter(|&u| self.enabled(u) & drop == 0).collect();
                 if !rest.is_empty() {
                     stamp += 1;
                     work.extend(self.sccs(&rest, &mut member, stamp));
@@ -340,7 +636,7 @@ impl Graph {
 
     /// Shortest path from any `from` node to any `to` node, within `allowed`.
     pub fn path(&self, from: &[u32], to: &[bool], allowed: &[bool]) -> Option<Vec<u32>> {
-        let mut prev = vec![u32::MAX; self.keys.len()];
+        let mut prev = vec![u32::MAX; self.len()];
         let mut q = std::collections::VecDeque::new();
         for &f in from {
             if allowed[f as usize] {
@@ -359,7 +655,7 @@ impl Graph {
                 p.reverse();
                 return Some(p);
             }
-            for &(v, _) in &self.adj[u as usize] {
+            for (v, _) in self.succ(u) {
                 if allowed[v as usize] && prev[v as usize] == u32::MAX {
                     prev[v as usize] = u;
                     q.push_back(v);
@@ -377,16 +673,15 @@ pub struct Lasso {
     pub cycle: Vec<u32>,
 }
 
-pub fn check_leaf(g: &Graph, p: &Program, i: &Inst, fair: &[FairInst], inits: &[u32], bufs: &mut Bufs) -> R<Option<Lasso>> {
-    let n = g.keys.len();
-    let holds = |e: &Expr, bufs: &mut Bufs| -> R<Vec<bool>> {
-        (0..n).map(|u| eval_env(p, e, i.frame, &i.env, &g.states[u], None, bufs)?.as_bool()).collect()
-    };
+/// `base`: the instance's first predicate bit (see `layout`).
+pub fn check_leaf(g: &Graph, i: &Inst, base: usize, fair: &[FairInst], inits: &[u32]) -> R<Option<Lasso>> {
+    let n = g.len();
+    let holds = |k: usize| -> Vec<bool> { (0..n as u32).map(|u| g.bit(u, k)).collect() };
     let all = vec![true; n];
     let (allowed, accept, starts): (Vec<bool>, Option<Vec<bool>>, Option<Vec<bool>>) = match i.leaf {
-        TProp::LeadsTo(pe, qe) => {
-            let q = holds(qe, bufs)?;
-            let pv = holds(pe, bufs)?;
+        TProp::LeadsTo(..) => {
+            let pv = holds(base);
+            let q = holds(base + 1);
             let not_q: Vec<bool> = q.iter().map(|x| !x).collect();
             let starts: Vec<bool> = (0..n).map(|u| pv[u] && !q[u]).collect();
             if !starts.iter().any(|&b| b) {
@@ -394,8 +689,8 @@ pub fn check_leaf(g: &Graph, p: &Program, i: &Inst, fair: &[FairInst], inits: &[
             }
             (not_q, None, Some(starts))
         }
-        TProp::AlwaysEventually(pe) => (holds(pe, bufs)?.iter().map(|x| !x).collect(), None, None),
-        TProp::EventuallyAlways(pe) => (all.clone(), Some(holds(pe, bufs)?.iter().map(|x| !x).collect()), None),
+        TProp::AlwaysEventually(_) => (holds(base).iter().map(|x| !x).collect(), None, None),
+        TProp::EventuallyAlways(_) => (all.clone(), Some(holds(base).iter().map(|x| !x).collect()), None),
         _ => return Ok(None),
     };
     let comps = g.fair_sccs(&allowed, accept.as_deref(), fair);
@@ -439,7 +734,7 @@ pub fn check_leaf(g: &Graph, p: &Program, i: &Inst, fair: &[FairInst], inits: &[
     let cycle = if comp.len() == 1 {
         vec![entry]
     } else {
-        let succs: Vec<u32> = g.adj[entry as usize].iter().map(|e| e.0).filter(|&v| in_comp[v as usize]).collect();
+        let succs: Vec<u32> = g.succ(entry).map(|e| e.0).filter(|&v| in_comp[v as usize]).collect();
         let mut target = vec![false; n];
         target[entry as usize] = true;
         let mut c = g.path(&succs, &target, &in_comp).unwrap_or_default();

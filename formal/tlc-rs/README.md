@@ -63,6 +63,40 @@ runs. Liveness mutation runs, summed: 57.5 s checking only at the end,
 (`results/liveness-failfast-sweep-2026-09-28.jsonl`): 69 compared with TLC,
 0 differences.
 
+### Liveness on disk
+
+The graph is no longer held in memory. When a worker expands a state it
+appends one record to its own graph log: the state's trace index and key,
+the fairness actions enabled there, the property predicates' bits
+(P and Q of each `P ~> Q` instance, evaluated then, so the state is never
+needed again), and its edges out with their fairness masks. A check
+(partial, while failing fast, or final) loads the logs in two passes into
+a compact graph: keys sorted give dense ids, edges become one array of
+4-byte targets, masks go through a palette of the few distinct ones
+(~34 bytes a node, ~8 an edge, against whole states before). A
+counterexample's states are rebuilt from the trace logs. The loader
+refuses a graph in which a state was recorded twice.
+
+Liveness runs now checkpoint: the graph logs' lengths go into the
+checkpoint, and recovery **cuts the logs back to them**. That is the trap
+flint-27 saw TLC fall into: TLC's disk graph had been written past its
+checkpoint and its recovery failed reading it. Control: FlintTierSessionLive
+killed 25 s in with each log ~10 MB past the checkpoint; recovered, exact
+(2,603,207, holds); with the cut disabled, the loader stops with "the
+graph logs record the state ... twice".
+
+| FlintTierSessionLive, 8 workers | before | now |
+|---|---|---|
+| peak RSS | 4.2 GB | **749 MB** |
+| time | 100 s (the Mac swapping) | 27.7 s |
+
+All 92 property entries re-run (`results/liveness-disk-sweep-2026-09-28.jsonl`):
+71 compared with TLC, 0 differences (ForgeSyncLive's 1,781,559 is the
+spec as changed on 2026-09-28; TLC re-run on it: 1,781,559). Liveness
+mutation runs, summed: 3.5 s (TLC 93.5 s). A lasso may differ from the
+earlier build's by which of equally short paths it takes (node ids now
+follow the key order).
+
 ## INSTANCE and refinement
 
 `I == INSTANCE M WITH x <- e, ...` is expanded when the spec is loaded
@@ -235,8 +269,7 @@ TLC's layout (`store.rs`):
 The metadir defaults to `states/<spec>-tlcrs-<time>-<pid>` beside the spec
 and is created only when something spills; a run that finishes removes
 the files it wrote (only those). A killed run leaves them, as TLC does.
-Liveness properties still keep their graph in memory, so with them there
-are no checkpoints and `-recover` is refused.
+Liveness runs checkpoint and recover too (see *Liveness on disk*).
 
 The INSTANCE changes were re-run over the whole gate
 (`results/instance-sweep-2026-09-28.jsonl`): 257 entries as before, 0

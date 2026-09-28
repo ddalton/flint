@@ -20,7 +20,7 @@ use std::os::unix::fs::FileExt;
 
 pub type State = Box<[Value]>;
 
-fn io<T>(what: &str, r: std::io::Result<T>) -> R<T> {
+pub(crate) fn io<T>(what: &str, r: std::io::Result<T>) -> R<T> {
     r.map_err(|e| format!("{what}: {e}"))
 }
 
@@ -375,7 +375,7 @@ impl Meta {
     pub fn new(dir: PathBuf) -> Meta {
         Meta { dir, made: Mutex::new(false) }
     }
-    fn path(&self, name: &str) -> R<PathBuf> {
+    pub(crate) fn path(&self, name: &str) -> R<PathBuf> {
         let mut made = self.made.lock().unwrap();
         if !*made {
             io(&format!("creating {}", self.dir.display()), fs::create_dir_all(&self.dir))?;
@@ -470,7 +470,7 @@ impl Trace {
 
 // ---- serialized states --------------------------------------------------
 
-fn put_var(out: &mut Vec<u8>, mut n: u64) {
+pub(crate) fn put_var(out: &mut Vec<u8>, mut n: u64) {
     while n >= 0x80 {
         out.push(n as u8 | 0x80);
         n >>= 7;
@@ -478,7 +478,7 @@ fn put_var(out: &mut Vec<u8>, mut n: u64) {
     out.push(n as u8);
 }
 
-fn get_var(b: &[u8], pos: &mut usize) -> R<u64> {
+pub(crate) fn get_var(b: &[u8], pos: &mut usize) -> R<u64> {
     let mut n = 0u64;
     let mut shift = 0;
     loop {
@@ -701,11 +701,24 @@ pub struct Snapshot {
     pub depth: usize,
     pub generated: u64,
     pub level: Level,
+    /// with liveness properties: each graph log's (bytes, records) at the
+    /// checkpoint, and the initial states' keys
+    pub graph_logs: Vec<(u64, u64)>,
+    pub graph_inits: Vec<u64>,
 }
 
 /// Write a checkpoint of the search as it stands before expanding
 /// `level`: into `ckpt.tmp`, then swapped in for `ckpt`.
-pub fn checkpoint(meta: &Meta, source_hash: u64, fps: &FpSet, trace: &Trace, depth: usize, generated: u64, level: &Level) -> R<()> {
+pub fn checkpoint(
+    meta: &Meta,
+    source_hash: u64,
+    fps: &FpSet,
+    trace: &Trace,
+    depth: usize,
+    generated: u64,
+    level: &Level,
+    graph: Option<(Vec<(u64, u64)>, &[u64])>,
+) -> R<()> {
     let tmp = meta.path("ckpt.tmp")?;
     let _ = fs::remove_dir_all(&tmp);
     io("checkpoint", fs::create_dir_all(&tmp))?;
@@ -736,6 +749,20 @@ pub fn checkpoint(meta: &Meta, source_hash: u64, fps: &FpSet, trace: &Trace, dep
     m += &format!("source_hash {source_hash}\ndepth {depth}\ngenerated {generated}\n");
     for b in &level.mem {
         m += &format!("memblock {} {}\n", b.bytes.len(), b.count);
+    }
+    if let Some((lens, inits)) = &graph {
+        // the graph logs are cut here on recovery; they must be on disk
+        for slot in 0..lens.len() {
+            if let Ok(f) = File::open(meta.dir.join(format!("graph-{slot}.bin"))) {
+                io("sync", f.sync_all())?;
+            }
+        }
+        for (len, records) in lens {
+            m += &format!("graphlog {len} {records}\n");
+        }
+        for k in inits.iter() {
+            m += &format!("graphinit {k}\n");
+        }
     }
     m += &format!("trace {}\n", lens.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(" "));
     for b in &level.blocks {
@@ -775,6 +802,7 @@ pub fn recover(meta: &Meta, source_hash: u64, nvars: usize, fps: &FpSet, trace: 
     let text = io(&format!("reading {}", ck.join("meta.txt").display()), fs::read_to_string(ck.join("meta.txt")))?;
     let (mut depth, mut generated, mut nmem, mut lens, mut blocks) = (0, 0, 0, Vec::new(), Vec::new());
     let mut memblocks: Vec<(u64, u64)> = Vec::new();
+    let (mut graph_logs, mut graph_inits) = (Vec::new(), Vec::new());
     for line in text.lines() {
         let mut w = line.split_whitespace();
         let key = w.next().unwrap_or("");
@@ -789,6 +817,8 @@ pub fn recover(meta: &Meta, source_hash: u64, nvars: usize, fps: &FpSet, trace: 
             // an older checkpoint: the memory part as one run of states
             "mem" => nmem = nums[0] as usize,
             "memblock" => memblocks.push((nums[0], nums[1])),
+            "graphlog" => graph_logs.push((nums[0], nums[1])),
+            "graphinit" => graph_inits.push(nums[0]),
             "trace" => lens = nums,
             "block" => blocks.push(Block { off: nums[0], len: nums[1], count: nums[2] }),
             _ => return Err(format!("bad checkpoint line: {line}")),
@@ -837,5 +867,5 @@ pub fn recover(meta: &Meta, source_hash: u64, nvars: usize, fps: &FpSet, trace: 
         let p = ck.join("queue-disk.bin");
         Some((io("checkpoint", File::open(&p))?, PathBuf::new()))
     };
-    Ok(Snapshot { depth, generated, level: Level { mem, blocks, file } })
+    Ok(Snapshot { depth, generated, level: Level { mem, blocks, file }, graph_logs, graph_inits })
 }

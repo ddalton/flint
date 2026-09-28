@@ -5,7 +5,7 @@
 //! workers in parallel. See `store`.
 
 use crate::eval::{Bufs, Engine, Program};
-use crate::liveness::{self, FairInst, Graph, Inst};
+use crate::liveness::{self, FairInst, Graph, GraphLogs, Inst, Layout};
 use crate::store::{self, FpSet, Level, LevelWriter, Meta, Trace, NO_PARENT};
 use crate::symkey::{Scratch, SymKey};
 use crate::value::{combine, fingerprint, same, var_hash, Value};
@@ -74,6 +74,8 @@ pub struct Checker<'p> {
     /// property leaves, instantiated; fairness instances
     pub props: Vec<Inst<'p>>,
     pub fair: Vec<FairInst<'p>>,
+    /// where each liveness instance's predicate bits sit in a graph node
+    pub lay: Layout,
     pub disk: Disk,
 }
 
@@ -88,7 +90,8 @@ impl<'p> Checker<'p> {
             recover: false,
             source_hash: 0,
         };
-        Ok(Checker { reference: None, p, e, sk: SymKey::new(p), vbufs: Default::default(), workers, progress: true, props, fair, disk })
+        let lay = liveness::layout(&props);
+        Ok(Checker { reference: None, p, e, sk: SymKey::new(p), vbufs: Default::default(), workers, progress: true, props, fair, lay, disk })
     }
 
     fn needs_graph(&self) -> bool {
@@ -282,7 +285,8 @@ impl<'p> Checker<'p> {
         store::raise_fd_limit();
         let seen = FpSet::new(self.disk.fp_mem, meta.dir.clone());
         let mut trace = Trace::new(self.workers);
-        let (mut out, failure) = self.search(&meta, &seen, &mut trace, t0);
+        let mut glogs = GraphLogs::new(self.workers);
+        let (mut out, failure) = self.search(&meta, &seen, &mut trace, &mut glogs, t0);
         if let Some(f) = &failure {
             let idx = match f {
                 Failure::Invariant(_, i) | Failure::Deadlock(i) | Failure::Step(_, i, _) | Failure::InitProperty(_, i) => Some(*i),
@@ -312,7 +316,9 @@ impl<'p> Checker<'p> {
                 let n = e.file_name().to_string_lossy().to_string();
                 if n.starts_with("ckpt") {
                     let _ = std::fs::remove_dir_all(e.path());
-                } else if (n.starts_with("trace-") || n.starts_with("queue-") || n.starts_with("fpset-")) && (n.ends_with(".bin") || n.ends_with(".tmp")) {
+                } else if (n.starts_with("trace-") || n.starts_with("queue-") || n.starts_with("fpset-") || n.starts_with("graph-"))
+                    && (n.ends_with(".bin") || n.ends_with(".tmp"))
+                {
                     let _ = std::fs::remove_file(e.path());
                 }
             }
@@ -320,14 +326,11 @@ impl<'p> Checker<'p> {
         let _ = std::fs::remove_dir(&meta.dir);
     }
 
-    fn search(&self, meta: &Meta, seen: &FpSet, trace: &mut Trace, t0: Instant) -> (Outcome, Option<Failure>) {
+    fn search(&self, meta: &Meta, seen: &FpSet, trace: &mut Trace, glogs: &mut GraphLogs, t0: Instant) -> (Outcome, Option<Failure>) {
         let mut bufs = Bufs::default();
         let graph = self.needs_graph();
         let keep_all = self.keep_all();
         let nvars = self.p.vars.len();
-        let nodes: Mutex<Vec<(u64, State)>> = Mutex::new(Vec::new());
-        let edges: Mutex<Vec<(u64, u64, u128)>> = Mutex::new(Vec::new());
-        let enabled: Mutex<Vec<(u64, u128)>> = Mutex::new(Vec::new());
         let sv = liveness::sub_vars(self.p, &self.fair);
         let mut init_keys: Vec<u64> = Vec::new();
         let done = |generated, depth, failure| (Outcome { generated, distinct: seen.len(), depth, failure: None }, failure);
@@ -336,9 +339,6 @@ impl<'p> Checker<'p> {
         let mut depth = 1;
         let mut generated = 0u64;
         if self.disk.recover {
-            if graph {
-                return done(0, 0, Some(Failure::Eval("-recover: liveness properties keep their graph in memory; a checkpoint cannot hold it".into(), None)));
-            }
             match store::recover(meta, self.disk.source_hash, nvars, seen, trace) {
                 Ok(s) => {
                     eprintln!(
@@ -349,6 +349,12 @@ impl<'p> Checker<'p> {
                         seen.len(),
                         s.level.len()
                     );
+                    if graph {
+                        if let Err(e) = glogs.truncate(meta, &s.graph_logs) {
+                            return done(0, 0, Some(Failure::Eval(format!("-recover: {e}"), None)));
+                        }
+                        init_keys = s.graph_inits.clone();
+                    }
                     (depth, generated, frontier) = (s.depth, s.generated, s.level);
                 }
                 Err(e) => return done(0, 0, Some(Failure::Eval(format!("-recover: {e}"), None))),
@@ -392,7 +398,6 @@ impl<'p> Checker<'p> {
                     match held {
                         Ok(None) => {
                             if graph {
-                                nodes.lock().unwrap().push((fp, s.clone()));
                                 init_keys.push(fp);
                             }
                             init_level.push((idx, s))
@@ -407,6 +412,7 @@ impl<'p> Checker<'p> {
             }
         }
         let trace = &*trace;
+        let glogs = &*glogs;
 
         let failure: Mutex<Option<Failure>> = Mutex::new(None);
         let stop = AtomicBool::new(false);
@@ -415,14 +421,19 @@ impl<'p> Checker<'p> {
         let ckpt_every = Duration::from_secs(self.disk.checkpoint_secs);
         let mut last_ckpt = Instant::now();
         let mut next_live_check = 1000usize;
-        if graph && self.disk.checkpoint_secs > 0 && self.progress {
-            eprintln!("checkpoints: off (liveness properties keep their graph in memory)");
-        }
         while !frontier.is_empty() {
-            if !graph && self.disk.checkpoint_secs > 0 && last_ckpt.elapsed() >= ckpt_every {
+            if self.disk.checkpoint_secs > 0 && last_ckpt.elapsed() >= ckpt_every {
                 let t = Instant::now();
                 let g = gen_total.load(Ordering::Relaxed);
-                if let Err(e) = store::checkpoint(meta, self.disk.source_hash, seen, trace, depth, g, &frontier) {
+                let gl = if graph {
+                    if let Err(e) = glogs.flush_all(meta) {
+                        return done(g, depth, Some(Failure::Eval(format!("checkpoint: {e}"), None)));
+                    }
+                    Some((glogs.lengths(), init_keys.as_slice()))
+                } else {
+                    None
+                };
+                if let Err(e) = store::checkpoint(meta, self.disk.source_hash, seen, trace, depth, g, &frontier, gl) {
                     return done(g, depth, Some(Failure::Eval(format!("checkpoint: {e}"), None)));
                 }
                 if self.progress {
@@ -436,9 +447,6 @@ impl<'p> Checker<'p> {
                 }
                 last_ckpt = Instant::now();
             }
-            // nodes admitted before this level's expansion are fully
-            // expanded once it ends (their successors all recorded)
-            let expanded_before = if graph { nodes.lock().unwrap().len() } else { 0 };
             let writer = LevelWriter::new(meta, depth + 1, self.disk.queue_mem);
             let mem_cursor = AtomicUsize::new(0);
             // blocks sized so the next level (about this one's size) has
@@ -451,7 +459,7 @@ impl<'p> Checker<'p> {
             let busy = &busy_ns;
             std::thread::scope(|s| {
                 for w in 0..self.workers {
-                    let (writer, failure, stop, gen_total, nodes, edges, enabled, sv) = (&writer, &failure, &stop, &gen_total, &nodes, &edges, &enabled, &sv);
+                    let (writer, failure, stop, gen_total, sv) = (&writer, &failure, &stop, &gen_total, &sv);
                     let (mem_cursor, blk_cursor) = (&mem_cursor, &blk_cursor);
                     s.spawn(move || {
                         let frontier = frontier_ref;
@@ -463,8 +471,9 @@ impl<'p> Checker<'p> {
                         let mut enc: Vec<u8> = Vec::new();
                         let mut decoded: Vec<(u64, State)> = Vec::new();
                         let mut local_next: Vec<(u64, State)> = Vec::new();
-                        let (mut local_nodes, mut local_edges): (Vec<(u64, State)>, Vec<(u64, u64, u128)>) = (Vec::new(), Vec::new());
-                        let mut local_enabled: Vec<(u64, u128)> = Vec::new();
+                        // this worker's graph log, and the node being expanded
+                        let mut glog = glogs.logs[w].lock().unwrap();
+                        let (mut node_edges, mut node_bits): (Vec<(u64, u128)>, Vec<u64>) = (Vec::new(), Vec::new());
                         let mut local_gen = 0u64;
                         let wt0 = Instant::now();
                         let fail = |f: Failure| {
@@ -493,9 +502,7 @@ impl<'p> Checker<'p> {
                             } else {
                                 (0, Vec::new())
                             };
-                            if en != 0 {
-                                local_enabled.push((pfp, en));
-                            }
+                            node_edges.clear();
                             for (fp, s) in succ.drain(..) {
                                 if keep_all {
                                     for inst in self.props.iter().filter(|i| matches!(i.leaf, crate::eval::TProp::ActionBox(..))) {
@@ -508,7 +515,7 @@ impl<'p> Checker<'p> {
                                     if graph {
                                         let mask = if en == 0 { Ok(0) } else { liveness::edge_label(self.p, &self.fair, en, &subs, st, &s, &mut bufs) };
                                         match mask {
-                                            Ok(m) => local_edges.push((pfp, fp, m)),
+                                            Ok(m) => node_edges.push((fp, m)),
                                             Err(e) => return Some(Failure::Eval(format!("evaluating fairness: {e}"), Some(pidx))),
                                         }
                                     }
@@ -540,9 +547,6 @@ impl<'p> Checker<'p> {
                                 });
                                 match held {
                                     Ok(None) => {
-                                        if graph {
-                                            local_nodes.push((fp, s.clone()));
-                                        }
                                         local_next.push((idx, s));
                                         if local_next.len() >= batch {
                                             if let Err(e) = writer.push(&mut local_next, &mut enc) {
@@ -552,6 +556,15 @@ impl<'p> Checker<'p> {
                                     }
                                     Ok(Some(inv)) => return Some(Failure::Invariant(inv, idx)),
                                     Err(e) => return Some(Failure::Eval(e, Some(idx))),
+                                }
+                            }
+                            if graph {
+                                // the node, expanded: its record on disk
+                                if let Err(e) = liveness::node_bits(self.p, &self.props, &self.lay, st, &mut bufs, &mut node_bits) {
+                                    return Some(Failure::Eval(format!("evaluating a liveness property: {e}"), Some(pidx)));
+                                }
+                                if let Err(e) = glog.append(meta, pidx, pfp, en, &node_bits, &node_edges) {
+                                    return Some(Failure::Eval(e, None));
                                 }
                             }
                             None
@@ -598,11 +611,6 @@ impl<'p> Checker<'p> {
                         if let Err(e) = writer.push(&mut local_next, &mut enc) {
                             fail(Failure::Eval(e, None));
                         }
-                        if graph {
-                            nodes.lock().unwrap().append(&mut local_nodes);
-                            edges.lock().unwrap().append(&mut local_edges);
-                            enabled.lock().unwrap().append(&mut local_enabled);
-                        }
                     });
                 }
             });
@@ -624,16 +632,18 @@ impl<'p> Checker<'p> {
             // it has its final successors and enabledness, so a fair
             // counterexample found here is real; the final check still
             // runs for what this one cannot see yet.
-            if graph && !frontier.is_empty() && expanded_before >= next_live_check {
-                next_live_check = expanded_before * 2;
-                let partial = {
-                    let n = nodes.lock().unwrap();
-                    let (e, en) = (edges.lock().unwrap(), enabled.lock().unwrap());
-                    (n[..expanded_before].to_vec(), e.clone(), en.clone())
-                };
-                if let Some(f) = self.check_liveness(partial.0, partial.1, partial.2, &init_keys, true) {
-                    *failure.lock().unwrap() = Some(f);
+            if graph && !frontier.is_empty() {
+                if let Err(e) = glogs.flush_all(meta) {
+                    *failure.lock().unwrap() = Some(Failure::Eval(e, None));
                     break;
+                }
+                let expanded = glogs.records() as usize;
+                if expanded >= next_live_check {
+                    next_live_check = expanded * 2;
+                    if let Some(f) = self.check_liveness(glogs, meta, trace, &init_keys, true) {
+                        *failure.lock().unwrap() = Some(f);
+                        break;
+                    }
                 }
             }
             if self.progress && last_report.elapsed().as_secs() >= 10 {
@@ -656,7 +666,10 @@ impl<'p> Checker<'p> {
             if self.progress {
                 eprintln!("liveness: checking {} property instances under {} fairness instances", self.props.iter().filter(|i| liveness::is_graph_leaf(i.leaf)).count(), self.fair.len());
             }
-            failure = self.check_liveness(nodes.into_inner().unwrap(), edges.into_inner().unwrap(), enabled.into_inner().unwrap(), &init_keys, false);
+            failure = match glogs.flush_all(meta) {
+                Ok(()) => self.check_liveness(glogs, meta, trace, &init_keys, false),
+                Err(e) => Some(Failure::Eval(e, None)),
+            };
         }
         done(generated, depth, failure)
     }
@@ -671,17 +684,22 @@ impl<'p> Checker<'p> {
         println!();
     }
 
-    /// `partial`: the graph holds only the states expanded so far.
-    fn check_liveness(&self, nodes: Vec<(u64, State)>, edges: Vec<(u64, u64, u128)>, enabled: Vec<(u64, u128)>, init_keys: &[u64], partial: bool) -> Option<Failure> {
+    /// `partial`: the logs hold only the states expanded so far. The
+    /// graph is loaded from them; a counterexample's states are rebuilt
+    /// from the trace logs, since the graph keeps none.
+    fn check_liveness(&self, glogs: &GraphLogs, meta: &Meta, trace: &Trace, init_keys: &[u64], partial: bool) -> Option<Failure> {
         let t0 = Instant::now();
-        let mut bufs = Bufs::default();
-        let g = Graph::build(nodes, edges, enabled);
+        let g = match Graph::load(glogs, meta, self.lay.words) {
+            Ok(g) => g,
+            Err(e) => return Some(Failure::Eval(format!("loading the liveness graph: {e}"), None)),
+        };
         if self.progress && !partial {
-            eprintln!("liveness: graph of {} nodes built in {:.1}s", g.keys.len(), t0.elapsed().as_secs_f64());
+            eprintln!("liveness: graph of {} nodes loaded in {:.1}s", g.len(), t0.elapsed().as_secs_f64());
         }
-        let inits: Vec<u32> = init_keys.iter().filter_map(|k| g.index.get(k).copied()).collect();
-        for inst in self.props.iter().filter(|i| liveness::is_graph_leaf(i.leaf)) {
-            match liveness::check_leaf(&g, self.p, inst, &self.fair, &inits, &mut bufs) {
+        let inits: Vec<u32> = init_keys.iter().filter_map(|&k| g.index(k)).collect();
+        for (i, inst) in self.props.iter().enumerate() {
+            let Some(base) = self.lay.base[i] else { continue };
+            match liveness::check_leaf(&g, inst, base, &self.fair, &inits) {
                 Ok(None) => {}
                 Ok(Some(l)) => {
                     let env: Vec<String> = inst.env.iter().map(|(_, v)| v.to_string()).collect();
@@ -690,18 +708,18 @@ impl<'p> Checker<'p> {
                         inst.name,
                         if env.is_empty() { String::new() } else { format!(" (for {})", env.join(", ")) }
                     );
-                    for (i, &u) in l.prefix.iter().enumerate() {
-                        self.show(i, &g.states[u as usize]);
+                    let nodes: Vec<u32> = l.prefix.iter().chain(l.cycle.iter().skip(1)).copied().collect();
+                    for (i, &u) in nodes.iter().enumerate() {
+                        match self.state_at(trace, g.tidx[u as usize]) {
+                            Some(st) => self.show(i, &st),
+                            None => println!("State {}: (could not rebuild it from the trace)\n", i + 1),
+                        }
                     }
                     let base = l.prefix.len();
-                    for (i, &u) in l.cycle.iter().enumerate().skip(1) {
-                        self.show(base + i - 1, &g.states[u as usize]);
-                    }
                     if l.cycle.len() == 1 {
                         println!("State {}: Stuttering", base + 1);
                     } else {
-                        let back = base - 1 + 1;
-                        println!("Back to state {back}.");
+                        println!("Back to state {base}.");
                     }
                     return Some(Failure::Liveness(inst.name.clone()));
                 }
@@ -710,7 +728,7 @@ impl<'p> Checker<'p> {
         }
         if self.progress {
             if partial {
-                eprintln!("liveness: {} expanded states checked, no violation yet ({:.1}s)", g.keys.len(), t0.elapsed().as_secs_f64());
+                eprintln!("liveness: {} expanded states checked, no violation yet ({:.1}s)", g.len(), t0.elapsed().as_secs_f64());
             } else {
                 eprintln!("liveness: all properties checked in {:.1}s", t0.elapsed().as_secs_f64());
             }
@@ -718,43 +736,40 @@ impl<'p> Checker<'p> {
         None
     }
 
-    fn print_trace(&self, trace: &Trace, idx: u64) -> usize {
-        let chain = match trace.chain(idx) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("(could not read the trace: {e})");
-                return 0;
-            }
-        };
+    /// The states from an initial state to the one at trace index `idx`,
+    /// replayed from the fingerprints the trace logs keep.
+    fn replay(&self, trace: &Trace, idx: u64) -> Result<Vec<State>, String> {
+        let chain = trace.chain(idx)?;
         let mut bufs = Bufs::default();
-        let Ok(inits) = self.init_states(&mut bufs) else { return 0 };
-        let Some(mut st) = inits.into_iter().find(|s| self.fp(s) == chain[0]) else {
-            eprintln!("(could not replay the trace)");
-            return 0;
-        };
-        let show = |i: usize, st: &[Value]| {
-            println!("State {}:", i + 1);
-            for (n, v) in self.p.vars.iter().zip(st.iter()) {
-                println!("/\\ {n} = {v}");
-            }
-            println!();
-        };
-        show(0, &st);
-        for (i, want) in chain.iter().enumerate().skip(1) {
+        let inits = self.init_states(&mut bufs)?;
+        let mut st = inits.into_iter().find(|s| self.fp(s) == chain[0]).ok_or("could not replay the trace")?;
+        let mut out = vec![st.clone()];
+        for want in chain.iter().skip(1) {
             let mut succ = Vec::new();
-            if self.successors(&st, &mut bufs, &mut succ).is_err() {
-                return 0;
-            }
-            match succ.into_iter().find(|s| self.fp(s) == *want) {
-                Some(s) => st = s,
-                None => {
-                    eprintln!("(could not replay the trace)");
-                    return 0;
-                }
-            }
-            show(i, &st);
+            self.successors(&st, &mut bufs, &mut succ)?;
+            st = succ.into_iter().find(|s| self.fp(s) == *want).ok_or("could not replay the trace")?;
+            out.push(st.clone());
         }
-        chain.len()
+        Ok(out)
+    }
+
+    fn state_at(&self, trace: &Trace, idx: u64) -> Option<State> {
+        self.replay(trace, idx).ok().and_then(|v| v.into_iter().last())
+    }
+
+    fn print_trace(&self, trace: &Trace, idx: u64) -> usize {
+        match self.replay(trace, idx) {
+            Ok(states) => {
+                for (i, st) in states.iter().enumerate() {
+                    self.show(i, st);
+                }
+                states.len()
+            }
+            Err(e) => {
+                eprintln!("({e})");
+                0
+            }
+        }
     }
 
 }
