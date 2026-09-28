@@ -466,6 +466,22 @@ pub struct StateIdRecord {
     pub client_id: u64,
     pub filehandle: Option<Vec<u8>>,
     pub revoked: bool,
+    /// OPEN stateids only: the open-owner and share masks. Without them
+    /// a restart restored the stateid but could not rebuild the open
+    /// index (keyed by client, owner, fh), so the restored open could
+    /// not be CLOSEd, upgraded, or denied against (D2, nfs-proxy census
+    /// 2026-09-27). `None` for lock and delegation stateids, and for
+    /// rows written before this field existed.
+    #[serde(default)]
+    pub open: Option<OpenOwnerRecord>,
+}
+
+/// The open-owner half of an OPEN stateid's persisted record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenOwnerRecord {
+    pub owner: Vec<u8>,
+    pub share_access: u32,
+    pub share_deny: u32,
 }
 
 /// One byte-range lock (LOCK op). The lock's *stateid* was already a
@@ -1609,6 +1625,7 @@ mod tests {
             client_id: 42,
             filehandle: Some(b"/foo/bar".to_vec()),
             revoked: false,
+            open: None,
         };
         b.put_stateid(&stateid).await.unwrap();
         assert_eq!(

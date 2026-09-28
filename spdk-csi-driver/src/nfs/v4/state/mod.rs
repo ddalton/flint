@@ -208,6 +208,7 @@ impl StateManager {
                             client_id,
                             filehandle: None,
                             revoked: true,
+                            open: None,
                         },
                     ));
                 } else {
@@ -253,6 +254,7 @@ impl StateManager {
                                 client_id: 0,
                                 filehandle: None,
                                 revoked: true,
+                                open: None,
                             },
                         ));
                     }
@@ -1533,6 +1535,78 @@ mod tests {
         assert_ne!(
             new_session.session_id, session.session_id,
             "post-restart CREATE_SESSION must mint a fresh session_id",
+        );
+    }
+
+    /// D2 (nfs-proxy census 2026-09-27, 2 of 2 runs on a real hub): an
+    /// open held across a hub restart could not be CLOSEd — the hub
+    /// answered BAD_STATEID ("CLOSE: Invalid stateid: NotFound") while
+    /// I/O through the restored state kept working. `load_records`
+    /// restored the master stateid but never rebuilt the open index
+    /// (`open_states` / `open_state_keys` / `opens_by_fh`), which only
+    /// `record_open` populated — and the persisted record did not carry
+    /// the open-owner or share modes to rebuild it from. So after ANY
+    /// restart every restored open was also invisible to a same-owner
+    /// upgrade and to share-deny arbitration. Through SQLite, because
+    /// that is the backend the hub runs and the columns are the fix.
+    #[tokio::test]
+    async fn an_open_held_across_a_restart_can_be_closed_upgraded_and_denied_against() {
+        use crate::state_backend::SqliteBackend;
+        use crate::nfs::v4::state::stateid::CloseOutcome;
+        const ACCESS_READ: u32 = 1;
+        const ACCESS_BOTH: u32 = 3;
+        const DENY_WRITE: u32 = 2;
+
+        let sqlite = Arc::new(SqliteBackend::open_in_memory().unwrap());
+        let backend: Arc<dyn StateBackend> = sqlite.clone();
+        let fh = b"fh-of-f".to_vec();
+        let other_fh = b"fh-of-g".to_vec();
+
+        let mgr1 = StateManager::new("vol1", Arc::clone(&backend));
+        // The open that will be closed after the restart.
+        let held = mgr1.stateids.record_open(
+            7, b"owner-a".to_vec(), fh.clone(), ACCESS_BOTH, DENY_WRITE, None, None,
+        );
+        // An open that is downgraded BEFORE the restart: the downgrade's
+        // seqid bump and narrowed masks must be what comes back.
+        let wide = mgr1.stateids.record_open(
+            7, b"owner-b".to_vec(), other_fh.clone(), ACCESS_BOTH, 0, None, None,
+        );
+        let narrowed = mgr1
+            .stateids
+            .downgrade_open(&wide, ACCESS_READ, 0)
+            .expect("downgrade");
+        sqlite.flush().await.unwrap();
+        drop(mgr1);
+
+        let mgr2 = StateManager::new("vol1", Arc::clone(&backend));
+        mgr2.load_from_backend(false).await.expect("load");
+
+        // Share-deny: the restored open denies WRITE, so another
+        // client asking for write access must conflict.
+        assert!(
+            mgr2.stateids.share_conflict(&fh, 8, b"someone-else", ACCESS_BOTH, 0),
+            "a restored open's DENY_WRITE must still be enforced"
+        );
+
+        // Same-owner OPEN after the restart upgrades the SAME stateid
+        // (Linux refuses a different `other` for an open it holds).
+        let again = mgr2.stateids.record_open(
+            7, b"owner-a".to_vec(), fh.clone(), ACCESS_READ, 0, None, None,
+        );
+        assert_eq!(again.other, held.other, "a restored open must be found, not re-minted");
+        assert_eq!(again.seqid, held.seqid + 1, "and its seqid bumps as for any open");
+
+        // The census sequence: CLOSE the open held across the restart.
+        assert!(
+            matches!(mgr2.stateids.close_open(&again), CloseOutcome::Closed),
+            "a restored open must be closable"
+        );
+
+        // The downgrade survived: its seqid is current and CLOSE works.
+        assert!(
+            matches!(mgr2.stateids.close_open(&narrowed), CloseOutcome::Closed),
+            "the downgraded open's seqid and masks must have been persisted"
         );
     }
 

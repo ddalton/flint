@@ -698,6 +698,47 @@ impl LockManager {
         lock
     }
 
+    /// FREE_STATEID of a client-visible lock stateid (RFC 8881
+    /// §18.38.3): `false` — refuse with LOCKS_HELD — while its owner
+    /// still holds any range on the file; otherwise drop the owner
+    /// registration (memory and its persisted row) and return `true`.
+    ///
+    /// Linux frees its lock stateid right after the owner's last LOCKU.
+    /// Refusing that unconditionally leaked the stateid, and every
+    /// DESTROY_CLIENTID at unmount then answered CLIENTID_BUSY (D1,
+    /// nfs-proxy census 2026-09-27). A stateid that is itself a live
+    /// range entry (restored rows from before the owner map) counts as
+    /// held. Not atomic against a concurrent LOCK by the same owner —
+    /// the client does not lock through a stateid it is freeing.
+    pub fn release_owner_stateid(&self, other: &[u8; 12]) -> bool {
+        if self.locks.contains_key(other) {
+            return false;
+        }
+        let Some(key) = self.stateid_owners.get(other).map(|e| e.value().clone()) else {
+            return true;
+        };
+        // Copy the file's entry keys out before touching `locks`: no
+        // guard on one map is held while reading another.
+        let keys = self
+            .locks_by_fh
+            .get(&key.filehandle)
+            .map(|k| k.clone())
+            .unwrap_or_default();
+        let held = keys.iter().any(|k| {
+            self.locks
+                .get(k)
+                .map_or(false, |l| l.client_id == key.client_id && l.owner == key.owner)
+        });
+        if held {
+            return false;
+        }
+        self.stateid_owners.remove(other);
+        if let Some(backend) = &self.backend {
+            backend.enqueue_write(WriteOp::DeleteLock(*other));
+        }
+        true
+    }
+
     /// Get a lock
     ///
     /// LOCK-FREE: Lock-free read, no blocking on concurrent operations

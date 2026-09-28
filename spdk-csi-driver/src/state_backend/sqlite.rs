@@ -67,7 +67,8 @@ use super::{
     CachedCreateSessionResRecord, ClientRecord, FhMappingRecord, IoModeRecord, LayoutRecord,
     LayoutSegmentRecord, LockRecord, PlacementRecord, SessionRecord, StateBackend,
     VolumeGeometryRecord,
-    StateBackendError, StateBackendResult, StateIdRecord, StateTypeRecord, WriteOp, WriteOpKey,
+    OpenOwnerRecord, StateBackendError, StateBackendResult, StateIdRecord, StateTypeRecord,
+    WriteOp, WriteOpKey,
 };
 use async_trait::async_trait;
 use crossbeam::channel::{unbounded, Receiver, Sender, TryRecvError};
@@ -212,6 +213,24 @@ impl SqliteBackend {
                 "ALTER TABLE tier_evicted ADD COLUMN hydrating_unix INTEGER;",
             )
             .map_err(|e| StateBackendError::Storage(format!("tier_evicted hydrating: {}", e)))?;
+        }
+
+        // D2: an OPEN stateid's open-owner and share masks (NULL for
+        // lock/delegation rows). Backfill for databases created before.
+        let has_open_owner: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('stateids') WHERE name='open_owner'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| StateBackendError::Storage(format!("stateids introspect: {}", e)))?;
+        if has_open_owner == 0 {
+            conn.execute_batch(
+                "ALTER TABLE stateids ADD COLUMN open_owner BLOB;
+                 ALTER TABLE stateids ADD COLUMN share_access INTEGER;
+                 ALTER TABLE stateids ADD COLUMN share_deny INTEGER;",
+            )
+            .map_err(|e| StateBackendError::Storage(format!("stateids open_owner: {}", e)))?;
         }
 
         // Schema version: insert if first run, else verify match. This
@@ -540,8 +559,9 @@ fn apply_write_op(conn: &Connection, op: &WriteOp) -> rusqlite::Result<()> {
         WriteOp::PutStateid(s) => {
             conn.prepare_cached(
                 "INSERT OR REPLACE INTO stateids
-                 (other, seqid, state_type, client_id, filehandle, revoked)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 (other, seqid, state_type, client_id, filehandle, revoked,
+                  open_owner, share_access, share_deny)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?
             .execute(params![
                 s.other.to_vec(),
@@ -550,6 +570,9 @@ fn apply_write_op(conn: &Connection, op: &WriteOp) -> rusqlite::Result<()> {
                 u64_to_i64(s.client_id),
                 s.filehandle,
                 bool_to_i64(s.revoked),
+                s.open.as_ref().map(|o| o.owner.clone()),
+                s.open.as_ref().map(|o| o.share_access as i64),
+                s.open.as_ref().map(|o| o.share_deny as i64),
             ])?;
         }
         WriteOp::DeleteStateid(o) => {
@@ -1413,7 +1436,8 @@ impl StateBackend for SqliteBackend {
         let row = self
             .with_conn(move |conn| {
                 conn.query_row(
-                    "SELECT other, seqid, state_type, client_id, filehandle, revoked
+                    "SELECT other, seqid, state_type, client_id, filehandle, revoked,
+                            open_owner, share_access, share_deny
                      FROM stateids WHERE other = ?1",
                     params![key],
                     decode_stateid_row,
@@ -1428,7 +1452,8 @@ impl StateBackend for SqliteBackend {
         let rows = self
             .with_conn(|conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT other, seqid, state_type, client_id, filehandle, revoked
+                    "SELECT other, seqid, state_type, client_id, filehandle, revoked,
+                            open_owner, share_access, share_deny
                      FROM stateids",
                 )?;
                 let rows: rusqlite::Result<Vec<_>> =
@@ -2445,6 +2470,9 @@ fn decode_stateid_row(r: &rusqlite::Row) -> rusqlite::Result<StateBackendResult<
     let client_id: i64 = r.get(3)?;
     let filehandle: Option<Vec<u8>> = r.get(4)?;
     let revoked: i64 = r.get(5)?;
+    let open_owner: Option<Vec<u8>> = r.get(6)?;
+    let share_access: Option<i64> = r.get(7)?;
+    let share_deny: Option<i64> = r.get(8)?;
 
     Ok((|| -> StateBackendResult<StateIdRecord> {
         Ok(StateIdRecord {
@@ -2454,6 +2482,11 @@ fn decode_stateid_row(r: &rusqlite::Row) -> rusqlite::Result<StateBackendResult<
             client_id: i64_to_u64(client_id),
             filehandle,
             revoked: i64_to_bool(revoked),
+            open: open_owner.map(|owner| OpenOwnerRecord {
+                owner,
+                share_access: share_access.unwrap_or(0) as u32,
+                share_deny: share_deny.unwrap_or(0) as u32,
+            }),
         })
     })())
 }
@@ -2598,7 +2631,10 @@ CREATE TABLE IF NOT EXISTS stateids (
     state_type INTEGER NOT NULL,
     client_id INTEGER NOT NULL,
     filehandle BLOB,
-    revoked INTEGER NOT NULL
+    revoked INTEGER NOT NULL,
+    open_owner BLOB,
+    share_access INTEGER,
+    share_deny INTEGER
 );
 
 -- Byte-range locks. Lock STATEIDS live in `stateids` (state_type=Lock),
@@ -3464,6 +3500,7 @@ mod tests {
                 client_id: 42,
                 filehandle: Some(b"/foo/bar".to_vec()),
                 revoked: false,
+                open: None,
             })
             .await
             .unwrap();
@@ -3608,6 +3645,7 @@ mod tests {
             client_id: 7,
             filehandle: Some(b"/fh".to_vec()),
             revoked: false,
+            open: None,
         }
     }
 
@@ -3647,6 +3685,55 @@ mod tests {
         b.enqueue_write(WriteOp::PutStateid(sid(1, 6)));
         let got = b.get_stateid(&sid(1, 0).other).await.unwrap().unwrap();
         assert_eq!(got.seqid, 6);
+    }
+
+    /// D2's columns reach a database created before them: the backfill
+    /// adds `open_owner` / `share_access` / `share_deny` in place, a row
+    /// written by the older schema reads back with `open: None`, and a
+    /// new OPEN row carries its owner and masks through a round trip.
+    #[tokio::test]
+    async fn stateids_gain_the_open_owner_columns_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE stateids (
+                     other BLOB PRIMARY KEY,
+                     seqid INTEGER NOT NULL,
+                     state_type INTEGER NOT NULL,
+                     client_id INTEGER NOT NULL,
+                     filehandle BLOB,
+                     revoked INTEGER NOT NULL
+                 );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO stateids VALUES (?1, 3, ?2, 7, ?3, 0)",
+                params![
+                    [1u8; 12].to_vec(),
+                    state_type_to_i64(StateTypeRecord::Open),
+                    b"fh".to_vec()
+                ],
+            )
+            .unwrap();
+        }
+        let b = SqliteBackend::open(&path).unwrap();
+        let old = b.get_stateid(&[1u8; 12]).await.unwrap().expect("old row survives");
+        assert_eq!(old.seqid, 3);
+        assert_eq!(old.open, None, "a pre-D2 row has no open-owner");
+
+        let mut fresh = sid(2, 1);
+        fresh.state_type = StateTypeRecord::Open;
+        fresh.open = Some(OpenOwnerRecord {
+            owner: b"owner-a".to_vec(),
+            share_access: 3,
+            share_deny: 2,
+        });
+        b.put_stateid(&fresh).await.unwrap();
+        let got = b.get_stateid(&fresh.other).await.unwrap().unwrap();
+        assert_eq!(got.open, fresh.open);
+        assert_eq!(b.list_stateids().await.unwrap().len(), 2);
     }
 
     /// Dropping the backend closes the channel; the writer's final

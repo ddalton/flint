@@ -172,6 +172,28 @@ the build box. The kernel client ran on the same host. Script:
   **This qualifies design §2's claim:** a restart is invisible for I/O,
   but not for closing a file that was open with a lock across it.
 
+**Both fixed test-first (2026-09-27).** Each test was run against the
+unfixed code and seen to fail at the census's own step:
+`FreeStateId(LocksHeld)` after the last `LOCKU` (D1), and a restored
+open's `DENY_WRITE` not enforced (D2).
+- **D1:** `FREE_STATEID` of a lock stateid succeeds once its owner
+  holds no range on the file (`LockManager::release_owner_stateid`).
+  Open stateids, and lock stateids with a range held, still answer
+  `LOCKS_HELD`.
+- **D2 was wider than the capture showed.** `load_records` never
+  rebuilt the open index for ANY restored open, so after every restart
+  restored opens could not be closed, upgraded or downgraded, and did
+  not enforce share-deny. The persisted stateid record now carries the
+  open-owner and share masks (three nullable columns, backfilled in
+  place), and the index is rebuilt at load. `downgrade_open` now
+  persists its seqid bump, which it never did.
+
+Lib suite on real Linux: 2550 passed, 0 failed, 6 ignored. **The drill
+that found them, rerun against the fixed hub**
+(`results-box-6.12-flint-hub/fixed-restart-{0,1}/`), in both arms:
+`LOCKU`, `FREE_STATEID`, `CLOSE` → `NFS4_OK`, and `DESTROY_CLIENTID` →
+`NFS4_OK` on its first attempt.
+
 Neither defect is caused by the proxy; both exist on direct mounts
 today. D1 matters to the proxy because its backend-client teardown
 would meet `CLIENTID_BUSY` on every hub a client ever locked on. Both

@@ -2303,11 +2303,24 @@ impl CompoundDispatcher {
                         OperationResult::FreeStateId(Nfs4Status::Ok)
                     }
                     Some(e) => match e.state_type {
-                        StateType::Open | StateType::Lock => {
-                            // RFC 8881 §18.38.3: open/lock stateids that are
-                            // still in use cannot be freed. Pynfs's CSID9
-                            // exercises this immediately after OPEN.
+                        StateType::Open => {
+                            // RFC 8881 §18.38.3: an open is itself a lock,
+                            // so an open stateid is not freeable while
+                            // open. Pynfs's CSID9 exercises this
+                            // immediately after OPEN.
                             OperationResult::FreeStateId(Nfs4Status::LocksHeld)
+                        }
+                        StateType::Lock => {
+                            // LOCKS_HELD only while the owner still holds
+                            // a range. Linux frees right after its last
+                            // LOCKU; refusing that leaked the stateid and
+                            // wedged DESTROY_CLIENTID (D1).
+                            if self.lock_mgr.release_owner_stateid(&stateid.other) {
+                                self.state_mgr.stateids.remove(&stateid);
+                                OperationResult::FreeStateId(Nfs4Status::Ok)
+                            } else {
+                                OperationResult::FreeStateId(Nfs4Status::LocksHeld)
+                            }
                         }
                         _ => {
                             let _ = self.state_mgr.stateids.revoke(&stateid);
@@ -5072,6 +5085,135 @@ mod tests {
         let lock_mgr = Arc::new(LockManager::new());
         let dispatcher = CompoundDispatcher::new(fh_mgr, state_mgr, lock_mgr);
         (dispatcher, temp_dir)
+    }
+
+    /// D1 (nfs-proxy census 2026-09-27, 2 of 2 runs on a real hub):
+    /// Linux frees its lock stateid right after the owner's last LOCKU,
+    /// and the hub answered LOCKS_HELD for EVERY live lock stateid —
+    /// so the stateid leaked, and at unmount every DESTROY_CLIENTID got
+    /// CLIENTID_BUSY ("still holds 1 stateid(s), 0 lock(s)"). RFC 8881
+    /// §18.38.3 allows LOCKS_HELD only while locks remain. The arms
+    /// that MUST stay refused are pinned too: a lock stateid whose
+    /// owner still holds a range, and an open stateid (the open is
+    /// itself a lock; pynfs CSID9).
+    #[tokio::test]
+    async fn free_stateid_releases_a_lock_stateid_once_its_last_range_is_unlocked() {
+        let (dispatcher, t) = create_test_dispatcher();
+        std::fs::write(t.path().join("f"), b"hello").unwrap();
+        dispatcher.state_mgr.leases.end_grace();
+        const CLIENT: u64 = 91;
+        let s = dispatcher.state_mgr.sessions.create_session(
+            CLIENT, 0, 0, 65536, 65536, 16384, 16, 16, 0, None, 1,
+        );
+        let mut ctx = CompoundContext::new(1);
+        ctx.session_id = Some(s.session_id);
+
+        dispatcher.dispatch_operation(Operation::PutRootFh, &mut ctx).await;
+        let open = Operation::Open {
+            seqid: 0,
+            share_access: 3,
+            share_deny: 0,
+            owner: b"open-owner".to_vec(),
+            openhow: crate::nfs::v4::compound::OpenHow {
+                createmode: 0,
+                attrs: None,
+                attrmask: Vec::new(),
+            },
+            claim: crate::nfs::v4::compound::OpenClaim {
+                claim_type: 0,
+                file: "f".to_string(),
+                delegate_type: None,
+                delegate_stateid: None,
+            },
+        };
+        let open_sid = match dispatcher.dispatch_operation(open, &mut ctx).await {
+            OperationResult::Open(Nfs4Status::Ok, Some(r)) => r.stateid,
+            other => panic!("OPEN: {other:?}"),
+        };
+        let lock = Operation::Lock {
+            locktype: 2,
+            reclaim: false,
+            offset: 0,
+            length: 1,
+            stateid: open_sid,
+            owner: b"lock-owner".to_vec(),
+            new_lock_owner: true,
+        };
+        let lock_sid = match dispatcher.dispatch_operation(lock, &mut ctx).await {
+            OperationResult::Lock(Nfs4Status::Ok, Some(sid), _) => sid,
+            other => panic!("LOCK: {other:?}"),
+        };
+        let held = dispatcher.state_mgr.stateids.count_for_client(CLIENT);
+
+        // Still holding the range: the free MUST be refused.
+        let res = dispatcher
+            .dispatch_operation(Operation::FreeStateId(lock_sid), &mut ctx)
+            .await;
+        assert!(
+            matches!(res, OperationResult::FreeStateId(Nfs4Status::LocksHeld)),
+            "a lock stateid whose owner still holds a range is not freeable: {res:?}"
+        );
+
+        let unlock = Operation::LockU {
+            locktype: 2,
+            seqid: 0,
+            stateid: lock_sid,
+            offset: 0,
+            length: 1,
+        };
+        let lock_sid = match dispatcher.dispatch_operation(unlock, &mut ctx).await {
+            OperationResult::LockU(Nfs4Status::Ok, Some(sid)) => sid,
+            other => panic!("LOCKU: {other:?}"),
+        };
+
+        // The census sequence: last range gone, then FREE_STATEID.
+        let res = dispatcher
+            .dispatch_operation(Operation::FreeStateId(lock_sid), &mut ctx)
+            .await;
+        assert!(
+            matches!(res, OperationResult::FreeStateId(Nfs4Status::Ok)),
+            "a lock stateid with no ranges left must be freeable: {res:?}"
+        );
+        assert_eq!(
+            dispatcher.state_mgr.stateids.count_for_client(CLIENT),
+            held - 1,
+            "the freed lock stateid must leave the client's index — the \
+             leak is what made DESTROY_CLIENTID answer CLIENTID_BUSY"
+        );
+        match dispatcher
+            .dispatch_operation(Operation::TestStateId(vec![lock_sid]), &mut ctx)
+            .await
+        {
+            OperationResult::TestStateId(Nfs4Status::Ok, Some(st)) => {
+                assert_eq!(st.as_slice(), &[Nfs4Status::BadStateId], "freed means gone");
+            }
+            other => panic!("TEST_STATEID: {other:?}"),
+        }
+
+        // The owner can lock again afterwards (a fresh lock stateid).
+        let relock = Operation::Lock {
+            locktype: 2,
+            reclaim: false,
+            offset: 0,
+            length: 1,
+            stateid: open_sid,
+            owner: b"lock-owner".to_vec(),
+            new_lock_owner: true,
+        };
+        let res = dispatcher.dispatch_operation(relock, &mut ctx).await;
+        assert!(
+            matches!(res, OperationResult::Lock(Nfs4Status::Ok, Some(_), _)),
+            "relock after the free: {res:?}"
+        );
+
+        // The open stateid is itself a lock: still refused.
+        let res = dispatcher
+            .dispatch_operation(Operation::FreeStateId(open_sid), &mut ctx)
+            .await;
+        assert!(
+            matches!(res, OperationResult::FreeStateId(Nfs4Status::LocksHeld)),
+            "an open stateid stays unfreeable while open: {res:?}"
+        );
     }
 
     /// THE DELEGATION WIRE ARMS, pinned at the dispatch level

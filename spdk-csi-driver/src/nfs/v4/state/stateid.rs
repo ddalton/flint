@@ -93,6 +93,11 @@ pub struct StateEntry {
     /// Is this state revoked?
     pub revoked: bool,
 
+    /// OPEN stateids: the open-owner and current share masks, persisted
+    /// so a restart can rebuild the open index (D2). Kept in step with
+    /// `OpenState` by `record_open` and `downgrade_open`.
+    pub open: Option<crate::state_backend::OpenOwnerRecord>,
+
     /// RAII claim on the descriptor cached for this stateid.
     ///
     /// THE POINT: when this record is dropped — by CLOSE, by
@@ -125,6 +130,7 @@ impl StateEntry {
             client_id: self.client_id,
             filehandle: self.filehandle.clone(),
             revoked: self.revoked,
+            open: self.open.clone(),
         }
     }
 
@@ -148,6 +154,7 @@ impl StateEntry {
             seqid: r.seqid,
             filehandle: r.filehandle,
             revoked: r.revoked,
+            open: r.open,
             fd_lease: None,
         }
     }
@@ -166,6 +173,7 @@ impl StateEntry {
             seqid: stateid.seqid,
             filehandle,
             revoked: false,
+            open: None,
             fd_lease: None,
         }
     }
@@ -454,6 +462,7 @@ impl StateIdManager {
                         .remove_if(&cur_other, |_, k| *k == key);
                     let stateid =
                         self.allocate(StateType::Open, client_id, Some(fh.clone()));
+                    self.stamp_open(&stateid.other, &owner, share_access, share_deny);
                     self.open_state_keys.insert(stateid.other, key.clone());
                     occ.insert(OpenState {
                         stateid_other: stateid.other,
@@ -493,6 +502,11 @@ impl StateIdManager {
                 {
                     master.seqid = e.seqid;
                     master.stateid.seqid = e.seqid;
+                    master.open = Some(crate::state_backend::OpenOwnerRecord {
+                        owner: owner.clone(),
+                        share_access: e.share_access,
+                        share_deny: e.share_deny,
+                    });
                     Some(master.clone())
                 } else {
                     None
@@ -511,6 +525,7 @@ impl StateIdManager {
                 // so the master `states` map and `client_states` index
                 // stay consistent with everything else.
                 let stateid = self.allocate(StateType::Open, client_id, Some(fh.clone()));
+                self.stamp_open(&stateid.other, &owner, share_access, share_deny);
                 self.open_state_keys.insert(stateid.other, key.clone());
                 vac.insert(OpenState {
                     stateid_other: stateid.other,
@@ -547,6 +562,25 @@ impl StateIdManager {
                 self.index_ident(&fh, ident);
                 stateid
             }
+        }
+    }
+
+    /// Record the open-owner and share masks on a freshly allocated OPEN
+    /// stateid's master entry and persist it, so a restart can rebuild
+    /// the open index from the backend (D2). Called under the
+    /// `open_states` entry guard; `states` nests inside it, as on every
+    /// other path.
+    fn stamp_open(&self, other: &[u8; 12], owner: &[u8], share_access: u32, share_deny: u32) {
+        let snap = self.states.get_mut(other).map(|mut master| {
+            master.open = Some(crate::state_backend::OpenOwnerRecord {
+                owner: owner.to_vec(),
+                share_access,
+                share_deny,
+            });
+            master.clone()
+        });
+        if let Some(snap) = snap {
+            self.persist(&snap);
         }
     }
 
@@ -594,9 +628,24 @@ impl StateIdManager {
         entry.share_access = share_access;
         entry.share_deny = share_deny;
         let refreshed = StateId { seqid: entry.seqid, other: entry.stateid_other };
-        if let Some(mut master) = self.states.get_mut(&entry.stateid_other) {
+        let snap = if let Some(mut master) = self.states.get_mut(&entry.stateid_other) {
             master.seqid = entry.seqid;
             master.stateid.seqid = entry.seqid;
+            master.open = Some(crate::state_backend::OpenOwnerRecord {
+                owner: key.1.clone(),
+                share_access,
+                share_deny,
+            });
+            Some(master.clone())
+        } else {
+            None
+        };
+        drop(entry);
+        // Persist the bump and the narrowed masks: a restart that
+        // reloads the pre-downgrade seqid rejects the client's current
+        // stateid, and stale masks over-deny other openers.
+        if let Some(snap) = snap {
+            self.persist(&snap);
         }
         Ok(refreshed)
     }
@@ -659,6 +708,31 @@ impl StateIdManager {
             max_counter = max_counter.max(u64::from_be_bytes(buf));
             let cid = r.client_id;
             let other = r.other;
+            // D2: rebuild the open index for a live OPEN. Without it the
+            // restored open validated for I/O but CLOSE, a same-owner
+            // upgrade, OPEN_DOWNGRADE and share-deny arbitration all
+            // missed it. Rows from before the owner was persisted
+            // (`open: None`) cannot be indexed and stay I/O-only.
+            if let (StateTypeRecord::Open, false, Some(open), Some(fh)) =
+                (r.state_type, r.revoked, r.open.as_ref(), r.filehandle.as_ref())
+            {
+                let key = (cid, open.owner.clone(), fh.clone());
+                self.open_state_keys.insert(other, key.clone());
+                self.open_states.insert(
+                    key,
+                    OpenState {
+                        stateid_other: other,
+                        seqid: r.seqid,
+                        share_access: open.share_access,
+                        share_deny: open.share_deny,
+                        verifier: None,
+                    },
+                );
+                let mut owners = self.opens_by_fh.entry(fh.clone()).or_insert_with(Vec::new);
+                if !owners.iter().any(|(c, o)| *c == cid && *o == open.owner) {
+                    owners.push((cid, open.owner.clone()));
+                }
+            }
             self.states.insert(other, StateEntry::from_record(r));
             self.client_states
                 .entry(cid)
@@ -1464,6 +1538,7 @@ mod tests {
                 client_id: 7,
                 filehandle: None,
                 revoked: true,
+                open: None,
             },
             StateIdRecord {
                 other: breaker,
@@ -1472,6 +1547,7 @@ mod tests {
                 client_id: 0,
                 filehandle: None,
                 revoked: true,
+                open: None,
             },
         ]);
 
