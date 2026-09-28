@@ -1,0 +1,124 @@
+C8 — two flint-forge servers on one S3 prefix, concurrent client traffic
+Run: 2026-09-09, macOS host, MinIO at 127.0.0.1:9100, ROUNDS=6, heartbeat 2s
+Drill: forge/e2e/composition/c8-two-forges.sh
+Binary: forge/syncer built from the working tree — every file under
+        forge/syncer/src and crates/flint-store/src was verified byte-identical
+        to origin/main before the three fixes below were applied.
+
+SUMMARY: 52 passed, 0 failed.
+
+This run is the AFTER arm of three fixes. The BEFORE arm (same drill, same
+rig, pre-fix) is recorded in the notes below, because two of its legs are
+what the fixes were written against.
+
+  D0  a race for a fresh cell resolves to exactly one writer; the loser parks
+      in claimingEpoch at 0/6 quiet polls while the holder's token moves.
+  D1  a push at the standby is refused, and the refusal NAMES the posture and
+      the prefix. Before: 'the repository server is not accepting writes (No
+      such file or directory (os error 2))' — the socket did not exist yet.
+      After:  'another server holds c8/one; this process is a standby and
+               cannot publish — push to the repository's own endpoint, or
+               wait for it to take over'
+  D2  6 rounds of simultaneous pushes at both doors: holder acked 6/6, standby
+      acked 0/6, and the challenger cost the holder nothing.
+  D3  CONTROL: the same generator with the two servers on DIFFERENT prefixes.
+      Both ack. The rig CAN observe two writers succeeding, so D2's asymmetry
+      is the lease and not the harness.
+  D4  the holder is SIGSTOPped: the standby supersedes after the quiet window
+      and the epoch advances (2 -> 3).
+  D5  SIGCONT: the deposed server names its deposal and EXITS rather than
+      serve on — the fence is the loop's exit. A push into it is refused and
+      the cell still names the successor.
+  D6  ORACLE: both servers stopped, a third restores into an EMPTY repository
+      from S3 alone. 8 acked refs present, 8 refused refs absent, exactly.
+  D7  a standby with PREWARM=0 and no repository yet CREATES and CONFIGURES
+      one before it claims, and refuses by posture. Before the fix this leg
+      met 'cannot find hook proc-receive' — safe, but naming nothing.
+  D7a a bare repository forge did not create, beside a parked syncer. Before
+      the fix plain git ACCEPTED the push and the client was told its commit
+      had landed when nothing reached the bucket. Now forge takes the
+      repository over at startup and the push is refused.
+
+==== full transcript ====
+
+== precondition: FORGE_BIN is newer than the sources it claims to be ==
+  PASS  FORGE_BIN is not older than any source under forge/syncer or flint-store
+
+== rig gate: the store's conditional PUT is real ==
+  PASS  If-None-Match:* admits a fresh key
+  PASS  If-None-Match:* refuses an existing key
+  PASS  If-Match refuses a wrong etag
+  PASS  If-Match admits the right etag
+  PASS  the refused PUTs left the bytes alone
+
+== D0 — two servers race for one fresh prefix; exactly one may win ==
+  PASS  a lease cell appeared under c8/one
+  PASS  both servers are still running
+  PASS  the two servers are distinct incarnations (forge-5b98ef6d-564d-4d6d-becd-043d47e25110 / forge-c685e20e-7a4a-4620-b891-7015f9e43fab)
+  PASS  the bucket names exactly one of them: B (forge-c685e20e-7a4a-4620-b891-7015f9e43fab)
+  PASS  and B's own /status agrees it holds the lease
+  PASS  A does not claim the lease
+  PASS  and A is parked in claimingEpoch, not serving
+  PASS  A is polling the cell and reports 0/6 quiet polls
+  PASS  and the count is ZERO — B's token is moving under it
+
+== D1 — a push at the standby must be refused; the holder's must land ==
+  PASS  a push at B (the holder) LANDS — the standby's refusal will mean something
+  ....  the client at the standby said: To /tmp/fc-c8/a.git  ! [remote rejected] HEAD -> d1-standby (another server holds c8/one; this process is a standby and cannot publish — push to the repository's own endpoint, or wait for it to take o
+  PASS  the standby REFUSED the push (rc=1)
+  PASS  and the refusal names the POSTURE ('standby'), not a missing file
+  PASS  and it names the prefix (c8/one), so an operator knows which repository
+  PASS  and it no longer mentions a missing file
+  PASS  and the standby's repository did not move the ref either
+
+== D2 — 6 rounds of simultaneous pushes at BOTH doors ==
+  PASS  the holder acked all 6 of its pushes with a challenger present
+  PASS  the standby acked NONE of its 6 pushes
+  PASS  both servers are still running after the concurrent rounds
+
+== D3 — CONTROL: the same generator on TWO prefixes must ack twice ==
+  PASS  on separate prefixes both servers hold a lease and serve
+  PASS  both acked — this rig CAN observe two servers writing at once
+
+== D4 — the holder freezes; the standby supersedes; acked pushes survive ==
+  ....  after the restart the holder is A
+  PASS  a push at A is acknowledged just before the freeze
+  PASS  A is frozen (SIGSTOP) — its token stops moving, the process does not die
+  PASS  B superseded the frozen holder (epoch 2 -> 3)
+  PASS  and the epoch advanced
+  PASS  and B now reports itself the writer
+
+== D5 — the frozen holder wakes with the lease gone and must write nothing ==
+  PASS  A is running again (SIGCONT)
+  PASS  A exited rather than serve on — the fence IS the loop's exit
+  PASS  and it named the deposal: flint-forge-syncer: fenced: deposed at renew: epoch_put: 412 PreconditionFailed
+  PASS  and it does not claim the lease
+  ....  the client at the zombie said: To /tmp/fc-c8/a.git  ! [remote rejected] HEAD -> d5-zombie (the repository server is not accepting writes (Connection refused (os error 61))) error: failed to push some refs to '/tmp/fc-c8/a.git'
+  PASS  the deposed server REFUSED the push (rc=1)
+  PASS  and the cell still names the successor, not the zombie
+
+== D6 — a third server restores from S3 alone; acked == present, exactly ==
+  PASS  a fresh server claimed the prefix and restored
+  ....  the bucket holds: refs/heads/d1-holder refs/heads/d2-w-1 refs/heads/d2-w-2 refs/heads/d2-w-3 refs/heads/d2-w-4 refs/heads/d2-w-5 refs/heads/d2-w-6 refs/heads/d4-acked
+  PASS  every ref the client was told landed is in the bucket (8 of them)
+  PASS  and no ref the client was told was refused is in the bucket (8 of them)
+
+== D7 — a standby prepares its repository BEFORE it claims (PREWARM=0) ==
+  PASS  the holder is up on c8/three
+  PASS  and it accepts a push — D7's refusals will mean something
+  PASS  the no-prewarm standby is parked in claimingEpoch
+  PASS  the parked standby CREATED its repository without claiming
+  PASS  and it carries receive.procReceiveRefs=refs/ — every push routes through forge
+  ....  the client said: To /tmp/fc-c8/pc.git  ! [remote rejected] HEAD -> d7 (another server holds c8/three; this process is a standby and cannot publish — push to the repository's own endpoint, or wait f
+  PASS  a push at the no-prewarm standby is REFUSED (rc=1)
+  PASS  and the refusal names the posture, with prewarm off
+
+== D7a — a bare repository that already existed, which forge must still claim ==
+  PASS  precondition: the repository starts with NO procReceiveRefs
+  PASS  the standby is parked beside a repository it inherited
+  PASS  and it has taken the repository over: procReceiveRefs=refs/ is set
+  ....  the client said: To /tmp/fc-c8/pb.git  ! [remote rejected] HEAD -> d7a (another server holds c8/three; this process is a standby and cannot publish — push to the repository's own endpoint, or wait 
+  PASS  the push is REFUSED (rc=1) — plain git no longer decides it
+  PASS  and no ref moved on that disk
+
+C8: 52 passed, 0 failed

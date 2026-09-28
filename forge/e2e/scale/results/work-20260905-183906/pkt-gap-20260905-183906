@@ -1,0 +1,93 @@
+01:55:50.804417 pkt-line.c:86           packet:          git< # service=git-receive-pack
+01:55:50.804430 pkt-line.c:86           packet:          git< 0000
+01:55:50.804434 pkt-line.c:86           packet:          git< 9b22f5cd5dcf817ed1548b2e6dbe3676abf29454 refs/heads/agent/conc-20260905-183333-1\0report-status report-status-v2 delete-refs side-band-64k quiet atomic ofs-delta push-options object-format=sha1 agent=git/2.45.4
+01:55:50.804441 pkt-line.c:86           packet:          git< aa3fd255a9997ac1a9f87f468c3d99a2ca037e20 refs/heads/agent/conc-20260905-183333-2
+01:55:50.804444 pkt-line.c:86           packet:          git< acf2ec92edc528d8d89bd372871a873cc3f339f5 refs/heads/agent/conc-20260905-183333-3
+01:55:50.804447 pkt-line.c:86           packet:          git< a05c186b1fa1bebbefabd30f25e766c77859379b refs/heads/agent/conc-20260905-183333-4
+01:55:50.804456 pkt-line.c:86           packet:          git< 7be7d0000d43f3ebf56d4f7937f2d2f96b79b883 refs/heads/agent/conc-20260905-183333-5
+01:55:50.804459 pkt-line.c:86           packet:          git< 05f063bf7bff7f16539c664f4bacd7c04e65d60e refs/heads/agent/conc-20260905-183906-1
+01:55:50.804462 pkt-line.c:86           packet:          git< c2471a624cfbb7484fadf11df8522a64fea09cb9 refs/heads/agent/conc-20260905-183906-2
+01:55:50.804464 pkt-line.c:86           packet:          git< 5295a4244cf83933111163c5b693db15d711e668 refs/heads/agent/conc-20260905-183906-3
+01:55:50.804467 pkt-line.c:86           packet:          git< 6ef601ed12965d0f278675d92e99266fb571cf0c refs/heads/agent/conc-20260905-183906-4
+01:55:50.804470 pkt-line.c:86           packet:          git< 64ce29ee884851819ad75b77347f782c049cbd97 refs/heads/agent/conc-20260905-183906-5
+01:55:50.804473 pkt-line.c:86           packet:          git< d71a08a89f408d7fd25b9425fba35dd5532b79d9 refs/heads/agent/roll-20260905-183333
+01:55:50.804475 pkt-line.c:86           packet:          git< 6e1402e230994982e71034eb347380ad9ba1b160 refs/heads/agent/roll-20260905-183906
+01:55:50.804478 pkt-line.c:86           packet:          git< 2651c03a11e47d3316ee35ca3ec113e6f5ae2072 refs/heads/agent/stall-20260905-183333
+01:55:50.804481 pkt-line.c:86           packet:          git< a9171a16c490d235e6e3d49a8d7e6a3d5fccd465 refs/heads/agent/stall-20260905-183906
+01:55:50.804483 pkt-line.c:86           packet:          git< 0000
+01:55:50.804613 pkt-line.c:86           packet:          git> HEAD:refs/heads/agent/gap-20260905-183906
+01:55:50.804616 pkt-line.c:86           packet:          git> 0000
+01:55:50.805332 pkt-line.c:86           packet:          git< HEAD:refs/heads/agent/gap-20260905-183906
+01:55:50.805342 pkt-line.c:86           packet:          git< 0000
+01:55:50.805347 pkt-line.c:86           packet:          git< 9b22f5cd5dcf817ed1548b2e6dbe3676abf29454 refs/heads/agent/conc-20260905-183333-1\0report-status report-status-v2 delete-refs side-band-64k quiet atomic ofs-delta push-options object-format=sha1 agent=git/2.45.4
+01:55:50.805357 pkt-line.c:86           packet:          git< aa3fd255a9997ac1a9f87f468c3d99a2ca037e20 refs/heads/agent/conc-20260905-183333-2
+01:55:50.805361 pkt-line.c:86           packet:          git< acf2ec92edc528d8d89bd372871a873cc3f339f5 refs/heads/agent/conc-20260905-183333-3
+01:55:50.805364 pkt-line.c:86           packet:          git< a05c186b1fa1bebbefabd30f25e766c77859379b refs/heads/agent/conc-20260905-183333-4
+01:55:50.805368 pkt-line.c:86           packet:          git< 7be7d0000d43f3ebf56d4f7937f2d2f96b79b883 refs/heads/agent/conc-20260905-183333-5
+01:55:50.805371 pkt-line.c:86           packet:          git< 05f063bf7bff7f16539c664f4bacd7c04e65d60e refs/heads/agent/conc-20260905-183906-1
+01:55:50.805374 pkt-line.c:86           packet:          git< c2471a624cfbb7484fadf11df8522a64fea09cb9 refs/heads/agent/conc-20260905-183906-2
+01:55:50.805378 pkt-line.c:86           packet:          git< 5295a4244cf83933111163c5b693db15d711e668 refs/heads/agent/conc-20260905-183906-3
+01:55:50.805381 pkt-line.c:86           packet:          git< 6ef601ed12965d0f278675d92e99266fb571cf0c refs/heads/agent/conc-20260905-183906-4
+01:55:50.805389 pkt-line.c:86           packet:          git< 64ce29ee884851819ad75b77347f782c049cbd97 refs/heads/agent/conc-20260905-183906-5
+01:55:50.805392 pkt-line.c:86           packet:          git< d71a08a89f408d7fd25b9425fba35dd5532b79d9 refs/heads/agent/roll-20260905-183333
+01:55:50.805395 pkt-line.c:86           packet:          git< 6e1402e230994982e71034eb347380ad9ba1b160 refs/heads/agent/roll-20260905-183906
+01:55:50.805399 pkt-line.c:86           packet:          git< 2651c03a11e47d3316ee35ca3ec113e6f5ae2072 refs/heads/agent/stall-20260905-183333
+01:55:50.805405 pkt-line.c:86           packet:          git< a9171a16c490d235e6e3d49a8d7e6a3d5fccd465 refs/heads/agent/stall-20260905-183906
+01:55:50.805408 pkt-line.c:86           packet:          git< 0000
+01:55:50.805535 pkt-line.c:86           packet:          git> 0000000000000000000000000000000000000000 ff9876f337e7aacf608d866567414f3b2069797a refs/heads/agent/gap-20260905-183906\0 report-status-v2 side-band-64k quiet object-format=sha1 agent=git/2.45.4
+01:55:50.805538 pkt-line.c:86           packet:          git> 0000
+01:55:50.805554 pkt-line.c:86           packet:          git< 00c40000000000000000000000000000000000000000 ff9876f337e7aacf608d866567414f3b2069797a refs/heads/agent/gap-20260905-183906\0 report-status-v2 side-band-64k quiet object-format=sha1 agent=git/2.45.40000
+01:55:50.920493 pkt-line.c:86           packet:          git< PACK ...
+01:59:13.784240 pkt-line.c:86           packet:          git> 0000
+01:59:19.552037 pkt-line.c:86           packet:     sideband< \1
+01:59:24.552988 pkt-line.c:86           packet:     sideband< \1
+01:59:29.558006 pkt-line.c:86           packet:     sideband< \1
+01:59:34.561335 pkt-line.c:86           packet:     sideband< \1
+01:59:39.566307 pkt-line.c:86           packet:     sideband< \1
+01:59:44.571140 pkt-line.c:86           packet:     sideband< \1
+01:59:49.573892 pkt-line.c:86           packet:     sideband< \1
+01:59:54.579007 pkt-line.c:86           packet:     sideband< \1
+01:59:59.581063 pkt-line.c:86           packet:     sideband< \1
+02:00:04.586193 pkt-line.c:86           packet:     sideband< \1
+02:00:09.591093 pkt-line.c:86           packet:     sideband< \1
+02:00:14.593058 pkt-line.c:86           packet:     sideband< \1
+02:00:19.598069 pkt-line.c:86           packet:     sideband< \1
+02:00:24.601149 pkt-line.c:86           packet:     sideband< \1
+02:00:29.606194 pkt-line.c:86           packet:     sideband< \1
+02:00:34.611185 pkt-line.c:86           packet:     sideband< \1
+02:00:39.616120 pkt-line.c:86           packet:     sideband< \1
+02:00:44.621120 pkt-line.c:86           packet:     sideband< \1
+02:00:49.625405 pkt-line.c:86           packet:     sideband< \1
+02:00:54.630437 pkt-line.c:86           packet:     sideband< \1
+02:00:59.632607 pkt-line.c:86           packet:     sideband< \1
+02:01:04.637677 pkt-line.c:86           packet:     sideband< \1
+02:01:09.641124 pkt-line.c:86           packet:     sideband< \1
+02:01:14.643308 pkt-line.c:86           packet:     sideband< \1
+02:01:19.648282 pkt-line.c:86           packet:     sideband< \1
+02:01:24.653316 pkt-line.c:86           packet:     sideband< \1
+02:01:29.654234 pkt-line.c:86           packet:     sideband< \1
+02:01:34.659316 pkt-line.c:86           packet:     sideband< \1
+02:01:39.661433 pkt-line.c:86           packet:     sideband< \1
+02:01:44.666512 pkt-line.c:86           packet:     sideband< \1
+02:01:49.671120 pkt-line.c:86           packet:     sideband< \1
+02:01:54.673466 pkt-line.c:86           packet:     sideband< \1
+02:01:59.678433 pkt-line.c:86           packet:     sideband< \1
+02:02:04.681574 pkt-line.c:86           packet:     sideband< \1
+02:02:09.686563 pkt-line.c:86           packet:     sideband< \1
+02:02:14.691131 pkt-line.c:86           packet:     sideband< \1
+02:02:19.696152 pkt-line.c:86           packet:     sideband< \1
+02:02:24.701134 pkt-line.c:86           packet:     sideband< \1
+02:02:29.706078 pkt-line.c:86           packet:     sideband< \1
+02:02:34.711529 pkt-line.c:86           packet:     sideband< \1
+02:02:39.716178 pkt-line.c:86           packet:     sideband< \1
+02:02:44.721125 pkt-line.c:86           packet:     sideband< \1
+02:02:49.725452 pkt-line.c:86           packet:     sideband< \1
+02:02:54.731047 pkt-line.c:86           packet:     sideband< \1
+02:02:59.731188 pkt-line.c:86           packet:     sideband< \1
+02:03:04.736147 pkt-line.c:86           packet:     sideband< \1
+02:03:06.153449 pkt-line.c:86           packet:     sideband< \1000eunpack ok002cok refs/heads/agent/gap-20260905-1839060000
+02:03:06.153485 pkt-line.c:86           packet:     sideband< 0000
+02:03:06.153504 pkt-line.c:86           packet:          git< unpack ok
+02:03:06.153522 pkt-line.c:86           packet:          git< ok refs/heads/agent/gap-20260905-183906
+02:03:06.153528 pkt-line.c:86           packet:          git< 0000
+02:03:06.153531 pkt-line.c:86           packet:          git> 0000

@@ -1,0 +1,93 @@
+02:32:05.098642 http.c:843              == Info: Couldn't find host flint-forge-door.forge-system.svc in the .netrc file; using defaults
+02:32:05.100983 http.c:843              == Info: Host flint-forge-door.forge-system.svc:80 was resolved.
+02:32:05.100991 http.c:843              == Info: IPv6: (none)
+02:32:05.100994 http.c:843              == Info: IPv4: 10.106.187.45
+02:32:05.101009 http.c:843              == Info:   Trying 10.106.187.45:80...
+02:32:05.101074 http.c:843              == Info: Connected to flint-forge-door.forge-system.svc (10.106.187.45) port 80
+02:32:05.101078 http.c:843              == Info: using HTTP/1.x
+02:32:05.101132 http.c:790              => Send header, 0000001690 bytes (0x0000069a)
+02:32:05.101143 http.c:802              => Send header: GET /git/agents/small.git/info/refs?service=git-receive-pack HTTP/1.1
+02:32:05.101146 http.c:802              => Send header: Host: flint-forge-door.forge-system.svc
+02:32:05.101148 http.c:802              => Send header: User-Agent: git/2.45.4
+02:32:05.101152 http.c:802              => Send header: Accept: */*
+02:32:05.101155 http.c:802              => Send header: Accept-Encoding: deflate, gzip, br, zstd
+02:32:05.101157 http.c:802              => Send header: Authorization: Basic <redacted>
+02:32:05.101161 http.c:802              => Send header: Pragma: no-cache
+02:32:05.101163 http.c:802              => Send header:
+02:32:05.101182 http.c:843              == Info: Request completely sent off
+02:32:05.156313 http.c:790              <= Recv header, 0000000017 bytes (0x00000011)
+02:32:05.156329 http.c:802              <= Recv header: HTTP/1.1 200 OK
+02:32:05.156337 http.c:790              <= Recv header, 0000000060 bytes (0x0000003c)
+02:32:05.156340 http.c:802              <= Recv header: content-type: application/x-git-receive-pack-advertisement
+02:32:05.156345 http.c:790              <= Recv header, 0000000053 bytes (0x00000035)
+02:32:05.156347 http.c:802              <= Recv header: cache-control: no-cache, max-age=0, must-revalidate
+02:32:05.156351 http.c:790              <= Recv header, 0000000040 bytes (0x00000028)
+02:32:05.156353 http.c:802              <= Recv header: expires: Fri, 01 Jan 1980 00:00:00 GMT
+02:32:05.156357 http.c:790              <= Recv header, 0000000018 bytes (0x00000012)
+02:32:05.156359 http.c:802              <= Recv header: pragma: no-cache
+02:32:05.156364 http.c:790              <= Recv header, 0000000028 bytes (0x0000001c)
+02:32:05.156366 http.c:802              <= Recv header: transfer-encoding: chunked
+02:32:05.156369 http.c:790              <= Recv header, 0000000037 bytes (0x00000025)
+02:32:05.156372 http.c:802              <= Recv header: date: Sun, 06 Sep 2026 02:32:05 GMT
+02:32:05.156375 http.c:790              <= Recv header, 0000000002 bytes (0x00000002)
+02:32:05.156378 http.c:802              <= Recv header:
+02:32:05.156393 http.c:843              == Info: Connection #0 to host flint-forge-door.forge-system.svc left intact
+02:32:05.343535 http.c:843              == Info: Couldn't find host flint-forge-door.forge-system.svc in the .netrc file; using defaults
+02:32:05.343563 http.c:843              == Info: Re-using existing http: connection with host flint-forge-door.forge-system.svc
+02:32:05.343671 http.c:790              => Send header, 0000001720 bytes (0x000006b8)
+02:32:05.343685 http.c:802              => Send header: POST /git/agents/small.git/git-receive-pack HTTP/1.1
+02:32:05.343689 http.c:802              => Send header: Host: flint-forge-door.forge-system.svc
+02:32:05.343691 http.c:802              => Send header: User-Agent: git/2.45.4
+02:32:05.343694 http.c:802              => Send header: Authorization: Basic <redacted>
+02:32:05.343696 http.c:802              => Send header: Content-Type: application/x-git-receive-pack-request
+02:32:05.343699 http.c:802              => Send header: Accept: application/x-git-receive-pack-result
+02:32:05.343701 http.c:802              => Send header: Content-Length: 4
+02:32:05.343703 http.c:802              => Send header:
+02:32:05.343707 http.c:843              == Info: upload completely sent off: 4 bytes
+02:32:05.346884 http.c:790              <= Recv header, 0000000017 bytes (0x00000011)
+02:32:05.346892 http.c:802              <= Recv header: HTTP/1.1 200 OK
+02:32:05.346899 http.c:790              <= Recv header, 0000000053 bytes (0x00000035)
+02:32:05.346902 http.c:802              <= Recv header: content-type: application/x-git-receive-pack-result
+02:32:05.346907 http.c:790              <= Recv header, 0000000053 bytes (0x00000035)
+02:32:05.346909 http.c:802              <= Recv header: cache-control: no-cache, max-age=0, must-revalidate
+02:32:05.346913 http.c:790              <= Recv header, 0000000040 bytes (0x00000028)
+02:32:05.346915 http.c:802              <= Recv header: expires: Fri, 01 Jan 1980 00:00:00 GMT
+02:32:05.346919 http.c:790              <= Recv header, 0000000018 bytes (0x00000012)
+02:32:05.346921 http.c:802              <= Recv header: pragma: no-cache
+02:32:05.346925 http.c:790              <= Recv header, 0000000028 bytes (0x0000001c)
+02:32:05.346928 http.c:802              <= Recv header: transfer-encoding: chunked
+02:32:05.346931 http.c:790              <= Recv header, 0000000037 bytes (0x00000025)
+02:32:05.346934 http.c:802              <= Recv header: date: Sun, 06 Sep 2026 02:32:05 GMT
+02:32:05.346938 http.c:790              <= Recv header, 0000000002 bytes (0x00000002)
+02:32:05.346940 http.c:802              <= Recv header:
+02:32:05.346952 http.c:843              == Info: Connection #0 to host flint-forge-door.forge-system.svc left intact
+02:32:05.346994 http.c:843              == Info: Couldn't find host flint-forge-door.forge-system.svc in the .netrc file; using defaults
+02:32:05.347001 http.c:843              == Info: Re-using existing http: connection with host flint-forge-door.forge-system.svc
+02:32:05.347131 http.c:790              => Send header, 0000001771 bytes (0x000006eb)
+02:32:05.347138 http.c:802              => Send header: POST /git/agents/small.git/git-receive-pack HTTP/1.1
+02:32:05.347141 http.c:802              => Send header: Host: flint-forge-door.forge-system.svc
+02:32:05.347144 http.c:802              => Send header: User-Agent: git/2.45.4
+02:32:05.347147 http.c:802              => Send header: Accept-Encoding: deflate, gzip, br, zstd
+02:32:05.347150 http.c:802              => Send header: Transfer-Encoding: chunked
+02:32:05.347154 http.c:802              => Send header: Authorization: Basic <redacted>
+02:32:05.347156 http.c:802              => Send header: Content-Type: application/x-git-receive-pack-request
+02:32:05.347160 http.c:802              => Send header: Accept: application/x-git-receive-pack-result
+02:32:05.347162 http.c:802              => Send header:
+02:35:38.023846 http.c:843              == Info: upload completely sent off: 21496532500 bytes
+02:39:35.918298 http.c:790              <= Recv header, 0000000017 bytes (0x00000011)
+02:39:35.918334 http.c:802              <= Recv header: HTTP/1.1 200 OK
+02:39:35.918347 http.c:790              <= Recv header, 0000000053 bytes (0x00000035)
+02:39:35.918352 http.c:802              <= Recv header: content-type: application/x-git-receive-pack-result
+02:39:35.918382 http.c:790              <= Recv header, 0000000053 bytes (0x00000035)
+02:39:35.918388 http.c:802              <= Recv header: cache-control: no-cache, max-age=0, must-revalidate
+02:39:35.918392 http.c:790              <= Recv header, 0000000040 bytes (0x00000028)
+02:39:35.918395 http.c:802              <= Recv header: expires: Fri, 01 Jan 1980 00:00:00 GMT
+02:39:35.918400 http.c:790              <= Recv header, 0000000018 bytes (0x00000012)
+02:39:35.918403 http.c:802              <= Recv header: pragma: no-cache
+02:39:35.918408 http.c:790              <= Recv header, 0000000028 bytes (0x0000001c)
+02:39:35.918411 http.c:802              <= Recv header: transfer-encoding: chunked
+02:39:35.918415 http.c:790              <= Recv header, 0000000037 bytes (0x00000025)
+02:39:35.918418 http.c:802              <= Recv header: date: Sun, 06 Sep 2026 02:39:35 GMT
+02:39:35.918423 http.c:790              <= Recv header, 0000000002 bytes (0x00000002)
+02:39:35.918437 http.c:802              <= Recv header:
+02:39:35.918508 http.c:843              == Info: Connection #0 to host flint-forge-door.forge-system.svc left intact
