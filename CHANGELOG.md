@@ -14,6 +14,20 @@ covered by the stability guarantee.
 
 ### Added
 
+- **pNFS MDS / lite hub: `ro` in an export's `options` makes the export
+  read-only** (2026-09-28, F70's follow-on). `ExportConfig.options` was carried
+  in every config (`[rw, sync, no_subtree_check]`) and read nowhere.
+  `ExportConfig::read_only()` now reads it exports(5)-style — `ro` ⇒ read-only,
+  `rw` or neither ⇒ read-write, other knfsd options ignored as before — and
+  `MetadataServer::new` hands the answer to `CompoundDispatcher::with_read_only`,
+  so every mutating op answers `NFS4ERR_ROFS` (see F70 under Fixed). An export
+  naming both `ro` and `rw` refuses to start, like standalone+dataServers.
+  Checked: the reader's table; a standalone MDS built from a real YAML config
+  with `[ro, sync, no_subtree_check]` refuses REMOVE and the file stays, while
+  the shipped `[rw, sync, no_subtree_check]` shape performs it; `[ro, rw]` does
+  not construct. Nothing renders `ro` yet: the chart's MDS template and the lite
+  operator hard-code `rw`, so a read-only hub still needs a knob.
+
 - **lean: immutable object handles — the store type, the syncer's commit
   section and the gateway's verbs (H6's structural fix, tranches 1, 3 and 4
   of `docs/plans/flint-lean-immutable-objects-design.md`; NOT the drills).**

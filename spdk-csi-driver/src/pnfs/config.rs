@@ -741,6 +741,31 @@ pub struct ExportConfig {
     pub access: Vec<AccessConfig>,
 }
 
+impl ExportConfig {
+    /// Whether this export is read-only, read exports(5)-style from
+    /// `options`: `ro` makes it read-only, `rw` (the default when neither
+    /// is present) read-write. Every other option (`sync`,
+    /// `no_subtree_check`, ...) is a knfsd option this server never
+    /// implemented and is ignored, as it always was. An export that says
+    /// BOTH `ro` and `rw` is refused rather than resolved by position,
+    /// because whichever the operator meant, the other half of their
+    /// config would be silently ignored.
+    ///
+    /// Until 2026-09-28 `options` was carried in every config and read
+    /// nowhere; `ro` did nothing. The MDS now hands the answer to
+    /// `CompoundDispatcher::with_read_only` (F70's refusal).
+    pub fn read_only(&self) -> std::result::Result<bool, String> {
+        let has = |want: &str| self.options.iter().any(|o| o.trim().eq_ignore_ascii_case(want));
+        match (has("ro"), has("rw")) {
+            (true, true) => Err(format!(
+                "export {}: options name both `ro` and `rw` — keep one",
+                self.path
+            )),
+            (ro, _) => Ok(ro),
+        }
+    }
+}
+
 /// Access control configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccessConfig {
@@ -1244,6 +1269,33 @@ impl PnfsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn export_with(options: &[&str]) -> ExportConfig {
+        ExportConfig {
+            path: "/exports".to_string(),
+            fsid: 1,
+            options: options.iter().map(|s| s.to_string()).collect(),
+            access: Vec::new(),
+        }
+    }
+
+    /// `ro` is read exports(5)-style: alone or beside the knfsd options
+    /// every shipped config carries; `rw` and no option both mean
+    /// read-write; case and whitespace do not matter; both at once is a
+    /// refused config, not a coin toss.
+    #[test]
+    fn export_options_ro_is_read_only_and_ro_plus_rw_is_refused() {
+        assert_eq!(export_with(&["ro"]).read_only(), Ok(true));
+        assert_eq!(export_with(&["ro", "sync", "no_subtree_check"]).read_only(), Ok(true));
+        assert_eq!(export_with(&[" RO "]).read_only(), Ok(true));
+        // the shape every chart, operator and lima config renders today
+        assert_eq!(export_with(&["rw", "sync", "no_subtree_check"]).read_only(), Ok(false));
+        assert_eq!(export_with(&[]).read_only(), Ok(false));
+        assert_eq!(export_with(&["sync"]).read_only(), Ok(false));
+        let both = export_with(&["ro", "rw"]).read_only();
+        assert!(both.is_err(), "ro+rw must be refused, got {both:?}");
+        assert!(both.unwrap_err().contains("/exports"), "the error names the export");
+    }
 
     #[test]
     fn effective_endpoints_prefers_shard_list() {

@@ -365,12 +365,33 @@ impl MetadataServer {
         } else {
             Some(operation_handler.clone() as Arc<dyn crate::pnfs::PnfsOperations>)
         };
-        let base_dispatcher = Arc::new(CompoundDispatcher::new_with_pnfs(
-            Arc::clone(&fh_manager),
-            Arc::clone(&state_mgr),
-            lock_mgr,
-            pnfs_ops,
-        ));
+        // The export's `ro` option (exports(5) style) makes this server
+        // read-only — F70's dispatcher refusal, reached from config. The
+        // MDS serves `exports.first()` (the same export whose path was
+        // taken above), so that is the export whose options count. Read
+        // before the dispatcher exists so an ambiguous `ro`+`rw` refuses
+        // startup instead of picking one.
+        let read_only = exports
+            .first()
+            .map(|e| e.read_only())
+            .transpose()
+            .map_err(crate::pnfs::Error::Config)?
+            .unwrap_or(false);
+        let base_dispatcher = Arc::new(
+            CompoundDispatcher::new_with_pnfs(
+                Arc::clone(&fh_manager),
+                Arc::clone(&state_mgr),
+                lock_mgr,
+                pnfs_ops,
+            )
+            .with_read_only(read_only),
+        );
+        if read_only {
+            info!(
+                "🔒 export is READ-ONLY (`ro` in export options): every mutating \
+                 operation answers NFS4ERR_ROFS, whatever the client mounted"
+            );
+        }
 
         // THE LAUNDROMAT. `courtesy_release_expired` reaps every expired
         // client — but until now its ONLY production caller was the top
@@ -2217,3 +2238,79 @@ impl MetadataServer {
 }
 
 
+
+#[cfg(test)]
+mod export_options_tests {
+    use super::*;
+
+    /// A standalone MDS built from a real YAML config, the way
+    /// `nfs_mds_main` builds one, with the export's options as given.
+    async fn mds_with_options(options: &str) -> (Result<MetadataServer>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let export = dir.path().join("exports");
+        std::fs::create_dir_all(&export).unwrap();
+        std::fs::write(export.join("victim"), b"x").unwrap();
+        let yaml = format!(
+            "apiVersion: chert.us/v1alpha1\nkind: PnfsConfig\nmode: standalone\n\
+             mds:\n  bind:\n    address: \"127.0.0.1\"\n    port: 0\n\
+             \x20 layout:\n    type: file\n    stripeSize: 8388608\n    policy: stripe\n\
+             \x20 dataServers: []\n  state:\n    backend: memory\n    config: {{}}\n\
+             exports:\n  - path: {}\n    fsid: 1\n    options: {}\n\
+             logging:\n  level: info\n  format: text\n",
+            export.display(),
+            options,
+        );
+        let cfg_path = dir.path().join("mds.yaml");
+        std::fs::write(&cfg_path, yaml).unwrap();
+        let cfg = crate::pnfs::config::PnfsConfig::from_file(&cfg_path).expect("config parses");
+        let mds = MetadataServer::new(cfg.mds.expect("mds section"), cfg.exports).await;
+        (mds, dir)
+    }
+
+    async fn remove_victim(mds: &MetadataServer) -> crate::nfs::v4::protocol::Nfs4Status {
+        use crate::nfs::v4::compound::{CompoundRequest, Operation};
+        let req = CompoundRequest {
+            tag: String::new(),
+            tag_valid: true,
+            minor_version: 0,
+            operations: vec![Operation::PutRootFh, Operation::Remove("victim".to_string())],
+            wire_size: 0,
+        };
+        mds.base_dispatcher.dispatch_compound(req, Vec::new()).await.status
+    }
+
+    /// `options: [ro, ...]` reaches the dispatcher of a server built the
+    /// way `main` builds one: REMOVE answers ROFS and the file stays.
+    /// The control arm is the shape every shipped config renders today
+    /// (`[rw, sync, no_subtree_check]`): the same REMOVE succeeds. Both
+    /// arms run so the option, not the operation, is what decides.
+    #[tokio::test]
+    async fn ro_in_export_options_makes_the_mds_read_only_and_rw_does_not() {
+        use crate::nfs::v4::protocol::Nfs4Status;
+
+        let (mds, dir) = mds_with_options("[ro, sync, no_subtree_check]").await;
+        let mds = mds.expect("a read-only MDS constructs");
+        assert!(mds.base_dispatcher.is_read_only());
+        assert_eq!(remove_victim(&mds).await, Nfs4Status::RoFs);
+        assert!(dir.path().join("exports/victim").exists(), "REMOVE removed nothing");
+
+        let (mds, dir) = mds_with_options("[rw, sync, no_subtree_check]").await;
+        let mds = mds.expect("a read-write MDS constructs");
+        assert!(!mds.base_dispatcher.is_read_only());
+        assert_eq!(remove_victim(&mds).await, Nfs4Status::Ok);
+        assert!(!dir.path().join("exports/victim").exists(), "REMOVE performed");
+    }
+
+    /// `ro` and `rw` on one export is two servers in one config; it is
+    /// refused at construction, like standalone+dataServers, instead of
+    /// being resolved by position.
+    #[tokio::test]
+    async fn ro_and_rw_together_refuse_to_start() {
+        let (mds, _dir) = mds_with_options("[ro, rw]").await;
+        let err = match mds {
+            Err(e) => format!("{e}"),
+            Ok(_) => panic!("an export that is both ro and rw must not construct"),
+        };
+        assert!(err.contains("`ro` and `rw`"), "the refusal names the conflict: {err}");
+    }
+}

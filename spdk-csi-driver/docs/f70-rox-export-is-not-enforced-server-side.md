@@ -170,9 +170,22 @@ that mounts the ROX PVC without `readOnly` and must be refused) have not
 been run against the fixed server; the kind tier on the build box cannot
 run this suite (see F71's run record). (2) `NodePublishVolume` still does
 not read the access mode; the client-side `ro` remains kubelet's bit. That
-is now belt to the server's braces rather than the guarantee. (3) The MDS's
-`ExportConfig.options` is still never read, so a lite/pNFS export cannot be
-declared read-only; `with_read_only` is available to it when that is wanted.
+is now belt to the server's braces rather than the guarantee. (3) ~~The MDS's
+`ExportConfig.options` is still never read~~ — **wired the same day**:
+`ExportConfig::read_only()` reads `options` exports(5)-style (`ro` ⇒
+read-only; `rw` or nothing ⇒ read-write; the knfsd options every shipped
+config carries, `sync`/`no_subtree_check`, stay ignored; `ro`+`rw` on one
+export refuses startup, like standalone+dataServers) and `MetadataServer::new`
+hands it to `with_read_only`. Tests: the reader's table
+(`export_options_ro_is_read_only_and_ro_plus_rw_is_refused`); a standalone MDS
+built from a real YAML config with `[ro, sync, no_subtree_check]` answers ROFS
+to REMOVE and the file stays, and the control `[rw, sync, no_subtree_check]`
+(what the chart, the lite operator and every lima config render) performs it
+(`ro_in_export_options_makes_the_mds_read_only_and_rw_does_not`); `[ro, rw]`
+refuses to construct (`ro_and_rw_together_refuse_to_start`). Nothing renders
+`ro` yet — the chart's MDS template and the lite operator hard-code
+`[rw, sync, no_subtree_check]` — so a knob (values / FlintShare field) is the
+next step if a read-only hub is wanted. `access[].permissions` is still unread.
 
 ## Scope note — this is not lean
 
