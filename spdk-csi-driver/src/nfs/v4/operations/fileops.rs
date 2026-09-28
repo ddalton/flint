@@ -1336,7 +1336,7 @@ fn encode_export_entry_attributes(name: &str, requested_attrs: &[u32], pnfs_enab
 /// a pre-fetched snapshot, ensuring consistency per RFC 8434 §13.
 ///
 /// Key principle: This function does ZERO I/O, only serialization.
-fn encode_attributes_from_snapshot(
+pub(crate) fn encode_attributes_from_snapshot(
     requested_bitmap: &[u32],
     snapshot: &AttributeSnapshot,
     pnfs_enabled: bool,
