@@ -568,10 +568,26 @@ port are still wanted for capacity and failure isolation.
      set once) and passing both env vars. That lands with step 4's
      `nfsProxy.enabled`, since nothing sets them before a proxy exists.
 2. Proxy core: downstream sessions (reused), pseudo-root, routing,
-   backend clients, slot mapping, splice.
+   backend clients, slot mapping, splice. **The authorization hook is
+   part of the core, not a later add-on:** every connection carries an
+   identity (the source address in step 2, the certificate in 2b), and
+   the router consults an allowlist at exactly three points: `READDIR /`
+   (filtered), the crossing `LOOKUP` (`NFS4ERR_NOENT`, so a refused
+   workspace is indistinguishable from an absent one), and `PUTFH` of a
+   hub filehandle (`NFS4ERR_STALE`, the leaked-filehandle bypass of
+   §7). Drill control: the same client without the allowlist entry must
+   see the workspace.
+2b. RPC-with-TLS mTLS at the proxy (§6a): the `AUTH_TLS` NULL probe,
+   STARTTLS, rustls with a required client certificate, the URI SAN as
+   the identity, hot reload of the cert-manager files. A connection
+   that does not upgrade is refused on the external listener.
 3. Restarts and wake: lease keepalive, status-flag OR, the table in
    §4, and `NFS4ERR_DELAY` + wake.
-4. Chart/operator wiring, with **headless hub Services** (§7a).
+4. Chart/operator wiring, with **headless hub Services** (§7a), and
+   the hub lockdown that makes the proxy unbypassable: NetworkPolicy
+   (and, under ambient, the L4 `AuthorizationPolicy`) admitting only
+   the proxy's ServiceAccount. Drill control: a pod beside the proxy,
+   under a different ServiceAccount, must fail to connect to a hub.
 5. **Scale prerequisites (§7a):** hibernate as the inactive default,
    with **zero live leases as a hibernation precondition** (the HIB-1
    fix, and now required by §4); hub defects **D1** (`FREE_STATEID` →

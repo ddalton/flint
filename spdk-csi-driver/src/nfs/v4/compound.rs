@@ -2467,7 +2467,7 @@ impl CompoundResponse {
     }
 
     /// Encode a single operation result
-    fn encode_result(encoder: &mut XdrEncoder, result: OperationResult) {
+    pub(crate) fn encode_result(encoder: &mut XdrEncoder, result: OperationResult) {
         match result {
             // File handle operations
             OperationResult::PutRootFh(status) => {
