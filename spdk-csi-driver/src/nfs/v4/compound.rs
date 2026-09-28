@@ -677,6 +677,9 @@ pub enum OperationResult {
 
     // Lookup operations
     Lookup(Nfs4Status),
+    /// Its own variant: a result carries its op's opcode (16, not
+    /// LOOKUP's 15) or the Linux client cannot decode the reply.
+    LookupP(Nfs4Status),
     ReadDir(Nfs4Status, Option<ReadDirResult>),
 
     // File I/O
@@ -761,6 +764,7 @@ impl OperationResult {
             OperationResult::SaveFh(s) => *s,
             OperationResult::RestoreFh(s) => *s,
             OperationResult::Lookup(s) => *s,
+            OperationResult::LookupP(s) => *s,
             OperationResult::ReadDir(s, _) => *s,
             OperationResult::Open(s, _) => *s,
             OperationResult::Close(s, _) => *s,
@@ -2503,6 +2507,10 @@ impl CompoundResponse {
             // Lookup and directory operations
             OperationResult::Lookup(status) => {
                 encoder.encode_u32(opcode::LOOKUP);
+                encoder.encode_status(status);
+            }
+            OperationResult::LookupP(status) => {
+                encoder.encode_u32(opcode::LOOKUPP);
                 encoder.encode_status(status);
             }
             OperationResult::ReadDir(status, result) => {

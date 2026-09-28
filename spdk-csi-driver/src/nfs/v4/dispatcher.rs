@@ -1299,8 +1299,7 @@ impl CompoundDispatcher {
             Operation::LookupP => {
                 context.current_stateid = None;
                 let res = self.file_handler.handle_lookupp(LookupPOp, context).await;
-                // Note: LookupP doesn't exist in OperationResult, using Lookup instead
-                OperationResult::Lookup(res.status)
+                OperationResult::LookupP(res.status)
             }
 
             Operation::Access(access) => {
@@ -5056,6 +5055,27 @@ mod tests {
             opcode::SEQUENCE,
             "the SEQUENCE result must still be FIRST so the client can read sr_status"
         );
+    }
+
+    /// RFC 8881 §15.2: each result carries the opcode of ITS op. LOOKUPP
+    /// was answered as a LOOKUP result (opcode 15, not 16), which the Linux
+    /// client's `decode_op_hdr` rejects: the reply fails to decode (EIO).
+    /// Found building the nfs-proxy pseudo-root, which answers LOOKUPP too.
+    #[tokio::test]
+    async fn a_lookupp_result_carries_the_lookupp_opcode() {
+        let (d, _t) = create_test_dispatcher();
+        let sid = session_with_max_response(&d, 4096).await;
+        std::fs::create_dir(_t.path().join("sub")).unwrap();
+        let ops = vec![Operation::PutRootFh, Operation::Lookup("sub".into()), Operation::LookupP];
+        let resp = d.dispatch_compound(seq_then(sid, 1, ops), Vec::new()).await;
+        let raw = resp.raw_reply.expect("session replies are carried as raw bytes");
+        let f: Vec<u8> = raw.iter().flat_map(|b| b.as_mem().iter().copied()).collect();
+        let g = |o: usize| u32::from_be_bytes([f[o], f[o + 1], f[o + 2], f[o + 3]]);
+        assert_eq!(g(8), 4, "SEQUENCE + PUTROOTFH + LOOKUP + LOOKUPP");
+        // header 12 | SEQUENCE ok 44 | PUTROOTFH 8 | LOOKUP 8 | LOOKUPP
+        assert_eq!((g(12), g(56), g(64)), (opcode::SEQUENCE, opcode::PUTROOTFH, opcode::LOOKUP));
+        assert_eq!(g(72), opcode::LOOKUPP);
+        assert_eq!(g(76), Nfs4Status::Ok as u32);
     }
 
     /// Control for the test above: the same shape UNDER the cap must pass
