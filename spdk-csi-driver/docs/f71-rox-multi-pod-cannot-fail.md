@@ -13,7 +13,9 @@ and 2 are fixed in `tests/system/tests-standard/rox-multi-pod/`:
   `spec.nodeName`s.
 - New steps 07 and 08 mount the ROX PVC from a pod WITHOUT `readOnly` and
   require its write refused. That is F70 reached through the ordinary API,
-  with no privileged pod, and it FAILS while F70 is open.
+  with no privileged pod, and it FAILED while F70 was open. **F70 was fixed
+  server-side 2026-09-28** (unit-tested; see the F70 doc). This cluster
+  test has still not been run against the fixed server.
 - The bare `kubectl` calls now name `$NAMESPACE`. kuttl runs each test in
   its own namespace, and the old step 06's bare calls looked in `default`.
 

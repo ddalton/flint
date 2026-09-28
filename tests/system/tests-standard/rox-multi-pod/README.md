@@ -3,10 +3,11 @@
 > **F71 fixed in the test, 2026-09-27 (not yet run on a cluster).** Until
 > then this test could not fail in the ways its claim table implied. See
 > [F71](../../../../spdk-csi-driver/docs/f71-rox-multi-pod-cannot-fail.md).
-> **Step 08 is EXPECTED TO FAIL while
-> [F70](../../../../spdk-csi-driver/docs/f70-rox-export-is-not-enforced-server-side.md)
-> is open:** a pod that mounts the ROX PVC without `readOnly: true` can
-> write to it.
+> **Step 08 is the cluster-level proof of
+> [F70](../../../../spdk-csi-driver/docs/f70-rox-export-is-not-enforced-server-side.md),
+> fixed server-side 2026-09-28** (the NFS server now answers NFS4ERR_ROFS to
+> every mutating op on a ROX export). It failed against every server before
+> that fix, and it has not yet been run against the fixed one.
 
 ## Purpose
 

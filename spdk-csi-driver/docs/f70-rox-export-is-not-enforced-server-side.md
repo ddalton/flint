@@ -1,9 +1,11 @@
 # F70 — a ROX export is read-only only because the CLIENT was asked nicely; the NFS server never enforces it
 
-Status: **FOUND 2026-09-22 by a code read, NOT FIXED, NOT reproduced on a
-rig.** Found while answering a scoping question ("can flint lean run in ROX
-mode?"), not by any suite — and no suite could have found it, which is
-[F71](f71-rox-multi-pod-cannot-fail.md).
+Status: **FIXED SERVER-SIDE 2026-09-28, unit-tested; the cluster test
+(`rox-multi-pod` step 08) has NOT yet been run against the fixed server.**
+Found 2026-09-22 by a code read while answering a scoping question ("can
+flint lean run in ROX mode?"), not by any suite — and no suite could have
+found it, which is [F71](f71-rox-multi-pod-cannot-fail.md). The sections
+below describe the server as it was when found; the fix is at the end.
 
 `disk.csi.chert.us` genuinely supports `ReadOnlyMany`: it is on the
 `ValidateVolumeCapabilities` allowlist (`main.rs:2946-2951`) and a ROX claim
@@ -105,6 +107,72 @@ export-level check is cheaper and safer than a per-object one.
 or not the server enforces anything, so a fix landed against it proves
 nothing. The order is: make the test able to fail (F71), watch it fail
 against today's server, then fix.
+
+## The fix (2026-09-28)
+
+`CompoundDispatcher` gained a `read_only` flag (`with_read_only`,
+`is_read_only`; `nfs/v4/dispatcher.rs`). `NfsServer::new` sets it from
+`NfsConfig.read_only` — the link that was missing — and logs
+`export is READ-ONLY (ROX)` at startup. `CompoundDispatcher::new`'s
+signature is unchanged, so the MDS, the file API and the NFS proxy build
+read-write dispatchers exactly as before.
+
+**Where the refusal lives.** At the top of `dispatch_operation_inner`,
+after the minor-version check and before the operation `match`:
+`read_only_refusal(&op)` answers `NFS4ERR_ROFS` for every mutating
+operation before any handler, stateid, share reservation, tier mark or
+filesystem call runs. The refused op ends the COMPOUND with ROFS as its
+top-level status, so nothing behind it executes. The function is a total
+match over `Operation`, like `minor_version_2_opcode`, so a new mutating
+op added to the enum is a compile error here rather than a hole.
+
+Refused: WRITE, COMMIT, SETATTR (whole — every attribute it sets is on-disk
+state), CREATE, REMOVE, RENAME, LINK, OPEN that asks for write access or
+would create (`OPEN4_CREATE` in any createmode), LOCK of a write type
+(WRITE_LT, WRITEW_LT), ALLOCATE, DEALLOCATE, COPY, CLONE, LAYOUTGET with an
+iomode other than READ, LAYOUTCOMMIT. Never refused: every read and lookup,
+and every release — CLOSE, OPEN_DOWNGRADE, LOCKU, FREE_STATEID, DELEGRETURN,
+LAYOUTRETURN, LOCKT, read-type LOCK, read OPEN — so a client can always let
+go of state it holds. ACCESS still reports the write bits as *supported*
+but never *grants* MODIFY, EXTEND or DELETE, the way knfsd answers on an
+`ro` export; Linux consults ACCESS before OPEN, so `open(2)` for write
+returns EROFS on the client.
+
+**Tests** (all in `#[cfg(test)]`, run 2026-09-28):
+
+- `a_read_only_export_refuses_every_mutating_op_with_rofs` — the list above
+  with null stateids (so the refusal is proven to land BEFORE stateid
+  validation), plus the file is unchanged and no directory, rename target or
+  link exists afterwards.
+- `a_read_write_export_never_answers_rofs_to_the_same_ops` — the control:
+  the same operations on the same dispatcher built read-write never answer
+  ROFS. Without it a refusal that fired for every export would pass.
+- `a_read_only_export_still_serves_reads_and_releases` — ACCESS, LOOKUP,
+  GETATTR, a read OPEN, READ (bytes compared), a read LOCK, LOCKU and CLOSE
+  all succeed on the read-only export.
+- `a_refused_op_ends_the_compound_with_rofs` — through the public session
+  path: `SEQUENCE, PUTROOTFH, REMOVE, GETFH` answers ROFS with three
+  results; GETFH never ran; the file is still there.
+- `a_constructed_read_only_server_refuses_a_write_and_a_read_write_one_does_not`
+  (`nfs/server_v4.rs`) — the production wiring on a server built the way
+  `main` builds one, both arms, with the victim file's presence following
+  the flag. This is the test whose absence was the whole bug.
+- Positive controls, run the same day: with the server passing `false`
+  instead of its config, only the wiring test fails; with the OPEN(write |
+  create) refusal removed, only the refusal-list test fails. Both lines are
+  load-bearing and both are pinned. (Trap met on the way: a file restored
+  by moving its backup back keeps the backup's OLD mtime, so cargo reused
+  the mutated test binary and reported a failure that was not there —
+  `touch` the restored sources before the next run.)
+
+**Still owed.** (1) The cluster leg: `rox-multi-pod` steps 07/08 (a pod
+that mounts the ROX PVC without `readOnly` and must be refused) have not
+been run against the fixed server; the kind tier on the build box cannot
+run this suite (see F71's run record). (2) `NodePublishVolume` still does
+not read the access mode; the client-side `ro` remains kubelet's bit. That
+is now belt to the server's braces rather than the guarantee. (3) The MDS's
+`ExportConfig.options` is still never read, so a lite/pNFS export cannot be
+declared read-only; `with_read_only` is available to it when that is wanted.
 
 ## Scope note — this is not lean
 

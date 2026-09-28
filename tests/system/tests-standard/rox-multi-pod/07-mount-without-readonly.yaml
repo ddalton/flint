@@ -5,7 +5,9 @@
 # (MULTI_NODE_READER_ONLY), and the NFS server never reads its own
 # `read_only` config. This pod mounts the ROX PVC the ordinary way, without
 # `readOnly`, and tries to write. Step 08 requires the write to be REFUSED.
-# While F70 is open it LANDS, and this test FAILS — which is the point.
+# While F70 was open it LANDED, and this test FAILED — which was the point.
+# F70 was fixed server-side 2026-09-28 (the server answers NFS4ERR_ROFS);
+# this leg has not yet been run against the fixed server.
 apiVersion: v1
 kind: Pod
 metadata:

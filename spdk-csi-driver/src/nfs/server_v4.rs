@@ -153,11 +153,20 @@ impl NfsServer {
         let lock_mgr = LockManager::bring_up(state_mgr.backend(), state_lost).await;
 
         // Create COMPOUND dispatcher (creates handlers internally)
-        let dispatcher = Arc::new(CompoundDispatcher::new(
-            fh_mgr,
-            state_mgr.clone(),
-            lock_mgr.clone(),
-        ));
+        // F70: the read-only bit the CSI controller sent us (`--read-only`
+        // for a ROX volume) reaches the dispatcher here. Before 2026-09-28
+        // it was logged in the banner and read nowhere else, so every ROX
+        // export was read-write to any client that did not mount `ro`.
+        let dispatcher = Arc::new(
+            CompoundDispatcher::new(fh_mgr, state_mgr.clone(), lock_mgr.clone())
+                .with_read_only(config.read_only),
+        );
+        if config.read_only {
+            info!(
+                "🔒 export is READ-ONLY (ROX): every mutating operation answers \
+                 NFS4ERR_ROFS, whatever the client mounted"
+            );
+        }
 
         // Validate the security floor BEFORE the listener exists.
         //
@@ -1772,5 +1781,52 @@ mod deleg_wiring_tests {
             server.state_mgr.recall_machinery_ready(),
             "a server that cannot recall refuses every delegation and says nothing about it",
         );
+    }
+
+    /// F70. The refusal is a dispatcher property, and the dispatcher's own
+    /// tests prove it — for a dispatcher built by hand. This pins the
+    /// wiring on a server built the way `main` builds one, because that
+    /// is exactly the link that was missing: `read_only` reached
+    /// `NfsConfig` and stopped there for as long as ROX existed. Both
+    /// arms run so the flag, not the operation, is what decides.
+    #[tokio::test]
+    async fn a_constructed_read_only_server_refuses_a_write_and_a_read_write_one_does_not() {
+        use crate::nfs::v4::compound::Operation;
+        use crate::nfs::v4::protocol::Nfs4Status;
+
+        async fn remove_status(read_only: bool) -> Nfs4Status {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(dir.path().join(".flint-nfs")).unwrap();
+            std::fs::write(dir.path().join(".flint-nfs/volume-id"), b"f70-vol").unwrap();
+            std::fs::write(dir.path().join("victim"), b"x").unwrap();
+            let server = NfsServer::new(NfsConfig {
+                bind_addr: "127.0.0.1".to_string(),
+                bind_port: 0,
+                volume_id: "f70-vol".to_string(),
+                export_path: dir.path().to_path_buf(),
+                read_only,
+            })
+            .await
+            .expect("server construction");
+            assert_eq!(server.dispatcher.is_read_only(), read_only);
+            let req = CompoundRequest {
+                tag: String::new(),
+                tag_valid: true,
+                minor_version: 0,
+                operations: vec![Operation::PutRootFh, Operation::Remove("victim".to_string())],
+                wire_size: 0,
+            };
+            let resp = server.dispatcher.dispatch_compound(req, Vec::new()).await;
+            let still_there = dir.path().join("victim").exists();
+            assert_eq!(
+                still_there, read_only,
+                "read_only={read_only}: the victim's presence must follow the flag (status {:?})",
+                resp.status
+            );
+            resp.status
+        }
+
+        assert_eq!(remove_status(true).await, Nfs4Status::RoFs, "a ROX server refuses REMOVE");
+        assert_eq!(remove_status(false).await, Nfs4Status::Ok, "an RWX server performs it");
     }
 }

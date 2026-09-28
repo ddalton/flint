@@ -110,6 +110,33 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **F70: a ReadOnlyMany export is now read-only at the SERVER** (2026-09-28).
+  The CSI controller has always told the NFS server pod `--read-only` for a
+  ROX volume, and the server carried it into `NfsConfig.read_only` and read
+  it nowhere: the export was read-write for every client that did not mount
+  `ro`, and the only `ro` came from kubelet's `readonly` bit in the pod
+  spec. A pod without `readOnly: true`, a hand mount against the Service, or
+  a client in another cluster wrote through a ROX volume. Now
+  `CompoundDispatcher::with_read_only` (set from the config in
+  `NfsServer::new`) answers `NFS4ERR_ROFS` at the top of dispatch — before
+  any handler, stateid or filesystem call — to WRITE, COMMIT, SETATTR,
+  CREATE, REMOVE, RENAME, LINK, an OPEN that asks for write access or would
+  create, a write-type LOCK, ALLOCATE, DEALLOCATE, COPY, CLONE, a read-write
+  LAYOUTGET and LAYOUTCOMMIT; the refused op ends the COMPOUND. Every read
+  and every release (CLOSE, OPEN_DOWNGRADE, LOCKU, FREE_STATEID, DELEGRETURN,
+  LAYOUTRETURN) still passes, and ACCESS never grants MODIFY/EXTEND/DELETE,
+  as knfsd answers on an `ro` export. Checked: the refusal list with null
+  stateids and an untouched tree; the same ops on a read-write dispatcher
+  never answer ROFS (the control); reads, a read lock and the releases on
+  the read-only export; the COMPOUND-level status through the session path;
+  and the production wiring on a server built the way `main` builds one,
+  both arms; positive controls — the server passing `false` instead of its
+  config fails only the wiring test, and dropping the OPEN(write) refusal
+  fails only the refusal test. NOT yet run: `rox-multi-pod` steps 07/08 on a cluster (the
+  kind tier on the build box cannot run that suite). The MDS's
+  `ExportConfig.options` is still unread, so lite/pNFS exports cannot be
+  declared read-only yet. Docs:
+  `spdk-csi-driver/docs/f70-rox-export-is-not-enforced-server-side.md`.
 - **spdk-tgt + hot rejoin: a lapsed quiesce lease can no longer be
   re-acquired by the "renew"** (2026-09-27). `bdev_raid_quiesce` (the
   carried raid patch) acquired or renewed with the same call and answered

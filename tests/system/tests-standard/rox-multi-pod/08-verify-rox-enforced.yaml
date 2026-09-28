@@ -1,7 +1,8 @@
 apiVersion: kuttl.dev/v1beta1
 kind: TestStep
 # F70 (2026-09-27, F71's fix): the ROX volume refuses a write from a pod that
-# did not ask for readOnly. FAILS while F70 is open.
+# did not ask for readOnly. Failed while F70 was open; F70 was fixed
+# server-side 2026-09-28 and this leg has not yet been run against it.
 commands:
   - command: |
       set -u

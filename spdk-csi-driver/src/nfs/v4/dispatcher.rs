@@ -82,6 +82,19 @@ pub struct CompoundDispatcher {
         crate::nfs::v4::protocol::SessionId,
         Vec<std::sync::Weak<crate::nfs::v4::back_channel::BackChannelWriter>>,
     >,
+
+    /// F70: the export is read-only. Every mutating operation answers
+    /// NFS4ERR_ROFS at the top of dispatch, before any handler, stateid
+    /// or filesystem is consulted, and ACCESS never grants a write bit.
+    ///
+    /// This is the ONLY place a ROX guarantee can live. The client-side
+    /// `ro` mount option is kubelet's `readonly` bit forwarded — a pod
+    /// that omits `readOnly: true`, a hand mount against the Service, or
+    /// a client in another cluster all reach the export read-write
+    /// without it. `NfsConfig.read_only` was carried from the CSI
+    /// controller to this process's config and then never read; the
+    /// export was read-write for every client for as long as ROX existed.
+    read_only: bool,
 }
 
 /// One pnfs_scsi_layout4 extent as encoded on the wire (RFC 8154
@@ -108,6 +121,18 @@ impl CompoundDispatcher {
     /// (step 10/11: open-hot files are non-evictable).
     pub fn open_file_view(&self) -> crate::nfs::v4::operations::ioops::OpenFileView {
         self.io_handler.open_file_view()
+    }
+
+    /// F70: make the export read-only. See `read_only_refusal` for the
+    /// operations this refuses; the read path is untouched.
+    pub fn with_read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
+    }
+
+    /// Whether this dispatcher refuses mutating operations (F70).
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
     
     /// Create a new COMPOUND dispatcher with optional pNFS support
@@ -148,6 +173,7 @@ impl CompoundDispatcher {
             pnfs_handler,
             back_channels: Arc::new(dashmap::DashMap::new()),
             session_bound_conns: dashmap::DashMap::new(),
+            read_only: false,
         };
         // The grant path's callback_ready (rule 7) and the MDS
         // posture refusal both live on StateManager; hand it the
@@ -912,6 +938,16 @@ impl CompoundDispatcher {
             }
         }
 
+        // F70: a read-only export refuses every mutating operation here,
+        // ahead of the handlers, so no stateid, share reservation, tier
+        // mark or filesystem call is ever made on its behalf.
+        if self.read_only {
+            if let Some((name, refused)) = read_only_refusal(&operation) {
+                debug!("read-only export: {} refused with NFS4ERR_ROFS", name);
+                return refused;
+            }
+        }
+
         match operation {
             // Session operations (NFSv4.1)
             Operation::ExchangeId { clientowner, flags, state_protect, impl_id } => {
@@ -1306,7 +1342,17 @@ impl CompoundDispatcher {
                 let op = AccessOp { access };
                 let res = self.file_handler.handle_access(op, context).await;
                 // ACCESS response has TWO fields: supported and access (what's granted)
-                OperationResult::Access(res.status, Some((res.supported, res.access)))
+                // F70: a read-only export supports the write bits (the
+                // client asked about them) but never GRANTS one, the way
+                // knfsd answers ACCESS on an `ro` export. Linux consults
+                // ACCESS before OPEN, so this turns the refusal into an
+                // EROFS at open(2) instead of a surprise on the wire.
+                let granted = if self.read_only {
+                    res.access & !READ_ONLY_EXPORT_DENIED_ACCESS_BITS
+                } else {
+                    res.access
+                };
+                OperationResult::Access(res.status, Some((res.supported, granted)))
             }
 
             Operation::GetAttr(attr_request) => {
@@ -4740,6 +4786,110 @@ pub struct ServerStats {
 /// The opcode of `op` when that operation exists ONLY in NFSv4.2
 /// (RFC 7862), else None.
 ///
+/// The ACCESS bits a read-only export never grants (RFC 8881 §18.1):
+/// MODIFY, EXTEND and DELETE. READ, LOOKUP and EXECUTE are unaffected.
+const READ_ONLY_EXPORT_DENIED_ACCESS_BITS: u32 =
+    crate::nfs::v4::operations::fileops::ACCESS4_MODIFY
+        | crate::nfs::v4::operations::fileops::ACCESS4_EXTEND
+        | crate::nfs::v4::operations::fileops::ACCESS4_DELETE;
+
+/// F70: the NFS4ERR_ROFS answer for an operation a read-only export
+/// refuses, or None when the operation does not mutate.
+///
+/// The list is what knfsd refuses on an `ro` export: the data writers
+/// (WRITE, COMMIT, ALLOCATE, DEALLOCATE, COPY, CLONE), the attribute and
+/// namespace writers (SETATTR, CREATE, REMOVE, RENAME, LINK), an OPEN
+/// that asks for write access or would create, a write-type LOCK, and
+/// the pNFS write path (a read-write LAYOUTGET, LAYOUTCOMMIT). Releases
+/// are never refused — CLOSE, OPEN_DOWNGRADE, LOCKU, FREE_STATEID,
+/// DELEGRETURN and LAYOUTRETURN all pass — so a client can always let go
+/// of state it holds. SETATTR is refused whole, including a pure atime
+/// or mode change, because every attribute it can set is on-disk state.
+///
+/// A total match, like `minor_version_2_opcode` below: a new mutating
+/// operation added to `Operation` shows up here as a compile error, not
+/// as a hole in the export.
+fn read_only_refusal(op: &Operation) -> Option<(&'static str, OperationResult)> {
+    use crate::nfs::v4::operations::ioops::OPEN4_SHARE_ACCESS_WRITE;
+    use crate::pnfs::protocol::iomode::LAYOUTIOMODE4_READ;
+    const WRITE_LT: u32 = 2;
+    const WRITEW_LT: u32 = 4;
+    let rofs = Nfs4Status::RoFs;
+    Some(match op {
+        Operation::Write { .. } => ("WRITE", OperationResult::Write(rofs, None)),
+        Operation::Commit { .. } => ("COMMIT", OperationResult::Commit(rofs, None)),
+        Operation::SetAttr { .. } => ("SETATTR", OperationResult::SetAttr(rofs, Vec::new())),
+        Operation::Create { .. } => ("CREATE", OperationResult::Create(rofs, None, Vec::new())),
+        Operation::Remove(_) => ("REMOVE", OperationResult::Remove(rofs, None)),
+        Operation::Rename { .. } => ("RENAME", OperationResult::Rename(rofs, None, None)),
+        Operation::Link(_) => ("LINK", OperationResult::Link(rofs, None)),
+        // OPEN4_CREATE is decoded as `openhow.attrs.is_some()` for every
+        // createmode (compound.rs); OPEN4_NOCREATE carries None.
+        Operation::Open { share_access, openhow, .. }
+            if share_access & OPEN4_SHARE_ACCESS_WRITE != 0 || openhow.attrs.is_some() =>
+        {
+            ("OPEN(write|create)", OperationResult::Open(rofs, None))
+        }
+        Operation::Lock { locktype, .. } if *locktype == WRITE_LT || *locktype == WRITEW_LT => {
+            ("LOCK(write)", OperationResult::Lock(rofs, None, None))
+        }
+        Operation::Allocate { .. } => ("ALLOCATE", OperationResult::Allocate(rofs)),
+        Operation::Deallocate { .. } => ("DEALLOCATE", OperationResult::Deallocate(rofs)),
+        Operation::Copy { .. } => ("COPY", OperationResult::Copy(rofs, None)),
+        Operation::Clone { .. } => ("CLONE", OperationResult::Clone(rofs)),
+        Operation::LayoutGet { iomode, .. } if *iomode != LAYOUTIOMODE4_READ => {
+            ("LAYOUTGET(rw)", OperationResult::LayoutGet(rofs, None))
+        }
+        Operation::LayoutCommit { .. } => ("LAYOUTCOMMIT", OperationResult::LayoutCommit(rofs, None)),
+
+        // Everything below reads, releases, or manages sessions.
+        Operation::Open { .. }
+        | Operation::Lock { .. }
+        | Operation::LayoutGet { .. }
+        | Operation::PutRootFh
+        | Operation::PutFh(_)
+        | Operation::GetFh
+        | Operation::SaveFh
+        | Operation::RestoreFh
+        | Operation::PutPubFh
+        | Operation::Lookup(_)
+        | Operation::LookupP
+        | Operation::ReadDir { .. }
+        | Operation::Close { .. }
+        | Operation::OpenDowngrade { .. }
+        | Operation::Read { .. }
+        | Operation::DelegPurge { .. }
+        | Operation::BackchannelCtl { .. }
+        | Operation::DelegReturn { .. }
+        | Operation::GetAttr(_)
+        | Operation::Verify { .. }
+        | Operation::Nverify { .. }
+        | Operation::Access(_)
+        | Operation::ReadLink
+        | Operation::ExchangeId { .. }
+        | Operation::CreateSession { .. }
+        | Operation::DestroySession(_)
+        | Operation::DestroyClientId(_)
+        | Operation::BindConnToSession { .. }
+        | Operation::Sequence { .. }
+        | Operation::ReclaimComplete(_)
+        | Operation::SecInfo(_)
+        | Operation::SecInfoNoName(_)
+        | Operation::TestStateId(_)
+        | Operation::FreeStateId(_)
+        | Operation::LockT { .. }
+        | Operation::LockU { .. }
+        | Operation::Seek { .. }
+        | Operation::ReadPlus { .. }
+        | Operation::IoAdvise { .. }
+        | Operation::GetDeviceInfo { .. }
+        | Operation::LayoutReturn { .. }
+        | Operation::Unsupported(_)
+        | Operation::BadXdr(_)
+        | Operation::InvalidName(_) => return None,
+    })
+}
+
 /// Deliberately a total match over the 4.2 variants rather than a range
 /// test on a numeric opcode: adding a new 4.2 operation to the `Operation`
 /// enum without listing it here is a compile-time-visible omission in one
@@ -8108,5 +8258,226 @@ mod tests {
         let r = d.dispatch_operation(commit(), &mut ctx).await;
         assert!(matches!(r, OperationResult::LayoutCommit(Nfs4Status::Ok, _)), "{r:?}");
         assert_eq!(std::fs::metadata(export.join("warm.txt")).unwrap().len(), 4096, "now it extends");
+    }
+
+    // ───────────── F70: a read-only export is enforced by the SERVER ─────────────
+    //
+    // Until 2026-09-28 `NfsConfig.read_only` was carried from the CSI
+    // controller into this process and never read. A ROX volume was
+    // read-only only because kubelet asked the client to mount `ro`; a pod
+    // without `readOnly: true`, a hand mount, or a client in another
+    // cluster wrote through it. These tests pin the server's own refusal.
+
+    fn null_stateid() -> StateId {
+        StateId { seqid: 0, other: [0u8; 12] }
+    }
+
+    fn create_attrs() -> crate::nfs::v4::operations::fileops::Fattr4 {
+        crate::nfs::v4::operations::fileops::Fattr4 { attrmask: Vec::new(), attr_vals: Vec::new() }
+    }
+
+    fn open_op(share_access: u32, create: bool, file: &str) -> Operation {
+        Operation::Open {
+            seqid: 0,
+            share_access,
+            share_deny: 0,
+            owner: b"f70-owner".to_vec(),
+            openhow: crate::nfs::v4::compound::OpenHow {
+                createmode: 0,
+                attrs: if create { Some(Bytes::from_static(&[0, 0, 0, 0, 0, 0, 0, 0])) } else { None },
+                attrmask: if create { vec![0, 0] } else { Vec::new() },
+            },
+            claim: crate::nfs::v4::compound::OpenClaim {
+                claim_type: 0,
+                file: file.to_string(),
+                delegate_type: None,
+                delegate_stateid: None,
+            },
+        }
+    }
+
+    /// Every operation a read-only export must refuse, with the arguments
+    /// a client would send. Stateids are NULL on purpose: the refusal has
+    /// to land before stateid validation, or the answer would be
+    /// BAD_STATEID and a client holding a valid open would reach the
+    /// handler.
+    fn mutating_ops() -> Vec<(&'static str, Operation)> {
+        let sid = null_stateid();
+        vec![
+            ("WRITE", Operation::Write { stateid: sid, offset: 0, stable: 0, data: Bytes::from_static(b"x") }),
+            ("COMMIT", Operation::Commit { offset: 0, count: 0 }),
+            ("SETATTR", Operation::SetAttr { stateid: sid, attrs: Bytes::from_static(&[0, 0, 0, 0, 0, 0, 0, 0]) }),
+            ("CREATE", Operation::Create {
+                objtype: Nfs4FileType::Directory,
+                objname: "f70-dir".to_string(),
+                linkdata: None,
+                createattrs: create_attrs(),
+            }),
+            ("REMOVE", Operation::Remove("f".to_string())),
+            ("RENAME", Operation::Rename { oldname: "f".to_string(), newname: "g".to_string() }),
+            ("LINK", Operation::Link("f-link".to_string())),
+            ("OPEN write", open_op(crate::nfs::v4::operations::ioops::OPEN4_SHARE_ACCESS_WRITE, false, "f")),
+            ("OPEN both", open_op(crate::nfs::v4::operations::ioops::OPEN4_SHARE_ACCESS_BOTH, false, "f")),
+            ("OPEN read+create", open_op(1, true, "f70-new")),
+            ("LOCK write", Operation::Lock {
+                locktype: 2, reclaim: false, offset: 0, length: 1, stateid: sid,
+                owner: b"f70-lock".to_vec(), new_lock_owner: true,
+            }),
+            ("LOCK writew", Operation::Lock {
+                locktype: 4, reclaim: false, offset: 0, length: 1, stateid: sid,
+                owner: b"f70-lock".to_vec(), new_lock_owner: true,
+            }),
+            ("ALLOCATE", Operation::Allocate { stateid: sid, offset: 0, length: 4096 }),
+            ("DEALLOCATE", Operation::Deallocate { stateid: sid, offset: 0, length: 4096 }),
+            ("COPY", Operation::Copy {
+                src_stateid: sid, dst_stateid: sid, src_offset: 0, dst_offset: 0, count: 1,
+                consecutive: false, synchronous: true, source_server_count: 0,
+            }),
+            ("CLONE", Operation::Clone { src_stateid: sid, dst_stateid: sid, src_offset: 0, dst_offset: 0, count: 1 }),
+            ("LAYOUTGET rw", Operation::LayoutGet {
+                signal_layout_avail: false, layout_type: 1,
+                iomode: crate::pnfs::protocol::iomode::LAYOUTIOMODE4_RW,
+                offset: 0, length: u64::MAX, minlength: 0, stateid: sid, maxcount: 4096,
+            }),
+            ("LAYOUTCOMMIT", Operation::LayoutCommit {
+                offset: 0, length: 1, reclaim: false, stateid: sid,
+                last_write_offset: None, time_modify: None, layout_type: 1, layoutupdate: Bytes::new(),
+            }),
+        ]
+    }
+
+    async fn ro_dispatcher_with_file() -> (CompoundDispatcher, TempDir, CompoundContext) {
+        let (d, t) = create_test_dispatcher();
+        let d = d.with_read_only(true);
+        std::fs::write(t.path().join("f"), b"hello").unwrap();
+        d.state_mgr.leases.end_grace();
+        let s = d.state_mgr.sessions.create_session(
+            70, 0, 0, 65536, 65536, 16384, 16, 16, 0, None, 2,
+        );
+        let mut ctx = CompoundContext::new(2);
+        ctx.session_id = Some(s.session_id);
+        let put = d.dispatch_operation(Operation::PutRootFh, &mut ctx).await;
+        assert!(matches!(put, OperationResult::PutRootFh(Nfs4Status::Ok)));
+        (d, t, ctx)
+    }
+
+    /// F70: every mutating operation answers NFS4ERR_ROFS on a read-only
+    /// export, and nothing on disk moves.
+    #[tokio::test]
+    async fn a_read_only_export_refuses_every_mutating_op_with_rofs() {
+        let (d, t, mut ctx) = ro_dispatcher_with_file().await;
+        for (name, op) in mutating_ops() {
+            let r = d.dispatch_operation(op, &mut ctx).await;
+            assert_eq!(r.status(), Nfs4Status::RoFs, "{name} on a read-only export: {r:?}");
+        }
+        assert_eq!(std::fs::read(t.path().join("f")).unwrap(), b"hello", "the file is untouched");
+        assert!(!t.path().join("f70-dir").exists(), "CREATE made nothing");
+        assert!(!t.path().join("f70-new").exists(), "OPEN(create) made nothing");
+        assert!(!t.path().join("g").exists() && !t.path().join("f-link").exists(), "no rename, no link");
+    }
+
+    /// The control for the test above: the SAME operations against the
+    /// same dispatcher built read-write never answer ROFS. Without this,
+    /// a refusal that fired for every export would pass the test above.
+    #[tokio::test]
+    async fn a_read_write_export_never_answers_rofs_to_the_same_ops() {
+        let (d, t) = create_test_dispatcher();
+        std::fs::write(t.path().join("f"), b"hello").unwrap();
+        d.state_mgr.leases.end_grace();
+        let s = d.state_mgr.sessions.create_session(
+            71, 0, 0, 65536, 65536, 16384, 16, 16, 0, None, 2,
+        );
+        let mut ctx = CompoundContext::new(2);
+        ctx.session_id = Some(s.session_id);
+        d.dispatch_operation(Operation::PutRootFh, &mut ctx).await;
+        assert!(!d.is_read_only());
+        for (name, op) in mutating_ops() {
+            let r = d.dispatch_operation(op, &mut ctx).await;
+            assert_ne!(r.status(), Nfs4Status::RoFs, "{name} on a read-write export: {r:?}");
+        }
+    }
+
+    /// The read path of a read-only export is untouched: LOOKUP, GETATTR,
+    /// ACCESS, a read OPEN, READ, CLOSE and the release ops all succeed.
+    /// ACCESS supports the write bits but grants none of them, the way
+    /// knfsd answers on an `ro` export — Linux consults ACCESS before OPEN.
+    #[tokio::test]
+    async fn a_read_only_export_still_serves_reads_and_releases() {
+        let (d, _t, mut ctx) = ro_dispatcher_with_file().await;
+
+        let r = d.dispatch_operation(Operation::Access(0x3f), &mut ctx).await;
+        match r {
+            OperationResult::Access(Nfs4Status::Ok, Some((supported, granted))) => {
+                // (EXECUTE is not reported as supported on a directory, so
+                // only the bits the refusal governs are asserted here.)
+                assert_eq!(
+                    supported & READ_ONLY_EXPORT_DENIED_ACCESS_BITS,
+                    READ_ONLY_EXPORT_DENIED_ACCESS_BITS,
+                    "the write bits are still SUPPORTED: {supported:#x}"
+                );
+                assert_eq!(
+                    granted & READ_ONLY_EXPORT_DENIED_ACCESS_BITS,
+                    0,
+                    "MODIFY/EXTEND/DELETE must not be granted: {granted:#x}"
+                );
+                assert_ne!(granted & 0x1, 0, "READ is granted: {granted:#x}");
+            }
+            other => panic!("ACCESS: {other:?}"),
+        }
+
+        let r = d.dispatch_operation(Operation::Lookup("f".to_string()), &mut ctx).await;
+        assert!(matches!(r, OperationResult::Lookup(Nfs4Status::Ok)), "{r:?}");
+        let r = d.dispatch_operation(Operation::GetAttr(vec![0x10, 0]), &mut ctx).await;
+        assert!(matches!(r, OperationResult::GetAttr(Nfs4Status::Ok, Some(_))), "{r:?}");
+
+        d.dispatch_operation(Operation::PutRootFh, &mut ctx).await;
+        let open_sid = match d.dispatch_operation(open_op(1, false, "f"), &mut ctx).await {
+            OperationResult::Open(Nfs4Status::Ok, Some(res)) => res.stateid,
+            other => panic!("a read OPEN must succeed on a read-only export: {other:?}"),
+        };
+        let r = d.dispatch_operation(Operation::Read { stateid: open_sid, offset: 0, count: 5 }, &mut ctx).await;
+        match r {
+            OperationResult::Read(Nfs4Status::Ok, Some(res)) => {
+                assert_eq!(&res.data.as_mem()[..], b"hello");
+            }
+            other => panic!("READ: {other:?}"),
+        }
+        // A READ lock is fine; only write-type locks are refused.
+        let r = d.dispatch_operation(Operation::Lock {
+            locktype: 1, reclaim: false, offset: 0, length: 1, stateid: open_sid,
+            owner: b"f70-rlock".to_vec(), new_lock_owner: true,
+        }, &mut ctx).await;
+        let lock_sid = match r {
+            OperationResult::Lock(Nfs4Status::Ok, Some(sid), _) => sid,
+            other => panic!("a read LOCK must be granted on a read-only export: {other:?}"),
+        };
+        let r = d.dispatch_operation(Operation::LockU { locktype: 1, seqid: 0, stateid: lock_sid, offset: 0, length: 1 }, &mut ctx).await;
+        assert!(matches!(r, OperationResult::LockU(Nfs4Status::Ok, _)), "LOCKU is never refused: {r:?}");
+        let r = d.dispatch_operation(Operation::Close { seqid: 0, stateid: open_sid }, &mut ctx).await;
+        assert!(matches!(r, OperationResult::Close(Nfs4Status::Ok, _)), "CLOSE is never refused: {r:?}");
+    }
+
+    /// The refusal ends the COMPOUND with ROFS as the top-level status, so
+    /// a client sees the error on the op that caused it and nothing after
+    /// it runs (RFC 8881 §15.2). Sent through the public session path.
+    #[tokio::test]
+    async fn a_refused_op_ends_the_compound_with_rofs() {
+        let (d, t) = create_test_dispatcher();
+        let d = d.with_read_only(true);
+        std::fs::write(t.path().join("f"), b"hello").unwrap();
+        d.state_mgr.leases.end_grace();
+        let sid = session_with_max_response(&d, 1 << 20).await;
+        let ops = vec![
+            Operation::PutRootFh,
+            Operation::Remove("f".to_string()),
+            Operation::GetFh,
+        ];
+        let resp = d.dispatch_compound(seq_then(sid, 1, ops), Vec::new()).await;
+        assert_eq!(resp.status, Nfs4Status::RoFs, "{resp:?}");
+        let raw = resp.raw_reply.expect("session replies are carried as raw bytes");
+        let (status, n_results, _first) = header_of(&raw);
+        assert_eq!(status, Nfs4Status::RoFs as u32);
+        assert_eq!(n_results, 3, "SEQUENCE + PUTROOTFH + the refused REMOVE; GETFH never ran");
+        assert!(t.path().join("f").exists(), "REMOVE removed nothing");
     }
 }
