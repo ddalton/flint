@@ -2,14 +2,15 @@
 # LeanP1LiveHolds, resumed (2026-09-28). The first attempt ran at -Xmx12g and
 # spent its time in GC (8 GC threads ~77 CPU-min each, 366K -> 44K ds/min,
 # the liveness pass 10 min -> 60 min); it was stopped after its 21:05
-# checkpoint. The user chose 20 GB, starting once the small worlds are done
-# (SMALLDONE). No timeout: the gate runner's 6 h `timeout` would kill it and
+# checkpoint. The user chose 20 GB. No timeout: the gate runner's 6 h `timeout` would kill it and
 # then delete the checkpoint. The metadir is deleted only on a verdict.
 # Ends with LEANP1DONE (the deep run waits for it) only on a verdict.
 set -u
 cd ~/lean-leanp1-2026-09-25d || exit 1
 [ "$(md5sum LeanP1.tla | cut -c1-32)" = 3f6af642f7e39c19cafa413540e50cbe ] || { echo "MD5 CHANGED LeanP1.tla" >> RESULTS.txt; exit 4; }
-until grep -q SMALLDONE RESULTS.txt 2>/dev/null; do sleep 60; done
+# 22:55: started NOW, beside the small worlds (the user's call, to shorten
+# the gate): it is the long pole. The small-worlds runner was moved to
+# tlc-rs, whose seen set spills past 1 GB, so the two fit beside 20 GB.
 JAR=~/lean-gate-2026-09-18/.tla2tools.jar
 wld=LeanP1LiveHolds; exp=$(awk -F'\t' -v w=$wld '$1==w{print $2}' WORLDS-LeanP1.tsv)
 ST=/mnt/nvme/tlc-leanp1d/$wld
@@ -29,6 +30,9 @@ printf "%-30s %-18s exp=%-22s rc=%-3s | %s | %s | %s (recovered from the 21:05 c
 # Only a verdict ends the gate: without one (OOM, a kill) the checkpoint is
 # kept and LEANP1DONE is NOT written, so the deep run does not start early.
 case "$got" in
-  "No error has been found"|*violated*) rm -rf $ST; echo LEANP1DONE >> RESULTS.txt ;;
+  "No error has been found"|*violated*) rm -rf $ST
+    # The gate is done when BOTH halves are: this world and the small ones.
+    until grep -q SMALLDONE RESULTS.txt 2>/dev/null; do sleep 60; done
+    echo LEANP1DONE >> RESULTS.txt ;;
   *) echo "$wld STOPPED WITHOUT A VERDICT $(date -u +%FT%TZ); checkpoint kept in $ST" >> RESULTS.txt ;;
 esac
