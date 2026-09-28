@@ -166,9 +166,16 @@ backend seqids are tracked per hub, never copied from the client.
 
 ### Leases
 
-- The proxy's advertised lease is **shorter than the hub's by a
-  margin**, so a hub never expires a client the proxy still thinks is
-  live.
+- The proxy advertises and enforces **the hubs' own lease, not a
+  shorter one.** (This first said "shorter than the hub's by a margin";
+  the step-3 keepalive drill disproved it.) The Linux client takes its
+  renewal period from the LAST fsinfo it ran (`nfs4_set_lease_period`
+  in `nfs4_do_fsinfo`), and a workspace submount's fsinfo is answered by
+  the hub, unmodified. So a client renews on the hub's schedule, and a
+  shorter proxy lease reaped live clients between renewals: `SEQUENCE:
+  session not found`, then a recovery loop on a hard mount. What keeps
+  a hub from expiring a client the proxy still holds is the keepalive
+  below, not a margin.
 - While a downstream client keeps renewing, the proxy sends a bare
   `SEQUENCE` to every hub it holds a backend client on for that client,
   about once per third of the hub lease. When the downstream lease
@@ -599,6 +606,27 @@ port are still wanted for capacity and failure isolation.
    that does not upgrade is refused on the external listener.
 3. Restarts and wake: lease keepalive, status-flag OR, the table in
    §4, and `NFS4ERR_DELAY` + wake.
+   **DONE 2026-09-28 (static-table mode):** a one-slot control session
+   per backend client (RECLAIM_COMPLETE, the root, the keepalive — never
+   a client's slot), the keepalive, DESTROY_SESSION/_CLIENTID propagated,
+   a wake hook (logs in static mode; the FlintShare stamp is step 4),
+   retransmissions tied to the backend session they were sent on, and a
+   hub that reaped the backend client is registered with again. **Drills
+   on a real kernel, 11/11** (`step3-drills.sh`, `results-box-6.12-step3/`):
+   hub restart and proxy restart under an fsync'd writer (no error, no
+   gaps), an idle lock holder keeps its lock past three hub leases (a
+   direct-mount contender is refused), a stopped hub makes the reader
+   wait and finish, umount destroys the backend clients. **Control:**
+   keepalive off → the contender acquires the lock.
+   **Two defects the drills found, both fixed test-first:** (1) the
+   proxy lease must EQUAL the hubs' (§4 Leases); (2) a backend client
+   the hub had reaped surfaced as `NFS4ERR_DELAY` forever — on a hard
+   mount that wedged every process touching the mount, sshd's session
+   setup included, and the box needed a forced reboot. DELAY is now
+   answered only when the hub is unreachable; anything else is an
+   error the client sees. **Still open:** the status-flag drill and the
+   per-op revocation drill (§4 hub-loses-state row), the wake stamp
+   (step 4).
 4. Chart/operator wiring, with **headless hub Services** (§7a), and
    the hub lockdown that makes the proxy unbypassable: NetworkPolicy
    (and, under ambient, the L4 `AuthorizationPolicy`) admitting only

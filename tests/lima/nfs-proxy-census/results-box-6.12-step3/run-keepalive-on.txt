@@ -1,0 +1,8 @@
+=== keepalive
+idle 60s (lease 20s)
+contender: REFUSED 11
+PASS keepalive: the idle holder still holds its lock on the hub
+proxy warnings:
+      1  WARN spdk_csi_driver::nfs::v4::dispatcher: CREATE_SESSION: client requested CONN_BACK_CHAN but no back-channel writer is available for session SessionId([0, 0, 0, 0, 0, 0,
+RESULT: 1 passed, 0 failed
+exit=0

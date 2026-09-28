@@ -567,6 +567,11 @@ impl ClientManager {
         self.owner_to_id.contains_key(owner)
     }
 
+    /// The clientid this co_ownerid currently maps to.
+    pub(crate) fn id_of_owner(&self, owner: &[u8]) -> Option<u64> {
+        self.owner_to_id.get(owner).map(|e| *e)
+    }
+
     pub fn exchange_id(
         &self,
         owner: Vec<u8>,

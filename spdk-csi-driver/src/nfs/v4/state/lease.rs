@@ -18,6 +18,32 @@ use tracing::{debug, info, warn};
 /// Default lease time (90 seconds per RFC 8881)
 pub const DEFAULT_LEASE_TIME: Duration = Duration::from_secs(90);
 
+static LEASE_TIME: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+
+/// The lease this process advertises (FATTR4_LEASE_TIME) and enforces:
+/// [`DEFAULT_LEASE_TIME`] unless the process set another, once, before
+/// serving. The NFS proxy advertises a SHORTER lease than its hubs'
+/// (nfs-proxy design §4), so a hub never expires a client the proxy
+/// still thinks is live.
+///
+/// A process that sets nothing reads `FLINT_NFS_LEASE_SECS` once (the
+/// hub; drills shorten it so a lease can lapse in seconds).
+pub fn lease_time() -> Duration {
+    *LEASE_TIME.get_or_init(|| {
+        std::env::var("FLINT_NFS_LEASE_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|s| *s > 0)
+            .map(Duration::from_secs)
+            .unwrap_or(DEFAULT_LEASE_TIME)
+    })
+}
+
+/// Set the process lease; false if it was already set.
+pub fn set_lease_time(d: Duration) -> bool {
+    LEASE_TIME.set(d).is_ok()
+}
+
 /// Grace period after server startup (90 seconds)
 pub const GRACE_PERIOD: Duration = Duration::from_secs(90);
 
@@ -41,7 +67,7 @@ impl Lease {
         Self {
             client_id,
             last_renewal: now,
-            expires_at: now + DEFAULT_LEASE_TIME,
+            expires_at: now + lease_time(),
         }
     }
 
@@ -49,9 +75,9 @@ impl Lease {
     pub fn renew(&mut self) {
         let now = Instant::now();
         self.last_renewal = now;
-        self.expires_at = now + DEFAULT_LEASE_TIME;
+        self.expires_at = now + lease_time();
         debug!("Lease renewed for client {}: expires in {:?}",
-               self.client_id, DEFAULT_LEASE_TIME);
+               self.client_id, lease_time());
     }
 
     /// Check if lease has expired
@@ -188,7 +214,7 @@ impl LeaseManager {
                 // Allow renewal if expired within last lease period (lenient)
                 // This gives clients time to recover from brief network issues
                 let time_since_expiry = Instant::now().duration_since(lease.expires_at);
-                if time_since_expiry > DEFAULT_LEASE_TIME {
+                if time_since_expiry > lease_time() {
                     // Expired too long ago - reject
                     warn!("Lease for client {} expired {} seconds ago (too long)",
                           client_id, time_since_expiry.as_secs());
@@ -323,7 +349,7 @@ impl LeaseManager {
 
     /// Get lease time (for client queries)
     pub fn lease_time(&self) -> u32 {
-        DEFAULT_LEASE_TIME.as_secs() as u32
+        lease_time().as_secs() as u32
     }
 }
 

@@ -5084,6 +5084,58 @@ mod tests {
     /// Establish a real session with a caller-chosen `ca_maxresponsesize`.
     /// 256 is the server's negotiated floor (RFC 5661 §18.36.4 TOOSMALL),
     /// which is what pynfs's testRepTooBig relies on.
+    /// A client whose lease lapsed finds out (BADSESSION) and registers
+    /// again with the same owner and verifier: EXCHANGE_ID, then
+    /// CREATE_SESSION. That must work, and does. Written while chasing a
+    /// wedged hard mount behind the nfs proxy (2026-09-28), whose log
+    /// showed "CREATE_SESSION: Client N not found" during a re-registration
+    /// — which this rules out as a dispatcher defect (that client recovered).
+    #[tokio::test]
+    async fn a_client_whose_lease_lapsed_can_register_again() {
+        use crate::nfs::v4::compound::ChannelAttrs;
+        let (d, _t) = create_test_dispatcher();
+        let one = |op: Operation| CompoundRequest {
+            tag: String::new(),
+            tag_valid: true,
+            minor_version: 2,
+            operations: vec![op],
+            wire_size: 0,
+        };
+        let eid = || one(Operation::ExchangeId {
+            clientowner: ClientId { verifier: 7, id: b"lapsed-client".to_vec() },
+            flags: 0,
+            state_protect: 0,
+            impl_id: vec![],
+        });
+        let cs = |clientid: u64, sequence: u32| one(Operation::CreateSession {
+            clientid,
+            sequence,
+            flags: 0,
+            fore_chan_attrs: ChannelAttrs::default(),
+            back_chan_attrs: ChannelAttrs::default(),
+            cb_program: 0x40000000,
+            cb_sec: vec![],
+        });
+        let register = |r: CompoundResponse| match &r.results[0] {
+            OperationResult::ExchangeId(Nfs4Status::Ok, Some(x)) => (x.clientid, x.sequenceid),
+            other => panic!("EXCHANGE_ID: {other:?}"),
+        };
+
+        let (c1, s1) = register(d.dispatch_compound(eid(), Vec::new()).await);
+        let r = d.dispatch_compound(cs(c1, s1), Vec::new()).await;
+        assert_eq!(r.results[0].status(), Nfs4Status::Ok, "first CREATE_SESSION");
+
+        d.state_mgr.leases.expire_now(c1);
+
+        let (c2, s2) = register(d.dispatch_compound(eid(), Vec::new()).await);
+        let r = d.dispatch_compound(cs(c2, s2), Vec::new()).await;
+        assert_eq!(
+            r.results[0].status(),
+            Nfs4Status::Ok,
+            "re-registration after the lease lapsed (clientid {c1:#x} then {c2:#x})"
+        );
+    }
+
     async fn session_with_max_response(
         d: &CompoundDispatcher,
         max_response: u32,

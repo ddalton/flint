@@ -1655,8 +1655,9 @@ pub(crate) fn encode_attributes_from_snapshot(
                 true
             }
             FATTR4_LEASE_TIME => {
-                // Lease time in seconds
-                attr_vals.put_u32(90);
+                // Lease time in seconds: the process's own (the proxy's
+                // is shorter than its hubs', nfs-proxy design §4).
+                attr_vals.put_u32(crate::nfs::v4::state::lease::lease_time().as_secs() as u32);
                 true
             }
             FATTR4_SUPPATTR_EXCLCREAT => {

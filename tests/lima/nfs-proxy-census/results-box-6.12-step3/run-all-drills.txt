@@ -1,0 +1,23 @@
+=== restart
+PASS restart: the writer never saw an error
+PASS restart: the file on the hub has no gaps
+PASS restart: the proxy registered on hub A again after its restart
+=== proxyrestart
+PASS proxyrestart: the writer never saw an error
+PASS proxyrestart: the file on the hub has no gaps
+PASS proxyrestart: the proxy really restarted mid-write
+=== keepalive
+idle 60s (lease 20s)
+contender: REFUSED 11
+PASS keepalive: the idle holder still holds its lock on the hub
+=== parked
+PASS parked: the reader waits (no error) while the hub is down
+PASS parked: the proxy asked to wake the hub
+PASS parked: the read completes once the hub is back
+=== destroy
+backend clients destroyed with the downstream: 2
+PASS destroy: umount destroyed the backend client on both hubs
+proxy warnings:
+      1  WARN spdk_csi_driver::nfs::v4::dispatcher: CREATE_SESSION: client requested CONN_BACK_CHAN but no back-channel writer is available for session SessionId([0, 0, 0, 0, 0, 0,
+RESULT: 11 passed, 0 failed
+exit=0

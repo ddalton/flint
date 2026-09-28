@@ -192,22 +192,80 @@ pub struct BackendClient {
     /// The next CREATE_SESSION sequence (RFC 8881 §18.36: starts at the
     /// EXCHANGE_ID result's `eir_sequenceid`).
     cs_seq: Mutex<u32>,
-    reclaimed: AtomicBool,
+    /// A one-slot session of the proxy's own: RECLAIM_COMPLETE, learning
+    /// the hub's root, the lease keepalive, and nothing a client sends.
+    /// The data sessions' slots belong to the downstream slots one for
+    /// one, so the proxy must never borrow one of them.
+    ctl: Arc<BackendSession>,
+    ctl_lock: tokio::sync::Mutex<()>,
+    last_renewed: Mutex<std::time::Instant>,
 }
 
 async fn one_op(conn: &HubConn, op: Vec<u8>) -> Result<Bytes, BackendError> {
     conn.call(&proxy_cred(), &wire::encode_compound(b"flint-proxy", 1, &[&op])).await
 }
 
+async fn create_session_on(conn: &HubConn, clientid: u64, cs_seq: &Mutex<u32>, fore: &ChannelAttrs) -> Result<Arc<BackendSession>, BackendError> {
+    let seq = *cs_seq.lock().unwrap();
+    let slots = fore.max_requests;
+    let body = one_op(conn, wire::op_create_session(clientid, seq, fore)).await?;
+    let (s, ok) = wire::decode_create_session_reply(body).map_err(BackendError::Protocol)?;
+    let ok = ok.ok_or(BackendError::Status("CREATE_SESSION", s))?;
+    *cs_seq.lock().unwrap() = seq.wrapping_add(1);
+    if ok.fore_max_requests < slots {
+        return Err(BackendError::Protocol(format!(
+            "hub granted {} slots, the downstream session has {slots}",
+            ok.fore_max_requests
+        )));
+    }
+    Ok(Arc::new(BackendSession { sessionid: ok.sessionid, seqs: Mutex::new(vec![0; slots as usize]) }))
+}
+
+/// The status of a one-op compound's op.
+fn first_status(body: Bytes) -> Result<Nfs4Status, BackendError> {
+    let mut d = crate::nfs::xdr::XdrDecoder::new(body);
+    let status = d.decode_u32().map_err(BackendError::Protocol)?;
+    Ok(Nfs4Status::from_u32(status))
+}
+
+/// The status of the one op after SEQUENCE in a proxy-originated reply
+/// (SEQUENCE's own, when that failed).
+fn second_status(body: Bytes) -> Result<Nfs4Status, BackendError> {
+    let h = wire::parse_hub_reply(body, false).map_err(BackendError::Protocol)?;
+    if h.seq.0 != Nfs4Status::Ok {
+        return Ok(h.seq.0);
+    }
+    let mut d = crate::nfs::xdr::XdrDecoder::new(h.tail);
+    let _op = d.decode_u32().map_err(BackendError::Protocol)?;
+    Ok(Nfs4Status::from_u32(d.decode_u32().map_err(BackendError::Protocol)?))
+}
+
 impl BackendClient {
-    /// EXCHANGE_ID as `flint-proxy/‖owner` with the downstream verifier.
+    /// EXCHANGE_ID as `flint-proxy/‖owner` with the downstream verifier,
+    /// then the control session and RECLAIM_COMPLETE on it.
     pub async fn register(conn: Arc<HubConn>, owner: &[u8], verifier: [u8; 8], flags: u32) -> Result<Arc<Self>, BackendError> {
         // CONFIRMED_R is a reply flag; the rest mirror the client.
         let flags = flags & !0x8000_0000;
         let body = one_op(&conn, wire::op_exchange_id(verifier, &backend_owner(owner), flags)).await?;
         let (s, ok) = wire::decode_exchange_id_reply(body).map_err(BackendError::Protocol)?;
         let ok = ok.ok_or(BackendError::Status("EXCHANGE_ID", s))?;
-        Ok(Arc::new(BackendClient { conn, clientid: ok.clientid, cs_seq: Mutex::new(ok.sequenceid), reclaimed: AtomicBool::new(false) }))
+        let cs_seq = Mutex::new(ok.sequenceid);
+        let ctl = create_session_on(&conn, ok.clientid, &cs_seq, &ChannelAttrs { max_requests: 1, ..ChannelAttrs::default() }).await?;
+        let c = Arc::new(BackendClient {
+            conn,
+            clientid: ok.clientid,
+            cs_seq,
+            ctl,
+            ctl_lock: tokio::sync::Mutex::new(()),
+            last_renewed: Mutex::new(std::time::Instant::now()),
+        });
+        // §4: the proxy sends RECLAIM_COMPLETE on its backend clients
+        // itself; it never reclaims (a hub keeps the state across a proxy
+        // restart, under the same owner and verifier). COMPLETE_ALREADY
+        // after a proxy restart is the expected answer then.
+        let s = c.on_ctl(&[&wire::op_reclaim_complete(false)]).await.and_then(second_status)?;
+        debug!("backend RECLAIM_COMPLETE on {}: clientid {:#x}: {s:?}", c.conn.addr(), c.clientid);
+        Ok(c)
     }
 
     /// A backend session on the downstream session's own fore channel
@@ -215,45 +273,56 @@ impl BackendClient {
     /// send fits: downstream slot s = backend slot s. A hub that grants
     /// fewer slots is refused: the identity mapping would break.
     pub async fn create_session(&self, fore: &ChannelAttrs) -> Result<Arc<BackendSession>, BackendError> {
-        let seq = *self.cs_seq.lock().unwrap();
-        let slots = fore.max_requests;
-        let body = one_op(&self.conn, wire::op_create_session(self.clientid, seq, fore)).await?;
-        let (s, ok) = wire::decode_create_session_reply(body).map_err(BackendError::Protocol)?;
-        let ok = ok.ok_or(BackendError::Status("CREATE_SESSION", s))?;
-        *self.cs_seq.lock().unwrap() = seq.wrapping_add(1);
-        if ok.fore_max_requests < slots {
-            return Err(BackendError::Protocol(format!(
-                "hub granted {} slots, the downstream session has {slots}",
-                ok.fore_max_requests
-            )));
-        }
-        let sess = Arc::new(BackendSession { sessionid: ok.sessionid, seqs: Mutex::new(vec![0; slots as usize]) });
-        if !self.reclaimed.swap(true, Ordering::SeqCst) {
-            // §4: the proxy sends RECLAIM_COMPLETE on its backend clients
-            // itself; it never reclaims (state survives a proxy restart
-            // on the hub, under the same owner and verifier).
-            // COMPLETE_ALREADY after a proxy restart is fine.
-            self.sequenced(&sess, 0, &[&wire::op_reclaim_complete(false)]).await?;
-            debug!("backend RECLAIM_COMPLETE on {}: clientid {:#x}", self.conn.addr(), self.clientid);
-        }
-        Ok(sess)
+        create_session_on(&self.conn, self.clientid, &self.cs_seq, fore).await
     }
 
-    /// A proxy-originated compound on `slot`: SEQUENCE + `ops`.
-    async fn sequenced(&self, sess: &BackendSession, slot: u32, ops: &[&[u8]]) -> Result<Bytes, BackendError> {
-        let seq = sess.next_seq(slot).ok_or_else(|| BackendError::Protocol("slot out of range".into()))?;
-        let s = wire::op_sequence(&SeqArgs { sessionid: sess.sessionid, sequenceid: seq, slotid: slot, highest_slotid: slot, cachethis: false });
+    /// A proxy-originated compound on the control session.
+    async fn on_ctl(&self, ops: &[&[u8]]) -> Result<Bytes, BackendError> {
+        let _g = self.ctl_lock.lock().await;
+        let seq = self.ctl.next_seq(0).expect("one slot");
+        let s = wire::op_sequence(&SeqArgs { sessionid: self.ctl.sessionid, sequenceid: seq, slotid: 0, highest_slotid: 0, cachethis: false });
         let mut all: Vec<&[u8]> = vec![&s];
         all.extend_from_slice(ops);
-        self.conn.call(&proxy_cred(), &wire::encode_compound(b"flint-proxy", 1, &all)).await
+        let r = self.conn.call(&proxy_cred(), &wire::encode_compound(b"flint-proxy", 1, &all)).await;
+        if r.is_ok() {
+            *self.last_renewed.lock().unwrap() = std::time::Instant::now();
+        }
+        r
     }
 
     /// The hub's root filehandle (`PUTROOTFH, GETFH`).
-    pub async fn root_fh(&self, sess: &BackendSession) -> Result<Nfs4FileHandle, BackendError> {
-        let body = self.sequenced(sess, 0, &[&wire::op_putrootfh(), &wire::op_getfh()]).await?;
+    pub async fn root_fh(&self) -> Result<Nfs4FileHandle, BackendError> {
+        let body = self.on_ctl(&[&wire::op_putrootfh(), &wire::op_getfh()]).await?;
         wire::decode_root_fh_reply(body)
             .map_err(BackendError::Protocol)?
             .map_err(|s| BackendError::Status("PUTROOTFH/GETFH", s))
+    }
+
+    /// §4 Leases: a bare SEQUENCE renews this client's lease on the hub.
+    /// Returns the hub's SEQUENCE status (not OK = the backend is stale).
+    pub async fn keepalive(&self) -> Result<Nfs4Status, BackendError> {
+        let body = self.on_ctl(&[]).await?;
+        Ok(wire::parse_hub_reply(body, false).map_err(BackendError::Protocol)?.seq.0)
+    }
+
+    /// Time since this backend last renewed its hub lease through the
+    /// control session. Forwarded compounds renew it too, but the
+    /// keepalive does not count on them.
+    pub fn since_renewed(&self) -> std::time::Duration {
+        self.last_renewed.lock().unwrap().elapsed()
+    }
+
+    pub async fn destroy_session_on(conn: &HubConn, sess: &BackendSession) -> Result<Nfs4Status, BackendError> {
+        let body = one_op(conn, wire::op_destroy_session(&sess.sessionid)).await?;
+        first_status(body)
+    }
+
+    /// DESTROY_CLIENTID (after the control session; the data sessions
+    /// must already be gone, RFC 8881 §18.50.3).
+    pub async fn destroy(&self) -> Result<Nfs4Status, BackendError> {
+        Self::destroy_session_on(&self.conn, &self.ctl).await?;
+        let body = one_op(&self.conn, wire::op_destroy_clientid(self.clientid)).await?;
+        first_status(body)
     }
 
     /// Forward a client's ops. `seq` is `Some` for a retransmission (the

@@ -27,6 +27,9 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let raw = std::fs::read_to_string(&args.config)?;
     let cfg: ProxyConfig = serde_yaml::from_str(&raw)?;
+    // Before any state exists: every lease the proxy hands out uses it.
+    // The same as the hubs' (ProxyConfig::lease_secs says why).
+    spdk_csi_driver::nfs::v4::state::lease::set_lease_time(std::time::Duration::from_secs(cfg.lease_secs));
     let proxy = Proxy::new(&cfg).await.map_err(anyhow::Error::msg)?;
     proxy.serve(&cfg.listen).await?;
     Ok(())
