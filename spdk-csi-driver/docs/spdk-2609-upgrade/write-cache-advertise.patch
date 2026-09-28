@@ -1,0 +1,73 @@
+diff --git a/module/bdev/lvol/vbdev_lvol.c b/module/bdev/lvol/vbdev_lvol.c
+index 470b0628f..b3a5fe17f 100644
+--- a/module/bdev/lvol/vbdev_lvol.c
++++ b/module/bdev/lvol/vbdev_lvol.c
+@@ -1187,6 +1187,14 @@ _create_lvol_disk(struct spdk_lvol *lvol, bool destroy)
+ 	bdev->name = lvol->unique_id;
+ 	bdev->product_name = "Logical Volume";
+ 	bdev->blocklen = spdk_bs_get_io_unit_size(lvol->lvol_store->blobstore);
++	/*
++	 * flint: with the lvol FLUSH -> spdk_blob_sync_md handler (lvol-flush-sync.patch)
++	 * an lvol holds volatile state (unsynced blob metadata) that a FLUSH commits. Since
++	 * SPDK v26.09 the nvmf target advertises the NVMe Volatile Write Cache only when a
++	 * namespace's bdev reports write_cache, and a host that sees no VWC never sends
++	 * FLUSH. Report the cache so FLUSH keeps reaching the lvol.
++	 */
++	bdev->write_cache = 1;
+ 	total_size = spdk_blob_get_num_clusters(lvol->blob) *
+ 		     spdk_bs_get_cluster_size(lvol->lvol_store->blobstore);
+ 	assert((total_size % bdev->blocklen) == 0);
+diff --git a/module/bdev/raid/bdev_raid.c b/module/bdev/raid/bdev_raid.c
+index 48694e1ab..a2d322778 100644
+--- a/module/bdev/raid/bdev_raid.c
++++ b/module/bdev/raid/bdev_raid.c
+@@ -1961,12 +1961,29 @@ static int
+ raid_bdev_configure(struct raid_bdev *raid_bdev, raid_bdev_action_cb cb, void *cb_ctx)
+ {
+ 	uint32_t data_block_size = spdk_bdev_get_data_block_size(&raid_bdev->bdev);
++	struct raid_base_bdev_info *base_info;
+ 	int rc;
+ 
+ 	assert(raid_bdev->state == SPDK_BDEV_RAID_STATE_CONFIGURING);
+ 	assert(raid_bdev->num_base_bdevs_discovered == raid_bdev->num_base_bdevs_operational);
+ 	assert(raid_bdev->bdev.blocklen > 0);
+ 
++	/*
++	 * flint: a raid holds volatile state if any base bdev does. Upstream hard-codes
++	 * write_cache = 0 at creation (raid_bdev_create); since SPDK v26.09 an nvmf
++	 * subsystem exporting such a raid advertises no Volatile Write Cache, hosts then
++	 * never send FLUSH, and the raid's FLUSH fan-out to its bases never runs. Derive
++	 * it from the bases now that they are all present. A base hot-added later does
++	 * not change it: every flint leg is an lvol or an nvmf-attached lvol, all alike.
++	 */
++	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
++		if (base_info->desc != NULL &&
++		    spdk_bdev_has_write_cache(spdk_bdev_desc_get_bdev(base_info->desc))) {
++			raid_bdev->bdev.write_cache = 1;
++			break;
++		}
++	}
++
+ 	/* The strip_size_kb is read in from user in KB. Convert to blocks here for
+ 	 * internal use.
+ 	 */
+diff --git a/test/unit/lib/bdev/raid/bdev_raid.c/bdev_raid_ut.c b/test/unit/lib/bdev/raid/bdev_raid.c/bdev_raid_ut.c
+index effecf2f7..f2453dc93 100644
+--- a/test/unit/lib/bdev/raid/bdev_raid.c/bdev_raid_ut.c
++++ b/test/unit/lib/bdev/raid/bdev_raid.c/bdev_raid_ut.c
+@@ -141,6 +141,15 @@ static struct raid_bdev_module g_ut_raid_module = {
+ };
+ RAID_MODULE_REGISTER(&g_ut_raid_module)
+ 
++/* flint write-cache-advertise.patch: raid_bdev_configure() derives the raid's
++ * write_cache from its bases; the ut's base bdevs report none, so the existing
++ * `write_cache == 0` assertion still holds. */
++bool
++spdk_bdev_has_write_cache(const struct spdk_bdev *bdev)
++{
++	return bdev->write_cache;
++}
++
+ DEFINE_STUB_V(spdk_bdev_module_examine_done, (struct spdk_bdev_module *module));
+ DEFINE_STUB_V(spdk_bdev_module_list_add, (struct spdk_bdev_module *bdev_module));
+ DEFINE_STUB(spdk_bdev_io_type_supported, bool, (struct spdk_bdev *bdev,

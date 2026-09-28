@@ -151,6 +151,29 @@ fn rebuild_lease_ms() -> u64 {
     env_u64("FLINT_PNFS_BLOCK_REBUILD_LEASE_MS", 10_000)
 }
 
+/// The quiesce lease a rebuild window runs under: the id the target issued
+/// on acquire (`None` on a target whose raid patch predates lease ids — it
+/// answers `true`), when it was armed, and for how long. Every call inside
+/// the window names the id, so the target refuses a renew, an add or a
+/// release against a lease that is not this one — the lease that covered
+/// the cut.
+struct HeldQuiesce {
+    id: Option<u64>,
+    armed: std::time::Instant,
+    lease_ms: u64,
+}
+
+/// The target says the lease we meant to release is already gone: it
+/// lapsed (-ENOENT) or another actor holds a successor (-ESTALE). Client
+/// I/O is not gated behind us either way, so this is not a failure.
+fn lease_already_gone(msg: &str) -> bool {
+    msg.contains("no quiesce lease")
+        || msg.contains("Code=-2")
+        || msg.contains("Code=-116")
+        || msg.contains("not the caller's")
+        || msg.contains("lapsed")
+}
+
 /// Shallow-copy poll cadence.
 fn rebuild_poll() -> std::time::Duration {
     std::time::Duration::from_millis(env_u64("FLINT_PNFS_BLOCK_REBUILD_POLL_MS", 500))
@@ -1880,16 +1903,45 @@ impl BlockExportReconciler {
             }
         }
         round += 1;
-        let result = self.rebuild_window(volume, peer, &raid, &head, &dst, round).await;
+        // The window's lease is acquired HERE and released HERE whatever
+        // the window does, and every call inside the window names it, so
+        // the target can refuse a renew, an add or a release against a
+        // lease that is not this one.
+        let lease_ms = rebuild_lease_ms();
+        let held = match self.quiesce(&raid, lease_ms, None).await {
+            Ok(id) => HeldQuiesce { id, armed: std::time::Instant::now(), lease_ms },
+            Err(e) => {
+                self.abandon_rebuild(volume, peer).await;
+                return RebuildOutcome::Deferred(e);
+            }
+        };
+        if held.id.is_none() {
+            tracing::warn!(
+                "'{}': the target issued no lease id (its raid patch predates lease ids) — a \
+                 lapsed lease cannot be told from a renewed one, so this window relies on the \
+                 clock guard alone",
+                volume
+            );
+        }
+        let result = self.rebuild_window(volume, peer, &raid, &head, &dst, round, &held).await;
         // ALWAYS release. The lease would expire on its own — that is
         // what it is for — but leaving client I/O gated for the rest of
         // a lease we are finished with is a stall we chose not to spend.
-        if let Err(e) = self.unquiesce(&raid).await {
-            tracing::error!(
-                "'{}': releasing the quiesce failed ({}) — the lease expires on its own, so \
-                 client I/O resumes within {} ms",
-                volume, e, rebuild_lease_ms()
-            );
+        // A lease that is already gone (lapsed, or a successor's) is not
+        // a failure: nothing of ours gates client I/O.
+        if let Err(e) = self.unquiesce(&raid, held.id).await {
+            if lease_already_gone(&e) {
+                tracing::info!(
+                    "'{}': the quiesce lease was already gone at release ({}) — nothing gated",
+                    volume, e
+                );
+            } else {
+                tracing::error!(
+                    "'{}': releasing the quiesce failed ({}) — the lease expires on its own, so \
+                     client I/O resumes within {} ms",
+                    volume, e, lease_ms
+                );
+            }
         }
         match result {
             Ok(n) => {
@@ -1909,10 +1961,11 @@ impl BlockExportReconciler {
         }
     }
 
-    /// The quiesced window: cut, copy, admit, mark. Every step of it is
-    /// ordered, and the ordering is the correctness argument — see
-    /// `rebuild_leg`. The caller releases the quiesce whatever happens
-    /// here.
+    /// The quiesced window: cut, copy, admit, mark, under the lease the
+    /// caller holds (`held`). Every step of it is ordered, and the
+    /// ordering is the correctness argument — see `rebuild_leg`. The
+    /// caller acquires and releases the quiesce whatever happens here.
+    #[allow(clippy::too_many_arguments)]
     async fn rebuild_window(
         &self,
         volume: &str,
@@ -1921,10 +1974,9 @@ impl BlockExportReconciler {
         head: &str,
         dst: &str,
         round: u32,
+        held: &HeldQuiesce,
     ) -> Result<u64, String> {
-        let lease_ms = rebuild_lease_ms();
-        self.quiesce(raid, lease_ms).await?;
-        let armed = std::time::Instant::now();
+        let lease_ms = held.lease_ms;
         // The cut MUST be inside the held quiesce: a cut taken before it
         // misses every write that landed between the two, and those
         // writes would exist nowhere on the new leg.
@@ -1932,12 +1984,12 @@ impl BlockExportReconciler {
         self.snapshot_lvol(head, &cut).await?;
         let copied = self.shallow_copy(&self.cut_alias(volume, round), dst).await?;
         // Did the window outlive its own lease? A lapsed lease
-        // auto-unquiesces, writes resume, and our cut is stale — and a
-        // renewal after that is indistinguishable from a fresh quiesce
-        // at the RPC, so the target's own contract check would pass
-        // while the base silently missed the writes. Our clock is the
-        // only witness, so it is the one that refuses.
-        let spent = armed.elapsed().as_millis() as u64;
+        // auto-unquiesces, writes resume, and our cut is stale. The
+        // target refuses a renew or an add that names a lapsed lease
+        // (-ENOENT, or -ESTALE for a successor) — that is the
+        // load-bearing check. The clock stays: a cheap early abort, and
+        // the only witness against a target that issued no lease id.
+        let spent = held.armed.elapsed().as_millis() as u64;
         if spent * 4 > lease_ms * 3 {
             return Err(format!(
                 "'{volume}': the final delta took {spent} ms of a {lease_ms} ms quiesce lease — \
@@ -1945,11 +1997,13 @@ impl BlockExportReconciler {
                  lapse. The next attempt starts from a smaller delta"
             ));
         }
-        // Renew immediately before the add, so the add itself runs on a
-        // full lease. The target pins the lease across the add, so an
-        // expiry during channel installation defers to it.
-        self.quiesce(raid, lease_ms).await?;
-        self.raid_add_insync(raid, dst).await?;
+        // Renew immediately before the add, NAMING the lease: renew-only,
+        // so a lapse between the cut and here is refused rather than
+        // papered over. The add then runs on a full lease; the target
+        // pins it across the add, so an expiry during channel
+        // installation defers to it.
+        self.quiesce(raid, lease_ms, held.id).await?;
+        self.raid_add_insync(raid, dst, held.id).await?;
         // AND ONLY NOW the record. If this fails the leg is a member
         // that the record does not vouch for, which the next converge
         // prunes — the safe direction. The reverse would leave an
@@ -2172,20 +2226,42 @@ impl BlockExportReconciler {
         }
     }
 
-    async fn quiesce(&self, raid: &str, lease_ms: u64) -> Result<(), String> {
-        let payload = json!({
-            "method": "bdev_raid_quiesce",
-            "params": { "name": raid, "lease_ms": lease_ms }
-        });
+    /// Acquire the raid's quiesce lease, or — when `lease_id` names one —
+    /// RENEW ONLY that lease. Returns the lease id the target issued
+    /// (`None` on a target whose raid patch predates lease ids: it answers
+    /// `true`). Naming the lease is what makes a renew safe: the bare RPC
+    /// acquires-or-renews, so a lease that lapsed mid-window (expired,
+    /// auto-released, client writes resumed) would be quietly replaced by
+    /// a fresh one and the `skip_rebuild` add would then pass the target's
+    /// held-lease check against a base missing those writes. Named, a
+    /// lapsed lease answers -ENOENT and a successor another actor armed
+    /// answers -ESTALE; neither is ever mistaken for ours.
+    async fn quiesce(
+        &self,
+        raid: &str,
+        lease_ms: u64,
+        lease_id: Option<u64>,
+    ) -> Result<Option<u64>, String> {
+        let mut params = json!({ "name": raid, "lease_ms": lease_ms });
+        if let Some(id) = lease_id {
+            params["lease_id"] = json!(id);
+        }
+        let payload = json!({ "method": "bdev_raid_quiesce", "params": params });
         self.rpc
             .rpc(&payload)
             .await
-            .map(|_| ())
+            .map(|v| v.get("result").and_then(|r| r.get("lease_id")).and_then(|id| id.as_u64()))
             .map_err(|e| format!("quiescing {raid}: {e}"))
     }
 
-    async fn unquiesce(&self, raid: &str) -> Result<(), String> {
-        let payload = json!({ "method": "bdev_raid_unquiesce", "params": { "name": raid } });
+    /// Release the lease — when `lease_id` names it, only that one, so a
+    /// successor's lease is never taken down because ours lapsed.
+    async fn unquiesce(&self, raid: &str, lease_id: Option<u64>) -> Result<(), String> {
+        let mut params = json!({ "name": raid });
+        if let Some(id) = lease_id {
+            params["lease_id"] = json!(id);
+        }
+        let payload = json!({ "method": "bdev_raid_unquiesce", "params": params });
         self.rpc
             .rpc(&payload)
             .await
@@ -2193,17 +2269,27 @@ impl BlockExportReconciler {
             .map_err(|e| format!("releasing the quiesce of {raid}: {e}"))
     }
 
-    async fn raid_add_insync(&self, raid: &str, base: &str) -> Result<(), String> {
+    async fn raid_add_insync(
+        &self,
+        raid: &str,
+        base: &str,
+        lease_id: Option<u64>,
+    ) -> Result<(), String> {
         // guarded-construct-lint: allow — the hazard this lint guards is
         // a composition assembled over bases nobody validated. This call
         // is the opposite: it is the ONE site that has proof, and the
         // proof is enforced target-side as well as here. `skip_rebuild`
         // is refused by flint's carried patch unless a quiesce lease is
-        // held, and the caller took the cut this base was built from
-        // inside that same lease. No other site may add a base at all.
+        // held — and, when `lease_id` names it, unless the held lease is
+        // THAT one, the lease the caller took the cut under. No other
+        // site may add a base at all.
+        let mut params = json!({ "raid_bdev": raid, "base_bdev": base, "skip_rebuild": true });
+        if let Some(id) = lease_id {
+            params["lease_id"] = json!(id);
+        }
         let payload = json!({
             "method": "bdev_raid_add_base_bdev", // guarded-construct-lint: allow
-            "params": { "raid_bdev": raid, "base_bdev": base, "skip_rebuild": true }
+            "params": params
         });
         self.rpc
             .rpc(&payload)
@@ -3848,8 +3934,19 @@ pub(crate) mod tests {
         /// and its slot COUNT is fixed at creation — a leg can only ever
         /// rejoin a slot some removal emptied.
         pub(crate) raids: Mutex<std::collections::HashMap<String, Vec<Option<String>>>>,
-        /// Raids under a held `bdev_raid_quiesce` lease.
-        pub(crate) quiesced: Mutex<std::collections::HashSet<String>>,
+        /// raid → the id of the `bdev_raid_quiesce` lease held on it. The
+        /// fake models the patch's lease-id contract: a bare quiesce
+        /// acquires or renews, one naming a lease is renew-only, and the
+        /// `skip_rebuild` add and the release refuse a lease that is not
+        /// the caller's.
+        pub(crate) quiesced: Mutex<std::collections::HashMap<String, u64>>,
+        pub(crate) lease_seq: Mutex<u64>,
+        /// Knob: the lease lapses (expires, auto-releases) the moment the
+        /// acquire answers — the renew must refuse, never re-acquire.
+        pub(crate) lapse_after_acquire: Mutex<bool>,
+        /// Knob: a target whose raid patch predates lease ids, answering
+        /// `true` to `bdev_raid_quiesce`.
+        pub(crate) legacy_lease_bool: Mutex<bool>,
         /// alias → clusters the blob OWNS. Snapshotting moves them to
         /// the cut, which is what makes a shallow copy of the cut the
         /// delta and nothing more.
@@ -3900,6 +3997,9 @@ pub(crate) mod tests {
                 total_clusters: Mutex::new(1 << 20),
                 raids: Mutex::new(Default::default()),
                 quiesced: Mutex::new(Default::default()),
+                lease_seq: Mutex::new(0),
+                lapse_after_acquire: Mutex::new(false),
+                legacy_lease_bool: Mutex::new(false),
                 alloc: Mutex::new(Default::default()),
                 parents: Mutex::new(Default::default()),
                 copies: Mutex::new(Default::default()),
@@ -4102,11 +4202,26 @@ pub(crate) mod tests {
                     let raid = p["raid_bdev"].as_str().unwrap_or("").to_string();
                     let base = p["base_bdev"].as_str().unwrap_or("").to_string();
                     let skip = p["skip_rebuild"].as_bool().unwrap_or(false);
-                    if skip && !self.quiesced.lock().unwrap().contains(&raid) {
-                        return Err(format!(
-                            "skip_rebuild add requires a held bdev_raid_quiesce lease on {raid}"
-                        )
-                        .into());
+                    if skip {
+                        let held = self.quiesced.lock().unwrap().get(&raid).copied();
+                        let named =
+                            p.get("lease_id").and_then(|v| v.as_u64()).filter(|id| *id != 0);
+                        match (held, named) {
+                            (None, _) => {
+                                return Err(format!(
+                                    "skip_rebuild add requires a held bdev_raid_quiesce lease on {raid}"
+                                )
+                                .into())
+                            }
+                            (Some(h), Some(id)) if h != id => {
+                                return Err(format!(
+                                    "Code=-116 skip_rebuild add refused: held lease on {raid} is {h}, \
+                                     the caller's lease {id} lapsed (snapshot window breached)"
+                                )
+                                .into())
+                            }
+                            _ => {}
+                        }
                     }
                     let mut raids = self.raids.lock().unwrap();
                     let slots = raids.get_mut(&raid).ok_or("no such raid")?;
@@ -4126,15 +4241,58 @@ pub(crate) mod tests {
                     if !self.raids.lock().unwrap().contains_key(&name) {
                         return Err("raid bdev not found".into());
                     }
-                    self.quiesced.lock().unwrap().insert(name);
-                    Ok(json!({ "result": true }))
+                    let named = p.get("lease_id").and_then(|v| v.as_u64()).filter(|id| *id != 0);
+                    let mut q = self.quiesced.lock().unwrap();
+                    let held = q.get(&name).copied();
+                    match (held, named) {
+                        (None, Some(id)) => {
+                            return Err(format!(
+                                "Code=-2 no quiesce lease held on raid bdev {name}: lease {id} lapsed"
+                            )
+                            .into())
+                        }
+                        (Some(h), Some(id)) if h != id => {
+                            return Err(format!(
+                                "Code=-116 quiesce lease on raid bdev {name} is {h}, not {id}: the \
+                                 caller's lease lapsed and was re-acquired"
+                            )
+                            .into())
+                        }
+                        _ => {}
+                    }
+                    let id = match held {
+                        Some(h) => h,
+                        None => {
+                            let mut seq = self.lease_seq.lock().unwrap();
+                            *seq += 1;
+                            q.insert(name.clone(), *seq);
+                            *seq
+                        }
+                    };
+                    if named.is_none() && *self.lapse_after_acquire.lock().unwrap() {
+                        q.remove(&name);
+                    }
+                    if *self.legacy_lease_bool.lock().unwrap() {
+                        Ok(json!({ "result": true }))
+                    } else {
+                        Ok(json!({ "result": { "lease_id": id } }))
+                    }
                 }
                 "bdev_raid_unquiesce" => {
                     let name = p["name"].as_str().unwrap_or("").to_string();
-                    if !self.quiesced.lock().unwrap().remove(&name) {
-                        return Err("no quiesce lease held".into());
+                    let named = p.get("lease_id").and_then(|v| v.as_u64()).filter(|id| *id != 0);
+                    let mut q = self.quiesced.lock().unwrap();
+                    match (q.get(&name).copied(), named) {
+                        (None, _) => Err("Code=-2 no quiesce lease held".into()),
+                        (Some(h), Some(id)) if h != id => Err(format!(
+                            "Code=-116 quiesce lease on raid bdev {name} is {h}, not the caller's {id}"
+                        )
+                        .into()),
+                        _ => {
+                            q.remove(&name);
+                            Ok(json!({ "result": true }))
+                        }
                     }
-                    Ok(json!({ "result": true }))
                 }
                 "bdev_raid_delete" => {
                     let name = p["name"].as_str().unwrap_or("").to_string();
@@ -6051,6 +6209,78 @@ pub(crate) mod tests {
             "the quiesce is always released — the lease would expire anyway, but a stall we \
              are finished with is one we chose not to spend"
         );
+
+        // The lease is NAMED: the acquire answers an id, the renew and the
+        // add carry it, and so does the release — so a lease that lapsed
+        // mid-window can no longer be mistaken for a renewed one.
+        let calls = tgt.calls.lock().unwrap().clone();
+        let quiesces: Vec<&Value> =
+            calls.iter().filter(|c| c["method"] == "bdev_raid_quiesce").collect();
+        assert_eq!(quiesces.len(), 2, "acquire, then renew: {methods:?}");
+        assert!(quiesces[0]["params"].get("lease_id").is_none(), "the acquire names no lease");
+        assert_eq!(quiesces[1]["params"]["lease_id"], json!(1), "the renew names the acquired lease");
+        assert_eq!(add["params"]["lease_id"], json!(1), "the add rides that lease");
+        let release =
+            tgt.call_with_method(&calls, "bdev_raid_unquiesce").expect("released").clone();
+        assert_eq!(release["params"]["lease_id"], json!(1), "the release names it");
+    }
+
+    /// THE RENEW CANNOT RE-ACQUIRE. A lease that lapsed between the cut
+    /// and the renew means client writes resumed on the composition while
+    /// the copy was still running; the cut is stale. Before lease ids the
+    /// renew was a bare `bdev_raid_quiesce`, which arms a FRESH lease
+    /// and answers success — indistinguishable from a renewal — and the
+    /// clock guard in `rebuild_window` was the only witness. Now the
+    /// renew names its lease and the target refuses.
+    ///
+    /// A/B: drop the `lease_id` from the renew and this test admits the leg.
+    #[tokio::test]
+    async fn a_lapsed_lease_is_refused_at_the_renew_and_the_leg_stays_stale() {
+        let (tgt, backend, r) = framed_with_a_stale_peer("pvc-lapse", 4).await;
+        *tgt.lapse_after_acquire.lock().unwrap() = true;
+
+        match r.rebuild_leg("pvc-lapse", "node-peer").await {
+            RebuildOutcome::Deferred(why) => assert!(why.contains("lapsed"), "{why}"),
+            other => panic!("expected a deferral, got {other:?}"),
+        }
+        assert!(
+            !tgt.methods().iter().any(|m| m == "bdev_raid_add_base_bdev"),
+            "never admitted on a lapsed lease: {:?}",
+            tgt.methods()
+        );
+        let legs = backend.block_legs("pvc-lapse").await.unwrap().unwrap();
+        assert_eq!(
+            legs.iter().find(|l| l.target_id == "node-peer").unwrap().sync_state,
+            crate::state_backend::extent_alloc::LEG_STALE,
+            "the record never called the leg in sync"
+        );
+        assert!(
+            tgt.quiesced.lock().unwrap().is_empty(),
+            "nothing re-acquired: the old protocol would have armed a fresh lease here"
+        );
+    }
+
+    /// A target whose raid patch predates lease ids answers `true`: the
+    /// window runs the old protocol (bare renew, clock guard) and never
+    /// invents an id the target did not issue.
+    #[tokio::test]
+    async fn a_target_without_lease_ids_still_rebuilds_on_the_old_protocol() {
+        let (tgt, _backend, r) = framed_with_a_stale_peer("pvc-legacy", 4).await;
+        *tgt.legacy_lease_bool.lock().unwrap() = true;
+
+        assert!(matches!(
+            r.rebuild_leg("pvc-legacy", "node-peer").await,
+            RebuildOutcome::Rebuilt { .. }
+        ));
+        for c in tgt.calls.lock().unwrap().iter() {
+            let m = c["method"].as_str().unwrap_or("");
+            if matches!(m, "bdev_raid_quiesce" | "bdev_raid_add_base_bdev" | "bdev_raid_unquiesce") {
+                assert!(
+                    c["params"].get("lease_id").is_none(),
+                    "{m} carried a lease_id the target never issued"
+                );
+            }
+        }
     }
 
     /// THE RECORD'S OPTIMISM TRAILS REALITY — proven by the failure.

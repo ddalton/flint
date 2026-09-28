@@ -110,6 +110,40 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **spdk-tgt + hot rejoin: a lapsed quiesce lease can no longer be
+  re-acquired by the "renew"** (2026-09-27). `bdev_raid_quiesce` (the
+  carried raid patch) acquired or renewed with the same call and answered
+  `true` either way, so a hot-rejoin window that outlived its 10 s lease
+  (three AER waits of up to 3 s each, plus the cut, the clone and the ns
+  swap) had guest writes resume on the survivors, then "renewed" into a
+  FRESH lease, and the `skip_rebuild` add passed the target's held-lease
+  check against a base missing every write since the lapse — the silent
+  divergence the single window exists to prevent. Never seen: drills
+  measured 150 ms windows, and the unit fake had no lease state. The
+  target now issues a `lease_id` on acquire; a quiesce that names one is
+  renew-only (`-ENOENT` lapsed, `-ESTALE` a successor is held), the
+  `skip_rebuild` add and the release refuse a lease that is not the
+  caller's, and both callers name their lease on the renew, the add and
+  the release: `hot_rejoin.rs` (both windows) and the pNFS block export's
+  rebuild window (`block_export.rs`, whose clock guard stays as an early
+  abort). Bare calls keep today's behaviour (Python CLI, an old
+  `spdk-tgt` image — the callers then run the old protocol and warn
+  once). Both patch variants carry it:
+  `spdk-csi-driver/raid-skip-rebuild.patch` (v26.05, shipped) and
+  `docs/spdk-2609-upgrade/raid-skip-rebuild-2609.patch`. Shipped as
+  `dilipdalton/spdk-tgt:1.7.0` (built by `scripts/release.sh images`,
+  digest `sha256:f87c0517…`); the chart pins it. `1.6.x` targets still
+  work: the callers run the old protocol against them and warn once.
+  - Checked: both images built from the patched recipes; inside each, a
+    lease that lapsed is refused on renew with no fresh lease armed, a
+    wrong id is refused on renew, add and release, the right id admits
+    with no rebuild process. SPDK unit suites (raid, raid1, lvol, blob,
+    bdev, nvmf) unchanged and green on v26.09. `cargo test --lib
+    hot_rejoin`: 71 passed; the five new tests FAIL when the renew stops
+    naming its lease and pass when restored. pNFS block export: the
+    window test now pins the id on renew, add and release, and a lapsed
+    lease is refused at the renew with the leg left stale.
+
 - **forge: a snapshot CAS cannot be written without a lease renewal**
   (2026-09-27). "Renew before the CAS" was an obligation each of the three
   call sites had to remember, and two forgot it (the fold, `FoldNoRenew`;

@@ -872,19 +872,26 @@ async fn window(
     let mut ef_ns_added = false;
     let mut head_created = false;
     let mut ns_swapped = false;
+    // The lease this window holds; every later lease call names it.
+    let mut lease_id: Option<u64> = None;
 
     // Find the pad's nsid before touching anything (used by the swap).
     let pad_nsid = subsystem_nsid(rpc, dst_node, &nqn_replica).await?.unwrap_or(1);
 
     let result: Result<String, RpcError> = async {
         // W1: leased quiesce.
-        rpc.spdk_rpc(
-            topo.consumer,
-            &json!({ "method": "bdev_raid_quiesce",
-                     "params": { "name": topo.raid_name, "lease_ms": cfg.lease_ms } }),
-        )
-        .await
-        .map_err(|e| format!("quiesce: {}", e))?;
+        let resp = rpc
+            .spdk_rpc(
+                topo.consumer,
+                &json!({ "method": "bdev_raid_quiesce",
+                         "params": { "name": topo.raid_name, "lease_ms": cfg.lease_ms } }),
+            )
+            .await
+            .map_err(|e| format!("quiesce: {}", e))?;
+        lease_id = lease_id_of(&resp);
+        if lease_id.is_none() {
+            warn!(volume_id = vol, "[HOT_REJOIN] Target issued no lease id (raid patch predates lease ids): a lapsed lease cannot be told from a renewed one, so this window relies on the lease outliving it");
+        }
         lap("quiesce", &mut t);
         fault_point("abort_after_quiesce");
 
@@ -956,11 +963,16 @@ async fn window(
             .map_err(|e| format!("head bdev on consumer: {}", e))?;
         lap("export+aer head", &mut t);
 
-        // W6: renew immediately before the add — hard invariant.
+        // W6: renew immediately before the add — hard invariant. Naming the
+        // lease makes this renew-only: a lapsed lease is -ENOENT, a
+        // successor's is -ESTALE, and neither is ever mistaken for ours.
+        let mut renew = json!({ "name": topo.raid_name, "lease_ms": cfg.lease_ms });
+        if let Some(id) = lease_id {
+            renew["lease_id"] = json!(id);
+        }
         rpc.spdk_rpc(
             topo.consumer,
-            &json!({ "method": "bdev_raid_quiesce",
-                     "params": { "name": topo.raid_name, "lease_ms": cfg.lease_ms } }),
+            &json!({ "method": "bdev_raid_quiesce", "params": renew }),
         )
         .await
         .map_err(|e| format!("lease renew (window breached — never add): {}", e))?;
@@ -968,9 +980,14 @@ async fn window(
 
         // W7: the patched add. EBUSY = a just-released lease's unquiesce in
         // flight — bounded retry.
-        let add = json!({ "method": "bdev_raid_add_base_bdev",
-                          "params": { "raid_bdev": topo.raid_name, "base_bdev": expected,
-                                       "skip_rebuild": true } });
+        let mut add_params = json!({ "raid_bdev": topo.raid_name, "base_bdev": expected,
+                                     "skip_rebuild": true });
+        if let Some(id) = lease_id {
+            // The target refuses the add unless the lease it holds is this
+            // one — the lease that covered the E_f cut.
+            add_params["lease_id"] = json!(id);
+        }
+        let add = json!({ "method": "bdev_raid_add_base_bdev", "params": add_params });
         let mut attempt = 0;
         loop {
             match rpc.spdk_rpc(topo.consumer, &add).await {
@@ -993,12 +1010,16 @@ async fn window(
         match rpc
             .spdk_rpc(
                 topo.consumer,
-                &json!({ "method": "bdev_raid_unquiesce", "params": { "name": topo.raid_name } }),
+                &json!({ "method": "bdev_raid_unquiesce",
+                         "params": lease_params(&topo.raid_name, lease_id) }),
             )
             .await
         {
             Ok(_) => {}
-            Err(e) if is_missing(&e.to_string()) || e.to_string().contains("no quiesce lease") => {}
+            Err(e)
+                if is_missing(&e.to_string())
+                    || e.to_string().contains("no quiesce lease")
+                    || is_stale_lease(&e.to_string()) => {}
             Err(e) => {
                 warn!(volume_id = vol, error = %e, "[HOT_REJOIN] Unquiesce failed post-add — v3 expiry poller owns the release");
             }
@@ -1059,15 +1080,21 @@ async fn window(
                         .await;
                 }
             }
+            // Named release: never takes down a successor's lease if ours
+            // lapsed (-ESTALE is then the same non-event as -ENOENT).
             match rpc
                 .spdk_rpc(
                     topo.consumer,
-                    &json!({ "method": "bdev_raid_unquiesce", "params": { "name": topo.raid_name } }),
+                    &json!({ "method": "bdev_raid_unquiesce",
+                             "params": lease_params(&topo.raid_name, lease_id) }),
                 )
                 .await
             {
                 Ok(_) => {}
-                Err(e2) if is_missing(&e2.to_string()) || e2.to_string().contains("no quiesce lease") => {}
+                Err(e2)
+                    if is_missing(&e2.to_string())
+                        || e2.to_string().contains("no quiesce lease")
+                        || is_stale_lease(&e2.to_string()) => {}
                 Err(e2) => {
                     warn!(volume_id = vol, error = %e2, "[HOT_REJOIN] Unwind unquiesce failed — lease expiry will release");
                 }
@@ -1279,15 +1306,22 @@ async fn window_inline(
     };
 
     let mut cut_done = false;
+    // The lease this window holds; every later lease call names it.
+    let mut lease_id: Option<u64> = None;
     let result: Result<(), RpcError> = async {
         // W1: leased quiesce — the correctness fence for the fenced delta.
-        rpc.spdk_rpc(
-            topo.consumer,
-            &json!({ "method": "bdev_raid_quiesce",
-                     "params": { "name": topo.raid_name, "lease_ms": cfg.lease_ms } }),
-        )
-        .await
-        .map_err(|e| format!("quiesce: {}", e))?;
+        let resp = rpc
+            .spdk_rpc(
+                topo.consumer,
+                &json!({ "method": "bdev_raid_quiesce",
+                         "params": { "name": topo.raid_name, "lease_ms": cfg.lease_ms } }),
+            )
+            .await
+            .map_err(|e| format!("quiesce: {}", e))?;
+        lease_id = lease_id_of(&resp);
+        if lease_id.is_none() {
+            warn!(volume_id = vol, "[HOT_REJOIN] Target issued no lease id (raid patch predates lease ids): a lapsed lease cannot be told from a renewed one, so this window relies on the lease outliving it");
+        }
         lap("quiesce", &mut t);
         fault_point("abort_after_quiesce");
 
@@ -1316,11 +1350,15 @@ async fn window_inline(
         .map_err(|e| format!("fenced final delta: {}", e))?;
         lap("fenced final delta", &mut t);
 
-        // W4: renew immediately before the add — hard invariant.
+        // W4: renew immediately before the add — hard invariant, renew-only
+        // when the lease is named (see the esnap window's W6).
+        let mut renew = json!({ "name": topo.raid_name, "lease_ms": cfg.lease_ms });
+        if let Some(id) = lease_id {
+            renew["lease_id"] = json!(id);
+        }
         rpc.spdk_rpc(
             topo.consumer,
-            &json!({ "method": "bdev_raid_quiesce",
-                     "params": { "name": topo.raid_name, "lease_ms": cfg.lease_ms } }),
+            &json!({ "method": "bdev_raid_quiesce", "params": renew }),
         )
         .await
         .map_err(|e| format!("lease renew (window breached — never add): {}", e))?;
@@ -1340,9 +1378,14 @@ async fn window_inline(
             )
             .into());
         }
-        let add = json!({ "method": "bdev_raid_add_base_bdev",
-                          "params": { "raid_bdev": topo.raid_name, "base_bdev": expected,
-                                       "skip_rebuild": true } });
+        let mut add_params = json!({ "raid_bdev": topo.raid_name, "base_bdev": expected,
+                                     "skip_rebuild": true });
+        if let Some(id) = lease_id {
+            // The target refuses the add unless the lease it holds is this
+            // one — the lease that covered the E_f cut.
+            add_params["lease_id"] = json!(id);
+        }
+        let add = json!({ "method": "bdev_raid_add_base_bdev", "params": add_params });
         let mut attempt = 0;
         loop {
             match rpc.spdk_rpc(topo.consumer, &add).await {
@@ -1362,12 +1405,16 @@ async fn window_inline(
         match rpc
             .spdk_rpc(
                 topo.consumer,
-                &json!({ "method": "bdev_raid_unquiesce", "params": { "name": topo.raid_name } }),
+                &json!({ "method": "bdev_raid_unquiesce",
+                         "params": lease_params(&topo.raid_name, lease_id) }),
             )
             .await
         {
             Ok(_) => {}
-            Err(e) if is_missing(&e.to_string()) || e.to_string().contains("no quiesce lease") => {}
+            Err(e)
+                if is_missing(&e.to_string())
+                    || e.to_string().contains("no quiesce lease")
+                    || is_stale_lease(&e.to_string()) => {}
             Err(e) => {
                 warn!(volume_id = vol, error = %e, "[HOT_REJOIN] Unquiesce failed post-add — v3 expiry poller owns the release");
             }
@@ -1392,15 +1439,21 @@ async fn window_inline(
                         .await;
                 }
             }
+            // Named release: never takes down a successor's lease if ours
+            // lapsed (-ESTALE is then the same non-event as -ENOENT).
             match rpc
                 .spdk_rpc(
                     topo.consumer,
-                    &json!({ "method": "bdev_raid_unquiesce", "params": { "name": topo.raid_name } }),
+                    &json!({ "method": "bdev_raid_unquiesce",
+                             "params": lease_params(&topo.raid_name, lease_id) }),
                 )
                 .await
             {
                 Ok(_) => {}
-                Err(e2) if is_missing(&e2.to_string()) || e2.to_string().contains("no quiesce lease") => {}
+                Err(e2)
+                    if is_missing(&e2.to_string())
+                        || e2.to_string().contains("no quiesce lease")
+                        || is_stale_lease(&e2.to_string()) => {}
                 Err(e2) => {
                     warn!(volume_id = vol, error = %e2, "[HOT_REJOIN] Inline unwind unquiesce failed — lease expiry will release");
                 }
@@ -1485,6 +1538,44 @@ async fn wait_bdev(
 
 fn is_busy(msg: &str) -> bool {
     msg.contains("EBUSY") || msg.contains("Code=-16") || msg.to_lowercase().contains("busy")
+}
+
+// --- lease identity -------------------------------------------------------
+//
+// `bdev_raid_quiesce` acquires OR renews with the same call, and a lease that
+// lapsed (expired, auto-released, guest writes resumed) is gone by the time
+// the window comes back to renew: the bare RPC then arms a FRESH lease and
+// answers success, indistinguishable from a renewal. The skip_rebuild add
+// that follows passes the target's held-lease check against a base that
+// missed every write since the lapse — the silent divergence the single
+// window exists to prevent. So the target now issues a `lease_id` on acquire,
+// and the window names it on every later call: the renew becomes renew-only
+// (`-ENOENT` if the lease lapsed, `-ESTALE` if a successor is held), the add
+// is refused unless the held lease is that one, and the release never takes
+// down a successor's lease. A target whose patch predates lease ids answers
+// `true`: the window then runs the old protocol and says so once.
+
+/// The lease id a `bdev_raid_quiesce` acquire returned, or `None` on a
+/// target whose raid patch predates lease ids.
+fn lease_id_of(resp: &serde_json::Value) -> Option<u64> {
+    resp.get("result")?.get("lease_id")?.as_u64()
+}
+
+/// `{"name": raid}` plus `"lease_id"` when the target issued one. Never 0:
+/// the target reads 0 as "unspecified".
+fn lease_params(raid: &str, lease_id: Option<u64>) -> serde_json::Value {
+    let mut p = json!({ "name": raid });
+    if let Some(id) = lease_id {
+        p["lease_id"] = json!(id);
+    }
+    p
+}
+
+/// The target holds a lease that is not the caller's (`-ESTALE`): the
+/// caller's lapsed and another actor armed one. For a release that means
+/// "ours is already gone" — the same non-event as `-ENOENT`.
+fn is_stale_lease(msg: &str) -> bool {
+    msg.contains("Code=-116") || msg.contains("not the caller's") || msg.contains("lapsed")
 }
 
 // --- converge probes (F48/F54) ---------------------------------------------
@@ -2929,6 +3020,22 @@ mod tests {
         /// way a real zombie's stale view survives target-side ns changes.
         /// A detach clears the freeze (a fresh controller sees live state).
         frozen_aer: HashSet<(String, String)>,
+        /// The raid quiesce lease the fake target holds: (raid, lease id).
+        /// Models the patch's lease-id contract, so the renew-vs-acquire
+        /// hole is testable: a bare quiesce acquires or renews, a quiesce
+        /// naming a lease is renew-only, the skip_rebuild add and the
+        /// release refuse a lease that is not the caller's.
+        lease: Option<(String, u64)>,
+        lease_seq: u64,
+        /// Knob: the lease lapses (expires, auto-releases) right after the
+        /// acquire answers — the renew must refuse, never re-acquire.
+        lapse_lease_after_acquire: bool,
+        /// Knob: the lease lapses and ANOTHER actor arms a successor before
+        /// the renew — renew and add must refuse it as not ours.
+        foreign_lease_after_acquire: bool,
+        /// Knob: the target's raid patch predates lease ids and answers
+        /// `true` to bdev_raid_quiesce (the old protocol must still run).
+        legacy_lease_bool: bool,
     }
 
     impl World {
@@ -3105,14 +3212,105 @@ mod tests {
             let mut w = self.world.lock().unwrap();
             let node_s = node.to_string();
             let resp = match method.as_str() {
-                "bdev_raid_quiesce" | "bdev_raid_unquiesce" | "bdev_wait_for_examine"
-                | "bdev_examine" => json!({ "result": true }),
+                "bdev_wait_for_examine" | "bdev_examine" => json!({ "result": true }),
+                "bdev_raid_quiesce" => {
+                    let raid = params["name"].as_str().unwrap_or("").to_string();
+                    let named = params.get("lease_id").and_then(|v| v.as_u64()).filter(|id| *id != 0);
+                    let held = w.lease.as_ref().map(|(_, id)| *id);
+                    match (held, named) {
+                        (None, Some(id)) => {
+                            return Err(format!(
+                                "SPDK RPC error: Code=-2 Msg=no quiesce lease held on raid bdev {}: lease {} lapsed",
+                                raid, id
+                            )
+                            .into())
+                        }
+                        (Some(h), Some(id)) if h != id => {
+                            return Err(format!(
+                                "SPDK RPC error: Code=-116 Msg=quiesce lease on raid bdev {} is {}, not {}: the caller's lease lapsed and was re-acquired",
+                                raid, h, id
+                            )
+                            .into())
+                        }
+                        _ => {}
+                    }
+                    let id = match held {
+                        Some(h) => h,
+                        None => {
+                            w.lease_seq += 1;
+                            w.lease = Some((raid.clone(), w.lease_seq));
+                            w.lease_seq
+                        }
+                    };
+                    if named.is_none() {
+                        if w.lapse_lease_after_acquire {
+                            w.lease = None;
+                        } else if w.foreign_lease_after_acquire {
+                            w.lease_seq += 1;
+                            w.lease = Some((raid, w.lease_seq));
+                        }
+                    }
+                    if w.legacy_lease_bool {
+                        json!({ "result": true })
+                    } else {
+                        json!({ "result": { "lease_id": id } })
+                    }
+                }
+                "bdev_raid_unquiesce" => {
+                    let raid = params["name"].as_str().unwrap_or("").to_string();
+                    let named = params.get("lease_id").and_then(|v| v.as_u64()).filter(|id| *id != 0);
+                    let held = w.lease.as_ref().map(|(_, id)| *id);
+                    match (held, named) {
+                        (None, _) => {
+                            return Err(format!(
+                                "SPDK RPC error: Code=-2 Msg=no quiesce lease held on raid bdev {}",
+                                raid
+                            )
+                            .into())
+                        }
+                        (Some(h), Some(id)) if h != id => {
+                            return Err(format!(
+                                "SPDK RPC error: Code=-116 Msg=quiesce lease on raid bdev {} is {}, not the caller's {}",
+                                raid, h, id
+                            )
+                            .into())
+                        }
+                        _ => {
+                            w.lease = None;
+                            json!({ "result": true })
+                        }
+                    }
+                }
                 "bdev_raid_get_bdevs" => {
                     json!({ "result": w.raids.get(&node_s).cloned().unwrap_or_default() })
                 }
                 "bdev_raid_add_base_bdev" => {
                     let raid = params["raid_bdev"].as_str().unwrap().to_string();
                     let base = params["base_bdev"].as_str().unwrap().to_string();
+                    if params["skip_rebuild"].as_bool() == Some(true) {
+                        // The patch's contract: a held lease, and — when the
+                        // caller names one — THAT lease.
+                        let held = w.lease.as_ref().map(|(_, id)| *id);
+                        let named =
+                            params.get("lease_id").and_then(|v| v.as_u64()).filter(|id| *id != 0);
+                        match (held, named) {
+                            (None, _) => {
+                                return Err(format!(
+                                    "SPDK RPC error: Code=-1 Msg=skip_rebuild add requires a held bdev_raid_quiesce lease on {}",
+                                    raid
+                                )
+                                .into())
+                            }
+                            (Some(h), Some(id)) if h != id => {
+                                return Err(format!(
+                                    "SPDK RPC error: Code=-116 Msg=skip_rebuild add refused: held lease on {} is {}, the caller's lease {} lapsed (snapshot window breached)",
+                                    raid, h, id
+                                )
+                                .into())
+                            }
+                            _ => {}
+                        }
+                    }
                     if let Some(raids) = w.raids.get_mut(&node_s) {
                         for r in raids.iter_mut() {
                             if r["name"].as_str() == Some(raid.as_str()) {
@@ -4886,6 +5084,149 @@ mod tests {
             .unwrap();
         assert!(matches!(out, HotRejoinOutcome::Rejoined { .. }));
         assert_eq!(rpc.calls_of("bdev_raid_add_base_bdev").len(), 2);
+    }
+
+    // -- Lease identity: the renew-vs-acquire hole -----------------------------
+    //
+    // Before lease ids, the fake (like the target) answered `true` to every
+    // quiesce, so a lease that lapsed mid-window was silently re-acquired by
+    // the "renew" and the add passed the held-lease check against a base
+    // that had missed writes. These pin the closed hole at the RPC seam.
+
+    #[tokio::test]
+    async fn lease_id_threads_through_the_window() {
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        let store = FakeStore::new(stale_b_record());
+
+        let out = hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &cfg())
+            .await
+            .unwrap();
+        assert!(matches!(out, HotRejoinOutcome::Rejoined { .. }), "got {:?}", out);
+
+        let q = rpc.calls_of("bdev_raid_quiesce");
+        assert_eq!(q.len(), 2);
+        assert!(q[0].1.get("lease_id").is_none(), "the acquire names no lease");
+        let id = q[1].1["lease_id"].as_u64().expect("the renew names the acquired lease");
+        assert_eq!(id, 1);
+        let adds = rpc.calls_of("bdev_raid_add_base_bdev");
+        assert_eq!(adds[0].1["lease_id"].as_u64(), Some(id), "the add rides that lease");
+        let rel = rpc.calls_of("bdev_raid_unquiesce");
+        assert_eq!(rel[0].1["lease_id"].as_u64(), Some(id), "the release names it");
+        assert!(rpc.world.lock().unwrap().lease.is_none(), "released");
+    }
+
+    #[tokio::test]
+    async fn lapsed_lease_is_refused_by_the_renew_never_reacquired() {
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        // The lease expires and auto-releases between the acquire and the
+        // renew (guest writes resumed in between).
+        rpc.world.lock().unwrap().lapse_lease_after_acquire = true;
+        let store = FakeStore::new(stale_b_record());
+
+        let err = hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &cfg())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("never add"), "unexpected: {}", err);
+        assert!(err.to_string().contains("lapsed"), "unexpected: {}", err);
+        assert!(rpc.calls_of("bdev_raid_add_base_bdev").is_empty(), "no add on a lapsed lease");
+        // The old protocol would have armed a fresh lease right here.
+        assert!(rpc.world.lock().unwrap().lease.is_none());
+        let rec = store.record();
+        let b = rec.get("uuid-b").unwrap();
+        assert_eq!(b.sync_state, SyncState::Stale);
+        assert!(b.hot_rejoin.is_none());
+        assert_eq!(store.events(), vec!["HotRejoinUnwound"]);
+    }
+
+    #[tokio::test]
+    async fn successor_lease_is_refused_and_left_alone() {
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        // Ours lapsed and another actor armed lease 2 before the renew.
+        rpc.world.lock().unwrap().foreign_lease_after_acquire = true;
+        let store = FakeStore::new(stale_b_record());
+
+        let err = hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &cfg())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("never add"), "unexpected: {}", err);
+        assert!(rpc.calls_of("bdev_raid_add_base_bdev").is_empty());
+        // The unwind's named release did not take down the other actor's lease.
+        let w = rpc.world.lock().unwrap();
+        assert_eq!(w.lease.as_ref().map(|(_, id)| *id), Some(2));
+    }
+
+    #[tokio::test]
+    async fn legacy_target_without_lease_ids_runs_the_old_protocol() {
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        rpc.world.lock().unwrap().legacy_lease_bool = true;
+        let store = FakeStore::new(stale_b_record());
+
+        let out = hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &cfg())
+            .await
+            .unwrap();
+        assert!(matches!(out, HotRejoinOutcome::Rejoined { .. }), "got {:?}", out);
+        for method in ["bdev_raid_quiesce", "bdev_raid_add_base_bdev", "bdev_raid_unquiesce"] {
+            for (_, p) in rpc.calls_of(method) {
+                assert!(
+                    p.get("lease_id").is_none(),
+                    "{} carried a lease_id the target never issued",
+                    method
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn inline_window_threads_the_lease_id_and_refuses_a_lapse() {
+        // Happy path: the inline window names its lease on renew, add and
+        // release, exactly like the esnap window.
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        seed_allocated(
+            &rpc,
+            &[(&epoch_name(VOL, 1), 100), (&epoch_name(VOL, 2), 7), (&src_head_name(), 3)],
+        );
+        let store = FakeStore::new(standby_b_record());
+        let out = hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &cfg_inline())
+            .await
+            .unwrap();
+        assert!(matches!(out, HotRejoinOutcome::Rejoined { .. }), "got {:?}", out);
+        assert!(
+            !rpc.methods_in_order().contains(&"bdev_lvol_clone_bdev".to_string()),
+            "inline path taken"
+        );
+        let q = rpc.calls_of("bdev_raid_quiesce");
+        assert_eq!(q.len(), 2);
+        assert_eq!(q[1].1["lease_id"].as_u64(), Some(1));
+        assert_eq!(rpc.calls_of("bdev_raid_add_base_bdev")[0].1["lease_id"].as_u64(), Some(1));
+        assert_eq!(rpc.calls_of("bdev_raid_unquiesce")[0].1["lease_id"].as_u64(), Some(1));
+
+        // The fenced delta outlived the lease: the renew refuses, no add,
+        // and the inline path reports the abort as an outcome.
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        seed_allocated(
+            &rpc,
+            &[(&epoch_name(VOL, 1), 100), (&epoch_name(VOL, 2), 7), (&src_head_name(), 3)],
+        );
+        rpc.world.lock().unwrap().lapse_lease_after_acquire = true;
+        let store = FakeStore::new(standby_b_record());
+        let out = hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &cfg_inline())
+            .await
+            .unwrap();
+        match out {
+            HotRejoinOutcome::InlineAborted { reason } => {
+                assert!(reason.contains("never add"), "unexpected: {}", reason);
+                assert!(reason.contains("lapsed"), "unexpected: {}", reason);
+            }
+            other => panic!("expected InlineAborted, got {:?}", other),
+        }
+        assert!(rpc.calls_of("bdev_raid_add_base_bdev").is_empty(), "no add on a lapsed lease");
+        assert!(rpc.world.lock().unwrap().lease.is_none(), "nothing re-acquired");
     }
 
     #[tokio::test]

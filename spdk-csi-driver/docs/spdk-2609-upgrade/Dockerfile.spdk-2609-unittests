@@ -1,0 +1,66 @@
+FROM ubuntu:24.04 AS builder
+
+# The image's minimum CPU. See the --target-arch note on the build step
+# below for why this must never be left implicit. Overridable so the
+# floor can be A/B'd against throughput on real hardware rather than
+# argued about:  docker build --build-arg SPDK_TARGET_ARCH=skylake-avx512
+ARG SPDK_TARGET_ARCH=corei7
+
+# Install all build-time dependencies including RDMA support
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    pkg-config \
+    libaio-dev \
+    libssl-dev \
+    libnuma-dev \
+    libpciaccess-dev \
+    libcunit1-dev \
+    libncurses5-dev \
+    liburing-dev \
+    libfuse3-dev \
+    python3 \
+    python3-pyelftools \
+    python3-jinja2 \
+    python3-tabulate \
+    python3-yaml \
+    git \
+    wget \
+    meson \
+    nasm \
+    autoconf \
+    automake \
+    libtool \
+    uuid-dev \
+    libibverbs-dev \
+    librdmacm-dev \
+    rdma-core \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /spdk
+
+# Unit-test build of the SAME source + patch set as Dockerfile.spdk, but with
+# SPDK's unit tests enabled (Dockerfile.spdk passes --disable-tests, which also
+# disables test/unit). Runs the suites that cover the patched code and the
+# upstream changes between v26.05 and v26.09 that touch it.
+COPY nvmf-hostlog.patch lvol-flush-sync.patch ublk-debug.patch blob-recovery-batched.patch \
+     blob-shutdown-debug.patch raid-skip-rebuild-2609.patch write-cache-advertise.patch /tmp/
+RUN git clone https://github.com/spdk/spdk.git . && \
+    git checkout v26.09 && \
+    git submodule update --init --recursive && \
+    for p in nvmf-hostlog lvol-flush-sync ublk-debug blob-recovery-batched blob-shutdown-debug raid-skip-rebuild-2609 write-cache-advertise; do \
+        patch -p1 < /tmp/$p.patch && echo "applied $p"; done && \
+    ./configure --target-arch=corei7 --with-ublk --with-rdma --with-uring && \
+    make -j$(nproc)
+SHELL ["/bin/bash", "-c"]
+RUN set -e; for t in \
+      test/unit/lib/bdev/raid/bdev_raid.c/bdev_raid_ut \
+      test/unit/lib/bdev/raid/raid1.c/raid1_ut \
+      test/unit/lib/bdev/vbdev_lvol.c/vbdev_lvol_ut \
+      test/unit/lib/lvol/lvol.c/lvol_ut \
+      test/unit/lib/blob/blob.c/blob_ut \
+      test/unit/lib/bdev/bdev.c/bdev_ut \
+      test/unit/lib/nvmf/subsystem.c/subsystem_ut \
+      test/unit/lib/nvmf/ctrlr.c/ctrlr_ut ; do \
+      echo "=== UT $t"; test -x "$t" || { echo "MISSING UNIT TEST BINARY: $t"; exit 2; }; \
+      "$t" 2>&1 | tail -12; test "${PIPESTATUS[0]}" -eq 0 || { echo "UT FAILED: $t"; exit 1; }; \
+    done; echo "ALL LISTED UNIT TESTS PASSED"

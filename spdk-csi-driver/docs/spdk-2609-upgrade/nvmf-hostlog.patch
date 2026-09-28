@@ -1,0 +1,31 @@
+diff --git a/lib/nvmf/ctrlr.c b/lib/nvmf/ctrlr.c
+index 5d4ca6501..a8419d140 100644
+--- a/lib/nvmf/ctrlr.c
++++ b/lib/nvmf/ctrlr.c
+@@ -970,8 +970,9 @@ nvmf_qpair_access_allowed(struct spdk_nvmf_qpair *qpair, struct spdk_nvmf_subsys
+ 	}
+ 
+ 	if (!spdk_nvmf_subsystem_listener_allowed(subsystem, &listen_trid)) {
+-		SPDK_ERRLOG("Subsystem '%s' does not allow host '%s' to connect at this address.\n",
+-			    subsystem->subnqn, hostnqn);
++		SPDK_ERRLOG("Subsystem '%s' does not allow host '%s' to connect at this address. Listener address is %s/%s/%s\n",
++			    subsystem->subnqn, hostnqn, spdk_nvme_transport_id_trtype_str(listen_trid.trtype),
++			    listen_trid.traddr, listen_trid.trsvcid);
+ 		return false;
+ 	}
+ 
+diff --git a/test/unit/lib/nvmf/ctrlr.c/ctrlr_ut.c b/test/unit/lib/nvmf/ctrlr.c/ctrlr_ut.c
+index e50711a1f..b4cd91c36 100644
+--- a/test/unit/lib/nvmf/ctrlr.c/ctrlr_ut.c
++++ b/test/unit/lib/nvmf/ctrlr.c/ctrlr_ut.c
+@@ -88,6 +88,10 @@ DEFINE_STUB(spdk_nvmf_qpair_get_listen_trid,
+ 	    (struct spdk_nvmf_qpair *qpair, struct spdk_nvme_transport_id *trid),
+ 	    0);
+ 
++/* flint nvmf-hostlog.patch: the access-denied ERRLOG in nvmf_qpair_access_allowed()
++ * names the listener's transport; ctrlr_ut links no nvme transport code. */
++DEFINE_STUB(spdk_nvme_transport_id_trtype_str, const char *,
++	    (enum spdk_nvme_transport_type trtype), "TCP");
+ DEFINE_STUB(spdk_nvmf_subsystem_listener_allowed,
+ 	    bool,
+ 	    (struct spdk_nvmf_subsystem *subsystem, const struct spdk_nvme_transport_id *trid),
