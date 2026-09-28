@@ -7,7 +7,7 @@ run the way the gates run it.
 
     cargo build --release --offline
     target/release/tlc-rs [-workers N] [-engine interp|closure] [-var-order v1,v2,..] [-config X.cfg]
-                          [-metadir DIR] [-checkpoint MIN] [-recover DIR] [-queue-mem MB] X.tla
+                          [-metadir DIR] [-checkpoint MIN] [-recover DIR] [-queue-mem MB] [-fpmem MB] X.tla
     target/release/tlc-rs -codegen DIR [-config X.cfg] X.tla   # then: cd DIR && cargo build --release
 
 ## What it supports
@@ -167,7 +167,12 @@ tlc-rs stops scaling at the 4 performance cores (ScopedSync: 14.6 / 9.1 /
 TLC's layout (`store.rs`):
 
 - the seen set holds **8-byte fingerprints** only (open addressing, 1024
-  shards);
+  shards), in memory up to `-fpmem` (default 1024 MB); past it a shard
+  sorts its table and merges it into its own sorted file (a new file,
+  renamed over the old), keeping in memory only every 128th fingerprint
+  (for a one-block read) and a Bloom filter (~10 bits, 4 probes) so a new
+  fingerprint rarely touches the disk — ~1.3 bytes of RAM per state on
+  disk, so a billion states need ~1.3 GB of RAM and 8 GB of disk;
 - each worker appends (fingerprint, parent) records to its own **trace
   log**, buffered (512 MB in all) and spilled to a file, and a
   counterexample walks parents back through it;
@@ -214,9 +219,39 @@ box; not the same machine). Generated counts differ (112,597,310 vs TLC's
 115,302,321); the two count generated states differently, and distinct is
 the comparison. Sweep: `results/disk-sweep-2026-09-26.jsonl`.
 
-Not yet: TLC's fingerprint set also spills to disk (tlc-rs needs ~14 B
-of RAM per distinct state: ~14 GB at 1B states); checkpoints only at level
-boundaries (TLC's can land mid-level).
+The fingerprint set on disk (`-fpmem 8`, so nearly every fingerprint is
+in a file): FlintTierSession 10,698,103 distinct, exact, in 40.3 s against
+33.7 s in memory (44.9 s before the Bloom filters: every new state had
+cost two reads finding nothing); killed and recovered with the set on
+disk, exact again (the checkpoint hard-links the 1,024 shard files);
+LeanScopedSyncHolds (SYMMETRY+VIEW, 1 worker) 246,151. The whole gate with
+every run's set on disk (`TLCRS_FPMEM_MB=1`,
+`results/fpset-disk-sweep-2026-09-28.jsonl`): 255 entries as before, 0
+regressions.
+
+On the Linux box (x86, NVMe, 1 niced worker beside other runs) it found
+what the Mac could not: 1,024 open shard files exceed Linux's default soft
+limit of 1,024 descriptors ("Too many open files"; macOS's default is
+~1M). tlc-rs now raises its soft limit toward the hard one at start, as
+the JVM does for TLC. Then: FlintTierSession with the set on disk
+10,698,103, exact (280 s against 254 s in memory); killed with `kill -9`
+after a checkpoint and recovered, exact again. **MCLeanP1Like with the set
+spilling (`-fpmem 64`, 4,096 shard spills): 26,592,522 distinct, TLC's
+exact count, in 52 min on 1 niced worker of the loaded box (TLC: 61 min on
+6 workers), 873 MB peak RSS.**
+
+A queue fix from the same round, found by flint-27: under SYMMETRY a
+level must be read back in the order it was written, since which state
+stands for an orbit depends on which comes first. After one batch of a
+level had spilled, a later, smaller batch (always the last, partial one)
+could still fit under `-queue-mem` and was then read *before* the blocks
+on disk. ForgeSyncRewindProbeResurrected at 1 worker gave 3,189,392
+against TLC's 3,172,931 by default, and TLC's count with `-queue-mem
+1024`. Now a level that has spilled keeps spilling: 3,172,931 at the
+default and fully spilled; LeanScopedSyncHolds 246,151 at 64, 1 and 0 MB.
+
+Not yet: checkpoints only at level boundaries (TLC's can land
+mid-level).
 
 ## Where the time went (and what fixed it)
 

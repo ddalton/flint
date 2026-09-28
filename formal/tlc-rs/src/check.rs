@@ -28,6 +28,9 @@ pub struct Disk {
     pub checkpoint_secs: u64,
     /// estimated bytes of one BFS level kept in memory before spilling
     pub queue_mem: u64,
+    /// bytes the in-memory fingerprint tables may use before shards
+    /// spill to sorted files in the metadir
+    pub fp_mem: u64,
     /// resume from the checkpoint in `metadir`
     pub recover: bool,
     /// written into a checkpoint; recovery refuses a mismatch
@@ -80,6 +83,7 @@ impl<'p> Checker<'p> {
             metadir: std::env::temp_dir().join(format!("tlc-rs-{}", std::process::id())),
             checkpoint_secs: 0,
             queue_mem: 1 << 30,
+            fp_mem: u64::MAX,
             recover: false,
             source_hash: 0,
         };
@@ -176,7 +180,7 @@ impl<'p> Checker<'p> {
                     }
                     sk.reset(succ);
                     let fp = sk.key(&s, changed, parent, succ, vbufs)?;
-                    if keep_all || !seen.contains(fp) {
+                    if keep_all || !seen.contains(fp)? {
                         out.push((fp, s.into_boxed_slice()));
                     }
                     Ok(())
@@ -214,7 +218,7 @@ impl<'p> Checker<'p> {
                 }
             }
             let fp = (0..np).map(|k| combine(&hs[k * nvars..(k + 1) * nvars])).min().unwrap();
-            if keep_all || !seen.contains(fp) {
+            if keep_all || !seen.contains(fp)? {
                 out.push((fp, cx.next.iter().map(|v| v.clone().unwrap()).collect()));
             }
             Ok(())
@@ -274,7 +278,8 @@ impl<'p> Checker<'p> {
     pub fn run(&self) -> Outcome {
         let t0 = Instant::now();
         let meta = Meta::new(self.disk.metadir.clone());
-        let seen = FpSet::default();
+        store::raise_fd_limit();
+        let seen = FpSet::new(self.disk.fp_mem, meta.dir.clone());
         let mut trace = Trace::new(self.workers);
         let (mut out, failure) = self.search(&meta, &seen, &mut trace, t0);
         if let Some(f) = &failure {
@@ -298,7 +303,7 @@ impl<'p> Checker<'p> {
 
     /// Remove what the run wrote (never anything else in the directory).
     fn clean(&self, meta: &Meta) {
-        if !meta.exists() {
+        if !meta.dir.is_dir() {
             return;
         }
         if let Ok(rd) = std::fs::read_dir(&meta.dir) {
@@ -306,7 +311,7 @@ impl<'p> Checker<'p> {
                 let n = e.file_name().to_string_lossy().to_string();
                 if n.starts_with("ckpt") {
                     let _ = std::fs::remove_dir_all(e.path());
-                } else if (n.starts_with("trace-") || n.starts_with("queue-")) && n.ends_with(".bin") {
+                } else if (n.starts_with("trace-") || n.starts_with("queue-") || n.starts_with("fpset-")) && (n.ends_with(".bin") || n.ends_with(".tmp")) {
                     let _ = std::fs::remove_file(e.path());
                 }
             }
@@ -364,7 +369,11 @@ impl<'p> Checker<'p> {
                     Ok(Some(_)) => continue,
                     Err(e) => return done(generated, 0, Some(Failure::Eval(e, None))),
                 }
-                if seen.insert(fp) {
+                let new = match seen.insert(fp) {
+                    Ok(b) => b,
+                    Err(e) => return done(generated, 0, Some(Failure::Eval(e, None))),
+                };
+                if new {
                     let idx = match log.append(meta, fp, NO_PARENT) {
                         Ok(i) => i,
                         Err(e) => return done(generated, 1, Some(Failure::Eval(e, None))),
@@ -500,8 +509,10 @@ impl<'p> Checker<'p> {
                                         Err(e) => return Some(Failure::Eval(e, Some(pidx))),
                                     }
                                 }
-                                if !seen.insert(fp) {
-                                    continue;
+                                match seen.insert(fp) {
+                                    Ok(true) => {}
+                                    Ok(false) => continue,
+                                    Err(e) => return Some(Failure::Eval(e, None)),
                                 }
                                 let idx = match log.append(meta, fp, pidx) {
                                     Ok(i) => i,
@@ -605,9 +616,10 @@ impl<'p> Checker<'p> {
                 last_report = Instant::now();
                 let on_disk: u64 = frontier.blocks.iter().map(|b| b.count).sum();
                 eprintln!(
-                    "progress: depth {depth}, {} generated, {} distinct, {} on queue ({on_disk} on disk), {:.1}s",
+                    "progress: depth {depth}, {} generated, {} distinct ({} fingerprint spills), {} on queue ({on_disk} on disk), {:.1}s",
                     gen_total.load(Ordering::Relaxed),
                     seen.len(),
+                    seen.spills.load(Ordering::Relaxed),
                     frontier.len(),
                     t0.elapsed().as_secs_f64()
                 );

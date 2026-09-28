@@ -24,9 +24,46 @@ fn io<T>(what: &str, r: std::io::Result<T>) -> R<T> {
     r.map_err(|e| format!("{what}: {e}"))
 }
 
+// ---- open files -----------------------------------------------------------
+
+/// A spilled seen set holds one open file per shard (1024), beside the
+/// trace logs and queue files: more than Linux's default soft limit of
+/// 1024 descriptors. Raise the soft limit toward the hard one, as the JVM
+/// does for TLC (HotSpot's MaxFDLimit).
+#[cfg(unix)]
+pub fn raise_fd_limit() {
+    #[repr(C)]
+    struct Rlimit {
+        cur: u64,
+        max: u64,
+    }
+    unsafe extern "C" {
+        fn getrlimit(resource: i32, rlim: *mut Rlimit) -> i32;
+        fn setrlimit(resource: i32, rlim: *const Rlimit) -> i32;
+    }
+    #[cfg(target_os = "linux")]
+    const RLIMIT_NOFILE: i32 = 7;
+    #[cfg(not(target_os = "linux"))]
+    const RLIMIT_NOFILE: i32 = 8;
+    const WANT: u64 = 65536;
+    let mut r = Rlimit { cur: 0, max: 0 };
+    // SAFETY: plain libc calls on a properly laid out struct
+    unsafe {
+        if getrlimit(RLIMIT_NOFILE, &mut r) == 0 && r.cur < WANT {
+            let want = Rlimit { cur: WANT.min(r.max), max: r.max };
+            setrlimit(RLIMIT_NOFILE, &want);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub fn raise_fd_limit() {}
+
 // ---- the fingerprint set ------------------------------------------------
 
 const SHARDS: usize = 1024;
+/// fingerprints per block of a shard's disk run (one read per lookup)
+const BLOCK: usize = 128;
 
 /// Open addressing over u64; 0 marks an empty slot (a fingerprint of 0 is
 /// stored as 1, as TLC folds its own reserved value).
@@ -36,24 +73,17 @@ struct Table {
 }
 
 impl Table {
-    fn insert(&mut self, fp: u64) -> bool {
+    fn insert_new(&mut self, fp: u64) {
         if (self.n + 1) * 4 > self.t.len() * 3 {
             self.grow();
         }
         let mask = self.t.len() - 1;
         let mut i = fp as usize & mask;
-        loop {
-            let x = self.t[i];
-            if x == fp {
-                return false;
-            }
-            if x == 0 {
-                self.t[i] = fp;
-                self.n += 1;
-                return true;
-            }
+        while self.t[i] != 0 {
             i = (i + 1) & mask;
         }
+        self.t[i] = fp;
+        self.n += 1;
     }
     fn contains(&self, fp: u64) -> bool {
         let mask = self.t.len() - 1;
@@ -75,57 +105,256 @@ impl Table {
         self.n = 0;
         for fp in old {
             if fp != 0 {
-                self.insert(fp);
+                self.insert_new(fp);
             }
         }
     }
+    /// Would the next insert grow the table past `max_len` slots?
+    fn full(&self, max_len: usize) -> bool {
+        (self.n + 1) * 4 > self.t.len() * 3 && self.t.len() * 2 > max_len
+    }
+}
+
+/// A shard's fingerprints on disk: one sorted file, and the first
+/// fingerprint of each BLOCK of it.
+#[derive(Default)]
+struct Run {
+    file: Option<(File, PathBuf)>,
+    len: u64,
+    index: Vec<u64>,
+    /// a Bloom filter over the run (~10 bits a fingerprint, 4 probes), so
+    /// a new fingerprint rarely costs a read
+    bloom: Vec<u64>,
+}
+
+/// The filter's bit positions for fp: slices of a remix of it (the shard
+/// and the table already use fp's own high and low bits).
+#[inline]
+fn probes(fp: u64, nbits: u64) -> [u64; 4] {
+    let h = fp.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let g = (fp ^ (fp >> 29)).wrapping_mul(0xBF58_476D_1CE4_E5B9) | 1;
+    let m = nbits - 1;
+    [h & m, h.wrapping_add(g) & m, h.wrapping_add(g.wrapping_mul(2)) & m, h.wrapping_add(g.wrapping_mul(3)) & m]
+}
+
+fn bloom_for(len: u64) -> Vec<u64> {
+    vec![0; ((len * 10).max(64).next_power_of_two() / 64) as usize]
+}
+
+fn bloom_add(b: &mut [u64], fp: u64) {
+    for p in probes(fp, b.len() as u64 * 64) {
+        b[(p / 64) as usize] |= 1 << (p % 64);
+    }
+}
+
+impl Run {
+    fn contains(&self, fp: u64) -> R<bool> {
+        let Some((f, _)) = &self.file else { return Ok(false) };
+        if probes(fp, self.bloom.len() as u64 * 64).iter().any(|p| self.bloom[(p / 64) as usize] & (1 << (p % 64)) == 0) {
+            return Ok(false);
+        }
+        let b = self.index.partition_point(|&x| x <= fp);
+        if b == 0 {
+            return Ok(false);
+        }
+        let start = (b - 1) * BLOCK;
+        let n = BLOCK.min(self.len as usize - start);
+        let mut buf = vec![0u8; n * 8];
+        io("fingerprint file", f.read_exact_at(&mut buf, start as u64 * 8))?;
+        let block: Vec<u64> = buf.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
+        Ok(block.binary_search(&fp).is_ok())
+    }
+
+    /// Adopt a sorted file (a checkpoint's), building its index.
+    fn open(path: PathBuf) -> R<Run> {
+        let f = io("fingerprint file", File::open(&path))?;
+        let len = io("fingerprint file", f.metadata())?.len() / 8;
+        let mut r = BufReader::with_capacity(1 << 20, io("fingerprint file", File::open(&path))?);
+        let mut index = Vec::with_capacity(len as usize / BLOCK + 1);
+        let mut bloom = bloom_for(len);
+        let mut b = [0u8; 8];
+        for i in 0..len {
+            io("fingerprint file", r.read_exact(&mut b))?;
+            let fp = u64::from_le_bytes(b);
+            if i as usize % BLOCK == 0 {
+                index.push(fp);
+            }
+            bloom_add(&mut bloom, fp);
+        }
+        Ok(Run { file: Some((f, path)), len, index, bloom })
+    }
+}
+
+struct Shard {
+    mem: Table,
+    run: Run,
 }
 
 pub struct FpSet {
-    shards: Box<[Mutex<Table>]>,
+    shards: Box<[Mutex<Shard>]>,
+    /// the most slots one shard's table may hold before it spills
+    max_len: usize,
+    dir: PathBuf,
+    /// spills so far (for progress lines)
+    pub spills: AtomicU64,
 }
 
 impl Default for FpSet {
     fn default() -> FpSet {
-        FpSet { shards: (0..SHARDS).map(|_| Mutex::new(Table { t: vec![0; 1024], n: 0 })).collect() }
+        FpSet::new(u64::MAX, PathBuf::new())
     }
 }
 
 impl FpSet {
+    /// `mem_bytes`: what the in-memory tables may use in all; past it,
+    /// shards spill to sorted files in `dir`.
+    pub fn new(mem_bytes: u64, dir: PathBuf) -> FpSet {
+        let per = (mem_bytes / SHARDS as u64 / 8).max(1024);
+        FpSet {
+            shards: (0..SHARDS).map(|_| Mutex::new(Shard { mem: Table { t: vec![0; 1024], n: 0 }, run: Run::default() })).collect(),
+            max_len: per.min(usize::MAX as u64 / 2) as usize,
+            dir,
+            spills: AtomicU64::new(0),
+        }
+    }
+
     #[inline]
-    fn shard(&self, fp: u64) -> &Mutex<Table> {
+    fn shard(&self, fp: u64) -> &Mutex<Shard> {
         // high bits pick the shard; the table itself uses the low bits
         &self.shards[(fp >> 54) as usize % SHARDS]
     }
+
     /// true if fp was new
-    pub fn insert(&self, fp: u64) -> bool {
+    pub fn insert(&self, fp: u64) -> R<bool> {
         let fp = fp.max(1);
-        self.shard(fp).lock().unwrap().insert(fp)
+        let i = (fp >> 54) as usize % SHARDS;
+        let mut s = self.shards[i].lock().unwrap();
+        if s.mem.contains(fp) || s.run.contains(fp)? {
+            return Ok(false);
+        }
+        if s.mem.full(self.max_len) {
+            self.spill(i, &mut s)?;
+        }
+        s.mem.insert_new(fp);
+        Ok(true)
     }
-    pub fn contains(&self, fp: u64) -> bool {
+
+    pub fn contains(&self, fp: u64) -> R<bool> {
         let fp = fp.max(1);
-        self.shard(fp).lock().unwrap().contains(fp)
+        let s = self.shard(fp).lock().unwrap();
+        Ok(s.mem.contains(fp) || s.run.contains(fp)?)
     }
+
     pub fn len(&self) -> usize {
-        self.shards.iter().map(|s| s.lock().unwrap().n).sum()
+        self.shards
+            .iter()
+            .map(|s| {
+                let s = s.lock().unwrap();
+                s.mem.n + s.run.len as usize
+            })
+            .sum()
     }
-    fn save(&self, path: &Path) -> R<()> {
-        let mut w = BufWriter::with_capacity(1 << 20, io("create", File::create(path))?);
-        for s in self.shards.iter() {
-            for &fp in s.lock().unwrap().t.iter().filter(|&&x| x != 0) {
+
+    /// Merge shard i's table into its sorted file: a new file, renamed over
+    /// the old, so a checkpoint's link to the old one stays intact.
+    fn spill(&self, i: usize, s: &mut Shard) -> R<()> {
+        let mut mem: Vec<u64> = s.mem.t.iter().copied().filter(|&x| x != 0).collect();
+        mem.sort_unstable();
+        io("creating the metadir", fs::create_dir_all(&self.dir))?;
+        let path = self.dir.join(format!("fpset-{i}.bin"));
+        let tmp = self.dir.join(format!("fpset-{i}.tmp"));
+        let mut w = BufWriter::with_capacity(1 << 20, io("fingerprint file", File::create(&tmp))?);
+        let mut index = Vec::new();
+        let mut bloom = bloom_for(s.run.len + mem.len() as u64);
+        let mut n = 0u64;
+        let mut put = |fp: u64, w: &mut BufWriter<File>| -> R<()> {
+            if n as usize % BLOCK == 0 {
+                index.push(fp);
+            }
+            bloom_add(&mut bloom, fp);
+            n += 1;
+            io("fingerprint file", w.write_all(&fp.to_le_bytes()))
+        };
+        let mut old = match &s.run.file {
+            Some((_, p)) => Some(BufReader::with_capacity(1 << 20, io("fingerprint file", File::open(p))?)),
+            None => None,
+        };
+        let next_old = |r: &mut Option<BufReader<File>>| -> R<Option<u64>> {
+            let Some(r) = r else { return Ok(None) };
+            let mut b = [0u8; 8];
+            match r.read_exact(&mut b) {
+                Ok(()) => Ok(Some(u64::from_le_bytes(b))),
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
+                Err(e) => Err(format!("fingerprint file: {e}")),
+            }
+        };
+        let mut a = next_old(&mut old)?;
+        let mut mi = 0;
+        loop {
+            match (a, mem.get(mi)) {
+                (Some(x), Some(&y)) if x < y => {
+                    put(x, &mut w)?;
+                    a = next_old(&mut old)?;
+                }
+                (Some(x), None) => {
+                    put(x, &mut w)?;
+                    a = next_old(&mut old)?;
+                }
+                (_, Some(&y)) => {
+                    put(y, &mut w)?;
+                    mi += 1;
+                }
+                (None, None) => break,
+            }
+        }
+        io("fingerprint file", w.flush())?;
+        drop(w);
+        io("fingerprint file", fs::rename(&tmp, &path))?;
+        let f = io("fingerprint file", File::open(&path))?;
+        s.run = Run { file: Some((f, path)), len: n, index, bloom };
+        s.mem.t.iter_mut().for_each(|x| *x = 0);
+        s.mem.n = 0;
+        self.spills.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Into a checkpoint directory: each shard's disk run hard-linked,
+    /// the in-memory fingerprints written out.
+    fn save(&self, dir: &Path) -> R<()> {
+        let mut w = BufWriter::with_capacity(1 << 20, io("create", File::create(dir.join("fps.bin")))?);
+        for (i, s) in self.shards.iter().enumerate() {
+            let s = s.lock().unwrap();
+            for &fp in s.mem.t.iter().filter(|&&x| x != 0) {
                 io("write", w.write_all(&fp.to_le_bytes()))?;
+            }
+            if let Some((f, p)) = &s.run.file {
+                io("sync", f.sync_all())?;
+                io("checkpoint", fs::hard_link(p, dir.join(format!("fpset-{i}.bin"))))?;
             }
         }
         io("write", w.flush())?;
         io("sync", w.get_ref().sync_all())
     }
-    fn load(&self, path: &Path) -> R<()> {
-        let mut r = BufReader::with_capacity(1 << 20, io("open", File::open(path))?);
+
+    fn load(&self, dir: &Path) -> R<()> {
+        for (i, s) in self.shards.iter().enumerate() {
+            let src = dir.join(format!("fpset-{i}.bin"));
+            if src.exists() {
+                // adopt a link of the checkpoint's run; a later spill
+                // replaces the link, never the checkpoint's file
+                io("creating the metadir", fs::create_dir_all(&self.dir))?;
+                let own = self.dir.join(format!("fpset-{i}.bin"));
+                let _ = fs::remove_file(&own);
+                io("checkpoint", fs::hard_link(&src, &own))?;
+                s.lock().unwrap().run = Run::open(own)?;
+            }
+        }
+        let mut r = BufReader::with_capacity(1 << 20, io("open", File::open(dir.join("fps.bin")))?);
         let mut b = [0u8; 8];
         loop {
             match r.read_exact(&mut b) {
                 Ok(()) => {
-                    self.insert(u64::from_le_bytes(b));
+                    self.insert(u64::from_le_bytes(b))?;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
                 Err(e) => return Err(format!("reading fingerprints: {e}")),
@@ -383,6 +612,12 @@ pub struct LevelWriter<'a> {
     name: String,
     budget: u64,
     mem_bytes: AtomicU64,
+    /// a batch has gone to disk: every later one follows it, so the level
+    /// is read back (memory, then blocks) in the order it was written —
+    /// under SYMMETRY which state stands for an orbit depends on that
+    /// order, and a small last batch slipping back under the budget
+    /// changed TLC-exact counts (found by flint-27 on ForgeSyncRewind)
+    spilled: std::sync::atomic::AtomicBool,
     mem: Mutex<Vec<(u64, State)>>,
     disk: Mutex<(Option<(File, PathBuf)>, u64, Vec<Block>)>,
 }
@@ -394,6 +629,7 @@ impl<'a> LevelWriter<'a> {
             name: format!("queue-{depth}.bin"),
             budget,
             mem_bytes: AtomicU64::new(0),
+            spilled: std::sync::atomic::AtomicBool::new(false),
             mem: Mutex::new(Vec::new()),
             disk: Mutex::new((None, 0, Vec::new())),
         }
@@ -409,11 +645,14 @@ impl<'a> LevelWriter<'a> {
         enc.clear();
         encode_states(&batch[..1], enc);
         let est = enc.len() as u64 * 5 * batch.len() as u64;
-        if self.mem_bytes.fetch_add(est, Ordering::Relaxed) + est <= self.budget {
-            self.mem.lock().unwrap().append(batch);
-            return Ok(());
+        if !self.spilled.load(Ordering::Relaxed) {
+            if self.mem_bytes.fetch_add(est, Ordering::Relaxed) + est <= self.budget {
+                self.mem.lock().unwrap().append(batch);
+                return Ok(());
+            }
+            self.mem_bytes.fetch_sub(est, Ordering::Relaxed);
+            self.spilled.store(true, Ordering::Relaxed);
         }
-        self.mem_bytes.fetch_sub(est, Ordering::Relaxed);
         enc.clear();
         encode_states(batch, enc);
         let mut d = self.disk.lock().unwrap();
@@ -449,7 +688,7 @@ pub fn checkpoint(meta: &Meta, source_hash: u64, fps: &FpSet, trace: &Trace, dep
     let tmp = meta.path("ckpt.tmp")?;
     let _ = fs::remove_dir_all(&tmp);
     io("checkpoint", fs::create_dir_all(&tmp))?;
-    fps.save(&tmp.join("fps.bin"))?;
+    fps.save(&tmp)?;
     let mut lens = Vec::new();
     for l in &trace.logs {
         let mut l = l.lock().unwrap();
@@ -528,7 +767,7 @@ pub fn recover(meta: &Meta, source_hash: u64, nvars: usize, fps: &FpSet, trace: 
         }
     }
     *meta.made.lock().unwrap() = true;
-    fps.load(&ck.join("fps.bin"))?;
+    fps.load(&ck)?;
     if trace.logs.len() < lens.len() {
         let cap = trace.logs[0].lock().unwrap().cap;
         for slot in trace.logs.len()..lens.len() {

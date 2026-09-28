@@ -34,11 +34,17 @@ with open(OUT, "w") as f:
             continue
         t0 = time.time()
         try:
-            p = subprocess.run([BIN, "-workers", "8", "-config", cfg, mod + ".tla"], cwd=f"{ROOT}/{d}",
+            # a run killed at the timeout leaves its spilled queue behind:
+            # give each run its own metadir and always remove it
+            meta = f"{ROOT}/formal/tlc-rs/gen/sweep-meta"
+            p = subprocess.run([BIN, "-workers", "8", "-metadir", meta, "-config", cfg, mod + ".tla"], cwd=f"{ROOT}/{d}",
                                capture_output=True, text=True, timeout=TIMEOUT)
             out, rc = p.stdout + p.stderr, p.returncode
         except subprocess.TimeoutExpired:
             out, rc = "TIMEOUT", -1
+        finally:
+            import shutil
+            shutil.rmtree(f"{ROOT}/formal/tlc-rs/gen/sweep-meta", ignore_errors=True)
         secs = time.time() - t0
         m = re.search(r"(\d+) distinct states found", out)
         distinct = int(m.group(1)) if m else None

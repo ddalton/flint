@@ -1,13 +1,14 @@
 //! The command line, shared by `tlc-rs` and every generated checker.
 //!
 //!   tlc-rs [-workers N] [-engine interp|closure] [-codegen DIR] [-config X.cfg]
-//!          [-metadir DIR] [-checkpoint MIN] [-recover DIR] [-queue-mem MB] X.tla
+//!          [-metadir DIR] [-checkpoint MIN] [-recover DIR] [-queue-mem MB] [-fpmem MB] X.tla
 //!
 //! Disk: a BFS level beyond `-queue-mem` (default 64 MB, estimated)
 //! spills to the metadir (default `states/<spec>-<time>` beside the spec),
 //! and every `-checkpoint` minutes (default 30; 0 = never) the search is
 //! checkpointed there at a level boundary. `-recover DIR` resumes from
-//! that checkpoint. A finished run removes what it wrote.
+//! that checkpoint. Past `-fpmem` (default 1024 MB) the seen set's shards
+//! spill to sorted files there too. A finished run removes what it wrote.
 //!
 //! Invariants, state constraints, deadlock, SYMMETRY, VIEW, and temporal
 //! PROPERTYs in the shapes the gates use (`[][A]_v`, `P ~> Q`,
@@ -148,6 +149,8 @@ fn run(generated: Option<Generated>) -> Result<bool, String> {
     let (mut cfg_path, mut spec_path, mut engine, mut codegen_dir) = (None, None, "interp".to_string(), None);
     let mut var_order: Option<String> = None;
     let (mut metadir, mut recover, mut checkpoint_min, mut queue_mb): (Option<PathBuf>, bool, f64, u64) = (None, false, 30.0, 64);
+    // TLCRS_FPMEM_MB: the default -fpmem, for forcing spills in tests
+    let mut fp_mb: u64 = std::env::var("TLCRS_FPMEM_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(1024);
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -182,6 +185,10 @@ fn run(generated: Option<Generated>) -> Result<bool, String> {
             "-checkpoint" => {
                 i += 1;
                 checkpoint_min = args[i].parse().map_err(|_| "bad -checkpoint (minutes)")?;
+            }
+            "-fpmem" => {
+                i += 1;
+                fp_mb = args[i].parse().map_err(|_| "bad -fpmem (MB)")?;
             }
             "-queue-mem" => {
                 i += 1;
@@ -281,6 +288,7 @@ fn run(generated: Option<Generated>) -> Result<bool, String> {
         }),
         checkpoint_secs: (checkpoint_min * 60.0) as u64,
         queue_mem: queue_mb << 20,
+        fp_mem: fp_mb << 20,
         recover,
         source_hash: l.source_hash,
     };
