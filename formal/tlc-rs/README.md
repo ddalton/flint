@@ -6,7 +6,7 @@ on the 8-core (4 performance + 4 efficiency), 8 GiB Mac, against TLC v1.7.4
 run the way the gates run it.
 
     cargo build --release --offline
-    target/release/tlc-rs [-workers N] [-engine interp|closure] [-var-order v1,v2,..] [-config X.cfg]
+    target/release/tlc-rs [-workers N] [-engine interp|closure] [-var-order v1,v2,..] [-print-var-order] [-config X.cfg]
                           [-metadir DIR] [-checkpoint MIN] [-recover DIR] [-queue-mem MB] [-fpmem MB] X.tla
     target/release/tlc-rs -codegen DIR [-config X.cfg] X.tla   # then: cd DIR && cargo build --release
 
@@ -137,12 +137,29 @@ v1.7.4 source and confirmed against TLC's own tokens:
    value); a model value is below every other kind.
 4. Variables are compared in **TLC's variable order, which is a
    `java.util.Hashtable` iteration order** over SANY's symbol table
-   (`Context.getVariableDecls`), not declaration order. tlc-rs cannot
-   derive it yet; pass it with `-var-order` (the first state of a TLC
-   `-dump` lists it).
+   (`Context.getVariableDecls`), not declaration order. tlc-rs derives it
+   (`varorder.rs`): it rebuilds the root module's SANY context — SANY's 72
+   built-in operators first (every context starts as a copy of them),
+   then each EXTENDS module's non-local symbols in the order they entered
+   its context, then the module's own declarations in source order, a
+   named INSTANCE adding `I!D` in the instanced module's table order and
+   then `I` — simulates `java.util.Hashtable` exactly (capacity 11, load
+   0.75, rehash to 2n+1, new entries at the head of their bucket,
+   `elements()` from the last bucket down, `String.hashCode` keys), and
+   reverses the result, as `ModuleNode.getVariableDecls` does. Checked
+   against TLC's own order on all 23 root modules of the gates (including
+   LeanRefine's INSTANCE and the pending ForgeSyncRewind): 23/23. The
+   context was compared entry by entry with SANY's own
+   (`results/CtxDump.java`). `-var-order` still overrides;
+   `-print-var-order` prints the derived one.
 
 With all four, the single-worker count is exactly TLC's 246,151, and none
-of TLC's 246,151 dumped states is merged by tlc-rs. Under SYMMETRY+VIEW the
+of TLC's 246,151 dumped states is merged by tlc-rs. With the derived
+order (no `-var-order`), all 9 strict SYMMETRY+VIEW gate entries with a
+1-worker TLC count match it exactly (LeanSubtreeTakeover 566,405 ...
+LeanBarrierLeaseSyncOverlayHolds 455,989), and so does the pending
+ForgeSyncRewindProbeResurrected (3,172,931); in declaration order
+ScopedSync gave 241,719. Under SYMMETRY+VIEW the
 count depends on exploration order at more than one worker, **in TLC too**
 (246,151 / 246,247 at 8 workers), so only 1-worker counts are reproducible.
 

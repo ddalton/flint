@@ -73,6 +73,16 @@ pub struct Instance {
     pub subs: Vec<(String, Ast)>,
 }
 
+/// A module-level declaration, in source order, as SANY adds it to the
+/// module's symbol table (see `varorder`).
+#[derive(Debug, Clone)]
+pub enum Decl {
+    /// a constant, variable, definition or RECURSIVE declaration
+    Sym { name: String, local: bool, var: bool },
+    /// `name == INSTANCE module` (name empty for a bare INSTANCE)
+    Instance { name: String, module: String, local: bool },
+}
+
 #[derive(Default, Debug)]
 pub struct Module {
     pub name: String,
@@ -82,4 +92,5 @@ pub struct Module {
     pub defs: Vec<Rc<Def>>,
     pub assumes: Vec<Ast>,
     pub instances: Vec<Instance>,
+    pub decls: Vec<Decl>,
 }

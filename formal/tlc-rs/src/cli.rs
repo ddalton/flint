@@ -17,6 +17,7 @@
 
 use crate::eval::{Engine, Program};
 use crate::{ast, check, closure, codegen, compile, lexer, parser};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -50,7 +51,14 @@ struct InternOrder {
     strings: Vec<String>,
 }
 
-fn load(dir: &Path, name: &str, out: &mut Vec<ast::Module>, hash: &mut u64, order: &mut InternOrder) -> Result<(), String> {
+fn load(
+    dir: &Path,
+    name: &str,
+    out: &mut Vec<ast::Module>,
+    hash: &mut u64,
+    order: &mut InternOrder,
+    reg: &mut HashMap<String, crate::varorder::ModuleDecls>,
+) -> Result<(), String> {
     if out.iter().any(|m| m.name == name) || STANDARD.contains(&name) {
         return Ok(());
     }
@@ -70,14 +78,15 @@ fn load(dir: &Path, name: &str, out: &mut Vec<ast::Module>, hash: &mut u64, orde
         })
         .collect();
     let mut m = parser::Parser::new(toks).module().map_err(|e| format!("{}: {e}", path.display()))?;
+    reg.insert(m.name.clone(), crate::varorder::ModuleDecls { extends: m.extends.clone(), decls: m.decls.clone() });
     for e in m.extends.clone() {
-        load(dir, &e, out, hash, order)?;
+        load(dir, &e, out, hash, order, reg)?;
     }
     // An instantiated module is loaded apart (its names are not this
     // module's) and brought in as renamed, substituted definitions.
     for inst in m.instances.clone() {
         let mut group = Vec::new();
-        load(dir, &inst.module, &mut group, hash, order)?;
+        load(dir, &inst.module, &mut group, hash, order, reg)?;
         let x = crate::instance::expand(&inst, &group).map_err(|e| format!("{}: {e}", path.display()))?;
         m.defs.extend(x.defs);
         m.assumes.extend(x.assumes);
@@ -89,6 +98,8 @@ fn load(dir: &Path, name: &str, out: &mut Vec<ast::Module>, hash: &mut u64, orde
 
 pub struct Loaded {
     pub name: String,
+    /// every module read, as SANY would see it: for TLC's variable order
+    pub decls: HashMap<String, crate::varorder::ModuleDecls>,
     pub prog: Program,
     pub source_hash: u64,
     pub cfg_path: PathBuf,
@@ -114,7 +125,8 @@ pub fn load_spec(spec_path: &Path, cfg_path: &Path) -> Result<Loaded, String> {
     cfg.constants.iter().for_each(|(_, v)| cfg_names(v, &mut order));
     let mut modules = Vec::new();
     let mut spec_order = InternOrder::default();
-    load(&dir, &name, &mut modules, &mut hash, &mut spec_order)?;
+    let mut reg = HashMap::new();
+    load(&dir, &name, &mut modules, &mut hash, &mut spec_order, &mut reg)?;
     order.extend(spec_order.idents);
     order.extend(spec_order.strings);
     fnv(&mut hash, cfg_src.as_bytes());
@@ -140,7 +152,7 @@ pub fn load_spec(spec_path: &Path, cfg_path: &Path) -> Result<Loaded, String> {
     let mut prog = c.finish(init, next, invariants, constraints, &assumes, cfg.check_deadlock, symmetry, view)?;
     prog.properties = properties;
     prog.fairness = fairness;
-    Ok(Loaded { name, prog, source_hash: hash, cfg_path: cfg_path.into(), spec_path: spec_path.into() })
+    Ok(Loaded { name, decls: reg, prog, source_hash: hash, cfg_path: cfg_path.into(), spec_path: spec_path.into() })
 }
 
 fn run(generated: Option<Generated>) -> Result<bool, String> {
@@ -148,6 +160,7 @@ fn run(generated: Option<Generated>) -> Result<bool, String> {
     let mut workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let (mut cfg_path, mut spec_path, mut engine, mut codegen_dir) = (None, None, "interp".to_string(), None);
     let mut var_order: Option<String> = None;
+    let mut print_var_order = false;
     let (mut metadir, mut recover, mut checkpoint_min, mut queue_mb): (Option<PathBuf>, bool, f64, u64) = (None, false, 30.0, 64);
     // TLCRS_FPMEM_MB: the default -fpmem, for forcing spills in tests
     let mut fp_mb: u64 = std::env::var("TLCRS_FPMEM_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(1024);
@@ -169,6 +182,7 @@ fn run(generated: Option<Generated>) -> Result<bool, String> {
                 i += 1;
                 engine = args[i].clone();
             }
+            "-print-var-order" => print_var_order = true,
             "-var-order" => {
                 i += 1;
                 var_order = Some(args[i].clone());
@@ -218,6 +232,22 @@ fn run(generated: Option<Generated>) -> Result<bool, String> {
             return Err("-var-order must list every variable once".into());
         }
         l.prog.cmp_order = idx;
+    } else if !l.prog.symmetry.is_empty() || print_var_order {
+        // TLC's order, derived: see varorder.rs
+        match crate::varorder::tlc_order(&l.name, &l.decls) {
+            Ok(names) if names.len() == l.prog.vars.len() => {
+                l.prog.cmp_order = names.iter().map(|n| l.prog.vars.iter().position(|v| v == n).unwrap()).collect();
+            }
+            Ok(names) => return Err(format!("variable-order model found {} variables, the spec has {}", names.len(), l.prog.vars.len())),
+            Err(e) => {
+                eprintln!("tlc-rs: TLC's variable order is unknown ({e}); declaration order is used, so SYMMETRY counts may differ from TLC's. Pass -var-order.");
+            }
+        }
+    }
+    if print_var_order {
+        let names: Vec<&str> = l.prog.cmp_order.iter().map(|&i| l.prog.vars[i].as_str()).collect();
+        println!("{}", names.join(","));
+        return Ok(true);
     }
     let prog = &l.prog;
 

@@ -14,6 +14,7 @@ pub mod parser;
 pub mod store;
 pub mod symkey;
 pub mod value;
+pub mod varorder;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;

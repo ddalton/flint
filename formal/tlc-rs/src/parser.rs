@@ -130,8 +130,12 @@ impl Parser {
         if matches!(self.raw().tok, Tok::Sep) {
             self.bump();
         }
+        // LOCAL applies to the next declaration
+        let mut local = false;
         loop {
             let t = self.raw().tok.clone();
+            let was_local = std::mem::take(&mut local);
+            let sym = |name: &str, var: bool| crate::ast::Decl::Sym { name: name.to_string(), local: was_local, var };
             match t {
                 Tok::End | Tok::Eof => break,
                 Tok::Sep => {
@@ -145,12 +149,15 @@ impl Parser {
                     "CONSTANT" | "CONSTANTS" => {
                         self.bump();
                         for c in self.decl_list()? {
+                            m.decls.push(sym(&c, false));
                             m.constants.push(c);
                         }
                     }
                     "VARIABLE" | "VARIABLES" => {
                         self.bump();
-                        m.variables.extend(self.ident_list()?);
+                        let vs = self.ident_list()?;
+                        m.decls.extend(vs.iter().map(|v| sym(v, true)));
+                        m.variables.extend(vs);
                     }
                     "ASSUME" => {
                         self.bump();
@@ -162,24 +169,33 @@ impl Parser {
                     }
                     "RECURSIVE" => {
                         self.bump();
-                        self.decl_list()?;
+                        for r in self.decl_list()? {
+                            m.decls.push(sym(&r, false));
+                        }
                     }
                     "LOCAL" => {
                         self.bump();
+                        local = true;
                     }
                     "INSTANCE" => {
                         self.bump();
                         let inst = self.instance(String::new())?;
+                        m.decls.push(crate::ast::Decl::Instance { name: String::new(), module: inst.module.clone(), local: was_local });
                         m.instances.push(inst);
                     }
                     _ if matches!(self.peek_at(1), Tok::Op("==")) && matches!(self.peek_at(2), Tok::Ident(k) if k == "INSTANCE") => {
                         let name = self.ident()?;
                         self.bump();
                         self.bump();
-                        let inst = self.instance(name)?;
+                        let inst = self.instance(name.clone())?;
+                        m.decls.push(crate::ast::Decl::Instance { name, module: inst.module.clone(), local: was_local });
                         m.instances.push(inst);
                     }
-                    _ => m.defs.push(self.def()?),
+                    _ => {
+                        let d = self.def()?;
+                        m.decls.push(sym(&d.name, false));
+                        m.defs.push(d);
+                    }
                 },
                 _ => return self.err("unexpected token at module level"),
             }
