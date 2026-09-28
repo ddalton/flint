@@ -577,6 +577,22 @@ port are still wanted for capacity and failure isolation.
    hub filehandle (`NFS4ERR_STALE`, the leaked-filehandle bypass of
    §7). Drill control: the same client without the allowlist entry must
    see the workspace.
+   **Core DONE 2026-09-28** (`src/nfs_proxy/`, bin `flint-nfs-proxy`):
+   `route.rs` (the router and the three allowlist points), `wire.rs`
+   (the codec toward the hubs and the reply splice), `pseudo.rs` (the
+   root, with READDIR cookies stable across creates and deletes),
+   `backend.rs` (xid-multiplexed hub connections, one backend client per
+   (client, hub), one backend session per (downstream session, hub),
+   slot s = slot s), `table.rs` (the rows and per-connection views from
+   a static config), `server.rs` (sessions through the crate's own
+   dispatcher; retransmissions re-sent with the same backend seqid).
+   Mutation controls bite on every load-bearing check. **End to end on a
+   real kernel, 14/14** with its allowlist control failing exactly the
+   two allowlist checks (census Part 4). Found on the way: the hub's
+   LOOKUPP result carried LOOKUP's opcode (fixed), and D3 (census Part
+   4, open). **Left for step 3:** DESTROY_SESSION/_CLIENTID on the
+   backends, keepalive, the wake on a refused connection (today:
+   `NFS4ERR_DELAY`), a retransmission across a hub re-establish.
 2b. RPC-with-TLS mTLS at the proxy (§6a): the `AUTH_TLS` NULL probe,
    STARTTLS, rustls with a required client certificate, the URI SAN as
    the identity, hot reload of the cert-manager files. A connection

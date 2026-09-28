@@ -238,3 +238,37 @@ proxy**. The §4 hibernate row is withdrawn. What replaces it:
    **without** the SEQUENCE flag. Whether Linux keeps that recovery
    per-state is **unmeasured**. It is the step-3 drill, with this
    file's four arms as its template.
+
+## Part 4 — step 2 end to end, and hub defect D3 (2026-09-28, box, Linux 6.12)
+
+`tests/lima/nfs-proxy-census/step2-e2e.sh` puts two real hubs (H1 + H2
+on) behind `flint-nfs-proxy` and mounts the proxy's `/` with the kernel
+client. Evidence: `results-box-6.12-step2/`.
+
+- **Proxied run, 14/14:** the root lists exactly the allowed workspaces;
+  writes land in each hub's own export dir; a read-back, 200 creates, a
+  byte-range lock and a byte-identical 64 MiB round trip; each workspace
+  is its own filesystem to the client (H1: distinct `st_dev`); the
+  cross-workspace `COPY` is answered `XDEV` by the proxy and reaches no
+  hub, and `mv` then copies + unlinks; a workspace outside the allowlist
+  is `ENOENT`; **the second-target counter stays at 0** (design §3); every
+  downstream `SEQUENCE` reply carries `sr_status_flags = 0`.
+- **Allowlist control (`ALLOW='"ws-*"'`), 12/14:** exactly the two
+  allowlist checks fail (`/` lists `ws-hidden`; looking it up is no
+  longer `ENOENT`). The allowlist checks reach the mechanism.
+
+### D3 — the hub refuses to have its own ACL set back (control: no proxy)
+
+`mv` across workspaces printed `preserving permissions: Input/output
+error`. The reply is well-formed (`SETATTR` → `NFS4ERR_ATTRNOTSUPP`,
+empty `attrsset`). **The control arm, `step2-control-direct.sh`, shows
+the same EIO between two DIRECT hub mounts**, and a bare
+`setxattr(system.nfs4_acl)` does too. So it is the hub's:
+`SUPPORTED_ATTRS` advertises `FATTR4_ACL`, GETATTR answers an empty ACL,
+and SETATTR of `FATTR4_ACL` (`fileops.rs`, the settable-attrs decoder)
+is `ATTRNOTSUPP`, which Linux maps to EIO. Every `mv`/`cp -a` into a
+flint mount from another NFS mount reports an error (the data still
+moves). Not fixed yet: either stop advertising `FATTR4_ACL`, or accept
+an ACL equal to what GETATTR reports (the empty one) as a no-op. Why
+`FATTR4_ACL` was added to the advertisement (`e09e0d17`, "critical
+missing attributes") must be read before choosing.

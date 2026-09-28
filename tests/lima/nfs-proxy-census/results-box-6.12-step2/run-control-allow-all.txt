@@ -1,0 +1,31 @@
+hub ws-a server id 7134290039568533671, ws-b 8471805505913382037
+PASS mount
+ls /: ws-a ws-b ws-hidden 
+FAIL root lists exactly the allowed workspaces
+PASS ws-a write landed in hub A's export
+PASS ws-b write landed in hub B's export
+PASS read back through the proxy
+st_dev: / 61, ws-a 62, ws-b 103
+PASS each workspace is its own filesystem to the client (H1)
+PASS 200 creates in ws-a
+cross rename: mv: preserving permissions for ‘/mnt/px/ws-b/g’: Input/output error
+PASS a cross-workspace mv moves the data (EXDEV → copy + unlink)
+ls ws-hidden: 
+FAIL the hidden workspace is ENOENT, like an absent one
+lock/unlock ok
+PASS a byte-range lock through the proxy
+PASS 64 MiB round trip is byte-identical
+PASS umount
+COPY→XDEV replies from the proxy: 1; COPY calls reaching a hub: 0
+PASS the proxy answered the cross-workspace COPY itself (XDEV), no hub saw it
+PASS second-target refusals = 0 (design §3)
+proxy warnings/errors:
+      1 2026-09-28T14:51:29.518188Z  WARN spdk_csi_driver::nfs::v4::dispatcher: CREATE_SESSION: client requested CONN_BACK_CHAN but no back-channel writer is available for session SessionId([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0
+      1 2026-09-28T14:51:30.709368Z  WARN spdk_csi_driver::nfs_proxy::server: hub 0x1: hub down: 127.0.0.1:20493: Connection refused (os error 111)
+      1 2026-09-28T14:51:30.810153Z  WARN spdk_csi_driver::nfs_proxy::server: hub 0x1: hub down: 127.0.0.1:20493: Connection refused (os error 111)
+      1 2026-09-28T14:51:31.018191Z  WARN spdk_csi_driver::nfs_proxy::server: hub 0x1: hub down: 127.0.0.1:20493: Connection refused (os error 111)
+      1 2026-09-28T14:51:31.426209Z  WARN spdk_csi_driver::nfs_proxy::server: hub 0x1: hub down: 127.0.0.1:20493: Connection refused (os error 111)
+      1 2026-09-28T14:51:32.250196Z  WARN spdk_csi_driver::nfs_proxy::server: hub 0x1: hub down: 127.0.0.1:20493: Connection refused (os error 111)
+      1 2026-09-28T14:51:33.914117Z  WARN spdk_csi_driver::nfs_proxy::server: hub 0x1: hub down: 127.0.0.1:20493: Connection refused (os error 111)
+      1 2026-09-28T14:51:37.178080Z  WARN spdk_csi_driver::nfs_proxy::server: hub 0x1: hub down: 127.0.0.1:20493: Connection refused (os error 111)
+RESULT: 12 passed, 2 failed

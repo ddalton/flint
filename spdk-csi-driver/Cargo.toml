@@ -40,6 +40,13 @@ path = "src/bin/flint_lite_operator.rs"
 name = "flint-hub-gateway"
 path = "src/bin/flint_hub_gateway.rs"
 
+# flint-nfs-proxy: many lite hubs behind one NFSv4.1 port
+# (docs/plans/flint-lite-nfs-proxy-design.md). Ships in the
+# flint-lite-operator image beside the gateway.
+[[bin]]
+name = "flint-nfs-proxy"
+path = "src/bin/flint_nfs_proxy.rs"
+
 # flint-forge-operator: the FlintRepo controller. Named explicitly, like
 # every other binary here, because a file-stem-derived target is
 # `flint_forge_operator` with underscores — and the staging script, the

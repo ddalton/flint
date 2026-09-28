@@ -1,0 +1,5 @@
+direct cross-mount mv: mv: preserving permissions for ‘/mnt/dB/g’: Input/output error
+exit=0
+setfacl-free chmod on B: exit=0
+nfs4_acl xattr copy on B: OSError: [Errno 5] Input/output error: '/mnt/dB/h'
+exit=0
