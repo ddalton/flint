@@ -359,13 +359,19 @@ pub fn mds_yaml(share: &FlintShare, d: &RenderDefaults) -> String {
         }
     }
 
+    // `spec.readOnly` becomes the export's `ro` option, which is what
+    // the server reads (`ExportConfig::read_only` → the dispatcher's
+    // NFS4ERR_ROFS refusal, F70). The server parses this at boot, so
+    // the line is part of the rollout checksum on purpose: flipping the
+    // knob must roll the hub.
+    let mode = if s.read_only() { "ro" } else { "rw" };
     let _ = writeln!(y, "exports:");
     let _ = writeln!(y, "  - path: {DATA_MOUNT}/exports");
     let _ = writeln!(y, "    fsid: 1");
-    let _ = writeln!(y, "    options: [rw, sync, no_subtree_check]");
+    let _ = writeln!(y, "    options: [{mode}, sync, no_subtree_check]");
     let _ = writeln!(y, "    access:");
     let _ = writeln!(y, "      - network: 0.0.0.0/0");
-    let _ = writeln!(y, "        permissions: rw");
+    let _ = writeln!(y, "        permissions: {mode}");
     let _ = writeln!(y, "logging:");
     let _ = writeln!(y, "  level: {}", yaml_str(&log));
     let _ = writeln!(y, "  format: text");
@@ -1370,6 +1376,7 @@ mod tests {
             credentials_secret_ref: None,
             import_on_start: None,
             adopt_data: None,
+            read_only: None,
             persistence: PersistenceSpec {
                 size: "20Gi".into(),
                 storage_class_name: None,
@@ -1490,6 +1497,36 @@ mod tests {
         assert_eq!(t.knobs.flush_floor_secs, 60, "unset knob took the server default");
         assert_eq!(t.bucket, "my-team-flint");
         assert_eq!(t.key_prefix, "tenant-a/");
+    }
+
+    /// `spec.readOnly` reaches the server as the export option its own
+    /// reader consumes (`ExportConfig::read_only`), and only then: false
+    /// and absent both render the shipped `rw` shape. Toggling it changes
+    /// the rollout checksum, because the server reads export options at
+    /// boot and a knob that does not roll the hub does nothing until an
+    /// unrelated restart.
+    #[test]
+    fn read_only_renders_ro_for_the_server_to_read_and_rolls_the_hub() {
+        let d = RenderDefaults::default();
+        let ro = mds_yaml(&share("ro", FlintShareSpec { read_only: Some(true), ..base_spec() }), &d);
+        let rw = mds_yaml(&share("rw", FlintShareSpec { read_only: Some(false), ..base_spec() }), &d);
+        let absent = mds_yaml(&share("plain", base_spec()), &d);
+        assert!(ro.contains("options: [ro, sync, no_subtree_check]"), "{ro}");
+        assert!(ro.contains("permissions: ro"), "{ro}");
+        for (name, y) in [("false", &rw), ("absent", &absent)] {
+            assert!(y.contains("options: [rw, sync, no_subtree_check]"), "{name}:\n{y}");
+            assert!(y.contains("permissions: rw"), "{name}:\n{y}");
+        }
+        // The server's own reader is what the knob exists to reach.
+        let server_reads = |y: &str| -> bool {
+            let cfg: crate::pnfs::config::PnfsConfig = serde_yaml::from_str(y).unwrap();
+            cfg.exports[0].read_only().expect("an unambiguous export")
+        };
+        assert!(server_reads(&ro));
+        assert!(!server_reads(&rw));
+        assert!(!server_reads(&absent));
+        assert_ne!(rollout_checksum(&ro), rollout_checksum(&rw), "toggling readOnly must roll the hub");
+        assert_eq!(rollout_checksum(&rw), rollout_checksum(&absent), "false and absent are the same hub");
     }
 
     /// A tier-off share is a share: no `tier:` block at all, and no

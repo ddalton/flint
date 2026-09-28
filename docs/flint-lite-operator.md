@@ -616,6 +616,31 @@ In order of what to look at:
    request will bring it back) versus `Suspended` (an admin set
    `spec.lifecycle`, and a wake request will NOT override it).
 
+## Read-only shares
+
+`spec.readOnly: true` makes the hub refuse every mutating NFS operation
+with `NFS4ERR_ROFS` — WRITE, SETATTR, CREATE, REMOVE, RENAME, LINK, an
+OPEN for write or create, a write lock — whatever the client mounted
+with. The server enforces it; nobody is asked to mount `ro`. A pod that
+forgets `readOnly: true` on its volume, a hand mount against the
+Service, and a client in another cluster are refused alike. Reads,
+lookups and the release operations (CLOSE, LOCKU, ...) are untouched,
+and ACCESS stops granting the write bits, so `open(2)` for write fails
+with `EROFS` on the client before anything is sent.
+
+```yaml
+spec:
+  readOnly: true
+```
+
+The tier still hydrates from the bucket on a read-only share; there is
+simply nothing to flush. The rendered config carries it as
+`options: [ro, sync, no_subtree_check]` on the export, which the server
+reads at boot — so flipping the field rolls the hub, like any other
+setting (see [Changing settings](#changing-settings-and-what-actually-restarts-the-hub)).
+Uses: a published dataset many agents read, a project frozen while its
+bucket moves, a satellite that must never write back.
+
 ## Locking down the network
 
 Once shares are reachable across clusters, "8080 is never on the

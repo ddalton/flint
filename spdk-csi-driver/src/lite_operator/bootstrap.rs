@@ -59,7 +59,10 @@ pub const SCHEMA_VERSION_ANNOTATION: &str = "chert.us/crd-schema-version";
 ///   is an ENUM in the schema, so an operator on `4` would refuse to
 ///   store it.
 /// - `6` — `status.conflictWith` and the CONFLICT printer column.
-pub const SCHEMA_VERSION: u32 = 6;
+/// - `7` — `spec.readOnly` (renders `ro` into the export options; the
+///   hub refuses every mutating op). An operator on `6` would prune it
+///   and serve the share read-write.
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// The CRD this binary would install, annotated with its schema
 /// version. Identical to what `crdgen` prints and what the chart
@@ -251,5 +254,34 @@ mod tests {
             decide(Some(&crd_at(Some("not-a-number"))), 1),
             CrdDecision::AdoptUnstamped
         );
+    }
+
+    /// The chart ships `crds/flintshares.yaml` for install-time bootstrap
+    /// and the release gate diffs it against `crdgen` — at RELEASE time.
+    /// This is the same check at `cargo test` time: a spec field added
+    /// without regenerating the file fails here, not at the push. (Seen
+    /// failing on the stale file before `spec.readOnly` was regenerated
+    /// into it, 2026-09-28.)
+    #[test]
+    fn the_shipped_crd_is_what_this_binary_would_install() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../flint-lite-operator-chart/crds/flintshares.yaml"
+        );
+        let shipped = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("cannot read the shipped CRD at {path}: {e}"));
+        let generated = serde_yaml::to_string(&desired_crd()).expect("CRD serializes");
+        if shipped != generated {
+            let first_diff = shipped
+                .lines()
+                .zip(generated.lines())
+                .enumerate()
+                .find(|(_, (a, b))| a != b)
+                .map(|(i, (a, b))| format!("line {}: shipped {a:?} vs generated {b:?}", i + 1))
+                .unwrap_or_else(|| "one file is a prefix of the other".to_string());
+            panic!(
+                "{path} is STALE ({first_diff}) — regenerate with:\n  cargo run --bin crdgen -- share > {path}"
+            );
+        }
     }
 }

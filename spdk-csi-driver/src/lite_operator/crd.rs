@@ -193,6 +193,17 @@ pub struct FlintShareSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adopt_data: Option<bool>,
 
+    /// The share is read-only: the hub answers NFS4ERR_ROFS to every
+    /// mutating operation (WRITE, SETATTR, CREATE, REMOVE, RENAME, LINK,
+    /// an OPEN for write or create, a write lock), whatever the client
+    /// mounted with — enforced by the server, not by asking clients to
+    /// mount `ro`. Reads and releases are untouched; the tier still
+    /// hydrates from the bucket, there is simply nothing to flush.
+    /// Rendered as `ro` in the export's options, which the server reads
+    /// at boot, so flipping it rolls the hub. Absent = read-write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
+
     /// The hub's disk. Sized for the WORKING SET when the tier is on
     /// (durable data lives in the bucket), for the WHOLE DATASET when
     /// it is off.
@@ -1037,6 +1048,11 @@ impl FlintShareSpec {
             .and_then(|s| s.enforce_permissions)
             .unwrap_or(false)
     }
+
+    /// Whether the export is read-only (`spec.readOnly`). Absent = false.
+    pub fn read_only(&self) -> bool {
+        self.read_only.unwrap_or(false)
+    }
 }
 
 #[cfg(test)]
@@ -1144,6 +1160,7 @@ mod tests {
             credentials_secret_ref: None,
             import_on_start: None,
             adopt_data: None,
+            read_only: None,
             persistence: PersistenceSpec {
                 size: "20Gi".into(),
                 storage_class_name: None,

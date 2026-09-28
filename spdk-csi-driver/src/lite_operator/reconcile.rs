@@ -2987,6 +2987,7 @@ mod tests {
                 credentials_secret_ref: None,
                 import_on_start: None,
                 adopt_data: None,
+                read_only: None,
                 persistence: PersistenceSpec {
                     size: "20Gi".into(),
                     storage_class_name: None,

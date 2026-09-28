@@ -182,10 +182,13 @@ built from a real YAML config with `[ro, sync, no_subtree_check]` answers ROFS
 to REMOVE and the file stays, and the control `[rw, sync, no_subtree_check]`
 (what the chart, the lite operator and every lima config render) performs it
 (`ro_in_export_options_makes_the_mds_read_only_and_rw_does_not`); `[ro, rw]`
-refuses to construct (`ro_and_rw_together_refuse_to_start`). Nothing renders
-`ro` yet — the chart's MDS template and the lite operator hard-code
-`[rw, sync, no_subtree_check]` — so a knob (values / FlintShare field) is the
-next step if a read-only hub is wanted. `access[].permissions` is still unread.
+refuses to construct (`ro_and_rw_together_refuse_to_start`). **`FlintShare`
+gained `spec.readOnly` the same day** (CRD schema version 7): the lite
+operator renders `options: [ro, sync, no_subtree_check]` for it, the render
+test parses the result back through the server's own reader, and flipping the
+field rolls the hub (the line is in the rollout checksum). The pNFS chart's
+MDS template still hard-codes `rw`. `access[].permissions` is rendered `ro`
+too but is still unread by the server.
 
 ## Scope note — this is not lean
 

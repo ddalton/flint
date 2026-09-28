@@ -14,6 +14,21 @@ covered by the stability guarantee.
 
 ### Added
 
+- **FlintShare `spec.readOnly`: a read-only hub from the CR** (2026-09-28,
+  CRD schema version 7). The lite operator renders `options: [ro, sync,
+  no_subtree_check]` (and `permissions: ro`) for the export, which the
+  server's `ExportConfig::read_only()` reads at boot, so the hub answers
+  `NFS4ERR_ROFS` to every mutating op whatever a client mounted with; false
+  and absent render the shipped `rw` shape unchanged. The export line is
+  part of the rollout checksum, so flipping the field rolls the hub (a knob
+  that does not roll the hub does nothing until an unrelated restart).
+  Checked: the render for true/false/absent parsed back through the
+  server's reader; the checksum moves on the toggle and not between false
+  and absent; the shipped `crds/flintshares.yaml` is now pinned to the
+  generator at `cargo test` time too (`the_shipped_crd_is_what_this_binary_would_install`,
+  seen failing on the stale file first), not only at the release gate.
+  NOT run on a cluster. Docs: `docs/flint-lite-operator.md` "Read-only
+  shares".
 - **pNFS MDS / lite hub: `ro` in an export's `options` makes the export
   read-only** (2026-09-28, F70's follow-on). `ExportConfig.options` was carried
   in every config (`[rw, sync, no_subtree_check]`) and read nowhere.

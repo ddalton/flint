@@ -2,7 +2,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    chert.us/crd-schema-version: '6'
+    chert.us/crd-schema-version: '7'
   name: flintshares.chert.us
 spec:
   group: chert.us
@@ -356,6 +356,18 @@ spec:
                 required:
                 - size
                 type: object
+              readOnly:
+                description: |-
+                  The share is read-only: the hub answers NFS4ERR_ROFS to every
+                  mutating operation (WRITE, SETATTR, CREATE, REMOVE, RENAME, LINK,
+                  an OPEN for write or create, a write lock), whatever the client
+                  mounted with — enforced by the server, not by asking clients to
+                  mount `ro`. Reads and releases are untouched; the tier still
+                  hydrates from the bucket, there is simply nothing to flush.
+                  Rendered as `ro` in the export's options, which the server reads
+                  at boot, so flipping it rolls the hub. Absent = read-write.
+                nullable: true
+                type: boolean
               reclaim:
                 description: |-
                   What CR deletion does to the PVC. Absent = `Retain`.
