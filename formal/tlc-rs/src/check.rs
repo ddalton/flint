@@ -16,8 +16,9 @@ use std::time::{Duration, Instant};
 
 pub use crate::store::State;
 
-/// States a worker hands to the next level at once.
-const BATCH: usize = 4096;
+/// States a worker hands to the next level at once: one block, the unit
+/// of work (4096 left a spilled level's last blocks to a single worker).
+const BATCH: usize = 256;
 
 /// Where a run keeps what does not fit in memory, and when it checkpoints.
 pub struct Disk {
@@ -358,6 +359,7 @@ impl<'p> Checker<'p> {
                 Err(e) => return done(generated, 0, Some(Failure::Eval(e, None))),
             };
             let mut log = trace.logs[0].lock().unwrap();
+            let mut init_level: Vec<(u64, State)> = Vec::new();
             for s in inits {
                 generated += 1;
                 let fp = match self.key_of(&s) {
@@ -393,12 +395,15 @@ impl<'p> Checker<'p> {
                                 nodes.lock().unwrap().push((fp, s.clone()));
                                 init_keys.push(fp);
                             }
-                            frontier.mem.push((idx, s))
+                            init_level.push((idx, s))
                         }
                         Ok(Some(inv)) => return done(generated, 1, Some(Failure::Invariant(inv, idx))),
                         Err(e) => return done(generated, 1, Some(Failure::Eval(e, Some(idx)))),
                     }
                 }
+            }
+            for part in init_level.chunks(BATCH) {
+                frontier.push_mem(part);
             }
         }
         let trace = &*trace;
@@ -436,9 +441,14 @@ impl<'p> Checker<'p> {
             let expanded_before = if graph { nodes.lock().unwrap().len() } else { 0 };
             let writer = LevelWriter::new(meta, depth + 1, self.disk.queue_mem);
             let mem_cursor = AtomicUsize::new(0);
+            // blocks sized so the next level (about this one's size) has
+            // ~16 per worker
+            let batch = (frontier.len() as usize / (self.workers * 16)).clamp(1, BATCH);
             let blk_cursor = AtomicUsize::new(0);
-            let chunk = (frontier.mem.len() / (self.workers * 64)).clamp(1, 1024);
             let frontier_ref = &frontier;
+            let lvl_t0 = Instant::now();
+            let busy_ns = AtomicU64::new(0);
+            let busy = &busy_ns;
             std::thread::scope(|s| {
                 for w in 0..self.workers {
                     let (writer, failure, stop, gen_total, nodes, edges, enabled, sv) = (&writer, &failure, &stop, &gen_total, &nodes, &edges, &enabled, &sv);
@@ -456,6 +466,7 @@ impl<'p> Checker<'p> {
                         let (mut local_nodes, mut local_edges): (Vec<(u64, State)>, Vec<(u64, u64, u128)>) = (Vec::new(), Vec::new());
                         let mut local_enabled: Vec<(u64, u128)> = Vec::new();
                         let mut local_gen = 0u64;
+                        let wt0 = Instant::now();
                         let fail = |f: Failure| {
                             let mut g = failure.lock().unwrap();
                             if g.is_none() {
@@ -533,7 +544,7 @@ impl<'p> Checker<'p> {
                                             local_nodes.push((fp, s.clone()));
                                         }
                                         local_next.push((idx, s));
-                                        if local_next.len() >= BATCH {
+                                        if local_next.len() >= batch {
                                             if let Err(e) = writer.push(&mut local_next, &mut enc) {
                                                 return Some(Failure::Eval(e, None));
                                             }
@@ -549,10 +560,17 @@ impl<'p> Checker<'p> {
                             if stop.load(Ordering::Relaxed) {
                                 break;
                             }
-                            let i = mem_cursor.fetch_add(chunk, Ordering::Relaxed);
+                            // a block (up to BATCH states) at a time, from
+                            // memory first, then from the file
+                            let i = mem_cursor.fetch_add(1, Ordering::Relaxed);
                             if i < frontier.mem.len() {
-                                for (pidx, st) in &frontier.mem[i..(i + chunk).min(frontier.mem.len())] {
-                                    if let Some(f) = handle(*pidx, st) {
+                                decoded.clear();
+                                if let Err(e) = frontier.read_mem(i, nvars, &mut decoded) {
+                                    fail(Failure::Eval(e, None));
+                                    break;
+                                }
+                                for (pidx, st) in decoded.drain(..) {
+                                    if let Some(f) = handle(pidx, &st) {
                                         fail(f);
                                         break 'outer;
                                     }
@@ -575,6 +593,7 @@ impl<'p> Checker<'p> {
                                 }
                             }
                         }
+                        busy.fetch_add(wt0.elapsed().as_nanos() as u64, Ordering::Relaxed);
                         gen_total.fetch_add(local_gen, Ordering::Relaxed);
                         if let Err(e) = writer.push(&mut local_next, &mut enc) {
                             fail(Failure::Eval(e, None));
@@ -587,6 +606,11 @@ impl<'p> Checker<'p> {
                     });
                 }
             });
+            // TLCRS_LEVEL_PROFILE: per level, how busy the workers were
+            if std::env::var_os("TLCRS_LEVEL_PROFILE").is_some() {
+                let wall = lvl_t0.elapsed().as_secs_f64();
+                eprintln!("level {depth}: {} states, wall {:.1} ms, workers busy {:.0}%", frontier.len(), wall * 1e3, busy_ns.load(Ordering::Relaxed) as f64 / 1e9 / (wall * self.workers as f64) * 100.0);
+            }
             if stop.load(Ordering::Relaxed) {
                 break;
             }

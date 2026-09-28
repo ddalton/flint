@@ -3,7 +3,7 @@
 //!   tlc-rs [-workers N] [-engine interp|closure] [-codegen DIR] [-config X.cfg]
 //!          [-metadir DIR] [-checkpoint MIN] [-recover DIR] [-queue-mem MB] [-fpmem MB] X.tla
 //!
-//! Disk: a BFS level beyond `-queue-mem` (default 64 MB, estimated)
+//! Disk: a BFS level (kept serialized) beyond `-queue-mem` (default 256 MB)
 //! spills to the metadir (default `states/<spec>-<time>` beside the spec),
 //! and every `-checkpoint` minutes (default 30; 0 = never) the search is
 //! checkpointed there at a level boundary. `-recover DIR` resumes from
@@ -161,7 +161,7 @@ fn run(generated: Option<Generated>) -> Result<bool, String> {
     let (mut cfg_path, mut spec_path, mut engine, mut codegen_dir) = (None, None, "interp".to_string(), None);
     let mut var_order: Option<String> = None;
     let mut print_var_order = false;
-    let (mut metadir, mut recover, mut checkpoint_min, mut queue_mb): (Option<PathBuf>, bool, f64, u64) = (None, false, 30.0, 64);
+    let (mut metadir, mut recover, mut checkpoint_min, mut queue_mb): (Option<PathBuf>, bool, f64, u64) = (None, false, 30.0, 256);
     // TLCRS_FPMEM_MB: the default -fpmem, for forcing spills in tests
     let mut fp_mb: u64 = std::env::var("TLCRS_FPMEM_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(1024);
     let mut i = 0;

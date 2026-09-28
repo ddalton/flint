@@ -575,17 +575,41 @@ pub struct Block {
     pub count: u64,
 }
 
-/// One BFS level: the states held in memory, then blocks in a file.
+/// Serialized states held in memory.
+pub struct MemBlock {
+    pub bytes: Vec<u8>,
+    pub count: u64,
+}
+
+/// One BFS level: blocks of serialized states in memory, then blocks in a
+/// file. States are kept serialized even in memory: a worker decodes its
+/// own private copy, where a shared tree would have every worker bumping
+/// the same reference counts across cores (LeanScopedSyncHolds at 4
+/// workers: 6.15 s holding trees, 5.34 s decoding), and the budget counts
+/// real bytes.
 #[derive(Default)]
 pub struct Level {
-    pub mem: Vec<(u64, State)>,
+    pub mem: Vec<MemBlock>,
     pub blocks: Vec<Block>,
     pub file: Option<(File, PathBuf)>,
 }
 
 impl Level {
     pub fn len(&self) -> u64 {
-        self.mem.len() as u64 + self.blocks.iter().map(|b| b.count).sum::<u64>()
+        self.mem.iter().map(|b| b.count).sum::<u64>() + self.blocks.iter().map(|b| b.count).sum::<u64>()
+    }
+    /// Append states as one block in memory.
+    pub fn push_mem(&mut self, states: &[(u64, State)]) {
+        if states.is_empty() {
+            return;
+        }
+        let mut bytes = Vec::new();
+        encode_states(states, &mut bytes);
+        self.mem.push(MemBlock { bytes, count: states.len() as u64 });
+    }
+    pub fn read_mem(&self, i: usize, nvars: usize, out: &mut Vec<(u64, State)>) -> R<()> {
+        let b = &self.mem[i];
+        decode_states(&b.bytes, b.count as usize, nvars, out)
     }
     pub fn is_empty(&self) -> bool {
         self.len() == 0
@@ -618,7 +642,7 @@ pub struct LevelWriter<'a> {
     /// order, and a small last batch slipping back under the budget
     /// changed TLC-exact counts (found by flint-27 on ForgeSyncRewind)
     spilled: std::sync::atomic::AtomicBool,
-    mem: Mutex<Vec<(u64, State)>>,
+    mem: Mutex<Vec<MemBlock>>,
     disk: Mutex<(Option<(File, PathBuf)>, u64, Vec<Block>)>,
 }
 
@@ -634,27 +658,24 @@ impl<'a> LevelWriter<'a> {
             disk: Mutex::new((None, 0, Vec::new())),
         }
     }
-    /// Hand over a worker's batch: kept in memory while the level's
-    /// estimated size is under the budget, else written out as a block.
+    /// Hand over a worker's batch, serialized: kept in memory while the
+    /// level's bytes are under the budget, else written out as a block.
     pub fn push(&self, batch: &mut Vec<(u64, State)>, enc: &mut Vec<u8>) -> R<()> {
         if batch.is_empty() {
             return Ok(());
         }
-        // estimate from the first state's encoding: a tree in memory costs
-        // about 5x its serialized bytes (measured: FlintTierSession)
-        enc.clear();
-        encode_states(&batch[..1], enc);
-        let est = enc.len() as u64 * 5 * batch.len() as u64;
-        if !self.spilled.load(Ordering::Relaxed) {
-            if self.mem_bytes.fetch_add(est, Ordering::Relaxed) + est <= self.budget {
-                self.mem.lock().unwrap().append(batch);
-                return Ok(());
-            }
-            self.mem_bytes.fetch_sub(est, Ordering::Relaxed);
-            self.spilled.store(true, Ordering::Relaxed);
-        }
         enc.clear();
         encode_states(batch, enc);
+        let n = enc.len() as u64;
+        if !self.spilled.load(Ordering::Relaxed) {
+            if self.mem_bytes.fetch_add(n, Ordering::Relaxed) + n <= self.budget {
+                self.mem.lock().unwrap().push(MemBlock { bytes: enc.clone(), count: batch.len() as u64 });
+                batch.clear();
+                return Ok(());
+            }
+            self.mem_bytes.fetch_sub(n, Ordering::Relaxed);
+            self.spilled.store(true, Ordering::Relaxed);
+        }
         let mut d = self.disk.lock().unwrap();
         if d.0.is_none() {
             let p = self.meta.path(&self.name)?;
@@ -698,12 +719,13 @@ pub fn checkpoint(meta: &Meta, source_hash: u64, fps: &FpSet, trace: &Trace, dep
         }
         lens.push(l.flushed);
     }
-    // the level: in-memory states serialized; blocks already on disk linked
-    let mut enc = Vec::new();
-    encode_states(&level.mem, &mut enc);
-    let mut f = io("checkpoint", File::create(tmp.join("queue-mem.bin")))?;
-    io("checkpoint", f.write_all(&enc))?;
-    io("sync", f.sync_all())?;
+    // the level: its memory blocks written out; blocks already on disk linked
+    let mut f = BufWriter::new(io("checkpoint", File::create(tmp.join("queue-mem.bin")))?);
+    for b in &level.mem {
+        io("checkpoint", f.write_all(&b.bytes))?;
+    }
+    io("checkpoint", f.flush())?;
+    io("sync", f.get_ref().sync_all())?;
     if let Some((qf, p)) = &level.file {
         io("sync", qf.sync_all())?;
         // an empty path: the level was recovered from the current checkpoint
@@ -711,7 +733,10 @@ pub fn checkpoint(meta: &Meta, source_hash: u64, fps: &FpSet, trace: &Trace, dep
         io("checkpoint", fs::hard_link(src, tmp.join("queue-disk.bin")))?;
     }
     let mut m = String::new();
-    m += &format!("source_hash {source_hash}\ndepth {depth}\ngenerated {generated}\nmem {}\n", level.mem.len());
+    m += &format!("source_hash {source_hash}\ndepth {depth}\ngenerated {generated}\n");
+    for b in &level.mem {
+        m += &format!("memblock {} {}\n", b.bytes.len(), b.count);
+    }
     m += &format!("trace {}\n", lens.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(" "));
     for b in &level.blocks {
         m += &format!("block {} {} {}\n", b.off, b.len, b.count);
@@ -749,6 +774,7 @@ pub fn recover(meta: &Meta, source_hash: u64, nvars: usize, fps: &FpSet, trace: 
     let ck = meta.dir.join("ckpt");
     let text = io(&format!("reading {}", ck.join("meta.txt").display()), fs::read_to_string(ck.join("meta.txt")))?;
     let (mut depth, mut generated, mut nmem, mut lens, mut blocks) = (0, 0, 0, Vec::new(), Vec::new());
+    let mut memblocks: Vec<(u64, u64)> = Vec::new();
     for line in text.lines() {
         let mut w = line.split_whitespace();
         let key = w.next().unwrap_or("");
@@ -760,7 +786,9 @@ pub fn recover(meta: &Meta, source_hash: u64, nvars: usize, fps: &FpSet, trace: 
             "source_hash" => {}
             "depth" => depth = nums[0] as usize,
             "generated" => generated = nums[0],
+            // an older checkpoint: the memory part as one run of states
             "mem" => nmem = nums[0] as usize,
+            "memblock" => memblocks.push((nums[0], nums[1])),
             "trace" => lens = nums,
             "block" => blocks.push(Block { off: nums[0], len: nums[1], count: nums[2] }),
             _ => return Err(format!("bad checkpoint line: {line}")),
@@ -788,8 +816,20 @@ pub fn recover(meta: &Meta, source_hash: u64, nvars: usize, fps: &FpSet, trace: 
         l.flushed = len;
     }
     let buf = io("checkpoint", fs::read(ck.join("queue-mem.bin")))?;
-    let mut mem = Vec::with_capacity(nmem);
-    decode_states(&buf, nmem, nvars, &mut mem)?;
+    let mut mem = Vec::new();
+    if nmem > 0 {
+        // check it decodes, then keep it as one block
+        decode_states(&buf, nmem, nvars, &mut Vec::new())?;
+        mem.push(MemBlock { bytes: buf, count: nmem as u64 });
+    } else {
+        let mut at = 0usize;
+        for (len, count) in memblocks {
+            let end = at + len as usize;
+            let bytes = buf.get(at..end).ok_or("checkpoint: queue-mem.bin is shorter than its blocks")?.to_vec();
+            mem.push(MemBlock { bytes, count });
+            at = end;
+        }
+    }
     let file = if blocks.is_empty() {
         None
     } else {

@@ -176,8 +176,38 @@ count depends on exploration order at more than one worker, **in TLC too**
 | the 167 decided gate runs, summed | 8 | 308 s | 82 s (3.8x) | — |
 | of which the 152 runs TLC finishes in < 2 s | 8 | 131 s | 3.4 s (~39x) | — |
 
-tlc-rs stops scaling at the 4 performance cores (ScopedSync: 14.6 / 9.1 /
-6.0 / 7.1 s at 1 / 2 / 4 / 8 workers); TLC keeps gaining to 6.
+### Scaling across cores
+
+Measured at 1 and 4 workers on the Mac's 4 performance cores, where total
+CPU time against wall time separates the two ways to lose: CPU time that
+grows is contention, idle time is imbalance.
+
+- **Imbalance.** A spilled level was handed out in blocks of 4,096 states,
+  so its last few blocks ran on single workers while the rest waited:
+  LeanScopedSyncHolds' big levels ran 63-66% busy (per level:
+  `TLCRS_LEVEL_PROFILE=1`). Blocks are now at most 256 states, sized to
+  give each worker ~16 per level.
+- **Sharing.** States held in memory as value trees share sub-values with
+  their parents, built on other cores, and every expansion bumps the same
+  reference counts across cores; a fully spilled run, whose states are
+  decoded privately, was *faster* (5.34 s against 6.15 s, CPU 18.8 s
+  against 23.8 s). So a level is now always kept serialized, in memory up
+  to `-queue-mem` (default 256 MB, now real bytes) and then on disk, and a
+  worker decodes its own copy.
+
+| world | workers | before | now |
+|---|---|---|---|
+| LeanScopedSyncHolds (SYMMETRY+VIEW) | 4 | 6.07 s (2.7x over 1) | **4.72 s (3.6x)** |
+| LeanChunkGC | 4 / 8 | 4.82 / 4.31 s | 4.63 / 3.84 s |
+| FlintTierSession | 4 | 37.5 s | 35.8 s |
+
+The cost is serializing each state once: ~6% at 1 worker on
+LeanScopedSyncHolds, nothing measurable on FlintTierSession. What remains
+at 4 workers is hardware: on FlintTierSession every function slows by the
+same third (sampled profiles at 1 and 4 workers have the same shape), as
+the performance cores share L2 and memory bandwidth over a 10.7M-state
+working set; TLC scales no better there (196 s at 1 worker, 65.5 s at 8).
+Beyond 4 workers the Mac adds efficiency cores, which add little.
 
 ## Memory, disk, and checkpoints
 
