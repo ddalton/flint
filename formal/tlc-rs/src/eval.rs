@@ -9,6 +9,10 @@ use crate::value::{Lazy, Value, R};
 use std::sync::Arc;
 
 pub enum Expr {
+    /// a zero-argument operator evaluated at most once per evaluation
+    /// context (an instance's substituted state function): the memo slot,
+    /// whether it reads the next state, and the call
+    Memo(u32, bool, Box<Expr>),
     Const(Value),
     Local(u32),
     Var(u32),
@@ -168,6 +172,8 @@ pub enum TProp {
     AlwaysEventually(Expr),
     /// `[]P`, P a state predicate
     Always(Expr),
+    /// P, a state predicate: holds in every initial state
+    Init(Expr),
     /// `[][A]_v`: every step satisfies A or leaves v unchanged
     ActionBox(Expr, Expr),
 }
@@ -217,6 +223,10 @@ pub struct Program {
 pub struct Cx<'a> {
     pub state: &'a [Value],
     pub next: &'a mut Vec<Option<Value>>,
+    pub memo: &'a mut Vec<Option<Value>>,
+    /// the next state is complete and will not change under this context
+    /// (a step property), so primed memo slots may be used
+    pub next_fixed: bool,
     pub stack: &'a mut Vec<Value>,
     /// per stack slot: has a lazy LET slot been evaluated
     pub ok: &'a mut Vec<bool>,
@@ -228,6 +238,7 @@ pub struct Cx<'a> {
 #[derive(Default)]
 pub struct Bufs {
     pub next: Vec<Option<Value>>,
+    pub memo: Vec<Option<Value>>,
     pub stack: Vec<Value>,
     pub ok: Vec<bool>,
 }
@@ -236,11 +247,12 @@ impl Bufs {
     pub fn cx<'a>(&'a mut self, state: &'a [Value], nvars: usize, frame: u32) -> Cx<'a> {
         self.next.clear();
         self.next.resize(nvars, None);
+        self.memo.clear();
         if self.stack.len() < frame as usize {
             self.stack.resize(frame as usize, Value::Bool(false));
             self.ok.resize(frame as usize, false);
         }
-        Cx { state, next: &mut self.next, stack: &mut self.stack, ok: &mut self.ok, base: 0, frame: frame as usize }
+        Cx { state, next: &mut self.next, memo: &mut self.memo, next_fixed: false, stack: &mut self.stack, ok: &mut self.ok, base: 0, frame: frame as usize }
     }
 }
 
@@ -444,6 +456,21 @@ impl Program {
                     cx.ok[cx.base + *s as usize] = false;
                 }
                 return self.eval(body, cx);
+            }
+            Expr::Memo(slot, primed, e) => {
+                let i = *slot as usize;
+                if *primed && !cx.next_fixed {
+                    return self.eval(e, cx);
+                }
+                if let Some(Some(v)) = cx.memo.get(i) {
+                    return Ok(v.clone());
+                }
+                let v = self.eval(e, cx)?;
+                if cx.memo.len() <= i {
+                    cx.memo.resize(i + 1, None);
+                }
+                cx.memo[i] = Some(v.clone());
+                v
             }
             Expr::LetRef(slot, id) => {
                 let i = cx.base + *slot as usize;

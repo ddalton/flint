@@ -68,9 +68,18 @@ fn load(dir: &Path, name: &str, out: &mut Vec<ast::Module>, hash: &mut u64, orde
             _ => None,
         })
         .collect();
-    let m = parser::Parser::new(toks).module().map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut m = parser::Parser::new(toks).module().map_err(|e| format!("{}: {e}", path.display()))?;
     for e in m.extends.clone() {
         load(dir, &e, out, hash, order)?;
+    }
+    // An instantiated module is loaded apart (its names are not this
+    // module's) and brought in as renamed, substituted definitions.
+    for inst in m.instances.clone() {
+        let mut group = Vec::new();
+        load(dir, &inst.module, &mut group, hash, order)?;
+        let x = crate::instance::expand(&inst, &group).map_err(|e| format!("{}: {e}", path.display()))?;
+        m.defs.extend(x.defs);
+        m.assumes.extend(x.assumes);
     }
     order.strings.extend(strings);
     out.push(m);
@@ -300,6 +309,10 @@ fn run(generated: Option<Generated>) -> Result<bool, String> {
             false
         }
         Some(check::Failure::Liveness(_)) => false,
+        Some(check::Failure::InitProperty(name, _)) => {
+            println!("Error: Property {name} is violated by the initial state above.");
+            false
+        }
     };
     println!(
         "{} states generated, {} distinct states found. Depth {}. Checked in {:.3}s ({:.0} distinct/s).",

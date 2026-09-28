@@ -42,7 +42,7 @@ with open(OUT, "w") as f:
         secs = time.time() - t0
         m = re.search(r"(\d+) distinct states found", out)
         distinct = int(m.group(1)) if m else None
-        viol = re.search(r"(?:Invariant|Temporal property|Action property) (\S+)(?: \(for [^)]*\))? is violated", out)
+        viol = re.search(r"(?:Invariant|Temporal property|Action property|Property) (\S+)(?: \(for [^)]*\))? is violated", out)
         if rc == -1:
             status = "timeout"
         elif rc == 2:

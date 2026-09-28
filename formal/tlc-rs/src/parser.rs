@@ -167,13 +167,43 @@ impl Parser {
                     "LOCAL" => {
                         self.bump();
                     }
-                    "INSTANCE" => return self.err("INSTANCE is not supported"),
+                    "INSTANCE" => {
+                        self.bump();
+                        let inst = self.instance(String::new())?;
+                        m.instances.push(inst);
+                    }
+                    _ if matches!(self.peek_at(1), Tok::Op("==")) && matches!(self.peek_at(2), Tok::Ident(k) if k == "INSTANCE") => {
+                        let name = self.ident()?;
+                        self.bump();
+                        self.bump();
+                        let inst = self.instance(name)?;
+                        m.instances.push(inst);
+                    }
                     _ => m.defs.push(self.def()?),
                 },
                 _ => return self.err("unexpected token at module level"),
             }
         }
         Ok(m)
+    }
+
+    /// After `INSTANCE`: `M [WITH x <- e, ...]`.
+    fn instance(&mut self, name: String) -> R<crate::ast::Instance> {
+        let module = self.ident()?;
+        let mut subs = Vec::new();
+        if self.is_kw("WITH") {
+            self.bump();
+            loop {
+                let x = self.ident()?;
+                self.expect_op("<-")?;
+                subs.push((x, self.expr(0)?));
+                if !self.is_op(",") {
+                    break;
+                }
+                self.bump();
+            }
+        }
+        Ok(crate::ast::Instance { name, module, subs })
     }
 
     fn ident_list(&mut self) -> R<Vec<String>> {
@@ -508,6 +538,13 @@ impl Parser {
             }
             Tok::Ident(s) => {
                 self.bump();
+                // `I!Op`: an operator of the instance I
+                let mut s = s;
+                while self.is_op("!") && matches!(self.peek_at(1), Tok::Ident(_)) {
+                    self.bump();
+                    let t = self.ident()?;
+                    s = format!("{s}!{t}");
+                }
                 if self.is_op("(") {
                     self.bump();
                     let args = self.expr_list(")")?;

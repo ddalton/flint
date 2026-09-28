@@ -49,6 +49,7 @@ pub fn eval_env(p: &Program, e: &Expr, frame: u32, env: &[(u32, Value)], state: 
         for (i, v) in n.iter().enumerate() {
             cx.next[i] = Some(v.clone());
         }
+        cx.next_fixed = true;
     }
     p.eval(e, &mut cx)
 }

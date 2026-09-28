@@ -89,6 +89,7 @@ fn walk_expr<'e>(e: &'e Expr, f: &mut dyn FnMut(&'e Value)) {
             }
         }
         Expr::Local(_) | Expr::Var(_) | Expr::Primed(_) | Expr::LetRef(..) => {}
+        Expr::Memo(_, _, e) => walk_expr(e, f),
         Expr::Enabled(a) => walk_act(a, f),
         Expr::Call(_, v) | Expr::And(v) | Expr::Or(v) | Expr::SetEnum(v) | Expr::Product(v) | Expr::Tuple(v)
         | Expr::Builtin(_, v) => v.iter().for_each(|x| walk_expr(x, f)),
@@ -318,6 +319,7 @@ impl Gen<'_> {
 
     fn val(&mut self, e: &Expr) -> String {
         match e {
+            Expr::Memo(_, _, e) => self.val(e),
             Expr::Const(v) if is_scalar(v) => scalar(v),
             Expr::Primed(i) => format!("primed(&{}[{i}], {:?})?.clone()", self.nx, self.p.vars[*i as usize]),
             Expr::Call(op, args) if !(args.is_empty() && self.p.ops[*op as usize].cached.is_some()) => {

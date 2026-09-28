@@ -44,6 +44,8 @@ pub enum Failure {
     Liveness(String),
     Deadlock(u64),
     Eval(String, Option<u64>),
+    /// a property's initial-state predicate, false in this initial state
+    InitProperty(String, u64),
 }
 
 pub struct Outcome {
@@ -91,6 +93,19 @@ impl<'p> Checker<'p> {
     /// Every transition must be seen, not only those into new states.
     fn keep_all(&self) -> bool {
         self.needs_graph() || self.props.iter().any(|i| matches!(i.leaf, crate::eval::TProp::ActionBox(..)))
+    }
+
+    /// A property's state-predicate leaves (`Init` of `Init /\ [][Next]_v`)
+    /// hold in each initial state.
+    fn init_ok(&self, st: &[Value], bufs: &mut Bufs) -> Result<Option<String>, String> {
+        for i in &self.props {
+            if let crate::eval::TProp::Init(e) = i.leaf {
+                if !liveness::eval_env(self.p, e, i.frame, &i.env, st, None, bufs)?.as_bool()? {
+                    return Ok(Some(i.name.clone()));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// `[]P` properties are invariants.
@@ -264,7 +279,7 @@ impl<'p> Checker<'p> {
         let (mut out, failure) = self.search(&meta, &seen, &mut trace, t0);
         if let Some(f) = &failure {
             let idx = match f {
-                Failure::Invariant(_, i) | Failure::Deadlock(i) | Failure::Step(_, i, _) => Some(*i),
+                Failure::Invariant(_, i) | Failure::Deadlock(i) | Failure::Step(_, i, _) | Failure::InitProperty(_, i) => Some(*i),
                 Failure::Eval(_, i) => *i,
                 Failure::Liveness(_) => None,
             };
@@ -354,6 +369,11 @@ impl<'p> Checker<'p> {
                         Ok(i) => i,
                         Err(e) => return done(generated, 1, Some(Failure::Eval(e, None))),
                     };
+                    match self.init_ok(&s, &mut bufs) {
+                        Ok(None) => {}
+                        Ok(Some(name)) => return done(generated, 1, Some(Failure::InitProperty(name, idx))),
+                        Err(e) => return done(generated, 1, Some(Failure::Eval(e, Some(idx)))),
+                    }
                     let held = self.holds(false, &s, &mut bufs).and_then(|r| match r {
                         None => self.always_ok(&s, &mut bufs),
                         some => Ok(some),
@@ -380,6 +400,7 @@ impl<'p> Checker<'p> {
         let mut last_report = Instant::now();
         let ckpt_every = Duration::from_secs(self.disk.checkpoint_secs);
         let mut last_ckpt = Instant::now();
+        let mut next_live_check = 1000usize;
         if graph && self.disk.checkpoint_secs > 0 && self.progress {
             eprintln!("checkpoints: off (liveness properties keep their graph in memory)");
         }
@@ -401,6 +422,9 @@ impl<'p> Checker<'p> {
                 }
                 last_ckpt = Instant::now();
             }
+            // nodes admitted before this level's expansion are fully
+            // expanded once it ends (their successors all recorded)
+            let expanded_before = if graph { nodes.lock().unwrap().len() } else { 0 };
             let writer = LevelWriter::new(meta, depth + 1, self.disk.queue_mem);
             let mem_cursor = AtomicUsize::new(0);
             let blk_cursor = AtomicUsize::new(0);
@@ -559,6 +583,24 @@ impl<'p> Checker<'p> {
             if !frontier.is_empty() {
                 depth += 1;
             }
+            // Fail fast, as TLC does: check the properties on the graph of
+            // the states expanded so far, each time it has doubled. Every
+            // cycle there is a cycle of the final graph, and every node in
+            // it has its final successors and enabledness, so a fair
+            // counterexample found here is real; the final check still
+            // runs for what this one cannot see yet.
+            if graph && !frontier.is_empty() && expanded_before >= next_live_check {
+                next_live_check = expanded_before * 2;
+                let partial = {
+                    let n = nodes.lock().unwrap();
+                    let (e, en) = (edges.lock().unwrap(), enabled.lock().unwrap());
+                    (n[..expanded_before].to_vec(), e.clone(), en.clone())
+                };
+                if let Some(f) = self.check_liveness(partial.0, partial.1, partial.2, &init_keys, true) {
+                    *failure.lock().unwrap() = Some(f);
+                    break;
+                }
+            }
             if self.progress && last_report.elapsed().as_secs() >= 10 {
                 last_report = Instant::now();
                 let on_disk: u64 = frontier.blocks.iter().map(|b| b.count).sum();
@@ -578,7 +620,7 @@ impl<'p> Checker<'p> {
             if self.progress {
                 eprintln!("liveness: checking {} property instances under {} fairness instances", self.props.iter().filter(|i| liveness::is_graph_leaf(i.leaf)).count(), self.fair.len());
             }
-            failure = self.check_liveness(nodes.into_inner().unwrap(), edges.into_inner().unwrap(), enabled.into_inner().unwrap(), &init_keys);
+            failure = self.check_liveness(nodes.into_inner().unwrap(), edges.into_inner().unwrap(), enabled.into_inner().unwrap(), &init_keys, false);
         }
         done(generated, depth, failure)
     }
@@ -593,11 +635,12 @@ impl<'p> Checker<'p> {
         println!();
     }
 
-    fn check_liveness(&self, nodes: Vec<(u64, State)>, edges: Vec<(u64, u64, u128)>, enabled: Vec<(u64, u128)>, init_keys: &[u64]) -> Option<Failure> {
+    /// `partial`: the graph holds only the states expanded so far.
+    fn check_liveness(&self, nodes: Vec<(u64, State)>, edges: Vec<(u64, u64, u128)>, enabled: Vec<(u64, u128)>, init_keys: &[u64], partial: bool) -> Option<Failure> {
         let t0 = Instant::now();
         let mut bufs = Bufs::default();
         let g = Graph::build(nodes, edges, enabled);
-        if self.progress {
+        if self.progress && !partial {
             eprintln!("liveness: graph of {} nodes built in {:.1}s", g.keys.len(), t0.elapsed().as_secs_f64());
         }
         let inits: Vec<u32> = init_keys.iter().filter_map(|k| g.index.get(k).copied()).collect();
@@ -630,7 +673,11 @@ impl<'p> Checker<'p> {
             }
         }
         if self.progress {
-            eprintln!("liveness: all properties checked in {:.1}s", t0.elapsed().as_secs_f64());
+            if partial {
+                eprintln!("liveness: {} expanded states checked, no violation yet ({:.1}s)", g.keys.len(), t0.elapsed().as_secs_f64());
+            } else {
+                eprintln!("liveness: all properties checked in {:.1}s", t0.elapsed().as_secs_f64());
+            }
         }
         None
     }

@@ -7,6 +7,7 @@ pub mod closure;
 pub mod codegen;
 pub mod compile;
 pub mod eval;
+pub mod instance;
 pub mod lexer;
 pub mod liveness;
 pub mod parser;

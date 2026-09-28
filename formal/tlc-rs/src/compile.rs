@@ -54,6 +54,9 @@ pub struct Compiler {
     next_slot: u32,
     inline_depth: u32,
     lets: Vec<Expr>,
+    /// compiling the operand of a prime (not an Init action)
+    priming: bool,
+    memo_slots: HashMap<String, u32>,
 }
 
 fn is_builtin_value(n: &str) -> Option<Value> {
@@ -187,6 +190,8 @@ impl Compiler {
             next_slot: 0,
             inline_depth: 0,
             lets: vec![],
+            priming: false,
+            memo_slots: HashMap::new(),
         };
         for n in intern_order {
             c.intern(n);
@@ -268,11 +273,19 @@ impl Compiler {
     fn drain_pending(&mut self) -> R<()> {
         while let Some(i) = self.pending.pop() {
             let name = self.op_idx.iter().find(|(_, v)| **v == i).unwrap().0.clone();
-            let d = self.defs[&name].clone();
+            // `X'`: the operator X read in the next state
+            let (base, primed) = match name.strip_suffix('\'') {
+                Some(b) if !self.defs.contains_key(&name) => (b.to_string(), true),
+                _ => (name.clone(), false),
+            };
+            let d = self.defs[&base].clone();
             let saved = self.next_slot;
             self.next_slot = 0;
             let mut sc: Vec<Entry> = d.params.iter().map(|p| Entry::Local(p.clone(), self.slot())).collect();
-            let body = self.expr(&d.body, &mut sc, false).map_err(|e| format!("in {name}: {e}"))?;
+            let was = std::mem::replace(&mut self.priming, primed);
+            let body = self.expr(&d.body, &mut sc, primed).map_err(|e| format!("in {name}: {e}"));
+            self.priming = was;
+            let body = body?;
             self.ops[i as usize] = Some(Op { name, nparams: d.params.len(), frame: self.next_slot, body, cached: None });
             self.next_slot = saved;
         }
@@ -406,6 +419,11 @@ impl Compiler {
     }
 
     fn temporal(&mut self, a: &Ast, sc: &mut Vec<Entry>) -> R<TProp> {
+        // a state predicate outside any temporal operator: it constrains
+        // the initial state (`Init` in `Init /\ [][Next]_v`)
+        if !self.is_temporal(a) {
+            return Ok(TProp::Init(self.expr(a, sc, false)?));
+        }
         match a {
             Ast::And(v) => Ok(TProp::And(v.iter().map(|x| self.temporal(x, sc)).collect::<R<_>>()?)),
             Ast::Quant(true, bounds, body) => {
@@ -530,6 +548,26 @@ impl Compiler {
             return None;
         }
         self.vars.get(n).copied()
+    }
+
+    /// The parts of `UNCHANGED a`: tuples flattened, and a zero-argument
+    /// operator whose body is a tuple (`vars`) expanded. `true`: the part
+    /// came from an operator body, so it is read in the global scope.
+    fn unchanged_parts(&self, a: &Ast, sc: &[Entry], out: &mut Vec<(Ast, bool)>) {
+        self.unchanged_parts_in(a, false, sc, out)
+    }
+
+    fn unchanged_parts_in(&self, a: &Ast, global: bool, sc: &[Entry], out: &mut Vec<(Ast, bool)>) {
+        match a {
+            Ast::Tuple(v) => v.iter().for_each(|x| self.unchanged_parts_in(x, global, sc, out)),
+            Ast::Ident(n)
+                if (global || Self::lookup(sc, n).is_none())
+                    && self.defs.get(n).is_some_and(|d| d.params.is_empty() && matches!(d.body, Ast::Tuple(_))) =>
+            {
+                self.unchanged_parts_in(&self.defs[n].body.clone(), true, sc, out)
+            }
+            _ => out.push((a.clone(), global)),
+        }
     }
 
     fn unchanged_vars(&self, a: &Ast, out: &mut Vec<u32>) -> R<()> {
@@ -745,6 +783,12 @@ impl Compiler {
                     if d.params.len() != args.len() {
                         return Err(format!("{n} takes {} arguments", d.params.len()));
                     }
+                    // as for a bare name: in init (primed) mode a state-level
+                    // operator must see the primed variables
+                    if init && self.op_is_action(n, true) {
+                        let (binds, body) = self.inline(&d, &[], args, sc, init, Self::expr)?;
+                        return Ok(Expr::Let(binds, bx(body)));
+                    }
                     let args = args.iter().map(|x| self.expr(x, sc, init)).collect::<R<_>>()?;
                     Expr::Call(self.op_index(n), args)
                 } else if let Some((bi, arity)) = builtin_fn(n) {
@@ -760,13 +804,34 @@ impl Compiler {
                 Ast::Ident(n) if self.vars.contains_key(n) && Self::lookup(sc, n).is_none() => {
                     Expr::Primed(self.vars[n])
                 }
-                _ => return Err(format!("priming a non-variable {x:?} is not supported")),
+                // e': e evaluated in the next state. Init mode compiles
+                // exactly that (variables read primed, state-level
+                // operators inlined), so it is reused.
+                _ if !init => {
+                    let was = std::mem::replace(&mut self.priming, true);
+                    let e = self.expr(x, sc, true);
+                    self.priming = was;
+                    e?
+                }
+                _ => return Err(format!("priming {x:?} inside a primed expression")),
             },
             // In a step predicate (a `[][A]_v` property), UNCHANGED e is e' = e.
             Ast::Unchanged(x) => {
-                let mut vs = Vec::new();
-                self.unchanged_vars(x, &mut vs)?;
-                Expr::And(vs.into_iter().map(|v| Expr::Bin(Bin::Eq, bx(Expr::Primed(v)), bx(Expr::Var(v)))).collect())
+                let mut parts = Vec::new();
+                self.unchanged_parts(x, sc, &mut parts);
+                let mut conj = Vec::new();
+                for (part, global) in parts {
+                    let mut empty = Vec::new();
+                    let scope = if global { &mut empty } else { &mut *sc };
+                    conj.push(match &part {
+                        Ast::Ident(n) if self.vars.contains_key(n) && Self::lookup(scope, n).is_none() => {
+                            let v = self.vars[n];
+                            Expr::Bin(Bin::Eq, bx(Expr::Primed(v)), bx(Expr::Var(v)))
+                        }
+                        _ => Expr::Bin(Bin::Eq, bx(self.expr(&part, scope, true)?), bx(self.expr(&part, scope, false)?)),
+                    });
+                }
+                Expr::And(conj.into())
             }
             Ast::Not(x) => Expr::Not(bx(self.expr(x, sc, init)?)),
             Ast::Neg(x) => Expr::Un(Un::Neg, bx(self.expr(x, sc, init)?)),
@@ -904,6 +969,15 @@ impl Compiler {
             if !d.params.is_empty() {
                 return Err(format!("{n} used without its arguments"));
             }
+            // an instance's substitution: evaluated once per context, and
+            // primed as an operator of its own
+            if n.contains("!__sub_") && (!init || self.priming) {
+                let primed = init && self.op_is_action(n, true);
+                let key = if primed { format!("{n}'") } else { n.to_string() };
+                let next = self.memo_slots.len() as u32;
+                let slot = *self.memo_slots.entry(key.clone()).or_insert(next);
+                return Ok(Expr::Memo(slot, primed, Box::new(Expr::Call(self.op_index(&key), Box::new([])))));
+            }
             // Init-mode references to a state-level operator must see the
             // variables being assigned, so they are inlined.
             if init && self.op_is_action(n, true) {
@@ -951,6 +1025,7 @@ impl Compiler {
             match e {
                 Expr::Var(_) | Expr::Primed(_) => false,
                 Expr::LetRef(_, id) => expr_const(&p.lets[*id as usize], p, memo),
+                Expr::Memo(_, _, e) => expr_const(e, p, memo),
                 Expr::Call(op, args) => {
                     op_const(*op as usize, p, memo) && args.iter().all(|a| expr_const(a, p, memo))
                 }
@@ -1030,7 +1105,7 @@ pub fn visit(e: &Expr, f: &mut dyn FnMut(&Expr)) {
     let bounds = |bs: &[crate::eval::Bound], f: &mut dyn FnMut(&Expr)| bs.iter().for_each(|b| f(&b.set));
     match e {
         Expr::Const(_) | Expr::Local(_) | Expr::Var(_) | Expr::Primed(_) | Expr::LetRef(..) | Expr::Enabled(_) => {}
-        Expr::Lazy(_, body) => f(body),
+        Expr::Lazy(_, body) | Expr::Memo(_, _, body) => f(body),
         Expr::SelectSeq(a, _, b) => {
             f(a);
             f(b)

@@ -64,6 +64,15 @@ pub struct Def {
     pub body: Ast,
 }
 
+/// `Name == INSTANCE M WITH x <- e, ...` (`name` empty for a bare
+/// `INSTANCE M`).
+#[derive(Debug, Clone)]
+pub struct Instance {
+    pub name: String,
+    pub module: String,
+    pub subs: Vec<(String, Ast)>,
+}
+
 #[derive(Default, Debug)]
 pub struct Module {
     pub name: String,
@@ -72,4 +81,5 @@ pub struct Module {
     pub variables: Vec<String>,
     pub defs: Vec<Rc<Def>>,
     pub assumes: Vec<Ast>,
+    pub instances: Vec<Instance>,
 }

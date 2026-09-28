@@ -24,8 +24,12 @@ every transition), `P ~> Q`, `[](P => <>Q)`, `<>[]P`, `[]<>P`, under
 `\A`, with `WF`/`SF` fairness from the spec (also `SpecLive == Spec /\
 Fairness`), and `ENABLED` in state predicates.
 
+`INSTANCE` (named or bare, with `WITH` substitutions), so a refinement
+`PROPERTY Core!Spec` is checked: its `Init` on every initial state, its
+`[][Next]_vars` on every step, through the mapping.
+
 It **refuses** a cfg rather than silently checking less: other temporal
-shapes, `ACTION_CONSTRAINT`, and `INSTANCE` (so `Core!Spec` refinement).
+shapes and `ACTION_CONSTRAINT`.
 
 ## Liveness
 
@@ -45,10 +49,49 @@ Against TLC on every property-bearing gate entry both finish
 (`results/liveness-vs-tlc-*.jsonl`): **72 compared, 0 differences** —
 verdict, violation kind (temporal vs action), and the exact distinct count
 on every strict run. Strict runs are much faster (FlintTierSessionLive 29 s
-vs 398 s; ForgeSyncLive 37 s vs 191 s); liveness *mutation* runs are
-slower (~20 s vs ~4 s), because TLC checks liveness periodically during the
-search and stops at the first violation, and tlc-rs checks once, at the
-end.
+vs 398 s; ForgeSyncLive 37 s vs 191 s).
+
+**Fail fast.** As TLC does, the properties are also checked during the
+search, on the graph of the states expanded so far, each time it has
+doubled (from 1,000 states): every cycle there is a cycle of the final
+graph and every node in it has its final successors and enabledness, so a
+counterexample found there is real; states not yet expanded are left out
+(they would look like dead ends stuttering forever). The final check still
+runs. Liveness mutation runs, summed: 57.5 s checking only at the end,
+**7.3 s** failing fast, TLC 93.5 s (e.g. FlintCompositionNoWitness 11.4 s
+-> 0.09 s, TLC 3.8 s). Re-run on all 92 property entries
+(`results/liveness-failfast-sweep-2026-09-28.jsonl`): 69 compared with TLC,
+0 differences.
+
+## INSTANCE and refinement
+
+`I == INSTANCE M WITH x <- e, ...` is expanded when the spec is loaded
+(`instance.rs`): each definition D of M (and of what M extends) becomes
+`I!D`, with M's own references renamed, each substituted constant or
+variable x replaced by a new definition `I!__sub_x == e` in the
+instantiating module (so no name M binds can capture one in e), and one
+not named in WITH left as the same name outside (TLA+'s implicit
+substitution). `x'` is then `e'`: e evaluated in the next state, the way
+TLC's `OPCODE_prime` evaluates its operand against the next state.
+
+A `PROPERTY I!Spec` of the shape `Init /\ [][Next]_vars` checks Init on
+every initial state and `[Next]_vars` on every step. What made it
+practical: each substituted state function is evaluated at most once per
+evaluation context (`Expr::Memo`), as TLC binds a substitution to a
+`LazyValue`; before that, every `w'[s]` inside `Core!Next` re-derived the
+whole mapped state, and LeanRefineQueue took 255 s instead of 41.6 s.
+
+Against TLC (8 workers each, this Mac):
+
+| cfg | TLC | tlc-rs |
+|---|---|---|
+| LeanRefineQueue | 606,916 distinct, holds, 155 s | 606,916, holds, 41.6 s (3.7x) |
+| LeanRefineProbe | 1,965,383 distinct, holds, 903 s | 1,965,383, holds, 195 s (4.6x) |
+| mapping `ui <- 0` (a UI write is no core step) | action property violated, 2-state trace | the same |
+| mapping `seq <- manSeq + 1` | violated by the initial state | the same |
+
+The two mutations were made on copies, to show the check can fail through
+the path it claims (the unmutated gate entries hold).
 
 ## Three engines, one checker
 
@@ -142,6 +185,10 @@ and is created only when something spills; a run that finishes removes
 the files it wrote (only those). A killed run leaves them, as TLC does.
 Liveness properties still keep their graph in memory, so with them there
 are no checkpoints and `-recover` is refused.
+
+The INSTANCE changes were re-run over the whole gate
+(`results/instance-sweep-2026-09-28.jsonl`): 257 entries as before, 0
+regressions (3 newly supported).
 
 | | before | now (default) | now, queue fully on disk |
 |---|---|---|---|

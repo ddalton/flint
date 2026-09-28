@@ -303,6 +303,9 @@ impl C<'_> {
 
     fn val(&self, e: &Expr) -> VF {
         match e {
+            // not memoized here: the closure engine never evaluates a
+            // step property, and a state-level memo only saves time
+            Expr::Memo(_, _, e) => self.val(e),
             Expr::Const(v) => {
                 let v = v.clone();
                 Box::new(move |_| Ok(v.clone()))
