@@ -14,12 +14,13 @@ REV=$2   # that commit
 [ "$(md5sum LeanP1.tla | cut -c1-32)" = 3f6af642f7e39c19cafa413540e50cbe ] || { echo "MD5 CHANGED LeanP1.tla" > RESULTS-tlcrs.txt; exit 4; }
 ST=/mnt/nvme2/tlcrs-leanp1-shape; mkdir -p $ST out
 LIMIT_KB=${LIMIT_KB:-$((9 * 1024 * 1024))}   # 9 GB: the fp set lives in RAM (~14 B/state)
-echo "tlc-rs $REV, 2 workers, checkpoint 15 min, 4 h per world, RSS guard 9 GB; started $(date '+%F %T')" > RESULTS-tlcrs.txt
+echo "tlc-rs $REV, 2 workers, checkpoint 15 min, 4 h per world (a resumed world gets 4 h more), RSS guard 9 GB; (re)started $(date '+%F %T')" >> RESULTS-tlcrs.txt
 TLIM=${TLIM:-14400}   # overridable only to test the timeout path
 for w in ${WORLDS:-MCLeanP1GateSeq3Copies0 MCLeanP1GateSeq3Copies1 MCLeanP1GateSeqAllCopies0}; do
-  rm -rf $ST/$w
+  grep -qE "^$w .*(rc=|UNDECIDED|GUARD)" RESULTS-tlcrs.txt 2>/dev/null && continue   # decided before a pause
+  if [ -e $ST/$w/ckpt/meta.txt ]; then ARGS="-recover $ST/$w"; else rm -rf $ST/$w; ARGS="-metadir $ST/$w"; fi
   t0=$(date +%s)
-  nice -n 10 $BIN -workers 2 -checkpoint ${CKMIN:-15} -metadir $ST/$w -config $w.cfg MCLeanP1Gate.tla > out/$w-tlcrs.out 2>&1 &
+  nice -n 10 $BIN -workers 2 -checkpoint ${CKMIN:-15} $ARGS -config $w.cfg MCLeanP1Gate.tla > out/$w-tlcrs.out 2>&1 &
   pid=$!; why=""
   while kill -0 $pid 2>/dev/null; do
     sleep 30

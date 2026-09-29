@@ -1,0 +1,4 @@
+LS1 rc=124 |  |  | progress: depth 20, 60040307 generated, 17998900 distinct (0 fingerprint spills), 4708350 on queue (4679678 on disk), 509.3s
+LS2 rc=0 | Model checking completed. No error has been found. | 39223077 states generated, 10676334 distinct states found. Depth 36. Checked in 350.529s (30458 distinct/s). | progress: depth 32, 38657809 generated, 10546224 distinct (0 fingerprint spills), 143300 on queue (114628 on disk), 344.0s
+LS3 rc=0 | Model checking completed. No error has been found. | 7842689 states generated, 2272635 distinct states found. Depth 32. Checked in 68.767s (33048 distinct/s). | progress: depth 24, 7050717 generated, 2081183 distinct (0 fingerprint spills), 98039 on queue (69367 on disk), 61.3s
+SIZEDONE

@@ -16,9 +16,10 @@ TLIM=${TLIM:-28800}                          # 8 h a world
 echo "tlc-rs $REV, ForgeSyncRewind.tla $MD5, 2 workers, checkpoint 15 min, ${TLIM}s a world, RSS guard $((LIMIT_KB/1048576)) GB; started $(date '+%F %T')" >> RESULTS-Rewind-fix.txt
 for w in ${WORLDS:-ForgeSyncRewindKeepsNamedRetention ForgeSyncRewindKeepsNamedRetentionLoss ForgeSyncRewindHolds}; do
   exp=$(awk -F'\t' -v w=$w '$1==w{print $2}' WORLDS-Rewind.tsv)
-  rm -rf $ST/$w
+  grep -qE "^$w +(OK-|MISMATCH)" RESULTS-Rewind-fix.txt && continue   # decided before a pause
+  if [ -e $ST/$w/ckpt/meta.txt ]; then ARGS="-recover $ST/$w"; else rm -rf $ST/$w; ARGS="-metadir $ST/$w"; fi
   t0=$(date +%s)
-  nice -n 10 $BIN -workers 2 -checkpoint 15 -metadir $ST/$w -config $w.cfg ForgeSyncRewind.tla > out/$w-tlcrs.out 2>&1 &
+  nice -n 10 $BIN -workers 2 -checkpoint 15 $ARGS -config $w.cfg ForgeSyncRewind.tla > out/$w-tlcrs.out 2>&1 &
   pid=$!; why=""
   while kill -0 $pid 2>/dev/null; do
     sleep 30

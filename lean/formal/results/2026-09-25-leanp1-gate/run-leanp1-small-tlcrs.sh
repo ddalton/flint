@@ -11,9 +11,10 @@ BIN=$1; REV=$2
 ST=${GATE_ST:-/mnt/nvme2/tlcrs-leanp1d}; mkdir -p $ST out
 LIMIT_KB=$((6 * 1024 * 1024))
 while IFS=$'\t' read -r wld exp; do
-  rm -rf $ST/$wld
+  # A world stopped mid-run (the 2026-09-29 pause) resumes from its checkpoint.
+  if [ -e $ST/$wld/ckpt/meta.txt ]; then ARGS="-recover $ST/$wld"; else rm -rf $ST/$wld; ARGS="-metadir $ST/$wld"; fi
   t0=$(date +%s)
-  nice -n 10 $BIN -workers 6 -metadir $ST/$wld -config $wld.cfg $( [ -f $wld.tla ] && echo $wld.tla || echo LeanP1.tla ) > out/$wld-tlcrs.out 2>&1 &
+  nice -n 10 $BIN -workers 6 $ARGS -config $wld.cfg $( [ -f $wld.tla ] && echo $wld.tla || echo LeanP1.tla ) > out/$wld-tlcrs.out 2>&1 &
   pid=$!; why=""
   # A RECORD world has no expected result, so it is capped at 1 h (the
   # user's call, to shorten the gate); the others keep TLC's 6 h.

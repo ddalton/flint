@@ -1,0 +1,3 @@
+tlc-rs badaa979, ForgeSyncRewind.tla 5ee1b260cba85f0cbfe45829e2493a77, 2 workers, checkpoint 15 min, 28800s a world, RSS guard 6 GB; started 2026-09-28 19:33:41
+ForgeSyncRewindKeepsNamedRetention       OK-FOUND exp=Inv_ProofNeverRestsOnRetention rc=12  16341s | Invariant Inv_ProofNeverRestsOnRetention is violated | 1238574223 states generated, 253421025 distinct states found. Depth 38. Checked in 16323.593s (15525 distinct/s).
+PAUSED 2026-09-29T00:3xZ (user: pause for the day); resume: ~/resume-2026-09-29.sh — KeepsNamedRetentionLoss (22 min, depth 31, 25,623,283 distinct) resumes from its checkpoint; then Holds

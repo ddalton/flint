@@ -1,0 +1,2 @@
+tlc-rs badaa979, 2 workers, checkpoint 15 min, 4 h per world, RSS guard 9 GB; started 2026-09-28 19:10:53
+MCLeanP1GateSeq3Copies0 PAUSED 2026-09-28T22:51:16Z after 13223s (user: shorten the gate) | last checkpoint: 214143917 distinct, depth 22 | progress: depth 22, 882277365 generated, 214143917 distinct, 27904904 on queue (27880328 on disk), 12529.0s | resume: -recover /mnt/nvme2/tlcrs-leanp1-shape/MCLeanP1GateSeq3Copies0

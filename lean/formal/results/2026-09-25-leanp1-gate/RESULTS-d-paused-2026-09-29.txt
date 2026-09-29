@@ -1,0 +1,15 @@
+MCLeanP1Like                   OK-HOLDS           exp=HOLDS                  rc=0   | No error has been found | 115302321 states generated, 26592522 distinct | Finished in 01h 01min at 
+LeanP1Holds                    UNDECIDED-TIMEOUT  exp=HOLDS                  rc=124 |  |  | 
+LeanP1Holds1p3b                OK-HOLDS           exp=HOLDS                  rc=0   | No error has been found | 1929290972 states generated, 461094969 distinct | Finished in 02h 18min at 
+PAUSED 2026-09-27 01:12: box shut down at the user request; LeanP1LiveHolds (20 min in, no checkpoint) restarts on resume
+LeanP1NoR7                     OK-FIRES           exp=Prop_NoSilentRevert    rc=13  | Error: Action property Prop_NoSilentRevert is violated | 974467 states generated, 362277 distinct | Finished in 08s at 
+LeanP1VerifyOff                OK-FIRES           exp=Inv_CitationsLive      rc=12  | Error: Invariant Inv_CitationsLive is violated | 411693271 states generated, 119020783 distinct | Finished in 39min 00s at 
+LeanP1SweepFree                OK-FIRES           exp=Inv_CitationsLive      rc=12  | Error: Invariant Inv_CitationsLive is violated | 3266986 states generated, 1116729 distinct | Finished in 19s at 
+LeanP1LiveHolds                MISMATCH           exp=HOLDS                  rc=1   | Error: TLC threw an unexpected exception |  |  (recovered from the 21:05 checkpoint, 20 GB)
+LeanP1LiveHolds STOPPED WITHOUT A VERDICT 2026-09-28T22:56:06Z; checkpoint kept in /mnt/nvme/tlc-leanp1d/LeanP1LiveHolds
+LeanP1LiveHolds STOPPED 2026-09-28T23:06:27Z (user): same bounds as LeanP1Holds (>1B states), its final liveness check cannot fit 20 GB; replaced by a reduced liveness world + its control | Progress(14) at 2026-09-28 23:05:58: 19,305,687 states generated (2,400,098 s/min), 6,131,248 distinct states found (757,611 ds/min), 3,254,
+LeanP1LiveWaitsOnLeaseSmall    OK-FIRES           exp=Temporal               rc=12  | Error: Temporal property Prop_UISaveCompletes (for p1) is violated | 12828 states generated, 5068 distinct states found. Depth 8 | 10s [tlc-rs 92c7a987]
+LeanP1LiveHoldsSmall           GUARD-RSS          exp=HOLDS                  rc=143 |  |  | 51s [tlc-rs 92c7a987]
+LeanP1LiveWaitsOnLeaseSmall    OK-FIRES           exp=Temporal               rc=13  | Error: Temporal properties were violated | 77425 states generated, 27460 distinct  | 4s [TLC]
+LeanP1LiveHoldsSmall           OK-HOLDS           exp=HOLDS                  rc=0   | No error has been found | 39427922 states generated, 10676334 distinct depth of the complete state graph search is 36 | 879s [TLC -lncheck final]
+PAUSED 2026-09-29T00:3xZ (user: pause for the day); resume: ~/resume-2026-09-29.sh — LeanP1DeleteOverrideOff (1 h 34 min, depth 20, 245,259,380 distinct) resumes from its checkpoint; 20 worlds + 2 RECORD to run
