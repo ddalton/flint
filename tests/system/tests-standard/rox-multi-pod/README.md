@@ -7,7 +7,10 @@
 > [F70](../../../../spdk-csi-driver/docs/f70-rox-export-is-not-enforced-server-side.md),
 > fixed server-side 2026-09-28** (the NFS server now answers NFS4ERR_ROFS to
 > every mutating op on a ROX export). It failed against every server before
-> that fix, and it has not yet been run against the fixed one.
+> that fix, and it has not yet been run against the fixed one. **Since
+> 2026-09-29 the client also mounts `ro` for a reader-only access mode**, so
+> step 07's write now fails on the client — step 08 no longer observes the
+> server fence through a CSI mount (see the note in `07-mount-without-readonly.yaml`).
 
 ## Purpose
 
@@ -43,7 +46,8 @@ Step 05: Create 2 reader pods (REQUIRED anti-affinity: two nodes or the step fai
 Step 06: Both read the data; their nodeNames differ; a write through each
          readOnly mount is refused
 Step 07: A pod mounts the ROX PVC WITHOUT readOnly and tries to write
-Step 08: That write must be REFUSED (fails while F70 is open)
+Step 08: That write must be REFUSED (failed while F70 was open; now refused
+         by the client's access-mode `ro` AND the server — not yet run)
 Step 09: Cleanup
 ```
 
@@ -67,7 +71,9 @@ Step 09: Cleanup
 - ✅ **Snapshot restoration** - Create volume from snapshot
 - ✅ **Multi-node attachment** - Same volume on multiple nodes
 - ✅ **Read-only mounts** - a write through a `readOnly` mount is refused
-- ❌ **ROX enforced by the volume** - step 08; F70 (open)
+- 🟡 **ROX enforced by the volume** - step 08; F70 fixed server-side 2026-09-28
+  and client-side 2026-09-29, not yet run against either fix; the server's
+  fence needs a direct-mount leg to be observed on a cluster (not written)
 
 ### Real-World ROX Use Cases
 - Shared configuration across pods

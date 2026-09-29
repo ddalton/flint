@@ -244,6 +244,15 @@ security:
   # find workloads that were relying on the gap.
   enforcePermissions: false
 
+# Serve the share READ-ONLY. Renders `options: [ro, sync, no_subtree_check]`
+# and `permissions: ro` into the hub's config; the hub answers NFS4ERR_ROFS
+# to every mutating operation whatever a client mounted with, and stops
+# granting the write bits in ACCESS so open(2) for write fails with EROFS
+# on the client. Reads, lookups and releases are untouched; the tier still
+# hydrates. The rendered config is in checksum/config, so flipping this
+# rolls the hub. (The FlintShare operator's equivalent is `spec.readOnly`.)
+readOnly: false
+
 logLevel: info
 # Requests only, no limits, and matched by the operator's
 # RenderDefaults — a hub with neither runs BestEffort, which at fleet

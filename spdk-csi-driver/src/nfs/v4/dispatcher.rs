@@ -95,6 +95,12 @@ pub struct CompoundDispatcher {
     /// controller to this process's config and then never read; the
     /// export was read-write for every client for as long as ROX existed.
     read_only: bool,
+
+    /// The export's `access:` list (`nfs::export_access`): which networks
+    /// may reach the export and whether read-write or read-only. Decided
+    /// per connection by `peer_policy`; the answer rides in
+    /// `CompoundContext::peer`. Empty = every client, read-write.
+    access: crate::nfs::export_access::ExportAccess,
 }
 
 /// One pnfs_scsi_layout4 extent as encoded on the wire (RFC 8154
@@ -133,6 +139,27 @@ impl CompoundDispatcher {
     /// Whether this dispatcher refuses mutating operations (F70).
     pub fn is_read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// Install the export's `access:` list. Builder-style like
+    /// `with_read_only`; the MDS calls it from `ExportConfig::access_policy`.
+    pub fn with_export_access(mut self, access: crate::nfs::export_access::ExportAccess) -> Self {
+        self.access = access;
+        self
+    }
+
+    pub fn export_access(&self) -> &crate::nfs::export_access::ExportAccess {
+        &self.access
+    }
+
+    /// What a connection from `peer` may do: the `access:` list's answer,
+    /// with the export-wide `ro` folded in. Called once per accepted
+    /// connection (`server_v4::handle_tcp_connection`) and handed to
+    /// `dispatch_compound_with_cred` for every COMPOUND on it.
+    pub fn peer_policy(&self, peer: std::net::IpAddr) -> crate::nfs::export_access::PeerPolicy {
+        let mut p = self.access.decide(peer);
+        p.read_only |= self.read_only;
+        p
     }
     
     /// Create a new COMPOUND dispatcher with optional pNFS support
@@ -174,6 +201,7 @@ impl CompoundDispatcher {
             back_channels: Arc::new(dashmap::DashMap::new()),
             session_bound_conns: dashmap::DashMap::new(),
             read_only: false,
+            access: Default::default(),
         };
         // The grant path's callback_ready (rule 7) and the MDS
         // posture refusal both live on StateManager; hand it the
@@ -342,8 +370,9 @@ impl CompoundDispatcher {
         unix_gids: Vec<u32>,
         back_channel: Option<Arc<crate::nfs::v4::back_channel::BackChannelWriter>>,
         may_splice: bool,
+        peer: crate::nfs::export_access::PeerPolicy,
     ) -> CompoundResponse {
-        self.dispatch_compound_inner(request, principal, unix_cred, unix_gids, back_channel, may_splice)
+        self.dispatch_compound_inner(request, principal, unix_cred, unix_gids, back_channel, may_splice, peer)
             .await
     }
 
@@ -361,7 +390,7 @@ impl CompoundDispatcher {
         // `may_splice: false` — see `CompoundContext::can_splice`. Only
         // the plain-TCP reply path may splice; every other entry, this
         // one included, is safe by default rather than by a guard.
-        self.dispatch_compound_inner(request, principal, None, Vec::new(), back_channel, false)
+        self.dispatch_compound_inner(request, principal, None, Vec::new(), back_channel, false, Default::default())
             .await
     }
 
@@ -434,6 +463,7 @@ impl CompoundDispatcher {
         unix_gids: Vec<u32>,
         back_channel: Option<Arc<crate::nfs::v4::back_channel::BackChannelWriter>>,
         may_splice: bool,
+        peer: crate::nfs::export_access::PeerPolicy,
     ) -> CompoundResponse {
         debug!("COMPOUND: tag={}, operations={}", request.tag, request.operations.len());
 
@@ -595,6 +625,9 @@ impl CompoundDispatcher {
         // BIND_CONN_TO_SESSION arm can register it later in the
         // dispatcher's per-session back-channel table.
         context.back_channel = back_channel;
+        // What this connection's peer may do to the export (decided once
+        // per connection; see `peer_policy`).
+        context.peer = peer;
 
         // Process operations sequentially
         let mut results = Vec::new();
@@ -938,10 +971,25 @@ impl CompoundDispatcher {
             }
         }
 
+        // A peer outside every network of the export's `access:` list has
+        // no access to the export (`nfs::export_access`): the operations
+        // that introduce a filehandle answer NFS4ERR_ACCESS, and without a
+        // current filehandle nothing downstream can reach a file. Session
+        // operations are served as before — the session is the server's;
+        // the export is what is refused, as with knfsd.
+        if context.peer.denied {
+            if let Some((name, refused)) = denied_peer_refusal(&operation) {
+                debug!("peer outside the export's access list: {} refused with NFS4ERR_ACCESS", name);
+                return refused;
+            }
+        }
+
         // F70: a read-only export refuses every mutating operation here,
         // ahead of the handlers, so no stateid, share reservation, tier
-        // mark or filesystem call is ever made on its behalf.
-        if self.read_only {
+        // mark or filesystem call is ever made on its behalf. Read-only is
+        // the export's `ro` (every client) OR this connection's network's
+        // `permissions: ro`.
+        if self.read_only || context.peer.read_only {
             if let Some((name, refused)) = read_only_refusal(&operation) {
                 debug!("read-only export: {} refused with NFS4ERR_ROFS", name);
                 return refused;
@@ -1347,7 +1395,7 @@ impl CompoundDispatcher {
                 // knfsd answers ACCESS on an `ro` export. Linux consults
                 // ACCESS before OPEN, so this turns the refusal into an
                 // EROFS at open(2) instead of a surprise on the wire.
-                let granted = if self.read_only {
+                let granted = if self.read_only || context.peer.read_only {
                     res.access & !READ_ONLY_EXPORT_DENIED_ACCESS_BITS
                 } else {
                     res.access
@@ -4887,6 +4935,22 @@ fn read_only_refusal(op: &Operation) -> Option<(&'static str, OperationResult)> 
         | Operation::Unsupported(_)
         | Operation::BadXdr(_)
         | Operation::InvalidName(_) => return None,
+    })
+}
+
+/// The NFS4ERR_ACCESS answer for an operation a peer outside the export's
+/// `access:` list may not perform, or None. Only the three operations that
+/// introduce a current filehandle are refused — PUTROOTFH, PUTPUBFH and
+/// PUTFH — because every operation on a file needs one first and answers
+/// NFS4ERR_NOFILEHANDLE without it; refusing at the root is what makes a
+/// denied client's mount fail with EACCES instead of half-working.
+fn denied_peer_refusal(op: &Operation) -> Option<(&'static str, OperationResult)> {
+    let access = Nfs4Status::Access;
+    Some(match op {
+        Operation::PutRootFh => ("PUTROOTFH", OperationResult::PutRootFh(access)),
+        Operation::PutPubFh => ("PUTPUBFH", OperationResult::PutPubFh(access)),
+        Operation::PutFh(_) => ("PUTFH", OperationResult::PutFh(access)),
+        _ => return None,
     })
 }
 
@@ -8531,5 +8595,150 @@ mod tests {
         assert_eq!(status, Nfs4Status::RoFs as u32);
         assert_eq!(n_results, 3, "SEQUENCE + PUTROOTFH + the refused REMOVE; GETFH never ran");
         assert!(t.path().join("f").exists(), "REMOVE removed nothing");
+    }
+
+    // ---- `access[]`: per-network permissions and refusal (2026-09-29) ----
+
+    fn access(rules: &[(&str, bool)]) -> crate::nfs::export_access::ExportAccess {
+        use crate::nfs::export_access::{AccessRule, ExportAccess};
+        ExportAccess::new(rules.iter().map(|(n, ro)| AccessRule::new(n, *ro).unwrap()).collect())
+    }
+
+    fn ip(s: &str) -> std::net::IpAddr {
+        s.parse().unwrap()
+    }
+
+    /// `ops` as a peer with `policy`, through the per-connection entry
+    /// point the TCP server uses (a v4.0 COMPOUND: no session needed).
+    async fn as_peer(
+        d: &CompoundDispatcher,
+        policy: crate::nfs::export_access::PeerPolicy,
+        ops: Vec<Operation>,
+    ) -> CompoundResponse {
+        let req = CompoundRequest { tag: String::new(), tag_valid: true, minor_version: 0, operations: ops, wire_size: 0 };
+        d.dispatch_compound_with_cred(req, Vec::new(), None, Vec::new(), None, false, policy).await
+    }
+
+    /// The example config's shape — the cluster network read-write, the
+    /// rest read-only. A peer in the read-only network gets ROFS on REMOVE
+    /// and the file stays; the SAME dispatcher performs the SAME REMOVE for
+    /// a peer in the read-write network. The export itself is read-write
+    /// (`is_read_only()` false), so the network alone decides.
+    #[tokio::test]
+    async fn a_peer_in_a_read_only_network_gets_rofs_and_one_in_a_read_write_network_does_not() {
+        use crate::nfs::export_access::PeerPolicy;
+        let (d, t) = create_test_dispatcher();
+        let d = d.with_export_access(access(&[("10.0.0.0/8", false), ("0.0.0.0/0", true)]));
+        d.state_mgr.leases.end_grace();
+        std::fs::write(t.path().join("f"), b"hello").unwrap();
+        assert!(!d.is_read_only(), "the export is read-write; only the network is ro");
+
+        let ro = d.peer_policy(ip("192.168.1.1"));
+        assert_eq!(ro, PeerPolicy::READ_ONLY);
+        let resp = as_peer(&d, ro, vec![Operation::PutRootFh, Operation::Remove("f".to_string())]).await;
+        assert_eq!(resp.status, Nfs4Status::RoFs, "{resp:?}");
+        assert!(t.path().join("f").exists(), "REMOVE removed nothing");
+
+        let rw = d.peer_policy(ip("10.1.2.3"));
+        assert_eq!(rw, PeerPolicy::ALLOW);
+        let resp = as_peer(&d, rw, vec![Operation::PutRootFh, Operation::Remove("f".to_string())]).await;
+        assert_eq!(resp.status, Nfs4Status::Ok, "{resp:?}");
+        assert!(!t.path().join("f").exists(), "the read-write peer's REMOVE performed");
+    }
+
+    /// The export-wide `ro` folds into every peer's policy: a peer whose
+    /// network says `rw` is still refused on an `ro` export.
+    #[tokio::test]
+    async fn an_ro_export_overrides_a_read_write_network() {
+        let (d, t) = create_test_dispatcher();
+        let d = d.with_read_only(true).with_export_access(access(&[("0.0.0.0/0", false)]));
+        std::fs::write(t.path().join("f"), b"hello").unwrap();
+        let p = d.peer_policy(ip("10.1.2.3"));
+        assert!(p.read_only && !p.denied, "{p:?}");
+        let resp = as_peer(&d, p, vec![Operation::PutRootFh, Operation::Remove("f".to_string())]).await;
+        assert_eq!(resp.status, Nfs4Status::RoFs, "{resp:?}");
+        assert!(t.path().join("f").exists());
+    }
+
+    /// A peer outside every network of the list is refused at each
+    /// filehandle-introducing op with NFS4ERR_ACCESS, the refusal ends the
+    /// COMPOUND (nothing after it runs), and session establishment is still
+    /// served — the session is the server's, the export is what is refused.
+    /// The control: the shape every shipped config renders (`0.0.0.0/0 rw`)
+    /// serves the same peer.
+    #[tokio::test]
+    async fn a_peer_outside_every_access_network_is_refused_at_the_filehandle() {
+        use crate::nfs::export_access::PeerPolicy;
+        let (d, t) = create_test_dispatcher();
+        let d = d.with_export_access(access(&[("10.0.0.0/8", false)]));
+        std::fs::write(t.path().join("f"), b"hello").unwrap();
+        let denied = d.peer_policy(ip("192.168.1.1"));
+        assert_eq!(denied, PeerPolicy::DENIED);
+
+        let fh_ops: Vec<(&str, Operation)> = vec![
+            ("PUTROOTFH", Operation::PutRootFh),
+            ("PUTPUBFH", Operation::PutPubFh),
+            ("PUTFH", Operation::PutFh(Nfs4FileHandle { data: vec![0xAB; 16] })),
+        ];
+        for (name, op) in fh_ops {
+            let resp = as_peer(&d, denied, vec![op, Operation::Remove("f".to_string())]).await;
+            assert_eq!(resp.status, Nfs4Status::Access, "{name}: {resp:?}");
+            assert_eq!(resp.results.len(), 1, "{name}: the refused op ends the COMPOUND; REMOVE never ran");
+            assert_eq!(resp.results[0].status(), Nfs4Status::Access, "{name}: {:?}", resp.results[0]);
+        }
+        assert!(t.path().join("f").exists(), "nothing reached the file");
+
+        // Session establishment is not the export's to refuse.
+        let eid = as_peer(
+            &d,
+            denied,
+            vec![Operation::ExchangeId {
+                clientowner: ClientId { verifier: 7, id: b"denied-peer".to_vec() },
+                flags: 0,
+                state_protect: 0,
+                impl_id: vec![],
+            }],
+        )
+        .await;
+        assert!(
+            matches!(eid.results.first(), Some(OperationResult::ExchangeId(Nfs4Status::Ok, Some(_)))),
+            "EXCHANGE_ID is served to a denied peer: {eid:?}"
+        );
+
+        // The control: a catch-all `rw` list — what every chart renders —
+        // serves the same peer at the same ops.
+        let (d2, _t2) = create_test_dispatcher();
+        let d2 = d2.with_export_access(access(&[("0.0.0.0/0", false)]));
+        let p = d2.peer_policy(ip("192.168.1.1"));
+        assert_eq!(p, PeerPolicy::ALLOW);
+        let resp = as_peer(&d2, p, vec![Operation::PutRootFh]).await;
+        assert_eq!(resp.status, Nfs4Status::Ok, "{resp:?}");
+    }
+
+    /// ACCESS for a read-only peer never grants the write bits (as on an
+    /// `ro` export), so Linux fails `open(2)` for write with EROFS before
+    /// sending anything; the read-write peer of the same export is granted
+    /// them (the control).
+    #[tokio::test]
+    async fn a_read_only_peer_is_granted_no_write_bits_by_access() {
+        let (d, _t) = create_test_dispatcher();
+        let d = d.with_export_access(access(&[("10.0.0.0/8", false), ("0.0.0.0/0", true)]));
+        async fn granted(d: &CompoundDispatcher, p: crate::nfs::export_access::PeerPolicy) -> u32 {
+            let resp = as_peer(d, p, vec![Operation::PutRootFh, Operation::Access(0x3f)]).await;
+            assert_eq!(resp.status, Nfs4Status::Ok, "{resp:?}");
+            match &resp.results[1] {
+                OperationResult::Access(Nfs4Status::Ok, Some((_, granted))) => *granted,
+                other => panic!("ACCESS: {other:?}"),
+            }
+        }
+        let ro = granted(&d, d.peer_policy(ip("192.168.1.1"))).await;
+        assert_eq!(ro & READ_ONLY_EXPORT_DENIED_ACCESS_BITS, 0, "read-only peer granted write bits: {ro:#x}");
+        assert_ne!(ro & 0x1, 0, "READ is granted: {ro:#x}");
+        let rw = granted(&d, d.peer_policy(ip("10.1.2.3"))).await;
+        assert_eq!(
+            rw & READ_ONLY_EXPORT_DENIED_ACCESS_BITS,
+            READ_ONLY_EXPORT_DENIED_ACCESS_BITS,
+            "the read-write peer is granted them (the control): {rw:#x}"
+        );
     }
 }

@@ -638,6 +638,13 @@ simply nothing to flush. The rendered config carries it as
 `options: [ro, sync, no_subtree_check]` on the export, which the server
 reads at boot — so flipping the field rolls the hub, like any other
 setting (see [Changing settings](#changing-settings-and-what-actually-restarts-the-hub)).
+The rendered `access:` list says the same (`network: 0.0.0.0/0`,
+`permissions: ro`), and since 2026-09-29 the server enforces that list
+too — per network, most specific network first, a `/0` matching every
+peer of either IP family — so either line alone would make the hub
+read-only. The operator renders one catch-all network; a hand-written
+config can serve some networks read-write and others read-only, and a
+client outside every listed network is refused (`NFS4ERR_ACCESS`).
 Uses: a published dataset many agents read, a project frozen while its
 bucket moves, a satellite that must never write back.
 

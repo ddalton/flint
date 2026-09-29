@@ -1,7 +1,10 @@
 # F70 — a ROX export is read-only only because the CLIENT was asked nicely; the NFS server never enforces it
 
 Status: **FIXED SERVER-SIDE 2026-09-28, unit-tested; the cluster test
-(`rox-multi-pod` step 08) has NOT yet been run against the fixed server.**
+(`rox-multi-pod` step 08) has NOT yet been run against the fixed server.
+2026-09-29: the export's `access:` list is enforced too (per-network
+`ro`/`rw`, unlisted peers refused), the client reads the access mode, and
+both charts grew a `readOnly` knob — see the end.**
 Found 2026-09-22 by a code read while answering a scoping question ("can
 flint lean run in ROX mode?"), not by any suite — and no suite could have
 found it, which is [F71](f71-rox-multi-pod-cannot-fail.md). The sections
@@ -68,7 +71,8 @@ makes on flint's behalf with that bit set. It does not hold for:
   `NodePublishVolume` **never reads the access mode** (`main.rs:4487-5090`
   inspects `req.readonly` and `access_type` only), so the access mode is not
   a second, independent source of the truth. There is exactly one bit, and it
-  arrives from outside.
+  arrives from outside. *(As found. Since 2026-09-29 it does read the access
+  mode — `mount_opts::publish_is_read_only` — see the end.)*
 
 A ROX PV's promise is "many readers, no writers". What is implemented is
 "many mounters, each of whom we asked to mount `ro`".
@@ -168,9 +172,9 @@ returns EROFS on the client.
 **Still owed.** (1) The cluster leg: `rox-multi-pod` steps 07/08 (a pod
 that mounts the ROX PVC without `readOnly` and must be refused) have not
 been run against the fixed server; the kind tier on the build box cannot
-run this suite (see F71's run record). (2) `NodePublishVolume` still does
-not read the access mode; the client-side `ro` remains kubelet's bit. That
-is now belt to the server's braces rather than the guarantee. (3) ~~The MDS's
+run this suite (see F71's run record). (2) ~~`NodePublishVolume` still does
+not read the access mode~~ — **it does since 2026-09-29** (below); the
+client-side `ro` is now kubelet's bit OR a reader-only access mode. (3) ~~The MDS's
 `ExportConfig.options` is still never read~~ — **wired the same day**:
 `ExportConfig::read_only()` reads `options` exports(5)-style (`ro` ⇒
 read-only; `rw` or nothing ⇒ read-write; the knfsd options every shipped
@@ -186,9 +190,81 @@ refuses to construct (`ro_and_rw_together_refuse_to_start`). **`FlintShare`
 gained `spec.readOnly` the same day** (CRD schema version 7): the lite
 operator renders `options: [ro, sync, no_subtree_check]` for it, the render
 test parses the result back through the server's own reader, and flipping the
-field rolls the hub (the line is in the rollout checksum). The pNFS chart's
+field rolls the hub (the line is in the rollout checksum). ~~The pNFS chart's
 MDS template still hard-codes `rw`. `access[].permissions` is rendered `ro`
-too but is still unread by the server.
+too but is still unread by the server.~~ Both closed 2026-09-29, below.
+
+## The follow-on (2026-09-29): `access[]`, the access mode, the charts
+
+**The export's `access:` list is enforced** (`nfs::export_access`, new).
+Every config carried `access: [{network: 0.0.0.0/0, permissions: rw}]` and
+the example config a `10.0.0.0/8 rw` list, and the server read none of it —
+the same class as F70. Now `ExportConfig::access_policy()` parses each entry
+(a CIDR or bare address; `ro` or `rw`; anything else refuses startup naming
+the export and the entry) and `MetadataServer::new` hands the list to
+`CompoundDispatcher::with_export_access`. The decision is made ONCE PER
+CONNECTION, in the shared connection handler (`server_v4::handle_tcp_connection`,
+which both the MDS and the per-volume server use), from the peer address the
+listener accepted, and rides in `CompoundContext::peer` for every COMPOUND
+on that connection, AUTH_SYS and RPCSEC_GSS alike:
+
+- the MOST SPECIFIC network containing the peer decides (longest prefix; a
+  tie goes to the first listed), as knfsd prefers a host entry over a
+  network entry;
+- `permissions: ro` ⇒ that connection is read-only: the F70 refusal list
+  answers `NFS4ERR_ROFS` and ACCESS grants no write bits, exactly as the
+  export-wide `ro` does for everyone. `options: [ro]` folds in on top;
+- a peer matching NO entry of a non-empty list has no access: PUTROOTFH,
+  PUTPUBFH and PUTFH answer `NFS4ERR_ACCESS`, so its mount fails with EACCES
+  and nothing downstream can reach a file. Session ops (EXCHANGE_ID, ...)
+  are still served — the session is the server's, the export is what is
+  refused, as with knfsd;
+- an empty or absent list restricts nothing (the previous behaviour);
+- a `/0` network (`0.0.0.0/0`, `::/0`) matches every peer of EITHER IP
+  family, so the shipped catch-all does not lock the IPv6 pods of a
+  dual-stack cluster out; a longer prefix matches its own family, with an
+  IPv4-mapped IPv6 peer unmapped first.
+
+Tests: the decision table (`nfs::export_access::tests`); the config reader
+(`export_access_permissions_are_read_per_network_and_bad_entries_are_refused`);
+the dispatcher, through the per-connection entry point
+(`a_peer_in_a_read_only_network_gets_rofs_and_one_in_a_read_write_network_does_not`,
+`an_ro_export_overrides_a_read_write_network`,
+`a_peer_outside_every_access_network_is_refused_at_the_filehandle`,
+`a_read_only_peer_is_granted_no_write_bits_by_access`); the MDS built from a
+real YAML config (`access_permissions_reach_the_dispatcher_of_a_constructed_mds`,
+`an_access_entry_with_unknown_permissions_refuses_to_start`); and the WIRING,
+over a real loopback TCP connection through the production handler
+(`server_v4::export_access_wiring_tests`: 127.0.0.1 against `10.0.0.0/8` is
+refused at PUTROOTFH with ACCESS and against `127.0.0.0/8` served; a
+`127.0.0.1/32 ro` entry answers ROFS to REMOVE and the file stays, `rw`
+performs it). The proxy's CIDR matcher moved into the new module so the two
+lists are matched by one implementation.
+
+**`NodePublishVolume` reads the access mode.** `mount_opts::publish_is_read_only`
+is kubelet's bit OR a reader-only access mode (`MULTI_NODE_READER_ONLY`,
+`SINGLE_NODE_READER_ONLY` — modes the CSI spec defines as "can only be
+published as readonly"; kubelet sends the PV's first access mode with every
+publish, so a `ReadOnlyMany` PV whose pod forgot `readOnly: true` arrives as
+one). Better than the bit alone: `open(2)` for write fails with EROFS on the
+client, and the client never sends the write. It is forced, not refused — a
+pod that reads a ROX PVC without saying `readOnly` is an ordinary manifest.
+Tested (`a_reader_only_access_mode_or_kubelets_bit_makes_the_publish_read_only`);
+the one-line wiring in `main.rs` is read, not unit-tested (`main.rs` has no
+tests). NOTE THE COST: the F71 pod now fails on the client, so `rox-multi-pod`
+step 07/08 can no longer observe the server fence through a CSI mount; a
+cluster leg for the server needs a direct `mount -t nfs4 -o rw` from a
+privileged pod (not written).
+
+**The charts.** `pnfs.server.readOnly` (flint-csi-driver-chart) and
+`readOnly` (flint-lite-chart) render `options: [ro, sync, no_subtree_check]`
+and `permissions: ro`; rendered both ways with `helm template`. The lite
+chart's config is in `checksum/config`, so it rolls the hub; the pNFS chart
+has no config checksum, so the MDS pods must be restarted (as for every knob
+in that chart today — said in `values.yaml`). The DS template's export block
+(`pnfs-ds.yaml`, `options: [rw, sync]`) is left as is: the DS never reads
+its `exports` (its config is bdevs, bind and MDS endpoints), and the MDS is
+the layout authority — an `ro` MDS grants no read-write layout.
 
 ## Scope note — this is not lean
 

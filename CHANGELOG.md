@@ -14,6 +14,44 @@ covered by the stability guarantee.
 
 ### Added
 
+- **pNFS MDS / lite hub: the export's `access:` list is enforced** (2026-09-29,
+  `nfs::export_access`, F70's second follow-on). Every config carried
+  `access: [{network: 0.0.0.0/0, permissions: rw}]` and the server read none
+  of it. Now each entry is a CIDR (or bare address) with `ro` or `rw`; the
+  most specific network containing a client's address decides (a tie goes to
+  the first listed); `permissions: ro` makes that client's connections
+  read-only (`NFS4ERR_ROFS` to every mutating op, no write bits from ACCESS —
+  exactly the export-wide `ro`), and a client outside EVERY listed network is
+  refused at PUTROOTFH/PUTFH with `NFS4ERR_ACCESS` (its mount fails with
+  EACCES; session ops are still served). An empty or absent list restricts
+  nothing; a `/0` network matches every peer of either IP family, so the
+  shipped catch-all keeps serving IPv6 pods. Decided once per connection from
+  the accepted peer address, in the connection handler both servers share,
+  for AUTH_SYS and RPCSEC_GSS alike. A bad entry refuses startup naming the
+  export and the entry. Checked: the decision table; the config reader; the
+  dispatcher through the per-connection entry point; an MDS built from a real
+  YAML config; and the wiring over a real loopback TCP connection through the
+  production handler (127.0.0.1 refused against `10.0.0.0/8`, served against
+  `127.0.0.0/8`; a `127.0.0.1/32 ro` entry answers ROFS to REMOVE). NOT run
+  on a cluster. See `docs/f70-rox-export-is-not-enforced-server-side.md`.
+- **CSI node: a reader-only access mode mounts `ro`** (2026-09-29).
+  `NodePublishVolume` used to read only kubelet's `readonly` bit, which comes
+  from the pod spec; it now also reads the volume capability's access mode
+  (`MULTI_NODE_READER_ONLY`, `SINGLE_NODE_READER_ONLY` — modes the CSI spec
+  says can only be published read-only), so a `ReadOnlyMany` PV whose pod
+  forgot `readOnly: true` still mounts `ro` and `open(2)` for write fails on
+  the client with EROFS (`mount_opts::publish_is_read_only`, tested). The
+  server enforces ROX regardless (F70); this is the client's half. It also
+  means `rox-multi-pod` step 07 can no longer observe the server fence through
+  a CSI mount — a direct-mount leg is needed for that (not written).
+- **Charts: `pnfs.server.readOnly` (flint-csi-driver-chart) and `readOnly`
+  (flint-lite-chart)** (2026-09-29) render `options: [ro, sync,
+  no_subtree_check]` and `permissions: ro` into the server config instead of
+  the hard-coded `rw`; rendered both ways with `helm template`. The lite
+  chart's config is in `checksum/config`, so flipping rolls the hub; the pNFS
+  chart has no config checksum, so the MDS pods must be restarted (said in
+  `values.yaml`). The DS template's export block is unchanged: the DS never
+  reads its `exports`.
 - **FlintShare `spec.readOnly`: a read-only hub from the CR** (2026-09-28,
   CRD schema version 7). The lite operator renders `options: [ro, sync,
   no_subtree_check]` (and `permissions: ro`) for the export, which the
@@ -136,6 +174,17 @@ covered by the stability guarantee.
   was read by an invariant but dropped from `StrictGh`; the census self-test
   refused the gate, the field is now kept, and the two removal worlds re-ran
   under the sound view with unchanged counts.
+
+### Changed
+
+- **An export's `access:` list is no longer decorative** (2026-09-29). A
+  client outside every listed network used to get read-write access; it is
+  now refused (`NFS4ERR_ACCESS` at PUTROOTFH/PUTFH), and a `permissions: ro`
+  network is now read-only. Every shipped config (both charts, the lite
+  operator, the lima fixtures) renders `0.0.0.0/0 rw`, which changes nothing
+  for any peer of either IP family; a hand-written list such as the example
+  config's `10.0.0.0/8 rw` now means what it says. `permissions` must be `ro`
+  or `rw` and `network` a CIDR or address, or the server refuses to start.
 
 ### Fixed
 

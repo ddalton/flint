@@ -82,13 +82,17 @@ mds:
     {{- toYaml . | nindent 4 }}
     {{- end }}
   {{- end }}
+{{- /* `ro` or `rw` from .Values.readOnly; the server reads BOTH `options`
+     and `access[].permissions` (the most specific network wins; a peer
+     outside every network is refused; `/0` is anyone, either IP family). */}}
+{{- $mode := ternary "ro" "rw" (default false .Values.readOnly) }}
 exports:
   - path: /data/exports
     fsid: 1
-    options: [rw, sync, no_subtree_check]
+    options: [{{ $mode }}, sync, no_subtree_check]
     access:
       - network: 0.0.0.0/0
-        permissions: rw
+        permissions: {{ $mode }}
 logging:
   level: {{ .Values.logLevel | default "info" }}
   format: text

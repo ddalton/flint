@@ -305,7 +305,7 @@ impl Proxy {
     async fn to_dispatcher(&self, call: &CallMessage, req: CompoundRequest) -> Bytes {
         let resp = self
             .disp
-            .dispatch_compound_with_cred(req, call.cred.principal(), call.cred.unix_uid_gid(), call.cred.unix_gids(), None, false)
+            .dispatch_compound_with_cred(req, call.cred.principal(), call.cred.unix_uid_gid(), call.cred.unix_gids(), None, false, Default::default())
             .await;
         let slot = resp.cache_slot;
         let bytes = resp.encode();
@@ -349,7 +349,7 @@ impl Proxy {
         let seq_only = CompoundRequest { tag: String::new(), tag_valid: true, minor_version: minor, operations: vec![seq_op], wire_size: 0 };
         let seq_body = self
             .disp
-            .dispatch_compound_with_cred(seq_only, call.cred.principal(), call.cred.unix_uid_gid(), call.cred.unix_gids(), None, false)
+            .dispatch_compound_with_cred(seq_only, call.cred.principal(), call.cred.unix_uid_gid(), call.cred.unix_gids(), None, false, Default::default())
             .await
             .encode();
         let mut d = XdrDecoder::new(seq_body.clone());

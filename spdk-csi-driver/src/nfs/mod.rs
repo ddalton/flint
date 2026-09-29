@@ -33,6 +33,7 @@ pub mod krb;          // Kerberos 5 crypto to spec (RFC 3961/3962/8009/4121)
 pub mod gss_framing;  // RPCSEC_GSS message framing (RFC 2203 §5.3)
 pub mod rpcsec_gss;   // RPCSEC_GSS authentication (Kerberos support)
 pub mod sec_policy;   // Minimum security flavor floor (FLINT_NFS_MIN_SEC)
+pub mod export_access; // Per-network export access: `access[].network` + `permissions` (ro/rw), decided once per connection
 pub mod pipeline;     // Per-connection RPC pipelining (RFC 8881 §2.10.6)
 pub mod ingress;      // One RPC-record ingress for every lane (markers, fragments, caps, pooling)
 pub mod read_pool;    // Reusable READ buffers (mmap_lock is why, not CPU)

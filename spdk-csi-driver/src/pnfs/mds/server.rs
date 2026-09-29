@@ -377,6 +377,15 @@ impl MetadataServer {
             .transpose()
             .map_err(crate::pnfs::Error::Config)?
             .unwrap_or(false);
+        // The same export's `access:` list — per-network `ro`/`rw`, and a
+        // refusal for peers outside every network. A bad entry refuses
+        // startup here, like an ambiguous `ro`+`rw`.
+        let access = exports
+            .first()
+            .map(|e| e.access_policy())
+            .transpose()
+            .map_err(crate::pnfs::Error::Config)?
+            .unwrap_or_default();
         let base_dispatcher = Arc::new(
             CompoundDispatcher::new_with_pnfs(
                 Arc::clone(&fh_manager),
@@ -384,12 +393,20 @@ impl MetadataServer {
                 lock_mgr,
                 pnfs_ops,
             )
-            .with_read_only(read_only),
+            .with_read_only(read_only)
+            .with_export_access(access),
         );
         if read_only {
             info!(
                 "🔒 export is READ-ONLY (`ro` in export options): every mutating \
                  operation answers NFS4ERR_ROFS, whatever the client mounted"
+            );
+        }
+        if !base_dispatcher.export_access().is_empty() {
+            info!(
+                "🔐 export access list (most specific network wins; peers outside every \
+                 network are refused): {}",
+                base_dispatcher.export_access().describe()
             );
         }
 
@@ -2246,6 +2263,13 @@ mod export_options_tests {
     /// A standalone MDS built from a real YAML config, the way
     /// `nfs_mds_main` builds one, with the export's options as given.
     async fn mds_with_options(options: &str) -> (Result<MetadataServer>, tempfile::TempDir) {
+        mds_with_export(options, "").await
+    }
+
+    /// As above, with an `access:` list too — `access_yaml` is the list's
+    /// YAML, already indented under the export (empty = no `access:` key,
+    /// which is what a config that never had one deserializes to).
+    async fn mds_with_export(options: &str, access_yaml: &str) -> (Result<MetadataServer>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let export = dir.path().join("exports");
         std::fs::create_dir_all(&export).unwrap();
@@ -2255,10 +2279,11 @@ mod export_options_tests {
              mds:\n  bind:\n    address: \"127.0.0.1\"\n    port: 0\n\
              \x20 layout:\n    type: file\n    stripeSize: 8388608\n    policy: stripe\n\
              \x20 dataServers: []\n  state:\n    backend: memory\n    config: {{}}\n\
-             exports:\n  - path: {}\n    fsid: 1\n    options: {}\n\
+             exports:\n  - path: {}\n    fsid: 1\n    options: {}\n{}\
              logging:\n  level: info\n  format: text\n",
             export.display(),
             options,
+            access_yaml,
         );
         let cfg_path = dir.path().join("mds.yaml");
         std::fs::write(&cfg_path, yaml).unwrap();
@@ -2312,5 +2337,77 @@ mod export_options_tests {
             Ok(_) => panic!("an export that is both ro and rw must not construct"),
         };
         assert!(err.contains("`ro` and `rw`"), "the refusal names the conflict: {err}");
+    }
+
+    /// The export's `access:` list reaches the dispatcher of a server built
+    /// the way `main` builds one: a peer's policy follows its network. The
+    /// list is the example config's shape (cluster read-write, the rest
+    /// read-only), then a list with no catch-all (the rest refused), then
+    /// the shape every shipped config renders (`0.0.0.0/0 rw`: nobody
+    /// refused, nobody read-only), then no list at all.
+    #[tokio::test]
+    async fn access_permissions_reach_the_dispatcher_of_a_constructed_mds() {
+        use crate::nfs::export_access::PeerPolicy;
+        use std::net::IpAddr;
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+
+        let (mds, _d) = mds_with_export(
+            "[rw, sync, no_subtree_check]",
+            "    access:\n      - network: 10.0.0.0/8\n        permissions: rw\n\
+             \x20     - network: 0.0.0.0/0\n        permissions: ro\n",
+        )
+        .await;
+        let mds = mds.expect("constructs");
+        assert_eq!(mds.base_dispatcher.peer_policy(ip("10.1.2.3")), PeerPolicy::ALLOW);
+        assert_eq!(mds.base_dispatcher.peer_policy(ip("192.168.1.1")), PeerPolicy::READ_ONLY);
+
+        let (mds, _d) = mds_with_export(
+            "[rw, sync, no_subtree_check]",
+            "    access:\n      - network: 10.0.0.0/8\n        permissions: rw\n",
+        )
+        .await;
+        let mds = mds.expect("constructs");
+        assert_eq!(mds.base_dispatcher.peer_policy(ip("10.1.2.3")), PeerPolicy::ALLOW);
+        assert_eq!(mds.base_dispatcher.peer_policy(ip("192.168.1.1")), PeerPolicy::DENIED);
+
+        let (mds, _d) = mds_with_export(
+            "[rw, sync, no_subtree_check]",
+            "    access:\n      - network: 0.0.0.0/0\n        permissions: rw\n",
+        )
+        .await;
+        let mds = mds.expect("constructs");
+        assert_eq!(mds.base_dispatcher.peer_policy(ip("192.168.1.1")), PeerPolicy::ALLOW);
+        assert_eq!(mds.base_dispatcher.peer_policy(ip("fd00::1")), PeerPolicy::ALLOW);
+
+        let (mds, _d) = mds_with_options("[rw, sync, no_subtree_check]").await;
+        let mds = mds.expect("constructs");
+        assert!(mds.base_dispatcher.export_access().is_empty());
+        assert_eq!(mds.base_dispatcher.peer_policy(ip("192.168.1.1")), PeerPolicy::ALLOW);
+
+        // `ro` in options folds into every peer's policy, whatever its network.
+        let (mds, _d) = mds_with_export(
+            "[ro, sync, no_subtree_check]",
+            "    access:\n      - network: 0.0.0.0/0\n        permissions: rw\n",
+        )
+        .await;
+        let mds = mds.expect("constructs");
+        assert_eq!(mds.base_dispatcher.peer_policy(ip("10.1.2.3")), PeerPolicy::READ_ONLY);
+    }
+
+    /// An `access:` entry the server cannot enforce as written is refused
+    /// at construction, naming the export and the entry — never read as
+    /// read-write.
+    #[tokio::test]
+    async fn an_access_entry_with_unknown_permissions_refuses_to_start() {
+        let (mds, _d) = mds_with_export(
+            "[rw, sync, no_subtree_check]",
+            "    access:\n      - network: 10.0.0.0/8\n        permissions: rwx\n",
+        )
+        .await;
+        let err = match mds {
+            Err(e) => format!("{e}"),
+            Ok(_) => panic!("`permissions: rwx` must not construct"),
+        };
+        assert!(err.contains("10.0.0.0/8") && err.contains("rwx"), "the refusal names the entry: {err}");
     }
 }

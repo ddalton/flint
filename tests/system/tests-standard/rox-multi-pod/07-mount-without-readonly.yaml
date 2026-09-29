@@ -1,13 +1,22 @@
 # F70's load-bearing leg (F71, 2026-09-27). A ROX volume must be read-only
-# because it IS ROX, not because the pod remembered `readOnly: true`. The
-# driver's only read-only switch is kubelet's `readonly` bit, which comes
-# from the POD SPEC; NodePublishVolume never reads the access mode
-# (MULTI_NODE_READER_ONLY), and the NFS server never reads its own
+# because it IS ROX, not because the pod remembered `readOnly: true`. When
+# written, the driver's only read-only switch was kubelet's `readonly` bit,
+# which comes from the POD SPEC; NodePublishVolume never read the access
+# mode (MULTI_NODE_READER_ONLY), and the NFS server never read its own
 # `read_only` config. This pod mounts the ROX PVC the ordinary way, without
 # `readOnly`, and tries to write. Step 08 requires the write to be REFUSED.
 # While F70 was open it LANDED, and this test FAILED — which was the point.
-# F70 was fixed server-side 2026-09-28 (the server answers NFS4ERR_ROFS);
-# this leg has not yet been run against the fixed server.
+#
+# Since then, TWO independent fences refuse it: the server answers
+# NFS4ERR_ROFS (2026-09-28), and NodePublishVolume reads the access mode
+# and mounts `ro` for a reader-only PV (2026-09-29), so this pod's write
+# fails with EROFS on the client before anything is sent. That second fence
+# means this leg can no longer SEE the server's: a server regression would
+# be masked by the client's `ro`. The server fence is observed at unit level
+# over a real TCP connection (`server_v4::export_access_wiring_tests`,
+# `deleg_wiring_tests`); a cluster leg for it needs a DIRECT mount of the
+# export (`mount -t nfs4 -o rw` from a privileged pod, bypassing CSI) — not
+# written. Neither leg has been run against the fixed server yet.
 apiVersion: v1
 kind: Pod
 metadata:

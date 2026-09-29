@@ -84,6 +84,7 @@ Rules that matter (details and the why in `docs/flint-lite.md`):
 | `persistence.storageClassName` | `""` (cluster default) | Any CSI driver's RWO class |
 | `persistence.size` | `20Gi` | Size for the working set, not the dataset |
 | `tier.*` | disabled | S3 cold tier — see above and `values.yaml` |
+| `readOnly` | `false` | Serve the share read-only: the hub answers `NFS4ERR_ROFS` to every mutating operation whatever a client mounted with; flipping it rolls the hub |
 | `logLevel`, `resources`, `nodeSelector` | `info`, `{}`, `{}` | Hub pod knobs |
 
 Migrating from the old `flint-csi-driver-chart` lite profile: the keys

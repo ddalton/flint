@@ -4498,7 +4498,15 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         let volume_id = req.volume_id.clone();
         let target_path = req.target_path.clone();
         let staging_target_path = req.staging_target_path.clone();
-        let readonly = req.readonly;
+        // kubelet's `readonly` bit OR a reader-only access mode: a ROX PV
+        // whose pod forgot `readOnly: true` still mounts `ro` (the server
+        // enforces ROX regardless since F70; this is the client's half).
+        let readonly = spdk_csi_driver::mount_opts::publish_is_read_only(&req);
+        if readonly && !req.readonly {
+            println!(
+                "📋 [NODE] Read-only from the volume's ACCESS MODE (kubelet's readonly bit was not set)"
+            );
+        }
         
         // Check if this is an ephemeral volume
         let is_ephemeral = req.volume_context.get("csi.storage.k8s.io/ephemeral")

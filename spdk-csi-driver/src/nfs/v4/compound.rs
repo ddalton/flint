@@ -1009,6 +1009,13 @@ pub struct CompoundContext {
     /// path that doesn't have a real TCP connection. Callback paths
     /// must tolerate this.
     pub back_channel: Option<std::sync::Arc<super::back_channel::BackChannelWriter>>,
+    /// What the connection this COMPOUND arrived on may do to the export,
+    /// decided once per connection from the peer address against the
+    /// export's `access:` list (`nfs::export_access`). The default is
+    /// "allowed, read-write": every in-process caller (the hub's File
+    /// API, unit tests) has it, and the export-wide `ro`
+    /// (`CompoundDispatcher::with_read_only`) applies on top of it.
+    pub peer: crate::nfs::export_access::PeerPolicy,
 }
 
 /// "Current stateid" sentinel: `seqid=1, other=00…00`. RFC 8881
@@ -1047,6 +1054,7 @@ impl CompoundContext {
             unix_gids: Vec::new(),
             current_stateid: None,
             back_channel: None,
+            peer: Default::default(),
         }
     }
 

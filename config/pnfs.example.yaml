@@ -193,19 +193,34 @@ exports:
   - path: /
     # Filesystem ID (must be unique per export)
     fsid: 1
-    # Export options
+    # Export options, exports(5)-style. `rw` (or neither) is read-write;
+    # `ro` makes the export read-only for EVERY client: each mutating
+    # operation answers NFS4ERR_ROFS whatever the client mounted with.
+    # `sync`, `no_subtree_check`, `no_root_squash` are knfsd options this
+    # server accepts and ignores. `ro` and `rw` together refuse to start.
     options:
       - rw              # Read-write
       - sync            # Synchronous I/O
       - no_subtree_check
       - no_root_squash  # Allow root access
-    # Access control
+    # Access control, ENFORCED since 2026-09-29 (it was carried and read
+    # nowhere before). Each entry is a CIDR (or a bare address) and `ro`
+    # or `rw`. A client is matched to the MOST SPECIFIC network that
+    # contains its address (a tie goes to the first listed); `ro` makes
+    # that client's connections read-only (NFS4ERR_ROFS). A client that
+    # matches NO entry of a non-empty list has no access: PUTROOTFH /
+    # PUTFH answer NFS4ERR_ACCESS and its mount fails with EACCES. An
+    # empty or absent list restricts nothing. `0.0.0.0/0` or `::/0` means
+    # anyone, of either IP family; any longer prefix matches only its own.
     access:
-      # Allow entire cluster network
+      # The cluster network, read-write
       - network: 10.0.0.0/8
         permissions: rw
-      # Allow specific client
+      # One host inside it, read-only — the /32 is more specific and wins
       # - network: 192.168.1.100/32
+      #   permissions: ro
+      # Everyone else would be refused; to serve them read-only instead:
+      # - network: 0.0.0.0/0
       #   permissions: ro
 
 # ============================================================================

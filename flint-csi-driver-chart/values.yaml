@@ -559,6 +559,16 @@ pnfs:
     # RUST_LOG / config log level for MDS + DS pods.
     logLevel: info
 
+    # Serve the export READ-ONLY. Renders `options: [ro, sync,
+    # no_subtree_check]` and `permissions: ro` into every shard's MDS
+    # config; the server answers NFS4ERR_ROFS to every mutating
+    # operation whatever a client mounted with (F70), and stops
+    # granting the write bits in ACCESS so open(2) for write fails
+    # with EROFS on the client. Read at MDS boot: flipping it takes
+    # effect when the MDS pods restart (this chart does not roll them
+    # on a config change).
+    readOnly: false
+
     mds:
       # MDS shard count (mds-sharding-plan.md). Each shard is an
       # independent single-replica MDS owning a disjoint set of

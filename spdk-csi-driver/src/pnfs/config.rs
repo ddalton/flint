@@ -764,6 +764,39 @@ impl ExportConfig {
             (ro, _) => Ok(ro),
         }
     }
+
+    /// The export's `access:` list as the server enforces it
+    /// (`nfs::export_access`): each entry's `network` must be a CIDR or a
+    /// bare address and its `permissions` `ro` or `rw`; anything else is a
+    /// refused config, named by export and network, rather than an entry
+    /// silently read as read-write. An absent or empty list restricts
+    /// nothing — the behaviour before 2026-09-29, when the list was read
+    /// nowhere.
+    pub fn access_policy(&self) -> std::result::Result<crate::nfs::export_access::ExportAccess, String> {
+        use crate::nfs::export_access::{AccessRule, ExportAccess};
+        let mut rules = Vec::with_capacity(self.access.len());
+        for a in &self.access {
+            let read_only = match a.permissions.trim().to_ascii_lowercase().as_str() {
+                "ro" => true,
+                "rw" => false,
+                other => {
+                    return Err(format!(
+                        "export {}: access network {} has permissions {:?} — use `ro` or `rw`",
+                        self.path, a.network, other
+                    ))
+                }
+            };
+            let rule = AccessRule::new(&a.network, read_only).ok_or_else(|| {
+                format!(
+                    "export {}: access network {:?} is not an IPv4/IPv6 CIDR or address \
+                     (e.g. 10.0.0.0/8, 192.168.1.100, ::/0)",
+                    self.path, a.network
+                )
+            })?;
+            rules.push(rule);
+        }
+        Ok(ExportAccess::new(rules))
+    }
 }
 
 /// Access control configuration
@@ -1295,6 +1328,53 @@ mod tests {
         let both = export_with(&["ro", "rw"]).read_only();
         assert!(both.is_err(), "ro+rw must be refused, got {both:?}");
         assert!(both.unwrap_err().contains("/exports"), "the error names the export");
+    }
+
+    fn export_with_access(access: &[(&str, &str)]) -> ExportConfig {
+        ExportConfig {
+            path: "/exports".to_string(),
+            fsid: 1,
+            options: vec!["rw".to_string()],
+            access: access
+                .iter()
+                .map(|(n, p)| AccessConfig { network: n.to_string(), permissions: p.to_string() })
+                .collect(),
+        }
+    }
+
+    /// `access[].permissions` is read `ro`/`rw` (case and whitespace
+    /// free) per network; an unknown word or an unparsable network is a
+    /// refused config naming the export and the entry, and no list at all
+    /// is the allow-everyone list.
+    #[test]
+    fn export_access_permissions_are_read_per_network_and_bad_entries_are_refused() {
+        use std::net::IpAddr;
+        use crate::nfs::export_access::PeerPolicy;
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+
+        let a = export_with_access(&[("10.0.0.0/8", "rw"), ("0.0.0.0/0", " RO ")])
+            .access_policy()
+            .expect("a valid list parses");
+        assert_eq!(a.rules().len(), 2);
+        assert_eq!(a.decide(ip("10.1.2.3")), PeerPolicy::ALLOW);
+        assert_eq!(a.decide(ip("192.168.1.1")), PeerPolicy::READ_ONLY);
+
+        // the shape every chart, operator and lima config renders today
+        let shipped = export_with_access(&[("0.0.0.0/0", "rw")]).access_policy().unwrap();
+        assert_eq!(shipped.decide(ip("192.168.1.1")), PeerPolicy::ALLOW);
+        assert_eq!(shipped.decide(ip("fd00::1")), PeerPolicy::ALLOW, "/0 is anyone");
+
+        let none = export_with(&["rw"]).access_policy().unwrap();
+        assert!(none.is_empty());
+        assert_eq!(none.decide(ip("192.168.1.1")), PeerPolicy::ALLOW);
+
+        let bad_perm = export_with_access(&[("10.0.0.0/8", "rwx")]).access_policy();
+        let err = bad_perm.expect_err("`rwx` is not a permission");
+        assert!(err.contains("/exports") && err.contains("10.0.0.0/8") && err.contains("rwx"), "{err}");
+
+        let bad_net = export_with_access(&[("cluster-local", "rw")]).access_policy();
+        let err = bad_net.expect_err("a name is not a network");
+        assert!(err.contains("/exports") && err.contains("cluster-local"), "{err}");
     }
 
     #[test]

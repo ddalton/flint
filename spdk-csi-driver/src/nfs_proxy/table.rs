@@ -52,32 +52,10 @@ pub struct IdentityRule {
     pub workspaces: Vec<String>,
 }
 
-fn parse_cidr(s: &str) -> Option<(IpAddr, u8)> {
-    let (a, l) = s.split_once('/').unwrap_or((s, ""));
-    let ip: IpAddr = a.trim().parse().ok()?;
-    let max = if ip.is_ipv4() { 32 } else { 128 };
-    let len = if l.is_empty() { max } else { l.trim().parse().ok()? };
-    (len <= max).then_some((ip, len))
-}
-
-fn in_cidr(ip: IpAddr, (net, len): (IpAddr, u8)) -> bool {
-    // An IPv4 client seen on a dual-stack socket arrives as ::ffff:a.b.c.d.
-    let ip = match ip {
-        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
-        v4 => v4,
-    };
-    match (ip, net) {
-        (IpAddr::V4(a), IpAddr::V4(n)) => {
-            let m = if len == 0 { 0 } else { u32::MAX << (32 - len) };
-            u32::from(a) & m == u32::from(n) & m
-        }
-        (IpAddr::V6(a), IpAddr::V6(n)) => {
-            let m = if len == 0 { 0 } else { u128::MAX << (128 - len) };
-            u128::from(a) & m == u128::from(n) & m
-        }
-        _ => false,
-    }
-}
+// The CIDR parser and matcher moved to `nfs::export_access` on
+// 2026-09-29 so the export `access:` list and these identity sources are
+// matched by ONE implementation; `cidr_edges` below still pins it.
+use crate::nfs::export_access::{in_cidr, parse_cidr};
 
 fn name_matches(pattern: &str, name: &str) -> bool {
     match pattern.strip_suffix('*') {

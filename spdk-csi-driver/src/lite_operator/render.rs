@@ -1525,6 +1525,19 @@ mod tests {
         assert!(server_reads(&ro));
         assert!(!server_reads(&rw));
         assert!(!server_reads(&absent));
+        // Since 2026-09-29 the server reads `access[].permissions` too, so
+        // the rendered list must say the same thing as `options` for every
+        // peer — the one network rendered is a catch-all, so IPv6 included.
+        let peer_policy = |y: &str, peer: &str| {
+            let cfg: crate::pnfs::config::PnfsConfig = serde_yaml::from_str(y).unwrap();
+            cfg.exports[0].access_policy().expect("an enforceable access list").decide(peer.parse().unwrap())
+        };
+        use crate::nfs::export_access::PeerPolicy;
+        for peer in ["10.1.2.3", "fd00::1"] {
+            assert_eq!(peer_policy(&ro, peer), PeerPolicy::READ_ONLY, "{peer}");
+            assert_eq!(peer_policy(&rw, peer), PeerPolicy::ALLOW, "{peer}");
+            assert_eq!(peer_policy(&absent, peer), PeerPolicy::ALLOW, "{peer}");
+        }
         assert_ne!(rollout_checksum(&ro), rollout_checksum(&rw), "toggling readOnly must roll the hub");
         assert_eq!(rollout_checksum(&rw), rollout_checksum(&absent), "false and absent are the same hub");
     }

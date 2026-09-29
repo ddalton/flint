@@ -107,13 +107,18 @@ data:
         heartbeatTimeout: {{ $.Values.pnfs.server.mds.heartbeatTimeout }}
         policy: recall_affected
         gracePeriod: 60
+    {{- /* `ro` or `rw` from pnfs.server.readOnly; the server reads BOTH
+         `options` and `access[].permissions` (the most specific network
+         wins, and a peer outside every network is refused — `/0` is
+         anyone, either IP family). */}}
+    {{- $mode := ternary "ro" "rw" (default false $.Values.pnfs.server.readOnly) }}
     exports:
       - path: /data/exports
         fsid: 1
-        options: [rw, sync, no_subtree_check]
+        options: [{{ $mode }}, sync, no_subtree_check]
         access:
           - network: 0.0.0.0/0
-            permissions: rw
+            permissions: {{ $mode }}
     logging:
       level: {{ $.Values.pnfs.server.logLevel | default "info" }}
       format: text

@@ -722,6 +722,218 @@
       },
       "values": "# tier off: a plain NFS hub whose PVC is the only copy of the data\ntier:\n  enabled: false\n"
     },
+    "read-only": {
+      "deployment": {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "labels": {
+            "app.kubernetes.io/component": "lite",
+            "app.kubernetes.io/instance": "flint-lite",
+            "app.kubernetes.io/managed-by": "Helm",
+            "app.kubernetes.io/name": "flint-lite",
+            "app.kubernetes.io/version": "1.56.0",
+            "helm.sh/chart": "flint-lite-0.5.0"
+          },
+          "name": "flint-lite",
+          "namespace": "flint"
+        },
+        "spec": {
+          "replicas": 1,
+          "selector": {
+            "matchLabels": {
+              "app": "flint-lite"
+            }
+          },
+          "strategy": {
+            "type": "Recreate"
+          },
+          "template": {
+            "metadata": {
+              "annotations": {
+                "checksum/config": "b963281ba051f2474141e67f13c9ba49e7b37f760438680ec1384ef4c45c9edb"
+              },
+              "labels": {
+                "app": "flint-lite",
+                "app.kubernetes.io/instance": "flint-lite",
+                "app.kubernetes.io/name": "flint-lite",
+                "chert.us/role": "lite"
+              }
+            },
+            "spec": {
+              "containers": [
+                {
+                  "args": [
+                    "--config",
+                    "/etc/flint/mds.yaml"
+                  ],
+                  "command": [
+                    "/usr/local/bin/flint-pnfs-mds"
+                  ],
+                  "env": [
+                    {
+                      "name": "RUST_LOG",
+                      "value": "info"
+                    },
+                    {
+                      "name": "POD_NAME",
+                      "valueFrom": {
+                        "fieldRef": {
+                          "fieldPath": "metadata.name"
+                        }
+                      }
+                    },
+                    {
+                      "name": "FLINT_FH_KERNEL",
+                      "value": "1"
+                    }
+                  ],
+                  "image": "dilipdalton/flint-pnfs:1.56.0",
+                  "imagePullPolicy": "IfNotPresent",
+                  "livenessProbe": {
+                    "initialDelaySeconds": 10,
+                    "periodSeconds": 15,
+                    "tcpSocket": {
+                      "port": 2049
+                    }
+                  },
+                  "name": "hub",
+                  "ports": [
+                    {
+                      "containerPort": 2049,
+                      "name": "nfs"
+                    }
+                  ],
+                  "readinessProbe": {
+                    "initialDelaySeconds": 3,
+                    "periodSeconds": 5,
+                    "tcpSocket": {
+                      "port": 2049
+                    }
+                  },
+                  "resources": {
+                    "requests": {
+                      "cpu": "100m",
+                      "memory": "128Mi"
+                    }
+                  },
+                  "securityContext": {
+                    "allowPrivilegeEscalation": false,
+                    "capabilities": {
+                      "add": [
+                        "CHOWN",
+                        "DAC_OVERRIDE",
+                        "DAC_READ_SEARCH",
+                        "FOWNER",
+                        "FSETID"
+                      ],
+                      "drop": [
+                        "ALL"
+                      ]
+                    },
+                    "readOnlyRootFilesystem": false,
+                    "runAsNonRoot": false,
+                    "runAsUser": 0,
+                    "seccompProfile": {
+                      "type": "RuntimeDefault"
+                    }
+                  },
+                  "volumeMounts": [
+                    {
+                      "mountPath": "/etc/flint",
+                      "name": "config"
+                    },
+                    {
+                      "mountPath": "/data",
+                      "name": "data"
+                    }
+                  ]
+                }
+              ],
+              "terminationGracePeriodSeconds": 120,
+              "volumes": [
+                {
+                  "configMap": {
+                    "name": "flint-lite-config"
+                  },
+                  "name": "config"
+                },
+                {
+                  "name": "data",
+                  "persistentVolumeClaim": {
+                    "claimName": "flint-lite-data"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "mdsYaml": "apiVersion: chert.us/v1alpha1\nkind: PnfsConfig\nmode: standalone\nmds:\n  bind:\n    address: \"0.0.0.0\"\n    port: 2049\n  # Inert in standalone (no layouts are ever granted) but part of the\n  # config schema.\n  layout:\n    type: file\n    stripeSize: 8388608\n    policy: stripe\n  dataServers: []\n  state:\n    backend: sqlite\n    config:\n      path: /data/state/state.db\nexports:\n  - path: /data/exports\n    fsid: 1\n    options: [ro, sync, no_subtree_check]\n    access:\n      - network: 0.0.0.0/0\n        permissions: ro\nlogging:\n  level: info\n  format: text\n",
+      "pvc": {
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {
+          "labels": {
+            "app.kubernetes.io/component": "lite",
+            "app.kubernetes.io/instance": "flint-lite",
+            "app.kubernetes.io/managed-by": "Helm",
+            "app.kubernetes.io/name": "flint-lite",
+            "app.kubernetes.io/version": "1.56.0",
+            "helm.sh/chart": "flint-lite-0.5.0"
+          },
+          "name": "flint-lite-data",
+          "namespace": "flint"
+        },
+        "spec": {
+          "accessModes": [
+            "ReadWriteOnce"
+          ],
+          "resources": {
+            "requests": {
+              "storage": "20Gi"
+            }
+          }
+        }
+      },
+      "service": {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+          "labels": {
+            "app.kubernetes.io/component": "lite",
+            "app.kubernetes.io/instance": "flint-lite",
+            "app.kubernetes.io/managed-by": "Helm",
+            "app.kubernetes.io/name": "flint-lite",
+            "app.kubernetes.io/version": "1.56.0",
+            "helm.sh/chart": "flint-lite-0.5.0"
+          },
+          "name": "flint-lite",
+          "namespace": "flint"
+        },
+        "spec": {
+          "ports": [
+            {
+              "name": "nfs",
+              "port": 2049,
+              "protocol": "TCP",
+              "targetPort": 2049
+            }
+          ],
+          "selector": {
+            "app": "flint-lite"
+          },
+          "type": "ClusterIP"
+        }
+      },
+      "spec": {
+        "persistence": {
+          "size": "20Gi"
+        },
+        "readOnly": true
+      },
+      "values": "# tier off: a plain NFS hub whose PVC is the only copy of the data\ntier:\n  enabled: false\nreadOnly: true\n"
+    },
     "sparse-settings": {
       "deployment": {
         "apiVersion": "apps/v1",
@@ -1182,5 +1394,5 @@
       "values": "tier:\n  enabled: true\n  bucket: my-team-flint\n  keyPrefix: tenant-a/\n  endpoint: http://minio.minio:9000\n  region: us-east-1\n  credentialsSecret: flint-s3\n  importOnStart: true\n"
     }
   },
-  "chartSha256": "5f4f42f6df2dd4bf42aa1eab4c359de562c4b304b4cddf7d21a93bc85d6b8869"
+  "chartSha256": "089f208fd4743f63d8e901fc0c84152d73d88109dbaf2734852692fa71ad3477"
 }

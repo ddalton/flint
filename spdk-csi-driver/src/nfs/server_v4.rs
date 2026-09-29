@@ -507,6 +507,24 @@ async fn handle_tcp_connection(
     info!("🔌 [NFS_SERVER] Connection #{} handler started for {}", conn_id, peer);
     info!("   Start time: {:?}", std::time::SystemTime::now());
 
+    // What this peer may do to the export, from its address against the
+    // export's `access:` list — decided ONCE here, before any RPC, and
+    // carried into every COMPOUND on the connection (`nfs::export_access`).
+    let peer_policy = dispatcher.peer_policy(peer.ip());
+    if peer_policy.denied {
+        warn!(
+            "⛔ [NFS_SERVER] Connection #{} from {} is outside every `access` network of the \
+             export ({}) — PUTROOTFH/PUTFH answer NFS4ERR_ACCESS; its mount fails with EACCES",
+            conn_id, peer, dispatcher.export_access().describe()
+        );
+    } else if peer_policy.read_only && !dispatcher.is_read_only() {
+        info!(
+            "🔒 [NFS_SERVER] Connection #{} from {} is in a `permissions: ro` network — \
+             every mutating operation answers NFS4ERR_ROFS",
+            conn_id, peer
+        );
+    }
+
     // Set TCP_NODELAY for low latency
     stream.set_nodelay(true)?;
 
@@ -675,6 +693,7 @@ async fn handle_tcp_connection(
                     conn_id,
                     rpc_num,
                     bcw_dispatch,
+                    peer_policy,
                 ).await;
                 debug!("📨 [NFS_SERVER] Connection #{}: RPC #{} processed in {:?} ({} bytes in {} segment(s))",
                        conn_id, rpc_num, rpc_start.elapsed(),
@@ -698,6 +717,7 @@ async fn dispatch_nfsv4(
     conn_id: u64,
     rpc_num: u64,
     back_channel: Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
+    peer_policy: crate::nfs::export_access::PeerPolicy,
 ) -> Vec<crate::nfs::segment::Segment> {
     debug!("🔍 [NFS_SERVER] Connection #{}, RPC #{}: Dispatching RPC: {} total bytes", conn_id, rpc_num, request.len());
     debug!("   First 64 bytes of request: {:02x?}", &request[..std::cmp::min(64, request.len())]);
@@ -751,7 +771,7 @@ async fn dispatch_nfsv4(
     // still reached that machinery.
     if call.cred.flavor == AuthFlavor::RpcsecGss {
         info!("🔐 [NFS_SERVER] Connection #{}, RPC #{}: RPCSEC_GSS authentication detected", conn_id, rpc_num);
-        return handle_rpcsec_gss_call(call, args, gss_manager, dispatcher, back_channel).await;
+        return handle_rpcsec_gss_call(call, args, gss_manager, dispatcher, back_channel, peer_policy).await;
     }
 
     // Enforce the export's minimum security flavor.
@@ -790,7 +810,7 @@ async fn dispatch_nfsv4(
         procedure::COMPOUND => {
             // COMPOUND procedure - dispatch to NFSv4.2 handler
             debug!(">>> COMPOUND procedure");
-            handle_compound(call, args, dispatcher, back_channel, None).await
+            handle_compound(call, args, dispatcher, back_channel, None, peer_policy).await
         }
 
         _ => {
@@ -807,6 +827,7 @@ async fn handle_compound(
     dispatcher: Arc<CompoundDispatcher>,
     back_channel: Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
     gss: Option<&crate::nfs::gss_framing::ValidatedCall>,
+    peer_policy: crate::nfs::export_access::PeerPolicy,
 ) -> Vec<crate::nfs::segment::Segment> {
     // The args Bytes contains only the COMPOUND procedure arguments (RPC header already stripped)
 
@@ -869,6 +890,7 @@ async fn handle_compound(
             // so a payload that never enters userspace cannot be framed
             // for it. Plain TCP only, and only when switched on.
             gss.is_none() && crate::nfs::splice::enabled(),
+            peer_policy,
         )
         .await;
 
@@ -1013,6 +1035,7 @@ async fn handle_rpcsec_gss_call(
     gss_manager: Arc<RpcSecGssManager>,
     dispatcher: Arc<CompoundDispatcher>,
     back_channel: Arc<crate::nfs::v4::back_channel::BackChannelWriter>,
+    peer_policy: crate::nfs::export_access::PeerPolicy,
 ) -> Vec<crate::nfs::segment::Segment> {
     // Decode RPCSEC_GSS credentials
     let gss_cred = match RpcGssCred::decode(&call.cred.body) {
@@ -1135,7 +1158,7 @@ async fn handle_rpcsec_gss_call(
                 }
                 procedure::COMPOUND => {
                     info!("✅ GSS authentication successful, processing COMPOUND");
-                    handle_compound(call, args, dispatcher, back_channel, Some(&validated)).await
+                    handle_compound(call, args, dispatcher, back_channel, Some(&validated), peer_policy).await
                 }
                 other => {
                     warn!("Invalid NFSv4 procedure over RPCSEC_GSS: {}", other);
@@ -1828,5 +1851,109 @@ mod deleg_wiring_tests {
 
         assert_eq!(remove_status(true).await, Nfs4Status::RoFs, "a ROX server refuses REMOVE");
         assert_eq!(remove_status(false).await, Nfs4Status::Ok, "an RWX server performs it");
+    }
+}
+
+/// The wiring from the accepted socket to the per-network answer: the
+/// policy is computed in `handle_tcp_connection` from the PEER ADDRESS the
+/// listener reported, and rides into every COMPOUND on the connection. A
+/// loopback client is 127.0.0.1, so a list that names only 10.0.0.0/8
+/// refuses it and a list that names 127.0.0.0/8 serves it — over TCP,
+/// through the production handler (`serve_tcp`'s loop only spawns it).
+#[cfg(test)]
+mod export_access_wiring_tests {
+    use super::*;
+    use crate::nfs::export_access::{AccessRule, ExportAccess};
+    use crate::nfs::rpc::Auth;
+    use crate::nfs::v4::protocol::{opcode, Nfs4Status};
+    use crate::nfs_proxy::wire::{decode_reply, encode_call, encode_compound, op_putrootfh};
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn op_remove(name: &str) -> Vec<u8> {
+        let mut e = XdrEncoder::new();
+        e.encode_u32(opcode::REMOVE);
+        e.encode_string(name);
+        e.finish().to_vec()
+    }
+
+    /// Serve ONE loopback connection through `handle_tcp_connection` for a
+    /// dispatcher whose export carries `rules`; the COMPOUND4res status of
+    /// `ops` (a v4.0 COMPOUND under AUTH_SYS root, no session needed).
+    async fn status_over_tcp(rules: &[(&str, bool)], ops: &[&[u8]], dir: &Path) -> u32 {
+        let fh_mgr = Arc::new(FileHandleManager::new(dir.to_path_buf()));
+        let state_mgr = Arc::new(StateManager::new_in_memory(""));
+        let lock_mgr = Arc::new(LockManager::new());
+        let access = ExportAccess::new(rules.iter().map(|(n, ro)| AccessRule::new(n, *ro).unwrap()).collect());
+        let dispatcher =
+            Arc::new(CompoundDispatcher::new(fh_mgr, state_mgr, lock_mgr).with_export_access(access));
+        let gss = Arc::new(RpcSecGssManager::new(None));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let (served, peer) = listener.accept().await.unwrap();
+        assert!(peer.ip().is_loopback(), "the peer the handler decides on: {peer}");
+        let handle = tokio::spawn(async move {
+            handle_tcp_connection(served, dispatcher, gss, peer, 1, Some(Duration::from_secs(5))).await
+        });
+
+        // AUTH_SYS root with no machine name: stamp, name len 0, uid 0, gid 0, no gids.
+        let cred = Auth { flavor: AuthFlavor::Unix, body: Bytes::from_static(&[0; 20]) };
+        let xid = 0x7001;
+        let call = encode_call(xid, &cred, &encode_compound(b"", 0, ops));
+        let marker = 0x8000_0000u32 | call.len() as u32;
+        client.write_all(&marker.to_be_bytes()).await.unwrap();
+        client.write_all(&call).await.unwrap();
+        client.flush().await.unwrap();
+
+        let mut m = [0u8; 4];
+        tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut m))
+            .await
+            .expect("the server must answer within the window")
+            .expect("reply marker");
+        let len = (u32::from_be_bytes(m) & 0x7FFF_FFFF) as usize;
+        let mut body = vec![0u8; len];
+        client.read_exact(&mut body).await.expect("reply body");
+        drop(client);
+        let _ = handle.await;
+
+        let compound = decode_reply(Bytes::from(body), xid).expect("an accepted RPC reply, not a denial");
+        let mut d = XdrDecoder::new(compound);
+        d.decode_u32().expect("COMPOUND4res status")
+    }
+
+    /// 127.0.0.1 against `10.0.0.0/8 rw` alone: PUTROOTFH answers
+    /// NFS4ERR_ACCESS over the wire. The control is the same peer, the
+    /// same call, against `127.0.0.0/8 rw`: NFS4_OK. Against the reverted
+    /// wiring (a default policy in `handle_tcp_connection`) both answer OK
+    /// and the first assertion fails.
+    #[tokio::test]
+    async fn a_peer_outside_the_export_access_list_is_refused_at_putrootfh_over_tcp() {
+        let _serial = CONN_SLOT_TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let t = tempfile::TempDir::new().unwrap();
+        let put = op_putrootfh();
+        let denied = status_over_tcp(&[("10.0.0.0/8", false)], &[&put], t.path()).await;
+        assert_eq!(denied, Nfs4Status::Access as u32, "127.0.0.1 is outside 10.0.0.0/8");
+        let served = status_over_tcp(&[("127.0.0.0/8", false)], &[&put], t.path()).await;
+        assert_eq!(served, Nfs4Status::Ok as u32, "the control: a listed peer is served");
+    }
+
+    /// 127.0.0.1 in a `permissions: ro` host entry: `[PUTROOTFH, REMOVE]`
+    /// answers NFS4ERR_ROFS and the file stays; the same entry as `rw`
+    /// performs the REMOVE.
+    #[tokio::test]
+    async fn a_peer_in_a_read_only_network_gets_rofs_over_tcp() {
+        let _serial = CONN_SLOT_TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let t = tempfile::TempDir::new().unwrap();
+        std::fs::write(t.path().join("victim"), b"x").unwrap();
+        let put = op_putrootfh();
+        let rm = op_remove("victim");
+        let ro = status_over_tcp(&[("127.0.0.1/32", true)], &[&put, &rm], t.path()).await;
+        assert_eq!(ro, Nfs4Status::RoFs as u32, "a read-only network's REMOVE");
+        assert!(t.path().join("victim").exists(), "REMOVE removed nothing");
+        let rw = status_over_tcp(&[("127.0.0.1/32", false)], &[&put, &rm], t.path()).await;
+        assert_eq!(rw, Nfs4Status::Ok as u32, "the control: the same entry as rw");
+        assert!(!t.path().join("victim").exists(), "the read-write REMOVE performed");
     }
 }

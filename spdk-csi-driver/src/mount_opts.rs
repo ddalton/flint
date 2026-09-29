@@ -184,6 +184,32 @@ pub fn build_rwx_nfs_mount_opts(readonly: bool, user_flags: &[String]) -> String
     merge(&defaults, user_flags, &forced)
 }
 
+/// Whether a `NodePublishVolume` must mount read-only.
+///
+/// Two independent sources, either suffices: kubelet's `readonly` bit,
+/// which comes from the POD SPEC (`persistentVolumeClaim.readOnly`), and
+/// the volume capability's access mode. The CSI spec defines
+/// `SINGLE_NODE_READER_ONLY` and `MULTI_NODE_READER_ONLY` as modes a
+/// volume "can only be published as readonly" in, and kubelet sends the
+/// PV's access mode with every publish — so a `ReadOnlyMany` PV whose pod
+/// forgot `readOnly: true` still arrives here as a reader-only publish.
+/// Until 2026-09-29 only the bit was read (F70: "there is exactly one bit,
+/// and it arrives from outside"). The server enforces ROX on its own since
+/// F70's fix; this makes the client mount `ro` too, so `open(2)` for write
+/// fails locally with EROFS instead of on the wire.
+pub fn publish_is_read_only(req: &crate::csi::NodePublishVolumeRequest) -> bool {
+    req.readonly || access_mode_is_reader_only(req.volume_capability.as_ref())
+}
+
+/// The reader-only access modes of the CSI spec, or false when the
+/// capability or its mode is absent (a driver must not invent read-only).
+pub fn access_mode_is_reader_only(cap: Option<&crate::csi::VolumeCapability>) -> bool {
+    use crate::csi::volume_capability::access_mode::Mode;
+    cap.and_then(|c| c.access_mode.as_ref())
+        .map(|m| m.mode == Mode::MultiNodeReaderOnly as i32 || m.mode == Mode::SingleNodeReaderOnly as i32)
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,5 +307,39 @@ mod tests {
         let opts = build_rwx_nfs_mount_opts(false, &f(&["", "   ", "hard"]));
         assert!(!opts.contains(",,"), "{opts}");
         assert!(opts.split(',').any(|o| o == "hard"), "{opts}");
+    }
+
+    fn publish(readonly: bool, mode: Option<i32>) -> crate::csi::NodePublishVolumeRequest {
+        use crate::csi::{volume_capability::AccessMode, VolumeCapability};
+        crate::csi::NodePublishVolumeRequest {
+            readonly,
+            volume_capability: mode.map(|m| VolumeCapability {
+                access_mode: Some(AccessMode { mode: m }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Either source makes the publish read-only; a writer mode with the
+    /// bit clear does not; a capability without a mode, or no capability,
+    /// invents nothing.
+    #[test]
+    fn a_reader_only_access_mode_or_kubelets_bit_makes_the_publish_read_only() {
+        use crate::csi::volume_capability::access_mode::Mode;
+        let rox = Mode::MultiNodeReaderOnly as i32;
+        let rwo = Mode::SingleNodeWriter as i32;
+        let rwx = Mode::MultiNodeMultiWriter as i32;
+        // the F71 pod: a ROX PV, no `readOnly: true` — kubelet's bit is clear
+        assert!(publish_is_read_only(&publish(false, Some(rox))));
+        assert!(publish_is_read_only(&publish(false, Some(Mode::SingleNodeReaderOnly as i32))));
+        // the bit alone (a pod asking for ro on a writable volume)
+        assert!(publish_is_read_only(&publish(true, Some(rwo))));
+        assert!(publish_is_read_only(&publish(true, None)));
+        // the controls: writer modes with the bit clear stay read-write
+        assert!(!publish_is_read_only(&publish(false, Some(rwo))));
+        assert!(!publish_is_read_only(&publish(false, Some(rwx))));
+        assert!(!publish_is_read_only(&publish(false, None)));
+        assert!(!access_mode_is_reader_only(Some(&crate::csi::VolumeCapability::default())));
     }
 }
