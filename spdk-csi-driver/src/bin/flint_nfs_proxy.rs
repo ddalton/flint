@@ -24,11 +24,15 @@ async fn main() -> anyhow::Result<()> {
     // Before any kube client exists (the 1.26/1.27 startup panic; the
     // lib's crypto_provider_tests guard every binary for it).
     spdk_csi_driver::install_crypto_provider();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    let mut filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    // tlshd presents the server's IP address as SNI, which RFC 6066
+    // forbids and rustls warns about on EVERY handshake. Harmless (the
+    // proxy serves one certificate); silenced unless asked for.
+    if !std::env::var("RUST_LOG").unwrap_or_default().contains("rustls") {
+        filter = filter.add_directive("rustls::msgs::handshake=error".parse()?);
+    }
+    tracing_subscriber::fmt().with_env_filter(filter).init();
     let args = Args::parse();
     let raw = std::fs::read_to_string(&args.config)?;
     let cfg: ProxyConfig = serde_yaml::from_str(&raw)?;

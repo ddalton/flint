@@ -1,0 +1,31 @@
+PASS PKI generated
+FAIL client a mounts with xprtsec=mtls
+  a sees: 
+FAIL client a's root lists exactly ws-a (its certificate's rule)
+tee: /mnt/tA/ws-a/f: No such file or directory (os error 2)
+FAIL a write through the TLS mount lands in hub A
+PASS ws-b is ENOENT to client a
+umount: /mnt/tA: not mounted.
+PASS client a's NFS client is gone before the next identity
+FAIL client b mounts with xprtsec=mtls
+  b sees: 
+FAIL client b's root lists exactly ws-b (the identity follows the certificate)
+tee: /mnt/tB/ws-b/g: No such file or directory (os error 2)
+FAIL a write as client b lands in hub B
+umount: /mnt/tB: not mounted.
+  rogue mount rc=124: 
+PASS a certificate from another CA cannot mount
+  plaintext mount rc=0: 
+FAIL a mount that does not upgrade is refused
+FAIL the proxy refused it AUTH_TOOWEAK (the mechanism)
+FAIL client a mounts again (the mount that must survive the rotation)
+PASS control: before the rotation, 127.0.0.6 is not in the served certificate
+FAIL the proxy loaded the rotated certificate without a restart
+FAIL after the rotation, a new handshake gets the NEW certificate
+cat: /mnt/tC/ws-a/f: No such file or directory (os error 2)
+FAIL a mount made before the rotation still reads
+  marker in capture: proxy port 0, hub port (plaintext, control) 0
+FAIL control: the capture sees the payload in the clear on the hub's port
+PASS the payload never appears in the clear on the proxy's port
+proxy TLS log:
+RESULT: 6 passed, 13 failed

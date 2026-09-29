@@ -73,6 +73,12 @@ pub enum AuthFlavor {
     Null = 0,
     Unix = 1,
     RpcsecGss = 6,  // RPCSEC_GSS (RFC 2203)
+    /// AUTH_TLS (RFC 9289 §4.1): only ever on the NULL probe that asks a
+    /// server to upgrade the connection. It carries no identity. Before
+    /// it decoded, the probe was undecodable and went UNANSWERED, so a
+    /// `xprtsec=tls` mount waited for a timeout instead of learning at
+    /// once that this server does not offer TLS.
+    Tls = 7,
 }
 
 /// Authentication credentials
@@ -101,6 +107,7 @@ impl Auth {
             0 => AuthFlavor::Null,
             1 => AuthFlavor::Unix,
             6 => AuthFlavor::RpcsecGss,
+            7 => AuthFlavor::Tls,
             _ => return Err(format!("Unknown auth flavor: {}", flavor_val)),
         };
         let body = dec.decode_opaque()?;
@@ -179,7 +186,7 @@ impl Auth {
     ///   * unknown   → "raw:<flavor>:<body>"
     pub fn principal(&self) -> Vec<u8> {
         match self.flavor {
-            AuthFlavor::Null => Vec::new(),
+            AuthFlavor::Null | AuthFlavor::Tls => Vec::new(),
             AuthFlavor::Unix => {
                 // authsys_parms = { stamp:u32, machinename:string<255>,
                 //                   uid:u32, gid:u32, gids:u32<16> }

@@ -16,8 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use tokio::io::AsyncWriteExt;
-use tokio::net::tcp::OwnedWriteHalf;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tracing::{debug, warn};
@@ -55,7 +54,7 @@ type Pending = Arc<Mutex<HashMap<u32, oneshot::Sender<Bytes>>>>;
 /// One connection to one hub; calls multiplexed by xid.
 pub struct HubConn {
     addr: String,
-    writer: tokio::sync::Mutex<OwnedWriteHalf>,
+    writer: tokio::sync::Mutex<Box<dyn AsyncWrite + Send + Unpin>>,
     pending: Pending,
     next_xid: AtomicU32,
     closed: Arc<AtomicBool>,
@@ -65,12 +64,20 @@ impl HubConn {
     pub async fn connect(addr: &str) -> Result<Arc<Self>, BackendError> {
         let stream = TcpStream::connect(addr).await.map_err(|e| BackendError::Down(format!("{addr}: {e}")))?;
         let _ = stream.set_nodelay(true);
-        let (mut rd, wr) = stream.into_split();
+        Ok(Self::over(addr, stream))
+    }
+
+    /// A connection over any byte stream (a TLS one, in the tests).
+    pub fn over<S>(addr: &str, stream: S) -> Arc<Self>
+    where
+        S: AsyncRead + AsyncWrite + Send + 'static,
+    {
+        let (mut rd, wr) = tokio::io::split(stream);
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let closed = Arc::new(AtomicBool::new(false));
         let conn = Arc::new(HubConn {
             addr: addr.to_string(),
-            writer: tokio::sync::Mutex::new(wr),
+            writer: tokio::sync::Mutex::new(Box::new(wr)),
             pending: pending.clone(),
             // xids only need to be unique per connection
             next_xid: AtomicU32::new(rand::random::<u32>() | 1),
@@ -105,7 +112,7 @@ impl HubConn {
             // dead connection.
             pending.lock().unwrap().clear();
         });
-        Ok(conn)
+        conn
     }
 
     pub fn is_closed(&self) -> bool {

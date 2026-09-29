@@ -91,7 +91,7 @@ impl SecLevel {
     /// [`Krb5`]: SecLevel::Krb5
     pub fn of_call(flavor: AuthFlavor, service: Option<GssService>) -> Self {
         match flavor {
-            AuthFlavor::Null => SecLevel::None,
+            AuthFlavor::Null | AuthFlavor::Tls => SecLevel::None,
             AuthFlavor::Unix => SecLevel::Sys,
             AuthFlavor::RpcsecGss => match service {
                 Some(GssService::Privacy) => SecLevel::Krb5p,

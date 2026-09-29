@@ -24,15 +24,15 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use serde::Deserialize;
-use tokio::io::AsyncWriteExt;
-use tokio::net::tcp::OwnedWriteHalf;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, info, warn};
 
 use super::backend::{BackendClient, BackendError, BackendSession, HubConn};
 use super::pseudo::{self, LocalCtx};
 use super::route::{self, Disp};
-use super::table::{HubRow, IdentityRule, Table, View};
+use super::table::{HubRow, IdentityRule, Peer, Table, View};
+use super::tls::{self, Tls, TlsConfig};
 use super::wire::{self, HubReply, Splice};
 use crate::nfs::ingress::{NextRecord, RecordReader};
 use crate::nfs::rpc::{AuthFlavor, AuthStat, CallMessage, ReplyBuilder};
@@ -104,6 +104,10 @@ pub struct ProxyConfig {
     pub kube: Option<KubeSource>,
     #[serde(default)]
     pub identities: Vec<IdentityRule>,
+    /// RPC-with-TLS (design §6a). Set, EVERY connection must upgrade: a
+    /// call on a connection that did not is refused `AUTH_TOOWEAK`.
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
 }
 
 /// The revocation bits a hub's `sr_status_flags` may carry through to the
@@ -144,7 +148,41 @@ pub struct Proxy {
     last_wake: Mutex<HashMap<u64, std::time::Instant>>,
     hub_lease: std::time::Duration,
     keepalive: bool,
+    tls: Option<Arc<Tls>>,
 }
+
+/// Ids no client or session can have: both are counters from 1, and a
+/// session id is `counter ‖ clientid` (`SessionManager::create_session`).
+const NO_SESSION: SessionId = SessionId([0xFF; 16]);
+const NO_CLIENT: u64 = u64::MAX;
+
+/// The owner prefix of a TLS identity: a digest, so the owner stays
+/// bounded whatever the certificate names, and STABLE — it is persisted
+/// in proxy.db and sent to the hubs. None on plaintext.
+fn identity_prefix(peer: &Peer) -> Option<Vec<u8>> {
+    use sha2::{Digest, Sha256};
+    if peer.uris.is_empty() {
+        return None;
+    }
+    let mut uris = peer.uris.clone();
+    uris.sort();
+    let d = Sha256::digest(uris.join("\n").as_bytes());
+    let hex: String = d[..8].iter().map(|b| format!("{b:02x}")).collect();
+    Some(format!("id:{hex}/").into_bytes())
+}
+
+/// Does a registered owner belong to this identity? A plaintext
+/// connection owns what no certificate registered.
+fn owner_is(owner: &[u8], prefix: Option<&[u8]>) -> bool {
+    match prefix {
+        Some(p) => owner.starts_with(p),
+        None => !owner.starts_with(b"id:"),
+    }
+}
+
+/// A TLS handshake that has not finished by then is dropped: the socket
+/// is not the client's until it has.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 fn opcode_at(args: &Bytes, r: &std::ops::Range<usize>) -> u32 {
     args.get(r.start..r.start + 4).map(|b| u32::from_be_bytes(b.try_into().unwrap())).unwrap_or(0)
@@ -191,6 +229,10 @@ impl Proxy {
         let locks = Arc::new(LockManager::new());
         let disp = Arc::new(CompoundDispatcher::new(fh, state.clone(), locks));
         let table = Table::new(cfg.hubs.clone(), cfg.identities.clone())?;
+        if table.wants_certificates() && cfg.tls.is_none() {
+            return Err("an identity names `clients:` but `tls` is not configured: no connection could match it".into());
+        }
+        let tls = cfg.tls.as_ref().map(Tls::load).transpose()?;
         Ok(Arc::new(Proxy {
             table,
             disp,
@@ -205,6 +247,7 @@ impl Proxy {
             last_wake: Mutex::new(HashMap::new()),
             hub_lease: std::time::Duration::from_secs(cfg.lease_secs),
             keepalive: cfg.keepalive,
+            tls,
         }))
     }
 
@@ -223,6 +266,9 @@ impl Proxy {
             let p = self.clone();
             tokio::spawn(async move { p.keepalive_loop().await });
         }
+        if let Some(t) = &self.tls {
+            tokio::spawn(t.clone().reload_loop());
+        }
         loop {
             let (s, peer) = l.accept().await?;
             let p = self.clone();
@@ -230,40 +276,104 @@ impl Proxy {
         }
     }
 
-    async fn connection(self: Arc<Self>, s: TcpStream, peer: SocketAddr) {
+    async fn connection(self: Arc<Self>, mut s: TcpStream, addr: SocketAddr) {
         let _ = s.set_nodelay(true);
-        let (mut rd, wr) = s.into_split();
+        debug!("client {addr} connected");
+        let Some(tls) = self.tls.clone() else {
+            let (rd, wr) = s.into_split();
+            return self.serve_records(rd, wr, Peer::addr(addr.ip())).await;
+        };
+        // §6a: the connection must upgrade before it is anyone. Until the
+        // probe, a NULL ping is answered and every other call is refused
+        // AUTH_TOOWEAK (a plaintext mount fails at once, and says why).
+        // RecordReader reads exactly one record, so after the probe the
+        // socket's next byte is the client's ClientHello.
+        let mut rr = RecordReader::new(format!("client {addr}"));
+        loop {
+            let rec = match rr.next(&mut s, None).await {
+                Ok(NextRecord::Record(r)) => r,
+                _ => return,
+            };
+            let call = match CallMessage::decode_with_args(rec) {
+                Ok((call, _)) => call,
+                Err(e) => {
+                    debug!("client {addr}: undecodable call before TLS: {e}");
+                    return;
+                }
+            };
+            let (reply, upgrade) = if tls::is_probe(&call) {
+                (tls::starttls_reply(call.xid), true)
+            } else if call.procedure == 0 {
+                (ReplyBuilder::success(call.xid).finish(), false)
+            } else {
+                warn!("client {addr}: call on a connection that did not upgrade to TLS: AUTH_TOOWEAK");
+                (ReplyBuilder::auth_error(call.xid, AuthStat::TooWeak), false)
+            };
+            if !write_record_to(&mut s, &reply).await {
+                return;
+            }
+            if upgrade {
+                break;
+            }
+        }
+        let stream = match tokio::time::timeout(HANDSHAKE_TIMEOUT, tls.acceptor().accept(s)).await {
+            Ok(Ok(st)) => st,
+            Ok(Err(e)) => {
+                warn!("client {addr}: TLS handshake failed: {e}");
+                return;
+            }
+            Err(_) => {
+                warn!("client {addr}: TLS handshake timed out");
+                return;
+            }
+        };
+        let conn = stream.get_ref().1;
+        let uris = conn.peer_certificates().and_then(|c| c.first()).map(|c| tls::uri_sans(c)).unwrap_or_default();
+        if conn.alpn_protocol() != Some(tls::ALPN_SUNRPC) {
+            debug!("client {addr}: no ALPN sunrpc offered");
+        }
+        info!("client {addr}: TLS up, identity {uris:?}");
+        let (rd, wr) = tokio::io::split(stream);
+        self.serve_records(rd, wr, Peer { addr: addr.ip(), uris }).await
+    }
+
+    async fn serve_records<R, W>(self: Arc<Self>, mut rd: R, wr: W, peer: Peer)
+    where
+        R: AsyncRead + Unpin + Send,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        let peer = Arc::new(peer);
         let wr = Arc::new(tokio::sync::Mutex::new(wr));
-        let mut rr = RecordReader::new(format!("client {peer}"));
-        debug!("client {peer} connected");
+        let mut rr = RecordReader::new(format!("client {}", peer.addr));
         loop {
             let rec = match rr.next(&mut rd, None).await {
                 Ok(NextRecord::Record(r)) => r,
                 Ok(_) => break,
                 Err(e) => {
-                    debug!("client {peer}: {e}");
+                    debug!("client {}: {e}", peer.addr);
                     break;
                 }
             };
             let p = self.clone();
             let wr = wr.clone();
+            let peer = peer.clone();
             // Requests on one connection run concurrently: the client
             // pipelines across slots, and one slow hub must not stall the
             // replies from another.
             tokio::spawn(async move {
-                if let Some(reply) = p.call(rec, peer).await {
+                if let Some(reply) = p.call(rec, &peer).await {
                     write_record(&wr, &reply).await;
                 }
             });
         }
-        debug!("client {peer} gone");
+        debug!("client {} gone", peer.addr);
     }
 
-    async fn call(&self, rec: Bytes, peer: SocketAddr) -> Option<Bytes> {
+    async fn call(&self, rec: Bytes, peer: &Peer) -> Option<Bytes> {
         let (call, args) = match CallMessage::decode_with_args(rec) {
             Ok(x) => x,
             Err(e) => {
-                debug!("client {peer}: undecodable call: {e}");
+                debug!("client {}: undecodable call: {e}", peer.addr);
                 return None;
             }
         };
@@ -286,8 +396,8 @@ impl Proxy {
         match call.procedure {
             0 => Some(ReplyBuilder::success(call.xid).finish()),
             1 => {
-                let view = self.table.view(peer.ip());
-                let body = match self.compound(&view, &call, args).await {
+                let view = self.table.view_of(peer);
+                let body = match self.compound(&view, peer, &call, args).await {
                     Ok(b) => b,
                     Err(()) => return Some(ReplyBuilder::garbage_args(call.xid)),
                 };
@@ -296,6 +406,58 @@ impl Proxy {
                 Some(rb.finish())
             }
             _ => Some(ReplyBuilder::proc_unavail(call.xid)),
+        }
+    }
+
+    /// §6a: a downstream client belongs to the identity that registered
+    /// it. Session and client ids are guessable (a counter), and every
+    /// connection reaches the one dispatcher, so without this a
+    /// certificate for cluster B could drive cluster A's session — its
+    /// slots, its lease, its opens and locks on any workspace both may
+    /// see. On a TLS connection, EXCHANGE_ID's owner is prefixed with the
+    /// identity (two identities never share a client record, and the
+    /// hubs see the prefix in the backend owner too), and any session or
+    /// clientid a compound names that belongs to ANOTHER identity is
+    /// replaced by one that cannot exist: the dispatcher then answers
+    /// BADSESSION / STALE_CLIENTID exactly as for an absent one.
+    ///
+    /// A plaintext connection (no `tls`) has no identity to bind to: an
+    /// address is not one (NAT, trunking over several addresses).
+    fn bind_to_identity(&self, peer: &Peer, ops: &mut [Operation]) {
+        let prefix = identity_prefix(peer);
+        let owns_client = |cid: u64| match self.state.clients.get_client(cid) {
+            Some(c) => owner_is(&c.owner, prefix.as_deref()),
+            None => true, // absent either way
+        };
+        let owns_session = |sid: &SessionId| match self.state.sessions.get_session(sid) {
+            Some(s) => owns_client(s.client_id),
+            None => true,
+        };
+        for op in ops.iter_mut() {
+            match op {
+                Operation::ExchangeId { clientowner, .. } => {
+                    if let Some(p) = &prefix {
+                        let mut o = p.clone();
+                        o.extend_from_slice(&clientowner.id);
+                        clientowner.id = o;
+                    }
+                }
+                Operation::Sequence { sessionid, .. }
+                | Operation::DestroySession(sessionid)
+                | Operation::BindConnToSession { sessionid, .. } => {
+                    if !owns_session(sessionid) {
+                        warn!("client {}: names a session of another identity; answered as absent", peer.addr);
+                        *sessionid = NO_SESSION;
+                    }
+                }
+                Operation::CreateSession { clientid, .. } | Operation::DestroyClientId(clientid) => {
+                    if !owns_client(*clientid) {
+                        warn!("client {}: names a clientid of another identity; answered as absent", peer.addr);
+                        *clientid = NO_CLIENT;
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -315,8 +477,9 @@ impl Proxy {
         bytes
     }
 
-    async fn compound(&self, view: &View, call: &CallMessage, args: Bytes) -> Result<Bytes, ()> {
-        let (req, ranges) = CompoundRequest::decode_with_ranges(XdrDecoder::new(args.clone())).map_err(|_| ())?;
+    async fn compound(&self, view: &View, peer: &Peer, call: &CallMessage, args: Bytes) -> Result<Bytes, ()> {
+        let (mut req, ranges) = CompoundRequest::decode_with_ranges(XdrDecoder::new(args.clone())).map_err(|_| ())?;
+        self.bind_to_identity(peer, &mut req.operations);
         let first_is_seq = matches!(req.operations.first(), Some(Operation::Sequence { .. }));
         if !first_is_seq || !(1..=2).contains(&req.minor_version) || !req.tag_valid {
             let destroyed = destroyed_by(&req.operations);
@@ -777,13 +940,21 @@ fn rewrap(body: &Bytes, tag: &[u8]) -> Bytes {
     e.finish()
 }
 
-async fn write_record(wr: &tokio::sync::Mutex<OwnedWriteHalf>, reply: &[u8]) {
+async fn write_record<W: AsyncWrite + Unpin>(wr: &tokio::sync::Mutex<W>, reply: &[u8]) {
+    let mut w = wr.lock().await;
+    write_record_to(&mut *w, reply).await;
+}
+
+async fn write_record_to<W: AsyncWrite + Unpin>(w: &mut W, reply: &[u8]) -> bool {
     let mut rec = Vec::with_capacity(4 + reply.len());
     rec.extend_from_slice(&(0x8000_0000u32 | reply.len() as u32).to_be_bytes());
     rec.extend_from_slice(reply);
-    let mut w = wr.lock().await;
-    if let Err(e) = w.write_all(&rec).await {
-        debug!("reply write failed: {e}");
+    match w.write_all(&rec).await {
+        Ok(()) => true,
+        Err(e) => {
+            debug!("reply write failed: {e}");
+            false
+        }
     }
 }
 
@@ -834,7 +1005,8 @@ mod tests {
             state_dir: dir.join("proxy"),
             hubs: vec![HubRow { name: "ws-a".into(), address: hub_addr.into(), server_id: HUB_ID, stateid_tag: 10, share: None, wakeable: true }],
             kube: None,
-            identities: vec![IdentityRule { name: "t".into(), sources: vec!["127.0.0.1/32".into()], workspaces: vec!["ws-*".into()] }],
+            identities: vec![IdentityRule { name: "t".into(), sources: vec!["127.0.0.1/32".into()], clients: vec![], workspaces: vec!["ws-*".into()] }],
+            tls: None,
         };
         let p = Proxy::new(&cfg).await.unwrap();
         let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -998,6 +1170,273 @@ mod tests {
         assert!(hub_state.clients.id_of_owner(b"flint-proxy/test-client").is_some(), "registered again");
     }
 
+    // ---- §6a RPC-with-TLS ----
+
+    use crate::nfs_proxy::tls::testpki;
+
+    /// A proxy that requires TLS, trusting `client_ca` for clients.
+    async fn tls_proxy(dir: &std::path::Path, hub_addr: &str, rules: Vec<IdentityRule>) -> (testpki::Ca, String) {
+        let ca = testpki::ca("flint-test-ca");
+        let srv = ca.server("proxy");
+        let pki = dir.join("pki");
+        std::fs::create_dir_all(&pki).unwrap();
+        std::fs::write(pki.join("tls.crt"), &srv.cert_pem).unwrap();
+        std::fs::write(pki.join("tls.key"), &srv.key_pem).unwrap();
+        std::fs::write(pki.join("ca.crt"), &ca.pem).unwrap();
+        let cfg = ProxyConfig {
+            listen: "127.0.0.1:0".into(),
+            lease_secs: 90,
+            keepalive: false,
+            state_dir: dir.join("proxy"),
+            hubs: vec![HubRow { name: "ws-a".into(), address: hub_addr.into(), server_id: HUB_ID, stateid_tag: 10, share: None, wakeable: true }],
+            kube: None,
+            identities: rules,
+            tls: Some(TlsConfig { cert: pki.join("tls.crt"), key: pki.join("tls.key"), client_ca: pki.join("ca.crt"), reload_secs: 3600 }),
+        };
+        let p = Proxy::new(&cfg).await.unwrap();
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        tokio::spawn(p.serve_on(l));
+        (ca, addr)
+    }
+
+    fn cert_rule(uri: &str) -> IdentityRule {
+        IdentityRule { name: "c".into(), sources: vec![], clients: vec![uri.into()], workspaces: vec!["ws-*".into()] }
+    }
+
+    /// One raw RPC call record, NULL or COMPOUND, with this credential flavor.
+    fn raw_call(xid: u32, proc_: u32, flavor: u32, args: &[u8]) -> Vec<u8> {
+        let mut e = XdrEncoder::new();
+        for w in [xid, 0, 2, wire::NFS_PROGRAM, wire::NFS_V4, proc_, flavor, 0, 0, 0] {
+            e.encode_u32(w);
+        }
+        e.append_raw(args);
+        let m = e.finish();
+        let mut r = (0x8000_0000u32 | m.len() as u32).to_be_bytes().to_vec();
+        r.extend_from_slice(&m);
+        r
+    }
+
+    async fn read_reply(s: &mut TcpStream) -> Bytes {
+        let mut rr = RecordReader::new("test".into());
+        match tokio::time::timeout(std::time::Duration::from_secs(5), rr.next(s, None)).await {
+            Ok(Ok(NextRecord::Record(r))) => r,
+            Ok(Ok(_)) => panic!("no reply: the connection closed"),
+            Ok(Err(e)) => panic!("no reply: {e}"),
+            Err(_) => panic!("no reply within 5 s"),
+        }
+    }
+
+    /// The RFC 9289 client side: the AUTH_TLS probe, then the handshake
+    /// with `leaf` (if any) as the client certificate.
+    async fn tls_connect(addr: &str, ca: &testpki::Ca, leaf: Option<&testpki::Leaf>) -> Arc<HubConn> {
+        use rustls::pki_types::pem::PemObject;
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(&raw_call(7, 0, 7, &[])).await.unwrap();
+        let r = read_reply(&mut s).await;
+        assert_eq!(&r[16..28], &[&8u32.to_be_bytes()[..], b"STARTTLS"].concat()[..], "the probe is answered STARTTLS");
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(CertificateDer::from_pem_slice(ca.pem.as_bytes()).unwrap()).unwrap();
+        let b = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_root_certificates(roots);
+        let mut cc = match leaf {
+            Some(l) => b
+                .with_client_auth_cert(
+                    vec![CertificateDer::from_pem_slice(l.cert_pem.as_bytes()).unwrap()],
+                    PrivateKeyDer::from_pem_slice(l.key_pem.as_bytes()).unwrap(),
+                )
+                .unwrap(),
+            None => b.with_no_client_auth(),
+        };
+        cc.alpn_protocols = vec![b"sunrpc".to_vec()];
+        let tls = tokio_rustls::TlsConnector::from(Arc::new(cc))
+            .connect(ServerName::try_from("proxy").unwrap(), s)
+            .await
+            .unwrap();
+        HubConn::over(addr, tls)
+    }
+
+    async fn session_on(c: &Arc<HubConn>) -> Result<SessionId, BackendError> {
+        let one = |op: Vec<u8>| {
+            let c = c.clone();
+            async move { c.call(&proxy_cred(), &wire::encode_compound(b"", 1, &[&op])).await }
+        };
+        let (_, x) = wire::decode_exchange_id_reply(one(wire::op_exchange_id(*b"verifier", b"tls-client", 0)).await?).unwrap();
+        let x = x.unwrap();
+        let fore = ChannelAttrs { max_requests: 4, ..ChannelAttrs::default() };
+        let (_, cs) = wire::decode_create_session_reply(one(wire::op_create_session(x.clientid, x.sequenceid, &fore)).await?).unwrap();
+        Ok(cs.unwrap().sessionid)
+    }
+
+    async fn lookup_ws_a(c: &Arc<HubConn>, sid: SessionId) -> Bytes {
+        let x = [seq(sid, 0, 1), op_putfh(route::PSEUDO_ROOT_FH), op_lookup("ws-a"), wire::op_getfh()];
+        let refs: Vec<&[u8]> = x.iter().map(|o| o.as_slice()).collect();
+        c.call(&proxy_cred(), &wire::encode_compound(b"", 2, &refs)).await.unwrap()
+    }
+
+    /// §6a end to end in-process: probe → STARTTLS → handshake with a
+    /// client certificate → the URI SAN picks the identity rule → the
+    /// crossing reaches the hub. The control is the SAME proxy and CA
+    /// with a certificate naming another client: its root has no ws-a.
+    #[tokio::test]
+    async fn an_mtls_client_is_its_certificate_and_sees_its_workspaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub_addr = hub(dir.path()).await;
+        let (ca, addr) = tls_proxy(dir.path(), &hub_addr, vec![cert_rule("spiffe://clusters/a")]).await;
+
+        let c = tls_connect(&addr, &ca, Some(&ca.client(Some("spiffe://clusters/a")))).await;
+        let sid = session_on(&c).await.unwrap();
+        let body = lookup_ws_a(&c, sid).await;
+        assert_eq!(&body[0..4], &[0, 0, 0, 0], "cluster a crosses into ws-a");
+
+        let other = tls_connect(&addr, &ca, Some(&ca.client(Some("spiffe://clusters/b")))).await;
+        let sid = session_on(&other).await.unwrap();
+        let body = lookup_ws_a(&other, sid).await;
+        assert_eq!(&body[0..4], &(Nfs4Status::NoEnt as u32).to_be_bytes(), "cluster b: ws-a does not exist");
+    }
+
+    /// §6a: a client belongs to the identity that registered it. Cluster
+    /// b, on its own TLS connection, names cluster a's session (ids are a
+    /// counter: guessable): the SEQUENCE is BADSESSION, as for an absent
+    /// session, and DESTROY_SESSION / CREATE_SESSION / DESTROY_CLIENTID
+    /// naming a's ids fail the same way. The control: a's own session
+    /// keeps working afterwards, on a's connection.
+    #[tokio::test]
+    async fn another_identitys_session_and_client_look_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub_addr = hub(dir.path()).await;
+        let rules = vec![cert_rule("spiffe://clusters/a"), cert_rule("spiffe://clusters/b")];
+        let (ca, addr) = tls_proxy(dir.path(), &hub_addr, rules).await;
+        let a = tls_connect(&addr, &ca, Some(&ca.client(Some("spiffe://clusters/a")))).await;
+        let sid_a = session_on(&a).await.unwrap();
+        let b = tls_connect(&addr, &ca, Some(&ca.client(Some("spiffe://clusters/b")))).await;
+        let _sid_b = session_on(&b).await.unwrap();
+        let status = |body: Bytes| u32::from_be_bytes(body[0..4].try_into().unwrap());
+        let bad_session = Nfs4Status::BadSession as u32;
+
+        let body = lookup_ws_a(&b, sid_a).await;
+        assert_eq!(status(body), bad_session, "b drives a's session: BADSESSION");
+
+        let mut e = XdrEncoder::new();
+        e.encode_u32(opcode::DESTROY_SESSION);
+        e.append_raw(&sid_a.0);
+        let op = e.finish().to_vec();
+        let body = b.call(&proxy_cred(), &wire::encode_compound(b"", 1, &[&op])).await.unwrap();
+        assert_eq!(status(body), bad_session, "b destroys a's session: BADSESSION");
+
+        let cid_a = u64::from_be_bytes(sid_a.0[8..16].try_into().unwrap());
+        let mut e = XdrEncoder::new();
+        e.encode_u32(opcode::DESTROY_CLIENTID);
+        e.encode_u64(cid_a);
+        let op = e.finish().to_vec();
+        let body = b.call(&proxy_cred(), &wire::encode_compound(b"", 1, &[&op])).await.unwrap();
+        assert_eq!(status(body), Nfs4Status::StaleClientId as u32, "b destroys a's client: STALE_CLIENTID");
+
+        let fore = ChannelAttrs { max_requests: 4, ..ChannelAttrs::default() };
+        let body = b.call(&proxy_cred(), &wire::encode_compound(b"", 1, &[&wire::op_create_session(cid_a, 2, &fore)])).await.unwrap();
+        assert_eq!(status(body), Nfs4Status::StaleClientId as u32, "b opens a session on a's client: STALE_CLIENTID");
+
+        let x = [seq(sid_a, 0, 1), op_putfh(route::PSEUDO_ROOT_FH), op_lookup("ws-a"), wire::op_getfh()];
+        let refs: Vec<&[u8]> = x.iter().map(|o| o.as_slice()).collect();
+        let body = a.call(&proxy_cred(), &wire::encode_compound(b"", 2, &refs)).await.unwrap();
+        assert_eq!(status(body), 0, "control: a's session is intact and a still crosses into ws-a");
+    }
+
+    /// Same host owner, two identities: two clients, not one — the
+    /// prefix is part of the owner the dispatcher keys on.
+    #[test]
+    fn the_identity_prefix_is_stable_and_separates_owners() {
+        let p = |u: &[&str]| identity_prefix(&Peer { addr: "10.0.0.1".parse().unwrap(), uris: u.iter().map(|s| s.to_string()).collect() });
+        let a = p(&["spiffe://clusters/a"]).unwrap();
+        assert_eq!(a, p(&["spiffe://clusters/a"]).unwrap());
+        assert_ne!(a, p(&["spiffe://clusters/b"]).unwrap());
+        assert_eq!(p(&["u2", "u1"]), p(&["u1", "u2"]), "order of SANs does not matter");
+        assert_eq!(p(&[]), None, "plaintext: no prefix");
+        // Pinned: the prefix is persisted and sent to hubs, so a change
+        // of digest is a change of every client's identity.
+        assert_eq!(a, b"id:cfcbe7d9df2b4dca/".to_vec(), "sha256(uri)[..8]");
+        assert!(owner_is(&[a.as_slice(), b"Linux NFS"].concat(), Some(&a)));
+        assert!(!owner_is(&[a.as_slice(), b"Linux NFS"].concat(), None), "plaintext does not own a certified client");
+        assert!(owner_is(b"Linux NFS", None));
+    }
+
+    /// §6a: "A connection that does not upgrade is refused." EXCHANGE_ID
+    /// in the clear is AUTH_TOOWEAK (MSG_DENIED / AUTH_ERROR); a NULL
+    /// ping is still answered (the control: the connection is served,
+    /// only refused).
+    #[tokio::test]
+    async fn a_connection_that_does_not_upgrade_is_refused_tooweak() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub_addr = hub(dir.path()).await;
+        let (_ca, addr) = tls_proxy(dir.path(), &hub_addr, vec![cert_rule("spiffe://clusters/a")]).await;
+        let mut s = TcpStream::connect(&addr).await.unwrap();
+        s.write_all(&raw_call(1, 0, 1, &[])).await.unwrap();
+        let r = read_reply(&mut s).await;
+        assert_eq!(&r[4..12], &[0, 0, 0, 1, 0, 0, 0, 0], "control: NULL is accepted");
+        let x = wire::op_exchange_id(*b"verifier", b"plain", 0);
+        s.write_all(&raw_call(2, 1, 1, &wire::encode_compound(b"", 1, &[&x]))).await.unwrap();
+        let r = read_reply(&mut s).await;
+        let want: Vec<u8> = [2u32, 1, 1, 1, 5].iter().flat_map(|w| w.to_be_bytes()).collect();
+        assert_eq!(r.as_ref(), want.as_slice(), "xid 2, REPLY, MSG_DENIED, AUTH_ERROR, AUTH_TOOWEAK");
+    }
+
+    /// The certificate must chain to the configured CA, and there must
+    /// be one. A refused handshake surfaces at the client's first call
+    /// (TLS 1.3 verifies the client after the client's Finished).
+    #[tokio::test]
+    async fn a_certificate_from_another_ca_or_none_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub_addr = hub(dir.path()).await;
+        let (ca, addr) = tls_proxy(dir.path(), &hub_addr, vec![cert_rule("spiffe://clusters/a")]).await;
+        let rogue = testpki::ca("rogue");
+        let c = tls_connect(&addr, &ca, Some(&rogue.client(Some("spiffe://clusters/a")))).await;
+        assert!(session_on(&c).await.is_err(), "a certificate from another CA");
+        let c = tls_connect(&addr, &ca, None).await;
+        assert!(session_on(&c).await.is_err(), "no certificate");
+        let c = tls_connect(&addr, &ca, Some(&ca.client(Some("spiffe://clusters/a")))).await;
+        assert!(session_on(&c).await.is_ok(), "control: the CA's certificate is served");
+    }
+
+    /// Without `tls`, the probe is a plain NULL: accepted with an EMPTY
+    /// verifier, which RFC 9289 §4.1 reads as "no TLS here" — before
+    /// AUTH_TLS decoded, the probe got no reply at all and the mount
+    /// waited out a timeout.
+    #[tokio::test]
+    async fn without_tls_the_probe_is_answered_without_starttls() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub_addr = hub(dir.path()).await;
+        let (_p, addr) = proxy(dir.path(), &hub_addr).await;
+        let mut s = TcpStream::connect(&addr).await.unwrap();
+        s.write_all(&raw_call(9, 0, 7, &[])).await.unwrap();
+        let r = read_reply(&mut s).await;
+        let want: Vec<u8> = [9u32, 1, 0, 0, 0, 0].iter().flat_map(|w| w.to_be_bytes()).collect();
+        assert_eq!(r.as_ref(), want.as_slice(), "accepted, AUTH_NONE verifier with no body, SUCCESS");
+        // And a hub answers it the same way.
+        let mut h = TcpStream::connect(&hub_addr).await.unwrap();
+        h.write_all(&raw_call(9, 0, 7, &[])).await.unwrap();
+        assert_eq!(read_reply(&mut h).await.as_ref(), want.as_slice());
+    }
+
+    #[test]
+    fn a_clients_rule_without_tls_is_a_config_error() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ProxyConfig {
+            listen: "127.0.0.1:0".into(),
+            lease_secs: 90,
+            keepalive: false,
+            state_dir: dir.path().join("proxy"),
+            hubs: vec![],
+            kube: None,
+            identities: vec![cert_rule("spiffe://clusters/a")],
+            tls: None,
+        };
+        assert!(rt.block_on(Proxy::new(&cfg)).is_err());
+    }
+
     /// The config the chart renders (flint-lite-operator-chart
     /// templates/nfs-proxy.yaml, `helm template` output verbatim) is the
     /// config this binary parses — kube mode, all namespaces.
@@ -1012,5 +1451,22 @@ mod tests {
         let one_ns = rendered.replace("kube:\n  {}", "kube:\n  namespace: \"workspaces\"");
         let cfg: ProxyConfig = serde_yaml::from_str(&one_ns).unwrap();
         assert_eq!(cfg.kube.unwrap().namespace.as_deref(), Some("workspaces"));
+        assert!(cfg.tls.is_none(), "tls off unless the chart renders it");
+    }
+
+    /// The same, with `nfsProxy.tls.enabled` and a `clients:` rule
+    /// (`helm template` output verbatim): the paths are where the chart
+    /// mounts the Secret and the CA bundle.
+    #[test]
+    fn the_charts_rendered_tls_config_parses() {
+        let rendered = "listen: 0.0.0.0:2049\nstateDir: /var/lib/flint-nfs-proxy\nleaseSecs: 90\nkube:\n  {}\nidentities:\n  - clients:\n    - spiffe://clusters/a\n    name: a\n    workspaces:\n    - ws-*\ntls:\n  cert: /etc/flint-nfs-proxy/tls/tls.crt\n  key: /etc/flint-nfs-proxy/tls/tls.key\n  clientCa: /etc/flint-nfs-proxy/client-ca/ca.crt\n  reloadSecs: 30\n";
+        let cfg: ProxyConfig = serde_yaml::from_str(rendered).unwrap();
+        let t = cfg.tls.unwrap();
+        assert_eq!(t.cert, PathBuf::from("/etc/flint-nfs-proxy/tls/tls.crt"));
+        assert_eq!(t.key, PathBuf::from("/etc/flint-nfs-proxy/tls/tls.key"));
+        assert_eq!(t.client_ca, PathBuf::from("/etc/flint-nfs-proxy/client-ca/ca.crt"));
+        assert_eq!(t.reload_secs, 30);
+        assert_eq!(cfg.identities[0].clients, vec!["spiffe://clusters/a"]);
+        assert!(cfg.identities[0].sources.is_empty());
     }
 }

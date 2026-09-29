@@ -289,15 +289,45 @@ nfsProxy:
   enabled: false
 
   # Who may see which workspace. REQUIRED: a client that matches no
-  # identity sees an empty `/`. `sources` are the addresses the proxy
-  # sees — keep them real with service.externalTrafficPolicy: Local (or
-  # an NLB with IP targets). A remote cluster behind a NAT gateway is
-  # one address. Workspace patterns: exact names, or a trailing `*`.
-  # (Client certificates — RPC-with-TLS — are design §6a, not yet built.)
+  # identity sees an empty `/`. A rule names `clients` (client
+  # certificate URI SANs; needs `tls` below), `sources` (the addresses
+  # the proxy sees), or both — then BOTH must hold. With `clients`, the
+  # path a connection took (gateway, NAT) does not matter; with
+  # `sources` alone, keep them real with service.externalTrafficPolicy:
+  # Local (or an NLB with IP targets). Patterns: exact, or a trailing `*`.
   identities: []
   #  - name: cluster-a
-  #    sources: ["10.20.0.0/16"]
+  #    clients: ["spiffe://clusters/a"]
+  #    sources: ["10.20.0.0/16"]     # optional, defence in depth
   #    workspaces: ["team-a-*"]
+
+  # RPC-with-TLS (RFC 9289; design §6a). Enabled, EVERY client must
+  # mount with `xprtsec=mtls` (Linux >= 6.5, tlshd running on the node)
+  # and present a certificate chaining to the client CA; a connection
+  # that does not upgrade is refused AUTH_TOOWEAK. The files are
+  # re-read every reloadSecs: a cert-manager renewal takes over for new
+  # connections without a restart.
+  tls:
+    enabled: false
+    # A kubernetes.io/tls Secret (tls.crt, tls.key): the proxy's
+    # certificate. Its SANs must name the address clients MOUNT (tlshd
+    # verifies it): the LoadBalancer IP or DNS name.
+    secretName: ""
+    # Render a cert-manager Certificate into secretName.
+    certificate:
+      create: false
+      issuerRef: {}          # {name: ..., kind: ClusterIssuer}
+      dnsNames: []
+      ipAddresses: []
+      duration: 2160h
+      renewBefore: 360h
+    # The client CA bundle: a ConfigMap key (a trust-manager Bundle's
+    # target), or a Secret key when clientCa.secretName is set.
+    clientCa:
+      configMapName: ""
+      secretName: ""
+      key: ca.crt
+    reloadSecs: 30
 
   # FlintShares to serve. "" = every namespace.
   watchNamespace: ""

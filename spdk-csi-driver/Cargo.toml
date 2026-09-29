@@ -164,6 +164,13 @@ schemars = "1.0"
 # a process default — so every kube TLS client PANICKED at
 # construction. See lib.rs for the whole story.
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+# RPC-with-TLS (RFC 9289) at flint-nfs-proxy (design §6a): the STARTTLS
+# upgrade runs rustls on the accepted socket, and the client
+# certificate's URI SAN is the connection's identity. tokio-rustls 0.26
+# is already in the tree (hyper-rustls); x509-parser reads the SAN,
+# which rustls/webpki verify but do not expose.
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }
+x509-parser = "0.16"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
@@ -251,6 +258,8 @@ io-uring = "0.7"
 
 [dev-dependencies]
 tempfile = "3.0"
+# A CA, server and client certificates for the proxy's mTLS tests.
+rcgen = "0.13"
 # test-util: virtual time (start_paused) for the crash-sweep sim harness —
 # the timeout that "crashes" a hung flow fires in virtual time, so the
 # whole sweep runs in milliseconds of wall clock.

@@ -1,0 +1,42 @@
+PASS PKI generated
+PASS client a mounts with xprtsec=mtls
+  a sees: ws-a 
+PASS client a's root lists exactly ws-a (its certificate's rule)
+PASS a write through the TLS mount lands in hub A
+PASS ws-b is ENOENT to client a
+PASS client b mounts with xprtsec=mtls
+  b sees: ws-a 
+FAIL client b's root lists exactly ws-b (the identity follows the certificate)
+PASS client a's mount still reads (its TLS session is its own)
+  rogue mount rc=32: mount.nfs4: access denied by server while mounting 127.0.0.3:/
+PASS a certificate from another CA cannot mount
+  plaintext mount rc=32: mount.nfs4: access denied by server while mounting 127.0.0.4:/
+PASS a mount that does not upgrade is refused
+PASS the proxy refused it AUTH_TOOWEAK (the mechanism)
+PASS the proxy loaded the rotated certificate without a restart
+PASS a new mount after the rotation handshakes
+PASS an existing mount survives the rotation
+  marker in capture: proxy port 0, hub port (plaintext, control) 1
+PASS control: the capture sees the payload in the clear on the hub's port
+PASS the payload never appears in the clear on the proxy's port
+proxy TLS log:
+      1 2026-09-29T22:51:56.467095Z  WARN rustls::msgs::handshake: Illegal SNI extension: ignoring IP address presented as hostname (3132372e302e302e31)    
+      1 2026-09-29T22:51:56.558749Z  INFO spdk_csi_driver::nfs_proxy::server: client 127.0.0.1:821: TLS up, identity ["spiffe://clusters/a"]
+      1 2026-09-29T22:51:58.040222Z  WARN rustls::msgs::handshake: Illegal SNI extension: ignoring IP address presented as hostname (3132372e302e302e32)    
+      1 2026-09-29T22:51:58.043135Z  INFO spdk_csi_driver::nfs_proxy::server: client 127.0.0.1:898: TLS up, identity ["spiffe://clusters/b"]
+      1 2026-09-29T22:51:59.489742Z  WARN rustls::msgs::handshake: Illegal SNI extension: ignoring IP address presented as hostname (3132372e302e302e33)    
+      1 2026-09-29T22:51:59.491624Z  WARN spdk_csi_driver::nfs_proxy::server: client 127.0.0.1:683: TLS handshake failed: invalid peer certificate: UnknownIssuer
+      1 2026-09-29T22:51:59.515185Z  WARN rustls::msgs::handshake: Illegal SNI extension: ignoring IP address presented as hostname (3132372e302e302e33)    
+      1 2026-09-29T22:51:59.518449Z  WARN spdk_csi_driver::nfs_proxy::server: client 127.0.0.1:958: TLS handshake failed: invalid peer certificate: UnknownIssuer
+      1 2026-09-29T22:51:59.522455Z  WARN rustls::msgs::handshake: Illegal SNI extension: ignoring IP address presented as hostname (3132372e302e302e33)    
+      1 2026-09-29T22:51:59.524721Z  WARN spdk_csi_driver::nfs_proxy::server: client 127.0.0.1:671: TLS handshake failed: invalid peer certificate: UnknownIssuer
+      1 2026-09-29T22:51:59.529726Z  WARN rustls::msgs::handshake: Illegal SNI extension: ignoring IP address presented as hostname (3132372e302e302e33)    
+      1 2026-09-29T22:51:59.532694Z  WARN spdk_csi_driver::nfs_proxy::server: client 127.0.0.1:721: TLS handshake failed: invalid peer certificate: UnknownIssuer
+      1 2026-09-29T22:51:59.574471Z  WARN rustls::msgs::handshake: Illegal SNI extension: ignoring IP address presented as hostname (3132372e302e302e33)    
+      1 2026-09-29T22:51:59.576365Z  WARN spdk_csi_driver::nfs_proxy::server: client 127.0.0.1:715: TLS handshake failed: invalid peer certificate: UnknownIssuer
+      1 2026-09-29T22:51:59.639363Z  WARN spdk_csi_driver::nfs_proxy::server: client 127.0.0.1:975: call on a connection that did not upgrade to TLS: AUTH_TOOWEAK
+      1 2026-09-29T22:51:59.639540Z  WARN spdk_csi_driver::nfs_proxy::server: client 127.0.0.1:975: call on a connection that did not upgrade to TLS: AUTH_TOOWEAK
+      1 2026-09-29T22:52:01.405623Z  INFO spdk_csi_driver::nfs_proxy::tls: tls: new certificate/CA files loaded; new connections use them
+      1 2026-09-29T22:52:02.892494Z  WARN rustls::msgs::handshake: Illegal SNI extension: ignoring IP address presented as hostname (3132372e302e302e35)    
+      1 2026-09-29T22:52:02.895040Z  INFO spdk_csi_driver::nfs_proxy::server: client 127.0.0.1:1013: TLS up, identity ["spiffe://clusters/a"]
+RESULT: 15 passed, 1 failed

@@ -604,6 +604,48 @@ port are still wanted for capacity and failure isolation.
    STARTTLS, rustls with a required client certificate, the URI SAN as
    the identity, hot reload of the cert-manager files. A connection
    that does not upgrade is refused on the external listener.
+   **DONE 2026-09-29** (`nfs_proxy/tls.rs`; `tls:` in the config, the
+   chart's `nfsProxy.tls`). The first record on a connection must be the
+   `AUTH_TLS` NULL probe: it is answered `STARTTLS` and rustls takes the
+   socket (TLS 1.3, ALPN `sunrpc`, a client certificate REQUIRED and
+   chained to `clientCa`); anything else is answered `AUTH_TOOWEAK`, a
+   plain NULL ping excepted. The URI SANs are the connection's identity:
+   an identity rule names `clients`, `sources` or both (then both must
+   hold). The three files are re-read every `reloadSecs`; a file that
+   fails to parse keeps the previous configuration. Also fixed on the
+   way: `AUTH_TLS` did not decode anywhere in the crate, so the probe
+   went UNANSWERED (hubs too) and an `xprtsec=` mount waited out a
+   timeout instead of learning there is no TLS.
+   **Identity binding** (found while writing the drill): session and
+   client ids are counters, so any connection could name another
+   client's session. On a TLS connection the downstream owner is
+   prefixed `id:<sha256(URIs)[..8]>/`, and a session or clientid of
+   another identity is answered as absent (BADSESSION /
+   STALE_CLIENTID). Plaintext connections stay unbound: an address is
+   not an identity.
+   **Drills on a real kernel, 19/19** (`step2b-mtls.sh`, Linux 6.12,
+   ktls-utils 1.0 `tlshd`, `results-box-6.12-step2b/`): clients a and b
+   each see only their workspaces; another CA's certificate and a
+   plaintext mount are refused (the latter by `AUTH_TOOWEAK`, seen in the
+   log); a rotated server certificate is SERVED without a restart (a
+   mount of an address only the new certificate names fails before the
+   rotation and succeeds after), and a mount made before it keeps
+   reading; a marker written through the mount never appears in the
+   clear on the proxy's port (control: it does on the hub's). The pre-2b
+   proxy fails 13/19 (`run-prefix-known-bad.txt`; the 6 it passes are
+   refusals that pass when nothing mounts, each paired with a positive
+   control). In-process: 7 tests over a real hub; mutation controls
+   (rules ignore `clients`, no TOOWEAK, client certificate optional,
+   binding off, SEQUENCE unbound) each fail a test.
+   **Found by run 1: one node, one identity.** While an NFS client to
+   the proxy exists, Linux trunks a new mount of the same server
+   (same `server_owner`) onto that client's connection, so a second
+   certificate on the same node is never presented: b's connection came
+   up as b and b's mount listed a's workspaces over a's connection
+   (`run-1-trunking-finding.txt`). Per-cluster (or per-node)
+   certificates, as §6a has them, are the only shape that works.
+   **Not built:** the client-side `flint-nfs-client-identity` DaemonSet,
+   and the §6a Istio checks (left open under step 4).
 3. Restarts and wake: lease keepalive, status-flag OR, the table in
    §4, and `NFS4ERR_DELAY` + wake.
    **DONE 2026-09-28 (static-table mode):** a one-slot control session

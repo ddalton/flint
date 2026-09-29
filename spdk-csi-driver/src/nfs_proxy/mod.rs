@@ -10,3 +10,4 @@ pub mod backend;
 pub mod table;
 pub mod server;
 pub mod kube;
+pub mod tls;

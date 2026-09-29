@@ -14,6 +14,18 @@ one annotation to wake a parked hub. Nothing else.
 {{- if not .Values.nfsProxy.identities }}
 {{- fail "nfsProxy.enabled requires nfsProxy.identities — without one, every client sees an empty root. There is no allow-all default: this port reaches every workspace." }}
 {{- end }}
+{{- $tls := .Values.nfsProxy.tls }}
+{{- if $tls.enabled }}
+{{- if not $tls.secretName }}
+{{- fail "nfsProxy.tls.enabled requires nfsProxy.tls.secretName (the proxy's certificate Secret)" }}
+{{- end }}
+{{- if and $tls.certificate.create (not $tls.certificate.issuerRef) }}
+{{- fail "nfsProxy.tls.certificate.create requires nfsProxy.tls.certificate.issuerRef" }}
+{{- end }}
+{{- if not (or $tls.clientCa.configMapName $tls.clientCa.secretName) }}
+{{- fail "nfsProxy.tls.enabled requires nfsProxy.tls.clientCa.configMapName or .secretName — the CA client certificates must chain to" }}
+{{- end }}
+{{- end }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -71,7 +83,43 @@ data:
       {{- end }}
     identities:
       {{- toYaml .Values.nfsProxy.identities | nindent 6 }}
+    {{- if $tls.enabled }}
+    tls:
+      cert: /etc/flint-nfs-proxy/tls/tls.crt
+      key: /etc/flint-nfs-proxy/tls/tls.key
+      clientCa: /etc/flint-nfs-proxy/client-ca/{{ $tls.clientCa.key }}
+      reloadSecs: {{ int $tls.reloadSecs }}
+    {{- end }}
 ---
+{{- if and $tls.enabled $tls.certificate.create }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "flint-lite-operator.nfsProxyName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-lite-operator.nfsProxyLabels" . | nindent 4 }}
+spec:
+  secretName: {{ $tls.secretName }}
+  issuerRef:
+    {{- toYaml $tls.certificate.issuerRef | nindent 4 }}
+  duration: {{ $tls.certificate.duration }}
+  renewBefore: {{ $tls.certificate.renewBefore }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages: ["server auth"]
+  {{- with $tls.certificate.dnsNames }}
+  dnsNames:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with $tls.certificate.ipAddresses }}
+  ipAddresses:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+---
+{{- end }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -163,6 +211,17 @@ spec:
               readOnly: true
             - name: state
               mountPath: /var/lib/flint-nfs-proxy
+            {{- if $tls.enabled }}
+            # Whole-volume mounts, never subPath: kubelet swaps a
+            # projected volume's `..data` link on a renewal, and the
+            # proxy re-reads these paths (a subPath would pin the old file).
+            - name: tls
+              mountPath: /etc/flint-nfs-proxy/tls
+              readOnly: true
+            - name: client-ca
+              mountPath: /etc/flint-nfs-proxy/client-ca
+              readOnly: true
+            {{- end }}
           # A TCP accept is all the proxy promises before the watch has
           # listed; the binary exits if the watch cannot start, so a pod
           # that stays up has a table.
@@ -190,6 +249,19 @@ spec:
         - name: state
           persistentVolumeClaim:
             claimName: {{ include "flint-lite-operator.nfsProxyName" . }}
+        {{- if $tls.enabled }}
+        - name: tls
+          secret:
+            secretName: {{ $tls.secretName }}
+        - name: client-ca
+          {{- if $tls.clientCa.secretName }}
+          secret:
+            secretName: {{ $tls.clientCa.secretName }}
+          {{- else }}
+          configMap:
+            name: {{ $tls.clientCa.configMapName }}
+          {{- end }}
+        {{- end }}
       {{- with .Values.nfsProxy.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -41,6 +41,13 @@ fn yes() -> bool {
 }
 
 /// Who a connection is, and what it may see.
+///
+/// A rule matches a connection when every condition it names holds:
+/// `clients` (the client certificate's URI SAN, design §6a) and
+/// `sources` (the peer address). Name both and a certificate is honoured
+/// only from those addresses; name `clients` alone and the path the
+/// connection took does not matter (a gateway, NAT). A rule must name
+/// at least one.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IdentityRule {
@@ -48,8 +55,26 @@ pub struct IdentityRule {
     /// CIDRs (`10.0.0.0/8`, `127.0.0.1/32`, `::1/128`).
     #[serde(default)]
     pub sources: Vec<String>,
+    /// Client certificate URI SANs (`spiffe://clusters/a`); a trailing
+    /// `*` matches a prefix. Only a TLS connection has one.
+    #[serde(default)]
+    pub clients: Vec<String>,
     /// Workspace names; a trailing `*` matches a prefix.
     pub workspaces: Vec<String>,
+}
+
+/// What a connection has proved: its peer address, and, after the
+/// RFC 9289 upgrade, its certificate's URI SANs.
+#[derive(Debug, Clone)]
+pub struct Peer {
+    pub addr: IpAddr,
+    pub uris: Vec<String>,
+}
+
+impl Peer {
+    pub fn addr(addr: IpAddr) -> Self {
+        Peer { addr, uris: Vec::new() }
+    }
 }
 
 // The CIDR parser and matcher moved to `nfs::export_access` on
@@ -82,6 +107,9 @@ impl Table {
     pub fn new(hubs: Vec<HubRow>, rules: Vec<IdentityRule>) -> Result<Arc<Self>, String> {
         let mut parsed = Vec::new();
         for r in rules {
+            if r.sources.is_empty() && r.clients.is_empty() {
+                return Err(format!("identity {}: names neither sources nor clients", r.name));
+            }
             let cidrs = r
                 .sources
                 .iter()
@@ -142,13 +170,27 @@ impl Table {
         self.roots.write().unwrap().insert(server_id, fh);
     }
 
-    /// The view of a connection from `peer`: the union of every rule
-    /// whose sources contain it. No rule, no workspaces.
+    /// Does any rule name `clients:`? Such a rule needs TLS to match.
+    pub fn wants_certificates(&self) -> bool {
+        self.rules.iter().any(|(r, _)| !r.clients.is_empty())
+    }
+
+    /// The view of a plaintext connection from `peer`.
     pub fn view(self: &Arc<Self>, peer: IpAddr) -> View {
+        self.view_of(&Peer::addr(peer))
+    }
+
+    /// The view of a connection: the union of every rule it matches.
+    /// No rule, no workspaces.
+    pub fn view_of(self: &Arc<Self>, peer: &Peer) -> View {
         let patterns: Vec<String> = self
             .rules
             .iter()
-            .filter(|(_, cidrs)| cidrs.iter().any(|c| in_cidr(peer, *c)))
+            .filter(|(r, cidrs)| {
+                (cidrs.is_empty() || cidrs.iter().any(|c| in_cidr(peer.addr, *c)))
+                    && (r.clients.is_empty()
+                        || r.clients.iter().any(|p| peer.uris.iter().any(|u| name_matches(p, u))))
+            })
             .flat_map(|(r, _)| r.workspaces.iter().cloned())
             .collect();
         View { table: self.clone(), patterns }
@@ -219,8 +261,8 @@ mod tests {
         Table::new(
             vec![row("team-a-1", 1, 11), row("team-a-2", 2, 12), row("team-b-1", 3, 13)],
             vec![
-                IdentityRule { name: "a".into(), sources: vec!["10.0.0.0/24".into()], workspaces: vec!["team-a-*".into()] },
-                IdentityRule { name: "b".into(), sources: vec!["10.0.1.7".into()], workspaces: vec!["team-b-1".into()] },
+                IdentityRule { name: "a".into(), sources: vec!["10.0.0.0/24".into()], clients: vec![], workspaces: vec!["team-a-*".into()] },
+                IdentityRule { name: "b".into(), sources: vec!["10.0.1.7".into()], clients: vec![], workspaces: vec!["team-b-1".into()] },
             ],
         )
         .unwrap()
@@ -241,6 +283,51 @@ mod tests {
         let b = t.view("10.0.1.7".parse().unwrap());
         assert_eq!(b.workspaces(), vec!["team-b-1"]);
         assert!(b.hub_allowed(3) && !b.hub_allowed(1));
+    }
+
+    fn rule(name: &str, sources: &[&str], clients: &[&str], ws: &str) -> IdentityRule {
+        IdentityRule {
+            name: name.into(),
+            sources: sources.iter().map(|s| s.to_string()).collect(),
+            clients: clients.iter().map(|s| s.to_string()).collect(),
+            workspaces: vec![ws.into()],
+        }
+    }
+
+    fn peer(addr: &str, uris: &[&str]) -> Peer {
+        Peer { addr: addr.parse().unwrap(), uris: uris.iter().map(|s| s.to_string()).collect() }
+    }
+
+    /// §6a: the certificate names the client, whatever address the
+    /// connection arrives from (a gateway, NAT). A plaintext connection
+    /// from the same address has no certificate and matches nothing.
+    #[test]
+    fn a_certificate_rule_matches_by_uri_from_any_address() {
+        let t = Table::new(
+            vec![row("team-a-1", 1, 11), row("team-b-1", 3, 13)],
+            vec![rule("a", &[], &["spiffe://clusters/a"], "team-a-*"), rule("b", &[], &["spiffe://clusters/b*"], "team-b-*")],
+        )
+        .unwrap();
+        assert_eq!(t.view_of(&peer("10.9.9.9", &["spiffe://clusters/a"])).workspaces(), vec!["team-a-1"]);
+        assert_eq!(t.view_of(&peer("192.168.0.1", &["spiffe://clusters/b-east"])).workspaces(), vec!["team-b-1"]);
+        assert!(t.view_of(&peer("10.9.9.9", &["spiffe://clusters/c"])).workspaces().is_empty(), "another client");
+        assert!(t.view("10.9.9.9".parse().unwrap()).workspaces().is_empty(), "plaintext: no certificate");
+        assert!(t.wants_certificates());
+    }
+
+    /// Both named: BOTH must hold. The address fence is defence in
+    /// depth — a stolen certificate from elsewhere sees nothing.
+    #[test]
+    fn a_rule_naming_both_needs_the_certificate_and_the_address() {
+        let t = Table::new(vec![row("team-a-1", 1, 11)], vec![rule("a", &["10.0.0.0/24"], &["spiffe://clusters/a"], "team-a-*")]).unwrap();
+        assert_eq!(t.view_of(&peer("10.0.0.5", &["spiffe://clusters/a"])).workspaces(), vec!["team-a-1"], "control: both hold");
+        assert!(t.view_of(&peer("10.0.1.5", &["spiffe://clusters/a"])).workspaces().is_empty(), "wrong address");
+        assert!(t.view_of(&peer("10.0.0.5", &[])).workspaces().is_empty(), "no certificate");
+    }
+
+    #[test]
+    fn a_rule_naming_neither_is_refused() {
+        assert!(Table::new(vec![], vec![rule("x", &[], &[], "*")]).is_err());
     }
 
     #[test]
