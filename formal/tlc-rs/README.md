@@ -143,6 +143,29 @@ All three agree on all 167 decidable gate entries
 nothing over the interpreter (104.6 s vs 101.2 s on FlintTierSession): the
 interpreter was already specialized. Generated Rust buys 1.3–1.5x.
 
+## The official examples (tlaplus/Examples)
+
+Every exhaustive-search model in [tlaplus/Examples](https://github.com/tlaplus/Examples)
+(commit c9e45d0) whose manifest records a TLC runtime of at most 10
+minutes was run through tlc-rs (`results/examples_run.py`,
+`results/examples-2026-09-28.jsonl`): 165 models. tlc-rs accepts 29 and
+refuses 136 (exit 2, nothing checked).
+
+**All 29 it accepts agree with TLC's recorded result**: the verdict (26
+hold, 3 safety violations), and every recorded distinct-state count and
+depth — among them dijkstra-mutex's 4-processor model (33.5M states),
+acp, bosco, GermanProtocol, ReadersWriters, SingleLaneBridge, the
+Specifying Systems chapters. The one depth that differed, btree/kvstore
+(9 against the manifest's 11), is TLC's multi-worker depth: TLC reports 9
+at 1 worker, and the same 2,641 states and 28,585 generated.
+
+What the 136 need is almost all syntax, not checking: named `ASSUME
+Name == ...` and proof syntax (`LEMMA ... BY ... DEF`, `<1>` steps), which
+TLC ignores; higher-order operator parameters (`op(_, _)`); recursive
+function definitions (`f[x \in S] == ...`); unbounded `CHOOSE x : P`;
+`INSTANCE` in a `LET`; a few operators (`\prec`, `^^`, `&`); some
+temporal shapes; and the Community Modules.
+
 ## Correctness against TLC
 
 Every gate entry was run through it (`results/gate-sweep-2026-09-26.jsonl`,
