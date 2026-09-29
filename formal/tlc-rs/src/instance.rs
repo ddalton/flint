@@ -18,6 +18,8 @@ use std::rc::Rc;
 pub struct Expanded {
     pub defs: Vec<Rc<Def>>,
     pub assumes: Vec<Ast>,
+    /// each renamed definition: its module of origin and name there
+    pub origins: Vec<(String, (String, String))>,
 }
 
 struct Rw {
@@ -167,11 +169,15 @@ pub fn expand(inst: &Instance, group: &[Module]) -> Result<Expanded, String> {
         subs.insert(x.clone(), name);
     }
     let rw = Rw { prefix: prefix.clone(), defs: group.iter().flat_map(|m| m.defs.iter().map(|d| d.name.clone())).collect(), subs };
+    let mut origins = Vec::new();
     for m in group {
         for d in &m.defs {
-            defs.push(rw.def(d, &mut Vec::new(), format!("{prefix}{}", d.name)));
+            let name = format!("{prefix}{}", d.name);
+            let origin = m.origins.get(&d.name).cloned().unwrap_or_else(|| (m.name.clone(), d.name.clone()));
+            origins.push((name.clone(), origin));
+            defs.push(rw.def(d, &mut Vec::new(), name));
         }
     }
     let assumes = group.iter().flat_map(|m| m.assumes.iter()).map(|a| rw.ast(a, &mut Vec::new())).collect();
-    Ok(Expanded { defs, assumes })
+    Ok(Expanded { defs, assumes, origins })
 }

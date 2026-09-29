@@ -106,6 +106,9 @@ pub enum Un {
     Subset,
     Union,
     Domain,
+    /// is a function (a record, a tuple): what a function or record set's
+    /// membership asks first, as TLC answers FALSE, not an error
+    IsFcn,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -170,6 +173,8 @@ pub enum TProp {
     EventuallyAlways(Expr),
     /// `[]<>P`
     AlwaysEventually(Expr),
+    /// `<>P`, P a state predicate: every behavior reaches P
+    Eventually(Expr),
     /// `[]P`, P a state predicate
     Always(Expr),
     /// P, a state predicate: holds in every initial state
@@ -642,6 +647,7 @@ impl Program {
                     Un::Neg => Value::Int(-x.as_int()?),
                     Un::Subset => Value::Lazy(Arc::new(Lazy::Subset(x))),
                     Un::Domain => return x.domain(),
+                    Un::IsFcn => Value::Bool(x.domain().is_ok()),
                     Un::Union => {
                         let mut out = Vec::new();
                         for s in x.elems()?.iter() {

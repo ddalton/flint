@@ -56,6 +56,13 @@ struct InternOrder {
     strings: Vec<String>,
 }
 
+/// Standard modules TLC defines in TLA+ (tla2tools' StandardModules),
+/// used when no file of that name is found.
+const EMBEDDED: &[(&str, &str)] = &[("Bags", include_str!("../modules/Bags.tla"))];
+
+/// Directories searched for a module not beside the spec.
+static LIB_DIRS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+
 fn load(
     dir: &Path,
     name: &str,
@@ -67,8 +74,19 @@ fn load(
     if out.iter().any(|m| m.name == name) || STANDARD.contains(&name) {
         return Ok(());
     }
-    let path = dir.join(format!("{name}.tla"));
-    let src = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    // the spec's directory, then the library directories (`-lib`,
+    // TLCRS_LIB): where TLC's classpath finds CommunityModules
+    let file = format!("{name}.tla");
+    let found = std::iter::once(dir.to_path_buf())
+        .chain(LIB_DIRS.get().into_iter().flatten().cloned())
+        .map(|d| d.join(&file))
+        .find(|p| p.is_file());
+    let path = found.clone().unwrap_or_else(|| dir.join(&file));
+    // a standard module TLC defines in TLA+ itself, built in as its source
+    let src = match (found, EMBEDDED.iter().find(|(n, _)| *n == name)) {
+        (None, Some((_, src))) => src.to_string(),
+        _ => std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?,
+    };
     fnv(hash, src.as_bytes());
     let toks = lexer::lex_module(&src).map_err(|e| format!("{}: {e}", path.display()))?;
     order.idents.extend(toks.iter().filter_map(|t| match &t.tok {
@@ -95,6 +113,7 @@ fn load(
         let x = crate::instance::expand(&inst, &group).map_err(|e| format!("{}: {e}", path.display()))?;
         m.defs.extend(x.defs);
         m.assumes.extend(x.assumes);
+        m.origins.extend(x.origins);
     }
     order.strings.extend(strings);
     out.push(m);
@@ -118,7 +137,7 @@ pub fn load_spec(spec_path: &Path, cfg_path: &Path) -> Result<Loaded, String> {
     // TLC reads the cfg before it parses the spec, and the cfg's string and
     // model values are interned as it reads them.
     let cfg_src = std::fs::read_to_string(cfg_path).map_err(|e| format!("{}: {e}", cfg_path.display()))?;
-    let cfg = parser::parse_cfg(lexer::lex(&cfg_src)?)?;
+    let mut cfg = parser::parse_cfg(lexer::lex(&cfg_src)?)?;
     let mut order = Vec::new();
     fn cfg_names(v: &parser::CfgVal, order: &mut Vec<String>) {
         match v {
@@ -134,6 +153,24 @@ pub fn load_spec(spec_path: &Path, cfg_path: &Path) -> Result<Loaded, String> {
     load(&dir, &name, &mut modules, &mut hash, &mut spec_order, &mut reg)?;
     order.extend(spec_order.idents);
     order.extend(spec_order.strings);
+    // `x <-[M] y`: M's definition x, under every name it was brought in as
+    for (m, x, y) in cfg.scoped_substitutions.clone() {
+        let mut names: Vec<String> = Vec::new();
+        for md in &modules {
+            if md.name == m && md.defs.iter().any(|d| d.name == x && !md.origins.contains_key(&x)) {
+                names.push(x.clone());
+            }
+            names.extend(md.origins.iter().filter(|(_, o)| o.0 == m && o.1 == x).map(|(n, _)| n.clone()));
+        }
+        names.sort();
+        names.dedup();
+        // x not M's own definition (`Nat <-[ZSequences] ZSeqNat`: a built-in
+        // M sees through EXTENDS): modules are flattened, so everywhere
+        if names.is_empty() {
+            names.push(x.clone());
+        }
+        cfg.substitutions.extend(names.into_iter().map(|n| (n, y.clone())));
+    }
     fnv(&mut hash, cfg_src.as_bytes());
 
     if !cfg.action_constraints.is_empty() {
@@ -143,6 +180,8 @@ pub fn load_spec(spec_path: &Path, cfg_path: &Path) -> Result<Loaded, String> {
     let (init_ast, next_ast, fair_asts) = match (&cfg.spec, &cfg.init, &cfg.next) {
         (Some(s), _, _) => c.spec_parts_fair(s)?,
         (None, Some(i), Some(n)) => (ast::Ast::Ident(i.clone()), ast::Ast::Ident(n.clone()), vec![]),
+        // no behavior: TLC checks the assumptions and explores nothing
+        (None, None, None) => (ast::Ast::Bool(false), ast::Ast::Bool(false), vec![]),
         _ => return Err("the cfg names neither SPECIFICATION nor INIT/NEXT".into()),
     };
     let init = c.rooted_act("Init", &init_ast, true)?;
@@ -169,9 +208,14 @@ fn run(generated: Option<Generated>) -> Result<bool, String> {
     let (mut metadir, mut recover, mut checkpoint_min, mut queue_mb): (Option<PathBuf>, bool, f64, u64) = (None, false, 30.0, 256);
     // TLCRS_FPMEM_MB: the default -fpmem, for forcing spills in tests
     let mut fp_mb: u64 = std::env::var("TLCRS_FPMEM_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(1024);
+    let mut lib_dirs: Vec<PathBuf> = std::env::var_os("TLCRS_LIB").map(|v| std::env::split_paths(&v).collect()).unwrap_or_default();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "-lib" => {
+                i += 1;
+                lib_dirs.push(PathBuf::from(args.get(i).ok_or("-lib needs a directory")?));
+            }
             "-workers" => {
                 i += 1;
                 let w = &args[i];
@@ -222,10 +266,11 @@ fn run(generated: Option<Generated>) -> Result<bool, String> {
         }
         i += 1;
     }
-    let spec_path = spec_path.ok_or("usage: tlc-rs [-workers N] [-engine interp|closure] [-codegen DIR] [-config X.cfg] X.tla")?;
+    let spec_path = spec_path.ok_or("usage: tlc-rs [-workers N] [-engine interp|closure] [-codegen DIR] [-lib DIR]... [-config X.cfg] X.tla")?;
     let cfg_path = cfg_path.unwrap_or_else(|| spec_path.with_extension("cfg"));
 
     let t0 = Instant::now();
+    let _ = LIB_DIRS.set(lib_dirs);
     let mut l = load_spec(&spec_path, &cfg_path)?;
     if let Some(order) = var_order {
         let names: Vec<&str> = order.split(',').map(str::trim).collect();
@@ -372,6 +417,10 @@ pub fn main(generated: Option<Generated>) -> ExitCode {
     match run(generated) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(12),
+        Err(e) if e == crate::compile::ASSUME_FALSE => {
+            println!("Error: {e}.");
+            ExitCode::from(10)
+        }
         Err(e) => {
             eprintln!("tlc-rs: {e}");
             ExitCode::from(2)

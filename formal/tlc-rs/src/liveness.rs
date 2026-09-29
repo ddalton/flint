@@ -162,13 +162,13 @@ pub fn step_ok(p: &Program, i: &Inst, s: &[Value], t: &[Value], bufs: &mut Bufs)
 }
 
 pub fn is_graph_leaf(t: &TProp) -> bool {
-    matches!(t, TProp::LeadsTo(..) | TProp::EventuallyAlways(_) | TProp::AlwaysEventually(_))
+    matches!(t, TProp::LeadsTo(..) | TProp::EventuallyAlways(_) | TProp::AlwaysEventually(_) | TProp::Eventually(_))
 }
 
 // ---- which state predicates the graph carries ------------------------------
 
 /// Where each graph-leaf instance's predicates sit in a node's bit words:
-/// `P ~> Q` has two bits (P, Q), `[]<>P` and `<>[]P` one.
+/// `P ~> Q` has two bits (P, Q), `[]<>P`, `<>[]P` and `<>P` one.
 pub struct Layout {
     /// per instance (indexes into the checker's `props`): its first bit
     pub base: Vec<Option<usize>>,
@@ -184,7 +184,7 @@ pub fn layout(props: &[Inst]) -> Layout {
                 next += 2;
                 Some(next - 2)
             }
-            TProp::AlwaysEventually(_) | TProp::EventuallyAlways(_) => {
+            TProp::AlwaysEventually(_) | TProp::EventuallyAlways(_) | TProp::Eventually(_) => {
                 next += 1;
                 Some(next - 1)
             }
@@ -212,7 +212,7 @@ pub fn node_bits(p: &Program, props: &[Inst], lay: &Layout, st: &[Value], bufs: 
                 set(b, pe, bufs)?;
                 set(b + 1, qe, bufs)?;
             }
-            TProp::AlwaysEventually(pe) | TProp::EventuallyAlways(pe) => set(b, pe, bufs)?,
+            TProp::AlwaysEventually(pe) | TProp::EventuallyAlways(pe) | TProp::Eventually(pe) => set(b, pe, bufs)?,
             _ => {}
         }
     }
@@ -690,6 +690,19 @@ pub fn check_leaf(g: &Graph, i: &Inst, base: usize, fair: &[FairInst], inits: &[
             (not_q, None, Some(starts))
         }
         TProp::AlwaysEventually(_) => (holds(base).iter().map(|x| !x).collect(), None, None),
+        // `<>P` is `Init ~> P`: a fair path from an initial state that
+        // never reaches P
+        TProp::Eventually(_) => {
+            let not_p: Vec<bool> = holds(base).iter().map(|x| !x).collect();
+            let mut starts = vec![false; n];
+            for &u in inits {
+                starts[u as usize] = not_p[u as usize];
+            }
+            if !starts.iter().any(|&b| b) {
+                return Ok(None);
+            }
+            (not_p, None, Some(starts))
+        }
         TProp::EventuallyAlways(_) => (all.clone(), Some(holds(base).iter().map(|x| !x).collect()), None),
         _ => return Ok(None),
     };

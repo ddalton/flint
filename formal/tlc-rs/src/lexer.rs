@@ -232,6 +232,16 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             }
             continue;
         }
+        // `(+)`, `(-)`, `(.)`, `(/)`, `(\X)`: other spellings of \oplus,
+        // \ominus, \odot, \oslash, \otimes (Bags defines `(+)`)
+        if let Some((w, t)) = [("(+)", "\\oplus"), ("(-)", "\\ominus"), ("(.)", "\\odot"), ("(/)", "\\oslash"), ("(\\X)", "\\otimes")]
+            .iter()
+            .find(|(w, _)| src[i..].starts_with(*w))
+        {
+            push(&mut out, Tok::Op(t));
+            i += w.len();
+            continue;
+        }
         match SYMBOLS.iter().find(|s| src[i..].starts_with(**s)) {
             Some(s) => {
                 push(&mut out, Tok::Op(s));

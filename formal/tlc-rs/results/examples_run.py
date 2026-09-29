@@ -4,7 +4,7 @@ with the results their manifests record (from TLC)."""
 import json, glob, os, re, subprocess, sys, time, shutil
 EX, BIN, OUT = sys.argv[1], sys.argv[2], sys.argv[3]
 WORKERS = os.environ.get('WORKERS', '4'); TIMEOUT = float(os.environ.get('TIMEOUT', '300'))
-META = os.path.join(os.path.dirname(OUT), 'ex-meta')
+META = OUT + '.meta'
 def secs(t):
     try:
         h, m, s = map(int, t.split(':')); return h * 3600 + m * 60 + s
@@ -20,6 +20,14 @@ for f in sorted(glob.glob(f'{EX}/specifications/*/manifest.json')):
             if s is None or s > 600:
                 continue
             rows.append((mod, mo))
+skip = set()
+for f in os.environ.get('SKIPFROM', '').split(','):
+    if f:
+        skip |= {json.loads(l)['model'] for l in open(f)}
+rows = [(m, mo) for m, mo in rows if mo['path'] not in skip]
+sh = os.environ.get('SHARD')
+if sh:
+    k, n = map(int, sh.split('/')); rows = rows[k::n]
 only = os.environ.get('ONLY')
 with open(OUT, 'w') as out:
     for mod, mo in rows:

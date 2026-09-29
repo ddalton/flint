@@ -462,6 +462,7 @@ impl Gen<'_> {
                     Un::Neg => format!("Value::Int(-({x}).as_int()?)"),
                     Un::Subset => format!("Value::Lazy(Arc::new(Lazy::Subset({x})))"),
                     Un::Domain => format!("({x}).domain()?"),
+                    Un::IsFcn => format!("Value::Bool(({x}).domain().is_ok())"),
                     Un::Union => format!("union({x})?"),
                 }
             }

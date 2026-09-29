@@ -339,10 +339,13 @@ impl Parser {
     }
 
     /// Skips a theorem (statement and proof) or a proof command: up to the
-    /// next line that starts a module-level unit.
+    /// next line that starts a module-level unit no further right than the
+    /// unit being skipped (a proof's `ASSUME NEW`, or a definition inside a
+    /// proof, is indented under its theorem).
     fn skip_unit(&mut self) {
+        let col = self.raw().col;
         self.bump();
-        while !(self.line_start() && self.unit_start()) {
+        while !(self.line_start() && self.raw().col <= col && self.unit_start()) {
             if matches!(self.raw().tok, Tok::Eof) {
                 return;
             }
@@ -693,6 +696,22 @@ impl Parser {
             return Ok(v);
         }
         loop {
+            // an infix operator as an argument (`FoldFunctionOnSet(+, 0, f, S)`):
+            // the operator `LAMBDA a, b : a + b`
+            if let Tok::Op(o) = self.peek().clone() {
+                if close == ")" && infix(o).is_some() && matches!(self.peek_at(1), Tok::Op("," | ")")) {
+                    self.bump();
+                    let (a, b) = ("$l".to_string(), "$r".to_string());
+                    let body = Ast::Bin(o, Box::new(Ast::Ident(a.clone())), Box::new(Ast::Ident(b.clone())));
+                    v.push(Ast::Lambda(vec![a, b], Box::new(body)));
+                    if self.is_op(",") {
+                        self.bump();
+                        continue;
+                    }
+                    self.expect_op(close)?;
+                    return Ok(v);
+                }
+            }
             v.push(self.expr(0)?);
             if self.is_op(",") {
                 self.bump();
@@ -755,6 +774,17 @@ impl Parser {
             Tok::Op("<<") => {
                 self.bump();
                 let v = self.expr_list(">>")?;
+                // `<<A>>_v`: the subscript lexes as an identifier starting
+                // with `_`, as in `[A]_v`
+                if v.len() == 1 {
+                    if let Tok::Ident(s) = self.raw().tok.clone() {
+                        if let Some(rest) = s.strip_prefix('_') {
+                            self.bump();
+                            let sub = if rest.is_empty() { self.primary_postfix()? } else { Ast::Ident(rest.to_string()) };
+                            return Ok(Ast::Temporal("<<>>_", vec![v.into_iter().next().unwrap(), sub]));
+                        }
+                    }
+                }
                 Ok(Ast::Tuple(v))
             }
             Tok::Op("{") => {
@@ -802,6 +832,32 @@ impl Parser {
                 let p = self.expr(0)?;
                 self.expect_op("}")?;
                 return Ok(Ast::SetFilter(Box::new(Bound { names: vec![name], tuple: false, set }), Box::new(p)));
+            }
+            self.pos = save;
+        }
+        // `{<<a, b>> \in S : P}` — a filter over tuples.
+        if self.is_op("<<") {
+            let save = self.pos;
+            self.bump();
+            let mut names = Vec::new();
+            while let Tok::Ident(n) = self.peek().clone() {
+                self.bump();
+                names.push(n);
+                if !self.is_op(",") {
+                    break;
+                }
+                self.bump();
+            }
+            if !names.is_empty() && self.is_op(">>") && self.peek_at(1) == &Tok::Op("\\in") {
+                self.bump();
+                self.bump();
+                let set = self.expr(0)?;
+                if self.is_op(":") {
+                    self.bump();
+                    let p = self.expr(0)?;
+                    self.expect_op("}")?;
+                    return Ok(Ast::SetFilter(Box::new(Bound { names, tuple: true, set }), Box::new(p)));
+                }
             }
             self.pos = save;
         }
@@ -943,6 +999,9 @@ pub enum CfgVal {
 pub struct Cfg {
     pub constants: Vec<(String, CfgVal)>,
     pub substitutions: Vec<(String, String)>,
+    /// `x <-[M] y`: (M, x, y), overriding M's definition x wherever M is
+    /// instantiated
+    pub scoped_substitutions: Vec<(String, String, String)>,
     pub init: Option<String>,
     pub next: Option<String>,
     pub spec: Option<String>,
@@ -979,22 +1038,29 @@ pub fn parse_cfg(toks: Vec<Token>) -> R<Cfg> {
                 p.bump();
                 match section.as_str() {
                     "CONSTANT" | "CONSTANTS" => {
-                        // `<-[M]` / `= [M]v`: scoped to module M; tlc-rs
-                        // flattens modules, so the scope is dropped
-                        let skip_scope = |p: &mut Parser| {
-                            if p.is_op("[") && matches!(p.peek_at(1), Tok::Ident(_)) && matches!(p.peek_at(2), Tok::Op("]")) {
-                                p.bump();
-                                p.bump();
-                                p.bump();
+                        // `<-[M]` / `= [M]v`: scoped to module M
+                        let scope = |p: &mut Parser| -> Option<String> {
+                            if p.is_op("[") && matches!(p.peek_at(2), Tok::Op("]")) {
+                                if let Tok::Ident(m) = p.peek_at(1).clone() {
+                                    p.bump();
+                                    p.bump();
+                                    p.bump();
+                                    return Some(m);
+                                }
                             }
+                            None
                         };
                         if p.is_op("<-") {
                             p.bump();
-                            skip_scope(&mut p);
-                            c.substitutions.push((name, p.ident()?));
+                            match scope(&mut p) {
+                                Some(m) => c.scoped_substitutions.push((m, name, p.ident()?)),
+                                None => c.substitutions.push((name, p.ident()?)),
+                            }
                         } else {
                             p.expect_op("=")?;
-                            skip_scope(&mut p);
+                            // a constant is one name however it is reached:
+                            // the scope changes nothing tlc-rs resolves
+                            scope(&mut p);
                             c.constants.push((name, cfg_val(&mut p)?));
                         }
                     }

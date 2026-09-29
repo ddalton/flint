@@ -703,6 +703,8 @@ impl<'p> Checker<'p> {
                 Ok(None) => {}
                 Ok(Some(l)) => {
                     let env: Vec<String> = inst.env.iter().map(|(_, v)| v.to_string()).collect();
+                    // TLC's own line, which the gates match; then which one
+                    println!("Error: Temporal properties were violated.");
                     println!(
                         "Error: Temporal property {}{} is violated.",
                         inst.name,

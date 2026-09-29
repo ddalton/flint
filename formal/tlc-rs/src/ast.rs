@@ -95,4 +95,7 @@ pub struct Module {
     pub assumes: Vec<Ast>,
     pub instances: Vec<Instance>,
     pub decls: Vec<Decl>,
+    /// a definition brought in by INSTANCE: the module that defines it and
+    /// its name there (what a cfg override scoped `<-[M]` names)
+    pub origins: std::collections::HashMap<String, (String, String)>,
 }

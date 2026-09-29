@@ -187,6 +187,30 @@ pub fn map_children(a: &Ast, f: &mut dyn FnMut(&Ast) -> Ast) -> Ast {
 }
 
 /// Every direct sub-expression, including LET definition bodies.
+/// The error a false ASSUME is: a verdict (TLC's exit 10), not "unsupported".
+pub const ASSUME_FALSE: &str = "an ASSUME is false";
+
+/// Does anything in `a` bind the name `n`?
+fn binds(a: &Ast, n: &str) -> bool {
+    let bs = |v: &[crate::ast::Bound]| v.iter().any(|b| b.names.iter().any(|x| x == n));
+    let hit = match a {
+        Ast::Quant(_, v, _) | Ast::SetMap(_, v) | Ast::FuncCons(v, _) => bs(v),
+        Ast::Choose(b, _) | Ast::SetFilter(b, _) => bs(std::slice::from_ref(&**b)),
+        Ast::Lambda(ps, _) => ps.iter().any(|p| p == n),
+        Ast::Let(ds, _) => ds.iter().any(|d| d.name == n || d.params.iter().any(|p| p == n) || binds(&d.body, n)),
+        _ => false,
+    };
+    hit || children(a).into_iter().any(|x| binds(x, n))
+}
+
+/// `a` with each free `Ident(p)` of `m` replaced by its syntax.
+fn replace(a: &Ast, m: &HashMap<String, Ast>) -> Ast {
+    match a {
+        Ast::Ident(n) if m.contains_key(n) => m[n].clone(),
+        _ => map_children(a, &mut |x| replace(x, m)),
+    }
+}
+
 pub fn children(a: &Ast) -> Vec<&Ast> {
     use Ast::*;
     match a {
@@ -380,6 +404,29 @@ impl Compiler {
         }
     }
 
+    /// `is_action`, also seeing through a parameter bound to an action
+    /// argument (a zero-parameter closure).
+    fn is_action_in(&mut self, a: &Ast, sc: &[Entry], init: bool) -> bool {
+        if self.is_action(a, init) {
+            return true;
+        }
+        let mut names = Vec::new();
+        fn idents<'a>(a: &'a Ast, out: &mut Vec<&'a str>) {
+            if let Ast::Ident(n) = a {
+                out.push(n);
+            }
+            children(a).into_iter().for_each(|x| idents(x, out));
+        }
+        idents(a, &mut names);
+        names.into_iter().any(|n| match Self::lookup(sc, n) {
+            Some(Entry::Closure(d, cap)) if d.params.is_empty() => {
+                let (d, cap) = (d.clone(), cap.clone());
+                self.is_action_in(&d.body, &cap, init)
+            }
+            _ => false,
+        })
+    }
+
     fn op_is_action(&mut self, n: &str, init: bool) -> bool {
         let Some(d) = self.defs.get(n).cloned() else { return false };
         let key = (n.to_string(), init);
@@ -394,6 +441,8 @@ impl Compiler {
 
     fn is_temporal(&mut self, a: &Ast) -> bool {
         match a {
+            // a state predicate, however its action is written
+            Ast::Temporal("ENABLED", _) => false,
             Ast::Temporal(..) | Ast::BoxAction(..) => true,
             Ast::Ident(n) | Ast::Apply(n, _) => {
                 let Some(d) = self.defs.get(n).cloned() else { return false };
@@ -518,6 +567,7 @@ impl Compiler {
             },
             Ast::Temporal("<>", v) => match &v[0] {
                 Ast::Temporal("[]", w) if !self.is_temporal(&w[0]) => Ok(TProp::EventuallyAlways(self.expr(&w[0], sc, false)?)),
+                x if !self.is_temporal(x) => Ok(TProp::Eventually(self.expr(x, sc, false)?)),
                 _ => Err("unsupported shape under <>".into()),
             },
             Ast::Ident(n) | Ast::Apply(n, _) if Self::lookup(sc, n).is_none() && self.defs.contains_key(n) => {
@@ -596,6 +646,14 @@ impl Compiler {
                 inner.push(Entry::Closure(Self::closure(p, arity, a)?, sc.clone()));
                 continue;
             }
+            // an action argument (`NoStutter(l0(self))`) is substituted by
+            // name, as TLC does: expanded where the body uses it, in the
+            // caller's scope, so the primes it assigns stay assignments
+            if self.is_action_in(a, sc, init) {
+                let d = Def { name: p.clone(), params: vec![], op_arity: vec![], body: a.clone() };
+                inner.push(Entry::Closure(Rc::new(d), sc.clone()));
+                continue;
+            }
             let e = self.expr(a, sc, init)?;
             let s = self.slot();
             binds.push((s, e));
@@ -620,6 +678,45 @@ impl Compiler {
             }
             _ => return Err(format!("the argument for operator parameter {param} must be an operator or a LAMBDA of {arity} parameters")),
         }))
+    }
+
+    /// Is membership in this set decided from its structure (`member`)
+    /// rather than by building it?
+    fn structural(&self, a: &Ast) -> bool {
+        match a {
+            Ast::SetFilter(b, _) => !b.tuple && b.names.len() == 1,
+            Ast::Prefix("SUBSET", _) | Ast::FuncSet(..) | Ast::RecordSet(_) => true,
+            Ast::Prefix("UNION", u) => matches!(&**u, Ast::SetEnum(_)) || self.infinite(a, 0),
+            Ast::Bin("\\" | "\\cup" | "\\cap", l, r) => self.structural(l) || self.structural(r) || self.infinite(a, 0),
+            Ast::Ident(n) => self.expand_def(n) || self.infinite(a, 0),
+            _ => self.infinite(a, 0),
+        }
+    }
+
+    /// Is membership in the zero-argument definition `n` decided from its
+    /// body? Not when the set is constant and finite: then it is evaluated
+    /// once (constant folding) and a lookup in it is cheaper than its
+    /// structure (`seq \in SortedSeqs` over a half-million sequences).
+    fn expand_def(&self, n: &str) -> bool {
+        let Some(d) = self.defs.get(n) else { return false };
+        d.params.is_empty()
+            && self.structural(&d.body)
+            && (self.infinite(&d.body, 0) || self.reaches_state(&d.body, &mut std::collections::HashSet::new()))
+    }
+
+    /// Does `a` read a state variable (directly or through definitions)?
+    fn reaches_state(&self, a: &Ast, seen: &mut std::collections::HashSet<String>) -> bool {
+        match a {
+            Ast::Prime(_) | Ast::Unchanged(_) => true,
+            Ast::Ident(n) | Ast::Apply(n, _) if self.vars.contains_key(n) => true,
+            Ast::Ident(n) | Ast::Apply(n, _) => {
+                let args_reach = matches!(a, Ast::Apply(..)) && children(a).into_iter().any(|x| self.reaches_state(x, seen));
+                args_reach
+                    || (seen.insert(n.clone())
+                        && self.defs.get(n).is_some_and(|d| self.reaches_state(&d.body.clone(), seen)))
+            }
+            _ => children(a).into_iter().any(|x| self.reaches_state(x, seen)),
+        }
     }
 
     /// Does this set expression involve a set TLC-style evaluation cannot
@@ -687,7 +784,18 @@ impl Compiler {
                     _ => Expr::And(Box::new([a, b])),
                 })
             }),
-            Ast::FuncSet(d, r) if self.infinite(r, depth + 1) => with_x(self, sc, &mut |me, sc, xv| {
+            // `SUBSET S`: a set whose every element is in S
+            Ast::Prefix("SUBSET", s) => with_x(self, sc, &mut |me, sc, xv| {
+                let k = format!("$e{}", me.next_slot);
+                let each = Ast::Quant(
+                    true,
+                    vec![crate::ast::Bound { names: vec![k.clone()], tuple: false, set: xv.clone() }],
+                    Box::new(Ast::Bin("\\in", Box::new(Ast::Ident(k)), s.clone())),
+                );
+                me.expr(&each, sc, init)
+            }),
+            Ast::FuncSet(d, r) => with_x(self, sc, &mut |me, sc, xv| {
+                let is_f = Expr::Un(Un::IsFcn, bx(me.expr(xv, sc, init)?));
                 let dom = Expr::Bin(Bin::Eq, bx(Expr::Un(Un::Domain, bx(me.expr(xv, sc, init)?))), bx(me.expr(d, sc, init)?));
                 let k = format!("$k{}", me.next_slot);
                 let each = Ast::Quant(
@@ -695,11 +803,14 @@ impl Compiler {
                     vec![crate::ast::Bound { names: vec![k.clone()], tuple: false, set: (**d).clone() }],
                     Box::new(Ast::Bin("\\in", Box::new(Ast::App(Box::new(xv.clone()), vec![Ast::Ident(k)])), r.clone())),
                 );
-                Ok(Expr::And(Box::new([dom, me.expr(&each, sc, init)?])))
+                Ok(Expr::And(Box::new([is_f, dom, me.expr(&each, sc, init)?])))
             }),
-            Ast::RecordSet(fs) if fs.iter().any(|(_, e)| self.infinite(e, depth + 1)) => with_x(self, sc, &mut |me, sc, xv| {
+            Ast::RecordSet(fs) => with_x(self, sc, &mut |me, sc, xv| {
                 let names = Ast::SetEnum(fs.iter().map(|(f, _)| Ast::Str(f.clone())).collect());
-                let mut conj = vec![Expr::Bin(Bin::Eq, bx(Expr::Un(Un::Domain, bx(me.expr(xv, sc, init)?))), bx(me.expr(&names, sc, init)?))];
+                let mut conj = vec![
+                    Expr::Un(Un::IsFcn, bx(me.expr(xv, sc, init)?)),
+                    Expr::Bin(Bin::Eq, bx(Expr::Un(Un::Domain, bx(me.expr(xv, sc, init)?))), bx(me.expr(&names, sc, init)?)),
+                ];
                 for (f, e) in fs {
                     conj.push(me.member(&Ast::Field(Box::new(xv.clone()), f.clone()), e, sc, init, depth + 1)?);
                 }
@@ -714,7 +825,7 @@ impl Compiler {
             // a set-valued definition: its body, in the global scope
             Ast::Ident(n) if Self::lookup(sc, n).is_none() && self.defs.get(n).is_some_and(|d| d.params.is_empty()) && !self.consts.contains_key(n) => {
                 let body = self.defs[n].body.clone();
-                if !self.infinite(&body, depth + 1) {
+                if !self.expand_def(n) {
                     return plain(self, sc);
                 }
                 with_x(self, sc, &mut |me, sc, xv| {
@@ -729,6 +840,43 @@ impl Compiler {
     }
 
     // ---- actions --------------------------------------------------------
+
+    /// `v` or `v'` for a state variable v not shadowed in scope.
+    fn is_var_ref(&self, a: &Ast, sc: &[Entry]) -> bool {
+        let n = match a {
+            Ast::Ident(n) => n,
+            Ast::Prime(x) => match &**x {
+                Ast::Ident(n) => n,
+                _ => return false,
+            },
+            _ => return false,
+        };
+        Self::lookup(sc, n).is_none() && self.vars.contains_key(n)
+    }
+
+    /// `d` with its parameters whose arguments are state variables (`x`,
+    /// `x'`) replaced by those arguments, as TLC substitutes by name: then
+    /// `xNext = xInit` in `XAct(0, x, x')` assigns x'. A variable's name
+    /// cannot be rebound, so nothing in the body captures it; a body that
+    /// binds the parameter's own name keeps it as it was.
+    fn by_name(&self, d: &Rc<Def>, args: &[Ast], sc: &[Entry]) -> Rc<Def> {
+        let mut m = HashMap::new();
+        for (i, (p, a)) in d.params.iter().zip(args).enumerate() {
+            if self.is_var_ref(a, sc) && d.op_arity.get(i).copied().unwrap_or(0) == 0 && !binds(&d.body, p) {
+                m.insert(p.clone(), a.clone());
+            }
+        }
+        if m.is_empty() {
+            return d.clone();
+        }
+        let keep: Vec<usize> = (0..d.params.len()).filter(|&i| !m.contains_key(&d.params[i])).collect();
+        Rc::new(Def {
+            name: d.name.clone(),
+            params: keep.iter().map(|&i| d.params[i].clone()).collect(),
+            op_arity: keep.iter().filter_map(|&i| d.op_arity.get(i).copied()).collect(),
+            body: replace(&d.body, &m),
+        })
+    }
 
     fn var_of(&self, a: &Ast, sc: &[Entry], init: bool) -> Option<u32> {
         let n = match (a, init) {
@@ -780,7 +928,7 @@ impl Compiler {
     }
 
     fn act(&mut self, a: &Ast, sc: &mut Vec<Entry>, init: bool) -> R<Act> {
-        if !self.is_action(a, init) {
+        if !self.is_action_in(a, sc, init) {
             return Ok(Act::Guard(self.expr(a, sc, init)?));
         }
         Ok(match a {
@@ -826,6 +974,11 @@ impl Compiler {
                 sc.truncate(n);
                 Act::Lazy(slots, Box::new(body?))
             }
+            // a cfg override of an operator (`Send <- MCSend`), as in expr
+            Ast::Apply(n, args) if Self::lookup(sc, n).is_none() && self.subst.contains_key(n) => {
+                let to = self.subst[n].clone();
+                return self.act(&Ast::Apply(to, args.clone()), sc, init);
+            }
             Ast::Ident(name) | Ast::Apply(name, _) => {
                 let args: &[Ast] = match a {
                     Ast::Apply(_, args) => args,
@@ -835,8 +988,20 @@ impl Compiler {
                     let outer = sc[..len].to_vec();
                     let (binds, body) = self.inline(&d, &outer, args, sc, init, Self::act)?;
                     Act::Let(binds, Box::new(body))
+                } else if let Some(Entry::Closure(d, cap)) = Self::lookup(sc, name).cloned() {
+                    // a parameter standing for an action (or a primed
+                    // argument): expanded where it is used, in the caller's
+                    // scope, so its primes can assign
+                    if d.params.is_empty() && args.is_empty() {
+                        self.act(&d.body, &mut cap.clone(), init)?
+                    } else {
+                        let (binds, body) = self.inline(&d, &cap, args, sc, init, Self::act)?;
+                        Act::Let(binds, Box::new(body))
+                    }
                 } else if Self::lookup(sc, name).is_none() && self.defs.contains_key(name) {
-                    let d = self.defs[name].clone();
+                    let d = self.by_name(&self.defs[name].clone(), args, sc);
+                    let args: Vec<Ast> = args.iter().filter(|x| !self.is_var_ref(x, sc)).cloned().collect();
+                    let args = &args[..];
                     let (binds, body) = self.inline(&d, &[], args, sc, init, Self::act)?;
                     if binds.is_empty() { body } else { Act::Let(binds, Box::new(body)) }
                 } else {
@@ -1050,9 +1215,11 @@ impl Compiler {
             Ast::And(v) => Expr::And(v.iter().map(|x| self.expr(x, sc, init)).collect::<R<_>>()?),
             Ast::Or(v) => Expr::Or(v.iter().map(|x| self.expr(x, sc, init)).collect::<R<_>>()?),
             Ast::Bin("=>", l, r) => Expr::Implies(bx(self.expr(l, sc, init)?), bx(self.expr(r, sc, init)?)),
-            // `x \in S` for a set that cannot be enumerated: decided from S's
-            // structure (see `member`)
-            Ast::Bin(op @ ("\\in" | "\\notin"), x, set) if self.infinite(set, 0) => {
+            // `x \in S` decided from S's structure (see `member`), as TLC
+            // does: never enumerating a filter, a SUBSET or a function set
+            // to test one element (and a set too big or infinite to
+            // enumerate is not)
+            Ast::Bin(op @ ("\\in" | "\\notin"), x, set) if self.structural(set) => {
                 let m = self.member(x, set, sc, init, 0)?;
                 return Ok(if *op == "\\in" { m } else { Expr::Not(bx(m)) });
             }
@@ -1188,6 +1355,7 @@ impl Compiler {
                 return Ok(Expr::Let(binds, Box::new(body)));
             }
             Some(Entry::Lifted(_, idx, caps)) => return self.call_lifted(idx, &caps, &[], sc, init),
+            Some(Entry::Closure(d, cap)) if d.params.is_empty() => return self.expr(&d.body, &mut cap.clone(), init),
             Some(Entry::Closure(..)) => return Err(format!("operator parameter {n} used without its arguments")),
             None => {}
         }
@@ -1331,7 +1499,7 @@ impl Compiler {
         for (e, frame) in assume_exprs {
             let mut cx = bufs.cx(&empty, p.vars.len(), frame);
             if !p.eval_bool(&e, &mut cx)? {
-                return Err("an ASSUME is false".into());
+                return Err(ASSUME_FALSE.into());
             }
         }
         Ok(p)

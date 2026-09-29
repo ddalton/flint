@@ -202,6 +202,76 @@ temporal shapes; and the Community Modules.
 - **cfg**: `<-[M]` and `= [M]v`, overrides scoped to a module, are accepted
   (modules are flattened).
 
+### More gaps, and membership as TLC decides it (2026-09-29)
+
+- **`<>P`** (P a state predicate): a fair behavior from an initial state
+  that never reaches P, checked on the liveness graph as `Init ~> P`.
+  `ENABLED A` inside a temporal formula is a state predicate
+  (`<>(ENABLED Termination)`, `[]((~ENABLED Next) => Done)`). A toy spec
+  gives TLC's verdict in all three cases (holds under WF; fails without it,
+  by stuttering; fails for a P never reached).
+- **Operator arguments by name, as TLC substitutes them.** An argument that
+  is a state variable (`XAct(0, x, x')`, `Send(p, d, memInt, memInt')`) is
+  substituted into the body, so `xNext = xInit` there assigns x'; an
+  action argument (`NoStutter(NoHistoryChange(l0(self)))`) is expanded
+  where the body uses it, in the caller's scope. A cfg override of an
+  operator (`Send <- MCSend`) applies in actions too.
+- **`x <-[M] e` is scoped**: it overrides M's definition under every name an
+  INSTANCE gave it (`V!Ballot` in MCPaxos's refinement property `V!Spec`),
+  not the same name in the root module.
+- **Membership is decided from the set's structure, as TLC does**: `x \in
+  {y \in S : P}`, `SUBSET S`, `[D -> R]`, record sets, `\cup`/`\cap`/`\`,
+  never building the set to test one element — unless the set is a
+  constant, finite definition, which is evaluated once and looked up.
+  MCQuicksort (`UV \in DomainPartitions`, a filter over `SUBSET SUBSET
+  (1..4)`) went from over 300 s to 2 s; MCBinarySearch (`seq \in
+  SortedSeqs`, 488,280 sequences) stays at 1.6 s because SortedSeqs is
+  constant. A value that is not a function is in no function or record
+  set (FALSE, not an error: `NoVal \in [adr : Adr, ...] \cup {NoVal}`).
+- **No behavior spec**: a cfg with neither SPECIFICATION nor INIT/NEXT
+  checks the assumptions and explores nothing (TLC's 0 states). A false
+  ASSUME is a verdict, exit 10 (TLC's), not "unsupported".
+- **Parser**: `<<A>>_v`; `{<<a, b>> \in S : P}`; a theorem's `ASSUME NEW`
+  and a proof's definitions are skipped with it (a unit ends only at a line
+  no further right than the theorem); an infix operator as an argument
+  (`FoldFunctionOnSet(+, 0, f, S)`); `(+)` and `(-)`, other spellings of
+  `\oplus` and `\ominus`.
+- **Modules**: `-lib DIR` (or `TLCRS_LIB`, a path list) is searched for a
+  module not beside the spec — where TLC's classpath finds the
+  [Community Modules](https://github.com/tlaplus/CommunityModules). Bags,
+  a standard module TLC defines in TLA+, is built in (its source from
+  tla2tools.jar, `modules/Bags.tla`).
+- The liveness violation prints TLC's `Error: Temporal properties were
+  violated.` before naming the property (the lean gate matches that line).
+
+**Where that leaves the examples** (`results/examples-2026-09-29.jsonl`,
+this commit's tlc-rs, `-lib` pointing at CommunityModules 9aae8ea; the two
+LeastCircularSubstring rows re-run after the last fix, a cfg-override
+fallback nothing else here uses):
+of the 165 models, tlc-rs now accepts **104, and all 104 agree with TLC's
+recorded result** (95 hold, 9 safety violations; every recorded distinct
+count and depth). Two more (ElevatorSafetyLarge, MultiPaxos_MC, 10 and 8
+minutes in TLC) ran out a 15-minute cap on a box shared with other runs.
+The 59 it refuses, by cause: 26 temporal shapes the liveness checker does
+not take (refinement properties carrying WF/SF — `ABCSpec`, `EWD998Spec` —,
+`[]<><<A>>_v`, a temporal IF, `=>` between quantified temporal formulas);
+14 parser gaps (`INSTANCE` in a LET, parameterized `P(x) == INSTANCE`,
+positional subexpressions `Init!1`, `\cdot`, unbounded `\A x :`, LET
+RECURSIVE); 15 Community Modules or TLC extensions (Graphs and
+UndirectedGraphs over `Seq(S)`, which TLC replaces with Java; Bitwise, SVG,
+TLCExt, Randomization; `TLCGet`, `RandomElement`); 3 that enumerate Nat or
+name an undefined constraint; 1 `ACTION_CONSTRAINT`.
+
+**The gate sweep had skipped a third of the gate.** `results/sweep.py` read
+only one-line entries and only the variable `$M`: the 138 lean entries whose
+expected violation sits on a continuation line were never run, `$C` stayed
+literal and `$M2` became `LeanSubtree2`. Fixed (439 entries, all resolved),
+and a lean mutation's expectation (`"Invariant X is violated"`, a substring
+of the output) is matched as the lean gate matches it. On all 439
+(`results/gate-sweep-2026-09-29.jsonl`, 60 s a model): **404 agree, 0
+disagree, 0 unsupported**; the other 35 are the large worlds, which need more
+than 60 s (being run to completion on the box).
+
 ## Correctness against TLC
 
 Every gate entry was run through it (`results/gate-sweep-2026-09-26.jsonl`,
@@ -412,8 +482,3 @@ mid-level).
 5. Measured and dropped: a per-allocation memo of hashes and permuted
    images (20.2 → 22.4 s); PGO (+4–7%).
 6. mimalloc, fat LTO, one codegen unit, `target-cpu=native`, `panic=abort`.
-
-**Paused 2026-09-28, with both validation runs partial.**
-- Gate sweep with the parser-gap binary: 291 of 301 run; `results/gate-sweep-parser-gaps-partial-2026-09-28.jsonl`. 0 regressions; two models moved from unsupported to agree (LeanBarrierLeaseLeakHolds, LeanBarrierLeaseLeakRuleConverges).
-- tlaplus/Examples with the final binary: 28 of 165 run; `results/examples-final-partial-2026-09-28.jsonl`. 16 accepted, 16 agree with the manifest, 12 unsupported.
-- To resume: re-run the remaining models with `results/examples_run.py`.

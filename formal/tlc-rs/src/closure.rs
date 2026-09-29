@@ -640,6 +640,7 @@ impl C<'_> {
                         Un::Neg => Value::Int(-x.as_int()?),
                         Un::Subset => Value::Lazy(Arc::new(Lazy::Subset(x))),
                         Un::Domain => return x.domain(),
+                        Un::IsFcn => Value::Bool(x.domain().is_ok()),
                         Un::Union => {
                             let mut out = Vec::new();
                             for s in x.elems()?.iter() {
