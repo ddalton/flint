@@ -12,6 +12,9 @@ pub struct Parser {
     toks: Vec<Token>,
     pos: usize,
     floors: Vec<i64>,
+    /// `LET I == INSTANCE M IN ...`: brought to module level (its names are
+    /// `I!D`, which nothing else defines)
+    hoisted: Vec<crate::ast::Instance>,
 }
 
 type R<T> = Result<T, String>;
@@ -118,7 +121,7 @@ const KEYWORDS: &[&str] = &[
 
 impl Parser {
     pub fn new(toks: Vec<Token>) -> Self {
-        Parser { toks, pos: 0, floors: vec![-1] }
+        Parser { toks, pos: 0, floors: vec![-1], hoisted: Vec::new() }
     }
 
     fn raw(&self) -> &Token {
@@ -253,7 +256,25 @@ impl Parser {
                     // Theorems and their proofs, and proof commands, are
                     // for TLAPS; TLC ignores them, and so does tlc-rs.
                     "THEOREM" | "LEMMA" | "PROPOSITION" | "COROLLARY" | "USE" | "HIDE" | "PROOF" | "BY" | "OBVIOUS"
-                    | "OMITTED" | "QED" => self.skip_unit(),
+                    | "OMITTED" | "QED" => {
+                        // `THEOREM Name == e` with e an expression: `Name!:`
+                        // is e (TLC checks `ASSUME Name!:`); the proof is skipped
+                        let (save, floors) = (self.pos, self.floors.clone());
+                        let is_thm = matches!(s.as_str(), "THEOREM" | "LEMMA" | "PROPOSITION" | "COROLLARY");
+                        if is_thm && matches!(self.peek_at(1), Tok::Ident(_)) && self.peek_at(2) == &Tok::Op("==") {
+                            self.bump();
+                            let name = self.ident()?;
+                            self.bump();
+                            if !self.is_kw("ASSUME") {
+                                if let Ok(e) = self.expr(0) {
+                                    m.defs.push(Rc::new(Def { name: format!("{name}!:"), params: vec![], op_arity: vec![], body: e }));
+                                }
+                            }
+                        }
+                        self.pos = save;
+                        self.floors = floors;
+                        self.skip_unit()
+                    }
                     "RECURSIVE" => {
                         self.bump();
                         for r in self.decl_list()? {
@@ -289,6 +310,7 @@ impl Parser {
                 _ => return self.err("unexpected token at module level"),
             }
         }
+        m.instances.extend(std::mem::take(&mut self.hoisted));
         Ok(m)
     }
 
@@ -592,6 +614,19 @@ impl Parser {
                             self.decl_list()?;
                             continue;
                         }
+                        if matches!(self.peek(), Tok::Ident(_)) && self.peek_at(1) == &Tok::Op("==") && matches!(self.peek_at(2), Tok::Ident(w) if w == "INSTANCE") {
+                            let name = self.ident()?;
+                            self.bump();
+                            self.bump();
+                            let inst = self.instance(name)?;
+                            // a WITH could name the LET's own parameters,
+                            // which module level cannot see
+                            if !inst.subs.is_empty() {
+                                return self.err("INSTANCE ... WITH inside a LET is not supported");
+                            }
+                            self.hoisted.push(inst);
+                            continue;
+                        }
                         defs.extend(self.defs()?);
                     }
                     self.bump();
@@ -689,6 +724,17 @@ impl Parser {
     }
 
     /// Comma-separated expressions up to and including `close`.
+    /// A subscript's name after `_` (`[Next]_EWD998!vars`): `I!Op` parts too.
+    fn subscript_name(&mut self, first: &str) -> R<Ast> {
+        let mut s = first.to_string();
+        while self.is_op("!") && matches!(self.peek_at(1), Tok::Ident(_)) {
+            self.bump();
+            let t = self.ident()?;
+            s = format!("{s}!{t}");
+        }
+        Ok(Ast::Ident(s))
+    }
+
     fn expr_list(&mut self, close: &str) -> R<Vec<Ast>> {
         let mut v = Vec::new();
         if self.is_op(close) {
@@ -780,7 +826,7 @@ impl Parser {
                     if let Tok::Ident(s) = self.raw().tok.clone() {
                         if let Some(rest) = s.strip_prefix('_') {
                             self.bump();
-                            let sub = if rest.is_empty() { self.primary_postfix()? } else { Ast::Ident(rest.to_string()) };
+                            let sub = if rest.is_empty() { self.primary_postfix()? } else { self.subscript_name(rest)? };
                             return Ok(Ast::Temporal("<<>>_", vec![v.into_iter().next().unwrap(), sub]));
                         }
                     }
@@ -797,11 +843,24 @@ impl Parser {
             }
             Tok::Ident(s) => {
                 self.bump();
-                // `I!Op`: an operator of the instance I
+                // `I!Op`: an operator of the instance I; `D!2`: the second
+                // conjunct (or disjunct) of D's definition
                 let mut s = s;
-                while self.is_op("!") && matches!(self.peek_at(1), Tok::Ident(_)) {
+                // `Thm!:`: a named theorem's statement
+                if self.is_op("!") && self.peek_at(1) == &Tok::Op(":") {
                     self.bump();
-                    let t = self.ident()?;
+                    self.bump();
+                    return Ok(Ast::Ident(format!("{s}!:")));
+                }
+                while self.is_op("!") && matches!(self.peek_at(1), Tok::Ident(_) | Tok::Num(_)) {
+                    self.bump();
+                    let t = match self.peek().clone() {
+                        Tok::Num(n) => {
+                            self.bump();
+                            n.to_string()
+                        }
+                        _ => self.ident()?,
+                    };
                     s = format!("{s}!{t}");
                 }
                 if self.is_op("(") {
@@ -975,7 +1034,7 @@ impl Parser {
         if let Tok::Ident(s) = self.raw().tok.clone() {
             if let Some(rest) = s.strip_prefix('_') {
                 self.bump();
-                let sub = if rest.is_empty() { self.primary_postfix()? } else { Ast::Ident(rest.to_string()) };
+                let sub = if rest.is_empty() { self.primary_postfix()? } else { self.subscript_name(rest)? };
                 return Ok(Ast::BoxAction(Box::new(e), Box::new(sub)));
             }
         }

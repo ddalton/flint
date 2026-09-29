@@ -299,6 +299,29 @@ impl Compiler {
             }
             declared.extend(m.constants.iter().cloned());
         }
+        // positional subexpressions `D!k`: the k-th conjunct or disjunct of
+        // D's body, as a definition of its own
+        let mut wanted = Vec::new();
+        fn names(a: &Ast, out: &mut Vec<String>) {
+            if let Ast::Ident(n) | Ast::Apply(n, _) = a {
+                out.push(n.clone());
+            }
+            children(a).into_iter().for_each(|x| names(x, out));
+        }
+        for d in c.defs.values() {
+            names(&d.body, &mut wanted);
+        }
+        for m in modules {
+            m.assumes.iter().for_each(|a| names(a, &mut wanted));
+        }
+        for n in wanted {
+            if c.defs.contains_key(&n) {
+                continue;
+            }
+            if let Some(d) = c.positional(&n) {
+                c.defs.insert(n, d);
+            }
+        }
         for (name, v) in &cfg.constants {
             let val = c.cfg_value(v)?;
             c.consts.insert(name.clone(), val);
@@ -309,6 +332,21 @@ impl Compiler {
             }
         }
         Ok(c)
+    }
+
+    /// `D!k` (and `D!k!j`): the k-th conjunct or disjunct of D's body.
+    fn positional(&self, n: &str) -> Option<Rc<Def>> {
+        let (base, k) = n.rsplit_once('!')?;
+        let k: usize = k.parse().ok()?;
+        let d = match self.defs.get(base) {
+            Some(d) => d.clone(),
+            None => self.positional(base)?,
+        };
+        let part = match &d.body {
+            Ast::And(v) | Ast::Or(v) => v.get(k.checked_sub(1)?)?.clone(),
+            _ => return None,
+        };
+        Some(Rc::new(Def { name: n.to_string(), params: d.params.clone(), op_arity: d.op_arity.clone(), body: part }))
     }
 
     fn intern(&mut self, s: &str) -> u32 {

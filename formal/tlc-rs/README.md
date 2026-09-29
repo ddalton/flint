@@ -243,24 +243,25 @@ temporal shapes; and the Community Modules.
   tla2tools.jar, `modules/Bags.tla`).
 - The liveness violation prints TLC's `Error: Temporal properties were
   violated.` before naming the property (the lean gate matches that line).
+- **More parser**: positional subexpressions `Inv!2` (the second conjunct or
+  disjunct of Inv's definition, also `D!k!j`); `THEOREM Name == e` records
+  its statement as `Name!:` (TLC checks `ASSUME QuorumNonEmpty!:`; a false
+  statement fails the ASSUME, checked); `[Next]_I!vars`; `INSTANCE` in a LET
+  (without WITH) is hoisted to module level. An empty search reports depth 0.
 
 **Where that leaves the examples** (`results/examples-2026-09-29.jsonl`,
-this commit's tlc-rs, `-lib` pointing at CommunityModules 9aae8ea; the two
-LeastCircularSubstring rows re-run after the last fix, a cfg-override
-fallback nothing else here uses):
-of the 165 models, tlc-rs now accepts **104, and all 104 agree with TLC's
-recorded result** (95 hold, 9 safety violations; every recorded distinct
-count and depth). Two more (ElevatorSafetyLarge, MultiPaxos_MC, 10 and 8
-minutes in TLC) ran out a 15-minute cap on a box shared with other runs.
-The 59 it refuses, by cause: 26 temporal shapes the liveness checker does
-not take (refinement properties carrying WF/SF — `ABCSpec`, `EWD998Spec` —,
-`[]<><<A>>_v`, a temporal IF, `=>` between quantified temporal formulas);
-14 parser gaps (`INSTANCE` in a LET, parameterized `P(x) == INSTANCE`,
-positional subexpressions `Init!1`, `\cdot`, unbounded `\A x :`, LET
-RECURSIVE); 15 Community Modules or TLC extensions (Graphs and
-UndirectedGraphs over `Seq(S)`, which TLC replaces with Java; Bitwise, SVG,
-TLCExt, Randomization; `TLCGet`, `RandomElement`); 3 that enumerate Nat or
-name an undefined constraint; 1 `ACTION_CONSTRAINT`.
+this commit's tlc-rs, `-lib` pointing at CommunityModules 9aae8ea, 4 workers,
+10 minutes a model): of the 165 models, tlc-rs now accepts **112, and all 112
+agree with TLC's recorded result** (100 hold, 12 safety violations; every
+recorded distinct count and depth). MultiPaxos_MC (8 minutes in TLC) ran out
+the 10 minutes. The 50 it refuses and 2 it errors on, by cause: temporal
+shapes the liveness checker does not take (refinement properties carrying
+WF/SF — `ABCSpec`, `EWD998Spec` —, `[]<><<A>>_v`, a temporal IF, `=>`
+between quantified temporal formulas); parser gaps (parameterized `P(x) ==
+INSTANCE`, `\cdot`, unbounded `\A x :`, LET RECURSIVE); Community Modules
+whose TLA+ definitions TLC replaces with Java (Graphs and UndirectedGraphs
+over `Seq(S)`, Bitwise) or that tlc-rs lacks (TLCExt, Randomization);
+`TLCGet`, `RandomElement`, `ACTION_CONSTRAINT`.
 
 **The gate sweep had skipped a third of the gate.** `results/sweep.py` read
 only one-line entries and only the variable `$M`: the 138 lean entries whose

@@ -406,7 +406,8 @@ fn run(generated: Option<Generated>) -> Result<bool, String> {
         "{} states generated, {} distinct states found. Depth {}. Checked in {:.3}s ({:.0} distinct/s).",
         out.generated,
         out.distinct,
-        out.depth,
+        // TLC's depth of an empty search is 0
+        if out.distinct == 0 { 0 } else { out.depth },
         secs,
         out.distinct as f64 / secs
     );
