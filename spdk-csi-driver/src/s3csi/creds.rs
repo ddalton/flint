@@ -339,6 +339,23 @@ impl BrokerClient {
         &self.base
     }
 
+    /// `GET /v1/status` — the broker's backend and its read enforcement.
+    /// The node plugin reads it to decide whether a read grant's authority
+    /// is a function of the CR alone (sts, static: shareable between pods)
+    /// or of the pod it was minted for (rest: not).
+    pub async fn status(&self) -> Result<serde_json::Value, String> {
+        let resp = self
+            .http
+            .get(format!("{}/v1/status", self.base))
+            .send()
+            .await
+            .map_err(|e| format!("broker status: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("broker status: {}", resp.status()));
+        }
+        resp.json().await.map_err(|e| format!("broker status: {e}"))
+    }
+
     fn node_token(&self) -> Result<String, String> {
         std::fs::read_to_string(&self.node_token_file)
             .map(|s| s.trim().to_string())

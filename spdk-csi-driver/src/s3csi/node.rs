@@ -16,7 +16,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use k8s_openapi::api::core::v1::{Event, ObjectReference, ResourceRequirements};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{MicroTime, ObjectMeta};
@@ -33,7 +33,7 @@ use super::fuse::{self, Launch};
 use super::policy::{Access, CredentialMode};
 use super::quota;
 use super::resolve::{self, Refusal, Resolved};
-use super::state::{self, TenantRef, VolumeState, STATE_VERSION};
+use super::state::{self, SharedMount, TenantRef, VolumeState, STATE_VERSION};
 use super::worker::{self, WaitOutcome, WorkerInputs, WorkerWatch};
 use super::DRIVER_NAME;
 
@@ -51,6 +51,12 @@ const DRAIN_WAIT: Duration = Duration::from_secs(90);
 /// Where the syncer sees the tree (its hostPath mount).
 const SYNCER_ROOT: &str = "/workspace";
 const DEFAULT_OWNER: u32 = 65534;
+/// How long the broker's backend name (its `/v1/status`) is believed
+/// before it is read again for a sharing decision.
+const BROKER_BACKEND_TTL: Duration = Duration::from_secs(600);
+/// How long a publish that found a DEAD shared mounter waits for the
+/// old worker to leave the API before giving kubelet a retry.
+const DEAD_SHARED_WORKER_WAIT: Duration = Duration::from_secs(20);
 
 pub struct Config {
     pub node_name: String,
@@ -65,6 +71,12 @@ pub struct Config {
     /// ordering mechanism for drain and node shutdown; there is no
     /// PodDisruptionBudget for workers.
     pub prestop_secs: Option<i64>,
+    /// F72: how long an unpublish waits for a passthrough mounter to exit
+    /// ON ITS OWN after its source mount is detached, before the preStop
+    /// marker and the delete — the SIGTERM — go out
+    /// (FLINT_S3CSI_QUIESCE_SECS, default 30; 0 disables the wait). See
+    /// `teardown_mounter`.
+    pub quiesce_secs: u64,
     /// Enforce `sizeLimitGib` on a lean tree with a loop-mounted image
     /// (FLINT_S3CSI_QUOTA, default OFF). Off ⇒ the tree is a plain
     /// directory on the node's root filesystem, at native speed, and the
@@ -117,6 +129,7 @@ impl Config {
             worker_resources,
             priority_class: opt("FLINT_S3CSI_WORKER_PRIORITY_CLASS"),
             prestop_secs: opt("FLINT_S3CSI_PRESTOP_SECS").and_then(|v| v.parse().ok()),
+            quiesce_secs: opt("FLINT_S3CSI_QUIESCE_SECS").and_then(|v| v.parse().ok()).unwrap_or(30),
             quota: opt("FLINT_S3CSI_QUOTA").map(|v| v == "true").unwrap_or(false),
             broker: BrokerClient::from_env()?,
             creds_lifetime_secs: opt("FLINT_S3CSI_CREDS_LIFETIME_SECS").and_then(|v| v.parse().ok()).unwrap_or(900),
@@ -139,13 +152,56 @@ pub struct S3Node {
     /// bounded below kubelet's deadline so a stuck holder surfaces as
     /// `Unavailable`, not a consumed deadline.
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// The broker's backend (`/v1/status`), read once per
+    /// `BROKER_BACKEND_TTL` for the sharing decision: only a backend
+    /// whose read grant is a function of the CR alone may be shared.
+    broker_backend: tokio::sync::Mutex<Option<(Instant, String)>>,
+}
+
+/// The lock key of a shared mount's class: taken AFTER the volume's own,
+/// by every join, leave, rebind and teardown of that class.
+fn share_lock_key(hash: &str) -> String {
+    format!("share:{hash}")
 }
 
 impl S3Node {
     /// Must run inside the tokio runtime: the worker watch is spawned here.
     pub fn new(cfg: Config, client: Client) -> Self {
         let workers = WorkerWatch::start(client.clone(), &cfg.worker_namespace, &cfg.node_name);
-        Self { cfg: Arc::new(cfg), client, workers, locks: Mutex::new(HashMap::new()) }
+        Self {
+            cfg: Arc::new(cfg),
+            client,
+            workers,
+            locks: Mutex::new(HashMap::new()),
+            broker_backend: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// The broker's backend name, cached for `BROKER_BACKEND_TTL`. `None`
+    /// when there is no broker or its status could not be read — which
+    /// the sharing decision treats as "unknown: a mounter per pod", and
+    /// which is retried on the next publish rather than cached.
+    async fn broker_backend(&self) -> Option<String> {
+        let broker = self.cfg.broker.as_ref()?;
+        let mut cache = self.broker_backend.lock().await;
+        if let Some((at, backend)) = cache.as_ref() {
+            if at.elapsed() < BROKER_BACKEND_TTL {
+                return Some(backend.clone());
+            }
+        }
+        match broker.status().await {
+            Ok(v) => {
+                let backend = v.get("backend").and_then(|b| b.as_str()).map(String::from);
+                if let Some(b) = &backend {
+                    *cache = Some((Instant::now(), b.clone()));
+                }
+                backend
+            }
+            Err(e) => {
+                tracing::warn!("broker status (for the sharing decision): {e}");
+                None
+            }
+        }
     }
 
     async fn lock(&self, vid: &str) -> Result<tokio::sync::OwnedMutexGuard<()>, Status> {
@@ -179,6 +235,42 @@ impl S3Node {
                 AdoptAction::Cleanup => self.cleanup(&dir, &st, "unfinished publish found at startup").await,
             }
         }
+        self.adopt_shared().await;
+    }
+
+    /// The shared records, after the volumes: drop members whose volume
+    /// state is gone (an unpublish that ran while the plugin was down, or
+    /// a member the loop above just cleaned up), and bring down a mounter
+    /// nothing holds. A mounter with members is kept whether or not it is
+    /// running: a dead one strands them exactly as a per-pod dead mounter
+    /// does, and the next member's publish replaces it.
+    async fn adopt_shared(&self) {
+        for (sdir, mut sm) in SharedMount::list(&self.cfg.plugin_root) {
+            let before = sm.members.len();
+            sm.members.retain(|vid| {
+                VolumeState::load(&state::volume_dir(&self.cfg.plugin_root, vid))
+                    .ok()
+                    .flatten()
+                    .is_some_and(|m| m.shared.as_deref() == Some(sm.hash.as_str()))
+            });
+            if sm.members.len() != before {
+                tracing::info!(shared = %sm.hash, dropped = before - sm.members.len(), "shared members whose volume state is gone were dropped");
+                if let Err(e) = sm.save(&sdir) {
+                    tracing::warn!(shared = %sm.hash, "shared record: {e}");
+                }
+            }
+            let alive = worker::is_running(&self.client, &sm.worker_namespace, &sm.worker_name).await.unwrap_or(false);
+            tracing::info!(
+                shared = %sm.hash, cr = %sm.cr, members = sm.members.len(), worker = %sm.worker_name, worker_running = alive,
+                "adopted shared mount at {}", sdir.display()
+            );
+            if sm.members.is_empty() {
+                tracing::warn!(shared = %sm.hash, "no member holds the shared mount; bringing it down");
+                if let Err(e) = self.teardown_shared(&sdir, &sm).await {
+                    tracing::warn!(shared = %sm.hash, "shared teardown at startup: {}", e.message());
+                }
+            }
+        }
     }
 
     /// A publish that cannot finish: tear down everything it made so
@@ -203,6 +295,10 @@ impl S3Node {
             return;
         }
         tracing::warn!(volume = %st.volume_id, "cleaning up: {why}");
+        if let Some(hash) = st.shared.clone() {
+            self.cleanup_shared_member(dir, st, &hash).await;
+            return;
+        }
         let _ = fuse::unmount(Path::new(&st.target_path), true);
         let _ = fuse::unmount(&fuse::ro_stage_of(Path::new(&st.src)), true);
         let _ = fuse::unmount(Path::new(&st.src), true);
@@ -215,6 +311,36 @@ impl S3Node {
             }
         }
         let _ = worker::delete(&self.client, &st.worker_namespace, &st.worker_name, Some(5)).await;
+        if let Some(b) = &self.cfg.broker {
+            let _ = b.deregister(&st.volume_id).await;
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A failed JOIN, or a member's unfinished publish found at startup,
+    /// leaves the shared mount alone unless nothing else holds it: unbind
+    /// this member's target, take it off the record, and bring the
+    /// mounter down only as the last one out. A failed join must never
+    /// tear down the mount it failed to join. The class lock is the
+    /// caller's — every path here already holds it, or runs at startup.
+    async fn cleanup_shared_member(&self, dir: &Path, st: &VolumeState, hash: &str) {
+        let _ = fuse::unmount(Path::new(&st.target_path), true);
+        let sdir = state::shared_dir(&self.cfg.plugin_root, hash);
+        match SharedMount::load(&sdir) {
+            Ok(Some(mut sm)) => {
+                sm.remove_member(&st.volume_id);
+                if sm.members.is_empty() {
+                    tracing::info!(volume = %st.volume_id, shared = hash, "nothing else holds the shared mount; bringing it down");
+                    if let Err(e) = self.teardown_shared(&sdir, &sm).await {
+                        tracing::warn!(volume = %st.volume_id, shared = hash, "shared teardown during cleanup: {}", e.message());
+                    }
+                } else if let Err(e) = sm.save(&sdir) {
+                    tracing::warn!(volume = %st.volume_id, shared = hash, "shared record: {e}");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(volume = %st.volume_id, shared = hash, "shared record: {e}; leaving the mount alone"),
+        }
         if let Some(b) = &self.cfg.broker {
             let _ = b.deregister(&st.volume_id).await;
         }
@@ -287,6 +413,12 @@ impl S3Node {
                         quota::remount(&dir, Path::new(&st.src))
                             .map_err(|e| Status::unavailable(format!("remount tree: {e}")))?;
                     }
+                    // A shared source has ONE ro stage for every member:
+                    // binds of one class are serialised under its lock.
+                    let _class = match &st.shared {
+                        Some(h) => Some(self.lock(&share_lock_key(h)).await?),
+                        None => None,
+                    };
                     fuse::bind_mount(Path::new(&st.src), &target, st.read_only)
                         .map_err(|e| Status::unavailable(format!("rebind: {e}")))?;
                     return Ok(());
@@ -305,7 +437,17 @@ impl S3Node {
                 // (design §3.5 step 8): do not start over, wait again.
                 PublishedAction::ResumeCheckout => return self.resume_lean(&dir, st, &target).await,
                 // An unfinished publish: start over.
-                PublishedAction::StartOver => self.cleanup(&dir, &st, "retrying an unfinished publish").await,
+                PublishedAction::StartOver => {
+                    // A shared member's cleanup edits the class record:
+                    // under the class lock, released before the publish
+                    // below takes it again.
+                    let class = match &st.shared {
+                        Some(h) => Some(self.lock(&share_lock_key(h)).await?),
+                        None => None,
+                    };
+                    self.cleanup(&dir, &st, "retrying an unfinished publish").await;
+                    drop(class);
+                }
             }
         }
 
@@ -442,6 +584,37 @@ impl S3Node {
         // `access` already carries the pod's `csi.readOnly`; the CR's own
         // `readOnly` narrows every consumer of this mount.
         let read_only = access.is_read() || spec.read_only;
+        // A CR that shares its mounter gets the block cache by default when
+        // it names none: sharing is for a dataset read many times, and
+        // without the cache every read that is not concurrent goes to S3.
+        // Named on the CR either way; `cache.enabled: false` opts out.
+        let spec = if spec.shares_read_only() && spec.cache.is_none() {
+            let spec = spec.with_default_cache(&self.cfg.scratch_size);
+            match spec.cache.as_ref().and_then(|c| c.max_size_mib) {
+                Some(mib) => tracing::info!(
+                    volume = vid, cr = pr.selector.name(), cache_mib = mib, scratch = %self.cfg.scratch_size,
+                    "sharing: block cache defaulted (spec.cache absent)"
+                ),
+                None => tracing::warn!(
+                    volume = vid, cr = pr.selector.name(), scratch = %self.cfg.scratch_size,
+                    "sharing: no default block cache — workers.scratchSize is unreadable or too small; set spec.cache on the CR"
+                ),
+            }
+            spec
+        } else {
+            spec
+        };
+        if spec.shares_read_only() {
+            let backend = if cred_mode == CredentialMode::Broker { self.broker_backend().await } else { None };
+            match sharing_decision(true, read_only, cred_mode, backend.as_deref()) {
+                Sharing::Shared => {
+                    return self.publish_shared(dir, vid, target, pr, tenant, &spec, cred_mode, req, (owner_uid, owner_gid)).await;
+                }
+                Sharing::Own(why) => {
+                    tracing::info!(volume = vid, cr = pr.selector.name(), "own mounter, not the CR's shared one: {why}");
+                }
+            }
+        }
         let src = dir.join("src");
         let mut st = VolumeState {
             version: STATE_VERSION,
@@ -469,6 +642,7 @@ impl S3Node {
             drain_started_unix: None,
             sync_env: None,
             on_behalf_of: pr.on_behalf_of.clone(),
+            shared: None,
         };
         st.save(dir).map_err(|e| Status::internal(format!("state: {e}")))?;
 
@@ -493,6 +667,7 @@ impl S3Node {
             priority_class: self.cfg.priority_class.clone(),
             comm_size: self.cfg.comm_size.clone(),
             scratch_size: self.cfg.scratch_size.clone(),
+            shared_key: None,
         });
         if let Err(e) = worker::ensure(&self.client, &pod).await {
             return Err(self.fail(dir, &st,Status::unavailable(e)).await);
@@ -580,6 +755,294 @@ impl S3Node {
         st.last_probe_ok = Some(true);
         st.save(dir).map_err(|e| Status::internal(format!("state: {e}")))?;
         tracing::info!(volume = vid, cr = %st.cr, tenant = %format!("{}/{}", tenant.namespace, tenant.pod), worker = %st.worker_name, "published");
+        Ok(())
+    }
+
+    /// Join the CR's shared read-only mounter on this node, or create it
+    /// (docs/plans/passthrough-read-only-mount-sharing.md): one worker,
+    /// one FUSE source, one block cache and one connection pool per
+    /// equality class (`state::share_key`), and each member's target a
+    /// bind of that source.
+    ///
+    /// Each member keeps its own `VolumeState`, registration, nonce and
+    /// token, and exchanges ITS OWN credential into the shared worker's
+    /// comm dir: every member's authority is the same function of the CR
+    /// — the whole security argument, and why only read-only members on a
+    /// backend that scopes by CR get here (`sharing_decision`). The
+    /// freshest key wins the file; the door token stays the creator's,
+    /// because the mounter is reading it. The broker still logs one
+    /// registration and one exchange per member.
+    #[allow(clippy::too_many_arguments)]
+    async fn publish_shared(
+        &self,
+        dir: &Path,
+        vid: &str,
+        target: &Path,
+        pr: &PublishRequest,
+        tenant: &TenantRef,
+        spec: &crate::passthrough::spec::MountSpec,
+        cred_mode: CredentialMode,
+        req: &csi::NodePublishVolumeRequest,
+        owner: (u32, u32),
+    ) -> Result<(), Status> {
+        let (owner_uid, owner_gid) = owner;
+        let mut args = crate::passthrough::mounter::mounter_args_for(
+            spec,
+            (Some(owner_uid as i64), Some(owner_gid as i64)),
+            fuse::FUSE_FD_PLACEHOLDER,
+        );
+        if !args.iter().any(|a| a == "--read-only") {
+            args.push("--read-only".into());
+        }
+        let cr = pr.selector.name();
+        let (hash, key) = state::share_key(&self.cfg.node_name, &tenant.namespace, cr, owner_uid, owner_gid, cred_mode.as_str(), &args);
+        let sdir = state::shared_dir(&self.cfg.plugin_root, &hash);
+        let src = sdir.join("src");
+        // The class lock, after the volume's: every join, leave and
+        // teardown of one class serialises here — which is also what keeps
+        // two members off the class's one ro stage at once.
+        let _class = self.lock(&share_lock_key(&hash)).await?;
+
+        let mut st = VolumeState {
+            version: STATE_VERSION,
+            volume_id: vid.to_string(),
+            mode: "passthrough".into(),
+            cr: cr.to_string(),
+            tenant: tenant.clone(),
+            target_path: target.to_string_lossy().into_owned(),
+            src: src.to_string_lossy().into_owned(),
+            worker_namespace: self.cfg.worker_namespace.clone(),
+            worker_name: worker::worker_name(&hash),
+            worker_uid: None,
+            phase: "publishing".into(),
+            credential_mode: cred_mode.as_str().into(),
+            nonce: creds::new_nonce(),
+            creds_expiration: None,
+            token_expiration: None,
+            last_probe_ok: None,
+            published_unix: None,
+            read_only: true,
+            owner_uid,
+            owner_gid,
+            grace_secs: None,
+            tree_image: None,
+            drain_started_unix: None,
+            sync_env: None,
+            on_behalf_of: pr.on_behalf_of.clone(),
+            shared: Some(hash.clone()),
+        };
+        st.save(dir).map_err(|e| Status::internal(format!("state: {e}")))?;
+
+        let mut sm = match SharedMount::load(&sdir).map_err(|e| Status::internal(format!("shared record: {e}")))? {
+            Some(sm) if sm.phase == "published" && self.shared_mount_alive(&sm).await => sm,
+            Some(mut sm) => {
+                // A record whose mounter is not serving (dead, or a create
+                // that never finished). Its members are stranded exactly as
+                // a per-pod dead mounter strands its tenant — their events
+                // said so — and a NEW member gets a fresh mounter under the
+                // same class rather than a dead one.
+                tracing::warn!(
+                    volume = vid, shared = %hash, phase = %sm.phase, members = ?sm.members,
+                    "the shared mounter is not serving; replacing it for the new member"
+                );
+                if let Err(e) = self.replace_dead_shared_mounter(&sm).await {
+                    return Err(self.fail(dir, &st, e).await);
+                }
+                sm.phase = "publishing".into();
+                sm.worker_uid = None;
+                sm
+            }
+            None => SharedMount {
+                version: STATE_VERSION,
+                hash: hash.clone(),
+                key: key.clone(),
+                namespace: tenant.namespace.clone(),
+                cr: cr.to_string(),
+                src: st.src.clone(),
+                worker_namespace: self.cfg.worker_namespace.clone(),
+                worker_name: worker::worker_name(&hash),
+                worker_uid: None,
+                owner_uid,
+                owner_gid,
+                credential_mode: cred_mode.as_str().into(),
+                phase: "publishing".into(),
+                members: vec![],
+                created_unix: Some(chrono::Utc::now().timestamp() as u64),
+            },
+        };
+        // The record carries this member from here on, so a failure below
+        // (`cleanup`) knows whether it was the only one.
+        sm.add_member(vid);
+        sm.save(&sdir).map_err(|e| Status::internal(format!("shared record: {e}")))?;
+
+        if sm.phase != "published" {
+            // CREATE: the worker first (its comm dir is where the
+            // credential goes), then the credential, then the mount.
+            let (run_as, run_as_gid) = worker_owner(&st);
+            let pod = worker::build_pod(&WorkerInputs {
+                namespace: self.cfg.worker_namespace.clone(),
+                node_name: self.cfg.node_name.clone(),
+                node_uid: self.cfg.node_uid.clone(),
+                image: self.cfg.passthrough_image.clone(),
+                mode: "passthrough",
+                volume_id: &hash,
+                tenant,
+                cr,
+                run_as_uid: run_as,
+                run_as_gid,
+                resources: self.cfg.worker_resources.clone(),
+                prestop_secs: self.cfg.prestop_secs,
+                env: BTreeMap::from([("FLINT_S3W_MODE".to_string(), "passthrough".to_string())]),
+                lean_tree_hostpath: None,
+                grace_secs: Some(30),
+                priority_class: self.cfg.priority_class.clone(),
+                comm_size: self.cfg.comm_size.clone(),
+                scratch_size: self.cfg.scratch_size.clone(),
+                shared_key: Some(&key),
+            });
+            if let Err(e) = worker::ensure(&self.client, &pod).await {
+                return Err(self.fail(dir, &st, Status::unavailable(e)).await);
+            }
+            let worker_uid = match worker::wait_running(&self.client, &st.worker_namespace, &st.worker_name, WORKER_RUNNING_WAIT).await {
+                Ok(WaitOutcome::Running { uid }) => uid,
+                Ok(WaitOutcome::Failed { reason, message }) => {
+                    return Err(self.fail(dir, &st, Status::failed_precondition(format!("shared worker pod {}: {reason} {message}", st.worker_name))).await)
+                }
+                Ok(WaitOutcome::Timeout { phase }) => {
+                    return Err(self
+                        .fail(dir, &st, Status::unavailable(format!("shared worker pod {} not Running after {}s ({phase}); retrying", st.worker_name, WORKER_RUNNING_WAIT.as_secs())))
+                        .await)
+                }
+                Err(e) => return Err(self.fail(dir, &st, Status::unavailable(e)).await),
+            };
+            sm.worker_uid = Some(worker_uid.clone());
+            sm.save(&sdir).map_err(|e| Status::internal(format!("shared record: {e}")))?;
+            st.worker_uid = Some(worker_uid.clone());
+            let comm = worker::comm_dir(&self.cfg.kubelet_root, &worker_uid);
+            if !comm.is_dir() {
+                return Err(self.fail(dir, &st, Status::unavailable(format!("shared worker comm dir {} not visible on the node yet", comm.display()))).await);
+            }
+            let mat = match self.credential(dir, cred_mode, pr, &mut st, &req.secrets).await {
+                Ok(m) => m,
+                Err(e) => return Err(self.fail(dir, &st, e).await),
+            };
+            if let Err(e) = creds::write_files(&comm, &mat.files, worker_owner(&st)) {
+                return Err(self.fail(dir, &st, Status::internal(format!("write comm files: {e}"))).await);
+            }
+            st.save(dir).map_err(|e| Status::internal(format!("state: {e}")))?;
+            if let Err(e) = unmount_all(&src) {
+                return Err(self.fail(dir, &st, Status::unavailable(format!("stale shared source mount at {}: {e}", src.display()))).await);
+            }
+            let fd = match fuse::open_and_mount(&src, (owner_uid, owner_gid), true, "mount-s3") {
+                Ok(fd) => fd,
+                Err(e) => return Err(self.fail(dir, &st, Status::internal(format!("fuse mount: {e}"))).await),
+            };
+            let launch = Launch { mode: "passthrough".into(), args, env: mat.env };
+            let sock = comm.join("mount.sock");
+            let reply = {
+                use std::os::fd::AsRawFd;
+                let raw = fd.as_raw_fd();
+                let sock = sock.clone();
+                let launch = launch.clone();
+                tokio::task::spawn_blocking(move || fuse::send_launch(&sock, &launch, Some(raw), LAUNCH_REPLY_WAIT)).await
+            };
+            drop(fd);
+            match reply {
+                Ok(Ok(r)) if r.ok => {}
+                Ok(Ok(r)) => return Err(self.fail(dir, &st, Status::unavailable(format!("shared worker refused the launch: {}", r.error.unwrap_or_default()))).await),
+                Ok(Err(e)) => return Err(self.fail(dir, &st, Status::unavailable(format!("launch over {}: {e}", sock.display()))).await),
+                Err(e) => return Err(self.fail(dir, &st, Status::internal(format!("launch task: {e}"))).await),
+            }
+            if let Err(e) = fuse::wait_ready(&src, FUSE_READY_WAIT).await {
+                let detail = wait_for_mount_error(&comm, Duration::from_secs(3)).await;
+                return Err(self
+                    .fail(
+                        dir,
+                        &st,
+                        Status::unavailable(format!(
+                            "shared mounter did not serve the mount: {e}{}",
+                            if detail.is_empty() { String::new() } else { format!(" — {}", detail.trim()) }
+                        )),
+                    )
+                    .await);
+            }
+            sm.phase = "published".into();
+            sm.save(&sdir).map_err(|e| Status::internal(format!("shared record: {e}")))?;
+        } else {
+            // JOIN: this member's own credential into the shared comm dir
+            // (identical authority; the freshest key wins) — never the
+            // door token, which is the creator's and in use.
+            let Some(worker_uid) = sm.worker_uid.clone() else {
+                return Err(self.fail(dir, &st, Status::internal(format!("shared record {hash} is published but names no worker uid"))).await);
+            };
+            st.worker_uid = Some(worker_uid.clone());
+            let comm = worker::comm_dir(&self.cfg.kubelet_root, &worker_uid);
+            let mat = match self.credential(dir, cred_mode, pr, &mut st, &req.secrets).await {
+                Ok(m) => m,
+                Err(e) => return Err(self.fail(dir, &st, e).await),
+            };
+            let files: Vec<creds::CommFile> = mat.files.into_iter().filter(|f| f.name != creds::AUTH_TOKEN_FILE).collect();
+            if let Err(e) = creds::write_files(&comm, &files, worker_owner(&st)) {
+                return Err(self.fail(dir, &st, Status::internal(format!("write comm files: {e}"))).await);
+            }
+            st.save(dir).map_err(|e| Status::internal(format!("state: {e}")))?;
+        }
+        if let Err(e) = fuse::bind_mount(&src, target, true) {
+            return Err(self.fail(dir, &st, Status::internal(format!("bind: {e}"))).await);
+        }
+        st.phase = "published".into();
+        st.published_unix = Some(chrono::Utc::now().timestamp() as u64);
+        st.last_probe_ok = Some(true);
+        st.save(dir).map_err(|e| Status::internal(format!("state: {e}")))?;
+        tracing::info!(
+            volume = vid, cr = %st.cr, tenant = %format!("{}/{}", tenant.namespace, tenant.pod), worker = %st.worker_name,
+            shared = %hash, members = sm.members.len(), "published (shared read-only mount)"
+        );
+        Ok(())
+    }
+
+    /// Is the shared mounter serving: its source a mount that answers
+    /// statfs (a dead FUSE mount is still a mount point — `is_mountpoint`
+    /// says so on purpose — hence the probe; Mountpoint answers statfs
+    /// without S3, so three seconds of silence is a daemon that is not
+    /// there), and its worker not DEFINITIVELY gone. An API error is not
+    /// a verdict: replacing a mounter deletes its worker, which strands
+    /// every current member, so only a GET that answers "not Running"
+    /// counts against it — the local probe decides the rest.
+    async fn shared_mount_alive(&self, sm: &SharedMount) -> bool {
+        let src = Path::new(&sm.src);
+        let serving = fuse::is_mountpoint(src).unwrap_or(false)
+            && fuse::wait_ready_opts(src, Duration::from_secs(3), false).await.is_ok();
+        if !serving {
+            return false;
+        }
+        match worker::is_running(&self.client, &sm.worker_namespace, &sm.worker_name).await {
+            Ok(running) => running,
+            Err(e) => {
+                tracing::warn!(shared = %sm.hash, worker = %sm.worker_name, "could not read the shared worker ({e}); its mount answers, so it is treated as alive");
+                true
+            }
+        }
+    }
+
+    /// Clear a dead shared mounter out of the way of a new member: detach
+    /// its source (its members' targets keep their own reference to the
+    /// dead superblock, as they would with a dead per-pod mounter),
+    /// release and delete the old worker, and wait — bounded — for the
+    /// name to be free, because the new worker is created under it.
+    async fn replace_dead_shared_mounter(&self, sm: &SharedMount) -> Result<(), Status> {
+        let src = Path::new(&sm.src);
+        unmount_all(&fuse::ro_stage_of(src)).map_err(|e| Status::unavailable(format!("unmount ro stage: {e}")))?;
+        unmount_all(src).map_err(|e| Status::unavailable(format!("stale shared source mount at {}: {e}", src.display())))?;
+        self.release_worker_uid(&format!("shared:{}", sm.hash), sm.worker_uid.as_deref());
+        worker::delete(&self.client, &sm.worker_namespace, &sm.worker_name, Some(0)).await.map_err(Status::unavailable)?;
+        let start = Instant::now();
+        while !worker::is_gone(&self.client, &sm.worker_namespace, &sm.worker_name).await.map_err(Status::unavailable)? {
+            if start.elapsed() > DEAD_SHARED_WORKER_WAIT {
+                return Err(Status::unavailable(format!("the dead shared worker {} is still terminating; retrying", sm.worker_name)));
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
         Ok(())
     }
 
@@ -932,6 +1395,7 @@ impl S3Node {
             drain_started_unix: None,
             sync_env: None,
             on_behalf_of: pr.on_behalf_of.clone(),
+            shared: None,
         };
         st.save(dir).map_err(|e| Status::internal(format!("state: {e}")))?;
 
@@ -1040,6 +1504,7 @@ impl S3Node {
             priority_class: self.cfg.priority_class.clone(),
             comm_size: self.cfg.comm_size.clone(),
             scratch_size: self.cfg.scratch_size.clone(),
+            shared_key: None,
         });
         worker::ensure(&self.client, &pod).await.map_err(Status::unavailable)?;
         let worker_uid = match worker::wait_running(&self.client, &st.worker_namespace, &st.worker_name, WORKER_RUNNING_WAIT).await {
@@ -1082,12 +1547,69 @@ impl S3Node {
     /// tenant is actually gone. Best effort by design: a worker whose
     /// comm dir has already vanished has nothing left to wait for.
     fn release_worker(&self, st: &VolumeState) {
-        let Some(uid) = st.worker_uid.as_ref() else { return };
+        self.release_worker_uid(&st.volume_id, st.worker_uid.as_deref());
+    }
+
+    fn release_worker_uid(&self, label: &str, worker_uid: Option<&str>) {
+        let Some(uid) = worker_uid else { return };
         let marker = worker::comm_dir(&self.cfg.kubelet_root, uid).join("released");
         match std::fs::write(&marker, b"released\n") {
-            Ok(()) => tracing::debug!(volume = %st.volume_id, marker = %marker.display(), "released the worker's preStop hook"),
-            Err(e) => tracing::warn!(volume = %st.volume_id, marker = %marker.display(), "could not write the release marker: {e}"),
+            Ok(()) => tracing::debug!(volume = label, marker = %marker.display(), "released the worker's preStop hook"),
+            Err(e) => tracing::warn!(volume = label, marker = %marker.display(), "could not write the release marker: {e}"),
         }
+    }
+
+    /// Bring a passthrough mounter down in the order F72 requires
+    /// (docs/f72-passthrough-teardown-kills-the-mounter-before-quiescing-it.md).
+    /// The tenant's bind is already gone (the caller's). Detach the ro
+    /// stage and the source: the kernel aborts the FUSE connection, and
+    /// mount-s3, left alone, finishes the RELEASE it may still be serving
+    /// — a deferred upload, completed there when the file's last close
+    /// came from a process other than its opener — and exits by itself.
+    /// WAIT for that exit, bounded by `quiesce_secs`, and only then
+    /// disarm the preStop hook and delete the pod: the SIGTERM those two
+    /// send makes mount-s3 return without joining its threads, which is
+    /// what cut the upload before. At the ceiling the old order applies
+    /// (marker, delete with 10 s), so the worst case is what it always
+    /// was, and the log says which happened and why it matters.
+    async fn teardown_mounter(&self, label: &str, src: &Path, ns: &str, name: &str, worker_uid: Option<&str>) -> Result<(), Status> {
+        unmount_all(&fuse::ro_stage_of(src)).map_err(|e| Status::internal(format!("unmount ro stage: {e}")))?;
+        unmount_all(src).map_err(|e| Status::internal(format!("unmount source: {e}")))?;
+        let budget = Duration::from_secs(self.cfg.quiesce_secs);
+        let exited = if budget.is_zero() {
+            false
+        } else {
+            let t0 = Instant::now();
+            match worker::wait_exited(&self.client, ns, name, budget).await {
+                Ok(true) => {
+                    tracing::info!(volume = label, worker = name, after = ?t0.elapsed(), "the mounter exited on its own once its source was detached");
+                    true
+                }
+                Ok(false) => {
+                    tracing::warn!(
+                        volume = label, worker = name, budget = ?budget,
+                        "the mounter is still running after its source was detached: its FUSE superblock is still \
+                         referenced from another mount namespace, or an upload is still completing — terminating it; \
+                         an upload it was still completing is lost (an incomplete multipart upload stays in the bucket)"
+                    );
+                    false
+                }
+                Err(e) => {
+                    tracing::warn!(volume = label, worker = name, "could not watch the mounter exit ({e}); terminating it");
+                    false
+                }
+            }
+        };
+        self.release_worker_uid(label, worker_uid);
+        worker::delete(&self.client, ns, name, Some(if exited { 0 } else { 10 })).await.map_err(Status::unavailable)?;
+        Ok(())
+    }
+
+    /// The last member out: the shared mounter, then its record.
+    async fn teardown_shared(&self, sdir: &Path, sm: &SharedMount) -> Result<(), Status> {
+        self.teardown_mounter(&format!("shared:{}", sm.hash), Path::new(&sm.src), &sm.worker_namespace, &sm.worker_name, sm.worker_uid.as_deref())
+            .await?;
+        remove_state_dir(sdir)
     }
 
     fn marker_path(st: &VolumeState) -> PathBuf {
@@ -1395,19 +1917,38 @@ impl S3Node {
         if st.mode == "lean" {
             return self.unpublish_lean(&dir, st, target).await;
         }
-        // Passthrough teardown: target, source, worker, registration, state.
+        // Passthrough teardown: the tenant's bind; then the mounter, in
+        // F72's order — as the owner of its own, or as the LAST member of
+        // a shared one; then registration and state.
         unmount_all(target).map_err(|e| Status::internal(format!("unmount target: {e}")))?;
-        unmount_all(&fuse::ro_stage_of(Path::new(&st.src))).map_err(|e| Status::internal(format!("unmount ro stage: {e}")))?;
-        unmount_all(Path::new(&st.src)).map_err(|e| Status::internal(format!("unmount source: {e}")))?;
-        self.release_worker(&st);
-        worker::delete(&self.client, &st.worker_namespace, &st.worker_name, Some(10)).await.map_err(Status::unavailable)?;
+        if let Some(hash) = st.shared.clone() {
+            let _class = self.lock(&share_lock_key(&hash)).await?;
+            let sdir = state::shared_dir(&self.cfg.plugin_root, &hash);
+            match SharedMount::load(&sdir).map_err(|e| Status::internal(format!("shared record: {e}")))? {
+                Some(mut sm) => {
+                    sm.remove_member(&vid);
+                    if sm.members.is_empty() {
+                        tracing::info!(volume = %vid, shared = %hash, "last member out: bringing the shared mounter down");
+                        // Not saved first: a teardown that fails (retryable)
+                        // is retried from a record that still names us.
+                        self.teardown_shared(&sdir, &sm).await?;
+                    } else {
+                        sm.save(&sdir).map_err(|e| Status::internal(format!("shared record: {e}")))?;
+                        tracing::info!(volume = %vid, shared = %hash, members = sm.members.len(), "left the shared mount; its mounter stays for the others");
+                    }
+                }
+                None => tracing::warn!(volume = %vid, shared = %hash, "no shared record at {}; nothing to leave", sdir.display()),
+            }
+        } else {
+            self.teardown_mounter(&vid, Path::new(&st.src), &st.worker_namespace, &st.worker_name, st.worker_uid.as_deref()).await?;
+        }
         if let Some(b) = &self.cfg.broker {
             if let Err(e) = b.deregister(&vid).await {
                 tracing::warn!(volume = %vid, "deregister: {e}");
             }
         }
         remove_state_dir(&dir)?;
-        tracing::info!(volume = %vid, "unpublished");
+        tracing::info!(volume = %vid, shared = st.shared.is_some(), "unpublished");
         Ok(())
     }
 }
@@ -1557,6 +2098,44 @@ pub fn registered_access(st: &VolumeState) -> Access {
         Access::Read
     } else {
         Access::ReadWrite
+    }
+}
+
+/// Whether a passthrough publish joins the CR's shared mounter on this
+/// node, or gets its own. `Own` names why, for the log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sharing {
+    Shared,
+    Own(&'static str),
+}
+
+/// The sharing decision (docs/plans/passthrough-read-only-mount-sharing.md
+/// §5, §7): the CR must ask; the member must be READ-ONLY; and its
+/// credential must be a function of the CR alone, so that every member
+/// holds identical authority and sharing grants none of them anything —
+/// ambient (the node's own chain), or the broker on a backend whose read
+/// grant is CR-scoped: `sts` (a session policy on the CR's prefix) or
+/// `static` (the one read key). The `rest` door scopes to the pod it was
+/// minted for, a `static` identity is the pod's own Secret, and
+/// `webIdentity` binds the worker to one pod's token: none of those may
+/// share. An unknown backend is an unknown authority: a mounter per pod.
+pub fn sharing_decision(cr_shares: bool, read_only: bool, mode: CredentialMode, broker_backend: Option<&str>) -> Sharing {
+    if !cr_shares {
+        return Sharing::Own("the CR does not ask for it (spec.sharing.readOnly)");
+    }
+    if !read_only {
+        return Sharing::Own("a read-write consumer keeps its own mounter: only read-only members hold identical authority");
+    }
+    match mode {
+        CredentialMode::Ambient => Sharing::Shared,
+        CredentialMode::Broker => match broker_backend {
+            Some("sts") | Some("static") => Sharing::Shared,
+            Some("rest") => Sharing::Own("the broker's rest backend scopes a credential to the pod it was minted for, so members would not hold identical authority"),
+            Some(_) => Sharing::Own("the broker reports a backend this plugin does not know"),
+            None => Sharing::Own("the broker's backend could not be read (GET /v1/status), and sharing is only safe when every member's credential is known to carry the same authority"),
+        },
+        CredentialMode::Static => Sharing::Own("identity.mode static: the key is the pod's own nodePublishSecretRef"),
+        CredentialMode::WebIdentity => Sharing::Own("identity.mode webIdentity binds the worker to one pod's token"),
     }
 }
 
@@ -1719,6 +2298,7 @@ mod tests {
         assert_eq!(c.worker_namespace, "flint-workers");
         assert_eq!(c.creds_lifetime_secs, 900);
         assert!(c.broker.is_none());
+        assert_eq!(c.quiesce_secs, 30, "F72: the mounter gets 30 s to exit on its own by default");
         std::env::remove_var("FLINT_S3CSI_NODE_NAME");
         std::env::remove_var("FLINT_S3CSI_PASSTHROUGH_IMAGE");
     }
@@ -1793,7 +2373,32 @@ mod tests {
             drain_started_unix: None,
             sync_env: None,
             on_behalf_of: None,
+            shared: None,
         }
+    }
+
+    /// Only a READ-ONLY member whose credential is the CR's function may
+    /// share, and only when the CR asked: every other combination is a
+    /// mounter of its own, with the reason named.
+    #[test]
+    fn only_read_only_members_with_cr_scoped_credentials_share() {
+        use CredentialMode::*;
+        assert_eq!(sharing_decision(true, true, Broker, Some("sts")), Sharing::Shared);
+        assert_eq!(sharing_decision(true, true, Broker, Some("static")), Sharing::Shared);
+        assert_eq!(sharing_decision(true, true, Ambient, None), Sharing::Shared);
+        let own = |d: Sharing, what: &str| match d {
+            Sharing::Own(why) => assert!(why.contains(what), "{why:?} should name {what:?}"),
+            Sharing::Shared => panic!("must not share: {what}"),
+        };
+        own(sharing_decision(false, true, Broker, Some("sts")), "does not ask");
+        own(sharing_decision(false, true, Ambient, None), "does not ask");
+        own(sharing_decision(true, false, Broker, Some("sts")), "read-write");
+        own(sharing_decision(true, true, Broker, Some("rest")), "rest");
+        own(sharing_decision(true, true, Broker, Some("other")), "does not know");
+        own(sharing_decision(true, true, Broker, None), "could not be read");
+        own(sharing_decision(true, true, Static, None), "static");
+        own(sharing_decision(true, true, WebIdentity, None), "webIdentity");
+        assert_ne!(share_lock_key("abc"), "abc", "the class lock is its own key, never a volume's");
     }
 
     /// A plugin roll mid-checkout must not restart the checkout (§6.4,

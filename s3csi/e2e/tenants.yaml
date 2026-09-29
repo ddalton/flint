@@ -94,6 +94,44 @@ spec:
   region: us-east-1
   uid: 1001
 ---
+# S23 (F72): a read-write mount whose part size is larger than the file
+# the leg writes, so the whole object is the LAST part — uploaded at
+# completion, which for a file whose last close came from a child of
+# the opener happens inside FUSE RELEASE, after the container is gone.
+apiVersion: chert.us/v1alpha1
+kind: FlintPassthroughMount
+metadata:
+  name: datasets-f72
+  namespace: s3-tenants
+spec:
+  bucket: s3bucket
+  keyPrefix: datasets/f72
+  endpoint: http://minio.flint-system.svc:9000
+  region: us-east-1
+  uid: 1001
+  mountOptions: ["--part-size", "67108864"]
+  consumers:
+    serviceAccounts: [trainer]
+---
+# S24: one mounter per node for this CR's read-only consumers
+# (spec.sharing.readOnly). No spec.cache on purpose: a sharing CR gets
+# the block cache by DEFAULT, and the leg checks that it is in use.
+apiVersion: chert.us/v1alpha1
+kind: FlintPassthroughMount
+metadata:
+  name: datasets-shared
+  namespace: s3-tenants
+spec:
+  bucket: s3bucket
+  keyPrefix: datasets/imagenet
+  endpoint: http://minio.flint-system.svc:9000
+  region: us-east-1
+  readOnly: true
+  uid: 1001
+  sharing: { readOnly: true }
+  consumers:
+    serviceAccounts: [trainer]
+---
 # ── the pods ─────────────────────────────────────────────────────────
 # The headline reader: restricted namespace, SA trainer, one csi volume.
 apiVersion: v1
@@ -211,3 +249,91 @@ spec:
         capabilities: { drop: [ALL] }
       volumeMounts:
         - { name: data, mountPath: /mnt/s3 }
+---
+# S24: shared-a — a read-only consumer of datasets-shared.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: shared-a
+  namespace: s3-tenants
+spec:
+  serviceAccountName: trainer
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    seccompProfile: { type: RuntimeDefault }
+  volumes:
+    - name: data
+      csi:
+        driver: s3.csi.chert.us
+        volumeAttributes:
+          chert.us/mount: datasets-shared
+  containers:
+    - name: agent
+      image: busybox:1.36
+      command: ["/bin/sh", "-c"]
+      args: ["trap 'exit 0' TERM INT; sleep 86400 & wait"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: [ALL] }
+      volumeMounts:
+        - { name: data, mountPath: /mnt/shared }
+---
+# S24: shared-b — a read-only consumer of datasets-shared (the same class as shared-a: one worker between them).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: shared-b
+  namespace: s3-tenants
+spec:
+  serviceAccountName: trainer
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    seccompProfile: { type: RuntimeDefault }
+  volumes:
+    - name: data
+      csi:
+        driver: s3.csi.chert.us
+        volumeAttributes:
+          chert.us/mount: datasets-shared
+  containers:
+    - name: agent
+      image: busybox:1.36
+      command: ["/bin/sh", "-c"]
+      args: ["trap 'exit 0' TERM INT; sleep 86400 & wait"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: [ALL] }
+      volumeMounts:
+        - { name: data, mountPath: /mnt/shared }
+---
+# S24: shared-c — a read-only consumer of datasets-shared that asks for uid 1002 — another class, its own worker: the control that the owner is in the key.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: shared-c
+  namespace: s3-tenants
+spec:
+  serviceAccountName: trainer
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    seccompProfile: { type: RuntimeDefault }
+  volumes:
+    - name: data
+      csi:
+        driver: s3.csi.chert.us
+        volumeAttributes:
+          chert.us/mount: datasets-shared
+          chert.us/uid: "1002"
+  containers:
+    - name: agent
+      image: busybox:1.36
+      command: ["/bin/sh", "-c"]
+      args: ["trap 'exit 0' TERM INT; sleep 86400 & wait"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: [ALL] }
+      volumeMounts:
+        - { name: data, mountPath: /mnt/shared }

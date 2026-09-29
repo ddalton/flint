@@ -18,6 +18,27 @@
 # and needs no label, no sidecar, no credential and no privilege — it is
 # admissible under PodSecurity `restricted`.
 #
+# For a dataset MANY pods read, one mounter per node instead of one per
+# pod — the CR opts its read-only consumers in, and the block cache comes
+# with it (three quarters of workers.scratchSize unless spec.cache says):
+#
+#   apiVersion: chert.us/v1alpha1
+#   kind: FlintPassthroughMount
+#   metadata: { name: datasets, namespace: team-a }
+#   spec:
+#     bucket: my-bucket
+#     keyPrefix: datasets/imagenet
+#     readOnly: true                      # or list the SAs in consumers.readOnlyServiceAccounts
+#     sharing: { readOnly: true }
+#     consumers: { serviceAccounts: [trainer] }
+#
+# Pods on one node that mount it read-only with the same uid/gid share
+# the worker (`kubectl -n flint-workers get pods -o
+# custom-columns=NAME:.metadata.name,CLASS:.metadata.annotations.chert\.us/shared-mount`).
+# Needs identity.mode broker on an sts or static backend, or ambient.
+# Helm applies crds/ on install only: after an upgrade that added the
+# field, `kubectl apply -f flint-passthrough-chart/crds/flintpassthroughmounts.yaml`.
+#
 # Design of record: docs/plans/csi-node-mount-design.md (§3.1 components,
 # §3.6 privilege accounting, §4 the identity chain, §10.1 coexistence
 # with the webhooks).
@@ -245,6 +266,19 @@ workers:
   # It never blocks a shutdown: the hook exits 0 when the budget runs out.
   prestopSecs: 60
 
+  # How long NodeUnpublish waits for a passthrough mounter to EXIT ON ITS
+  # OWN after its source mount is detached, before it disarms the preStop
+  # hook and deletes the pod (FLINT_S3CSI_QUIESCE_SECS). Detaching the
+  # source aborts the FUSE connection; mount-s3 then finishes any RELEASE
+  # it is still serving — a file whose last close came from a process
+  # other than the one that opened it (a parent that opened the output
+  # and a child that wrote it) has its upload completed THERE, after the
+  # container is gone — and exits by itself. A SIGTERM makes it exit at
+  # once instead, mid-upload, leaving an incomplete multipart upload in
+  # the bucket and no object (F72). The wait is bounded and logged; at
+  # the ceiling the old order applies. 0 disables the wait.
+  quiesceSecs: 30
+
   # Enforce a lean workspace's `sizeLimitGib` (FLINT_S3CSI_QUOTA).
   # OFF by default: the tree is a plain directory on the NODE's root
   # filesystem, at native speed, and `sizeLimitGib` is enforced by
@@ -275,7 +309,9 @@ workers:
   # (memory-backed; the launch socket, the token and the credential
   # file) and `scratch` (mount-s3's cache, at /tmp). Empty ⇒ the
   # binary's defaults, 16Mi and 1Gi (FLINT_S3CSI_COMM_SIZE,
-  # FLINT_S3CSI_SCRATCH_SIZE).
+  # FLINT_S3CSI_SCRATCH_SIZE). A FlintPassthroughMount with
+  # sharing.readOnly and no spec.cache gets a block cache of three
+  # quarters of scratchSize by default (768Mi at 1Gi).
   commSize: ""
   scratchSize: ""
 

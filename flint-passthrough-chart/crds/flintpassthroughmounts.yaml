@@ -42,6 +42,7 @@ spec:
         - { name: Prefix, type: string, jsonPath: .spec.keyPrefix }
         - { name: Mount, type: string, jsonPath: .spec.mountPath }
         - { name: RO, type: boolean, jsonPath: .spec.readOnly }
+        - { name: Shared, type: boolean, jsonPath: .spec.sharing.readOnly }
         - { name: Age, type: date, jsonPath: .metadata.creationTimestamp }
       schema:
         openAPIV3Schema:
@@ -174,7 +175,9 @@ spec:
                     1Gi). OFF unless enabled. For a dataset mounted
                     read-only and read many times this is the largest
                     single performance lever available; without it every
-                    repeated read re-fetches from S3.
+                    repeated read re-fetches from S3. A CR with
+                    sharing.readOnly that names no cache gets one by
+                    default (see sharing).
                   properties:
                     enabled:
                       type: boolean
@@ -190,6 +193,37 @@ spec:
                         (restartPolicy: Never). Leave headroom under
                         workers.scratchSize.
                   required: [enabled]
+                sharing:
+                  type: object
+                  description: >-
+                    One mounter per NODE for this CR's read-only consumers
+                    instead of one per pod: one worker pod, one FUSE
+                    mount, one block cache and one connection pool, with
+                    each pod's volume a bind of that mount. OFF unless
+                    readOnly is true. Members are the pods whose effective
+                    access is read (spec.readOnly, an SA in
+                    readOnlyServiceAccounts, or the pod's own readOnly:
+                    true) with the same effective uid/gid, on
+                    identity.mode broker (a broker whose backend scopes a
+                    read grant by the CR: sts or static) or ambient; a
+                    read-write consumer keeps its own mounter, and
+                    identity.mode static is refused with this set. The
+                    trade, stated: one mounter's death strands every
+                    member; one memory limit and prefetch budget serve
+                    them all; and a member's grant cannot be revoked on
+                    its own before its pod exits, because every member
+                    holds the same authority (which is also why sharing
+                    grants none of them anything). Per-member
+                    registrations and exchanges are still logged by the
+                    broker. A sharing CR that names no cache gets one by
+                    default: three quarters of workers.scratchSize (768 MiB
+                    at the chart's 1Gi); cache.enabled: false opts out,
+                    cache.maxSizeMib chooses. Design:
+                    docs/plans/passthrough-read-only-mount-sharing.md.
+                  properties:
+                    readOnly:
+                      type: boolean
+                      default: false
                 image:
                   type: string
                   description: >-

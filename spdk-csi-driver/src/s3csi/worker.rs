@@ -53,6 +53,11 @@ pub const LABEL_MANAGED_BY: &str = "app.kubernetes.io/managed-by";
 pub const ANN_VOLUME_ID: &str = "chert.us/volume-id";
 pub const ANN_TENANT_POD: &str = "chert.us/tenant-pod";
 pub const ANN_CR: &str = "chert.us/cr";
+/// On a SHARED read-only mounter: the equality class it serves
+/// (`state::share_key`), readable. Its volume-id annotation is the
+/// class hash, and `chert.us/tenant-pod` names the member that created
+/// it; the member set lives in the plugin's shared record on the node.
+pub const ANN_SHARED_KEY: &str = "chert.us/shared-mount";
 pub const MANAGED_BY: &str = "flint-s3-csi-node";
 pub const CONTAINER_NAME: &str = "worker";
 pub const COMM_VOLUME: &str = "comm";
@@ -104,6 +109,10 @@ pub struct WorkerInputs<'a> {
     pub priority_class: Option<String>,
     pub comm_size: String,
     pub scratch_size: String,
+    /// A shared read-only mounter: `volume_id` is then the class HASH
+    /// (what names the pod and what `ensure` adopts on), and this is the
+    /// class, readable, for the annotation.
+    pub shared_key: Option<&'a str>,
 }
 
 pub fn build_pod(i: &WorkerInputs) -> Pod {
@@ -131,12 +140,15 @@ pub fn build_pod(i: &WorkerInputs) -> Pod {
     if metrics_port.is_some() {
         labels.insert(LABEL_LEAN_WORKSPACE.to_string(), i.cr.to_string());
     }
-    let annotations = BTreeMap::from([
+    let mut annotations = BTreeMap::from([
         (ANN_VOLUME_ID.to_string(), i.volume_id.to_string()),
         (ANN_TENANT_POD.to_string(), format!("{}/{}", i.tenant.namespace, i.tenant.pod)),
         (ANN_CR.to_string(), i.cr.to_string()),
         ("cluster-autoscaler.kubernetes.io/safe-to-evict".to_string(), "true".to_string()),
     ]);
+    if let Some(k) = i.shared_key {
+        annotations.insert(ANN_SHARED_KEY.to_string(), k.to_string());
+    }
     let owner_references = i.node_uid.as_ref().map(|uid| {
         vec![OwnerReference {
             api_version: "v1".into(),
@@ -449,6 +461,37 @@ pub async fn delete(client: &Client, ns: &str, name: &str, grace_secs: Option<u3
     }
 }
 
+/// Wait, bounded, for a worker to LEAVE ON ITS OWN: gone from the API,
+/// terminating, or exited (phase Succeeded or Failed).
+///
+/// F72: once the plugin detaches a passthrough source mount, the kernel
+/// aborts the FUSE connection; mount-s3's request threads exit and its
+/// waiter joins every one of them — including a thread still completing
+/// a deferred upload inside a RELEASE — before the process ends. A
+/// SIGTERM, by contrast, makes mount-s3 return without joining anything.
+/// So the released marker and the delete, which are that SIGTERM, wait
+/// for this first. `Ok(false)` at the budget means the worker is still
+/// running: its superblock is referenced from elsewhere (a private copy
+/// of the plugin directory in another mount namespace keeps it alive) or
+/// an upload is still completing; the caller then falls back to the old
+/// order and says so.
+pub async fn wait_exited(client: &Client, ns: &str, name: &str, budget: Duration) -> Result<bool, String> {
+    let api: Api<Pod> = Api::namespaced(client.clone(), ns);
+    let start = Instant::now();
+    loop {
+        match api.get_opt(name).await {
+            Ok(None) => return Ok(true),
+            Ok(Some(p)) if is_dead(&p) => return Ok(true),
+            Ok(Some(_)) => {}
+            Err(e) => return Err(format!("get worker {ns}/{name}: {e}")),
+        }
+        if start.elapsed() >= budget {
+            return Ok(false);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 pub async fn is_gone(client: &Client, ns: &str, name: &str) -> Result<bool, String> {
     let api: Api<Pod> = Api::namespaced(client.clone(), ns);
     match api.get_opt(name).await {
@@ -555,6 +598,7 @@ mod tests {
             priority_class: None,
             comm_size: "16Mi".into(),
             scratch_size: "1Gi".into(),
+            shared_key: None,
         }
     }
 
@@ -616,6 +660,28 @@ mod tests {
         assert!(volume_hash(&vid).len() <= 63);
         assert!(worker_name(&vid).starts_with("s3w-"));
         assert_ne!(worker_name(&vid), worker_name("csi-other"));
+    }
+
+    /// A shared read-only mounter is one pod per equality class: named by
+    /// the class hash exactly as a per-pod worker is named by its volume
+    /// id (so `ensure` adopts it for the next member and refuses a pod
+    /// of another class), and it says which class it serves.
+    #[test]
+    fn a_shared_worker_is_named_by_its_class_and_says_so() {
+        let t = tenant();
+        let (hash, key) = super::super::state::share_key("n1", "team-a", "datasets", 1001, 1001, "broker", &["b".to_string()]);
+        let mut i = inputs("passthrough", &t, None);
+        i.volume_id = &hash;
+        i.shared_key = Some(&key);
+        let pod = build_pod(&i);
+        assert_eq!(pod.metadata.name.as_deref(), Some(worker_name(&hash).as_str()));
+        let ann = pod.metadata.annotations.as_ref().unwrap();
+        assert_eq!(ann.get(ANN_VOLUME_ID).map(String::as_str), Some(hash.as_str()));
+        assert_eq!(ann.get(ANN_SHARED_KEY).map(String::as_str), Some(key.as_str()));
+        assert_eq!(ann.get(ANN_TENANT_POD).map(String::as_str), Some("team-a/agent"), "the creating member");
+        // and a per-pod worker carries no class
+        let own = build_pod(&inputs("passthrough", &t, None));
+        assert!(own.metadata.annotations.as_ref().unwrap().get(ANN_SHARED_KEY).is_none());
     }
 
     #[test]

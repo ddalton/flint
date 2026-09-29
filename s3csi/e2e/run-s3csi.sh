@@ -126,6 +126,11 @@ kill_worker() {
             for p in /proc/[0-9]*; do [ \"\$(cat \$p/comm 2>/dev/null)\" = pause ] && continue; \
               case \"\$(tr -d '_-' < \$p/cgroup 2>/dev/null)\" in *pod$u*) kill -9 \${p#/proc/} 2>/dev/null;; esac; done; true"
 }
+# The PID, on the node, of a worker pod's container: what `nsenter -n`
+# needs to shape its egress (S23). Empty when crictl cannot find it.
+worker_pid() {
+    onnode "p=\$(crictl pods -q --name $1 2>/dev/null | head -1); c=\$(crictl ps -q --pod \$p 2>/dev/null | head -1); crictl inspect \$c 2>/dev/null | grep -m1 '\"pid\"' | tr -dc 0-9"
+}
 # The worker pod serving a tenant pod, by annotation.
 # Like `worker_of` but matches a worker in ANY phase. S17 needs it: the
 # checkout of a 200-file project finishes in under 10 s (measured on
@@ -1398,6 +1403,119 @@ if require_pod reader-elsewhere; then
     apply_fx tenants.yaml >/dev/null
 fi
 
+# ── S23 (F72) ─────────────────────────────────────────────────────────
+# Mountpoint completes a file's upload inside close() only when the
+# closing process is the one that opened it. When a PARENT opened the
+# output and a CHILD wrote it and closed last, the upload completes
+# inside FUSE RELEASE — asynchronously, after the container is gone —
+# and the old unpublish order (the released marker and the delete, i.e.
+# the SIGTERM, right after the detach) cut it: no object, an incomplete
+# multipart upload left behind. The plugin now waits for the mounter to
+# exit on its own once the source is detached (workers.quiesceSecs).
+#
+# ABLE TO FAIL, on purpose: the tail is slowed — a 64 MiB part size so
+# the whole 48 MiB file is the last part, uploaded at completion, and
+# netem on the worker's egress — so the completion outlives the
+# container by ~10 s: longer than the old window (a second or two),
+# shorter than the 30 s quiesce. A same-process writer would PASS
+# AGAINST THE DEFECT, because close() blocks until the upload is done.
+leg S23 "F72: a file whose last close came from a CHILD of its opener is whole in the bucket after its pod exits, with no incomplete multipart upload left behind"
+$K -n $NS apply -f - >/dev/null <<PODEOF
+apiVersion: v1
+kind: Pod
+metadata: { name: f72-writer, namespace: $NS }
+spec:
+  serviceAccountName: trainer
+  securityContext: { runAsNonRoot: true, runAsUser: 1001, seccompProfile: { type: RuntimeDefault } }
+  volumes:
+    - name: data
+      csi: { driver: s3.csi.chert.us, volumeAttributes: { chert.us/mount: datasets-f72 } }
+  containers:
+    - name: agent
+      image: busybox:1.36
+      command: ["/bin/sh", "-c"]
+      args: ["trap 'exit 0' TERM INT; sleep 86400 & wait"]
+      securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+      volumeMounts: [{ name: data, mountPath: /mnt/s3 }]
+PODEOF
+mcx mc rm --force m/$BUCKET/datasets/f72/late.bin >/dev/null 2>&1
+if wait_phase f72-writer Running 180 && require_pod f72-writer; then
+    w=$(worker_of f72-writer)
+    pid=$(worker_pid "$w")
+    if [ -n "$pid" ] && onnode "nsenter -t $pid -n tc qdisc add dev eth0 root netem rate 40mbit"; then
+        ok "worker $w egress shaped to 40 Mbit/s (a 48 MiB tail takes ~10 s)"
+    else
+        note "could not shape worker $w's egress (pid '$pid'): the leg still runs, but a pass is then only as strong as the unshaped race"
+    fi
+    # The opener (this shell) closes its descriptor BEFORE a byte is
+    # written; the child writes 48 MiB and is the last to close.
+    inpod f72-writer "exec 3>/mnt/s3/late.bin; ( sleep 1; head -c 50331648 /dev/zero >&3 ) & exec 3>&-; wait; echo written" | grep -q written \
+        && ok "48 MiB written by a child of the opener, which had already closed" || bad "the writer failed"
+    # The container exits NOW, with the completion in flight.
+    $K -n $NS delete pod f72-writer --wait=true --timeout=180s >/dev/null 2>&1
+    i=0; while [ $i -lt 90 ] && $K -n $WNS get pod "$w" >/dev/null 2>&1; do sleep 2; i=$((i + 2)); done
+    $K -n $WNS get pod "$w" >/dev/null 2>&1 && bad "worker $w still exists ${i}s after the tenant was deleted" || ok "worker $w is gone (${i}s)"
+    $K -n $SYS logs "$(plugin_pod)" 2>/dev/null | grep -q "exited on its own once its source was detached" \
+        && ok "the plugin waited for the mounter's own exit (F72 order)" || bad "no 'exited on its own' line in the plugin log: the old order ran, or the wait hit its ceiling"
+    size=$(mcx mc stat --json m/$BUCKET/datasets/f72/late.bin 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["size"])' 2>/dev/null)
+    [ "${size:-0}" = "50331648" ] && ok "late.bin is in the bucket whole (48 MiB)" || bad "late.bin in the bucket: size '${size:-absent}' — the completion was cut"
+    inc=$(mcx mc ls --incomplete --recursive m/$BUCKET/datasets/f72/ 2>/dev/null | grep -c . || true)
+    [ "${inc:-0}" = "0" ] && ok "no incomplete multipart upload under datasets/f72/" || bad "$inc incomplete multipart upload(s) under datasets/f72/ — the fingerprint of a cut completion"
+fi
+
+# ── S24 shared read-only mounter ──────────────────────────────────────
+# spec.sharing.readOnly: one worker per node for a CR's read-only
+# consumers of one class (namespace, CR, uid/gid, credential mode,
+# argv). shared-a and shared-b are one class; shared-c asks for uid
+# 1002 and is another (the control that the owner is in the key). The
+# creator's worker names it in chert.us/tenant-pod; the joiner has no
+# worker of its own. The creator leaves FIRST, so the mounter must
+# outlive the pod its annotation names; the last member's leave brings
+# it down, in F72's order.
+leg S24 "sharing: two read-only consumers of one CR on one node share ONE worker, a third with another uid gets its own; the first out leaves the mounter up, the last brings it down"
+shared_workers() { $K -n $WNS get pods -o json 2>/dev/null | python3 -c "
+import json,sys
+n=0
+for p in json.load(sys.stdin)['items']:
+    a=p['metadata'].get('annotations',{})
+    if a.get('chert.us/cr')=='datasets-shared' and 'chert.us/shared-mount' in a and p.get('status',{}).get('phase')=='Running' and not p['metadata'].get('deletionTimestamp'): n+=1
+print(n)"; }
+if require_pod shared-a && require_pod shared-b && require_pod shared-c; then
+    got=$(inpod shared-a "cat /mnt/shared/shard-01.txt"); [ "$got" = "seeded-object-01" ] && ok "shared-a reads through the shared mount" || bad "shared-a read '$got'"
+    got=$(inpod shared-b "cat /mnt/shared/shard-01.txt"); [ "$got" = "seeded-object-01" ] && ok "shared-b reads through the shared mount" || bad "shared-b read '$got'"
+    got=$(inpod shared-c "cat /mnt/shared/shard-01.txt"); [ "$got" = "seeded-object-01" ] && ok "shared-c reads through its own class's mount" || bad "shared-c read '$got'"
+    n=$(shared_workers); [ "$n" = "2" ] && ok "two shared workers for datasets-shared: one class for uid 1001 (shared-a + shared-b), one for uid 1002 (shared-c)" || bad "$n shared worker(s) for datasets-shared, expected 2"
+    wa=$(worker_of shared-a); wb=$(worker_of shared-b)
+    if [ -n "$wa" ] && [ -z "$wb" ]; then creator=shared-a; joiner=shared-b; w=$wa
+    elif [ -z "$wa" ] && [ -n "$wb" ]; then creator=shared-b; joiner=shared-a; w=$wb
+    else creator=""; fi
+    [ -n "$creator" ] && ok "exactly one of the pair created a worker ($creator → $w); the other joined it" || bad "workers named by shared-a '$wa' and shared-b '$wb' — expected exactly one creator"
+    srcs=$(onnode "grep -c 'plugins/s3.csi.chert.us/shared/' /proc/mounts"); [ "${srcs:-0}" = "2" ] && ok "two shared FUSE sources on the node (one per class)" || bad "$srcs shared source mount(s) on the node, expected 2"
+    # The CR names no cache: the shared mounter must be running the
+    # DEFAULT one (three quarters of scratch), and the reads above filled it.
+    [ -n "$w" ] && blocks=$($K -n $WNS exec "$w" -- ls -R /tmp/mountpoint-cache 2>/dev/null | grep -c .)
+    [ "${blocks:-0}" -gt 0 ] && ok "the default block cache is in use in $w ($blocks entries under /tmp/mountpoint-cache)" || bad "no block cache under /tmp/mountpoint-cache in $w — the sharing default did not reach the mounter"
+    $K -n $SYS logs "$(plugin_pod)" 2>/dev/null | grep -q "block cache defaulted" && ok "the plugin logged the defaulted cache" || bad "no 'block cache defaulted' line in the plugin log"
+    inpod shared-a "touch /mnt/shared/x" >/dev/null 2>&1 && bad "shared-a could write the read-only shared mount" || ok "the shared mount is read-only"
+    lines=$($K -n $SYS logs "$(plugin_pod)" 2>/dev/null | grep -c 'published (shared read-only mount)')
+    [ "${lines:-0}" -ge 3 ] && ok "the plugin logged $lines shared publishes" || bad "the plugin logged $lines shared publish(es), expected 3"
+    if [ -n "$creator" ]; then
+        # The creator out first: the mounter its annotation names stays for the joiner.
+        $K -n $NS delete pod "$creator" --wait=true --timeout=180s >/dev/null 2>&1
+        sleep 3
+        [ "$($K -n $WNS get pod "$w" -o jsonpath='{.status.phase}' 2>/dev/null)" = "Running" ] && ok "worker $w still Running after its creator $creator left" || bad "worker $w is not Running after the FIRST member ($creator) left"
+        got=$(inpod "$joiner" "cat /mnt/shared/shard-02.txt"); [ "$got" = "seeded-object-02" ] && ok "$joiner still reads after $creator left" || bad "$joiner read '$got' after $creator left"
+        $K -n $SYS logs "$(plugin_pod)" 2>/dev/null | grep -q "left the shared mount; its mounter stays" && ok "the plugin recorded the leave" || bad "no 'left the shared mount' line in the plugin log"
+        # The last member out: the mounter comes down.
+        $K -n $NS delete pod "$joiner" --wait=true --timeout=180s >/dev/null 2>&1
+        i=0; while [ $i -lt 90 ] && $K -n $WNS get pod "$w" >/dev/null 2>&1; do sleep 2; i=$((i + 2)); done
+        $K -n $WNS get pod "$w" >/dev/null 2>&1 && bad "worker $w still exists ${i}s after the last member left" || ok "worker $w is gone after the last member left (${i}s)"
+        $K -n $SYS logs "$(plugin_pod)" 2>/dev/null | grep -q "last member out: bringing the shared mounter down" && ok "the plugin brought the mounter down as the last member left" || bad "no 'last member out' line in the plugin log"
+        left=$(onnode "ls /var/lib/kubelet/plugins/s3.csi.chert.us/shared 2>/dev/null | wc -l"); [ "${left:-0}" = "1" ] && ok "one shared record left on the node (shared-c's class)" || bad "shared records on the node: $left, expected 1 (shared-c's)"
+    fi
+    apply_fx tenants.yaml >/dev/null
+fi
+
 # ── S21 (audit 2026-09-03, finding 4) ─────────────────────────────────
 # A node reboot empties the worker's memory-backed comm dir: the
 # supervisor restarts with no launch record, sits in its accept loop,
@@ -1602,7 +1720,7 @@ $K uncordon "$NODE" >/dev/null 2>&1 && note "node uncordoned"
 
 # ── roster ────────────────────────────────────────────────────────────
 echo
-for want in S1 S2 S3 S4 S5 S5c S6 S7 S8 S9 S10 S11 S12 S13 S14 S15 S16 S17 S17f S18 S19 S20 S21 S22 SU; do
+for want in S1 S2 S3 S4 S5 S5c S6 S7 S8 S9 S10 S11 S12 S13 S14 S15 S16 S17 S17f S18 S19 S20 S21 S22 S23 S24 SU; do
     echo " $RAN_LEGS " | grep -q " $want " || bad "leg $want never ran"
 done
 echo "════════════════════════════════════════"

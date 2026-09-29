@@ -1,7 +1,10 @@
 # Sharing one `mount-s3` mount between pods — read-only passthrough
 
-Status: **RESEARCH — no code, produced 2026-09-22.** Written so the first
-line of code can be judged against it. Citations are `path:line` as read
+Status: **BUILT 2026-09-29, opt-in (`spec.sharing.readOnly`), NOT RUN on
+a cluster — see §10 for what was built, where it departs from the plan
+below, and the two answers the plan asked for (§8).** Originally
+research, no code, produced 2026-09-22. Written so the first line of
+code can be judged against it. Citations are `path:line` as read
 on this date. Claims I opened and read myself are unmarked; claims taken
 from the recon pass and NOT independently re-read are marked **[recon]**
 and must be re-verified before they are built on. Nothing here is
@@ -275,3 +278,89 @@ enforcement is already stronger than ROX's, since ROX on the block/NFS
 driver turned out to be client-side only ([F70](../../spdk-csi-driver/docs/f70-rox-export-is-not-enforced-server-side.md)).
 Build sharing for the performance; add PV support only if a customer
 needs the PVC shape.
+
+---
+
+## 10. What was built (2026-09-29), and where it departs from the plan
+
+Code: `s3csi/state.rs` (`SharedMount`, `share_key`, `VolumeState.shared`),
+`s3csi/node.rs` (`publish_shared`, `sharing_decision`, the class lock,
+`cleanup_shared_member`, `adopt_shared`, `teardown_mounter`),
+`s3csi/worker.rs` (`ANN_SHARED_KEY`, `wait_exited`),
+`passthrough/spec.rs` (`SharingSpec`), the CRD, `CHANGELOG.md`. Kind-rig
+legs S23 (F72) and S24 (sharing) in `s3csi/e2e/run-s3csi.sh`, NOT RUN.
+
+**§8.1, answered: Mountpoint does not mount `direct_io`, but it never
+keeps the page cache either.** At v1.24.0 `fs.rs:400` replies to `open`
+with `FOPEN_DIRECT_IO` only when the application asked `O_DIRECT`, and
+never `FOPEN_KEEP_CACHE`; without that flag the kernel invalidates the
+file's cached pages at every open. So the last row of §1's table is
+"one copy per OPEN, shared by concurrent readers" — the durable per-node
+win is the block cache (`spec.cache`) and one connection pool. Still
+worth it for the flagship case; smaller than the table said.
+
+**§5, dissolved rather than solved.** No sponsor, no handoff, no new
+grant shape, no broker change. Every member registers and exchanges on
+its own, exactly as today (its own nonce, its own token, its own
+registration keyed by its volume id), and writes ITS OWN key into the
+shared worker's comm dir — the freshest key wins the file, and since
+every member's authority is the same function of the CR, whose key is
+in the file is immaterial to access control. The door token
+(`auth.token`) is written by the creator only; joiners skip it, because
+the mounter is reading it. The broker's audit lines are therefore still
+one registration and one exchange per pod (§6.4's concern is narrowed
+to CloudTrail attribution of the S3 requests themselves, which
+alternates between members' sessions — the admin who set the knob
+accepts that).
+
+**What sharing cannot do, stated on the CRD field:** revoke one member
+before its pod exits. A refusal on one member's refresh removes the
+shared key (today's revocation), the next still-allowed member's
+republish re-mints it within ~90 s, and the refused member — still bound
+to the same superblock, from inside its own mount namespace — reads
+again. Every member could have minted that key itself, so nothing is
+gained by the lingering member; but the isolation §4.6 promises per pod
+is per CLASS here.
+
+**Scope, as built:** read-only members (`access.is_read() ||
+spec.readOnly`), same node/namespace/CR/uid/gid/credential mode/argv
+(`share_key`; the argv is in the key so a CR edit is a new class for new
+members), on `ambient` or on `broker` with a backend the plugin reads
+from `/v1/status` as `sts` or `static` (both CR-scoped: a session policy
+on the prefix, or the one read key). `rest` (per-pod scoping), an
+unreadable broker, a read-write consumer: a mounter per pod, reason
+logged. `identity.mode static` with the knob: refused by `validate`.
+`webIdentity` is already refused on passthrough.
+
+**Departures from §7's order:** step 0 (F72) done first, in the same
+change. Step 1 (per-target ro stage) not needed: the class lock
+serialises every bind of a class, so the one stage per source is never
+contended. Step 5 (preStop "last member released") needed no worker
+change: only the last member's unpublish writes the marker. Step 6
+(broker grant shape) not needed, per §5 above. A dead shared mounter
+(worker gone or source not answering) is REPLACED under the same class
+by the next member's publish; its current members are stranded exactly
+as a per-pod dead mounter strands its tenant, and their `MounterDead`
+event already said so.
+
+**The cache comes with it (added the same day, at the user's ask).** A
+sharing CR that names no `spec.cache` gets Mountpoint's block cache by
+default: three quarters of `workers.scratchSize`
+(`MountSpec::with_default_cache`, 768 MiB at the chart's 1Gi), applied
+at publish and logged; `cache: { enabled: false }` opts out and a named
+`maxSizeMib` is kept. Three quarters, not all, because the scratch
+emptyDir's `sizeLimit` evicts the worker when overrun, and under sharing
+that strands every member. The default is part of the mounter's argv,
+so it is in the class key like everything else.
+
+**How to ask for one.** On the CR: `readOnly: true` (or the pod's SA in
+`consumers.readOnlyServiceAccounts`) and `sharing: { readOnly: true }`,
+with `identity.mode` broker (on an sts or static backend) or ambient.
+Pods mount it as before (`chert.us/mount: <cr>`); those on one node with
+the same effective uid/gid share the worker, which carries
+`chert.us/shared-mount` naming the class. Helm applies `crds/` on
+install only: after an upgrade, `kubectl apply -f
+flint-passthrough-chart/crds/flintpassthroughmounts.yaml`.
+
+**Not built:** ROX/PV shape (§9); per-member revocation; sharing across
+namespaces or CRs.

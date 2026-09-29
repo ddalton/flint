@@ -14,6 +14,37 @@ covered by the stability guarantee.
 
 ### Added
 
+- **flint-passthrough: one mounter per node for a CR's read-only consumers
+  (`spec.sharing.readOnly`)** (2026-09-29, opt-in, off by default; design of
+  record `docs/plans/passthrough-read-only-mount-sharing.md`). Every pod used
+  to get its own mount-s3 worker, FUSE mount, block cache and connection pool
+  — N readers of one dataset on one node fetched it N times. With the knob,
+  pods whose effective access is read (the CR's `readOnly`, an SA in
+  `readOnlyServiceAccounts`, or the pod's own `readOnly: true`) with the same
+  effective uid/gid share one worker per node; each pod's volume is a bind of
+  its FUSE source, and the mounter comes down when the LAST member leaves.
+  Members keep their own registration, nonce and token and exchange their own
+  credential into the shared worker (the freshest key wins), so the broker
+  still logs one registration and one exchange per pod; the door token stays
+  the creator's. Only a credential that is a function of the CR alone may be
+  shared: ambient, or the broker on an `sts` or `static` backend (read from
+  `/v1/status`); a `rest` backend, an unreadable broker, a read-write consumer
+  and `identity.mode static` each keep a mounter per pod, with the reason
+  logged (`static` with the knob is refused by the CR validation). A CR edited
+  under running members is a NEW class for new members (the argv is in the
+  key). The trade is on the CRD field: one mounter's death strands every
+  member; one memory limit and prefetch budget serve them all; and a member's
+  grant cannot be revoked on its own before its pod exits, since every member
+  holds identical authority. What sharing buys is the block cache and the
+  connection pool, not the kernel page cache: mount-s3 1.24.0 never sets
+  `FOPEN_KEEP_CACHE`, so the kernel drops a file's pages at every open and a
+  shared mount's page cache serves only concurrent readers. Kind-rig legs
+  S23/S24 written, NOT RUN. The worker pod carries `chert.us/shared-mount`
+  (the class, readable); its volume-id annotation is the class hash. A
+  sharing CR that names no `spec.cache` gets the block cache by default —
+  three quarters of `workers.scratchSize` (768 MiB at the chart's 1Gi),
+  logged at publish; `cache: { enabled: false }` opts out.
+
 - **pNFS MDS / lite hub: the export's `access:` list is enforced** (2026-09-29,
   `nfs::export_access`, F70's second follow-on). Every config carried
   `access: [{network: 0.0.0.0/0, permissions: rw}]` and the server read none
@@ -187,6 +218,36 @@ covered by the stability guarantee.
   or `rw` and `network` a CIDR or address, or the server refuses to start.
 
 ### Fixed
+
+- **The passthrough CRD-agreement test had silently stopped running**
+  (2026-09-29, `passthrough/spec.rs`). When `spec.cache` was added, its test
+  was inserted between the CRD test's `#[test]` attribute and the CRD test's
+  function, so the attribute landed on the cache test twice
+  (`duplicate_macro_attributes`, a warning) and
+  `the_crd_and_the_struct_agree_on_every_field` became a plain function that
+  nothing called ("never used", another warning). The one test that stops
+  the hand-written CRD and the struct from drifting ran for nobody from that
+  commit on; the CRD happened to agree. The attribute is back on the right
+  function, and it runs again with `sharing` on both sides.
+- **F72: passthrough unpublish cut a deferred upload** (2026-09-29,
+  `spdk-csi-driver/docs/f72-passthrough-teardown-kills-the-mounter-before-quiescing-it.md`).
+  Mountpoint completes a file's upload inside `close()` only when the closing
+  process is the one that opened it; when a parent opened the output and a
+  child wrote it and closed last (Java `ProcessBuilder.redirectOutput`, Python
+  `Popen(stdout=f)` with the parent's handle closed first, Node `spawn` with an
+  fd), the upload completes inside FUSE RELEASE, asynchronously, after the
+  container is gone. Unpublish then detached the source — which is survivable:
+  mount-s3 joins the thread still completing the upload before it exits — and
+  in the same breath wrote the released marker and deleted the worker, whose
+  SIGTERM makes mount-s3 return without joining anything: the object never
+  appeared and an incomplete multipart upload stayed in the bucket. Now the
+  plugin detaches the source and WAITS, bounded by `workers.quiesceSecs`
+  (default 30, `FLINT_S3CSI_QUIESCE_SECS`, 0 disables), for the worker to exit
+  on its own, and only then disarms the hook and deletes the pod; at the
+  ceiling the old order applies and the log says so. Verified against the
+  pinned mount-s3 1.24.0 source (`fs.rs` flush/release, `fuse/session.rs`
+  join); the rig leg (S23, a different-process writer with a slowed tail)
+  is written, NOT RUN.
 
 - **F70: a ReadOnlyMany export is now read-only at the SERVER** (2026-09-28).
   The CSI controller has always told the NFS server pod `--read-only` for a

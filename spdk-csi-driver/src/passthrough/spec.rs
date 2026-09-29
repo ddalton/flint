@@ -46,6 +46,15 @@ pub struct CacheSpec {
     pub max_size_mib: Option<u64>,
 }
 
+/// One mounter per node for the CR's read-only consumers. See
+/// [`MountSpec::sharing`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SharingSpec {
+    #[serde(default)]
+    pub read_only: bool,
+}
+
 // Serialize is here for ONE reason: it is what lets
 // `the_crd_and_the_struct_agree_on_every_field` enumerate this
 // struct's fields at runtime and compare them against the hand-written
@@ -99,6 +108,33 @@ pub struct MountSpec {
     /// (`restartPolicy: Never`).
     #[serde(default)]
     pub cache: Option<CacheSpec>,
+    /// `sharing.readOnly: true` — every READ-ONLY consumer of this CR on
+    /// one node shares ONE mounter (one worker pod, one FUSE mount, one
+    /// block cache, one connection pool) instead of each pod getting its
+    /// own; each pod's target is a bind of that mount. OFF by default.
+    /// Design of record: docs/plans/passthrough-read-only-mount-sharing.md.
+    ///
+    /// A sharing CR that names no `cache` gets one by default: three
+    /// quarters of `workers.scratchSize` ([`MountSpec::with_default_cache`]);
+    /// `cache: { enabled: false }` opts out, `cache.maxSizeMib` chooses.
+    ///
+    /// Who shares: pods whose effective access is read (the CR's
+    /// `readOnly`, or an SA in `readOnlyServiceAccounts`, or the pod's own
+    /// `readOnly: true`) with the same effective uid/gid, on `identity.mode`
+    /// broker (with a broker whose backend scopes a read grant by the CR:
+    /// sts or static) or ambient. A read-write consumer keeps its own
+    /// mounter. `static` is refused with this set: that key is the pod's
+    /// own Secret.
+    ///
+    /// What it costs, so the choice is informed: one mounter's death
+    /// strands every member (not one pod); one memory limit and one
+    /// prefetch budget serve them all; and a member's grant cannot be
+    /// revoked on its own before its pod exits — every member holds the
+    /// same authority, which is why sharing grants nothing, and also why
+    /// the mount cannot tell members apart. Per-member registrations and
+    /// credential exchanges are still logged by the broker as before.
+    #[serde(default)]
+    pub sharing: Option<SharingSpec>,
     /// Per-mount image override (the chart's default otherwise).
     /// WEBHOOK DELIVERY ONLY: the CSI node driver never reads it — the
     /// worker image is chart-pinned, because this field is the
@@ -125,10 +161,70 @@ pub struct MountSpec {
     // Found by `the_crd_and_the_struct_agree_on_every_field`.
 }
 
+/// A Kubernetes resource quantity (`1Gi`, `512Mi`, `2G`, `1073741824`)
+/// in whole MiB, rounded down. `None` for anything else.
+pub fn quantity_mib(q: &str) -> Option<u64> {
+    let q = q.trim();
+    let split = q.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(q.len());
+    let (num, suffix) = q.split_at(split);
+    let n: f64 = num.parse().ok()?;
+    let bytes = match suffix {
+        "" => n,
+        "Ki" => n * 1024.0,
+        "Mi" => n * 1024.0 * 1024.0,
+        "Gi" => n * 1024f64.powi(3),
+        "Ti" => n * 1024f64.powi(4),
+        "k" | "K" => n * 1e3,
+        "M" => n * 1e6,
+        "G" => n * 1e9,
+        "T" => n * 1e12,
+        _ => return None,
+    };
+    if !bytes.is_finite() || bytes < 0.0 {
+        return None;
+    }
+    Some((bytes / (1024.0 * 1024.0)) as u64)
+}
+
+/// The smallest default cache worth having; below it the CR must say.
+pub const DEFAULT_SHARED_CACHE_MIN_MIB: u64 = 64;
+
+/// The block cache a CR that shares its mounter gets when it names none:
+/// three quarters of the worker's scratch emptyDir (`workers.scratchSize`,
+/// so 768 MiB at the chart's 1Gi default), leaving headroom under the
+/// limit whose overrun evicts the worker — and, under sharing, strands
+/// every member. Never below [`DEFAULT_SHARED_CACHE_MIN_MIB`], and none
+/// at all when the size cannot be read.
+pub fn default_shared_cache_mib(scratch_size: &str) -> Option<u64> {
+    let ceiling = quantity_mib(scratch_size)? * 3 / 4;
+    (ceiling >= DEFAULT_SHARED_CACHE_MIN_MIB).then_some(ceiling)
+}
+
 impl MountSpec {
     /// True when requests should use path-style addressing.
     pub fn use_path_style(&self) -> bool {
         self.path_style.unwrap_or_else(|| self.endpoint.is_some())
+    }
+
+    /// The spec as the mounter sees it: a CR that shares its mounter and
+    /// names no `cache` gets the default one ([`default_shared_cache_mib`]),
+    /// because sharing is for a dataset read many times and without the
+    /// cache every read that is not concurrent goes to S3. A CR that names
+    /// `cache` keeps it, `enabled: false` included — that is how a shared
+    /// CR opts out.
+    pub fn with_default_cache(mut self, scratch_size: &str) -> Self {
+        if self.shares_read_only() && self.cache.is_none() {
+            if let Some(mib) = default_shared_cache_mib(scratch_size) {
+                self.cache = Some(CacheSpec { enabled: true, max_size_mib: Some(mib) });
+            }
+        }
+        self
+    }
+
+    /// `spec.sharing.readOnly`: the CR asks that its read-only consumers
+    /// on a node share one mounter.
+    pub fn shares_read_only(&self) -> bool {
+        self.sharing.as_ref().is_some_and(|s| s.read_only)
     }
 
     /// Everything the injector refuses. Each arm names the field and
@@ -227,6 +323,17 @@ impl MountSpec {
                 Some(_) => {}
             }
         }
+        // A shared mounter holds ONE credential for every member. With
+        // `static` that credential is whichever pod's nodePublishSecretRef
+        // came first — the pod author's choice, not the CR's — so the
+        // members' authority would not be the same function of the CR,
+        // which is the whole argument for sharing. Refused by name.
+        if self.shares_read_only() && self.identity.as_ref().is_some_and(|i| i.mode == "static") {
+            return Err("spec.sharing.readOnly is true with spec.identity.mode static — a shared mounter \
+                        holds one credential for every member, and a static key is the pod's own \
+                        nodePublishSecretRef. Use identity.mode broker or ambient, or drop sharing"
+                .into());
+        }
 
         Ok(())
     }
@@ -243,17 +350,6 @@ mod tests {
     /// crds/flintpassthroughmounts.yaml.
     const TOMBSTONES: &[&str] = &["driver"];
 
-    /// The CRD is hand-written (this spec is plain serde, not a
-    /// schemars derive), so nothing but this test stops the two from
-    /// drifting — and drift is silent in both directions:
-    ///
-    /// - a struct field the CRD does not declare is PRUNED by the API
-    ///   server before the node plugin ever sees it: a knob that exists in
-    ///   the CR the user wrote and does nothing;
-    /// - a CRD property the struct does not have is stored and then
-    ///   hits `deny_unknown_fields`, denying every pod that opts into
-    ///   the mount.
-    #[test]
     /// An enabled cache with no ceiling is unbounded: it fills the
     /// worker's scratch emptyDir, whose sizeLimit then EVICTS the
     /// worker — and an evicted passthrough worker cannot be restarted
@@ -275,6 +371,7 @@ mod tests {
             gid: None,
             mount_options: vec![],
             cache: None,
+            sharing: None,
             image: None,
             consumers: None,
             identity: None,
@@ -290,6 +387,114 @@ mod tests {
         assert!(s.validate().is_ok(), "disabled needs no ceiling");
     }
 
+    #[test]
+    fn quantities_read_in_whole_mib() {
+        for (q, want) in [
+            ("1Gi", Some(1024)),
+            ("512Mi", Some(512)),
+            ("1.5Gi", Some(1536)),
+            ("2G", Some(1907)),
+            ("1073741824", Some(1024)),
+            ("64Ki", Some(0)),
+            (" 1Gi ", Some(1024)),
+            ("", None),
+            ("abc", None),
+            ("10x", None),
+            ("100m", None),
+            ("-1Gi", None),
+        ] {
+            assert_eq!(quantity_mib(q), want, "{q:?}");
+        }
+    }
+
+    /// Sharing is for a dataset read many times, and without the block
+    /// cache every read that is not concurrent goes to S3: a sharing CR
+    /// that names no cache gets three quarters of the worker's scratch —
+    /// under the limit whose overrun would evict the shared worker and
+    /// strand every member. A named cache, enabled or not, is kept, and a
+    /// CR that does not share gets nothing it did not ask for.
+    #[test]
+    fn a_sharing_cr_without_a_cache_gets_three_quarters_of_the_scratch() {
+        let base = MountSpec {
+            bucket: "b".into(),
+            key_prefix: None,
+            endpoint: None,
+            region: None,
+            mount_path: "/mnt/s3".into(),
+            read_only: true,
+            path_style: None,
+            credentials_secret_ref: None,
+            uid: None,
+            gid: None,
+            mount_options: vec![],
+            cache: None,
+            sharing: Some(SharingSpec { read_only: true }),
+            image: None,
+            consumers: None,
+            identity: None,
+        };
+        let d = base.clone().with_default_cache("1Gi");
+        assert_eq!(d.cache, Some(CacheSpec { enabled: true, max_size_mib: Some(768) }));
+        assert!(d.validate().is_ok(), "the default must pass the cache validation");
+        assert_eq!(base.clone().with_default_cache("512Mi").cache.unwrap().max_size_mib, Some(384));
+        assert!(base.clone().with_default_cache("64Mi").cache.is_none(), "48 MiB is below the floor: the CR must say");
+        assert!(base.clone().with_default_cache("").cache.is_none(), "an unreadable size defaults nothing");
+        let off = MountSpec { cache: Some(CacheSpec { enabled: false, max_size_mib: None }), ..base.clone() };
+        assert_eq!(off.clone().with_default_cache("1Gi").cache, off.cache, "enabled: false is the opt-out");
+        let named = MountSpec { cache: Some(CacheSpec { enabled: true, max_size_mib: Some(100) }), ..base.clone() };
+        assert_eq!(named.clone().with_default_cache("1Gi").cache, named.cache, "a named ceiling is kept");
+        let own = MountSpec { sharing: None, ..base.clone() };
+        assert!(own.with_default_cache("1Gi").cache.is_none(), "a CR that does not share gets no default");
+        assert_eq!(default_shared_cache_mib("1Gi"), Some(768));
+    }
+
+    /// A shared mounter holds one credential for all its members, so the
+    /// credential must be the CR's function, not a pod's: `static` (the
+    /// pod's own Secret) is refused by name; broker and ambient are not.
+    #[test]
+    fn sharing_cannot_run_on_a_per_pod_secret() {
+        let mut s = MountSpec {
+            bucket: "b".into(),
+            key_prefix: None,
+            endpoint: None,
+            region: None,
+            mount_path: "/mnt/s3".into(),
+            read_only: true,
+            path_style: None,
+            credentials_secret_ref: None,
+            uid: None,
+            gid: None,
+            mount_options: vec![],
+            cache: None,
+            sharing: Some(SharingSpec { read_only: true }),
+            image: None,
+            consumers: None,
+            identity: Some(crate::s3csi::policy::Identity { mode: "static".into() }),
+        };
+        assert!(!MountSpec { sharing: None, ..s.clone() }.shares_read_only());
+        assert!(!MountSpec { sharing: Some(SharingSpec { read_only: false }), ..s.clone() }.shares_read_only());
+        assert!(s.shares_read_only());
+        let e = s.validate().expect_err("static + sharing must be refused");
+        assert!(e.contains("static") && e.contains("sharing"), "{e}");
+        for mode in ["broker", "ambient"] {
+            s.identity = Some(crate::s3csi::policy::Identity { mode: mode.into() });
+            assert!(s.validate().is_ok(), "{mode} may share");
+        }
+        s.identity = None;
+        assert!(s.validate().is_ok(), "the default mode is broker");
+    }
+
+    /// The CRD is hand-written (this spec is plain serde, not a
+    /// schemars derive), so nothing but this test stops the two from
+    /// drifting — and drift is silent in both directions:
+    ///
+    /// - a struct field the CRD does not declare is PRUNED by the API
+    ///   server before the node plugin ever sees it: a knob that exists in
+    ///   the CR the user wrote and does nothing;
+    /// - a CRD property the struct does not have is stored and then
+    ///   hits `deny_unknown_fields`, denying every pod that opts into
+    ///   the mount.
+    #[test]
     fn the_crd_and_the_struct_agree_on_every_field() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -324,6 +529,7 @@ mod tests {
             gid: Some(1),
             mount_options: vec!["--metadata-ttl".into(), "60".into()],
             cache: Some(CacheSpec { enabled: true, max_size_mib: Some(512) }),
+            sharing: Some(SharingSpec { read_only: true }),
             image: Some("i".into()),
             consumers: Some(crate::s3csi::policy::MountConsumers {
                 service_accounts: vec!["a".into()],
