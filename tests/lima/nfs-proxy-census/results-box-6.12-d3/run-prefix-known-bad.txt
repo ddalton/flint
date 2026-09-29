@@ -1,0 +1,15 @@
+PASS control: chmod lands (mode 640)
+  cp -a: rc=1 err=[cp: preserving permissions for ‘/mnt/d3B/cp’: Input/output error]
+FAIL direct cp -a exits 0 with no error
+PASS control: cp -a moved the bytes
+PASS cp -a preserved the mode (640) without an ACL
+  mv: rc=0 err=[mv: preserving permissions for ‘/mnt/d3B/mv’: Input/output error]
+FAIL direct mv exits 0 with no error
+  listxattr: ['system.nfs4_acl']
+FAIL system.nfs4_acl is not listed
+  proxied cp -a: rc=1 err=[cp: preserving permissions for ‘/mnt/d3P/ws-b/p’: Input/output error]
+FAIL proxied cp -a exits 0 with no error
+PASS control: proxied cp -a moved the bytes
+  proxied mv: rc=0 err=[mv: preserving permissions for ‘/mnt/d3P/ws-b/q’: Input/output error]
+FAIL proxied mv exits 0 with no error
+RESULT: 4 passed, 5 failed

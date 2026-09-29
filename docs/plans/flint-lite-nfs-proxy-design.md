@@ -597,7 +597,7 @@ port are still wanted for capacity and failure isolation.
    real kernel, 14/14** with its allowlist control failing exactly the
    two allowlist checks (census Part 4). Found on the way: the hub's
    LOOKUPP result carried LOOKUP's opcode (fixed), and D3 (census Part
-   4, open). **Left for step 3:** DESTROY_SESSION/_CLIENTID on the
+   4; fixed 2026-09-29). **Left for step 3:** DESTROY_SESSION/_CLIENTID on the
    backends, keepalive, the wake on a refused connection (today:
    `NFS4ERR_DELAY`), a retransmission across a hub re-establish.
 2b. RPC-with-TLS mTLS at the proxy (§6a): the `AUTH_TLS` NULL probe,

@@ -1133,14 +1133,24 @@ const SUPPORTED_ATTRS_BITMAP: u64 = (1u64 << FATTR4_TYPE)
     // knfsd in a delete-storm capture's READDIR requests.
     | (1u64 << FATTR4_RDATTR_ERROR)
     | (1u64 << FATTR4_LEASE_TIME)       // CRITICAL for NFSv4.1 leases!
-    | (1u64 << FATTR4_ACLSUPPORT)       // ACL capabilities
-    | (1u64 << FATTR4_ACL)
+    // ACLSUPPORT is answered 0 (no ACE types). FATTR4_ACL is NOT
+    // advertised (D3): the server has no ACLs and SETATTR of one is
+    // ATTRNOTSUPP. Advertised, Linux listed `system.nfs4_acl`, and every
+    // `cp -a`/`mv` from one flint mount into another failed with EIO
+    // copying the (fake, empty) ACL back. e09e0d17 added the bit in the
+    // same commit as FH_EXPIRE_TYPE, against a "VFS denied all access"
+    // report; the client needs neither ACL nor its advertisement to
+    // fall back to the mode.
+    | (1u64 << FATTR4_ACLSUPPORT)
     | (1u64 << FATTR4_CANSETTIME)       // Can set timestamps
     | (1u64 << FATTR4_FILEID)
     | (1u64 << FATTR4_FILES_AVAIL)      // For df -i command
     | (1u64 << FATTR4_FILES_FREE)       // For df -i command
     | (1u64 << FATTR4_FILES_TOTAL)      // For df -i command
-    | (1u64 << FATTR4_MAXFILESIZE)      // Maximum file size
+    // MAXFILESIZE is not advertised: the limit is the backing
+    // filesystem's, which the encoder does not know. Unanswered, the
+    // client uses its own maximum — the same as before, when the bit
+    // was advertised and never answered.
     | (1u64 << FATTR4_MAXLINK)          // Max hard links
     | (1u64 << FATTR4_MAXNAME)          // Max filename length
     | (1u64 << FATTR4_MAXREAD)          // CRITICAL for client rsize!
@@ -1483,10 +1493,17 @@ pub(crate) fn encode_attributes_from_snapshot(
                 attr_vals.put_u32(0); // NFS4_OK
                 true
             }
-            FATTR4_ACL => {
-                // Return empty ACL (use POSIX mode instead)
-                // Per RFC 7530 Section 6.4: empty ACL means use MODE attribute
-                attr_vals.put_u32(0); // Array length = 0 (no ACEs)
+            FATTR4_ACLSUPPORT => {
+                // No ACE type is supported (ACL4_SUPPORT_* = 0): see D3
+                // at SUPPORTED_ATTRS_BITMAP.
+                attr_vals.put_u32(0);
+                true
+            }
+            FATTR4_RAWDEV => {
+                // specdata4. Only REG/DIR/LNK are ever reported, and none
+                // of them is a device.
+                attr_vals.put_u32(0);
+                attr_vals.put_u32(0);
                 true
             }
             FATTR4_FILEID => {
@@ -5633,5 +5650,89 @@ mod tests {
             link, 0,
             "THE BUG: the server advertises hard-link support it then refuses with NOTSUPP"
         );
+    }
+
+    /// D3 (docs/plans/flint-lite-nfs-proxy-census.md, Part 4): the hub
+    /// advertised FATTR4_ACL, answered GETATTR with a zero-ACE ACL and
+    /// refused SETATTR of it with ATTRNOTSUPP. Linux takes the
+    /// advertisement as "ACLs supported", lists `system.nfs4_acl`, and
+    /// `cp -a` / `mv` from one flint mount into another copies it back:
+    /// EIO ("preserving permissions: Input/output error") on every such
+    /// copy. The zero-ACE answer was not "use the mode" either: under
+    /// RFC 8881 §6.2.1 an ACL with no ACEs grants nothing. The server has
+    /// no ACLs, so it must not say it has one.
+    #[test]
+    fn acl_is_not_advertised_and_aclsupport_says_none() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let f = dir.path().join("f");
+        std::fs::write(&f, b"x").unwrap();
+        let snap = AttributeSnapshot::from_metadata(std::fs::metadata(&f).unwrap(), &f).unwrap();
+
+        assert_eq!(
+            SUPPORTED_ATTRS_BITMAP & (1u64 << FATTR4_ACL),
+            0,
+            "THE BUG: FATTR4_ACL advertised by a server that cannot set one"
+        );
+
+        // ACL + ACLSUPPORT + MODE (the control: it must still answer).
+        let requested = vec![
+            (1u32 << FATTR4_ACL) | (1u32 << FATTR4_ACLSUPPORT),
+            1u32 << (FATTR4_MODE - 32),
+        ];
+        let (vals, bitmap) =
+            encode_attributes_from_snapshot(&requested, &snap, false, None, None, None);
+        let w0 = bitmap.first().copied().unwrap_or(0);
+        let w1 = bitmap.get(1).copied().unwrap_or(0);
+        assert_ne!(w1 & (1 << (FATTR4_MODE - 32)), 0, "control: MODE is answered");
+        assert_eq!(w0 & (1 << FATTR4_ACL), 0, "no ACL in the reply");
+        assert_ne!(
+            w0 & (1 << FATTR4_ACLSUPPORT),
+            0,
+            "ACLSUPPORT is advertised, so it must be answered"
+        );
+        // Attr order: ACL(12) omitted, ACLSUPPORT(13), MODE(33).
+        assert_eq!(vals.len(), 8, "two u32 answers");
+        assert_eq!(&vals[0..4], &0u32.to_be_bytes(), "ACLSUPPORT = no ACE types");
+    }
+
+    /// The class D3 was one member of: every attribute the server
+    /// advertises in SUPPORTED_ATTRS must be answered when a client asks
+    /// for it. ACLSUPPORT was advertised and silently dropped from every
+    /// reply (so were RAWDEV and MAXFILESIZE). Exempt, each for a stated
+    /// reason: FILEHANDLE (GETATTR callers pass no handle; GETFH answers
+    /// it), FILES_*/SPACE_* (answered only with the tier's space gauge —
+    /// a striped pNFS export's capacity is not the MDS's filesystem) and
+    /// the write-only TIME_*_SET (RFC 8881 §5.5: never in a GETATTR).
+    #[test]
+    fn every_advertised_attribute_is_answered() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let f = dir.path().join("f");
+        std::fs::write(&f, b"x").unwrap();
+        let snap = AttributeSnapshot::from_metadata(std::fs::metadata(&f).unwrap(), &f).unwrap();
+
+        let exempt = [
+            FATTR4_FILEHANDLE,
+            FATTR4_FILES_AVAIL,
+            FATTR4_FILES_FREE,
+            FATTR4_FILES_TOTAL,
+            FATTR4_SPACE_AVAIL,
+            FATTR4_SPACE_FREE,
+            FATTR4_SPACE_TOTAL,
+            FATTR4_TIME_ACCESS_SET,
+            FATTR4_TIME_MODIFY_SET,
+        ];
+        let mut missing = Vec::new();
+        for attr in 0..64u32 {
+            if SUPPORTED_ATTRS_BITMAP & (1u64 << attr) == 0 || exempt.contains(&attr) {
+                continue;
+            }
+            let mut req = vec![0u32; 2];
+            req[(attr / 32) as usize] = 1 << (attr % 32);
+            let (_, bitmap) = encode_attributes_from_snapshot(&req, &snap, false, None, None, None);
+            if bitmap.get((attr / 32) as usize).copied().unwrap_or(0) & (1 << (attr % 32)) == 0 {
+                missing.push(attr);
+            }
+        }
+        assert!(missing.is_empty(), "advertised but never answered: {missing:?}");
     }
 }

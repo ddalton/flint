@@ -268,7 +268,24 @@ the same EIO between two DIRECT hub mounts**, and a bare
 and SETATTR of `FATTR4_ACL` (`fileops.rs`, the settable-attrs decoder)
 is `ATTRNOTSUPP`, which Linux maps to EIO. Every `mv`/`cp -a` into a
 flint mount from another NFS mount reports an error (the data still
-moves). Not fixed yet: either stop advertising `FATTR4_ACL`, or accept
-an ACL equal to what GETATTR reports (the empty one) as a no-op. Why
-`FATTR4_ACL` was added to the advertisement (`e09e0d17`, "critical
-missing attributes") must be read before choosing.
+moves; `cp -a` exits 1).
+
+**Fixed 2026-09-29: `FATTR4_ACL` is no longer advertised**, and
+`ACLSUPPORT` is answered 0. The other option (accept the empty ACL as a
+no-op) was rejected: under RFC 8881 §6.2.1 an ACL with no ACEs grants
+nothing, so the GETATTR answer was itself false, not "use the mode" as
+its comment said, and a real ACL from another server would still fail.
+`e09e0d17` added the bit in the same commit as `FH_EXPIRE_TYPE`, against
+a "VFS denied all access" report; the drill below reads and writes on
+mounts without it.
+
+A census test (`every_advertised_attribute_is_answered`) found the rest
+of the class: `ACLSUPPORT`, `RAWDEV` and `MAXFILESIZE` were advertised
+and never answered. `RAWDEV` is now answered (0,0: only REG/DIR/LNK are
+reported); `MAXFILESIZE` is no longer advertised (the limit belongs to
+the backing filesystem; the client's default applies, as before).
+
+Evidence `results-box-6.12-d3/` (`d3-drill.sh`, direct and proxied):
+the pre-fix build fails all 5 D3 checks with the 4 controls passing
+(`run-prefix-known-bad.txt`); the fixed build passes 9/9
+(`run-fixed.txt`); step 2 e2e still 14/14 (`run-step2-e2e-fixed.txt`).

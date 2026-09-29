@@ -1,0 +1,15 @@
+PASS control: chmod lands (mode 640)
+  cp -a: rc=0 err=[]
+PASS direct cp -a exits 0 with no error
+PASS control: cp -a moved the bytes
+PASS cp -a preserved the mode (640) without an ACL
+  mv: rc=0 err=[]
+PASS direct mv exits 0 with no error
+  listxattr: []
+PASS system.nfs4_acl is not listed
+  proxied cp -a: rc=0 err=[]
+PASS proxied cp -a exits 0 with no error
+PASS control: proxied cp -a moved the bytes
+  proxied mv: rc=0 err=[]
+PASS proxied mv exits 0 with no error
+RESULT: 9 passed, 0 failed
