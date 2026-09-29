@@ -90,6 +90,12 @@ graph logs record the state ... twice".
 | peak RSS | 4.2 GB | **749 MB** |
 | time | 100 s (the Mac swapping) | 27.7 s |
 
+flint-27 on the box, LeanP1LiveHoldsSmall (2 workers): tlc-rs holds with
+10,676,334 distinct states, depth 36, in 441 s at 1.6 GB (the graph of
+10.7M nodes loaded in 29 s); TLC (`-lncheck final`, `-Xmx8g`) the same
+verdict and count in 877 s. The build before this one hit its 6 GB guard
+within 51 s.
+
 All 92 property entries re-run (`results/liveness-disk-sweep-2026-09-28.jsonl`):
 71 compared with TLC, 0 differences (ForgeSyncLive's 1,781,559 is the
 spec as changed on 2026-09-28; TLC re-run on it: 1,781,559). Liveness
@@ -165,6 +171,36 @@ TLC ignores; higher-order operator parameters (`op(_, _)`); recursive
 function definitions (`f[x \in S] == ...`); unbounded `CHOOSE x : P`;
 `INSTANCE` in a `LET`; a few operators (`\prec`, `^^`, `&`); some
 temporal shapes; and the Community Modules.
+
+### Closing the gaps the examples showed (2026-09-28)
+
+- **Theorems and proofs are skipped**, as TLC skips them: `THEOREM` /
+  `LEMMA` / `PROPOSITION` / `COROLLARY` with any proof (`BY`, `DEF`,
+  `OBVIOUS`, `<1>` steps), and `USE` / `HIDE`, up to the next line that
+  starts a module-level unit. `ASSUME Name == e` is an assumption and a
+  definition of Name. Labels (`Name::`) are skipped. `TLAPS` and the proof
+  libraries extending it are built-in empty modules.
+- **Only the module is TLA+**: prose before `---- MODULE` and after the
+  closing `====` is ignored, as by SANY.
+- **Function definitions** `f[x \in S, ...] == e`, at module level and in
+  LET, recursive or not. As in TLC they are lazy: an application `f[a]`
+  evaluates `e` for that argument only (an operator `f!app`), with the
+  domain checked; `f` alone is the whole function. (Building the whole
+  function per application made ElevatorSafetyMedium, 18.0M states, not
+  finish in 5 minutes; now 132 s, TLC's recorded runtime 3 minutes.)
+- **Operator parameters** `F(op(_, _), x) == ...`, called with an operator
+  or a `LAMBDA`; `SelectSeq` with any operator.
+- **User-defined infix operators** (`\prec`, `^^`, `++`, `\oplus`, ...) with
+  TLA+'s precedences.
+- **Unbounded `CHOOSE x : P`** parses; as in TLC it is an error only if
+  evaluated (a cfg normally overrides such a definition).
+- **Membership in sets that cannot be enumerated**: `x \in S` where S
+  involves Nat, Int, STRING or Seq(T) is decided from S's structure —
+  `{y \in T : P}`, `A \ B`, `\cup`, `\cap`, `[D -> R]`, record sets, and
+  set-valued definitions — never building S (`Capacity \in [Jug -> {n \in
+  Nat : n > 0}]`, `N \in Nat \ {0}`).
+- **cfg**: `<-[M]` and `= [M]v`, overrides scoped to a module, are accepted
+  (modules are flattened).
 
 ## Correctness against TLC
 
@@ -376,3 +412,8 @@ mid-level).
 5. Measured and dropped: a per-allocation memo of hashes and permuted
    images (20.2 → 22.4 s); PGO (+4–7%).
 6. mimalloc, fat LTO, one codegen unit, `target-cpu=native`, `panic=abort`.
+
+**Paused 2026-09-28, with both validation runs partial.**
+- Gate sweep with the parser-gap binary: 291 of 301 run; `results/gate-sweep-parser-gaps-partial-2026-09-28.jsonl`. 0 regressions; two models moved from unsupported to agree (LeanBarrierLeaseLeakHolds, LeanBarrierLeaseLeakRuleConverges).
+- tlaplus/Examples with the final binary: 28 of 165 run; `results/examples-final-partial-2026-09-28.jsonl`. 16 accepted, 16 agree with the manifest, 12 unsupported.
+- To resume: re-run the remaining models with `results/examples_run.py`.

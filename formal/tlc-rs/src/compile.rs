@@ -20,6 +20,10 @@ enum Entry {
     /// a recursive LET operator, lifted to its own frame: the op, and the
     /// enclosing locals it reads, passed ahead of its own arguments
     Lifted(Rc<Def>, u32, Vec<Capture>),
+    /// an operator argument (`op(_, _)` bound to an operator or LAMBDA): a
+    /// definition named as the parameter, and the caller's scope it is
+    /// inlined in
+    Closure(Rc<Def>, Vec<Entry>),
 }
 
 #[derive(Clone)]
@@ -118,8 +122,72 @@ fn bin(op: &str) -> Option<Bin> {
     })
 }
 
+/// `a` with each direct sub-expression replaced by `f` of it (the same
+/// sub-expressions `children` lists).
+pub fn map_children(a: &Ast, f: &mut dyn FnMut(&Ast) -> Ast) -> Ast {
+    use Ast::*;
+    let b = |x: Ast| Box::new(x);
+    let bounds = |bs: &[crate::ast::Bound], f: &mut dyn FnMut(&Ast) -> Ast| -> Vec<crate::ast::Bound> {
+        bs.iter().map(|x| crate::ast::Bound { names: x.names.clone(), tuple: x.tuple, set: f(&x.set) }).collect()
+    };
+    match a {
+        Num(_) | Str(_) | Bool(_) | Ident(_) | At => a.clone(),
+        Lambda(ps, x) => Lambda(ps.clone(), b(f(x))),
+        Apply(n, v) => Apply(n.clone(), v.iter().map(|x| f(x)).collect()),
+        And(v) => And(v.iter().map(|x| f(x)).collect()),
+        Or(v) => Or(v.iter().map(|x| f(x)).collect()),
+        Product(v) => Product(v.iter().map(|x| f(x)).collect()),
+        SetEnum(v) => SetEnum(v.iter().map(|x| f(x)).collect()),
+        Tuple(v) => Tuple(v.iter().map(|x| f(x)).collect()),
+        Temporal(k, v) => Temporal(k, v.iter().map(|x| f(x)).collect()),
+        Prime(x) => Prime(b(f(x))),
+        Unchanged(x) => Unchanged(b(f(x))),
+        Not(x) => Not(b(f(x))),
+        Neg(x) => Neg(b(f(x))),
+        Prefix(k, x) => Prefix(k, b(f(x))),
+        Field(x, n) => Field(b(f(x)), n.clone()),
+        Bin(k, x, y) => Bin(k, b(f(x)), b(f(y))),
+        FuncSet(x, y) => FuncSet(b(f(x)), b(f(y))),
+        BoxAction(x, y) => BoxAction(b(f(x)), b(f(y))),
+        If(c, x, y) => If(b(f(c)), b(f(x)), b(f(y))),
+        Case(arms, o) => Case(arms.iter().map(|(p, e)| (f(p), f(e))).collect(), o.as_deref().map(|x| b(f(x)))),
+        Let(defs, body) => Let(
+            defs.iter()
+                .map(|d| Rc::new(Def { name: d.name.clone(), params: d.params.clone(), op_arity: d.op_arity.clone(), body: f(&d.body) }))
+                .collect(),
+            b(f(body)),
+        ),
+        Quant(k, bs, body) => Quant(*k, bounds(bs, f), b(f(body))),
+        FuncCons(bs, body) => FuncCons(bounds(bs, f), b(f(body))),
+        SetMap(body, bs) => {
+            let body = f(body);
+            SetMap(b(body), bounds(bs, f))
+        }
+        Choose(bd, body) => Choose(Box::new(bounds(std::slice::from_ref(&**bd), f).pop().unwrap()), b(f(body))),
+        SetFilter(bd, body) => SetFilter(Box::new(bounds(std::slice::from_ref(&**bd), f).pop().unwrap()), b(f(body))),
+        Record(fs) => Record(fs.iter().map(|(n, e)| (n.clone(), f(e))).collect()),
+        RecordSet(fs) => RecordSet(fs.iter().map(|(n, e)| (n.clone(), f(e))).collect()),
+        Except(g, ups) => Except(
+            b(f(g)),
+            ups.iter()
+                .map(|(path, e)| {
+                    let path = path
+                        .iter()
+                        .map(|p| match p {
+                            PathEl::Idx(ix) => PathEl::Idx(ix.iter().map(|x| f(x)).collect()),
+                            PathEl::Field(n) => PathEl::Field(n.clone()),
+                        })
+                        .collect();
+                    (path, f(e))
+                })
+                .collect(),
+        ),
+        App(g, args) => App(b(f(g)), args.iter().map(|x| f(x)).collect()),
+    }
+}
+
 /// Every direct sub-expression, including LET definition bodies.
-fn children(a: &Ast) -> Vec<&Ast> {
+pub fn children(a: &Ast) -> Vec<&Ast> {
     use Ast::*;
     match a {
         Num(_) | Str(_) | Bool(_) | Ident(_) | At => vec![],
@@ -498,7 +566,7 @@ impl Compiler {
     fn lookup<'s>(sc: &'s [Entry], n: &str) -> Option<&'s Entry> {
         sc.iter().rev().find(|e| match e {
             Entry::Local(x, _) | Entry::Lazy(x, _, _) => x == n,
-            Entry::LetOp(d, _) | Entry::Lifted(d, _, _) => d.name == n,
+            Entry::LetOp(d, _) | Entry::Lifted(d, _, _) | Entry::Closure(d, _) => d.name == n,
         })
     }
 
@@ -522,7 +590,12 @@ impl Compiler {
         }
         let mut binds = Vec::new();
         let mut inner = outer.to_vec();
-        for (p, a) in d.params.iter().zip(args) {
+        for (i, (p, a)) in d.params.iter().zip(args).enumerate() {
+            let arity = d.op_arity.get(i).copied().unwrap_or(0);
+            if arity > 0 {
+                inner.push(Entry::Closure(Self::closure(p, arity, a)?, sc.clone()));
+                continue;
+            }
             let e = self.expr(a, sc, init)?;
             let s = self.slot();
             binds.push((s, e));
@@ -531,6 +604,128 @@ impl Compiler {
         let body = f(self, &d.body, &mut inner, init);
         self.inline_depth -= 1;
         Ok((binds.into(), body?))
+    }
+
+    /// The definition an operator argument stands for: a LAMBDA's, or one
+    /// applying the named operator (resolved in the caller's scope).
+    fn closure(param: &str, arity: usize, a: &Ast) -> R<Rc<Def>> {
+        Ok(Rc::new(match a {
+            Ast::Lambda(ps, body) if ps.len() == arity => {
+                Def { name: param.to_string(), params: ps.clone(), op_arity: vec![0; arity], body: (**body).clone() }
+            }
+            Ast::Ident(op) => {
+                let ps: Vec<String> = (0..arity).map(|i| format!("$p{i}")).collect();
+                let body = Ast::Apply(op.clone(), ps.iter().map(|p| Ast::Ident(p.clone())).collect());
+                Def { name: param.to_string(), params: ps, op_arity: vec![0; arity], body }
+            }
+            _ => return Err(format!("the argument for operator parameter {param} must be an operator or a LAMBDA of {arity} parameters")),
+        }))
+    }
+
+    /// Does this set expression involve a set TLC-style evaluation cannot
+    /// enumerate (Nat, Int, STRING, Seq(S))?
+    fn infinite(&self, a: &Ast, depth: u32) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        match a {
+            Ast::Ident(n) if matches!(n.as_str(), "Nat" | "Int" | "Real" | "STRING") => true,
+            Ast::Ident(n) => self.defs.get(n).is_some_and(|d| d.params.is_empty() && self.infinite(&d.body.clone(), depth + 1)),
+            Ast::Apply(n, _) if n == "Seq" && !self.subst.contains_key(n) => true,
+            Ast::Apply(n, _) if self.subst.contains_key(n) => {
+                let to = self.subst[n].clone();
+                self.defs.get(&to).is_some_and(|d| self.infinite(&d.body.clone(), depth + 1))
+            }
+            Ast::SetFilter(b, _) => self.infinite(&b.set, depth + 1),
+            Ast::Bin("\\" | "\\cup" | "\\cap", l, r) => self.infinite(l, depth + 1) || self.infinite(r, depth + 1),
+            Ast::FuncSet(d, r) => self.infinite(d, depth + 1) || self.infinite(r, depth + 1),
+            Ast::RecordSet(fs) => fs.iter().any(|(_, e)| self.infinite(e, depth + 1)),
+            Ast::Prefix("UNION", x) => matches!(&**x, Ast::SetEnum(v) if v.iter().any(|e| self.infinite(e, depth + 1))),
+            _ => false,
+        }
+    }
+
+    /// `x \in set` from the set's structure, never building the set:
+    /// `{y \in S : P}` is `x \in S /\ P(x)`, `A \ B` is `x \in A /\ x \notin B`,
+    /// `\cup`/`\cap` are `\/`/`/\`, `[D -> R]` is "DOMAIN x = D and every
+    /// value in R", a record set likewise per field, and a set-valued
+    /// definition is looked through. Anything else is tested as a value
+    /// (Nat, Int and Seq(S) test membership without enumerating).
+    fn member(&mut self, x: &Ast, set: &Ast, sc: &mut Vec<Entry>, init: bool, depth: u32) -> R<Expr> {
+        let bx = |e: Expr| Box::new(e);
+        let plain = |me: &mut Self, sc: &mut Vec<Entry>| -> R<Expr> {
+            Ok(Expr::Bin(Bin::In, bx(me.expr(x, sc, init)?), bx(me.expr(set, sc, init)?)))
+        };
+        if depth > 8 {
+            return plain(self, sc);
+        }
+        // x evaluated once, into a slot the parts below read
+        let with_x = |me: &mut Self, sc: &mut Vec<Entry>, f: &mut dyn FnMut(&mut Self, &mut Vec<Entry>, &Ast) -> R<Expr>| -> R<Expr> {
+            let xe = me.expr(x, sc, init)?;
+            let slot = me.slot();
+            let name = format!("$m{slot}");
+            sc.push(Entry::Local(name.clone(), slot));
+            let body = f(me, sc, &Ast::Ident(name));
+            sc.pop();
+            Ok(Expr::Let(Box::new([(slot, xe)]), bx(body?)))
+        };
+        match set {
+            Ast::SetFilter(b, p) if !b.tuple && b.names.len() == 1 => with_x(self, sc, &mut |me, sc, xv| {
+                let inner = me.member(xv, &b.set, sc, init, depth + 1)?;
+                let Some(Entry::Local(_, slot)) = Self::lookup(sc, match xv { Ast::Ident(n) => n, _ => unreachable!() }).cloned() else { unreachable!() };
+                sc.push(Entry::Local(b.names[0].clone(), slot));
+                let pe = me.expr(p, sc, init);
+                sc.pop();
+                Ok(Expr::And(Box::new([inner, pe?])))
+            }),
+            Ast::Bin(op @ ("\\" | "\\cup" | "\\cap"), l, r) => with_x(self, sc, &mut |me, sc, xv| {
+                let a = me.member(xv, l, sc, init, depth + 1)?;
+                let b = me.member(xv, r, sc, init, depth + 1)?;
+                Ok(match *op {
+                    "\\" => Expr::And(Box::new([a, Expr::Not(bx(b))])),
+                    "\\cup" => Expr::Or(Box::new([a, b])),
+                    _ => Expr::And(Box::new([a, b])),
+                })
+            }),
+            Ast::FuncSet(d, r) if self.infinite(r, depth + 1) => with_x(self, sc, &mut |me, sc, xv| {
+                let dom = Expr::Bin(Bin::Eq, bx(Expr::Un(Un::Domain, bx(me.expr(xv, sc, init)?))), bx(me.expr(d, sc, init)?));
+                let k = format!("$k{}", me.next_slot);
+                let each = Ast::Quant(
+                    true,
+                    vec![crate::ast::Bound { names: vec![k.clone()], tuple: false, set: (**d).clone() }],
+                    Box::new(Ast::Bin("\\in", Box::new(Ast::App(Box::new(xv.clone()), vec![Ast::Ident(k)])), r.clone())),
+                );
+                Ok(Expr::And(Box::new([dom, me.expr(&each, sc, init)?])))
+            }),
+            Ast::RecordSet(fs) if fs.iter().any(|(_, e)| self.infinite(e, depth + 1)) => with_x(self, sc, &mut |me, sc, xv| {
+                let names = Ast::SetEnum(fs.iter().map(|(f, _)| Ast::Str(f.clone())).collect());
+                let mut conj = vec![Expr::Bin(Bin::Eq, bx(Expr::Un(Un::Domain, bx(me.expr(xv, sc, init)?))), bx(me.expr(&names, sc, init)?))];
+                for (f, e) in fs {
+                    conj.push(me.member(&Ast::Field(Box::new(xv.clone()), f.clone()), e, sc, init, depth + 1)?);
+                }
+                Ok(Expr::And(conj.into()))
+            }),
+            // `UNION {A, B, ...}`: in any of them
+            Ast::Prefix("UNION", u) if matches!(&**u, Ast::SetEnum(_)) => with_x(self, sc, &mut |me, sc, xv| {
+                let Ast::SetEnum(v) = &**u else { unreachable!() };
+                let parts = v.iter().map(|e| me.member(xv, e, sc, init, depth + 1)).collect::<R<Vec<_>>>()?;
+                Ok(Expr::Or(parts.into()))
+            }),
+            // a set-valued definition: its body, in the global scope
+            Ast::Ident(n) if Self::lookup(sc, n).is_none() && self.defs.get(n).is_some_and(|d| d.params.is_empty()) && !self.consts.contains_key(n) => {
+                let body = self.defs[n].body.clone();
+                if !self.infinite(&body, depth + 1) {
+                    return plain(self, sc);
+                }
+                with_x(self, sc, &mut |me, sc, xv| {
+                    let Ast::Ident(xn) = xv else { unreachable!() };
+                    let entry = Self::lookup(sc, xn).cloned().unwrap();
+                    let mut global = vec![entry];
+                    me.member(xv, &body, &mut global, init, depth + 1)
+                })
+            }
+            _ => plain(self, sc),
+        }
     }
 
     // ---- actions --------------------------------------------------------
@@ -763,14 +958,23 @@ impl Compiler {
                         sc.pop();
                         b?
                     }
-                    Ast::Ident(op) if self.defs.get(op).is_some_and(|d| d.params.len() == 1) => {
-                        Expr::Call(self.op_index(op), Box::new([Expr::Local(slot)]))
+                    Ast::Ident(op) if Self::lookup(sc, op).is_some() || self.defs.get(op).is_some_and(|d| d.params.len() == 1) => {
+                        sc.push(Entry::Local("$sel".into(), slot));
+                        let b = self.expr(&Ast::Apply(op.clone(), vec![Ast::Ident("$sel".into())]), sc, init);
+                        sc.pop();
+                        b?
                     }
                     _ => return Err("SelectSeq wants a one-parameter LAMBDA or operator".into()),
                 };
                 Expr::SelectSeq(bx(seq), slot, bx(pred))
             }
             Ast::Lambda(..) => return Err("LAMBDA outside SelectSeq is not supported".into()),
+            // a cfg override of an operator (`Seq <- BoundedSeq`) applies to
+            // its applications too
+            Ast::Apply(n, args) if Self::lookup(sc, n).is_none() && self.subst.contains_key(n) => {
+                let to = self.subst[n].clone();
+                return self.expr(&Ast::Apply(to, args.clone()), sc, init);
+            }
             Ast::Apply(n, args) => {
                 if let Some(Entry::Lifted(_, idx, caps)) = Self::lookup(sc, n).cloned() {
                     self.call_lifted(idx, &caps, args, sc, init)?
@@ -778,10 +982,18 @@ impl Compiler {
                     let outer = sc[..len].to_vec();
                     let (binds, body) = self.inline(&d, &outer, args, sc, init, Self::expr)?;
                     Expr::Let(binds, bx(body))
+                } else if let Some(Entry::Closure(d, cap)) = Self::lookup(sc, n).cloned() {
+                    let (binds, body) = self.inline(&d, &cap, args, sc, init, Self::expr)?;
+                    Expr::Let(binds, bx(body))
                 } else if self.defs.contains_key(n) {
                     let d = self.defs[n].clone();
                     if d.params.len() != args.len() {
                         return Err(format!("{n} takes {} arguments", d.params.len()));
+                    }
+                    // an operator taking operators is inlined at each call
+                    if d.op_arity.iter().any(|&a| a > 0) {
+                        let (binds, body) = self.inline(&d, &[], args, sc, init, Self::expr)?;
+                        return Ok(Expr::Let(binds, bx(body)));
                     }
                     // as for a bare name: in init (primed) mode a state-level
                     // operator must see the primed variables
@@ -838,6 +1050,16 @@ impl Compiler {
             Ast::And(v) => Expr::And(v.iter().map(|x| self.expr(x, sc, init)).collect::<R<_>>()?),
             Ast::Or(v) => Expr::Or(v.iter().map(|x| self.expr(x, sc, init)).collect::<R<_>>()?),
             Ast::Bin("=>", l, r) => Expr::Implies(bx(self.expr(l, sc, init)?), bx(self.expr(r, sc, init)?)),
+            // `x \in S` for a set that cannot be enumerated: decided from S's
+            // structure (see `member`)
+            Ast::Bin(op @ ("\\in" | "\\notin"), x, set) if self.infinite(set, 0) => {
+                let m = self.member(x, set, sc, init, 0)?;
+                return Ok(if *op == "\\in" { m } else { Expr::Not(bx(m)) });
+            }
+            // a user-defined infix operator (`a \prec b == ...`)
+            Ast::Bin(op, l, r) if bin(op).is_none() && (self.defs.contains_key(*op) || Self::lookup(sc, op).is_some()) => {
+                return self.expr(&Ast::Apply(op.to_string(), vec![(**l).clone(), (**r).clone()]), sc, init);
+            }
             Ast::Bin(op, l, r) => {
                 let b = bin(op).ok_or(format!("unsupported operator {op}"))?;
                 Expr::Bin(b, bx(self.expr(l, sc, init)?), bx(self.expr(r, sc, init)?))
@@ -924,6 +1146,18 @@ impl Compiler {
                 }
                 Expr::Except(bx(base), us.into())
             }
+            // `f[a]` for a function definition `f[x \in S] == e`: its
+            // application operator, evaluating e for this argument only
+            Ast::App(f, args)
+                if matches!(&**f, Ast::Ident(n) if {
+                    let app = format!("{n}!app");
+                    Self::lookup(sc, &app).is_some() || (Self::lookup(sc, n).is_none() && self.defs.contains_key(&app))
+                }) =>
+            {
+                let Ast::Ident(n) = &**f else { unreachable!() };
+                let arg = if args.len() == 1 { args[0].clone() } else { Ast::Tuple(args.clone()) };
+                return self.expr(&Ast::Apply(format!("{n}!app"), vec![arg]), sc, init);
+            }
             Ast::App(f, args) => Expr::App(bx(self.expr(f, sc, init)?), bx(self.index_arg(args, sc, init)?)),
             Ast::Field(r, f) => {
                 let id = self.intern(f);
@@ -954,6 +1188,7 @@ impl Compiler {
                 return Ok(Expr::Let(binds, Box::new(body)));
             }
             Some(Entry::Lifted(_, idx, caps)) => return self.call_lifted(idx, &caps, &[], sc, init),
+            Some(Entry::Closure(..)) => return Err(format!("operator parameter {n} used without its arguments")),
             None => {}
         }
         if let Some(&v) = self.vars.get(n) {
@@ -988,6 +1223,9 @@ impl Compiler {
         }
         if let Some(v) = is_builtin_value(n) {
             return Ok(Expr::Const(v));
+        }
+        if n == crate::parser::UNBOUNDED {
+            return Err("an unbounded CHOOSE (CHOOSE x : P) cannot be evaluated; TLC cannot either (override the definition in the cfg)".into());
         }
         Err(format!("unknown identifier {n}"))
     }

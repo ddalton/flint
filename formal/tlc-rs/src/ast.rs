@@ -61,6 +61,8 @@ pub struct Bound {
 pub struct Def {
     pub name: String,
     pub params: Vec<String>,
+    /// per parameter: 0, or the arity of an operator parameter (`op(_, _)`)
+    pub op_arity: Vec<usize>,
     pub body: Ast,
 }
 

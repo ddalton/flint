@@ -25,6 +25,8 @@ pub struct Token {
 /// Symbolic operators, longest first so a prefix never wins.
 const SYMBOLS: &[&str] = &[
     "<=>", "|->", "...", "==", "=>", "=<", "<=", ">=", "/=", "/\\", "<<", ">>", "->", "<-", "[]",
+    // user-definable infix operators
+    "^^", "++", "**", "//", "&&", "%%", "##", "$$",
     "<>", "~>", "..", "::", ":>", "@@", "=", "#", "<", ">", ":", "@", "'", "(", ")", "[", "]", "{",
     "}", ",", ".", "+", "-", "*", "^", "%", "~", "!", "|", "&", "$", "?",
 ];
@@ -52,8 +54,53 @@ fn backslash_word(w: &str) -> Option<&'static str> {
         "equiv" => "<=>",
         "leq" => "<=",
         "geq" => ">=",
+        // user-definable infix operators
+        "prec" => "\\prec",
+        "preceq" => "\\preceq",
+        "succ" => "\\succ",
+        "succeq" => "\\succeq",
+        "ll" => "\\ll",
+        "gg" => "\\gg",
+        "sqsubset" => "\\sqsubset",
+        "sqsubseteq" => "\\sqsubseteq",
+        "sqsupset" => "\\sqsupset",
+        "sqsupseteq" => "\\sqsupseteq",
+        "sim" => "\\sim",
+        "simeq" => "\\simeq",
+        "approx" => "\\approx",
+        "cong" => "\\cong",
+        "doteq" => "\\doteq",
+        "oplus" => "\\oplus",
+        "ominus" => "\\ominus",
+        "otimes" => "\\otimes",
+        "odot" => "\\odot",
+        "oslash" => "\\oslash",
+        "uplus" => "\\uplus",
+        "sqcap" => "\\sqcap",
+        "sqcup" => "\\sqcup",
+        "star" => "\\star",
+        "bullet" => "\\bullet",
         _ => return None,
     })
+}
+
+/// A module file: only the text from the `---- MODULE` line to the first
+/// `====` line after it is TLA+; prose before and after is ignored, as by
+/// SANY. The rest is blanked so line numbers stay true.
+pub fn lex_module(src: &str) -> Result<Vec<Token>, String> {
+    let lines: Vec<&str> = src.split('\n').collect();
+    let is_head = |l: &str| {
+        let t = l.trim_start();
+        t.starts_with("----") && t.trim_start_matches('-').trim_start().starts_with("MODULE")
+    };
+    let Some(start) = lines.iter().position(|l| is_head(l)) else { return lex(src) };
+    let end = lines.iter().skip(start + 1).position(|l| l.trim_start().starts_with("====")).map(|k| k + start + 1);
+    let kept: Vec<&str> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| if i < start || end.is_some_and(|e| i > e) { "" } else { *l })
+        .collect();
+    lex(&kept.join("\n"))
 }
 
 pub fn lex(src: &str) -> Result<Vec<Token>, String> {

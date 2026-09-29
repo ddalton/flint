@@ -45,7 +45,7 @@ impl Rw {
         bound.extend(d.params.iter().cloned());
         let body = self.ast(&d.body, bound);
         bound.truncate(n);
-        Rc::new(Def { name, params: d.params.clone(), body })
+        Rc::new(Def { name, params: d.params.clone(), op_arity: d.op_arity.clone(), body })
     }
 
     fn bound(&self, b: &Bound, bound: &mut Vec<String>) -> Bound {
@@ -163,7 +163,7 @@ pub fn expand(inst: &Instance, group: &[Module]) -> Result<Expanded, String> {
             return Err(format!("INSTANCE {}: {x} is not a constant or variable of {}", inst.module, inst.module));
         }
         let name = format!("{}!__sub_{x}", if inst.name.is_empty() { &inst.module } else { &inst.name });
-        defs.push(Rc::new(Def { name: name.clone(), params: vec![], body: e.clone() }));
+        defs.push(Rc::new(Def { name: name.clone(), params: vec![], op_arity: vec![], body: e.clone() }));
         subs.insert(x.clone(), name);
     }
     let rw = Rw { prefix: prefix.clone(), defs: group.iter().flat_map(|m| m.defs.iter().map(|d| d.name.clone())).collect(), subs };

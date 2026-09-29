@@ -22,7 +22,12 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
-const STANDARD: &[&str] = &["Naturals", "Integers", "Sequences", "FiniteSets", "TLC"];
+/// Built in. TLAPS and the proof libraries that extend it define only
+/// proof-checker pseudo-operators, which a model never evaluates.
+const STANDARD: &[&str] = &[
+    "Naturals", "Integers", "Sequences", "FiniteSets", "TLC", "TLAPS", "NaturalsInduction", "WellFoundedInduction",
+    "FiniteSetTheorems", "SequenceTheorems", "SequencesExtTheorems", "FunctionTheorems",
+];
 
 /// What a generated checker brings: the hash of the sources it was
 /// generated from, and the constructor for its engine.
@@ -65,7 +70,7 @@ fn load(
     let path = dir.join(format!("{name}.tla"));
     let src = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     fnv(hash, src.as_bytes());
-    let toks = lexer::lex(&src)?;
+    let toks = lexer::lex_module(&src).map_err(|e| format!("{}: {e}", path.display()))?;
     order.idents.extend(toks.iter().filter_map(|t| match &t.tok {
         lexer::Tok::Ident(s) => Some(s.clone()),
         _ => None,

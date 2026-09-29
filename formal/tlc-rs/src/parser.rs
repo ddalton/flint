@@ -31,8 +31,83 @@ fn infix(op: &str) -> Option<(u8, bool)> {
         "+" | "-" | "\\X" => (10, false),
         "*" | "\\div" | "%" | "\\o" => (13, false),
         "^" => (14, true),
+        // user-definable (TLA+'s precedences)
+        "\\prec" | "\\preceq" | "\\succ" | "\\succeq" | "\\ll" | "\\gg" | "\\sqsubset" | "\\sqsubseteq"
+        | "\\sqsupset" | "\\sqsupseteq" | "\\sim" | "\\simeq" | "\\approx" | "\\cong" | "\\doteq" => (5, false),
+        "##" | "$$" | "\\uplus" | "\\sqcap" | "\\sqcup" => (9, false),
+        "++" | "\\oplus" | "%%" => (10, false),
+        "\\ominus" => (11, false),
+        "&" | "&&" | "**" | "//" | "\\otimes" | "\\odot" | "\\oslash" | "\\star" | "\\bullet" => (13, false),
+        "^^" => (14, false),
         _ => return None,
     })
+}
+
+/// The set of an unbounded CHOOSE (not a name a spec can write).
+pub const UNBOUNDED: &str = "$unbounded";
+
+/// `f[x \in S, y \in T] == e`. Not recursive: `f == [x \in S, y \in T |-> e]`.
+/// Recursive (e mentions f), TLC evaluates it lazily, one application at
+/// a time, so it becomes an operator `f!app(arg)` (arg the argument, a
+/// tuple for several bounds), applications `f[a]` in e become
+/// `f!app(a)`, and `f` itself the function built from it.
+fn function_def(name: String, bounds: Vec<Bound>, body: Ast) -> Vec<Rc<Def>> {
+    fn mentions(a: &Ast, n: &str) -> bool {
+        match a {
+            Ast::Ident(x) | Ast::Apply(x, _) if x == n => true,
+            _ => crate::compile::children(a).into_iter().any(|c| mentions(c, n)),
+        }
+    }
+    let arg = |bs: &[Bound]| -> Ast {
+        let parts: Vec<Ast> = bs
+            .iter()
+            .map(|b| if b.tuple { Ast::Tuple(b.names.iter().map(|n| Ast::Ident(n.clone())).collect()) } else { Ast::Ident(b.names[0].clone()) })
+            .collect();
+        if parts.len() == 1 { parts.into_iter().next().unwrap() } else { Ast::Tuple(parts) }
+    };
+    let recursive = mentions(&body, &name);
+    let app = format!("{name}!app");
+    fn rewrite(a: &Ast, f: &str, app: &str, whole: &Ast) -> Ast {
+        match a {
+            Ast::App(g, args) if matches!(&**g, Ast::Ident(x) if x == f) => {
+                let args: Vec<Ast> = args.iter().map(|x| rewrite(x, f, app, whole)).collect();
+                let arg = if args.len() == 1 { args.into_iter().next().unwrap() } else { Ast::Tuple(args) };
+                Ast::Apply(app.to_string(), vec![arg])
+            }
+            Ast::Ident(x) if x == f => whole.clone(),
+            _ => crate::compile::map_children(a, &mut |c| rewrite(c, f, app, whole)),
+        }
+    }
+    let whole = Ast::FuncCons(bounds.clone(), Box::new(Ast::Apply(app.clone(), vec![arg(&bounds)])));
+    // destructure the argument into the bound names
+    let a = Ast::Ident("$arg".into());
+    let nth = |v: &Ast, i: usize| Ast::App(Box::new(v.clone()), vec![Ast::Num(i as i64 + 1)]);
+    let mut lets = Vec::new();
+    for (j, b) in bounds.iter().enumerate() {
+        let part = if bounds.len() == 1 { a.clone() } else { nth(&a, j) };
+        if b.tuple {
+            for (i, n) in b.names.iter().enumerate() {
+                lets.push(Rc::new(Def { name: n.clone(), params: vec![], op_arity: vec![], body: nth(&part, i) }));
+            }
+        } else {
+            lets.push(Rc::new(Def { name: b.names[0].clone(), params: vec![], op_arity: vec![], body: part }));
+        }
+    }
+    let body = if recursive { rewrite(&body, &name, &app, &whole) } else { body };
+    // an argument outside the domain is an error, as in TLC (a CASE with
+    // no arm that matches)
+    let in_domain = Ast::And(
+        bounds
+            .iter()
+            .enumerate()
+            .map(|(j, b)| Ast::Bin("\\in", Box::new(if bounds.len() == 1 { a.clone() } else { nth(&a, j) }), Box::new(b.set.clone())))
+            .collect(),
+    );
+    let app_body = Ast::Case(vec![(in_domain, Ast::Let(lets, Box::new(body)))], None);
+    vec![
+        Rc::new(Def { name: app.clone(), params: vec!["$arg".into()], op_arity: vec![0], body: app_body }),
+        Rc::new(Def { name, params: vec![], op_arity: vec![], body: whole }),
+    ]
 }
 
 const KEYWORDS: &[&str] = &[
@@ -159,14 +234,26 @@ impl Parser {
                         m.decls.extend(vs.iter().map(|v| sym(v, true)));
                         m.variables.extend(vs);
                     }
-                    "ASSUME" => {
+                    "ASSUME" | "ASSUMPTION" | "AXIOM" => {
                         self.bump();
-                        m.assumes.push(self.expr(0)?);
+                        // `ASSUME Name == e`: an assumption that is also a
+                        // definition of Name (SANY's theorem node)
+                        let mut name = None;
+                        if matches!(self.peek(), Tok::Ident(_)) && matches!(self.peek_at(1), Tok::Op("==")) {
+                            name = Some(self.ident()?);
+                            self.bump();
+                        }
+                        let e = self.expr(0)?;
+                        if let Some(n) = name {
+                            m.decls.push(sym(&n, false));
+                            m.defs.push(Rc::new(Def { name: n, params: vec![], op_arity: vec![], body: e.clone() }));
+                        }
+                        m.assumes.push(e);
                     }
-                    "THEOREM" => {
-                        self.bump();
-                        self.expr(0)?;
-                    }
+                    // Theorems and their proofs, and proof commands, are
+                    // for TLAPS; TLC ignores them, and so does tlc-rs.
+                    "THEOREM" | "LEMMA" | "PROPOSITION" | "COROLLARY" | "USE" | "HIDE" | "PROOF" | "BY" | "OBVIOUS"
+                    | "OMITTED" | "QED" => self.skip_unit(),
                     "RECURSIVE" => {
                         self.bump();
                         for r in self.decl_list()? {
@@ -192,15 +279,75 @@ impl Parser {
                         m.instances.push(inst);
                     }
                     _ => {
-                        let d = self.def()?;
-                        m.decls.push(sym(&d.name, false));
-                        m.defs.push(d);
+                        let ds = self.defs()?;
+                        m.decls.push(sym(&ds.last().unwrap().name, false));
+                        m.defs.extend(ds);
                     }
                 },
+                // a proof step (`<1>2. ...`) left of any theorem's indent
+                Tok::Op("<") if self.line_start() => self.skip_unit(),
                 _ => return self.err("unexpected token at module level"),
             }
         }
         Ok(m)
+    }
+
+    fn line_start(&self) -> bool {
+        self.pos == 0 || self.toks[self.pos - 1].line != self.toks[self.pos].line
+    }
+
+    /// Does a module-level unit start here: a declaration keyword, or a
+    /// definition `X ==`, `F(..) ==`, `f[..] ==`, `a op b ==`?
+    fn unit_start(&self) -> bool {
+        let at = |k: usize| &self.toks[(self.pos + k).min(self.toks.len() - 1)].tok;
+        match at(0) {
+            Tok::Sep | Tok::End | Tok::Eof => true,
+            Tok::Ident(s) => {
+                if matches!(
+                    s.as_str(),
+                    "VARIABLE" | "VARIABLES" | "CONSTANT" | "CONSTANTS" | "ASSUME" | "ASSUMPTION" | "AXIOM" | "THEOREM"
+                        | "LEMMA" | "PROPOSITION" | "COROLLARY" | "INSTANCE" | "LOCAL" | "RECURSIVE" | "EXTENDS"
+                ) {
+                    return true;
+                }
+                match at(1) {
+                    Tok::Op("==") => true,
+                    Tok::Op(o @ ("(" | "[")) => {
+                        let close = if *o == "(" { ")" } else { "]" };
+                        let mut depth = 0;
+                        for k in 1..200 {
+                            match at(k) {
+                                Tok::Op(x) if *x == *o => depth += 1,
+                                Tok::Op(x) if *x == close => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        return matches!(at(k + 1), Tok::Op("=="));
+                                    }
+                                }
+                                Tok::Eof | Tok::End => return false,
+                                _ => {}
+                            }
+                        }
+                        false
+                    }
+                    Tok::Op(_) => matches!((at(2), at(3)), (Tok::Ident(_), Tok::Op("=="))),
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Skips a theorem (statement and proof) or a proof command: up to the
+    /// next line that starts a module-level unit.
+    fn skip_unit(&mut self) {
+        self.bump();
+        while !(self.line_start() && self.unit_start()) {
+            if matches!(self.raw().tok, Tok::Eof) {
+                return;
+            }
+            self.bump();
+        }
     }
 
     /// After `INSTANCE`: `M [WITH x <- e, ...]`.
@@ -249,17 +396,68 @@ impl Parser {
         }
     }
 
-    fn def(&mut self) -> R<Rc<Def>> {
+    /// A definition: `F == e`, `F(x, op(_, _)) == e`, `a \prec b == e`,
+    /// or a function `f[x \in S, ...] == e`, which is two when recursive
+    /// (see `function_def`).
+    fn defs(&mut self) -> R<Vec<Rc<Def>>> {
+        // infix: `a op b == e`
+        if let (Tok::Ident(a), Tok::Op(op), Tok::Ident(b), Tok::Op("==")) =
+            (self.peek().clone(), self.peek_at(1).clone(), self.peek_at(2).clone(), self.peek_at(3).clone())
+        {
+            if infix(op).is_some() {
+                for _ in 0..4 {
+                    self.bump();
+                }
+                let body = self.expr(0)?;
+                return Ok(vec![Rc::new(Def { name: op.to_string(), params: vec![a, b], op_arity: vec![0, 0], body })]);
+            }
+        }
         let name = self.ident()?;
-        let mut params = Vec::new();
+        if self.is_op("[") {
+            self.bump();
+            let bounds = self.bounds()?;
+            self.expect_op("]")?;
+            self.expect_op("==")?;
+            let body = self.expr(0)?;
+            return Ok(function_def(name, bounds, body));
+        }
+        let (mut params, mut op_arity) = (Vec::new(), Vec::new());
         if self.is_op("(") {
             self.bump();
-            params = self.ident_list()?;
+            loop {
+                params.push(self.ident()?);
+                // an operator parameter: `op(_, _)`
+                let mut arity = 0;
+                if self.is_op("(") {
+                    self.bump();
+                    loop {
+                        match self.peek() {
+                            Tok::Ident(u) if u == "_" => {
+                                self.bump();
+                                arity += 1;
+                            }
+                            _ => return self.err("expected `_` in an operator parameter"),
+                        }
+                        if self.is_op(",") {
+                            self.bump();
+                        } else {
+                            break;
+                        }
+                    }
+                    self.expect_op(")")?;
+                }
+                op_arity.push(arity);
+                if self.is_op(",") {
+                    self.bump();
+                } else {
+                    break;
+                }
+            }
             self.expect_op(")")?;
         }
         self.expect_op("==")?;
         let body = self.expr(0)?;
-        Ok(Rc::new(Def { name, params, body }))
+        Ok(vec![Rc::new(Def { name, params, op_arity, body })])
     }
 
     // ---- expressions -------------------------------------------------------
@@ -322,6 +520,11 @@ impl Parser {
     }
 
     fn prefix(&mut self) -> R<Ast> {
+        // a label (`Name::` or `Name(a, b)::`) names the expression after it
+        if matches!(self.peek(), Tok::Ident(_)) && matches!(self.peek_at(1), Tok::Op("::")) {
+            self.bump();
+            self.bump();
+        }
         let t = self.peek().clone();
         let e = match t {
             Tok::Op("/\\") => return self.junction("/\\"),
@@ -386,7 +589,7 @@ impl Parser {
                             self.decl_list()?;
                             continue;
                         }
-                        defs.push(self.def()?);
+                        defs.extend(self.defs()?);
                     }
                     self.bump();
                     let body = self.expr(0)?;
@@ -394,6 +597,16 @@ impl Parser {
                 }
                 "CHOOSE" => {
                     self.bump();
+                    // unbounded: `CHOOSE x : P`. TLC cannot evaluate it either;
+                    // it is fine as long as nothing evaluates it (a cfg
+                    // usually overrides such a definition)
+                    if matches!(self.peek(), Tok::Ident(_)) && matches!(self.peek_at(1), Tok::Op(":")) {
+                        let x = self.ident()?;
+                        self.bump();
+                        let body = self.expr(0)?;
+                        let b = Bound { names: vec![x], tuple: false, set: Ast::Ident(UNBOUNDED.into()) };
+                        return Ok(Ast::Choose(Box::new(b), Box::new(body)));
+                    }
                     let mut b = self.bounds()?;
                     self.expect_op(":")?;
                     let body = self.expr(0)?;
@@ -766,11 +979,22 @@ pub fn parse_cfg(toks: Vec<Token>) -> R<Cfg> {
                 p.bump();
                 match section.as_str() {
                     "CONSTANT" | "CONSTANTS" => {
+                        // `<-[M]` / `= [M]v`: scoped to module M; tlc-rs
+                        // flattens modules, so the scope is dropped
+                        let skip_scope = |p: &mut Parser| {
+                            if p.is_op("[") && matches!(p.peek_at(1), Tok::Ident(_)) && matches!(p.peek_at(2), Tok::Op("]")) {
+                                p.bump();
+                                p.bump();
+                                p.bump();
+                            }
+                        };
                         if p.is_op("<-") {
                             p.bump();
+                            skip_scope(&mut p);
                             c.substitutions.push((name, p.ident()?));
                         } else {
                             p.expect_op("=")?;
+                            skip_scope(&mut p);
                             c.constants.push((name, cfg_val(&mut p)?));
                         }
                     }
