@@ -1,0 +1,5 @@
+Q2: yes: the proxy saw the host's address (172.18.0.1), and the cert+address rule matched
+Q1: yes: the gateway carries RPC-with-TLS to the bypassed proxy as plain TCP (an mTLS mount through it works)
+Q5: yes: tlshd presented b's certificate without a restart
+Q3: yes: the probe reaches the hub itself (REJECT in its netns made it NotReady)
+Q4: yes: a ztunnel restart reset the client's connection when captured (2→4) and not with the bypass — the bypass matters

@@ -360,9 +360,37 @@ nfsProxy:
       memory: 1Gi
   nodeSelector: {}
   tolerations: []
-  # Under Istio ambient: ambient.istio.io/bypass-inbound-capture: "true"
-  # (design §6a — the proxy terminates its own clients).
   podAnnotations: {}
+
+  # Istio AMBIENT (design §6a). The mesh cannot identify an NFS client —
+  # the kernel mounts from the node's namespace, remote clusters are
+  # outside it — so clients prove who they are with `tls` above. What the
+  # mesh does here: the PROXY's calls to the hubs carry its SPIFFE
+  # identity, and the hubs accept no one else.
+  istio:
+    enabled: false
+    # The mesh trust domain (`meshConfig.trustDomain`).
+    trustDomain: cluster.local
+    # Keep client connections OUT of ztunnel on the proxy pod
+    # (ambient.istio.io/bypass-inbound-capture): the payload is already
+    # TLS, and a ztunnel restart would reset every client at once. The
+    # proxy's outbound to the hubs stays in the mesh.
+    bypassInboundCapture: true
+    # In every networkPolicy.hubNamespaces: PeerAuthentication STRICT on
+    # the hub pods and an L4 AuthorizationPolicy (ztunnel-enforced, no
+    # waypoint): NFS from the proxy's ServiceAccount only; the hub API
+    # ports from the operator's (and the gateway's, when enabled). The
+    # hub NetworkPolicy also admits HBONE (15008) from those pods.
+    hubPolicy: true
+    # Path B: a Gateway API TCPRoute from an Istio ingress Gateway to the
+    # proxy. RPC-with-TLS is STARTTLS-shaped (the first bytes are an RPC
+    # call, not a ClientHello), so the listener must be protocol TCP —
+    # nothing can route it by SNI. The route lives in this namespace; the
+    # Gateway's listener must allow routes from it.
+    # Needs the Gateway API CRDs >= v1.6 (TCPRoute v1).
+    tcpRoute:
+      enabled: false
+      parentRef: {}          # {name: ..., namespace: ..., sectionName: ...}
 
 rbac:
   # Create the ClusterRole/Binding. The operator needs cluster scope:

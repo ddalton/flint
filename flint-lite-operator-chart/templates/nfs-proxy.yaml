@@ -181,6 +181,9 @@ spec:
         {{- include "flint-lite-operator.nfsProxySelectorLabels" . | nindent 8 }}
       annotations:
         checksum/config: {{ .Values.nfsProxy | toJson | sha256sum }}
+        {{- if and .Values.nfsProxy.istio.enabled .Values.nfsProxy.istio.bypassInboundCapture }}
+        ambient.istio.io/bypass-inbound-capture: "true"
+        {{- end }}
         {{- with .Values.nfsProxy.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

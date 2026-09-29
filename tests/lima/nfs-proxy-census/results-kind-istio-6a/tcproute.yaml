@@ -1,0 +1,65 @@
+apiVersion: v1
+items:
+- apiVersion: gateway.networking.k8s.io/v1
+  kind: TCPRoute
+  metadata:
+    annotations:
+      meta.helm.sh/release-name: flint-lite-operator
+      meta.helm.sh/release-namespace: flint-system
+    creationTimestamp: "2026-09-29T23:55:25Z"
+    generation: 1
+    labels:
+      app.kubernetes.io/instance: flint-lite-operator
+      app.kubernetes.io/managed-by: Helm
+      app.kubernetes.io/name: flint-lite-operator-nfs-proxy
+      app.kubernetes.io/version: 1.56.0
+      helm.sh/chart: flint-lite-operator-0.4.0
+    name: flint-lite-operator-nfs-proxy
+    namespace: flint-system
+    resourceVersion: "1112"
+    uid: 0ee8b689-2659-4561-af34-72cff153437f
+  spec:
+    parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: nfs-gw
+      namespace: istio-ingress
+      sectionName: nfs
+    rules:
+    - backendRefs:
+      - group: ""
+        kind: Service
+        name: flint-lite-operator-nfs-proxy
+        port: 2049
+        weight: 1
+  status:
+    parents:
+    - conditions:
+      - lastTransitionTime: "2026-09-29T23:55:25Z"
+        message: Route was valid
+        observedGeneration: 1
+        reason: Accepted
+        status: "True"
+        type: Accepted
+      - lastTransitionTime: "2026-09-29T23:55:25Z"
+        message: All references resolved
+        observedGeneration: 1
+        reason: ResolvedRefs
+        status: "True"
+        type: ResolvedRefs
+      - lastTransitionTime: "2026-09-29T23:55:25Z"
+        message: All waypoints resolved
+        observedGeneration: 1
+        reason: ResolvedWaypoints
+        status: "True"
+        type: ResolvedWaypoints
+      controllerName: istio.io/gateway-controller
+      parentRef:
+        group: gateway.networking.k8s.io
+        kind: Gateway
+        name: nfs-gw
+        namespace: istio-ingress
+        sectionName: nfs
+kind: List
+metadata:
+  resourceVersion: ""

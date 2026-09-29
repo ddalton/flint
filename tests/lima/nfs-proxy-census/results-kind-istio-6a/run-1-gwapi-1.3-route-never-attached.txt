@@ -1,0 +1,61 @@
+== images
+== cluster + Istio ambient
+Warning: unrecognized format "int32"
+Warning: unrecognized format "int64"
+client version: 1.31.1
+control plane version: 1.31.1
+data plane version: 1.31.1 (3 proxies)
+== PKI (server SANs = every node address) and tlshd
+node addresses: 172.18.0.4 172.18.0.5 172.18.0.6 ; the host on the kind network: 172.18.0.1
+== Istio ingress Gateway (path B)
+== install
+ws-a: phase=Ready serverId=14868178276455156933 stateidTag=459984558
+ws-b: phase=Ready serverId=5875260136980739915 stateidTag=2814325657
+ws-c: phase=Ready serverId=16692428352452205827 stateidTag=4165771739
+PASS the operator reaches every hub's status port through the mesh (serverId set)
+PASS the proxy pod carries bypass-inbound-capture
+PASS ztunnel enrolled the proxy pod (its OUTBOUND is in the mesh)
+path A: 172.18.0.6:30904 (proxy on flint-istio-worker2)
+== Q2 path A: mTLS mount, source address
+PASS path A: an mTLS mount of the proxy's NodePort
+  root: ws-a ws-b 
+PASS path A: the certificate's workspace is there
+ANSWER Q2: yes: the proxy saw the host's address (172.18.0.1), and the cert+address rule matched
+PASS path A: b's workspace is not
+PASS path A: a write through the mesh lands in hub A
+== Q4 ztunnel restart on the proxy's node, WITH the bypass
+  connect_count 2 → 2; read [istio-11713029], write rc=0
+PASS with the bypass, I/O continues across a ztunnel restart (the proxy re-dials its hubs)
+== Q1 path B: through the Istio ingress Gateway
+  gateway NodePort 30888
+  mount via 172.18.0.4:30888 rc=124 
+  root: 
+ANSWER Q1: NO: an mTLS mount through the gateway failed (see mount-iG.err, proxy.log) — use the PERMISSIVE fallback
+FAIL path B: the certificate still names the client (ws-a)
+PASS path B: the gateway's address does not satisfy the host-address rule (no ws-b)
+umount: /mnt/iG: not mounted.
+== Q5 tlshd and a rotated client certificate (no restart)
+  root after rotating a→b in place: ws-c 
+ANSWER Q5: yes: tlshd presented b's certificate without a restart
+== Q3 the hub's kubelet probe
+  hub ws-c-74cbf787cb-lf6vf on flint-istio-worker pid 2259 ready=True
+ANSWER Q3: yes: the probe reaches the hub itself (REJECT in its netns made it NotReady)
+PASS Q3 control: the hub is Ready again once the rule is gone
+== hub lockdown: the AuthorizationPolicy
+  NULL reply bytes: proxy labels + default SA: 0; proxy labels + the proxy's SA: 28
+PASS a pod with the proxy's LABELS but another ServiceAccount gets no NFS reply
+PASS control: the proxy's ServiceAccount gets the reply
+== Q4 control arm: the proxy WITHOUT the bypass
+PASS control arm: the new proxy pod has no bypass annotation
+PASS control arm: path A still mounts with the proxy's inbound captured
+  connect_count 2 → 4; read [istio-11713029]
+ANSWER Q4: yes: a ztunnel restart reset the client's connection when captured (2→4) and not with the bypass — the bypass matters
+PASS control arm: I/O recovers after the restart
+--- answers
+Q2: yes: the proxy saw the host's address (172.18.0.1), and the cert+address rule matched
+Q1: NO: an mTLS mount through the gateway failed (see mount-iG.err, proxy.log) — use the PERMISSIVE fallback
+Q5: yes: tlshd presented b's certificate without a restart
+Q3: yes: the probe reaches the hub itself (REJECT in its netns made it NotReady)
+Q4: yes: a ztunnel restart reset the client's connection when captured (2→4) and not with the bypass — the bypass matters
+RESULT: 15 passed, 1 failed
+exit=0

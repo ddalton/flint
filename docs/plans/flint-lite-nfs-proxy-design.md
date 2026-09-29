@@ -404,6 +404,41 @@ intact.
    so run on the Linux build box (Docker Desktop's VM kernel is not the
    target).
 
+**Answered 2026-09-29** (`tests/lima/nfs-proxy-census/step6a-istio.sh`,
+kind on the box, Istio 1.31.1 ambient, Gateway API v1.6.2, host kernel
+6.12 with `tlshd`; 17/17, `results-kind-istio-6a/`):
+
+1. **Yes.** The annotation exists in 1.31 and ztunnel still enrolls the
+   pod for its outbound. An `xprtsec=mtls` mount through the Istio
+   Gateway (TCP listener + `TCPRoute`) works, which is only possible if
+   the gateway hands the proxy plain TCP. **Needs Gateway API ≥ v1.6**:
+   Istio 1.31 ignores older TCPRoute CRDs, with nothing but a warning in
+   istiod's log (run 1: the route never attached and the mount timed
+   out, which the rig at first misread as a bypass failure).
+2. **Yes.** A rule needing the certificate AND the host's address
+   matched on path A (externalTrafficPolicy Local). Through the gateway
+   the peer is the gateway, and the address rule does not match: the
+   certificate is what names the client there.
+3. **Yes.** With TCP 2049 REJECTed inside the hub pod's netns the pod
+   went NotReady, and Ready again once the rule was gone: the probe
+   reaches the hub, not ztunnel.
+4. **Yes, the bypass matters.** A ztunnel restart on the proxy's node
+   reconnected the client (kernel connect_count 2→4) with the proxy's
+   inbound captured, and did not (2→2) with the bypass. I/O continued in
+   both cases: the proxy re-dials its hubs, whose connections do go
+   through ztunnel.
+5. **Yes.** Certificate files rewritten in place, no restart: the next
+   handshake presented the new certificate.
+6. Ran on the box's kernel throughout.
+
+Also checked: the hubs' AuthorizationPolicy (chart `nfsProxy.istio`)
+refuses a pod that has the proxy's LABELS but another ServiceAccount (no
+NFS reply to a NULL call), and serves the proxy's ServiceAccount (the
+control); the operator reaches every hub's status port through the mesh.
+In ambient the hub NetworkPolicy must admit HBONE (15008) from the proxy
+and the operator, which the chart now renders. Not checked: STRICT alone
+against a non-mesh client (the NetworkPolicy refuses it first).
+
 ## 7. What this does not solve, and what it costs
 
 - **One failure domain for the door.** Every proxied mount goes through
@@ -645,7 +680,7 @@ port are still wanted for capacity and failure isolation.
    (`run-1-trunking-finding.txt`). Per-cluster (or per-node)
    certificates, as §6a has them, are the only shape that works.
    **Not built:** the client-side `flint-nfs-client-identity` DaemonSet,
-   and the §6a Istio checks (left open under step 4).
+   The §6a Istio checks are answered (§6a, 2026-09-29).
 3. Restarts and wake: lease keepalive, status-flag OR, the table in
    §4, and `NFS4ERR_DELAY` + wake.
    **DONE 2026-09-28 (static-table mode):** a one-slot control session

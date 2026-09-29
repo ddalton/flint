@@ -1,0 +1,91 @@
+{{- if and .Values.nfsProxy.enabled .Values.nfsProxy.istio.enabled }}
+{{- /*
+Istio ambient for flint-nfs-proxy (docs/plans/flint-lite-nfs-proxy-design.md
+§6a "Proxy → hubs: identity in the mesh"). ztunnel enforces both
+resources at L4; no waypoint.
+*/}}
+{{- $td := .Values.nfsProxy.istio.trustDomain }}
+{{- $proxySa := printf "%s/ns/%s/sa/%s" $td .Release.Namespace (include "flint-lite-operator.nfsProxyName" .) }}
+{{- $apiSas := list (printf "%s/ns/%s/sa/%s" $td .Release.Namespace (include "flint-lite-operator.serviceAccountName" .)) }}
+{{- if .Values.gateway.enabled }}
+{{- $apiSas = append $apiSas (printf "%s/ns/%s/sa/%s" $td .Release.Namespace (include "flint-lite-operator.gatewayName" .)) }}
+{{- end }}
+{{- if .Values.nfsProxy.istio.hubPolicy }}
+{{- if not .Values.networkPolicy.hubNamespaces }}
+{{- fail "nfsProxy.istio.hubPolicy needs networkPolicy.hubNamespaces: the namespaces whose hubs get the policy" }}
+{{- end }}
+{{- range $ns := .Values.networkPolicy.hubNamespaces }}
+---
+# Hubs serve no one directly: plaintext (a kubelet mount straight to a
+# hub, a pod outside the mesh) is refused.
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: {{ include "flint-lite-operator.name" $ }}-hubs
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flint-lite-operator.labels" $ | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: flint-lite
+  mtls:
+    mode: STRICT
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ include "flint-lite-operator.name" $ }}-hubs
+  namespace: {{ $ns }}
+  labels:
+    {{- include "flint-lite-operator.labels" $ | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: flint-lite
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: [{{ $proxySa | quote }}]
+      to:
+        - operation:
+            ports: ["2049"]
+    - from:
+        - source:
+            principals:
+              {{- range $apiSas }}
+              - {{ . | quote }}
+              {{- end }}
+      to:
+        - operation:
+            ports:
+              {{- range $.Values.networkPolicy.hubApiPorts }}
+              - {{ . | quote }}
+              {{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.nfsProxy.istio.tcpRoute.enabled }}
+{{- if not .Values.nfsProxy.istio.tcpRoute.parentRef.name }}
+{{- fail "nfsProxy.istio.tcpRoute.enabled requires nfsProxy.istio.tcpRoute.parentRef.name (the Istio Gateway)" }}
+{{- end }}
+---
+# TCPRoute is v1 in the Gateway API standard channel from v1.6, which is
+# also the minimum CRD version Istio 1.31 processes (older: ignored,
+# with a warning in istiod's log, and the listener gets no route).
+apiVersion: gateway.networking.k8s.io/v1
+kind: TCPRoute
+metadata:
+  name: {{ include "flint-lite-operator.nfsProxyName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-lite-operator.nfsProxyLabels" . | nindent 4 }}
+spec:
+  parentRefs:
+    {{- list .Values.nfsProxy.istio.tcpRoute.parentRef | toYaml | nindent 4 }}
+  rules:
+    - backendRefs:
+        - name: {{ include "flint-lite-operator.nfsProxyName" . }}
+          port: {{ .Values.nfsProxy.service.port }}
+{{- end }}
+{{- end }}
