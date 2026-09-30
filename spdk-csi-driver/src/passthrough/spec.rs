@@ -101,6 +101,10 @@ pub struct MountSpec {
     /// at 125 MiB/s): 6 GiB read through a 768 MiB cache took 48 s where
     /// no cache took 10 s, cold and warm alike; a 512 MiB set that fit
     /// warmed 2.5× faster. Enable it for a set that fits in `maxSizeMib`.
+    /// WHERE it lives is the chart's: `workers.cacheHostPath` places every
+    /// cache in a private directory on a device the operator names (the
+    /// instance store), and there a sharing CR that names no `cache` gets
+    /// one of `workers.cacheSizeMib` ([`MountSpec::with_placed_default_cache`]).
     ///
     /// The emptyDir was provisioned and documented as "mount-s3's cache"
     /// from the start and `--cache` was never passed, so every repeated
@@ -126,7 +130,9 @@ pub struct MountSpec {
     /// that cache — on the emptyDir, so on the node's root disk — made a
     /// 6 GiB read five times slower than S3, design §11.) Ask for one
     /// with `cache` when the working set fits in it; one mounter per node
-    /// is what sharing buys on its own.
+    /// is what sharing buys on its own. With the cache PLACED by the chart
+    /// (`workers.cacheHostPath`) a sharing CR that names none gets one of
+    /// `workers.cacheSizeMib` on that device.
     ///
     /// Who shares: pods whose effective access is read (the CR's
     /// `readOnly`, or an SA in `readOnlyServiceAccounts`, or the pod's own
@@ -206,6 +212,21 @@ impl MountSpec {
     /// on a node share one mounter.
     pub fn shares_read_only(&self) -> bool {
         self.sharing.as_ref().is_some_and(|s| s.read_only)
+    }
+
+    /// The spec as the mounter sees it when the chart PLACED the cache
+    /// (`workers.cacheHostPath`, sharing design §11 step 2): a CR that
+    /// shares its mounter and names no `cache` gets one of `size_mib`
+    /// there — the device is the operator's and at least as fast as the
+    /// node's S3 path, so the reason step 1 turned the default off (the
+    /// emptyDir is the root disk) does not apply. Unplaced, a named
+    /// `cache` (enabled or not), a CR that does not share, or a zero size:
+    /// unchanged. Nothing gets a cache it did not ask for on the emptyDir.
+    pub fn with_placed_default_cache(mut self, placed: bool, size_mib: u64) -> Self {
+        if placed && size_mib > 0 && self.shares_read_only() && self.cache.is_none() {
+            self.cache = Some(CacheSpec { enabled: true, max_size_mib: Some(size_mib) });
+        }
+        self
     }
 
     /// Everything the injector refuses. Each arm names the field and
@@ -386,6 +407,32 @@ mod tests {
         ] {
             assert_eq!(quantity_mib(q), want, "{q:?}");
         }
+    }
+
+    /// Step 1 of §11 turned the sharing default off because the emptyDir
+    /// is the node's root disk; step 2 turns it on ONLY where the chart
+    /// placed the cache on a device of the operator's choosing, and at
+    /// the size the chart names — not a fraction of the scratch. Every
+    /// other shape is unchanged: a named cache (enabled or not) is kept,
+    /// a CR that does not share gets nothing, and unplaced means off.
+    #[test]
+    fn a_sharing_cr_without_a_cache_gets_the_chart_size_only_where_the_cache_is_placed() {
+        let base: MountSpec = serde_json::from_value(serde_json::json!({
+            "bucket": "b", "readOnly": true, "sharing": { "readOnly": true }
+        }))
+        .unwrap();
+        assert!(base.shares_read_only() && base.cache.is_none());
+        let placed = base.clone().with_placed_default_cache(true, 4096);
+        assert_eq!(placed.cache, Some(CacheSpec { enabled: true, max_size_mib: Some(4096) }));
+        assert!(placed.validate().is_ok(), "the placed default must pass the cache validation");
+        assert!(base.clone().with_placed_default_cache(false, 4096).cache.is_none(), "unplaced: nothing");
+        assert!(base.clone().with_placed_default_cache(true, 0).cache.is_none(), "a zero size places nothing");
+        let off = MountSpec { cache: Some(CacheSpec { enabled: false, max_size_mib: None }), ..base.clone() };
+        assert_eq!(off.clone().with_placed_default_cache(true, 4096).cache, off.cache, "enabled: false is the opt-out, placed or not");
+        let named = MountSpec { cache: Some(CacheSpec { enabled: true, max_size_mib: Some(100) }), ..base.clone() };
+        assert_eq!(named.clone().with_placed_default_cache(true, 4096).cache, named.cache, "a named ceiling is kept");
+        let own = MountSpec { sharing: None, ..base.clone() };
+        assert!(own.with_placed_default_cache(true, 4096).cache.is_none(), "a CR that does not share gets nothing it did not ask for");
     }
 
     /// A shared mounter holds one credential for all its members, so the

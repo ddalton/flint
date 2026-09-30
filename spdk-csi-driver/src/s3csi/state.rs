@@ -88,6 +88,13 @@ pub struct VolumeState {
     /// volume's. Absent: the volume owns its mount, as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared: Option<String>,
+    /// Passthrough, own mounter: the cache's private directory on the
+    /// PLACED device (`workers.cacheHostPath/<worker-name>`, sharing
+    /// design §11 step 2), made 0700 for the worker before its pod and
+    /// removed after the mounter's own exit. Absent: the cache, if any,
+    /// is the scratch emptyDir. A shared member's is on the shared record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_dir: Option<String>,
 }
 
 /// The pod-bound ServiceAccount token kubelet delivered with the latest
@@ -225,6 +232,10 @@ pub struct SharedMount {
     pub members: Vec<String>,
     #[serde(default)]
     pub created_unix: Option<u64>,
+    /// The shared mounter's placed cache directory
+    /// (`workers.cacheHostPath/<worker-name>`); see [`VolumeState::cache_dir`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_dir: Option<String>,
 }
 
 /// `<plugin>/shared/<hash>`: outside `volumes/`, so volume adoption never
@@ -358,6 +369,7 @@ mod tests {
             sync_env: Some(BTreeMap::from([("FLINT_SYNC_ROOT".to_string(), "/workspace".to_string())])),
             on_behalf_of: Some("alice@example.com".into()),
             shared: None,
+            cache_dir: None,
         };
         let d = volume_dir(root.path(), "csi-1");
         assert!(VolumeState::load(&d).unwrap().is_none());
@@ -426,6 +438,7 @@ mod tests {
             sync_env: None,
             on_behalf_of: None,
             shared: None,
+            cache_dir: None,
         };
         s.save(&dest).unwrap();
         assert!(VolumeState::list(root.path()).is_empty(), "a preserved tree must not be listed for adoption");
@@ -506,6 +519,7 @@ mod shared_tests {
             phase: "publishing".into(),
             members: vec![],
             created_unix: Some(1),
+            cache_dir: None,
         };
         sm.add_member("csi-1");
         sm.add_member("csi-2");

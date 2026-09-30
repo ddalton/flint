@@ -13,7 +13,9 @@
 #   · every image is one of the two the chart pins;
 #   · nothing is privileged, hostNetwork or hostPID;
 #   · the only hostPath is under the plugin's own volumes directory
-#     (the lean tree), never anywhere else on the host;
+#     (the lean tree) — or, when workers.cacheHostPath places the block
+#     cache, a private subdirectory of that root — never anywhere else
+#     on the host;
 #   · no ServiceAccount token is mounted.
 #
 # Without the node rule, one compromised node could delete every worker
@@ -52,6 +54,12 @@ spec:
       expression: {{ printf "['%s', '%s']" (include "flint-s3-csi.passthroughImage" .) (include "flint-s3-csi.leanImage" .) | quote }}
     - name: hostPathPrefix
       expression: {{ printf "'%s/volumes/'" (include "flint-s3-csi.pluginDir" .) | quote }}
+    # The placed cache root (workers.cacheHostPath), '' when unset: the
+    # only other prefix a worker may hostPath — one private subdirectory
+    # per worker, made by the plugin. The API server refuses a hostPath
+    # with '..' in it, so a prefix check cannot be walked out of.
+    - name: cachePrefix
+      expression: {{ if .Values.workers.cacheHostPath }}{{ printf "'%s/'" (.Values.workers.cacheHostPath | trimSuffix "/") | quote }}{{ else }}"''"{{ end }}
     # kube-system controllers that must be able to DELETE: the Node
     # ownerReference GC, the terminated-pod reaper, namespace deletion.
     # None of them may CREATE. The kubelet is handled below, by node.
@@ -91,8 +99,8 @@ spec:
       message: "workers may not use hostPID"
     - expression: "request.operation != 'CREATE' || !has(object.spec.hostIPC) || !object.spec.hostIPC"
       message: "workers may not use hostIPC"
-    - expression: "request.operation != 'CREATE' || !has(object.spec.volumes) || object.spec.volumes.all(v, !has(v.hostPath) || v.hostPath.path.startsWith(variables.hostPathPrefix))"
-      message: "the only hostPath a worker may mount is under the plugin's own volumes directory (/var/lib/kubelet/plugins/s3.csi.chert.us/volumes/)"
+    - expression: "request.operation != 'CREATE' || !has(object.spec.volumes) || object.spec.volumes.all(v, !has(v.hostPath) || v.hostPath.path.startsWith(variables.hostPathPrefix) || (variables.cachePrefix != '' && v.hostPath.path.startsWith(variables.cachePrefix)))"
+      message: "the only hostPaths a worker may mount are under the plugin's own volumes directory (/var/lib/kubelet/plugins/s3.csi.chert.us/volumes/) and, when workers.cacheHostPath is set, a subdirectory of that root"
     - expression: "request.operation != 'CREATE' || (has(object.spec.automountServiceAccountToken) && object.spec.automountServiceAccountToken == false)"
       message: "workers must set automountServiceAccountToken: false"
 ---

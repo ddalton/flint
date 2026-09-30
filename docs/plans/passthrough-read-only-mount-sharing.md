@@ -480,6 +480,27 @@ can make an EBS-backed cache cheap; the fix is where the directory lives.
    `workers.cacheSizeMib` names it (suggest 4096). The device is the
    operator's: on trove nodes that means mounting `nvme1n1`, which is a
    trove change, not a chart one.
+   **DONE 2026-09-30** — as written, with these particulars: the scratch
+   volume is REPLACED (a hostPath named `scratch` at `/tmp`, type
+   Directory), not added to, so the mounter's argv and the class key are
+   untouched by placement; the plugin mounts the root itself as a
+   type-Directory hostPath at the same path (a node without the device
+   fails the plugin pod, `hostPath type check failed`, rather than
+   kubelet creating the directory on the root disk) and refuses to start
+   on a path that is not a directory; the chart refuses a relative path
+   and a zero `cacheSizeMib` at render time; the workers' admission
+   policy gains the root as its second and only other hostPath prefix
+   (the API server refuses `..` in a hostPath, so a prefix check holds).
+   `cacheDir` is on both records; `teardown_mounter` removes it after the
+   pod, `cleanup` on a failed publish too; a directory a dead worker of
+   the same name left is emptied before the next create
+   (`prepare_cache_dir`), and `sweep_cache_root` at startup removes
+   `s3w-*` entries no record names and nothing else. The placed default
+   is `MountSpec::with_placed_default_cache(placed, cacheSizeMib)`, a
+   different function from the removed three-quarters rule, logged as
+   "block cache defaulted on the placed device". Kind leg S30 covers the
+   mechanics (NOT RUN yet); the speed is step 4's M1 on a node with the
+   instance store mounted.
 3. **Say where the cache is.** At publish, when a cache is on, the plugin
    logs the cache directory's device (`stat -f`/`statfs` of `/tmp` in
    the worker's spec is not visible to the plugin, but the emptyDir's

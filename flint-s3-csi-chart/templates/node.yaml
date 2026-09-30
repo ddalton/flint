@@ -7,6 +7,19 @@
 # socket), hostPID (it unmounts, it never signals a mounter), Secrets
 # RBAC, pod verbs outside workers.namespace.
 {{- /*
+  The placed cache root must be an absolute path (it is a hostPath on
+  the plugin AND the prefix the admission policy admits for workers), and
+  the default it gives a sharing CR must be a size.
+*/}}
+{{- if .Values.workers.cacheHostPath }}
+{{- if not (hasPrefix "/" .Values.workers.cacheHostPath) }}
+{{- fail (printf "workers.cacheHostPath %q must be an absolute path on every node (e.g. /mnt/nvme/flint-s3-cache)" .Values.workers.cacheHostPath) }}
+{{- end }}
+{{- if lt (int .Values.workers.cacheSizeMib) 1 }}
+{{- fail (printf "workers.cacheSizeMib %v must be at least 1 when workers.cacheHostPath is set: it is the only bound on a placed cache" .Values.workers.cacheSizeMib) }}
+{{- end }}
+{{- end }}
+{{- /*
   A worker memory limit below 512Mi cannot work: mount-s3's memory target
   (the plugin passes --memory-target at two thirds of the limit) has a
   512 MiB floor the binary itself enforces, so under such a limit the
@@ -150,6 +163,15 @@ spec:
 {{- if .Values.workers.scratchSize }}
             - { name: FLINT_S3CSI_SCRATCH_SIZE, value: {{ .Values.workers.scratchSize | quote }} }
 {{- end }}
+{{- if .Values.workers.cacheHostPath }}
+            # WHERE THE BLOCK CACHE LIVES: a device the operator mounted on
+            # every node. Every worker that runs with a cache gets a private
+            # 0700 subdirectory of it as a hostPath at /tmp in place of the
+            # scratch emptyDir (sharing design §11 step 2), and a sharing
+            # CR that names no spec.cache gets one of cacheSizeMib there.
+            - { name: FLINT_S3CSI_CACHE_HOST_PATH, value: {{ .Values.workers.cacheHostPath | trimSuffix "/" | quote }} }
+            - { name: FLINT_S3CSI_CACHE_SIZE_MIB, value: {{ .Values.workers.cacheSizeMib | quote }} }
+{{- end }}
 {{- if .Values.broker.enabled }}
             # Unset ⇒ no broker: only identity.mode static and ambient
             # can publish.
@@ -195,6 +217,13 @@ spec:
             - name: node-token
               mountPath: /var/run/secrets/flint-s3
               readOnly: true
+{{- if .Values.workers.cacheHostPath }}
+            # The cache root at the SAME path as on the host, so the
+            # directory the plugin makes is the one the worker's hostPath
+            # names.
+            - name: cache-root
+              mountPath: {{ .Values.workers.cacheHostPath | trimSuffix "/" }}
+{{- end }}
         - name: node-driver-registrar
           image: "{{ with (coalesce .Values.global.imageRegistry .Values.csiSidecars.registry) }}{{ . }}/{{ end }}{{ .Values.csiSidecars.repository }}/{{ .Values.csiSidecars.nodeDriverRegistrar.name }}:{{ .Values.csiSidecars.nodeDriverRegistrar.tag }}"
           imagePullPolicy: IfNotPresent
@@ -238,6 +267,16 @@ spec:
           hostPath:
             path: /dev/fuse
             type: CharDevice
+{{- if .Values.workers.cacheHostPath }}
+        # Type Directory, not DirectoryOrCreate: on a node where the device
+        # is not mounted the plugin pod FAILS to start (hostPath type check
+        # failed), instead of kubelet creating the directory on the root
+        # disk and the cache landing exactly where §11 says it must not.
+        - name: cache-root
+          hostPath:
+            path: {{ .Values.workers.cacheHostPath | trimSuffix "/" }}
+            type: Directory
+{{- end }}
         # The plugin's identity to the broker. Pod-bound, so
         # TokenReview yields this pod's node in userInfo.extra — the
         # same fact the admission policy checks.

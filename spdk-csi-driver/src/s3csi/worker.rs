@@ -109,6 +109,14 @@ pub struct WorkerInputs<'a> {
     pub priority_class: Option<String>,
     pub comm_size: String,
     pub scratch_size: String,
+    /// Passthrough: the cache's private directory on the PLACED device
+    /// (`workers.cacheHostPath/<worker-name>`, made 0700 for the worker's
+    /// uid by the plugin before this pod), hostPath'd at `/tmp` IN PLACE
+    /// OF the scratch emptyDir — the same `/tmp` the mounter's `--cache`
+    /// names, so the argv and the class key do not depend on where the
+    /// cache lives. A hostPath has no sizeLimit: `--max-cache-size` is the
+    /// bound. None: the emptyDir.
+    pub cache_host_dir: Option<String>,
     /// A shared read-only mounter: `volume_id` is then the class HASH
     /// (what names the pod and what `ensure` adopts on), and this is the
     /// class, readable, for the annotation.
@@ -166,10 +174,22 @@ pub fn build_pod(i: &WorkerInputs) -> Pod {
             empty_dir: Some(EmptyDirVolumeSource { medium: Some("Memory".into()), size_limit: Some(Quantity(i.comm_size.clone())) }),
             ..Default::default()
         },
-        Volume {
-            name: "scratch".into(),
-            empty_dir: Some(EmptyDirVolumeSource { medium: None, size_limit: Some(Quantity(i.scratch_size.clone())) }),
-            ..Default::default()
+        // The scratch: the emptyDir on the node's root disk, or — with the
+        // cache PLACED (`workers.cacheHostPath`) — the worker's private
+        // directory on that device. Type Directory: the plugin made it
+        // before this pod, and a missing one is a failed create, not a
+        // directory kubelet quietly creates on the root disk.
+        match &i.cache_host_dir {
+            Some(dir) => Volume {
+                name: "scratch".into(),
+                host_path: Some(HostPathVolumeSource { path: dir.clone(), type_: Some("Directory".into()) }),
+                ..Default::default()
+            },
+            None => Volume {
+                name: "scratch".into(),
+                empty_dir: Some(EmptyDirVolumeSource { medium: None, size_limit: Some(Quantity(i.scratch_size.clone())) }),
+                ..Default::default()
+            },
         },
     ];
     let mut mounts = vec![
@@ -627,6 +647,7 @@ mod tests {
             priority_class: None,
             comm_size: "16Mi".into(),
             scratch_size: "1Gi".into(),
+            cache_host_dir: None,
             shared_key: None,
         }
     }
@@ -743,6 +764,37 @@ mod tests {
         for e in c.env.as_ref().unwrap() {
             assert!(!e.name.contains("SECRET") && !e.name.contains("TOKEN"), "{}", e.name);
         }
+    }
+
+    /// With the cache PLACED (`workers.cacheHostPath`, sharing design §11
+    /// step 2) the scratch is the worker's private directory on that
+    /// device, a hostPath at the same `/tmp` the mounter's `--cache`
+    /// names, IN PLACE OF the emptyDir — so the argv, and the class key,
+    /// are untouched by where the cache lives. Type Directory: the plugin
+    /// made it before the pod; a missing one is a failed create, not a
+    /// directory kubelet creates on the root disk. No sizeLimit applies;
+    /// `--max-cache-size` is the bound. Unplaced: the emptyDir, as before.
+    #[test]
+    fn a_placed_cache_replaces_the_scratch_emptydir_with_a_private_hostpath_at_tmp() {
+        let t = tenant();
+        let mut i = inputs("passthrough", &t, None);
+        i.cache_host_dir = Some("/mnt/nvme/flint-s3-cache/s3w-abc".into());
+        let pod = build_pod(&i);
+        let spec = pod.spec.as_ref().unwrap();
+        let vols = spec.volumes.as_ref().unwrap();
+        let scratch = vols.iter().find(|v| v.name == "scratch").unwrap();
+        assert!(scratch.empty_dir.is_none(), "the emptyDir must be REPLACED, not kept beside the hostPath");
+        let hp = scratch.host_path.as_ref().expect("the scratch is a hostPath when the cache is placed");
+        assert_eq!(hp.path, "/mnt/nvme/flint-s3-cache/s3w-abc");
+        assert_eq!(hp.type_.as_deref(), Some("Directory"));
+        assert_eq!(vols.iter().filter(|v| v.host_path.is_some()).count(), 1, "the cache directory is the only hostPath");
+        let m = spec.containers[0].volume_mounts.as_ref().unwrap().iter().find(|m| m.name == "scratch").unwrap();
+        assert_eq!(m.mount_path, "/tmp", "the same /tmp the argv names");
+
+        let pod = build_pod(&inputs("passthrough", &t, None));
+        let scratch = pod.spec.as_ref().unwrap().volumes.as_ref().unwrap().iter().find(|v| v.name == "scratch").unwrap();
+        assert!(scratch.host_path.is_none(), "unplaced: no hostPath");
+        assert_eq!(scratch.empty_dir.as_ref().unwrap().size_limit.as_ref().unwrap().0, "1Gi", "unplaced: the sized emptyDir");
     }
 
     #[test]

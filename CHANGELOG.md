@@ -14,6 +14,38 @@ covered by the stability guarantee.
 
 ### Added
 
+- **flint-s3-csi: `workers.cacheHostPath` places the block cache on a device
+  of the operator's choosing** (2026-09-30, step 2 of the sharing design's
+  §11). Set to a directory mounted on every node — the instance store, e.g.
+  `/mnt/nvme/flint-s3-cache` — and every worker that runs with a cache gets
+  a PRIVATE subdirectory of it, `<root>/<worker-name>`, made 0700 for the
+  worker's uid by the plugin before the pod and removed after the mounter's
+  own exit (F72's order), as a hostPath at `/tmp` in place of the `scratch`
+  emptyDir. The mounter's argv is unchanged (`--cache /tmp`), so the class
+  key does not depend on where the cache lives; a hostPath has no
+  `sizeLimit`, so `--max-cache-size` is the bound. With the cache placed, a
+  sharing CR that names no `spec.cache` gets one of `workers.cacheSizeMib`
+  (default 4096) there — the default step 1 withdrew from the emptyDir,
+  back where the disk under it is the operator's and at least as fast as
+  S3 (`MountSpec::with_placed_default_cache`); unplaced, nothing gets a
+  cache it did not ask for. The plugin mounts the root as a hostPath of
+  type Directory — a node without the device FAILS the plugin pod loudly
+  (`hostPath type check failed`) instead of kubelet creating the directory
+  on the root disk and the cache landing where §11 says it must not — and
+  refuses to start if the path is not a directory; the chart refuses a
+  relative path or a zero size at render time; the workers' admission
+  policy admits a hostPath under the root as the only other prefix besides
+  the plugin's volumes directory. A directory left by a worker of the same
+  name (its plugin died between the pod's delete and the removal) is
+  emptied before the next create, and at startup the plugin removes
+  `s3w-*` directories under the root that no record names, leaving
+  anything else there alone. Both records (`VolumeState`, `SharedMount`)
+  carry `cacheDir`; older records load with none. Kind leg S30 (the
+  placement, both per-pod controls, the removal, the leftover, the sweep,
+  the loud failure, the render-time refusals) written, NOT RUN. Mounting
+  the device is the platform's job, not the chart's (on trove nodes,
+  `nvme1n1`).
+
 - **flint-s3-csi: the mounter's memory target follows the worker's limit;
   a shared mounter gets its own resources; the worker images are pulled
   before the first mount** (2026-09-30, the passthrough design review's

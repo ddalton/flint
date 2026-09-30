@@ -1907,6 +1907,125 @@ $K -n $NS delete pod shared-d --wait=true --timeout=120s >/dev/null 2>&1
 $K -n $NS delete sa trainer2 >/dev/null 2>&1
 apply_fx tenants.yaml >/dev/null
 
+# ── S30 cache placement (sharing design §11 step 2) ────────────────────
+# workers.cacheHostPath names a device the operator mounted on every node;
+# every worker that runs with a cache gets <root>/<worker> — made 0700 for
+# its uid by the plugin — as a hostPath at /tmp in place of the scratch
+# emptyDir, and a sharing CR that names no spec.cache gets one of
+# workers.cacheSizeMib there (step 1 turned that default off on the
+# emptyDir). The directory goes with the mounter, in F72's order; one left
+# by a worker of the same name is emptied before the next create; s3w-*
+# directories no record names are swept when the plugin starts; a root
+# missing on a node fails the plugin pod there instead of putting the
+# cache on the root disk. On kind the "device" is a directory on the
+# node's own disk: this leg checks the placement MECHANICS, not the speed
+# (that is M1 on a node with the instance store mounted).
+leg S30 "cache placement: a placed cache is a private 0700 hostPath at /tmp under the named root, a sharing CR without spec.cache gets workers.cacheSizeMib there, a per-pod CR without one keeps its emptyDir, a named one is placed at its own ceiling, the directory goes with the mounter, a leftover is emptied, an orphan is swept, and a missing root fails the plugin loudly"
+CROOT=/var/lib/flint-s3-cache-s30
+# The root on EVERY node (the plugin is a DaemonSet with a type-Directory
+# hostPath on it), with an orphan for the startup sweep and an unrelated
+# directory the sweep must leave alone.
+for n in $($K get nodes -o jsonpath='{.items[*].metadata.name}'); do
+    NODE=$n onnode "rm -rf $CROOT && mkdir -p $CROOT/s3w-orphan $CROOT/planted && touch $CROOT/s3w-orphan/x && chmod 755 $CROOT" || bad "PRECONDITION: could not make $CROOT on $n"
+done
+if chart_up --set workers.cacheHostPath=$CROOT --set workers.cacheSizeMib=512 >/dev/null 2>&1 && plugin_rolled; then
+    ok "chart up with workers.cacheHostPath=$CROOT (cacheSizeMib 512); the plugin rolled"
+    $K -n $SYS get pod "$(plugin_pod)" -o jsonpath='{.spec.volumes[?(@.name=="cache-root")].hostPath.type}' 2>/dev/null | grep -q '^Directory$' && ok "the plugin mounts the cache root as a hostPath of type Directory" || bad "the plugin pod has no cache-root hostPath of type Directory"
+    i=0; while [ $i -lt 30 ] && onnode "test -d $CROOT/s3w-orphan"; do sleep 3; i=$((i + 3)); done
+    onnode "test -d $CROOT/s3w-orphan" && bad "the startup sweep left $CROOT/s3w-orphan (no record names it) after ${i}s" || ok "the startup sweep removed s3w-orphan, which no record names (${i}s)"
+    onnode "test -d $CROOT/planted" && ok "the sweep left $CROOT/planted alone (not an s3w-* directory)" || bad "the sweep removed $CROOT/planted, a directory the plugin did not make"
+    # A sharing CR with no spec.cache: the placed default makes a NEW class
+    # (the argv gained the cache flags), so a recreated member gets a fresh
+    # worker on it; shared-b stays on the old, unplaced class.
+    $K -n $NS delete pod shared-a --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
+    fx_doc tenants.yaml Pod shared-a | $K apply -f - >/dev/null
+    if wait_phase shared-a Running 300 && [ -n "$(worker_of shared-a)" ]; then
+        w=$(worker_of shared-a); argv=$(worker_argv "$w")
+        echo "$argv" | grep -q -- '--cache /tmp --max-cache-size 512' && ok "shared-a's mount-s3 runs --cache /tmp --max-cache-size 512: the sharing default, at the chart's size, once the cache is placed" || bad "shared-a's argv carries no '--cache /tmp --max-cache-size 512': ${argv:-<none>}"
+        hp=$($K -n $WNS get pod "$w" -o jsonpath='{.spec.volumes[?(@.name=="scratch")].hostPath.path}' 2>/dev/null)
+        [ "$hp" = "$CROOT/$w" ] && ok "the worker's scratch is a hostPath at $CROOT/$w (the emptyDir replaced)" || bad "the worker's scratch hostPath is '${hp:-<none: an emptyDir>}', expected $CROOT/$w"
+        $K -n $WNS get pod "$w" -o jsonpath='{.spec.volumes[?(@.name=="scratch")].emptyDir}' 2>/dev/null | grep -q . && bad "the worker still carries a scratch emptyDir beside the hostPath" || ok "no scratch emptyDir on the worker"
+        perm=$(onnode "stat -c '%a %u:%g' $CROOT/$w 2>/dev/null"); [ "$perm" = "700 1001:1001" ] && ok "the cache directory is 0700, owned by the worker's uid:gid (1001:1001)" || bad "cache directory $CROOT/$w: '${perm:-absent}', expected '700 1001:1001'"
+        got=$(inpod shared-a "cat /mnt/shared/shard-01.txt"); [ "$got" = "seeded-object-01" ] && ok "shared-a reads through the placed-cache mount" || bad "shared-a read '$got'"
+        onnode "ls $CROOT/$w 2>/dev/null | grep -q mountpoint-cache" && ok "mount-s3 populated its cache under the placed directory after the read" || bad "no mountpoint-cache under $CROOT/$w after a read"
+        plugin_log | grep -q "block cache defaulted on the placed device" && ok "the plugin logged the placed default" || bad "no 'block cache defaulted on the placed device' line in the plugin log"
+        plugin_log | grep -q "block cache placed" && ok "the plugin logged where it placed the cache" || bad "no 'block cache placed' line in the plugin log"
+        # CONTROL: a per-pod CR that names no cache keeps its emptyDir —
+        # placement forces a cache on nobody.
+        $K -n $NS delete pod reader --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
+        fx_doc tenants.yaml Pod reader | $K apply -f - >/dev/null
+        if wait_phase reader Running 300 && [ -n "$(worker_of reader)" ]; then
+            wr=$(worker_of reader); argvr=$(worker_argv "$wr")
+            hpr=$($K -n $WNS get pod "$wr" -o jsonpath='{.spec.volumes[?(@.name=="scratch")].hostPath.path}' 2>/dev/null)
+            if [ -z "$hpr" ] && ! echo "$argvr" | grep -q -- '--cache'; then ok "CONTROL: reader (datasets, no spec.cache) keeps its scratch emptyDir and runs no cache"; else bad "CONTROL: reader's worker has hostPath '${hpr}', argv ${argvr:-<none>}"; fi
+        else
+            bad "CONTROL: reader did not come back Running"
+        fi
+        # CONTROL: a per-pod CR that NAMES a cache gets it placed, at its own ceiling.
+        $K -n $NS patch fpm datasets-ro --type=merge -p '{"spec":{"cache":{"enabled":true,"maxSizeMib":128}}}' >/dev/null
+        $K -n $NS delete pod reader-ro --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
+        fx_doc tenants.yaml Pod reader-ro | $K apply -f - >/dev/null
+        wro=""
+        if wait_phase reader-ro Running 300 && [ -n "$(worker_of reader-ro)" ]; then
+            wro=$(worker_of reader-ro); argvo=$(worker_argv "$wro")
+            hpo=$($K -n $WNS get pod "$wro" -o jsonpath='{.spec.volumes[?(@.name=="scratch")].hostPath.path}' 2>/dev/null)
+            if echo "$argvo" | grep -q -- '--cache /tmp --max-cache-size 128' && [ "$hpo" = "$CROOT/$wro" ]; then ok "CONTROL: reader-ro (spec.cache 128) runs its own ceiling, placed at $CROOT/$wro"; else bad "CONTROL: reader-ro's worker: hostPath '${hpo:-none}', argv ${argvo:-<none>}"; fi
+        else
+            bad "CONTROL: reader-ro did not come back Running on the cached CR"
+        fi
+        $K -n $NS patch fpm datasets-ro --type=json -p '[{"op":"remove","path":"/spec/cache"}]' >/dev/null
+        $K -n $NS delete pod reader-ro --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
+        if [ -n "$wro" ]; then
+            i=0; while [ $i -lt 90 ] && $K -n $WNS get pod "$wro" >/dev/null 2>&1; do sleep 2; i=$((i + 2)); done
+            onnode "test -d $CROOT/$wro" && bad "reader-ro's cache directory $CROOT/$wro survived its unpublish" || ok "reader-ro's cache directory went with its mounter (${i}s)"
+        fi
+        # The last member of the placed class out: the mounter, then its directory.
+        $K -n $NS delete pod shared-a --wait=true --timeout=180s >/dev/null 2>&1
+        i=0; while [ $i -lt 90 ] && $K -n $WNS get pod "$w" >/dev/null 2>&1; do sleep 2; i=$((i + 2)); done
+        $K -n $WNS get pod "$w" >/dev/null 2>&1 && bad "worker $w still exists ${i}s after its last member left" || ok "worker $w is gone (${i}s)"
+        onnode "test -d $CROOT/$w" && bad "cache directory $CROOT/$w survived the mounter" || ok "cache directory $CROOT/$w removed with the mounter"
+        plugin_log | grep -q "cache directory removed" && ok "the plugin logged the removal" || bad "no 'cache directory removed' line in the plugin log"
+        # A leftover of the same name (a worker that died with its plugin)
+        # is EMPTIED before the next create, so the new mounter starts clean.
+        onnode "mkdir -p $CROOT/$w && touch $CROOT/$w/leftover && chown 0:0 $CROOT/$w && chmod 755 $CROOT/$w"
+        fx_doc tenants.yaml Pod shared-a | $K apply -f - >/dev/null
+        if wait_phase shared-a Running 300 && [ -n "$(worker_of shared-a)" ]; then
+            w2=$(worker_of shared-a)
+            [ "$w2" = "$w" ] && ok "the same class gets the same worker name ($w2), so the same directory" || note "the class worker is $w2 (was $w)"
+            onnode "test -e $CROOT/$w2/leftover" && bad "the leftover file survived into the new worker's cache directory" || ok "the leftover was emptied before the new worker"
+            perm=$(onnode "stat -c '%a %u:%g' $CROOT/$w2 2>/dev/null"); [ "$perm" = "700 1001:1001" ] && ok "the reused directory is 0700 1001:1001 again" || bad "reused directory: '${perm:-absent}'"
+            plugin_log | grep -q "emptying the cache directory a previous worker of this name left" && ok "the plugin logged the emptying" || bad "no 'emptying the cache directory' line in the plugin log"
+        else
+            bad "shared-a did not come back Running on the reused directory"
+        fi
+    else
+        bad "shared-a never reached Running with the cache placed — the worker's hostPath or the admission policy's second prefix is the suspect: $($K -n $NS describe pod shared-a 2>/dev/null | grep -i 'hostPath\|denied\|Warning' | tail -3)"
+    fi
+    # A root that exists on no node: the plugin FAILS TO START there
+    # (hostPath type Directory), not a cache on the root disk.
+    if chart_up --set workers.cacheHostPath=/var/lib/flint-s3-cache-absent --set workers.cacheSizeMib=512 >/dev/null 2>&1; then
+        i=0; seen=""
+        while [ $i -lt 150 ] && [ -z "$seen" ]; do
+            seen=$($K -n $SYS get events --field-selector reason=FailedMount -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' 2>/dev/null | grep -i 'hostPath type check failed' | head -1)
+            [ -n "$seen" ] || { sleep 5; i=$((i + 5)); }
+        done
+        [ -n "$seen" ] && ok "a missing cache root fails the plugin pod loudly (${i}s): hostPath type check failed" || bad "no 'hostPath type check failed' event in ${i}s for a missing cache root — the plugin came up, or failed for another reason"
+    else
+        bad "chart_up with an absent cache root failed at render/apply: $(helm --kube-context "$CTX" status flint-s3-csi -n $SYS 2>&1 | tail -1)"
+    fi
+    # The chart refuses a relative root and a zero size at render time.
+    chart_up --set workers.cacheHostPath=relative/dir --set workers.cacheSizeMib=512 >/tmp/s30-helm.log 2>&1 && bad "the chart ACCEPTED a relative cacheHostPath" || { grep -q "absolute path" /tmp/s30-helm.log && ok "the chart refused a relative cacheHostPath at render time" || bad "the chart refused relative/dir for another reason: $(tail -1 /tmp/s30-helm.log | cut -c1-160)"; }
+    chart_up --set workers.cacheHostPath=$CROOT --set workers.cacheSizeMib=0 >/tmp/s30-helm.log 2>&1 && bad "the chart ACCEPTED cacheSizeMib 0 with a placement" || { grep -q "at least 1" /tmp/s30-helm.log && ok "the chart refused cacheSizeMib 0 with a placement at render time" || bad "the chart refused cacheSizeMib 0 for another reason: $(tail -1 /tmp/s30-helm.log | cut -c1-160)"; }
+else
+    bad "chart_up with workers.cacheHostPath=$CROOT did not roll the plugin: $($K -n $SYS describe pod "$(plugin_pod)" 2>/dev/null | grep -i 'hostPath\|Warning' | tail -2)"
+fi
+# Restore: the chart without a placement, the fixtures as written, the
+# root gone from every node.
+chart_up >/dev/null 2>&1 && plugin_rolled && ok "chart restored (no cache placement)" || bad "chart restore failed"
+$K -n $NS delete pod shared-a reader reader-ro --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
+apply_fx tenants.yaml >/dev/null
+for n in $($K get nodes -o jsonpath='{.items[*].metadata.name}'); do NODE=$n onnode "rm -rf $CROOT" >/dev/null 2>&1; done
+
 # ── S21 (audit 2026-09-03, finding 4) ─────────────────────────────────
 # A node reboot empties the worker's memory-backed comm dir: the
 # supervisor restarts with no launch record, sits in its accept loop,

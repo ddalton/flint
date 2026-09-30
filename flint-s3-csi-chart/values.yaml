@@ -19,8 +19,9 @@
 # admissible under PodSecurity `restricted`.
 #
 # For a dataset MANY pods read, one mounter per node instead of one per
-# pod — the CR opts its read-only consumers in. The block cache does NOT
-# come with it: name spec.cache for a working set that fits in it (see
+# pod — the CR opts its read-only consumers in. The block cache comes
+# with it only where workers.cacheHostPath places it on a fast device;
+# otherwise name spec.cache for a working set that fits in it (see
 # workers.scratchSize below for why):
 #
 #   apiVersion: chert.us/v1alpha1
@@ -359,18 +360,47 @@ workers:
   # 6 GiB through a 768Mi cache read 5× slower than S3 on a gp3 root,
   # cold and warm alike. Ask for a cache (spec.cache.maxSizeMib, under
   # scratchSize) for a set that fits; a bigger scratchSize on the same
-  # disk buys a bigger cache at the same 125 MiB/s. Placing the cache on
-  # a faster device is the follow-up
-  # (docs/plans/passthrough-read-only-mount-sharing.md §11).
+  # disk buys a bigger cache at the same 125 MiB/s. Put the cache on a
+  # faster device with cacheHostPath, below.
   commSize: ""
   scratchSize: ""
+
+  # WHERE THE BLOCK CACHE LIVES (FLINT_S3CSI_CACHE_HOST_PATH). Empty ⇒ the
+  # scratch emptyDir, i.e. the node's root disk (above). Set to a directory
+  # on a device at least as fast as the node's S3 path — the instance
+  # store, e.g. /mnt/nvme/flint-s3-cache — and every worker that runs with
+  # a cache gets a PRIVATE subdirectory of it (<path>/<worker-name>, 0700,
+  # the worker's uid) as a hostPath at /tmp in place of the emptyDir: the
+  # plugin makes it before the worker and removes it after the mounter's
+  # own exit, and one left by a worker that died with its plugin is
+  # emptied before the next create (s3w-* directories no record names are
+  # removed when the plugin starts; anything else in the directory is
+  # left alone). The directory must EXIST on every node: the plugin
+  # mounts it as a hostPath of type Directory, so a node without the
+  # device FAILS the plugin pod loudly instead of kubelet creating the
+  # directory on the root disk and the cache landing exactly where the
+  # note above says it must not. Mounting the device is the platform's
+  # job (on trove nodes, nvme1n1), not the chart's. The mounter's argv is
+  # the same either way (--cache /tmp), so a class key does not depend on
+  # where the cache lives. With a placement set, a sharing CR that names
+  # no spec.cache gets one of cacheSizeMib; without one, nothing gets a
+  # cache it did not ask for (docs/plans/passthrough-read-only-mount-sharing.md §11).
+  cacheHostPath: ""
+  # The cache a sharing CR that names no spec.cache gets when the cache is
+  # placed (FLINT_S3CSI_CACHE_SIZE_MIB), as mount-s3's --max-cache-size in
+  # MiB. A hostPath has no sizeLimit, so this is the only bound: size it
+  # for the working set (a set larger than the cache warms nothing) and
+  # for the device every worker on the node shares. A CR's own
+  # spec.cache.maxSizeMib wins.
+  cacheSizeMib: 4096
 
   # THE REAL GUARD on workers.namespace (§3.6). A ValidatingAdmissionPolicy
   # that admits a pod there only if the creator is the node
   # ServiceAccount, the pod is pinned to the node whose kubelet minted
   # the caller's token, every image is one of the two above, nothing is
   # privileged / hostNetwork / hostPID, the only hostPath allowed is
-  # under the plugin's own volumes dir, and no ServiceAccount token is
+  # under the plugin's own volumes dir (or, with cacheHostPath set, a
+  # subdirectory of that root), and no ServiceAccount token is
   # mounted; and a DELETE only for a pod on the caller's own node.
   # Without the node rule, one compromised node could delete every
   # worker in the cluster and strand every S3-mounted pod on ENOTCONN.

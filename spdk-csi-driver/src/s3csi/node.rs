@@ -98,6 +98,16 @@ pub struct Config {
     pub plugin_root: PathBuf,
     pub comm_size: String,
     pub scratch_size: String,
+    /// `workers.cacheHostPath`: the device the block cache is PLACED on
+    /// (sharing design §11 step 2). Every worker that runs with a cache
+    /// gets `<path>/<worker-name>`, 0700 for its uid, as a hostPath at
+    /// `/tmp` in place of the scratch emptyDir; made before the pod,
+    /// removed after the mounter's own exit. None: the emptyDir, on the
+    /// node's root disk, and no CR gets a cache it did not ask for.
+    pub cache_host_path: Option<PathBuf>,
+    /// `workers.cacheSizeMib`: the cache a sharing CR that names none gets
+    /// when the cache is placed.
+    pub cache_size_mib: u64,
 }
 
 impl std::fmt::Debug for Config {
@@ -110,6 +120,7 @@ impl std::fmt::Debug for Config {
             .field("broker", &self.broker.as_ref().map(|b| b.base_url().to_string()))
             .field("creds_lifetime_secs", &self.creds_lifetime_secs)
             .field("plugin_root", &self.plugin_root)
+            .field("cache_host_path", &self.cache_host_path)
             .finish_non_exhaustive()
     }
 }
@@ -128,6 +139,26 @@ impl Config {
         };
         let worker_resources = resources("FLINT_S3CSI_WORKER_RESOURCES")?;
         let shared_worker_resources = resources("FLINT_S3CSI_SHARED_WORKER_RESOURCES")?;
+        // The placed cache root must be a directory on THIS node at
+        // startup: the chart mounts it as a hostPath of type Directory (a
+        // node without the device fails the plugin pod), and this is the
+        // message that names the knob when it does not.
+        let cache_host_path = match opt("FLINT_S3CSI_CACHE_HOST_PATH") {
+            None => None,
+            Some(p) => {
+                let p = PathBuf::from(p);
+                if !p.is_absolute() {
+                    return Err(format!("FLINT_S3CSI_CACHE_HOST_PATH {} is not an absolute path (workers.cacheHostPath)", p.display()));
+                }
+                if !p.is_dir() {
+                    return Err(format!(
+                        "FLINT_S3CSI_CACHE_HOST_PATH {} is not a directory on this node: mount the device there on every node, or unset workers.cacheHostPath",
+                        p.display()
+                    ));
+                }
+                Some(p)
+            }
+        };
         Ok(Self {
             node_name: need("FLINT_S3CSI_NODE_NAME")?,
             node_uid: None,
@@ -148,6 +179,8 @@ impl Config {
             plugin_root: super::plugin_root(),
             comm_size: opt("FLINT_S3CSI_COMM_SIZE").unwrap_or_else(|| "16Mi".into()),
             scratch_size: opt("FLINT_S3CSI_SCRATCH_SIZE").unwrap_or_else(|| "1Gi".into()),
+            cache_host_path,
+            cache_size_mib: opt("FLINT_S3CSI_CACHE_SIZE_MIB").and_then(|v| v.parse().ok()).unwrap_or(4096),
         })
     }
 }
@@ -246,6 +279,64 @@ impl S3Node {
             }
         }
         self.adopt_shared().await;
+        self.sweep_cache_root();
+    }
+
+    /// Directories under the placed cache root that no record names: a
+    /// worker's whose plugin died between the pod's delete and this
+    /// removal, or a record removed while the plugin was down. Nothing
+    /// holds them. Only `s3w-*` names are touched — the root is the
+    /// operator's directory, and anything else in it is not ours.
+    fn sweep_cache_root(&self) {
+        let Some(root) = self.cfg.cache_host_path.as_ref() else { return };
+        let mut named: std::collections::HashSet<PathBuf> =
+            VolumeState::list(&self.cfg.plugin_root).into_iter().filter_map(|(_, st)| st.cache_dir.map(PathBuf::from)).collect();
+        named.extend(SharedMount::list(&self.cfg.plugin_root).into_iter().filter_map(|(_, sm)| sm.cache_dir.map(PathBuf::from)));
+        let entries = match std::fs::read_dir(root) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(root = %root.display(), "cache root not readable: {e}");
+                return;
+            }
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            let ours = p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("s3w-"));
+            if !ours || named.contains(&p) {
+                continue;
+            }
+            match std::fs::remove_dir_all(&p) {
+                Ok(()) => tracing::info!(dir = %p.display(), "removed a cache directory no worker record names"),
+                Err(e) => tracing::warn!(dir = %p.display(), "orphan cache directory not removed: {e}"),
+            }
+        }
+    }
+
+    /// The cache's private directory on the placed device for a worker
+    /// that will run with a cache: `<workers.cacheHostPath>/<worker-name>`.
+    /// None when the cache is not placed, or this mount runs without one.
+    fn cache_dir_for(&self, spec: &crate::passthrough::spec::MountSpec, worker_name: &str) -> Option<PathBuf> {
+        let root = self.cfg.cache_host_path.as_ref()?;
+        spec.cache.as_ref().filter(|c| c.enabled)?;
+        Some(root.join(worker_name))
+    }
+
+    /// Remove a worker's placed cache directory, after its mounter is
+    /// gone. Only a direct child of the configured root is ever removed:
+    /// a record from before the root moved names a directory under the
+    /// old one, and that is the operator's to clear.
+    fn remove_cache_dir(&self, dir: Option<&str>, label: &str) {
+        let (Some(dir), Some(root)) = (dir, self.cfg.cache_host_path.as_ref()) else { return };
+        let p = Path::new(dir);
+        if p.parent() != Some(root.as_path()) {
+            tracing::warn!(volume = label, dir, root = %root.display(), "cache directory is not under the configured root; leaving it");
+            return;
+        }
+        match std::fs::remove_dir_all(p) {
+            Ok(()) => tracing::info!(volume = label, dir, "cache directory removed"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(volume = label, dir, "cache directory not removed: {e}"),
+        }
     }
 
     /// The shared records, after the volumes: drop members whose volume
@@ -321,6 +412,7 @@ impl S3Node {
             }
         }
         let _ = worker::delete(&self.client, &st.worker_namespace, &st.worker_name, Some(5)).await;
+        self.remove_cache_dir(st.cache_dir.as_deref(), &st.volume_id);
         if let Some(b) = &self.cfg.broker {
             let _ = b.deregister(&st.volume_id).await;
         }
@@ -695,10 +787,22 @@ impl S3Node {
         // volume: 5× slower than S3 on EC2 (sharing design §11). Off until
         // the cache can be placed on a faster device; said at publish so
         // the operator who expected one sees why there is none.
-        if spec.shares_read_only() && spec.cache.is_none() {
+        // With the cache PLACED (workers.cacheHostPath, §11 step 2) a
+        // sharing CR that names none gets one of workers.cacheSizeMib on
+        // that device: the disk under it is the operator's, and at least
+        // as fast as S3, so step 1's reason does not apply there.
+        let placed = self.cfg.cache_host_path.is_some();
+        let defaulted = placed && spec.shares_read_only() && spec.cache.is_none();
+        let spec = spec.with_placed_default_cache(placed, self.cfg.cache_size_mib);
+        if defaulted {
+            tracing::info!(
+                volume = vid, cr = pr.selector.name(), cache_mib = self.cfg.cache_size_mib,
+                "sharing: block cache defaulted on the placed device (spec.cache absent, workers.cacheHostPath set)"
+            );
+        } else if spec.shares_read_only() && spec.cache.is_none() {
             tracing::info!(
                 volume = vid, cr = pr.selector.name(),
-                "sharing: no block cache (spec.cache absent; the default is off — on an emptyDir it would sit on the node's root disk); name spec.cache on the CR to ask for one"
+                "sharing: no block cache (spec.cache absent; the default is off — on an emptyDir it would sit on the node's root disk); name spec.cache on the CR to ask for one, or place the cache with workers.cacheHostPath"
             );
         }
         if spec.shares_read_only() {
@@ -764,11 +868,22 @@ impl S3Node {
             sync_env: None,
             on_behalf_of: pr.on_behalf_of.clone(),
             shared: None,
+            cache_dir: None,
         };
         st.save(dir).map_err(|e| Status::internal(format!("state: {e}")))?;
 
         // The worker pod first: its comm dir is where the credential goes.
         let (run_as, run_as_gid) = worker_owner(&st);
+        // The cache's private directory on the placed device, before the
+        // pod that mounts it (§11 step 2): 0700, the worker's uid.
+        if let Some(cdir) = self.cache_dir_for(&spec, &st.worker_name) {
+            if let Err(e) = prepare_cache_dir(&cdir, run_as, run_as_gid) {
+                return Err(self.fail(dir, &st, Status::internal(format!("cache directory {}: {e}", cdir.display()))).await);
+            }
+            st.cache_dir = Some(cdir.to_string_lossy().into_owned());
+            st.save(dir).map_err(|e| Status::internal(format!("state: {e}")))?;
+            tracing::info!(volume = vid, worker = %st.worker_name, dir = %cdir.display(), "block cache placed");
+        }
         let pod = worker::build_pod(&WorkerInputs {
             namespace: self.cfg.worker_namespace.clone(),
             node_name: self.cfg.node_name.clone(),
@@ -788,6 +903,7 @@ impl S3Node {
             priority_class: self.cfg.priority_class.clone(),
             comm_size: self.cfg.comm_size.clone(),
             scratch_size: self.cfg.scratch_size.clone(),
+            cache_host_dir: st.cache_dir.clone(),
             shared_key: None,
         });
         if let Err(e) = worker::ensure(&self.client, &pod).await {
@@ -944,6 +1060,7 @@ impl S3Node {
             sync_env: None,
             on_behalf_of: pr.on_behalf_of.clone(),
             shared: Some(hash.clone()),
+            cache_dir: None,
         };
         st.save(dir).map_err(|e| Status::internal(format!("state: {e}")))?;
 
@@ -997,6 +1114,7 @@ impl S3Node {
                 phase: "publishing".into(),
                 members: vec![],
                 created_unix: Some(chrono::Utc::now().timestamp() as u64),
+                cache_dir: None,
             },
         };
         // The record carries this member from here on, so a failure below
@@ -1008,6 +1126,18 @@ impl S3Node {
             // CREATE: the worker first (its comm dir is where the
             // credential goes), then the credential, then the mount.
             let (run_as, run_as_gid) = worker_owner(&st);
+            // The class's cache directory on the placed device (§11 step
+            // 2), before the pod: one left by a dead mounter of this class
+            // is emptied first. On the shared record, so the last member's
+            // teardown removes it.
+            sm.cache_dir = self.cache_dir_for(spec, &sm.worker_name).map(|p| p.to_string_lossy().into_owned());
+            if let Some(cdir) = sm.cache_dir.as_deref() {
+                if let Err(e) = prepare_cache_dir(Path::new(cdir), run_as, run_as_gid) {
+                    return Err(self.fail(dir, &st, Status::internal(format!("cache directory {cdir}: {e}"))).await);
+                }
+                sm.save(&sdir).map_err(|e| Status::internal(format!("shared record: {e}")))?;
+                tracing::info!(volume = vid, shared = %hash, worker = %sm.worker_name, dir = cdir, "block cache placed");
+            }
             let pod = worker::build_pod(&WorkerInputs {
                 namespace: self.cfg.worker_namespace.clone(),
                 node_name: self.cfg.node_name.clone(),
@@ -1027,6 +1157,7 @@ impl S3Node {
                 priority_class: self.cfg.priority_class.clone(),
                 comm_size: self.cfg.comm_size.clone(),
                 scratch_size: self.cfg.scratch_size.clone(),
+                cache_host_dir: sm.cache_dir.clone(),
                 shared_key: Some(&key),
             });
             if let Err(e) = worker::ensure(&self.client, &pod).await {
@@ -1538,6 +1669,7 @@ impl S3Node {
             sync_env: None,
             on_behalf_of: pr.on_behalf_of.clone(),
             shared: None,
+            cache_dir: None,
         };
         st.save(dir).map_err(|e| Status::internal(format!("state: {e}")))?;
 
@@ -1646,6 +1778,7 @@ impl S3Node {
             priority_class: self.cfg.priority_class.clone(),
             comm_size: self.cfg.comm_size.clone(),
             scratch_size: self.cfg.scratch_size.clone(),
+            cache_host_dir: None,
             shared_key: None,
         });
         worker::ensure(&self.client, &pod).await.map_err(Status::unavailable)?;
@@ -1711,8 +1844,17 @@ impl S3Node {
     /// send makes mount-s3 return without joining its threads, which is
     /// what cut the upload before. At the ceiling the old order applies
     /// (marker, delete with 10 s), so the worst case is what it always
-    /// was, and the log says which happened and why it matters.
-    async fn teardown_mounter(&self, label: &str, src: &Path, ns: &str, name: &str, worker_uid: Option<&str>) -> Result<(), Status> {
+    /// was, and the log says which happened and why it matters. A placed
+    /// cache directory goes last, after the pod that mounted it.
+    async fn teardown_mounter(
+        &self,
+        label: &str,
+        src: &Path,
+        ns: &str,
+        name: &str,
+        worker_uid: Option<&str>,
+        cache_dir: Option<&str>,
+    ) -> Result<(), Status> {
         unmount_all(&fuse::ro_stage_of(src)).map_err(|e| Status::internal(format!("unmount ro stage: {e}")))?;
         unmount_all(src).map_err(|e| Status::internal(format!("unmount source: {e}")))?;
         // A worker that never reached Running (a create kept for a retry
@@ -1744,13 +1886,21 @@ impl S3Node {
         };
         self.release_worker_uid(label, worker_uid);
         worker::delete(&self.client, ns, name, Some(if exited { 0 } else { 10 })).await.map_err(Status::unavailable)?;
+        self.remove_cache_dir(cache_dir, label);
         Ok(())
     }
 
     /// The last member out: the shared mounter, then its record.
     async fn teardown_shared(&self, sdir: &Path, sm: &SharedMount) -> Result<(), Status> {
-        self.teardown_mounter(&format!("shared:{}", sm.hash), Path::new(&sm.src), &sm.worker_namespace, &sm.worker_name, sm.worker_uid.as_deref())
-            .await?;
+        self.teardown_mounter(
+            &format!("shared:{}", sm.hash),
+            Path::new(&sm.src),
+            &sm.worker_namespace,
+            &sm.worker_name,
+            sm.worker_uid.as_deref(),
+            sm.cache_dir.as_deref(),
+        )
+        .await?;
         remove_state_dir(sdir)
     }
 
@@ -2082,7 +2232,8 @@ impl S3Node {
                 None => tracing::warn!(volume = %vid, shared = %hash, "no shared record at {}; nothing to leave", sdir.display()),
             }
         } else {
-            self.teardown_mounter(&vid, Path::new(&st.src), &st.worker_namespace, &st.worker_name, st.worker_uid.as_deref()).await?;
+            self.teardown_mounter(&vid, Path::new(&st.src), &st.worker_namespace, &st.worker_name, st.worker_uid.as_deref(), st.cache_dir.as_deref())
+                .await?;
         }
         if let Some(b) = &self.cfg.broker {
             if let Err(e) = b.deregister(&vid).await {
@@ -2190,6 +2341,21 @@ pub fn worker_memory_limit(r: Option<&ResourceRequirements>) -> Option<String> {
 /// pretend otherwise at the others' expense.
 pub fn revocation_removes_the_key(st: &VolumeState) -> bool {
     st.shared.is_none()
+}
+
+/// The cache's private directory on the placed device
+/// (`workers.cacheHostPath/<worker>`), made before the worker that mounts
+/// it at `/tmp`: emptied if a previous worker of this name left one (a
+/// dead mounter's blocks are nobody's), then 0700 for the worker's uid —
+/// as private as the emptyDir it replaces (root on the node reads both).
+fn prepare_cache_dir(dir: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
+    if dir.exists() {
+        tracing::info!(dir = %dir.display(), "emptying the cache directory a previous worker of this name left");
+        std::fs::remove_dir_all(dir)?;
+    }
+    std::fs::create_dir(dir)?;
+    std::os::unix::fs::chown(dir, Some(uid), Some(gid))?;
+    std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))
 }
 
 /// The uid/gid the worker RUNS as (never root: a root owner maps to
@@ -2555,6 +2721,7 @@ mod tests {
             sync_env: None,
             on_behalf_of: None,
             shared: None,
+            cache_dir: None,
         }
     }
 

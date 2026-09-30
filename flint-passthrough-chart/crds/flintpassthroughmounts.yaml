@@ -182,7 +182,11 @@ spec:
                     warms nothing: 6 GiB through a 768 MiB cache read 5x
                     SLOWER than with no cache on a gp3 root, cold and
                     warm alike (2026-09-30, design doc section 11).
-                    Enable it for a set that fits.
+                    Enable it for a set that fits. WHERE it lives is the
+                    chart's: workers.cacheHostPath places every cache in
+                    a private directory on a device the operator names
+                    (the instance store), and there a sharing CR that
+                    names no cache gets one of workers.cacheSizeMib.
                   properties:
                     enabled:
                       type: boolean
@@ -223,7 +227,9 @@ spec:
                     broker. A sharing CR that names no cache runs WITHOUT
                     the block cache (the one-day default of three quarters
                     of workers.scratchSize, 2026-09-29, was withdrawn once
-                    measured: see cache); name cache to ask for one.
+                    measured: see cache) unless the chart PLACED the cache
+                    on a fast device (workers.cacheHostPath), where it
+                    gets one of workers.cacheSizeMib; name cache to choose.
                     Design: docs/plans/passthrough-read-only-mount-sharing.md.
                   properties:
                     readOnly:

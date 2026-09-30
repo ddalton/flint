@@ -19,11 +19,16 @@ use super::spec::{quantity_mib, MountSpec};
 /// rig: with the daemon at uid 1001 and no flag, root's `statfs` on
 /// the mount is refused, so the driver's readiness probe can never
 /// pass; with the flag, root, the owner and a third uid all read.
-/// Where Mountpoint's block cache goes: the worker's own `scratch`
-/// emptyDir, mounted at `/tmp` (`worker.rs`, sized by
-/// `workers.scratchSize`). Never a hostPath — AWS moved their own cache
-/// off the host for isolation, and a shared host cache would be a
-/// cross-tenant read channel.
+/// Where Mountpoint's block cache goes: `/tmp` in the worker — the
+/// `scratch` emptyDir (`worker.rs`, sized by `workers.scratchSize`), or,
+/// with `workers.cacheHostPath` set, the worker's PRIVATE directory on
+/// the device the operator named (`<root>/<worker>`, 0700 for its uid,
+/// made and removed by the plugin), hostPath'd at the same `/tmp` so the
+/// argv — and the class key — do not depend on where the cache lives.
+/// Never a SHARED host directory: AWS moved their own cache off the host
+/// for isolation, and one directory for every tenant would be a
+/// cross-tenant read channel; a per-worker 0700 directory is as private
+/// as the emptyDir it replaces (root on the node reads both).
 ///
 /// The scratch ROOT, not a subdirectory of it: mount-s3 creates its own
 /// `mountpoint-cache-<id>` under the directory it is given and does not
