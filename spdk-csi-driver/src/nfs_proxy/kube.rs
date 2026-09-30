@@ -9,7 +9,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use kube::api::{Patch, PatchParams};
 use kube::runtime::{reflector, watcher, WatchStreamExt};
-use kube::{Api, Client};
+use kube::{Api, Client, ResourceExt};
 use tracing::{info, warn};
 
 use super::server::Waker;
@@ -27,7 +27,19 @@ use crate::lite_operator::idle::ANN_REQUESTED_AT;
 /// the FIRST share (by namespace/name, so the choice is stable across
 /// rebuilds) and drops the rest loudly — refusing the whole table would
 /// take every workspace down for one bad row.
-pub fn rows_of(shares: &[Arc<FlintShare>]) -> (Vec<HubRow>, Vec<String>) {
+///
+/// `last_address` carries each share's address across the moments the
+/// operator withholds `status.address` — every ladder transition, a WAKE
+/// included, because a direct consumer must not mount an address with
+/// nothing behind it. Behind the proxy that withholding is exactly wrong:
+/// a share without a row is an absent workspace, so a client holding its
+/// handles got ESTALE and a lookup got ENOENT in the very window the proxy
+/// should answer DELAY and wait (step5-kind.sh). The address of a hub's
+/// headless Service does not change, so the last one is still right.
+pub fn rows_of(shares: &[Arc<FlintShare>], last_address: &mut std::collections::HashMap<String, String>) -> (Vec<HubRow>, Vec<String>) {
+    let live: std::collections::HashSet<String> =
+        shares.iter().map(|s| format!("{}/{}", s.namespace().unwrap_or_default(), s.name_any())).collect();
+    last_address.retain(|k, _| live.contains(k));
     let mut views: Vec<(ShareView, Option<u32>)> = shares
         .iter()
         .map(|s| (ShareView::of(s), s.status.as_ref().and_then(|st| st.stateid_tag)))
@@ -41,10 +53,15 @@ pub fn rows_of(shares: &[Arc<FlintShare>]) -> (Vec<HubRow>, Vec<String>) {
     for (v, tag) in views {
         let who = format!("{}/{}", v.namespace, v.name);
         if v.deleting {
+            last_address.remove(&who);
             continue;
         }
-        let Some(address) = v.address.clone() else {
-            continue; // Failed / Terminating withdraw it; nothing to dial
+        if let Some(a) = &v.address {
+            last_address.insert(who.clone(), a.clone());
+        }
+        let Some(address) = last_address.get(&who).cloned() else {
+            skipped.push(format!("{who}: no address yet"));
+            continue;
         };
         let Some(server_id) = v.server_id.as_deref().and_then(|s| s.trim().parse::<u64>().ok()) else {
             skipped.push(format!("{who}: no serverId yet"));
@@ -107,8 +124,9 @@ pub async fn watch(client: Client, namespace: Option<String>, table: Arc<Table>,
     });
     store.wait_until_ready().await?;
     let mut last_skipped: Vec<String> = Vec::new();
+    let mut last_address = std::collections::HashMap::new();
     loop {
-        let (rows, skipped) = rows_of(&store.state());
+        let (rows, skipped) = rows_of(&store.state(), &mut last_address);
         if skipped != last_skipped {
             for s in &skipped {
                 warn!("share not routable: {s}");
@@ -180,7 +198,7 @@ mod tests {
             share("t", "no-id", None, Some(3), Phase::Pending),
             share("t", "no-tag", Some("14"), None, Phase::Ready),
         ];
-        let (rows, skipped) = rows_of(&fleet);
+        let (rows, skipped) = rows_of(&fleet, &mut Default::default());
         let names: Vec<_> = rows.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec!["parked", "ready"], "parked shares stay listed: the proxy wakes them");
         assert_eq!(skipped.len(), 2, "{skipped:?}");
@@ -196,7 +214,7 @@ mod tests {
             share("a", "z", Some("23"), Some(9), Phase::Ready), // same tag as b/x
             share("a", "ok", Some("24"), Some(6), Phase::Ready),
         ];
-        let (rows, skipped) = rows_of(&fleet);
+        let (rows, skipped) = rows_of(&fleet, &mut Default::default());
         let mut got: Vec<_> = rows.iter().map(|r| format!("{}={}", r.name, r.server_id)).collect();
         got.sort();
         // a/x is first by namespace, so it keeps "x"; b/x then collides on
@@ -208,9 +226,31 @@ mod tests {
         assert!(t.is_ok(), "the table accepts what rows_of produced");
     }
 
+    /// The operator withholds `status.address` during every ladder
+    /// transition, a wake included. The row must stay (at the last address)
+    /// or the workspace vanishes mid-wake: ESTALE for held handles, ENOENT
+    /// for a lookup (step5-kind.sh, run 1). A share never seen with an
+    /// address is still left out, and a deleted one is forgotten.
+    #[test]
+    fn a_share_keeps_its_row_while_the_operator_withholds_its_address() {
+        let mut last = std::collections::HashMap::new();
+        let up = share("t", "w", Some("41"), Some(4), Phase::Ready);
+        assert_eq!(rows_of(&[up.clone()], &mut last).0.len(), 1);
+        let mut waking = (*up).clone();
+        waking.status.as_mut().unwrap().address = None;
+        waking.status.as_mut().unwrap().phase = Some(Phase::Starting);
+        let (rows, skipped) = rows_of(&[Arc::new(waking.clone())], &mut last);
+        assert_eq!(rows.len(), 1, "mid-wake the workspace must stay routable: {skipped:?}");
+        assert_eq!(rows[0].address, "w.t.svc.cluster.local:2049");
+        let (rows, _) = rows_of(&[Arc::new(waking)], &mut Default::default());
+        assert!(rows.is_empty(), "never seen with an address: nothing to dial");
+        assert!(rows_of(&[], &mut last).0.is_empty());
+        assert!(last.is_empty(), "a share that is gone is forgotten");
+    }
+
     #[test]
     fn an_admin_suspended_share_is_listed_but_not_woken() {
-        let (rows, _) = rows_of(&[share("t", "s", Some("31"), Some(5), Phase::Suspended)]);
+        let (rows, _) = rows_of(&[share("t", "s", Some("31"), Some(5), Phase::Suspended)], &mut Default::default());
         assert!(!rows[0].wakeable);
     }
 }

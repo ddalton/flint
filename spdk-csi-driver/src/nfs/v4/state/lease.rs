@@ -356,6 +356,11 @@ impl LeaseManager {
         self.leases.iter().filter(|l| !l.is_expired()).count()
     }
 
+    /// The clients behind `live_count`.
+    pub fn live_clients(&self) -> Vec<u64> {
+        self.leases.iter().filter(|l| !l.is_expired()).map(|l| l.client_id).collect()
+    }
+
     /// Get lease time (for client queries)
     pub fn lease_time(&self) -> u32 {
         lease_time().as_secs() as u32

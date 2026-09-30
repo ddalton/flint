@@ -285,8 +285,29 @@ gateway:
 # fsid) and their stateid tag (assigned once, into status.stateidTag),
 # and their NFS Services become headless. The hub NetworkPolicy admits
 # the proxy on 2049 (networkPolicy.enabled).
+# A restart of a node's spdk-tgt (a flint-csi-node roll, an upgrade, a
+# crash) leaves every flint volume staged on that node dead: the hub's
+# ext4 goes EIO and stays so. The operator scales each such hub to zero
+# and back, so it restages. Only hubs whose PVC is in `storageClasses`.
+restartOnTgtRestart:
+  enabled: true
+  csiNodeNamespace: flint-system
+  csiNodeSelector: app=flint-csi-node
+  tgtContainer: spdk-tgt
+  storageClasses: [flint-spdk]
+
 nfsProxy:
   enabled: false
+
+  # The idle ladder for every share that sets no `spec.idle` (design §7a:
+  # most projects are inactive, and an inactive one should cost a CR,
+  # not a disk). Only behind the proxy, which wakes a parked hub. Suspend
+  # keeps the PVC; hibernate deletes it once the bucket can rebuild it and
+  # no client holds state, and applies only to shares with a bucket.
+  # 0 turns a rung off; a share opts out with `spec.idle: {}`.
+  idleDefaults:
+    suspendAfterSecs: 3600
+    hibernateAfterSecs: 86400
 
   # Who may see which workspace. REQUIRED: a client that matches no
   # identity sees an empty `/`. A rule names `clients` (client

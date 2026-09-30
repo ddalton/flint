@@ -93,6 +93,9 @@ pub struct RenderDefaults {
     /// address, so a hub needs no stable ClusterIP, and past ~4,000
     /// shares a ClusterIP each overflows a default Service range (§7a).
     pub nfs_proxy: bool,
+    /// The fleet's idle policy for shares with no `spec.idle`, applied
+    /// only behind the proxy (`idle::effective`).
+    pub idle: Option<crate::lite_operator::crd::IdleSpec>,
 }
 
 impl Default for RenderDefaults {
@@ -114,6 +117,7 @@ impl Default for RenderDefaults {
             hub_cpu_request: "100m".to_string(),
             hub_memory_request: "128Mi".to_string(),
             nfs_proxy: false,
+            idle: None,
         }
     }
 }

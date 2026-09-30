@@ -77,6 +77,10 @@ pub enum IdleState {
     /// claim is deleted and the state returns to `Active` — where the
     /// render creates a NEW claim at the smaller size.
     ReprovisionDraining,
+    /// Scaled to zero so the hub comes back on a FRESH staging of its
+    /// volume: its node's spdk-tgt restarted under it (`noderoll`). Back to
+    /// `Active` once no pod mounts the claim.
+    Restarting,
 }
 
 impl IdleState {
@@ -88,6 +92,7 @@ impl IdleState {
             IdleState::HibernateVerifying => "HibernateVerifying",
             IdleState::ReprovisionVerifying => "ReprovisionVerifying",
             IdleState::ReprovisionDraining => "ReprovisionDraining",
+            IdleState::Restarting => "Restarting",
         }
     }
 
@@ -99,6 +104,7 @@ impl IdleState {
             "HibernateVerifying" => IdleState::HibernateVerifying,
             "ReprovisionVerifying" => IdleState::ReprovisionVerifying,
             "ReprovisionDraining" => IdleState::ReprovisionDraining,
+            "Restarting" => IdleState::Restarting,
             _ => return None,
         })
     }
@@ -111,7 +117,7 @@ impl IdleState {
     pub fn is_down(self) -> bool {
         matches!(
             self,
-            IdleState::Suspended | IdleState::Hibernated | IdleState::ReprovisionDraining
+            IdleState::Suspended | IdleState::Hibernated | IdleState::ReprovisionDraining | IdleState::Restarting
         )
     }
 
@@ -343,6 +349,31 @@ pub struct Inputs<'a> {
 /// sidesteps clock comparison: the annotation is judged on the front
 /// door's clock and idleness on the hub's, and neither has to agree
 /// with the operator's.
+/// The idle policy a share runs under: its own `spec.idle` if it has one,
+/// otherwise — and ONLY when the NFS proxy fronts the fleet — the
+/// operator's fleet default (nfs-proxy design §7a: at 10,000–20,000
+/// shares, 90–95% of them inactive, an inactive project hibernates).
+///
+/// The proxy is the condition because it removes the reason the ladder
+/// is opt-in (see `IdleSpec`): clients mount the proxy, and the proxy
+/// wakes a parked hub, so a default suspend no longer hangs anyone.
+/// The hibernate rung is dropped for a share with no bucket — its PVC is
+/// the only copy, which admission refuses for an explicit policy too.
+/// A share opts out with an explicit empty `spec.idle: {}`.
+pub fn effective(share: &FlintShare, fleet: Option<&IdleSpec>, nfs_proxy: bool) -> Option<IdleSpec> {
+    if let Some(own) = &share.spec.idle {
+        return Some(own.clone());
+    }
+    if !nfs_proxy {
+        return None;
+    }
+    let mut d = fleet?.clone();
+    if share.spec.bucket.is_none() {
+        d.hibernate_after_secs = None;
+    }
+    Some(d)
+}
+
 pub fn decide(cfg: Option<&IdleSpec>, input: Inputs<'_>) -> Decision {
     let share = input.share;
     let state = state_of(share);
@@ -469,6 +500,28 @@ mod tests {
         chrono::DateTime::parse_from_rfc3339("2026-08-19T12:00:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc)
+    }
+
+    /// §7a: behind the proxy a share with no `spec.idle` runs the fleet
+    /// default; its hibernate rung needs a bucket; its own policy (even an
+    /// empty one, the opt-out) wins; and without the proxy nothing is
+    /// defaulted — nothing would wake a directly-mounted hub.
+    #[test]
+    fn the_fleet_idle_default_applies_only_behind_the_proxy() {
+        let fleet = IdleSpec { suspend_after_secs: Some(3600), hibernate_after_secs: Some(86400), suspend_with_sessions: None };
+        let mut s = share(&[]);
+        s.spec.bucket = None; // the helper's share has one
+        assert_eq!(effective(&s, Some(&fleet), false), None, "no proxy: the ladder stays opt-in");
+        assert_eq!(effective(&s, None, true), None, "no fleet default configured");
+        let d = effective(&s, Some(&fleet), true).expect("the fleet default");
+        assert_eq!((d.suspend_after_secs, d.hibernate_after_secs), (Some(3600), None), "no bucket: never hibernated");
+        s.spec.bucket = Some("b".into());
+        assert_eq!(effective(&s, Some(&fleet), true), Some(fleet.clone()));
+        s.spec.idle = Some(IdleSpec { suspend_after_secs: None, hibernate_after_secs: None, suspend_with_sessions: None });
+        let own = effective(&s, Some(&fleet), true);
+        assert_eq!(own.as_ref().and_then(|i| i.suspend_after_secs), None, "an explicit empty policy opts out");
+        let d = decide(own.as_ref(), Inputs { share: &s, now: now(), hub_quiet: Ok(()), sessions_live: None });
+        assert_eq!(d, Decision::Stay);
     }
 
     fn share(anns: &[(&str, &str)]) -> FlintShare {

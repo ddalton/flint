@@ -222,18 +222,24 @@ pub struct Nfs {
     /// persisted client run for this long whether or not anyone is there.
     #[serde(default)]
     pub lease_secs: Option<u64>,
+
+    /// Clients with a live lease that hold an open, a lock or a
+    /// delegation. A lease alone is not state: behind the proxy every node
+    /// that ever listed a workspace keeps one for as long as it is mounted.
+    #[serde(default)]
+    pub live_state_holders: Option<usize>,
 }
 
 /// Whether a client still holds NFSv4 state on a hub: the hibernation
 /// precondition (design §7a HIB-1).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LeaseFree {
-    /// No client has renewed for a full lease: nothing is held.
+pub enum StateFree {
+    /// No client with a live lease holds an open, a lock or a delegation.
     Free,
     /// The hub has not been up a full lease: the leases it restored at
     /// load are still running, whoever is behind them. Ask again later.
     Settling(String),
-    /// A client renewed since the hub started: it holds state.
+    /// A client that renewed since the hub started holds state.
     Held(String),
     /// The hub does not report what the answer needs.
     Unknown(String),
@@ -320,33 +326,40 @@ impl HubSnapshot {
     }
 
     /// Does NO client hold NFSv4 state here? Hibernation deletes the PVC and
-    /// `state.db` with it, so a client still holding opens or locks would
-    /// lose them: on a direct mount as a remount, behind the proxy as the
-    /// per-op errors of a lost state (design §4). `rpoClean` says the DATA
-    /// is safe; it says nothing about the state (HIB-1).
+    /// `state.db` with it, so a client holding opens, locks or delegations
+    /// would lose them: on a direct mount as a remount, behind the proxy as
+    /// the per-op errors of a lost state (design §4). `rpoClean` says the
+    /// DATA is safe; it says nothing about the state (HIB-1).
     ///
-    /// A just-started hub cannot answer by count alone: load re-creates a
-    /// lease for every persisted client, so the count starts at "everyone
-    /// the old process knew" and falls only once those leases run out
-    /// unrenewed. Hence the uptime term. An absent field is never read as
-    /// zero: this predicate is on the path to a PVC delete.
-    pub fn lease_free(&self) -> LeaseFree {
+    /// A client holding only a lease is not counted: it loses nothing a
+    /// hibernation could keep (its handles go stale either way), and behind
+    /// the proxy every node that ever listed a workspace holds one while it
+    /// stays mounted, which would keep inactive workspaces off the disk-free
+    /// rung for good.
+    ///
+    /// A just-started hub cannot answer at once: load re-creates a lease for
+    /// every persisted client, state and all, and only the clients that do
+    /// not renew within a lease drop out. Hence the uptime term. An absent
+    /// field is never read as zero: this is on the path to a PVC delete.
+    pub fn state_free(&self) -> StateFree {
         let Some(n) = self.nfs else {
-            return LeaseFree::Unknown("the hub reports no NFS state".to_string());
+            return StateFree::Unknown("the hub reports no NFS state".to_string());
         };
-        let (Some(live), Some(lease)) = (n.live_leases, n.lease_secs) else {
-            return LeaseFree::Unknown("the hub reports no live-lease count or lease time".to_string());
+        let (Some(holders), Some(lease)) = (n.live_state_holders, n.lease_secs) else {
+            return StateFree::Unknown("the hub reports no state-holder count or lease time".to_string());
         };
         if self.uptime_secs < lease {
-            return LeaseFree::Settling(format!(
+            return StateFree::Settling(format!(
                 "the hub has been up {}s of its {lease}s lease; the leases it restored at load have not run out",
                 self.uptime_secs
             ));
         }
-        if live > 0 {
-            return LeaseFree::Held(format!("{live} client(s) renewed a lease since the hub started and hold its state"));
+        if holders > 0 {
+            return StateFree::Held(format!(
+                "{holders} client(s) with a live lease hold opens, locks or delegations"
+            ));
         }
-        LeaseFree::Free
+        StateFree::Free
     }
 
     /// May the PVC be deleted — i.e. can the bucket rebuild this volume?
@@ -464,29 +477,31 @@ mod tests {
 
     /// HIB-1 (design §7a): hibernation deletes `state.db`, so it needs
     /// evidence that no client holds state — not only a clean flush. The
-    /// evidence is a live-lease count of zero read after a full lease of
+    /// evidence is a state-holder count of zero read after a full lease of
     /// uptime: before that, the leases restored at load are still running.
+    /// Leases alone do not count.
     #[test]
-    fn hibernation_needs_a_full_lease_of_uptime_and_no_live_lease() {
-        let at = |uptime: u64, live: usize| {
+    fn hibernation_needs_a_full_lease_of_uptime_and_no_state_holder() {
+        let at = |uptime: u64, leases: usize, holders: usize| {
             snap(&format!(
                 r#"{{"phase":"serving","uptimeSecs":{uptime},"rpoClean":true,"epoch":{{"held":true}},
-                    "nfs":{{"activeLeases":{live},"liveLeases":{live},"leaseSecs":90}}}}"#
+                    "nfs":{{"activeLeases":{leases},"liveLeases":{leases},"leaseSecs":90,"liveStateHolders":{holders}}}}}"#
             ))
         };
-        assert_eq!(at(200, 0).lease_free(), LeaseFree::Free);
-        assert!(matches!(at(30, 0).lease_free(), LeaseFree::Settling(_)), "restored leases still running");
-        assert!(matches!(at(30, 2).lease_free(), LeaseFree::Settling(_)));
-        assert!(matches!(at(200, 1).lease_free(), LeaseFree::Held(_)), "a client renewed since the start");
+        assert_eq!(at(200, 0, 0).state_free(), StateFree::Free);
+        assert_eq!(at(200, 3, 0).state_free(), StateFree::Free, "leases without state do not hold a hibernation");
+        assert!(matches!(at(30, 0, 0).state_free(), StateFree::Settling(_)), "restored leases still running");
+        assert!(matches!(at(30, 2, 2).state_free(), StateFree::Settling(_)));
+        assert!(matches!(at(200, 1, 1).state_free(), StateFree::Held(_)), "a renewing client holds state");
         // A clean flush says nothing about state: both verdicts are needed.
-        assert!(at(200, 1).hibernatable().is_ok());
+        assert!(at(200, 1, 1).hibernatable().is_ok());
         // An absent count or lease time is never zero on the way to a delete.
         for doc in [
             r#"{"phase":"serving","uptimeSecs":500}"#,
-            r#"{"phase":"serving","uptimeSecs":500,"nfs":{"activeLeases":0}}"#,
-            r#"{"phase":"serving","uptimeSecs":500,"nfs":{"liveLeases":0}}"#,
+            r#"{"phase":"serving","uptimeSecs":500,"nfs":{"activeLeases":0,"liveLeases":0,"leaseSecs":90}}"#,
+            r#"{"phase":"serving","uptimeSecs":500,"nfs":{"liveStateHolders":0}}"#,
         ] {
-            assert!(matches!(snap(doc).lease_free(), LeaseFree::Unknown(_)), "{doc}");
+            assert!(matches!(snap(doc).state_free(), StateFree::Unknown(_)), "{doc}");
         }
     }
 
@@ -522,7 +537,7 @@ mod tests {
             import_refused: None,
             warm_fill: None,
             tier: TierDoc { gauges: None, meters: Default::default() },
-            nfs: NfsDoc { active_leases: Some(3), outstanding_delegations: Some(0), live_leases: Some(0), lease_secs: Some(0) },
+            nfs: NfsDoc { active_leases: Some(3), outstanding_delegations: Some(0), live_leases: Some(0), lease_secs: Some(0), live_state_holders: Some(0) },
             activity: ActivitySnapshot {
                 last_activity_unix: 900,
                 idle_secs: 1234,
@@ -557,7 +572,7 @@ mod tests {
         assert_eq!(got.rpo_clean, Some(true), "rpoClean authorizes deleting a PVC");
         assert_eq!(got.server_id.as_deref(), Some("stub-1"));
         assert!(got.hibernatable().is_ok(), "a clean stub must be hibernatable");
-        assert_eq!(got.lease_free(), LeaseFree::Free, "and lease-free, or the stub fleet never hibernates");
+        assert_eq!(got.state_free(), StateFree::Free, "and state-free, or the stub fleet never hibernates");
         assert!(
             got.suspendable(600).is_ok(),
             "a stub idle for 1234s must be suspendable against a 600s threshold"

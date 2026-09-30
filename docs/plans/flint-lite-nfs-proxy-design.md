@@ -808,19 +808,58 @@ port are still wanted for capacity and failure isolation.
    checks.
 5. **Scale prerequisites (§7a):**
    **HIB-1 re-derived 2026-09-30: it was still open** (`hibernatable()`
-   read only the flush). Now fixed in code: the hub reports `liveLeases`
-   and `leaseSecs`, and the operator's `verify_and_hibernate` also
-   requires `lease_free()`. That means a full lease of uptime (load
-   re-creates a lease for every persisted client) and then zero live
-   leases. A renewing client sends the share back to Suspended, keeping
-   the disk. Unit-tested with two mutation controls. **Not yet run on a
-   cluster**, and hibernate is not yet the default.
-   Remaining: hibernate as the inactive default,
-   with **zero live leases as a hibernation precondition** (the HIB-1
-   fix, and now required by §4); hub defects **D1** (`FREE_STATEID` →
-   `LOCKS_HELD` after the last `LOCKU`) and **D2** (`CLOSE` →
-   `BAD_STATEID` after a restart) fixed test-first; operator-driven hub restart after a
-   flint-csi-node roll; hibernated share = CR only.
+   read only the flush). Fixed: the hub reports `liveStateHolders`
+   (clients with a live lease AND an open, a lock or a delegation) and
+   `leaseSecs`, and `verify_and_hibernate` also requires `state_free()`.
+   That is a full lease of uptime (load re-creates a lease for every
+   persisted client) and then zero state holders. A holder sends the
+   share back to Suspended with its disk. **A lease alone does not
+   count**: the first cut counted live leases, but behind the proxy
+   every node that ever listed a workspace keeps a backend lease on it
+   while mounted, which would have kept inactive workspaces off the
+   disk-free rung for good. A lease-only client loses nothing a
+   hibernation could keep; its handles go stale either way.
+   **Hibernate is the inactive default behind the proxy:**
+   `nfsProxy.idleDefaults` (suspend 3600 s, hibernate 86400 s) applies
+   to every share with no `spec.idle`. Its hibernate rung applies only
+   with a bucket, and `spec.idle: {}` opts out (`idle::effective`).
+   Without the proxy nothing is defaulted, because nothing would wake a
+   directly mounted hub.
+   **Hubs restart after an spdk-tgt restart:** `restartOnTgtRestart`
+   (`lite_operator::noderoll`) compares, every 30 s, each running hub
+   pod's start with its node's `spdk-tgt` container start. A hub older
+   than its node's tgt goes through `IdleState::Restarting`: zero
+   replicas until no pod mounts the claim, then back, so the volume is
+   staged afresh. A bare pod delete can inherit the dead mount. Only
+   PVCs in the listed classes. Not covered: the tgt of a REMOTE node
+   hosting the volume. Unit-tested with mutation controls.
+   **Kind rig `step5-kind.sh`, run 2: 16/17** (`results-kind-step5/`).
+   A lock holder's workspace was deferred, kept its disk and kept its
+   lock through the verify wake. A lease-only workspace hibernated and
+   woke from the bucket through the proxy. The fleet default, the
+   no-bucket rung and the opt-out behaved as designed. A csi-node
+   rollout restarted exactly the running hubs in the listed class. The
+   FAIL was the rig's convergence query; the operator log shows one mark
+   per hub and none after.
+   **A proxy defect in the wake path, found by the step 5 kind run:**
+   the operator withholds `status.address` in every ladder transition,
+   a wake included, so that a direct consumer never mounts an address
+   with nothing behind it. The proxy's kube mode dropped a share with no
+   address from its table. For the length of a wake the workspace was
+   absent: the lock holder's WRITE got ESTALE and a read of the other
+   workspace got ENOENT, both within 2 s of the wake request, instead of
+   DELAY. The client then released the file's state, and the lock went
+   with it. Fixed: the proxy keeps routing to a share's last address,
+   since a headless hub Service's name does not change
+   (`a_share_keeps_its_row_while_the_operator_withholds_its_address`,
+   which fails with the fallback removed). The step 4 wake leg did not
+   catch it; why it passed there is not established (a new file's
+   create, not a held handle, was its first op).
+   The restart watch patches under the resourceVersion it decided on, so
+   a stale cache cannot overwrite a ladder transition with a restart.
+   Hub defects D1 and D2 were fixed 2026-09-27 (census Part 2).
+   Remaining: a hibernated share = CR only; operator memory at 20,000
+   CRs (§7a).
 6. **Real-hub rig** (never run: the 3,000-share rig used stubs): 10–30
    real hubs behind the proxy at 1,000–10,000 files each, measuring
    RSS/CPU per hub, wake time from hibernate, proxy throughput, and the

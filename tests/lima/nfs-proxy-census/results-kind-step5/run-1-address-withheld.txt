@@ -1,0 +1,49 @@
+== images
+== cluster
+== S3 (RustFS) and a second storage class
+pod "mb" deleted from s3 namespace
+== the csi-node stand-in (BEFORE any hub: a real node's tgt is always older than its hubs)
+== install
+ws-lock: phase=Ready serverId=52637477623623549
+ws-lease: phase=Ready serverId=5816341460488754033
+ws-nobucket: phase=Ready serverId=11015109726926731675
+ws-optout: phase=Ready serverId=5869897902454847503
+ws-other: phase=Ready serverId=16519817760336814637
+PASS an explicit empty spec.idle survived admission (the opt-out)
+== mount; a lock on ws-lock, a written-and-closed file on ws-lease
+PASS mount
+PASS the holder took its lock through the proxy
+== the ladder runs (suspend 60s, hibernate 120s, then a verify of >= one hub lease)
+ws-lock: phase=IdleSuspended pvc=persistentvolumeclaim/ws-lock-data events=[StateidTagAssigned ScalingReplicaSet IdleSuspended ScalingReplicaSet HibernateStarted HibernateDeferred ]
+ws-lease: phase=Hibernated pvc= events=[StateidTagAssigned ScalingReplicaSet IdleSuspended ScalingReplicaSet HibernateStarted HibernateVerified DiskReclaimed ]
+ws-nobucket: phase=IdleSuspended pvc=persistentvolumeclaim/ws-nobucket-data events=[StateidTagAssigned ScalingReplicaSet IdleSuspended ScalingReplicaSet ]
+ws-optout: phase=Ready pvc=persistentvolumeclaim/ws-optout-data events=[StateidTagAssigned ScalingReplicaSet ]
+ws-other: phase=Ready pvc=persistentvolumeclaim/ws-other-data events=[StateidTagAssigned ScalingReplicaSet ]
+ws-lock deferred at 316s; ws-lease hibernated at 357s
+PASS ws-lease (a lease, no state) hibernated: PVC gone
+PASS ws-lock (a lock held) was NOT hibernated: deferred, back to IdleSuspended
+PASS ws-lock kept its PVC
+PASS ws-lock's deferral names the held state
+PASS ws-nobucket (fleet default, no bucket) suspended and kept its PVC
+PASS ws-optout (spec.idle: {}) never left Ready
+== the lock outlived two hub restarts (suspend, verify wake): the proxy re-attached
+holder's write: errno 116
+FAIL the holder's write after the verify wake succeeded (its lock was kept)
+== ws-lease wakes from the bucket through the proxy
+read: [cat: /mnt/px5/ws-lease/f: No such file or directory (os error 2)] phase=Pending
+FAIL the hibernated workspace woke and served its bytes from the bucket
+== an spdk-tgt restart (a csi-node rollout) restarts exactly the right hubs
+running hubs before the roll: ws-lock ws-lease ws-optout ws-other
+ws-lock: pod a33919f1-7e13-4dff-a2d0-3337b332f966 ->  phase=Hibernated events=[StateidTagAssigned ScalingReplicaSet IdleSuspended ScalingReplicaSet HibernateStarted HibernateDeferred Woken HibernateVerified DiskReclaimed ]
+ws-lease: pod 54a6424d-c9c8-49fe-9139-78095ad62c76 -> 9680391a-af2c-465d-be3a-acb0183f110c phase=Ready events=[StateidTagAssigned ScalingReplicaSet IdleSuspended ScalingReplicaSet HibernateStarted HibernateVerified DiskReclaimed Woken HubRestarted IdleSuspended HibernateStarted ]
+ws-nobucket: pod none ->  phase=IdleSuspended events=[StateidTagAssigned ScalingReplicaSet IdleSuspended ScalingReplicaSet ]
+ws-optout: pod 55ebd878-dcd7-47a9-b1a8-06a9fc82e99a -> 1511f9f1-3170-4b41-b024-6e6d53a82748 phase=Ready events=[StateidTagAssigned ScalingReplicaSet ScalingReplicaSet HubRestarted ]
+ws-other: pod 16ac5f56-482a-4075-8f8e-66e8f65595df -> 16ac5f56-482a-4075-8f8e-66e8f65595df phase=Ready events=[StateidTagAssigned ScalingReplicaSet ]
+FAIL ws-lock (running, class standard) was restarted: new pod, HubRestarted
+PASS ws-lease (running, class standard) was restarted: new pod, HubRestarted
+PASS ws-optout (running, class standard) was restarted: new pod, HubRestarted
+PASS ws-other (class other) was NOT restarted
+FAIL the restarted hubs are Ready again
+FAIL convergent: no second restart a minute later
+umount.nfs4: /mnt/px5: device is busy
+RESULT: 12 passed, 5 failed

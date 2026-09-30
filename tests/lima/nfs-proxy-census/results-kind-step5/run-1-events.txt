@@ -1,0 +1,145 @@
+LAST SEEN   TYPE      REASON                  OBJECT                                   MESSAGE
+7m27s       Normal    DiskReclaimed           flintshare/ws-lease                      PVC ws-lease-data deleted — the bucket is now the only copy, and waking this share is a DR import. The CR and the bucket itself are untouched.
+13m         Normal    StateidTagAssigned      flintshare/ws-nobucket                   stateid tag 1034023877 (nfs proxy H2); set once
+5m59s       Normal    HubRestarted            flintshare/ws-optout                     the node's spdk-tgt restarted under this hub, so its volume's staging was dead; the old pod is gone and a new one stages it afresh
+13m         Normal    StateidTagAssigned      flintshare/ws-optout                     stateid tag 2870715022 (nfs proxy H2); set once
+13m         Normal    StateidTagAssigned      flintshare/ws-lease                      stateid tag 1328141926 (nfs proxy H2); set once
+11m         Normal    IdleSuspended           flintshare/ws-lease                      no activity for the configured window (idle) — scaled to zero; the PVC is kept and a wake is a pod start
+12m         Normal    IdleSuspended           flintshare/ws-nobucket                   no activity for the configured window (idle) — scaled to zero; the PVC is kept and a wake is a pod start
+2m43s       Normal    HibernateVerified       flintshare/ws-lock                       the bucket can rebuild this volume (rpoClean, epoch 4); scaling to zero, then reclaiming the disk. The CR and the bucket are untouched.
+2m27s       Normal    DiskReclaimed           flintshare/ws-lock                       PVC ws-lock-data deleted — the bucket is now the only copy, and waking this share is a DR import. The CR and the bucket itself are untouched.
+7m43s       Normal    HibernateVerified       flintshare/ws-lease                      the bucket can rebuild this volume (rpoClean, epoch 2); scaling to zero, then reclaiming the disk. The CR and the bucket are untouched.
+13m         Normal    StateidTagAssigned      flintshare/ws-other                      stateid tag 162967641 (nfs proxy H2); set once
+63s         Normal    HibernateVerified       flintshare/ws-lease                      the bucket can rebuild this volume (rpoClean, epoch 5); scaling to zero, then reclaiming the disk. The CR and the bucket are untouched.
+9m14s       Normal    HibernateStarted        flintshare/ws-lease                      verifying the flush before reclaiming the disk; the PVC is deleted only after the hub reports a clean flush
+7m23s       Normal    Woken                   flintshare/ws-lock                       wake requested — scaling back up
+8m6s        Normal    HibernateDeferred       flintshare/ws-lock                       not reclaiming the disk: 1 client(s) with a live lease hold opens, locks or delegations; back to suspended, hibernation is retried later
+4m14s       Normal    HibernateStarted        flintshare/ws-lock                       verifying the flush before reclaiming the disk; the PVC is deleted only after the hub reports a clean flush
+6m17s       Normal    IdleSuspended           flintshare/ws-lock                       no activity for the configured window (idle) — scaled to zero; the PVC is kept and a wake is a pod start
+13m         Normal    StateidTagAssigned      flintshare/ws-lock                       stateid tag 684432182 (nfs proxy H2); set once
+7m21s       Normal    Woken                   flintshare/ws-lease                      wake requested — scaling back up
+5m59s       Normal    HubRestarted            flintshare/ws-lease                      the node's spdk-tgt restarted under this hub, so its volume's staging was dead; the old pod is gone and a new one stages it afresh
+4m47s       Normal    IdleSuspended           flintshare/ws-lease                      no activity for the configured window (idle) — scaled to zero; the PVC is kept and a wake is a pod start
+2m35s       Normal    HibernateStarted        flintshare/ws-lease                      verifying the flush before reclaiming the disk; the PVC is deleted only after the hub reports a clean flush
+47s         Normal    DiskReclaimed           flintshare/ws-lease                      PVC ws-lease-data deleted — the bucket is now the only copy, and waking this share is a DR import. The CR and the bucket itself are untouched.
+13m         Normal    WaitForFirstConsumer    persistentvolumeclaim/ws-nobucket-data   waiting for first consumer to be created before binding
+13m         Normal    SuccessfulCreate        replicaset/ws-lock-6c69f5b75             Created pod: ws-lock-6c69f5b75-dz858
+13m         Normal    SuccessfulCreate        replicaset/ws-lease-574898cb84           Created pod: ws-lease-574898cb84-rqlrs
+13m         Normal    WaitForFirstConsumer    persistentvolumeclaim/ws-lock-data       waiting for first consumer to be created before binding
+13m         Normal    ExternalProvisioning    persistentvolumeclaim/ws-lock-data       Waiting for a volume to be created either by the external provisioner 'rancher.io/local-path' or manually by the system administrator. If volume creation is delayed, please verify that the provisioner is running and correctly registered.
+13m         Normal    Provisioning            persistentvolumeclaim/ws-lock-data       External provisioner is provisioning volume for claim "workspaces/ws-lock-data"
+13m         Normal    SuccessfulCreate        replicaset/ws-nobucket-7bf96dbdb6        Created pod: ws-nobucket-7bf96dbdb6-5xwwc
+13m         Normal    ExternalProvisioning    persistentvolumeclaim/ws-lease-data      Waiting for a volume to be created either by the external provisioner 'rancher.io/local-path' or manually by the system administrator. If volume creation is delayed, please verify that the provisioner is running and correctly registered.
+13m         Normal    ScalingReplicaSet       deployment/ws-nobucket                   Scaled up replica set ws-nobucket-7bf96dbdb6 from 0 to 1
+13m         Normal    SuccessfulCreate        replicaset/ws-optout-79cb54f59f          Created pod: ws-optout-79cb54f59f-66dc9
+13m         Normal    WaitForFirstConsumer    persistentvolumeclaim/ws-optout-data     waiting for first consumer to be created before binding
+13m         Normal    Provisioning            persistentvolumeclaim/ws-lease-data      External provisioner is provisioning volume for claim "workspaces/ws-lease-data"
+13m         Normal    WaitForFirstConsumer    persistentvolumeclaim/ws-lease-data      waiting for first consumer to be created before binding
+13m         Normal    Provisioning            persistentvolumeclaim/ws-nobucket-data   External provisioner is provisioning volume for claim "workspaces/ws-nobucket-data"
+13m         Normal    ScalingReplicaSet       deployment/ws-other                      Scaled up replica set ws-other-bd4d5b577 from 0 to 1
+13m         Normal    ExternalProvisioning    persistentvolumeclaim/ws-other-data      Waiting for a volume to be created either by the external provisioner 'rancher.io/local-path' or manually by the system administrator. If volume creation is delayed, please verify that the provisioner is running and correctly registered.
+13m         Normal    WaitForFirstConsumer    persistentvolumeclaim/ws-other-data      waiting for first consumer to be created before binding
+13m         Normal    SuccessfulCreate        replicaset/ws-other-bd4d5b577            Created pod: ws-other-bd4d5b577-nx572
+13m         Normal    ExternalProvisioning    persistentvolumeclaim/ws-optout-data     Waiting for a volume to be created either by the external provisioner 'rancher.io/local-path' or manually by the system administrator. If volume creation is delayed, please verify that the provisioner is running and correctly registered.
+13m         Normal    ExternalProvisioning    persistentvolumeclaim/ws-nobucket-data   Waiting for a volume to be created either by the external provisioner 'rancher.io/local-path' or manually by the system administrator. If volume creation is delayed, please verify that the provisioner is running and correctly registered.
+13m         Normal    Provisioning            persistentvolumeclaim/ws-optout-data     External provisioner is provisioning volume for claim "workspaces/ws-optout-data"
+13m         Normal    ProvisioningSucceeded   persistentvolumeclaim/ws-lock-data       Successfully provisioned volume pvc-4ada7a7f-cec8-46d1-96da-21aef04d7361
+13m         Normal    Scheduled               pod/ws-lock-6c69f5b75-dz858              Successfully assigned workspaces/ws-lock-6c69f5b75-dz858 to flint-step5-worker
+13m         Normal    ProvisioningSucceeded   persistentvolumeclaim/ws-lease-data      Successfully provisioned volume pvc-01023c0f-a53b-4105-82f6-6595142f853b
+13m         Normal    Provisioning            persistentvolumeclaim/ws-other-data      External provisioner is provisioning volume for claim "workspaces/ws-other-data"
+13m         Normal    Scheduled               pod/ws-lease-574898cb84-rqlrs            Successfully assigned workspaces/ws-lease-574898cb84-rqlrs to flint-step5-worker
+13m         Normal    Created                 pod/ws-lease-574898cb84-rqlrs            Created container: hub
+13m         Normal    Pulled                  pod/ws-lock-6c69f5b75-dz858              Container image "flint-pnfs:step5-dev" already present on machine
+13m         Normal    Started                 pod/ws-lease-574898cb84-rqlrs            Started container hub
+13m         Normal    ProvisioningSucceeded   persistentvolumeclaim/ws-nobucket-data   Successfully provisioned volume pvc-1f3190be-ec51-4b18-b13e-017e22d7ce37
+13m         Normal    Started                 pod/ws-lock-6c69f5b75-dz858              Started container hub
+13m         Normal    Pulled                  pod/ws-lease-574898cb84-rqlrs            Container image "flint-pnfs:step5-dev" already present on machine
+13m         Normal    Created                 pod/ws-lock-6c69f5b75-dz858              Created container: hub
+13m         Normal    Scheduled               pod/ws-nobucket-7bf96dbdb6-5xwwc         Successfully assigned workspaces/ws-nobucket-7bf96dbdb6-5xwwc to flint-step5-worker
+13m         Normal    Pulled                  pod/ws-nobucket-7bf96dbdb6-5xwwc         Container image "flint-pnfs:step5-dev" already present on machine
+13m         Normal    Created                 pod/ws-nobucket-7bf96dbdb6-5xwwc         Created container: hub
+13m         Normal    Started                 pod/ws-nobucket-7bf96dbdb6-5xwwc         Started container hub
+13m         Normal    ProvisioningSucceeded   persistentvolumeclaim/ws-optout-data     Successfully provisioned volume pvc-d5d769e6-3bec-4a80-bda3-6c84f5afbe94
+13m         Normal    Started                 pod/ws-optout-79cb54f59f-66dc9           Started container hub
+13m         Normal    ProvisioningSucceeded   persistentvolumeclaim/ws-other-data      Successfully provisioned volume pvc-07f6e76a-e4fe-4448-9eb3-497434cb6278
+13m         Normal    Pulled                  pod/ws-optout-79cb54f59f-66dc9           Container image "flint-pnfs:step5-dev" already present on machine
+13m         Normal    Created                 pod/ws-optout-79cb54f59f-66dc9           Created container: hub
+13m         Normal    Scheduled               pod/ws-optout-79cb54f59f-66dc9           Successfully assigned workspaces/ws-optout-79cb54f59f-66dc9 to flint-step5-worker
+13m         Normal    Pulled                  pod/ws-other-bd4d5b577-nx572             Container image "flint-pnfs:step5-dev" already present on machine
+13m         Normal    Started                 pod/ws-other-bd4d5b577-nx572             Started container hub
+13m         Normal    Scheduled               pod/ws-other-bd4d5b577-nx572             Successfully assigned workspaces/ws-other-bd4d5b577-nx572 to flint-step5-worker
+13m         Normal    Created                 pod/ws-other-bd4d5b577-nx572             Created container: hub
+12m         Normal    ScalingReplicaSet       deployment/ws-nobucket                   Scaled down replica set ws-nobucket-7bf96dbdb6 from 1 to 0
+12m         Normal    Killing                 pod/ws-nobucket-7bf96dbdb6-5xwwc         Stopping container hub
+12m         Normal    SuccessfulDelete        replicaset/ws-nobucket-7bf96dbdb6        Deleted pod: ws-nobucket-7bf96dbdb6-5xwwc
+11m         Normal    Killing                 pod/ws-lock-6c69f5b75-dz858              Stopping container hub
+11m         Normal    SuccessfulDelete        replicaset/ws-lock-6c69f5b75             Deleted pod: ws-lock-6c69f5b75-dz858
+11m         Normal    Killing                 pod/ws-lease-574898cb84-rqlrs            Stopping container hub
+11m         Normal    SuccessfulDelete        replicaset/ws-lease-574898cb84           Deleted pod: ws-lease-574898cb84-rqlrs
+9m37s       Normal    Created                 pod/ws-lock-6c69f5b75-xhjqw              Created container: hub
+9m37s       Normal    SuccessfulCreate        replicaset/ws-lock-6c69f5b75             Created pod: ws-lock-6c69f5b75-xhjqw
+9m37s       Normal    Started                 pod/ws-lock-6c69f5b75-xhjqw              Started container hub
+9m37s       Normal    Pulled                  pod/ws-lock-6c69f5b75-xhjqw              Container image "flint-pnfs:step5-dev" already present on machine
+9m37s       Normal    Scheduled               pod/ws-lock-6c69f5b75-xhjqw              Successfully assigned workspaces/ws-lock-6c69f5b75-xhjqw to flint-step5-worker
+9m14s       Normal    Scheduled               pod/ws-lease-574898cb84-qklqm            Successfully assigned workspaces/ws-lease-574898cb84-qklqm to flint-step5-worker
+9m14s       Normal    Pulled                  pod/ws-lease-574898cb84-qklqm            Container image "flint-pnfs:step5-dev" already present on machine
+9m14s       Normal    Created                 pod/ws-lease-574898cb84-qklqm            Created container: hub
+9m14s       Normal    SuccessfulCreate        replicaset/ws-lease-574898cb84           Created pod: ws-lease-574898cb84-qklqm
+9m14s       Normal    Started                 pod/ws-lease-574898cb84-qklqm            Started container hub
+8m7s        Normal    Killing                 pod/ws-lock-6c69f5b75-xhjqw              Stopping container hub
+8m7s        Normal    SuccessfulDelete        replicaset/ws-lock-6c69f5b75             Deleted pod: ws-lock-6c69f5b75-xhjqw
+7m43s       Normal    SuccessfulDelete        replicaset/ws-lease-574898cb84           Deleted pod: ws-lease-574898cb84-qklqm
+7m43s       Normal    Killing                 pod/ws-lease-574898cb84-qklqm            Stopping container hub
+7m24s       Normal    SuccessfulCreate        replicaset/ws-lock-6c69f5b75             Created pod: ws-lock-6c69f5b75-kz54f
+7m24s       Normal    Scheduled               pod/ws-lock-6c69f5b75-kz54f              Successfully assigned workspaces/ws-lock-6c69f5b75-kz54f to flint-step5-worker
+7m23s       Normal    Created                 pod/ws-lock-6c69f5b75-kz54f              Created container: hub
+7m23s       Normal    Pulled                  pod/ws-lock-6c69f5b75-kz54f              Container image "flint-pnfs:step5-dev" already present on machine
+7m23s       Normal    Started                 pod/ws-lock-6c69f5b75-kz54f              Started container hub
+7m22s       Normal    ExternalProvisioning    persistentvolumeclaim/ws-lease-data      Waiting for a volume to be created either by the external provisioner 'rancher.io/local-path' or manually by the system administrator. If volume creation is delayed, please verify that the provisioner is running and correctly registered.
+7m22s       Normal    SuccessfulCreate        replicaset/ws-lease-574898cb84           Created pod: ws-lease-574898cb84-tnbbn
+7m22s       Normal    WaitForFirstConsumer    persistentvolumeclaim/ws-lease-data      waiting for first consumer to be created before binding
+7m22s       Normal    Provisioning            persistentvolumeclaim/ws-lease-data      External provisioner is provisioning volume for claim "workspaces/ws-lease-data"
+7m20s       Normal    ProvisioningSucceeded   persistentvolumeclaim/ws-lease-data      Successfully provisioned volume pvc-b02a6793-647a-4e88-abd4-5a067525fa64
+7m19s       Normal    Scheduled               pod/ws-lease-574898cb84-tnbbn            Successfully assigned workspaces/ws-lease-574898cb84-tnbbn to flint-step5-worker
+7m18s       Normal    Started                 pod/ws-lease-574898cb84-tnbbn            Started container hub
+7m18s       Normal    Pulled                  pod/ws-lease-574898cb84-tnbbn            Container image "flint-pnfs:step5-dev" already present on machine
+7m18s       Normal    Created                 pod/ws-lease-574898cb84-tnbbn            Created container: hub
+6m18s       Normal    SuccessfulDelete        replicaset/ws-lock-6c69f5b75             Deleted pod: ws-lock-6c69f5b75-kz54f
+6m18s       Normal    Killing                 pod/ws-lock-6c69f5b75-kz54f              Stopping container hub
+6m15s       Normal    Killing                 pod/ws-optout-79cb54f59f-66dc9           Stopping container hub
+6m15s       Normal    SuccessfulDelete        replicaset/ws-optout-79cb54f59f          Deleted pod: ws-optout-79cb54f59f-66dc9
+6m15s       Normal    ScalingReplicaSet       deployment/ws-optout                     Scaled down replica set ws-optout-79cb54f59f from 1 to 0
+6m15s       Normal    Killing                 pod/ws-lease-574898cb84-tnbbn            Stopping container hub
+6m15s       Normal    SuccessfulDelete        replicaset/ws-lease-574898cb84           Deleted pod: ws-lease-574898cb84-tnbbn
+5m59s       Normal    SuccessfulCreate        replicaset/ws-optout-79cb54f59f          Created pod: ws-optout-79cb54f59f-mb2jq
+5m59s       Normal    Scheduled               pod/ws-lease-574898cb84-c9xlx            Successfully assigned workspaces/ws-lease-574898cb84-c9xlx to flint-step5-worker
+5m59s       Normal    SuccessfulCreate        replicaset/ws-lease-574898cb84           Created pod: ws-lease-574898cb84-c9xlx
+5m59s       Normal    Created                 pod/ws-lease-574898cb84-c9xlx            Created container: hub
+5m59s       Normal    Started                 pod/ws-lease-574898cb84-c9xlx            Started container hub
+5m59s       Normal    ScalingReplicaSet       deployment/ws-optout                     Scaled up replica set ws-optout-79cb54f59f from 0 to 1
+5m59s       Normal    Pulled                  pod/ws-lease-574898cb84-c9xlx            Container image "flint-pnfs:step5-dev" already present on machine
+5m59s       Normal    Started                 pod/ws-optout-79cb54f59f-mb2jq           Started container hub
+5m59s       Normal    Created                 pod/ws-optout-79cb54f59f-mb2jq           Created container: hub
+5m59s       Normal    Pulled                  pod/ws-optout-79cb54f59f-mb2jq           Container image "flint-pnfs:step5-dev" already present on machine
+5m59s       Normal    Scheduled               pod/ws-optout-79cb54f59f-mb2jq           Successfully assigned workspaces/ws-optout-79cb54f59f-mb2jq to flint-step5-worker
+4m47s       Normal    Killing                 pod/ws-lease-574898cb84-c9xlx            Stopping container hub
+4m47s       Normal    SuccessfulDelete        replicaset/ws-lease-574898cb84           Deleted pod: ws-lease-574898cb84-c9xlx
+4m15s       Normal    SuccessfulCreate        replicaset/ws-lock-6c69f5b75             Created pod: ws-lock-6c69f5b75-5dsp2
+4m15s       Normal    Scheduled               pod/ws-lock-6c69f5b75-5dsp2              Successfully assigned workspaces/ws-lock-6c69f5b75-5dsp2 to flint-step5-worker
+4m15s       Normal    ScalingReplicaSet       deployment/ws-lock                       Scaled up replica set ws-lock-6c69f5b75 from 0 to 1
+4m14s       Normal    Started                 pod/ws-lock-6c69f5b75-5dsp2              Started container hub
+4m14s       Normal    Created                 pod/ws-lock-6c69f5b75-5dsp2              Created container: hub
+4m14s       Normal    Pulled                  pod/ws-lock-6c69f5b75-5dsp2              Container image "flint-pnfs:step5-dev" already present on machine
+2m43s       Normal    Killing                 pod/ws-lock-6c69f5b75-5dsp2              Stopping container hub
+2m43s       Normal    ScalingReplicaSet       deployment/ws-lock                       Scaled down replica set ws-lock-6c69f5b75 from 1 to 0
+2m43s       Normal    SuccessfulDelete        replicaset/ws-lock-6c69f5b75             Deleted pod: ws-lock-6c69f5b75-5dsp2
+2m43s       Warning   Unhealthy               pod/ws-lock-6c69f5b75-5dsp2              Readiness probe failed: dial tcp 10.244.1.27:2049: connect: connection refused
+2m35s       Normal    Created                 pod/ws-lease-574898cb84-9cttj            Created container: hub
+2m35s       Normal    SuccessfulCreate        replicaset/ws-lease-574898cb84           Created pod: ws-lease-574898cb84-9cttj
+2m35s       Normal    Scheduled               pod/ws-lease-574898cb84-9cttj            Successfully assigned workspaces/ws-lease-574898cb84-9cttj to flint-step5-worker
+2m35s       Normal    Started                 pod/ws-lease-574898cb84-9cttj            Started container hub
+2m35s       Normal    ScalingReplicaSet       deployment/ws-lease                      Scaled up replica set ws-lease-574898cb84 from 0 to 1
+2m35s       Normal    Pulled                  pod/ws-lease-574898cb84-9cttj            Container image "flint-pnfs:step5-dev" already present on machine
+63s         Normal    Killing                 pod/ws-lease-574898cb84-9cttj            Stopping container hub
+63s         Normal    ScalingReplicaSet       deployment/ws-lease                      Scaled down replica set ws-lease-574898cb84 from 1 to 0
+63s         Normal    SuccessfulDelete        replicaset/ws-lease-574898cb84           Deleted pod: ws-lease-574898cb84-9cttj

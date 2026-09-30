@@ -853,6 +853,7 @@ impl MetadataServer {
         // makes the whole startup observable.
         self.status.attach_backend(self.backend.clone());
         self.status.attach_leases(self.state_mgr.leases.clone());
+        self.status.attach_stateids(self.state_mgr.stateids.clone());
         self.status
             .attach_delegations(self.state_mgr.delegations.clone());
         // Published on /status so a caller can tell a restart (podName

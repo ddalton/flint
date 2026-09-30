@@ -74,6 +74,8 @@ pub struct HubStatus {
     /// is the whole feature — so it is invisible to every other idle
     /// signal this hub reports.
     delegations: RwLock<Option<Arc<crate::nfs::v4::state::delegation::DelegationManager>>>,
+    /// Opens and locks (lock stateids), for `liveStateHolders`.
+    stateids: RwLock<Option<Arc<crate::nfs::v4::state::stateid::StateIdManager>>>,
     /// The persisted NFS server identity — the same one filehandles are
     /// stamped with and the tier epoch is held under.
     server_id: OnceLock<String>,
@@ -173,6 +175,28 @@ impl HubStatus {
         }
     }
 
+    pub fn attach_stateids(&self, stateids: Arc<crate::nfs::v4::state::stateid::StateIdManager>) {
+        if let Ok(mut s) = self.stateids.write() {
+            *s = Some(stateids);
+        }
+    }
+
+    /// Clients with a live lease that hold an open, a lock or a
+    /// delegation: what a hibernation would take from someone. `None`
+    /// until the state managers are attached.
+    fn live_state_holders(&self) -> Option<usize> {
+        let leases = self.leases.read().ok()?.clone()?;
+        let stateids = self.stateids.read().ok()?.clone()?;
+        let delegations = self.delegations.read().ok().and_then(|d| d.clone());
+        Some(
+            leases
+                .live_clients()
+                .into_iter()
+                .filter(|c| stateids.count_for_client(*c) > 0 || delegations.as_ref().is_some_and(|d| d.count_for_client(*c) > 0))
+                .count(),
+        )
+    }
+
     /// Assemble the document served at `/status`.
     pub async fn render(&self) -> StatusDoc {
         let started = self.started_unix.get().copied().unwrap_or(0);
@@ -218,6 +242,7 @@ impl HubStatus {
                     .and_then(|l| l.as_ref().map(|l| l.active_count())),
                 live_leases: self.leases.read().ok().and_then(|l| l.as_ref().map(|l| l.live_count())),
                 lease_secs: self.leases.read().ok().and_then(|l| l.as_ref().map(|l| u64::from(l.lease_time()))),
+                live_state_holders: self.live_state_holders(),
                 // ALWAYS Some, including 0 and including when the gate
                 // is off — see the consumer's `None` reasoning. A build
                 // that can grant must always say so, or the operator's
@@ -323,13 +348,18 @@ pub struct TierDoc {
 #[serde(rename_all = "camelCase")]
 pub struct NfsDoc {
     pub active_leases: Option<usize>,
-    /// Unexpired leases (`LeaseManager::live_count`). With `leaseSecs` and
-    /// `uptimeSecs` this answers "does a client still hold state here":
-    /// the leases re-created at load for persisted clients have run out
-    /// once the hub has been up `leaseSecs`, unless a client renewed.
-    /// Hibernation requires it to be 0 (design §7a HIB-1).
+    /// Unexpired leases (`LeaseManager::live_count`). The leases re-created
+    /// at load for persisted clients run out once the hub has been up
+    /// `leaseSecs`, unless a client renewed — which is why the operator
+    /// reads `liveStateHolders` only after that much uptime.
     pub live_leases: Option<usize>,
     pub lease_secs: Option<u64>,
+    /// Clients with a live lease AND an open, a lock or a delegation. The
+    /// hibernation precondition (HIB-1) is that this is 0: a client that
+    /// holds only a lease loses nothing a hibernation could keep (its
+    /// handles go stale either way), and behind the proxy every node that
+    /// ever listed a workspace holds one for as long as it stays mounted.
+    pub live_state_holders: Option<usize>,
     /// Live (non-revoked) READ delegations across all clients.
     ///
     /// Always `Some` from any build that can grant one — including
@@ -427,6 +457,25 @@ pub fn spawn(
 
 #[cfg(test)]
 mod tests {
+    /// `liveStateHolders` (HIB-1): a client with a live lease AND state.
+    /// A lease alone does not count, nor does state whose lease is gone.
+    #[tokio::test]
+    async fn state_holders_are_live_leases_that_hold_state() {
+        use crate::nfs::v4::state::{stateid::StateType, StateManager};
+        let sm = StateManager::new_in_memory("v");
+        let st = super::HubStatus::new();
+        st.attach_leases(sm.leases.clone());
+        st.attach_stateids(sm.stateids.clone());
+        st.attach_delegations(sm.delegations.clone());
+        sm.leases.create_lease(1); // a lease, no state
+        sm.leases.create_lease(2);
+        sm.stateids.allocate(StateType::Open, 2, Some(vec![1]));
+        sm.stateids.allocate(StateType::Open, 3, Some(vec![2])); // state, no lease
+        let doc = st.render().await;
+        assert_eq!(doc.nfs.live_leases, Some(2));
+        assert_eq!(doc.nfs.live_state_holders, Some(1));
+    }
+
 
     /// **The failure this pins looks exactly like health.**
     ///
