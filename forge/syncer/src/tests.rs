@@ -3186,6 +3186,34 @@ async fn the_sweep_between_batches_aborts_a_pending_upload() {
     assert!(rig.store.list_uploads(&prefix).await.unwrap().is_empty());
 }
 
+/// ...but not once the bucket has moved (review 2026-09-23). An upload
+/// pending then may be a SUCCESSOR's: a holder deposed without knowing
+/// it still passes its local fence check, and aborting first would
+/// fail the successor's push. The snapshot check the sweep already
+/// makes before deleting anything now comes before the abort too.
+#[tokio::test]
+async fn the_sweep_aborts_nothing_once_the_snapshot_has_moved() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let c1 = rig.stage_commit(None, &[("a.txt", "one\n")], "first").await;
+    rig.run(vec![push(1, vec![RefUpdate { name: "refs/heads/main".into(), old_oid: zero(), new_oid: c1 }])])
+        .await;
+    // A successor's rotation: same content, next seq, another writer.
+    let mut moved = rig.sc.cell().unwrap().snap.clone();
+    moved.seq += 1;
+    moved.writer = "successor".into();
+    rig.store.raw_put(&rig.sc.cfg.snapshot_key(), serde_json::to_vec(&moved).unwrap().into(), vec![]);
+    let prefix = format!("{}/", rig.sc.cfg.git_prefix());
+    rig.store.raw_begin_upload(&rig.sc.cfg.pack_key("pack-successors.pack"));
+
+    assert_eq!(sweep::sweep(&mut rig.sc).await.expect("sweep"), 0);
+    assert_eq!(
+        rig.store.list_uploads(&prefix).await.unwrap().len(),
+        1,
+        "a sweep that read a moved snapshot aborted an upload that may be the successor's"
+    );
+}
+
 /// Transfers report what they landed, in bytes, on the counter the
 /// renewer reads — a whole PUT once, a ranged fetch per chunk.
 #[tokio::test]
@@ -4461,6 +4489,48 @@ async fn the_ledger_sweep_deletes_only_past_the_grace_and_only_unnamed() {
         assert!(rig.store.head(&rig.sc.cfg.pack_key(p)).await.is_err());
     }
     rig.store.head(&rig.sc.cfg.pack_key(&f)).await.expect("the named roll-up stays");
+}
+
+/// The ledger sweep waits for a fold in flight, as the other two do
+/// (review 2026-09-23). Its only guards were "not named now" and the
+/// store's age, and neither sees the holder's own upload: git names a
+/// pack by its objects, so a rebuild can regenerate a stem the ledger
+/// still carries, and a multipart object's age is its upload's START,
+/// so a long upload can arrive already past the grace. The sweep would
+/// then delete the pack the fold is about to name.
+#[tokio::test]
+async fn the_ledger_sweep_waits_while_a_fold_is_in_flight() {
+    let mut rig = Rig::new().await;
+    rig.tiers_only();
+    rig.start().await;
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+    let c1 = rig.push_commit("refs/heads/main", Some(&c0), "c1").await;
+    let inputs = rig.sc.cell().unwrap().snap.packs.clone();
+    rig.fold_once().await.unwrap();
+    assert_eq!(rig.sc.fold_ledger.len(), 1, "the first fold's inputs are in the ledger");
+    rig.sc.cfg.orphan_grace_secs = 0;
+
+    // A second fold, in flight: its task uploads beside the loop.
+    let c2 = rig.push_commit("refs/heads/main", Some(&c1), "c2").await;
+    let _ = rig.push_commit("refs/heads/main", Some(&c2), "c3").await;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    fold::maybe_spawn(&mut rig.sc, tx, super::now_unix()).unwrap().expect("planned");
+    assert!(rig.sc.fold.is_some());
+
+    let deleted = fold::sweep_ledger(&mut rig.sc, super::now_unix(), 64).await.unwrap();
+    assert_eq!(deleted, 0, "the ledger sweep ran beside the holder's own fold");
+    assert_eq!(rig.sc.fold_ledger.len(), 1, "the entry waits for the fold");
+    for p in &inputs {
+        rig.store.head(&rig.sc.cfg.pack_key(p)).await.expect("nothing was deleted");
+    }
+
+    // Once the fold commits, the ledger is swept as before.
+    let res = rx.recv().await.unwrap();
+    fold::commit(&mut rig.sc, res, super::now_unix()).await.unwrap();
+    assert!(fold::sweep_ledger(&mut rig.sc, super::now_unix(), 64).await.unwrap() >= 2);
+    for p in &inputs {
+        assert!(rig.store.head(&rig.sc.cfg.pack_key(p)).await.is_err());
+    }
 }
 
 /// The restore reconciles packs as it reconciles refs: a local pack

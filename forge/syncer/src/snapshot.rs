@@ -29,9 +29,12 @@ pub const SNAPSHOT_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Snapshot {
     pub version: u32,
-    /// Monotonic per write. Its only job is to make a rotation change
-    /// the object's bytes (and therefore its etag) when the content
-    /// would otherwise be identical.
+    /// Monotonic per write. It makes a rotation change the object's
+    /// bytes (and therefore its etag) when the content would otherwise
+    /// be identical; it keys the batch log (`log.rs`, `git/log/<seq>`);
+    /// and with `epoch` and `writer` it is how a batch whose CAS
+    /// reported an error recognises that its own write landed
+    /// (`batch.rs`, step 5).
     pub seq: u64,
     /// The lease epoch under which this snapshot was written.
     pub epoch: u64,
@@ -48,9 +51,11 @@ pub struct Snapshot {
     /// The commit whose tree the legible export last published (§9).
     #[serde(default)]
     pub exported_commit: Option<String>,
-    /// Which syncer wrote this, and when by its own clock. Diagnostic
-    /// only — no decision reads them, because a deposed writer's clock
-    /// is exactly the one that cannot be trusted.
+    /// Which syncer wrote this, and when by its own clock. `unix` is
+    /// diagnostic only: a deposed writer's clock is exactly the one
+    /// that cannot be trusted. `writer` is read once, with `seq` and
+    /// `epoch`, to adopt an ambiguous CAS result as this batch's own
+    /// (`batch.rs`, step 5); a clock plays no part in that.
     pub writer: String,
     pub unix: u64,
 }
@@ -185,9 +190,13 @@ async fn write(
 /// seq, one small CAS — makes the straggler's token stale before the
 /// successor serves a byte, and its next batch 412s into the fence.
 ///
-/// It is needed ONLY for the unreleased-foreign takeover. A released
-/// cell is a clean handoff and self-recognition means our own previous
-/// container died with its writes, so rotating there is pure churn.
+/// It runs on every claim except a released cell's, which is a clean
+/// handoff: its holder fenced itself before it wrote the mark.
+/// Self-recognition is NOT exempt. The incarnation of ours that died
+/// may have been a successor that died between its takeover and its
+/// rotation, with the straggler from the epoch before still live
+/// (`lease.rs`, `claim_step`; `formal/ForgeSync.tla`'s second strict
+/// counterexample).
 ///
 /// A repository nobody has published yet is rotated too, by CREATING
 /// its empty snapshot under `If-None-Match: *`. The first shape

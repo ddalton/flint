@@ -950,6 +950,15 @@ pub fn unlink_retained(sc: &mut Syncer, now: u64) -> ForgeResult<usize> {
 /// capped at `budget` requests so the loop is held for about a second.
 pub async fn sweep_ledger(sc: &mut Syncer, now: u64, budget: usize) -> ForgeResult<usize> {
     sc.check_fence()?;
+    // Never beside the holder's own fold, as the other two sweeps. Its
+    // guards (not named now, and old by the store's clock) cannot see
+    // an upload in flight: git names a pack by its objects, so a
+    // rebuild can regenerate a stem this ledger still carries, and a
+    // multipart object's age is its upload's START. Not an error: a
+    // fold in flight is routine, and the next tick sweeps.
+    if sc.fold.is_some() {
+        return Ok(0);
+    }
     let grace = sc.cfg.orphan_grace_secs;
     if !sc.fold_ledger.iter().any(|e| now.saturating_sub(e.unnamed_unix) >= grace) {
         return Ok(0);

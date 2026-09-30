@@ -476,16 +476,7 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
                                     // to be wrong.
                                     packs: vec![],
                                     commands: dead, server_created: vec![] };
-                                if let Err(e) =
-                                    batch::run_batch(&mut sc, vec![push], &policy).await
-                                {
-                                    if matches!(e, ForgeError::Fenced(_)) {
-                                        return Err(e);
-                                    }
-                                    eprintln!("flint-forge: prune deferred: {e}");
-                                } else {
-                                    publish(&shared, &sc, Phase::Serving);
-                                }
+                                run_own_batch(&mut sc, push, &policy, &shared).await?;
                             }
                             Ok(_) => {}
                             Err(e) => eprintln!("flint-forge: prune deferred: {e}"),
@@ -549,16 +540,15 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
                                     server_created: vec![cmd.new_oid.clone()],
                                     commands: vec![cmd],
                                 };
-                                match batch::run_batch(&mut sc, vec![push], &policy).await {
+                                match run_own_batch(&mut sc, push, &policy, &shared).await {
                                     Ok(reports) => Some(first_verdict(&reports)),
-                                    Err(e @ ForgeError::Fenced(_)) => {
+                                    Err(e) => {
                                         super::fileapi::answer(
                                             planned,
                                             Some(Err(e.to_string())),
                                         );
                                         return Err(e);
                                     }
-                                    Err(e) => Some(Err(e.to_string())),
                                 }
                             }
                         };
@@ -825,6 +815,38 @@ async fn run_and_report(
                     .collect();
                 let _ = w.reply.send(HookResponse { results });
             }
+            publish(shared, sc, Phase::Draining);
+            Err(e)
+        }
+    }
+}
+
+/// A batch the loop originates itself, a file-API write or a prune,
+/// held to the same two rules as a push (review 2026-09-23, finding 3).
+///
+/// Under `Pushing` the renewer renews only while the batch MOVES, so a
+/// write wedged on its upload lets the token go quiet and a challenger
+/// take over; under `Serving` it would renew for a dead holder forever.
+/// And ANY error ends the process, exactly as `run_and_report` does:
+/// an error after the snapshot CAS leaves the local refs behind the
+/// bucket, every later batch then refuses the refs that disagree, and
+/// only a restore from the bucket reconciles them.
+async fn run_own_batch(
+    sc: &mut Syncer,
+    push: batch::PushRequest,
+    policy: &Policy,
+    shared: &Shared,
+) -> ForgeResult<Vec<PushReport>> {
+    publish(shared, sc, Phase::Pushing);
+    match batch::run_batch(sc, vec![push], policy).await {
+        Ok(reports) => {
+            publish(shared, sc, Phase::Serving);
+            Ok(reports)
+        }
+        Err(e) => {
+            eprintln!(
+                "flint-forge: a server-originated batch failed ({e}); restarting from the bucket"
+            );
             publish(shared, sc, Phase::Draining);
             Err(e)
         }

@@ -198,6 +198,9 @@ pub struct MemoryStore {
     /// BESIDE (a batch beside a fold's upload), with the ordering held
     /// by the gate rather than by a sleep the scheduler may outlast.
     hold_puts: AtomicBool,
+    /// When set, only a whole PUT whose key contains this parks: a test
+    /// can stall one upload while the lease's own writes go through.
+    hold_puts_matching: Mutex<Option<String>>,
     held_puts: Mutex<Vec<tokio::sync::oneshot::Sender<()>>>,
     /// get_range calls in flight, and the most there have ever been at
     /// once: a fan-out's bound, observed from both sides.
@@ -285,6 +288,7 @@ impl MemoryStore {
             get_range_delay_ms: AtomicU64::new(0),
             put_whole_delay_ms: AtomicU64::new(0),
             hold_puts: AtomicBool::new(false),
+            hold_puts_matching: Mutex::new(None),
             held_puts: Mutex::new(Vec::new()),
             inflight_get_range: AtomicU64::new(0),
             peak_get_range: AtomicU64::new(0),
@@ -384,7 +388,17 @@ impl MemoryStore {
     /// one task's upload, let the next caller's through at once, and
     /// release the stalled one when it chooses.
     pub fn inject_put_hold(&self, on: bool) {
+        *self.hold_puts_matching.lock().unwrap() = None;
         self.hold_puts.store(on, Ordering::SeqCst);
+    }
+
+    /// Like [`inject_put_hold`], but only for keys containing
+    /// `key_contains`. `inject_put_hold(false)` ends it.
+    ///
+    /// [`inject_put_hold`]: MemoryStore::inject_put_hold
+    pub fn inject_put_hold_matching(&self, key_contains: &str) {
+        *self.hold_puts_matching.lock().unwrap() = Some(key_contains.to_string());
+        self.hold_puts.store(true, Ordering::SeqCst);
     }
 
     /// How many whole PUTs are parked right now.
@@ -752,7 +766,12 @@ impl ObjectStore for MemoryStore {
         crc64: u64,
     ) -> StoreResult<ObjectMeta> {
         self.bump("put_whole");
-        if self.hold_puts.load(Ordering::SeqCst) {
+        let held = self.hold_puts.load(Ordering::SeqCst)
+            && match self.hold_puts_matching.lock().unwrap().as_deref() {
+                None => true,
+                Some(m) => key.contains(m),
+            };
+        if held {
             let (tx, rx) = tokio::sync::oneshot::channel();
             self.held_puts.lock().unwrap().push(tx);
             // A dropped sender (a release that drained the list) lets

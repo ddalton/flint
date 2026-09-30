@@ -33,6 +33,9 @@ struct Rig {
     /// for a clone they never push.
     client: Option<std::path::PathBuf>,
     token: String,
+    /// How the serving loop ended, once it has: `Ok` or the error's
+    /// text. `None` while it is still serving.
+    served: Arc<std::sync::Mutex<Option<Result<(), String>>>>,
 }
 
 /// How long any single git call in this file may take. Generous for a
@@ -219,10 +222,15 @@ impl Rig {
     /// repository can be driven through BOTH doors at once — which is
     /// the interaction neither door's own tests can reach.
     async fn start_with_git(with_git: bool) -> Rig {
+        Rig::start_with(with_git, |_| {}).await
+    }
+
+    async fn start_with(with_git: bool, tweak: impl FnOnce(&mut ForgeConfig)) -> Rig {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo.git");
         let store = Arc::new(MemoryStore::new());
-        let cfg = ForgeConfig::new(PREFIX, &repo);
+        let mut cfg = ForgeConfig::new(PREFIX, &repo);
+        tweak(&mut cfg);
         let socket = cfg.state_dir.join(flint_forge::uds::SOCKET_NAME);
         // Port 0: the kernel picks, the server reports, nothing races.
         let token = rig_token();
@@ -251,10 +259,15 @@ impl Rig {
                 token: Some(token.clone()),
             }),
         };
+        let served: Arc<std::sync::Mutex<Option<Result<(), String>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let outcome = served.clone();
         tokio::spawn(async move {
-            if let Err(e) = run(sc, opts).await {
+            let r = run(sc, opts).await.map_err(|e| e.to_string());
+            if let Err(e) = &r {
                 eprintln!("serving loop stopped: {e}");
             }
+            *outcome.lock().unwrap() = Some(r);
         });
 
         // Two waits, and they are different things. First the server
@@ -289,7 +302,7 @@ impl Rig {
                 } else {
                     None
                 };
-                return Rig { _dir: dir, addr, store, repo, socket, client, token };
+                return Rig { _dir: dir, addr, store, repo, socket, client, token, served };
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
@@ -980,4 +993,80 @@ async fn reads_are_not_refused_while_the_loop_is_running_a_batch() {
         refused.len(),
         refused.first().map(String::as_str).unwrap_or("")
     );
+}
+
+/// Review 2026-09-23, finding 3: a file-API write is a batch like any
+/// push, so it must be held to the push's two rules. This is the
+/// first: while it runs, the lease is renewed only while it MOVES.
+/// A write wedged on its upload must let the token go quiet, the one
+/// takeover a wedged holder can get. The serving loop used to run
+/// these batches under `Serving`, which the renewer renews
+/// unconditionally, so a dead holder kept the repository.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stalled_file_api_write_lets_the_lease_go_quiet() {
+    let rig = Arc::new(Rig::start_with(false, |c| c.heartbeat_secs = 1).await);
+    let cell = ForgeConfig::new(PREFIX, &rig.repo).epoch_key();
+
+    // Only the pack's upload parks; the lease's own writes go through.
+    rig.store.inject_put_hold_matching("/git/objects/pack/");
+    let write = {
+        let rig = rig.clone();
+        tokio::spawn(async move { rig.put("ada", "stuck.md", b"wedged\n", None).await })
+    };
+    for _ in 0..200 {
+        if rig.store.held_puts() > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(rig.store.held_puts() > 0, "the write's upload never reached the store");
+
+    // One heartbeat may still renew on progress made before the park.
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let before = rig.store.head(&cell).await.expect("the cell").etag;
+    tokio::time::sleep(std::time::Duration::from_millis(3500)).await;
+    let after = rig.store.head(&cell).await.expect("the cell").etag;
+
+    rig.store.release_held_puts();
+    rig.store.inject_put_hold(false);
+    let r = write.await.expect("join");
+    assert_eq!(r.status, 200, "the write lands once its upload does: {}", r.text());
+    assert_eq!(
+        before, after,
+        "the lease was renewed for three heartbeats while the write moved nothing"
+    );
+}
+
+/// Finding 3, the second rule: a batch whose ref transaction fails
+/// AFTER its snapshot CAS landed leaves the local repository behind
+/// the bucket. A push in that state tells its clients and takes the
+/// process down, and the restart restores from the bucket. A file-API
+/// write used to answer and keep serving, and every later write to the
+/// branch was then refused as "disagreed", with nothing to restart it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_ref_update_that_fails_after_the_cas_stops_the_serving_loop() {
+    let rig = Rig::start().await;
+    let r = rig.put("ada", "a.md", b"one\n", None).await;
+    assert_eq!(r.status, 200, "{}", r.text());
+
+    // git refuses a ref transaction while the ref's lock file exists.
+    let lock = rig.repo.join("refs/heads/main.lock");
+    std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    std::fs::write(&lock, b"").unwrap();
+    let r = rig.put("ada", "b.md", b"two\n", None).await;
+    std::fs::remove_file(&lock).unwrap();
+    assert_ne!(r.status, 200, "the write cannot report success: {}", r.text());
+
+    let mut ended = None;
+    for _ in 0..200 {
+        ended = rig.served.lock().unwrap().clone();
+        if ended.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    match ended {
+        Some(Err(e)) => assert!(e.contains("update-ref"), "stopped, but on something else: {e}"),
+        other => panic!("the serving loop kept serving with local refs behind the bucket: {other:?}"),
+    }
 }

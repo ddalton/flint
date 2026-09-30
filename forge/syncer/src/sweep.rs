@@ -64,9 +64,6 @@ pub async fn sweep(sc: &mut Syncer) -> ForgeResult<usize> {
     if sc.fold.is_some() {
         return Err(ForgeError::State("a fold is in flight; the sweep waits".into()));
     }
-    // In-flight uploads first: between batches nothing of ours is in
-    // flight, so every one of them is an orphan.
-    abort_orphaned_uploads(sc).await?;
     // Rule 1: candidates first…
     let listed = restore::list_pack_files(sc).await?;
 
@@ -84,6 +81,13 @@ pub async fn sweep(sc: &mut Syncer) -> ForgeResult<usize> {
         );
         return Ok(0);
     }
+    // In-flight uploads, and only now: between batches nothing of ours
+    // is in flight, so every one is an orphan, but only while the
+    // snapshot is still the one this holder wrote. A holder deposed
+    // without knowing it passes `check_fence` (a LOCAL read) and would
+    // abort its successor's upload, failing that push (review
+    // 2026-09-23; `the_sweep_aborts_nothing_once_the_snapshot_has_moved`).
+    abort_orphaned_uploads(sc).await?;
 
     let mut stems: Vec<String> = fresh
         .snap
