@@ -2,11 +2,19 @@
 # nfs-proxy step 3 drills (design §4 / §8), real kernel client, real hubs.
 #   bash step3-drills.sh              # all drills
 #   KEEPALIVE=false bash step3-drills.sh keepalive   # CONTROL: the keepalive drill must FAIL
+#   bash step3-drills.sh revoke                      # hub A loses its state (§4)
+#   LOSS=0 bash step3-drills.sh revoke               # CONTROL: nothing lost, both locks hold
+#   PROXY_BIN=<known-bad build> INJECT=0x20 bash step3-drills.sh revoke
+#       KNOWN-BAD arms: a proxy built with revoke-inject.patch ORs INJECT into
+#       the first forwarded downstream SEQUENCE after the loss (0x08
+#       EXPIRED_ALL, 0x10 EXPIRED_SOME, 0x20 ADMIN, 0x40 RECALLABLE _STATE_REVOKED)
 # Drills: restart (hub restart under a writer), proxyrestart (proxy restart
 # under a writer), keepalive (an idle lock holder keeps its lock on the hub
 # past the hub lease), parked (a stopped hub: the client waits, no error,
 # and finishes when the hub is back), destroy (umount destroys the backend
-# clients on the hubs).
+# clients on the hubs), revoke (hub A loses every client's state while one
+# client holds a lock in each workspace: ws-b must not notice; not in the
+# default list — its arms are chosen by LOSS / INJECT).
 set -u
 BIN=${BIN:-$HOME/nfs-proxy-census/flint/spdk-csi-driver/target/release}
 # NOT /tmp: a wedged run ends in a reboot, which clears /tmp.
@@ -56,7 +64,7 @@ hub_start() {  # $1 name, $2 tag
 hub_stop() { sudo pkill -TERM -f "[f]lint-pnfs-mds --config $ROOT/$1/"; sleep 1; }
 sid() { clean $ROOT/out/hub-$1.log | grep -o 'server id (persistent): [0-9]*' | head -1 | grep -o '[0-9]*$'; }
 proxy_start() {
-  RUST_LOG=info setsid $BIN/flint-nfs-proxy --config $ROOT/proxy/config.yaml >>$ROOT/out/proxy.log 2>&1 < /dev/null &
+  RUST_LOG=info FLINT_PROXY_INJECT_FILE=$ROOT/out/inject setsid ${PROXY_BIN:-$BIN/flint-nfs-proxy} --config $ROOT/proxy/config.yaml >>$ROOT/out/proxy.log 2>&1 < /dev/null &
   sleep 1
 }
 proxy_stop() { pkill -TERM -f "[f]lint-nfs-proxy --config $ROOT"; sleep 1; }
@@ -151,6 +159,75 @@ except OSError as e: print('REFUSED', e.errno)
     hub_start ws-a 10
     for _ in $(seq 1 60); do [ -e $ROOT/out/parked.rc ] && break; sleep 1; done
     check "parked: the read completes once the hub is back" '[ "$(cat $ROOT/out/parked.rc 2>/dev/null)" = 0 ] && [ "$(cat $ROOT/out/parked.out)" = parked-bytes ]'
+    ;;
+  revoke)
+    # One process holds an open + a write lock on ws-a/f and ws-b/f (one
+    # client, one session: the proxy's shape). Then hub A loses EVERY
+    # client's state (stopped, its NFSv4 tables emptied, restarted — the
+    # server id and filehandles stay, as after a lease reap or a
+    # recreated bookkeeping DB), and the holder writes through both fds.
+    sudo python3 - $MNT $ROOT/out <<'P' & H=$!
+import fcntl, os, sys, time
+mnt, out = sys.argv[1], sys.argv[2]
+fds = {w: os.open(f"{mnt}/{w}/f", os.O_CREAT | os.O_RDWR, 0o644) for w in ("ws-a", "ws-b")}
+for fd in fds.values():
+    fcntl.lockf(fd, fcntl.LOCK_EX)
+open(f"{out}/held", "w").close()
+while not os.path.exists(f"{out}/go"):
+    time.sleep(0.2)
+for w, fd in fds.items():   # ws-a (the loser) first
+    try:
+        os.pwrite(fd, b"after\n", 0); os.fsync(fd); r = "ok"
+    except OSError as e:
+        r = f"errno {e.errno}"
+    open(f"{out}/res-{w}", "w").write(r)
+time.sleep(600)             # keep holding: the contenders below test the hubs
+P
+    for _ in $(seq 1 50); do [ -e $ROOT/out/held ] && break; sleep 0.2; done
+    sudo dmesg > $ROOT/out/dmesg.before
+    if [ "${LOSS:-1}" = 1 ]; then
+      hub_stop ws-a
+      sudo python3 -c "
+import sqlite3; c = sqlite3.connect('$ROOT/ws-a/data/state/state.db')
+for t in ('locks', 'stateids', 'sessions', 'clients'): c.execute(f'DELETE FROM {t}')
+c.commit()"
+      hub_start ws-a 10
+    fi
+    [ -n "${INJECT:-}" ] && echo "$INJECT" > $ROOT/out/inject
+    touch $ROOT/out/go
+    for _ in $(seq 1 120); do [ -e $ROOT/out/res-ws-b ] && break; sleep 1; done
+    RA=$(cat $ROOT/out/res-ws-a 2>/dev/null || echo none); RB=$(cat $ROOT/out/res-ws-b 2>/dev/null || echo none)
+    sleep 2; sudo dmesg | diff $ROOT/out/dmesg.before - | grep '^>' > $ROOT/out/dmesg.delta
+    LOST=$(grep -o 'lost [0-9]* locks' $ROOT/out/dmesg.delta | awk '{s+=$2} END {print s+0}')
+    # A contender on each hub (a DIRECT mount: a different client to it).
+    contend() {  # $1 port → ACQUIRED | REFUSED <errno>
+      sudo timeout 30 mount -t nfs4 -o nfsvers=4.2,proto=tcp,hard,timeo=50,port=$1 127.0.0.1:/ $DIRECT || { echo NOMOUNT; return; }
+      sudo timeout 60 python3 -c "
+import fcntl, os
+fd = os.open('$DIRECT/f', os.O_RDWR)
+try:
+    fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); print('ACQUIRED')
+except OSError as e: print('REFUSED', e.errno)" 2>&1
+      sudo timeout 20 umount $DIRECT || sudo umount -f -l $DIRECT
+    }
+    CA=$(contend 20491); CB=$(contend 20492)
+    echo "LOSS=${LOSS:-1} INJECT=${INJECT:-none}: ws-a write=$RA ws-b write=$RB; kernel lost $LOST lock(s); contender A=$CA B=$CB"
+    grep -E 'lost|reclaim|NFS' $ROOT/out/dmesg.delta | sed 's/^> /  kernel: /' | head -8
+    check "revoke: the holder finished both writes (no wedge)" '[ "$RB" != none ]'
+    check "revoke: ws-b's write succeeded" '[ "$RB" = ok ]'
+    check "revoke: ws-b's lock is still held on hub B" 'echo "$CB" | grep -q REFUSED'
+    if [ "${LOSS:-1}" = 1 ]; then
+      check "revoke: hub A really lost the lock (a contender takes it)" '[ "$CA" = ACQUIRED ]'
+      check "revoke: ws-a's write reports the loss (EIO), not success" '[ "$RA" = "errno 5" ]'
+      check "revoke: the kernel declared exactly ONE lock lost (ws-a's)" '[ "$LOST" = 1 ]'
+      check "revoke: the proxy registered on hub A again" '[ "$(clean $ROOT/out/proxy.log | grep -c "backend client on ws-a")" -ge 2 ]'
+    else
+      check "revoke: nothing lost — ws-a's write succeeded" '[ "$RA" = ok ]'
+      check "revoke: nothing lost — ws-a's lock still held on hub A" 'echo "$CA" | grep -q REFUSED'
+      check "revoke: nothing lost — the kernel lost no lock" '[ "$LOST" = 0 ]'
+    fi
+    [ -n "${INJECT:-}" ] && check "revoke: the known-bad proxy really injected $INJECT" 'clean $ROOT/out/proxy.log | grep -q "KNOWN-BAD: injected"'
+    sudo kill $H 2>/dev/null
     ;;
   destroy)
     echo x | sudo tee $MNT/ws-a/d >/dev/null; echo y | sudo tee $MNT/ws-b/d >/dev/null

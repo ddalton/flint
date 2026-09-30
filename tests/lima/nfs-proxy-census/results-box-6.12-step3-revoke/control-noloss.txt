@@ -1,0 +1,11 @@
+=== revoke
+LOSS=0 INJECT=none: ws-a write=ok ws-b write=ok; kernel lost 0 lock(s); contender A=REFUSED 11 B=REFUSED 11
+PASS revoke: the holder finished both writes (no wedge)
+PASS revoke: ws-b's write succeeded
+PASS revoke: ws-b's lock is still held on hub B
+PASS revoke: nothing lost — ws-a's write succeeded
+PASS revoke: nothing lost — ws-a's lock still held on hub A
+PASS revoke: nothing lost — the kernel lost no lock
+proxy warnings:
+      1  WARN spdk_csi_driver::nfs::v4::dispatcher: CREATE_SESSION: client requested CONN_BACK_CHAN but no back-channel writer is available for session SessionId([0, 0, 0, 0, 0, 0,
+RESULT: 6 passed, 0 failed

@@ -111,12 +111,18 @@ pub struct ProxyConfig {
 }
 
 /// The revocation bits a hub's `sr_status_flags` may carry through to the
-/// client (§4 Leases: a revocation must not be dropped on the way). NEVER
-/// `SEQ4_STATUS_ADMIN_STATE_REVOKED` (0x20): Linux treats it client-wide,
-/// and behind the proxy the client is every workspace a node mounts
-/// (census Part 3). Channel bits (CB_PATH_DOWN, ...) describe the
-/// proxy's backend session, not the client's.
-const HUB_FLAGS_PASSED: u32 = 0x08 | 0x10 | 0x40;
+/// client: RECALLABLE_STATE_REVOKED (0x40) only, which Linux answers by
+/// testing its delegations one stateid at a time. EXPIRED_ALL (0x08),
+/// EXPIRED_SOME (0x10) and ADMIN (0x20) _STATE_REVOKED start a
+/// client-wide recovery (`nfs41_handle_sequence_flag_errors`), and behind
+/// the proxy the client is every workspace a node mounts: each of the
+/// three, surfaced after one hub lost its state, cost another workspace
+/// its lock and its writes (step3-drills.sh `revoke`, Linux 6.12; census
+/// Part 3 for 0x20 on knfsd). Those losses reach the client as the hub's
+/// per-op stateid errors instead, which it recovers per state (same
+/// drill). Channel bits (CB_PATH_DOWN, ...) describe the proxy's backend
+/// session, not the client's.
+const HUB_FLAGS_PASSED: u32 = 0x40;
 
 /// What a downstream slot last carried.
 #[derive(Debug, Clone, Copy)]
@@ -1168,6 +1174,36 @@ mod tests {
         assert_eq!(st, 0, "status {st} (10008 = DELAY, the forever-loop)");
         assert!(dir.path().join("export/b").is_dir());
         assert!(hub_state.clients.id_of_owner(b"flint-proxy/test-client").is_some(), "registered again");
+    }
+
+    /// §4 Leases, measured (step3-drills.sh `revoke`, Linux 6.12): a hub's
+    /// EXPIRED_ALL (0x08), EXPIRED_SOME (0x10) or ADMIN (0x20)
+    /// _STATE_REVOKED surfaced downstream cost the lock and the writes of
+    /// ANOTHER workspace; RECALLABLE_STATE_REVOKED (0x40) did not. Only
+    /// 0x40 may pass; the rest are left to the hub's per-op errors.
+    #[tokio::test]
+    async fn only_a_per_state_revocation_flag_reaches_the_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let (hub_addr, hub_state) = hub_with_state(dir.path()).await;
+        let (_p, addr) = proxy(dir.path(), &hub_addr).await;
+        let (c, sid) = client(&addr).await;
+        let flags = |slot_seq: u32| {
+            let c = c.clone();
+            async move {
+                let x = [seq(sid, 0, slot_seq), op_putfh(route::PSEUDO_ROOT_FH), op_lookup("ws-a"), wire::op_getfh()];
+                let refs: Vec<&[u8]> = x.iter().map(|o| o.as_slice()).collect();
+                let body = c.call(&proxy_cred(), &wire::encode_compound(b"", 2, &refs)).await.unwrap();
+                let mut d = XdrDecoder::new(body);
+                let (_, _, _) = (d.decode_u32(), d.decode_opaque(), d.decode_u32());
+                let (st, r) = wire::decode_sequence_res(&mut d).unwrap();
+                assert_eq!(st, Nfs4Status::Ok);
+                r.unwrap().status_flags
+            }
+        };
+        assert_eq!(flags(1).await, 0);
+        let backend = hub_state.clients.id_of_owner(b"flint-proxy/test-client").unwrap();
+        hub_state.raise_seq_flags(backend, 0x08 | 0x10 | 0x20 | 0x40);
+        assert_eq!(flags(2).await, 0x40, "the client-wide revocation bits must stop at the proxy");
     }
 
     // ---- §6a RPC-with-TLS ----

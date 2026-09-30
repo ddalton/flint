@@ -1,0 +1,13 @@
+=== revoke
+LOSS=1 INJECT=none: ws-a write=errno 5 ws-b write=ok; kernel lost 1 lock(s); contender A=ACQUIRED B=REFUSED 11
+  kernel: [ 2607.666431] NFS: 127.0.0.1: lost 1 locks
+PASS revoke: the holder finished both writes (no wedge)
+PASS revoke: ws-b's write succeeded
+PASS revoke: ws-b's lock is still held on hub B
+PASS revoke: hub A really lost the lock (a contender takes it)
+PASS revoke: ws-a's write reports the loss (EIO), not success
+PASS revoke: the kernel declared exactly ONE lock lost (ws-a's)
+PASS revoke: the proxy registered on hub A again
+proxy warnings:
+      1  WARN spdk_csi_driver::nfs::v4::dispatcher: CREATE_SESSION: client requested CONN_BACK_CHAN but no back-channel writer is available for session SessionId([0, 0, 0, 0, 0, 0,
+RESULT: 7 passed, 0 failed

@@ -1,0 +1,21 @@
+diff --git a/spdk-csi-driver/src/nfs_proxy/server.rs b/spdk-csi-driver/src/nfs_proxy/server.rs
+index c3e7d7ea..3d2a6275 100644
+--- a/spdk-csi-driver/src/nfs_proxy/server.rs
++++ b/spdk-csi-driver/src/nfs_proxy/server.rs
+@@ -590,6 +590,16 @@ impl Proxy {
+                         Ok((bsid, bseq, reply)) => {
+                             used_hub = Some((hub, bsid, bseq));
+                             seq_res.status_flags |= reply.seq.1.as_ref().map(|s| s.status_flags).unwrap_or(0) & HUB_FLAGS_PASSED;
++                            // KNOWN-BAD (revoke-inject.patch, drills only): surface a
++                            // hub's state loss as a SEQUENCE flag, once.
++                            if let Ok(f) = std::env::var("FLINT_PROXY_INJECT_FILE") {
++                                if let Ok(v) = std::fs::read_to_string(&f) {
++                                    if std::fs::remove_file(&f).is_ok() {
++                                        seq_res.status_flags |= u32::from_str_radix(v.trim().trim_start_matches("0x"), 16).unwrap_or(0);
++                                        warn!("KNOWN-BAD: injected sr_status_flags {:#x}", seq_res.status_flags);
++                                    }
++                                }
++                            }
+                             if cross {
+                                 let s = reply.putrootfh.unwrap_or(Nfs4Status::ServerFault);
+                                 pieces.push(Piece::Res(OperationResult::Lookup(s)));

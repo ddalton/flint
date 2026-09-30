@@ -1,0 +1,17 @@
+=== revoke
+LOSS=1 INJECT=0x20: ws-a write=errno 5 ws-b write=errno 5; kernel lost 2 lock(s); contender A=ACQUIRED B=REFUSED 11
+  kernel: [ 1915.721766] NFS: 127.0.0.1: lost 2 locks
+PASS revoke: the holder finished both writes (no wedge)
+FAIL revoke: ws-b's write succeeded
+PASS revoke: ws-b's lock is still held on hub B
+PASS revoke: hub A really lost the lock (a contender takes it)
+PASS revoke: ws-a's write reports the loss (EIO), not success
+FAIL revoke: the kernel declared exactly ONE lock lost (ws-a's)
+PASS revoke: the proxy registered on hub A again
+PASS revoke: the known-bad proxy really injected 0x20
+proxy warnings:
+      1  WARN spdk_csi_driver::nfs_proxy::server: hub ws-a (127.0.0.1:20491) refuses connections; no waker in static mode — answering DELAY
+      1  WARN spdk_csi_driver::nfs_proxy::server: hub 0x80b8f67b3966af5d: hub down: 127.0.0.1:20491: Connection refused (os error 111) → Delay
+      1  WARN spdk_csi_driver::nfs_proxy::server: KNOWN-BAD: injected sr_status_flags 0x20
+      1  WARN spdk_csi_driver::nfs::v4::dispatcher: CREATE_SESSION: client requested CONN_BACK_CHAN but no back-channel writer is available for session SessionId([0, 0, 0, 0, 0, 0,
+RESULT: 6 passed, 2 failed

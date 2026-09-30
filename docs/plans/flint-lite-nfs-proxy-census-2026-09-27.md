@@ -236,8 +236,11 @@ proxy**. The §4 hibernate row is withdrawn. What replaces it:
 2. For the losses that remain (a quarantined `state.db`, a crash that
    loses the PVC), return per-operation errors on that hub's stateids,
    **without** the SEQUENCE flag. Whether Linux keeps that recovery
-   per-state is **unmeasured**. It is the step-3 drill, with this
-   file's four arms as its template.
+   per-state was unmeasured here. **Measured 2026-09-30 through the
+   proxy with flint hubs** (`step3-drills.sh revoke`, design §8 step 3):
+   per-op errors alone lose only ws-a's lock; the same loss with 0x08,
+   0x10 or 0x20 in the downstream `SEQUENCE` also costs ws-b its lock
+   and writes; 0x40 does not.
 
 ## Part 4 — step 2 end to end, and hub defect D3 (2026-09-28, box, Linux 6.12)
 

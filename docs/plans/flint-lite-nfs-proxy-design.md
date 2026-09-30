@@ -181,9 +181,17 @@ backend seqids are tracked per hub, never copied from the client.
   about once per third of the hub lease. When the downstream lease
   lapses, the proxy stops, and the hub's own expiry and courtesy release
   run as they do today.
-- `sr_status_flags` from every hub the client uses are **OR-ed into the
-  next downstream `SEQUENCE` reply**. A revocation must not be dropped
-  on the way through.
+- `sr_status_flags` from a hub are OR-ed into the downstream `SEQUENCE`
+  reply of the compound that reached it, **but only
+  `RECALLABLE_STATE_REVOKED` (0x40)**. (This first said every
+  revocation bit must pass; the step-3 `revoke` drill disproved it.)
+  Linux answers `EXPIRED_ALL` (0x08), `EXPIRED_SOME` (0x10) and `ADMIN`
+  (0x20) `_STATE_REVOKED` with a client-wide recovery, and each one,
+  surfaced after hub A lost its state, cost ws-b its lock and its writes
+  (EIO, the kernel "lost 2 locks"); 0x40 did not. A loss reaches the
+  client as the hub's per-op stateid errors instead (next row). The
+  cost: a client learns of a lost lock at its next use of that stateid,
+  not at its next lease renewal.
 
 ### Restarts and state loss
 
@@ -191,7 +199,7 @@ backend seqids are tracked per hub, never copied from the client.
 |---|---|---|
 | **Hub restarts** (state persisted) | `BADSESSION` → `CREATE_SESSION`, no reclaim | Hub returns `BADSESSION` to the proxy; proxy re-`CREATE_SESSION`s on the same backend clientid and retries. **The client sees nothing but latency.** |
 | **Proxy restarts** | — | The client sees `BADSESSION`, re-`CREATE_SESSION`s on its clientid. That works because the proxy's client table is **persisted** (small SQLite DB on a PVC, written only at `EXCHANGE_ID` confirm and `DESTROY_CLIENTID`). Backend clients are re-attached with the same owner and verifier, so the hubs return the **same** clientid with state intact — no reclaim anywhere. |
-| **Hub loses a client's state** (hibernate deleted the PVC, `state.db` quarantined) | Remount, not resume (hibernate already means this) | Hub returns `STALE_CLIENTID`; proxy re-registers. **The proxy must NOT set `SEQ4_STATUS_ADMIN_STATE_REVOKED`.** The census measured Linux 6.12 treating that flag client-wide: revoking one export's state lost byte-range locks in the *other* export on the same session (census Part 3). Behind the proxy, that means every workspace the node mounts. Instead: (1) **hibernation requires zero live leases** (the HIB-1 fix), so hibernation never destroys state a client holds; (2) for the remaining losses, return per-op errors on that hub's stateids only, with no SEQUENCE flag. Whether Linux keeps that recovery per-state is **unmeasured** and is the step-3 drill. |
+| **Hub loses a client's state** (hibernate deleted the PVC, `state.db` quarantined) | Remount, not resume (hibernate already means this) | Hub returns `STALE_CLIENTID`; proxy re-registers. **The proxy must NOT set `SEQ4_STATUS_ADMIN_STATE_REVOKED`.** The census measured Linux 6.12 treating that flag client-wide: revoking one export's state lost byte-range locks in the *other* export on the same session (census Part 3). Behind the proxy, that means every workspace the node mounts. Instead: (1) **hibernation requires zero live leases** (the HIB-1 fix), so hibernation never destroys state a client holds; (2) for the remaining losses, return per-op errors on that hub's stateids only, with no SEQUENCE flag. **Measured (step 3 `revoke`, Linux 6.12): the recovery stays per-state.** One process holds a lock in ws-a and in ws-b; hub A loses every client's state. ws-a's write returns EIO and the kernel logs "lost 1 locks"; ws-b's write succeeds and its lock still holds on hub B. |
 | **Hub parked** (idle ladder, replicas 0) | `hard` mount hangs; nothing can wake it (an NFS client cannot write an annotation) | Proxy gets connection refused, stamps `chert.us/requested-at` on the FlintShare (the hub-gateway's `/wake` code), and returns **`NFS4ERR_DELAY`** until the hub is Ready. **This fixes the agent-mount hazard** for proxied clients. |
 
 The last row is an improvement over direct mounts: the proxy is the
@@ -724,9 +732,23 @@ port are still wanted for capacity and failure isolation.
    mount that wedged every process touching the mount, sshd's session
    setup included, and the box needed a forced reboot. DELAY is now
    answered only when the hub is unreachable; anything else is an
-   error the client sees. **Still open:** the status-flag drill and the
-   per-op revocation drill (§4 hub-loses-state row), the wake stamp
-   (step 4).
+   error the client sees. The wake stamp landed with step 4.
+   **Revocation drill, 2026-09-30** (`step3-drills.sh revoke`,
+   `results-box-6.12-step3-revoke/`): one process holds an open and a
+   write lock on ws-a/f and ws-b/f (one client, one session); hub A is
+   stopped, its NFSv4 tables emptied (server id and filehandles kept, as
+   after a lease reap), and restarted; the process writes through both.
+   **Design arm 7/7:** ws-a's write is EIO, the kernel loses exactly
+   one lock, a contender on hub A takes it; ws-b's write succeeds and a
+   contender on hub B is refused. **Control, nothing lost, 6/6:** both
+   writes succeed, both locks hold, no lock lost. **Known-bad arms**
+   (`revoke-inject.patch`: the proxy ORs one flag into the first
+   forwarded `SEQUENCE` after the loss): 0x08, 0x10 and 0x20 each fail
+   exactly the two ws-b checks (ws-b's write EIO, "lost 2 locks"); 0x40
+   passes 8/8. **This is the status-flag drill, and it found a
+   defect:** the proxy passed 0x08 and 0x10 through. Fixed test-first
+   (`only_a_per_state_revocation_flag_reaches_the_client`: a hub
+   raising 0x78 reached the client as 0x58 before the fix, 0x40 after).
 4. Chart/operator wiring, with **headless hub Services** (§7a), and
    the hub lockdown that makes the proxy unbypassable: NetworkPolicy
    (and, under ambient, the L4 `AuthorizationPolicy`) admitting only
@@ -809,8 +831,9 @@ Drills. Each one needs an arm that fails when the mechanism is removed:
   recovers opens on the affected workspace **without** disturbing the
   others. **Answered by the census (Part 3): NO.** Linux 6.12 lost
   locks in the other export too. So §4 never sets the flag. The open
-  question is now whether per-op stateid errors *without* the flag stay
-  per-state. That is the step-3 drill.
+  question was whether per-op stateid errors *without* the flag stay
+  per-state. **Answered by the step-3 `revoke` drill (2026-09-30):
+  YES**, and 0x08 and 0x10 are as client-wide as 0x20 (§8 step 3).
 - Whether the hub accepts a `CREATE_SESSION` without a back channel,
   and behaves correctly with one. With delegations off it should never
   use it; confirm that.
