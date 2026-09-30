@@ -6,6 +6,25 @@
 # What it must NOT have, and does not: hostNetwork (it serves one Unix
 # socket), hostPID (it unmounts, it never signals a mounter), Secrets
 # RBAC, pod verbs outside workers.namespace.
+{{- /*
+  A worker memory limit below 512Mi cannot work: mount-s3's memory target
+  (the plugin passes --memory-target at two thirds of the limit) has a
+  512 MiB floor the binary itself enforces, so under such a limit the
+  mounter's read and write buffers alone are allowed to exceed the cgroup,
+  and the first sustained read OOM-kills the worker — a dead mount for
+  its tenant, or for every member of a shared class. Refused here, where
+  the message can name the value.
+*/ -}}
+{{- range $name, $r := dict "workers.resources" .Values.workers.resources "workers.sharedResources" .Values.workers.sharedResources }}
+{{- if $r }}{{- if $r.limits }}{{- if $r.limits.memory }}
+{{- $mib := include "flint-s3-csi.quantityMiB" $r.limits.memory | int }}
+{{- if lt $mib 0 }}
+{{- fail (printf "%s.limits.memory %q is not a memory quantity this chart reads (use Gi, Mi, Ki, G, M, k or bytes)" $name (toString $r.limits.memory)) }}
+{{- else if lt $mib 512 }}
+{{- fail (printf "%s.limits.memory %s is below 512Mi, mount-s3's own memory-target floor: the mounter's buffers alone could exceed the cgroup and the worker would be OOM-killed under the first sustained read" $name (toString $r.limits.memory)) }}
+{{- end }}
+{{- end }}{{- end }}{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -42,6 +61,53 @@ spec:
 {{- with .Values.node.affinity }}
       affinity: {{- toYaml . | nindent 8 }}
 {{- end }}
+{{- if or .Values.workers.prepull.passthrough .Values.workers.prepull.lean }}
+      # PRE-PULL THE WORKER IMAGES. The first mount on a fresh node used
+      # to pay for the worker image pull inside NodePublishVolume: the
+      # plugin waits 45 s for the worker to run, gives kubelet a retry,
+      # and kubelet backs off toward two minutes between attempts. Pulling
+      # here, before the plugin registers, makes the first publish on a
+      # node cost what every later one does. Each init container runs the
+      # worker binary's preStop verb with a zero budget, which exits 0 at
+      # once in every worker image that has the hook — no shell, no new
+      # subcommand the image would have to be rebuilt for. A missing
+      # image blocks the plugin on that node (fail-closed): no publish
+      # could succeed without it anyway, which is why the lean image is
+      # opt-in (workers.prepull.lean) on a cluster that runs no lean.
+      initContainers:
+{{- if .Values.workers.prepull.passthrough }}
+        - name: prepull-passthrough
+          image: {{ include "flint-s3-csi.passthroughImage" . | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/flint-s3-worker", "await-release"]
+          env:
+            - { name: FLINT_S3W_PRESTOP_SECS, value: "0" }
+            - { name: FLINT_S3W_COMM, value: "/tmp/prepull" }
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits: { memory: 32Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+{{- end }}
+{{- if .Values.workers.prepull.lean }}
+        - name: prepull-lean
+          image: {{ include "flint-s3-csi.leanImage" . | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/flint-s3-worker", "await-release"]
+          env:
+            - { name: FLINT_S3W_PRESTOP_SECS, value: "0" }
+            - { name: FLINT_S3W_COMM, value: "/tmp/prepull" }
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits: { memory: 32Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+{{- end }}
+{{- end }}
       containers:
         - name: node
           image: {{ include "flint-s3-csi.node.image" . }}
@@ -66,6 +132,12 @@ spec:
             - { name: FLINT_S3CSI_LEAN_IMAGE, value: {{ include "flint-s3-csi.leanImage" . | quote }} }
             - { name: FLINT_S3CSI_WORKER_NAMESPACE, value: {{ .Values.workers.namespace | quote }} }
             - { name: FLINT_S3CSI_WORKER_RESOURCES, value: {{ .Values.workers.resources | toJson | quote }} }
+{{- if .Values.workers.sharedResources }}
+            # A shared read-only mounter's resources, when they differ
+            # from every worker's (one limit and one memory target serve
+            # every member of a class).
+            - { name: FLINT_S3CSI_SHARED_WORKER_RESOURCES, value: {{ .Values.workers.sharedResources | toJson | quote }} }
+{{- end }}
             - { name: FLINT_S3CSI_PRESTOP_SECS, value: {{ .Values.workers.prestopSecs | quote }} }
             - { name: FLINT_S3CSI_QUIESCE_SECS, value: {{ .Values.workers.quiesceSecs | quote }} }
             - { name: FLINT_S3CSI_QUOTA, value: {{ .Values.workers.quota | quote }} }

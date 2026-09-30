@@ -65,6 +65,11 @@ pub struct Config {
     pub passthrough_image: String,
     pub lean_image: Option<String>,
     pub worker_resources: Option<ResourceRequirements>,
+    /// Resources for a SHARED read-only mounter
+    /// (FLINT_S3CSI_SHARED_WORKER_RESOURCES): one worker serving every
+    /// read-only member of a class on the node, so one memory limit and
+    /// one `--memory-target` for all of them. Unset ⇒ `worker_resources`.
+    pub shared_worker_resources: Option<ResourceRequirements>,
     pub priority_class: Option<String>,
     /// How long a worker's preStop hook holds it open waiting for its
     /// volume to be released (FLINT_S3CSI_PRESTOP_SECS). This is the
@@ -113,12 +118,16 @@ impl Config {
     pub fn from_env() -> Result<Self, String> {
         let need = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty()).ok_or_else(|| format!("{k} is unset"));
         let opt = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
-        let worker_resources = match opt("FLINT_S3CSI_WORKER_RESOURCES") {
-            Some(j) if j.trim() != "{}" => Some(
-                serde_json::from_str(&j).map_err(|e| format!("FLINT_S3CSI_WORKER_RESOURCES is not ResourceRequirements JSON: {e}"))?,
-            ),
-            _ => None,
+        let resources = |k: &str| -> Result<Option<ResourceRequirements>, String> {
+            match opt(k) {
+                Some(j) if j.trim() != "{}" => Ok(Some(
+                    serde_json::from_str(&j).map_err(|e| format!("{k} is not ResourceRequirements JSON: {e}"))?,
+                )),
+                _ => Ok(None),
+            }
         };
+        let worker_resources = resources("FLINT_S3CSI_WORKER_RESOURCES")?;
+        let shared_worker_resources = resources("FLINT_S3CSI_SHARED_WORKER_RESOURCES")?;
         Ok(Self {
             node_name: need("FLINT_S3CSI_NODE_NAME")?,
             node_uid: None,
@@ -127,6 +136,7 @@ impl Config {
             passthrough_image: need("FLINT_S3CSI_PASSTHROUGH_IMAGE")?,
             lean_image: opt("FLINT_S3CSI_LEAN_IMAGE"),
             worker_resources,
+            shared_worker_resources,
             priority_class: opt("FLINT_S3CSI_WORKER_PRIORITY_CLASS"),
             prestop_secs: opt("FLINT_S3CSI_PRESTOP_SECS").and_then(|v| v.parse().ok()),
             quiesce_secs: opt("FLINT_S3CSI_QUIESCE_SECS").and_then(|v| v.parse().ok()).unwrap_or(30),
@@ -347,6 +357,94 @@ impl S3Node {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// The resources a shared mounter's pod gets: its own when the chart
+    /// set them, else every worker's.
+    fn shared_worker_resources(&self) -> Option<ResourceRequirements> {
+        self.cfg.shared_worker_resources.clone().or_else(|| self.cfg.worker_resources.clone())
+    }
+
+    /// The mounter's memory target from the worker's limit, logged once
+    /// per publish so the number is beside the volume in the log.
+    fn mounter_args(
+        &self,
+        vid: &str,
+        spec: &crate::passthrough::spec::MountSpec,
+        owner: (u32, u32),
+        resources: Option<&ResourceRequirements>,
+    ) -> Vec<String> {
+        let limit = worker_memory_limit(resources);
+        let args = crate::passthrough::mounter::mounter_args_for(
+            spec,
+            (Some(owner.0 as i64), Some(owner.1 as i64)),
+            fuse::FUSE_FD_PLACEHOLDER,
+            limit.as_deref(),
+        );
+        match (limit.as_deref(), crate::passthrough::mounter::memory_target_mib(limit.as_deref())) {
+            (Some(l), Some(mib)) => {
+                let limit_mib = crate::passthrough::spec::quantity_mib(l).unwrap_or(0);
+                if mib >= limit_mib {
+                    tracing::warn!(
+                        volume = vid, limit = l, target_mib = mib,
+                        "the worker memory limit is at or below mount-s3's {} MiB floor: its buffers alone may exceed the cgroup; raise workers.resources.limits.memory",
+                        crate::passthrough::mounter::MEMORY_TARGET_FLOOR_MIB
+                    );
+                } else {
+                    tracing::info!(volume = vid, limit = l, target_mib = mib, "mounter memory target from the worker limit");
+                }
+            }
+            (Some(l), None) => tracing::warn!(volume = vid, limit = l, "worker memory limit is not a quantity this plugin reads; mount-s3 keeps its own memory target"),
+            (None, _) => tracing::info!(volume = vid, "no worker memory limit: mount-s3 keeps its own memory target (95% of the cgroup or the node)"),
+        }
+        args
+    }
+
+    /// A worker kubelet or its container refused, as the tenant's
+    /// FailedMount. A kubelet ADMISSION refusal (`OutOfmemory`,
+    /// `OutOfpods`, …) is the one case that is not the plugin's or the
+    /// bucket's: the plugin places workers with `nodeName` set, so the
+    /// scheduler reserved no room for one, and the tenant is already
+    /// bound here — Kubernetes will not move it. Named in its own event,
+    /// with what frees it.
+    async fn worker_refused(&self, st: &VolumeState, what: &str, reason: &str, message: &str) -> Status {
+        if !worker::admission_refused(reason) {
+            return Status::failed_precondition(format!("{what} pod {}: {reason} {message}", st.worker_name));
+        }
+        let requests = self
+            .cfg
+            .worker_resources
+            .as_ref()
+            .and_then(|r| r.requests.as_ref())
+            .map(|r| serde_json::to_string(r).unwrap_or_default())
+            .unwrap_or_else(|| "none".into());
+        let msg = format!(
+            "{what} pod {} was not admitted by kubelet on node {}: {reason} {message} — the mount needs a worker pod on this \
+             node, the scheduler reserved no room for it, and the tenant pod is bound here and will not be rescheduled. \
+             kubelet keeps retrying this mount; it succeeds once capacity frees on the node (worker requests: {requests}, \
+             workers.resources in the flint-s3-csi chart; one worker per mounted pod counts against the node's maxPods)",
+            st.worker_name, self.cfg.node_name
+        );
+        self.emit_event(&st.tenant, "WorkerNotAdmitted", &msg, true).await;
+        Status::failed_precondition(msg)
+    }
+
+    /// A worker that is still coming up at the deadline (an image still
+    /// pulling on a fresh node, most often) is KEPT: the volume goes to
+    /// phase `worker-pending` and kubelet's retry adopts the same pod
+    /// (`worker::ensure` adopts a live namesake) instead of deleting it
+    /// and starting the pull's accounting over under a growing backoff.
+    async fn worker_pending(&self, dir: &Path, st: &mut VolumeState, what: &str, phase: &str) -> Status {
+        st.phase = "worker-pending".into();
+        if let Err(e) = st.save(dir) {
+            return Status::internal(format!("state: {e}"));
+        }
+        tracing::info!(volume = %st.volume_id, worker = %st.worker_name, phase, "{what} still coming up at the deadline; kept for kubelet's retry");
+        Status::unavailable(format!(
+            "{what} pod {} not Running after {}s ({phase}); it is kept and the retry resumes it",
+            st.worker_name,
+            WORKER_RUNNING_WAIT.as_secs()
+        ))
+    }
+
     async fn emit_event(&self, tenant: &TenantRef, reason: &str, message: &str, warning: bool) {
         let api: Api<Event> = Api::namespaced(self.client.clone(), &tenant.namespace);
         let now = MicroTime(k8s_openapi::jiff::Timestamp::now());
@@ -436,6 +534,12 @@ impl S3Node {
                 // The syncer is checking out between kubelet's attempts
                 // (design §3.5 step 8): do not start over, wait again.
                 PublishedAction::ResumeCheckout => return self.resume_lean(&dir, st, &target).await,
+                // The worker from the previous attempt is still coming up:
+                // nothing below it was made (no credential, no mount), so
+                // the publish runs again from the top and adopts it.
+                PublishedAction::ResumeWorker => {
+                    tracing::info!(volume = %vid, worker = %st.worker_name, "the previous attempt's worker is still coming up; resuming rather than starting over");
+                }
                 // An unfinished publish: start over.
                 PublishedAction::StartOver => {
                     // A shared member's cleanup edits the class record:
@@ -610,8 +714,32 @@ impl S3Node {
                 Sharing::Shared => {
                     return self.publish_shared(dir, vid, target, pr, tenant, &spec, cred_mode, req, (owner_uid, owner_gid)).await;
                 }
+                // The CR asked and the answer is not known yet: a retry, not
+                // a mounter of its own for the pod's whole life. With the
+                // broker unreachable the credential exchange below would
+                // fail the same way, so nothing is lost by waiting.
+                Sharing::Retry(why) => {
+                    tracing::warn!(volume = vid, cr = pr.selector.name(), "sharing cannot be decided yet: {why}; retrying");
+                    return Err(Status::unavailable(format!(
+                        "FlintPassthroughMount {}/{} asks for sharing and {why}; retrying",
+                        pr.pod_namespace,
+                        pr.selector.name()
+                    )));
+                }
                 Sharing::Own(why) => {
                     tracing::info!(volume = vid, cr = pr.selector.name(), "own mounter, not the CR's shared one: {why}");
+                    // A read-write consumer is expected to keep its own; a
+                    // read-only one the knob was meant for gets told, once
+                    // per publish, on the tenant pod.
+                    if read_only {
+                        self.emit_event(
+                            tenant,
+                            "SharingUnavailable",
+                            &format!("{}: spec.sharing.readOnly is set but this pod gets a mounter of its own — {why}", pr.selector.name()),
+                            true,
+                        )
+                        .await;
+                    }
                 }
             }
         }
@@ -675,11 +803,11 @@ impl S3Node {
         let worker_uid = match worker::wait_running(&self.client, &st.worker_namespace, &st.worker_name, WORKER_RUNNING_WAIT).await {
             Ok(WaitOutcome::Running { uid }) => uid,
             Ok(WaitOutcome::Failed { reason, message }) => {
-                return Err(self.fail(dir, &st,Status::failed_precondition(format!("worker pod {}: {reason} {message}", st.worker_name))).await)
+                let status = self.worker_refused(&st, "worker", &reason, &message).await;
+                return Err(self.fail(dir, &st, status).await);
             }
-            Ok(WaitOutcome::Timeout { phase }) => {
-                return Err(self.fail(dir, &st,Status::unavailable(format!("worker pod {} not Running after {}s ({phase}); retrying", st.worker_name, WORKER_RUNNING_WAIT.as_secs()))).await)
-            }
+            // Kept, not cleaned up: the retry adopts it.
+            Ok(WaitOutcome::Timeout { phase }) => return Err(self.worker_pending(dir, &mut st, "worker", &phase).await),
             Err(e) => return Err(self.fail(dir, &st,Status::unavailable(e)).await),
         };
         st.worker_uid = Some(worker_uid.clone());
@@ -709,11 +837,7 @@ impl S3Node {
             Ok(fd) => fd,
             Err(e) => return Err(self.fail(dir, &st,Status::internal(format!("fuse mount: {e}"))).await),
         };
-        let mut args = crate::passthrough::mounter::mounter_args_for(
-            &spec,
-            (Some(owner_uid as i64), Some(owner_gid as i64)),
-            fuse::FUSE_FD_PLACEHOLDER,
-        );
+        let mut args = self.mounter_args(vid, &spec, (owner_uid, owner_gid), self.cfg.worker_resources.as_ref());
         if read_only && !args.iter().any(|a| a == "--read-only") {
             args.push("--read-only".into());
         }
@@ -786,11 +910,8 @@ impl S3Node {
         owner: (u32, u32),
     ) -> Result<(), Status> {
         let (owner_uid, owner_gid) = owner;
-        let mut args = crate::passthrough::mounter::mounter_args_for(
-            spec,
-            (Some(owner_uid as i64), Some(owner_gid as i64)),
-            fuse::FUSE_FD_PLACEHOLDER,
-        );
+        let shared_resources = self.shared_worker_resources();
+        let mut args = self.mounter_args(vid, spec, owner, shared_resources.as_ref());
         if !args.iter().any(|a| a == "--read-only") {
             args.push("--read-only".into());
         }
@@ -835,6 +956,21 @@ impl S3Node {
 
         let mut sm = match SharedMount::load(&sdir).map_err(|e| Status::internal(format!("shared record: {e}")))? {
             Some(sm) if sm.phase == "published" && self.shared_mount_alive(&sm).await => sm,
+            // A create whose worker was never LAUNCHED (no worker uid on the
+            // record: the previous attempt hit its deadline before the pod
+            // ran, and kept it) and whose pod is alive — still pulling, or
+            // Running by now: the CREATE branch below adopts that pod and
+            // launches on it. A record WITH a worker uid was launched once
+            // already, and an fd passed once cannot be passed again: replaced.
+            Some(mut sm)
+                if sm.phase != "published"
+                    && sm.worker_uid.is_none()
+                    && worker::alive(&self.client, &sm.worker_namespace, &sm.worker_name).await.unwrap_or(false) =>
+            {
+                tracing::info!(volume = vid, shared = %hash, worker = %sm.worker_name, "the shared worker from an earlier attempt is alive and was never launched; resuming its create on it");
+                sm.phase = "publishing".into();
+                sm
+            }
             Some(mut sm) => {
                 // A record whose mounter is not serving (dead, or a create
                 // that never finished). Its members are stranded exactly as
@@ -890,7 +1026,7 @@ impl S3Node {
                 cr,
                 run_as_uid: run_as,
                 run_as_gid,
-                resources: self.cfg.worker_resources.clone(),
+                resources: shared_resources.clone(),
                 prestop_secs: self.cfg.prestop_secs,
                 env: BTreeMap::from([("FLINT_S3W_MODE".to_string(), "passthrough".to_string())]),
                 lean_tree_hostpath: None,
@@ -906,13 +1042,12 @@ impl S3Node {
             let worker_uid = match worker::wait_running(&self.client, &st.worker_namespace, &st.worker_name, WORKER_RUNNING_WAIT).await {
                 Ok(WaitOutcome::Running { uid }) => uid,
                 Ok(WaitOutcome::Failed { reason, message }) => {
-                    return Err(self.fail(dir, &st, Status::failed_precondition(format!("shared worker pod {}: {reason} {message}", st.worker_name))).await)
+                    let status = self.worker_refused(&st, "shared worker", &reason, &message).await;
+                    return Err(self.fail(dir, &st, status).await);
                 }
-                Ok(WaitOutcome::Timeout { phase }) => {
-                    return Err(self
-                        .fail(dir, &st, Status::unavailable(format!("shared worker pod {} not Running after {}s ({phase}); retrying", st.worker_name, WORKER_RUNNING_WAIT.as_secs())))
-                        .await)
-                }
+                // Kept, with this member on the record: the retry (this
+                // member's, or another's) adopts it.
+                Ok(WaitOutcome::Timeout { phase }) => return Err(self.worker_pending(dir, &mut st, "shared worker", &phase).await),
                 Err(e) => return Err(self.fail(dir, &st, Status::unavailable(e)).await),
             };
             sm.worker_uid = Some(worker_uid.clone());
@@ -1111,12 +1246,26 @@ impl S3Node {
                                     // the door answers 503, the client fails at the old
                                     // key's expiry — revocation lands within one lifetime
                                     // (design §4.6). An outage keeps the cached key.
-                                    if e.is_refusal() {
+                                    if e.is_refusal() && revocation_removes_the_key(&st) {
                                         creds::remove_file(&comm, creds::CREDS_FILE);
                                         st.creds_expiration = None;
                                         changed = true;
                                     }
-                                    self.emit_event(&st.tenant, "CredentialRefreshFailed", &format!("{}: {e}", st.cr), true).await;
+                                    let detail = if e.is_refusal() && st.shared.is_some() {
+                                        // The file serves every member of the class; removing
+                                        // it would only cut the others' reads until the next
+                                        // member re-minted it, while this pod — bound to the
+                                        // same superblock — read on regardless.
+                                        format!(
+                                            "{}: {e} — this pod shares its mounter with the other read-only members of its class, so the \
+                                             class's credential stays for them and this pod keeps reading until it exits (per-member \
+                                             revocation is not possible under spec.sharing.readOnly)",
+                                            st.cr
+                                        )
+                                    } else {
+                                        format!("{}: {e}", st.cr)
+                                    };
+                                    self.emit_event(&st.tenant, "CredentialRefreshFailed", &detail, true).await;
                                 }
                             }
                         }
@@ -1509,9 +1658,7 @@ impl S3Node {
         worker::ensure(&self.client, &pod).await.map_err(Status::unavailable)?;
         let worker_uid = match worker::wait_running(&self.client, &st.worker_namespace, &st.worker_name, WORKER_RUNNING_WAIT).await {
             Ok(WaitOutcome::Running { uid }) => uid,
-            Ok(WaitOutcome::Failed { reason, message }) => {
-                return Err(Status::failed_precondition(format!("syncer pod {}: {reason} {message}", st.worker_name)))
-            }
+            Ok(WaitOutcome::Failed { reason, message }) => return Err(self.worker_refused(st, "syncer", &reason, &message).await),
             Ok(WaitOutcome::Timeout { phase }) => {
                 return Err(Status::unavailable(format!(
                     "syncer pod {} not Running after {}s ({phase}); retrying",
@@ -1575,7 +1722,9 @@ impl S3Node {
     async fn teardown_mounter(&self, label: &str, src: &Path, ns: &str, name: &str, worker_uid: Option<&str>) -> Result<(), Status> {
         unmount_all(&fuse::ro_stage_of(src)).map_err(|e| Status::internal(format!("unmount ro stage: {e}")))?;
         unmount_all(src).map_err(|e| Status::internal(format!("unmount source: {e}")))?;
-        let budget = Duration::from_secs(self.cfg.quiesce_secs);
+        // A worker that never reached Running (a create kept for a retry
+        // that never came, found at startup) has no mounter to wait for.
+        let budget = if worker_uid.is_none() { Duration::ZERO } else { Duration::from_secs(self.cfg.quiesce_secs) };
         let exited = if budget.is_zero() {
             false
         } else {
@@ -2030,6 +2179,26 @@ fn remove_state_dir(dir: &Path) -> Result<(), Status> {
     }
 }
 
+/// The worker's memory limit as the chart wrote it (`limits.memory`),
+/// the quantity the mounter's `--memory-target` is derived from.
+pub fn worker_memory_limit(r: Option<&ResourceRequirements>) -> Option<String> {
+    r?.limits.as_ref()?.get("memory").map(|q| q.0.clone())
+}
+
+/// Whether a REFUSED refresh takes the credential file away (design
+/// §4.6: the door answers 503 and the client fails at the old key's
+/// expiry). Only for a mounter of the pod's own. A shared class's file
+/// serves every member, and every member could have minted the same key:
+/// removing it would cut the innocent members' reads until the next
+/// member's republish re-minted it (up to ~90 s, an EIO in a mount-s3
+/// that refreshes inside that window) while the refused pod, bound to
+/// the same superblock, read on regardless. Per-member revocation is
+/// documented on the CRD field as impossible; the plugin must not
+/// pretend otherwise at the others' expense.
+pub fn revocation_removes_the_key(st: &VolumeState) -> bool {
+    st.shared.is_none()
+}
+
 /// The uid/gid the worker RUNS as (never root: a root owner maps to
 /// nobody for the process, while `--uid 0` still presents root).
 fn worker_owner(st: &VolumeState) -> (u32, u32) {
@@ -2084,6 +2253,10 @@ pub enum PublishedAction {
     RefuseLean,
     /// A lean checkout between kubelet's attempts: keep waiting.
     ResumeCheckout,
+    /// The worker from the previous attempt is still coming up: publish
+    /// again from the top and adopt it (`worker::ensure`), rather than
+    /// deleting it and starting its image pull's backoff over.
+    ResumeWorker,
     /// An unfinished publish: clean up and start over.
     StartOver,
 }
@@ -2107,6 +2280,11 @@ pub fn registered_access(st: &VolumeState) -> Access {
 pub enum Sharing {
     Shared,
     Own(&'static str),
+    /// The CR asked and the member qualifies, but the fact the decision
+    /// turns on could not be read right now: answer `Unavailable` so
+    /// kubelet retries, rather than silently giving the pod a mounter of
+    /// its own for its whole life.
+    Retry(&'static str),
 }
 
 /// The sharing decision (docs/plans/passthrough-read-only-mount-sharing.md
@@ -2132,7 +2310,7 @@ pub fn sharing_decision(cr_shares: bool, read_only: bool, mode: CredentialMode, 
             Some("sts") | Some("static") => Sharing::Shared,
             Some("rest") => Sharing::Own("the broker's rest backend scopes a credential to the pod it was minted for, so members would not hold identical authority"),
             Some(_) => Sharing::Own("the broker reports a backend this plugin does not know"),
-            None => Sharing::Own("the broker's backend could not be read (GET /v1/status), and sharing is only safe when every member's credential is known to carry the same authority"),
+            None => Sharing::Retry("the broker's backend could not be read (GET /v1/status); sharing is only safe when every member's credential is known to carry the same authority, so the decision waits for the broker"),
         },
         CredentialMode::Static => Sharing::Own("identity.mode static: the key is the pod's own nodePublishSecretRef"),
         CredentialMode::WebIdentity => Sharing::Own("identity.mode webIdentity binds the worker to one pod's token"),
@@ -2180,6 +2358,9 @@ pub fn published_action(st: &VolumeState, target_mounted: bool, src_mounted: boo
     }
     if lean && st.phase == "checking-out" {
         return PublishedAction::ResumeCheckout;
+    }
+    if st.phase == "worker-pending" {
+        return PublishedAction::ResumeWorker;
     }
     PublishedAction::StartOver
 }
@@ -2295,6 +2476,13 @@ mod tests {
         assert!(Config::from_env().unwrap_err().contains("FLINT_S3CSI_PASSTHROUGH_IMAGE"));
         std::env::set_var("FLINT_S3CSI_PASSTHROUGH_IMAGE", "img");
         let c = Config::from_env().unwrap();
+        assert!(c.shared_worker_resources.is_none(), "unset ⇒ the shared mounter gets every worker's resources");
+        std::env::set_var("FLINT_S3CSI_SHARED_WORKER_RESOURCES", r#"{"limits":{"memory":"4Gi"}}"#);
+        let shared = Config::from_env().unwrap().shared_worker_resources.expect("parsed");
+        assert_eq!(worker_memory_limit(Some(&shared)).as_deref(), Some("4Gi"));
+        std::env::set_var("FLINT_S3CSI_SHARED_WORKER_RESOURCES", "not json");
+        assert!(Config::from_env().unwrap_err().contains("FLINT_S3CSI_SHARED_WORKER_RESOURCES"));
+        std::env::remove_var("FLINT_S3CSI_SHARED_WORKER_RESOURCES");
         assert_eq!(c.worker_namespace, "flint-workers");
         assert_eq!(c.creds_lifetime_secs, 900);
         assert!(c.broker.is_none());
@@ -2389,13 +2577,23 @@ mod tests {
         let own = |d: Sharing, what: &str| match d {
             Sharing::Own(why) => assert!(why.contains(what), "{why:?} should name {what:?}"),
             Sharing::Shared => panic!("must not share: {what}"),
+            Sharing::Retry(why) => panic!("must be a mounter of its own, not a retry: {what} ({why})"),
         };
         own(sharing_decision(false, true, Broker, Some("sts")), "does not ask");
         own(sharing_decision(false, true, Ambient, None), "does not ask");
         own(sharing_decision(true, false, Broker, Some("sts")), "read-write");
         own(sharing_decision(true, true, Broker, Some("rest")), "rest");
         own(sharing_decision(true, true, Broker, Some("other")), "does not know");
-        own(sharing_decision(true, true, Broker, None), "could not be read");
+        // An UNREADABLE broker is a retry, never a silent mounter of the
+        // pod's own for its whole life (the CR asked; the exchange would
+        // fail on the same outage anyway).
+        match sharing_decision(true, true, Broker, None) {
+            Sharing::Retry(why) => assert!(why.contains("could not be read"), "{why}"),
+            other => panic!("an unreadable broker must be a Retry, got {other:?}"),
+        }
+        // …but only when the knob applies: a read-write consumer keeps its own
+        // without waiting for anything.
+        own(sharing_decision(true, false, Broker, None), "read-write");
         own(sharing_decision(true, true, Static, None), "static");
         own(sharing_decision(true, true, WebIdentity, None), "webIdentity");
         assert_ne!(share_lock_key("abc"), "abc", "the class lock is its own key, never a volume's");
@@ -2411,6 +2609,48 @@ mod tests {
         assert_eq!(adopt_action(&st("passthrough", "published", None)), AdoptAction::Keep);
         assert_eq!(adopt_action(&st("lean", "publishing", None)), AdoptAction::Cleanup);
         assert_eq!(adopt_action(&st("passthrough", "publishing", None)), AdoptAction::Cleanup);
+        // A worker kept for a retry that never came (the plugin restarted
+        // instead): cleaned up like any unfinished publish.
+        assert_eq!(adopt_action(&st("passthrough", "worker-pending", None)), AdoptAction::Cleanup);
+    }
+
+    /// A worker still coming up at the deadline is kept for the retry,
+    /// which resumes from the top and adopts it — never StartOver, whose
+    /// cleanup would delete the pod mid-pull. Only that phase: an
+    /// unfinished publish past the worker (a mount that never served) is
+    /// still started over.
+    #[test]
+    fn a_pending_worker_is_resumed_by_the_retry_not_started_over() {
+        let p = st("passthrough", "worker-pending", None);
+        assert_eq!(published_action(&p, false, false, false), PublishedAction::ResumeWorker);
+        assert_eq!(published_action(&p, false, false, true), PublishedAction::ResumeWorker);
+        assert_eq!(published_action(&st("passthrough", "publishing", None), false, false, false), PublishedAction::StartOver);
+    }
+
+    /// A refused refresh removes the key from a mounter of the pod's own
+    /// (revocation within one lifetime) and NOT from a shared class, whose
+    /// file serves every member.
+    #[test]
+    fn a_refusal_removes_the_key_only_from_an_unshared_mounter() {
+        let mut v = st("passthrough", "published", None);
+        assert!(revocation_removes_the_key(&v));
+        v.shared = Some("abcd".into());
+        assert!(!revocation_removes_the_key(&v), "a shared class's key is every member's");
+    }
+
+    /// The memory limit reaches the mounter as the chart wrote it, and
+    /// only the limit: requests are for scheduling.
+    #[test]
+    fn the_worker_memory_limit_is_read_from_the_chart_s_resources() {
+        use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+        let r: ResourceRequirements = serde_json::from_str(r#"{"requests":{"cpu":"10m","memory":"64Mi"},"limits":{"memory":"1Gi"}}"#).unwrap();
+        assert_eq!(worker_memory_limit(Some(&r)).as_deref(), Some("1Gi"));
+        let cpu_only = ResourceRequirements {
+            limits: Some(BTreeMap::from([("cpu".to_string(), Quantity("1".into()))])),
+            ..Default::default()
+        };
+        assert_eq!(worker_memory_limit(Some(&cpu_only)), None);
+        assert_eq!(worker_memory_limit(None), None);
     }
 
     /// A published lean workspace is NEVER started over. The old code

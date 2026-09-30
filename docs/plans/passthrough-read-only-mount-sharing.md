@@ -364,3 +364,16 @@ flint-passthrough-chart/crds/flintpassthroughmounts.yaml`.
 
 **Not built:** ROX/PV shape (§9); per-member revocation; sharing across
 namespaces or CRs.
+
+**Follow-ups from the 2026-09-30 design review (built the same day).**
+A shared mounter's `--memory-target` is two thirds of its memory limit,
+and that limit is its own: `workers.sharedResources` (falls back to
+`workers.resources`). An unreadable broker at publish is a retry
+(`Sharing::Retry`), not a silent mounter of the pod's own; the backends
+that cannot share raise `SharingUnavailable` on the tenant. A refused
+refresh on a member leaves the class's `creds.json` alone
+(`revocation_removes_the_key`): removing it cut the other members' reads
+for up to a republish period and revoked nothing, since the refused pod
+is bound to the same superblock. A shared create whose worker was kept at
+the publish deadline, never launched, is resumed by the next publish
+rather than replaced (`worker::alive`).

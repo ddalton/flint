@@ -347,6 +347,35 @@ pub fn is_dead(pod: &Pod) -> bool {
     matches!(pod.status.as_ref().and_then(|s| s.phase.as_deref()), Some("Succeeded") | Some("Failed"))
 }
 
+/// Exists and is not dead (`is_dead`), whatever its phase: Pending with an
+/// image still pulling, or Running already. A retried publish ADOPTS such
+/// a worker (`ensure` does, on the 409) rather than replacing it:
+/// deleting a Pending worker and creating it again on every kubelet
+/// retry restarts nothing useful (containerd keeps pulling the image
+/// either way) and turns a slow first pull on a fresh node into several
+/// minutes of backoff — and a worker that reached Running between the
+/// deadline and the retry is exactly the one to launch on.
+pub async fn alive(client: &Client, ns: &str, name: &str) -> Result<bool, String> {
+    let api: Api<Pod> = Api::namespaced(client.clone(), ns);
+    match api.get_opt(name).await {
+        Ok(None) => Ok(false),
+        Ok(Some(p)) => Ok(!is_dead(&p)),
+        Err(e) => Err(format!("get worker {ns}/{name}: {e}")),
+    }
+}
+
+/// Kubelet refused to RUN the pod on its node at all — its admission
+/// failed for capacity (`OutOfcpu`, `OutOfmemory`, `OutOfpods`,
+/// `OutOfephemeral-storage`; `status.reason` on a pod that went straight
+/// to Failed). The plugin creates workers with `nodeName` set, so the
+/// scheduler never reserved room for one; the tenant pod is already
+/// bound to this node and Kubernetes will not move it, so this is not
+/// "retry until it fits" — it is a node with no room for the mount its
+/// tenant needs, and the event on the tenant must say so.
+pub fn admission_refused(reason: &str) -> bool {
+    reason.starts_with("OutOf")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WaitOutcome {
     /// Running, with the pod's uid (the comm dir's path component).
@@ -782,6 +811,19 @@ mod tests {
         p.status = Some(PodStatus { phase: Some("Running".into()), ..Default::default() });
         p.metadata.deletion_timestamp = Some(Time(k8s_openapi::jiff::Timestamp::now()));
         assert!(is_dead(&p), "deletion requested wins over Running");
+    }
+
+    /// Kubelet's capacity refusals, and nothing else: a container that
+    /// exited or a pod evicted later is a different failure with a
+    /// different remedy.
+    #[test]
+    fn only_kubelet_capacity_refusals_are_admission_refusals() {
+        for r in ["OutOfmemory", "OutOfcpu", "OutOfpods", "OutOfephemeral-storage"] {
+            assert!(admission_refused(r), "{r}");
+        }
+        for r in ["Error", "Evicted", "Refused", "Failed", "ContainerCannotRun", "", "outofmemory"] {
+            assert!(!admission_refused(r), "{r}");
+        }
     }
 
     /// The cache answers only for pods it holds. A pod it does not

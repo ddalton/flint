@@ -107,3 +107,24 @@ http://{{ include "flint-s3-csi.broker.name" . }}.{{ .Release.Namespace }}.svc:8
 {{- range . -}}{{- $out = append $out (printf "'%s'" .) -}}{{- end -}}
 {{- join ", " $out -}}
 {{- end -}}
+
+{{/* A Kubernetes memory quantity in whole MiB (Gi, Mi, Ki, G, M, k, or
+     plain bytes), or -1 for a suffix this helper does not read. Used to
+     refuse a worker memory limit below mount-s3's own 512 MiB
+     memory-target floor at render time, where the message can name the
+     value, instead of as an OOM-killed mounter under the first read. */}}
+{{- define "flint-s3-csi.quantityMiB" -}}
+{{- $q := toString . -}}
+{{- $num := regexFind "^[0-9.]+" $q | float64 -}}
+{{- $suf := regexReplaceAll "^[0-9.]+" $q "" -}}
+{{- $mib := -1.0 -}}
+{{- if eq $suf "Gi" }}{{ $mib = mulf $num 1024 }}
+{{- else if eq $suf "Mi" }}{{ $mib = $num }}
+{{- else if eq $suf "Ki" }}{{ $mib = divf $num 1024 }}
+{{- else if eq $suf "G" }}{{ $mib = divf (mulf $num 1000000000) 1048576 }}
+{{- else if eq $suf "M" }}{{ $mib = divf (mulf $num 1000000) 1048576 }}
+{{- else if eq $suf "k" }}{{ $mib = divf (mulf $num 1000) 1048576 }}
+{{- else if eq $suf "" }}{{ $mib = divf $num 1048576 }}
+{{- end -}}
+{{- printf "%d" (int $mib) -}}
+{{- end -}}

@@ -14,6 +14,32 @@ covered by the stability guarantee.
 
 ### Added
 
+- **flint-s3-csi: the mounter's memory target follows the worker's limit;
+  a shared mounter gets its own resources; the worker images are pulled
+  before the first mount** (2026-09-30, the passthrough design review's
+  findings 1 and 3). The plugin now passes mount-s3 `--memory-target` at two
+  thirds of `workers.resources.limits.memory` (682 MiB at the chart's 1Gi;
+  `passthrough::mounter::memory_target_mib`). Left alone, Mountpoint 1.24
+  targets 95% of the cgroup limit — "not a guaranteed limit", by its own help
+  text — which at 1Gi leaves ~50 MiB for its heap, cache index and TLS
+  buffers, and an OOM-killed mounter is a dead mount for its tenant, or under
+  `spec.sharing.readOnly` for every member of the class. The binary refuses a
+  target below 512 MiB, so the chart refuses a limit below 512Mi at render
+  time (`flint-s3-csi.quantityMiB`); a CR naming its own `--memory-target` in
+  `mountOptions` keeps it. `workers.sharedResources`
+  (FLINT_S3CSI_SHARED_WORKER_RESOURCES) sizes a shared read-only mounter apart
+  from per-pod workers — one limit and one prefetch budget serve every member
+  — and defaults to `workers.resources`. `workers.prepull` adds init
+  containers to the node DaemonSet that pull the passthrough worker image
+  (and, opt-in, the lean one) before the plugin registers: the first mount on
+  a fresh node used to pay for the pull inside NodePublishVolume, 45 s per
+  attempt under kubelet's growing backoff. The init containers run the
+  worker's `await-release` verb with a zero budget, which exits 0 at once in
+  every image that carries the preStop hook, so no image needs rebuilding for
+  it. The values.yaml claim that mount-s3 "sizes its prefetch against machine
+  RAM, not the cgroup" was true of older releases and false for the pinned
+  1.24.0; corrected.
+
 - **flint-passthrough: one mounter per node for a CR's read-only consumers
   (`spec.sharing.readOnly`)** (2026-09-29, opt-in, off by default; design of
   record `docs/plans/passthrough-read-only-mount-sharing.md`). Every pod used
@@ -208,6 +234,20 @@ covered by the stability guarantee.
 
 ### Changed
 
+- **flint-s3-csi: worker requests drop to 10m/64Mi, and a worker kubelet
+  cannot admit is named** (2026-09-30, finding 2). The plugin places a worker
+  with `spec.nodeName` set, so the scheduler reserves no room for it and
+  kubelet admits it against the node's allocatable; on a full node the worker
+  went `Failed` (OutOfmemory, OutOfcpu, OutOfpods), the publish answered
+  FailedPrecondition, cleanup deleted it, and kubelet retried the same thing
+  for the life of the tenant pod — which, already bound to the node, is never
+  rescheduled. The refusal now raises a `WorkerNotAdmitted` Warning on the
+  tenant naming the node, the reason, the worker's requests and what frees
+  it (`worker::admission_refused`, `S3Node::worker_refused`, lean included);
+  requests are what admission checks, and mount-s3 idles well under 64Mi, so
+  they are small and the limit does the bounding. values.yaml and NOTES.txt
+  say that one worker per mounted pod counts against the node's `maxPods`.
+
 - **The s3csi kind rig runs RustFS** (2026-09-29, `s3csi/e2e/rig.yaml`).
   MinIO's public images went away that day — quay.io answers 401 to everyone,
   Docker Hub's `minio/*` is denied, dl.min.io is 410 — so the rig's store is
@@ -230,6 +270,43 @@ covered by the stability guarantee.
   or `rw` and `network` a CIDR or address, or the server refuses to start.
 
 ### Fixed
+
+- **flint-s3-csi: a worker still coming up at the publish deadline is kept
+  for the retry, not deleted** (2026-09-30, finding 3). `NodePublishVolume`
+  waits 45 s for the worker to run; at the deadline it cleaned up — deleting
+  the Pending pod — and answered Unavailable, so kubelet's retry created it
+  again and waited again, under a backoff growing toward two minutes, while
+  containerd's pull carried on regardless. The volume now goes to phase
+  `worker-pending` and the retry resumes from the top, where `worker::ensure`
+  adopts the live namesake (`PublishedAction::ResumeWorker`); a shared class
+  whose create never reached its launch is resumed the same way rather than
+  replaced (`worker::alive`). A pending worker found at plugin startup is
+  cleaned up as before, and a never-Running worker skips the F72 quiesce
+  wait it has no mounter for.
+
+- **flint-s3-csi: a sharing CR no longer degrades silently to a mounter per
+  pod** (2026-09-30, finding 4). When the broker's `/v1/status` could not be
+  read at publish, `sharing_decision` answered "own mounter" with a log line,
+  and the pod kept that mounter — no shared cache, no shared connection pool
+  — for its whole life. An unreadable broker is now `Sharing::Retry`: the
+  publish answers Unavailable and kubelet retries (the credential exchange
+  would have failed on the same outage anyway). The cases that genuinely
+  cannot share (a `rest` backend, an unknown one) raise a `SharingUnavailable`
+  Warning on the tenant pod naming why; a read-write consumer keeping its own
+  mounter is expected and raises nothing.
+
+- **flint-s3-csi: a refused refresh on a shared member no longer removes the
+  class's credential** (2026-09-30, finding 5). A refusal (the SA dropped from
+  `consumers`) removed `creds.json` from the worker's comm dir so the door
+  answers 503 and the client fails at expiry — right for a mounter of the
+  pod's own, wrong for a shared class, whose one file serves every member:
+  the innocent members' mount-s3, refreshing inside the window before the
+  next member's republish re-minted the key (up to ~90 s), got a 503 and an
+  EIO, while the refused pod — bound to the same superblock — read on
+  regardless. The file now stays when the volume is shared
+  (`revocation_removes_the_key`); the `CredentialRefreshFailed` event says the
+  class's credential stays and the pod keeps reading until it exits, which
+  is what the CRD field already documents.
 
 - **lean: a `sync` with no document deleted the tree's clean files; a
   sync or a reader left paths owed forever; a rescope widen overwrote the

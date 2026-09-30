@@ -5,7 +5,7 @@
 //! on `/dev/fd/3` with exactly this argv (design §3.4 step 9). Never
 //! concatenated into a shell string: the worker passes it as ARGUMENTS.
 
-use super::spec::MountSpec;
+use super::spec::{quantity_mib, MountSpec};
 
 /// `owner` is the resolved (uid, gid) the mount presents; `target` is
 /// the mount point argument (`{FUSE_FD}` in the CSI delivery, which the
@@ -34,7 +34,47 @@ use super::spec::MountSpec;
 /// published.
 pub const CACHE_DIR: &str = "/tmp";
 
-pub fn mounter_args_for(spec: &MountSpec, owner: (Option<i64>, Option<i64>), target: &str) -> Vec<String> {
+/// mount-s3 refuses a `--memory-target` below this (`cli.rs`,
+/// `value_parser!(u64).range(512..)`), and its own default is the same
+/// floor: `max(95% of the cgroup limit, 512 MiB)`.
+pub const MEMORY_TARGET_FLOOR_MIB: u64 = 512;
+
+/// The mounter's `--memory-target`, from the worker's memory LIMIT.
+///
+/// Mountpoint 1.24 sizes its read and write buffers against a target
+/// that defaults to 95% of the cgroup limit — and says of it "not a
+/// guaranteed limit". At the chart's 1Gi that leaves ~50 MiB for the
+/// process's own heap, the cache index and the TLS buffers, and under
+/// sharing every member's prefetch rides on that one budget; an
+/// OOM-killed mounter is a dead mount for every pod behind it. Two
+/// thirds of the limit leaves the other third for everything the target
+/// does not count. Never below mount-s3's floor (it would refuse the
+/// argument); `None` when there is no limit to derive from, so mount-s3
+/// keeps its own default.
+pub fn memory_target_mib(worker_memory_limit: Option<&str>) -> Option<u64> {
+    let limit = quantity_mib(worker_memory_limit?)?;
+    if limit == 0 {
+        return None;
+    }
+    Some((limit * 2 / 3).max(MEMORY_TARGET_FLOOR_MIB))
+}
+
+/// Does the CR's `mountOptions` already carry `flag` (`--x` or `--x=v`)?
+/// mount-s3's parser refuses an argument given twice, so a flag the CR
+/// names is the CR's to set.
+fn names_flag(options: &[String], flag: &str) -> bool {
+    options.iter().any(|o| o == flag || o.starts_with(&format!("{flag}=")))
+}
+
+/// `worker_memory_limit` is the worker pod's memory limit as a Kubernetes
+/// quantity (`workers.resources.limits.memory`), or `None` when the chart
+/// set no limit.
+pub fn mounter_args_for(
+    spec: &MountSpec,
+    owner: (Option<i64>, Option<i64>),
+    target: &str,
+    worker_memory_limit: Option<&str>,
+) -> Vec<String> {
     let mut a: Vec<String> = vec![spec.bucket.clone(), target.to_string(), "--foreground".into(), "--allow-other".into()];
     if let Some(p) = spec.key_prefix.as_deref().filter(|p| !p.is_empty()) {
         a.push("--prefix".into());
@@ -84,6 +124,14 @@ pub fn mounter_args_for(spec: &MountSpec, owner: (Option<i64>, Option<i64>), tar
             a.push(mib.to_string());
         }
     }
+    // The memory target follows the worker's cgroup limit (see
+    // `memory_target_mib`); a CR that names its own keeps it.
+    if !names_flag(&spec.mount_options, "--memory-target") {
+        if let Some(mib) = memory_target_mib(worker_memory_limit) {
+            a.push("--memory-target".into());
+            a.push(mib.to_string());
+        }
+    }
     a.extend(spec.mount_options.iter().cloned());
     a
 }
@@ -108,7 +156,7 @@ mod tests {
     /// path-style addressing (a bucket name is not a DNS label there).
     #[test]
     fn the_args_address_the_subtree_and_force_path_style_behind_an_endpoint() {
-        let a = mounter_args_for(&spec(), (None, None), "{FUSE_FD}");
+        let a = mounter_args_for(&spec(), (None, None), "{FUSE_FD}", None);
         assert_eq!(a[0], "agentws");
         assert_eq!(a[1], "{FUSE_FD}");
         let i = a.iter().position(|x| x == "--prefix").unwrap();
@@ -124,7 +172,7 @@ mod tests {
     /// told too (measured on kind: EACCES for every uid but the daemon's).
     #[test]
     fn allow_other_is_passed_for_the_daemon_side_acl() {
-        let a = mounter_args_for(&spec(), (Some(1001), Some(1001)), "{FUSE_FD}");
+        let a = mounter_args_for(&spec(), (Some(1001), Some(1001)), "{FUSE_FD}", None);
         assert!(a.contains(&"--allow-other".to_string()));
         let i = a.iter().position(|x| x == "--uid").unwrap();
         assert_eq!(a[i + 1], "1001");
@@ -137,12 +185,12 @@ mod tests {
     #[test]
     fn write_flags_track_read_only() {
         let mut s = spec();
-        let rw = mounter_args_for(&s, (None, None), "t");
+        let rw = mounter_args_for(&s, (None, None), "t", None);
         assert!(rw.contains(&"--allow-delete".to_string()));
         assert!(rw.contains(&"--allow-overwrite".to_string()));
         assert!(!rw.contains(&"--read-only".to_string()));
         s.read_only = true;
-        let ro = mounter_args_for(&s, (None, None), "t");
+        let ro = mounter_args_for(&s, (None, None), "t", None);
         assert!(ro.contains(&"--read-only".to_string()));
         assert!(!ro.contains(&"--allow-delete".to_string()));
         assert!(!ro.contains(&"--allow-overwrite".to_string()));
@@ -156,12 +204,12 @@ mod tests {
     #[test]
     fn the_cache_is_wired_to_the_scratch_dir_when_asked_and_absent_otherwise() {
         let mut s = spec();
-        let off = mounter_args_for(&s, (None, None), "t");
+        let off = mounter_args_for(&s, (None, None), "t", None);
         assert!(!off.iter().any(|a| a == "--cache"), "the cache must stay OPT-IN: {off:?}");
         assert!(!off.iter().any(|a| a == "--max-cache-size"));
 
         s.cache = Some(crate::passthrough::spec::CacheSpec { enabled: true, max_size_mib: Some(512) });
-        let on = mounter_args_for(&s, (None, None), "t");
+        let on = mounter_args_for(&s, (None, None), "t", None);
         let i = on.iter().position(|x| x == "--cache").expect("--cache is not passed");
         assert_eq!(on[i + 1], CACHE_DIR, "the cache must live in the worker's writable scratch");
         let j = on.iter().position(|x| x == "--max-cache-size").expect("--max-cache-size is not passed");
@@ -169,7 +217,7 @@ mod tests {
 
         // Asked for but disabled is the same as not asked for.
         s.cache = Some(crate::passthrough::spec::CacheSpec { enabled: false, max_size_mib: Some(512) });
-        let disabled = mounter_args_for(&s, (None, None), "t");
+        let disabled = mounter_args_for(&s, (None, None), "t", None);
         assert!(!disabled.iter().any(|a| a == "--cache"), "{disabled:?}");
     }
 
@@ -179,7 +227,41 @@ mod tests {
     fn mount_options_survive_verbatim_as_arguments() {
         let mut s = spec();
         s.mount_options = vec!["--metadata-ttl".into(), "5; rm -rf /".into()];
-        let a = mounter_args_for(&s, (None, None), "t");
+        let a = mounter_args_for(&s, (None, None), "t", None);
         assert!(a.contains(&"5; rm -rf /".to_string()), "it must survive verbatim as an ARGUMENT");
+    }
+
+    fn memory_target(a: &[String]) -> Option<String> {
+        a.iter().position(|x| x == "--memory-target").map(|i| a[i + 1].clone())
+    }
+
+    /// Mountpoint's own default target is 95% of the cgroup limit and
+    /// "not a guaranteed limit": at 1Gi that leaves ~50 MiB for the rest
+    /// of the process, and under sharing every member's prefetch rides on
+    /// it. The argv pins the target to two thirds of the worker's limit,
+    /// never below mount-s3's 512 MiB floor (it refuses less), passes
+    /// nothing without a limit, and defers to a CR that names its own.
+    #[test]
+    fn the_memory_target_is_two_thirds_of_the_worker_limit() {
+        let s = spec();
+        assert_eq!(memory_target(&mounter_args_for(&s, (None, None), "t", Some("1Gi"))).as_deref(), Some("682"));
+        assert_eq!(memory_target(&mounter_args_for(&s, (None, None), "t", Some("3Gi"))).as_deref(), Some("2048"));
+        assert_eq!(memory_target(&mounter_args_for(&s, (None, None), "t", Some("768Mi"))).as_deref(), Some("512"), "exactly at the floor");
+        assert_eq!(memory_target(&mounter_args_for(&s, (None, None), "t", Some("600Mi"))).as_deref(), Some("512"), "clamped UP to the floor: mount-s3 refuses less");
+        assert_eq!(memory_target(&mounter_args_for(&s, (None, None), "t", None)), None, "no limit: mount-s3 keeps its default");
+        assert_eq!(memory_target(&mounter_args_for(&s, (None, None), "t", Some(""))), None, "an unreadable quantity derives nothing");
+        assert_eq!(memory_target(&mounter_args_for(&s, (None, None), "t", Some("0"))), None);
+        // A CR that names its own target keeps it — mount-s3 refuses a flag
+        // given twice, so ours must not be there at all.
+        let mut named = spec();
+        named.mount_options = vec!["--memory-target".into(), "900".into()];
+        let a = mounter_args_for(&named, (None, None), "t", Some("1Gi"));
+        assert_eq!(a.iter().filter(|x| *x == "--memory-target").count(), 1);
+        assert_eq!(memory_target(&a).as_deref(), Some("900"));
+        named.mount_options = vec!["--memory-target=900".into()];
+        let a = mounter_args_for(&named, (None, None), "t", Some("1Gi"));
+        assert!(!a.iter().any(|x| x == "--memory-target"), "{a:?}");
+        assert_eq!(memory_target_mib(Some("1Gi")), Some(682));
+        assert_eq!(MEMORY_TARGET_FLOOR_MIB, 512);
     }
 }

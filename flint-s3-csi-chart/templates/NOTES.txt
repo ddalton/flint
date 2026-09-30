@@ -51,6 +51,14 @@ WHERE THINGS RUN. Each mounted volume is one worker pod in
 
   kubectl -n {{ .Values.workers.namespace }} get pods -l app.kubernetes.io/managed-by={{ include "flint-s3-csi.node.name" . }}
 
+The worker is placed on the tenant's node directly (spec.nodeName), so
+the scheduler reserves no room for it and it counts against the node's
+maxPods like any pod. A node with no room refuses it (a WorkerNotAdmitted
+event on the tenant, which stays ContainerCreating and is NOT
+rescheduled) until capacity frees. Size nodes for two pods per
+S3-mounted tenant, or let read-only consumers of one dataset share a
+mounter (spec.sharing.readOnly).
+
 The tenant pod carries no credential and no privilege and is admissible
 under PodSecurity `restricted`. The node plugin is the privileged
 component (one per node); the broker is the one with a standing

@@ -200,14 +200,56 @@ workers:
     tag: ""
 
   # Resources for EVERY worker (FLINT_S3CSI_WORKER_RESOURCES). No
-  # per-mount override: the CR is tenant-writable. The memory limit is
-  # the knob that matters — mount-s3 sizes its prefetch against machine
-  # RAM, not the cgroup, and an OOMKilled mounter takes the MOUNT with
-  # it (ENOTCONN in the tenant pod, which must then be recreated).
-  # Raise this before blaming the bucket. `{}` ⇒ no requests or limits.
+  # per-mount override: the CR is tenant-writable. `{}` ⇒ no requests or
+  # limits.
+  #
+  # THE MEMORY LIMIT IS THE KNOB THAT MATTERS, and the mounter is told
+  # about it: the plugin passes mount-s3 `--memory-target` at two thirds
+  # of limits.memory (682 MiB at 1Gi). Left alone, Mountpoint 1.24 sizes
+  # its read and write buffers to 95% of the cgroup limit and calls that
+  # target "not a guaranteed limit" — at 1Gi that leaves ~50 MiB for its
+  # heap, cache index and TLS buffers, and an OOM-killed mounter takes
+  # the MOUNT with it (ENOTCONN in the tenant pod, which must then be
+  # recreated). The binary refuses a target below 512 MiB, so the chart
+  # refuses a limit below 512Mi at render time. A CR that names its own
+  # `--memory-target` in mountOptions keeps it. Raise the limit before
+  # blaming the bucket.
+  #
+  # REQUESTS ARE FOR ADMISSION, AND ADMISSION CAN FAIL. The plugin
+  # creates a worker with spec.nodeName set, so the scheduler never
+  # reserved room for it; kubelet admits it against the node's
+  # allocatable, and on a node with no room the worker is refused
+  # (OutOfmemory, OutOfcpu, OutOfpods) while the tenant pod — already
+  # bound there — is never rescheduled. The plugin raises a
+  # WorkerNotAdmitted event on the tenant and kubelet keeps retrying the
+  # mount until capacity frees. Requests are therefore small: mount-s3
+  # idles well under 64Mi, and the limit is what bounds it. ONE WORKER PER
+  # MOUNTED POD also counts against the node's maxPods (110 by default):
+  # a node full of S3-mounted pods holds half as many tenants as its
+  # maxPods says; raise it on the kubelet, or share read-only mounters
+  # (spec.sharing.readOnly, one worker per node per dataset).
   resources:
-    requests: { cpu: 50m, memory: 128Mi }
+    requests: { cpu: 10m, memory: 64Mi }
     limits: { memory: 1Gi }
+
+  # Resources for a SHARED read-only mounter
+  # (FLINT_S3CSI_SHARED_WORKER_RESOURCES): one worker serves every
+  # read-only member of a class on the node, so one memory limit, one
+  # `--memory-target` and one prefetch budget serve them all. Empty ⇒
+  # the same as `resources`. A class of many concurrent readers wants
+  # more than one pod's worth, e.g.
+  #   sharedResources: { requests: { cpu: 50m, memory: 256Mi }, limits: { memory: 4Gi } }
+  sharedResources: {}
+
+  # Pull the worker images on every node when the plugin starts, so the
+  # first mount on a fresh node does not pay for the pull inside
+  # NodePublishVolume (45 s per attempt, then kubelet's backoff toward
+  # two minutes). Init containers on the node DaemonSet; a missing image
+  # blocks the plugin on that node, which is why the lean image is opt-in
+  # on a cluster that runs no lean workspaces.
+  prepull:
+    passthrough: true
+    lean: false
 
   # The worker's PriorityClass (FLINT_S3CSI_WORKER_PRIORITY_CLASS).
   # This is the ORDERING mechanism for node shutdown and spot
