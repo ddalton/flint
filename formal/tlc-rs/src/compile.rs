@@ -43,6 +43,9 @@ impl Capture {
 }
 
 pub struct Compiler {
+    /// the operator whose body is being compiled (a folded constant call
+    /// must not fold into itself)
+    compiling: String,
     defs: HashMap<String, Rc<Def>>,
     vars: HashMap<String, u32>,
     var_names: Vec<String>,
@@ -283,6 +286,7 @@ impl Compiler {
             inline_depth: 0,
             lets: vec![],
             priming: false,
+            compiling: String::new(),
             memo_slots: HashMap::new(),
         };
         for n in intern_order {
@@ -413,7 +417,9 @@ impl Compiler {
             self.next_slot = 0;
             let mut sc: Vec<Entry> = d.params.iter().map(|p| Entry::Local(p.clone(), self.slot())).collect();
             let was = std::mem::replace(&mut self.priming, primed);
+            let was_compiling = std::mem::replace(&mut self.compiling, base.clone());
             let body = self.expr(&d.body, &mut sc, primed).map_err(|e| format!("in {name}: {e}"));
+            self.compiling = was_compiling;
             self.priming = was;
             let body = body?;
             self.ops[i as usize] = Some(Op { name, nparams: d.params.len(), frame: self.next_slot, body, cached: None });
@@ -740,6 +746,16 @@ impl Compiler {
         d.params.is_empty()
             && self.structural(&d.body)
             && (self.infinite(&d.body, 0) || self.reaches_state(&d.body, &mut std::collections::HashSet::new()))
+    }
+
+    /// Does `a` name nothing bound in scope (a quantifier's variable, a
+    /// parameter, a LET)? Then its value is the same wherever it is read.
+    fn closed(&self, a: &Ast, sc: &[Entry]) -> bool {
+        match a {
+            Ast::Ident(n) | Ast::Apply(n, _) if Self::lookup(sc, n).is_some() => false,
+            Ast::At | Ast::Lambda(..) => false,
+            _ => children(a).into_iter().all(|x| self.closed(x, sc)),
+        }
     }
 
     /// Does `a` read a state variable (directly or through definitions)?
@@ -1198,6 +1214,27 @@ impl Compiler {
                         let (binds, body) = self.inline(&d, &[], args, sc, init, Self::expr)?;
                         return Ok(Expr::Let(binds, bx(body)));
                     }
+                    // a call whose arguments are constants (`Opt(Handles)`) and
+                    // which reads no state is itself a constant: a
+                    // zero-argument definition of its own, evaluated once by
+                    // constant folding
+                    if !args.is_empty()
+                        && d.op_arity.iter().all(|&a| a == 0)
+                        && args.iter().all(|a| self.closed(a, sc))
+                        && !self.reaches_state(&Ast::Apply(n.clone(), args.clone()), &mut std::collections::HashSet::new())
+                    {
+                        let key = format!("{n}$const{args:?}");
+                        if self.compiling == key {
+                            let d = self.defs[n].clone();
+                            let (binds, body) = self.inline(&d, &[], args, sc, init, Self::expr)?;
+                            return Ok(Expr::Let(binds, bx(body)));
+                        }
+                        if !self.defs.contains_key(&key) {
+                            let body = Ast::Apply(n.clone(), args.clone());
+                            self.defs.insert(key.clone(), Rc::new(Def { name: key.clone(), params: vec![], op_arity: vec![], body }));
+                        }
+                        return Ok(Expr::Call(self.op_index(&key), Box::new([])));
+                    }
                     // as for a bare name: in init (primed) mode a state-level
                     // operator must see the primed variables
                     if init && self.op_is_action(n, true) {
@@ -1498,6 +1535,12 @@ impl Compiler {
             if is_const[i] == Some(true) && self.defs.get(&p.ops[i].name).is_some_and(|d| d.params.is_empty()) {
                 let mut cx = bufs.cx(&empty, p.vars.len(), 0);
                 if let Ok(v) = p.eval(&Expr::Call(i as u32, Box::new([])), &mut cx) {
+                    // a small finite lazy set (`Handles == Paths \X Gens`) is
+                    // built once here, not each time it is enumerated
+                    let v = match v.lazy_size() {
+                        Some(n) if n <= 1 << 16 => v.materialize().unwrap_or(v),
+                        _ => v,
+                    };
                     p.ops[i].cached = Some(v);
                 }
             }

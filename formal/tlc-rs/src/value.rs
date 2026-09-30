@@ -153,6 +153,31 @@ impl Value {
         }
     }
 
+    /// How many elements a lazy set has, when it is finite (None: infinite,
+    /// or not a lazy set).
+    pub fn lazy_size(&self) -> Option<u128> {
+        let Value::Lazy(l) = self else { return None };
+        let len = |v: &Value| -> Option<u128> {
+            match v {
+                Value::Lazy(_) => v.lazy_size(),
+                _ => v.elems().ok().map(|e| e.len() as u128),
+            }
+        };
+        match &**l {
+            Lazy::Nat | Lazy::Int | Lazy::Strings | Lazy::SeqOf(_) => None,
+            Lazy::Subset(s) => {
+                let n = len(s)?;
+                if n >= 64 { None } else { Some(1u128 << n) }
+            }
+            Lazy::FuncSet(d, r) => {
+                let (n, m) = (len(d)?, len(r)?);
+                m.checked_pow(u32::try_from(n).ok()?)
+            }
+            Lazy::RecSet(fs) => fs.iter().try_fold(1u128, |acc, (_, v)| acc.checked_mul(len(v)?)),
+            Lazy::Product(sets) => sets.iter().try_fold(1u128, |acc, v| acc.checked_mul(len(v)?)),
+        }
+    }
+
     pub fn materialize(&self) -> R<Value> {
         let Value::Lazy(l) = self else { return Ok(self.clone()) };
         Ok(match &**l {
@@ -369,7 +394,8 @@ impl Value {
     pub fn domain(&self) -> R<Value> {
         match self {
             Value::Seq(s) => Ok(Value::set_sorted((1..=s.len() as i64).map(Value::Int).collect())),
-            Value::Func(f) => Ok(Value::set_sorted(f.keys.to_vec())),
+            // the keys are sorted and unique: the domain shares them
+            Value::Func(f) => Ok(Value::Set(f.keys.clone())),
             _ => Err(format!("DOMAIN of a non-function {self}")),
         }
     }
