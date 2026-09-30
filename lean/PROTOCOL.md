@@ -68,7 +68,7 @@ Guards read the state; effects write it.
 | **Reap**(s, h) | inside a commit section; h retired at least G ago, not cited | `live \= {h}`; the log goes once its handles are gone (`untracked.rs::reap_retired`) | `Inv_ReaderFetches` | `LeanP1ReaderLoses` |
 | **Finish**(s) | cased, collected | the baseline follows what was published (its uploads, its landed deletes); `synced := seq` if the install was the document; `derived := seq` only if the CAS replaced exactly the derived document (`adv`: the install is it plus this tree's own changes), and the published paths leave `skipped`; the section closes | `Inv_ShortcutSound` | `LeanP1AdvanceUnguarded` |
 | **Restart**(s) | — | keeps the tree and the baseline (with `synced`, `derived` and `skipped`, on disk); drops the barrier in flight. No journal is read back: content convergence settles an upload the CAS already cited | `Inv_NoRegress` | `LeanP1ProbeRestartAfterCas` (reachable) |
-| **Sync**(s) | idle, something owed | takes what is owed, and records what it derived as a consume would (`derived := seq`, `skipped` := the dirty paths it left); a scoped sync in the code records nothing, so the next consume derives | `Inv_NoRegress` | — |
+| **Sync**(s) | idle, something owed | takes what is owed, and records what it derived as a consume would (`derived := seq`, `skipped` := the dirty paths it left) — only when it took everything owed: a fetch or a write it could not complete records nothing, as the consume's `left` (L-128); a scoped sync in the code records nothing, so the next consume derives. With no document at all, a sync of a tree that holds paths refuses rather than read the absence as an empty document (L-127) | `Inv_NoRegress` | — |
 
 ## The invariants
 
@@ -101,7 +101,9 @@ UI promote — outside its scope (`a_scoped_tree_never_receives_a_peers_change_o
 
 A cited handle is live (`Inv_CitationsLive`), so the model's consume never
 fails a fetch and always takes everything it owes. The code's consume can
-fail a fetch; then it records nothing as derived (`derived_etag` = none), and the next consume derives again.
+fail a fetch; then it records nothing as derived (`derived_etag` = none), and the next consume derives again. A sync does the same (L-128), and a reader re-syncs while its baseline says something is owed (L-129).
+
+The model has no rescope either. A widen keeps a file the agent made at a newly admitted path (uncited, with a record) rather than fetch the document's version over it (L-130); the next barrier publishes it as the agent's add.
 
 The retire log is written after the CAS. A crash between the two leaves
 those handles to the orphan sweep's write-age rule; the model does not

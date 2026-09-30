@@ -77,7 +77,7 @@ impl Syncer {
             };
         let now = PulledFrom { manifest_etag: manifest_etag.clone(), inbox_etag: ib.etag };
         let mut out = Pull { observed_seq, observed_etag: manifest_etag, sync: None };
-        if self.load_pulled_from().as_ref() == Some(&now) {
+        if self.load_pulled_from().as_ref() == Some(&now) && !self.still_owed()? {
             return Ok(out);
         }
         // `sync` reads both documents again. If either moved in between,
@@ -86,6 +86,23 @@ impl Syncer {
         out.sync = Some(self.sync().await?);
         self.save_pulled_from(&now)?;
         Ok(out)
+    }
+
+    /// Did the last sync leave something owed? The consume's cheap-path
+    /// test on the baseline the sync wrote: nothing recorded as derived (a
+    /// fetch or a write it could not complete), or a path it skipped as
+    /// dirty that is clean again. Without it a reader judged by the two
+    /// etags alone, and a path its sync could not take waited for the
+    /// next commit (review 2026-09-29, S4).
+    fn still_owed(&self) -> LeanResult<bool> {
+        let b = self.state.load_baseline()?;
+        if b.derived_etag.is_none() {
+            return Ok(true);
+        }
+        Ok(!b.skipped.iter().all(|path| {
+            super::barrier::check_contained(&self.cfg.root, path).is_ok()
+                && super::barrier::local_dirty(&self.cfg.root.join(path), b.entries.get(path))
+        }))
     }
 
     fn load_pulled_from(&self) -> Option<PulledFrom> {

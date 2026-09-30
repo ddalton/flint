@@ -12212,3 +12212,173 @@ async fn a_path_a_sync_declined_as_dirty_arrives_when_the_agent_reverts() {
     }
     assert_eq!(read(dir.path(), "x.txt").as_deref(), Some("the peer's v2"), "the peer's version never arrived");
 }
+
+// ---------------------------------------------------------------------
+// Review 2026-09-29 (sync.rs / reader.rs): a sync must leave the tree and
+// the cheap path's record exactly as the consume would.
+// ---------------------------------------------------------------------
+
+/// S1. The consume takes nothing when the document is absent. A whole-tree
+/// sync used to read the absence as an EMPTY document and delete every
+/// clean file the baseline holds — for a writer whose prefix was wiped or
+/// re-pointed, the last copy of its published work.
+#[tokio::test]
+async fn a_sync_against_an_absent_document_deletes_nothing() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "keep/a.txt", "published a");
+    write(dir.path(), "b.txt", "published b");
+    a.run_barrier().await.unwrap();
+    assert!(!a.state.load_baseline().unwrap().entries.is_empty());
+    // The prefix is wiped: no pointer, no legacy document, no objects.
+    for o in store.list(PREFIX).await.unwrap() {
+        store.delete(&o.key).await.unwrap();
+    }
+    assert!(manifest::load(store.as_ref(), &a.cfg).await.unwrap().is_none());
+
+    let r = a.sync().await;
+
+    assert!(r.is_err(), "a sync with no document must refuse, not treat it as empty: {r:?}");
+    assert_eq!(read(dir.path(), "keep/a.txt").as_deref(), Some("published a"));
+    assert_eq!(read(dir.path(), "b.txt").as_deref(), Some("published b"));
+}
+
+/// S2. A fetch that fails leaves the path owed. The consume marks it
+/// (`left`) and records nothing as derived; the sync recorded the document
+/// as derived anyway, so the cheap path then skipped the path until the
+/// pointer moved again.
+#[tokio::test]
+async fn a_path_a_sync_could_not_fetch_stays_owed() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "shared.txt", "v1");
+    a.run_barrier().await.unwrap();
+    hitl_write(&store, &a.cfg, "shared.txt", "user v2", "dilip").await.unwrap();
+    let key = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.entries["shared.txt"].key.clone();
+    // The object reads absent for the length of the sync (a delete marker).
+    store.delete(&key).await.unwrap();
+
+    a.sync().await.unwrap();
+    assert_eq!(read(dir.path(), "shared.txt").as_deref(), Some("v1"), "nothing was fetchable");
+
+    // It is back, with the etag the document cites; the pointer has not moved.
+    for v in store.list_versions(&key).await.unwrap() {
+        if v.key == key && v.is_delete_marker {
+            store.delete_version(&key, &v.version_id).await.unwrap();
+        }
+    }
+    a.consume_owed().await.unwrap();
+    assert_eq!(read(dir.path(), "shared.txt").as_deref(), Some("user v2"), "the path the sync could not take was never owed again");
+}
+
+/// S3. A write that fails for a transient reason (here: a directory the
+/// syncer cannot write to) is not a containment refusal. The consume
+/// records it as `consume-write-failed (will retry)` and leaves it owed;
+/// the sync recorded `sync-refused-containment` and marked the document
+/// derived, so the path was never taken.
+#[tokio::test]
+async fn a_path_a_sync_could_not_write_stays_owed() {
+    use std::os::unix::fs::PermissionsExt;
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "sub/f.txt", "v1");
+    a.run_barrier().await.unwrap();
+    hitl_write(&store, &a.cfg, "sub/f.txt", "user v2", "dilip").await.unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let r = a.sync().await.unwrap();
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // Not vacuous: the write really failed (a root run would not fail it).
+    assert!(r.conflicts.contains(&"sub/f.txt".to_string()), "the write did not fail: {r:?}");
+    assert_eq!(read(dir.path(), "sub/f.txt").as_deref(), Some("v1"));
+
+    a.consume_owed().await.unwrap();
+    assert_eq!(read(dir.path(), "sub/f.txt").as_deref(), Some("user v2"), "the path the sync could not write was never owed again");
+}
+
+/// S4. A reader re-syncs when the documents move — and, like the consume's
+/// cheap path, when its last sync left something owed. It used to judge by
+/// the two etags alone, so a path its sync could not take waited for the
+/// next commit, however long that was.
+#[tokio::test]
+async fn a_reader_retries_what_its_last_sync_left_owed() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_r) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&store, dir_a.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "x.txt", "A v1");
+    a.floor_tick().await.unwrap();
+    let mut r = reader(&store, dir_r.path()).await;
+    r.checkout().await.unwrap();
+    r.floor_tick().await.unwrap();
+    assert_eq!(read(dir_r.path(), "x.txt").as_deref(), Some("A v1"));
+
+    write(dir_a.path(), "x.txt", "A v2");
+    backdate_baseline(&a, "x.txt");
+    a.declared_barrier().await.unwrap();
+    let key = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.entries["x.txt"].key.clone();
+    store.delete(&key).await.unwrap();
+    r.floor_tick().await.unwrap();
+    assert_eq!(read(dir_r.path(), "x.txt").as_deref(), Some("A v1"), "nothing was fetchable");
+
+    for v in store.list_versions(&key).await.unwrap() {
+        if v.key == key && v.is_delete_marker {
+            store.delete_version(&key, &v.version_id).await.unwrap();
+        }
+    }
+    // Nothing moved since the last tick: only what was left owed says pull.
+    r.floor_tick().await.unwrap();
+    assert_eq!(read(dir_r.path(), "x.txt").as_deref(), Some("A v2"), "the reader never retried the path its sync left");
+}
+
+/// R3. A widen admits paths this tree did not hold. A file the agent made
+/// at such a path since the last barrier is its unpublished work — the
+/// consume would call it dirty and leave it. The widen fetched the
+/// document's version over it (checkout's resume rule: a present file
+/// whose bytes differ is re-materialized), a silent loss.
+#[tokio::test]
+async fn a_widen_never_overwrites_a_file_the_agent_made_at_an_admitted_path() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&store, dir_a.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "inputs/in.txt", "input");
+    write(dir_a.path(), "outputs/o.txt", "A's published output");
+    a.run_barrier().await.unwrap();
+
+    let mut b = syncer(&store, dir_b.path()).await;
+    b.checkout_scoped(Some(vec!["inputs".into()])).await.unwrap();
+    assert_eq!(read(dir_b.path(), "outputs/o.txt"), None);
+    // B's agent writes there before any barrier of B's.
+    write(dir_b.path(), "outputs/o.txt", "B's unpublished work");
+
+    let r = b.rescope(None).await.unwrap();
+
+    assert_eq!(read(dir_b.path(), "outputs/o.txt").as_deref(), Some("B's unpublished work"), "the widen overwrote the agent's file");
+    // And surfaced, never silent: a record names it.
+    let recs = b.state.load_conflicts().unwrap();
+    assert!(recs.iter().any(|c| c.path == "outputs/o.txt"), "no record names the kept file: {r:?} {recs:?}");
+
+    // B's next barrier publishes its version over A's, and A's is not lost:
+    // the merge records what it published over (R7).
+    let a_etag = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap().manifest.entries["outputs/o.txt"].etag.clone();
+    assert!(claim_until_held(&mut b, 3).await);
+    b.run_barrier().await.unwrap();
+    let doc = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
+    assert_ne!(doc.entries["outputs/o.txt"].etag, a_etag, "B's work was not published");
+    let recs = b.state.load_conflicts().unwrap();
+    assert!(
+        recs.iter().any(|c| c.path == "outputs/o.txt" && c.foreign_etag == a_etag && c.preserved_key.is_some()),
+        "A's version was replaced with no record preserving it: {recs:?}"
+    );
+}

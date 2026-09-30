@@ -87,8 +87,9 @@ impl Scope {
 }
 
 impl Syncer {
-    /// Whole-tree sync — exactly as shipped, including advancing
-    /// `seq`/`manifest_etag`.
+    /// Whole-tree sync: advances `seq` and the cheap path's record once it
+    /// has taken everything owed; `manifest_etag` stays where the last
+    /// barrier left it (`reader.rs` relies on that).
     pub async fn sync(&mut self) -> LeanResult<SyncReport> {
         self.sync_scoped(None).await
     }
@@ -132,16 +133,35 @@ impl Syncer {
                 || classified.first_absence.contains(path)
         };
 
-        // 2. Remote truth: manifest + inbox overlay (an inbox entry is
-        //    a write the manifest has not re-cited yet).
+        // 2. Remote truth: the committed document (since P2 the gateway
+        //    commits each UI verb, so there is no inbox overlay).
         let loaded = manifest::load(self.store.as_ref(), &self.cfg).await?;
         // The agent's paths this sync leaves untaken (dirty), for the
         // consume's cheap path: owed again if the agent backs out.
         let mut dirty_skips: BTreeSet<String> = BTreeSet::new();
         let (theirs, metag) = match loaded {
             Some(l) => (l.manifest, Some(l.etag)),
-            None => (Default::default(), None),
+            // No document at all. For a tree that holds nothing that is a
+            // new workspace, and there is nothing to do. For one that
+            // holds paths it is a wiped or re-pointed prefix, and reading
+            // it as an EMPTY document would delete every clean file here —
+            // perhaps the last copy. The consume takes nothing in this
+            // case; the sync refuses (review 2026-09-29, S1).
+            None if baseline.entries.is_empty() => (Default::default(), None),
+            None => {
+                return Err(LeanError::State(format!(
+                    "sync: the workspace has no document (no pointer, no manifest) but this tree's \
+                     baseline holds {} paths — refusing to read a missing document as an empty \
+                     one, which would delete every clean file here",
+                    baseline.entries.len()
+                )))
+            }
         };
+        // Something owed could not be taken now (a fetch that lost to a
+        // newer document, a failed write): the next consume derives again
+        // even if the pointer does not move — exactly the consume's `left`
+        // (review 2026-09-29, S2/S3).
+        let mut left = false;
         // Path -> (etag, HANDLE): the entry's own key, which is what the
         // fetch below reads (design 2026-09-19: a handle is fetched by
         // name; the bare path is nobody's to read).
@@ -232,10 +252,8 @@ impl Syncer {
                 // whose local bytes ARE the remote bytes, and the path
                 // would then re-publish as a spurious generation bump.
                 // Compare content identity first.
-                // The remote entry's crc must come from the object we
-                // would actually apply, not from the manifest: when
-                // remote truth is an INBOX overlay, the manifest entry
-                // is a generation behind and its crc would never match.
+                // The remote's crc, read off the object we would apply
+                // (the backend's attestation) before the manifest's.
                 // One HEAD, only on the dirty-vs-remote path.
                 let remote_meta = match self.store.head(key).await {
                     Ok(m) if m.etag == *etag => Some(m),
@@ -290,15 +308,16 @@ impl Syncer {
             let (meta, body) = match fetched {
                 Ok(ok) => ok,
                 Err(StoreError::PreconditionFailed(_)) | Err(StoreError::NotFound(_)) => {
-                    continue; // superseded mid-sync; the next sync sees the newer truth
+                    // Superseded mid-sync, or not readable yet: owed still.
+                    left = true;
+                    continue;
                 }
                 Err(e) => return Err(e.into()),
             };
             let mode = PosixStamps::from_meta(&meta.meta).map(|p| p.mode);
             // VERIFIED before it is written, exactly as checkout's fresh
             // fetch is: against the writer's CRC for this etag (the
-            // manifest's for a cited entry, the gateway's for an inbox
-            // overlay), else the backend's attestation when it offers
+            // manifest's), else the backend's attestation when it offers
             // one. What the baseline records is OURS, over the bytes
             // written.
             let got = crc64_to_b64(crc64_nvme(&body));
@@ -312,6 +331,20 @@ impl Syncer {
                          store returned the wrong bytes; refusing to apply it (nothing written)"
                     )));
                 }
+            }
+            // A path this tree can never safely materialise is refused and
+            // NOT left owed (as the consume does); a write that fails for
+            // any other reason below is transient and stays owed.
+            if let Err(e) = super::barrier::check_contained(&self.cfg.root, path) {
+                self.state.append_conflict(&ConflictRecord {
+                    path: path.clone(),
+                    foreign_etag: etag.clone(),
+                    preserved_key: None,
+                    kind: format!("sync-refused-containment: {e}"),
+                    at_unix: now_unix(),
+                })?;
+                report.conflicts.push(path.clone());
+                continue;
             }
             super::barrier::consume_window("before-write", path);
             // Review 2026-09-18, H7: dirt was judged by the scan at step 1,
@@ -339,15 +372,17 @@ impl Syncer {
                     continue;
                 }
                 Err(e) => {
-                    // Containment refusal: surfaced, never a wedge.
+                    // TRANSIENT (a full disk, a directory it cannot write
+                    // to): surfaced, never a wedge, and still owed.
                     self.state.append_conflict(&ConflictRecord {
                         path: path.clone(),
                         foreign_etag: etag.clone(),
                         preserved_key: None,
-                        kind: format!("sync-refused-containment: {e}"),
+                        kind: format!("sync-write-failed (will retry): {e}"),
                         at_unix: now_unix(),
                     })?;
                     report.conflicts.push(path.clone());
+                    left = true;
                     continue;
                 }
             };
@@ -377,11 +412,18 @@ impl Syncer {
         //    as a consume would write it. Scoped, it derived only part: the
         //    next consume derives again (D4 keeps manifest_etag where it was).
         match &scope {
-            None => {
+            None if !left => {
                 baseline.seq = theirs.seq;
                 baseline.derived_etag = Some(metag.clone().unwrap_or_default());
                 baseline.skipped = dirty_skips;
                 report.seq = theirs.seq;
+            }
+            // Something is still owed: nothing is recorded as derived, and
+            // the tree is not integrated with this document yet.
+            None => {
+                baseline.derived_etag = None;
+                baseline.skipped.clear();
+                report.seq = baseline.seq;
             }
             Some(_) => {
                 baseline.derived_etag = None;

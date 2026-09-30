@@ -953,9 +953,12 @@ pub struct RescopeReport {
     /// workspace had. Zero work, and the number that tells a widen that
     /// did nothing from a widen that had nothing to do.
     pub already_held: usize,
-    /// Paths that should have left the held set but carry unpublished
-    /// local changes. KEPT, cited, on disk, with a conflict record —
-    /// a narrow may unwatch a file, never discard an edit.
+    /// Paths whose unpublished local changes a rescope kept, each with a
+    /// conflict record: on a narrow, paths that should have left the held
+    /// set (KEPT, cited — a narrow may unwatch a file, never discard an
+    /// edit); on a widen, admitted paths where the agent had made a file
+    /// the tree does not cite yet (kept, uncited, published by the next
+    /// barrier).
     pub kept_dirty: Vec<String>,
     /// This call finished a rescope a crash had left half-applied.
     pub replayed: bool,
@@ -1141,8 +1144,40 @@ impl Syncer {
         }
 
         // WIDEN: admitted citations this workspace does not hold.
-        let add: Vec<(&String, &super::manifest::LeanEntry)> =
+        let mut add: Vec<(&String, &super::manifest::LeanEntry)> =
             m.entries.iter().filter(|(p, _)| covered(p) && !baseline.entries.contains_key(*p)).collect();
+        // A file already at an admitted path that this tree does not cite
+        // is the agent's (made since the last barrier; the scan has not
+        // published it yet). Materialize would fetch the document's
+        // version over it (checkout's resume rule, which is right only
+        // for its own half-written fetches). The consume calls such a path
+        // dirty and leaves it; so does the widen: kept, uncited, and named
+        // in a record. The next barrier publishes it as the agent's add,
+        // and the merge records the version it replaces (review
+        // 2026-09-29, R3). Bytes that ARE the document's are adopted as
+        // before, which is what lets a crashed widen's replay converge.
+        let mut kept_local: Vec<String> = Vec::new();
+        add.retain(|(p, e)| {
+            let local = self.cfg.root.join(p);
+            let Ok(st) = std::fs::symlink_metadata(&local) else { return true };
+            let same = st.is_file()
+                && st.len() == e.size
+                && local_crc64_b64(&local).map(|got| got == e.crc64_b64).unwrap_or(false);
+            if !same {
+                kept_local.push((*p).clone());
+            }
+            same
+        });
+        for p in &kept_local {
+            self.state.append_conflict(&super::state::ConflictRecord {
+                path: p.clone(),
+                foreign_etag: m.entries[p].etag.clone(),
+                preserved_key: None,
+                kind: "rescope-kept-local-unpublished".into(),
+                at_unix: super::now_unix(),
+            })?;
+        }
+        report.kept_dirty.extend(kept_local);
         report.already_held =
             m.entries.keys().filter(|p| covered(p) && baseline.entries.contains_key(*p)).count();
         if !add.is_empty() {
@@ -1172,6 +1207,11 @@ impl Syncer {
 
         baseline.seq = m.seq;
         baseline.manifest_etag = metag;
+        // What the held set is owed changed with it: the next consume
+        // derives in full rather than trusting the cheap path's record
+        // (a widened path it kept or could not take is owed from here).
+        baseline.derived_etag = None;
+        baseline.skipped.clear();
 
         self.state.sync_tree()?;
         self.state.save_baseline(&baseline)?;
