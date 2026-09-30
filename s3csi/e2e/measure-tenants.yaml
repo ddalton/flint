@@ -1,0 +1,88 @@
+# Fixtures for aws-measure.sh — the `big` set (6 × 1 GiB under big/)
+# read through four shapes of passthrough mount. Every CR is read-only
+# for SA trainer; the endpoint/bucket/region literals are what `fx`
+# rewrites for STORE=s3.
+apiVersion: chert.us/v1alpha1
+kind: FlintPassthroughMount
+metadata: { name: big-nocache, namespace: s3-tenants }
+spec:
+  bucket: s3bucket
+  keyPrefix: big
+  endpoint: http://minio.flint-system.svc:9000
+  region: us-east-1
+  readOnly: true
+  uid: 1001
+  consumers: { serviceAccounts: [trainer] }
+---
+# M1's other arm: the block cache, at the sharing default's size, on a
+# mounter of the pod's own.
+apiVersion: chert.us/v1alpha1
+kind: FlintPassthroughMount
+metadata: { name: big-cache, namespace: s3-tenants }
+spec:
+  bucket: s3bucket
+  keyPrefix: big
+  endpoint: http://minio.flint-system.svc:9000
+  region: us-east-1
+  readOnly: true
+  uid: 1001
+  cache: { enabled: true, maxSizeMib: 768 }
+  consumers: { serviceAccounts: [trainer] }
+---
+# M2: one shared mounter (default cache) for every reader on the node,
+# the plugin's memory target (two thirds of the limit).
+apiVersion: chert.us/v1alpha1
+kind: FlintPassthroughMount
+metadata: { name: big-shared, namespace: s3-tenants }
+spec:
+  bucket: s3bucket
+  keyPrefix: big
+  endpoint: http://minio.flint-system.svc:9000
+  region: us-east-1
+  readOnly: true
+  uid: 1001
+  sharing: { readOnly: true }
+  consumers: { serviceAccounts: [trainer] }
+---
+# M2's control: the same shared mounter with mount-s3's OWN default
+# target — 95% of a 1Gi cgroup, 973 MiB — named on the CR so the
+# plugin's two-thirds target is absent. What every mount ran before
+# 2026-09-30.
+apiVersion: chert.us/v1alpha1
+kind: FlintPassthroughMount
+metadata: { name: big-shared-old, namespace: s3-tenants }
+spec:
+  bucket: s3bucket
+  keyPrefix: big
+  endpoint: http://minio.flint-system.svc:9000
+  region: us-east-1
+  readOnly: true
+  uid: 1001
+  sharing: { readOnly: true }
+  mountOptions: ["--memory-target", "973"]
+  consumers: { serviceAccounts: [trainer] }
+---
+apiVersion: chert.us/v1alpha1
+kind: FlintPassthroughMount
+metadata: { name: mid-nocache, namespace: s3-tenants }
+spec:
+  bucket: s3bucket
+  keyPrefix: mid
+  endpoint: http://minio.flint-system.svc:9000
+  region: us-east-1
+  readOnly: true
+  uid: 1001
+  consumers: { serviceAccounts: [trainer] }
+---
+apiVersion: chert.us/v1alpha1
+kind: FlintPassthroughMount
+metadata: { name: mid-cache, namespace: s3-tenants }
+spec:
+  bucket: s3bucket
+  keyPrefix: mid
+  endpoint: http://minio.flint-system.svc:9000
+  region: us-east-1
+  readOnly: true
+  uid: 1001
+  cache: { enabled: true, maxSizeMib: 768 }
+  consumers: { serviceAccounts: [trainer] }

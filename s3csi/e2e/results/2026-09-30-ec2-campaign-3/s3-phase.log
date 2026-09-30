@@ -1,0 +1,373 @@
+=== TEARDOWN
+Error: uninstall: Release not loaded: flint-s3-csi: release: not found
+namespace "flint-system" deleted
+namespace "s3-tenants" deleted
+job.batch "seed-bucket" deleted
+✓ sleepers removed
+=== both namespaces gone after 6s
+=== SETUP (STORE=s3)
+namespace/flint-system created
+namespace/s3-tenants created
+job.batch/seed-bucket created
+pod/mc-s3 created
+secret/s3-broker-static created
+secret/minio-creds created
+customresourcedefinition.apiextensions.k8s.io/flintpassthroughmounts.chert.us unchanged
+customresourcedefinition.apiextensions.k8s.io/flintleanworkspaces.chert.us configured
+waiting for the store + seed (s3)…
+job.batch/seed-bucket condition met
+pod/mc-s3 condition met
+seeded:
+[2026-09-30 19:50:44 UTC]    17B STANDARD datasets/imagenet/shard-00.txt
+[2026-09-30 19:50:44 UTC]    17B STANDARD datasets/imagenet/shard-01.txt
+[2026-09-30 19:50:44 UTC]    17B STANDARD datasets/imagenet/shard-02.txt
+[2026-09-30 19:50:45 UTC]    17B STANDARD datasets/imagenet/shard-03.txt
+[2026-09-30 19:50:45 UTC]    17B STANDARD datasets/imagenet/shard-04.txt
+[2026-09-30 19:50:45 UTC]    17B STANDARD datasets/imagenet/shard-05.txt
+[2026-09-30 19:50:45 UTC]    17B STANDARD datasets/imagenet/shard-06.txt
+[2026-09-30 19:50:45 UTC]    17B STANDARD datasets/imagenet/shard-07.txt
+[2026-09-30 19:50:46 UTC]    17B STANDARD datasets/imagenet/shard-08.txt
+[2026-09-30 19:50:46 UTC]    17B STANDARD datasets/imagenet/shard-09.txt
+[2026-09-30 19:50:46 UTC]    12B STANDARD datasets/imagenet/sub/deep.txt
+[2026-09-30 19:50:46 UTC]    15B STANDARD elsewhere/only.txt
+[2026-09-30 19:50:46 UTC]    20B STANDARD private/secret.txt
+Release "flint-s3-csi" does not exist. Installing it now.
+NAME: flint-s3-csi
+LAST DEPLOYED: Wed Sep 30 12:50:50 2026
+NAMESPACE: flint-system
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+flint-s3-csi is installed in namespace flint-system.
+
+Confirm the driver registered on every node (the registrar sidecar does
+this; give a fresh node a few seconds):
+
+  kubectl get csidriver s3.csi.chert.us
+  kubectl -n flint-system rollout status ds/flint-s3-csi-node
+  kubectl -n flint-system rollout status deploy/flint-s3-broker
+
+Declare a mount IN THE TENANT'S NAMESPACE, and say who may use it:
+
+  apiVersion: chert.us/v1alpha1
+  kind: FlintPassthroughMount
+  metadata: { name: datasets, namespace: team-a }
+  spec:
+    bucket: my-bucket
+    keyPrefix: datasets/imagenet
+    endpoint: http://minio.flint-system.svc:9000   # unset ⇒ AWS S3
+    readOnly: true
+    consumers:
+      serviceAccounts: ["trainer"]   # ABSENT = DENY; "*" = any SA here
+    identity:
+      mode: broker                   # broker | webIdentity | static | ambient
+
+Then a pod mounts it with a volume — no label, no sidecar:
+
+  spec:
+    serviceAccountName: trainer      # must be in consumers
+    volumes:
+      - name: data
+        csi:
+          driver: s3.csi.chert.us
+          readOnly: true
+          volumeAttributes:
+            chert.us/mount: datasets
+            # chert.us/uid: "1001"   # presentation only; default 65534
+    containers:
+      - name: app
+        volumeMounts:
+          - { name: data, mountPath: /mnt/s3, readOnly: true }
+
+volumeAttributes are a REQUEST, never an authorization: exactly one of
+chert.us/mount / chert.us/workspace, optionally chert.us/uid and
+chert.us/gid, and every other key is refused by name. bucket, keyPrefix,
+endpoint, image and credentials come from the CR and only the CR.
+
+WHERE THINGS RUN. Each mounted volume is one worker pod in
+flint-workers, pinned to the tenant's node:
+
+  kubectl -n flint-workers get pods -l app.kubernetes.io/managed-by=flint-s3-csi-node
+
+The worker is placed on the tenant's node directly (spec.nodeName), so
+the scheduler reserves no room for it and it counts against the node's
+maxPods like any pod. A node with no room refuses it (a WorkerNotAdmitted
+event on the tenant, which stays ContainerCreating and is NOT
+rescheduled) until capacity frees. Size nodes for two pods per
+S3-mounted tenant, or let read-only consumers of one dataset share a
+mounter (spec.sharing.readOnly).
+
+The tenant pod carries no credential and no privilege and is admissible
+under PodSecurity `restricted`. The node plugin is the privileged
+component (one per node); the broker is the one with a standing
+credential. A refused publish shows up as a FailedMount event on the
+tenant pod, retried with backoff — `kubectl describe pod` names the
+reason (a missing CR, a ServiceAccount not in consumers, a refused
+attribute).
+
+IDENTITY. Every publish registers with the broker, and every credential
+is minted from the POD's own kubelet-issued token (1 h, audience
+s3.csi.chert.us) after a TokenReview. A pod
+gets a credential only for a CR whose consumers name its ServiceAccount,
+120 s at a time.
+
+THIS INSTALL RUNS THE STATIC BACKEND: the broker hands the ONE key set in
+Secret s3-broker-static to every entitled pod. The
+pod is still authenticated and authorized per publish, but every project
+shares that key at the bucket. Move to broker.backend sts or rest when a
+per-project credential source exists.
+
+A MOUNTER CRASH IS STILL NOT RECOVERABLE IN PLACE. Containers that
+already opened the mount read ENOTCONN once the worker dies; the volume
+stays unhealthy until the pod is recreated. Run S3-mounted workloads
+under a controller.
+
+THE MOUNT PRESENTS AS ONE UID. NodePublish never sees the pod's
+securityContext, so nothing can default from runAsUser. Ownership is the
+volume's chert.us/uid attribute if set, ELSE the CR's spec.uid, else
+65534 — the ATTRIBUTE WINS over the CR. gid resolves the same way and
+defaults to whatever uid resolved to. With nothing declared, files no
+longer present as root as they did under the webhook. A lean workspace
+has no default: it refuses to publish without a uid, and refuses uid 0,
+because the syncer must run as the app's uid to read what the app wrote.
+
+IDENTITY MODES. broker, webIdentity and static are the driver's own and
+run unchanged against S3, MinIO or Ceph RGW. ambient hands the worker
+nothing: whatever the SDK's default credential chain finds on the node
+(environment, a shared file, a web-identity token, a container
+credential URI, instance metadata) is the identity, and when it finds
+nothing the FailedMount event carries the chain's own error. The
+platform must let a pod complete that chain — on a cloud instance
+behind an overlay network, the metadata service's hop limit has to
+admit pods — and the driver does not proxy or inject it.
+
+NODE LOSS. A tenant on a node that dies is Kubernetes' to reschedule; a
+Deployment's replacement pod mounts on its new node and the dead node's
+workers go with the node. What Kubernetes does NOT do without a
+cloud-controller-manager is delete the Node object of an instance that
+has vanished. Until someone does, a rolling update of this chart's
+DaemonSet stalls: the controller picks the dead node's pod first, it can
+never finish terminating, and with maxUnavailable 1 no live node is
+updated. `kubectl delete node <name>` is the operator's step on such a
+cluster; the roll then proceeds. Mounts on live nodes keep serving
+throughout — a plugin roll does not unmount tenants.
+
+WHEN A DRAIN COULD NOT BE ATTESTED. If a lean syncer dies, is evicted or
+runs out of grace before its final publish completes, the node plugin
+does NOT delete the workspace — it moves the tree aside and raises a
+DrainNotAttested event on the tenant. What the tenant wrote since its
+last publish is still on that node:
+
+  <kubelet-root>/plugins/s3.csi.chert.us/undrained/<volume>-<unix>
+
+By default (workers.quota: false) that directory holds the tree itself,
+at <...>/undrained/<volume>-<unix>/tree. With workers.quota: true it holds
+an ext4 IMAGE, not a browsable tree, so recovering it means mounting it
+read-only:
+
+  mount -o loop,ro <...>/undrained/<volume>-<unix>/tree.img /mnt/recover
+
+Nothing ever removes these, by design — losing a tenant's last writes to
+an automatic sweep would be worse than keeping them. The consequence is
+that they accumulate until an operator reviews and deletes them, and a
+node whose root filesystem fills crosses kubelet's DiskPressure
+threshold, at which point kubelet evicts pods that have nothing to do
+with the workspace that was preserved. Size the node's root filesystem
+for the workspaces it may hold (a preserved plain tree costs what it
+contains; with workers.quota: true each costs at least the ext4 metadata
+its sizeLimitGib implies — roughly 0.5 GiB for a 20 GiB workspace — plus
+every block ever written in it), and sweep the directory
+as part of routine operations.
+
+NODE SHUTDOWN, AND WHAT SURVIVES IT. A graceful shutdown drains: the
+syncer publishes its outstanding work on SIGTERM, so a reboot or a
+planned cloud-instance termination keeps it. A machine that simply
+stops — power cut, kernel panic, instance failure — runs no drain at
+all, and everything written since the last publish is gone; `floorSecs`
+on the workspace is what bounds that window. The ordering between a
+tenant and its worker during a shutdown is kubelet's graceful node
+shutdown, which is OFF unless `shutdownGracePeriod` is set on the
+kubelet; see workers.priorityClassName in values.yaml.
+Waiting for daemon set "flint-s3-csi-node" rollout to finish: 0 of 3 updated pods are available...
+Waiting for daemon set "flint-s3-csi-node" rollout to finish: 1 of 3 updated pods are available...
+Waiting for daemon set "flint-s3-csi-node" rollout to finish: 2 of 3 updated pods are available...
+daemon set "flint-s3-csi-node" successfully rolled out
+deployment "flint-s3-broker" successfully rolled out
+serviceaccount/trainer created
+serviceaccount/bob created
+flintpassthroughmount.chert.us/datasets created
+flintpassthroughmount.chert.us/datasets-ro created
+flintpassthroughmount.chert.us/elsewhere created
+flintpassthroughmount.chert.us/datasets-static created
+flintpassthroughmount.chert.us/datasets-noconsumers created
+flintpassthroughmount.chert.us/datasets-f72 created
+flintpassthroughmount.chert.us/datasets-shared created
+pod/reader created
+pod/reader-ro created
+pod/reader-elsewhere created
+pod/reader-static created
+pod/shared-a created
+pod/shared-b created
+pod/shared-c created
+pod/refused-bob created
+pod/refused-noconsumers created
+pod/refused-missing created
+pod/refused-badattr created
+pod/labelled-only created
+  + nodesh-daemon-s3aaws1
+  + nodesh-daemon-s3aaws2
+  + nodesh-daemon-s3acp1
+✓ all sleepers ready — nodesh now execs (~1s) instead of spawning (~20s)
+setup done (store=s3 node=s3a-aws-1 via nodesh)
+=== MEASURE
+── seeding big/ (6 × 1 GiB) and mid/ (4 × 128 MiB) if absent — store=s3 bucket=flint-s3csi-drill-20260930
+  seeded big/f1
+  seeded big/f2
+  seeded big/f3
+  seeded big/f4
+  seeded big/f5
+  seeded big/f6
+  seeded mid/m1
+  seeded mid/m2
+  seeded mid/m3
+  seeded mid/m4
+  [2026-09-30 19:51:01 UTC] 1.0GiB STANDARD f1
+  [2026-09-30 19:51:15 UTC] 1.0GiB STANDARD f2
+  [2026-09-30 19:51:29 UTC] 1.0GiB STANDARD f3
+  [2026-09-30 19:51:43 UTC] 1.0GiB STANDARD f4
+  [2026-09-30 19:51:57 UTC] 1.0GiB STANDARD f5
+  [2026-09-30 19:52:11 UTC] 1.0GiB STANDARD f6
+  [2026-09-30 19:52:25 UTC] 128MiB STANDARD m1
+  [2026-09-30 19:52:28 UTC] 128MiB STANDARD m2
+  [2026-09-30 19:52:31 UTC] 128MiB STANDARD m3
+  [2026-09-30 19:52:33 UTC] 128MiB STANDARD m4
+── node s3a-aws-1: where an emptyDir lives
+  /dev/nvme0n1p1  8.0G  4.4G  3.6G  55% /
+  nvme1n1 435.9G Amazon EC2 NVMe Instance Storage
+  nvme0n1     8G Amazon Elastic Block Store
+# measure 2026-09-30T19:52:36Z ctx=s3a store=s3 node=s3a-aws-1 tag=ec2-0930 reps=3 readers=4
+
+── M1: cold then warm, no cache vs the default-sized cache, on mid (512 MiB, fits) and big (6 GiB, six times the cache) (n=3)
+M1	set	arm	rep	cold_ms	warm_ms	worker
+M1	mid	nocache	1	1139	960	s3w-c07db2657a46fdbe
+M1	mid	nocache	2	1119	940	s3w-53610218e550a916
+M1	mid	nocache	3	1110	940	s3w-9bf37076fc465b76
+M1	mid	cache	1	3250	369	s3w-0cf031b8133ed14e
+M1	mid	cache	2	1210	390	s3w-a939ccfbfa62236e
+M1	mid	cache	3	3270	389	s3w-1d841778a791e0d1
+M1	big	nocache	1	10360	10119	s3w-a8c7afe076daa80a
+M1	big	nocache	2	9490	9059	s3w-4867931e69b3626e
+M1	big	nocache	3	10079	9829	s3w-6dd4c9b8e406a1f4
+M1	big	cache	1	48130	49399	s3w-1559e00b36865016
+M1	big	cache	2	48750	49300	s3w-d51830f95a46a7b8
+M1	big	cache	3	48739	49789	s3w-28729396361706de
+
+── M2: 4 concurrent readers of 6 GiB through ONE shared mounter, three memory targets
+M2	arm	target_mib	limit	readers_ok	slowest_ms	worker_peak_mib	worker_terminated	worker
+  shared worker: s3w-123fac31ac57ebc7 (argv: --memory-target 682)
+M2	fix	682	1Gi	4/4	98180	1030	-	s3w-123fac31ac57ebc7
+  shared worker: s3w-4e217a644e7bb5ed (argv: --memory-target 973)
+M2	old	973	1Gi	4/4	185420	1038	-	s3w-4e217a644e7bb5ed
+  chart: sharedResources 4Gi
+  shared worker: s3w-972224e4fe6015f1 (argv: --memory-target 2730)
+M2	big	2730	4Gi	4/4	96979	3204	-	s3w-972224e4fe6015f1
+  chart restored
+
+written: results/measure-20260930-195059.tsv
+=== UNCORDON
+node/s3a-aws-2 uncordoned
+=== PASSTHROUGH LEGS
+flint-passthrough on real nodes — cluster s3a, node s3a-aws-1 (+s3a-aws-2), buckets flint-s3csi-drill-20260930 / flint-s3csi-drill-20260930-kms / flint-s3csi-drill-20260930-east
+
+── P8 — rotation soak: a reader on s3a-aws-2 reads every 5 s for 30 min across ≥10 key rotations (lifetime 120s) with zero errors
+  ok: PRECONDITION: the soak reader is Running on s3a-aws-2 and reading (broker issued so far: 175)
+
+── P1 — throughput: 512 MiB written through the mount lands whole and reads back byte-identical; a 256 MiB object written by someone else reads whole; both directions clear 20 MiB/s
+  ok: PRECONDITION: 512 MiB of random bytes staged in the tenant (5600a55057714c5af38e0c2e2a36ce33)
+  ok: the write landed as one 536870912-byte object in 2s (256 MiB/s)
+  ok: write throughput 256 MiB/s clears the 20 MiB/s floor
+  ok: read back byte-identical (5600a55057714c5af38e0c2e2a36ce33) in 3s (170 MiB/s)
+  ok: read throughput 170 MiB/s clears the 20 MiB/s floor
+  ok: a 256 MiB object written by ANOTHER writer reads whole and identical (4b877ec81c1f561db8866343674f955f)
+  ok: unlink through the mount removed both objects from the bucket
+
+── P2 — many files: a 5000-object prefix lists complete through the mount and a sample reads correct
+  ok: PRECONDITION: 5000 objects seeded under pt/many/
+  ok: the mount lists all 5000 entries (1s)
+  ok: seven sampled files read their own bytes
+
+── P3 — 16 tenants on one node: every mount serves its bytes, each tenant has its own worker, and all of it is reclaimed at delete
+  ok: all 16 tenants Running on s3a-aws-1 within 5s
+  ok: all 16 read shard-05.txt with its bytes
+  ok: 16 workers, all distinct — one per tenant
+  NOTE: node available memory: 12325 MiB → 11883 MiB with 16 mounts
+  ok: all 16 workers gone 0s after the tenants
+  ok: plugin-dir mounts on the node back to 5
+
+── P4 — a tenant container restart keeps its mount: same pod, same worker, bytes still there
+  ok: PRECONDITION: the agent container restarted (0 → 1)
+  ok: the restarted container reads its mount
+  ok: same worker (s3w-6b2d74de95965bf4): a container restart is not a republish
+
+── P5 — a kubelet restart on s3a-aws-1 mid-read leaves every mount serving, and the driver re-registers for the next tenant
+  ok: kubelet is back and s3a-aws-1 is Ready (0s)
+  ok: reads before/during/after the kubelet restart agree (4b7804772772cd87b99f76b89e79e44a)
+  ok: a NEW tenant mounts and reads after the restart (the driver re-registered)
+
+── P9 — ambient identity: the worker is handed nothing — no broker, no key on the pod — and the platform's own credential chain admits reads and writes
+  SKIP: the platform does not complete the ambient chain for a pod on s3a-aws-1; P9 would judge the platform, not flint. The probe said: 'aws: [ERROR]: An error occurred (NoCredentials): Unable to locate credentials. You can configure credentials by running "aws login".'
+
+── P10 — an SSE-KMS bucket: a write through the mount lands encrypted with the bucket's key, and reads back
+  ok: the object is SSE-KMS under the bucket's key (9230239d-bbaa-4e90-8ea5-8e7dc90fb4bd)
+  ok: the encrypted object reads back through the mount
+
+── P11 — a bucket in us-east-1 mounted from us-west-1: reads and writes work; per-read latency is recorded
+  ok: the cross-region mount reads the seeded object
+  NOTE: 20 sequential reads of a 10-byte object across regions: 248 ms each
+  ok: a cross-region write landed in us-east-1
+
+── P12 — a VPC gateway endpoint for S3 in the cluster's VPC: the route appears and the mounts keep serving through it
+  ok: PRECONDITION: s3a-aws-1 is in vpc-0ae8e524c20d613ee, route table rtb-06378a77cc1269924
+  NOTE: gateway endpoint vpce-07242b60285534a25 already exists in vpc-0ae8e524c20d613ee; using it (and leaving it)
+  ok: gateway endpoint vpce-07242b60285534a25 is available (0s)
+  ok: the route table routes the S3 prefix list pl-6ba54002 via the endpoint
+  ok: the existing mount keeps serving through the endpoint
+  ok: a NEW mount comes up through the endpoint
+
+── P13 — an S3 partition on s3a-aws-1: reads fail while the drop rules hold and resume within a minute of their removal
+  ok: PRECONDITION: S3's prefix list pl-6ba54002 has 11 CIDRs
+  ok: PRECONDITION: 11 blackhole route(s) installed for S3's CIDRs on s3a-aws-1
+  ok: a read under the partition fails or stalls (timed out at 25s)
+  ok: the blackhole routes are gone
+  ok: reads resumed 0s after the partition lifted
+  NOTE: MounterDead events on reader after the partition: 0
+
+── P14 — broker HA: two replicas rolled mid-read — the reader keeps reading and key rotation continues
+  ok: zero read errors across the broker roll
+  ok: rotation continued after the roll (Expiration 2026-09-30T20:16:12Z → 2026-09-30T20:17:36Z, 20s)
+
+── P6 — a REAL reboot of s3a-aws-1: the tenant on it comes back mounted and reading, with a working worker, and nothing is orphaned
+  ok: PRECONDITION: s3a-aws-1 went NotReady (55s) — it is rebooting
+  ok: s3a-aws-1 is Ready again (50s)
+  ok: the tenant's container restarted on the rebooted node (50s)
+  ok: the tenant reads its mount after the reboot
+  ok: a Running worker serves the tenant after the reboot (s3w-6b2d74de95965bf4 → s3w-6b2d74de95965bf4)
+  ok: no half-removed volume directory on the node after the reboot
+  ok: plugin-dir mounts (5) do not exceed live CSI tenants on the node (8)
+
+── P8 — rotation soak — collect
+  ok: 360 reads over 1832s with zero errors
+  BAD: broker issued 175 → 159: fewer than 10 rotations in the soak
+
+── P7 — instance TERMINATION (graceful: the guest is shut down, not cut off): the instance under a Deployment-managed tenant on s3a-aws-2 is terminated; the tenant reschedules to s3a-aws-1 and mounts
+  ok: PRECONDITION: pt-deploy-57459f86c9-fzwgd Running on s3a-aws-2 and reading (seeded-object-05)
+  ok: PRECONDITION: s3a-aws-2 is instance i-029f74ab214afc7b5
+  NOTE: terminated i-029f74ab214afc7b5 at 20:41:07
+  ok: s3a-aws-2 went NotReady 45s after termination
+  ok: the tenant rescheduled to s3a-aws-1 as pt-deploy-57459f86c9-qpjcj and is Running (79s after termination)
+  ok: the rescheduled tenant reads its mount
+
+════════════════════════════════════════
+flint-passthrough on real nodes: 51 ok, 1 bad, 1 skipped
+=== S3 PHASE END

@@ -1,0 +1,33 @@
+
+== seed with the AWS CLI: 10 small + 300 tiny (a paginated listing) + 128 MiB 16:28:58
+imagenet seeded
+many seeded
+m1 seeded
+None
+
+== A: read-only mount — list, read, stat, a 300-key directory 16:29:06
+prefix datasets/ of bucket ptoz is mounted at /home/ddalton/oz/mnt-ro
+mounted
+ls imagenet: 10 entries
+cat: seeded-object-03
+17 bytes mode 644
+prefix many/ of bucket ptoz is mounted at /home/ddalton/oz/mnt-ro
+ls many: 300 entries (300 seeded)
+k150: k150
+
+== D: read-only with --cache: cold then warm read of the 128 MiB object 16:29:11
+prefix mid/ of bucket ptoz is mounted at /home/ddalton/oz/mnt-ro
+-rw-r--r-- 1 ddalton ddalton 134217728 Sep 30 16:29 m1
+8d3401c9
+cold read: 2068 ms
+8d3401c9
+warm read: 221 ms
+cache on disk: 129M
+8d3401c9
+
+== E: write flags Ozone needs? re-check f72 objects and their ETags 16:29:14
+50331648	"11416582e022ed4cda9e12a12d41ce04-6"	None
+50331648	"5c2b40527995ead8ac75f80d4c7636a5-6"
+--- mount-s3 log lines mentioning error/checksum:
+
+== DONE 16:29:16

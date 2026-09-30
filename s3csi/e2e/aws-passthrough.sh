@@ -61,7 +61,15 @@ if wait_phase pt-soak Running 300; then
     soak_out=$(mktemp)
     ( $K -n $NS exec pt-soak -c agent -- /bin/sh -c 'e=0; n=0; for i in $(seq 1 360); do n=$((n+1)); [ "$(cat /mnt/s3/shard-01.txt)" = seeded-object-01 ] || e=$((e+1)); sleep 5; done; echo "errors=$e reads=$n"' > "$soak_out" 2>&1 ) &
     soak_pid=$!
-    ok "PRECONDITION: the soak reader is Running on $NODE2 and reading (broker issued so far: ${soak_issued0:-?})"
+    # Rotations are counted where they LAND — the soak worker's
+    # creds.json, sampled every 30 s for the soak's life — not on the
+    # broker: its issued counter is per pod, and P14 rolls the broker
+    # mid-soak (it read 175 → 159 on s3a, 2026-09-30, over a soak that
+    # had zero errors).
+    soak_w=$(worker_of pt-soak); soak_keys=$(mktemp)
+    ( while :; do $K -n $WNS exec "$soak_w" -- cat /comm/creds.json 2>/dev/null | jq -r '.AccessKeyId // empty' 2>/dev/null; sleep 30; done >> "$soak_keys" 2>/dev/null ) &
+    soak_keys_pid=$!
+    ok "PRECONDITION: the soak reader is Running on $NODE2 and reading; its worker $soak_w is sampled for its key (broker issued so far: ${soak_issued0:-?})"
 else
     bad "the soak reader never reached Running — P8 makes no observation"; soak_pid=""
 fi
@@ -259,7 +267,13 @@ vpc=${iid%%	*}; subnet=${iid##*	}
 rtb=$($AWSA ec2 describe-route-tables --filters "Name=association.subnet-id,Values=$subnet" --query 'RouteTables[0].RouteTableId' --output text 2>/dev/null)
 [ "$rtb" = "None" ] || [ -z "$rtb" ] && rtb=$($AWSA ec2 describe-route-tables --filters "Name=vpc-id,Values=$vpc" "Name=association.main,Values=true" --query 'RouteTables[0].RouteTableId' --output text 2>/dev/null)
 [ -n "$vpc" ] && [ -n "$rtb" ] && ok "PRECONDITION: $NODE is in $vpc, route table $rtb" || bad "PRECONDITION: could not resolve the node's VPC/route table"
-vpce=$($AWSA ec2 create-vpc-endpoint --vpc-id "$vpc" --service-name "com.amazonaws.$S3_REGION.s3" --route-table-ids "$rtb" --query VpcEndpoint.VpcEndpointId --output text 2>/dev/null)
+# An endpoint that already exists (a measurement run made one first, so
+# its reads did not go through a NAT gateway) is used and KEPT; only an
+# endpoint this leg makes is deleted by it. A second gateway endpoint
+# for the same service on the same route table is refused by EC2.
+had=$($AWSA ec2 describe-vpc-endpoints --filters "Name=vpc-id,Values=$vpc" "Name=service-name,Values=com.amazonaws.$S3_REGION.s3" "Name=vpc-endpoint-state,Values=available,pending" --query 'VpcEndpoints[0].VpcEndpointId' --output text 2>/dev/null)
+if [ -n "$had" ] && [ "$had" != "None" ]; then vpce=$had; made=""; note "gateway endpoint $vpce already exists in $vpc; using it (and leaving it)"
+else vpce=$($AWSA ec2 create-vpc-endpoint --vpc-id "$vpc" --service-name "com.amazonaws.$S3_REGION.s3" --route-table-ids "$rtb" --query VpcEndpoint.VpcEndpointId --output text 2>/dev/null); made=yes; fi
 i=0; while [ $i -lt 120 ] && [ "$($AWSA ec2 describe-vpc-endpoints --vpc-endpoint-ids "$vpce" --query 'VpcEndpoints[0].State' --output text 2>/dev/null)" != "available" ]; do sleep 5; i=$((i + 5)); done
 [ -n "$vpce" ] && ok "gateway endpoint $vpce is available (${i}s)" || bad "no VPC endpoint was created"
 pl=$($AWSA ec2 describe-route-tables --route-table-ids "$rtb" --query "RouteTables[0].Routes[?GatewayId=='$vpce'].DestinationPrefixListId" --output text 2>/dev/null)
@@ -269,7 +283,7 @@ sleep 10
 ptpod pt-vpce datasets "$NODE"
 wait_phase pt-vpce Running 180 && [ "$(inpod_out pt-vpce cat /mnt/s3/shard-05.txt)" = "seeded-object-05" ] && ok "a NEW mount comes up through the endpoint" || bad "a new mount failed with the endpoint in place: $(mount_events pt-vpce | tail -1 | cut -c1-160)"
 ptdel pt-vpce
-$AWSA ec2 delete-vpc-endpoints --vpc-endpoint-ids "$vpce" >/dev/null 2>&1 && note "endpoint $vpce deleted"
+[ -n "$made" ] && $AWSA ec2 delete-vpc-endpoints --vpc-endpoint-ids "$vpce" >/dev/null 2>&1 && note "endpoint $vpce deleted"
 
 # ── P13 S3 partition ──────────────────────────────────────────────────
 leg P13 "an S3 partition on $NODE: reads fail while the drop rules hold and resume within a minute of their removal"
@@ -331,7 +345,12 @@ if [ -n "${soak_pid:-}" ]; then
     wait "$soak_pid" 2>/dev/null; res=$(cat "$soak_out"); rm -f "$soak_out"
     soak_issued1=$(broker_issued); el=$(( $(now) - soak_t0 ))
     case "$res" in errors=0\ reads=360) ok "360 reads over ${el}s with zero errors" ;; *) bad "soak result: '${res:-<none>}' (wanted errors=0 reads=360)" ;; esac
-    [ "${soak_issued1:-0}" -ge $(( ${soak_issued0:-0} + 10 )) ] 2>/dev/null && ok "the broker issued ≥10 more keys during the soak (${soak_issued0} → ${soak_issued1}): rotation happened, repeatedly" || bad "broker issued ${soak_issued0} → ${soak_issued1}: fewer than 10 rotations in the soak"
+    kill "${soak_keys_pid:-}" 2>/dev/null; wait "${soak_keys_pid:-}" 2>/dev/null
+    nrot=$(sort -u "${soak_keys:-/dev/null}" 2>/dev/null | grep -c . || true); rm -f "${soak_keys:-}"
+    [ "${nrot:-0}" -ge 10 ] \
+        && ok "the soak worker held $nrot distinct keys over ${el}s (lifetime ${CREDS_LIFETIME}s): rotation happened, repeatedly, under the reads" \
+        || bad "the soak worker held only ${nrot:-0} distinct key(s) over ${el}s at a ${CREDS_LIFETIME}s lifetime — rotation stalled, or the sampler never read creds.json"
+    note "broker issued counter ${soak_issued0:-?} → ${soak_issued1:-?} (per pod; P14's roll resets it)"
 fi
 ptdel pt-soak
 

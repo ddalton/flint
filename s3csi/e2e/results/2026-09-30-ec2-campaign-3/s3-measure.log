@@ -1,0 +1,54 @@
+── seeding big/ (6 × 1 GiB) and mid/ (4 × 128 MiB) if absent — store=s3 bucket=flint-s3csi-drill-20260930
+  seeded big/f1
+  seeded big/f2
+  seeded big/f3
+  seeded big/f4
+  seeded big/f5
+  seeded big/f6
+  seeded mid/m1
+  seeded mid/m2
+  seeded mid/m3
+  seeded mid/m4
+  [2026-09-30 19:51:01 UTC] 1.0GiB STANDARD f1
+  [2026-09-30 19:51:15 UTC] 1.0GiB STANDARD f2
+  [2026-09-30 19:51:29 UTC] 1.0GiB STANDARD f3
+  [2026-09-30 19:51:43 UTC] 1.0GiB STANDARD f4
+  [2026-09-30 19:51:57 UTC] 1.0GiB STANDARD f5
+  [2026-09-30 19:52:11 UTC] 1.0GiB STANDARD f6
+  [2026-09-30 19:52:25 UTC] 128MiB STANDARD m1
+  [2026-09-30 19:52:28 UTC] 128MiB STANDARD m2
+  [2026-09-30 19:52:31 UTC] 128MiB STANDARD m3
+  [2026-09-30 19:52:33 UTC] 128MiB STANDARD m4
+── node s3a-aws-1: where an emptyDir lives
+  /dev/nvme0n1p1  8.0G  4.4G  3.6G  55% /
+  nvme1n1 435.9G Amazon EC2 NVMe Instance Storage
+  nvme0n1     8G Amazon Elastic Block Store
+# measure 2026-09-30T19:52:36Z ctx=s3a store=s3 node=s3a-aws-1 tag=ec2-0930 reps=3 readers=4
+
+── M1: cold then warm, no cache vs the default-sized cache, on mid (512 MiB, fits) and big (6 GiB, six times the cache) (n=3)
+M1	set	arm	rep	cold_ms	warm_ms	worker
+M1	mid	nocache	1	1139	960	s3w-c07db2657a46fdbe
+M1	mid	nocache	2	1119	940	s3w-53610218e550a916
+M1	mid	nocache	3	1110	940	s3w-9bf37076fc465b76
+M1	mid	cache	1	3250	369	s3w-0cf031b8133ed14e
+M1	mid	cache	2	1210	390	s3w-a939ccfbfa62236e
+M1	mid	cache	3	3270	389	s3w-1d841778a791e0d1
+M1	big	nocache	1	10360	10119	s3w-a8c7afe076daa80a
+M1	big	nocache	2	9490	9059	s3w-4867931e69b3626e
+M1	big	nocache	3	10079	9829	s3w-6dd4c9b8e406a1f4
+M1	big	cache	1	48130	49399	s3w-1559e00b36865016
+M1	big	cache	2	48750	49300	s3w-d51830f95a46a7b8
+M1	big	cache	3	48739	49789	s3w-28729396361706de
+
+── M2: 4 concurrent readers of 6 GiB through ONE shared mounter, three memory targets
+M2	arm	target_mib	limit	readers_ok	slowest_ms	worker_peak_mib	worker_terminated	worker
+  shared worker: s3w-123fac31ac57ebc7 (argv: --memory-target 682)
+M2	fix	682	1Gi	4/4	98180	1030	-	s3w-123fac31ac57ebc7
+  shared worker: s3w-4e217a644e7bb5ed (argv: --memory-target 973)
+M2	old	973	1Gi	4/4	185420	1038	-	s3w-4e217a644e7bb5ed
+  chart: sharedResources 4Gi
+  shared worker: s3w-972224e4fe6015f1 (argv: --memory-target 2730)
+M2	big	2730	4Gi	4/4	96979	3204	-	s3w-972224e4fe6015f1
+  chart restored
+
+written: results/measure-20260930-195059.tsv

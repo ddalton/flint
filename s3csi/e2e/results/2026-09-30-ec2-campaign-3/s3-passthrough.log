@@ -1,0 +1,92 @@
+flint-passthrough on real nodes — cluster s3a, node s3a-aws-1 (+s3a-aws-2), buckets flint-s3csi-drill-20260930 / flint-s3csi-drill-20260930-kms / flint-s3csi-drill-20260930-east
+
+── P8 — rotation soak: a reader on s3a-aws-2 reads every 5 s for 30 min across ≥10 key rotations (lifetime 120s) with zero errors
+  ok: PRECONDITION: the soak reader is Running on s3a-aws-2 and reading (broker issued so far: 175)
+
+── P1 — throughput: 512 MiB written through the mount lands whole and reads back byte-identical; a 256 MiB object written by someone else reads whole; both directions clear 20 MiB/s
+  ok: PRECONDITION: 512 MiB of random bytes staged in the tenant (5600a55057714c5af38e0c2e2a36ce33)
+  ok: the write landed as one 536870912-byte object in 2s (256 MiB/s)
+  ok: write throughput 256 MiB/s clears the 20 MiB/s floor
+  ok: read back byte-identical (5600a55057714c5af38e0c2e2a36ce33) in 3s (170 MiB/s)
+  ok: read throughput 170 MiB/s clears the 20 MiB/s floor
+  ok: a 256 MiB object written by ANOTHER writer reads whole and identical (4b877ec81c1f561db8866343674f955f)
+  ok: unlink through the mount removed both objects from the bucket
+
+── P2 — many files: a 5000-object prefix lists complete through the mount and a sample reads correct
+  ok: PRECONDITION: 5000 objects seeded under pt/many/
+  ok: the mount lists all 5000 entries (1s)
+  ok: seven sampled files read their own bytes
+
+── P3 — 16 tenants on one node: every mount serves its bytes, each tenant has its own worker, and all of it is reclaimed at delete
+  ok: all 16 tenants Running on s3a-aws-1 within 5s
+  ok: all 16 read shard-05.txt with its bytes
+  ok: 16 workers, all distinct — one per tenant
+  NOTE: node available memory: 12325 MiB → 11883 MiB with 16 mounts
+  ok: all 16 workers gone 0s after the tenants
+  ok: plugin-dir mounts on the node back to 5
+
+── P4 — a tenant container restart keeps its mount: same pod, same worker, bytes still there
+  ok: PRECONDITION: the agent container restarted (0 → 1)
+  ok: the restarted container reads its mount
+  ok: same worker (s3w-6b2d74de95965bf4): a container restart is not a republish
+
+── P5 — a kubelet restart on s3a-aws-1 mid-read leaves every mount serving, and the driver re-registers for the next tenant
+  ok: kubelet is back and s3a-aws-1 is Ready (0s)
+  ok: reads before/during/after the kubelet restart agree (4b7804772772cd87b99f76b89e79e44a)
+  ok: a NEW tenant mounts and reads after the restart (the driver re-registered)
+
+── P9 — ambient identity: the worker is handed nothing — no broker, no key on the pod — and the platform's own credential chain admits reads and writes
+  SKIP: the platform does not complete the ambient chain for a pod on s3a-aws-1; P9 would judge the platform, not flint. The probe said: 'aws: [ERROR]: An error occurred (NoCredentials): Unable to locate credentials. You can configure credentials by running "aws login".'
+
+── P10 — an SSE-KMS bucket: a write through the mount lands encrypted with the bucket's key, and reads back
+  ok: the object is SSE-KMS under the bucket's key (9230239d-bbaa-4e90-8ea5-8e7dc90fb4bd)
+  ok: the encrypted object reads back through the mount
+
+── P11 — a bucket in us-east-1 mounted from us-west-1: reads and writes work; per-read latency is recorded
+  ok: the cross-region mount reads the seeded object
+  NOTE: 20 sequential reads of a 10-byte object across regions: 248 ms each
+  ok: a cross-region write landed in us-east-1
+
+── P12 — a VPC gateway endpoint for S3 in the cluster's VPC: the route appears and the mounts keep serving through it
+  ok: PRECONDITION: s3a-aws-1 is in vpc-0ae8e524c20d613ee, route table rtb-06378a77cc1269924
+  NOTE: gateway endpoint vpce-07242b60285534a25 already exists in vpc-0ae8e524c20d613ee; using it (and leaving it)
+  ok: gateway endpoint vpce-07242b60285534a25 is available (0s)
+  ok: the route table routes the S3 prefix list pl-6ba54002 via the endpoint
+  ok: the existing mount keeps serving through the endpoint
+  ok: a NEW mount comes up through the endpoint
+
+── P13 — an S3 partition on s3a-aws-1: reads fail while the drop rules hold and resume within a minute of their removal
+  ok: PRECONDITION: S3's prefix list pl-6ba54002 has 11 CIDRs
+  ok: PRECONDITION: 11 blackhole route(s) installed for S3's CIDRs on s3a-aws-1
+  ok: a read under the partition fails or stalls (timed out at 25s)
+  ok: the blackhole routes are gone
+  ok: reads resumed 0s after the partition lifted
+  NOTE: MounterDead events on reader after the partition: 0
+
+── P14 — broker HA: two replicas rolled mid-read — the reader keeps reading and key rotation continues
+  ok: zero read errors across the broker roll
+  ok: rotation continued after the roll (Expiration 2026-09-30T20:16:12Z → 2026-09-30T20:17:36Z, 20s)
+
+── P6 — a REAL reboot of s3a-aws-1: the tenant on it comes back mounted and reading, with a working worker, and nothing is orphaned
+  ok: PRECONDITION: s3a-aws-1 went NotReady (55s) — it is rebooting
+  ok: s3a-aws-1 is Ready again (50s)
+  ok: the tenant's container restarted on the rebooted node (50s)
+  ok: the tenant reads its mount after the reboot
+  ok: a Running worker serves the tenant after the reboot (s3w-6b2d74de95965bf4 → s3w-6b2d74de95965bf4)
+  ok: no half-removed volume directory on the node after the reboot
+  ok: plugin-dir mounts (5) do not exceed live CSI tenants on the node (8)
+
+── P8 — rotation soak — collect
+  ok: 360 reads over 1832s with zero errors
+  BAD: broker issued 175 → 159: fewer than 10 rotations in the soak
+
+── P7 — instance TERMINATION (graceful: the guest is shut down, not cut off): the instance under a Deployment-managed tenant on s3a-aws-2 is terminated; the tenant reschedules to s3a-aws-1 and mounts
+  ok: PRECONDITION: pt-deploy-57459f86c9-fzwgd Running on s3a-aws-2 and reading (seeded-object-05)
+  ok: PRECONDITION: s3a-aws-2 is instance i-029f74ab214afc7b5
+  NOTE: terminated i-029f74ab214afc7b5 at 20:41:07
+  ok: s3a-aws-2 went NotReady 45s after termination
+  ok: the tenant rescheduled to s3a-aws-1 as pt-deploy-57459f86c9-qpjcj and is Running (79s after termination)
+  ok: the rescheduled tenant reads its mount
+
+════════════════════════════════════════
+flint-passthrough on real nodes: 51 ok, 1 bad, 1 skipped

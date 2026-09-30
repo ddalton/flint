@@ -31,9 +31,10 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: mc
-          image: quay.io/minio/mc:latest
+          image: cgr.dev/chainguard/minio-client:latest-dev
+          imagePullPolicy: IfNotPresent
           command:
-            - /bin/sh
+            - sh
             - -c
             - |
               until mc alias set m __ENDPOINT__ __KEY__ __SECRET__; do sleep 2; done
@@ -65,8 +66,9 @@ spec:
     - { key: node-role.kubernetes.io/master, operator: Exists, effect: NoSchedule }
   containers:
     - name: mc
-      image: quay.io/minio/mc:latest
-      command: ["/bin/sh", "-c"]
+      image: cgr.dev/chainguard/minio-client:latest-dev
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-c"]
       args:
         - |
           trap 'exit 0' TERM INT

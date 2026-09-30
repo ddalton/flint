@@ -1,0 +1,64 @@
+
+== packages 16:23:20
+1
+/usr/bin/fusermount
+
+== ozone 2.2.1 16:23:20
+ Container ozone-recon-1 Running 
+ Container ozone-datanode-1 Running 
+ Container ozone-om-1 Running 
+s3g answered after ~3s: 403
+SERVICE    STATUS
+datanode   Up 3 minutes
+httpfs     Up 3 minutes
+om         Up 3 minutes
+recon      Up 3 minutes
+s3g        Up 3 minutes
+scm        Up 3 minutes
+
+== bucket + seed 16:23:20
+mb attempts: 30
+mc: <ERROR> Unable to list folder. This part of feature is not implemented yet.
+
+== mount-s3 1.24.0 16:26:03
+mount-s3 1.24.0
+
+== A: read-only mount 16:26:03
+prefix datasets/imagenet/ of bucket ptoz is mounted at /home/ddalton/oz/mnt-ro
+cat: /home/ddalton/oz/mnt-ro/shard-03.txt: No such file or directory (os error 2)
+cat: 
+stat: cannot stat '/home/ddalton/oz/mnt-ro/shard-03.txt': No such file or directory (os error 2)
+umount: /home/ddalton/oz/mnt-ro: filesystem was unmounted, but failed to update userspace mount table.
+
+== B: read-write mount, default checksums (CRC32C trailing), a 48 MiB multipart write + a small single PUT 16:26:05
+prefix f72/ of bucket ptoz is mounted at /home/ddalton/oz/mnt-rw
+small write rc=0
+48 MiB write rc=0
+incomplete: 1
+delete rc=0
+umount: /home/ddalton/oz/mnt-rw: filesystem was unmounted, but failed to update userspace mount table.
+--- mount-s3 log (errors/warnings):
+2026-09-30T16:26:05.592483Z  WARN ThreadId(01) mountpoint_s3::cli: failed to detect network throughput. Using 10 gbps as throughput. Use --maximum-throughput-gbps CLI flag to configure a target throughput appropriate for the instance. Detection failed due to: failed to get instance type: IMDS is disabled
+2026-09-30T16:26:07.690766Z  WARN ThreadId(09) getxattr{req=16 ino=2 name="security.capability" pid=107905}: mountpoint_s3_fs::fuse: getxattr failed: operation not supported by Mountpoint
+2026-09-30T16:26:08.450256Z  WARN ThreadId(10) fuser: [Not Implemented] poll(ino: 0x3, fh: 2, ph: PollHandle(3), events: 24, flags: 0)
+
+== C: read-write mount with --upload-checksums off (control if B failed; a comparison if it did not) 16:26:12
+prefix f72c/ of bucket ptoz is mounted at /home/ddalton/oz/mnt-rw
+48 MiB write rc=0
+incomplete: 1
+umount: /home/ddalton/oz/mnt-rw: filesystem was unmounted, but failed to update userspace mount table.
+2026-09-30T16:26:12.118405Z  WARN ThreadId(01) mountpoint_s3::cli: failed to detect network throughput. Using 10 gbps as throughput. Use --maximum-throughput-gbps CLI flag to configure a target throughput appropriate for the instance. Detection failed due to: failed to get instance type: IMDS is disabled
+2026-09-30T16:26:14.219323Z  WARN ThreadId(09) fuser: [Not Implemented] poll(ino: 0x2, fh: 1, ph: PollHandle(2), events: 24, flags: 0)
+2026-09-30T16:26:14.221352Z  WARN ThreadId(09) getxattr{req=24 ino=2 name="security.capability" pid=114197}: mountpoint_s3_fs::fuse: getxattr failed: operation not supported by Mountpoint
+
+== D: read-only with the block cache (--cache) and a cold/warm read of a 128 MiB object 16:26:17
+head: error writing 'standard output': Broken pipe (os error 32)
+prefix mid/ of bucket ptoz is mounted at /home/ddalton/oz/mnt-ro
+cat: /home/ddalton/oz/mnt-ro/m1: No such file or directory (os error 2)
+cold read: 10 ms
+cat: /home/ddalton/oz/mnt-ro/m1: No such file or directory (os error 2)
+warm read: 3 ms
+8.0K
+umount: /home/ddalton/oz/mnt-ro: filesystem was unmounted, but failed to update userspace mount table.
+
+== DONE 16:26:19
