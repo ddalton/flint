@@ -697,31 +697,54 @@ impl Proxy {
         let tick = (every / 3).max(std::time::Duration::from_secs(1));
         loop {
             tokio::time::sleep(tick).await;
-            let all: Vec<((u64, u64), Arc<BackendClient>)> =
-                self.clients.lock().unwrap().iter().map(|(k, v)| (*k, v.clone())).collect();
-            for ((cid, hub), c) in all {
-                if self.state.clients.get_client(cid).is_none() {
-                    // The downstream client is gone (expired and reaped):
-                    // forget its backends; the hub expires them itself.
-                    self.clients.lock().unwrap().remove(&(cid, hub));
-                    continue;
-                }
-                if !self.state.leases.is_valid(cid) || c.since_renewed() < every {
-                    continue;
-                }
-                let p = self.clone();
-                tokio::spawn(async move {
-                    match c.keepalive().await {
-                        Ok(Nfs4Status::Ok) => debug!("hub {hub:#x}: renewed backend {:#x}", c.clientid),
-                        Ok(s) => {
-                            info!("hub {hub:#x}: keepalive {s:?}; backend {:#x} dropped, next use re-establishes", c.clientid);
-                            p.forget(hub, Some(cid), None);
-                        }
-                        Err(e) => debug!("hub {hub:#x}: keepalive: {e}"),
-                    }
-                });
-            }
+            self.keepalive_tick(every);
         }
+    }
+
+    /// One pass: renew every backend of a live downstream client not
+    /// renewed within `every`. Each renewal runs in its own task, so one
+    /// slow hub does not hold up the rest; the handles are for tests.
+    fn keepalive_tick(self: &Arc<Self>, every: std::time::Duration) -> Vec<tokio::task::JoinHandle<()>> {
+        let mut spawned = Vec::new();
+        let all: Vec<((u64, u64), Arc<BackendClient>)> =
+            self.clients.lock().unwrap().iter().map(|(k, v)| (*k, v.clone())).collect();
+        for ((cid, hub), c) in all {
+            if self.state.clients.get_client(cid).is_none() {
+                // The downstream client is gone (expired and reaped):
+                // forget its backends; the hub expires them itself.
+                self.clients.lock().unwrap().remove(&(cid, hub));
+                continue;
+            }
+            if !self.state.leases.is_valid(cid) || c.since_renewed() < every {
+                continue;
+            }
+            let p = self.clone();
+            spawned.push(tokio::spawn(async move {
+                match c.keepalive().await {
+                    Ok(Nfs4Status::Ok) => debug!("hub {hub:#x}: renewed backend {:#x}", c.clientid),
+                    // The hub restarted (its sessions are dropped at
+                    // load) or the connection closed. An idle client
+                    // sends nothing that reaches the hub, so nothing
+                    // but this re-attaches it: left alone, the hub
+                    // reaps the backend client one lease later, locks
+                    // and all, and reports zero leases, which
+                    // hibernation reads as "nobody holds state here"
+                    // (step3-drills.sh `idlerestart`).
+                    Ok(Nfs4Status::BadSession | Nfs4Status::DeadSession) | Err(BackendError::Down(_)) => {
+                        match p.reattach(cid, hub, &c).await {
+                            Ok(n) => info!("hub {hub:#x}: backend {:#x} re-attached by the keepalive: clientid {n:#x}", c.clientid),
+                            Err(e) => debug!("hub {hub:#x}: keepalive re-attach: {e}"),
+                        }
+                    }
+                    Ok(s) => {
+                        info!("hub {hub:#x}: keepalive {s:?}; backend {:#x} dropped, next use re-establishes", c.clientid);
+                        p.forget(hub, Some(cid), None);
+                    }
+                    Err(e) => debug!("hub {hub:#x}: keepalive: {e}"),
+                }
+            }));
+        }
+        spawned
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -775,6 +798,46 @@ impl Proxy {
             self.forget(hub, if client_gone { cid } else { None }, Some(sid));
         }
         unreachable!()
+    }
+
+    /// Register `cid`'s backend client on `hub` again, under the same
+    /// owner and verifier: a hub that kept its state (a restart) answers
+    /// with the SAME clientid, so the client's opens and locks carry on.
+    /// Replaces `old` only if it is still the cached one (a client op may
+    /// have re-established it meanwhile). Its data sessions died with the
+    /// hub's sessions and are dropped; next use creates new ones.
+    async fn reattach(&self, cid: u64, hub: u64, old: &Arc<BackendClient>) -> Result<u64, BackendError> {
+        let _g = self.setup.lock().await;
+        let cached = self.clients.lock().unwrap().get(&(cid, hub)).cloned();
+        if !cached.is_some_and(|c| Arc::ptr_eq(&c, old)) {
+            return Ok(old.clientid);
+        }
+        let row = self.table.hub(hub).ok_or_else(|| BackendError::Protocol(format!("hub {hub:#x} not in the table")))?;
+        let down = self
+            .state
+            .clients
+            .get_client(cid)
+            .ok_or_else(|| BackendError::Protocol("downstream client vanished".into()))?;
+        let conn = {
+            let cur = self.conns.lock().unwrap().get(&hub).cloned();
+            match cur {
+                Some(c) if !c.is_closed() => c,
+                _ => {
+                    // Not `backend`'s drop-everything-on-this-hub: every
+                    // other backend on the old connection fails its own
+                    // keepalive and re-attaches the same way.
+                    let c = HubConn::connect(&row.address).await?;
+                    self.conns.lock().unwrap().insert(hub, c.clone());
+                    c
+                }
+            }
+        };
+        let c = BackendClient::register(conn, &down.owner, down.verifier.to_be_bytes(), down.flags).await?;
+        let sids: Vec<[u8; 16]> = self.state.sessions.get_client_sessions(cid).into_iter().map(|s| s.0).collect();
+        self.sessions.lock().unwrap().retain(|(s, h), _| !(*h == hub && sids.contains(s)));
+        let n = c.clientid;
+        self.clients.lock().unwrap().insert((cid, hub), c);
+        Ok(n)
     }
 
     /// Drop backend state after a hub said it is gone: a closed
@@ -1174,6 +1237,40 @@ mod tests {
         assert_eq!(st, 0, "status {st} (10008 = DELAY, the forever-loop)");
         assert!(dir.path().join("export/b").is_dir());
         assert!(hub_state.clients.id_of_owner(b"flint-proxy/test-client").is_some(), "registered again");
+    }
+
+    /// A hub restart drops every session; a client that stays idle sends
+    /// nothing that reaches the hub again. The keepalive must re-attach
+    /// its backend under the same clientid (state intact), or the hub reaps
+    /// it a lease later, locks and all (step3-drills.sh `idlerestart`).
+    #[tokio::test]
+    async fn the_keepalive_reattaches_an_idle_client_after_the_hub_drops_its_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let (hub_addr, hub_state) = hub_with_state(dir.path()).await;
+        let (p, addr) = proxy(dir.path(), &hub_addr).await;
+        let (c, sid) = client(&addr).await;
+        let x = [seq(sid, 0, 1), op_putfh(route::PSEUDO_ROOT_FH), op_lookup("ws-a"), op_mkdir("a")];
+        let refs: Vec<&[u8]> = x.iter().map(|o| o.as_slice()).collect();
+        let body = c.call(&proxy_cred(), &wire::encode_compound(b"", 2, &refs)).await.unwrap();
+        assert_eq!(&body[0..4], &[0, 0, 0, 0]);
+        let backend = hub_state.clients.id_of_owner(b"flint-proxy/test-client").unwrap();
+        assert!(hub_state.sessions.session_count_for_client(backend) > 0);
+
+        // What the hub's restart does to the backend: its sessions are gone.
+        hub_state.sessions.destroy_client_sessions(backend);
+        for h in p.keepalive_tick(std::time::Duration::ZERO) {
+            h.await.unwrap();
+        }
+        assert_eq!(hub_state.clients.id_of_owner(b"flint-proxy/test-client"), Some(backend), "the same client, state intact");
+        assert!(
+            hub_state.sessions.session_count_for_client(backend) > 0,
+            "re-attached with a new control session — otherwise nothing renews it again"
+        );
+        // And the next keepalive renews it.
+        for h in p.keepalive_tick(std::time::Duration::ZERO) {
+            h.await.unwrap();
+        }
+        assert!(hub_state.sessions.session_count_for_client(backend) > 0);
     }
 
     /// §4 Leases, measured (step3-drills.sh `revoke`, Linux 6.12): a hub's

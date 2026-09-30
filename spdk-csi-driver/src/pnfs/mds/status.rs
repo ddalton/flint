@@ -216,6 +216,8 @@ impl HubStatus {
                     .read()
                     .ok()
                     .and_then(|l| l.as_ref().map(|l| l.active_count())),
+                live_leases: self.leases.read().ok().and_then(|l| l.as_ref().map(|l| l.live_count())),
+                lease_secs: self.leases.read().ok().and_then(|l| l.as_ref().map(|l| u64::from(l.lease_time()))),
                 // ALWAYS Some, including 0 and including when the gate
                 // is off — see the consumer's `None` reasoning. A build
                 // that can grant must always say so, or the operator's
@@ -321,6 +323,13 @@ pub struct TierDoc {
 #[serde(rename_all = "camelCase")]
 pub struct NfsDoc {
     pub active_leases: Option<usize>,
+    /// Unexpired leases (`LeaseManager::live_count`). With `leaseSecs` and
+    /// `uptimeSecs` this answers "does a client still hold state here":
+    /// the leases re-created at load for persisted clients have run out
+    /// once the hub has been up `leaseSecs`, unless a client renewed.
+    /// Hibernation requires it to be 0 (design §7a HIB-1).
+    pub live_leases: Option<usize>,
+    pub lease_secs: Option<u64>,
     /// Live (non-revoked) READ delegations across all clients.
     ///
     /// Always `Some` from any build that can grant one — including

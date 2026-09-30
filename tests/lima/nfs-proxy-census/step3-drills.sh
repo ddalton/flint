@@ -10,7 +10,8 @@
 #       EXPIRED_ALL, 0x10 EXPIRED_SOME, 0x20 ADMIN, 0x40 RECALLABLE _STATE_REVOKED)
 # Drills: restart (hub restart under a writer), proxyrestart (proxy restart
 # under a writer), keepalive (an idle lock holder keeps its lock on the hub
-# past the hub lease), parked (a stopped hub: the client waits, no error,
+# past the hub lease), idlerestart (the same holder keeps it across a hub
+# RESTART: the keepalive must re-attach), parked (a stopped hub: the client waits, no error,
 # and finishes when the hub is back), destroy (umount destroys the backend
 # clients on the hubs), revoke (hub A loses every client's state while one
 # client holds a lock in each workspace: ws-b must not notice; not in the
@@ -20,7 +21,7 @@ BIN=${BIN:-$HOME/nfs-proxy-census/flint/spdk-csi-driver/target/release}
 # NOT /tmp: a wedged run ends in a reboot, which clears /tmp.
 ROOT=$HOME/nfs-proxy-step3; MNT=/mnt/px; DIRECT=/mnt/pxd; PX=20490
 HUB_LEASE=20
-WHICH=${*:-restart proxyrestart keepalive parked destroy}
+WHICH=${*:-restart proxyrestart keepalive idlerestart parked destroy}
 ok=0; bad=0
 # A drill that fails can leave a HARD mount wedged in client recovery, and
 # every process that stats the mount table then blocks in D state — on
@@ -68,7 +69,7 @@ proxy_start() {
   sleep 1
 }
 proxy_stop() { pkill -TERM -f "[f]lint-nfs-proxy --config $ROOT"; sleep 1; }
-mnt() { sudo timeout 30 mount -t nfs4 -o nfsvers=4.2,proto=tcp,hard,timeo=50,port=$PX 127.0.0.1:/ $MNT; }
+mnt() { sudo timeout 30 mount -t nfs4 -o nfsvers=4.2,proto=tcp,hard,timeo=50,port=$PX${MNTX:-} 127.0.0.1:/ $MNT; }
 
 setup() {
   sudo umount -f -l $MNT 2>/dev/null; sudo umount -f -l $DIRECT 2>/dev/null
@@ -147,6 +148,54 @@ except OSError as e: print('REFUSED', e.errno)
     echo "contender: $GOT"
     check "keepalive: the idle holder still holds its lock on the hub" 'echo "$GOT" | grep -q REFUSED'
     sudo kill $H 2>/dev/null; sudo timeout 20 umount $DIRECT || sudo umount -f -l $DIRECT
+    ;;
+  idlerestart)
+    # keepalive's holder, but hub A RESTARTS (state persisted) while it
+    # idles. A direct mount's client re-creates its session itself; behind
+    # the proxy nothing the client sends reaches hub A, so the proxy's
+    # keepalive has to re-attach, or hub A reaps the backend client one
+    # lease later and the lock with it — and reads zero leases, which
+    # hibernation takes as "nobody holds state here" (design §7a HIB-1).
+    # actimeo=3600: the kernel's own attribute revalidation (a GETATTR of
+    # the ws-a root about once a minute, seen in the capture) otherwise
+    # re-attaches the backend when it happens to land within a lease of
+    # the restart, so the arm passed or failed on the kernel's timing.
+    sudo umount $MNT; MNTX=,actimeo=3600 mnt
+    sudo python3 -c "
+import fcntl, os, time
+fd = os.open('$MNT/ws-a/lk', os.O_CREAT | os.O_RDWR)
+fcntl.lockf(fd, fcntl.LOCK_EX)
+open('$ROOT/out/held', 'w').close()
+while not os.path.exists('$ROOT/out/go'): time.sleep(0.2)
+try:
+    os.pwrite(fd, b'after\\n', 0); os.fsync(fd); r = 'ok'
+except OSError as e: r = 'errno %d' % e.errno
+open('$ROOT/out/res', 'w').write(r)
+time.sleep(600)
+" & H=$!
+    for _ in $(seq 1 50); do [ -e $ROOT/out/held ] && break; sleep 0.2; done
+    sleep $((HUB_LEASE * 2))
+    USE0=$(clean $ROOT/out/proxy.log | grep -c "backend client on ws-a")
+    hub_stop ws-a; sleep 2; hub_start ws-a 10
+    IDLE=$((HUB_LEASE * 3)); echo "hub A restarted; idle ${IDLE}s (lease ${HUB_LEASE}s)"; sleep $IDLE
+    USE1=$(clean $ROOT/out/proxy.log | grep -c "backend client on ws-a")
+    sudo timeout 30 mount -t nfs4 -o nfsvers=4.2,proto=tcp,hard,timeo=50,port=20491 127.0.0.1:/ $DIRECT
+    GOT=$(sudo timeout 60 python3 -c "
+import fcntl, os
+fd = os.open('$DIRECT/lk', os.O_RDWR)
+try:
+    fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); print('ACQUIRED')
+except OSError as e: print('REFUSED', e.errno)
+" 2>&1)
+    sudo timeout 20 umount $DIRECT || sudo umount -f -l $DIRECT
+    touch $ROOT/out/go
+    for _ in $(seq 1 60); do [ -e $ROOT/out/res ] && break; sleep 1; done
+    R=$(cat $ROOT/out/res 2>/dev/null || echo none)
+    echo "contender: $GOT; holder's write after: $R; client-driven attaches to ws-a before/after the restart: $USE0/$USE1"
+    check "idlerestart: no client op reached ws-a across the restart (else the arm tests nothing)" '[ "$USE0" = "$USE1" ]'
+    check "idlerestart: the idle holder still holds its lock after the hub restart" 'echo "$GOT" | grep -q REFUSED'
+    check "idlerestart: the holder's next write succeeds" '[ "$R" = ok ]'
+    sudo kill $H 2>/dev/null
     ;;
   parked)
     echo parked-bytes | sudo tee $ROOT/ws-a/data/exports/p >/dev/null   # never read through the proxy yet

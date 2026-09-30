@@ -34,6 +34,8 @@
 //! | `STUB_RPO_CLEAN` | `true`/`false` — the hibernate gate |
 //! | `STUB_PHASE` | `serving` (default), `starting`, `importing`, `draining` |
 //! | `STUB_ACTIVE_LEASES` | what `nfs.activeLeases` reports |
+//! | `STUB_LIVE_LEASES` | what `nfs.liveLeases` reports (default 0) |
+//! | `STUB_LEASE_SECS` | what `nfs.leaseSecs` reports (default 0) |
 //! | `STUB_STATUS_DELAY_MS` | added latency per `/status`, to inflate the operator's `d` |
 //! | `STUB_STATUS_FAIL_PCT` | percentage of polls answered 503, for the backoff legs |
 //! | `STUB_HEALTH_PORT` | default 8080 |
@@ -179,6 +181,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tier: TierDoc { gauges: None, meters: Default::default() },
                     nfs: NfsDoc {
                         active_leases: Some(env_u64("STUB_ACTIVE_LEASES", 0) as usize),
+                        // The hibernate lease guard reads these two; the
+                        // defaults let a stub fleet hibernate at once.
+                        live_leases: Some(env_u64("STUB_LIVE_LEASES", 0) as usize),
+                        lease_secs: Some(env_u64("STUB_LEASE_SECS", 0)),
                         // Knob so the fleet rig can exercise the
                         // delegation suspend guard at scale — a stub
                         // that always says zero could never show the

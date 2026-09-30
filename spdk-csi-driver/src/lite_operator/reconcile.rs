@@ -45,7 +45,7 @@ use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use super::conflict::{self, Admission, Candidate, ANN_ABANDON};
-use super::hubstatus;
+use super::hubstatus::{self, LeaseFree};
 use super::idle::{self, Decision, IdleState};
 use super::persistence;
 use super::crd::{FlintShare, FlintShareStatus, Lifecycle, Phase, Reclaim, RestartPolicy, ShareCondition};
@@ -1983,6 +1983,29 @@ async fn verify_and_hibernate(
             condition("IdleEligible", false, "NotRecoverable", Some(why), generation),
         );
         return Ok(IdleOutcome { phase: Phase::Ready, short_circuit: Some(Action::requeue(REQUEUE_BLOCKED)), server_id: None, hub_phase: None });
+    }
+
+    // The data is safe; is the STATE? Deleting the PVC deletes state.db,
+    // so a client still holding opens or locks would lose them (design
+    // §7a HIB-1: this rung used to read only the flush).
+    match snap.lease_free() {
+        LeaseFree::Free => {}
+        LeaseFree::Settling(why) => {
+            // Keep the hub up until its restored leases run out: one lease.
+            set_condition(conds, condition("IdleEligible", false, "LeasesSettling", Some(why), generation));
+            return Ok(IdleOutcome { phase: Phase::Ready, short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)), server_id: None, hub_phase: None });
+        }
+        LeaseFree::Held(why) | LeaseFree::Unknown(why) => {
+            // Someone is there (or the hub cannot say). Keep the disk and go
+            // back down; `idle-since` restarts, so the next attempt is a
+            // full `hibernateAfterSecs` away rather than a wake loop.
+            set_idle_state(ctx, share, &ns, IdleState::Suspended, false).await?;
+            let note = format!("not reclaiming the disk: {why}; back to suspended, hibernation is retried later");
+            info!(share = %share.name_any(), "{note}");
+            event(ctx, share, EventType::Normal, "HibernateDeferred", &note).await;
+            set_condition(conds, condition("IdleEligible", false, "ClientHoldsState", Some(note), generation));
+            return Ok(IdleOutcome { phase: Phase::IdleSuspended, short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)), server_id: None, hub_phase: None });
+        }
     }
 
     // Clean. Record Hibernated FIRST, so the render scales to zero and

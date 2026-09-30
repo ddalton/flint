@@ -347,6 +347,15 @@ impl LeaseManager {
         self.leases.len()
     }
 
+    /// Leases that have NOT expired: clients that renewed within one lease
+    /// time. `active_count` also counts expired rows the sweep has not
+    /// retired yet, and after a restart every persisted client gets a fresh
+    /// lease at load, so neither count alone says whether anyone is still
+    /// there — this one does once the process has been up a full lease.
+    pub fn live_count(&self) -> usize {
+        self.leases.iter().filter(|l| !l.is_expired()).count()
+    }
+
     /// Get lease time (for client queries)
     pub fn lease_time(&self) -> u32 {
         lease_time().as_secs() as u32

@@ -756,6 +756,16 @@ port are still wanted for capacity and failure isolation.
    defect:** the proxy passed 0x08 and 0x10 through. Fixed test-first
    (`only_a_per_state_revocation_flag_reaches_the_client`: a hub
    raising 0x78 reached the client as 0x58 before the fix, 0x40 after).
+   **Idle holder across a hub restart, 2026-09-30** (`idlerestart`,
+   `results-box-6.12-step3-idlerestart/`): a defect. After a hub
+   restart the keepalive met a closed connection or BADSESSION and
+   never renewed again. An idle client sends nothing that reaches the
+   hub, so the hub reaped the backend client one lease later: the
+   contender took the lock and the holder's write was EIO (2/2). A
+   direct mount does not do this: its client re-creates its session.
+   Fixed: the keepalive re-attaches (same owner and verifier, so the
+   same clientid and state). Fixed 3/3 runs, whole suite 14/14; the unit
+   test fails with the re-attach mutated out.
 4. Chart/operator wiring, with **headless hub Services** (§7a), and
    the hub lockdown that makes the proxy unbypassable: NetworkPolicy
    (and, under ambient, the L4 `AuthorizationPolicy`) admitting only
@@ -796,7 +806,16 @@ port are still wanted for capacity and failure isolation.
    **Not done:** the ambient `AuthorizationPolicy` (the NetworkPolicy
    peer is label-based, not ServiceAccount-based) and the §6a Istio
    checks.
-5. **Scale prerequisites (§7a):** hibernate as the inactive default,
+5. **Scale prerequisites (§7a):**
+   **HIB-1 re-derived 2026-09-30: it was still open** (`hibernatable()`
+   read only the flush). Now fixed in code: the hub reports `liveLeases`
+   and `leaseSecs`, and the operator's `verify_and_hibernate` also
+   requires `lease_free()`. That means a full lease of uptime (load
+   re-creates a lease for every persisted client) and then zero live
+   leases. A renewing client sends the share back to Suspended, keeping
+   the disk. Unit-tested with two mutation controls. **Not yet run on a
+   cluster**, and hibernate is not yet the default.
+   Remaining: hibernate as the inactive default,
    with **zero live leases as a hibernation precondition** (the HIB-1
    fix, and now required by §4); hub defects **D1** (`FREE_STATEID` →
    `LOCKS_HELD` after the last `LOCKU`) and **D2** (`CLOSE` →

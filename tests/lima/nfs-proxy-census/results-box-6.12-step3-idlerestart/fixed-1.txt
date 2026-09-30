@@ -1,0 +1,9 @@
+=== idlerestart
+hub A restarted; idle 60s (lease 20s)
+contender: REFUSED 11; holder's write after: ok; client-driven attaches to ws-a before/after the restart: 1/1
+PASS idlerestart: no client op reached ws-a across the restart (else the arm tests nothing)
+PASS idlerestart: the idle holder still holds its lock after the hub restart
+PASS idlerestart: the holder's next write succeeds
+proxy warnings:
+      2  WARN spdk_csi_driver::nfs::v4::dispatcher: CREATE_SESSION: client requested CONN_BACK_CHAN but no back-channel writer is available for session SessionId([0, 0, 0, 0, 0, 0,
+RESULT: 3 passed, 0 failed

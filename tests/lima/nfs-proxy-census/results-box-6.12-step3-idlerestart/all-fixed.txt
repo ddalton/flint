@@ -1,0 +1,32 @@
+=== restart
+PASS restart: the writer never saw an error
+PASS restart: the file on the hub has no gaps
+PASS restart: the proxy registered on hub A again after its restart
+=== proxyrestart
+PASS proxyrestart: the writer never saw an error
+PASS proxyrestart: the file on the hub has no gaps
+PASS proxyrestart: the proxy really restarted mid-write
+=== keepalive
+idle 60s (lease 20s)
+contender: REFUSED 11
+PASS keepalive: the idle holder still holds its lock on the hub
+=== idlerestart
+hub A restarted; idle 60s (lease 20s)
+contender: REFUSED 11; holder's write after: ok; client-driven attaches to ws-a before/after the restart: 1/1
+PASS idlerestart: no client op reached ws-a across the restart (else the arm tests nothing)
+PASS idlerestart: the idle holder still holds its lock after the hub restart
+PASS idlerestart: the holder's next write succeeds
+=== parked
+PASS parked: the reader waits (no error) while the hub is down
+PASS parked: the proxy asked to wake the hub
+PASS parked: the read completes once the hub is back
+umount.nfs4: /mnt/px: device is busy
+=== destroy
+backend clients destroyed with the downstream: 2
+PASS destroy: umount destroyed the backend client on both hubs
+proxy warnings:
+      2  WARN spdk_csi_driver::nfs::v4::operations::session: SEQUENCE: Session SessionId([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2]) not found
+      1  WARN spdk_csi_driver::nfs::v4::operations::session: DESTROY_SESSION: Failed to destroy session: Session not found
+      1  WARN spdk_csi_driver::nfs::v4::operations::session: CREATE_SESSION: Client 2 not found
+      1  WARN spdk_csi_driver::nfs::v4::dispatcher: CREATE_SESSION: client requested CONN_BACK_CHAN but no back-channel writer is available for session SessionId([0, 0, 0, 0, 0, 0,
+RESULT: 14 passed, 0 failed
