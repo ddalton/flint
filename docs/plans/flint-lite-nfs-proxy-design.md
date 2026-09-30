@@ -582,6 +582,17 @@ required before 1,000.
     per share). Linear extrapolation gives about 350 MB at 20,000,
     above today's 256Mi limit. Measure it at 20,000, and check a
     watcher-side strip of `managedFields` as the lever.
+    **Measured 2026-09-30** (kind, 20,000 shares created hibernated
+    and parked as their CR alone, `step5-scale-kind.sh`): operator 416
+    MiB settled and 465 MiB peak while parking (~19 KiB/share), proxy
+    354 MiB (~16 KiB/share), both from ~30 MiB empty. All 20,000 parked
+    in 905 s with no restart. A parked share is 2.8 KB of JSON, 44% of
+    it `managedFields`. The operator's default limit is now 1Gi
+    (465 MiB was 91% of 512Mi before any relist, which briefly holds
+    the store twice; the relist is estimated, not measured). Stripping
+    `managedFields` is the lever past 20,000. It needs kube's unstable
+    stream-driven Controller in the operator; the proxy's own reflector
+    could do it on stable API. Not done.
 
 ### What this means for multi-volume
 
@@ -857,9 +868,22 @@ port are still wanted for capacity and failure isolation.
    create, not a held handle, was its first op).
    The restart watch patches under the resourceVersion it decided on, so
    a stale cache cannot overwrite a ladder transition with a restart.
+   **A hibernated share is its CR alone (behind the proxy):** once its
+   disk is reclaimed, and with no live wake request, the reconciler
+   deletes its Deployment, Service(s) and ConfigMap (`park_as_cr_only`,
+   event `ParkedAsCr`) and keeps only status: Hibernated, serverId and
+   stateidTag. The proxy dials such a share at the address its CR
+   implies (`render::in_cluster_address`). A test pins that address to
+   the one the operator publishes for the Service it renders. A wake
+   goes through the normal path, which renders everything again. Only
+   objects the share controls are deleted (`owned_by` with a uid
+   precondition), and the Deployment goes last, so its absence proves
+   the rest are gone. The chart now grants `delete` on Deployments and
+   ConfigMaps (run 4 found the 403). **Kind run 5: 19/19**, including
+   the park and a wake through a restarted proxy.
    Hub defects D1 and D2 were fixed 2026-09-27 (census Part 2).
-   Remaining: a hibernated share = CR only; operator memory at 20,000
-   CRs (§7a).
+   **Operator memory at 20,000 CRs: measured** (§7a): 416 MiB settled,
+   465 MiB peak; the default limit is now 1Gi.
 6. **Real-hub rig** (never run: the 3,000-share rig used stubs): 10–30
    real hubs behind the proxy at 1,000–10,000 files each, measuring
    RSS/CPU per hub, wake time from hibernate, proxy throughput, and the

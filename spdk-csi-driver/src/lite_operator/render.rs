@@ -538,6 +538,16 @@ pub fn pvc(share: &FlintShare) -> Option<PersistentVolumeClaim> {
     })
 }
 
+/// The in-cluster address of a share's NFS Service, as `address_of`
+/// derives it for a non-LoadBalancer Service — computed from the CR
+/// alone, for when the Service does not exist: a hibernated share behind
+/// the proxy is its CR only, and the proxy still has to dial it to wake
+/// it (`nfs_proxy::kube::rows_of`).
+pub fn in_cluster_address(share: &FlintShare) -> String {
+    let port = share.spec.service.as_ref().and_then(|s| s.port).unwrap_or(NFS_PORT);
+    format!("{}.{}.svc.cluster.local:{port}", names(share).service, share.metadata.namespace.clone().unwrap_or_default())
+}
+
 pub fn service(share: &FlintShare, d: &RenderDefaults) -> Service {
     let n = names(share);
     let svc = share.spec.service.as_ref();

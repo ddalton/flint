@@ -41,3 +41,40 @@ address) and the rig fix (the ladder frozen before the roll):
   one mark per restarted hub, all at 18:34:41, and none after the
   restarts completed at 18:34:57, through the rest of the run. The
   check now counts those log lines. **That fixed check has not been run.**
+
+**Run 3** (`run-3.txt`), 18/19 after CR-only hibernation was added: the
+convergence check (now counting the operator's mark lines) passed, and
+the wake through a RESTARTED proxy (only the CR-implied address) passed.
+The CR-only check failed: after `DiskReclaimed` the next pass came only
+at `REQUEUE_SETTLED` (300 s). Fixed: `Deleted` requeues at
+`REQUEUE_PROGRESS`.
+
+**Run 4** (`run-4.txt`), same FAIL, with a different cause in the
+operator's log: `configmaps ... forbidden: cannot delete`. The chart
+granted no `delete` on ConfigMaps (or Deployments). The park stopped
+after the Service, and the Deployment-last order left the Deployment in
+place, so the next pass retried instead of taking the share as parked.
+Fixed: the grants, a test pinning them
+(`the_chart_lets_the_operator_delete_what_the_park_deletes`, fails
+without the ConfigMap grant), and deletes limited to objects the share
+controls (`owned_by`, with a uid precondition).
+
+**Run 5** (`run-5.txt`), **19/19**: ws-lease has 0 objects after
+hibernating and wakes through the restarted proxy; everything else as
+in run 2.
+
+## Operator and proxy memory at 20,000 shares (`../step5-scale-kind.sh`)
+
+`scale-20000.txt` / `scale-20000-mem.txt`: 20,000 shares created
+hibernated (no disk), all parked as their CR alone in 905 s, no
+restarts, no Deployment/Service/ConfigMap in the namespace.
+
+| | empty | peak while parking | settled | per share |
+|---|---|---|---|---|
+| operator | 28 MiB | 465 MiB | 416 MiB | ~19 KiB |
+| proxy | 32 MiB | 361 MiB | 354 MiB | ~16 KiB |
+
+`scale-200-mem.txt`: a 200-share run for the one-share breakdown. A parked
+share is 2,782 bytes of JSON, 1,235 of them `managedFields` (44%). The
+20,000 run printed 0% because `kubectl -o json` hides managedFields
+without `--show-managed-fields`, since fixed in the rig.

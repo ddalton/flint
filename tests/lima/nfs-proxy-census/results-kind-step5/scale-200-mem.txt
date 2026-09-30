@@ -1,0 +1,5 @@
+empty fleet: operator [VmHWM:=28Mi VmRSS:=28Mi ] proxy [VmHWM:=32Mi VmRSS:=32Mi ]
+  0s: parked 120 / 200; operator [VmHWM:=77Mi VmRSS:=74Mi ] proxy [VmHWM:=36Mi VmRSS:=36Mi ]
+  61s: parked 200 / 200; operator [VmHWM:=77Mi VmRSS:=77Mi ] proxy [VmHWM:=44Mi VmRSS:=44Mi ]
+settled: operator [VmHWM:=77Mi VmRSS:=77Mi ] proxy [VmHWM:=49Mi VmRSS:=49Mi ]
+one share as JSON: 2782 bytes, of which managedFields 1235 (44%)

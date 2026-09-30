@@ -374,6 +374,18 @@ pub fn effective(share: &FlintShare, fleet: Option<&IdleSpec>, nfs_proxy: bool) 
     Some(d)
 }
 
+/// Is a wake request outstanding — still LIVE, not merely present (see
+/// `decide`)? Shared with the reconciler's CR-only park, which must not
+/// tear a share down under a request `decide` would honour.
+pub fn wake_requested(cfg: Option<&IdleSpec>, share: &FlintShare, now: chrono::DateTime<chrono::Utc>) -> bool {
+    match cfg.and_then(|c| c.suspend_after_secs) {
+        Some(after) => clock::request_is_live(share.annotations(), now, after),
+        // No suspend rung configured: nothing here can say how old is
+        // too old, so presence stands — which is also today's rule.
+        None => share.annotations().contains_key(ANN_REQUESTED_AT),
+    }
+}
+
 pub fn decide(cfg: Option<&IdleSpec>, input: Inputs<'_>) -> Decision {
     let share = input.share;
     let state = state_of(share);
@@ -400,12 +412,7 @@ pub fn decide(cfg: Option<&IdleSpec>, input: Inputs<'_>) -> Decision {
     // (`proxy.rs`, no presence guard), so a real waiter cannot be
     // stranded by it — and it makes the rung correct whatever the
     // invariant does next.
-    let wake_requested = match cfg.and_then(|c| c.suspend_after_secs) {
-        Some(after) => clock::request_is_live(input.share.annotations(), input.now, after),
-        // No suspend rung configured: nothing here can say how old is
-        // too old, so presence stands — which is also today's rule.
-        None => input.share.annotations().contains_key(ANN_REQUESTED_AT),
-    };
+    let wake_requested = wake_requested(cfg, share, input.now);
     let request_age = requested_age_secs(share, input.now);
 
     // Down, and someone asked for it back.

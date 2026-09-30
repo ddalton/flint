@@ -1,0 +1,27 @@
+== cluster
+empty fleet: operator [VmHWM:=28Mi VmRSS:=28Mi ] proxy [VmHWM:=32Mi VmRSS:=32Mi ]
+== seeding 20000 pre-hibernated shares
+seeded in 81s
+PASS all 20000 shares exist
+== waiting for the operator to park every share
+  7s: parked 3402 / 20000; operator [VmHWM:=299Mi VmRSS:=217Mi ] proxy [VmHWM:=249Mi VmRSS:=226Mi ]
+  75s: parked 4588 / 20000; operator [VmHWM:=433Mi VmRSS:=323Mi ] proxy [VmHWM:=260Mi VmRSS:=237Mi ]
+  145s: parked 5875 / 20000; operator [VmHWM:=433Mi VmRSS:=334Mi ] proxy [VmHWM:=264Mi VmRSS:=240Mi ]
+  215s: parked 6654 / 20000; operator [VmHWM:=433Mi VmRSS:=343Mi ] proxy [VmHWM:=264Mi VmRSS:=262Mi ]
+  283s: parked 7979 / 20000; operator [VmHWM:=433Mi VmRSS:=368Mi ] proxy [VmHWM:=271Mi VmRSS:=271Mi ]
+  351s: parked 9501 / 20000; operator [VmHWM:=433Mi VmRSS:=384Mi ] proxy [VmHWM:=286Mi VmRSS:=264Mi ]
+  421s: parked 10744 / 20000; operator [VmHWM:=433Mi VmRSS:=377Mi ] proxy [VmHWM:=290Mi VmRSS:=288Mi ]
+  491s: parked 11544 / 20000; operator [VmHWM:=433Mi VmRSS:=379Mi ] proxy [VmHWM:=298Mi VmRSS:=295Mi ]
+  560s: parked 13222 / 20000; operator [VmHWM:=433Mi VmRSS:=389Mi ] proxy [VmHWM:=303Mi VmRSS:=291Mi ]
+  629s: parked 14833 / 20000; operator [VmHWM:=434Mi VmRSS:=431Mi ] proxy [VmHWM:=318Mi VmRSS:=300Mi ]
+  698s: parked 16493 / 20000; operator [VmHWM:=442Mi VmRSS:=418Mi ] proxy [VmHWM:=331Mi VmRSS:=315Mi ]
+  767s: parked 18137 / 20000; operator [VmHWM:=451Mi VmRSS:=444Mi ] proxy [VmHWM:=347Mi VmRSS:=323Mi ]
+  836s: parked 19718 / 20000; operator [VmHWM:=465Mi VmRSS:=444Mi ] proxy [VmHWM:=354Mi VmRSS:=333Mi ]
+  905s: parked 20000 / 20000; operator [VmHWM:=465Mi VmRSS:=417Mi ] proxy [VmHWM:=361Mi VmRSS:=356Mi ]
+PASS the operator reported every share Hibernated (within 905s)
+PASS CR-only: no Deployment, Service or ConfigMap in the fleet namespace
+PASS the operator did not restart (no OOMKill)
+PASS the proxy did not restart (no OOMKill)
+settled: operator [VmHWM:=465Mi VmRSS:=416Mi ] proxy [VmHWM:=361Mi VmRSS:=354Mi ]
+one share as JSON: 1527 bytes, of which managedFields 2 (0%)
+RESULT: 5 passed, 0 failed

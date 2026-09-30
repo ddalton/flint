@@ -1216,6 +1216,24 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
         ),
     );
 
+    // --- 4b. A hibernated share is its CR alone --------------------------
+    // Behind the proxy only (design §7a): once the disk is reclaimed, the
+    // Deployment, Service and ConfigMap are derived state with nothing to
+    // serve, and at 10,000–20,000 mostly-parked shares they are most of the
+    // fleet's objects. The proxy dials a hibernated share by the address its
+    // CR implies (`render::in_cluster_address`), and a wake re-renders
+    // everything through the normal path below.
+    if ctx.defaults.nfs_proxy && idle::state_of(&share) == IdleState::Hibernated && !names.claim_is_adopted {
+        let cfg = idle::effective(&share, ctx.defaults.idle.as_ref(), true);
+        let requested = idle::wake_requested(cfg.as_ref(), &share, chrono::Utc::now());
+        let claim_exists = get_opt(Api::<PersistentVolumeClaim>::namespaced(ctx.client.clone(), &ns).get(&names.claim))
+            .await?
+            .is_some();
+        if parks_as_cr_only(IdleState::Hibernated, names.claim_is_adopted, claim_exists, requested) {
+            return park_as_cr_only(&ctx, &share, &ns, &names, existing_dep.is_some(), conds, generation).await;
+        }
+    }
+
     // --- 5. Apply -------------------------------------------------------
     let owner = share
         .controller_owner_ref(&())
@@ -2480,7 +2498,11 @@ enum ReclaimOutcome {
 /// while the drain is still in flight — is asserted rather than implied.
 fn requeue_after_reclaim(o: ReclaimOutcome) -> Option<Duration> {
     match o {
-        ReclaimOutcome::Deleted => Some(REQUEUE_SETTLED),
+        // Soon: behind the proxy the next pass is the one that parks the
+        // share as its CR alone, and nothing else triggers it (PVCs are not
+        // watched) — at SETTLED, step5-kind.sh run 3 still found the hub's
+        // objects 90 s after the disk went.
+        ReclaimOutcome::Deleted => Some(REQUEUE_PROGRESS),
         ReclaimOutcome::Draining => Some(REQUEUE_PROGRESS),
         ReclaimOutcome::Idle => None,
     }
@@ -2536,6 +2558,98 @@ async fn reclaim_hibernated_disk(
     warn!(share = %share.name_any(), "{note}");
     event(ctx, share, EventType::Normal, "DiskReclaimed", &note).await;
     Ok(ReclaimOutcome::Deleted)
+}
+
+/// May a share be parked as its CR alone? Hibernated, its disk already
+/// reclaimed (so its pod is gone: the claim is deleted only after that),
+/// not an adopted claim, and no live wake request — a request goes through
+/// the normal path, which re-renders the hub.
+fn parks_as_cr_only(state: IdleState, claim_adopted: bool, claim_exists: bool, wake_requested: bool) -> bool {
+    state == IdleState::Hibernated && !claim_adopted && !claim_exists && !wake_requested
+}
+
+/// Delete a hibernated share's derived objects and report it Hibernated.
+///
+/// The Deployment goes LAST, so its absence — which `apply` has already
+/// read — proves the rest are gone too, and a parked share's later passes
+/// make no deletes at all: at 20,000 parked shares, four 404s per share
+/// per pass would be most of the operator's traffic.
+async fn park_as_cr_only(
+    ctx: &Arc<Ctx>,
+    share: &Arc<FlintShare>,
+    ns: &str,
+    names: &render::Names,
+    dep_exists: bool,
+    conds: Vec<ShareCondition>,
+    generation: Option<i64>,
+) -> Result<Action> {
+    // Only what this share CONTROLS (`owned_by`), and only that object
+    // (a uid precondition): RBAC cannot scope `delete` to our own objects,
+    // so the check is here, as for the conflict loser's API door.
+    async fn gone<K>(api: Api<K>, name: &str, share: &FlintShare) -> Result<bool>
+    where
+        K: kube::Resource + Clone + serde::de::DeserializeOwned + std::fmt::Debug,
+    {
+        let Some(obj) = get_opt(api.get(name)).await? else { return Ok(false) };
+        if !owned_by(obj.meta(), share) {
+            warn!(share = %share.name_any(), "not deleting {name}: this share does not control it");
+            return Ok(false);
+        }
+        let dp = DeleteParams {
+            preconditions: obj.meta().uid.clone().map(|uid| kube::api::Preconditions { uid: Some(uid), resource_version: None }),
+            ..DeleteParams::background()
+        };
+        match api.delete(name, &dp).await {
+            Ok(_) => Ok(true),
+            Err(kube::Error::Api(e)) if e.code == 404 || e.code == 409 => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+    let c = &ctx.client;
+    let mut removed = Vec::new();
+    if dep_exists {
+        if gone(Api::<Service>::namespaced(c.clone(), ns), &names.service, share).await? {
+            removed.push(format!("Service {}", names.service));
+        }
+        if let Some(api_svc) = &names.api_service {
+            if gone(Api::<Service>::namespaced(c.clone(), ns), api_svc, share).await? {
+                removed.push(format!("Service {api_svc}"));
+            }
+        }
+        if gone(Api::<ConfigMap>::namespaced(c.clone(), ns), &names.config_map, share).await? {
+            removed.push(format!("ConfigMap {}", names.config_map));
+        }
+        if gone(Api::<Deployment>::namespaced(c.clone(), ns), &names.deployment, share).await? {
+            removed.push(format!("Deployment {}", names.deployment));
+        }
+    }
+    if !removed.is_empty() {
+        let note = format!(
+            "hibernated: removed {} — only the FlintShare remains; a wake renders them again",
+            removed.join(", ")
+        );
+        info!(share = %share.name_any(), "{note}");
+        event(ctx, share, EventType::Normal, "ParkedAsCr", &note).await;
+    }
+    write_status(
+        ctx,
+        share,
+        FlintShareStatus {
+            phase: Some(Phase::Hibernated),
+            address: None,
+            api_endpoint: None,
+            hub_phase: None,
+            observed_generation: generation,
+            claim_name: Some(names.claim.clone()),
+            server_id: carry_server_id(share, None),
+            stateid_tag: None,
+            conflict_with: None,
+            conditions: Some(conds),
+        },
+    )
+    .await?;
+    ctx.failures.remove(&format!("{ns}/{}", share.name_any()));
+    Ok(Action::requeue(jittered(REQUEUE_PARKED, &format!("{ns}/{}", share.name_any()))))
 }
 
 /// Find this share's hub pod and ask it for `/status`.
@@ -3041,6 +3155,53 @@ mod tests {
     use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 
+    /// §7a: a hibernated share is parked as its CR alone only once its
+    /// disk is gone (so its pod is), never for an adopted claim, and never
+    /// under a live wake request — which the normal path must honour.
+    #[test]
+    fn only_a_reclaimed_unrequested_hibernated_share_parks_as_cr_only() {
+        use IdleState::*;
+        assert!(parks_as_cr_only(Hibernated, false, false, false));
+        assert!(!parks_as_cr_only(Hibernated, false, true, false), "the disk is not reclaimed yet");
+        assert!(!parks_as_cr_only(Hibernated, true, false, false), "an adopted claim is the user's");
+        assert!(!parks_as_cr_only(Hibernated, false, false, true), "a wake is outstanding");
+        for st in [Active, Suspended, HibernateVerifying, ReprovisionVerifying, ReprovisionDraining, Restarting] {
+            assert!(!parks_as_cr_only(st, false, false, false), "{st:?}");
+        }
+    }
+
+    /// `park_as_cr_only` deletes the three children, and the chart must
+    /// grant it. A unit test cannot see RBAC; the kind run found the
+    /// missing ConfigMap grant as a 403 that left the share half-parked.
+    #[test]
+    fn the_chart_lets_the_operator_delete_what_the_park_deletes() {
+        let rbac = include_str!("../../../flint-lite-operator-chart/templates/rbac.yaml");
+        for kind in ["deployments", "services", "configmaps"] {
+            let at = rbac.find(&format!("resources: [\"{kind}\"]")).unwrap_or_else(|| panic!("no rule for {kind}"));
+            let verbs = rbac[at..].lines().nth(1).unwrap_or_default();
+            assert!(verbs.contains("\"delete\""), "{kind}: {verbs}");
+        }
+    }
+
+    /// The proxy dials a CR-only share by `render::in_cluster_address`,
+    /// and the operator publishes `address_of` for the Service it renders.
+    /// They must agree, or a wake dials a name nothing answers.
+    #[test]
+    fn the_address_the_proxy_derives_is_the_one_the_operator_publishes() {
+        let mut share: FlintShare = serde_json::from_value(serde_json::json!({
+            "apiVersion": "chert.us/v1alpha1", "kind": "FlintShare",
+            "metadata": { "name": "proj-7", "namespace": "ws", "uid": "0f0e0d0c-0000-4000-8000-000000000000" },
+            "spec": { "persistence": { "size": "1Gi" } }
+        }))
+        .unwrap();
+        let d = render::RenderDefaults { nfs_proxy: true, ..Default::default() };
+        for port in [None, Some(12049)] {
+            share.spec.service = port.map(|p| serde_json::from_value(serde_json::json!({ "port": p })).unwrap());
+            let svc = render::service(&share, &d);
+            assert_eq!(Some(render::in_cluster_address(&share)), address_of(&svc, "ws", None), "port {port:?}");
+        }
+    }
+
     fn share_named(name: &str) -> FlintShare {
         let mut s = FlintShare::new(
             name,
@@ -3099,7 +3260,8 @@ mod tests {
         );
         assert_eq!(
             requeue_after_reclaim(ReclaimOutcome::Deleted),
-            Some(REQUEUE_SETTLED)
+            Some(REQUEUE_PROGRESS),
+            "the pass after the disk goes parks the share as its CR alone"
         );
         assert_eq!(
             requeue_after_reclaim(ReclaimOutcome::Idle),

@@ -35,14 +35,15 @@ use crate::lite_operator::idle::ANN_REQUESTED_AT;
 /// a share without a row is an absent workspace, so a client holding its
 /// handles got ESTALE and a lookup got ENOENT in the very window the proxy
 /// should answer DELAY and wait (step5-kind.sh). The address of a hub's
-/// headless Service does not change, so the last one is still right.
+/// headless Service does not change, so the last one is still right; and
+/// with none known, the one the CR implies (`render::in_cluster_address`).
 pub fn rows_of(shares: &[Arc<FlintShare>], last_address: &mut std::collections::HashMap<String, String>) -> (Vec<HubRow>, Vec<String>) {
     let live: std::collections::HashSet<String> =
         shares.iter().map(|s| format!("{}/{}", s.namespace().unwrap_or_default(), s.name_any())).collect();
     last_address.retain(|k, _| live.contains(k));
-    let mut views: Vec<(ShareView, Option<u32>)> = shares
+    let mut views: Vec<(ShareView, Option<u32>, String)> = shares
         .iter()
-        .map(|s| (ShareView::of(s), s.status.as_ref().and_then(|st| st.stateid_tag)))
+        .map(|s| (ShareView::of(s), s.status.as_ref().and_then(|st| st.stateid_tag), crate::lite_operator::render::in_cluster_address(s)))
         .collect();
     views.sort_by(|a, b| (&a.0.namespace, &a.0.name).cmp(&(&b.0.namespace, &b.0.name)));
     let mut rows: Vec<HubRow> = Vec::new();
@@ -50,7 +51,7 @@ pub fn rows_of(shares: &[Arc<FlintShare>], last_address: &mut std::collections::
     let mut names = std::collections::HashMap::new();
     let mut ids = std::collections::HashMap::new();
     let mut tags = std::collections::HashMap::new();
-    for (v, tag) in views {
+    for (v, tag, implied) in views {
         let who = format!("{}/{}", v.namespace, v.name);
         if v.deleting {
             last_address.remove(&who);
@@ -59,10 +60,11 @@ pub fn rows_of(shares: &[Arc<FlintShare>], last_address: &mut std::collections::
         if let Some(a) = &v.address {
             last_address.insert(who.clone(), a.clone());
         }
-        let Some(address) = last_address.get(&who).cloned() else {
-            skipped.push(format!("{who}: no address yet"));
-            continue;
-        };
+        // Never seen with one — a hibernated share is its CR alone, with
+        // no Service to take an address from, and after a proxy restart
+        // nothing is remembered: dial the headless Service its CR implies,
+        // which is what the operator re-creates on the wake this causes.
+        let address = last_address.get(&who).cloned().unwrap_or(implied);
         let Some(server_id) = v.server_id.as_deref().and_then(|s| s.trim().parse::<u64>().ok()) else {
             skipped.push(format!("{who}: no serverId yet"));
             continue;
@@ -230,7 +232,7 @@ mod tests {
     /// transition, a wake included. The row must stay (at the last address)
     /// or the workspace vanishes mid-wake: ESTALE for held handles, ENOENT
     /// for a lookup (step5-kind.sh, run 1). A share never seen with an
-    /// address is still left out, and a deleted one is forgotten.
+    /// address gets the one its CR implies, and a deleted one is forgotten.
     #[test]
     fn a_share_keeps_its_row_while_the_operator_withholds_its_address() {
         let mut last = std::collections::HashMap::new();
@@ -242,8 +244,11 @@ mod tests {
         let (rows, skipped) = rows_of(&[Arc::new(waking.clone())], &mut last);
         assert_eq!(rows.len(), 1, "mid-wake the workspace must stay routable: {skipped:?}");
         assert_eq!(rows[0].address, "w.t.svc.cluster.local:2049");
+        // Never seen with an address (a CR-only hibernated share after a
+        // proxy restart): the address its CR implies, still routable.
         let (rows, _) = rows_of(&[Arc::new(waking)], &mut Default::default());
-        assert!(rows.is_empty(), "never seen with an address: nothing to dial");
+        assert_eq!(rows.len(), 1, "a parked share must stay wakeable");
+        assert_eq!(rows[0].address, "w.t.svc.cluster.local:2049");
         assert!(rows_of(&[], &mut last).0.is_empty());
         assert!(last.is_empty(), "a share that is gone is forgotten");
     }

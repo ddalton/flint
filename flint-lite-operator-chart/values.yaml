@@ -436,6 +436,16 @@ logLevel: info
 # share), so a relist peaks near 88 MiB. That leaves 3.2x headroom at
 # 6000 shares and 2x at 10,000.
 #
+# 1Gi since the NFS proxy's scale target (10,000-20,000 shares, most of
+# them hibernated as their CR alone). MEASURED on kind at 20,000 parked
+# shares (tests/lima/nfs-proxy-census/step5-scale-kind.sh): 416 MiB
+# settled, 465 MiB peak while parking them (~19 KiB per share) — 91% of
+# 512Mi before any relist. A relist, which briefly holds the store twice,
+# is ESTIMATED (not measured) at 650-800 MiB there. 44% of a parked
+# share's stored bytes are managedFields; stripping them in the
+# reflector is the lever past this, and needs kube's unstable
+# stream-driven Controller.
+#
 # A limit is a CEILING, not a reservation — the request below is what
 # reserves capacity — so an oversized limit is nearly free while an
 # undersized one is a fleet-wide outage: the operator OOMs, CrashLoops,
@@ -443,7 +453,7 @@ logLevel: info
 # wake only happens while it reconciles. But a limit set absurdly high
 # is not free either: it lets a leak run longer before anything notices
 # and can push a NODE into memory pressure, evicting other pods, before
-# the operator is the one killed. 512Mi is where those meet.
+# the operator is the one killed. 512Mi was where those met for 10,000.
 #
 # NO CPU LIMIT, deliberately. Reconcile wall time is the denominator of
 # the operator's self-trigger amplification: throttling the operator
@@ -455,7 +465,7 @@ resources:
     cpu: 500m
     memory: 128Mi
   limits:
-    memory: 512Mi
+    memory: 1Gi
 nodeSelector: {}
 tolerations: []
 podAnnotations: {}

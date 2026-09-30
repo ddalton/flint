@@ -63,16 +63,18 @@ rules:
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
     verbs: ["get", "list", "watch", "create", "patch", "update"]
-  # The three children that carry ownerReferences.
+  # The three children that carry ownerReferences. `delete` on them (and
+  # on services below) is for a hibernated share behind the NFS proxy,
+  # parked as its CR alone (`park_as_cr_only`): only objects the share
+  # controls, checked in code (`owned_by`) with a uid precondition.
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    verbs: ["get", "list", "watch", "create", "patch", "update"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
   # `delete` on services is for ONE path: shutting a conflict loser's
   # API door before the scale-down, so a front door holding a cached
   # endpoint and this project's bearer token cannot keep writing into
-  # the winner's subtree for the whole 120s grace period. Nothing else
-  # in the operator deletes a Service — children are reclaimed by owner
-  # GC. It is a broader grant than that one use needs, because RBAC
+  # the winner's subtree for the whole 120s grace period — and the
+  # CR-only park above. Otherwise children are reclaimed by owner GC. It is a broader grant than that one use needs, because RBAC
   # cannot scope a verb to objects the operator owns; the owner check is
   # in the code, at `owned_by`.
   - apiGroups: [""]
@@ -80,7 +82,7 @@ rules:
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
   - apiGroups: [""]
     resources: ["configmaps"]
-    verbs: ["get", "list", "watch", "create", "patch", "update"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
   # The claim: created and (only on reclaim: Delete) deleted.
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]

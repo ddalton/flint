@@ -8,6 +8,9 @@
 #     while a share the same mount only listed and wrote (a lease, no
 #     state) IS, and wakes from the bucket through the proxy;
 #   - the lock survives the verify wake (the proxy's keepalive re-attach);
+#   - a hibernated share is its CR alone (Deployment, Service, ConfigMap
+#     deleted), and wakes through a RESTARTED proxy, which has only the
+#     address the CR implies;
 #   - restartOnTgtRestart: a rollout of the csi-node DaemonSet (a stand-in
 #     with an `spdk-tgt` container) restarts every running hub on that
 #     node whose PVC is in the listed class, and no other.
@@ -228,7 +231,17 @@ for _ in $(seq 1 240); do [ -e $OUT/res ] && break; sleep 2; done
 echo "holder's write: $(cat $OUT/res 2>/dev/null || echo none)"
 check "the holder's write after the verify wake succeeded (its lock was kept)" '[ "$(cat $OUT/res 2>/dev/null)" = ok ]'
 
-echo "== ws-lease wakes from the bucket through the proxy"
+echo "== a hibernated share is its CR alone"
+objs() { K -n $NS get deploy,svc,cm -l chert.us/share=$1 -o name 2>/dev/null | wc -l; }
+for _ in $(seq 1 30); do [ "$(objs ws-lease)" = 0 ] && break; sleep 3; done
+echo "ws-lease objects: $(objs ws-lease); ws-lock objects: $(objs ws-lock)"
+check "hibernated ws-lease has no Deployment, Service or ConfigMap left" '[ "$(objs ws-lease)" = 0 ] && echo "$(events ws-lease)" | grep -q ParkedAsCr'
+check "suspended ws-lock keeps its objects (only a hibernated share is parked as CR)" '[ "$(objs ws-lock)" -ge 3 ]'
+# Forget every remembered address: the wake below must dial the one the CR implies.
+K -n $OPNS rollout restart deploy/flint-lite-operator-nfs-proxy >/dev/null
+K -n $OPNS rollout status deploy/flint-lite-operator-nfs-proxy --timeout=180s >/dev/null
+
+echo "== ws-lease wakes from the bucket through the (restarted) proxy"
 R=$(timeout 300 sudo cat $MNT/ws-lease/f 2>&1); echo "read: [$R] phase=$(phase ws-lease)"
 check "the hibernated workspace woke and served its bytes from the bucket" '[ "$R" = lease-bytes ]'
 
