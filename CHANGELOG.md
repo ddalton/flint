@@ -276,6 +276,35 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **s3csi drill: legs S14, S20 and S21 restated for the per-barrier publish
+  fence; S24, S25 and S27 read the plugin and the node they run on; S23
+  gets `tc` and an else branch; S17 reports an inconclusive run as such;
+  `setup` waits out a terminating namespace**
+  (2026-09-30). The first full single-suite run on a real cluster since the
+  per-barrier fence (b50c2faf, 2026-09-13) — trove `s3a`, 3 × i4i.large,
+  RustFS in-cluster — came back 223 ok, 17 bad, none of it the product: S14
+  and S20 froze a holder and applied a second pod, the lifetime lease's
+  shape, and under a fence held only inside a commit section they observed
+  an inert cell (the 09-17 kind run had already recorded S14 as UNKNOWN);
+  S21 asserted a lease renewal between barriers; S24/S25 asserted plugin-log
+  lines written by a pod the DaemonSet had since rolled away. S14 now
+  stages each claim verdict by writing the cell (`lcell_stage`) and
+  observes it through one triggered publish (`lpublish`) — released: on
+  sight, no rotation; held by a stranger: 63 s and a rotation; reserved for
+  a stranger: 22 s, no rotation; held by this pod's previous container:
+  released at the restart. S20 stages the exited syncer with SIGTERM, sees
+  it relaunched by a republish, then deletes the tenant against a fence the
+  rig keeps live: the drain stands, kubelet kills the worker at the derived
+  grace, and the tree — an ext4 image under `workers.quota=true` — is
+  preserved with the uncited file inside. Re-run of the touched legs 100 ok
+  / 1 bad (the image read, then fixed); the full suite on the fixed drill
+  258 ok / 4 bad, all rig: S17's timing window closes on a fast cluster
+  (now INCONCLUSIVE, S17f pins it), S23 found no `tc` on Amazon Linux
+  2023 (installed where dnf is; a missing writer is a BAD, not a silent
+  skip), S27 started its worker from the node's image cache (the node's
+  reference is dropped first, by name). Re-run of S23 and S27: 18 ok / 0 bad
+  (`s3csi/e2e/results/2026-09-30-ec2-campaign-3/`).
+
 - **flint-s3-csi: a worker still coming up at the publish deadline is kept
   for the retry, not deleted** (2026-09-30, finding 3). `NodePublishVolume`
   waits 45 s for the worker to run; at the deadline it cleaned up — deleting

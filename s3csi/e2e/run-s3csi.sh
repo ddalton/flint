@@ -134,8 +134,18 @@ kill_worker() {
 # kind NODE's own interface (pid 1's netns), left the pod untouched, and
 # throttled everything leaving the node. Verified: the pid this returns
 # has a netns other than pid 1's, with the pod's eth0 in it.
+# A real node may carry no crictl (AL2023 kubeadm nodes ship `ctr` only,
+# the first EC2 run found): then any process in the pod's cgroup but the
+# sandbox's pause serves — every one of them is in the pod's netns.
 worker_pid() {
-    onnode "p=\$(crictl pods -q --name $1 2>/dev/null | head -1); c=\$(crictl ps -q --pod \$p 2>/dev/null | head -1); [ -n \"\$c\" ] && crictl inspect -o go-template --template '{{.info.pid}}' \$c 2>/dev/null"
+    local pid uid u
+    pid=$(onnode "p=\$(crictl pods -q --name $1 2>/dev/null | head -1); c=\$(crictl ps -q --pod \$p 2>/dev/null | head -1); [ -n \"\$c\" ] && crictl inspect -o go-template --template '{{.info.pid}}' \$c 2>/dev/null")
+    if [ -z "$pid" ]; then
+        uid=$($K -n $WNS get pod "$1" -o jsonpath='{.metadata.uid}' 2>/dev/null); u=$(printf '%s' "$uid" | tr -d '-')
+        [ -n "$u" ] && pid=$(onnode "for p in /proc/[0-9]*; do [ \"\$(cat \$p/comm 2>/dev/null)\" = pause ] && continue; \
+            case \"\$(tr -d '_-' < \$p/cgroup 2>/dev/null)\" in *pod$u*) echo \${p#/proc/}; break;; esac; done")
+    fi
+    printf '%s' "$pid"
 }
 # The worker pod serving a tenant pod, by annotation.
 # Like `worker_of` but matches a worker in ANY phase. S17 needs it: the
@@ -241,8 +251,182 @@ k,n=sys.argv[1],sys.argv[2]
 for d in sys.stdin.read().split('\n---\n'):
     if ('kind: '+k+'\n') in d and ('  name: '+n+'\n') in d: print(d); print('---')
 " "$2" "$3"; }
+# S27's missing image, by substrate. On kind the nodes pull from nothing,
+# so the tag "arrives" by `kind load`; on a real cluster they pull from
+# Docker Hub, so it arrives by a push (the docker login rides on the
+# drill's DOCKER_HOST) and the premise — the registry does NOT serve it
+# yet — is asked of Hub's tag API, never of a local cache. The tag is
+# deleted from Hub afterwards with a JWT from the same login, when the
+# credential allows it; else the leg says the tag is left.
+HUB_REPO=dilipdalton/flint-s3-worker
+on_kind() { case "$CTX" in kind-*) return 0;; *) return 1;; esac; }
+image_where() { on_kind && echo "kind nodes" || echo "Docker Hub"; }
+image_absent() {
+    on_kind && return 0
+    [ "$(curl -s -o /dev/null -w '%{http_code}' "https://hub.docker.com/v2/repositories/$HUB_REPO/tags/pull-test" 2>/dev/null)" = "404" ]
+}
+# The node's own containerd cache is the other place the image can come
+# from: run 3 on s3a pulled it, run 4 found it cached, the worker came up
+# at once and the 45 s deadline never hit (the two log assertions caught
+# the vacuity). `ctr images rm <name>` drops ONE reference — unlike
+# `crictl rmi`, which removes the image with every tag it carries
+# (b859b38d) — and the node is then asked whether the name is gone.
+node_image_drop() {
+    onnode "command -v ctr >/dev/null 2>&1 && ctr -n k8s.io images rm docker.io/$HUB_REPO:pull-test >/dev/null 2>&1; ! ctr -n k8s.io images ls -q 2>/dev/null | grep -q '$HUB_REPO:pull-test'"
+}
+image_lands() {
+    docker tag "$HUB_REPO:$TAG" "$HUB_REPO:pull-test" >/dev/null 2>&1 || return 1
+    if on_kind; then kind load docker-image "$HUB_REPO:pull-test" --name "${CTX#kind-}" >/dev/null 2>&1
+    else docker push "$HUB_REPO:pull-test" >/dev/null 2>&1; fi
+}
+image_unland() {
+    on_kind && return 0
+    local user secret jwt code
+    user=$(printf 'https://index.docker.io/v1/' | docker-credential-osxkeychain get 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["Username"])' 2>/dev/null)
+    secret=$(printf 'https://index.docker.io/v1/' | docker-credential-osxkeychain get 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["Secret"])' 2>/dev/null)
+    jwt=$(curl -s -H 'Content-Type: application/json' -d "{\"username\":\"$user\",\"password\":\"$secret\"}" https://hub.docker.com/v2/users/login/ 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("token",""))' 2>/dev/null)
+    code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "Authorization: JWT $jwt" "https://hub.docker.com/v2/repositories/$HUB_REPO/tags/pull-test/" 2>/dev/null)
+    case "$code" in 2*) note "the pull-test tag was deleted from Docker Hub";; *) note "the pull-test tag is LEFT on Docker Hub (delete answered '$code'); remove it by hand before the next run";; esac
+}
 # The mounter's argv inside a passthrough worker (its image has a shell).
 worker_argv() { $K -n $WNS exec "$1" -- sh -c 'for p in /proc/[0-9]*; do tr "\0" " " < $p/cmdline 2>/dev/null; echo; done' 2>/dev/null | grep -- 'mount-s3' | head -1; }
+
+# ── lean store helpers (S11-S14, S20; run-legs.sh imports these) ──
+# Store helpers, the lean drill's (run-agent.sh): jq, not grep — the
+# manifest is nested JSON.
+lobj()   { mcx mc cat "m/$BUCKET/$1" 2>/dev/null; }
+lcount() { mcx mc ls --recursive "m/$BUCKET/$1" 2>/dev/null | grep -c . ; }
+# Resolve the manifest THROUGH the pointer (see `lptr` below).
+# `.flint/lean/current` is the mutable object; the entries live in the
+# write-once generation it names. These three helpers read
+# `.flint/lean/manifest` — the PRE-pointer key — only as a fallback for
+# a bucket an older binary wrote, and never first: after migration that
+# key holds a refusal doc with no `.entries` at all.
+#
+# They read the legacy key FIRST until 2026-09-03, which under the
+# pointer layout is simply absent. `lments`/`lmseq` answer 0 for a
+# missing object, so the two sides of "seq unchanged" and "entry count
+# unchanged" agreed by both being zero — a pass earned by reading
+# nothing. S14's `n0 > 0` precondition is what caught it.
+#
+# Three layouts now, tried newest first: a CHUNK LIST (`.chunks`), one
+# generation object (`.entries_key`), and the pre-pointer single key.
+# A chunked pointer answers `null` for `entries_key`, so a resolver that
+# only knew the middle form would read "null" and fail the same silent
+# way — which is why each form is tested for POSITIVELY rather than by
+# falling through on empty.
+lmbody() {
+    local c k addrs a body all
+    c=$(lobj "$1/.flint/lean/current")
+    if [ -n "$c" ]; then
+        if printf '%s' "$c" | jq -e 'has("chunks")' >/dev/null 2>&1; then
+            addrs=$(printf '%s' "$c" | jq -r '.chunks[].addr')
+            all='{"entries":{}}'
+            for a in $addrs; do
+                body=$(lobj "$1/.flint/lean/chunks/$a")
+                # A chunk the pointer names and the bucket does not
+                # have is a HOLE, not an empty manifest. Fail — and SAY
+                # SO, because the callers map a failed resolve to 0 and
+                # an assertion downstream could otherwise pass while
+                # reading a short document. S14's `n0 > 0` precondition
+                # is the structural guard; this is so the log shows why.
+                if [ -z "$body" ]; then
+                    echo "  NOTE: pointer for $1 names chunk $a, which the bucket does not have" >&2
+                    return 1
+                fi
+                all=$(printf '%s\n%s' "$all" "$body" \
+                        | jq -s '{entries: (.[0].entries + .[1].entries)}')
+            done
+            printf '%s' "$all"
+            return
+        fi
+        k=$(printf '%s' "$c" | jq -r '.entries_key // empty')
+        [ -z "$k" ] && return 1
+        lobj "$k"
+        return
+    fi
+    lobj "$1/.flint/lean/manifest"
+}
+# Objects under the layout's entries prefix: chunks when chunked,
+# generations when not. S14 compares this across a takeover, and
+# counting the wrong prefix would compare 0 to 0.
+lgens()  {
+    if lptr "$1" 'has("chunks")' 2>/dev/null | grep -q true; then
+        mcx mc ls "m/$BUCKET/$1/.flint/lean/chunks/" 2>/dev/null | grep -c .
+    else
+        mcx mc ls "m/$BUCKET/$1/.flint/lean/manifests/" 2>/dev/null | grep -c .
+    fi
+}
+# The identity of the ENTRIES a pointer names, whichever layout it is
+# on: the sorted chunk address list, or the single generation key.
+# Chunks are CONTENT-ADDRESSED, so an unchanged list is proof the bytes
+# were not rewritten — a stronger statement than the etag comparison it
+# replaces, and one that needs no extra request.
+lments_id() {
+    local c
+    c=$(lobj "$1/.flint/lean/current")
+    [ -z "$c" ] && return 1
+    printf '%s' "$c" | jq -r 'if has("chunks") then ([.chunks[].addr] | sort | join(",")) else (.entries_key // "") end'
+}
+# The FENCING seq is the pointer's, not the generation's: a takeover
+# rotation bumps the pointer and leaves `entries_seq` alone, which is
+# the entire point of the layout.
+lmseq()  {
+    local c m
+    c=$(lobj "$1/.flint/lean/current")
+    [ -n "$c" ] && { printf '%s' "$c" | jq -r '.seq // 0'; return; }
+    m=$(lobj "$1/.flint/lean/manifest"); [ -z "$m" ] && { echo 0; return; }
+    printf '%s' "$m" | jq -r '.seq // 0'
+}
+# The epoch cell is the lease: holder_id, epoch, released. `lepoch <prefix> <jq>`.
+lepoch() { local e; e=$(lobj "$1/.flint/lean/epoch"); [ -z "$e" ] && return 1; printf '%s' "$e" | jq -r "$2"; }
+lments() { local m; m=$(lmbody "$1"); [ -z "$m" ] && { echo 0; return; }; printf '%s' "$m" | jq -r '.entries | length'; }
+# Kill the syncer INSIDE a worker without touching its pod: the container
+# restarts (workers are restartPolicy OnFailure) and relaunches from the
+# persisted launch message over the SAME tree — the self-recognition path.
+# /proc + kill only; PID 1 cannot be signalled from inside its own namespace.
+sig_syncer() { $K -n $WNS exec "$1" -- /bin/sh -c "for p in /proc/[0-9]*; do [ \"\$(cat \$p/comm 2>/dev/null)\" = flint-sync ] && kill -$2 \"\${p#/proc/}\"; done; exit 0" >/dev/null 2>&1; }
+kill_syncer() { sig_syncer "$1" 9; }
+# The epoch cell's renewed_unix is the liveness signal a successor
+# judges. Frozen holder ⇒ it stops advancing, and the cell stays
+# `released: false` because nothing ran the release.
+lrenew() { lepoch "$1" .renewed_unix; }
+# The manifest pointer layout (docs/plans/flint-lean-manifest-pointer-design.md):
+# `.flint/lean/current` is the only mutable metadata object; entries live
+# in write-once `.flint/lean/manifests/<seq>-<uuid>`.
+lptr()   { local c; c=$(lobj "$1/.flint/lean/current"); [ -z "$c" ] && return 1; printf '%s' "$c" | jq -r "$2"; }
+lmhas()  { local m; m=$(lmbody "$1"); [ -z "$m" ] && return 1; printf '%s' "$m" | jq -e --arg p "$2" '.entries | has($p)' >/dev/null; }
+# The publish fence is held for ONE commit section (lease.rs module doc,
+# design 2026-09-13 §4): between barriers nobody holds the cell, so a
+# lease verdict cannot be observed by freezing a holder — it is STAGED.
+# `lcell_stage` writes the cell the syncer must judge, in the S3
+# backend's own shape (crates/flint-store/src/s3.rs EpochBody: holder_id,
+# epoch, renewed_unix, salt, released, and the optional handoff); the
+# token the syncer CASes on is the object's ETag, and the salt makes every
+# stage move it. `lpublish` writes S12's sentinel and waits for an ack
+# carrying its nonce, printing "<secs> <ack>": the latency is what the
+# quiet polls leave behind. `lincarnation` reads the pod's own id from
+# the tenant's view of the tree (`.flint-sync/incarnation.json`).
+lcell_stage() { # <prefix> <holder> <epoch> <released:true|false> [handoff]
+    local body="{\"holder_id\":\"$2\",\"epoch\":$3,\"renewed_unix\":$(date +%s),\"salt\":\"$(date +%s)-$RANDOM$RANDOM\",\"released\":$4${5:+,\"handoff\":\"$5\"}}"
+    mcx sh -c "printf '%s' '$body' | mc pipe m/$BUCKET/$1/.flint/lean/epoch" >/dev/null 2>&1
+}
+lcell_rm() { mcx mc rm "m/$BUCKET/$1/.flint/lean/epoch" >/dev/null 2>&1; }
+lpublish() { # <pod> <nonce> <secs>  → prints "<elapsed> <ack>"; 0 iff the ack carries the nonce
+    local p=$1 nonce=$2 budget=$3 i=0 ack="" t0
+    t0=$(date +%s)
+    tsh "$p" "mkdir -p /workspace/.flint && printf '{\"nonce\":\"$nonce\"}' > /workspace/.flint/publish.tmp && mv /workspace/.flint/publish.tmp /workspace/.flint/publish" \
+        || { echo "-1 sentinel-not-written"; return 1; }
+    while [ $i -lt "$budget" ]; do
+        ack=$(tsh_out "$p" "cat /workspace/.flint/publish.ack 2>/dev/null")
+        case "$ack" in *"$nonce"*) break ;; esac
+        sleep 2; i=$((i + 2))
+    done
+    printf '%s %s\n' "$(( $(date +%s) - t0 ))" "$(printf '%s' "$ack" | tr -d '\n')"
+    case "$ack" in *"$nonce"*) return 0 ;; *) return 1 ;; esac
+}
+lincarnation() { tsh_out "$1" "cat /workspace/.flint-sync/incarnation.json 2>/dev/null" | jq -r '.holder_id // empty' 2>/dev/null; }
+ack_status() { printf '%s' "$1" | jq -r '.status // "?"' 2>/dev/null; }
 
 # ── setup / teardown ─────────────────────────────────────────────────
 if [ "${1:-}" = "setup" ]; then
@@ -255,6 +439,14 @@ if [ "${1:-}" = "setup" ]; then
     # that cannot write. Recreating the Job every setup is cheap and
     # makes seeding unconditional.
     $K -n $SYS delete job seed-bucket --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1
+    # A teardown's namespaces can still be Terminating: an apply into one
+    # is Forbidden, and the waits below then hang on objects that were
+    # never created (twice on s3a, 2026-09-30). Wait them out first.
+    i=0
+    while [ $i -lt 600 ] && { [ "$($K get ns $SYS -o jsonpath='{.status.phase}' 2>/dev/null)" = Terminating ] || [ "$($K get ns $NS -o jsonpath='{.status.phase}' 2>/dev/null)" = Terminating ]; }; do
+        sleep 3; i=$((i + 3))
+    done
+    if [ $i -gt 0 ]; then echo "waited ${i}s for terminating namespaces"; fi
     rig | $K apply -f -
     $K apply -f "$REPO/flint-passthrough-chart/crds/flintpassthroughmounts.yaml"
     $K apply -f "$REPO/flint-lean-chart/crds/flintleanworkspaces.yaml" 2>/dev/null || true
@@ -652,111 +844,7 @@ echo "$out" | grep -qi 'denied\|ValidatingAdmissionPolicy\|node-name' && ok "VAP
 $K -n $WNS delete pod forged-worker --ignore-not-found --wait=false >/dev/null 2>&1
 
 # ── S-unpublish teardown hygiene ─────────────────────────────────────
-# ── lean (design §3.5, §5; S11 + S13) ────────────────────────────────
-# Store helpers, the lean drill's (run-agent.sh): jq, not grep — the
-# manifest is nested JSON.
-lobj()   { mcx mc cat "m/$BUCKET/$1" 2>/dev/null; }
-lcount() { mcx mc ls --recursive "m/$BUCKET/$1" 2>/dev/null | grep -c . ; }
-# Resolve the manifest THROUGH the pointer (see `lptr` below).
-# `.flint/lean/current` is the mutable object; the entries live in the
-# write-once generation it names. These three helpers read
-# `.flint/lean/manifest` — the PRE-pointer key — only as a fallback for
-# a bucket an older binary wrote, and never first: after migration that
-# key holds a refusal doc with no `.entries` at all.
-#
-# They read the legacy key FIRST until 2026-09-03, which under the
-# pointer layout is simply absent. `lments`/`lmseq` answer 0 for a
-# missing object, so the two sides of "seq unchanged" and "entry count
-# unchanged" agreed by both being zero — a pass earned by reading
-# nothing. S14's `n0 > 0` precondition is what caught it.
-#
-# Three layouts now, tried newest first: a CHUNK LIST (`.chunks`), one
-# generation object (`.entries_key`), and the pre-pointer single key.
-# A chunked pointer answers `null` for `entries_key`, so a resolver that
-# only knew the middle form would read "null" and fail the same silent
-# way — which is why each form is tested for POSITIVELY rather than by
-# falling through on empty.
-lmbody() {
-    local c k addrs a body all
-    c=$(lobj "$1/.flint/lean/current")
-    if [ -n "$c" ]; then
-        if printf '%s' "$c" | jq -e 'has("chunks")' >/dev/null 2>&1; then
-            addrs=$(printf '%s' "$c" | jq -r '.chunks[].addr')
-            all='{"entries":{}}'
-            for a in $addrs; do
-                body=$(lobj "$1/.flint/lean/chunks/$a")
-                # A chunk the pointer names and the bucket does not
-                # have is a HOLE, not an empty manifest. Fail — and SAY
-                # SO, because the callers map a failed resolve to 0 and
-                # an assertion downstream could otherwise pass while
-                # reading a short document. S14's `n0 > 0` precondition
-                # is the structural guard; this is so the log shows why.
-                if [ -z "$body" ]; then
-                    echo "  NOTE: pointer for $1 names chunk $a, which the bucket does not have" >&2
-                    return 1
-                fi
-                all=$(printf '%s\n%s' "$all" "$body" \
-                        | jq -s '{entries: (.[0].entries + .[1].entries)}')
-            done
-            printf '%s' "$all"
-            return
-        fi
-        k=$(printf '%s' "$c" | jq -r '.entries_key // empty')
-        [ -z "$k" ] && return 1
-        lobj "$k"
-        return
-    fi
-    lobj "$1/.flint/lean/manifest"
-}
-# Objects under the layout's entries prefix: chunks when chunked,
-# generations when not. S14 compares this across a takeover, and
-# counting the wrong prefix would compare 0 to 0.
-lgens()  {
-    if lptr "$1" 'has("chunks")' 2>/dev/null | grep -q true; then
-        mcx mc ls "m/$BUCKET/$1/.flint/lean/chunks/" 2>/dev/null | grep -c .
-    else
-        mcx mc ls "m/$BUCKET/$1/.flint/lean/manifests/" 2>/dev/null | grep -c .
-    fi
-}
-# The identity of the ENTRIES a pointer names, whichever layout it is
-# on: the sorted chunk address list, or the single generation key.
-# Chunks are CONTENT-ADDRESSED, so an unchanged list is proof the bytes
-# were not rewritten — a stronger statement than the etag comparison it
-# replaces, and one that needs no extra request.
-lments_id() {
-    local c
-    c=$(lobj "$1/.flint/lean/current")
-    [ -z "$c" ] && return 1
-    printf '%s' "$c" | jq -r 'if has("chunks") then ([.chunks[].addr] | sort | join(",")) else (.entries_key // "") end'
-}
-# The FENCING seq is the pointer's, not the generation's: a takeover
-# rotation bumps the pointer and leaves `entries_seq` alone, which is
-# the entire point of the layout.
-lmseq()  {
-    local c m
-    c=$(lobj "$1/.flint/lean/current")
-    [ -n "$c" ] && { printf '%s' "$c" | jq -r '.seq // 0'; return; }
-    m=$(lobj "$1/.flint/lean/manifest"); [ -z "$m" ] && { echo 0; return; }
-    printf '%s' "$m" | jq -r '.seq // 0'
-}
-# The epoch cell is the lease: holder_id, epoch, released. `lepoch <prefix> <jq>`.
-lepoch() { local e; e=$(lobj "$1/.flint/lean/epoch"); [ -z "$e" ] && return 1; printf '%s' "$e" | jq -r "$2"; }
-lments() { local m; m=$(lmbody "$1"); [ -z "$m" ] && { echo 0; return; }; printf '%s' "$m" | jq -r '.entries | length'; }
-# Kill the syncer INSIDE a worker without touching its pod: the container
-# restarts (workers are restartPolicy OnFailure) and relaunches from the
-# persisted launch message over the SAME tree — the self-recognition path.
-# /proc + kill only; PID 1 cannot be signalled from inside its own namespace.
-sig_syncer() { $K -n $WNS exec "$1" -- /bin/sh -c "for p in /proc/[0-9]*; do [ \"\$(cat \$p/comm 2>/dev/null)\" = flint-sync ] && kill -$2 \"\${p#/proc/}\"; done; exit 0" >/dev/null 2>&1; }
-kill_syncer() { sig_syncer "$1" 9; }
-# The epoch cell's renewed_unix is the liveness signal a successor
-# judges. Frozen holder ⇒ it stops advancing, and the cell stays
-# `released: false` because nothing ran the release.
-lrenew() { lepoch "$1" .renewed_unix; }
-# The manifest pointer layout (docs/plans/flint-lean-manifest-pointer-design.md):
-# `.flint/lean/current` is the only mutable metadata object; entries live
-# in write-once `.flint/lean/manifests/<seq>-<uuid>`.
-lptr()   { local c; c=$(lobj "$1/.flint/lean/current"); [ -z "$c" ] && return 1; printf '%s' "$c" | jq -r "$2"; }
-lmhas()  { local m; m=$(lmbody "$1"); [ -z "$m" ] && return 1; printf '%s' "$m" | jq -e --arg p "$2" '.entries | has($p)' >/dev/null; }
+# ── S11 lean (design §3.5, §5; S11 + S13) ────────────────────────────────
 
 leg S11 "lean: the checkout gate holds for the app AND its init container; a cold pod finds the seeded project; the syncer lives in the worker, not the pod"
 $K -n $NS delete pod lean-agent lean-seeder lean-refused --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
@@ -896,245 +984,263 @@ if require_pod lean-agent; then
 fi
 $K -n $NS delete pod lean-refused --ignore-not-found --wait=false >/dev/null 2>&1
 
-# ── S14 holder identity: self-recognition vs takeover ────────────────
-# The tree is keyed on the VOLUME ID = f(podUID, volumeName), never on
-# the CR name. That choice is the whole leg. Key on the CR name instead
-# and a replacement pod would self-RECOGNISE a dead pod's lease: no
-# rotation, no quiet-poll wait, and a straggler mid-barrier would never
-# be fenced (design §5 "Holder identity"; lease.rs:64-93).
+# ── S14 holder identity under the per-barrier fence ──────────────────
+# The publish fence is held for ONE commit section (lease.rs module doc,
+# design 2026-09-13 §4): between barriers nobody holds the cell. The
+# 2026-09-03 version of this leg froze the holder and applied a second
+# pod — the LIFETIME lease's shape — and under the per-barrier fence it
+# froze nothing: the cell it read was the S13 drain's released leftover,
+# neither pod's incarnation had ever claimed, and every observation was
+# of an inert cell (6 BAD on s3a 2026-09-30; PRECONDITION failures on
+# kind since 09-17). A verdict is now STAGED — the cell the syncer must
+# judge is written in the store's own shape (`lcell_stage`) — and
+# observed through ONE triggered publish (`lpublish`, S12's sentinel),
+# whose latency is what the quiet polls leave behind:
 #
-# The two paths differ in three observables and agree on the fourth, so
-# each is checked against the other rather than against a bare "it
-# changed":
+#   cell staged                          latency          rotation   epoch   holder after
+#   RELEASED, reserved for nobody        on sight         none       +1      this pod
+#   HELD by a stranger, never renewed    >= 50 s (6 × 10) YES        +1      this pod
+#   RELEASED, reserved for a stranger    >= 10 s (2 × 10) none       +1      this pod
+#   HELD by THIS pod's previous container  released at the restart, before any claim
 #
-#   path                 holder_id   manifest seq   claim latency   epoch
-#   container restart    SAME        SAME           immediate       +1
-#   pod replacement      NEW         +1 (rotation)  >= quiet polls  +1
-#
-# Epoch bumps on BOTH — even self-recognition supersedes, to fence a
-# straggler — so an assertion on the epoch alone would pass either way.
-leg S14 "lean holder identity: a syncer restart over the same tree self-recognises; a pod REPLACEMENT after an unclean death waits out the lease and rotates the manifest"
+# The epoch bumps on every claim, so an assertion on the epoch alone
+# passes either way; the latency and the manifest seq (+1 for an
+# install, +2 for a rotation then an install) tell the verdicts apart.
+# A no-change publish would observe nothing: the barrier's early exit
+# comes BEFORE the claim (barrier.rs), so every arm publishes one file.
+leg S14 "lean holder identity under the per-barrier fence: a released cell is claimed on sight, a HELD stranger is waited out and deposed with a rotation, a reserved handoff is waited out without one, and a fence a previous container of this pod left held is released at its restart"
 # An `apply` against a still-terminating object is a silent no-op (the
 # S1 lesson), and every observation below would then be made against the
 # PREVIOUS pod. Refuse to start rather than measure the wrong thing.
-$K -n $NS delete pod lean-agent --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
+$K -n $NS delete pod lean-agent lean-agent2 --ignore-not-found --wait=true --timeout=240s >/dev/null 2>&1
 $K get -n $NS pod lean-agent >/dev/null 2>&1 && bad "PRECONDITION: lean-agent still exists before S14 applies it — the apply would be a no-op against a terminating object"
 apply_fx lean-agent.yaml >/dev/null
 if wait_phase lean-agent Running 300; then
-    h0=$(lepoch tenants/proj .holder_id); e0=$(lepoch tenants/proj .epoch)
-    s0=$(lmseq tenants/proj); n0=$(lments tenants/proj)
-    [ -n "$h0" ] && [ "${n0:-0}" -gt 0 ] \
-        && ok "PRECONDITION: the workspace has a holder ($h0) at epoch $e0, manifest seq $s0 with $n0 entries" \
-        || bad "PRECONDITION: no readable epoch cell or an empty manifest — every comparison below would be against nothing"
+    inc=$(lincarnation lean-agent)
+    e0=$(lepoch tenants/proj .epoch 2>/dev/null); s0=$(lmseq tenants/proj); n0=$(lments tenants/proj)
+    [ -n "$inc" ] && [ "${n0:-0}" -gt 0 ] \
+        && ok "PRECONDITION: lean-agent's incarnation is $inc; the cell reads epoch ${e0:-none}, the manifest seq $s0 with $n0 entries" \
+        || bad "PRECONDITION: no incarnation id in the tenant's view ('$inc') or an empty manifest ($n0 entries) — nothing below could be attributed"
+    E=$(( ${e0:-0} + 10 ))
 
-    # ── self-recognition: same tree, same holder, no rotation ────────
+    # ── a RELEASED cell reserved for nobody: a clean handoff ─────────
+    lcell_stage tenants/proj lean-stranger-released $E true
+    tsh lean-agent "printf 'arm1' > /workspace/src/s14-a.txt"
+    out=$(lpublish lean-agent "s14a-$(date +%s)" 120); el=${out%% *}; ack=${out#* }
+    [ "$(ack_status "$ack")" = "ok" ] \
+        && ok "released cell: the publish was acked ok in ${el}s" \
+        || bad "released cell: no ok ack in ${el}s (ack: $(printf '%s' "$ack" | cut -c1-140))"
+    [ "${el:-999}" -lt 30 ] \
+        && ok "released cell: claimed on sight (${el}s) — a clean handoff is not waited out" \
+        || bad "released cell: ${el}s to the ack — a released cell reserved for nobody was waited out"
+    h=$(lepoch tenants/proj .holder_id); e=$(lepoch tenants/proj .epoch); rel=$(lepoch tenants/proj .released); s=$(lmseq tenants/proj)
+    [ "$h" = "$inc" ] && ok "the cell names THIS pod's incarnation ($h), not the released stranger" || bad "the cell names '$h' after a publish by $inc"
+    [ "${e:-0}" = "$((E + 1))" ] && ok "epoch $E → $e: the claim superseded the released cell by one" || bad "epoch $E → '${e:-?}' across a clean handoff"
+    [ "$rel" = "true" ] && ok "the cell is released again after the barrier — the fence is held for one commit section" || bad "the cell reads released=$rel after the barrier ended"
+    [ "${s:-0}" = "$((s0 + 1))" ] && ok "manifest seq $s0 → $s: one install and no rotation for a clean handoff" || bad "manifest seq $s0 → '${s:-?}': expected exactly +1 (a rotation would double-bump)"
+    lmhas tenants/proj src/s14-a.txt && ok "src/s14-a.txt is cited" || bad "src/s14-a.txt is not cited after an ok ack"
+
+    # ── a cell HELD by a stranger that never renews: deposal + rotation ──
+    # THE ANTI-VACUITY CONTROL is the latency: a syncer that walked in
+    # would show the same new holder and a bumped epoch; only >= 50 s
+    # separates "judged dead across six spaced polls" from "superseded on
+    # sight".
+    E=$((E + 10)); s1=$(lmseq tenants/proj); n1=$(lments tenants/proj)
+    lcell_stage tenants/proj lean-straggler-held $E false
+    tsh lean-agent "printf 'arm2' > /workspace/src/s14-b.txt"
+    out=$(lpublish lean-agent "s14b-$(date +%s)" 200); el=${out%% *}; ack=${out#* }
+    [ "$(ack_status "$ack")" = "ok" ] \
+        && ok "held cell: the publish was acked ok in ${el}s" \
+        || bad "held cell: no ok ack in ${el}s (ack: $(printf '%s' "$ack" | cut -c1-140))"
+    [ "${el:-0}" -ge 50 ] && [ "${el:-999}" -le 160 ] \
+        && ok "held cell: ${el}s to the ack — six spaced quiet polls (>= 50 s) before the stranger was judged dead, inside the 150 s claim deadline" \
+        || bad "held cell: ${el}s to the ack — under 50 s it deposed a holder it never judged dead; over 160 s the barrier hit its deadline"
+    w=$(worker_of lean-agent)
+    $K -n $WNS logs "$w" 2>/dev/null | grep -q "waiting for the publish fence behind lean-straggler-held" \
+        && ok "the syncer reported the wait (behind lean-straggler-held)" \
+        || bad "no 'waiting for the publish fence behind lean-straggler-held' line in the worker log"
+    h=$(lepoch tenants/proj .holder_id); e=$(lepoch tenants/proj .epoch); s=$(lmseq tenants/proj); n=$(lments tenants/proj)
+    [ "$h" = "$inc" ] && ok "the cell names this pod ($h): the stranger was DEPOSED" || bad "the cell names '$h': the stranger was not deposed"
+    [ "${e:-0}" = "$((E + 1))" ] && ok "epoch $E → $e across the deposal" || bad "epoch $E → '${e:-?}' across the deposal"
+    [ "${s:-0}" = "$((s1 + 2))" ] \
+        && ok "manifest seq $s1 → $s: the takeover ROTATED (+1, entries kept) before the install (+1) — a straggler's CAS is stale" \
+        || bad "manifest seq $s1 → '${s:-?}': expected +2 (rotation, then install); +1 means no rotation, and a straggler mid-commit could publish over this pod"
+    [ "${n:-0}" = "$((n1 + 1))" ] && ok "the entries survived the rotation ($n1 → $n: the one new file)" || bad "entries $n1 → '${n:-?}' across the rotation"
+
+    # ── a RELEASED cell reserved for a stranger: the handoff is waited out ──
+    E=$((E + 10)); s2=$(lmseq tenants/proj)
+    lcell_stage tenants/proj lean-stranger-released $E true lean-dead-waiter
+    tsh lean-agent "printf 'arm3' > /workspace/src/s14-c.txt"
+    out=$(lpublish lean-agent "s14c-$(date +%s)" 120); el=${out%% *}; ack=${out#* }
+    [ "$(ack_status "$ack")" = "ok" ] \
+        && ok "reserved handoff: the publish was acked ok in ${el}s" \
+        || bad "reserved handoff: no ok ack in ${el}s (ack: $(printf '%s' "$ack" | cut -c1-140))"
+    [ "${el:-0}" -ge 10 ] && [ "${el:-999}" -lt 50 ] \
+        && ok "reserved handoff: ${el}s to the ack — two spaced quiet polls for the reserved waiter (>= 10 s), well short of a deposal (50 s)" \
+        || bad "reserved handoff: ${el}s to the ack — under 10 s it skipped a reservation it never judged abandoned; 50 s or more is a deposal wait on a released cell"
+    h=$(lepoch tenants/proj .holder_id); e=$(lepoch tenants/proj .epoch); s=$(lmseq tenants/proj)
+    [ "$h" = "$inc" ] && ok "the cell names this pod ($h): the abandoned reservation was skipped" || bad "the cell names '$h' after the reserved handoff"
+    [ "${e:-0}" = "$((E + 1))" ] && ok "epoch $E → $e" || bad "epoch $E → '${e:-?}'"
+    [ "${s:-0}" = "$((s2 + 1))" ] && ok "manifest seq $s2 → $s: no rotation for a released cell, whoever it was reserved for" || bad "manifest seq $s2 → '${s:-?}': expected exactly +1"
+
+    # ── a fence THIS pod's previous container left held: released at the restart ──
+    # The one case where immediate self-recognition is safe: the
+    # incarnation id is emptyDir-scoped, so only a restarted container of
+    # the same pod inherits it, and its previous life's process died with
+    # it. flint-sync releases such a cell at startup (release_stale_own),
+    # before anyone pays the deposal wait for it.
+    E=$((E + 10)); s3=$(lmseq tenants/proj)
+    lcell_stage tenants/proj "$inc" $E false
     w=$(worker_of lean-agent)
     r0=$($K -n $WNS get pod "$w" -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null)
     kill_syncer "$w"
-    i=0; while [ $i -lt 60 ]; do
+    i=0; while [ $i -lt 90 ]; do
         r1=$($K -n $WNS get pod "$w" -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null)
         [ "${r1:-0}" -gt "${r0:-0}" ] && break
         sleep 3; i=$((i + 3))
     done
     [ "${r1:-0}" -gt "${r0:-0}" ] \
         && ok "the syncer died and its container restarted in place (restartCount ${r0:-?} → ${r1:-?} in ${i}s) — the same pod, the same tree" \
-        || bad "the worker did not restart after its syncer was killed (restartCount stuck at ${r0:-?}) — the self-recognition arm never ran"
-    i=0; while [ $i -lt 60 ] && [ "$(lepoch tenants/proj .epoch)" = "$e0" ]; do sleep 3; i=$((i + 3)); done
-    h1=$(lepoch tenants/proj .holder_id); e1=$(lepoch tenants/proj .epoch); s1=$(lmseq tenants/proj)
-    [ "$h1" = "$h0" ] \
-        && ok "self-recognition: the holder id survived the restart ($h1) — the incarnation lives in the tree, not in the container" \
-        || bad "the holder id changed across a mere container restart ($h0 → $h1): a restart is being treated as a takeover"
-    [ "$s1" = "$s0" ] \
-        && ok "self-recognition did NOT rotate the manifest (seq still $s1) — rotation is for stragglers, not for restarts" \
-        || bad "a container restart rotated the manifest ($s0 → $s1): pure churn, and at 100k entries a multi-MB GET+PUT per restart"
-    [ "${e1:-0}" -gt "${e0:-0}" ] \
-        && ok "the epoch still bumped ($e0 → $e1): even self-recognition supersedes, so a straggler cannot publish under the old epoch" \
-        || bad "the epoch did not move across the restart ($e0 → $e1) — a straggler mid-barrier would still be holding a live lease"
-
-    # ── takeover: a FROZEN straggler, then a successor ───────────────
-    # Rotation exists for a holder that is still alive and might still be
-    # mid-barrier, not for one that has tidily gone. So the straggler is
-    # SIGSTOPped rather than killed: it stops renewing, it never reaches
-    # `release`, and it can wake up at any moment — which is the case the
-    # successor's rotation has to survive.
-    #
-    # It is also the only shape available. A worker cannot be deleted
-    # from here: the workers' admission policy admits DELETE only from
-    # the node ServiceAccount, that node's own kubelet, and the
-    # kube-system GC (§3.6), so `--grace-period=0 --force` is REFUSED —
-    # the first cut of this leg swallowed that refusal and then measured
-    # a perfectly healthy pod. And deleting the TENANT would drain the
-    # syncer cleanly (released: true ⇒ immediate handoff, no rotation),
-    # besides waiting out a grace derived from floorSecs — an hour, on
-    # this fixture.
-    w=$(worker_of lean-agent)
-    [ -n "$w" ] || bad "PRECONDITION: no worker for lean-agent — nothing to freeze, and the successor below would face a live lease"
-    r0=$(lrenew tenants/proj)
-    sig_syncer "$w" STOP
-    sleep 40
-    r1=$(lrenew tenants/proj); rel=$(lepoch tenants/proj .released)
-    [ -n "$r0" ] && [ "$r1" = "$r0" ] \
-        && ok "PRECONDITION: the holder is FROZEN — renewed_unix stood still at $r1 across 40s, so its lease reads dead to anyone watching" \
-        || bad "PRECONDITION: the holder kept renewing across the freeze ($r0 → $r1); the successor would never judge this lease dead and the arm proves nothing"
-    [ "$rel" = "false" ] \
-        && ok "PRECONDITION: the frozen holder never released (released=false) — the successor faces a possibly-live straggler, which is what rotation is for" \
-        || bad "PRECONDITION: the lease reads released=$rel; the successor would take a CLEAN handoff and rotate nothing"
-
-    # THE POINTER MEASUREMENT. A takeover used to be a GET and a PUT of
-    # the whole manifest — 264 MiB each way at 1M entries, per claim —
-    # because the only way to invalidate a straggler's handle was to
-    # rewrite the object it held. Under the pointer layout it must move
-    # `current` and NOTHING else.
-    # `lments_id` is the identity of the ENTRIES the pointer names,
-    # whichever layout it is on: the sorted CHUNK ADDRESS LIST when
-    # chunked, the generation key when not. Chunks are content-addressed,
-    # so an unchanged list is proof the bytes were not rewritten — a
-    # stronger statement than the etag comparison this replaces, and one
-    # that costs no extra request.
-    #
-    # Reading `.entries_key` here was the trap: on a chunked pointer jq
-    # answers the STRING "null", so the before/after comparison below
-    # would have compared "null" to "null" and passed while reading
-    # nothing at all.
-    p_id0=$(lments_id tenants/proj); p_seq0=$(lptr tenants/proj .seq)
-    p_n0=$(lgens tenants/proj)
-    [ -n "$p_id0" ] && [ "$p_id0" != "null" ] && [ "${p_n0:-0}" -ge 1 ] \
-        && ok "PRECONDITION: the workspace is on the pointer layout — seq $p_seq0 over $p_n0 entries object(s)" \
-        || bad "PRECONDITION: no readable entries identity for this workspace (got '$p_id0', $p_n0 object(s)); the takeover measurement below has nothing to measure"
-
-    t0=$(date +%s)
-    apply_fx lean-agent2.yaml >/dev/null
-    if wait_phase lean-agent2 Running 400; then
-        el=$(( $(date +%s) - t0 ))
-        h2=$(lepoch tenants/proj .holder_id); e2=$(lepoch tenants/proj .epoch)
-        s2=$(lmseq tenants/proj); n2=$(lments tenants/proj)
-        [ "$h2" != "$h1" ] && [ -n "$h2" ] \
-            && ok "the successor claimed under a NEW holder id ($h2), not the straggler's — the tree is keyed on the volume id, never on the CR name" \
-            || bad "the successor claimed under the STRAGGLER's holder id ($h2): something a second pod shares is being used as the incarnation — the CR name is the trap §5 names"
-        [ "${s2:-0}" -gt "${s1:-0}" ] \
-            && ok "the takeover ROTATED the manifest ($s1 → $s2): if the straggler wakes mid-barrier its CAS is already stale" \
-            || bad "the takeover did not rotate the manifest (seq still $s2) — a straggler that wakes up can publish over the successor"
-        [ "${n2:-0}" = "${n0:-0}" ] \
-            && ok "rotation preserved every entry ($n2) — it bumps the seq, it does not truncate the project" \
-            || bad "the manifest lost entries across the rotation ($n0 → $n2)"
-        # THE ANTI-VACUITY CONTROL. A successor that skipped the wait
-        # would show a new holder and a bumped seq too; only the latency
-        # separates "judged dead across six quiet polls" from "walked in".
-        [ "$el" -ge 50 ] \
-            && ok "the successor waited ${el}s to reach Running — it observed the quiet polls (6 × 10s) rather than superseding on sight" \
-            || bad "the successor was Running in ${el}s, inside the quiet-poll floor: it deposed a lease it never judged dead"
-        note "epoch $e1 → $e2 across the takeover"
-
-        # The measurement itself.
-        p_id1=$(lments_id tenants/proj); p_seq1=$(lptr tenants/proj .seq)
-        p_n1=$(lgens tenants/proj)
-        [ "${p_seq1:-0}" -gt "${p_seq0:-0}" ] \
-            && ok "the pointer's seq moved across the takeover ($p_seq0 → $p_seq1) — a straggler's handle is stale" \
-            || bad "the pointer's seq did not move ($p_seq0 → $p_seq1): nothing invalidated the straggler's handle"
-        [ -n "$p_id1" ] && [ "$p_id1" = "$p_id0" ] \
-            && ok "the takeover reused the STANDING entries — the identity it names is unchanged, and chunks are content-addressed, so that IS byte-identity without a second request" \
-            || bad "the takeover repointed at different entries ('$p_id0' → '$p_id1'): it rewrote what it was supposed to leave alone, which is the multi-MB rotation this layout removed"
-        [ "${p_n1:-0}" = "${p_n0:-0}" ] \
-            && ok "no new entries object appeared across the takeover ($p_n1) — the rotation wrote the pointer and nothing else" \
-            || bad "the entries objects went $p_n0 → $p_n1 across a rotation that should have written only the pointer"
-        note "entries objects: $p_n0 → $p_n1"
-
-        # THE FENCE BITES. Wake the straggler: its next renew CASes
-        # against an ETag the successor overwrote, gets a 412, and must
-        # fail closed. Watch the PHASE, not restartCount: a fence exits
-        # ZERO on purpose ("a clean shutdown order, not a crash loop",
-        # flint_sync.rs:209-211), so `restartPolicy: OnFailure` leaves it
-        # down and the count never moves. Measured: the pod is Succeeded
-        # within 15 s, its log naming `deposed at renew: 412`.
-        wuid_pre=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
-        sig_syncer "$w" CONT
-        i=0; ph=""
-        while [ $i -lt 120 ]; do
-            ph=$($K -n $WNS get pod "$w" -o jsonpath='{.status.phase}' 2>/dev/null)
-            u=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
-            # S20's relaunch can land before this leg looks: a NEW pod
-            # under the old name is the fence having bitten already.
-            [ -n "$u" ] && [ "$u" != "$wuid_pre" ] && { ph="Relaunched"; break; }
-            [ -n "$ph" ] && [ "$ph" != "Running" ] && break
-            sleep 5; i=$((i + 5))
-        done
-        xc=$($K -n $WNS get pod "$w" -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}' 2>/dev/null)
-        if [ "$ph" = "Succeeded" ] && [ "${xc:-1}" = "0" ]; then
-            ok "the woken straggler FENCED itself and shut down cleanly (${ph}, exit ${xc}, ${i}s after SIGCONT) — it did not resume publishing under a superseded epoch"
-        elif [ "$ph" = "Relaunched" ]; then
-            ok "the woken straggler fenced itself and the plugin had ALREADY relaunched its worker (uid $wuid_pre replaced, ${i}s after SIGCONT) — S20 measures the relaunch"
-        elif [ "$ph" = "Running" ] || [ -z "$ph" ]; then
-            bad "the woken straggler is STILL RUNNING ${i}s after SIGCONT: it never noticed it had been deposed, and rotation is the only thing standing between it and the successor's manifest"
-        else
-            bad "the woken straggler ended as ${ph} exit ${xc:-?}, not Succeeded/0: a fence is being treated as a crash, so OnFailure will restart it into a loop against a lease it can never hold"
-        fi
-        h3=$(lepoch tenants/proj .holder_id)
-        [ "$h3" = "$h2" ] \
-            && ok "the cell still names the successor ($h3) after the straggler woke — a fenced holder does not take its lease back" \
-            || bad "the woken straggler RECLAIMED the lease ($h2 → $h3): two writers, and the rotation bought nothing"
-
-        # ── S20 (audit 2026-09-03, findings 2 + 3) ───────────────────
-        # The fenced worker is Succeeded and nothing used to bring it
-        # back: OnFailure ignores exit 0, and the plugin relaunched only
-        # Failed pods, so a self-fence left a tenant unpublished for its
-        # life. Now a Succeeded worker under a still-mounted tenant is
-        # relaunched on the next republish; the relaunched syncer finds
-        # the successor's cell and WAITS — it never wins the quiet polls
-        # against a live holder. Then the tenant is deleted: the unpublish
-        # SIGTERMs a syncer holding no lease, which exits attesting
-        # nothing, and the tree must be PRESERVED — the pod's absence is
-        # no longer read as the drain's outcome.
-        leg S20 "a fenced syncer is relaunched under its still-mounted tenant, waits on the live successor, and at the tenant's delete its UNATTESTED tree is preserved rather than removed"
-        i=0; wuid_r=""
-        while [ $i -lt 240 ]; do
-            rph=$($K -n $WNS get pod "$w" -o jsonpath='{.status.phase}' 2>/dev/null)
-            u=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
-            [ "$rph" = "Running" ] && [ -n "$u" ] && [ "$u" != "$wuid_pre" ] && { wuid_r=$u; break; }
-            sleep 5; i=$((i + 5))
-        done
-        [ -n "$wuid_r" ] \
-            && ok "the fenced worker was RELAUNCHED by a republish (${i}s; uid $wuid_pre → $wuid_r)" \
-            || bad "the fenced worker was not relaunched in ${i}s (phase '${rph:-?}'): a self-fenced holder stays gone for the tenant's life"
-        mount_events lean-agent | grep -q 'SyncerRecreated' \
-            && ok "the tenant's events name the relaunch (SyncerRecreated)" \
-            || bad "no SyncerRecreated event on lean-agent"
-        sleep 30
-        h4=$(lepoch tenants/proj .holder_id)
-        [ "$h4" = "$h2" ] \
-            && ok "30 s after the relaunch the cell still names the successor ($h4): the relaunched syncer waits, it does not depose a live holder" \
-            || bad "the relaunched syncer took the lease ($h2 → $h4) from a LIVE successor"
-        $K -n $WNS logs "$w" 2>/dev/null | grep -q 'waiting on the standing lease' \
-            && ok "the relaunched syncer is waiting on the standing lease" \
-            || note "relaunched syncer log: $($K -n $WNS logs "$w" 2>/dev/null | tail -2)"
-        before_und=$(onnode "ls -d /var/lib/kubelet/plugins/s3.csi.chert.us/undrained/* 2>/dev/null | wc -l")
-        $K -n $NS delete pod lean-agent --wait=true --timeout=240s >/dev/null 2>&1
-        after_und=$(onnode "ls -d /var/lib/kubelet/plugins/s3.csi.chert.us/undrained/* 2>/dev/null | wc -l")
-        [ "${after_und:-0}" -gt "${before_und:-0}" ] \
-            && ok "the straggler's tree was PRESERVED under undrained/ at its tenant's delete (its drain attested nothing)" \
-            || bad "no preserved tree appeared under undrained/ ($before_und → $after_und): an unattested drain lost its tree with the pod"
-        und=$(onnode "ls -dt /var/lib/kubelet/plugins/s3.csi.chert.us/undrained/* 2>/dev/null | head -1")
-        [ -n "$und" ] && onnode "test -d '$und/tree' && test -f '$und/state.json'" \
-            && ok "the preserved dir carries the tree and its state ($und)" \
-            || bad "the preserved dir is incomplete or absent: $(onnode "ls '${und:-/nonexistent}' 2>&1" | tr '\n' ' ')"
-        onnode "test -f '${und:-/nonexistent}/tree/.flint-sync/drained.json'" \
-            && bad "a drain attestation exists in a tree the plugin preserved — the sensor contradicts the decision" \
-            || ok "no drain attestation in the preserved tree — the decision matches its sensor"
-        ev=$(mount_events lean-agent)
-        echo "$ev" | grep -q 'DrainNotAttested' \
-            && ok "the tenant's events say why (DrainNotAttested)" \
-            || bad "no DrainNotAttested event on lean-agent: $(echo "$ev" | tail -2 | cut -c1-200)"
-        onnode "rm -rf /var/lib/kubelet/plugins/s3.csi.chert.us/undrained" >/dev/null 2>&1
-    else
-        bad "lean-agent2 never reached Running in 400s — the takeover arm made no observation at all"
-    fi
-    # Leave the workspace to one live pod: S16 drains this node, and a
-    # lean worker's grace is derived from floorSecs (3681 s here), so a
-    # wedged syncer left behind would outlast the drain's timeout.
-    sig_syncer "$w" CONT
-    $K -n $NS delete pod lean-agent2 lean-agent --ignore-not-found --wait=true --timeout=240s >/dev/null 2>&1
+        || bad "the worker did not restart after its syncer was killed (restartCount stuck at ${r0:-?}) — the restart arm never ran"
+    i=0; while [ $i -lt 90 ] && [ "$(lepoch tenants/proj .released)" != "true" ]; do sleep 3; i=$((i + 3)); done
+    h=$(lepoch tenants/proj .holder_id); e=$(lepoch tenants/proj .epoch); rel=$(lepoch tenants/proj .released)
+    [ "$rel" = "true" ] && [ "$h" = "$inc" ] && [ "${e:-0}" = "$E" ] \
+        && ok "the restarted container RELEASED the fence its previous life left held (holder $inc, epoch $E, released within ${i}s) — no waiter pays the deposal for it" \
+        || bad "after the restart the cell reads holder=$h epoch=${e:-?} released=$rel — a fence left held by this pod's own previous container was not released"
+    $K -n $WNS logs "$w" 2>/dev/null | grep -q "the publish fence was left held by a previous container of this pod" \
+        && ok "the worker log names the repair" \
+        || bad "no 'left held by a previous container' line in the restarted worker's log"
+    inc2=$(lincarnation lean-agent)
+    [ -n "$inc2" ] && [ "$inc2" = "$inc" ] \
+        && ok "the incarnation id survived the restart ($inc2) — it lives in the tree, not in the container" \
+        || bad "the incarnation id changed across a mere container restart ($inc → '$inc2')"
+    [ "$(lmseq tenants/proj)" = "$s3" ] && ok "the restart moved no manifest (seq still $s3) — rotation is for stragglers, not restarts" || bad "the restart moved the manifest ($s3 → $(lmseq tenants/proj))"
+    tsh lean-agent "printf 'arm4' > /workspace/src/s14-d.txt"
+    out=$(lpublish lean-agent "s14d-$(date +%s)" 120); el=${out%% *}; ack=${out#* }
+    h=$(lepoch tenants/proj .holder_id); e=$(lepoch tenants/proj .epoch); s=$(lmseq tenants/proj)
+    [ "$(ack_status "$ack")" = "ok" ] && [ "${el:-999}" -lt 30 ] && [ "$h" = "$inc" ] && [ "${e:-0}" = "$((E + 1))" ] && [ "${s:-0}" = "$((s3 + 1))" ] \
+        && ok "the restarted container publishes again under the same incarnation on sight (${el}s; epoch $E → $e, seq $s3 → $s, no rotation)" \
+        || bad "after the restart: ack ${el}s status $(ack_status "$ack"), holder '$h', epoch '${e:-?}' (want $((E + 1))), seq '${s:-?}' (want $((s3 + 1)))"
 else
     bad "lean-agent never reached Running in 300s — S14 made no observation at all"
 fi
+$K -n $NS delete pod lean-agent --ignore-not-found --wait=true --timeout=240s >/dev/null 2>&1
+
+# ── S20 an exited syncer relaunched; a drain against a LIVE fence ─────
+# Audit 2026-09-03, findings 2 + 3, restated for the per-barrier fence.
+# A fence no longer exits the process (barrier.rs: a fenced barrier is
+# abandoned and the next floor claims again), so the Succeeded worker
+# finding 2 is about is staged the way it happens: the syncer exits 0 on
+# its own (SIGTERM) while the tenant is still mounted. OnFailure ignores
+# exit 0; the plugin must relaunch it on the next republish. Finding 3:
+# at the tenant's delete the drain meets a fence held by a LIVE stranger
+# — renewed from the rig every 5 s, so its token never stands still and
+# no quiet poll ever judges it dead — and cannot publish. It exits
+# attesting nothing, and the tree must be PRESERVED. The workspace's
+# floor is lowered to 60 s for this pod only: the derived grace (floor +
+# 81 s) is also the drain's retry budget, and at the fixture's one-hour
+# floor the delete would stand for an hour.
+leg S20 "a syncer that exited on its own is relaunched under its still-mounted tenant; at the tenant's delete a drain that cannot win a LIVE fence attests nothing and its tree is preserved"
+$K -n $NS delete pod lean-agent --ignore-not-found --wait=true --timeout=240s >/dev/null 2>&1
+$K -n $NS patch flintleanworkspace proj --type merge -p '{"spec":{"floorSecs":60}}' >/dev/null 2>&1
+apply_fx lean-agent.yaml >/dev/null
+if wait_phase lean-agent Running 300; then
+    w=$(worker_of lean-agent); wuid0=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+    grace=$($K -n $WNS get pod "$w" -o jsonpath='{.spec.terminationGracePeriodSeconds}' 2>/dev/null)
+    [ -n "$w" ] && ok "PRECONDITION: lean-agent's worker is $w (grace ${grace:-?}s from the 60 s floor)" || bad "PRECONDITION: no worker for lean-agent"
+    sig_syncer "$w" TERM
+    i=0; ph=""
+    while [ $i -lt 90 ]; do
+        ph=$($K -n $WNS get pod "$w" -o jsonpath='{.status.phase}' 2>/dev/null)
+        [ "$ph" = "Succeeded" ] && break
+        u=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+        [ -n "$u" ] && [ "$u" != "$wuid0" ] && { ph="Relaunched"; break; }
+        sleep 3; i=$((i + 3))
+    done
+    xc=$($K -n $WNS get pod "$w" -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}' 2>/dev/null)
+    if [ "$ph" = "Succeeded" ] && [ "${xc:-1}" = "0" ]; then
+        ok "the syncer exited on SIGTERM and its worker is Succeeded (exit 0, ${i}s) while the tenant is still mounted — the shape OnFailure never restarts"
+    elif [ "$ph" = "Relaunched" ]; then
+        ok "the syncer exited and the plugin had already relaunched its worker (uid $wuid0 replaced, ${i}s)"
+    else
+        bad "after SIGTERM the worker is '${ph:-?}' exit '${xc:-?}' at ${i}s, not Succeeded/0 — the arm has no exited syncer to relaunch"
+    fi
+    seen=$(tsh_out lean-agent "ls /workspace/src 2>/dev/null | wc -l")
+    [ "${seen:-0}" -gt 0 ] && ok "the tenant still sees its tree ($seen files) with no syncer behind it" || bad "the tenant's tree reads empty ('$seen') once the syncer exited"
+    i=0; wuid_r=""
+    while [ $i -lt 240 ]; do
+        rph=$($K -n $WNS get pod "$w" -o jsonpath='{.status.phase}' 2>/dev/null)
+        u=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+        [ "$rph" = "Running" ] && [ -n "$u" ] && [ "$u" != "$wuid0" ] && { wuid_r=$u; break; }
+        sleep 5; i=$((i + 5))
+    done
+    [ -n "$wuid_r" ] \
+        && ok "the exited worker was RELAUNCHED by a republish (${i}s; uid $wuid0 → $wuid_r)" \
+        || bad "the exited worker was not relaunched in ${i}s (phase '${rph:-?}'): a syncer that exits 0 stays gone for the tenant's life"
+    mount_events lean-agent | grep -q 'SyncerRecreated' \
+        && ok "the tenant's events name the relaunch (SyncerRecreated)" \
+        || bad "no SyncerRecreated event on lean-agent"
+    tsh lean-agent "printf 'after the relaunch' > /workspace/src/s20-a.txt"
+    out=$(lpublish lean-agent "s20a-$(date +%s)" 120); el=${out%% *}; ack=${out#* }
+    [ "$(ack_status "$ack")" = "ok" ] && lmhas tenants/proj src/s20-a.txt \
+        && ok "the relaunched syncer publishes (acked in ${el}s, src/s20-a.txt cited)" \
+        || bad "the relaunched syncer did not publish: ack ${el}s '$(printf '%s' "$ack" | cut -c1-100)'"
+
+    # ── the delete, against a LIVE fence ─────────────────────────────
+    tsh lean-agent "printf 'written after the last publish' > /workspace/src/s20-late.txt"
+    E=$(( $(lepoch tenants/proj .epoch 2>/dev/null || echo 0) + 10 ))
+    ( i=0; while [ $i -lt 90 ]; do lcell_stage tenants/proj lean-live-stranger $E false; sleep 5; i=$((i + 1)); done ) >/dev/null 2>&1 &
+    renew_pid=$!
+    sleep 8
+    before_und=$(onnode "ls -d /var/lib/kubelet/plugins/s3.csi.chert.us/undrained/* 2>/dev/null | wc -l")
+    t0=$(date +%s)
+    $K -n $NS delete pod lean-agent --wait=true --timeout=600s >/dev/null 2>&1
+    el=$(( $(date +%s) - t0 ))
+    kill "$renew_pid" 2>/dev/null; wait "$renew_pid" 2>/dev/null
+    # THE ANTI-VACUITY CONTROL: a drain that never met the fence returns
+    # in seconds, and what follows would be a different failure's tree.
+    [ "$el" -ge 60 ] \
+        && ok "the delete stood ${el}s: the drain waited on the live fence rather than walking past it" \
+        || bad "the delete returned in ${el}s — the drain never waited on the live fence, so what follows was not earned"
+    h=$(lepoch tenants/proj .holder_id)
+    [ "$h" = "lean-live-stranger" ] && ok "the cell still names the live stranger ($h): a holder whose token moves is never deposed" || bad "the cell names '$h': the drain deposed a LIVE holder"
+    after_und=$(onnode "ls -d /var/lib/kubelet/plugins/s3.csi.chert.us/undrained/* 2>/dev/null | wc -l")
+    [ "${after_und:-0}" -gt "${before_und:-0}" ] \
+        && ok "the tree was PRESERVED under undrained/ at its tenant's delete (its drain attested nothing)" \
+        || bad "no preserved tree appeared under undrained/ ($before_und → $after_und): an unattested drain lost its tree with the pod"
+    und=$(onnode "ls -dt /var/lib/kubelet/plugins/s3.csi.chert.us/undrained/* 2>/dev/null | head -1")
+    [ -n "$und" ] && onnode "test -d '$und/tree' && test -f '$und/state.json'" \
+        && ok "the preserved dir carries the tree and its state ($und)" \
+        || bad "the preserved dir is incomplete or absent: $(onnode "ls '${und:-/nonexistent}' 2>&1" | tr '\n' ' ')"
+    # With workers.quota=true the tree is an ext4 image (tree.img) and
+    # preservation unmounts it, so tree/ is an empty mount point: read
+    # through a loop mount of the image, as the event text tells an
+    # operator to (1 BAD on s3a 2026-09-30 for reading the directory).
+    if onnode "test -f '${und:-/nonexistent}/tree.img'"; then
+        shape="tree.img, loop-mounted"
+        late=$(onnode "mkdir -p /mnt/s20-und && mount -o loop,ro '${und:-/nonexistent}/tree.img' /mnt/s20-und && cat /mnt/s20-und/src/s20-late.txt; umount /mnt/s20-und 2>/dev/null; rmdir /mnt/s20-und 2>/dev/null")
+    else
+        shape="tree/"
+        late=$(onnode "cat '${und:-/nonexistent}/tree/src/s20-late.txt' 2>/dev/null")
+    fi
+    [ "$late" = "written after the last publish" ] \
+        && ok "the uncited file is in the preserved tree ($shape) — what the drain could not publish was not lost" \
+        || bad "src/s20-late.txt is not in the preserved tree ($shape): read '$late'"
+    onnode "test -f '${und:-/nonexistent}/tree/.flint-sync/drained.json'" \
+        && bad "a drain attestation exists in a tree the plugin preserved — the sensor contradicts the decision" \
+        || ok "no drain attestation in the preserved tree — the decision matches its sensor"
+    ev=$(mount_events lean-agent)
+    echo "$ev" | grep -qE 'DrainNotAttested|DrainCeilingHit' \
+        && ok "the tenant's events say why ($(echo "$ev" | grep -oE 'DrainNotAttested|DrainCeilingHit' | sort -u | tr '\n' ' '))" \
+        || bad "no DrainNotAttested/DrainCeilingHit event on lean-agent: $(echo "$ev" | tail -2 | cut -c1-200)"
+    onnode "rm -rf /var/lib/kubelet/plugins/s3.csi.chert.us/undrained" >/dev/null 2>&1
+else
+    bad "lean-agent never reached Running in 300s — S20 made no observation at all"
+fi
+# Leave the workspace as the fixture has it: the hour-long floor, and a
+# released cell so the next claim is a clean handoff.
+$K -n $NS patch flintleanworkspace proj --type merge -p '{"spec":{"floorSecs":3600}}' >/dev/null 2>&1
+lcell_stage tenants/proj lean-live-stranger "$(( $(lepoch tenants/proj .epoch 2>/dev/null || echo 0) + 1 ))" true
 
 # ── S17 a plugin restart mid-checkout ────────────────────────────────
 # The syncer is a SEPARATE POD, so rolling the node plugin must not
@@ -1197,7 +1303,11 @@ if [ -n "$w" ]; then
     elif printf '%s' "$adopt_log" | grep -q "unfinished publish found at startup"; then
         bad "the new plugin CLEANED UP the checkout at startup ('unfinished publish found at startup'): the syncer and its tree were destroyed and the checkout restarted"
     else
-        bad "the new plugin logged neither adoption branch: the checkout had finished before it started, so this run tests nothing (widen the window: more files, fanout 1)"
+        # A fast cluster (3 × i4i.large + an in-cluster store, 2026-09-30)
+        # closes the window before the roll lands. That is not the product
+        # failing — S17f holds the syncer still and pins the same property
+        # deterministically — so the run says INCONCLUSIVE rather than BAD.
+        note "INCONCLUSIVE: the new plugin logged neither adoption branch — the checkout had finished before it started, so this run tests nothing (S17f is the deterministic form; widen the window here with more files or fanout 1)"
     fi
     if wait_phase slow-agent Running 400; then
         ok "the tenant reached Running: the checkout COMPLETED across a plugin restart"
@@ -1488,6 +1598,12 @@ mcx mc rm --incomplete --recursive --force m/$BUCKET/datasets/f72/ >/dev/null 2>
 if wait_phase f72-writer Running 180 && require_pod f72-writer; then
     w=$(worker_of f72-writer)
     pid=$(worker_pid "$w")
+    # Amazon Linux 2023 ships no `tc` (iproute-tc is its own package), so
+    # the shaping below could never run there — and run 3 on s3a never
+    # reached it (2026-09-30). Install it where dnf is; kind's Debian node
+    # carries tc already.
+    onnode "command -v tc >/dev/null 2>&1 || { command -v dnf >/dev/null 2>&1 && dnf install -q -y iproute-tc >/dev/null 2>&1; }; command -v tc >/dev/null 2>&1" \
+        || note "no tc on $NODE and none could be installed — the shaping below will fail"
     # The pid must live in a netns of its own (the pod's), never pid 1's:
     # shaping the node's interface is the mistake the helper's comment
     # describes, and it would make this leg pass against the defect.
@@ -1515,6 +1631,8 @@ if wait_phase f72-writer Running 180 && require_pod f72-writer; then
     mcx mc ls --incomplete m/$BUCKET/datasets/f72/ >/dev/null 2>&1 && ok "the store answers ListMultipartUploads" || bad "the store does not answer ListMultipartUploads — the incomplete-upload check below would be vacuous"
     inc=$(mcx mc ls --incomplete --recursive m/$BUCKET/datasets/f72/ 2>/dev/null | grep -c . || true)
     [ "${inc:-0}" = "0" ] && ok "no incomplete multipart upload under datasets/f72/" || bad "$inc incomplete multipart upload(s) under datasets/f72/ — the fingerprint of a cut completion"
+else
+    bad "f72-writer never reached Running in 180s — S23 made no observation at all (this was a SILENT skip: run 3 on s3a, 2026-09-30)"
 fi
 
 # ── S24 shared read-only mounter ──────────────────────────────────────
@@ -1527,6 +1645,15 @@ fi
 # outlive the pod its annotation names; the last member's leave brings
 # it down, in F72's order.
 leg S24 "sharing: two read-only consumers of one CR on one node share ONE worker, a third with another uid gets its own; the first out leaves the mounter up, the last brings it down"
+# The publishes this leg reads from the plugin's log must be THIS
+# plugin's: the fixtures were published at setup, and every roll since
+# (S9, S17, S17f, and a multi-node rolling update) took that log with
+# its pod — 2 BAD on s3a 2026-09-30 for lines the first plugin wrote.
+# Recreate the three, so the lines the assertions read are this pod's.
+$K -n $NS delete pod shared-a shared-b shared-c --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
+for p in shared-a shared-b shared-c; do fx_doc tenants.yaml Pod "$p" | $K apply -f - >/dev/null; done
+wait_phase shared-a Running 300 && wait_phase shared-b Running 300 && wait_phase shared-c Running 300 \
+    || bad "PRECONDITION: shared-a/b/c did not all reach Running after their recreate — the log lines below would be nobody's"
 shared_workers() { $K -n $WNS get pods -o json 2>/dev/null | python3 -c "
 import json,sys
 n=0
@@ -1581,6 +1708,12 @@ fi
 # mount-s3's own 512 MiB floor, and the worker image is pulled by the
 # plugin's init container before any tenant needs it.
 leg S25 "the mounter's memory target is two thirds of the worker limit, a CR's own wins, the worker image was pre-pulled by the plugin, and the chart refuses a limit under 512Mi"
+# `reader` was published at setup; the line this leg reads from the
+# plugin's log is that publish's, and the plugin has been rolled since
+# (1 BAD on s3a 2026-09-30). Recreate it, so the line is this pod's.
+$K -n $NS delete pod reader --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
+fx_doc tenants.yaml Pod reader | $K apply -f - >/dev/null
+wait_phase reader Running 300 || bad "PRECONDITION: reader did not come back Running after its recreate"
 if require_pod reader; then
     w=$(worker_of reader)
     argv=$(worker_argv "$w")
@@ -1644,8 +1777,12 @@ fi
 # tag no node has and no registry serves; it lands when the leg loads
 # it, and the SAME worker pod — the uid pins it — must carry the mount.
 leg S27 "a worker whose image is still coming at the 45 s deadline is KEPT: kubelet's retries adopt the same pod, and the mount completes on it once the image lands"
-if chart_up --set workers.passthroughImage.tag=pull-test --set workers.prepull.passthrough=false >/dev/null 2>&1 && plugin_rolled; then
-    ok "chart upgraded: workers run dilipdalton/flint-s3-worker:pull-test (nowhere yet); pre-pull off so the plugin itself can roll"
+if ! image_absent; then
+    bad "the registry already serves dilipdalton/flint-s3-worker:pull-test (a previous run's leftover): the worker would pull it at once and this leg would measure nothing"
+elif ! node_image_drop; then
+    bad "$NODE still holds $HUB_REPO:pull-test in its containerd cache and it could not be dropped: the worker would start from the cache at once and this leg would measure nothing"
+elif chart_up --set workers.passthroughImage.tag=pull-test --set workers.prepull.passthrough=false >/dev/null 2>&1 && plugin_rolled; then
+    ok "chart upgraded: workers run dilipdalton/flint-s3-worker:pull-test (nowhere yet, checked); pre-pull off so the plugin itself can roll"
     fx_doc tenants.yaml Pod reader | sed 's/^  name: reader$/  name: pull-reader/' | $K apply -f - >/dev/null
     i=0; w=""; while [ $i -lt 60 ]; do w=$(worker_of_any pull-reader); [ -n "$w" ] && break; sleep 2; i=$((i + 2)); done
     [ -n "$w" ] && ok "worker $w created for pull-reader (${i}s)" || bad "no worker for pull-reader in 60 s"
@@ -1658,21 +1795,22 @@ if chart_up --set workers.passthroughImage.tag=pull-test --set workers.prepull.p
     plugin_log | grep -q "still coming up; resuming rather than starting over" && ok "a retry resumed on the kept worker (logged)" || bad "no 'resuming rather than starting over' line in the plugin log"
     n=$(plugin_log | grep -c "retrying an unfinished publish"); [ "${n:-0}" = "0" ] && ok "no attempt started the publish over (0 cleanup lines)" || bad "$n 'retrying an unfinished publish' cleanup(s) in the plugin log"
     note "worker $w is waiting on: $($K -n $WNS get pod "$w" -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null)"
-    docker tag "dilipdalton/flint-s3-worker:$TAG" dilipdalton/flint-s3-worker:pull-test >/dev/null 2>&1
-    kind load docker-image dilipdalton/flint-s3-worker:pull-test --name "${CTX#kind-}" >/dev/null 2>&1 && ok "the pull-test image was loaded onto the nodes: the same pod's next pull succeeds" || bad "kind load of the pull-test tag failed"
+    image_lands && ok "the pull-test image is now where the nodes pull from ($(image_where)): the same pod's next pull succeeds" || bad "could not make the pull-test tag available ($(image_where))"
     $K -n $NS wait --for=condition=ready pod/pull-reader --timeout=540s >/dev/null 2>&1 && ok "pull-reader mounted once the image was there" || bad "pull-reader not Ready 540 s after the image landed: $(mount_events pull-reader | tail -1 | cut -c1-200)"
     uid2=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
     [ "$uid2" = "$uid0" ] && ok "…on THAT worker (uid unchanged through the whole wait)" || bad "the mount landed on a different worker: '$uid0' → '$uid2'"
     got=$(inpod pull-reader "cat /mnt/s3/shard-02.txt"); [ "$got" = "seeded-object-02" ] && ok "pull-reader reads content" || bad "pull-reader read '$got'"
     $K -n $NS delete pod pull-reader --wait=true --timeout=120s >/dev/null 2>&1
     chart_up >/dev/null 2>&1 && plugin_rolled && ok "chart restored (tag $TAG, pre-pull on)" || bad "chart restore failed"
-    # The host's tag only. NOT `crictl rmi` on the node: containerd's CRI
-    # removes the IMAGE, every tag of it, and pull-test is the same image
-    # as $TAG — measured on the box 2026-09-30, where a by-hand
-    # `crictl rmi …:pull-test` left the worker node with no
-    # flint-s3-worker:$TAG at all (the next plugin roll's pre-pull would
-    # have failed and blocked the plugin). The node keeps the extra tag.
+    # The docker host's tag, and the registry's on a real cluster. NOT
+    # `crictl rmi` on the node: containerd's CRI removes the IMAGE, every
+    # tag of it, and pull-test is the same image as $TAG — measured on
+    # the box 2026-09-30, where a by-hand `crictl rmi …:pull-test` left
+    # the worker node with no flint-s3-worker:$TAG at all (the next
+    # plugin roll's pre-pull would have failed and blocked the plugin).
+    # The node keeps the extra tag.
     docker rmi dilipdalton/flint-s3-worker:pull-test >/dev/null 2>&1
+    image_unland
 else
     bad "chart upgrade to the pull-test tag failed; leg skipped"
 fi
@@ -1788,10 +1926,15 @@ if wait_phase lean-agent Running 300; then
     mount_events lean-agent | grep -q 'SyncerRelaunched' \
         && ok "the tenant's events name it (SyncerRelaunched)" \
         || bad "no SyncerRelaunched event on lean-agent"
-    r0=$(lrenew tenants/proj); sleep 40; r1=$(lrenew tenants/proj)
-    [ "${r1:-0}" -gt "${r0:-0}" ] \
-        && ok "the relaunched syncer holds and renews the lease ($r0 → $r1)" \
-        || bad "the lease is not being renewed after the relaunch ($r0 → $r1)"
+    # Under the per-barrier fence nothing renews between barriers (a
+    # renewal here was the lifetime lease's sign of life — 1 BAD on s3a
+    # 2026-09-30); the relaunched syncer is proven live by a publish it
+    # must claim for.
+    tsh lean-agent "printf 'after the re-send' > /workspace/src/s21.txt"
+    out=$(lpublish lean-agent "s21-$(date +%s)" 120); el=${out%% *}; ack=${out#* }
+    [ "$(ack_status "$ack")" = "ok" ] && lmhas tenants/proj src/s21.txt \
+        && ok "the relaunched syncer claims and publishes (acked in ${el}s, src/s21.txt cited)" \
+        || bad "the relaunched syncer did not publish: ack ${el}s '$(printf '%s' "$ack" | cut -c1-100)'"
 else
     bad "lean-agent never reached Running in 300s — S21 made no observation at all"
 fi

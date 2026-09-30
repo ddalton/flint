@@ -1,0 +1,346 @@
+=== TEARDOWN
+Error: uninstall: Release not loaded: flint-s3-csi: release: not found
+namespace "s3-tenants" deleted
+secret "minio-creds" deleted
+✓ sleepers removed
+=== both namespaces gone after 6s
+=== SETUP
+namespace/flint-system created
+namespace/s3-tenants created
+deployment.apps/minio created
+service/minio created
+job.batch/seed-bucket created
+pod/mc-s3 created
+secret/s3-broker-static created
+secret/minio-creds created
+customresourcedefinition.apiextensions.k8s.io/flintpassthroughmounts.chert.us unchanged
+customresourcedefinition.apiextensions.k8s.io/flintleanworkspaces.chert.us configured
+waiting for the store + seed (minio)…
+Waiting for deployment "minio" rollout to finish: 0 of 1 updated replicas are available...
+deployment "minio" successfully rolled out
+job.batch/seed-bucket condition met
+pod/mc-s3 condition met
+seeded:
+[2026-09-30 18:07:31 UTC]    17B STANDARD datasets/imagenet/shard-00.txt
+[2026-09-30 18:07:31 UTC]    17B STANDARD datasets/imagenet/shard-01.txt
+[2026-09-30 18:07:31 UTC]    17B STANDARD datasets/imagenet/shard-02.txt
+[2026-09-30 18:07:31 UTC]    17B STANDARD datasets/imagenet/shard-03.txt
+[2026-09-30 18:07:32 UTC]    17B STANDARD datasets/imagenet/shard-04.txt
+[2026-09-30 18:07:32 UTC]    17B STANDARD datasets/imagenet/shard-05.txt
+[2026-09-30 18:07:32 UTC]    17B STANDARD datasets/imagenet/shard-06.txt
+[2026-09-30 18:07:32 UTC]    17B STANDARD datasets/imagenet/shard-07.txt
+[2026-09-30 18:07:32 UTC]    17B STANDARD datasets/imagenet/shard-08.txt
+[2026-09-30 18:07:32 UTC]    17B STANDARD datasets/imagenet/shard-09.txt
+[2026-09-30 18:07:32 UTC]    12B STANDARD datasets/imagenet/sub/deep.txt
+[2026-09-30 18:07:32 UTC]    15B STANDARD elsewhere/only.txt
+[2026-09-30 18:07:32 UTC]    20B STANDARD private/secret.txt
+Release "flint-s3-csi" does not exist. Installing it now.
+NAME: flint-s3-csi
+LAST DEPLOYED: Wed Sep 30 11:07:36 2026
+NAMESPACE: flint-system
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+flint-s3-csi is installed in namespace flint-system.
+
+Confirm the driver registered on every node (the registrar sidecar does
+this; give a fresh node a few seconds):
+
+  kubectl get csidriver s3.csi.chert.us
+  kubectl -n flint-system rollout status ds/flint-s3-csi-node
+  kubectl -n flint-system rollout status deploy/flint-s3-broker
+
+Declare a mount IN THE TENANT'S NAMESPACE, and say who may use it:
+
+  apiVersion: chert.us/v1alpha1
+  kind: FlintPassthroughMount
+  metadata: { name: datasets, namespace: team-a }
+  spec:
+    bucket: my-bucket
+    keyPrefix: datasets/imagenet
+    endpoint: http://minio.flint-system.svc:9000   # unset ⇒ AWS S3
+    readOnly: true
+    consumers:
+      serviceAccounts: ["trainer"]   # ABSENT = DENY; "*" = any SA here
+    identity:
+      mode: broker                   # broker | webIdentity | static | ambient
+
+Then a pod mounts it with a volume — no label, no sidecar:
+
+  spec:
+    serviceAccountName: trainer      # must be in consumers
+    volumes:
+      - name: data
+        csi:
+          driver: s3.csi.chert.us
+          readOnly: true
+          volumeAttributes:
+            chert.us/mount: datasets
+            # chert.us/uid: "1001"   # presentation only; default 65534
+    containers:
+      - name: app
+        volumeMounts:
+          - { name: data, mountPath: /mnt/s3, readOnly: true }
+
+volumeAttributes are a REQUEST, never an authorization: exactly one of
+chert.us/mount / chert.us/workspace, optionally chert.us/uid and
+chert.us/gid, and every other key is refused by name. bucket, keyPrefix,
+endpoint, image and credentials come from the CR and only the CR.
+
+WHERE THINGS RUN. Each mounted volume is one worker pod in
+flint-workers, pinned to the tenant's node:
+
+  kubectl -n flint-workers get pods -l app.kubernetes.io/managed-by=flint-s3-csi-node
+
+The worker is placed on the tenant's node directly (spec.nodeName), so
+the scheduler reserves no room for it and it counts against the node's
+maxPods like any pod. A node with no room refuses it (a WorkerNotAdmitted
+event on the tenant, which stays ContainerCreating and is NOT
+rescheduled) until capacity frees. Size nodes for two pods per
+S3-mounted tenant, or let read-only consumers of one dataset share a
+mounter (spec.sharing.readOnly).
+
+The tenant pod carries no credential and no privilege and is admissible
+under PodSecurity `restricted`. The node plugin is the privileged
+component (one per node); the broker is the one with a standing
+credential. A refused publish shows up as a FailedMount event on the
+tenant pod, retried with backoff — `kubectl describe pod` names the
+reason (a missing CR, a ServiceAccount not in consumers, a refused
+attribute).
+
+IDENTITY. Every publish registers with the broker, and every credential
+is minted from the POD's own kubelet-issued token (1 h, audience
+s3.csi.chert.us) after a TokenReview. A pod
+gets a credential only for a CR whose consumers name its ServiceAccount,
+120 s at a time.
+
+THIS INSTALL RUNS THE STATIC BACKEND: the broker hands the ONE key set in
+Secret s3-broker-static to every entitled pod. The
+pod is still authenticated and authorized per publish, but every project
+shares that key at the bucket. Move to broker.backend sts or rest when a
+per-project credential source exists.
+
+A MOUNTER CRASH IS STILL NOT RECOVERABLE IN PLACE. Containers that
+already opened the mount read ENOTCONN once the worker dies; the volume
+stays unhealthy until the pod is recreated. Run S3-mounted workloads
+under a controller.
+
+THE MOUNT PRESENTS AS ONE UID. NodePublish never sees the pod's
+securityContext, so nothing can default from runAsUser. Ownership is the
+volume's chert.us/uid attribute if set, ELSE the CR's spec.uid, else
+65534 — the ATTRIBUTE WINS over the CR. gid resolves the same way and
+defaults to whatever uid resolved to. With nothing declared, files no
+longer present as root as they did under the webhook. A lean workspace
+has no default: it refuses to publish without a uid, and refuses uid 0,
+because the syncer must run as the app's uid to read what the app wrote.
+
+IDENTITY MODES. broker, webIdentity and static are the driver's own and
+run unchanged against S3, MinIO or Ceph RGW. ambient hands the worker
+nothing: whatever the SDK's default credential chain finds on the node
+(environment, a shared file, a web-identity token, a container
+credential URI, instance metadata) is the identity, and when it finds
+nothing the FailedMount event carries the chain's own error. The
+platform must let a pod complete that chain — on a cloud instance
+behind an overlay network, the metadata service's hop limit has to
+admit pods — and the driver does not proxy or inject it.
+
+NODE LOSS. A tenant on a node that dies is Kubernetes' to reschedule; a
+Deployment's replacement pod mounts on its new node and the dead node's
+workers go with the node. What Kubernetes does NOT do without a
+cloud-controller-manager is delete the Node object of an instance that
+has vanished. Until someone does, a rolling update of this chart's
+DaemonSet stalls: the controller picks the dead node's pod first, it can
+never finish terminating, and with maxUnavailable 1 no live node is
+updated. `kubectl delete node <name>` is the operator's step on such a
+cluster; the roll then proceeds. Mounts on live nodes keep serving
+throughout — a plugin roll does not unmount tenants.
+
+WHEN A DRAIN COULD NOT BE ATTESTED. If a lean syncer dies, is evicted or
+runs out of grace before its final publish completes, the node plugin
+does NOT delete the workspace — it moves the tree aside and raises a
+DrainNotAttested event on the tenant. What the tenant wrote since its
+last publish is still on that node:
+
+  <kubelet-root>/plugins/s3.csi.chert.us/undrained/<volume>-<unix>
+
+By default (workers.quota: false) that directory holds the tree itself,
+at <...>/undrained/<volume>-<unix>/tree. With workers.quota: true it holds
+an ext4 IMAGE, not a browsable tree, so recovering it means mounting it
+read-only:
+
+  mount -o loop,ro <...>/undrained/<volume>-<unix>/tree.img /mnt/recover
+
+Nothing ever removes these, by design — losing a tenant's last writes to
+an automatic sweep would be worse than keeping them. The consequence is
+that they accumulate until an operator reviews and deletes them, and a
+node whose root filesystem fills crosses kubelet's DiskPressure
+threshold, at which point kubelet evicts pods that have nothing to do
+with the workspace that was preserved. Size the node's root filesystem
+for the workspaces it may hold (a preserved plain tree costs what it
+contains; with workers.quota: true each costs at least the ext4 metadata
+its sizeLimitGib implies — roughly 0.5 GiB for a 20 GiB workspace — plus
+every block ever written in it), and sweep the directory
+as part of routine operations.
+
+NODE SHUTDOWN, AND WHAT SURVIVES IT. A graceful shutdown drains: the
+syncer publishes its outstanding work on SIGTERM, so a reboot or a
+planned cloud-instance termination keeps it. A machine that simply
+stops — power cut, kernel panic, instance failure — runs no drain at
+all, and everything written since the last publish is gone; `floorSecs`
+on the workspace is what bounds that window. The ordering between a
+tenant and its worker during a shutdown is kubelet's graceful node
+shutdown, which is OFF unless `shutdownGracePeriod` is set on the
+kubelet; see workers.priorityClassName in values.yaml.
+Waiting for daemon set "flint-s3-csi-node" rollout to finish: 0 of 3 updated pods are available...
+Waiting for daemon set "flint-s3-csi-node" rollout to finish: 1 of 3 updated pods are available...
+Waiting for daemon set "flint-s3-csi-node" rollout to finish: 2 of 3 updated pods are available...
+daemon set "flint-s3-csi-node" successfully rolled out
+deployment "flint-s3-broker" successfully rolled out
+serviceaccount/trainer created
+serviceaccount/bob created
+flintpassthroughmount.chert.us/datasets created
+flintpassthroughmount.chert.us/datasets-ro created
+flintpassthroughmount.chert.us/elsewhere created
+flintpassthroughmount.chert.us/datasets-static created
+flintpassthroughmount.chert.us/datasets-noconsumers created
+flintpassthroughmount.chert.us/datasets-f72 created
+flintpassthroughmount.chert.us/datasets-shared created
+pod/reader created
+pod/reader-ro created
+pod/reader-elsewhere created
+pod/reader-static created
+pod/shared-a created
+pod/shared-b created
+pod/shared-c created
+pod/refused-bob created
+pod/refused-noconsumers created
+pod/refused-missing created
+pod/refused-badattr created
+pod/labelled-only created
+  + nodesh-daemon-s3aaws1
+  + nodesh-daemon-s3aaws2
+  + nodesh-daemon-s3acp1
+✓ all sleepers ready — nodesh now execs (~1s) instead of spawning (~20s)
+setup done (store=minio node=s3a-aws-1 via nodesh)
+=== LEGS
+
+── S11 — lean: the checkout gate holds for the app AND its init container; a cold pod finds the seeded project; the syncer lives in the worker, not the pod
+  ok: lean-seeder is Running (claim + checkout of a fresh prefix, no operator, no webhook)
+  ok: the seeder's declared publish was acked in 0s
+  ok: 200 objects under tenants/proj/files/src/
+  ok: the manifest cites src/f0042.txt at seq 1
+  ok: zero FLINT_SYNC_*/AWS_* in the seeder's env
+  ok: syncer worker s3w-6d51c8b98e0e74b2 is uid 1001, drop ALL, unprivileged
+  ok: its only hostPath is the plugin-owned tree (/var/lib/kubelet/plugins/s3.csi.chert.us/volumes/csi-a06a916c2e5772194eb28352401c66b56e74a4a4beac85a9bcdda9f8b84ddb62/tree)
+  ok: flint-sync run is alive in the worker
+  ok: the seeder pod is gone; only bucket objects remain
+  ok: the INIT container ran only after checkout-complete existed
+  ok: the init container saw all 200 files
+  ok: the app's first instruction ran after checkout-complete
+  ok: the app's first instruction saw 200 files
+  ok: f0042.txt carries the seeded bytes
+  ok: zero AWS_*/FLINT_SYNC_* in the agent's env
+  ok: CONTROL: a lean CR without consumers denies, naming the SA and the field
+
+── S12 — lean: the in-band publish verb is acked under CSI delivery, the manifest advances, and the control door is reachable in the TENANT's own view of the tree
+  ok: the exec channel into the tenant works (a FALSE below is an answer, not a broken exec)
+  ok: PRECONDITION: no publish.ack yet, manifest at seq 1
+  ok: PRECONDITION: src/s12.txt is written but uncited (the 1-hour floor is the fixture)
+  ok: the sentinel was acked in 3s, carrying THIS leg's nonce (not a stale ack)
+  ok: the ack status is ok
+  ok: the manifest advanced 1 → 2 (A5)
+  ok: the manifest cites src/s12.txt
+  ok: the bucket carries the bytes the tenant wrote
+  ok: the control door is a SOCKET in the tenant's own view (/workspace/.flint-sync/ctl.sock)
+  ok: it is the SAME socket the worker bound (inode 131082) — a tenant that curls --unix-socket reaches the live door
+  ok: the door ANSWERS: flint-sync ctl status returns a status document from the running syncer
+  ok: the operator-side recipe works: flint-sync status runs in s3w-08bf2bf9d1bb6441 while the syncer holds the occupancy flock
+
+── S13 — lean drain: a file written after the last publish is in the bucket, cited, once the pod is deleted — and the worker follows the pod
+  ok: PRECONDITION: late.txt is not cited before the delete (floorSecs is an hour)
+  ok: the drain published late.txt (cited 0s after the delete returned) at seq 3
+  ok: late.txt carries the bytes the agent wrote
+  ok: syncer worker s3w-08bf2bf9d1bb6441 is gone
+  ok: no lean tree remains under the plugin dir
+
+── S14 — lean holder identity under the per-barrier fence: a released cell is claimed on sight, a HELD stranger is waited out and deposed with a rotation, a reserved handoff is waited out without one, and a fence a previous container of this pod left held is released at its restart
+  ok: PRECONDITION: lean-agent's incarnation is lean-2f15d7bc-4152-4f40-ad79-8c0a557fee40; the cell reads epoch 3, the manifest seq 3 with 202 entries
+  ok: released cell: the publish was acked ok in 3s
+  ok: released cell: claimed on sight (3s) — a clean handoff is not waited out
+  ok: the cell names THIS pod's incarnation (lean-2f15d7bc-4152-4f40-ad79-8c0a557fee40), not the released stranger
+  ok: epoch 13 → 14: the claim superseded the released cell by one
+  ok: the cell is released again after the barrier — the fence is held for one commit section
+  ok: manifest seq 3 → 4: one install and no rotation for a clean handoff
+  ok: src/s14-a.txt is cited
+  ok: held cell: the publish was acked ok in 63s
+  ok: held cell: 63s to the ack — six spaced quiet polls (>= 50 s) before the stranger was judged dead, inside the 150 s claim deadline
+  ok: the syncer reported the wait (behind lean-straggler-held)
+  ok: the cell names this pod (lean-2f15d7bc-4152-4f40-ad79-8c0a557fee40): the stranger was DEPOSED
+  ok: epoch 23 → 24 across the deposal
+  ok: manifest seq 4 → 6: the takeover ROTATED (+1, entries kept) before the install (+1) — a straggler's CAS is stale
+  ok: the entries survived the rotation (203 → 204: the one new file)
+  ok: reserved handoff: the publish was acked ok in 22s
+  ok: reserved handoff: 22s to the ack — two spaced quiet polls for the reserved waiter (>= 10 s), well short of a deposal (50 s)
+  ok: the cell names this pod (lean-2f15d7bc-4152-4f40-ad79-8c0a557fee40): the abandoned reservation was skipped
+  ok: epoch 33 → 34
+  ok: manifest seq 6 → 7: no rotation for a released cell, whoever it was reserved for
+  ok: the syncer died and its container restarted in place (restartCount 0 → 1 in 3s) — the same pod, the same tree
+  ok: the restarted container RELEASED the fence its previous life left held (holder lean-2f15d7bc-4152-4f40-ad79-8c0a557fee40, epoch 43, released within 0s) — no waiter pays the deposal for it
+  ok: the worker log names the repair
+  ok: the incarnation id survived the restart (lean-2f15d7bc-4152-4f40-ad79-8c0a557fee40) — it lives in the tree, not in the container
+  ok: the restart moved no manifest (seq still 7) — rotation is for stragglers, not restarts
+  ok: the restarted container publishes again under the same incarnation on sight (3s; epoch 43 → 44, seq 7 → 8, no rotation)
+
+── S20 — a syncer that exited on its own is relaunched under its still-mounted tenant; at the tenant's delete a drain that cannot win a LIVE fence attests nothing and its tree is preserved
+  ok: PRECONDITION: lean-agent's worker is s3w-82ffe1dc75924d34 (grace 141s from the 60 s floor)
+  ok: the syncer exited on SIGTERM and its worker is Succeeded (exit 0, 3s) while the tenant is still mounted — the shape OnFailure never restarts
+  ok: the tenant still sees its tree (206 files) with no syncer behind it
+  ok: the exited worker was RELAUNCHED by a republish (60s; uid 4f56e655-0345-4ec3-ad7e-848b36ef629e → 82fd62a6-068c-4a8e-a01e-5c5124d73ae1)
+  ok: the tenant's events name the relaunch (SyncerRecreated)
+  ok: the relaunched syncer publishes (acked in 3s, src/s20-a.txt cited)
+  ok: the delete stood 83s: the drain waited on the live fence rather than walking past it
+  ok: the cell still names the live stranger (lean-live-stranger): a holder whose token moves is never deposed
+  ok: the tree was PRESERVED under undrained/ at its tenant's delete (its drain attested nothing)
+  ok: the preserved dir carries the tree and its state (/var/lib/kubelet/plugins/s3.csi.chert.us/undrained/csi-77cac5a6ec88497dd18acc8f2899f6bd4c557c87215ed7e8a6f7d6b2ae034ffd-1790792054)
+  BAD: src/s20-late.txt is not in the preserved tree
+  ok: no drain attestation in the preserved tree — the decision matches its sensor
+  ok: the tenant's events say why (DrainNotAttested )
+
+── S21 — a Running worker with no syncer inside it (its launch record gone, the node-reboot shape) gets the launch sent again on the next republish, in the SAME pod
+  ok: PRECONDITION: the worker container restarted (0 → 1) with no launch record
+  ok: PRECONDITION: the pod is Running with NO flint-sync inside it — the shape a reboot leaves
+  ok: flint-sync is back in the worker 60s later: the plugin sent the launch again
+  ok: the SAME pod (uid unchanged): the launch was re-sent, the worker was not recreated
+  ok: the launch record is persisted again
+  ok: the tenant's events name it (SyncerRelaunched)
+  ok: the relaunched syncer claims and publishes (acked in 3s, src/s21.txt cited)
+
+── S24 — sharing: two read-only consumers of one CR on one node share ONE worker, a third with another uid gets its own; the first out leaves the mounter up, the last brings it down
+  ok: shared-a reads through the shared mount
+  ok: shared-b reads through the shared mount
+  ok: shared-c reads through its own class's mount
+  ok: two shared workers for datasets-shared: one class for uid 1001 (shared-a + shared-b), one for uid 1002 (shared-c)
+  ok: exactly one of the pair created a worker (shared-a → s3w-3e3235dcf353e90b); the other joined it
+  ok: two shared FUSE sources on the node (one per class)
+  ok: the default block cache is in use in s3w-3e3235dcf353e90b (8 cache entries under /tmp)
+  ok: the plugin logged the defaulted cache
+  ok: the shared mount is read-only
+  ok: the plugin logged 6 shared publishes
+  ok: worker s3w-3e3235dcf353e90b still Running after its creator shared-a left
+  ok: shared-b still reads after shared-a left
+  ok: the plugin recorded the leave
+  ok: worker s3w-3e3235dcf353e90b is gone after the last member left (0s)
+  ok: the plugin brought the mounter down as the last member left
+  ok: one shared record left on the node (shared-c's class)
+
+── S25 — the mounter's memory target is two thirds of the worker limit, a CR's own wins, the worker image was pre-pulled by the plugin, and the chart refuses a limit under 512Mi
+  ok: reader's mount-s3 runs --memory-target 682 (two thirds of the chart's 1Gi limit)
+  ok: the plugin logged the target it derived
+  ok: the plugin's prepull-passthrough init container ran the worker image and exited 0 on s3a-aws-1
+  ok: CONTROL: a CR naming its own --memory-target (900) keeps it, and the plugin's 682 is absent
+  ok: the chart refused a 256Mi worker limit at render time, naming the floor
+  ok: the refused upgrade left the release at revision 1
+
+════════════════════════════════════════
+s3.csi.chert.us legs [S11 S14 S20 S21 S24 S25]: 100 ok, 1 bad
