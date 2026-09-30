@@ -38,7 +38,12 @@ covered by the stability guarantee.
   every image that carries the preStop hook, so no image needs rebuilding for
   it. The values.yaml claim that mount-s3 "sizes its prefetch against machine
   RAM, not the cgroup" was true of older releases and false for the pinned
-  1.24.0; corrected.
+  1.24.0; corrected. Kind-rig legs S25-S29 (`s3csi/e2e/run-s3csi.sh`) pin
+  each of the five fixes; run on the box 2026-09-30, 77 ok over two runs
+  (`s3csi/e2e/results/2026-09-30-kind-box-review-fixes/`), with S23/S24 as
+  regression. The drill gained `chart_up` (one --set list for setup and
+  the legs), `fx_doc` (one fixture document), `worker_argv`, and a
+  `plugin_log` that strips the plugin's ANSI colour.
 
 - **flint-passthrough: one mounter per node for a CR's read-only consumers
   (`spec.sharing.readOnly`)** (2026-09-29, opt-in, off by default; design of

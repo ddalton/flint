@@ -1,0 +1,85 @@
+
+── S23 — F72: a file whose last close came from a CHILD of its opener is whole in the bucket after its pod exits, with no incomplete multipart upload left behind
+  ok: worker s3w-fbc3a49b4a06d697 egress shaped to 40 Mbit/s in the pod's own netns (a 48 MiB tail takes ~10 s)
+  ok: 48 MiB written by a child of the opener, which had already closed
+  ok: worker s3w-fbc3a49b4a06d697 is gone (0s)
+  ok: the plugin waited for the mounter's own exit (F72 order)
+  ok: late.bin is in the bucket whole (48 MiB)
+  ok: the store answers ListMultipartUploads
+  ok: no incomplete multipart upload under datasets/f72/
+
+── S24 — sharing: two read-only consumers of one CR on one node share ONE worker, a third with another uid gets its own; the first out leaves the mounter up, the last brings it down
+  ok: shared-a reads through the shared mount
+  ok: shared-b reads through the shared mount
+  ok: shared-c reads through its own class's mount
+  ok: two shared workers for datasets-shared: one class for uid 1001 (shared-a + shared-b), one for uid 1002 (shared-c)
+  ok: exactly one of the pair created a worker (shared-b → s3w-b69dcb634bc8097e); the other joined it
+  ok: two shared FUSE sources on the node (one per class)
+  ok: the default block cache is in use in s3w-b69dcb634bc8097e (8 cache entries under /tmp)
+  ok: the plugin logged the defaulted cache
+  ok: the shared mount is read-only
+  ok: the plugin logged 3 shared publishes
+  ok: worker s3w-b69dcb634bc8097e still Running after its creator shared-b left
+  ok: shared-a still reads after shared-b left
+  ok: the plugin recorded the leave
+  ok: worker s3w-b69dcb634bc8097e is gone after the last member left (0s)
+  ok: the plugin brought the mounter down as the last member left
+  ok: one shared record left on the node (shared-c's class)
+
+── S25 — the mounter's memory target is two thirds of the worker limit, a CR's own wins, the worker image was pre-pulled by the plugin, and the chart refuses a limit under 512Mi
+  ok: reader's mount-s3 runs --memory-target 682 (two thirds of the chart's 1Gi limit)
+  ok: the plugin logged the target it derived
+  ok: the plugin's prepull-passthrough init container ran the worker image and exited 0 on flint-s3csi-worker
+  ok: CONTROL: a CR naming its own --memory-target (900) keeps it, and the plugin's 682 is absent
+  ok: the chart refused a 256Mi worker limit at render time, naming the floor
+  ok: the refused upgrade left the release at revision 1
+
+── S26 — a node with no room for the worker: WorkerNotAdmitted on the tenant naming kubelet's refusal, the pod stays ContainerCreating, and mounts once capacity is back
+  ok: chart upgraded: every new worker now asks kubelet for 1000Gi
+  ok: WorkerNotAdmitted landed on noroom within 5s
+  ok: the event names kubelet's reason (OutOfmemory)
+  ok: the event says the tenant stays bound to this node
+  ok: …and names the node's maxPods as the other ceiling
+  ok: noroom is still Pending (ContainerCreating), not Failed
+  NOTE: 1 Failed worker(s) in flint-workers at this instant (the plugin's cleanup and kubelet's GC reap them)
+  ok: chart restored
+  ok: noroom mounted once the requests fit again — kubelet's retry on the same pod, no recreation
+  ok: noroom reads content
+
+── S27 — a worker whose image is still coming at the 45 s deadline is KEPT: kubelet's retries adopt the same pod, and the mount completes on it once the image lands
+  ok: chart upgraded: workers run dilipdalton/flint-s3-worker:pull-test (nowhere yet); pre-pull off so the plugin itself can roll
+  ok: worker s3w-00f00ea47025e5ea created for pull-reader (2s)
+  NOTE: waiting 150 s: past the 45 s deadline and through at least one kubelet retry
+  ok: the same worker pod (uid ba118e9c-f700-4105-8f80-f08a59adac58) is still there after 150 s of retries — never deleted and recreated
+  ok: the plugin kept the worker at the deadline (logged)
+  ok: a retry resumed on the kept worker (logged)
+  ok: no attempt started the publish over (0 cleanup lines)
+  NOTE: worker s3w-00f00ea47025e5ea is waiting on: ImagePullBackOff
+  ok: the pull-test image was loaded onto the nodes: the same pod's next pull succeeds
+  ok: pull-reader mounted once the image was there
+  ok: …on THAT worker (uid unchanged through the whole wait)
+  ok: pull-reader reads content
+  ok: chart restored (tag dev, pre-pull on)
+
+── S29 — revoking ONE member of a shared class refuses its refresh without taking the class's credential from the others: the file stays, the siblings keep reading
+  ok: shared-d (SA trainer2) mounted
+  BAD: shared-d's publish line: 
+  ok: the class's creds.json is in s3w-b69dcb634bc8097e's comm dir on the node
+  NOTE: trainer2 dropped from consumers; shared-d's next refresh (every republish at lifetime 120s) is refused
+  ok: CredentialRefreshFailed landed on shared-d after 65s
+  ok: the event says the class's credential stays for the others
+  ok: creds.json stayed in place through 50 samples over 100 s after the refusal
+  ok: shared-a (still a consumer) reads an object it had not cached
+  ok: shared-d keeps reading until it exits (per-member revocation is not possible under sharing, as the CRD says)
+
+── S28 — a sharing CR whose broker cannot be asked at publish is RETRIED, not given a mounter of its own: once the broker is back the pod joins the shared class
+  ok: the refusal names the sharing decision, not a credential outage: FailedMount: MountVolume.SetUp failed for volume "data" : rpc error: code = Unavailable desc = FlintPassthroughMount s3-tenants/datasets-shared asks f…
+  ok: the plugin logged the retry
+  ok: no mounter of its own was created for shared-retry during the outage
+  ok: shared-retry mounted once the broker was back
+  BAD: shared-retry's publish line: 
+  ok: shared-retry created no worker (it joined the class's)
+  ok: shared-retry reads through the shared mount
+
+════════════════════════════════════════
+s3.csi.chert.us legs [S23 S24 S25 S26 S27 S29 S28]: 62 ok, 2 bad

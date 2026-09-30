@@ -1,0 +1,23 @@
+
+── S29 — revoking ONE member of a shared class refuses its refresh without taking the class's credential from the others: the file stays, the siblings keep reading
+  ok: shared-d (SA trainer2) mounted
+  ok: shared-d joined the shared class (a second SA in one class)
+  ok: the class's creds.json is in s3w-b69dcb634bc8097e's comm dir on the node
+  NOTE: trainer2 dropped from consumers; shared-d's next refresh (every republish at lifetime 120s) is refused
+  ok: CredentialRefreshFailed landed on shared-d after 90s
+  ok: the event says the class's credential stays for the others
+  ok: creds.json stayed in place through 50 samples over 100 s after the refusal
+  ok: shared-a (still a consumer) reads an object it had not cached
+  ok: shared-d keeps reading until it exits (per-member revocation is not possible under sharing, as the CRD says)
+
+── S28 — a sharing CR whose broker cannot be asked at publish is RETRIED, not given a mounter of its own: once the broker is back the pod joins the shared class
+  ok: the refusal names the sharing decision, not a credential outage: FailedMount: MountVolume.SetUp failed for volume "data" : rpc error: code = Unavailable desc = FlintPassthroughMount s3-tenants/datasets-shared asks f…
+  ok: the plugin logged the retry
+  ok: no mounter of its own was created for shared-retry during the outage
+  ok: shared-retry mounted once the broker was back
+  ok: …as a MEMBER of the shared class, not with a mounter of its own
+  ok: shared-retry created no worker (it joined the class's)
+  ok: shared-retry reads through the shared mount
+
+════════════════════════════════════════
+s3.csi.chert.us legs [S29 S28]: 15 ok, 0 bad

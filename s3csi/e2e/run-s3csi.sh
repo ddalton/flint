@@ -213,6 +213,37 @@ rig() {
     fi
 }
 
+# The chart, installed or upgraded with the rig's settings plus whatever
+# a leg asks for. ONE list, so a leg's upgrade cannot silently drop a
+# setting setup relied on (and never --reuse-values, which would keep a
+# previous leg's override alive under the next).
+chart_up() {
+    helm --kube-context "$CTX" upgrade --install flint-s3-csi "$REPO/flint-s3-csi-chart" -n $SYS \
+        --set node.image.tag="$TAG" --set workers.passthroughImage.tag="$TAG" --set workers.leanImage.tag="$TAG" \
+        --set node.image.pullPolicy=IfNotPresent \
+        --set broker.backend=static --set broker.static.secretRef=s3-broker-static \
+        --set node.credsLifetimeSecs="$CREDS_LIFETIME" --set broker.replicas=1 \
+        --set node.region="$S3_REGION" \
+        --set workers.quota=true \
+        --set node.logLevel=debug --set broker.logLevel=debug "$@"
+}
+plugin_rolled() { $K -n $SYS rollout status ds/flint-s3-csi-node --timeout=240s >/dev/null 2>&1; }
+# The plugin logs with ANSI colour (RUST_LOG's default fmt): a field
+# renders as `ESC[3mtenant ESC[0m ESC[2m= ESC[0m value`, so a grep for
+# `tenant=…` can never match the raw stream. Stripped here, once.
+plugin_log() { $K -n $SYS logs "$(plugin_pod)" 2>/dev/null | sed "s/$(printf '\033')\[[0-9;]*m//g"; }
+# ONE document of a fixture file, by kind and name, so a leg can recreate
+# a single pod (or a renamed copy of it) without re-applying every CR the
+# file holds — which would undo a patch the leg just made.
+fx_doc() { fx "$1" | python3 -c "
+import sys
+k,n=sys.argv[1],sys.argv[2]
+for d in sys.stdin.read().split('\n---\n'):
+    if ('kind: '+k+'\n') in d and ('  name: '+n+'\n') in d: print(d); print('---')
+" "$2" "$3"; }
+# The mounter's argv inside a passthrough worker (its image has a shell).
+worker_argv() { $K -n $WNS exec "$1" -- sh -c 'for p in /proc/[0-9]*; do tr "\0" " " < $p/cmdline 2>/dev/null; echo; done' 2>/dev/null | grep -- 'mount-s3' | head -1; }
+
 # ── setup / teardown ─────────────────────────────────────────────────
 if [ "${1:-}" = "setup" ]; then
     set -e
@@ -238,14 +269,7 @@ if [ "${1:-}" = "setup" ]; then
         exit 1
     fi
     echo "seeded:"; mcx mc ls --recursive m/$BUCKET/
-    helm --kube-context "$CTX" upgrade --install flint-s3-csi "$REPO/flint-s3-csi-chart" -n $SYS \
-        --set node.image.tag="$TAG" --set workers.passthroughImage.tag="$TAG" --set workers.leanImage.tag="$TAG" \
-        --set node.image.pullPolicy=IfNotPresent \
-        --set broker.backend=static --set broker.static.secretRef=s3-broker-static \
-        --set node.credsLifetimeSecs="$CREDS_LIFETIME" --set broker.replicas=1 \
-        --set node.region="$S3_REGION" \
-        --set workers.quota=true \
-        --set node.logLevel=debug --set broker.logLevel=debug
+    chart_up
     # workers.quota=true: S18 tests the ceiling, which is off by default
     # since 2026-09-15 (a plain directory is faster; the chart says why).
     $K -n $SYS rollout status ds/flint-s3-csi-node --timeout=180s
@@ -1547,6 +1571,169 @@ if require_pod shared-a && require_pod shared-b && require_pod shared-c; then
     apply_fx tenants.yaml >/dev/null
 fi
 
+# ── S25 memory target, pre-pull, the chart's floor ───────────────────
+# Fix 1 + fix 3a of the 2026-09-30 passthrough review. Mountpoint 1.24
+# targets 95% of the cgroup limit for its buffers and calls that "not a
+# guaranteed limit"; the plugin now pins --memory-target at two thirds
+# of workers.resources.limits.memory (682 at the rig's 1Gi), a CR that
+# names its own keeps it (mount-s3 refuses the flag twice, so the
+# plugin's must be ABSENT then), the chart refuses a limit under
+# mount-s3's own 512 MiB floor, and the worker image is pulled by the
+# plugin's init container before any tenant needs it.
+leg S25 "the mounter's memory target is two thirds of the worker limit, a CR's own wins, the worker image was pre-pulled by the plugin, and the chart refuses a limit under 512Mi"
+if require_pod reader; then
+    w=$(worker_of reader)
+    argv=$(worker_argv "$w")
+    echo "$argv" | grep -q -- '--memory-target 682 ' && ok "reader's mount-s3 runs --memory-target 682 (two thirds of the chart's 1Gi limit)" || bad "reader's mount-s3 argv carries no '--memory-target 682': ${argv:-<no mount-s3 cmdline in $w>}"
+    plugin_log | grep -q "mounter memory target from the worker limit" && ok "the plugin logged the target it derived" || bad "no 'mounter memory target' line in the plugin log"
+    pp=$($K -n $SYS get pod "$(plugin_pod)" -o jsonpath='{range .status.initContainerStatuses[?(@.name=="prepull-passthrough")]}{.state.terminated.exitCode}{end}' 2>/dev/null)
+    [ "$pp" = "0" ] && ok "the plugin's prepull-passthrough init container ran the worker image and exited 0 on $NODE" || bad "prepull-passthrough init container: exit '${pp:-absent}'"
+    # CONTROL: a CR that names its own target keeps it, and the plugin adds none.
+    $K -n $NS patch fpm datasets-ro --type=merge -p '{"spec":{"mountOptions":["--memory-target","900"]}}' >/dev/null
+    $K -n $NS delete pod reader-ro --wait=true --timeout=120s >/dev/null 2>&1
+    fx_doc tenants.yaml Pod reader-ro | $K apply -f - >/dev/null
+    $K -n $NS wait --for=condition=ready pod/reader-ro --timeout=180s >/dev/null 2>&1
+    w2=$(worker_of reader-ro); argv2=$(worker_argv "$w2")
+    if echo "$argv2" | grep -q -- '--memory-target 900' && ! echo "$argv2" | grep -q -- '--memory-target 682'; then ok "CONTROL: a CR naming its own --memory-target (900) keeps it, and the plugin's 682 is absent"; else bad "CONTROL: reader-ro's argv: ${argv2:-<none>}"; fi
+    $K -n $NS patch fpm datasets-ro --type=json -p '[{"op":"remove","path":"/spec/mountOptions"}]' >/dev/null
+    $K -n $NS delete pod reader-ro --wait=true --timeout=120s >/dev/null 2>&1
+    fx_doc tenants.yaml Pod reader-ro | $K apply -f - >/dev/null
+    # The floor, live: an upgrade to a 256Mi limit must fail at render and change nothing.
+    rev0=$(helm --kube-context "$CTX" -n $SYS status flint-s3-csi -o json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')
+    if chart_up --set workers.resources.limits.memory=256Mi >/tmp/s25-helm.log 2>&1; then bad "the chart ACCEPTED a 256Mi worker limit"; else grep -q "below 512Mi" /tmp/s25-helm.log && ok "the chart refused a 256Mi worker limit at render time, naming the floor" || bad "the chart refused 256Mi for another reason: $(tail -1 /tmp/s25-helm.log | cut -c1-160)"; fi
+    rev1=$(helm --kube-context "$CTX" -n $SYS status flint-s3-csi -o json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')
+    [ "$rev0" = "$rev1" ] && ok "the refused upgrade left the release at revision $rev0" || bad "the release moved from revision $rev0 to $rev1 on a refused upgrade"
+fi
+
+# ── S26 a worker kubelet cannot admit ────────────────────────────────
+# Fix 2. The plugin places a worker with spec.nodeName set, so the
+# scheduler reserved no room for it; kubelet admits it against the
+# node's allocatable and refuses it on a full node (OutOfmemory), while
+# the tenant — already bound here — is never rescheduled. Before: a
+# FailedPrecondition and a cleanup, retried by kubelet forever, with
+# nothing that said why. Now: a WorkerNotAdmitted event naming the node,
+# kubelet's reason and what frees it; and the mount completes once room
+# is back, on the SAME tenant pod.
+leg S26 "a node with no room for the worker: WorkerNotAdmitted on the tenant naming kubelet's refusal, the pod stays ContainerCreating, and mounts once capacity is back"
+if chart_up --set workers.resources.requests.memory=1000Gi --set workers.resources.limits.memory=1000Gi >/dev/null 2>&1 && plugin_rolled; then
+    ok "chart upgraded: every new worker now asks kubelet for 1000Gi"
+    fx_doc tenants.yaml Pod reader | sed 's/^  name: reader$/  name: noroom/' | $K apply -f - >/dev/null
+    i=0; ev=""; while [ $i -lt 150 ]; do ev=$(mount_events noroom | grep WorkerNotAdmitted | head -1); [ -n "$ev" ] && break; sleep 5; i=$((i + 5)); done
+    [ -n "$ev" ] && ok "WorkerNotAdmitted landed on noroom within ${i}s" || bad "no WorkerNotAdmitted event on noroom in 150 s: $(mount_events noroom | tail -1 | cut -c1-200)"
+    echo "$ev" | grep -q "OutOfmemory" && ok "the event names kubelet's reason (OutOfmemory)" || bad "the event does not name OutOfmemory: $(echo "$ev" | cut -c1-200)"
+    echo "$ev" | grep -q "will not be rescheduled" && ok "the event says the tenant stays bound to this node" || bad "the event lacks the rescheduling warning"
+    echo "$ev" | grep -q "maxPods" && ok "…and names the node's maxPods as the other ceiling" || bad "the event does not mention maxPods"
+    ph=$($K -n $NS get pod noroom -o jsonpath='{.status.phase}'); [ "$ph" = "Pending" ] && ok "noroom is still Pending (ContainerCreating), not Failed" || bad "noroom phase: $ph"
+    failed=$($K -n $WNS get pods --field-selector status.phase=Failed --no-headers 2>/dev/null | grep -c . || true)
+    [ "${failed:-0}" = "0" ] && ok "no refused worker was left behind in $WNS" || note "$failed Failed worker(s) in $WNS at this instant (the plugin's cleanup and kubelet's GC reap them)"
+    chart_up >/dev/null 2>&1 && plugin_rolled && ok "chart restored" || bad "chart restore failed"
+    $K -n $NS wait --for=condition=ready pod/noroom --timeout=300s >/dev/null 2>&1 && ok "noroom mounted once the requests fit again — kubelet's retry on the same pod, no recreation" || bad "noroom not Ready 300 s after the chart was restored: $(mount_events noroom | tail -1 | cut -c1-200)"
+    got=$(inpod noroom "cat /mnt/s3/shard-02.txt"); [ "$got" = "seeded-object-02" ] && ok "noroom reads content" || bad "noroom read '$got'"
+    $K -n $NS delete pod noroom --wait=true --timeout=120s >/dev/null 2>&1
+else
+    bad "chart upgrade to 1000Gi requests failed; leg skipped"
+fi
+
+# ── S27 a worker still pulling at the publish deadline ───────────────
+# Fix 3b. NodePublishVolume waits 45 s for the worker to run; at the
+# deadline it used to clean up — DELETING the Pending pod — and answer
+# Unavailable, so kubelet's retry created it again and waited again,
+# under a backoff growing toward two minutes, while containerd's pull
+# carried on regardless. Now the worker is kept (phase worker-pending)
+# and the retry adopts it. The image that "is still coming" here is a
+# tag no node has and no registry serves; it lands when the leg loads
+# it, and the SAME worker pod — the uid pins it — must carry the mount.
+leg S27 "a worker whose image is still coming at the 45 s deadline is KEPT: kubelet's retries adopt the same pod, and the mount completes on it once the image lands"
+if chart_up --set workers.passthroughImage.tag=pull-test --set workers.prepull.passthrough=false >/dev/null 2>&1 && plugin_rolled; then
+    ok "chart upgraded: workers run dilipdalton/flint-s3-worker:pull-test (nowhere yet); pre-pull off so the plugin itself can roll"
+    fx_doc tenants.yaml Pod reader | sed 's/^  name: reader$/  name: pull-reader/' | $K apply -f - >/dev/null
+    i=0; w=""; while [ $i -lt 60 ]; do w=$(worker_of_any pull-reader); [ -n "$w" ] && break; sleep 2; i=$((i + 2)); done
+    [ -n "$w" ] && ok "worker $w created for pull-reader (${i}s)" || bad "no worker for pull-reader in 60 s"
+    uid0=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+    note "waiting 150 s: past the 45 s deadline and through at least one kubelet retry"
+    sleep 150
+    uid1=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+    [ -n "$uid0" ] && [ "$uid0" = "$uid1" ] && ok "the same worker pod (uid $uid0) is still there after 150 s of retries — never deleted and recreated" || bad "worker uid changed or vanished: '$uid0' → '$uid1'"
+    plugin_log | grep -q "still coming up at the deadline; kept for kubelet's retry" && ok "the plugin kept the worker at the deadline (logged)" || bad "no 'kept for kubelet's retry' line in the plugin log"
+    plugin_log | grep -q "still coming up; resuming rather than starting over" && ok "a retry resumed on the kept worker (logged)" || bad "no 'resuming rather than starting over' line in the plugin log"
+    n=$(plugin_log | grep -c "retrying an unfinished publish"); [ "${n:-0}" = "0" ] && ok "no attempt started the publish over (0 cleanup lines)" || bad "$n 'retrying an unfinished publish' cleanup(s) in the plugin log"
+    note "worker $w is waiting on: $($K -n $WNS get pod "$w" -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null)"
+    docker tag "dilipdalton/flint-s3-worker:$TAG" dilipdalton/flint-s3-worker:pull-test >/dev/null 2>&1
+    kind load docker-image dilipdalton/flint-s3-worker:pull-test --name "${CTX#kind-}" >/dev/null 2>&1 && ok "the pull-test image was loaded onto the nodes: the same pod's next pull succeeds" || bad "kind load of the pull-test tag failed"
+    $K -n $NS wait --for=condition=ready pod/pull-reader --timeout=540s >/dev/null 2>&1 && ok "pull-reader mounted once the image was there" || bad "pull-reader not Ready 540 s after the image landed: $(mount_events pull-reader | tail -1 | cut -c1-200)"
+    uid2=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+    [ "$uid2" = "$uid0" ] && ok "…on THAT worker (uid unchanged through the whole wait)" || bad "the mount landed on a different worker: '$uid0' → '$uid2'"
+    got=$(inpod pull-reader "cat /mnt/s3/shard-02.txt"); [ "$got" = "seeded-object-02" ] && ok "pull-reader reads content" || bad "pull-reader read '$got'"
+    $K -n $NS delete pod pull-reader --wait=true --timeout=120s >/dev/null 2>&1
+    chart_up >/dev/null 2>&1 && plugin_rolled && ok "chart restored (tag $TAG, pre-pull on)" || bad "chart restore failed"
+    docker rmi dilipdalton/flint-s3-worker:pull-test >/dev/null 2>&1; onnode "crictl rmi docker.io/dilipdalton/flint-s3-worker:pull-test" >/dev/null 2>&1
+else
+    bad "chart upgrade to the pull-test tag failed; leg skipped"
+fi
+
+# ── S28 sharing waits for the broker ─────────────────────────────────
+# Fix 4. A sharing CR's decision reads the broker's backend; when that
+# read failed the plugin used to give the pod a mounter of its OWN — no
+# shared cache, no shared pool — for its whole life, with a log line.
+# Now it is a retry. The rig can only take the whole broker away (its
+# status and its exchange fail together), so what this leg pins is that
+# the refusal names the sharing decision and that recovery converges on
+# the shared class; the case that separates old from new — a status
+# that fails while the exchange works — has no shape on this rig.
+leg S28 "a sharing CR whose broker cannot be asked at publish is RETRIED, not given a mounter of its own: once the broker is back the pod joins the shared class"
+$K -n $NS wait --for=condition=ready pod/shared-a pod/shared-b --timeout=180s >/dev/null 2>&1
+$K -n $SYS scale deploy/flint-s3-broker --replicas=0 >/dev/null 2>&1
+$K -n $SYS wait --for=delete pod -l app.kubernetes.io/name=flint-s3-broker --timeout=120s >/dev/null 2>&1
+# A fresh plugin: nothing cached answers for the broker.
+$K -n $SYS delete pod "$(plugin_pod)" --wait=true --timeout=120s >/dev/null 2>&1; plugin_rolled
+fx_doc tenants.yaml Pod shared-a | sed 's/^  name: shared-a$/  name: shared-retry/' | $K apply -f - >/dev/null
+i=0; ev=""; while [ $i -lt 120 ]; do ev=$(mount_events shared-retry | grep "asks for sharing and" | head -1); [ -n "$ev" ] && break; sleep 5; i=$((i + 5)); done
+[ -n "$ev" ] && ok "the refusal names the sharing decision, not a credential outage: $(echo "$ev" | cut -c1-150)…" || bad "no 'asks for sharing' FailedMount on shared-retry in 120 s: $(mount_events shared-retry | tail -1 | cut -c1-200)"
+plugin_log | grep -q "sharing cannot be decided yet" && ok "the plugin logged the retry" || bad "no 'sharing cannot be decided yet' line in the plugin log"
+[ -z "$(worker_of_any shared-retry)" ] && ok "no mounter of its own was created for shared-retry during the outage" || bad "shared-retry got its own worker $(worker_of_any shared-retry) during the outage"
+$K -n $SYS scale deploy/flint-s3-broker --replicas=1 >/dev/null 2>&1
+$K -n $SYS rollout status deploy/flint-s3-broker --timeout=180s >/dev/null 2>&1
+$K -n $NS wait --for=condition=ready pod/shared-retry --timeout=300s >/dev/null 2>&1 && ok "shared-retry mounted once the broker was back" || bad "shared-retry not Ready 300 s after the broker returned: $(mount_events shared-retry | tail -1 | cut -c1-200)"
+plugin_log | grep "tenant=s3-tenants/shared-retry" | tail -1 | grep -q "published (shared read-only mount)" && ok "…as a MEMBER of the shared class, not with a mounter of its own" || bad "shared-retry's publish line: $(plugin_log | grep 'tenant=s3-tenants/shared-retry' | tail -1 | cut -c1-200)"
+[ -z "$(worker_of shared-retry)" ] && ok "shared-retry created no worker (it joined the class's)" || bad "shared-retry has a worker of its own: $(worker_of shared-retry)"
+got=$(inpod shared-retry "cat /mnt/shared/shard-03.txt"); [ "$got" = "seeded-object-03" ] && ok "shared-retry reads through the shared mount" || bad "shared-retry read '$got'"
+$K -n $NS delete pod shared-retry --wait=true --timeout=120s >/dev/null 2>&1
+
+# ── S29 a refused member of a shared class ───────────────────────────
+# Fix 5. A refused refresh (the SA dropped from consumers) removed the
+# worker's creds.json so the door answers 503 and the client fails at
+# expiry — right for a mounter of the pod's own, wrong for a shared
+# class, whose ONE file serves every member: the siblings' mount-s3,
+# refreshing inside the window before the next member's republish
+# re-minted the key, got a 503 and an EIO, while the refused pod — bound
+# to the same superblock — read on regardless. Now the file stays. The
+# file is sampled every 2 s for 100 s after the refusal, longer than a
+# republish period: the old code's removal-then-re-mint would show as
+# absent samples.
+leg S29 "revoking ONE member of a shared class refuses its refresh without taking the class's credential from the others: the file stays, the siblings keep reading"
+$K -n $NS wait --for=condition=ready pod/shared-a pod/shared-b --timeout=180s >/dev/null 2>&1
+$K -n $NS create sa trainer2 >/dev/null 2>&1 || true
+$K -n $NS patch fpm datasets-shared --type=merge -p '{"spec":{"consumers":{"serviceAccounts":["trainer","trainer2"]}}}' >/dev/null
+fx_doc tenants.yaml Pod shared-a | sed -e 's/^  name: shared-a$/  name: shared-d/' -e 's/serviceAccountName: trainer$/serviceAccountName: trainer2/' | $K apply -f - >/dev/null
+$K -n $NS wait --for=condition=ready pod/shared-d --timeout=180s >/dev/null 2>&1 && ok "shared-d (SA trainer2) mounted" || bad "shared-d not Ready in 180 s: $(mount_events shared-d | tail -1 | cut -c1-200)"
+plugin_log | grep "tenant=s3-tenants/shared-d" | tail -1 | grep -q "published (shared read-only mount)" && ok "shared-d joined the shared class (a second SA in one class)" || bad "shared-d's publish line: $(plugin_log | grep 'tenant=s3-tenants/shared-d' | tail -1 | cut -c1-200)"
+w=$(worker_of_any shared-a); [ -n "$w" ] || w=$(worker_of_any shared-b); [ -n "$w" ] || w=$(worker_of_any shared-d)
+wuid=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+comm="/var/lib/kubelet/pods/$wuid/volumes/kubernetes.io~empty-dir/comm"
+onnode "test -f $comm/creds.json" && ok "the class's creds.json is in $w's comm dir on the node" || bad "no creds.json at $comm on the node"
+$K -n $NS patch fpm datasets-shared --type=merge -p '{"spec":{"consumers":{"serviceAccounts":["trainer"]}}}' >/dev/null
+note "trainer2 dropped from consumers; shared-d's next refresh (every republish at lifetime ${CREDS_LIFETIME}s) is refused"
+i=0; ev=""; while [ $i -lt 240 ]; do ev=$(mount_events shared-d | grep CredentialRefreshFailed | head -1); [ -n "$ev" ] && break; sleep 5; i=$((i + 5)); done
+[ -n "$ev" ] && ok "CredentialRefreshFailed landed on shared-d after ${i}s" || bad "no CredentialRefreshFailed on shared-d in 240 s"
+echo "$ev" | grep -q "class's credential stays" && ok "the event says the class's credential stays for the others" || bad "the event lacks the shared wording: $(echo "$ev" | cut -c1-200)"
+gone=0; j=0; while [ $j -lt 100 ]; do onnode "test -f $comm/creds.json" || gone=$((gone + 1)); sleep 2; j=$((j + 2)); done
+[ "$gone" = "0" ] && ok "creds.json stayed in place through 50 samples over 100 s after the refusal" || bad "creds.json was ABSENT in $gone of 50 samples after the refusal — the class's key was taken away"
+got=$(inpod shared-a "cat /mnt/shared/shard-05.txt"); [ "$got" = "seeded-object-05" ] && ok "shared-a (still a consumer) reads an object it had not cached" || bad "shared-a read '$got' after its sibling's refusal"
+got=$(inpod shared-d "cat /mnt/shared/shard-06.txt"); [ "$got" = "seeded-object-06" ] && ok "shared-d keeps reading until it exits (per-member revocation is not possible under sharing, as the CRD says)" || note "shared-d read '$got'"
+$K -n $NS delete pod shared-d --wait=true --timeout=120s >/dev/null 2>&1
+$K -n $NS delete sa trainer2 >/dev/null 2>&1
+apply_fx tenants.yaml >/dev/null
+
 # ── S21 (audit 2026-09-03, finding 4) ─────────────────────────────────
 # A node reboot empties the worker's memory-backed comm dir: the
 # supervisor restarts with no launch record, sits in its accept loop,
@@ -1751,7 +1938,7 @@ $K uncordon "$NODE" >/dev/null 2>&1 && note "node uncordoned"
 
 # ── roster ────────────────────────────────────────────────────────────
 echo
-for want in S1 S2 S3 S4 S5 S5c S6 S7 S8 S9 S10 S11 S12 S13 S14 S15 S16 S17 S17f S18 S19 S20 S21 S22 S23 S24 SU; do
+for want in S1 S2 S3 S4 S5 S5c S6 S7 S8 S9 S10 S11 S12 S13 S14 S15 S16 S17 S17f S18 S19 S20 S21 S22 S23 S24 S25 S26 S27 S28 S29 SU; do
     echo " $RAN_LEGS " | grep -q " $want " || bad "leg $want never ran"
 done
 echo "════════════════════════════════════════"
