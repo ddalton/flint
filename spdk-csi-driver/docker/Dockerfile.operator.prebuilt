@@ -7,11 +7,12 @@
 #   for T in x86_64 aarch64; do
 #     cargo zigbuild --release --target $T-unknown-linux-musl \
 #       --bin flint-lite-operator --bin flint-hub-gateway --bin flint-nfs-proxy \
+#       --bin flint-nfs-client-identity \
 #       --bin flint-lean-operator
 #     (cd ../lean/gateway && cargo zigbuild --release --features s3 \
 #       --target $T-unknown-linux-musl --bin flint-lean-gateway); done
-#   # stage: docker/prebuilt/amd64/{flint-lite-operator,flint-hub-gateway,flint-nfs-proxy}
-#   #        docker/prebuilt/arm64/{flint-lite-operator,flint-hub-gateway,flint-nfs-proxy}
+#   # stage: docker/prebuilt/amd64/{flint-lite-operator,flint-hub-gateway,flint-nfs-proxy,flint-nfs-client-identity}
+#   #        docker/prebuilt/arm64/{flint-lite-operator,flint-hub-gateway,flint-nfs-proxy,flint-nfs-client-identity}
 #   for A in amd64 arm64; do
 #     docker build --platform linux/$A -f docker/Dockerfile.operator.prebuilt \
 #       --build-arg BIN_DIR=docker/prebuilt \
@@ -55,6 +56,11 @@ COPY ${BIN_DIR}/${TARGETARCH}/flint-hub-gateway /usr/local/bin/flint-hub-gateway
 # (docs/plans/flint-lite-nfs-proxy-design.md), chosen by `command:` when
 # the chart's nfsProxy.enabled is on.
 COPY ${BIN_DIR}/${TARGETARCH}/flint-nfs-proxy /usr/local/bin/flint-nfs-proxy
+
+# flint-nfs-client-identity: the flint-nfs-client chart's DaemonSet, in
+# CLIENT clusters — it puts the node's tlshd certificate in place for
+# xprtsec=mtls mounts of the proxy (design §6a).
+COPY ${BIN_DIR}/${TARGETARCH}/flint-nfs-client-identity /usr/local/bin/flint-nfs-client-identity
 
 # flint-lean's operator and gateway ride here too, and the chart already
 # says so: flint-lean-chart/values.yaml names THIS image and its

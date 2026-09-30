@@ -47,6 +47,13 @@ path = "src/bin/flint_hub_gateway.rs"
 name = "flint-nfs-proxy"
 path = "src/bin/flint_nfs_proxy.rs"
 
+# flint-nfs-client-identity: the per-node agent (a DaemonSet in each
+# CLIENT cluster) that keeps the node's tlshd certificate equal to a
+# cert-manager Secret (design §6a). Same image as the proxy.
+[[bin]]
+name = "flint-nfs-client-identity"
+path = "src/bin/flint_nfs_client_identity.rs"
+
 # flint-forge-operator: the FlintRepo controller. Named explicitly, like
 # every other binary here, because a file-stem-derived target is
 # `flint_forge_operator` with underscores — and the staging script, the

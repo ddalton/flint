@@ -335,7 +335,7 @@ EOF
         # The binaries this chart EXECS must be in the image it pulls (the
         # lean chart's CrashLoopBackOff below, caught one chart earlier).
         op_recipe="$repo_root/spdk-csi-driver/docker/Dockerfile.operator.prebuilt"
-        for bin in flint-lite-operator flint-hub-gateway flint-nfs-proxy; do
+        for bin in flint-lite-operator flint-hub-gateway flint-nfs-proxy flint-nfs-client-identity; do
             if ! grep -q "/usr/local/bin/$bin" "$op_recipe"; then
                 echo "REFUSING to push flint-lite-operator $op_version: the chart execs" \
                      "/usr/local/bin/$bin but $(basename "$op_recipe") does not install it." >&2

@@ -1,0 +1,19 @@
+apiVersion: v2
+name: flint-nfs-client
+description: >-
+  Client-cluster side of flint-nfs-proxy's RPC-with-TLS: a DaemonSet that
+  keeps each node's tlshd certificate equal to a cert-manager Secret, so
+  kubelet-mounted `nfs:` volumes can use `xprtsec=mtls` and name their
+  cluster to the proxy.
+type: application
+version: 0.1.0
+# The flint release whose image carries flint-nfs-client-identity (the
+# flint-lite-operator image, beside flint-nfs-proxy).
+appVersion: "1.56.0"
+keywords:
+  - nfs
+  - tls
+  - flint
+home: https://flint.chert.us
+sources:
+  - https://github.com/ddalton/flint

@@ -73,6 +73,7 @@ pub mod passthrough;  // flint-passthrough: the FlintPassthroughMount CR and the
 pub mod s3csi;  // s3.csi.chert.us: the CSI node driver that delivers both (docs/plans/csi-node-mount-design.md)
 pub mod forge_operator;  // flint forge: the FlintRepo CRD (docs/plans/flint-forge-design.md)
 pub mod nfs_proxy;  // flint-nfs-proxy: many lite hubs behind one NFS port (docs/plans/flint-lite-nfs-proxy-design.md)
+pub mod nfs_client_identity;  // the per-node tlshd certificate agent for xprtsec=mtls clients (§6a)
 pub mod lite_gateway;  // flint-hub-gateway: one door in front of every hub's file API (docs/flint-hub-gateway.md)
 
 /// Install the process-wide rustls crypto provider. **Call this first

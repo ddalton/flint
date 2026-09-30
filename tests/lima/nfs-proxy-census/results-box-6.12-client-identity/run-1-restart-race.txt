@@ -1,0 +1,42 @@
+== A: the agent on a real host
+PASS control: before the agent, an mTLS mount fails (tlshd has no certificate)
+  2026-09-30T00:40:26.791307Z  WARN spdk_csi_driver::nfs_client_identity: client certificate expires in 47 h: is cert-manager renewing it?
+  2026-09-30T00:40:26.801585Z  INFO spdk_csi_driver::nfs_client_identity: installed the client certificate for ["spiffe://clusters/a"] in /etc/flint/nfs-tls
+  2026-09-30T00:40:26.803627Z  INFO spdk_csi_driver::nfs_client_identity: pointed /etc/tlshd.conf at /etc/flint/nfs-tls; restarting tlshd
+  not-ready
+  identity spiffe://clusters/a
+  reason tlshd is not running on this node (ktls-utils; systemctl enable --now tlshd)
+FAIL first pass: ready, identity a
+PASS the files are on the host, the key 0600
+PASS tlshd.conf points at them
+PASS tlshd was restarted for the conf edit
+  mount as a: rc=0 root [ws-a ]
+PASS a mount now works and is cluster a
+PASS renewal (the Secret now holds b): installed, still ready
+PASS a renewal does not restart tlshd
+  mount after the renewal: rc=0 root [ws-b ]
+PASS the next handshake presents the renewed certificate
+  reason the Secret does not validate, host files left as they were: the key does not belong to the certificate: keys may not be consistent: KeyMismatch
+PASS a mismatched pair: not ready, and says why
+PASS the host keeps the last good pair
+PASS --check agrees (the readiness probe)
+PASS the existing mount is untouched
+PASS tlshd stopped: not ready, and says so
+PASS tlshd back: ready again
+== B: the chart's DaemonSet on kind (nodes without tlshd)
+Image: "flint-lite-operator:client-id" with ID "sha256:64377032286bc5d1223dbde084eaea376324d60df017c4bf675b0a309dc770f4" not yet present on node "flint-client-id-control-plane", loading...
+Image: "flint-lite-operator:client-id" with ID "sha256:64377032286bc5d1223dbde084eaea376324d60df017c4bf675b0a309dc770f4" not yet present on node "flint-client-id-worker", loading...
+PASS a pod on every node (control-plane taint tolerated)
+  pods ready: [False False ]
+PASS no tlshd on kind nodes: every pod NotReady
+  not-ready
+  identity spiffe://clusters/a
+  reason tlshd is not running on this node (ktls-utils; systemctl enable --now tlshd)
+  command terminated with exit code 1
+PASS and it says why (tlshd), with the identity it holds
+PASS the files are on flint-client-id-control-plane
+PASS the files are on flint-client-id-worker
+PASS every node labelled chert.us/nfs-tls-ready=false
+Warning: resource secrets/flint-nfs-client-tls is missing the kubectl.kubernetes.io/last-applied-configuration annotation which is required by kubectl apply. kubectl apply should only be used on resources created declaratively by either kubectl create --save-config or kubectl apply. The missing annotation will be patched automatically.
+PASS a Secret update reaches the node's files (kubelet's swap, then the agent)
+RESULT: 21 passed, 1 failed

@@ -679,8 +679,31 @@ port are still wanted for capacity and failure isolation.
    up as b and b's mount listed a's workspaces over a's connection
    (`run-1-trunking-finding.txt`). Per-cluster (or per-node)
    certificates, as §6a has them, are the only shape that works.
-   **Not built:** the client-side `flint-nfs-client-identity` DaemonSet,
    The §6a Istio checks are answered (§6a, 2026-09-29).
+   **Client DaemonSet BUILT 2026-09-29:** `flint-nfs-client-identity`
+   (`src/nfs_client_identity.rs`, in the operator image) and the
+   `flint-nfs-client-chart` (install in each CLIENT cluster). Per node it
+   keeps `/etc/flint/nfs-tls/` equal to a cert-manager Secret — only a
+   pair that validates (key matches, within validity, a URI SAN), each
+   file atomically, the key 0600 — optionally points `tlshd.conf` at it
+   (restarting tlshd only when that edit changed something; a renewal
+   needs no restart, check 5), checks kernel ≥ 6.5 and a running tlshd,
+   and reports readiness (`--check`) and, optionally, a node label
+   `chert.us/nfs-tls-ready` for nodeAffinity. `configureTlshd` makes the
+   pod privileged (host PID, edits the host's conf through /proc/1/root,
+   `systemctl restart tlshd` via nsenter); false needs only the hostPath.
+   **Drill 22/22** (`client-identity-drill.sh`,
+   `results-box-6.12-client-identity/`): on the host with the real kernel
+   and tlshd, an mTLS mount fails before the agent (the control) and
+   works after; a renewal reaches the next handshake without a tlshd
+   restart; a mismatched pair leaves the host's files and the mounts
+   alone and says why; a stopped tlshd reads not ready. On kind (no
+   tlshd on the nodes) the chart runs a pod per node, installs the files,
+   reads NotReady with the reason, labels every node false, and a Secret
+   update reaches the nodes. Run 1 found a race (the first pass after a
+   restart saw systemd's forked `(tlshd)` and read not ready for one
+   interval); fixed. Not built: publishing the chart (`release.sh` checks
+   the image carries the binary, but pushes no flint-nfs-client chart).
 3. Restarts and wake: lease keepalive, status-flag OR, the table in
    §4, and `NFS4ERR_DELAY` + wake.
    **DONE 2026-09-28 (static-table mode):** a one-slot control session

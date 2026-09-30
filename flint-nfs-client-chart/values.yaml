@@ -1,0 +1,75 @@
+# flint-nfs-client: install in EACH cluster whose nodes mount flint
+# workspaces through flint-nfs-proxy with `xprtsec=mtls`
+# (docs/plans/flint-lite-nfs-proxy-design.md §6a). Every node presents
+# the SAME certificate: the identity is the cluster's (Linux reuses one
+# connection per server, so a node never presents two).
+#
+# Node prerequisites (the pods report each one; see readiness):
+#   - Linux >= 6.5 (the kernel's TLS handshake upcall);
+#   - ktls-utils installed and `tlshd` running (systemctl enable --now tlshd).
+#
+# Mount with: mountOptions: ["nfsvers=4.2", "xprtsec=mtls"]
+
+global:
+  imageRegistry: ""
+
+image:
+  registry: ""
+  repository: dilipdalton/flint-lite-operator
+  tag: ""
+  ref: ""
+  pullPolicy: IfNotPresent
+
+# The client certificate: a kubernetes.io/tls Secret in the release
+# namespace with tls.crt, tls.key and ca.crt. ca.crt is what tlshd
+# verifies the PROXY's certificate with; a cert-manager CA issuer
+# writes it. Its URI SAN is the identity the proxy's `clients:` rules
+# name.
+secretName: flint-nfs-client-tls
+secretKeys:
+  cert: tls.crt
+  key: tls.key
+  ca: ca.crt
+
+# Render a cert-manager Certificate into secretName.
+certificate:
+  create: false
+  # REQUIRED with create: the name the proxy knows this cluster by,
+  # e.g. spiffe://clusters/team-a.
+  uri: ""
+  issuerRef: {}          # {name: ..., kind: ClusterIssuer}
+  duration: 2160h
+  renewBefore: 360h
+
+# Where the files land on each node (tlshd reads them there).
+hostDir: /etc/flint/nfs-tls
+
+# Point the node's /etc/tlshd.conf [authenticate.client] at hostDir and
+# restart tlshd when that edit changes something (a renewal does not:
+# tlshd re-reads the files on every handshake). This makes the pod
+# PRIVILEGED with the host PID namespace — it edits a host file and runs
+# `systemctl restart tlshd` in the host's namespaces. Set false when the
+# node image already points tlshd at hostDir; the pod then needs only a
+# hostPath for hostDir.
+configureTlshd: true
+
+# Label each node chert.us/nfs-tls-ready=true|false, so a workload can
+# require it (nodeAffinity) and never land where its mount would fail.
+# Needs a ClusterRole that may patch nodes.
+nodeLabel: false
+
+intervalSecs: 30
+logLevel: info
+
+# Every node that may run a mounting workload. The default tolerates
+# every taint.
+tolerations:
+  - operator: Exists
+nodeSelector: {}
+priorityClassName: ""
+resources:
+  requests:
+    cpu: 10m
+    memory: 16Mi
+  limits:
+    memory: 64Mi

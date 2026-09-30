@@ -1,0 +1,175 @@
+{{- /*
+flint-nfs-client-identity: one per node. Keeps /etc/flint/nfs-tls equal
+to the client Secret and reports whether the node can mount with
+xprtsec=mtls (spdk-csi-driver/src/nfs_client_identity.rs).
+*/}}
+{{- if and .Values.certificate.create (not .Values.certificate.uri) }}
+{{- fail "certificate.create requires certificate.uri — the name the proxy's `clients:` rules match" }}
+{{- end }}
+{{- if and .Values.certificate.create (not .Values.certificate.issuerRef) }}
+{{- fail "certificate.create requires certificate.issuerRef" }}
+{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "flint-nfs-client.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-nfs-client.labels" . | nindent 4 }}
+---
+{{- if .Values.nodeLabel }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "flint-nfs-client.name" . }}
+  labels:
+    {{- include "flint-nfs-client.labels" . | nindent 4 }}
+rules:
+  # One label on the node the pod runs on (chert.us/nfs-tls-ready).
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "flint-nfs-client.name" . }}
+  labels:
+    {{- include "flint-nfs-client.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "flint-nfs-client.name" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "flint-nfs-client.name" . }}
+    namespace: {{ .Release.Namespace }}
+---
+{{- end }}
+{{- if .Values.certificate.create }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "flint-nfs-client.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-nfs-client.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.secretName }}
+  issuerRef:
+    {{- toYaml .Values.certificate.issuerRef | nindent 4 }}
+  commonName: {{ .Values.certificate.uri | quote }}
+  uris:
+    - {{ .Values.certificate.uri | quote }}
+  duration: {{ .Values.certificate.duration }}
+  renewBefore: {{ .Values.certificate.renewBefore }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages: ["client auth"]
+---
+{{- end }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "flint-nfs-client.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-nfs-client.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "flint-nfs-client.selectorLabels" . | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 10%
+  template:
+    metadata:
+      labels:
+        {{- include "flint-nfs-client.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "flint-nfs-client.name" . }}
+      # The host's /proc: is tlshd running? (and, configuring it, the
+      # host's namespaces for the restart)
+      hostPID: true
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      containers:
+        - name: agent
+          image: {{ include "flint-nfs-client.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/flint-nfs-client-identity"]
+          args:
+            - --secret-dir=/var/run/flint/client-tls
+            - --cert-key={{ .Values.secretKeys.cert }}
+            - --key-key={{ .Values.secretKeys.key }}
+            - --ca-key={{ .Values.secretKeys.ca }}
+            - --install-dir=/host{{ .Values.hostDir }}
+            - --host-dir={{ .Values.hostDir }}
+            - --interval-secs={{ int .Values.intervalSecs }}
+            {{- if .Values.configureTlshd }}
+            # Through PID 1's root: the host's own /etc, no hostPath on it.
+            - --tlshd-conf=/proc/1/root/etc/tlshd.conf
+            {{- end }}
+            {{- if .Values.nodeLabel }}
+            - --node-label
+            {{- end }}
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.logLevel | quote }}
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          readinessProbe:
+            exec:
+              command: ["/usr/local/bin/flint-nfs-client-identity", "--check"]
+            periodSeconds: 10
+          securityContext:
+            runAsUser: 0
+            readOnlyRootFilesystem: true
+            {{- if .Values.configureTlshd }}
+            privileged: true
+            {{- else }}
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              # root writing a root-owned host directory, key mode 0600
+              add: ["CHOWN", "DAC_OVERRIDE", "FOWNER"]
+            {{- end }}
+          volumeMounts:
+            # Whole-volume, never subPath: kubelet swaps the Secret's
+            # `..data` link on a renewal and the agent re-reads the paths.
+            - name: client-tls
+              mountPath: /var/run/flint/client-tls
+              readOnly: true
+            - name: host-dir
+              mountPath: /host{{ .Values.hostDir }}
+            - name: run
+              mountPath: /run/flint-nfs-client-identity
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: client-tls
+          secret:
+            secretName: {{ .Values.secretName }}
+        - name: host-dir
+          hostPath:
+            path: {{ .Values.hostDir }}
+            type: DirectoryOrCreate
+        - name: run
+          emptyDir:
+            medium: Memory
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
