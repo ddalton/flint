@@ -19,8 +19,9 @@
 # admissible under PodSecurity `restricted`.
 #
 # For a dataset MANY pods read, one mounter per node instead of one per
-# pod — the CR opts its read-only consumers in, and the block cache comes
-# with it (three quarters of workers.scratchSize unless spec.cache says):
+# pod — the CR opts its read-only consumers in. The block cache does NOT
+# come with it: name spec.cache for a working set that fits in it (see
+# workers.scratchSize below for why):
 #
 #   apiVersion: chert.us/v1alpha1
 #   kind: FlintPassthroughMount
@@ -349,11 +350,18 @@ workers:
 
   # Size limits for the two emptyDirs every worker carries: `comm`
   # (memory-backed; the launch socket, the token and the credential
-  # file) and `scratch` (mount-s3's cache, at /tmp). Empty ⇒ the
-  # binary's defaults, 16Mi and 1Gi (FLINT_S3CSI_COMM_SIZE,
-  # FLINT_S3CSI_SCRATCH_SIZE). A FlintPassthroughMount with
-  # sharing.readOnly and no spec.cache gets a block cache of three
-  # quarters of scratchSize by default (768Mi at 1Gi).
+  # file) and `scratch` (mount-s3's block cache, at /tmp, when the CR's
+  # spec.cache asks for one). Empty ⇒ the binary's defaults, 16Mi and
+  # 1Gi (FLINT_S3CSI_COMM_SIZE, FLINT_S3CSI_SCRATCH_SIZE). No CR gets a
+  # cache it did not ask for, a sharing CR included (2026-09-30): the
+  # emptyDir is on the node's root disk, and a working set larger than
+  # the cache pays every fetched block to that disk and warms nothing —
+  # 6 GiB through a 768Mi cache read 5× slower than S3 on a gp3 root,
+  # cold and warm alike. Ask for a cache (spec.cache.maxSizeMib, under
+  # scratchSize) for a set that fits; a bigger scratchSize on the same
+  # disk buys a bigger cache at the same 125 MiB/s. Placing the cache on
+  # a faster device is the follow-up
+  # (docs/plans/passthrough-read-only-mount-sharing.md §11).
   commSize: ""
   scratchSize: ""
 

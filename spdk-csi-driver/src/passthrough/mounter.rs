@@ -113,9 +113,12 @@ pub fn mounter_args_for(
         a.push(gid.to_string());
     }
     // Mountpoint's block cache, in the worker's own scratch emptyDir.
-    // Opt-in: the cardinality of a block-per-object cache is a real cost
-    // for a mount with many small objects, so the operator asks for it
-    // per mount rather than inheriting it.
+    // Opt-in, a sharing CR included: the cardinality of a block-per-object
+    // cache is a real cost for a mount with many small objects, and the
+    // emptyDir is the node's root disk, where a working set larger than
+    // the cache pays every fetched block to a 125 MiB/s volume and warms
+    // nothing (5× slower than S3 on EC2, 2026-09-30, sharing design §11).
+    // The operator asks for it per mount, for a set that fits.
     if let Some(c) = spec.cache.as_ref().filter(|c| c.enabled) {
         a.push("--cache".into());
         a.push(CACHE_DIR.into());
@@ -219,6 +222,34 @@ mod tests {
         s.cache = Some(crate::passthrough::spec::CacheSpec { enabled: false, max_size_mib: Some(512) });
         let disabled = mounter_args_for(&s, (None, None), "t", None);
         assert!(!disabled.iter().any(|a| a == "--cache"), "{disabled:?}");
+    }
+
+    /// A CR that shares its mounter inherits no cache either. For one day
+    /// (2026-09-29) the plugin defaulted a sharing CR to three quarters of
+    /// the scratch; measured on EC2 the next day (sharing design §11), that
+    /// cache on the emptyDir — the node's gp3 root, 125 MiB/s — made a
+    /// 6 GiB read five times slower than no cache, cold and warm alike,
+    /// because Mountpoint writes every fetched block to the disk under the
+    /// cache directory. Off until the cache can be placed on a device
+    /// faster than S3; a sharing CR that wants one names it, and gets
+    /// exactly what it named — the ceiling is the CR's, not a fraction of
+    /// the scratch.
+    #[test]
+    fn a_sharing_cr_that_names_no_cache_mounts_without_one() {
+        let mut s = spec();
+        s.read_only = true;
+        s.sharing = Some(crate::passthrough::spec::SharingSpec { read_only: true });
+        assert!(s.shares_read_only());
+        let bare = mounter_args_for(&s, (None, None), "t", Some("1Gi"));
+        assert!(!bare.iter().any(|a| a == "--cache"), "a sharing CR must not inherit a cache: {bare:?}");
+        assert!(!bare.iter().any(|a| a == "--max-cache-size"), "{bare:?}");
+
+        s.cache = Some(crate::passthrough::spec::CacheSpec { enabled: true, max_size_mib: Some(4096) });
+        let named = mounter_args_for(&s, (None, None), "t", Some("1Gi"));
+        let i = named.iter().position(|x| x == "--cache").expect("a named cache is passed");
+        assert_eq!(named[i + 1], CACHE_DIR);
+        let j = named.iter().position(|x| x == "--max-cache-size").expect("the named ceiling is passed");
+        assert_eq!(named[j + 1], "4096", "the ceiling is the CR's, not three quarters of the scratch");
     }
 
     /// Extra mount options from the CR survive verbatim as ARGUMENTS —

@@ -351,10 +351,14 @@ at publish and logged; `cache: { enabled: false }` opts out and a named
 `maxSizeMib` is kept. Three quarters, not all, because the scratch
 emptyDir's `sizeLimit` evicts the worker when overrun, and under sharing
 that strands every member. The default is part of the mounter's argv,
-so it is in the class key like everything else. **Measured on EC2 on
-2026-09-30 (§11), the default's PLACEMENT — the scratch emptyDir on the
-node's root disk — makes it a 5× regression for any working set larger
-than the cache; the placement follow-up is there.**
+so it is in the class key like everything else. **WITHDRAWN 2026-09-30
+(§11 step 1): measured on EC2 the same day, the default's PLACEMENT — the
+scratch emptyDir on the node's root disk — made it a 5× regression for
+any working set larger than the cache. A sharing CR that names no `cache`
+now runs without one; `with_default_cache` and `default_shared_cache_mib`
+are gone, and the placed default of §11 step 2 will be a different
+function (`workers.cacheSizeMib` on a named device), not a fraction of
+the scratch.**
 
 **How to ask for one.** On the CR: `readOnly: true` (or the pod's SA in
 `consumers.readOnlyServiceAccounts`) and `sharing: { readOnly: true }`,
@@ -444,6 +448,22 @@ can make an EBS-backed cache cheap; the fix is where the directory lives.
    for operators who neither placed the cache nor asked — which the
    values comment then tells them how to do. The class key is unchanged
    in shape (the argv still carries the cache flags when they apply).
+   **DONE 2026-09-30** — removed rather than gated: with no placement
+   knob yet the gate would be a constant, and the three-quarters-of-scratch
+   sizing was the emptyDir's argument (§10), which step 2's placed cache
+   does not share. `with_default_cache`, `default_shared_cache_mib` and
+   their test are gone; the publish logs `sharing: no block cache` for a
+   shared CR that named none; the CRD's `cache` and `sharing`
+   descriptions, the values text and `MountSpec`'s field docs carry the
+   measurement and the sizing rule (step 4's text landed with this);
+   `mounter_args_for` has a test that a sharing CR without `cache` gets
+   no cache flags and one with `cache` gets exactly its ceiling. S24
+   asserts no `--cache` in the shared mounter's argv and no cache
+   directory under its `/tmp` after the reads, and as its control
+   recreates shared-c's class against the CR with a 256 MiB cache named
+   and checks the flags and a populated cache directory (kind, NOT RUN
+   yet). The M2 fixtures name the 768 MiB cache they were measured with,
+   so a re-run measures the same mount.
 2. **A placement knob: `workers.cacheHostPath`.** When set (e.g.
    `/mnt/nvme/flint-s3-cache`), every worker that runs with a cache gets
    a `hostPath` volume at `<cacheHostPath>/<worker-name>` mounted at

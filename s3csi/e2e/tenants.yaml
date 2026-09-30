@@ -115,7 +115,9 @@ spec:
 ---
 # S24: one mounter per node for this CR's read-only consumers
 # (spec.sharing.readOnly). No spec.cache on purpose: a sharing CR gets
-# the block cache by DEFAULT, and the leg checks that it is in use.
+# NO block cache unless it asks (2026-09-30, sharing design §11 step 1),
+# and the leg checks that none is in use — then names one on the CR,
+# recreates shared-c's class against it, and checks that it comes.
 apiVersion: chert.us/v1alpha1
 kind: FlintPassthroughMount
 metadata:

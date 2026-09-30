@@ -1672,12 +1672,19 @@ if require_pod shared-a && require_pod shared-b && require_pod shared-c; then
     else creator=""; fi
     [ -n "$creator" ] && ok "exactly one of the pair created a worker ($creator → $w); the other joined it" || bad "workers named by shared-a '$wa' and shared-b '$wb' — expected exactly one creator"
     srcs=$(onnode "grep -c 'plugins/s3.csi.chert.us/shared/' /proc/mounts"); [ "${srcs:-0}" = "2" ] && ok "two shared FUSE sources on the node (one per class)" || bad "$srcs shared source mount(s) on the node, expected 2"
-    # The CR names no cache: the shared mounter must be running the
-    # DEFAULT one (three quarters of scratch), and the reads above filled it.
-    # mount-s3 makes `mountpoint-cache-<id>` under the scratch root.
-    [ -n "$w" ] && blocks=$($K -n $WNS exec "$w" -- ls -R /tmp 2>/dev/null | grep -c "mountpoint-cache\|^[0-9a-f]")
-    [ "${blocks:-0}" -gt 1 ] && ok "the default block cache is in use in $w ($blocks cache entries under /tmp)" || bad "no populated block cache under /tmp in $w — the sharing default did not reach the mounter"
-    $K -n $SYS logs "$(plugin_pod)" 2>/dev/null | grep -q "block cache defaulted" && ok "the plugin logged the defaulted cache" || bad "no 'block cache defaulted' line in the plugin log"
+    # The CR names no cache, and a sharing CR gets none it did not ask
+    # for (2026-09-30, sharing design §11 step 1: for one day it got three
+    # quarters of the scratch by default, which on the emptyDir's root
+    # disk read 6 GiB 5× slower than S3). The argv carries no --cache and
+    # mount-s3 made no `mountpoint-cache-<id>` under the scratch root for
+    # the reads above.
+    if [ -n "$w" ]; then
+        argv=$(worker_argv "$w")
+        echo "$argv" | grep -qE -- '(^| )--cache( |$)' && bad "$w's mount-s3 runs with a cache the CR never asked for: $argv" || ok "$w's mount-s3 argv carries no --cache (the CR named none)"
+        blocks=$($K -n $WNS exec "$w" -- ls -R /tmp 2>/dev/null | grep -c "mountpoint-cache" || true)
+        [ "${blocks:-0}" = "0" ] && ok "no block cache directory under /tmp in $w after the reads" || bad "$blocks mountpoint-cache entr(y|ies) under /tmp in $w — a cache the CR did not ask for is in use"
+    fi
+    plugin_log | grep -q "sharing: no block cache" && ok "the plugin logged that the shared mounter runs without a cache" || bad "no 'sharing: no block cache' line in the plugin log"
     inpod shared-a "touch /mnt/shared/x" >/dev/null 2>&1 && bad "shared-a could write the read-only shared mount" || ok "the shared mount is read-only"
     lines=$($K -n $SYS logs "$(plugin_pod)" 2>/dev/null | grep -c 'published (shared read-only mount)')
     [ "${lines:-0}" -ge 3 ] && ok "the plugin logged $lines shared publishes" || bad "the plugin logged $lines shared publish(es), expected 3"
@@ -1695,6 +1702,28 @@ if require_pod shared-a && require_pod shared-b && require_pod shared-c; then
         $K -n $SYS logs "$(plugin_pod)" 2>/dev/null | grep -q "last member out: bringing the shared mounter down" && ok "the plugin brought the mounter down as the last member left" || bad "no 'last member out' line in the plugin log"
         left=$(onnode "ls /var/lib/kubelet/plugins/s3.csi.chert.us/shared 2>/dev/null | wc -l"); [ "${left:-0}" = "1" ] && ok "one shared record left on the node (shared-c's class)" || bad "shared records on the node: $left, expected 1 (shared-c's)"
     fi
+    # CONTROL: the cache still comes when asked. A CR edited under running
+    # members is a new class for new members (the argv is in the key), so
+    # shared-c — alone in its class — is recreated against the CR with a
+    # 256 MiB cache named: the flags must be in its argv and a read must
+    # populate the cache directory. Then the CR is restored and shared-c
+    # recreated on it, so the legs after this one find the fixture as
+    # written. Without this arm a plugin that dropped the cache flags
+    # altogether would pass the assertions above.
+    $K -n $NS patch fpm datasets-shared --type=merge -p '{"spec":{"cache":{"enabled":true,"maxSizeMib":256}}}' >/dev/null
+    $K -n $NS delete pod shared-c --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
+    fx_doc tenants.yaml Pod shared-c | $K apply -f - >/dev/null
+    if wait_phase shared-c Running 300; then
+        wc=$(worker_of shared-c); argvc=$(worker_argv "$wc")
+        echo "$argvc" | grep -q -- '--cache /tmp --max-cache-size 256' && ok "CONTROL: shared-c's mount-s3 runs --cache /tmp --max-cache-size 256 once the CR asks" || bad "CONTROL: shared-c's argv carries no '--cache /tmp --max-cache-size 256': ${argvc:-<none>}"
+        got=$(inpod shared-c "cat /mnt/shared/shard-01.txt"); [ "$got" = "seeded-object-01" ] && ok "CONTROL: shared-c reads through the cached shared mount" || bad "CONTROL: shared-c read '$got' through the cached mount"
+        blocks=$($K -n $WNS exec "$wc" -- ls -R /tmp 2>/dev/null | grep -c "mountpoint-cache" || true)
+        [ "${blocks:-0}" -ge 1 ] && ok "CONTROL: the named cache is populated under /tmp in $wc ($blocks entries)" || bad "CONTROL: no mountpoint-cache under /tmp in $wc after a read — the named cache did not reach the mounter"
+    else
+        bad "CONTROL: shared-c did not come back Running on the cached class"
+    fi
+    $K -n $NS patch fpm datasets-shared --type=json -p '[{"op":"remove","path":"/spec/cache"}]' >/dev/null
+    $K -n $NS delete pod shared-c --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
     apply_fx tenants.yaml >/dev/null
 fi
 

@@ -3,8 +3,9 @@
 # rig, the same helpers, imported the way run-legs.sh does):
 #
 #   M1  the block cache's cost AS DEPLOYED: a read cold then warm through
-#       a mount with no cache and through one with the sharing default's
-#       cache (768 MiB), n reps each, on TWO sets — `mid` (4 × 128 MiB,
+#       a mount with no cache and through one with a 768 MiB cache named
+#       on the CR (the sharing default of 2026-09-29, withdrawn by §11
+#       step 1 once this measured it), n reps each, on TWO sets — `mid` (4 × 128 MiB,
 #       fits the cache) and `big` (6 × 1 GiB, six times the cache, so the
 #       warm read can only miss) — on the node's actual emptyDir disk (an
 #       8 GiB gp3 root on the trove i4i.large nodes), which the 09-12 door

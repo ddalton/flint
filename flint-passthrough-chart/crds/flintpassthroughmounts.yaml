@@ -172,12 +172,17 @@ spec:
                   description: >-
                     Mountpoint's local block cache, in the worker's own
                     scratch emptyDir (/tmp, workers.scratchSize, default
-                    1Gi). OFF unless enabled. For a dataset mounted
-                    read-only and read many times this is the largest
-                    single performance lever available; without it every
-                    repeated read re-fetches from S3. A CR with
-                    sharing.readOnly that names no cache gets one by
-                    default (see sharing).
+                    1Gi). OFF unless enabled, a sharing CR included. For
+                    a dataset mounted read-only and read many times that
+                    FITS in maxSizeMib it is the largest single
+                    performance lever available (a 512 MiB set warmed
+                    2.5x faster on EC2); a working set larger than the
+                    cache pays every fetched block to the disk under
+                    /tmp -- the node's root volume, on an emptyDir -- and
+                    warms nothing: 6 GiB through a 768 MiB cache read 5x
+                    SLOWER than with no cache on a gp3 root, cold and
+                    warm alike (2026-09-30, design doc section 11).
+                    Enable it for a set that fits.
                   properties:
                     enabled:
                       type: boolean
@@ -215,11 +220,11 @@ spec:
                     holds the same authority (which is also why sharing
                     grants none of them anything). Per-member
                     registrations and exchanges are still logged by the
-                    broker. A sharing CR that names no cache gets one by
-                    default: three quarters of workers.scratchSize (768 MiB
-                    at the chart's 1Gi); cache.enabled: false opts out,
-                    cache.maxSizeMib chooses. Design:
-                    docs/plans/passthrough-read-only-mount-sharing.md.
+                    broker. A sharing CR that names no cache runs WITHOUT
+                    the block cache (the one-day default of three quarters
+                    of workers.scratchSize, 2026-09-29, was withdrawn once
+                    measured: see cache); name cache to ask for one.
+                    Design: docs/plans/passthrough-read-only-mount-sharing.md.
                   properties:
                     readOnly:
                       type: boolean

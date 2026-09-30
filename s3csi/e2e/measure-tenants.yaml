@@ -14,8 +14,8 @@ spec:
   uid: 1001
   consumers: { serviceAccounts: [trainer] }
 ---
-# M1's other arm: the block cache, at the sharing default's size, on a
-# mounter of the pod's own.
+# M1's other arm: the block cache, at 768 MiB (what the sharing default
+# was when M1 was measured, 2026-09-30), on a mounter of the pod's own.
 apiVersion: chert.us/v1alpha1
 kind: FlintPassthroughMount
 metadata: { name: big-cache, namespace: s3-tenants }
@@ -29,8 +29,11 @@ spec:
   cache: { enabled: true, maxSizeMib: 768 }
   consumers: { serviceAccounts: [trainer] }
 ---
-# M2: one shared mounter (default cache) for every reader on the node,
-# the plugin's memory target (two thirds of the limit).
+# M2: one shared mounter for every reader on the node, the plugin's
+# memory target (two thirds of the limit). The 768 MiB cache is the one
+# the sharing default carried when M2 was measured (2026-09-30); named
+# here since §11 step 1 withdrew that default, so a re-run measures the
+# same mount.
 apiVersion: chert.us/v1alpha1
 kind: FlintPassthroughMount
 metadata: { name: big-shared, namespace: s3-tenants }
@@ -42,6 +45,7 @@ spec:
   readOnly: true
   uid: 1001
   sharing: { readOnly: true }
+  cache: { enabled: true, maxSizeMib: 768 }
   consumers: { serviceAccounts: [trainer] }
 ---
 # M2's control: the same shared mounter with mount-s3's OWN default
@@ -59,6 +63,7 @@ spec:
   readOnly: true
   uid: 1001
   sharing: { readOnly: true }
+  cache: { enabled: true, maxSizeMib: 768 }
   mountOptions: ["--memory-target", "973"]
   consumers: { serviceAccounts: [trainer] }
 ---

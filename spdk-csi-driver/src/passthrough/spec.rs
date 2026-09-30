@@ -94,7 +94,13 @@ pub struct MountSpec {
     pub mount_options: Vec<String>,
     /// Mountpoint's local block cache, in the worker's own `scratch`
     /// emptyDir (`/tmp`, `workers.scratchSize`, default 1Gi). OFF by
-    /// default and opt-in per mount.
+    /// default and opt-in per mount — a sharing CR included, since
+    /// 2026-09-30 (design §11): the emptyDir sits on the node's root
+    /// disk, and a working set larger than the cache pays every fetched
+    /// block to that disk and warms nothing. Measured on EC2 (a gp3 root
+    /// at 125 MiB/s): 6 GiB read through a 768 MiB cache took 48 s where
+    /// no cache took 10 s, cold and warm alike; a 512 MiB set that fit
+    /// warmed 2.5× faster. Enable it for a set that fits in `maxSizeMib`.
     ///
     /// The emptyDir was provisioned and documented as "mount-s3's cache"
     /// from the start and `--cache` was never passed, so every repeated
@@ -114,9 +120,13 @@ pub struct MountSpec {
     /// own; each pod's target is a bind of that mount. OFF by default.
     /// Design of record: docs/plans/passthrough-read-only-mount-sharing.md.
     ///
-    /// A sharing CR that names no `cache` gets one by default: three
-    /// quarters of `workers.scratchSize` ([`MountSpec::with_default_cache`]);
-    /// `cache: { enabled: false }` opts out, `cache.maxSizeMib` chooses.
+    /// A sharing CR that names no `cache` runs WITHOUT the block cache.
+    /// (For one day, 2026-09-29, it got three quarters of
+    /// `workers.scratchSize` by default; measured on EC2 the next day,
+    /// that cache — on the emptyDir, so on the node's root disk — made a
+    /// 6 GiB read five times slower than S3, design §11.) Ask for one
+    /// with `cache` when the working set fits in it; one mounter per node
+    /// is what sharing buys on its own.
     ///
     /// Who shares: pods whose effective access is read (the CR's
     /// `readOnly`, or an SA in `readOnlyServiceAccounts`, or the pod's own
@@ -186,39 +196,10 @@ pub fn quantity_mib(q: &str) -> Option<u64> {
     Some((bytes / (1024.0 * 1024.0)) as u64)
 }
 
-/// The smallest default cache worth having; below it the CR must say.
-pub const DEFAULT_SHARED_CACHE_MIN_MIB: u64 = 64;
-
-/// The block cache a CR that shares its mounter gets when it names none:
-/// three quarters of the worker's scratch emptyDir (`workers.scratchSize`,
-/// so 768 MiB at the chart's 1Gi default), leaving headroom under the
-/// limit whose overrun evicts the worker — and, under sharing, strands
-/// every member. Never below [`DEFAULT_SHARED_CACHE_MIN_MIB`], and none
-/// at all when the size cannot be read.
-pub fn default_shared_cache_mib(scratch_size: &str) -> Option<u64> {
-    let ceiling = quantity_mib(scratch_size)? * 3 / 4;
-    (ceiling >= DEFAULT_SHARED_CACHE_MIN_MIB).then_some(ceiling)
-}
-
 impl MountSpec {
     /// True when requests should use path-style addressing.
     pub fn use_path_style(&self) -> bool {
         self.path_style.unwrap_or_else(|| self.endpoint.is_some())
-    }
-
-    /// The spec as the mounter sees it: a CR that shares its mounter and
-    /// names no `cache` gets the default one ([`default_shared_cache_mib`]),
-    /// because sharing is for a dataset read many times and without the
-    /// cache every read that is not concurrent goes to S3. A CR that names
-    /// `cache` keeps it, `enabled: false` included — that is how a shared
-    /// CR opts out.
-    pub fn with_default_cache(mut self, scratch_size: &str) -> Self {
-        if self.shares_read_only() && self.cache.is_none() {
-            if let Some(mib) = default_shared_cache_mib(scratch_size) {
-                self.cache = Some(CacheSpec { enabled: true, max_size_mib: Some(mib) });
-            }
-        }
-        self
     }
 
     /// `spec.sharing.readOnly`: the CR asks that its read-only consumers
@@ -405,47 +386,6 @@ mod tests {
         ] {
             assert_eq!(quantity_mib(q), want, "{q:?}");
         }
-    }
-
-    /// Sharing is for a dataset read many times, and without the block
-    /// cache every read that is not concurrent goes to S3: a sharing CR
-    /// that names no cache gets three quarters of the worker's scratch —
-    /// under the limit whose overrun would evict the shared worker and
-    /// strand every member. A named cache, enabled or not, is kept, and a
-    /// CR that does not share gets nothing it did not ask for.
-    #[test]
-    fn a_sharing_cr_without_a_cache_gets_three_quarters_of_the_scratch() {
-        let base = MountSpec {
-            bucket: "b".into(),
-            key_prefix: None,
-            endpoint: None,
-            region: None,
-            mount_path: "/mnt/s3".into(),
-            read_only: true,
-            path_style: None,
-            credentials_secret_ref: None,
-            uid: None,
-            gid: None,
-            mount_options: vec![],
-            cache: None,
-            sharing: Some(SharingSpec { read_only: true }),
-            image: None,
-            consumers: None,
-            identity: None,
-        };
-        let d = base.clone().with_default_cache("1Gi");
-        assert_eq!(d.cache, Some(CacheSpec { enabled: true, max_size_mib: Some(768) }));
-        assert!(d.validate().is_ok(), "the default must pass the cache validation");
-        assert_eq!(base.clone().with_default_cache("512Mi").cache.unwrap().max_size_mib, Some(384));
-        assert!(base.clone().with_default_cache("64Mi").cache.is_none(), "48 MiB is below the floor: the CR must say");
-        assert!(base.clone().with_default_cache("").cache.is_none(), "an unreadable size defaults nothing");
-        let off = MountSpec { cache: Some(CacheSpec { enabled: false, max_size_mib: None }), ..base.clone() };
-        assert_eq!(off.clone().with_default_cache("1Gi").cache, off.cache, "enabled: false is the opt-out");
-        let named = MountSpec { cache: Some(CacheSpec { enabled: true, max_size_mib: Some(100) }), ..base.clone() };
-        assert_eq!(named.clone().with_default_cache("1Gi").cache, named.cache, "a named ceiling is kept");
-        let own = MountSpec { sharing: None, ..base.clone() };
-        assert!(own.with_default_cache("1Gi").cache.is_none(), "a CR that does not share gets no default");
-        assert_eq!(default_shared_cache_mib("1Gi"), Some(768));
     }
 
     /// A shared mounter holds one credential for all its members, so the

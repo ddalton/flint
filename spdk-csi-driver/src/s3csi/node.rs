@@ -688,26 +688,19 @@ impl S3Node {
         // `access` already carries the pod's `csi.readOnly`; the CR's own
         // `readOnly` narrows every consumer of this mount.
         let read_only = access.is_read() || spec.read_only;
-        // A CR that shares its mounter gets the block cache by default when
-        // it names none: sharing is for a dataset read many times, and
-        // without the cache every read that is not concurrent goes to S3.
-        // Named on the CR either way; `cache.enabled: false` opts out.
-        let spec = if spec.shares_read_only() && spec.cache.is_none() {
-            let spec = spec.with_default_cache(&self.cfg.scratch_size);
-            match spec.cache.as_ref().and_then(|c| c.max_size_mib) {
-                Some(mib) => tracing::info!(
-                    volume = vid, cr = pr.selector.name(), cache_mib = mib, scratch = %self.cfg.scratch_size,
-                    "sharing: block cache defaulted (spec.cache absent)"
-                ),
-                None => tracing::warn!(
-                    volume = vid, cr = pr.selector.name(), scratch = %self.cfg.scratch_size,
-                    "sharing: no default block cache — workers.scratchSize is unreadable or too small; set spec.cache on the CR"
-                ),
-            }
-            spec
-        } else {
-            spec
-        };
+        // A CR that shares its mounter and names no cache runs without one.
+        // The default it had for a day (three quarters of the scratch,
+        // 2026-09-29) sat on the emptyDir — the node's root disk — where a
+        // set larger than the cache paid every fetched block to a 125 MiB/s
+        // volume: 5× slower than S3 on EC2 (sharing design §11). Off until
+        // the cache can be placed on a faster device; said at publish so
+        // the operator who expected one sees why there is none.
+        if spec.shares_read_only() && spec.cache.is_none() {
+            tracing::info!(
+                volume = vid, cr = pr.selector.name(),
+                "sharing: no block cache (spec.cache absent; the default is off — on an emptyDir it would sit on the node's root disk); name spec.cache on the CR to ask for one"
+            );
+        }
         if spec.shares_read_only() {
             let backend = if cred_mode == CredentialMode::Broker { self.broker_backend().await } else { None };
             match sharing_decision(true, read_only, cred_mode, backend.as_deref()) {

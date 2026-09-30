@@ -72,9 +72,10 @@ covered by the stability guarantee.
   shared mount's page cache serves only concurrent readers. Kind-rig legs
   S23/S24 written, NOT RUN. The worker pod carries `chert.us/shared-mount`
   (the class, readable); its volume-id annotation is the class hash. A
-  sharing CR that names no `spec.cache` gets the block cache by default —
-  three quarters of `workers.scratchSize` (768 MiB at the chart's 1Gi),
-  logged at publish; `cache: { enabled: false }` opts out.
+  sharing CR that names no `spec.cache` got the block cache by default —
+  three quarters of `workers.scratchSize` (768 MiB at the chart's 1Gi) —
+  for one day; measured on EC2 on 2026-09-30, that default is a 5×
+  regression on the disk it lands on, and it is withdrawn (Changed, below).
 
 - **pNFS MDS / lite hub: the export's `access:` list is enforced** (2026-09-29,
   `nfs::export_access`, F70's second follow-on). Every config carried
@@ -238,6 +239,34 @@ covered by the stability guarantee.
   under the sound view with unchanged counts.
 
 ### Changed
+
+- **flint-s3-csi: a sharing CR that names no `spec.cache` gets NO block
+  cache** (2026-09-30, step 1 of the sharing design's §11). The default the
+  2026-09-29 sharing knob added — three quarters of `workers.scratchSize`,
+  768 MiB at the chart's 1Gi, applied at publish — was measured on EC2 the
+  next day AS DEPLOYED: the worker's `scratch` emptyDir sits on the node's
+  root volume, a gp3 at 125 MiB/s on trove's i4i.large nodes and on EKS
+  managed node groups alike, and Mountpoint writes every fetched block to
+  the cache directory on the read path. A 6 GiB set read through the 768 MiB
+  cache took 48 s cold AND warm where no cache took 10 s — 6 GiB at
+  125 MiB/s, to the second — because a scan larger than the cache evicts
+  all of itself and pays the disk again; the 512 MiB set that fit warmed
+  2.5× faster (`s3csi/e2e/results/2026-09-30-ec2-campaign-3/`, M1). A
+  default that is a 5× regression for every working set larger than it, on
+  the platforms this driver targets, is withdrawn: the plugin defaults
+  nothing (`MountSpec::with_default_cache` and `default_shared_cache_mib`
+  removed), logs `sharing: no block cache` at a shared publish that named
+  none, and a CR asks with `cache: { enabled: true, maxSizeMib: N }` for a
+  set that fits in N — the CRD's `cache` and `sharing` descriptions, the
+  values text and the design (§10, §11) say so and say why. The class key's
+  shape is unchanged: the argv carries the cache flags when a CR names
+  them. S24 now asserts the shared mounter's argv carries no `--cache` and
+  its `/tmp` holds no cache directory after the reads, and as its control
+  recreates shared-c's class against the CR with a 256 MiB cache named and
+  checks the flags and a populated cache directory (kind, NOT RUN). The M2
+  fixtures name the 768 MiB cache they were measured with. Placing the cache
+  on a device faster than S3 (`workers.cacheHostPath`, §11 steps 2–4) is
+  the follow-up; until then the truthful default is off.
 
 - **flint-s3-csi: worker requests drop to 10m/64Mi, and a worker kubelet
   cannot admit is named** (2026-09-30, finding 2). The plugin places a worker
