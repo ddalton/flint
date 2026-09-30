@@ -710,8 +710,15 @@ port are still wanted for capacity and failure isolation.
    reads NotReady with the reason, labels every node false, and a Secret
    update reaches the nodes. Run 1 found a race (the first pass after a
    restart saw systemd's forked `(tlshd)` and read not ready for one
-   interval); fixed. Not built: publishing the chart (`release.sh` checks
-   the image carries the binary, but pushes no flint-nfs-client chart).
+   interval); fixed. **Publishing (2026-09-30):** `release.sh chart`
+   pushes it as `flint-nfs-client` (scope `all`) once the
+   flint-lite-operator image AT ITS appVersion carries the binary —
+   checked inside the published image, since the recipe grep the other
+   charts use passed an image built before the binary existed.
+   `flint-lite-operator:1.56.0` carries neither `flint-nfs-client-identity`
+   nor `flint-nfs-proxy`, so both this chart and the operator chart are
+   refused until the next release's image is published. A test keeps the
+   chart's appVersion and image equal to the operator chart's.
 3. Restarts and wake: lease keepalive, status-flag OR, the table in
    §4, and `NFS4ERR_DELAY` + wake.
    **DONE 2026-09-28 (static-table mode):** a one-slot control session

@@ -195,6 +195,29 @@ push_chart() {  # <scopes> <name> <version> <tgz>
     echo "chart $name $version released."
 }
 
+# The binaries a chart execs, looked for IN THE PUBLISHED IMAGE. Prints
+# each one missing (and a note in parentheses if the image could not be
+# read), nothing when all are there. The recipe greps beside the callers
+# only say the NEXT build will carry a binary; a tag that is already
+# published is never rebuilt (see the top of this file), so for it the
+# recipe proves nothing. flint-lite-operator:1.56.0 was published before
+# flint-nfs-proxy and flint-nfs-client-identity existed, and the recipe
+# gate passed charts that exec both.
+image_missing_bins() {  # <name> <tag> <bin>...
+    local ref="$hub_ns/$1:$2" c list
+    shift 2
+    if ! docker pull -q --platform linux/amd64 "$ref" >/dev/null 2>&1 \
+        || ! c=$(docker create --platform linux/amd64 "$ref" 2>/dev/null); then
+        echo "(could not pull $ref to look inside it)"
+        return 0
+    fi
+    list=$(docker export "$c" | tar -t 2>/dev/null | grep '^usr/local/bin/' || true)
+    docker rm "$c" >/dev/null 2>&1 || true
+    for b in "$@"; do
+        printf '%s\n' "$list" | grep -qx "usr/local/bin/$b" || echo "$b"
+    done
+}
+
 # True when the active scope is in the given list.
 #
 # The chart GATES need this as much as push_chart does, and for a
@@ -342,10 +365,51 @@ EOF
                 exit 1
             fi
         done
+        op_missing=$(image_missing_bins flint-lite-operator "$op_app" \
+            flint-lite-operator flint-hub-gateway flint-nfs-proxy flint-nfs-client-identity)
+        if [ -n "$op_missing" ]; then
+            echo "REFUSING to push flint-lite-operator $op_version: the chart execs binaries" \
+                 "missing from the published $hub_ns/flint-lite-operator:$op_app:" $op_missing >&2
+            exit 1
+        fi
         refuse_stale_crd flint-lite-operator "$op_version" share "$op_dir/crds/flintshares.yaml"
         helm package "$op_dir" --destination "$pkg_dir" >/dev/null
         op_pkg="$pkg_dir/flint-lite-operator-$op_version.tgz"
         push_chart "all" flint-lite-operator "$op_version" "$op_pkg"
+    fi
+
+    # The flint-nfs-client chart, installed in each CLIENT cluster (the
+    # DaemonSet that feeds tlshd its certificate, design §6a). It runs
+    # flint-nfs-client-identity out of the flint-lite-operator image at
+    # its appVersion, so its appVersion is the operator chart's (pinned by
+    # a test in nfs_client_identity.rs) and the binary must be in that
+    # image as published.
+    nc_dir="$repo_root/flint-nfs-client-chart"
+    if [ -d "$nc_dir" ] && in_scope "all"; then
+        nc_version=$(python3 -c "import yaml; print(yaml.safe_load(open('$nc_dir/Chart.yaml'))['version'])")
+        nc_app=$(python3 -c "import yaml; print(yaml.safe_load(open('$nc_dir/Chart.yaml'))['appVersion'])")
+        nc_img=$(values_image_name "flint-nfs-client $nc_version" "$nc_dir/values.yaml")
+        nc_pin=$(python3 -c "import yaml; i=yaml.safe_load(open('$nc_dir/values.yaml'))['image']; print((i.get('tag') or '') + '|' + (i.get('ref') or ''))")
+        if [ "$nc_img" != flint-lite-operator ] || [ "$nc_pin" != "|" ]; then
+            echo "REFUSING to push flint-nfs-client $nc_version: values.yaml must pull" \
+                 "$hub_ns/flint-lite-operator at the appVersion (image $nc_img, tag|ref '$nc_pin')." >&2
+            exit 1
+        fi
+        if ! tag_exists flint-lite-operator "$nc_app"; then
+            echo "REFUSING to push flint-nfs-client $nc_version:" \
+                 "$hub_ns/flint-lite-operator:$nc_app is not on Docker Hub." >&2
+            exit 1
+        fi
+        nc_missing=$(image_missing_bins flint-lite-operator "$nc_app" flint-nfs-client-identity)
+        if [ -n "$nc_missing" ]; then
+            echo "REFUSING to push flint-nfs-client $nc_version: the chart execs" \
+                 "flint-nfs-client-identity, missing from the published" \
+                 "$hub_ns/flint-lite-operator:$nc_app:" $nc_missing >&2
+            exit 1
+        fi
+        helm package "$nc_dir" --destination "$pkg_dir" >/dev/null
+        nc_pkg="$pkg_dir/flint-nfs-client-$nc_version.tgz"
+        push_chart "all" flint-nfs-client "$nc_version" "$nc_pkg"
     fi
 
     # The flint-lean chart. It was NOT gated here until 2026-08-26, and

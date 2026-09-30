@@ -488,4 +488,24 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "x\n", "one restart for one edit");
         assert!(std::fs::read_to_string(&conf).unwrap().contains("x509.private_key= /etc/flint/nfs-tls/client.key"));
     }
+
+    /// The client chart runs this binary out of the flint-lite-operator
+    /// image, so it must pull the image the operator chart ships: the same
+    /// repository at the same appVersion. release.sh then checks the binary
+    /// is in that image as published.
+    #[test]
+    fn the_client_chart_pulls_the_operator_charts_image() {
+        const NC_CHART: &str = include_str!("../../flint-nfs-client-chart/Chart.yaml");
+        const OP_CHART: &str = include_str!("../../flint-lite-operator-chart/Chart.yaml");
+        const NC_VALUES: &str = include_str!("../../flint-nfs-client-chart/values.yaml");
+        const OP_VALUES: &str = include_str!("../../flint-lite-operator-chart/values.yaml");
+        let field = |y: &str, key: &str| {
+            y.lines()
+                .find_map(|l| l.strip_prefix(key))
+                .map(|v| v.trim().trim_matches('"').to_string())
+                .unwrap_or_else(|| panic!("{key} missing"))
+        };
+        assert_eq!(field(NC_CHART, "appVersion:"), field(OP_CHART, "appVersion:"), "the two charts' appVersions");
+        assert_eq!(field(NC_VALUES, "  repository:"), field(OP_VALUES, "  repository:"), "the two charts' image repositories");
+    }
 }
