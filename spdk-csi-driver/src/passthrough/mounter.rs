@@ -24,7 +24,15 @@ use super::spec::MountSpec;
 /// `workers.scratchSize`). Never a hostPath — AWS moved their own cache
 /// off the host for isolation, and a shared host cache would be a
 /// cross-tenant read channel.
-pub const CACHE_DIR: &str = "/tmp/mountpoint-cache";
+///
+/// The scratch ROOT, not a subdirectory of it: mount-s3 creates its own
+/// `mountpoint-cache-<id>` under the directory it is given and does not
+/// create that directory's parents, so `/tmp/mountpoint-cache` (the
+/// path until 2026-09-29) made every cached mount die at start with
+/// "creation of cache sub-directory failed: No such file or directory"
+/// — found on the kind rig the first time a cached mount was actually
+/// published.
+pub const CACHE_DIR: &str = "/tmp";
 
 pub fn mounter_args_for(spec: &MountSpec, owner: (Option<i64>, Option<i64>), target: &str) -> Vec<String> {
     let mut a: Vec<String> = vec![spec.bucket.clone(), target.to_string(), "--foreground".into(), "--allow-other".into()];

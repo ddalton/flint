@@ -34,14 +34,31 @@ spec:
   template:
     metadata: { labels: { app: minio } }
     spec:
+      # THE STORE IS RUSTFS (2026-09-29). MinIO's public images went away
+      # that day — the quay.io ones answer 401 to everyone and the Docker
+      # Hub ones are denied — so the rig runs RustFS, an S3 store the
+      # repo already tests against (flint-store's presign test). The
+      # Deployment and Service keep the name `minio`: every fixture and
+      # helper addresses http://minio.flint-system.svc:9000, and the name
+      # is an address, not a claim about what answers it. `mc` (the
+      # client the legs seed and assert with) comes from Chainguard's
+      # minio-client image, the -dev variant because the seed script and
+      # the drill's exec need a shell.
       containers:
         - name: minio
-          image: quay.io/minio/minio:latest
-          args: ["server", "/data", "--address", ":9000"]
+          image: rustfs/rustfs:latest
+          imagePullPolicy: IfNotPresent
           env:
-            - { name: MINIO_ROOT_USER, value: drill }
-            - { name: MINIO_ROOT_PASSWORD, value: drillsecret }
+            - { name: RUSTFS_ACCESS_KEY, value: drill }
+            - { name: RUSTFS_SECRET_KEY, value: drillsecret }
+            - { name: RUSTFS_VOLUMES, value: /data }
           ports: [{ containerPort: 9000 }]
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: logs, mountPath: /logs }
+      volumes:
+        - { name: data, emptyDir: {} }
+        - { name: logs, emptyDir: {} }
 ---
 apiVersion: v1
 kind: Service
@@ -64,9 +81,10 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: mc
-          image: quay.io/minio/mc:latest
+          image: cgr.dev/chainguard/minio-client:latest-dev
+          imagePullPolicy: IfNotPresent
           command:
-            - /bin/sh
+            - sh
             - -c
             - |
               until mc alias set m http://minio.flint-system.svc:9000 drill drillsecret; do sleep 2; done
@@ -88,8 +106,9 @@ metadata:
 spec:
   containers:
     - name: mc
-      image: quay.io/minio/mc:latest
-      command: ["/bin/sh", "-c"]
+      image: cgr.dev/chainguard/minio-client:latest-dev
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-c"]
       args:
         - |
           trap 'exit 0' TERM INT

@@ -128,8 +128,14 @@ kill_worker() {
 }
 # The PID, on the node, of a worker pod's container: what `nsenter -n`
 # needs to shape its egress (S23). Empty when crictl cannot find it.
+# Asked for by name (`.info.pid`), never by grepping the inspect JSON:
+# the first `"pid"` in that document is `"pid": 1` in the container's
+# process spec, and a grep took it — so the first run of S23 shaped the
+# kind NODE's own interface (pid 1's netns), left the pod untouched, and
+# throttled everything leaving the node. Verified: the pid this returns
+# has a netns other than pid 1's, with the pod's eth0 in it.
 worker_pid() {
-    onnode "p=\$(crictl pods -q --name $1 2>/dev/null | head -1); c=\$(crictl ps -q --pod \$p 2>/dev/null | head -1); crictl inspect \$c 2>/dev/null | grep -m1 '\"pid\"' | tr -dc 0-9"
+    onnode "p=\$(crictl pods -q --name $1 2>/dev/null | head -1); c=\$(crictl ps -q --pod \$p 2>/dev/null | head -1); [ -n \"\$c\" ] && crictl inspect -o go-template --template '{{.info.pid}}' \$c 2>/dev/null"
 }
 # The worker pod serving a tenant pod, by annotation.
 # Like `worker_of` but matches a worker in ANY phase. S17 needs it: the
@@ -1438,14 +1444,22 @@ spec:
       securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
       volumeMounts: [{ name: data, mountPath: /mnt/s3 }]
 PODEOF
+# A clean prefix: the object, and any incomplete upload an earlier run
+# (or a control that ran the old order) left behind — otherwise the
+# fingerprint below would read a predecessor's leftovers.
 mcx mc rm --force m/$BUCKET/datasets/f72/late.bin >/dev/null 2>&1
+mcx mc rm --incomplete --recursive --force m/$BUCKET/datasets/f72/ >/dev/null 2>&1
 if wait_phase f72-writer Running 180 && require_pod f72-writer; then
     w=$(worker_of f72-writer)
     pid=$(worker_pid "$w")
-    if [ -n "$pid" ] && onnode "nsenter -t $pid -n tc qdisc add dev eth0 root netem rate 40mbit"; then
-        ok "worker $w egress shaped to 40 Mbit/s (a 48 MiB tail takes ~10 s)"
+    # The pid must live in a netns of its own (the pod's), never pid 1's:
+    # shaping the node's interface is the mistake the helper's comment
+    # describes, and it would make this leg pass against the defect.
+    if [ -n "$pid" ] && [ "$(onnode "readlink /proc/$pid/ns/net")" != "$(onnode "readlink /proc/1/ns/net")" ] \
+        && onnode "nsenter -t $pid -n tc qdisc add dev eth0 root netem rate 40mbit"; then
+        ok "worker $w egress shaped to 40 Mbit/s in the pod's own netns (a 48 MiB tail takes ~10 s)"
     else
-        note "could not shape worker $w's egress (pid '$pid'): the leg still runs, but a pass is then only as strong as the unshaped race"
+        bad "could not shape worker $w's egress in its own netns (pid '$pid'): without it the completion finishes before unpublish and this leg cannot fail"
     fi
     # The opener (this shell) closes its descriptor BEFORE a byte is
     # written; the child writes 48 MiB and is the last to close.
@@ -1459,6 +1473,10 @@ if wait_phase f72-writer Running 180 && require_pod f72-writer; then
         && ok "the plugin waited for the mounter's own exit (F72 order)" || bad "no 'exited on its own' line in the plugin log: the old order ran, or the wait hit its ceiling"
     size=$(mcx mc stat --json m/$BUCKET/datasets/f72/late.bin 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["size"])' 2>/dev/null)
     [ "${size:-0}" = "50331648" ] && ok "late.bin is in the bucket whole (48 MiB)" || bad "late.bin in the bucket: size '${size:-absent}' — the completion was cut"
+    # The fingerprint below reads an EMPTY listing as success, so the store
+    # must be shown to answer ListMultipartUploads at all (a store that
+    # refuses it would make the check vacuous).
+    mcx mc ls --incomplete m/$BUCKET/datasets/f72/ >/dev/null 2>&1 && ok "the store answers ListMultipartUploads" || bad "the store does not answer ListMultipartUploads — the incomplete-upload check below would be vacuous"
     inc=$(mcx mc ls --incomplete --recursive m/$BUCKET/datasets/f72/ 2>/dev/null | grep -c . || true)
     [ "${inc:-0}" = "0" ] && ok "no incomplete multipart upload under datasets/f72/" || bad "$inc incomplete multipart upload(s) under datasets/f72/ — the fingerprint of a cut completion"
 fi
@@ -1493,8 +1511,9 @@ if require_pod shared-a && require_pod shared-b && require_pod shared-c; then
     srcs=$(onnode "grep -c 'plugins/s3.csi.chert.us/shared/' /proc/mounts"); [ "${srcs:-0}" = "2" ] && ok "two shared FUSE sources on the node (one per class)" || bad "$srcs shared source mount(s) on the node, expected 2"
     # The CR names no cache: the shared mounter must be running the
     # DEFAULT one (three quarters of scratch), and the reads above filled it.
-    [ -n "$w" ] && blocks=$($K -n $WNS exec "$w" -- ls -R /tmp/mountpoint-cache 2>/dev/null | grep -c .)
-    [ "${blocks:-0}" -gt 0 ] && ok "the default block cache is in use in $w ($blocks entries under /tmp/mountpoint-cache)" || bad "no block cache under /tmp/mountpoint-cache in $w — the sharing default did not reach the mounter"
+    # mount-s3 makes `mountpoint-cache-<id>` under the scratch root.
+    [ -n "$w" ] && blocks=$($K -n $WNS exec "$w" -- ls -R /tmp 2>/dev/null | grep -c "mountpoint-cache\|^[0-9a-f]")
+    [ "${blocks:-0}" -gt 1 ] && ok "the default block cache is in use in $w ($blocks cache entries under /tmp)" || bad "no populated block cache under /tmp in $w — the sharing default did not reach the mounter"
     $K -n $SYS logs "$(plugin_pod)" 2>/dev/null | grep -q "block cache defaulted" && ok "the plugin logged the defaulted cache" || bad "no 'block cache defaulted' line in the plugin log"
     inpod shared-a "touch /mnt/shared/x" >/dev/null 2>&1 && bad "shared-a could write the read-only shared mount" || ok "the shared mount is read-only"
     lines=$($K -n $SYS logs "$(plugin_pod)" 2>/dev/null | grep -c 'published (shared read-only mount)')

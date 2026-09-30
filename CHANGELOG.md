@@ -208,6 +208,18 @@ covered by the stability guarantee.
 
 ### Changed
 
+- **The s3csi kind rig runs RustFS** (2026-09-29, `s3csi/e2e/rig.yaml`).
+  MinIO's public images went away that day — quay.io answers 401 to everyone,
+  Docker Hub's `minio/*` is denied, dl.min.io is 410 — so the rig's store is
+  `rustfs/rustfs` behind the Service still named `minio` (every fixture
+  addresses `minio.flint-system.svc:9000`), and `mc` comes from Chainguard's
+  `minio-client:latest-dev`. The lean rigs still name `minio/minio` and are
+  broken the same way; not touched here. `run-legs.sh` runs a chosen subset
+  of the drill's legs against a rig `setup` built. S23 (F72) shapes the
+  worker's egress in the pod's own netns — the first cut resolved the pid by
+  grepping crictl's JSON, took `"pid": 1`, and shaped the kind NODE instead —
+  and refuses to run unshaped, because unshaped it cannot fail.
+
 - **An export's `access:` list is no longer decorative** (2026-09-29). A
   client outside every listed network used to get read-write access; it is
   now refused (`NFS4ERR_ACCESS` at PUTROOTFH/PUTFH), and a `permissions: ro`
@@ -219,6 +231,34 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **lean: a `sync` with no document deleted the tree's clean files; a
+  sync or a reader left paths owed forever; a rescope widen overwrote the
+  agent's unpublished work** (2026-09-29, the review of `sync.rs`,
+  `reader.rs` and rescope against the consume; `lean/FINDINGS.md`
+  L-127–L-130, each pinned by a test that fails as shipped).
+  - L-127: `sync` read a missing document (no pointer, no manifest) as an
+    empty one and deleted every clean file the baseline held — for a
+    wiped or re-pointed prefix, the last copy. It now refuses when the
+    tree holds anything; the consume already took nothing.
+  - L-128: a path `sync` could not fetch or write was recorded as taken
+    (the cheap path's `derived_etag` set), so it waited for the next
+    commit. It now leaves it owed, as the consume's `left` does; a write
+    failure is `sync-write-failed (will retry)`, and only a path that can
+    never be materialised is `sync-refused-containment`.
+  - L-129: a reader re-synced only when the pointer or the cell moved; it
+    now also re-syncs while its baseline says something is owed.
+  - L-130: a rescope WIDEN re-fetched the document's version over a file
+    the agent had made at a newly admitted path. It now keeps the file
+    (uncited, `rescope-kept-local-unpublished`); the next barrier
+    publishes it and the merge preserves the version it replaces.
+- **`spec.cache` never produced a working mount** (2026-09-29, found on the
+  kind rig the first time a cached passthrough mount was published —
+  through the sharing default). The plugin handed mount-s3
+  `--cache /tmp/mountpoint-cache`; mount-s3 creates its own
+  `mountpoint-cache-<id>` under the directory it is given and does not
+  create that directory's parents, so every cached mount died at start with
+  "creation of cache sub-directory failed: No such file or directory". The
+  cache is now the scratch root, `/tmp`, which the worker's emptyDir is.
 - **The passthrough CRD-agreement test had silently stopped running**
   (2026-09-29, `passthrough/spec.rs`). When `spec.cache` was added, its test
   was inserted between the CRD test's `#[test]` attribute and the CRD test's
