@@ -1419,12 +1419,24 @@ fi
 # multipart upload left behind. The plugin now waits for the mounter to
 # exit on its own once the source is detached (workers.quiesceSecs).
 #
-# ABLE TO FAIL, on purpose: the tail is slowed — a 64 MiB part size so
-# the whole 48 MiB file is the last part, uploaded at completion, and
-# netem on the worker's egress — so the completion outlives the
-# container by ~10 s: longer than the old window (a second or two),
-# shorter than the 30 s quiesce. A same-process writer would PASS
-# AGAINST THE DEFECT, because close() blocks until the upload is done.
+# The tail is slowed — a 64 MiB part size so the whole 48 MiB file is
+# the last part, uploaded at completion, and netem on the worker's
+# egress — so that a completion left to RELEASE would outlive the
+# container by ~10 s: longer than the old window, shorter than the 30 s
+# quiesce.
+#
+# MEASURED 2026-09-30 (kind, RustFS): this leg CANNOT FAIL on data as
+# deployed. Every FUSE request from a tenant carries pid 0 (the tenant's
+# processes are outside the mounter's pid namespace: the plugin has no
+# hostPID, the worker is its own pod), Mountpoint reads 0 == 0 as the
+# opener, and every close — the child's included — completes the upload
+# inside FLUSH: the child-written file took the whole shaped 12 s at
+# close, and the OLD order (workers.quiesceSecs=0) landed it whole too.
+# What this leg pins is the ORDER (the plugin waited for the mounter's
+# own exit) and that a child-written file lands whole and clean; the
+# data-loss window opens only where the mounter can see the tenant's
+# pids (hostPID on the plugin, a shared pid namespace), and a run in
+# such a configuration is what would make this leg a falsifier.
 leg S23 "F72: a file whose last close came from a CHILD of its opener is whole in the bucket after its pod exits, with no incomplete multipart upload left behind"
 $K -n $NS apply -f - >/dev/null <<PODEOF
 apiVersion: v1

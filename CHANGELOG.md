@@ -286,8 +286,16 @@ covered by the stability guarantee.
   on its own, and only then disarms the hook and deletes the pod; at the
   ceiling the old order applies and the log says so. Verified against the
   pinned mount-s3 1.24.0 source (`fs.rs` flush/release, `fuse/session.rs`
-  join); the rig leg (S23, a different-process writer with a slowed tail)
-  is written, NOT RUN.
+  join). MEASURED on the kind rig 2026-09-30 (S23): NOT REACHABLE AS
+  DEPLOYED — every FUSE request from a tenant carries pid 0, because the
+  tenant's processes are outside the mounter's pid namespace (the plugin
+  runs without hostPID), Mountpoint reads 0 == 0 as the opener, and every
+  close completes the upload inside FLUSH; a child-written 48 MiB file took
+  the whole shaped 12 s at close and landed whole under the OLD order too.
+  The window opens only where the mounter can see the tenant's pids
+  (`hostPID` on the plugin, or a shared pid namespace). The fix stays, at
+  ~2 s per unpublish; S23 is a regression check of the order, not a
+  falsifier of data loss.
 
 - **F70: a ReadOnlyMany export is now read-only at the SERVER** (2026-09-28).
   The CSI controller has always told the NFS server pod `--read-only` for a

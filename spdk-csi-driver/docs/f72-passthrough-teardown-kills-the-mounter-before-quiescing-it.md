@@ -192,3 +192,45 @@ different-process writer AND a slowed tail (a large `--part-size`, or
 `tc netem` on the worker) to be able to fail at all: a same-process
 writer cannot lose data and would pass against the defect. Fingerprint:
 the object absent AND an incomplete multipart upload listed. NOT RUN.
+
+## Measured on the box (2026-09-30): NOT REACHABLE AS DEPLOYED
+
+The kind rig (`run-s3csi.sh` S23, RustFS behind the store Service) ran
+the deferred-completion pattern — the opener closes first, a child
+writes 48 MiB and closes last — with the worker's egress shaped to
+40 Mbit/s in the pod's own network namespace, so the completion takes
+about 11 s. With the fix, the object landed whole. With the OLD order
+(`workers.quiesceSecs=0`) the object ALSO landed whole. The reason, from
+mount-s3's own `--debug` log and two timed writes:
+
+| write | wall time |
+|---|---|
+| same process opens, writes, closes | 11.15 s |
+| opener closes first, child writes and closes last | 12.18 s |
+
+Both closes BLOCKED for the upload, and every FUSE request in the log —
+write, flush, release — carries `pid=0`. The kernel reports a
+requester's pid as seen from the mounter's pid namespace, and the
+tenant's processes are outside it (the node plugin, which performs the
+`mount(2)`, runs without `hostPID`, and the worker is its own pod), so
+every request reads as pid 0; Mountpoint's `are_from_same_process(0, 0)`
+is true, so every close is the opener's, the upload completes inside
+FLUSH, and `close(2)` does not return until it has. RELEASE then has
+nothing left to complete. A container therefore cannot exit with an
+upload in flight, and the window this finding describes does not open
+in this deployment.
+
+**It opens the moment the mounter can see the tenant's pids** — the
+plugin with `hostPID: true`, or a mounter sharing the tenant's pid
+namespace — because then the pids are real and distinct, the tgid
+lookup fails from inside the worker, and Mountpoint defers to RELEASE
+(`fs/handles.rs:455-466`: an unresolvable pid is "a different
+process"). The fix stays, at a cost of about 2 s per unpublish on this
+rig (the mounter's own exit after the detach), and S23 stays as a
+regression check of the order. S23 is NOT a falsifier of data loss
+here: its two old-order controls passed for this reason, the second
+one with the shaping verified in the pod's netns.
+
+Corrects the "Re-checked against the source" section above and the
+CHANGELOG entry: the deferred path is Mountpoint's in general, not
+flint's as deployed.
