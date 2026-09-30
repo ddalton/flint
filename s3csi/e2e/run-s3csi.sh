@@ -1666,7 +1666,13 @@ if chart_up --set workers.passthroughImage.tag=pull-test --set workers.prepull.p
     got=$(inpod pull-reader "cat /mnt/s3/shard-02.txt"); [ "$got" = "seeded-object-02" ] && ok "pull-reader reads content" || bad "pull-reader read '$got'"
     $K -n $NS delete pod pull-reader --wait=true --timeout=120s >/dev/null 2>&1
     chart_up >/dev/null 2>&1 && plugin_rolled && ok "chart restored (tag $TAG, pre-pull on)" || bad "chart restore failed"
-    docker rmi dilipdalton/flint-s3-worker:pull-test >/dev/null 2>&1; onnode "crictl rmi docker.io/dilipdalton/flint-s3-worker:pull-test" >/dev/null 2>&1
+    # The host's tag only. NOT `crictl rmi` on the node: containerd's CRI
+    # removes the IMAGE, every tag of it, and pull-test is the same image
+    # as $TAG — measured on the box 2026-09-30, where a by-hand
+    # `crictl rmi …:pull-test` left the worker node with no
+    # flint-s3-worker:$TAG at all (the next plugin roll's pre-pull would
+    # have failed and blocked the plugin). The node keeps the extra tag.
+    docker rmi dilipdalton/flint-s3-worker:pull-test >/dev/null 2>&1
 else
     bad "chart upgrade to the pull-test tag failed; leg skipped"
 fi
