@@ -14,6 +14,26 @@ covered by the stability guarantee.
 
 ### Added
 
+- **Can flint-passthrough serve AWC's read-only ABS STS pod mounts? —
+  assessment, no code** (2026-10-01,
+  `docs/plans/passthrough-sts-secret-mounts-assessment.md`). awc-docs
+  PR #136 specifies read-only pod mounts delivered as inline
+  ephemeral CSI volumes with the STS session in a `nodePublishSecretRef`
+  Secret — the shape this driver already serves exclusively
+  (`attrs.rs:171-173`), with a `CSIDriver` matching the proposal field for
+  field. The blocker is one wire never connected: `static` is the only arm
+  that reads a `nodePublishSecretRef` and the only arm that does not
+  refresh (`node.rs:1374-1445`, `Static` falls through `_ => {}`). The
+  note records the scope split (of 13 requirements, only `sts-fuse-node`
+  N1–N5 and S2 are the driver's), the fix in five steps behind a NEW
+  `identity.mode: stsSecret` rather than a change to `static`, and the one
+  piece that does not fit: a reviewer asked that a replacement session be
+  proven usable before it displaces a working one, and since there is one
+  `creds.json` and only the mounter makes S3 requests, that needs a
+  PLUGIN-side `ListObjectsV2` probe — `aws-sdk-s3` is already a dependency
+  but nothing in `src/s3csi/` uses it. No code; four things to verify
+  before any.
+
 - **flint-s3-csi: the placed block cache measured on an instance store —
   half the penalty, not none** (2026-10-01, step 4 of the sharing design's
   §11; `s3csi/e2e/results/2026-10-01-ec2-step4/`). On trove `s3a`
