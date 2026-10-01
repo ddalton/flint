@@ -1,0 +1,12 @@
+create+unlink   direct       57-    104 ops/s   proxy    2.5-   4.8 ms CPU per 1k ops
+create+unlink   proxy        50-     93 ops/s   proxy  940.5-1542.0 ms CPU per 1k ops
+create+unlink   tls          44-     60 ops/s   proxy 1639.5-1926.0 ms CPU per 1k ops
+seq-read        direct      513-    523 MiB/s  proxy      8-    12 ms CPU per GiB
+seq-read        proxy       372-    410 MiB/s  proxy    644-   770 ms CPU per GiB
+seq-read        tls         329-    350 MiB/s  proxy    940-  1012 ms CPU per GiB
+seq-write       direct       80-    134 MiB/s  proxy     12-    14 ms CPU per GiB
+seq-write       proxy       115-    188 MiB/s  proxy   1616-  2666 ms CPU per GiB
+seq-write       tls          86-    171 MiB/s  proxy   2486-  4564 ms CPU per GiB
+stat            direct     4982-   6304 ops/s   proxy    0.3-   0.4 ms CPU per 1k ops
+stat            proxy      2633-   2961 ops/s   proxy  173.0- 189.4 ms CPU per 1k ops
+stat            tls        2511-   2656 ops/s   proxy  196.0- 207.2 ms CPU per 1k ops

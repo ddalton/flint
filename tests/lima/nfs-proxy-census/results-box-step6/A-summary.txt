@@ -1,0 +1,4 @@
+idle  h1000   n=10  rss_mib 84-103 (median 92)  cpu_m 4-5 (median 4)  statedb_kib 356-356 (median 356)
+idle  h10000  n=10  rss_mib 81-98 (median 92)  cpu_m 9-12 (median 11)  statedb_kib 1352-1376 (median 1356)
+idle  h5000   n=10  rss_mib 65-88 (median 74)  cpu_m 7-9 (median 8)  statedb_kib 800-804 (median 800)
+load  h10000  n=10  rss_mib 69-90 (median 83)  cpu_m 51-54 (median 52)  statedb_kib 1360-1384 (median 1364)

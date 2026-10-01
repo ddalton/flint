@@ -1,0 +1,11 @@
+apiserver requests/s over 300 s, total 182.79
+  deployments                    37.77/s
+  persistentvolumeclaims         33.03/s
+  services                       31.04/s
+  secrets                        15.53/s
+  pods                           15.53/s
+  configmaps                     15.52/s
+  flintshares                    15.51/s
+  replicasets                    13.31/s
+  persistentvolumes               2.01/s
+  leases                          1.78/s

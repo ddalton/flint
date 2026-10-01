@@ -1,0 +1,6 @@
+suspend   tier  1000  first byte    13-13s  full list    13-14s  server ready    11-11s
+suspend   tier  5000  first byte    13-14s  full list    13-14s  server ready    10-11s
+suspend   tier 10000  first byte    13-14s  full list    14-14s  server ready    10-12s
+hibernate tier  1000  first byte    27-27s  full list    27-27s  server ready    14-15s
+hibernate tier  5000  first byte    26-27s  full list    27-27s  server ready    13-15s
+hibernate tier 10000  first byte    26-27s  full list    27-28s  server ready    14-15s

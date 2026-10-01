@@ -1,0 +1,2 @@
+flint-lite-operator: 56 MiB
+flint-lite-operator-nfs-proxy: 83 MiB

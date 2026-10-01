@@ -1,0 +1,12 @@
+tls	rep=1	w=stat	ops=10000	wall_s=3.773436493	proxy_cpu_ms=1964	hub_cpu_ms=1178
+tls	rep=1	w=create+unlink	ops=4000	wall_s=91.917605976	proxy_cpu_ms=7704	hub_cpu_ms=19304
+tls	rep=1	w=seq-write	mib=512	wall_s=5.983865264	proxy_cpu_ms=2282	hub_cpu_ms=1604
+tls	rep=1	w=seq-read	mib=512	wall_s=1.554984834	proxy_cpu_ms=506	hub_cpu_ms=127	intact=yes
+tls	rep=2	w=stat	ops=10000	wall_s=3.764982056	proxy_cpu_ms=1960	hub_cpu_ms=1208
+tls	rep=2	w=create+unlink	ops=4000	wall_s=68.877259923	proxy_cpu_ms=6817	hub_cpu_ms=18986
+tls	rep=2	w=seq-write	mib=512	wall_s=3.002899379	proxy_cpu_ms=1243	hub_cpu_ms=650
+tls	rep=2	w=seq-read	mib=512	wall_s=1.464407660	proxy_cpu_ms=470	hub_cpu_ms=122	intact=yes
+tls	rep=3	w=stat	ops=10000	wall_s=3.983177602	proxy_cpu_ms=2072	hub_cpu_ms=1262
+tls	rep=3	w=create+unlink	ops=4000	wall_s=66.653271851	proxy_cpu_ms=6558	hub_cpu_ms=20451
+tls	rep=3	w=seq-write	mib=512	wall_s=5.655942848	proxy_cpu_ms=2257	hub_cpu_ms=1104
+tls	rep=3	w=seq-read	mib=512	wall_s=1.527506925	proxy_cpu_ms=503	hub_cpu_ms=168	intact=yes

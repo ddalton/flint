@@ -889,6 +889,18 @@ port are still wanted for capacity and failure isolation.
    RSS/CPU per hub, wake time from hibernate, proxy throughput, and the
    operator at about 1,000 live + 10,000 parked. **Its numbers decide
    multi-volume.**
+   **Plan:** `flint-lite-nfs-proxy-step6-rig-plan.md`. Option 1 was
+   chosen: phases A–D on the build box (RUN 2026-09-30, results in
+   `tests/lima/nfs-proxy-census/results-box-step6/`), then one short AWS
+   session for E, C's cross-node half and the operator relist (not run).
+   Headlines:
+   - a real hub is ~90 MiB and ~5 m CPU idle at any size;
+   - wakes are size-independent: ~13 s from suspend, ~27 s from
+     hibernate;
+   - the proxy spends ~0.18 ms CPU per metadata op, about the hub's own
+     (one core ≈ 5,500 ops/s);
+   - 150 live + 10,000 parked: the operator at 235 MiB / 181 m, with 183
+     apiserver req/s.
 7. Multi-replica proxy (shared client table) before about 1,000 active.
 
 Drills. Each one needs an arm that fails when the mechanism is removed:

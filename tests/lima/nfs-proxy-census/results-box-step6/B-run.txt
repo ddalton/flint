@@ -1,0 +1,36 @@
+== bring-up
+Bucket created successfully `m/fleet`.
+PASS w1000 holds 1000 files
+PASS w5000 holds 5000 files
+PASS w10000 holds 10000 files
+PASS every hub is flushed (rpoClean)
+== wakes from SUSPEND (disk kept)
+suspend	w1000	tier=1000	rep=1	rc=0	files=1000	client_first_byte_s=13.3	client_full_list_s=13.5	server_pod_ready_s=11
+suspend	w5000	tier=5000	rep=1	rc=0	files=5000	client_first_byte_s=13.5	client_full_list_s=14.0	server_pod_ready_s=10
+suspend	w10000	tier=10000	rep=1	rc=0	files=10000	client_first_byte_s=13.2	client_full_list_s=13.6	server_pod_ready_s=11
+suspend	w1000	tier=1000	rep=2	rc=0	files=1000	client_first_byte_s=13.4	client_full_list_s=13.6	server_pod_ready_s=11
+suspend	w5000	tier=5000	rep=2	rc=0	files=5000	client_first_byte_s=13.0	client_full_list_s=13.3	server_pod_ready_s=10
+suspend	w10000	tier=10000	rep=2	rc=0	files=10000	client_first_byte_s=13.5	client_full_list_s=14.0	server_pod_ready_s=10
+suspend	w1000	tier=1000	rep=3	rc=0	files=1000	client_first_byte_s=13.2	client_full_list_s=13.4	server_pod_ready_s=11
+suspend	w5000	tier=5000	rep=3	rc=0	files=5000	client_first_byte_s=13.0	client_full_list_s=13.3	server_pod_ready_s=11
+suspend	w10000	tier=10000	rep=3	rc=0	files=10000	client_first_byte_s=13.5	client_full_list_s=13.9	server_pod_ready_s=12
+== wakes from HIBERNATE (CR alone: new disk, bucket import)
+hibernate	w1000	tier=1000	rep=1	rc=0	files=1000	client_first_byte_s=26.8	client_full_list_s=26.9	server_pod_ready_s=15
+hibernate	w5000	tier=5000	rep=1	rc=0	files=5000	client_first_byte_s=26.5	client_full_list_s=26.9	server_pod_ready_s=15
+hibernate	w10000	tier=10000	rep=1	rc=0	files=10000	client_first_byte_s=26.8	client_full_list_s=27.5	server_pod_ready_s=15
+hibernate	w1000	tier=1000	rep=2	rc=0	files=1000	client_first_byte_s=26.6	client_full_list_s=26.8	server_pod_ready_s=14
+hibernate	w5000	tier=5000	rep=2	rc=0	files=5000	client_first_byte_s=26.7	client_full_list_s=27.1	server_pod_ready_s=13
+hibernate	w10000	tier=10000	rep=2	rc=0	files=10000	client_first_byte_s=26.8	client_full_list_s=27.2	server_pod_ready_s=15
+hibernate	w1000	tier=1000	rep=3	rc=0	files=1000	client_first_byte_s=26.8	client_full_list_s=27.0	server_pod_ready_s=15
+hibernate	w5000	tier=5000	rep=3	rc=0	files=5000	client_first_byte_s=26.5	client_full_list_s=26.8	server_pod_ready_s=14
+hibernate	w10000	tier=10000	rep=3	rc=0	files=10000	client_first_byte_s=26.5	client_full_list_s=27.0	server_pod_ready_s=14
+PASS suspend: 9 wakes, every one served all its files (9/9)
+PASS hibernate: 9 wakes, every one served all its files (9/9)
+== summary (ranges over reps)
+suspend   tier  1000  first byte    13-13s  full list    13-14s  server ready    11-11s
+suspend   tier  5000  first byte    13-14s  full list    13-14s  server ready    10-11s
+suspend   tier 10000  first byte    13-14s  full list    14-14s  server ready    10-12s
+hibernate tier  1000  first byte    27-27s  full list    27-27s  server ready    14-15s
+hibernate tier  5000  first byte    26-27s  full list    27-27s  server ready    13-15s
+hibernate tier 10000  first byte    26-27s  full list    27-28s  server ready    14-15s
+RESULT: 6 passed, 0 failed

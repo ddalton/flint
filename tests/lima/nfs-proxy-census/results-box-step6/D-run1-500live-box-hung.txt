@@ -1,0 +1,32 @@
+== images: a stub from HEAD (the published 1.32.0 predates today's status fields)
+    Finished `release` profile [optimized] target(s) in 2.53s
+== cluster: 1 control plane + 6 workers (110 pods each)
+empty: operator [VmHWM:=31Mi VmRSS:=31Mi ] proxy [VmHWM:=32Mi VmRSS:=32Mi ]
+== seeding 500 live stub shares and 10000 parked (hibernated, CR-only) shares
+seeded 10500 in 65s
+  3s:    7531     2469 Hibernated     499 Pending       1 Starting | operator [VmHWM:=248Mi VmRSS:=240Mi ] proxy [VmHWM:=159Mi VmRSS:=158Mi ]
+  67s:    5405     4595 Hibernated     484 Pending       2 Ready      14 Starting | operator [VmHWM:=266Mi VmRSS:=225Mi ] proxy [VmHWM:=159Mi VmRSS:=154Mi ]
+  131s:    3282     6718 Hibernated     352 Pending      28 Ready     120 Starting | operator [VmHWM:=266Mi VmRSS:=245Mi ] proxy [VmHWM:=176Mi VmRSS:=171Mi ]
+  195s:    1615     8385 Hibernated     266 Pending      47 Ready     187 Starting | operator [VmHWM:=266Mi VmRSS:=258Mi ] proxy [VmHWM:=182Mi VmRSS:=175Mi ]
+  261s:     123     9877 Hibernated     182 Pending      73 Ready     245 Starting | operator [VmHWM:=280Mi VmRSS:=269Mi ] proxy [VmHWM:=191Mi VmRSS:=180Mi ]
+  325s:   10000 Hibernated     175 Pending      75 Ready     250 Starting | operator [VmHWM:=280Mi VmRSS:=258Mi ] proxy [VmHWM:=206Mi VmRSS:=199Mi ]
+  390s:   10000 Hibernated     175 Pending      75 Ready     250 Starting | operator [VmHWM:=280Mi VmRSS:=257Mi ] proxy [VmHWM:=206Mi VmRSS:=190Mi ]
+  455s:   10000 Hibernated     175 Pending      75 Ready     250 Starting | operator [VmHWM:=280Mi VmRSS:=259Mi ] proxy [VmHWM:=212Mi VmRSS:=195Mi ]
+  519s:   10000 Hibernated     175 Pending      75 Ready     250 Starting | operator [VmHWM:=280Mi VmRSS:=254Mi ] proxy [VmHWM:=212Mi VmRSS:=193Mi ]
+  584s:   10000 Hibernated     175 Pending      75 Ready     250 Starting | operator [VmHWM:=280Mi VmRSS:=252Mi ] proxy [VmHWM:=212Mi VmRSS:=192Mi ]
+  648s:   10000 Hibernated     175 Pending      75 Ready     250 Starting | operator [VmHWM:=280Mi VmRSS:=248Mi ] proxy [VmHWM:=212Mi VmRSS:=201Mi ]
+  712s:   10000 Hibernated     175 Pending      75 Ready     250 Starting | operator [VmHWM:=280Mi VmRSS:=244Mi ] proxy [VmHWM:=212Mi VmRSS:=204Mi ]
+  782s: | operator [] proxy []
+  881s: | operator [] proxy []
+  982s: | operator [] proxy []
+  1072s: | operator [] proxy []
+  1162s: | operator [] proxy []
+  1253s: | operator [] proxy []
+  1343s: | operator [] proxy []
+  1433s: | operator [] proxy []
+  1523s: | operator [] proxy []
+  1613s: | operator [] proxy []
+  1704s: | operator [] proxy []
+Terminated
+  1733s: | operator [] proxy []
+  1793s: | operator [] proxy []

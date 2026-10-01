@@ -1,0 +1,11 @@
+empty: operator [VmHWM:=28Mi VmRSS:=27Mi ] proxy [VmHWM:=32Mi VmRSS:=32Mi ]
+  3s:    6834     3166 Hibernated     143 Pending       7 Starting | operator [VmHWM:=265Mi VmRSS:=221Mi ] proxy [VmHWM:=147Mi VmRSS:=138Mi ]
+  67s:    4192     5808 Hibernated      86 Pending      23 Ready      41 Starting | operator [VmHWM:=294Mi VmRSS:=228Mi ] proxy [VmHWM:=172Mi VmRSS:=172Mi ]
+  131s:    1587     8413 Hibernated      28 Pending      82 Ready      40 Starting | operator [VmHWM:=294Mi VmRSS:=251Mi ] proxy [VmHWM:=186Mi VmRSS:=186Mi ]
+  194s:   10000 Hibernated     131 Ready      19 Starting | operator [VmHWM:=294Mi VmRSS:=243Mi ] proxy [VmHWM:=209Mi VmRSS:=205Mi ]
+  258s:   10000 Hibernated     149 Ready       1 Starting | operator [VmHWM:=294Mi VmRSS:=236Mi ] proxy [VmHWM:=211Mi VmRSS:=211Mi ]
+  322s:   10000 Hibernated     150 Ready | operator [VmHWM:=294Mi VmRSS:=234Mi ] proxy [VmHWM:=219Mi VmRSS:=215Mi ]
+settled: operator [VmHWM:=294Mi VmRSS:=235Mi ] cpu 181m; proxy [VmHWM:=235Mi VmRSS:=235Mi ] cpu 22m
+before relist: operator [VmHWM:=294Mi VmRSS:=235Mi ] proxy [VmHWM:=235Mi VmRSS:=235Mi ]
+after relist:  operator [VmHWM:=294Mi VmRSS:=234Mi ] proxy [VmHWM:=334Mi VmRSS:=232Mi ]
+operator log lines naming a 410 / too-old watch in the last 5 min: 0

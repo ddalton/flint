@@ -1,0 +1,8 @@
+seeded: floor3 10000, default 10000
+flush: the default arm needs >= 60 s per file; waiting 5 min, then 5 min idle
+rpoClean: floor3 True, default True
+sample 1	floor3_cpu_m=5	default_cpu_m=5
+sample 2	floor3_cpu_m=5	default_cpu_m=5
+sample 3	floor3_cpu_m=5	default_cpu_m=7
+cpu-floor3: /status lines logged in 10 min: 0 (0 = the hub does not log them)
+cpu-default: /status lines logged in 10 min: 0 (0 = the hub does not log them)

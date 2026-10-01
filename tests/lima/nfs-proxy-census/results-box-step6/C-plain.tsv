@@ -1,0 +1,24 @@
+direct	rep=1	w=stat	ops=10000	wall_s=2.007425748	proxy_cpu_ms=4	hub_cpu_ms=1622
+direct	rep=1	w=create+unlink	ops=4000	wall_s=70.693714376	proxy_cpu_ms=19	hub_cpu_ms=19010
+direct	rep=1	w=seq-write	mib=512	wall_s=6.367893884	proxy_cpu_ms=6	hub_cpu_ms=1963
+direct	rep=1	w=seq-read	mib=512	wall_s=.997189369	proxy_cpu_ms=4	hub_cpu_ms=177	intact=yes
+proxy	rep=1	w=stat	ops=10000	wall_s=3.798002045	proxy_cpu_ms=1894	hub_cpu_ms=1506
+proxy	rep=1	w=create+unlink	ops=4000	wall_s=43.215406070	proxy_cpu_ms=3762	hub_cpu_ms=25051
+proxy	rep=1	w=seq-write	mib=512	wall_s=2.730615324	proxy_cpu_ms=808	hub_cpu_ms=875
+proxy	rep=1	w=seq-read	mib=512	wall_s=1.247354338	proxy_cpu_ms=322	hub_cpu_ms=115	intact=yes
+direct	rep=2	w=stat	ops=10000	wall_s=1.663967031	proxy_cpu_ms=3	hub_cpu_ms=1210
+direct	rep=2	w=create+unlink	ops=4000	wall_s=38.581104272	proxy_cpu_ms=10	hub_cpu_ms=17164
+direct	rep=2	w=seq-write	mib=512	wall_s=3.807360745	proxy_cpu_ms=7	hub_cpu_ms=1573
+direct	rep=2	w=seq-read	mib=512	wall_s=.979587089	proxy_cpu_ms=4	hub_cpu_ms=157	intact=yes
+proxy	rep=2	w=stat	ops=10000	wall_s=3.377547024	proxy_cpu_ms=1730	hub_cpu_ms=1144
+proxy	rep=2	w=create+unlink	ops=4000	wall_s=79.530475571	proxy_cpu_ms=5768	hub_cpu_ms=19477
+proxy	rep=2	w=seq-write	mib=512	wall_s=4.197471410	proxy_cpu_ms=1272	hub_cpu_ms=2088
+proxy	rep=2	w=seq-read	mib=512	wall_s=1.375254199	proxy_cpu_ms=385	hub_cpu_ms=218	intact=yes
+direct	rep=3	w=stat	ops=10000	wall_s=1.586347555	proxy_cpu_ms=4	hub_cpu_ms=1156
+direct	rep=3	w=create+unlink	ops=4000	wall_s=48.553218118	proxy_cpu_ms=14	hub_cpu_ms=21485
+direct	rep=3	w=seq-write	mib=512	wall_s=3.848145377	proxy_cpu_ms=6	hub_cpu_ms=1574
+direct	rep=3	w=seq-read	mib=512	wall_s=.979433750	proxy_cpu_ms=6	hub_cpu_ms=131	intact=yes
+proxy	rep=3	w=stat	ops=10000	wall_s=3.532019279	proxy_cpu_ms=1789	hub_cpu_ms=1195
+proxy	rep=3	w=create+unlink	ops=4000	wall_s=72.172095960	proxy_cpu_ms=6168	hub_cpu_ms=18472
+proxy	rep=3	w=seq-write	mib=512	wall_s=4.440017615	proxy_cpu_ms=1333	hub_cpu_ms=1351
+proxy	rep=3	w=seq-read	mib=512	wall_s=1.258374727	proxy_cpu_ms=329	hub_cpu_ms=115	intact=yes

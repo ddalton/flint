@@ -1,0 +1,88 @@
+== cluster (PVCs and bucket on /mnt/nvme2/step6)
+Bucket created successfully `m/fleet`.
+== operator + proxy
+PASS all 30 hubs Ready
+== mount and seed (files of 1-64 KiB, log-uniform)
+PASS / lists every hub before seeding
+seeded 30 hubs in 429s
+PASS tier 1000: h1000-1 holds 1000 files through the proxy
+PASS tier 5000: h5000-1 holds 5000 files through the proxy
+PASS tier 10000: h10000-1 holds 10000 files through the proxy
+== flushed to the bucket (rpoClean) before measuring
+PASS every hub reports rpoClean (its files are in the bucket)
+bucket objects under h1000-1/ (excluding .flint/): 1003
+bucket objects under h5000-1/ (excluding .flint/): 5003
+bucket objects under h10000-1/ (excluding .flint/): 10003
+[2026-09-30 21:21:26 UTC]   135B STANDARD .flint/epoch
+[2026-09-30 21:12:05 UTC] 214KiB STANDARD .flint/manifest
+[2026-09-30 21:10:05 UTC]    89B STANDARD .flint/owner
+[2026-09-30 21:11:15 UTC] 8.8KiB STANDARD d000/f00000
+[2026-09-30 21:11:15 UTC]  33KiB STANDARD d000/f00001
+[2026-09-30 21:11:15 UTC] 3.2KiB STANDARD d000/f00002
+[2026-09-30 21:11:15 UTC] 3.4KiB STANDARD d000/f00003
+[2026-09-30 21:11:15 UTC] 1.1KiB STANDARD d000/f00004
+[2026-09-30 21:11:15 UTC] 2.7KiB STANDARD d000/f00005
+[2026-09-30 21:11:15 UTC] 2.8KiB STANDARD d000/f00006
+grep: write error: Broken pipe
+== idle: 600 s settle, then a 120 s window
+idle	h1000-1	h1000	rss_mib=103	cpu_m=4	statedb_kib=356
+idle	h1000-2	h1000	rss_mib=90	cpu_m=5	statedb_kib=356
+idle	h1000-3	h1000	rss_mib=85	cpu_m=5	statedb_kib=356
+idle	h1000-4	h1000	rss_mib=93	cpu_m=5	statedb_kib=356
+idle	h1000-5	h1000	rss_mib=84	cpu_m=5	statedb_kib=356
+idle	h1000-6	h1000	rss_mib=93	cpu_m=4	statedb_kib=356
+idle	h1000-7	h1000	rss_mib=91	cpu_m=4	statedb_kib=356
+idle	h1000-8	h1000	rss_mib=98	cpu_m=4	statedb_kib=356
+idle	h1000-9	h1000	rss_mib=94	cpu_m=4	statedb_kib=356
+idle	h1000-10	h1000	rss_mib=89	cpu_m=5	statedb_kib=356
+idle	h5000-1	h5000	rss_mib=88	cpu_m=7	statedb_kib=800
+idle	h5000-2	h5000	rss_mib=65	cpu_m=8	statedb_kib=800
+idle	h5000-3	h5000	rss_mib=76	cpu_m=9	statedb_kib=800
+idle	h5000-4	h5000	rss_mib=71	cpu_m=9	statedb_kib=800
+idle	h5000-5	h5000	rss_mib=75	cpu_m=7	statedb_kib=804
+idle	h5000-6	h5000	rss_mib=78	cpu_m=8	statedb_kib=800
+idle	h5000-7	h5000	rss_mib=72	cpu_m=9	statedb_kib=800
+idle	h5000-8	h5000	rss_mib=81	cpu_m=8	statedb_kib=800
+idle	h5000-9	h5000	rss_mib=72	cpu_m=8	statedb_kib=800
+idle	h5000-10	h5000	rss_mib=71	cpu_m=8	statedb_kib=800
+idle	h10000-1	h10000	rss_mib=95	cpu_m=12	statedb_kib=1352
+idle	h10000-2	h10000	rss_mib=81	cpu_m=11	statedb_kib=1356
+idle	h10000-3	h10000	rss_mib=92	cpu_m=11	statedb_kib=1352
+idle	h10000-4	h10000	rss_mib=88	cpu_m=11	statedb_kib=1356
+idle	h10000-5	h10000	rss_mib=92	cpu_m=9	statedb_kib=1356
+idle	h10000-6	h10000	rss_mib=92	cpu_m=11	statedb_kib=1356
+idle	h10000-7	h10000	rss_mib=92	cpu_m=11	statedb_kib=1352
+idle	h10000-8	h10000	rss_mib=89	cpu_m=12	statedb_kib=1352
+idle	h10000-9	h10000	rss_mib=98	cpu_m=12	statedb_kib=1356
+idle	h10000-10	h10000	rss_mib=98	cpu_m=11	statedb_kib=1376
+== under load: a metadata walk + small writes on the 10k tier, 180 s window
+load	h10000-1	h10000	rss_mib=84	cpu_m=53	statedb_kib=1360
+load	h10000-2	h10000	rss_mib=69	cpu_m=51	statedb_kib=1364
+load	h10000-3	h10000	rss_mib=71	cpu_m=52	statedb_kib=1360
+load	h10000-4	h10000	rss_mib=82	cpu_m=54	statedb_kib=1364
+load	h10000-5	h10000	rss_mib=72	cpu_m=51	statedb_kib=1364
+load	h10000-6	h10000	rss_mib=89	cpu_m=53	statedb_kib=1364
+load	h10000-7	h10000	rss_mib=78	cpu_m=52	statedb_kib=1360
+load	h10000-8	h10000	rss_mib=85	cpu_m=52	statedb_kib=1360
+load	h10000-9	h10000	rss_mib=87	cpu_m=52	statedb_kib=1364
+load	h10000-10	h10000	rss_mib=90	cpu_m=51	statedb_kib=1384
+== start to Ready: restart the 10k tier's hubs (PVC kept, no import)
+h10000-1	start_to_ready_s=11
+h10000-2	start_to_ready_s=10
+h10000-3	start_to_ready_s=10
+h10000-4	start_to_ready_s=10
+h10000-5	start_to_ready_s=10
+h10000-6	start_to_ready_s=12
+h10000-7	start_to_ready_s=11
+h10000-8	start_to_ready_s=11
+h10000-9	start_to_ready_s=11
+h10000-10	start_to_ready_s=10
+== context
+flint-lite-operator: 56 MiB
+flint-lite-operator-nfs-proxy: 83 MiB
+== summary per tier (idle / load)
+idle  h1000   n=10  rss_mib 84-103 (median 92)  cpu_m 4-5 (median 4)  statedb_kib 356-356 (median 356)
+idle  h10000  n=10  rss_mib 81-98 (median 92)  cpu_m 9-12 (median 11)  statedb_kib 1352-1376 (median 1356)
+idle  h5000   n=10  rss_mib 65-88 (median 74)  cpu_m 7-9 (median 8)  statedb_kib 800-804 (median 800)
+load  h10000  n=10  rss_mib 69-90 (median 83)  cpu_m 51-54 (median 52)  statedb_kib 1360-1384 (median 1364)
+RESULT: 6 passed, 0 failed
