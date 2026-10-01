@@ -461,9 +461,11 @@ can make an EBS-backed cache cheap; the fix is where the directory lives.
    asserts no `--cache` in the shared mounter's argv and no cache
    directory under its `/tmp` after the reads, and as its control
    recreates shared-c's class against the CR with a 256 MiB cache named
-   and checks the flags and a populated cache directory (kind, NOT RUN
-   yet). The M2 fixtures name the 768 MiB cache they were measured with,
-   so a re-run measures the same mount.
+   and checks the flags and a populated cache directory (kind
+   2026-10-01, with S30: 46 ok, 0 bad —
+   `s3csi/e2e/results/2026-10-01-kind-s24-s30/`). The M2 fixtures name
+   the 768 MiB cache they were measured with, so a re-run measures the
+   same mount.
 2. **A placement knob: `workers.cacheHostPath`.** When set (e.g.
    `/mnt/nvme/flint-s3-cache`), every worker that runs with a cache gets
    a `hostPath` volume at `<cacheHostPath>/<worker-name>` mounted at
@@ -499,8 +501,10 @@ can make an EBS-backed cache cheap; the fix is where the directory lives.
    is `MountSpec::with_placed_default_cache(placed, cacheSizeMib)`, a
    different function from the removed three-quarters rule, logged as
    "block cache defaulted on the placed device". Kind leg S30 covers the
-   mechanics (NOT RUN yet); the speed is step 4's M1 on a node with the
-   instance store mounted.
+   mechanics — run 2026-10-01 on the box's kind cluster with images from
+   `7b5a6da7`, 46 ok with S24, 0 bad
+   (`s3csi/e2e/results/2026-10-01-kind-s24-s30/`); the speed is step 4's
+   M1 on a node with the instance store mounted.
 3. **Say where the cache is.** At publish, when a cache is on, the plugin
    logs the cache directory's device (`stat -f`/`statfs` of `/tmp` in
    the worker's spec is not visible to the plugin, but the emptyDir's

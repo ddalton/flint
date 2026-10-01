@@ -1,0 +1,53 @@
+
+── S24 — sharing: two read-only consumers of one CR on one node share ONE worker, a third with another uid gets its own; the first out leaves the mounter up, the last brings it down
+  ok: shared-a reads through the shared mount
+  ok: shared-b reads through the shared mount
+  ok: shared-c reads through its own class's mount
+  ok: two shared workers for datasets-shared: one class for uid 1001 (shared-a + shared-b), one for uid 1002 (shared-c)
+  ok: exactly one of the pair created a worker (shared-a → s3w-bb239ff9ac825570); the other joined it
+  ok: two shared FUSE sources on the node (one per class)
+  ok: s3w-bb239ff9ac825570's mount-s3 argv carries no --cache (the CR named none)
+  ok: no block cache directory under /tmp in s3w-bb239ff9ac825570 after the reads
+  ok: the plugin logged that the shared mounter runs without a cache
+  ok: the shared mount is read-only
+  ok: the plugin logged 3 shared publishes
+  ok: worker s3w-bb239ff9ac825570 still Running after its creator shared-a left
+  ok: shared-b still reads after shared-a left
+  ok: the plugin recorded the leave
+  ok: worker s3w-bb239ff9ac825570 is gone after the last member left (0s)
+  ok: the plugin brought the mounter down as the last member left
+  ok: one shared record left on the node (shared-c's class)
+  ok: CONTROL: shared-c's mount-s3 runs --cache /tmp --max-cache-size 256 once the CR asks
+  ok: CONTROL: shared-c reads through the cached shared mount
+  ok: CONTROL: the named cache is populated under /tmp in s3w-bd706d8fb01a741f (5 entries)
+
+── S30 — cache placement: a placed cache is a private 0700 hostPath at /tmp under the named root, a sharing CR without spec.cache gets workers.cacheSizeMib there, a per-pod CR without one keeps its emptyDir, a named one is placed at its own ceiling, the directory goes with the mounter, a leftover is emptied, an orphan is swept, and a missing root fails the plugin loudly
+  ok: chart up with workers.cacheHostPath=/var/lib/flint-s3-cache-s30 (cacheSizeMib 512); the plugin rolled
+  ok: the plugin mounts the cache root as a hostPath of type Directory
+  ok: the startup sweep removed s3w-orphan, which no record names (0s)
+  ok: the sweep left /var/lib/flint-s3-cache-s30/planted alone (not an s3w-* directory)
+  ok: shared-a's mount-s3 runs --cache /tmp --max-cache-size 512: the sharing default, at the chart's size, once the cache is placed
+  ok: the worker's scratch is a hostPath at /var/lib/flint-s3-cache-s30/s3w-a11983779c264387 (the emptyDir replaced)
+  ok: no scratch emptyDir on the worker
+  ok: the cache directory is 0700, owned by the worker's uid:gid (1001:1001)
+  ok: shared-a reads through the placed-cache mount
+  ok: mount-s3 populated its cache under the placed directory after the read
+  ok: the plugin logged the placed default
+  ok: the plugin logged where it placed the cache
+  ok: CONTROL: reader (datasets, no spec.cache) keeps its scratch emptyDir and runs no cache
+  ok: CONTROL: reader-ro (spec.cache 128) runs its own ceiling, placed at /var/lib/flint-s3-cache-s30/s3w-a23c4618850cfde9
+  ok: reader-ro's cache directory went with its mounter (0s)
+  ok: worker s3w-a11983779c264387 is gone (0s)
+  ok: cache directory /var/lib/flint-s3-cache-s30/s3w-a11983779c264387 removed with the mounter
+  ok: the plugin logged the removal
+  ok: the same class gets the same worker name (s3w-a11983779c264387), so the same directory
+  ok: the leftover was emptied before the new worker
+  ok: the reused directory is 0700 1001:1001 again
+  ok: the plugin logged the emptying
+  ok: a missing cache root fails the plugin pod loudly (30s): hostPath type check failed
+  ok: the chart refused a relative cacheHostPath at render time
+  ok: the chart refused cacheSizeMib 0 with a placement at render time
+  ok: chart restored (no cache placement)
+
+════════════════════════════════════════
+s3.csi.chert.us legs [S24 S30]: 46 ok, 0 bad

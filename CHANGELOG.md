@@ -42,9 +42,10 @@ covered by the stability guarantee.
   anything else there alone. Both records (`VolumeState`, `SharedMount`)
   carry `cacheDir`; older records load with none. Kind leg S30 (the
   placement, both per-pod controls, the removal, the leftover, the sweep,
-  the loud failure, the render-time refusals) written, NOT RUN. Mounting
-  the device is the platform's job, not the chart's (on trove nodes,
-  `nvme1n1`).
+  the loud failure, the render-time refusals) run on kind 2026-10-01 with
+  S24: 46 ok, 0 bad (`s3csi/e2e/results/2026-10-01-kind-s24-s30/`).
+  Mounting the device is the platform's job, not the chart's (on trove
+  nodes, `nvme1n1`).
 
 - **flint-s3-csi: the mounter's memory target follows the worker's limit;
   a shared mounter gets its own resources; the worker images are pulled
@@ -295,7 +296,8 @@ covered by the stability guarantee.
   them. S24 now asserts the shared mounter's argv carries no `--cache` and
   its `/tmp` holds no cache directory after the reads, and as its control
   recreates shared-c's class against the CR with a 256 MiB cache named and
-  checks the flags and a populated cache directory (kind, NOT RUN). The M2
+  checks the flags and a populated cache directory (kind 2026-10-01: 46 ok
+  with S30, `s3csi/e2e/results/2026-10-01-kind-s24-s30/`). The M2
   fixtures name the 768 MiB cache they were measured with. Placing the cache
   on a device faster than S3 (`workers.cacheHostPath`, §11 steps 2–4) is
   the follow-up; until then the truthful default is off.
