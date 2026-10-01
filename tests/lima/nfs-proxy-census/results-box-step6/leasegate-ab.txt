@@ -1,0 +1,51 @@
+# the lease-scan fix, A/B on the box 2026-10-01 (step6-proxy-profile.sh, frame-pointer release builds
+# from one source export: before = HEAD 7ebde1a1, after = + reap_on_compound(false) and a 1 s laundromat)
+# runs alternate before/after/before/after; 4 stat passes over 5,000 files per line, actimeo=0
+== run 1-before
+proxy pid 44301, hub pid 44279
+direct ops=20000  9368 ops/s  proxy 0.0 ms CPU/1k ops  hub 74.0 ms CPU/1k ops
+proxy  ops=20000  4440 ops/s  proxy 115.5 ms CPU/1k ops  hub 73.5 ms CPU/1k ops
+direct ops=20000  9204 ops/s  proxy 0.0 ms CPU/1k ops  hub 74.5 ms CPU/1k ops
+proxy  ops=20000  4496 ops/s  proxy 113.5 ms CPU/1k ops  hub 73.5 ms CPU/1k ops
+direct ops=20000  9419 ops/s  proxy 0.0 ms CPU/1k ops  hub 73.5 ms CPU/1k ops
+proxy  ops=20000  4454 ops/s  proxy 116.5 ms CPU/1k ops  hub 72.0 ms CPU/1k ops
+== run 2-after
+proxy pid 44783, hub pid 44761
+direct ops=20000  9360 ops/s  proxy 0.0 ms CPU/1k ops  hub 74.0 ms CPU/1k ops
+proxy  ops=20000  4545 ops/s  proxy 108.5 ms CPU/1k ops  hub 76.5 ms CPU/1k ops
+direct ops=20000  9033 ops/s  proxy 0.0 ms CPU/1k ops  hub 77.0 ms CPU/1k ops
+proxy  ops=20000  4628 ops/s  proxy 107.5 ms CPU/1k ops  hub 73.0 ms CPU/1k ops
+direct ops=20000  8809 ops/s  proxy 0.0 ms CPU/1k ops  hub 79.0 ms CPU/1k ops
+proxy  ops=20000  4571 ops/s  proxy 108.5 ms CPU/1k ops  hub 75.0 ms CPU/1k ops
+== run 3-before
+proxy pid 45247, hub pid 45225
+direct ops=20000  9241 ops/s  proxy 0.0 ms CPU/1k ops  hub 74.5 ms CPU/1k ops
+proxy  ops=20000  4383 ops/s  proxy 118.5 ms CPU/1k ops  hub 76.0 ms CPU/1k ops
+direct ops=20000  9402 ops/s  proxy 0.0 ms CPU/1k ops  hub 73.5 ms CPU/1k ops
+proxy  ops=20000  4412 ops/s  proxy 117.5 ms CPU/1k ops  hub 73.5 ms CPU/1k ops
+direct ops=20000  9021 ops/s  proxy 0.0 ms CPU/1k ops  hub 76.5 ms CPU/1k ops
+proxy  ops=20000  4461 ops/s  proxy 115.0 ms CPU/1k ops  hub 71.5 ms CPU/1k ops
+== run 4-after
+proxy pid 45726, hub pid 45704
+direct ops=20000  9276 ops/s  proxy 0.0 ms CPU/1k ops  hub 75.0 ms CPU/1k ops
+proxy  ops=20000  4472 ops/s  proxy 110.5 ms CPU/1k ops  hub 76.0 ms CPU/1k ops
+direct ops=20000  9019 ops/s  proxy 0.0 ms CPU/1k ops  hub 76.5 ms CPU/1k ops
+proxy  ops=20000  4622 ops/s  proxy 107.5 ms CPU/1k ops  hub 73.0 ms CPU/1k ops
+direct ops=20000  9163 ops/s  proxy 0.0 ms CPU/1k ops  hub 76.0 ms CPU/1k ops
+proxy  ops=20000  4534 ops/s  proxy 110.5 ms CPU/1k ops  hub 75.0 ms CPU/1k ops
+
+# perf, proxy process: the scan's share of all samples (inclusive, self)
+== run 1-before (inclusive %, self %, symbol)
+ 5.46% 0.02% [.] <spdk_csi_driver::nfs::v4::dispatcher::CompoundDispatcher>::courtesy_release_expired - - 
+ 5.43% 0.08% [.] <alloc::vec::Vec<u64> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<u64, core::iter::adapters::filter_map::Filte
+ 0.33% 0.09% [.] <spdk_csi_driver::nfs::v4::state::lease::LeaseManager>::renew_lease - - 
+== run 3-before (inclusive %, self %, symbol)
+ 5.66% 0.01% [.] <spdk_csi_driver::nfs::v4::dispatcher::CompoundDispatcher>::courtesy_release_expired - - 
+ 5.64% 0.17% [.] <alloc::vec::Vec<u64> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<u64, core::iter::adapters::filter_map::Filte
+ 0.41% 0.13% [.] <spdk_csi_driver::nfs::v4::state::lease::LeaseManager>::renew_lease - - 
+== run 2-after (inclusive %, self %, symbol)
+ 0.33% 0.09% [.] <spdk_csi_driver::nfs::v4::state::lease::LeaseManager>::renew_lease - - 
+== run 4-after (inclusive %, self %, symbol)
+ 0.45% 0.15% [.] <spdk_csi_driver::nfs::v4::state::lease::LeaseManager>::renew_lease - - 
+ 0.01% 0.00% [.] <alloc::vec::Vec<u64> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<u64, core::iter::adapters::filter_map::Filte
+ 0.01% 0.00% [.] <spdk_csi_driver::nfs::v4::dispatcher::CompoundDispatcher>::courtesy_release_expired - - 

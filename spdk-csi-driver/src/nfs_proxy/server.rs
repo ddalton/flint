@@ -190,6 +190,13 @@ fn owner_is(owner: &[u8], prefix: Option<&[u8]>) -> bool {
 /// is not the client's until it has.
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How often the proxy reaps expired downstream clients. The dispatcher's
+/// per-compound reap is off here (`with_reap_on_compound(false)`): it walks
+/// every lease on every operation, and the proxy's clients are every node
+/// of every client cluster. The proxy holds no locks or opens, so nothing
+/// needs the reap sooner; an expired client is retired at most this late.
+const LAUNDROMAT: std::time::Duration = std::time::Duration::from_secs(1);
+
 fn opcode_at(args: &Bytes, r: &std::ops::Range<usize>) -> u32 {
     args.get(r.start..r.start + 4).map(|b| u32::from_be_bytes(b.try_into().unwrap())).unwrap_or(0)
 }
@@ -233,7 +240,7 @@ impl Proxy {
         state.load_from_backend(false).await.map_err(|e| format!("load {}: {e}", db.display()))?;
         let fh = Arc::new(FileHandleManager::new(root));
         let locks = Arc::new(LockManager::new());
-        let disp = Arc::new(CompoundDispatcher::new(fh, state.clone(), locks));
+        let disp = Arc::new(CompoundDispatcher::new(fh, state.clone(), locks).with_reap_on_compound(false));
         let table = Table::new(cfg.hubs.clone(), cfg.identities.clone())?;
         if table.wants_certificates() && cfg.tls.is_none() {
             return Err("an identity names `clients:` but `tls` is not configured: no connection could match it".into());
@@ -268,6 +275,10 @@ impl Proxy {
     }
 
     pub async fn serve_on(self: Arc<Self>, l: TcpListener) -> std::io::Result<()> {
+        {
+            let p = self.clone();
+            tokio::spawn(async move { p.laundromat_loop().await });
+        }
         if self.keepalive {
             let p = self.clone();
             tokio::spawn(async move { p.keepalive_loop().await });
@@ -684,6 +695,20 @@ impl Proxy {
                     Ok(s) => info!("hub {hub:#x}: backend client {:#x} destroyed with its downstream: {s:?}", c.clientid),
                     Err(e) => debug!("hub {hub:#x}: backend DESTROY_CLIENTID: {e}"),
                 }
+            }
+        }
+    }
+
+    /// Retire expired downstream clients every `LAUNDROMAT`, with or
+    /// without traffic: the dispatcher does not reap per compound here.
+    async fn laundromat_loop(self: Arc<Self>) {
+        let mut iv = tokio::time::interval(LAUNDROMAT);
+        iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            iv.tick().await;
+            let n = self.disp.courtesy_release_expired();
+            if n > 0 {
+                info!(clients = n, "laundromat: retired expired downstream clients");
             }
         }
     }
@@ -1204,6 +1229,28 @@ mod tests {
         assert_eq!(rec.verifier, u64::from_be_bytes(*b"boot-two"), "the hub saw the reboot");
         assert_ne!(after, before, "and replaced the old incarnation (case 5), not renewed it");
         assert!(hub_state.clients.get_client(before).is_none(), "whose record is gone");
+    }
+
+    /// The proxy reaps expired downstream clients on a timer, not at the
+    /// top of every compound: that scan walks every lease per operation,
+    /// and the proxy's clients are every node of every client cluster
+    /// (step 6 profile, 5.3% of proxy CPU with ONE client). The timer must
+    /// still retire a client that has gone quiet, with no traffic at all.
+    #[tokio::test]
+    async fn an_expired_downstream_client_is_reaped_on_a_timer_not_per_compound() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub_addr = hub(dir.path()).await;
+        let (p, addr) = proxy(dir.path(), &hub_addr).await;
+        assert!(!p.disp.reaps_on_compound(), "no lease scan per compound");
+        let (_c, _sid) = client(&addr).await;
+        let live = p.state.leases.live_clients();
+        assert_eq!(live.len(), 1);
+        p.state.leases.expire_now(live[0]);
+        let deadline = tokio::time::Instant::now() + 3 * LAUNDROMAT;
+        while p.state.clients.get_client(live[0]).is_some() {
+            assert!(tokio::time::Instant::now() < deadline, "the laundromat never reaped it");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 
     /// A hub that reaped the proxy's backend client (its lease lapsed and

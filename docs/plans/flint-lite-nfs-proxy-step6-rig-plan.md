@@ -33,8 +33,9 @@ Hub or private ECR.
 
 Profile of C's proxy cost (host processes, `perf`): ~1.5× the hub's CPU
 per metadata op, mostly the extra TCP hop. One scaling hazard: the
-per-compound lease scan (`courtesy_release_expired`), proposed fix not
-yet made.
+per-compound lease scan (`courtesy_release_expired`), fixed 2026-10-01:
+the proxy reaps on a 1 s timer instead, ~6% less proxy CPU per op with
+one client (`results-box-step6/leasegate-ab.txt`).
 
 Left for the AWS session: phase E, the cross-node half of C, and D's
 relist.

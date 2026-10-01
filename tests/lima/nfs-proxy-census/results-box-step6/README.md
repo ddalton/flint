@@ -187,8 +187,18 @@ Without kind the proxy costs ~1.5× the hub's CPU per op (on kind,
   clients are every node of every client cluster, so the scan grows
   with the fleet, per operation. That growth is inferred from the code;
   only the single-client cost is measured. The proxy needs no
-  every-compound reap: it holds no locks of its own, and its periodic
-  sweep exists.
+  every-compound reap, since it holds no locks of its own.
+
+  **Fixed 2026-10-01** (`leasegate-ab.txt`). The proxy had no periodic
+  sweep: the per-compound pass was its only reaper. It now turns that
+  pass off (`with_reap_on_compound(false)`) and reaps on a 1 s timer.
+  Four alternating runs, one client:
+  - proxy CPU per 1k stat ops: before 113.5–118.5 ms, after
+    107.5–110.5 ms;
+  - the scan's share of proxy samples: before 5.5–5.7%, after 0.01%.
+
+  The test `an_expired_downstream_client_is_reaped_on_a_timer_not_per_compound`
+  pins the timer: with the laundromat removed, it fails (the control).
 
 **For step 7:** size the proxy at ~1.5× the hub's CPU per metadata op
 (~8,500 stat ops/s per core here). Most of that is the network hop

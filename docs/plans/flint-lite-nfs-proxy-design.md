@@ -906,12 +906,16 @@ port are still wanted for capacity and failure isolation.
    - the proxy costs ~1.5× the hub's CPU per metadata op (115–119 vs
      74–81 ms per 1k stat ops); ~56% of it is kernel and libc, the extra
      TCP hop, and the proxy's own logic is small;
-   - **scaling hazard, not fixed:** the embedded dispatcher's
-     `courtesy_release_expired` scans every lease on every compound
-     (5.3% with one client). In the proxy that grows with the number of
-     client nodes, per operation. Proposed fix: a proxy-only gate (about
-     once a second), since the proxy holds no locks and has a periodic
-     sweep; hubs unchanged.
+   - **scaling hazard, FIXED 2026-10-01:** the embedded dispatcher's
+     `courtesy_release_expired` scanned every lease on every compound
+     (5.3–5.7% with one client), which in the proxy grows with the number
+     of client nodes, per operation. The proxy now builds its dispatcher
+     with `with_reap_on_compound(false)` and reaps on a 1 s laundromat of
+     its own (it had none: the per-compound pass was its only reaper). It
+     holds no locks or opens, so nothing needs the reap sooner. Hubs are
+     unchanged. A/B on the box: proxy CPU per 1k stat ops 113.5–118.5 →
+     107.5–110.5 ms, and the scan 5.5% → 0.01% of samples
+     (`results-box-step6/leasegate-ab.txt`).
 7. Multi-replica proxy (shared client table) before about 1,000 active.
 
 Drills. Each one needs an arm that fails when the mechanism is removed:

@@ -101,6 +101,13 @@ pub struct CompoundDispatcher {
     /// per connection by `peer_policy`; the answer rides in
     /// `CompoundContext::peer`. Empty = every client, read-write.
     access: crate::nfs::export_access::ExportAccess,
+
+    /// Run `courtesy_release_expired` at the top of every COMPOUND (the
+    /// default; a hub's conflict checks rely on it). The NFS proxy turns
+    /// it off and reaps on a timer: it holds no locks or opens, and the
+    /// scan walks every lease, once per operation, across every client
+    /// node it fronts.
+    reap_on_compound: bool,
 }
 
 /// One pnfs_scsi_layout4 extent as encoded on the wire (RFC 8154
@@ -134,6 +141,18 @@ impl CompoundDispatcher {
     pub fn with_read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
         self
+    }
+
+    /// Whether the top of every COMPOUND reaps expired clients. Off only
+    /// where something else drives `courtesy_release_expired` on a timer
+    /// and no conflict check needs the reap at once (the NFS proxy).
+    pub fn with_reap_on_compound(mut self, on: bool) -> Self {
+        self.reap_on_compound = on;
+        self
+    }
+
+    pub fn reaps_on_compound(&self) -> bool {
+        self.reap_on_compound
     }
 
     /// Whether this dispatcher refuses mutating operations (F70).
@@ -202,6 +221,7 @@ impl CompoundDispatcher {
             session_bound_conns: dashmap::DashMap::new(),
             read_only: false,
             access: Default::default(),
+            reap_on_compound: true,
         };
         // The grant path's callback_ready (rule 7) and the MDS
         // posture refusal both live on StateManager; hand it the
@@ -482,7 +502,11 @@ impl CompoundDispatcher {
         // by the dispatcher, so we drive its lock-release pass from
         // here using the same expired-client list before the
         // StateManager cascade nukes the lease records.
-        self.courtesy_release_expired();
+        //
+        // Not where the caller reaps on a timer instead (`reap_on_compound`).
+        if self.reap_on_compound {
+            self.courtesy_release_expired();
+        }
 
         // RFC 5661 §15.1.6 / RFC 7530 §15.1.6: reject unrecognised minor
         // versions before doing any work. Only 0 (v4.0), 1 (v4.1) and 2 (v4.2)
@@ -5154,6 +5178,48 @@ mod tests {
     /// wedged hard mount behind the nfs proxy (2026-09-28), whose log
     /// showed "CREATE_SESSION: Client N not found" during a re-registration
     /// — which this rules out as a dispatcher defect (that client recovered).
+    /// The per-compound courtesy release is a hub's (conflict checks heal
+    /// at once), and it scans every lease per compound. The proxy holds no
+    /// locks or opens, and its clients are every node of every client
+    /// cluster, so it turns the per-compound pass off and reaps on a timer
+    /// (step 6 profile: 5.3% of proxy CPU with ONE client). Pinned both
+    /// ways: the default still reaps at the top of a compound, and the
+    /// opt-out leaves the client for the sweep, which still retires it.
+    #[tokio::test]
+    async fn reaping_leaves_the_compound_path_only_when_asked() {
+        use crate::nfs::v4::state::client::ExchangeIdOutcome;
+        let empty = || CompoundRequest {
+            tag: String::new(),
+            tag_valid: true,
+            minor_version: 2,
+            operations: vec![],
+            wire_size: 0,
+        };
+        let seed = |d: &CompoundDispatcher| {
+            let id = match d.state_mgr.clients.exchange_id(b"gone-node".to_vec(), 1, 0, Vec::new()) {
+                ExchangeIdOutcome::NewUnconfirmed { client_id, .. } => client_id,
+                other => panic!("expected NewUnconfirmed, got {:?}", other),
+            };
+            d.state_mgr.clients.mark_confirmed(id);
+            d.state_mgr.leases.expire_now(id);
+            id
+        };
+
+        let (d, _t) = create_test_dispatcher();
+        assert!(d.reaps_on_compound(), "a hub reaps per compound by default");
+        let id = seed(&d);
+        d.dispatch_compound(empty(), vec![]).await;
+        assert!(d.state_mgr.clients.get_client(id).is_none(), "the compound reaped it");
+
+        let (d, _t) = create_test_dispatcher();
+        let d = d.with_reap_on_compound(false);
+        let id = seed(&d);
+        d.dispatch_compound(empty(), vec![]).await;
+        assert!(d.state_mgr.clients.get_client(id).is_some(), "no per-compound scan");
+        assert_eq!(d.courtesy_release_expired(), 1, "the sweep still retires it");
+        assert!(d.state_mgr.clients.get_client(id).is_none());
+    }
+
     #[tokio::test]
     async fn a_client_whose_lease_lapsed_can_register_again() {
         use crate::nfs::v4::compound::ChannelAttrs;
