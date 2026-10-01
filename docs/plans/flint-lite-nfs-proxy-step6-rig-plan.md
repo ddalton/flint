@@ -31,6 +31,11 @@ Hub or private ECR.
   sits at 235 MiB / 181 m, with 183 apiserver req/s; the proxy's relist
   measured +100 MiB, the operator's relist was not triggered.
 
+Profile of C's proxy cost (host processes, `perf`): ~1.5× the hub's CPU
+per metadata op, mostly the extra TCP hop. One scaling hazard: the
+per-compound lease scan (`courtesy_release_expired`), proposed fix not
+yet made.
+
 Left for the AWS session: phase E, the cross-node half of C, and D's
 relist.
 

@@ -1,0 +1,6 @@
+    48.52%  [kernel.kallsyms]
+    38.31%  flint-nfs-proxy  
+     7.21%  libc.so.6        
+                       0x7da6770ac772
+     1.80%  [nf_conntrack]   
+     1.55%  [nf_tables]      

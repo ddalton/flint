@@ -901,6 +901,17 @@ port are still wanted for capacity and failure isolation.
      (one core ≈ 5,500 ops/s);
    - 150 live + 10,000 parked: the operator at 235 MiB / 181 m, with 183
      apiserver req/s.
+   **Proxy CPU profiled 2026-09-30** (host processes, `perf`;
+   `results-box-step6/README.md` "Profile"):
+   - the proxy costs ~1.5× the hub's CPU per metadata op (115–119 vs
+     74–81 ms per 1k stat ops); ~56% of it is kernel and libc, the extra
+     TCP hop, and the proxy's own logic is small;
+   - **scaling hazard, not fixed:** the embedded dispatcher's
+     `courtesy_release_expired` scans every lease on every compound
+     (5.3% with one client). In the proxy that grows with the number of
+     client nodes, per operation. Proposed fix: a proxy-only gate (about
+     once a second), since the proxy holds no locks and has a periodic
+     sweep; hubs unchanged.
 7. Multi-replica proxy (shared client table) before about 1,000 active.
 
 Drills. Each one needs an arm that fails when the mechanism is removed:

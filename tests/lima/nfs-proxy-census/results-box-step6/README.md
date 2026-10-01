@@ -101,9 +101,29 @@ it** (`D-run1-500live-box-hung.txt`). All 10,000 parked shares were
 Hibernated within ~5 min, but only 75 of 500 live stubs got Ready. kind's
 local-path provisioner binds one PVC at a time, and at ~13 min the kind
 apiserver pinned a core and stopped answering, with a load average ~8 on
-8 cores. The operator had averaged ~0.85 core. Minutes later the whole
-box stopped answering ping and needed a restart. The rig now aborts at
-a load average ≥ 12.
+8 cores. The operator had averaged ~0.85 core.
+
+**The box did not hang; it lost its network.** Its journal (read
+2026-10-01) shows `neighbour: arp_cache: neighbor table overflow!`
+from 23:02:17 onward, 14 min into the run, with ~350 pods running. The
+log is rate-limited, so it shows ~115 lines a minute until shutdown.
+The table's hard limit is `gc_thresh3` = 1024 (the default), and it
+counts every network namespace on the host. kindnet gives each pod
+neighbor entries in both its node's namespace and its own. Once
+existing entries aged out, the host could not resolve its own LAN
+neighbors:
+- ssh was last accepted at 23:09:00, then connections timed out;
+- ping got no replies;
+- the kernel kept logging until the clean shutdown at 23:22:01.
+
+There were no hung tasks and no OOM kills. Run 2 (150 live) stayed
+well under the limit. A host that runs this many kind pods needs
+`gc_thresh3` raised. The load-average abort in the rig guards the wrong
+thing.
+
+A separate defect, which did not cause this: the step 5 rig's lazy
+unmount of `/mnt/px5` at 18:14 left a hard mount's RPC client
+retrying 172.18.0.4 for five hours (2,823 "not responding" lines).
 
 **Run 2, 150 live + 10,000 parked (2 workers): 5/6**
 (`D-run2-150live.txt`, `D-mem.txt`, `D-api-rates.txt`). The box's load
@@ -126,3 +146,50 @@ stayed under 5.
   likely reason is watch bookmarks: they keep a watcher's
   resourceVersion current, so it resumed past the compaction. **So the
   operator's relist spike is still an estimate.**
+
+## Profile — where the proxy's CPU per metadata op goes (`step6-proxy-profile.sh`)
+
+The proxy and one hub run as host processes (no kind), from a
+frame-pointer build; the host kernel mounts with `actimeo=0`; the
+workload is 4 stat passes over 5,000 files, ×3
+(`profile-cpu.txt`):
+
+| | direct | through the proxy |
+|---|---|---|
+| ops/s | 8,474–9,394 | 4,332–4,410 |
+| proxy CPU per 1k ops | — | 114.5–119 ms |
+| hub CPU per 1k ops | 74.5–81 ms | 73.5–76 ms |
+
+Without kind the proxy costs ~1.5× the hub's CPU per op (on kind,
+173–189 ms included the container network).
+
+`perf record -g` on the proxy (`profile-dso.txt`,
+`profile-proxy-functions.txt`):
+- **Kernel 48.5% + libc 7.2%.** Mostly TCP send and receive: a proxied
+  operation costs the proxy two receives and two sends, where a direct
+  mount has none. On loopback each send also pays the receiver's stack.
+  This is the inherent cost of the extra hop. Each message is already a
+  single write (marker and body together).
+- **nf_conntrack + nf_tables 3.4%:** the box's Docker iptables, an
+  environment cost.
+- **The proxy's own logic is small:**
+  - SEQUENCE through the embedded dispatcher, 9.9%;
+  - the pseudo-root, 2.2%;
+  - identity binding, 1.7%;
+  - decode, 1.3%;
+  - splice, ~1.5%;
+  - encode, ~1.4%;
+  - a task spawned per request, ~1.8%.
+- **A scaling hazard inside that 9.9%: `courtesy_release_expired`, 5.3%
+  with ONE client.** The dispatcher scans the whole lease map on every
+  compound to reap expired clients. That suits a hub, which has few
+  clients and wants a conflicting lock to self-heal at once. The proxy's
+  clients are every node of every client cluster, so the scan grows
+  with the fleet, per operation. That growth is inferred from the code;
+  only the single-client cost is measured. The proxy needs no
+  every-compound reap: it holds no locks of its own, and its periodic
+  sweep exists.
+
+**For step 7:** size the proxy at ~1.5× the hub's CPU per metadata op
+(~8,500 stat ops/s per core here). Most of that is the network hop
+itself, so replicas, not micro-optimisation, are the lever.

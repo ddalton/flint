@@ -1,0 +1,6 @@
+direct ops=20000  9394 ops/s  proxy 0.0 ms CPU/1k ops  hub 74.5 ms CPU/1k ops
+proxy  ops=20000  4388 ops/s  proxy 117.0 ms CPU/1k ops  hub 73.5 ms CPU/1k ops
+direct ops=20000  8474 ops/s  proxy 0.0 ms CPU/1k ops  hub 81.0 ms CPU/1k ops
+proxy  ops=20000  4410 ops/s  proxy 114.5 ms CPU/1k ops  hub 74.0 ms CPU/1k ops
+direct ops=20000  9093 ops/s  proxy 0.0 ms CPU/1k ops  hub 76.0 ms CPU/1k ops
+proxy  ops=20000  4332 ops/s  proxy 119.0 ms CPU/1k ops  hub 76.0 ms CPU/1k ops
