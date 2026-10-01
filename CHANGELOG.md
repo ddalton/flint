@@ -14,6 +14,51 @@ covered by the stability guarantee.
 
 ### Added
 
+- **flint-s3-csi: the placed block cache measured on an instance store —
+  half the penalty, not none** (2026-10-01, step 4 of the sharing design's
+  §11; `s3csi/e2e/results/2026-10-01-ec2-step4/`). On trove `s3a`
+  (i4i.large, the 435.9 GiB instance store mounted on every node by the
+  drill standing in for the platform, real S3) M1 ran three arms: no
+  cache, the 768 MiB cache on the scratch emptyDir, the same CR with the
+  cache placed through `workers.cacheHostPath`. The emptyDir control
+  reproduced campaign 3 to the second (6 GiB: 49 s cold and warm against
+  13–15 s uncached, `CacheOnRootDisk` on every pod). Placed, the same set
+  took **23 s — twice as fast as the root disk and still 1.7× slower than
+  no cache**, no note, 772 MiB on the device, the root empty after each
+  worker. `dd` on the node says why: the i4i.large's one instance-store
+  slice writes 263–299 MiB/s and reads 335–390, the gp3 root 139 and 125,
+  and the node reads S3 uncached at 410–470 MiB/s — the device is slower
+  than S3 both ways, and 6 GiB at its write rate is 23 s. §11's "on NVMe,
+  always" is withdrawn: a placed cache is cheaper to miss, not free, by
+  the device's write bandwidth, which the operator measures; the sizing
+  rule — a cache for a working set that fits — stands placed or not, and
+  the values text, the CRD, `MountSpec`'s doc and the plugin's comment now
+  say so. The 512 MiB set's 2× warm win is the page cache on either disk.
+  M2 with the cache placed: one shared mounter under four readers of 6 GiB
+  went from 97 s (emptyDir) to 60 s; the same mounter with no cache at
+  all — the control the first pass lacked — did it in 43 s with the worker
+  peaking at 597 MiB against 1029–1034 with a cache, so for a set larger
+  than the cache the cache costs 1.4× placed and 2.3× on the emptyDir
+  under concurrent readers too, and those 1 GiB peaks were the cache's
+  page charge. S24 + S30 on the same real nodes: **52 ok, 0 bad**, S30's
+  note firing by the devices for a root on the node's own disk. Drill:
+  `aws-measure.sh` mounts the
+  instance store (found by model, never by `/dev` name) and gains the
+  `placed` arms, a no-cache shared control, `RUN_M1`/`M2_ARMS` knobs and
+  a note column counted after the reads; `run-legs.sh SUITE=…` runs
+  another suite's legs; `measure-tenants.yaml` names `big-shared-nocache`.
+- **s3csi drill: P8's rotation oracle counts expirations, not keys**
+  (2026-10-01). The soak rewritten after campaign 3 counted distinct
+  `AccessKeyId`s in the soak worker's `creds.json`; the rig's broker runs
+  `backend=static`, which hands out ONE key set with a synthetic
+  per-exchange `Expiration` (`broker.rs`), so the count read 1 by
+  construction on its first real run (360 reads / 1829 s, zero errors,
+  broker issued 14 → 273) and the leg said BAD of a product that had
+  rotated. The sampler now records the expiration beside the key, the
+  oracle is ≥10 distinct expirations — fresh from every exchange on every
+  backend — and the key count is a note. Re-run on s3a: **3 ok, 0 bad** —
+  360 reads over 1829 s with zero errors, 25 distinct expirations over one
+  static key, broker issued 15 → 189.
 - **flint-s3-csi: the plugin says where a block cache landed —
   `CacheOnRootDisk`** (2026-10-01, step 3 of the sharing design's §11).
   At every publish that runs with a cache the plugin logs `block cache
@@ -46,9 +91,11 @@ covered by the stability guarantee.
   `sizeLimit`, so `--max-cache-size` is the bound. With the cache placed, a
   sharing CR that names no `spec.cache` gets one of `workers.cacheSizeMib`
   (default 4096) there — the default step 1 withdrew from the emptyDir,
-  back where the disk under it is the operator's and at least as fast as
-  S3 (`MountSpec::with_placed_default_cache`); unplaced, nothing gets a
-  cache it did not ask for. The plugin mounts the root as a hostPath of
+  back where the disk under it is the operator's, chosen and measured by
+  them (`MountSpec::with_placed_default_cache`; step 4 below found an
+  i4i.large's instance store SLOWER than S3, so "at least as fast" is the
+  operator's to check, and the cache is for a set that fits placed or
+  not); unplaced, nothing gets a cache it did not ask for. The plugin mounts the root as a hostPath of
   type Directory — a node without the device FAILS the plugin pod loudly
   (`hostPath type check failed`) instead of kubelet creating the directory
   on the root disk and the cache landing where §11 says it must not — and

@@ -15,7 +15,7 @@
 #   P6  a REAL node reboot: the tenant comes back mounted with a fresh worker
 #   P7  instance TERMINATION — a GRACEFUL shutdown, not a hard loss: the
 #       instance is terminated and a Deployment tenant reschedules
-#   P8  rotation soak: 30 min of reads across ≥10 key rotations, zero errors
+#   P8  rotation soak: 30 min of reads across ≥10 credential rotations, zero errors
 #   P9  ambient identity: the worker is handed nothing; the platform's own
 #       credential chain admits it (precondition: the platform can complete it)
 #   P10 SSE-KMS bucket: writes land encrypted with the bucket's key, reads work
@@ -54,7 +54,7 @@ $K get csidriver s3.csi.chert.us >/dev/null 2>&1 || { echo "no s3.csi.chert.us �
 ptcrs | $K apply -f - >/dev/null
 
 # ── P8 (started first, collected before P7): the soak reader on NODE2 ─
-leg P8 "rotation soak: a reader on $NODE2 reads every 5 s for 30 min across ≥10 key rotations (lifetime ${CREDS_LIFETIME}s) with zero errors"
+leg P8 "rotation soak: a reader on $NODE2 reads every 5 s for 30 min across ≥10 credential rotations (lifetime ${CREDS_LIFETIME}s) with zero errors"
 ptpod pt-soak datasets "$NODE2"
 if wait_phase pt-soak Running 300; then
     soak_issued0=$(broker_issued); soak_t0=$(now)
@@ -65,9 +65,15 @@ if wait_phase pt-soak Running 300; then
     # creds.json, sampled every 30 s for the soak's life — not on the
     # broker: its issued counter is per pod, and P14 rolls the broker
     # mid-soak (it read 175 → 159 on s3a, 2026-09-30, over a soak that
-    # had zero errors).
+    # had zero errors). The sample is the EXPIRATION, not the key: every
+    # exchange mints a fresh one whatever the backend, while the rig's
+    # static backend hands out ONE key set with a synthetic expiration
+    # (broker.rs), so a count of distinct keys reads 1 there by
+    # construction — which is what the first count did (s3a, 2026-10-01:
+    # 1 key, broker issued 14 → 273, zero errors). The keys are still
+    # counted, as a note.
     soak_w=$(worker_of pt-soak); soak_keys=$(mktemp)
-    ( while :; do $K -n $WNS exec "$soak_w" -- cat /comm/creds.json 2>/dev/null | jq -r '.AccessKeyId // empty' 2>/dev/null; sleep 30; done >> "$soak_keys" 2>/dev/null ) &
+    ( while :; do $K -n $WNS exec "$soak_w" -- cat /comm/creds.json 2>/dev/null | jq -r 'select(.Expiration != null) | "\(.Expiration) \(.AccessKeyId)"' 2>/dev/null; sleep 30; done >> "$soak_keys" 2>/dev/null ) &
     soak_keys_pid=$!
     ok "PRECONDITION: the soak reader is Running on $NODE2 and reading; its worker $soak_w is sampled for its key (broker issued so far: ${soak_issued0:-?})"
 else
@@ -346,10 +352,12 @@ if [ -n "${soak_pid:-}" ]; then
     soak_issued1=$(broker_issued); el=$(( $(now) - soak_t0 ))
     case "$res" in errors=0\ reads=360) ok "360 reads over ${el}s with zero errors" ;; *) bad "soak result: '${res:-<none>}' (wanted errors=0 reads=360)" ;; esac
     kill "${soak_keys_pid:-}" 2>/dev/null; wait "${soak_keys_pid:-}" 2>/dev/null
-    nrot=$(sort -u "${soak_keys:-/dev/null}" 2>/dev/null | grep -c . || true); rm -f "${soak_keys:-}"
+    nrot=$(awk '{print $1}' "${soak_keys:-/dev/null}" 2>/dev/null | sort -u | grep -c . || true)
+    nkey=$(awk '{print $2}' "${soak_keys:-/dev/null}" 2>/dev/null | sort -u | grep -c . || true); rm -f "${soak_keys:-}"
     [ "${nrot:-0}" -ge 10 ] \
-        && ok "the soak worker held $nrot distinct keys over ${el}s (lifetime ${CREDS_LIFETIME}s): rotation happened, repeatedly, under the reads" \
-        || bad "the soak worker held only ${nrot:-0} distinct key(s) over ${el}s at a ${CREDS_LIFETIME}s lifetime — rotation stalled, or the sampler never read creds.json"
+        && ok "the soak worker's credentials carried $nrot distinct expirations over ${el}s (lifetime ${CREDS_LIFETIME}s): rotation happened, repeatedly, under the reads" \
+        || bad "the soak worker's credentials carried only ${nrot:-0} distinct expiration(s) over ${el}s at a ${CREDS_LIFETIME}s lifetime — rotation stalled, or the sampler never read creds.json"
+    note "$nkey distinct access key(s) across those rotations (1 under the rig's static backend, by construction; more only when the backend mints)"
     note "broker issued counter ${soak_issued0:-?} → ${soak_issued1:-?} (per pod; P14's roll resets it)"
 fi
 ptdel pt-soak

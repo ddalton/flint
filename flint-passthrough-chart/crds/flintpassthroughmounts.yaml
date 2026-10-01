@@ -185,7 +185,11 @@ spec:
                     Enable it for a set that fits. WHERE it lives is the
                     chart's: workers.cacheHostPath places every cache in
                     a private directory on a device the operator names
-                    (the instance store), and there a sharing CR that
+                    and has measured (the instance store -- on an
+                    i4i.large it writes ~270 MiB/s, slower than S3, and
+                    6 GiB through 768 MiB took 23 s placed, 49 s on the
+                    root, 13 s uncached: a miss is cheaper placed, never
+                    free; 2026-10-01), and there a sharing CR that
                     names no cache gets one of workers.cacheSizeMib. The
                     plugin says where the cache landed: a CacheOnRootDisk
                     event on the tenant pod when the cache directory is on
@@ -233,8 +237,9 @@ spec:
                     the block cache (the one-day default of three quarters
                     of workers.scratchSize, 2026-09-29, was withdrawn once
                     measured: see cache) unless the chart PLACED the cache
-                    on a fast device (workers.cacheHostPath), where it
-                    gets one of workers.cacheSizeMib; name cache to choose.
+                    on a device of the operator's (workers.cacheHostPath),
+                    where it gets one of workers.cacheSizeMib -- for a set
+                    that fits, there too; name cache to choose.
                     Design: docs/plans/passthrough-read-only-mount-sharing.md.
                   properties:
                     readOnly:

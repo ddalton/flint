@@ -1,0 +1,74 @@
+── seeding big/ (6 × 1 GiB) and mid/ (4 × 128 MiB) if absent — store=s3 bucket=flint-s3csi-step4-20261001
+  seeded big/f1
+  seeded big/f2
+  seeded big/f3
+  seeded big/f4
+  seeded big/f5
+  seeded big/f6
+  seeded mid/m1
+  seeded mid/m2
+  seeded mid/m3
+  seeded mid/m4
+  [2026-10-01 15:20:28 UTC] 1.0GiB STANDARD f1
+  [2026-10-01 15:20:46 UTC] 1.0GiB STANDARD f2
+  [2026-10-01 15:21:03 UTC] 1.0GiB STANDARD f3
+  [2026-10-01 15:21:21 UTC] 1.0GiB STANDARD f4
+  [2026-10-01 15:21:38 UTC] 1.0GiB STANDARD f5
+  [2026-10-01 15:21:55 UTC] 1.0GiB STANDARD f6
+  [2026-10-01 15:22:12 UTC] 128MiB STANDARD m1
+  [2026-10-01 15:22:15 UTC] 128MiB STANDARD m2
+  [2026-10-01 15:22:18 UTC] 128MiB STANDARD m3
+  [2026-10-01 15:22:22 UTC] 128MiB STANDARD m4
+── node s3a-aws-1: where an emptyDir lives
+  /dev/nvme0n1p1  8.0G  4.9G  3.1G  62% /
+  nvme1n1 435.9G Amazon EC2 NVMe Instance Storage
+  nvme0n1     8G Amazon Elastic Block Store
+# measure 2026-10-01T15:22:25Z ctx=s3a store=s3 node=s3a-aws-1 tag=ec2-1001 reps=3 readers=4 cache_host_path=/mnt/nvme/flint-s3-cache
+── placing the cache: /mnt/nvme/flint-s3-cache on the instance store of every node (the drill as the platform)
+  s3a-aws-1: /dev/nvme1n1 on /mnt/nvme:  436G 3.1G xfs
+  s3a-aws-2: /dev/nvme1n1 on /mnt/nvme:  436G 3.1G xfs
+  s3a-cp-1: /dev/nvme1n1 on /mnt/nvme:  436G 3.1G xfs
+
+── M1: cold then warm, arms [nocache cache placed], on mid (512 MiB, fits the cache) and big (6 GiB, eight times it) (n=3)
+M1	arm	set	rep	cold_ms	warm_ms	note	placed_mib	worker
+M1	nocache	mid	1	1649	1409	0	-	s3w-44992c0e20a9cd60
+M1	nocache	mid	2	1659	1410	0	-	s3w-89341993334fa7a0
+M1	nocache	mid	3	1540	1259	0	-	s3w-a71b555741cadf59
+M1	nocache	big	1	15240	14560	0	-	s3w-62e9e5377caaf365
+M1	nocache	big	2	12939	13860	0	-	s3w-3eb4ac1b209aeb5d
+M1	nocache	big	3	13119	13230	0	-	s3w-5899e994ac40207b
+M1	cache	mid	1	2939	689	1	-	s3w-01ede99dc5f404a1
+M1	cache	mid	2	3690	950	1	-	s3w-c28603e6cd38915c
+M1	cache	mid	3	2029	639	1	-	s3w-6846ff86d0abc1bc
+M1	cache	big	1	49899	49149	1	-	s3w-5478eaf469c510a1
+M1	cache	big	2	48809	49250	1	-	s3w-6b0ce70712d95c62
+M1	cache	big	3	49330	49170	1	-	s3w-87a4b67d0d59483e
+  plugin on s3a-aws-1: cache_device=259:2 nodefs_device=259:2
+  chart: workers.cacheHostPath=/mnt/nvme/flint-s3-cache
+M1	placed	mid	1	1850	689	0	515	s3w-43cdf8a5a73d9c36
+M1	placed	mid	2	1879	719	0	515	s3w-720a107964963835
+M1	placed	mid	3	1879	690	0	515	s3w-daca128f921f114e
+M1	placed	big	1	24629	23269	0	772	s3w-6edc877f85e1a14c
+M1	placed	big	2	23349	23160	0	772	s3w-9d3f05b3c182a855
+M1	placed	big	3	23140	23000	0	772	s3w-3f9914f217c6213d
+  plugin on s3a-aws-1: cache_device=259:0 nodefs_device=259:2
+  /mnt/nvme/flint-s3-cache on s3a-aws-1 after the arm: [] (empty = every directory went with its worker)
+  chart restored
+
+── M2: 4 concurrent readers of 6 GiB through ONE shared mounter, three memory targets, then the cache placed
+M2	arm	target_mib	limit	readers_ok	slowest_ms	worker_peak_mib	worker_terminated	note	worker
+  shared worker: s3w-90629e5516f7b0b4 (argv: --memory-target 682)
+M2	fix	682	1Gi	4/4	97250	1029	-	0	s3w-90629e5516f7b0b4
+  shared worker: s3w-436e863ebb77ca7e (argv: --memory-target 973)
+M2	old	973	1Gi	4/4	164079	1032	-	0	s3w-436e863ebb77ca7e
+  chart: sharedResources 4Gi
+  shared worker: s3w-293b9e59cd6b66c1 (argv: --memory-target 2730)
+M2	big	2730	4Gi	4/4	114659	3214	-	0	s3w-293b9e59cd6b66c1
+  chart restored
+  chart: workers.cacheHostPath=/mnt/nvme/flint-s3-cache
+  shared worker: s3w-90629e5516f7b0b4 (argv: --memory-target 682)
+M2	placed	682	1Gi	4/4	59949	1034	-	0	s3w-90629e5516f7b0b4
+  plugin on s3a-aws-1: cache_device=259:0 nodefs_device=259:2
+  chart restored
+
+written: results/measure-20261001-152026.tsv

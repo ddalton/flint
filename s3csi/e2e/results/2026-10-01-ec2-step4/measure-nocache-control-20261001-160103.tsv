@@ -1,0 +1,4 @@
+# measure 2026-10-01T16:02:39Z ctx=s3a store=s3 node=s3a-aws-1 tag=ec2-1001 reps=3 readers=4 cache_host_path=-
+M1	arm	set	rep	cold_ms	warm_ms	note	placed_mib	worker
+M2	arm	target_mib	limit	readers_ok	slowest_ms	worker_peak_mib	worker_terminated	note	worker
+M2	nocache	682	1Gi	4/4	42659	597	-	0	s3w-029ad4b81636f55c

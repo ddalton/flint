@@ -1,0 +1,15 @@
+16:34:15 non-terminated instances in us-west-1: 0 (after 60s)
+awk: syntax error at source line 1
+ context is
+	 >>> print <<<  $2
+awk: bailing out at source line 1
+  states:    states:    1 i-04d8afcb7174ff934	terminated;   1 i-0557b96884c2184ec	terminated;   1 i-07cf09a45e88bf248	terminated;
+  volumes: 0
+  open/active spot requests: 0
+  elastic IPs: 0
+  trove-s3a SGs: 0 (after 0s more); non-default SGs: 0
+  us-east-1 non-terminated instances: 0
+  trove orphans: "matched":0 "ghostRows":[] "purgedRows":0 
+  buckets in the account: 0
+  iam user: NoSuchEntity
+VERIFY-DONE 16:34:24

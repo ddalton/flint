@@ -1,0 +1,36 @@
+── seeding big/ (6 × 1 GiB) and mid/ (4 × 128 MiB) if absent — store=s3 bucket=flint-s3csi-step4-20261001
+  seeded big/f1
+  seeded big/f2
+  seeded big/f3
+  seeded big/f4
+  seeded big/f5
+  seeded big/f6
+  seeded mid/m1
+  seeded mid/m2
+  seeded mid/m3
+  seeded mid/m4
+  [2026-10-01 16:01:05 UTC] 1.0GiB STANDARD f1
+  [2026-10-01 16:01:19 UTC] 1.0GiB STANDARD f2
+  [2026-10-01 16:01:33 UTC] 1.0GiB STANDARD f3
+  [2026-10-01 16:01:47 UTC] 1.0GiB STANDARD f4
+  [2026-10-01 16:02:01 UTC] 1.0GiB STANDARD f5
+  [2026-10-01 16:02:15 UTC] 1.0GiB STANDARD f6
+  [2026-10-01 16:02:29 UTC] 128MiB STANDARD m1
+  [2026-10-01 16:02:32 UTC] 128MiB STANDARD m2
+  [2026-10-01 16:02:34 UTC] 128MiB STANDARD m3
+  [2026-10-01 16:02:37 UTC] 128MiB STANDARD m4
+── node s3a-aws-1: where an emptyDir lives
+  /dev/nvme0n1p1  8.0G  4.9G  3.1G  62% /
+  nvme1n1 435.9G Amazon EC2 NVMe Instance Storage
+  nvme0n1     8G Amazon Elastic Block Store
+# measure 2026-10-01T16:02:39Z ctx=s3a store=s3 node=s3a-aws-1 tag=ec2-1001 reps=3 readers=4 cache_host_path=-
+
+── M1: cold then warm, arms [skipped], on mid (512 MiB, fits the cache) and big (6 GiB, eight times it) (n=3)
+M1	arm	set	rep	cold_ms	warm_ms	note	placed_mib	worker
+
+── M2: 4 concurrent readers of 6 GiB through ONE shared mounter — arms [nocache]
+M2	arm	target_mib	limit	readers_ok	slowest_ms	worker_peak_mib	worker_terminated	note	worker
+  shared worker: s3w-029ad4b81636f55c (argv: --memory-target 682)
+M2	nocache	682	1Gi	4/4	42659	597	-	0	s3w-029ad4b81636f55c
+
+written: results/measure-20261001-160103.tsv

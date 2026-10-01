@@ -1,0 +1,12 @@
+flint-passthrough on real nodes — cluster s3a, node s3a-aws-1 (+s3a-aws-2), buckets flint-s3csi-step4-20261001 / flint-s3csi-step4-20261001 / flint-s3csi-step4-20261001
+
+── P8 — rotation soak: a reader on s3a-aws-2 reads every 5 s for 30 min across ≥10 key rotations (lifetime 120s) with zero errors
+  ok: PRECONDITION: the soak reader is Running on s3a-aws-2 and reading; its worker s3w-bb6da8745e168fe8 is sampled for its key (broker issued so far: 14)
+
+── P8 — rotation soak — collect
+  ok: 360 reads over 1829s with zero errors
+  BAD: the soak worker held only 1 distinct key(s) over 1829s at a 120s lifetime — rotation stalled, or the sampler never read creds.json
+  NOTE: broker issued counter 14 → 273 (per pod; P14's roll resets it)
+
+════════════════════════════════════════
+s3.csi.chert.us legs [P8] of aws-passthrough.sh: 2 ok, 1 bad

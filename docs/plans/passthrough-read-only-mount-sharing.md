@@ -534,6 +534,41 @@ can make an EBS-backed cache cheap; the fix is where the directory lives.
    cache pays every block to the disk twice and warms nothing. With the
    placement knob set that rule relaxes to "the device is at least as
    fast as the node's S3 path" — on NVMe, always.
+   **DONE 2026-10-01, and the relaxation WITHDRAWN** — measured on
+   trove `s3a` (i4i.large, the 435.9 GiB instance store mounted on every
+   node by the drill, standing in for the platform; real S3 through the
+   public endpoint; `s3csi/e2e/results/2026-10-01-ec2-step4/`), M1 with
+   the cache placed on it through `workers.cacheHostPath`:
+
+   | set | no cache, cold → warm | cache 768 MiB on the emptyDir | cache 768 MiB placed on the instance store |
+   |---|---|---|---|
+   | 512 MiB | 1.5–1.7 s → 1.3–1.4 s | 2.0–3.7 s → **0.64–0.95 s** | 1.9 s → **0.69–0.72 s** |
+   | 6 GiB | 13–15 s → 13–15 s | **49 s → 49 s** | **23–25 s → 23 s** |
+
+   The emptyDir control reproduces campaign 3 to the second. Placed, the
+   6 GiB set is twice as fast as on the root disk and still 1.7× slower
+   than with no cache: the bar below ("within 10% of no cache") is not
+   met, because the device is not faster than S3. `dd` on the node: the
+   i4i.large's one instance-store slice writes 263–299 MiB/s and reads
+   335–390; the gp3 root 139 and 125; the node reads S3 uncached at
+   410–470 MiB/s. 6 GiB at ~270 MiB/s is 23 s, the measured number. "On
+   NVMe, always" was wrong for the smallest i4i — the slice scales with
+   the instance size — so the values text, the CRD, `MountSpec`'s doc
+   and the plugin's comment now say what is true: a placed cache is
+   cheaper to miss, not free; how much cheaper is the device's write
+   bandwidth, which the operator measures; the sizing rule stands placed
+   or not, and `workers.cacheSizeMib` is for a set that fits. The
+   512 MiB set's warm win is the page cache on both arms (0.69 s is
+   740 MiB/s, faster than either disk reads). The mechanics held on
+   real nodes: every placed directory was on the instance store
+   (`cache_device=259:0 nodefs_device=259:2` logged; the emptyDir arm
+   `259:2` twice), no placed pod got the note and every emptyDir pod
+   did, the root was empty after each arm, the chart rolled onto all
+   three nodes; S24 + S30 on the same nodes 52 ok, 0 bad, S30's note
+   firing by the devices for a root on the node's own disk. M2 with the
+   cache placed: the shared mounter under four readers of 6 GiB went
+   from 97 s to 60 s. Mounting the instance store at provision remains
+   trove's to do; the drill mounts it meanwhile.
 
 **What not to do.** Raising `workers.scratchSize` on the root disk buys
 a bigger cache on the same 125 MiB/s. `medium: Memory` for the scratch
@@ -550,3 +585,18 @@ the cache on the NVMe, which answers the mechanism; on EC2 it needs a
 node with the instance store mounted. S24 gains one assertion: the
 cache directory's device is the one the chart named. Until then the
 truthful default is off.
+
+**What it showed (2026-10-01, step 4 above).** The mechanism works and
+the premise was wrong: on the node this driver was measured on, the
+instance store is not "a device faster than S3", so the 6 GiB cache arm
+reads at the device's write rate (23 s against 13–15 s), half the root
+disk's penalty and not within 10% of none. The verification stands as
+written for a device that out-writes the S3 path; the i4i.large's slice
+does not, and nothing in the chart can know which kind the operator
+mounted. So the device assertion lives where it can be made — S30 asserts
+the cache directory's device against the kubelet root's and the note
+fires or not by that comparison; M1's placed rows record the device, the
+bytes that landed on it and the note's absence — and the values text
+tells the operator to measure the device before placing anything on it.
+The default stays off unless placed, and placed it is
+`workers.cacheSizeMib` for a working set that fits.

@@ -1,0 +1,11 @@
+node ip-172-31-8-55.us-west-1.compute.internal: nvme1n1 Amazon EC2 NVMe Instance Storage;nvme0n1 Amazon Elastic Block Store
+  nvme write, 1 stream, 4 GiB, direct            13.7 s      299 MiB/s
+  nvme write, 4 streams x 1 GiB, direct          15.6 s      263 MiB/s
+  nvme write, 1 stream, 4 GiB, buffered+fsync    15.6 s      263 MiB/s
+  nvme read, 1 stream, 4 GiB, direct             10.5 s      390 MiB/s
+  nvme read, 4 streams x 1 GiB, direct           12.2 s      335 MiB/s
+  gp3 root write, 1 stream, 1 GiB, direct         7.4 s      139 MiB/s
+  gp3 root read, 1 stream, 1 GiB, direct          8.2 s      125 MiB/s
+  nvme1n1 queue: nr_requests=127 max_sectors_kb=128
+  /dev/nvme1n1    436G  3.1G  433G   1% /mnt/nvme
+  /dev/nvme0n1p1  8.0G  5.9G  2.1G  75% /

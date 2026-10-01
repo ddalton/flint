@@ -217,11 +217,16 @@ impl MountSpec {
     /// The spec as the mounter sees it when the chart PLACED the cache
     /// (`workers.cacheHostPath`, sharing design §11 step 2): a CR that
     /// shares its mounter and names no `cache` gets one of `size_mib`
-    /// there — the device is the operator's and at least as fast as the
-    /// node's S3 path, so the reason step 1 turned the default off (the
-    /// emptyDir is the root disk) does not apply. Unplaced, a named
-    /// `cache` (enabled or not), a CR that does not share, or a zero size:
-    /// unchanged. Nothing gets a cache it did not ask for on the emptyDir.
+    /// there — the device is the operator's, chosen and measured by them
+    /// (the values text says how), so the reason step 1 turned the
+    /// default off (the emptyDir is the root disk, 125 MiB/s) does not
+    /// apply. Placement does not make a cache free: a set larger than it
+    /// pays every block to the device's write rate — on an i4i.large's
+    /// instance store, 270 MiB/s, which halved M1's penalty rather than
+    /// removing it (§11 step 4) — so `size_mib` is for a set that fits.
+    /// Unplaced, a named `cache` (enabled or not), a CR that does not
+    /// share, or a zero size: unchanged. Nothing gets a cache it did not
+    /// ask for on the emptyDir.
     pub fn with_placed_default_cache(mut self, placed: bool, size_mib: u64) -> Self {
         if placed && size_mib > 0 && self.shares_read_only() && self.cache.is_none() {
             self.cache = Some(CacheSpec { enabled: true, max_size_mib: Some(size_mib) });

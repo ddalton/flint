@@ -367,8 +367,9 @@ workers:
 
   # WHERE THE BLOCK CACHE LIVES (FLINT_S3CSI_CACHE_HOST_PATH). Empty ⇒ the
   # scratch emptyDir, i.e. the node's root disk (above). Set to a directory
-  # on a device at least as fast as the node's S3 path — the instance
-  # store, e.g. /mnt/nvme/flint-s3-cache — and every worker that runs with
+  # on a device you have MEASURED against the node's S3 path — the
+  # instance store, e.g. /mnt/nvme/flint-s3-cache; `dd … oflag=direct` on
+  # the node says what it writes — and every worker that runs with
   # a cache gets a PRIVATE subdirectory of it (<path>/<worker-name>, 0700,
   # the worker's uid) as a hostPath at /tmp in place of the emptyDir: the
   # plugin makes it before the worker and removes it after the mounter's
@@ -396,7 +397,17 @@ workers:
   # MiB. A hostPath has no sizeLimit, so this is the only bound: size it
   # for the working set (a set larger than the cache warms nothing) and
   # for the device every worker on the node shares. A CR's own
-  # spec.cache.maxSizeMib wins.
+  # spec.cache.maxSizeMib wins. Placing the cache makes a miss CHEAPER,
+  # not free: a set larger than the cache still pays every fetched block
+  # to the device's write rate. Measured 2026-10-01 on an i4i.large,
+  # whose one instance-store slice writes ~270 MiB/s and reads ~360 while
+  # the node pulls S3 at ~420: 6 GiB through a 768Mi cache took 23 s
+  # there against 49 s on the gp3 root and 13–15 s with no cache — half
+  # the penalty, still 1.7× slower than none; the 512Mi set that fit
+  # warmed 2× faster on either disk (the page cache). Larger instance
+  # sizes carry proportionally faster slices; measure yours. The rule is
+  # the same placed or not: a cache for a working set that fits
+  # (s3csi/e2e/results/2026-10-01-ec2-step4/).
   cacheSizeMib: 4096
 
   # THE REAL GUARD on workers.namespace (§3.6). A ValidatingAdmissionPolicy

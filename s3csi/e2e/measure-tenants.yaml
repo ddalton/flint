@@ -91,3 +91,20 @@ spec:
   uid: 1001
   cache: { enabled: true, maxSizeMib: 768 }
   consumers: { serviceAccounts: [trainer] }
+---
+# M2's control: the same shared mounter with NO block cache (a sharing
+# CR that names none gets none unless the chart placed the cache, so this
+# arm runs with the chart plain). The number the cache arms stand against:
+# whatever this takes is the mounter and S3, not the disk.
+apiVersion: chert.us/v1alpha1
+kind: FlintPassthroughMount
+metadata: { name: big-shared-nocache, namespace: s3-tenants }
+spec:
+  bucket: s3bucket
+  keyPrefix: big
+  endpoint: http://minio.flint-system.svc:9000
+  region: us-east-1
+  readOnly: true
+  uid: 1001
+  sharing: { readOnly: true }
+  consumers: { serviceAccounts: [trainer] }

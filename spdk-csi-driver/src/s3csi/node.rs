@@ -827,8 +827,12 @@ impl S3Node {
         // the operator who expected one sees why there is none.
         // With the cache PLACED (workers.cacheHostPath, §11 step 2) a
         // sharing CR that names none gets one of workers.cacheSizeMib on
-        // that device: the disk under it is the operator's, and at least
-        // as fast as S3, so step 1's reason does not apply there.
+        // that device: the disk under it is the operator's, chosen and
+        // measured by them, so step 1's reason does not apply there. Not
+        // free either way — a set larger than the cache pays the device's
+        // write rate (an i4i.large instance store: 270 MiB/s, 2× slower
+        // than S3 for 6 GiB through 768 MiB; §11 step 4) — which is what
+        // workers.cacheSizeMib is sized against.
         let placed = self.cfg.cache_host_path.is_some();
         let defaulted = placed && spec.shares_read_only() && spec.cache.is_none();
         let spec = spec.with_placed_default_cache(placed, self.cfg.cache_size_mib);
