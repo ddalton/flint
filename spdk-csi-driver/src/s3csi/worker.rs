@@ -84,6 +84,13 @@ pub fn comm_dir(kubelet_root: &Path, worker_pod_uid: &str) -> PathBuf {
         .join(COMM_VOLUME)
 }
 
+/// `/var/lib/kubelet/pods/<uid>/volumes/kubernetes.io~empty-dir/scratch`:
+/// the worker's scratch emptyDir as the node sees it — where an UNPLACED
+/// block cache lives, on the kubelet root's disk by construction.
+pub fn scratch_dir(kubelet_root: &Path, worker_pod_uid: &str) -> PathBuf {
+    comm_dir(kubelet_root, worker_pod_uid).with_file_name("scratch")
+}
+
 pub struct WorkerInputs<'a> {
     pub namespace: String,
     pub node_name: String,
@@ -795,6 +802,14 @@ mod tests {
         let scratch = pod.spec.as_ref().unwrap().volumes.as_ref().unwrap().iter().find(|v| v.name == "scratch").unwrap();
         assert!(scratch.host_path.is_none(), "unplaced: no hostPath");
         assert_eq!(scratch.empty_dir.as_ref().unwrap().size_limit.as_ref().unwrap().0, "1Gi", "unplaced: the sized emptyDir");
+    }
+
+    #[test]
+    fn the_scratch_emptydir_sits_beside_the_comm_dir() {
+        assert_eq!(
+            scratch_dir(Path::new("/var/lib/kubelet"), "u-1"),
+            PathBuf::from("/var/lib/kubelet/pods/u-1/volumes/kubernetes.io~empty-dir/scratch")
+        );
     }
 
     #[test]

@@ -29,6 +29,17 @@ notes (`legs-S24-S30.log`).
   failed` in 30 s; the chart refused a relative path and a zero size at
   render time; the chart restored without a placement.
 
+**Second run, step 3 (`legs-S24-S30-step3.log`)**: the same two legs with
+the `CacheOnRootDisk` note built in, images from origin/main `1b179df8`
+plus the step 3 diff: **52 ok, 0 bad**. The six new assertions: no note
+on a shared mounter with no cache (S24) nor on a per-pod mount with none
+(S30); the note on S24's emptyDir-cache control names the CR, the 256 MiB
+and the emptyDir; on S30's placed cache the leg compared the devices on
+the node first — on kind the root under `/var/lib` shares the kubelet
+root's disk — and the note named the placed directory and the 512 MiB;
+the plugin logged `block cache device` in both legs.
+
 On kind the "device" is a directory on the node's own disk: this is the
-placement MECHANICS. The speed claim (§11 step 4) is M1 on a node with
-the instance store mounted, not yet run.
+placement MECHANICS, and it is also why the note fires there. The speed
+claim (§11 step 4) is M1 on a node with the instance store mounted, not
+yet run.

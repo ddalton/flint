@@ -14,6 +14,26 @@ covered by the stability guarantee.
 
 ### Added
 
+- **flint-s3-csi: the plugin says where a block cache landed —
+  `CacheOnRootDisk`** (2026-10-01, step 3 of the sharing design's §11).
+  At every publish that runs with a cache the plugin logs `block cache
+  device`: the cache directory's device as `major:minor` beside the kubelet
+  root's. When the two are the same disk the tenant pod gets a Normal event
+  `CacheOnRootDisk` naming the CR, the cache size and where it sits — on
+  the scratch emptyDir that is always (it lives under the kubelet root, the
+  node's root disk), and the note says to size the cache for a set that
+  fits or place it with `workers.cacheHostPath`; on a placement it fires
+  only when the operator pointed the knob at a directory on the node's own
+  disk rather than a faster device, and says so with the directory. A note,
+  not a refusal: the operator who reads it knows what M1 says (6 GiB
+  through 768 MiB on a gp3 root: 48 s, against 10 s uncached). Once per
+  publish, never on a republish; a shared class's members each get it.
+  S24's control (an emptyDir cache) asserts the note and S24's main arm its
+  absence; S30 follows the devices — on kind the placed root shares the
+  node's `/var`, so the note fires and names the directory, and on an
+  instance store it must be absent. Run on kind 2026-10-01 with S24: 52 ok,
+  0 bad (`s3csi/e2e/results/2026-10-01-kind-s24-s30/legs-S24-S30-step3.log`).
+
 - **flint-s3-csi: `workers.cacheHostPath` places the block cache on a device
   of the operator's choosing** (2026-09-30, step 2 of the sharing design's
   §11). Set to a directory mounted on every node — the instance store, e.g.

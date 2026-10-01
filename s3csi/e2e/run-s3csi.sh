@@ -1685,6 +1685,7 @@ if require_pod shared-a && require_pod shared-b && require_pod shared-c; then
         [ "${blocks:-0}" = "0" ] && ok "no block cache directory under /tmp in $w after the reads" || bad "$blocks mountpoint-cache entr(y|ies) under /tmp in $w — a cache the CR did not ask for is in use"
     fi
     plugin_log | grep -q "sharing: no block cache" && ok "the plugin logged that the shared mounter runs without a cache" || bad "no 'sharing: no block cache' line in the plugin log"
+    [ "$(mount_events shared-a | grep -c CacheOnRootDisk)" = 0 ] && ok "no CacheOnRootDisk note on shared-a: no cache, nothing to say" || bad "a CacheOnRootDisk note on shared-a, whose mount runs no cache: $(mount_events shared-a | grep CacheOnRootDisk | cut -c1-140)"
     inpod shared-a "touch /mnt/shared/x" >/dev/null 2>&1 && bad "shared-a could write the read-only shared mount" || ok "the shared mount is read-only"
     lines=$($K -n $SYS logs "$(plugin_pod)" 2>/dev/null | grep -c 'published (shared read-only mount)')
     [ "${lines:-0}" -ge 3 ] && ok "the plugin logged $lines shared publishes" || bad "the plugin logged $lines shared publish(es), expected 3"
@@ -1719,6 +1720,12 @@ if require_pod shared-a && require_pod shared-b && require_pod shared-c; then
         got=$(inpod shared-c "cat /mnt/shared/shard-01.txt"); [ "$got" = "seeded-object-01" ] && ok "CONTROL: shared-c reads through the cached shared mount" || bad "CONTROL: shared-c read '$got' through the cached mount"
         blocks=$($K -n $WNS exec "$wc" -- ls -R /tmp 2>/dev/null | grep -c "mountpoint-cache" || true)
         [ "${blocks:-0}" -ge 1 ] && ok "CONTROL: the named cache is populated under /tmp in $wc ($blocks entries)" || bad "CONTROL: no mountpoint-cache under /tmp in $wc after a read — the named cache did not reach the mounter"
+        # §11 step 3: an emptyDir cache is on the kubelet root's disk by
+        # construction, and the tenant is told so, with the CR and the size.
+        mount_events shared-c | grep -q "CacheOnRootDisk: FlintPassthroughMount datasets-shared: its block cache (256 MiB) is on the worker's scratch emptyDir" \
+            && ok "CONTROL: CacheOnRootDisk on shared-c names the CR, the 256 MiB and the emptyDir" \
+            || bad "CONTROL: no CacheOnRootDisk note on shared-c for its emptyDir cache; its events: $(mount_events shared-c | cut -c1-120 | tr '\n' '|')"
+        plugin_log | grep -q "block cache device" && ok "CONTROL: the plugin logged the cache directory's device" || bad "CONTROL: no 'block cache device' line in the plugin log"
     else
         bad "CONTROL: shared-c did not come back Running on the cached class"
     fi
@@ -1950,6 +1957,19 @@ if chart_up --set workers.cacheHostPath=$CROOT --set workers.cacheSizeMib=512 >/
         onnode "ls $CROOT/$w 2>/dev/null | grep -q mountpoint-cache" && ok "mount-s3 populated its cache under the placed directory after the read" || bad "no mountpoint-cache under $CROOT/$w after a read"
         plugin_log | grep -q "block cache defaulted on the placed device" && ok "the plugin logged the placed default" || bad "no 'block cache defaulted on the placed device' line in the plugin log"
         plugin_log | grep -q "block cache placed" && ok "the plugin logged where it placed the cache" || bad "no 'block cache placed' line in the plugin log"
+        # §11 step 3: the note follows the DEVICES, not the knob. Where the
+        # placed root shares the kubelet root's disk (kind: both under the
+        # node's /var) the tenant gets CacheOnRootDisk naming the directory;
+        # where it is its own device (an instance store) it must not.
+        same=$(onnode "[ \"\$(stat -c %d $CROOT/$w)\" = \"\$(stat -c %d /var/lib/kubelet)\" ] && echo yes || echo no")
+        if [ "$same" = yes ]; then
+            mount_events shared-a | grep -q "CacheOnRootDisk: FlintPassthroughMount datasets-shared: its block cache (512 MiB) at $CROOT/$w is on the SAME disk as the kubelet root" \
+                && ok "CacheOnRootDisk on shared-a: the placed root shares the kubelet root's disk here, and the note names the directory and the size" \
+                || bad "the placed root shares the kubelet root's disk and shared-a got no CacheOnRootDisk naming $CROOT/$w; its events: $(mount_events shared-a | cut -c1-120 | tr '\n' '|')"
+        else
+            [ "$(mount_events shared-a | grep -c CacheOnRootDisk)" = 0 ] && ok "no CacheOnRootDisk on shared-a: the placed root is its own device" || bad "CacheOnRootDisk on shared-a although the placed root is a different device from the kubelet root"
+        fi
+        plugin_log | grep -q "block cache device" && ok "the plugin logged the cache directory's device beside the kubelet root's" || bad "no 'block cache device' line in the plugin log"
         # CONTROL: a per-pod CR that names no cache keeps its emptyDir —
         # placement forces a cache on nobody.
         $K -n $NS delete pod reader --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
@@ -1958,6 +1978,7 @@ if chart_up --set workers.cacheHostPath=$CROOT --set workers.cacheSizeMib=512 >/
             wr=$(worker_of reader); argvr=$(worker_argv "$wr")
             hpr=$($K -n $WNS get pod "$wr" -o jsonpath='{.spec.volumes[?(@.name=="scratch")].hostPath.path}' 2>/dev/null)
             if [ -z "$hpr" ] && ! echo "$argvr" | grep -q -- '--cache'; then ok "CONTROL: reader (datasets, no spec.cache) keeps its scratch emptyDir and runs no cache"; else bad "CONTROL: reader's worker has hostPath '${hpr}', argv ${argvr:-<none>}"; fi
+            [ "$(mount_events reader | grep -c CacheOnRootDisk)" = 0 ] && ok "CONTROL: no CacheOnRootDisk on reader: no cache, nothing to say" || bad "CONTROL: a CacheOnRootDisk note on reader, which runs no cache"
         else
             bad "CONTROL: reader did not come back Running"
         fi

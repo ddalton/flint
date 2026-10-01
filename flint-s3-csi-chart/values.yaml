@@ -384,7 +384,12 @@ workers:
   # the same either way (--cache /tmp), so a class key does not depend on
   # where the cache lives. With a placement set, a sharing CR that names
   # no spec.cache gets one of cacheSizeMib; without one, nothing gets a
-  # cache it did not ask for (docs/plans/passthrough-read-only-mount-sharing.md §11).
+  # cache it did not ask for. Either way the plugin says where a cache
+  # landed: "block cache device" in its log (the cache directory's
+  # major:minor beside the kubelet root's), and a CacheOnRootDisk event
+  # on the tenant pod when the two are the same disk — always for an
+  # emptyDir cache, and for a placement whose root is on the node's own
+  # disk (docs/plans/passthrough-read-only-mount-sharing.md §11).
   cacheHostPath: ""
   # The cache a sharing CR that names no spec.cache gets when the cache is
   # placed (FLINT_S3CSI_CACHE_SIZE_MIB), as mount-s3's --max-cache-size in

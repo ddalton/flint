@@ -339,6 +339,44 @@ impl S3Node {
         }
     }
 
+    /// Say where the cache is (sharing design §11 step 3). When this mount
+    /// runs with a block cache, log the cache directory's device beside
+    /// the kubelet root's, and tell the tenant — `CacheOnRootDisk`, a
+    /// note, not a refusal — when they are the same disk: on the scratch
+    /// emptyDir that is always (it lives under the kubelet root); on a
+    /// placement it means `workers.cacheHostPath` points at a directory on
+    /// the node's own disk rather than a faster device. The operator who
+    /// reads it knows what M1 says. Once per publish, never on a
+    /// republish.
+    async fn note_cache_device(
+        &self,
+        tenant: &TenantRef,
+        vid: &str,
+        cr: &str,
+        spec: &crate::passthrough::spec::MountSpec,
+        cache_dir: Option<&str>,
+        worker_uid: &str,
+    ) {
+        let Some(c) = spec.cache.as_ref().filter(|c| c.enabled) else { return };
+        let (dir, placed) = match cache_dir {
+            Some(d) => (PathBuf::from(d), true),
+            None => (worker::scratch_dir(&self.cfg.kubelet_root, worker_uid), false),
+        };
+        let (cache_dev, root_dev) = (device_of(&dir), device_of(&self.cfg.kubelet_root));
+        tracing::info!(
+            volume = vid, cr, dir = %dir.display(), placed, size_mib = ?c.max_size_mib,
+            cache_device = %fmt_dev(cache_dev), nodefs_device = %fmt_dev(root_dev),
+            "block cache device"
+        );
+        match (cache_dev, root_dev) {
+            (Some(a), Some(b)) if a == b => {
+                self.emit_event(tenant, "CacheOnRootDisk", &cache_on_root_disk_message(cr, placed, &dir, c.max_size_mib), false).await;
+            }
+            (None, _) => tracing::warn!(volume = vid, dir = %dir.display(), "block cache directory not visible to the plugin; its device is unknown"),
+            _ => {}
+        }
+    }
+
     /// The shared records, after the volumes: drop members whose volume
     /// state is gone (an unpublish that ran while the plugin was down, or
     /// a member the loop above just cleaned up), and bring down a mounter
@@ -987,6 +1025,7 @@ impl S3Node {
         st.published_unix = Some(chrono::Utc::now().timestamp() as u64);
         st.last_probe_ok = Some(true);
         st.save(dir).map_err(|e| Status::internal(format!("state: {e}")))?;
+        self.note_cache_device(tenant, vid, &st.cr, &spec, st.cache_dir.as_deref(), &worker_uid).await;
         tracing::info!(volume = vid, cr = %st.cr, tenant = %format!("{}/{}", tenant.namespace, tenant.pod), worker = %st.worker_name, "published");
         Ok(())
     }
@@ -1253,6 +1292,9 @@ impl S3Node {
         st.published_unix = Some(chrono::Utc::now().timestamp() as u64);
         st.last_probe_ok = Some(true);
         st.save(dir).map_err(|e| Status::internal(format!("state: {e}")))?;
+        if let Some(u) = sm.worker_uid.as_deref() {
+            self.note_cache_device(tenant, vid, cr, spec, sm.cache_dir.as_deref(), u).await;
+        }
         tracing::info!(
             volume = vid, cr = %st.cr, tenant = %format!("{}/{}", tenant.namespace, tenant.pod), worker = %st.worker_name,
             shared = %hash, members = sm.members.len(), "published (shared read-only mount)"
@@ -2343,6 +2385,48 @@ pub fn revocation_removes_the_key(st: &VolumeState) -> bool {
     st.shared.is_none()
 }
 
+/// The device a path sits on (`st_dev`), None when it cannot be read.
+fn device_of(p: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(p).ok().map(|m| m.dev())
+}
+
+/// A Linux `dev_t` as `major:minor` (glibc's and musl's `major()`/`minor()`
+/// bit layout), for the log; `?` when the path could not be read.
+fn fmt_dev(dev: Option<u64>) -> String {
+    match dev {
+        Some(d) => {
+            let major = ((d >> 8) & 0xfff) | ((d >> 32) & 0xffff_f000);
+            let minor = (d & 0xff) | ((d >> 12) & 0xffff_ff00);
+            format!("{major}:{minor}")
+        }
+        None => "?".into(),
+    }
+}
+
+/// The `CacheOnRootDisk` note: the cache directory shares the kubelet
+/// root's disk. On the emptyDir that is the node's root disk by
+/// construction; on a placement, the operator pointed the knob at it.
+fn cache_on_root_disk_message(cr: &str, placed: bool, dir: &Path, size_mib: Option<u64>) -> String {
+    let size = size_mib.map(|m| format!("{m} MiB")).unwrap_or_else(|| "unbounded".into());
+    if placed {
+        format!(
+            "FlintPassthroughMount {cr}: its block cache ({size}) at {} is on the SAME disk as the kubelet root — \
+             workers.cacheHostPath points at the node's root disk, not a faster device; a working set larger than \
+             the cache pays every fetched block to that disk and warms nothing (measured 5× slower than no cache for \
+             6 GiB through 768 MiB on a gp3 root)",
+            dir.display()
+        )
+    } else {
+        format!(
+            "FlintPassthroughMount {cr}: its block cache ({size}) is on the worker's scratch emptyDir, the node's root \
+             disk — a working set larger than the cache pays every fetched block to that disk and warms nothing \
+             (measured 5× slower than no cache for 6 GiB through 768 MiB on a gp3 root); size the cache for a set that \
+             fits, or place it on a faster device with workers.cacheHostPath"
+        )
+    }
+}
+
 /// The cache's private directory on the placed device
 /// (`workers.cacheHostPath/<worker>`), made before the worker that mounts
 /// it at `/tmp`: emptied if a previous worker of this name left one (a
@@ -2617,6 +2701,34 @@ impl csi::identity_server::Identity for S3Identity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `st_dev` as the kernel packs it, printed the way `ls -l /dev` and
+    /// `stat` show a device, so the log line can be matched against the
+    /// node: 0x803 is sda3, 0x10302 is nvme0n1p2 (major 259), 0xfd01 is
+    /// dm-1 (major 253).
+    #[test]
+    fn a_dev_t_prints_as_major_colon_minor() {
+        assert_eq!(fmt_dev(Some(0x803)), "8:3");
+        assert_eq!(fmt_dev(Some(0x10302)), "259:2");
+        assert_eq!(fmt_dev(Some(0xfd01)), "253:1");
+        assert_eq!(fmt_dev(None), "?");
+    }
+
+    /// The note names the CR, the size and WHERE the cache is, and tells
+    /// the unplaced operator what to do about it; the placed shape says
+    /// the knob points at the root disk and names the directory.
+    #[test]
+    fn the_cache_on_root_disk_note_names_the_cr_the_size_and_the_place() {
+        let d = Path::new("/mnt/nvme/flint-s3-cache/s3w-abc");
+        let unplaced = cache_on_root_disk_message("datasets", false, d, Some(512));
+        assert!(unplaced.starts_with("FlintPassthroughMount datasets: its block cache (512 MiB) is on the worker's scratch emptyDir"), "{unplaced}");
+        assert!(unplaced.contains("workers.cacheHostPath"), "the unplaced note must name the knob: {unplaced}");
+        assert!(!unplaced.contains("s3w-abc"), "the emptyDir note names no placed directory: {unplaced}");
+        let placed = cache_on_root_disk_message("datasets", true, d, None);
+        assert!(placed.contains("(unbounded) at /mnt/nvme/flint-s3-cache/s3w-abc is on the SAME disk as the kubelet root"), "{placed}");
+        assert!(placed.contains("points at the node's root disk"), "{placed}");
+        assert!(placed.len() <= 1000, "emit_event truncates at 1000 chars; the note must fit whole: {}", placed.len());
+    }
 
     #[test]
     fn refusals_map_to_the_right_grpc_codes() {

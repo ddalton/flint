@@ -512,6 +512,23 @@ can make an EBS-backed cache cheap; the fix is where the directory lives.
    `CacheOnRootDisk` on the tenant when that device is the node's root
    filesystem. A note, not a refusal: the operator who reads it knows
    what M1 says.
+   **DONE 2026-10-01** — `note_cache_device` at the end of every
+   successful publish (own mounter, shared creator and shared joiner;
+   never a republish): `stat` of the cache directory — the placed
+   `<root>/<worker>`, or the scratch emptyDir under the kubelet root
+   (`worker::scratch_dir`) — against `stat` of the kubelet root, logged
+   as `block cache device` with both `major:minor`; `CacheOnRootDisk`
+   (Normal) on the tenant pod when they match, with the CR, the size,
+   and the place: the emptyDir shape tells the operator to size for a set
+   that fits or to place the cache, the placed shape says the knob points
+   at the node's own disk and names the directory. "Root filesystem" is
+   the kubelet root's device — what kubelet calls nodefs and where every
+   emptyDir lives — which is what the plugin can see; the host's `/` is
+   not mounted into it. S24 asserts the note on its emptyDir-cache control
+   and its absence without a cache; S30 asserts by the devices (same disk
+   on kind → the note names the directory; its own device → no note).
+   Run on kind 2026-10-01: 52 ok, 0 bad with S24
+   (`s3csi/e2e/results/2026-10-01-kind-s24-s30/legs-S24-S30-step3.log`).
 4. **The sizing rule, in the values text and the CR's field doc**: enable
    a cache only for a working set that fits in it; a set larger than the
    cache pays every block to the disk twice and warms nothing. With the

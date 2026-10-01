@@ -186,7 +186,12 @@ spec:
                     chart's: workers.cacheHostPath places every cache in
                     a private directory on a device the operator names
                     (the instance store), and there a sharing CR that
-                    names no cache gets one of workers.cacheSizeMib.
+                    names no cache gets one of workers.cacheSizeMib. The
+                    plugin says where the cache landed: a CacheOnRootDisk
+                    event on the tenant pod when the cache directory is on
+                    the same disk as the kubelet root (always, on the
+                    emptyDir; on a placement, when the root is on the
+                    node's own disk). A note, not a refusal.
                   properties:
                     enabled:
                       type: boolean
