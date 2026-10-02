@@ -1,0 +1,79 @@
+== S31 re-run with the continuous reader 14:46:23
+── S31 — stsSecret: a Secret-fed expiring credential mounts through the door, a higher generation replaces it in place and is FETCHED by the mounter, and every refusal is said once
+  ok: stsSecret mount reads content
+  ok: the door serves creds.json (generation 1, expires 2026-10-02T14:51:23Z)
+  ok: mount-s3's env points at the door
+  ok: no secret in mount-s3's env
+  ok: generation 2 reached the door in 80s (expires 2026-10-02T15:06:28Z)
+  ok: a CredentialReplaced event names generation 2
+  ok: mount-s3 fetched generation 2 from the door 213s BEFORE generation 1 expired (door log; waited 0s)
+  ok: reads continue across the replacement
+  ok: a lower generation is refused, and the refusal names both generations
+  ok: the door still serves generation 2 after the rollback attempt
+  ok: generation 3 with 60 s left is refused
+  ok: the door kept generation 2 through the short-lived candidate
+  ok: the same generation 3, re-offered with life, installs in 80s — the refusal did not poison it
+  ok: an envelope naming another ServiceAccount is refused
+  ok: the door kept generation 3 through the foreign envelope
+  ok: an envelope naming this namespace, ServiceAccount and mount installs generation 4 in 75s
+  ok: an unknown key is refused by name
+  ok: the door kept generation 4 through the unknown key
+  ok: the unknown-key refusal was said once (1), not again a republish later
+  ok: the same mount-s3 process (pid 15) served every generation — no remount
+  ok: content still reads at the end
+  NOTE: the background reader was still running at the leg's end (the leg finished inside its 900 s)
+s3.csi.chert.us legs [S31] of run-s3csi.sh: 21 ok, 0 bad
+== S5c re-run 14:57:12
+── S5c — the static arm: the pod names a Secret, kubelet fetches it, the node SA never could
+  ok: static-arm mount reads content
+  ok: static arm: no creds.json (keys went over the launch socket into the child env)
+
+════════════════════════════════════════
+s3.csi.chert.us legs [S5c] of run-s3csi.sh: 2 ok, 0 bad
+== teardown (kind store) 14:57:12
+pod "mc-s3" deleted from flint-system namespace
+secret "s3-broker-static" deleted from flint-system namespace
+secret "minio-creds" deleted from s3-tenants namespace
+== setup (real bucket) 14:57:46
+pod/reader-ro created
+pod/reader-elsewhere created
+pod/reader-static created
+pod/shared-a created
+pod/shared-b created
+pod/shared-c created
+pod/refused-bob created
+pod/refused-noconsumers created
+pod/refused-missing created
+pod/refused-badattr created
+pod/labelled-only created
+setup done (store=s3 node=flint-sts-worker via docker)
+setup-exit 0
+== R1 14:58:45
+stsSecret against a real store — cluster kind-flint-sts, node flint-sts-worker, bucket flint-s3csi-sts-20261002 (us-west-1)
+
+── R1 — real STS sessions: a rotated pod reads every 5 s for ~32 min across three expiries with zero errors; an unrotated pod FAILS when its session expires; the mounter fetched each generation before its predecessor expired
+  ok: PRECONDITION: a real 900 s session minted (AccessKeyId ASIA…, expires 2026-10-02T15:13:46+00:00)
+  ok: reader-sts reads real-bucket content through the session (token and all)
+  ok: reader-sts-bad reads real-bucket content through the session (token and all)
+  ok: readers started on both pods at t0 (session 1 expires 2026-10-02T15:13:46+00:00); the rotated pod's door is s3w-eb4a0ee5274b9d64, the unrotated pod's s3w-74b5f60591ad8fcc
+  ok: generation 2 (expires 2026-10-02T15:20:52+00:00) reached the rotated pod's door 10s after it was written, at t0+432s
+  ok: generation 3 (expires 2026-10-02T15:28:54+00:00) reached the rotated pod's door 10s after it was written, at t0+914s
+  ok: generation 4 (expires 2026-10-02T15:36:56+00:00) reached the rotated pod's door 30s after it was written, at t0+1417s
+  NOTE: rotated:   errors=0 reads=355 first_fail= recover=
+  NOTE: unrotated: errors=192 reads=361 first_fail= 1790954027 recover=
+  ok: the rotated pod read 355 times across three session expiries with ZERO errors
+  ok: the unrotated pod failed 1s after its session expired (the store enforces expiry; the mounter had nothing else to fall back on)
+  ok: the mounter fetched generation 2 299s before generation 1 expired (164s after it was installed; fetched 1 time(s) in all)
+  ok: the mounter fetched generation 3 298s before generation 2 expired (109s after it was installed; fetched 1 time(s) in all)
+  ok: the mounter fetched generation 4 297s before generation 3 expired (89s after it was installed; fetched 1 time(s) in all)
+  NOTE: 4 distinct AccessKeyIds landed in the rotated pod's creds.json (4 sessions minted); the unrotated door served its one expiration 361 time(s)
+  ok: 3 CredentialReplaced events on the rotated pod
+
+════════════════════════════════════════
+s3.csi.chert.us legs [R1] of aws-sts-secret.sh: 13 ok, 0 bad
+R1-exit 0
+== teardown (real) 15:30:34
+pod "mc-s3" deleted from flint-system namespace
+secret "s3-broker-static" deleted from flint-system namespace
+secret "minio-creds" deleted from s3-tenants namespace
+== real-done 15:30:39

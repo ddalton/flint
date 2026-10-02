@@ -1,0 +1,89 @@
+== rig 14:21:41
+== setup 14:21:41
+flintpassthroughmount.chert.us/datasets-f72 created
+flintpassthroughmount.chert.us/datasets-shared created
+pod/reader created
+pod/reader-ro created
+pod/reader-elsewhere created
+pod/reader-static created
+pod/shared-a created
+pod/shared-b created
+pod/shared-c created
+pod/refused-bob created
+pod/refused-noconsumers created
+pod/refused-missing created
+pod/refused-badattr created
+pod/labelled-only created
+setup done (store=minio node=flint-sts-worker via docker)
+setup-exit 0
+== legs 14:22:49
+
+── S5c — the static arm: the pod names a Secret, kubelet fetches it, the node SA never could
+  BAD: pod reader-static is 'Pending', not Running — every observation this leg makes would be an empty string
+
+── S31 — stsSecret: a Secret-fed expiring credential mounts through the door, a higher generation replaces it in place and is FETCHED by the mounter, and every refusal is said once
+  ok: stsSecret mount reads content
+  ok: the door serves creds.json (generation 1, expires 2026-10-02T14:27:49Z)
+  ok: mount-s3's env points at the door
+  ok: no secret in mount-s3's env
+  ok: generation 2 reached the door in 80s (expires 2026-10-02T14:42:56Z)
+  ok: a CredentialReplaced event names generation 2
+  BAD: mount-s3 never fetched generation 2 from the door within 360s (door served gen 1 5 time(s)); the plugin's rewrite reached nobody
+  ok: reads continue across the replacement
+  ok: a lower generation is refused, and the refusal names both generations
+  ok: the door still serves generation 2 after the rollback attempt
+  ok: generation 3 with 60 s left is refused
+  ok: the door kept generation 2 through the short-lived candidate
+  ok: the same generation 3, re-offered with life, installs in 80s — the refusal did not poison it
+  ok: an envelope naming another ServiceAccount is refused
+  ok: the door kept generation 3 through the foreign envelope
+  ok: an envelope naming this namespace, ServiceAccount and mount installs generation 4 in 85s
+  ok: an unknown key is refused by name
+  ok: the door kept generation 4 through the unknown key
+  ok: the unknown-key refusal was said once (1), not again a republish later
+  ok: the same mount-s3 process (pid 15) served every generation — no remount
+  ok: content still reads at the end
+
+── S32 — a dead mounter is announced on EVERY republish: at least two MounterDead events within two periods
+  ok: CONTROL: the tenant's read fails with the worker dead
+  ok: 2 MounterDead events within 130s — said again after the first
+  ok: the event says it repeats
+
+── S33 — workers.maxPerNode: past the ceiling a publish is refused with a WorkerCapacity event, and the same pod mounts once it is lifted
+  ok: PRECONDITION: 6 live worker(s) on flint-sts-worker
+  ok: chart rolled with workers.maxPerNode=6
+  ok: refused with a WorkerCapacity event: WorkerCapacity: datasets: node flint-sts-worker already runs 6 flint-s3 workers and workers.maxPerNode is 6, so no worker is created for pod s3-tenants/cap-reader; kubelet retries 
+  ok: cap-reader stays unmounted under the ceiling
+  ok: kubelet's FailedMount carries the plugin's message
+  ok: the same pod mounts once the ceiling is lifted
+
+── S24 — sharing: two read-only consumers of one CR on one node share ONE worker, a third with another uid gets its own; the first out leaves the mounter up, the last brings it down
+  ok: shared-a reads through the shared mount
+  ok: shared-b reads through the shared mount
+  ok: shared-c reads through its own class's mount
+  ok: two shared workers for datasets-shared: one class for uid 1001 (shared-a + shared-b), one for uid 1002 (shared-c)
+  ok: exactly one of the pair created a worker (shared-a → s3w-eec40e5dd051118d); the other joined it
+  ok: two shared FUSE sources on the node (one per class)
+  ok: s3w-eec40e5dd051118d's mount-s3 argv carries no --cache (the CR named none)
+  ok: no block cache directory under /tmp in s3w-eec40e5dd051118d after the reads
+  ok: the plugin logged that the shared mounter runs without a cache
+  ok: no CacheOnRootDisk note on shared-a: no cache, nothing to say
+  ok: the shared mount is read-only
+  ok: the plugin logged 3 shared publishes
+  ok: worker s3w-eec40e5dd051118d still Running after its creator shared-a left
+  ok: shared-b still reads after shared-a left
+  ok: the plugin recorded the leave
+  ok: worker s3w-eec40e5dd051118d is gone after the last member left (0s)
+  ok: the plugin brought the mounter down as the last member left
+  ok: one shared record left on the node (shared-c's class)
+  ok: CONTROL: shared-c's mount-s3 runs --cache /tmp --max-cache-size 256 once the CR asks
+  ok: CONTROL: shared-c reads through the cached shared mount
+  ok: CONTROL: the named cache is populated under /tmp in s3w-42066cbad0449fe6 (5 entries)
+  ok: CONTROL: CacheOnRootDisk on shared-c names the CR, the 256 MiB and the emptyDir
+  ok: CONTROL: the plugin logged the cache directory's device
+
+════════════════════════════════════════
+s3.csi.chert.us legs [S5c S31 S32 S33 S24] of run-s3csi.sh: 52 ok, 2 bad
+legs-exit 1
+== run-done 14:45:52
+== chain-done 14:45:52
