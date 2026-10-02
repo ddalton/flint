@@ -1,0 +1,27 @@
+tlc-rs: LeanP1 (30 variables, 0 symmetry permutations), 4 workers, interp engine; loaded in 0.003s
+liveness: 2047 expanded states checked, no violation yet (0.0s)
+liveness: 5068 expanded states checked, no violation yet (0.0s)
+liveness: 11553 expanded states checked, no violation yet (0.0s)
+liveness: 24250 expanded states checked, no violation yet (0.0s)
+liveness: 85865 expanded states checked, no violation yet (0.1s)
+liveness: 247143 expanded states checked, no violation yet (0.2s)
+liveness: 647168 expanded states checked, no violation yet (0.5s)
+progress: depth 17, 3192179 generated, 1008184 distinct (0 fingerprint spills), 361016 on queue (0 on disk), 12.6s
+liveness: 1505515 expanded states checked, no violation yet (1.6s)
+progress: depth 19, 7023293 generated, 2131266 distinct (0 fingerprint spills), 625751 on queue (110167 on disk), 27.6s
+progress: depth 21, 12255673 generated, 3645838 distinct (0 fingerprint spills), 789565 on queue (274749 on disk), 46.6s
+liveness: 3645838 expanded states checked, no violation yet (4.7s)
+progress: depth 22, 15139865 generated, 4461175 distinct (0 fingerprint spills), 815337 on queue (301033 on disk), 62.2s
+progress: depth 23, 18114323 generated, 5280464 distinct (0 fingerprint spills), 819289 on queue (306009 on disk), 72.7s
+progress: depth 24, 21200546 generated, 6124612 distinct (0 fingerprint spills), 844148 on queue (332660 on disk), 83.7s
+progress: depth 25, 24493404 generated, 7029275 distinct (0 fingerprint spills), 904663 on queue (395479 on disk), 95.4s
+progress: depth 26, 28015965 generated, 7974185 distinct (0 fingerprint spills), 944910 on queue (436494 on disk), 108.0s
+liveness: 7974185 expanded states checked, no violation yet (12.7s)
+progress: depth 27, 31512341 generated, 8851961 distinct (0 fingerprint spills), 877776 on queue (367824 on disk), 133.2s
+progress: depth 29, 36303823 generated, 9957822 distinct (0 fingerprint spills), 429919 on queue (0 on disk), 150.0s
+progress: depth 33, 39002323 generated, 10633956 distinct (0 fingerprint spills), 87732 on queue (0 on disk), 160.1s
+liveness: checking 1 property instances under 1 fairness instances
+liveness: graph of 10676334 nodes loaded in 17.8s
+liveness: all properties checked in 18.3s
+Model checking completed. No error has been found.
+39223077 states generated, 10676334 distinct states found. Depth 36. Checked in 179.311s (59541 distinct/s).

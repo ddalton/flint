@@ -1,0 +1,32 @@
+LeanP1.tla f64d5a831da252e1953ffb8edfe0a4ae, tlc-rs 2aa87d67, 4 workers; started 2026-10-02T15:23:47Z
+LeanP1NoR7                       OK-FIRES          exp=Prop_NoSilentRevert      rc=12  | Error: Action property Prop_NoSilentRevert is violated by the last step above | 1214058 states generated, 479130 distinct states found. Depth 9 | 5s
+LeanP1VerifyOff                  MISMATCH          exp=Inv_CitationsLive        rc=12  | Error: queue file: No space left on device (os error 28) | 220952827 states generated, 65966686 distinct states found. Depth 16 | 1137s
+LeanP1SweepFree                  OK-FIRES          exp=Inv_CitationsLive        rc=12  | Error: Invariant Inv_CitationsLive is violated | 3959444 states generated, 1431059 distinct states found. Depth 10 | 17s
+LeanP1DeleteOutranked            OK-FIRES          exp=Prop_DeleteSettles       rc=12  | Error: Action property Prop_DeleteSettles is violated by the last step above | 1916337 states generated, 739256 distinct states found. Depth 10 | 9s
+LeanP1OwedUnmarked               OK-FIRES          exp=Inv_ShortcutSound        rc=12  | Error: Invariant Inv_ShortcutSound is violated | 29407 states generated, 14576 distinct states found. Depth 6 | 0s
+LeanP1AdvanceUnguarded           OK-FIRES          exp=Inv_ShortcutSound        rc=12  | Error: Invariant Inv_ShortcutSound is violated | 1167618 states generated, 459623 distinct states found. Depth 9 | 5s
+LeanP1ReaderLoses                OK-FIRES          exp=Inv_ReaderFetches        rc=12  | Error: Invariant Inv_ReaderFetches is violated | 439901 states generated, 177617 distinct states found. Depth 8 | 2s
+LeanP1LiveWaitsOnLease           OK-FIRES          exp=Temporal                 rc=12  | Error: Temporal properties were violated | 179518 states generated, 79626 distinct states found. Depth 8 | 0s
+LeanP1GatewayBlind               OK-FIRES          exp=Prop_NoSilentRevert      rc=12  | Error: Action property Prop_NoSilentRevert is violated by the last step above | 2001739 states generated, 767722 distinct states found. Depth 10 | 10s
+LeanP1SweepNoGrace               OK-FIRES          exp=Inv_CitationsLive        rc=12  | Error: Invariant Inv_CitationsLive is violated | 222567 states generated, 98294 distinct states found. Depth 8 | 1s
+LeanP1RenameTwoCAS               OK-FIRES          exp=Inv_OneName              rc=12  | Error: Invariant Inv_OneName is violated | 9 states generated, 5 distinct states found. Depth 1 | 0s
+LeanP1ProbeStalledSave           OK-FIRES          exp=ProbeStalledSave         rc=12  | Error: Invariant ProbeStalledSave is violated | 13381 states generated, 7007 distinct states found. Depth 6 | 0s
+LeanP1ProbeSavedUnderLease       OK-FIRES          exp=ProbeSavedUnderLease     rc=12  | Error: Action property ProbeSavedUnderLease is violated by the last step above | 56730 states generated, 27018 distinct states found. Depth 7 | 0s
+LeanP1ProbeSaveRefused           OK-FIRES          exp=ProbeSaveRefused         rc=12  | Error: Action property ProbeSaveRefused is violated by the last step above | 654269 states generated, 269304 distinct states found. Depth 9 | 3s
+LeanP1ProbeRenamed               OK-FIRES          exp=ProbeRenamed             rc=12  | Error: Invariant ProbeRenamed is violated | 9 states generated, 5 distinct states found. Depth 1 | 0s
+LeanP1ProbeSurfaced              OK-FIRES          exp=ProbeSurfaced            rc=12  | Error: Invariant ProbeSurfaced is violated | 669837 states generated, 276543 distinct states found. Depth 9 | 2s
+LeanP1ProbeDeleteOverridden      OK-FIRES          exp=ProbeDeleteOverridden    rc=12  | Error: Invariant ProbeDeleteOverridden is violated | 348040 states generated, 147844 distinct states found. Depth 8 | 1s
+LeanP1ProbeDeleteOverTheirs      OK-FIRES          exp=ProbeDeleteOverTheirs    rc=12  | Error: Action property ProbeDeleteOverTheirs is violated by the last step above | 648022 states generated, 266367 distinct states found. Depth 9 | 3s
+LeanP1ProbeShortcut              OK-FIRES          exp=ProbeShortcut            rc=12  | Error: Action property ProbeShortcut is violated by the last step above | 69 states generated, 45 distinct states found. Depth 2 | 0s
+LeanP1ProbeReaped                OK-FIRES          exp=ProbeReaped              rc=12  | Error: Action property ProbeReaped is violated by the last step above | 355749 states generated, 151213 distinct states found. Depth 8 | 2s
+LeanP1ProbeConverged             OK-FIRES          exp=ProbeConverged           rc=12  | Error: Action property ProbeConverged is violated by the last step above | 158107 states generated, 51727 distinct states found. Depth 9 | 0s
+LeanP1ProbeRepublish             OK-FIRES          exp=ProbeRepublish           rc=12  | Error: Action property ProbeRepublish is violated by the last step above | 24246936 states generated, 6960127 distinct states found. Depth 17 | 94s
+LeanP1ProbeRestartAfterCas       OK-FIRES          exp=ProbeRestartAfterCas     rc=12  | Error: Action property ProbeRestartAfterCas is violated by the last step above | 60862 states generated, 21334 distinct states found. Depth 8 | 0s
+LeanP1LiveHoldsSmall             OK-HOLDS          exp=HOLDS                    rc=0   | No error has been found | 39223077 states generated, 10676334 distinct states found. Depth 36 | 180s
+LeanP1LiveWaitsOnLeaseSmall      OK-FIRES          exp=Temporal                 rc=12  | Error: Temporal properties were violated | 12828 states generated, 5068 distinct states found. Depth 8 | 0s
+MCLeanP1Like                     OK-HOLDS          exp=HOLDS                    rc=0   | No error has been found | 112597310 states generated, 26592522 distinct states found. Depth 34 | 612s
+DONE 2026-10-02T15:58:30Z
+NOTE: the VerifyOff MISMATCH above is not a verdict: the Mac's disk filled (another run's 21 GB metadir left by a timeout).
+LeanP1VerifyOff (re-run alone, uncapped, disk guard 8 GiB)  UNDECIDED-DISK  stopped at depth 17, 74,720,931 distinct, 28.1M on queue (27.7M on disk), 1685 s.
+  Not decidable on the Mac: TLC fired it at 119,020,783 distinct (box, 2026-09-29). A box job, with LeanP1Holds, LeanP1LiveHolds,
+  LeanP1DeleteOverrideOff and LeanP1Holds1p3b. RECORD worlds (CollectorGreedy, NoConvergence) not run: no expected result.
