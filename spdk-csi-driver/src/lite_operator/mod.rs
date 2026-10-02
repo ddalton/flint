@@ -49,6 +49,69 @@ pub mod persistence;
 pub mod reconcile;
 pub mod render;
 
+/// The backoff for the controller's watch streams (`Controller::trigger_backoff`).
+///
+/// kube's Controller puts ONE backoff over all its watches, so any watch
+/// error pauses every watch. Its default (0.8 s doubling to 30 s, reset
+/// after 120 s quiet) made an apiserver restart at 10,000 shares cost ~4
+/// minutes of deafness: six 410s drained one at a time behind it. This one
+/// starts at 100 ms, doubles to a 5 s cap, and resets after a quiet minute:
+/// six 410s cost seconds, and while the apiserver is down the operator's
+/// watches still retry only every few seconds.
+pub fn trigger_backoff() -> kube::runtime::utils::ResetTimerBackoff<TriggerBackoff> {
+    kube::runtime::utils::ResetTimerBackoff::new(TriggerBackoff::new(), std::time::Duration::from_secs(60))
+}
+
+/// Exponential, 100 ms doubling to 5 s; each delay drawn from [d/2, d].
+pub struct TriggerBackoff {
+    next: std::time::Duration,
+}
+
+impl TriggerBackoff {
+    const MIN: std::time::Duration = std::time::Duration::from_millis(100);
+    const MAX: std::time::Duration = std::time::Duration::from_secs(5);
+
+    fn new() -> Self {
+        Self { next: Self::MIN }
+    }
+}
+
+impl Iterator for TriggerBackoff {
+    type Item = std::time::Duration;
+
+    fn next(&mut self) -> Option<std::time::Duration> {
+        use rand::Rng;
+        let d = self.next;
+        self.next = (d * 2).min(Self::MAX);
+        Some(d.mul_f64(rand::thread_rng().gen_range(0.5..=1.0)))
+    }
+}
+
+impl kube::runtime::utils::Backoff for TriggerBackoff {
+    fn reset(&mut self) {
+        self.next = Self::MIN;
+    }
+}
+
+/// An error and every source under it, as one log line. kube's
+/// `controller::Error::QueueError` displays as just "event queue error";
+/// the watcher failure under it (a 410 that forces a relist, a 403) is
+/// only in the chain. A source whose text the line already holds is
+/// skipped: thiserror types often repeat their source in their own text.
+pub fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut line = e.to_string();
+    let mut next = e.source();
+    while let Some(s) = next {
+        let t = s.to_string();
+        if !line.contains(&t) {
+            line.push_str(": ");
+            line.push_str(&t);
+        }
+        next = s.source();
+    }
+    line
+}
+
 /// The published guide must pin the chart it documents.
 ///
 /// `docs/flint-lite-for-agent-fleets.md` is a copy-paste install: a
@@ -146,5 +209,76 @@ mod guide_pins {
                  `{needle}`. Re-render the .pdf from the html once fixed."
             );
         }
+    }
+}
+
+/// kube's `controller::Error::QueueError` displays as "event queue error"
+/// and nothing more: the watcher error under it (a 410 "too old resource
+/// version" that forced a relist, a 403) lives only in its `source()`.
+/// The operator logged `{e}`, so every watch failure read the same, and
+/// the step 6 rig could not tell a relist happened at 10,000 shares.
+#[cfg(test)]
+mod error_chain_tests {
+    use super::error_chain;
+    use kube::core::Status;
+    use kube::runtime::{controller, watcher};
+
+    #[test]
+    fn a_410_under_a_queue_error_reaches_the_log_line() {
+        let gone = Status {
+            code: 410,
+            message: "too old resource version: 80353 (80433)".into(),
+            reason: "Expired".into(),
+            ..Default::default()
+        };
+        let e: controller::Error<std::io::Error, watcher::Error> =
+            controller::Error::QueueError(watcher::Error::WatchError(gone.boxed()));
+        assert_eq!(e.to_string(), "event queue error", "the control: Display alone hides it");
+        let line = error_chain(&e);
+        assert!(line.starts_with("event queue error: "), "{line}");
+        assert!(line.contains("too old resource version: 80353 (80433)"), "{line}");
+        assert_eq!(line.matches("too old resource version").count(), 1, "no repeats: {line}");
+    }
+}
+
+/// kube's Controller puts ONE backoff over all its watches (`StreamBackoff`
+/// over the merged trigger streams): any watch error pauses EVERY watch.
+/// With kube's default (0.8 s doubling to 30 s, reset only after 120 s
+/// quiet) an apiserver restart at 10,000 shares cost ~4 minutes: the
+/// connection errors during the outage pushed it to the cap, then six 410s
+/// drained one at a time, ~35-45 s apiece, and no re-list could start until
+/// the last one had. A watch that had resumed cleanly aged out while unread
+/// and took its own 410 (step 6, `results-box-step6/D-relist-10k.txt`).
+#[cfg(test)]
+mod trigger_backoff_tests {
+    use super::trigger_backoff;
+    use std::time::Duration;
+
+    /// Delays the controller sleeps for: `outage` failed retries while the
+    /// apiserver is down, then the six 410s it answers with once it is back.
+    fn after_outage(mut b: impl Iterator<Item = Duration>, outage: usize) -> (Vec<Duration>, Duration) {
+        let during: Vec<Duration> = (&mut b).take(outage).collect();
+        let six: Duration = b.take(6).sum();
+        (during, six)
+    }
+
+    #[test]
+    fn six_410s_after_an_apiserver_restart_cost_seconds_not_minutes() {
+        // The control: kube's default spends minutes on them.
+        let (_, kube_six) = after_outage(kube::runtime::watcher::DefaultBackoff::default(), 20);
+        assert!(kube_six > Duration::from_secs(150), "kube default: {kube_six:?}");
+
+        let (during, six) = after_outage(trigger_backoff(), 20);
+        assert!(six <= Duration::from_secs(30), "six 410s cost {six:?}");
+        assert!(during.iter().all(|d| *d <= Duration::from_secs(5)), "a delay above the cap: {during:?}");
+        // Not a hot loop while the apiserver is down: by the tenth retry it
+        // waits at least half the cap.
+        assert!(during[10..].iter().all(|d| *d >= Duration::from_millis(2500)), "{during:?}");
+    }
+
+    #[test]
+    fn the_first_retry_is_quick() {
+        let first = trigger_backoff().next().unwrap();
+        assert!(first <= Duration::from_millis(100), "{first:?}");
     }
 }

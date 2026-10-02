@@ -1,0 +1,79 @@
+# Phase D: why the operator "did not relist" at 10,000 shares (box, 2026-10-02)
+#
+# 150 live + 10,000 parked, 2 workers, kind v1.34.0. The operator ran with
+# RUST_LOG=info,kube_client=debug (every request logged with its URL) and
+# the error-chain logging added the same day. Forced relist as in
+# step6-box-fleet.sh: 20 churn writes, `etcdctl compact` at the new head,
+# `crictl stop` of the kube-apiserver. Peaks reset (clear_refs 5) just
+# before the restart and read from the node.
+#
+# etcd revision 87182, compacted at 87255.
+
+== the operator's collection requests and 410s, in order (UTC)
+14:55:33.141  WATCH flintshares            from rv 86782   (controller's own watch)
+14:55:33.141  WATCH configmaps (metadata)  from rv 86708
+14:55:33.142  WATCH persistentvolumeclaims from rv 86764
+14:55:33.142  WATCH secrets (label sel.)   from rv 86764
+14:55:33.142  WATCH services (metadata)    from rv 86674
+14:55:33.143  WATCH deployments (metadata) from rv 87272   (above the compaction: resumes)
+14:55:33.143  WATCH flintshares            from rv 86782   (the .watches() trigger)
+14:55:33.144  410  too old resource version: 86782 (87279)
+14:56:12.108  LIST  flintshares limit=500  (page 1 only; then frozen)
+14:56:12.110  410  too old resource version: 86764 (87272)
+14:56:54.863  410  too old resource version: 86782 (87279)
+14:57:39.502  410  too old resource version: 86764 (87272)
+14:58:25.161  410  too old resource version: 86708 (87272)
+14:58:58.766  410  too old resource version: 86674 (87272)
+   (the rig's old 180 s window closed here, ~14:58:35, with no re-list done)
+14:59:32.288  LIST  secrets, flintshares, persistentvolumeclaims, configmaps, services (all at once)
+14:59:32.3    WATCH secrets, configmaps, services, deployments re-opened
+14:59:32.364  410  too old resource version: 87512 (88017)   <- deployments: it had resumed
+                   cleanly at 14:55:33, then sat unread behind the backoff until it aged out
+14:59:33.943  LIST  deployments (metadata)
+14:59:35-37   LIST  flintshares page 1 + 14 continue pages (both FlintShare watches)
+14:59:36.849  WATCH persistentvolumeclaims, deployments re-opened
+after 14:59:40: no further 410s
+
+== the operator's memory (node-side, peak reset before the restart)
+before the restart  VmRSS 192 MiB
+14:58:35            VmHWM 192 MiB   <- what the old rig read: "no spike"
+14:59:47            VmHWM 240 MiB
+15:00:05            VmHWM 271 MiB
+15:00:43            VmHWM 393 MiB, VmRSS 210 MiB   <- the relist peak: ~2.0x the settled RSS
+15:01:43            VmHWM 393 MiB, VmRSS 202 MiB
+No restart, no OOMKill (limit 1 GiB in the chart; this rig sets 4 GiB).
+
+== why: one backoff over every watch
+kube-runtime 3.0 Controller::run wraps the merged trigger streams in ONE
+StreamBackoff (controller/mod.rs: StreamBackoff::new(self.trigger_selector,
+self.trigger_backoff)). On any watcher error it sleeps before polling ANY
+watch again: DefaultBackoff, exponential 0.8 s -> 30 s with jitter, reset
+only after 120 s without errors. The connection errors while the apiserver
+was down had already pushed it to the cap, so each 410 cost ~35-45 s of
+total watch silence, and the re-lists could not start until the last 410
+had drained. A watch that resumed cleanly then aged out while unread.
+
+== what the old rig got wrong (all three now fixed in step6-box-fleet.sh)
+- it waited 180 s; the operator's re-list began at +240 s;
+- it read the lifetime VmHWM, already 294 MiB from the initial sync;
+- it grepped `kubectl logs` (current file only) for "410|too old|...":
+  the operator logged only "event queue error" (the 410 was in the error's
+  source chain), and a bare "410" matched a log timestamp instead.
+
+== AFTER the fix (same rig, 2026-10-02 15:53): the operator built with its own
+== trigger backoff (lite_operator::trigger_backoff: 100 ms doubling to 5 s,
+== drawn from [d/2, d], reset after 60 s quiet). Rig window now 600 s.
+15:53:27.958-.961  WATCH all 7 re-opened from their old resourceVersions
+15:53:27.962  410  82278 (82687)
+15:53:31.809  LIST  flintshares limit=500 (both FlintShare watches)    <- +4 s
+15:53:31.810  410  81976 (82687)
+15:53:36.516  410  82408 (82654)
+15:53:41.447  410  82647 (82654)
+15:53:45.491  410  82254 (82654)
+15:53:48.655  410  82361 (82654)
+15:53:51.821  410  82364 (82654)      <- seven 410s, 3-5 s apart: 24 s in all (was 3.5 min)
+15:53:56.369  LIST  secrets, deployments, services, persistentvolumeclaims, configmaps   <- +29 s (was +4 min)
+15:53:56-57   WATCH secrets, services, configmaps, deployments, persistentvolumeclaims re-opened
+15:54:00      LIST  flintshares: 28 continue pages; both FlintShare caches rebuilt by ~+33 s
+No watch aged out behind the backoff this time; no further 410s.
+Operator peak since the reset: 364 MiB from 236 (1.5x); no restart, no OOMKill. 6/6.

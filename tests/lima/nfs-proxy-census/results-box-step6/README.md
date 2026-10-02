@@ -156,11 +156,38 @@ stayed under 5.
   on a ~200 MiB store, 1.5×, not the 2× the chart comment assumes. The
   operator's peak stayed at 294 MiB, and its log names no 410. The
   likely reason is watch bookmarks: they keep a watcher's
-  resourceVersion current, so it resumed past the compaction. **So the
-  operator's relist spike is still an estimate.**
-  In the 220-share smoke run the operator did relist (it logged the
-  410): its memory went from 58 to 59 MiB, the proxy's from 48 to 52.
-  At 10,000 the operator's relist is still unmeasured.
+  resourceVersion current, so it resumed past the compaction. (That
+  guess was wrong; see below.)
+  **Answered 2026-10-02 (`D-relist-10k.txt`): the operator does relist
+  at 10,000, about 4 minutes late, and its peak is ~2× (192 → 393 MiB).**
+  The rig could not see it, for three reasons:
+  - it waited 180 s, and the re-list began at +240 s;
+  - it read a lifetime memory peak that the initial sync had already
+    set;
+  - its log check could not match. The operator logged every watch
+    error as just "event queue error" (now fixed: it logs the error
+    chain), and a bare "410" matched a log timestamp. That false match
+    is also what the 220-share smoke "relist" above was.
+
+  **The delay is a product issue.** kube's Controller puts ONE backoff
+  over all its watches. After the apiserver restart each 410 froze every
+  watch for ~35–45 s, and six 410s drained one at a time (3.5 min). No
+  re-list could start until the last one had drained, and for those
+  minutes the operator saw no watch events at all. Worse, a watch that had resumed
+  cleanly (deployments) aged out while it sat unread behind the backoff,
+  and took its own 410.
+
+  **Fixed 2026-10-02:** the operator now gives the Controller its own
+  backoff, `lite_operator::trigger_backoff`: 100 ms doubling to a 5 s
+  cap, jittered, reset after a quiet minute. In the same 10,000-share
+  run:
+  - seven 410s cleared in 24 s instead of 3.5 min;
+  - every re-list began within 29 s of the restart, instead of 4 min;
+  - both FlintShare caches were rebuilt by about 33 s;
+  - no watch aged out.
+
+  The peak was 364 MiB from 236. Its tests failed against kube's default
+  backoff, which the control computes at 280 s for six 410s.
 
 ## Profile — where the proxy's CPU per metadata op goes (`step6-proxy-profile.sh`)
 

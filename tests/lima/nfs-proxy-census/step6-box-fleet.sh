@@ -35,7 +35,7 @@ K -n $NS create secret generic s3 --from-literal=AWS_ACCESS_KEY_ID=x --from-lite
 up_operator "resources: { requests: { cpu: 500m, memory: 128Mi }, limits: { memory: 4Gi } }
 "
 helm upgrade flint-lite-operator $CHART -n $OPNS -f $OUT/values.yaml \
-  --set nfsProxy.resources.limits.memory=4Gi > $OUT/helm2.log 2>&1 || { tail $OUT/helm2.log; exit 1; }
+  --set nfsProxy.resources.limits.memory=4Gi --set-string logLevel="$(echo "${OPLOG:-info}" | sed "s/,/\\\\,/g")" > $OUT/helm2.log 2>&1 || { tail $OUT/helm2.log; exit 1; }
 K -n $OPNS rollout status deploy/flint-lite-operator --timeout=180s >/dev/null || exit 1
 K -n $OPNS rollout status deploy/flint-lite-operator-nfs-proxy --timeout=180s >/dev/null || exit 1
 
@@ -129,17 +129,80 @@ CP=$CLUSTER-control-plane
 REV=$(docker exec $CP sh -c 'crictl exec $(crictl ps --name etcd -q) etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key endpoint status -w json' 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["Status"]["header"]["revision"])' 2>/dev/null)
 echo "etcd revision $REV"
 HWM0=$(mem flint-lite-operator); PHWM0=$(mem flint-lite-operator-nfs-proxy)
+# Evidence that cannot be lost (run 2 at 10,000 lost both kinds):
+# - VmHWM is a LIFETIME peak, and the initial sync already set it, so a
+#   relist spike below it did not show. Reset it (clear_refs 5) just
+#   before the restart, and read it from the node, not through the
+#   apiserver that is about to go away.
+# - `kubectl logs` returns only the CURRENT log file. kubelet rotates at
+#   10 MiB, so at 10,000 shares a 410 line could rotate out within the
+#   wait. Search every file under /var/log/pods, rotated ones included.
+node_of() { K -n $OPNS get pod -l app.kubernetes.io/name=$1 -o jsonpath='{.items[0].spec.nodeName}'; }
+pid_of() {  # $1 node, $2 container name: the host-side pid inside the node
+  docker exec $1 sh -c "crictl inspect \$(crictl ps --name '^$2\$' -q | head -1)" | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["pid"])'
+}
+ON=$(node_of flint-lite-operator); OP=$(pid_of $ON operator)
+PN=$(node_of flint-lite-operator-nfs-proxy); PP=$(pid_of $PN nfs-proxy)
+nodemem() { docker exec $1 sh -c "grep -E '^Vm(RSS|HWM)' /proc/$2/status" | awk '{printf "%s=%dMi ", $1, $2/1024}'; }
+echo "operator: node $ON pid $OP [$(nodemem $ON $OP)]; proxy: node $PN pid $PP [$(nodemem $PN $PP)]"
+oplogs() { docker exec $ON sh -c 'for f in /var/log/pods/'$OPNS'_flint-lite-operator-*/operator/*; do case $f in *.gz) zcat $f;; *) cat $f;; esac; done'; }
+LOGB0=$(oplogs | wc -c)
 # Advance the revision past the watchers (a no-op object churn), compact, restart the apiserver.
 for i in $(seq 1 20); do K -n $NS annotate secret s3 --overwrite churn=$i >/dev/null; done
 REV2=$(docker exec $CP sh -c 'crictl exec $(crictl ps --name etcd -q) etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key endpoint status -w json' 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["Status"]["header"]["revision"])' 2>/dev/null)
 docker exec $CP sh -c "crictl exec \$(crictl ps --name etcd -q) etcdctl --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key compact $REV2" 2>&1 | tail -1
+docker exec $ON sh -c "echo 5 > /proc/$OP/clear_refs"; docker exec $PN sh -c "echo 5 > /proc/$PP/clear_refs"
+echo "peaks reset: operator [$(nodemem $ON $OP)] proxy [$(nodemem $PN $PP)]"
+T_RESTART=$(date +%s); TS_RESTART=$(date -u +%Y-%m-%dT%H:%M:%S)
 docker exec $CP sh -c 'crictl stop $(crictl ps --name kube-apiserver -q)' >/dev/null 2>&1
 for _ in $(seq 1 60); do K get --raw /readyz >/dev/null 2>&1 && break; sleep 2; done
-sleep 180
+# kube's Controller puts ONE backoff over all its watches: each 410 after
+# the restart pauses every watch for ~30-45 s, and the 410s drain one at a
+# time. At 10,000 shares six of them took 3.5 min, and no re-list began
+# until all had drained; the old 180 s window closed before any did.
+# So watch for RELIST_WAIT (default 600 s), sampling the operator's RSS.
+for _ in $(seq 1 $(( ${RELIST_WAIT:-600} / 15 ))); do
+  echo "  $(date -u +%H:%M:%S) operator [$(nodemem $ON $OP)] proxy [$(nodemem $PN $PP)]" >> $OUT/relist-mem.txt
+  sleep 15
+done
 echo "before relist: operator [$HWM0] proxy [$PHWM0]" | tee -a $OUT/mem.txt
-echo "after relist:  operator [$(mem flint-lite-operator)] proxy [$(mem flint-lite-operator-nfs-proxy)]" | tee -a $OUT/mem.txt
-RL=$(K -n $OPNS logs deploy/flint-lite-operator --since=5m 2>/dev/null | grep -ciE "410|too old|relist|expired|Gone")
-echo "operator log lines naming a 410 / too-old watch in the last 5 min: $RL" | tee -a $OUT/mem.txt
+echo "peak since the reset: operator [$(nodemem $ON $OP)] proxy [$(nodemem $PN $PP)]" | tee -a $OUT/mem.txt
+LOGB1=$(oplogs | wc -c)
+echo "operator log: $(( (LOGB1 - LOGB0) / 1024 )) KiB written in $(( $(date +%s) - T_RESTART ))s since the restart; files now:" | tee -a $OUT/mem.txt
+docker exec $ON sh -c 'ls -la /var/log/pods/'$OPNS'_flint-lite-operator-*/operator/' | tee -a $OUT/mem.txt
+# CRI lines begin with an RFC 3339 UTC timestamp (kind nodes run UTC).
+# The apiserver's own words for a 410 on a watch. A bare "410" matched a
+# log TIMESTAMP (13:44:27.180410437) and passed a run with no relist.
+# The operator prints the error chain since 2026-10-02; before that it
+# logged only "event queue error", so no pattern could have matched.
+oplogs | awk -v t="$TS_RESTART" '$1 >= t' | grep -i "too old resource version" > $OUT/op-410.txt
+RL=$(wc -l < $OUT/op-410.txt)
+echo "operator log lines with a 410 (too old resource version) since the restart, all files: $RL" | tee -a $OUT/mem.txt
+sed "s/\x1b\[[0-9;]*m//g" $OUT/op-410.txt | cut -c1-300 | head -12 | tee -a $OUT/mem.txt
+oplogs | awk -v t="$TS_RESTART" '$1 >= t' | sed "s/\x1b\[[0-9;]*m//g" > $OUT/op-after-restart.log
+# With OPLOG=info,kube_client=debug every request is logged with its URL:
+# which watches re-opened, from which resourceVersion, and which re-LISTed.
+if oplogs | awk -v t="$TS_RESTART" '$1 >= t' | grep -q 'http.url='; then
+  echo "operator requests since the restart (watch/list calls only):" | tee -a $OUT/mem.txt
+  oplogs | awk -v t="$TS_RESTART" '$1 >= t' | sed "s/\x1b\[[0-9;]*m//g" | grep -o 'http.method=[A-Z]* http.url=[^ ]*' \
+    | python3 -c '
+import sys, re, collections
+seen = collections.Counter(); first = {}
+for line in sys.stdin:
+    m = re.search(r"http.method=(\w+) http.url=(\S+)", line)
+    meth, url = m.groups()
+    path, _, q = url.partition("?")
+    if meth != "GET" or path.rstrip("/").split("/")[-1] in ("", "status"): continue
+    res = path.rstrip("/").split("/")[-1]
+    if "/namespaces/" in path and re.search(r"/namespaces/[^/]+/[^/]+/[^/]+$", path): continue  # a named GET, not a list
+    kind = "WATCH" if "watch=true" in q else "LIST"
+    rv = re.search(r"resourceVersion=(\d+)", q)
+    key = f"{kind:5} {res}"
+    seen[key] += 1
+    first.setdefault(key, rv.group(1) if rv else "-")
+for k in sorted(seen): print(f"  {k:40} x{seen[k]:<4} first rv={first[k]}")
+' | tee -a $OUT/mem.txt
+fi
 check "the relist really happened (the operator logged a 410 / too-old resourceVersion)" '[ "$RL" -gt 0 ]'
 check "the operator did not restart (no OOMKill)" '[ "$(restarts flint-lite-operator)" = 0 ]'
 check "the proxy did not restart" '[ "$(restarts flint-lite-operator-nfs-proxy)" = 0 ]'

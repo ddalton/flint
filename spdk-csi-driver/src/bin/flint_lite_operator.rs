@@ -36,7 +36,7 @@ use kube::runtime::events::{Recorder, Reporter};
 use kube::runtime::reflector::ObjectRef;
 use kube::runtime::{watcher, Controller};
 use kube::{Api, Client, ResourceExt};
-use spdk_csi_driver::lite_operator::{bootstrap, conflict, crd::{FlintShare, IdleSpec}, noderoll, reconcile, render};
+use spdk_csi_driver::lite_operator::{bootstrap, conflict, crd::{FlintShare, IdleSpec}, error_chain, noderoll, trigger_backoff, reconcile, render};
 use spdk_csi_driver::orchestrator_lease::{self, KubeLeaseOps, LeaseConfig};
 use tracing::{info, warn};
 
@@ -209,7 +209,10 @@ async fn main() -> anyhow::Result<()> {
         kube::runtime::controller::Config::default()
             .concurrency(32)
             .debounce(Duration::from_millis(250)),
-    );
+    )
+    // One backoff covers every watch below: kube's default froze them all
+    // for ~4 minutes after an apiserver restart at 10,000 shares.
+    .trigger_backoff(trigger_backoff());
     let store = controller.store();
 
     let ctx = Arc::new(reconcile::Ctx {
@@ -322,7 +325,7 @@ async fn main() -> anyhow::Result<()> {
         .for_each(|res| async move {
             match res {
                 Ok((obj, action)) => tracing::debug!("reconciled {}: {action:?}", obj.name),
-                Err(e) => warn!("controller error: {e}"),
+                Err(e) => warn!("controller error: {}", error_chain(&e)),
             }
         })
         .await;

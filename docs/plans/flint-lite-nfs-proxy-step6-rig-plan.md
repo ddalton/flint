@@ -27,9 +27,13 @@ Hub or private ECR.
 - C: the proxy spends ~0.18 ms CPU per metadata op, about the hub's
   own, so one core serves ~5,500 ops/s; mTLS adds ~10% on metadata,
   ~40% on bulk reads.
-- D: 500 live hung the box; at 150 live + 10,000 parked the operator
-  sits at 235 MiB / 181 m, with 183 apiserver req/s; the proxy's relist
-  measured +100 MiB, the operator's relist was not triggered.
+- D: 500 live took the box off the network (ARP table overflow); at
+  150 live + 10,000 parked the operator sits at 235 MiB / 181 m, with
+  ~180 apiserver req/s (not per-share: 178 at 220 shares). The proxy's
+  relist measured +100 MiB. The operator's relist was measured on
+  2026-10-02 (`D-relist-10k.txt`): ~2× its RSS. It had been 4 minutes
+  late behind kube's single watch backoff; its own backoff (fixed the
+  same day) brings that to ~30 s.
 
 Profile of C's proxy cost (host processes, `perf`): ~1.5× the hub's CPU
 per metadata op, mostly the extra TCP hop. One scaling hazard: the
