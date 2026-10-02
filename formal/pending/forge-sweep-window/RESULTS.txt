@@ -3,3 +3,12 @@ tlcrs  ProbeRetrySweepTakesNamed      rc=12    594s | Error: Invariant Inv_Lande
 tlcrs  ProbeUnderLeaseSweepDeleted    rc=12      4s | Error: Action property ProbeSweepDeleted is violated by the last step above. 629082 states generated, 195026 distinct states found. Depth 17. Checked in 3.889s (50154 distinct/s). 
 tlcrs  Retry                          rc=12    312s | Error: Invariant Inv_LandedPackComplete is violated. 52200856 states generated, 11592949 distinct states found. Depth 33. Checked in 311.422s (37226 distinct/s). 
 tlcrs  RetryRechecks                  rc=12    411s | Error: Invariant Inv_LandedPackComplete is violated. 53321299 states generated, 11824525 distinct states found. Depth 33. Checked in 411.048s (28767 distinct/s). 
+tlcrs  RetryAtomic                    rc=0     474s | Model checking completed. No error has been found. 73383867 states generated, 16155793 distinct states found. Depth 58. Checked in 474.385s (34056 distinct/s). 
+tlcrs  RetryUnderLease                rc=0     594s | Model checking completed. No error has been found. 76379468 states generated, 16724450 distinct states found. Depth 58. Checked in 594.437s (28135 distinct/s). 
+tlc    ProbeRetrySweepTakesNamed      rc=12    639s | Error: Invariant Inv_LandedPackComplete is violated. 51065814 states generated, 11319176 distinct states found, 1008265 states left on queue. 
+tlc    ProbeUnderLeaseSweepDeleted    rc=13      6s | Error: Action property ProbeSweepDeleted is violated. 560338 states generated, 175131 distinct states found, 69909 states left on queue. 
+tlc    Retry                          rc=12    666s | Error: Invariant Inv_LandedPackComplete is violated. 53374920 states generated, 11777572 distinct states found, 979659 states left on queue. 
+tlc    RetryRechecks                  rc=12    698s | Error: Invariant Inv_LandedPackComplete is violated. 51160187 states generated, 11346050 distinct states found, 1016246 states left on queue. 
+tlc    RetryAtomic                    rc=0    1762s | Model checking completed. No error has been found. 73801798 states generated, 16155793 distinct states found, 0 states left on queue. 
+tlc    RetryUnderLease                rc=0    1365s | Model checking completed. No error has been found. 76804937 states generated, 16724450 distinct states found, 0 states left on queue. 
+DONE 2026-10-02T22:30:24Z
