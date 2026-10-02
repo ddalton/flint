@@ -1,0 +1,204 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/v0.2.15/.schemas/json/test-chainsaw-v1alpha1.json
+# Converted from kuttl 2026-10-02; see tests/system/README.md.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: multi-replica
+spec:
+  steps:
+  - name: 00-storageclass
+    try:
+    - apply:
+        file: 00-storageclass.yaml
+  - name: 01-pvc
+    try:
+    - apply:
+        file: 01-pvc.yaml
+    - script:
+        shell: bash
+        timeout: 60s
+        content: |
+          # kuttl retried a TestAssert command until the step timeout;
+          # a Chainsaw script runs once, so the retry is explicit.
+          attempt() {
+            set -e  # Exit on any error
+
+            # Get the current namespace (kuttl sets this)
+            NAMESPACE=${NAMESPACE:-default}
+            echo "Using namespace: $NAMESPACE"
+
+            # First, wait for PVC to exist (retry loop for up to 10 seconds)
+            echo "Waiting for PVC to exist..."
+            for i in $(seq 1 20); do
+              if kubectl get pvc test-multi-replica-pvc -n $NAMESPACE >/dev/null 2>&1; then
+                echo "✅ PVC exists"
+                break
+              fi
+              if [ $i -eq 20 ]; then
+                echo "❌ PVC does not exist after 10 seconds"
+                kubectl get pvc -n $NAMESPACE || echo "No PVCs in namespace"
+                exit 1
+              fi
+              sleep 0.5
+            done
+
+            # Now wait for PVC to be bound
+            echo "Waiting for PVC to be bound..."
+            kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/test-multi-replica-pvc -n $NAMESPACE --timeout=45s || {
+              echo "❌ PVC not bound within timeout"
+              kubectl get pvc test-multi-replica-pvc -n $NAMESPACE
+              exit 1
+            }
+
+            # Verify PV has replica metadata
+            PV_NAME=$(kubectl get pvc test-multi-replica-pvc -n $NAMESPACE -o jsonpath='{.spec.volumeName}')
+            if [ -z "$PV_NAME" ]; then
+              echo "❌ No PV name found for PVC"
+              exit 1
+            fi
+            echo "PV Name: $PV_NAME"
+
+            # Check replica count
+            REPLICA_COUNT=$(kubectl get pv $PV_NAME -o jsonpath='{.spec.csi.volumeAttributes.disk\.chert\.us/replica-count}')
+            echo "Replica Count: $REPLICA_COUNT"
+            if [ "$REPLICA_COUNT" != "2" ]; then
+              echo "❌ Expected 2 replicas, got: $REPLICA_COUNT"
+              exit 1
+            fi
+
+            # Check replicas JSON exists
+            REPLICAS_JSON=$(kubectl get pv $PV_NAME -o jsonpath='{.spec.csi.volumeAttributes.disk\.chert\.us/replicas}')
+            if [ -z "$REPLICAS_JSON" ]; then
+              echo "❌ No replicas metadata found in PV"
+              exit 1
+            fi
+
+            echo "✅ PV has correct multi-replica metadata"
+            echo "Replicas: $REPLICAS_JSON"
+            exit 0
+          }
+          until ( attempt ); do sleep 2; done
+  - name: 02-pod
+    try:
+    - apply:
+        file: 02-pod.yaml
+    - script:
+        shell: bash
+        timeout: 180s
+        content: |
+          # kuttl retried a TestAssert command until the step timeout;
+          # a Chainsaw script runs once, so the retry is explicit.
+          attempt() {
+            set -e  # Exit on any error
+
+            # Get the current namespace (kuttl sets this)
+            NAMESPACE=${NAMESPACE:-default}
+            echo "Using namespace: $NAMESPACE"
+
+            # Wait for pod to exist first
+            echo "Waiting for pod to exist..."
+            for i in $(seq 1 20); do
+              if kubectl get pod test-multi-replica-pod -n $NAMESPACE >/dev/null 2>&1; then
+                echo "✅ Pod exists"
+                break
+              fi
+              if [ $i -eq 20 ]; then
+                echo "❌ Pod does not exist after 10 seconds"
+                kubectl get pods -n $NAMESPACE || echo "No pods in namespace"
+                exit 1
+              fi
+              sleep 0.5
+            done
+
+            # Wait for pod to complete
+            echo "Waiting for pod to complete..."
+            kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/test-multi-replica-pod -n $NAMESPACE --timeout=120s || {
+              echo "❌ Pod did not complete within timeout"
+              kubectl get pod test-multi-replica-pod -n $NAMESPACE
+              kubectl describe pod test-multi-replica-pod -n $NAMESPACE | tail -30
+              exit 1
+            }
+
+            # Verify pod completed successfully
+            POD_STATUS=$(kubectl get pod test-multi-replica-pod -n $NAMESPACE -o jsonpath='{.status.phase}')
+            if [ "$POD_STATUS" = "Succeeded" ]; then
+              echo "✅ Pod completed successfully"
+            else
+              echo "❌ Pod status: $POD_STATUS"
+              exit 1
+            fi
+
+            # Check the logs to verify data was written
+            echo "Checking pod logs..."
+            kubectl logs test-multi-replica-pod -n $NAMESPACE | tail -20
+
+            if kubectl logs test-multi-replica-pod -n $NAMESPACE | grep -q "Data written successfully"; then
+              echo "✅ Data written successfully to multi-replica volume"
+            else
+              echo "❌ Data write verification failed"
+              exit 1
+            fi
+
+            # Get the node where pod ran
+            NODE=$(kubectl get pod test-multi-replica-pod -n $NAMESPACE -o jsonpath='{.spec.nodeName}')
+            echo "✅ Pod ran on node: $NODE"
+
+            # Verify volume has 2 replicas
+            PV_NAME=$(kubectl get pvc test-multi-replica-pvc -n $NAMESPACE -o jsonpath='{.spec.volumeName}')
+            REPLICA_COUNT=$(kubectl get pv $PV_NAME -o jsonpath='{.spec.csi.volumeAttributes.disk\.chert\.us/replica-count}')
+            if [ "$REPLICA_COUNT" = "2" ]; then
+              echo "✅ Volume configured with 2 replicas"
+            else
+              echo "⚠️ Replica count: $REPLICA_COUNT (expected 2)"
+            fi
+            exit 0
+          }
+          until ( attempt ); do sleep 2; done
+  - name: 03-cleanup
+    try:
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Pod
+          name: test-multi-replica-pod
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          name: test-multi-replica-pvc
+    - delete:
+        ref:
+          apiVersion: storage.k8s.io/v1
+          kind: StorageClass
+          name: flint-multi-replica
+    - script:
+        shell: bash
+        content: |
+          # kuttl retried a TestAssert command until the step timeout;
+          # a Chainsaw script runs once, so the retry is explicit.
+          attempt() {
+            set -e  # Exit on any error
+
+            # Get the current namespace
+            NAMESPACE=${NAMESPACE:-default}
+            echo "=== Verifying cleanup in namespace: $NAMESPACE ==="
+
+            # Verify PVC is deleted
+            if kubectl get pvc test-multi-replica-pvc -n $NAMESPACE 2>/dev/null; then
+              echo "⚠️ PVC still exists, waiting for deletion..."
+              sleep 5
+            else
+              echo "✅ PVC deleted successfully"
+            fi
+
+            # Verify Pod is deleted
+            if kubectl get pod test-multi-replica-pod -n $NAMESPACE 2>/dev/null; then
+              echo "⚠️ Pod still exists, waiting for deletion..."
+              sleep 5
+            else
+              echo "✅ Pod deleted successfully"
+            fi
+
+            echo "✅ Multi-replica test cleanup complete"
+          }
+          until ( attempt ); do sleep 2; done

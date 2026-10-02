@@ -68,10 +68,10 @@ This test validates the complete lifecycle of an ephemeral inline volume:
 
 ```bash
 # From the tests/system directory
-kubectl kuttl test --config kuttl-testsuite.yaml --test ephemeral-inline
+chainsaw test --config chainsaw-nfs-only.yaml --test-dir tests-nfs-only/ephemeral-inline
 
 # Or run just this test
-kubectl kuttl test --test ephemeral-inline
+chainsaw test --config chainsaw-nfs-only.yaml --test-dir tests-nfs-only/ephemeral-inline
 ```
 
 ## Example Pod Spec

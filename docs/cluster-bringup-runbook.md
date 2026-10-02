@@ -122,7 +122,7 @@ and ~933 GB free.
 Trove creates `flint-spdk` (primary, `WaitForFirstConsumer`) and
 `flint-nfs`. It does **not** create:
 
-- `flint` — the kuttl standard suite provisions with `storageClassName:
+- `flint` — the Chainsaw standard suite (tests/system) provisions with `storageClassName:
   flint` in 9 places; without it every PVC stays Pending and the tests
   burn 300 s timeouts. Apply a clone of `flint-spdk`.
 - any **pNFS** class — add `layout: pnfs` to an otherwise identical

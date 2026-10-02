@@ -1,4 +1,4 @@
-.PHONY: help install test test-verbose test-single clean check-kuttl check-kubeconfig
+.PHONY: help install test test-verbose test-single clean check-chainsaw check-kubeconfig test-nfs-only test-kind-nfs-only
 
 # Configuration
 KUBECONFIG_PATH ?= $(CURDIR)/config/kubeconfig
@@ -35,66 +35,72 @@ check-kubeconfig: ## Check if kubeconfig is configured
 		exit 1; \
 	fi
 
-check-kuttl: ## Check if kuttl is installed
-	@which kubectl-kuttl > /dev/null || (echo "❌ Kuttl not found. Install with: kubectl krew install kuttl" && exit 1)
-	@echo "✅ Kuttl is installed"
+check-chainsaw: ## Check if chainsaw is installed
+	@which chainsaw > /dev/null || (echo "❌ chainsaw not found. Install with: make install (or brew install kyverno/chainsaw/chainsaw)" && exit 1)
+	@echo "✅ chainsaw is installed"
 
-install: ## Install kuttl (requires kubectl krew)
-	@echo "Installing kuttl..."
-	kubectl krew install kuttl
-	@echo "✅ Kuttl installed successfully"
+install: ## Install chainsaw (go install, the version CI pins)
+	@echo "Installing chainsaw..."
+	go install github.com/kyverno/chainsaw@v0.2.15
+	@echo "✅ chainsaw installed successfully"
 
-test: check-kubeconfig check-kuttl ## Run all tests (standard tests in parallel, clean-shutdown + replica-rebuild separately)
+test: check-kubeconfig check-chainsaw ## Run all tests (standard tests in parallel, clean-shutdown + replica-rebuild separately)
 	@echo "Running standard CSI driver tests..."
-	kubectl kuttl test --config kuttl-testsuite.yaml
+	chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard
 	@echo ""
 	@echo "Running clean-shutdown test (must run in isolation)..."
-	kubectl kuttl test --config kuttl-testsuite-clean-shutdown.yaml
+	chainsaw test --config chainsaw-clean-shutdown.yaml --test-dir tests
 	@echo ""
 	@echo "Running incremental-replica-rebuild test (must run in isolation)..."
-	kubectl kuttl test --config kuttl-testsuite-replica-rebuild.yaml
+	chainsaw test --config chainsaw-replica-rebuild.yaml --test-dir tests-replica-rebuild
 
-test-verbose: check-kubeconfig check-kuttl ## Run all tests with verbose output
+test-verbose: check-kubeconfig check-chainsaw ## Run all tests with verbose output
 	@echo "Running all CSI driver tests (verbose)..."
-	kubectl kuttl test --config kuttl-testsuite.yaml --suppress=
+	chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard
 
-test-single: check-kubeconfig check-kuttl ## Run a single test (usage: make test-single TEST=rwo-pvc-migration)
+test-single: check-kubeconfig check-chainsaw ## Run a single test (usage: make test-single TEST=rwo-pvc-migration)
 	@if [ -z "$(TEST)" ]; then \
 		echo "❌ Please specify TEST variable. Example: make test-single TEST=rwo-pvc-migration"; \
 		exit 1; \
 	fi
 	@echo "Running test: $(TEST)..."
-	kubectl kuttl test --config kuttl-testsuite.yaml --test $(TEST)
+	chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard/$(TEST)
 
-test-rwo: check-kubeconfig check-kuttl ## Run RWO PVC migration test
-	kubectl kuttl test --config kuttl-testsuite.yaml --test rwo-pvc-migration
+test-rwo: check-kubeconfig check-chainsaw ## Run RWO PVC migration test
+	chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard/rwo-pvc-migration
 
-test-multi-replica: check-kubeconfig check-kuttl ## Run multi-replica test
-	kubectl kuttl test --config kuttl-testsuite.yaml --test multi-replica
+test-multi-replica: check-kubeconfig check-chainsaw ## Run multi-replica test
+	chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard/multi-replica
 
-test-expand: check-kubeconfig check-kuttl ## Run volume expansion test
-	kubectl kuttl test --config kuttl-testsuite.yaml --test volume-expansion
+test-expand: check-kubeconfig check-chainsaw ## Run volume expansion test
+	chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard/volume-expansion
 
-test-clean-shutdown: check-kubeconfig check-kuttl ## Run clean shutdown test (runs in isolation)
-	kubectl kuttl test --config kuttl-testsuite-clean-shutdown.yaml
+test-clean-shutdown: check-kubeconfig check-chainsaw ## Run clean shutdown test (runs in isolation)
+	chainsaw test --config chainsaw-clean-shutdown.yaml --test-dir tests
 
-test-replica-rebuild: check-kubeconfig check-kuttl ## Run incremental replica rebuild test (runs in isolation)
-	kubectl kuttl test --config kuttl-testsuite-replica-rebuild.yaml
+test-replica-rebuild: check-kubeconfig check-chainsaw ## Run incremental replica rebuild test (runs in isolation)
+	chainsaw test --config chainsaw-replica-rebuild.yaml --test-dir tests-replica-rebuild
 
-test-snapshot: check-kubeconfig check-kuttl ## Run snapshot restore test
-	kubectl kuttl test --config kuttl-testsuite.yaml --test snapshot-restore
+test-nfs-only: check-kubeconfig check-chainsaw ## Run the nfs-only suite (no SPDK; needs the flint-nfs StorageClass)
+	chainsaw test --config chainsaw-nfs-only.yaml --test-dir tests-nfs-only
 
-clean: ## Clean up test namespaces (kuttl-test-*)
+test-kind-nfs-only: ## Build this tree's driver, run the nfs-only suite on a throwaway kind cluster (what CI runs)
+	./kind-nfs-only.sh
+
+test-snapshot: check-kubeconfig check-chainsaw ## Run snapshot restore test
+	chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard/snapshot-restore
+
+clean: ## Clean up test namespaces left by --skip-delete (chainsaw-*)
 	@echo "Cleaning up test namespaces..."
-	@kubectl get ns | grep kuttl-test | awk '{print $$1}' | xargs -r kubectl delete ns
+	@kubectl get ns -o name | grep '^namespace/chainsaw-' | xargs -r kubectl delete
 	@echo "✅ Cleanup complete"
 
-logs: ## Show logs from test pods (usage: make logs NS=kuttl-test-xxx)
+logs: ## Show logs from test pods (usage: make logs NS=chainsaw-xxx)
 	@if [ -z "$(NS)" ]; then \
 		echo "Available test namespaces:"; \
-		kubectl get ns | grep kuttl-test; \
+		kubectl get ns | grep chainsaw-; \
 		echo ""; \
-		echo "Usage: make logs NS=kuttl-test-xxx"; \
+		echo "Usage: make logs NS=chainsaw-xxx"; \
 	else \
 		kubectl get pods -n $(NS) && \
 		echo "" && \
@@ -102,17 +108,17 @@ logs: ## Show logs from test pods (usage: make logs NS=kuttl-test-xxx)
 		kubectl logs $$POD -n $(NS); \
 	fi
 
-debug: check-kubeconfig check-kuttl ## Keep failed test resources for debugging
-	kubectl kuttl test --config kuttl-testsuite.yaml --skip-delete
+debug: check-kubeconfig check-chainsaw ## Keep failed test resources for debugging
+	chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard --skip-delete
 
-validate: ## Validate YAML syntax
-	@echo "Validating YAML files..."
-	@find tests -name "*.yaml" -exec echo "Checking {}" \; -exec kubectl apply --dry-run=client -f {} \; 2>&1 | grep -v "configured (dry run)"
+validate: check-chainsaw ## Lint every Chainsaw test and configuration
+	@for f in $$(find tests tests-* -name chainsaw-test.yaml) ; do echo "Checking $$f"; chainsaw lint test -f $$f || exit 1; done
+	@for f in chainsaw-*.yaml ; do echo "Checking $$f"; chainsaw lint configuration -f $$f || exit 1; done
 	@echo "✅ Validation complete"
 
 list-tests: ## List all available tests
 	@echo "Available tests:"
-	@find tests -mindepth 1 -maxdepth 1 -type d -exec basename {} \;
+	@find tests tests-* -name chainsaw-test.yaml | sed 's|/chainsaw-test.yaml||' 
 
 restart-csi: check-kubeconfig ## Restart Flint CSI driver pods (required after loading ublk module)
 	@echo "Restarting Flint CSI driver pods..."

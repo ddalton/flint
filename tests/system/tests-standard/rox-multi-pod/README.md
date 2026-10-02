@@ -85,7 +85,7 @@ Step 09: Cleanup
 
 ```bash
 cd tests/system
-KUBECONFIG=/path/to/kubeconfig kubectl kuttl test --config kuttl-testsuite.yaml --test rox-multi-pod
+KUBECONFIG=/path/to/kubeconfig chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard/rox-multi-pod
 ```
 
 ## Expected Duration

@@ -74,13 +74,13 @@ Step 06: Rapid Cycle
 
 ```bash
 cd tests/system
-kubectl kuttl test --test clean-shutdown
+chainsaw test --config chainsaw-clean-shutdown.yaml --test-dir tests/clean-shutdown
 ```
 
 ### Run with verbose output
 
 ```bash
-kubectl kuttl test --test clean-shutdown --suppress=
+chainsaw test --config chainsaw-clean-shutdown.yaml --test-dir tests/clean-shutdown
 ```
 
 ### Expected Duration
@@ -187,7 +187,7 @@ Add to your test pipeline:
 - name: Run Clean Shutdown Test
   run: |
     cd tests/system
-    kubectl kuttl test --test clean-shutdown --timeout 600
+    chainsaw test --config chainsaw-clean-shutdown.yaml --test-dir tests/clean-shutdown --assert-timeout 600s --exec-timeout 600s
 ```
 
 ## Manual Verification

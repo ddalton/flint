@@ -1,0 +1,35 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/v0.2.15/.schemas/json/configuration-chainsaw-v1alpha2.json
+# Incremental replica rebuild (SPDK). MUST run in isolation (parallel 1, its own suite): the test kills the spdk-tgt on one storage node, which degrades every volume with a leg or consumer on that node. Never point it at a cluster carrying live volumes outside the test. Per-step timeout 600 s: the heal cycle is minutes at the 30 s drill epoch cadence.
+# Run: chainsaw test --config chainsaw-replica-rebuild.yaml --test-dir tests-replica-rebuild
+apiVersion: chainsaw.kyverno.io/v1alpha2
+kind: Configuration
+metadata:
+  name: flint-replica-rebuild
+spec:
+  # kuttl's suite timeout applied to every step; an operation that set its
+  # own (a former TestAssert `timeout`) overrides it in chainsaw-test.yaml.
+  timeouts:
+    apply: 600s
+    assert: 600s
+    cleanup: 600s
+    delete: 600s
+    error: 600s
+    exec: 600s
+  execution:
+    parallel: 1
+  discovery:
+    testFile: chainsaw-test
+  # kuttl never templated resource files, and the pod scripts carry `$(...)`.
+  templating:
+    enabled: false
+  # On a failed step, show what the cluster was doing (kuttl suppressed
+  # events always; a CI log is all a remote reader has).
+  error:
+    catch:
+    - events: {}
+    - describe:
+        apiVersion: v1
+        kind: Pod
+    - describe:
+        apiVersion: v1
+        kind: PersistentVolumeClaim

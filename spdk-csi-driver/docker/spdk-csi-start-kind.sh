@@ -79,6 +79,52 @@ if [ -n "$VIRTUAL_DISK_SIZE_MB" ] && [ "$VIRTUAL_DISK_SIZE_MB" -gt 0 ]; then
     fi
 
     echo "Virtual disk ready: $LVS_NAME on $BDEV_NAME (malloc-backed)"
+elif [ -n "$VIRTUAL_DISK_DEVICE" ]; then
+    # A REAL block device (a partition the rig binds into the kind node),
+    # opened with io_uring like the driver's kernel-bound fallback. Unlike
+    # malloc it survives an spdk-tgt restart: the lvstore on it is LOADED,
+    # never recreated, so a killed-and-restarted leg comes back with its
+    # data (what tests-replica-rebuild exercises).
+    LVS_NAME="${VIRTUAL_DISK_LVS_NAME:-lvs_kind}"
+    # %NODE% names this node's own volume when every node sees one shared
+    # /dev (the rig binds the host's /dev into each kind node).
+    VIRTUAL_DISK_DEVICE="$(printf '%s' "$VIRTUAL_DISK_DEVICE" | sed "s/%NODE%/${NODE_NAME:-}/g")"
+    if [ ! -b "$VIRTUAL_DISK_DEVICE" ]; then
+        echo "ERROR: VIRTUAL_DISK_DEVICE $VIRTUAL_DISK_DEVICE is not a block device"
+        kill "$SPDK_PID" 2>/dev/null || true
+        exit 1
+    fi
+    # SPDK's uring bdev probes /sys/block/<basename>/queue/zoned and fails
+    # when that is absent, so the device must be opened under its KERNEL
+    # name, and must be a whole block device (a partition has no
+    # /sys/block entry; an LVM volume, dm-N, does). The rig binds it at a
+    # fixed path; resolve the kernel name from the device number.
+    MAJMIN="$(( 0x$(stat -Lc %t "$VIRTUAL_DISK_DEVICE") )):$(( 0x$(stat -Lc %T "$VIRTUAL_DISK_DEVICE") ))"
+    KNAME="$(basename "$(readlink -f "/sys/dev/block/$MAJMIN")")"
+    if [ -z "$KNAME" ] || [ ! -e "/sys/block/$KNAME" ]; then
+        echo "ERROR: $VIRTUAL_DISK_DEVICE ($MAJMIN -> '$KNAME') is not a whole block device in /sys/block (a partition? use an LVM volume)"
+        kill "$SPDK_PID" 2>/dev/null || true
+        exit 1
+    fi
+    if [ ! -b "/dev/$KNAME" ]; then
+        mknod "/dev/$KNAME" b "${MAJMIN%%:*}" "${MAJMIN##*:}"
+    fi
+    VIRTUAL_DISK_DEVICE="/dev/$KNAME"
+    BDEV_NAME="uring_$KNAME"
+    echo "Creating uring bdev: $BDEV_NAME on $VIRTUAL_DISK_DEVICE"
+    $RPC bdev_uring_create "$VIRTUAL_DISK_DEVICE" "$BDEV_NAME"
+    # An existing lvstore is loaded by the bdev examine, asynchronously.
+    # Deciding "absent" before examine finishes would create a NEW lvstore
+    # over the old one -- wiping every volume on the restart this path
+    # exists for. Wait for examine, then look.
+    $RPC bdev_wait_for_examine
+    if ! $RPC bdev_lvol_get_lvstores 2>/dev/null | grep -q "\"$LVS_NAME\""; then
+        echo "Creating LVS: $LVS_NAME on $BDEV_NAME"
+        $RPC bdev_lvol_create_lvstore "$BDEV_NAME" "$LVS_NAME" --cluster-sz 1048576
+    else
+        echo "LVS $LVS_NAME loaded from $VIRTUAL_DISK_DEVICE, not recreated"
+    fi
+    echo "Disk ready: $LVS_NAME on $BDEV_NAME (device-backed)"
 fi
 
 touch /var/tmp/spdk.ready

@@ -1,0 +1,53 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/v0.2.15/.schemas/json/test-chainsaw-v1alpha1.json
+# Converted from kuttl 2026-10-02; see tests/system/README.md.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rwx-single-replica
+spec:
+  steps:
+  - name: 00-pvc
+    try:
+    - apply:
+        file: 00-pvc.yaml
+  - name: 01-pods
+    try:
+    - apply:
+        file: 01-pods.yaml
+    - assert:
+        file: 01-assert.yaml
+  - name: 02-verify
+    try:
+    - apply:
+        file: 02-verify.yaml
+    - assert:
+        file: 02-assert.yaml
+  - name: 03-cleanup
+    try:
+    # kuttl applied these bare objects (a no-op re-apply); the step's
+    # intent, by its name, is to delete them.
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Pod
+          name: rwx-writer-1
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Pod
+          name: rwx-writer-2
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Pod
+          name: rwx-writer-3
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Pod
+          name: rwx-verifier
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          name: rwx-test-pvc

@@ -1,0 +1,123 @@
+# The CSI driver's system tests (tests/system, Chainsaw) against a real
+# cluster: a kind cluster on the hosted Ubuntu runner, running the driver
+# image built from this commit.
+#
+# Until 2026-10-02 these were kuttl suites that nothing ran: a developer
+# pointed them at a cluster by hand. Converting them found that several
+# steps could never fail (a `$patch: delete` kuttl ignored, so the
+# "migration" reader read a volume the writer still held; an assert that
+# exits 0 whether or not the pod exists). Run on every change, they are a
+# gate; run by hand, they had drifted into theatre. The first run of this
+# job found that every nfs-only PVC had been unservable since F30
+# (2026-07-21): the emptyDir backing is never staged, so nothing stamped
+# its identity marker and the NFS server refused it (exit 57). Behind it,
+# an RWO nfs-only volume could never detach: NodeUnstage ran the SPDK
+# teardown on a node with no SPDK, and failed on every retry.
+#
+# SCOPE: the nfs-only suite. The SPDK suites need hugepages and a
+# ublk-capable kernel, which a hosted runner does not offer; they stay on
+# the metal/AWS rigs (tests/system/README.md). nfs-only still runs the
+# controller, the node plugin, the per-volume NFS server pod and the
+# runner kernel's NFS client for real.
+#
+# The job is tests/system/kind-nfs-only.sh and nothing else, so a red run
+# reproduces on any Linux host with docker by running that script.
+name: system-chainsaw
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'spdk-csi-driver/**'
+      # Path dependencies of the driver crate: a change there changes the
+      # binary under test.
+      - 'crates/flint-store/**'
+      - 'forge/syncer/**'
+      # The chart under test, and the charts the driver embeds with
+      # include_str! (the lite operator renders them).
+      - 'flint-*chart/**'
+      - 'tests/system/**'
+      - '.github/workflows/system-chainsaw.yml'
+  pull_request:
+    paths:
+      - 'spdk-csi-driver/**'
+      - 'crates/flint-store/**'
+      - 'forge/syncer/**'
+      - 'flint-*chart/**'
+      - 'tests/system/**'
+      - '.github/workflows/system-chainsaw.yml'
+
+concurrency:
+  group: system-chainsaw-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  KIND_VERSION: v0.30.0
+  KIND_NODE_IMAGE: kindest/node:v1.34.0
+  CHAINSAW_VERSION: v0.2.15
+  ZIG_VERSION: 0.13.0
+  CARGO_ZIGBUILD_VERSION: 0.23.4
+
+jobs:
+  nfs-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: kernel NFS client (the node plugin mounts in THIS kernel)
+        run: sudo modprobe nfs && grep -w nfs4 /proc/filesystems
+
+      - name: install protoc (tonic-build)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: spdk-csi-driver
+          key: musl-release
+
+      # The published image is built from cargo-zigbuild musl binaries
+      # (scripts/stage-prebuilt.sh); the gate builds the same way.
+      - name: install zig + cargo-zigbuild
+        run: |
+          set -euo pipefail
+          z=zig-linux-x86_64-${ZIG_VERSION}
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/${z}.tar.xz" -o /tmp/zig.tar.xz
+          echo "d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea  /tmp/zig.tar.xz" | sha256sum -c -
+          sudo tar -xJf /tmp/zig.tar.xz -C /opt
+          echo "/opt/${z}" >> "$GITHUB_PATH"
+          cargo install cargo-zigbuild --locked --version "${CARGO_ZIGBUILD_VERSION}"
+
+      - name: install kind + chainsaw
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/bin"
+          curl -fsSL "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64" -o "$HOME/bin/kind"
+          curl -fsSL "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64.sha256sum" |
+            sed "s|kind-linux-amd64|$HOME/bin/kind|" | sha256sum -c -
+          chmod +x "$HOME/bin/kind"
+          cd /tmp
+          curl -fsSLO "https://github.com/kyverno/chainsaw/releases/download/${CHAINSAW_VERSION}/chainsaw_linux_amd64.tar.gz"
+          curl -fsSL "https://github.com/kyverno/chainsaw/releases/download/${CHAINSAW_VERSION}/checksums.txt" |
+            grep ' chainsaw_linux_amd64.tar.gz$' | sha256sum -c -
+          tar -xzf chainsaw_linux_amd64.tar.gz chainsaw
+          install -m 0755 chainsaw "$HOME/bin/chainsaw"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: tests/system/kind-nfs-only.sh
+        env:
+          TAG: ci-${{ github.sha }}
+          REPORT_DIR: ${{ runner.temp }}/chainsaw-report
+        run: |
+          kind version; helm version --short; kubectl version --client; chainsaw version
+          tests/system/kind-nfs-only.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chainsaw-nfs-only-report
+          path: ${{ runner.temp }}/chainsaw-report
+          if-no-files-found: ignore

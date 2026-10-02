@@ -42,7 +42,7 @@ as dated, not as current.
 
 - trove-provisioned k8s with flint chart (SPDK three-container mode) in
   `flint-system`; campaign SCs `flint`/`flint-r2`/`flint-r3` (all
-  WaitForFirstConsumer — do NOT reuse the kuttl multi-replica SC, it binds
+  WaitForFirstConsumer — do NOT reuse the system suite's multi-replica SC, it binds
   Immediate).
 - Workers with instance-store NVMe (i4i.*): **r1 data dies with the node** —
   drills 1.13/1.14 are clean-failure drills by design.

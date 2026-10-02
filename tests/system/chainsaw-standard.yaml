@@ -1,0 +1,35 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/v0.2.15/.schemas/json/configuration-chainsaw-v1alpha2.json
+# SPDK suite: the default `flint` StorageClass (nfsEmptyDir: false).
+# Run: chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard
+apiVersion: chainsaw.kyverno.io/v1alpha2
+kind: Configuration
+metadata:
+  name: flint-standard
+spec:
+  # kuttl's suite timeout applied to every step; an operation that set its
+  # own (a former TestAssert `timeout`) overrides it in chainsaw-test.yaml.
+  timeouts:
+    apply: 300s
+    assert: 300s
+    cleanup: 300s
+    delete: 300s
+    error: 300s
+    exec: 300s
+  execution:
+    parallel: 4
+  discovery:
+    testFile: chainsaw-test
+  # kuttl never templated resource files, and the pod scripts carry `$(...)`.
+  templating:
+    enabled: false
+  # On a failed step, show what the cluster was doing (kuttl suppressed
+  # events always; a CI log is all a remote reader has).
+  error:
+    catch:
+    - events: {}
+    - describe:
+        apiVersion: v1
+        kind: Pod
+    - describe:
+        apiVersion: v1
+        kind: PersistentVolumeClaim

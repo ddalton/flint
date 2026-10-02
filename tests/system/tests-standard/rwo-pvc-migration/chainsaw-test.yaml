@@ -1,0 +1,72 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/v0.2.15/.schemas/json/test-chainsaw-v1alpha1.json
+# Converted from kuttl 2026-10-02; see tests/system/README.md.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rwo-pvc-migration
+spec:
+  steps:
+  - name: 01-pvc
+    try:
+    - apply:
+        file: 01-pvc.yaml
+    - assert:
+        file: 01-assert.yaml
+        timeout: 30s
+  - name: 02-writer-pod
+    try:
+    - apply:
+        file: 02-writer-pod.yaml
+    - assert:
+        file: 02-assert.yaml
+        timeout: 120s
+    - script:
+        shell: bash
+        content: |
+          # Record where the writer ran; step 04 schedules the reader elsewhere.
+          node=$(kubectl -n "$NAMESPACE" get pod writer-pod -o jsonpath='{.spec.nodeName}')
+          test -n "$node"
+          kubectl -n "$NAMESPACE" create configmap writer-node --from-literal=node="$node"
+  - name: 03-delete-writer
+    try:
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Pod
+          name: writer-pod
+    - error:
+        resource:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: writer-pod
+        timeout: 60s
+  - name: 04-reader-pod
+    try:
+    - script:
+        shell: bash
+        content: |
+          node=$(kubectl -n "$NAMESPACE" get configmap writer-node -o jsonpath='{.data.node}')
+          test -n "$node"
+          sed "s/__WRITER_NODE__/$node/" 04-reader-pod.yaml | kubectl -n "$NAMESPACE" apply -f -
+    - assert:
+        file: 04-assert.yaml
+        timeout: 120s
+    - script:
+        shell: bash
+        content: |
+          # The migration this test is named for: the reader mounted the
+          # volume on another node than the one that wrote it.
+          w=$(kubectl -n "$NAMESPACE" get configmap writer-node -o jsonpath='{.data.node}')
+          r=$(kubectl -n "$NAMESPACE" get pod reader-pod -o jsonpath='{.spec.nodeName}')
+          echo "writer ran on $w, reader on $r"
+          test -n "$r" && test "$w" != "$r"
+    # The reader is applied by the script above, so Chainsaw does not
+    # track it: delete it here, or the PVC's pvc-protection finalizer holds
+    # the PVC's cleanup for the whole cleanup timeout.
+    cleanup:
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Pod
+          name: reader-pod

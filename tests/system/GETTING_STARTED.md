@@ -2,7 +2,7 @@
 
 ## What You Have
 
-A complete, production-ready test framework for testing CSI drivers on Kubernetes using **Kuttl** - a declarative, YAML-based testing tool.
+A complete, production-ready test framework for testing CSI drivers on Kubernetes using **Chainsaw** - a declarative, YAML-based testing tool (converted from kuttl 2026-10-02; README.md, "Migration from kuttl").
 
 ## Why This Approach?
 
@@ -20,7 +20,7 @@ A complete, production-ready test framework for testing CSI drivers on Kubernete
 - ✅ ublk kernel module is loaded on all worker nodes
 - ✅ CSI driver pods restarted after loading ublk module
 - ✅ kubectl configured with cluster access
-- ✅ Kuttl installed
+- ✅ Chainsaw installed (`brew install kyverno/chainsaw/chainsaw`)
 
 ```bash
 # Verify ublk module on each node
@@ -45,11 +45,11 @@ make test-expand
 ```
 
 ### 3. View Results
-Tests create temporary namespaces (`kuttl-test-*`) and automatically clean up on success.
+Tests create temporary namespaces (`chainsaw-*`) and clean them up when they finish.
 
 On failure, resources are kept for debugging:
 ```bash
-kubectl get ns | grep kuttl-test
+kubectl get ns | grep chainsaw-
 kubectl get all -n <namespace>
 ```
 
@@ -130,7 +130,7 @@ tests/my-test/
 └── 02-assert.yaml  # ...and verification
 ```
 
-Kuttl executes files in alphabetical order, waiting for assertions before proceeding.
+Chainsaw runs the steps of a test's `chainsaw-test.yaml` in order; an `assert` retries until it holds or its timeout expires.
 
 ## Creating Your Own Tests
 
@@ -166,7 +166,7 @@ Kuttl executes files in alphabetical order, waiting for assertions before procee
 
 4. **Run your test**:
    ```bash
-   kubectl kuttl test --test my-new-test
+   chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard/my-new-test
    ```
 
 ## CI/CD Integration
@@ -178,7 +178,7 @@ You can integrate these tests into your CI/CD pipeline. See the **CI/CD Integrat
 ### View Logs
 ```bash
 # Find test namespace
-kubectl get ns | grep kuttl-test
+kubectl get ns | grep chainsaw-
 
 # View pod logs
 kubectl logs <pod-name> -n <test-namespace>
@@ -190,13 +190,15 @@ kubectl get events -n <test-namespace> --sort-by='.lastTimestamp'
 ### Keep Resources
 ```bash
 # Run test and keep resources on failure
-kubectl kuttl test --skip-delete
+chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard --skip-delete
 ```
 
 ### Increase Timeout
-Edit `kuttl-testsuite.yaml`:
+Edit the suite's `chainsaw-*.yaml`:
 ```yaml
-timeout: 600  # Increase from 300 to 600 seconds
+spec:
+  timeouts:
+    assert: 600s  # and apply/delete/error/exec/cleanup alike
 ```
 
 ## Common Issues & Troubleshooting
@@ -227,7 +229,7 @@ kubectl delete pods -n flint-system -l app=flint-csi-controller
 kubectl wait --for=condition=ready pod -l app=flint-csi-node -n flint-system --timeout=120s
 
 # 4. Clean up test namespaces and retry
-kubectl get ns | grep kuttl-test | awk '{print $1}' | xargs kubectl delete ns
+kubectl get ns -o name | grep '^namespace/chainsaw-' | xargs -r kubectl delete
 ```
 
 ### Other Common Problems
@@ -238,7 +240,7 @@ kubectl get ns | grep kuttl-test | awk '{print $1}' | xargs kubectl delete ns
 | Pod can't schedule | Check node resources: `kubectl describe nodes` |
 | Anti-affinity fails | Need 2+ nodes in cluster |
 | Snapshot test fails | Install snapshot CRDs and controller |
-| Test timeout | Increase timeout in `kuttl-testsuite.yaml` |
+| Test timeout | Increase `timeouts` in the suite's `chainsaw-*.yaml` |
 | Mount device failed | **See UBLK Driver Setup above** |
 
 ## Next Steps
@@ -253,7 +255,7 @@ kubectl get ns | grep kuttl-test | awk '{print $1}' | xargs kubectl delete ns
 
 - **README.md** - Comprehensive documentation with troubleshooting
 - **Test READMEs** - Each test directory has detailed documentation
-- **Kuttl Docs** - https://kuttl.dev/
+- **Chainsaw Docs** - https://kyverno.github.io/chainsaw/
 
 ## Support
 

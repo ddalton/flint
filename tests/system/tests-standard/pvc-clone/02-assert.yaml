@@ -9,22 +9,3 @@ status:
       state:
         terminated:
           exitCode: 0
----
-# Fail fast if pod goes into Error state
-apiVersion: kuttl.dev/v1beta1
-kind: TestAssert
-commands:
-  - script: |
-      set -e  # Exit on any error
-      
-      # Get the current namespace
-      NAMESPACE=${NAMESPACE:-default}
-      echo "Using namespace: $NAMESPACE"
-      
-      PHASE=$(kubectl get pod clone-verifier -n $NAMESPACE -o jsonpath='{.status.phase}')
-      if [ "$PHASE" = "Failed" ] || [ "$PHASE" = "Error" ]; then
-        echo "❌ Pod in $PHASE state - failing test"
-        exit 1
-      fi
-      echo "✅ Pod status check passed (Phase: $PHASE)"
-

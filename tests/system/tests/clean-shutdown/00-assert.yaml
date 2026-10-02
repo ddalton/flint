@@ -1,11 +1,6 @@
-apiVersion: kuttl.dev/v1beta1
-kind: TestAssert
-timeout: 30
----
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: clean-shutdown-pvc
 # Note: With WaitForFirstConsumer, PVC stays Pending until Pod is created
 # So we just verify the PVC exists, not that it's Bound yet
-

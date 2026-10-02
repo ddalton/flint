@@ -11,7 +11,7 @@ repo paths.
 | Phase | What | Runs on | Time |
 |---|---|---|---|
 | **1** | pNFS multi-host scalability bench (the architectural-claim test) + NVMe IOPS sanity check | Plain EKS, no SPDK setup | ~30 min |
-| **2** | SPDK KUTTL system tests (multi-replica, snapshot-restore, volume-expansion, pvc-clone, ephemeral-inline) | Same cluster + ublk/hugepages bootstrap + Flint Helm install | ~45 min |
+| **2** | SPDK Chainsaw system tests (multi-replica, snapshot-restore, volume-expansion, pvc-clone, ephemeral-inline) | Same cluster + ublk/hugepages bootstrap + Flint Helm install | ~45 min |
 
 Phase 2 runs on the same cluster as Phase 1. Phase 1 is a clean run
 that doesn't pollute the cluster — ublk and hugepages get added via
@@ -318,7 +318,7 @@ imagePullSecrets in the bench namespace before pasting the prompt.
 
 ## Phase 1 prompt — paste below into a fresh Claude Code session
 
-I'm running Phase 1 of pre-publish validation for Flint CSI **v1.0.0** — the **pNFS multi-host scalability bench**. The release candidate is committed to `main` of `https://github.com/ddalton/flint`. The release tag `v1.0.0` has **not** been created yet — the publish is gated on this validation passing AND a separate Phase 2 (SPDK KUTTL tests) passing. **Do not run `git tag` or `gh release create`. Do not push images to the `:1.0.0` tag (only `:1.0.0-rc<N>` is OK). Do not push to `origin/main`. Do not run any SPDK-related tests in this session — Phase 2 is separate. Your job is the bench run and a written report.**
+I'm running Phase 1 of pre-publish validation for Flint CSI **v1.0.0** — the **pNFS multi-host scalability bench**. The release candidate is committed to `main` of `https://github.com/ddalton/flint`. The release tag `v1.0.0` has **not** been created yet — the publish is gated on this validation passing AND a separate Phase 2 (SPDK Chainsaw tests) passing. **Do not run `git tag` or `gh release create`. Do not push images to the `:1.0.0` tag (only `:1.0.0-rc<N>` is OK). Do not push to `origin/main`. Do not run any SPDK-related tests in this session — Phase 2 is separate. Your job is the bench run and a written report.**
 
 ### Infrastructure I have
 
@@ -374,7 +374,7 @@ A Kubernetes cluster on AWS with **5 nodes** (1 control + 4 workers, all `i3en.x
 - Don't run `git tag v1.0.0`, `git push --tags`, or `gh release create`. Tagging is the release-prep session's job once **both** phases pass.
 - Don't bump versions in `Cargo.toml`, `Chart.yaml`, or `CHANGELOG.md`.
 - Don't push to the immutable `:1.0.0` image tag. Only `:1.0.0-rc<N>` tags are OK during validation.
-- Don't run Phase 2 work — no Helm install, no KUTTL tests, no SPDK setup. The user runs Phase 2 separately after Phase 1 reports green.
+- Don't run Phase 2 work — no Helm install, no Chainsaw system tests, no SPDK setup. The user runs Phase 2 separately after Phase 1 reports green.
 
 **OK to fix in-session, with discipline** (lesson from the rc3 cycle: small blocker fixes don't need to wait for a session handoff — but they have to be done cleanly):
 
@@ -406,7 +406,7 @@ If anything in those docs is ambiguous about the bench setup, surface it in your
 # Phase 2 — SPDK validation
 
 Run **only after Phase 1 passes**. Same cluster; this phase adds the
-SPDK prerequisites and runs the KUTTL system test suite.
+SPDK prerequisites and runs the Chainsaw system test suite.
 
 ## Phase 2 pre-cluster setup additions
 
@@ -639,7 +639,7 @@ kubectl port-forward -n flint-system svc/flint-dashboard 3000:3000 &
 
 ## Phase 2 prompt — paste below into a fresh Claude Code session
 
-I'm running Phase 2 of pre-publish validation for Flint CSI **v1.0.0** — the **SPDK KUTTL system tests**. Phase 1 (pNFS scalability) has already passed and was reported green. Same cluster, now with SPDK prerequisites in place. **Do not run `git tag` or `gh release create`. Do not push images to the `:1.0.0` tag. Do not push to `origin/main`. Your job is the test runs and a written report.**
+I'm running Phase 2 of pre-publish validation for Flint CSI **v1.0.0** — the **SPDK Chainsaw system tests**. Phase 1 (pNFS scalability) has already passed and was reported green. Same cluster, now with SPDK prerequisites in place. **Do not run `git tag` or `gh release create`. Do not push images to the `:1.0.0` tag. Do not push to `origin/main`. Your job is the test runs and a written report.**
 
 ### Infrastructure I have
 
@@ -654,7 +654,7 @@ Same 5-node `i3en.xlarge` EKS cluster from Phase 1, plus:
 
 ### What you need to do
 
-Phase 2 runs **two KUTTL test suites** to cover both Flint backends. Both must pass.
+Phase 2 runs **two Chainsaw test suites** to cover both Flint backends. Both must pass.
 
 1. **Confirm Flint is healthy** before running tests:
    ```bash
@@ -667,20 +667,20 @@ Phase 2 runs **two KUTTL test suites** to cover both Flint backends. Both must p
 2. **Run the SPDK suite** — covers full Flint+SPDK code paths including **RWX with SPDK**:
    ```bash
    cd tests/system
-   KUBECONFIG=$KUBECONFIG kubectl kuttl test --config kuttl-testsuite.yaml
+   KUBECONFIG=$KUBECONFIG chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard
    ```
    Tests: `multi-replica`, `snapshot-restore`, `volume-expansion`, `pvc-clone`, `ephemeral-inline`, `rwo-pvc-migration`, **`rwx-single-replica`** (RWX-via-NFS-on-SPDK), `rox-multi-pod`. Capture the full output.
 
 3. **Run the no-SPDK suite** — covers **RWX without SPDK** plus other no-SPDK paths:
    ```bash
-   KUBECONFIG=$KUBECONFIG kubectl kuttl test --config kuttl-testsuite-nfs-only.yaml
+   KUBECONFIG=$KUBECONFIG chainsaw test --config chainsaw-nfs-only.yaml --test-dir tests-nfs-only
    ```
    Tests: `ephemeral-inline`, `rwo-pvc-migration`, **`rwx-single-replica`** (RWX-via-NFS-emptyDir, no SPDK), `volume-expansion`. The suite description is explicit: *"Tests compatible with nfs-only mode (no SPDK). Excludes: multi-replica (requires SPDK replication), snapshot-restore (requires SPDK snapshots), rox-multi-pod (requires snapshot-based ROX volumes)."* Capture the full output.
 
    This suite uses the no-SPDK StorageClass (`parameters.nfsEmptyDir: "true"`). If the test PVCs reference `storageClassName: flint` but the suite expects an NFS-only StorageClass, the StorageClass naming setup may need adjustment — if either suite fails with `provisioning failed: storage class not found` or `wrong backend`, surface that as a finding rather than mutating the tests.
 
 4. **Report back with** (separately for each suite):
-   - The full KUTTL output (PASS/FAIL per test, total wall-clock time).
+   - The full Chainsaw output (PASS/FAIL per test, total wall-clock time).
    - Per-test failure details if any test failed: pod logs, kubectl describe, leftover resources in the test namespace.
    - Any `OOMKilled`, `CrashLoopBackOff`, or `Error` pod statuses during the run.
    - Output of `kubectl logs -n flint-system -l app=flint-csi-controller --tail=200` after each suite completes.
@@ -690,19 +690,19 @@ Phase 2 runs **two KUTTL test suites** to cover both Flint backends. Both must p
 
 ### Phase 2 success criteria
 
-- **All tests in `kuttl-testsuite.yaml` pass** (SPDK paths, including RWX-with-SPDK).
-- **All tests in `kuttl-testsuite-nfs-only.yaml` pass** (no-SPDK paths, including RWX-without-SPDK).
+- **All tests in `chainsaw-standard.yaml` (tests-standard) pass** (SPDK paths, including RWX-with-SPDK).
+- **All tests in `chainsaw-nfs-only.yaml` (tests-nfs-only) pass** (no-SPDK paths, including RWX-without-SPDK).
 - Both `rwx-single-replica` runs (one per suite) explicitly pass — RWX is the use case where Flint diverges most from a stock single-server NFS, so both backends getting it right is load-bearing.
 - No Flint controller or node-pod restarts during either run.
-- No leftover orphan resources after each suite completes (KUTTL cleans up between tests).
+- No leftover orphan resources after each suite completes (Chainsaw cleans up between tests).
 
 ### What to leave alone, and what's OK to fix in-session
 
-Same rules as Phase 1: hard prohibitions on tag, release, version bump, and pushing to the immutable `:1.0.0` image tag. **Small, well-scoped fixes that turn a red KUTTL test green ARE OK to commit to `main`** if they meet the same four-condition test as Phase 1: localized, regression-tested, rc bumped (e.g., `:1.0.0-rc4`), and the test re-run against the new rc reports green. See the Phase 1 "What to leave alone" section for the full text. Anything bigger surfaces as a finding for the release-prep session.
+Same rules as Phase 1: hard prohibitions on tag, release, version bump, and pushing to the immutable `:1.0.0` image tag. **Small, well-scoped fixes that turn a red Chainsaw test green ARE OK to commit to `main`** if they meet the same four-condition test as Phase 1: localized, regression-tested, rc bumped (e.g., `:1.0.0-rc4`), and the test re-run against the new rc reports green. See the Phase 1 "What to leave alone" section for the full text. Anything bigger surfaces as a finding for the release-prep session.
 
 ### Reference docs in the repo
 
-- `tests/system/README.md` — KUTTL suite overview.
+- `tests/system/README.md` — Chainsaw suite overview.
 - `tests/system/tests-standard/<name>/` — individual test specs.
 - `CHANGELOG.md` — what v1.0.0 ships.
 
@@ -753,6 +753,6 @@ After both phases report back to the release-prep session:
 - **Phase 1 red:** fix on `main`, build `:1.0.0-rc2`, repeat Phase 1.
   Don't proceed to Phase 2 until Phase 1 is green.
 - **Phase 1 green, Phase 2 red:** depends on the failure. A regression
-  in a code path that hasn't materially changed since the last KUTTL
+  in a code path that hasn't materially changed since the last system-suite
   run is a real release blocker. A flake or environmental issue may
   warrant a re-run before fixing.

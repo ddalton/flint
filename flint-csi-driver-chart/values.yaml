@@ -856,6 +856,13 @@ spdkTarget:
     image:
       name: spdk-tgt-kind
       tag: latest
+    # --interrupt-mode: the targets sleep instead of each spinning a core.
+    # SPDK's NVMe-oF INITIATOR supports interrupt mode only over PCIe, so
+    # with it every SPDK-to-SPDK attach over TCP fails EOPNOTSUPP
+    # ("Interrupt mode is only supported with PCIe transport"): no remote
+    # replica leg, no cross-node RWO reader. Set false (polling, as in
+    # production) for multi-node tests; tests/system/kind-spdk.sh does.
+    interruptMode: true
     # SPDK DPDK EAL memory allocation in MB (passed as -s flag)
     # Must be large enough for: iobuf pools (~170MB) + virtual disk + subsystem overhead
     spdkMemoryMB: 2048
@@ -863,6 +870,13 @@ spdkTarget:
     # Size must fit within spdkMemoryMB minus ~300MB overhead for pools/subsystems
     virtualDisk:
       sizeMB: 0          # e.g. 1536 for 1.5GB. 0 = disabled
+      # OR a real WHOLE block device (sizeMB: 0; an LVM volume works, a
+      # partition does not): opened with io_uring, its lvstore LOADED on
+      # restart rather than recreated, so data survives an spdk-tgt
+      # restart. `%NODE%` is replaced with the node's name, so one value
+      # picks each node's own volume (tests/system/kind-spdk.sh:
+      # /dev/flintkindspdk/%NODE%).
+      device: ""
       path: "/var/tmp/spdk-virtual.img"
       lvsName: "lvs_kind"
     # Container memory limits (must exceed spdkMemoryMB + ~512MB process overhead)

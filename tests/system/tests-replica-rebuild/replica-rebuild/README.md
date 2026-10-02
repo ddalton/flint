@@ -31,7 +31,7 @@ full redundancy **without touching the workload**.
 
 - Killing spdk-tgt degrades **every** volume with a leg or consumer on the
   target node. This suite runs with `parallel: 1` in its own suite file
-  (`kuttl-testsuite-replica-rebuild.yaml`) and must not run against a cluster
+  (`chainsaw-replica-rebuild.yaml`) and must not run against a cluster
   carrying unrelated live volumes — same isolation contract as
   clean-shutdown.
 - Step 00 enables `FLINT_EPOCH_SCHEDULER` / `FLINT_CATCHUP` /
@@ -43,7 +43,7 @@ full redundancy **without touching the workload**.
 ## Run
 
 ```sh
-kubectl kuttl test --config kuttl-testsuite-replica-rebuild.yaml
+chainsaw test --config chainsaw-replica-rebuild.yaml --test-dir tests-replica-rebuild
 ```
 
 First live validation: 2026-07-04 on cluster `runk` (see

@@ -1,0 +1,58 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/v0.2.15/.schemas/json/test-chainsaw-v1alpha1.json
+# Converted from kuttl 2026-10-02; see tests/system/README.md.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: snapshot-restore
+spec:
+  steps:
+  - name: 00-setup
+    try:
+    - apply:
+        file: 00-setup.yaml
+    - assert:
+        file: 00-assert.yaml
+  - name: 01-snapshot
+    try:
+    - apply:
+        file: 01-snapshot.yaml
+    - assert:
+        file: 01-assert.yaml
+  - name: 02-modify
+    try:
+    - apply:
+        file: 02-modify.yaml
+    - assert:
+        file: 02-assert.yaml
+  - name: 03-restore
+    try:
+    - apply:
+        file: 03-restore.yaml
+    - assert:
+        file: 03-assert.yaml
+  - name: 04-verify
+    try:
+    - apply:
+        file: 04-verify.yaml
+    - script:
+        shell: bash
+        content: |
+          # kuttl retried a TestAssert command until the step timeout;
+          # a Chainsaw script runs once, so the retry is explicit.
+          attempt() {
+            set -e  # Exit on any error
+
+            # Get the current namespace
+            NAMESPACE=${NAMESPACE:-default}
+            echo "Using namespace: $NAMESPACE"
+
+            PHASE=$(kubectl get pod snapshot-verifier -n $NAMESPACE -o jsonpath='{.status.phase}')
+            if [ "$PHASE" = "Failed" ] || [ "$PHASE" = "Error" ]; then
+              echo "❌ Pod in $PHASE state - failing test"
+              exit 1
+            fi
+            echo "✅ Pod status check passed (Phase: $PHASE)"
+          }
+          until ( attempt ); do sleep 2; done
+    - assert:
+        file: 04-assert.yaml

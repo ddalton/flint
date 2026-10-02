@@ -205,6 +205,16 @@ spec:
               value: {{ .Values.spdkTarget.kindMode.virtualDisk.path | quote }}
             - name: VIRTUAL_DISK_LVS_NAME
               value: {{ .Values.spdkTarget.kindMode.virtualDisk.lvsName | quote }}
+            {{- else if and .Values.spdkTarget.kindMode.enabled .Values.spdkTarget.kindMode.virtualDisk.device }}
+            - name: VIRTUAL_DISK_DEVICE
+              value: {{ .Values.spdkTarget.kindMode.virtualDisk.device | quote }}
+            # `%NODE%` in the device path is replaced with this.
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: VIRTUAL_DISK_LVS_NAME
+              value: {{ .Values.spdkTarget.kindMode.virtualDisk.lvsName | quote }}
             {{- end }}
           securityContext:
             privileged: true

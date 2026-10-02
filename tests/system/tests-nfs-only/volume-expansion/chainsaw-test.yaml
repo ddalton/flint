@@ -1,0 +1,53 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/v0.2.15/.schemas/json/test-chainsaw-v1alpha1.json
+# Converted from kuttl 2026-10-02; see tests/system/README.md.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: volume-expansion
+spec:
+  steps:
+  - name: 00-pvc
+    try:
+    - apply:
+        file: 00-pvc.yaml
+    - assert:
+        file: 00-assert.yaml
+  - name: 01-writer
+    try:
+    - apply:
+        file: 01-writer.yaml
+    - assert:
+        file: 01-assert.yaml
+  - name: 02-expand-pvc
+    try:
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Pod
+          name: initial-writer
+    - apply:
+        file: 02-expand-pvc.yaml
+    - assert:
+        file: 02-assert.yaml
+  - name: 03-delete-writer
+    try:
+    - script:
+        shell: bash
+        content: |
+          kubectl delete pod initial-writer --namespace=$NAMESPACE --ignore-not-found=true
+    - script:
+        shell: bash
+        content: |
+          kubectl wait --for=delete pod initial-writer --namespace=$NAMESPACE --timeout=60s || true
+    - error:
+        resource:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: initial-writer
+  - name: 04-verify
+    try:
+    - apply:
+        file: 04-verify.yaml
+    - assert:
+        file: 04-assert.yaml

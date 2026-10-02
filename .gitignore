@@ -57,7 +57,7 @@ kubeconfig-*.yaml
 !tests/system/config/kubeconfig.example
 
 # Test artifacts
-tests/system/kuttl-test-*
+tests/system/chainsaw-report*
 tests/system/*.log
 .claude/
 spdk-csi-driver/docker/prebuilt/

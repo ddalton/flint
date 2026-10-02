@@ -1,0 +1,124 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/v0.2.15/.schemas/json/test-chainsaw-v1alpha1.json
+# Converted from kuttl 2026-10-02; see tests/system/README.md.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rox-multi-pod
+spec:
+  steps:
+  - name: 00-pvc
+    try:
+    - apply:
+        file: 00-pvc.yaml
+  - name: 01-writer-pod
+    try:
+    - apply:
+        file: 01-writer-pod.yaml
+    - assert:
+        file: 01-assert.yaml
+  - name: 02-snapshot
+    try:
+    - apply:
+        file: 02-snapshot.yaml
+    - assert:
+        file: 02-assert.yaml
+  - name: 03-delete-writer
+    try:
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Pod
+          name: writer-pod
+  - name: 04-pvc-rox
+    try:
+    - apply:
+        file: 04-pvc-rox.yaml
+  - name: 05-reader-pods
+    try:
+    - apply:
+        file: 05-reader-pods.yaml
+    - assert:
+        file: 05-assert.yaml
+  - name: 06-verify-readonly
+    try:
+    - script:
+        shell: bash
+        content: |
+          set -u
+          echo "=== 1. both readers read the snapshot's data ==="
+          for p in reader-pod-1 reader-pod-2; do
+            kubectl -n "$NAMESPACE" logs $p | grep -q "ROX_TEST_DATA" || { echo "FAIL: $p cannot read the data"; exit 1; }
+          done
+          echo "=== 2. the readers are on DIFFERENT nodes ==="
+          n1=$(kubectl -n "$NAMESPACE" get pod reader-pod-1 -o jsonpath='{.spec.nodeName}')
+          n2=$(kubectl -n "$NAMESPACE" get pod reader-pod-2 -o jsonpath='{.spec.nodeName}')
+          echo "reader-pod-1 on '$n1', reader-pod-2 on '$n2'"
+          [ -n "$n1" ] && [ "$n1" != "$n2" ] || { echo "FAIL: not multi-node ($n1 / $n2)"; exit 1; }
+          echo "=== 3. a write through a readOnly pod mount is refused ==="
+          for p in reader-pod-1 reader-pod-2; do
+            if kubectl -n "$NAMESPACE" exec $p -- sh -c 'echo F71 > /data/f71-readonly-probe' 2>/tmp/f71-err-$p; then
+              echo "FAIL: $p WROTE to the ROX volume"; exit 1
+            fi
+            echo "$p refused: $(cat /tmp/f71-err-$p | tr '\n' ' ')"
+          done
+          echo "PASS: readable from two nodes, and a readOnly mount refuses writes"
+  - name: 07-mount-without-readonly
+    try:
+    - apply:
+        file: 07-mount-without-readonly.yaml
+    - assert:
+        file: 07-assert.yaml
+  - name: 08-verify-rox-enforced
+    try:
+    - script:
+        shell: bash
+        content: |
+          set -u
+          for i in $(seq 1 30); do
+            out=$(kubectl -n "$NAMESPACE" logs rox-forgetful-writer 2>/dev/null)
+            [ -n "$out" ] && break; sleep 2
+          done
+          echo "rox-forgetful-writer: $out"
+          case "$out" in
+            *WRITE_LANDED*) echo "FAIL (F70): a pod without readOnly WROTE to a ReadOnlyMany volume"; exit 1 ;;
+            *WRITE_REFUSED*) ;;
+            *) echo "FAIL: no verdict from the writer"; exit 1 ;;
+          esac
+          # Independent of the writer's own view: another node's reader must
+          # not see the probe (informative only when the write was refused).
+          if kubectl -n "$NAMESPACE" exec reader-pod-1 -- test -e /data/f71-rw-probe; then
+            echo "FAIL (F70): the probe file is visible to reader-pod-1"; exit 1
+          fi
+          echo "PASS: ROX is enforced whatever the pod asks for"
+  - name: 09-cleanup
+    try:
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Pod
+          name: rox-forgetful-writer
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Pod
+          name: reader-pod-1
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Pod
+          name: reader-pod-2
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          name: rox-pvc
+    - delete:
+        ref:
+          apiVersion: snapshot.storage.k8s.io/v1
+          kind: VolumeSnapshot
+          name: rox-source-snapshot
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          name: test-pvc

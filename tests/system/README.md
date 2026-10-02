@@ -1,16 +1,14 @@
 # CSI Driver System Test Framework
 
-This is a declarative test framework for testing CSI drivers on Kubernetes using [Kuttl](https://kuttl.dev/).
+This is a declarative test framework for testing CSI drivers on Kubernetes using [Chainsaw](https://kyverno.github.io/chainsaw/) (converted from kuttl 2026-10-02; see [Migration from kuttl](#migration-from-kuttl)).
 
 ## Prerequisites
 
-1. **Install Kuttl**
+1. **Install Chainsaw** (CI pins v0.2.15)
    ```bash
-   # Using kubectl plugin
-   kubectl krew install kuttl
-   
-   # Or download binary directly
-   # https://github.com/kudobuilder/kuttl/releases
+   brew install kyverno/chainsaw/chainsaw
+   # or: go install github.com/kyverno/chainsaw@v0.2.15
+   # or: https://github.com/kyverno/chainsaw/releases
    ```
 
 2. **Kubernetes Cluster**
@@ -28,7 +26,8 @@ This is a declarative test framework for testing CSI drivers on Kubernetes using
 
 ```
 .
-├── kuttl-testsuite.yaml           # Main test suite configuration
+├── chainsaw-standard.yaml         # Suite configuration (also chainsaw-nfs-only/-clean-shutdown/-replica-rebuild.yaml)
+├── kind-nfs-only.sh               # Build this tree, run the nfs-only suite on kind (the CI gate)
 ├── tests/
 │   ├── clean-shutdown/            # Test: Clean shutdown and fast remount ⭐ NEW
 │   │   ├── 00-pvc.yaml            # Create PVC
@@ -62,14 +61,26 @@ This is a declarative test framework for testing CSI drivers on Kubernetes using
 
 ## Running Tests
 
-There are two KUTTL suites plus two standalone isolated tests:
+There are two Chainsaw suites plus two standalone isolated tests. Each
+test is a directory holding a `chainsaw-test.yaml` (the steps) and the
+resource files it applies and asserts:
 
-| Suite | Config | Tests | StorageClass | Backend |
-|-------|--------|-------|--------------|---------|
-| SPDK (standard) | `kuttl-testsuite.yaml` | 8 | `flint` (`nfsEmptyDir: false`) | SPDK blobstore |
-| NFS-only | `kuttl-testsuite-nfs-only.yaml` | 4 | `flint-nfs` (`nfsEmptyDir: true`) | emptyDir + NFS |
-| Clean shutdown | `kuttl-testsuite-clean-shutdown.yaml` | 1 | `flint` | SPDK blobstore |
-| Replica rebuild | `kuttl-testsuite-replica-rebuild.yaml` | 1 | created in-test (`numReplicas: 2`) | SPDK blobstore |
+| Suite | Config | Test dir | Tests | StorageClass | Backend |
+|-------|--------|----------|-------|--------------|---------|
+| SPDK (standard) | `chainsaw-standard.yaml` | `tests-standard` | 8 | `flint` (`nfsEmptyDir: false`) | SPDK blobstore |
+| NFS-only | `chainsaw-nfs-only.yaml` | `tests-nfs-only` | 4 | `flint-nfs` (`nfsEmptyDir: true`) | emptyDir + NFS |
+| Clean shutdown | `chainsaw-clean-shutdown.yaml` | `tests` | 1 | `flint` | SPDK blobstore |
+| Replica rebuild | `chainsaw-replica-rebuild.yaml` | `tests-replica-rebuild` | 1 | created in-test (`numReplicas: 2`) | SPDK blobstore |
+
+**CI.** `.github/workflows/system-chainsaw.yml` runs the NFS-only suite on
+every change to the driver, its path dependencies, the charts or these
+tests: `./kind-nfs-only.sh` builds the driver image from the tree the way
+it is published (cargo-zigbuild musl + `Dockerfile.csi.prebuilt`), starts a
+3-node kind cluster pulling from a local registry, installs the chart with
+`deployment.nodeMode=nfs-only`, and runs the suite. The same script
+reproduces a CI result on any Linux host with docker. The SPDK suites need
+hugepages and a ublk-capable kernel, which a hosted runner lacks; they stay
+on the metal/AWS rigs.
 
 The replica-rebuild test kills a replica leg's spdk-tgt under active writes
 and asserts the incremental heal pipeline (stale → catch-up → hot rejoin →
@@ -118,8 +129,8 @@ echo 1024 > /proc/sys/vm/nr_hugepages
 Always ensure no leftover state from previous runs:
 
 ```bash
-# Delete any orphaned KUTTL namespaces
-kubectl get ns | grep kuttl-test | awk '{print $1}' | xargs -r kubectl delete ns --wait=true
+# Delete any orphaned test namespaces (Chainsaw names them chainsaw-*)
+kubectl get ns -o name | grep '^namespace/chainsaw-' | xargs -r kubectl delete --wait=true
 
 # Delete any orphaned NFS server pods
 kubectl -n flint-system get pods | grep "flint-nfs-pvc-" | grep -E "Error|Completed" | awk '{print $1}' | xargs -r kubectl -n flint-system delete pod --force --grace-period=0
@@ -131,42 +142,42 @@ kubectl -n flint-system get pods -l app=flint-csi-node -o wide
 ### Run All Tests
 ```bash
 # 1. SPDK suite (8 tests, parallel)
-kubectl kuttl test --config kuttl-testsuite.yaml
+chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard
 
-# 2. Clean up between suites
-kubectl get ns | grep kuttl-test | awk '{print $1}' | xargs -r kubectl delete ns --wait=true
+# 2. NFS-only suite (4 tests, parallel)
+chainsaw test --config chainsaw-nfs-only.yaml --test-dir tests-nfs-only
 
-# 3. NFS-only suite (4 tests, parallel)
-kubectl kuttl test --config kuttl-testsuite-nfs-only.yaml
+# 3. Clean shutdown test (runs in isolation)
+chainsaw test --config chainsaw-clean-shutdown.yaml --test-dir tests
 
-# 4. Clean shutdown test (runs in isolation)
-kubectl kuttl test --config kuttl-testsuite-clean-shutdown.yaml
+# 4. Replica rebuild (runs in isolation; see its README first)
+chainsaw test --config chainsaw-replica-rebuild.yaml --test-dir tests-replica-rebuild
 ```
 
 ### Run Specific Test
 ```bash
-kubectl kuttl test --test rwo-pvc-migration
-kubectl kuttl test --test multi-replica
-kubectl kuttl test --test snapshot-restore
-kubectl kuttl test --test volume-expansion
+chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard/rwo-pvc-migration
+chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard/multi-replica
+chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard/snapshot-restore
+chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard/volume-expansion
 ```
 
 ### Run with Custom Timeout
 ```bash
-kubectl kuttl test --timeout 600
+chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard --assert-timeout 600s --exec-timeout 600s
 ```
 
 ### Verbose Output (for debugging)
 ```bash
-kubectl kuttl test --config kuttl-testsuite.yaml --suppress=
+chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard  # every operation's output is printed by default
 ```
 
 ## Configuration
 
-Edit `kuttl-testsuite.yaml` to adjust:
-- **timeout**: Maximum time for each test step (default: 300s)
-- **parallel**: Number of tests to run in parallel
-- **testDirs**: Directories containing tests
+Edit the suite's `chainsaw-*.yaml` to adjust:
+- **timeouts**: the default for every operation (kuttl's suite timeout). An
+  operation in a `chainsaw-test.yaml` that sets its own `timeout` overrides it.
+- **execution.parallel**: Number of tests to run in parallel
 
 ### Storage Class Configuration
 
@@ -228,34 +239,36 @@ spec:
 
 ## Creating New Tests
 
-1. Create a new directory under `tests/`
-2. Add numbered YAML files for each step:
-   - `XX-*.yaml` - Resources to create/update
-   - `XX-assert.yaml` - Assertions to verify
+1. Create a new directory under the suite's test dir (e.g. `tests-standard/`)
+2. Add the resource files, and a `chainsaw-test.yaml` whose steps `apply`
+   and `assert` them by `file:` (copy an existing test). Prefer the
+   declarative operations (`apply`, `assert`, `error`, `delete`) over a
+   `script`; a script runs ONCE, so a script that asserts must loop until
+   its condition holds (see the converted tests).
 
 ### Example Test Structure
 
 ```
 tests/my-new-test/
+├── chainsaw-test.yaml  # The steps, in order
 ├── 00-setup.yaml       # Create initial resources
 ├── 00-assert.yaml      # Verify setup completed
 ├── 01-test-step.yaml   # Execute test action
-├── 01-assert.yaml      # Verify test step succeeded
-└── 02-cleanup.yaml     # Optional cleanup
+└── 01-assert.yaml      # Verify test step succeeded
 ```
 
 ## Debugging Failed Tests
 
 ### View Test Logs
 ```bash
-# Kuttl creates temporary namespaces like kuttl-test-*
-kubectl get pods -A | grep kuttl-test
+# Chainsaw creates temporary namespaces like chainsaw-<adjective>-<animal>
+kubectl get pods -A | grep chainsaw-
 kubectl logs <pod-name> -n <namespace>
 ```
 
 ### Keep Test Resources After Failure
 ```bash
-kubectl kuttl test --skip-delete
+chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard --skip-delete
 ```
 
 ### Check Events
@@ -265,25 +278,28 @@ kubectl get events -n <test-namespace> --sort-by='.lastTimestamp'
 
 ## Advanced Features
 
-### Using TestAssert for Custom Commands
+### Asserting with a command
+
+A Chainsaw `script` runs once. To assert a condition that takes time to
+hold, loop until it does and let the operation's `timeout` bound it:
 
 ```yaml
-apiVersion: kuttl.dev/v1beta1
-kind: TestAssert
-commands:
-  - command: kubectl exec reader-pod -- cat /data/test-file.txt
-    ignoreFailure: false
+- script:
+    shell: bash
+    timeout: 60s
+    content: |
+      until kubectl -n "$NAMESPACE" exec reader-pod -- cat /data/test-file.txt; do sleep 2; done
 ```
 
-### Using TestStep for Complex Logic
+### Asserting that something is gone
 
 ```yaml
-apiVersion: kuttl.dev/v1beta1
-kind: TestStep
-commands:
-  - command: kubectl apply -f custom-resource.yaml
-  - command: sleep 5
-  - command: kubectl wait --for=condition=ready pod/my-pod --timeout=60s
+- error:
+    resource:
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: writer-pod
 ```
 
 ### Node Affinity
@@ -311,33 +327,17 @@ spec:
 
 ## CI/CD Integration
 
-### GitHub Actions Example
-
-```yaml
-name: CSI Driver Tests
-on: [push, pull_request]
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - name: Install Kuttl
-        run: |
-          curl -LO https://github.com/kudobuilder/kuttl/releases/download/v0.15.0/kubectl-kuttl_0.15.0_linux_x86_64
-          chmod +x kubectl-kuttl_0.15.0_linux_x86_64
-          sudo mv kubectl-kuttl_0.15.0_linux_x86_64 /usr/local/bin/kubectl-kuttl
-      - name: Setup K8s cluster
-        # ... your cluster setup
-      - name: Run Tests
-        run: kubectl kuttl test --config kuttl-testsuite.yaml
-```
+`.github/workflows/system-chainsaw.yml` is the gate; it runs
+`./kind-nfs-only.sh` and nothing else. Run that script on a Linux host with
+docker, kind, helm, kubectl, chainsaw and cargo-zigbuild to reproduce a run
+(`KEEP=1` leaves the cluster up; it prints the private KUBECONFIG).
 
 ## Best Practices
 
 1. **Keep tests independent**: Each test should be self-contained
 2. **Use unique names**: Avoid naming conflicts between tests
 3. **Add assertions**: Verify every important state change
-4. **Clean up resources**: Use `$patch: delete` or rely on namespace cleanup
+4. **Clean up resources**: Use a `delete` operation, or rely on namespace cleanup. (kuttl's `$patch: delete` form deleted NOTHING: kuttl >= 0.15 ignored it.)
 5. **Test negative cases**: Include tests for failure scenarios
 6. **Use meaningful timeouts**: Adjust based on expected operation duration
 
@@ -396,10 +396,10 @@ desc = Failed to create ublk device: Node agent HTTP call failed:
 5. **Clean up any stuck test resources and retry**:
    ```bash
    # Clean up test namespaces
-   kubectl get ns | grep kuttl-test | awk '{print $1}' | xargs kubectl delete ns
-   
+   kubectl get ns -o name | grep '^namespace/chainsaw-' | xargs -r kubectl delete
+
    # Run tests again
-   KUBECONFIG=/path/to/kubeconfig kubectl kuttl test --config kuttl-testsuite.yaml
+   KUBECONFIG=/path/to/kubeconfig chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard
    ```
 
 ### Stale NFS Mount Hang
@@ -439,7 +439,7 @@ kubectl -n flint-system wait --for=condition=ready pod -l app=flint-csi-node --t
 |-------|----------|
 | PVC not binding | Check storage class exists: `kubectl get sc` |
 | Pod stuck pending | Check node resources, taints, affinity rules |
-| Test timeout | Increase timeout in kuttl-testsuite.yaml |
+| Test timeout | Increase `timeouts` in the suite's chainsaw-*.yaml |
 | Data not persisting | Check CSI driver attach/detach logic |
 | Anti-affinity not working | Ensure multiple nodes available in cluster |
 | Mount device failed | **See UBLK Driver Issues above** |
@@ -448,6 +448,75 @@ kubectl -n flint-system wait --for=condition=ready pod -l app=flint-csi-node --t
 
 ## Additional Resources
 
-- [Kuttl Documentation](https://kuttl.dev/)
+- [Chainsaw Documentation](https://kyverno.github.io/chainsaw/)
 - [Kubernetes CSI Documentation](https://kubernetes-csi.github.io/docs/)
 - [CSI Driver Testing Best Practices](https://kubernetes-csi.github.io/docs/testing-drivers.html)
+
+## Migration from kuttl
+
+Converted 2026-10-02. `chainsaw migrate kuttl` converted 6 of the 14 tests
+and silently changed the rest (it dropped every TestAssert `timeout`, and
+it turned retried TestAssert commands into run-once scripts), so the
+conversion was done by a script that keeps kuttl's semantics:
+
+- step order: TestStep `delete`, then `commands`, then the applied files,
+  then the asserts;
+- a TestAssert `timeout` becomes that step's assert timeout; the suite
+  timeout becomes the configuration's default for every operation;
+- a TestAssert command, which kuttl RETRIED until the timeout, becomes a
+  script that loops until it passes;
+- every script runs under bash (the scripts use `&>`, which dash, Ubuntu's
+  `sh`, parses as "background, then truncate", so `if cmd &> /dev/null`
+  always took the then-branch).
+
+What the conversion found, and changed on purpose:
+
+- **Every nfs-only PVC was unservable** (driver defect, fixed with the
+  migration). The first kind run of the nfs-only suite showed each
+  per-volume NFS server crash-looping on `F30 REFUSAL (exit 57): export
+  "/mnt/volume" has neither identity marker nor flint state`. F30
+  (2026-07-21) stamps the marker at NodeStage, but the emptyDir backend is
+  a hostPath the kubelet creates empty and nothing stages. The controller
+  now passes `--fresh-backing` for that backend only, and the server stamps
+  a WHOLLY empty export at first boot (any other unmarked export is still
+  refused). Nothing had run this suite since before F30.
+
+- **`$patch: delete` deleted nothing.** kuttl >= 0.15 ignores that form
+  (re-applies the object, warns "unknown field"). Ten deletes across six
+  tests were no-ops, including the writer delete in `rwo-pvc-migration`,
+  whose reader therefore mounted a volume the writer still held. They are
+  now `delete` operations.
+- **`rwo-pvc-migration` pinned "a different node" with a pod anti-affinity
+  on the writer's label**, which holds nothing once the writer is deleted.
+  The writer's node is now recorded, the reader is scheduled with a
+  `NotIn` node affinity, and the step asserts the two nodes differ.
+- **`rwx-single-replica`'s `03-cleanup` re-applied bare objects** (no
+  `$patch` at all), a no-op; it is now `delete` operations.
+- **`kubectl get pod X --ignore-not-found` exits 0 whether or not X
+  exists**, so the "writer is gone" asserts could not fail. They are
+  `error` operations now.
+- A TestStep `timeout` (kuttl has no such field; it was ignored) and
+  `ignoreFailure` on a TestAssert command (not a field there either) were
+  dropped, as kuttl dropped them.
+
+- **An RWO nfs-only volume could never move nodes** (driver defect, fixed
+  with the migration). NodeUnstage takes the unmount-only path for volumes
+  whose PV is RWX/ROX or pNFS; an RWO claim on the nfs-only class resolves
+  to the Block role, so it fell through to the SPDK teardown, which fails
+  on an nfs-only node (no `spdk.sock`). The unstage failed on every retry,
+  the kubelet kept the volume in use, it never detached, and the reader on
+  another node sat on `Multi-Attach error`. NodeUnstage now also reads the
+  PV's `nfs.chert.us/backend` and unstages `emptydir` volumes unmount-only.
+  (Under kuttl the writer was never deleted, so the test never reached it.)
+
+**Seen once, not reproduced:** in one parallel run the RWO writers hung in
+`close()` (D state in `nfs_wb_all`, the client's state manager in open-state
+recovery) before the NodeUnstage fix; three later runs, one with the same
+parallelism, did not show it. A hung hard NFS mount leaves D-state tasks in
+the HOST kernel that outlive the kind cluster: clear them with
+`nsenter -t <pid> -m umount -f /data` (the force flag aborts the RPCs even
+when the umount itself reports busy).
+
+Not changed, still weak: `clean-shutdown/03-verify-logs` (SPDK) passes
+whether or not the unload line is found, and `ephemeral-inline`'s cleanup
+step (both suites) only logs whether the controller deleted the volume.

@@ -286,22 +286,23 @@ spec:
 
 == Testing
 
-Run the comprehensive test suite:
+The system tests are https://kyverno.github.io/chainsaw/[Chainsaw] suites
+run against a cluster with the driver installed:
 
 [source,bash]
 ----
 cd tests/system
 
-# Run all standard tests (parallel execution)
-KUBECONFIG=/path/to/kubeconfig kubectl kuttl test --config kuttl-testsuite.yaml
+# Run all standard (SPDK) tests (parallel execution)
+KUBECONFIG=/path/to/kubeconfig chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard
 
 # Or run individual tests
-kubectl kuttl test --test rwo-pvc-migration
-kubectl kuttl test --test multi-replica
-kubectl kuttl test --test snapshot-restore
-kubectl kuttl test --test volume-expansion
-kubectl kuttl test --test pvc-clone
-kubectl kuttl test --test ephemeral-inline
+chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard/rwo-pvc-migration
+chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard/snapshot-restore
+
+# The nfs-only suite on a throwaway kind cluster, built from this tree
+# (what the GitHub gate runs: .github/workflows/system-chainsaw.yml)
+./kind-nfs-only.sh
 ----
 
 See link:tests/system/README.md[tests/system/README.md] for details.

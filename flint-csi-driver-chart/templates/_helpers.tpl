@@ -112,7 +112,10 @@ branch renders it as a YAML list.
 {{- end -}}
 {{- $args := list -}}
 {{- if .Values.spdkTarget.kindMode.enabled -}}
-{{- $args = concat $args (list "--no-huge" "-s" (.Values.spdkTarget.kindMode.spdkMemoryMB | toString) "--no-pci" "--interrupt-mode") -}}
+{{- $args = concat $args (list "--no-huge" "-s" (.Values.spdkTarget.kindMode.spdkMemoryMB | toString) "--no-pci") -}}
+{{- if ne (toString .Values.spdkTarget.kindMode.interruptMode) "false" -}}
+{{- $args = append $args "--interrupt-mode" -}}
+{{- end -}}
 {{- else if not .Values.spdkTarget.hugepages.enabled -}}
 {{- $args = concat $args (list "--no-huge" "-s" (.Values.spdkTarget.hugepages.noHugeMemoryMB | default 1024 | toString)) -}}
 {{- end -}}

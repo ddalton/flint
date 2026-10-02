@@ -58,7 +58,7 @@ Tests ReadWriteMany (RWX) volume support with a single-replica volume using NFS.
 
 ```bash
 cd tests/system
-kubectl kuttl test --test rwx-single-replica
+chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard/rwx-single-replica
 ```
 
 ## Success Criteria

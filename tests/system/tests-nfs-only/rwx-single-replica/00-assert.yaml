@@ -1,3 +1,0 @@
-# No assertion needed - PVC will bind when pods are created (WaitForFirstConsumer)
-# The binding will be verified in step 01-assert.yaml
-

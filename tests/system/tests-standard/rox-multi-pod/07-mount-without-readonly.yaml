@@ -30,7 +30,10 @@ spec:
         - /bin/sh
         - -c
         - |
-          if echo "F71_WROTE_THROUGH_ROX" > /data/f71-rw-probe 2>/tmp/err && sync; then
+          # 2> BEFORE >: redirections open left to right, and the open of
+          # /data/... is what fails on a read-only mount -- its error must
+          # already be going to /tmp/err.
+          if echo "F71_WROTE_THROUGH_ROX" 2>/tmp/err > /data/f71-rw-probe && sync; then
             echo "WRITE_LANDED"
           else
             echo "WRITE_REFUSED: $(cat /tmp/err)"

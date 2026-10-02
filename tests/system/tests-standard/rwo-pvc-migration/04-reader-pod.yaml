@@ -6,17 +6,19 @@ metadata:
     test: csi-reader
 spec:
   restartPolicy: Never
-  # Anti-affinity to ensure it runs on a different node than the writer
+  # A DIFFERENT node than the writer's, by name: __WRITER_NODE__ is
+  # replaced by chainsaw-test.yaml step 04, which applies this file. (A
+  # podAntiAffinity on the writer's label cannot do this once the writer
+  # is deleted -- and the old kuttl step never deleted it.)
   affinity:
-    podAntiAffinity:
+    nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
-        - labelSelector:
-            matchExpressions:
-              - key: test
-                operator: In
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: NotIn
                 values:
-                  - csi-writer
-          topologyKey: kubernetes.io/hostname
+                  - __WRITER_NODE__
   containers:
     - name: reader
       image: busybox:latest
