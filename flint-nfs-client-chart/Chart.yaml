@@ -9,7 +9,7 @@ type: application
 version: 0.1.0
 # The flint release whose image carries flint-nfs-client-identity (the
 # flint-lite-operator image, beside flint-nfs-proxy).
-appVersion: "1.56.0"
+appVersion: "1.57.0"
 keywords:
   - nfs
   - tls

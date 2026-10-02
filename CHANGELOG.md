@@ -12,7 +12,65 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.57.0] - 2026-10-02
+
+flint-lite gets the NFS proxy: many hubs behind one port, idle by
+default, hibernated shares parked as their CR alone, and a wake that
+reaches the user in seconds. Beside it, the s3csi `stsSecret` mode and
+the placed block cache, lean's immutable object handles, forge's sweep
+and snapshot fixes, and the system suites on Chainsaw.
+
 ### Added
+
+- **flint-lite: the NFS proxy — many hubs behind one port** (2026-09-27 →
+  10-02, `docs/plans/flint-lite-nfs-proxy-design.md`). `flint-nfs-proxy`
+  terminates NFSv4.1 sessions and routes each COMPOUND to the hub named by
+  the instance id every hub filehandle already carries, so hubs stay one
+  per share and the external surface is one LoadBalancer on 2049. Opt in
+  with the operator chart's `nfsProxy.enabled`. The hubs gain two
+  off-by-default switches the proxy turns on: a per-volume fsid
+  (`FLINT_NFS_FSID_FROM_VOLUME`) and a stateid tag
+  (`FLINT_NFS_STATEID_TAG`, assigned once per share as
+  `status.stateidTag` by its own field manager) so filehandle-less
+  TEST_STATEID/FREE_STATEID route. The proxy keeps each backend client's
+  lease alive while its downstream client's is, re-attaches after a hub
+  restart, carries a client reboot through as a new verifier, passes only
+  `RECALLABLE_STATE_REVOKED` downstream (0x08/0x10/0x20 cost a client its
+  locks on every other hub), and wakes a parked share by stamping
+  `chert.us/requested-at`. Behind the proxy, shares idle by default
+  (`nfsProxy.idleDefaults`: suspend 3600 s, hibernate 86400 s with a
+  bucket; `spec.idle: {}` opts out), hibernation requires no client
+  holding state (hub `nfs.liveStateHolders`, read after a full lease of
+  uptime), and a hibernated share is parked as its CR alone. Real-kernel
+  drills: step 3 14/14, step 4 kind 14/14, step 5 kind 19/19, revocation
+  7/7. 20,000 hibernated shares parked in 905 s with the operator at
+  ~19 KiB/share and the proxy at ~16 KiB/share. On AWS (i4i.xlarge, real
+  flint-spdk) a flint-csi-node roll under 8 live fsync'd writers lost
+  nothing; through the proxy, cross-node stat throughput is ~72% of
+  direct and sequential I/O equal. Multi-volume hubs: decided, not built.
+- **nfs-proxy: RPC-with-TLS mTLS, Istio ambient policy, and the client-node
+  identity agent** (2026-09-29). With `nfsProxy.tls`, a connection must
+  open with the RFC 9289 AUTH_TLS probe, a client certificate chained to
+  `clientCa` is required, the certificate's URI SANs are the identity
+  (`clients:` rules), and sessions and client ids are bound to it. The
+  files reload every `reloadSecs`. `nfsProxy.istio` renders the proxy's
+  capture bypass, STRICT PeerAuthentication and an L4 AuthorizationPolicy
+  per hub namespace, HBONE in the hub NetworkPolicy, and an optional
+  Gateway API TCPRoute (Istio 1.31 needs Gateway API ≥ v1.6). The new
+  `flint-nfs-client` chart runs `flint-nfs-client-identity` on every
+  client node: it keeps `/etc/flint/nfs-tls` equal to a cert-manager
+  Secret, installs only a pair that validates, and reports kernel ≥ 6.5
+  and tlshd readiness. Drills: mTLS 19/19 (the pre-2b proxy 13/19), Istio
+  17/17, client identity 22/22.
+- **flint-lite: hub requests drop to 20m / 100Mi** (2026-10-02), in the
+  operator's render defaults and the standalone chart alike. Measured idle
+  at ~65–103 MiB RSS and ~5 m CPU; 100m reserved 20× the use. Requests
+  only, still no limit. The operator's own memory limit goes 512Mi → 1Gi.
+- **CSI: the kind SPDK rig can use a real disk** (2026-10-02). Chart
+  `kindMode.virtualDisk.device` (`%NODE%` names the node) opens a whole
+  block device through uring and loads its lvstore on restart;
+  `kindMode.interruptMode: false` for NVMe-oF TCP (SPDK's interrupt mode
+  is PCIe-only, so every TCP attach failed with EOPNOTSUPP).
 
 - **flint-s3-csi: `identity.mode: stsSecret`, a hard worker ceiling, and
   a `MounterDead` that repeats** (2026-10-02,
@@ -378,6 +436,38 @@ covered by the stability guarantee.
 
 ### Changed
 
+- **flint-lite: a wake reaches the user in seconds** (2026-10-02). From
+  hibernate ~6–7 s, down from ~27 s; from suspend ~3 s, down from ~13 s.
+  Hub startup and readiness probes check every second (`startupProbe`
+  `failureThreshold` is now `startupFailureThreshold × 10` at
+  `periodSeconds: 1`, the same 10-minute budget), and the proxy holds a
+  compound for a waking hub (`nfsProxy.wakeHoldSecs`, default 20) instead
+  of answering NFS4ERR_DELAY at once.
+- **flint-lite-operator: noderoll is removed** (2026-10-02). It restarted a
+  hub after its node's spdk-tgt restarted, for a v1.14-era driver; a real
+  flint-csi-node roll now costs a ~5 s fsync stall and loses nothing, and
+  noderoll could never fire on the real chart (it read containerStatuses;
+  spdk-tgt is a native sidecar). The chart's `restartOnTgtRestart` is gone.
+- **flint-lite-operator: its own watch backoff** (2026-10-02). kube's
+  Controller pauses every watch behind one backoff; at 10,000 shares an
+  apiserver restart left the operator deaf for ~4 minutes. It now backs
+  off from 100 ms to a 5 s cap: every re-list by +29 s. Watch errors log
+  their whole error chain.
+- **Every system suite is Chainsaw, and the nfs-only suite gates CI**
+  (2026-10-02, `tests/system/`). kuttl is gone. The conversion found tests
+  that could not fail — `$patch: delete` deleted nothing on kuttl ≥ 0.15,
+  `--ignore-not-found` "asserted" absence, rwo-pvc-migration's reader
+  could land on the writer's node — and fixed them. The
+  `system-chainsaw` workflow builds the driver as published and runs the
+  nfs-only suite on a 3-node kind cluster (4/4). The SPDK suites ran on
+  real nodes (i4i.large): standard 8/8, clean-shutdown, replica-rebuild,
+  nfs-only 4/4 (`tests/system/results/2026-10-02-aws-spdk/`).
+- **release.sh refuses a chart whose image, as published, lacks a binary
+  the chart execs** (2026-09-30). The recipe grep said only that the NEXT
+  build would carry it. `flint-nfs-client` is now published (scope `all`).
+- `formal-lean.yml` is no longer a CI workflow; the lean model gate runs
+  on the box.
+
 - **forge: a batch names the packs its accepted pushes NEED, read off
   git; the per-push pack records are gone** (2026-10-02, the "needed
   packs" simplification of 2026-09-26, modelled as `ForgeSyncNeeded` and
@@ -474,6 +564,51 @@ covered by the stability guarantee.
   or `rw` and `network` a CIDR or address, or the server refuses to start.
 
 ### Fixed
+
+- **flint-lite-operator: a wake request left over from the previous wake
+  no longer aborts the next hibernation, wakes a parked share right after
+  it parks, or keeps a hibernated share's disk forever** (2026-10-02). The
+  proxy re-asks every 5 s while a hub starts, so a request can land after
+  the operator honoured the wake; read as presence, it did all three. The
+  operator ignores a request older than the share's last idle transition.
+- **flint-lite-operator: a live share's apply no longer re-triggers
+  itself** (2026-10-02). Each apply stamped `render-verified-at` with the
+  current time, so every live share reconciled about every 2 s and the
+  apiserver saw ~180 req/s at any fleet size. The stamp now advances only
+  when stale: 20 live + 200 parked, 177 → 4.8 req/s, operator CPU
+  151 m → 0 m.
+- **nfs-proxy: expired downstream clients are reaped on a 1 s timer, not
+  per compound** (2026-10-01). The per-compound scan walked every lease,
+  i.e. every client node, on every operation: 5.5% of the proxy's CPU
+  with one client, 0.01% after.
+- **nfs-only: emptyDir-backed volumes are served again, and an RWO one can
+  detach** (2026-10-02). F30's volume marker refused every emptyDir
+  volume (the server exited 57 at first boot); the controller now passes
+  `--fresh-backing` for that backend only and the server stamps a wholly
+  empty export. NodeUnstage of an RWO emptyDir volume ran the SPDK
+  teardown on a node with no SPDK, failed forever, and the pod could not
+  move nodes (Multi-Attach); it now unmounts only.
+- **lite: a client that replaces a file it holds open had its writes land
+  in the replaced inode** (2026-09-18). `write()` and `fsync()` returned
+  success and the file at the path stayed empty. The fd cache is keyed on
+  the inode the path names now, and REMOVE and RENAME evict.
+- **lite: a stateid for one file could read and write another**
+  (2026-09-18). READ and WRITE now refuse a stateid whose file is not the
+  current filehandle's, as knfsd's `nfs4_check_fh` does. SETATTR, LOCK
+  and LOCKU are not covered yet.
+- **nfs: a lock stateid is freeable after its last unlock, and an open
+  survives a restart whole** (2026-09-27). FREE_STATEID answered
+  LOCKS_HELD for every lock stateid, so every unmount's DESTROY_CLIENTID
+  was CLIENTID_BUSY; after a restart no restored open could be CLOSEd,
+  upgraded or downgraded, or enforced share-deny.
+- **nfs: `cp -a` from one flint mount to another no longer fails with EIO**
+  (2026-09-29, D3). The server advertised FATTR4_ACL and refused to set it;
+  ACL, and MAXFILESIZE, are no longer advertised, and RAWDEV is answered.
+- **nfs: a LOOKUPP result carries LOOKUPP's opcode** (2026-09-28). It
+  carried LOOKUP's, which the Linux client refuses to decode.
+- **CSI: disk discovery never takes a disk the host is using** (F73,
+  2026-09-26). An O_EXCL probe skips any disk the host holds; kind mode
+  turns discovery off.
 
 - **forge: a deposed holder's sweep deleted a pack its successor had just
   named** (2026-10-02, lesser finding 5 of the 2026-09-23 review, found by
@@ -9064,7 +9199,9 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.55.0...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.57.0...HEAD
+[1.57.0]: https://github.com/ddalton/flint/compare/v1.56.0...v1.57.0
+[1.56.0]: https://github.com/ddalton/flint/compare/v1.55.0...v1.56.0
 [1.55.0]: https://github.com/ddalton/flint/compare/v1.54.0...v1.55.0
 [1.54.0]: https://github.com/ddalton/flint/compare/v1.53.0...v1.54.0
 [1.53.0]: https://github.com/ddalton/flint/compare/v1.52.0...v1.53.0
