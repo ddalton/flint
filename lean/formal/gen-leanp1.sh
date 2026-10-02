@@ -12,18 +12,18 @@ CommitSurfacesForeign CommitVerifiesUploads SweepUnderLease CollectorSparesCited
 CommitRecordsDeleteOverride DeleteWinsPreserved ContentConverges RecheckSkipped CommitAdvanceGuarded RetireAge \
 GatewayIgnoresLease GatewayJudgesRead GatewaySweepGrace RenameAtomic \
 Scopes MaxRescopes ConsumeHonorsScope RescopeUnciteFirst RescopeKeepsDirty WidenKeepsLocal UnlinkChecksBytes \
-MaxFetchFails ConsumeKeepsLeft SyncKeepsLeft"
+MaxFetchFails ConsumeKeepsLeft SyncKeepsLeft Readers ReaderRechecksOwed"
 emit() { # <name> <spec> <invariants> <properties> <overrides...>
   local name=$1 spec=$2 invs=$3 props=$4; shift 4
   local c_Paths='{p1, p2}' c_Free='{p2}' c_Writers='{A, B}'
   local c_MaxMint=3 c_MaxUI=1 c_MaxRemovals=1 c_MaxBarriers=2 c_MaxRestarts=0 c_MaxSyncs=0 c_MaxCopies=1 c_MaxAges=1
-  local c_Scopes= c_MaxRescopes=0 c_MaxFetchFails=0
+  local c_Scopes= c_MaxRescopes=0 c_MaxFetchFails=0 c_Readers='{}'
   local k kv v
   for k in CommitSurfacesForeign CommitVerifiesUploads SweepUnderLease CollectorSparesCited \
            CommitRecordsDeleteOverride DeleteWinsPreserved ContentConverges RecheckSkipped CommitAdvanceGuarded RetireAge \
            GatewayIgnoresLease GatewayJudgesRead GatewaySweepGrace RenameAtomic \
            ConsumeHonorsScope RescopeUnciteFirst RescopeKeepsDirty WidenKeepsLocal UnlinkChecksBytes \
-           ConsumeKeepsLeft SyncKeepsLeft; do
+           ConsumeKeepsLeft SyncKeepsLeft ReaderRechecksOwed; do
     eval "local c_$k=TRUE"
   done
   for kv in "$@"; do k=${kv%%=*}; v=${kv#*=}; eval "c_$k=\"\$v\""; done
@@ -117,3 +117,15 @@ emit ConsumeLeftRecorded Spec TypeOK,Inv_ShortcutSound "" ConsumeKeepsLeft=FALSE
 emit SyncLeftRecorded Spec TypeOK,Inv_ShortcutSound "" SyncKeepsLeft=FALSE $FF
 emit ProbeFetchFailed Spec TypeOK ProbeFetchFailed $FF
 emit ScopeFetchHolds Spec "$INV" "$SPROPS" $SC MaxFetchFails=1
+# 2026-10-02: A READER. B has read access: it never publishes, and its tick
+# syncs the whole tree when the pointer moved since its last pull or its
+# baseline says something is still owed (L-129). One fetch may fail.
+RD="Paths={p1} Free={} MaxRemovals=0 MaxFetchFails=1 MaxAges=0 Readers={B}"
+emit ReaderHolds Spec "$INV,Inv_ReaderSound" "$PROPS,Prop_AgentWorkKept" $RD
+emit ReaderOwedIgnored Spec TypeOK,Inv_ReaderSound "" ReaderRechecksOwed=FALSE $RD
+emit ProbeReaderPulled Spec TypeOK ProbeReaderPulled $RD
+emit ProbeReaderSkipped Spec ProbeReaderSkipped "" $RD
+# The reader over two paths, scoped or not. No UI removal and no re-upload
+# copy: with them this grew ~1.75x a level past 27M states at depth 14.
+emit ReaderScopeHolds Spec "$INV,Inv_ReaderSound" "$PROPS,Prop_AgentWorkKept,Prop_ScopeRespected" \
+  Free={p2} MaxRemovals=0 MaxCopies=0 MaxFetchFails=1 MaxAges=0 Readers={B} "Scopes={{p1},{p1,p2}}"

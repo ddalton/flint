@@ -321,9 +321,10 @@ def convert(lines):
             "ContentConverges", "RecheckSkipped", "CommitAdvanceGuarded", "RetireAge", "GatewayIgnoresLease", "GatewayJudgesRead",
             "GatewaySweepGrace", "RenameAtomic",
             "ConsumeHonorsScope", "RescopeUnciteFirst", "RescopeKeepsDirty", "WidenKeepsLocal",
-            "UnlinkChecksBytes", "ConsumeKeepsLeft", "SyncKeepsLeft")},
-        # The traces check out unscoped, never rescope and never fail a fetch.
-        "Scopes": {frozenset(paths)}, "MaxRescopes": 0, "MaxFetchFails": 0,
+            "UnlinkChecksBytes", "ConsumeKeepsLeft", "SyncKeepsLeft", "ReaderRechecksOwed")},
+        # The traces check out unscoped, never rescope, never fail a fetch,
+        # and every tree in them writes.
+        "Scopes": {frozenset(paths)}, "MaxRescopes": 0, "MaxFetchFails": 0, "Readers": set(),
     }
     return steps, consts, ver_of
 

@@ -71,6 +71,8 @@ Guards read the state; effects write it.
 | **RescopeBegin**(s) | idle, no rescope in flight | THE DOOR: a target scope T; refused if a path T drops (held, not admitted) has unpublished changes. Else the INTENT (T, the drop set) is durable before the first mutation | — | — |
 | **RescopeFirst**(s) | an intent "saved" (a fresh one, or a replay after a crash) | keeps the still-cited dirty paths of the drop set (a replay must converge, not refuse); records what it drops (`ScopeIntent::held`) with the intent; UNCITES the rest (the baseline lets go) | `Prop_NarrowNeverDeletes` | `LeanP1NarrowUnlinkFirst` (unlink first, crash, replay: the absence publishes as a delete) |
 | **RescopeSecond**(s) | the uncite landed | UNLINKS what it uncited — only while the tree's bytes there are still the recorded ones (L-131); then the WIDEN: fetches each admitted citation the tree does not hold, adopts bytes that ARE the document's, keeps a file the agent made there (L-130); the scope := T; `derived` := 0 (the next consume derives in full); the intent clears. A restart between the halves sends the replay back to RescopeFirst, which re-derives what it keeps from the RECORDED drop set; the barrier replays before any consume | `Prop_AgentWorkKept`, `Prop_ScopeRespected` | `LeanP1UnlinkBlind` (L-131), `LeanP1WidenOverwrites` (L-130) |
+| **RPullRead**(s) | a reader, idle; NOT (the pointer is the one its last pull synced against and nothing is still owed: `derived` set and every `skipped` path still dirty) | reads the pointer (`rnow := seq`) | — | — |
+| **RPullSync**(s) | the pointer read | a whole-tree sync against the document as it is now, recording what it derived as a consume would (a failed fetch: nothing derived); then `memo := rnow`, the pointer read BEFORE the sync, so a document that moved in between is pulled again | `Inv_ReaderSound` | `LeanP1ReaderOwedIgnored` (judged by the pointer alone, L-129) |
 | **Sync**(s) | idle, something owed | takes what is owed, and records what it derived as a consume would (`derived := seq`, `skipped` := the dirty paths it left) — only when it took everything owed: a fetch or a write it could not complete records nothing, as the consume's `left` (L-128); a scoped sync in the code records nothing, so the next consume derives. With no document at all, a sync of a tree that holds paths refuses rather than read the absence as an empty document (L-127) | `Inv_NoRegress` | — |
 
 ## The invariants
@@ -90,6 +92,7 @@ Predicates on a state, and two on a step. Each world's list is in
 | **Inv_ReaderFetches** | a reader that loaded the document less than G ago can fetch every handle it cites (one lagging longer re-resolves the pointer) | the retire age (`LeanP1ReaderLoses`) |
 | **Prop_NoSilentRevert** | no lost update: a commit replaces a published version only if its tree held it at the path, the new version derives from it, a record preserves it, it moves to another path, or it was the human's own earlier acknowledged version there | R7 (`LeanP1NoR7`), the gateway judging a save against the version read (`LeanP1GatewayBlind`) |
 | **Prop_DeleteSettles** | a barrier that published a delete leaves the tree and the document agreeing at that path | M3 (`LeanP1DeleteOutranked`: theirs outranking mine) |
+| **Inv_ReaderSound** | a reader that skips a tick is owed nothing | the reader re-checking what its baseline says is owed (`LeanP1ReaderOwedIgnored`, L-129) |
 | **Prop_AgentWorkKept** | bytes the agent wrote that nobody has PUT yet leave its tree only by the agent's own hand | the widen keeping a file the agent made (`LeanP1WidenOverwrites`, L-130), the unlink taking only the bytes it uncited (`LeanP1UnlinkBlind`, L-131) |
 | **Prop_ScopeRespected** | no step but the agent's writes the tree at a path it neither holds nor admits | the consume's scope filter (`LeanP1ScopeIgnored`) |
 | **Prop_NarrowNeverDeletes** | a narrow is an unwatch, never an absence: no barrier publishes the delete of a path a rescope unlinked that the agent has not touched since | the uncite before the unlink (`LeanP1NarrowUnlinkFirst`) |
@@ -117,8 +120,12 @@ the pointer it integrated, so the next consume derives again
 (`LeanP1FetchHolds`, two writers on one path; `LeanP1ScopeFetchHolds`, with
 scope and rescope). Recording a derive that left something is
 `LeanP1ConsumeLeftRecorded` / `LeanP1SyncLeftRecorded` (L-128's class); both
-break `Inv_ShortcutSound`. A reader's re-sync while its baseline says
-something is owed (L-129) is not in the model: it has no reader tree.
+break `Inv_ShortcutSound`.
+
+A reader is modelled (2026-10-02): a tree in `Readers` never publishes, and
+its tick is `RPullRead` then `RPullSync` (`LeanP1ReaderHolds`, a writer and a
+reader on one path with a failed fetch; `LeanP1ReaderScopeHolds`, two paths,
+scoped or not). The request cell, the reader's second etag, is not.
 
 A widen's failed fetch leaves the path unheld but covered, so the next
 consume owes it; the code also records it (`rescope-refused`).

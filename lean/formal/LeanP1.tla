@@ -35,8 +35,15 @@
    move the pointer it integrated.  With `MaxFetchFails = 0` every state is
    the model's without it.
 
+   A READER (2026-10-02, `reader.rs`): a tree in `Readers` never publishes.
+   Its tick reads the pointer, and syncs the whole tree only when the
+   pointer moved since the last pull (`memo`) or its baseline says
+   something is still owed (L-129); it then remembers the pointer it read
+   BEFORE the sync, so a document that moved in between is pulled again.
+
    Differences from the code the model keeps on purpose: a scoped SYNC (D4,
-   a request scope narrower than the workspace's) is not modelled.        *)
+   a request scope narrower than the workspace's) is not modelled; the
+   reader's second etag (the request cell) is not either.               *)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS
@@ -77,11 +84,15 @@ CONSTANTS
   \* A failed fetch.
   MaxFetchFails,
   ConsumeKeepsLeft,             \* a consume that left a path records nothing as derived
-  SyncKeepsLeft                 \* likewise a sync (L-128)
+  SyncKeepsLeft,                \* likewise a sync (L-128)
+  \* Readers.
+  Readers,                      \* the trees with read access (a subset of Writers)
+  ReaderRechecksOwed            \* a reader pulls while its baseline says something is owed (L-129)
 
 ASSUME Free \subseteq Paths
 ASSUME MaxMint \in Nat /\ MaxMint >= 1
 ASSUME Scopes \subseteq SUBSET Paths /\ Scopes # {}
+ASSUME Readers \subseteq Writers
 
 Seed == 1
 Gens == Seed..(MaxMint + MaxCopies)
@@ -113,7 +124,7 @@ vars == <<live, minted, doc, seq, tomb, base, acked, conflicts, holder,
 
 Writer ==
   [st : {"off", "on"},
-   pc : {"idle", "consumed", "scanned", "claimed", "cased"},
+   pc : {"idle", "consumed", "scanned", "claimed", "cased", "pulling"},
    local : [Paths -> Opt(Handles)],     \* the tree
    baseline : [Paths -> Opt(Handles)],  \* what the tree integrated — and the merge base
    integrated : SUBSET Gens,
@@ -137,7 +148,10 @@ Writer ==
    sTgt : SUBSET Paths, sDrop : SUBSET Paths, sKeep : SUBSET Paths,
    sHeld : [Paths -> Opt(Handles)],
    \* A ghost: paths a rescope unlinked that the agent has not touched since.
-   unlinked : SUBSET Paths]
+   unlinked : SUBSET Paths,
+   \* A reader: the pointer its last completed pull synced against
+   \* (`reader.json`, 0: none), and the one this pull read.
+   memo : Nat, rnow : Nat]
 
 WriterInit ==
   [st |-> "off", pc |-> "idle",
@@ -148,7 +162,7 @@ WriterInit ==
    verified |-> FALSE, inst |-> [p \in Paths |-> Nil], retire |-> {},
    collected |-> FALSE, adv |-> FALSE, synced |-> 0, derived |-> 0, skipped |-> {},
    scope |-> {}, sStage |-> "none", sTgt |-> {}, sDrop |-> {}, sKeep |-> {},
-   sHeld |-> [p \in Paths |-> Nil], unlinked |-> {}]
+   sHeld |-> [p \in Paths |-> Nil], unlinked |-> {}, memo |-> 0, rnow |-> 0]
 
 TypeOK ==
   /\ live \subseteq Handles /\ minted \subseteq Handles /\ live \subseteq minted
@@ -316,7 +330,7 @@ CheapPath(s) ==
   /\ w[s].derived = seq
   /\ RecheckSkipped => \A p \in w[s].skipped : w[s].local[p] # w[s].baseline[p]
 Consume(s) ==
-  /\ On(s) /\ w[s].pc = "idle" /\ barriers < MaxBarriers
+  /\ On(s) /\ s \notin Readers /\ w[s].pc = "idle" /\ barriers < MaxBarriers
   \* Step 0 replays a rescope in flight first (`run_barrier`).
   /\ w[s].sStage = "none"
   /\ IF CheapPath(s)
@@ -566,7 +580,7 @@ Restart(s) ==
 \* A sync does not replay a rescope; it can run after a crash left one
 \* "saved" (the scope it reads is still the old one).
 Sync(s) ==
-  /\ On(s) /\ w[s].pc = "idle" /\ syncs < MaxSyncs /\ w[s].sStage \in {"none", "saved"}
+  /\ On(s) /\ s \notin Readers /\ w[s].pc = "idle" /\ syncs < MaxSyncs /\ w[s].sStage \in {"none", "saved"}
   /\ \E p \in Paths : Owed(s, p)
   /\ LET all == {p \in Paths : Owed(s, p)} IN
      \E fail \in SUBSET all :
@@ -681,6 +695,46 @@ RescopeSecond(s) ==
                  restarts, syncs, regressed, rescopes, upped, copies, orig>>
 
 ------------------------------------------------------------------------------
+(* A reader's tick (`reader.rs::reader_pull`).                             *)
+
+\* What the sync last left owed, by its own record: nothing derived (a
+\* fetch or a write it could not complete), or a path it skipped as dirty
+\* that is clean again (`still_owed`).
+StillOwed(s) == w[s].derived = 0 \/ \E p \in w[s].skipped : w[s].local[p] = w[s].baseline[p]
+\* The tick does nothing: the pointer is the one last pulled against, and
+\* (L-129) nothing is still owed.
+ReaderSkips(s) == w[s].memo = seq /\ (ReaderRechecksOwed => ~StillOwed(s))
+
+\* The pointer GET.
+RPullRead(s) ==
+  /\ On(s) /\ s \in Readers /\ w[s].pc = "idle" /\ w[s].sStage \in {"none", "saved"}
+  /\ ~ReaderSkips(s)
+  /\ w' = [w EXCEPT ![s].pc = "pulling", ![s].rnow = seq]
+  /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
+
+\* The whole-tree sync, against the document as it is NOW (it reads both
+\* again), recording what it derived as a consume would; then the memo is
+\* the pointer read BEFORE it.
+RPullSync(s) ==
+  /\ On(s) /\ s \in Readers /\ w[s].pc = "pulling"
+  /\ LET all == {p \in Paths : Owed(s, p)} IN
+     \E fail \in SUBSET all :
+     LET owed == all \ fail
+         left == fail # {}
+         bl == [p \in Paths |-> IF p \in owed THEN doc[p] ELSE w[s].baseline[p]]
+     IN /\ fails + Cardinality(fail) <= MaxFetchFails
+        /\ w' = [w EXCEPT ![s].pc = "idle", ![s].memo = w[s].rnow,
+                       ![s].local = [p \in Paths |-> IF p \in owed THEN doc[p] ELSE @[p]],
+                       ![s].baseline = bl,
+                       ![s].integrated = @ \cup {Gen(doc[p]) : p \in {q \in owed : doc[q] # Nil}},
+                       ![s].derived = IF left /\ SyncKeepsLeft THEN 0 ELSE seq,
+                       ![s].skipped = IF left /\ SyncKeepsLeft THEN {}
+                                      ELSE {p \in Paths : doc[p] # bl[p] /\ w[s].local[p] # bl[p] /\ Held(s, p)}]
+        /\ fails' = fails + Cardinality(fail)
+        /\ regressed' = (regressed \/ \E p \in owed : Back(s, p))
+  /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, restarts, syncs, rescopes, upped, copies, orig>>
+
+------------------------------------------------------------------------------
 (* The retire age (M1) and a reader of the document.                       *)
 
 \* Every step that moves the document LOGS the handles it stopped citing
@@ -745,6 +799,7 @@ WriterStep ==
        \/ Checkout(s) \/ Consume(s) \/ Scan(s) \/ Skip(s) \/ PullOnly(s) \/ Claim(s)
        \/ Verify(s) \/ Install(s) \/ Collect(s) \/ Finish(s) \/ Restart(s) \/ Sync(s)
        \/ RescopeBegin(s) \/ RescopeFirst(s) \/ RescopeSecond(s)
+       \/ RPullRead(s) \/ RPullSync(s)
   \/ \E s \in Writers, p \in Paths : Edit(s, p) \/ Delete(s, p) \/ Upload(s, p)
   \/ \E s \in Writers, h \in Handles : Sweep(s, h)
 
@@ -821,6 +876,12 @@ Inv_ShortcutSound ==
     (On(s) /\ w[s].pc = "idle" /\ w[s].sStage = "none" /\ CheapPath(s))
       => \A p \in Paths : ~Owed(s, p)
 
+\* A READER THAT SKIPS A TICK IS OWED NOTHING (the reader's cheap path).
+Inv_ReaderSound ==
+  \A s \in Readers :
+    (On(s) /\ w[s].pc = "idle" /\ w[s].sStage = "none" /\ ReaderSkips(s))
+      => \A p \in Paths : ~Owed(s, p)
+
 \* M3: a barrier that published a delete leaves the tree and the document
 \* agreeing at that path (applied, or the tree took what stands).
 Prop_DeleteSettles ==
@@ -867,6 +928,9 @@ ProbeNarrowed == [][~\E s \in Writers : w[s].sStage = "mid" /\ w'[s].sStage = "n
 ProbeWidened == [][~\E s \in Writers : w[s].sStage = "mid" /\ w'[s].sStage = "none"
                      /\ \E p \in Paths : w[s].baseline[p] = Nil /\ w'[s].baseline[p] # Nil]_vars
 ProbeRescopeReplayed == [][~\E s \in Writers : w[s].sStage = "mid" /\ w'[s].sStage = "saved"]_vars
+\* A reader pulled, and a reader skipped a tick it could have taken.
+ProbeReaderPulled == [][~\E s \in Readers : w[s].pc = "pulling" /\ w'[s].pc = "idle"]_vars
+ProbeReaderSkipped == ~\E s \in Readers : On(s) /\ w[s].pc = "idle" /\ w[s].memo = seq /\ w[s].memo # 0
 \* A consume or a sync left a path it owed (a fetch failed).
 ProbeFetchFailed == [][fails' = fails]_vars
 ProbeOutOfScopePublished ==
