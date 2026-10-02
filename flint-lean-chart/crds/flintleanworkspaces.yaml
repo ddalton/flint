@@ -170,11 +170,11 @@ spec:
                       (needs TLS trust in the mounter image).
                       `static`: the pod's `nodePublishSecretRef` (AWS_* keys verbatim)
                       — the interim arm, today's trust level.
-                      `stsSecret`: the pod's `nodePublishSecretRef` carrying an EXPIRING
-                      credential a controller keeps fresh (AWS_* plus
+                      `stsSecret`: an EXPIRING credential a controller keeps fresh in the
+                      pod's `nodePublishSecretRef` Secret (AWS_* plus
                       `AWS_CREDENTIAL_EXPIRATION` and a `generation`), served over the
                       worker's door and replaced in place on republish under the
-                      generation rules (docs/plans/passthrough-sts-secret-mode.md).
+                      generation rules (`creds::sts_replace_decision`).
                       `ambient`: nothing; the worker's own AWS chain.
                     type: string
                 type: object
