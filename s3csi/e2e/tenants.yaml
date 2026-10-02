@@ -81,6 +81,26 @@ spec:
   identity:
     mode: static
 ---
+# stsSecret (S31): the POD names a Secret a controller keeps fresh —
+# AWS_* plus AWS_CREDENTIAL_EXPIRATION and a generation — served over the
+# door and replaced in place (docs/plans/passthrough-sts-secret-mode.md).
+# The Secret itself is the leg's to write; the pod is sts-reader.yaml.
+apiVersion: chert.us/v1alpha1
+kind: FlintPassthroughMount
+metadata:
+  name: datasets-sts
+  namespace: s3-tenants
+spec:
+  bucket: s3bucket
+  keyPrefix: datasets/imagenet
+  endpoint: http://minio.flint-system.svc:9000
+  region: us-east-1
+  uid: 1001
+  consumers:
+    serviceAccounts: [trainer]
+  identity:
+    mode: stsSecret
+---
 # A CR with NO consumers block at all: absent = deny (S6b).
 apiVersion: chert.us/v1alpha1
 kind: FlintPassthroughMount

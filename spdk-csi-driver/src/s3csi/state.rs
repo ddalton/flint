@@ -57,6 +57,20 @@ pub struct VolumeState {
     pub last_probe_ok: Option<bool>,
     #[serde(default)]
     pub published_unix: Option<u64>,
+    /// `stsSecret`: the generation of the credential in the worker's
+    /// `creds.json` — the installed watermark; a candidate installs only
+    /// above it (`creds::sts_replace_decision`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creds_generation: Option<u64>,
+    /// `stsSecret`: the last generation the Secret OFFERED, installed or
+    /// refused — kept apart from the installed one so a refused candidate
+    /// neither advances the watermark nor is forgotten.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempted_generation: Option<u64>,
+    /// `stsSecret`: the refusal last said on the tenant pod, so the same
+    /// refusal is not an Event per republish; cleared by an install.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sts_refusal: Option<String>,
     pub read_only: bool,
     pub owner_uid: u32,
     pub owner_gid: u32,
@@ -360,6 +374,9 @@ mod tests {
             token_expiration: None,
             last_probe_ok: None,
             published_unix: None,
+            creds_generation: None,
+            attempted_generation: None,
+            sts_refusal: None,
             read_only: false,
             owner_uid: 1001,
             owner_gid: 1001,
@@ -429,6 +446,9 @@ mod tests {
             token_expiration: None,
             last_probe_ok: None,
             published_unix: None,
+            creds_generation: None,
+            attempted_generation: None,
+            sts_refusal: None,
             read_only: false,
             owner_uid: 1001,
             owner_gid: 1001,

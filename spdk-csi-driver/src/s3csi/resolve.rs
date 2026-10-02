@@ -322,7 +322,12 @@ mod tests {
     #[test]
     fn the_other_modes_still_pass_on_a_passthrough_mount() {
         // The control: the refusal is scoped to ONE mode.
-        for (m, want) in [("broker", CredentialMode::Broker), ("static", CredentialMode::Static), ("ambient", CredentialMode::Ambient)] {
+        for (m, want) in [
+            ("broker", CredentialMode::Broker),
+            ("static", CredentialMode::Static),
+            ("stsSecret", CredentialMode::StsSecret),
+            ("ambient", CredentialMode::Ambient),
+        ] {
             let r = decide_passthrough(
                 Some(pt(json!({ "bucket": "b", "consumers": { "serviceAccounts": ["*"] }, "identity": { "mode": m } }))),
                 "team-a",

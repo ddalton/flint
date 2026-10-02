@@ -225,7 +225,8 @@ spec:
                     identity.mode broker (a broker whose backend scopes a
                     read grant by the CR: sts or static) or ambient; a
                     read-write consumer keeps its own mounter, and
-                    identity.mode static is refused with this set. The
+                    identity.mode static or stsSecret is refused with this
+                    set (each pod's Secret is its own). The
                     trade, stated: one mounter's death strands every
                     member; one memory limit and prefetch budget serve
                     them all; and a member's grant cannot be revoked on
@@ -299,11 +300,20 @@ spec:
                     FlintLeanWorkspace, whose syncer does implement it);
                     static — the pod's
                     nodePublishSecretRef (AWS_* keys verbatim, the
-                    interim arm); ambient — the worker's own AWS chain.
+                    interim arm); stsSecret — the pod's
+                    nodePublishSecretRef again, but an EXPIRING credential
+                    a controller keeps fresh (AWS_* plus
+                    AWS_CREDENTIAL_EXPIRATION and a generation), served
+                    over the worker's door and replaced in place on
+                    republish when the Secret offers a higher generation
+                    with at least 120 s left — never a lower one, never
+                    the same generation with other contents
+                    (docs/plans/passthrough-sts-secret-mode.md); ambient —
+                    the worker's own AWS chain.
                   properties:
                     mode:
                       type: string
-                      enum: [broker, webIdentity, static, ambient]
+                      enum: [broker, webIdentity, static, stsSecret, ambient]
                       default: broker
               # No `additionalProperties: false` here — a structural
               # schema forbids it alongside `properties`, and it would

@@ -14,6 +14,44 @@ covered by the stability guarantee.
 
 ### Added
 
+- **flint-s3-csi: `identity.mode: stsSecret`, a hard worker ceiling, and
+  a `MounterDead` that repeats** (2026-10-02,
+  `docs/plans/passthrough-sts-secret-mode.md`; the node half of what
+  awc-docs PR #136 asks of an S3 FUSE node, assuming AWC adopts this
+  driver). `stsSecret`: the pod's `nodePublishSecretRef` carries an
+  EXPIRING credential plus a `generation` and an optional envelope
+  (`namespace`, `serviceAccount`, `mount`); it is served over the worker's
+  door like the broker's keys (nothing sensitive in mount-s3's env, which
+  `static` cannot say) and on every republish a higher generation with at
+  least 120 s left replaces `creds.json` in place — no remount, the same
+  mount-s3 PID. A lower generation, the same generation with other
+  contents, a near-dead candidate, an envelope naming another pod or a
+  key outside the schema is refused and said once as `CredentialRefused`;
+  an install is `CredentialReplaced`. The schema is PROVISIONAL until
+  #136's envelope settles. `workers.maxPerNode` (`FLINT_S3CSI_MAX_WORKERS_PER_NODE`,
+  off by default): counted at the API before every worker create; over
+  it `ResourceExhausted` + `WorkerCapacity`. `MounterDead` now fires on
+  every republish while the mounter is dead, not on the transition only.
+  `spec.sharing.readOnly` is refused with `stsSecret` as with `static`.
+  The republish match is exhaustive over the mode — `static` sat under a
+  wildcard and was the one arm that never refreshed. The candidate probe
+  the #136 reviewer asked for is DEFERRED: it belongs in the receiver
+  that writes the Secret, or in the worker pod, not in the plugin (§6).
+  The worker's door now logs one line per fetch with the expiration it
+  served: until now nothing observed the MOUNTER re-reading a
+  replacement — P8's oracle sampled the file the plugin wrote, which
+  under a same-key backend cannot tell a re-fetch from none. S31 waits
+  for that fetch. Kind (box): S31 21/21, S32 3/3, S33 6/6, S24 23/23
+  (`s3csi/e2e/results/2026-10-02-kind-sts-secret/`). REAL bucket, REAL
+  15-minute STS sessions (`s3csi/e2e/aws-sts-secret.sh` R1, 13/13): a
+  rotated pod read every 5 s for 32 min across three session expiries
+  with zero errors; an unrotated pod under the same CR failed 1 s after
+  its session expired and never recovered; mount-s3 fetched each new
+  generation from the door ~298 s before its predecessor expired, once —
+  the CRT asks at T−300 s and takes what is there, so a controller must
+  offer the next generation seven minutes before expiry (the note's
+  rule, corrected from four). Torn down and verified.
+
 - **flint-s3-csi: the placed block cache measured on an instance store —
   half the penalty, not none** (2026-10-01, step 4 of the sharing design's
   §11; `s3csi/e2e/results/2026-10-01-ec2-step4/`). On trove `s3a`

@@ -579,6 +579,18 @@ fn serve_door(listener: std::net::TcpListener, comm: &Path) {
         };
         let req = String::from_utf8_lossy(&buf[..n]);
         let (status, body) = door_response(&req, comm);
+        if status.starts_with("200") {
+            // One line per fetch, so what the MOUNTER took from the door is
+            // observable: the plugin rewriting creds.json is not proof the
+            // consumer re-read it (the rotation soak's oracle sampled the
+            // file, which cannot tell a re-fetch from none when the key is
+            // the same). The expiration only — never the key.
+            let exp = serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v.get("Expiration").and_then(|e| e.as_str()).map(str::to_string))
+                .unwrap_or_else(|| "?".into());
+            eprintln!("flint-s3-worker: door served creds.json Expiration={exp}");
+        }
         let resp = format!(
             "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()

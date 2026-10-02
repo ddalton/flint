@@ -242,6 +242,55 @@ plugin_rolled() { $K -n $SYS rollout status ds/flint-s3-csi-node --timeout=240s 
 # renders as `ESC[3mtenant ESC[0m ESC[2m= ESC[0m value`, so a grep for
 # `tenant=…` can never match the raw stream. Stripped here, once.
 plugin_log() { $K -n $SYS logs "$(plugin_pod)" 2>/dev/null | sed "s/$(printf '\033')\[[0-9;]*m//g"; }
+# ── stsSecret helpers (S31-S33) ──────────────────────────────────────
+# An RFC 3339 instant N seconds from now (GNU date, then BSD).
+iso_in() { date -u -d "@$(( $(date +%s) + $1 ))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$(( $(date +%s) + $1 ))" +%Y-%m-%dT%H:%M:%SZ; }
+# The stsSecret Secret a controller would keep fresh: a generation, an
+# expiry (seconds from now), then any extra key=value pairs — envelope
+# fields, or a key the schema must refuse. The rig's store key, no
+# session token (the schema makes it optional for exactly this). Prints
+# the expiration it wrote, which is what the door will serve.
+sts_secret() { # gen secs-from-now [k=v ...]
+    local gen=$1 secs=$2 exp kv extra=""; shift 2
+    exp=$(iso_in "$secs")
+    for kv in "$@"; do extra="$extra --from-literal=$kv"; done
+    # shellcheck disable=SC2086
+    $K -n $NS create secret generic sts-session --dry-run=client -o yaml \
+        --from-literal=AWS_ACCESS_KEY_ID=drill --from-literal=AWS_SECRET_ACCESS_KEY=drillsecret \
+        --from-literal=AWS_CREDENTIAL_EXPIRATION="$exp" --from-literal=generation="$gen" $extra \
+        | $K apply -f - >/dev/null
+    echo "$exp"
+}
+# The expiration the worker's door serves now — what the mounter fetches.
+creds_exp() { $K -n $WNS exec "$1" -- cat /comm/creds.json 2>/dev/null | jq -r '.Expiration // empty' 2>/dev/null; }
+# Wait (bounded) for the door's expiration to BECOME $2; prints the seconds it took.
+wait_creds_exp() { # worker want secs
+    local i=0
+    while [ $i -lt "$3" ]; do
+        [ "$(creds_exp "$1")" = "$2" ] && { echo "$i"; return 0; }
+        sleep 5; i=$((i + 5))
+    done
+    echo "$i"; return 1
+}
+# Wait (bounded) for an event on pod $1 with reason $2 whose message has $3; prints it.
+wait_event() { # pod reason grep secs
+    local i=0 m
+    while [ $i -lt "$4" ]; do
+        m=$(mount_events "$1" | grep "^$2:" | grep -- "$3" | tail -1)
+        [ -n "$m" ] && { printf '%s\n' "$m"; return 0; }
+        sleep 5; i=$((i + 5))
+    done
+    return 1
+}
+# How many times the door has served a creds.json with THIS expiration —
+# the worker logs one line per fetch, so this is what the MOUNTER took,
+# not what the plugin wrote.
+door_served() { $K -n $WNS logs "$1" 2>/dev/null | grep -c "door served creds.json Expiration=$2" || true; }
+# An RFC 3339 instant as epoch seconds (GNU date, then BSD).
+iso_to_epoch() { date -u -d "$1" +%s 2>/dev/null || date -j -u -f %Y-%m-%dT%H:%M:%SZ "$1" +%s; }
+# The mount-s3 PID inside a worker — the same one across a credential
+# replacement is the proof there was no remount.
+mounter_pid() { $K -n $WNS exec "$1" -- sh -c 'for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = mount-s3 ] && echo ${p#/proc/}; done' 2>/dev/null | head -1; }
 # ONE document of a fixture file, by kind and name, so a leg can recreate
 # a single pod (or a renamed copy of it) without re-applying every CR the
 # file holds — which would undo a patch the leg just made.
@@ -2046,6 +2095,139 @@ chart_up >/dev/null 2>&1 && plugin_rolled && ok "chart restored (no cache placem
 $K -n $NS delete pod shared-a reader reader-ro --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
 apply_fx tenants.yaml >/dev/null
 for n in $($K get nodes -o jsonpath='{.items[*].metadata.name}'); do NODE=$n onnode "rm -rf $CROOT" >/dev/null 2>&1; done
+
+# ── S31 stsSecret: a controller-fed credential, replaced in place ─────
+# identity.mode stsSecret (docs/plans/passthrough-sts-secret-mode.md): the
+# pod's nodePublishSecretRef carries an EXPIRING credential plus a
+# generation, served over the door like the broker's keys and replaced on
+# republish under the generation rules. Every rule is observed where it
+# lands — the door's creds.json — AND every refusal is observed as the
+# plugin's own Event, so a rule that silently did nothing cannot pass as
+# "unchanged". Each rewrite of the Secret costs one republish (~60-90 s).
+leg S31 "stsSecret: a Secret-fed expiring credential mounts through the door, a higher generation replaces it in place and is FETCHED by the mounter, and every refusal is said once"
+# Generation 1 lives 300 s: short enough that the mounter's re-fetch of
+# its replacement is observed inside the leg, long enough for the publish.
+e1want=$(sts_secret 1 300)
+apply_fx sts-reader.yaml >/dev/null
+if wait_phase reader-sts Running 180; then
+    got=$(inpod reader-sts cat /mnt/s3/shard-07.txt)
+    [ "$got" = "seeded-object-07" ] && ok "stsSecret mount reads content" || bad "stsSecret read: '$got'"
+    w=$(worker_of reader-sts); p1=$(mounter_pid "$w")
+    e1=$(creds_exp "$w")
+    # A reader every 5 s for the leg's life. mount-s3 (the CRT) fetches
+    # credentials LAZILY — only when a request needs signing after its
+    # refresh point — so an idle mount never shows the fetch: the first
+    # run saw five fetches at startup and none in the six minutes after
+    # the replacement, because the one read before generation 1 expired
+    # needed nothing. The reads also make the leg a small soak.
+    s31_out=$(mktemp)
+    ( $K -n $NS exec reader-sts -c agent -- /bin/sh -c 'e=0; n=0; end=$(( $(date +%s) + 900 )); while [ $(date +%s) -lt $end ]; do n=$((n+1)); [ "$(cat /mnt/s3/shard-07.txt 2>/dev/null)" = seeded-object-07 ] || e=$((e+1)); sleep 5; done; echo "errors=$e reads=$n"' > "$s31_out" 2>&1 ) & s31_pid=$!
+    [ -n "$e1" ] && ok "the door serves creds.json (generation 1, expires $e1)" || bad "no creds.json behind the door of $w"
+    # The door form, not the static arm's: nothing sensitive in the child's env.
+    envs=$($K -n $WNS exec "$w" -- sh -c 'for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = mount-s3 ] && tr "\0" "\n" < $p/environ; done' 2>/dev/null)
+    echo "$envs" | grep -q '^AWS_CONTAINER_CREDENTIALS_FULL_URI=' && ok "mount-s3's env points at the door" || bad "mount-s3's env has no AWS_CONTAINER_CREDENTIALS_FULL_URI: $(echo "$envs" | grep '^AWS_' | tr '\n' ' ')"
+    echo "$envs" | grep -q '^AWS_SECRET_ACCESS_KEY=' && bad "mount-s3's env carries AWS_SECRET_ACCESS_KEY — the static arm's shape, not the door's" || ok "no secret in mount-s3's env"
+    # 1. A HIGHER generation replaces the credential in place.
+    e2=$(sts_secret 2 1200)
+    t=$(wait_creds_exp "$w" "$e2" 240) && ok "generation 2 reached the door in ${t}s (expires $e2)" || bad "generation 2 never reached creds.json in ${t}s (the door serves '$(creds_exp "$w")')"
+    wait_event reader-sts CredentialReplaced "generation 2" 30 >/dev/null && ok "a CredentialReplaced event names generation 2" || bad "no CredentialReplaced event for generation 2"
+    # THE CONSUMER'S SIDE: the mounter must FETCH generation 2 from the door
+    # before generation 1 expires. The plugin's rewrite proved nothing
+    # about that; the worker's door log does.
+    i=0; while [ $i -lt 360 ] && [ "$(door_served "$w" "$e2")" = 0 ]; do sleep 5; i=$((i + 5)); done
+    if [ "$(door_served "$w" "$e2")" -ge 1 ]; then
+        left=$(( $(iso_to_epoch "$e1") - $(date +%s) ))
+        [ "$left" -gt 0 ] && ok "mount-s3 fetched generation 2 from the door ${left}s BEFORE generation 1 expired (door log; waited ${i}s)" || bad "mount-s3 fetched generation 2 only $(( -left ))s AFTER generation 1 had expired — a real session would have 403'd in between"
+    else
+        bad "mount-s3 never fetched generation 2 from the door within ${i}s (door served gen 1 $(door_served "$w" "$e1") time(s)); the plugin's rewrite reached nobody"
+    fi
+    got=$(inpod reader-sts cat /mnt/s3/shard-07.txt)
+    [ "$got" = "seeded-object-07" ] && ok "reads continue across the replacement" || bad "read after the replacement: '$got'"
+    # 2. A LOWER generation is refused and said; the door is untouched.
+    sts_secret 1 1500 >/dev/null
+    wait_event reader-sts CredentialRefused "lower than the installed 2" 240 >/dev/null && ok "a lower generation is refused, and the refusal names both generations" || bad "no CredentialRefused for a rollback within 240 s: $(mount_events reader-sts | grep Credential | tail -1 | cut -c1-200)"
+    [ "$(creds_exp "$w")" = "$e2" ] && ok "the door still serves generation 2 after the rollback attempt" || bad "the door CHANGED on a lower generation: '$(creds_exp "$w")'"
+    # 3. Under the 120 s floor: refused; the SAME generation re-offered with life installs.
+    sts_secret 3 60 >/dev/null
+    wait_event reader-sts CredentialRefused "under 120 s" 240 >/dev/null && ok "generation 3 with 60 s left is refused" || bad "no refusal for a 60 s candidate within 240 s"
+    [ "$(creds_exp "$w")" = "$e2" ] && ok "the door kept generation 2 through the short-lived candidate" || bad "the door took a candidate under the floor: '$(creds_exp "$w")'"
+    e3=$(sts_secret 3 1800)
+    t=$(wait_creds_exp "$w" "$e3" 240) && ok "the same generation 3, re-offered with life, installs in ${t}s — the refusal did not poison it" || bad "generation 3 with life never installed (the door serves '$(creds_exp "$w")')"
+    # 4. An envelope minted for another pod is refused; one naming this pod installs.
+    sts_secret 4 1800 serviceAccount=someone-else >/dev/null
+    wait_event reader-sts CredentialRefused "serviceAccount" 240 >/dev/null && ok "an envelope naming another ServiceAccount is refused" || bad "no refusal for a foreign envelope within 240 s"
+    [ "$(creds_exp "$w")" = "$e3" ] && ok "the door kept generation 3 through the foreign envelope" || bad "the door took a foreign envelope: '$(creds_exp "$w")'"
+    e4=$(sts_secret 4 1800 namespace=$NS serviceAccount=trainer mount=datasets-sts)
+    t=$(wait_creds_exp "$w" "$e4" 240) && ok "an envelope naming this namespace, ServiceAccount and mount installs generation 4 in ${t}s" || bad "generation 4 with a matching envelope never installed (the door serves '$(creds_exp "$w")')"
+    # 5. A key outside the schema is refused BY NAME: a misspelt envelope
+    #    field must not pass as an absent one.
+    sts_secret 5 1800 serviceaccount=trainer >/dev/null
+    wait_event reader-sts CredentialRefused "serviceaccount" 240 >/dev/null && ok "an unknown key is refused by name" || bad "no refusal naming the unknown key within 240 s"
+    [ "$(creds_exp "$w")" = "$e4" ] && ok "the door kept generation 4 through the unknown key" || bad "the door moved on an unknown key: '$(creds_exp "$w")'"
+    # The same refusal is said ONCE, not once per republish: count, wait a
+    # period, count again.
+    n1=$(mount_events reader-sts | grep -c 'CredentialRefused.*serviceaccount' || true)
+    sleep 100
+    n2=$(mount_events reader-sts | grep -c 'CredentialRefused.*serviceaccount' || true)
+    [ "${n1:-0}" -ge 1 ] && [ "$n1" = "$n2" ] && ok "the unknown-key refusal was said once ($n1), not again a republish later" || bad "the refusal count went $n1 → $n2 over one republish period"
+    # No remount through all of it: the same mount-s3 process.
+    p2=$(mounter_pid "$w")
+    [ -n "$p1" ] && [ "$p1" = "$p2" ] && ok "the same mount-s3 process (pid $p1) served every generation — no remount" || bad "mount-s3 pid changed $p1 → $p2, or was not found"
+    got=$(inpod reader-sts cat /mnt/s3/shard-07.txt)
+    [ "$got" = "seeded-object-07" ] && ok "content still reads at the end" || bad "final read: '$got'"
+    if kill -0 "$s31_pid" 2>/dev/null; then
+        kill "$s31_pid" 2>/dev/null; wait "$s31_pid" 2>/dev/null; note "the background reader was still running at the leg's end (the leg finished inside its 900 s)"
+    else
+        res=$(cat "$s31_out"); case "$res" in errors=0\ reads=*) ok "the background reader: $res over the leg, zero errors across four generations" ;; *) bad "the background reader saw errors: '$res'" ;; esac
+    fi
+    rm -f "$s31_out"
+else
+    bad "reader-sts never reached Running: $(mount_events reader-sts | tail -2 | cut -c1-300)"
+fi
+
+# ── S32 MounterDead is said again every republish (N4) ────────────────
+# The event used to fire on the probe's TRANSITION only; a reader that
+# missed it (or an Event aged out) saw nothing more. Kill reader-sts's
+# worker and count the events over two republish periods.
+leg S32 "a dead mounter is announced on EVERY republish: at least two MounterDead events within two periods"
+if require_pod reader-sts; then
+    w=$(worker_of reader-sts)
+    kill_worker "$w" >/dev/null 2>&1 || note "kill_worker reported an error for $w; the events decide"
+    sleep 8
+    inpod reader-sts "cat /mnt/s3/shard-07.txt" >/dev/null 2>&1 && bad "CONTROL: reads still succeed after the worker died" || ok "CONTROL: the tenant's read fails with the worker dead"
+    i=0; seen=0
+    while [ $i -lt 300 ]; do
+        seen=$(mount_events reader-sts | grep -c '^MounterDead' || true)
+        [ "${seen:-0}" -ge 2 ] && break
+        sleep 10; i=$((i + 10))
+    done
+    [ "${seen:-0}" -ge 2 ] && ok "$seen MounterDead events within ${i}s — said again after the first" || bad "only ${seen:-0} MounterDead event(s) in 300 s: the repeat is not happening"
+    mount_events reader-sts | grep '^MounterDead' | tail -1 | grep -q 'said again every republish' && ok "the event says it repeats" || bad "the MounterDead text does not announce the repeat"
+fi
+$K -n $NS delete pod reader-sts --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
+$K -n $NS delete secret sts-session --ignore-not-found >/dev/null 2>&1
+
+# ── S33 workers.maxPerNode: a hard ceiling (N5) ───────────────────────
+# The ceiling set to the node's CURRENT live worker count: the next
+# publish must be refused ResourceExhausted with a WorkerCapacity event,
+# and the same pod must mount once the ceiling is lifted (kubelet retried).
+leg S33 "workers.maxPerNode: past the ceiling a publish is refused with a WorkerCapacity event, and the same pod mounts once it is lifted"
+live=$($K -n $WNS get pods -l chert.us/node=$NODE --field-selector=status.phase=Running -o name 2>/dev/null | grep -c . || true)
+[ "${live:-0}" -ge 1 ] && ok "PRECONDITION: $live live worker(s) on $NODE" || bad "no live workers on $NODE — a ceiling of 0 is 'none', so this leg could refuse nothing"
+if [ "${live:-0}" -ge 1 ] && chart_up --set workers.maxPerNode="$live" >/dev/null 2>&1 && plugin_rolled; then
+    ok "chart rolled with workers.maxPerNode=$live"
+    sed -e "s#__NAME__#cap-reader#g" -e "s#__CR__#datasets#g" -e "s#__NODE__#$NODE#g" pt-pod.yaml.tpl | $K apply -f - >/dev/null
+    m=$(wait_event cap-reader WorkerCapacity "maxPerNode is $live" 150) && ok "refused with a WorkerCapacity event: $(echo "$m" | cut -c1-180)" || bad "no WorkerCapacity event within 150 s: $(mount_events cap-reader | tail -2 | cut -c1-300)"
+    wait_phase cap-reader Running 10 && bad "cap-reader is Running under a full ceiling" || ok "cap-reader stays unmounted under the ceiling"
+    mount_events cap-reader | grep -q 'FailedMount.*maxPerNode' && ok "kubelet's FailedMount carries the plugin's message" || note "FailedMount text: $(mount_events cap-reader | grep FailedMount | tail -1 | cut -c1-200)"
+    # Lift it: the SAME pod mounts.
+    chart_up >/dev/null 2>&1 && plugin_rolled || bad "chart restore failed"
+    wait_phase cap-reader Running 300 && ok "the same pod mounts once the ceiling is lifted" || bad "cap-reader never mounted after the ceiling was lifted: $(mount_events cap-reader | tail -2 | cut -c1-300)"
+else
+    bad "chart_up with workers.maxPerNode=$live did not roll the plugin"
+    chart_up >/dev/null 2>&1 && plugin_rolled
+fi
+$K -n $NS delete pod cap-reader --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
 
 # ── S21 (audit 2026-09-03, finding 4) ─────────────────────────────────
 # A node reboot empties the worker's memory-backed comm dir: the

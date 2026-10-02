@@ -410,6 +410,18 @@ workers:
   # (s3csi/e2e/results/2026-10-01-ec2-step4/).
   cacheSizeMib: 4096
 
+  # A HARD CEILING on the workers one node runs
+  # (FLINT_S3CSI_MAX_WORKERS_PER_NODE). 0 = none: kubelet's own admission
+  # (maxPods, allocatable) is then the only limit, and a publish it cannot
+  # fit is retried as WorkerNotAdmitted. Set, a publish that would CREATE
+  # a worker past the ceiling — a per-pod mounter, a shared class's first
+  # mounter, a lean syncer — is refused ResourceExhausted with a
+  # WorkerCapacity Warning on the tenant pod naming the count and this
+  # knob, and kubelet retries it until a worker on the node exits. A pod
+  # joining a shared mounter creates no worker and is not counted against
+  # it. The AWC fuse-node spec (awc-docs PR #136, N5) asks for 16.
+  maxPerNode: 0
+
   # THE REAL GUARD on workers.namespace (§3.6). A ValidatingAdmissionPolicy
   # that admits a pod there only if the creator is the node
   # ServiceAccount, the pod is pinned to the node whose kubelet minted

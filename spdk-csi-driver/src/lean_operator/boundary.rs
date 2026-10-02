@@ -85,6 +85,13 @@ pub fn access_isolation(spec: &FlintLeanWorkspaceSpec, generation: Option<i64>) 
              which flint cannot narrow. A read-only pod's mount and syncer keep it from writing; its key could \
              write",
         ),
+        crate::s3csi::policy::CredentialMode::StsSecret => (
+            "False",
+            "Cooperative",
+            "identity.mode is stsSecret: a pod's syncer signs with the session a controller keeps in its \
+             nodePublishSecretRef Secret, which flint cannot narrow. A read-only pod's mount and syncer keep it from \
+             writing; its session could write",
+        ),
         crate::s3csi::policy::CredentialMode::Ambient => (
             "False",
             "Cooperative",
@@ -240,6 +247,7 @@ mod tests {
             (Some("broker"), "Unknown", "DecidedByBroker"),
             (Some("webIdentity"), "Unknown", "DecidedByBroker"),
             (Some("static"), "False", "Cooperative"),
+            (Some("stsSecret"), "False", "Cooperative"),
             (Some("ambient"), "False", "Cooperative"),
         ] {
             let mut extra = serde_json::json!({ "consumers": consumers });

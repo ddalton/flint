@@ -24,7 +24,7 @@ use k8s_openapi::api::core::v1::{
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
-use kube::api::{Api, DeleteParams, PostParams};
+use kube::api::{Api, DeleteParams, ListParams, PostParams};
 use kube::runtime::reflector::{self, ObjectRef};
 use kube::runtime::{watcher, WatchStreamExt};
 use kube::Client;
@@ -365,6 +365,19 @@ pub async fn ensure(client: &Client, pod: &Pod) -> Result<Pod, String> {
 /// How long a retried publish waits for a dead predecessor worker to
 /// leave the API before giving kubelet an `Unavailable` to retry.
 const DEAD_WORKER_WAIT: Duration = Duration::from_secs(20);
+
+/// This node's live workers (not `is_dead`), counted at the API: the
+/// watch cache mid-relist would under-count and admit, and a ceiling
+/// that admits on a stale answer is no ceiling (`cached_running` says why
+/// the cache can never say "gone"). `except` is the worker the caller is
+/// about to create or adopt, so a retried publish is never refused by
+/// its own Pending worker. One LIST per worker creation, not per republish.
+pub async fn count_live_on_node(client: &Client, ns: &str, node_name: &str, except: &str) -> Result<usize, String> {
+    let api: Api<Pod> = Api::namespaced(client.clone(), ns);
+    let lp = ListParams::default().labels(&format!("{LABEL_NODE}={node_name},{LABEL_MANAGED_BY}={MANAGED_BY}"));
+    let pods = api.list(&lp).await.map_err(|e| format!("list workers on {node_name}: {e}"))?;
+    Ok(pods.items.iter().filter(|p| !is_dead(p) && p.metadata.name.as_deref() != Some(except)).count())
+}
 
 /// Terminating (deletion requested) or already exited.
 pub fn is_dead(pod: &Pod) -> bool {

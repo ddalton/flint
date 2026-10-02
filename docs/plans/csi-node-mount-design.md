@@ -1620,6 +1620,7 @@ Why this shape (the spine's, with security-first's discipline grafted in):
 | `knox` via the loopback door (fallback) | `AWS_CONTAINER_CREDENTIALS_FULL_URI=http://127.0.0.1:9911/v1/creds`, `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE=/comm/auth.token` | node plugin re-exchanges at republish when keys are within 3 periods of expiry; rewrites `creds.json` | P-CRED-only proxies; TLS-trust problems in the mounter image |
 | `irsa` / `pod-identity` | the same files with AWS STS / EKS Pod Identity endpoints (Mountpoint CSI's `authenticationSource: pod`, [web-fuse-csi-priorart §2]) | same | AWS-native clusters |
 | `static` (interim, deprecated) | `AWS_*` from the pod's `nodePublishSecretRef` written to `/comm/credentials` as a profile (0600) | none (as today) | rigs, migration |
+| `stsSecret` (2026-10-02, `passthrough-sts-secret-mode.md`) | the door form above; the credential, its `AWS_CREDENTIAL_EXPIRATION` and a `generation` come from the pod's `nodePublishSecretRef`, kept fresh by a controller | `creds.json` rewritten on republish when the Secret offers a HIGHER generation with ≥ 120 s left (`creds::sts_replace_decision`); never on a lower, an equal-but-different or a near-dead one; each refusal said once | AWC's STS handoff (awc-docs PR #136); any controller that mints sessions |
 | `ambient` | nothing; the worker's own chain | client-managed | dev |
 
 ### 4.5 The interim static arm

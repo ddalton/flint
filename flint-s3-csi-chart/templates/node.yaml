@@ -172,9 +172,15 @@ spec:
             - { name: FLINT_S3CSI_CACHE_HOST_PATH, value: {{ .Values.workers.cacheHostPath | trimSuffix "/" | quote }} }
             - { name: FLINT_S3CSI_CACHE_SIZE_MIB, value: {{ .Values.workers.cacheSizeMib | quote }} }
 {{- end }}
+{{- if .Values.workers.maxPerNode }}
+            # A hard ceiling on this node's workers (workers.maxPerNode):
+            # past it a publish that would create one is refused
+            # ResourceExhausted with a WorkerCapacity event.
+            - { name: FLINT_S3CSI_MAX_WORKERS_PER_NODE, value: {{ .Values.workers.maxPerNode | quote }} }
+{{- end }}
 {{- if .Values.broker.enabled }}
-            # Unset ⇒ no broker: only identity.mode static and ambient
-            # can publish.
+            # Unset ⇒ no broker: only identity.mode static, stsSecret and
+            # ambient can publish.
             - { name: FLINT_S3CSI_BROKER_URL, value: {{ include "flint-s3-csi.brokerUrl" . | quote }} }
 {{- end }}
             # The plugin's OWN token (audience s3.csi.chert.us, pod-bound) —

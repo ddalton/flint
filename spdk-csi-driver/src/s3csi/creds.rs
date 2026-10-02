@@ -1,7 +1,7 @@
 //! How a worker gets its S3 credential (design §4.4, §4.5), and the
 //! plugin's client to `flint-s3-broker`.
 //!
-//! Four arms behind one seam:
+//! Five arms behind one seam:
 //!
 //! - `broker` (default): the PLUGIN exchanges the pod-bound ServiceAccount
 //!   token at the broker for short-lived keys and writes them host-side
@@ -17,6 +17,12 @@
 //! - `static`: the pod's `nodePublishSecretRef` — kubelet fetched it with
 //!   kubelet's credentials and delivered it in `secrets`; the node SA
 //!   needs no Secrets RBAC. Today's trust level; the interim arm.
+//! - `stsSecret`: the pod's `nodePublishSecretRef` again, but an EXPIRING
+//!   credential a controller keeps fresh (AWS_* plus
+//!   `AWS_CREDENTIAL_EXPIRATION` and a `generation`), served over the
+//!   door like the broker's keys and replaced in place on republish under
+//!   the generation rules (`sts_replace_decision`). Nothing sensitive in
+//!   the child's env.
 //! - `ambient`: nothing; the worker's own chain.
 //!
 //! Nothing here ever lands in a pod spec: env for the child goes over the
@@ -129,6 +135,146 @@ pub fn static_arm(secrets: &HashMap<String, String>) -> Result<Materialized, Str
         }
     }
     Ok(Materialized { env, files: vec![] })
+}
+
+// ── stsSecret: a controller-fed, expiring credential ─────────────────
+//
+// The Secret a controller (awc-docs PR #136's receiver, or anything that
+// mints sessions) keeps fresh in the pod's namespace, named by the pod's
+// nodePublishSecretRef and re-delivered by kubelet on every republish.
+// Served over the door like the broker's keys, so the mounter re-fetches
+// before `Expiration` and nothing sensitive sits in its env; replaced in
+// place under `sts_replace_decision`.
+
+/// The keys an `identity.mode: stsSecret` Secret carries. PROVISIONAL:
+/// the envelope PR #136 specifies is not settled, so this is flint's own
+/// closed schema until it is. A key outside it is REFUSED by name, not
+/// ignored — a misspelt envelope field must not pass as an absent one.
+pub const STS_KEY_EXPIRATION: &str = "AWS_CREDENTIAL_EXPIRATION";
+pub const STS_KEY_GENERATION: &str = "generation";
+pub const STS_KEY_NAMESPACE: &str = "namespace";
+pub const STS_KEY_SERVICE_ACCOUNT: &str = "serviceAccount";
+pub const STS_KEY_MOUNT: &str = "mount";
+const STS_REQUIRED: [&str; 4] = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", STS_KEY_EXPIRATION, STS_KEY_GENERATION];
+const STS_OPTIONAL: [&str; 4] = ["AWS_SESSION_TOKEN", STS_KEY_NAMESPACE, STS_KEY_SERVICE_ACCOUNT, STS_KEY_MOUNT];
+/// A candidate with less than this left is refused: by the time the
+/// mounter re-fetched it, it would be as good as expired, and installing
+/// it would displace a credential that still works. Kubelet's republish
+/// is every ~60-90 s, so a controller should offer the next generation
+/// well before this — the broker arm refreshes at 270 s.
+pub const STS_MIN_SECS_LEFT: i64 = 120;
+
+/// What an `stsSecret` Secret said: the credential, its generation, and
+/// the optional envelope naming who it was minted for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StsSecret {
+    pub creds: Creds,
+    pub generation: u64,
+    pub namespace: Option<String>,
+    pub service_account: Option<String>,
+    pub mount: Option<String>,
+}
+
+/// Parse the Secret. `ignore` names keys that are not the Secret's own —
+/// the kubelet token key when `serviceAccountTokenInSecrets` is on.
+pub fn parse_sts_secret(secrets: &HashMap<String, String>, ignore: &[&str]) -> Result<StsSecret, String> {
+    let mut unknown: Vec<&str> = secrets
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !STS_REQUIRED.contains(k) && !STS_OPTIONAL.contains(k) && !ignore.contains(k))
+        .collect();
+    if !unknown.is_empty() {
+        unknown.sort_unstable();
+        return Err(format!(
+            "nodePublishSecretRef Secret carries keys identity.mode stsSecret does not accept: {} — it takes {} and the optional {}",
+            unknown.join(", "),
+            STS_REQUIRED.join(", "),
+            STS_OPTIONAL.join(", ")
+        ));
+    }
+    let get = |k: &str| secrets.get(k).map(|v| v.trim()).filter(|v| !v.is_empty()).map(str::to_string);
+    let need = |k: &str| {
+        get(k).ok_or_else(|| format!("nodePublishSecretRef Secret has no {k} — identity.mode stsSecret needs {}", STS_REQUIRED.join(", ")))
+    };
+    let expiration = need(STS_KEY_EXPIRATION)?;
+    chrono::DateTime::parse_from_rfc3339(&expiration).map_err(|e| format!("{STS_KEY_EXPIRATION} {expiration:?} is not RFC 3339: {e}"))?;
+    let generation = need(STS_KEY_GENERATION)?;
+    let generation = generation.parse::<u64>().map_err(|e| format!("{STS_KEY_GENERATION} {generation:?} is not a whole number: {e}"))?;
+    Ok(StsSecret {
+        creds: Creds {
+            access_key_id: need("AWS_ACCESS_KEY_ID")?,
+            secret_access_key: need("AWS_SECRET_ACCESS_KEY")?,
+            session_token: get("AWS_SESSION_TOKEN"),
+            expiration,
+        },
+        generation,
+        namespace: get(STS_KEY_NAMESPACE),
+        service_account: get(STS_KEY_SERVICE_ACCOUNT),
+        mount: get(STS_KEY_MOUNT),
+    })
+}
+
+/// The envelope: each field that is PRESENT against what kubelet asserted
+/// (the pod's namespace and ServiceAccount) and what the pod named (the
+/// CR). Absent fields check nothing — the schema is the controller's to
+/// fill in, and the CR's consumer list already gates the mount.
+pub fn sts_envelope_check(s: &StsSecret, namespace: &str, service_account: &str, mount: &str) -> Result<(), String> {
+    for (key, got, want) in [
+        (STS_KEY_NAMESPACE, s.namespace.as_deref(), namespace),
+        (STS_KEY_SERVICE_ACCOUNT, s.service_account.as_deref(), service_account),
+        (STS_KEY_MOUNT, s.mount.as_deref(), mount),
+    ] {
+        if let Some(got) = got {
+            if got != want {
+                return Err(format!(
+                    "the Secret's envelope says {key} {got:?} but this mount is for {want:?} — the credential was not minted for this pod"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What a republish does with the Secret it was handed.
+#[derive(Debug, PartialEq, Eq)]
+pub enum StsReplace {
+    /// Write it: a first credential, or a higher generation with life left.
+    Install,
+    /// The installed generation, re-offered unchanged: nothing to do, nothing to say.
+    Idempotent,
+    /// Leave the installed credential alone, and say why.
+    Refuse(String),
+}
+
+/// The generation rules (the AWC fuse-node spec's N3, made flint's): never
+/// roll back, never install the same generation twice with different
+/// contents, never install what is about to expire — and never discard a
+/// still-valid installed credential: every refusal leaves the file as it
+/// was. `installed` is the generation and expiration in the worker's
+/// `creds.json` now; the state keeps no key material, so "unchanged" is
+/// judged on those two.
+pub fn sts_replace_decision(installed: Option<(u64, &str)>, candidate: &StsSecret, now: chrono::DateTime<chrono::Utc>) -> StsReplace {
+    let g = candidate.generation;
+    match installed {
+        Some((have, exp)) if g == have && candidate.creds.expiration == exp => return StsReplace::Idempotent,
+        Some((have, _)) if g < have => {
+            return StsReplace::Refuse(format!("generation {g} is lower than the installed {have}; a credential never rolls back"))
+        }
+        Some((have, exp)) if g == have => {
+            return StsReplace::Refuse(format!(
+                "generation {have} is already installed (expires {exp}) and the Secret offers the same generation with expiration {} — a replacement must carry a HIGHER generation",
+                candidate.creds.expiration
+            ))
+        }
+        _ => {}
+    }
+    if candidate.creds.secs_left(now) < STS_MIN_SECS_LEFT {
+        return StsReplace::Refuse(format!(
+            "generation {g} expires at {}, under {STS_MIN_SECS_LEFT} s away; the installed credential is kept",
+            candidate.creds.expiration
+        ));
+    }
+    StsReplace::Install
 }
 
 /// The loopback door: the worker checks `auth.token`, serves `creds.json`.
@@ -486,6 +632,120 @@ mod tests {
     }
 
 
+
+    fn sts(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+    fn full_sts() -> HashMap<String, String> {
+        sts(&[
+            ("AWS_ACCESS_KEY_ID", "AK"),
+            ("AWS_SECRET_ACCESS_KEY", "SK"),
+            ("AWS_SESSION_TOKEN", "ST"),
+            (STS_KEY_EXPIRATION, "2030-01-01T00:00:00Z"),
+            (STS_KEY_GENERATION, "7"),
+        ])
+    }
+    const TOKEN_KEY: &str = "csi.storage.k8s.io/serviceAccount.tokens";
+
+    #[test]
+    fn sts_secret_parses_the_tuple_and_its_envelope() {
+        let mut m = full_sts();
+        m.insert(STS_KEY_NAMESPACE.into(), "team-a".into());
+        m.insert(STS_KEY_SERVICE_ACCOUNT.into(), "trainer".into());
+        m.insert(STS_KEY_MOUNT.into(), "datasets".into());
+        m.insert(TOKEN_KEY.into(), "{}".into());
+        let s = parse_sts_secret(&m, &[TOKEN_KEY]).unwrap();
+        assert_eq!(s.generation, 7);
+        assert_eq!(s.creds.session_token.as_deref(), Some("ST"));
+        assert_eq!(s.creds.expiration, "2030-01-01T00:00:00Z");
+        assert_eq!(
+            (s.namespace.as_deref(), s.service_account.as_deref(), s.mount.as_deref()),
+            (Some("team-a"), Some("trainer"), Some("datasets"))
+        );
+        // The session token is the session's business: an expiring static key still parses.
+        let mut no_token = full_sts();
+        no_token.remove("AWS_SESSION_TOKEN");
+        assert!(parse_sts_secret(&no_token, &[]).unwrap().creds.session_token.is_none());
+    }
+
+    #[test]
+    fn sts_secret_refuses_each_missing_or_malformed_field_by_name() {
+        for k in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", STS_KEY_EXPIRATION, STS_KEY_GENERATION] {
+            let mut m = full_sts();
+            m.remove(k);
+            let e = parse_sts_secret(&m, &[]).unwrap_err();
+            assert!(e.contains(k), "missing {k}: {e}");
+            let mut m = full_sts();
+            m.insert(k.into(), "  ".into());
+            assert!(parse_sts_secret(&m, &[]).unwrap_err().contains(k), "blank {k}");
+        }
+        let mut m = full_sts();
+        m.insert(STS_KEY_EXPIRATION.into(), "tomorrow".into());
+        assert!(parse_sts_secret(&m, &[]).unwrap_err().contains("RFC 3339"));
+        let mut m = full_sts();
+        m.insert(STS_KEY_GENERATION.into(), "-1".into());
+        assert!(parse_sts_secret(&m, &[]).unwrap_err().contains(STS_KEY_GENERATION));
+    }
+
+    /// A misspelt envelope key must not pass as an absent one.
+    #[test]
+    fn sts_secret_refuses_unknown_keys_by_name_but_ignores_the_token_key() {
+        let mut m = full_sts();
+        m.insert("serviceaccount".into(), "x".into());
+        m.insert("AWS_REGION".into(), "us-east-1".into());
+        let e = parse_sts_secret(&m, &[TOKEN_KEY]).unwrap_err();
+        assert!(e.contains("AWS_REGION") && e.contains("serviceaccount"), "{e}");
+        let mut m = full_sts();
+        m.insert(TOKEN_KEY.into(), "{}".into());
+        assert!(parse_sts_secret(&m, &[TOKEN_KEY]).is_ok());
+        assert!(parse_sts_secret(&m, &[]).is_err(), "the ignore list is the caller's, not built in");
+    }
+
+    #[test]
+    fn sts_envelope_mismatch_is_refused_per_field_and_absence_passes() {
+        let s = parse_sts_secret(&full_sts(), &[]).unwrap();
+        assert!(sts_envelope_check(&s, "team-a", "trainer", "datasets").is_ok(), "no envelope: nothing to disagree");
+        for (k, right) in [(STS_KEY_NAMESPACE, "team-a"), (STS_KEY_SERVICE_ACCOUNT, "trainer"), (STS_KEY_MOUNT, "datasets")] {
+            let mut m = full_sts();
+            m.insert(k.into(), "other".into());
+            let e = sts_envelope_check(&parse_sts_secret(&m, &[]).unwrap(), "team-a", "trainer", "datasets").unwrap_err();
+            assert!(e.contains(k) && e.contains("other"), "{k}: {e}");
+            m.insert(k.into(), right.into());
+            assert!(sts_envelope_check(&parse_sts_secret(&m, &[]).unwrap(), "team-a", "trainer", "datasets").is_ok(), "{k}");
+        }
+    }
+
+    #[test]
+    fn sts_replace_decision_table() {
+        let now = chrono::DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let cand = |g: u64, exp: &str| StsSecret {
+            creds: Creds { access_key_id: "AK".into(), secret_access_key: "SK".into(), session_token: None, expiration: exp.into() },
+            generation: g,
+            namespace: None,
+            service_account: None,
+            mount: None,
+        };
+        let refused = |v: StsReplace, word: &str| match v {
+            StsReplace::Refuse(m) => assert!(m.contains(word), "{m}"),
+            v => panic!("wanted a refusal naming {word}, got {v:?}"),
+        };
+        let far = "2030-01-01T01:00:00Z"; // 3600 s left
+        assert_eq!(sts_replace_decision(None, &cand(1, far), now), StsReplace::Install, "first install");
+        assert_eq!(sts_replace_decision(Some((1, far)), &cand(2, far), now), StsReplace::Install, "higher generation");
+        assert_eq!(sts_replace_decision(Some((2, far)), &cand(2, far), now), StsReplace::Idempotent, "same generation, same expiration");
+        refused(sts_replace_decision(Some((2, far)), &cand(1, far), now), "lower");
+        refused(sts_replace_decision(Some((2, far)), &cand(2, "2030-01-01T02:00:00Z"), now), "HIGHER");
+        // The floor: under 120 s left is refused whether or not anything is installed...
+        let soon = "2030-01-01T00:01:59Z"; // 119 s
+        refused(sts_replace_decision(None, &cand(1, soon), now), "120");
+        refused(sts_replace_decision(Some((1, far)), &cand(2, soon), now), "120");
+        assert_eq!(sts_replace_decision(Some((1, far)), &cand(2, "2030-01-01T00:02:00Z"), now), StsReplace::Install, "exactly 120 s installs");
+        // ...but the installed generation re-offered unchanged is idempotent even near its end: nothing to say.
+        assert_eq!(sts_replace_decision(Some((2, soon)), &cand(2, soon), now), StsReplace::Idempotent);
+        // A refused generation is retryable: gen 3 refused under the floor, then gen 3 with life installs.
+        refused(sts_replace_decision(Some((2, far)), &cand(3, soon), now), "120");
+        assert_eq!(sts_replace_decision(Some((2, far)), &cand(3, "2030-01-01T03:00:00Z"), now), StsReplace::Install);
+    }
 
     /// The CR's region beats the node's default and an empty stamp does not.
 

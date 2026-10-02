@@ -84,8 +84,9 @@ per-project credential source exists.
 {{- else }}
 
 NO BROKER. broker.enabled is false, so only CRs with identity.mode
-`static` (the pod names a Secret via nodePublishSecretRef, delivered by
-kubelet) or `ambient` can publish; `broker` and `webIdentity` are
+`static` or `stsSecret` (the pod names a Secret via nodePublishSecretRef,
+delivered by kubelet; stsSecret's expires and is replaced in place) or
+`ambient` can publish; `broker` and `webIdentity` are
 refused with a message naming FLINT_S3CSI_BROKER_URL.
 {{- end }}
 

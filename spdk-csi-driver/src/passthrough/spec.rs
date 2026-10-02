@@ -331,15 +331,20 @@ impl MountSpec {
             }
         }
         // A shared mounter holds ONE credential for every member. With
-        // `static` that credential is whichever pod's nodePublishSecretRef
-        // came first — the pod author's choice, not the CR's — so the
-        // members' authority would not be the same function of the CR,
-        // which is the whole argument for sharing. Refused by name.
-        if self.shares_read_only() && self.identity.as_ref().is_some_and(|i| i.mode == "static") {
-            return Err("spec.sharing.readOnly is true with spec.identity.mode static — a shared mounter \
-                        holds one credential for every member, and a static key is the pod's own \
-                        nodePublishSecretRef. Use identity.mode broker or ambient, or drop sharing"
-                .into());
+        // `static` or `stsSecret` that credential is whichever pod's
+        // nodePublishSecretRef came first — the pod author's (or its
+        // controller's) choice, not the CR's — so the members' authority
+        // would not be the same function of the CR, which is the whole
+        // argument for sharing; and the AWC fuse-node spec `stsSecret`
+        // serves wants a worker per pod outright (N1). Refused by name.
+        if self.shares_read_only() {
+            if let Some(mode) = self.identity.as_ref().map(|i| i.mode.as_str()).filter(|m| matches!(*m, "static" | "stsSecret")) {
+                return Err(format!(
+                    "spec.sharing.readOnly is true with spec.identity.mode {mode} — a shared mounter holds one \
+                     credential for every member, and a {mode} credential is the pod's own nodePublishSecretRef. \
+                     Use identity.mode broker or ambient, or drop sharing"
+                ));
+            }
         }
 
         Ok(())
@@ -468,6 +473,9 @@ mod tests {
         assert!(s.shares_read_only());
         let e = s.validate().expect_err("static + sharing must be refused");
         assert!(e.contains("static") && e.contains("sharing"), "{e}");
+        s.identity = Some(crate::s3csi::policy::Identity { mode: "stsSecret".into() });
+        let e = s.validate().expect_err("stsSecret + sharing must be refused");
+        assert!(e.contains("stsSecret") && e.contains("sharing"), "{e}");
         for mode in ["broker", "ambient"] {
             s.identity = Some(crate::s3csi::policy::Identity { mode: mode.into() });
             assert!(s.validate().is_ok(), "{mode} may share");

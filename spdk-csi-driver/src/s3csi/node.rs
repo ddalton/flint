@@ -70,6 +70,12 @@ pub struct Config {
     /// read-only member of a class on the node, so one memory limit and
     /// one `--memory-target` for all of them. Unset ⇒ `worker_resources`.
     pub shared_worker_resources: Option<ResourceRequirements>,
+    /// A hard ceiling on this node's workers (FLINT_S3CSI_MAX_WORKERS_PER_NODE,
+    /// workers.maxPerNode; unset or 0 ⇒ none): past it a publish that
+    /// would CREATE a worker is refused ResourceExhausted with a Warning
+    /// on the tenant (`worker_capacity`). Kubelet's own admission stays
+    /// the ceiling underneath (`worker_refused`).
+    pub max_workers_per_node: Option<u32>,
     pub priority_class: Option<String>,
     /// How long a worker's preStop hook holds it open waiting for its
     /// volume to be released (FLINT_S3CSI_PRESTOP_SECS). This is the
@@ -159,6 +165,15 @@ impl Config {
                 Some(p)
             }
         };
+        // A misspelt ceiling must not read as "no ceiling".
+        let max_workers_per_node = match opt("FLINT_S3CSI_MAX_WORKERS_PER_NODE") {
+            None => None,
+            Some(v) => match v.parse::<u32>() {
+                Ok(0) => None,
+                Ok(n) => Some(n),
+                Err(e) => return Err(format!("FLINT_S3CSI_MAX_WORKERS_PER_NODE {v:?} is not a whole number (workers.maxPerNode): {e}")),
+            },
+        };
         Ok(Self {
             node_name: need("FLINT_S3CSI_NODE_NAME")?,
             node_uid: None,
@@ -168,6 +183,7 @@ impl Config {
             lean_image: opt("FLINT_S3CSI_LEAN_IMAGE"),
             worker_resources,
             shared_worker_resources,
+            max_workers_per_node,
             priority_class: opt("FLINT_S3CSI_WORKER_PRIORITY_CLASS"),
             prestop_secs: opt("FLINT_S3CSI_PRESTOP_SECS").and_then(|v| v.parse().ok()),
             quiesce_secs: opt("FLINT_S3CSI_QUIESCE_SECS").and_then(|v| v.parse().ok()).unwrap_or(30),
@@ -767,6 +783,26 @@ impl S3Node {
                 }
                 creds::static_arm(secrets).map_err(Status::failed_precondition)
             }
+            CredentialMode::StsSecret => {
+                if secrets.is_empty() {
+                    return Err(Status::failed_precondition(
+                        "identity.mode is stsSecret, but the pod's volume names no nodePublishSecretRef (a Secret in the \
+                         pod's namespace carrying AWS_* keys, AWS_CREDENTIAL_EXPIRATION and generation)",
+                    ));
+                }
+                let s = creds::parse_sts_secret(secrets, &[attrs::K_SA_TOKENS]).map_err(Status::failed_precondition)?;
+                creds::sts_envelope_check(&s, &pr.pod_namespace, &pr.service_account, pr.selector.name()).map_err(Status::permission_denied)?;
+                if let creds::StsReplace::Refuse(why) = creds::sts_replace_decision(None, &s, chrono::Utc::now()) {
+                    return Err(Status::failed_precondition(format!("identity.mode stsSecret: {why}")));
+                }
+                st.creds_expiration = Some(s.creds.expiration.clone());
+                st.creds_generation = Some(s.generation);
+                st.attempted_generation = Some(s.generation);
+                // The door, as the broker arm: nothing sensitive in the child's env.
+                let mut m = creds::door_arm(&st.nonce);
+                m.files.push(creds::CommFile { name: creds::CREDS_FILE.into(), bytes: creds::creds_json(&s.creds), mode: 0o600 });
+                Ok(m)
+            }
             CredentialMode::Ambient => Ok(creds::ambient_arm()),
             CredentialMode::Broker | CredentialMode::WebIdentity => {
                 let Some(broker) = &self.cfg.broker else {
@@ -901,6 +937,9 @@ impl S3Node {
             token_expiration: None,
             last_probe_ok: None,
             published_unix: None,
+            creds_generation: None,
+            attempted_generation: None,
+            sts_refusal: None,
             read_only,
             owner_uid,
             owner_gid,
@@ -948,6 +987,9 @@ impl S3Node {
             cache_host_dir: st.cache_dir.clone(),
             shared_key: None,
         });
+        if let Err(e) = self.worker_capacity(&st, "worker").await {
+            return Err(self.fail(dir, &st, e).await);
+        }
         if let Err(e) = worker::ensure(&self.client, &pod).await {
             return Err(self.fail(dir, &st,Status::unavailable(e)).await);
         }
@@ -1094,6 +1136,9 @@ impl S3Node {
             token_expiration: None,
             last_probe_ok: None,
             published_unix: None,
+            creds_generation: None,
+            attempted_generation: None,
+            sts_refusal: None,
             read_only: true,
             owner_uid,
             owner_gid,
@@ -1203,6 +1248,9 @@ impl S3Node {
                 cache_host_dir: sm.cache_dir.clone(),
                 shared_key: Some(&key),
             });
+            if let Err(e) = self.worker_capacity(&st, "shared worker").await {
+                return Err(self.fail(dir, &st, e).await);
+            }
             if let Err(e) = worker::ensure(&self.client, &pod).await {
                 return Err(self.fail(dir, &st, Status::unavailable(e)).await);
             }
@@ -1351,6 +1399,118 @@ impl S3Node {
         Ok(())
     }
 
+    /// `workers.maxPerNode` (the AWC fuse-node spec's N5): a hard ceiling
+    /// on this node's workers, checked before every worker CREATE — a
+    /// per-pod mounter, a shared class's first mounter, a lean syncer — and
+    /// never on a join, which creates none. Counted at the API
+    /// (`worker::count_live_on_node`), the worker this publish is about
+    /// excluded. Over it: a Warning on the tenant and `ResourceExhausted`,
+    /// which kubelet retries; the pod is bound to this node and nothing
+    /// reschedules it, so the message says what frees room. Off by default
+    /// — kubelet's own admission then stays the only ceiling
+    /// (`worker_refused`).
+    async fn worker_capacity(&self, st: &VolumeState, what: &str) -> Result<(), Status> {
+        let Some(cap) = self.cfg.max_workers_per_node else { return Ok(()) };
+        let live = worker::count_live_on_node(&self.client, &self.cfg.worker_namespace, &self.cfg.node_name, &st.worker_name)
+            .await
+            .map_err(Status::unavailable)?;
+        if live < cap as usize {
+            return Ok(());
+        }
+        let msg = format!(
+            "{}: node {} already runs {live} flint-s3 workers and workers.maxPerNode is {cap}, so no {what} is created for pod \
+             {}/{}; kubelet retries the mount until a worker on this node exits — raise workers.maxPerNode, spread the pods, \
+             or share read-only mounters (spec.sharing.readOnly)",
+            st.cr, self.cfg.node_name, st.tenant.namespace, st.tenant.pod
+        );
+        self.emit_event(&st.tenant, "WorkerCapacity", &msg, true).await;
+        Err(Status::resource_exhausted(msg))
+    }
+
+    /// `stsSecret` on republish: the Secret kubelet re-delivered, parsed,
+    /// checked against the pod, and judged against what is installed
+    /// (`creds::sts_replace_decision`). A higher generation with life left
+    /// replaces `creds.json` in place — the same rename the broker arm
+    /// uses, under the same per-volume lock, with no remount; the mounter
+    /// re-fetches it from the door before the old one expires. Anything
+    /// else leaves the installed credential exactly as it was and says why
+    /// on the tenant pod, once per distinct reason: kubelet republishes
+    /// every ~60-90 s, and the same refusal that often is noise.
+    async fn refresh_sts_secret(
+        &self,
+        st: &mut VolumeState,
+        comm: &Path,
+        pr: &PublishRequest,
+        secrets: &HashMap<String, String>,
+        changed: &mut bool,
+    ) {
+        let verdict = creds::parse_sts_secret(secrets, &[attrs::K_SA_TOKENS])
+            .and_then(|s| creds::sts_envelope_check(&s, &pr.pod_namespace, &pr.service_account, pr.selector.name()).map(|()| s))
+            .map(|s| {
+                let installed = st.creds_generation.zip(st.creds_expiration.as_deref());
+                (creds::sts_replace_decision(installed, &s, chrono::Utc::now()), s)
+            });
+        let refusal = match verdict {
+            Err(e) => e,
+            Ok((creds::StsReplace::Idempotent, _)) => return,
+            Ok((creds::StsReplace::Refuse(why), s)) => {
+                if st.attempted_generation != Some(s.generation) {
+                    st.attempted_generation = Some(s.generation);
+                    *changed = true;
+                }
+                why
+            }
+            Ok((creds::StsReplace::Install, s)) => {
+                let f = creds::CommFile { name: creds::CREDS_FILE.into(), bytes: creds::creds_json(&s.creds), mode: 0o600 };
+                match creds::write_files(comm, &[f], worker_owner(st)) {
+                    Ok(()) => {
+                        let from = st.creds_generation;
+                        st.creds_expiration = Some(s.creds.expiration.clone());
+                        st.creds_generation = Some(s.generation);
+                        st.attempted_generation = Some(s.generation);
+                        st.sts_refusal = None;
+                        *changed = true;
+                        tracing::info!(volume = %st.volume_id, from = ?from, to = s.generation, expiration = %s.creds.expiration, "stsSecret credential replaced");
+                        self.emit_event(
+                            &st.tenant,
+                            "CredentialReplaced",
+                            &format!(
+                                "{}: credential generation {} installed (expires {}){}; the mounter re-fetches it from its door \
+                                 before the old one expires, with no remount",
+                                st.cr,
+                                s.generation,
+                                s.creds.expiration,
+                                from.map(|g| format!(", replacing generation {g}")).unwrap_or_default()
+                            ),
+                            false,
+                        )
+                        .await;
+                        return;
+                    }
+                    Err(e) => format!("generation {} could not be written to the worker's comm dir: {e}", s.generation),
+                }
+            }
+        };
+        tracing::warn!(volume = %st.volume_id, "stsSecret refresh refused: {refusal}");
+        if st.sts_refusal.as_deref() != Some(refusal.as_str()) {
+            st.sts_refusal = Some(refusal.clone());
+            *changed = true;
+            self.emit_event(
+                &st.tenant,
+                "CredentialRefused",
+                &format!(
+                    "{}: the nodePublishSecretRef Secret was not installed — {refusal}. The installed credential (generation {}, \
+                     expires {}) stays until a higher generation replaces it or it expires",
+                    st.cr,
+                    st.creds_generation.map(|g| g.to_string()).unwrap_or_else(|| "?".into()),
+                    st.creds_expiration.as_deref().unwrap_or("?")
+                ),
+                true,
+            )
+            .await;
+        }
+    }
+
     /// Target already mounted: refresh, probe, OK. Never an error.
     async fn republish(
         &self,
@@ -1369,10 +1529,13 @@ impl S3Node {
                 Err(e) => tracing::warn!(volume = %st.volume_id, "persist token: {e}"),
             }
         }
-        if let (Some(worker_uid), Some(token)) = (st.worker_uid.clone(), pr.token.as_ref()) {
+        if let Some(worker_uid) = st.worker_uid.clone() {
             let comm = worker::comm_dir(&self.cfg.kubelet_root, &worker_uid);
-            match CredentialMode::parse(&st.credential_mode).unwrap_or(CredentialMode::Ambient) {
-                CredentialMode::WebIdentity => {
+            // Exhaustive over the mode on purpose: `static` sat under a
+            // wildcard here and was the one arm that never refreshed
+            // (docs/plans/passthrough-sts-secret-mode.md).
+            match (CredentialMode::parse(&st.credential_mode).unwrap_or(CredentialMode::Ambient), pr.token.as_ref()) {
+                (CredentialMode::WebIdentity, Some(token)) => {
                     if st.token_expiration.as_deref() != Some(token.expiration.as_str()) {
                         let f = creds::CommFile { name: creds::TOKEN_FILE.into(), bytes: token.token.as_bytes().to_vec(), mode: 0o600 };
                         if creds::write_files(&comm, &[f], worker_owner(&st)).is_ok() {
@@ -1381,7 +1544,7 @@ impl S3Node {
                         }
                     }
                 }
-                CredentialMode::Broker => {
+                (CredentialMode::Broker, Some(token)) => {
                     let left = st
                         .creds_expiration
                         .as_ref()
@@ -1441,7 +1604,9 @@ impl S3Node {
                         }
                     }
                 }
-                _ => {}
+                (CredentialMode::StsSecret, _) => self.refresh_sts_secret(&mut st, &comm, pr, secrets, &mut changed).await,
+                (CredentialMode::WebIdentity | CredentialMode::Broker, None) => {}
+                (CredentialMode::Static | CredentialMode::Ambient, _) => {}
             }
         }
         // Liveness: is the worker alive and the mount answering? The
@@ -1456,25 +1621,30 @@ impl S3Node {
         if st.last_probe_ok != Some(ok) {
             changed = true;
             st.last_probe_ok = Some(ok);
-            if !ok {
-                let detail = st
-                    .worker_uid
-                    .as_ref()
-                    .map(|u| worker::comm_dir(&self.cfg.kubelet_root, u).join("mount.error"))
-                    .and_then(|p| std::fs::read_to_string(p).ok())
-                    .unwrap_or_default();
-                self.emit_event(
-                    &st.tenant,
-                    "MounterDead",
-                    &format!(
-                        "the mounter serving {} at {} is not answering (worker {} running={alive}); processes with the \
-                         mount open get ENOTCONN until the pod is recreated. {}",
-                        st.cr, st.target_path, st.worker_name, detail.trim()
-                    ),
-                    true,
-                )
-                .await;
-            }
+        }
+        // Said on EVERY republish while the mounter is dead, not only on
+        // the transition (the AWC fuse-node spec's N4): one Event can be
+        // missed or age out, and kubelet's republish cadence (~60-90 s) is
+        // the interval. Each is its own Event object, so a reader counts
+        // them and a watcher sees each.
+        if !ok {
+            let detail = st
+                .worker_uid
+                .as_ref()
+                .map(|u| worker::comm_dir(&self.cfg.kubelet_root, u).join("mount.error"))
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .unwrap_or_default();
+            self.emit_event(
+                &st.tenant,
+                "MounterDead",
+                &format!(
+                    "the mounter serving {} at {} is not answering (worker {} running={alive}); processes with the \
+                     mount open get ENOTCONN until the pod is recreated — said again every republish until it is. {}",
+                    st.cr, st.target_path, st.worker_name, detail.trim()
+                ),
+                true,
+            )
+            .await;
         }
         // A lean syncer lost at the POD level — evicted, node pressure,
         // deleted by hand — leaves a tree nobody publishes for the rest
@@ -1703,6 +1873,9 @@ impl S3Node {
             token_expiration: None,
             last_probe_ok: None,
             published_unix: None,
+            creds_generation: None,
+            attempted_generation: None,
+            sts_refusal: None,
             // The decided access (per-user access design §4.1): the tenant
             // bind below, the syncer's mode and the broker's credential all
             // follow it.
@@ -1827,6 +2000,7 @@ impl S3Node {
             cache_host_dir: None,
             shared_key: None,
         });
+        self.worker_capacity(st, "syncer").await?;
         worker::ensure(&self.client, &pod).await.map_err(Status::unavailable)?;
         let worker_uid = match worker::wait_running(&self.client, &st.worker_namespace, &st.worker_name, WORKER_RUNNING_WAIT).await {
             Ok(WaitOutcome::Running { uid }) => uid,
@@ -2560,6 +2734,9 @@ pub fn sharing_decision(cr_shares: bool, read_only: bool, mode: CredentialMode, 
             None => Sharing::Retry("the broker's backend could not be read (GET /v1/status); sharing is only safe when every member's credential is known to carry the same authority, so the decision waits for the broker"),
         },
         CredentialMode::Static => Sharing::Own("identity.mode static: the key is the pod's own nodePublishSecretRef"),
+        CredentialMode::StsSecret => {
+            Sharing::Own("identity.mode stsSecret: the session is the pod's own nodePublishSecretRef, and the spec it serves wants a worker per pod")
+        }
         CredentialMode::WebIdentity => Sharing::Own("identity.mode webIdentity binds the worker to one pod's token"),
     }
 }
@@ -2828,6 +3005,9 @@ mod tests {
             token_expiration: None,
             last_probe_ok: None,
             published_unix: None,
+            creds_generation: None,
+            attempted_generation: None,
+            sts_refusal: None,
             read_only: false,
             owner_uid: 1001,
             owner_gid: 1001,
@@ -2872,6 +3052,7 @@ mod tests {
         own(sharing_decision(true, false, Broker, None), "read-write");
         own(sharing_decision(true, true, Static, None), "static");
         own(sharing_decision(true, true, WebIdentity, None), "webIdentity");
+        own(sharing_decision(true, true, StsSecret, None), "stsSecret");
         assert_ne!(share_lock_key("abc"), "abc", "the class lock is its own key, never a volume's");
     }
 

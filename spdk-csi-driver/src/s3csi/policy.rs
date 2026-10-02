@@ -121,6 +121,11 @@ pub struct Identity {
     /// (needs TLS trust in the mounter image).
     /// `static`: the pod's `nodePublishSecretRef` (AWS_* keys verbatim)
     /// — the interim arm, today's trust level.
+    /// `stsSecret`: an EXPIRING credential a controller keeps fresh in the
+    /// pod's `nodePublishSecretRef` Secret (AWS_* plus
+    /// `AWS_CREDENTIAL_EXPIRATION` and a `generation`), served over the
+    /// worker's door and replaced in place on republish under the
+    /// generation rules (`creds::sts_replace_decision`).
     /// `ambient`: nothing; the worker's own AWS chain.
     #[serde(default = "default_mode")]
     pub mode: String,
@@ -135,6 +140,7 @@ pub enum CredentialMode {
     Broker,
     WebIdentity,
     Static,
+    StsSecret,
     Ambient,
 }
 
@@ -144,9 +150,10 @@ impl CredentialMode {
             "broker" | "" => Ok(Self::Broker),
             "webIdentity" => Ok(Self::WebIdentity),
             "static" => Ok(Self::Static),
+            "stsSecret" => Ok(Self::StsSecret),
             "ambient" => Ok(Self::Ambient),
             other => Err(format!(
-                "identity.mode {other:?} is not one of broker | webIdentity | static | ambient"
+                "identity.mode {other:?} is not one of broker | webIdentity | static | stsSecret | ambient"
             )),
         }
     }
@@ -155,6 +162,7 @@ impl CredentialMode {
             Self::Broker => "broker",
             Self::WebIdentity => "webIdentity",
             Self::Static => "static",
+            Self::StsSecret => "stsSecret",
             Self::Ambient => "ambient",
         }
     }
@@ -228,7 +236,7 @@ mod tests {
         let i: Identity = serde_json::from_str("{}").unwrap();
         assert_eq!(CredentialMode::parse(&i.mode).unwrap(), CredentialMode::Broker);
         assert!(CredentialMode::parse("knox").unwrap_err().contains("knox"));
-        for m in ["broker", "webIdentity", "static", "ambient"] {
+        for m in ["broker", "webIdentity", "static", "stsSecret", "ambient"] {
             assert_eq!(CredentialMode::parse(m).unwrap().as_str(), m);
         }
     }
