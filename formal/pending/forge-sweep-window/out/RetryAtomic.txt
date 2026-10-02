@@ -1,0 +1,3 @@
+tlc-rs: ForgeSyncSweepWindow (43 variables, 3 symmetry permutations), 4 workers, interp engine; loaded in 0.004s
+Model checking completed. No error has been found.
+73383867 states generated, 16155793 distinct states found. Depth 58. Checked in 425.692s (37952 distinct/s).

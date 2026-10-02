@@ -1011,7 +1011,11 @@ pub async fn sweep_ledger(sc: &mut Syncer, now: u64, budget: usize) -> ForgeResu
                 left.push(file);
                 continue;
             }
-            requests += 1;
+            // Only the holder deletes, as `sweep::sweep` (lesser finding 5):
+            // the reference set was read once for the pass.
+            super::sweep::delete_window().await;
+            let _held = super::lease::renew(sc).await?;
+            requests += 2;
             sc.store.delete(&key).await?;
             deleted += 1;
         }

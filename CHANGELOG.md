@@ -475,6 +475,22 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **forge: a deposed holder's sweep deleted a pack its successor had just
+  named** (2026-10-02, lesser finding 5 of the 2026-09-23 review, found by
+  flint-27, modelled in `formal/pending/forge-sweep-window`). The orphan
+  sweep and the ledger sweep read the snapshot once per pass, then per key
+  HEAD and later DELETE. A holder deposed in between still deleted the
+  key, while its successor had accepted a retried push, whose pack has the
+  same content-derived name, re-uploaded it and named it: the snapshot
+  then named a pack the bucket no longer held. A per-delete snapshot
+  re-check does not close it (`ForgeSyncSweepWindowRetryRechecks` still
+  fails); only the lease holder deleting does. Both sweeps now renew the
+  lease before every DELETE: a deposed holder is fenced, a live one
+  restarts every challenger's count. Tests
+  `a_deposed_sweepers_delete_never_takes_a_pack_its_successor_named` and
+  `a_deposed_ledger_sweep_never_takes_a_pack_its_successor_named`, each
+  failing as shipped.
+
 - **s3csi drill: legs S14, S20 and S21 restated for the per-barrier publish
   fence; S24, S25 and S27 read the plugin and the node they run on; S23
   gets `tc` and an else branch; S17 reports an inconclusive run as such;

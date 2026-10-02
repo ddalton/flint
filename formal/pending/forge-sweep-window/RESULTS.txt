@@ -1,0 +1,5 @@
+ForgeSyncSweepWindow.tla 55f53b8e7eef50a434bb80dc45ac02a5; started 2026-10-02T20:24:58Z
+tlcrs  ProbeRetrySweepTakesNamed      rc=12    594s | Error: Invariant Inv_LandedPackComplete is violated. 52896286 states generated, 11744807 distinct states found. Depth 33. Checked in 594.357s (19761 distinct/s). 
+tlcrs  ProbeUnderLeaseSweepDeleted    rc=12      4s | Error: Action property ProbeSweepDeleted is violated by the last step above. 629082 states generated, 195026 distinct states found. Depth 17. Checked in 3.889s (50154 distinct/s). 
+tlcrs  Retry                          rc=12    312s | Error: Invariant Inv_LandedPackComplete is violated. 52200856 states generated, 11592949 distinct states found. Depth 33. Checked in 311.422s (37226 distinct/s). 
+tlcrs  RetryRechecks                  rc=12    411s | Error: Invariant Inv_LandedPackComplete is violated. 53321299 states generated, 11824525 distinct states found. Depth 33. Checked in 411.048s (28767 distinct/s). 

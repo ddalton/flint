@@ -166,6 +166,17 @@ pub async fn sweep(sc: &mut Syncer) -> ForgeResult<usize> {
         if !age_ok {
             continue;
         }
+        delete_window().await;
+        // ONLY THE HOLDER DELETES (lesser finding 5; `ForgeSyncSweepWindow`).
+        // The snapshot was read once for the pass, and between this
+        // candidate's HEAD and its DELETE a holder deposed without knowing
+        // it is still here, while its successor may have re-uploaded this
+        // very key — names are content-derived, a retried push makes the
+        // same pack — and NAMED it. Neither the etag check nor a conditional
+        // delete can see that (same bytes, same etag). The renewal can: a
+        // deposed holder's 412s and fences, and a live one's restarts every
+        // challenger's quiet count, so the DELETE lands inside the term.
+        let _held = super::lease::renew(sc).await?;
         sc.store.delete(&obj.key).await?;
         deleted += 1;
     }
@@ -198,3 +209,25 @@ pub async fn sweep(sc: &mut Syncer) -> ForgeResult<usize> {
     }
     Ok(deleted)
 }
+
+// A test's hold on a sweep between its HEAD and its DELETE: the window a
+// deposed sweeper's successor can act in (lesser finding 5). Thread-
+// local, as the runtime of a `#[tokio::test]` is.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static DELETE_WINDOW: std::cell::RefCell<Option<(std::sync::Arc<tokio::sync::Notify>, std::sync::Arc<tokio::sync::Notify>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) async fn delete_window() {
+    let gate = DELETE_WINDOW.with(|g| g.borrow_mut().take());
+    if let Some((reached, resume)) = gate {
+        reached.notify_one();
+        resume.notified().await;
+    }
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+pub(crate) async fn delete_window() {}

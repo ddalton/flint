@@ -6982,6 +6982,119 @@ async fn an_open_door_forwards_the_push_to_the_serving_loop() {
 
 // ── review 2026-09-23: the residue rules against their own contracts ──
 
+/// LESSER FINDING 5 (2026-10-02; `formal/pending/forge-sweep-window`,
+/// `ForgeSyncSweepWindowRetry`): the sweep reads the snapshot ONCE per
+/// pass, then per candidate HEADs and later DELETEs. A holder deposed
+/// between the two — its successor took over, restored and accepted a
+/// retried push whose pack is that same content-named key, re-uploaded and
+/// NAMED — still deletes it: the snapshot then names a pack the bucket no
+/// longer holds. Only the lease holder may delete.
+#[tokio::test]
+async fn a_deposed_sweepers_delete_never_takes_a_pack_its_successor_named() {
+    let store = Arc::new(MemoryStore::new());
+    let mut a = Rig::with_store(store.clone(), "a").await;
+    a.sc.cfg.orphan_grace_secs = 0;
+    a.start().await;
+    let c0 = a.push_commit("refs/heads/main", None, "c0").await;
+    // The orphan: c1's pack in the bucket and named by nothing (a batch
+    // that uploaded and lost its CAS; the client was told it failed).
+    let before: std::collections::BTreeSet<String> = a.sc.git.local_packs().unwrap().into_iter().collect();
+    let c1 = a.stage_commit(Some(&c0), &[("f.txt", "c1\n")], "c1").await;
+    let p1 = a.sc.git.local_packs().unwrap().into_iter().find(|p| !before.contains(p)).expect("c1's pack");
+    let epoch = a.sc.lease().unwrap().epoch;
+    let files = a.sc.git.pack_siblings(&p1);
+    for f in &files {
+        super::packio::upload_file(store.as_ref(), &a.sc.cfg.pack_key(f), &a.sc.git.pack_path(f), epoch, None)
+            .await
+            .expect("the orphan's upload");
+    }
+    let src: Vec<(String, std::path::PathBuf)> = files.iter().map(|f| (f.clone(), a.sc.git.pack_path(f))).collect();
+    let (epoch_key, pack_key) = (a.sc.cfg.epoch_key(), a.sc.cfg.pack_key(&p1));
+
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
+    sweep::DELETE_WINDOW.with(|g| *g.borrow_mut() = Some((reached.clone(), resume.clone())));
+    let sweeping = sweep::sweep(&mut a.sc);
+    let succession = async {
+        reached.notified().await;
+        // The successor, while the sweeper waits on its DELETE.
+        let mut b = Rig::with_store(store.clone(), "b").await;
+        store.backdate_epoch(&epoch_key, 10_000);
+        take_over_and_restore(&mut b).await.expect("the successor serves");
+        // The client retries c1: the same objects, so the same pack.
+        for (f, path) in &src {
+            std::fs::copy(path, b.sc.git.pack_path(f)).unwrap();
+        }
+        let r = b.run(vec![push(3, vec![RefUpdate { name: "refs/heads/main".into(), old_oid: c0.clone(), new_oid: c1.clone() }])]).await;
+        assert!(is_ok(&r[0].results[0]), "the retry is accepted: {:?}", r[0].results[0]);
+        assert!(b.sc.cell().unwrap().snap.packs.contains(&p1), "fixture: the successor named the orphan's key");
+        resume.notify_one();
+        b
+    };
+    let (_swept, b) = tokio::join!(sweeping, succession);
+    assert!(
+        store.head(&pack_key).await.is_ok(),
+        "the deposed sweeper deleted {p1}, which its successor's snapshot names: {:?}",
+        b.sc.cell().unwrap().snap.packs
+    );
+    // And what the client was told ok is restorable.
+    let mut heir = Rig::with_store(store.clone(), "c").await;
+    store.backdate_epoch(&epoch_key, 20_000);
+    take_over_and_restore(&mut heir).await.expect("the successor's snapshot restores");
+}
+
+/// The ledger sweep's instance of the same window (`fold::sweep_ledger`):
+/// it reads the reference set once per pass and deletes the files a fold
+/// superseded by exact key, HEAD then DELETE. A key the successor
+/// re-uploaded and named in between must survive.
+#[tokio::test]
+async fn a_deposed_ledger_sweep_never_takes_a_pack_its_successor_named() {
+    let store = Arc::new(MemoryStore::new());
+    let mut a = Rig::with_store(store.clone(), "a").await;
+    a.sc.cfg.orphan_grace_secs = 0;
+    a.start().await;
+    let c0 = a.push_commit("refs/heads/main", None, "c0").await;
+    let before: std::collections::BTreeSet<String> = a.sc.git.local_packs().unwrap().into_iter().collect();
+    let c1 = a.stage_commit(Some(&c0), &[("f.txt", "c1\n")], "c1").await;
+    let p1 = a.sc.git.local_packs().unwrap().into_iter().find(|p| !before.contains(p)).expect("c1's pack");
+    let epoch = a.sc.lease().unwrap().epoch;
+    let files = a.sc.git.pack_siblings(&p1);
+    for f in &files {
+        super::packio::upload_file(store.as_ref(), &a.sc.cfg.pack_key(f), &a.sc.git.pack_path(f), epoch, None)
+            .await
+            .expect("the superseded upload");
+    }
+    // The ledger names it, as a fold's commit records what it unnamed.
+    a.sc.fold_ledger.push(fold::LedgerEntry { files: files.clone(), unnamed_unix: 0 });
+    let src: Vec<(String, std::path::PathBuf)> = files.iter().map(|f| (f.clone(), a.sc.git.pack_path(f))).collect();
+    let (epoch_key, pack_key) = (a.sc.cfg.epoch_key(), a.sc.cfg.pack_key(&p1));
+
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
+    sweep::DELETE_WINDOW.with(|g| *g.borrow_mut() = Some((reached.clone(), resume.clone())));
+    let sweeping = fold::sweep_ledger(&mut a.sc, super::now_unix(), 64);
+    let succession = async {
+        reached.notified().await;
+        let mut b = Rig::with_store(store.clone(), "b").await;
+        store.backdate_epoch(&epoch_key, 10_000);
+        take_over_and_restore(&mut b).await.expect("the successor serves");
+        for (f, path) in &src {
+            std::fs::copy(path, b.sc.git.pack_path(f)).unwrap();
+        }
+        let r = b.run(vec![push(3, vec![RefUpdate { name: "refs/heads/main".into(), old_oid: c0.clone(), new_oid: c1.clone() }])]).await;
+        assert!(is_ok(&r[0].results[0]), "the retry is accepted: {:?}", r[0].results[0]);
+        assert!(b.sc.cell().unwrap().snap.packs.contains(&p1), "fixture: the successor named the key");
+        resume.notify_one();
+        b
+    };
+    let (_swept, b) = tokio::join!(sweeping, succession);
+    assert!(
+        store.head(&pack_key).await.is_ok(),
+        "the deposed ledger sweep deleted {p1}, which its successor's snapshot names: {:?}",
+        b.sc.cell().unwrap().snap.packs
+    );
+}
+
 /// Claim the lease on a store another rig holds (after `backdate_epoch`)
 /// and restore, returning the restore's verdict instead of panicking on
 /// it — the verdict is what these tests are about.
