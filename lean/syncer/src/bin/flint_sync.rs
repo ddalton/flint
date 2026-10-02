@@ -279,7 +279,7 @@ async fn main() {
     // Drill-only: the sweep's grace, shortened so a host leg need not wait
     // ten minutes. The gateway's own overwrite grace does not move with it.
     cfg.untracked_grace_secs =
-        env_u64("FLINT_SYNC_UNTRACKED_GRACE_SECS", flint_lean::inbox::UNTRACKED_GRACE_SECS);
+        env_u64("FLINT_SYNC_UNTRACKED_GRACE_SECS", flint_lean::untracked::UNTRACKED_GRACE_SECS);
     if matches!(std::env::var("FLINT_SYNC_EVENT_TRACE").as_deref(), Ok("1") | Ok("true")) {
         cfg.event_trace = Some(flint_lean::trace::Sink::Stderr);
     }
