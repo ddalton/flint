@@ -53,8 +53,8 @@ Guards read the state; effects write it.
 | **GDelete**(p) | p cited, nothing in flight | one CAS: `doc[p] := Nil`, the tombstone names what it retired. Deletes no object | S3 | — |
 | **Edit**(s, p) | — | mint h derived from `baseline[p]`; `local[p] := h` | — | — |
 | **Delete**(s, p) | `local[p] ≠ Nil` | `local[p] := Nil` | — | — |
-| **Checkout**(s) | the writer is off | `local`, `baseline`, `inst` := `doc`; `synced`, `derived` := `seq`; nothing skipped | — | — |
-| **Consume**(s) | idle | THE CHEAP PATH first (the scan trigger): `derived = seq` and every `skipped` path still dirty ⇒ nothing is derived (one pointer GET, a stat per skipped path). Otherwise, owed = every path where `doc ≠ baseline` and the tree is clean (`local = baseline`); scope-filtered in the code (held or covered). Also taken: a dirty path whose bytes ARE the document's, or absent in both (content convergence — a restart between this writer's CAS and step 7 leaves exactly that). The tree and the baseline take `doc` there; `synced`, `derived` := `seq`; `skipped` := the paths left untaken, which are the agent's (dirty, the document differs) | `Inv_ShortcutSound`, `Inv_NoRegress` | `LeanP1OwedUnmarked` (skipped not re-checked), `LeanP1NoConvergence` (recorded) |
+| **Checkout**(s) | the writer is off | picks a scope T (`{Paths}` unscoped); `local`, `baseline` := `doc` on T, nothing elsewhere; `inst` := `doc`; `synced`, `derived` := `seq`; nothing skipped | — | — |
+| **Consume**(s) | idle | THE CHEAP PATH first (the scan trigger): `derived = seq` and every `skipped` path still dirty ⇒ nothing is derived (one pointer GET, a stat per skipped path). Otherwise, owed = every path where `doc ≠ baseline`, the tree is clean (`local = baseline`) and the tree HOLDS (its baseline cites it, or its scope covers it): what the scope declined stays declined. Also taken: a dirty path whose bytes ARE the document's, or absent in both (content convergence — a restart between this writer's CAS and step 7 leaves exactly that). The tree and the baseline take `doc` there; `synced`, `derived` := `seq`; `skipped` := the paths left untaken, which are the agent's (dirty, the document differs) | `Inv_ShortcutSound`, `Inv_NoRegress` | `LeanP1OwedUnmarked` (skipped not re-checked), `LeanP1NoConvergence` (recorded) |
 | **Scan**(s) | consumed | `uploads` := paths whose tree differs from the baseline and is present; `deletes` := any subset of the absent ones (the two-scan guard); `snap` := the tree | — | — |
 | **Skip**(s) | consumed; nothing dirty; `seq = synced` | back to idle: no scan, no CAS | — | — |
 | **Upload**(s, p) | scanned, p in `uploads` | the snapshot's handle lands, no condition; bytes PUT once before land at a COPY handle | R1 | — |
@@ -68,6 +68,9 @@ Guards read the state; effects write it.
 | **Reap**(s, h) | inside a commit section; h retired at least G ago, not cited | `live \= {h}`; the log goes once its handles are gone (`untracked.rs::reap_retired`) | `Inv_ReaderFetches` | `LeanP1ReaderLoses` |
 | **Finish**(s) | cased, collected | the baseline follows what was published (its uploads, its landed deletes); `synced := seq` if the install was the document; `derived := seq` only if the CAS replaced exactly the derived document (`adv`: the install is it plus this tree's own changes), and the published paths leave `skipped`; the section closes | `Inv_ShortcutSound` | `LeanP1AdvanceUnguarded` |
 | **Restart**(s) | — | keeps the tree and the baseline (with `synced`, `derived` and `skipped`, on disk); drops the barrier in flight. No journal is read back: content convergence settles an upload the CAS already cited | `Inv_NoRegress` | `LeanP1ProbeRestartAfterCas` (reachable) |
+| **RescopeBegin**(s) | idle, no rescope in flight | THE DOOR: a target scope T; refused if a path T drops (held, not admitted) has unpublished changes. Else the INTENT (T, the drop set) is durable before the first mutation | — | — |
+| **RescopeFirst**(s) | an intent "saved" (a fresh one, or a replay after a crash) | keeps the still-cited dirty paths of the drop set (a replay must converge, not refuse); records what it drops (`ScopeIntent::held`) with the intent; UNCITES the rest (the baseline lets go) | `Prop_NarrowNeverDeletes` | `LeanP1NarrowUnlinkFirst` (unlink first, crash, replay: the absence publishes as a delete) |
+| **RescopeSecond**(s) | the uncite landed | UNLINKS what it uncited — only while the tree's bytes there are still the recorded ones (L-131); then the WIDEN: fetches each admitted citation the tree does not hold, adopts bytes that ARE the document's, keeps a file the agent made there (L-130); the scope := T; `derived` := 0 (the next consume derives in full); the intent clears. A restart between the halves sends the replay back to RescopeFirst, which re-derives what it keeps from the RECORDED drop set; the barrier replays before any consume | `Prop_AgentWorkKept`, `Prop_ScopeRespected` | `LeanP1UnlinkBlind` (L-131), `LeanP1WidenOverwrites` (L-130) |
 | **Sync**(s) | idle, something owed | takes what is owed, and records what it derived as a consume would (`derived := seq`, `skipped` := the dirty paths it left) — only when it took everything owed: a fetch or a write it could not complete records nothing, as the consume's `left` (L-128); a scoped sync in the code records nothing, so the next consume derives. With no document at all, a sync of a tree that holds paths refuses rather than read the absence as an empty document (L-127) | `Inv_NoRegress` | — |
 
 ## The invariants
@@ -83,10 +86,13 @@ Predicates on a state, and two on a step. Each world's list is in
 | **Inv_AckedNamed** | an acknowledged handle that is gone is accounted for by something in the state that names it: a conflict record; a citation or tombstone derived from it at its path or where the human moved it; an acknowledged delete of a version derived from it; a later acknowledged write at its path; or a tree that took it in at that path and no longer holds it | — (every rule above that names it) |
 | **Inv_OneHolder** | a writer in its commit section is the cell's holder | the lease |
 | **Inv_NoRegress** | a consume or a sync never steps a tree back to a version its own derives from, unless a record names what it steps over (L-123's class) | — |
-| **Inv_ShortcutSound** | an idle writer whose pointer is where it left it and that nothing marked owed is owed nothing | the merge marking what it saw untaken (`LeanP1OwedUnmarked`) |
+| **Inv_ShortcutSound** | an idle writer with no rescope in flight, whose pointer is where it left it and that nothing marked owed, is owed nothing | the merge marking what it saw untaken (`LeanP1OwedUnmarked`) |
 | **Inv_ReaderFetches** | a reader that loaded the document less than G ago can fetch every handle it cites (one lagging longer re-resolves the pointer) | the retire age (`LeanP1ReaderLoses`) |
 | **Prop_NoSilentRevert** | no lost update: a commit replaces a published version only if its tree held it at the path, the new version derives from it, a record preserves it, it moves to another path, or it was the human's own earlier acknowledged version there | R7 (`LeanP1NoR7`), the gateway judging a save against the version read (`LeanP1GatewayBlind`) |
 | **Prop_DeleteSettles** | a barrier that published a delete leaves the tree and the document agreeing at that path | M3 (`LeanP1DeleteOutranked`: theirs outranking mine) |
+| **Prop_AgentWorkKept** | bytes the agent wrote that nobody has PUT yet leave its tree only by the agent's own hand | the widen keeping a file the agent made (`LeanP1WidenOverwrites`, L-130), the unlink taking only the bytes it uncited (`LeanP1UnlinkBlind`, L-131) |
+| **Prop_ScopeRespected** | no step but the agent's writes the tree at a path it neither holds nor admits | the consume's scope filter (`LeanP1ScopeIgnored`) |
+| **Prop_NarrowNeverDeletes** | a narrow is an unwatch, never an absence: no barrier publishes the delete of a path a rescope unlinked that the agent has not touched since | the uncite before the unlink (`LeanP1NarrowUnlinkFirst`) |
 
 `Prop_UISaveCompletes` (`LeanP1LiveHolds`) is the liveness claim: fair to
 the gateway's CAS alone, every save completes, with the writers free to
@@ -95,15 +101,21 @@ mutation (a gateway that waits for the lease).
 
 ## Honest limits
 
-The model has no scope: every path is held. The code filters the owed set
-by the held scope, so a scoped tree never receives a peer's change — or a
-UI promote — outside its scope (`a_scoped_tree_never_receives_a_peers_change_outside_its_scope`).
+Scope and rescope are modelled (2026-10-02), at one rescope and one restart
+over two paths (`LeanP1ScopeHolds`). A scoped SYNC (a request scope
+narrower than the workspace's, D4) is not; it records nothing as derived,
+so the next consume derives in full. The apply's keep set (a still-cited
+dirty path stays cited) is not load-bearing for the agent's work under the
+unlink's byte check: an uncited dirty file is kept and publishes as an
+add, and R7 records what it lands over.
 
 A cited handle is live (`Inv_CitationsLive`), so the model's consume never
 fails a fetch and always takes everything it owes. The code's consume can
 fail a fetch; then it records nothing as derived (`derived_etag` = none), and the next consume derives again. A sync does the same (L-128), and a reader re-syncs while its baseline says something is owed (L-129).
 
-The model has no rescope either. A widen keeps a file the agent made at a newly admitted path (uncited, with a record) rather than fetch the document's version over it (L-130); the next barrier publishes it as the agent's add.
+A widen's fetch never fails in the model. In the code a refused fetch is
+recorded (`rescope-refused`) and the path stays unheld but covered, so the
+next consume owes it.
 
 The retire log is written after the CAS. A crash between the two leaves
 those handles to the orphan sweep's write-age rule; the model does not

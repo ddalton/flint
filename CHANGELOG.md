@@ -472,6 +472,19 @@ covered by the stability guarantee.
   class's credential stays and the pod keeps reading until it exits, which
   is what the CRD field already documents.
 
+- **lean: a rescope narrow unlinked a file the agent wrote after the
+  uncite** (2026-10-02, L-131, found by the model once scope and rescope
+  were added to `LeanP1.tla`). The narrow uncites the paths it drops, then
+  unlinks them; the dirtiness checks ran before the uncite, the unlink
+  checked nothing. An agent writing a dropped path in between — a race in
+  a live call, and a window held open by a crash between the two halves
+  until the next barrier replays the intent — lost the write with no
+  record. The intent now records what the uncite drops
+  (`ScopeIntent::held`), and the unlink takes a file only while its bytes
+  are still those; otherwise it is kept (`rescope-kept-agent-write`) and
+  the next barrier publishes it as the agent's add.
+  (`a_narrow_never_unlinks_bytes_the_agent_wrote_after_the_uncite`,
+  `a_replay_never_unlinks_what_the_agent_wrote_while_the_syncer_was_down`.)
 - **lean: a `sync` with no document deleted the tree's clean files; a
   sync or a reader left paths owed forever; a rescope widen overwrote the
   agent's unpublished work** (2026-09-29, the review of `sync.rs`,

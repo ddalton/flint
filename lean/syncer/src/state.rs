@@ -96,6 +96,15 @@ pub struct ScopeIntent {
     /// would delete the agent's work instead.
     #[serde(default)]
     pub drop: Vec<String>,
+    /// What the uncite dropped, per path, recorded BEFORE the uncite (and
+    /// kept across a replay, which can no longer read it off the
+    /// baseline). The unlink takes a file only while its bytes are still
+    /// these: the agent may write a dropped path between the uncite and
+    /// the unlink — a crash leaves that window open until the next
+    /// barrier — and once uncited, its write and the leftover read alike
+    /// (the model's `LeanP1UnlinkBlind`, 2026-10-02).
+    #[serde(default)]
+    pub held: BTreeMap<String, BaselineEntry>,
 }
 
 /// The pod-incarnation identity + lease bookkeeping ({last_token,

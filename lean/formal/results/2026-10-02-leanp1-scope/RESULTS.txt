@@ -1,0 +1,30 @@
+LeanP1 + scope and rescope, 2026-10-02. LeanP1.tla md5 f64d5a831da252e1953ffb8edfe0a4ae.
+Worlds from gen-leanp1.sh ($SC: Scopes={{p1},{p1,p2}} MaxRescopes=1 MaxRestarts=1 Writers={A} MaxAges=0).
+Checkers: tlc-rs 2aa87d67 (4 workers), TLC tla2tools.jar (4 workers; mutations/probes 2-4). Every verdict below agrees on both.
+
+world                              expect                    tlc-rs                                      TLC
+LeanP1ScopeHolds                   HOLDS                     HOLDS 8,057,963 distinct, depth 30, 147 s   HOLDS 8,057,963 distinct, 303 s
+LeanP1ScopeIgnored                 Prop_ScopeRespected       fires, depth 3                              fires
+LeanP1WidenOverwrites (L-130)      Prop_AgentWorkKept        fires, depth 6                              fires
+LeanP1NarrowUnlinkFirst            Prop_NarrowNeverDeletes   fires, depth 9                              fires
+LeanP1UnlinkBlind (L-131)          Prop_AgentWorkKept        fires, depth 6                              fires
+LeanP1ProbeNarrowed                ProbeNarrowed             fires                                       fires
+LeanP1ProbeWidened                 ProbeWidened              fires                                       fires
+LeanP1ProbeRescopeReplayed         ProbeRescopeReplayed      fires                                       fires
+LeanP1ProbeOutOfScopePublished     ProbeOutOfScopePublished  fires                                       fires
+
+REGRESSION (the unscoped model is unchanged): LeanP1LiveHoldsSmall's bounds as Spec, safety only, tlc-rs 4w:
+  HEAD LeanP1.tla (3f6af642)  39,223,077 generated, 10,676,334 distinct, depth 36
+  this LeanP1.tla             39,223,077 generated, 10,676,334 distinct, depth 36
+So the deep LeanP1Holds run (md5 3f6af642, checkpoint at depth 22) checks this model at MaxRescopes=0, Scopes={Paths}.
+Inv_ShortcutSound's mutations still fire (OwedUnmarked depth 6, AdvanceUnguarded depth 9); trace check (core): ok.
+
+FOUND: L-131 (UnlinkBlind = the code as shipped: the narrow's unlink took the agent's write made after the
+uncite). Fixed in lean/syncer (ScopeIntent::held; unlink only while the bytes are the recorded ones).
+
+NOT a world: RescopeKeepsDirty=FALSE ran 600 s (two writers, MaxAges=1) without violating Prop_AgentWorkKept:
+under the unlink's byte check the keep set is not load-bearing for the agent's work.
+Two writers at these bounds grew ~2.5x a level past 21M distinct at depth 12 (stopped).
+Two false alarms on the way, both in the NEW claims, fixed before these runs: Inv_ShortcutSound now excludes a
+writer with a rescope in flight (its replay runs before any consume and clears `derived`); a re-upload copy's
+content is read through orig' (ContentNext), since the step records it.

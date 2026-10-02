@@ -7446,6 +7446,7 @@ async fn a_crash_between_the_intent_and_the_unlink_converges() {
         .save_scope_intent(&super::state::ScopeIntent {
             target: Some(vec!["inputs".into()]),
             drop: (0..6).map(|i| format!("outputs/big-{i}.bin")).collect(),
+            held: Default::default(),
         })
         .unwrap();
     assert!(read(dir.path(), "outputs/big-0.bin").is_some(), "nothing applied yet");
@@ -7473,14 +7474,17 @@ async fn a_crash_between_the_uncite_and_the_unlink_does_not_re_cite() {
     let _keep = scoped_fixture(&store).await;
     let (dir, mut b) = rescope_fixture(&store).await;
 
-    // The crash: intent durable, citations dropped, files still there.
+    // The crash: intent durable with what the uncite dropped (recorded
+    // before it), citations dropped, files still there.
+    let mut base = b.state.load_baseline().unwrap();
+    let drop: Vec<String> = (0..6).map(|i| format!("outputs/big-{i}.bin")).collect();
     b.state
         .save_scope_intent(&super::state::ScopeIntent {
             target: Some(vec!["inputs".into()]),
-            drop: (0..6).map(|i| format!("outputs/big-{i}.bin")).collect(),
+            held: drop.iter().map(|p| (p.clone(), base.entries[p].clone())).collect(),
+            drop,
         })
         .unwrap();
-    let mut base = b.state.load_baseline().unwrap();
     for i in 0..6 {
         let p = format!("outputs/big-{i}.bin");
         base.entries.remove(&p);
@@ -7547,6 +7551,7 @@ async fn a_replay_keeps_a_dirty_path_instead_of_wedging_the_barrier() {
         .save_scope_intent(&super::state::ScopeIntent {
             target: Some(vec!["inputs".into()]),
             drop: (0..6).map(|i| format!("outputs/big-{i}.bin")).collect(),
+            held: Default::default(),
         })
         .unwrap();
     write(dir.path(), "outputs/big-0.bin", "edited after the intent landed");
@@ -7570,6 +7575,86 @@ async fn a_replay_keeps_a_dirty_path_instead_of_wedging_the_barrier() {
             .any(|c| c.path == "outputs/big-0.bin" && c.kind == "rescope-kept-locally-dirty"),
         "a kept path must be surfaced, not silently retained"
     );
+}
+
+/// The agent writes a dropped path BETWEEN the uncite and the unlink (the
+/// model's `LeanP1UnlinkBlind`, 2026-10-02). The door saw it clean and the
+/// apply's keep set saw it clean; the unlink must still not take bytes it
+/// did not uncite. Kept, uncited, recorded — the next barrier publishes it
+/// as the agent's add.
+#[tokio::test]
+async fn a_narrow_never_unlinks_bytes_the_agent_wrote_after_the_uncite() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+    let (dir, mut b) = rescope_fixture(&store).await;
+
+    let root = dir.path().to_path_buf();
+    super::barrier::CONSUME_WINDOW_HOOK.with(|h| {
+        *h.borrow_mut() = Some((
+            "outputs/big-0.bin".into(),
+            "rescope-before-unlink",
+            Box::new(move || write(&root, "outputs/big-0.bin", "the agent's edit after the uncite")),
+        ))
+    });
+    let r = b.rescope(Some(vec!["inputs".into()])).await.unwrap();
+    assert!(super::barrier::CONSUME_WINDOW_HOOK.with(|h| h.borrow().is_none()), "fixture: the window never ran");
+
+    assert_eq!(
+        read(dir.path(), "outputs/big-0.bin").as_deref(),
+        Some("the agent's edit after the uncite"),
+        "the narrow unlinked the agent's write"
+    );
+    assert!(read(dir.path(), "outputs/big-1.bin").is_none(), "the clean ones still left");
+    assert!(r.kept_dirty.contains(&"outputs/big-0.bin".to_string()), "{:?}", r.kept_dirty);
+    assert!(
+        b.state.load_conflicts().unwrap().iter().any(|c| c.path == "outputs/big-0.bin"),
+        "a kept path must be surfaced"
+    );
+    // And it is the agent's add from here: the next barrier publishes it.
+    let r1 = b.run_barrier().await.unwrap();
+    assert!(r1.uploaded.iter().any(|p| p == "outputs/big-0.bin"), "{:?}", r1.uploaded);
+    let m = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries.len(), 8, "{:?}", m.entries.keys());
+}
+
+/// The same window, held open by a crash: the syncer died between the
+/// uncite and the unlink, and the agent — still running — wrote a dropped
+/// path before the next barrier's replay. Uncited, the write and the
+/// leftover read alike; only the recorded entry tells them apart.
+#[tokio::test]
+async fn a_replay_never_unlinks_what_the_agent_wrote_while_the_syncer_was_down() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+    let (dir, mut b) = rescope_fixture(&store).await;
+
+    let mut base = b.state.load_baseline().unwrap();
+    let drop: Vec<String> = (0..6).map(|i| format!("outputs/big-{i}.bin")).collect();
+    b.state
+        .save_scope_intent(&super::state::ScopeIntent {
+            target: Some(vec!["inputs".into()]),
+            held: drop.iter().map(|p| (p.clone(), base.entries[p].clone())).collect(),
+            drop: drop.clone(),
+        })
+        .unwrap();
+    for p in &drop {
+        base.entries.remove(p);
+        base.prev_scan.remove(p);
+    }
+    b.state.save_baseline(&base).unwrap();
+    write(dir.path(), "outputs/big-0.bin", "written while the syncer was down");
+
+    let r1 = b.run_barrier().await.unwrap();
+    assert!(r1.rescope_replayed);
+    assert_eq!(
+        read(dir.path(), "outputs/big-0.bin").as_deref(),
+        Some("written while the syncer was down"),
+        "the replay unlinked the agent's write"
+    );
+    assert!(read(dir.path(), "outputs/big-1.bin").is_none(), "the leftovers still left");
+    // Anti-vacuity for `..._does_not_re_cite`: only the agent's file publishes.
+    let r2 = b.run_barrier().await.unwrap();
+    let up: Vec<&String> = r1.uploaded.iter().chain(r2.uploaded.iter()).collect();
+    assert_eq!(up, vec!["outputs/big-0.bin"], "{up:?}");
 }
 
 /// An all-rejected scope is REFUSED, never read as the whole tree —

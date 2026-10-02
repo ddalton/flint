@@ -10,18 +10,23 @@ cd "$(dirname "$0")"
 KEYS="Paths Free Writers MaxMint MaxUI MaxRemovals MaxBarriers MaxRestarts MaxSyncs MaxCopies MaxAges \
 CommitSurfacesForeign CommitVerifiesUploads SweepUnderLease CollectorSparesCited \
 CommitRecordsDeleteOverride DeleteWinsPreserved ContentConverges RecheckSkipped CommitAdvanceGuarded RetireAge \
-GatewayIgnoresLease GatewayJudgesRead GatewaySweepGrace RenameAtomic"
+GatewayIgnoresLease GatewayJudgesRead GatewaySweepGrace RenameAtomic \
+Scopes MaxRescopes ConsumeHonorsScope RescopeUnciteFirst RescopeKeepsDirty WidenKeepsLocal UnlinkChecksBytes"
 emit() { # <name> <spec> <invariants> <properties> <overrides...>
   local name=$1 spec=$2 invs=$3 props=$4; shift 4
   local c_Paths='{p1, p2}' c_Free='{p2}' c_Writers='{A, B}'
   local c_MaxMint=3 c_MaxUI=1 c_MaxRemovals=1 c_MaxBarriers=2 c_MaxRestarts=0 c_MaxSyncs=0 c_MaxCopies=1 c_MaxAges=1
+  local c_Scopes= c_MaxRescopes=0
   local k kv v
   for k in CommitSurfacesForeign CommitVerifiesUploads SweepUnderLease CollectorSparesCited \
            CommitRecordsDeleteOverride DeleteWinsPreserved ContentConverges RecheckSkipped CommitAdvanceGuarded RetireAge \
-           GatewayIgnoresLease GatewayJudgesRead GatewaySweepGrace RenameAtomic; do
+           GatewayIgnoresLease GatewayJudgesRead GatewaySweepGrace RenameAtomic \
+           ConsumeHonorsScope RescopeUnciteFirst RescopeKeepsDirty WidenKeepsLocal UnlinkChecksBytes; do
     eval "local c_$k=TRUE"
   done
   for kv in "$@"; do k=${kv%%=*}; v=${kv#*=}; eval "c_$k=\"\$v\""; done
+  # Unscoped unless a world names its scopes: every tree holds every path.
+  [ -n "$c_Scopes" ] || c_Scopes="{$c_Paths}"
   {
     echo "SPECIFICATION $spec"
     echo "CHECK_DEADLOCK FALSE"
@@ -75,3 +80,27 @@ emit ProbeReaped Spec TypeOK ProbeReaped
 emit ProbeConverged Spec TypeOK ProbeConverged $Q1
 emit ProbeRepublish Spec TypeOK ProbeRepublish $Q1
 emit ProbeRestartAfterCas Spec TypeOK ProbeRestartAfterCas $Q1
+# 2026-10-02: SCOPE AND RESCOPE. One writer, scoped ({p1}) or not; one
+# rescope (a widen from {p1}, or a narrow from {p1, p2}); one restart, so
+# the replay after a crash between the halves is reachable. p2 starts
+# uncited (Free), so a UI save or rename can change it out of scope. One
+# writer: what moves the document under a scoped tree is the gateway's
+# verbs as much as a peer's commit, and the merge between writers is
+# LeanP1Holds's. No retire age (orthogonal; LeanP1Holds checks it). Two
+# writers at these bounds grew 2.5x a level past 21M states at depth 12.
+SC="Scopes={{p1},{p1,p2}} MaxRescopes=1 MaxRestarts=1 Writers={A} MaxAges=0"
+SPROPS="Prop_NoSilentRevert,Prop_DeleteSettles,Prop_AgentWorkKept,Prop_ScopeRespected,Prop_NarrowNeverDeletes"
+emit ScopeHolds Spec "$INV" "$SPROPS" $SC
+emit ScopeIgnored Spec TypeOK Prop_ScopeRespected ConsumeHonorsScope=FALSE $SC
+emit WidenOverwrites Spec TypeOK Prop_AgentWorkKept WidenKeepsLocal=FALSE $SC
+emit NarrowUnlinkFirst Spec TypeOK Prop_NarrowNeverDeletes RescopeUnciteFirst=FALSE $SC
+# RescopeKeepsDirty (the replay keeps a still-cited dirty path) is NOT a
+# world: under the unlink's byte check it is not load-bearing for the
+# agent's work (an uncited dirty file is kept and publishes as an add; R7
+# records what it lands over). Measured: RescopeKeepsDirty=FALSE ran 600 s
+# without a violation of Prop_AgentWorkKept.
+emit UnlinkBlind Spec TypeOK Prop_AgentWorkKept UnlinkChecksBytes=FALSE $SC
+emit ProbeNarrowed Spec TypeOK ProbeNarrowed $SC
+emit ProbeWidened Spec TypeOK ProbeWidened $SC
+emit ProbeRescopeReplayed Spec TypeOK ProbeRescopeReplayed $SC
+emit ProbeOutOfScopePublished Spec ProbeOutOfScopePublished "" $SC

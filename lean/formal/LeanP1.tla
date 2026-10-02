@@ -18,9 +18,20 @@
    that; a commit advances it only when its CAS replaced exactly that
    document (`CommitAdvanceGuarded`).  `Inv_ShortcutSound` is the claim.
 
-   Differences from the code the model keeps on purpose: no scope (every
-   path is held); a cited handle is live (Inv_CitationsLive), so a consume's
-   fetch never fails and a consume always takes everything it owes.       *)
+   SCOPE AND RESCOPE (2026-10-02): a checkout admits a set of paths (one of
+   `Scopes`; `{Paths}` is the unscoped tree), and a consume or a sync owes
+   only what the tree HOLDS (its baseline cites it) or its scope covers
+   (`barrier.rs::consume_owed`, `sync.rs`).  The narrow / widen verb
+   (`checkout.rs::rescope`) is a durable INTENT applied in two halves, the
+   uncite and then the unlink with the widen; a restart replays it from the
+   recorded drop set before any consume.  With `MaxRescopes = 0` and
+   `Scopes = {Paths}` every state is the unscoped model's.
+
+   Differences from the code the model keeps on purpose: a cited handle is
+   live (Inv_CitationsLive), so a consume's fetch never fails and a consume
+   always takes everything it owes; a widen's fetch never fails either;
+   a scoped SYNC (D4, a request scope narrower than the workspace's) is not
+   modelled.                                                                 *)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS
@@ -49,10 +60,19 @@ CONSTANTS
   GatewayIgnoresLease,          \* G1
   GatewayJudgesRead,            \* a save lands only over the version it read
   GatewaySweepGrace,            \* G3: the sweep spares a save in flight
-  RenameAtomic                  \* one CAS (FALSE: two)
+  RenameAtomic,                 \* one CAS (FALSE: two)
+  \* Scope and rescope.
+  Scopes,                       \* the admitted sets a checkout or a rescope may name
+  MaxRescopes,
+  ConsumeHonorsScope,           \* a path neither held nor covered is not owed
+  RescopeUnciteFirst,           \* the uncite lands before the unlink
+  RescopeKeepsDirty,            \* the apply (and its replay) keeps a still-cited dirty path
+  WidenKeepsLocal,              \* L-130: a widen keeps a file the agent made at an admitted path
+  UnlinkChecksBytes             \* the unlink takes only the bytes the uncite dropped
 
 ASSUME Free \subseteq Paths
 ASSUME MaxMint \in Nat /\ MaxMint >= 1
+ASSUME Scopes \subseteq SUBSET Paths /\ Scopes # {}
 
 Seed == 1
 Gens == Seed..(MaxMint + MaxCopies)
@@ -67,7 +87,7 @@ VARIABLES
   gw,     \* per path, the save in flight: its fresh handle, not yet cited
   mv,     \* a two-CAS rename between its CASes (only when ~RenameAtomic)
   udel,   \* the deletes the gateway ACKNOWLEDGED: <<path, version deleted>>
-  restarts, syncs, regressed,
+  restarts, syncs, regressed, rescopes,
   upped, copies, orig,  \* every handle PUT; the copies made; a copy's original
   \* RETIRE-AGE G (M1, slice 5).  `retiring`: what a commit stopped citing,
   \* less than G ago (the code's young retire logs; the sweeps spare it).
@@ -77,7 +97,7 @@ VARIABLES
   retiring, aged, ages, rdoc, rlag
 
 bucket == <<live, minted, doc, seq, tomb, base, acked, conflicts, holder, gw, mv, udel>>
-aux == <<restarts, syncs, regressed, upped, copies, orig>>
+aux == <<restarts, syncs, regressed, rescopes, upped, copies, orig>>
 ret == <<retiring, aged, ages, rdoc, rlag>>
 vars == <<live, minted, doc, seq, tomb, base, acked, conflicts, holder,
           nextGen, ui, reqs, barriers, w, took, gw, mv, udel, aux, ret>>
@@ -98,7 +118,17 @@ Writer ==
    synced : Nat,                        \* the pointer seq it last left the tree at
                                         \*   (`baseline.manifest_etag`)
    derived : Nat,                       \* the seq the last derive read (0: none)
-   skipped : SUBSET Paths]              \* what it left as the agent's work
+   skipped : SUBSET Paths,              \* what it left as the agent's work
+   scope : SUBSET Paths,                \* the admitted set (`scope.json`)
+   \* A rescope in flight (`scope-intent.json`): its target and the paths it
+   \* drops, durable before the first mutation; "saved" until the first
+   \* half lands, "mid" between the halves.  `sKeep`: the still-cited dirty
+   \* paths this apply keeps.  `sHeld`: what the uncite dropped, per path.
+   sStage : {"none", "saved", "mid"},
+   sTgt : SUBSET Paths, sDrop : SUBSET Paths, sKeep : SUBSET Paths,
+   sHeld : [Paths -> Opt(Handles)],
+   \* A ghost: paths a rescope unlinked that the agent has not touched since.
+   unlinked : SUBSET Paths]
 
 WriterInit ==
   [st |-> "off", pc |-> "idle",
@@ -107,7 +137,9 @@ WriterInit ==
    uploads |-> {}, deletes |-> {},
    snap |-> [p \in Paths |-> Nil], upDone |-> {}, gone |-> {},
    verified |-> FALSE, inst |-> [p \in Paths |-> Nil], retire |-> {},
-   collected |-> FALSE, adv |-> FALSE, synced |-> 0, derived |-> 0, skipped |-> {}]
+   collected |-> FALSE, adv |-> FALSE, synced |-> 0, derived |-> 0, skipped |-> {},
+   scope |-> {}, sStage |-> "none", sTgt |-> {}, sDrop |-> {}, sKeep |-> {},
+   sHeld |-> [p \in Paths |-> Nil], unlinked |-> {}]
 
 TypeOK ==
   /\ live \subseteq Handles /\ minted \subseteq Handles /\ live \subseteq minted
@@ -124,7 +156,7 @@ TypeOK ==
   /\ gw \in [Paths -> Opt(Handles)]
   /\ mv \in Opt(Paths \X Handles)
   /\ udel \subseteq Paths \X Handles
-  /\ restarts \in Nat /\ syncs \in Nat /\ regressed \in BOOLEAN
+  /\ restarts \in Nat /\ syncs \in Nat /\ regressed \in BOOLEAN /\ rescopes \in Nat
   /\ retiring \subseteq Handles /\ aged \subseteq Handles /\ ages \in Nat
   /\ rdoc \in [Paths -> Opt(Handles)] /\ rlag \in BOOLEAN
 
@@ -157,7 +189,7 @@ GPut(p) ==
      /\ nextGen' = nextGen + 1 /\ ui' = ui + 1
      /\ upped' = upped \cup {h}
   /\ UNCHANGED <<doc, seq, tomb, acked, conflicts, holder, reqs, barriers, w, mv, udel,
-                 restarts, syncs, regressed, copies, orig>>
+                 restarts, syncs, regressed, rescopes, copies, orig>>
 
 \* ...and its CAS, judged against the CURRENT document: it lands only over
 \* the version the UI read.  Otherwise 412, not acknowledged, and the fresh
@@ -222,21 +254,26 @@ Edit(s, p) ==
   /\ LET h == <<p, nextGen>> IN
      /\ minted' = minted \cup {h}
      /\ base' = [base EXCEPT ![h] = w[s].baseline[p]]
-     /\ w' = [w EXCEPT ![s].local[p] = h, ![s].integrated = @ \cup {nextGen}]
+     /\ w' = [w EXCEPT ![s].local[p] = h, ![s].integrated = @ \cup {nextGen},
+                       ![s].unlinked = @ \ {p}]
      /\ nextGen' = nextGen + 1
   /\ UNCHANGED <<live, doc, seq, tomb, acked, conflicts, holder, ui, reqs, barriers, gw, mv, udel, aux>>
 
 Delete(s, p) ==
   /\ On(s) /\ w[s].local[p] # Nil
-  /\ w' = [w EXCEPT ![s].local[p] = Nil]
+  /\ w' = [w EXCEPT ![s].local[p] = Nil, ![s].unlinked = @ \ {p}]
   /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
 
+\* A checkout materializes what its scope admits (`checkout_scoped`).
 Checkout(s) ==
   /\ w[s].st = "off"
-  /\ w' = [w EXCEPT ![s].st = "on",
-                    ![s].local = doc, ![s].baseline = doc, ![s].inst = doc,
-                    ![s].integrated = {Gen(doc[p]) : p \in {q \in Paths : doc[q] # Nil}},
-                    ![s].synced = seq, ![s].derived = seq, ![s].skipped = {}]
+  /\ \E T \in Scopes :
+       LET held == [p \in Paths |-> IF p \in T THEN doc[p] ELSE Nil] IN
+       w' = [w EXCEPT ![s].st = "on",
+                      ![s].local = held, ![s].baseline = held, ![s].inst = doc,
+                      ![s].integrated = {Gen(doc[p]) : p \in {q \in T : doc[q] # Nil}},
+                      ![s].synced = seq, ![s].derived = seq, ![s].skipped = {},
+                      ![s].scope = T]
   /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
 
 ------------------------------------------------------------------------------
@@ -249,14 +286,18 @@ Checkout(s) ==
    CHEAP PATH: the pointer where this writer left it and nothing marked
    owed means nothing is derived at all; a consume that leaves a dirty
    path untaken marks it (`left` in the code).                             *)
-Owed(s, p) == doc[p] # w[s].baseline[p] /\ w[s].local[p] = w[s].baseline[p]
+\* What the tree HOLDS: its baseline cites the path, or its scope covers it.
+\* A path neither is not this tree's (what the scope declined stays declined).
+Held(s, p) == w[s].baseline[p] # Nil \/ p \in w[s].scope
+Owed(s, p) == /\ doc[p] # w[s].baseline[p] /\ w[s].local[p] = w[s].baseline[p]
+              /\ ConsumeHonorsScope => Held(s, p)
 \* Taking doc[p] would step the tree BACK to a version its own derives from
 \* (L-123's class), unless a record names what it steps over.
 Back(s, p) == /\ doc[p] # Nil /\ w[s].baseline[p] # Nil /\ Derives(w[s].baseline[p], doc[p])
               /\ Content(doc[p]) # Content(w[s].baseline[p])
               /\ <<p, w[s].baseline[p]>> \notin conflicts
 Converges(s, p) ==
-  /\ ContentConverges
+  /\ ContentConverges /\ Held(s, p)
   /\ w[s].local[p] # w[s].baseline[p] /\ doc[p] # w[s].baseline[p]
   /\ \/ w[s].local[p] # Nil /\ doc[p] # Nil /\ Content(w[s].local[p]) = Content(doc[p])
      \/ w[s].local[p] = Nil /\ doc[p] = Nil
@@ -267,6 +308,8 @@ CheapPath(s) ==
   /\ RecheckSkipped => \A p \in w[s].skipped : w[s].local[p] # w[s].baseline[p]
 Consume(s) ==
   /\ On(s) /\ w[s].pc = "idle" /\ barriers < MaxBarriers
+  \* Step 0 replays a rescope in flight first (`run_barrier`).
+  /\ w[s].sStage = "none"
   /\ IF CheapPath(s)
      THEN /\ w' = [w EXCEPT ![s].pc = "consumed"]
           /\ UNCHANGED regressed
@@ -281,10 +324,10 @@ Consume(s) ==
                          \* A path left untaken is the agent's work, owed again
                          \* the moment the agent backs out (a revert, or a new
                          \* file deleted unpublished).
-                         ![s].skipped = {p \in Paths \ taken : doc[p] # w[s].baseline[p]}]
+                         ![s].skipped = {p \in Paths \ taken : doc[p] # w[s].baseline[p] /\ Held(s, p)}]
              /\ regressed' = (regressed \/ \E p \in owed : Back(s, p))
   /\ UNCHANGED <<live, minted, doc, seq, tomb, base, acked, conflicts, holder, gw, mv, udel,
-                 nextGen, ui, reqs, barriers, restarts, syncs, upped, copies, orig>>
+                 nextGen, ui, reqs, barriers, restarts, syncs, rescopes, upped, copies, orig>>
 
 \* Step 2: what differs from the baseline is an upload or a deletion; a
 \* deletion may wait for the next walk (the two-scan guard: any subset).
@@ -332,7 +375,7 @@ Upload(s, p) ==
                                ![s].local[p] = IF @ = h THEN c ELSE @]
           /\ copies' = copies + 1
   /\ UNCHANGED <<doc, seq, tomb, acked, conflicts, holder, gw, mv, udel,
-                 nextGen, ui, reqs, barriers, restarts, syncs, regressed>>
+                 nextGen, ui, reqs, barriers, restarts, syncs, regressed, rescopes>>
 
 ------------------------------------------------------------------------------
 (* The merge's vocabulary, read at the CAS against the CURRENT document
@@ -491,17 +534,22 @@ Restart(s) ==
                     ![s].snap = [p \in Paths |-> Nil],
                     ![s].upDone = {}, ![s].gone = {}, ![s].verified = FALSE,
                     ![s].inst = [p \in Paths |-> Nil], ![s].retire = {},
-                    ![s].collected = FALSE, ![s].adv = FALSE]
+                    ![s].collected = FALSE, ![s].adv = FALSE,
+                    \* The intent is on disk; its replay starts the apply over.
+                    ![s].sStage = IF @ = "none" THEN "none" ELSE "saved",
+                    ![s].sKeep = {}]
   /\ holder' = IF holder = s THEN "none" ELSE holder
   /\ restarts' = restarts + 1
   /\ UNCHANGED <<live, minted, doc, seq, tomb, base, acked, conflicts, gw, mv, udel,
-                 nextGen, ui, reqs, barriers, regressed, syncs, upped, copies, orig>>
+                 nextGen, ui, reqs, barriers, regressed, syncs, rescopes, upped, copies, orig>>
 
 \* A sync, between barriers: it takes what is owed, and records what it
 \* derived as a consume would: the paths it left are the agent's (dirty,
 \* with the document moved) (`sync.rs` step 5).  It does not move `synced`.
+\* A sync does not replay a rescope; it can run after a crash left one
+\* "saved" (the scope it reads is still the old one).
 Sync(s) ==
-  /\ On(s) /\ w[s].pc = "idle" /\ syncs < MaxSyncs
+  /\ On(s) /\ w[s].pc = "idle" /\ syncs < MaxSyncs /\ w[s].sStage \in {"none", "saved"}
   /\ \E p \in Paths : Owed(s, p)
   /\ LET owed == {p \in Paths : Owed(s, p)}
          bl == [p \in Paths |-> IF p \in owed THEN doc[p] ELSE w[s].baseline[p]]
@@ -509,10 +557,100 @@ Sync(s) ==
                        ![s].baseline = bl,
                        ![s].integrated = @ \cup {Gen(doc[p]) : p \in {q \in owed : doc[q] # Nil}},
                        ![s].derived = seq,
-                       ![s].skipped = {p \in Paths : doc[p] # bl[p] /\ w[s].local[p] # bl[p]}]
+                       ![s].skipped = {p \in Paths : doc[p] # bl[p] /\ w[s].local[p] # bl[p] /\ Held(s, p)}]
   /\ syncs' = syncs + 1
   /\ regressed' = (regressed \/ \E p \in Paths : Owed(s, p) /\ Back(s, p))
-  /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, restarts, upped, copies, orig>>
+  /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, restarts, rescopes, upped, copies, orig>>
+
+------------------------------------------------------------------------------
+(* The narrow / widen verb (`checkout.rs::rescope`, scoped-read design §4).
+   The DOOR refuses a narrow over a leaving path with unpublished changes;
+   the intent (target, drop set) is durable before the first mutation.  The
+   APPLY converges instead of refusing: a still-cited dirty path is kept.
+   Its halves: the uncite, then the unlink and the widen (shipped order;
+   `RescopeUnciteFirst = FALSE` swaps them).  A restart between them sends
+   the replay back to the first half, which re-derives what it keeps from
+   the RECORDED drop set.                                                  *)
+
+\* What a target drops: the paths the baseline holds that it does not admit.
+Leaving(s, T) == {p \in Paths : w[s].baseline[p] # Nil /\ p \notin T}
+
+RescopeBegin(s) ==
+  /\ On(s) /\ w[s].pc = "idle" /\ w[s].sStage = "none" /\ rescopes < MaxRescopes
+  /\ \E T \in Scopes \ {w[s].scope} :
+       /\ \A p \in Leaving(s, T) : w[s].local[p] = w[s].baseline[p]
+       /\ w' = [w EXCEPT ![s].sStage = "saved", ![s].sTgt = T,
+                         ![s].sDrop = Leaving(s, T), ![s].sKeep = {},
+                         ![s].sHeld = [p \in Paths |-> Nil]]
+  /\ rescopes' = rescopes + 1
+  /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, restarts, syncs, regressed, upped, copies, orig>>
+
+\* What the apply keeps: still cited and dirty.  A path already uncited
+\* reads as dirty in the code (an upload) and is NOT kept: keeping it would
+\* undo the very step a crash interrupted.
+KeepSet(s) == IF RescopeKeepsDirty
+              THEN {p \in w[s].sDrop : w[s].baseline[p] # Nil /\ w[s].local[p] # w[s].baseline[p]}
+              ELSE {}
+
+RescopeFirst(s) ==
+  /\ On(s) /\ w[s].pc = "idle" /\ w[s].sStage = "saved"
+  /\ LET keep == KeepSet(s)
+         dd == w[s].sDrop \ keep
+     IN w' = [w EXCEPT ![s].sStage = "mid", ![s].sKeep = keep,
+                       \* What it uncites, recorded with the intent; a replay
+                       \* keeps what an earlier run recorded.
+                       ![s].sHeld = [p \in Paths |-> IF p \in dd /\ w[s].baseline[p] # Nil
+                                                     THEN w[s].baseline[p] ELSE @[p]],
+                       ![s].baseline = IF RescopeUnciteFirst
+                                       THEN [p \in Paths |-> IF p \in dd THEN Nil ELSE @[p]]
+                                       ELSE @,
+                       ![s].local = IF RescopeUnciteFirst
+                                    THEN @
+                                    ELSE [p \in Paths |-> IF p \in dd THEN Nil ELSE @[p]],
+                       ![s].unlinked = IF RescopeUnciteFirst
+                                       THEN @
+                                       ELSE @ \cup {p \in dd : w[s].local[p] # Nil}]
+  /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
+
+\* The second half, the widen, and the new scope; then the intent clears.
+\* The widen fetches each admitted citation the tree does not hold, adopts
+\* bytes already there that ARE the document's, and keeps a file the agent
+\* made there (L-130: uncited, published by the next barrier).
+RescopeSecond(s) ==
+  /\ On(s) /\ w[s].pc = "idle" /\ w[s].sStage = "mid"
+  /\ LET W == w[s]
+         dd == W.sDrop \ W.sKeep
+         \* The unlink: what the uncite dropped, unless the tree's bytes
+         \* there are no longer those (the agent wrote since).
+         unlink(p) == /\ p \in dd /\ W.local[p] # Nil
+                      /\ \/ ~UnlinkChecksBytes
+                         \/ W.sHeld[p] # Nil /\ Content(W.local[p]) = Content(W.sHeld[p])
+         local1 == IF RescopeUnciteFirst
+                   THEN [p \in Paths |-> IF unlink(p) THEN Nil ELSE W.local[p]]
+                   ELSE W.local
+         base1 == IF RescopeUnciteFirst
+                  THEN W.baseline
+                  ELSE [p \in Paths |-> IF p \in dd THEN Nil ELSE W.baseline[p]]
+         add == {p \in W.sTgt : base1[p] = Nil /\ doc[p] # Nil}
+         kept == IF WidenKeepsLocal
+                 THEN {p \in add : local1[p] # Nil /\ Content(local1[p]) # Content(doc[p])}
+                 ELSE {}
+         fetch == add \ kept
+     IN w' = [w EXCEPT ![s].sStage = "none",
+                       \* Fetched where the tree has nothing (or, unguarded,
+                       \* over whatever it has); adopted where its bytes ARE
+                       \* the document's.
+                       ![s].local = [p \in Paths |->
+                                       IF p \in fetch /\ (local1[p] = Nil \/ ~WidenKeepsLocal)
+                                       THEN doc[p] ELSE local1[p]],
+                       ![s].baseline = [p \in Paths |-> IF p \in fetch THEN doc[p] ELSE base1[p]],
+                       ![s].integrated = @ \cup {Gen(doc[p]) : p \in fetch},
+                       ![s].scope = W.sTgt,
+                       ![s].synced = seq, ![s].derived = 0, ![s].skipped = {},
+                       ![s].sTgt = {}, ![s].sDrop = {}, ![s].sKeep = {},
+                       ![s].sHeld = [p \in Paths |-> Nil],
+                       ![s].unlinked = (@ \cup {p \in Paths : unlink(p) /\ RescopeUnciteFirst}) \ fetch]
+  /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
 
 ------------------------------------------------------------------------------
 (* The retire age (M1) and a reader of the document.                       *)
@@ -564,7 +702,7 @@ Init ==
   /\ gw = [p \in Paths |-> Nil]
   /\ mv = Nil
   /\ udel = {}
-  /\ restarts = 0 /\ syncs = 0 /\ regressed = FALSE
+  /\ restarts = 0 /\ syncs = 0 /\ regressed = FALSE /\ rescopes = 0
   /\ upped = live /\ copies = 0 /\ orig = [h \in Handles |-> Nil]
   /\ retiring = {} /\ aged = {} /\ ages = 0
   /\ rdoc = [p \in Paths |-> Nil] /\ rlag = TRUE
@@ -578,6 +716,7 @@ WriterStep ==
   \/ \E s \in Writers :
        \/ Checkout(s) \/ Consume(s) \/ Scan(s) \/ Skip(s) \/ PullOnly(s) \/ Claim(s)
        \/ Verify(s) \/ Install(s) \/ Collect(s) \/ Finish(s) \/ Restart(s) \/ Sync(s)
+       \/ RescopeBegin(s) \/ RescopeFirst(s) \/ RescopeSecond(s)
   \/ \E s \in Writers, p \in Paths : Edit(s, p) \/ Delete(s, p) \/ Upload(s, p)
   \/ \E s \in Writers, h \in Handles : Sweep(s, h)
 
@@ -646,16 +785,62 @@ Inv_ReaderFetches == ~rlag => \A p \in Paths : rdoc[p] # Nil => rdoc[p] \in live
 
 \* THE CHEAP PATH IS SOUND: an idle writer the cheap path would let skip is
 \* owed nothing.  Two gaps it closed by construction (the `behind` design's
-\* gate 2026-09-25: a skipped dirty path, a withheld upload).
+\* gate 2026-09-25: a skipped dirty path, a withheld upload).  A rescope in
+\* flight is no such writer: its replay runs before any consume and clears
+\* the record (`derived` = 0).
 Inv_ShortcutSound ==
   \A s \in Writers :
-    (On(s) /\ w[s].pc = "idle" /\ CheapPath(s)) => \A p \in Paths : ~Owed(s, p)
+    (On(s) /\ w[s].pc = "idle" /\ w[s].sStage = "none" /\ CheapPath(s))
+      => \A p \in Paths : ~Owed(s, p)
 
 \* M3: a barrier that published a delete leaves the tree and the document
 \* agreeing at that path (applied, or the tree took what stands).
 Prop_DeleteSettles ==
   [][\A s \in Writers :
        Finish(s) => \A p \in w[s].deletes : w[s].inst[p] = Nil \/ w'[s].local[p] = w[s].inst[p]]_vars
+
+\* The bytes a handle holds after the step (a copy's original is recorded
+\* by the step that makes it).
+ContentNext(h) == IF h # Nil /\ orig'[h] # Nil THEN orig'[h] ELSE h
+\* The agent's own steps.
+AgentStep(s) == \E q \in Paths : Edit(s, q) \/ Delete(s, q)
+
+\* THE AGENT'S WORK IS KEPT: bytes the agent wrote that nobody has PUT yet
+\* leave its tree only by its own hand.  Nothing else holds them.
+Prop_AgentWorkKept ==
+  [][\A s \in Writers, p \in Paths :
+       LET h == w[s].local[p] IN
+       (/\ h # Nil /\ h \notin upped
+        /\ w'[s].local[p] # h
+        /\ ~(w'[s].local[p] # Nil /\ ContentNext(w'[s].local[p]) = h)) => AgentStep(s)]_vars
+
+\* WHAT THE SCOPE DECLINED STAYS DECLINED: no step but the agent's writes
+\* the tree at a path it neither holds nor admits (before or after) — but
+\* a narrow's unlink of a path it dropped.
+Prop_ScopeRespected ==
+  [][\A s \in Writers, p \in Paths :
+       (/\ w[s].st = "on"
+        /\ p \notin w[s].scope \cup w'[s].scope /\ w[s].baseline[p] = Nil
+        /\ w'[s].local[p] # w[s].local[p]
+        /\ ~(w'[s].local[p] = Nil /\ p \in w[s].sDrop)
+        /\ ~(w'[s].local[p] # Nil /\ w[s].local[p] # Nil
+             /\ ContentNext(w'[s].local[p]) = Content(w[s].local[p]))) => AgentStep(s)]_vars
+
+\* A NARROW IS AN UNWATCH, NEVER AN ABSENCE: no barrier's scan chooses to
+\* publish the delete of a path a rescope unlinked and the agent has not
+\* touched since.
+Prop_NarrowNeverDeletes ==
+  [][\A s \in Writers :
+       (w[s].pc = "consumed" /\ w'[s].pc = "scanned")
+         => w'[s].deletes \cap w[s].unlinked = {}]_vars
+
+\* Probes for the new steps.
+ProbeNarrowed == [][~\E s \in Writers : w[s].sStage = "mid" /\ w'[s].sStage = "none" /\ w'[s].scope \subseteq w[s].scope /\ w'[s].scope # w[s].scope]_vars
+ProbeWidened == [][~\E s \in Writers : w[s].sStage = "mid" /\ w'[s].sStage = "none"
+                     /\ \E p \in Paths : w[s].baseline[p] = Nil /\ w'[s].baseline[p] # Nil]_vars
+ProbeRescopeReplayed == [][~\E s \in Writers : w[s].sStage = "mid" /\ w'[s].sStage = "saved"]_vars
+ProbeOutOfScopePublished ==
+  ~\E s \in Writers, p \in Paths : On(s) /\ p \notin w[s].scope /\ w[s].baseline[p] # Nil
 
 \* G1: every save the gateway starts is answered.  Checked under LSpec.
 Prop_UISaveCompletes == \A p \in Paths : (gw[p] # Nil) ~> (gw[p] = Nil)

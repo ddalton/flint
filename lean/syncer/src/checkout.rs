@@ -690,18 +690,16 @@ impl Syncer {
     /// The safety argument is `classify` (`scan.rs`), which derives
     /// deletions by iterating `baseline.entries.keys()`: a path this
     /// checkout never materialized is never cited, so it can never be
-    /// classified absent and can never have its object DELETEd. That is
-    /// why no scope filter is needed in the barrier, the sync or the
-    /// delete sites — the admission filter here IS the whole argument,
-    /// and four copies of a rule are four places for it to drift.
+    /// classified absent and can never have its object DELETEd. So the
+    /// DELETE sites need no scope filter: the admission filter here is
+    /// that whole argument. What the tree is OWED does need one, below.
     ///
-    /// What a scoped workspace does NOT get is a frozen held set. A path
-    /// outside the scope that changes REMOTELY arrives through the inbox
-    /// and enters the baseline, and from then on it is owned like any
-    /// other — probe P1/P3 of 2026-09-11 measured both halves. There is
-    /// no verb to shed it again, and no verb to ask for a path the
-    /// remote never touched. Scoping a checkout is therefore a bet that
-    /// the admitted set is the set the agent needs for its whole life.
+    /// The held set is what the baseline cites plus what the scope covers.
+    /// A path outside both that changes REMOTELY is not owed: the consume
+    /// and the sync decline it (`Prop_ScopeRespected` in `LeanP1.tla`).
+    /// A file the AGENT writes outside the scope publishes like any other,
+    /// and from then on the baseline holds it. `rescope` narrows or widens
+    /// the set later.
     /// Name the right culprit when a fetch could not be served.
     ///
     /// Two of `materialize`'s refusals — the SOLE WRITER 412 and the
@@ -1026,7 +1024,7 @@ impl Syncer {
             )));
         }
 
-        let intent = super::state::ScopeIntent { target, drop: leaving };
+        let intent = super::state::ScopeIntent { target, drop: leaving, held: Default::default() };
         self.state.save_scope_intent(&intent)?;
         self.apply_scope_intent(&intent).await
     }
@@ -1116,6 +1114,19 @@ impl Syncer {
         let drop_set: Vec<String> =
             leaving.into_iter().filter(|p| !dirty.contains(p)).collect();
 
+        // What the uncite drops, durable with the intent before it lands. A
+        // replay keeps what an earlier run recorded: those paths are no
+        // longer in the baseline to read it from.
+        let mut recorded = intent.clone();
+        for p in &drop_set {
+            if let Some(be) = baseline.entries.get(p) {
+                recorded.held.insert(p.clone(), be.clone());
+            }
+        }
+        if recorded != *intent {
+            self.state.save_scope_intent(&recorded)?;
+        }
+
         // UNCITE FIRST, and durably, before a single file leaves the
         // tree. Both halves must happen, and the intent guarantees
         // they will; this order decides only which way a lost intent
@@ -1134,6 +1145,23 @@ impl Syncer {
             // The same containment the barrier demands: a citation is
             // not a licence to unlink whatever a path resolves to.
             if contained_path(&self.cfg.root, p).is_err() {
+                continue;
+            }
+            super::barrier::consume_window("rescope-before-unlink", p);
+            // Only the bytes the uncite dropped. A file that is no longer
+            // them is the agent's, written since: kept, uncited, recorded;
+            // the next barrier publishes it as the agent's add.
+            if std::fs::symlink_metadata(&local).is_ok()
+                && super::barrier::local_dirty(&local, recorded.held.get(p))
+            {
+                self.state.append_conflict(&super::state::ConflictRecord {
+                    path: p.clone(),
+                    foreign_etag: String::new(),
+                    preserved_key: None,
+                    kind: "rescope-kept-agent-write".into(),
+                    at_unix: super::now_unix(),
+                })?;
+                report.kept_dirty.push(p.clone());
                 continue;
             }
             match std::fs::remove_file(&local) {
