@@ -64,89 +64,6 @@ fn socket_path() -> PathBuf {
     state_dir().join(SOCKET_NAME)
 }
 
-/// DIRECTION 5: where `pre-receive` leaves this push's pack names for
-/// `proc-receive` to pick up.
-///
-/// KEYED BY THE PARENT PID, which is `git-receive-pack`: both hooks are
-/// its children within one push, and two concurrent pushes are two
-/// receive-pack processes. Nothing else correlates them. The ref list
-/// cannot — two pushes can carry the same refs — and the pack name
-/// cannot either, because pack names are MANY-TO-ONE: identical content
-/// hashes identically, so the same name legitimately belongs to several
-/// pushes at once. That many-to-one property is exactly why the mapping
-/// recorded here is `pack -> {pushes}` and never `push` as an owner.
-fn push_packs_path() -> PathBuf {
-    let ppid = std::os::unix::process::parent_id();
-    state_dir().join("pushpacks").join(ppid.to_string())
-}
-
-/// The packs this push brought, read out of the quarantine git built
-/// for it — the one moment they are unambiguously identifiable, because
-/// the quarantine holds THIS push's objects and nothing else. Once
-/// `pre-receive` passes, git migrates them into `objects/pack` beside
-/// every other pack and the distinction is gone; that migration is what
-/// makes a refused push's residue indistinguishable from a queued
-/// push's pack, and it is the whole reason this file exists.
-///
-/// `index-pack --fix-thin` has ALREADY COMPLETED by the time
-/// `pre-receive` runs (measured 9/9 in the probe, 16/19 through forge's
-/// own chain), so the name here is FINAL — it is the name the pack will
-/// carry on disk.
-///
-/// Best effort throughout: every failure records NOTHING, and the batch
-/// reads an empty list as "no information" and falls back to naming the
-/// directory. Recording a WRONG name would unname a live pack; recording
-/// none only forgoes the reduction.
-fn record_push_packs() {
-    let Ok(quarantine) = std::env::var("GIT_QUARANTINE_PATH") else { return };
-    let dir = PathBuf::from(quarantine).join("pack");
-    let Ok(entries) = std::fs::read_dir(&dir) else { return };
-    let mut names: Vec<String> = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("pack") {
-            continue;
-        }
-        // SPELLED THE WAY `local_packs` SPELLS THEM: `pack-<hash>.pack`,
-        // extension INCLUDED. The two sets are compared directly, and
-        // the first cut of this used `file_stem()` — so nothing ever
-        // matched, the accepted set collapsed to the snapshot's packs,
-        // and a batch named ZERO packs. The A/B caught it on its first
-        // run because the arms' refs diverged; had it only compared
-        // bytes it would have read as a spectacular reduction.
-        if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-            names.push(name.to_string());
-        }
-    }
-    if names.is_empty() {
-        return;
-    }
-    let path = push_packs_path();
-    if let Some(parent) = path.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
-            return;
-        }
-    }
-    let _ = std::fs::write(&path, names.join("\n"));
-}
-
-/// Drop a record for a push that is being refused at `pre-receive`,
-/// whose quarantine git therefore discards whole.
-fn forget_push_packs() {
-    let _ = std::fs::remove_file(push_packs_path());
-}
-
-/// Read back what `pre-receive` recorded, and REMOVE it: the file is
-/// one push's handoff, and a leftover would be read by a later push
-/// that happened to reuse the pid — naming a pack that push never
-/// brought.
-fn take_push_packs() -> Vec<String> {
-    let path = push_packs_path();
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let _ = std::fs::remove_file(&path);
-    text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect()
-}
-
 /// The hook names git invokes.
 pub const ROLES: [&str; 2] = ["pre-receive", "proc-receive"];
 
@@ -191,20 +108,6 @@ pub fn run_hook(role: &str) -> i32 {
 /// `pre-receive`: every command on stdin as `<old> <new> <ref>`, and an
 /// exit status that accepts or refuses ALL of them.
 fn pre_receive() -> std::io::Result<i32> {
-    // RECORDED FIRST, BEFORE ANY DECISION. This function has three
-    // exits and every one that returns 0 lets git migrate the pack out
-    // of quarantine — so recording on only one of them records on only
-    // some pushes.
-    //
-    // It was attached to the "policy evaluated, nothing refused" path,
-    // which missed the FIRST exit: no policy document at all returns 0
-    // right here. A local rig that renders a policy always took the
-    // instrumented path and the omission was invisible; the cluster
-    // renders the document elsewhere, so the recorder never ran, the
-    // listing fell back to naming the directory, and the treated arm
-    // measured byte-identical to its control. Found by the drill,
-    // unreachable from the unit rig.
-    record_push_packs();
     let policy = match Policy::load(&state_dir()) {
         Ok(Some(p)) => p,
         // No document is the pre-operator posture and is permissive by
@@ -213,7 +116,6 @@ fn pre_receive() -> std::io::Result<i32> {
         Ok(None) => return Ok(0),
         Err(e) => {
             eprintln!("flint-forge: {e}");
-            forget_push_packs();
             return Ok(1);
         }
     };
@@ -238,13 +140,6 @@ fn pre_receive() -> std::io::Result<i32> {
     if refusals.is_empty() {
         return Ok(0);
     }
-    // REFUSED HERE: git discards the whole quarantine, so the packs
-    // recorded above will never exist on disk and the record must go
-    // with them. (The batch also filters what it names by what is on
-    // disk, so a leaked record could not name a phantom pack — but a
-    // file per refused push, keyed by a pid that recycles, is litter
-    // this can simply not create.)
-    forget_push_packs();
     // git prints these to the pusher verbatim. One line per rule, and
     // the whole push is refused: `pre-receive` has no per-ref verdict.
     for why in &refusals {
@@ -314,7 +209,6 @@ fn run() -> std::io::Result<i32> {
         principal: std::env::var("REMOTE_USER").unwrap_or_default(),
         options,
         atomic,
-        packs: take_push_packs(),
         commands: commands.clone(),
     };
 

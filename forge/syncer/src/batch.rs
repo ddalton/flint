@@ -50,11 +50,6 @@ pub struct PushRequest {
     /// honoured HERE, nothing honours it, and a client that asked for
     /// all-or-nothing gets neither the guarantee nor an error.
     pub atomic: bool,
-    /// DIRECTION 5: the packs `pre-receive` recorded for this push.
-    /// Empty when the hook recorded nothing (an older hook, a ref-only
-    /// push, or no quarantine), which the listing treats as "no
-    /// information" and never as "this push brought no pack".
-    pub packs: Vec<String>,
     pub commands: Vec<RefUpdate>,
     /// New oids whose objects this process created and which are
     /// therefore LOOSE on disk, not in any pack.
@@ -88,6 +83,93 @@ impl PushRequest {
             matches!(*s, "ours" | "theirs")
         })
     }
+}
+
+/// The packs a batch must NAME: the snapshot's, less what retention holds
+/// on disk, plus every pack holding an object the accepted tips reach and
+/// the snapshot's refs do not (`ForgeSyncNeeded`'s `NameNeeded`).
+///
+/// The snapshot's refs are the base because they are DURABLE: a CAS names
+/// only what it uploaded or a prior CAS named. What they do not reach is
+/// looked for first in the packs nothing names — this batch's pushes, the
+/// server's merge pack, a refused push's residue (its objects are never
+/// wanted, so it is never named); then in the named packs, whose indexes
+/// can be the whole repository's (a ref-only push, or a re-push of
+/// history a fold's roll-up holds); last in a pack retention holds, which
+/// a re-push after a rewind can reproduce by name.
+///
+/// An object in NO pack is an error, never a smaller set: nothing could
+/// upload it, and a snapshot naming a ref whose objects reached no pack
+/// is one a successor cannot restore (`ForgeSyncRewind`'s
+/// `NeededTrustsDisk`).
+async fn needed_packs(
+    sc: &Syncer,
+    snap: &snapshot::Snapshot,
+    accepted: &[RefUpdate],
+    server_pack: Option<&String>,
+) -> ForgeResult<Vec<String>> {
+    let held: BTreeSet<&String> = sc.retained.iter().map(|r| &r.name).collect();
+    let mut named: BTreeSet<String> = snap.packs.iter().filter(|p| !held.contains(p)).cloned().collect();
+    let tips: Vec<String> = accepted
+        .iter()
+        .filter(|u| !is_zero(&u.new_oid))
+        .map(|u| u.new_oid.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let base: Vec<String> = snap.refs.values().filter(|o| !is_zero(o)).cloned().collect();
+    let mut want: BTreeSet<String> = sc.git.objects_since(&tips, &base).await?.into_iter().collect();
+    if let Some(f) = server_pack {
+        named.insert(f.clone());
+    }
+    let ids_of = |pack: &str| sc.git.pack_path(&format!("{}.idx", pack.trim_end_matches(".pack")));
+    let unnamed: Vec<String> = sc.git.local_packs()?.into_iter().filter(|p| !named.contains(p)).collect();
+    // In this order, each read only while something is still wanted:
+    // 1. the server's merge pack and the packs no snapshot names and
+    //    retention does not hold — this batch's pushes (and a refused
+    //    push's residue, which holds nothing wanted);
+    // 2. the named packs, whose indexes can be the whole repository's;
+    // 3. last, a pack retention holds: re-naming one re-uploads what a
+    //    fold superseded, so only for an object no named pack has (a
+    //    re-push after a base rebuild dropped it).
+    let mut fresh: Vec<String> = server_pack.into_iter().cloned().collect();
+    fresh.extend(unnamed.iter().filter(|p| !held.contains(p)).cloned());
+    let retained: Vec<String> = unnamed.iter().filter(|p| held.contains(p)).cloned().collect();
+    let in_snapshot: Vec<String> = snap.packs.iter().filter(|p| named.contains(*p)).cloned().collect();
+    for (pass, packs) in [(1, fresh), (2, in_snapshot), (3, retained)] {
+        for p in packs {
+            if want.is_empty() {
+                break;
+            }
+            // An index that cannot be read (a neighbour's pack mid-
+            // migration, or damage) is not one this batch can name.
+            // Skipped, not fatal: an object only it holds stays wanted,
+            // and that fails the batch below.
+            let ids = match sc.git.pack_object_ids(&ids_of(&p)).await {
+                Ok(ids) => ids,
+                Err(e) if pass != 2 => {
+                    eprintln!("flint-forge: needed packs: {p} skipped, its index is unreadable: {e}");
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            let before = want.len();
+            for o in &ids {
+                want.remove(o);
+            }
+            if want.len() < before {
+                named.insert(p);
+            }
+        }
+    }
+    if let Some(o) = want.iter().next() {
+        return Err(ForgeError::State(format!(
+            "the accepted pushes need {} object(s) that are in no pack on disk (first: {o}); \
+             nothing would upload them, so nothing is published",
+            want.len()
+        )));
+    }
+    Ok(named.into_iter().collect())
 }
 
 /// ONE transaction entry per ref, however many commands moved it.
@@ -203,10 +285,6 @@ pub async fn run_batch(
 
     let mut reports: Vec<PushReport> = Vec::new();
     let mut accepted: Vec<RefUpdate> = Vec::new();
-    // DIRECTION 5: which pushes something was ACCEPTED from. A push
-    // every command of which was refused contributes no pack to name —
-    // its pack on disk is precisely the residue the finding is about.
-    let mut accepted_ids: BTreeSet<u64> = BTreeSet::new();
     // Objects the SERVER created this batch (merge commits and their
     // trees). They are loose, and a pack-only upload would leave the
     // bucket holding a ref whose commit is in no pack.
@@ -309,12 +387,6 @@ pub async fn run_batch(
                 })
                 .collect();
         }
-        // AFTER the atomic rollback above, which can take a push back
-        // to having contributed nothing: asking before it would name
-        // the pack of a push that was refused whole.
-        if accepted.len() > accepted_at {
-            accepted_ids.insert(push.id);
-        }
         reports.push(PushReport { id: push.id, results });
     }
 
@@ -369,70 +441,18 @@ pub async fn run_batch(
     let renewed = lease::renew(sc).await?;
 
     // ── step 4: upload every pack the bucket does not have ───────────
-    // The listing minus what a fold superseded and retention keeps on
-    // disk: a retained pack re-listed here would be re-named and
-    // re-uploaded (fold.rs).
-    let local_packs = sc.listed_packs()?;
-    // ── DIRECTION 5: the set this batch will NAME ────────────────────
-    //
-    // `local_packs` is the DIRECTORY. Because git migrates a push's
-    // pack when `pre-receive` passes — before `proc-receive` carries
-    // forge's verdict — the directory also holds the packs of pushes
-    // forge REFUSED, and naming them pins them forever under strict
-    // coverage supersede.
-    //
-    // The decided form, matching the model's `AcceptedListing`:
-    //
-    //     (snapshot.packs \ retained) ∪ {accepted pushes' packs}
-    //                                 ∪ {the pack the server built}
-    //
-    // and it is a SUPERSET of what the snapshot already names, so this
-    // can only decline to name packs that arrived since the last CAS.
-    //
-    // FALLING BACK IS THE SAFE DIRECTION. If no push in this batch
-    // recorded a pack, the hook told us nothing (an older hook, no
-    // quarantine) and we name the directory as before: naming too much
-    // costs bytes, naming too little loses objects.
-    //
-    // And the fallback is PER PUSH, not per batch. An empty record is
-    // "no information" for THAT push — its record write or read failed
-    // (both are best effort and swallowed), or it moved a ref onto
-    // objects it did not bring — so ONE such push beside a recorded one
-    // is enough to name the directory. Deciding it for the batch as a
-    // whole named only the recorded packs, and the unrecorded push's
-    // pack was neither named nor uploaded while its ref landed and it
-    // was told ok (review 2026-09-23; pinned by
-    // `an_unrecorded_push_beside_a_recorded_one_is_still_named_and_uploaded`).
-    // A push that only deletes needs no objects, and one whose every
-    // new tip the server built has them in `server_pack`.
-    let accepted_pushes = || pushes.iter().filter(|p| accepted_ids.contains(&p.id));
-    let recorded: BTreeSet<&String> = accepted_pushes().flat_map(|p| p.packs.iter()).collect();
-    let unrecorded = accepted_pushes().any(|p| {
-        p.packs.is_empty()
-            && p.commands
-                .iter()
-                .any(|c| !is_zero(&c.new_oid) && !p.server_created.contains(&c.new_oid))
-    });
-    let use_accepted = sc.cfg.name_accepted_set && !recorded.is_empty() && !unrecorded;
-    let named_set: Vec<String> = if use_accepted {
-        let on_disk: BTreeSet<&String> = local_packs.iter().collect();
-        let mut keep: BTreeSet<String> = cell.snap.packs.iter().cloned().collect();
-        // Retention keeps a superseded pack on disk without naming it;
-        // re-naming one would re-upload it and refresh its age, the
-        // collision every "keep the old packs a while" fix has.
-        if !sc.retained.is_empty() {
-            let held: BTreeSet<&String> = sc.retained.iter().map(|r| &r.name).collect();
-            keep.retain(|p| !held.contains(p));
-        }
-        // Only what is actually on disk can be uploaded, and only what
-        // this batch accepted may be added.
-        keep.extend(recorded.iter().filter(|p| on_disk.contains(**p)).map(|p| (*p).clone()));
-        if let Some(f) = &server_pack {
-            keep.insert(f.clone());
-        }
-        keep.into_iter().collect()
+    // NEEDED PACKS (2026-10-02): the set this batch NAMES is the
+    // snapshot's (less what retention holds) plus the packs holding what
+    // the ACCEPTED pushes need — read off git, never off a per-push
+    // record. The directory also holds the packs of pushes forge REFUSED
+    // (git migrates a quarantine as soon as `pre-receive` passes, before
+    // `proc-receive` carries forge's verdict), and naming those pins them
+    // forever under strict coverage supersede. `name_accepted_set` off is
+    // the control: name the directory, as before DIRECTION 5.
+    let named_set: Vec<String> = if sc.cfg.name_accepted_set {
+        needed_packs(sc, &cell.snap, &accepted, server_pack.as_ref()).await?
     } else {
-        local_packs.clone()
+        sc.listed_packs()?
     };
     let known: BTreeSet<&String> = cell.snap.packs.iter().collect();
     let epoch = sc.lease()?.epoch;

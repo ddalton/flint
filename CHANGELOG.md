@@ -378,6 +378,25 @@ covered by the stability guarantee.
 
 ### Changed
 
+- **forge: a batch names the packs its accepted pushes NEED, read off
+  git; the per-push pack records are gone** (2026-10-02, the "needed
+  packs" simplification of 2026-09-26, modelled as `ForgeSyncNeeded` and
+  `ForgeSyncRewind`). `pre-receive` used to write each push's quarantine
+  pack names best effort, and a lost record fell back to naming the whole
+  directory — refused pushes' residue included, pinned for good by strict
+  coverage (and once, batch-wide, named neither: review 2026-09-23). Now
+  `batch::needed_packs` walks the objects the accepted tips reach and the
+  snapshot's refs do not, and names the packs holding them: the unnamed
+  packs first, then the named ones, a pack retention holds last (so a
+  re-push after a rewind never re-names what a fold superseded). An
+  object in no pack FAILS the batch: before, a tip whose objects were
+  loose was told ok with nothing uploaded. `FLINT_FORGE_NAME_ACCEPTED_SET`
+  stays as the control (off: name the directory). Tests:
+  `a_refused_pushs_residue_is_never_named_beside_an_accepted_push`,
+  `an_accepted_tip_in_no_pack_fails_the_batch` (both fail as shipped),
+  `a_re_push_the_roll_up_already_holds_names_no_retained_pack`; each
+  guard mutated, its test fails.
+
 - **flint-s3-csi: the broker arm refreshes at 420 s before expiry, not
   270** (2026-10-02, `BROKER_REFRESH_SECS` in `s3csi/node.rs`). Measured
   against real STS sessions: mount-s3's credential provider asks the

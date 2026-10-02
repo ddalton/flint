@@ -474,7 +474,6 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
                                     // fall back to naming the
                                     // directory, which is the safe way
                                     // to be wrong.
-                                    packs: vec![],
                                     commands: dead, server_created: vec![] };
                                 run_own_batch(&mut sc, push, &policy, &shared).await?;
                             }
@@ -532,7 +531,6 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
                                     // pushed, so it arrived in no
                                     // quarantine and there is nothing
                                     // to record.
-                                    packs: vec![],
                                     // THE COMMIT IS LOOSE. Nothing else
                                     // will pack it, and a ref published
                                     // without its objects makes the next
@@ -1092,7 +1090,6 @@ mod collect_tests {
         let (reply, _rx) = tokio::sync::oneshot::channel();
         Incoming {
             request: uds::HookRequest {
-                packs: vec![],
                 principal: "tester".into(),
                 options: vec![],
                 atomic: false,

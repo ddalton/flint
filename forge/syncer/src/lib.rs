@@ -280,9 +280,20 @@ pub struct ForgeConfig {
     /// push→pack mapping is `ForgeSyncForgetPushPack`, which violates
     /// `Inv_LandedPackComplete` in one second.
     ///
+    /// NEEDED PACKS (2026-10-02): the mapping is no longer RECORDED.
+    /// `pre-receive` wrote each push's quarantine pack names best effort,
+    /// a lost record fell back to naming the directory, and a lost record
+    /// beside a recorded one once named neither (review 2026-09-23). The
+    /// batch now reads what the accepted tips need off git — the objects
+    /// they reach that the snapshot's refs do not — and names the packs
+    /// holding them; an object in no pack fails the batch
+    /// (`batch::needed_packs`; modelled `ForgeSyncNeeded`, identical
+    /// counts to the accepted set, and `ForgeSyncRewind`).
+    ///
     /// It REDUCES, it does not eliminate: a MIXED push puts accepted
     /// and refused objects in ONE pack, which must still be named.
-    /// Measured to remove 78-81% of the residue.
+    /// Measured to remove 78-81% of the residue. OFF is the control:
+    /// name the directory.
     pub name_accepted_set: bool,
     /// DIRECTION 4 (`FLINT_FORGE_RECLAIM_AT_REST`, DEFAULT ON).
     ///

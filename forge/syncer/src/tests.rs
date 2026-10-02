@@ -148,12 +148,12 @@ impl Rig {
 /// on the rig, so a test can build one while the rig is borrowed for
 /// the batch it is about to run.
 fn push(id: u64, cmds: Vec<RefUpdate>) -> PushRequest {
-    PushRequest { id, principal: "tester".into(), options: vec![], atomic: false, packs: vec![], commands: cmds, server_created: vec![] }
+    PushRequest { id, principal: "tester".into(), options: vec![], atomic: false, commands: cmds, server_created: vec![] }
 }
 
 /// `git push --atomic`: every command lands or none does.
 fn atomic_push(id: u64, cmds: Vec<RefUpdate>) -> PushRequest {
-    PushRequest { id, principal: "tester".into(), options: vec![], atomic: true, packs: vec![], commands: cmds, server_created: vec![] }
+    PushRequest { id, principal: "tester".into(), options: vec![], atomic: true, commands: cmds, server_created: vec![] }
 }
 
 fn zero() -> String {
@@ -185,6 +185,9 @@ fn ng_reason(r: &CommandResult) -> String {
 #[tokio::test]
 async fn a_pack_without_its_index_is_neither_uploaded_nor_named() {
     let mut rig = Rig::new().await;
+    // The LISTING is under test, so the directory arm: NEEDED PACKS names
+    // only what accepted tips need, and never a neighbour's pack at all.
+    rig.sc.cfg.name_accepted_set = false;
     rig.start().await;
     let c = rig.stage_commit(None, &[("a.txt", "one\n")], "first").await;
 
@@ -3760,6 +3763,88 @@ async fn a_base_rebuild_after_a_rewind_survives_a_warm_restart() {
     assert_eq!(rig.sc.git.ref_oid("refs/heads/main").await.unwrap(), Some(c1));
 }
 
+/// NEEDED PACKS never re-names a pack retention holds when a NAMED pack
+/// already has the objects: a tier fold rolls every input into its
+/// roll-up, so a re-push after a rewind brings objects the roll-up holds,
+/// in a pack whose name retention still holds. Re-naming that pack would
+/// re-upload what a fold superseded and refresh its age — the collision
+/// `a_retained_pack_is_never_named_by_a_batch` guards for the listing.
+#[tokio::test]
+async fn a_re_push_the_roll_up_already_holds_names_no_retained_pack() {
+    let store = Arc::new(MemoryStore::new());
+    let mut rig = Rig::with_store(store.clone(), "a").await;
+    rig.tiers_only();
+    rig.start().await;
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+    let c1 = rig.push_commit("refs/heads/main", Some(&c0), "c1").await;
+    let (_, rolled) = rig.fold_once().await.expect("two equal packs fold");
+    let f = rolled.expect("a roll-up");
+    let held: Vec<String> = rig.sc.retained.iter().map(|r| r.name.clone()).collect();
+    assert!(!held.is_empty(), "fixture: the fold's inputs are retained");
+    let pol = Policy { allow_non_fast_forward: vec!["*".into()], ..Policy::default() };
+    let rewind = vec![push(9, vec![RefUpdate { name: "refs/heads/main".into(), old_oid: c1.clone(), new_oid: c0.clone() }])];
+    assert!(is_ok(&batch::run_batch(&mut rig.sc, rewind, &pol).await.unwrap()[0].results[0]));
+    // The re-push of c1: the same objects, packed again as a push would.
+    let base: Vec<String> = rig.sc.git.refs().await.unwrap().into_values().collect();
+    let again = rig.sc.git.pack_new_objects(std::slice::from_ref(&c1), &base).await.unwrap().expect("a pack");
+    assert!(held.contains(&again), "fixture: the same objects give a retained name ({again} vs {held:?})");
+    let repush = vec![push(10, vec![RefUpdate { name: "refs/heads/main".into(), old_oid: c0.clone(), new_oid: c1.clone() }])];
+    assert!(is_ok(&batch::run_batch(&mut rig.sc, repush, &pol).await.unwrap()[0].results[0]));
+    let snap = rig.sc.cell().unwrap().snap.clone();
+    assert!(snap.packs.contains(&f), "the roll-up stays named: {:?}", snap.packs);
+    assert!(!snap.packs.contains(&again), "a retained pack was re-named: {:?}", snap.packs);
+    let mut heir = Rig::with_store(store.clone(), "b").await;
+    store.backdate_epoch(&rig.sc.cfg.epoch_key(), 10_000);
+    take_over_and_restore(&mut heir).await.expect("restorable");
+    assert_eq!(heir.sc.git.refs().await.unwrap().get("refs/heads/main"), Some(&c1));
+}
+
+/// NEEDED PACKS (`ForgeSyncRewind`'s shape, 2026-10-02): a rewind, a base
+/// rebuild that cannot reach the rewound commit, and a re-push of it. The
+/// rebuild keeps the input pack holding it NAMED (strict coverage), so the
+/// re-push's objects are in a named pack and the batch must find them
+/// there; a successor restores the re-pushed tip.
+#[tokio::test]
+async fn a_re_push_after_a_rewind_and_a_base_rebuild_is_restorable() {
+    let store = Arc::new(MemoryStore::new());
+    let mut rig = Rig::with_store(store.clone(), "a").await;
+    rig.sc.cfg.fold_factor = 2;
+    rig.sc.cfg.base_min_bytes = 0;
+    rig.sc.cfg.base_rebuild_min_secs = 0;
+    rig.sc.cfg.fold_min_bytes = 0;
+    rig.start().await;
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+    let c1 = rig.push_commit("refs/heads/main", Some(&c0), "c1").await;
+    let c2 = rig.push_commit("refs/heads/main", Some(&c1), "c2").await;
+    let p2: Vec<String> = rig.sc.cell().unwrap().snap.packs.clone();
+    let pol = Policy { allow_non_fast_forward: vec!["*".into()], ..Policy::default() };
+    let rewind = vec![push(9, vec![RefUpdate { name: "refs/heads/main".into(), old_oid: c2.clone(), new_oid: c1.clone() }])];
+    let reports = batch::run_batch(&mut rig.sc, rewind, &pol).await.expect("rewind batch");
+    assert!(is_ok(&reports[0].results[0]), "the rewind: {:?}", reports[0].results[0]);
+    rig.git(&["prune-packed", "-q"], None).await;
+    let (plan, _) = rig.fold_once().await.expect("the base rule fires");
+    assert!(matches!(plan, fold::Plan::Base { .. }));
+    let retained: Vec<String> = rig.sc.retained.iter().map(|r| r.name.clone()).collect();
+    assert!(!retained.is_empty(), "fixture: the base's inputs are retained");
+
+    // The re-push: c2's objects again, packed as a push brings them.
+    let refs: Vec<String> = rig.sc.git.refs().await.unwrap().into_values().collect();
+    let again = rig.sc.git.pack_new_objects(std::slice::from_ref(&c2), &refs).await.expect("pack");
+    let again = again.expect("a pack was written");
+    let repush = push(10, vec![RefUpdate { name: "refs/heads/main".into(), old_oid: c1.clone(), new_oid: c2.clone() }]);
+    let reports = batch::run_batch(&mut rig.sc, vec![repush], &pol).await.expect("re-push batch");
+    assert!(is_ok(&reports[0].results[0]), "the re-push is told ok: {:?}", reports[0].results[0]);
+    let snap = rig.sc.cell().unwrap().snap.clone();
+    assert_eq!(snap.refs.get("refs/heads/main"), Some(&c2));
+    assert!(snap.packs.contains(&again), "the pack holding c2 must be named: {:?} (pushed {p2:?})", snap.packs);
+
+    // What the client was promised: a successor serves c2.
+    let mut heir = Rig::with_store(store.clone(), "b").await;
+    store.backdate_epoch(&rig.sc.cfg.epoch_key(), 10_000);
+    take_over_and_restore(&mut heir).await.expect("an acknowledged re-push is restorable");
+    assert_eq!(heir.sc.git.refs().await.unwrap().get("refs/heads/main"), Some(&c2));
+}
+
 /// The cadence is the base's age by the store's clock, not process
 /// memory: the pod P5 restarted on runca rebuilt a 12 GiB base the
 /// moment it restored. A fresh incarnation restores, reads the base's
@@ -4004,6 +4089,11 @@ async fn the_derived_tick_packs_the_refs_away_without_moving_any() {
 #[tokio::test]
 async fn a_pack_named_before_its_ref_moves_survives_the_base_rebuild_that_could_not_see_it() {
     let mut rig = Rig::new().await;
+    // The DIRECTORY arm (`name_accepted_set` off): the premise is a
+    // batch naming a queued push's pack before its ref moves, which
+    // NEEDED PACKS never does (it names only what accepted tips need).
+    // The fold's protection is still the directory arm's to keep.
+    rig.sc.cfg.name_accepted_set = false;
     rig.sc.cfg.fold_factor = 2;
     rig.sc.cfg.base_min_bytes = 0;
     rig.sc.cfg.base_rebuild_min_secs = 0;
@@ -4082,6 +4172,11 @@ async fn a_pack_named_before_its_ref_moves_survives_the_base_rebuild_that_could_
 #[tokio::test]
 async fn a_base_commit_may_not_unname_a_pack_whose_push_lands_after_it() {
     let mut rig = Rig::new().await;
+    // The DIRECTORY arm (`name_accepted_set` off): the premise is a
+    // batch naming a queued push's pack before its ref moves, which
+    // NEEDED PACKS never does (it names only what accepted tips need).
+    // The fold's protection is still the directory arm's to keep.
+    rig.sc.cfg.name_accepted_set = false;
     rig.sc.cfg.fold_factor = 2;
     rig.sc.cfg.base_min_bytes = 0;
     rig.sc.cfg.base_rebuild_min_secs = 0;
@@ -4153,6 +4248,57 @@ async fn named_holder_of(rig: &Rig, oid: &str) -> Option<String> {
     found
 }
 
+/// NEEDED PACKS (2026-10-02): the batch names the packs holding what its
+/// ACCEPTED pushes need, read off git (`rev-list` from the accepted tips,
+/// not the snapshot's refs), never off a per-push record that can be lost.
+/// With the record gone, the old rule fell back to naming the directory —
+/// and so named a refused push's residue, pinned for good by strict
+/// coverage (the test below measures that price).
+#[tokio::test]
+async fn a_refused_pushs_residue_is_never_named_beside_an_accepted_push() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+    let dead = rig.stage_commit(None, &[("d.txt", "d\n")], "dead").await;
+    let reports = rig
+        .run(vec![push(9, vec![RefUpdate { name: "refs/heads/main".into(), old_oid: c0.clone(), new_oid: dead.clone() }])])
+        .await;
+    assert!(!is_ok(&reports[0].results[0]), "fixture: the unrelated-history push is refused");
+    let c1 = rig.push_commit("refs/heads/main", Some(&c0), "c1").await;
+    assert!(named_holder_of(&rig, &c1).await.is_some(), "the accepted push is named");
+    assert!(
+        named_holder_of(&rig, &dead).await.is_none(),
+        "the refused push's pack is named: {:?}",
+        rig.sc.cell().unwrap().snap.packs
+    );
+}
+
+/// An accepted tip whose objects are in NO pack on disk fails the batch:
+/// nothing can upload them, so naming "what is there" would publish a ref
+/// a successor cannot restore. The answer must be an error, never a
+/// legal empty set (`ForgeSyncRewind`'s `NeededTrustsDisk`).
+#[tokio::test]
+async fn an_accepted_tip_in_no_pack_fails_the_batch() {
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+    // c1's objects written LOOSE and never packed.
+    let blob = rig.git(&["hash-object", "-w", "--stdin"], Some(b"loose\n")).await.trim().to_string();
+    let tree = rig.git(&["mktree"], Some(format!("100644 blob {blob}\tf.txt\n").as_bytes())).await.trim().to_string();
+    let c1 = rig.sc.git.commit_tree(&tree, &[c0.clone()], "loose", "tester").await.unwrap();
+    let out = batch::run_batch(
+        &mut rig.sc,
+        vec![push(5, vec![RefUpdate { name: "refs/heads/main".into(), old_oid: c0.clone(), new_oid: c1.clone() }])],
+        &Policy::default(),
+    )
+    .await;
+    match out {
+        Err(e) => assert!(e.to_string().contains("in no pack"), "the wrong error: {e}"),
+        Ok(r) => panic!("a tip in no pack was answered {:?}", r[0].results[0]),
+    }
+    assert_eq!(rig.sc.cell().unwrap().snap.refs.get("refs/heads/main"), Some(&c0), "and nothing was published");
+}
+
 /// THE PRICE OF THE RULE THE TEST ABOVE BUYS (runcl, 2026-09-08), and a
 /// guard on anyone who tries to stop paying it.
 ///
@@ -4183,6 +4329,10 @@ async fn named_holder_of(rig: &Rig, oid: &str) -> Option<String> {
 #[tokio::test]
 async fn a_refused_pushs_dead_objects_pin_their_pack_and_coverage_keeps_it_named() {
     let mut rig = Rig::new().await;
+    // The DIRECTORY arm: this measures what naming the directory costs,
+    // which NEEDED PACKS (the default) no longer does
+    // (`a_refused_pushs_residue_is_never_named_beside_an_accepted_push`).
+    rig.sc.cfg.name_accepted_set = false;
     // Tiers first and no base yet: the amplification step needs a tier
     // fold to happen BEFORE the collection, which is the runcl order.
     rig.tiers_only();
@@ -6721,7 +6871,6 @@ async fn ask_the_door(
         principal: "driller".into(),
         options: vec![],
         atomic: false,
-        packs: vec![],
         commands: vec![RefUpdate {
             name: "refs/heads/main".into(),
             old_oid: "0".repeat(40),
@@ -6850,10 +6999,7 @@ async fn take_over_and_restore(heir: &mut Rig) -> Result<(), ForgeError> {
 /// Two pushes judged in ONE batch, the second of which may or may not
 /// have had its pack recorded by `pre-receive`. Returns the two packs'
 /// names and the batch's reports.
-async fn d5_mixed_batch(
-    rig: &mut Rig,
-    second_recorded: bool,
-) -> (String, String, String, Vec<batch::PushReport>) {
+async fn d5_mixed_batch(rig: &mut Rig) -> (String, String, String, Vec<batch::PushReport>) {
     let before: std::collections::BTreeSet<String> =
         rig.sc.git.local_packs().expect("packs").into_iter().collect();
     let a = rig.stage_commit(None, &[("a.txt", "alpha\n")], "a").await;
@@ -6868,64 +7014,32 @@ async fn d5_mixed_batch(
     assert_eq!((pa.len(), pb.len()), (1, 1), "setup: one pack per push, got {pa:?} {pb:?}");
     let (pa, pb) = (pa[0].clone(), pb[0].clone());
 
-    let mut p1 = push(1, vec![RefUpdate { name: "refs/heads/a".into(), old_oid: zero(), new_oid: a }]);
-    p1.packs = vec![pa.clone()];
-    let mut p2 = push(2, vec![RefUpdate { name: "refs/heads/b".into(), old_oid: zero(), new_oid: b.clone() }]);
-    if second_recorded {
-        p2.packs = vec![pb.clone()];
-    }
+    let p1 = push(1, vec![RefUpdate { name: "refs/heads/a".into(), old_oid: zero(), new_oid: a }]);
+    let p2 = push(2, vec![RefUpdate { name: "refs/heads/b".into(), old_oid: zero(), new_oid: b.clone() }]);
     let reports = rig.run(vec![p1, p2]).await;
     (pa, pb, b, reports)
 }
 
-/// DIRECTION 5 — an empty record is "no information", never "no pack".
-///
-/// `pre-receive` records a push's packs best-effort: every failure to
-/// write or read the record leaves it EMPTY, and `PushRequest::packs`
-/// and `record_push_packs` both say the batch must read that as "no
-/// information" and fall back to naming the directory. The fallback
-/// was taken for the whole BATCH, though, and only when NO push had
-/// recorded — so an unrecorded push judged beside a recorded one had
-/// its pack neither named nor uploaded, while its ref landed and it was
-/// told ok. The next restore then refuses the repository.
+/// Two pushes judged in one batch: each one's pack is named, uploaded and
+/// restorable. Before NEEDED PACKS a push's pack was named off a record
+/// `pre-receive` wrote best-effort, and an unrecorded push beside a
+/// recorded one was told ok with its pack neither named nor uploaded
+/// (review 2026-09-23). There is no record now: the batch reads what the
+/// accepted tips need off git.
 #[tokio::test]
-async fn an_unrecorded_push_beside_a_recorded_one_is_still_named_and_uploaded() {
+async fn two_pushes_in_one_batch_are_both_named_and_restorable() {
     let store = Arc::new(MemoryStore::new());
     let mut rig = Rig::with_store(store.clone(), "a").await;
     assert!(rig.sc.cfg.name_accepted_set, "the shipped default is under test");
     rig.start().await;
-
-    let (_pa, pb, b, reports) = d5_mixed_batch(&mut rig, false).await;
-    assert!(is_ok(&reports[0].results[0]), "push 1: {:?}", reports[0].results[0]);
-    assert!(is_ok(&reports[1].results[0]), "push 2 is TOLD OK: {:?}", reports[1].results[0]);
-
-    let snap = rig.sc.cell().unwrap().snap.clone();
-    assert_eq!(snap.refs.get("refs/heads/b"), Some(&b), "and its ref landed");
-    assert!(snap.packs.contains(&pb), "so its pack must be named: {:?}", snap.packs);
-    rig.store.head(&rig.sc.cfg.pack_key(&pb)).await.expect("and in the bucket");
-
-    // What the client was promised: a successor can serve it.
-    let mut heir = Rig::with_store(store.clone(), "b").await;
-    store.backdate_epoch(&rig.sc.cfg.epoch_key(), 10_000);
-    take_over_and_restore(&mut heir).await.expect("an acknowledged push is restorable");
-    assert_eq!(heir.sc.git.refs().await.unwrap().get("refs/heads/b"), Some(&b));
-}
-
-/// The control for the test above: the SAME batch with the second push
-/// recorded is named, uploaded and restorable — so a failure above is
-/// the empty record and not the two-push batch or the rig.
-#[tokio::test]
-async fn a_batch_whose_pushes_all_recorded_names_both_packs() {
-    let store = Arc::new(MemoryStore::new());
-    let mut rig = Rig::with_store(store.clone(), "a").await;
-    rig.start().await;
-    let (pa, pb, b, reports) = d5_mixed_batch(&mut rig, true).await;
+    let (pa, pb, b, reports) = d5_mixed_batch(&mut rig).await;
     assert!(reports.iter().all(|r| is_ok(&r.results[0])), "{reports:?}");
     let snap = rig.sc.cell().unwrap().snap.clone();
     assert!(snap.packs.contains(&pa) && snap.packs.contains(&pb), "{:?}", snap.packs);
+    rig.store.head(&rig.sc.cfg.pack_key(&pb)).await.expect("and in the bucket");
     let mut heir = Rig::with_store(store.clone(), "b").await;
     store.backdate_epoch(&rig.sc.cfg.epoch_key(), 10_000);
-    take_over_and_restore(&mut heir).await.expect("restorable");
+    take_over_and_restore(&mut heir).await.expect("an acknowledged push is restorable");
     assert_eq!(heir.sc.git.refs().await.unwrap().get("refs/heads/b"), Some(&b));
 }
 
