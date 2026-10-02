@@ -1862,53 +1862,32 @@ async fn drive_idle_ladder(
         },
     );
 
-    let (next, reason) = match &decision {
-        Decision::Stay => {
-            return Ok(IdleOutcome {
-                phase: ladder_phase.unwrap_or(Phase::Pending),
-                short_circuit: None,
-                server_id: server_id.clone(),
-                hub_phase: hub_phase.clone(),
-            })
-        }
-        Decision::Hold(why) => {
+    let Some(next) = ladder_next(&decision) else {
+        // Stay or Hold: nothing to write.
+        if let Decision::Hold(why) = &decision {
             set_condition(
                 conds,
                 condition("IdleEligible", false, "Held", Some(why.clone()), generation),
             );
-            return Ok(IdleOutcome {
-                phase: ladder_phase.unwrap_or(Phase::Pending),
-                short_circuit: None,
-                server_id: server_id.clone(),
-                hub_phase: hub_phase.clone(),
-            });
         }
-        Decision::Suspend => (IdleState::Suspended, "idle".to_string()),
-        Decision::Wake => (IdleState::Active, "wake requested".to_string()),
-        Decision::BeginHibernate => (
-            IdleState::HibernateVerifying,
-            "verifying the flush before reclaiming the disk".to_string(),
-        ),
+        return Ok(IdleOutcome {
+            phase: ladder_phase.unwrap_or(Phase::Pending),
+            short_circuit: None,
+            server_id: server_id.clone(),
+            hub_phase: hub_phase.clone(),
+        });
     };
-
-    // Patch the annotations. This is the durable carrier; the render
-    // reads it on the reconcile this patch triggers.
-    let mut ann = serde_json::Map::new();
-    ann.insert(
-        idle::ANN_IDLE_STATE.to_string(),
-        serde_json::Value::String(next.as_str().to_string()),
-    );
-    ann.insert(
-        idle::ANN_IDLE_SINCE.to_string(),
-        serde_json::Value::String(now_rfc3339()),
-    );
-    if next == IdleState::Active {
-        // The request has been honoured; clearing it means the NEXT
-        // idle window starts from the hub's own activity clock rather
-        // than from a stale heartbeat. A null value removes the key.
-        ann.insert(idle::ANN_REQUESTED_AT.to_string(), serde_json::Value::Null);
+    let reason = match &decision {
+        Decision::Wake => "wake requested",
+        Decision::BeginHibernate => "verifying the flush before reclaiming the disk",
+        _ => "idle",
     }
-    let patch = serde_json::json!({ "metadata": { "annotations": ann } });
+    .to_string();
+    // Patch the annotations. This is the durable carrier; the render
+    // reads it on the reconcile this patch triggers. Reaching `Active`
+    // honours the request, so it clears the stamp: the NEXT idle window
+    // starts from the hub's own activity clock, not a stale heartbeat.
+    let patch = idle_state_patch(next, &now_rfc3339(), next == IdleState::Active);
     Api::<FlintShare>::namespaced(ctx.client.clone(), &ns)
         .patch(&share.name_any(), &PatchParams::apply(FIELD_MANAGER), &Patch::Merge(&patch))
         .await?;
@@ -1972,7 +1951,7 @@ async fn verify_and_hibernate(
     // Someone wants it. Abandon the hibernate — it is already up. Only a
     // request made since verification began counts (`woken_since_idle`):
     // a stale stamp from the last wake used to abort every hibernation.
-    if idle::woken_since_idle(share) {
+    if verify_yields_to_wake(share) {
         set_idle_state(ctx, share, &ns, IdleState::Active, true).await?;
         let note = "wake requested during hibernate verification — kept the PVC".to_string();
         info!(share = %share.name_any(), "{note}");
@@ -2414,6 +2393,45 @@ pub fn auto_expand_would_undo_it(share: &FlintShare) -> bool {
     }
 }
 
+/// The annotation patch for an idle-state transition: the state, `idle-since`
+/// = `at`, and, when the transition honours a wake, the stamp removed (a
+/// merge-patch null). The ladder and every rung write through this, so the
+/// idle-lifecycle sequence test applies exactly what the operator writes.
+fn idle_state_patch(next: IdleState, at: &str, clear_request: bool) -> serde_json::Value {
+    let mut ann = serde_json::Map::new();
+    ann.insert(idle::ANN_IDLE_STATE.to_string(), serde_json::Value::String(next.as_str().to_string()));
+    ann.insert(idle::ANN_IDLE_SINCE.to_string(), serde_json::Value::String(at.to_string()));
+    if clear_request {
+        ann.insert(idle::ANN_REQUESTED_AT.to_string(), serde_json::Value::Null);
+    }
+    serde_json::json!({ "metadata": { "annotations": ann } })
+}
+
+/// The state a ladder decision moves to; `None` for Stay and Hold.
+fn ladder_next(d: &Decision) -> Option<IdleState> {
+    match d {
+        Decision::Stay | Decision::Hold(_) => None,
+        Decision::Suspend => Some(IdleState::Suspended),
+        Decision::Wake => Some(IdleState::Active),
+        Decision::BeginHibernate => Some(IdleState::HibernateVerifying),
+    }
+}
+
+/// Does a hibernate verification give way to a wake? Only to one asked
+/// for since verification began: a stale stamp from the last wake (the
+/// proxy re-asks while a hub starts, after the operator cleared the
+/// stamp) used to abort every hibernation.
+fn verify_yields_to_wake(share: &FlintShare) -> bool {
+    idle::woken_since_idle(share)
+}
+
+/// Does the disk reclaim give way to a wake? Only to one asked for since
+/// the share hibernated: read as presence, a leftover stamp kept the disk
+/// forever, half-parked.
+fn reclaim_yields_to_wake(share: &FlintShare) -> bool {
+    idle::woken_since_idle(share)
+}
+
 /// Patch the ladder's durable position onto the CR.
 async fn set_idle_state(
     ctx: &Arc<Ctx>,
@@ -2422,16 +2440,7 @@ async fn set_idle_state(
     next: IdleState,
     clear_request: bool,
 ) -> Result<()> {
-    let mut ann = serde_json::Map::new();
-    ann.insert(
-        idle::ANN_IDLE_STATE.to_string(),
-        serde_json::Value::String(next.as_str().to_string()),
-    );
-    ann.insert(idle::ANN_IDLE_SINCE.to_string(), serde_json::Value::String(now_rfc3339()));
-    if clear_request {
-        ann.insert(idle::ANN_REQUESTED_AT.to_string(), serde_json::Value::Null);
-    }
-    let patch = serde_json::json!({ "metadata": { "annotations": ann } });
+    let patch = idle_state_patch(next, &now_rfc3339(), clear_request);
     Api::<FlintShare>::namespaced(ctx.client.clone(), ns)
         .patch(&share.name_any(), &PatchParams::apply(FIELD_MANAGER), &Patch::Merge(&patch))
         .await?;
@@ -2508,7 +2517,7 @@ async fn reclaim_hibernated_disk(
     // process the request instead. A stamp from before the park is not
     // one (`woken_since_idle`): read as presence, a proxy re-ask left
     // over from the last wake kept the disk forever, half-parked.
-    if idle::woken_since_idle(share) {
+    if reclaim_yields_to_wake(share) {
         return Ok(ReclaimOutcome::Idle);
     }
     let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
@@ -4422,5 +4431,375 @@ mod tests {
             phase_of(Lifecycle::Active, Some(&dep), true, IdleState::Suspended, true),
             Phase::Failed
         );
+    }
+
+    /// The idle lifecycle as a SEQUENCE, with a wake asked for at every
+    /// step. The unit tests above each pin one state; three bugs on
+    /// 2026-10-02 lived only in sequences (a wake, the proxy's re-ask
+    /// landing after the operator cleared the stamp, then a hibernation)
+    /// and the box found them one 20-minute run at a time.
+    ///
+    /// The operator's DECISIONS are the real ones: `idle::decide`,
+    /// `idle::wake_requested`, `parks_as_cr_only`, `verify_yields_to_wake`,
+    /// `reclaim_yields_to_wake`, `ladder_next` and `idle_state_patch`. What
+    /// is mirrored by hand is the order `apply` calls them in (4b park,
+    /// apply, reclaim, ladder), and the world: a pod that follows the
+    /// replicas, a claim, the derived objects, a hub that is always
+    /// recoverable, and a client that the proxy serves when the pod is
+    /// ready and otherwise asks a wake for, at most every `WAKE_EVERY`
+    /// (as `nfs_proxy::server` does). A change to that order or to the
+    /// proxy's ask has to be made here too.
+    ///
+    /// Checked on every run:
+    /// - P1: a client that wants the share is never left unserved longer
+    ///   than a drain, a start and one ask period;
+    /// - P2: once nobody wants it, the share ends fully parked (its CR
+    ///   alone: no pod, no claim, no objects);
+    /// - P3: no wake without a reason: a wake (or a verification giving
+    ///   way to one) needs a client ask at or after the last idle
+    ///   transition (1 s resolution, as the stamps; same-second counts).
+    mod idle_sequence {
+        use super::*;
+        use chrono::{DateTime, TimeZone, Utc};
+
+        const SUSPEND_AFTER: u64 = 30;
+        const HIBERNATE_AFTER: u64 = 60;
+        /// `nfs_proxy::server::WAKE_EVERY`.
+        const WAKE_EVERY: i64 = 5;
+        /// A served client's state holds the hub this long (the verify's
+        /// `state_free` answers Held inside it).
+        const LEASE: i64 = 10;
+
+        #[derive(Clone, Copy, PartialEq, Debug)]
+        enum PodSt {
+            None,
+            Starting { ready_at: i64 },
+            Ready,
+            Draining { gone_at: i64 },
+        }
+
+        fn at(t: i64) -> DateTime<Utc> {
+            Utc.timestamp_opt(1_790_000_000 + t, 0).unwrap()
+        }
+        fn stamp(t: i64) -> String {
+            at(t).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        }
+
+        #[derive(Clone, Copy, Debug)]
+        struct Case {
+            start_delay: i64,
+            drain: i64,
+            /// The client's demand windows, `[from, to)`.
+            demand: [Option<(i64, i64)>; 2],
+            /// The proxy's ask lands before the operator's pass in a tick.
+            proxy_first: bool,
+            /// Someone (the rig, an admin) writes this idle state at this
+            /// time, as `step6-box-wakeparts.sh` does.
+            force: Option<(i64, IdleState)>,
+        }
+
+        struct World {
+            c: Case,
+            share: FlintShare,
+            cfg: IdleSpec,
+            t: i64,
+            objects: bool,
+            claim: bool,
+            replicas: i32,
+            pod: PodSt,
+            last_activity: i64,
+            last_ask: Option<i64>,
+            last_transition: i64,
+            unserved: i64,
+            log: Vec<String>,
+        }
+
+        impl World {
+            fn new(c: Case) -> Self {
+                let cfg = IdleSpec {
+                    suspend_after_secs: Some(SUSPEND_AFTER),
+                    hibernate_after_secs: Some(HIBERNATE_AFTER),
+                    suspend_with_sessions: None,
+                };
+                let mut share = share_named("s");
+                share.metadata.namespace = Some("ns".into());
+                share.spec.bucket = Some("b".into());
+                share.spec.idle = Some(cfg.clone());
+                let mut w = World {
+                    c,
+                    share,
+                    cfg,
+                    t: 0,
+                    objects: true,
+                    claim: true,
+                    replicas: 1,
+                    pod: PodSt::Ready,
+                    last_activity: 0,
+                    last_ask: None,
+                    last_transition: 0,
+                    unserved: 0,
+                    log: Vec::new(),
+                };
+                w.write(idle_state_patch(IdleState::Active, &stamp(0), false));
+                w
+            }
+
+            fn anns(&mut self) -> &mut BTreeMap<String, String> {
+                self.share.metadata.annotations.get_or_insert_with(Default::default)
+            }
+
+            /// A merge patch on the annotations, as the API server applies it.
+            fn write(&mut self, p: serde_json::Value) {
+                for (k, v) in p["metadata"]["annotations"].as_object().unwrap() {
+                    match v {
+                        serde_json::Value::Null => {
+                            self.anns().remove(k);
+                        }
+                        serde_json::Value::String(s) => {
+                            self.anns().insert(k.clone(), s.clone());
+                        }
+                        other => panic!("annotation {k} = {other}"),
+                    }
+                }
+            }
+
+            fn transition(&mut self, next: IdleState, clear: bool, why: &str) -> Result<(), String> {
+                if next == IdleState::Active {
+                    // P3: a wake needs an ask since the last transition.
+                    let asked = self.last_ask.is_some_and(|a| a >= self.last_transition);
+                    if !asked {
+                        return Err(format!(
+                            "t={}: woke ({why}) with no ask since the last transition at {} (last ask {:?})",
+                            self.t, self.last_transition, self.last_ask
+                        ));
+                    }
+                }
+                self.write(idle_state_patch(next, &stamp(self.t), clear));
+                self.last_transition = self.t;
+                self.log.push(format!("{:>4} {} ({why})", self.t, next.as_str()));
+                Ok(())
+            }
+
+            /// One operator pass, in `apply`'s order.
+            fn reconcile(&mut self) -> Result<(), String> {
+                let now = at(self.t);
+                let state = idle::state_of(&self.share);
+                // 4b. A hibernated share with its disk gone is its CR alone.
+                if state == IdleState::Hibernated {
+                    let requested = idle::wake_requested(Some(&self.cfg), &self.share, now);
+                    if parks_as_cr_only(state, false, self.claim, requested) {
+                        if self.objects {
+                            self.log.push(format!("{:>4} parked as CR", self.t));
+                        }
+                        self.objects = false;
+                        self.replicas = 0;
+                        return Ok(());
+                    }
+                }
+                // 5. Apply: objects, replicas, and the claim (`claim_plan`
+                // never re-creates a Hibernated share's claim).
+                self.objects = true;
+                self.replicas = if state.is_down() { 0 } else { 1 };
+                if state != IdleState::Hibernated {
+                    self.claim = true;
+                }
+                // The disk, once the pod has drained.
+                if state == IdleState::Hibernated && !reclaim_yields_to_wake(&self.share) {
+                    if self.pod != PodSt::None {
+                        return Ok(()); // Draining
+                    }
+                    if self.claim {
+                        self.claim = false; // Deleted
+                        self.log.push(format!("{:>4} disk reclaimed", self.t));
+                        return Ok(());
+                    }
+                }
+                // 5b. The ladder.
+                if state == IdleState::HibernateVerifying {
+                    if verify_yields_to_wake(&self.share) {
+                        return self.transition(IdleState::Active, true, "verification gave way to a wake");
+                    }
+                    if self.pod != PodSt::Ready {
+                        return Ok(()); // the poll fails: wait
+                    }
+                    if self.t - self.last_activity < LEASE {
+                        return self.transition(IdleState::Suspended, false, "a client holds state");
+                    }
+                    return self.transition(IdleState::Hibernated, false, "verified");
+                }
+                let hub_quiet = if state.is_down() {
+                    Err("the hub is scaled to zero".to_string())
+                } else if self.pod != PodSt::Ready {
+                    Err("poll failed".to_string())
+                } else if ((self.t - self.last_activity) as u64) < SUSPEND_AFTER {
+                    Err("active".to_string())
+                } else {
+                    Ok(())
+                };
+                let d = idle::decide(
+                    Some(&self.cfg),
+                    idle::Inputs { share: &self.share, now, hub_quiet, sessions_live: None },
+                );
+                match ladder_next(&d) {
+                    Some(next) => self.transition(next, next == IdleState::Active, &format!("{d:?}")),
+                    None => Ok(()),
+                }
+            }
+
+            /// The pod follows the Deployment's replicas.
+            fn kubelet(&mut self) {
+                let up = self.replicas == 1 && self.objects;
+                self.pod = match self.pod {
+                    PodSt::None if up && self.claim => PodSt::Starting { ready_at: self.t + self.c.start_delay },
+                    PodSt::Starting { .. } | PodSt::Ready if !up => PodSt::Draining { gone_at: self.t + self.c.drain },
+                    PodSt::Starting { ready_at } if self.t >= ready_at => PodSt::Ready,
+                    PodSt::Draining { gone_at } if self.t >= gone_at => PodSt::None,
+                    p => p,
+                };
+            }
+
+            /// A client that wants the share: served by a ready hub, or the
+            /// proxy asks for a wake (rate-limited per hub, as `wake()`).
+            fn client(&mut self) -> Result<(), String> {
+                if self.pod == PodSt::Ready && self.objects {
+                    self.last_activity = self.t;
+                    self.unserved = 0;
+                    return Ok(());
+                }
+                if self.last_ask.is_none_or(|a| self.t - a >= WAKE_EVERY) {
+                    let s = stamp(self.t);
+                    self.anns().insert(idle::ANN_REQUESTED_AT.to_string(), s);
+                    self.last_ask = Some(self.t);
+                }
+                self.unserved += 1;
+                // P1: a drain, a start, one ask period, and a pass or two.
+                let bound = self.c.drain + self.c.start_delay + WAKE_EVERY + 4;
+                if self.unserved > bound {
+                    return Err(format!("t={}: a client has waited {}s (bound {bound}s)", self.t, self.unserved));
+                }
+                Ok(())
+            }
+
+            fn step(&mut self) -> Result<(), String> {
+                self.kubelet();
+                if let Some((f, st)) = self.c.force {
+                    if f == self.t {
+                        self.write(idle_state_patch(st, &stamp(self.t), false));
+                        self.last_transition = self.t;
+                        self.log.push(format!("{:>4} {} (forced)", self.t, st.as_str()));
+                    }
+                }
+                let wants = self.c.demand.iter().flatten().any(|&(a, b)| self.t >= a && self.t < b);
+                if self.c.proxy_first {
+                    if wants {
+                        self.client()?;
+                    }
+                    self.reconcile()
+                } else {
+                    self.reconcile()?;
+                    if wants {
+                        self.client()?;
+                    }
+                    Ok(())
+                }
+            }
+        }
+
+        fn run(c: Case) -> Result<(), String> {
+            let last = c.demand.iter().flatten().map(|&(_, b)| b).chain(c.force.map(|(f, _)| f)).max().unwrap_or(0);
+            let mut w = World::new(c);
+            let fail = |w: &World, e: String| Err(format!("{e}\n{c:?}\n{}", w.log.join("\n")));
+            for t in 0..last + 300 {
+                w.t = t;
+                if let Err(e) = w.step() {
+                    return fail(&w, e);
+                }
+            }
+            // P2: nobody wants it any more, so it ends as its CR alone.
+            let state = idle::state_of(&w.share);
+            if state != IdleState::Hibernated || w.claim || w.objects || w.pod != PodSt::None {
+                let e = format!(
+                    "not parked at the end: {} claim={} objects={} pod={:?}",
+                    state.as_str(), w.claim, w.objects, w.pod
+                );
+                return fail(&w, e);
+            }
+            Ok(())
+        }
+
+        fn cases() -> Vec<Case> {
+            let mut out = Vec::new();
+            for start_delay in [2, 8] {
+                for drain in [0, 3] {
+                    for proxy_first in [true, false] {
+                        // One demand window, starting at every second of the
+                        // lifecycle (active, suspended, verifying, draining,
+                        // parked), short and long.
+                        for from in 0..170 {
+                            for len in [1, 12] {
+                                out.push(Case { start_delay, drain, demand: [Some((from, from + len)), None], proxy_first, force: None });
+                                // And a second one after it.
+                                for gap in [3, 45] {
+                                    let b = from + len + gap;
+                                    out.push(Case {
+                                        start_delay,
+                                        drain,
+                                        demand: [Some((from, from + len)), Some((b, b + 1))],
+                                        proxy_first,
+                                        force: None,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // The rig's forced transition at every second after a wake from
+            // parked (the self-wake needed a stamp still live at the park).
+            for start_delay in [2, 8] {
+                for drain in [0, 3] {
+                    for proxy_first in [true, false] {
+                        for after in 0..40 {
+                            for st in [IdleState::Suspended, IdleState::HibernateVerifying] {
+                                let from = 150;
+                                out.push(Case {
+                                    start_delay,
+                                    drain,
+                                    demand: [Some((from, from + 1)), None],
+                                    proxy_first,
+                                    force: Some((from + after, st)),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            out
+        }
+
+        #[test]
+        fn every_wake_has_a_reason_every_waiter_is_served_and_every_idle_share_parks() {
+            let cases = cases();
+            let mut failures: Vec<String> = cases.iter().filter_map(|c| run(*c).err()).collect();
+            let n = failures.len();
+            failures.truncate(1);
+            assert!(n == 0, "{n} of {} sequences failed; the first:\n{}", cases.len(), failures.join("\n"));
+        }
+
+        /// The world itself: with no demand at all, a share parks on the
+        /// ladder alone, through every rung, and nothing wakes it.
+        #[test]
+        fn an_untouched_share_walks_the_whole_ladder_to_its_cr() {
+            let c = Case { start_delay: 8, drain: 3, demand: [None, None], proxy_first: true, force: None };
+            let mut w = World::new(c);
+            for t in 0..300 {
+                w.t = t;
+                w.step().unwrap();
+            }
+            let log = w.log.join("\n");
+            for rung in ["Suspended", "HibernateVerifying", "Hibernated", "disk reclaimed", "parked as CR"] {
+                assert!(log.contains(rung), "never reached {rung}:\n{log}");
+            }
+        }
     }
 }
