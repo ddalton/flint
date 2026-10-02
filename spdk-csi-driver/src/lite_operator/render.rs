@@ -114,8 +114,11 @@ impl Default for RenderDefaults {
             termination_grace_period_seconds: 120,
             log_level: "info".to_string(),
             service_port: NFS_PORT,
-            hub_cpu_request: "100m".to_string(),
-            hub_memory_request: "128Mi".to_string(),
+            // Measured (step 6): ~65-103 MiB RSS and ~5 m CPU idle, ~50 m
+            // under a light metadata load. CPU above the request is still
+            // available; the request is what the scheduler reserves.
+            hub_cpu_request: "20m".to_string(),
+            hub_memory_request: "100Mi".to_string(),
             nfs_proxy: false,
             idle: None,
         }
@@ -1480,6 +1483,22 @@ mod tests {
             rollout_checksum(&plain),
             "stripping the boot-only line must not have blunted the checksum entirely"
         );
+    }
+
+    /// The fleet default is what a hub was MEASURED to use (step 6,
+    /// `tests/lima/nfs-proxy-census/results-box-step6/`): ~65-103 MiB RSS
+    /// idle at 1k-10k files, ~5 m CPU idle, ~50 m under a light metadata
+    /// load. 128Mi / 100m reserved 20x the CPU a hub uses, so 1,000 hubs
+    /// held 100 cores to use 5. Requests only, never a limit.
+    #[test]
+    fn a_hub_with_no_resources_requests_its_measured_cost_and_no_limit() {
+        let r = render(&share("t", tiered_spec()), &RenderDefaults::default(), None, None);
+        let c = &r.deployment.spec.as_ref().unwrap().template.spec.as_ref().unwrap().containers[0];
+        let res = c.resources.as_ref().expect("a hub must never run BestEffort");
+        let req = res.requests.as_ref().unwrap();
+        assert_eq!(req.get("cpu").map(|q| q.0.as_str()), Some("20m"));
+        assert_eq!(req.get("memory").map(|q| q.0.as_str()), Some("100Mi"));
+        assert!(res.limits.is_none(), "a limit makes a filesystem server killable");
     }
 
     /// The knob half is the whole reason `settings` is typed: what the

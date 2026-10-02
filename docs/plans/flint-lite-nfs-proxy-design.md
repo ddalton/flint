@@ -523,7 +523,7 @@ What is measured today (`docs/plans/flint-lite-fleet-rig-results.md`):
 | Volume attach limit | none: flint-spdk reports `max_volumes_per_node: 0` (`spdk-csi-driver/src/main.rs:5761`); lvols live on node NVMe, reached over NVMe-oF | not a limit |
 | SPDK NVMe-oF target subsystem cap | **1,024 per node** (measured 2026-10-02: SPDK's default, which flint never overrides) | not a limit at 1,000 over about 10 nodes |
 | Pods per node (110, minus about 10 system pods) | 10–12 nodes minimum | Node shape of the 16-vCPU class, given the 100m hub CPU request |
-| Hub CPU/memory requests (100m / 128Mi) | 100 cores / 125 GiB reserved | **Measured: ~90 MiB RSS and ~5 m CPU idle** (step 6 A). The requests over-reserve CPU 20×: lower them to the measurement |
+| Hub CPU/memory requests (100m / 128Mi) | 100 cores / 125 GiB reserved | **Measured: ~90 MiB RSS and ~5 m CPU idle** (step 6 A). **Lowered 2026-10-02 to 20m / 100Mi** (`RenderDefaults`): 1,000 hubs now reserve 20 cores / ~98 GiB |
 | Operator live-hub polling | 3.3x the tested live count | Needs the rig run |
 | Proxy (§7) | one replica carries every byte for 1,000 projects | **Multi-replica proxy (shared client table) becomes required** |
 | Spot reclaim | about 70–100 hubs per node lost at once | Same under multi-volume, so it does not decide between them |
@@ -536,8 +536,10 @@ each one had to be restarted (see the v1.14 topology release record);
 nothing.** Every acknowledged record survived, and each writer saw one
 fsync stall of about 5 s while its node's target restarted. No hub
 restarted, and none needed to. `noderoll` cannot fire on the real chart
-anyway: it reads `containerStatuses`, and `spdk-tgt` is a native sidecar
-(open: fix it or remove it).
+anyway: it reads `containerStatuses`, and `spdk-tgt` is a native sidecar.
+**`noderoll` was removed 2026-10-02**: a fix would only add a hub
+restart where there is now a 5 s stall, and nothing deployed runs an
+older driver.
 
 ### Inactive side — 9,000–19,000 shares
 
@@ -621,8 +623,8 @@ per node (110 by default). Each has a far cheaper lever than a new
 server design:
 
 - raise kubelet `maxPods` (250 is common; EKS with prefix delegation);
-- lower the hub's requests to the measured cost: ~100 Mi and 10–20 m,
-  instead of 128 Mi and 100 m;
+- lower the hub's requests to the measured cost: done 2026-10-02,
+  20m / 100Mi instead of 100m / 128Mi;
 - the SPDK cap is already 1,024.
 
 Multi-volume would cost the whole surface its own design lists: a
@@ -876,8 +878,9 @@ isolation.
    with a bucket, and `spec.idle: {}` opts out (`idle::effective`).
    Without the proxy nothing is defaulted, because nothing would wake a
    directly mounted hub.
-   **Hubs restart after an spdk-tgt restart:** `restartOnTgtRestart`
-   (`lite_operator::noderoll`) compares, every 30 s, each running hub
+   **Hubs restart after an spdk-tgt restart (REMOVED 2026-10-02, see
+   §7a "flint-csi-node rolls"; kept here as the record):**
+   `restartOnTgtRestart` (`lite_operator::noderoll`) compared, every 30 s, each running hub
    pod's start with its node's `spdk-tgt` container start. A hub older
    than its node's tgt goes through `IdleState::Restarting`: zero
    replicas until no pod mounts the claim, then back, so the volume is

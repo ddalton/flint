@@ -77,10 +77,6 @@ pub enum IdleState {
     /// claim is deleted and the state returns to `Active` — where the
     /// render creates a NEW claim at the smaller size.
     ReprovisionDraining,
-    /// Scaled to zero so the hub comes back on a FRESH staging of its
-    /// volume: its node's spdk-tgt restarted under it (`noderoll`). Back to
-    /// `Active` once no pod mounts the claim.
-    Restarting,
 }
 
 impl IdleState {
@@ -92,7 +88,6 @@ impl IdleState {
             IdleState::HibernateVerifying => "HibernateVerifying",
             IdleState::ReprovisionVerifying => "ReprovisionVerifying",
             IdleState::ReprovisionDraining => "ReprovisionDraining",
-            IdleState::Restarting => "Restarting",
         }
     }
 
@@ -104,7 +99,6 @@ impl IdleState {
             "HibernateVerifying" => IdleState::HibernateVerifying,
             "ReprovisionVerifying" => IdleState::ReprovisionVerifying,
             "ReprovisionDraining" => IdleState::ReprovisionDraining,
-            "Restarting" => IdleState::Restarting,
             _ => return None,
         })
     }
@@ -117,7 +111,7 @@ impl IdleState {
     pub fn is_down(self) -> bool {
         matches!(
             self,
-            IdleState::Suspended | IdleState::Hibernated | IdleState::ReprovisionDraining | IdleState::Restarting
+            IdleState::Suspended | IdleState::Hibernated | IdleState::ReprovisionDraining
         )
     }
 

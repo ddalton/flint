@@ -41,7 +41,6 @@ hubImage: "$HUBIMG"
 hubImagePullPolicy: Never
 replicas: 1
 resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { memory: 4Gi } }
-restartOnTgtRestart: { enabled: false }
 nfsProxy:
   enabled: true
   service: { type: NodePort }

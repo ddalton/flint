@@ -11,9 +11,8 @@
 #   - a hibernated share is its CR alone (Deployment, Service, ConfigMap
 #     deleted), and wakes through a RESTARTED proxy, which has only the
 #     address the CR implies;
-#   - restartOnTgtRestart: a rollout of the csi-node DaemonSet (a stand-in
-#     with an `spdk-tgt` container) restarts every running hub on that
-#     node whose PVC is in the listed class, and no other.
+#   (restartOnTgtRestart, its leg here, was REMOVED 2026-10-02: a real
+#   csi-node roll on AWS needed no hub restart, results-aws-step6/.)
 #   bash step5-kind.sh           # KEEP=1 leaves the cluster up
 source "$(cd "$(dirname "$0")" && pwd)/rig-safety.sh"
 set -u
@@ -112,31 +111,12 @@ K -n $S3NS run mb --rm -i --restart=Never --image=cgr.dev/chainguard/minio-clien
   sh -c 'until mc alias set m http://minio.s3.svc:9000 drill drillsecret >/dev/null; do sleep 2; done; mc mb --ignore-existing m/fleet' 2>&1 | tail -1
 K -n $NS create secret generic s3 --from-literal=AWS_ACCESS_KEY_ID=drill --from-literal=AWS_SECRET_ACCESS_KEY=drillsecret >/dev/null
 
-echo "== the csi-node stand-in (BEFORE any hub: a real node's tgt is always older than its hubs)"
-cat <<EOF | K apply -f - >/dev/null
-apiVersion: apps/v1
-kind: DaemonSet
-metadata: { name: flint-csi-node, namespace: $OPNS }
-spec:
-  selector: { matchLabels: { app: flint-csi-node } }
-  template:
-    metadata: { labels: { app: flint-csi-node } }
-    spec:
-      tolerations: [{ operator: Exists }]
-      containers:
-        - { name: spdk-tgt, image: busybox:1.36, imagePullPolicy: Never, command: [sleep, "1000000"] }
-EOF
-K -n $OPNS rollout status ds/flint-csi-node --timeout=120s >/dev/null || { echo "stand-in DS not ready"; exit 1; }
-
 echo "== install"
 cat > $OUT/values.yaml <<EOF
 image: { ref: "$OPIMG", pullPolicy: Never }
 hubImage: "$HUBIMG"
 hubImagePullPolicy: Never
 replicas: 1
-restartOnTgtRestart:
-  enabled: true
-  storageClasses: [standard]
 nfsProxy:
   enabled: true
   idleDefaults: { suspendAfterSecs: $SUSPEND, hibernateAfterSecs: $HIBERNATE }
@@ -245,32 +225,6 @@ K -n $OPNS rollout status deploy/flint-lite-operator-nfs-proxy --timeout=180s >/
 echo "== ws-lease wakes from the bucket through the (restarted) proxy"
 R=$(timeout 300 sudo cat $MNT/ws-lease/f 2>&1); echo "read: [$R] phase=$(phase ws-lease)"
 check "the hibernated workspace woke and served its bytes from the bucket" '[ "$R" = lease-bytes ]'
-
-echo "== an spdk-tgt restart (a csi-node rollout) restarts exactly the right hubs"
-# Freeze the ladder first (spec.idle: {}), or its own suspends and wakes
-# change pods during this leg and read as restarts (run 1).
-for s in $ALL; do K -n $NS patch flintshare $s --type merge -p '{"spec":{"idle":{}}}' >/dev/null; done
-sleep 20
-declare -A BEFORE
-for s in $ALL; do BEFORE[$s]=$(pod $s); done
-RUNNING=""; for s in $ALL; do [ -n "${BEFORE[$s]}" ] && RUNNING="$RUNNING $s"; done
-echo "running hubs before the roll:$RUNNING"
-K -n $OPNS rollout restart ds/flint-csi-node >/dev/null
-K -n $OPNS rollout status ds/flint-csi-node --timeout=120s >/dev/null
-EXPECT=""; for s in $RUNNING; do [ $s != ws-other ] && EXPECT="$EXPECT $s"; done
-settled() { for s in $EXPECT; do [ "$(pod $s)" != "${BEFORE[$s]}" ] && [ "$(phase $s)" = Ready ] || return 1; done; }
-for _ in $(seq 1 60); do settled && break; sleep 5; done
-for s in $ALL; do echo "$s: pod ${BEFORE[$s]:-none} -> $(pod $s) phase=$(phase $s) events=[$(events $s)]"; done
-for s in $EXPECT; do
-  check "$s (running, class standard) was restarted: new pod, HubRestarted" '[ "$(pod $s)" != "${BEFORE[$s]}" ] && echo "$(events $s)" | grep -q HubRestarted'
-done
-check "ws-other (class other) was NOT restarted" '[ "$(pod ws-other)" = "${BEFORE[ws-other]}" ]'
-check "the restarted hubs are Ready again" 'settled'
-# Counted from the operator's own mark lines. Run 2 summed the core
-# events' `count`, which these events do not carry: 0 and 0.
-restarts() { K -n $OPNS logs deploy/flint-lite-operator 2>/dev/null | grep -c "restarting the hub"; }
-R1=$(restarts); sleep 70; R2=$(restarts); echo "restart marks: $R1 then $R2 (expected: one per restarted hub)"
-check "convergent: one mark per restarted hub, none a minute later" '[ "$R1" = "$R2" ] && [ "$R1" = "$(echo $EXPECT | wc -w)" ]'
 
 sudo kill $HOLDER 2>/dev/null; HOLDER=
 unmount_hard $MNT

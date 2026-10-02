@@ -97,8 +97,8 @@
                   },
                   "resources": {
                     "requests": {
-                      "cpu": "100m",
-                      "memory": "128Mi"
+                      "cpu": "20m",
+                      "memory": "100Mi"
                     }
                   },
                   "securityContext": {
@@ -602,8 +602,8 @@
                   },
                   "resources": {
                     "requests": {
-                      "cpu": "100m",
-                      "memory": "128Mi"
+                      "cpu": "20m",
+                      "memory": "100Mi"
                     }
                   },
                   "securityContext": {
@@ -813,8 +813,8 @@
                   },
                   "resources": {
                     "requests": {
-                      "cpu": "100m",
-                      "memory": "128Mi"
+                      "cpu": "20m",
+                      "memory": "100Mi"
                     }
                   },
                   "securityContext": {
@@ -1025,8 +1025,8 @@
                   },
                   "resources": {
                     "requests": {
-                      "cpu": "100m",
-                      "memory": "128Mi"
+                      "cpu": "20m",
+                      "memory": "100Mi"
                     }
                   },
                   "securityContext": {
@@ -1260,8 +1260,8 @@
                   },
                   "resources": {
                     "requests": {
-                      "cpu": "100m",
-                      "memory": "128Mi"
+                      "cpu": "20m",
+                      "memory": "100Mi"
                     }
                   },
                   "securityContext": {
@@ -1394,5 +1394,5 @@
       "values": "tier:\n  enabled: true\n  bucket: my-team-flint\n  keyPrefix: tenant-a/\n  endpoint: http://minio.minio:9000\n  region: us-east-1\n  credentialsSecret: flint-s3\n  importOnStart: true\n"
     }
   },
-  "chartSha256": "089f208fd4743f63d8e901fc0c84152d73d88109dbaf2734852692fa71ad3477"
+  "chartSha256": "f220a1a7889aafb2da1a0d4948a4393a5100c02149671f4f8a3d8ea7cb753714"
 }

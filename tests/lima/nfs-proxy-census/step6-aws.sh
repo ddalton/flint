@@ -2,8 +2,8 @@
 # step 6 on AWS: what the build box cannot measure (plan:
 # docs/plans/flint-lite-nfs-proxy-step6-rig-plan.md, the AWS session).
 #   E  real flint-spdk: the target's subsystem cap, and a real
-#      flint-csi-node roll under 8 live hubs (noderoll must restart each
-#      hub exactly once; a writer on each must resume with no gap).
+#      flint-csi-node roll under 8 live hubs (a writer on each must lose
+#      nothing; the 2026-10-02 run had no hub restart and one ~5 s stall).
 #   C  the cross-node half of the proxy cost: a client on its own node,
 #      the hub on another, direct vs through the proxy.
 #
@@ -135,7 +135,6 @@ EOF
 image: { ref: "dilipdalton/flint-lite-operator:$TAG" }
 hubImage: "dilipdalton/flint-pnfs:$TAG"
 nodeSelector: { step6/role: client }
-restartOnTgtRestart: { enabled: true, csiNodeNamespace: $RNS, csiNodeSelector: app=flint-csi-node, tgtContainer: spdk-tgt, storageClasses: [flint-spdk] }
 nfsProxy:
   enabled: true
   idleDefaults: { suspendAfterSecs: 0, hibernateAfterSecs: 0 }
@@ -209,8 +208,7 @@ for d in e1 e2 e3 e4 e5 e6 e7 e8; do rm -f /mnt/px/$d/log /ack-$d; nohup python3
   get() { eval "echo \${$1_$2:-}"; }; put() { eval "$1_$2=\$3"; }
   for h in $E; do put A0 $h "$(acked $h)"; put POD0 $h "$(pod $h)"; done
   echo "before the roll: $(for h in $E; do echo -n "$h=$(get A0 $h) "; done)" | tee -a $OUT/E-roll.txt
-  marks() { K -n $OPNS logs deploy/flint-lite-operator 2>/dev/null | grep -c "restarting the hub"; }
-  M0=$(marks); T0=$(date +%s)
+  T0=$(date +%s)
   # The DaemonSet is OnDelete; flint's own roll controller replaces the
   # pods one node at a time. `rollout status` refuses OnDelete, so wait on
   # the DaemonSet's counters.
@@ -221,11 +219,9 @@ for d in e1 e2 e3 e4 e5 e6 e7 e8; do rm -f /mnt/px/$d/log /ack-$d; nohup python3
   done
   echo "csi-node rolled in $(( $(date +%s) - T0 ))s" | tee -a $OUT/E-roll.txt
   # Every hub Ready again. On HEAD flint-spdk (2026-10-02) the hubs ride
-  # through the roll on their SAME pods (one ~5 s fsync stall each) and
-  # noderoll does not fire: it reads containerStatuses, and the chart runs
-  # spdk-tgt as a native sidecar (an init container), so it never sees a
-  # restart. The restart checks below record which happened; the data
-  # checks are the ones that must hold.
+  # through the roll on their SAME pods (one ~5 s fsync stall each), which
+  # is why the operator's restart-on-roll (noderoll) was removed. Which
+  # pod each hub ends on is recorded; the data checks must hold.
   for _ in $(seq 1 120); do
     all=1; for h in $E; do [ "$(phase $h)" = Ready ] || all=0; done
     [ $all = 1 ] && break; sleep 5
@@ -236,8 +232,6 @@ for d in e1 e2 e3 e4 e5 e6 e7 e8; do rm -f /mnt/px/$d/log /ack-$d; nohup python3
   sleep 10
   echo "after the roll: $(for h in $E; do echo -n "$h=$(get A1 $h) "; done)" | tee -a $OUT/E-roll.txt
   echo "longest fsync stall per writer (s): $(for h in $E; do echo -n "$h=$(C cat /ack-$h.worst 2>/dev/null) "; done)" | tee -a $OUT/E-roll.txt
-  M1=$(marks); sleep 60; M2=$(marks)
-  K -n $OPNS logs deploy/flint-lite-operator 2>/dev/null | grep "restarting the hub" | sed 's/\x1b\[[0-9;]*m//g' > $OUT/E-roll-marks.txt
   C sh -c 'pkill -f "^python3 /w.py"'; sleep 2
   for h in $E; do
     echo "$h: pod $( [ "$(pod $h)" = "$(get POD0 $h)" ] && echo SAME || echo NEW ), longest fsync stall $(C cat /ack-$h.worst)s" | tee -a $OUT/E-roll.txt
@@ -249,8 +243,6 @@ want = list(range(1, len(xs) + 1))
 print('ok' if xs == want and len(xs) >= $last else f'BAD n={len(xs)} acked=$last first_break={next((i for i,(a,b) in enumerate(zip(xs,want)) if a!=b), None)}')")
     check "$h: records 1..N with no gap or repeat, N >= last acknowledged ($last): $gap" '[ "$gap" = ok ]'
   done
-  echo "operator restart marks: $M0 before, $M1 after the roll, $M2 a minute later" | tee -a $OUT/E-roll.txt
-  check "no restart loop: no new marks a minute after the roll" '[ "$M1" = "$M2" ]'
   for h in $E; do echo "$h: $(K -n $NS get events --field-selector involvedObject.name=$h -o jsonpath='{range .items[*]}{.reason} {end}')"; done >> $OUT/E-roll.txt
   echo "RESULT: $ok passed, $bad failed" | tee -a $OUT/E-roll.txt
   ;;

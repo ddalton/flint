@@ -36,7 +36,7 @@ use kube::runtime::events::{Recorder, Reporter};
 use kube::runtime::reflector::ObjectRef;
 use kube::runtime::{watcher, Controller};
 use kube::{Api, Client, ResourceExt};
-use spdk_csi_driver::lite_operator::{bootstrap, conflict, crd::{FlintShare, IdleSpec}, error_chain, noderoll, trigger_backoff, reconcile, render};
+use spdk_csi_driver::lite_operator::{bootstrap, conflict, crd::{FlintShare, IdleSpec}, error_chain, trigger_backoff, reconcile, render};
 use spdk_csi_driver::orchestrator_lease::{self, KubeLeaseOps, LeaseConfig};
 use tracing::{info, warn};
 
@@ -101,20 +101,6 @@ struct Args {
     #[arg(long, env = "FLINT_LITE_DEFAULT_HIBERNATE_AFTER_SECS", default_value_t = 0)]
     default_hibernate_after_secs: u64,
 
-    /// Restart a hub (scale to zero and back) when its node's spdk-tgt
-    /// restarts under it — a csi-node roll leaves its staged volume dead
-    /// (`lite_operator::noderoll`). Off: `--restart-on-tgt-restart=false`.
-    #[arg(long, env = "FLINT_LITE_RESTART_ON_TGT_RESTART", action = clap::ArgAction::Set, default_value_t = true)]
-    restart_on_tgt_restart: bool,
-    #[arg(long, env = "FLINT_LITE_CSI_NODE_NAMESPACE", default_value = "flint-system")]
-    csi_node_namespace: String,
-    #[arg(long, env = "FLINT_LITE_CSI_NODE_SELECTOR", default_value = "app=flint-csi-node")]
-    csi_node_selector: String,
-    #[arg(long, env = "FLINT_LITE_CSI_NODE_TGT_CONTAINER", default_value = "spdk-tgt")]
-    csi_node_tgt_container: String,
-    /// Comma-separated: only hubs whose PVC is in one of these classes.
-    #[arg(long, env = "FLINT_LITE_TGT_STORAGE_CLASSES", default_value = "flint-spdk", value_delimiter = ',')]
-    tgt_storage_classes: Vec<String>,
 }
 
 /// The fleet idle default, held to the rules admission holds a share's own
@@ -243,20 +229,6 @@ async fn main() -> anyhow::Result<()> {
         namespace = %args.namespace.clone().unwrap_or_else(|| "<all>".into()),
         "flint-lite-operator starting"
     );
-
-    if args.restart_on_tgt_restart {
-        tokio::spawn(noderoll::run(
-            client.clone(),
-            store.clone(),
-            noderoll::Config {
-                namespace: args.csi_node_namespace.clone(),
-                selector: args.csi_node_selector.clone(),
-                container: args.csi_node_tgt_container.clone(),
-                storage_classes: args.tgt_storage_classes.clone(),
-                every: Duration::from_secs(30),
-            },
-        ));
-    }
 
     let secret_store = store.clone();
     let claim_store = store.clone();

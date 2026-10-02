@@ -285,17 +285,6 @@ gateway:
 # fsid) and their stateid tag (assigned once, into status.stateidTag),
 # and their NFS Services become headless. The hub NetworkPolicy admits
 # the proxy on 2049 (networkPolicy.enabled).
-# A restart of a node's spdk-tgt (a flint-csi-node roll, an upgrade, a
-# crash) leaves every flint volume staged on that node dead: the hub's
-# ext4 goes EIO and stays so. The operator scales each such hub to zero
-# and back, so it restages. Only hubs whose PVC is in `storageClasses`.
-restartOnTgtRestart:
-  enabled: true
-  csiNodeNamespace: flint-system
-  csiNodeSelector: app=flint-csi-node
-  tgtContainer: spdk-tgt
-  storageClasses: [flint-spdk]
-
 nfsProxy:
   enabled: false
 

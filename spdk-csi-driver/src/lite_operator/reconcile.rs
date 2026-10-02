@@ -293,8 +293,6 @@ fn settled_requeue(share: &FlintShare, idle: Option<&IdleSpec>, state: IdleState
         // the one ladder position where a slow re-check is a share
         // sitting with no disk at all.
         IdleState::ReprovisionVerifying | IdleState::ReprovisionDraining => REQUEUE_PROGRESS,
-        // A hub down for a restart (`noderoll`): progress, like a drain.
-        IdleState::Restarting => REQUEUE_PROGRESS,
     }
 }
 
@@ -1819,13 +1817,6 @@ async fn drive_idle_ladder(
         return verify_and_hibernate(ctx, share, names, dep, conds).await;
     }
 
-    // A restart after the node's spdk-tgt restarted under the hub
-    // (`noderoll`). Before `decide`: a wake must not scale it back up
-    // while the old pod still holds the dead mount.
-    if state == IdleState::Restarting {
-        return drive_restart(ctx, share, names, dep, conds).await;
-    }
-
     // A disk rebuild in flight. Runs BEFORE any idleness evaluation:
     // suspending or hibernating a share midway through would strand it
     // between two disks, and a wake request must not abort it either
@@ -1946,7 +1937,7 @@ async fn drive_idle_ladder(
         IdleState::Hibernated => Phase::Hibernated,
         IdleState::HibernateVerifying => Phase::Ready,
         IdleState::ReprovisionVerifying | IdleState::ReprovisionDraining => Phase::Reprovisioning,
-        IdleState::Active | IdleState::Restarting => Phase::Starting,
+        IdleState::Active => Phase::Starting,
     };
     Ok(IdleOutcome {
         server_id: None,
@@ -2068,40 +2059,6 @@ async fn verify_and_hibernate(
         condition("IdleEligible", true, "Hibernating", Some(note), generation),
     );
     Ok(IdleOutcome { phase: Phase::Hibernated, short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)), server_id: None, hub_phase: None })
-}
-
-/// The csi-node-roll restart (`noderoll`). The render has the hub at zero
-/// replicas; once no pod of ours mounts the claim, go back to `Active`, so
-/// the next pod stages the volume afresh instead of inheriting the mount
-/// that died with the old spdk-tgt — the same wait as the reprovision
-/// drain, and for the same reason.
-async fn drive_restart(
-    ctx: &Arc<Ctx>,
-    share: &Arc<FlintShare>,
-    names: &render::Names,
-    dep: Option<&Deployment>,
-    _conds: &mut Vec<ShareCondition>,
-) -> Result<IdleOutcome> {
-    let ns = share.namespace().unwrap_or_default();
-    let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), &ns);
-    let still_running = pods
-        .list(&ListParams::default())
-        .await?
-        .items
-        .iter()
-        .any(|p| pod_is_ours(dep, p) && pod_mounts_claim(p, &names.claim));
-    if still_running {
-        return Ok(IdleOutcome { phase: Phase::Starting, short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)), server_id: None, hub_phase: None });
-    }
-    // Coming back up honours any wake request too, so clear it — every
-    // path to Active does (`every_path_back_to_active_clears_the_wake_stamp`).
-    set_idle_state(ctx, share, &ns, IdleState::Active, true).await?;
-    let note = "the node's spdk-tgt restarted under this hub, so its volume's staging was dead; \
-                the old pod is gone and a new one stages it afresh"
-        .to_string();
-    info!(share = %share.name_any(), "{note}");
-    event(ctx, share, EventType::Normal, "HubRestarted", &note).await;
-    Ok(IdleOutcome { phase: Phase::Starting, short_circuit: Some(Action::requeue(REQUEUE_PROGRESS)), server_id: None, hub_phase: None })
 }
 
 /// Rebuild a share's disk at a smaller size.
@@ -3179,7 +3136,7 @@ mod tests {
         assert!(!parks_as_cr_only(Hibernated, false, true, false), "the disk is not reclaimed yet");
         assert!(!parks_as_cr_only(Hibernated, true, false, false), "an adopted claim is the user's");
         assert!(!parks_as_cr_only(Hibernated, false, false, true), "a wake is outstanding");
-        for st in [Active, Suspended, HibernateVerifying, ReprovisionVerifying, ReprovisionDraining, Restarting] {
+        for st in [Active, Suspended, HibernateVerifying, ReprovisionVerifying, ReprovisionDraining] {
             assert!(!parks_as_cr_only(st, false, false, false), "{st:?}");
         }
     }

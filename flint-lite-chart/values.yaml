@@ -260,10 +260,14 @@ logLevel: info
 # first out under node memory pressure. A memory LIMIT is deliberately
 # absent: a hub is a filesystem server whose working set belongs to the
 # caller, and a limit makes it killable mid-operation.
+#
+# The numbers are what a hub was MEASURED to use (nfs-proxy step 6):
+# ~65-103 MiB RSS and ~5 m CPU idle, ~50 m under a light metadata load.
+# CPU above the request is still available; 100m reserved 20x the use.
 resources:
   requests:
-    cpu: 100m
-    memory: 128Mi
+    cpu: 20m
+    memory: 100Mi
 # ─────────────────────────── Security context ────────────────────────────
 # Audit finding 7. The hub had NO securityContext at all — a default root
 # container — while the operator and the gateway in this same repo both

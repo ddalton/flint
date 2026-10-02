@@ -46,7 +46,7 @@ of proxy samples (`results-box-step6/leasegate-ab.txt`).
 **AWS session RUN 2026-10-02** (`results-aws-step6/README.md`; trove,
 4 × i4i.xlarge spot, ~2 h, ~$0.85, verified torn down):
 - E: the subsystem cap is 1,024. A real roll under 8 live writers lost
-  nothing (one ~5 s stall each, no restarts). noderoll cannot fire on
+  nothing (one ~5 s stall each, no restarts). noderoll (since removed) could not fire on
   the real chart, because `spdk-tgt` is a native sidecar.
 - C, cross-node: proxy ~72% of direct metadata throughput, 0.35 ms CPU
   per op; bulk equal.

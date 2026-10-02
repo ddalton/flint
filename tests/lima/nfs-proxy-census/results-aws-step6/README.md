@@ -49,8 +49,9 @@ the target is nowhere near its cap.
   status is in `initContainerStatuses`. The kind drill (step 5) used a
   stand-in DaemonSet with `spdk-tgt` as a regular container, so it
   could not see this. On HEAD the restart is not needed; noderoll is
-  dead code on real deployments, not a live bug. Deciding whether to
-  fix it or remove it is open.
+  dead code on real deployments, not a live bug. **It was removed the
+  same day** (with `IdleState::Restarting` and the chart's
+  `restartOnTgtRestart`).
 
 The first roll (`roll-1-no-writers.log`) ran with no writers, because a
 `pkill -f` matched its own shell. It is kept, but it measures nothing

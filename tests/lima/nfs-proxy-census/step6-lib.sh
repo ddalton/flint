@@ -87,7 +87,6 @@ image: { ref: "$OPIMG", pullPolicy: Never }
 hubImage: "$HUBIMG"
 hubImagePullPolicy: Never
 replicas: 1
-restartOnTgtRestart: { enabled: false }
 nfsProxy:
   enabled: true
   idleDefaults: { suspendAfterSecs: 0, hibernateAfterSecs: 0 }

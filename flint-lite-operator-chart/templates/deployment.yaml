@@ -90,15 +90,6 @@ spec:
             - --manage-crd={{ .Values.manageCrd }}
             # H1 + the stateid tag on every hub, headless hub Services.
             - --nfs-proxy={{ .Values.nfsProxy.enabled }}
-            - --restart-on-tgt-restart={{ .Values.restartOnTgtRestart.enabled }}
-            {{- with .Values.restartOnTgtRestart }}
-            {{- if .enabled }}
-            - --csi-node-namespace={{ .csiNodeNamespace }}
-            - --csi-node-selector={{ .csiNodeSelector }}
-            - --csi-node-tgt-container={{ .tgtContainer }}
-            - --tgt-storage-classes={{ join "," .storageClasses }}
-            {{- end }}
-            {{- end }}
             {{- if .Values.nfsProxy.enabled }}
             - --default-suspend-after-secs={{ int .Values.nfsProxy.idleDefaults.suspendAfterSecs }}
             - --default-hibernate-after-secs={{ int .Values.nfsProxy.idleDefaults.hibernateAfterSecs }}
