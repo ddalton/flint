@@ -29,7 +29,9 @@ Hub or private ECR.
   ~40% on bulk reads.
 - D: 500 live took the box off the network (ARP table overflow); at
   150 live + 10,000 parked the operator sits at 235 MiB / 181 m, with
-  ~180 apiserver req/s (not per-share: 178 at 220 shares). The proxy's
+  ~180 apiserver req/s, which was a reconcile loop on live shares (a
+  timestamp annotation re-stamped on every apply), fixed 2026-10-02:
+  4.8 req/s (`D-apirate-loop.txt`). The proxy's
   relist measured +100 MiB. The operator's relist was measured on
   2026-10-02 (`D-relist-10k.txt`): ~2× its RSS. It had been 4 minutes
   late behind kube's single watch backoff; its own backoff (fixed the

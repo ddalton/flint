@@ -155,6 +155,23 @@ fn apply_gate_state(dep: &Deployment, want: &str) -> Option<GateState> {
     Some(if (0..FULL_APPLY_AFTER).contains(&age) { GateState::Fresh } else { GateState::Stale })
 }
 
+/// The `render-verified-at` value to stamp on this apply.
+///
+/// A fresh stamp on an unchanged render is KEPT, so the apply of a live
+/// share (which is never gated) is byte-identical and the apiserver sees
+/// no change. Stamping `now` on every apply changed the Deployment on
+/// every reconcile; its watch event triggered the next one, and every
+/// live share looped about every 2 s (~180 apiserver req/s at any fleet
+/// size). Keeping an older stamp is safe for the gate: a stamp older than
+/// the last real apply only makes the forced full apply come sooner.
+fn verified_stamp(existing: Option<&Deployment>, render_hash: &str) -> String {
+    let fresh = existing.filter(|d| apply_gate_state(d, render_hash) == Some(GateState::Fresh));
+    match fresh.and_then(|d| d.metadata.annotations.as_ref()?.get(ANN_RENDER_VERIFIED)) {
+        Some(kept) => kept.clone(),
+        None => chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    }
+}
+
 /// Ceiling for the failure backoff. A share that has been failing for
 /// fifteen minutes is not going to be fixed by asking faster.
 const RETRY_MAX: Duration = Duration::from_secs(900);
@@ -1393,10 +1410,7 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
         // reconcile can read both halves in the GET it already does.
         let ann = dep.metadata.annotations.get_or_insert_with(Default::default);
         ann.insert(ANN_RENDER_HASH.to_string(), render_hash.clone());
-        ann.insert(
-            ANN_RENDER_VERIFIED.to_string(),
-            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        );
+        ann.insert(ANN_RENDER_VERIFIED.to_string(), verified_stamp(existing_dep.as_ref(), &render_hash));
         deployments.patch(&names.deployment, &pp, &Patch::Apply(&dep)).await?
     };
 
@@ -4146,6 +4160,31 @@ mod tests {
         d.metadata.annotations.as_mut().unwrap()
             .insert(ANN_RENDER_VERIFIED.to_string(), "not-a-time".to_string());
         assert_eq!(apply_gate_state(&d, "abc"), None);
+    }
+
+    /// A LIVE share re-applies on every reconcile, and the apply must be
+    /// byte-identical when nothing changed. Stamping `now` made every
+    /// apply a real change to the Deployment, its watch event triggered
+    /// the next reconcile, and every live share looped about every 2 s:
+    /// ~180 apiserver req/s at any fleet size (an annotation change also
+    /// bumps a Deployment's generation, so kube-controller-manager re-synced
+    /// it and its ReplicaSets each time). A fresh stamp on an unchanged
+    /// render is kept; a stale or mismatched one is replaced.
+    #[test]
+    fn an_unchanged_render_keeps_its_fresh_stamp_so_the_apply_is_a_no_op() {
+        let earlier = chrono::Utc::now() - chrono::Duration::seconds(120);
+        let fresh = dep_with(Some("abc"), Some(earlier));
+        let kept = earlier.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        assert_eq!(verified_stamp(Some(&fresh), "abc"), kept, "a fresh stamp on the same render is kept");
+
+        let is_now = |s: String| {
+            let t = chrono::DateTime::parse_from_rfc3339(&s).unwrap().with_timezone(&chrono::Utc);
+            (chrono::Utc::now() - t).num_seconds().abs() <= 2
+        };
+        assert!(is_now(verified_stamp(Some(&fresh), "different")), "a changed render is re-proved now");
+        let old = chrono::Utc::now() - chrono::Duration::seconds(FULL_APPLY_AFTER + 60);
+        assert!(is_now(verified_stamp(Some(&dep_with(Some("abc"), Some(old))), "abc")), "a stale stamp is renewed");
+        assert!(is_now(verified_stamp(None, "abc")), "a first apply is stamped now");
     }
 
     /// The fingerprint must move when ANY of the four applied objects

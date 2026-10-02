@@ -1,0 +1,39 @@
+# Phase D: the ~180 apiserver req/s that did not scale with shares (box, 2026-10-02)
+#
+# Cause: a self-triggering reconcile loop on every LIVE share. A live share is
+# never apply-gated, and each apply stamped chert.us/render-verified-at = now
+# on its Deployment. The stamp changed every second, so every apply was a real
+# change; the operator's .owns(Deployment) watch then triggered the next
+# reconcile. An annotation change also bumps a Deployment's generation, so
+# kube-controller-manager re-synced it and its ReplicaSets and wrote status,
+# a second trigger. Parked shares skip their applies and never looped; live
+# shares looped as fast as the operator could reconcile, so the total sat near
+# its throughput (~15 reconciles/s) at 20 live or 150.
+
+== BEFORE (20 live + 200 parked, operator with kube_client=debug)
+60 s of the operator's log: 576 reconciles, every one
+  "object.reason=related object updated: Deployment.v1.apps/p-000NN.ws".
+Per reconcile, 10 requests: GET secret, deployment, service, pvc, pods;
+  PATCH (apply) deployment, service, pvc, configmap, flintshare/status.
+One Deployment, two snapshots 3 s apart:
+  generation 91 -> 93; only metadata.annotations.chert.us/render-verified-at
+  (16:23:37Z -> 16:23:40Z), managedFields times and status.observedGeneration
+  differ. Field managers: flint-lite-operator (Apply), kube-controller-manager
+  (Update, status).
+apiserver requests/s over 300 s: total 177.29
+  deployments 37.27, persistentvolumeclaims 30.89, services 30.62, pods 15.32,
+  configmaps 15.31, secrets 15.31, flintshares 15.30, replicasets 13.35,
+  leases 1.70, (none) 1.23
+  (= ~15.3 reconciles/s x the request set above, plus the controller-manager's
+  Deployment status and ReplicaSet syncs)
+operator settled: 151 m CPU at 220 shares; 181-276 m at 10,150.
+
+== AFTER (same rig; the operator keeps a fresh stamp on an unchanged render:
+== reconcile::verified_stamp)
+One Deployment over 60 s: generation 1, resourceVersion 2456, stamp
+  2026-10-02T16:45:25Z, all unchanged.
+apiserver requests/s over 300 s: total 4.83
+  leases 1.68, (none) 1.24, persistentvolumeclaims 0.42, persistentvolumes 0.29,
+  services 0.16, deployments 0.15, endpointslices 0.11, nodes 0.11,
+  endpoints 0.10, pods 0.10
+operator settled: 0 m CPU, 74 MiB RSS. Rig 6/6.

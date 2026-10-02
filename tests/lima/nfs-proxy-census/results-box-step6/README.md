@@ -147,9 +147,25 @@ stayed under 5.
   `run-smoke-20live.txt`) saw **178 req/s**, with almost the same
   per-resource rates (Deployments 37.5, PVCs 31.1, Services 30.8, the
   rest ~15.4). So the earlier reading ("re-reading objects a CR-only
-  share does not have") was wrong. A fixed rate like this looks like a
-  periodic loop or a client-side rate limit, not per-share work. Cause
-  not yet found.
+  share does not have") was wrong.
+
+  **Cause found and fixed 2026-10-02 (`D-apirate-loop.txt`): a
+  reconcile loop on every live share.** Live shares are never
+  apply-gated, and each apply stamped `chert.us/render-verified-at` with
+  the current time. So every apply really changed the Deployment, and
+  its watch event triggered the next reconcile, about every 2 s per
+  share. An annotation change also bumps a Deployment's generation, so
+  the controller-manager re-synced it and its ReplicaSets each time.
+  Live shares looped as fast as the operator could reconcile, which is
+  why the total did not move with fleet size.
+
+  The operator now keeps a fresh stamp when the render is unchanged
+  (`verified_stamp`), so the apply sends identical bytes. Same 20-live
+  rig:
+  - apiserver **177 → 4.8 req/s**;
+  - operator CPU 151 m → 0 m;
+  - a live Deployment unchanged for a full minute (it had reached
+    generation 91 within minutes).
 - **Forced relist: the proxy relisted, the operator did not; the guard
   FAILED, correctly.** After etcd was compacted and the apiserver
   restarted, the proxy's peak rose from 235 to **334 MiB**: about +100 MiB
