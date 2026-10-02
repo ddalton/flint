@@ -12,6 +12,21 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Fixed
+
+- **flint-lite: a wake request from a writer whose clock runs a few
+  seconds slow is no longer ignored, and the NFS proxy no longer leaves
+  stale wake stamps** (2026-10-02). 1.57.0 counts a `requested-at` only
+  when it is no older than the share's last idle transition, which
+  compares the writer's clock with the operator's: a one-shot request
+  (`kubectl annotate`, one `/wake` call) made just after a park by a
+  clock 3 s slow was ignored. A request up to 5 s older now counts. The
+  proxy no longer stamps a share that is already `Active`, which is
+  where the stale stamps came from. Also: a `wake-intent` is dropped by
+  every idle transition except a wake, so a warm or cold hint cannot
+  reach a later boot; and the hub-gateway reads a share's pending wake
+  by the operator's rule rather than the key's presence.
+
 ## [1.57.0] - 2026-10-02
 
 flint-lite gets the NFS proxy: many hubs behind one port, idle by
