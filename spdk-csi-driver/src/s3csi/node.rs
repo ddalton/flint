@@ -131,6 +131,19 @@ impl std::fmt::Debug for Config {
     }
 }
 
+/// How far before its keys expire the broker arm re-exchanges them, in
+/// seconds (checked on every republish). The mounter's credential provider
+/// (the CRT inside mount-s3) asks the door again exactly 300 s before the
+/// key it holds expires, ONCE, and takes whatever is there; after that it
+/// asks again only once the key has expired, on every request (measured
+/// against real STS sessions, 2026-10-02, passthrough-sts-secret-mode.md
+/// §2). So the new key must be in `creds.json` by T−300, and the republish
+/// that writes it can be up to ~90 s away: 420. At the old 270 the mounter
+/// learned of the new key only at the old one's expiry, on the first
+/// request after it — zero errors measured, no margin. Under a lifetime of
+/// 420 s or less this is every republish, as before.
+pub const BROKER_REFRESH_SECS: i64 = 420;
+
 impl Config {
     pub fn from_env() -> Result<Self, String> {
         let need = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty()).ok_or_else(|| format!("{k} is unset"));
@@ -1550,8 +1563,8 @@ impl S3Node {
                         .as_ref()
                         .map(|e| Creds { access_key_id: String::new(), secret_access_key: String::new(), session_token: None, expiration: e.clone() }.secs_left(chrono::Utc::now()))
                         .unwrap_or(0);
-                    // Three republish periods (~90 s each) before expiry.
-                    if left < 270 {
+                    // Before the mounter's own ask at T−300 (BROKER_REFRESH_SECS).
+                    if left < BROKER_REFRESH_SECS {
                         if let Some(broker) = &self.cfg.broker {
                             // Re-register on EVERY refresh: the broker's registry is
                             // in-memory, and a broker restart (a roll, an eviction)
@@ -2200,7 +2213,7 @@ impl S3Node {
     /// inside the tenant's grace, so it succeeds. Under `--force` it is
     /// already dead, the drain runs on the remaining key life, and the
     /// caller's event says so. Before this the drain ran on whatever
-    /// the last republish left, 270-900 s, and a hybrid workspace with
+    /// the last republish left, 420-900 s, and a hybrid workspace with
     /// a long floor could outlive its key mid-drain.
     async fn refresh_for_drain(&self, dir: &Path, st: &mut VolumeState, grace: u64) -> Result<(), String> {
         if CredentialMode::parse(&st.credential_mode).ok() != Some(CredentialMode::Broker) {

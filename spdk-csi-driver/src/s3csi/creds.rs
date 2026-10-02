@@ -9,7 +9,8 @@
 //!   worker's PID 1 serves them on the loopback container-credentials
 //!   door, which mount-s3 (CRT) and the Rust SDK consume unchanged and
 //!   re-fetch before `Expiration`. Republish re-exchanges when the keys
-//!   are within three periods of expiry.
+//!   are within 420 s of expiry (`node::BROKER_REFRESH_SECS`: the
+//!   mounter asks the door at 300 s before, once).
 //! - `webIdentity`: the WORKER calls the broker's STS façade itself with
 //!   the token file the plugin keeps fresh. Needs the broker's TLS
 //!   trusted by the mounter image (the CRT's web-identity provider is
@@ -161,7 +162,8 @@ const STS_OPTIONAL: [&str; 4] = ["AWS_SESSION_TOKEN", STS_KEY_NAMESPACE, STS_KEY
 /// mounter re-fetched it, it would be as good as expired, and installing
 /// it would displace a credential that still works. Kubelet's republish
 /// is every ~60-90 s, so a controller should offer the next generation
-/// well before this — the broker arm refreshes at 270 s.
+/// well before this — the broker arm refreshes at 420 s left for the
+/// same reason (`node::BROKER_REFRESH_SECS`).
 pub const STS_MIN_SECS_LEFT: i64 = 120;
 
 /// What an `stsSecret` Secret said: the credential, its generation, and

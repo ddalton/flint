@@ -112,10 +112,12 @@ installs it can be ~90 s away: a controller should offer the next
 generation **at least seven minutes before the current one expires**
 and must bump `generation` every time it mints. With a 15-minute
 session that is a rotation at the 8-minute mark. (The broker arm
-refreshes at 270 s left, i.e. AFTER the CRT's last ask; the CRT then
-learns of the new key only at the old one's expiry, on the first request
-after it — zero errors in P8, but a tighter margin than it looks. Moving
-the broker's refresh to ~420 s is a follow-up.) An idle mount does none
+used to refresh at 270 s left, i.e. AFTER the CRT's last ask, so the CRT
+learned of the new key only at the old one's expiry, on the first request
+after it: zero errors in P8, but no margin. It now refreshes at 420 s
+left — `BROKER_REFRESH_SECS` in `node.rs` — for the same reason. P8
+should be re-run with the door log as its oracle to show the switch now
+happens with the margin.) An idle mount does none
 of this: with no request to sign it holds its credential past expiry
 and fetches on its next request, which is harmless so long as the door
 then holds a live generation.

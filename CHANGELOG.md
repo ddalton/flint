@@ -378,6 +378,18 @@ covered by the stability guarantee.
 
 ### Changed
 
+- **flint-s3-csi: the broker arm refreshes at 420 s before expiry, not
+  270** (2026-10-02, `BROKER_REFRESH_SECS` in `s3csi/node.rs`). Measured
+  against real STS sessions: mount-s3's credential provider asks the
+  worker's door again exactly 300 s before the key it holds expires, once,
+  and takes what is there; it asks again only once that key has expired,
+  then on every request. At 270 the plugin wrote the new key AFTER that
+  ask, so the mounter learned of it only at the old key's expiry, on the
+  first request after it — zero errors in P8, no margin. At 420 the new
+  key is in `creds.json` before the ask (the republish that writes it can
+  be ~90 s away). Lifetimes of 420 s or less refresh every republish, as
+  before. P8 to be re-run with the door log as its oracle.
+
 - **flint-s3-csi: a sharing CR that names no `spec.cache` gets NO block
   cache** (2026-09-30, step 1 of the sharing design's §11). The default the
   2026-09-29 sharing knob added — three quarters of `workers.scratchSize`,
