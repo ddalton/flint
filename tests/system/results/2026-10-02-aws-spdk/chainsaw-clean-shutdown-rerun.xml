@@ -1,0 +1,5 @@
+<testsuites name="chainsaw-report" time="41.860629" tests="1">
+  <testsuite name="tests/clean-shutdown" tests="1" failures="0" errors="0" id="0" time="">
+    <testcase name="clean-shutdown" classname="" time="36.228698"></testcase>
+  </testsuite>
+</testsuites>

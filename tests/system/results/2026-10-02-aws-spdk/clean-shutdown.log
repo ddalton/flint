@@ -1,0 +1,138 @@
+Version: 0.2.15
+Loading config (chainsaw-clean-shutdown.yaml)...
+- Using test file: chainsaw-test
+- TestDirs [tests]
+- Quiet false
+- SkipDelete false
+- FailFast false
+- ReportFormat 'JUNIT-TEST'
+- ReportName 'chainsaw-clean-shutdown'
+- ReportPath '/private/tmp/claude-503/-Users-ddalton-github-flint/04b1b4fc-8045-4244-87a1-599b98585b0c/scratchpad/aws-out'
+- Namespace ''
+- FastNamespaceDeletion false
+- FullName false
+- IncludeTestRegex ''
+- ExcludeTestRegex ''
+- ApplyTimeout 5m0s
+- AssertTimeout 5m0s
+- CleanupTimeout 5m0s
+- DeleteTimeout 5m0s
+- ErrorTimeout 5m0s
+- ExecTimeout 5m0s
+- DeletionPropagationPolicy Background
+- Parallel 1
+- Template false
+- NoCluster false
+- PauseOnFailure false
+Loading tests...
+- clean-shutdown (tests/clean-shutdown)
+Loading values...
+Running tests...
+=== RUN   chainsaw
+=== PAUSE chainsaw
+=== CONT  chainsaw
+=== RUN   chainsaw/clean-shutdown
+=== PAUSE chainsaw/clean-shutdown
+=== CONT  chainsaw/clean-shutdown
+    sink.go:61: | 12:24:36 | clean-shutdown | @chainsaw             | CREATE    | OK    | v1/Namespace @ chainsaw-driven-lamprey
+    sink.go:61: | 12:24:36 | clean-shutdown | 00-pvc                | TRY       | BEGIN |
+    sink.go:61: | 12:24:36 | clean-shutdown | 00-pvc                | APPLY     | RUN   | v1/PersistentVolumeClaim @ chainsaw-driven-lamprey/clean-shutdown-pvc
+    sink.go:61: | 12:24:36 | clean-shutdown | 00-pvc                | CREATE    | OK    | v1/PersistentVolumeClaim @ chainsaw-driven-lamprey/clean-shutdown-pvc
+    sink.go:61: | 12:24:36 | clean-shutdown | 00-pvc                | APPLY     | DONE  | v1/PersistentVolumeClaim @ chainsaw-driven-lamprey/clean-shutdown-pvc
+    sink.go:61: | 12:24:36 | clean-shutdown | 00-pvc                | ASSERT    | RUN   | v1/PersistentVolumeClaim @ chainsaw-driven-lamprey/clean-shutdown-pvc
+    sink.go:61: | 12:24:36 | clean-shutdown | 00-pvc                | ASSERT    | DONE  | v1/PersistentVolumeClaim @ chainsaw-driven-lamprey/clean-shutdown-pvc
+    sink.go:61: | 12:24:36 | clean-shutdown | 00-pvc                | TRY       | END   |
+    sink.go:61: | 12:24:36 | clean-shutdown | 01-writer-pod         | TRY       | BEGIN |
+    sink.go:61: | 12:24:36 | clean-shutdown | 01-writer-pod         | APPLY     | RUN   | v1/Pod @ chainsaw-driven-lamprey/writer-pod
+    sink.go:61: | 12:24:36 | clean-shutdown | 01-writer-pod         | CREATE    | OK    | v1/Pod @ chainsaw-driven-lamprey/writer-pod
+    sink.go:61: | 12:24:36 | clean-shutdown | 01-writer-pod         | APPLY     | DONE  | v1/Pod @ chainsaw-driven-lamprey/writer-pod
+    sink.go:61: | 12:24:36 | clean-shutdown | 01-writer-pod         | ASSERT    | RUN   | v1/PersistentVolumeClaim @ chainsaw-driven-lamprey/clean-shutdown-pvc
+    sink.go:61: | 12:24:37 | clean-shutdown | 01-writer-pod         | ASSERT    | DONE  | v1/PersistentVolumeClaim @ chainsaw-driven-lamprey/clean-shutdown-pvc
+    sink.go:61: | 12:24:37 | clean-shutdown | 01-writer-pod         | ASSERT    | RUN   | v1/Pod @ chainsaw-driven-lamprey/writer-pod
+    sink.go:61: | 12:24:48 | clean-shutdown | 01-writer-pod         | ASSERT    | DONE  | v1/Pod @ chainsaw-driven-lamprey/writer-pod
+    sink.go:61: | 12:24:48 | clean-shutdown | 01-writer-pod         | TRY       | END   |
+    sink.go:61: | 12:24:48 | clean-shutdown | 02-delete-writer      | TRY       | BEGIN |
+    sink.go:61: | 12:24:48 | clean-shutdown | 02-delete-writer      | DELETE    | RUN   | v1/Pod @ chainsaw-driven-lamprey/writer-pod
+    sink.go:61: | 12:24:48 | clean-shutdown | 02-delete-writer      | DELETE    | OK    | v1/Pod @ chainsaw-driven-lamprey/writer-pod
+    sink.go:61: | 12:24:48 | clean-shutdown | 02-delete-writer      | DELETE    | DONE  | v1/Pod @ chainsaw-driven-lamprey/writer-pod
+    sink.go:61: | 12:24:49 | clean-shutdown | 02-delete-writer      | ASSERT    | RUN   | v1/Pod @ chainsaw-driven-lamprey/writer-pod
+    sink.go:61: | 12:25:49 | clean-shutdown | 02-delete-writer      | ASSERT    | ERROR | v1/Pod @ chainsaw-driven-lamprey/writer-pod
+        === ERROR
+        actual resource not found
+    sink.go:61: | 12:25:49 | clean-shutdown | 02-delete-writer      | TRY       | END   |
+    sink.go:61: | 12:25:49 | clean-shutdown | 02-delete-writer      | CATCH     | BEGIN |
+    sink.go:61: | 12:25:49 | clean-shutdown | 02-delete-writer      | CMD       | RUN   |
+        === COMMAND
+        /usr/local/bin/kubectl get events -n chainsaw-driven-lamprey
+    sink.go:61: | 12:25:49 | clean-shutdown | 02-delete-writer      | CMD       | LOG   |
+        === STDOUT
+        LAST SEEN   TYPE     REASON                   OBJECT                                     MESSAGE
+        73s         Normal   WaitForFirstConsumer     persistentvolumeclaim/clean-shutdown-pvc   waiting for first consumer to be created before binding
+        73s         Normal   Provisioning             persistentvolumeclaim/clean-shutdown-pvc   External provisioner is provisioning volume for claim "chainsaw-driven-lamprey/clean-shutdown-pvc"
+        73s         Normal   ExternalProvisioning     persistentvolumeclaim/clean-shutdown-pvc   Waiting for a volume to be created either by the external provisioner 'disk.csi.chert.us' or manually by the system administrator. If volume creation is delayed, please verify that the provisioner is running and correctly registered.
+        72s         Normal   ProvisioningSucceeded    persistentvolumeclaim/clean-shutdown-pvc   Successfully provisioned volume pvc-1f5f340e-d0fd-41d0-9972-87332e2e04e3
+        72s         Normal   Scheduled                pod/writer-pod                             Successfully assigned chainsaw-driven-lamprey/writer-pod to csw-aws-2
+        71s         Normal   SuccessfulAttachVolume   pod/writer-pod                             AttachVolume.Attach succeeded for volume "pvc-1f5f340e-d0fd-41d0-9972-87332e2e04e3"
+        63s         Normal   Pulling                  pod/writer-pod                             Pulling image "busybox:latest"
+        63s         Normal   Pulled                   pod/writer-pod                             Successfully pulled image "busybox:latest" in 456ms (456ms including waiting). Image size: 2236767 bytes.
+        63s         Normal   Created                  pod/writer-pod                             Created container: writer
+        63s         Normal   Started                  pod/writer-pod                             Started container writer
+    sink.go:61: | 12:25:49 | clean-shutdown | 02-delete-writer      | CMD       | DONE  |
+    sink.go:61: | 12:25:49 | clean-shutdown | 02-delete-writer      | CMD       | RUN   |
+        === COMMAND
+        /usr/local/bin/kubectl describe pods -n chainsaw-driven-lamprey
+    sink.go:61: | 12:25:49 | clean-shutdown | 02-delete-writer      | CMD       | LOG   |
+        === STDERR
+        No resources found in chainsaw-driven-lamprey namespace.
+    sink.go:61: | 12:25:49 | clean-shutdown | 02-delete-writer      | CMD       | DONE  |
+    sink.go:61: | 12:25:49 | clean-shutdown | 02-delete-writer      | CMD       | RUN   |
+        === COMMAND
+        /usr/local/bin/kubectl describe persistentvolumeclaims -n chainsaw-driven-lamprey
+    sink.go:61: | 12:25:49 | clean-shutdown | 02-delete-writer      | CMD       | LOG   |
+        === STDOUT
+        Name:          clean-shutdown-pvc
+        Namespace:     chainsaw-driven-lamprey
+        StorageClass:  flint
+        Status:        Bound
+        Volume:        pvc-1f5f340e-d0fd-41d0-9972-87332e2e04e3
+        Labels:        <none>
+        Annotations:   pv.kubernetes.io/bind-completed: yes
+                       pv.kubernetes.io/bound-by-controller: yes
+                       volume.beta.kubernetes.io/storage-provisioner: disk.csi.chert.us
+                       volume.kubernetes.io/selected-node: csw-aws-2
+                       volume.kubernetes.io/storage-provisioner: disk.csi.chert.us
+        Finalizers:    [kubernetes.io/pvc-protection]
+        Capacity:      1Gi
+        Access Modes:  RWO
+        VolumeMode:    Filesystem
+        Used By:       <none>
+        Events:
+          Type    Reason                 Age   From                                                                                          Message
+          ----    ------                 ----  ----                                                                                          -------
+          Normal  WaitForFirstConsumer   73s   persistentvolume-controller                                                                   waiting for first consumer to be created before binding
+          Normal  Provisioning           73s   disk.csi.chert.us_flint-csi-controller-6c56566974-smc5m_f8e09136-1f8b-4393-94c2-9a6f1f1853a4  External provisioner is provisioning volume for claim "chainsaw-driven-lamprey/clean-shutdown-pvc"
+          Normal  ExternalProvisioning   73s   persistentvolume-controller                                                                   Waiting for a volume to be created either by the external provisioner 'disk.csi.chert.us' or manually by the system administrator. If volume creation is delayed, please verify that the provisioner is running and correctly registered.
+          Normal  ProvisioningSucceeded  72s   disk.csi.chert.us_flint-csi-controller-6c56566974-smc5m_f8e09136-1f8b-4393-94c2-9a6f1f1853a4  Successfully provisioned volume pvc-1f5f340e-d0fd-41d0-9972-87332e2e04e3
+    sink.go:61: | 12:25:49 | clean-shutdown | 02-delete-writer      | CMD       | DONE  |
+    sink.go:61: | 12:25:49 | clean-shutdown | 02-delete-writer      | CATCH     | END   |
+    sink.go:61: | 12:25:49 | clean-shutdown | 01-writer-pod         | CLEANUP   | BEGIN |
+    sink.go:61: | 12:25:49 | clean-shutdown | 01-writer-pod         | DELETE    | OK    | v1/Pod @ chainsaw-driven-lamprey/writer-pod
+        === ERROR
+        pods "writer-pod" not found
+    sink.go:61: | 12:25:49 | clean-shutdown | 01-writer-pod         | CLEANUP   | END   |
+    sink.go:61: | 12:25:49 | clean-shutdown | 00-pvc                | CLEANUP   | BEGIN |
+    sink.go:61: | 12:25:49 | clean-shutdown | 00-pvc                | DELETE    | OK    | v1/PersistentVolumeClaim @ chainsaw-driven-lamprey/clean-shutdown-pvc
+    sink.go:61: | 12:25:49 | clean-shutdown | 00-pvc                | CLEANUP   | END   |
+    sink.go:61: | 12:25:49 | clean-shutdown | @chainsaw             | CLEANUP   | BEGIN |
+    sink.go:61: | 12:25:49 | clean-shutdown | @chainsaw             | DELETE    | OK    | v1/Namespace @ chainsaw-driven-lamprey
+    sink.go:61: | 12:25:55 | clean-shutdown | @chainsaw             | CLEANUP   | END   |
+--- FAIL: chainsaw (0.00s)
+    --- FAIL: chainsaw/clean-shutdown (78.99s)
+FAIL
+Tests Summary...
+- Passed  tests 0
+- Failed  tests 1
+- Skipped tests 0
+Saving report...
+Done with failures.
+Error: some tests failed

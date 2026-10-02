@@ -1,0 +1,884 @@
+Version: 0.2.15
+Loading config (chainsaw-nfs-only.yaml)...
+- Using test file: chainsaw-test
+- TestDirs [tests-nfs-only]
+- Quiet false
+- SkipDelete false
+- FailFast false
+- ReportFormat 'JUNIT-TEST'
+- ReportName 'chainsaw-nfs-only'
+- ReportPath '/private/tmp/claude-503/-Users-ddalton-github-flint/04b1b4fc-8045-4244-87a1-599b98585b0c/scratchpad/aws-out'
+- Namespace ''
+- FastNamespaceDeletion false
+- FullName false
+- IncludeTestRegex ''
+- ExcludeTestRegex ''
+- ApplyTimeout 5m0s
+- AssertTimeout 5m0s
+- CleanupTimeout 5m0s
+- DeleteTimeout 5m0s
+- ErrorTimeout 5m0s
+- ExecTimeout 5m0s
+- DeletionPropagationPolicy Background
+- Parallel 4
+- Template false
+- NoCluster false
+- PauseOnFailure false
+Loading tests...
+- ephemeral-inline (tests-nfs-only/ephemeral-inline)
+- rwo-pvc-migration (tests-nfs-only/rwo-pvc-migration)
+- rwx-single-replica (tests-nfs-only/rwx-single-replica)
+- volume-expansion (tests-nfs-only/volume-expansion)
+Loading values...
+Running tests...
+=== RUN   chainsaw
+=== PAUSE chainsaw
+=== CONT  chainsaw
+=== RUN   chainsaw/ephemeral-inline
+=== PAUSE chainsaw/ephemeral-inline
+=== RUN   chainsaw/rwo-pvc-migration
+=== PAUSE chainsaw/rwo-pvc-migration
+=== RUN   chainsaw/rwx-single-replica
+=== PAUSE chainsaw/rwx-single-replica
+=== RUN   chainsaw/volume-expansion
+=== PAUSE chainsaw/volume-expansion
+=== CONT  chainsaw/ephemeral-inline
+=== CONT  chainsaw/volume-expansion
+=== CONT  chainsaw/rwx-single-replica
+=== CONT  chainsaw/rwo-pvc-migration
+=== NAME  chainsaw/ephemeral-inline
+    sink.go:61: | 12:31:44 | ephemeral-inline | @chainsaw  | CREATE    | OK    | v1/Namespace @ chainsaw-charming-dodo
+=== NAME  chainsaw/volume-expansion
+    sink.go:61: | 12:31:44 | volume-expansion | @chainsaw        | CREATE    | OK    | v1/Namespace @ chainsaw-elegant-feline
+=== NAME  chainsaw/ephemeral-inline
+    sink.go:61: | 12:31:44 | ephemeral-inline | 00-assert  | TRY       | BEGIN |
+=== NAME  chainsaw/volume-expansion
+    sink.go:61: | 12:31:44 | volume-expansion | 00-pvc           | TRY       | BEGIN |
+=== NAME  chainsaw/ephemeral-inline
+    sink.go:61: | 12:31:44 | ephemeral-inline | 00-assert  | CMD       | RUN   |
+        === COMMAND
+        /bin/bash -c # kuttl retried a TestAssert command until the step timeout;
+        # a Chainsaw script runs once, so the retry is explicit.
+        attempt() {
+          # Verify Flint CSI driver is installed and supports ephemeral volumes
+          echo "Checking CSIDriver configuration..."
+        
+          if kubectl get csidriver disk.csi.chert.us &> /dev/null; then
+            echo "✅ Flint CSIDriver found"
+          else
+            echo "❌ Flint CSIDriver not found"
+            exit 1
+          fi
+        
+          # Check if Ephemeral mode is enabled
+          LIFECYCLE_MODES=$(kubectl get csidriver disk.csi.chert.us -o jsonpath='{.spec.volumeLifecycleModes[*]}')
+          echo "Volume lifecycle modes: $LIFECYCLE_MODES"
+        
+          if echo "$LIFECYCLE_MODES" | grep -q "Ephemeral"; then
+            echo "✅ Ephemeral volume support is enabled"
+          else
+            echo "❌ Ephemeral volume support is NOT enabled"
+            echo "Please set driver.enableEphemeral=true in values.yaml"
+            exit 1
+          fi
+        
+          # Verify controller pod is running
+          if kubectl get pod -n flint-system -l app=flint-csi-controller | grep -q "Running"; then
+            echo "✅ Flint CSI controller is running"
+          else
+            echo "❌ Flint CSI controller is not running"
+            exit 1
+          fi
+        
+          echo "✅ All prerequisites met for ephemeral volume test"
+        }
+        until ( attempt ); do sleep 2; done
+=== NAME  chainsaw/rwo-pvc-migration
+    sink.go:61: | 12:31:44 | rwo-pvc-migration | @chainsaw        | CREATE    | OK    | v1/Namespace @ chainsaw-feasible-hen
+    sink.go:61: | 12:31:44 | rwo-pvc-migration | 01-pvc           | TRY       | BEGIN |
+=== NAME  chainsaw/rwx-single-replica
+    sink.go:61: | 12:31:44 | rwx-single-replica | @chainsaw  | CREATE    | OK    | v1/Namespace @ chainsaw-evident-sloth
+    sink.go:61: | 12:31:44 | rwx-single-replica | 00-pvc     | TRY       | BEGIN |
+=== NAME  chainsaw/volume-expansion
+    sink.go:61: | 12:31:44 | volume-expansion | 00-pvc           | APPLY     | RUN   | v1/PersistentVolumeClaim @ chainsaw-elegant-feline/expandable-pvc
+=== NAME  chainsaw/rwo-pvc-migration
+    sink.go:61: | 12:31:44 | rwo-pvc-migration | 01-pvc           | APPLY     | RUN   | v1/PersistentVolumeClaim @ chainsaw-feasible-hen/test-pvc
+=== NAME  chainsaw/rwx-single-replica
+    sink.go:61: | 12:31:44 | rwx-single-replica | 00-pvc     | APPLY     | RUN   | v1/PersistentVolumeClaim @ chainsaw-evident-sloth/rwx-test-pvc
+=== NAME  chainsaw/volume-expansion
+    sink.go:61: | 12:31:44 | volume-expansion | 00-pvc           | CREATE    | OK    | v1/PersistentVolumeClaim @ chainsaw-elegant-feline/expandable-pvc
+    sink.go:61: | 12:31:44 | volume-expansion | 00-pvc           | APPLY     | DONE  | v1/PersistentVolumeClaim @ chainsaw-elegant-feline/expandable-pvc
+=== NAME  chainsaw/rwx-single-replica
+    sink.go:61: | 12:31:44 | rwx-single-replica | 00-pvc     | CREATE    | OK    | v1/PersistentVolumeClaim @ chainsaw-evident-sloth/rwx-test-pvc
+=== NAME  chainsaw/rwo-pvc-migration
+    sink.go:61: | 12:31:44 | rwo-pvc-migration | 01-pvc           | CREATE    | OK    | v1/PersistentVolumeClaim @ chainsaw-feasible-hen/test-pvc
+=== NAME  chainsaw/rwx-single-replica
+    sink.go:61: | 12:31:44 | rwx-single-replica | 00-pvc     | APPLY     | DONE  | v1/PersistentVolumeClaim @ chainsaw-evident-sloth/rwx-test-pvc
+=== NAME  chainsaw/rwo-pvc-migration
+    sink.go:61: | 12:31:44 | rwo-pvc-migration | 01-pvc           | APPLY     | DONE  | v1/PersistentVolumeClaim @ chainsaw-feasible-hen/test-pvc
+=== NAME  chainsaw/rwx-single-replica
+    sink.go:61: | 12:31:44 | rwx-single-replica | 00-pvc     | TRY       | END   |
+    sink.go:61: | 12:31:44 | rwx-single-replica | 01-pods    | TRY       | BEGIN |
+=== NAME  chainsaw/volume-expansion
+    sink.go:61: | 12:31:44 | volume-expansion | 00-pvc           | ASSERT    | RUN   | v1/PersistentVolumeClaim @ chainsaw-elegant-feline/expandable-pvc
+=== NAME  chainsaw/rwo-pvc-migration
+    sink.go:61: | 12:31:44 | rwo-pvc-migration | 01-pvc           | ASSERT    | RUN   | v1/PersistentVolumeClaim @ chainsaw-feasible-hen/test-pvc
+=== NAME  chainsaw/rwx-single-replica
+    sink.go:61: | 12:31:44 | rwx-single-replica | 01-pods    | APPLY     | RUN   | v1/Pod @ chainsaw-evident-sloth/rwx-writer-1
+=== NAME  chainsaw/volume-expansion
+    sink.go:61: | 12:31:44 | volume-expansion | 00-pvc           | ASSERT    | DONE  | v1/PersistentVolumeClaim @ chainsaw-elegant-feline/expandable-pvc
+    sink.go:61: | 12:31:44 | volume-expansion | 00-pvc           | TRY       | END   |
+    sink.go:61: | 12:31:44 | volume-expansion | 01-writer        | TRY       | BEGIN |
+=== NAME  chainsaw/rwo-pvc-migration
+    sink.go:61: | 12:31:44 | rwo-pvc-migration | 01-pvc           | ASSERT    | DONE  | v1/PersistentVolumeClaim @ chainsaw-feasible-hen/test-pvc
+    sink.go:61: | 12:31:44 | rwo-pvc-migration | 01-pvc           | TRY       | END   |
+    sink.go:61: | 12:31:44 | rwo-pvc-migration | 02-writer-pod    | TRY       | BEGIN |
+=== NAME  chainsaw/volume-expansion
+    sink.go:61: | 12:31:44 | volume-expansion | 01-writer        | APPLY     | RUN   | v1/Pod @ chainsaw-elegant-feline/initial-writer
+=== NAME  chainsaw/rwx-single-replica
+    sink.go:61: | 12:31:44 | rwx-single-replica | 01-pods    | CREATE    | OK    | v1/Pod @ chainsaw-evident-sloth/rwx-writer-1
+    sink.go:61: | 12:31:44 | rwx-single-replica | 01-pods    | APPLY     | DONE  | v1/Pod @ chainsaw-evident-sloth/rwx-writer-1
+=== NAME  chainsaw/rwo-pvc-migration
+    sink.go:61: | 12:31:44 | rwo-pvc-migration | 02-writer-pod    | APPLY     | RUN   | v1/Pod @ chainsaw-feasible-hen/writer-pod
+=== NAME  chainsaw/rwx-single-replica
+    sink.go:61: | 12:31:44 | rwx-single-replica | 01-pods    | APPLY     | RUN   | v1/Pod @ chainsaw-evident-sloth/rwx-writer-2
+=== NAME  chainsaw/volume-expansion
+    sink.go:61: | 12:31:44 | volume-expansion | 01-writer        | CREATE    | OK    | v1/Pod @ chainsaw-elegant-feline/initial-writer
+    sink.go:61: | 12:31:44 | volume-expansion | 01-writer        | APPLY     | DONE  | v1/Pod @ chainsaw-elegant-feline/initial-writer
+=== NAME  chainsaw/ephemeral-inline
+    sink.go:61: | 12:31:44 | ephemeral-inline | 00-assert  | SCRIPT    | LOG   |
+        === STDOUT
+        Checking CSIDriver configuration...
+        ✅ Flint CSIDriver found
+        Volume lifecycle modes: Persistent Ephemeral
+        ✅ Ephemeral volume support is enabled
+        ✅ Flint CSI controller is running
+        ✅ All prerequisites met for ephemeral volume test
+    sink.go:61: | 12:31:44 | ephemeral-inline | 00-assert  | SCRIPT    | DONE  |
+    sink.go:61: | 12:31:44 | ephemeral-inline | 00-assert  | TRY       | END   |
+    sink.go:61: | 12:31:44 | ephemeral-inline | 01-pod     | TRY       | BEGIN |
+=== NAME  chainsaw/rwo-pvc-migration
+    sink.go:61: | 12:31:44 | rwo-pvc-migration | 02-writer-pod    | CREATE    | OK    | v1/Pod @ chainsaw-feasible-hen/writer-pod
+    sink.go:61: | 12:31:44 | rwo-pvc-migration | 02-writer-pod    | APPLY     | DONE  | v1/Pod @ chainsaw-feasible-hen/writer-pod
+=== NAME  chainsaw/volume-expansion
+    sink.go:61: | 12:31:44 | volume-expansion | 01-writer        | ASSERT    | RUN   | v1/Pod @ chainsaw-elegant-feline/initial-writer
+=== NAME  chainsaw/ephemeral-inline
+    sink.go:61: | 12:31:44 | ephemeral-inline | 01-pod     | APPLY     | RUN   | v1/Pod @ chainsaw-charming-dodo/ephemeral-test-pod
+=== NAME  chainsaw/rwo-pvc-migration
+    sink.go:61: | 12:31:44 | rwo-pvc-migration | 02-writer-pod    | ASSERT    | RUN   | v1/PersistentVolumeClaim @ chainsaw-feasible-hen/test-pvc
+=== NAME  chainsaw/rwx-single-replica
+    sink.go:61: | 12:31:44 | rwx-single-replica | 01-pods    | CREATE    | OK    | v1/Pod @ chainsaw-evident-sloth/rwx-writer-2
+    sink.go:61: | 12:31:44 | rwx-single-replica | 01-pods    | APPLY     | DONE  | v1/Pod @ chainsaw-evident-sloth/rwx-writer-2
+    sink.go:61: | 12:31:44 | rwx-single-replica | 01-pods    | APPLY     | RUN   | v1/Pod @ chainsaw-evident-sloth/rwx-writer-3
+=== NAME  chainsaw/ephemeral-inline
+    sink.go:61: | 12:31:44 | ephemeral-inline | 01-pod     | CREATE    | OK    | v1/Pod @ chainsaw-charming-dodo/ephemeral-test-pod
+    sink.go:61: | 12:31:44 | ephemeral-inline | 01-pod     | APPLY     | DONE  | v1/Pod @ chainsaw-charming-dodo/ephemeral-test-pod
+    sink.go:61: | 12:31:44 | ephemeral-inline | 01-pod     | ASSERT    | RUN   | v1/Pod @ chainsaw-charming-dodo/ephemeral-test-pod
+=== NAME  chainsaw/rwx-single-replica
+    sink.go:61: | 12:31:44 | rwx-single-replica | 01-pods    | CREATE    | OK    | v1/Pod @ chainsaw-evident-sloth/rwx-writer-3
+    sink.go:61: | 12:31:44 | rwx-single-replica | 01-pods    | APPLY     | DONE  | v1/Pod @ chainsaw-evident-sloth/rwx-writer-3
+    sink.go:61: | 12:31:45 | rwx-single-replica | 01-pods    | ASSERT    | RUN   | v1/Pod @ chainsaw-evident-sloth/rwx-writer-1
+=== NAME  chainsaw/ephemeral-inline
+    sink.go:61: | 12:31:48 | ephemeral-inline | 01-pod     | ASSERT    | DONE  | v1/Pod @ chainsaw-charming-dodo/ephemeral-test-pod
+    sink.go:61: | 12:31:48 | ephemeral-inline | 01-pod     | TRY       | END   |
+    sink.go:61: | 12:31:48 | ephemeral-inline | 02-cleanup | TRY       | BEGIN |
+    sink.go:61: | 12:31:48 | ephemeral-inline | 02-cleanup | CMD       | RUN   |
+        === COMMAND
+        /bin/bash -c set -e
+        NAMESPACE=${NAMESPACE:-default}
+        echo "Deleting ephemeral-test-pod in namespace: $NAMESPACE"
+        kubectl delete pod ephemeral-test-pod -n $NAMESPACE --ignore-not-found=true
+        echo "✅ Pod deletion initiated"
+    sink.go:61: | 12:31:49 | ephemeral-inline | 02-cleanup | SCRIPT    | LOG   |
+        === STDOUT
+        Deleting ephemeral-test-pod in namespace: chainsaw-charming-dodo
+        pod "ephemeral-test-pod" deleted
+        ✅ Pod deletion initiated
+    sink.go:61: | 12:31:49 | ephemeral-inline | 02-cleanup | SCRIPT    | DONE  |
+    sink.go:61: | 12:31:49 | ephemeral-inline | 02-cleanup | TRY       | END   |
+    sink.go:61: | 12:31:49 | ephemeral-inline | 03-assert  | TRY       | BEGIN |
+    sink.go:61: | 12:31:49 | ephemeral-inline | 03-assert  | CMD       | RUN   |
+        === COMMAND
+        /bin/bash -c # kuttl retried a TestAssert command until the step timeout;
+        # a Chainsaw script runs once, so the retry is explicit.
+        attempt() {
+          set -e  # Exit on any error
+        
+          # Get the current namespace
+          NAMESPACE=${NAMESPACE:-default}
+          echo "Using namespace: $NAMESPACE"
+        
+          # Wait for pod to be deleted
+          echo "Waiting for pod deletion..."
+          kubectl wait --for=delete pod/ephemeral-test-pod -n $NAMESPACE --timeout=60s || true
+        
+          # Verify pod is gone
+          if kubectl get pod ephemeral-test-pod -n $NAMESPACE &> /dev/null; then
+            echo "❌ Pod still exists after deletion"
+            exit 1
+          else
+            echo "✅ Pod deleted successfully"
+          fi
+        
+          # Give CSI driver time to clean up the ephemeral volume
+          echo "Waiting 10 seconds for CSI driver to clean up ephemeral volume..."
+          sleep 10
+        
+          # Check CSI controller logs for ephemeral volume deletion
+          echo "Checking CSI controller logs for volume deletion..."
+          CONTROLLER_POD=$(kubectl get pod -n flint-system -l app=flint-csi-controller -o jsonpath='{.items[0].metadata.name}')
+        
+          # Look for deletion in recent logs
+          kubectl logs -n flint-system $CONTROLLER_POD --tail=100 | tail -30
+        
+          if kubectl logs -n flint-system $CONTROLLER_POD --tail=100 | grep -q "Deleting volume"; then
+            echo "✅ Volume deletion detected in controller logs"
+          else
+            echo "ℹ️ Volume deletion not found in recent logs (might have been cleaned up earlier)"
+          fi
+        
+          # Verify no orphaned PVs were created (ephemeral volumes shouldn't create PVs)
+          # The volume ID would be something like ephemeral-test-pod-<uid>-ephemeral-storage
+          PV_COUNT=$(kubectl get pv --no-headers 2>/dev/null | grep -c "ephemeral-test-pod" || echo "0")
+          if [ "$PV_COUNT" = "0" ]; then
+            echo "✅ No orphaned PersistentVolumes found (expected for ephemeral volumes)"
+          else
+            echo "⚠️ Found $PV_COUNT PV(s) with 'ephemeral-test-pod' in name"
+            kubectl get pv | grep "ephemeral-test-pod" || true
+          fi
+        
+          # Verify no orphaned PVCs
+          PVC_COUNT=$(kubectl get pvc -n $NAMESPACE --no-headers 2>/dev/null | grep -c "ephemeral-test-pod" || echo "0")
+          if [ "$PVC_COUNT" = "0" ]; then
+            echo "✅ No orphaned PersistentVolumeClaims found (expected for ephemeral volumes)"
+          else
+            echo "⚠️ Found $PVC_COUNT PVC(s) with 'ephemeral-test-pod' in name"
+            kubectl get pvc -n $NAMESPACE | grep "ephemeral-test-pod" || true
+          fi
+        
+          echo "==================================================================="
+          echo "✅ EPHEMERAL INLINE VOLUME TEST COMPLETED SUCCESSFULLY"
+          echo "==================================================================="
+          echo "Summary:"
+          echo "  - Pod with ephemeral inline volume: CREATED ✅"
+          echo "  - Data written to ephemeral volume: VERIFIED ✅"
+          echo "  - Pod deletion: SUCCESSFUL ✅"
+          echo "  - Ephemeral volume cleanup: AUTOMATIC ✅"
+          echo "  - No orphaned resources: VERIFIED ✅"
+          echo "==================================================================="
+        }
+        until ( attempt ); do sleep 2; done
+    sink.go:61: | 12:32:00 | ephemeral-inline | 03-assert  | SCRIPT    | LOG   |
+        === STDOUT
+        Using namespace: chainsaw-charming-dodo
+        Waiting for pod deletion...
+        ✅ Pod deleted successfully
+        Waiting 10 seconds for CSI driver to clean up ephemeral volume...
+        Checking CSI controller logs for volume deletion...
+        ⚠️ [DRIVER] Failed to remove target (continuing anyway): Node agent HTTP call failed: {"error":"SPDK RPC call 'nvmf_delete_subsystem' failed: SPDK RPC error: Code=-32602 Msg=Invalid parameters","success":false}
+        🗑️ [CONTROLLER] Deleting replica 2 on node csw-aws-2
+        2026-10-02T19:31:37.312649Z  INFO [CONTROLLER] Lvol deleted via node agent lvol_uuid="1c84ab00-6bdf-4f30-8245-994263729a93"
+        ✅ Deleted replica 2 (UUID: 1c84ab00-6bdf-4f30-8245-994263729a93)
+        🧹 [DRIVER] Removing NVMe-oF target from node: csw-aws-2 nqn: nqn.2024-11.com.flint:volume:pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b_1
+        ⚠️ [DRIVER] Failed to remove target (continuing anyway): Node agent HTTP call failed: {"error":"SPDK RPC call 'nvmf_delete_subsystem' failed: SPDK RPC error: Code=-32602 Msg=Invalid parameters","success":false}
+        🧹 [DRIVER] Removing NVMe-oF target from node: csw-aws-2 nqn: nqn.2024-11.com.flint:volume:nfs-server-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b_1
+        ⚠️ [DRIVER] Failed to remove target (continuing anyway): Node agent HTTP call failed: {"error":"SPDK RPC call 'nvmf_delete_subsystem' failed: SPDK RPC error: Code=-32602 Msg=Invalid parameters","success":false}
+        2026-10-02T19:31:37.420996Z  INFO [CONTROLLER] Lvol deleted via node agent lvol_uuid="c5ba3560-7141-45c3-be2b-159b4bc7789e"
+        2026-10-02T19:31:37.421087Z  INFO [CONTROLLER] Teardown sweep deleted lvol (F51) node_name="csw-aws-1" lvol=vol_pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b_replica_0
+        🔵 [GRPC] Identity.GetPluginInfo called
+        2026-10-02T19:31:37.470523Z  INFO [CONTROLLER] Lvol deleted via node agent lvol_uuid="eeffb2bb-04de-46d9-9157-fc45f6d2bcfa"
+        2026-10-02T19:31:37.470606Z  INFO [CONTROLLER] Teardown sweep deleted lvol (F51) node_name="csw-aws-1" lvol=epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-2
+        2026-10-02T19:31:37.517007Z  INFO [CONTROLLER] Lvol deleted via node agent lvol_uuid="ddd76e9c-df43-4787-9088-47dccb41a928"
+        2026-10-02T19:31:37.517101Z  INFO [CONTROLLER] Teardown sweep deleted lvol (F51) node_name="csw-aws-1" lvol=epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-4
+        2026-10-02T19:31:37.565011Z  INFO [CONTROLLER] Lvol deleted via node agent lvol_uuid="3414669b-2458-4c74-82c8-be86c9fdc0d4"
+        2026-10-02T19:31:37.565105Z  INFO [CONTROLLER] Teardown sweep deleted lvol (F51) node_name="csw-aws-1" lvol=epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-5
+        2026-10-02T19:31:37.624788Z  INFO [CONTROLLER] Lvol deleted via node agent lvol_uuid="57503700-8249-42da-815a-364591f7f842"
+        2026-10-02T19:31:37.625090Z  INFO [CONTROLLER] Teardown sweep deleted lvol (F51) node_name="csw-aws-2" lvol=epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-1
+        2026-10-02T19:31:37.672641Z  INFO [CONTROLLER] Lvol deleted via node agent lvol_uuid="97b63190-c53a-4e4d-8d49-0c488cb459aa"
+        2026-10-02T19:31:37.672795Z  INFO [CONTROLLER] Teardown sweep deleted lvol (F51) node_name="csw-aws-2" lvol=epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-2
+        2026-10-02T19:31:37.720648Z  INFO [CONTROLLER] Lvol deleted via node agent lvol_uuid="cf3278c6-0fb7-4fa7-8bf6-a8b2b7c8893e"
+        2026-10-02T19:31:37.720666Z  INFO [CONTROLLER] Teardown sweep deleted lvol (F51) node_name="csw-aws-2" lvol=epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-3
+        2026-10-02T19:31:37.768663Z  INFO [CONTROLLER] Lvol deleted via node agent lvol_uuid="9c0788f9-9df4-4096-999e-d00f13fdac3d"
+        2026-10-02T19:31:37.768680Z  INFO [CONTROLLER] Teardown sweep deleted lvol (F51) node_name="csw-aws-2" lvol=epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-4
+        2026-10-02T19:31:37.816672Z  INFO [CONTROLLER] Lvol deleted via node agent lvol_uuid="49419381-2d2a-405f-b396-a8d1093c52f3"
+        2026-10-02T19:31:37.816688Z  INFO [CONTROLLER] Teardown sweep deleted lvol (F51) node_name="csw-aws-2" lvol=epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-5
+        🧹 [CONTROLLER] Teardown sweep: 9 residual lvol(s) deleted, 0 left to the orphan sweep
+        ✅ [CONTROLLER] Multi-replica volume deleted: pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b (2 replicas, 9 residual lvols swept)
+        2026-10-02T19:31:51.656457Z  INFO 🗳️ [ORCH_LEASE] ACQUIRED — this process ACTS as the orchestrator holder=flint-csi-controller-6c56566974-xtnrv
+        ✅ Volume deletion detected in controller logs
+        ⚠️ Found 0
+        0 PV(s) with 'ephemeral-test-pod' in name
+        ⚠️ Found 0
+        0 PVC(s) with 'ephemeral-test-pod' in name
+        ===================================================================
+        ✅ EPHEMERAL INLINE VOLUME TEST COMPLETED SUCCESSFULLY
+        ===================================================================
+        Summary:
+          - Pod with ephemeral inline volume: CREATED ✅
+          - Data written to ephemeral volume: VERIFIED ✅
+          - Pod deletion: SUCCESSFUL ✅
+          - Ephemeral volume cleanup: AUTOMATIC ✅
+          - No orphaned resources: VERIFIED ✅
+        ===================================================================
+        === STDERR
+        Defaulted container "flint-csi-controller" out of: flint-csi-controller, csi-provisioner, csi-attacher, csi-resizer, csi-snapshotter, liveness-probe
+        Defaulted container "flint-csi-controller" out of: flint-csi-controller, csi-provisioner, csi-attacher, csi-resizer, csi-snapshotter, liveness-probe
+        No resources found
+        No resources found in chainsaw-charming-dodo namespace.
+    sink.go:61: | 12:32:00 | ephemeral-inline | 03-assert  | SCRIPT    | DONE  |
+    sink.go:61: | 12:32:00 | ephemeral-inline | 03-assert  | TRY       | END   |
+    sink.go:61: | 12:32:00 | ephemeral-inline | 01-pod     | CLEANUP   | BEGIN |
+    sink.go:61: | 12:32:00 | ephemeral-inline | 01-pod     | DELETE    | OK    | v1/Pod @ chainsaw-charming-dodo/ephemeral-test-pod
+        === ERROR
+        pods "ephemeral-test-pod" not found
+    sink.go:61: | 12:32:00 | ephemeral-inline | 01-pod     | CLEANUP   | END   |
+    sink.go:61: | 12:32:00 | ephemeral-inline | @chainsaw  | CLEANUP   | BEGIN |
+    sink.go:61: | 12:32:00 | ephemeral-inline | @chainsaw  | DELETE    | OK    | v1/Namespace @ chainsaw-charming-dodo
+    sink.go:61: | 12:32:06 | ephemeral-inline | @chainsaw  | CLEANUP   | END   |
+=== NAME  chainsaw/rwo-pvc-migration
+    sink.go:61: | 12:33:44 | rwo-pvc-migration | 02-writer-pod    | ASSERT    | ERROR | v1/PersistentVolumeClaim @ chainsaw-feasible-hen/test-pvc
+        === ERROR
+        -------------------------------------------------------
+        v1/PersistentVolumeClaim/chainsaw-feasible-hen/test-pvc
+        -------------------------------------------------------
+        * status.phase: Invalid value: "Pending": Expected value: "Bound"
+        
+        --- expected
+        +++ actual
+        @@ -4,5 +4,5 @@
+           name: test-pvc
+           namespace: chainsaw-feasible-hen
+         status:
+        -  phase: Bound
+        +  phase: Pending
+    sink.go:61: | 12:33:44 | rwo-pvc-migration | 02-writer-pod    | ASSERT    | RUN   | v1/Pod @ chainsaw-feasible-hen/writer-pod
+    sink.go:61: | 12:35:44 | rwo-pvc-migration | 02-writer-pod    | ASSERT    | ERROR | v1/Pod @ chainsaw-feasible-hen/writer-pod
+        === ERROR
+        ---------------------------------------
+        v1/Pod/chainsaw-feasible-hen/writer-pod
+        ---------------------------------------
+        * status.phase: Invalid value: "Pending": Expected value: "Succeeded"
+        
+        --- expected
+        +++ actual
+        @@ -4,5 +4,5 @@
+           name: writer-pod
+           namespace: chainsaw-feasible-hen
+         status:
+        -  phase: Succeeded
+        +  phase: Pending
+    sink.go:61: | 12:35:44 | rwo-pvc-migration | 02-writer-pod    | TRY       | END   |
+    sink.go:61: | 12:35:44 | rwo-pvc-migration | 02-writer-pod    | CATCH     | BEGIN |
+    sink.go:61: | 12:35:44 | rwo-pvc-migration | 02-writer-pod    | CMD       | RUN   |
+        === COMMAND
+        /usr/local/bin/kubectl get events -n chainsaw-feasible-hen
+    sink.go:61: | 12:35:45 | rwo-pvc-migration | 02-writer-pod    | CMD       | LOG   |
+        === STDOUT
+        LAST SEEN   TYPE      REASON                 OBJECT                           MESSAGE
+        2s          Normal    ExternalProvisioning   persistentvolumeclaim/test-pvc   Waiting for a volume to be created either by the external provisioner 'flint.csi.storage.io' or manually by the system administrator. If volume creation is delayed, please verify that the provisioner is running and correctly registered.
+        4m1s        Warning   FailedScheduling       pod/writer-pod                   0/4 nodes are available: pod has unbound immediate PersistentVolumeClaims. not found
+    sink.go:61: | 12:35:45 | rwo-pvc-migration | 02-writer-pod    | CMD       | DONE  |
+    sink.go:61: | 12:35:45 | rwo-pvc-migration | 02-writer-pod    | CMD       | RUN   |
+        === COMMAND
+        /usr/local/bin/kubectl describe pods -n chainsaw-feasible-hen
+    sink.go:61: | 12:35:45 | rwo-pvc-migration | 02-writer-pod    | CMD       | LOG   |
+        === STDOUT
+        Name:         writer-pod
+        Namespace:    chainsaw-feasible-hen
+        Priority:     0
+        Node:         <none>
+        Labels:       test=csi-writer
+        Annotations:  <none>
+        Status:       Pending
+        IP:           
+        IPs:          <none>
+        Containers:
+          writer:
+            Image:      busybox:latest
+            Port:       <none>
+            Host Port:  <none>
+            Command:
+              /bin/sh
+              -c
+              echo "Writing test data at $(date)" > /data/test-file.txt
+              echo "CSI Driver Test - RWO Migration" >> /data/test-file.txt
+              echo "Random data: $RANDOM" >> /data/test-file.txt
+              sync
+              echo "Data written and synced successfully"
+              cat /data/test-file.txt
+              
+            Environment:  <none>
+            Mounts:
+              /data from test-volume (rw)
+              /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-9r5mp (ro)
+        Conditions:
+          Type           Status
+          PodScheduled   False 
+        Volumes:
+          test-volume:
+            Type:       PersistentVolumeClaim (a reference to a PersistentVolumeClaim in the same namespace)
+            ClaimName:  test-pvc
+            ReadOnly:   false
+          kube-api-access-9r5mp:
+            Type:                    Projected (a volume that contains injected data from multiple sources)
+            TokenExpirationSeconds:  3607
+            ConfigMapName:           kube-root-ca.crt
+            ConfigMapOptional:       <nil>
+            DownwardAPI:             true
+        QoS Class:                   BestEffort
+        Node-Selectors:              <none>
+        Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+                                     node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+        Events:
+          Type     Reason            Age   From               Message
+          ----     ------            ----  ----               -------
+          Warning  FailedScheduling  4m1s  default-scheduler  0/4 nodes are available: pod has unbound immediate PersistentVolumeClaims. not found
+    sink.go:61: | 12:35:45 | rwo-pvc-migration | 02-writer-pod    | CMD       | DONE  |
+    sink.go:61: | 12:35:45 | rwo-pvc-migration | 02-writer-pod    | CMD       | RUN   |
+        === COMMAND
+        /usr/local/bin/kubectl describe persistentvolumeclaims -n chainsaw-feasible-hen
+    sink.go:61: | 12:35:45 | rwo-pvc-migration | 02-writer-pod    | CMD       | LOG   |
+        === STDOUT
+        Name:          test-pvc
+        Namespace:     chainsaw-feasible-hen
+        StorageClass:  flint-nfs
+        Status:        Pending
+        Volume:        
+        Labels:        <none>
+        Annotations:   volume.beta.kubernetes.io/storage-provisioner: flint.csi.storage.io
+                       volume.kubernetes.io/storage-provisioner: flint.csi.storage.io
+        Finalizers:    [kubernetes.io/pvc-protection]
+        Capacity:      
+        Access Modes:  
+        VolumeMode:    Filesystem
+        Used By:       writer-pod
+        Events:
+          Type    Reason                Age                 From                         Message
+          ----    ------                ----                ----                         -------
+          Normal  ExternalProvisioning  2s (x18 over 4m1s)  persistentvolume-controller  Waiting for a volume to be created either by the external provisioner 'flint.csi.storage.io' or manually by the system administrator. If volume creation is delayed, please verify that the provisioner is running and correctly registered.
+    sink.go:61: | 12:35:45 | rwo-pvc-migration | 02-writer-pod    | CMD       | DONE  |
+    sink.go:61: | 12:35:45 | rwo-pvc-migration | 02-writer-pod    | CATCH     | END   |
+    sink.go:61: | 12:35:45 | rwo-pvc-migration | 02-writer-pod    | CLEANUP   | BEGIN |
+    sink.go:61: | 12:35:45 | rwo-pvc-migration | 02-writer-pod    | DELETE    | OK    | v1/Pod @ chainsaw-feasible-hen/writer-pod
+    sink.go:61: | 12:35:45 | rwo-pvc-migration | 02-writer-pod    | CLEANUP   | END   |
+    sink.go:61: | 12:35:45 | rwo-pvc-migration | 01-pvc           | CLEANUP   | BEGIN |
+    sink.go:61: | 12:35:45 | rwo-pvc-migration | 01-pvc           | DELETE    | OK    | v1/PersistentVolumeClaim @ chainsaw-feasible-hen/test-pvc
+    sink.go:61: | 12:35:45 | rwo-pvc-migration | 01-pvc           | CLEANUP   | END   |
+    sink.go:61: | 12:35:45 | rwo-pvc-migration | @chainsaw        | CLEANUP   | BEGIN |
+    sink.go:61: | 12:35:45 | rwo-pvc-migration | @chainsaw        | DELETE    | OK    | v1/Namespace @ chainsaw-feasible-hen
+    sink.go:61: | 12:35:50 | rwo-pvc-migration | @chainsaw        | CLEANUP   | END   |
+=== NAME  chainsaw/volume-expansion
+    sink.go:61: | 12:36:44 | volume-expansion | 01-writer        | ASSERT    | ERROR | v1/Pod @ chainsaw-elegant-feline/initial-writer
+        === ERROR
+        ---------------------------------------------
+        v1/Pod/chainsaw-elegant-feline/initial-writer
+        ---------------------------------------------
+        * status.phase: Invalid value: "Pending": Expected value: "Succeeded"
+        
+        --- expected
+        +++ actual
+        @@ -4,5 +4,5 @@
+           name: initial-writer
+           namespace: chainsaw-elegant-feline
+         status:
+        -  phase: Succeeded
+        +  phase: Pending
+    sink.go:61: | 12:36:44 | volume-expansion | 01-writer        | ASSERT    | RUN   | v1/PersistentVolumeClaim @ chainsaw-elegant-feline/expandable-pvc
+=== NAME  chainsaw/rwx-single-replica
+    sink.go:61: | 12:36:44 | rwx-single-replica | 01-pods    | ASSERT    | ERROR | v1/Pod @ chainsaw-evident-sloth/rwx-writer-1
+        === ERROR
+        ------------------------------------------
+        v1/Pod/chainsaw-evident-sloth/rwx-writer-1
+        ------------------------------------------
+        * status.phase: Invalid value: "Pending": Expected value: "Running"
+        
+        --- expected
+        +++ actual
+        @@ -4,5 +4,5 @@
+           name: rwx-writer-1
+           namespace: chainsaw-evident-sloth
+         status:
+        -  phase: Running
+        +  phase: Pending
+    sink.go:61: | 12:36:45 | rwx-single-replica | 01-pods    | ASSERT    | RUN   | v1/Pod @ chainsaw-evident-sloth/rwx-writer-2
+=== NAME  chainsaw/volume-expansion
+    sink.go:61: | 12:41:44 | volume-expansion | 01-writer        | ASSERT    | ERROR | v1/PersistentVolumeClaim @ chainsaw-elegant-feline/expandable-pvc
+        === ERROR
+        ---------------------------------------------------------------
+        v1/PersistentVolumeClaim/chainsaw-elegant-feline/expandable-pvc
+        ---------------------------------------------------------------
+        * status.phase: Invalid value: "Pending": Expected value: "Bound"
+        
+        --- expected
+        +++ actual
+        @@ -4,5 +4,5 @@
+           name: expandable-pvc
+           namespace: chainsaw-elegant-feline
+         status:
+        -  phase: Bound
+        +  phase: Pending
+    sink.go:61: | 12:41:44 | volume-expansion | 01-writer        | TRY       | END   |
+    sink.go:61: | 12:41:44 | volume-expansion | 01-writer        | CATCH     | BEGIN |
+    sink.go:61: | 12:41:44 | volume-expansion | 01-writer        | CMD       | RUN   |
+        === COMMAND
+        /usr/local/bin/kubectl get events -n chainsaw-elegant-feline
+=== NAME  chainsaw/rwx-single-replica
+    sink.go:61: | 12:41:44 | rwx-single-replica | 01-pods    | ASSERT    | ERROR | v1/Pod @ chainsaw-evident-sloth/rwx-writer-2
+        === ERROR
+        ------------------------------------------
+        v1/Pod/chainsaw-evident-sloth/rwx-writer-2
+        ------------------------------------------
+        * status.phase: Invalid value: "Pending": Expected value: "Running"
+        
+        --- expected
+        +++ actual
+        @@ -4,5 +4,5 @@
+           name: rwx-writer-2
+           namespace: chainsaw-evident-sloth
+         status:
+        -  phase: Running
+        +  phase: Pending
+    sink.go:61: | 12:41:45 | rwx-single-replica | 01-pods    | ASSERT    | RUN   | v1/Pod @ chainsaw-evident-sloth/rwx-writer-3
+=== NAME  chainsaw/volume-expansion
+    sink.go:61: | 12:41:45 | volume-expansion | 01-writer        | CMD       | LOG   |
+        === STDOUT
+        LAST SEEN   TYPE      REASON                 OBJECT                                 MESSAGE
+        4m2s        Normal    ExternalProvisioning   persistentvolumeclaim/expandable-pvc   Waiting for a volume to be created either by the external provisioner 'flint.csi.storage.io' or manually by the system administrator. If volume creation is delayed, please verify that the provisioner is running and correctly registered.
+        4m36s       Warning   FailedScheduling       pod/initial-writer                     0/4 nodes are available: pod has unbound immediate PersistentVolumeClaims. not found
+    sink.go:61: | 12:41:45 | volume-expansion | 01-writer        | CMD       | DONE  |
+    sink.go:61: | 12:41:45 | volume-expansion | 01-writer        | CMD       | RUN   |
+        === COMMAND
+        /usr/local/bin/kubectl describe pods -n chainsaw-elegant-feline
+    sink.go:61: | 12:41:45 | volume-expansion | 01-writer        | CMD       | LOG   |
+        === STDOUT
+        Name:         initial-writer
+        Namespace:    chainsaw-elegant-feline
+        Priority:     0
+        Node:         <none>
+        Labels:       <none>
+        Annotations:  <none>
+        Status:       Pending
+        IP:           
+        IPs:          <none>
+        Containers:
+          writer:
+            Image:      busybox:latest
+            Port:       <none>
+            Host Port:  <none>
+            Command:
+              /bin/sh
+              -c
+              echo "Initial data before expansion" > /data/test-file.txt
+              dd if=/dev/zero of=/data/largefile bs=1M count=100
+              sync
+              df -h /data
+              echo "Initial write completed"
+              
+            Environment:  <none>
+            Mounts:
+              /data from test-volume (rw)
+              /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-nnlhj (ro)
+        Conditions:
+          Type           Status
+          PodScheduled   False 
+        Volumes:
+          test-volume:
+            Type:       PersistentVolumeClaim (a reference to a PersistentVolumeClaim in the same namespace)
+            ClaimName:  expandable-pvc
+            ReadOnly:   false
+          kube-api-access-nnlhj:
+            Type:                    Projected (a volume that contains injected data from multiple sources)
+            TokenExpirationSeconds:  3607
+            ConfigMapName:           kube-root-ca.crt
+            ConfigMapOptional:       <nil>
+            DownwardAPI:             true
+        QoS Class:                   BestEffort
+        Node-Selectors:              <none>
+        Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+                                     node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+        Events:
+          Type     Reason            Age                  From               Message
+          ----     ------            ----                 ----               -------
+          Warning  FailedScheduling  4m36s (x2 over 10m)  default-scheduler  0/4 nodes are available: pod has unbound immediate PersistentVolumeClaims. not found
+    sink.go:61: | 12:41:45 | volume-expansion | 01-writer        | CMD       | DONE  |
+    sink.go:61: | 12:41:45 | volume-expansion | 01-writer        | CMD       | RUN   |
+        === COMMAND
+        /usr/local/bin/kubectl describe persistentvolumeclaims -n chainsaw-elegant-feline
+    sink.go:61: | 12:41:45 | volume-expansion | 01-writer        | CMD       | LOG   |
+        === STDOUT
+        Name:          expandable-pvc
+        Namespace:     chainsaw-elegant-feline
+        StorageClass:  flint-nfs
+        Status:        Pending
+        Volume:        
+        Labels:        <none>
+        Annotations:   volume.beta.kubernetes.io/storage-provisioner: flint.csi.storage.io
+                       volume.kubernetes.io/storage-provisioner: flint.csi.storage.io
+        Finalizers:    [kubernetes.io/pvc-protection]
+        Capacity:      
+        Access Modes:  
+        VolumeMode:    Filesystem
+        Used By:       initial-writer
+        Events:
+          Type    Reason                Age                  From                         Message
+          ----    ------                ----                 ----                         -------
+          Normal  ExternalProvisioning  4m2s (x26 over 10m)  persistentvolume-controller  Waiting for a volume to be created either by the external provisioner 'flint.csi.storage.io' or manually by the system administrator. If volume creation is delayed, please verify that the provisioner is running and correctly registered.
+    sink.go:61: | 12:41:45 | volume-expansion | 01-writer        | CMD       | DONE  |
+    sink.go:61: | 12:41:45 | volume-expansion | 01-writer        | CATCH     | END   |
+    sink.go:61: | 12:41:45 | volume-expansion | 01-writer        | CLEANUP   | BEGIN |
+    sink.go:61: | 12:41:45 | volume-expansion | 01-writer        | DELETE    | OK    | v1/Pod @ chainsaw-elegant-feline/initial-writer
+    sink.go:61: | 12:41:45 | volume-expansion | 01-writer        | CLEANUP   | END   |
+    sink.go:61: | 12:41:45 | volume-expansion | 00-pvc           | CLEANUP   | BEGIN |
+    sink.go:61: | 12:41:45 | volume-expansion | 00-pvc           | DELETE    | OK    | v1/PersistentVolumeClaim @ chainsaw-elegant-feline/expandable-pvc
+    sink.go:61: | 12:41:45 | volume-expansion | 00-pvc           | CLEANUP   | END   |
+    sink.go:61: | 12:41:45 | volume-expansion | @chainsaw        | CLEANUP   | BEGIN |
+    sink.go:61: | 12:41:45 | volume-expansion | @chainsaw        | DELETE    | OK    | v1/Namespace @ chainsaw-elegant-feline
+    sink.go:61: | 12:41:51 | volume-expansion | @chainsaw        | CLEANUP   | END   |
+=== NAME  chainsaw/rwx-single-replica
+    sink.go:61: | 12:46:44 | rwx-single-replica | 01-pods    | ASSERT    | ERROR | v1/Pod @ chainsaw-evident-sloth/rwx-writer-3
+        === ERROR
+        ------------------------------------------
+        v1/Pod/chainsaw-evident-sloth/rwx-writer-3
+        ------------------------------------------
+        * status.phase: Invalid value: "Pending": Expected value: "Running"
+        
+        --- expected
+        +++ actual
+        @@ -4,5 +4,5 @@
+           name: rwx-writer-3
+           namespace: chainsaw-evident-sloth
+         status:
+        -  phase: Running
+        +  phase: Pending
+    sink.go:61: | 12:46:44 | rwx-single-replica | 01-pods    | TRY       | END   |
+    sink.go:61: | 12:46:44 | rwx-single-replica | 01-pods    | CATCH     | BEGIN |
+    sink.go:61: | 12:46:45 | rwx-single-replica | 01-pods    | CMD       | RUN   |
+        === COMMAND
+        /usr/local/bin/kubectl get events -n chainsaw-evident-sloth
+    sink.go:61: | 12:46:45 | rwx-single-replica | 01-pods    | CMD       | LOG   |
+        === STDOUT
+        LAST SEEN   TYPE      REASON                 OBJECT                               MESSAGE
+        4m47s       Normal    ExternalProvisioning   persistentvolumeclaim/rwx-test-pvc   Waiting for a volume to be created either by the external provisioner 'flint.csi.storage.io' or manually by the system administrator. If volume creation is delayed, please verify that the provisioner is running and correctly registered.
+        4m36s       Warning   FailedScheduling       pod/rwx-writer-1                     0/4 nodes are available: pod has unbound immediate PersistentVolumeClaims. not found
+        4m36s       Warning   FailedScheduling       pod/rwx-writer-2                     0/4 nodes are available: pod has unbound immediate PersistentVolumeClaims. not found
+        4m36s       Warning   FailedScheduling       pod/rwx-writer-3                     0/4 nodes are available: pod has unbound immediate PersistentVolumeClaims. not found
+    sink.go:61: | 12:46:45 | rwx-single-replica | 01-pods    | CMD       | DONE  |
+    sink.go:61: | 12:46:45 | rwx-single-replica | 01-pods    | CMD       | RUN   |
+        === COMMAND
+        /usr/local/bin/kubectl describe pods -n chainsaw-evident-sloth
+    sink.go:61: | 12:46:45 | rwx-single-replica | 01-pods    | CMD       | LOG   |
+        === STDOUT
+        Name:         rwx-writer-1
+        Namespace:    chainsaw-evident-sloth
+        Priority:     0
+        Node:         <none>
+        Labels:       <none>
+        Annotations:  <none>
+        Status:       Pending
+        IP:           
+        IPs:          <none>
+        Containers:
+          writer:
+            Image:      busybox
+            Port:       <none>
+            Host Port:  <none>
+            Command:
+              sh
+              -c
+              echo "Starting writer-1 at $(date)" | tee /data/writer-1.log
+              for i in $(seq 1 10); do
+                echo "writer-1: Message $i at $(date)" >> /data/shared.log
+                echo "writer-1: Progress $i/10" >> /data/writer-1.log
+                sleep 1
+              done
+              echo "writer-1: Completed at $(date)" | tee -a /data/writer-1.log
+              # Keep running to verify data
+              tail -f /dev/null
+              
+            Environment:  <none>
+            Mounts:
+              /data from data (rw)
+              /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-d65jf (ro)
+        Conditions:
+          Type           Status
+          PodScheduled   False 
+        Volumes:
+          data:
+            Type:       PersistentVolumeClaim (a reference to a PersistentVolumeClaim in the same namespace)
+            ClaimName:  rwx-test-pvc
+            ReadOnly:   false
+          kube-api-access-d65jf:
+            Type:                    Projected (a volume that contains injected data from multiple sources)
+            TokenExpirationSeconds:  3607
+            ConfigMapName:           kube-root-ca.crt
+            ConfigMapOptional:       <nil>
+            DownwardAPI:             true
+        QoS Class:                   BestEffort
+        Node-Selectors:              <none>
+        Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+                                     node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+        Events:
+          Type     Reason            Age                  From               Message
+          ----     ------            ----                 ----               -------
+          Warning  FailedScheduling  4m36s (x3 over 15m)  default-scheduler  0/4 nodes are available: pod has unbound immediate PersistentVolumeClaims. not found
+        
+        
+        Name:         rwx-writer-2
+        Namespace:    chainsaw-evident-sloth
+        Priority:     0
+        Node:         <none>
+        Labels:       <none>
+        Annotations:  <none>
+        Status:       Pending
+        IP:           
+        IPs:          <none>
+        Containers:
+          writer:
+            Image:      busybox
+            Port:       <none>
+            Host Port:  <none>
+            Command:
+              sh
+              -c
+              echo "Starting writer-2 at $(date)" | tee /data/writer-2.log
+              for i in $(seq 1 10); do
+                echo "writer-2: Message $i at $(date)" >> /data/shared.log
+                echo "writer-2: Progress $i/10" >> /data/writer-2.log
+                sleep 1
+              done
+              echo "writer-2: Completed at $(date)" | tee -a /data/writer-2.log
+              # Keep running to verify data
+              tail -f /dev/null
+              
+            Environment:  <none>
+            Mounts:
+              /data from data (rw)
+              /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-hftxc (ro)
+        Conditions:
+          Type           Status
+          PodScheduled   False 
+        Volumes:
+          data:
+            Type:       PersistentVolumeClaim (a reference to a PersistentVolumeClaim in the same namespace)
+            ClaimName:  rwx-test-pvc
+            ReadOnly:   false
+          kube-api-access-hftxc:
+            Type:                    Projected (a volume that contains injected data from multiple sources)
+            TokenExpirationSeconds:  3607
+            ConfigMapName:           kube-root-ca.crt
+            ConfigMapOptional:       <nil>
+            DownwardAPI:             true
+        QoS Class:                   BestEffort
+        Node-Selectors:              <none>
+        Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+                                     node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+        Events:
+          Type     Reason            Age                  From               Message
+          ----     ------            ----                 ----               -------
+          Warning  FailedScheduling  4m36s (x3 over 15m)  default-scheduler  0/4 nodes are available: pod has unbound immediate PersistentVolumeClaims. not found
+        
+        
+        Name:         rwx-writer-3
+        Namespace:    chainsaw-evident-sloth
+        Priority:     0
+        Node:         <none>
+        Labels:       <none>
+        Annotations:  <none>
+        Status:       Pending
+        IP:           
+        IPs:          <none>
+        Containers:
+          writer:
+            Image:      busybox
+            Port:       <none>
+            Host Port:  <none>
+            Command:
+              sh
+              -c
+              echo "Starting writer-3 at $(date)" | tee /data/writer-3.log
+              for i in $(seq 1 10); do
+                echo "writer-3: Message $i at $(date)" >> /data/shared.log
+                echo "writer-3: Progress $i/10" >> /data/writer-3.log
+                sleep 1
+              done
+              echo "writer-3: Completed at $(date)" | tee -a /data/writer-3.log
+              # Keep running to verify data
+              tail -f /dev/null
+              
+            Environment:  <none>
+            Mounts:
+              /data from data (rw)
+              /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-qm2bq (ro)
+        Conditions:
+          Type           Status
+          PodScheduled   False 
+        Volumes:
+          data:
+            Type:       PersistentVolumeClaim (a reference to a PersistentVolumeClaim in the same namespace)
+            ClaimName:  rwx-test-pvc
+            ReadOnly:   false
+          kube-api-access-qm2bq:
+            Type:                    Projected (a volume that contains injected data from multiple sources)
+            TokenExpirationSeconds:  3607
+            ConfigMapName:           kube-root-ca.crt
+            ConfigMapOptional:       <nil>
+            DownwardAPI:             true
+        QoS Class:                   BestEffort
+        Node-Selectors:              <none>
+        Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+                                     node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+        Events:
+          Type     Reason            Age                  From               Message
+          ----     ------            ----                 ----               -------
+          Warning  FailedScheduling  4m36s (x3 over 15m)  default-scheduler  0/4 nodes are available: pod has unbound immediate PersistentVolumeClaims. not found
+    sink.go:61: | 12:46:45 | rwx-single-replica | 01-pods    | CMD       | DONE  |
+    sink.go:61: | 12:46:45 | rwx-single-replica | 01-pods    | CMD       | RUN   |
+        === COMMAND
+        /usr/local/bin/kubectl describe persistentvolumeclaims -n chainsaw-evident-sloth
+    sink.go:61: | 12:46:45 | rwx-single-replica | 01-pods    | CMD       | LOG   |
+        === STDOUT
+        Name:          rwx-test-pvc
+        Namespace:     chainsaw-evident-sloth
+        StorageClass:  flint-nfs
+        Status:        Pending
+        Volume:        
+        Labels:        <none>
+        Annotations:   volume.beta.kubernetes.io/storage-provisioner: flint.csi.storage.io
+                       volume.kubernetes.io/storage-provisioner: flint.csi.storage.io
+        Finalizers:    [kubernetes.io/pvc-protection]
+        Capacity:      
+        Access Modes:  
+        VolumeMode:    Filesystem
+        Used By:       rwx-writer-1
+                       rwx-writer-2
+                       rwx-writer-3
+        Events:
+          Type    Reason                Age                   From                         Message
+          ----    ------                ----                  ----                         -------
+          Normal  ExternalProvisioning  4m47s (x43 over 15m)  persistentvolume-controller  Waiting for a volume to be created either by the external provisioner 'flint.csi.storage.io' or manually by the system administrator. If volume creation is delayed, please verify that the provisioner is running and correctly registered.
+    sink.go:61: | 12:46:45 | rwx-single-replica | 01-pods    | CMD       | DONE  |
+    sink.go:61: | 12:46:45 | rwx-single-replica | 01-pods    | CATCH     | END   |
+    sink.go:61: | 12:46:45 | rwx-single-replica | 01-pods    | CLEANUP   | BEGIN |
+    sink.go:61: | 12:46:45 | rwx-single-replica | 01-pods    | DELETE    | OK    | v1/Pod @ chainsaw-evident-sloth/rwx-writer-3
+    sink.go:61: | 12:46:45 | rwx-single-replica | 01-pods    | DELETE    | OK    | v1/Pod @ chainsaw-evident-sloth/rwx-writer-2
+    sink.go:61: | 12:46:45 | rwx-single-replica | 01-pods    | DELETE    | OK    | v1/Pod @ chainsaw-evident-sloth/rwx-writer-1
+    sink.go:61: | 12:46:45 | rwx-single-replica | 01-pods    | CLEANUP   | END   |
+    sink.go:61: | 12:46:45 | rwx-single-replica | 00-pvc     | CLEANUP   | BEGIN |
+    sink.go:61: | 12:46:45 | rwx-single-replica | 00-pvc     | DELETE    | OK    | v1/PersistentVolumeClaim @ chainsaw-evident-sloth/rwx-test-pvc
+    sink.go:61: | 12:46:46 | rwx-single-replica | 00-pvc     | CLEANUP   | END   |
+    sink.go:61: | 12:46:46 | rwx-single-replica | @chainsaw  | CLEANUP   | BEGIN |
+    sink.go:61: | 12:46:46 | rwx-single-replica | @chainsaw  | DELETE    | OK    | v1/Namespace @ chainsaw-evident-sloth
+    sink.go:61: | 12:46:51 | rwx-single-replica | @chainsaw  | CLEANUP   | END   |
+--- FAIL: chainsaw (0.00s)
+    --- PASS: chainsaw/ephemeral-inline (22.17s)
+    --- FAIL: chainsaw/rwo-pvc-migration (247.09s)
+    --- FAIL: chainsaw/volume-expansion (607.28s)
+    --- FAIL: chainsaw/rwx-single-replica (907.41s)
+FAIL
+Tests Summary...
+- Passed  tests 1
+- Failed  tests 3
+- Skipped tests 0
+Saving report...
+Done with failures.
+Error: some tests failed

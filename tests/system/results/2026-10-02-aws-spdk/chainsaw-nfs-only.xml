@@ -1,0 +1,20 @@
+<testsuites name="chainsaw-report" time="907.407550" tests="4" failures="3">
+  <testsuite name="tests-nfs-only/ephemeral-inline" tests="1" failures="0" errors="0" id="0" time="">
+    <testcase name="ephemeral-inline" classname="" time="16.861116"></testcase>
+  </testsuite>
+  <testsuite name="tests-nfs-only/rwo-pvc-migration" tests="1" failures="1" errors="0" id="0" time="">
+    <testcase name="rwo-pvc-migration" classname="" time="241.646365">
+      <failure message="-------------------------------------------------------&#xA;v1/PersistentVolumeClaim/chainsaw-feasible-hen/test-pvc&#xA;-------------------------------------------------------&#xA;* status.phase: Invalid value: &#34;Pending&#34;: Expected value: &#34;Bound&#34;&#xA;&#xA;--- expected&#xA;+++ actual&#xA;@@ -4,5 +4,5 @@&#xA;   name: test-pvc&#xA;   namespace: chainsaw-feasible-hen&#xA; status:&#xA;-  phase: Bound&#xA;+  phase: Pending&#xA; &#xA;; ---------------------------------------&#xA;v1/Pod/chainsaw-feasible-hen/writer-pod&#xA;---------------------------------------&#xA;* status.phase: Invalid value: &#34;Pending&#34;: Expected value: &#34;Succeeded&#34;&#xA;&#xA;--- expected&#xA;+++ actual&#xA;@@ -4,5 +4,5 @@&#xA;   name: writer-pod&#xA;   namespace: chainsaw-feasible-hen&#xA; status:&#xA;-  phase: Succeeded&#xA;+  phase: Pending&#xA; &#xA;"></failure>
+    </testcase>
+  </testsuite>
+  <testsuite name="tests-nfs-only/volume-expansion" tests="1" failures="1" errors="0" id="0" time="">
+    <testcase name="volume-expansion" classname="" time="601.804274">
+      <failure message="---------------------------------------------&#xA;v1/Pod/chainsaw-elegant-feline/initial-writer&#xA;---------------------------------------------&#xA;* status.phase: Invalid value: &#34;Pending&#34;: Expected value: &#34;Succeeded&#34;&#xA;&#xA;--- expected&#xA;+++ actual&#xA;@@ -4,5 +4,5 @@&#xA;   name: initial-writer&#xA;   namespace: chainsaw-elegant-feline&#xA; status:&#xA;-  phase: Succeeded&#xA;+  phase: Pending&#xA; &#xA;; ---------------------------------------------------------------&#xA;v1/PersistentVolumeClaim/chainsaw-elegant-feline/expandable-pvc&#xA;---------------------------------------------------------------&#xA;* status.phase: Invalid value: &#34;Pending&#34;: Expected value: &#34;Bound&#34;&#xA;&#xA;--- expected&#xA;+++ actual&#xA;@@ -4,5 +4,5 @@&#xA;   name: expandable-pvc&#xA;   namespace: chainsaw-elegant-feline&#xA; status:&#xA;-  phase: Bound&#xA;+  phase: Pending&#xA; &#xA;"></failure>
+    </testcase>
+  </testsuite>
+  <testsuite name="tests-nfs-only/rwx-single-replica" tests="1" failures="1" errors="0" id="0" time="">
+    <testcase name="rwx-single-replica" classname="" time="901.975391">
+      <failure message="------------------------------------------&#xA;v1/Pod/chainsaw-evident-sloth/rwx-writer-1&#xA;------------------------------------------&#xA;* status.phase: Invalid value: &#34;Pending&#34;: Expected value: &#34;Running&#34;&#xA;&#xA;--- expected&#xA;+++ actual&#xA;@@ -4,5 +4,5 @@&#xA;   name: rwx-writer-1&#xA;   namespace: chainsaw-evident-sloth&#xA; status:&#xA;-  phase: Running&#xA;+  phase: Pending&#xA; &#xA;; ------------------------------------------&#xA;v1/Pod/chainsaw-evident-sloth/rwx-writer-2&#xA;------------------------------------------&#xA;* status.phase: Invalid value: &#34;Pending&#34;: Expected value: &#34;Running&#34;&#xA;&#xA;--- expected&#xA;+++ actual&#xA;@@ -4,5 +4,5 @@&#xA;   name: rwx-writer-2&#xA;   namespace: chainsaw-evident-sloth&#xA; status:&#xA;-  phase: Running&#xA;+  phase: Pending&#xA; &#xA;; ------------------------------------------&#xA;v1/Pod/chainsaw-evident-sloth/rwx-writer-3&#xA;------------------------------------------&#xA;* status.phase: Invalid value: &#34;Pending&#34;: Expected value: &#34;Running&#34;&#xA;&#xA;--- expected&#xA;+++ actual&#xA;@@ -4,5 +4,5 @@&#xA;   name: rwx-writer-3&#xA;   namespace: chainsaw-evident-sloth&#xA; status:&#xA;-  phase: Running&#xA;+  phase: Pending&#xA; &#xA;"></failure>
+    </testcase>
+  </testsuite>
+</testsuites>

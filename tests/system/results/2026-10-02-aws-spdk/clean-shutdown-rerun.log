@@ -1,0 +1,257 @@
+Version: 0.2.15
+Loading config (chainsaw-clean-shutdown.yaml)...
+- Using test file: chainsaw-test
+- TestDirs [tests]
+- Quiet false
+- SkipDelete false
+- FailFast false
+- ReportFormat 'JUNIT-TEST'
+- ReportName 'chainsaw-clean-shutdown-rerun'
+- ReportPath '/private/tmp/claude-503/-Users-ddalton-github-flint/04b1b4fc-8045-4244-87a1-599b98585b0c/scratchpad/aws-out'
+- Namespace ''
+- FastNamespaceDeletion false
+- FullName false
+- IncludeTestRegex ''
+- ExcludeTestRegex ''
+- ApplyTimeout 5m0s
+- AssertTimeout 5m0s
+- CleanupTimeout 5m0s
+- DeleteTimeout 5m0s
+- ErrorTimeout 5m0s
+- ExecTimeout 5m0s
+- DeletionPropagationPolicy Background
+- Parallel 1
+- Template false
+- NoCluster false
+- PauseOnFailure false
+Loading tests...
+- clean-shutdown (tests/clean-shutdown)
+Loading values...
+Running tests...
+=== RUN   chainsaw
+=== PAUSE chainsaw
+=== CONT  chainsaw
+=== RUN   chainsaw/clean-shutdown
+=== PAUSE chainsaw/clean-shutdown
+=== CONT  chainsaw/clean-shutdown
+    sink.go:61: | 12:47:03 | clean-shutdown | @chainsaw             | CREATE    | OK    | v1/Namespace @ chainsaw-positive-flounder
+    sink.go:61: | 12:47:03 | clean-shutdown | 00-pvc                | TRY       | BEGIN |
+    sink.go:61: | 12:47:03 | clean-shutdown | 00-pvc                | APPLY     | RUN   | v1/PersistentVolumeClaim @ chainsaw-positive-flounder/clean-shutdown-pvc
+    sink.go:61: | 12:47:03 | clean-shutdown | 00-pvc                | CREATE    | OK    | v1/PersistentVolumeClaim @ chainsaw-positive-flounder/clean-shutdown-pvc
+    sink.go:61: | 12:47:03 | clean-shutdown | 00-pvc                | APPLY     | DONE  | v1/PersistentVolumeClaim @ chainsaw-positive-flounder/clean-shutdown-pvc
+    sink.go:61: | 12:47:03 | clean-shutdown | 00-pvc                | ASSERT    | RUN   | v1/PersistentVolumeClaim @ chainsaw-positive-flounder/clean-shutdown-pvc
+    sink.go:61: | 12:47:03 | clean-shutdown | 00-pvc                | ASSERT    | DONE  | v1/PersistentVolumeClaim @ chainsaw-positive-flounder/clean-shutdown-pvc
+    sink.go:61: | 12:47:03 | clean-shutdown | 00-pvc                | TRY       | END   |
+    sink.go:61: | 12:47:03 | clean-shutdown | 01-writer-pod         | TRY       | BEGIN |
+    sink.go:61: | 12:47:03 | clean-shutdown | 01-writer-pod         | APPLY     | RUN   | v1/Pod @ chainsaw-positive-flounder/writer-pod
+    sink.go:61: | 12:47:03 | clean-shutdown | 01-writer-pod         | CREATE    | OK    | v1/Pod @ chainsaw-positive-flounder/writer-pod
+    sink.go:61: | 12:47:03 | clean-shutdown | 01-writer-pod         | APPLY     | DONE  | v1/Pod @ chainsaw-positive-flounder/writer-pod
+    sink.go:61: | 12:47:03 | clean-shutdown | 01-writer-pod         | ASSERT    | RUN   | v1/PersistentVolumeClaim @ chainsaw-positive-flounder/clean-shutdown-pvc
+    sink.go:61: | 12:47:04 | clean-shutdown | 01-writer-pod         | ASSERT    | DONE  | v1/PersistentVolumeClaim @ chainsaw-positive-flounder/clean-shutdown-pvc
+    sink.go:61: | 12:47:04 | clean-shutdown | 01-writer-pod         | ASSERT    | RUN   | v1/Pod @ chainsaw-positive-flounder/writer-pod
+    sink.go:61: | 12:47:17 | clean-shutdown | 01-writer-pod         | ASSERT    | DONE  | v1/Pod @ chainsaw-positive-flounder/writer-pod
+    sink.go:61: | 12:47:17 | clean-shutdown | 01-writer-pod         | TRY       | END   |
+    sink.go:61: | 12:47:17 | clean-shutdown | 02-delete-writer      | TRY       | BEGIN |
+    sink.go:61: | 12:47:17 | clean-shutdown | 02-delete-writer      | DELETE    | RUN   | v1/Pod @ chainsaw-positive-flounder/writer-pod
+    sink.go:61: | 12:47:17 | clean-shutdown | 02-delete-writer      | DELETE    | OK    | v1/Pod @ chainsaw-positive-flounder/writer-pod
+    sink.go:61: | 12:47:17 | clean-shutdown | 02-delete-writer      | DELETE    | DONE  | v1/Pod @ chainsaw-positive-flounder/writer-pod
+    sink.go:61: | 12:47:17 | clean-shutdown | 02-delete-writer      | ERROR     | RUN   | v1/Pod @ chainsaw-positive-flounder/writer-pod
+    sink.go:61: | 12:47:17 | clean-shutdown | 02-delete-writer      | ERROR     | DONE  | v1/Pod @ chainsaw-positive-flounder/writer-pod
+    sink.go:61: | 12:47:17 | clean-shutdown | 02-delete-writer      | TRY       | END   |
+    sink.go:61: | 12:47:17 | clean-shutdown | 03-verify-logs        | TRY       | BEGIN |
+    sink.go:61: | 12:47:17 | clean-shutdown | 03-verify-logs        | CMD       | RUN   |
+        === COMMAND
+        /bin/bash -c #!/bin/bash
+        set -e
+        
+        echo "=== Verifying Clean Shutdown in SPDK Logs ==="
+        
+        # Check all SPDK pods (simpler and more reliable)
+        echo "Checking all SPDK node pods for clean shutdown logs..."
+        SPDK_PODS=$(kubectl get pods -n flint-system -l app=flint-csi-node -o name)
+        
+        if [ -z "$SPDK_PODS" ]; then
+          echo "ERROR: No SPDK pods found in flint-system namespace"
+          exit 1
+        fi
+        
+        echo "Found SPDK pods: $SPDK_PODS"
+        
+        FOUND_UNLOAD=false
+        
+        for POD in $SPDK_PODS; do
+          echo "Checking logs for $POD..."
+        
+          # Check for clean shutdown indicator in spdk-tgt container
+          if kubectl logs -n flint-system $POD -c spdk-tgt --tail=200 | grep -q "BLOBSTORE UNLOAD"; then
+            echo "✅ Found BLOBSTORE UNLOAD in $POD"
+            FOUND_UNLOAD=true
+        
+            # Show the unload section
+            echo "=== Blobstore Unload Log Excerpt ==="
+            kubectl logs -n flint-system $POD -c spdk-tgt --tail=200 | grep -A 5 "BLOBSTORE UNLOAD" || true
+            echo "===================================="
+          fi
+        
+          # Verify FLUSH support was advertised
+          if kubectl logs -n flint-system $POD -c spdk-tgt | grep -q "supports FLUSH.*UBLK_ATTR_VOLATILE_CACHE"; then
+            echo "✅ FLUSH support confirmed in $POD"
+          fi
+        done
+        
+        if [ "$FOUND_UNLOAD" = true ]; then
+          echo "✅ PASS: Clean shutdown sequence detected"
+          exit 0
+        else
+          echo "⚠️  WARNING: Blobstore unload not found in recent logs"
+          echo "This may be expected if logs rotated, continuing..."
+          exit 0
+        fi
+    sink.go:61: | 12:47:19 | clean-shutdown | 03-verify-logs        | SCRIPT    | LOG   |
+        === STDOUT
+        === Verifying Clean Shutdown in SPDK Logs ===
+        Checking all SPDK node pods for clean shutdown logs...
+        Found SPDK pods: pod/flint-csi-node-bkzt7
+        pod/flint-csi-node-cb8wj
+        pod/flint-csi-node-m8xcn
+        pod/flint-csi-node-pcqwj
+        Checking logs for pod/flint-csi-node-bkzt7...
+        Checking logs for pod/flint-csi-node-cb8wj...
+        Checking logs for pod/flint-csi-node-m8xcn...
+        Checking logs for pod/flint-csi-node-pcqwj...
+        ⚠️  WARNING: Blobstore unload not found in recent logs
+        This may be expected if logs rotated, continuing...
+    sink.go:61: | 12:47:19 | clean-shutdown | 03-verify-logs        | SCRIPT    | DONE  |
+    sink.go:61: | 12:47:19 | clean-shutdown | 03-verify-logs        | TRY       | END   |
+    sink.go:61: | 12:47:19 | clean-shutdown | 04-fast-remount       | TRY       | BEGIN |
+    sink.go:61: | 12:47:19 | clean-shutdown | 04-fast-remount       | APPLY     | RUN   | v1/Pod @ chainsaw-positive-flounder/fast-remount-pod
+    sink.go:61: | 12:47:19 | clean-shutdown | 04-fast-remount       | CREATE    | OK    | v1/Pod @ chainsaw-positive-flounder/fast-remount-pod
+    sink.go:61: | 12:47:19 | clean-shutdown | 04-fast-remount       | APPLY     | DONE  | v1/Pod @ chainsaw-positive-flounder/fast-remount-pod
+    sink.go:61: | 12:47:19 | clean-shutdown | 04-fast-remount       | ASSERT    | RUN   | v1/Pod @ chainsaw-positive-flounder/fast-remount-pod
+    sink.go:61: | 12:47:27 | clean-shutdown | 04-fast-remount       | ASSERT    | DONE  | v1/Pod @ chainsaw-positive-flounder/fast-remount-pod
+    sink.go:61: | 12:47:27 | clean-shutdown | 04-fast-remount       | TRY       | END   |
+    sink.go:61: | 12:47:27 | clean-shutdown | 05-verify-no-recovery | TRY       | BEGIN |
+    sink.go:61: | 12:47:27 | clean-shutdown | 05-verify-no-recovery | CMD       | RUN   |
+        === COMMAND
+        /bin/bash -c #!/bin/bash
+        set -e
+        
+        echo "=== Verifying No Recovery Was Triggered ==="
+        
+        # Check all SPDK pods (simpler and more reliable)
+        echo "Checking all SPDK node pods for recovery status..."
+        SPDK_PODS=$(kubectl get pods -n flint-system -l app=flint-csi-node -o name)
+        
+        if [ -z "$SPDK_PODS" ]; then
+          echo "ERROR: No SPDK pods found in flint-system namespace"
+          exit 1
+        fi
+        
+        echo "Found SPDK pods: $SPDK_PODS"
+        
+        FOUND_RECOVERY=false
+        FOUND_CLEAN=false
+        
+        for POD in $SPDK_PODS; do
+          echo "Checking logs for $POD..."
+        
+          # Check for recovery in recent logs (last 200 lines should cover the remount) in spdk-tgt container
+          if kubectl logs -n flint-system $POD -c spdk-tgt --tail=200 | grep -q "Recovery required"; then
+            echo "❌ ERROR: Recovery was triggered in $POD"
+            echo "This indicates blobstore was not cleanly unmounted!"
+            FOUND_RECOVERY=true
+        
+            # Show the problematic section
+            echo "=== Recovery Log Excerpt ==="
+            kubectl logs -n flint-system $POD -c spdk-tgt --tail=200 | grep -B 5 -A 10 "Recovery required" || true
+            echo "============================"
+          fi
+        
+          # Check for clean blobstore message
+          if kubectl logs -n flint-system $POD -c spdk-tgt --tail=200 | grep -q "Clean blobstore, no recovery needed"; then
+            echo "✅ Found clean blobstore confirmation in $POD"
+            FOUND_CLEAN=true
+        
+            # Show clean flag status
+            echo "=== Clean Blobstore Log Excerpt ==="
+            kubectl logs -n flint-system $POD -c spdk-tgt --tail=200 | grep -B 3 -A 2 "Clean blobstore" || true
+            echo "===================================="
+          fi
+        done
+        
+        if [ "$FOUND_RECOVERY" = true ]; then
+          echo "❌ FAIL: Recovery was triggered - patches may not be applied correctly"
+          exit 1
+        fi
+        
+        if [ "$FOUND_CLEAN" = true ]; then
+          echo "✅ PASS: Clean blobstore confirmed, no recovery needed"
+          exit 0
+        fi
+        
+        echo "⚠️  WARNING: Could not verify clean mount status in recent logs"
+        echo "Checking for FLUSH support as fallback verification..."
+        
+        # Fallback: verify FLUSH support exists (indicates patches are applied)
+        for POD in $SPDK_PODS; do
+          if kubectl logs -n flint-system $POD -c spdk-tgt | grep -q "FLUSH patch applied"; then
+            echo "✅ FLUSH patch confirmed in $POD - patches are applied"
+            echo "Clean mount status may not be logged, but system is configured correctly"
+            exit 0
+          fi
+        done
+        
+        echo "⚠️  Could not fully verify clean shutdown behavior"
+        echo "Manual verification recommended: check SPDK logs for 'clean flag: 1'"
+        exit 0
+    sink.go:61: | 12:47:29 | clean-shutdown | 05-verify-no-recovery | SCRIPT    | LOG   |
+        === STDOUT
+        === Verifying No Recovery Was Triggered ===
+        Checking all SPDK node pods for recovery status...
+        Found SPDK pods: pod/flint-csi-node-bkzt7
+        pod/flint-csi-node-cb8wj
+        pod/flint-csi-node-m8xcn
+        pod/flint-csi-node-pcqwj
+        Checking logs for pod/flint-csi-node-bkzt7...
+        Checking logs for pod/flint-csi-node-cb8wj...
+        Checking logs for pod/flint-csi-node-m8xcn...
+        Checking logs for pod/flint-csi-node-pcqwj...
+        ⚠️  WARNING: Could not verify clean mount status in recent logs
+        Checking for FLUSH support as fallback verification...
+        ⚠️  Could not fully verify clean shutdown behavior
+        Manual verification recommended: check SPDK logs for 'clean flag: 1'
+    sink.go:61: | 12:47:29 | clean-shutdown | 05-verify-no-recovery | SCRIPT    | DONE  |
+    sink.go:61: | 12:47:29 | clean-shutdown | 05-verify-no-recovery | TRY       | END   |
+    sink.go:61: | 12:47:29 | clean-shutdown | 06-rapid-cycle        | TRY       | BEGIN |
+    sink.go:61: | 12:47:29 | clean-shutdown | 06-rapid-cycle        | APPLY     | RUN   | v1/Pod @ chainsaw-positive-flounder/cycle-test-pod
+    sink.go:61: | 12:47:29 | clean-shutdown | 06-rapid-cycle        | CREATE    | OK    | v1/Pod @ chainsaw-positive-flounder/cycle-test-pod
+    sink.go:61: | 12:47:29 | clean-shutdown | 06-rapid-cycle        | APPLY     | DONE  | v1/Pod @ chainsaw-positive-flounder/cycle-test-pod
+    sink.go:61: | 12:47:29 | clean-shutdown | 06-rapid-cycle        | ASSERT    | RUN   | v1/Pod @ chainsaw-positive-flounder/cycle-test-pod
+    sink.go:61: | 12:47:39 | clean-shutdown | 06-rapid-cycle        | ASSERT    | DONE  | v1/Pod @ chainsaw-positive-flounder/cycle-test-pod
+    sink.go:61: | 12:47:39 | clean-shutdown | 06-rapid-cycle        | TRY       | END   |
+    sink.go:61: | 12:47:39 | clean-shutdown | 06-rapid-cycle        | CLEANUP   | BEGIN |
+    sink.go:61: | 12:47:39 | clean-shutdown | 06-rapid-cycle        | DELETE    | OK    | v1/Pod @ chainsaw-positive-flounder/cycle-test-pod
+    sink.go:61: | 12:47:39 | clean-shutdown | 06-rapid-cycle        | CLEANUP   | END   |
+    sink.go:61: | 12:47:39 | clean-shutdown | 04-fast-remount       | CLEANUP   | BEGIN |
+    sink.go:61: | 12:47:39 | clean-shutdown | 04-fast-remount       | DELETE    | OK    | v1/Pod @ chainsaw-positive-flounder/fast-remount-pod
+    sink.go:61: | 12:47:39 | clean-shutdown | 04-fast-remount       | CLEANUP   | END   |
+    sink.go:61: | 12:47:39 | clean-shutdown | 01-writer-pod         | CLEANUP   | BEGIN |
+    sink.go:61: | 12:47:39 | clean-shutdown | 01-writer-pod         | DELETE    | OK    | v1/Pod @ chainsaw-positive-flounder/writer-pod
+        === ERROR
+        pods "writer-pod" not found
+    sink.go:61: | 12:47:39 | clean-shutdown | 01-writer-pod         | CLEANUP   | END   |
+    sink.go:61: | 12:47:39 | clean-shutdown | 00-pvc                | CLEANUP   | BEGIN |
+    sink.go:61: | 12:47:39 | clean-shutdown | 00-pvc                | DELETE    | OK    | v1/PersistentVolumeClaim @ chainsaw-positive-flounder/clean-shutdown-pvc
+    sink.go:61: | 12:47:39 | clean-shutdown | 00-pvc                | CLEANUP   | END   |
+    sink.go:61: | 12:47:39 | clean-shutdown | @chainsaw             | CLEANUP   | BEGIN |
+    sink.go:61: | 12:47:39 | clean-shutdown | @chainsaw             | DELETE    | OK    | v1/Namespace @ chainsaw-positive-flounder
+    sink.go:61: | 12:47:45 | clean-shutdown | @chainsaw             | CLEANUP   | END   |
+--- PASS: chainsaw (0.00s)
+    --- PASS: chainsaw/clean-shutdown (41.86s)
+PASS
+Tests Summary...
+- Passed  tests 1
+- Failed  tests 0
+- Skipped tests 0
+Saving report...
+Done.

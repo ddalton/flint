@@ -1,0 +1,683 @@
+I1002 19:31:37.089483       1 main.go:109] Version: v6.3.0
+I1002 19:31:37.090833       1 connection.go:164] Connecting to unix:///csi/csi.sock
+I1002 19:31:37.092315       1 connection.go:193] GRPC call: /csi.v1.Identity/GetPluginInfo
+I1002 19:31:37.092327       1 connection.go:194] GRPC request: {}
+I1002 19:31:37.094898       1 connection.go:200] GRPC response: {"name":"disk.csi.chert.us","vendor_version":"1.3.0"}
+I1002 19:31:37.094910       1 connection.go:201] GRPC error: <nil>
+I1002 19:31:37.094947       1 main.go:189] CSI driver name: "disk.csi.chert.us"
+I1002 19:31:37.094954       1 common.go:138] Probing CSI driver for readiness
+I1002 19:31:37.094962       1 connection.go:193] GRPC call: /csi.v1.Identity/Probe
+I1002 19:31:37.094965       1 connection.go:194] GRPC request: {}
+I1002 19:31:37.095433       1 connection.go:200] GRPC response: {"ready":{"value":true}}
+I1002 19:31:37.095448       1 connection.go:201] GRPC error: <nil>
+I1002 19:31:37.095461       1 connection.go:193] GRPC call: /csi.v1.Controller/ControllerGetCapabilities
+I1002 19:31:37.095473       1 connection.go:194] GRPC request: {}
+I1002 19:31:37.095968       1 connection.go:200] GRPC response: {"capabilities":[{"Type":{"Rpc":{"type":1}}},{"Type":{"Rpc":{"type":2}}},{"Type":{"Rpc":{"type":5}}},{"Type":{"Rpc":{"type":7}}},{"Type":{"Rpc":{"type":9}}}]}
+I1002 19:31:37.096001       1 connection.go:201] GRPC error: <nil>
+I1002 19:31:37.096015       1 main.go:227] Start NewCSISnapshotSideCarController with snapshotter [disk.csi.chert.us] kubeconfig [] csiTimeout [1m0s] csiAddress [/csi/csi.sock] resyncPeriod [15m0s] snapshotNamePrefix [snapshot] snapshotNameUUIDLength [824638794840]
+I1002 19:31:37.096321       1 reflector.go:289] Starting reflector *v1.VolumeSnapshotClass (15m0s) from github.com/kubernetes-csi/external-snapshotter/client/v6/informers/externalversions/factory.go:133
+I1002 19:31:37.096342       1 reflector.go:325] Listing and watching *v1.VolumeSnapshotClass from github.com/kubernetes-csi/external-snapshotter/client/v6/informers/externalversions/factory.go:133
+I1002 19:31:37.096754       1 reflector.go:289] Starting reflector *v1.VolumeSnapshotContent (15m0s) from github.com/kubernetes-csi/external-snapshotter/client/v6/informers/externalversions/factory.go:133
+I1002 19:31:37.096766       1 reflector.go:325] Listing and watching *v1.VolumeSnapshotContent from github.com/kubernetes-csi/external-snapshotter/client/v6/informers/externalversions/factory.go:133
+I1002 19:31:37.097026       1 snapshot_controller_base.go:170] Starting CSI snapshotter
+I1002 19:31:37.197166       1 shared_informer.go:341] caches populated
+I1002 19:31:37.197311       1 snapshot_controller_base.go:396] controller initialized
+I1002 19:37:58.110465       1 reflector.go:790] github.com/kubernetes-csi/external-snapshotter/client/v6/informers/externalversions/factory.go:133: Watch close - *v1.VolumeSnapshotContent total 7 items received
+I1002 19:39:39.109718       1 reflector.go:790] github.com/kubernetes-csi/external-snapshotter/client/v6/informers/externalversions/factory.go:133: Watch close - *v1.VolumeSnapshotClass total 8 items received
+I1002 19:46:37.110092       1 reflector.go:378] github.com/kubernetes-csi/external-snapshotter/client/v6/informers/externalversions/factory.go:133: forcing resync
+I1002 19:31:37.467772       1 main.go:149] calling CSI driver to discover driver name
+I1002 19:31:37.471427       1 main.go:155] CSI driver name: "disk.csi.chert.us"
+I1002 19:31:37.471495       1 main.go:183] ServeMux listening at "0.0.0.0:9808"
+🎛️ [ORCHESTRATORS] ENABLED — FLINT_ORCHESTRATORS is set to enabled — this process owns the controller-side orchestrators
+🗳️ [ORCH_LEASE] leader election enabled (lease flint-system/flint-orchestrators, holder flint-csi-controller-6c56566974-xtnrv)
+[2m2026-10-02T19:31:35.555095Z[0m [32m INFO[0m 🗳️ [ORCH_LEASE] campaigning — orchestrators idle until the lease is held [3mholder[0m[2m=[0mflint-csi-controller-6c56566974-xtnrv [3mlease[0m[2m=[0mflint-orchestrators [3mduration_secs[0m[2m=[0m15
+[2m2026-10-02T19:31:35.555491Z[0m [32m INFO[0m [CACHE] Creating capacity cache [3mttl_seconds[0m[2m=[0m30
+🎯 [CONFIG] Using namespace for custom resources: flint-system
+🚀 [MAIN] Initializing CSI driver...
+[2m2026-10-02T19:31:35.555690Z[0m [32m INFO[0m [DRIVER] Initializing CSI driver [3mmode[0m[2m=[0m"controller"
+[2m2026-10-02T19:31:35.555742Z[0m [32m INFO[0m [DRIVER] Warming up capacity cache
+[2m2026-10-02T19:31:35.555766Z[0m [32m INFO[0m [CACHE] Warming up capacity cache
+✅ [DRIVER] Found 4 nodes in cluster
+[2m2026-10-02T19:31:35.626603Z[0m [32m INFO[0m [CACHE] Found nodes to warm up [3mnode_count[0m[2m=[0m4
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-cp-1
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-2
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-1
+✅ [DRIVER] Found 1 initialized disks on node csw-cp-1
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-3
+[2m2026-10-02T19:31:35.715707Z[0m [32m INFO[0m [CACHE] Warm up complete [3msuccess_count[0m[2m=[0m4
+[2m2026-10-02T19:31:35.715768Z[0m [32m INFO[0m [CACHE] Starting background refresh [3minterval_secs[0m[2m=[0m60
+[2m2026-10-02T19:31:35.715857Z[0m [32m INFO[0m [DRIVER] Initialization complete
+✅ [MAIN] CSI driver initialization complete
+⚠️  [PREFLIGHT] Could not verify snapshot CRDs: ApiError: customresourcedefinitions.apiextensions.k8s.io "volumesnapshotclasses.snapshot.storage.k8s.io" is forbidden: User "system:serviceaccount:flint-system:flint-csi-controller" cannot get resource "customresourcedefinitions" in API group "apiextensions.k8s.io" at the cluster scope: Forbidden (Status { status: Some(Failure), code: 403, message: "customresourcedefinitions.apiextensions.k8s.io \"volumesnapshotclasses.snapshot.storage.k8s.io\" is forbidden: User \"system:serviceaccount:flint-system:flint-csi-controller\" cannot get resource \"customresourcedefinitions\" in API group \"apiextensions.k8s.io\" at the cluster scope", metadata: Some(ListMeta { continue_: None, remaining_item_count: None, resource_version: None, self_link: None }), reason: "Forbidden", details: Some(StatusDetails { name: "volumesnapshotclasses.snapshot.storage.k8s.io", group: "apiextensions.k8s.io", kind: "customresourcedefinitions", uid: "", causes: [], retry_after_seconds: 0 }) }). Snapshot RPCs may fail; non-snapshot operations unaffected.
+⏱️ [EPOCH] Epoch snapshot scheduler enabled (interval: 300s, retain: 6)
+[2m2026-10-02T19:31:35.721500Z[0m [32m INFO[0m [EPOCH] Epoch snapshot scheduler started [3minterval_secs[0m[2m=[0m300 [3mretain[0m[2m=[0m6
+🩹 [CATCHUP] Replica catch-up orchestrator enabled (t_back: 120s, poll: 2s, full build: on)
+[2m2026-10-02T19:31:35.721619Z[0m [32m INFO[0m [CATCHUP] Replica catch-up orchestrator started [3mt_back_secs[0m[2m=[0m120 [3mreplace_enabled[0m[2m=[0mtrue [3mreplace_after_secs[0m[2m=[0m600
+🔁 [CUTOVER] Reassembly cutover orchestrator enabled (cooldown: 900s, max lag: 1 epoch(s))
+[2m2026-10-02T19:31:35.721776Z[0m [32m INFO[0m [CUTOVER] Reassembly cutover orchestrator started [3mcooldown_secs[0m[2m=[0m900 [3mmax_lag[0m[2m=[0m1
+♻️ [HOT_REJOIN] Hot-rejoin orchestrator enabled (max lag: 1 epoch(s), retry backoff: 300s, window target: 2000ms)
+ℹ️  [pNFS] disabled (neither FLINT_PNFS_MDS_SHARD_ENDPOINTS nor FLINT_PNFS_MDS_ENDPOINT set)
+[2m2026-10-02T19:31:35.721936Z[0m [32m INFO[0m [HOT_REJOIN] Hot-rejoin orchestrator started [3mmax_lag[0m[2m=[0m1 [3mretry_backoff_secs[0m[2m=[0m300
+[2m2026-10-02T19:31:35.721973Z[0m [32m INFO[0m [MAINT] Maintenance roller started [3mnamespace[0m[2m=[0mflint-system [3mds[0m[2m=[0mflint-csi-node [3msuppress_ttl_secs[0m[2m=[0m900
+✅ [NFS] NFS support ENABLED
+Starting health server on port 9809
+Starting in Controller mode...
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+🩺 [NFS-RECONCILER] NFS server-pod liveness reconciler running (30s tick; FLINT_NFS_RECONCILER=disabled to opt out)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [CSI_SERVER] Minimal State SPDK CSI Driver starting
+   Mode: controller
+[2m2026-10-02T19:31:35.722868Z[0m [32m INFO[0m [1mServer::run[0m[1m{[0m[3maddr[0m[2m=[0m0.0.0.0:9809[1m}[0m[2m:[0m listening on http://0.0.0.0:9809
+   Endpoint: unix:///csi/csi.sock
+   Node ID: flint-csi-controller-6c56566974-xtnrv
+   Clone Detection: ENABLED (commit c03bba7)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 [CSI_SERVER] Setting up Unix socket: /csi/csi.sock
+✅ [DRIVER] Found 4 nodes in cluster
+   Creating parent directory: "/csi"
+   Binding to socket...
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ [CSI_SERVER] CSI gRPC server listening on: /csi/csi.sock
+   Waiting for CSI requests from kubelet...
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-cp-1
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-1
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-3
+✅ [DRIVER] Found 1 initialized disks on node csw-cp-1
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-2
+🔵 [GRPC] Identity.Probe called
+🔵 [GRPC] Identity.GetPluginInfo called
+🔵 [GRPC] Identity.GetPluginCapabilities called
+🔵 [GRPC] Controller.ControllerGetCapabilities called
+🔵 [GRPC] Identity.Probe called
+🔵 [GRPC] Identity.GetPluginInfo called
+🔵 [GRPC] Identity.GetPluginCapabilities called
+🔵 [GRPC] Controller.ControllerGetCapabilities called
+📥 [CONTROLLER] Unpublishing volume pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b from node "csw-aws-2"
+🔍 [DRIVER] Getting volume info from PV metadata: pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b
+❌ [DRIVER] Volume metadata not found in PV: PV found but missing flint metadata in volumeAttributes
+💡 [DRIVER] This means either:
+   1. Volume doesn't exist
+   2. Volume was created with old driver version (before metadata storage)
+   3. PV is corrupted or missing volumeAttributes
+⚠️ [CONTROLLER] Volume not found (may already be deleted): Volume pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b metadata not found in PV: PV found but missing flint metadata in volumeAttributes
+🔵 [GRPC] Identity.Probe called
+🔵 [GRPC] Identity.GetPluginInfo called
+🔵 [GRPC] Identity.GetPluginCapabilities called
+🔵 [GRPC] Controller.ControllerGetCapabilities called
+🔵 [GRPC] Controller.ControllerGetCapabilities called
+🔵 [GRPC] Identity.GetPluginInfo called
+🔵 [GRPC] Identity.Probe called
+🔵 [GRPC] Controller.ControllerGetCapabilities called
+🗑️ [CONTROLLER] Deleting volume: pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+🗑️  [NFS] Deleting NFS infrastructure for volume: pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b
+ℹ️  [NFS] Service already deleted: flint-nfs-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b
+ℹ️  [NFS] Pod already deleted: flint-nfs-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b
+ℹ️  [NFS] PVC already deleted: flint-nfs-pvc-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b
+ℹ️  [NFS] PV already deleted: flint-nfs-pv-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b
+📊 [CONTROLLER] Deleting multi-replica volume (2 replicas)
+🗑️ [CONTROLLER] Deleting replica 1 on node csw-aws-1
+ℹ️ [CONTROLLER] Replica 1 backing storage already gone (UUID: 95968e09-0538-4dfd-a15c-a5a59fe9ed5e)
+   This can happen when: memory disk destroyed, NVMe failed, or node offline
+🧹 [DRIVER] Removing NVMe-oF target from node: csw-aws-1 nqn: nqn.2024-11.com.flint:volume:pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b_0
+✅ [DRIVER] Successfully removed NVMe-oF target: nqn.2024-11.com.flint:volume:pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b_0
+🧹 [DRIVER] Removing NVMe-oF target from node: csw-aws-1 nqn: nqn.2024-11.com.flint:volume:nfs-server-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b_0
+⚠️ [DRIVER] Failed to remove target (continuing anyway): Node agent HTTP call failed: {"error":"SPDK RPC call 'nvmf_delete_subsystem' failed: SPDK RPC error: Code=-32602 Msg=Invalid parameters","success":false}
+🗑️ [CONTROLLER] Deleting replica 2 on node csw-aws-2
+[2m2026-10-02T19:31:37.312649Z[0m [32m INFO[0m [CONTROLLER] Lvol deleted via node agent [3mlvol_uuid[0m[2m=[0m"1c84ab00-6bdf-4f30-8245-994263729a93"
+✅ Deleted replica 2 (UUID: 1c84ab00-6bdf-4f30-8245-994263729a93)
+🧹 [DRIVER] Removing NVMe-oF target from node: csw-aws-2 nqn: nqn.2024-11.com.flint:volume:pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b_1
+⚠️ [DRIVER] Failed to remove target (continuing anyway): Node agent HTTP call failed: {"error":"SPDK RPC call 'nvmf_delete_subsystem' failed: SPDK RPC error: Code=-32602 Msg=Invalid parameters","success":false}
+🧹 [DRIVER] Removing NVMe-oF target from node: csw-aws-2 nqn: nqn.2024-11.com.flint:volume:nfs-server-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b_1
+⚠️ [DRIVER] Failed to remove target (continuing anyway): Node agent HTTP call failed: {"error":"SPDK RPC call 'nvmf_delete_subsystem' failed: SPDK RPC error: Code=-32602 Msg=Invalid parameters","success":false}
+[2m2026-10-02T19:31:37.420996Z[0m [32m INFO[0m [CONTROLLER] Lvol deleted via node agent [3mlvol_uuid[0m[2m=[0m"c5ba3560-7141-45c3-be2b-159b4bc7789e"
+[2m2026-10-02T19:31:37.421087Z[0m [32m INFO[0m [CONTROLLER] Teardown sweep deleted lvol (F51) [3mnode_name[0m[2m=[0m"csw-aws-1" [3mlvol[0m[2m=[0mvol_pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b_replica_0
+🔵 [GRPC] Identity.GetPluginInfo called
+[2m2026-10-02T19:31:37.470523Z[0m [32m INFO[0m [CONTROLLER] Lvol deleted via node agent [3mlvol_uuid[0m[2m=[0m"eeffb2bb-04de-46d9-9157-fc45f6d2bcfa"
+[2m2026-10-02T19:31:37.470606Z[0m [32m INFO[0m [CONTROLLER] Teardown sweep deleted lvol (F51) [3mnode_name[0m[2m=[0m"csw-aws-1" [3mlvol[0m[2m=[0mepoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-2
+[2m2026-10-02T19:31:37.517007Z[0m [32m INFO[0m [CONTROLLER] Lvol deleted via node agent [3mlvol_uuid[0m[2m=[0m"ddd76e9c-df43-4787-9088-47dccb41a928"
+[2m2026-10-02T19:31:37.517101Z[0m [32m INFO[0m [CONTROLLER] Teardown sweep deleted lvol (F51) [3mnode_name[0m[2m=[0m"csw-aws-1" [3mlvol[0m[2m=[0mepoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-4
+[2m2026-10-02T19:31:37.565011Z[0m [32m INFO[0m [CONTROLLER] Lvol deleted via node agent [3mlvol_uuid[0m[2m=[0m"3414669b-2458-4c74-82c8-be86c9fdc0d4"
+[2m2026-10-02T19:31:37.565105Z[0m [32m INFO[0m [CONTROLLER] Teardown sweep deleted lvol (F51) [3mnode_name[0m[2m=[0m"csw-aws-1" [3mlvol[0m[2m=[0mepoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-5
+[2m2026-10-02T19:31:37.624788Z[0m [32m INFO[0m [CONTROLLER] Lvol deleted via node agent [3mlvol_uuid[0m[2m=[0m"57503700-8249-42da-815a-364591f7f842"
+[2m2026-10-02T19:31:37.625090Z[0m [32m INFO[0m [CONTROLLER] Teardown sweep deleted lvol (F51) [3mnode_name[0m[2m=[0m"csw-aws-2" [3mlvol[0m[2m=[0mepoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-1
+[2m2026-10-02T19:31:37.672641Z[0m [32m INFO[0m [CONTROLLER] Lvol deleted via node agent [3mlvol_uuid[0m[2m=[0m"97b63190-c53a-4e4d-8d49-0c488cb459aa"
+[2m2026-10-02T19:31:37.672795Z[0m [32m INFO[0m [CONTROLLER] Teardown sweep deleted lvol (F51) [3mnode_name[0m[2m=[0m"csw-aws-2" [3mlvol[0m[2m=[0mepoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-2
+[2m2026-10-02T19:31:37.720648Z[0m [32m INFO[0m [CONTROLLER] Lvol deleted via node agent [3mlvol_uuid[0m[2m=[0m"cf3278c6-0fb7-4fa7-8bf6-a8b2b7c8893e"
+[2m2026-10-02T19:31:37.720666Z[0m [32m INFO[0m [CONTROLLER] Teardown sweep deleted lvol (F51) [3mnode_name[0m[2m=[0m"csw-aws-2" [3mlvol[0m[2m=[0mepoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-3
+[2m2026-10-02T19:31:37.768663Z[0m [32m INFO[0m [CONTROLLER] Lvol deleted via node agent [3mlvol_uuid[0m[2m=[0m"9c0788f9-9df4-4096-999e-d00f13fdac3d"
+[2m2026-10-02T19:31:37.768680Z[0m [32m INFO[0m [CONTROLLER] Teardown sweep deleted lvol (F51) [3mnode_name[0m[2m=[0m"csw-aws-2" [3mlvol[0m[2m=[0mepoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-4
+[2m2026-10-02T19:31:37.816672Z[0m [32m INFO[0m [CONTROLLER] Lvol deleted via node agent [3mlvol_uuid[0m[2m=[0m"49419381-2d2a-405f-b396-a8d1093c52f3"
+[2m2026-10-02T19:31:37.816688Z[0m [32m INFO[0m [CONTROLLER] Teardown sweep deleted lvol (F51) [3mnode_name[0m[2m=[0m"csw-aws-2" [3mlvol[0m[2m=[0mepoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-5
+🧹 [CONTROLLER] Teardown sweep: 9 residual lvol(s) deleted, 0 left to the orphan sweep
+✅ [CONTROLLER] Multi-replica volume deleted: pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b (2 replicas, 9 residual lvols swept)
+[2m2026-10-02T19:31:51.656457Z[0m [32m INFO[0m 🗳️ [ORCH_LEASE] ACQUIRED — this process ACTS as the orchestrator [3mholder[0m[2m=[0mflint-csi-controller-6c56566974-xtnrv
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 4 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-3
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-3
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-1
+✅ [DRIVER] Found 1 initialized disks on node csw-cp-1
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-2
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 4 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-3
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 1 initialized disks on node csw-cp-1
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-1
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-2
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-3
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 4 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-cp-1
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-1
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-3
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-2
+✅ [DRIVER] Found 1 initialized disks on node csw-cp-1
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 4 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-3
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-3
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-1
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-2
+✅ [DRIVER] Found 1 initialized disks on node csw-cp-1
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 4 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-cp-1
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-1
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-2
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-3
+✅ [DRIVER] Found 1 initialized disks on node csw-cp-1
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 4 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-3
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-3
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-2
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-1
+✅ [DRIVER] Found 1 initialized disks on node csw-cp-1
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 4 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-3
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-1
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-3
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-2
+✅ [DRIVER] Found 1 initialized disks on node csw-cp-1
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 4 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-cp-1
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-3
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-1
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-2
+✅ [DRIVER] Found 1 initialized disks on node csw-cp-1
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 4 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-cp-1
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-2
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-3
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-1
+✅ [DRIVER] Found 1 initialized disks on node csw-cp-1
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 4 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-cp-1
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-1
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-2
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-3
+✅ [DRIVER] Found 1 initialized disks on node csw-cp-1
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 4 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-3
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-cp-1
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-1
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-3
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-2
+✅ [DRIVER] Found 1 initialized disks on node csw-cp-1
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 4 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-3
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-2
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-1
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-3
+✅ [DRIVER] Found 1 initialized disks on node csw-cp-1
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 4 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-3
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-3
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-2
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-1
+✅ [DRIVER] Found 1 initialized disks on node csw-cp-1
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 4 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-3
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-2
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-1
+✅ [DRIVER] Found 1 initialized disks on node csw-cp-1
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-3
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 4 nodes in cluster
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-cp-1
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-2
+🔍 [DRIVER] Getting initialized disks (with LVS) from node: csw-aws-3
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-1
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-3
+✅ [DRIVER] Found 1 initialized disks on node csw-aws-2
+✅ [DRIVER] Found 1 initialized disks on node csw-cp-1
+✅ [NFS] NFS support ENABLED
+   Image: dilipdalton/flint-driver:spdk-1002-10c9c0fe
+   Port: 2049
+   Namespace: flint-system
+W1002 19:31:35.959557       1 feature_gate.go:241] Setting GA feature gate Topology=true. It will be removed in a future release.
+I1002 19:31:35.959652       1 feature_gate.go:249] feature gates: &{map[Topology:true]}
+I1002 19:31:35.959687       1 csi-provisioner.go:154] Version: v3.6.0
+I1002 19:31:35.959694       1 csi-provisioner.go:177] Building kube configs for running in cluster...
+I1002 19:31:35.960210       1 connection.go:164] Connecting to unix:///csi/csi.sock
+I1002 19:31:35.961147       1 common.go:138] Probing CSI driver for readiness
+I1002 19:31:35.961157       1 connection.go:193] GRPC call: /csi.v1.Identity/Probe
+I1002 19:31:35.961161       1 connection.go:194] GRPC request: {}
+I1002 19:31:35.966574       1 connection.go:200] GRPC response: {"ready":{"value":true}}
+I1002 19:31:35.966586       1 connection.go:201] GRPC error: <nil>
+I1002 19:31:35.966606       1 connection.go:193] GRPC call: /csi.v1.Identity/GetPluginInfo
+I1002 19:31:35.966611       1 connection.go:194] GRPC request: {}
+I1002 19:31:35.967012       1 connection.go:200] GRPC response: {"name":"disk.csi.chert.us","vendor_version":"1.3.0"}
+I1002 19:31:35.967024       1 connection.go:201] GRPC error: <nil>
+I1002 19:31:35.967045       1 csi-provisioner.go:230] Detected CSI driver disk.csi.chert.us
+I1002 19:31:35.967057       1 connection.go:193] GRPC call: /csi.v1.Identity/GetPluginCapabilities
+I1002 19:31:35.967061       1 connection.go:194] GRPC request: {}
+I1002 19:31:35.967527       1 connection.go:200] GRPC response: {"capabilities":[{"Type":{"Service":{"type":1}}},{"Type":{"Service":{"type":2}}}]}
+I1002 19:31:35.967540       1 connection.go:201] GRPC error: <nil>
+I1002 19:31:35.967585       1 connection.go:193] GRPC call: /csi.v1.Controller/ControllerGetCapabilities
+I1002 19:31:35.967589       1 connection.go:194] GRPC request: {}
+I1002 19:31:35.967978       1 connection.go:200] GRPC response: {"capabilities":[{"Type":{"Rpc":{"type":1}}},{"Type":{"Rpc":{"type":2}}},{"Type":{"Rpc":{"type":5}}},{"Type":{"Rpc":{"type":7}}},{"Type":{"Rpc":{"type":9}}}]}
+I1002 19:31:35.967989       1 connection.go:201] GRPC error: <nil>
+I1002 19:31:35.968112       1 csi-provisioner.go:299] CSI driver supports PUBLISH_UNPUBLISH_VOLUME, watching VolumeAttachments
+I1002 19:31:35.968618       1 controller.go:732] Using saving PVs to API server in background
+I1002 19:31:35.968833       1 reflector.go:289] Starting reflector *v1.CSINode (1h0m0s) from k8s.io/client-go/informers/factory.go:150
+I1002 19:31:35.968846       1 reflector.go:325] Listing and watching *v1.CSINode from k8s.io/client-go/informers/factory.go:150
+I1002 19:31:35.969234       1 reflector.go:289] Starting reflector *v1.Node (1h0m0s) from k8s.io/client-go/informers/factory.go:150
+I1002 19:31:35.969246       1 reflector.go:325] Listing and watching *v1.Node from k8s.io/client-go/informers/factory.go:150
+I1002 19:31:35.969862       1 reflector.go:289] Starting reflector *v1.StorageClass (1h0m0s) from k8s.io/client-go/informers/factory.go:150
+I1002 19:31:35.969874       1 reflector.go:325] Listing and watching *v1.StorageClass from k8s.io/client-go/informers/factory.go:150
+I1002 19:31:35.970325       1 reflector.go:289] Starting reflector *v1.PersistentVolumeClaim (15m0s) from k8s.io/client-go/informers/factory.go:150
+I1002 19:31:35.970338       1 reflector.go:325] Listing and watching *v1.PersistentVolumeClaim from k8s.io/client-go/informers/factory.go:150
+I1002 19:31:35.970361       1 reflector.go:289] Starting reflector *v1.VolumeAttachment (1h0m0s) from k8s.io/client-go/informers/factory.go:150
+I1002 19:31:35.970435       1 reflector.go:325] Listing and watching *v1.VolumeAttachment from k8s.io/client-go/informers/factory.go:150
+I1002 19:31:36.068815       1 shared_informer.go:341] caches populated
+I1002 19:31:36.068983       1 shared_informer.go:341] caches populated
+I1002 19:31:36.068990       1 shared_informer.go:341] caches populated
+I1002 19:31:36.068994       1 shared_informer.go:341] caches populated
+I1002 19:31:36.068998       1 shared_informer.go:341] caches populated
+I1002 19:31:36.069094       1 controller.go:811] Starting provisioner controller disk.csi.chert.us_flint-csi-controller-6c56566974-xtnrv_92e6af04-9d66-472e-88f7-fc3737543c59!
+I1002 19:31:36.069394       1 reflector.go:289] Starting reflector *v1.PersistentVolume (15m0s) from sigs.k8s.io/sig-storage-lib-external-provisioner/v9/controller/controller.go:845
+I1002 19:31:36.069455       1 reflector.go:325] Listing and watching *v1.PersistentVolume from sigs.k8s.io/sig-storage-lib-external-provisioner/v9/controller/controller.go:845
+I1002 19:31:36.069154       1 clone_controller.go:66] Starting CloningProtection controller
+I1002 19:31:36.069806       1 clone_controller.go:82] Started CloningProtection controller
+I1002 19:31:36.069170       1 volume_store.go:97] Starting save volume queue
+I1002 19:31:36.070084       1 reflector.go:289] Starting reflector *v1.StorageClass (15m0s) from sigs.k8s.io/sig-storage-lib-external-provisioner/v9/controller/controller.go:848
+I1002 19:31:36.070135       1 reflector.go:325] Listing and watching *v1.StorageClass from sigs.k8s.io/sig-storage-lib-external-provisioner/v9/controller/controller.go:848
+I1002 19:31:36.170236       1 shared_informer.go:341] caches populated
+I1002 19:31:36.170560       1 controller.go:860] Started provisioner controller disk.csi.chert.us_flint-csi-controller-6c56566974-xtnrv_92e6af04-9d66-472e-88f7-fc3737543c59!
+I1002 19:31:36.170593       1 controller.go:1152] handleProtectionFinalizer Volume : &PersistentVolume{ObjectMeta:{pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b    696d7157-2611-45ea-b2b5-a125268e4d67 8590 0 2026-10-02 19:26:34 +0000 UTC <nil> <nil> map[disk.chert.us/replica-494bbb5d-ed0b-4b19-9085-99055357ad39:true disk.chert.us/replica-dd7f63b5-4f65-4b6c-bdfc-7dc7486f48f6:true] map[chert.us/block-device-backend:Nvmeof chert.us/chain-gen:1 chert.us/nvme-device:nvme2 chert.us/nvmeof-nqn:nqn.2024-11.com.flint:volume:pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b disk.chert.us/filesystem-initialized:true disk.chert.us/replica-health:{"configured":1,"observed_by":"csw-aws-2","state":"online","total":2} disk.chert.us/replica-sync-state:{"current_epoch":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-5","epochs":[{"name":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-1","recorded_at":"2026-10-02T19:27:28Z"},{"name":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-2","recorded_at":"2026-10-02T19:28:28Z"},{"name":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-3","recorded_at":"2026-10-02T19:29:28Z"},{"name":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-4","recorded_at":"2026-10-02T19:30:31Z"},{"name":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-5","recorded_at":"2026-10-02T19:31:28Z"}],"writer_set":{"lvol_uuids":["1c84ab00-6bdf-4f30-8245-994263729a93","95968e09-0538-4dfd-a15c-a5a59fe9ed5e"],"since":"2026-10-02T19:30:31Z"},"replicas":[{"node_name":"csw-aws-1","node_uid":"dd7f63b5-4f65-4b6c-bdfc-7dc7486f48f6","lvol_uuid":"95968e09-0538-4dfd-a15c-a5a59fe9ed5e","sync_state":"in_sync","last_epoch":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-5","since":"2026-10-02T19:30:31Z","reason":"admitted at reassembly after fenced final delta","active_lvol_uuid":"c5ba3560-7141-45c3-be2b-159b4bc7789e"},{"node_name":"csw-aws-2","node_uid":"494bbb5d-ed0b-4b19-9085-99055357ad39","lvol_uuid":"1c84ab00-6bdf-4f30-8245-994263729a93","sync_state":"in_sync","last_epoch":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-5"}]} pv.kubernetes.io/provisioned-by:disk.csi.chert.us volume.kubernetes.io/provisioner-deletion-secret-name: volume.kubernetes.io/provisioner-deletion-secret-namespace:] [] [kubernetes.io/pv-protection external-attacher/disk-csi-chert-us] [{csi-attacher Update v1 2026-10-02 19:26:34 +0000 UTC FieldsV1 {"f:metadata":{"f:finalizers":{"v:\"external-attacher/disk-csi-chert-us\"":{}}}} } {csi-provisioner Update v1 2026-10-02 19:26:34 +0000 UTC FieldsV1 {"f:metadata":{"f:annotations":{".":{},"f:pv.kubernetes.io/provisioned-by":{},"f:volume.kubernetes.io/provisioner-deletion-secret-name":{},"f:volume.kubernetes.io/provisioner-deletion-secret-namespace":{}}},"f:spec":{"f:accessModes":{},"f:capacity":{".":{},"f:storage":{}},"f:claimRef":{".":{},"f:apiVersion":{},"f:kind":{},"f:name":{},"f:namespace":{},"f:resourceVersion":{},"f:uid":{}},"f:csi":{".":{},"f:driver":{},"f:volumeAttributes":{".":{},"f:disk.chert.us/replica-count":{},"f:disk.chert.us/replicas":{},"f:disk.chert.us/role":{},"f:size":{},"f:storage.kubernetes.io/csiProvisionerIdentity":{}},"f:volumeHandle":{}},"f:persistentVolumeReclaimPolicy":{},"f:storageClassName":{},"f:volumeMode":{}}} } {kube-controller-manager Update v1 2026-10-02 19:31:01 +0000 UTC FieldsV1 {"f:status":{"f:phase":{}}} status} {unknown Update v1 2026-10-02 19:31:28 +0000 UTC FieldsV1 {"f:metadata":{"f:annotations":{"f:chert.us/block-device-backend":{},"f:chert.us/chain-gen":{},"f:chert.us/nvme-device":{},"f:chert.us/nvmeof-nqn":{},"f:disk.chert.us/filesystem-initialized":{},"f:disk.chert.us/replica-health":{},"f:disk.chert.us/replica-sync-state":{}},"f:labels":{".":{},"f:disk.chert.us/replica-494bbb5d-ed0b-4b19-9085-99055357ad39":{},"f:disk.chert.us/replica-dd7f63b5-4f65-4b6c-bdfc-7dc7486f48f6":{}}}} }]},Spec:PersistentVolumeSpec{Capacity:ResourceList{storage: {{2147483648 0} {<nil>} 2Gi BinarySI},},PersistentVolumeSource:PersistentVolumeSource{GCEPersistentDisk:nil,AWSElasticBlockStore:nil,HostPath:nil,Glusterfs:nil,NFS:nil,RBD:nil,ISCSI:nil,Cinder:nil,CephFS:nil,FC:nil,Flocker:nil,FlexVolume:nil,AzureFile:nil,VsphereVolume:nil,Quobyte:nil,AzureDisk:nil,PhotonPersistentDisk:nil,PortworxVolume:nil,ScaleIO:nil,Local:nil,StorageOS:nil,CSI:&CSIPersistentVolumeSource{Driver:disk.csi.chert.us,VolumeHandle:pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b,ReadOnly:false,FSType:,VolumeAttributes:map[string]string{disk.chert.us/replica-count: 2,disk.chert.us/replicas: [{"node_name":"csw-aws-1","node_uid":"dd7f63b5-4f65-4b6c-bdfc-7dc7486f48f6","disk_pci_address":"0000:00:1f.0","lvol_uuid":"95968e09-0538-4dfd-a15c-a5a59fe9ed5e","lvol_name":"vol_pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b_replica_0","lvs_name":"lvs_csw-aws-1_0000-00-1f-0","nqn":null,"target_ip":null,"target_port":null,"health":"online"},{"node_name":"csw-aws-2","node_uid":"494bbb5d-ed0b-4b19-9085-99055357ad39","disk_pci_address":"0000:00:1f.0","lvol_uuid":"1c84ab00-6bdf-4f30-8245-994263729a93","lvol_name":"vol_pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b_replica_1","lvs_name":"lvs_csw-aws-2_0000-00-1f-0","nqn":null,"target_ip":null,"target_port":null,"health":"online"}],disk.chert.us/role: block,size: 2Gi,storage.kubernetes.io/csiProvisionerIdentity: 1790969189038-2815-disk.csi.chert.us,},ControllerPublishSecretRef:nil,NodeStageSecretRef:nil,NodePublishSecretRef:nil,ControllerExpandSecretRef:nil,NodeExpandSecretRef:nil,},},AccessModes:[ReadWriteOnce],ClaimRef:&ObjectReference{Kind:PersistentVolumeClaim,Namespace:chainsaw-novel-katydid,Name:rebuild-pvc,UID:b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b,APIVersion:v1,ResourceVersion:7453,FieldPath:,},PersistentVolumeReclaimPolicy:Delete,StorageClassName:flint-rebuild-2r,MountOptions:[],VolumeMode:*Filesystem,NodeAffinity:nil,},Status:PersistentVolumeStatus{Phase:Released,Message:,Reason:,LastPhaseTransitionTime:2026-10-02 19:31:01 +0000 UTC,},}
+I1002 19:31:36.170846       1 controller.go:1239] shouldDelete volume "pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b"
+I1002 19:31:36.170857       1 controller.go:1269] shouldDelete volume "pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b" is true
+I1002 19:31:36.170861       1 controller.go:1113] shouldDelete Volume: "pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b"
+I1002 19:31:36.170869       1 controller.go:1509] delete "pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b": started
+I1002 19:31:36.170880       1 controller.go:1279] volume pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b does not need any deletion secrets
+E1002 19:31:36.170897       1 controller.go:1519] delete "pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b": volume deletion failed: persistentvolume pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b is still attached to node csw-aws-2
+W1002 19:31:36.170921       1 controller.go:989] Retrying syncing volume "pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b", failure 0
+E1002 19:31:36.170938       1 controller.go:1007] error syncing volume "pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b": persistentvolume pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b is still attached to node csw-aws-2
+I1002 19:31:36.173868       1 event.go:298] Event(v1.ObjectReference{Kind:"PersistentVolume", Namespace:"", Name:"pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b", UID:"696d7157-2611-45ea-b2b5-a125268e4d67", APIVersion:"v1", ResourceVersion:"8590", FieldPath:""}): type: 'Warning' reason: 'VolumeFailedDelete' persistentvolume pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b is still attached to node csw-aws-2
+I1002 19:31:37.171659       1 controller.go:1152] handleProtectionFinalizer Volume : &PersistentVolume{ObjectMeta:{pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b    696d7157-2611-45ea-b2b5-a125268e4d67 8590 0 2026-10-02 19:26:34 +0000 UTC <nil> <nil> map[disk.chert.us/replica-494bbb5d-ed0b-4b19-9085-99055357ad39:true disk.chert.us/replica-dd7f63b5-4f65-4b6c-bdfc-7dc7486f48f6:true] map[chert.us/block-device-backend:Nvmeof chert.us/chain-gen:1 chert.us/nvme-device:nvme2 chert.us/nvmeof-nqn:nqn.2024-11.com.flint:volume:pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b disk.chert.us/filesystem-initialized:true disk.chert.us/replica-health:{"configured":1,"observed_by":"csw-aws-2","state":"online","total":2} disk.chert.us/replica-sync-state:{"current_epoch":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-5","epochs":[{"name":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-1","recorded_at":"2026-10-02T19:27:28Z"},{"name":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-2","recorded_at":"2026-10-02T19:28:28Z"},{"name":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-3","recorded_at":"2026-10-02T19:29:28Z"},{"name":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-4","recorded_at":"2026-10-02T19:30:31Z"},{"name":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-5","recorded_at":"2026-10-02T19:31:28Z"}],"writer_set":{"lvol_uuids":["1c84ab00-6bdf-4f30-8245-994263729a93","95968e09-0538-4dfd-a15c-a5a59fe9ed5e"],"since":"2026-10-02T19:30:31Z"},"replicas":[{"node_name":"csw-aws-1","node_uid":"dd7f63b5-4f65-4b6c-bdfc-7dc7486f48f6","lvol_uuid":"95968e09-0538-4dfd-a15c-a5a59fe9ed5e","sync_state":"in_sync","last_epoch":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-5","since":"2026-10-02T19:30:31Z","reason":"admitted at reassembly after fenced final delta","active_lvol_uuid":"c5ba3560-7141-45c3-be2b-159b4bc7789e"},{"node_name":"csw-aws-2","node_uid":"494bbb5d-ed0b-4b19-9085-99055357ad39","lvol_uuid":"1c84ab00-6bdf-4f30-8245-994263729a93","sync_state":"in_sync","last_epoch":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-5"}]} pv.kubernetes.io/provisioned-by:disk.csi.chert.us volume.kubernetes.io/provisioner-deletion-secret-name: volume.kubernetes.io/provisioner-deletion-secret-namespace:] [] [kubernetes.io/pv-protection external-attacher/disk-csi-chert-us] [{csi-attacher Update v1 2026-10-02 19:26:34 +0000 UTC FieldsV1 {"f:metadata":{"f:finalizers":{"v:\"external-attacher/disk-csi-chert-us\"":{}}}} } {csi-provisioner Update v1 2026-10-02 19:26:34 +0000 UTC FieldsV1 {"f:metadata":{"f:annotations":{".":{},"f:pv.kubernetes.io/provisioned-by":{},"f:volume.kubernetes.io/provisioner-deletion-secret-name":{},"f:volume.kubernetes.io/provisioner-deletion-secret-namespace":{}}},"f:spec":{"f:accessModes":{},"f:capacity":{".":{},"f:storage":{}},"f:claimRef":{".":{},"f:apiVersion":{},"f:kind":{},"f:name":{},"f:namespace":{},"f:resourceVersion":{},"f:uid":{}},"f:csi":{".":{},"f:driver":{},"f:volumeAttributes":{".":{},"f:disk.chert.us/replica-count":{},"f:disk.chert.us/replicas":{},"f:disk.chert.us/role":{},"f:size":{},"f:storage.kubernetes.io/csiProvisionerIdentity":{}},"f:volumeHandle":{}},"f:persistentVolumeReclaimPolicy":{},"f:storageClassName":{},"f:volumeMode":{}}} } {kube-controller-manager Update v1 2026-10-02 19:31:01 +0000 UTC FieldsV1 {"f:status":{"f:phase":{}}} status} {unknown Update v1 2026-10-02 19:31:28 +0000 UTC FieldsV1 {"f:metadata":{"f:annotations":{"f:chert.us/block-device-backend":{},"f:chert.us/chain-gen":{},"f:chert.us/nvme-device":{},"f:chert.us/nvmeof-nqn":{},"f:disk.chert.us/filesystem-initialized":{},"f:disk.chert.us/replica-health":{},"f:disk.chert.us/replica-sync-state":{}},"f:labels":{".":{},"f:disk.chert.us/replica-494bbb5d-ed0b-4b19-9085-99055357ad39":{},"f:disk.chert.us/replica-dd7f63b5-4f65-4b6c-bdfc-7dc7486f48f6":{}}}} }]},Spec:PersistentVolumeSpec{Capacity:ResourceList{storage: {{2147483648 0} {<nil>} 2Gi BinarySI},},PersistentVolumeSource:PersistentVolumeSource{GCEPersistentDisk:nil,AWSElasticBlockStore:nil,HostPath:nil,Glusterfs:nil,NFS:nil,RBD:nil,ISCSI:nil,Cinder:nil,CephFS:nil,FC:nil,Flocker:nil,FlexVolume:nil,AzureFile:nil,VsphereVolume:nil,Quobyte:nil,AzureDisk:nil,PhotonPersistentDisk:nil,PortworxVolume:nil,ScaleIO:nil,Local:nil,StorageOS:nil,CSI:&CSIPersistentVolumeSource{Driver:disk.csi.chert.us,VolumeHandle:pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b,ReadOnly:false,FSType:,VolumeAttributes:map[string]string{disk.chert.us/replica-count: 2,disk.chert.us/replicas: [{"node_name":"csw-aws-1","node_uid":"dd7f63b5-4f65-4b6c-bdfc-7dc7486f48f6","disk_pci_address":"0000:00:1f.0","lvol_uuid":"95968e09-0538-4dfd-a15c-a5a59fe9ed5e","lvol_name":"vol_pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b_replica_0","lvs_name":"lvs_csw-aws-1_0000-00-1f-0","nqn":null,"target_ip":null,"target_port":null,"health":"online"},{"node_name":"csw-aws-2","node_uid":"494bbb5d-ed0b-4b19-9085-99055357ad39","disk_pci_address":"0000:00:1f.0","lvol_uuid":"1c84ab00-6bdf-4f30-8245-994263729a93","lvol_name":"vol_pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b_replica_1","lvs_name":"lvs_csw-aws-2_0000-00-1f-0","nqn":null,"target_ip":null,"target_port":null,"health":"online"}],disk.chert.us/role: block,size: 2Gi,storage.kubernetes.io/csiProvisionerIdentity: 1790969189038-2815-disk.csi.chert.us,},ControllerPublishSecretRef:nil,NodeStageSecretRef:nil,NodePublishSecretRef:nil,ControllerExpandSecretRef:nil,NodeExpandSecretRef:nil,},},AccessModes:[ReadWriteOnce],ClaimRef:&ObjectReference{Kind:PersistentVolumeClaim,Namespace:chainsaw-novel-katydid,Name:rebuild-pvc,UID:b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b,APIVersion:v1,ResourceVersion:7453,FieldPath:,},PersistentVolumeReclaimPolicy:Delete,StorageClassName:flint-rebuild-2r,MountOptions:[],VolumeMode:*Filesystem,NodeAffinity:nil,},Status:PersistentVolumeStatus{Phase:Released,Message:,Reason:,LastPhaseTransitionTime:2026-10-02 19:31:01 +0000 UTC,},}
+I1002 19:31:37.171905       1 controller.go:1239] shouldDelete volume "pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b"
+I1002 19:31:37.171913       1 controller.go:1269] shouldDelete volume "pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b" is true
+I1002 19:31:37.171917       1 controller.go:1113] shouldDelete Volume: "pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b"
+I1002 19:31:37.171926       1 controller.go:1509] delete "pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b": started
+I1002 19:31:37.171937       1 controller.go:1279] volume pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b does not need any deletion secrets
+I1002 19:31:37.171954       1 connection.go:193] GRPC call: /csi.v1.Controller/DeleteVolume
+I1002 19:31:37.171958       1 connection.go:194] GRPC request: {"volume_id":"pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b"}
+I1002 19:31:37.817172       1 connection.go:200] GRPC response: {}
+I1002 19:31:37.817324       1 connection.go:201] GRPC error: <nil>
+I1002 19:31:37.817404       1 controller.go:1524] delete "pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b": volume deleted
+I1002 19:31:37.825358       1 controller.go:1569] delete "pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b": persistentvolume deleted succeeded
+I1002 19:31:37.825402       1 controller.go:1152] handleProtectionFinalizer Volume : &PersistentVolume{ObjectMeta:{pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b    696d7157-2611-45ea-b2b5-a125268e4d67 8664 0 2026-10-02 19:26:34 +0000 UTC 2026-10-02 19:31:37 +0000 UTC 0xc000449508 map[disk.chert.us/replica-494bbb5d-ed0b-4b19-9085-99055357ad39:true disk.chert.us/replica-dd7f63b5-4f65-4b6c-bdfc-7dc7486f48f6:true] map[chert.us/block-device-backend:Nvmeof chert.us/chain-gen:1 chert.us/nvme-device:nvme2 chert.us/nvmeof-nqn:nqn.2024-11.com.flint:volume:pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b disk.chert.us/filesystem-initialized:true disk.chert.us/replica-health:{"configured":1,"observed_by":"csw-aws-2","state":"online","total":2} disk.chert.us/replica-sync-state:{"current_epoch":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-5","epochs":[{"name":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-1","recorded_at":"2026-10-02T19:27:28Z"},{"name":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-2","recorded_at":"2026-10-02T19:28:28Z"},{"name":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-3","recorded_at":"2026-10-02T19:29:28Z"},{"name":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-4","recorded_at":"2026-10-02T19:30:31Z"},{"name":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-5","recorded_at":"2026-10-02T19:31:28Z"}],"writer_set":{"lvol_uuids":["1c84ab00-6bdf-4f30-8245-994263729a93","95968e09-0538-4dfd-a15c-a5a59fe9ed5e"],"since":"2026-10-02T19:30:31Z"},"replicas":[{"node_name":"csw-aws-1","node_uid":"dd7f63b5-4f65-4b6c-bdfc-7dc7486f48f6","lvol_uuid":"95968e09-0538-4dfd-a15c-a5a59fe9ed5e","sync_state":"in_sync","last_epoch":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-5","since":"2026-10-02T19:30:31Z","reason":"admitted at reassembly after fenced final delta","active_lvol_uuid":"c5ba3560-7141-45c3-be2b-159b4bc7789e"},{"node_name":"csw-aws-2","node_uid":"494bbb5d-ed0b-4b19-9085-99055357ad39","lvol_uuid":"1c84ab00-6bdf-4f30-8245-994263729a93","sync_state":"in_sync","last_epoch":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-5"}]} pv.kubernetes.io/provisioned-by:disk.csi.chert.us volume.kubernetes.io/provisioner-deletion-secret-name: volume.kubernetes.io/provisioner-deletion-secret-namespace:] [] [kubernetes.io/pv-protection external-attacher/disk-csi-chert-us] [{csi-attacher Update v1 2026-10-02 19:26:34 +0000 UTC FieldsV1 {"f:metadata":{"f:finalizers":{"v:\"external-attacher/disk-csi-chert-us\"":{}}}} } {csi-provisioner Update v1 2026-10-02 19:26:34 +0000 UTC FieldsV1 {"f:metadata":{"f:annotations":{".":{},"f:pv.kubernetes.io/provisioned-by":{},"f:volume.kubernetes.io/provisioner-deletion-secret-name":{},"f:volume.kubernetes.io/provisioner-deletion-secret-namespace":{}}},"f:spec":{"f:accessModes":{},"f:capacity":{".":{},"f:storage":{}},"f:claimRef":{".":{},"f:apiVersion":{},"f:kind":{},"f:name":{},"f:namespace":{},"f:resourceVersion":{},"f:uid":{}},"f:csi":{".":{},"f:driver":{},"f:volumeAttributes":{".":{},"f:disk.chert.us/replica-count":{},"f:disk.chert.us/replicas":{},"f:disk.chert.us/role":{},"f:size":{},"f:storage.kubernetes.io/csiProvisionerIdentity":{}},"f:volumeHandle":{}},"f:persistentVolumeReclaimPolicy":{},"f:storageClassName":{},"f:volumeMode":{}}} } {kube-controller-manager Update v1 2026-10-02 19:31:01 +0000 UTC FieldsV1 {"f:status":{"f:phase":{}}} status} {unknown Update v1 2026-10-02 19:31:28 +0000 UTC FieldsV1 {"f:metadata":{"f:annotations":{"f:chert.us/block-device-backend":{},"f:chert.us/chain-gen":{},"f:chert.us/nvme-device":{},"f:chert.us/nvmeof-nqn":{},"f:disk.chert.us/filesystem-initialized":{},"f:disk.chert.us/replica-health":{},"f:disk.chert.us/replica-sync-state":{}},"f:labels":{".":{},"f:disk.chert.us/replica-494bbb5d-ed0b-4b19-9085-99055357ad39":{},"f:disk.chert.us/replica-dd7f63b5-4f65-4b6c-bdfc-7dc7486f48f6":{}}}} }]},Spec:PersistentVolumeSpec{Capacity:ResourceList{storage: {{2147483648 0} {<nil>} 2Gi BinarySI},},PersistentVolumeSource:PersistentVolumeSource{GCEPersistentDisk:nil,AWSElasticBlockStore:nil,HostPath:nil,Glusterfs:nil,NFS:nil,RBD:nil,ISCSI:nil,Cinder:nil,CephFS:nil,FC:nil,Flocker:nil,FlexVolume:nil,AzureFile:nil,VsphereVolume:nil,Quobyte:nil,AzureDisk:nil,PhotonPersistentDisk:nil,PortworxVolume:nil,ScaleIO:nil,Local:nil,StorageOS:nil,CSI:&CSIPersistentVolumeSource{Driver:disk.csi.chert.us,VolumeHandle:pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b,ReadOnly:false,FSType:,VolumeAttributes:map[string]string{disk.chert.us/replica-count: 2,disk.chert.us/replicas: [{"node_name":"csw-aws-1","node_uid":"dd7f63b5-4f65-4b6c-bdfc-7dc7486f48f6","disk_pci_address":"0000:00:1f.0","lvol_uuid":"95968e09-0538-4dfd-a15c-a5a59fe9ed5e","lvol_name":"vol_pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b_replica_0","lvs_name":"lvs_csw-aws-1_0000-00-1f-0","nqn":null,"target_ip":null,"target_port":null,"health":"online"},{"node_name":"csw-aws-2","node_uid":"494bbb5d-ed0b-4b19-9085-99055357ad39","disk_pci_address":"0000:00:1f.0","lvol_uuid":"1c84ab00-6bdf-4f30-8245-994263729a93","lvol_name":"vol_pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b_replica_1","lvs_name":"lvs_csw-aws-2_0000-00-1f-0","nqn":null,"target_ip":null,"target_port":null,"health":"online"}],disk.chert.us/role: block,size: 2Gi,storage.kubernetes.io/csiProvisionerIdentity: 1790969189038-2815-disk.csi.chert.us,},ControllerPublishSecretRef:nil,NodeStageSecretRef:nil,NodePublishSecretRef:nil,ControllerExpandSecretRef:nil,NodeExpandSecretRef:nil,},},AccessModes:[ReadWriteOnce],ClaimRef:&ObjectReference{Kind:PersistentVolumeClaim,Namespace:chainsaw-novel-katydid,Name:rebuild-pvc,UID:b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b,APIVersion:v1,ResourceVersion:7453,FieldPath:,},PersistentVolumeReclaimPolicy:Delete,StorageClassName:flint-rebuild-2r,MountOptions:[],VolumeMode:*Filesystem,NodeAffinity:nil,},Status:PersistentVolumeStatus{Phase:Released,Message:,Reason:,LastPhaseTransitionTime:2026-10-02 19:31:01 +0000 UTC,},}
+I1002 19:31:37.825542       1 controller.go:1239] shouldDelete volume "pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b"
+I1002 19:31:37.825549       1 controller.go:1254] shouldDelete volume "pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b" is false: DeletionTimestamp != nil
+I1002 19:31:37.836942       1 controller.go:1152] handleProtectionFinalizer Volume : &PersistentVolume{ObjectMeta:{pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b    696d7157-2611-45ea-b2b5-a125268e4d67 8665 0 2026-10-02 19:26:34 +0000 UTC 2026-10-02 19:31:37 +0000 UTC 0xc0005761e8 map[disk.chert.us/replica-494bbb5d-ed0b-4b19-9085-99055357ad39:true disk.chert.us/replica-dd7f63b5-4f65-4b6c-bdfc-7dc7486f48f6:true] map[chert.us/block-device-backend:Nvmeof chert.us/chain-gen:1 chert.us/nvme-device:nvme2 chert.us/nvmeof-nqn:nqn.2024-11.com.flint:volume:pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b disk.chert.us/filesystem-initialized:true disk.chert.us/replica-health:{"configured":1,"observed_by":"csw-aws-2","state":"online","total":2} disk.chert.us/replica-sync-state:{"current_epoch":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-5","epochs":[{"name":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-1","recorded_at":"2026-10-02T19:27:28Z"},{"name":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-2","recorded_at":"2026-10-02T19:28:28Z"},{"name":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-3","recorded_at":"2026-10-02T19:29:28Z"},{"name":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-4","recorded_at":"2026-10-02T19:30:31Z"},{"name":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-5","recorded_at":"2026-10-02T19:31:28Z"}],"writer_set":{"lvol_uuids":["1c84ab00-6bdf-4f30-8245-994263729a93","95968e09-0538-4dfd-a15c-a5a59fe9ed5e"],"since":"2026-10-02T19:30:31Z"},"replicas":[{"node_name":"csw-aws-1","node_uid":"dd7f63b5-4f65-4b6c-bdfc-7dc7486f48f6","lvol_uuid":"95968e09-0538-4dfd-a15c-a5a59fe9ed5e","sync_state":"in_sync","last_epoch":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-5","since":"2026-10-02T19:30:31Z","reason":"admitted at reassembly after fenced final delta","active_lvol_uuid":"c5ba3560-7141-45c3-be2b-159b4bc7789e"},{"node_name":"csw-aws-2","node_uid":"494bbb5d-ed0b-4b19-9085-99055357ad39","lvol_uuid":"1c84ab00-6bdf-4f30-8245-994263729a93","sync_state":"in_sync","last_epoch":"epoch-pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b-5"}]} pv.kubernetes.io/provisioned-by:disk.csi.chert.us volume.kubernetes.io/provisioner-deletion-secret-name: volume.kubernetes.io/provisioner-deletion-secret-namespace:] [] [kubernetes.io/pv-protection] [{csi-provisioner Update v1 2026-10-02 19:26:34 +0000 UTC FieldsV1 {"f:metadata":{"f:annotations":{".":{},"f:pv.kubernetes.io/provisioned-by":{},"f:volume.kubernetes.io/provisioner-deletion-secret-name":{},"f:volume.kubernetes.io/provisioner-deletion-secret-namespace":{}}},"f:spec":{"f:accessModes":{},"f:capacity":{".":{},"f:storage":{}},"f:claimRef":{".":{},"f:apiVersion":{},"f:kind":{},"f:name":{},"f:namespace":{},"f:resourceVersion":{},"f:uid":{}},"f:csi":{".":{},"f:driver":{},"f:volumeAttributes":{".":{},"f:disk.chert.us/replica-count":{},"f:disk.chert.us/replicas":{},"f:disk.chert.us/role":{},"f:size":{},"f:storage.kubernetes.io/csiProvisionerIdentity":{}},"f:volumeHandle":{}},"f:persistentVolumeReclaimPolicy":{},"f:storageClassName":{},"f:volumeMode":{}}} } {kube-controller-manager Update v1 2026-10-02 19:31:01 +0000 UTC FieldsV1 {"f:status":{"f:phase":{}}} status} {unknown Update v1 2026-10-02 19:31:28 +0000 UTC FieldsV1 {"f:metadata":{"f:annotations":{"f:chert.us/block-device-backend":{},"f:chert.us/chain-gen":{},"f:chert.us/nvme-device":{},"f:chert.us/nvmeof-nqn":{},"f:disk.chert.us/filesystem-initialized":{},"f:disk.chert.us/replica-health":{},"f:disk.chert.us/replica-sync-state":{}},"f:labels":{".":{},"f:disk.chert.us/replica-494bbb5d-ed0b-4b19-9085-99055357ad39":{},"f:disk.chert.us/replica-dd7f63b5-4f65-4b6c-bdfc-7dc7486f48f6":{}}}} }]},Spec:PersistentVolumeSpec{Capacity:ResourceList{storage: {{2147483648 0} {<nil>} 2Gi BinarySI},},PersistentVolumeSource:PersistentVolumeSource{GCEPersistentDisk:nil,AWSElasticBlockStore:nil,HostPath:nil,Glusterfs:nil,NFS:nil,RBD:nil,ISCSI:nil,Cinder:nil,CephFS:nil,FC:nil,Flocker:nil,FlexVolume:nil,AzureFile:nil,VsphereVolume:nil,Quobyte:nil,AzureDisk:nil,PhotonPersistentDisk:nil,PortworxVolume:nil,ScaleIO:nil,Local:nil,StorageOS:nil,CSI:&CSIPersistentVolumeSource{Driver:disk.csi.chert.us,VolumeHandle:pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b,ReadOnly:false,FSType:,VolumeAttributes:map[string]string{disk.chert.us/replica-count: 2,disk.chert.us/replicas: [{"node_name":"csw-aws-1","node_uid":"dd7f63b5-4f65-4b6c-bdfc-7dc7486f48f6","disk_pci_address":"0000:00:1f.0","lvol_uuid":"95968e09-0538-4dfd-a15c-a5a59fe9ed5e","lvol_name":"vol_pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b_replica_0","lvs_name":"lvs_csw-aws-1_0000-00-1f-0","nqn":null,"target_ip":null,"target_port":null,"health":"online"},{"node_name":"csw-aws-2","node_uid":"494bbb5d-ed0b-4b19-9085-99055357ad39","disk_pci_address":"0000:00:1f.0","lvol_uuid":"1c84ab00-6bdf-4f30-8245-994263729a93","lvol_name":"vol_pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b_replica_1","lvs_name":"lvs_csw-aws-2_0000-00-1f-0","nqn":null,"target_ip":null,"target_port":null,"health":"online"}],disk.chert.us/role: block,size: 2Gi,storage.kubernetes.io/csiProvisionerIdentity: 1790969189038-2815-disk.csi.chert.us,},ControllerPublishSecretRef:nil,NodeStageSecretRef:nil,NodePublishSecretRef:nil,ControllerExpandSecretRef:nil,NodeExpandSecretRef:nil,},},AccessModes:[ReadWriteOnce],ClaimRef:&ObjectReference{Kind:PersistentVolumeClaim,Namespace:chainsaw-novel-katydid,Name:rebuild-pvc,UID:b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b,APIVersion:v1,ResourceVersion:7453,FieldPath:,},PersistentVolumeReclaimPolicy:Delete,StorageClassName:flint-rebuild-2r,MountOptions:[],VolumeMode:*Filesystem,NodeAffinity:nil,},Status:PersistentVolumeStatus{Phase:Released,Message:,Reason:,LastPhaseTransitionTime:2026-10-02 19:31:01 +0000 UTC,},}
+I1002 19:31:37.837242       1 controller.go:1239] shouldDelete volume "pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b"
+I1002 19:31:37.837250       1 controller.go:1254] shouldDelete volume "pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b" is false: DeletionTimestamp != nil
+I1002 19:37:53.990542       1 reflector.go:790] k8s.io/client-go/informers/factory.go:150: Watch close - *v1.CSINode total 7 items received
+I1002 19:38:09.985563       1 reflector.go:790] k8s.io/client-go/informers/factory.go:150: Watch close - *v1.PersistentVolumeClaim total 16 items received
+I1002 19:38:51.988230       1 reflector.go:790] k8s.io/client-go/informers/factory.go:150: Watch close - *v1.StorageClass total 8 items received
+I1002 19:39:42.074477       1 reflector.go:790] sigs.k8s.io/sig-storage-lib-external-provisioner/v9/controller/controller.go:848: Watch close - *v1.StorageClass total 10 items received
+I1002 19:40:06.985822       1 reflector.go:790] k8s.io/client-go/informers/factory.go:150: Watch close - *v1.VolumeAttachment total 12 items received
+I1002 19:40:15.991781       1 reflector.go:790] k8s.io/client-go/informers/factory.go:150: Watch close - *v1.Node total 16 items received
+I1002 19:40:40.074598       1 reflector.go:790] sigs.k8s.io/sig-storage-lib-external-provisioner/v9/controller/controller.go:845: Watch close - *v1.PersistentVolume total 14 items received
+I1002 19:44:54.989635       1 reflector.go:790] k8s.io/client-go/informers/factory.go:150: Watch close - *v1.StorageClass total 8 items received
+I1002 19:45:09.992004       1 reflector.go:790] k8s.io/client-go/informers/factory.go:150: Watch close - *v1.CSINode total 8 items received
+I1002 19:45:57.987407       1 reflector.go:790] k8s.io/client-go/informers/factory.go:150: Watch close - *v1.PersistentVolumeClaim total 11 items received
+I1002 19:46:17.993214       1 reflector.go:790] k8s.io/client-go/informers/factory.go:150: Watch close - *v1.Node total 12 items received
+I1002 19:46:35.983164       1 reflector.go:378] k8s.io/client-go/informers/factory.go:150: forcing resync
+I1002 19:46:36.073428       1 reflector.go:378] sigs.k8s.io/sig-storage-lib-external-provisioner/v9/controller/controller.go:845: forcing resync
+I1002 19:46:50.076492       1 reflector.go:790] sigs.k8s.io/sig-storage-lib-external-provisioner/v9/controller/controller.go:848: Watch close - *v1.StorageClass total 8 items received
+I1002 19:31:36.348022       1 main.go:97] Version: v4.4.0
+I1002 19:31:36.349101       1 connection.go:164] Connecting to unix:///csi/csi.sock
+I1002 19:31:36.350742       1 common.go:138] Probing CSI driver for readiness
+I1002 19:31:36.350797       1 connection.go:193] GRPC call: /csi.v1.Identity/Probe
+I1002 19:31:36.350839       1 connection.go:194] GRPC request: {}
+I1002 19:31:36.353288       1 connection.go:200] GRPC response: {"ready":{"value":true}}
+I1002 19:31:36.353341       1 connection.go:201] GRPC error: <nil>
+I1002 19:31:36.353360       1 connection.go:193] GRPC call: /csi.v1.Identity/GetPluginInfo
+I1002 19:31:36.353379       1 connection.go:194] GRPC request: {}
+I1002 19:31:36.353769       1 connection.go:200] GRPC response: {"name":"disk.csi.chert.us","vendor_version":"1.3.0"}
+I1002 19:31:36.353847       1 connection.go:201] GRPC error: <nil>
+I1002 19:31:36.353890       1 main.go:154] CSI driver name: "disk.csi.chert.us"
+I1002 19:31:36.353917       1 connection.go:193] GRPC call: /csi.v1.Identity/GetPluginCapabilities
+I1002 19:31:36.353932       1 connection.go:194] GRPC request: {}
+I1002 19:31:36.354437       1 connection.go:200] GRPC response: {"capabilities":[{"Type":{"Service":{"type":1}}},{"Type":{"Service":{"type":2}}}]}
+I1002 19:31:36.354518       1 connection.go:201] GRPC error: <nil>
+I1002 19:31:36.354560       1 connection.go:193] GRPC call: /csi.v1.Controller/ControllerGetCapabilities
+I1002 19:31:36.354586       1 connection.go:194] GRPC request: {}
+I1002 19:31:36.355075       1 connection.go:200] GRPC response: {"capabilities":[{"Type":{"Rpc":{"type":1}}},{"Type":{"Rpc":{"type":2}}},{"Type":{"Rpc":{"type":5}}},{"Type":{"Rpc":{"type":7}}},{"Type":{"Rpc":{"type":9}}}]}
+I1002 19:31:36.355115       1 connection.go:201] GRPC error: <nil>
+I1002 19:31:36.355168       1 main.go:230] CSI driver supports ControllerPublishUnpublish, using real CSI handler
+I1002 19:31:36.355397       1 controller.go:130] Starting CSI attacher
+I1002 19:31:36.355517       1 reflector.go:289] Starting reflector *v1.PersistentVolume (10m0s) from k8s.io/client-go/informers/factory.go:150
+I1002 19:31:36.355670       1 reflector.go:325] Listing and watching *v1.PersistentVolume from k8s.io/client-go/informers/factory.go:150
+I1002 19:31:36.355586       1 reflector.go:289] Starting reflector *v1.VolumeAttachment (10m0s) from k8s.io/client-go/informers/factory.go:150
+I1002 19:31:36.356002       1 reflector.go:325] Listing and watching *v1.VolumeAttachment from k8s.io/client-go/informers/factory.go:150
+I1002 19:31:36.355616       1 reflector.go:289] Starting reflector *v1.CSINode (10m0s) from k8s.io/client-go/informers/factory.go:150
+I1002 19:31:36.356799       1 reflector.go:325] Listing and watching *v1.CSINode from k8s.io/client-go/informers/factory.go:150
+I1002 19:31:36.456091       1 shared_informer.go:341] caches populated
+I1002 19:31:36.456457       1 controller.go:210] Started VA processing "csi-f70c8307da6d87adcfb52f49d319102ff412cfb430d132e46e22fc0b5af0bf37"
+I1002 19:31:36.456540       1 csi_handler.go:224] CSIHandler: processing VA "csi-f70c8307da6d87adcfb52f49d319102ff412cfb430d132e46e22fc0b5af0bf37"
+I1002 19:31:36.456576       1 csi_handler.go:275] Starting detach operation for "csi-f70c8307da6d87adcfb52f49d319102ff412cfb430d132e46e22fc0b5af0bf37"
+I1002 19:31:36.456664       1 csi_handler.go:282] Detaching "csi-f70c8307da6d87adcfb52f49d319102ff412cfb430d132e46e22fc0b5af0bf37"
+I1002 19:31:36.456736       1 csi_handler.go:740] Found NodeID csw-aws-2 in CSINode csw-aws-2
+I1002 19:31:36.456815       1 connection.go:193] GRPC call: /csi.v1.Controller/ControllerUnpublishVolume
+I1002 19:31:36.456852       1 connection.go:194] GRPC request: {"node_id":"csw-aws-2","volume_id":"pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b"}
+I1002 19:31:36.463675       1 connection.go:200] GRPC response: {}
+I1002 19:31:36.463766       1 connection.go:201] GRPC error: <nil>
+I1002 19:31:36.463837       1 csi_handler.go:581] Detached "csi-f70c8307da6d87adcfb52f49d319102ff412cfb430d132e46e22fc0b5af0bf37"
+I1002 19:31:36.463928       1 util.go:80] Marking as detached "csi-f70c8307da6d87adcfb52f49d319102ff412cfb430d132e46e22fc0b5af0bf37"
+I1002 19:31:36.476120       1 controller.go:261] Started PV processing "pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b"
+I1002 19:31:36.476138       1 csi_handler.go:623] CSIHandler: processing PV "pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b"
+I1002 19:31:36.476147       1 csi_handler.go:645] CSIHandler: processing PV "pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b": no deletion timestamp, ignoring
+I1002 19:31:36.479603       1 util.go:106] Finalizer removed from "csi-f70c8307da6d87adcfb52f49d319102ff412cfb430d132e46e22fc0b5af0bf37"
+I1002 19:31:36.479623       1 csi_handler.go:295] Fully detached "csi-f70c8307da6d87adcfb52f49d319102ff412cfb430d132e46e22fc0b5af0bf37"
+I1002 19:31:36.479631       1 csi_handler.go:240] CSIHandler: finished processing "csi-f70c8307da6d87adcfb52f49d319102ff412cfb430d132e46e22fc0b5af0bf37"
+I1002 19:31:36.479794       1 controller.go:210] Started VA processing "csi-f70c8307da6d87adcfb52f49d319102ff412cfb430d132e46e22fc0b5af0bf37"
+I1002 19:31:36.479875       1 controller.go:217] VA "csi-f70c8307da6d87adcfb52f49d319102ff412cfb430d132e46e22fc0b5af0bf37" deleted, ignoring
+I1002 19:31:37.826100       1 controller.go:261] Started PV processing "pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b"
+I1002 19:31:37.826199       1 csi_handler.go:623] CSIHandler: processing PV "pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b"
+I1002 19:31:37.826300       1 csi_handler.go:684] CSIHandler: processing PV "pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b": no VA found, removing finalizer
+I1002 19:31:37.836609       1 csi_handler.go:706] Removed finalizer from PV "pvc-b3fd94cf-ac1b-4f8b-9d8d-e51683965c4b"
+I1002 19:38:27.369649       1 reflector.go:790] k8s.io/client-go/informers/factory.go:150: Watch close - *v1.VolumeAttachment total 10 items received
+I1002 19:38:55.372847       1 reflector.go:790] k8s.io/client-go/informers/factory.go:150: Watch close - *v1.CSINode total 9 items received
+I1002 19:40:57.372883       1 reflector.go:790] k8s.io/client-go/informers/factory.go:150: Watch close - *v1.PersistentVolume total 13 items received
+I1002 19:41:36.371673       1 reflector.go:378] k8s.io/client-go/informers/factory.go:150: forcing resync
+I1002 19:41:36.371872       1 reflector.go:378] k8s.io/client-go/informers/factory.go:150: forcing resync
+I1002 19:43:30.371601       1 reflector.go:790] k8s.io/client-go/informers/factory.go:150: Watch close - *v1.VolumeAttachment total 7 items received
+I1002 19:45:21.374433       1 reflector.go:790] k8s.io/client-go/informers/factory.go:150: Watch close - *v1.CSINode total 8 items received
+I1002 19:46:35.375157       1 reflector.go:790] k8s.io/client-go/informers/factory.go:150: Watch close - *v1.PersistentVolume total 7 items received
+I1002 19:31:36.757972       1 main.go:93] Version : v1.9.0
+I1002 19:31:36.758219       1 feature_gate.go:249] feature gates: &{map[]}
+I1002 19:31:36.759029       1 connection.go:164] Connecting to unix:///csi/csi.sock
+I1002 19:31:36.759885       1 common.go:138] Probing CSI driver for readiness
+I1002 19:31:36.759974       1 connection.go:193] GRPC call: /csi.v1.Identity/Probe
+I1002 19:31:36.760008       1 connection.go:194] GRPC request: {}
+I1002 19:31:36.765155       1 connection.go:200] GRPC response: {"ready":{"value":true}}
+I1002 19:31:36.765173       1 connection.go:201] GRPC error: <nil>
+I1002 19:31:36.765184       1 connection.go:193] GRPC call: /csi.v1.Identity/GetPluginInfo
+I1002 19:31:36.765187       1 connection.go:194] GRPC request: {}
+I1002 19:31:36.765653       1 connection.go:200] GRPC response: {"name":"disk.csi.chert.us","vendor_version":"1.3.0"}
+I1002 19:31:36.765714       1 connection.go:201] GRPC error: <nil>
+I1002 19:31:36.765786       1 main.go:141] CSI driver name: "disk.csi.chert.us"
+I1002 19:31:36.765849       1 connection.go:193] GRPC call: /csi.v1.Identity/GetPluginCapabilities
+I1002 19:31:36.765886       1 connection.go:194] GRPC request: {}
+I1002 19:31:36.766437       1 connection.go:200] GRPC response: {"capabilities":[{"Type":{"Service":{"type":1}}},{"Type":{"Service":{"type":2}}}]}
+I1002 19:31:36.766507       1 connection.go:201] GRPC error: <nil>
+I1002 19:31:36.766543       1 connection.go:193] GRPC call: /csi.v1.Controller/ControllerGetCapabilities
+I1002 19:31:36.766590       1 connection.go:194] GRPC request: {}
+I1002 19:31:36.767128       1 connection.go:200] GRPC response: {"capabilities":[{"Type":{"Rpc":{"type":1}}},{"Type":{"Rpc":{"type":2}}},{"Type":{"Rpc":{"type":5}}},{"Type":{"Rpc":{"type":7}}},{"Type":{"Rpc":{"type":9}}}]}
+I1002 19:31:36.767273       1 connection.go:201] GRPC error: <nil>
+I1002 19:31:36.767318       1 connection.go:193] GRPC call: /csi.v1.Controller/ControllerGetCapabilities
+I1002 19:31:36.767322       1 connection.go:194] GRPC request: {}
+I1002 19:31:36.767663       1 connection.go:200] GRPC response: {"capabilities":[{"Type":{"Rpc":{"type":1}}},{"Type":{"Rpc":{"type":2}}},{"Type":{"Rpc":{"type":5}}},{"Type":{"Rpc":{"type":7}}},{"Type":{"Rpc":{"type":9}}}]}
+I1002 19:31:36.767712       1 connection.go:201] GRPC error: <nil>
+I1002 19:31:36.767864       1 controller.go:120] Register Pod informer for resizer disk.csi.chert.us
+I1002 19:31:36.768002       1 controller.go:255] Starting external resizer disk.csi.chert.us
+I1002 19:31:36.768130       1 reflector.go:289] Starting reflector *v1.PersistentVolumeClaim (10m0s) from k8s.io/client-go/informers/factory.go:150
+I1002 19:31:36.768191       1 reflector.go:325] Listing and watching *v1.PersistentVolumeClaim from k8s.io/client-go/informers/factory.go:150
+I1002 19:31:36.768638       1 reflector.go:289] Starting reflector *v1.PersistentVolume (10m0s) from k8s.io/client-go/informers/factory.go:150
+I1002 19:31:36.769071       1 reflector.go:325] Listing and watching *v1.PersistentVolume from k8s.io/client-go/informers/factory.go:150
+I1002 19:31:36.768736       1 reflector.go:289] Starting reflector *v1.Pod (10m0s) from k8s.io/client-go/informers/factory.go:150
+I1002 19:31:36.769408       1 reflector.go:325] Listing and watching *v1.Pod from k8s.io/client-go/informers/factory.go:150
+I1002 19:31:36.969168       1 shared_informer.go:341] caches populated
+I1002 19:31:44.287992       1 controller.go:295] Started PVC processing "chainsaw-elegant-feline/expandable-pvc"
+I1002 19:31:44.288015       1 controller.go:318] PV bound to PVC "chainsaw-elegant-feline/expandable-pvc" is not created yet
+I1002 19:31:44.388268       1 controller.go:295] Started PVC processing "chainsaw-evident-sloth/rwx-test-pvc"
+I1002 19:31:44.388290       1 controller.go:318] PV bound to PVC "chainsaw-evident-sloth/rwx-test-pvc" is not created yet
+I1002 19:31:44.391163       1 controller.go:295] Started PVC processing "chainsaw-feasible-hen/test-pvc"
+I1002 19:31:44.391283       1 controller.go:318] PV bound to PVC "chainsaw-feasible-hen/test-pvc" is not created yet
+I1002 19:37:02.791480       1 reflector.go:790] k8s.io/client-go/informers/factory.go:150: Watch close - *v1.PersistentVolumeClaim total 14 items received
+I1002 19:40:47.838238       1 reflector.go:790] k8s.io/client-go/informers/factory.go:150: Watch close - *v1.PersistentVolume total 14 items received
+I1002 19:41:29.873317       1 reflector.go:790] k8s.io/client-go/informers/factory.go:150: Watch close - *v1.Pod total 32 items received
+I1002 19:41:36.785019       1 reflector.go:378] k8s.io/client-go/informers/factory.go:150: forcing resync
+I1002 19:41:36.785338       1 controller.go:295] Started PVC processing "chainsaw-elegant-feline/expandable-pvc"
+I1002 19:41:36.785414       1 controller.go:318] PV bound to PVC "chainsaw-elegant-feline/expandable-pvc" is not created yet
+I1002 19:41:36.785387       1 controller.go:295] Started PVC processing "chainsaw-evident-sloth/rwx-test-pvc"
+I1002 19:41:36.785546       1 controller.go:318] PV bound to PVC "chainsaw-evident-sloth/rwx-test-pvc" is not created yet
+I1002 19:41:36.871937       1 reflector.go:378] k8s.io/client-go/informers/factory.go:150: forcing resync
+I1002 19:43:56.793043       1 reflector.go:790] k8s.io/client-go/informers/factory.go:150: Watch close - *v1.PersistentVolumeClaim total 9 items received

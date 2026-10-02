@@ -609,12 +609,20 @@ done
 # Expect: each pod reports /dev/nvme1n1 as uninitialized.
 
 # 2. Initialize the local NVMe on each worker (blobstore creation).
+#    The API takes the disk's PCI ADDRESS, not its /dev path: a /dev path
+#    answers "Disk not found: <node>:/dev/nvme1n1" (measured 2026-10-02 on
+#    i4i.large, where the agent had already attached the instance store as
+#    a uring bdev, so its listed model is "URING bdev", not the EC2 model).
 for pod in $(kubectl get pods -n flint-system -l app=flint-csi-node -o name); do
-  echo "─── initializing /dev/nvme1n1 on $pod ───"
+  pci=$(kubectl exec -n flint-system "$pod" -c flint-csi-driver -- \
+    curl -sS -X POST http://localhost:9081/api/disks/uninitialized \
+      -H 'Content-Type: application/json' -d '{}' \
+    | jq -r '.uninitialized_disks[] | select(.device_name=="nvme1n1") | .pci_address')
+  echo "─── initializing nvme1n1 ($pci) on $pod ───"
   kubectl exec -n flint-system "$pod" -c flint-csi-driver -- \
     curl -sS -X POST http://localhost:9081/api/disks/initialize \
       -H 'Content-Type: application/json' \
-      -d '{"disks":["/dev/nvme1n1"]}' | jq .
+      -d "{\"disks\":[\"$pci\"]}" | jq .
 done
 
 # 3. Verify each disk is now Ready.

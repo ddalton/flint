@@ -1,0 +1,26 @@
+<testsuites name="chainsaw-report" time="178.779425" tests="8">
+  <testsuite name="tests-standard/snapshot-restore" tests="1" failures="0" errors="0" id="0" time="">
+    <testcase name="snapshot-restore" classname="" time="34.243194"></testcase>
+  </testsuite>
+  <testsuite name="tests-standard/rwx-single-replica" tests="1" failures="0" errors="0" id="0" time="">
+    <testcase name="rwx-single-replica" classname="" time="132.160936"></testcase>
+  </testsuite>
+  <testsuite name="tests-standard/rox-multi-pod" tests="1" failures="0" errors="0" id="0" time="">
+    <testcase name="rox-multi-pod" classname="" time="137.150577"></testcase>
+  </testsuite>
+  <testsuite name="tests-standard/multi-replica" tests="1" failures="0" errors="0" id="0" time="">
+    <testcase name="multi-replica" classname="" time="11.665783"></testcase>
+  </testsuite>
+  <testsuite name="tests-standard/ephemeral-inline" tests="1" failures="0" errors="0" id="0" time="">
+    <testcase name="ephemeral-inline" classname="" time="15.994262"></testcase>
+  </testsuite>
+  <testsuite name="tests-standard/rwo-pvc-migration" tests="1" failures="0" errors="0" id="0" time="">
+    <testcase name="rwo-pvc-migration" classname="" time="20.592688"></testcase>
+  </testsuite>
+  <testsuite name="tests-standard/pvc-clone" tests="1" failures="0" errors="0" id="0" time="">
+    <testcase name="pvc-clone" classname="" time="28.542459"></testcase>
+  </testsuite>
+  <testsuite name="tests-standard/volume-expansion" tests="1" failures="0" errors="0" id="0" time="">
+    <testcase name="volume-expansion" classname="" time="23.122018"></testcase>
+  </testsuite>
+</testsuites>

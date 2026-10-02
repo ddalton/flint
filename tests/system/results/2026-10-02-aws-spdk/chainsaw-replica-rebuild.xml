@@ -1,0 +1,5 @@
+<testsuites name="chainsaw-report" time="348.320555" tests="1">
+  <testsuite name="tests-replica-rebuild/replica-rebuild" tests="1" failures="0" errors="0" id="0" time="">
+    <testcase name="replica-rebuild" classname="" time="342.932192"></testcase>
+  </testsuite>
+</testsuites>

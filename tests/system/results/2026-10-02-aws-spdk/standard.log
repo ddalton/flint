@@ -1,0 +1,1143 @@
+Version: 0.2.15
+Loading config (chainsaw-standard.yaml)...
+- Using test file: chainsaw-test
+- TestDirs [tests-standard]
+- Quiet false
+- SkipDelete false
+- FailFast false
+- ReportFormat 'JUNIT-TEST'
+- ReportName 'chainsaw-standard'
+- ReportPath '/private/tmp/claude-503/-Users-ddalton-github-flint/04b1b4fc-8045-4244-87a1-599b98585b0c/scratchpad/aws-out'
+- Namespace ''
+- FastNamespaceDeletion false
+- FullName false
+- IncludeTestRegex ''
+- ExcludeTestRegex ''
+- ApplyTimeout 5m0s
+- AssertTimeout 5m0s
+- CleanupTimeout 5m0s
+- DeleteTimeout 5m0s
+- ErrorTimeout 5m0s
+- ExecTimeout 5m0s
+- DeletionPropagationPolicy Background
+- Parallel 4
+- Template false
+- NoCluster false
+- PauseOnFailure false
+Loading tests...
+- ephemeral-inline (tests-standard/ephemeral-inline)
+- multi-replica (tests-standard/multi-replica)
+- pvc-clone (tests-standard/pvc-clone)
+- rox-multi-pod (tests-standard/rox-multi-pod)
+- rwo-pvc-migration (tests-standard/rwo-pvc-migration)
+- rwx-single-replica (tests-standard/rwx-single-replica)
+- snapshot-restore (tests-standard/snapshot-restore)
+- volume-expansion (tests-standard/volume-expansion)
+Loading values...
+Running tests...
+=== RUN   chainsaw
+=== PAUSE chainsaw
+=== CONT  chainsaw
+=== RUN   chainsaw/ephemeral-inline
+=== PAUSE chainsaw/ephemeral-inline
+=== RUN   chainsaw/multi-replica
+=== PAUSE chainsaw/multi-replica
+=== RUN   chainsaw/pvc-clone
+=== PAUSE chainsaw/pvc-clone
+=== RUN   chainsaw/rox-multi-pod
+=== PAUSE chainsaw/rox-multi-pod
+=== RUN   chainsaw/rwo-pvc-migration
+=== PAUSE chainsaw/rwo-pvc-migration
+=== RUN   chainsaw/rwx-single-replica
+=== PAUSE chainsaw/rwx-single-replica
+=== RUN   chainsaw/snapshot-restore
+=== PAUSE chainsaw/snapshot-restore
+=== RUN   chainsaw/volume-expansion
+=== PAUSE chainsaw/volume-expansion
+=== CONT  chainsaw/ephemeral-inline
+=== CONT  chainsaw/rwo-pvc-migration
+=== CONT  chainsaw/pvc-clone
+=== CONT  chainsaw/multi-replica
+    sink.go:61: | 12:21:37 | multi-replica | @chainsaw       | CREATE    | OK    | v1/Namespace @ chainsaw-touched-mosquito
+    sink.go:61: | 12:21:37 | multi-replica | 00-storageclass | TRY       | BEGIN |
+=== NAME  chainsaw/pvc-clone
+    sink.go:61: | 12:21:37 | pvc-clone | @chainsaw              | CREATE    | OK    | v1/Namespace @ chainsaw-giving-cheetah
+    sink.go:61: | 12:21:37 | pvc-clone | 00-setup               | TRY       | BEGIN |
+=== NAME  chainsaw/ephemeral-inline
+    sink.go:61: | 12:21:37 | ephemeral-inline | @chainsaw  | CREATE    | OK    | v1/Namespace @ chainsaw-verified-marmoset
+    sink.go:61: | 12:21:37 | ephemeral-inline | 00-assert  | TRY       | BEGIN |
+    sink.go:61: | 12:21:37 | ephemeral-inline | 00-assert  | CMD       | RUN   |
+        === COMMAND
+        /bin/bash -c # kuttl retried a TestAssert command until the step timeout;
+        # a Chainsaw script runs once, so the retry is explicit.
+        attempt() {
+          # Verify Flint CSI driver is installed and supports ephemeral volumes
+          echo "Checking CSIDriver configuration..."
+        
+          if kubectl get csidriver disk.csi.chert.us &> /dev/null; then
+            echo "✅ Flint CSIDriver found"
+          else
+            echo "❌ Flint CSIDriver not found"
+            exit 1
+          fi
+        
+          # Check if Ephemeral mode is enabled
+          LIFECYCLE_MODES=$(kubectl get csidriver disk.csi.chert.us -o jsonpath='{.spec.volumeLifecycleModes[*]}')
+          echo "Volume lifecycle modes: $LIFECYCLE_MODES"
+        
+          if echo "$LIFECYCLE_MODES" | grep -q "Ephemeral"; then
+            echo "✅ Ephemeral volume support is enabled"
+          else
+            echo "❌ Ephemeral volume support is NOT enabled"
+            echo "Please set driver.enableEphemeral=true in values.yaml"
+            exit 1
+          fi
+        
+          # Verify controller pod is running
+          if kubectl get pod -n flint-system -l app=flint-csi-controller | grep -q "Running"; then
+            echo "✅ Flint CSI controller is running"
+          else
+            echo "❌ Flint CSI controller is not running"
+            exit 1
+          fi
+        
+          echo "✅ All prerequisites met for ephemeral volume test"
+        }
+        until ( attempt ); do sleep 2; done
+=== NAME  chainsaw/rwo-pvc-migration
+    sink.go:61: | 12:21:37 | rwo-pvc-migration | @chainsaw        | CREATE    | OK    | v1/Namespace @ chainsaw-key-snipe
+    sink.go:61: | 12:21:37 | rwo-pvc-migration | 01-pvc           | TRY       | BEGIN |
+=== NAME  chainsaw/multi-replica
+    sink.go:61: | 12:21:37 | multi-replica | 00-storageclass | APPLY     | RUN   | storage.k8s.io/v1/StorageClass @ flint-multi-replica
+=== NAME  chainsaw/pvc-clone
+    sink.go:61: | 12:21:37 | pvc-clone | 00-setup               | APPLY     | RUN   | v1/PersistentVolumeClaim @ chainsaw-giving-cheetah/source-pvc
+=== NAME  chainsaw/rwo-pvc-migration
+    sink.go:61: | 12:21:37 | rwo-pvc-migration | 01-pvc           | APPLY     | RUN   | v1/PersistentVolumeClaim @ chainsaw-key-snipe/test-pvc
+=== NAME  chainsaw/multi-replica
+    sink.go:61: | 12:21:37 | multi-replica | 00-storageclass | CREATE    | OK    | storage.k8s.io/v1/StorageClass @ flint-multi-replica
+    sink.go:61: | 12:21:37 | multi-replica | 00-storageclass | APPLY     | DONE  | storage.k8s.io/v1/StorageClass @ flint-multi-replica
+    sink.go:61: | 12:21:37 | multi-replica | 00-storageclass | TRY       | END   |
+    sink.go:61: | 12:21:37 | multi-replica | 01-pvc          | TRY       | BEGIN |
+=== NAME  chainsaw/pvc-clone
+    sink.go:61: | 12:21:37 | pvc-clone | 00-setup               | CREATE    | OK    | v1/PersistentVolumeClaim @ chainsaw-giving-cheetah/source-pvc
+=== NAME  chainsaw/rwo-pvc-migration
+    sink.go:61: | 12:21:37 | rwo-pvc-migration | 01-pvc           | CREATE    | OK    | v1/PersistentVolumeClaim @ chainsaw-key-snipe/test-pvc
+=== NAME  chainsaw/pvc-clone
+    sink.go:61: | 12:21:37 | pvc-clone | 00-setup               | APPLY     | DONE  | v1/PersistentVolumeClaim @ chainsaw-giving-cheetah/source-pvc
+=== NAME  chainsaw/rwo-pvc-migration
+    sink.go:61: | 12:21:37 | rwo-pvc-migration | 01-pvc           | APPLY     | DONE  | v1/PersistentVolumeClaim @ chainsaw-key-snipe/test-pvc
+=== NAME  chainsaw/multi-replica
+    sink.go:61: | 12:21:37 | multi-replica | 01-pvc          | APPLY     | RUN   | v1/PersistentVolumeClaim @ chainsaw-touched-mosquito/test-multi-replica-pvc
+=== NAME  chainsaw/pvc-clone
+    sink.go:61: | 12:21:37 | pvc-clone | 00-setup               | APPLY     | RUN   | v1/Pod @ chainsaw-giving-cheetah/source-writer
+=== NAME  chainsaw/rwo-pvc-migration
+    sink.go:61: | 12:21:37 | rwo-pvc-migration | 01-pvc           | ASSERT    | RUN   | v1/PersistentVolumeClaim @ chainsaw-key-snipe/test-pvc
+=== NAME  chainsaw/multi-replica
+    sink.go:61: | 12:21:37 | multi-replica | 01-pvc          | CREATE    | OK    | v1/PersistentVolumeClaim @ chainsaw-touched-mosquito/test-multi-replica-pvc
+    sink.go:61: | 12:21:37 | multi-replica | 01-pvc          | APPLY     | DONE  | v1/PersistentVolumeClaim @ chainsaw-touched-mosquito/test-multi-replica-pvc
+    sink.go:61: | 12:21:37 | multi-replica | 01-pvc          | CMD       | RUN   |
+        === COMMAND
+        /bin/bash -c # kuttl retried a TestAssert command until the step timeout;
+        # a Chainsaw script runs once, so the retry is explicit.
+        attempt() {
+          set -e  # Exit on any error
+        
+          # Get the current namespace (kuttl sets this)
+          NAMESPACE=${NAMESPACE:-default}
+          echo "Using namespace: $NAMESPACE"
+        
+          # First, wait for PVC to exist (retry loop for up to 10 seconds)
+          echo "Waiting for PVC to exist..."
+          for i in $(seq 1 20); do
+            if kubectl get pvc test-multi-replica-pvc -n $NAMESPACE >/dev/null 2>&1; then
+              echo "✅ PVC exists"
+              break
+            fi
+            if [ $i -eq 20 ]; then
+              echo "❌ PVC does not exist after 10 seconds"
+              kubectl get pvc -n $NAMESPACE || echo "No PVCs in namespace"
+              exit 1
+            fi
+            sleep 0.5
+          done
+        
+          # Now wait for PVC to be bound
+          echo "Waiting for PVC to be bound..."
+          kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/test-multi-replica-pvc -n $NAMESPACE --timeout=45s || {
+            echo "❌ PVC not bound within timeout"
+            kubectl get pvc test-multi-replica-pvc -n $NAMESPACE
+            exit 1
+          }
+        
+          # Verify PV has replica metadata
+          PV_NAME=$(kubectl get pvc test-multi-replica-pvc -n $NAMESPACE -o jsonpath='{.spec.volumeName}')
+          if [ -z "$PV_NAME" ]; then
+            echo "❌ No PV name found for PVC"
+            exit 1
+          fi
+          echo "PV Name: $PV_NAME"
+        
+          # Check replica count
+          REPLICA_COUNT=$(kubectl get pv $PV_NAME -o jsonpath='{.spec.csi.volumeAttributes.disk\.chert\.us/replica-count}')
+          echo "Replica Count: $REPLICA_COUNT"
+          if [ "$REPLICA_COUNT" != "2" ]; then
+            echo "❌ Expected 2 replicas, got: $REPLICA_COUNT"
+            exit 1
+          fi
+        
+          # Check replicas JSON exists
+          REPLICAS_JSON=$(kubectl get pv $PV_NAME -o jsonpath='{.spec.csi.volumeAttributes.disk\.chert\.us/replicas}')
+          if [ -z "$REPLICAS_JSON" ]; then
+            echo "❌ No replicas metadata found in PV"
+            exit 1
+          fi
+        
+          echo "✅ PV has correct multi-replica metadata"
+          echo "Replicas: $REPLICAS_JSON"
+          exit 0
+        }
+        until ( attempt ); do sleep 2; done
+=== NAME  chainsaw/rwo-pvc-migration
+    sink.go:61: | 12:21:37 | rwo-pvc-migration | 01-pvc           | ASSERT    | DONE  | v1/PersistentVolumeClaim @ chainsaw-key-snipe/test-pvc
+    sink.go:61: | 12:21:37 | rwo-pvc-migration | 01-pvc           | TRY       | END   |
+    sink.go:61: | 12:21:37 | rwo-pvc-migration | 02-writer-pod    | TRY       | BEGIN |
+=== NAME  chainsaw/pvc-clone
+    sink.go:61: | 12:21:37 | pvc-clone | 00-setup               | CREATE    | OK    | v1/Pod @ chainsaw-giving-cheetah/source-writer
+    sink.go:61: | 12:21:37 | pvc-clone | 00-setup               | APPLY     | DONE  | v1/Pod @ chainsaw-giving-cheetah/source-writer
+=== NAME  chainsaw/rwo-pvc-migration
+    sink.go:61: | 12:21:37 | rwo-pvc-migration | 02-writer-pod    | APPLY     | RUN   | v1/Pod @ chainsaw-key-snipe/writer-pod
+=== NAME  chainsaw/ephemeral-inline
+    sink.go:61: | 12:21:37 | ephemeral-inline | 00-assert  | SCRIPT    | LOG   |
+        === STDOUT
+        Checking CSIDriver configuration...
+        ✅ Flint CSIDriver found
+        Volume lifecycle modes: Persistent Ephemeral
+        ✅ Ephemeral volume support is enabled
+        ✅ Flint CSI controller is running
+        ✅ All prerequisites met for ephemeral volume test
+    sink.go:61: | 12:21:37 | ephemeral-inline | 00-assert  | SCRIPT    | DONE  |
+    sink.go:61: | 12:21:37 | ephemeral-inline | 00-assert  | TRY       | END   |
+    sink.go:61: | 12:21:37 | ephemeral-inline | 01-pod     | TRY       | BEGIN |
+=== NAME  chainsaw/pvc-clone
+    sink.go:61: | 12:21:37 | pvc-clone | 00-setup               | ASSERT    | RUN   | v1/PersistentVolumeClaim @ chainsaw-giving-cheetah/source-pvc
+=== NAME  chainsaw/ephemeral-inline
+    sink.go:61: | 12:21:38 | ephemeral-inline | 01-pod     | APPLY     | RUN   | v1/Pod @ chainsaw-verified-marmoset/ephemeral-test-pod
+=== NAME  chainsaw/rwo-pvc-migration
+    sink.go:61: | 12:21:38 | rwo-pvc-migration | 02-writer-pod    | CREATE    | OK    | v1/Pod @ chainsaw-key-snipe/writer-pod
+    sink.go:61: | 12:21:38 | rwo-pvc-migration | 02-writer-pod    | APPLY     | DONE  | v1/Pod @ chainsaw-key-snipe/writer-pod
+    sink.go:61: | 12:21:38 | rwo-pvc-migration | 02-writer-pod    | ASSERT    | RUN   | v1/PersistentVolumeClaim @ chainsaw-key-snipe/test-pvc
+=== NAME  chainsaw/ephemeral-inline
+    sink.go:61: | 12:21:38 | ephemeral-inline | 01-pod     | CREATE    | OK    | v1/Pod @ chainsaw-verified-marmoset/ephemeral-test-pod
+    sink.go:61: | 12:21:38 | ephemeral-inline | 01-pod     | APPLY     | DONE  | v1/Pod @ chainsaw-verified-marmoset/ephemeral-test-pod
+=== NAME  chainsaw/pvc-clone
+    sink.go:61: | 12:21:38 | pvc-clone | 00-setup               | ASSERT    | DONE  | v1/PersistentVolumeClaim @ chainsaw-giving-cheetah/source-pvc
+=== NAME  chainsaw/ephemeral-inline
+    sink.go:61: | 12:21:38 | ephemeral-inline | 01-pod     | ASSERT    | RUN   | v1/Pod @ chainsaw-verified-marmoset/ephemeral-test-pod
+=== NAME  chainsaw/pvc-clone
+    sink.go:61: | 12:21:38 | pvc-clone | 00-setup               | ASSERT    | RUN   | v1/Pod @ chainsaw-giving-cheetah/source-writer
+=== NAME  chainsaw/rwo-pvc-migration
+    sink.go:61: | 12:21:38 | rwo-pvc-migration | 02-writer-pod    | ASSERT    | DONE  | v1/PersistentVolumeClaim @ chainsaw-key-snipe/test-pvc
+    sink.go:61: | 12:21:38 | rwo-pvc-migration | 02-writer-pod    | ASSERT    | RUN   | v1/Pod @ chainsaw-key-snipe/writer-pod
+=== NAME  chainsaw/multi-replica
+    sink.go:61: | 12:21:40 | multi-replica | 01-pvc          | SCRIPT    | LOG   |
+        === STDOUT
+        Using namespace: chainsaw-touched-mosquito
+        Waiting for PVC to exist...
+        ✅ PVC exists
+        Waiting for PVC to be bound...
+        persistentvolumeclaim/test-multi-replica-pvc condition met
+        PV Name: pvc-19a589e7-0278-4b5b-8986-06b5450f3e9a
+        Replica Count: 2
+        ✅ PV has correct multi-replica metadata
+        Replicas: [{"node_name":"csw-aws-1","node_uid":"dd7f63b5-4f65-4b6c-bdfc-7dc7486f48f6","disk_pci_address":"0000:00:1f.0","lvol_uuid":"650e0b36-7081-448a-9ec8-6ef196dec8f9","lvol_name":"vol_pvc-19a589e7-0278-4b5b-8986-06b5450f3e9a_replica_0","lvs_name":"lvs_csw-aws-1_0000-00-1f-0","nqn":null,"target_ip":null,"target_port":null,"health":"online"},{"node_name":"csw-aws-2","node_uid":"494bbb5d-ed0b-4b19-9085-99055357ad39","disk_pci_address":"0000:00:1f.0","lvol_uuid":"25aec0a5-c6c8-4e30-855e-dce47c59e961","lvol_name":"vol_pvc-19a589e7-0278-4b5b-8986-06b5450f3e9a_replica_1","lvs_name":"lvs_csw-aws-2_0000-00-1f-0","nqn":null,"target_ip":null,"target_port":null,"health":"online"}]
+    sink.go:61: | 12:21:40 | multi-replica | 01-pvc          | SCRIPT    | DONE  |
+    sink.go:61: | 12:21:40 | multi-replica | 01-pvc          | TRY       | END   |
+    sink.go:61: | 12:21:40 | multi-replica | 02-pod          | TRY       | BEGIN |
+    sink.go:61: | 12:21:40 | multi-replica | 02-pod          | APPLY     | RUN   | v1/Pod @ chainsaw-touched-mosquito/test-multi-replica-pod
+    sink.go:61: | 12:21:40 | multi-replica | 02-pod          | CREATE    | OK    | v1/Pod @ chainsaw-touched-mosquito/test-multi-replica-pod
+    sink.go:61: | 12:21:40 | multi-replica | 02-pod          | APPLY     | DONE  | v1/Pod @ chainsaw-touched-mosquito/test-multi-replica-pod
+    sink.go:61: | 12:21:40 | multi-replica | 02-pod          | CMD       | RUN   |
+        === COMMAND
+        /bin/bash -c # kuttl retried a TestAssert command until the step timeout;
+        # a Chainsaw script runs once, so the retry is explicit.
+        attempt() {
+          set -e  # Exit on any error
+        
+          # Get the current namespace (kuttl sets this)
+          NAMESPACE=${NAMESPACE:-default}
+          echo "Using namespace: $NAMESPACE"
+        
+          # Wait for pod to exist first
+          echo "Waiting for pod to exist..."
+          for i in $(seq 1 20); do
+            if kubectl get pod test-multi-replica-pod -n $NAMESPACE >/dev/null 2>&1; then
+              echo "✅ Pod exists"
+              break
+            fi
+            if [ $i -eq 20 ]; then
+              echo "❌ Pod does not exist after 10 seconds"
+              kubectl get pods -n $NAMESPACE || echo "No pods in namespace"
+              exit 1
+            fi
+            sleep 0.5
+          done
+        
+          # Wait for pod to complete
+          echo "Waiting for pod to complete..."
+          kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/test-multi-replica-pod -n $NAMESPACE --timeout=120s || {
+            echo "❌ Pod did not complete within timeout"
+            kubectl get pod test-multi-replica-pod -n $NAMESPACE
+            kubectl describe pod test-multi-replica-pod -n $NAMESPACE | tail -30
+            exit 1
+          }
+        
+          # Verify pod completed successfully
+          POD_STATUS=$(kubectl get pod test-multi-replica-pod -n $NAMESPACE -o jsonpath='{.status.phase}')
+          if [ "$POD_STATUS" = "Succeeded" ]; then
+            echo "✅ Pod completed successfully"
+          else
+            echo "❌ Pod status: $POD_STATUS"
+            exit 1
+          fi
+        
+          # Check the logs to verify data was written
+          echo "Checking pod logs..."
+          kubectl logs test-multi-replica-pod -n $NAMESPACE | tail -20
+        
+          if kubectl logs test-multi-replica-pod -n $NAMESPACE | grep -q "Data written successfully"; then
+            echo "✅ Data written successfully to multi-replica volume"
+          else
+            echo "❌ Data write verification failed"
+            exit 1
+          fi
+        
+          # Get the node where pod ran
+          NODE=$(kubectl get pod test-multi-replica-pod -n $NAMESPACE -o jsonpath='{.spec.nodeName}')
+          echo "✅ Pod ran on node: $NODE"
+        
+          # Verify volume has 2 replicas
+          PV_NAME=$(kubectl get pvc test-multi-replica-pvc -n $NAMESPACE -o jsonpath='{.spec.volumeName}')
+          REPLICA_COUNT=$(kubectl get pv $PV_NAME -o jsonpath='{.spec.csi.volumeAttributes.disk\.chert\.us/replica-count}')
+          if [ "$REPLICA_COUNT" = "2" ]; then
+            echo "✅ Volume configured with 2 replicas"
+          else
+            echo "⚠️ Replica count: $REPLICA_COUNT (expected 2)"
+          fi
+          exit 0
+        }
+        until ( attempt ); do sleep 2; done
+=== NAME  chainsaw/ephemeral-inline
+    sink.go:61: | 12:21:41 | ephemeral-inline | 01-pod     | ASSERT    | DONE  | v1/Pod @ chainsaw-verified-marmoset/ephemeral-test-pod
+    sink.go:61: | 12:21:41 | ephemeral-inline | 01-pod     | TRY       | END   |
+    sink.go:61: | 12:21:41 | ephemeral-inline | 02-cleanup | TRY       | BEGIN |
+    sink.go:61: | 12:21:41 | ephemeral-inline | 02-cleanup | CMD       | RUN   |
+        === COMMAND
+        /bin/bash -c set -e
+        NAMESPACE=${NAMESPACE:-default}
+        echo "Deleting ephemeral-test-pod in namespace: $NAMESPACE"
+        kubectl delete pod ephemeral-test-pod -n $NAMESPACE --ignore-not-found=true
+        echo "✅ Pod deletion initiated"
+    sink.go:61: | 12:21:41 | ephemeral-inline | 02-cleanup | SCRIPT    | LOG   |
+        === STDOUT
+        Deleting ephemeral-test-pod in namespace: chainsaw-verified-marmoset
+        pod "ephemeral-test-pod" deleted
+        ✅ Pod deletion initiated
+    sink.go:61: | 12:21:41 | ephemeral-inline | 02-cleanup | SCRIPT    | DONE  |
+    sink.go:61: | 12:21:41 | ephemeral-inline | 02-cleanup | TRY       | END   |
+    sink.go:61: | 12:21:41 | ephemeral-inline | 03-assert  | TRY       | BEGIN |
+    sink.go:61: | 12:21:41 | ephemeral-inline | 03-assert  | CMD       | RUN   |
+        === COMMAND
+        /bin/bash -c # kuttl retried a TestAssert command until the step timeout;
+        # a Chainsaw script runs once, so the retry is explicit.
+        attempt() {
+          set -e  # Exit on any error
+        
+          # Get the current namespace
+          NAMESPACE=${NAMESPACE:-default}
+          echo "Using namespace: $NAMESPACE"
+        
+          # Wait for pod to be deleted
+          echo "Waiting for pod deletion..."
+          kubectl wait --for=delete pod/ephemeral-test-pod -n $NAMESPACE --timeout=60s || true
+        
+          # Verify pod is gone
+          if kubectl get pod ephemeral-test-pod -n $NAMESPACE &> /dev/null; then
+            echo "❌ Pod still exists after deletion"
+            exit 1
+          else
+            echo "✅ Pod deleted successfully"
+          fi
+        
+          # Give CSI driver time to clean up the ephemeral volume
+          echo "Waiting 10 seconds for CSI driver to clean up ephemeral volume..."
+          sleep 10
+        
+          # Check CSI controller logs for ephemeral volume deletion
+          echo "Checking CSI controller logs for volume deletion..."
+          CONTROLLER_POD=$(kubectl get pod -n flint-system -l app=flint-csi-controller -o jsonpath='{.items[0].metadata.name}')
+        
+          # Look for deletion in recent logs
+          kubectl logs -n flint-system $CONTROLLER_POD --tail=100 | tail -30
+        
+          if kubectl logs -n flint-system $CONTROLLER_POD --tail=100 | grep -q "Deleting volume"; then
+            echo "✅ Volume deletion detected in controller logs"
+          else
+            echo "ℹ️ Volume deletion not found in recent logs (might have been cleaned up earlier)"
+          fi
+        
+          # Verify no orphaned PVs were created (ephemeral volumes shouldn't create PVs)
+          # The volume ID would be something like ephemeral-test-pod-<uid>-ephemeral-storage
+          PV_COUNT=$(kubectl get pv --no-headers 2>/dev/null | grep -c "ephemeral-test-pod" || echo "0")
+          if [ "$PV_COUNT" = "0" ]; then
+            echo "✅ No orphaned PersistentVolumes found (expected for ephemeral volumes)"
+          else
+            echo "⚠️ Found $PV_COUNT PV(s) with 'ephemeral-test-pod' in name"
+            kubectl get pv | grep "ephemeral-test-pod" || true
+          fi
+        
+          # Verify no orphaned PVCs
+          PVC_COUNT=$(kubectl get pvc -n $NAMESPACE --no-headers 2>/dev/null | grep -c "ephemeral-test-pod" || echo "0")
+          if [ "$PVC_COUNT" = "0" ]; then
+            echo "✅ No orphaned PersistentVolumeClaims found (expected for ephemeral volumes)"
+          else
+            echo "⚠️ Found $PVC_COUNT PVC(s) with 'ephemeral-test-pod' in name"
+            kubectl get pvc -n $NAMESPACE | grep "ephemeral-test-pod" || true
+          fi
+        
+          echo "==================================================================="
+          echo "✅ EPHEMERAL INLINE VOLUME TEST COMPLETED SUCCESSFULLY"
+          echo "==================================================================="
+          echo "Summary:"
+          echo "  - Pod with ephemeral inline volume: CREATED ✅"
+          echo "  - Data written to ephemeral volume: VERIFIED ✅"
+          echo "  - Pod deletion: SUCCESSFUL ✅"
+          echo "  - Ephemeral volume cleanup: AUTOMATIC ✅"
+          echo "  - No orphaned resources: VERIFIED ✅"
+          echo "==================================================================="
+        }
+        until ( attempt ); do sleep 2; done
+=== NAME  chainsaw/rwo-pvc-migration
+    sink.go:61: | 12:21:46 | rwo-pvc-migration | 02-writer-pod    | ASSERT    | DONE  | v1/Pod @ chainsaw-key-snipe/writer-pod
+    sink.go:61: | 12:21:46 | rwo-pvc-migration | 02-writer-pod    | CMD       | RUN   |
+        === COMMAND
+        /bin/bash -c # Record where the writer ran; step 04 schedules the reader elsewhere.
+        node=$(kubectl -n "$NAMESPACE" get pod writer-pod -o jsonpath='{.spec.nodeName}')
+        test -n "$node"
+        kubectl -n "$NAMESPACE" create configmap writer-node --from-literal=node="$node"
+    sink.go:61: | 12:21:46 | rwo-pvc-migration | 02-writer-pod    | SCRIPT    | LOG   |
+        === STDOUT
+        configmap/writer-node created
+    sink.go:61: | 12:21:46 | rwo-pvc-migration | 02-writer-pod    | SCRIPT    | DONE  |
+    sink.go:61: | 12:21:46 | rwo-pvc-migration | 02-writer-pod    | TRY       | END   |
+    sink.go:61: | 12:21:46 | rwo-pvc-migration | 03-delete-writer | TRY       | BEGIN |
+    sink.go:61: | 12:21:46 | rwo-pvc-migration | 03-delete-writer | DELETE    | RUN   | v1/Pod @ chainsaw-key-snipe/writer-pod
+    sink.go:61: | 12:21:46 | rwo-pvc-migration | 03-delete-writer | DELETE    | OK    | v1/Pod @ chainsaw-key-snipe/writer-pod
+    sink.go:61: | 12:21:46 | rwo-pvc-migration | 03-delete-writer | DELETE    | DONE  | v1/Pod @ chainsaw-key-snipe/writer-pod
+    sink.go:61: | 12:21:46 | rwo-pvc-migration | 03-delete-writer | ERROR     | RUN   | v1/Pod @ chainsaw-key-snipe/writer-pod
+    sink.go:61: | 12:21:46 | rwo-pvc-migration | 03-delete-writer | ERROR     | DONE  | v1/Pod @ chainsaw-key-snipe/writer-pod
+    sink.go:61: | 12:21:46 | rwo-pvc-migration | 03-delete-writer | TRY       | END   |
+    sink.go:61: | 12:21:46 | rwo-pvc-migration | 04-reader-pod    | TRY       | BEGIN |
+    sink.go:61: | 12:21:46 | rwo-pvc-migration | 04-reader-pod    | CMD       | RUN   |
+        === COMMAND
+        /bin/bash -c node=$(kubectl -n "$NAMESPACE" get configmap writer-node -o jsonpath='{.data.node}')
+        test -n "$node"
+        sed "s/__WRITER_NODE__/$node/" 04-reader-pod.yaml | kubectl -n "$NAMESPACE" apply -f -
+    sink.go:61: | 12:21:47 | rwo-pvc-migration | 04-reader-pod    | SCRIPT    | LOG   |
+        === STDOUT
+        pod/reader-pod created
+    sink.go:61: | 12:21:47 | rwo-pvc-migration | 04-reader-pod    | SCRIPT    | DONE  |
+    sink.go:61: | 12:21:47 | rwo-pvc-migration | 04-reader-pod    | ASSERT    | RUN   | v1/Pod @ chainsaw-key-snipe/reader-pod
+=== NAME  chainsaw/pvc-clone
+    sink.go:61: | 12:21:47 | pvc-clone | 00-setup               | ASSERT    | DONE  | v1/Pod @ chainsaw-giving-cheetah/source-writer
+    sink.go:61: | 12:21:47 | pvc-clone | 00-setup               | TRY       | END   |
+    sink.go:61: | 12:21:47 | pvc-clone | 01-clone               | TRY       | BEGIN |
+    sink.go:61: | 12:21:47 | pvc-clone | 01-clone               | APPLY     | RUN   | v1/PersistentVolumeClaim @ chainsaw-giving-cheetah/cloned-pvc
+    sink.go:61: | 12:21:47 | pvc-clone | 01-clone               | CREATE    | OK    | v1/PersistentVolumeClaim @ chainsaw-giving-cheetah/cloned-pvc
+    sink.go:61: | 12:21:47 | pvc-clone | 01-clone               | APPLY     | DONE  | v1/PersistentVolumeClaim @ chainsaw-giving-cheetah/cloned-pvc
+    sink.go:61: | 12:21:47 | pvc-clone | 01-clone               | ASSERT    | RUN   | v1/PersistentVolumeClaim @ chainsaw-giving-cheetah/cloned-pvc
+    sink.go:61: | 12:21:47 | pvc-clone | 01-clone               | ASSERT    | DONE  | v1/PersistentVolumeClaim @ chainsaw-giving-cheetah/cloned-pvc
+    sink.go:61: | 12:21:47 | pvc-clone | 01-clone               | TRY       | END   |
+    sink.go:61: | 12:21:47 | pvc-clone | 02-verify              | TRY       | BEGIN |
+    sink.go:61: | 12:21:47 | pvc-clone | 02-verify              | APPLY     | RUN   | v1/Pod @ chainsaw-giving-cheetah/clone-verifier
+    sink.go:61: | 12:21:48 | pvc-clone | 02-verify              | CREATE    | OK    | v1/Pod @ chainsaw-giving-cheetah/clone-verifier
+    sink.go:61: | 12:21:48 | pvc-clone | 02-verify              | APPLY     | DONE  | v1/Pod @ chainsaw-giving-cheetah/clone-verifier
+    sink.go:61: | 12:21:48 | pvc-clone | 02-verify              | CMD       | RUN   |
+        === COMMAND
+        /bin/bash -c # kuttl retried a TestAssert command until the step timeout;
+        # a Chainsaw script runs once, so the retry is explicit.
+        attempt() {
+          set -e  # Exit on any error
+        
+          # Get the current namespace
+          NAMESPACE=${NAMESPACE:-default}
+          echo "Using namespace: $NAMESPACE"
+        
+          PHASE=$(kubectl get pod clone-verifier -n $NAMESPACE -o jsonpath='{.status.phase}')
+          if [ "$PHASE" = "Failed" ] || [ "$PHASE" = "Error" ]; then
+            echo "❌ Pod in $PHASE state - failing test"
+            exit 1
+          fi
+          echo "✅ Pod status check passed (Phase: $PHASE)"
+        }
+        until ( attempt ); do sleep 2; done
+    sink.go:61: | 12:21:48 | pvc-clone | 02-verify              | SCRIPT    | LOG   |
+        === STDOUT
+        Using namespace: chainsaw-giving-cheetah
+        ✅ Pod status check passed (Phase: Pending)
+    sink.go:61: | 12:21:48 | pvc-clone | 02-verify              | SCRIPT    | DONE  |
+    sink.go:61: | 12:21:48 | pvc-clone | 02-verify              | ASSERT    | RUN   | v1/Pod @ chainsaw-giving-cheetah/clone-verifier
+=== NAME  chainsaw/multi-replica
+    sink.go:61: | 12:21:48 | multi-replica | 02-pod          | SCRIPT    | LOG   |
+        === STDOUT
+        Using namespace: chainsaw-touched-mosquito
+        Waiting for pod to exist...
+        ✅ Pod exists
+        Waiting for pod to complete...
+        pod/test-multi-replica-pod condition met
+        ✅ Pod completed successfully
+        Checking pod logs...
+        === Writing test data to multi-replica volume ===
+        100+0 records in
+        100+0 records out
+        104857600 bytes (100.0MB) copied, 0.415376 seconds, 240.7MB/s
+        ✅ Data written successfully
+        04e60e9be55d3bc95e2600c9380da15f  /data/testfile
+        === Test complete ===
+        ✅ Data written successfully to multi-replica volume
+        ✅ Pod ran on node: csw-aws-2
+        ✅ Volume configured with 2 replicas
+    sink.go:61: | 12:21:48 | multi-replica | 02-pod          | SCRIPT    | DONE  |
+    sink.go:61: | 12:21:48 | multi-replica | 02-pod          | TRY       | END   |
+    sink.go:61: | 12:21:48 | multi-replica | 03-cleanup      | TRY       | BEGIN |
+    sink.go:61: | 12:21:48 | multi-replica | 03-cleanup      | DELETE    | RUN   | v1/Pod @ chainsaw-touched-mosquito/test-multi-replica-pod
+    sink.go:61: | 12:21:48 | multi-replica | 03-cleanup      | DELETE    | OK    | v1/Pod @ chainsaw-touched-mosquito/test-multi-replica-pod
+    sink.go:61: | 12:21:48 | multi-replica | 03-cleanup      | DELETE    | DONE  | v1/Pod @ chainsaw-touched-mosquito/test-multi-replica-pod
+    sink.go:61: | 12:21:48 | multi-replica | 03-cleanup      | DELETE    | RUN   | v1/PersistentVolumeClaim @ chainsaw-touched-mosquito/test-multi-replica-pvc
+    sink.go:61: | 12:21:48 | multi-replica | 03-cleanup      | DELETE    | OK    | v1/PersistentVolumeClaim @ chainsaw-touched-mosquito/test-multi-replica-pvc
+    sink.go:61: | 12:21:48 | multi-replica | 03-cleanup      | DELETE    | DONE  | v1/PersistentVolumeClaim @ chainsaw-touched-mosquito/test-multi-replica-pvc
+    sink.go:61: | 12:21:48 | multi-replica | 03-cleanup      | DELETE    | RUN   | storage.k8s.io/v1/StorageClass @ flint-multi-replica
+    sink.go:61: | 12:21:48 | multi-replica | 03-cleanup      | DELETE    | OK    | storage.k8s.io/v1/StorageClass @ flint-multi-replica
+    sink.go:61: | 12:21:48 | multi-replica | 03-cleanup      | DELETE    | DONE  | storage.k8s.io/v1/StorageClass @ flint-multi-replica
+    sink.go:61: | 12:21:48 | multi-replica | 03-cleanup      | CMD       | RUN   |
+        === COMMAND
+        /bin/bash -c # kuttl retried a TestAssert command until the step timeout;
+        # a Chainsaw script runs once, so the retry is explicit.
+        attempt() {
+          set -e  # Exit on any error
+        
+          # Get the current namespace
+          NAMESPACE=${NAMESPACE:-default}
+          echo "=== Verifying cleanup in namespace: $NAMESPACE ==="
+        
+          # Verify PVC is deleted
+          if kubectl get pvc test-multi-replica-pvc -n $NAMESPACE 2>/dev/null; then
+            echo "⚠️ PVC still exists, waiting for deletion..."
+            sleep 5
+          else
+            echo "✅ PVC deleted successfully"
+          fi
+        
+          # Verify Pod is deleted
+          if kubectl get pod test-multi-replica-pod -n $NAMESPACE 2>/dev/null; then
+            echo "⚠️ Pod still exists, waiting for deletion..."
+            sleep 5
+          else
+            echo "✅ Pod deleted successfully"
+          fi
+        
+          echo "✅ Multi-replica test cleanup complete"
+        }
+        until ( attempt ); do sleep 2; done
+    sink.go:61: | 12:21:49 | multi-replica | 03-cleanup      | SCRIPT    | LOG   |
+        === STDOUT
+        === Verifying cleanup in namespace: chainsaw-touched-mosquito ===
+        ✅ PVC deleted successfully
+        ✅ Pod deleted successfully
+        ✅ Multi-replica test cleanup complete
+    sink.go:61: | 12:21:49 | multi-replica | 03-cleanup      | SCRIPT    | DONE  |
+    sink.go:61: | 12:21:49 | multi-replica | 03-cleanup      | TRY       | END   |
+    sink.go:61: | 12:21:49 | multi-replica | 02-pod          | CLEANUP   | BEGIN |
+    sink.go:61: | 12:21:49 | multi-replica | 02-pod          | DELETE    | OK    | v1/Pod @ chainsaw-touched-mosquito/test-multi-replica-pod
+        === ERROR
+        pods "test-multi-replica-pod" not found
+    sink.go:61: | 12:21:49 | multi-replica | 02-pod          | CLEANUP   | END   |
+    sink.go:61: | 12:21:49 | multi-replica | 01-pvc          | CLEANUP   | BEGIN |
+    sink.go:61: | 12:21:49 | multi-replica | 01-pvc          | DELETE    | OK    | v1/PersistentVolumeClaim @ chainsaw-touched-mosquito/test-multi-replica-pvc
+        === ERROR
+        persistentvolumeclaims "test-multi-replica-pvc" not found
+    sink.go:61: | 12:21:49 | multi-replica | 01-pvc          | CLEANUP   | END   |
+    sink.go:61: | 12:21:49 | multi-replica | 00-storageclass | CLEANUP   | BEGIN |
+    sink.go:61: | 12:21:49 | multi-replica | 00-storageclass | DELETE    | OK    | storage.k8s.io/v1/StorageClass @ flint-multi-replica
+        === ERROR
+        storageclasses.storage.k8s.io "flint-multi-replica" not found
+    sink.go:61: | 12:21:49 | multi-replica | 00-storageclass | CLEANUP   | END   |
+    sink.go:61: | 12:21:49 | multi-replica | @chainsaw       | CLEANUP   | BEGIN |
+    sink.go:61: | 12:21:49 | multi-replica | @chainsaw       | DELETE    | OK    | v1/Namespace @ chainsaw-touched-mosquito
+=== NAME  chainsaw/ephemeral-inline
+    sink.go:61: | 12:21:53 | ephemeral-inline | 03-assert  | SCRIPT    | LOG   |
+        === STDOUT
+        Using namespace: chainsaw-verified-marmoset
+        Waiting for pod deletion...
+        ✅ Pod deleted successfully
+        Waiting 10 seconds for CSI driver to clean up ephemeral volume...
+        Checking CSI controller logs for volume deletion...
+        🔍 [DRIVER] Getting volume info from PV metadata: pvc-b3b3a1c2-31b7-4391-9311-76a8ab2e6de2
+        ❌ [DRIVER] Volume metadata not found in PV: PV found but missing flint metadata in volumeAttributes
+        💡 [DRIVER] This means either:
+           1. Volume doesn't exist
+           2. Volume was created with old driver version (before metadata storage)
+           3. PV is corrupted or missing volumeAttributes
+        ⚠️ [CONTROLLER] Volume not found (may already be deleted): Volume pvc-19a589e7-0278-4b5b-8986-06b5450f3e9a metadata not found in PV: PV found but missing flint metadata in volumeAttributes
+        ✅ [DRIVER] Found volume info: node=csw-aws-2, lvol=80deacd2-9567-40e5-934c-810d803dcc21
+        ℹ️ [CONTROLLER] Volume is local - no NVMe-oF cleanup needed
+        ✅ [CONTROLLER] Volume pvc-b3b3a1c2-31b7-4391-9311-76a8ab2e6de2 unpublished successfully
+        📤 [CONTROLLER] Publishing volume pvc-b3b3a1c2-31b7-4391-9311-76a8ab2e6de2 to node csw-aws-3
+        🔢 [CONTROLLER] chain-gen bumped to 3 before attach grant
+        🔍 [DRIVER] Getting volume info from PV metadata: pvc-b3b3a1c2-31b7-4391-9311-76a8ab2e6de2
+        ✅ [DRIVER] Found volume info: node=csw-aws-2, lvol=80deacd2-9567-40e5-934c-810d803dcc21
+        📊 [CONTROLLER] Single-replica volume on node csw-aws-2
+        🌐 [CONTROLLER] Volume is remote - setting up NVMe-oF
+        🌐 [DRIVER] Setting up NVMe-oF target on node: csw-aws-2 for bdev: 80deacd2-9567-40e5-934c-810d803dcc21
+        🎉 [DRIVER] NVMe-oF target setup completed: nqn.2024-11.com.flint:volume:pvc-b3b3a1c2-31b7-4391-9311-76a8ab2e6de2
+        ✅ [CONTROLLER] NVMe-oF target ready: nqn.2024-11.com.flint:volume:pvc-b3b3a1c2-31b7-4391-9311-76a8ab2e6de2
+        ✅ [CONTROLLER] Volume pvc-b3b3a1c2-31b7-4391-9311-76a8ab2e6de2 published successfully
+        📤 [CONTROLLER] Publishing volume pvc-b3b3a1c2-31b7-4391-9311-76a8ab2e6de2 to node csw-aws-3
+        🔢 [CONTROLLER] chain-gen bumped to 4 before attach grant
+        🔍 [DRIVER] Getting volume info from PV metadata: pvc-b3b3a1c2-31b7-4391-9311-76a8ab2e6de2
+        ✅ [DRIVER] Found volume info: node=csw-aws-2, lvol=80deacd2-9567-40e5-934c-810d803dcc21
+        📊 [CONTROLLER] Single-replica volume on node csw-aws-2
+        🌐 [CONTROLLER] Volume is remote - setting up NVMe-oF
+        🌐 [DRIVER] Setting up NVMe-oF target on node: csw-aws-2 for bdev: 80deacd2-9567-40e5-934c-810d803dcc21
+        🎉 [DRIVER] NVMe-oF target setup completed: nqn.2024-11.com.flint:volume:pvc-b3b3a1c2-31b7-4391-9311-76a8ab2e6de2
+        ✅ [CONTROLLER] NVMe-oF target ready: nqn.2024-11.com.flint:volume:pvc-b3b3a1c2-31b7-4391-9311-76a8ab2e6de2
+        ✅ [CONTROLLER] Volume pvc-b3b3a1c2-31b7-4391-9311-76a8ab2e6de2 published successfully
+        ℹ️ Volume deletion not found in recent logs (might have been cleaned up earlier)
+        ⚠️ Found 0
+        0 PV(s) with 'ephemeral-test-pod' in name
+        ⚠️ Found 0
+        0 PVC(s) with 'ephemeral-test-pod' in name
+        ===================================================================
+        ✅ EPHEMERAL INLINE VOLUME TEST COMPLETED SUCCESSFULLY
+        ===================================================================
+        Summary:
+          - Pod with ephemeral inline volume: CREATED ✅
+          - Data written to ephemeral volume: VERIFIED ✅
+          - Pod deletion: SUCCESSFUL ✅
+          - Ephemeral volume cleanup: AUTOMATIC ✅
+          - No orphaned resources: VERIFIED ✅
+        ===================================================================
+        === STDERR
+        Defaulted container "flint-csi-controller" out of: flint-csi-controller, csi-provisioner, csi-attacher, csi-resizer, csi-snapshotter, liveness-probe
+        Defaulted container "flint-csi-controller" out of: flint-csi-controller, csi-provisioner, csi-attacher, csi-resizer, csi-snapshotter, liveness-probe
+        No resources found in chainsaw-verified-marmoset namespace.
+    sink.go:61: | 12:21:53 | ephemeral-inline | 03-assert  | SCRIPT    | DONE  |
+    sink.go:61: | 12:21:53 | ephemeral-inline | 03-assert  | TRY       | END   |
+    sink.go:61: | 12:21:53 | ephemeral-inline | 01-pod     | CLEANUP   | BEGIN |
+    sink.go:61: | 12:21:53 | ephemeral-inline | 01-pod     | DELETE    | OK    | v1/Pod @ chainsaw-verified-marmoset/ephemeral-test-pod
+        === ERROR
+        pods "ephemeral-test-pod" not found
+    sink.go:61: | 12:21:53 | ephemeral-inline | 01-pod     | CLEANUP   | END   |
+    sink.go:61: | 12:21:53 | ephemeral-inline | @chainsaw  | CLEANUP   | BEGIN |
+    sink.go:61: | 12:21:53 | ephemeral-inline | @chainsaw  | DELETE    | OK    | v1/Namespace @ chainsaw-verified-marmoset
+=== NAME  chainsaw/multi-replica
+    sink.go:61: | 12:21:54 | multi-replica | @chainsaw       | CLEANUP   | END   |
+=== CONT  chainsaw/snapshot-restore
+    sink.go:61: | 12:21:54 | snapshot-restore | @chainsaw   | CREATE    | OK    | v1/Namespace @ chainsaw-definite-snail
+    sink.go:61: | 12:21:54 | snapshot-restore | 00-setup    | TRY       | BEGIN |
+    sink.go:61: | 12:21:54 | snapshot-restore | 00-setup    | APPLY     | RUN   | v1/PersistentVolumeClaim @ chainsaw-definite-snail/snapshot-source-pvc
+    sink.go:61: | 12:21:54 | snapshot-restore | 00-setup    | CREATE    | OK    | v1/PersistentVolumeClaim @ chainsaw-definite-snail/snapshot-source-pvc
+    sink.go:61: | 12:21:54 | snapshot-restore | 00-setup    | APPLY     | DONE  | v1/PersistentVolumeClaim @ chainsaw-definite-snail/snapshot-source-pvc
+    sink.go:61: | 12:21:54 | snapshot-restore | 00-setup    | APPLY     | RUN   | v1/Pod @ chainsaw-definite-snail/initial-data-writer
+    sink.go:61: | 12:21:54 | snapshot-restore | 00-setup    | CREATE    | OK    | v1/Pod @ chainsaw-definite-snail/initial-data-writer
+    sink.go:61: | 12:21:54 | snapshot-restore | 00-setup    | APPLY     | DONE  | v1/Pod @ chainsaw-definite-snail/initial-data-writer
+    sink.go:61: | 12:21:55 | snapshot-restore | 00-setup    | ASSERT    | RUN   | v1/PersistentVolumeClaim @ chainsaw-definite-snail/snapshot-source-pvc
+    sink.go:61: | 12:21:55 | snapshot-restore | 00-setup    | ASSERT    | DONE  | v1/PersistentVolumeClaim @ chainsaw-definite-snail/snapshot-source-pvc
+    sink.go:61: | 12:21:55 | snapshot-restore | 00-setup    | ASSERT    | RUN   | v1/Pod @ chainsaw-definite-snail/initial-data-writer
+=== NAME  chainsaw/pvc-clone
+    sink.go:61: | 12:21:55 | pvc-clone | 02-verify              | ASSERT    | DONE  | v1/Pod @ chainsaw-giving-cheetah/clone-verifier
+    sink.go:61: | 12:21:55 | pvc-clone | 02-verify              | TRY       | END   |
+    sink.go:61: | 12:21:55 | pvc-clone | 03-modify-source       | TRY       | BEGIN |
+    sink.go:61: | 12:21:55 | pvc-clone | 03-modify-source       | APPLY     | RUN   | v1/Pod @ chainsaw-giving-cheetah/source-modifier
+    sink.go:61: | 12:21:55 | pvc-clone | 03-modify-source       | CREATE    | OK    | v1/Pod @ chainsaw-giving-cheetah/source-modifier
+    sink.go:61: | 12:21:55 | pvc-clone | 03-modify-source       | APPLY     | DONE  | v1/Pod @ chainsaw-giving-cheetah/source-modifier
+    sink.go:61: | 12:21:55 | pvc-clone | 03-modify-source       | ASSERT    | RUN   | v1/Pod @ chainsaw-giving-cheetah/source-modifier
+=== NAME  chainsaw/rwo-pvc-migration
+    sink.go:61: | 12:21:57 | rwo-pvc-migration | 04-reader-pod    | ASSERT    | DONE  | v1/Pod @ chainsaw-key-snipe/reader-pod
+    sink.go:61: | 12:21:57 | rwo-pvc-migration | 04-reader-pod    | CMD       | RUN   |
+        === COMMAND
+        /bin/bash -c # The migration this test is named for: the reader mounted the
+        # volume on another node than the one that wrote it.
+        w=$(kubectl -n "$NAMESPACE" get configmap writer-node -o jsonpath='{.data.node}')
+        r=$(kubectl -n "$NAMESPACE" get pod reader-pod -o jsonpath='{.spec.nodeName}')
+        echo "writer ran on $w, reader on $r"
+        test -n "$r" && test "$w" != "$r"
+    sink.go:61: | 12:21:57 | rwo-pvc-migration | 04-reader-pod    | SCRIPT    | LOG   |
+        === STDOUT
+        writer ran on csw-aws-2, reader on csw-aws-3
+    sink.go:61: | 12:21:57 | rwo-pvc-migration | 04-reader-pod    | SCRIPT    | DONE  |
+    sink.go:61: | 12:21:57 | rwo-pvc-migration | 04-reader-pod    | TRY       | END   |
+    sink.go:61: | 12:21:57 | rwo-pvc-migration | 04-reader-pod    | CLEANUP   | BEGIN |
+    sink.go:61: | 12:21:57 | rwo-pvc-migration | 04-reader-pod    | DELETE    | RUN   | v1/Pod @ chainsaw-key-snipe/reader-pod
+    sink.go:61: | 12:21:58 | rwo-pvc-migration | 04-reader-pod    | DELETE    | OK    | v1/Pod @ chainsaw-key-snipe/reader-pod
+    sink.go:61: | 12:21:58 | rwo-pvc-migration | 04-reader-pod    | DELETE    | DONE  | v1/Pod @ chainsaw-key-snipe/reader-pod
+    sink.go:61: | 12:21:58 | rwo-pvc-migration | 04-reader-pod    | CLEANUP   | END   |
+    sink.go:61: | 12:21:58 | rwo-pvc-migration | 02-writer-pod    | CLEANUP   | BEGIN |
+    sink.go:61: | 12:21:58 | rwo-pvc-migration | 02-writer-pod    | DELETE    | OK    | v1/Pod @ chainsaw-key-snipe/writer-pod
+        === ERROR
+        pods "writer-pod" not found
+    sink.go:61: | 12:21:58 | rwo-pvc-migration | 02-writer-pod    | CLEANUP   | END   |
+    sink.go:61: | 12:21:58 | rwo-pvc-migration | 01-pvc           | CLEANUP   | BEGIN |
+    sink.go:61: | 12:21:58 | rwo-pvc-migration | 01-pvc           | DELETE    | OK    | v1/PersistentVolumeClaim @ chainsaw-key-snipe/test-pvc
+    sink.go:61: | 12:21:58 | rwo-pvc-migration | 01-pvc           | CLEANUP   | END   |
+    sink.go:61: | 12:21:58 | rwo-pvc-migration | @chainsaw        | CLEANUP   | BEGIN |
+    sink.go:61: | 12:21:58 | rwo-pvc-migration | @chainsaw        | DELETE    | OK    | v1/Namespace @ chainsaw-key-snipe
+=== NAME  chainsaw/ephemeral-inline
+    sink.go:61: | 12:21:58 | ephemeral-inline | @chainsaw  | CLEANUP   | END   |
+=== CONT  chainsaw/volume-expansion
+    sink.go:61: | 12:21:58 | volume-expansion | @chainsaw        | CREATE    | OK    | v1/Namespace @ chainsaw-shining-mite
+    sink.go:61: | 12:21:58 | volume-expansion | 00-pvc           | TRY       | BEGIN |
+    sink.go:61: | 12:21:58 | volume-expansion | 00-pvc           | APPLY     | RUN   | v1/PersistentVolumeClaim @ chainsaw-shining-mite/expandable-pvc
+    sink.go:61: | 12:21:58 | volume-expansion | 00-pvc           | CREATE    | OK    | v1/PersistentVolumeClaim @ chainsaw-shining-mite/expandable-pvc
+    sink.go:61: | 12:21:58 | volume-expansion | 00-pvc           | APPLY     | DONE  | v1/PersistentVolumeClaim @ chainsaw-shining-mite/expandable-pvc
+    sink.go:61: | 12:21:59 | volume-expansion | 00-pvc           | ASSERT    | RUN   | v1/PersistentVolumeClaim @ chainsaw-shining-mite/expandable-pvc
+    sink.go:61: | 12:21:59 | volume-expansion | 00-pvc           | ASSERT    | DONE  | v1/PersistentVolumeClaim @ chainsaw-shining-mite/expandable-pvc
+    sink.go:61: | 12:21:59 | volume-expansion | 00-pvc           | TRY       | END   |
+    sink.go:61: | 12:21:59 | volume-expansion | 01-writer        | TRY       | BEGIN |
+    sink.go:61: | 12:21:59 | volume-expansion | 01-writer        | APPLY     | RUN   | v1/Pod @ chainsaw-shining-mite/initial-writer
+    sink.go:61: | 12:21:59 | volume-expansion | 01-writer        | CREATE    | OK    | v1/Pod @ chainsaw-shining-mite/initial-writer
+    sink.go:61: | 12:21:59 | volume-expansion | 01-writer        | APPLY     | DONE  | v1/Pod @ chainsaw-shining-mite/initial-writer
+    sink.go:61: | 12:21:59 | volume-expansion | 01-writer        | ASSERT    | RUN   | v1/Pod @ chainsaw-shining-mite/initial-writer
+=== NAME  chainsaw/rwo-pvc-migration
+    sink.go:61: | 12:22:03 | rwo-pvc-migration | @chainsaw        | CLEANUP   | END   |
+=== CONT  chainsaw/rwx-single-replica
+    sink.go:61: | 12:22:03 | rwx-single-replica | @chainsaw  | CREATE    | OK    | v1/Namespace @ chainsaw-neutral-liger
+    sink.go:61: | 12:22:03 | rwx-single-replica | 00-pvc     | TRY       | BEGIN |
+    sink.go:61: | 12:22:04 | rwx-single-replica | 00-pvc     | APPLY     | RUN   | v1/PersistentVolumeClaim @ chainsaw-neutral-liger/rwx-test-pvc
+    sink.go:61: | 12:22:04 | rwx-single-replica | 00-pvc     | CREATE    | OK    | v1/PersistentVolumeClaim @ chainsaw-neutral-liger/rwx-test-pvc
+    sink.go:61: | 12:22:04 | rwx-single-replica | 00-pvc     | APPLY     | DONE  | v1/PersistentVolumeClaim @ chainsaw-neutral-liger/rwx-test-pvc
+    sink.go:61: | 12:22:04 | rwx-single-replica | 00-pvc     | TRY       | END   |
+    sink.go:61: | 12:22:04 | rwx-single-replica | 01-pods    | TRY       | BEGIN |
+    sink.go:61: | 12:22:04 | rwx-single-replica | 01-pods    | APPLY     | RUN   | v1/Pod @ chainsaw-neutral-liger/rwx-writer-1
+    sink.go:61: | 12:22:04 | rwx-single-replica | 01-pods    | CREATE    | OK    | v1/Pod @ chainsaw-neutral-liger/rwx-writer-1
+    sink.go:61: | 12:22:04 | rwx-single-replica | 01-pods    | APPLY     | DONE  | v1/Pod @ chainsaw-neutral-liger/rwx-writer-1
+    sink.go:61: | 12:22:04 | rwx-single-replica | 01-pods    | APPLY     | RUN   | v1/Pod @ chainsaw-neutral-liger/rwx-writer-2
+    sink.go:61: | 12:22:04 | rwx-single-replica | 01-pods    | CREATE    | OK    | v1/Pod @ chainsaw-neutral-liger/rwx-writer-2
+    sink.go:61: | 12:22:04 | rwx-single-replica | 01-pods    | APPLY     | DONE  | v1/Pod @ chainsaw-neutral-liger/rwx-writer-2
+    sink.go:61: | 12:22:04 | rwx-single-replica | 01-pods    | APPLY     | RUN   | v1/Pod @ chainsaw-neutral-liger/rwx-writer-3
+    sink.go:61: | 12:22:04 | rwx-single-replica | 01-pods    | CREATE    | OK    | v1/Pod @ chainsaw-neutral-liger/rwx-writer-3
+    sink.go:61: | 12:22:04 | rwx-single-replica | 01-pods    | APPLY     | DONE  | v1/Pod @ chainsaw-neutral-liger/rwx-writer-3
+    sink.go:61: | 12:22:04 | rwx-single-replica | 01-pods    | ASSERT    | RUN   | v1/Pod @ chainsaw-neutral-liger/rwx-writer-1
+=== NAME  chainsaw/pvc-clone
+    sink.go:61: | 12:22:05 | pvc-clone | 03-modify-source       | ASSERT    | DONE  | v1/Pod @ chainsaw-giving-cheetah/source-modifier
+    sink.go:61: | 12:22:05 | pvc-clone | 03-modify-source       | TRY       | END   |
+    sink.go:61: | 12:22:05 | pvc-clone | 04-verify-independence | TRY       | BEGIN |
+    sink.go:61: | 12:22:05 | pvc-clone | 04-verify-independence | APPLY     | RUN   | v1/Pod @ chainsaw-giving-cheetah/independence-verifier
+    sink.go:61: | 12:22:05 | pvc-clone | 04-verify-independence | CREATE    | OK    | v1/Pod @ chainsaw-giving-cheetah/independence-verifier
+    sink.go:61: | 12:22:05 | pvc-clone | 04-verify-independence | APPLY     | DONE  | v1/Pod @ chainsaw-giving-cheetah/independence-verifier
+    sink.go:61: | 12:22:05 | pvc-clone | 04-verify-independence | ASSERT    | RUN   | v1/Pod @ chainsaw-giving-cheetah/source-modifier
+    sink.go:61: | 12:22:05 | pvc-clone | 04-verify-independence | ASSERT    | DONE  | v1/Pod @ chainsaw-giving-cheetah/source-modifier
+    sink.go:61: | 12:22:05 | pvc-clone | 04-verify-independence | TRY       | END   |
+    sink.go:61: | 12:22:05 | pvc-clone | 04-verify-independence | CLEANUP   | BEGIN |
+    sink.go:61: | 12:22:05 | pvc-clone | 04-verify-independence | DELETE    | OK    | v1/Pod @ chainsaw-giving-cheetah/independence-verifier
+    sink.go:61: | 12:22:07 | pvc-clone | 04-verify-independence | CLEANUP   | END   |
+    sink.go:61: | 12:22:07 | pvc-clone | 03-modify-source       | CLEANUP   | BEGIN |
+    sink.go:61: | 12:22:07 | pvc-clone | 03-modify-source       | DELETE    | OK    | v1/Pod @ chainsaw-giving-cheetah/source-modifier
+    sink.go:61: | 12:22:07 | pvc-clone | 03-modify-source       | CLEANUP   | END   |
+    sink.go:61: | 12:22:07 | pvc-clone | 02-verify              | CLEANUP   | BEGIN |
+    sink.go:61: | 12:22:07 | pvc-clone | 02-verify              | DELETE    | OK    | v1/Pod @ chainsaw-giving-cheetah/clone-verifier
+    sink.go:61: | 12:22:07 | pvc-clone | 02-verify              | CLEANUP   | END   |
+    sink.go:61: | 12:22:07 | pvc-clone | 01-clone               | CLEANUP   | BEGIN |
+    sink.go:61: | 12:22:07 | pvc-clone | 01-clone               | DELETE    | OK    | v1/PersistentVolumeClaim @ chainsaw-giving-cheetah/cloned-pvc
+    sink.go:61: | 12:22:07 | pvc-clone | 01-clone               | CLEANUP   | END   |
+    sink.go:61: | 12:22:07 | pvc-clone | 00-setup               | CLEANUP   | BEGIN |
+    sink.go:61: | 12:22:07 | pvc-clone | 00-setup               | DELETE    | OK    | v1/Pod @ chainsaw-giving-cheetah/source-writer
+    sink.go:61: | 12:22:07 | pvc-clone | 00-setup               | DELETE    | OK    | v1/PersistentVolumeClaim @ chainsaw-giving-cheetah/source-pvc
+    sink.go:61: | 12:22:07 | pvc-clone | 00-setup               | CLEANUP   | END   |
+    sink.go:61: | 12:22:07 | pvc-clone | @chainsaw              | CLEANUP   | BEGIN |
+    sink.go:61: | 12:22:07 | pvc-clone | @chainsaw              | DELETE    | OK    | v1/Namespace @ chainsaw-giving-cheetah
+=== NAME  chainsaw/volume-expansion
+    sink.go:61: | 12:22:08 | volume-expansion | 01-writer        | ASSERT    | DONE  | v1/Pod @ chainsaw-shining-mite/initial-writer
+    sink.go:61: | 12:22:08 | volume-expansion | 01-writer        | ASSERT    | RUN   | v1/PersistentVolumeClaim @ chainsaw-shining-mite/expandable-pvc
+    sink.go:61: | 12:22:08 | volume-expansion | 01-writer        | ASSERT    | DONE  | v1/PersistentVolumeClaim @ chainsaw-shining-mite/expandable-pvc
+    sink.go:61: | 12:22:08 | volume-expansion | 01-writer        | TRY       | END   |
+    sink.go:61: | 12:22:08 | volume-expansion | 02-expand-pvc    | TRY       | BEGIN |
+    sink.go:61: | 12:22:08 | volume-expansion | 02-expand-pvc    | DELETE    | RUN   | v1/Pod @ chainsaw-shining-mite/initial-writer
+    sink.go:61: | 12:22:08 | volume-expansion | 02-expand-pvc    | DELETE    | OK    | v1/Pod @ chainsaw-shining-mite/initial-writer
+    sink.go:61: | 12:22:09 | volume-expansion | 02-expand-pvc    | DELETE    | DONE  | v1/Pod @ chainsaw-shining-mite/initial-writer
+    sink.go:61: | 12:22:09 | volume-expansion | 02-expand-pvc    | APPLY     | RUN   | v1/PersistentVolumeClaim @ chainsaw-shining-mite/expandable-pvc
+    sink.go:61: | 12:22:09 | volume-expansion | 02-expand-pvc    | PATCH     | OK    | v1/PersistentVolumeClaim @ chainsaw-shining-mite/expandable-pvc
+    sink.go:61: | 12:22:09 | volume-expansion | 02-expand-pvc    | APPLY     | DONE  | v1/PersistentVolumeClaim @ chainsaw-shining-mite/expandable-pvc
+    sink.go:61: | 12:22:09 | volume-expansion | 02-expand-pvc    | ASSERT    | RUN   | v1/PersistentVolumeClaim @ chainsaw-shining-mite/expandable-pvc
+    sink.go:61: | 12:22:09 | volume-expansion | 02-expand-pvc    | ASSERT    | DONE  | v1/PersistentVolumeClaim @ chainsaw-shining-mite/expandable-pvc
+    sink.go:61: | 12:22:09 | volume-expansion | 02-expand-pvc    | TRY       | END   |
+    sink.go:61: | 12:22:09 | volume-expansion | 03-delete-writer | TRY       | BEGIN |
+    sink.go:61: | 12:22:09 | volume-expansion | 03-delete-writer | CMD       | RUN   |
+        === COMMAND
+        /bin/bash -c kubectl delete pod initial-writer --namespace=$NAMESPACE --ignore-not-found=true
+    sink.go:61: | 12:22:09 | volume-expansion | 03-delete-writer | SCRIPT    | DONE  |
+    sink.go:61: | 12:22:09 | volume-expansion | 03-delete-writer | CMD       | RUN   |
+        === COMMAND
+        /bin/bash -c kubectl wait --for=delete pod initial-writer --namespace=$NAMESPACE --timeout=60s || true
+    sink.go:61: | 12:22:09 | volume-expansion | 03-delete-writer | SCRIPT    | DONE  |
+    sink.go:61: | 12:22:09 | volume-expansion | 03-delete-writer | ERROR     | RUN   | v1/Pod @ chainsaw-shining-mite/initial-writer
+    sink.go:61: | 12:22:09 | volume-expansion | 03-delete-writer | ERROR     | DONE  | v1/Pod @ chainsaw-shining-mite/initial-writer
+    sink.go:61: | 12:22:09 | volume-expansion | 03-delete-writer | TRY       | END   |
+    sink.go:61: | 12:22:09 | volume-expansion | 04-verify        | TRY       | BEGIN |
+    sink.go:61: | 12:22:09 | volume-expansion | 04-verify        | APPLY     | RUN   | v1/Pod @ chainsaw-shining-mite/post-expansion-pod
+    sink.go:61: | 12:22:10 | volume-expansion | 04-verify        | CREATE    | OK    | v1/Pod @ chainsaw-shining-mite/post-expansion-pod
+    sink.go:61: | 12:22:10 | volume-expansion | 04-verify        | APPLY     | DONE  | v1/Pod @ chainsaw-shining-mite/post-expansion-pod
+    sink.go:61: | 12:22:10 | volume-expansion | 04-verify        | ASSERT    | RUN   | v1/Pod @ chainsaw-shining-mite/post-expansion-pod
+=== NAME  chainsaw/snapshot-restore
+    sink.go:61: | 12:22:10 | snapshot-restore | 00-setup    | ASSERT    | DONE  | v1/Pod @ chainsaw-definite-snail/initial-data-writer
+    sink.go:61: | 12:22:10 | snapshot-restore | 00-setup    | TRY       | END   |
+    sink.go:61: | 12:22:10 | snapshot-restore | 01-snapshot | TRY       | BEGIN |
+    sink.go:61: | 12:22:10 | snapshot-restore | 01-snapshot | APPLY     | RUN   | snapshot.storage.k8s.io/v1/VolumeSnapshot @ chainsaw-definite-snail/test-snapshot
+    sink.go:61: | 12:22:10 | snapshot-restore | 01-snapshot | CREATE    | OK    | snapshot.storage.k8s.io/v1/VolumeSnapshot @ chainsaw-definite-snail/test-snapshot
+    sink.go:61: | 12:22:10 | snapshot-restore | 01-snapshot | APPLY     | DONE  | snapshot.storage.k8s.io/v1/VolumeSnapshot @ chainsaw-definite-snail/test-snapshot
+    sink.go:61: | 12:22:10 | snapshot-restore | 01-snapshot | ASSERT    | RUN   | snapshot.storage.k8s.io/v1/VolumeSnapshot @ chainsaw-definite-snail/test-snapshot
+    sink.go:61: | 12:22:11 | snapshot-restore | 01-snapshot | ASSERT    | DONE  | snapshot.storage.k8s.io/v1/VolumeSnapshot @ chainsaw-definite-snail/test-snapshot
+    sink.go:61: | 12:22:11 | snapshot-restore | 01-snapshot | TRY       | END   |
+    sink.go:61: | 12:22:11 | snapshot-restore | 02-modify   | TRY       | BEGIN |
+    sink.go:61: | 12:22:11 | snapshot-restore | 02-modify   | APPLY     | RUN   | v1/Pod @ chainsaw-definite-snail/data-modifier
+    sink.go:61: | 12:22:11 | snapshot-restore | 02-modify   | CREATE    | OK    | v1/Pod @ chainsaw-definite-snail/data-modifier
+    sink.go:61: | 12:22:11 | snapshot-restore | 02-modify   | APPLY     | DONE  | v1/Pod @ chainsaw-definite-snail/data-modifier
+    sink.go:61: | 12:22:11 | snapshot-restore | 02-modify   | ASSERT    | RUN   | v1/Pod @ chainsaw-definite-snail/data-modifier
+=== NAME  chainsaw/pvc-clone
+    sink.go:61: | 12:22:13 | pvc-clone | @chainsaw              | CLEANUP   | END   |
+=== CONT  chainsaw/rox-multi-pod
+    sink.go:61: | 12:22:13 | rox-multi-pod | @chainsaw                 | CREATE    | OK    | v1/Namespace @ chainsaw-pet-elf
+    sink.go:61: | 12:22:13 | rox-multi-pod | 00-pvc                    | TRY       | BEGIN |
+    sink.go:61: | 12:22:13 | rox-multi-pod | 00-pvc                    | APPLY     | RUN   | v1/PersistentVolumeClaim @ chainsaw-pet-elf/test-pvc
+    sink.go:61: | 12:22:13 | rox-multi-pod | 00-pvc                    | CREATE    | OK    | v1/PersistentVolumeClaim @ chainsaw-pet-elf/test-pvc
+    sink.go:61: | 12:22:13 | rox-multi-pod | 00-pvc                    | APPLY     | DONE  | v1/PersistentVolumeClaim @ chainsaw-pet-elf/test-pvc
+    sink.go:61: | 12:22:13 | rox-multi-pod | 00-pvc                    | TRY       | END   |
+    sink.go:61: | 12:22:13 | rox-multi-pod | 01-writer-pod             | TRY       | BEGIN |
+    sink.go:61: | 12:22:13 | rox-multi-pod | 01-writer-pod             | APPLY     | RUN   | v1/Pod @ chainsaw-pet-elf/writer-pod
+    sink.go:61: | 12:22:13 | rox-multi-pod | 01-writer-pod             | CREATE    | OK    | v1/Pod @ chainsaw-pet-elf/writer-pod
+    sink.go:61: | 12:22:13 | rox-multi-pod | 01-writer-pod             | APPLY     | DONE  | v1/Pod @ chainsaw-pet-elf/writer-pod
+    sink.go:61: | 12:22:13 | rox-multi-pod | 01-writer-pod             | ASSERT    | RUN   | v1/PersistentVolumeClaim @ chainsaw-pet-elf/test-pvc
+    sink.go:61: | 12:22:14 | rox-multi-pod | 01-writer-pod             | ASSERT    | DONE  | v1/PersistentVolumeClaim @ chainsaw-pet-elf/test-pvc
+    sink.go:61: | 12:22:14 | rox-multi-pod | 01-writer-pod             | ASSERT    | RUN   | v1/Pod @ chainsaw-pet-elf/writer-pod
+=== NAME  chainsaw/rwx-single-replica
+    sink.go:61: | 12:22:17 | rwx-single-replica | 01-pods    | ASSERT    | DONE  | v1/Pod @ chainsaw-neutral-liger/rwx-writer-1
+    sink.go:61: | 12:22:17 | rwx-single-replica | 01-pods    | ASSERT    | RUN   | v1/Pod @ chainsaw-neutral-liger/rwx-writer-2
+    sink.go:61: | 12:22:17 | rwx-single-replica | 01-pods    | ASSERT    | DONE  | v1/Pod @ chainsaw-neutral-liger/rwx-writer-2
+    sink.go:61: | 12:22:17 | rwx-single-replica | 01-pods    | ASSERT    | RUN   | v1/Pod @ chainsaw-neutral-liger/rwx-writer-3
+    sink.go:61: | 12:22:17 | rwx-single-replica | 01-pods    | ASSERT    | DONE  | v1/Pod @ chainsaw-neutral-liger/rwx-writer-3
+    sink.go:61: | 12:22:17 | rwx-single-replica | 01-pods    | TRY       | END   |
+    sink.go:61: | 12:22:17 | rwx-single-replica | 02-verify  | TRY       | BEGIN |
+    sink.go:61: | 12:22:17 | rwx-single-replica | 02-verify  | APPLY     | RUN   | v1/Pod @ chainsaw-neutral-liger/rwx-verifier
+    sink.go:61: | 12:22:17 | rwx-single-replica | 02-verify  | CREATE    | OK    | v1/Pod @ chainsaw-neutral-liger/rwx-verifier
+    sink.go:61: | 12:22:17 | rwx-single-replica | 02-verify  | APPLY     | DONE  | v1/Pod @ chainsaw-neutral-liger/rwx-verifier
+    sink.go:61: | 12:22:17 | rwx-single-replica | 02-verify  | ASSERT    | RUN   | v1/Pod @ chainsaw-neutral-liger/rwx-verifier
+=== NAME  chainsaw/snapshot-restore
+    sink.go:61: | 12:22:20 | snapshot-restore | 02-modify   | ASSERT    | DONE  | v1/Pod @ chainsaw-definite-snail/data-modifier
+    sink.go:61: | 12:22:20 | snapshot-restore | 02-modify   | TRY       | END   |
+    sink.go:61: | 12:22:20 | snapshot-restore | 03-restore  | TRY       | BEGIN |
+    sink.go:61: | 12:22:20 | snapshot-restore | 03-restore  | APPLY     | RUN   | v1/PersistentVolumeClaim @ chainsaw-definite-snail/restored-pvc
+    sink.go:61: | 12:22:20 | snapshot-restore | 03-restore  | CREATE    | OK    | v1/PersistentVolumeClaim @ chainsaw-definite-snail/restored-pvc
+    sink.go:61: | 12:22:20 | snapshot-restore | 03-restore  | APPLY     | DONE  | v1/PersistentVolumeClaim @ chainsaw-definite-snail/restored-pvc
+    sink.go:61: | 12:22:20 | snapshot-restore | 03-restore  | ASSERT    | RUN   | v1/PersistentVolumeClaim @ chainsaw-definite-snail/restored-pvc
+    sink.go:61: | 12:22:21 | snapshot-restore | 03-restore  | ASSERT    | DONE  | v1/PersistentVolumeClaim @ chainsaw-definite-snail/restored-pvc
+    sink.go:61: | 12:22:21 | snapshot-restore | 03-restore  | TRY       | END   |
+    sink.go:61: | 12:22:21 | snapshot-restore | 04-verify   | TRY       | BEGIN |
+    sink.go:61: | 12:22:21 | snapshot-restore | 04-verify   | APPLY     | RUN   | v1/Pod @ chainsaw-definite-snail/snapshot-verifier
+    sink.go:61: | 12:22:21 | snapshot-restore | 04-verify   | CREATE    | OK    | v1/Pod @ chainsaw-definite-snail/snapshot-verifier
+    sink.go:61: | 12:22:21 | snapshot-restore | 04-verify   | APPLY     | DONE  | v1/Pod @ chainsaw-definite-snail/snapshot-verifier
+    sink.go:61: | 12:22:21 | snapshot-restore | 04-verify   | CMD       | RUN   |
+        === COMMAND
+        /bin/bash -c # kuttl retried a TestAssert command until the step timeout;
+        # a Chainsaw script runs once, so the retry is explicit.
+        attempt() {
+          set -e  # Exit on any error
+        
+          # Get the current namespace
+          NAMESPACE=${NAMESPACE:-default}
+          echo "Using namespace: $NAMESPACE"
+        
+          PHASE=$(kubectl get pod snapshot-verifier -n $NAMESPACE -o jsonpath='{.status.phase}')
+          if [ "$PHASE" = "Failed" ] || [ "$PHASE" = "Error" ]; then
+            echo "❌ Pod in $PHASE state - failing test"
+            exit 1
+          fi
+          echo "✅ Pod status check passed (Phase: $PHASE)"
+        }
+        until ( attempt ); do sleep 2; done
+    sink.go:61: | 12:22:21 | snapshot-restore | 04-verify   | SCRIPT    | LOG   |
+        === STDOUT
+        Using namespace: chainsaw-definite-snail
+        ✅ Pod status check passed (Phase: Pending)
+    sink.go:61: | 12:22:21 | snapshot-restore | 04-verify   | SCRIPT    | DONE  |
+    sink.go:61: | 12:22:21 | snapshot-restore | 04-verify   | ASSERT    | RUN   | v1/Pod @ chainsaw-definite-snail/snapshot-verifier
+=== NAME  chainsaw/volume-expansion
+    sink.go:61: | 12:22:21 | volume-expansion | 04-verify        | ASSERT    | DONE  | v1/Pod @ chainsaw-shining-mite/post-expansion-pod
+    sink.go:61: | 12:22:21 | volume-expansion | 04-verify        | ASSERT    | RUN   | v1/PersistentVolumeClaim @ chainsaw-shining-mite/expandable-pvc
+    sink.go:61: | 12:22:21 | volume-expansion | 04-verify        | ASSERT    | DONE  | v1/PersistentVolumeClaim @ chainsaw-shining-mite/expandable-pvc
+    sink.go:61: | 12:22:21 | volume-expansion | 04-verify        | TRY       | END   |
+    sink.go:61: | 12:22:21 | volume-expansion | 04-verify        | CLEANUP   | BEGIN |
+    sink.go:61: | 12:22:21 | volume-expansion | 04-verify        | DELETE    | OK    | v1/Pod @ chainsaw-shining-mite/post-expansion-pod
+    sink.go:61: | 12:22:21 | volume-expansion | 04-verify        | CLEANUP   | END   |
+    sink.go:61: | 12:22:21 | volume-expansion | 01-writer        | CLEANUP   | BEGIN |
+    sink.go:61: | 12:22:21 | volume-expansion | 01-writer        | DELETE    | OK    | v1/Pod @ chainsaw-shining-mite/initial-writer
+        === ERROR
+        pods "initial-writer" not found
+    sink.go:61: | 12:22:21 | volume-expansion | 01-writer        | CLEANUP   | END   |
+    sink.go:61: | 12:22:21 | volume-expansion | 00-pvc           | CLEANUP   | BEGIN |
+    sink.go:61: | 12:22:21 | volume-expansion | 00-pvc           | DELETE    | OK    | v1/PersistentVolumeClaim @ chainsaw-shining-mite/expandable-pvc
+    sink.go:61: | 12:22:22 | volume-expansion | 00-pvc           | CLEANUP   | END   |
+    sink.go:61: | 12:22:22 | volume-expansion | @chainsaw        | CLEANUP   | BEGIN |
+    sink.go:61: | 12:22:22 | volume-expansion | @chainsaw        | DELETE    | OK    | v1/Namespace @ chainsaw-shining-mite
+    sink.go:61: | 12:22:27 | volume-expansion | @chainsaw        | CLEANUP   | END   |
+=== NAME  chainsaw/snapshot-restore
+    sink.go:61: | 12:22:28 | snapshot-restore | 04-verify   | ASSERT    | DONE  | v1/Pod @ chainsaw-definite-snail/snapshot-verifier
+    sink.go:61: | 12:22:28 | snapshot-restore | 04-verify   | TRY       | END   |
+    sink.go:61: | 12:22:28 | snapshot-restore | 04-verify   | CLEANUP   | BEGIN |
+    sink.go:61: | 12:22:28 | snapshot-restore | 04-verify   | DELETE    | OK    | v1/Pod @ chainsaw-definite-snail/snapshot-verifier
+    sink.go:61: | 12:22:28 | snapshot-restore | 04-verify   | CLEANUP   | END   |
+    sink.go:61: | 12:22:28 | snapshot-restore | 03-restore  | CLEANUP   | BEGIN |
+    sink.go:61: | 12:22:28 | snapshot-restore | 03-restore  | DELETE    | OK    | v1/PersistentVolumeClaim @ chainsaw-definite-snail/restored-pvc
+=== NAME  chainsaw/rox-multi-pod
+    sink.go:61: | 12:22:28 | rox-multi-pod | 01-writer-pod             | ASSERT    | DONE  | v1/Pod @ chainsaw-pet-elf/writer-pod
+    sink.go:61: | 12:22:28 | rox-multi-pod | 01-writer-pod             | TRY       | END   |
+    sink.go:61: | 12:22:28 | rox-multi-pod | 02-snapshot               | TRY       | BEGIN |
+=== NAME  chainsaw/snapshot-restore
+    sink.go:61: | 12:22:28 | snapshot-restore | 03-restore  | CLEANUP   | END   |
+    sink.go:61: | 12:22:28 | snapshot-restore | 02-modify   | CLEANUP   | BEGIN |
+    sink.go:61: | 12:22:28 | snapshot-restore | 02-modify   | DELETE    | OK    | v1/Pod @ chainsaw-definite-snail/data-modifier
+    sink.go:61: | 12:22:28 | snapshot-restore | 02-modify   | CLEANUP   | END   |
+    sink.go:61: | 12:22:28 | snapshot-restore | 01-snapshot | CLEANUP   | BEGIN |
+=== NAME  chainsaw/rox-multi-pod
+    sink.go:61: | 12:22:28 | rox-multi-pod | 02-snapshot               | APPLY     | RUN   | snapshot.storage.k8s.io/v1/VolumeSnapshot @ chainsaw-pet-elf/rox-source-snapshot
+=== NAME  chainsaw/snapshot-restore
+    sink.go:61: | 12:22:28 | snapshot-restore | 01-snapshot | DELETE    | OK    | snapshot.storage.k8s.io/v1/VolumeSnapshot @ chainsaw-definite-snail/test-snapshot
+=== NAME  chainsaw/rox-multi-pod
+    sink.go:61: | 12:22:29 | rox-multi-pod | 02-snapshot               | CREATE    | OK    | snapshot.storage.k8s.io/v1/VolumeSnapshot @ chainsaw-pet-elf/rox-source-snapshot
+    sink.go:61: | 12:22:29 | rox-multi-pod | 02-snapshot               | APPLY     | DONE  | snapshot.storage.k8s.io/v1/VolumeSnapshot @ chainsaw-pet-elf/rox-source-snapshot
+    sink.go:61: | 12:22:29 | rox-multi-pod | 02-snapshot               | ASSERT    | RUN   | snapshot.storage.k8s.io/v1/VolumeSnapshot @ chainsaw-pet-elf/rox-source-snapshot
+=== NAME  chainsaw/snapshot-restore
+    sink.go:61: | 12:22:29 | snapshot-restore | 01-snapshot | CLEANUP   | END   |
+    sink.go:61: | 12:22:29 | snapshot-restore | 00-setup    | CLEANUP   | BEGIN |
+    sink.go:61: | 12:22:29 | snapshot-restore | 00-setup    | DELETE    | OK    | v1/Pod @ chainsaw-definite-snail/initial-data-writer
+    sink.go:61: | 12:22:29 | snapshot-restore | 00-setup    | DELETE    | OK    | v1/PersistentVolumeClaim @ chainsaw-definite-snail/snapshot-source-pvc
+    sink.go:61: | 12:22:29 | snapshot-restore | 00-setup    | CLEANUP   | END   |
+    sink.go:61: | 12:22:29 | snapshot-restore | @chainsaw   | CLEANUP   | BEGIN |
+    sink.go:61: | 12:22:29 | snapshot-restore | @chainsaw   | DELETE    | OK    | v1/Namespace @ chainsaw-definite-snail
+=== NAME  chainsaw/rox-multi-pod
+    sink.go:61: | 12:22:29 | rox-multi-pod | 02-snapshot               | ASSERT    | DONE  | snapshot.storage.k8s.io/v1/VolumeSnapshot @ chainsaw-pet-elf/rox-source-snapshot
+    sink.go:61: | 12:22:29 | rox-multi-pod | 02-snapshot               | TRY       | END   |
+    sink.go:61: | 12:22:29 | rox-multi-pod | 03-delete-writer          | TRY       | BEGIN |
+    sink.go:61: | 12:22:30 | rox-multi-pod | 03-delete-writer          | DELETE    | RUN   | v1/Pod @ chainsaw-pet-elf/writer-pod
+    sink.go:61: | 12:22:30 | rox-multi-pod | 03-delete-writer          | DELETE    | OK    | v1/Pod @ chainsaw-pet-elf/writer-pod
+    sink.go:61: | 12:22:30 | rox-multi-pod | 03-delete-writer          | DELETE    | DONE  | v1/Pod @ chainsaw-pet-elf/writer-pod
+    sink.go:61: | 12:22:30 | rox-multi-pod | 03-delete-writer          | TRY       | END   |
+    sink.go:61: | 12:22:30 | rox-multi-pod | 04-pvc-rox                | TRY       | BEGIN |
+    sink.go:61: | 12:22:30 | rox-multi-pod | 04-pvc-rox                | APPLY     | RUN   | v1/PersistentVolumeClaim @ chainsaw-pet-elf/rox-pvc
+    sink.go:61: | 12:22:30 | rox-multi-pod | 04-pvc-rox                | CREATE    | OK    | v1/PersistentVolumeClaim @ chainsaw-pet-elf/rox-pvc
+    sink.go:61: | 12:22:30 | rox-multi-pod | 04-pvc-rox                | APPLY     | DONE  | v1/PersistentVolumeClaim @ chainsaw-pet-elf/rox-pvc
+    sink.go:61: | 12:22:30 | rox-multi-pod | 04-pvc-rox                | TRY       | END   |
+    sink.go:61: | 12:22:30 | rox-multi-pod | 05-reader-pods            | TRY       | BEGIN |
+    sink.go:61: | 12:22:30 | rox-multi-pod | 05-reader-pods            | APPLY     | RUN   | v1/Pod @ chainsaw-pet-elf/reader-pod-1
+    sink.go:61: | 12:22:30 | rox-multi-pod | 05-reader-pods            | CREATE    | OK    | v1/Pod @ chainsaw-pet-elf/reader-pod-1
+    sink.go:61: | 12:22:30 | rox-multi-pod | 05-reader-pods            | APPLY     | DONE  | v1/Pod @ chainsaw-pet-elf/reader-pod-1
+    sink.go:61: | 12:22:30 | rox-multi-pod | 05-reader-pods            | APPLY     | RUN   | v1/Pod @ chainsaw-pet-elf/reader-pod-2
+    sink.go:61: | 12:22:30 | rox-multi-pod | 05-reader-pods            | CREATE    | OK    | v1/Pod @ chainsaw-pet-elf/reader-pod-2
+    sink.go:61: | 12:22:30 | rox-multi-pod | 05-reader-pods            | APPLY     | DONE  | v1/Pod @ chainsaw-pet-elf/reader-pod-2
+    sink.go:61: | 12:22:30 | rox-multi-pod | 05-reader-pods            | ASSERT    | RUN   | v1/PersistentVolumeClaim @ chainsaw-pet-elf/rox-pvc
+    sink.go:61: | 12:22:30 | rox-multi-pod | 05-reader-pods            | ASSERT    | DONE  | v1/PersistentVolumeClaim @ chainsaw-pet-elf/rox-pvc
+    sink.go:61: | 12:22:30 | rox-multi-pod | 05-reader-pods            | ASSERT    | RUN   | v1/Pod @ chainsaw-pet-elf/reader-pod-1
+=== NAME  chainsaw/snapshot-restore
+    sink.go:61: | 12:22:34 | snapshot-restore | @chainsaw   | CLEANUP   | END   |
+=== NAME  chainsaw/rwx-single-replica
+    sink.go:61: | 12:22:42 | rwx-single-replica | 02-verify  | ASSERT    | DONE  | v1/Pod @ chainsaw-neutral-liger/rwx-verifier
+    sink.go:61: | 12:22:42 | rwx-single-replica | 02-verify  | TRY       | END   |
+    sink.go:61: | 12:22:42 | rwx-single-replica | 03-cleanup | TRY       | BEGIN |
+    sink.go:61: | 12:22:42 | rwx-single-replica | 03-cleanup | DELETE    | RUN   | v1/Pod @ chainsaw-neutral-liger/rwx-writer-1
+    sink.go:61: | 12:22:42 | rwx-single-replica | 03-cleanup | DELETE    | OK    | v1/Pod @ chainsaw-neutral-liger/rwx-writer-1
+=== NAME  chainsaw/rox-multi-pod
+    sink.go:61: | 12:22:49 | rox-multi-pod | 05-reader-pods            | ASSERT    | DONE  | v1/Pod @ chainsaw-pet-elf/reader-pod-1
+    sink.go:61: | 12:22:49 | rox-multi-pod | 05-reader-pods            | ASSERT    | RUN   | v1/Pod @ chainsaw-pet-elf/reader-pod-2
+    sink.go:61: | 12:22:50 | rox-multi-pod | 05-reader-pods            | ASSERT    | DONE  | v1/Pod @ chainsaw-pet-elf/reader-pod-2
+    sink.go:61: | 12:22:50 | rox-multi-pod | 05-reader-pods            | TRY       | END   |
+    sink.go:61: | 12:22:50 | rox-multi-pod | 06-verify-readonly        | TRY       | BEGIN |
+    sink.go:61: | 12:22:50 | rox-multi-pod | 06-verify-readonly        | CMD       | RUN   |
+        === COMMAND
+        /bin/bash -c set -u
+        echo "=== 1. both readers read the snapshot's data ==="
+        for p in reader-pod-1 reader-pod-2; do
+          kubectl -n "$NAMESPACE" logs $p | grep -q "ROX_TEST_DATA" || { echo "FAIL: $p cannot read the data"; exit 1; }
+        done
+        echo "=== 2. the readers are on DIFFERENT nodes ==="
+        n1=$(kubectl -n "$NAMESPACE" get pod reader-pod-1 -o jsonpath='{.spec.nodeName}')
+        n2=$(kubectl -n "$NAMESPACE" get pod reader-pod-2 -o jsonpath='{.spec.nodeName}')
+        echo "reader-pod-1 on '$n1', reader-pod-2 on '$n2'"
+        [ -n "$n1" ] && [ "$n1" != "$n2" ] || { echo "FAIL: not multi-node ($n1 / $n2)"; exit 1; }
+        echo "=== 3. a write through a readOnly pod mount is refused ==="
+        for p in reader-pod-1 reader-pod-2; do
+          if kubectl -n "$NAMESPACE" exec $p -- sh -c 'echo F71 > /data/f71-readonly-probe' 2>/tmp/f71-err-$p; then
+            echo "FAIL: $p WROTE to the ROX volume"; exit 1
+          fi
+          echo "$p refused: $(cat /tmp/f71-err-$p | tr '\n' ' ')"
+        done
+        echo "PASS: readable from two nodes, and a readOnly mount refuses writes"
+    sink.go:61: | 12:22:52 | rox-multi-pod | 06-verify-readonly        | SCRIPT    | LOG   |
+        === STDOUT
+        === 1. both readers read the snapshot's data ===
+        === 2. the readers are on DIFFERENT nodes ===
+        reader-pod-1 on 'csw-aws-3', reader-pod-2 on 'csw-aws-1'
+        === 3. a write through a readOnly pod mount is refused ===
+        reader-pod-1 refused: sh: line 0: can't create /data/f71-readonly-probe: Read-only file system command terminated with exit code 1 
+        reader-pod-2 refused: sh: line 0: can't create /data/f71-readonly-probe: Read-only file system command terminated with exit code 1 
+        PASS: readable from two nodes, and a readOnly mount refuses writes
+    sink.go:61: | 12:22:52 | rox-multi-pod | 06-verify-readonly        | SCRIPT    | DONE  |
+    sink.go:61: | 12:22:52 | rox-multi-pod | 06-verify-readonly        | TRY       | END   |
+    sink.go:61: | 12:22:52 | rox-multi-pod | 07-mount-without-readonly | TRY       | BEGIN |
+    sink.go:61: | 12:22:52 | rox-multi-pod | 07-mount-without-readonly | APPLY     | RUN   | v1/Pod @ chainsaw-pet-elf/rox-forgetful-writer
+    sink.go:61: | 12:22:52 | rox-multi-pod | 07-mount-without-readonly | CREATE    | OK    | v1/Pod @ chainsaw-pet-elf/rox-forgetful-writer
+    sink.go:61: | 12:22:52 | rox-multi-pod | 07-mount-without-readonly | APPLY     | DONE  | v1/Pod @ chainsaw-pet-elf/rox-forgetful-writer
+    sink.go:61: | 12:22:52 | rox-multi-pod | 07-mount-without-readonly | ASSERT    | RUN   | v1/Pod @ chainsaw-pet-elf/rox-forgetful-writer
+    sink.go:61: | 12:22:54 | rox-multi-pod | 07-mount-without-readonly | ASSERT    | DONE  | v1/Pod @ chainsaw-pet-elf/rox-forgetful-writer
+    sink.go:61: | 12:22:54 | rox-multi-pod | 07-mount-without-readonly | TRY       | END   |
+    sink.go:61: | 12:22:54 | rox-multi-pod | 08-verify-rox-enforced    | TRY       | BEGIN |
+    sink.go:61: | 12:22:54 | rox-multi-pod | 08-verify-rox-enforced    | CMD       | RUN   |
+        === COMMAND
+        /bin/bash -c set -u
+        for i in $(seq 1 30); do
+          out=$(kubectl -n "$NAMESPACE" logs rox-forgetful-writer 2>/dev/null)
+          [ -n "$out" ] && break; sleep 2
+        done
+        echo "rox-forgetful-writer: $out"
+        case "$out" in
+          *WRITE_LANDED*) echo "FAIL (F70): a pod without readOnly WROTE to a ReadOnlyMany volume"; exit 1 ;;
+          *WRITE_REFUSED*) ;;
+          *) echo "FAIL: no verdict from the writer"; exit 1 ;;
+        esac
+        # Independent of the writer's own view: another node's reader must
+        # not see the probe (informative only when the write was refused).
+        if kubectl -n "$NAMESPACE" exec reader-pod-1 -- test -e /data/f71-rw-probe; then
+          echo "FAIL (F70): the probe file is visible to reader-pod-1"; exit 1
+        fi
+        echo "PASS: ROX is enforced whatever the pod asks for"
+    sink.go:61: | 12:22:55 | rox-multi-pod | 08-verify-rox-enforced    | SCRIPT    | LOG   |
+        === STDOUT
+        rox-forgetful-writer: WRITE_REFUSED: /bin/sh: line 3: can't create /data/f71-rw-probe: Read-only file system
+        PASS: ROX is enforced whatever the pod asks for
+        === STDERR
+        command terminated with exit code 1
+    sink.go:61: | 12:22:55 | rox-multi-pod | 08-verify-rox-enforced    | SCRIPT    | DONE  |
+    sink.go:61: | 12:22:55 | rox-multi-pod | 08-verify-rox-enforced    | TRY       | END   |
+    sink.go:61: | 12:22:55 | rox-multi-pod | 09-cleanup                | TRY       | BEGIN |
+    sink.go:61: | 12:22:55 | rox-multi-pod | 09-cleanup                | DELETE    | RUN   | v1/Pod @ chainsaw-pet-elf/rox-forgetful-writer
+    sink.go:61: | 12:22:55 | rox-multi-pod | 09-cleanup                | DELETE    | OK    | v1/Pod @ chainsaw-pet-elf/rox-forgetful-writer
+=== NAME  chainsaw/rwx-single-replica
+    sink.go:61: | 12:23:13 | rwx-single-replica | 03-cleanup | DELETE    | DONE  | v1/Pod @ chainsaw-neutral-liger/rwx-writer-1
+    sink.go:61: | 12:23:13 | rwx-single-replica | 03-cleanup | DELETE    | RUN   | v1/Pod @ chainsaw-neutral-liger/rwx-writer-2
+    sink.go:61: | 12:23:13 | rwx-single-replica | 03-cleanup | DELETE    | OK    | v1/Pod @ chainsaw-neutral-liger/rwx-writer-2
+=== NAME  chainsaw/rox-multi-pod
+    sink.go:61: | 12:23:27 | rox-multi-pod | 09-cleanup                | DELETE    | DONE  | v1/Pod @ chainsaw-pet-elf/rox-forgetful-writer
+    sink.go:61: | 12:23:27 | rox-multi-pod | 09-cleanup                | DELETE    | RUN   | v1/Pod @ chainsaw-pet-elf/reader-pod-1
+    sink.go:61: | 12:23:27 | rox-multi-pod | 09-cleanup                | DELETE    | OK    | v1/Pod @ chainsaw-pet-elf/reader-pod-1
+=== NAME  chainsaw/rwx-single-replica
+    sink.go:61: | 12:23:44 | rwx-single-replica | 03-cleanup | DELETE    | DONE  | v1/Pod @ chainsaw-neutral-liger/rwx-writer-2
+    sink.go:61: | 12:23:44 | rwx-single-replica | 03-cleanup | DELETE    | RUN   | v1/Pod @ chainsaw-neutral-liger/rwx-writer-3
+    sink.go:61: | 12:23:44 | rwx-single-replica | 03-cleanup | DELETE    | OK    | v1/Pod @ chainsaw-neutral-liger/rwx-writer-3
+=== NAME  chainsaw/rox-multi-pod
+    sink.go:61: | 12:23:58 | rox-multi-pod | 09-cleanup                | DELETE    | DONE  | v1/Pod @ chainsaw-pet-elf/reader-pod-1
+    sink.go:61: | 12:23:58 | rox-multi-pod | 09-cleanup                | DELETE    | RUN   | v1/Pod @ chainsaw-pet-elf/reader-pod-2
+    sink.go:61: | 12:23:59 | rox-multi-pod | 09-cleanup                | DELETE    | OK    | v1/Pod @ chainsaw-pet-elf/reader-pod-2
+=== NAME  chainsaw/rwx-single-replica
+    sink.go:61: | 12:24:15 | rwx-single-replica | 03-cleanup | DELETE    | DONE  | v1/Pod @ chainsaw-neutral-liger/rwx-writer-3
+    sink.go:61: | 12:24:15 | rwx-single-replica | 03-cleanup | DELETE    | RUN   | v1/Pod @ chainsaw-neutral-liger/rwx-verifier
+    sink.go:61: | 12:24:15 | rwx-single-replica | 03-cleanup | DELETE    | OK    | v1/Pod @ chainsaw-neutral-liger/rwx-verifier
+    sink.go:61: | 12:24:15 | rwx-single-replica | 03-cleanup | DELETE    | DONE  | v1/Pod @ chainsaw-neutral-liger/rwx-verifier
+    sink.go:61: | 12:24:15 | rwx-single-replica | 03-cleanup | DELETE    | RUN   | v1/PersistentVolumeClaim @ chainsaw-neutral-liger/rwx-test-pvc
+    sink.go:61: | 12:24:15 | rwx-single-replica | 03-cleanup | DELETE    | OK    | v1/PersistentVolumeClaim @ chainsaw-neutral-liger/rwx-test-pvc
+    sink.go:61: | 12:24:15 | rwx-single-replica | 03-cleanup | DELETE    | DONE  | v1/PersistentVolumeClaim @ chainsaw-neutral-liger/rwx-test-pvc
+    sink.go:61: | 12:24:15 | rwx-single-replica | 03-cleanup | TRY       | END   |
+    sink.go:61: | 12:24:15 | rwx-single-replica | 02-verify  | CLEANUP   | BEGIN |
+    sink.go:61: | 12:24:15 | rwx-single-replica | 02-verify  | DELETE    | OK    | v1/Pod @ chainsaw-neutral-liger/rwx-verifier
+        === ERROR
+        pods "rwx-verifier" not found
+    sink.go:61: | 12:24:15 | rwx-single-replica | 02-verify  | CLEANUP   | END   |
+    sink.go:61: | 12:24:15 | rwx-single-replica | 01-pods    | CLEANUP   | BEGIN |
+    sink.go:61: | 12:24:15 | rwx-single-replica | 01-pods    | DELETE    | OK    | v1/Pod @ chainsaw-neutral-liger/rwx-writer-3
+        === ERROR
+        pods "rwx-writer-3" not found
+    sink.go:61: | 12:24:15 | rwx-single-replica | 01-pods    | DELETE    | OK    | v1/Pod @ chainsaw-neutral-liger/rwx-writer-2
+        === ERROR
+        pods "rwx-writer-2" not found
+    sink.go:61: | 12:24:16 | rwx-single-replica | 01-pods    | DELETE    | OK    | v1/Pod @ chainsaw-neutral-liger/rwx-writer-1
+        === ERROR
+        pods "rwx-writer-1" not found
+    sink.go:61: | 12:24:16 | rwx-single-replica | 01-pods    | CLEANUP   | END   |
+    sink.go:61: | 12:24:16 | rwx-single-replica | 00-pvc     | CLEANUP   | BEGIN |
+    sink.go:61: | 12:24:16 | rwx-single-replica | 00-pvc     | DELETE    | OK    | v1/PersistentVolumeClaim @ chainsaw-neutral-liger/rwx-test-pvc
+        === ERROR
+        persistentvolumeclaims "rwx-test-pvc" not found
+    sink.go:61: | 12:24:16 | rwx-single-replica | 00-pvc     | CLEANUP   | END   |
+    sink.go:61: | 12:24:16 | rwx-single-replica | @chainsaw  | CLEANUP   | BEGIN |
+    sink.go:61: | 12:24:16 | rwx-single-replica | @chainsaw  | DELETE    | OK    | v1/Namespace @ chainsaw-neutral-liger
+    sink.go:61: | 12:24:21 | rwx-single-replica | @chainsaw  | CLEANUP   | END   |
+=== NAME  chainsaw/rox-multi-pod
+    sink.go:61: | 12:24:30 | rox-multi-pod | 09-cleanup                | DELETE    | DONE  | v1/Pod @ chainsaw-pet-elf/reader-pod-2
+    sink.go:61: | 12:24:30 | rox-multi-pod | 09-cleanup                | DELETE    | RUN   | v1/PersistentVolumeClaim @ chainsaw-pet-elf/rox-pvc
+    sink.go:61: | 12:24:30 | rox-multi-pod | 09-cleanup                | DELETE    | OK    | v1/PersistentVolumeClaim @ chainsaw-pet-elf/rox-pvc
+    sink.go:61: | 12:24:30 | rox-multi-pod | 09-cleanup                | DELETE    | DONE  | v1/PersistentVolumeClaim @ chainsaw-pet-elf/rox-pvc
+    sink.go:61: | 12:24:30 | rox-multi-pod | 09-cleanup                | DELETE    | RUN   | snapshot.storage.k8s.io/v1/VolumeSnapshot @ chainsaw-pet-elf/rox-source-snapshot
+    sink.go:61: | 12:24:30 | rox-multi-pod | 09-cleanup                | DELETE    | OK    | snapshot.storage.k8s.io/v1/VolumeSnapshot @ chainsaw-pet-elf/rox-source-snapshot
+    sink.go:61: | 12:24:30 | rox-multi-pod | 09-cleanup                | DELETE    | DONE  | snapshot.storage.k8s.io/v1/VolumeSnapshot @ chainsaw-pet-elf/rox-source-snapshot
+    sink.go:61: | 12:24:30 | rox-multi-pod | 09-cleanup                | DELETE    | RUN   | v1/PersistentVolumeClaim @ chainsaw-pet-elf/test-pvc
+    sink.go:61: | 12:24:30 | rox-multi-pod | 09-cleanup                | DELETE    | OK    | v1/PersistentVolumeClaim @ chainsaw-pet-elf/test-pvc
+    sink.go:61: | 12:24:30 | rox-multi-pod | 09-cleanup                | DELETE    | DONE  | v1/PersistentVolumeClaim @ chainsaw-pet-elf/test-pvc
+    sink.go:61: | 12:24:30 | rox-multi-pod | 09-cleanup                | TRY       | END   |
+    sink.go:61: | 12:24:30 | rox-multi-pod | 07-mount-without-readonly | CLEANUP   | BEGIN |
+    sink.go:61: | 12:24:30 | rox-multi-pod | 07-mount-without-readonly | DELETE    | OK    | v1/Pod @ chainsaw-pet-elf/rox-forgetful-writer
+        === ERROR
+        pods "rox-forgetful-writer" not found
+    sink.go:61: | 12:24:30 | rox-multi-pod | 07-mount-without-readonly | CLEANUP   | END   |
+    sink.go:61: | 12:24:30 | rox-multi-pod | 05-reader-pods            | CLEANUP   | BEGIN |
+    sink.go:61: | 12:24:30 | rox-multi-pod | 05-reader-pods            | DELETE    | OK    | v1/Pod @ chainsaw-pet-elf/reader-pod-2
+        === ERROR
+        pods "reader-pod-2" not found
+    sink.go:61: | 12:24:30 | rox-multi-pod | 05-reader-pods            | DELETE    | OK    | v1/Pod @ chainsaw-pet-elf/reader-pod-1
+        === ERROR
+        pods "reader-pod-1" not found
+    sink.go:61: | 12:24:30 | rox-multi-pod | 05-reader-pods            | CLEANUP   | END   |
+    sink.go:61: | 12:24:30 | rox-multi-pod | 04-pvc-rox                | CLEANUP   | BEGIN |
+    sink.go:61: | 12:24:30 | rox-multi-pod | 04-pvc-rox                | DELETE    | OK    | v1/PersistentVolumeClaim @ chainsaw-pet-elf/rox-pvc
+        === ERROR
+        persistentvolumeclaims "rox-pvc" not found
+    sink.go:61: | 12:24:30 | rox-multi-pod | 04-pvc-rox                | CLEANUP   | END   |
+    sink.go:61: | 12:24:30 | rox-multi-pod | 02-snapshot               | CLEANUP   | BEGIN |
+    sink.go:61: | 12:24:30 | rox-multi-pod | 02-snapshot               | DELETE    | OK    | snapshot.storage.k8s.io/v1/VolumeSnapshot @ chainsaw-pet-elf/rox-source-snapshot
+        === ERROR
+        volumesnapshots.snapshot.storage.k8s.io "rox-source-snapshot" not found
+    sink.go:61: | 12:24:30 | rox-multi-pod | 02-snapshot               | CLEANUP   | END   |
+    sink.go:61: | 12:24:30 | rox-multi-pod | 01-writer-pod             | CLEANUP   | BEGIN |
+    sink.go:61: | 12:24:30 | rox-multi-pod | 01-writer-pod             | DELETE    | OK    | v1/Pod @ chainsaw-pet-elf/writer-pod
+        === ERROR
+        pods "writer-pod" not found
+    sink.go:61: | 12:24:30 | rox-multi-pod | 01-writer-pod             | CLEANUP   | END   |
+    sink.go:61: | 12:24:30 | rox-multi-pod | 00-pvc                    | CLEANUP   | BEGIN |
+    sink.go:61: | 12:24:30 | rox-multi-pod | 00-pvc                    | DELETE    | OK    | v1/PersistentVolumeClaim @ chainsaw-pet-elf/test-pvc
+        === ERROR
+        persistentvolumeclaims "test-pvc" not found
+    sink.go:61: | 12:24:30 | rox-multi-pod | 00-pvc                    | CLEANUP   | END   |
+    sink.go:61: | 12:24:30 | rox-multi-pod | @chainsaw                 | CLEANUP   | BEGIN |
+    sink.go:61: | 12:24:30 | rox-multi-pod | @chainsaw                 | DELETE    | OK    | v1/Namespace @ chainsaw-pet-elf
+    sink.go:61: | 12:24:36 | rox-multi-pod | @chainsaw                 | CLEANUP   | END   |
+--- PASS: chainsaw (0.00s)
+    --- PASS: chainsaw/multi-replica (17.23s)
+    --- PASS: chainsaw/ephemeral-inline (21.43s)
+    --- PASS: chainsaw/rwo-pvc-migration (26.43s)
+    --- PASS: chainsaw/pvc-clone (36.10s)
+    --- PASS: chainsaw/volume-expansion (28.68s)
+    --- PASS: chainsaw/snapshot-restore (40.39s)
+    --- PASS: chainsaw/rwx-single-replica (137.80s)
+    --- PASS: chainsaw/rox-multi-pod (142.68s)
+PASS
+Tests Summary...
+- Passed  tests 8
+- Failed  tests 0
+- Skipped tests 0
+Saving report...
+Done.

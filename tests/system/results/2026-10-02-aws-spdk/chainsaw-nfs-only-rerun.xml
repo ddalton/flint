@@ -1,0 +1,14 @@
+<testsuites name="chainsaw-report" time="132.340029" tests="4">
+  <testsuite name="tests-nfs-only/volume-expansion" tests="1" failures="0" errors="0" id="0" time="">
+    <testcase name="volume-expansion" classname="" time="29.036050"></testcase>
+  </testsuite>
+  <testsuite name="tests-nfs-only/rwx-single-replica" tests="1" failures="0" errors="0" id="0" time="">
+    <testcase name="rwx-single-replica" classname="" time="126.847323"></testcase>
+  </testsuite>
+  <testsuite name="tests-nfs-only/ephemeral-inline" tests="1" failures="0" errors="0" id="0" time="">
+    <testcase name="ephemeral-inline" classname="" time="17.018495"></testcase>
+  </testsuite>
+  <testsuite name="tests-nfs-only/rwo-pvc-migration" tests="1" failures="0" errors="0" id="0" time="">
+    <testcase name="rwo-pvc-migration" classname="" time="25.164745"></testcase>
+  </testsuite>
+</testsuites>

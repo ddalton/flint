@@ -27,8 +27,15 @@ spec:
           apiVersion: v1
           kind: Pod
           name: writer-pod
-    - assert:
-        file: 02-assert.yaml
+    # 02-assert.yaml says "Verify pod is deleted" but asserted phase
+    # Succeeded -- true only while kuttl ignored the `$patch: delete`.
+    # The intent is absence.
+    - error:
+        resource:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: writer-pod
         timeout: 60s
   - name: 03-verify-logs
     try:
