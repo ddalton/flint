@@ -129,7 +129,6 @@ helm upgrade --install flint-csi "$ROOT/flint-csi-driver-chart" \
   --set storageClass.parameters.nfsEmptyDir=true \
   --set dashboard.enabled=false \
   --set snapshotClass.enabled=false \
-  --set snapshotController.enabled=false \
   --set crds.installSnapshotCRDs=false \
   ${HELM_EXTRA:-} \
   --wait --timeout 5m

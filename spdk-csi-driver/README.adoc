@@ -7,7 +7,7 @@ This crate builds the container images that make up the Flint data path:
 | Image | Dockerfile | Contents
 
 | `flint-driver`
-| `docker/Dockerfile.csi`
+| `docker/Dockerfile.csi.prebuilt`
 | The CSI driver binary. One image serves **both** controller and node
   roles — the role is selected at runtime via the `CSI_MODE` env var
   (`controller` / `node`). Also embeds the dashboard backend
@@ -20,7 +20,7 @@ This crate builds the container images that make up the Flint data path:
   a privileged sidecar on each node.
 
 | `flint-pnfs`
-| `docker/Dockerfile.pnfs`
+| `docker/Dockerfile.pnfs.prebuilt`
 | The pNFS MDS + Data Server (one image; the entrypoint selects the
   role). Only needed when `pnfs.server.enabled` is set in the chart.
 |===
@@ -39,20 +39,31 @@ and refuses to push a chart whose images aren't published:
 [source,bash]
 ----
 scripts/release.sh check    # verify every tag the chart references
-scripts/release.sh images   # build + push the MISSING images only
+scripts/release.sh images   # build + push missing NON-prebuilt images (spdk-tgt, frontend)
 scripts/release.sh all      # images, then chart
 ----
 
-To build one image manually (registry comes from `images.repository` in
-`values.yaml`, default `dilipdalton` on Docker Hub):
+`flint-driver` and `flint-pnfs` are built the way releases ship them:
+musl binaries cross-compiled with cargo-zigbuild for both arches, then a
+thin runtime image (`docker/Dockerfile.*.prebuilt`):
+
+[source,bash]
+----
+scripts/stage-prebuilt.sh            # checks the binaries are built and fresh, stages them
+scripts/publish-images.sh <version> all   # multi-arch build + push (forge is its own scope)
+----
+
+The in-container `docker/Dockerfile.csi` and `docker/Dockerfile.pnfs`
+do NOT build: their context, `spdk-csi-driver/`, lacks the crate's path
+dependencies (`crates/flint-store`, `forge/syncer`), since 2026-08-25.
+`tests/system/kind-nfs-only.sh` shows the one-image path for a test build.
+
+The SPDK target still builds in-container (registry from
+`images.repository` in `values.yaml`, default `dilipdalton`):
 
 [source,bash]
 ----
 # from the repo root
-docker buildx build --platform linux/amd64 \
-  -f spdk-csi-driver/docker/Dockerfile.csi \
-  -t dilipdalton/flint-driver:<tag> --push spdk-csi-driver
-
 docker buildx build --platform linux/amd64 \
   -f spdk-csi-driver/docker/Dockerfile.spdk \
   -t dilipdalton/spdk-tgt:<tag> --push spdk-csi-driver

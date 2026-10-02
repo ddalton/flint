@@ -2,6 +2,13 @@
 # kind-up.sh — bring up a kind cluster with the Flint CSI driver
 # installed, suitable for running tests/regression/spdk-*.sh.
 #
+# NOTE (2026-10-02): this installs the PUBLISHED images, never this tree.
+# It loads `flint-driver:latest` while the chart pins a release tag, so
+# the load is unused, and there is no `make build-images`. Its SPDK disk is
+# malloc (RAM), lost on any spdk-tgt restart. To test THIS tree, use
+# tests/system/kind-nfs-only.sh (no SPDK) or tests/system/kind-spdk.sh
+# (SPDK on a real disk; read its single-host limits in tests/system/README.md).
+#
 # What this gives you:
 #   - A 3-node kind cluster (1 control plane + 2 workers) so multi-node
 #     scenarios can run.
@@ -98,9 +105,9 @@ kubectl config use-context "kind-$CLUSTER_NAME" >/dev/null
 #
 # kind nodes can't pull from Docker Hub directly in restricted networks;
 # `kind load docker-image` ships local images into the kind nodes'
-# containerd. We assume the user has these images locally — pulled from
-# Docker Hub or built via `make build-images`. If they aren't, kindMode
-# falls back to imagePullPolicy=IfNotPresent and the kubelet pulls them.
+# containerd. These are only USED if their tags match the chart's pins
+# (flint-csi-driver-chart/values.yaml), which `:latest` does not; the
+# kubelet then pulls the pinned tags from Docker Hub.
 # ---------------------------------------------------------------------------
 
 step "loading driver images into kind"

@@ -5,6 +5,8 @@
 #   scripts/release.sh check    # verify every image tag the chart references
 #                               # exists on Docker Hub (default)
 #   scripts/release.sh images   # build + push the MISSING images only
+#                               # (not *.prebuilt ones: those come from
+#                               # stage-prebuilt.sh + publish-images.sh)
 #   scripts/release.sh chart    # verify, then helm package + push the chart
 #   scripts/release.sh all      # images, then chart
 #
@@ -98,8 +100,12 @@ import sys, yaml
 d = sys.argv[1]
 values = yaml.safe_load(open(f"{d}/values.yaml"))
 images = values["images"]
+# The PREBUILT file: what publish-images.sh builds and pushes. The
+# in-container docker/Dockerfile.csi has not built since a602e084
+# (2026-08-25): its context, spdk-csi-driver/, lacks the crate's path
+# dependencies (crates/flint-store, forge/syncer).
 print(images["flintCsiDriver"]["name"], images["flintCsiDriver"]["tag"],
-      "spdk-csi-driver", "docker/Dockerfile.csi")
+      "spdk-csi-driver", "docker/Dockerfile.csi.prebuilt")
 print(images["spdkTarget"]["name"], images["spdkTarget"]["tag"],
       "spdk-csi-driver", "docker/Dockerfile.spdk")
 dash = values.get("dashboard", {})
@@ -288,9 +294,18 @@ if [ "$cmd" = images ] || [ "$cmd" = all ]; then
     if [ -z "$missing_table" ]; then
         echo "all referenced images are published; nothing to build."
     fi
+    need_prebuilt=""
     while read -r name tag ctx file; do
         [ -n "$name" ] || continue
         ref="$hub_ns/$name:$tag"
+        # A *.prebuilt Dockerfile copies binaries this script never
+        # builds: they come from scripts/stage-prebuilt.sh, and the image
+        # (multi-arch) from scripts/publish-images.sh. Building it here
+        # would fail on a missing docker/prebuilt/<arch>/, or worse, ship
+        # whatever stale binaries a dev left staged.
+        case "$file" in *.prebuilt)
+            need_prebuilt="$need_prebuilt $ref"; continue ;;
+        esac
         echo "── building $ref"
         echo "   context $repo_root/$ctx"
         docker buildx build --platform linux/amd64 \
@@ -299,6 +314,12 @@ if [ "$cmd" = images ] || [ "$cmd" = all ]; then
     done <<EOF
 $missing_table
 EOF
+    if [ -n "$need_prebuilt" ]; then
+        echo "NOT built here (prebuilt images):$need_prebuilt" >&2
+        echo "  build them the published way: scripts/stage-prebuilt.sh, then" >&2
+        echo "  scripts/publish-images.sh <version> <scope>" >&2
+        exit 1
+    fi
 fi
 
 # --- chart: verify everything again, then package + push ---------------------

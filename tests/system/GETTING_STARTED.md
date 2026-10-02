@@ -55,22 +55,22 @@ kubectl get all -n <namespace>
 
 ## What Tests Are Included?
 
-### 1. **RWO PVC Migration** (`tests/rwo-pvc-migration/`)
+### 1. **RWO PVC Migration** (`tests-standard/rwo-pvc-migration/`)
 Tests pod migration between nodes with data persistence
 - **Use Case**: Simulates pod rescheduling or node failures
 - **Duration**: ~2-3 minutes
 
-### 2. **Multi-Replica** (`tests/multi-replica/`)
+### 2. **Multi-Replica** (`tests-standard/multi-replica/`)
 Tests multi-replica volume support
 - **Use Case**: High availability storage with multiple replicas
 - **Duration**: ~2-3 minutes
 
-### 3. **Volume Expansion** (`tests/volume-expansion/`)
+### 3. **Volume Expansion** (`tests-standard/volume-expansion/`)
 Tests online volume expansion without data loss
 - **Use Case**: Growing storage needs (databases, etc.)
 - **Duration**: ~3-4 minutes
 
-### 4. **Snapshot & Restore** (`tests/snapshot-restore/`)
+### 4. **Snapshot & Restore** (`tests-standard/snapshot-restore/`)
 Tests volume snapshot and restore functionality
 - **Use Case**: Backup/restore, environment cloning
 - **Duration**: ~3-4 minutes
@@ -82,19 +82,20 @@ Tests volume snapshot and restore functionality
 Before running tests, update the storage class in PVC manifests:
 
 ```yaml
-# In files like tests/*/00-pvc.yaml or tests/*/01-pvc.yaml
+# In files like tests-standard/*/00-pvc.yaml or tests-standard/*/01-pvc.yaml
 spec:
   storageClassName: your-csi-driver-storage-class  # <-- Update this
 ```
 
-Or use the quick-start script which does this automatically.
+The SPDK tests ask for `flint`, the nfs-only tests for `flint-nfs`; the
+rigs (`kind-nfs-only.sh`, `kind-spdk.sh`) create what they need.
 
 ### Update Snapshot Class
 
 For the snapshot test, ensure you have a VolumeSnapshotClass:
 
 ```yaml
-# In tests/snapshot-restore/01-snapshot.yaml
+# In tests-standard/snapshot-restore/01-snapshot.yaml
 spec:
   volumeSnapshotClassName: csi-snapclass  # <-- Update this
 ```
@@ -121,7 +122,7 @@ spec:
 Each test follows this pattern:
 
 ```
-tests/my-test/
+tests-standard/my-test/
 ├── 00-*.yaml       # Setup: Create initial resources
 ├── 00-assert.yaml  # Assert setup completed
 ├── 01-*.yaml       # Action: Execute test operation
@@ -136,7 +137,7 @@ Chainsaw runs the steps of a test's `chainsaw-test.yaml` in order; an `assert` r
 
 1. **Create test directory**:
    ```bash
-   mkdir tests/my-new-test
+   mkdir tests-standard/my-new-test
    ```
 
 2. **Add test steps** (numbered YAML files):

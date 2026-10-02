@@ -1,5 +1,13 @@
 # Chainguard base images for the flint images
 
+> **Update 2026-10-02.** These bases shipped in v1.56.0 (2026-09-17). The
+> "canonical in-container-compile twins" below (`Dockerfile.csi`,
+> `Dockerfile.pnfs`) do NOT build: since 2026-08-25 their context
+> (`spdk-csi-driver/`) lacks the crate's path dependencies
+> (`crates/flint-store`, `forge/syncer`). Every release uses the
+> `.prebuilt` files via `scripts/stage-prebuilt.sh` +
+> `scripts/publish-images.sh`.
+
 Status: **Dockerfiles converted, built and smoke-tested locally on linux/arm64
 and linux/amd64 (2026-09-16). Not yet published and not yet run on a cluster.**
 The canonical in-container-compile twins (`Dockerfile.csi`, `Dockerfile.pnfs`)

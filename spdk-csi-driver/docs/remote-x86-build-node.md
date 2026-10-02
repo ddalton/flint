@@ -198,11 +198,13 @@ docker version --format 'server={{.Server.Version}} arch={{.Server.Arch}}'
 # → server=25.0.16 arch=amd64
 
 cd ~/github/flint/spdk-csi-driver
-docker buildx build -f docker/Dockerfile.csi  -t dilipdalton/flint-driver:1.1.0 .
+# flint-driver: NOT from docker/Dockerfile.csi, which has not built since
+# 2026-08-25 (its context lacks the crate's path dependencies). Build the
+# musl binaries and the image with scripts/stage-prebuilt.sh +
+# scripts/publish-images.sh (spdk-csi-driver/README.adoc).
 docker buildx build -f docker/Dockerfile.spdk -t dilipdalton/spdk-tgt:1.1.0 .
 
 # push straight from the node, using the Mac's Docker Hub login:
-docker push dilipdalton/flint-driver:1.1.0
 docker push dilipdalton/spdk-tgt:1.1.0
 
 unset DOCKER_HOST   # back to the local daemon

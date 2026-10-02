@@ -17,7 +17,7 @@ This test validates the complete lifecycle of an ephemeral inline volume:
 
 ### Steps
 
-1. **Prerequisites Check** (`00-assert.yaml`)
+1. **Prerequisites Check** (`chainsaw-test.yaml` step `00-assert`, a script)
    - Verify Flint CSI driver is installed
    - Confirm `Ephemeral` mode is enabled in CSIDriver object
    - Check controller pod is running
@@ -30,18 +30,17 @@ This test validates the complete lifecycle of an ephemeral inline volume:
 3. **Verify Volume Works** (`01-assert.yaml`)
    - Wait for Pod to start and complete
    - Verify data was written to the ephemeral volume
-   - Check CSI controller logs for ephemeral volume creation
    - Confirm Pod executed successfully
 
-4. **Delete Pod** (`02-cleanup.yaml`)
-   - Delete the Pod using `$patch: delete`
+4. **Delete Pod** (`chainsaw-test.yaml` step `02-cleanup`, a script running
+   `kubectl delete pod`)
    - Triggers automatic volume cleanup
 
-5. **Verify Automatic Cleanup** (`02-assert.yaml`)
+5. **Verify Automatic Cleanup** (`chainsaw-test.yaml` step `03-assert`)
    - Confirm Pod is deleted
-   - Verify volume deletion in CSI logs
+   - Look for the volume deletion in the CSI controller log (logged, not
+     asserted: tests/system/README.md, "still weak")
    - Ensure no orphaned PV/PVC resources remain
-   - Validate complete cleanup
 
 ## Expected Behavior
 

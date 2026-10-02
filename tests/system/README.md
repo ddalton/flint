@@ -25,39 +25,30 @@ This is a declarative test framework for testing CSI drivers on Kubernetes using
 ## Project Structure
 
 ```
-.
-├── chainsaw-standard.yaml         # Suite configuration (also chainsaw-nfs-only/-clean-shutdown/-replica-rebuild.yaml)
-├── kind-nfs-only.sh               # Build this tree, run the nfs-only suite on kind (the CI gate)
-├── tests/
-│   ├── clean-shutdown/            # Test: Clean shutdown and fast remount ⭐ NEW
-│   │   ├── 00-pvc.yaml            # Create PVC
-│   │   ├── 00-assert.yaml         # Assert PVC bound
-│   │   ├── 01-writer-pod.yaml     # Write data and sync
-│   │   ├── 01-assert.yaml         # Assert write succeeded
-│   │   ├── 02-delete-writer.yaml  # Trigger clean shutdown
-│   │   ├── 02-assert.yaml         # Assert deletion
-│   │   ├── 03-verify-logs.yaml    # Verify BLOBSTORE UNLOAD in logs
-│   │   ├── 04-fast-remount.yaml   # Remount and verify data
-│   │   ├── 04-assert.yaml         # Assert fast remount (< 30s)
-│   │   ├── 05-verify-no-recovery.yaml  # Verify no recovery triggered
-│   │   ├── 06-rapid-cycle.yaml    # Test rapid mount/unmount
-│   │   ├── 06-assert.yaml         # Assert rapid cycle works
-│   │   └── README.md              # Detailed test documentation
-│   ├── rwo-pvc-migration/         # Test: RWO PVC migration between nodes
-│   │   ├── 00-assert.yaml         # Initial state check
-│   │   ├── 01-pvc.yaml            # Create PVC
-│   │   ├── 01-assert.yaml         # Assert PVC is bound
-│   │   ├── 02-writer-pod.yaml     # Pod that writes data
-│   │   ├── 02-assert.yaml         # Assert writer completed
-│   │   ├── 03-delete-writer.yaml  # Delete writer pod
-│   │   ├── 03-assert.yaml         # Assert deletion
-│   │   ├── 04-reader-pod.yaml     # Pod that reads data on different node
-│   │   └── 04-assert.yaml         # Assert reader succeeded
-│   ├── multi-replica/             # Test: Multi-replica volume support
-│   ├── snapshot-restore/          # Test: Snapshot and restore
-│   └── volume-expansion/          # Test: Volume expansion
-└── README.md
+tests/system/
+├── chainsaw-standard.yaml          # suite configs: one per suite
+├── chainsaw-nfs-only.yaml
+├── chainsaw-clean-shutdown.yaml
+├── chainsaw-replica-rebuild.yaml
+├── kind-nfs-only.sh                # build this tree, run nfs-only on kind (the CI gate)
+├── kind-spdk.sh                    # SPDK suites on kind over one real disk (single-host limits: README below)
+├── tests-standard/                 # SPDK suite (StorageClass `flint`)
+│   ├── rwo-pvc-migration/
+│   │   ├── chainsaw-test.yaml      # the steps, in order
+│   │   ├── 01-pvc.yaml  01-assert.yaml  02-writer-pod.yaml  02-assert.yaml
+│   │   └── 04-reader-pod.yaml  04-assert.yaml
+│   ├── ephemeral-inline/  multi-replica/  pvc-clone/  rox-multi-pod/
+│   └── rwx-single-replica/  snapshot-restore/  volume-expansion/
+├── tests-nfs-only/                 # no-SPDK suite (StorageClass `flint-nfs`)
+│   └── ephemeral-inline/  rwo-pvc-migration/  rwx-single-replica/  volume-expansion/
+├── tests/clean-shutdown/           # SPDK, run alone (chainsaw-clean-shutdown.yaml)
+├── tests-replica-rebuild/          # SPDK, run alone (chainsaw-replica-rebuild.yaml)
+└── results/                        # dated run evidence (e.g. 2026-10-02-aws-spdk)
 ```
+
+Steps that were kuttl TestStep/TestAssert files are now operations inside
+each test's `chainsaw-test.yaml`; the numbered YAML files that remain are
+the resources those operations apply or assert.
 
 ## Running Tests
 
