@@ -31,6 +31,8 @@ kuttl suite (`tests/system/kuttl-testsuite.yaml`, 8 tests): **8/8 PASS in
 `flint-spdk`, the suite expects `flint` — a clone SC must be applied first
 (recorded in project memory).
 
+> **Note 2026-10-02:** this PASS came from the kuttl suites, several of whose steps could not fail (`$patch: delete` deleted nothing; absence was "asserted" with `--ignore-not-found`; see tests/system/README.md, "Migration from kuttl"). In particular rwo-pvc-migration never deleted its writer, so the reader never mounted a volume that had moved nodes. The Chainsaw suites that replaced them passed on real nodes on 2026-10-02 (tests/system/results/2026-10-02-aws-spdk/).
+
 **Stage 1 — phases 1–4 live (rc1).** 2-replica volume (replicas aws-1 +
 aws-2), consumer on aws-3, busybox writer appending one fsynced line/s.
 - Epoch scheduler: cuts on both replicas at the configured cadence;
@@ -135,6 +137,8 @@ suite in parallel plus the separately-run clean-shutdown suite — passed
 green, and `v1.2.0` was tagged (commit `1de8f45`): chart `1.2.0` on the
 Docker Hub OCI repo, image `1.2.0` with `1.2`/`1` aliases, trove pinned
 to the released chart.
+
+> **Note 2026-10-02:** this PASS came from the kuttl suites, several of whose steps could not fail (`$patch: delete` deleted nothing; absence was "asserted" with `--ignore-not-found`; see tests/system/README.md, "Migration from kuttl"). Also, clean-shutdown step 02 asserted `Succeeded` for a writer it never deleted, so the remount after a clean unpublish was not exercised. The Chainsaw suites that replaced them passed on real nodes on 2026-10-02 (tests/system/results/2026-10-02-aws-spdk/).
 
 ## Observations for follow-up (none blocking)
 

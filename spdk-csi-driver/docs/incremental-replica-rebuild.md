@@ -970,6 +970,9 @@ Rejected alternatives:
    scenarios (replica-node reboot → phantom raid; restage → EEXIST) on the
    fixed build and observe convergence, plus the isolated clean-shutdown
    suite (`kuttl-testsuite-clean-shutdown.yaml`).
+
+   > **Note 2026-10-02:** this PASS came from the kuttl suites, several of whose steps could not fail (`$patch: delete` deleted nothing; absence was "asserted" with `--ignore-not-found`; see tests/system/README.md, "Migration from kuttl"). "Cross-node RWO migration" in particular was never exercised: its writer was never deleted. The Chainsaw suites that replaced them passed on real nodes on 2026-10-02 (tests/system/results/2026-10-02-aws-spdk/).
+
 1. **Persistent replica sync-state** in PV annotations (`sync_state` ∈
    `in_sync`/`stale`/`standby`, `last_epoch`, current epoch name). *Control
    plane.*

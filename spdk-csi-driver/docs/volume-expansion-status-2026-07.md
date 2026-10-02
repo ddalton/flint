@@ -113,6 +113,8 @@ block volumes:
      falls through to `Status::unimplemented("Unsupported filesystem type: ")`
      — a known gap, fails loudly rather than crashing.
 
+     > **Note 2026-10-02:** from F30 (2026-07-21) until 2026-10-02 EVERY nfs-only PVC was unservable (the NFS server refused its unstamped emptyDir backing, exit 57), so the `tests-nfs-only` suite could not have exercised this arm in that window; fixed and run green 2026-10-02 (tests/system/README.md).
+
 **Online expansion:** yes — `resize2fs`/`xfs_growfs` run on the live mounted
 device. There is still no explicit flint-issued NVMe-oF rescan in the expand
 path; the kernel initiator's AEN handling grows the device, and the v1.21.0
@@ -495,6 +497,8 @@ NfsBacking — kept its semantics.)*
 ---
 
 ## 7. Test surface (added 2026-07-27 — undocumented in the original)
+
+> **Note 2026-10-02:** these suites are Chainsaw now (2026-10-02); the kuttl versions' step-02 `$patch: delete` of `initial-writer` deleted nothing, and the nfs-only one could not run at all from 2026-07-21 (F30) until 2026-10-02. See tests/system/README.md, "Migration from kuttl".
 
 **Pre-existing kuttl suites** (`tests/system/`):
 - `tests-standard/volume-expansion` — the RWO baseline regression (1Gi→2Gi

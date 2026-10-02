@@ -1,5 +1,7 @@
 # Taking flint-lite to 3000 shares / 300 live hubs
 
+> **Update 2026-10-02:** BUILT and measured: `flint-lite-fleet-rig-results.md` (runbv, 2026-08-20: "the OOMKill was real, and the fix holds"). The status below is the original.
+
 > **Status: plan of record, no code yet.** Produced 2026-08-20 by a
 > 51-agent ultracode pass — five parallel readers over the fleet-critical
 > subsystems, three independent designs from deliberately opposed priors,

@@ -1,5 +1,7 @@
 # Chunked manifest entries — design of record
 
+> **Update 2026-10-02:** BUILT: `lean/syncer/src/chunk.rs`; the manifest resolver reads the chunked layout (CHANGELOG). The status below is the original.
+
 Status: **DESIGN — no code.** Written 2026-09-03. Step TWO. Step one is
 `flint-lean-manifest-pointer-design.md` (immutable generations plus a
 small mutable pointer), **built and committed at `1ace7bca`**; this

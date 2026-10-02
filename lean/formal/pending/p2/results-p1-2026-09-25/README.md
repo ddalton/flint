@@ -1,3 +1,5 @@
+> **Note 2026-10-02:** superseded: this sandbox became `lean/formal/LeanP1.tla`; its gate is `lean/formal/results/2026-09-25-leanp1-gate/`. Re-run before quoting anything below.
+
 # P1-lite sandbox, paired with its same-coverage baseline — paused 2026-09-25
 
 Models (final, local):

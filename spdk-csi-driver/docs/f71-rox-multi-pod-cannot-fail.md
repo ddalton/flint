@@ -1,5 +1,7 @@
 # F71 — `rox-multi-pod` asserts nothing a broken ROX implementation would violate: the step called "verify-readonly" never attempts a write, and "multi-node" is a scheduling *preference*
 
+> **Note 2026-10-02:** RUN on real nodes 2026-10-02 (Chainsaw, i4i.large AWS): rox-multi-pod PASSED, including step 08 (a pod mounting the ROX volume without `readOnly` had its write REFUSED). Evidence: tests/system/results/2026-10-02-aws-spdk/. The status lines below are the originals.
+
 Status: **FOUND 2026-09-22 by reading the test, NOT FIXED.** This is the
 oracle defect that let [F70](f70-rox-export-is-not-enforced-server-side.md)
 survive. F70 is a server that never enforces read-only; this is the reason

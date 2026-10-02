@@ -1,3 +1,5 @@
+> **Note 2026-10-02:** superseded by `door-drill-2026-09-12.md`: these lean numbers predate the changes this drill motivated and describe a binary nobody runs.
+
 # Four doors to the same bytes — a live read/write drill
 
 **Cluster** runcr, 3 x i4i.large spot, us-west-1, one AZ.

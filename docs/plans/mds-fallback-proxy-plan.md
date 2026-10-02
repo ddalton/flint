@@ -1,5 +1,7 @@
 # MDS fallback-I/O proxy — closing the straggler-EIO hole (F66)
 
+> **Update 2026-10-02:** IMPLEMENTED: the MDS applies fallback I/O to the stripes (F66), shipped in v1.25.0 (CHANGELOG "The MDS applies fallback I/O to the stripes instead of refusing it"). The status line below is the plan's original.
+
 Status: DESIGNED 2026-08-02, not yet implemented.
 Gate: `make test-pnfs-fsx` (seed 42 — currently RED at HEAD, fails in
 seconds; this plan is done when it is green and stays green).

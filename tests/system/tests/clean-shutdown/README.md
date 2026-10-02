@@ -90,6 +90,8 @@ chainsaw test --config chainsaw-clean-shutdown.yaml --test-dir tests/clean-shutd
 
 ## Interpreting Results
 
+> **Note 2026-10-02:** step 03-verify-logs passes whether or not the BLOBSTORE UNLOAD line is found, so a PASS here does not prove the unload happened; read the log excerpt it prints. Until 2026-10-02 step 02 also asserted `Succeeded` for a writer it never deleted (now an absence check).
+
 ### ✅ PASS - All patches working correctly
 
 ```

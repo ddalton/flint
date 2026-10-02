@@ -1,5 +1,7 @@
 # F70 — a ROX export is read-only only because the CLIENT was asked nicely; the NFS server never enforces it
 
+> **Note 2026-10-02:** rox-multi-pod step 08 RAN against the fixed driver on real nodes 2026-10-02 and the write was REFUSED (tests/system/results/2026-10-02-aws-spdk/). As its pod spec says, NodePublish now mounts a reader-only PV `ro`, so the client refuses first: that leg cannot observe the SERVER's fence, which stays covered at unit level only.
+
 Status: **FIXED SERVER-SIDE 2026-09-28, unit-tested; the cluster test
 (`rox-multi-pod` step 08) has NOT yet been run against the fixed server.
 2026-09-29: the export's `access:` list is enforced too (per-network

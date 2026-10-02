@@ -1,5 +1,7 @@
 # Replacing the flint-passthrough and flint-lean webhooks with a CSI node DaemonSet — design of record
 
+> **Update 2026-10-02:** BUILT and shipped (v1.45.0); §0 below already says it overrides this header.
+
 Status: **RESEARCH — no code; produced 2026-09-02.** Nothing in this
 document is built. It is the design of record for the question the user
 asked, written so that the first line of code can be judged against it,

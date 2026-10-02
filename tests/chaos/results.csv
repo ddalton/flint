@@ -4,7 +4,7 @@ date,phase,drill,t_ready_s,stall_s,restarts_delta,pre_node,post_node,va_ok,nvme_
 2026-07-13T05:33:34Z,1,1.3,-1,0,new:6,runs-aws-3,runs-aws-3,Y,Y,Y,FAIL,Y,FAIL,"force delete; WAL replay expected failed: ready db"
 2026-07-13T13:40:39Z,1,1.2,11,9,new:0,runt-aws-3,runt-aws-3,Y,Y,Y,PASS,Y,PASS,"clean shutdown"
 2026-07-13T17:58:36Z,1,1.3,6,3,new:0,runt-aws-1,runt-aws-1,Y,Y,Y,FAIL,Y,FAIL,"force delete; WAL replay expected failed: db"
-2026-07-13T17:59:54Z,1,1.4,27,24,new:0,runt-aws-1,runt-aws-3,Y,Y,Y,FAIL,Y,FAIL,"cross-node migration failed: db"
+2026-07-13T17:59:54Z,1,1.4,27,24,new:0,runt-aws-1,runt-aws-3,Y,Y,Y,FAIL,Y,FAIL,"cross-node migration failed: db [INVALIDATED 2026-07-13 batch, verify contamination: attach-detach-campaign-2026-07.md 'Verify contamination across drills'; rerun 2026-07-17]"
 2026-07-13T18:39:32Z,1,1.5,954,19,new:0,runt-aws-3,runt-aws-1,Y,Y,Y,PASS,Y,PASS,"drain"
 2026-07-17T00:47:13Z,1,1.2,6,5,new:0,runu-aws-3,runu-aws-3,Y,Y,Y,PASS,Y,PASS,"clean shutdown"
 2026-07-17T00:48:13Z,1,1.3,-1,0,new:6,runu-aws-3,runu-aws-3,Y,Y,Y,FAIL,Y,FAIL,"force delete; WAL replay expected failed: ready db"

@@ -52,6 +52,8 @@ HIGH-PRIORITY in `tests/system/MISSING_CRITICAL_TESTS.md`.
 - kuttl smoke green after disk-init: rwo-pvc-migration, multi-replica,
   rwx-single-replica, clean-shutdown all PASS.
 
+  > **Note 2026-10-02:** kuttl-era gate: rwo-pvc-migration never deleted its writer and clean-shutdown step 02 asserted `Succeeded` for a pod it never deleted, so those two PASSes did not exercise a cross-node move or a clean-unpublish remount (tests/system/README.md, "Migration from kuttl"). The Chainsaw suites passed on real nodes 2026-10-02.
+
 ## Phase 1 — RWO, numReplicas=1
 
 _Results table filled from `tests/chaos/results.csv` as drills complete._

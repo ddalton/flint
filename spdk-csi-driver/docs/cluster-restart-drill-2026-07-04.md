@@ -144,3 +144,5 @@ rejoin, writer untouched). Two authoring findings worth remembering: the
 replica-sync-state PV annotation is a JSON *string* (`jq fromjson`
 required), and kuttl ≥0.15 ignores `$patch: delete` manifests — use the
 TestStep `delete:` list.
+
+> **Note 2026-10-02:** the replica-rebuild suite above is `tests/system/chainsaw-replica-rebuild.yaml` since 2026-10-02 (`make test-replica-rebuild` still runs it). It already used kuttl's `delete:` list, not `$patch: delete`, so its PASS stands; it passed again on real nodes 2026-10-02.

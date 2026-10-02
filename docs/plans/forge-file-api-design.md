@@ -1,5 +1,7 @@
 # flint forge — a file API with lite's semantics: design
 
+> **Update 2026-10-02:** BUILT: `forge/syncer/src/fileapi.rs`. The status below is the original.
+
 *Draft 2026-09-07. Status: DESIGN ONLY, no code. Companion to
 `docs/plans/flint-forge-design.md` (the design of record), whose §6
 identity model and §4 push path this reuses unchanged.*

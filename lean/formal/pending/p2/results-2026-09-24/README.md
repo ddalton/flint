@@ -1,3 +1,5 @@
+> **Note 2026-10-02:** superseded: the P2 sandbox was folded into `lean/formal/LeanP1.tla`; its gate is `lean/formal/results/2026-09-25-leanp1-gate/`.
+
 # P2 sandbox, run 2 — 2026-09-24, box `ddalton@10.0.0.249`
 
 Model `../LeanCoreP2.tla`, md5 `c82cbb811a316222a2fd57495cbe03e5` (checked on both sides).

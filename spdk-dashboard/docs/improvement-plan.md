@@ -581,6 +581,8 @@ run 7/8 — ephemeral-inline schedules node-locally and landed on the
 LVS-less builder node; the builder is now cordoned during gate runs,
 runbook updated).
 
+> **Note 2026-10-02:** kuttl-era gate: rwo-pvc-migration never deleted its writer and clean-shutdown step 02 asserted `Succeeded` for a pod it never deleted, so those two PASSes did not exercise a cross-node move or a clean-unpublish remount (tests/system/README.md, "Migration from kuttl"). The Chainsaw suites passed on real nodes 2026-10-02.
+
 Small items now tracked: ~~the dashboard delete proxy wraps the agent's
 409 + refusal message as a generic 502 "Node agent returned: 409
 Conflict" — pass the agent's status and body through so the UI shows

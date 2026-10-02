@@ -172,6 +172,8 @@ which identity each of its ~700 `volume_id` references means.
   `format!`s; orphan sweep + dashboard adopt the shared parsers;
   contract table into the architecture docs.
 
+> **Note 2026-10-02:** the "full kuttl suite" evidence for this phase could not exercise the rwx/rox teardown itself (its cleanups deleted nothing); see identity-unification-phase0-audit.md and tests/system/README.md, "Migration from kuttl".
+
 Estimate: Phase 0 ≈ 1 day, Phase 1 ≈ 2–3 days (the decision sites are
 ~25 even though references are ~700), Phases 2+4 ≈ 1 day combined,
 Phase 3 ≈ 1 day on a live cluster. Controller-side only; no node-DS or

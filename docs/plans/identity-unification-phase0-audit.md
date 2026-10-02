@@ -169,6 +169,8 @@ SPDK-eligibility keys off the CP type). Build `identity-p3.0` = Phases
   the node now stays healthy and the pod drains the moment I/O resolves
   (or immediately after force-delete, via the orphan-cleanup path).
 
+> **Note 2026-10-02:** this PASS came from the kuttl suites, several of whose steps could not fail (`$patch: delete` deleted nothing; absence was "asserted" with `--ignore-not-found`; see tests/system/README.md, "Migration from kuttl"). rwx-single-replica's cleanup re-applied bare objects and rox-multi-pod's used `$patch: delete`, so neither DELETED anything: "zero lingering flint-nfs pods" reflects kuttl's namespace deletion, not the tests' own teardown. The Chainsaw suites that replaced them passed on real nodes on 2026-10-02 (tests/system/results/2026-10-02-aws-spdk/).
+
 ### Phase-2 status (2026-07-04): SHIPPED
 
 CreateVolume stamps `disk.chert.us/role` =

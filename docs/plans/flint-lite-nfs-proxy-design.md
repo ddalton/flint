@@ -1,5 +1,7 @@
 # flint-lite NFS proxy — many hubs, one port
 
+> **Update 2026-10-02:** BUILT: `spdk-csi-driver/src/nfs_proxy/`, `src/bin/flint_nfs_proxy.rs` and the lite-operator chart's nfs-proxy templates (steps 1-6; see the BUILT notes in the body). The status line below is the original.
+
 Status: **DESIGN, NO CODE** (2026-09-27).
 
 This is the alternative to `flint-lite-multivolume-design.md`. That

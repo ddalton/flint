@@ -1,3 +1,5 @@
+> **Note 2026-10-02:** written in the kuttl era. The suites are Chainsaw now (tests/system/README.md); the kuttl templates below (`kuttl.dev/v1beta1`, `$patch: delete`) are NOT a pattern to copy (`$patch: delete` deletes nothing under kuttl >= 0.15), and `csi-sanity/` no longer exists.
+
 # Missing Critical System Tests - Flint CSI Driver
 
 Analysis of critical system tests missing from the current test suite, prioritized for production readiness.

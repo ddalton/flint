@@ -405,6 +405,8 @@ noted in `remote-x86-build-node.md`.
 (clean-shutdown needed one rerun: first attempt scheduled its writer on
 the build node while spdk-tgt was still crash-looping on 1.1.1).
 
+> **Note 2026-10-02:** kuttl-era gate: rwo-pvc-migration never deleted its writer and clean-shutdown step 02 asserted `Succeeded` for a pod it never deleted, so those two PASSes did not exercise a cross-node move or a clean-unpublish remount (tests/system/README.md, "Migration from kuttl"). The Chainsaw suites passed on real nodes 2026-10-02.
+
 **Drills — all PASS (v2 parity + v3 additions):**
 
 | drill | result |

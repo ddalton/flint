@@ -1,5 +1,7 @@
 # flint-lite: the real-cluster drill
 
+> **Update 2026-10-02:** RUN on real clusters: see `flint-lite-drill-results.md`. The status below is the original.
+
 **Status: designed, not yet run. Nothing in the idle-lifecycle wave has ever
 executed on real infrastructure.**
 
