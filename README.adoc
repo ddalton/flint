@@ -5,7 +5,6 @@
 image:https://github.com/ddalton/flint/actions/workflows/rust-ci.yml/badge.svg?branch=main[rust-ci,link=https://github.com/ddalton/flint/actions/workflows/rust-ci.yml]
 image:https://github.com/ddalton/flint/actions/workflows/dashboard-ci.yml/badge.svg?branch=main[dashboard-ci,link=https://github.com/ddalton/flint/actions/workflows/dashboard-ci.yml]
 image:https://github.com/ddalton/flint/actions/workflows/dashboard-api-spec.yml/badge.svg?branch=main[dashboard-api-spec,link=https://github.com/ddalton/flint/actions/workflows/dashboard-api-spec.yml]
-image:https://github.com/ddalton/flint/actions/workflows/formal-lean.yml/badge.svg?branch=main[formal-lean,link=https://github.com/ddalton/flint/actions/workflows/formal-lean.yml]
 image:https://github.com/ddalton/flint/actions/workflows/formal-hub.yml/badge.svg?branch=main[formal-hub,link=https://github.com/ddalton/flint/actions/workflows/formal-hub.yml]
 
 // `?branch=main` is deliberate. Without it a badge reports the most
@@ -19,10 +18,12 @@ image:https://github.com/ddalton/flint/actions/workflows/formal-hub.yml/badge.sv
 // flint-store crate, flint-lean, flint-forge, and the cross-uid
 // authorization drill against a real kernel NFS mount.
 //
-// `formal-lean` and `formal-hub` are the TLA+ gates, split because
-// GitHub path filters are WORKFLOW-level: one file holding both ran the
-// hub's 250-run gate on every lean-only edit. A green badge there says
-// the models still
+// `formal-hub` is the TLA+ gate in CI. The lean model's gate
+// (lean/formal: `bash check.sh` + `bash trace-check.sh`) left CI on
+// 2026-10-02: it had outgrown the job's 45-minute budget and every run
+// since 2026-09-29 ended "cancelled" -- a gate that never finishes gates
+// nothing. Run it on the Linux box before merging a lean/formal change.
+// A green formal-hub badge says the models still
 // CHECK OUT — every strict run holds and every must-fail mutation still
 // fails. It does NOT say the models still describe the code; nothing
 // automated can, and reading it that way is how an abstraction becomes

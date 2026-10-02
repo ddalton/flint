@@ -1,7 +1,11 @@
 # The hub's models — 246 TLC runs, roughly three times the lean gate.
 #
-# The same caveat applies as in formal-lean.yml: a green badge says the
-# models still CHECK OUT, never that they still describe the code.
+# A green badge says the models still CHECK OUT, never that they still
+# describe the code: nothing automated can say that, and reading it that
+# way is how an abstraction becomes the bug. (The lean model's gate used
+# to run beside this one as formal-lean.yml; it left CI on 2026-10-02
+# after outgrowing the 45-minute job budget -- run lean/formal/check.sh
+# and trace-check.sh on the Linux box instead.)
 #
 # TRIGGERED NARROWLY, because it is expensive: only when `formal/**`
 # itself changes, plus a weekly bit-rot run. A gate slow enough to

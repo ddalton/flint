@@ -70,7 +70,9 @@ What is not solid:
   - On its first run it rejected three traces at three real
     model-versus-code gaps, now modelled (`CommitLoadsCurrent`,
     `Upload412Preserves`, `DeclaredConfirmsAbsence`).
-  - It runs in `formal-lean` CI.
+  - It ran in `formal-lean` CI until 2026-10-02, when that workflow was
+    removed for outgrowing its 45-minute budget; run `lean/formal/trace-check.sh`
+    on the Linux box.
 - **W3 started.**
   - `Writers` is a constant.
   - `LeanBarrierLeaseImplThreeWriters` HOLDS exhaustively: 5,086,371
