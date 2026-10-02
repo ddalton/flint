@@ -113,6 +113,8 @@ cross-node re-attach + revived-node stale unstage).
 
 ### Verify contamination across drills (2026-07-13 batch — 1.4/1.5 verdicts invalidated)
 
+> **Note 2026-10-02:** the raw captures of this invalidated batch (`tests/chaos/artifacts/1-1.3-1783965516`, `1-1.4-1783965594`, `1-1.5-1783967972`) were removed from the tree; they remain in git history (e.g. `git show 55f551bc:tests/chaos/artifacts/1-1.4-1783965594/driver-logs.txt`). The 2026-07-17 reruns are kept.
+
 The 1.3→1.4→1.5 batch ran back-to-back with **no harness reset**: the
 inter-drill health gate (pg-0 Ready + ledger acking) passed even though 1.3's
 by-design two-postmaster overlap had corrupted the DB (amcheck FAIL). Both

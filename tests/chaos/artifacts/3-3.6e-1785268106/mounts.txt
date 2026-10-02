@@ -1,3 +1,0 @@
-runam-aws-1 globalmounts=0 orphans=''
-runam-aws-3 globalmounts=2 orphans=''
-runam-aws-4 globalmounts=1 orphans=''
