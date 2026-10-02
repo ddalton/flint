@@ -393,7 +393,10 @@ Five things about that loop:
   during import rather than hydrating on first touch. Use it when a
   person is opening the project; omit it for a background poll. The
   operator consumes it once the hub is serving, and clearing it does
-  not restart anything.
+  not restart anything. Any idle transition other than a wake also
+  drops it (a hibernate verification, a share that went down again
+  before it served), so it never outlives the wake it was written
+  for: write it in the same patch as `requested-at`.
 - **Read `status.serverId` and keep it with the mount.** If it changes,
   the share came back on a fresh PVC and every stateid a client still
   holds is stale. A change means remount; an unchanged id across a
@@ -435,9 +438,12 @@ the claim waits out the full `lease_misses × heartbeat`. Measured at
 project pays that on its first open.
 
 **The wake is level-triggered, and that cuts both ways.** The operator
-acts on the annotation being *present*, not on the write event — so a
+acts on the annotation's value, not on the write event: a stamp counts
+as a request while it is no older than the share's last idle transition
+(`chert.us/idle-since`, less 5 s for the writer's clock). So a
 `requested-at` stamped while the operator was down is honoured when it
-returns, and no wake is ever lost to a dropped watch. The other side is
+returns, and no wake is ever lost to a dropped watch; a stamp left over
+from an earlier wake is not mistaken for a new one. The other side is
 that **a share cannot wake while no operator is reconciling**. The
 drill measured exactly that: with the operator scaled to zero a stamped
 share sat at `IdleSuspended` for 245s untouched, then reached `Ready`
@@ -585,8 +591,10 @@ Two failure modes to design against:
   pins a project exactly as re-downloading does.
 - **Do not let a wrong clock look like demand.** A `requested-at` more
   than one `suspendAfterSecs` in the future is discarded, and the share
-  reports an `ImplausibleRequest` event. That is a guard, not a
-  feature — stamp it from a sane clock.
+  reports an `ImplausibleRequest` event. A slow clock fails the other
+  way: a stamp more than 5 s older than the share's last idle transition
+  is read as left over from an earlier wake. These are guards, not
+  features — stamp it from a sane clock.
 
 ### Is the operator alive?
 
@@ -932,9 +940,10 @@ Each covers the other's blind spot. An agent that computes in memory
 for twenty minutes without touching the filesystem looks idle to the
 hub — the heartbeat keeps it alive. A workload that mounted without the
 front door in the loop has no heartbeat at all — the hub's own clock
-keeps it alive. It also avoids comparing clocks: the annotation is
-judged on the front door's, idleness on the hub's, and neither has to
-agree with the operator's.
+keeps it alive. The annotation's age is measured on the operator's
+clock against the front door's stamp, so a front door with a wrong
+clock is the one way to get this wrong; idleness is the hub's own
+clock and needs nobody else's.
 
 **A hub that cannot be polled is never suspended.** An unreachable hub
 is an unknown hub, not an idle one, and the `HubReachable` condition
@@ -967,7 +976,21 @@ kubectl annotate flintshare fs-myproject \
 ```
 
 That is the whole protocol. Keep touching it on a heartbeat shorter
-than `suspendAfterSecs` while a session is alive. What the two rungs
+than `suspendAfterSecs` while a session is alive.
+
+**A request must be newer than the share's last move.** The operator
+counts a stamp only when it is no older than `chert.us/idle-since`,
+less 5 s for clock skew. A stamp from an earlier wake (one written
+while the hub was still starting, after the operator had cleared the
+request it honoured) is then not read as a new request. Stamp from a
+clock within a few seconds of the cluster's: a stamp written right
+after the share parked, by a clock more than 5 s slow, is ignored.
+
+**`idle-state` and `idle-since` are the operator's.** A tool or test
+that writes `idle-state` anyway (a share created already parked, a
+rung forced by hand) writes `idle-since` in the same patch: it is the
+line a wake request has to beat. Without it, any stamp at all reads as
+a request. What the two rungs
 then cost to come back — and why nothing wakes while the operator is
 down — is in *What create and wake actually do*.
 

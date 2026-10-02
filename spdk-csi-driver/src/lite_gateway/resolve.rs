@@ -26,7 +26,6 @@
 
 use crate::forge_operator::crd::FlintRepo;
 use crate::lite_operator::crd::{FlintShare, Phase};
-use crate::lite_operator::idle::ANN_REQUESTED_AT;
 use kube::ResourceExt;
 
 use super::derive::{Binding, NoBinding, ANN_TOKEN_VERSION};
@@ -165,12 +164,13 @@ pub struct ShareView {
     /// re-arm it.
     ///
     /// Read differently by the two construction sites, on purpose. A
-    /// SHARE is presence — lite's operator clears the stamp once the
-    /// request has been honoured, so a present stamp is USUALLY a live
-    /// one; a re-ask that lands just after the clear survives, which is
-    /// why the operator itself only counts a stamp newer than
-    /// `idle-since`. Nothing acts on this field for a share today (the
-    /// git door is the only reader, and it serves repositories). A REPOSITORY is freshness — forge's operator keeps the
+    /// SHARE is the operator's own rule (`idle::woken_since_idle`): a
+    /// stamp no older than `idle-since` (less the clock allowance). Lite
+    /// clears the stamp once it honours a request, but one written just
+    /// after the clear survives on a share that later parks, and read as
+    /// presence it was taken for a new request (three operator bugs,
+    /// 2026-10-02). No door acts on this field for a share today (the git
+    /// door serves repositories). A REPOSITORY is freshness — forge's operator keeps the
     /// stamp as the door's heartbeat and never clears it, so presence
     /// there says only that this repository was woken once, ever
     /// (X24).
@@ -316,11 +316,7 @@ impl ShareView {
             conflict_with: st
                 .and_then(|s| s.conflict_with.as_ref())
                 .map(|c| format!("{}/{}", c.namespace, c.name)),
-            wake_requested: share
-                .metadata
-                .annotations
-                .as_ref()
-                .is_some_and(|a| a.contains_key(ANN_REQUESTED_AT)),
+            wake_requested: crate::lite_operator::idle::woken_since_idle(share),
             endpoint_s3: share.spec.endpoint.clone().unwrap_or_default(),
             bucket: share.spec.bucket.clone(),
             key_prefix: share.spec.key_prefix.clone(),
@@ -1422,6 +1418,34 @@ mod tests {
         }))
         .unwrap();
         ShareView::of(&share)
+    }
+
+    /// A share's `wake_requested` is the operator's own rule, not the
+    /// key's presence: a stamp left behind on a share that has since
+    /// parked is not a request the operator will act on (2026-10-02, three
+    /// operator bugs from reading it as presence), so a door reading this
+    /// field must not take it for one either.
+    #[test]
+    fn a_shares_wake_request_is_the_one_the_operator_would_act_on() {
+        let view = |anns: serde_json::Value| {
+            let share: FlintShare = serde_json::from_value(serde_json::json!({
+                "apiVersion": "chert.us/v1alpha1", "kind": "FlintShare",
+                "metadata": {"name": "fs-p", "namespace": "ws", "annotations": anns},
+                "spec": {"persistence": {"size": "1Gi"}}
+            }))
+            .unwrap();
+            ShareView::of(&share).wake_requested
+        };
+        let parked = "2026-10-02T21:40:30Z";
+        assert!(!view(serde_json::json!({
+            "chert.us/idle-state": "Hibernated", "chert.us/idle-since": parked,
+            "chert.us/requested-at": "2026-10-02T21:38:48Z"
+        })), "left over from the last wake");
+        assert!(view(serde_json::json!({
+            "chert.us/idle-state": "Hibernated", "chert.us/idle-since": parked,
+            "chert.us/requested-at": "2026-10-02T21:41:00Z"
+        })), "asked after the park");
+        assert!(!view(serde_json::json!({})), "never asked");
     }
 
     /// THE ONE AN AGENT NEEDS.

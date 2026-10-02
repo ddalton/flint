@@ -2397,12 +2397,21 @@ pub fn auto_expand_would_undo_it(share: &FlintShare) -> bool {
 /// = `at`, and, when the transition honours a wake, the stamp removed (a
 /// merge-patch null). The ladder and every rung write through this, so the
 /// idle-lifecycle sequence test applies exactly what the operator writes.
+///
+/// Every transition except into Active also drops `wake-intent`: it is a
+/// hint for the boot a wake causes, consumed once that hub serves, and a
+/// wake that never got there (a hibernate verification, a share that went
+/// down again first) otherwise handed it to the next boot, whoever asked
+/// for that one.
 fn idle_state_patch(next: IdleState, at: &str, clear_request: bool) -> serde_json::Value {
     let mut ann = serde_json::Map::new();
     ann.insert(idle::ANN_IDLE_STATE.to_string(), serde_json::Value::String(next.as_str().to_string()));
     ann.insert(idle::ANN_IDLE_SINCE.to_string(), serde_json::Value::String(at.to_string()));
     if clear_request {
         ann.insert(idle::ANN_REQUESTED_AT.to_string(), serde_json::Value::Null);
+    }
+    if next != IdleState::Active {
+        ann.insert(idle::ANN_WAKE_INTENT.to_string(), serde_json::Value::Null);
     }
     serde_json::json!({ "metadata": { "annotations": ann } })
 }
@@ -3142,6 +3151,28 @@ mod tests {
     /// §7a: a hibernated share is parked as its CR alone only once its
     /// disk is gone (so its pod is), never for an adopted claim, and never
     /// under a live wake request — which the normal path must honour.
+    /// `wake-intent` is a hint for ONE boot, consumed once the hub serves.
+    /// A wake that never got there (a hibernate verification, a share that
+    /// went down again first) left it set, and the next boot, whoever asked
+    /// for it, ran under someone else's hint. Every transition except into
+    /// Active drops it; the wake keeps it for the render that boots.
+    #[test]
+    fn every_idle_transition_but_a_wake_drops_the_wake_intent() {
+        let intent = |next: IdleState| idle_state_patch(next, "2026-10-02T00:00:00Z", false)["metadata"]["annotations"]
+            .get(idle::ANN_WAKE_INTENT)
+            .cloned();
+        assert_eq!(intent(IdleState::Active), None, "the wake keeps it for its boot");
+        for down in [
+            IdleState::Suspended,
+            IdleState::Hibernated,
+            IdleState::HibernateVerifying,
+            IdleState::ReprovisionVerifying,
+            IdleState::ReprovisionDraining,
+        ] {
+            assert_eq!(intent(down), Some(serde_json::Value::Null), "{down:?}");
+        }
+    }
+
     #[test]
     fn only_a_reclaimed_unrequested_hibernated_share_parks_as_cr_only() {
         use IdleState::*;
@@ -4469,6 +4500,26 @@ mod tests {
         /// A served client's state holds the hub this long (the verify's
         /// `state_free` answers Held inside it).
         const LEASE: i64 = 10;
+        /// How stale the proxy's view of a share is: its table is rebuilt
+        /// from the watch every 2 s (`bin/flint_nfs_proxy.rs`).
+        const PROXY_LAG: i64 = 2;
+
+        /// Who asks for the wake.
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Writer {
+            /// The NFS proxy: re-asks every `WAKE_EVERY` while the hub is
+            /// down, and skips the stamp (still spending the period, as
+            /// `Proxy::wake` does) when its lagged view says `Active`.
+            Proxy,
+            /// `kubectl annotate`, one `/wake` call: once per wait.
+            OneShot,
+            /// The hub-gateway's `/wake` used as a keepalive: every
+            /// `WAKE_EVERY` while the client wants the share, served or
+            /// not, Active or not. This is the writer that leaves stamps
+            /// on running and starting shares, which the operator must
+            /// read as stale once the share has moved on.
+            Keepalive,
+        }
 
         #[derive(Clone, Copy, PartialEq, Debug)]
         enum PodSt {
@@ -4496,6 +4547,9 @@ mod tests {
             /// Someone (the rig, an admin) writes this idle state at this
             /// time, as `step6-box-wakeparts.sh` does.
             force: Option<(i64, IdleState)>,
+            writer: Writer,
+            /// How far the writer's clock is BEHIND the operator's.
+            skew: i64,
         }
 
         struct World {
@@ -4509,8 +4563,11 @@ mod tests {
             pod: PodSt,
             last_activity: i64,
             last_ask: Option<i64>,
+            last_proxy_try: Option<i64>,
             last_transition: i64,
             unserved: i64,
+            /// The idle state at the end of each tick, for the proxy's lag.
+            states: Vec<IdleState>,
             log: Vec<String>,
         }
 
@@ -4536,8 +4593,10 @@ mod tests {
                     pod: PodSt::Ready,
                     last_activity: 0,
                     last_ask: None,
+                    last_proxy_try: None,
                     last_transition: 0,
                     unserved: 0,
+                    states: Vec::new(),
                     log: Vec::new(),
                 };
                 w.write(idle_state_patch(IdleState::Active, &stamp(0), false));
@@ -4565,8 +4624,9 @@ mod tests {
 
             fn transition(&mut self, next: IdleState, clear: bool, why: &str) -> Result<(), String> {
                 if next == IdleState::Active {
-                    // P3: a wake needs an ask since the last transition.
-                    let asked = self.last_ask.is_some_and(|a| a >= self.last_transition);
+                    // P3: a wake needs an ask since the last transition, or
+                    // within the writers' skew allowance before it.
+                    let asked = self.last_ask.is_some_and(|a| a >= self.last_transition - idle::REQUEST_SKEW_SECS);
                     if !asked {
                         return Err(format!(
                             "t={}: woke ({why}) with no ask since the last transition at {} (last ask {:?})",
@@ -4661,19 +4721,39 @@ mod tests {
             /// A client that wants the share: served by a ready hub, or the
             /// proxy asks for a wake (rate-limited per hub, as `wake()`).
             fn client(&mut self) -> Result<(), String> {
+                if self.c.writer == Writer::Keepalive && self.last_ask.is_none_or(|a| self.t - a >= WAKE_EVERY) {
+                    let s = stamp(self.t - self.c.skew);
+                    self.anns().insert(idle::ANN_REQUESTED_AT.to_string(), s);
+                    self.last_ask = Some(self.t);
+                }
                 if self.pod == PodSt::Ready && self.objects {
                     self.last_activity = self.t;
                     self.unserved = 0;
                     return Ok(());
                 }
-                if self.last_ask.is_none_or(|a| self.t - a >= WAKE_EVERY) {
-                    let s = stamp(self.t);
+                let ask = match self.c.writer {
+                    Writer::Keepalive => false, // stamped above
+                    Writer::OneShot => self.unserved == 0,
+                    Writer::Proxy => {
+                        if self.last_proxy_try.is_some_and(|a| self.t - a < WAKE_EVERY) {
+                            false
+                        } else {
+                            self.last_proxy_try = Some(self.t);
+                            let seen = (self.t - PROXY_LAG).max(0) as usize;
+                            let view = self.states.get(seen).copied().unwrap_or(IdleState::Active);
+                            view != IdleState::Active
+                        }
+                    }
+                };
+                if ask {
+                    let s = stamp(self.t - self.c.skew);
                     self.anns().insert(idle::ANN_REQUESTED_AT.to_string(), s);
                     self.last_ask = Some(self.t);
                 }
                 self.unserved += 1;
-                // P1: a drain, a start, one ask period, and a pass or two.
-                let bound = self.c.drain + self.c.start_delay + WAKE_EVERY + 4;
+                // P1: a drain, a start, one ask period (plus the proxy's
+                // lag, which can spend one), and a pass or two.
+                let bound = self.c.drain + self.c.start_delay + WAKE_EVERY + PROXY_LAG + 4;
                 if self.unserved > bound {
                     return Err(format!("t={}: a client has waited {}s (bound {bound}s)", self.t, self.unserved));
                 }
@@ -4694,14 +4774,16 @@ mod tests {
                     if wants {
                         self.client()?;
                     }
-                    self.reconcile()
+                    self.reconcile()?;
                 } else {
                     self.reconcile()?;
                     if wants {
                         self.client()?;
                     }
-                    Ok(())
                 }
+                let st = idle::state_of(&self.share);
+                self.states.push(st);
+                Ok(())
             }
         }
 
@@ -4737,7 +4819,7 @@ mod tests {
                         // parked), short and long.
                         for from in 0..170 {
                             for len in [1, 12] {
-                                out.push(Case { start_delay, drain, demand: [Some((from, from + len)), None], proxy_first, force: None });
+                                out.push(Case { start_delay, drain, demand: [Some((from, from + len)), None], proxy_first, force: None, writer: Writer::Proxy, skew: 0 });
                                 // And a second one after it.
                                 for gap in [3, 45] {
                                     let b = from + len + gap;
@@ -4747,8 +4829,26 @@ mod tests {
                                         demand: [Some((from, from + len)), Some((b, b + 1))],
                                         proxy_first,
                                         force: None,
+                                        writer: Writer::Proxy,
+                                        skew: 0,
                                     });
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+            // Writers whose clock runs behind the operator's, and one that
+            // asks only once: a stamp read against `idle-since` compares
+            // two clocks, and a single lost ask strands its waiter.
+            for start_delay in [2, 8] {
+                for drain in [0, 3] {
+                    for proxy_first in [true, false] {
+                        for from in 0..170 {
+                            for (writer, skew) in [(Writer::OneShot, 0), (Writer::OneShot, 3), (Writer::Proxy, 3), (Writer::Keepalive, 0)] {
+                                // Long enough that a lost ask outlasts P1's bound: a one-second
+                                // window let a stranded waiter walk away unseen.
+                                out.push(Case { start_delay, drain, demand: [Some((from, from + 40)), None], proxy_first, force: None, writer, skew });
                             }
                         }
                     }
@@ -4760,14 +4860,23 @@ mod tests {
                 for drain in [0, 3] {
                     for proxy_first in [true, false] {
                         for after in 0..40 {
-                            for st in [IdleState::Suspended, IdleState::HibernateVerifying] {
+                            for (st, writer) in [IdleState::Suspended, IdleState::HibernateVerifying]
+                                .into_iter()
+                                .flat_map(|st| [(st, Writer::Proxy), (st, Writer::Keepalive)])
+                            {
                                 let from = 150;
+                                // The keepalive wants it for 12 s, so it also stamps
+                                // while the hub starts: the leftover a forced
+                                // transition then meets while it is still live.
+                                let len = if writer == Writer::Keepalive { 12 } else { 1 };
                                 out.push(Case {
                                     start_delay,
                                     drain,
-                                    demand: [Some((from, from + 1)), None],
+                                    demand: [Some((from, from + len)), None],
                                     proxy_first,
                                     force: Some((from + after, st)),
+                                    writer,
+                                    skew: 0,
                                 });
                             }
                         }
@@ -4790,7 +4899,7 @@ mod tests {
         /// ladder alone, through every rung, and nothing wakes it.
         #[test]
         fn an_untouched_share_walks_the_whole_ladder_to_its_cr() {
-            let c = Case { start_delay: 8, drain: 3, demand: [None, None], proxy_first: true, force: None };
+            let c = Case { start_delay: 8, drain: 3, demand: [None, None], proxy_first: true, force: None, writer: Writer::Proxy, skew: 0 };
             let mut w = World::new(c);
             for t in 0..300 {
                 w.t = t;

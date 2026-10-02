@@ -34,10 +34,26 @@ pub struct HubRow {
     /// False for an admin's `Suspended`: the proxy does not wake it.
     #[serde(default = "yes")]
     pub wakeable: bool,
+    /// The operator already wants this share up (`idle-state` Active):
+    /// it is starting, or restarting, and a wake stamp would only be left
+    /// behind once the operator has cleared the one it honoured.
+    #[serde(default)]
+    pub wanted_up: bool,
 }
 
 fn yes() -> bool {
     true
+}
+
+impl HubRow {
+    /// Should a refused connection stamp a wake? Not for an admin's
+    /// Suspended, and not for a share the operator is already bringing up:
+    /// the operator clears the stamp when it starts a wake, and one written
+    /// while the hub was still starting outlived the wake and read as a new
+    /// request (three operator bugs, 2026-10-02).
+    pub fn wants_a_stamp(&self) -> bool {
+        self.wakeable && !self.wanted_up
+    }
 }
 
 /// Who a connection is, and what it may see.
@@ -254,7 +270,7 @@ mod tests {
     use super::*;
 
     fn row(name: &str, id: u64, tag: u32) -> HubRow {
-        HubRow { name: name.into(), address: format!("10.1.0.{id}:2049"), server_id: id, stateid_tag: tag, share: None, wakeable: true }
+        HubRow { name: name.into(), address: format!("10.1.0.{id}:2049"), server_id: id, stateid_tag: tag, share: None, wakeable: true, wanted_up: false }
     }
 
     fn table() -> Arc<Table> {

@@ -16,7 +16,7 @@ use super::server::Waker;
 use super::table::{HubRow, Table};
 use crate::lite_gateway::resolve::ShareView;
 use crate::lite_operator::crd::{FlintShare, Phase};
-use crate::lite_operator::idle::ANN_REQUESTED_AT;
+use crate::lite_operator::idle::{self, IdleState, ANN_REQUESTED_AT};
 
 /// The rows for a fleet, and why each share left out was left out.
 ///
@@ -41,9 +41,16 @@ pub fn rows_of(shares: &[Arc<FlintShare>], last_address: &mut std::collections::
     let live: std::collections::HashSet<String> =
         shares.iter().map(|s| format!("{}/{}", s.namespace().unwrap_or_default(), s.name_any())).collect();
     last_address.retain(|k, _| live.contains(k));
-    let mut views: Vec<(ShareView, Option<u32>, String)> = shares
+    let mut views: Vec<(ShareView, Option<u32>, String, bool)> = shares
         .iter()
-        .map(|s| (ShareView::of(s), s.status.as_ref().and_then(|st| st.stateid_tag), crate::lite_operator::render::in_cluster_address(s)))
+        .map(|s| {
+            (
+                ShareView::of(s),
+                s.status.as_ref().and_then(|st| st.stateid_tag),
+                crate::lite_operator::render::in_cluster_address(s),
+                idle::state_of(s) == IdleState::Active,
+            )
+        })
         .collect();
     views.sort_by(|a, b| (&a.0.namespace, &a.0.name).cmp(&(&b.0.namespace, &b.0.name)));
     let mut rows: Vec<HubRow> = Vec::new();
@@ -51,7 +58,7 @@ pub fn rows_of(shares: &[Arc<FlintShare>], last_address: &mut std::collections::
     let mut names = std::collections::HashMap::new();
     let mut ids = std::collections::HashMap::new();
     let mut tags = std::collections::HashMap::new();
-    for (v, tag, implied) in views {
+    for (v, tag, implied, up) in views {
         let who = format!("{}/{}", v.namespace, v.name);
         if v.deleting {
             last_address.remove(&who);
@@ -99,6 +106,7 @@ pub fn rows_of(shares: &[Arc<FlintShare>], last_address: &mut std::collections::
             // client waits (DELAY) as a hard mount of it would, and no
             // wake is stamped.
             wakeable: v.phase != Some(Phase::Suspended),
+            wanted_up: up,
         });
     }
     (rows, skipped)
@@ -155,6 +163,10 @@ impl Waker for KubeWaker {
         let Some((ns, name)) = hub.share.clone() else { return };
         if !hub.wakeable {
             info!("{ns}/{name} is Suspended by an admin; not waking it");
+            return;
+        }
+        if !hub.wants_a_stamp() {
+            // Already Active: the operator is bringing it up.
             return;
         }
         let api: Api<FlintShare> = Api::namespaced(self.client.clone(), &ns);
@@ -251,6 +263,30 @@ mod tests {
         assert_eq!(rows[0].address, "w.t.svc.cluster.local:2049");
         assert!(rows_of(&[], &mut last).0.is_empty());
         assert!(last.is_empty(), "a share that is gone is forgotten");
+    }
+
+    /// The operator clears the wake stamp when it starts a wake; the hub
+    /// then takes seconds to listen, and a stamp the proxy wrote in that
+    /// window outlived the wake and was read as a new request (three
+    /// operator bugs, 2026-10-02). A share whose `idle-state` is Active is
+    /// already wanted up: asking again only leaves that stamp behind.
+    #[test]
+    fn a_share_the_operator_already_wants_up_is_not_stamped_again() {
+        let with_state = |st: Option<&str>| {
+            let mut s = (*share("t", "w", Some("41"), Some(4), Phase::Starting)).clone();
+            if let Some(st) = st {
+                s.metadata.annotations = Some([(crate::lite_operator::idle::ANN_IDLE_STATE.to_string(), st.to_string())].into());
+            }
+            rows_of(&[Arc::new(s)], &mut Default::default()).0.remove(0)
+        };
+        assert!(!with_state(None).wants_a_stamp(), "no idle-state is Active");
+        assert!(!with_state(Some("Active")).wants_a_stamp());
+        for down in ["Suspended", "Hibernated", "HibernateVerifying"] {
+            assert!(with_state(Some(down)).wants_a_stamp(), "{down}: the proxy is what wakes it");
+        }
+        let mut admin = (*share("t", "s", Some("31"), Some(5), Phase::Suspended)).clone();
+        admin.metadata.annotations = Some([(crate::lite_operator::idle::ANN_IDLE_STATE.to_string(), "Suspended".to_string())].into());
+        assert!(!rows_of(&[Arc::new(admin)], &mut Default::default()).0[0].wants_a_stamp(), "an admin's Suspended is never stamped");
     }
 
     #[test]

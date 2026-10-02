@@ -17,14 +17,22 @@
 //! accidental re-suspend. So the carrier is ANNOTATIONS, which are
 //! metadata, and the rule "the operator never writes spec" holds.
 //!
-//! ## The three annotations
+//! ## The four annotations
 //!
 //! - `chert.us/idle-state` — operator-written: what the ladder did.
-//! - `chert.us/idle-since` — operator-written: when, RFC3339.
+//! - `chert.us/idle-since` — operator-written: when, RFC3339. Also the
+//!   line a wake request has to beat (`woken_since_idle`).
 //! - `chert.us/requested-at` — FRONT-DOOR-written: someone wants this
-//!   share awake. The operator reads it and never writes it. This is the
-//!   whole wake protocol: touch an annotation, and the level-triggered
-//!   reconcile does the rest.
+//!   share awake. The operator only ever CLEARS it, when it honours a
+//!   request; a stamp counts while it is no older than `idle-since` (less
+//!   `REQUEST_SKEW_SECS`). This is the whole wake protocol: touch an
+//!   annotation, and the level-triggered reconcile does the rest.
+//! - `chert.us/wake-intent` — FRONT-DOOR-written: `warm` or `cold` for the
+//!   boot a wake causes. Cleared once that hub serves, and by every idle
+//!   transition other than a wake.
+//!
+//! Every reader and writer, and the rule each relies on:
+//! `docs/plans/flint-lite-idle-annotation-census.md`.
 //!
 //! ## Precedence, which is the part that bites
 //!
@@ -49,6 +57,17 @@ pub const ANN_REQUESTED_AT: &str = "chert.us/requested-at";
 /// Optional hint consumed once at wake: `warm` asks the hub to bulk-fill
 /// after its import instead of hydrating on demand.
 pub const ANN_WAKE_INTENT: &str = "chert.us/wake-intent";
+
+/// How far a wake stamp may predate `idle-since` and still count as a
+/// request for the share in its current state. The stamp carries its
+/// WRITER's clock (the proxy's, the gateway's, an admin's laptop) and
+/// `idle-since` the operator's: with no allowance, a one-shot ask made
+/// just after a park by a writer 3 s behind was ignored and its waiter
+/// stranded (the idle sequence test). It re-admits a leftover stamp only
+/// when a transition follows it within this window: the natural ladder
+/// never does (its next move is `suspendAfterSecs` after the hub serves),
+/// and the proxy no longer asks for a share already `Active`.
+pub const REQUEST_SKEW_SECS: i64 = 5;
 
 /// The ladder's durable position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,10 +174,11 @@ pub fn requested_at(share: &FlintShare) -> Option<chrono::DateTime<chrono::Utc>>
 /// racing it) can stamp a wake just after the operator honoured an earlier
 /// one and cleared it, and nothing clears that late stamp on a share that
 /// is already up. Read as presence, it aborted every later hibernation.
-/// Same-second counts as asked (stamps have 1 s resolution: keep the disk).
+/// Same-second counts as asked (stamps have 1 s resolution: keep the disk),
+/// and so does a stamp up to `REQUEST_SKEW_SECS` earlier (clock skew).
 pub fn woken_since_idle(share: &FlintShare) -> bool {
     match (requested_at(share), since(share)) {
-        (Some(r), Some(s)) => r >= s,
+        (Some(r), Some(s)) => r >= s - chrono::Duration::seconds(REQUEST_SKEW_SECS),
         (Some(_), None) => true,
         (None, _) => false,
     }
@@ -557,6 +577,12 @@ mod tests {
         assert!(!woken_since_idle(&late), "a stamp from before verification began is stale");
         let during = share(&[(ANN_REQUESTED_AT, "2026-10-02T20:42:10Z"), (ANN_IDLE_SINCE, "2026-10-02T20:41:55Z")]);
         assert!(woken_since_idle(&during));
+        // The writer's clock is not the operator's: a request up to
+        // REQUEST_SKEW_SECS before the transition still counts.
+        let skewed = share(&[(ANN_REQUESTED_AT, "2026-10-02T20:41:50Z"), (ANN_IDLE_SINCE, "2026-10-02T20:41:55Z")]);
+        assert!(woken_since_idle(&skewed), "5 s behind: within the skew allowance");
+        let older = share(&[(ANN_REQUESTED_AT, "2026-10-02T20:41:49Z"), (ANN_IDLE_SINCE, "2026-10-02T20:41:55Z")]);
+        assert!(!woken_since_idle(&older), "6 s behind: stale");
         let same = share(&[(ANN_REQUESTED_AT, "2026-10-02T20:41:55Z"), (ANN_IDLE_SINCE, "2026-10-02T20:41:55Z")]);
         assert!(woken_since_idle(&same), "same second: keep the disk");
         assert!(woken_since_idle(&share(&[(ANN_REQUESTED_AT, "2026-10-02T20:41:41Z")])), "no idle-since: presence");
