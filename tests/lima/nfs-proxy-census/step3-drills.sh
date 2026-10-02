@@ -16,6 +16,7 @@
 # clients on the hubs), revoke (hub A loses every client's state while one
 # client holds a lock in each workspace: ws-b must not notice; not in the
 # default list — its arms are chosen by LOSS / INJECT).
+source "$(cd "$(dirname "$0")" && pwd)/rig-safety.sh"
 set -u
 BIN=${BIN:-$HOME/nfs-proxy-census/flint/spdk-csi-driver/target/release}
 # NOT /tmp: a wedged run ends in a reboot, which clears /tmp.
@@ -28,7 +29,7 @@ ok=0; bad=0
 # 2026-09-28 that included sshd's session setup, and the box needed a
 # reboot. So: lazy-unmount and stop everything on ANY exit.
 cleanup() {
-  sudo umount -f -l $MNT 2>/dev/null; sudo umount -f -l $DIRECT 2>/dev/null
+  unmount_hard $MNT; unmount_hard $DIRECT
   pkill -TERM -f "[f]lint-nfs-proxy --config $ROOT" 2>/dev/null
   sudo pkill -TERM -f "[f]lint-pnfs-mds --config $ROOT" 2>/dev/null
 }
@@ -72,7 +73,7 @@ proxy_stop() { pkill -TERM -f "[f]lint-nfs-proxy --config $ROOT"; sleep 1; }
 mnt() { sudo timeout 30 mount -t nfs4 -o nfsvers=4.2,proto=tcp,hard,timeo=50,port=$PX${MNTX:-} 127.0.0.1:/ $MNT; }
 
 setup() {
-  sudo umount -f -l $MNT 2>/dev/null; sudo umount -f -l $DIRECT 2>/dev/null
+  unmount_hard $MNT; unmount_hard $DIRECT
   proxy_stop; sudo pkill -TERM -f "[f]lint-pnfs-mds --config $ROOT"; sleep 1
   sudo rm -rf $ROOT; mkdir -p $ROOT/out $ROOT/proxy; sudo mkdir -p $MNT $DIRECT
   hubconf ws-a 20491; hubconf ws-b 20492
@@ -147,7 +148,7 @@ except OSError as e: print('REFUSED', e.errno)
 " 2>&1)
     echo "contender: $GOT"
     check "keepalive: the idle holder still holds its lock on the hub" 'echo "$GOT" | grep -q REFUSED'
-    sudo kill $H 2>/dev/null; sudo timeout 20 umount $DIRECT || sudo umount -f -l $DIRECT
+    sudo kill $H 2>/dev/null; unmount_hard $DIRECT
     ;;
   idlerestart)
     # keepalive's holder, but hub A RESTARTS (state persisted) while it
@@ -187,7 +188,7 @@ try:
     fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); print('ACQUIRED')
 except OSError as e: print('REFUSED', e.errno)
 " 2>&1)
-    sudo timeout 20 umount $DIRECT || sudo umount -f -l $DIRECT
+    unmount_hard $DIRECT
     touch $ROOT/out/go
     for _ in $(seq 1 60); do [ -e $ROOT/out/res ] && break; sleep 1; done
     R=$(cat $ROOT/out/res 2>/dev/null || echo none)
@@ -257,7 +258,7 @@ fd = os.open('$DIRECT/f', os.O_RDWR)
 try:
     fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); print('ACQUIRED')
 except OSError as e: print('REFUSED', e.errno)" 2>&1
-      sudo timeout 20 umount $DIRECT || sudo umount -f -l $DIRECT
+      unmount_hard $DIRECT
     }
     CA=$(contend 20491); CB=$(contend 20492)
     echo "LOSS=${LOSS:-1} INJECT=${INJECT:-none}: ws-a write=$RA ws-b write=$RB; kernel lost $LOST lock(s); contender A=$CA B=$CB"
@@ -280,13 +281,13 @@ except OSError as e: print('REFUSED', e.errno)" 2>&1
     ;;
   destroy)
     echo x | sudo tee $MNT/ws-a/d >/dev/null; echo y | sudo tee $MNT/ws-b/d >/dev/null
-    sudo timeout 30 umount $MNT || sudo umount -f -l $MNT; sleep 2
+    unmount_hard $MNT; sleep 2
     N=$(clean $ROOT/out/proxy.log | grep -c "destroyed with its downstream")
     echo "backend clients destroyed with the downstream: $N"
     check "destroy: umount destroyed the backend client on both hubs" '[ "$N" = 2 ]'
     ;;
   esac
-  timeout 10 mountpoint -q $MNT && { sudo timeout 20 umount $MNT || sudo umount -f -l $MNT; }
+  timeout 10 mountpoint -q $MNT && { unmount_hard $MNT; }
 done
 proxy_stop; sudo pkill -TERM -f "[f]lint-pnfs-mds --config $ROOT"
 echo "proxy warnings:"; clean $ROOT/out/proxy.log | grep -E "WARN|ERROR" | cut -c29-200 | sort | uniq -c | sort -rn | head -12

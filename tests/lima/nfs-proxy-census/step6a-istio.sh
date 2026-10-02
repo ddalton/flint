@@ -17,6 +17,7 @@
 #       ServiceAccount gets no NFS reply; the proxy's ServiceAccount does
 #
 #   bash step6a-istio.sh      # KEEP=1 leaves the cluster up
+source "$(cd "$(dirname "$0")" && pwd)/rig-safety.sh"
 set -u
 REPO=${REPO:-$HOME/nfs-proxy-census/flint}
 CARGO_DIR=$REPO/spdk-csi-driver
@@ -39,12 +40,12 @@ K() { kubectl "$@"; }
 MNTS="/mnt/iA /mnt/iG /mnt/iZ /mnt/iR"
 TLSHD_CONF=/etc/tlshd.conf
 cleanup() {
-  for m in $MNTS; do sudo umount -f -l $m 2>/dev/null; done
+  for m in $MNTS; do unmount_hard $m; done
   [ -f $OUT/tlshd.conf.orig ] && sudo cp $OUT/tlshd.conf.orig $TLSHD_CONF && sudo systemctl restart tlshd
   [ "${KEEP:-0}" = 1 ] || kind delete cluster --name $CLUSTER >/dev/null 2>&1
 }
 trap cleanup EXIT INT TERM
-for m in $MNTS; do sudo umount -f -l $m 2>/dev/null; sudo mkdir -p $m; done
+for m in $MNTS; do unmount_hard $m; sudo mkdir -p $m; done
 sudo cp $TLSHD_CONF $OUT/tlshd.conf.orig
 
 echo "== images"
@@ -199,7 +200,7 @@ TLS="nfsvers=4.2,proto=tcp,xprtsec=mtls,soft,timeo=100,retrans=3"
 mnt() { sudo timeout 90 mount -t nfs4 -o $3,port=$2 $1:/ $4 2>$OUT/mount-$(basename $4).err; }
 ls1() { sudo timeout 30 ls $1 2>&1 | tr '\n' ' '; }
 drop() {  # umount, then wait for the kernel to drop its client to $2
-  sudo umount $1 2>/dev/null || sudo umount -f -l $1
+  unmount_hard $1
   for _ in $(seq 60); do grep -q "$2" /proc/fs/nfsfs/servers 2>/dev/null || return 0; sleep 1; done; return 1
 }
 connects() {  # kernel connect_count of the transport behind mount $1

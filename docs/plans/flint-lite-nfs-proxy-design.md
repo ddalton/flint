@@ -913,9 +913,10 @@ port are still wanted for capacity and failure isolation.
      with `with_reap_on_compound(false)` and reaps on a 1 s laundromat of
      its own (it had none: the per-compound pass was its only reaper). It
      holds no locks or opens, so nothing needs the reap sooner. Hubs are
-     unchanged. A/B on the box: proxy CPU per 1k stat ops 113.5–118.5 →
-     107.5–110.5 ms, and the scan 5.5% → 0.01% of samples
-     (`results-box-step6/leasegate-ab.txt`).
+     unchanged. A/B on the box: the scan 5.5% → 0.01% of proxy samples;
+     proxy CPU per 1k stat ops 113.5–118.5 → 107.5–113.5 ms (three
+     "after" runs; the ranges touch, so the CPU drop is near the noise
+     with one client) (`results-box-step6/leasegate-ab.txt`).
 7. Multi-replica proxy (shared client table) before about 1,000 active.
 
 Drills. Each one needs an arm that fails when the mechanism is removed:

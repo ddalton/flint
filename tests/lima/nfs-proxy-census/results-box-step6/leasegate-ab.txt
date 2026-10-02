@@ -49,3 +49,14 @@ proxy  ops=20000  4534 ops/s  proxy 110.5 ms CPU/1k ops  hub 75.0 ms CPU/1k ops
  0.45% 0.15% [.] <spdk_csi_driver::nfs::v4::state::lease::LeaseManager>::renew_lease - - 
  0.01% 0.00% [.] <alloc::vec::Vec<u64> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<u64, core::iter::adapters::filter_map::Filte
  0.01% 0.00% [.] <spdk_csi_driver::nfs::v4::dispatcher::CompoundDispatcher>::courtesy_release_expired - - 
+
+== run 5-after (2026-10-01, a later smoke run of the profile rig with the after binaries; the third 'after' sample)
+proxy pid 81705, hub pid 81683
+direct ops=20000  9188 ops/s  proxy 0.0 ms CPU/1k ops  hub 76.5 ms CPU/1k ops
+proxy  ops=20000  4440 ops/s  proxy 113.5 ms CPU/1k ops  hub 77.5 ms CPU/1k ops
+direct ops=20000  9325 ops/s  proxy 0.0 ms CPU/1k ops  hub 74.0 ms CPU/1k ops
+proxy  ops=20000  4431 ops/s  proxy 113.5 ms CPU/1k ops  hub 75.5 ms CPU/1k ops
+direct ops=20000  9005 ops/s  proxy 0.0 ms CPU/1k ops  hub 76.5 ms CPU/1k ops
+proxy  ops=20000  4591 ops/s  proxy 107.5 ms CPU/1k ops  hub 73.5 ms CPU/1k ops
+# so after = 107.5-113.5 ms across three runs: the ranges TOUCH at 113.5, and the CPU drop (~5%) is
+# near the run-to-run noise. The perf share (5.5% -> 0.01%) is the clean signal.

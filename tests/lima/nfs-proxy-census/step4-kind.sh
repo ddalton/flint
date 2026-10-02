@@ -11,6 +11,7 @@
 #   - the hub NetworkPolicy admits the proxy's pods on 2049 and nobody
 #     else (INCONCLUSIVE if the CNI enforces no policy at all).
 #   bash step4-kind.sh           # KEEP=1 leaves the cluster up
+source "$(cd "$(dirname "$0")" && pwd)/rig-safety.sh"
 set -u
 REPO=${REPO:-$HOME/nfs-proxy-census/flint}
 CARGO_DIR=$REPO/spdk-csi-driver
@@ -30,7 +31,7 @@ ok=0; bad=0; inc=0
 check() { if eval "$2"; then echo "PASS $1"; ok=$((ok+1)); else echo "FAIL $1"; bad=$((bad+1)); fi; }
 K() { kubectl "$@"; }
 cleanup() {
-  sudo umount -f -l $MNT 2>/dev/null
+  unmount_hard $MNT
   [ "${KEEP:-0}" = 1 ] || kind delete cluster --name $CLUSTER >/dev/null 2>&1
 }
 trap cleanup EXIT INT TERM
@@ -178,7 +179,7 @@ else
   check "a stranger cannot reach a hub's 2049; the proxy's peer can" '[ "$STRANGER" = closed ] && [ "$LOOKALIKE" = open ]'
 fi
 
-sudo timeout 30 umount $MNT || sudo umount -f -l $MNT
+unmount_hard $MNT
 K -n $OPNS logs deploy/flint-lite-operator-nfs-proxy > $OUT/proxy.log 2>&1
 K -n $OPNS logs deploy/flint-lite-operator > $OUT/operator.log 2>&1
 echo "proxy warnings:"; sed 's/\x1b\[[0-9;]*m//g' $OUT/proxy.log | grep -E "WARN|ERROR" | grep -v "no serverId yet" | cut -c29-200 | sort | uniq -c | sort -rn > $OUT/warn.txt; head -12 $OUT/warn.txt

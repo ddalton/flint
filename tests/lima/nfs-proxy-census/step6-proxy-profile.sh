@@ -9,13 +9,14 @@
 #   3. perf record -g on the proxy during the stat passes; the hottest
 #      symbols, self and inclusive.
 #   BIN=$HOME/target-prof/release bash step6-proxy-profile.sh
+source "$(cd "$(dirname "$0")" && pwd)/rig-safety.sh"
 set -u
 BIN=${BIN:-$HOME/target-prof/release}
 ROOT=$HOME/nfs-proxy-prof; MNT=/mnt/pxp; PX=20590; HP=20591; FILES=5000
 exec 9>$HOME/.proxy-prof.lock
 flock -n 9 || { echo "another profile run holds the lock"; exit 1; }
 cleanup() {
-  sudo umount -f -l $MNT 2>/dev/null
+  unmount_hard $MNT
   pkill -TERM -f "[f]lint-nfs-proxy --config $ROOT" 2>/dev/null
   sudo pkill -TERM -f "[f]lint-pnfs-mds --config $ROOT" 2>/dev/null
 }

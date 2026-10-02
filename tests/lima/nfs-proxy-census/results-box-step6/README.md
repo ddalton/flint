@@ -118,12 +118,17 @@ neighbors:
 
 There were no hung tasks and no OOM kills. Run 2 (150 live) stayed
 well under the limit. A host that runs this many kind pods needs
-`gc_thresh3` raised. The load-average abort in the rig guards the wrong
-thing.
+`gc_thresh3` raised. The box's limit is now 16384
+(`/etc/sysctl.d/90-neigh-gc-thresh.conf`), and the rig aborts at 75%
+of it (`arp_guard` in `rig-safety.sh`, checked every 10 s; the
+load-average abort stays as a second guard).
 
 A separate defect, which did not cause this: the step 5 rig's lazy
 unmount of `/mnt/px5` at 18:14 left a hard mount's RPC client
-retrying 172.18.0.4 for five hours (2,823 "not responding" lines).
+retrying 172.18.0.4 for five hours (2,823 "not responding" lines). Every rig in this directory now unmounts with
+`unmount_hard` (`rig-safety.sh`), which kills the holders first and
+leaves no client behind. `rig-safety-check.sh` checks both helpers, 11/11,
+with the old unmount sequence as its known-bad arm.
 
 **Run 2, 150 live + 10,000 parked (2 workers): 5/6**
 (`D-run2-150live.txt`, `D-mem.txt`, `D-api-rates.txt`). The box's load
@@ -135,9 +140,16 @@ stayed under 5.
   operator 53 MiB, 98 m.
 - apiserver: **183 req/s** over 300 s — Deployments 37.8, PVCs 33.0,
   Services 31.0, and Secrets, Pods, ConfigMaps and FlintShares ~15.5
-  each. With 10,000 parked shares that have no children, most of this
-  is the operator re-reading objects a CR-only share does not have
-  before it reaches the park. That is the next thing to trim.
+  each.
+
+  **Correction, 2026-10-01:** the rate does not scale with parked shares.
+  A smoke run of this rig at 20 live + 200 parked (one worker,
+  `run-smoke-20live.txt`) saw **178 req/s**, with almost the same
+  per-resource rates (Deployments 37.5, PVCs 31.1, Services 30.8, the
+  rest ~15.4). So the earlier reading ("re-reading objects a CR-only
+  share does not have") was wrong. A fixed rate like this looks like a
+  periodic loop or a client-side rate limit, not per-share work. Cause
+  not yet found.
 - **Forced relist: the proxy relisted, the operator did not; the guard
   FAILED, correctly.** After etcd was compacted and the apiserver
   restarted, the proxy's peak rose from 235 to **334 MiB**: about +100 MiB
@@ -146,6 +158,9 @@ stayed under 5.
   likely reason is watch bookmarks: they keep a watcher's
   resourceVersion current, so it resumed past the compaction. **So the
   operator's relist spike is still an estimate.**
+  In the 220-share smoke run the operator did relist (it logged the
+  410): its memory went from 58 to 59 MiB, the proxy's from 48 to 52.
+  At 10,000 the operator's relist is still unmeasured.
 
 ## Profile — where the proxy's CPU per metadata op goes (`step6-proxy-profile.sh`)
 
@@ -192,10 +207,11 @@ Without kind the proxy costs ~1.5× the hub's CPU per op (on kind,
   **Fixed 2026-10-01** (`leasegate-ab.txt`). The proxy had no periodic
   sweep: the per-compound pass was its only reaper. It now turns that
   pass off (`with_reap_on_compound(false)`) and reaps on a 1 s timer.
-  Four alternating runs, one client:
+  Four alternating runs and a later fifth, one client:
+  - the scan's share of proxy samples: before 5.5–5.7%, after 0.01%;
   - proxy CPU per 1k stat ops: before 113.5–118.5 ms, after
-    107.5–110.5 ms;
-  - the scan's share of proxy samples: before 5.5–5.7%, after 0.01%.
+    107.5–113.5 ms. The ranges touch, so with one client the CPU drop
+    is near the run-to-run noise; the perf share is the clean signal.
 
   The test `an_expired_downstream_client_is_reaped_on_a_timer_not_per_compound`
   pins the timer: with the laundromat removed, it fails (the control).

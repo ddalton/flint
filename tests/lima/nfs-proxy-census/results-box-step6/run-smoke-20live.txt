@@ -1,0 +1,34 @@
+== images: a stub from HEAD (the published 1.32.0 predates today's status fields)
+    Finished `release` profile [optimized] target(s) in 0.49s
+== cluster: 1 control plane + 1 workers (110 pods each)
+empty: operator [VmHWM:=29Mi VmRSS:=27Mi ] proxy [VmHWM:=30Mi VmRSS:=30Mi ]
+== seeding 20 live stub shares and 200 parked (hibernated, CR-only) shares
+seeded 220 in 2s
+  0s:      44      156 Hibernated      20 Pending | operator [VmHWM:=81Mi VmRSS:=81Mi ] proxy [VmHWM:=36Mi VmRSS:=36Mi ]
+  60s:     200 Hibernated      20 Ready | operator [VmHWM:=81Mi VmRSS:=71Mi ] proxy [VmHWM:=44Mi VmRSS:=44Mi ]
+PASS 20 live stub hubs Ready
+PASS 200 parked shares Hibernated
+PASS the operator polls every live stub (HubReachable 20 of 20)
+== settled: a 300 s window
+settled: operator [VmHWM:=81Mi VmRSS:=58Mi ] cpu 151m; proxy [VmHWM:=48Mi VmRSS:=48Mi ] cpu 1m
+apiserver requests/s over 300 s, total 177.96
+  deployments                    37.46/s
+  persistentvolumeclaims         31.05/s
+  services                       30.78/s
+  secrets                        15.39/s
+  pods                           15.39/s
+  configmaps                     15.39/s
+  flintshares                    15.38/s
+  replicasets                    13.34/s
+  leases                          1.69/s
+  (none)                          1.23/s
+== forced relist: compact etcd past every watcher, restart the apiserver
+etcd revision 14197
+compacted revision 14235
+before relist: operator [VmHWM:=81Mi VmRSS:=58Mi ] proxy [VmHWM:=48Mi VmRSS:=48Mi ]
+after relist:  operator [VmHWM:=81Mi VmRSS:=59Mi ] proxy [VmHWM:=52Mi VmRSS:=52Mi ]
+operator log lines naming a 410 / too-old watch in the last 5 min: 1
+PASS the relist really happened (the operator logged a 410 / too-old resourceVersion)
+PASS the operator did not restart (no OOMKill)
+PASS the proxy did not restart
+RESULT: 6 passed, 0 failed

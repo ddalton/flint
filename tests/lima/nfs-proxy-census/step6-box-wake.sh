@@ -10,6 +10,7 @@
 #   server: the woken pod's creation to Ready (import included).
 # RustFS on the same box: a LOWER bound on a real S3 import.
 #   bash step6-box-wake.sh        # REPS=3 TIERS="1000 5000 10000"; KEEP=1
+source "$(cd "$(dirname "$0")" && pwd)/rig-safety.sh"
 set -u
 CLUSTER=flint-step6b; OUT=$HOME/nfs-proxy-step6-B; MNT=/mnt/px6b
 cd "$(dirname "$0")" && source ./step6-lib.sh
@@ -28,7 +29,7 @@ for h in $HUBS; do
 done
 for _ in $(seq 1 60); do n=$(for h in $HUBS; do rpo $h; done | grep -c True); [ "$n" = $(echo $HUBS | wc -w) ] && break; sleep 10; done
 check "every hub is flushed (rpoClean)" '[ "$n" = $(echo $HUBS | wc -w) ]'
-sudo timeout 30 umount $MNT || sudo umount -f -l $MNT
+unmount_hard $MNT
 
 ann() { K -n $NS annotate flintshare $1 --overwrite chert.us/idle-state=$2 chert.us/idle-since=$(date -u +%Y-%m-%dT%H:%M:%SZ) >/dev/null; }
 objs() { K -n $NS get deploy,svc,cm,pvc -l chert.us/share=$1 -o name 2>/dev/null | wc -l; }
@@ -56,7 +57,7 @@ measure() {  # $1 hub, $2 kind, $3 rep
   for _ in $(seq 1 60); do [ "$(phase $h)" = Ready ] && break; sleep 2; done
   printf "%s\t%s\ttier=%s\trep=%s\trc=%s\tfiles=%s\tclient_first_byte_s=%.1f\tclient_full_list_s=%.1f\tserver_pod_ready_s=%s\n" \
     $2 $h $n $3 $rc $got $(echo "$t1 - $t0" | bc) $(echo "$t2 - $t0" | bc) "$(ready_s $h)"
-  sudo timeout 30 umount $MNT || sudo umount -f -l $MNT
+  unmount_hard $MNT
 }
 
 echo "== wakes from SUSPEND (disk kept)"

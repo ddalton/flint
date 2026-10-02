@@ -12,6 +12,7 @@
 # on the same node is never presented (run 1 of this drill: b's
 # connection came up as b, and b's mount listed ws-a over a's). One
 # node, one identity — which is what §6a's per-cluster certificate is.
+source "$(cd "$(dirname "$0")" && pwd)/rig-safety.sh"
 set -u
 BIN=${BIN:-$HOME/nfs-proxy-census/flint/spdk-csi-driver/target/release}
 ROOT=$HOME/nfs-proxy-2b
@@ -25,14 +26,14 @@ check() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 
 TLSHD_CONF=/etc/tlshd.conf
 cleanup() {
-  for m in $MNTS; do sudo umount -f -l $m 2>/dev/null; done
+  for m in $MNTS; do unmount_hard $m; done
   sudo pkill -TERM -f "[f]lint-pnfs-mds --config $ROOT"
   pkill -TERM -f "[f]lint-nfs-proxy --config $ROOT"
   [ -n "${CAP:-}" ] && sudo kill $CAP 2>/dev/null
   [ -f $ROOT/tlshd.conf.orig ] && sudo cp $ROOT/tlshd.conf.orig $TLSHD_CONF && sudo systemctl restart tlshd
 }
 trap cleanup EXIT
-for m in $MNTS; do sudo umount -f -l $m 2>/dev/null; sudo mkdir -p $m; done
+for m in $MNTS; do unmount_hard $m; sudo mkdir -p $m; done
 sudo pkill -TERM -f "[f]lint-pnfs-mds --config $ROOT"; pkill -TERM -f "[f]lint-nfs-proxy --config $ROOT"; sleep 1
 sudo rm -rf $ROOT; mkdir -p $ROOT/pki $OUT
 sudo cp $TLSHD_CONF $ROOT/tlshd.conf.orig

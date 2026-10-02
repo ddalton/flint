@@ -1,0 +1,18 @@
+== unmount, OLD sequence (the known-bad arm)
+umount.nfs4: /mnt/rsc: device is busy
+first retry of the dead server after 75s
+PASS old: the mount is gone from the namespace
+PASS old: but its NFS client lingers against the dead server (the leak)
+PASS old: and the kernel retries it
+PASS old arm cleaned up: the leaked client is gone
+== unmount, unmount_hard
+PASS new: the mount is gone
+PASS new: the holder was killed
+PASS new: no NFS client left for the server
+PASS new: no retries of the dead server
+== arp_guard
+host table entries: 6 before, 106 after 100 entries in another namespace
+PASS the host's table counts another namespace's entries (+100)
+PASS the guard passes well under the limit
+PASS the guard fires at 75% of the limit
+RESULT: 11 passed, 0 failed

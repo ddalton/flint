@@ -16,6 +16,7 @@
 # update must reach the node's files.
 #
 #   bash client-identity-drill.sh [A|B]...     (default: A B)
+source "$(cd "$(dirname "$0")" && pwd)/rig-safety.sh"
 set -u
 REPO=${REPO:-$HOME/nfs-proxy-census/flint}
 BIN=${BIN:-$REPO/spdk-csi-driver/target/release}
@@ -30,14 +31,14 @@ bad() { echo "FAIL $*"; fail=$((fail+1)); }
 check() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 MNTS="/mnt/cA /mnt/cB /mnt/cC"
 cleanup() {
-  for m in $MNTS; do sudo umount -f -l $m 2>/dev/null; done
+  for m in $MNTS; do unmount_hard $m; done
   sudo pkill -TERM -f "[f]lint-pnfs-mds --config $ROOT"; pkill -TERM -f "[f]lint-nfs-proxy --config $ROOT"
   [ -f $ROOT/tlshd.conf.orig ] && sudo cp $ROOT/tlshd.conf.orig $CONF && sudo systemctl restart tlshd
   sudo rm -rf $HOSTDIR
   [ "${KEEP:-0}" = 1 ] || kind delete cluster --name flint-client-id >/dev/null 2>&1
 }
 trap cleanup EXIT INT TERM
-for m in $MNTS; do sudo umount -f -l $m 2>/dev/null; sudo mkdir -p $m; done
+for m in $MNTS; do unmount_hard $m; sudo mkdir -p $m; done
 sudo rm -rf $ROOT; mkdir -p $OUT $P $TMPDIR
 sudo cp $CONF $ROOT/tlshd.conf.orig; sudo chown $USER $ROOT/tlshd.conf.orig
 

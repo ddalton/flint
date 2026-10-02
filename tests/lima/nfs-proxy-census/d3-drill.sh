@@ -7,6 +7,7 @@
 #
 # Known-bad arm: BIN=<a pre-fix build> must FAIL the D3 checks and pass
 # the controls.
+source "$(cd "$(dirname "$0")" && pwd)/rig-safety.sh"
 set -u
 BIN=${BIN:-$HOME/nfs-proxy-census/flint/spdk-csi-driver/target/release}
 ROOT=$HOME/nfs-proxy-d3
@@ -17,7 +18,7 @@ bad() { echo "FAIL $*"; fail=$((fail+1)); }
 check() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 
 cleanup() {
-  for m in $MNTS; do sudo umount -f -l $m 2>/dev/null; done
+  for m in $MNTS; do unmount_hard $m; done
   sudo pkill -TERM -f "[f]lint-pnfs-mds --config $ROOT"
   sudo pkill -TERM -f "[f]lint-nfs-proxy --config $ROOT"
 }

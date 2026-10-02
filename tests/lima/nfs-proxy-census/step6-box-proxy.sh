@@ -12,6 +12,7 @@
 # (cgroup usage) per 1k ops / per GiB. Same host, so this is the proxy's
 # CPU and latency cost, NOT network throughput (that is the AWS session).
 #   bash step6-box-proxy.sh      # REPS=3 SEQ_MIB=512; KEEP=1
+source "$(cd "$(dirname "$0")" && pwd)/rig-safety.sh"
 set -u
 CLUSTER=flint-step6c; OUT=$HOME/nfs-proxy-step6-C; MNT=/mnt/px6d
 cd "$(dirname "$0")" && source ./step6-lib.sh
@@ -95,7 +96,7 @@ os.rmdir(d)"
   t1=$(date +%s.%N); p1=$(px_cpu_us); h1=$(hub_cpu_us)
   echo -e "$arm\trep=$rep\tw=seq-read\tmib=$SEQ_MIB\twall_s=$(echo "$t1 - $t0" | bc)\tproxy_cpu_ms=$(( (p1 - p0) / 1000 ))\thub_cpu_ms=$(( (h1 - h0) / 1000 ))\tintact=$([ "$got" = "$want" ] && echo yes || echo NO)"
   sudo rm -f $big
-  sudo umount $MNT || sudo umount -f -l $MNT
+  unmount_hard $MNT
 }
 
 echo "== plain arms, interleaved: direct, proxy"

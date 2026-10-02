@@ -78,13 +78,16 @@ echo "seeded $TOTAL in $(( $(date +%s) - T0 ))s"
 phases() { K -n $NS get flintshares -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null | sort | uniq -c | tr '\n' ' '; }
 T1=$(date +%s); HOT=0
 while [ $(( $(date +%s) - T1 )) -lt 3600 ]; do
-  # Safety valve: run 1 (500 live) saturated the apiserver and then hung
-  # the whole box, which had to be power-cycled. Abort before that.
+  # Safety valves. Run 1 (500 live) took the box off the network: the
+  # host's ARP table, shared by every pod's namespace, overflowed at ~350
+  # pods (`arp_guard`, rig-safety.sh). It read as a load hang until the
+  # journal said otherwise. The load check stays as a second guard.
+  arp_guard
   L=$(cut -d' ' -f1 /proc/loadavg); if [ "${L%.*}" -ge 12 ]; then HOT=$((HOT+1)); else HOT=0; fi
   [ $HOT -ge 2 ] && { echo "ABORT: load average $L twice in a row — protecting the box"; exit 1; }
   P=$(phases); echo "  $(( $(date +%s) - T1 ))s: $P| operator [$(mem flint-lite-operator)] proxy [$(mem flint-lite-operator-nfs-proxy)]" | tee -a $OUT/mem.txt
   echo "$P" | grep -q " $LIVE Ready" && echo "$P" | grep -q " $PARKED Hibernated" && break
-  sleep 60
+  for _ in 1 2 3 4 5 6; do sleep 10; arp_guard; done   # the table fills in minutes
 done
 SETTLE_S=$(( $(date +%s) - T1 ))
 P=$(phases)

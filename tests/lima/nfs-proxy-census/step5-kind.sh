@@ -15,6 +15,7 @@
 #     with an `spdk-tgt` container) restarts every running hub on that
 #     node whose PVC is in the listed class, and no other.
 #   bash step5-kind.sh           # KEEP=1 leaves the cluster up
+source "$(cd "$(dirname "$0")" && pwd)/rig-safety.sh"
 set -u
 REPO=${REPO:-$HOME/nfs-proxy-census/flint}
 CARGO_DIR=$REPO/spdk-csi-driver
@@ -34,7 +35,7 @@ K() { kubectl "$@"; }
 HOLDER=
 cleanup() {
   [ -n "$HOLDER" ] && sudo kill $HOLDER 2>/dev/null
-  sudo umount -f -l $MNT 2>/dev/null
+  unmount_hard $MNT
   [ "${KEEP:-0}" = 1 ] || kind delete cluster --name $CLUSTER >/dev/null 2>&1
 }
 trap cleanup EXIT INT TERM
@@ -272,7 +273,7 @@ R1=$(restarts); sleep 70; R2=$(restarts); echo "restart marks: $R1 then $R2 (exp
 check "convergent: one mark per restarted hub, none a minute later" '[ "$R1" = "$R2" ] && [ "$R1" = "$(echo $EXPECT | wc -w)" ]'
 
 sudo kill $HOLDER 2>/dev/null; HOLDER=
-sudo timeout 30 umount $MNT || sudo umount -f -l $MNT
+unmount_hard $MNT
 K -n $OPNS logs deploy/flint-lite-operator > $OUT/operator.log 2>&1
 K -n $OPNS logs deploy/flint-lite-operator-nfs-proxy > $OUT/proxy.log 2>&1
 K -n $NS get events --sort-by=.lastTimestamp > $OUT/events.txt 2>&1

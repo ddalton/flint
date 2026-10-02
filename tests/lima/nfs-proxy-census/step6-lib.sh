@@ -13,13 +13,14 @@ export PATH=$HOME/bin:$HOME/.cargo/bin:/usr/local/bin:$PATH
 export TMPDIR=$HOME/tmp
 exec 9>$HOME/.$CLUSTER.lock
 flock -n 9 || { echo "another $CLUSTER run holds $HOME/.$CLUSTER.lock"; exit 1; }
+source ./rig-safety.sh
 export KUBECONFIG=$HOME/.kube/$CLUSTER.config
 rm -rf $OUT; mkdir -p $OUT $TMPDIR
 ok=0; bad=0
 check() { if eval "$2"; then echo "PASS $1"; ok=$((ok+1)); else echo "FAIL $1"; bad=$((bad+1)); fi; }
 K() { kubectl "$@"; }
 cleanup() {
-  sudo umount -f -l $MNT 2>/dev/null
+  unmount_hard $MNT
   if [ "${KEEP:-0}" != 1 ]; then kind delete cluster --name $CLUSTER >/dev/null 2>&1; sudo rm -rf $DATA; fi
 }
 trap cleanup EXIT INT TERM
@@ -133,7 +134,7 @@ mount_proxy() {  # mounts / of the proxy at $MNT; waits until it lists the given
   for _ in $(seq 1 60); do [ "$(ls $MNT | sort | tr '\n' ' ')" = "$want" ] && return 0; sleep 3; done
   echo "the proxy does not list: $want (got: $(ls $MNT | tr '\n' ' '))"; return 1
 }
-remount() { sudo timeout 30 umount $MNT || sudo umount -f -l $MNT; mount_proxy "$@"; }
+remount() { unmount_hard $MNT; mount_proxy "$@"; }
 
 seed() {  # $1 dir, $2 files — 1-64 KiB log-uniform, 100 per directory
   sudo python3 - "$1" "$2" <<'P'

@@ -6,6 +6,7 @@
 # kernel as the client. Not flint-spdk (that is the AWS session): the hub
 # process is the same, its I/O path is not.
 #   bash step6-box-hubcost.sh      # PER_TIER=10 TIERS="1000 5000 10000"; KEEP=1
+source "$(cd "$(dirname "$0")" && pwd)/rig-safety.sh"
 set -u
 REPO=${REPO:-$HOME/nfs-proxy-census/flint}
 CHART=$REPO/flint-lite-operator-chart
@@ -32,7 +33,7 @@ ok=0; bad=0
 check() { if eval "$2"; then echo "PASS $1"; ok=$((ok+1)); else echo "FAIL $1"; bad=$((bad+1)); fi; }
 K() { kubectl "$@"; }
 cleanup() {
-  sudo umount -f -l $MNT 2>/dev/null
+  unmount_hard $MNT
   if [ "${KEEP:-0}" != 1 ]; then kind delete cluster --name $CLUSTER >/dev/null 2>&1; sudo rm -rf $DATA; fi
 }
 trap cleanup EXIT INT TERM
