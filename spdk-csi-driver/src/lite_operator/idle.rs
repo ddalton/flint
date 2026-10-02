@@ -150,6 +150,20 @@ pub fn requested_at(share: &FlintShare) -> Option<chrono::DateTime<chrono::Utc>>
     parse_time(annotation(share, ANN_REQUESTED_AT))
 }
 
+/// Was a wake asked for AFTER this share entered its current idle state?
+/// A stamp older than `idle-since` is stale: the proxy (or a client retry
+/// racing it) can stamp a wake just after the operator honoured an earlier
+/// one and cleared it, and nothing clears that late stamp on a share that
+/// is already up. Read as presence, it aborted every later hibernation.
+/// Same-second counts as asked (stamps have 1 s resolution: keep the disk).
+pub fn woken_since_idle(share: &FlintShare) -> bool {
+    match (requested_at(share), since(share)) {
+        (Some(r), Some(s)) => r >= s,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
+}
+
 pub fn wake_intent(share: &FlintShare) -> Option<&str> {
     annotation(share, ANN_WAKE_INTENT)
 }
@@ -372,6 +386,15 @@ pub fn effective(share: &FlintShare, fleet: Option<&IdleSpec>, nfs_proxy: bool) 
 /// `decide`)? Shared with the reconciler's CR-only park, which must not
 /// tear a share down under a request `decide` would honour.
 pub fn wake_requested(cfg: Option<&IdleSpec>, share: &FlintShare, now: chrono::DateTime<chrono::Utc>) -> bool {
+    // A stamp from before this share went down is stale, live or not:
+    // the proxy re-asks every few seconds while a wake is under way, so
+    // one ask lands after the operator has honoured the wake and cleared
+    // the stamp, and it then woke the share again one pass after its next
+    // park. A real waiter is not lost: it asks again while the share is
+    // down, after `idle-since`.
+    if !woken_since_idle(share) {
+        return false;
+    }
     match cfg.and_then(|c| c.suspend_after_secs) {
         Some(after) => clock::request_is_live(share.annotations(), now, after),
         // No suspend rung configured: nothing here can say how old is
@@ -523,6 +546,21 @@ mod tests {
         assert_eq!(own.as_ref().and_then(|i| i.suspend_after_secs), None, "an explicit empty policy opts out");
         let d = decide(own.as_ref(), Inputs { share: &s, now: now(), hub_quiet: Ok(()), sessions_live: None });
         assert_eq!(d, Decision::Stay);
+    }
+
+    /// The box rerun (2026-10-02): the proxy's held compound re-asked at
+    /// +5.1 s, after the operator had woken the share and cleared the
+    /// stamp; the late stamp then aborted the NEXT hibernation, forever.
+    #[test]
+    fn a_wake_older_than_the_idle_state_does_not_count() {
+        let late = share(&[(ANN_REQUESTED_AT, "2026-10-02T20:41:41Z"), (ANN_IDLE_SINCE, "2026-10-02T20:41:55Z")]);
+        assert!(!woken_since_idle(&late), "a stamp from before verification began is stale");
+        let during = share(&[(ANN_REQUESTED_AT, "2026-10-02T20:42:10Z"), (ANN_IDLE_SINCE, "2026-10-02T20:41:55Z")]);
+        assert!(woken_since_idle(&during));
+        let same = share(&[(ANN_REQUESTED_AT, "2026-10-02T20:41:55Z"), (ANN_IDLE_SINCE, "2026-10-02T20:41:55Z")]);
+        assert!(woken_since_idle(&same), "same second: keep the disk");
+        assert!(woken_since_idle(&share(&[(ANN_REQUESTED_AT, "2026-10-02T20:41:41Z")])), "no idle-since: presence");
+        assert!(!woken_since_idle(&share(&[(ANN_IDLE_SINCE, "2026-10-02T20:41:55Z")])));
     }
 
     fn share(anns: &[(&str, &str)]) -> FlintShare {
@@ -982,6 +1020,28 @@ mod tests {
             Inputs { share: &s, now: now(), hub_quiet: Ok(()), sessions_live: None },
         );
         assert_eq!(d, Decision::Wake);
+    }
+
+    /// The box run's rep 2: the proxy's re-ask during rep 1's wake left a
+    /// stamp at 21:38:48 on the running share; the share parked at
+    /// 21:40:30 and woke itself one second later, because the stamp was
+    /// still inside the live window. Older than the park, it is stale.
+    #[test]
+    fn a_stamp_from_before_the_park_does_not_wake_the_parked_share() {
+        let cfg = idle(Some(300), None);
+        let decide_on = |requested: &str| {
+            let s = share(&[
+                (ANN_IDLE_STATE, "Hibernated"),
+                (ANN_IDLE_SINCE, "2026-08-19T11:59:30Z"),
+                (ANN_REQUESTED_AT, requested),
+            ]);
+            decide(Some(&cfg), Inputs { share: &s, now: now(), hub_quiet: Ok(()), sessions_live: None })
+        };
+        assert_ne!(decide_on("2026-08-19T11:57:48Z"), Decision::Wake, "asked before the park, and live");
+        assert_eq!(decide_on("2026-08-19T11:59:35Z"), Decision::Wake, "asked after the park");
+        assert_eq!(decide_on("2026-08-19T11:59:30Z"), Decision::Wake, "same second: wake");
+        let s = share(&[(ANN_IDLE_STATE, "Hibernated"), (ANN_IDLE_SINCE, "2026-08-19T11:59:30Z"), (ANN_REQUESTED_AT, "2026-08-19T11:57:48Z")]);
+        assert!(!wake_requested(Some(&cfg), &s, now()), "the CR-only park reads the same rule");
     }
 
     /// The second rung: down long enough, and with a hibernate policy,

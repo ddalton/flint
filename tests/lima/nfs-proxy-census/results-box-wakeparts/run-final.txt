@@ -1,0 +1,177 @@
+== bring-up
+Bucket created successfully `m/fleet`.
+PASS w1000 holds 1000 files
+PASS w1000 is flushed (rpoClean)
+== suspend rep=1: first byte at 2.431s
+     0.05s  proxy: wake requested
+     0.33s  event FlintShare/Woken
+     0.51s  Pod created
+     0.51s  container started
+     0.51s  event Pod/Created
+     0.51s  event Pod/Pulled
+     0.51s  event Pod/Scheduled
+     0.51s  event Pod/Started
+     0.51s  event ReplicaSet/SuccessfulCreate
+     0.51s  pod condition Initialized
+     0.51s  pod condition PodReadyToStartContainers
+     0.51s  pod condition PodScheduled
+     1.23s  hub: first log line
+     1.23s  hub: server id: 2026-10-02T22:22:22.723647Z  INFO 🔑 MDS server id (persistent): 155327093
+     1.23s  hub: server id: 2026-10-02T22:22:22.725370Z  INFO 📇 export fsid = (0xd78f44e0c782ba8d, 0)
+     1.23s  hub: listening: 2026-10-02T22:22:22.725837Z  INFO Listening on: 0.0.0.0:2049
+     1.23s  hub: listening: 2026-10-02T22:22:22.726077Z  INFO 🩺 hub status endpoint listening on 0.0.
+     1.29s  hub: listening: 2026-10-02T22:22:22.783990Z  INFO ✅ NFSv4.2 TCP server listening on 0.0.0
+     1.51s  pod condition ContainersReady
+     1.51s  pod condition Ready
+     2.43s  CLIENT FIRST BYTE
+     2.51s  share status written (flint-lite-operator)
+== suspend rep=2: first byte at 2.928s
+    -0.13s  Pod created
+    -0.13s  event Pod/Scheduled
+    -0.13s  event ReplicaSet/SuccessfulCreate
+    -0.13s  pod condition Initialized
+    -0.13s  pod condition PodScheduled
+     0.04s  proxy: wake requested
+     0.87s  container started
+     0.87s  event Pod/Created
+     0.87s  event Pod/Pulled
+     0.87s  event Pod/Started
+     0.87s  pod condition PodReadyToStartContainers
+     1.29s  hub: first log line
+     1.29s  hub: server id: 2026-10-02T22:22:39.424464Z  INFO 🔑 MDS server id (persistent): 155327093
+     1.29s  hub: server id: 2026-10-02T22:22:39.426745Z  INFO 📇 export fsid = (0xd78f44e0c782ba8d, 0)
+     1.29s  hub: listening: 2026-10-02T22:22:39.427121Z  INFO Listening on: 0.0.0.0:2049
+     1.29s  hub: listening: 2026-10-02T22:22:39.427197Z  INFO 🩺 hub status endpoint listening on 0.0.
+     1.34s  hub: listening: 2026-10-02T22:22:39.468799Z  INFO ✅ NFSv4.2 TCP server listening on 0.0.0
+     1.87s  pod condition ContainersReady
+     1.87s  pod condition Ready
+     2.87s  share status written (flint-lite-operator)
+     2.93s  CLIENT FIRST BYTE
+== suspend rep=3: first byte at 2.929s
+    -0.25s  Pod created
+    -0.25s  event Pod/Scheduled
+    -0.25s  event ReplicaSet/SuccessfulCreate
+    -0.25s  pod condition Initialized
+    -0.25s  pod condition PodScheduled
+     0.05s  proxy: wake requested
+     0.75s  container started
+     0.75s  event Pod/Created
+     0.75s  event Pod/Pulled
+     0.75s  event Pod/Started
+     0.75s  pod condition PodReadyToStartContainers
+     1.25s  hub: first log line
+     1.25s  hub: server id: 2026-10-02T22:22:56.502176Z  INFO 🔑 MDS server id (persistent): 155327093
+     1.25s  hub: server id: 2026-10-02T22:22:56.503546Z  INFO 📇 export fsid = (0xd78f44e0c782ba8d, 0)
+     1.25s  hub: listening: 2026-10-02T22:22:56.503911Z  INFO Listening on: 0.0.0.0:2049
+     1.25s  hub: listening: 2026-10-02T22:22:56.504035Z  INFO 🩺 hub status endpoint listening on 0.0.
+     1.29s  hub: listening: 2026-10-02T22:22:56.542130Z  INFO ✅ NFSv4.2 TCP server listening on 0.0.0
+     1.75s  pod condition ContainersReady
+     1.75s  pod condition Ready
+     2.75s  share status written (flint-lite-operator)
+     2.93s  CLIENT FIRST BYTE
+cat: /mnt/px6w/w1000/d000/f00000: Stale file handle (os error 116)
+== hibernate rep=1: first byte at 5.734s
+     0.05s  proxy: wake requested
+     0.24s  Deployment created
+     0.24s  PersistentVolumeClaim created
+     0.24s  Pod created
+     0.24s  event Deployment/ScalingReplicaSet
+     0.24s  event PersistentVolumeClaim/ExternalProvisioning
+     0.24s  event PersistentVolumeClaim/Provisioning
+     0.24s  event PersistentVolumeClaim/WaitForFirstConsumer
+     0.24s  event ReplicaSet/SuccessfulCreate
+     2.24s  event PersistentVolumeClaim/ProvisioningSucceeded
+     3.24s  event Pod/Pulled
+     3.24s  event Pod/Scheduled
+     3.24s  pod condition Initialized
+     3.24s  pod condition PodScheduled
+     4.24s  container started
+     4.24s  event Pod/Created
+     4.24s  event Pod/Started
+     4.24s  pod condition PodReadyToStartContainers
+     4.33s  hub: first log line
+     4.33s  hub: server id: 2026-10-02T22:25:06.095084Z  INFO 🔑 MDS server id (persistent): 116336404
+     4.33s  hub: server id: 2026-10-02T22:25:06.095299Z  INFO 📇 export fsid = (0xa172fe568683b329, 0)
+     4.33s  hub: listening: 2026-10-02T22:25:06.095604Z  INFO Listening on: 0.0.0.0:2049
+     4.33s  hub: listening: 2026-10-02T22:25:06.095670Z  INFO 🩺 hub status endpoint listening on 0.0.
+     4.40s  hub: import: 2026-10-02T22:25:06.158186Z  INFO tier import: fresh state + bucket conte
+     4.40s  hub: import: 2026-10-02T22:25:06.158344Z  INFO tier import: manifest seq 6 — 1010 entr
+     4.42s  hub: import: 2026-10-02T22:25:06.183580Z  INFO tier import: 10 dir(s), 0 symlink(s), 1
+     4.42s  hub: import: 2026-10-02T22:25:06.183590Z  INFO 🪣 tier import: 10 dir(s), 0 symlink(s),
+     4.42s  hub: listening: 2026-10-02T22:25:06.185185Z  INFO ✅ NFSv4.2 TCP server listening on 0.0.0
+     5.12s  proxy: wake requested
+     5.24s  pod condition ContainersReady
+     5.24s  pod condition Ready
+     5.24s  share status written (flint-lite-operator)
+     5.73s  CLIENT FIRST BYTE
+== hibernate rep=2: first byte at 7.333s
+    -0.11s  Deployment created
+    -0.11s  PersistentVolumeClaim created
+    -0.11s  Pod created
+    -0.11s  event Deployment/ScalingReplicaSet
+    -0.11s  event PersistentVolumeClaim/ExternalProvisioning
+    -0.11s  event PersistentVolumeClaim/Provisioning
+    -0.11s  event PersistentVolumeClaim/WaitForFirstConsumer
+    -0.11s  event ReplicaSet/SuccessfulCreate
+     0.04s  proxy: wake requested
+     1.89s  event PersistentVolumeClaim/ProvisioningSucceeded
+     2.89s  event Pod/Scheduled
+     2.89s  pod condition Initialized
+     2.89s  pod condition PodScheduled
+     3.89s  container started
+     3.89s  event Pod/Created
+     3.89s  event Pod/Pulled
+     3.89s  event Pod/Started
+     3.89s  pod condition PodReadyToStartContainers
+     4.26s  hub: first log line
+     4.27s  hub: server id: 2026-10-02T22:27:15.380365Z  INFO 🔑 MDS server id (persistent): 176141278
+     4.27s  hub: server id: 2026-10-02T22:27:15.380592Z  INFO 📇 export fsid = (0x271c78f41fc063f, 0) 
+     4.27s  hub: listening: 2026-10-02T22:27:15.380919Z  INFO Listening on: 0.0.0.0:2049
+     4.27s  hub: listening: 2026-10-02T22:27:15.380988Z  INFO 🩺 hub status endpoint listening on 0.0.
+     4.34s  hub: import: 2026-10-02T22:27:15.445949Z  INFO tier import: fresh state + bucket conte
+     4.34s  hub: import: 2026-10-02T22:27:15.446116Z  INFO tier import: manifest seq 7 — 1010 entr
+     4.36s  hub: import: 2026-10-02T22:27:15.473365Z  INFO tier import: 10 dir(s), 0 symlink(s), 1
+     4.36s  hub: import: 2026-10-02T22:27:15.473374Z  INFO 🪣 tier import: 10 dir(s), 0 symlink(s),
+     4.37s  hub: listening: 2026-10-02T22:27:15.475041Z  INFO ✅ NFSv4.2 TCP server listening on 0.0.0
+     4.89s  pod condition ContainersReady
+     4.89s  pod condition Ready
+     4.89s  share status written (flint-lite-operator)
+     5.11s  proxy: wake requested
+     7.13s  proxy: wake requested
+     7.33s  CLIENT FIRST BYTE
+cat: /mnt/px6w/w1000/d000/f00000: Stale file handle (os error 116)
+== hibernate rep=3: first byte at 7.226s
+     0.02s  Deployment created
+     0.02s  PersistentVolumeClaim created
+     0.02s  Pod created
+     0.02s  event Deployment/ScalingReplicaSet
+     0.02s  event PersistentVolumeClaim/ExternalProvisioning
+     0.02s  event PersistentVolumeClaim/Provisioning
+     0.02s  event PersistentVolumeClaim/WaitForFirstConsumer
+     0.02s  event ReplicaSet/SuccessfulCreate
+     0.04s  proxy: wake requested
+     3.02s  event PersistentVolumeClaim/ProvisioningSucceeded
+     4.02s  event Pod/Scheduled
+     4.02s  pod condition Initialized
+     4.02s  pod condition PodScheduled
+     5.02s  container started
+     5.02s  event Pod/Created
+     5.02s  event Pod/Pulled
+     5.02s  event Pod/Started
+     5.02s  pod condition PodReadyToStartContainers
+     5.11s  proxy: wake requested
+     5.32s  hub: first log line
+     5.33s  hub: server id: 2026-10-02T22:29:27.309599Z  INFO 🔑 MDS server id (persistent): 659687160
+     5.33s  hub: server id: 2026-10-02T22:29:27.309800Z  INFO 📇 export fsid = (0x5b8ccbc6711ed607, 0)
+     5.33s  hub: listening: 2026-10-02T22:29:27.310129Z  INFO Listening on: 0.0.0.0:2049
+     5.33s  hub: listening: 2026-10-02T22:29:27.310198Z  INFO 🩺 hub status endpoint listening on 0.0.
+     5.40s  hub: import: 2026-10-02T22:29:27.378356Z  INFO tier import: fresh state + bucket conte
+     5.40s  hub: import: 2026-10-02T22:29:27.378513Z  INFO tier import: manifest seq 8 — 1010 entr
+     5.42s  hub: import: 2026-10-02T22:29:27.403781Z  INFO tier import: 10 dir(s), 0 symlink(s), 1
+     5.42s  hub: import: 2026-10-02T22:29:27.403790Z  INFO 🪣 tier import: 10 dir(s), 0 symlink(s),
+     5.42s  hub: listening: 2026-10-02T22:29:27.405358Z  INFO ✅ NFSv4.2 TCP server listening on 0.0.0
+     6.02s  pod condition ContainersReady
+     6.02s  pod condition Ready
+     7.02s  share status written (flint-lite-operator)
+     7.23s  CLIENT FIRST BYTE
+RESULT: 2 passed, 0 failed

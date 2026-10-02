@@ -1,0 +1,637 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "v1",
+            "count": 1,
+            "eventTime": null,
+            "firstTimestamp": "2026-10-02T22:21:29Z",
+            "involvedObject": {
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "name": "w1000-676d4cdb94-t4lhp",
+                "namespace": "ws",
+                "resourceVersion": "678",
+                "uid": "827fbbe4-9471-4802-a355-3d0eaaceb60b"
+            },
+            "kind": "Event",
+            "lastTimestamp": "2026-10-02T22:21:29Z",
+            "message": "Successfully assigned ws/w1000-676d4cdb94-t4lhp to flint-step6w-worker",
+            "metadata": {
+                "creationTimestamp": "2026-10-02T22:21:29Z",
+                "name": "w1000-676d4cdb94-t4lhp.18dad689d4c4fcef",
+                "namespace": "ws",
+                "resourceVersion": "735",
+                "uid": "086ac93e-f431-4706-ae52-6b47fea93275"
+            },
+            "reason": "Scheduled",
+            "reportingComponent": "default-scheduler",
+            "reportingInstance": "",
+            "source": {
+                "component": "default-scheduler"
+            },
+            "type": "Normal"
+        },
+        {
+            "apiVersion": "v1",
+            "count": 1,
+            "eventTime": null,
+            "firstTimestamp": "2026-10-02T22:21:29Z",
+            "involvedObject": {
+                "apiVersion": "v1",
+                "fieldPath": "spec.containers{hub}",
+                "kind": "Pod",
+                "name": "w1000-676d4cdb94-t4lhp",
+                "namespace": "ws",
+                "resourceVersion": "734",
+                "uid": "827fbbe4-9471-4802-a355-3d0eaaceb60b"
+            },
+            "kind": "Event",
+            "lastTimestamp": "2026-10-02T22:21:29Z",
+            "message": "Container image \"flint-pnfs:step5-dev\" already present on machine",
+            "metadata": {
+                "creationTimestamp": "2026-10-02T22:21:29Z",
+                "name": "w1000-676d4cdb94-t4lhp.18dad689f00f1f66",
+                "namespace": "ws",
+                "resourceVersion": "737",
+                "uid": "285e0278-abe5-41cb-b6f3-2c83e653f9d9"
+            },
+            "reason": "Pulled",
+            "reportingComponent": "kubelet",
+            "reportingInstance": "flint-step6w-worker",
+            "source": {
+                "component": "kubelet",
+                "host": "flint-step6w-worker"
+            },
+            "type": "Normal"
+        },
+        {
+            "apiVersion": "v1",
+            "count": 1,
+            "eventTime": null,
+            "firstTimestamp": "2026-10-02T22:21:29Z",
+            "involvedObject": {
+                "apiVersion": "v1",
+                "fieldPath": "spec.containers{hub}",
+                "kind": "Pod",
+                "name": "w1000-676d4cdb94-t4lhp",
+                "namespace": "ws",
+                "resourceVersion": "734",
+                "uid": "827fbbe4-9471-4802-a355-3d0eaaceb60b"
+            },
+            "kind": "Event",
+            "lastTimestamp": "2026-10-02T22:21:29Z",
+            "message": "Created container: hub",
+            "metadata": {
+                "creationTimestamp": "2026-10-02T22:21:29Z",
+                "name": "w1000-676d4cdb94-t4lhp.18dad689f0db19f5",
+                "namespace": "ws",
+                "resourceVersion": "738",
+                "uid": "4777ace0-0169-448e-b661-b2db5e258982"
+            },
+            "reason": "Created",
+            "reportingComponent": "kubelet",
+            "reportingInstance": "flint-step6w-worker",
+            "source": {
+                "component": "kubelet",
+                "host": "flint-step6w-worker"
+            },
+            "type": "Normal"
+        },
+        {
+            "apiVersion": "v1",
+            "count": 1,
+            "eventTime": null,
+            "firstTimestamp": "2026-10-02T22:21:29Z",
+            "involvedObject": {
+                "apiVersion": "v1",
+                "fieldPath": "spec.containers{hub}",
+                "kind": "Pod",
+                "name": "w1000-676d4cdb94-t4lhp",
+                "namespace": "ws",
+                "resourceVersion": "734",
+                "uid": "827fbbe4-9471-4802-a355-3d0eaaceb60b"
+            },
+            "kind": "Event",
+            "lastTimestamp": "2026-10-02T22:21:29Z",
+            "message": "Started container hub",
+            "metadata": {
+                "creationTimestamp": "2026-10-02T22:21:29Z",
+                "name": "w1000-676d4cdb94-t4lhp.18dad689f7cc8e46",
+                "namespace": "ws",
+                "resourceVersion": "739",
+                "uid": "bd28c7a8-372f-4d97-9d22-c5e2604ab4b2"
+            },
+            "reason": "Started",
+            "reportingComponent": "kubelet",
+            "reportingInstance": "flint-step6w-worker",
+            "source": {
+                "component": "kubelet",
+                "host": "flint-step6w-worker"
+            },
+            "type": "Normal"
+        },
+        {
+            "apiVersion": "v1",
+            "count": 1,
+            "eventTime": null,
+            "firstTimestamp": "2026-10-02T22:22:14Z",
+            "involvedObject": {
+                "apiVersion": "v1",
+                "fieldPath": "spec.containers{hub}",
+                "kind": "Pod",
+                "name": "w1000-676d4cdb94-t4lhp",
+                "namespace": "ws",
+                "resourceVersion": "734",
+                "uid": "827fbbe4-9471-4802-a355-3d0eaaceb60b"
+            },
+            "kind": "Event",
+            "lastTimestamp": "2026-10-02T22:22:14Z",
+            "message": "Stopping container hub",
+            "metadata": {
+                "creationTimestamp": "2026-10-02T22:22:14Z",
+                "name": "w1000-676d4cdb94-t4lhp.18dad69451a8bdb9",
+                "namespace": "ws",
+                "resourceVersion": "835",
+                "uid": "3cc76c1f-6a00-4869-8d8f-4b3b5e853a01"
+            },
+            "reason": "Killing",
+            "reportingComponent": "kubelet",
+            "reportingInstance": "flint-step6w-worker",
+            "source": {
+                "component": "kubelet",
+                "host": "flint-step6w-worker"
+            },
+            "type": "Normal"
+        },
+        {
+            "apiVersion": "v1",
+            "count": 1,
+            "eventTime": null,
+            "firstTimestamp": "2026-10-02T22:22:22Z",
+            "involvedObject": {
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "name": "w1000-676d4cdb94-zt5v8",
+                "namespace": "ws",
+                "resourceVersion": "865",
+                "uid": "8b142bcf-85b5-4c4a-8d9e-26b707ca173d"
+            },
+            "kind": "Event",
+            "lastTimestamp": "2026-10-02T22:22:22Z",
+            "message": "Successfully assigned ws/w1000-676d4cdb94-zt5v8 to flint-step6w-worker",
+            "metadata": {
+                "creationTimestamp": "2026-10-02T22:22:22Z",
+                "name": "w1000-676d4cdb94-zt5v8.18dad69625eadb80",
+                "namespace": "ws",
+                "resourceVersion": "871",
+                "uid": "c40aa6d4-cfa2-4e5d-96b6-59ff875faf01"
+            },
+            "reason": "Scheduled",
+            "reportingComponent": "default-scheduler",
+            "reportingInstance": "",
+            "source": {
+                "component": "default-scheduler"
+            },
+            "type": "Normal"
+        },
+        {
+            "apiVersion": "v1",
+            "count": 1,
+            "eventTime": null,
+            "firstTimestamp": "2026-10-02T22:22:22Z",
+            "involvedObject": {
+                "apiVersion": "v1",
+                "fieldPath": "spec.containers{hub}",
+                "kind": "Pod",
+                "name": "w1000-676d4cdb94-zt5v8",
+                "namespace": "ws",
+                "resourceVersion": "869",
+                "uid": "8b142bcf-85b5-4c4a-8d9e-26b707ca173d"
+            },
+            "kind": "Event",
+            "lastTimestamp": "2026-10-02T22:22:22Z",
+            "message": "Container image \"flint-pnfs:step5-dev\" already present on machine",
+            "metadata": {
+                "creationTimestamp": "2026-10-02T22:22:22Z",
+                "name": "w1000-676d4cdb94-zt5v8.18dad6963ec13324",
+                "namespace": "ws",
+                "resourceVersion": "877",
+                "uid": "00494a72-0b3c-469f-9701-ecb406d76870"
+            },
+            "reason": "Pulled",
+            "reportingComponent": "kubelet",
+            "reportingInstance": "flint-step6w-worker",
+            "source": {
+                "component": "kubelet",
+                "host": "flint-step6w-worker"
+            },
+            "type": "Normal"
+        },
+        {
+            "apiVersion": "v1",
+            "count": 1,
+            "eventTime": null,
+            "firstTimestamp": "2026-10-02T22:22:22Z",
+            "involvedObject": {
+                "apiVersion": "v1",
+                "fieldPath": "spec.containers{hub}",
+                "kind": "Pod",
+                "name": "w1000-676d4cdb94-zt5v8",
+                "namespace": "ws",
+                "resourceVersion": "869",
+                "uid": "8b142bcf-85b5-4c4a-8d9e-26b707ca173d"
+            },
+            "kind": "Event",
+            "lastTimestamp": "2026-10-02T22:22:22Z",
+            "message": "Created container: hub",
+            "metadata": {
+                "creationTimestamp": "2026-10-02T22:22:22Z",
+                "name": "w1000-676d4cdb94-zt5v8.18dad6963f70ec03",
+                "namespace": "ws",
+                "resourceVersion": "878",
+                "uid": "f5a75431-e088-4311-ae25-f92392e74967"
+            },
+            "reason": "Created",
+            "reportingComponent": "kubelet",
+            "reportingInstance": "flint-step6w-worker",
+            "source": {
+                "component": "kubelet",
+                "host": "flint-step6w-worker"
+            },
+            "type": "Normal"
+        },
+        {
+            "apiVersion": "v1",
+            "count": 1,
+            "eventTime": null,
+            "firstTimestamp": "2026-10-02T22:22:22Z",
+            "involvedObject": {
+                "apiVersion": "v1",
+                "fieldPath": "spec.containers{hub}",
+                "kind": "Pod",
+                "name": "w1000-676d4cdb94-zt5v8",
+                "namespace": "ws",
+                "resourceVersion": "869",
+                "uid": "8b142bcf-85b5-4c4a-8d9e-26b707ca173d"
+            },
+            "kind": "Event",
+            "lastTimestamp": "2026-10-02T22:22:22Z",
+            "message": "Started container hub",
+            "metadata": {
+                "creationTimestamp": "2026-10-02T22:22:22Z",
+                "name": "w1000-676d4cdb94-zt5v8.18dad69644ad2e77",
+                "namespace": "ws",
+                "resourceVersion": "879",
+                "uid": "d81e093a-baf3-47e9-8f3a-3157fcc628e3"
+            },
+            "reason": "Started",
+            "reportingComponent": "kubelet",
+            "reportingInstance": "flint-step6w-worker",
+            "source": {
+                "component": "kubelet",
+                "host": "flint-step6w-worker"
+            },
+            "type": "Normal"
+        },
+        {
+            "apiVersion": "v1",
+            "count": 1,
+            "eventTime": null,
+            "firstTimestamp": "2026-10-02T22:21:25Z",
+            "involvedObject": {
+                "apiVersion": "apps/v1",
+                "kind": "ReplicaSet",
+                "name": "w1000-676d4cdb94",
+                "namespace": "ws",
+                "resourceVersion": "676",
+                "uid": "b2261a70-9c9e-4635-997b-10f863e20b19"
+            },
+            "kind": "Event",
+            "lastTimestamp": "2026-10-02T22:21:25Z",
+            "message": "Created pod: w1000-676d4cdb94-t4lhp",
+            "metadata": {
+                "creationTimestamp": "2026-10-02T22:21:25Z",
+                "name": "w1000-676d4cdb94.18dad688e536e920",
+                "namespace": "ws",
+                "resourceVersion": "681",
+                "uid": "1f84407c-b571-4611-b72f-6aa422e1e545"
+            },
+            "reason": "SuccessfulCreate",
+            "reportingComponent": "replicaset-controller",
+            "reportingInstance": "",
+            "source": {
+                "component": "replicaset-controller"
+            },
+            "type": "Normal"
+        },
+        {
+            "apiVersion": "v1",
+            "count": 1,
+            "eventTime": null,
+            "firstTimestamp": "2026-10-02T22:22:14Z",
+            "involvedObject": {
+                "apiVersion": "apps/v1",
+                "kind": "ReplicaSet",
+                "name": "w1000-676d4cdb94",
+                "namespace": "ws",
+                "resourceVersion": "829",
+                "uid": "b2261a70-9c9e-4635-997b-10f863e20b19"
+            },
+            "kind": "Event",
+            "lastTimestamp": "2026-10-02T22:22:14Z",
+            "message": "Deleted pod: w1000-676d4cdb94-t4lhp",
+            "metadata": {
+                "creationTimestamp": "2026-10-02T22:22:14Z",
+                "name": "w1000-676d4cdb94.18dad694519460ae",
+                "namespace": "ws",
+                "resourceVersion": "833",
+                "uid": "7a2d44c4-f3aa-41b9-9a50-944f17db92ce"
+            },
+            "reason": "SuccessfulDelete",
+            "reportingComponent": "replicaset-controller",
+            "reportingInstance": "",
+            "source": {
+                "component": "replicaset-controller"
+            },
+            "type": "Normal"
+        },
+        {
+            "apiVersion": "v1",
+            "count": 1,
+            "eventTime": null,
+            "firstTimestamp": "2026-10-02T22:22:22Z",
+            "involvedObject": {
+                "apiVersion": "apps/v1",
+                "kind": "ReplicaSet",
+                "name": "w1000-676d4cdb94",
+                "namespace": "ws",
+                "resourceVersion": "864",
+                "uid": "b2261a70-9c9e-4635-997b-10f863e20b19"
+            },
+            "kind": "Event",
+            "lastTimestamp": "2026-10-02T22:22:22Z",
+            "message": "Created pod: w1000-676d4cdb94-zt5v8",
+            "metadata": {
+                "creationTimestamp": "2026-10-02T22:22:22Z",
+                "name": "w1000-676d4cdb94.18dad6962599ae42",
+                "namespace": "ws",
+                "resourceVersion": "868",
+                "uid": "937b8428-a53e-4680-bcd2-9f8fcc97e109"
+            },
+            "reason": "SuccessfulCreate",
+            "reportingComponent": "replicaset-controller",
+            "reportingInstance": "",
+            "source": {
+                "component": "replicaset-controller"
+            },
+            "type": "Normal"
+        },
+        {
+            "apiVersion": "v1",
+            "count": 1,
+            "eventTime": null,
+            "firstTimestamp": "2026-10-02T22:21:25Z",
+            "involvedObject": {
+                "apiVersion": "v1",
+                "kind": "PersistentVolumeClaim",
+                "name": "w1000-data",
+                "namespace": "ws",
+                "resourceVersion": "670",
+                "uid": "86339e67-dd21-4fe4-a26b-4b24d677f722"
+            },
+            "kind": "Event",
+            "lastTimestamp": "2026-10-02T22:21:25Z",
+            "message": "waiting for first consumer to be created before binding",
+            "metadata": {
+                "creationTimestamp": "2026-10-02T22:21:25Z",
+                "name": "w1000-data.18dad688e24fec2a",
+                "namespace": "ws",
+                "resourceVersion": "671",
+                "uid": "08ce05b8-28b6-4633-89eb-e7c426b8bee7"
+            },
+            "reason": "WaitForFirstConsumer",
+            "reportingComponent": "persistentvolume-controller",
+            "reportingInstance": "",
+            "source": {
+                "component": "persistentvolume-controller"
+            },
+            "type": "Normal"
+        },
+        {
+            "apiVersion": "v1",
+            "count": 1,
+            "eventTime": null,
+            "firstTimestamp": "2026-10-02T22:21:25Z",
+            "involvedObject": {
+                "apiVersion": "v1",
+                "kind": "PersistentVolumeClaim",
+                "name": "w1000-data",
+                "namespace": "ws",
+                "resourceVersion": "684",
+                "uid": "86339e67-dd21-4fe4-a26b-4b24d677f722"
+            },
+            "kind": "Event",
+            "lastTimestamp": "2026-10-02T22:21:25Z",
+            "message": "Waiting for a volume to be created either by the external provisioner 'rancher.io/local-path' or manually by the system administrator. If volume creation is delayed, please verify that the provisioner is running and correctly registered.",
+            "metadata": {
+                "creationTimestamp": "2026-10-02T22:21:25Z",
+                "name": "w1000-data.18dad688e645e181",
+                "namespace": "ws",
+                "resourceVersion": "685",
+                "uid": "13df9961-715c-4fd7-9187-5bfeafbee563"
+            },
+            "reason": "ExternalProvisioning",
+            "reportingComponent": "persistentvolume-controller",
+            "reportingInstance": "",
+            "source": {
+                "component": "persistentvolume-controller"
+            },
+            "type": "Normal"
+        },
+        {
+            "apiVersion": "v1",
+            "count": 1,
+            "eventTime": null,
+            "firstTimestamp": "2026-10-02T22:21:25Z",
+            "involvedObject": {
+                "apiVersion": "v1",
+                "kind": "PersistentVolumeClaim",
+                "name": "w1000-data",
+                "namespace": "ws",
+                "resourceVersion": "684",
+                "uid": "86339e67-dd21-4fe4-a26b-4b24d677f722"
+            },
+            "kind": "Event",
+            "lastTimestamp": "2026-10-02T22:21:25Z",
+            "message": "External provisioner is provisioning volume for claim \"ws/w1000-data\"",
+            "metadata": {
+                "creationTimestamp": "2026-10-02T22:21:25Z",
+                "name": "w1000-data.18dad688e68ab808",
+                "namespace": "ws",
+                "resourceVersion": "688",
+                "uid": "eabe805e-db44-4b04-b1a4-5a2f7bd44a39"
+            },
+            "reason": "Provisioning",
+            "reportingComponent": "rancher.io/local-path_local-path-provisioner-7b8c8ddbd6-v42xk_1adc8400-10ca-4c8b-8ac8-3c715042484e",
+            "reportingInstance": "",
+            "source": {
+                "component": "rancher.io/local-path_local-path-provisioner-7b8c8ddbd6-v42xk_1adc8400-10ca-4c8b-8ac8-3c715042484e"
+            },
+            "type": "Normal"
+        },
+        {
+            "apiVersion": "v1",
+            "count": 1,
+            "eventTime": null,
+            "firstTimestamp": "2026-10-02T22:21:28Z",
+            "involvedObject": {
+                "apiVersion": "v1",
+                "kind": "PersistentVolumeClaim",
+                "name": "w1000-data",
+                "namespace": "ws",
+                "resourceVersion": "684",
+                "uid": "86339e67-dd21-4fe4-a26b-4b24d677f722"
+            },
+            "kind": "Event",
+            "lastTimestamp": "2026-10-02T22:21:28Z",
+            "message": "Successfully provisioned volume pvc-86339e67-dd21-4fe4-a26b-4b24d677f722",
+            "metadata": {
+                "creationTimestamp": "2026-10-02T22:21:28Z",
+                "name": "w1000-data.18dad6899cb38a4f",
+                "namespace": "ws",
+                "resourceVersion": "719",
+                "uid": "b6680c1f-ce5a-4522-8a87-89c53c9fd288"
+            },
+            "reason": "ProvisioningSucceeded",
+            "reportingComponent": "rancher.io/local-path_local-path-provisioner-7b8c8ddbd6-v42xk_1adc8400-10ca-4c8b-8ac8-3c715042484e",
+            "reportingInstance": "",
+            "source": {
+                "component": "rancher.io/local-path_local-path-provisioner-7b8c8ddbd6-v42xk_1adc8400-10ca-4c8b-8ac8-3c715042484e"
+            },
+            "type": "Normal"
+        },
+        {
+            "action": "Reconcile",
+            "apiVersion": "v1",
+            "eventTime": "2026-10-02T22:21:25.200465Z",
+            "firstTimestamp": null,
+            "involvedObject": {
+                "apiVersion": "chert.us/v1alpha1",
+                "kind": "FlintShare",
+                "name": "w1000",
+                "namespace": "ws",
+                "uid": "f49e43b0-54c3-4430-9969-c03b1a21ebb5"
+            },
+            "kind": "Event",
+            "lastTimestamp": null,
+            "message": "stateid tag 3112947123 (nfs proxy H2); set once",
+            "metadata": {
+                "creationTimestamp": "2026-10-02T22:21:25Z",
+                "name": "w1000.18dad688e0508f8f",
+                "namespace": "ws",
+                "resourceVersion": "668",
+                "uid": "b60c46a4-2baa-4b05-9b70-05f0720fe352"
+            },
+            "reason": "StateidTagAssigned",
+            "reportingComponent": "flint-lite-operator",
+            "reportingInstance": "flint-lite-operator-bc8b4bfb7-r5bfp",
+            "source": {},
+            "type": "Normal"
+        },
+        {
+            "apiVersion": "v1",
+            "count": 2,
+            "eventTime": null,
+            "firstTimestamp": "2026-10-02T22:21:25Z",
+            "involvedObject": {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "name": "w1000",
+                "namespace": "ws",
+                "resourceVersion": "675",
+                "uid": "d166bc3f-c457-431c-901f-608613fdf251"
+            },
+            "kind": "Event",
+            "lastTimestamp": "2026-10-02T22:22:22Z",
+            "message": "Scaled up replica set w1000-676d4cdb94 from 0 to 1",
+            "metadata": {
+                "creationTimestamp": "2026-10-02T22:21:25Z",
+                "name": "w1000.18dad688e4986229",
+                "namespace": "ws",
+                "resourceVersion": "866",
+                "uid": "e7196bc2-1af8-44cd-ae6e-b94f7218d003"
+            },
+            "reason": "ScalingReplicaSet",
+            "reportingComponent": "deployment-controller",
+            "reportingInstance": "",
+            "source": {
+                "component": "deployment-controller"
+            },
+            "type": "Normal"
+        },
+        {
+            "apiVersion": "v1",
+            "count": 1,
+            "eventTime": null,
+            "firstTimestamp": "2026-10-02T22:22:14Z",
+            "involvedObject": {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "name": "w1000",
+                "namespace": "ws",
+                "resourceVersion": "826",
+                "uid": "d166bc3f-c457-431c-901f-608613fdf251"
+            },
+            "kind": "Event",
+            "lastTimestamp": "2026-10-02T22:22:14Z",
+            "message": "Scaled down replica set w1000-676d4cdb94 from 1 to 0",
+            "metadata": {
+                "creationTimestamp": "2026-10-02T22:22:14Z",
+                "name": "w1000.18dad6945127f64d",
+                "namespace": "ws",
+                "resourceVersion": "830",
+                "uid": "a04d3db1-4f09-41bc-bd72-314e5f7b38ed"
+            },
+            "reason": "ScalingReplicaSet",
+            "reportingComponent": "deployment-controller",
+            "reportingInstance": "",
+            "source": {
+                "component": "deployment-controller"
+            },
+            "type": "Normal"
+        },
+        {
+            "action": "Reconcile",
+            "apiVersion": "v1",
+            "eventTime": "2026-10-02T22:22:21.822667Z",
+            "firstTimestamp": null,
+            "involvedObject": {
+                "apiVersion": "chert.us/v1alpha1",
+                "kind": "FlintShare",
+                "name": "w1000",
+                "namespace": "ws",
+                "uid": "f49e43b0-54c3-4430-9969-c03b1a21ebb5"
+            },
+            "kind": "Event",
+            "lastTimestamp": null,
+            "message": "wake requested — scaling back up",
+            "metadata": {
+                "creationTimestamp": "2026-10-02T22:22:21Z",
+                "name": "w1000.18dad6960f42c99c",
+                "namespace": "ws",
+                "resourceVersion": "859",
+                "uid": "8c220860-9d61-4be1-86b0-0e29f04c4974"
+            },
+            "reason": "Woken",
+            "reportingComponent": "flint-lite-operator",
+            "reportingInstance": "flint-lite-operator-bc8b4bfb7-r5bfp",
+            "source": {},
+            "type": "Normal"
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}

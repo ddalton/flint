@@ -1,0 +1,21 @@
+2026-10-02T22:22:55.123846484Z 2026-10-02T22:22:55.123635Z  INFO spdk_csi_driver::nfs::v4::operations::session: EXCHANGE_ID: owner=[76, 105, 110, 117, 120, 32, 78, 70, 83, 118, 52, 46, 50, 32, 109, 97, 115, 116, 101, 114], verifier=1790953548271342592
+2026-10-02T22:22:55.123919522Z 2026-10-02T22:22:55.123698Z  INFO spdk_csi_driver::nfs::v4::state::lease: Lease created for client 7
+2026-10-02T22:22:55.123935983Z 2026-10-02T22:22:55.123712Z  INFO spdk_csi_driver::nfs::v4::state::client: EXCHANGE_ID: new client 7 (no existing record)
+2026-10-02T22:22:55.123947797Z 2026-10-02T22:22:55.123724Z  INFO spdk_csi_driver::nfs::v4::operations::session: EXCHANGE_ID: new unconfirmed clientid 7
+2026-10-02T22:22:55.123961982Z 2026-10-02T22:22:55.123736Z  INFO spdk_csi_driver::nfs::v4::operations::session: EXCHANGE_ID response - server_owner="flint-nfs-flint-nfs-proxy", server_scope="flint-nfs-flint-nfs-proxy", flags=0x00010000
+2026-10-02T22:22:55.124363228Z 2026-10-02T22:22:55.124152Z  INFO spdk_csi_driver::nfs::v4::operations::session: EXCHANGE_ID: owner=[76, 105, 110, 117, 120, 32, 78, 70, 83, 118, 52, 46, 50, 32, 109, 97, 115, 116, 101, 114], verifier=1790953548271342592
+2026-10-02T22:22:55.124577136Z 2026-10-02T22:22:55.124202Z  INFO spdk_csi_driver::nfs::v4::state::lease: Lease removed for client 7
+2026-10-02T22:22:55.124609397Z 2026-10-02T22:22:55.124227Z  INFO spdk_csi_driver::nfs::v4::state::lease: Lease created for client 8
+2026-10-02T22:22:55.124618024Z 2026-10-02T22:22:55.124242Z  INFO spdk_csi_driver::nfs::v4::operations::session: EXCHANGE_ID: new unconfirmed clientid 8
+2026-10-02T22:22:55.124626543Z 2026-10-02T22:22:55.124257Z  INFO spdk_csi_driver::nfs::v4::operations::session: EXCHANGE_ID response - server_owner="flint-nfs-flint-nfs-proxy", server_scope="flint-nfs-flint-nfs-proxy", flags=0x00010000
+2026-10-02T22:22:55.125118114Z 2026-10-02T22:22:55.124600Z  INFO spdk_csi_driver::nfs::v4::operations::session: CREATE_SESSION: clientid=8, sequence=1
+2026-10-02T22:22:55.125153150Z 2026-10-02T22:22:55.124632Z  INFO spdk_csi_driver::nfs::v4::operations::session: CREATE_SESSION: Client requested - max_request=1049620, max_response=1049480, max_ops=8
+2026-10-02T22:22:55.125163522Z 2026-10-02T22:22:55.124657Z  INFO spdk_csi_driver::nfs::v4::operations::session: CREATE_SESSION: Negotiated: req=1049620, resp=1049480, ops=8
+2026-10-02T22:22:55.125170911Z 2026-10-02T22:22:55.124684Z  INFO spdk_csi_driver::nfs::v4::state::session: Session created: client=8, session_id=SessionId([0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 8])
+2026-10-02T22:22:55.125180798Z 2026-10-02T22:22:55.124710Z  INFO spdk_csi_driver::nfs::v4::operations::session: CREATE_SESSION: client offered 1 callback credential(s): [Sys { stamp: 1710248960, machinename: "master", uid: 0, gid: 0, gids: [] }] → selected Some(Sys { stamp: 1710248960, machinename: "master", uid: 0, gid: 0, gids: [] })
+2026-10-02T22:22:55.125188105Z 2026-10-02T22:22:55.124743Z  INFO spdk_csi_driver::nfs::v4::operations::session: CREATE_SESSION: Session SessionId([0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 8]) created for client 8 with 1025KB buffers
+2026-10-02T22:22:55.125196606Z 2026-10-02T22:22:55.124770Z  WARN spdk_csi_driver::nfs::v4::dispatcher: CREATE_SESSION: client requested CONN_BACK_CHAN but no back-channel writer is available for session SessionId([0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 8]) — recalls cannot be delivered
+2026-10-02T22:22:55.125665241Z 2026-10-02T22:22:55.125212Z  INFO spdk_csi_driver::nfs::v4::dispatcher: RECLAIM_COMPLETE: one_fs=false
+2026-10-02T22:22:55.125691877Z 2026-10-02T22:22:55.125260Z  INFO spdk_csi_driver::nfs::v4::dispatcher: RECLAIM_COMPLETE: client 8 now exited grace mode
+2026-10-02T22:22:55.299922963Z 2026-10-02T22:22:55.299713Z  INFO spdk_csi_driver::nfs_proxy::kube: ws/w1000: wake requested
+2026-10-02T22:22:58.073356752Z 2026-10-02T22:22:58.073242Z  INFO spdk_csi_driver::nfs_proxy::server: backend client on w1000 for downstream 0x8: clientid 0x1

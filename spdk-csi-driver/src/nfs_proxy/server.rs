@@ -71,6 +71,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_wake_hold_secs() -> u64 {
+    20
+}
+
 fn default_lease_secs() -> u64 {
     90
 }
@@ -108,6 +112,14 @@ pub struct ProxyConfig {
     /// call on a connection that did not is refused `AUTH_TOOWEAK`.
     #[serde(default)]
     pub tls: Option<TlsConfig>,
+    /// How long a compound for a DOWN hub (parked, restarting) is HELD,
+    /// the hub retried, before it is answered DELAY. Linux retries DELAY
+    /// on a backoff (100 ms doubling to 15 s), so an immediate DELAY made
+    /// a wake as slow as the client's next retry: ~26 s for a hub serving
+    /// at 5 s. Keep it well under the client's RPC timeout (`timeo`,
+    /// 60 s by default for TCP). 0 = DELAY at once.
+    #[serde(default = "default_wake_hold_secs")]
+    pub wake_hold_secs: u64,
 }
 
 /// The revocation bits a hub's `sr_status_flags` may carry through to the
@@ -153,6 +165,8 @@ pub struct Proxy {
     waker: Arc<dyn Waker>,
     last_wake: Mutex<HashMap<u64, std::time::Instant>>,
     hub_lease: std::time::Duration,
+    /// `ProxyConfig::wake_hold_secs`.
+    wake_hold: std::time::Duration,
     keepalive: bool,
     tls: Option<Arc<Tls>>,
 }
@@ -189,6 +203,14 @@ fn owner_is(owner: &[u8], prefix: Option<&[u8]>) -> bool {
 /// A TLS handshake that has not finished by then is dropped: the socket
 /// is not the client's until it has.
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The least time between two wake requests for one hub. A request is an
+/// API-server write; a held compound re-asks on every poll, so this is
+/// the rate per down hub.
+const WAKE_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How often a held compound retries its down hub (`wake_hold_secs`).
+const HOLD_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// How often the proxy reaps expired downstream clients. The dispatcher's
 /// per-compound reap is off here (`with_reap_on_compound(false)`): it walks
@@ -259,6 +281,7 @@ impl Proxy {
             waker,
             last_wake: Mutex::new(HashMap::new()),
             hub_lease: std::time::Duration::from_secs(cfg.lease_secs),
+            wake_hold: std::time::Duration::from_secs(cfg.wake_hold_secs),
             keepalive: cfg.keepalive,
             tls,
         }))
@@ -600,10 +623,35 @@ impl Proxy {
                     let slices: Vec<&[u8]> = (start..end).map(|k| &args[ranges[k + 1].clone()]).collect();
                     let first_opcode = opcode_at(&args, &ranges[i + 1]);
                     let again = resend.filter(|l| l.hub == Some(hub)).map(|l| (l.bsid, l.bseq));
-                    match self
+                    let mut hub = hub;
+                    let mut res = self
                         .forward(view, sessionid, hub, slotid, again, cachethis, call, &tag, minor, plan.putrootfh, &slices)
-                        .await
-                    {
+                        .await;
+                    // A DOWN hub (parked, restarting) is woken and the
+                    // compound HELD, the hub retried, for up to
+                    // `wake_hold`: an immediate DELAY left the client to its
+                    // own backoff (100 ms doubling to 15 s), so a hub serving
+                    // at 5 s into a wake was reached at ~26 s.
+                    if matches!(res, Err(BackendError::Down(_))) && !self.wake_hold.is_zero() {
+                        self.wake(view, hub);
+                        let deadline = tokio::time::Instant::now() + self.wake_hold;
+                        while matches!(res, Err(BackendError::Down(_))) && tokio::time::Instant::now() < deadline {
+                            tokio::time::sleep(HOLD_POLL).await;
+                            // Route this run again on the CURRENT table: a
+                            // share woken from hibernation comes back on a new
+                            // disk under a new serverId.
+                            let fresh = self.table.view_of(peer);
+                            let h = route::route(&fresh, &ops).hub.unwrap_or(hub);
+                            // Ask again (rate-limited): a request can be
+                            // lost, or the hub re-parked right after it.
+                            self.wake(&fresh, h);
+                            res = self
+                                .forward(&fresh, sessionid, h, slotid, again, cachethis, call, &tag, minor, plan.putrootfh, &slices)
+                                .await;
+                            hub = h;
+                        }
+                    }
+                    match res {
                         Ok((bsid, bseq, reply)) => {
                             used_hub = Some((hub, bsid, bseq));
                             seq_res.status_flags |= reply.seq.1.as_ref().map(|s| s.status_flags).unwrap_or(0) & HUB_FLAGS_PASSED;
@@ -990,13 +1038,13 @@ impl Proxy {
 }
 
 impl Proxy {
-    /// At most once per 30 s per hub: a hard mount retries on DELAY every
-    /// few seconds, and the stamp is a write to the API server.
+    /// At most once per `WAKE_EVERY` per hub: a held compound re-asks on
+    /// every poll, and the stamp is a write to the API server.
     fn wake(&self, view: &View, hub: u64) {
         let Some(row) = view.hub(hub) else { return };
         let now = std::time::Instant::now();
         let mut last = self.last_wake.lock().unwrap();
-        if last.get(&hub).is_some_and(|t| now.duration_since(*t) < std::time::Duration::from_secs(30)) {
+        if last.get(&hub).is_some_and(|t| now.duration_since(*t) < WAKE_EVERY) {
             return;
         }
         last.insert(hub, now);
@@ -1068,17 +1116,25 @@ mod tests {
     }
 
     async fn hub_with_state(dir: &std::path::Path) -> (String, Arc<StateManager>) {
+        let addr = free_addr();
+        let state = hub_at(dir, &addr).await;
+        (addr, state)
+    }
+
+    fn free_addr() -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("127.0.0.1:{}", l.local_addr().unwrap().port())
+    }
+
+    /// A real hub serving on `addr` (which may have been dead until now).
+    async fn hub_at(dir: &std::path::Path, addr: &str) -> Arc<StateManager> {
         let export = dir.join("export");
         std::fs::create_dir_all(&export).unwrap();
         let fh = Arc::new(FileHandleManager::new_with_instance_id(export, "volume".into(), HUB_ID));
         let state = Arc::new(StateManager::new_in_memory("hub"));
         state.stateids.set_stateid_tag(10);
         let disp = Arc::new(CompoundDispatcher::new(fh, state.clone(), Arc::new(LockManager::new())));
-        let port = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap().port()
-        };
-        let addr = format!("127.0.0.1:{port}");
+        let addr = addr.to_string();
         let a = addr.clone();
         let gss = Arc::new(crate::nfs::rpcsec_gss::RpcSecGssManager::new(None));
         tokio::spawn(async move { crate::nfs::server_v4::serve_tcp(&a, disp, gss).await });
@@ -1088,10 +1144,14 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        (addr, state)
+        state
     }
 
     async fn proxy(dir: &std::path::Path, hub_addr: &str) -> (Arc<Proxy>, String) {
+        proxy_with(dir, hub_addr, 0, Arc::new(LogWaker)).await
+    }
+
+    async fn proxy_with(dir: &std::path::Path, hub_addr: &str, hold: u64, waker: Arc<dyn Waker>) -> (Arc<Proxy>, String) {
         let cfg = ProxyConfig {
             listen: "127.0.0.1:0".into(),
             lease_secs: 90,
@@ -1101,8 +1161,9 @@ mod tests {
             kube: None,
             identities: vec![IdentityRule { name: "t".into(), sources: vec!["127.0.0.1/32".into()], clients: vec![], workspaces: vec!["ws-*".into()] }],
             tls: None,
+            wake_hold_secs: hold,
         };
-        let p = Proxy::new(&cfg).await.unwrap();
+        let p = Proxy::new_with(&cfg, waker).await.unwrap();
         let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap().to_string();
         tokio::spawn(p.clone().serve_on(l));
@@ -1253,6 +1314,101 @@ mod tests {
         }
     }
 
+    /// A waker standing in for the operator: the hub comes up on `addr`
+    /// `after` the first wake request.
+    struct LateHub {
+        dir: std::path::PathBuf,
+        addr: String,
+        after: std::time::Duration,
+        asked: std::sync::atomic::AtomicUsize,
+        /// Which request (1-based) the stand-in operator acts on; the ones
+        /// before it are lost.
+        acts_on: usize,
+    }
+    impl Waker for LateHub {
+        fn wake(&self, _: &HubRow) {
+            if self.asked.fetch_add(1, Ordering::SeqCst) + 1 == self.acts_on {
+                let (d, a, t) = (self.dir.clone(), self.addr.clone(), self.after);
+                tokio::spawn(async move {
+                    tokio::time::sleep(t).await;
+                    hub_at(&d, &a).await;
+                });
+            }
+        }
+    }
+    fn late_hub(dir: &std::path::Path, addr: &str, after_ms: u64) -> Arc<LateHub> {
+        Arc::new(LateHub { dir: dir.into(), addr: addr.into(), after: std::time::Duration::from_millis(after_ms), asked: 0.into(), acts_on: 1 })
+    }
+    async fn mkdir_in_ws_a(c: &Arc<HubConn>, sid: SessionId, name: &str) -> u32 {
+        let x = [seq(sid, 0, 1), op_putfh(route::PSEUDO_ROOT_FH), op_lookup("ws-a"), op_mkdir(name)];
+        let refs: Vec<&[u8]> = x.iter().map(|o| o.as_slice()).collect();
+        let body = c.call(&proxy_cred(), &wire::encode_compound(b"", 2, &refs)).await.unwrap();
+        u32::from_be_bytes(body[0..4].try_into().unwrap())
+    }
+
+    /// A parked hub used to cost the client a DELAY at once, and Linux
+    /// retries DELAY on a backoff (100 ms doubling to 15 s): a hub that was
+    /// serving at 5.4 s into a hibernate wake was reached at 25.8 s, the
+    /// client's next retry (`results-box-wakeparts/`). The proxy now holds
+    /// the compound, retrying the hub, and answers when the hub does.
+    #[tokio::test]
+    async fn a_compound_for_a_waking_hub_is_held_until_the_hub_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub_addr = free_addr();
+        let waker = late_hub(dir.path(), &hub_addr, 1500);
+        let (_p, addr) = proxy_with(dir.path(), &hub_addr, 10, waker.clone()).await;
+        let (c, sid) = client(&addr).await;
+        let t0 = std::time::Instant::now();
+        let st = mkdir_in_ws_a(&c, sid, "held").await;
+        let took = t0.elapsed();
+        assert_eq!(st, 0, "status {st} (10008 = DELAY): the compound was not held");
+        assert!(took >= std::time::Duration::from_millis(1400), "answered before the hub existed: {took:?}");
+        assert!(took < std::time::Duration::from_secs(4), "held far past the hub's start: {took:?}");
+        assert_eq!(waker.asked.load(Ordering::SeqCst), 1, "the hub is still woken, once");
+        assert!(dir.path().join("export/held").is_dir(), "and the op ran on the hub");
+    }
+
+    /// A held compound keeps ASKING. A wake request can be lost (or the
+    /// hub re-parked right after it), and a once-per-30-s limit then held
+    /// the client its full 20 s with no wake outstanding: the box rerun's
+    /// suspend reps 2-3 took 24-29 s. The hold re-requests on each poll,
+    /// at most once per `WAKE_EVERY`.
+    #[tokio::test]
+    async fn a_held_compound_asks_again_when_the_first_wake_is_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub_addr = free_addr();
+        let waker = Arc::new(LateHub { acts_on: 2, ..Arc::try_unwrap(late_hub(dir.path(), &hub_addr, 300)).ok().unwrap() });
+        let (_p, addr) = proxy_with(dir.path(), &hub_addr, 15, waker.clone()).await;
+        let (c, sid) = client(&addr).await;
+        let t0 = std::time::Instant::now();
+        let st = mkdir_in_ws_a(&c, sid, "asked-again").await;
+        assert_eq!(st, 0, "status {st} (10008 = DELAY): the lost wake was never re-requested");
+        assert!(waker.asked.load(Ordering::SeqCst) >= 2);
+        assert!(t0.elapsed() < WAKE_EVERY + std::time::Duration::from_secs(3), "{:?}", t0.elapsed());
+    }
+
+    /// The hold is bounded: a hub that never comes back is DELAY after it,
+    /// as before, and a hold of 0 is today's immediate DELAY (the control).
+    #[tokio::test]
+    async fn a_hub_that_never_answers_is_delay_after_the_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub_addr = free_addr();
+        let (_p, addr) = proxy_with(dir.path(), &hub_addr, 1, Arc::new(LogWaker)).await;
+        let (c, sid) = client(&addr).await;
+        let t0 = std::time::Instant::now();
+        let st = mkdir_in_ws_a(&c, sid, "never").await;
+        let took = t0.elapsed();
+        assert_eq!(st, 10008, "status {st}: a dead hub must still answer DELAY");
+        assert!(took >= std::time::Duration::from_millis(900) && took < std::time::Duration::from_secs(3), "{took:?}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_p, addr) = proxy_with(dir.path(), &free_addr(), 0, Arc::new(LogWaker)).await;
+        let (c, sid) = client(&addr).await;
+        let t0 = std::time::Instant::now();
+        assert_eq!(mkdir_in_ws_a(&c, sid, "now").await, 10008);
+        assert!(t0.elapsed() < std::time::Duration::from_millis(500), "hold 0 is an immediate DELAY");
+    }
+
     /// A hub that reaped the proxy's backend client (its lease lapsed and
     /// a conflicting client triggered the courtesy release) answers the
     /// next op BADSESSION, and CREATE_SESSION on the old clientid is
@@ -1372,6 +1528,7 @@ mod tests {
             kube: None,
             identities: rules,
             tls: Some(TlsConfig { cert: pki.join("tls.crt"), key: pki.join("tls.key"), client_ca: pki.join("ca.crt"), reload_secs: 3600 }),
+            wake_hold_secs: 0,
         };
         let p = Proxy::new(&cfg).await.unwrap();
         let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1613,6 +1770,7 @@ mod tests {
             kube: None,
             identities: vec![cert_rule("spiffe://clusters/a")],
             tls: None,
+            wake_hold_secs: 0,
         };
         assert!(rt.block_on(Proxy::new(&cfg)).is_err());
     }

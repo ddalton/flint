@@ -1,0 +1,5 @@
+2026-10-02T22:27:11.153086981Z 2026-10-02T22:27:11.152920Z  INFO spdk_csi_driver::nfs_proxy::kube: ws/w1000: wake requested
+2026-10-02T22:27:16.222014572Z 2026-10-02T22:27:16.221824Z  INFO spdk_csi_driver::nfs_proxy::kube: ws/w1000: wake requested
+2026-10-02T22:27:16.720158502Z 2026-10-02T22:27:16.720028Z  INFO spdk_csi_driver::nfs_proxy::server: backend client on w1000 for downstream 0xc: clientid 0x1
+2026-10-02T22:27:18.235375147Z 2026-10-02T22:27:18.235191Z  INFO spdk_csi_driver::nfs_proxy::server: backend client on w1000 for downstream 0xc: clientid 0x1
+2026-10-02T22:27:18.242633474Z 2026-10-02T22:27:18.242418Z  INFO spdk_csi_driver::nfs_proxy::kube: ws/w1000: wake requested

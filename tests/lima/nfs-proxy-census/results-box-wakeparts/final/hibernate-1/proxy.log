@@ -1,0 +1,22 @@
+2026-10-02T22:25:01.634599669Z 2026-10-02T22:25:01.634514Z  INFO spdk_csi_driver::nfs::v4::operations::session: EXCHANGE_ID: owner=[76, 105, 110, 117, 120, 32, 78, 70, 83, 118, 52, 46, 50, 32, 109, 97, 115, 116, 101, 114], verifier=1790953548271342592
+2026-10-02T22:25:01.634627680Z 2026-10-02T22:25:01.634536Z  INFO spdk_csi_driver::nfs::v4::state::lease: Lease created for client 9
+2026-10-02T22:25:01.634631265Z 2026-10-02T22:25:01.634540Z  INFO spdk_csi_driver::nfs::v4::state::client: EXCHANGE_ID: new client 9 (no existing record)
+2026-10-02T22:25:01.634633495Z 2026-10-02T22:25:01.634544Z  INFO spdk_csi_driver::nfs::v4::operations::session: EXCHANGE_ID: new unconfirmed clientid 9
+2026-10-02T22:25:01.634636957Z 2026-10-02T22:25:01.634549Z  INFO spdk_csi_driver::nfs::v4::operations::session: EXCHANGE_ID response - server_owner="flint-nfs-flint-nfs-proxy", server_scope="flint-nfs-flint-nfs-proxy", flags=0x00010000
+2026-10-02T22:25:01.634812049Z 2026-10-02T22:25:01.634698Z  INFO spdk_csi_driver::nfs::v4::operations::session: EXCHANGE_ID: owner=[76, 105, 110, 117, 120, 32, 78, 70, 83, 118, 52, 46, 50, 32, 109, 97, 115, 116, 101, 114], verifier=1790953548271342592
+2026-10-02T22:25:01.634851161Z 2026-10-02T22:25:01.634722Z  INFO spdk_csi_driver::nfs::v4::state::lease: Lease removed for client 9
+2026-10-02T22:25:01.634859462Z 2026-10-02T22:25:01.634734Z  INFO spdk_csi_driver::nfs::v4::state::lease: Lease created for client 10
+2026-10-02T22:25:01.634865132Z 2026-10-02T22:25:01.634742Z  INFO spdk_csi_driver::nfs::v4::operations::session: EXCHANGE_ID: new unconfirmed clientid 10
+2026-10-02T22:25:01.634875728Z 2026-10-02T22:25:01.634748Z  INFO spdk_csi_driver::nfs::v4::operations::session: EXCHANGE_ID response - server_owner="flint-nfs-flint-nfs-proxy", server_scope="flint-nfs-flint-nfs-proxy", flags=0x00010000
+2026-10-02T22:25:01.635327824Z 2026-10-02T22:25:01.635107Z  INFO spdk_csi_driver::nfs::v4::operations::session: CREATE_SESSION: clientid=10, sequence=1
+2026-10-02T22:25:01.635413245Z 2026-10-02T22:25:01.635141Z  INFO spdk_csi_driver::nfs::v4::operations::session: CREATE_SESSION: Client requested - max_request=1049620, max_response=1049480, max_ops=8
+2026-10-02T22:25:01.635647058Z 2026-10-02T22:25:01.635278Z  INFO spdk_csi_driver::nfs::v4::operations::session: CREATE_SESSION: Negotiated: req=1049620, resp=1049480, ops=8
+2026-10-02T22:25:01.635684517Z 2026-10-02T22:25:01.635339Z  INFO spdk_csi_driver::nfs::v4::state::session: Session created: client=10, session_id=SessionId([0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 10])
+2026-10-02T22:25:01.635723296Z 2026-10-02T22:25:01.635365Z  INFO spdk_csi_driver::nfs::v4::operations::session: CREATE_SESSION: client offered 1 callback credential(s): [Sys { stamp: 1710248960, machinename: "master", uid: 0, gid: 0, gids: [] }] → selected Some(Sys { stamp: 1710248960, machinename: "master", uid: 0, gid: 0, gids: [] })
+2026-10-02T22:25:01.635732116Z 2026-10-02T22:25:01.635396Z  INFO spdk_csi_driver::nfs::v4::operations::session: CREATE_SESSION: Session SessionId([0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 10]) created for client 10 with 1025KB buffers
+2026-10-02T22:25:01.635740490Z 2026-10-02T22:25:01.635459Z  WARN spdk_csi_driver::nfs::v4::dispatcher: CREATE_SESSION: client requested CONN_BACK_CHAN but no back-channel writer is available for session SessionId([0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 10]) — recalls cannot be delivered
+2026-10-02T22:25:01.636376691Z 2026-10-02T22:25:01.635885Z  INFO spdk_csi_driver::nfs::v4::dispatcher: RECLAIM_COMPLETE: one_fs=false
+2026-10-02T22:25:01.636424390Z 2026-10-02T22:25:01.635930Z  INFO spdk_csi_driver::nfs::v4::dispatcher: RECLAIM_COMPLETE: client 10 now exited grace mode
+2026-10-02T22:25:01.810184905Z 2026-10-02T22:25:01.809998Z  INFO spdk_csi_driver::nfs_proxy::kube: ws/w1000: wake requested
+2026-10-02T22:25:06.877891305Z 2026-10-02T22:25:06.877690Z  INFO spdk_csi_driver::nfs_proxy::kube: ws/w1000: wake requested
+2026-10-02T22:25:07.375860835Z 2026-10-02T22:25:07.375700Z  INFO spdk_csi_driver::nfs_proxy::server: backend client on w1000 for downstream 0xa: clientid 0x1

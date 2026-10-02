@@ -1,0 +1,212 @@
+{
+    "apiVersion": "chert.us/v1alpha1",
+    "kind": "FlintShare",
+    "metadata": {
+        "annotations": {
+            "chert.us/idle-since": "2026-10-02T22:29:22Z",
+            "chert.us/idle-state": "Active",
+            "chert.us/requested-at": "2026-10-02T22:29:27Z",
+            "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"chert.us/v1alpha1\",\"kind\":\"FlintShare\",\"metadata\":{\"annotations\":{},\"name\":\"w1000\",\"namespace\":\"ws\"},\"spec\":{\"bucket\":\"fleet\",\"credentialsSecretRef\":\"s3\",\"endpoint\":\"http://minio.s3.svc:9000\",\"idle\":{},\"keyPrefix\":\"w1000/\",\"persistence\":{\"size\":\"2Gi\"},\"region\":\"us-east-1\",\"settings\":{\"flushFloorSecs\":3}}}\n"
+        },
+        "creationTimestamp": "2026-10-02T22:21:24Z",
+        "finalizers": [
+            "chert.us/share-protection"
+        ],
+        "generation": 1,
+        "managedFields": [
+            {
+                "apiVersion": "chert.us/v1alpha1",
+                "fieldsType": "FieldsV1",
+                "fieldsV1": {
+                    "f:status": {
+                        "f:stateidTag": {}
+                    }
+                },
+                "manager": "flint-lite-operator/stateid-tag",
+                "operation": "Apply",
+                "subresource": "status",
+                "time": "2026-10-02T22:21:25Z"
+            },
+            {
+                "apiVersion": "chert.us/v1alpha1",
+                "fieldsType": "FieldsV1",
+                "fieldsV1": {
+                    "f:status": {
+                        "f:address": {},
+                        "f:claimName": {},
+                        "f:conditions": {},
+                        "f:hubPhase": {},
+                        "f:observedGeneration": {},
+                        "f:phase": {},
+                        "f:serverId": {}
+                    }
+                },
+                "manager": "flint-lite-operator",
+                "operation": "Apply",
+                "subresource": "status",
+                "time": "2026-10-02T22:29:29Z"
+            },
+            {
+                "apiVersion": "chert.us/v1alpha1",
+                "fieldsType": "FieldsV1",
+                "fieldsV1": {
+                    "f:metadata": {
+                        "f:annotations": {
+                            ".": {},
+                            "f:kubectl.kubernetes.io/last-applied-configuration": {}
+                        }
+                    },
+                    "f:spec": {
+                        ".": {},
+                        "f:bucket": {},
+                        "f:credentialsSecretRef": {},
+                        "f:endpoint": {},
+                        "f:idle": {},
+                        "f:keyPrefix": {},
+                        "f:persistence": {
+                            ".": {},
+                            "f:size": {}
+                        },
+                        "f:region": {},
+                        "f:settings": {
+                            ".": {},
+                            "f:flushFloorSecs": {}
+                        }
+                    }
+                },
+                "manager": "kubectl-client-side-apply",
+                "operation": "Update",
+                "time": "2026-10-02T22:21:24Z"
+            },
+            {
+                "apiVersion": "chert.us/v1alpha1",
+                "fieldsType": "FieldsV1",
+                "fieldsV1": {
+                    "f:metadata": {
+                        "f:annotations": {
+                            "f:chert.us/idle-since": {},
+                            "f:chert.us/idle-state": {}
+                        }
+                    }
+                },
+                "manager": "flint-lite-operator",
+                "operation": "Update",
+                "time": "2026-10-02T22:29:22Z"
+            },
+            {
+                "apiVersion": "chert.us/v1alpha1",
+                "fieldsType": "FieldsV1",
+                "fieldsV1": {
+                    "f:metadata": {
+                        "f:annotations": {
+                            "f:chert.us/requested-at": {}
+                        },
+                        "f:finalizers": {
+                            ".": {},
+                            "v:\"chert.us/share-protection\"": {}
+                        }
+                    }
+                },
+                "manager": "unknown",
+                "operation": "Update",
+                "time": "2026-10-02T22:29:27Z"
+            }
+        ],
+        "name": "w1000",
+        "namespace": "ws",
+        "resourceVersion": "2076",
+        "uid": "f49e43b0-54c3-4430-9969-c03b1a21ebb5"
+    },
+    "spec": {
+        "bucket": "fleet",
+        "credentialsSecretRef": "s3",
+        "endpoint": "http://minio.s3.svc:9000",
+        "idle": {},
+        "keyPrefix": "w1000/",
+        "persistence": {
+            "size": "2Gi"
+        },
+        "region": "us-east-1",
+        "settings": {
+            "flushFloorSecs": 3
+        }
+    },
+    "status": {
+        "address": "w1000.ws.svc.cluster.local:2049",
+        "claimName": "w1000-data",
+        "conditions": [
+            {
+                "lastTransitionTime": "2026-10-02T22:21:25Z",
+                "message": "spec.monitoring.fileApi is not enabled",
+                "observedGeneration": 1,
+                "reason": "NotConfigured",
+                "status": "False",
+                "type": "ApiEndpointPublished"
+            },
+            {
+                "lastTransitionTime": "2026-10-02T22:21:25Z",
+                "observedGeneration": 1,
+                "reason": "InSync",
+                "status": "True",
+                "type": "ConfigCurrent"
+            },
+            {
+                "lastTransitionTime": "2026-10-02T22:21:25Z",
+                "observedGeneration": 1,
+                "reason": "Unique",
+                "status": "False",
+                "type": "Conflict"
+            },
+            {
+                "lastTransitionTime": "2026-10-02T22:21:25Z",
+                "observedGeneration": 1,
+                "reason": "Present",
+                "status": "True",
+                "type": "CredentialsFound"
+            },
+            {
+                "lastTransitionTime": "2026-10-02T22:21:25Z",
+                "message": "Secret s3 is missing the label chert.us/credentials — rotations will be picked up on the next periodic reconcile rather than immediately. `kubectl label secret s3 chert.us/credentials=true` to close the gap.",
+                "observedGeneration": 1,
+                "reason": "Unlabelled",
+                "status": "False",
+                "type": "CredentialsWatched"
+            },
+            {
+                "lastTransitionTime": "2026-10-02T22:29:29Z",
+                "message": "phase Serving, rpoClean Some(true)",
+                "observedGeneration": 1,
+                "reason": "Polled",
+                "status": "True",
+                "type": "HubReachable"
+            },
+            {
+                "lastTransitionTime": "2026-10-02T22:21:31Z",
+                "observedGeneration": 1,
+                "reason": "WithinVolume",
+                "status": "True",
+                "type": "HydrationUnblocked"
+            },
+            {
+                "lastTransitionTime": "2026-10-02T22:28:58Z",
+                "message": "wake requested — scaling back up",
+                "observedGeneration": 1,
+                "reason": "Woken",
+                "status": "True",
+                "type": "IdleEligible"
+            },
+            {
+                "lastTransitionTime": "2026-10-02T22:29:29Z",
+                "observedGeneration": 1,
+                "reason": "Serving",
+                "status": "True",
+                "type": "Ready"
+            }
+        ],
+        "hubPhase": "Serving",
+        "observedGeneration": 1,
+        "phase": "Ready",
+        "serverId": "6596871607352743431",
+        "stateidTag": 3112947123
+    }
+}

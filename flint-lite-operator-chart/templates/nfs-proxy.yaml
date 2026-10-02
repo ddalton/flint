@@ -75,6 +75,7 @@ data:
     listen: 0.0.0.0:2049
     stateDir: /var/lib/flint-nfs-proxy
     leaseSecs: {{ int .Values.nfsProxy.leaseSecs }}
+    wakeHoldSecs: {{ int .Values.nfsProxy.wakeHoldSecs }}
     kube:
       {{- with .Values.nfsProxy.watchNamespace }}
       namespace: {{ . | quote }}

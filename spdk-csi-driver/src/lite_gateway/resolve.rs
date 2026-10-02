@@ -166,8 +166,11 @@ pub struct ShareView {
     ///
     /// Read differently by the two construction sites, on purpose. A
     /// SHARE is presence — lite's operator clears the stamp once the
-    /// request has been honoured, so a present stamp is always a live
-    /// one. A REPOSITORY is freshness — forge's operator keeps the
+    /// request has been honoured, so a present stamp is USUALLY a live
+    /// one; a re-ask that lands just after the clear survives, which is
+    /// why the operator itself only counts a stamp newer than
+    /// `idle-since`. Nothing acts on this field for a share today (the
+    /// git door is the only reader, and it serves repositories). A REPOSITORY is freshness — forge's operator keeps the
     /// stamp as the door's heartbeat and never clears it, so presence
     /// there says only that this repository was woken once, ever
     /// (X24).

@@ -1,0 +1,673 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {
+                "annotations": {
+                    "chert.us/render-hash": "7d574ef5bd2bedd6",
+                    "chert.us/render-verified-at": "2026-10-02T19:34:51Z",
+                    "deployment.kubernetes.io/revision": "1"
+                },
+                "creationTimestamp": "2026-10-02T19:33:46Z",
+                "generation": 3,
+                "labels": {
+                    "app.kubernetes.io/component": "lite",
+                    "app.kubernetes.io/instance": "w1000",
+                    "app.kubernetes.io/managed-by": "flint-lite-operator",
+                    "app.kubernetes.io/name": "flint-lite",
+                    "chert.us/role": "lite",
+                    "chert.us/share": "w1000"
+                },
+                "name": "w1000",
+                "namespace": "ws",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "chert.us/v1alpha1",
+                        "controller": true,
+                        "kind": "FlintShare",
+                        "name": "w1000",
+                        "uid": "3a1bbc03-3e9e-4e52-9508-b1f7938624eb"
+                    }
+                ],
+                "resourceVersion": "957",
+                "uid": "337a77bc-c3cb-4fa0-b43d-a57deee74c8a"
+            },
+            "spec": {
+                "progressDeadlineSeconds": 600,
+                "replicas": 1,
+                "revisionHistoryLimit": 10,
+                "selector": {
+                    "matchLabels": {
+                        "app.kubernetes.io/name": "flint-lite",
+                        "chert.us/share": "w1000"
+                    }
+                },
+                "strategy": {
+                    "type": "Recreate"
+                },
+                "template": {
+                    "metadata": {
+                        "annotations": {
+                            "checksum/config": "73f3544565a182e0292b5104606b175394de0767a0e9ac075224093eba0b8740",
+                            "checksum/creds": "708ae7689c021e515755b6acf07380fe55db077fb81a43b445a5e3b16a14a1ad"
+                        },
+                        "labels": {
+                            "app.kubernetes.io/component": "lite",
+                            "app.kubernetes.io/instance": "w1000",
+                            "app.kubernetes.io/managed-by": "flint-lite-operator",
+                            "app.kubernetes.io/name": "flint-lite",
+                            "chert.us/role": "lite",
+                            "chert.us/share": "w1000"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "args": [
+                                    "--config",
+                                    "/etc/flint/mds.yaml"
+                                ],
+                                "command": [
+                                    "/usr/local/bin/flint-pnfs-mds"
+                                ],
+                                "env": [
+                                    {
+                                        "name": "RUST_LOG",
+                                        "value": "info"
+                                    },
+                                    {
+                                        "name": "POD_NAME",
+                                        "valueFrom": {
+                                            "fieldRef": {
+                                                "apiVersion": "v1",
+                                                "fieldPath": "metadata.name"
+                                            }
+                                        }
+                                    },
+                                    {
+                                        "name": "FLINT_FH_KERNEL",
+                                        "value": "1"
+                                    },
+                                    {
+                                        "name": "FLINT_NFS_FSID_FROM_VOLUME",
+                                        "value": "1"
+                                    },
+                                    {
+                                        "name": "FLINT_NFS_STATEID_TAG",
+                                        "value": "305321337"
+                                    },
+                                    {
+                                        "name": "AWS_REGION",
+                                        "value": "us-east-1"
+                                    }
+                                ],
+                                "envFrom": [
+                                    {
+                                        "secretRef": {
+                                            "name": "s3"
+                                        }
+                                    }
+                                ],
+                                "image": "flint-pnfs:step5-dev",
+                                "imagePullPolicy": "Never",
+                                "livenessProbe": {
+                                    "failureThreshold": 3,
+                                    "initialDelaySeconds": 10,
+                                    "periodSeconds": 15,
+                                    "successThreshold": 1,
+                                    "tcpSocket": {
+                                        "port": 2049
+                                    },
+                                    "timeoutSeconds": 1
+                                },
+                                "name": "hub",
+                                "ports": [
+                                    {
+                                        "containerPort": 2049,
+                                        "name": "nfs",
+                                        "protocol": "TCP"
+                                    },
+                                    {
+                                        "containerPort": 8080,
+                                        "name": "http",
+                                        "protocol": "TCP"
+                                    }
+                                ],
+                                "readinessProbe": {
+                                    "failureThreshold": 3,
+                                    "initialDelaySeconds": 3,
+                                    "periodSeconds": 5,
+                                    "successThreshold": 1,
+                                    "tcpSocket": {
+                                        "port": 2049
+                                    },
+                                    "timeoutSeconds": 1
+                                },
+                                "resources": {
+                                    "requests": {
+                                        "cpu": "100m",
+                                        "memory": "128Mi"
+                                    }
+                                },
+                                "securityContext": {
+                                    "allowPrivilegeEscalation": false,
+                                    "capabilities": {
+                                        "add": [
+                                            "CHOWN",
+                                            "DAC_OVERRIDE",
+                                            "DAC_READ_SEARCH",
+                                            "FOWNER",
+                                            "FSETID"
+                                        ],
+                                        "drop": [
+                                            "ALL"
+                                        ]
+                                    },
+                                    "readOnlyRootFilesystem": false,
+                                    "runAsNonRoot": false,
+                                    "runAsUser": 0,
+                                    "seccompProfile": {
+                                        "type": "RuntimeDefault"
+                                    }
+                                },
+                                "startupProbe": {
+                                    "failureThreshold": 60,
+                                    "periodSeconds": 10,
+                                    "successThreshold": 1,
+                                    "tcpSocket": {
+                                        "port": 2049
+                                    },
+                                    "timeoutSeconds": 1
+                                },
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/etc/flint",
+                                        "name": "config"
+                                    },
+                                    {
+                                        "mountPath": "/data",
+                                        "name": "data"
+                                    }
+                                ]
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "restartPolicy": "Always",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "terminationGracePeriodSeconds": 120,
+                        "volumes": [
+                            {
+                                "configMap": {
+                                    "defaultMode": 420,
+                                    "name": "w1000-config"
+                                },
+                                "name": "config"
+                            },
+                            {
+                                "name": "data",
+                                "persistentVolumeClaim": {
+                                    "claimName": "w1000-data"
+                                }
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "availableReplicas": 1,
+                "conditions": [
+                    {
+                        "lastTransitionTime": "2026-10-02T19:33:46Z",
+                        "lastUpdateTime": "2026-10-02T19:34:00Z",
+                        "message": "ReplicaSet \"w1000-778b4689c8\" has successfully progressed.",
+                        "reason": "NewReplicaSetAvailable",
+                        "status": "True",
+                        "type": "Progressing"
+                    },
+                    {
+                        "lastTransitionTime": "2026-10-02T19:35:01Z",
+                        "lastUpdateTime": "2026-10-02T19:35:01Z",
+                        "message": "Deployment has minimum availability.",
+                        "reason": "MinimumReplicasAvailable",
+                        "status": "True",
+                        "type": "Available"
+                    }
+                ],
+                "observedGeneration": 3,
+                "readyReplicas": 1,
+                "replicas": 1,
+                "updatedReplicas": 1
+            }
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "PersistentVolumeClaim",
+            "metadata": {
+                "annotations": {
+                    "pv.kubernetes.io/bind-completed": "yes",
+                    "pv.kubernetes.io/bound-by-controller": "yes",
+                    "volume.beta.kubernetes.io/storage-provisioner": "rancher.io/local-path",
+                    "volume.kubernetes.io/selected-node": "flint-step6w-worker",
+                    "volume.kubernetes.io/storage-provisioner": "rancher.io/local-path"
+                },
+                "creationTimestamp": "2026-10-02T19:33:46Z",
+                "finalizers": [
+                    "kubernetes.io/pvc-protection"
+                ],
+                "labels": {
+                    "app.kubernetes.io/component": "lite",
+                    "app.kubernetes.io/instance": "w1000",
+                    "app.kubernetes.io/managed-by": "flint-lite-operator",
+                    "app.kubernetes.io/name": "flint-lite",
+                    "chert.us/role": "lite",
+                    "chert.us/share": "w1000"
+                },
+                "name": "w1000-data",
+                "namespace": "ws",
+                "resourceVersion": "754",
+                "uid": "be9f6132-e782-42ea-b3f6-cd080c1739f9"
+            },
+            "spec": {
+                "accessModes": [
+                    "ReadWriteOnce"
+                ],
+                "resources": {
+                    "requests": {
+                        "storage": "2Gi"
+                    }
+                },
+                "storageClassName": "standard",
+                "volumeMode": "Filesystem",
+                "volumeName": "pvc-be9f6132-e782-42ea-b3f6-cd080c1739f9"
+            },
+            "status": {
+                "accessModes": [
+                    "ReadWriteOnce"
+                ],
+                "capacity": {
+                    "storage": "2Gi"
+                },
+                "phase": "Bound"
+            }
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "annotations": {
+                    "checksum/config": "73f3544565a182e0292b5104606b175394de0767a0e9ac075224093eba0b8740",
+                    "checksum/creds": "708ae7689c021e515755b6acf07380fe55db077fb81a43b445a5e3b16a14a1ad"
+                },
+                "creationTimestamp": "2026-10-02T19:34:51Z",
+                "generateName": "w1000-778b4689c8-",
+                "generation": 1,
+                "labels": {
+                    "app.kubernetes.io/component": "lite",
+                    "app.kubernetes.io/instance": "w1000",
+                    "app.kubernetes.io/managed-by": "flint-lite-operator",
+                    "app.kubernetes.io/name": "flint-lite",
+                    "chert.us/role": "lite",
+                    "chert.us/share": "w1000",
+                    "pod-template-hash": "778b4689c8"
+                },
+                "name": "w1000-778b4689c8-nzjlr",
+                "namespace": "ws",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "blockOwnerDeletion": true,
+                        "controller": true,
+                        "kind": "ReplicaSet",
+                        "name": "w1000-778b4689c8",
+                        "uid": "855d040f-9bfb-480b-84bb-27ea8d00bbc0"
+                    }
+                ],
+                "resourceVersion": "953",
+                "uid": "595496be-0032-4e75-a6b9-8b25da932925"
+            },
+            "spec": {
+                "containers": [
+                    {
+                        "args": [
+                            "--config",
+                            "/etc/flint/mds.yaml"
+                        ],
+                        "command": [
+                            "/usr/local/bin/flint-pnfs-mds"
+                        ],
+                        "env": [
+                            {
+                                "name": "RUST_LOG",
+                                "value": "info"
+                            },
+                            {
+                                "name": "POD_NAME",
+                                "valueFrom": {
+                                    "fieldRef": {
+                                        "apiVersion": "v1",
+                                        "fieldPath": "metadata.name"
+                                    }
+                                }
+                            },
+                            {
+                                "name": "FLINT_FH_KERNEL",
+                                "value": "1"
+                            },
+                            {
+                                "name": "FLINT_NFS_FSID_FROM_VOLUME",
+                                "value": "1"
+                            },
+                            {
+                                "name": "FLINT_NFS_STATEID_TAG",
+                                "value": "305321337"
+                            },
+                            {
+                                "name": "AWS_REGION",
+                                "value": "us-east-1"
+                            }
+                        ],
+                        "envFrom": [
+                            {
+                                "secretRef": {
+                                    "name": "s3"
+                                }
+                            }
+                        ],
+                        "image": "flint-pnfs:step5-dev",
+                        "imagePullPolicy": "Never",
+                        "livenessProbe": {
+                            "failureThreshold": 3,
+                            "initialDelaySeconds": 10,
+                            "periodSeconds": 15,
+                            "successThreshold": 1,
+                            "tcpSocket": {
+                                "port": 2049
+                            },
+                            "timeoutSeconds": 1
+                        },
+                        "name": "hub",
+                        "ports": [
+                            {
+                                "containerPort": 2049,
+                                "name": "nfs",
+                                "protocol": "TCP"
+                            },
+                            {
+                                "containerPort": 8080,
+                                "name": "http",
+                                "protocol": "TCP"
+                            }
+                        ],
+                        "readinessProbe": {
+                            "failureThreshold": 3,
+                            "initialDelaySeconds": 3,
+                            "periodSeconds": 5,
+                            "successThreshold": 1,
+                            "tcpSocket": {
+                                "port": 2049
+                            },
+                            "timeoutSeconds": 1
+                        },
+                        "resources": {
+                            "requests": {
+                                "cpu": "100m",
+                                "memory": "128Mi"
+                            }
+                        },
+                        "securityContext": {
+                            "allowPrivilegeEscalation": false,
+                            "capabilities": {
+                                "add": [
+                                    "CHOWN",
+                                    "DAC_OVERRIDE",
+                                    "DAC_READ_SEARCH",
+                                    "FOWNER",
+                                    "FSETID"
+                                ],
+                                "drop": [
+                                    "ALL"
+                                ]
+                            },
+                            "readOnlyRootFilesystem": false,
+                            "runAsNonRoot": false,
+                            "runAsUser": 0,
+                            "seccompProfile": {
+                                "type": "RuntimeDefault"
+                            }
+                        },
+                        "startupProbe": {
+                            "failureThreshold": 60,
+                            "periodSeconds": 10,
+                            "successThreshold": 1,
+                            "tcpSocket": {
+                                "port": 2049
+                            },
+                            "timeoutSeconds": 1
+                        },
+                        "terminationMessagePath": "/dev/termination-log",
+                        "terminationMessagePolicy": "File",
+                        "volumeMounts": [
+                            {
+                                "mountPath": "/etc/flint",
+                                "name": "config"
+                            },
+                            {
+                                "mountPath": "/data",
+                                "name": "data"
+                            },
+                            {
+                                "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+                                "name": "kube-api-access-xjzmz",
+                                "readOnly": true
+                            }
+                        ]
+                    }
+                ],
+                "dnsPolicy": "ClusterFirst",
+                "enableServiceLinks": true,
+                "nodeName": "flint-step6w-worker",
+                "preemptionPolicy": "PreemptLowerPriority",
+                "priority": 0,
+                "restartPolicy": "Always",
+                "schedulerName": "default-scheduler",
+                "securityContext": {},
+                "serviceAccount": "default",
+                "serviceAccountName": "default",
+                "terminationGracePeriodSeconds": 120,
+                "tolerations": [
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/not-ready",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    },
+                    {
+                        "effect": "NoExecute",
+                        "key": "node.kubernetes.io/unreachable",
+                        "operator": "Exists",
+                        "tolerationSeconds": 300
+                    }
+                ],
+                "volumes": [
+                    {
+                        "configMap": {
+                            "defaultMode": 420,
+                            "name": "w1000-config"
+                        },
+                        "name": "config"
+                    },
+                    {
+                        "name": "data",
+                        "persistentVolumeClaim": {
+                            "claimName": "w1000-data"
+                        }
+                    },
+                    {
+                        "name": "kube-api-access-xjzmz",
+                        "projected": {
+                            "defaultMode": 420,
+                            "sources": [
+                                {
+                                    "serviceAccountToken": {
+                                        "expirationSeconds": 3607,
+                                        "path": "token"
+                                    }
+                                },
+                                {
+                                    "configMap": {
+                                        "items": [
+                                            {
+                                                "key": "ca.crt",
+                                                "path": "ca.crt"
+                                            }
+                                        ],
+                                        "name": "kube-root-ca.crt"
+                                    }
+                                },
+                                {
+                                    "downwardAPI": {
+                                        "items": [
+                                            {
+                                                "fieldRef": {
+                                                    "apiVersion": "v1",
+                                                    "fieldPath": "metadata.namespace"
+                                                },
+                                                "path": "namespace"
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            "status": {
+                "conditions": [
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-10-02T19:34:51Z",
+                        "observedGeneration": 1,
+                        "status": "True",
+                        "type": "PodReadyToStartContainers"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-10-02T19:34:51Z",
+                        "observedGeneration": 1,
+                        "status": "True",
+                        "type": "Initialized"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-10-02T19:35:01Z",
+                        "observedGeneration": 1,
+                        "status": "True",
+                        "type": "Ready"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-10-02T19:35:01Z",
+                        "observedGeneration": 1,
+                        "status": "True",
+                        "type": "ContainersReady"
+                    },
+                    {
+                        "lastProbeTime": null,
+                        "lastTransitionTime": "2026-10-02T19:34:51Z",
+                        "observedGeneration": 1,
+                        "status": "True",
+                        "type": "PodScheduled"
+                    }
+                ],
+                "containerStatuses": [
+                    {
+                        "allocatedResources": {
+                            "cpu": "100m",
+                            "memory": "128Mi"
+                        },
+                        "containerID": "containerd://3e0ed4d8c41124835750a95c277ed55e06d17b5520983ba3f110471416f028a6",
+                        "image": "docker.io/library/flint-pnfs:step5-dev",
+                        "imageID": "sha256:62f3806c63b6675912ba2586db48a5171c8743ca7c12ce218cc85e6673c04324",
+                        "lastState": {},
+                        "name": "hub",
+                        "ready": true,
+                        "resources": {
+                            "requests": {
+                                "cpu": "100m",
+                                "memory": "128Mi"
+                            }
+                        },
+                        "restartCount": 0,
+                        "started": true,
+                        "state": {
+                            "running": {
+                                "startedAt": "2026-10-02T19:34:51Z"
+                            }
+                        },
+                        "user": {
+                            "linux": {
+                                "gid": 0,
+                                "supplementalGroups": [
+                                    0,
+                                    1,
+                                    2,
+                                    3,
+                                    4,
+                                    6,
+                                    10,
+                                    11,
+                                    20,
+                                    26,
+                                    27
+                                ],
+                                "uid": 0
+                            }
+                        },
+                        "volumeMounts": [
+                            {
+                                "mountPath": "/etc/flint",
+                                "name": "config"
+                            },
+                            {
+                                "mountPath": "/data",
+                                "name": "data"
+                            },
+                            {
+                                "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+                                "name": "kube-api-access-xjzmz",
+                                "readOnly": true,
+                                "recursiveReadOnly": "Disabled"
+                            }
+                        ]
+                    }
+                ],
+                "hostIP": "172.18.0.2",
+                "hostIPs": [
+                    {
+                        "ip": "172.18.0.2"
+                    }
+                ],
+                "observedGeneration": 1,
+                "phase": "Running",
+                "podIP": "10.244.1.9",
+                "podIPs": [
+                    {
+                        "ip": "10.244.1.9"
+                    }
+                ],
+                "qosClass": "Burstable",
+                "startTime": "2026-10-02T19:34:51Z"
+            }
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}

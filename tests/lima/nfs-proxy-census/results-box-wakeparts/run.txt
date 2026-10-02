@@ -1,0 +1,217 @@
+== bring-up
+Bucket created successfully `m/fleet`.
+PASS w1000 holds 1000 files
+PASS w1000 is flushed (rpoClean)
+== suspend rep=1: first byte at 13.24s
+     0.03s  proxy: DELAY answered (a client retry)
+     0.05s  proxy: wake requested
+     0.14s  proxy: DELAY answered (a client retry)
+     0.33s  event FlintShare/Woken
+     0.35s  proxy: DELAY answered (a client retry)
+     0.55s  Pod created
+     0.55s  container started
+     0.55s  event Pod/Created
+     0.55s  event Pod/Pulled
+     0.55s  event Pod/Scheduled
+     0.55s  event Pod/Started
+     0.55s  event ReplicaSet/SuccessfulCreate
+     0.55s  pod condition Initialized
+     0.55s  pod condition PodReadyToStartContainers
+     0.55s  pod condition PodScheduled
+     0.75s  proxy: DELAY answered (a client retry)
+     1.29s  hub: first log line
+     1.29s  hub: server id: 2026-10-02T19:34:51.739107Z  INFO 🔑 MDS server id (persistent): 126363658
+     1.29s  hub: server id: 2026-10-02T19:34:51.740643Z  INFO 📇 export fsid = (0xaf5d63c020f6a87b, 0)
+     1.29s  hub: listening: 2026-10-02T19:34:51.740978Z  INFO Listening on: 0.0.0.0:2049
+     1.29s  hub: listening: 2026-10-02T19:34:51.741063Z  INFO 🩺 hub status endpoint listening on 0.0.
+     1.35s  hub: listening: 2026-10-02T19:34:51.794646Z  INFO ✅ NFSv4.2 TCP server listening on 0.0.0
+     1.59s  proxy: DELAY answered (a client retry)
+     3.25s  proxy: DELAY answered (a client retry)
+     6.51s  proxy: DELAY answered (a client retry)
+    10.55s  pod condition ContainersReady
+    10.55s  pod condition Ready
+    11.55s  share status written (flint-lite-operator)
+    13.24s  CLIENT FIRST BYTE
+== suspend rep=2: first byte at 26.75s
+     0.03s  proxy: DELAY answered (a client retry)
+     0.14s  proxy: DELAY answered (a client retry)
+     0.35s  proxy: DELAY answered (a client retry)
+     0.76s  proxy: DELAY answered (a client retry)
+     1.59s  proxy: DELAY answered (a client retry)
+     3.25s  proxy: DELAY answered (a client retry)
+     6.52s  proxy: DELAY answered (a client retry)
+     6.53s  proxy: wake requested
+     7.15s  Pod created
+     7.15s  container started
+     7.15s  event Pod/Created
+     7.15s  event Pod/Pulled
+     7.15s  event Pod/Scheduled
+     7.15s  event Pod/Started
+     7.15s  event ReplicaSet/SuccessfulCreate
+     7.15s  pod condition Initialized
+     7.15s  pod condition PodReadyToStartContainers
+     7.15s  pod condition PodScheduled
+     7.76s  hub: first log line
+     7.76s  hub: server id: 2026-10-02T19:35:23.617681Z  INFO 🔑 MDS server id (persistent): 126363658
+     7.76s  hub: server id: 2026-10-02T19:35:23.619029Z  INFO 📇 export fsid = (0xaf5d63c020f6a87b, 0)
+     7.76s  hub: listening: 2026-10-02T19:35:23.619551Z  INFO Listening on: 0.0.0.0:2049
+     7.77s  hub: listening: 2026-10-02T19:35:23.619638Z  INFO 🩺 hub status endpoint listening on 0.0.
+     7.80s  hub: listening: 2026-10-02T19:35:23.653217Z  INFO ✅ NFSv4.2 TCP server listening on 0.0.0
+    13.36s  proxy: DELAY answered (a client retry)
+    17.15s  pod condition ContainersReady
+    17.15s  pod condition Ready
+    18.15s  share status written (flint-lite-operator)
+    26.75s  CLIENT FIRST BYTE
+== suspend rep=3: first byte at 13.44s
+     0.03s  proxy: DELAY answered (a client retry)
+     0.04s  proxy: wake requested
+     0.14s  proxy: DELAY answered (a client retry)
+     0.21s  Pod created
+     0.21s  event Pod/Created
+     0.21s  event Pod/Pulled
+     0.21s  event Pod/Scheduled
+     0.21s  event ReplicaSet/SuccessfulCreate
+     0.21s  pod condition Initialized
+     0.21s  pod condition PodScheduled
+     0.35s  proxy: DELAY answered (a client retry)
+     0.75s  proxy: DELAY answered (a client retry)
+     1.21s  container started
+     1.21s  event Pod/Started
+     1.21s  pod condition PodReadyToStartContainers
+     1.26s  hub: first log line
+     1.26s  hub: server id: 2026-10-02T19:35:56.054801Z  INFO 🔑 MDS server id (persistent): 126363658
+     1.27s  hub: server id: 2026-10-02T19:35:56.058183Z  INFO 📇 export fsid = (0xaf5d63c020f6a87b, 0)
+     1.27s  hub: listening: 2026-10-02T19:35:56.058808Z  INFO Listening on: 0.0.0.0:2049
+     1.27s  hub: listening: 2026-10-02T19:35:56.058918Z  INFO 🩺 hub status endpoint listening on 0.0.
+     1.31s  hub: listening: 2026-10-02T19:35:56.098606Z  INFO ✅ NFSv4.2 TCP server listening on 0.0.0
+     1.56s  proxy: DELAY answered (a client retry)
+     3.23s  proxy: DELAY answered (a client retry)
+     6.49s  proxy: DELAY answered (a client retry)
+    10.21s  pod condition ContainersReady
+    10.21s  pod condition Ready
+    11.21s  share status written (flint-lite-operator)
+    13.44s  CLIENT FIRST BYTE
+== hibernate rep=1: first byte at 26.54s
+     0.01s  Deployment created
+     0.01s  PersistentVolumeClaim created
+     0.01s  Pod created
+     0.01s  event Deployment/ScalingReplicaSet
+     0.01s  event PersistentVolumeClaim/ExternalProvisioning
+     0.01s  event PersistentVolumeClaim/Provisioning
+     0.01s  event PersistentVolumeClaim/WaitForFirstConsumer
+     0.01s  event ReplicaSet/SuccessfulCreate
+     0.03s  proxy: DELAY answered (a client retry)
+     0.04s  proxy: wake requested
+     0.13s  proxy: DELAY answered (a client retry)
+     0.34s  proxy: DELAY answered (a client retry)
+     0.76s  proxy: DELAY answered (a client retry)
+     1.61s  proxy: DELAY answered (a client retry)
+     3.01s  event PersistentVolumeClaim/ProvisioningSucceeded
+     3.27s  proxy: DELAY answered (a client retry)
+     4.01s  event Pod/Scheduled
+     4.01s  pod condition Initialized
+     4.01s  pod condition PodScheduled
+     5.01s  container started
+     5.01s  event Pod/Created
+     5.01s  event Pod/Pulled
+     5.01s  event Pod/Started
+     5.01s  pod condition PodReadyToStartContainers
+     5.29s  hub: first log line
+     5.30s  hub: server id: 2026-10-02T19:38:02.290127Z  INFO 🔑 MDS server id (persistent): 144190081
+     5.30s  hub: server id: 2026-10-02T19:38:02.290330Z  INFO 📇 export fsid = (0xc81a9b835b23b51f, 0)
+     5.30s  hub: listening: 2026-10-02T19:38:02.290848Z  INFO Listening on: 0.0.0.0:2049
+     5.30s  hub: listening: 2026-10-02T19:38:02.290915Z  INFO 🩺 hub status endpoint listening on 0.0.
+     5.37s  hub: import: 2026-10-02T19:38:02.355461Z  INFO tier import: fresh state + bucket conte
+     5.37s  hub: import: 2026-10-02T19:38:02.355609Z  INFO tier import: manifest seq 6 — 1010 entr
+     5.39s  hub: import: 2026-10-02T19:38:02.380688Z  INFO tier import: 10 dir(s), 0 symlink(s), 1
+     5.39s  hub: import: 2026-10-02T19:38:02.380696Z  INFO 🪣 tier import: 10 dir(s), 0 symlink(s),
+     5.39s  hub: listening: 2026-10-02T19:38:02.382468Z  INFO ✅ NFSv4.2 TCP server listening on 0.0.0
+     6.53s  proxy: DELAY answered (a client retry)
+    13.00s  proxy: DELAY answered (a client retry)
+    15.01s  pod condition ContainersReady
+    15.01s  pod condition Ready
+    15.01s  share status written (flint-lite-operator)
+    26.55s  CLIENT FIRST BYTE
+== hibernate rep=2: first byte at 26.75s
+    -0.56s  Deployment created
+     0.02s  proxy: DELAY answered (a client retry)
+     0.04s  proxy: wake requested
+     0.13s  proxy: DELAY answered (a client retry)
+     0.34s  proxy: DELAY answered (a client retry)
+     0.44s  PersistentVolumeClaim created
+     0.44s  Pod created
+     0.44s  event Deployment/ScalingReplicaSet
+     0.44s  event PersistentVolumeClaim/ExternalProvisioning
+     0.44s  event PersistentVolumeClaim/Provisioning
+     0.44s  event PersistentVolumeClaim/WaitForFirstConsumer
+     0.44s  event ReplicaSet/SuccessfulCreate
+     0.75s  proxy: DELAY answered (a client retry)
+     1.58s  proxy: DELAY answered (a client retry)
+     3.25s  proxy: DELAY answered (a client retry)
+     3.44s  event PersistentVolumeClaim/ProvisioningSucceeded
+     4.44s  container started
+     4.44s  event Pod/Created
+     4.44s  event Pod/Pulled
+     4.44s  event Pod/Scheduled
+     4.44s  event Pod/Started
+     4.44s  pod condition Initialized
+     4.44s  pod condition PodScheduled
+     5.30s  hub: first log line
+     5.31s  hub: server id: 2026-10-02T19:40:01.875422Z  INFO 🔑 MDS server id (persistent): 180323757
+     5.31s  hub: server id: 2026-10-02T19:40:01.875623Z  INFO 📇 export fsid = (0xfa3fde2a1577d4eb, 0)
+     5.31s  hub: listening: 2026-10-02T19:40:01.876042Z  INFO Listening on: 0.0.0.0:2049
+     5.31s  hub: listening: 2026-10-02T19:40:01.876155Z  INFO 🩺 hub status endpoint listening on 0.0.
+     5.37s  hub: import: 2026-10-02T19:40:01.937718Z  INFO tier import: fresh state + bucket conte
+     5.37s  hub: import: 2026-10-02T19:40:01.937867Z  INFO tier import: manifest seq 7 — 1010 entr
+     5.40s  hub: import: 2026-10-02T19:40:01.962499Z  INFO tier import: 10 dir(s), 0 symlink(s), 1
+     5.40s  hub: import: 2026-10-02T19:40:01.962508Z  INFO 🪣 tier import: 10 dir(s), 0 symlink(s),
+     5.40s  hub: listening: 2026-10-02T19:40:01.964090Z  INFO ✅ NFSv4.2 TCP server listening on 0.0.0
+     5.44s  pod condition PodReadyToStartContainers
+     6.51s  proxy: DELAY answered (a client retry)
+    13.23s  proxy: DELAY answered (a client retry)
+    14.44s  pod condition ContainersReady
+    14.44s  pod condition Ready
+    15.44s  share status written (flint-lite-operator)
+    26.75s  CLIENT FIRST BYTE
+== hibernate rep=3: first byte at 26.74s
+    -0.30s  Deployment created
+    -0.30s  PersistentVolumeClaim created
+    -0.30s  Pod created
+    -0.30s  event Deployment/ScalingReplicaSet
+    -0.30s  event PersistentVolumeClaim/WaitForFirstConsumer
+     0.02s  proxy: DELAY answered (a client retry)
+     0.04s  proxy: wake requested
+     0.13s  proxy: DELAY answered (a client retry)
+     0.34s  proxy: DELAY answered (a client retry)
+     0.70s  event PersistentVolumeClaim/ExternalProvisioning
+     0.70s  event PersistentVolumeClaim/Provisioning
+     0.70s  event ReplicaSet/SuccessfulCreate
+     0.75s  proxy: DELAY answered (a client retry)
+     1.59s  proxy: DELAY answered (a client retry)
+     3.25s  proxy: DELAY answered (a client retry)
+     3.70s  event PersistentVolumeClaim/ProvisioningSucceeded
+     4.70s  container started
+     4.70s  event Pod/Created
+     4.70s  event Pod/Pulled
+     4.70s  event Pod/Scheduled
+     4.70s  event Pod/Started
+     4.70s  pod condition Initialized
+     4.70s  pod condition PodScheduled
+     5.28s  hub: first log line
+     5.29s  hub: server id: 2026-10-02T19:41:58.585616Z  INFO 🔑 MDS server id (persistent): 960239643
+     5.29s  hub: server id: 2026-10-02T19:41:58.585822Z  INFO 📇 export fsid = (0xd5374de3ada3241, 0) 
+     5.29s  hub: listening: 2026-10-02T19:41:58.586168Z  INFO Listening on: 0.0.0.0:2049
+     5.29s  hub: listening: 2026-10-02T19:41:58.586242Z  INFO 🩺 hub status endpoint listening on 0.0.
+     5.35s  hub: import: 2026-10-02T19:41:58.646181Z  INFO tier import: fresh state + bucket conte
+     5.35s  hub: import: 2026-10-02T19:41:58.646352Z  INFO tier import: manifest seq 8 — 1010 entr
+     5.38s  hub: import: 2026-10-02T19:41:58.672081Z  INFO tier import: 10 dir(s), 0 symlink(s), 1
+     5.38s  hub: import: 2026-10-02T19:41:58.672091Z  INFO 🪣 tier import: 10 dir(s), 0 symlink(s),
+     5.38s  hub: listening: 2026-10-02T19:41:58.673681Z  INFO ✅ NFSv4.2 TCP server listening on 0.0.0
+     5.70s  pod condition PodReadyToStartContainers
+     6.51s  proxy: DELAY answered (a client retry)
+    13.24s  proxy: DELAY answered (a client retry)
+    15.70s  pod condition ContainersReady
+    15.70s  pod condition Ready
+    15.70s  share status written (flint-lite-operator)
+    26.75s  CLIENT FIRST BYTE
+RESULT: 2 passed, 0 failed

@@ -1969,8 +1969,10 @@ async fn verify_and_hibernate(
     let ns = share.namespace().unwrap_or_default();
     let generation = share.metadata.generation;
 
-    // Someone wants it. Abandon the hibernate — it is already up.
-    if idle::requested_at(share).is_some() {
+    // Someone wants it. Abandon the hibernate — it is already up. Only a
+    // request made since verification began counts (`woken_since_idle`):
+    // a stale stamp from the last wake used to abort every hibernation.
+    if idle::woken_since_idle(share) {
         set_idle_state(ctx, share, &ns, IdleState::Active, true).await?;
         let note = "wake requested during hibernate verification — kept the PVC".to_string();
         info!(share = %share.name_any(), "{note}");
@@ -2503,8 +2505,10 @@ async fn reclaim_hibernated_disk(
     // The data is in the bucket either way — the verification proved
     // that before anything was scaled down — so deleting here would
     // only turn a pod-start wake into a full DR import. Let the ladder
-    // process the request instead.
-    if idle::requested_at(share).is_some() {
+    // process the request instead. A stamp from before the park is not
+    // one (`woken_since_idle`): read as presence, a proxy re-ask left
+    // over from the last wake kept the disk forever, half-parked.
+    if idle::woken_since_idle(share) {
         return Ok(ReclaimOutcome::Idle);
     }
     let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);

@@ -933,11 +933,18 @@ pub fn deployment(
     // With the tier on, startup legitimately runs long BEFORE the
     // socket opens (epoch claim, DR import) — liveness must not begin
     // until it succeeds.
+    //
+    // Checked every SECOND: at 10 s the first check ran before the hub
+    // listened and the next came ~10 s later, which a wake waited out in
+    // full (`results-box-wakeparts/`). The threshold stays in 10-second
+    // periods (the CRD's unit), so the budget is unchanged. A TCP connect
+    // by the kubelet, until the first success only: no API-server cost.
     let startup_probe = s.tiered().then(|| Probe {
-        period_seconds: Some(10),
+        period_seconds: Some(1),
         failure_threshold: Some(
             s.startup_failure_threshold
-                .unwrap_or(d.startup_failure_threshold),
+                .unwrap_or(d.startup_failure_threshold)
+                .saturating_mul(10),
         ),
         ..tcp()
     });
@@ -1107,9 +1114,13 @@ pub fn deployment(
                         env: Some(env),
                         env_from,
                         ports: Some(ports),
+                        // Every second from the start: Ready is the next
+                        // readiness check after startup succeeds, and the
+                        // proxy's route waits on Ready. At 3 s + every 5 s a
+                        // hub listening at 1.3 s was Ready at ~7.6 s. A TCP
+                        // connect by the kubelet, node-local; no API cost.
                         readiness_probe: Some(Probe {
-                            initial_delay_seconds: Some(3),
-                            period_seconds: Some(5),
+                            period_seconds: Some(1),
                             ..tcp()
                         }),
                         liveness_probe: Some(Probe {
@@ -1573,6 +1584,40 @@ mod tests {
         }
         assert_ne!(rollout_checksum(&ro), rollout_checksum(&rw), "toggling readOnly must roll the hub");
         assert_eq!(rollout_checksum(&rw), rollout_checksum(&absent), "false and absent are the same hub");
+    }
+
+    /// The tiered startupProbe checks every SECOND, with the same budget.
+    /// At `periodSeconds: 10` its first check ran before the hub listened,
+    /// failed, and the next came ~10 s later: a hub listening 5.4 s into a
+    /// hibernate wake was Ready only at ~15 s, and the client's first byte
+    /// waited on it (`results-box-wakeparts/`). The field stays "in
+    /// 10-second periods", so the budget (threshold x 10 s) is unchanged.
+    #[test]
+    fn the_startup_probe_checks_every_second_with_the_same_budget() {
+        let d = RenderDefaults::default();
+        let probe = |spec| {
+            let dep = deployment(&share("t", spec), &d, "sum", None, None);
+            dep.spec.unwrap().template.spec.unwrap().containers[0].startup_probe.clone().expect("tiered ⇒ startupProbe")
+        };
+        let p = probe(tiered_spec());
+        assert_eq!(p.period_seconds, Some(1));
+        assert_eq!(p.failure_threshold, Some(600), "60 ten-second periods = 600 one-second checks");
+        let p = probe(FlintShareSpec { startup_failure_threshold: Some(120), ..tiered_spec() });
+        assert_eq!(p.failure_threshold, Some(1200), "the field keeps its unit: 120 x 10 s");
+    }
+
+    /// Ready is the next readiness check AFTER startup succeeds, and the
+    /// operator's status (the proxy's route) waits on Ready. At
+    /// `initialDelaySeconds: 3, periodSeconds: 5` a hub listening at 1.3 s
+    /// was Ready at ~7.6 s (the box rerun, `results-box-wakeparts/`).
+    #[test]
+    fn the_readiness_probe_checks_every_second_from_the_start() {
+        for spec in [tiered_spec(), base_spec()] {
+            let dep = deployment(&share("t", spec), &RenderDefaults::default(), "sum", None, None);
+            let r = dep.spec.unwrap().template.spec.unwrap().containers[0].readiness_probe.clone().unwrap();
+            assert_eq!(r.period_seconds, Some(1));
+            assert_eq!(r.initial_delay_seconds.unwrap_or(0), 0);
+        }
     }
 
     /// A tier-off share is a share: no `tier:` block at all, and no

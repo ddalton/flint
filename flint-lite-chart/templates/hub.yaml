@@ -241,11 +241,12 @@ spec:
             - containerPort: {{ .Values.monitoring.port }}
               name: http
             {{- end }}
+          # Every second from the start: Ready is the next readiness check
+          # after startup succeeds, and a wake waits on Ready.
           readinessProbe:
             tcpSocket:
               port: 2049
-            initialDelaySeconds: 3
-            periodSeconds: 5
+            periodSeconds: 1
           livenessProbe:
             tcpSocket:
               port: 2049
@@ -257,11 +258,14 @@ spec:
           # a DR-restore import walks the whole bucket. Liveness and
           # readiness only begin once this succeeds — without it the
           # liveness probe would kill a takeover or import at ~55s.
+          # Checked every second: at 10 s a wake waited out the gap between
+          # the first (failed) check and the next. The budget is unchanged:
+          # startupFailureThreshold stays in 10-second periods.
           startupProbe:
             tcpSocket:
               port: 2049
-            periodSeconds: 10
-            failureThreshold: {{ .Values.tier.startupFailureThreshold }}
+            periodSeconds: 1
+            failureThreshold: {{ mul .Values.tier.startupFailureThreshold 10 }}
           {{- end }}
           volumeMounts:
             - name: config

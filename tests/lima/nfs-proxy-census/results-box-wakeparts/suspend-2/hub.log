@@ -1,0 +1,196 @@
+2026-10-02T19:35:23.615773968Z [2m2026-10-02T19:35:23.615712Z[0m [32m INFO[0m ╔═══════════════════════════════════════════════════════════╗
+2026-10-02T19:35:23.615800524Z [2m2026-10-02T19:35:23.615720Z[0m [32m INFO[0m ║      Flint pNFS Metadata Server (MDS)                    ║
+2026-10-02T19:35:23.615802061Z [2m2026-10-02T19:35:23.615722Z[0m [32m INFO[0m ║      NFSv4.1+ Parallel NFS - Control Plane               ║
+2026-10-02T19:35:23.615802856Z [2m2026-10-02T19:35:23.615723Z[0m [32m INFO[0m ╚═══════════════════════════════════════════════════════════╝
+2026-10-02T19:35:23.615803619Z [2m2026-10-02T19:35:23.615724Z[0m [32m INFO[0m 
+2026-10-02T19:35:23.615804475Z [2m2026-10-02T19:35:23.615727Z[0m [32m INFO[0m RLIMIT_NOFILE already at the hard limit [3msoft[0m[2m=[0m1073741816 [3mhard[0m[2m=[0m1073741816
+2026-10-02T19:35:23.615805465Z [2m2026-10-02T19:35:23.615730Z[0m [32m INFO[0m 📄 Loading configuration from: "/etc/flint/mds.yaml"
+2026-10-02T19:35:23.615900589Z [2m2026-10-02T19:35:23.615881Z[0m [32m INFO[0m 📊 Configuration:
+2026-10-02T19:35:23.615902317Z [2m2026-10-02T19:35:23.615885Z[0m [32m INFO[0m    • Worker Threads: 8 (FLINT_MDS_WORKER_THREADS)
+2026-10-02T19:35:23.615903391Z [2m2026-10-02T19:35:23.615887Z[0m [32m INFO[0m    • Bind: 0.0.0.0:2049
+2026-10-02T19:35:23.615906420Z [2m2026-10-02T19:35:23.615890Z[0m [32m INFO[0m    • Layout Type: File
+2026-10-02T19:35:23.615907864Z [2m2026-10-02T19:35:23.615895Z[0m [32m INFO[0m    • Stripe Size: 8388608 bytes
+2026-10-02T19:35:23.615908609Z [2m2026-10-02T19:35:23.615897Z[0m [32m INFO[0m    • Layout Policy: Stripe
+2026-10-02T19:35:23.615909673Z [2m2026-10-02T19:35:23.615899Z[0m [32m INFO[0m    • Posture: STANDALONE (flint-lite) — layouts off, all I/O MDS-lane
+2026-10-02T19:35:23.615910382Z [2m2026-10-02T19:35:23.615900Z[0m [32m INFO[0m    • Exports: 1
+2026-10-02T19:35:23.615912558Z [2m2026-10-02T19:35:23.615902Z[0m [32m INFO[0m      - /data/exports (fsid=1)
+2026-10-02T19:35:23.615913297Z [2m2026-10-02T19:35:23.615905Z[0m [32m INFO[0m    • State Backend: Sqlite
+2026-10-02T19:35:23.615914089Z [2m2026-10-02T19:35:23.615906Z[0m [32m INFO[0m 
+2026-10-02T19:35:23.615914806Z [2m2026-10-02T19:35:23.615908Z[0m [32m INFO[0m ⚙️  Initializing Metadata Server...
+2026-10-02T19:35:23.615934741Z [2m2026-10-02T19:35:23.615922Z[0m [32m INFO[0m Initializing Metadata Server
+2026-10-02T19:35:23.615935929Z [2m2026-10-02T19:35:23.615925Z[0m [32m INFO[0m 📂 MDS export path: "/data/exports"
+2026-10-02T19:35:23.615950576Z [2m2026-10-02T19:35:23.615936Z[0m [32m INFO[0m 🪶 STANDALONE posture (flint-lite): layouts OFF — every byte serves through the MDS lane; no DS fleet, no block export
+2026-10-02T19:35:23.617718255Z [2m2026-10-02T19:35:23.617681Z[0m [32m INFO[0m 🔑 MDS server id (persistent): 12636365806309386363 — FHs stamped with this survive restart
+2026-10-02T19:35:23.617726147Z [2m2026-10-02T19:35:23.617696Z[0m [32m INFO[0m 🔧 FileHandleManager created:
+2026-10-02T19:35:23.617729452Z [2m2026-10-02T19:35:23.617698Z[0m [32m INFO[0m    Instance ID: 12636365806309386363 (shared across pNFS cluster)
+2026-10-02T19:35:23.617730230Z [2m2026-10-02T19:35:23.617700Z[0m [32m INFO[0m    Export path: "/data/exports"
+2026-10-02T19:35:23.617731199Z [2m2026-10-02T19:35:23.617701Z[0m [32m INFO[0m    Export name: volume
+2026-10-02T19:35:23.617734699Z [2m2026-10-02T19:35:23.617708Z[0m [32m INFO[0m 🌳 Pseudo-filesystem created (instance_id=12636365806309386363)
+2026-10-02T19:35:23.617735766Z [2m2026-10-02T19:35:23.617709Z[0m [32m INFO[0m    RFC 7530 Section 7: Unified namespace for NFSv4 exports
+2026-10-02T19:35:23.617742568Z [2m2026-10-02T19:35:23.617712Z[0m [32m INFO[0m 📁 Adding export to pseudo-filesystem:
+2026-10-02T19:35:23.617743343Z [2m2026-10-02T19:35:23.617713Z[0m [32m INFO[0m    Name: volume
+2026-10-02T19:35:23.617744057Z [2m2026-10-02T19:35:23.617715Z[0m [32m INFO[0m    Path: "/data/exports"
+2026-10-02T19:35:23.617745063Z [2m2026-10-02T19:35:23.617716Z[0m [32m INFO[0m    ID: 1
+2026-10-02T19:35:23.617745768Z [2m2026-10-02T19:35:23.617717Z[0m [32m INFO[0m    pNFS: Enabled
+2026-10-02T19:35:23.617780113Z [2m2026-10-02T19:35:23.617766Z[0m [32m INFO[0m 🧬 v4 kernel filehandles ACTIVE (probe passed) — path maps retired
+2026-10-02T19:35:23.619022684Z [2m2026-10-02T19:35:23.618948Z[0m [32m INFO[0m 🔥 fh identity index prewarmed: 1014 entries in 1.180454ms (F52)
+2026-10-02T19:35:23.619042478Z [2m2026-10-02T19:35:23.619029Z[0m [32m INFO[0m 📇 export fsid = (0xaf5d63c020f6a87b, 0) — the persistent server id (FLINT_NFS_FSID_FROM_VOLUME=1)
+2026-10-02T19:35:23.619051341Z [2m2026-10-02T19:35:23.619037Z[0m [32m INFO[0m LeaseManager created - grace period for 90s
+2026-10-02T19:35:23.619095214Z [2m2026-10-02T19:35:23.619080Z[0m [32m INFO[0m ClientManager created - mode="standalone", server_owner=flint-nfs-12636365806309386363, server_scope=flint-nfs-12636365806309386363
+2026-10-02T19:35:23.619117170Z [2m2026-10-02T19:35:23.619095Z[0m [32m INFO[0m SessionManager created
+2026-10-02T19:35:23.619118373Z [2m2026-10-02T19:35:23.619101Z[0m [32m INFO[0m StateIdManager created
+2026-10-02T19:35:23.619341089Z [2m2026-10-02T19:35:23.619324Z[0m [32m INFO[0m 🏷️  stateid tag 305321337 (FLINT_NFS_STATEID_TAG) — stamped into other[8..12]
+2026-10-02T19:35:23.619383162Z [2m2026-10-02T19:35:23.619369Z[0m [32m INFO[0m Layout manager initialized: policy=Stripe, stripe_size=8388608
+2026-10-02T19:35:23.619399269Z [2m2026-10-02T19:35:23.619386Z[0m [32m INFO[0m fd cache bounded (reaps least-recently-used above hiwat; see FdBudget) [3mhiwat[0m[2m=[0m16384 [3mlowat[0m[2m=[0m12288
+2026-10-02T19:35:23.619403514Z [2m2026-10-02T19:35:23.619394Z[0m [32m INFO[0m 🔐 export access list (most specific network wins; peers outside every network are refused): 0.0.0.0/0 rw
+2026-10-02T19:35:23.619427904Z [2m2026-10-02T19:35:23.619401Z[0m [32m INFO[0m 🧺 laundromat armed (traffic-independent lease expiry) [3mevery_secs[0m[2m=[0m30
+2026-10-02T19:35:23.619429394Z [2m2026-10-02T19:35:23.619405Z[0m [32m INFO[0m deleg: recall machinery installed — grants are now possible          (revoke deadline 90s, CB_PATH_DOWN window 30s)
+2026-10-02T19:35:23.619430713Z [2m2026-10-02T19:35:23.619408Z[0m [32m INFO[0m Device registry initialized with 0 data servers
+2026-10-02T19:35:23.619431954Z [2m2026-10-02T19:35:23.619411Z[0m [32m INFO[0m 🔐 Initializing RPCSEC_GSS manager (Pure Rust implementation)
+2026-10-02T19:35:23.619433170Z [2m2026-10-02T19:35:23.619413Z[0m [33m WARN[0m ⚠️  No keytab path specified, RPCSEC_GSS will use placeholder mode
+2026-10-02T19:35:23.619434535Z [2m2026-10-02T19:35:23.619416Z[0m [33m WARN[0m ⚠️  No keytab loaded — RPCSEC_GSS_INIT will be REFUSED. Set KRB5_KTNAME for Kerberos, or FLINT_NFS_GSS_INSECURE_PLACEHOLDER=1 in a test rig.
+2026-10-02T19:35:23.619436626Z [2m2026-10-02T19:35:23.619422Z[0m [32m INFO[0m F33 self-fencing ARMED [3mdeadline_secs[0m[2m=[0m90 [3mexport[0m[2m=[0m"/data/exports"
+2026-10-02T19:35:23.619527629Z [2m2026-10-02T19:35:23.619503Z[0m [32m INFO[0m [FENCE] backing-store watchdog armed (F33) [3mdeadline_secs[0m[2m=[0m90 [3minterval_ms[0m[2m=[0m10000
+2026-10-02T19:35:23.619528801Z [2m2026-10-02T19:35:23.619515Z[0m [32m INFO[0m privilege: CAP_CHOWN present — created objects will carry the caller's AUTH_SYS identity
+2026-10-02T19:35:23.619533534Z [2m2026-10-02T19:35:23.619518Z[0m [32m INFO[0m    • Status endpoint: :8080/health (+ /status)
+2026-10-02T19:35:23.619541843Z [2m2026-10-02T19:35:23.619520Z[0m [32m INFO[0m 🚀 Starting Metadata Server...
+2026-10-02T19:35:23.619546456Z [2m2026-10-02T19:35:23.619522Z[0m [32m INFO[0m 
+2026-10-02T19:35:23.619566816Z [2m2026-10-02T19:35:23.619541Z[0m [32m INFO[0m 📊 deleg reporter: delegations are OFF (FLINT_NFS_DELEGATIONS unset) — no grants will be made and no periodic report follows
+2026-10-02T19:35:23.619571759Z [2m2026-10-02T19:35:23.619543Z[0m [32m INFO[0m MDS server binary: release build
+2026-10-02T19:35:23.619574222Z [2m2026-10-02T19:35:23.619545Z[0m [32m INFO[0m ╔════════════════════════════════════════════════════╗
+2026-10-02T19:35:23.619575592Z [2m2026-10-02T19:35:23.619547Z[0m [32m INFO[0m ║   Flint pNFS Metadata Server (MDS) - RUNNING      ║
+2026-10-02T19:35:23.619576883Z [2m2026-10-02T19:35:23.619548Z[0m [32m INFO[0m ╚════════════════════════════════════════════════════╝
+2026-10-02T19:35:23.619578246Z [2m2026-10-02T19:35:23.619550Z[0m [32m INFO[0m 
+2026-10-02T19:35:23.619596640Z [2m2026-10-02T19:35:23.619551Z[0m [32m INFO[0m Listening on: 0.0.0.0:2049
+2026-10-02T19:35:23.619600384Z [2m2026-10-02T19:35:23.619564Z[0m [32m INFO[0m Posture: STANDALONE (flint-lite) — layouts off, all I/O MDS-lane
+2026-10-02T19:35:23.619601333Z [2m2026-10-02T19:35:23.619566Z[0m [32m INFO[0m 
+2026-10-02T19:35:23.619602127Z [2m2026-10-02T19:35:23.619568Z[0m [32m INFO[0m 🪣 S3 tier ENABLED — bucket fleet, prefix "w1000/"
+2026-10-02T19:35:23.619653568Z [2m2026-10-02T19:35:23.619638Z[0m [32m INFO[0m 🩺 hub status endpoint listening on 0.0.0.0:8080
+2026-10-02T19:35:23.620675512Z [2m2026-10-02T19:35:23.620660Z[0m [32m INFO[0m 📈 MDS instance counter: 3 (incremented at startup; persisted across restart)
+2026-10-02T19:35:23.620751601Z [2m2026-10-02T19:35:23.620736Z[0m [32m INFO[0m ClientManager loaded 0 records from backend
+2026-10-02T19:35:23.620756099Z [2m2026-10-02T19:35:23.620738Z[0m [32m INFO[0m SessionManager observed 0 persisted sessions; bumped counter past max_id=0, dropped them so kernel re-CREATE_SESSIONs naturally on BADSESSION
+2026-10-02T19:35:23.620757459Z [2m2026-10-02T19:35:23.620741Z[0m [32m INFO[0m StateIdManager loaded 0 records from backend (0 delegation holder markers)
+2026-10-02T19:35:23.620758769Z [2m2026-10-02T19:35:23.620743Z[0m [32m INFO[0m StateManager loaded 0 clients, 0 sessions, 0 stateids from backend
+2026-10-02T19:35:23.620761309Z [2m2026-10-02T19:35:23.620745Z[0m [32m INFO[0m nothing to reclaim on this volume — callers that cannot reclaim are not held by grace
+2026-10-02T19:35:23.620780630Z [2m2026-10-02T19:35:23.620768Z[0m [32m INFO[0m LayoutManager loaded 0 records from backend
+2026-10-02T19:35:23.620782043Z [2m2026-10-02T19:35:23.620771Z[0m [32m INFO[0m 📦 MDS reloaded 0 persisted layouts from backend
+2026-10-02T19:35:23.620798784Z [2m2026-10-02T19:35:23.620787Z[0m [32m INFO[0m LayoutManager loaded 0 placements from backend
+2026-10-02T19:35:23.620800030Z [2m2026-10-02T19:35:23.620791Z[0m [32m INFO[0m 📦 MDS reloaded 0 persisted placements from backend
+2026-10-02T19:35:23.620833809Z [2m2026-10-02T19:35:23.620818Z[0m [33m WARN[0m 📐 volume 'd004' has no geometry record — new files in it will use the fleet default (stripe_size=8388608, all data servers). Expected for volumes created before per-volume geometry; otherwise the record was lost.
+2026-10-02T19:35:23.620840129Z [2m2026-10-02T19:35:23.620824Z[0m [33m WARN[0m 📐 volume 'd008' has no geometry record — new files in it will use the fleet default (stripe_size=8388608, all data servers). Expected for volumes created before per-volume geometry; otherwise the record was lost.
+2026-10-02T19:35:23.620841244Z [2m2026-10-02T19:35:23.620826Z[0m [33m WARN[0m 📐 volume '.flint-nfs' has no geometry record — new files in it will use the fleet default (stripe_size=8388608, all data servers). Expected for volumes created before per-volume geometry; otherwise the record was lost.
+2026-10-02T19:35:23.620845254Z [2m2026-10-02T19:35:23.620827Z[0m [33m WARN[0m 📐 volume 'd005' has no geometry record — new files in it will use the fleet default (stripe_size=8388608, all data servers). Expected for volumes created before per-volume geometry; otherwise the record was lost.
+2026-10-02T19:35:23.620846394Z [2m2026-10-02T19:35:23.620829Z[0m [33m WARN[0m 📐 volume 'd003' has no geometry record — new files in it will use the fleet default (stripe_size=8388608, all data servers). Expected for volumes created before per-volume geometry; otherwise the record was lost.
+2026-10-02T19:35:23.620847471Z [2m2026-10-02T19:35:23.620831Z[0m [33m WARN[0m 📐 volume 'd002' has no geometry record — new files in it will use the fleet default (stripe_size=8388608, all data servers). Expected for volumes created before per-volume geometry; otherwise the record was lost.
+2026-10-02T19:35:23.620852398Z [2m2026-10-02T19:35:23.620833Z[0m [33m WARN[0m 📐 volume 'd009' has no geometry record — new files in it will use the fleet default (stripe_size=8388608, all data servers). Expected for volumes created before per-volume geometry; otherwise the record was lost.
+2026-10-02T19:35:23.620853843Z [2m2026-10-02T19:35:23.620835Z[0m [33m WARN[0m 📐 volume 'd000' has no geometry record — new files in it will use the fleet default (stripe_size=8388608, all data servers). Expected for volumes created before per-volume geometry; otherwise the record was lost.
+2026-10-02T19:35:23.620854574Z [2m2026-10-02T19:35:23.620837Z[0m [33m WARN[0m 📐 volume 'd001' has no geometry record — new files in it will use the fleet default (stripe_size=8388608, all data servers). Expected for volumes created before per-volume geometry; otherwise the record was lost.
+2026-10-02T19:35:23.620855272Z [2m2026-10-02T19:35:23.620839Z[0m [33m WARN[0m 📐 volume 'd007' has no geometry record — new files in it will use the fleet default (stripe_size=8388608, all data servers). Expected for volumes created before per-volume geometry; otherwise the record was lost.
+2026-10-02T19:35:23.620855997Z [2m2026-10-02T19:35:23.620841Z[0m [33m WARN[0m 📐 volume 'd006' has no geometry record — new files in it will use the fleet default (stripe_size=8388608, all data servers). Expected for volumes created before per-volume geometry; otherwise the record was lost.
+2026-10-02T19:35:23.620856795Z [2m2026-10-02T19:35:23.620843Z[0m [32m INFO[0m 📐 MDS loaded 0 volume geometry record(s)
+2026-10-02T19:35:23.620928548Z [2m2026-10-02T19:35:23.620910Z[0m [32m INFO[0m 🪣 tier space: reserve 256 MiB, watermark 85%, ballast 64 MiB
+2026-10-02T19:35:23.638440687Z [2m2026-10-02T19:35:23.638343Z[0m [32m INFO[0m 🪣 tier: conditional-write conformance verified
+2026-10-02T19:35:23.643668167Z [2m2026-10-02T19:35:23.643598Z[0m [32m INFO[0m tier: bucket bootstrap for fleet/w1000/: 1 notes, 1 warnings, 0 errors
+2026-10-02T19:35:23.643677435Z [2m2026-10-02T19:35:23.643607Z[0m [32m INFO[0m 🪣 tier bootstrap: lifecycle: MPU abort rule present
+2026-10-02T19:35:23.643678730Z [2m2026-10-02T19:35:23.643609Z[0m [33m WARN[0m 🪣 tier bootstrap: versioning is None: a foreign overwrite has NO recovery window (A9 recommends Versioning ON + NoncurrentVersionExpiration)
+2026-10-02T19:35:23.644408561Z [2m2026-10-02T19:35:23.644347Z[0m [32m INFO[0m 🪪 tier: prefix owner verified
+2026-10-02T19:35:23.644467394Z [2m2026-10-02T19:35:23.644446Z[0m [32m INFO[0m 🔐 tier: claiming the volume epoch as hub-af5d63c020f6a87b (a live foreign holder is waited out: 6 × 10s)
+2026-10-02T19:35:23.647630453Z [2m2026-10-02T19:35:23.647563Z[0m [32m INFO[0m tier epoch: self-recognition — hub-af5d63c020f6a87b resumes at epoch 3 (previous incarnation held 2)
+2026-10-02T19:35:23.648301560Z [2m2026-10-02T19:35:23.648261Z[0m [32m INFO[0m 🔐 tier: epoch 3 held
+2026-10-02T19:35:23.652323040Z [2m2026-10-02T19:35:23.652233Z[0m [32m INFO[0m tier manifest: project holds 1000 file(s), 16051518 bytes, largest 65448 bytes
+2026-10-02T19:35:23.652335828Z [2m2026-10-02T19:35:23.652243Z[0m [32m INFO[0m tier flush: startup loaded 1000 generation row(s), reconciled 0 intent(s)
+2026-10-02T19:35:23.653184428Z [2m2026-10-02T19:35:23.653133Z[0m [32m INFO[0m 🪣 tier: flush loop every 10s (floor 3s, quiesce 10s)
+2026-10-02T19:35:23.653194835Z [2m2026-10-02T19:35:23.653157Z[0m [32m INFO[0m 🪶 standalone: heartbeat monitor not started (no DS fleet)
+2026-10-02T19:35:23.653196334Z [2m2026-10-02T19:35:23.653163Z[0m [32m INFO[0m Status reporter started (interval: 60 seconds)
+2026-10-02T19:35:23.653197274Z [2m2026-10-02T19:35:23.653167Z[0m [32m INFO[0m ✅ Metadata Server is ready to accept connections
+2026-10-02T19:35:23.653199069Z [2m2026-10-02T19:35:23.653168Z[0m [32m INFO[0m 
+2026-10-02T19:35:23.653205399Z [2m2026-10-02T19:35:23.653170Z[0m [32m INFO[0m 🔒 standalone: gRPC control plane NOT started (no data servers to register, no CSI driver to serve — and DeleteVolume on an open port is not a feature)
+2026-10-02T19:35:23.653206806Z [2m2026-10-02T19:35:23.653173Z[0m [32m INFO[0m 🚀 pNFS MDS serving NFSv4 on 0.0.0.0:2049
+2026-10-02T19:35:23.653208080Z [2m2026-10-02T19:35:23.653176Z[0m [32m INFO[0m Lease sweep holds for 179s (one lease window past grace), then every 30s
+2026-10-02T19:35:23.653209002Z [2m2026-10-02T19:35:23.653183Z[0m [32m INFO[0m NFS connection cap: 1024 concurrent (FLINT_NFS_MAX_CONNECTIONS)
+2026-10-02T19:35:23.653210092Z [2m2026-10-02T19:35:23.653185Z[0m [32m INFO[0m NFS idle-read deadline: 360s (FLINT_NFS_IDLE_TIMEOUT_SECS)
+2026-10-02T19:35:23.653242339Z [2m2026-10-02T19:35:23.653217Z[0m [32m INFO[0m ✅ NFSv4.2 TCP server listening on 0.0.0.0:2049
+2026-10-02T19:35:23.653247170Z [2m2026-10-02T19:35:23.653220Z[0m [32m INFO[0m 
+2026-10-02T19:35:23.654309431Z [2m2026-10-02T19:35:23.654267Z[0m [32m INFO[0m ─────────────────────────────────────────────────────
+2026-10-02T19:35:23.654318098Z [2m2026-10-02T19:35:23.654273Z[0m [32m INFO[0m MDS Status Report:
+2026-10-02T19:35:23.654319322Z [2m2026-10-02T19:35:23.654275Z[0m [32m INFO[0m   Data Servers: 0 active / 0 total
+2026-10-02T19:35:23.654320133Z [2m2026-10-02T19:35:23.654278Z[0m [32m INFO[0m   Active Layouts: 0
+2026-10-02T19:35:23.654320890Z [2m2026-10-02T19:35:23.654280Z[0m [32m INFO[0m   Capacity: 0 bytes total, 0 bytes used
+2026-10-02T19:35:23.654321862Z [2m2026-10-02T19:35:23.654282Z[0m [32m INFO[0m ─────────────────────────────────────────────────────
+2026-10-02T19:35:23.668872655Z [2m2026-10-02T19:35:23.668696Z[0m [32m INFO[0m tier manifest: barrier seq 5 — 1010 entries, 0 beyond RPO
+2026-10-02T19:35:33.370424944Z [2m2026-10-02T19:35:33.370205Z[0m [32m INFO[0m ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-10-02T19:35:33.370474476Z [2m2026-10-02T19:35:33.370236Z[0m [32m INFO[0m 📡 [NFS_SERVER] Connection #1 from 10.244.1.1:57324 (Active connections: 1)
+2026-10-02T19:35:33.370508352Z [2m2026-10-02T19:35:33.370253Z[0m [32m INFO[0m    Timestamp: SystemTime { tv_sec: 1790969733, tv_nsec: 370252218 }
+2026-10-02T19:35:33.370515382Z [2m2026-10-02T19:35:33.370267Z[0m [32m INFO[0m ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-10-02T19:35:33.370716206Z [2m2026-10-02T19:35:33.370462Z[0m [32m INFO[0m 🚀 [NFS_SERVER] Spawned handler task for connection #1 from 10.244.1.1:57324
+2026-10-02T19:35:33.370760226Z [2m2026-10-02T19:35:33.370547Z[0m [32m INFO[0m 🔌 [NFS_SERVER] Connection #1 handler started for 10.244.1.1:57324
+2026-10-02T19:35:33.370767075Z [2m2026-10-02T19:35:33.370589Z[0m [32m INFO[0m    Start time: SystemTime { tv_sec: 1790969733, tv_nsec: 370588861 }
+2026-10-02T19:35:33.370789697Z [2m2026-10-02T19:35:33.370675Z[0m [32m INFO[0m 🔌 [NFS_SERVER] Connection #1 from 10.244.1.1:57324 closed after 128.262µs (0 RPCs processed)
+2026-10-02T19:35:33.370795556Z [2m2026-10-02T19:35:33.370700Z[0m [33m WARN[0m ⚠️  [NFS_SERVER] Client 10.244.1.1:57324 connected (conn #1) but sent NO RPC messages!
+2026-10-02T19:35:33.370964828Z [2m2026-10-02T19:35:33.370871Z[0m [32m INFO[0m ✓ [NFS_SERVER] Connection #1 from 10.244.1.1:57324 closed cleanly (Active: 0)
+2026-10-02T19:35:33.887438841Z [2m2026-10-02T19:35:33.887214Z[0m [32m INFO[0m ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-10-02T19:35:33.887484370Z [2m2026-10-02T19:35:33.887241Z[0m [32m INFO[0m 📡 [NFS_SERVER] Connection #2 from 10.244.1.1:57330 (Active connections: 1)
+2026-10-02T19:35:33.887489233Z [2m2026-10-02T19:35:33.887254Z[0m [32m INFO[0m    Timestamp: SystemTime { tv_sec: 1790969733, tv_nsec: 887253818 }
+2026-10-02T19:35:33.887493414Z [2m2026-10-02T19:35:33.887266Z[0m [32m INFO[0m ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-10-02T19:35:33.887519499Z [2m2026-10-02T19:35:33.887338Z[0m [32m INFO[0m 🚀 [NFS_SERVER] Spawned handler task for connection #2 from 10.244.1.1:57330
+2026-10-02T19:35:33.887525574Z [2m2026-10-02T19:35:33.887371Z[0m [32m INFO[0m 🔌 [NFS_SERVER] Connection #2 handler started for 10.244.1.1:57330
+2026-10-02T19:35:33.887530916Z [2m2026-10-02T19:35:33.887385Z[0m [32m INFO[0m    Start time: SystemTime { tv_sec: 1790969733, tv_nsec: 887384153 }
+2026-10-02T19:35:33.888244540Z [2m2026-10-02T19:35:33.888127Z[0m [32m INFO[0m 🔌 [NFS_SERVER] Connection #2 from 10.244.1.1:57330 closed after 754.44µs (0 RPCs processed)
+2026-10-02T19:35:33.888270641Z [2m2026-10-02T19:35:33.888152Z[0m [33m WARN[0m ⚠️  [NFS_SERVER] Client 10.244.1.1:57330 connected (conn #2) but sent NO RPC messages!
+2026-10-02T19:35:33.888487526Z [2m2026-10-02T19:35:33.888352Z[0m [32m INFO[0m ✓ [NFS_SERVER] Connection #2 from 10.244.1.1:57330 closed cleanly (Active: 0)
+2026-10-02T19:35:38.371320632Z [2m2026-10-02T19:35:38.371060Z[0m [32m INFO[0m ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-10-02T19:35:38.371368428Z [2m2026-10-02T19:35:38.371085Z[0m [32m INFO[0m 📡 [NFS_SERVER] Connection #3 from 10.244.1.1:57340 (Active connections: 1)
+2026-10-02T19:35:38.371374853Z [2m2026-10-02T19:35:38.371099Z[0m [32m INFO[0m    Timestamp: SystemTime { tv_sec: 1790969738, tv_nsec: 371098769 }
+2026-10-02T19:35:38.371380522Z [2m2026-10-02T19:35:38.371112Z[0m [32m INFO[0m ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-10-02T19:35:38.371413824Z [2m2026-10-02T19:35:38.371192Z[0m [32m INFO[0m 🚀 [NFS_SERVER] Spawned handler task for connection #3 from 10.244.1.1:57340
+2026-10-02T19:35:38.371417870Z [2m2026-10-02T19:35:38.371225Z[0m [32m INFO[0m 🔌 [NFS_SERVER] Connection #3 handler started for 10.244.1.1:57340
+2026-10-02T19:35:38.371422155Z [2m2026-10-02T19:35:38.371239Z[0m [32m INFO[0m    Start time: SystemTime { tv_sec: 1790969738, tv_nsec: 371237993 }
+2026-10-02T19:35:38.371853611Z [2m2026-10-02T19:35:38.371723Z[0m [32m INFO[0m 🔌 [NFS_SERVER] Connection #3 from 10.244.1.1:57340 closed after 497.509µs (0 RPCs processed)
+2026-10-02T19:35:38.371888562Z [2m2026-10-02T19:35:38.371742Z[0m [33m WARN[0m ⚠️  [NFS_SERVER] Client 10.244.1.1:57340 connected (conn #3) but sent NO RPC messages!
+2026-10-02T19:35:38.372009081Z [2m2026-10-02T19:35:38.371922Z[0m [32m INFO[0m ✓ [NFS_SERVER] Connection #3 from 10.244.1.1:57340 closed cleanly (Active: 0)
+2026-10-02T19:35:38.887899390Z [2m2026-10-02T19:35:38.887630Z[0m [32m INFO[0m ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-10-02T19:35:38.887940003Z [2m2026-10-02T19:35:38.887656Z[0m [32m INFO[0m 📡 [NFS_SERVER] Connection #4 from 10.244.1.1:57356 (Active connections: 1)
+2026-10-02T19:35:38.887945583Z [2m2026-10-02T19:35:38.887669Z[0m [32m INFO[0m    Timestamp: SystemTime { tv_sec: 1790969738, tv_nsec: 887669199 }
+2026-10-02T19:35:38.887951503Z [2m2026-10-02T19:35:38.887681Z[0m [32m INFO[0m ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-10-02T19:35:38.887957084Z [2m2026-10-02T19:35:38.887752Z[0m [32m INFO[0m 🚀 [NFS_SERVER] Spawned handler task for connection #4 from 10.244.1.1:57356
+2026-10-02T19:35:38.887962897Z [2m2026-10-02T19:35:38.887774Z[0m [32m INFO[0m 🔌 [NFS_SERVER] Connection #4 handler started for 10.244.1.1:57356
+2026-10-02T19:35:38.887968614Z [2m2026-10-02T19:35:38.887784Z[0m [32m INFO[0m    Start time: SystemTime { tv_sec: 1790969738, tv_nsec: 887783360 }
+2026-10-02T19:35:38.887993848Z [2m2026-10-02T19:35:38.887856Z[0m [32m INFO[0m 🔌 [NFS_SERVER] Connection #4 from 10.244.1.1:57356 closed after 82.494µs (0 RPCs processed)
+2026-10-02T19:35:38.887999876Z [2m2026-10-02T19:35:38.887873Z[0m [33m WARN[0m ⚠️  [NFS_SERVER] Client 10.244.1.1:57356 connected (conn #4) but sent NO RPC messages!
+2026-10-02T19:35:38.888247792Z [2m2026-10-02T19:35:38.888056Z[0m [32m INFO[0m ✓ [NFS_SERVER] Connection #4 from 10.244.1.1:57356 closed cleanly (Active: 0)
+2026-10-02T19:35:42.531611075Z [2m2026-10-02T19:35:42.531392Z[0m [32m INFO[0m ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-10-02T19:35:42.531656688Z [2m2026-10-02T19:35:42.531424Z[0m [32m INFO[0m 📡 [NFS_SERVER] Connection #5 from 10.244.1.7:57142 (Active connections: 1)
+2026-10-02T19:35:42.531663938Z [2m2026-10-02T19:35:42.531437Z[0m [32m INFO[0m    Timestamp: SystemTime { tv_sec: 1790969742, tv_nsec: 531436583 }
+2026-10-02T19:35:42.531670167Z [2m2026-10-02T19:35:42.531449Z[0m [32m INFO[0m ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-10-02T19:35:42.531761351Z [2m2026-10-02T19:35:42.531528Z[0m [32m INFO[0m 🚀 [NFS_SERVER] Spawned handler task for connection #5 from 10.244.1.7:57142
+2026-10-02T19:35:42.531834384Z [2m2026-10-02T19:35:42.531610Z[0m [32m INFO[0m 🔌 [NFS_SERVER] Connection #5 handler started for 10.244.1.7:57142
+2026-10-02T19:35:42.531839808Z [2m2026-10-02T19:35:42.531623Z[0m [32m INFO[0m    Start time: SystemTime { tv_sec: 1790969742, tv_nsec: 531622940 }
+2026-10-02T19:35:42.531931062Z [2m2026-10-02T19:35:42.531827Z[0m [32m INFO[0m EXCHANGE_ID: owner=[102, 108, 105, 110, 116, 45, 112, 114, 111, 120, 121, 47, 76, 105, 110, 117, 120, 32, 78, 70, 83, 118, 52, 46, 50, 32, 109, 97, 115, 116, 101, 114], verifier=1790953548271342592
+2026-10-02T19:35:42.531945326Z [2m2026-10-02T19:35:42.531899Z[0m [32m INFO[0m Lease created for client 1
+2026-10-02T19:35:42.531955699Z [2m2026-10-02T19:35:42.531919Z[0m [32m INFO[0m EXCHANGE_ID: new client 1 (no existing record)
+2026-10-02T19:35:42.531966902Z [2m2026-10-02T19:35:42.531936Z[0m [32m INFO[0m EXCHANGE_ID: new unconfirmed clientid 1
+2026-10-02T19:35:42.532010965Z [2m2026-10-02T19:35:42.531950Z[0m [32m INFO[0m EXCHANGE_ID response - server_owner="flint-nfs-12636365806309386363", server_scope="flint-nfs-12636365806309386363", flags=0x00010000
+2026-10-02T19:35:42.532417894Z [2m2026-10-02T19:35:42.532248Z[0m [32m INFO[0m CREATE_SESSION: clientid=1, sequence=1
+2026-10-02T19:35:42.532434264Z [2m2026-10-02T19:35:42.532267Z[0m [32m INFO[0m CREATE_SESSION: Client requested - max_request=1048576, max_response=1048576, max_ops=8
+2026-10-02T19:35:42.532441530Z [2m2026-10-02T19:35:42.532288Z[0m [32m INFO[0m CREATE_SESSION: Negotiated: req=1048576, resp=1048576, ops=8
+2026-10-02T19:35:42.532449723Z [2m2026-10-02T19:35:42.532311Z[0m [32m INFO[0m Session created: client=1, session_id=SessionId([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1])
+2026-10-02T19:35:42.532455863Z [2m2026-10-02T19:35:42.532334Z[0m [32m INFO[0m CREATE_SESSION: client offered 1 callback credential(s): [None] → selected Some(None)
+2026-10-02T19:35:42.532461519Z [2m2026-10-02T19:35:42.532348Z[0m [32m INFO[0m CREATE_SESSION: Session SessionId([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1]) created for client 1 with 1024KB buffers
+2026-10-02T19:35:42.532774520Z [2m2026-10-02T19:35:42.532677Z[0m [32m INFO[0m RECLAIM_COMPLETE: one_fs=false
+2026-10-02T19:35:42.532793465Z [2m2026-10-02T19:35:42.532696Z[0m [32m INFO[0m RECLAIM_COMPLETE: client 1 now exited grace mode
+2026-10-02T19:35:42.533013776Z [2m2026-10-02T19:35:42.532906Z[0m [32m INFO[0m CREATE_SESSION: clientid=1, sequence=2
+2026-10-02T19:35:42.533019871Z [2m2026-10-02T19:35:42.532922Z[0m [32m INFO[0m CREATE_SESSION: Client requested - max_request=1049620, max_response=1049480, max_ops=8
+2026-10-02T19:35:42.533025136Z [2m2026-10-02T19:35:42.532937Z[0m [32m INFO[0m CREATE_SESSION: Negotiated: req=1049620, resp=1049480, ops=8
+2026-10-02T19:35:42.533031271Z [2m2026-10-02T19:35:42.532955Z[0m [32m INFO[0m Session created: client=1, session_id=SessionId([0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1])
+2026-10-02T19:35:42.533037667Z [2m2026-10-02T19:35:42.532976Z[0m [32m INFO[0m CREATE_SESSION: client offered 1 callback credential(s): [None] → selected Some(None)
+2026-10-02T19:35:42.533055139Z [2m2026-10-02T19:35:42.532988Z[0m [32m INFO[0m CREATE_SESSION: Session SessionId([0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1]) created for client 1 with 1025KB buffers
+2026-10-02T19:35:43.887216719Z [2m2026-10-02T19:35:43.887023Z[0m [32m INFO[0m ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-10-02T19:35:43.887259394Z [2m2026-10-02T19:35:43.887048Z[0m [32m INFO[0m 📡 [NFS_SERVER] Connection #6 from 10.244.1.1:60940 (Active connections: 2)
+2026-10-02T19:35:43.887265318Z [2m2026-10-02T19:35:43.887062Z[0m [32m INFO[0m    Timestamp: SystemTime { tv_sec: 1790969743, tv_nsec: 887061697 }
+2026-10-02T19:35:43.887293126Z [2m2026-10-02T19:35:43.887074Z[0m [32m INFO[0m ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-10-02T19:35:43.887345985Z [2m2026-10-02T19:35:43.887140Z[0m [32m INFO[0m 🚀 [NFS_SERVER] Spawned handler task for connection #6 from 10.244.1.1:60940
+2026-10-02T19:35:43.887371153Z [2m2026-10-02T19:35:43.887178Z[0m [32m INFO[0m 🔌 [NFS_SERVER] Connection #6 handler started for 10.244.1.1:60940
+2026-10-02T19:35:43.887376383Z [2m2026-10-02T19:35:43.887190Z[0m [32m INFO[0m    Start time: SystemTime { tv_sec: 1790969743, tv_nsec: 887189916 }
+2026-10-02T19:35:43.887598688Z [2m2026-10-02T19:35:43.887484Z[0m [32m INFO[0m 🔌 [NFS_SERVER] Connection #6 from 10.244.1.1:60940 closed after 306.775µs (0 RPCs processed)
+2026-10-02T19:35:43.887612319Z [2m2026-10-02T19:35:43.887503Z[0m [33m WARN[0m ⚠️  [NFS_SERVER] Client 10.244.1.1:60940 connected (conn #6) but sent NO RPC messages!
+2026-10-02T19:35:43.887794525Z [2m2026-10-02T19:35:43.887703Z[0m [32m INFO[0m ✓ [NFS_SERVER] Connection #6 from 10.244.1.1:60940 closed cleanly (Active: 1)

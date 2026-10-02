@@ -127,8 +127,8 @@ tier:
   # lease (epochHeartbeatSecs × epochLeaseMisses ≈ 60s default), and a
   # DR-restore import walks the whole bucket — all BEFORE the listener
   # binds, because an unfenced hub must never serve. The startupProbe
-  # allows failureThreshold × 10s for this; liveness only starts once
-  # it succeeds.
+  # allows this many 10-second periods (it checks every second, so its
+  # failureThreshold is this × 10); liveness only starts once it succeeds.
   startupFailureThreshold: 60
 
 # RUST_LOG for the hub.

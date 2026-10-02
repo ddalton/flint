@@ -347,6 +347,13 @@ nfsProxy:
   # which for a workspace is the hub's; a proxy lease that differs reaps
   # live clients or holds dead ones (design §4 Leases).
   leaseSecs: 90
+  # A compound for a parked or restarting hub is HELD this long, the hub
+  # retried, before the client is answered DELAY. Linux retries DELAY on
+  # its own backoff (100 ms doubling to 15 s), so answering at once made
+  # a wake last until the client's next retry: ~26 s for a hub that was
+  # serving at 5 s. Keep it well under the clients' RPC timeout (`timeo`,
+  # 60 s by default). 0 = DELAY at once.
+  wakeHoldSecs: 20
 
   service:
     type: LoadBalancer

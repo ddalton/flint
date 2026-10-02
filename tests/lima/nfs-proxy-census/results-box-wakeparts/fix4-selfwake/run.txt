@@ -1,0 +1,152 @@
+== bring-up
+Bucket created successfully `m/fleet`.
+PASS w1000 holds 1000 files
+PASS w1000 is flushed (rpoClean)
+== suspend rep=1: first byte at 2.424s
+     0.03s  proxy: wake requested
+     0.32s  event FlintShare/Woken
+     0.46s  Pod created
+     0.46s  container started
+     0.46s  event Pod/Created
+     0.46s  event Pod/Pulled
+     0.46s  event Pod/Scheduled
+     0.46s  event Pod/Started
+     0.46s  event ReplicaSet/SuccessfulCreate
+     0.46s  pod condition Initialized
+     0.46s  pod condition PodReadyToStartContainers
+     0.46s  pod condition PodScheduled
+     1.23s  hub: first log line
+     1.23s  hub: server id: 2026-10-02T21:36:21.770399Z  INFO 🔑 MDS server id (persistent): 118664275
+     1.23s  hub: server id: 2026-10-02T21:36:21.771755Z  INFO 📇 export fsid = (0xa4ae04fd1e490099, 0)
+     1.23s  hub: listening: 2026-10-02T21:36:21.772082Z  INFO Listening on: 0.0.0.0:2049
+     1.23s  hub: listening: 2026-10-02T21:36:21.772148Z  INFO 🩺 hub status endpoint listening on 0.0.
+     1.28s  hub: listening: 2026-10-02T21:36:21.817313Z  INFO ✅ NFSv4.2 TCP server listening on 0.0.0
+     1.46s  pod condition ContainersReady
+     1.46s  pod condition Ready
+     2.42s  CLIENT FIRST BYTE
+     2.46s  share status written (flint-lite-operator)
+== suspend rep=2: first byte at 2.930s
+    -0.23s  Pod created
+    -0.23s  event Pod/Scheduled
+    -0.23s  event ReplicaSet/SuccessfulCreate
+    -0.23s  pod condition Initialized
+    -0.23s  pod condition PodScheduled
+     0.04s  proxy: wake requested
+     0.77s  container started
+     0.77s  event Pod/Created
+     0.77s  event Pod/Pulled
+     0.77s  event Pod/Started
+     0.77s  pod condition PodReadyToStartContainers
+     1.26s  hub: first log line
+     1.26s  hub: server id: 2026-10-02T21:36:38.493825Z  INFO 🔑 MDS server id (persistent): 118664275
+     1.26s  hub: server id: 2026-10-02T21:36:38.495188Z  INFO 📇 export fsid = (0xa4ae04fd1e490099, 0)
+     1.26s  hub: listening: 2026-10-02T21:36:38.495515Z  INFO Listening on: 0.0.0.0:2049
+     1.26s  hub: listening: 2026-10-02T21:36:38.495597Z  INFO 🩺 hub status endpoint listening on 0.0.
+     1.29s  hub: listening: 2026-10-02T21:36:38.528955Z  INFO ✅ NFSv4.2 TCP server listening on 0.0.0
+     1.77s  pod condition ContainersReady
+     1.77s  pod condition Ready
+     2.77s  share status written (flint-lite-operator)
+     2.93s  CLIENT FIRST BYTE
+== suspend rep=3: first byte at 2.930s
+    -0.34s  Pod created
+    -0.34s  event Pod/Scheduled
+    -0.34s  event ReplicaSet/SuccessfulCreate
+    -0.34s  pod condition Initialized
+    -0.34s  pod condition PodScheduled
+     0.04s  proxy: wake requested
+     0.66s  container started
+     0.66s  event Pod/Created
+     0.66s  event Pod/Pulled
+     0.66s  event Pod/Started
+     0.66s  pod condition PodReadyToStartContainers
+     1.17s  hub: first log line
+     1.17s  hub: server id: 2026-10-02T21:36:53.504076Z  INFO 🔑 MDS server id (persistent): 118664275
+     1.17s  hub: server id: 2026-10-02T21:36:53.505471Z  INFO 📇 export fsid = (0xa4ae04fd1e490099, 0)
+     1.17s  hub: listening: 2026-10-02T21:36:53.505802Z  INFO Listening on: 0.0.0.0:2049
+     1.17s  hub: listening: 2026-10-02T21:36:53.505860Z  INFO 🩺 hub status endpoint listening on 0.0.
+     1.23s  hub: listening: 2026-10-02T21:36:53.562101Z  INFO ✅ NFSv4.2 TCP server listening on 0.0.0
+     1.66s  pod condition ContainersReady
+     1.66s  pod condition Ready
+     2.66s  share status written (flint-lite-operator)
+     2.93s  CLIENT FIRST BYTE
+cat: /mnt/px6w/w1000/d000/f00000: Stale file handle (os error 116)
+== hibernate rep=1: first byte at 7.231s
+    -0.38s  Deployment created
+     0.04s  proxy: wake requested
+     0.62s  PersistentVolumeClaim created
+     0.62s  Pod created
+     0.62s  event Deployment/ScalingReplicaSet
+     0.62s  event PersistentVolumeClaim/ExternalProvisioning
+     0.62s  event PersistentVolumeClaim/Provisioning
+     0.62s  event PersistentVolumeClaim/WaitForFirstConsumer
+     0.62s  event ReplicaSet/SuccessfulCreate
+     3.62s  event PersistentVolumeClaim/ProvisioningSucceeded
+     4.62s  container started
+     4.62s  event Pod/Created
+     4.62s  event Pod/Pulled
+     4.62s  event Pod/Scheduled
+     4.62s  event Pod/Started
+     4.62s  pod condition Initialized
+     4.62s  pod condition PodScheduled
+     5.12s  proxy: wake requested
+     5.29s  hub: first log line
+     5.30s  hub: server id: 2026-10-02T21:38:48.681320Z  INFO 🔑 MDS server id (persistent): 144197585
+     5.30s  hub: server id: 2026-10-02T21:38:48.681537Z  INFO 📇 export fsid = (0xc81d45fa06c2fc49, 0)
+     5.30s  hub: listening: 2026-10-02T21:38:48.681853Z  INFO Listening on: 0.0.0.0:2049
+     5.30s  hub: listening: 2026-10-02T21:38:48.681922Z  INFO 🩺 hub status endpoint listening on 0.0.
+     5.37s  hub: import: 2026-10-02T21:38:48.746319Z  INFO tier import: fresh state + bucket conte
+     5.37s  hub: import: 2026-10-02T21:38:48.746476Z  INFO tier import: manifest seq 6 — 1010 entr
+     5.40s  hub: import: 2026-10-02T21:38:48.776980Z  INFO tier import: 10 dir(s), 0 symlink(s), 1
+     5.40s  hub: import: 2026-10-02T21:38:48.776990Z  INFO 🪣 tier import: 10 dir(s), 0 symlink(s),
+     5.40s  hub: listening: 2026-10-02T21:38:48.778662Z  INFO ✅ NFSv4.2 TCP server listening on 0.0.0
+     5.62s  pod condition PodReadyToStartContainers
+     6.62s  pod condition ContainersReady
+     6.62s  pod condition Ready
+     6.62s  share status written (flint-lite-operator)
+     7.23s  CLIENT FIRST BYTE
+hibernate rep=2 NOT-PARKED
+"chert.us/idle-since":"2026-10-02T21:40:31Z"
+"chert.us/idle-state":"Active"
+LAST SEEN   TYPE     REASON               OBJECT             MESSAGE
+18m         Normal   StateidTagAssigned   flintshare/w1000   stateid tag 3361718211 (nfs proxy H2); set once
+13m         Normal   Woken                flintshare/w1000   wake requested — scaling back up
+13m         Normal   HibernateVerified    flintshare/w1000   the bucket can rebuild this volume (rpoClean, epoch 4); scaling to zero, then reclaiming the disk. The CR and the bucket are untouched.
+15m         Normal   DiskReclaimed        flintshare/w1000   PVC w1000-data deleted — the bucket is now the only copy, and waking this share is a DR import. The CR and the bucket itself are untouched.
+15m         Normal   ParkedAsCr           flintshare/w1000   hibernated: removed Service w1000, ConfigMap w1000-config, Deployment w1000 — only the FlintShare remains; a wake renders them again
+== hibernate rep=3: first byte at 8.835s
+    -0.07s  Deployment created
+    -0.07s  PersistentVolumeClaim created
+    -0.07s  Pod created
+    -0.07s  event Deployment/ScalingReplicaSet
+    -0.07s  event PersistentVolumeClaim/ExternalProvisioning
+    -0.07s  event PersistentVolumeClaim/Provisioning
+    -0.07s  event PersistentVolumeClaim/WaitForFirstConsumer
+    -0.07s  event ReplicaSet/SuccessfulCreate
+     0.04s  proxy: wake requested
+     0.36s  event FlintShare/Woken
+     2.93s  event PersistentVolumeClaim/ProvisioningSucceeded
+     3.93s  event Pod/Scheduled
+     3.93s  pod condition Initialized
+     3.93s  pod condition PodScheduled
+     4.93s  container started
+     4.93s  event Pod/Created
+     4.93s  event Pod/Pulled
+     4.93s  event Pod/Started
+     4.93s  pod condition PodReadyToStartContainers
+     5.12s  proxy: wake requested
+     5.31s  hub: first log line
+     5.31s  hub: server id: 2026-10-02T21:54:42.382582Z  INFO 🔑 MDS server id (persistent): 119583717
+     5.31s  hub: server id: 2026-10-02T21:54:42.382949Z  INFO 📇 export fsid = (0x10987793edbac909, 0)
+     5.32s  hub: listening: 2026-10-02T21:54:42.383823Z  INFO Listening on: 0.0.0.0:2049
+     5.32s  hub: listening: 2026-10-02T21:54:42.384197Z  INFO 🩺 hub status endpoint listening on 0.0.
+     5.38s  hub: import: 2026-10-02T21:54:42.451390Z  INFO tier import: fresh state + bucket conte
+     5.38s  hub: import: 2026-10-02T21:54:42.451548Z  INFO tier import: manifest seq 8 — 1010 entr
+     5.41s  hub: import: 2026-10-02T21:54:42.480775Z  INFO tier import: 10 dir(s), 0 symlink(s), 1
+     5.41s  hub: import: 2026-10-02T21:54:42.480785Z  INFO 🪣 tier import: 10 dir(s), 0 symlink(s),
+     5.41s  hub: listening: 2026-10-02T21:54:42.482394Z  INFO ✅ NFSv4.2 TCP server listening on 0.0.0
+     5.93s  pod condition ContainersReady
+     5.93s  pod condition Ready
+     6.93s  share status written (flint-lite-operator)
+     8.67s  proxy: wake requested
+     8.84s  CLIENT FIRST BYTE
+RESULT: 2 passed, 0 failed

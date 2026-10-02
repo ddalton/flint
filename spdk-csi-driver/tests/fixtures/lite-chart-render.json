@@ -89,8 +89,7 @@
                     }
                   ],
                   "readinessProbe": {
-                    "initialDelaySeconds": 3,
-                    "periodSeconds": 5,
+                    "periodSeconds": 1,
                     "tcpSocket": {
                       "port": 2049
                     }
@@ -311,8 +310,7 @@
                     }
                   ],
                   "readinessProbe": {
-                    "initialDelaySeconds": 3,
-                    "periodSeconds": 5,
+                    "periodSeconds": 1,
                     "tcpSocket": {
                       "port": 2049
                     }
@@ -348,8 +346,8 @@
                     }
                   },
                   "startupProbe": {
-                    "failureThreshold": 90,
-                    "periodSeconds": 10,
+                    "failureThreshold": 900,
+                    "periodSeconds": 1,
                     "tcpSocket": {
                       "port": 2049
                     }
@@ -594,8 +592,7 @@
                     }
                   ],
                   "readinessProbe": {
-                    "initialDelaySeconds": 3,
-                    "periodSeconds": 5,
+                    "periodSeconds": 1,
                     "tcpSocket": {
                       "port": 2049
                     }
@@ -805,8 +802,7 @@
                     }
                   ],
                   "readinessProbe": {
-                    "initialDelaySeconds": 3,
-                    "periodSeconds": 5,
+                    "periodSeconds": 1,
                     "tcpSocket": {
                       "port": 2049
                     }
@@ -1017,8 +1013,7 @@
                     }
                   ],
                   "readinessProbe": {
-                    "initialDelaySeconds": 3,
-                    "periodSeconds": 5,
+                    "periodSeconds": 1,
                     "tcpSocket": {
                       "port": 2049
                     }
@@ -1051,8 +1046,8 @@
                     }
                   },
                   "startupProbe": {
-                    "failureThreshold": 60,
-                    "periodSeconds": 10,
+                    "failureThreshold": 600,
+                    "periodSeconds": 1,
                     "tcpSocket": {
                       "port": 2049
                     }
@@ -1252,8 +1247,7 @@
                     }
                   ],
                   "readinessProbe": {
-                    "initialDelaySeconds": 3,
-                    "periodSeconds": 5,
+                    "periodSeconds": 1,
                     "tcpSocket": {
                       "port": 2049
                     }
@@ -1286,8 +1280,8 @@
                     }
                   },
                   "startupProbe": {
-                    "failureThreshold": 60,
-                    "periodSeconds": 10,
+                    "failureThreshold": 600,
+                    "periodSeconds": 1,
                     "tcpSocket": {
                       "port": 2049
                     }
@@ -1394,5 +1388,5 @@
       "values": "tier:\n  enabled: true\n  bucket: my-team-flint\n  keyPrefix: tenant-a/\n  endpoint: http://minio.minio:9000\n  region: us-east-1\n  credentialsSecret: flint-s3\n  importOnStart: true\n"
     }
   },
-  "chartSha256": "f220a1a7889aafb2da1a0d4948a4393a5100c02149671f4f8a3d8ea7cb753714"
+  "chartSha256": "178d3859577b4d69de42240e192302747f59675516c6949b2921e68d1cc0683b"
 }
