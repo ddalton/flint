@@ -140,7 +140,7 @@ should revisit boot-time device state.
 
 Today the chart's entire pNFS surface is the controller env hook
 (`controller.yaml:93-100`, `pnfs.enabled`/`pnfs.mdsEndpoint`). MDS/DS
-have only the docker-compose-era sketches in `docker/README-pnfs.md`
+have only the docker-compose-era sketches in `docker/README-pnfs.md` (removed 2026-10-02)
 (which proposes a DaemonSet — superseded here).
 
 - **DS StatefulSet** (not DaemonSet: identity and PVC binding are the

@@ -5,7 +5,5 @@ target/
 docs/
 tests/
 helm/
-spdk-benchmark/
-spdk-benchmark-c/
 *.md
 *.adoc

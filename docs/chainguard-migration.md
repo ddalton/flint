@@ -60,7 +60,7 @@ spdk-csi-driver/src`) plus what ubuntu gave a human or a rig, and fail on any
 miss. `coreutils` is GNU on purpose: `mount_util.rs` reads `timeout`'s exit
 124 as TimedOut.
 
-Not converted, on purpose: `Dockerfile.csi-prebuilt` (it is `FROM` a previously
+Not converted, on purpose (and removed 2026-10-02): `Dockerfile.csi-prebuilt` (it is `FROM` a previously
 published `flint-driver` tag and inherits whatever base that tag has), the SPDK
 Dockerfiles, test-rig Dockerfiles (`Dockerfile.c6gates`, `Dockerfile.stub`) and
 the **builder** stages of `Dockerfile.csi`/`Dockerfile.pnfs` (`rust:1.92-alpine`,

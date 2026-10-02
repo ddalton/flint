@@ -4,7 +4,7 @@
 #
 # WHY THERE WAS NONE, AND WHY THAT IS THE PROBLEM. Nothing in this repo
 # measures whether a change made the server slower. The only perf script
-# present (scripts/benchmark-nfs-comparison.sh) compares two flint
+# present (scripts/benchmark-nfs-comparison.sh, removed 2026-10-02) compares two flint
 # binaries against each other, on macOS, using flint-nfs-server — which
 # breaks §0 rule 1 (the product binary is flint-pnfs-mds) and §0 rule 2
 # (macOS numbers are rig-confounded). So every change to the hot path,
