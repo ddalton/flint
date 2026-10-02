@@ -1,0 +1,31 @@
+dashboard:
+  enabled: true
+deployment:
+  nodeMode: three-container
+images:
+  flintCsiDriver:
+    tag: step6-66e47b9a
+pnfs:
+  enabled: true
+  server:
+    dataServers:
+      count: 3
+      multipathServices: 3
+    enabled: true
+    image:
+      tag: step6-66e47b9a
+  storageClass:
+    create: true
+spdkOperator:
+  enabled: true
+spdkTarget:
+  hugepages:
+    amount: 2Gi
+    enabled: true
+    size: 2Mi
+storageClass:
+  create: true
+  isDefaultClass: false
+  name: flint-spdk
+  parameters:
+    nfsEmptyDir: false

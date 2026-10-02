@@ -1,0 +1,11 @@
+image: { ref: "dilipdalton/flint-lite-operator:step6-66e47b9a" }
+hubImage: "dilipdalton/flint-pnfs:step6-66e47b9a"
+nodeSelector: { step6/role: client }
+restartOnTgtRestart: { enabled: true, csiNodeNamespace: flint-system, csiNodeSelector: app=flint-csi-node, tgtContainer: spdk-tgt, storageClasses: [flint-spdk] }
+nfsProxy:
+  enabled: true
+  idleDefaults: { suspendAfterSecs: 0, hibernateAfterSecs: 0 }
+  nodeSelector: { step6/role: client }
+  persistence: { storageClassName: flint-spdk }   # the cluster has no default class
+  service: { type: ClusterIP }                     # clients are in-cluster; no LB controller here
+  identities: [{ name: all, sources: ["0.0.0.0/0"], workspaces: ["*"] }]

@@ -1,0 +1,43 @@
+Error: uninstall: Release not loaded: flint-csi: release: not found
+NAME: flint-csi
+LAST DEPLOYED: Fri Oct  2 10:54:57 2026
+NAMESPACE: flint-system
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+Flint CSI driver installed in namespace "flint-system".
+
+Verify the controller and node pods are running:
+  kubectl get pods -n flint-system
+
+If you plan to use Volume Snapshots / Clones:
+
+  The VolumeSnapshot CRDs are a CLUSTER-WIDE prerequisite that the
+  Flint chart does not install (they are shared across all CSI drivers).
+  Verify they are installed:
+
+    kubectl get crd volumesnapshotclasses.snapshot.storage.k8s.io
+
+  If that returns "NotFound", install once per cluster:
+
+    kubectl apply -k https://github.com/kubernetes-csi/external-snapshotter/client/config/crd?ref=v8.2.0
+
+  Without these CRDs, the bundled snapshot-controller Deployment will
+  CrashLoopBackOff and snapshot RPCs will be rejected. Non-snapshot
+  operations are unaffected. The Flint controller logs a startup
+  warning if the CRDs are missing — see:
+
+    kubectl logs -n flint-system -l app=flint-csi-controller -c flint-csi-driver | grep PREFLIGHT
+
+Snapshot support notes:
+  - SPDK-backed StorageClasses: snapshots supported.
+  - pNFS-backed StorageClasses (parameters.layout: pnfs): snapshots
+    NOT supported in the no-SPDK deployment mode. Use a non-pNFS
+    StorageClass for volumes that need snapshots.
+
+See the full README for prerequisites, disk-init, and StorageClass
+examples: https://github.com/ddalton/flint
+
+(Looking for the standalone flint-lite hub? It moved to its own chart:
+flint-lite-chart/ — see docs/flint-lite.md.)

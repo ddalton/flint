@@ -17,7 +17,7 @@ control plane, 2 × i4i.xlarge hubs and 1 × m7i.xlarge client/proxy,
 ≈ $0.36/h. The rig scripts are debugged on the box first, so the
 session runs finished scripts. The full-cloud shape below is kept for
 reference. Still to settle before the AWS session: rc images on Docker
-Hub or private ECR.
+Hub or private ECR (Docker Hub, unreleased `step6-<sha>` tags).
 
 **Box phases A–D RUN 2026-09-30** (`tests/lima/nfs-proxy-census/results-box-step6/`):
 - A: a real hub is ~90 MiB RSS at any size, ~5 m CPU idle, 10–12 s to
@@ -43,8 +43,16 @@ per-compound lease scan (`courtesy_release_expired`), fixed 2026-10-01:
 the proxy reaps on a 1 s timer instead; the scan falls from 5.5% to 0.01%
 of proxy samples (`results-box-step6/leasegate-ab.txt`).
 
-Left for the AWS session: phase E, the cross-node half of C, and D's
-relist.
+**AWS session RUN 2026-10-02** (`results-aws-step6/README.md`; trove,
+4 × i4i.xlarge spot, ~2 h, ~$0.85, verified torn down):
+- E: the subsystem cap is 1,024. A real roll under 8 live writers lost
+  nothing (one ~5 s stall each, no restarts). noderoll cannot fire on
+  the real chart, because `spdk-tgt` is a native sidecar.
+- C, cross-node: proxy ~72% of direct metadata throughput, 0.35 ms CPU
+  per op; bulk equal.
+
+D's relist was measured on the box. **Multi-volume decided: not built**
+(design §7a).
 
 ## 1. What it is for
 

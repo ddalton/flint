@@ -521,19 +521,23 @@ What is measured today (`docs/plans/flint-lite-fleet-rig-results.md`):
 | Limit | At 1,000 | Status / lever |
 |---|---|---|
 | Volume attach limit | none: flint-spdk reports `max_volumes_per_node: 0` (`spdk-csi-driver/src/main.rs:5761`); lvols live on node NVMe, reached over NVMe-oF | not a limit |
-| SPDK NVMe-oF target subsystem cap | about 100 active volumes per node | SPDK's default is 1,024 per target. **Check flint's configured value.** |
+| SPDK NVMe-oF target subsystem cap | **1,024 per node** (measured 2026-10-02: SPDK's default, which flint never overrides) | not a limit at 1,000 over about 10 nodes |
 | Pods per node (110, minus about 10 system pods) | 10–12 nodes minimum | Node shape of the 16-vCPU class, given the 100m hub CPU request |
-| Hub CPU/memory requests (100m / 128Mi) | 100 cores / 125 GiB reserved | **Real RSS and CPU unknown**; set the requests from the rig |
+| Hub CPU/memory requests (100m / 128Mi) | 100 cores / 125 GiB reserved | **Measured: ~90 MiB RSS and ~5 m CPU idle** (step 6 A). The requests over-reserve CPU 20×: lower them to the measurement |
 | Operator live-hub polling | 3.3x the tested live count | Needs the rig run |
 | Proxy (§7) | one replica carries every byte for 1,000 projects | **Multi-replica proxy (shared client table) becomes required** |
 | Spot reclaim | about 70–100 hubs per node lost at once | Same under multi-volume, so it does not decide between them |
 
-**flint-csi-node rolls.** Rolling the node DaemonSet gives EIO to every
-flint-PVC consumer on the rolled node, and each one must be restarted
-(see the v1.14 topology release record). At about 100 hubs per node,
-a routine driver upgrade becomes a mass outage unless the **operator
-detects the roll and restarts every hub on the rolled node**. This is
-required before 1,000.
+**flint-csi-node rolls.** On the v1.14-era driver, rolling the node
+DaemonSet gave EIO to every flint-PVC consumer on the rolled node, and
+each one had to be restarted (see the v1.14 topology release record);
+`noderoll` was built for that. **Measured on HEAD (2026-10-02, AWS,
+`results-aws-step6/`): a real roll under 8 live hubs with writers lost
+nothing.** Every acknowledged record survived, and each writer saw one
+fsync stall of about 5 s while its node's target restarted. No hub
+restarted, and none needed to. `noderoll` cannot fire on the real chart
+anyway: it reads `containerStatuses`, and `spdk-tgt` is a native sidecar
+(open: fix it or remove it).
 
 ### Inactive side — 9,000–19,000 shares
 
@@ -594,16 +598,52 @@ required before 1,000.
     stream-driven Controller in the operator; the proxy's own reflector
     could do it on stable API. Not done.
 
-### What this means for multi-volume
+### What this means for multi-volume — DECIDED 2026-10-02: not built
 
-With flint-spdk, **no hard limit at this target requires
-multi-volume.** The case for it becomes **density**: fixed per-hub
-overhead × 1,000, still unmeasured. There is also the **blast radius
-of a node-DaemonSet roll**. Multi-volume does not shrink that per
-node, but it cuts the number of restarts. Decide after the rig. The
-proxy is kept under either outcome: it routes by `instance_id`, a
-multi-volume hub would answer for several, and several hubs behind one
-port are still wanted for capacity and failure isolation.
+**Decision: do not build multi-volume hubs. A workspace stays one hub,
+with the proxy in front and hibernation for idle shares.** The design
+deferred the choice to two measurements. Step 6 made both
+(`tests/lima/nfs-proxy-census/results-box-step6/`, `results-aws-step6/`):
+
+- **Density: the fixed cost per hub is small.** A real hub is ~90 MiB
+  RSS and ~5 m CPU idle, whatever its size. At 1,000 active that is
+  ~90 GiB and ~5 cores. On the ~10 nodes the pod and placement limits
+  need anyway (16 vCPU / 64 GiB class), that is ~14% of memory and ~3%
+  of CPU. A hibernated share is a CR alone, and 10,000 of them cost the
+  control plane little once the operator's live-share loop was fixed
+  (~4.8 apiserver req/s settled).
+- **Rolls: there is no blast radius left to shrink.** A real csi-node
+  roll costs each hub one ~5 s I/O stall, with no restart and no lost
+  write. The SPDK subsystem cap is 1,024 per node, not ~100.
+
+What remains binding at 1,000 active is **counts, not resources**: pods
+per node (110 by default). Each has a far cheaper lever than a new
+server design:
+
+- raise kubelet `maxPods` (250 is common; EKS with prefix delegation);
+- lower the hub's requests to the measured cost: ~100 Mi and 10–20 m,
+  instead of 128 Mi and 100 m;
+- the SPDK cap is already 1,024.
+
+Multi-volume would cost the whole surface its own design lists: a
+workspace registry and admin API, an open tenancy question, one WAL
+shared across workspaces, new ESTALE corners, and a hub crash taking N
+workspaces down. That is new protocol surface to save configuration.
+
+**Revisit if any of these turns out true:**
+1. A target platform cannot raise `maxPods`, and node count, not
+   resources, becomes the cost.
+2. Real per-hub load is far heavier than step 6 measured. Those numbers
+   are idle and light load, extrapolated from 30 hubs.
+3. Wakes must be near-instant. Loading a workspace into a running hub
+   would beat 13 s (suspend) and 27 s (hibernate). The cheaper first
+   step is the ~12 s of the hibernate wake spent outside the pod.
+4. A future driver brings back EIO-on-roll, and restarts at ~100 hubs a
+   node become the outage again.
+
+The proxy is kept either way: it routes by `instance_id`, and several
+hubs behind one port are still wanted for capacity and failure
+isolation.
 
 ## 8. Build order, and the drills with their controls
 
@@ -892,7 +932,16 @@ port are still wanted for capacity and failure isolation.
    **Plan:** `flint-lite-nfs-proxy-step6-rig-plan.md`. Option 1 was
    chosen: phases A–D on the build box (RUN 2026-09-30, results in
    `tests/lima/nfs-proxy-census/results-box-step6/`), then one short AWS
-   session for E, C's cross-node half and the operator relist (not run).
+   session for E and C's cross-node half (RUN 2026-10-02,
+   `results-aws-step6/`):
+   - the SPDK subsystem cap is 1,024 per node;
+   - a real csi-node roll under 8 live writers lost nothing: one ~5 s
+     stall each and no hub restart;
+   - cross-node, the proxy keeps ~72% of direct metadata throughput, at
+     0.35 ms of proxy CPU per op (~2,800 stat ops/s per core on EC2),
+     and matches direct on bulk transfer.
+
+   **Multi-volume: decided, not built** (§7a).
    Headlines:
    - a real hub is ~90 MiB and ~5 m CPU idle at any size;
    - wakes are size-independent: ~13 s from suspend, ~27 s from

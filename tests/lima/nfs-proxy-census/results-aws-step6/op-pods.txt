@@ -1,0 +1,11 @@
+NAME                                             READY   STATUS    RESTARTS   AGE   IP              NODE          NOMINATED NODE   READINESS GATES
+flint-csi-controller-9949c8568-trd8b             6/6     Running   0          34m   10.244.3.210    nfsp6-aws-1   <none>           <none>
+flint-csi-node-8wdxq                             4/4     Running   0          34m   172.31.20.228   nfsp6-aws-1   <none>           <none>
+flint-csi-node-dncnv                             4/4     Running   0          34m   172.31.20.29    nfsp6-cp-1    <none>           <none>
+flint-csi-node-jgnkk                             4/4     Running   0          34m   172.31.24.92    nfsp6-aws-3   <none>           <none>
+flint-csi-node-p642k                             4/4     Running   0          34m   172.31.28.29    nfsp6-aws-2   <none>           <none>
+flint-lite-operator-68489db568-d2rsf             1/1     Running   0          23m   10.244.1.77     nfsp6-aws-3   <none>           <none>
+flint-lite-operator-68489db568-qtgtk             1/1     Running   0          23m   10.244.1.153    nfsp6-aws-3   <none>           <none>
+flint-lite-operator-nfs-proxy-84666b54bd-mzhlh   1/1     Running   0          6s    10.244.1.55     nfsp6-aws-3   <none>           <none>
+snapshot-controller-75cc446f55-7272v             1/1     Running   0          34m   10.244.2.200    nfsp6-aws-2   <none>           <none>
+spdk-dashboard-69fb47c9f5-m7rkj                  2/2     Running   0          34m   10.244.2.43     nfsp6-aws-2   <none>           <none>

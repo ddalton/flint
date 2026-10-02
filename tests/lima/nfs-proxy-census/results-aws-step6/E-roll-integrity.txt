@@ -1,0 +1,20 @@
+e1 acked=1050 worst_fsync=4.96s ok records=1050
+e2 acked=1050 worst_fsync=4.99s ok records=1050
+e3 acked=1050 worst_fsync=5.09s ok records=1050
+e4 acked=1050 worst_fsync=5.03s ok records=1050
+e5 acked=1050 worst_fsync=4.98s ok records=1050
+e6 acked=1050 worst_fsync=4.92s ok records=1050
+e7 acked=1050 worst_fsync=5.04s ok records=1050
+e8 acked=1050 worst_fsync=4.92s ok records=1050
+e1: pod 2026-10-02T18:29:28Z restarts=0 
+e2: pod 2026-10-02T18:29:29Z restarts=0 
+e3: pod 2026-10-02T18:29:29Z restarts=0 
+e4: pod 2026-10-02T18:29:29Z restarts=0 
+e5: pod 2026-10-02T18:29:29Z restarts=0 
+e6: pod 2026-10-02T18:29:29Z restarts=0 
+e7: pod 2026-10-02T18:29:29Z restarts=0 
+e8: pod 2026-10-02T18:29:29Z restarts=0 
+nfsp6-aws-2   2026-10-02T18:43:35Z
+nfsp6-aws-3   2026-10-02T18:45:35Z
+nfsp6-aws-1   2026-10-02T18:44:35Z
+nfsp6-cp-1    2026-10-02T18:46:35Z

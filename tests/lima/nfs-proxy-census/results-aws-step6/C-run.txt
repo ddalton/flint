@@ -1,0 +1,4 @@
+== phase C, cross-node: hub on nfsp6-aws-1, client + proxy on nfsp6-aws-3
+  c1: Ready
+proxy CPU now: 8470000 us
+seeded 5000 files

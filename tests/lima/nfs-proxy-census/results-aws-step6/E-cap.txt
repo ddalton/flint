@@ -1,0 +1,133 @@
+== phase E1: the SPDK target's subsystem cap and use, per hub node
+-- nfsp6-aws-1 (flint-csi-node-8wdxq)
+nvmf framework config:
+[
+  {
+    "method": "nvmf_set_config",
+    "params": {
+      "discovery_filter": "match_any",
+      "admin_cmd_passthru": {
+        "identify_ctrlr": false,
+        "identify_uuid_list": false,
+        "get_log_page": false,
+        "get_set_features": false,
+        "sanitize": false,
+        "security_send_recv": false,
+        "fw_update": false,
+        "nvme_mi": false,
+        "vendor_specific": false
+      },
+      "dhchap_digests": [
+        "sha256",
+        "sha384",
+        "sha512"
+      ],
+      "dhchap_dhgroups": [
+        "null",
+        "ffdhe2048",
+        "ffdhe3072",
+        "ffdhe4096",
+        "ffdhe6144",
+        "ffdhe8192"
+      ],
+      "dup_host_policy": "allow"
+    }
+  },
+  {
+    "method": "nvmf_set_max_subsystems",
+    "params": {
+      "max_subsystems": 1024
+    }
+  },
+  {
+    "method": "nvmf_set_crdt",
+subsystems now: 1
+transports:
+[
+  {
+    "trtype": "TCP",
+    "max_queue_depth": 128,
+    "max_io_qpairs_per_ctrlr": 127,
+    "in_capsule_data_size": 4096,
+    "max_io_size": 131072,
+    "max_aq_depth": 128,
+    "iobuf_small_cache_size": 4294967295,
+    "iobuf_large_cache_size": 4294967295,
+    "dif_insert_or_strip": false,
+    "zcopy": false,
+    "c2h_success": true,
+    "sock_priority": 0,
+    "abort_timeout_sec": 1,
+    "ack_timeout": 0,
+    "data_wr_pool_size": 0,
+    "disable_command_passthru": false,
+    "kas": 100,
+    "min_kato": 10000
+  }
+]
+-- nfsp6-aws-2 (flint-csi-node-p642k)
+nvmf framework config:
+[
+  {
+    "method": "nvmf_set_config",
+    "params": {
+      "discovery_filter": "match_any",
+      "admin_cmd_passthru": {
+        "identify_ctrlr": false,
+        "identify_uuid_list": false,
+        "get_log_page": false,
+        "get_set_features": false,
+        "sanitize": false,
+        "security_send_recv": false,
+        "fw_update": false,
+        "nvme_mi": false,
+        "vendor_specific": false
+      },
+      "dhchap_digests": [
+        "sha256",
+        "sha384",
+        "sha512"
+      ],
+      "dhchap_dhgroups": [
+        "null",
+        "ffdhe2048",
+        "ffdhe3072",
+        "ffdhe4096",
+        "ffdhe6144",
+        "ffdhe8192"
+      ],
+      "dup_host_policy": "allow"
+    }
+  },
+  {
+    "method": "nvmf_set_max_subsystems",
+    "params": {
+      "max_subsystems": 1024
+    }
+  },
+  {
+    "method": "nvmf_set_crdt",
+subsystems now: 1
+transports:
+[
+  {
+    "trtype": "TCP",
+    "max_queue_depth": 128,
+    "max_io_qpairs_per_ctrlr": 127,
+    "in_capsule_data_size": 4096,
+    "max_io_size": 131072,
+    "max_aq_depth": 128,
+    "iobuf_small_cache_size": 4294967295,
+    "iobuf_large_cache_size": 4294967295,
+    "dif_insert_or_strip": false,
+    "zcopy": false,
+    "c2h_success": true,
+    "sock_priority": 0,
+    "abort_timeout_sec": 1,
+    "ack_timeout": 0,
+    "data_wr_pool_size": 0,
+    "disable_command_passthru": false,
+    "kas": 100,
+    "min_kato": 10000
+  }
+]

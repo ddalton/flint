@@ -1,0 +1,12 @@
+== phase C, cross-node: hub on nfsp6-aws-1, client + proxy on nfsp6-aws-3
+  c1: Ready
+seeded 5000 files
+direct	rep=1	w=stat	ops=10000	wall_s=14.096992000	proxy_cpu_ms=0	hub_cpu_ms=6359
+direct	rep=1	w=create+unlink	ops=4000	wall_s=12.007251000	proxy_cpu_ms=0	hub_cpu_ms=6375
+direct	rep=1	w=seq-write	mib=512	wall_s=1.990175000	proxy_cpu_ms=0	hub_cpu_ms=392
+direct	rep=1	w=seq-read	mib=512 intact=yes	wall_s=3.978206000	proxy_cpu_ms=0	hub_cpu_ms=225
+proxy	rep=1	w=stat	ops=10000	wall_s=14.584292000	proxy_cpu_ms=0	hub_cpu_ms=2500
+proxy	rep=1	w=create+unlink	ops=4000	wall_s=12.267440000	proxy_cpu_ms=0	hub_cpu_ms=3420
+proxy	rep=1	w=seq-write	mib=512	wall_s=2.058111000	proxy_cpu_ms=0	hub_cpu_ms=432
+proxy	rep=1	w=seq-read	mib=512 intact=yes	wall_s=4.074098000	proxy_cpu_ms=0	hub_cpu_ms=188
+direct	rep=2	w=stat	ops=10000	wall_s=10.794778000	proxy_cpu_ms=0	hub_cpu_ms=2513

@@ -1,6 +1,12 @@
 # flint-lite, multi-volume — many workspaces, one server, one port
 
-Status: **DESIGN, NO CODE** (2026-09-09).
+Status: **DESIGN, NO CODE** (2026-09-09). **NOT TO BE BUILT, decided
+2026-10-02:** the NFS proxy design's step 6 measured what this was
+deferred on (per-hub cost, roll blast radius) and found neither needs
+it. The decision, its evidence and the conditions for revisiting it are
+in `flint-lite-nfs-proxy-design.md` §7a, "What this means for
+multi-volume". This document is kept as the design to start from if one
+of those conditions turns true.
 
 This is a capability added to **flint-lite**, not a new product. That is
 a reversal, recorded deliberately: the first cut of this document was

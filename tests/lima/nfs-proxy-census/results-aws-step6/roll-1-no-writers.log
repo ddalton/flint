@@ -1,0 +1,14 @@
+== phase E2: a real flint-csi-node roll under 8 live hubs
+  e1: Ready
+  e2: Ready
+  e3: Ready
+  e4: Ready
+  e5: Ready
+  e6: Ready
+  e7: Ready
+  e8: Ready
+proxy lists: e1 e2 e3 e4 e5 e6 e7 e8 
+command terminated with exit code 143
+before the roll: e1=198 e2=198 e3=198 e4=198 e5=198 e6=198 e7=198 e8=198 
+error: rollout status is only available for RollingUpdate strategy type
+csi-node rolled in 0s
