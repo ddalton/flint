@@ -64,6 +64,48 @@ pub enum NfsBackend {
     EmptyDir,
 }
 
+/// Does a PV's volumeAttributes name the emptyDir NFS backend (the
+/// `nfsEmptyDir: "true"` class)? Such a volume is NFS-served whatever its
+/// access mode and owns no SPDK object.
+pub fn is_emptydir_backend(attrs: &std::collections::BTreeMap<String, String>) -> bool {
+    attrs.get("nfs.chert.us/backend").map(|v| v == "emptydir").unwrap_or(false)
+}
+
+/// The NFS server container's arguments.
+pub fn nfs_server_args(
+    volume_id: &str,
+    port: u16,
+    verbose: bool,
+    read_only: bool,
+    backend: &NfsBackend,
+) -> Vec<String> {
+    let mut args = vec![
+        "--export-path".to_string(),
+        "/mnt/volume".to_string(),
+        "--volume-id".to_string(),
+        volume_id.to_string(),
+        "--port".to_string(),
+        port.to_string(),
+    ];
+    // Per-op DEBUG logging only when asked for
+    // (NFS_VERBOSE) — it multiplies data-path latency.
+    if verbose {
+        args.push("--verbose".to_string());
+    }
+    // Add --read-only flag for ROX volumes
+    if read_only {
+        args.push("--read-only".to_string());
+    }
+    // F30: the emptyDir backend's hostPath is created empty and never
+    // staged, so nothing stamps its identity marker; the server stamps a
+    // wholly empty export at first boot. Never for a PVC backing: that is
+    // stamped at NodeStage, and an empty one must still be refused.
+    if *backend == NfsBackend::EmptyDir {
+        args.push("--fresh-backing".to_string());
+    }
+    args
+}
+
 /// NFS configuration loaded from environment variables (set by Helm chart)
 #[derive(Clone, Debug)]
 pub struct NfsConfig {
@@ -419,26 +461,13 @@ pub async fn create_nfs_server_pod(
                 image_pull_policy: Some(config.pull_policy.clone()),
                 // Override entrypoint to use flint-nfs-server instead of csi-driver
                 command: Some(vec!["/usr/local/bin/flint-nfs-server".to_string()]),
-                args: Some({
-                    let mut args = vec![
-                        "--export-path".to_string(),
-                        "/mnt/volume".to_string(),
-                        "--volume-id".to_string(),
-                        volume_id.to_string(),
-                        "--port".to_string(),
-                        config.port.to_string(),
-                    ];
-                    // Per-op DEBUG logging only when asked for
-                    // (NFS_VERBOSE) — it multiplies data-path latency.
-                    if config.verbose {
-                        args.push("--verbose".to_string());
-                    }
-                    // Add --read-only flag for ROX volumes
-                    if read_only {
-                        args.push("--read-only".to_string());
-                    }
-                    args
-                }),
+                args: Some(nfs_server_args(
+                    volume_id,
+                    config.port,
+                    config.verbose,
+                    read_only,
+                    &backend,
+                )),
                 ports: Some(vec![ContainerPort {
                     name: Some("nfs".to_string()),
                     container_port: config.port as i32,
@@ -1279,6 +1308,53 @@ mod tests {
     /// clients attached, server pod Absent. Everything else is a Skip —
     /// emptydir NEVER recreates (an auto-recreated emptydir share would
     /// silently replace a hung mount with an empty export).
+    /// NodeUnstage is context-free, so it classifies an nfs-only volume by
+    /// the PV's volumeAttributes. These are exactly the keys CreateVolume
+    /// stamps for `nfsEmptyDir: "true"` (main.rs, the NFS-EMPTYDIR arm),
+    /// whatever the access mode: an RWO claim on that class is NFS-served
+    /// too, owns no SPDK object, and must take the unmount-only unstage.
+    /// Found 2026-10-02: an RWO emptyDir volume fell through to the SPDK
+    /// teardown, which fails on an nfs-only node (no spdk.sock), so the
+    /// unstage failed forever and the volume never detached.
+    #[test]
+    fn an_emptydir_volume_is_recognised_by_its_attributes() {
+        let mut attrs = std::collections::BTreeMap::new();
+        attrs.insert("nfs.chert.us/enabled".to_string(), "true".to_string());
+        attrs.insert("nfs.chert.us/backend".to_string(), "emptydir".to_string());
+        attrs.insert("size".to_string(), "1Gi".to_string());
+        attrs.insert("disk.chert.us/role".to_string(), "block".to_string());
+        assert!(is_emptydir_backend(&attrs));
+        // An SPDK volume, a pNFS volume, or a missing key: not emptyDir.
+        let mut spdk = std::collections::BTreeMap::new();
+        spdk.insert("disk.chert.us/lvol-uuid".to_string(), "u".to_string());
+        assert!(!is_emptydir_backend(&spdk));
+        let mut pnfs = std::collections::BTreeMap::new();
+        pnfs.insert("pnfs.chert.us/layout".to_string(), "files".to_string());
+        assert!(!is_emptydir_backend(&pnfs));
+        assert!(!is_emptydir_backend(&std::collections::BTreeMap::new()));
+        let mut other = attrs.clone();
+        other.insert("nfs.chert.us/backend".to_string(), "pvc".to_string());
+        assert!(!is_emptydir_backend(&other));
+    }
+
+    /// The server is told its backing is FRESH only for the emptyDir
+    /// backend: a hostPath the kubelet creates empty, which nothing
+    /// stages or stamps. A PVC backing is stamped at NodeStage, and its
+    /// empty export must keep failing F30 loudly.
+    #[test]
+    fn only_the_emptydir_backend_tells_the_server_its_backing_is_fresh() {
+        let empty = nfs_server_args("pvc-1", 2049, false, false, &NfsBackend::EmptyDir);
+        assert!(empty.iter().any(|a| a == "--fresh-backing"), "{:?}", empty);
+        let pvc = nfs_server_args("pvc-1", 2049, false, false, &NfsBackend::Pvc);
+        assert!(!pvc.iter().any(|a| a == "--fresh-backing"), "{:?}", pvc);
+        assert_eq!(
+            &pvc[..6],
+            &["--export-path", "/mnt/volume", "--volume-id", "pvc-1", "--port", "2049"]
+        );
+        let rox = nfs_server_args("pvc-1", 2049, true, true, &NfsBackend::Pvc);
+        assert!(rox.iter().any(|a| a == "--verbose") && rox.iter().any(|a| a == "--read-only"));
+    }
+
     #[test]
     fn nfs_reconcile_truth_table() {
         use NfsPodLiveness::*;

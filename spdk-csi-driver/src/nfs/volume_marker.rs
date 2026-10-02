@@ -19,6 +19,10 @@
 //!   no marker, no flint state         → RefuseEmpty (the F30 shape: an
 //!                                       empty dir is NEVER a formatted
 //!                                       flint volume post-fix)
+//!   ...unless the backing is FRESH    → StampFresh (the emptyDir backend:
+//!      and the dir is wholly empty      a hostPath the kubelet creates
+//!                                       empty, which nothing stages, so
+//!                                       its first boot stamps the marker)
 
 use std::path::Path;
 
@@ -36,16 +40,28 @@ pub enum MarkerVerdict {
     /// No marker and no flint state: an empty/foreign directory (the F30
     /// empty-dir export). Refuse loudly instead of minting fresh state.
     RefuseEmpty,
+    /// No marker, no flint state, and the server was told its backing is
+    /// fresh (`--fresh-backing`, the emptyDir backend) and the export is
+    /// WHOLLY empty: a new volume. Stamp and serve.
+    StampFresh,
 }
 
 /// Pure classification rule.
-pub fn classify(marker: Option<&str>, expected: &str, has_flint_state: bool) -> MarkerVerdict {
+/// `fresh_and_empty`: the backing is declared fresh AND the export holds
+/// no entries at all.
+pub fn classify(
+    marker: Option<&str>,
+    expected: &str,
+    has_flint_state: bool,
+    fresh_and_empty: bool,
+) -> MarkerVerdict {
     match marker {
         Some(m) if m == expected => MarkerVerdict::Serve,
         Some(m) => MarkerVerdict::RefuseMismatch {
             found: m.to_string(),
         },
         None if has_flint_state => MarkerVerdict::AdoptLegacy,
+        None if fresh_and_empty => MarkerVerdict::StampFresh,
         None => MarkerVerdict::RefuseEmpty,
     }
 }
@@ -53,7 +69,16 @@ pub fn classify(marker: Option<&str>, expected: &str, has_flint_state: bool) -> 
 /// Read state from the export, classify, and stamp the marker when the
 /// verdict allows serving. Returns the verdict; the caller decides the
 /// process's fate (the server exits on Refuse*).
-pub fn verify_and_adopt(export_root: &Path, expected: &str) -> std::io::Result<MarkerVerdict> {
+///
+/// `fresh_backing`: the caller (the controller, via `--fresh-backing`)
+/// vouches that the backing directory is created empty for this volume —
+/// only the emptyDir backend does. Even then only a WHOLLY empty export
+/// is stamped; anything else without a marker is still refused.
+pub fn verify_and_adopt(
+    export_root: &Path,
+    expected: &str,
+    fresh_backing: bool,
+) -> std::io::Result<MarkerVerdict> {
     let marker_path = export_root.join(MARKER_REL);
     let marker = match std::fs::read_to_string(&marker_path) {
         Ok(s) => Some(s.trim().to_string()),
@@ -64,10 +89,14 @@ pub fn verify_and_adopt(export_root: &Path, expected: &str) -> std::io::Result<M
     // volume any flint server has ever served (fh_kernel creates it at
     // first boot), and never on an empty/foreign directory.
     let has_flint_state = export_root.join(".flint-nfs").join("fh.key").exists();
-    let verdict = classify(marker.as_deref(), expected, has_flint_state);
+    // Wholly empty: not one entry, hidden ones included. Asked only when
+    // the caller vouches the backing is fresh, so a PVC-backed export
+    // never reaches the stamp arm whatever it holds.
+    let fresh_and_empty = fresh_backing && std::fs::read_dir(export_root)?.next().is_none();
+    let verdict = classify(marker.as_deref(), expected, has_flint_state, fresh_and_empty);
     match &verdict {
         MarkerVerdict::Serve => {}
-        MarkerVerdict::AdoptLegacy => {
+        MarkerVerdict::AdoptLegacy | MarkerVerdict::StampFresh => {
             std::fs::create_dir_all(export_root.join(".flint-nfs"))?;
             // write-then-rename: a crash mid-write must not leave a
             // truncated marker that later reads as a mismatch.
@@ -114,14 +143,22 @@ mod tests {
 
     #[test]
     fn verdict_table_is_pinned() {
-        assert_eq!(classify(Some(VOL), VOL, true), MarkerVerdict::Serve);
-        assert_eq!(classify(Some(VOL), VOL, false), MarkerVerdict::Serve);
-        assert_eq!(
-            classify(Some("pvc-other"), VOL, true),
-            MarkerVerdict::RefuseMismatch { found: "pvc-other".into() }
-        );
-        assert_eq!(classify(None, VOL, true), MarkerVerdict::AdoptLegacy);
-        assert_eq!(classify(None, VOL, false), MarkerVerdict::RefuseEmpty);
+        for fresh in [false, true] {
+            assert_eq!(classify(Some(VOL), VOL, true, fresh), MarkerVerdict::Serve);
+            assert_eq!(classify(Some(VOL), VOL, false, fresh), MarkerVerdict::Serve);
+            assert_eq!(
+                classify(Some("pvc-other"), VOL, true, fresh),
+                MarkerVerdict::RefuseMismatch { found: "pvc-other".into() }
+            );
+            assert_eq!(
+                classify(Some("pvc-other"), VOL, false, fresh),
+                MarkerVerdict::RefuseMismatch { found: "pvc-other".into() }
+            );
+            assert_eq!(classify(None, VOL, true, fresh), MarkerVerdict::AdoptLegacy);
+        }
+        assert_eq!(classify(None, VOL, false, false), MarkerVerdict::RefuseEmpty);
+        // Only a FRESH backing that is wholly empty is a new volume.
+        assert_eq!(classify(None, VOL, false, true), MarkerVerdict::StampFresh);
     }
 
     /// The F30 incident shape end-to-end: an EMPTY export dir must be
@@ -131,7 +168,39 @@ mod tests {
     fn empty_export_dir_is_refused() {
         let dir = std::env::temp_dir().join(format!("f30-empty-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(verify_and_adopt(&dir, VOL).unwrap(), MarkerVerdict::RefuseEmpty);
+        assert_eq!(verify_and_adopt(&dir, VOL, false).unwrap(), MarkerVerdict::RefuseEmpty);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The nfs-only (emptyDir) backend: the controller's server pod
+    /// exports a hostPath directory the kubelet creates empty, and
+    /// nothing stages it, so nothing stamps it. Without `fresh_backing`
+    /// every such volume was refused at first boot (found 2026-10-02 by
+    /// the first CI run of the nfs-only suite). With it, a WHOLLY empty
+    /// dir is stamped once, and every later boot takes the Serve arm.
+    #[test]
+    fn fresh_backing_empty_dir_is_stamped_once_then_serves() {
+        let dir = std::env::temp_dir().join(format!("f30-fresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(verify_and_adopt(&dir, VOL, true).unwrap(), MarkerVerdict::StampFresh);
+        assert_eq!(std::fs::read_to_string(dir.join(MARKER_REL)).unwrap(), VOL);
+        assert_eq!(verify_and_adopt(&dir, VOL, true).unwrap(), MarkerVerdict::Serve);
+        assert_eq!(verify_and_adopt(&dir, VOL, false).unwrap(), MarkerVerdict::Serve);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `fresh_backing` is not a blanket waiver: a directory holding
+    /// anything but no marker and no flint state is still a foreign
+    /// directory, and is refused untouched.
+    #[test]
+    fn fresh_backing_does_not_adopt_a_non_empty_foreign_dir() {
+        let dir = std::env::temp_dir().join(format!("f30-foreign-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("somebody-elses-file"), b"x").unwrap();
+        assert_eq!(verify_and_adopt(&dir, VOL, true).unwrap(), MarkerVerdict::RefuseEmpty);
+        assert!(!dir.join(MARKER_REL).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -142,8 +211,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("f30-legacy-{}", std::process::id()));
         std::fs::create_dir_all(dir.join(".flint-nfs")).unwrap();
         std::fs::write(dir.join(".flint-nfs/fh.key"), [0u8; 32]).unwrap();
-        assert_eq!(verify_and_adopt(&dir, VOL).unwrap(), MarkerVerdict::AdoptLegacy);
-        assert_eq!(verify_and_adopt(&dir, VOL).unwrap(), MarkerVerdict::Serve);
+        assert_eq!(verify_and_adopt(&dir, VOL, false).unwrap(), MarkerVerdict::AdoptLegacy);
+        assert_eq!(verify_and_adopt(&dir, VOL, false).unwrap(), MarkerVerdict::Serve);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -154,7 +223,7 @@ mod tests {
         std::fs::create_dir_all(dir.join(".flint-nfs")).unwrap();
         std::fs::write(dir.join(MARKER_REL), "pvc-other").unwrap();
         assert_eq!(
-            verify_and_adopt(&dir, VOL).unwrap(),
+            verify_and_adopt(&dir, VOL, true).unwrap(),
             MarkerVerdict::RefuseMismatch { found: "pvc-other".into() }
         );
         assert_eq!(std::fs::read_to_string(dir.join(MARKER_REL)).unwrap(), "pvc-other");

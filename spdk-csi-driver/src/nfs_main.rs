@@ -13,7 +13,7 @@
 use clap::Parser;
 use spdk_csi_driver::nfs::{NfsConfig, NfsServer};
 use std::path::PathBuf;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber;
 
 #[derive(Parser, Debug)]
@@ -44,6 +44,14 @@ struct Args {
     /// Export as read-only (for ROX volumes)
     #[arg(short, long)]
     read_only: bool,
+
+    /// The backing directory is created EMPTY for this volume (the
+    /// controller passes this only for the emptyDir backend, a hostPath
+    /// nothing stages). F30 then stamps a WHOLLY empty export at first
+    /// boot instead of refusing it; any other unmarked export is still
+    /// refused.
+    #[arg(long)]
+    fresh_backing: bool,
 }
 
 /// Async worker count: FLINT_NFS_WORKER_THREADS, else every core on the
@@ -142,9 +150,18 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // F30: the export must PROVE it is the configured volume before one
     // byte is served. The incident: a bare mountpoint dir got exported
     // and the server silently minted fresh identity over emptiness.
-    match spdk_csi_driver::nfs::volume_marker::verify_and_adopt(&args.export_path, &args.volume_id)
-    {
+    match spdk_csi_driver::nfs::volume_marker::verify_and_adopt(
+        &args.export_path,
+        &args.volume_id,
+        args.fresh_backing,
+    ) {
         Ok(spdk_csi_driver::nfs::volume_marker::MarkerVerdict::Serve) => {}
+        Ok(spdk_csi_driver::nfs::volume_marker::MarkerVerdict::StampFresh) => {
+            warn!(
+                "F30: fresh backing — empty export {:?} stamped as volume {} (first boot of an emptyDir-backed volume)",
+                args.export_path, args.volume_id
+            );
+        }
         Ok(spdk_csi_driver::nfs::volume_marker::MarkerVerdict::AdoptLegacy) => {
             info!("F30: legacy volume adopted — identity marker stamped for {}", args.volume_id);
         }

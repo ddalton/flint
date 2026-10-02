@@ -4289,10 +4289,22 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         // unstage. NodeUnstage is context-free, so classification reads
         // the PV's volumeAttributes (pnfs.chert.us/* keys).
         let is_pnfs = !is_shared_nfs_consumer && self.driver.pv_is_pnfs(&actual_volume_id).await;
+        // nfs-only (emptyDir) volumes are NFS-served whatever their access
+        // mode — an RWO claim resolves to the Block role above — and own
+        // no SPDK object. Through the block path their unstage reached the
+        // SPDK teardown, which fails on an nfs-only node (no spdk.sock):
+        // kubelet retried forever and the volume never detached, so an RWO
+        // pod could not move nodes (found by the kind nfs-only suite,
+        // 2026-10-02).
+        let is_emptydir_nfs = !is_shared_nfs_consumer
+            && !is_pnfs
+            && self.driver.pv_is_nfs_emptydir(&actual_volume_id).await;
 
-        if is_shared_nfs_consumer || is_pnfs {
+        if is_shared_nfs_consumer || is_pnfs || is_emptydir_nfs {
             if is_pnfs {
                 println!("📡 [NODE] pNFS volume — unmount-only unstage (no SPDK teardown)");
+            } else if is_emptydir_nfs {
+                println!("📡 [NODE] nfs-only (emptyDir) volume — unmount-only unstage (no SPDK teardown)");
             } else {
                 println!("ℹ️ [NODE] Shared (RWX/ROX) NFS consumer — unmount-only unstage (no SPDK teardown)");
             }

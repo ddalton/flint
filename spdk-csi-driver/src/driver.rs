@@ -1633,6 +1633,25 @@ impl SpdkCsiDriver {
         }
     }
 
+    /// Is the PV behind `volume_id` an nfs-only (emptyDir-backed) volume?
+    /// Same read as [`Self::pv_is_pnfs`]; unreadable/absent PV ⇒ false.
+    pub async fn pv_is_nfs_emptydir(&self, volume_id: &str) -> bool {
+        use k8s_openapi::api::core::v1::PersistentVolume;
+        use kube::Api;
+        let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
+        let pv_name = crate::identity::storage_id_of_handle(volume_id);
+        match pvs.get(pv_name).await {
+            Ok(pv) => pv
+                .spec
+                .as_ref()
+                .and_then(|s| s.csi.as_ref())
+                .and_then(|csi| csi.volume_attributes.as_ref())
+                .map(crate::rwx_nfs::is_emptydir_backend)
+                .unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+
     /// The `pnfs.chert.us/layout` volumeAttribute of the PV whose
     /// volumeHandle is `volume_id` — `Ok(Some("block"))` for pnfs-block
     /// PVs, `Ok(None)` when the PV exists without the key (files-class).
