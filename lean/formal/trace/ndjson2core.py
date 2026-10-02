@@ -321,9 +321,9 @@ def convert(lines):
             "ContentConverges", "RecheckSkipped", "CommitAdvanceGuarded", "RetireAge", "GatewayIgnoresLease", "GatewayJudgesRead",
             "GatewaySweepGrace", "RenameAtomic",
             "ConsumeHonorsScope", "RescopeUnciteFirst", "RescopeKeepsDirty", "WidenKeepsLocal",
-            "UnlinkChecksBytes")},
-        # The traces check out unscoped and never rescope.
-        "Scopes": {frozenset(paths)}, "MaxRescopes": 0,
+            "UnlinkChecksBytes", "ConsumeKeepsLeft", "SyncKeepsLeft")},
+        # The traces check out unscoped, never rescope and never fail a fetch.
+        "Scopes": {frozenset(paths)}, "MaxRescopes": 0, "MaxFetchFails": 0,
     }
     return steps, consts, ver_of
 

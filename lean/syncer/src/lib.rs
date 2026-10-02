@@ -289,9 +289,6 @@ pub struct LeanConfig {
     /// Checkout refusal budgets (0 = unlimited).
     pub max_bytes: u64,
     pub max_files: u64,
-    /// Window deadline slack beyond the barrier start, seconds. A dead
-    /// syncer's window is ignorable past this deadline.
-    pub window_slack_secs: u64,
     /// Bounded concurrency for uploads and checkout fetches. The 0b
     /// rig measured the sequential loops at 561-854 PUTs/s and
     /// 1,000-2,000 GETs/s; fan-out multiplies directly against those.
@@ -495,7 +492,6 @@ impl LeanConfig {
             chunk_max: chunk::CHUNK_MAX,
             max_bytes: 0,
             max_files: 0,
-            window_slack_secs: 180,
             fanout: 128,
             upload_fanout: 32,
             project_id: None,

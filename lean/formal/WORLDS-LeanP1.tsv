@@ -38,3 +38,8 @@ LeanP1ProbeNarrowed	ProbeNarrowed
 LeanP1ProbeWidened	ProbeWidened
 LeanP1ProbeRescopeReplayed	ProbeRescopeReplayed
 LeanP1ProbeOutOfScopePublished	ProbeOutOfScopePublished
+LeanP1FetchHolds	HOLDS
+LeanP1ConsumeLeftRecorded	Inv_ShortcutSound
+LeanP1SyncLeftRecorded	Inv_ShortcutSound
+LeanP1ProbeFetchFailed	ProbeFetchFailed
+LeanP1ScopeFetchHolds	HOLDS

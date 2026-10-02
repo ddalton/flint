@@ -1,0 +1,14 @@
+LeanP1 + a failed fetch, 2026-10-02. LeanP1.tla md5 e6628be25509023a84b6eadbd01d3e62. tlc-rs 2aa87d67 (4 workers) and TLC (4 workers); every verdict agrees.
+$FF: Paths={p1} Free={} MaxRemovals=0 MaxFetchFails=1 MaxSyncs=1 MaxAges=0, two writers.
+
+world                           expect               tlc-rs                                     TLC
+LeanP1FetchHolds                HOLDS                HOLDS 3,510,269 distinct, depth 33, 60 s   HOLDS 3,510,269 distinct, 118 s
+LeanP1ScopeFetchHolds ($SC +1)  HOLDS                HOLDS 16,104,749 distinct, depth 31, 311 s HOLDS 16,104,749 distinct, 603 s
+LeanP1ConsumeLeftRecorded       Inv_ShortcutSound    fires, depth 6                             fires
+LeanP1SyncLeftRecorded (L-128)  Inv_ShortcutSound    fires, depth 4                             fires
+LeanP1ProbeFetchFailed          ProbeFetchFailed     fires, depth 4                             fires
+
+REGRESSION at MaxFetchFails = 0: LiveHoldsSmall's bounds as Spec 10,676,334 distinct / 39,223,077 generated, depth 36;
+LeanP1ScopeHolds 8,057,963 distinct — both unchanged. Trace check (core): ok.
+No code defect found: the consume, the sync and the widen already leave a failed path owed and record nothing as derived.
+At LeanP1Holds's two paths the failed fetch grew ~2.2x a level past 15M distinct at depth 13 (stopped), hence one path.

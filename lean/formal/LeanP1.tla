@@ -27,11 +27,16 @@
    recorded drop set before any consume.  With `MaxRescopes = 0` and
    `Scopes = {Paths}` every state is the unscoped model's.
 
-   Differences from the code the model keeps on purpose: a cited handle is
-   live (Inv_CitationsLive), so a consume's fetch never fails and a consume
-   always takes everything it owes; a widen's fetch never fails either;
-   a scoped SYNC (D4, a request scope narrower than the workspace's) is not
-   modelled.                                                                 *)
+   A FAILED FETCH (2026-10-02): a consume, a sync or a widen may fail to
+   fetch or write any path it would take, up to `MaxFetchFails` in a run (a
+   lost race with a newer document, a checksum refusal, a full disk).  The
+   path stays as it was and stays owed; the consume and the sync then record
+   nothing as derived (`left` in the code, L-128), and the consume does not
+   move the pointer it integrated.  With `MaxFetchFails = 0` every state is
+   the model's without it.
+
+   Differences from the code the model keeps on purpose: a scoped SYNC (D4,
+   a request scope narrower than the workspace's) is not modelled.        *)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS
@@ -68,7 +73,11 @@ CONSTANTS
   RescopeUnciteFirst,           \* the uncite lands before the unlink
   RescopeKeepsDirty,            \* the apply (and its replay) keeps a still-cited dirty path
   WidenKeepsLocal,              \* L-130: a widen keeps a file the agent made at an admitted path
-  UnlinkChecksBytes             \* the unlink takes only the bytes the uncite dropped
+  UnlinkChecksBytes,            \* the unlink takes only the bytes the uncite dropped
+  \* A failed fetch.
+  MaxFetchFails,
+  ConsumeKeepsLeft,             \* a consume that left a path records nothing as derived
+  SyncKeepsLeft                 \* likewise a sync (L-128)
 
 ASSUME Free \subseteq Paths
 ASSUME MaxMint \in Nat /\ MaxMint >= 1
@@ -87,7 +96,7 @@ VARIABLES
   gw,     \* per path, the save in flight: its fresh handle, not yet cited
   mv,     \* a two-CAS rename between its CASes (only when ~RenameAtomic)
   udel,   \* the deletes the gateway ACKNOWLEDGED: <<path, version deleted>>
-  restarts, syncs, regressed, rescopes,
+  restarts, syncs, regressed, rescopes, fails,
   upped, copies, orig,  \* every handle PUT; the copies made; a copy's original
   \* RETIRE-AGE G (M1, slice 5).  `retiring`: what a commit stopped citing,
   \* less than G ago (the code's young retire logs; the sweeps spare it).
@@ -97,7 +106,7 @@ VARIABLES
   retiring, aged, ages, rdoc, rlag
 
 bucket == <<live, minted, doc, seq, tomb, base, acked, conflicts, holder, gw, mv, udel>>
-aux == <<restarts, syncs, regressed, rescopes, upped, copies, orig>>
+aux == <<restarts, syncs, regressed, rescopes, fails, upped, copies, orig>>
 ret == <<retiring, aged, ages, rdoc, rlag>>
 vars == <<live, minted, doc, seq, tomb, base, acked, conflicts, holder,
           nextGen, ui, reqs, barriers, w, took, gw, mv, udel, aux, ret>>
@@ -156,7 +165,7 @@ TypeOK ==
   /\ gw \in [Paths -> Opt(Handles)]
   /\ mv \in Opt(Paths \X Handles)
   /\ udel \subseteq Paths \X Handles
-  /\ restarts \in Nat /\ syncs \in Nat /\ regressed \in BOOLEAN /\ rescopes \in Nat
+  /\ restarts \in Nat /\ syncs \in Nat /\ regressed \in BOOLEAN /\ rescopes \in Nat /\ fails \in Nat
   /\ retiring \subseteq Handles /\ aged \subseteq Handles /\ ages \in Nat
   /\ rdoc \in [Paths -> Opt(Handles)] /\ rlag \in BOOLEAN
 
@@ -189,7 +198,7 @@ GPut(p) ==
      /\ nextGen' = nextGen + 1 /\ ui' = ui + 1
      /\ upped' = upped \cup {h}
   /\ UNCHANGED <<doc, seq, tomb, acked, conflicts, holder, reqs, barriers, w, mv, udel,
-                 restarts, syncs, regressed, rescopes, copies, orig>>
+                 restarts, syncs, regressed, rescopes, fails, copies, orig>>
 
 \* ...and its CAS, judged against the CURRENT document: it lands only over
 \* the version the UI read.  Otherwise 412, not acknowledged, and the fresh
@@ -312,20 +321,28 @@ Consume(s) ==
   /\ w[s].sStage = "none"
   /\ IF CheapPath(s)
      THEN /\ w' = [w EXCEPT ![s].pc = "consumed"]
-          /\ UNCHANGED regressed
+          /\ UNCHANGED <<regressed, fails>>
      ELSE LET owed == {p \in Paths : Owed(s, p)}
               conv == {p \in Paths : Converges(s, p)}
-              taken == owed \cup conv
-          IN /\ w' = [w EXCEPT ![s].pc = "consumed",
+          IN \E fail \in SUBSET owed :
+             LET taken == (owed \ fail) \cup conv
+                 left == fail # {}
+             IN /\ fails + Cardinality(fail) <= MaxFetchFails
+                /\ w' = [w EXCEPT ![s].pc = "consumed",
                          ![s].local = [p \in Paths |-> IF p \in taken THEN doc[p] ELSE @[p]],
                          ![s].baseline = [p \in Paths |-> IF p \in taken THEN doc[p] ELSE @[p]],
                          ![s].integrated = @ \cup {Gen(doc[p]) : p \in {q \in taken : doc[q] # Nil}},
-                         ![s].synced = seq, ![s].derived = seq,
-                         \* A path left untaken is the agent's work, owed again
-                         \* the moment the agent backs out (a revert, or a new
-                         \* file deleted unpublished).
-                         ![s].skipped = {p \in Paths \ taken : doc[p] # w[s].baseline[p] /\ Held(s, p)}]
-             /\ regressed' = (regressed \/ \E p \in owed : Back(s, p))
+                         \* Something left owed: the tree is not integrated with
+                         \* this document, and nothing is recorded as derived.
+                         ![s].synced = IF left THEN @ ELSE seq,
+                         ![s].derived = IF left /\ ConsumeKeepsLeft THEN 0 ELSE seq,
+                         \* A dirty path left untaken is the agent's work, owed
+                         \* again the moment the agent backs out (a revert, or a
+                         \* new file deleted unpublished).
+                         ![s].skipped = {p \in Paths \ taken : doc[p] # w[s].baseline[p] /\ Held(s, p)
+                                                             /\ w[s].local[p] # w[s].baseline[p]}]
+                /\ fails' = fails + Cardinality(fail)
+                /\ regressed' = (regressed \/ \E p \in owed \ fail : Back(s, p))
   /\ UNCHANGED <<live, minted, doc, seq, tomb, base, acked, conflicts, holder, gw, mv, udel,
                  nextGen, ui, reqs, barriers, restarts, syncs, rescopes, upped, copies, orig>>
 
@@ -375,7 +392,7 @@ Upload(s, p) ==
                                ![s].local[p] = IF @ = h THEN c ELSE @]
           /\ copies' = copies + 1
   /\ UNCHANGED <<doc, seq, tomb, acked, conflicts, holder, gw, mv, udel,
-                 nextGen, ui, reqs, barriers, restarts, syncs, regressed, rescopes>>
+                 nextGen, ui, reqs, barriers, restarts, syncs, regressed, rescopes, fails>>
 
 ------------------------------------------------------------------------------
 (* The merge's vocabulary, read at the CAS against the CURRENT document
@@ -541,7 +558,7 @@ Restart(s) ==
   /\ holder' = IF holder = s THEN "none" ELSE holder
   /\ restarts' = restarts + 1
   /\ UNCHANGED <<live, minted, doc, seq, tomb, base, acked, conflicts, gw, mv, udel,
-                 nextGen, ui, reqs, barriers, regressed, syncs, rescopes, upped, copies, orig>>
+                 nextGen, ui, reqs, barriers, regressed, syncs, rescopes, fails, upped, copies, orig>>
 
 \* A sync, between barriers: it takes what is owed, and records what it
 \* derived as a consume would: the paths it left are the agent's (dirty,
@@ -551,15 +568,21 @@ Restart(s) ==
 Sync(s) ==
   /\ On(s) /\ w[s].pc = "idle" /\ syncs < MaxSyncs /\ w[s].sStage \in {"none", "saved"}
   /\ \E p \in Paths : Owed(s, p)
-  /\ LET owed == {p \in Paths : Owed(s, p)}
+  /\ LET all == {p \in Paths : Owed(s, p)} IN
+     \E fail \in SUBSET all :
+     LET owed == all \ fail
+         left == fail # {}
          bl == [p \in Paths |-> IF p \in owed THEN doc[p] ELSE w[s].baseline[p]]
-     IN w' = [w EXCEPT ![s].local = [p \in Paths |-> IF p \in owed THEN doc[p] ELSE @[p]],
+     IN /\ fails + Cardinality(fail) <= MaxFetchFails
+        /\ w' = [w EXCEPT ![s].local = [p \in Paths |-> IF p \in owed THEN doc[p] ELSE @[p]],
                        ![s].baseline = bl,
                        ![s].integrated = @ \cup {Gen(doc[p]) : p \in {q \in owed : doc[q] # Nil}},
-                       ![s].derived = seq,
-                       ![s].skipped = {p \in Paths : doc[p] # bl[p] /\ w[s].local[p] # bl[p] /\ Held(s, p)}]
+                       ![s].derived = IF left /\ SyncKeepsLeft THEN 0 ELSE seq,
+                       ![s].skipped = IF left /\ SyncKeepsLeft THEN {}
+                                      ELSE {p \in Paths : doc[p] # bl[p] /\ w[s].local[p] # bl[p] /\ Held(s, p)}]
+        /\ fails' = fails + Cardinality(fail)
+        /\ regressed' = (regressed \/ \E p \in owed : Back(s, p))
   /\ syncs' = syncs + 1
-  /\ regressed' = (regressed \/ \E p \in Paths : Owed(s, p) /\ Back(s, p))
   /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, restarts, rescopes, upped, copies, orig>>
 
 ------------------------------------------------------------------------------
@@ -583,7 +606,7 @@ RescopeBegin(s) ==
                          ![s].sDrop = Leaving(s, T), ![s].sKeep = {},
                          ![s].sHeld = [p \in Paths |-> Nil]]
   /\ rescopes' = rescopes + 1
-  /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, restarts, syncs, regressed, upped, copies, orig>>
+  /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, restarts, syncs, regressed, fails, upped, copies, orig>>
 
 \* What the apply keeps: still cited and dirty.  A path already uncited
 \* reads as dirty in the code (an upload) and is NOT kept: keeping it would
@@ -635,8 +658,12 @@ RescopeSecond(s) ==
          kept == IF WidenKeepsLocal
                  THEN {p \in add : local1[p] # Nil /\ Content(local1[p]) # Content(doc[p])}
                  ELSE {}
-         fetch == add \ kept
-     IN w' = [w EXCEPT ![s].sStage = "none",
+         fetch0 == add \ kept
+     IN \E wfail \in SUBSET {p \in fetch0 : local1[p] = Nil \/ ~WidenKeepsLocal} :
+        LET fetch == fetch0 \ wfail IN
+        /\ fails + Cardinality(wfail) <= MaxFetchFails
+        /\ fails' = fails + Cardinality(wfail)
+        /\ w' = [w EXCEPT ![s].sStage = "none",
                        \* Fetched where the tree has nothing (or, unguarded,
                        \* over whatever it has); adopted where its bytes ARE
                        \* the document's.
@@ -650,7 +677,8 @@ RescopeSecond(s) ==
                        ![s].sTgt = {}, ![s].sDrop = {}, ![s].sKeep = {},
                        ![s].sHeld = [p \in Paths |-> Nil],
                        ![s].unlinked = (@ \cup {p \in Paths : unlink(p) /\ RescopeUnciteFirst}) \ fetch]
-  /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
+  /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers,
+                 restarts, syncs, regressed, rescopes, upped, copies, orig>>
 
 ------------------------------------------------------------------------------
 (* The retire age (M1) and a reader of the document.                       *)
@@ -702,7 +730,7 @@ Init ==
   /\ gw = [p \in Paths |-> Nil]
   /\ mv = Nil
   /\ udel = {}
-  /\ restarts = 0 /\ syncs = 0 /\ regressed = FALSE /\ rescopes = 0
+  /\ restarts = 0 /\ syncs = 0 /\ regressed = FALSE /\ rescopes = 0 /\ fails = 0
   /\ upped = live /\ copies = 0 /\ orig = [h \in Handles |-> Nil]
   /\ retiring = {} /\ aged = {} /\ ages = 0
   /\ rdoc = [p \in Paths |-> Nil] /\ rlag = TRUE
@@ -839,6 +867,8 @@ ProbeNarrowed == [][~\E s \in Writers : w[s].sStage = "mid" /\ w'[s].sStage = "n
 ProbeWidened == [][~\E s \in Writers : w[s].sStage = "mid" /\ w'[s].sStage = "none"
                      /\ \E p \in Paths : w[s].baseline[p] = Nil /\ w'[s].baseline[p] # Nil]_vars
 ProbeRescopeReplayed == [][~\E s \in Writers : w[s].sStage = "mid" /\ w'[s].sStage = "saved"]_vars
+\* A consume or a sync left a path it owed (a fetch failed).
+ProbeFetchFailed == [][fails' = fails]_vars
 ProbeOutOfScopePublished ==
   ~\E s \in Writers, p \in Paths : On(s) /\ p \notin w[s].scope /\ w[s].baseline[p] # Nil
 

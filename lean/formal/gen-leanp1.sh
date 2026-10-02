@@ -11,17 +11,19 @@ KEYS="Paths Free Writers MaxMint MaxUI MaxRemovals MaxBarriers MaxRestarts MaxSy
 CommitSurfacesForeign CommitVerifiesUploads SweepUnderLease CollectorSparesCited \
 CommitRecordsDeleteOverride DeleteWinsPreserved ContentConverges RecheckSkipped CommitAdvanceGuarded RetireAge \
 GatewayIgnoresLease GatewayJudgesRead GatewaySweepGrace RenameAtomic \
-Scopes MaxRescopes ConsumeHonorsScope RescopeUnciteFirst RescopeKeepsDirty WidenKeepsLocal UnlinkChecksBytes"
+Scopes MaxRescopes ConsumeHonorsScope RescopeUnciteFirst RescopeKeepsDirty WidenKeepsLocal UnlinkChecksBytes \
+MaxFetchFails ConsumeKeepsLeft SyncKeepsLeft"
 emit() { # <name> <spec> <invariants> <properties> <overrides...>
   local name=$1 spec=$2 invs=$3 props=$4; shift 4
   local c_Paths='{p1, p2}' c_Free='{p2}' c_Writers='{A, B}'
   local c_MaxMint=3 c_MaxUI=1 c_MaxRemovals=1 c_MaxBarriers=2 c_MaxRestarts=0 c_MaxSyncs=0 c_MaxCopies=1 c_MaxAges=1
-  local c_Scopes= c_MaxRescopes=0
+  local c_Scopes= c_MaxRescopes=0 c_MaxFetchFails=0
   local k kv v
   for k in CommitSurfacesForeign CommitVerifiesUploads SweepUnderLease CollectorSparesCited \
            CommitRecordsDeleteOverride DeleteWinsPreserved ContentConverges RecheckSkipped CommitAdvanceGuarded RetireAge \
            GatewayIgnoresLease GatewayJudgesRead GatewaySweepGrace RenameAtomic \
-           ConsumeHonorsScope RescopeUnciteFirst RescopeKeepsDirty WidenKeepsLocal UnlinkChecksBytes; do
+           ConsumeHonorsScope RescopeUnciteFirst RescopeKeepsDirty WidenKeepsLocal UnlinkChecksBytes \
+           ConsumeKeepsLeft SyncKeepsLeft; do
     eval "local c_$k=TRUE"
   done
   for kv in "$@"; do k=${kv%%=*}; v=${kv#*=}; eval "c_$k=\"\$v\""; done
@@ -104,3 +106,14 @@ emit ProbeNarrowed Spec TypeOK ProbeNarrowed $SC
 emit ProbeWidened Spec TypeOK ProbeWidened $SC
 emit ProbeRescopeReplayed Spec TypeOK ProbeRescopeReplayed $SC
 emit ProbeOutOfScopePublished Spec ProbeOutOfScopePublished "" $SC
+# 2026-10-02: A FAILED FETCH. One fetch or write may fail in a consume, a
+# sync or a widen; the path stays owed and nothing is recorded as derived.
+# A sync is reachable (MaxSyncs=1); no retire age (LeanP1Holds checks it).
+# Two writers on one path, LiveHoldsSmall's shape: at LeanP1Holds's two
+# paths the failed fetch grew 2.2x a level past 15M states at depth 13.
+FF="Paths={p1} Free={} MaxRemovals=0 MaxFetchFails=1 MaxSyncs=1 MaxAges=0"
+emit FetchHolds Spec "$INV" "$PROPS" $FF
+emit ConsumeLeftRecorded Spec TypeOK,Inv_ShortcutSound "" ConsumeKeepsLeft=FALSE $FF
+emit SyncLeftRecorded Spec TypeOK,Inv_ShortcutSound "" SyncKeepsLeft=FALSE $FF
+emit ProbeFetchFailed Spec TypeOK ProbeFetchFailed $FF
+emit ScopeFetchHolds Spec "$INV" "$SPROPS" $SC MaxFetchFails=1

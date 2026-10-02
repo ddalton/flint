@@ -54,7 +54,7 @@ Guards read the state; effects write it.
 | **Edit**(s, p) | — | mint h derived from `baseline[p]`; `local[p] := h` | — | — |
 | **Delete**(s, p) | `local[p] ≠ Nil` | `local[p] := Nil` | — | — |
 | **Checkout**(s) | the writer is off | picks a scope T (`{Paths}` unscoped); `local`, `baseline` := `doc` on T, nothing elsewhere; `inst` := `doc`; `synced`, `derived` := `seq`; nothing skipped | — | — |
-| **Consume**(s) | idle | THE CHEAP PATH first (the scan trigger): `derived = seq` and every `skipped` path still dirty ⇒ nothing is derived (one pointer GET, a stat per skipped path). Otherwise, owed = every path where `doc ≠ baseline`, the tree is clean (`local = baseline`) and the tree HOLDS (its baseline cites it, or its scope covers it): what the scope declined stays declined. Also taken: a dirty path whose bytes ARE the document's, or absent in both (content convergence — a restart between this writer's CAS and step 7 leaves exactly that). The tree and the baseline take `doc` there; `synced`, `derived` := `seq`; `skipped` := the paths left untaken, which are the agent's (dirty, the document differs) | `Inv_ShortcutSound`, `Inv_NoRegress` | `LeanP1OwedUnmarked` (skipped not re-checked), `LeanP1NoConvergence` (recorded) |
+| **Consume**(s) | idle | THE CHEAP PATH first (the scan trigger): `derived = seq` and every `skipped` path still dirty ⇒ nothing is derived (one pointer GET, a stat per skipped path). Otherwise, owed = every path where `doc ≠ baseline`, the tree is clean (`local = baseline`) and the tree HOLDS (its baseline cites it, or its scope covers it): what the scope declined stays declined. Also taken: a dirty path whose bytes ARE the document's, or absent in both (content convergence — a restart between this writer's CAS and step 7 leaves exactly that). The tree and the baseline take `doc` there; `synced`, `derived` := `seq`; `skipped` := the paths left untaken, which are the agent's (dirty, the document differs). A path whose fetch or write fails stays as it was and owed; then `derived` := none and `synced` stays | `Inv_ShortcutSound`, `Inv_NoRegress` | `LeanP1OwedUnmarked` (skipped not re-checked), `LeanP1NoConvergence` (recorded) |
 | **Scan**(s) | consumed | `uploads` := paths whose tree differs from the baseline and is present; `deletes` := any subset of the absent ones (the two-scan guard); `snap` := the tree | — | — |
 | **Skip**(s) | consumed; nothing dirty; `seq = synced` | back to idle: no scan, no CAS | — | — |
 | **Upload**(s, p) | scanned, p in `uploads` | the snapshot's handle lands, no condition; bytes PUT once before land at a COPY handle | R1 | — |
@@ -86,7 +86,7 @@ Predicates on a state, and two on a step. Each world's list is in
 | **Inv_AckedNamed** | an acknowledged handle that is gone is accounted for by something in the state that names it: a conflict record; a citation or tombstone derived from it at its path or where the human moved it; an acknowledged delete of a version derived from it; a later acknowledged write at its path; or a tree that took it in at that path and no longer holds it | — (every rule above that names it) |
 | **Inv_OneHolder** | a writer in its commit section is the cell's holder | the lease |
 | **Inv_NoRegress** | a consume or a sync never steps a tree back to a version its own derives from, unless a record names what it steps over (L-123's class) | — |
-| **Inv_ShortcutSound** | an idle writer with no rescope in flight, whose pointer is where it left it and that nothing marked owed, is owed nothing | the merge marking what it saw untaken (`LeanP1OwedUnmarked`) |
+| **Inv_ShortcutSound** | an idle writer with no rescope in flight, whose pointer is where it left it and that nothing marked owed, is owed nothing | the merge marking what it saw untaken (`LeanP1OwedUnmarked`); a consume or a sync that left a path recording nothing as derived (`LeanP1ConsumeLeftRecorded`, `LeanP1SyncLeftRecorded`, L-128) |
 | **Inv_ReaderFetches** | a reader that loaded the document less than G ago can fetch every handle it cites (one lagging longer re-resolves the pointer) | the retire age (`LeanP1ReaderLoses`) |
 | **Prop_NoSilentRevert** | no lost update: a commit replaces a published version only if its tree held it at the path, the new version derives from it, a record preserves it, it moves to another path, or it was the human's own earlier acknowledged version there | R7 (`LeanP1NoR7`), the gateway judging a save against the version read (`LeanP1GatewayBlind`) |
 | **Prop_DeleteSettles** | a barrier that published a delete leaves the tree and the document agreeing at that path | M3 (`LeanP1DeleteOutranked`: theirs outranking mine) |
@@ -109,13 +109,19 @@ dirty path stays cited) is not load-bearing for the agent's work under the
 unlink's byte check: an uncited dirty file is kept and publishes as an
 add, and R7 records what it lands over.
 
-A cited handle is live (`Inv_CitationsLive`), so the model's consume never
-fails a fetch and always takes everything it owes. The code's consume can
-fail a fetch; then it records nothing as derived (`derived_etag` = none), and the next consume derives again. A sync does the same (L-128), and a reader re-syncs while its baseline says something is owed (L-129).
+A failed fetch or write is modelled (2026-10-02): a consume, a sync or a
+widen may fail on any path it would take, once per run (`MaxFetchFails`).
+The path stays as it was and stays owed; the consume and the sync record
+nothing as derived (`derived_etag` = none) and the consume does not move
+the pointer it integrated, so the next consume derives again
+(`LeanP1FetchHolds`, two writers on one path; `LeanP1ScopeFetchHolds`, with
+scope and rescope). Recording a derive that left something is
+`LeanP1ConsumeLeftRecorded` / `LeanP1SyncLeftRecorded` (L-128's class); both
+break `Inv_ShortcutSound`. A reader's re-sync while its baseline says
+something is owed (L-129) is not in the model: it has no reader tree.
 
-A widen's fetch never fails in the model. In the code a refused fetch is
-recorded (`rescope-refused`) and the path stays unheld but covered, so the
-next consume owes it.
+A widen's failed fetch leaves the path unheld but covered, so the next
+consume owes it; the code also records it (`rescope-refused`).
 
 The retire log is written after the CAS. A crash between the two leaves
 those handles to the orphan sweep's write-age rule; the model does not
