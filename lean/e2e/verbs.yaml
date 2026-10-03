@@ -162,6 +162,7 @@ spec:
         # mechanism under test can advance the manifest.
         - { name: FLINT_SYNC_FLOOR_SECS, value: "3600" }
         - { name: FLINT_SYNC_FANOUT, value: "1" }
+        - { name: FLINT_SYNC_UPLOAD_FANOUT, value: "1" }  # FANOUT bounds fetches only since the split
         - { name: AWS_ACCESS_KEY_ID, value: drill }
         - { name: AWS_SECRET_ACCESS_KEY, value: drillsecret }
         - { name: AWS_REGION, value: us-east-1 }
@@ -190,6 +191,7 @@ spec:
         - { name: FLINT_SYNC_ENDPOINT, value: "http://minio.flint-system.svc:9000" }
         - { name: FLINT_SYNC_FLOOR_SECS, value: "3600" }
         - { name: FLINT_SYNC_FANOUT, value: "1" }
+        - { name: FLINT_SYNC_UPLOAD_FANOUT, value: "1" }  # FANOUT bounds fetches only since the split
         - { name: AWS_ACCESS_KEY_ID, value: drill }
         - { name: AWS_SECRET_ACCESS_KEY, value: drillsecret }
         - { name: AWS_REGION, value: us-east-1 }
@@ -213,6 +215,7 @@ spec:
         - { name: FLINT_SYNC_ENDPOINT, value: "http://minio.flint-system.svc:9000" }
         - { name: FLINT_SYNC_FLOOR_SECS, value: "3600" }
         - { name: FLINT_SYNC_FANOUT, value: "1" }
+        - { name: FLINT_SYNC_UPLOAD_FANOUT, value: "1" }  # FANOUT bounds fetches only since the split
         - { name: AWS_ACCESS_KEY_ID, value: drill }
         - { name: AWS_SECRET_ACCESS_KEY, value: drillsecret }
         - { name: AWS_REGION, value: us-east-1 }
@@ -236,6 +239,7 @@ spec:
         - { name: FLINT_SYNC_ENDPOINT, value: "http://minio.flint-system.svc:9000" }
         - { name: FLINT_SYNC_FLOOR_SECS, value: "3600" }
         - { name: FLINT_SYNC_FANOUT, value: "1" }
+        - { name: FLINT_SYNC_UPLOAD_FANOUT, value: "1" }  # FANOUT bounds fetches only since the split
         - { name: AWS_ACCESS_KEY_ID, value: drill }
         - { name: AWS_SECRET_ACCESS_KEY, value: drillsecret }
         - { name: AWS_REGION, value: us-east-1 }
@@ -268,6 +272,7 @@ spec:
         - { name: FLINT_SYNC_ENDPOINT, value: "http://minio.flint-system.svc:9000" }
         - { name: FLINT_SYNC_FLOOR_SECS, value: "3600" }
         - { name: FLINT_SYNC_FANOUT, value: "1" }
+        - { name: FLINT_SYNC_UPLOAD_FANOUT, value: "1" }  # FANOUT bounds fetches only since the split
         - { name: AWS_ACCESS_KEY_ID, value: drill }
         - { name: AWS_SECRET_ACCESS_KEY, value: drillsecret }
         - { name: AWS_REGION, value: us-east-1 }
@@ -283,6 +288,7 @@ spec:
         - { name: FLINT_SYNC_ENDPOINT, value: "http://minio.flint-system.svc:9000" }
         - { name: FLINT_SYNC_FLOOR_SECS, value: "3600" }
         - { name: FLINT_SYNC_FANOUT, value: "1" }
+        - { name: FLINT_SYNC_UPLOAD_FANOUT, value: "1" }  # FANOUT bounds fetches only since the split
         - { name: AWS_ACCESS_KEY_ID, value: drill }
         - { name: AWS_SECRET_ACCESS_KEY, value: drillsecret }
         - { name: AWS_REGION, value: us-east-1 }

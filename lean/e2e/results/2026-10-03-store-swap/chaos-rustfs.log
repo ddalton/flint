@@ -1,0 +1,131 @@
+== chaos:rustfs start 2026-10-03T22:32:53Z
+Creating cluster "flint-lean-chaos" ...
+ • Ensuring node image (kindest/node:v1.34.0) 🖼  ...
+ ✓ Ensuring node image (kindest/node:v1.34.0) 🖼
+ • Preparing nodes 📦   ...
+ ✓ Preparing nodes 📦 
+ • Writing configuration 📜  ...
+ ✓ Writing configuration 📜
+ • Starting control-plane 🕹️  ...
+ ✓ Starting control-plane 🕹️
+ • Installing CNI 🔌  ...
+ ✓ Installing CNI 🔌
+ • Installing StorageClass 💾  ...
+ ✓ Installing StorageClass 💾
+ • Waiting ≤ 2m0s for control-plane = Ready ⏳  ...
+ ✓ Waiting ≤ 2m0s for control-plane = Ready ⏳
+ • Ready after 15s 💚
+Set kubectl context to "kind-flint-lean-chaos"
+You can now use your cluster with:
+
+kubectl cluster-info --context kind-flint-lean-chaos
+
+Thanks for using kind! 😊
+Image: "flint-sync:e2e" with ID "sha256:7261f85feb943e21b533f6485f77bd75a2ee45a7ef54bffbad04d7f1dda7288b" not yet present on node "flint-lean-chaos-control-plane", loading...
+Image: "flint-lean-gateway:e2e" with ID "sha256:a386e5187640be216259cc91a8f1db0ea6dfd81fa6c430c879623a8d925db6f0" not yet present on node "flint-lean-chaos-control-plane", loading...
+namespace/flint-system created
+deployment.apps/minio created
+service/minio created
+job.batch/make-bucket created
+secret/minio-creds created
+job.batch/make-bucket condition met
++ cd /home/ddalton/minio-swap-2026-10-03/lean/e2e
++ timeout 7200 ./run-chaos.sh
+flint-lean chaos drill — context kind-flint-lean-chaos
+  … resetting the rig (fresh emptyDirs + empty subtree)
+  store: rustfs
+
+── C1  crash mid-barrier, recover over the same emptyDir
+  ok: crash landed mid-barrier: 355/8000 objects up, no manifest (uncited orphans)
+  ok: recovery barrier: flint-sync: barrier seq=Some(1) up=8000 del=0 parked=0 consumed=0
+  ok: manifest cites all 8000, zero dangling citations
+  PASS
+
+── C2  pod loss mid-barrier, fresh pod carries on
+  ok: published the RPO-covered set: 6 files at seq 1
+  ok: pod lost mid-barrier: 1698/8000 burst objects orphaned in the bucket
+  ok: successor checked out at once (0s), no fence to wait out
+  ok: successor tree is EXACTLY the published set — loss equals the RPO
+  ok: manifest untouched by the loss: seq 1, 6 entries
+  ok: successor's first barrier claimed and handed on the fence (epoch 1)
+  ok: zero dangling citations after the loss
+  PASS
+
+── C3  a stopped writer resumes and its work lands
+  ok: straggler frozen mid-barrier at 351/8000 uploads
+  ok: second writer published beside the frozen one (seq 1 -> 2), no deposal
+  ok: thawed writer completed its barrier: flint-sync: barrier seq=Some(3) up=8000 del=0 parked=0 consumed=0
+  ok: both writers' work is cited: 8000 burst paths + other.txt at seq 3
+  ok: zero dangling citations
+  PASS
+
+── C4  container restart + two-scan delete
+  ok: published a/b/c
+  ok: container restarted over the live emptyDir (restartCount 0 -> 1)
+  ok: no resurrection: tree is 'a.txt c.txt' after restart
+  ok: barrier 1: b.txt still cited and still in the bucket (first absence only)
+  ok: barrier 2: b.txt un-cited; its handle stays for the retire grace — two consecutive scans, exactly
+  ok: with the grace at 0 the next commit collected b.txt's handle and kept the cited ones
+  PASS
+
+── C5  HITL write vs dirty local file
+  ok: published shared.txt=v1
+  ok: HITL overwrite: 428 without If-Match, 200 with it, and it is CITED at once
+  ok: both versions recoverable: cited=agent, preserved=tenants/c5/.flint/lean/conflicts/37a350b4-b84c-4396-a8f7-05f26146c01b/shared.txt holds the HITL bytes
+  ok: manifest citation matches the live object
+  PASS
+
+── C6  per-request epoch validation (P5)
+  ok: cell is at epoch 2 after two commits
+  ok: manifest install refused at the stale epoch 1 and at a future one (stale-epoch)
+  ok: current epoch + bad etag ⇒ 409 cas-miss, manifest untouched (seq 2)
+  ok: no bearer ⇒ 401, unknown workspace ⇒ 404
+  PASS
+
+── C7  barrier window refuses HITL
+  ok: UI save admitted in 0s while the writer held its commit (15s), cited at once
+  ok: after the hold the writer re-merged: agent.txt and ui.txt both cited
+  PASS
+
+── C8  gateway outage
+  ok: pre-outage: HITL write accepted
+  ok: outage confirmed: HITL write returns '000' (no gateway)
+  ok: the syncer published and cited a new file WHILE the gateway was down
+  note: a GATEWAY outage costs only the fourth of plan §2.2's four stated effects: publishing, checkout and sync are untouched. The shipped flint-sync writes the manifest and lease cells DIRECTLY to the store and links no HTTP client at all, so the gateway is not on its write path. C12 drills the other half — the proxy — and gets all four. Gateway and proxy are separate failure domains; plan §2.2 states them as one line ('gateway/proxy down'), and Phase 3's 'assert ALL FOUR effects' is a PROXY criterion.
+  ok: gateway recovered: HITL writes accepted again (stateless, nothing to rebuild)
+  PASS
+
+── C9  state-dir occupancy lock
+  ok: second syncer over one tree refused: flint-sync: state dir: state: another flint-sync already holds this workspace (/work/c9/.flint-sync): refusing to run two syncers over one tree
+  ok: lock released after the first exited: flint-sync: barrier seq=Some(1) up=0 del=0 parked=0 consumed=0
+  PASS
+
+── C10 prefix containment
+  ok: the GC ran and removed y.txt's handle
+  ok: all three neighbours survived (sibling prefix, non-files subtree, adjacent prefix)
+  PASS
+
+── C11 HITL upload survives later barriers (no sync)
+  ok: human uploaded human.txt; the gateway cited it at once
+  ok: barrier 1: consumed, adopted into the tree, cited
+  ok: barriers 2-5 did unrelated work including a GC
+  ok: human.txt intact and cited after 5 barriers and a GC, with no sync verb — cited set: b.txt c.txt human.txt 
+  PASS
+
+── C12 proxy unreachable (the other failure domain)
+  ok: published base.txt with the proxy reachable
+  ok: publish FAILS with the proxy unreachable (exit 1)
+  ok: the local tree is untouched — a failed publish is not a lost edit
+  ok: checkout WEDGES and the agent-start gate stays shut (no marker over an empty tree)
+  ok: both recover with the proxy back — publish and checkout, same subtree
+  note: the four effects in plan §2.2 are PROXY effects, not gateway effects: proxy unreachable ⇒ publish fails, checkout wedges, sync dead, HITL fails; gateway down (C8) ⇒ only HITL fails. Worth splitting in the plan, and it locates P5 enforcement at the PROXY — where the syncer's writes actually go, and where the epoch is already on the wire in GenerationStamps.
+  PASS
+
+════════════════════════════════════════════════
+flint-lean chaos drill: 12 passed, 0 failed (of 12)
+
+Measured residuals:
+  · a GATEWAY outage costs only the fourth of plan §2.2's four stated effects: publishing, checkout and sync are untouched. The shipped flint-sync writes the manifest and lease cells DIRECTLY to the store and links no HTTP client at all, so the gateway is not on its write path. C12 drills the other half — the proxy — and gets all four. Gateway and proxy are separate failure domains; plan §2.2 states them as one line ('gateway/proxy down'), and Phase 3's 'assert ALL FOUR effects' is a PROXY criterion.
+  · the four effects in plan §2.2 are PROXY effects, not gateway effects: proxy unreachable ⇒ publish fails, checkout wedges, sync dead, HITL fails; gateway down (C8) ⇒ only HITL fails. Worth splitting in the plan, and it locates P5 enforcement at the PROXY — where the syncer's writes actually go, and where the epoch is already on the wire in GenerationStamps.
+exit=0
+== chaos:rustfs end 2026-10-03T22:38:27Z

@@ -296,6 +296,23 @@ mbody() {
     objcat "$1/.flint/lean/manifest"
 }
 manif()    { mbody "$1"; }
+# ── files under the HANDLES layout (design 2026-09-19, R1/R3) ─────────
+# A write lands at `files/<path>@<flush>` and the manifest cites that
+# handle; the bare `files/<path>` is only the ingress key an outside
+# `aws s3 cp` writes, and nothing flint publishes writes it. Reading the
+# bare key is doubly wrong: `mc cat` finds nothing, and `mc stat` on it
+# SUCCEEDS by prefix whenever any handle exists — retired ones included
+# (checked on the box 2026-10-03: stat of a missing bare key rc=0 beside
+# `b.txt@u1`, rc=1 with no handle). So a file is read through its
+# citation, and "is there an object" is an exact listing of its handles.
+citekey() { manif "$1" | jq -r --arg p "$2" '.entries[$p].key // empty'; }  # <prefix> <path>
+fcat()    { local k; k=$(citekey "$1" "$2"); [ -n "$k" ] && objcat "$k"; }   # cited bytes
+cited()   { [ -n "$(citekey "$1" "$2")" ]; }
+# Handles of <path> in the bucket, cited or retired. `mc ls` of the
+# `<path>@` prefix lists exactly that path's handles (not `ab.txt@…`,
+# `b.txt.bak@…` or `sub/b.txt@…`; checked on the box).
+nhandles() { mcx mc ls --json "m/$BUCKET/$1/files/$2@" | jq -r 'select(.key)|.key' | grep -c . ; }
+haskey()   { [ "$(nhandles "$1" "$2")" -gt 0 ]; }
 # The FENCING seq is the POINTER's: a takeover rotation bumps it and
 # leaves `entries_seq` alone, which is the point of the layout.
 mseq()     { local c m; c=$(objcat "$1/.flint/lean/current"); [ -n "$c" ] && { printf '%s' "$c" | jq -r '.seq // 0'; return; }; m=$(manif "$1"); [ -z "$m" ] && { echo 0; return; }; printf '%s' "$m" | jq -r '.seq // 0'; }
@@ -338,7 +355,7 @@ bsource()  { objstat "$1/.flint/lean/current" | jq -r '.metadata["X-Amz-Meta-Fli
 
 wait_key() { # <prefix> <relative key> <iters>
   local i
-  for i in $(seq 1 "$3"); do objexists "$1/files/$2" && return 0; sleep 0.2; done
+  for i in $(seq 1 "$3"); do haskey "$1" "$2" && return 0; sleep 0.2; done
   return 1
 }
 wait_seq_gt() { # <prefix> <seq> <iters>
@@ -506,7 +523,7 @@ b2_crash_between_consume_and_ack() {
   # Land the kill INSIDE the honor: wait until an early key exists and
   # the last one does not. Two HEADs, no race against a sleep.
   wait_key $P "g0002.txt" 200 || { bad "the honor never started uploading"; return 1; }
-  objexists "$P/files/g0400.txt" && { bad "the upload finished before the kill — nothing mid-flight to test"; return 1; }
+  haskey $P g0400.txt && { bad "the upload finished before the kill — nothing mid-flight to test"; return 1; }
   local pend
   pend=$(inpod verbs-a "ls $R/.flint-sync/publish.pending.json 2>/dev/null")
   [ -n "$pend" ] || { bad "no pending record at kill time — the sentinel was not consumed"; return 1; }
@@ -525,7 +542,7 @@ b2_crash_between_consume_and_ack() {
   mnow=$(mseq $P)
   [ "$aseq" = "$mnow" ] || { bad "the ack names seq $aseq, the installed manifest is $mnow"; return 1; }
   [ "$aseq" -gt "$base" ] || { bad "the ack names the PRE-CRASH baseline ($aseq <= $base) — persisted state, not the re-run"; return 1; }
-  objexists "$P/files/g0400.txt" || { bad "the re-run did not finish the upload set"; return 1; }
+  cited $P g0400.txt || { bad "the re-run did not cite the whole upload set"; return 1; }
   ok "re-run acked seq $aseq (baseline was $base) and the full set is cited"
   killsync verbs-a
   return 0
@@ -642,7 +659,7 @@ b5_scoped_sync_defers_out_of_scope() {
   inpod verbs-a "mkdir -p $RA/inputs $RA/outputs" > /dev/null
   inpod verbs-a "printf A1 > $RA/inputs/a.txt; printf B1 > $RA/outputs/b.txt" > /dev/null
   sy verbs-a $P $RA "" barrier > /dev/null
-  [ "$(objcat $P/files/inputs/a.txt)" = "A1" ] || { bad "the seed barrier did not publish inputs/a.txt"; return 1; }
+  [ "$(fcat $P inputs/a.txt)" = "A1" ] || { bad "the seed barrier did not publish inputs/a.txt"; return 1; }
 
   # A genuinely FOREIGN writer: a second pod with its own emptyDir, so
   # it takes the lease over instead of self-recognizing it.
@@ -651,7 +668,7 @@ b5_scoped_sync_defers_out_of_scope() {
   # the scan by design, and a fixture built on one tests the residual.
   inpod verbs-b "printf A2-remote > $RB/inputs/a.txt; printf B2-remote > $RB/outputs/b.txt" > /dev/null
   sy verbs-b $P $RB "" barrier > /dev/null
-  [ "$(objcat $P/files/outputs/b.txt)" = "B2-remote" ] || { bad "the foreign writer did not install outputs/b.txt"; return 1; }
+  [ "$(fcat $P outputs/b.txt)" = "B2-remote" ] || { bad "the foreign writer did not install outputs/b.txt"; return 1; }
   ok "foreign install: inputs/a.txt=A2-remote and outputs/b.txt=B2-remote are in the bucket"
 
   # Scope = inputs/ only.
@@ -708,7 +725,7 @@ b6_conflict_rides_the_ack() {
   sy verbs-b $P $R "" checkout > /dev/null
   inpod verbs-b "printf REMOTE > $R/x.txt" > /dev/null
   sy verbs-b $P $R "" barrier > /dev/null
-  [ "$(objcat $P/files/x.txt)" = "REMOTE" ] || { bad "the foreign change never landed"; return 1; }
+  [ "$(fcat $P x.txt)" = "REMOTE" ] || { bad "the foreign change never landed"; return 1; }
 
   # Local dirt, observable to the scan (size differs, so no mtime race).
   inpod verbs-a "printf LOCAL-DIRTY > $R/x.txt" > /dev/null
@@ -787,7 +804,7 @@ b7_ticker_is_local_only_news() {
   local code
   code=$(gw_put_ws b07 hitl.txt "from-a-party-that-holds-no-lease")
   [ "$code" = "200" ] || { bad "the gateway HITL PUT returned $code: $(gw_body)"; return 1; }
-  [ "$(objcat $P/files/hitl.txt)" = "from-a-party-that-holds-no-lease" ] || { bad "the HITL bytes never reached the bucket"; return 1; }
+  [ "$(fcat $P hitl.txt)" = "from-a-party-that-holds-no-lease" ] || { bad "the HITL bytes never reached the bucket"; return 1; }
 
   local after
   for i in $(seq 1 60); do
@@ -829,6 +846,14 @@ b8_unused_verbs_cost_nothing() {
     local secs=$1 envs=$2 tag=$3
     mcx mc rm --recursive --force --versions "m/$BUCKET/$P/" > /dev/null 2>&1
     inpod verbs-a "rm -rf $R && mkdir -p $R" > /dev/null
+    # Publish ONCE first, so the window measures the steady state: a
+    # workspace with a pointer and a document. A never-published one
+    # (the fixture until 2026-10-03) has neither, so every read in its
+    # idle tick is a 404 — 4 GETs of the absent legacy `manifest` read as
+    # "the document is fetched again", and the lever this leg guards
+    # (never fetch the DOCUMENT to learn the seq) had nothing to guard.
+    inpod verbs-a "printf seed > $R/seed.txt" > /dev/null
+    sy verbs-a $P $R "" barrier > /dev/null
     sy_bg verbs-a $P $R "FLINT_SYNC_FLOOR_SECS=5 $envs" /tmp/b08.log run
     inpod verbs-a "for i in \$(seq 1 60); do [ -f $R/.flint-sync/checkout-complete ] && break; sleep 1; done" > /dev/null
     # Trace only AFTER startup, so claim/checkout/marker writes are not
@@ -866,61 +891,58 @@ b8_unused_verbs_cost_nothing() {
   # was ~19x under, so the absolute number is exactly the thing that
   # has been wrong before.
   #
-  # The plan states the idle tick EXACTLY (§7, and B8's own acceptance
-  # row): 4 requests at floor <= 30 s — the renew CAS and the deposal
-  # read, both on .flint/lean/epoch with the renew PUT-priced, plus the
-  # inbox GET and the manifest HEAD. That shape is asserted here, which
-  # is what "a recorded control whose request shape is written into the
-  # leg" was asking for.
+  # The plan stated the idle tick EXACTLY (§7): 4 requests, under the
+  # life-long lease. Under the per-barrier lease it is re-measured on a
+  # PUBLISHED workspace (the trace lines below say what the requests
+  # are); the SHAPE checks that follow are the contract, this bound only
+  # catches a multiplication. (Never-published, 2026-10-03: 6/tick —
+  # 3 pointer GETs, inbox GET, legacy manifest GET + HEAD, all 404s.)
   local per_tick=$(( off_n / ticks ))
-  [ "$per_tick" -ge 4 ] && [ "$per_tick" -le 6 ] || {
-    bad "the idle tick costs $per_tick requests, outside the measured 5 (window $win s, $ticks ticks, $off_n total)"
+  [ "$per_tick" -ge 2 ] && [ "$per_tick" -le 6 ] || {
+    bad "the idle tick costs $per_tick requests, outside the measured 6 (window $win s, $ticks ticks, $off_n total)"
     return 1; }
   ok "idle tick costs $per_tick requests"
 
-  local n_renew n_epoch n_inbox n_manifest
-  n_renew=$(kind_count off PutObject epoch)
-  n_epoch=$(kind_count off GetObject epoch)
+  # The record, before any judgement: what the control window's requests
+  # WERE, by api and object. A failing shape check is diagnosed from
+  # this, not re-derived from a count.
+  $K -n flint-system exec mc -- cat /tmp/b08-off.json 2>/dev/null \
+    | jq -r --arg p "/$BUCKET/$P/" 'select(.path? // "" | startswith($p))
+        | "\(.api) \(.path | ltrimstr($p) | sub("@[^/]*$"; "@…") | sub("chunks/.*"; "chunks/…") | sub("manifests/.*"; "manifests/…"))"' \
+    | sort | uniq -c | sed 's/^/    trace: /'
+
+  # 2026-10-03: re-derived for the PER-BARRIER lease (design 2026-09-13,
+  # lease.rs:1-12). Between barriers nobody holds the lease cell, so an
+  # idle tick neither renews it nor reads it — the old shape (renew PUT +
+  # deposal GET on .flint/lean/epoch, renewed twice per tick by D12's
+  # heartbeat) is gone with the life-long lease. What an idle tick IS
+  # (barrier.rs, skip-on-no-diff): the inbox GET (the verb requests ride
+  # it), then the POINTER `.flint/lean/current` by GET — a few hundred
+  # bytes carrying the seq — or, on a workspace that has never
+  # published, the legacy `manifest` key by HEAD after the pointer 404s.
+  local n_lease n_inbox n_ptr n_mhead n_entries
+  n_lease=$(( $(kind_count off PutObject epoch) + $(kind_count off GetObject epoch) ))
   n_inbox=$(kind_count off GetObject inbox)
-  n_manifest=$(kind_count off HeadObject manifest)
-  # Every category must appear, or "4 requests" could be four of the
-  # wrong thing — four manifest GETs on a 264 MiB manifest is the same
-  # count and a different product.
-  local missing=""
-  [ "$n_renew" -gt 0 ]    || missing="$missing renew-PUT"
-  [ "$n_epoch" -gt 0 ]    || missing="$missing epoch-GET"
-  [ "$n_inbox" -gt 0 ]    || missing="$missing inbox-GET"
-  [ "$n_manifest" -gt 0 ] || missing="$missing manifest-HEAD"
-  [ -z "$missing" ] || {
-    bad "the idle tick's shape is not the documented one — missing:$missing (renew=$n_renew epoch=$n_epoch inbox=$n_inbox manifest=$n_manifest)"
+  n_ptr=$(kind_count off GetObject current)
+  n_mhead=$(kind_count off HeadObject manifest)
+  [ "$n_lease" -eq 0 ] || {
+    bad "$n_lease lease-cell request(s) in an idle window — the per-barrier lease is held or polled between barriers"
     return 1; }
-  # And the manifest is read by HEAD, never by GET: the 0b lever that
-  # took the 1M-file idle tick from 27.5 s to 1.85 s was exactly this,
-  # and a regression to GET is invisible in a request COUNT.
+  [ "$n_inbox" -gt 0 ] || { bad "no inbox GET in the idle window — the verb requests have no door"; return 1; }
+  [ $(( n_ptr + n_mhead )) -gt 0 ] || {
+    bad "the idle tick read neither the pointer nor the legacy manifest — it cannot see a foreign publish"
+    return 1; }
+  # And never the ENTRIES: the 0b lever that took the 1M-file idle tick
+  # from 27.5 s to 1.85 s was reading the seq without the document, and
+  # a regression to fetching it is invisible in a request COUNT.
+  n_entries=$($K -n flint-system exec mc -- cat /tmp/b08-off.json 2>/dev/null \
+    | grep -c "\"api\":\"s3.GetObject\".*\"path\":\"/$BUCKET/$P/.flint/lean/\(manifests\|chunks\)/" || true)
   local n_mget
   n_mget=$(kind_count off GetObject manifest)
-  [ "$n_mget" -eq 0 ] || {
-    bad "$n_mget idle-tick manifest GETs — the HEAD+etag lever regressed; at 1M files this is 264 MiB per tick"
+  [ $(( n_entries + n_mget )) -eq 0 ] || {
+    bad "$n_entries entries/chunk GET(s) and $n_mget legacy manifest GET(s) in an idle window — the idle tick fetches the document again"
     return 1; }
-  ok "shape: renew PUT=$n_renew, epoch GET=$n_epoch, inbox GET=$n_inbox, manifest HEAD=$n_manifest, manifest GET=0"
-
-  # The renew arm fires TWICE at this floor, and that is correct.
-  # §7's "4 requests" is the tick's SHAPE (renew + epoch read + inbox
-  # GET + manifest HEAD); the renew COUNT is floor-dependent, because
-  # D12's heartbeat interval is min(floor,30) and the floor arm renews
-  # on its own independent non-resettable timer with no debounce in
-  # `lease::renew`. At floor=60 that is 3 renews/minute, which §7's
-  # delta line prices at +100 PUT/s fleet-wide. At THIS leg's floor=5
-  # the two arms coincide, so it is 2 per tick and the tick costs 5.
-  # Asserting a bare total would therefore encode a floor-specific
-  # number as if it were the contract; asserting the multiplier catches
-  # the regression that actually matters — the second renew silently
-  # disappearing, which would be a takeover-safety loss (§2.1a), not a
-  # saving.
-  [ "$n_renew" -ge $(( n_epoch * 2 )) ] || {
-    bad "renew PUT=$n_renew against epoch GET=$n_epoch — the heartbeat arm's independent renew is gone; D12 bought takeover safety with exactly that PUT"
-    return 1; }
-  ok "the renew arm fires twice per tick ($n_renew PUTs vs $n_epoch epoch reads) — D12's heartbeat plus the floor arm, priced in §7"
+  ok "shape: lease 0, inbox GET=$n_inbox, pointer GET=$n_ptr, legacy manifest HEAD=$n_mhead, entries GET=0"
 
   local delta=$(( auto_n - off_n ))
   [ "$delta" -lt 0 ] && delta=$(( -delta ))
@@ -1061,7 +1083,7 @@ b11a_sigterm_settles_an_owed_ack() {
   # boundary must never name two clocks, least of all with the bucket
   # holding the wrong one.
   [ "$src2" = "drain" ] || { bad "the ack says drain and the bucket says '$src2'"; return 1; }
-  [ "$(objcat $P2/files/two.txt)" = "two" ] || { bad "the drain acked but did not publish the declared bytes"; return 1; }
+  [ "$(fcat $P2 two.txt)" = "two" ] || { bad "the drain acked but did not publish the declared bytes"; return 1; }
   ok "owed ack settled: seq $s2 -> $s3, ack and bucket BOTH read drain, declared bytes published"
   mcx mc rm --recursive --force --versions "m/$BUCKET/$P2/" > /dev/null 2>&1
   return 0
@@ -1088,11 +1110,14 @@ b13_legacy_citation_survives_the_upgrade() {
   local want='legacy control data cited by a pre-D0 syncer'
   putobj "$P/files/.flint/legacy.txt" "$want"
   [ "$(objcat $P/files/.flint/legacy.txt)" = "$want" ] || { bad "the legacy object was not planted"; return 1; }
-  # The syncer image is busybox: no jq. sed with a printf'd insert
-  # line does the same job and keeps the fixture inside the image the
-  # product actually ships.
-  inpod verbs-a "printf '    \".flint/legacy.txt\": {\"etag\": \"legacy\", \"generation\": 1, \"size\": ${#want}, \"mtime_unix\": 1},\n' > /tmp/b13.ins" > /dev/null
-  inpod verbs-a "sed '/\"entries\": {/r /tmp/b13.ins' $R/.flint-sync/baseline.json > /tmp/b13.bl && mv /tmp/b13.bl $R/.flint-sync/baseline.json" > /dev/null
+  # The syncer image is busybox: no jq, so sed. The baseline is COMPACT
+  # JSON on one line (state.rs save_baseline, since 73e34dfc); a
+  # line-oriented insert after a pretty `"entries": {` matched nothing
+  # and planted nothing (matches=0). The first `"entries":{` is the
+  # baseline's own map (seq, manifest_etag, entries — field order), and
+  # it is non-empty here (normal.txt), so the inserted entry takes a
+  # trailing comma. Fields not given are Option/default in BaselineEntry.
+  inpod verbs-a "sed 's|\"entries\":{|\"entries\":{\".flint/legacy.txt\":{\"etag\":\"legacy\",\"generation\":1,\"size\":${#want},\"mtime_unix\":1},|' $R/.flint-sync/baseline.json > /tmp/b13.bl && mv /tmp/b13.bl $R/.flint-sync/baseline.json" > /dev/null
   local planted
   planted=$(inpod verbs-a "grep -c '\.flint/legacy.txt' $R/.flint-sync/baseline.json" | tr -d ' \r')
   [ "$planted" = "1" ] || { bad "the legacy baseline citation could not be planted (matches=$planted)"; return 1; }
@@ -1130,65 +1155,69 @@ b13_legacy_citation_survives_the_upgrade() {
 #      heartbeat into letting a standby depose a live syncer.
 # ─────────────────────────────────────────────────────────────────────
 b17_renewal_survives_a_sentinel_storm() {
+  # 2026-10-03: RE-DERIVED for the per-barrier lease (design 2026-09-13
+  # §4; lease.rs:1-12). The leg used to count HEARTBEAT renewals of a
+  # life-long lease while a standby sat blocked in `claim`, and assert
+  # the standby never deposed the storming holder. Neither half exists
+  # now: nobody holds the cell between barriers, so there is nothing to
+  # renew and no standby — a second writer is Ready in checkout time and
+  # publishes beside the first. What a storm can still break is the
+  # HANDOFF: a writer committing barrier after barrier must pass the cell
+  # on cleanly (claim how=released), never be deposed (how=deposed: a
+  # live writer judged dead), and must not starve the other writer.
   local P=tenants/b17 R=/work/b17 RB=/work/b17b
-  inpod verbs-a "mkdir -p $R" > /dev/null
-  sy_bg verbs-a $P $R "" /tmp/b17.log run          # floor 3600: cadence is out
-  inpod verbs-a "for i in \$(seq 1 60); do [ -f $R/.flint-sync/checkout-complete ] && break; sleep 1; done" > /dev/null
-  local e0
-  e0=$(epochdoc $P | jq -r '.epoch')
-  [ -n "$e0" ] || { bad "no epoch cell in the bucket"; return 1; }
-
-  # The standby: a real claimant, blocked in `claim`, counting quiet
-  # polls. A DEAD standby would prove nothing — the leg reads its log.
+  inpod verbs-a "rm -rf $R && mkdir -p $R" > /dev/null
   inpod verbs-b "rm -rf $RB && mkdir -p $RB" > /dev/null
-  sy_bg verbs-b $P $RB "" /tmp/b17b.log checkout
+  sy_bg verbs-a $P $R "FLINT_SYNC_EVENT_TRACE=1" /tmp/b17.log run   # floor 3600: cadence is out
+  inpod verbs-a "for i in \$(seq 1 60); do [ -f $R/.flint-sync/checkout-complete ] && break; sleep 1; done" > /dev/null
 
-  # The storm: a touch every 0.2 s for ~90 s.
-  inpod verbs-a "nohup sh -c 'mkdir -p $R/.flint; i=1; while [ \$i -le 450 ]; do \
+  # The storm: a touch every 0.2 s for ~60 s.
+  inpod verbs-a "nohup sh -c 'mkdir -p $R/.flint; i=1; while [ \$i -le 300 ]; do \
       printf \"{\\\"nonce\\\":\\\"b17-%d\\\"}\" \$i > $R/.flint/publish.tmp; \
       mv $R/.flint/publish.tmp $R/.flint/publish; \
       printf storm-\$i > $R/storm.txt; i=\$((i+1)); sleep 0.2; done' > /dev/null 2>&1 & echo stormed" > /dev/null
 
-  # Renewals are counted as CHANGES to the epoch object's Last-Modified,
-  # and the gaps are measured on the drill's own wall clock — which is
-  # what "renewals at <=30 s cadence" means to whoever is watching a
-  # fleet.
-  # `renew_every = min(floor_secs, 30)`, and this leg runs the hour-long
-  # floor, so renewals land every 30 s. Sampling at 3 s means an
-  # observed gap of 30 s reads as 30-33; the bound that MATTERS is the
-  # takeover threshold — six quiet polls at 10 s — so a gap comfortably
-  # under 60 s is what keeps a live syncer from being deposed.
-  local i renews="" last_seen="" last_at=0 gap_max=0 now
-  for i in $(seq 1 45); do
-    local lm
-    lm=$(epoch_mtime $P)
-    now=$(date +%s)
-    if [ -n "$lm" ] && [ "$lm" != "$last_seen" ]; then
-      if [ "$last_at" != "0" ]; then
-        local g=$((now - last_at))
-        [ "$g" -gt "$gap_max" ] && gap_max=$g
-      fi
-      last_seen=$lm
-      last_at=$now
-      renews="$renews."
-    fi
-    sleep 3
+  # The second writer joins MID-storm and must not wait the storm out.
+  sleep 5
+  inpod verbs-b "printf from-b > $RB/b.txt" > /dev/null
+  local t0=$(date +%s) tb
+  sy_bg verbs-b $P $RB "FLINT_SYNC_EVENT_TRACE=1 FLINT_SYNC_FLOOR_SECS=5" /tmp/b17b.log run
+  inpod verbs-b "for i in \$(seq 1 60); do [ -f $RB/.flint-sync/checkout-complete ] && break; sleep 1; done" > /dev/null
+  tb=$(( $(date +%s) - t0 ))
+  inpod verbs-b "test -f $RB/.flint-sync/checkout-complete" || { bad "the second writer never finished checkout under the storm"; return 1; }
+  [ "$tb" -le 30 ] || { bad "the second writer took ${tb}s to check out — it waited on the storming writer"; return 1; }
+  ok "second writer checked out in ${tb}s mid-storm (no lease is held between barriers)"
+
+  # B's file must be cited WHILE the storm runs: the writer that is not
+  # storming still gets the cell.
+  local i
+  for i in $(seq 1 40); do [ "$(fcat $P b.txt)" = "from-b" ] && break; sleep 1; done
+  [ "$(fcat $P b.txt)" = "from-b" ] || { bad "the second writer's file was never cited during the storm — it starved"; return 1; }
+  ok "the second writer published during the storm"
+
+  # Let the storm end and A's last touch settle.
+  for i in $(seq 1 60); do
+    inpod verbs-a "pgrep -f 'while \[ ' > /dev/null" || break; sleep 1
   done
-  local n_renews=${#renews}
-  local e1
-  e1=$(epochdoc $P | jq -r '.epoch')
-  [ "$e1" = "$e0" ] || { bad "the epoch moved $e0 -> $e1 — the standby DEPOSED a live syncer under storm"; return 1; }
+  local a
+  a=$(wait_ack verbs-a $R publish 'b17-300' 90) || { bad "the storm's last touch was never acked: $a"; return 1; }
+  [ "$(ajq "$a" .status)" = "ok" ] || { bad "the storm's last ack is $(ajq "$a" .status), not ok"; return 1; }
+  [ "$(fcat $P storm.txt)" = "storm-300" ] || { bad "the storm's final write is not what is cited (cited: '$(fcat $P storm.txt)')"; return 1; }
+  [ "$(fcat $P b.txt)" = "from-b" ] || { bad "the second writer's file was lost by the storm"; return 1; }
+  ok "both writers' last writes are cited: storm.txt=storm-300, b.txt=from-b"
 
-  # The standby was genuinely watching.
-  local sb
-  sb=$(inpod verbs-b "cat /tmp/b17b.log 2>/dev/null | grep -c 'waiting on the standing lease'" | tr -d ' ')
-  [ -n "$sb" ] && [ "$sb" -ge 3 ] || { bad "the standby logged $sb quiet polls — it was not really claiming"; return 1; }
-  ok "no takeover across ~90 s of storm: epoch stayed $e0, standby observed $sb quiet polls"
-
-  [ "$n_renews" -ge 3 ] || { bad "only $n_renews renewals observed across ~135 s — the heartbeat starved under storm"; return 1; }
-  [ "$gap_max" -gt 0 ] || { bad "no renewal gap could be measured — the oracle saw nothing move"; return 1; }
-  [ "$gap_max" -lt 60 ] || { bad "the widest renewal gap was ${gap_max}s, past the 60 s quiet-poll takeover window — a standby could have deposed a LIVE syncer"; return 1; }
-  ok "$n_renews renewals, widest gap ${gap_max}s (30 s cadence, 60 s takeover window) while the storm ran"
+  # The handoff record. Every claim must be fresh/released/adopted-own;
+  # one deposal means a LIVE writer was judged dead.
+  local ta tb2 claims deposed released
+  ta=$(inpod verbs-a "grep '\"ev\":\"claim\"' /tmp/b17.log")
+  tb2=$(inpod verbs-b "grep '\"ev\":\"claim\"' /tmp/b17b.log")
+  claims=$(printf '%s\n%s\n' "$ta" "$tb2" | grep -c '"verdict":"claimed"' || true)
+  deposed=$(printf '%s\n%s\n' "$ta" "$tb2" | grep -c '"how":"deposed"' || true)
+  released=$(printf '%s\n%s\n' "$ta" "$tb2" | grep -c '"how":"released"' || true)
+  [ "$claims" -ge 3 ] || { bad "only $claims claims traced — the storm committed too little to test a handoff"; return 1; }
+  [ "$deposed" -eq 0 ] || { bad "$deposed claim(s) DEPOSED a holder under the storm — a live writer was judged dead"; return 1; }
+  [ "$released" -ge 1 ] || { bad "no claim took a released cell — the two writers never handed the lease to each other"; return 1; }
+  ok "$claims claims, $released clean handoffs, 0 deposals"
   inpod verbs-a "pkill -f 'while \[ ' 2>/dev/null; true" > /dev/null
   killsync verbs-a; killsync verbs-b
   return 0
@@ -1199,72 +1228,74 @@ b17_renewal_survives_a_sentinel_storm() {
 #      an agent waiting on a marker that will never be answered.
 # ─────────────────────────────────────────────────────────────────────
 b18_deposed_mid_pending_refuses() {
+  # 2026-10-03: RE-DERIVED. Under the life-long lease a syncer frozen
+  # with a pending sentinel was DEPOSED, and its owed ack had to settle
+  # `refused-fenced` with a `fenced` capabilities state. The per-barrier
+  # lease removed both (sentinel.rs: "A fence is a retry … There is no
+  # refused-fenced ack and no fenced marker any more"): a writer frozen
+  # in its UPLOAD loop holds nothing — it claims after uploading — so a
+  # successor publishes without waiting out a takeover, and the thawed
+  # writer claims afresh, commits above the successor and settles its
+  # owed ack `ok`. What must still hold: no ack is stranded, nothing is
+  # deposed, and both writers' work is cited. (The name is kept so the
+  # roster and the plan's matrix still line up.)
   local P=tenants/b18 RS=/work/b18 RB=/work/b18s
   inpod verbs-s "rm -rf $RS" > /dev/null
   inpod verbs-s2 "rm -rf $RB" > /dev/null
-  sy_bg verbs-s $P $RS "" /tmp/b18.log run
+  sy_bg verbs-s $P $RS "FLINT_SYNC_EVENT_TRACE=1" /tmp/b18.log run
   inpod verbs-s "for i in \$(seq 1 60); do [ -f $RS/.flint-sync/checkout-complete ] && break; sleep 1; done" > /dev/null
   mkfiles verbs-s $RS 250 z > /dev/null
 
-  # A pending sentinel, then freeze it MID-HONOR so the record stands.
-  #
-  # Polling for the pending record and then signalling is a race the
-  # honor wins: the record is there when the poll looks, and the ack is
-  # written before SIGSTOP lands. Freeze inside the UPLOAD LOOP instead,
-  # which the two-HEAD check pins down exactly — 250 zero-padded files
-  # walked at fan-out 1, so an early key present and the last key absent
-  # means the honor is in flight and no ack can exist yet.
+  # Freeze INSIDE the upload loop (upload fan-out 1, verbs.yaml): an
+  # early handle present and the last one absent means the honor is in
+  # flight, before its commit section, so no ack can exist yet.
   touchp verbs-s $RS publish '{"nonce":"b18-pending"}'
   wait_key $P "z0002.txt" 300 || { bad "the honor never started uploading — nothing to strand"; return 1; }
-  objexists "$P/files/z0250.txt" && { bad "the honor finished before the freeze — nothing was mid-flight"; return 1; }
+  haskey $P z0250.txt && { bad "the honor finished before the freeze — nothing was mid-flight"; return 1; }
   stopsync verbs-s
   local pend
   pend=$(inpod verbs-s "ls $RS/.flint-sync/publish.pending.json 2>/dev/null")
-  [ -n "$pend" ] || { bad "no pending record at freeze time — the sentinel was never consumed"; return 1; }
-  inpod verbs-s "test -f $RS/.flint/publish.ack" && { bad "an ack already existed at freeze time"; return 1; }
-  local hash_before
-  hash_before=$(treehash verbs-s $RS)
-  ok "pending record standing at deposal, no ack, tree hash recorded"
+  [ -n "$pend" ] || { bad "no pending record at freeze time — the sentinel was never consumed"; contsync verbs-s; return 1; }
+  inpod verbs-s "test -f $RS/.flint/publish.ack" && { bad "an ack already existed at freeze time"; contsync verbs-s; return 1; }
+  ok "frozen mid-upload: pending record standing, no ack"
 
-  # The successor deposes it for real.
-  sy_bg verbs-s2 $P $RB "" /tmp/b18s.log run
-  await_file verbs-s2 "$RB/.flint-sync/checkout-complete" "$TAKEOVER_SECS" \
-    || { bad "the successor never took over"; contsync verbs-s; return 1; }
+  # The successor must NOT wait out a takeover: the frozen writer holds
+  # no lease. A deposal needs QUIET_POLLS x QUIET_SPACING_SECS = 60 s of
+  # an unmoving cell (lease.rs), so publishing inside 40 s is the
+  # discriminator.
+  local t0=$(date +%s) dt
+  sy_bg verbs-s2 $P $RB "FLINT_SYNC_EVENT_TRACE=1" /tmp/b18s.log run
+  await_file verbs-s2 "$RB/.flint-sync/checkout-complete" 60 \
+    || { bad "the successor never checked out"; contsync verbs-s; return 1; }
   inpod verbs-s2 "printf successor > $RB/succ.txt" > /dev/null
   touchp verbs-s2 $RB publish '{"nonce":"b18-succ"}'
-  wait_ack verbs-s2 $RB publish 'b18-succ' 90 > /dev/null || { bad "the successor never published"; contsync verbs-s; return 1; }
-  local newepoch
-  newepoch=$(epochdoc $P | jq -r '.epoch')
-  ok "successor holds epoch $newepoch and published"
+  local as
+  as=$(wait_ack verbs-s2 $RB publish 'b18-succ' 90) || { bad "the successor never published"; contsync verbs-s; return 1; }
+  dt=$(( $(date +%s) - t0 ))
+  [ "$(ajq "$as" .status)" = "ok" ] || { bad "the successor's ack is $(ajq "$as" .status)"; contsync verbs-s; return 1; }
+  [ "$dt" -lt 40 ] || { bad "the successor took ${dt}s to publish — it waited on the frozen writer as if it held the lease"; contsync verbs-s; return 1; }
+  local sseq
+  sseq=$(ajq "$as" .seq)
+  ok "successor published at seq $sseq in ${dt}s, without a takeover wait"
 
-  # Thaw the zombie: it must settle the owed ack as a REFUSAL.
+  # Thaw: the owed ack settles ok, ABOVE the successor's seq.
   contsync verbs-s
-  local a
-  a=$(wait_ack verbs-s $RS publish 'refused-fenced' 90) || { bad "the zombie never settled the owed ack: $a"; return 1; }
-  local st ep
-  st=$(ajq "$a" .status); ep=$(ajq "$a" '.observed_epoch // empty')
-  [ "$st" = "refused-fenced" ] || { bad "the zombie's ack status is '$st'"; return 1; }
-  [ -n "$ep" ] || { bad "the refusal names no epoch — an agent cannot tell WHICH successor deposed its syncer"; return 1; }
-  [ "$ep" = "$newepoch" ] || { bad "the refusal names epoch $ep, the successor holds $newepoch"; return 1; }
+  local a st aseq
+  a=$(wait_ack verbs-s $RS publish 'b18-pending' 120) || { bad "the thawed writer never settled its owed ack: $a"; return 1; }
+  st=$(ajq "$a" .status); aseq=$(ajq "$a" .seq)
+  [ "$st" = "ok" ] || { bad "the thawed writer's owed ack is '$st', not ok — a fence is a retry now"; return 1; }
+  [ "$aseq" -gt "$sseq" ] || { bad "the owed ack names seq $aseq, not above the successor's $sseq"; return 1; }
+  cited $P z0250.txt || { bad "the thawed writer's uploads are not cited"; return 1; }
+  [ "$(fcat $P succ.txt)" = "successor" ] || { bad "the successor's file was lost when the thawed writer committed"; return 1; }
+  ok "owed ack settled ok at seq $aseq > $sseq; both writers' files cited"
+
   local c
   c=$(caps verbs-s $RS)
-  [ "$(printf '%s' "$c" | jq -r '.state')" = "fenced" ] || { bad "capabilities still reads '$(printf '%s' "$c" | jq -r .state)' on a deposed syncer"; return 1; }
-  [ "$(printf '%s' "$c" | jq -r '.verbs|length')" = "0" ] || { bad "a fenced syncer still advertises verbs"; return 1; }
-  ok "owed ack settled refused-fenced (epoch ${ep:-unnamed}); capabilities: state=fenced, verbs=[]"
-
-  # A FURTHER sentinel on the zombie is refused too, and the tree is
-  # not mutated by the zombie's death throes.
-  inpod verbs-s "rm -f $RS/.flint/sync.ack" > /dev/null
-  touchp verbs-s $RS sync '{"nonce":"b18-zombie-sync"}'
-  sleep 15
-  local sa hash_after
-  sa=$(ackf verbs-s $RS sync)
-  hash_after=$(treehash verbs-s $RS)
-  if [ -n "$sa" ]; then
-    [ "$(ajq "$sa" .status)" = "refused-fenced" ] || { bad "the zombie honored a sync sentinel: $(ajq "$sa" .status)"; return 1; }
-  fi
-  [ "$hash_after" = "$hash_before" ] || { bad "the zombie mutated its tree after being fenced"; return 1; }
-  ok "a later sync sentinel on the zombie is refused${sa:+ (acked)}; tree hash unchanged"
+  [ "$(printf '%s' "$c" | jq -r '.verbs|length')" -gt 0 ] || { bad "the thawed writer stopped advertising its verbs"; return 1; }
+  local deposed
+  deposed=$( { inpod verbs-s "cat /tmp/b18.log"; inpod verbs-s2 "cat /tmp/b18s.log"; } | grep '"ev":"claim"' | grep -c '"how":"deposed"' || true)
+  [ "$deposed" -eq 0 ] || { bad "$deposed deposal(s) — a writer frozen OUTSIDE its commit section was judged a dead holder"; return 1; }
+  ok "no deposal; the thawed writer still advertises its verbs"
   killsync verbs-s; killsync verbs-s2
   return 0
 }
@@ -1394,7 +1425,7 @@ b14_mixed_fleet_is_detectable_both_ways() {
   local leaked_new
   leaked_new=$(allkeys "$PB" | grep -c "files/.flint/" || true)
   [ "$leaked_new" = "0" ] || { bad "the shipping binary published $leaked_new key(s) under files/.flint/"; CONT=$restore; return 1; }
-  [ "$(objcat $PB/files/real.txt)" = "work" ] || { bad "the shipping binary published nothing at all — the comparison is empty"; CONT=$restore; return 1; }
+  [ "$(fcat $PB real.txt)" = "work" ] || { bad "the shipping binary published nothing at all — the comparison is empty"; CONT=$restore; return 1; }
   ok "shipping image on the same fixture: 0 keys under files/.flint/, ordinary data published"
 
   # ── (b) downgrade over a LIVE tree: the marker survives the rollback,

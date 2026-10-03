@@ -1,0 +1,83 @@
+== verbs:minio start 2026-10-03T22:40:33Z
+Creating cluster "flint-lean-verbs" ...
+ • Ensuring node image (kindest/node:v1.34.0) 🖼  ...
+ ✓ Ensuring node image (kindest/node:v1.34.0) 🖼
+ • Preparing nodes 📦   ...
+ ✓ Preparing nodes 📦 
+ • Writing configuration 📜  ...
+ ✓ Writing configuration 📜
+ • Starting control-plane 🕹️  ...
+ ✓ Starting control-plane 🕹️
+ • Installing CNI 🔌  ...
+ ✓ Installing CNI 🔌
+ • Installing StorageClass 💾  ...
+ ✓ Installing StorageClass 💾
+ • Waiting ≤ 2m0s for control-plane = Ready ⏳  ...
+ ✓ Waiting ≤ 2m0s for control-plane = Ready ⏳
+ • Ready after 14s 💚
+Set kubectl context to "kind-flint-lean-verbs"
+You can now use your cluster with:
+
+kubectl cluster-info --context kind-flint-lean-verbs
+
+Have a question, bug, or feature request? Let us know! https://kind.sigs.k8s.io/#community 🙂
+Image: "flint-sync:e2e" with ID "sha256:7261f85feb943e21b533f6485f77bd75a2ee45a7ef54bffbad04d7f1dda7288b" not yet present on node "flint-lean-verbs-control-plane", loading...
+Image: "flint-lean-gateway:e2e" with ID "sha256:a386e5187640be216259cc91a8f1db0ea6dfd81fa6c430c879623a8d925db6f0" not yet present on node "flint-lean-verbs-control-plane", loading...
+Image: "flint-sync:predo" with ID "sha256:254a1cac96155fae400366d4e49ef472ff8b5d4fd78184baef9f3e570082d5cd" not yet present on node "flint-lean-verbs-control-plane", loading...
+namespace/flint-system created
+deployment.apps/minio created
+service/minio created
+job.batch/make-bucket created
+secret/minio-creds created
+job.batch/make-bucket condition met
+configmap/strip-proxy-conf created
+deployment.apps/strip-proxy created
+service/strip-proxy created
+service/lean-gateway created
+deployment.apps/lean-gateway created
+pod/mc created
+pod/curl created
+pod/verbs-a created
+pod/verbs-b created
+pod/verbs-s created
+pod/verbs-s2 created
+pod/verbs-old created
+pod/verbs-a condition met
+pod/verbs-b condition met
+pod/verbs-old condition met
+pod/verbs-s condition met
+pod/verbs-s2 condition met
+pod/curl condition met
+pod/lean-gateway-5b7dc7455c-h6pqh condition met
+timed out waiting for the condition on pods/make-bucket-vnbvw
+timed out waiting for the condition on pods/mc
+timed out waiting for the condition on pods/minio-7bdb6ff794-bpjk2
+timed out waiting for the condition on pods/strip-proxy-74569c4b75-4fns6
+timed out waiting for the condition on pods/coredns-66bc5c9577-259hh
+timed out waiting for the condition on pods/coredns-66bc5c9577-dgxnw
+timed out waiting for the condition on pods/etcd-flint-lean-verbs-control-plane
+timed out waiting for the condition on pods/kindnet-nn96z
+timed out waiting for the condition on pods/kube-apiserver-flint-lean-verbs-control-plane
+timed out waiting for the condition on pods/kube-controller-manager-flint-lean-verbs-control-plane
+timed out waiting for the condition on pods/kube-proxy-6qw9d
+timed out waiting for the condition on pods/kube-scheduler-flint-lean-verbs-control-plane
+timed out waiting for the condition on pods/local-path-provisioner-7b8c8ddbd6-7shcz
++ cd /home/ddalton/minio-swap-2026-10-03/lean/e2e
++ timeout 7200 ./run-verbs.sh
+  store: minio (minio.yaml = minio, rustfs.yaml = rustfs)
+  rig reset: 25 leg prefixes and their workspaces cleared
+
+── B8  unused verbs cost nothing
+  ok: control (sentinels off): 8 requests in 22s ≈ 2/tick
+  ok: idle tick costs 2 requests
+    trace:       4 s3.GetObject .flint/lean/current
+    trace:       4 s3.GetObject .flint/lean/inbox
+  ok: shape: lease 0, inbox GET=4, pointer GET=4, legacy manifest HEAD=0, entries GET=0
+  ok: sentinels on: 8 requests — delta 0 over 4 ticks
+  ok: no files/.flint/ objects, no acks: the verbs are inert when unused
+  PASS
+
+─────────────────────────────────────────────
+boundary-verbs bucket drill: 1 passed, 0 failed, 0 skipped
+exit=0
+== verbs:minio end 2026-10-03T22:47:50Z

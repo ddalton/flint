@@ -1,0 +1,175 @@
+== verbs:minio start 2026-10-03T22:03:30Z
+Creating cluster "flint-lean-verbs" ...
+ • Ensuring node image (kindest/node:v1.34.0) 🖼  ...
+ ✓ Ensuring node image (kindest/node:v1.34.0) 🖼
+ • Preparing nodes 📦   ...
+ ✓ Preparing nodes 📦 
+ • Writing configuration 📜  ...
+ ✓ Writing configuration 📜
+ • Starting control-plane 🕹️  ...
+ ✓ Starting control-plane 🕹️
+ • Installing CNI 🔌  ...
+ ✓ Installing CNI 🔌
+ • Installing StorageClass 💾  ...
+ ✓ Installing StorageClass 💾
+ • Waiting ≤ 2m0s for control-plane = Ready ⏳  ...
+ ✓ Waiting ≤ 2m0s for control-plane = Ready ⏳
+ • Ready after 14s 💚
+Set kubectl context to "kind-flint-lean-verbs"
+You can now use your cluster with:
+
+kubectl cluster-info --context kind-flint-lean-verbs
+
+Have a question, bug, or feature request? Let us know! https://kind.sigs.k8s.io/#community 🙂
+Image: "flint-sync:e2e" with ID "sha256:7261f85feb943e21b533f6485f77bd75a2ee45a7ef54bffbad04d7f1dda7288b" not yet present on node "flint-lean-verbs-control-plane", loading...
+Image: "flint-lean-gateway:e2e" with ID "sha256:a386e5187640be216259cc91a8f1db0ea6dfd81fa6c430c879623a8d925db6f0" not yet present on node "flint-lean-verbs-control-plane", loading...
+Image: "flint-sync:predo" with ID "sha256:254a1cac96155fae400366d4e49ef472ff8b5d4fd78184baef9f3e570082d5cd" not yet present on node "flint-lean-verbs-control-plane", loading...
+namespace/flint-system created
+deployment.apps/minio created
+service/minio created
+job.batch/make-bucket created
+secret/minio-creds created
+job.batch/make-bucket condition met
+configmap/strip-proxy-conf created
+deployment.apps/strip-proxy created
+service/strip-proxy created
+service/lean-gateway created
+deployment.apps/lean-gateway created
+pod/mc created
+pod/curl created
+pod/verbs-a created
+pod/verbs-b created
+pod/verbs-s created
+pod/verbs-s2 created
+pod/verbs-old created
+pod/verbs-a condition met
+pod/verbs-b condition met
+pod/verbs-old condition met
+pod/verbs-s condition met
+pod/verbs-s2 condition met
+pod/curl condition met
+pod/lean-gateway-5b7dc7455c-dfd2s condition met
+timed out waiting for the condition on pods/make-bucket-wt895
+timed out waiting for the condition on pods/mc
+timed out waiting for the condition on pods/minio-7bdb6ff794-d4zlh
+timed out waiting for the condition on pods/strip-proxy-74569c4b75-9gpm9
+timed out waiting for the condition on pods/coredns-66bc5c9577-kpz64
+timed out waiting for the condition on pods/coredns-66bc5c9577-vwkpv
+timed out waiting for the condition on pods/etcd-flint-lean-verbs-control-plane
+timed out waiting for the condition on pods/kindnet-cbqh4
+timed out waiting for the condition on pods/kube-apiserver-flint-lean-verbs-control-plane
+timed out waiting for the condition on pods/kube-controller-manager-flint-lean-verbs-control-plane
+timed out waiting for the condition on pods/kube-proxy-cgbcg
+timed out waiting for the condition on pods/kube-scheduler-flint-lean-verbs-control-plane
+timed out waiting for the condition on pods/local-path-provisioner-7b8c8ddbd6-7djbm
++ cd /home/ddalton/minio-swap-2026-10-03/lean/e2e
++ timeout 7200 ./run-verbs.sh
+  store: minio (minio.yaml = minio, rustfs.yaml = rustfs)
+  rig reset: 25 leg prefixes and their workspaces cleared
+
+── B1  sentinel publishes when cadence cannot
+  ok: 5 dirty files, floor=3600
+  ok: control: 25 s with no sentinel, manifest still at seq 0
+  ok: sentinel published: seq 0 -> 1, 5 files cited, ack covers b1-n1
+  PASS
+
+── B2  crash between consume and ack re-runs
+  ok: seeded baseline at seq 1
+  ok: killed mid-honor: pending record present, ack absent, uploads incomplete
+  ok: re-run acked seq 2 (baseline was 1) and the full set is cited
+  PASS
+
+── B3  storm coalesces, ack covers every touch
+  ok: 100 touches in 10s (min-interval 5 s), mid-storm file written at touch 50
+  ok: 2 barrier(s) for 100 touches, <= cap 3 — coalescing on the barrier count
+  ok: the final ack also carried 5 coalesced nonces
+  ok: the mid-storm write is cited at seq 2 — the at-least guarantee held across the storm
+  PASS
+
+── B4  stale-ack discrimination
+  ok: stale ack planted with nonce b4-OLD
+  ok: fresh ack replaced it: nonce b4-NEW, covering mtime 1791065445633913690
+  PASS
+
+── B5  scoped sync defers, never loses
+  ok: foreign install: inputs/a.txt=A2-remote and outputs/b.txt=B2-remote are in the bucket
+  ok: scoped: inputs/ applied (A2-remote), outputs/ untouched (B1), ack defers 1 change(s)
+  ok: the deferred change integrated at the next barrier (outputs/b.txt=B2-remote)
+  PASS
+
+── B6  conflict transport rides the ack
+  ok: local dirt (LOCAL-DIRTY) against a foreign remote (REMOTE)
+  ok: ack carries 1 conflict record(s); the agent's bytes are untouched
+  PASS
+
+── B7  remote.seq is local-only news
+  ok: probe (no creds, no S3 client) reads the ticker: observed_seq=1
+  ok: idle heartbeat: updated_unix 1791065474 -> 1791065484, observed_seq still 1
+  ok: foreign write seen by the probe alone: observed_seq 1 -> 2
+  PASS
+
+── B8  unused verbs cost nothing
+  ok: control (sentinels off): 24 requests in 22s ≈ 6/tick
+  ok: idle tick costs 6 requests
+    trace:      12 s3.GetObject .flint/lean/current
+    trace:       4 s3.GetObject .flint/lean/inbox
+    trace:       4 s3.GetObject .flint/lean/manifest
+    trace:       4 s3.HeadObject .flint/lean/manifest
+  BAD: 0 entries/chunk GET(s) and 4 legacy manifest GET(s) in an idle window — the idle tick fetches the document again
+  FAIL
+
+── B16 the default floor still publishes
+  ok: cadence advanced seq 0 -> 1 citing 3 files, source=cadence, no sentinel ever existed
+  PASS
+
+── B11a SIGTERM settles an owed ack
+  ok: a consumed-but-unhonored sentinel stands at seq 1 (held by a 600 s min-interval, floor an hour away)
+  ok: owed ack settled: seq 1 -> 2, ack and bucket BOTH read drain, declared bytes published
+  PASS
+
+── B13 a legacy citation survives the upgrade
+  ok: pre-upgrade state: files/.flint/legacy.txt in the bucket AND cited by the baseline
+  ok: the upgrade disabled the verbs and said why: reason=preexisting-flint-paths
+  ok: after two barriers the legacy object survives byte-identical
+  PASS
+
+── B14 mixed-fleet detection, both ways
+  ok: old image: no capability marker, sentinel file untouched
+  ok: destructive control: the old binary published 1 key(s) under files/.flint/ — the hazard D0 exists to close
+  ok: shipping image on the same fixture: 0 keys under files/.flint/, ordinary data published
+  ok: marked by the shipping binary: state=live, boot stamp recorded
+  ok: downgrade over a live tree: the marker survives with an UNCHANGED boot stamp — the agent's rollback tell
+  ok: the stale marker still advertises verbs from syncer 0.9.0, over a binary that has none — this is why the stamp is the tell
+  PASS
+
+── B17 renewal survives a sentinel storm
+  ok: second writer checked out in 1s mid-storm (no lease is held between barriers)
+  ok: the second writer published during the storm
+  ok: both writers' last writes are cited: storm.txt=storm-300, b.txt=from-b
+  ok: 14 claims, 13 clean handoffs, 0 deposals
+  PASS
+
+── B18 deposed mid-pending refuses
+  ok: frozen mid-upload: pending record standing, no ack
+  ok: successor published at seq 1 in 1s, without a takeover wait
+  ok: owed ack settled ok at seq 2 > 1; both writers' files cited
+  ok: no deposal; the thawed writer still advertises its verbs
+  PASS
+
+── B22 pre-existing .flint/ disables the verbs
+  ok: pre-existing app-owned .flint/publish planted (58 bytes), tree never marked
+  ok: capabilities.json: verbs=[] reason=preexisting-flint-paths
+  ok: the app's file is untouched, unacked and unpublished after a full floor
+  PASS
+
+── B25 hot loops meter by work, not by calls
+  ok: (a) big-file loop: 2 honored, 2 deferred — the meter engaged
+  ok: (b) 4 KiB loop at the same touch rate: 4 honored, 0 deferred
+  ok: the meter discriminates by WORK: 65 MiB throttles at 2, 4 KiB at 0
+  PASS
+  accounting: 16 legs ran, roster reconciles
+
+─────────────────────────────────────────────
+boundary-verbs bucket drill: 15 passed, 1 failed, 0 skipped
+exit=1
+== verbs:minio end 2026-10-03T22:16:05Z

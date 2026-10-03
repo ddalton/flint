@@ -85,6 +85,12 @@ sy() {
   $K exec "$pod" -c sync -- /bin/sh -c \
     "FLINT_SYNC_PREFIX=$prefix FLINT_SYNC_ROOT=$root /usr/local/bin/flint-sync $*" 2>&1
 }
+# `sy` with extra env for this one invocation (e.g. the retire grace).
+sye() { # <pod> <prefix> <root> <extra-env> <args…>
+  local pod=$1 prefix=$2 root=$3 envs=$4; shift 4
+  $K exec "$pod" -c sync -- /bin/sh -c \
+    "env FLINT_SYNC_PREFIX=$prefix FLINT_SYNC_ROOT=$root $envs /usr/local/bin/flint-sync $*" 2>&1
+}
 # Same, detached: the process must outlive the exec session so the
 # script can kill/stop it mid-barrier.
 sy_bg() {
@@ -122,8 +128,8 @@ await_exit() { # <pod> <process name> <iters>
   return 1
 }
 # flint-sync against a DIFFERENT endpoint — the proxy-outage lever.
-# Scaling MinIO to zero would destroy the rig's data (its /data is the
-# container's writable layer); an unreachable endpoint reproduces
+# Scaling MinIO to zero would destroy the rig's data (its /data is an
+# emptyDir); an unreachable endpoint reproduces
 # "the proxy is not answering" without losing the bucket.
 sy_ep() { # <pod> <prefix> <root> <endpoint> <args…>
   local pod=$1 prefix=$2 root=$3 ep=$4; shift 4
@@ -136,7 +142,7 @@ sy_ep() { # <pod> <prefix> <root> <endpoint> <args…>
 wait_key() { # <prefix> <relative key> <iters>
   local i
   for i in $(seq 1 "$3"); do
-    objexists "$1/files/$2" && return 0
+    haskey "$1" "$2" && return 0
     sleep 0.2
   done
   return 1
@@ -211,6 +217,23 @@ mbody() {
     objcat "$1/.flint/lean/manifest"
 }
 manif()    { mbody "$1"; }
+# ── files under the HANDLES layout (design 2026-09-19, R1/R3) ─────────
+# A write lands at `files/<path>@<flush>` and the manifest cites that
+# handle; the bare `files/<path>` is only the ingress key an outside
+# `aws s3 cp` writes, and nothing flint publishes writes it. Reading the
+# bare key is doubly wrong: `mc cat` finds nothing, and `mc stat` on it
+# SUCCEEDS by prefix whenever any handle exists — retired ones included
+# (checked on the box 2026-10-03: stat of a missing bare key rc=0 beside
+# `b.txt@u1`, rc=1 with no handle). So a file is read through its
+# citation, and "is there an object" is an exact listing of its handles.
+citekey() { manif "$1" | jq -r --arg p "$2" '.entries[$p].key // empty'; }  # <prefix> <path>
+fcat()    { local k; k=$(citekey "$1" "$2"); [ -n "$k" ] && objcat "$k"; }   # cited bytes
+cited()   { [ -n "$(citekey "$1" "$2")" ]; }
+# Handles of <path> in the bucket, cited or retired. `mc ls` of the
+# `<path>@` prefix lists exactly that path's handles (not `ab.txt@…`,
+# `b.txt.bak@…` or `sub/b.txt@…`; checked on the box).
+nhandles() { mcx mc ls --json "m/$BUCKET/$1/files/$2@" | jq -r 'select(.key)|.key' | grep -c . ; }
+haskey()   { [ "$(nhandles "$1" "$2")" -gt 0 ]; }
 
 gw_get()  { $K -n flint-system exec curl -- sh -c \
               "curl -sS -o /tmp/out -w '%{http_code}' -H 'Authorization: Bearer $TOK' '$GW$1'" 2>/dev/null; }
@@ -218,9 +241,17 @@ gw_post() { printf '%s' "$2" | $K -n flint-system exec -i curl -- sh -c \
               "cat > /tmp/body && curl -sS -o /tmp/out -w '%{http_code}' -X POST \
                -H 'Authorization: Bearer $TOK' -H 'Content-Type: application/json' \
                --data-binary @/tmp/body '$GW$1'" 2>/dev/null; }
-gw_put()  { printf '%s' "$2" | $K -n flint-system exec -i curl -- sh -c \
+# <path> <body> [<if-match etag>]. An OVERWRITE must name the version it
+# read (the gateway answers 428 precondition-required otherwise,
+# workspace.rs); a create sends none.
+gw_put()  { local im=""; [ -n "${3:-}" ] && im="-H 'If-Match: $3'"
+            printf '%s' "$2" | $K -n flint-system exec -i curl -- sh -c \
               "cat > /tmp/body && curl -sS -o /tmp/out -D /tmp/hdr -w '%{http_code}' -X PUT \
-               -H 'Authorization: Bearer $TOK' --data-binary @/tmp/body '$GW$1'" 2>/dev/null; }
+               -H 'Authorization: Bearer $TOK' $im --data-binary @/tmp/body '$GW$1'" 2>/dev/null; }
+# The etag a GET of a gateway path answers with — what an overwrite echoes.
+gw_etag() { $K -n flint-system exec curl -- sh -c \
+              "curl -sS -o /dev/null -D - -H 'Authorization: Bearer $TOK' '$GW$1'" 2>/dev/null \
+            | tr -d '\r' | sed -n 's/^[Ee][Tt][Aa][Gg]: *//p' | head -1; }
 gw_body() { $K -n flint-system exec curl -- cat /tmp/out 2>/dev/null; }
 gw_hdr()  { $K -n flint-system exec curl -- cat /tmp/hdr 2>/dev/null; }
 gw_epoch(){ gw_get "/lean/v1/$1/status" > /dev/null; gw_body | jq -r '.epoch'; }
@@ -238,17 +269,26 @@ gw_healthy() { # <iters>
 
 # Every key the manifest cites must resolve to a live object.
 dangling() { # <prefix> -> count
-  local m present cited
+  # An EXACT string set-difference in jq, not `sort | comm`: on the box
+  # (uutils coreutils, en_US.UTF-8) `comm` reported "not in sorted order"
+  # on sort's own output and named 64 cited keys "dangling" that a stat
+  # found — the oracle, not the bucket (C1/C3, 2026-10-03). The cause was
+  # never isolated; this comparison has no ordering to get wrong.
+  local m miss k n
+  # An unreadable manifest is a FAILURE, not "nothing dangles" — the
+  # difference over an empty document is empty.
   m=$(manif "$1")
-  cited=$(printf '%s' "$m" | jq -r '.entries[].key' | sort)
-  present=$(allkeys "$1" | sort)
-  local miss k
-  miss=$(comm -23 <(printf '%s\n' "$cited") <(printf '%s\n' "$present") | grep .)
-  # Name what is missing, and re-ask the store for each by key: a count
-  # alone cannot tell a lost object from a listing that missed one.
+  printf '%s' "$m" | jq -e '.entries | type == "object"' > /dev/null 2>&1 \
+    || { echo "  dangling: the manifest for $1 could not be read" >&2; echo 1; return; }
+  miss=$( { printf '%s\n' "$m"; allkeys "$1" | jq -R .; } \
+    | jq -r -s '.[0] as $m | (reduce .[1:][] as $k ({}; .[$k] = true)) as $have
+                | $m.entries[] | .key | select($have[.] | not)')
+  # Name what is missing and re-ask the store by EXACT key (`mc stat`
+  # matches by prefix; see haskey), so a listing gap reads as one.
   for k in $(printf '%s\n' "$miss" | head -5); do
-    if objexists "$k"; then echo "  dangling? $k — absent from the LISTING but stat finds it" >&2
-    else echo "  dangling: $k — stat finds no object" >&2; fi
+    n=$(mcx mc ls --json "m/$BUCKET/$k" | jq -r --arg b "${k##*/}" 'select(.key == $b) | .key' | grep -c .)
+    if [ "$n" -gt 0 ]; then echo "  dangling? $k — missing from the full listing, but listed by its own key" >&2
+    else echo "  dangling: $k — no object at that key" >&2; fi
   done
   printf '%s\n' "$miss" | grep -c .
 }
@@ -285,7 +325,7 @@ c1_crash_midbarrier() {
   # loop. Too early (nothing uploaded) or too late (manifest committed)
   # and the leg tested nothing — that is a failure, not a pass.
   [ "$landed" -gt 0 ] || { bad "kill landed before the first upload — leg vacuous"; return 1; }
-  if objexists "$P/files/f$(pad $N).txt"; then
+  if haskey $P "f$(pad $N).txt"; then
     bad "the last upload ($N) completed before the kill — leg vacuous"; return 1
   fi
   # The CAS that makes a publish VISIBLE is the pointer's, so that is
@@ -344,7 +384,7 @@ c2_podloss_takeover() {
   # ANTI-VACUITY: if no burst object landed, the pod died before the
   # barrier did anything and the takeover has nothing to be correct about.
   [ "$orphans" -gt 0 ] || { bad "pod died before any burst upload — leg vacuous"; return 1; }
-  if objexists "$P/files/burst$(pad $BURST).txt"; then
+  if haskey $P "burst$(pad $BURST).txt"; then
     bad "the whole burst uploaded before the kill — leg vacuous"; return 1
   fi
   ok "pod lost mid-barrier: $orphans/$BURST burst objects orphaned in the bucket"
@@ -415,7 +455,7 @@ c3_straggler_after_takeover() {
   local frozen
   frozen=$(allkeys "$P/files" | grep -c 'burst')
   [ "$frozen" -gt 0 ] || { bad "straggler stopped before any upload — leg vacuous"; return 1; }
-  if objexists "$P/files/burst$(pad $BURST).txt"; then
+  if haskey $P "burst$(pad $BURST).txt"; then
     bad "straggler finished before the STOP — leg vacuous"; return 1
   fi
   ok "straggler frozen mid-barrier at $frozen/$BURST uploads"
@@ -467,7 +507,7 @@ c4_restart_and_two_scan_delete() {
   sy chaos-a $P $R checkout > /dev/null || { bad "checkout"; return 1; }
   inpod chaos-a "mkdir -p $R; echo a > $R/a.txt; echo b > $R/b.txt; echo c > $R/c.txt; echo w" > /dev/null
   sy chaos-a $P $R barrier > /dev/null || { bad "base barrier"; return 1; }
-  objexists "$P/files/b.txt" || { bad "b.txt never published"; return 1; }
+  cited $P b.txt || { bad "b.txt never published"; return 1; }
   ok "published a/b/c"
 
   inpod chaos-a "rm -f $R/b.txt; echo rm" > /dev/null
@@ -501,7 +541,7 @@ c4_restart_and_two_scan_delete() {
   cited1=$(manif "$P" | jq -r '.entries|keys[]' | tr '\n' ' ')
   [ "$cited1" = "a.txt b.txt c.txt " ] ||
     { bad "manifest cites '$cited1' after ONE absent scan — the two-scan guard is gone"; return 1; }
-  objexists "$P/files/b.txt" || { bad "b.txt's object went after ONE absent scan"; return 1; }
+  haskey $P b.txt || { bad "b.txt's object went after ONE absent scan"; return 1; }
   ok "barrier 1: b.txt still cited and still in the bucket (first absence only)"
 
   local b2
@@ -509,16 +549,24 @@ c4_restart_and_two_scan_delete() {
   local cited
   cited=$(manif "$P" | jq -r '.entries|keys[]' | tr '\n' ' ')
   [ "$cited" = "a.txt c.txt " ] || { bad "manifest cites '$cited' after the delete"; return 1; }
-  # Then the object, judged against what THIS store can do. `leaked=` is
-  # the syncer saying it recognised the object and left it on purpose.
-  if has "leaked=" "$b2"; then
-    objexists "$P/files/b.txt" ||
-      { bad "the barrier reported a LEAKED object but b.txt is gone — it was collected anyway"; return 1; }
-    ok "barrier 2: b.txt un-cited, object LEFT (this store has no conditional DELETE) — two scans, exactly"
-  else
-    if objexists "$P/files/b.txt"; then bad "b.txt survived two absent scans — the delete never happened"; return 1; fi
-    ok "barrier 2: b.txt GC'd and un-cited — two consecutive scans, exactly"
-  fi
+  # Then the object. 2026-10-03, RE-DERIVED for immutable handles: the
+  # un-cited handle `b.txt@<flush>` is RETIRED, not deleted — it stays
+  # `retire_grace_secs` (600 by default) so a reader that loaded the
+  # previous document can still fetch it, and is collected by the next
+  # commit section after that (barrier.rs RETIRE-AGE G). The collector
+  # runs on every store now, MinIO included: a handle nobody cites can
+  # never be cited again, so its DELETE needs no If-Match
+  # (conformance.rs). The old `leaked=` branch is gone with that.
+  haskey $P b.txt || { bad "b.txt's handle was deleted at once — a reader of the previous document lost it inside the retire grace"; return 1; }
+  ok "barrier 2: b.txt un-cited; its handle stays for the retire grace — two consecutive scans, exactly"
+  # Collection: a commit with the grace at 0 takes it. A no-change
+  # barrier skips the commit section, so give it something to commit.
+  inpod chaos-a "echo d > $R/d.txt" > /dev/null
+  sye chaos-a $P $R "FLINT_SYNC_RETIRE_GRACE_SECS=0" barrier > /dev/null || { bad "the collecting barrier failed"; return 1; }
+  cited $P d.txt || { bad "the collecting barrier committed nothing — the GC check would be vacuous"; return 1; }
+  if haskey $P b.txt; then bad "b.txt's retired handle survived a commit with the grace at 0 — the collector never ran"; return 1; fi
+  haskey $P a.txt || { bad "the collector took a.txt's CITED handle too"; return 1; }
+  ok "with the grace at 0 the next commit collected b.txt's handle and kept the cited ones"
 }
 
 # ─────────────────────────────────────────────────────────────────────
@@ -527,6 +575,13 @@ c4_restart_and_two_scan_delete() {
 #     stay recoverable — the bytes, not just the reference.
 # ─────────────────────────────────────────────────────────────────────
 c5_hitl_conflict() {
+  # 2026-10-03: RE-DERIVED for P2 (f6f6a892: "UI verbs commit"). A UI
+  # write is no longer an inbox entry the agent's next barrier consumes;
+  # the gateway commits it into the manifest itself. An agent that then
+  # publishes its own dirty edit over that path publishes over a version
+  # it never integrated — and the barrier must SAY so and keep the UI
+  # bytes: a `commit-surfaced-foreign` conflict whose preserved_key holds
+  # them (barrier.rs). Both versions recoverable is still the claim.
   local P=tenants/c5 R=/work/c5 WS=c5
   sy chaos-a $P $R checkout > /dev/null || { bad "checkout"; return 1; }
   inpod chaos-a "mkdir -p $R; echo v1 > $R/shared.txt; echo w" > /dev/null
@@ -535,37 +590,40 @@ c5_hitl_conflict() {
 
   # The agent edits locally (dirty, unpublished).
   inpod chaos-a "echo from-agent-local > $R/shared.txt; echo w" > /dev/null
-  # The human writes the same path through the gateway.
-  local code
+  # The human overwrites the same path through the gateway, naming the
+  # version it read — without it the gateway refuses (428), as it must.
+  local code et
   code=$(gw_put "/lean/v1/$WS/files/shared.txt" "from-ui-human")
-  [ "$code" = "200" ] || { bad "gateway PUT returned $code: $(gw_body)"; return 1; }
-  ok "HITL write accepted (object + inbox entry, no manifest edit)"
+  [ "$code" = "428" ] || { bad "an overwrite with no If-Match returned $code, want 428: $(gw_body)"; return 1; }
+  et=$(gw_etag "/lean/v1/$WS/files/shared.txt")
+  [ -n "$et" ] || { bad "the gateway GET carried no etag"; return 1; }
+  code=$(gw_put "/lean/v1/$WS/files/shared.txt" "from-ui-human" "$et")
+  [ "$code" = "200" ] || { bad "gateway PUT with If-Match returned $code: $(gw_body)"; return 1; }
+  [ "$(fcat $P shared.txt)" = "from-ui-human" ] || { bad "the UI write is not what the manifest cites — under P2 a UI write commits"; return 1; }
+  ok "HITL overwrite: 428 without If-Match, 200 with it, and it is CITED at once"
 
   local out
   out=$(sy chaos-a $P $R barrier)
-  has "consumed=1" "$out" || { bad "barrier did not consume the inbox entry: $out"; return 1; }
-
   local conflicts pk
   conflicts=$(inpod chaos-a "cat $R/.flint-sync/conflicts.jsonl")
-  has "consume-dirty" "$conflicts" || { bad "no consume-dirty conflict recorded: $conflicts"; return 1; }
-  pk=$(printf '%s' "$conflicts" | jq -r 'select(.kind=="consume-dirty")|.preserved_key' | tail -1)
-  [ -n "$pk" ] && [ "$pk" != "null" ] || { bad "conflict record has no preserved_key — the foreign bytes were not kept"; return 1; }
+  pk=$(printf '%s' "$conflicts" | jq -r 'select(.path=="shared.txt" and (.kind|startswith("commit-surfaced-foreign")))|.preserved_key' | tail -1)
+  [ -n "$pk" ] && [ "$pk" != "null" ] || { bad "no commit-surfaced-foreign record with a preserved_key for shared.txt: $conflicts"; return 1; }
 
   local kept live
   kept=$(objcat "$pk")
-  live=$(objcat "$P/files/shared.txt")
+  live=$(fcat $P shared.txt)
   # ANTI-VACUITY: the two versions must actually differ, or "both
   # recoverable" is trivially true.
   [ "$kept" != "$live" ] || { bad "preserved and live bytes are identical — nothing was in conflict"; return 1; }
   [ "$kept" = "from-ui-human" ] || { bad "preserved bytes are '$kept', want the HITL version"; return 1; }
   [ "$live" = "from-agent-local" ] || { bad "live bytes are '$live', want the agent version"; return 1; }
-  ok "both versions recoverable: live=agent, preserved=$pk holds the HITL bytes"
+  ok "both versions recoverable: cited=agent, preserved=$pk holds the HITL bytes"
 
   # S3 ETags are quoted; mc reports them unquoted. Compare the values,
   # not the quoting convention of whoever printed them.
   local cited_etag actual_etag
   cited_etag=$(manif "$P" | jq -r '.entries["shared.txt"].etag' | tr -d '"')
-  actual_etag=$(mcx mc stat --json "m/$BUCKET/$P/files/shared.txt" | jq -r '.etag' | tr -d '"')
+  actual_etag=$(mcx mc stat --json "m/$BUCKET/$(citekey $P shared.txt)" | jq -r '.etag' | tr -d '"')
   [ "$cited_etag" = "$actual_etag" ] || { bad "manifest cites $cited_etag, object is $actual_etag"; return 1; }
   ok "manifest citation matches the live object"
 }
@@ -577,41 +635,41 @@ c5_hitl_conflict() {
 #     not the endpoint being broken).
 # ─────────────────────────────────────────────────────────────────────
 c6_gateway_epoch_validation() {
+  # 2026-10-03: RE-DERIVED. The window/open, window/clear and inbox/drop
+  # verbs are gone (P2: a UI write commits; there is no write window and
+  # no inbox to drop), so the ONE syncer-facing write left is
+  # `POST /manifest`, and it is still epoch-validated per request (P5,
+  # workspace.rs require_current_epoch). Under the per-barrier lease
+  # checkout claims nothing and each commit's claim of a released cell
+  # adds 1, so it takes TWO commits to have an older epoch to replay.
   local P=tenants/c6 R=/work/c6 WS=c6
   sy chaos-a $P $R checkout > /dev/null || { bad "checkout"; return 1; }
   inpod chaos-a "mkdir -p $R; echo one > $R/one.txt; echo w" > /dev/null
   sy chaos-a $P $R barrier > /dev/null || { bad "base barrier"; return 1; }
+  inpod chaos-a "echo two > $R/two.txt" > /dev/null
+  sy chaos-a $P $R barrier > /dev/null || { bad "second barrier"; return 1; }
 
-  local E stale now code
-  E=$(gw_epoch $WS); now=$(gw_now $WS); stale=$((E - 1))
-  [ "$E" -gt 1 ] || { bad "epoch is $E — no room for a stale claim"; return 1; }
-  ok "cell is at epoch $E"
-
-  code=$(gw_post "/lean/v1/$WS/window/open" "{\"epoch\":$stale,\"deadline_unix\":$((now + 60))}")
-  [ "$code" = "403" ] || { bad "window/open at stale epoch returned $code (want 403): $(gw_body)"; return 1; }
-  has "stale-epoch" "$(gw_body)" || { bad "403 but not stale-epoch: $(gw_body)"; return 1; }
-
-  code=$(gw_post "/lean/v1/$WS/inbox/drop" "{\"epoch\":$stale,\"consumed\":[]}")
-  [ "$code" = "403" ] || { bad "inbox/drop at stale epoch returned $code (want 403)"; return 1; }
+  local E stale code
+  E=$(gw_epoch $WS); stale=$((E - 1))
+  [ "$E" -gt 1 ] || { bad "epoch is $E after two commits — no older epoch to replay"; return 1; }
+  ok "cell is at epoch $E after two commits"
 
   # The one that matters: a deposed straggler's manifest install.
   code=$(gw_post "/lean/v1/$WS/manifest" \
     "{\"manifest\":{\"seq\":999,\"entries\":{}},\"epoch\":$stale,\"flush_uuid\":\"straggler\"}")
-  [ "$code" = "403" ] || { bad "manifest CAS at stale epoch returned $code (want 403): $(gw_body)"; return 1; }
-  ok "stale epoch refused on window/open, inbox/drop and manifest"
+  [ "$code" = "403" ] || { bad "manifest CAS at stale epoch $stale returned $code (want 403): $(gw_body)"; return 1; }
+  has "stale-epoch" "$(gw_body)" || { bad "403 but not stale-epoch: $(gw_body)"; return 1; }
+  code=$(gw_post "/lean/v1/$WS/manifest" \
+    "{\"manifest\":{\"seq\":999,\"entries\":{}},\"epoch\":$((E + 1)),\"flush_uuid\":\"future\"}")
+  [ "$code" = "403" ] || { bad "manifest CAS at a FUTURE epoch returned $code (want 403): $(gw_body)"; return 1; }
+  ok "manifest install refused at the stale epoch $stale and at a future one (stale-epoch)"
 
-  # ANTI-VACUITY: the same verbs at the CURRENT epoch must work, or the
-  # 403s prove only that the endpoints are broken.
-  code=$(gw_post "/lean/v1/$WS/window/open" "{\"epoch\":$E,\"deadline_unix\":$((now + 30))}")
-  [ "$code" = "200" ] || { bad "window/open at the CURRENT epoch returned $code — the 403s were vacuous"; return 1; }
-  code=$(gw_post "/lean/v1/$WS/window/clear" "{\"epoch\":$E,\"queued\":[]}")
-  [ "$code" = "200" ] || { bad "window/clear at the current epoch returned $code"; return 1; }
-  ok "current epoch admitted on the same verbs (the 403s are the check firing)"
-
-  # A correct epoch still has to pass the CAS guard.
+  # ANTI-VACUITY: at the CURRENT epoch the same install passes the epoch
+  # check and is stopped by the CAS guard instead — so the 403s were the
+  # epoch check firing, not a broken endpoint.
   code=$(gw_post "/lean/v1/$WS/manifest" \
     "{\"manifest\":{\"seq\":999,\"entries\":{}},\"expected_etag\":\"\\\"deadbeef\\\"\",\"epoch\":$E,\"flush_uuid\":\"x\"}")
-  [ "$code" = "409" ] || { bad "manifest CAS with a bogus etag returned $code (want 409 cas-miss)"; return 1; }
+  [ "$code" = "409" ] || { bad "manifest CAS with the current epoch and a bogus etag returned $code (want 409 cas-miss)"; return 1; }
   local seq_after
   seq_after=$(manif "$P" | jq -r '.seq')
   [ "$seq_after" != "999" ] || { bad "the bogus manifest LANDED"; return 1; }
@@ -631,37 +689,45 @@ c6_gateway_epoch_validation() {
 #     this leg proves the UX contract is actually wired.
 # ─────────────────────────────────────────────────────────────────────
 c7_window_refusal() {
-  local P=tenants/c7 R=/work/c7 WS=c7
+  # 2026-10-03: RE-DERIVED for P2. There is no barrier window any more:
+  # the window/open and window/clear verbs are gone, and a UI save
+  # "never waits on the writers' lease or their commit window"
+  # (workspace.rs) — a writer mid-commit loses its CAS and re-merges
+  # instead. So the leg holds a writer INSIDE its commit section (the
+  # drill hold, after the fence is taken, before the CAS) and asserts the
+  # opposite of what it used to: a UI save made during the hold is
+  # admitted at once, and when the hold ends the writer's CAS re-merges
+  # so BOTH are cited. (The name is kept for the roster.)
+  local P=tenants/c7 R=/work/c7 WS=c7 HOLD=15
   sy chaos-a $P $R checkout > /dev/null || { bad "checkout"; return 1; }
   inpod chaos-a "mkdir -p $R; echo seed > $R/seed.txt; echo w" > /dev/null
   sy chaos-a $P $R barrier > /dev/null || { bad "base barrier"; return 1; }
 
-  local E now code
-  E=$(gw_epoch $WS); now=$(gw_now $WS)
-  code=$(gw_post "/lean/v1/$WS/window/open" "{\"epoch\":$E,\"deadline_unix\":$((now + 120))}")
-  [ "$code" = "200" ] || { bad "window/open returned $code"; return 1; }
+  inpod chaos-a "echo agent > $R/agent.txt" > /dev/null
+  inpod chaos-a "rm -f /tmp/c7.log; nohup env FLINT_SYNC_PREFIX=$P FLINT_SYNC_ROOT=$R \
+      FLINT_SYNC_DRILL_HOLD_COMMIT_SECS=$HOLD /usr/local/bin/flint-sync barrier > /tmp/c7.log 2>&1 & echo bg" > /dev/null
+  local i
+  for i in $(seq 1 60); do
+    inpod chaos-a "grep -q 'DRILL: holding the fence' /tmp/c7.log" && break; sleep 0.5
+  done
+  inpod chaos-a "grep -q 'DRILL: holding the fence' /tmp/c7.log" \
+    || { bad "the writer never reached its commit hold — nothing to save against"; return 1; }
 
-  code=$(gw_put "/lean/v1/$WS/files/ui.txt" "during-window")
-  [ "$code" = "409" ] || { bad "HITL write during an open window returned $code (want 409)"; return 1; }
-  has "barrier-window-open" "$(gw_body)" || { bad "409 but not barrier-window-open: $(gw_body)"; return 1; }
-  has "retry-after" "$(gw_hdr | tr 'A-Z' 'a-z')" || { bad "409 carries no Retry-After: $(gw_hdr)"; return 1; }
-  ok "open window ⇒ 409 barrier-window-open + Retry-After"
+  local t0=$(date +%s) dt code
+  code=$(gw_put "/lean/v1/$WS/files/ui.txt" "during-commit")
+  dt=$(( $(date +%s) - t0 ))
+  [ "$code" = "200" ] || { bad "UI save during a held commit returned $code: $(gw_body)"; return 1; }
+  [ "$dt" -lt $((HOLD - 5)) ] || { bad "the UI save took ${dt}s — it waited on the writer's commit (hold ${HOLD}s)"; return 1; }
+  inpod chaos-a "grep -q 'barrier seq' /tmp/c7.log" && { bad "the writer's barrier finished before the save — the hold did not hold"; return 1; }
+  [ "$(fcat $P ui.txt)" = "during-commit" ] || { bad "the UI save is not cited right after its 200"; return 1; }
+  ok "UI save admitted in ${dt}s while the writer held its commit (${HOLD}s), cited at once"
 
-  code=$(gw_post "/lean/v1/$WS/window/clear" "{\"epoch\":$E,\"queued\":[]}")
-  [ "$code" = "200" ] || { bad "window/clear returned $code"; return 1; }
-  # ANTI-VACUITY: the same write must succeed once the window is gone.
-  code=$(gw_put "/lean/v1/$WS/files/ui.txt" "after-window")
-  [ "$code" = "200" ] || { bad "HITL write after the window returned $code — the 409 was not the window"; return 1; }
-  ok "window cleared ⇒ the same write is admitted"
-
-  local out
-  out=$(sy chaos-a $P $R barrier)
-  has "consumed=1" "$out" || { bad "barrier did not consume the released write: $out"; return 1; }
-  local body
-  body=$(objcat "$P/files/ui.txt")
-  [ "$body" = "after-window" ] || { bad "ui.txt is '$body'"; return 1; }
-  manif "$P" | jq -e '.entries["ui.txt"]' > /dev/null || { bad "manifest does not cite ui.txt"; return 1; }
-  ok "the released write was consumed and cited"
+  for i in $(seq 1 $((HOLD + 40))); do
+    proc_alive chaos-a flint-sync || break; sleep 1
+  done
+  [ "$(fcat $P agent.txt)" = "agent" ] || { bad "the held writer's file was never cited — its CAS did not re-merge: $(inpod chaos-a 'cat /tmp/c7.log')"; return 1; }
+  [ "$(fcat $P ui.txt)" = "during-commit" ] || { bad "the writer's commit dropped the UI save it raced"; return 1; }
+  ok "after the hold the writer re-merged: agent.txt and ui.txt both cited"
 }
 
 # ─────────────────────────────────────────────────────────────────────
@@ -669,6 +735,17 @@ c7_window_refusal() {
 #     Claim: the gateway is the CONTROL plane only — agents keep
 #     publishing through an outage. The UI is what degrades.
 # ─────────────────────────────────────────────────────────────────────
+# Scale the gateway back up and wait for its door. C8 calls it on EVERY
+# exit after the scale-down: a failing C8 used to return with the
+# gateway at zero replicas, and C11 then failed with curl's 000 — a
+# knock-on reported as a leg of its own (2026-10-03).
+gw_restore() {
+  $K -n flint-system scale deploy/lean-gateway --replicas=1 > /dev/null
+  $K -n flint-system rollout status deploy/lean-gateway --timeout=180s > /dev/null
+  # rollout status returns on Deployment availability; the Service
+  # endpoint can still be a beat behind. Poll the door itself.
+  gw_healthy 60
+}
 c8_gateway_outage() {
   local P=tenants/c8 R=/work/c8 WS=c8
   sy chaos-a $P $R checkout > /dev/null || { bad "checkout"; return 1; }
@@ -682,26 +759,21 @@ c8_gateway_outage() {
   $K -n flint-system scale deploy/lean-gateway --replicas=0 > /dev/null
   $K -n flint-system wait --for=delete pod -l app=lean-gateway --timeout=120s > /dev/null 2>&1
   code=$(gw_put "/lean/v1/$WS/files/during.txt" "during-outage")
-  [ "$code" != "200" ] || { bad "HITL write SUCCEEDED with the gateway scaled to zero — leg vacuous"; return 1; }
+  [ "$code" != "200" ] || { bad "HITL write SUCCEEDED with the gateway scaled to zero — leg vacuous"; gw_restore; return 1; }
   ok "outage confirmed: HITL write returns '$code' (no gateway)"
 
   # The claim: the data plane does not depend on the control plane.
   inpod chaos-a "echo written-during-outage > $R/outage.txt; echo w" > /dev/null
   local out
   out=$(sy chaos-a $P $R barrier)
-  has "up=1" "$out" || { bad "the syncer could not publish during the outage: $out"; return 1; }
+  has "up=1" "$out" || { bad "the syncer could not publish during the outage: $out"; gw_restore; return 1; }
   local body
-  body=$(objcat "$P/files/outage.txt")
-  [ "$body" = "written-during-outage" ] || { bad "outage publish body is '$body'"; return 1; }
-  manif "$P" | jq -e '.entries["outage.txt"]' > /dev/null || { bad "outage publish not cited"; return 1; }
+  body=$(fcat $P outage.txt)
+  [ "$body" = "written-during-outage" ] || { bad "outage publish body is '$body'"; gw_restore; return 1; }
   ok "the syncer published and cited a new file WHILE the gateway was down"
-  note "a GATEWAY outage costs only the fourth of plan §2.2's four stated effects: publishing, checkout and sync are untouched. The shipped flint-sync writes the manifest/window/inbox cells DIRECTLY to the store (barrier.rs:257,261,384,467) and links no HTTP client at all, so the gateway is not on its write path. C12 drills the other half — the proxy — and gets all four. Gateway and proxy are separate failure domains; plan §2.2 states them as one line ('gateway/proxy down'), and Phase 3's 'assert ALL FOUR effects' is a PROXY criterion."
+  note "a GATEWAY outage costs only the fourth of plan §2.2's four stated effects: publishing, checkout and sync are untouched. The shipped flint-sync writes the manifest and lease cells DIRECTLY to the store and links no HTTP client at all, so the gateway is not on its write path. C12 drills the other half — the proxy — and gets all four. Gateway and proxy are separate failure domains; plan §2.2 states them as one line ('gateway/proxy down'), and Phase 3's 'assert ALL FOUR effects' is a PROXY criterion."
 
-  $K -n flint-system scale deploy/lean-gateway --replicas=1 > /dev/null
-  $K -n flint-system rollout status deploy/lean-gateway --timeout=180s > /dev/null
-  # rollout status returns on Deployment availability; the Service
-  # endpoint can still be a beat behind. Poll the door itself.
-  gw_healthy 60 || { bad "gateway never answered /healthz after scale-up"; return 1; }
+  gw_restore || { bad "gateway never answered /healthz after scale-up"; return 1; }
   code=$(gw_put "/lean/v1/$WS/files/after.txt" "after-outage")
   [ "$code" = "200" ] || { bad "post-recovery HITL write returned $code"; return 1; }
   ok "gateway recovered: HITL writes accepted again (stateless, nothing to rebuild)"
@@ -753,11 +825,17 @@ c10_prefix_containment() {
 
   inpod chaos-a "rm -f $R/y.txt; echo rm" > /dev/null
   sy chaos-a $P $R barrier > /dev/null || { bad "barrier 1"; return 1; }
-  sy chaos-a $P $R barrier > /dev/null || { bad "barrier 2"; return 1; }
+  # The retired handle is collected by a COMMIT once it is
+  # retire_grace_secs old (600 by default; barrier.rs RETIRE-AGE G), and
+  # a no-change barrier skips the commit section — so barrier 2 carries
+  # a new file and runs with the grace at 0 (2026-10-03, handles).
+  inpod chaos-a "echo z > $R/z.txt" > /dev/null
+  sye chaos-a $P $R "FLINT_SYNC_RETIRE_GRACE_SECS=0" barrier > /dev/null || { bad "barrier 2"; return 1; }
+  cited $P z.txt || { bad "barrier 2 committed nothing — the GC had no commit to run in"; return 1; }
   # ANTI-VACUITY: the GC must actually have deleted something in this
   # run, or "the neighbours survived" is a statement about a no-op.
-  if objexists "$P/files/y.txt"; then bad "the GC deleted nothing — containment leg is vacuous"; return 1; fi
-  ok "the GC ran and removed y.txt"
+  if haskey $P y.txt; then bad "the GC deleted nothing — containment leg is vacuous"; return 1; fi
+  ok "the GC ran and removed y.txt's handle"
 
   objcat "$P-sibling/files/keep.txt" | grep -c 'sibling-must-survive' > /dev/null \
     || { bad "the string-prefix NEIGHBOUR tenants/c10-sibling was swept"; return 1; }
@@ -786,7 +864,11 @@ c11_hitl_survives_barriers() {
   local code
   code=$(gw_put "/lean/v1/$WS/files/human.txt" "human-uploaded-bytes")
   [ "$code" = "200" ] || { bad "HITL upload returned $code"; return 1; }
-  ok "human uploaded human.txt (object + inbox entry only — no manifest edit)"
+  # Under P2 (f6f6a892) the upload COMMITS: the gateway cites it itself,
+  # before answering. It used to be an inbox entry the next barrier
+  # consumed (2026-10-03, re-derived).
+  [ "$(fcat $P human.txt)" = "human-uploaded-bytes" ] || { bad "the upload is not cited after its 200 — under P2 a UI write commits"; return 1; }
+  ok "human uploaded human.txt; the gateway cited it at once"
 
   # Barrier 1 consumes it. The agent is doing unrelated work throughout;
   # the sync verb is never invoked.
@@ -812,15 +894,21 @@ c11_hitl_survives_barriers() {
   inpod chaos-a "rm -f $R/a.txt; echo rm" > /dev/null
   sy chaos-a $P $R barrier > /dev/null || { bad "barrier 3"; return 1; }
   sy chaos-a $P $R barrier > /dev/null || { bad "barrier 4"; return 1; }
-  if objexists "$P/files/a.txt"; then bad "the GC never ran — the delete leg is vacuous"; return 1; fi
-  ok "barriers 2-4 did unrelated work including a GC"
+  # Barrier 4 retired a.txt's handle; a COMMIT collects it once it is
+  # retire_grace_secs old, so barrier 5 commits a new file with the
+  # grace at 0 (barrier.rs RETIRE-AGE G).
+  inpod chaos-a "echo agent-c > $R/c.txt" > /dev/null
+  sye chaos-a $P $R "FLINT_SYNC_RETIRE_GRACE_SECS=0" barrier > /dev/null || { bad "barrier 5"; return 1; }
+  cited $P c.txt || { bad "barrier 5 committed nothing — no GC could run"; return 1; }
+  if haskey $P a.txt; then bad "the GC never ran — the delete leg is vacuous"; return 1; fi
+  ok "barriers 2-5 did unrelated work including a GC"
 
   local body cited
-  body=$(objcat "$P/files/human.txt")
+  body=$(fcat $P human.txt)
   [ "$body" = "human-uploaded-bytes" ] || { bad "human.txt bytes are now '$body'"; return 1; }
   cited=$(manif "$P" | jq -r '.entries|keys[]' | tr '\n' ' ')
   has "human.txt" "$cited" || { bad "human.txt un-cited after four barriers (cited: $cited)"; return 1; }
-  ok "human.txt intact and cited after 4 barriers and a GC, with no sync verb — cited set: $cited"
+  ok "human.txt intact and cited after 5 barriers and a GC, with no sync verb — cited set: $cited"
 }
 
 # ─────────────────────────────────────────────────────────────────────
