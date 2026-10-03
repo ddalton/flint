@@ -38,7 +38,9 @@
 # never happened.
 #
 # Prereqs: kind cluster `flint-lean-chaos` with flint-sync:e2e and
-# flint-lean-gateway:e2e loaded; minio.yaml + chaos.yaml applied.
+# flint-lean-gateway:e2e loaded; minio.yaml + chaos.yaml applied
+# (or rustfs.yaml in place of minio.yaml: the second store, same
+# Service name; no leg here needs anything MinIO-specific).
 # Runtime ~4-6 min. C2 and C3 were RE-DERIVED on 2026-09-13 for the
 # per-barrier lease (design flint-lean-writer-lease-and-gated-assessment
 # §4) and have NOT been run against it: a writer that dies or stalls
@@ -143,6 +145,19 @@ wait_key() { # <prefix> <relative key> <iters>
 # The oracle reads the bucket DIRECTLY (mc), never through the syncer's
 # own code — otherwise one bug can hide another.
 mcx()      { $K -n flint-system exec mc -- "$@" 2>/dev/null; }
+# Which server answers behind the Service named `minio`. MinIO says so in
+# its Server header; RustFS sends none, but its /health body names it.
+# The answer gates B8, so it is read, not configured — a wrong STORE=
+# would skip a leg on MinIO itself.
+store_kind() {
+  local h b
+  h=$($K -n flint-system exec curl -- curl -sI http://minio.flint-system.svc:9000/ 2>/dev/null \
+      | tr -d '\r' | sed -n 's/^[Ss]erver: *//p' | head -1)
+  case $h in *MinIO*) echo minio; return ;; esac
+  b=$($K -n flint-system exec curl -- curl -s http://minio.flint-system.svc:9000/health 2>/dev/null)
+  case $b in *rustfs*) echo rustfs; return ;; esac
+  echo "unknown(Server: ${h:-none})"
+}
 objcat()   { mcx mc cat "m/$BUCKET/$1"; }
 objexists(){ mcx mc stat "m/$BUCKET/$1" > /dev/null 2>&1; }
 putobj()   { printf '%s' "$2" | $K -n flint-system exec -i mc -- mc pipe "m/$BUCKET/$1" > /dev/null 2>&1; }
@@ -153,13 +168,44 @@ allkeys()  { mcx mc ls --recursive --json "m/$BUCKET/$1/" | jq -r --arg p "$1/" 
 # tried LAST — after migration it holds a refusal doc with no
 # `.entries`. Reading it first is not merely stale, it is VACUOUS: a
 # missing object answers 0/false, so assertions pass by reading nothing.
+#
+# 2026-10-03: the pointer has two layouts and this reader knew only the
+# first. A CHUNKED pointer (step two, the one the syncer writes now)
+# carries `chunks: [{addr, first, n}]` and NO `entries_key`, so this
+# returned 1 and every caller read an EMPTY manifest — "cites  of
+# 8000" right after a barrier that published 8000. It now assembles the
+# chunks into the one `{seq, entries, tombstones}` document the legs
+# read, and refuses (returns 1) if a chunk is missing or its entry
+# count is not the `n` the pointer committed to.
 mbody() {
-    local c k
+    local c k addr tk
     c=$(objcat "$1/.flint/lean/current")
     if [ -n "$c" ]; then
         k=$(printf '%s' "$c" | jq -r '.entries_key // empty')
-        [ -z "$k" ] && return 1
-        objcat "$k"
+        if [ -n "$k" ]; then objcat "$k"; return; fi
+        printf '%s' "$c" | jq -e '.chunks | type == "array"' > /dev/null || return 1
+        # Streamed through stdin, never passed as an argument: an 8000-
+        # entry document is past Linux's 128 KiB cap on ONE argv string,
+        # and jq --argjson then fails and reads as an empty manifest.
+        {
+            printf '%s\n' "$c"
+            for addr in $(printf '%s' "$c" | jq -r '.chunks[].addr'); do
+                objcat "$1/.flint/lean/chunks/$addr" || printf '"missing %s"' "$addr"
+                printf '\n'
+            done
+            tk=$(printf '%s' "$c" | jq -r '.tombstones // empty')
+            if [ -n "$tk" ]; then
+                objcat "$1/.flint/lean/chunks/$tk" || printf '"missing %s"' "$tk"
+                printf '\n'
+            fi
+        } | jq -c -s '
+            .[0] as $p | ($p.chunks | length) as $nc | .[1:1+$nc] as $cs | .[1+$nc:] as $ts
+            | if ([range($nc)] | all(. as $i | ($cs[$i] | type) == "object"
+                    and ($cs[$i].entries | length) == $p.chunks[$i].n))
+              then {seq: $p.seq,
+                    entries: (reduce $cs[] as $b ({}; . + $b.entries)),
+                    tombstones: (($ts[0] // {}) | if type == "object" then (.tombstones // {}) else error("missing tombstones") end)}
+              else error("a chunk is missing or its entry count is not the pointer'"'"'s n") end'
         return
     fi
     objcat "$1/.flint/lean/manifest"
@@ -196,7 +242,15 @@ dangling() { # <prefix> -> count
   m=$(manif "$1")
   cited=$(printf '%s' "$m" | jq -r '.entries[].key' | sort)
   present=$(allkeys "$1" | sort)
-  comm -23 <(printf '%s\n' "$cited") <(printf '%s\n' "$present") | grep -c .
+  local miss k
+  miss=$(comm -23 <(printf '%s\n' "$cited") <(printf '%s\n' "$present") | grep .)
+  # Name what is missing, and re-ask the store for each by key: a count
+  # alone cannot tell a lost object from a listing that missed one.
+  for k in $(printf '%s\n' "$miss" | head -5); do
+    if objexists "$k"; then echo "  dangling? $k — absent from the LISTING but stat finds it" >&2
+    else echo "  dangling: $k — stat finds no object" >&2; fi
+  done
+  printf '%s\n' "$miss" | grep -c .
 }
 
 wait_restart() { # <pod> <old count>
@@ -839,6 +893,9 @@ $K -n flint-system scale deploy/lean-gateway --replicas=1 > /dev/null 2>&1
 $K -n flint-system rollout status deploy/lean-gateway --timeout=180s > /dev/null \
   || { echo "FAIL: gateway not rolled out"; exit 1; }
 gw_healthy 60 || { echo "FAIL: gateway does not answer /healthz"; exit 1; }
+# Which store answers (minio.yaml or rustfs.yaml), so a log says which
+# store its verdicts are about.
+echo "  store: $(store_kind)"
 
 leg "C1  crash mid-barrier, recover over the same emptyDir" c1_crash_midbarrier
 leg "C2  pod loss mid-barrier, fresh pod carries on"        c2_podloss_takeover

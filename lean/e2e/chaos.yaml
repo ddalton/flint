@@ -68,7 +68,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: mc
-      image: minio/mc
+      image: cgr.dev/chainguard/minio-client:latest-dev
       command: ["/bin/sh", "-c", "sleep 100000"]
 ---
 # Gateway assertions: status codes and headers, which busybox wget

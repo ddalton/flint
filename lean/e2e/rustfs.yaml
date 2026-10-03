@@ -1,12 +1,14 @@
-# The store half of the e2e rig: namespace, MinIO (stand-in for the
-# deployment proxy), and the bucket bootstrap. Shared by the rigs in
-# this directory. rustfs.yaml is the same rig on the second store; apply
-# one or the other, never both (they share the Service name `minio`).
+# The store half of the e2e rig on the SECOND store: RustFS, behind the
+# Service still named `minio`, so verbs.yaml, chaos.yaml and both drills
+# address it unchanged. Apply this OR minio.yaml, never both.
 #
-# MinIO's own images stopped pulling in 2026-09 (Docker Hub denies
-# minio/minio and minio/mc, quay.io answers 401). Chainguard's build is
-# the same server and client, and pulls anonymously. It runs as a
-# non-root user, so /data is an emptyDir it can write.
+# Why a second store: every leg's expectation was written against MinIO,
+# and a protocol that only works on one vendor's reading of S3 is a
+# finding. MinIO stays the primary store (its measured behaviour, e.g.
+# DELETE ignoring If-Match, is what the legs were calibrated on).
+# run-verbs.sh detects the store; B8 counts requests with MinIO's admin
+# trace, which RustFS does not serve, so on RustFS B8 is SKIPPED, loudly.
+# The mc oracle and the bucket bootstrap are the same MinIO client.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -25,14 +27,18 @@ spec:
     spec:
       containers:
         - name: minio
-          image: cgr.dev/chainguard/minio:latest
-          args: ["server", "/data", "--address", ":9000"]
+          image: rustfs/rustfs:latest
           env:
-            - { name: MINIO_ROOT_USER, value: drill }
-            - { name: MINIO_ROOT_PASSWORD, value: drillsecret }
+            - { name: RUSTFS_ACCESS_KEY, value: drill }
+            - { name: RUSTFS_SECRET_KEY, value: drillsecret }
+            - { name: RUSTFS_VOLUMES, value: /data }
           ports: [{ containerPort: 9000 }]
-          volumeMounts: [{ name: data, mountPath: /data }]
-      volumes: [{ name: data, emptyDir: {} }]
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: logs, mountPath: /logs }
+      volumes:
+        - { name: data, emptyDir: {} }
+        - { name: logs, emptyDir: {} }
 ---
 apiVersion: v1
 kind: Service
