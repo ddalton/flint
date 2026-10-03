@@ -505,8 +505,12 @@ impl<'p> Checker<'p> {
                             node_edges.clear();
                             for (fp, s) in succ.drain(..) {
                                 if keep_all {
-                                    for inst in self.props.iter().filter(|i| matches!(i.leaf, crate::eval::TProp::ActionBox(..))) {
-                                        match liveness::step_ok(self.p, inst, st, &s, &mut bufs) {
+                                    for (pi, inst) in self.props.iter().enumerate().filter(|(_, i)| matches!(i.leaf, crate::eval::TProp::ActionBox(..))) {
+                                        let ok = match self.e.step_prop(pi, st, &s) {
+                                            Some(r) => r,
+                                            None => liveness::step_ok(self.p, inst, st, &s, &mut bufs),
+                                        };
+                                        match ok {
                                             Ok(true) => {}
                                             Ok(false) => return Some(Failure::Step(inst.name.clone(), pidx, s.clone())),
                                             Err(e) => return Some(Failure::Eval(format!("evaluating {}: {e}", inst.name), Some(pidx))),

@@ -282,6 +282,12 @@ pub trait Engine: Sync {
     fn invariant(&self, i: usize, cx: &mut Cx) -> R<bool>;
     fn constraint(&self, i: usize, cx: &mut Cx) -> R<bool>;
     fn view(&self, cx: &mut Cx) -> R<Value>;
+    /// A step property `[][A]_v` (the checker's `props[i]`) on the step
+    /// s -> t, when this engine compiled it; None leaves it to the
+    /// interpreter (`liveness::step_ok`).
+    fn step_prop(&self, _i: usize, _s: &[Value], _t: &[Value]) -> Option<R<bool>> {
+        None
+    }
 }
 
 impl Engine for Program {

@@ -61,6 +61,31 @@ pub fn empty_set() -> Value {
 }
 
 impl Value {
+    /// A copy that shares no reference-counted node with `self`. A value
+    /// every worker reads (a constant) costs an atomic increment and
+    /// decrement on ONE shared count per clone, and with many workers that
+    /// cache line moves between cores on every one; a worker holding its
+    /// own copy touches only counts no other core does.
+    pub fn deep_clone(&self) -> Value {
+        let many = |xs: &[Value]| xs.iter().map(Value::deep_clone).collect::<Vec<_>>();
+        match self {
+            Value::Bool(_) | Value::Int(_) | Value::Str(_) | Value::Model(_) => self.clone(),
+            Value::Set(xs) => Value::Set(many(xs).into()),
+            Value::Seq(xs) => Value::Seq(many(xs).into()),
+            Value::Func(f) => Value::Func(Arc::new(Func { keys: many(&f.keys).into(), vals: many(&f.vals).into() })),
+            Value::Lazy(l) => Value::Lazy(Arc::new(match &**l {
+                Lazy::Nat => Lazy::Nat,
+                Lazy::Int => Lazy::Int,
+                Lazy::Strings => Lazy::Strings,
+                Lazy::Subset(a) => Lazy::Subset(a.deep_clone()),
+                Lazy::FuncSet(a, b) => Lazy::FuncSet(a.deep_clone(), b.deep_clone()),
+                Lazy::RecSet(fs) => Lazy::RecSet(fs.iter().map(|(k, x)| (*k, x.deep_clone())).collect()),
+                Lazy::Product(xs) => Lazy::Product(many(xs).into()),
+                Lazy::SeqOf(a) => Lazy::SeqOf(a.deep_clone()),
+            })),
+        }
+    }
+
     fn tag(&self) -> u8 {
         match self {
             // A model value is below every other kind, as in TLC.

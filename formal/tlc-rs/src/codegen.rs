@@ -36,6 +36,29 @@ pub mod rt {
         pub fn new(p: &Program) -> G {
             G { k: super::const_pool(p), c: p.ops.iter().map(|o| o.cached.clone()).collect() }
         }
+
+        /// This thread's own copy of the pool (built on first use, never
+        /// freed): every worker shares the one `G`, and a clone of a
+        /// constant is an atomic update of a count all of them write, so
+        /// past a few workers the cores spend their time moving that cache
+        /// line. A copy per thread makes those counts private.
+        pub fn local(&self) -> &'static G {
+            thread_local! {
+                static MINE: std::cell::Cell<Option<(usize, &'static G)>> = const { std::cell::Cell::new(None) };
+            }
+            let key = self as *const G as usize;
+            MINE.with(|m| match m.get() {
+                Some((k, g)) if k == key => g,
+                _ => {
+                    let g: &'static G = Box::leak(Box::new(G {
+                        k: self.k.iter().map(Value::deep_clone).collect(),
+                        c: self.c.iter().map(|o| o.as_ref().map(Value::deep_clone)).collect(),
+                    }));
+                    m.set(Some((key, g)));
+                    g
+                }
+            })
+        }
     }
 
     #[inline(always)]
@@ -179,6 +202,22 @@ fn walk_program<'p>(p: &'p Program, f: &mut dyn FnMut(&'p Value)) {
     p.constraints.iter().for_each(|r| walk_expr(&r.body, f));
     if let Some(v) = &p.view {
         walk_expr(&v.body, f)
+    }
+    // Last, so the indices above do not move: the step properties the
+    // generator compiles (`[][A]_v`).
+    p.properties.iter().for_each(|pr| walk_tprop(&pr.body, f));
+}
+
+fn walk_tprop<'p>(t: &'p crate::eval::TProp, f: &mut dyn FnMut(&'p Value)) {
+    use crate::eval::TProp;
+    match t {
+        TProp::ForAll(_, body) | TProp::Let(_, body) => walk_tprop(body, f),
+        TProp::And(v) => v.iter().for_each(|x| walk_tprop(x, f)),
+        TProp::ActionBox(a, sub) => {
+            walk_expr(a, f);
+            walk_expr(sub, f)
+        }
+        _ => {}
     }
 }
 
@@ -646,6 +685,30 @@ pub fn generate(l: &Loaded, dir: &Path) -> Result<(), String> {
             );
         }
     }
+    // Step properties `[][A]_v` with no temporal-level parameters: compiled,
+    // so a checker generated from a spec with them no longer evaluates them
+    // in the interpreter on every transition. The others (none in our specs
+    // today) fall back to it: `step_prop` returns None for their index.
+    let (insts, _) = crate::liveness::instances(p)?;
+    let mut compiled = Vec::new();
+    for (i, inst) in insts.iter().enumerate() {
+        let crate::eval::TProp::ActionBox(a, sub) = inst.leaf else { continue };
+        if !inst.env.is_empty() {
+            continue;
+        }
+        let (sv, ab) = (g.val(sub), g.boolean(a));
+        let _ = writeln!(
+            code,
+            "// {} (step property)\nfn aprop_{i}(g: &G, s: &[Value], t: &[Value]) -> R<bool> {{ \
+             let nx: &[Option<Value>] = &[]; \
+             let v0 = {{ let st = s; {sv} }}; let v1 = {{ let st = t; {sv} }}; \
+             if v0 == v1 {{ return Ok(true); }} \
+             let nxv: Vec<Option<Value>> = t.iter().map(|v| Some(v.clone())).collect(); \
+             let nx: &[Option<Value>] = &nxv; let st = s; Ok({ab}) }}\n",
+            inst.name
+        );
+        compiled.push(i);
+    }
     let view = match &p.view {
         Some(v) => g.val(&v.body),
         None => "return Err(\"no VIEW\".into())".into(),
@@ -660,18 +723,20 @@ pub fn generate(l: &Loaded, dir: &Path) -> Result<(), String> {
             "fn {name}<'a>(g: &G, cx: &mut Cx<'a>, emit: K<'_, 'a>) -> R<()> {{ let st: &[Value] = cx.state; {body} Ok(()) }}\n"
         );
     }
+    let aprops: String = compiled.iter().map(|i| format!("{i} => Some(aprop_{i}(self.g.local(), s, t)), ")).collect();
     let arms = |kind: &str, n: usize| -> String {
-        (0..n).map(|i| format!("{i} => {kind}_{i}(&self.g, cx.state), ")).collect::<String>()
+        (0..n).map(|i| format!("{i} => {kind}_{i}(self.g.local(), cx.state), ")).collect::<String>()
     };
     let _ = write!(
         code,
         "struct E {{ g: G }}\n\
          impl Engine for E {{\n\
-         fn init<'a>(&self, cx: &mut Cx<'a>, k: K<'_, 'a>) -> R<()> {{ init(&self.g, cx, k) }}\n\
-         fn next<'a>(&self, cx: &mut Cx<'a>, k: K<'_, 'a>) -> R<()> {{ next(&self.g, cx, k) }}\n\
+         fn init<'a>(&self, cx: &mut Cx<'a>, k: K<'_, 'a>) -> R<()> {{ init(self.g.local(), cx, k) }}\n\
+         fn next<'a>(&self, cx: &mut Cx<'a>, k: K<'_, 'a>) -> R<()> {{ next(self.g.local(), cx, k) }}\n\
          fn invariant(&self, i: usize, cx: &mut Cx) -> R<bool> {{ match i {{ {} _ => unreachable!() }} }}\n\
          fn constraint(&self, i: usize, cx: &mut Cx) -> R<bool> {{ match i {{ {} _ => unreachable!() }} }}\n\
-         fn view(&self, cx: &mut Cx) -> R<Value> {{ view(&self.g, cx.state) }}\n\
+         fn view(&self, cx: &mut Cx) -> R<Value> {{ view(self.g.local(), cx.state) }}\n\
+         fn step_prop(&self, i: usize, s: &[Value], t: &[Value]) -> Option<R<bool>> {{ match i {{ {aprops}_ => None }} }}\n\
          }}\n\n\
          fn make(p: &Program) -> Box<dyn Engine + '_> {{ Box::new(E {{ g: G::new(p) }}) }}\n\n\
          fn main() -> std::process::ExitCode {{ tlc_rs::cli::main(Some(Generated {{ source_hash: {:#x}, make }})) }}\n",
