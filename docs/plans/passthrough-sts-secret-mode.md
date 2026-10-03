@@ -288,8 +288,10 @@ user. Also unshown: the first-publish refusal of a near-dead Secret
 2. Create the Secret in the pod's namespace with the keys of §2,
    `generation: 1`, and ≥ 120 s of life. Then the pod, naming both.
 3. On every mint: write the whole Secret again with `generation + 1` and
-   the new expiration, at least four minutes before the current one
-   expires. Never reuse a generation with different contents.
+   the new expiration, at least seven minutes before the current one
+   expires (§2, Timing: the mounter asks for a replacement once, 300 s
+   before expiry, and the republish that installs it can be 90 s away).
+   Never reuse a generation with different contents.
 4. Watch the pod's Events: `CredentialReplaced` (Normal) says a
    generation landed; `CredentialRefused` (Warning) says why one did not,
    once per reason. `FailedMount` on first publish names a Secret that

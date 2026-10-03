@@ -14,6 +14,12 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **docs: the `stsSecret` note told the controller's author to rotate four
+  minutes before expiry; it is seven** (2026-10-03). The note's timing
+  section and 1.57.0's changelog already said seven (the mounter asks for
+  a replacement 300 s before expiry, and the republish that installs it
+  can be 90 s away); the checklist in §8 still carried the earlier four.
+
 - **flint-lite: a wake request from a writer whose clock runs a few
   seconds slow is no longer ignored, and the NFS proxy no longer leaves
   stale wake stamps** (2026-10-02). 1.57.0 counts a `requested-at` only
