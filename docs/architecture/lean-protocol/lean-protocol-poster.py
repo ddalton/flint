@@ -65,8 +65,9 @@ GLOSSARY = [
     ("FIFO ticket", "a waiter enqueues once; the holder's handoff names the "
                     "head, which polls every 200 ms; the rest every second"),
 
-    ("the request cell", ".flint/lean/inbox: 'please publish' and 'please "
-                         "pull' from outside the pod. No UI writes since P2"),
+    ("the request cell", "'please publish' and 'please pull' from outside the "
+                         "pod. Not an inbox since P2; its key keeps the old "
+                         "name, .flint/lean/inbox"),
     ("merge base", "a writer's baseline: the version it integrated at each "
                    "path. Its commit merges three ways onto the CURRENT log"),
     ("consume", "the first thing a barrier does: take what the tree is OWED "
@@ -195,8 +196,8 @@ def build():
            "a fresh immutable handle per write; If-None-Match", fill=d.S3_F,
            line=d.S3_L, line_weight=0.013, cap=0.18, title_size=9.0,
            body_size=6.9)
-    d.node(p, "cylinder", 17.60, 3.72, 4.05, 0.80, ".flint/lean/inbox",
-           "the request cell: please publish · please pull", fill=d.S3_F, line=d.S3_L,
+    d.node(p, "cylinder", 17.60, 3.72, 4.05, 0.80, "the request cell",
+           "please publish · please pull (key: .flint/lean/inbox)", fill=d.S3_F, line=d.S3_L,
            line_weight=0.013, cap=0.18, title_size=9.0, body_size=6.9)
     d.node(p, "cylinder", 13.30, 4.74, 8.35, 0.90,
            ".flint/lean/epoch — THE FENCE: whose turn it is to commit",

@@ -67,8 +67,9 @@ GLOSSARY = [
 
     ("HITL", "human in the loop: a write that reaches the workspace from a "
              "UI rather than from the agent"),
-    ("the request cell", ".flint/lean/inbox: the two verb requests from "
-                         "outside the pod, please publish and please pull"),
+    ("the request cell", "the two verb requests from outside the pod, please "
+                         "publish and please pull. Not an inbox any more: its "
+                         "key keeps the old name, .flint/lean/inbox"),
     ("P2", "since 2026-09-25 a UI verb COMMITS: one pointer CAS, judged "
            "against the version the UI read, else 412"),
     ("epoch-validated", "checked PER REQUEST against the cell's current "
@@ -160,15 +161,15 @@ def build():
            "the publish fence, and the claim beside it — held per BARRIER, handed to a FIFO of waiters",
            fill=d.S3_F, line=d.S3_L, line_weight=0.013, cap=0.28,
            body_size=7.4)
-    d.node(p, "cylinder", 16.70, 5.95, 4.15, 0.85, ".flint/lean/inbox",
-           "the request cell: ONE CAS document, the two verb requests from "
-           "outside the pod. No UI writes in it since P2",
+    d.node(p, "cylinder", 16.70, 5.95, 4.15, 0.85, "the request cell",
+           "ONE CAS document: please publish, please pull. No UI writes — "
+           "not an inbox since P2 (key: .flint/lean/inbox)",
            fill=d.S3_HOT_F, line=d.S3_L, line_weight=0.015, cap=0.28,
            body_size=7.4)
     p.text(17.90, 7.20, 2.95, "\u2026workspace #1's prefix, above",
            size=7.4, color=MUTE, halign=2)
     d.node(p, "cylinder", 16.70, 8.82, 4.15, 0.85, "workspace #2's prefix",
-           "its own files/, current, epoch, claim and inbox — DISJOINT. "
+           "its own files/, current, epoch, claim and request cell — DISJOINT. "
            "Writers share one prefix, never two, and these two never meet",
            fill=d.S3_F, line=d.S3_L, line_weight=0.013, cap=0.28,
            body_size=7.4)
@@ -368,7 +369,8 @@ def build():
         "it is a CRATE too: a backend depends on flint-lean-gateway and calls "
         "the verbs in-process, holding nothing but credentials for the "
         "prefixes it serves. GET /snapshot returns {manifest, manifest_etag, "
-        "inbox} in one read, the inbox carrying only the standing requests; "
+        "inbox} in one read — the field keeps the old name and carries only "
+        "the request cell's two standing requests; "
         "GET /files/{path} reads the handle the manifest cites, and since "
         "every UI edit commits, that is the newest version and a read is one "
         "fetch; delete and rename are ONE pointer CAS each (a delete stops "
@@ -503,7 +505,7 @@ def build():
         "below that is per volume: its own worker pod (one per PUBLISHED "
         "volume, created by the plugin on its own node and owned by the "
         "Node so a vanished node GCs it), its own tree, its own credential, "
-        "and its own prefix with its own epoch, claim, pointer and inbox. "
+        "and its own prefix with its own epoch, claim, pointer and request cell. "
         "Taking turns at one prefix's fence is a mechanism inside a product; across "
         "products it is only a convention, so what assigns prefixes is what "
         "keeps two workspaces apart.",

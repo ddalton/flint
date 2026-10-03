@@ -12,23 +12,34 @@
 //! the plan pins that: the hub's 412 arbitration is LOCAL-WINS-overwrite
 //! (`tier/flush.rs`), which is exactly wrong under HITL second writers.
 //!
-//! The protocol here is the machine checked by `lean/formal/
-//! LeanSubtree.tla` (20-run gate). The load-bearing rules, each of
-//! which a model mutation rediscovers when broken:
+//! The protocol here is the shipped shape `lean/PROTOCOL.md` writes out,
+//! from its model `lean/formal/LeanP1.tla` (the shape since the
+//! simplification of 2026-09-25: P1, P2, M1). PROTOCOL.md has every rule
+//! with the invariant it holds up and the model world that fails without
+//! it; the load-bearing ones, in brief:
 //!
-//! - **Barrier order**: consume inbox → scan → intent/window → uploads
-//!   → manifest CAS (merge) → deletes LAST as GC of keys the NEW
-//!   manifest no longer references → baseline rewrite. (v1's
-//!   upload→delete→CAS order dangles the manifest on a crash.)
-//! - **HITL writes land as object + inbox entry, never direct manifest
-//!   edits**; the barrier never runs against an unconsumed inbox.
-//! - **Never If-Match-overwrite an ETag this syncer did not itself
-//!   publish or consume**: a foreign 412 parks the path and surfaces a
-//!   conflict; own-crashed-PUT is recognized by flush_uuid and adopted.
-//! - **GC deletes are HEAD-guarded** on the recognized ETag.
-//! - **Takeover rotation**: a successor CAS-rewrites the manifest
-//!   (seq++, content-identical) BEFORE serving, so a deposed
-//!   straggler's manifest CAS 412s; every publish carries its epoch.
+//! - **Every write lands at a fresh immutable handle**
+//!   (`files/<path>@<flush>`), and **the pointer CAS is the only commit**
+//!   — a writer's and the gateway's alike. Nothing overwrites a handle.
+//! - **The gateway commits each UI verb itself (P2)**: a save PUTs a fresh
+//!   handle, then ONE pointer CAS that lands only over the version the UI
+//!   read (else 412); a rename or a delete is one CAS. It never takes the
+//!   writers' lease. The request cell (`inbox`, `.flint/lean/inbox`)
+//!   carries only the two verb requests, "please publish" and "please
+//!   pull" — no entries, no removals, no window.
+//! - **The barrier**: consume (the cheap path: the scan trigger) → scan →
+//!   upload → claim the lease → verify the uploads (R4a) → install, a
+//!   three-way merge onto the CURRENT document with the baseline as the
+//!   merge base (mine wins modify/modify; R7 records theirs; a delete over
+//!   theirs applies, theirs kept, M3) → collect → finish (the baseline
+//!   follows what landed).
+//! - **What a commit stops citing is retired, not deleted**: logged at
+//!   the CAS and reaped only once G old (M1), so a reader that loaded
+//!   less than G ago can still fetch it. The orphan sweep runs only under
+//!   the lease (R4b) and spares a save in flight (G3).
+//! - **Takeover rotation**: a successor rewrites the document before
+//!   serving, so a deposed holder's pointer CAS 412s; the worker-facing
+//!   verbs are epoch-validated per request.
 //! - **Restart matrix**: marker present ⇒ never re-materialize (a
 //!   re-checkout would resurrect unpublished deletes); reload the
 //!   persisted baseline, rescan, self-recognize the lease via the
