@@ -1,0 +1,51 @@
+
+── S31 — stsSecret: a Secret-fed expiring credential mounts through the door, a higher generation replaces it in place and is FETCHED by the mounter, and every refusal is said once
+  ok: stsSecret mount reads content
+  ok: the door serves creds.json (generation 1, expires 2026-10-03T21:06:24Z)
+  ok: mount-s3's env points at the door
+  ok: no secret in mount-s3's env
+  ok: generation 2 reached the door in 70s (expires 2026-10-03T21:21:34Z)
+  ok: a CredentialReplaced event names generation 2
+  ok: mount-s3 fetched generation 2 from the door 218s BEFORE generation 1 expired (door log; waited 0s)
+  ok: reads continue across the replacement
+  ok: a lower generation is refused, and the refusal names both generations
+  ok: the door still serves generation 2 after the rollback attempt
+  ok: generation 3 with 60 s left is refused
+  ok: the door kept generation 2 through the short-lived candidate
+  ok: the same generation 3, re-offered with life, installs in 90s — the refusal did not poison it
+  ok: an envelope naming another ServiceAccount is refused
+  ok: the door kept generation 3 through the foreign envelope
+  ok: an envelope naming this namespace, ServiceAccount and mount installs generation 4 in 60s
+  ok: an unknown key is refused by name
+  ok: the door kept generation 4 through the unknown key
+  ok: the unknown-key refusal was said once (1), not again a republish later
+  BAD: no refusal for a reused generation with other keys within 240 s
+  ok: the door's key id is unchanged (drill) through the reused generation
+  ok: the door kept generation 4's expiration through the reused generation
+  ok: the same mount-s3 process (pid 15) served every generation — no remount
+  ok: content still reads at the end
+  NOTE: the background reader was still running at the leg's end (the leg finished inside its 900 s)
+
+── S34 — a shared mounter under load (four readers, a shaped link) is NOT replaced when a fifth member joins mid-read: the join lands on the live mounter, the readers finish with zero errors, and the node's statfs shows the load reached the probe without exceeding its budget
+  ok: 4 load objects of 64 MiB under datasets/imagenet/
+  ok: the readers share one worker (s3w-eff0671687330fd2)
+  ok: the class's source is mounted on the node at /var/lib/kubelet/plugins/s3.csi.chert.us/shared/78c07d2318826bf3/src
+  BAD: could not shape worker s3w-eff0671687330fd2's ingress (pid '9262', peer '47', veth ''): without the load this leg cannot fail
+  ok: shared-j reached Running while the readers were pulling
+  ok: shared-j's publish line says it joined the shared class
+  ok: shared-j reads through the mounter it joined
+  ok: the join did not replace the mounter (no 'replacing it for the new member' line)
+  ok: worker s3w-eff0671687330fd2 is the same pod after the join (uid unchanged)
+  ok: s34-r1: 1 pass(es) of load-01.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r1
+  ok: s34-r2: 1 pass(es) of load-02.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r2
+  ok: s34-r3: 1 pass(es) of load-03.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r3
+  ok: s34-r4: 1 pass(es) of load-04.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r4
+  NOTE: node statfs on the shared source during the reads: 24 samples, max 5 ms: 2 3 4 1 1 1 1 1 1 1 1 1 1 1 3 1 3 1 1 4 1 1 5 1 
+  BAD: the load did not reach the probe (max statfs 5 ms < 500 ms): the no-replace assertion above is vacuous — lower S34_RATE or raise S34_READERS
+
+════════════════════════════════════════
+s3.csi.chert.us legs [S31 S34] of run-s3csi.sh: 39 ok, 3 bad

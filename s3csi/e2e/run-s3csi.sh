@@ -250,13 +250,13 @@ iso_in() { date -u -d "@$(( $(date +%s) + $1 ))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null
 # fields, or a key the schema must refuse. The rig's store key, no
 # session token (the schema makes it optional for exactly this). Prints
 # the expiration it wrote, which is what the door will serve.
-sts_secret() { # gen secs-from-now [k=v ...]
+sts_secret() { # gen secs-from-now|@iso [k=v ...]; STS_KEY_ID overrides the key id
     local gen=$1 secs=$2 exp kv extra=""; shift 2
-    exp=$(iso_in "$secs")
+    case "$secs" in @*) exp=${secs#@} ;; *) exp=$(iso_in "$secs") ;; esac
     for kv in "$@"; do extra="$extra --from-literal=$kv"; done
     # shellcheck disable=SC2086
     $K -n $NS create secret generic sts-session --dry-run=client -o yaml \
-        --from-literal=AWS_ACCESS_KEY_ID=drill --from-literal=AWS_SECRET_ACCESS_KEY=drillsecret \
+        --from-literal=AWS_ACCESS_KEY_ID="${STS_KEY_ID:-drill}" --from-literal=AWS_SECRET_ACCESS_KEY=drillsecret \
         --from-literal=AWS_CREDENTIAL_EXPIRATION="$exp" --from-literal=generation="$gen" $extra \
         | $K apply -f - >/dev/null
     echo "$exp"
@@ -1982,10 +1982,18 @@ apply_fx tenants.yaml >/dev/null
 # statfs sample over the probe's 3 s (the defect is reachable, this join
 # merely missed the moment); and a load that never reached the probe
 # (max statfs under S34_FLOOR_MS — then the no-replace assertion is
-# vacuous: lower S34_RATE, raise S34_READERS). Written 2026-10-03, NOT
-# RUN: the floor is a first guess, to be calibrated on the first run.
-leg S34 "a shared mounter under load (four readers, a shaped link) is NOT replaced when a fifth member joins mid-read: the join lands on the live mounter, the readers finish with zero errors, and the node's statfs shows the load reached the probe without exceeding its budget"
-S34_RATE=${S34_RATE:-20mbit}; S34_READERS=${S34_READERS:-4}; S34_MIB=${S34_MIB:-64}; S34_PASSES=${S34_PASSES:-1}; S34_FLOOR_MS=${S34_FLOOR_MS:-500}
+# vacuous: lower S34_RATE, raise S34_READERS). Calibrated on the box
+# 2026-10-03 (results/2026-10-03-kind-s31-s34): FOUR readers at 20mbit
+# saturated the link for ~100 s and statfs never passed 23 ms —
+# Mountpoint answers statfs without S3, so network-bound reads do not
+# reach it. What does is FUSE-thread exhaustion: 24 readers (Mountpoint
+# serves FUSE on 16 threads by default and the plugin passes no
+# --max-threads) of 8 MiB at 10mbit took statfs to 3971 ms, the join
+# REPLACED the live mounter and all 24 readers got ENOTCONN. Those are
+# the defaults; at HEAD of that day the leg FAILS — the probe reads a
+# timeout as death (SECURITY.md §4.12).
+leg S34 "a shared mounter under load (more readers than its FUSE threads, a shaped link) is NOT replaced when a fifth member joins mid-read: the join lands on the live mounter, the readers finish with zero errors, and the node's statfs shows the load reached the probe without exceeding its budget"
+S34_RATE=${S34_RATE:-10mbit}; S34_READERS=${S34_READERS:-24}; S34_MIB=${S34_MIB:-8}; S34_PASSES=${S34_PASSES:-1}; S34_FLOOR_MS=${S34_FLOOR_MS:-500}
 # The readers' objects, seeded once under the CR's prefix.
 for i in $(seq 1 "$S34_READERS"); do
     mcx mc stat "m/$BUCKET/datasets/imagenet/load-0$i.bin" >/dev/null 2>&1 \
@@ -2038,10 +2046,13 @@ if [ "$allup" = 1 ]; then
     onnode "grep -q ' $src ' /proc/mounts" && ok "the class's source is mounted on the node at $src" || bad "no mount at $src on the node (hash '$hash') — the statfs samples below would measure nothing"
     # Shape the worker's INGRESS: netem on the node side of its veth pair
     # (egress there is ingress in the pod). The pod's eth0 names its peer
-    # by ifindex, and the peer lives in the node's own namespace.
+    # by ifindex, and the peer lives in the node's own namespace. Ask
+    # NETLINK (`eth0@ifN`): `nsenter -n cat /sys/class/net/eth0/iflink`
+    # reads the sysfs of the caller's mount namespace — the NODE's eth0,
+    # whose peer is on the host — and the first box run found no veth.
     pid=$(worker_pid "$w"); veth=""
     if [ -n "$pid" ] && [ "$(onnode "readlink /proc/$pid/ns/net")" != "$(onnode "readlink /proc/1/ns/net")" ]; then
-        peer=$(onnode "nsenter -t $pid -n cat /sys/class/net/eth0/iflink")
+        peer=$(onnode "nsenter -t $pid -n ip -o link show eth0" | sed -n 's/^[0-9]*: eth0@if\([0-9]*\):.*/\1/p')
         [ -n "$peer" ] && veth=$(onnode "ip -o link | awk -F': ' -v i=$peer '\$1 == i { sub(/@.*/, \"\", \$2); print \$2 }'")
     fi
     if [ -n "$veth" ] && onnode "tc qdisc add dev $veth root netem rate $S34_RATE"; then
@@ -2311,15 +2322,20 @@ if wait_phase reader-sts Running 180; then
     #    tuple since 2026-10-03; before, it passed as "unchanged", neither
     #    installed nor said): the key id behind the door must not move.
     #    Then the keys are put back, which is the installed tuple again —
-    #    idempotent, nothing said. NOT RUN as of 2026-10-03.
+    #    idempotent, nothing said. The Secret holds step 5's refused
+    #    generation 5 here, so the offer is written whole — generation 4,
+    #    its expiration, its envelope — with only the key id changed:
+    #    patching the key id alone re-offered generation 5, which the
+    #    first box run (2026-10-03) saw refused for its unknown key again,
+    #    silently, and read as "no refusal".
     creds_key() { $K -n $WNS exec "$1" -- cat /comm/creds.json 2>/dev/null | jq -r '.AccessKeyId // empty' 2>/dev/null; }
     key_before=$(creds_key "$w")
-    $K -n $NS patch secret sts-session --type=merge -p '{"stringData":{"AWS_ACCESS_KEY_ID":"drill-other"}}' >/dev/null
+    STS_KEY_ID=drill-other sts_secret 4 "@$e4" namespace=$NS serviceAccount=trainer mount=datasets-sts >/dev/null
     wait_event reader-sts CredentialRefused "DIFFERENT keys" 240 >/dev/null && ok "generation 4 re-offered with its expiration and OTHER keys is refused, and the refusal says to mint under 5" || bad "no refusal for a reused generation with other keys within 240 s"
     key_after=$(creds_key "$w")
     [ -n "$key_before" ] && [ "$key_after" = "$key_before" ] && ok "the door's key id is unchanged ($key_before) through the reused generation" || bad "the door's key id went '$key_before' → '$key_after' on a reused generation"
     [ "$(creds_exp "$w")" = "$e4" ] && ok "the door kept generation 4's expiration through the reused generation" || bad "the door moved on a reused generation: '$(creds_exp "$w")'"
-    $K -n $NS patch secret sts-session --type=merge -p '{"stringData":{"AWS_ACCESS_KEY_ID":"drill"}}' >/dev/null
+    sts_secret 4 "@$e4" namespace=$NS serviceAccount=trainer mount=datasets-sts >/dev/null
     # No remount through all of it: the same mount-s3 process.
     p2=$(mounter_pid "$w")
     [ -n "$p1" ] && [ "$p1" = "$p2" ] && ok "the same mount-s3 process (pid $p1) served every generation — no remount" || bad "mount-s3 pid changed $p1 → $p2, or was not found"

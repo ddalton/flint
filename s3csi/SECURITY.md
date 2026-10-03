@@ -178,7 +178,7 @@ Secrets RBAC), never refreshed, never shared.
 | P6 | `a_refusal_removes_the_key_only_from_an_unshared_mounter`; `exchange_errors_sort_refusals_from_outages`; `exchange_outages_are_unavailable_and_refusals_are_denied`; `a_token_review_the_api_server_did_not_answer_is_unavailable_not_refused` | S10, S29, S8 (outage control); L3 | campaign 3 run 4; review-fixes run 2 (2026-09-30) | no leg fails the API server under the broker (S8 fails the broker itself) |
 | P7 | `passthrough_worker_is_unprivileged_and_hostpath_free` | S2, S3, S19 | campaign 3 run 4 | no leg sets TLS or the NetworkPolicy; nothing checks the broker link |
 | P8 | `uid_gid_must_be_integers`; `dir_names_cannot_escape`; `name_and_hash_are_stable_and_label_sized` | S15, S24; P3 (16 tenants) | campaign 3 run 4; kind S24+S30 (2026-10-01) | cross-pod door reachability; state-dir mode |
-| P9 | `only_read_only_members_with_cr_scoped_credentials_share`; `sharing_cannot_run_on_a_per_pod_secret`; `the_class_is_node_namespace_cr_owner_mode_and_argv`; `a_shared_mount_round_trips_and_membership_is_a_set`; `a_shared_worker_is_named_by_its_class_and_says_so` | S24, S28, S29, S30; S34 (written 2026-10-03, NOT RUN) | kind S24+S30 46/0 (2026-10-01); sts run 1 | S34's probe-under-load question is open until it runs |
+| P9 | `only_read_only_members_with_cr_scoped_credentials_share`; `sharing_cannot_run_on_a_per_pod_secret`; `the_class_is_node_namespace_cr_owner_mode_and_argv`; `a_shared_mount_round_trips_and_membership_is_a_set`; `a_shared_worker_is_named_by_its_class_and_says_so` | S24, S28, S29, S30; S34 | kind S24+S30 46/0 (2026-10-01); sts run 1; S34 FAILS 2026-10-03 (§4.12) | a join while the mounter's FUSE threads are all busy replaces it and strands every member (§4.12) |
 | P10 | `redaction_masks_secret_shaped_arguments`; `creds_json_is_the_container_credentials_shape`; `our_audience_token_is_picked_and_never_debug_printed`; `the_start_up_line_never_prints_a_secret`; `token_is_written_once_at_0600_and_reloaded` | S3, S31 | sts runs | nothing greps events or the broker log for key material |
 | P11 | (none for `worker_capacity`) | S33 | sts run 1, 6/0 | the race has no leg: S33 is sequential |
 | P12 | `static_arm_needs_both_keys_and_passes_region`; `sharing_cannot_run_on_a_per_pod_secret` | S5c | sts run 2, 2/2 | — |
@@ -242,6 +242,20 @@ Secrets RBAC), never refreshed, never shared.
     from the node network.
 11. **S10 on kind runs against a store that never expires anything.**
     Its real twin is A6/R1 on AWS.
+12. **A busy shared mounter is replaced as if it were dead.** The join
+    path's `shared_mount_alive` asks `fuse::wait_ready_opts` for a statfs
+    within 3 s, and that function returns the same `Err` for ENOTCONN, a
+    statfs error and a timeout. Mountpoint answers statfs without S3, so
+    network-bound reads never slow it (S34, four readers at 20mbit: max
+    23 ms) — but statfs is a FUSE request like any other, and when every
+    one of Mountpoint's FUSE threads (16 by default; the plugin passes no
+    `--max-threads`) is parked on a slow read, it queues. Kind S34
+    2026-10-03, 24 readers of 8 MiB at 10mbit: statfs took up to 3971 ms,
+    a fifth member's publish replaced the live mounter, and all 24
+    readers got `Transport endpoint is not connected`; none of them got a
+    MounterDead event inside the leg's window. Reachable on any shared
+    class whose members read more files at once than the mounter has
+    threads, over a link slower than they want. Not fixed (open list 9).
 
 ## 5. The open list
 
@@ -249,12 +263,13 @@ Secrets RBAC), never refreshed, never shared.
 |---|---|---|
 | 1 | ~~TLS to the broker by default in the chart~~ — not this repo's: the service mesh encrypts the pod network (decided 2026-10-03; §2) | — |
 | 2 | ~~broker: a TokenReview transport error answers 503, not 400~~ — done 2026-10-03 (`review_outcome`, `ReviewError`; the node principal's review answers 503 the same way) | — |
-| 3 | ~~`sts_replace_decision`: a reused generation with other keys is refused~~ — done 2026-10-03 (`creds_fingerprint` in the state; S31 step 6 written, not run) | — |
+| 3 | ~~`sts_replace_decision`: a reused generation with other keys is refused~~ — done 2026-10-03 (`creds_fingerprint` in the state; S31 step 6 on kind 2026-10-03, S31 24/24) | — |
 | 4 | legs: the door tried from a sibling pod and from the node (expect refused); the capacity race (parallel publishes over the ceiling); a NetworkPolicy leg; an M2 results README | M |
 | 5 | ~~`write_files`: create the tmp at its mode~~ — done 2026-10-03 (`create_new` + `mode`; a stale tmp is replaced) | — |
 | 6 | the worker test asserts `hostNetwork` absent; `worker_capacity` gets a unit test | S |
-| 7 | run S34 (the probe under load) on the box, and calibrate its floor | S (box time) |
+| 7 | ~~run S34 (the probe under load) on the box, and calibrate its floor~~ — run 2026-10-03: four readers never reach the probe; 24 do, and the join replaces the mounter (§4.12) | — |
 | 8 | lean's `launch.json` written 0600 | S |
+| 9 | the join path replaces a shared mounter only on evidence of death — ENOTCONN, no mount, or a worker the API server says is not Running — and answers a timeout with `Unavailable` (kubelet retries the publish) instead of a replace; then S34 green at its defaults | S |
 
 Docs corrected with this file (2026-10-03): the sts note's "CA-pinned
 client"; the sharing design's §5 paragraph that said a refusal removes

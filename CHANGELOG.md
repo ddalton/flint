@@ -37,7 +37,17 @@ covered by the stability guarantee.
   mounter's liveness probe under load (four readers through a shaped
   link, a fifth member joining mid-read: the join must not replace the
   live mounter, and the node's own statfs must show the load reached
-  the probe) — written, NOT RUN.
+  the probe). Run on kind the same day
+  (`s3csi/e2e/results/2026-10-03-kind-s31-s34/`): S31 24/24, with its
+  new step 6 (a reused generation with other keys is refused, the door
+  unmoved); S34 FAILS at its calibrated defaults — with 24 readers
+  (more than Mountpoint's 16 FUSE threads) statfs took up to 3.97 s,
+  the join replaced the live shared mounter and all 24 readers got
+  ENOTCONN. **Known defect, not fixed:** the join path reads a probe
+  timeout as a dead mounter (`SECURITY.md` §4.12). Two rig bugs the
+  first run found are fixed: step 6 re-offered the refused generation 5
+  instead of generation 4, and S34 read the veth peer from the node's
+  sysfs instead of the pod's netns, so it never shaped the link.
 
 ### Fixed
 

@@ -1,0 +1,64 @@
+
+── S34 — a shared mounter under load (four readers, a shaped link) is NOT replaced when a fifth member joins mid-read: the join lands on the live mounter, the readers finish with zero errors, and the node's statfs shows the load reached the probe without exceeding its budget
+  ok: 24 load objects of 8 MiB under datasets/imagenet/
+  ok: the readers share one worker (s3w-eff0671687330fd2)
+  ok: the class's source is mounted on the node at /var/lib/kubelet/plugins/s3.csi.chert.us/shared/78c07d2318826bf3/src
+  ok: worker s3w-eff0671687330fd2's ingress shaped to 10mbit on the node side of its veth (vethde21ae81)
+  ok: shared-j reached Running while the readers were pulling
+  ok: shared-j's publish line says it joined the shared class
+  ok: shared-j reads through the mounter it joined
+  BAD: the join REPLACED the live mounter under load (1 'replacing' line(s)): the probe read a serving mounter as dead
+  BAD: worker s3w-eff0671687330fd2: uid 'b25da705-ad9c-4210-a860-466beec45631' before the join, '8693cd6f-9861-415a-ac05-4c3c4c0fa680' after
+  BAD: s34-r1: 'S34 reads=0 errors=1 cat: read error: Transport endpoint is not connected'
+  ok: no MounterDead on s34-r1
+  BAD: s34-r2: 'S34 reads=0 errors=1 cat: read error: Transport endpoint is not connected'
+  ok: no MounterDead on s34-r2
+  BAD: s34-r3: 'S34 reads=0 errors=1 cat: read error: Transport endpoint is not connected'
+  ok: no MounterDead on s34-r3
+  BAD: s34-r4: 'S34 reads=0 errors=1 cat: read error: Transport endpoint is not connected'
+  ok: no MounterDead on s34-r4
+  BAD: s34-r5: 'S34 reads=0 errors=1 cat: read error: Transport endpoint is not connected'
+  ok: no MounterDead on s34-r5
+  BAD: s34-r6: 'S34 reads=0 errors=1 cat: read error: Transport endpoint is not connected'
+  ok: no MounterDead on s34-r6
+  BAD: s34-r7: 'S34 reads=0 errors=1 cat: read error: Transport endpoint is not connected'
+  ok: no MounterDead on s34-r7
+  BAD: s34-r8: 'S34 reads=0 errors=1 cat: read error: Transport endpoint is not connected'
+  ok: no MounterDead on s34-r8
+  BAD: s34-r9: 'S34 reads=0 errors=1 cat: read error: Transport endpoint is not connected'
+  ok: no MounterDead on s34-r9
+  BAD: s34-r10: 'S34 reads=0 errors=1 cat: read error: Transport endpoint is not connected'
+  ok: no MounterDead on s34-r10
+  BAD: s34-r11: 'S34 reads=0 errors=1 cat: read error: Transport endpoint is not connected'
+  ok: no MounterDead on s34-r11
+  BAD: s34-r12: 'S34 reads=0 errors=1 cat: read error: Transport endpoint is not connected'
+  ok: no MounterDead on s34-r12
+  BAD: s34-r13: 'S34 reads=0 errors=1 cat: read error: Transport endpoint is not connected'
+  ok: no MounterDead on s34-r13
+  BAD: s34-r14: 'S34 reads=0 errors=1 cat: read error: Transport endpoint is not connected'
+  ok: no MounterDead on s34-r14
+  BAD: s34-r15: 'S34 reads=0 errors=1 cat: read error: Transport endpoint is not connected'
+  ok: no MounterDead on s34-r15
+  BAD: s34-r16: 'S34 reads=0 errors=1 cat: read error: Transport endpoint is not connected'
+  ok: no MounterDead on s34-r16
+  BAD: s34-r17: 'S34 reads=0 errors=1 cat: read error: Transport endpoint is not connected'
+  ok: no MounterDead on s34-r17
+  BAD: s34-r18: 'S34 reads=0 errors=1 cat: read error: Transport endpoint is not connected'
+  ok: no MounterDead on s34-r18
+  BAD: s34-r19: 'S34 reads=0 errors=1 cat: read error: Transport endpoint is not connected'
+  ok: no MounterDead on s34-r19
+  BAD: s34-r20: 'S34 reads=0 errors=1 cat: read error: Transport endpoint is not connected'
+  ok: no MounterDead on s34-r20
+  BAD: s34-r21: 'S34 reads=0 errors=1 cat: read error: Transport endpoint is not connected'
+  ok: no MounterDead on s34-r21
+  BAD: s34-r22: 'S34 reads=0 errors=1 cat: read error: Transport endpoint is not connected'
+  ok: no MounterDead on s34-r22
+  BAD: s34-r23: 'S34 reads=0 errors=1 cat: read error: Transport endpoint is not connected'
+  ok: no MounterDead on s34-r23
+  BAD: s34-r24: 'S34 reads=0 errors=1 cat: read error: Transport endpoint is not connected'
+  ok: no MounterDead on s34-r24
+  NOTE: node statfs on the shared source during the reads: 24 samples, max 3971 ms: 1185 3971 2138 1 1 1 1 3 1 1 3 1 1 4 5 1 3 1 1 1 1 1 1 1 
+  BAD: a statfs on the shared source took 3971 ms under this load — over the probe's 3 s budget: a join at that moment replaces a live mounter (the defect is reachable; this join missed it)
+
+════════════════════════════════════════
+s3.csi.chert.us legs [S34] of run-s3csi.sh: 31 ok, 27 bad
