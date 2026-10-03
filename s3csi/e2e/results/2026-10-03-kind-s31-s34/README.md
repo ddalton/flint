@@ -50,3 +50,4 @@ The leg's defaults are now run 3's (24 / 8 MiB / 10mbit), so it fails
 until the join path stops replacing on a timeout (`s3csi/SECURITY.md`
 §4.12, open list 9). The plugin logs were not kept (the runner deleted
 the cluster); the leg's lines above are the evidence.
+Fixed the same day: `../2026-10-03-kind-probe-fix/` (S34 61/0).

@@ -1965,35 +1965,26 @@ apply_fx tenants.yaml >/dev/null
 
 # ── S34 shared mounter under load: a join must not replace it ──────────
 # A new member of a shared class decides whether the class's mounter is
-# alive by a statfs on its source with a THREE-SECOND budget
-# (`shared_mount_alive`), and a mounter that misses it is REPLACED: its
-# worker deleted, every current member left on a dead superblock, mid-
-# read. A statfs on a FUSE mount waits for a free fuser thread; mount-s3
-# runs 16, and every read parks one on the prefetcher until its bytes
-# arrive, so a few readers on a slow link can hold all of them. The
-# sensor can lie under load (FlintCsiMount.tla's lesson, in a second
-# place), and no model settles whether this one does: this leg measures
-# it. S34_READERS readers pull S34_MIB objects through one shared worker
-# whose INGRESS is shaped to S34_RATE on the node side of its veth (the
-# data flows in; S23's egress shaping would not touch it); a further pod
-# joins mid-read; the node samples its own statfs on the shared source
-# while the reads run — the same syscall on the same mount the plugin's
-# probe makes. The leg can fail three ways: a replace (the defect); a
-# statfs sample over the probe's 3 s (the defect is reachable, this join
-# merely missed the moment); and a load that never reached the probe
-# (max statfs under S34_FLOOR_MS — then the no-replace assertion is
-# vacuous: lower S34_RATE, raise S34_READERS). Calibrated on the box
-# 2026-10-03 (results/2026-10-03-kind-s31-s34): FOUR readers at 20mbit
-# saturated the link for ~100 s and statfs never passed 23 ms —
-# Mountpoint answers statfs without S3, so network-bound reads do not
-# reach it. What does is FUSE-thread exhaustion: 24 readers (Mountpoint
-# serves FUSE on 16 threads by default and the plugin passes no
-# --max-threads) of 8 MiB at 10mbit took statfs to 3971 ms, the join
-# REPLACED the live mounter and all 24 readers got ENOTCONN. Those are
-# the defaults; at HEAD of that day the leg FAILS — the probe reads a
-# timeout as death (SECURITY.md §4.12).
-leg S34 "a shared mounter under load (more readers than its FUSE threads, a shaped link) is NOT replaced when a fifth member joins mid-read: the join lands on the live mounter, the readers finish with zero errors, and the node's statfs shows the load reached the probe without exceeding its budget"
-S34_RATE=${S34_RATE:-10mbit}; S34_READERS=${S34_READERS:-24}; S34_MIB=${S34_MIB:-8}; S34_PASSES=${S34_PASSES:-1}; S34_FLOOR_MS=${S34_FLOOR_MS:-500}
+# alive by a statfs on its source with a THREE-SECOND budget, and
+# until 2026-10-03 a mounter that missed it was REPLACED: its worker
+# deleted, every current member left on a dead superblock, mid-read. A
+# statfs on a FUSE mount waits for a free fuser thread; mount-s3 runs
+# 16, and every read parks one until its bytes arrive. S34_READERS
+# readers pull S34_MIB objects through one shared worker whose INGRESS
+# is shaped to S34_RATE on the node side of its veth; the node samples
+# its own statfs on the shared source (the probe's syscall, same mount);
+# once a sample passes 3 s a further pod joins. The leg fails on a
+# replace, a reader error or a MounterDead (the defect), and on a join
+# that never MET the mounter silent — the plugin logs "is not dead; not
+# replacing it" when it does — because then the no-replace assertion
+# proves nothing. Calibrated on the box 2026-10-03
+# (results/2026-10-03-kind-s31-s34): four readers at 20mbit never took
+# statfs past 23 ms (Mountpoint answers it without S3); 24 readers of
+# 8 MiB at 10mbit took it to 3971 ms, and the join replaced the live
+# mounter — all 24 readers ENOTCONN. Fixed the same day: silence from a
+# mounter whose worker runs is busy, not dead (`shared_liveness`).
+leg S34 "a shared mounter whose FUSE threads are all busy (more readers than threads, a shaped link) is NOT replaced when a member joins while it is silent: the join waits for it, the readers finish with zero errors, and nobody is told the mounter died"
+S34_RATE=${S34_RATE:-10mbit}; S34_READERS=${S34_READERS:-24}; S34_MIB=${S34_MIB:-8}; S34_PASSES=${S34_PASSES:-1}
 # The readers' objects, seeded once under the CR's prefix.
 for i in $(seq 1 "$S34_READERS"); do
     mcx mc stat "m/$BUCKET/datasets/imagenet/load-0$i.bin" >/dev/null 2>&1 \
@@ -2066,7 +2057,13 @@ if [ "$allup" = 1 ]; then
     samples=$(mktemp)
     onnode "for s in \$(seq 1 24); do a=\$(date +%s%N); timeout 20 stat -f $src >/dev/null 2>&1; b=\$(date +%s%N); echo \$(( (b - a) / 1000000 )); sleep 3; done" > "$samples" 2>/dev/null &
     sampler=$!
-    sleep 8
+    # Join INSIDE the window: once a sample has passed the probe's 3 s
+    # (bounded at 90 s). A fixed delay let the 2026-10-03 fix run join
+    # while statfs still answered fast — it proved nothing about a busy
+    # mounter.
+    k=0; while [ $k -lt 90 ] && ! awk '$1 >= 3000 { f = 1 } END { exit !f }' "$samples" 2>/dev/null; do sleep 1; k=$((k + 1)); done
+    note "the join goes in ${k}s after the reads began (statfs so far: $(grep -E '^[0-9]+$' "$samples" | tr '\n' ' '))"
+    busy0=$(plugin_log | grep -c 'is not dead; not replacing it')
     fx_doc tenants.yaml Pod shared-a | sed 's/^  name: shared-a$/  name: shared-j/' | $K apply -f - >/dev/null
     if wait_phase shared-j Running 240; then
         ok "shared-j reached Running while the readers were pulling"
@@ -2078,6 +2075,7 @@ if [ "$allup" = 1 ]; then
         bad "shared-j did not reach Running in 240 s: $(mount_events shared-j | tail -1 | cut -c1-200)"
     fi
     after=$(plugin_log | grep -c 'not serving; replacing it for the new member')
+    busy=$(( $(plugin_log | grep -c 'is not dead; not replacing it') - busy0 ))
     [ "$after" = "$before" ] && ok "the join did not replace the mounter (no 'replacing it for the new member' line)" \
         || bad "the join REPLACED the live mounter under load ($((after - before)) 'replacing' line(s)): the probe read a serving mounter as dead"
     wuid1=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
@@ -2096,17 +2094,36 @@ if [ "$allup" = 1 ]; then
     wait "$sampler" 2>/dev/null
     max=$(grep -E '^[0-9]+$' "$samples" | sort -n | tail -1); cnt=$(grep -cE '^[0-9]+$' "$samples")
     note "node statfs on the shared source during the reads: $cnt samples, max ${max:-?} ms: $(grep -E '^[0-9]+$' "$samples" | tr '\n' ' ')"
+    # Non-vacuous only if the join MET the silence: the plugin's own line
+    # for a probe that did not answer from a mounter with no sign of death.
     if [ -z "$max" ]; then bad "no statfs samples were taken on the node"
-    elif [ "$max" -ge 3000 ]; then bad "a statfs on the shared source took ${max} ms under this load — over the probe's 3 s budget: a join at that moment replaces a live mounter (the defect is reachable; this join missed it)"
-    elif [ "$max" -ge "$S34_FLOOR_MS" ]; then ok "the load reached the probe (max statfs ${max} ms, floor $S34_FLOOR_MS ms) and stayed inside its 3 s budget"
-    else bad "the load did not reach the probe (max statfs ${max} ms < $S34_FLOOR_MS ms): the no-replace assertion above is vacuous — lower S34_RATE or raise S34_READERS"
+    elif [ "$busy" -ge 1 ]; then ok "the join met the mounter silent $busy time(s) (max node statfs ${max} ms) and waited for it instead of replacing it"
+    elif [ "$max" -ge 3000 ]; then bad "statfs passed the probe's 3 s (max ${max} ms) but the join never met it silent: the no-replace assertion above is vacuous — the join landed outside the window"
+    else bad "the load never pushed statfs past the probe's 3 s (max ${max} ms): the no-replace assertion above is vacuous — lower S34_RATE or raise S34_READERS"
     fi
     rm -f "$samples"
     [ -n "$veth" ] && onnode "tc qdisc del dev $veth root" >/dev/null 2>&1
+    # The other arm, on the same class: a mounter that IS dead is still
+    # replaced for the next member — the fix must not keep a corpse. No
+    # other leg kills a SHARED worker and then joins.
+    kill_worker "$w" >/dev/null 2>&1 || note "kill_worker reported an error for $w; the join below decides"
+    sleep 5
+    r0=$(plugin_log | grep -c 'not serving; replacing it for the new member')
+    fx_doc tenants.yaml Pod shared-a | sed 's/^  name: shared-a$/  name: shared-k/' | $K apply -f - >/dev/null
+    if wait_phase shared-k Running 240; then
+        got=$(inpod shared-k "cat /mnt/shared/shard-01.txt"); [ "$got" = "seeded-object-01" ] && ok "shared-k, joining after the worker was killed, reads through a fresh mounter" || bad "shared-k read '$got' after the replace"
+    else
+        bad "shared-k did not reach Running in 240 s after the shared worker was killed: $(mount_events shared-k | tail -1 | cut -c1-200)"
+    fi
+    r1=$(plugin_log | grep -c 'not serving; replacing it for the new member')
+    [ "$r1" -gt "$r0" ] && ok "a DEAD shared mounter (worker killed) is replaced for the next member ($(plugin_log | grep 'not serving; replacing it for the new member' | tail -1 | grep -o 'why=[^=]*' | cut -c1-90))" \
+        || bad "the killed shared mounter was not replaced for shared-k (no 'replacing it for the new member' line)"
+    wuid2=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+    [ -n "$wuid2" ] && [ "$wuid2" != "$wuid0" ] && ok "worker $w is a new pod after the replace" || bad "worker $w: uid '$wuid0' before the kill, '$wuid2' after"
 else
     bad "the readers did not all reach Running in 300 s — S34 made no observation"
 fi
-$K -n $NS delete pod shared-j --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
+$K -n $NS delete pod shared-j shared-k --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
 $K -n $NS delete pod -l s34=reader --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
 apply_fx tenants.yaml >/dev/null
 

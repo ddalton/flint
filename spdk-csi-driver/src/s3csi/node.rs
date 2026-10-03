@@ -1182,8 +1182,32 @@ impl S3Node {
         };
         st.save(dir).map_err(|e| Status::internal(format!("state: {e}")))?;
 
-        let mut sm = match SharedMount::load(&sdir).map_err(|e| Status::internal(format!("shared record: {e}")))? {
-            Some(sm) if sm.phase == "published" && self.shared_mount_alive(&sm).await => sm,
+        let record = SharedMount::load(&sdir).map_err(|e| Status::internal(format!("shared record: {e}")))?;
+        let liveness = match &record {
+            Some(sm) if sm.phase == "published" => Some(self.shared_liveness(sm).await),
+            _ => None,
+        };
+        // A mounter that did not answer but shows no sign of death is not
+        // replaced: replacing deletes its worker and strands every member
+        // mid-read, and a mounter whose FUSE threads are all serving reads
+        // is exactly this (kind S34, 2026-10-03). The join waits instead —
+        // kubelet retries the publish — and its record never names this
+        // volume, so the cleanup below takes nothing from the class.
+        if let Some(SharedLiveness::Busy(why)) = &liveness {
+            tracing::warn!(volume = vid, shared = %hash, "the shared mounter did not answer ({why}) but is not dead; not replacing it, the publish is retried");
+            return Err(self
+                .fail(
+                    dir,
+                    &st,
+                    Status::unavailable(format!(
+                        "the shared mounter for {cr} did not answer ({why}) and shows no sign of death — most likely every \
+                         FUSE thread is serving its members' reads; it is not replaced under them, and this publish is retried"
+                    )),
+                )
+                .await);
+        }
+        let mut sm = match record {
+            Some(sm) if liveness == Some(SharedLiveness::Serving) => sm,
             // A create whose worker was never LAUNCHED (no worker uid on the
             // record: the previous attempt hit its deadline before the pod
             // ran, and kept it) and whose pod is alive — still pulling, or
@@ -1205,8 +1229,12 @@ impl S3Node {
                 // a per-pod dead mounter strands its tenant — their events
                 // said so — and a NEW member gets a fresh mounter under the
                 // same class rather than a dead one.
+                let why = match &liveness {
+                    Some(SharedLiveness::Dead(why)) => why.clone(),
+                    _ => format!("its create did not finish (phase {})", sm.phase),
+                };
                 tracing::warn!(
-                    volume = vid, shared = %hash, phase = %sm.phase, members = ?sm.members,
+                    volume = vid, shared = %hash, phase = %sm.phase, members = ?sm.members, why = %why,
                     "the shared mounter is not serving; replacing it for the new member"
                 );
                 if let Err(e) = self.replace_dead_shared_mounter(&sm).await {
@@ -1384,28 +1412,25 @@ impl S3Node {
         Ok(())
     }
 
-    /// Is the shared mounter serving: its source a mount that answers
-    /// statfs (a dead FUSE mount is still a mount point — `is_mountpoint`
-    /// says so on purpose — hence the probe; Mountpoint answers statfs
-    /// without S3, so three seconds of silence is a daemon that is not
-    /// there), and its worker not DEFINITIVELY gone. An API error is not
-    /// a verdict: replacing a mounter deletes its worker, which strands
-    /// every current member, so only a GET that answers "not Running"
-    /// counts against it — the local probe decides the rest.
-    async fn shared_mount_alive(&self, sm: &SharedMount) -> bool {
+    /// Is the shared mounter serving, dead, or neither: see
+    /// [`shared_liveness`]. The source is checked for a mount (a dead FUSE
+    /// mount is still a mount point — `is_mountpoint` says so on purpose —
+    /// hence the statfs), and the worker by a GET.
+    async fn shared_liveness(&self, sm: &SharedMount) -> SharedLiveness {
         let src = Path::new(&sm.src);
-        let serving = fuse::is_mountpoint(src).unwrap_or(false)
-            && fuse::wait_ready_opts(src, Duration::from_secs(3), false).await.is_ok();
-        if !serving {
-            return false;
-        }
-        match worker::is_running(&self.client, &sm.worker_namespace, &sm.worker_name).await {
-            Ok(running) => running,
+        let mounted = match fuse::is_mountpoint(src) {
+            Ok(m) => Some(m),
             Err(e) => {
-                tracing::warn!(shared = %sm.hash, worker = %sm.worker_name, "could not read the shared worker ({e}); its mount answers, so it is treated as alive");
-                true
+                tracing::warn!(shared = %sm.hash, "could not tell whether {} is a mount ({e}); the statfs decides", src.display());
+                None
             }
+        };
+        let probe = if mounted == Some(false) { fuse::Probe::Unanswered("no mount".into()) } else { fuse::probe(src, LIVENESS_PROBE_BUDGET).await };
+        let worker = worker::is_running(&self.client, &sm.worker_namespace, &sm.worker_name).await;
+        if let Err(e) = &worker {
+            tracing::warn!(shared = %sm.hash, worker = %sm.worker_name, "could not read the shared worker ({e}); the local probe decides");
         }
+        shared_liveness(mounted, probe, worker)
     }
 
     /// Clear a dead shared mounter out of the way of a new member: detach
@@ -1653,7 +1678,16 @@ impl S3Node {
         // mounter's whole timeout whenever the store is unreachable.
         let alive = self.workers.is_running(&st.worker_name).await.unwrap_or(true);
         let mounted = st.mode != "passthrough" || fuse::is_mountpoint(Path::new(&st.src)).unwrap_or(false);
-        let ok = alive && mounted && fuse::wait_ready_opts(Path::new(&st.src), Duration::from_secs(3), false).await.is_ok();
+        let probe = if alive && mounted { fuse::probe(Path::new(&st.src), LIVENESS_PROBE_BUDGET).await } else { fuse::Probe::Serving };
+        let ok = alive && mounted && probe == fuse::Probe::Serving;
+        // Silence from a mounter whose worker runs and whose mount is
+        // there is not death (`fuse::Probe::Unanswered`): said as such,
+        // not as MounterDead — whose text promises ENOTCONN, and which a
+        // busy mounter serving every read (S34) would otherwise earn.
+        let busy = match &probe {
+            fuse::Probe::Unanswered(why) if alive && mounted => Some(why.clone()),
+            _ => None,
+        };
         if st.last_probe_ok != Some(ok) {
             changed = true;
             st.last_probe_ok = Some(ok);
@@ -1663,7 +1697,23 @@ impl S3Node {
         // missed or age out, and kubelet's republish cadence (~60-90 s) is
         // the interval. Each is its own Event object, so a reader counts
         // them and a watcher sees each.
-        if !ok {
+        if let Some(why) = &busy {
+            self.emit_event(
+                &st.tenant,
+                "MounterUnresponsive",
+                &format!(
+                    "the mounter serving {} at {} did not answer a statfs within {} s ({why}); its worker {} is Running and \
+                     its mount is in place, so it is not declared dead — it is busy (every FUSE thread on a slow read) or hung. \
+                     Said again every republish while it lasts.",
+                    st.cr,
+                    st.target_path,
+                    LIVENESS_PROBE_BUDGET.as_secs(),
+                    st.worker_name
+                ),
+                true,
+            )
+            .await;
+        } else if !ok {
             let detail = st
                 .worker_uid
                 .as_ref()
@@ -2916,6 +2966,44 @@ impl csi::identity_server::Identity for S3Identity {
     }
 }
 
+/// How long a liveness statfs (the join's, and every republish's) may take
+/// before it counts as unanswered.
+pub const LIVENESS_PROBE_BUDGET: Duration = Duration::from_secs(3);
+
+/// What a join may conclude about a published shared mounter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SharedLiveness {
+    Serving,
+    /// Evidence of death: replace it for the new member.
+    Dead(String),
+    /// Neither: it did not answer, but nothing says it is gone. Never
+    /// replaced — that would strand every member of a mounter that may be
+    /// serving them all.
+    Busy(String),
+}
+
+/// Death needs evidence: no mount at the source, a statfs that says
+/// ENOTCONN, or a GET that says the worker is not Running. An API error
+/// is not a verdict, and neither is a statfs that did not answer — a
+/// mounter whose every FUSE thread is on a slow read does not answer one
+/// within the budget either (kind S34, 2026-10-03).
+pub fn shared_liveness(mounted: Option<bool>, probe: fuse::Probe, worker: Result<bool, String>) -> SharedLiveness {
+    if mounted == Some(false) {
+        return SharedLiveness::Dead("its source is not a mount".into());
+    }
+    if let fuse::Probe::Dead(why) = probe {
+        return SharedLiveness::Dead(why);
+    }
+    if worker == Ok(false) {
+        return SharedLiveness::Dead("its worker is not Running".into());
+    }
+    match probe {
+        fuse::Probe::Serving => SharedLiveness::Serving,
+        fuse::Probe::Unanswered(why) => SharedLiveness::Busy(why),
+        fuse::Probe::Dead(_) => unreachable!("handled above"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2928,6 +3016,27 @@ mod tests {
     /// tell a controller the same lead, in minutes, in BOTH places it says
     /// it (§2 Timing and the §8 checklist — §8 carried a stale "four" for a
     /// day, 2026-10-03). Until this test the agreement lived in comments.
+    #[test]
+    fn a_shared_mounter_is_dead_only_on_evidence_and_silence_is_busy() {
+        use super::fuse::Probe;
+        let silent = || Probe::Unanswered("statfs did not answer within the budget".into());
+        let enotconn = || Probe::Dead("statfs: ENOTCONN".into());
+        // S34's case: mounted, worker Running, statfs silent — busy, never replaced.
+        assert!(matches!(shared_liveness(Some(true), silent(), Ok(true)), SharedLiveness::Busy(_)));
+        // Silent and the API server did not answer either: still not evidence.
+        assert!(matches!(shared_liveness(Some(true), silent(), Err("timeout".into())), SharedLiveness::Busy(_)));
+        assert!(matches!(shared_liveness(None, silent(), Ok(true)), SharedLiveness::Busy(_)));
+        // Evidence, each alone, is death.
+        assert!(matches!(shared_liveness(Some(true), enotconn(), Ok(true)), SharedLiveness::Dead(_)));
+        assert!(matches!(shared_liveness(Some(true), enotconn(), Err("timeout".into())), SharedLiveness::Dead(_)));
+        assert!(matches!(shared_liveness(Some(true), silent(), Ok(false)), SharedLiveness::Dead(_)));
+        assert!(matches!(shared_liveness(Some(true), Probe::Serving, Ok(false)), SharedLiveness::Dead(_)));
+        assert!(matches!(shared_liveness(Some(false), Probe::Serving, Ok(true)), SharedLiveness::Dead(_)));
+        // Answering, with a worker that runs or a GET that failed: serving.
+        assert_eq!(shared_liveness(Some(true), Probe::Serving, Ok(true)), SharedLiveness::Serving);
+        assert_eq!(shared_liveness(Some(true), Probe::Serving, Err("timeout".into())), SharedLiveness::Serving);
+    }
+
     #[test]
     fn the_credential_timing_budget_agrees() {
         let needed = MOUNTER_ASKS_SECS_BEFORE_EXPIRY + REPUBLISH_MAX_SECS;

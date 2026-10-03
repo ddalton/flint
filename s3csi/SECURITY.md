@@ -127,6 +127,7 @@ of the CR alone.**
 | a shared mount is always `--read-only` | `publish_shared` | `s3csi/node.rs` |
 | every member registers and exchanges its OWN credential into the class's comm dir | `publish_shared` | `s3csi/node.rs` |
 | a refused member's refresh leaves the class key alone | `revocation_removes_the_key` | `s3csi/node.rs` |
+| a join replaces the class's mounter only on evidence of death (ENOTCONN, no mount, worker not Running); a mounter that is silent but not dead is waited for, never replaced under its members | `shared_liveness`, `fuse::classify_probe` | `s3csi/node.rs`, `s3csi/fuse.rs` |
 
 **P10. Key material is not logged.**
 
@@ -178,7 +179,7 @@ Secrets RBAC), never refreshed, never shared.
 | P6 | `a_refusal_removes_the_key_only_from_an_unshared_mounter`; `exchange_errors_sort_refusals_from_outages`; `exchange_outages_are_unavailable_and_refusals_are_denied`; `a_token_review_the_api_server_did_not_answer_is_unavailable_not_refused` | S10, S29, S8 (outage control); L3 | campaign 3 run 4; review-fixes run 2 (2026-09-30) | no leg fails the API server under the broker (S8 fails the broker itself) |
 | P7 | `passthrough_worker_is_unprivileged_and_hostpath_free` | S2, S3, S19 | campaign 3 run 4 | no leg sets TLS or the NetworkPolicy; nothing checks the broker link |
 | P8 | `uid_gid_must_be_integers`; `dir_names_cannot_escape`; `name_and_hash_are_stable_and_label_sized` | S15, S24; P3 (16 tenants) | campaign 3 run 4; kind S24+S30 (2026-10-01) | cross-pod door reachability; state-dir mode |
-| P9 | `only_read_only_members_with_cr_scoped_credentials_share`; `sharing_cannot_run_on_a_per_pod_secret`; `the_class_is_node_namespace_cr_owner_mode_and_argv`; `a_shared_mount_round_trips_and_membership_is_a_set`; `a_shared_worker_is_named_by_its_class_and_says_so` | S24, S28, S29, S30; S34 | kind S24+S30 46/0 (2026-10-01); sts run 1; S34 FAILS 2026-10-03 (§4.12) | a join while the mounter's FUSE threads are all busy replaces it and strands every member (§4.12) |
+| P9 | `only_read_only_members_with_cr_scoped_credentials_share`; `sharing_cannot_run_on_a_per_pod_secret`; `the_class_is_node_namespace_cr_owner_mode_and_argv`; `a_shared_mount_round_trips_and_membership_is_a_set`; `a_shared_worker_is_named_by_its_class_and_says_so`; `a_shared_mounter_is_dead_only_on_evidence_and_silence_is_busy`; `only_enotconn_is_a_dead_mount_and_silence_is_not` | S24, S28, S29, S30; S34 | kind S24+S30 46/0 (2026-10-01); sts run 1; S34 61/0 + S9 + S24 86/0 (2026-10-03, after the §4.12 fix) | a hung (not dead) shared mounter is waited for indefinitely (§4.12) |
 | P10 | `redaction_masks_secret_shaped_arguments`; `creds_json_is_the_container_credentials_shape`; `our_audience_token_is_picked_and_never_debug_printed`; `the_start_up_line_never_prints_a_secret`; `token_is_written_once_at_0600_and_reloaded` | S3, S31 | sts runs | nothing greps events or the broker log for key material |
 | P11 | (none for `worker_capacity`) | S33 | sts run 1, 6/0 | the race has no leg: S33 is sequential |
 | P12 | `static_arm_needs_both_keys_and_passes_region`; `sharing_cannot_run_on_a_per_pod_secret` | S5c | sts run 2, 2/2 | — |
@@ -242,8 +243,18 @@ Secrets RBAC), never refreshed, never shared.
     from the node network.
 11. **S10 on kind runs against a store that never expires anything.**
     Its real twin is A6/R1 on AWS.
-12. **A busy shared mounter is replaced as if it were dead.** The join
-    path's `shared_mount_alive` asks `fuse::wait_ready_opts` for a statfs
+12. **A HUNG shared mounter blocks new members; it is not replaced.**
+    Until 2026-10-03 the opposite held — a BUSY one was replaced as if
+    dead, stranding every member — and was fixed that day: death now
+    needs evidence (ENOTCONN, no mount, or a GET saying the worker is
+    not Running), and a join that meets silence answers `Unavailable`
+    and is retried by kubelet (`shared_liveness`; kind S34 61/0 —
+    the join met the mounter silent and waited, and a killed worker is
+    still replaced, on ENOTCONN). The price: a mount-s3 that hangs
+    without dying, in a worker that stays Running, is indistinguishable
+    from a busy one, so new members wait until it dies or its worker is
+    deleted; its members see `MounterUnresponsive` every republish
+    meanwhile. The history: the join path's `shared_mount_alive` asked `fuse::wait_ready_opts` for a statfs
     within 3 s, and that function returns the same `Err` for ENOTCONN, a
     statfs error and a timeout. Mountpoint answers statfs without S3, so
     network-bound reads never slow it (S34, four readers at 20mbit: max
@@ -255,7 +266,7 @@ Secrets RBAC), never refreshed, never shared.
     readers got `Transport endpoint is not connected`; none of them got a
     MounterDead event inside the leg's window. Reachable on any shared
     class whose members read more files at once than the mounter has
-    threads, over a link slower than they want. Not fixed (open list 9).
+    threads, over a link slower than they want.
 
 ## 5. The open list
 
@@ -269,7 +280,7 @@ Secrets RBAC), never refreshed, never shared.
 | 6 | the worker test asserts `hostNetwork` absent; `worker_capacity` gets a unit test | S |
 | 7 | ~~run S34 (the probe under load) on the box, and calibrate its floor~~ — run 2026-10-03: four readers never reach the probe; 24 do, and the join replaces the mounter (§4.12) | — |
 | 8 | lean's `launch.json` written 0600 | S |
-| 9 | the join path replaces a shared mounter only on evidence of death — ENOTCONN, no mount, or a worker the API server says is not Running — and answers a timeout with `Unavailable` (kubelet retries the publish) instead of a replace; then S34 green at its defaults | S |
+| 9 | ~~the join path replaces a shared mounter only on evidence of death, and answers silence with `Unavailable`~~ — done 2026-10-03 (`shared_liveness`, `fuse::Probe`; S34 61/0 with both arms) | — |
 
 Docs corrected with this file (2026-10-03): the sts note's "CA-pinned
 client"; the sharing design's §5 paragraph that said a refusal removes

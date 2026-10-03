@@ -1,0 +1,68 @@
+
+── S34 — a shared mounter whose FUSE threads are all busy (more readers than threads, a shaped link) is NOT replaced when a member joins while it is silent: the join waits for it, the readers finish with zero errors, and nobody is told the mounter died
+  ok: 24 load objects of 8 MiB under datasets/imagenet/
+  ok: the readers share one worker (s3w-4bab47e182d5299c)
+  ok: the class's source is mounted on the node at /var/lib/kubelet/plugins/s3.csi.chert.us/shared/2300d528caea210d/src
+  ok: worker s3w-4bab47e182d5299c's ingress shaped to 10mbit on the node side of its veth (veth6651d911)
+  NOTE: the join goes in 11s after the reads began (statfs so far: 1425 6078 )
+  ok: shared-j reached Running while the readers were pulling
+  ok: shared-j's publish line says it joined the shared class
+  ok: shared-j reads through the mounter it joined
+  ok: the join did not replace the mounter (no 'replacing it for the new member' line)
+  ok: worker s3w-4bab47e182d5299c is the same pod after the join (uid unchanged)
+  ok: s34-r1: 1 pass(es) of load-01.bin, 0 errors (5s)
+  ok: no MounterDead on s34-r1
+  ok: s34-r2: 1 pass(es) of load-02.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r2
+  ok: s34-r3: 1 pass(es) of load-03.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r3
+  ok: s34-r4: 1 pass(es) of load-04.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r4
+  ok: s34-r5: 1 pass(es) of load-05.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r5
+  ok: s34-r6: 1 pass(es) of load-06.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r6
+  ok: s34-r7: 1 pass(es) of load-07.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r7
+  ok: s34-r8: 1 pass(es) of load-08.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r8
+  ok: s34-r9: 1 pass(es) of load-09.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r9
+  ok: s34-r10: 1 pass(es) of load-010.bin, 0 errors (5s)
+  ok: no MounterDead on s34-r10
+  ok: s34-r11: 1 pass(es) of load-011.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r11
+  ok: s34-r12: 1 pass(es) of load-012.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r12
+  ok: s34-r13: 1 pass(es) of load-013.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r13
+  ok: s34-r14: 1 pass(es) of load-014.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r14
+  ok: s34-r15: 1 pass(es) of load-015.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r15
+  ok: s34-r16: 1 pass(es) of load-016.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r16
+  ok: s34-r17: 1 pass(es) of load-017.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r17
+  ok: s34-r18: 1 pass(es) of load-018.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r18
+  ok: s34-r19: 1 pass(es) of load-019.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r19
+  ok: s34-r20: 1 pass(es) of load-020.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r20
+  ok: s34-r21: 1 pass(es) of load-021.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r21
+  ok: s34-r22: 1 pass(es) of load-022.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r22
+  ok: s34-r23: 1 pass(es) of load-023.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r23
+  ok: s34-r24: 1 pass(es) of load-024.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r24
+  NOTE: node statfs on the shared source during the reads: 24 samples, max 20001 ms: 1425 6078 3672 4147 20001 20001 20001 6908 20001 20001 44 2 2 2 3 1 1 1 4 1 1 1 1 1 
+  ok: the join met the mounter silent 1 time(s) (max node statfs 20001 ms) and waited for it instead of replacing it
+  ok: shared-k, joining after the worker was killed, reads through a fresh mounter
+  ok: a DEAD shared mounter (worker killed) is replaced for the next member (why=statfs: ENOTCONN (the mounter's FUSE connection is gone))
+  ok: worker s3w-4bab47e182d5299c is a new pod after the replace
+
+════════════════════════════════════════
+s3.csi.chert.us legs [S34] of run-s3csi.sh: 61 ok, 0 bad

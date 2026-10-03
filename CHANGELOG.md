@@ -43,8 +43,7 @@ covered by the stability guarantee.
   unmoved); S34 FAILS at its calibrated defaults — with 24 readers
   (more than Mountpoint's 16 FUSE threads) statfs took up to 3.97 s,
   the join replaced the live shared mounter and all 24 readers got
-  ENOTCONN. **Known defect, not fixed:** the join path reads a probe
-  timeout as a dead mounter (`SECURITY.md` §4.12). Two rig bugs the
+  ENOTCONN — fixed the same day (below). Two rig bugs the
   first run found are fixed: step 6 re-offered the refused generation 5
   instead of generation 4, and S34 read the veth peer from the node's
   sysfs instead of the pod's netns, so it never shaped the link.
@@ -64,6 +63,23 @@ covered by the stability guarantee.
   (`lean/e2e/rustfs.yaml`) and say which store answered.
 
 ### Fixed
+
+- **flint-s3-csi: a busy shared mounter is no longer replaced as if it
+  were dead** (2026-10-03, `s3csi/SECURITY.md` §4.12). A pod joining a
+  shared read-only class checked the class's mounter with a 3 s statfs
+  and replaced it on ANY failure — deleting its worker and leaving every
+  current member on a dead mount (`Transport endpoint is not connected`)
+  mid-read. statfs is a FUSE request, and when every one of mount-s3's
+  16 FUSE threads is parked on a slow read it queues: on kind, 24
+  readers over a 10mbit link took it to 20 s, and the join replaced a
+  mounter that was serving all 24. Now death needs evidence — ENOTCONN,
+  no mount, or the worker not Running — and a join that meets silence
+  answers `Unavailable`, so kubelet retries it once the mounter answers.
+  The republish check says `MounterUnresponsive` for silence and keeps
+  `MounterDead` for death, whose text promises ENOTCONN. A mount-s3 that
+  hangs without dying now blocks new members of its class until its
+  worker goes, instead of being replaced. Kind leg S34 covers both arms
+  (`s3csi/e2e/results/2026-10-03-kind-probe-fix/`: 61/0).
 
 - **flint-s3-broker: an API server that did not answer a TokenReview no
   longer reads as a refusal** (2026-10-03, `s3csi/SECURITY.md` §4.5). A

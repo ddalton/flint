@@ -1,0 +1,95 @@
+
+── S9 — a DaemonSet roll mid-read leaves the mount serving; a dead WORKER strands its tenant and the pod is told
+  BAD: pod reader is 'Pending', not Running — every observation this leg makes would be an empty string
+
+── S24 — sharing: two read-only consumers of one CR on one node share ONE worker, a third with another uid gets its own; the first out leaves the mounter up, the last brings it down
+  ok: shared-a reads through the shared mount
+  ok: shared-b reads through the shared mount
+  ok: shared-c reads through its own class's mount
+  ok: two shared workers for datasets-shared: one class for uid 1001 (shared-a + shared-b), one for uid 1002 (shared-c)
+  ok: exactly one of the pair created a worker (shared-a → s3w-4bab47e182d5299c); the other joined it
+  ok: two shared FUSE sources on the node (one per class)
+  ok: s3w-4bab47e182d5299c's mount-s3 argv carries no --cache (the CR named none)
+  ok: no block cache directory under /tmp in s3w-4bab47e182d5299c after the reads
+  ok: the plugin logged that the shared mounter runs without a cache
+  ok: no CacheOnRootDisk note on shared-a: no cache, nothing to say
+  ok: the shared mount is read-only
+  ok: the plugin logged 3 shared publishes
+  ok: worker s3w-4bab47e182d5299c still Running after its creator shared-a left
+  ok: shared-b still reads after shared-a left
+  ok: the plugin recorded the leave
+  ok: worker s3w-4bab47e182d5299c is gone after the last member left (0s)
+  ok: the plugin brought the mounter down as the last member left
+  ok: one shared record left on the node (shared-c's class)
+  ok: CONTROL: shared-c's mount-s3 runs --cache /tmp --max-cache-size 256 once the CR asks
+  ok: CONTROL: shared-c reads through the cached shared mount
+  ok: CONTROL: the named cache is populated under /tmp in s3w-de7f3799afabf8c9 (5 entries)
+  ok: CONTROL: CacheOnRootDisk on shared-c names the CR, the 256 MiB and the emptyDir
+  ok: CONTROL: the plugin logged the cache directory's device
+
+── S32 — a dead mounter is announced on EVERY republish: at least two MounterDead events within two periods
+  BAD: pod reader-sts is 'absent', not Running — every observation this leg makes would be an empty string
+
+── S34 — a shared mounter under load (more readers than its FUSE threads, a shaped link) is NOT replaced when a fifth member joins mid-read: the join lands on the live mounter, the readers finish with zero errors, and the node's statfs shows the load reached the probe without exceeding its budget
+  ok: 24 load objects of 8 MiB under datasets/imagenet/
+  ok: the readers share one worker (s3w-4bab47e182d5299c)
+  ok: the class's source is mounted on the node at /var/lib/kubelet/plugins/s3.csi.chert.us/shared/2300d528caea210d/src
+  ok: worker s3w-4bab47e182d5299c's ingress shaped to 10mbit on the node side of its veth (vethd3f8b721)
+  ok: shared-j reached Running while the readers were pulling
+  ok: shared-j's publish line says it joined the shared class
+  ok: shared-j reads through the mounter it joined
+  ok: the join did not replace the mounter (no 'replacing it for the new member' line)
+  ok: worker s3w-4bab47e182d5299c is the same pod after the join (uid unchanged)
+  ok: s34-r1: 1 pass(es) of load-01.bin, 0 errors (45s)
+  ok: no MounterDead on s34-r1
+  ok: s34-r2: 1 pass(es) of load-02.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r2
+  ok: s34-r3: 1 pass(es) of load-03.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r3
+  ok: s34-r4: 1 pass(es) of load-04.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r4
+  ok: s34-r5: 1 pass(es) of load-05.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r5
+  ok: s34-r6: 1 pass(es) of load-06.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r6
+  ok: s34-r7: 1 pass(es) of load-07.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r7
+  ok: s34-r8: 1 pass(es) of load-08.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r8
+  ok: s34-r9: 1 pass(es) of load-09.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r9
+  ok: s34-r10: 1 pass(es) of load-010.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r10
+  ok: s34-r11: 1 pass(es) of load-011.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r11
+  ok: s34-r12: 1 pass(es) of load-012.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r12
+  ok: s34-r13: 1 pass(es) of load-013.bin, 0 errors (10s)
+  ok: no MounterDead on s34-r13
+  ok: s34-r14: 1 pass(es) of load-014.bin, 0 errors (5s)
+  ok: no MounterDead on s34-r14
+  ok: s34-r15: 1 pass(es) of load-015.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r15
+  ok: s34-r16: 1 pass(es) of load-016.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r16
+  ok: s34-r17: 1 pass(es) of load-017.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r17
+  ok: s34-r18: 1 pass(es) of load-018.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r18
+  ok: s34-r19: 1 pass(es) of load-019.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r19
+  ok: s34-r20: 1 pass(es) of load-020.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r20
+  ok: s34-r21: 1 pass(es) of load-021.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r21
+  ok: s34-r22: 1 pass(es) of load-022.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r22
+  ok: s34-r23: 1 pass(es) of load-023.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r23
+  ok: s34-r24: 1 pass(es) of load-024.bin, 0 errors (0s)
+  ok: no MounterDead on s34-r24
+  NOTE: node statfs on the shared source during the reads: 24 samples, max 20002 ms: 2924 2761 621 6190 20002 20001 13053 20002 14029 20001 225 1 1 3 4 1 1 2 1 2 2 1 1 1 
+  BAD: a statfs on the shared source took 20002 ms under this load — over the probe's 3 s budget: a join at that moment replaces a live mounter (the defect is reachable; this join missed it)
+
+════════════════════════════════════════
+s3.csi.chert.us legs [S9 S24 S32 S34] of run-s3csi.sh: 80 ok, 3 bad

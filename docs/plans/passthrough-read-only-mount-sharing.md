@@ -292,8 +292,10 @@ legs S23 (F72) and S24 (sharing) in `s3csi/e2e/run-s3csi.sh`, NOT RUN
 (both run 2026-09-30, 23/23; S34 — the class's liveness probe under
 load, a join mid-read — run on kind 2026-10-03 and FAILS: with more
 readers than the mounter's 16 FUSE threads statfs passes the probe's
-3 s, and the join replaces the live mounter, stranding every member —
-`s3csi/SECURITY.md` §4.12; the security claims are in that file).
+3 s, and the join replaced the live mounter, stranding every member.
+Fixed the same day: a join replaces only on evidence of death
+(ENOTCONN, no mount, worker not Running) and waits out silence; S34
+61/0 — `s3csi/SECURITY.md` §4.12; the security claims are in that file).
 
 **§8.1, answered: Mountpoint does not mount `direct_io`, but it never
 keeps the page cache either.** At v1.24.0 `fs.rs:400` replies to `open`

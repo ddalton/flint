@@ -257,6 +257,51 @@ mod imp {
     }
 }
 
+/// One liveness statfs on a live mount, sorted by [`classify_probe`].
+#[cfg(target_os = "linux")]
+pub async fn probe(src: &Path, budget: Duration) -> Probe {
+    let p = src.to_path_buf();
+    let call = tokio::task::spawn_blocking(move || nix::sys::statfs::statfs(&p).map(|_| ()).map_err(|e| e as i32));
+    classify_probe(match tokio::time::timeout(budget, call).await {
+        Ok(Ok(r)) => Some(r),
+        Ok(Err(_)) | Err(_) => None,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub async fn probe(_: &Path, _: Duration) -> Probe {
+    Probe::Unanswered("FUSE mounting is Linux-only".into())
+}
+
+/// What one statfs on a FUSE mount says about its daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Probe {
+    /// It answered.
+    Serving,
+    /// The kernel said the daemon is gone (`ENOTCONN`): the connection
+    /// is aborted and nothing will ever answer on this superblock again.
+    Dead(String),
+    /// No answer within the budget, or an error that is not death. A
+    /// daemon with every FUSE thread parked on a slow read does this —
+    /// statfs is a FUSE request like any other and queues behind them
+    /// (kind S34, 2026-10-03: 24 readers over Mountpoint's 16 threads
+    /// took statfs to 3971 ms while every read was being served). Not
+    /// evidence of death; a hung daemon looks the same, and only the
+    /// worker's state can tell the two apart.
+    Unanswered(String),
+}
+
+/// Sort one statfs outcome: `None` is no answer within the budget,
+/// `Some(Err(errno))` an error.
+pub fn classify_probe(outcome: Option<Result<(), i32>>) -> Probe {
+    match outcome {
+        Some(Ok(())) => Probe::Serving,
+        Some(Err(e)) if e == libc::ENOTCONN => Probe::Dead("statfs: ENOTCONN (the mounter's FUSE connection is gone)".into()),
+        Some(Err(e)) => Probe::Unanswered(format!("statfs: {}", io::Error::from_raw_os_error(e))),
+        None => Probe::Unanswered("statfs did not answer within the budget".into()),
+    }
+}
+
 /// Is `path` a mount point according to a `/proc/self/mountinfo` body?
 ///
 /// Field 5 (1-based) is the mount point, and octal escapes (`\040` for
@@ -328,6 +373,19 @@ pub async fn wait_ready(src: &Path, deadline: Duration) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only ENOTCONN is death. A probe that timed out — what a mounter
+    /// whose FUSE threads are all busy serving reads gives (S34) — and
+    /// any other error are unanswered, which the callers must not read
+    /// as dead.
+    #[test]
+    fn only_enotconn_is_a_dead_mount_and_silence_is_not() {
+        assert_eq!(classify_probe(Some(Ok(()))), Probe::Serving);
+        assert!(matches!(classify_probe(Some(Err(libc::ENOTCONN))), Probe::Dead(_)));
+        assert!(matches!(classify_probe(None), Probe::Unanswered(_)));
+        assert!(matches!(classify_probe(Some(Err(libc::EIO))), Probe::Unanswered(_)));
+        assert!(matches!(classify_probe(Some(Err(libc::EINTR))), Probe::Unanswered(_)));
+    }
 
     /// The stage is inside the volume directory the removal paths
     /// unmount under, for both front ends' sources.
