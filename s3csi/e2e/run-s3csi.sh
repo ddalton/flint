@@ -341,7 +341,7 @@ image_unland() {
 worker_argv() { $K -n $WNS exec "$1" -- sh -c 'for p in /proc/[0-9]*; do tr "\0" " " < $p/cmdline 2>/dev/null; echo; done' 2>/dev/null | grep -- 'mount-s3' | head -1; }
 
 # ── lean store helpers (S11-S14, S20; run-legs.sh imports these) ──
-# Store helpers, the lean drill's (run-agent.sh): jq, not grep — the
+# Store helpers, taken from the lean drill's (run-agent.sh, since removed): jq, not grep — the
 # manifest is nested JSON.
 lobj()   { mcx mc cat "m/$BUCKET/$1" 2>/dev/null; }
 lcount() { mcx mc ls --recursive "m/$BUCKET/$1" 2>/dev/null | grep -c . ; }

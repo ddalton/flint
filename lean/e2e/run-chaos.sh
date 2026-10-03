@@ -22,8 +22,9 @@
 # under CSI would take PID 1 of the worker with it.
 # The flint-lean CHAOS drill (plan §5 Phase 6, the kind-runnable half).
 #
-# run.sh and run-chart.sh prove the happy path: injection, gate,
-# publish, refusal. This drill proves what happens when the happy path
+# run.sh and run-chart.sh proved the happy path (injection, gate,
+# publish, refusal) until both were removed with the webhook delivery,
+# 2026-10-03. This drill proves what happens when the happy path
 # is INTERRUPTED — the legs the formal model either abstracts away
 # (the atomic scan, the poll protocol) or explicitly cannot represent
 # (the two-consecutive-scans rule, real crash timing), plus the two

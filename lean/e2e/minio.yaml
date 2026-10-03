@@ -1,6 +1,6 @@
 # The store half of the e2e rig: namespace, MinIO (stand-in for the
-# deployment proxy), and the bucket bootstrap. Shared by run.sh (raw
-# manifests) and run-chart.sh (helm).
+# deployment proxy), and the bucket bootstrap. Shared by the rigs in
+# this directory.
 apiVersion: v1
 kind: Namespace
 metadata:
