@@ -154,7 +154,8 @@ def build():
            body_size=7.3)
 
     d.node(p, "rect", 7.60, 6.50, 3.60, 0.68, "mount-s3  ·  worker #2",
-           "one worker per PUBLISHED VOLUME — its own fd, its own credential",
+           "one worker per PUBLISHED VOLUME, its own fd and credential — or, "
+           "with spec.sharing.readOnly, one per node for a CR's readers",
            fill=d.WORK_F, line=d.WORK_L, line_weight=0.014, title_size=9.4,
            body_size=7.2)
 
@@ -241,7 +242,9 @@ def build():
           "registration nonce the pod cannot mint · "
           "spec.consumers · then short-lived keys, on a loopback door. It "
           "reads no tenant Secret, and in sts/rest mode holds no bucket key "
-          "of its own.",
+          "of its own. A CR with spec.identity.mode stsSecret skips it: the "
+          "pod's nodePublishSecretRef carries an expiring session, replaced "
+          "in place by a newer generation.",
           fill=d.PLAIN_F, line=d.PLAIN_L, line_weight=0.012, title_size=9.6,
           body_size=7.4, body_color=SUB)
     p.box(7.60, 9.80, 6.90, 1.15,
