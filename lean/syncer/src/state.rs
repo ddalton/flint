@@ -596,6 +596,14 @@ impl SyncerState {
         }
     }
 
+    /// Every record ever appended: the ones rotation dropped plus the
+    /// ones held. Unlike the held count it never goes down, so a reader
+    /// that takes it before an operation knows exactly how many records
+    /// the operation produced, across any rotation (`conflicts_since`).
+    pub fn conflicts_appended(&self) -> LeanResult<u64> {
+        Ok(self.conflicts_dropped()? + self.load_conflicts()?.len() as u64)
+    }
+
     /// The rotated generation first, then the live one: oldest to
     /// newest, unbroken across a single rotation.
     pub fn load_conflicts(&self) -> LeanResult<Vec<ConflictRecord>> {

@@ -14,6 +14,20 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **lean: a publish or sync ack no longer names too few conflicts, or
+  none, when the conflict log rotates under it; and a touch whose fold
+  failed is no longer lost to the next touch** (2026-10-03, review
+  findings ack-7 and ack-10). The ack listed the records its operation
+  produced by counting the log before and after. A second rotation drops
+  the older generation whole, so an operation that produced as many
+  records as that generation held was acked with no conflicts, and one
+  that produced more lost the difference. The count now includes the
+  dropped records, so it never goes down. Separately, a touch whose fold
+  into the pending record failed mid-run (a transient write error) waited
+  in staging until a restart, and the next touch's rename overwrote it,
+  so the agent waiting on its nonce never got an ack. The stranded touch
+  is now folded first, on every poll.
+
 - **docs: the `stsSecret` note told the controller's author to rotate four
   minutes before expiry; it is seven** (2026-10-03). The note's timing
   section and 1.57.0's changelog already said seven (the mounter asks for

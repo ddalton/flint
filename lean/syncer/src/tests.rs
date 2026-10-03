@@ -7102,15 +7102,15 @@ fn a_shortened_conflict_log_never_reports_an_empty_ack() {
 
     // The ordinary case: the log grew, take the tail.
     let grew = vec![rec(0), rec(1), rec(2)];
-    assert_eq!(conflicts_since(1, grew.clone()).len(), 2);
-    assert_eq!(conflicts_since(3, grew.clone()).len(), 0, "grew by nothing");
+    assert_eq!(conflicts_since(1, 0, grew.clone()).len(), 2);
+    assert_eq!(conflicts_since(3, 0, grew.clone()).len(), 0, "grew by nothing");
 
     // The rotation case: the log SHRANK under us. Reporting the
     // survivors over-reports; skipping reports NOTHING, which is the
     // answer that hides a conflict.
     let shrank = vec![rec(7), rec(8)];
     assert_eq!(
-        conflicts_since(5, shrank.clone()).len(),
+        conflicts_since(5, 0, shrank.clone()).len(),
         2,
         "a shortened log must not yield an empty conflict set"
     );
@@ -12466,4 +12466,149 @@ async fn a_widen_never_overwrites_a_file_the_agent_made_at_an_admitted_path() {
         recs.iter().any(|c| c.path == "outputs/o.txt" && c.foreign_etag == a_etag && c.preserved_key.is_some()),
         "A's version was replaced with no record preserving it: {recs:?}"
     );
+}
+
+// ---------------------------------------------------------------------
+// ack-7: a sync's records across a SECOND rotation (review 2026-09-12)
+// ---------------------------------------------------------------------
+
+/// The ack names the records its own barrier or sync produced: count
+/// before, take what is new after. A second rotation drops the whole
+/// older generation (`conflicts.1.jsonl`) and the held count falls by
+/// exactly that many. If the operation produced as many records as the
+/// dropped generation held, the held count comes back to where it was
+/// and a count-and-skip reports NOTHING; if it produced more, it loses
+/// that many of its own. Exactly the operation's records, every time.
+#[tokio::test]
+async fn an_ack_names_every_record_its_operation_produced_across_a_second_rotation() {
+    use super::sentinel::conflicts_since;
+    let store = Arc::new(MemoryStore::new());
+    // Each case: the log has rotated `rotated` times when the operation
+    // starts (once: nothing dropped yet; twice: a generation already
+    // dropped, so the starting count must include it), and the operation
+    // produces the older generation's size plus `extra`, crossing the
+    // next rotation. Equal is the case that reported none; more is the
+    // case that lost some.
+    for (case, rotated, extra) in [
+        ("first drop, as many as it drops", 1, 0usize),
+        ("first drop, more than it drops", 1, 7),
+        ("a later drop, as many as it drops", 2, 0),
+        ("a later drop, more than it drops", 2, 7),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let a = syncer(&store, dir.path()).await;
+        let sd = a.cfg.state_dir();
+        let mut rotations = 0;
+        let mut i = 0usize;
+        while rotations < rotated {
+            let had = std::fs::metadata(sd.join("conflicts.jsonl")).map(|m| m.len()).unwrap_or(0);
+            a.state.append_conflict(&bulky_conflict(i)).unwrap();
+            i += 1;
+            let has = std::fs::metadata(sd.join("conflicts.jsonl")).map(|m| m.len()).unwrap_or(0);
+            if has < had {
+                rotations += 1;
+            }
+        }
+        // Records already in the live log when the operation starts (a
+        // rotation just happened above, so it is empty): the realistic
+        // start, and the one where a starting count that leaves out the
+        // dropped records over-reports into them.
+        for n in 0..5 {
+            a.state.append_conflict(&bulky_conflict(500_000 + n)).unwrap();
+        }
+        let dropped_before = a.state.conflicts_dropped().unwrap();
+        assert_eq!(dropped_before > 0, rotated > 1, "{case}: the fixture's starting point");
+        let generation =
+            std::fs::read_to_string(sd.join("conflicts.1.jsonl")).unwrap().lines().filter(|l| !l.trim().is_empty()).count();
+        assert!(generation > 100, "{case}: the fixture needs a real generation: {generation}");
+        let before = a.state.conflicts_appended().unwrap();
+        let k = generation + extra;
+        let made: Vec<String> = (0..k)
+            .map(|n| {
+                let r = bulky_conflict(1_000_000 + n);
+                a.state.append_conflict(&r).unwrap();
+                r.path
+            })
+            .collect();
+        let dropped = a.state.conflicts_dropped().unwrap();
+        assert!(dropped > dropped_before, "{case}: the run must cross a rotation that drops");
+        let got: Vec<String> =
+            conflicts_since(before, dropped, a.state.load_conflicts().unwrap()).into_iter().map(|r| r.path).collect();
+        assert_eq!(got.len(), made.len(), "{case}: the ack must name all {k} records the operation produced");
+        assert_eq!(got, made, "{case}: and exactly those, oldest first");
+    }
+}
+
+/// Over-reporting is the safe direction, and it is the answer when the
+/// log is reset under a reader (the total went DOWN): every survivor.
+#[test]
+fn a_log_reset_under_a_reader_over_reports() {
+    use super::sentinel::conflicts_since;
+    let survivors = vec![bulky_conflict(7), bulky_conflict(8)];
+    assert_eq!(conflicts_since(50, 0, survivors).len(), 2);
+}
+
+// ---------------------------------------------------------------------
+// ack-10 / U37: a consumed touch stranded in staging (review 2026-09-12)
+// ---------------------------------------------------------------------
+
+/// The consume renames the touch into staging, then folds it into the
+/// pending record. If the fold fails mid-run, the touch waits in
+/// staging; the NEXT consume must fold it first, never rename a new
+/// touch over it (which loses its nonce, so the agent waiting on that
+/// nonce never sees an ack). And while the fold still fails, the next
+/// touch stays where the agent put it.
+#[tokio::test]
+async fn a_touch_stranded_by_a_failed_fold_is_folded_before_the_next_consume() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    let pending = a.cfg.state_dir().join(Verb::Publish.pending_name());
+    let staging = a.cfg.state_dir().join("publish.consumed");
+    let sentinel = dir.path().join(super::CONTROL_DIR).join(control::PUBLISH);
+
+    // A transient fold failure: the pending record cannot be read.
+    std::fs::create_dir_all(&pending).unwrap();
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n1"}"#);
+    assert!(a.consume_sentinel(Verb::Publish).is_err(), "the fixture must make the fold fail");
+    assert!(staging.exists(), "the failed fold leaves the touch in staging");
+
+    // Still failing: the next touch must not be taken over the stranded one.
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n2"}"#);
+    assert!(a.consume_sentinel(Verb::Publish).is_err());
+    assert!(sentinel.exists(), "a touch the syncer cannot fold stays where the agent put it");
+    let staged = std::fs::read_to_string(&staging).unwrap();
+    assert!(staged.contains("n1"), "the stranded touch was overwritten: {staged}");
+
+    // The failure clears: both nonces reach the pending record.
+    std::fs::remove_dir(&pending).unwrap();
+    assert!(a.consume_sentinel(Verb::Publish).unwrap(), "the touch was not consumed");
+    assert!(!staging.exists(), "staging is cleared once folded");
+    assert!(!sentinel.exists());
+    let nonces = a.load_pending(Verb::Publish).unwrap().expect("no pending record").nonces;
+    assert_eq!(nonces, vec!["n1".to_string(), "n2".to_string()], "every touch's nonce must reach the ack");
+}
+
+/// The stranded touch is honored on the next poll, not only when the
+/// agent happens to touch again: an agent waiting on that nonce may
+/// never touch again.
+#[tokio::test]
+async fn a_stranded_touch_is_folded_on_the_next_poll_without_another_touch() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    let pending = a.cfg.state_dir().join(Verb::Publish.pending_name());
+    let staging = a.cfg.state_dir().join("publish.consumed");
+
+    std::fs::create_dir_all(&pending).unwrap();
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n1"}"#);
+    assert!(a.poll_sentinels().is_err(), "the fixture must make the fold fail");
+    assert!(staging.exists());
+
+    std::fs::remove_dir(&pending).unwrap();
+    let consumed = a.poll_sentinels().unwrap();
+    assert_eq!(consumed, vec![Verb::Publish], "the stranded touch counts as this poll's consume");
+    assert!(!staging.exists());
+    let nonces = a.load_pending(Verb::Publish).unwrap().expect("no pending record").nonces;
+    assert_eq!(nonces, vec!["n1".to_string()]);
 }

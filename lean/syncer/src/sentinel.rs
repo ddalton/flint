@@ -246,22 +246,34 @@ impl SentinelBudget {
 }
 
 /// Why a standing pending sentinel is not being honored right now.
-/// The records a sync produced, given how many the log held before it.
+/// The records an operation produced, given `conflicts_appended` taken
+/// before it, and the dropped count and held records after it.
 ///
-/// `skip(before)` alone is only sound while the log GREW. A rotation
-/// during the sync can SHORTEN it, and skipping past a shorter list
-/// reports NO conflicts for a sync that produced some — the one answer
-/// this ack must never give. Over-reporting the survivors is the safe
-/// direction: an ack naming a conflict that predates the sync costs a
-/// reader a second look, an ack naming none costs them the conflict.
+/// Counting the HELD records is not enough (review 2026-09-12, ack-7): a
+/// second rotation drops a whole generation, so the held count can come
+/// back to where it was, and skipping that many reports NO conflicts for
+/// an operation that produced a generation's worth, or loses some of
+/// them. The appended total never goes down, so the difference is
+/// exactly what the operation produced; they are the newest records
+/// held, or all of them if a rotation took some. A total that went DOWN
+/// means the log was reset under us: every survivor is reported, since
+/// over-reporting is the safe direction (an ack naming a conflict that
+/// predates the operation costs a reader a second look; an ack naming
+/// none costs them the conflict).
 pub(crate) fn conflicts_since(
-    before: usize,
+    before: u64,
+    dropped: u64,
     after: Vec<ConflictRecord>,
 ) -> Vec<ConflictRecord> {
-    if after.len() >= before {
-        after[before..].to_vec()
-    } else {
+    let total = dropped + after.len() as u64;
+    if total < before {
+        return after;
+    }
+    let new = (total - before) as usize;
+    if new >= after.len() {
         after
+    } else {
+        after[after.len() - new..].to_vec()
     }
 }
 
@@ -426,8 +438,8 @@ impl Syncer {
         Ok(Due::Ready)
     }
 
-    /// One poll tick: `lstat` exactly two fixed paths — no inotify
-    /// dependency, no directory scan, ~2 lstats/s when idle.
+    /// One poll tick: `lstat` exactly two fixed paths, and stat the two
+    /// staging names — no inotify dependency, no directory scan.
     ///
     /// Returns the verbs whose sentinel was consumed (or coalesced) on
     /// this tick.
@@ -445,22 +457,37 @@ impl Syncer {
     /// pending write. Called at startup, before the first poll.
     pub fn recover_consume_staging(&mut self) -> LeanResult<()> {
         for verb in [Verb::Publish, Verb::Sync] {
-            let staging = self.staging_path(verb);
-            if staging.exists() {
-                let meta = std::fs::metadata(&staging)?;
-                let (body, oversize) = read_bounded(&staging)?;
-                self.fold_into_pending(verb, mtime_ns(&meta), &body, oversize)?;
-                std::fs::remove_file(&staging)?;
-            }
+            self.fold_staging(verb)?;
         }
         Ok(())
     }
 
+    /// Fold a touch left in staging (a crash, or a fold that failed)
+    /// into the pending record, then clear staging. True when it folded.
+    fn fold_staging(&mut self, verb: Verb) -> LeanResult<bool> {
+        let staging = self.staging_path(verb);
+        if !staging.exists() {
+            return Ok(false);
+        }
+        let meta = std::fs::metadata(&staging)?;
+        let (body, oversize) = read_bounded(&staging)?;
+        self.fold_into_pending(verb, mtime_ns(&meta), &body, oversize)?;
+        std::fs::remove_file(&staging)?;
+        Ok(true)
+    }
+
     pub(crate) fn consume_sentinel(&mut self, verb: Verb) -> LeanResult<bool> {
+        // A fold that failed mid-run (review: U37) left its touch in
+        // staging, and the rename below would clobber it, orphaning its
+        // nonce. So a stranded touch is folded FIRST, on every poll (one
+        // more stat), so it is honored without waiting for another
+        // touch; while that still fails, a new touch stays where the
+        // agent put it.
+        let stranded = self.fold_staging(verb)?;
         let path = self.control_path(verb.sentinel_name());
         let meta = match std::fs::symlink_metadata(&path) {
             Ok(m) => m,
-            Err(_) => return Ok(false),
+            Err(_) => return Ok(stranded),
         };
         // Type check FIRST: a FIFO would block the body read forever;
         // a directory, socket or symlink at the sentinel path is not a
@@ -482,7 +509,7 @@ impl Syncer {
                     at_unix: now_unix(),
                 })?;
             }
-            return Ok(false);
+            return Ok(stranded);
         }
         let ns = mtime_ns(&meta);
         let (body, oversize) = match read_bounded(&path) {
@@ -493,14 +520,9 @@ impl Syncer {
         // Staging first, pending second — a crash between is recovered
         // at startup from the staging file, so a touch is never lost
         // ACROSS A RESTART.
-        //
-        // Scope worth naming (review: U37): recovery runs ONLY at
-        // startup (`settle_pending_at_startup`, called once before the
-        // run loop). A *transient* fold failure mid-run therefore leaves
-        // a consumed touch stranded in the staging file until the
-        // process restarts, and the next consume's rename clobbers it,
-        // orphaning its nonce. Recovering in the poll arm as well would
-        // close it; nothing does today.
+        // A fold that fails mid-run leaves its touch in staging too; it
+        // was folded at the top of this call, so the rename clobbers
+        // nothing.
         self.noted_not_regular.remove(&format!("{}/{}", super::CONTROL_DIR, verb.sentinel_name()));
         let staging = self.staging_path(verb);
         std::fs::rename(&path, &staging)?;
@@ -750,7 +772,7 @@ impl Syncer {
         // boundary that withholds them to the next floor tick.
         // The ack and the manifest must agree on which clock published:
         // a budget-deferred boundary reads `sentinel-deferred` in both.
-        let before = self.state.load_conflicts()?.len();
+        let before = self.state.conflicts_appended()?;
         let report = self
             .declared_barrier_as(
                 source.unwrap_or(if forced { "sentinel-deferred" } else { "sentinel" }),
@@ -759,7 +781,7 @@ impl Syncer {
         // Review 2026-09-12, ack-3: the boundary's own records (a
         // `consume-dirty` the agent won, a refused removal) ride the
         // publish ack as they ride the sync ack — AGENTS.md says so.
-        let conflicts = conflicts_since(before, self.state.load_conflicts()?);
+        let conflicts = conflicts_since(before, self.state.conflicts_dropped()?, self.state.load_conflicts()?);
         let units = self.charge_budget(report.published_bytes)?;
         let _ = units;
         let baseline = self.state.load_baseline()?;
@@ -835,9 +857,9 @@ impl Syncer {
                 report: AckReport { scope: pending.scope.clone(), ..Default::default() },
             });
         }
-        let before = self.state.load_conflicts()?.len();
+        let before = self.state.conflicts_appended()?;
         let report = self.sync_scoped(pending.scope.clone()).await?;
-        let conflicts = conflicts_since(before, self.state.load_conflicts()?);
+        let conflicts = conflicts_since(before, self.state.conflicts_dropped()?, self.state.load_conflicts()?);
         // A sync publishes no bytes: it costs no budget units, only the
         // min-interval (which it shares with publish).
         self.charge_budget(0)?;
