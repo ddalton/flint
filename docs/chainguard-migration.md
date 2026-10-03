@@ -62,7 +62,8 @@ miss. `coreutils` is GNU on purpose: `mount_util.rs` reads `timeout`'s exit
 
 Not converted, on purpose (and removed 2026-10-02): `Dockerfile.csi-prebuilt` (it is `FROM` a previously
 published `flint-driver` tag and inherits whatever base that tag has), the SPDK
-Dockerfiles, test-rig Dockerfiles (`Dockerfile.c6gates`, `Dockerfile.stub`) and
+Dockerfiles, test-rig Dockerfiles (`Dockerfile.c6gates`, `Dockerfile.stub`, both
+removed 2026-10-03) and
 the **builder** stages of `Dockerfile.csi`/`Dockerfile.pnfs` (`rust:1.92-alpine`,
 `rust:1.90-slim-bookworm`), which are not shipped. Replacing them would change
 the build, which was out of scope.

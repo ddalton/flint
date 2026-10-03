@@ -438,7 +438,7 @@ main() {
     
     echo "🎯 Next steps:"
     echo "   1. If reboot required, reboot now: sudo reboot"
-    echo "   2. Deploy SPDK CSI driver: kubectl apply -f flint-csi-driver-chart/"
+    echo "   2. Deploy SPDK CSI driver: helm install flint-csi ./flint-csi-driver-chart --namespace flint-system --create-namespace"
     echo "   3. Verify driver status: kubectl get pods -n flint-system"
 }
 

@@ -163,7 +163,9 @@ mod tests {
 
     /// LIVE gate (ignored): UBLK_U_CMD_DEL_DEV against a REAL kernel
     /// device — the io_uring submission path never runs under plain
-    /// `cargo test`. Run via the c6gates image on a storage node:
+    /// `cargo test`. Run the test binary on a storage node (the c6gates
+    /// image that once carried it was removed 2026-10-03; it had not
+    /// built since 2026-08-25):
     ///   FLINT_TEST_UBLK_DEL_ID=<scratch-id> /test-bin \
     ///     ublk_ctrl::tests::del_dev_live --ignored --nocapture
     /// The scratch device must be created first (malloc bdev +
