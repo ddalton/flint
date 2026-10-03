@@ -1037,11 +1037,17 @@ recently, and the hub's own activity clock is quiet.
 > nothing on the filesystem, so the hub sees an idle share; nothing is
 > stamping the wake annotation, so the front door looks absent. The hub
 > scales to zero underneath a live `hard` mount — and a `hard` mount
-> whose server is gone blocks in uninterruptible sleep. **An NFS client
-> cannot write a Kubernetes annotation, so nothing wakes it.** Not data
-> loss; an indefinite hang.
+> whose server is gone blocks in uninterruptible sleep. **On a direct
+> mount, an NFS client cannot write a Kubernetes annotation, so nothing
+> wakes it.** Not data loss; an indefinite hang.
 
-Two defences, and you want both:
+**Behind the NFS proxy (1.57) this hazard is closed for proxied
+clients:** the agent's next NFS operation reaches the proxy, which finds
+the hub refusing connections, stamps the wake annotation, and holds the
+operation until the hub serves (`nfsProxy.wakeHoldSecs`, 20 s; a hub
+back from suspend serves in ~3 s, from hibernation in ~6–7 s). The agent
+sees a pause, not a hang. On a direct mount, two defences, and you want
+both:
 
 - **`spec.idle.suspendWithSessions: false`** refuses to suspend while a
   client still holds a lease. **The default is to suspend anyway; the

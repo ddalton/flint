@@ -70,7 +70,7 @@
     <h1>Flint-lite — one hub, one volume</h1>
     <span class="kicker">1 / 5 · architecture</span>
   </header>
-  <p class="dek">A single pod serves real POSIX over NFSv4.2. The PVC is the working set, an S3 prefix is the durability, and a second listener exposes the same filesystem over HTTP for callers that cannot mount — reached through one gateway rather than one address per hub. One hub serves exactly one prefix; a project that needs several volumes has several hubs.</p>
+  <p class="dek">A single pod serves real POSIX over NFSv4.2. The PVC is the working set, an S3 prefix is the durability, and a second listener exposes the same filesystem over HTTP for callers that cannot mount — reached through one gateway rather than one address per hub. One hub serves exactly one prefix; a project that needs several volumes has several hubs. Behind the NFS proxy (1.57), many hubs sit behind one port, and one mount lists every workspace.</p>
   <figure>
   <svg viewBox="0 0 1600 800" role="img" aria-label="A consumer cluster mounts the flint-lite hub over NFSv4.2 on port 2049 through a Service; the hub pod runs flint-pnfs-mds in standalone mode with a second HTTP listener on 8080 for status and a file API; the hub writes to an RWO PVC and publishes to, hydrates from, and holds an epoch lease in an S3 bucket prefix. An optional flint-hub-gateway stands in front of the HTTP listener as a single addressable door for the whole fleet, and cannot proxy the status route.">
     <defs>
@@ -427,7 +427,7 @@
     <h1>Giving client pods a PVC — two recipes</h1>
     <span class="kicker">3 / 5 · consumer provisioning</span>
   </header>
-  <p class="dek">Consumers install nothing from flint either way: the data path is the node kernel's NFS client. The choice is only who mints the PV — you, once, by hand; or a stock provisioner, once per workspace.</p>
+  <p class="dek">Consumers install nothing from flint either way: the data path is the node kernel's NFS client (with the NFS proxy's mTLS on, each client node also runs the flint-nfs-client identity agent). The choice is only who mints the PV — you, once, by hand; or a stock provisioner, once per workspace.</p>
   <figure>
   <svg viewBox="0 0 1600 800" role="img" aria-label="Recipe A pins one static in-tree nfs PersistentVolume to the hub root so every pod shares one tree. Recipe B runs the nfs-subdir-external-provisioner, which watches PVCs, makes a fresh subdirectory on the hub and mints a PV bound to it. Both recipes end in the same data path: the node kernel NFS client to the hub Service on 2049.">
     <defs>
@@ -584,7 +584,7 @@
     <h1>Starting, winding down, waking</h1>
     <span class="kicker">4 / 5 · lifecycle</span>
   </header>
-  <p class="dek">A tiered hub does real work before its listener binds, and the operator winds an unused share down in two rungs — each opt-in, each giving back something different. Nothing in the data path ever starts a hub.</p>
+  <p class="dek">A tiered hub does real work before its listener binds, and the operator winds an unused share down in two rungs, each giving back something different: opt-in per share on a direct mount, the fleet default behind the NFS proxy. On a direct mount nothing in the data path starts a hub; behind the proxy, a refused connection does.</p>
   <figure>
   <svg viewBox="0 0 1600 920" role="img" aria-label="A hub boots through the phases starting, claimingEpoch, importing, reconciling and serving, with the HTTP status listener binding first and NFS last. The idle ladder then moves a share from Ready to IdleSuspended (replicas zero, PVC kept) to HibernateVerifying to Hibernated (PVC deleted), and a requested-at annotation wakes it back to Ready. Suspending requires both the front door heartbeat and the hub's own idle clock to agree.">
     <defs>
@@ -626,7 +626,7 @@
 
     <rect x="1180" y="76" width="390" height="120" rx="9" class="bx-slate"/>
     <text xml:space="preserve" class="tx" x="1196" y="104">A pod in Running / not-Ready is working, not stuck.</text>
-    <text xml:space="preserve" class="tx" x="1196" y="126">The startupProbe budgets 60 × 10s for all of it.</text>
+    <text xml:space="preserve" class="tx" x="1196" y="126">The startupProbe budgets 600 × 1s for all of it.</text>
     <text xml:space="preserve" class="tx" x="1196" y="148">Killing a Starting hub kills a takeover or an import.</text>
     <text xml:space="preserve" class="tx" x="1196" y="170">Poll /status: it tells importing from wedged.</text>
 
@@ -685,7 +685,7 @@
     <polyline class="ln-violet" points="1355,504 1355,612 140,612 140,506" marker-end="url(#p4-av)"/>
     <text xml:space="preserve" class="tx ctr c-violet" x="760" y="632">wake from Hibernated — the PVC is re-created, the bucket manifest imported, the full lease waited out · ~79s</text>
 
-    <text xml:space="preserve" class="tx" x="30" y="668">Nothing in the data path wakes a share: an NFS mount against a scaled-to-zero hub hangs, the file API answers 503 fast. Something must write the annotation — and a share cannot wake while no operator is reconciling.</text>
+    <text xml:space="preserve" class="tx" x="30" y="668">Behind the NFS proxy a refused connection stamps the annotation; on a direct mount nothing wakes a share (NFS hangs, the file API 503s). Either way no share wakes while no operator is reconciling.</text>
     <text xml:space="preserve" class="tx" x="30" y="686">spec.lifecycle: Suspended is an admin decision and a wake request does NOT override it — the phase reads Suspended, not IdleSuspended, so a front door can tell "will wake on request" from "never coming back".</text>
 
     <line class="hair" x1="30" y1="706" x2="1570" y2="706"/>
@@ -748,7 +748,7 @@
     <circle cx="1400" cy="876" r="7" fill="#ffffff" stroke="#94a3b8" stroke-width="1.4"/>
     <circle cx="1510" cy="876" r="7" fill="#ffffff" stroke="#94a3b8" stroke-width="1.4"/>
 
-    <text xml:space="preserve" class="tx" x="800" y="904">Deleting the CR drops every object — an archived project costs zero Kubernetes objects. The bucket is never touched, under any policy.</text>
+    <text xml:space="preserve" class="tx" x="800" y="904">Behind the NFS proxy, Hibernated keeps the CR alone. Deleting the CR drops every object; the bucket is never touched, under any policy.</text>
   </svg>
   <figcaption>
     <b>The two rungs are not one setting with two numbers.</b> Suspend keeps the disk, so waking is a pod start and an epoch re-claim on the same <code>state.db</code> — safe for any share, tiered or not. Hibernate deletes the PVC, so it requires <code>spec.bucket</code> and waking is a full DR import.

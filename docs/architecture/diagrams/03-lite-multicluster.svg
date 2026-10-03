@@ -126,27 +126,28 @@
 <text class="t4" x="1288" y="255">premise.</text>
 <text class="mono" x="1288" y="274" xml:space="preserve">hostname = &lt;cluster&gt;-&lt;node&gt;</text>
 <text class="mono" x="1288" y="290" xml:space="preserve">nfs.nfs4_unique_id=&lt;cluster&gt;</text>
-<circle cx="1300" cy="318" r="11" class="f-ink"/>
-<text class="num" x="1300" y="322" style="text-anchor:middle">2</text>
-<text class="t2" x="1322" y="322">A boundary at the network layer</text>
-<text class="t4" x="1288" y="344">Port 2049 is AUTH_SYS, so reachability IS the</text>
-<text class="t4" x="1288" y="359">boundary — and networkPolicy cannot draw it:</text>
-<text class="t4" x="1288" y="374">kube-proxy SNATs a NodePort or LB client to an</text>
-<text class="t4" x="1288" y="389">address in the HUB's cluster before the packet</text>
-<text class="t4" x="1288" y="404">arrives.</text>
-<text class="t4b c-red" x="1288" y="421">Measured: 1486 of 1486 connections from two</text>
-<text class="t4b c-red" x="1288" y="436">remote clusters arrived as the hub cluster's</text>
-<text class="t4b c-red" x="1288" y="451">gateway — none as a remote node.</text>
-<text class="t4" x="1288" y="468">Use peering, security groups or a gateway.</text>
-<circle cx="1300" cy="491" r="11" class="f-ink"/>
-<text class="num" x="1300" y="496" style="text-anchor:middle">3</text>
-<text class="t2" x="1322" y="495">A keepalive per remote mount</text>
-<text class="t4" x="1288" y="517">The idle ladder suspends a quiet share, and a</text>
-<text class="t4" x="1288" y="532">partitioned cluster's busy agents look exactly like</text>
-<text class="t4" x="1288" y="547">quiet ones. Drive POST /wake from the thing that</text>
-<text class="t4" x="1288" y="562">knows whether work is happening.</text>
-<text class="t4b" x="1288" y="579">suspendWithSessions DEFAULTS to suspending</text>
-<text class="t4b" x="1288" y="594">anyway.</text>
+<text class="t4" x="1288" y="306">behind the proxy's mTLS: a cert per node</text>
+<circle cx="1300" cy="332" r="11" class="f-ink"/>
+<text class="num" x="1300" y="336" style="text-anchor:middle">2</text>
+<text class="t2" x="1322" y="336">A boundary at the network layer</text>
+<text class="t4" x="1288" y="358">Port 2049 is AUTH_SYS, so reachability IS the</text>
+<text class="t4" x="1288" y="373">boundary — and networkPolicy cannot draw it:</text>
+<text class="t4" x="1288" y="388">kube-proxy SNATs a NodePort or LB client to an</text>
+<text class="t4" x="1288" y="403">address in the HUB's cluster before the packet</text>
+<text class="t4" x="1288" y="418">arrives.</text>
+<text class="t4b c-red" x="1288" y="435">Measured: 1486 of 1486 connections from two</text>
+<text class="t4b c-red" x="1288" y="450">remote clusters arrived as the hub cluster's</text>
+<text class="t4b c-red" x="1288" y="465">gateway — none as a remote node.</text>
+<text class="t4" x="1288" y="482">Use peering, security groups or a gateway.</text>
+<circle cx="1300" cy="505" r="11" class="f-ink"/>
+<text class="num" x="1300" y="510" style="text-anchor:middle">3</text>
+<text class="t2" x="1322" y="509">A keepalive per remote mount</text>
+<text class="t4" x="1288" y="531">The idle ladder suspends a quiet share, and a</text>
+<text class="t4" x="1288" y="546">partitioned cluster's busy agents look exactly like</text>
+<text class="t4" x="1288" y="561">quiet ones. Drive POST /wake from the thing that</text>
+<text class="t4" x="1288" y="576">knows whether work is happening.</text>
+<text class="t4b" x="1288" y="593">suspendWithSessions DEFAULTS to suspending</text>
+<text class="t4b" x="1288" y="608">anyway.</text>
 <rect x="24" y="664" width="1552" height="44" rx="7" class="bx"/>
 <path class="f-red" d="M24,671 A7,7 0 0 1 31,664 H29 V708 H31 A7,7 0 0 1 24,701 Z"/>
 <text class="t4b c-red" x="48" y="691">a colliding client gets NO error: the protocol says it is the same client returning, and the loser's locks and opens are simply gone — six defects in v1.37.0 traced to this one cause.</text>

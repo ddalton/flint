@@ -75,7 +75,8 @@
 <text class="t4" x="586" y="204">is the default — the mode is evaluated, LOGGED, and the</text>
 <text class="t4" x="586" y="218">operation allowed anyway; even enforced, the hub holds</text>
 <text class="t4" x="586" y="232">CAP_DAC_OVERRIDE.</text>
-<text class="t4b c-red" x="586" y="246">sec=sys buys IDENTITY, not ENFORCEMENT.</text>
+<text class="t4" x="586" y="246">NFS proxy mTLS: a cert per NODE, not per user.</text>
+<text class="t4b c-red" x="586" y="260">sec=sys buys IDENTITY, not ENFORCEMENT.</text>
 <line class="l-lite" x1="908" y1="174" x2="934" y2="174" marker-end="url(#a-lite)"/>
 <rect x="934" y="118" width="300" height="156" rx="7" class="bx"/>
 <text class="t2" x="948" y="142">what the hub sees</text>

@@ -439,9 +439,12 @@ cleanly. With a `hard` mount, I/O blocks in uninterruptible sleep; the
 data is safe (`state.db` keeps `serverId` stable, so clients reclaim)
 but **nothing wakes it**, because wake is level-triggered on an
 annotation and an NFS client cannot write one. The mount hangs until
-something else asks.
+something else asks. (Behind the NFS proxy, 1.57, the proxy is that
+something: a refused connection stamps the annotation and the proxy
+holds the operation until the hub serves, so a proxied mount pauses
+instead of hanging. What follows is for direct mounts.)
 
-Two defences, and for agents you want both:
+Two defences, and for agents on a direct mount you want both:
 
 - **`spec.idle.suspendWithSessions: false`** on the share. Read the name
   literally: the *protective* value is the falsy one, and it is

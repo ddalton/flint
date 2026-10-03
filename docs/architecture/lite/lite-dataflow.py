@@ -8,7 +8,8 @@ paragraph inside each box.
 The picture has one claim to make, and everything else serves it: ONE
 process holds the tree, so N pods in N clusters see one coherent
 filesystem — and that is also why it is one pod. The PVC beside it is a
-cache; the bucket is the copy.
+cache; the bucket is the copy. Since v1.57.0 the mount can be fronted too:
+the NFS proxy puts every hub behind one port.
 
 Run:  python3 lite-dataflow.py [outdir] [--preview] [--pdf] [--emf]
 """
@@ -54,7 +55,16 @@ GLOSSARY = [
     ("FlintShare", "the custom resource one lite volume is declared as. One "
                    "volume, one hub, N of them per project"),
 
-    ("flint-hub-gateway", "the proxy that fronts every hub's file API: one "
+    ("flint-nfs-proxy", "the door in front of every hub's :2049 — one "
+                        "address, one mount, every workspace a directory"),
+    ("instance id", "the hub's id inside every filehandle it issues: what "
+                    "the proxy routes a compound by"),
+    ("CR-only park", "a hibernated share behind the proxy: Deployment, "
+                     "Service and ConfigMap removed; a wake re-renders them"),
+    ("RPC-with-TLS", "RFC 9289: NFS over TLS, opened by an AUTH_TLS probe. "
+                     "The proxy can require a client certificate"),
+
+    ("flint-hub-gateway", "the door that fronts every hub's file API: one "
                           "endpoint, one inbound credential"),
     ("headless Service", "a Service with no ClusterIP — addressable inside "
                          "the cluster, routable from nowhere"),
@@ -83,9 +93,9 @@ def build():
     p = doc.page("Data flow", 24.5, 14.0)
 
     d.header(p, "lite", "Data flow",
-             "One process holds the tree, so N pods in N clusters see one "
-             "filesystem. The file API can be fronted by one door; the mount "
-             "cannot.", w=23.0)
+             "One process holds each tree, so N pods in N clusters see one "
+             "filesystem. One door fronts every hub's file API, and one proxy "
+             "fronts every hub's mount.", w=23.0)
 
     spine = 3.91          # hub A's NFS door
     http = 5.575          # hub A's file-API door
@@ -93,18 +103,18 @@ def build():
 
     # ---- boundaries ------------------------------------------------------
     d.zone(p, 0.5, 1.95, 4.9, 3.30, "consumer cluster",
-           sub="installs nothing from flint")
+           sub="installs nothing — with nfsProxy.tls, flint-nfs-client")
     d.zone(p, 0.5, 5.45, 4.9, 1.45, "consumer clusters B, C, \u2026",
            sub="the same wire — a hub does not count clusters, it sees NAMES")
     d.zone(p, 6.55, 2.15, 9.25, 7.80, "flint hub cluster",
-           sub="one volume, one hub, N per project  ·  ONE shared door for "
-               "the file API  ·  NONE for NFS")
+           sub="one volume, one hub, N per project  ·  ONE door for the "
+               "file API  ·  ONE proxy for NFS")
     d.container(p, 0.75, 2.47, 4.4, 2.50, "node")
     d.container(p, 8.85, 2.70, 6.75, 3.75,
                 "hub #1 — prefix vol1/")
     d.container(p, 8.85, 7.85, 6.75, 1.55,
-                "hub #2 — prefix vol2/  ·  a SECOND pod, a SECOND NFS "
-                "Service, a SECOND mount at the consumer")
+                "hub #2 — prefix vol2/  ·  a SECOND pod and Service; "
+                "through the proxy, the SAME mount")
     d.node(p, "cloud", 17.20, 2.40, 6.35, 7.55, "", "", fill=d.CLOUD_F,
            line=d.CLOUD_L, line_weight=0.012)
     p.text(17.40, 2.85, 5.95, "S3-compatible object storage", size=10.5,
@@ -123,14 +133,14 @@ def build():
            "shared by every pod on it, with its page cache",
            fill=d.CLIENT_F, line=d.CLIENT_L, line_weight=0.014,
            title_size=9.6, body_size=7.4)
-    p.text(0.95, 4.48, 4.05, "PV:  nfsvers=4.1 · hard · nconnect=4",
+    p.text(0.95, 4.48, 4.05, "PV:  the proxy · nfsvers=4.1 · hard",
            size=7.4, color=SUB, mono=True)
-    p.text(0.95, 4.66, 4.05, "hostname = <cluster>-<node>", size=7.4,
-           color=SUB, mono=True)
+    p.text(0.95, 4.66, 4.05, "id: cert URI SAN (tls) or hostname",
+           size=7.4, color=SUB, mono=True)
 
     d.node(p, "rect", 0.90, 5.98, 4.10, 0.70,
            "kernel NFS client — another cluster",
-           "same protocol · same tree · same locks",
+           "direct to a hub: same tree · same locks",
            fill=d.CLIENT_F, line=d.CLIENT_L, line_weight=0.013,
            title_size=9.2, body_size=7.2)
 
@@ -143,7 +153,14 @@ def build():
     p.text(0.55, 7.70, 2.60, "for a caller that cannot mount", size=7.8,
            color=SUB)
 
-    # ---- the shared door, and the one it is not --------------------------
+    # ---- the NFS door: the proxy in front of every hub's :2049 ------------
+    d.node(p, "rect", 6.75, 2.70, 1.90, 1.60, "flint-nfs-proxy",
+           "ONE mount, every hub a directory. Routes each compound by its "
+           "filehandle's instance id; wakes a parked hub and HOLDS the call",
+           fill=d.DOOR_F, line=d.DOOR_L, line_weight=0.016,
+           title_size=9.6, body_size=6.8)
+
+    # ---- the file-API door ------------------------------------------------
     d.node(p, "rect", 6.75, 4.60, 1.90, 3.20, "flint-hub-gateway",
            "ONE door in front of EVERY hub's file API.\n\n"
            "project id → its share · wakes it if parked · proxies exactly "
@@ -176,7 +193,8 @@ def build():
            fill=d.CACHE_F, line=d.CACHE_L, title_size=9.5, line_weight=0.013,
            body_size=7.4)
     d.node(p, "hexagon", 8.85, 6.75, 3.00, 0.82, "operator",
-           "FlintShare → the four objects  ·  suspend idle  ·  scale to zero",
+           "FlintShare → four objects · suspend, then hibernate · parked: "
+           "its CR alone",
            fill=d.OPER_F, line=d.OPER_L, line_weight=0.014, notch=0.13,
            title_size=9.6, body_size=7.0)
 
@@ -218,19 +236,21 @@ def build():
 
     # ---- the flows -------------------------------------------------------
     # 1 · the wire. Live, both ways, and it is every byte
-    p.arrow([(5.00, spine), (9.00, spine)], color=FLOW, weight=WT,
+    p.arrow([(5.00, spine), (6.75, spine)], color=FLOW, weight=WT,
             begin_arrow=k.ARROW_FILLED)
-    d.flabel(p, 5.97, spine - 0.50, "NFSv4.2 · :2049", w=1.7)
-    d.flabel(p, 5.97, spine - 0.22, "every read and write", w=2.2, size=7.2)
+    d.flabel(p, 5.975, spine - 0.50, "NFSv4.2 · :2049", w=1.30)
+    d.flabel(p, 5.975, spine - 0.22, "every read and write", w=1.30, size=7.2)
+    p.arrow([(8.65, spine), (9.00, spine)], color=FLOW, weight=WT,
+            begin_arrow=k.ARROW_FILLED)
 
-    # 1b · another cluster, onto the same door
-    p.arrow([(5.00, 6.33), (5.95, 6.33), (5.95, 4.45), (9.00, 4.45)],
+    # 1b · another cluster, mounting a hub directly (no proxy)
+    p.arrow([(5.00, 6.33), (6.40, 6.33), (6.40, 4.45), (9.00, 4.45)],
             color=FLOW, weight=WT)
+    d.flabel(p, 5.95, 6.53, "direct · per hub", w=1.05, size=7.0)
 
-    # 1c · a second volume is a SECOND MOUNT — nothing multiplexes NFS
-    p.arrow([(5.00, 4.25), (6.35, 4.25), (6.35, 8.90), (9.00, 8.90)],
+    # 1c · the proxy reaches hub #2 too: the SAME client mount
+    p.arrow([(8.65, 4.15), (8.76, 4.15), (8.76, 8.90), (9.00, 8.90)],
             color=FLOW, weight=WT)
-    d.flabel(p, 5.97, 4.05, "a SECOND mount", w=1.5, size=7.2)
 
     # 2 · the caller that cannot mount reaches ONE endpoint
     p.arrow([(4.30, 7.625), (6.75, 7.625)], color=ALT, weight=W)
@@ -270,15 +290,18 @@ def build():
     # ---- the notes the picture cannot carry ------------------------------
     y = 10.35
     y = d.notes(p, 0.55, y, 23.0, [
-        "THE TWO DOORS FRONT DIFFERENTLY, and that is lite's real asymmetry. "
-        "The FILE API can be multiplexed: flint-hub-gateway resolves a "
-        "project id to its share, wakes it if it is parked, and proxies six "
-        "file routes — so a fleet reaches three thousand shares through ONE "
-        "endpoint and ONE credential, exactly as forge's door fronts every "
-        "repository. THE MOUNT CANNOT. NFS needs a routable address per hub "
-        "(spec.service.advertiseAddress → status.address), so a second "
-        "volume is a second pod, a second Service and a second mount at the "
-        "consumer. Nothing multiplexes NFS.",
+        "BOTH DOORS CAN BE FRONTED, each by its own component. The FILE API: "
+        "flint-hub-gateway resolves a project id to its share, wakes it if "
+        "it is parked, and proxies six file routes — three thousand shares "
+        "through ONE endpoint and ONE credential, as forge's door fronts "
+        "every repository. THE MOUNT (v1.57.0, nfsProxy.enabled): "
+        "flint-nfs-proxy terminates NFSv4.1 sessions on one LoadBalancer :2049 "
+        "and routes each compound to the hub named by the instance id every "
+        "hub filehandle already carries, so one mount lists every workspace "
+        "and hubs stay one per share. Its client table is persisted, so a "
+        "proxy restart costs a client a new session, not its state. Without "
+        "the proxy a consumer mounts each hub's own routable address "
+        "(spec.service.advertiseAddress → status.address): a mount per hub.",
 
         "AND THE GATEWAY EXISTS BECAUSE PER-SHARE EXPOSURE DOES NOT SCALE. A "
         "hub's file API answers at a HEADLESS in-cluster Service the "
@@ -307,12 +330,15 @@ def build():
         "split-brain: it loses the CAS and is fenced. Two hubs on two "
         "prefixes, as drawn, is the ordinary configuration.",
 
-        "A HUB DOES NOT COUNT CLUSTERS — IT SEES CLIENT NAMES. The NFSv4 "
-        "client identity is the hostname and nothing else, so two clusters "
-        "sharing a node name are ONE client, and RFC 8881 §18.35.5 requires "
-        "the server to read the second as the first rebooting: the "
-        "incumbent's locks and opens go, silently, correctly, on a false "
-        "premise. Set hostname = <cluster>-<node>, or nfs.nfs4_unique_id.",
+        "A HUB DOES NOT COUNT CLUSTERS — IT SEES CLIENT NAMES. On a direct "
+        "mount the NFSv4 client identity is the hostname and nothing else, "
+        "so two clusters sharing a node name are ONE client, and RFC 8881 "
+        "§18.35.5 requires the server to read the second as the first "
+        "rebooting: the incumbent's locks and opens go, silently, correctly, "
+        "on a false premise. Set hostname = <cluster>-<node>, or "
+        "nfs.nfs4_unique_id. Through the proxy with nfsProxy.tls, the "
+        "identity is the client certificate's URI SAN and sessions are "
+        "bound to it.",
 
         "THE DISK IS A CACHE AND THE BUCKET IS THE COPY, so the recovery "
         "point is the flush cadence. Cold files evict at a disk watermark "
@@ -321,23 +347,43 @@ def build():
         "+ Retry-After. A file request on a parked share WAKES it — measured "
         "at 11 s on kind — which is why the gateway watches the CR and never "
         "polls a hub: a poll counts as activity and would pin every share it "
-        "touched awake.",
+        "touched awake. So does an NFS call through the proxy: a refused "
+        "connection stamps chert.us/requested-at, and the proxy HOLDS the "
+        "compound, retrying, for up to wakeHoldSecs (20 s) before it answers "
+        "DELAY — 2.4–2.9 s from suspend, 5.7–7.3 s from hibernate (box, "
+        "v1.57.0). A direct mount of a parked hub still hangs: nothing on "
+        "its path can wake it.",
 
-        "REACHABILITY IS THE BOUNDARY ON :2049 — it authenticates nobody, "
-        "and kube-proxy SNATs a remote client to an address in the hub's own "
+        "IDLE BY DEFAULT BEHIND THE PROXY. nfsProxy.idleDefaults applies to "
+        "every share without its own spec.idle: suspend after 3600 s, "
+        "hibernate after 86400 s (dropped for a share with no bucket); "
+        "spec.idle: {} opts out. Without the proxy the ladder stays opt-in, "
+        "since nothing would wake a direct consumer. Hibernation verifies "
+        "the bucket can rebuild the volume and that no client holds state, "
+        "then deletes the PVC; behind the proxy the Deployment, Service and "
+        "ConfigMap go too, so a parked share is its CR alone, and a wake "
+        "re-renders them.",
+
+        "A HUB'S :2049 AUTHENTICATES NOBODY, so reachability is its boundary: "
+        "kube-proxy SNATs a remote client to an address in the hub's own "
         "cluster before the packet arrives (1486 of 1486 connections on a "
-        "three-cluster rig), so networkPolicy cannot draw it: use peering, "
-        "security groups or a gateway. And nothing here is a complete oracle "
-        "of ACTIVITY: the gateway sees every file-API call, but consumers "
-        "dial each hub's :2049 directly, so a partitioned cluster's busy "
-        "agents look exactly like idle ones and POST /wake has to be driven "
-        "by whatever actually knows work is happening.",
+        "three-cluster rig), so networkPolicy cannot draw it — use peering, "
+        "security groups or a gateway. The PROXY can authenticate: with "
+        "nfsProxy.tls a connection must open with the RFC 9289 AUTH_TLS "
+        "probe and present a client certificate chained to clientCa (kernel "
+        ">= 6.5 with tlshd; the flint-nfs-client chart keeps each node's "
+        "pair current), and its identities rules decide who sees which "
+        "workspace. Activity: the gateway sees every file-API call and the "
+        "proxy every proxied compound, but a direct mount dials the hub "
+        "itself, so its busy agents look idle to everything else and POST "
+        "/wake has to be driven by whatever knows work is happening.",
     ])
 
     # ---- legend ----------------------------------------------------------
     y += 0.22
     d.legend(p, 0.55, y, [
-        ("data plane — every read and write, over the wire", FLOW, False),
+        ("data plane — every read and write, through the proxy or direct",
+         FLOW, False),
         ("durable path — each hub is the only writer of ITS prefix", DUR,
          False),
         ("control plane — never reads a file", CTL, True),

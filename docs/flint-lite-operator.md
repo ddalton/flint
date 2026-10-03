@@ -380,10 +380,14 @@ Five things about that loop:
   roll. See `docs/plans/hub-api-service-design.md` for the design that
   closes this.
 - **The wake is explicit and the annotation is the whole mechanism.**
-  An NFS operation against a suspended hub does not wake it — it hangs,
-  because there is nothing listening to notice. The file API is the
-  opposite: it fails fast with 503 rather than hanging. Either way,
-  something must write `requested-at` or the share stays down.
+  On a direct mount, an NFS operation against a suspended hub does not
+  wake it — it hangs, because there is nothing listening to notice. The
+  file API is the opposite: it fails fast with 503 rather than hanging.
+  Either way, something must write `requested-at` or the share stays
+  down. **Behind the NFS proxy (1.57) that something is the proxy:** a
+  refused connection stamps `requested-at`, and the proxy holds the
+  client's request until the hub serves (up to `nfsProxy.wakeHoldSecs`,
+  20 s) — see `docs/plans/flint-lite-nfs-proxy-design.md` §4.
 - **Phase distinguishes the waits, and they are very different.**
   `Pending` is objects being applied, `Starting` is a pod booting — and
   for a tiered share, `Starting` also covers claiming the volume epoch
@@ -409,13 +413,15 @@ they start from very different amounts of nothing, and the waits are
 not comparable. A UI that shows one spinner for both will be wrong
 about at least one of them.
 
-**Nothing in the data path starts a hub.** Neither door is a trigger.
-An NFS mount against a scaled-to-zero share hangs: the Service has no
-endpoints, so there is nothing to notice the attempt and a hard mount
-retries forever. The file API is the opposite failure and the better
-one — it refuses immediately rather than hanging. Either way the client
-is not what wakes the share, which is why ensure-live writes
-`requested-at` **before** it hands an address to anyone.
+**On a direct mount, nothing in the data path starts a hub.** Neither
+door is a trigger. An NFS mount against a scaled-to-zero share hangs:
+the Service has no endpoints, so there is nothing to notice the attempt
+and a hard mount retries forever. The file API is the opposite failure
+and the better one — it refuses immediately rather than hanging. Either
+way the client is not what wakes the share, which is why ensure-live
+writes `requested-at` **before** it hands an address to anyone. **The
+NFS proxy is the exception:** it sits in the data path, and a client
+mounting through it wakes a parked hub just by using it.
 
 **Create — the project has never existed.** The front door `create`s
 the CR; the operator applies four objects (a ConfigMap holding
@@ -895,7 +901,8 @@ Things worth knowing before you wire it up:
 
 ## The idle ladder: winding a share down when nobody is using it
 
-Off by default, and **each rung is opt-in on its own**:
+On a direct mount it is off by default, and **each rung is opt-in on its
+own**:
 
 ```yaml
 spec:
@@ -910,6 +917,14 @@ Absent means off because defaulting it on would auto-suspend every
 share in an existing fleet — including tier-off ones whose consumers
 mount `status.address` as a plain PV and have never heard of the wake
 annotation. Their mounts would simply hang.
+
+**Behind the NFS proxy the default is ON.** With `nfsProxy.enabled`, a
+share with no `spec.idle` gets the operator's fleet default,
+`nfsProxy.idleDefaults` (suspend after 3600 s, hibernate after 86400 s;
+`idle::effective`). That reason no longer holds there: clients mount
+the proxy, and the proxy wakes a parked hub on use. Hibernation applies
+only to shares with a bucket, `0` turns a rung off, and a share opts out
+with an explicit empty `spec.idle: {}`.
 
 ### The two rungs are not one setting with two numbers
 

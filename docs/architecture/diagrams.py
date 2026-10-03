@@ -557,7 +557,7 @@ def plate_02():
                   "off the data path.")
     fe = "lite"
     # ── consumer cluster: the pods, the node, the one client ──
-    s.group(M, 22, 470, 420, "consumer cluster", "installs nothing from flint")
+    s.group(M, 22, 470, 420, "consumer cluster", "installs nothing (proxy mTLS: an identity agent)")
     s.box(44, 56, 430, 356, None, "panel")
     s.text(62, 80, "node", "cap")
     for i in range(3):
@@ -606,7 +606,7 @@ def plate_02():
     s.text(1308, 312, "everything fast is on the disk.", "t4")
     # ── hazard ──
     s.box(M, 464, W - 2 * M, 54, None, "warn")
-    s.text(48, 486, "port 2049 authenticates nobody — reachability is the boundary; the :8080 token is per share, not per user; a second hub on one prefix is split-brain, which the epoch cell fences.", "t4b c-red")
+    s.text(48, 486, "a hub's 2049 authenticates nobody (the proxy's mTLS names nodes, not users) — reachability is the boundary; the :8080 token is per share; two hubs on one prefix are split-brain, fenced by the epoch cell.", "t4b c-red")
     s.legend(M + 4, 548, [("data", "data path"), ("ctl", "control"), ("red", "hazard / trust boundary")])
     s.h = 572
     return s
@@ -657,7 +657,8 @@ def plate_03():
     y = s.para(1288, y + 22, "The identity is the hostname and nothing else. Two clusters sharing a node name are ONE client, and RFC 8881 says the server MUST read the second as the first REBOOTING — so the incumbent's locks and opens are dropped, silently, correctly, on a false premise.", 270)
     s.text(1288, y + 4, "hostname = <cluster>-<node>", "mono")
     s.text(1288, y + 20, "nfs.nfs4_unique_id=<cluster>", "mono")
-    y += 52
+    s.text(1288, y + 36, "behind the proxy's mTLS: a cert per node", "t4")
+    y += 66
     s.numdot(1300, y - 4, 2)
     s.text(1322, y, "A boundary at the network layer", "t2")
     y = s.para(1288, y + 22, "Port 2049 is AUTH_SYS, so reachability IS the boundary — and networkPolicy cannot draw it: kube-proxy SNATs a NodePort or LB client to an address in the HUB's cluster before the packet arrives.", 270)
@@ -860,7 +861,7 @@ def plate_07():
         ("lite", "flint-lite", "ONE hub, reached from every cluster",
          ("Nothing on the wire carries a user identity.", "NFS has no field for a bearer token and no place to add one. krb5 exists in the server, is not surfaced by the chart, and is not an IdP token anyway.", True),
          ["the user's token — and it never sends it anywhere, because no door on the data path would read it", ("b", "The pod is not even the client. The NODE is:"), "one mount and one identity per node, asserting its own uid and hostname"],
-         ("the door — :2049, AUTH_SYS", ["The client asserts its own uid and the server takes it. No token is validated because none is presented.", ("m", "security.enforcePermissions: false"), "is the default — the mode is evaluated, LOGGED, and the operation allowed anyway; even enforced, the hub holds CAP_DAC_OVERRIDE.", ("r", "sec=sys buys IDENTITY, not ENFORCEMENT.")], True),
+         ("the door — :2049, AUTH_SYS", ["The client asserts its own uid and the server takes it. No token is validated because none is presented.", ("m", "security.enforcePermissions: false"), "is the default — the mode is evaluated, LOGGED, and the operation allowed anyway; even enforced, the hub holds CAP_DAC_OVERRIDE.", "NFS proxy mTLS: a cert per NODE, not per user.", ("r", "sec=sys buys IDENTITY, not ENFORCEMENT.")], True),
          ("what the hub sees", ["a client NAME — the hostname — and a self-declared uid. Not a user, not a cluster: two clusters sharing a node name are ONE client, and the protocol drops the incumbent's locks silently.", "The file API's bearer is per-SHARE, not per-user."]),
          ("what isolates user A from user B", [("r", "Nothing inside the hub."), "Draw the boundary outside it: one hub per project — one CR, one prefix, one coherence domain — and network reachability by peering, SGs or a gateway. networkPolicy cannot draw it."])),
         ("lean", "flint-lean", "one syncer per workspace, in every cluster",
