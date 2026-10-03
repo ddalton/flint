@@ -1963,6 +1963,142 @@ $K -n $NS delete pod shared-d --wait=true --timeout=120s >/dev/null 2>&1
 $K -n $NS delete sa trainer2 >/dev/null 2>&1
 apply_fx tenants.yaml >/dev/null
 
+# ── S34 shared mounter under load: a join must not replace it ──────────
+# A new member of a shared class decides whether the class's mounter is
+# alive by a statfs on its source with a THREE-SECOND budget
+# (`shared_mount_alive`), and a mounter that misses it is REPLACED: its
+# worker deleted, every current member left on a dead superblock, mid-
+# read. A statfs on a FUSE mount waits for a free fuser thread; mount-s3
+# runs 16, and every read parks one on the prefetcher until its bytes
+# arrive, so a few readers on a slow link can hold all of them. The
+# sensor can lie under load (FlintCsiMount.tla's lesson, in a second
+# place), and no model settles whether this one does: this leg measures
+# it. S34_READERS readers pull S34_MIB objects through one shared worker
+# whose INGRESS is shaped to S34_RATE on the node side of its veth (the
+# data flows in; S23's egress shaping would not touch it); a further pod
+# joins mid-read; the node samples its own statfs on the shared source
+# while the reads run — the same syscall on the same mount the plugin's
+# probe makes. The leg can fail three ways: a replace (the defect); a
+# statfs sample over the probe's 3 s (the defect is reachable, this join
+# merely missed the moment); and a load that never reached the probe
+# (max statfs under S34_FLOOR_MS — then the no-replace assertion is
+# vacuous: lower S34_RATE, raise S34_READERS). Written 2026-10-03, NOT
+# RUN: the floor is a first guess, to be calibrated on the first run.
+leg S34 "a shared mounter under load (four readers, a shaped link) is NOT replaced when a fifth member joins mid-read: the join lands on the live mounter, the readers finish with zero errors, and the node's statfs shows the load reached the probe without exceeding its budget"
+S34_RATE=${S34_RATE:-20mbit}; S34_READERS=${S34_READERS:-4}; S34_MIB=${S34_MIB:-64}; S34_PASSES=${S34_PASSES:-1}; S34_FLOOR_MS=${S34_FLOOR_MS:-500}
+# The readers' objects, seeded once under the CR's prefix.
+for i in $(seq 1 "$S34_READERS"); do
+    mcx mc stat "m/$BUCKET/datasets/imagenet/load-0$i.bin" >/dev/null 2>&1 \
+        || mcx sh -c "head -c $((S34_MIB * 1048576)) /dev/zero | mc pipe m/$BUCKET/datasets/imagenet/load-0$i.bin" >/dev/null 2>&1
+done
+n=0; for i in $(seq 1 "$S34_READERS"); do mcx mc stat "m/$BUCKET/datasets/imagenet/load-0$i.bin" >/dev/null 2>&1 && n=$((n + 1)); done
+[ "$n" = "$S34_READERS" ] && ok "$n load objects of $S34_MIB MiB under datasets/imagenet/" || bad "$n of $S34_READERS load objects present — the readers below would have nothing to pull"
+# This leg's class with this leg's members only, so the worker, the
+# record and the log lines are all its own.
+$K -n $NS delete pod shared-a shared-b shared-j --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
+$K -n $NS delete pod -l s34=reader --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
+s34_reader() { # name object passes — waits for /tmp/go, pulls the object `passes` times, reports once
+    cat <<PODEOF
+apiVersion: v1
+kind: Pod
+metadata: { name: $1, namespace: $NS, labels: { s34: reader } }
+spec:
+  serviceAccountName: trainer
+  securityContext: { runAsNonRoot: true, runAsUser: 1001, seccompProfile: { type: RuntimeDefault } }
+  volumes:
+    - name: data
+      csi: { driver: s3.csi.chert.us, volumeAttributes: { chert.us/mount: datasets-shared } }
+  containers:
+    - name: agent
+      image: busybox:1.36
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          while [ ! -f /tmp/go ]; do sleep 1; done
+          n=0; e=0; i=0
+          while [ \$i -lt $3 ]; do
+            if cat /mnt/shared/$2 > /dev/null 2>/tmp/err; then n=\$((n + 1)); else e=\$((e + 1)); fi
+            i=\$((i + 1))
+          done
+          echo "S34 reads=\$n errors=\$e \$(sed -n 1p /tmp/err 2>/dev/null)"
+          trap 'exit 0' TERM INT; sleep 86400 & wait
+      securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+      volumeMounts: [{ name: data, mountPath: /mnt/shared }]
+PODEOF
+}
+for i in $(seq 1 "$S34_READERS"); do s34_reader "s34-r$i" "load-0$i.bin" "$S34_PASSES" | $K apply -f - >/dev/null; done
+allup=1; for i in $(seq 1 "$S34_READERS"); do wait_phase "s34-r$i" Running 300 || allup=0; done
+if [ "$allup" = 1 ]; then
+    w=""; for i in $(seq 1 "$S34_READERS"); do w=$(worker_of_any "s34-r$i"); [ -n "$w" ] && break; done
+    [ -n "$w" ] && ok "the readers share one worker ($w)" || bad "no worker names a reader as its tenant — the readers did not form one shared class"
+    wuid0=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+    # A shared worker's volume-id annotation is its class hash, which names the record and the source.
+    hash=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.annotations.chert\.us/volume-id}' 2>/dev/null)
+    src="/var/lib/kubelet/plugins/s3.csi.chert.us/shared/$hash/src"
+    onnode "grep -q ' $src ' /proc/mounts" && ok "the class's source is mounted on the node at $src" || bad "no mount at $src on the node (hash '$hash') — the statfs samples below would measure nothing"
+    # Shape the worker's INGRESS: netem on the node side of its veth pair
+    # (egress there is ingress in the pod). The pod's eth0 names its peer
+    # by ifindex, and the peer lives in the node's own namespace.
+    pid=$(worker_pid "$w"); veth=""
+    if [ -n "$pid" ] && [ "$(onnode "readlink /proc/$pid/ns/net")" != "$(onnode "readlink /proc/1/ns/net")" ]; then
+        peer=$(onnode "nsenter -t $pid -n cat /sys/class/net/eth0/iflink")
+        [ -n "$peer" ] && veth=$(onnode "ip -o link | awk -F': ' -v i=$peer '\$1 == i { sub(/@.*/, \"\", \$2); print \$2 }'")
+    fi
+    if [ -n "$veth" ] && onnode "tc qdisc add dev $veth root netem rate $S34_RATE"; then
+        ok "worker $w's ingress shaped to $S34_RATE on the node side of its veth ($veth)"
+    else
+        bad "could not shape worker $w's ingress (pid '$pid', peer '${peer:-}', veth '$veth'): without the load this leg cannot fail"
+    fi
+    before=$(plugin_log | grep -c 'not serving; replacing it for the new member')
+    for i in $(seq 1 "$S34_READERS"); do inpod "s34-r$i" "touch /tmp/go" >/dev/null 2>&1; done
+    # The node's statfs on the source, sampled while the reads run.
+    samples=$(mktemp)
+    onnode "for s in \$(seq 1 24); do a=\$(date +%s%N); timeout 20 stat -f $src >/dev/null 2>&1; b=\$(date +%s%N); echo \$(( (b - a) / 1000000 )); sleep 3; done" > "$samples" 2>/dev/null &
+    sampler=$!
+    sleep 8
+    fx_doc tenants.yaml Pod shared-a | sed 's/^  name: shared-a$/  name: shared-j/' | $K apply -f - >/dev/null
+    if wait_phase shared-j Running 240; then
+        ok "shared-j reached Running while the readers were pulling"
+        plugin_log | grep "tenant=$NS/shared-j" | tail -1 | grep -q "published (shared read-only mount)" \
+            && ok "shared-j's publish line says it joined the shared class" \
+            || bad "shared-j's publish line: $(plugin_log | grep "tenant=$NS/shared-j" | tail -1 | cut -c1-200)"
+        got=$(inpod shared-j "cat /mnt/shared/shard-01.txt"); [ "$got" = "seeded-object-01" ] && ok "shared-j reads through the mounter it joined" || bad "shared-j read '$got'"
+    else
+        bad "shared-j did not reach Running in 240 s: $(mount_events shared-j | tail -1 | cut -c1-200)"
+    fi
+    after=$(plugin_log | grep -c 'not serving; replacing it for the new member')
+    [ "$after" = "$before" ] && ok "the join did not replace the mounter (no 'replacing it for the new member' line)" \
+        || bad "the join REPLACED the live mounter under load ($((after - before)) 'replacing' line(s)): the probe read a serving mounter as dead"
+    wuid1=$($K -n $WNS get pod "$w" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+    [ -n "$wuid0" ] && [ "$wuid1" = "$wuid0" ] && ok "worker $w is the same pod after the join (uid unchanged)" || bad "worker $w: uid '$wuid0' before the join, '$wuid1' after"
+    # The readers' verdict: every pass whole, zero errors, no MounterDead.
+    for i in $(seq 1 "$S34_READERS"); do
+        line=""; j=0
+        while [ $j -lt 420 ]; do line=$($K -n $NS logs "s34-r$i" 2>/dev/null | grep '^S34 reads=' | tail -1); [ -n "$line" ] && break; sleep 5; j=$((j + 5)); done
+        case "$line" in
+            "S34 reads=$S34_PASSES errors=0"*) ok "s34-r$i: $S34_PASSES pass(es) of load-0$i.bin, 0 errors (${j}s)" ;;
+            "") bad "s34-r$i reported nothing in 420 s" ;;
+            *) bad "s34-r$i: '$line'" ;;
+        esac
+        [ "$(mount_events "s34-r$i" | grep -c MounterDead)" = 0 ] && ok "no MounterDead on s34-r$i" || bad "MounterDead on s34-r$i: the mounter under it was replaced or died"
+    done
+    wait "$sampler" 2>/dev/null
+    max=$(grep -E '^[0-9]+$' "$samples" | sort -n | tail -1); cnt=$(grep -cE '^[0-9]+$' "$samples")
+    note "node statfs on the shared source during the reads: $cnt samples, max ${max:-?} ms: $(grep -E '^[0-9]+$' "$samples" | tr '\n' ' ')"
+    if [ -z "$max" ]; then bad "no statfs samples were taken on the node"
+    elif [ "$max" -ge 3000 ]; then bad "a statfs on the shared source took ${max} ms under this load — over the probe's 3 s budget: a join at that moment replaces a live mounter (the defect is reachable; this join missed it)"
+    elif [ "$max" -ge "$S34_FLOOR_MS" ]; then ok "the load reached the probe (max statfs ${max} ms, floor $S34_FLOOR_MS ms) and stayed inside its 3 s budget"
+    else bad "the load did not reach the probe (max statfs ${max} ms < $S34_FLOOR_MS ms): the no-replace assertion above is vacuous — lower S34_RATE or raise S34_READERS"
+    fi
+    rm -f "$samples"
+    [ -n "$veth" ] && onnode "tc qdisc del dev $veth root" >/dev/null 2>&1
+else
+    bad "the readers did not all reach Running in 300 s — S34 made no observation"
+fi
+$K -n $NS delete pod shared-j --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
+$K -n $NS delete pod -l s34=reader --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
+apply_fx tenants.yaml >/dev/null
+
 # ── S30 cache placement (sharing design §11 step 2) ────────────────────
 # workers.cacheHostPath names a device the operator mounted on every node;
 # every worker that runs with a cache gets <root>/<worker> — made 0700 for
