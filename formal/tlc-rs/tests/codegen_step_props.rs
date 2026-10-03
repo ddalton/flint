@@ -38,7 +38,7 @@ fn generated(dir: &Path, cfg_name: &str) -> PathBuf {
         .args(["-codegen", crate_dir.to_str().unwrap(), "-config", &format!("{cfg_name}.cfg"), "StepToy.tla"]));
     let main = std::fs::read_to_string(crate_dir.join("src/main.rs")).unwrap_or_else(|_| panic!("codegen failed: {out}"));
     assert!(main.contains("fn aprop_0("), "the step property must be compiled, not left to the interpreter");
-    assert!(main.contains("0 => Some(aprop_0("), "step_prop must dispatch to it");
+    assert!(main.contains("0 => match aprop_0("), "step_prop must dispatch to it");
     let aprop = main.lines().find(|l| l.starts_with("fn aprop_0(")).unwrap();
     assert!(aprop.contains("g.k["), "the property must read its constant from the pool: {aprop}");
     let target = Path::new(env!("CARGO_TARGET_TMPDIR")).join("codegen-step-props");

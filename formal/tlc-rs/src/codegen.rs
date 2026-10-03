@@ -26,6 +26,12 @@ pub mod rt {
     pub use std::cell::OnceCell;
     pub use std::sync::Arc;
 
+    /// What a generated formula returns where it reaches a construct the
+    /// generator does not compile (ENABLED). The engine catches exactly
+    /// this error and asks the interpreter for that invariant, constraint
+    /// or step property instead; anywhere else it is reported as is.
+    pub const UNSUPPORTED: &str = "ENABLED is not supported in generated checkers; use -engine interp";
+
     /// Constants the generated code refers to by index.
     pub struct G {
         pub k: Vec<Value>,
@@ -400,9 +406,10 @@ impl Gen<'_> {
                 let s = self.lazy_defs(slots);
                 s + &self.val(body) + " }"
             }
-            Expr::Enabled(_) => {
-                "(return Err(\"ENABLED is not supported in generated checkers; use -engine interp\".into()))".to_string()
-            }
+            // An expression of type Value that returns UNSUPPORTED (a bare
+            // `return` is of type `!`, and `&!` has no methods: the crate
+            // did not compile).
+            Expr::Enabled(_) => "(Err::<Value, String>(UNSUPPORTED.into())?)".to_string(),
             Expr::SelectSeq(seq, slot, pred) => {
                 let n = self.fresh();
                 let seq = self.val(seq);
@@ -723,14 +730,25 @@ pub fn generate(l: &Loaded, dir: &Path) -> Result<(), String> {
             "fn {name}<'a>(g: &G, cx: &mut Cx<'a>, emit: K<'_, 'a>) -> R<()> {{ let st: &[Value] = cx.state; {body} Ok(()) }}\n"
         );
     }
-    let aprops: String = compiled.iter().map(|i| format!("{i} => Some(aprop_{i}(self.g.local(), s, t)), ")).collect();
-    let arms = |kind: &str, n: usize| -> String {
-        (0..n).map(|i| format!("{i} => {kind}_{i}(self.g.local(), cx.state), ")).collect::<String>()
+    // A formula the generator could not compile returns UNSUPPORTED; that
+    // one is answered by the interpreter (`self.p`), the rest stay compiled.
+    let aprops: String = compiled
+        .iter()
+        .map(|i| format!("{i} => match aprop_{i}(self.g.local(), s, t) {{ Err(e) if e == UNSUPPORTED => None, r => Some(r) }}, "))
+        .collect();
+    let arms = |kind: &str, interp: &str, n: usize| -> String {
+        (0..n)
+            .map(|i| {
+                format!(
+                    "{i} => match {kind}_{i}(self.g.local(), cx.state) {{ Err(e) if e == UNSUPPORTED => Engine::{interp}(self.p, i, cx), r => r }}, "
+                )
+            })
+            .collect::<String>()
     };
     let _ = write!(
         code,
-        "struct E {{ g: G }}\n\
-         impl Engine for E {{\n\
+        "struct E<'p> {{ g: G, p: &'p Program }}\n\
+         impl Engine for E<'_> {{\n\
          fn init<'a>(&self, cx: &mut Cx<'a>, k: K<'_, 'a>) -> R<()> {{ init(self.g.local(), cx, k) }}\n\
          fn next<'a>(&self, cx: &mut Cx<'a>, k: K<'_, 'a>) -> R<()> {{ next(self.g.local(), cx, k) }}\n\
          fn invariant(&self, i: usize, cx: &mut Cx) -> R<bool> {{ match i {{ {} _ => unreachable!() }} }}\n\
@@ -738,10 +756,10 @@ pub fn generate(l: &Loaded, dir: &Path) -> Result<(), String> {
          fn view(&self, cx: &mut Cx) -> R<Value> {{ view(self.g.local(), cx.state) }}\n\
          fn step_prop(&self, i: usize, s: &[Value], t: &[Value]) -> Option<R<bool>> {{ match i {{ {aprops}_ => None }} }}\n\
          }}\n\n\
-         fn make(p: &Program) -> Box<dyn Engine + '_> {{ Box::new(E {{ g: G::new(p) }}) }}\n\n\
+         fn make(p: &Program) -> Box<dyn Engine + '_> {{ Box::new(E {{ g: G::new(p), p }}) }}\n\n\
          fn main() -> std::process::ExitCode {{ tlc_rs::cli::main(Some(Generated {{ source_hash: {:#x}, make }})) }}\n",
-        arms("inv", p.invariants.len()),
-        arms("con", p.constraints.len()),
+        arms("inv", "invariant", p.invariants.len()),
+        arms("con", "constraint", p.constraints.len()),
         l.source_hash
     );
 
