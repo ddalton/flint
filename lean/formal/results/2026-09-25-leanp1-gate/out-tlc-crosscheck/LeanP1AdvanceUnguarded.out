@@ -1,0 +1,840 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 68 and seed -8478803248391918876 with 2 workers on 8 cores with 1820MB heap and 64MB offheap memory [pid: 85476] (Mac OS X 26.3.1 aarch64, Oracle Corporation 25.0.1 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file /Users/ddalton/github/flint/lean/formal/LeanP1.tla
+Parsing file /private/var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/Naturals.tla
+Parsing file /private/var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/FiniteSets.tla
+Parsing file /private/var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/Sequences.tla
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module LeanP1
+Starting... (2026-09-29 17:06:00)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-09-29 17:06:00.
+Progress(10) at 2026-09-29 17:06:03: 274,515 states generated (274,515 s/min), 109,910 distinct states found (109,910 ds/min), 76,576 states left on queue.
+Error: Invariant Inv_ShortcutSound is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ regressed = FALSE
+/\ udel = {}
+/\ seq = 1
+/\ mv = Nil
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ reqs = 0
+/\ minted = {<<p1, 1>>}
+/\ upped = {<<p1, 1>>}
+/\ w = ( A :>
+      [ st |-> "off",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> Nil @@ p2 :> Nil),
+        integrated |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        adv |-> FALSE,
+        synced |-> 0,
+        derived |-> 0,
+        skipped |-> {} ] @@
+  B :>
+      [ st |-> "off",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> Nil @@ p2 :> Nil),
+        integrated |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        adv |-> FALSE,
+        synced |-> 0,
+        derived |-> 0,
+        skipped |-> {} ] )
+/\ conflicts = {}
+/\ rlag = TRUE
+/\ rdoc = (p1 :> Nil @@ p2 :> Nil)
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ copies = 0
+/\ holder = "none"
+/\ syncs = 0
+/\ retiring = {}
+/\ took = (A :> (p1 :> {} @@ p2 :> {}) @@ B :> (p1 :> {} @@ p2 :> {}))
+/\ gw = (p1 :> Nil @@ p2 :> Nil)
+/\ barriers = 0
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> Nil @@
+  <<p1, 3>> :> Nil @@
+  <<p1, 4>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil @@
+  <<p2, 4>> :> Nil )
+/\ nextGen = 2
+/\ restarts = 0
+/\ ui = 0
+/\ orig = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> Nil @@
+  <<p1, 3>> :> Nil @@
+  <<p1, 4>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil @@
+  <<p2, 4>> :> Nil )
+/\ acked = {}
+/\ aged = {}
+/\ live = {<<p1, 1>>}
+/\ ages = 0
+
+State 2: <Next line 595, col 6 to line 595, col 99 of module LeanP1>
+/\ regressed = FALSE
+/\ udel = {}
+/\ seq = 1
+/\ mv = Nil
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ reqs = 0
+/\ minted = {<<p1, 1>>}
+/\ upped = {<<p1, 1>>}
+/\ w = ( A :>
+      [ st |-> "on",
+        pc |-> "idle",
+        local |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        adv |-> FALSE,
+        synced |-> 1,
+        derived |-> 1,
+        skipped |-> {} ] @@
+  B :>
+      [ st |-> "off",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> Nil @@ p2 :> Nil),
+        integrated |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        adv |-> FALSE,
+        synced |-> 0,
+        derived |-> 0,
+        skipped |-> {} ] )
+/\ conflicts = {}
+/\ rlag = TRUE
+/\ rdoc = (p1 :> Nil @@ p2 :> Nil)
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ copies = 0
+/\ holder = "none"
+/\ syncs = 0
+/\ retiring = {}
+/\ took = (A :> (p1 :> {1} @@ p2 :> {}) @@ B :> (p1 :> {} @@ p2 :> {}))
+/\ gw = (p1 :> Nil @@ p2 :> Nil)
+/\ barriers = 0
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> Nil @@
+  <<p1, 3>> :> Nil @@
+  <<p1, 4>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil @@
+  <<p2, 4>> :> Nil )
+/\ nextGen = 2
+/\ restarts = 0
+/\ ui = 0
+/\ orig = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> Nil @@
+  <<p1, 3>> :> Nil @@
+  <<p1, 4>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil @@
+  <<p2, 4>> :> Nil )
+/\ acked = {}
+/\ aged = {}
+/\ live = {<<p1, 1>>}
+/\ ages = 0
+
+State 3: <Next line 595, col 6 to line 595, col 99 of module LeanP1>
+/\ regressed = FALSE
+/\ udel = {}
+/\ seq = 1
+/\ mv = Nil
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ reqs = 0
+/\ minted = {<<p1, 1>>}
+/\ upped = {<<p1, 1>>}
+/\ w = ( A :>
+      [ st |-> "on",
+        pc |-> "consumed",
+        local |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        adv |-> FALSE,
+        synced |-> 1,
+        derived |-> 1,
+        skipped |-> {} ] @@
+  B :>
+      [ st |-> "off",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> Nil @@ p2 :> Nil),
+        integrated |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        adv |-> FALSE,
+        synced |-> 0,
+        derived |-> 0,
+        skipped |-> {} ] )
+/\ conflicts = {}
+/\ rlag = TRUE
+/\ rdoc = (p1 :> Nil @@ p2 :> Nil)
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ copies = 0
+/\ holder = "none"
+/\ syncs = 0
+/\ retiring = {}
+/\ took = (A :> (p1 :> {1} @@ p2 :> {}) @@ B :> (p1 :> {} @@ p2 :> {}))
+/\ gw = (p1 :> Nil @@ p2 :> Nil)
+/\ barriers = 0
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> Nil @@
+  <<p1, 3>> :> Nil @@
+  <<p1, 4>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil @@
+  <<p2, 4>> :> Nil )
+/\ nextGen = 2
+/\ restarts = 0
+/\ ui = 0
+/\ orig = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> Nil @@
+  <<p1, 3>> :> Nil @@
+  <<p1, 4>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil @@
+  <<p2, 4>> :> Nil )
+/\ acked = {}
+/\ aged = {}
+/\ live = {<<p1, 1>>}
+/\ ages = 0
+
+State 4: <Next line 595, col 6 to line 595, col 99 of module LeanP1>
+/\ regressed = FALSE
+/\ udel = {}
+/\ seq = 2
+/\ mv = Nil
+/\ doc = (p1 :> Nil @@ p2 :> <<p1, 1>>)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>}
+/\ upped = {<<p1, 1>>}
+/\ w = ( A :>
+      [ st |-> "on",
+        pc |-> "consumed",
+        local |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        adv |-> FALSE,
+        synced |-> 1,
+        derived |-> 1,
+        skipped |-> {} ] @@
+  B :>
+      [ st |-> "off",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> Nil @@ p2 :> Nil),
+        integrated |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        adv |-> FALSE,
+        synced |-> 0,
+        derived |-> 0,
+        skipped |-> {} ] )
+/\ conflicts = {}
+/\ rlag = TRUE
+/\ rdoc = (p1 :> Nil @@ p2 :> Nil)
+/\ tomb = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ copies = 0
+/\ holder = "none"
+/\ syncs = 0
+/\ retiring = {}
+/\ took = (A :> (p1 :> {1} @@ p2 :> {}) @@ B :> (p1 :> {} @@ p2 :> {}))
+/\ gw = (p1 :> Nil @@ p2 :> Nil)
+/\ barriers = 0
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> Nil @@
+  <<p1, 3>> :> Nil @@
+  <<p1, 4>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil @@
+  <<p2, 4>> :> Nil )
+/\ nextGen = 2
+/\ restarts = 0
+/\ ui = 0
+/\ orig = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> Nil @@
+  <<p1, 3>> :> Nil @@
+  <<p1, 4>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil @@
+  <<p2, 4>> :> Nil )
+/\ acked = {<<p2, <<p1, 1>>>>}
+/\ aged = {}
+/\ live = {<<p1, 1>>}
+/\ ages = 0
+
+State 5: <Next line 595, col 6 to line 595, col 99 of module LeanP1>
+/\ regressed = FALSE
+/\ udel = {}
+/\ seq = 2
+/\ mv = Nil
+/\ doc = (p1 :> Nil @@ p2 :> <<p1, 1>>)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>}
+/\ upped = {<<p1, 1>>}
+/\ w = ( A :>
+      [ st |-> "on",
+        pc |-> "consumed",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        adv |-> FALSE,
+        synced |-> 1,
+        derived |-> 1,
+        skipped |-> {} ] @@
+  B :>
+      [ st |-> "off",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> Nil @@ p2 :> Nil),
+        integrated |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        adv |-> FALSE,
+        synced |-> 0,
+        derived |-> 0,
+        skipped |-> {} ] )
+/\ conflicts = {}
+/\ rlag = TRUE
+/\ rdoc = (p1 :> Nil @@ p2 :> Nil)
+/\ tomb = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ copies = 0
+/\ holder = "none"
+/\ syncs = 0
+/\ retiring = {}
+/\ took = (A :> (p1 :> {1} @@ p2 :> {}) @@ B :> (p1 :> {} @@ p2 :> {}))
+/\ gw = (p1 :> Nil @@ p2 :> Nil)
+/\ barriers = 0
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> Nil @@
+  <<p1, 3>> :> Nil @@
+  <<p1, 4>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil @@
+  <<p2, 4>> :> Nil )
+/\ nextGen = 2
+/\ restarts = 0
+/\ ui = 0
+/\ orig = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> Nil @@
+  <<p1, 3>> :> Nil @@
+  <<p1, 4>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil @@
+  <<p2, 4>> :> Nil )
+/\ acked = {<<p2, <<p1, 1>>>>}
+/\ aged = {}
+/\ live = {<<p1, 1>>}
+/\ ages = 0
+
+State 6: <Next line 595, col 6 to line 595, col 99 of module LeanP1>
+/\ regressed = FALSE
+/\ udel = {}
+/\ seq = 2
+/\ mv = Nil
+/\ doc = (p1 :> Nil @@ p2 :> <<p1, 1>>)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>}
+/\ upped = {<<p1, 1>>}
+/\ w = ( A :>
+      [ st |-> "on",
+        pc |-> "scanned",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1},
+        uploads |-> {},
+        deletes |-> {p1},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        adv |-> FALSE,
+        synced |-> 1,
+        derived |-> 1,
+        skipped |-> {} ] @@
+  B :>
+      [ st |-> "off",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> Nil @@ p2 :> Nil),
+        integrated |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        adv |-> FALSE,
+        synced |-> 0,
+        derived |-> 0,
+        skipped |-> {} ] )
+/\ conflicts = {}
+/\ rlag = TRUE
+/\ rdoc = (p1 :> Nil @@ p2 :> Nil)
+/\ tomb = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ copies = 0
+/\ holder = "none"
+/\ syncs = 0
+/\ retiring = {}
+/\ took = (A :> (p1 :> {1} @@ p2 :> {}) @@ B :> (p1 :> {} @@ p2 :> {}))
+/\ gw = (p1 :> Nil @@ p2 :> Nil)
+/\ barriers = 1
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> Nil @@
+  <<p1, 3>> :> Nil @@
+  <<p1, 4>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil @@
+  <<p2, 4>> :> Nil )
+/\ nextGen = 2
+/\ restarts = 0
+/\ ui = 0
+/\ orig = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> Nil @@
+  <<p1, 3>> :> Nil @@
+  <<p1, 4>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil @@
+  <<p2, 4>> :> Nil )
+/\ acked = {<<p2, <<p1, 1>>>>}
+/\ aged = {}
+/\ live = {<<p1, 1>>}
+/\ ages = 0
+
+State 7: <Next line 595, col 6 to line 595, col 99 of module LeanP1>
+/\ regressed = FALSE
+/\ udel = {}
+/\ seq = 2
+/\ mv = Nil
+/\ doc = (p1 :> Nil @@ p2 :> <<p1, 1>>)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>}
+/\ upped = {<<p1, 1>>}
+/\ w = ( A :>
+      [ st |-> "on",
+        pc |-> "claimed",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1},
+        uploads |-> {},
+        deletes |-> {p1},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        adv |-> FALSE,
+        synced |-> 1,
+        derived |-> 1,
+        skipped |-> {} ] @@
+  B :>
+      [ st |-> "off",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> Nil @@ p2 :> Nil),
+        integrated |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        adv |-> FALSE,
+        synced |-> 0,
+        derived |-> 0,
+        skipped |-> {} ] )
+/\ conflicts = {}
+/\ rlag = TRUE
+/\ rdoc = (p1 :> Nil @@ p2 :> Nil)
+/\ tomb = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ copies = 0
+/\ holder = A
+/\ syncs = 0
+/\ retiring = {}
+/\ took = (A :> (p1 :> {1} @@ p2 :> {}) @@ B :> (p1 :> {} @@ p2 :> {}))
+/\ gw = (p1 :> Nil @@ p2 :> Nil)
+/\ barriers = 1
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> Nil @@
+  <<p1, 3>> :> Nil @@
+  <<p1, 4>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil @@
+  <<p2, 4>> :> Nil )
+/\ nextGen = 2
+/\ restarts = 0
+/\ ui = 0
+/\ orig = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> Nil @@
+  <<p1, 3>> :> Nil @@
+  <<p1, 4>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil @@
+  <<p2, 4>> :> Nil )
+/\ acked = {<<p2, <<p1, 1>>>>}
+/\ aged = {}
+/\ live = {<<p1, 1>>}
+/\ ages = 0
+
+State 8: <Next line 595, col 6 to line 595, col 99 of module LeanP1>
+/\ regressed = FALSE
+/\ udel = {}
+/\ seq = 2
+/\ mv = Nil
+/\ doc = (p1 :> Nil @@ p2 :> <<p1, 1>>)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>}
+/\ upped = {<<p1, 1>>}
+/\ w = ( A :>
+      [ st |-> "on",
+        pc |-> "claimed",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1},
+        uploads |-> {},
+        deletes |-> {p1},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> TRUE,
+        inst |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        adv |-> FALSE,
+        synced |-> 1,
+        derived |-> 1,
+        skipped |-> {} ] @@
+  B :>
+      [ st |-> "off",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> Nil @@ p2 :> Nil),
+        integrated |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        adv |-> FALSE,
+        synced |-> 0,
+        derived |-> 0,
+        skipped |-> {} ] )
+/\ conflicts = {}
+/\ rlag = TRUE
+/\ rdoc = (p1 :> Nil @@ p2 :> Nil)
+/\ tomb = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ copies = 0
+/\ holder = A
+/\ syncs = 0
+/\ retiring = {}
+/\ took = (A :> (p1 :> {1} @@ p2 :> {}) @@ B :> (p1 :> {} @@ p2 :> {}))
+/\ gw = (p1 :> Nil @@ p2 :> Nil)
+/\ barriers = 1
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> Nil @@
+  <<p1, 3>> :> Nil @@
+  <<p1, 4>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil @@
+  <<p2, 4>> :> Nil )
+/\ nextGen = 2
+/\ restarts = 0
+/\ ui = 0
+/\ orig = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> Nil @@
+  <<p1, 3>> :> Nil @@
+  <<p1, 4>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil @@
+  <<p2, 4>> :> Nil )
+/\ acked = {<<p2, <<p1, 1>>>>}
+/\ aged = {}
+/\ live = {<<p1, 1>>}
+/\ ages = 0
+
+State 9: <Next line 595, col 6 to line 595, col 99 of module LeanP1>
+/\ regressed = FALSE
+/\ udel = {}
+/\ seq = 2
+/\ mv = Nil
+/\ doc = (p1 :> Nil @@ p2 :> <<p1, 1>>)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>}
+/\ upped = {<<p1, 1>>}
+/\ w = ( A :>
+      [ st |-> "on",
+        pc |-> "cased",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil),
+        integrated |-> {1},
+        uploads |-> {},
+        deletes |-> {p1},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> TRUE,
+        inst |-> (p1 :> Nil @@ p2 :> <<p1, 1>>),
+        retire |-> {},
+        collected |-> TRUE,
+        adv |-> TRUE,
+        synced |-> 1,
+        derived |-> 1,
+        skipped |-> {} ] @@
+  B :>
+      [ st |-> "off",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> Nil @@ p2 :> Nil),
+        integrated |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        adv |-> FALSE,
+        synced |-> 0,
+        derived |-> 0,
+        skipped |-> {} ] )
+/\ conflicts = {}
+/\ rlag = TRUE
+/\ rdoc = (p1 :> Nil @@ p2 :> Nil)
+/\ tomb = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ copies = 0
+/\ holder = A
+/\ syncs = 0
+/\ retiring = {}
+/\ took = (A :> (p1 :> {1} @@ p2 :> {}) @@ B :> (p1 :> {} @@ p2 :> {}))
+/\ gw = (p1 :> Nil @@ p2 :> Nil)
+/\ barriers = 1
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> Nil @@
+  <<p1, 3>> :> Nil @@
+  <<p1, 4>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil @@
+  <<p2, 4>> :> Nil )
+/\ nextGen = 2
+/\ restarts = 0
+/\ ui = 0
+/\ orig = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> Nil @@
+  <<p1, 3>> :> Nil @@
+  <<p1, 4>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil @@
+  <<p2, 4>> :> Nil )
+/\ acked = {<<p2, <<p1, 1>>>>}
+/\ aged = {}
+/\ live = {<<p1, 1>>}
+/\ ages = 0
+
+State 10: <Next line 595, col 6 to line 595, col 99 of module LeanP1>
+/\ regressed = FALSE
+/\ udel = {}
+/\ seq = 2
+/\ mv = Nil
+/\ doc = (p1 :> Nil @@ p2 :> <<p1, 1>>)
+/\ reqs = 1
+/\ minted = {<<p1, 1>>}
+/\ upped = {<<p1, 1>>}
+/\ w = ( A :>
+      [ st |-> "on",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> Nil @@ p2 :> Nil),
+        integrated |-> {1},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> Nil @@ p2 :> <<p1, 1>>),
+        retire |-> {},
+        collected |-> FALSE,
+        adv |-> FALSE,
+        synced |-> 2,
+        derived |-> 2,
+        skipped |-> {} ] @@
+  B :>
+      [ st |-> "off",
+        pc |-> "idle",
+        local |-> (p1 :> Nil @@ p2 :> Nil),
+        baseline |-> (p1 :> Nil @@ p2 :> Nil),
+        integrated |-> {},
+        uploads |-> {},
+        deletes |-> {},
+        snap |-> (p1 :> Nil @@ p2 :> Nil),
+        upDone |-> {},
+        gone |-> {},
+        verified |-> FALSE,
+        inst |-> (p1 :> Nil @@ p2 :> Nil),
+        retire |-> {},
+        collected |-> FALSE,
+        adv |-> FALSE,
+        synced |-> 0,
+        derived |-> 0,
+        skipped |-> {} ] )
+/\ conflicts = {}
+/\ rlag = TRUE
+/\ rdoc = (p1 :> Nil @@ p2 :> Nil)
+/\ tomb = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ copies = 0
+/\ holder = "none"
+/\ syncs = 0
+/\ retiring = {}
+/\ took = (A :> (p1 :> {1} @@ p2 :> {}) @@ B :> (p1 :> {} @@ p2 :> {}))
+/\ gw = (p1 :> Nil @@ p2 :> Nil)
+/\ barriers = 1
+/\ base = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> Nil @@
+  <<p1, 3>> :> Nil @@
+  <<p1, 4>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil @@
+  <<p2, 4>> :> Nil )
+/\ nextGen = 2
+/\ restarts = 0
+/\ ui = 0
+/\ orig = ( <<p1, 1>> :> Nil @@
+  <<p1, 2>> :> Nil @@
+  <<p1, 3>> :> Nil @@
+  <<p1, 4>> :> Nil @@
+  <<p2, 1>> :> Nil @@
+  <<p2, 2>> :> Nil @@
+  <<p2, 3>> :> Nil @@
+  <<p2, 4>> :> Nil )
+/\ acked = {<<p2, <<p1, 1>>>>}
+/\ aged = {}
+/\ live = {<<p1, 1>>}
+/\ ages = 0
+
+1578707 states generated, 570989 distinct states found, 365569 states left on queue.
+The depth of the complete state graph search is 11.
+The average outdegree of the complete state graph is 3 (minimum is 0, the maximum 16 and the 95th percentile is 7).
+Finished in 17s at (2026-09-29 17:06:17)

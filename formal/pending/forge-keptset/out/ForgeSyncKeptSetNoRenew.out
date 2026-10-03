@@ -1,0 +1,1323 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 84 and seed -1844545004465128628 with 2 workers on 8 cores with 1820MB heap and 64MB offheap memory [pid: 78682] (Mac OS X 26.3.1 aarch64, Oracle Corporation 25.0.1 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file /Users/ddalton/github/flint/formal/pending/forge-keptset/ForgeSyncKeptSet.tla
+Parsing file /private/var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/Naturals.tla
+Parsing file /private/var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/FiniteSets.tla
+Parsing file /private/var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/TLC.tla
+Parsing file /private/var/folders/c2/146zh2lj05g11sn0ts7s_ygr0000gq/T/Sequences.tla
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module ForgeSyncKeptSet
+Starting... (2026-09-29 16:46:01)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-09-29 16:46:01.
+Progress(16) at 2026-09-29 16:46:04: 67,333 states generated (67,333 s/min), 23,781 distinct states found (23,781 ds/min), 9,167 states left on queue.
+Progress(24) at 2026-09-29 16:47:04: 2,187,332 states generated (2,119,999 s/min), 614,712 distinct states found (590,931 ds/min), 173,858 states left on queue.
+Error: Invariant Inv_NoStragglerLandAfterRestore is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ claimBudget = 3
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 1
+/\ snap = [etag |-> 0, main |-> 0, packs |-> {}, history |-> {}]
+/\ pushTo = (p1 :> NoSyncer @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "new" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 0, tok |-> 0] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "idle" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 3
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 0, tok |-> 0, held |-> FALSE, holder |-> NoSyncer, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 2: <AcquireCreate line 351, col 3 to line 361, col 60 of module ForgeSyncKeptSet>
+/\ claimBudget = 2
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 2
+/\ snap = [etag |-> 0, main |-> 0, packs |-> {}, history |-> {}]
+/\ pushTo = (p1 :> NoSyncer @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "new" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "claimed" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 3
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 1, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 3: <SweepDone line 493, col 3 to line 500, col 60 of module ForgeSyncKeptSet>
+/\ claimBudget = 2
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 2
+/\ snap = [etag |-> 0, main |-> 0, packs |-> {}, history |-> {}]
+/\ pushTo = (p1 :> NoSyncer @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "new" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "restoring" @@ s2 :> "idle")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 0)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 3
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 1, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 4: <ObserveForeign line 402, col 3 to line 411, col 60 of module ForgeSyncKeptSet>
+/\ claimBudget = 2
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 2
+/\ snap = [etag |-> 0, main |-> 0, packs |-> {}, history |-> {}]
+/\ pushTo = (p1 :> NoSyncer @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "new" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 0)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "restoring" @@ s2 :> "watching")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 1)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 3
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 1, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 5: <PollQuiet line 422, col 3 to line 436, col 60 of module ForgeSyncKeptSet>
+/\ claimBudget = 2
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 2
+/\ snap = [etag |-> 0, main |-> 0, packs |-> {}, history |-> {}]
+/\ pushTo = (p1 :> NoSyncer @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "new" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> TRUE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 1)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "restoring" @@ s2 :> "watching")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 1)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 3
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 1, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 6: <RenewTick line 601, col 3 to line 623, col 27 of module ForgeSyncKeptSet>
+/\ claimBudget = 2
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 2
+/\ snap = [etag |-> 0, main |-> 0, packs |-> {}, history |-> {}]
+/\ pushTo = (p1 :> NoSyncer @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "new" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> FALSE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 1)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "restoring" @@ s2 :> "watching")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 1)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 3
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 1, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 7: <PollQuiet line 422, col 3 to line 436, col 60 of module ForgeSyncKeptSet>
+/\ claimBudget = 2
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 2
+/\ snap = [etag |-> 0, main |-> 0, packs |-> {}, history |-> {}]
+/\ pushTo = (p1 :> NoSyncer @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "new" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> TRUE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 2)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 0, tok |-> 0])
+/\ ackNotDurable = FALSE
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "restoring" @@ s2 :> "watching")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 1)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 3
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 1, tok |-> 1, held |-> TRUE, holder |-> s1, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 8: <Takeover line 443, col 3 to line 455, col 60 of module ForgeSyncKeptSet>
+/\ claimBudget = 1
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 3
+/\ snap = [etag |-> 0, main |-> 0, packs |-> {}, history |-> {}]
+/\ pushTo = (p1 :> NoSyncer @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "new" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> TRUE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 2)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 2, tok |-> 2])
+/\ ackNotDurable = FALSE
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "restoring" @@ s2 :> "rotating")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 1)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 3
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 2, tok |-> 2, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 9: <RotateSnapshot line 465, col 3 to line 473, col 60 of module ForgeSyncKeptSet>
+/\ claimBudget = 1
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 4
+/\ snap = [etag |-> 3, main |-> 0, packs |-> {}, history |-> {}]
+/\ pushTo = (p1 :> NoSyncer @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "new" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> TRUE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 2)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 2, tok |-> 2])
+/\ ackNotDurable = FALSE
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "restoring" @@ s2 :> "claimed")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 1)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 3
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 2, tok |-> 2, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 10: <SweepDone line 493, col 3 to line 500, col 60 of module ForgeSyncKeptSet>
+/\ claimBudget = 1
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 4
+/\ snap = [etag |-> 3, main |-> 0, packs |-> {}, history |-> {}]
+/\ pushTo = (p1 :> NoSyncer @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "new" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> TRUE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 2)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 2, tok |-> 2])
+/\ ackNotDurable = FALSE
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "restoring" @@ s2 :> "restoring")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 1)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 0, main |-> 0, packs |-> {}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 3
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 2, tok |-> 2, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 11: <Restore line 509, col 3 to line 581, col 27 of module ForgeSyncKeptSet>
+/\ claimBudget = 1
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 4
+/\ snap = [etag |-> 3, main |-> 0, packs |-> {}, history |-> {}]
+/\ pushTo = (p1 :> NoSyncer @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "new" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> TRUE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 2)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 2, tok |-> 2])
+/\ ackNotDurable = FALSE
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "restoring" @@ s2 :> "reclaiming")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 1)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 3, main |-> 0, packs |-> {}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 3
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> TRUE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 2, tok |-> 2, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> TRUE)
+
+State 12: <ReclaimDone line 481, col 3 to line 488, col 60 of module ForgeSyncKeptSet>
+/\ claimBudget = 1
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 4
+/\ snap = [etag |-> 3, main |-> 0, packs |-> {}, history |-> {}]
+/\ pushTo = (p1 :> NoSyncer @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "new" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> TRUE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 2)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 2, tok |-> 2])
+/\ ackNotDurable = FALSE
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "restoring" @@ s2 :> "serving")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 1)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 3, main |-> 0, packs |-> {}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 3
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> TRUE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 2, tok |-> 2, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> TRUE)
+
+State 13: <PushSend line 633, col 3 to line 642, col 60 of module ForgeSyncKeptSet>
+/\ claimBudget = 1
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 4
+/\ snap = [etag |-> 3, main |-> 0, packs |-> {}, history |-> {}]
+/\ pushTo = (p1 :> s2 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> TRUE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 2)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 2, tok |-> 2])
+/\ ackNotDurable = FALSE
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "restoring" @@ s2 :> "serving")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {p1})
+/\ lastTok = (s1 :> 0 @@ s2 :> 1)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 3, main |-> 0, packs |-> {}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 3
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> TRUE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 2, tok |-> 2, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> TRUE)
+
+State 14: <IdxLand line 647, col 3 to line 654, col 60 of module ForgeSyncKeptSet>
+/\ claimBudget = 1
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 4
+/\ snap = [etag |-> 3, main |-> 0, packs |-> {}, history |-> {}]
+/\ pushTo = (p1 :> s2 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> TRUE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 2)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 2, tok |-> 2])
+/\ ackNotDurable = FALSE
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {p1})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "restoring" @@ s2 :> "serving")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 1)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 3, main |-> 0, packs |-> {}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 3
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> TRUE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> 0, stage |-> "none", listed |-> {}] )
+/\ cell = [ep |-> 2, tok |-> 2, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> TRUE)
+
+State 15: <BatchStart line 682, col 3 to line 697, col 60 of module ForgeSyncKeptSet>
+/\ claimBudget = 1
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 4
+/\ snap = [etag |-> 3, main |-> 0, packs |-> {}, history |-> {}]
+/\ pushTo = (p1 :> s2 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> TRUE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 2)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 2, tok |-> 2])
+/\ ackNotDurable = FALSE
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {p1})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "restoring" @@ s2 :> "pushing")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 1)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 3, main |-> 0, packs |-> {}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 3
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> TRUE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> p1, stage |-> "judged", listed |-> {}] )
+/\ cell = [ep |-> 2, tok |-> 2, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> TRUE)
+
+State 16: <BatchRenew line 701, col 3 to line 716, col 50 of module ForgeSyncKeptSet>
+/\ claimBudget = 1
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 5
+/\ snap = [etag |-> 3, main |-> 0, packs |-> {}, history |-> {}]
+/\ pushTo = (p1 :> s2 @@ p2 :> NoSyncer)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "new")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> TRUE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 2)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 2, tok |-> 4])
+/\ ackNotDurable = FALSE
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {p1})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "restoring" @@ s2 :> "pushing")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 1)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 3, main |-> 0, packs |-> {}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 2
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> p1, stage |-> "renewed", listed |-> {}] )
+/\ cell = [ep |-> 2, tok |-> 4, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 17: <PushSend line 633, col 3 to line 642, col 60 of module ForgeSyncKeptSet>
+/\ claimBudget = 1
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 5
+/\ snap = [etag |-> 3, main |-> 0, packs |-> {}, history |-> {}]
+/\ pushTo = (p1 :> s2 @@ p2 :> s2)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "sent")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> TRUE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 2)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 2, tok |-> 4])
+/\ ackNotDurable = FALSE
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {p1})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "restoring" @@ s2 :> "pushing")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {p2})
+/\ lastTok = (s1 :> 0 @@ s2 :> 1)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 3, main |-> 0, packs |-> {}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 2
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> p1, stage |-> "renewed", listed |-> {}] )
+/\ cell = [ep |-> 2, tok |-> 4, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 18: <IdxLand line 647, col 3 to line 654, col 60 of module ForgeSyncKeptSet>
+/\ claimBudget = 1
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 5
+/\ snap = [etag |-> 3, main |-> 0, packs |-> {}, history |-> {}]
+/\ pushTo = (p1 :> s2 @@ p2 :> s2)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "sent")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> TRUE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 2)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 2, tok |-> 4])
+/\ ackNotDurable = FALSE
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {p1, p2})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "restoring" @@ s2 :> "pushing")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 1)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 3, main |-> 0, packs |-> {}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 2
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> FALSE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> p1, stage |-> "renewed", listed |-> {}] )
+/\ cell = [ep |-> 2, tok |-> 4, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> FALSE)
+
+State 19: <BatchHash line 799, col 3 to line 808, col 60 of module ForgeSyncKeptSet>
+/\ claimBudget = 1
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 5
+/\ snap = [etag |-> 3, main |-> 0, packs |-> {}, history |-> {}]
+/\ pushTo = (p1 :> s2 @@ p2 :> s2)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "sent")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> TRUE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 2)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 2, tok |-> 4])
+/\ ackNotDurable = FALSE
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {p1, p2})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "restoring" @@ s2 :> "pushing")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 1)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 3, main |-> 0, packs |-> {}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 2
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> TRUE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> p1, stage |-> "hashed", listed |-> {p1, p2}] )
+/\ cell = [ep |-> 2, tok |-> 4, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> TRUE)
+
+State 20: <BatchInit line 815, col 3 to line 824, col 60 of module ForgeSyncKeptSet>
+/\ claimBudget = 1
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 5
+/\ snap = [etag |-> 3, main |-> 0, packs |-> {}, history |-> {}]
+/\ pushTo = (p1 :> s2 @@ p2 :> s2)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "sent")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> TRUE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 2)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 2, tok |-> 4])
+/\ ackNotDurable = FALSE
+/\ idxObj = {}
+/\ localPacks = (s1 :> {} @@ s2 :> {p1, p2})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "restoring" @@ s2 :> "pushing")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 1)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 3, main |-> 0, packs |-> {}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 2
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {[ep |-> 2, s |-> s2, p |-> p1], [ep |-> 2, s |-> s2, p |-> p2]}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> TRUE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> p1, stage |-> "initiated", listed |-> {p1, p2}] )
+/\ cell = [ep |-> 2, tok |-> 4, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> TRUE)
+
+State 21: <BatchComplete line 834, col 3 to line 848, col 50 of module ForgeSyncKeptSet>
+/\ claimBudget = 1
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 5
+/\ snap = [etag |-> 3, main |-> 0, packs |-> {}, history |-> {}]
+/\ pushTo = (p1 :> s2 @@ p2 :> s2)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "sent")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> TRUE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 2)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 2, tok |-> 4])
+/\ ackNotDurable = FALSE
+/\ idxObj = {p1, p2}
+/\ localPacks = (s1 :> {} @@ s2 :> {p1, p2})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "restoring" @@ s2 :> "pushing")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, p2}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 1)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 3, main |-> 0, packs |-> {}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 2
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> TRUE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> p1, stage |-> "uploaded", listed |-> {p1, p2}] )
+/\ cell = [ep |-> 2, tok |-> 4, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> TRUE)
+
+State 22: <BatchCas line 861, col 3 to line 882, col 27 of module ForgeSyncKeptSet>
+/\ claimBudget = 1
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 6
+/\ snap = [etag |-> 5, main |-> p1, packs |-> {p1, p2}, history |-> {p1}]
+/\ pushTo = (p1 :> s2 @@ p2 :> s2)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "sent")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> TRUE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 2)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 2, tok |-> 4])
+/\ ackNotDurable = FALSE
+/\ idxObj = {p1, p2}
+/\ localPacks = (s1 :> {} @@ s2 :> {p1, p2})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> 0 @@ s2 :> 0)
+/\ st = (s1 :> "restoring" @@ s2 :> "pushing")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, p2}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 1)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 0, main |-> 0, packs |-> {}] @@
+  s2 :> [etag |-> 5, main |-> p1, packs |-> {p1, p2}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 2
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> FALSE @@ s2 :> TRUE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> p1, stage |-> "cas", listed |-> {p1, p2}] )
+/\ cell = [ep |-> 2, tok |-> 4, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> FALSE @@ s2 :> TRUE)
+
+State 23: <Restore line 509, col 3 to line 581, col 27 of module ForgeSyncKeptSet>
+/\ claimBudget = 1
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 6
+/\ snap = [etag |-> 5, main |-> p1, packs |-> {p1, p2}, history |-> {p1}]
+/\ pushTo = (p1 :> s2 @@ p2 :> s2)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "sent")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> TRUE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 2)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 2, tok |-> 4])
+/\ ackNotDurable = FALSE
+/\ idxObj = {p1, p2}
+/\ localPacks = (s1 :> {p1, p2} @@ s2 :> {p1, p2})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> p1 @@ s2 :> 0)
+/\ st = (s1 :> "reclaiming" @@ s2 :> "pushing")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, p2}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 1)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 5, main |-> p1, packs |-> {p1, p2}] @@
+  s2 :> [etag |-> 5, main |-> p1, packs |-> {p1, p2}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 2
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> TRUE @@ s2 :> TRUE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> p1, stage |-> "cas", listed |-> {p1, p2}] )
+/\ cell = [ep |-> 2, tok |-> 4, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> TRUE @@ s2 :> TRUE)
+
+State 24: <KeptSetRead line 1331, col 3 to line 1359, col 50 of module ForgeSyncKeptSet>
+/\ claimBudget = 1
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 6
+/\ snap = [etag |-> 5, main |-> p1, packs |-> {p1, p2}, history |-> {p1}]
+/\ pushTo = (p1 :> s2 @@ p2 :> s2)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "sent")
+/\ fold = ( s1 :>
+      [ stage |-> "keptRenewed",
+        id |-> 0,
+        inputs |-> {p2},
+        base |-> FALSE,
+        at |-> {p1},
+        atRest |-> TRUE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> TRUE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 2)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 2, tok |-> 4])
+/\ ackNotDurable = FALSE
+/\ idxObj = {p1, p2}
+/\ localPacks = (s1 :> {p1, p2} @@ s2 :> {p1, p2})
+/\ stragglerLand = FALSE
+/\ localMain = (s1 :> p1 @@ s2 :> 0)
+/\ st = (s1 :> "reclaiming" @@ s2 :> "pushing")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, p2}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 1)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 5, main |-> p1, packs |-> {p1, p2}] @@
+  s2 :> [etag |-> 5, main |-> p1, packs |-> {p1, p2}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 2
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> TRUE @@ s2 :> TRUE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> p1, stage |-> "cas", listed |-> {p1, p2}] )
+/\ cell = [ep |-> 2, tok |-> 4, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> TRUE @@ s2 :> TRUE)
+
+State 25: <KeptSetCommit line 1367, col 3 to line 1388, col 27 of module ForgeSyncKeptSet>
+/\ claimBudget = 1
+/\ retained = (s1 :> {} @@ s2 :> {})
+/\ nextTok = 7
+/\ snap = [etag |-> 6, main |-> p1, packs |-> {p1}, history |-> {p1}]
+/\ pushTo = (p1 :> s2 @@ p2 :> s2)
+/\ unrestorable = FALSE
+/\ provedOffBucket = FALSE
+/\ skipOverMovement = FALSE
+/\ pushState = (p1 :> "sent" @@ p2 :> "sent")
+/\ fold = ( s1 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] @@
+  s2 :>
+      [ stage |-> "none",
+        id |-> 0,
+        inputs |-> {},
+        base |-> FALSE,
+        at |-> {},
+        atRest |-> FALSE ] )
+/\ hbDue = (s1 :> TRUE @@ s2 :> FALSE)
+/\ quiet = (s1 :> 0 @@ s2 :> 2)
+/\ lease = (s1 :> [ep |-> 1, tok |-> 1] @@ s2 :> [ep |-> 2, tok |-> 4])
+/\ ackNotDurable = FALSE
+/\ idxObj = {p1, p2}
+/\ localPacks = (s1 :> {p1} @@ s2 :> {p1, p2})
+/\ stragglerLand = TRUE
+/\ localMain = (s1 :> p1 @@ s2 :> 0)
+/\ st = (s1 :> "serving" @@ s2 :> "pushing")
+/\ holds = (p1 :> {p1} @@ p2 :> {p2} @@ f1 :> {})
+/\ packObj = {p1, p2}
+/\ migrating = (s1 :> {} @@ s2 :> {})
+/\ lastTok = (s1 :> 0 @@ s2 :> 1)
+/\ crashes = 0
+/\ foldBudget = 1
+/\ belief = ( s1 :> [etag |-> 6, main |-> p1, packs |-> {p1}] @@
+  s2 :> [etag |-> 5, main |-> p1, packs |-> {p1, p2}] )
+/\ renewOverWedge = FALSE
+/\ renewBudget = 2
+/\ provedOverRetained = FALSE
+/\ toldFailedButDurable = FALSE
+/\ uploads = {}
+/\ sensorMoved = (s1 :> TRUE @@ s2 :> TRUE)
+/\ batch = ( s1 :> [push |-> 0, stage |-> "none", listed |-> {}] @@
+  s2 :> [push |-> p1, stage |-> "cas", listed |-> {p1, p2}] )
+/\ cell = [ep |-> 2, tok |-> 4, held |-> TRUE, holder |-> s2, released |-> FALSE]
+/\ realMoved = (s1 :> TRUE @@ s2 :> TRUE)
+
+3833532 states generated, 1060725 distinct states found, 291692 states left on queue.
+The depth of the complete state graph search is 26.
+The average outdegree of the complete state graph is 1 (minimum is 0, the maximum 18 and the 95th percentile is 4).
+Finished in 01min 52s at (2026-09-29 16:47:52)

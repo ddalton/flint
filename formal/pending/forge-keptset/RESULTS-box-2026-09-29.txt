@@ -1,0 +1,5 @@
+TLC .tla2tools.jar, ForgeSyncKeptSet.tla d20e865177f302063cfd6d048c2a8972, 2 workers, -Xmx8g, 21600s a world; started 2026-09-29 23:31:20
+ForgeSyncKeptSetOffLive          OK-HOLDS           exp=HOLDS                                      rc=0   | No error has been found | 6582985 states generated, 1781559 distinct states found depth of the complete state graph search is 41 | 834s
+ForgeSyncKeptSetLive             OK-HOLDS           exp=HOLDS                                      rc=0   | No error has been found | 5660657 states generated, 1500985 distinct states found depth of the complete state graph search is 41 | 451s
+ForgeSyncKeptSetHolds            OK-HOLDS           exp=HOLDS                                      rc=0   | No error has been found | 421313020 states generated, 86289224 distinct states found depth of the complete state graph search is 62 | 4966s
+TLC .tla2tools.jar, ForgeSyncKeptSet.tla d20e865177f302063cfd6d048c2a8972, 2 workers, -Xmx8g, 21600s a world; started 2026-09-30 01:15:49

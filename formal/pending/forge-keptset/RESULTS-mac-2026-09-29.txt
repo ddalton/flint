@@ -1,0 +1,8 @@
+TLC .tla2tools.jar, ForgeSyncKeptSet.tla d20e865177f302063cfd6d048c2a8972, 2 workers, -Xmx2g, 900s a world; started 2026-09-29 16:30:39
+ForgeSyncKeptSetAnyDrop          OK-FIRES           exp=Inv_(AckedIsDurable|LandedPackComplete)    rc=12  | Error: Invariant Inv_LandedPackComplete is violated | 795141 states generated, 235696 distinct states found depth of the complete state graph search is 21 | 15s
+ForgeSyncKeptSetVsOriginal       UNDECIDED-TIMEOUT  exp=Inv_(AckedIsDurable|LandedPackComplete)    rc=143 |  |   | 904s
+ForgeSyncKeptSetNoRenew          OK-FIRES           exp=Inv_NoStragglerLandAfterRestore            rc=12  | Error: Invariant Inv_NoStragglerLandAfterRestore is violated | 3833532 states generated, 1060725 distinct states found depth of the complete state graph search is 26 | 115s
+ForgeSyncKeptSetProbeCommits     OK-FIRES           exp=ProbeKeptSetCommits                        rc=13  | Error: Action property ProbeKeptSetCommits is violated | 796087 states generated, 236414 distinct states found depth of the complete state graph search is 21 | 26s
+ForgeSyncKeptSetProbeResidue     OK-FIRES           exp=ProbeKeptSetDropsResidue                   rc=13  | Error: Action property ProbeKeptSetDropsResidue is violated | 806012 states generated, 239371 distinct states found depth of the complete state graph search is 21 | 25s
+ForgeSyncKeptSetProbeCovered     UNDECIDED-TIMEOUT  exp=ProbeKeptSetDropsCovered                   rc=143 |  |   | 905s
+ForgeSyncKeptSetWhileServing     OK-FIRES           exp=Inv_(AckedIsDurable|LandedPackComplete)    rc=12  | Error: Invariant Inv_LandedPackComplete is violated | 2461305 states generated, 693930 distinct states found depth of the complete state graph search is 24 | 101s
