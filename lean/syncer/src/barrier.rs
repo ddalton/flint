@@ -97,6 +97,20 @@ pub struct BarrierReport {
 const UPLOAD_CHUNK_WAVES: usize = 16;
 
 
+
+/// What a consume's read of the document established, for the barrier's
+/// no-change fast path (which must not pay for the same read twice).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Seen {
+    /// The pointer at this (seq, etag).
+    Pointer(u64, String),
+    /// Neither the pointer nor the legacy object exists: nothing has ever
+    /// been published here. Both reads happened in this pass.
+    Nothing,
+    /// A legacy single-object document (no pointer); the fast path asks.
+    Legacy,
+}
+
 impl Syncer {
     /// Verify the cell still names us at OUR epoch; anything else is a
     /// fence. Read-verify before the manifest CAS (the per-request
@@ -130,10 +144,11 @@ impl Syncer {
     /// delete override). Unless its bytes already ARE the document's —
     /// a restart between this writer's CAS and step 7 leaves exactly
     /// that — and then the baseline simply follows (content convergence).
-    /// Returns how many paths it took, and the pointer's (seq, etag) as it
-    /// read them — the barrier's fast path needs exactly that, and must not
-    /// pay a second GET for it (an idle tick is the cell and the pointer).
-    pub async fn consume_owed(&mut self) -> LeanResult<(usize, Option<(u64, String)>)> {
+    /// Returns how many paths it took, and what its read of the document
+    /// established ([`Seen`]) — the barrier's fast path needs exactly that,
+    /// and must not pay a second GET for it (an idle tick is the cell and
+    /// the pointer).
+    pub async fn consume_owed(&mut self) -> LeanResult<(usize, Seen)> {
         let mut baseline = self.state.load_baseline()?;
         // THE CHEAP PATH (scan trigger). Only three things make a path
         // newly owed: the document moved (the pointer is not the one last
@@ -142,19 +157,28 @@ impl Syncer {
         // tree's own commit, which moves the pointer too), or the agent
         // backed out of a path the last derive skipped as its work. So: one
         // small GET, a stat per skipped path, never the entries.
+        //
+        // The pointer read here is handed to the load below rather than
+        // read again: a moved pointer needs the document behind THAT read,
+        // and an absent one sends the load straight to the legacy key.
+        let mut read: Option<Option<manifest::LoadedPointer>> = None;
         if let Some(d) = baseline.derived_etag.clone() {
-            if let Some(p) = manifest::load_pointer(self.store.as_ref(), &self.cfg).await? {
+            let lp = manifest::load_pointer(self.store.as_ref(), &self.cfg).await?;
+            if let Some(p) = &lp {
                 let still_theirs = baseline.skipped.iter().all(|path| {
                     check_contained(&self.cfg.root, path).is_ok()
                         && local_dirty(&self.cfg.root.join(path), baseline.entries.get(path))
                 });
                 if d == p.etag && still_theirs {
-                    return Ok((0, Some((p.pointer.seq, p.etag))));
+                    return Ok((0, Seen::Pointer(p.pointer.seq, p.etag.clone())));
                 }
             }
+            read = Some(lp);
         }
-        let Some(current) = manifest::load(self.store.as_ref(), &self.cfg).await? else {
-            return Ok((0, None));
+        let Some(current) = manifest::load_from(self.store.as_ref(), &self.cfg, read).await? else {
+            // Neither the pointer nor the legacy object exists: nothing
+            // has ever been published here, and this pass read both.
+            return Ok((0, Seen::Nothing));
         };
         let doc = &current.manifest;
         // H10: whatever this barrier does next — the fast path included —
@@ -386,7 +410,10 @@ impl Syncer {
         self.state.save_baseline(&baseline)?;
         // The pointer as this load saw it (a legacy single object has none,
         // and the fast path asks the bucket itself).
-        let seen = current.pointer.as_ref().map(|_| (doc.seq, current.etag.clone()));
+        let seen = match &current.pointer {
+            Some(_) => Seen::Pointer(doc.seq, current.etag.clone()),
+            None => Seen::Legacy,
+        };
         Ok((taken, seen))
     }
 
@@ -656,18 +683,27 @@ impl Syncer {
             // Legacy workspaces (no pointer yet) keep the HEAD they had.
             let pointer = match seen_pointer {
                 // The consume just read it: no second GET.
-                Some((seq, etag)) => Some((seq, etag)),
-                None => manifest::load_pointer(self.store.as_ref(), &self.cfg).await?.map(|l| (l.pointer.seq, l.etag)),
+                Seen::Pointer(seq, etag) => Some(Some((seq, etag))),
+                // The consume read the pointer AND the legacy key and found
+                // neither: decided below with no request at all.
+                Seen::Nothing => None,
+                Seen::Legacy => Some(
+                    manifest::load_pointer(self.store.as_ref(), &self.cfg).await?.map(|l| (l.pointer.seq, l.etag)),
+                ),
             };
             let unchanged = match pointer {
-                Some((seq, etag)) => {
+                // Nothing published: the answer the 404 arm reaches, read
+                // once in this pass instead of three times (B8 trace,
+                // 2026-10-03: three pointer GETs and a legacy HEAD a tick).
+                None => baseline.manifest_etag.is_none(),
+                Some(Some((seq, etag))) => {
                     // The news ticker rides this request for free — D5's
                     // "zero added bucket requests" is still literal.
                     report.observed_seq = Some(seq);
                     report.observed_etag = Some(etag.clone());
                     baseline.manifest_etag.as_deref() == Some(etag.as_str())
                 }
-                None => match self.store.head(&self.cfg.manifest_key()).await {
+                Some(None) => match self.store.head(&self.cfg.manifest_key()).await {
                     Ok(meta) => {
                         report.observed_seq =
                             GenerationStamps::from_meta(&meta.meta).map(|s| s.generation);

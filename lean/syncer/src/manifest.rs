@@ -316,10 +316,25 @@ pub async fn load(
     store: &dyn ObjectStore,
     cfg: &LeanConfig,
 ) -> LeanResult<Option<LoadedManifest>> {
+    load_from(store, cfg, None).await
+}
+
+/// [`load`], starting from a pointer read the caller ALREADY made
+/// (`Some(None)`: it 404'd), so the first attempt does not GET it again —
+/// the consume's cheap path reads the pointer and, when it has moved or is
+/// absent, needs the document behind that same read. A restart onto a
+/// newer generation reads the pointer afresh, as `load` always did.
+pub async fn load_from(
+    store: &dyn ObjectStore,
+    cfg: &LeanConfig,
+    mut first: Option<Option<LoadedPointer>>,
+) -> LeanResult<Option<LoadedManifest>> {
   for attempt in 0..LOAD_ATTEMPTS {
-    if let Some(LoadedPointer { pointer: p, etag, last_modified_unix: pointer_lm }) =
-        load_pointer(store, cfg).await?
-    {
+    let read = match first.take() {
+        Some(already) => already,
+        None => load_pointer(store, cfg).await?,
+    };
+    if let Some(LoadedPointer { pointer: p, etag, last_modified_unix: pointer_lm }) = read {
         // A pointer naming an object that is not there is not an empty
         // workspace — it is a broken one, and answering `None` would
         // invite a re-seed over a live project. That rule holds one

@@ -64,6 +64,14 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **lean: an idle tick reads the manifest pointer once** (2026-10-03).
+  On a workspace that has never published, every floor tick asked for
+  the pointer three times and then HEADed the legacy key, all 404s:
+  six requests where three answer it. The consume now hands the pointer
+  it read to the document load and tells the no-change path what it
+  found. A consume whose pointer had moved also stops reading it twice.
+  A published workspace's idle tick stays the inbox and the pointer.
+
 - **flint-s3-csi: a busy shared mounter is no longer replaced as if it
   were dead** (2026-10-03, `s3csi/SECURITY.md` §4.12). A pod joining a
   shared read-only class checked the class's mounter with a 3 s statfs

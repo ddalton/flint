@@ -9861,6 +9861,41 @@ async fn the_fence_costs_a_publishing_boundary_four_cell_requests_and_an_idle_on
     assert_eq!(ops.get("epoch_enqueue"), None, "{ops:?}");
 }
 
+/// The idle tick of a workspace that has NEVER published: it must learn
+/// "nothing is published" once — the pointer 404s, the legacy key 404s —
+/// and act on that. The e2e B8 trace (2026-10-03) showed six requests a
+/// tick: the consume's cheap path GET the pointer, `manifest::load` GET it
+/// again before trying the legacy key, and the fast path, told nothing,
+/// GET it a third time and HEADed the legacy key. The tick is the inbox,
+/// the pointer and the legacy key, each read once, and no HEAD.
+#[tokio::test]
+async fn an_idle_tick_on_a_never_published_workspace_reads_the_pointer_once() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.checkout().await.unwrap();
+    let first = a.floor_tick().await.unwrap();
+    assert!(first.no_change, "fixture: an empty tree publishes nothing");
+
+    store.reset_op_counts();
+    let idle = a.floor_tick().await.unwrap();
+    assert!(idle.no_change);
+    let ops = store.op_counts();
+    // After the counts are taken: this read is the fixture's, not the tick's.
+    assert!(
+        matches!(store.get_whole(&a.cfg.current_key(), None).await, Err(StoreError::NotFound(_))),
+        "fixture: the workspace has never published"
+    );
+    assert!(!ops.keys().any(|k| k.starts_with("epoch_")), "an idle tick touched the cell: {ops:?}");
+    assert_eq!(ops.get("head").copied().unwrap_or(0), 0, "the legacy key was HEADed after a GET already said it is absent: {ops:?}");
+    assert_eq!(
+        ops.get("get_whole").copied().unwrap_or(0),
+        3,
+        "an idle never-published tick is the inbox, the pointer and the legacy key, once each: {ops:?}"
+    );
+    assert_eq!(ops.values().sum::<u64>(), 3, "{ops:?}");
+}
+
 /// A PULL-ONLY boundary — the manifest moved, and this writer has nothing
 /// of its own to publish, delete, consume or re-cite — writes nothing to
 /// the bucket: its merge adds nothing, so there is no CAS, no GC and no
