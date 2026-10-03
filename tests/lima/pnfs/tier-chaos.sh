@@ -252,9 +252,11 @@ lsof -nP -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1 && fail "port $PORT already he
 
 cleanup
 rm -f /tmp/flint-chaos-*.log
-docker run -d --name "$MINIO_NAME" -p 127.0.0.1:$MINIO_PORT:9000 \
+# quay.io/minio/minio stopped pulling in 2026-09; Chainguard's build is the
+# same server, but runs as non-root, hence the tmpfs /data.
+docker run -d --name "$MINIO_NAME" -p 127.0.0.1:$MINIO_PORT:9000 --tmpfs /data \
   -e MINIO_ROOT_USER=$MINIO_USER -e MINIO_ROOT_PASSWORD=$MINIO_PASS \
-  quay.io/minio/minio server /data >/dev/null || fail "MinIO failed to start"
+  cgr.dev/chainguard/minio:latest server /data >/dev/null || fail "MinIO failed to start"
 for _ in $(seq 1 30); do
   curl -sf "http://127.0.0.1:$MINIO_PORT/minio/health/live" >/dev/null && break; sleep 1
 done

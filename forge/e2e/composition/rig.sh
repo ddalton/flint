@@ -150,9 +150,11 @@ rig_init() {
     say "docker is not answering"; return 1; }
   if ! docker ps --filter "name=$MINIO_NAME" --format '{{.Names}}' | grep -q "$MINIO_NAME"; then
     docker rm -f "$MINIO_NAME" >/dev/null 2>&1
-    docker run -d --name "$MINIO_NAME" -p "${MINIO_PORT}:9000" \
+    # quay.io/minio/minio stopped pulling in 2026-09; Chainguard's build is the
+    # same server, but runs as non-root, hence the tmpfs /data.
+    docker run -d --name "$MINIO_NAME" -p "${MINIO_PORT}:9000" --tmpfs /data \
       -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-      quay.io/minio/minio:latest server /data >/dev/null || return 1
+      cgr.dev/chainguard/minio:latest server /data >/dev/null || return 1
     for _ in $(seq 1 30); do
       aws s3api list-buckets >/dev/null 2>&1 && break; sleep 1
     done

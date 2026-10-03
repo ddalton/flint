@@ -28,12 +28,14 @@ spec:
     spec:
       containers:
         - name: minio
-          image: minio/minio
+          image: cgr.dev/chainguard/minio:latest
           args: ["server", "/data", "--address", ":9000"]
           env:
             - { name: MINIO_ROOT_USER, value: drill }
             - { name: MINIO_ROOT_PASSWORD, value: drillsecret }
           ports: [{ containerPort: 9000 }]
+          volumeMounts: [{ name: data, mountPath: /data }]
+      volumes: [{ name: data, emptyDir: {} }]
 ---
 apiVersion: v1
 kind: Service
@@ -52,7 +54,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: mc
-          image: minio/mc
+          image: cgr.dev/chainguard/minio-client:latest-dev
           command:
             - /bin/sh
             - -c
@@ -68,7 +70,7 @@ metadata: { name: mc-s3, namespace: forge-system }
 spec:
   containers:
     - name: mc
-      image: minio/mc
+      image: cgr.dev/chainguard/minio-client:latest-dev
       command: ["/bin/sh", "-c", "until mc alias set m http://minio.forge-system.svc:9000 drill drillsecret; do sleep 2; done; sleep infinity"]
 ---
 # The syncer reads these through envFrom, so THE KEYS ARE THE ENV VAR

@@ -88,7 +88,7 @@ mcx() {
         # Through cluster 1's mc pod, with the workers' own key.
         kubectl --context "$X1" -n $SYS exec -i mc-s3 -- mc "$@" 2>/dev/null
     else
-        docker run --rm -i --network kind -e "MC_HOST_m=http://drill:drillsecret@$(minio_ip):9000" minio/mc "$@" 2>/dev/null
+        docker run --rm -i --network kind -e "MC_HOST_m=http://drill:drillsecret@$(minio_ip):9000" cgr.dev/chainguard/minio-client:latest "$@" 2>/dev/null
     fi
 }
 # One cluster's fixtures, rendered for the store.
@@ -229,10 +229,12 @@ fi
 if [ "${1:-}" = "setup" ]; then
     set -e
     if ! docker inspect "$MINIO" >/dev/null 2>&1; then
-        docker run -d --name "$MINIO" --network kind -e MINIO_ROOT_USER=drill -e MINIO_ROOT_PASSWORD=drillsecret \
-            minio/minio server /data --console-address :9001 >/dev/null
+        # minio/minio and minio/mc stopped pulling in 2026-09; Chainguard's build is the
+        # same server, but runs as non-root, hence the tmpfs /data.
+        docker run -d --name "$MINIO" --network kind --tmpfs /data -e MINIO_ROOT_USER=drill -e MINIO_ROOT_PASSWORD=drillsecret \
+            cgr.dev/chainguard/minio:latest server /data --console-address :9001 >/dev/null
     fi
-    for i in $(seq 1 30); do docker exec "$MINIO" curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null 2>&1 && break; sleep 1; done
+    for i in $(seq 1 30); do docker exec -e MC_HOST_l=http://drill:drillsecret@127.0.0.1:9000 "$MINIO" mc ready l >/dev/null 2>&1 && break; sleep 1; done
     IP=$(minio_ip); echo "MinIO (outside both clusters): http://$IP:9000"
     mcx mb --ignore-existing "m/$BUCKET" >/dev/null
     seed

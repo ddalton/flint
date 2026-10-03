@@ -496,7 +496,7 @@ spec:
     spec:
       containers:
         - name: minio
-          image: quay.io/minio/minio
+          image: cgr.dev/chainguard/minio:latest
           args: ["server", "/data"]
           env:
             - { name: MINIO_ROOT_USER, value: "$MINIO_USER" }

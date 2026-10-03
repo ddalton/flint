@@ -28,7 +28,7 @@ metadata: { name: mc-s3, namespace: flint-system }
 spec:
   containers:
     - name: mc
-      image: quay.io/minio/mc:latest
+      image: cgr.dev/chainguard/minio-client:latest-dev
       command: ["/bin/sh", "-c"]
       args:
         - |

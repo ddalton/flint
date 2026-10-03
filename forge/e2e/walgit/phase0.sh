@@ -74,9 +74,11 @@ say "  work: $WORK"
 head_ "MinIO and walgit"
 docker rm -f "$SRV" "$MINIO_NAME" >/dev/null 2>&1; docker network rm "$NET" >/dev/null 2>&1
 docker network create "$NET" >/dev/null || { bad "network"; exit 1; }
-docker run -d --name "$MINIO_NAME" --network "$NET" -p "127.0.0.1:${MINIO_PORT}:9000" \
+# quay.io/minio/minio stopped pulling in 2026-09; Chainguard's build is the
+# same server, but runs as non-root, hence the tmpfs /data.
+docker run -d --name "$MINIO_NAME" --network "$NET" -p "127.0.0.1:${MINIO_PORT}:9000" --tmpfs /data \
   -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-  quay.io/minio/minio:latest server /data >/dev/null || { bad "minio did not start"; exit 1; }
+  cgr.dev/chainguard/minio:latest server /data >/dev/null || { bad "minio did not start"; exit 1; }
 for i in $(seq 1 30); do curl -sf "http://127.0.0.1:${MINIO_PORT}/minio/health/live" >/dev/null && break; sleep 1; done
 aws s3api create-bucket --bucket "$BUCKET" >/dev/null 2>&1 && ok "minio up on :$MINIO_PORT, bucket $BUCKET" || { bad "bucket"; exit 1; }
 

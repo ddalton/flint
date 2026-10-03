@@ -66,9 +66,11 @@ cleanup() { docker rm -f $NAME >/dev/null 2>&1; }
 
 echo "work dir: $WORK"
 cleanup
-docker run -d --name $NAME -p $PORT:9000 \
+# quay.io/minio/minio stopped pulling in 2026-09; Chainguard's build is the
+# same server, but runs as non-root, hence the tmpfs /data.
+docker run -d --name $NAME -p $PORT:9000 --tmpfs /data \
     -e MINIO_ROOT_USER=$ROOT_AK -e MINIO_ROOT_PASSWORD=$ROOT_SK \
-    quay.io/minio/minio:latest server /data >/dev/null || { echo "docker run failed"; exit 1; }
+    cgr.dev/chainguard/minio:latest server /data >/dev/null || { echo "docker run failed"; exit 1; }
 for _ in $(seq 1 60); do
     curl -fsS "$EP/minio/health/ready" >/dev/null 2>&1 && break
     sleep 1

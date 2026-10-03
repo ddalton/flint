@@ -204,9 +204,11 @@ chmod 0777 "$EXPORT_DIR"
 # ── MinIO up + bucket ─────────────────────────────────────────────────
 say "starting MinIO"
 docker rm -f "$MINIO_NAME" >/dev/null 2>&1
-docker run -d --name "$MINIO_NAME" -p 127.0.0.1:$MINIO_PORT:9000 \
+# quay.io/minio/minio stopped pulling in 2026-09; Chainguard's build is the
+# same server, but runs as non-root, hence the tmpfs /data.
+docker run -d --name "$MINIO_NAME" -p 127.0.0.1:$MINIO_PORT:9000 --tmpfs /data \
   -e MINIO_ROOT_USER=$MINIO_USER -e MINIO_ROOT_PASSWORD=$MINIO_PASS \
-  quay.io/minio/minio server /data >/dev/null \
+  cgr.dev/chainguard/minio:latest server /data >/dev/null \
   || fail "MinIO container failed to start"
 for _ in $(seq 1 30); do
   curl -sf "http://127.0.0.1:$MINIO_PORT/minio/health/live" >/dev/null && break

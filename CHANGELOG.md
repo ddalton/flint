@@ -49,6 +49,20 @@ covered by the stability guarantee.
   instead of generation 4, and S34 read the veth peer from the node's
   sysfs instead of the pod's netns, so it never shaped the link.
 
+### Changed
+
+- **The agent-fleets guide and every test rig take MinIO from
+  Chainguard's image** (2026-10-03). MinIO's own images no longer pull
+  anonymously (Docker Hub denies `minio/minio` and `minio/mc`; quay.io
+  answers 401), so the guide's in-cluster store, the lean, forge, s3csi
+  multi-cluster, lima and `tests/regression` rigs now use
+  `cgr.dev/chainguard/minio` and `cgr.dev/chainguard/minio-client`, the
+  same server and client. It runs as non-root: `/data` must be a volume
+  (an emptyDir, or `--tmpfs /data` under `docker run`); without one it
+  stops at startup with "Rename across devices not allowed". The guide
+  already mounted one. The lean e2e suites can also run against RustFS
+  (`lean/e2e/rustfs.yaml`) and say which store answered.
+
 ### Fixed
 
 - **flint-s3-broker: an API server that did not answer a TokenReview no

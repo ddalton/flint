@@ -25,12 +25,14 @@ spec:
     spec:
       containers:
         - name: minio
-          image: quay.io/minio/minio:latest
+          image: cgr.dev/chainguard/minio:latest
           args: ["server", "/data", "--console-address", ":9001"]
           env:
             - { name: MINIO_ROOT_USER, value: drill }
             - { name: MINIO_ROOT_PASSWORD, value: drillsecret }
           ports: [{ containerPort: 9000 }]
+          volumeMounts: [{ name: data, mountPath: /data }]
+      volumes: [{ name: data, emptyDir: {} }]
 ---
 apiVersion: v1
 kind: Service
@@ -48,7 +50,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: mc
-          image: quay.io/minio/mc:latest
+          image: cgr.dev/chainguard/minio-client:latest-dev
           command: ["sh", "-c"]
           args:
             - |
@@ -62,7 +64,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: mc
-      image: quay.io/minio/mc:latest
+      image: cgr.dev/chainguard/minio-client:latest-dev
       command: ["sh", "-c"]
       args:
         - |

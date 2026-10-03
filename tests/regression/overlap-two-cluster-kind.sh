@@ -156,10 +156,12 @@ kind create cluster --name "$CB" --wait 120s >/dev/null 2>&1 || fail "cluster $C
 # MinIO lives OUTSIDE both clusters, on the network kind put them on, so
 # neither API server has any view of the other's shares while both hubs
 # write to one bucket. That is the condition being tested.
+# quay.io/minio/minio stopped pulling in 2026-09; Chainguard's build is the
+# same server, but runs as non-root, hence the tmpfs /data.
 docker run -d --name "$MINIO_CT" --network kind \
-  -p "$MINIO_HOSTPORT:9000" \
+  -p "$MINIO_HOSTPORT:9000" --tmpfs /data \
   -e "MINIO_ROOT_USER=$MINIO_USER" -e "MINIO_ROOT_PASSWORD=$MINIO_PASS" \
-  quay.io/minio/minio server /data >/dev/null 2>&1 \
+  cgr.dev/chainguard/minio:latest server /data >/dev/null 2>&1 \
   || fail "could not start MinIO"
 MINIO_IP=$(docker inspect -f '{{.NetworkSettings.Networks.kind.IPAddress}}' "$MINIO_CT")
 [ -n "$MINIO_IP" ] || fail "MinIO has no address on the kind network"

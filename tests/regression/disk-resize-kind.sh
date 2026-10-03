@@ -165,12 +165,14 @@ spec:
     spec:
       containers:
         - name: minio
-          image: quay.io/minio/minio
+          image: cgr.dev/chainguard/minio:latest
           args: ["server", "/data"]
           env:
             - { name: MINIO_ROOT_USER, value: "$MINIO_USER" }
             - { name: MINIO_ROOT_PASSWORD, value: "$MINIO_PASS" }
           ports: [{ containerPort: 9000 }]
+          volumeMounts: [{ name: data, mountPath: /data }]
+      volumes: [{ name: data, emptyDir: {} }]
 ---
 apiVersion: v1
 kind: Service

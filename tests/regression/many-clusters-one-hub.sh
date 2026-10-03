@@ -178,9 +178,11 @@ rm -f "$KUBECONFIG"
 for c in "$CA" "$CB" "$CC"; do
   kind create cluster --name "$c" --wait 150s >/dev/null 2>&1 || fail "cluster $c never came up"
 done
-docker run -d --name "$MINIO_CT" --network kind -p "$MINIO_HOSTPORT:9000" \
+# quay.io/minio/minio stopped pulling in 2026-09; Chainguard's build is the
+# same server, but runs as non-root, hence the tmpfs /data.
+docker run -d --name "$MINIO_CT" --network kind -p "$MINIO_HOSTPORT:9000" --tmpfs /data \
   -e "MINIO_ROOT_USER=$MINIO_USER" -e "MINIO_ROOT_PASSWORD=$MINIO_PASS" \
-  quay.io/minio/minio server /data >/dev/null 2>&1 || fail "could not start MinIO"
+  cgr.dev/chainguard/minio:latest server /data >/dev/null 2>&1 || fail "could not start MinIO"
 MINIO_IP=$(docker inspect -f '{{.NetworkSettings.Networks.kind.IPAddress}}' "$MINIO_CT")
 for _ in $(seq 1 60); do curl -sf "http://127.0.0.1:$MINIO_HOSTPORT/minio/health/live" >/dev/null && break; sleep 1; done
 curl -sf "http://127.0.0.1:$MINIO_HOSTPORT/minio/health/live" >/dev/null || fail "MinIO never became live"
