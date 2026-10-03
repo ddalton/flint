@@ -1,0 +1,3 @@
+2026-10-03T21:38:53Z FULLFIX start: fixed build, 32 workers, -fpmem 48000 -queue-mem 80000 -checkpoint 0
+Terminated
+2026-10-03T22:08:18Z FULLFIX rc=143 |  | 

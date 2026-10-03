@@ -1,0 +1,10 @@
+2026-10-03T22:50:33Z PGO instrumented built
+/opt/pgo.sh: line 17: 82247 Killed                  ( cd $M && exec /opt/pgo/gt-inst/release/tlcgen-leanp1 -workers 192 -fpmem 32000 -queue-mem 200000 -checkpoint 0 -metadir /data/tmd -config LeanP1Holds.cfg LeanP1.tla > $O/pgo-train.out 2>&1 )
+/opt/pgo.sh: line 19: kill: (82247) - No such process
+2026-10-03T22:57:33Z PGO train |  | profraw 2 796K
+2026-10-03T22:58:14Z PGO pgo built | missing-profile warnings: 0
+2026-10-03T23:01:25Z PGO fix2-a | d18 115558624 gen=393173835 43.4s d20 244874921 gen=864890896 99.5s d21 332753224 gen=1195150636 140.3s d22 433073022 gen=1574761223 188.7s 
+2026-10-03T23:04:20Z PGO pgo-a | d18 115558624 gen=393173835 42.3s d20 244874921 gen=864890896 94.0s d21 332753224 gen=1195150636 130.6s d22 433073022 gen=1574761223 173.5s 
+2026-10-03T23:07:29Z PGO fix2-b | d18 115558624 gen=393173835 43.7s d20 244874921 gen=864890896 100.1s d21 332753224 gen=1195150636 141.1s d22 433073022 gen=1574761223 188.3s 
+2026-10-03T23:10:21Z PGO pgo-b | d18 115558624 gen=393173835 42.2s d20 244874921 gen=864890896 93.1s d21 332753224 gen=1195150636 128.8s d22 433073022 gen=1574761223 170.6s 
+2026-10-03T23:10:21Z PGO DONE

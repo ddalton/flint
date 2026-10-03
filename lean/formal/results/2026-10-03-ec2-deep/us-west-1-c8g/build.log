@@ -1,0 +1,27 @@
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded mimalloc v0.1.52
+  Downloaded find-msvc-tools v0.1.14
+  Downloaded cc v1.5.1
+  Downloaded shlex v2.0.1
+  Downloaded libmimalloc-sys v0.1.49
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.14
+   Compiling cc v1.5.1
+   Compiling libmimalloc-sys v0.1.49
+   Compiling mimalloc v0.1.52
+   Compiling tlc-rs v0.1.0 (/opt/payload/tlc-rs)
+    Finished `release` profile [optimized] target(s) in 22.47s
+tlc-rs: generated a checker for LeanP1 in /opt/gen (0.004s)
+    Updating crates.io index
+     Locking 6 packages to highest Rust 1.99.0 compatible versions
+ Downloading crates ...
+  Downloaded cc v1.6.0
+   Compiling find-msvc-tools v0.1.14
+   Compiling shlex v2.0.1
+   Compiling cc v1.6.0
+   Compiling libmimalloc-sys v0.1.49
+   Compiling mimalloc v0.1.52
+   Compiling tlc-rs v0.1.0 (/opt/payload/tlc-rs)
+   Compiling tlcgen-leanp1 v0.1.0 (/opt/gen)
+    Finished `release` profile [optimized] target(s) in 29.73s

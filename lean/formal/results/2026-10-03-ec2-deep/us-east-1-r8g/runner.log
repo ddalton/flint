@@ -1,0 +1,20 @@
+2026-10-03T20:58:29Z start aarch64 32 cpus
+2026-10-03T20:59:22Z built
+2026-10-03T21:00:17Z SMOKE OK 23s | 11504466 states generated, 3510269 distinct states found. Depth 33
+2026-10-03T21:10:18Z w8 rc=124 600s | progress: depth 16, 153488933 generated, 46585950 distinct (0 fingerprint spills), 18763897 on queue (0 on disk), 450.8s
+w16 profiled 21:12:51
+2026-10-03T21:20:18Z w16 rc=124 600s | progress: depth 17, 250122473 generated, 74720931 distinct (0 fingerprint spills), 28134981 on queue (0 on disk), 575.7s
+w32 profiled 21:22:52
+2026-10-03T21:30:18Z w32 rc=124 600s | progress: depth 16, 153488933 generated, 46585950 distinct (0 fingerprint spills), 18763897 on queue (0 on disk), 376.1s
+2026-10-03T21:30:18Z full run at 16 workers
+2026-10-03T21:30:21Z full rc=143 |  | 
+DONE
+2026-10-03T21:30:24Z AB stopped the baseline full run for the A/B
+2026-10-03T21:31:49Z AB fix built
+2026-10-03T21:32:05Z AB fix smoke | Model checking completed. No error has been found. | 11504466 states generated, 3510269 distinct states found. Depth 33
+2026-10-03T21:37:35Z AB fix w32 | d14 15688067 29.9s d15 27822053 55.1s d16 46585950 95.6s 
+2026-10-03T21:38:53Z AB stopped by hand after the 32-worker result (user: start the full run)
+2026-10-03T21:38:53Z FULLFIX start: fixed build, 32 workers, -fpmem 48000 -queue-mem 80000 -checkpoint 0
+2026-10-03T22:08:18Z FULLFIX rc=143 |  | 
+FULLFIX-DONE
+2026-10-03T22:08:18Z STOPPED by hand: the c8g fix-2 run superseded it (user)

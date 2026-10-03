@@ -1,0 +1,20 @@
+top - 21:53:25 up 1 min,  0 users,  load average: 72.20, 17.74, 5.92
+Threads: 193 total, 138 running,  55 sleeping,   0 stopped,   0 zombie
+%Cpu(s): 61.2 us,  5.1 sy,  0.0 ni, 33.7 id,  0.1 wa,  0.0 hi,  0.0 si,  0.0 st
+MiB Mem : 380060.8 total, 360220.1 free,  18461.8 used,   1379.0 buff/cache
+MiB Swap:      0.0 total,      0.0 free,      0.0 used. 359515.5 avail Mem 
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+  41430 root      20   0   32.5g  15.3g   2924 R  99.9   4.1   0:00.99 tlcgen-+
+  41405 root      20   0   32.5g  15.3g   2924 R  93.8   4.1   0:01.22 tlcgen-+
+  41528 root      20   0   32.5g  15.3g   2924 R  93.8   4.1   0:01.10 tlcgen-+
+  41568 root      20   0   32.5g  15.3g   2924 S  93.8   4.1   0:01.08 tlcgen-+
+  41406 root      20   0   32.5g  15.3g   2924 R  87.5   4.1   0:01.25 tlcgen-+
+  41413 root      20   0   32.5g  15.3g   2924 S  87.5   4.1   0:01.12 tlcgen-+
+  41415 root      20   0   32.5g  15.3g   2924 R  87.5   4.1   0:01.13 tlcgen-+
+  41417 root      20   0   32.5g  15.3g   2924 R  87.5   4.1   0:01.16 tlcgen-+
+  41424 root      20   0   32.5g  15.3g   2924 S  87.5   4.1   0:01.21 tlcgen-+
+  41434 root      20   0   32.5g  15.3g   2924 R  87.5   4.1   0:01.21 tlcgen-+
+  41487 root      20   0   32.5g  15.3g   2924 R  87.5   4.1   0:01.11 tlcgen-+
+  41540 root      20   0   32.5g  15.3g   2924 R  87.5   4.1   0:01.20 tlcgen-+
+  41421 root      20   0   32.5g  15.3g   2924 R  81.2   4.1   0:01.15 tlcgen-+

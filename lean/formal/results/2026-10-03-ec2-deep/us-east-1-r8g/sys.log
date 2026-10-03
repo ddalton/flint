@@ -1,0 +1,226 @@
+2026-10-03T21:00:29Z
+MemTotal:       259242656 kB
+MemAvailable:   255790540 kB
+/dev/nvme0n1p1  300G  4.7G  296G   2% /
+ 21:00:29 up 2 min,  0 users,  load average: 5.38, 1.62, 0.57
+2026-10-03T21:02:29Z
+MemTotal:       259242656 kB
+MemAvailable:   248071912 kB
+/dev/nvme0n1p1  300G  4.7G  296G   2% /
+ 21:02:29 up 4 min,  0 users,  load average: 7.80, 3.77, 1.49
+2026-10-03T21:04:30Z
+MemTotal:       259242656 kB
+MemAvailable:   241415540 kB
+/dev/nvme0n1p1  300G  4.6G  296G   2% /
+ 21:04:30 up 6 min,  0 users,  load average: 8.05, 5.19, 2.29
+2026-10-03T21:06:31Z
+MemTotal:       259242656 kB
+MemAvailable:   237796940 kB
+/dev/nvme0n1p1  300G  5.6G  295G   2% /
+ 21:06:31 up 8 min,  0 users,  load average: 8.07, 6.14, 2.99
+2026-10-03T21:08:31Z
+MemTotal:       259242656 kB
+MemAvailable:   237273088 kB
+/dev/nvme0n1p1  300G  5.6G  295G   2% /
+ 21:08:31 up 10 min,  0 users,  load average: 8.01, 6.76, 3.61
+2026-10-03T21:10:32Z
+MemTotal:       259242656 kB
+MemAvailable:   255539520 kB
+/dev/nvme0n1p1  300G  4.7G  296G   2% /
+ 21:10:32 up 12 min,  0 users,  load average: 9.91, 7.60, 4.28
+2026-10-03T21:12:32Z
+MemTotal:       259242656 kB
+MemAvailable:   248221920 kB
+/dev/nvme0n1p1  300G  4.7G  296G   2% /
+ 21:12:32 up 14 min,  0 users,  load average: 15.18, 10.39, 5.71
+2026-10-03T21:14:33Z
+MemTotal:       259242656 kB
+MemAvailable:   241527068 kB
+/dev/nvme0n1p1  300G  5.3G  295G   2% /
+ 21:14:33 up 16 min,  0 users,  load average: 15.96, 12.28, 6.98
+2026-10-03T21:16:34Z
+MemTotal:       259242656 kB
+MemAvailable:   238833224 kB
+/dev/nvme0n1p1  300G  5.5G  295G   2% /
+ 21:16:34 up 18 min,  0 users,  load average: 16.01, 13.53, 8.08
+2026-10-03T21:18:34Z
+MemTotal:       259242656 kB
+MemAvailable:   226608976 kB
+/dev/nvme0n1p1  300G  5.5G  295G   2% /
+ 21:18:34 up 20 min,  0 users,  load average: 16.09, 14.40, 9.07
+2026-10-03T21:20:35Z
+MemTotal:       259242656 kB
+MemAvailable:   255127560 kB
+/dev/nvme0n1p1  300G  4.7G  296G   2% /
+ 21:20:35 up 22 min,  0 users,  load average: 20.56, 16.00, 10.29
+2026-10-03T21:22:36Z
+MemTotal:       259242656 kB
+MemAvailable:   248435460 kB
+/dev/nvme0n1p1  300G  4.7G  296G   2% /
+ 21:22:36 up 24 min,  0 users,  load average: 30.52, 21.34, 12.94
+2026-10-03T21:24:37Z
+MemTotal:       259242656 kB
+MemAvailable:   242355308 kB
+/dev/nvme0n1p1  300G  4.7G  296G   2% /
+ 21:24:37 up 26 min,  0 users,  load average: 32.64, 25.34, 15.44
+2026-10-03T21:26:39Z
+MemTotal:       259242656 kB
+MemAvailable:   240345488 kB
+/dev/nvme0n1p1  300G  5.2G  295G   2% /
+ 21:26:39 up 28 min,  0 users,  load average: 32.30, 27.61, 17.48
+2026-10-03T21:28:40Z
+MemTotal:       259242656 kB
+MemAvailable:   228604608 kB
+/dev/nvme0n1p1  300G  5.2G  295G   2% /
+ 21:28:40 up 30 min,  0 users,  load average: 32.04, 29.07, 19.24
+2026-10-03T21:30:42Z
+MemTotal:       259242656 kB
+MemAvailable:   256546868 kB
+/dev/nvme0n1p1  300G  4.7G  296G   2% /
+ 21:30:42 up 32 min,  0 users,  load average: 22.41, 27.87, 20.13
+2026-10-03T21:32:42Z
+MemTotal:       259242656 kB
+MemAvailable:   246842132 kB
+/dev/nvme0n1p1  300G  4.7G  296G   2% /
+ 21:32:42 up 34 min,  0 users,  load average: 20.79, 23.54, 19.36
+2026-10-03T21:34:43Z
+MemTotal:       259242656 kB
+MemAvailable:   218547052 kB
+/dev/nvme0n1p1  300G  6.3G  294G   3% /
+ 21:34:43 up 36 min,  0 users,  load average: 30.52, 26.35, 20.90
+2026-10-03T21:36:44Z
+MemTotal:       259242656 kB
+MemAvailable:   214000108 kB
+/dev/nvme0n1p1  300G  6.3G  294G   3% /
+ 21:36:44 up 38 min,  0 users,  load average: 31.80, 28.23, 22.25
+2026-10-03T21:38:45Z
+MemTotal:       259242656 kB
+MemAvailable:   248139628 kB
+/dev/nvme0n1p1  300G  4.7G  296G   2% /
+ 21:38:45 up 40 min,  0 users,  load average: 21.07, 26.16, 22.28
+2026-10-03T21:40:45Z
+MemTotal:       259242656 kB
+MemAvailable:   234162700 kB
+/dev/nvme0n1p1  300G  5.2G  295G   2% /
+ 21:40:45 up 42 min,  0 users,  load average: 29.98, 27.56, 23.24
+2026-10-03T21:40:53Z
+MemAvailable:   231427168 kB
+/dev/nvme0n1p1  300G  5.2G  295G   2% /
+ 21:40:53 up 42 min,  0 users,  load average: 30.29, 27.71, 23.33
+2026-10-03T21:42:46Z
+MemTotal:       259242656 kB
+MemAvailable:   206932212 kB
+/dev/nvme0n1p1  300G  6.3G  294G   3% /
+ 21:42:46 up 44 min,  0 users,  load average: 31.73, 29.04, 24.31
+2026-10-03T21:42:54Z
+MemAvailable:   204279832 kB
+/dev/nvme0n1p1  300G  6.3G  294G   3% /
+ 21:42:54 up 44 min,  0 users,  load average: 31.77, 29.14, 24.39
+2026-10-03T21:44:47Z
+MemTotal:       259242656 kB
+MemAvailable:   190990636 kB
+/dev/nvme0n1p1  300G  8.5G  292G   3% /
+ 21:44:47 up 46 min,  0 users,  load average: 31.99, 30.04, 25.25
+2026-10-03T21:44:55Z
+MemAvailable:   188356264 kB
+/dev/nvme0n1p1  300G  8.5G  292G   3% /
+ 21:44:55 up 46 min,  0 users,  load average: 31.99, 30.10, 25.32
+2026-10-03T21:46:47Z
+MemTotal:       259242656 kB
+MemAvailable:   183847480 kB
+/dev/nvme0n1p1  300G  9.3G  291G   4% /
+ 21:46:47 up 48 min,  0 users,  load average: 32.00, 30.69, 26.07
+2026-10-03T21:46:56Z
+MemAvailable:   181277824 kB
+/dev/nvme0n1p1  300G  9.5G  291G   4% /
+ 21:46:56 up 48 min,  0 users,  load average: 32.15, 30.77, 26.15
+2026-10-03T21:48:48Z
+MemTotal:       259242656 kB
+MemAvailable:   191580368 kB
+/dev/nvme0n1p1  300G  9.5G  291G   4% /
+ 21:48:48 up 50 min,  0 users,  load average: 32.54, 31.33, 26.89
+2026-10-03T21:48:57Z
+MemAvailable:   189118848 kB
+/dev/nvme0n1p1  300G  9.5G  291G   4% /
+ 21:48:57 up 51 min,  0 users,  load average: 32.50, 31.34, 26.92
+2026-10-03T21:50:49Z
+MemTotal:       259242656 kB
+MemAvailable:   157345332 kB
+/dev/nvme0n1p1  300G  8.7G  292G   3% /
+ 21:50:49 up 52 min,  0 users,  load average: 32.13, 31.58, 27.53
+2026-10-03T21:50:58Z
+MemAvailable:   154736624 kB
+/dev/nvme0n1p1  300G  8.7G  292G   3% /
+ 21:50:58 up 53 min,  0 users,  load average: 32.12, 31.59, 27.55
+2026-10-03T21:52:50Z
+MemTotal:       259242656 kB
+MemAvailable:   178359656 kB
+/dev/nvme0n1p1  300G   11G  290G   4% /
+ 21:52:50 up 54 min,  0 users,  load average: 32.03, 31.74, 28.08
+2026-10-03T21:52:59Z
+MemAvailable:   175907884 kB
+/dev/nvme0n1p1  300G   11G  290G   4% /
+ 21:52:59 up 55 min,  0 users,  load average: 32.02, 31.75, 28.12
+2026-10-03T21:54:50Z
+MemTotal:       259242656 kB
+MemAvailable:   144985156 kB
+/dev/nvme0n1p1  300G   11G  290G   4% /
+ 21:54:50 up 56 min,  0 users,  load average: 32.14, 31.86, 28.57
+2026-10-03T21:55:00Z
+MemAvailable:   142056172 kB
+/dev/nvme0n1p1  300G   11G  290G   4% /
+ 21:55:00 up 57 min,  0 users,  load average: 32.19, 31.88, 28.61
+2026-10-03T21:56:51Z
+MemTotal:       259242656 kB
+MemAvailable:   105420264 kB
+/dev/nvme0n1p1  300G   13G  288G   5% /
+ 21:56:51 up 58 min,  0 users,  load average: 33.55, 32.34, 29.14
+2026-10-03T21:57:01Z
+MemAvailable:   102610144 kB
+/dev/nvme0n1p1  300G   13G  288G   5% /
+ 21:57:01 up 59 min,  0 users,  load average: 33.31, 32.33, 29.17
+2026-10-03T21:58:52Z
+MemTotal:       259242656 kB
+MemAvailable:   138954988 kB
+/dev/nvme0n1p1  300G   13G  288G   5% /
+ 21:58:52 up  1:00,  0 users,  load average: 32.34, 32.25, 29.50
+2026-10-03T21:59:02Z
+MemAvailable:   136257480 kB
+/dev/nvme0n1p1  300G   13G  288G   5% /
+ 21:59:02 up  1:01,  0 users,  load average: 32.29, 32.25, 29.53
+2026-10-03T22:00:53Z
+MemTotal:       259242656 kB
+MemAvailable:   104535172 kB
+/dev/nvme0n1p1  300G   13G  288G   5% /
+ 22:00:53 up  1:02,  0 users,  load average: 32.12, 32.19, 29.82
+2026-10-03T22:01:03Z
+MemAvailable:   101744268 kB
+/dev/nvme0n1p1  300G   13G  288G   5% /
+ 22:01:03 up  1:03,  0 users,  load average: 32.10, 32.19, 29.85
+2026-10-03T22:02:53Z
+MemTotal:       259242656 kB
+MemAvailable:   146832232 kB
+/dev/nvme0n1p1  300G   17G  284G   6% /
+ 22:02:53 up  1:04,  0 users,  load average: 31.99, 32.11, 30.09
+2026-10-03T22:03:04Z
+MemAvailable:   143809108 kB
+/dev/nvme0n1p1  300G   17G  284G   6% /
+ 22:03:04 up  1:05,  0 users,  load average: 32.06, 32.12, 30.11
+2026-10-03T22:04:54Z
+MemTotal:       259242656 kB
+MemAvailable:   113433632 kB
+/dev/nvme0n1p1  300G   17G  284G   6% /
+ 22:04:54 up  1:06,  0 users,  load average: 32.02, 32.09, 30.33
+2026-10-03T22:05:05Z
+MemAvailable:   110350148 kB
+/dev/nvme0n1p1  300G   17G  284G   6% /
+ 22:05:05 up  1:07,  0 users,  load average: 32.02, 32.09, 30.35
+2026-10-03T22:06:55Z
+MemTotal:       259242656 kB
+MemAvailable:   79635556 kB
+/dev/nvme0n1p1  300G   16G  285G   6% /
+ 22:06:55 up  1:08,  0 users,  load average: 32.08, 32.09, 30.55
+2026-10-03T22:07:06Z
+MemAvailable:   76680376 kB
+/dev/nvme0n1p1  300G   16G  285G   6% /
+ 22:07:06 up  1:09,  0 users,  load average: 32.13, 32.10, 30.58

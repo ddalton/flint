@@ -1,0 +1,40 @@
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.14
+   Compiling cc v1.5.1
+   Compiling libmimalloc-sys v0.1.49
+   Compiling mimalloc v0.1.52
+   Compiling tlc-rs v0.1.0 (/opt/f3b/tlc-rs)
+    Finished `release` profile [optimized] target(s) in 22.13s
+tlc-rs: generated a checker for LeanP1 in /opt/f3b/gen-Holds (0.004s)
+    Updating crates.io index
+     Locking 6 packages to highest Rust 1.99.0 compatible versions
+   Compiling find-msvc-tools v0.1.14
+   Compiling shlex v2.0.1
+   Compiling cc v1.6.0
+   Compiling libmimalloc-sys v0.1.49
+   Compiling mimalloc v0.1.52
+   Compiling tlc-rs v0.1.0 (/opt/f3b/tlc-rs)
+   Compiling tlcgen-leanp1 v0.1.0 (/opt/f3b/gen-Holds)
+    Finished `release` profile [optimized] target(s) in 30.48s
+tlc-rs: generated a checker for LeanP1 in /opt/f3b/gen-FetchHolds (0.004s)
+    Updating crates.io index
+     Locking 6 packages to highest Rust 1.99.0 compatible versions
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.14
+   Compiling cc v1.6.0
+   Compiling libmimalloc-sys v0.1.49
+   Compiling mimalloc v0.1.52
+   Compiling tlc-rs v0.1.0 (/opt/f3b/tlc-rs)
+   Compiling tlcgen-leanp1 v0.1.0 (/opt/f3b/gen-FetchHolds)
+    Finished `release` profile [optimized] target(s) in 30.49s
+tlc-rs: generated a checker for LeanP1 in /opt/f3b/gen-NoR7 (0.004s)
+    Updating crates.io index
+     Locking 6 packages to highest Rust 1.99.0 compatible versions
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.14
+   Compiling cc v1.6.0
+   Compiling libmimalloc-sys v0.1.49
+   Compiling mimalloc v0.1.52
+   Compiling tlc-rs v0.1.0 (/opt/f3b/tlc-rs)
+   Compiling tlcgen-leanp1 v0.1.0 (/opt/f3b/gen-NoR7)
+    Finished `release` profile [optimized] target(s) in 29.83s

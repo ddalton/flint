@@ -1,0 +1,25 @@
+    18.59%  tlcgen-leanp1  tlcgen-leanp1          [.] <tlc_rs::eval::Program>::eval
+    10.30%  tlcgen-leanp1  tlcgen-leanp1          [.] core::ptr::drop_glue::<tlc_rs::value::Value>
+    10.04%  tlcgen-leanp1  tlcgen-leanp1          [.] <tlc_rs::eval::Program>::bind
+     9.76%  tlcgen-leanp1  tlcgen-leanp1          [.] <tlc_rs::eval::Program>::quant
+     6.29%  tlcgen-leanp1  tlcgen-leanp1          [.] <tlc_rs::value::Value>::elems
+     3.77%  tlcgen-leanp1  tlcgen-leanp1          [.] <tlc_rs::value::Value>::hash
+     3.15%  tlcgen-leanp1  tlcgen-leanp1          [.] <alloc::vec::Vec<tlc_rs::value::Value> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<tlc_rs::value::Value, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::ops::range::Range<u64>, tlc_rs::store::decode::{closure#0}::{closure#0}>, core::result::Result<core::convert::Infallible, alloc::string::String>>>>::from_iter
+     3.07%  tlcgen-leanp1  tlcgen-leanp1          [.] <tlc_rs::value::Value as core::cmp::Ord>::cmp
+     3.05%  tlcgen-leanp1  tlcgen-leanp1          [.] tlc_rs::store::encode
+     2.91%  tlcgen-leanp1  [kernel.kallsyms]      [k] __ptep_set_access_flags
+     2.58%  tlcgen-leanp1  [kernel.kallsyms]      [k] try_to_unmap_flush
+     2.28%  tlcgen-leanp1  tlcgen-leanp1          [.] core::ptr::drop_glue::<tlc_rs::value::Value>
+     2.23%  tlcgen-leanp1  tlcgen-leanp1          [.] <tlc_rs::value::Value as core::clone::Clone>::clone
+     1.64%  tlcgen-leanp1  tlcgen-leanp1          [.] _mi_page_malloc_zero
+     1.32%  tlcgen-leanp1  tlcgen-leanp1          [.] tlcgen_leanp1::next::{closure#0}
+     1.22%  tlcgen-leanp1  tlcgen-leanp1          [.] <tlc_rs::value::Value>::apply_ref
+     1.17%  tlcgen-leanp1  tlcgen-leanp1          [.] <tlc_rs::value::Value as <[_]>::to_vec_in::ConvertVec>::to_vec::<alloc::alloc::Global>
+     1.16%  tlcgen-leanp1  tlcgen-leanp1          [.] <alloc::sync::Arc<[tlc_rs::value::Value]>>::drop_slow
+     0.98%  tlcgen-leanp1  tlcgen-leanp1          [.] tlcgen_leanp1::next
+     0.97%  tlcgen-leanp1  tlcgen-leanp1          [.] <alloc::sync::Arc<tlc_rs::value::Func>>::drop_slow
+     0.89%  tlcgen-leanp1  tlcgen-leanp1          [.] <tlc_rs::store::FpSet>::insert
+     0.76%  tlcgen-leanp1  tlcgen-leanp1          [.] tlc_rs::store::decode
+     0.63%  tlcgen-leanp1  tlcgen-leanp1          [.] tlc_rs::liveness::eval_env
+     0.63%  tlcgen-leanp1  tlcgen-leanp1          [.] tlcgen_leanp1::op_21
+     0.62%  tlcgen-leanp1  tlcgen-leanp1          [.] <tlc_rs::check::Checker>::expand::{closure#1}

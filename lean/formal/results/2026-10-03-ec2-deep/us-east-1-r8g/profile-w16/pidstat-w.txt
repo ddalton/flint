@@ -1,0 +1,9 @@
+Linux 6.18.51-120.163.amzn2023.aarch64 (ip-172-31-36-160.ec2.internal) 	10/03/26 	_aarch64_	(32 CPU)
+
+21:12:19      UID      TGID       TID   cswch/s nvcswch/s  Command
+21:12:24        0     33275         -      0.00      0.00  timeout
+21:12:24        0         -     33275      0.00      0.00  |__timeout
+21:12:29        0     33275         -      0.00      0.00  timeout
+21:12:29        0         -     33275      0.00      0.00  |__timeout
+Average:        0     33275         -      0.00      0.00  timeout
+Average:        0         -     33275      0.00      0.00  |__timeout

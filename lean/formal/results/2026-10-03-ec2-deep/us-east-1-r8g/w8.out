@@ -1,0 +1,7 @@
+tlc-rs: LeanP1 (31 variables, 0 symmetry permutations), 8 workers, generated engine; loaded in 0.003s
+progress: depth 11, 4827654 generated, 1753011 distinct (0 fingerprint spills), 1055025 on queue (0 on disk), 14.5s
+progress: depth 12, 11585417 generated, 3980077 distinct (0 fingerprint spills), 2227066 on queue (0 on disk), 34.4s
+progress: depth 13, 25094416 generated, 8236927 distinct (0 fingerprint spills), 4256850 on queue (0 on disk), 73.9s
+progress: depth 14, 49469433 generated, 15688067 distinct (0 fingerprint spills), 7451140 on queue (0 on disk), 143.8s
+progress: depth 15, 89942860 generated, 27822053 distinct (0 fingerprint spills), 12133986 on queue (0 on disk), 263.0s
+progress: depth 16, 153488933 generated, 46585950 distinct (0 fingerprint spills), 18763897 on queue (0 on disk), 450.8s
