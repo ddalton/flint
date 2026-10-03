@@ -288,7 +288,10 @@ Code: `s3csi/state.rs` (`SharedMount`, `share_key`, `VolumeState.shared`),
 `cleanup_shared_member`, `adopt_shared`, `teardown_mounter`),
 `s3csi/worker.rs` (`ANN_SHARED_KEY`, `wait_exited`),
 `passthrough/spec.rs` (`SharingSpec`), the CRD, `CHANGELOG.md`. Kind-rig
-legs S23 (F72) and S24 (sharing) in `s3csi/e2e/run-s3csi.sh`, NOT RUN.
+legs S23 (F72) and S24 (sharing) in `s3csi/e2e/run-s3csi.sh`, NOT RUN
+(both run 2026-09-30, 23/23; S34 — the class's liveness probe under
+load, a join mid-read — written 2026-10-03, NOT RUN; the security
+claims are in `s3csi/SECURITY.md`).
 
 **§8.1, answered: Mountpoint does not mount `direct_io`, but it never
 keeps the page cache either.** At v1.24.0 `fs.rs:400` replies to `open`
@@ -314,11 +317,13 @@ alternates between members' sessions — the admin who set the knob
 accepts that).
 
 **What sharing cannot do, stated on the CRD field:** revoke one member
-before its pod exits. A refusal on one member's refresh removes the
-shared key (today's revocation), the next still-allowed member's
-republish re-mints it within ~90 s, and the refused member — still bound
-to the same superblock, from inside its own mount namespace — reads
-again. Every member could have minted that key itself, so nothing is
+before its pod exits. A refusal on one member's refresh leaves the
+shared key where it is (`revocation_removes_the_key` is false for a
+shared member; as built 2026-09-30, §10 below — an earlier draft had the
+key removed and re-minted by the next sibling, which cut every member's
+reads for a republish period and revoked nothing), and the refused
+member — still bound to the same superblock, from inside its own mount
+namespace — reads on. Every member could have minted that key itself, so nothing is
 gained by the lingering member; but the isolation §4.6 promises per pod
 is per CLASS here.
 

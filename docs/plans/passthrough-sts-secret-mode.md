@@ -176,8 +176,9 @@ be proven usable before it displaces a working one). Not built, on
 purpose. The assessment put it in the node plugin as a `ListObjectsV2`
 with the candidate tuple. That is the wrong component:
 
-- the plugin never speaks S3 today; its only egress is the broker, over a
-  CA-pinned client. S3 egress from a privileged DaemonSet is new TLS
+- the plugin never speaks S3 today; its only egress is the broker (plain
+  http on the pod network by default; a CA it is told to trust is ADDED
+  to its store, not pinned — `s3csi/SECURITY.md` §4.1). S3 egress from a privileged DaemonSet is new TLS
   trust, proxy routing and NetworkPolicy — and the assessment's own
   verify item 2 concedes the probe may take a different route than the
   mounter, which makes it worthless in the one case it exists for;

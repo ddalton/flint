@@ -12,6 +12,33 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Added
+
+- **flint-s3-csi: what passthrough guarantees about credentials, written
+  down and checked** (2026-10-03). `s3csi/SECURITY.md` is the claims
+  matrix: twelve promises (no credential in a tenant container; a mount
+  only for a pod the CR names, re-checked by the broker; read-only below
+  the bind; the `stsSecret` rules; what a refused refresh takes away and
+  the revocation window per mode; the privileged part; isolation on a
+  node; sharing; logging; the ceiling; the static arm), each with its
+  enforcer, its unit tests, its rig legs and the newest run — and a
+  "not claimed" list from reading the code: the broker link is plain
+  http by default and nothing pins a CA (earlier notes said "CA-pinned";
+  corrected), the TokenReview binding is conditional on the extras it
+  gets, a TokenReview transport error reads as a refusal and removes the
+  key, `stsSecret` judges "unchanged" on generation and expiration only,
+  the SA token and the state nonce persist on node disk. Two things
+  come with it: the credential timing budget is now one unit test
+  (`the_credential_timing_budget_agrees`: the broker arm refreshes no
+  later than the mounter's one ask plus a republish period —
+  `MOUNTER_ASKS_SECS_BEFORE_EXPIRY`, `REPUBLISH_MAX_SECS` — and the sts
+  note says the same lead in both places it states it; the old 270 and a
+  stale "four minutes" each fail it); and kind leg S34, the shared
+  mounter's liveness probe under load (four readers through a shaped
+  link, a fifth member joining mid-read: the join must not replace the
+  live mounter, and the node's own statfs must show the load reached
+  the probe) — written, NOT RUN.
+
 ### Fixed
 
 - **lean: a publish or sync ack no longer names too few conflicts, or
@@ -27,6 +54,15 @@ covered by the stability guarantee.
   in staging until a restart, and the next touch's rename overwrote it,
   so the agent waiting on its nonce never got an ack. The stranded touch
   is now folded first, on every poll.
+
+- **docs: four passthrough passages said what the code does not**
+  (2026-10-03, found writing `s3csi/SECURITY.md`): the sts note's
+  "CA-pinned client" (there is no pinning; plain http by default); the
+  sharing design's §5 paragraph that had a refused member's refresh
+  REMOVE the shared key (it stays, as §10 and the code say); the CSI
+  design's §4.4 static row (the keys go to mount-s3's environment, not
+  a profile file) and §3.6 uid order (the pod's attribute wins over the
+  CR, as built).
 
 - **docs: the `stsSecret` note told the controller's author to rotate four
   minutes before expiry; it is seven** (2026-10-03). The note's timing
