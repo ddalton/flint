@@ -10,7 +10,8 @@
 //!   door, which mount-s3 (CRT) and the Rust SDK consume unchanged and
 //!   re-fetch before `Expiration`. Republish re-exchanges when the keys
 //!   are within 420 s of expiry (`node::BROKER_REFRESH_SECS`: the
-//!   mounter asks the door at 300 s before, once).
+//!   mounter asks the door once, `node::MOUNTER_ASKS_SECS_BEFORE_EXPIRY`
+//!   before, and a republish can be `node::REPUBLISH_MAX_SECS` late).
 //! - `webIdentity`: the WORKER calls the broker's STS façade itself with
 //!   the token file the plugin keeps fresh. Needs the broker's TLS
 //!   trusted by the mounter image (the CRT's web-identity provider is

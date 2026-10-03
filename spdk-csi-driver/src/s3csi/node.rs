@@ -131,17 +131,31 @@ impl std::fmt::Debug for Config {
     }
 }
 
+/// When the mounter's credential provider (the CRT inside mount-s3) asks the
+/// door for a replacement: ONCE, this many seconds before the key it holds
+/// expires, taking whatever is there; after that it asks again only once
+/// the key has expired, on every request. Not a knob of ours — a property
+/// of mount-s3, measured against real STS sessions (2026-10-02,
+/// passthrough-sts-secret-mode.md §2, R1). Re-measure it when the mounter
+/// image moves; the budget below is built on it.
+pub const MOUNTER_ASKS_SECS_BEFORE_EXPIRY: i64 = 300;
+
+/// The longest gap kubelet leaves between two republishes of one volume
+/// (~60–90 s observed). A replacement that becomes available just after a
+/// republish is written this late.
+pub const REPUBLISH_MAX_SECS: i64 = 90;
+
 /// How far before its keys expire the broker arm re-exchanges them, in
-/// seconds (checked on every republish). The mounter's credential provider
-/// (the CRT inside mount-s3) asks the door again exactly 300 s before the
-/// key it holds expires, ONCE, and takes whatever is there; after that it
-/// asks again only once the key has expired, on every request (measured
-/// against real STS sessions, 2026-10-02, passthrough-sts-secret-mode.md
-/// §2). So the new key must be in `creds.json` by T−300, and the republish
-/// that writes it can be up to ~90 s away: 420. At the old 270 the mounter
+/// seconds (checked on every republish). The new key must be in
+/// `creds.json` by the mounter's one ask (`MOUNTER_ASKS_SECS_BEFORE_EXPIRY`),
+/// and the republish that writes it can be a full period late
+/// (`REPUBLISH_MAX_SECS`): at least 390, so 420. At the old 270 the mounter
 /// learned of the new key only at the old one's expiry, on the first
 /// request after it — zero errors measured, no margin. Under a lifetime of
-/// 420 s or less this is every republish, as before.
+/// 420 s or less this is every republish, as before. The same number is
+/// what the `stsSecret` note tells a controller (§2 and §8: "seven
+/// minutes"); `tests::the_credential_timing_budget_agrees` holds the three
+/// constants and that note together.
 pub const BROKER_REFRESH_SECS: i64 = 420;
 
 impl Config {
@@ -1563,7 +1577,8 @@ impl S3Node {
                         .as_ref()
                         .map(|e| Creds { access_key_id: String::new(), secret_access_key: String::new(), session_token: None, expiration: e.clone() }.secs_left(chrono::Utc::now()))
                         .unwrap_or(0);
-                    // Before the mounter's own ask at T−300 (BROKER_REFRESH_SECS).
+                    // Before the mounter's own ask (MOUNTER_ASKS_SECS_BEFORE_EXPIRY),
+                    // with a republish period to spare (BROKER_REFRESH_SECS).
                     if left < BROKER_REFRESH_SECS {
                         if let Some(broker) = &self.cfg.broker {
                             // Re-register on EVERY refresh: the broker's registry is
@@ -2895,6 +2910,40 @@ impl csi::identity_server::Identity for S3Identity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The credential timing budget, held together in one place. The
+    /// mounter asks the door ONCE, `MOUNTER_ASKS_SECS_BEFORE_EXPIRY` before
+    /// its key expires, and takes what is there; the republish that writes
+    /// the replacement can be `REPUBLISH_MAX_SECS` late. So the broker arm
+    /// must refresh at least that far ahead, and the `stsSecret` note must
+    /// tell a controller the same lead, in minutes, in BOTH places it says
+    /// it (§2 Timing and the §8 checklist — §8 carried a stale "four" for a
+    /// day, 2026-10-03). Until this test the agreement lived in comments.
+    #[test]
+    fn the_credential_timing_budget_agrees() {
+        let needed = MOUNTER_ASKS_SECS_BEFORE_EXPIRY + REPUBLISH_MAX_SECS;
+        assert!(
+            BROKER_REFRESH_SECS >= needed,
+            "BROKER_REFRESH_SECS ({BROKER_REFRESH_SECS}) is inside the mounter's own ask ({MOUNTER_ASKS_SECS_BEFORE_EXPIRY}) plus a \
+             republish period ({REPUBLISH_MAX_SECS}) = {needed}: the mounter would learn of the new key only at the old one's expiry"
+        );
+        let words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve"];
+        let minutes = usize::try_from((needed + 59) / 60).unwrap();
+        let word = words.get(minutes).unwrap_or_else(|| panic!("extend the number table for {minutes} minutes"));
+        let phrase = format!("at least {word} minutes before the current one");
+        let note = concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/plans/passthrough-sts-secret-mode.md");
+        let doc = std::fs::read_to_string(note).unwrap_or_else(|e| panic!("{note}: {e}"));
+        assert_eq!(
+            doc.matches(&phrase).count(),
+            2,
+            "passthrough-sts-secret-mode.md must tell the controller's author \"{phrase}\" in §2 (Timing) and in the §8 checklist; \
+             the budget is {needed} s = {MOUNTER_ASKS_SECS_BEFORE_EXPIRY} + {REPUBLISH_MAX_SECS}"
+        );
+        assert!(
+            doc.contains(&format!("{BROKER_REFRESH_SECS} s")),
+            "the note's Timing section names the broker arm's refresh point ({BROKER_REFRESH_SECS} s)"
+        );
+    }
 
     /// `st_dev` as the kernel packs it, printed the way `ls -l /dev` and
     /// `stat` show a device, so the log line can be matched against the
