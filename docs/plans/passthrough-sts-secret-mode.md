@@ -83,6 +83,7 @@ serves now) and the Secret's candidate `g'` with `e'`:
 |---|---|---|
 | nothing installed yet, ≥ 120 s left | install | (first publish; no event) |
 | `g' == g`, `e' == e` | idempotent — nothing happens, nothing is said | — |
+| `g' == g`, `e' == e`, other keys | refused: a generation is never reused — mint under `g+1` (2026-10-03; before, this passed as unchanged) | `CredentialRefused` |
 | `g' < g` | refused: never rolls back | `CredentialRefused` |
 | `g' == g`, `e' != e` | refused: a replacement needs a HIGHER generation | `CredentialRefused` |
 | `g' > g`, under 120 s left | refused: as good as expired by the time the mounter fetched it | `CredentialRefused` |
@@ -97,8 +98,11 @@ one buys. The same refusal is said once, not once per republish (the
 message is kept in the state and compared); a different refusal, or an
 install, resets it.
 
-"Unchanged" is judged on generation and expiration: the state keeps no
-key material.
+"Unchanged" is judged on generation, expiration and a SHA-256
+fingerprint of the key tuple that the state keeps beside the watermark
+(`creds::creds_fingerprint`; no key material). Until 2026-10-03 it was
+the first two only, and a generation re-offered with its expiration but
+other keys was neither installed nor said.
 
 ### Timing
 

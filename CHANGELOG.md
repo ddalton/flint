@@ -41,6 +41,33 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **flint-s3-broker: an API server that did not answer a TokenReview no
+  longer reads as a refusal** (2026-10-03, `s3csi/SECURITY.md` §4.5). A
+  transport error, a timeout, a 5xx, or a 401/403/429 on the broker's
+  own request came back 400 `InvalidIdentityToken`, which the plugin
+  sorts as final and answers by removing the pod's key file — so a
+  kube-apiserver blip during a refresh cost a tenant its credential.
+  Such a review is now 503 `ServiceUnavailable`, which the plugin keeps
+  a still-valid key through; only the API server's verdict on the token
+  is 400. The node principal's review on register answers 503 the same
+  way instead of 403.
+
+- **flint-s3-csi `stsSecret`: the installed generation re-offered with
+  its expiration but OTHER keys is refused, not passed as unchanged**
+  (2026-10-03, §4.4). "Unchanged" was judged on generation and
+  expiration alone, so a controller that reused a generation with new
+  keys had them neither installed nor refused. The state keeps a
+  SHA-256 fingerprint of the installed key tuple (no key material) and
+  the refusal says to mint under the next generation; a state written
+  before the fingerprint existed is judged as before until its next
+  install. Kind leg S31 gains the case (step 6; not run).
+
+- **flint-s3-csi: a credential file is created at its mode, never
+  chmod'ed after** (2026-10-03, §4.6). `write_files` wrote the tmp file
+  under the umask and set 0600 afterwards; the gap was a readable key.
+  Now `create_new` at the mode, and a leftover tmp from an interrupted
+  write is replaced rather than inherited.
+
 - **lean: a publish or sync ack no longer names too few conflicts, or
   none, when the conflict log rotates under it; and a touch whose fold
   failed is no longer lost to the next touch** (2026-10-03, review

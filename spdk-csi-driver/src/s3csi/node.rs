@@ -824,6 +824,7 @@ impl S3Node {
                 }
                 st.creds_expiration = Some(s.creds.expiration.clone());
                 st.creds_generation = Some(s.generation);
+                st.creds_fingerprint = Some(creds::creds_fingerprint(&s.creds));
                 st.attempted_generation = Some(s.generation);
                 // The door, as the broker arm: nothing sensitive in the child's env.
                 let mut m = creds::door_arm(&st.nonce);
@@ -967,6 +968,7 @@ impl S3Node {
             creds_generation: None,
             attempted_generation: None,
             sts_refusal: None,
+            creds_fingerprint: None,
             read_only,
             owner_uid,
             owner_gid,
@@ -1166,6 +1168,7 @@ impl S3Node {
             creds_generation: None,
             attempted_generation: None,
             sts_refusal: None,
+            creds_fingerprint: None,
             read_only: true,
             owner_uid,
             owner_gid,
@@ -1474,7 +1477,11 @@ impl S3Node {
         let verdict = creds::parse_sts_secret(secrets, &[attrs::K_SA_TOKENS])
             .and_then(|s| creds::sts_envelope_check(&s, &pr.pod_namespace, &pr.service_account, pr.selector.name()).map(|()| s))
             .map(|s| {
-                let installed = st.creds_generation.zip(st.creds_expiration.as_deref());
+                let installed = st.creds_generation.zip(st.creds_expiration.as_deref()).map(|(generation, expiration)| creds::Installed {
+                    generation,
+                    expiration,
+                    fingerprint: st.creds_fingerprint.as_deref(),
+                });
                 (creds::sts_replace_decision(installed, &s, chrono::Utc::now()), s)
             });
         let refusal = match verdict {
@@ -1494,6 +1501,7 @@ impl S3Node {
                         let from = st.creds_generation;
                         st.creds_expiration = Some(s.creds.expiration.clone());
                         st.creds_generation = Some(s.generation);
+                        st.creds_fingerprint = Some(creds::creds_fingerprint(&s.creds));
                         st.attempted_generation = Some(s.generation);
                         st.sts_refusal = None;
                         *changed = true;
@@ -1904,6 +1912,7 @@ impl S3Node {
             creds_generation: None,
             attempted_generation: None,
             sts_refusal: None,
+            creds_fingerprint: None,
             // The decided access (per-user access design §4.1): the tenant
             // bind below, the syncer's mode and the broker's credential all
             // follow it.
@@ -3070,6 +3079,7 @@ mod tests {
             creds_generation: None,
             attempted_generation: None,
             sts_refusal: None,
+            creds_fingerprint: None,
             read_only: false,
             owner_uid: 1001,
             owner_gid: 1001,

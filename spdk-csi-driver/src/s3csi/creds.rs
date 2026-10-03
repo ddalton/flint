@@ -249,27 +249,64 @@ pub enum StsReplace {
     Refuse(String),
 }
 
+/// What the installed `creds.json` holds, as far as the state keeps it:
+/// the generation, the expiration, and a fingerprint of the key tuple
+/// (`creds_fingerprint`: no key material), so that the installed
+/// generation re-offered with the same expiration but OTHER keys is
+/// refused rather than passed as unchanged. `fingerprint` is `None` for
+/// a state written before it existed (2026-10-03); such a re-offer is
+/// judged on generation and expiration, as it was.
+#[derive(Debug, Clone, Copy)]
+pub struct Installed<'a> {
+    pub generation: u64,
+    pub expiration: &'a str,
+    pub fingerprint: Option<&'a str>,
+}
+
+/// SHA-256 over the key id, the secret and the session token, length-
+/// prefixed; what the state remembers of the installed keys. The
+/// expiration is not in it — it is judged on its own.
+pub fn creds_fingerprint(c: &Creds) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for part in [c.access_key_id.as_str(), c.secret_access_key.as_str(), c.session_token.as_deref().unwrap_or("")] {
+        h.update((part.len() as u64).to_le_bytes());
+        h.update(part.as_bytes());
+    }
+    format!("{:x}", h.finalize())
+}
+
 /// The generation rules (the AWC fuse-node spec's N3, made flint's): never
 /// roll back, never install the same generation twice with different
 /// contents, never install what is about to expire — and never discard a
 /// still-valid installed credential: every refusal leaves the file as it
-/// was. `installed` is the generation and expiration in the worker's
-/// `creds.json` now; the state keeps no key material, so "unchanged" is
-/// judged on those two.
-pub fn sts_replace_decision(installed: Option<(u64, &str)>, candidate: &StsSecret, now: chrono::DateTime<chrono::Utc>) -> StsReplace {
+/// was. "Unchanged" is the same generation, the same expiration and the
+/// same key fingerprint; until 2026-10-03 the state kept no fingerprint
+/// and the same generation with other keys passed as unchanged, neither
+/// installed nor said (s3csi/SECURITY.md §4.4).
+pub fn sts_replace_decision(installed: Option<Installed<'_>>, candidate: &StsSecret, now: chrono::DateTime<chrono::Utc>) -> StsReplace {
     let g = candidate.generation;
-    match installed {
-        Some((have, exp)) if g == have && candidate.creds.expiration == exp => return StsReplace::Idempotent,
-        Some((have, _)) if g < have => {
-            return StsReplace::Refuse(format!("generation {g} is lower than the installed {have}; a credential never rolls back"))
+    if let Some(have) = installed {
+        if g == have.generation && candidate.creds.expiration == have.expiration {
+            return match have.fingerprint {
+                Some(fp) if fp != creds_fingerprint(&candidate.creds) => StsReplace::Refuse(format!(
+                    "generation {g} is already installed (expires {}) and the Secret offers the same generation and expiration with DIFFERENT keys — a generation is never reused; mint under generation {}",
+                    have.expiration,
+                    g + 1
+                )),
+                _ => StsReplace::Idempotent,
+            };
         }
-        Some((have, exp)) if g == have => {
+        if g < have.generation {
+            return StsReplace::Refuse(format!("generation {g} is lower than the installed {}; a credential never rolls back", have.generation));
+        }
+        if g == have.generation {
             return StsReplace::Refuse(format!(
-                "generation {have} is already installed (expires {exp}) and the Secret offers the same generation with expiration {} — a replacement must carry a HIGHER generation",
+                "generation {g} is already installed (expires {}) and the Secret offers the same generation with expiration {} — a replacement must carry a HIGHER generation",
+                have.expiration,
                 candidate.creds.expiration
-            ))
+            ));
         }
-        _ => {}
     }
     if candidate.creds.secs_left(now) < STS_MIN_SECS_LEFT {
         return StsReplace::Refuse(format!(
@@ -355,7 +392,19 @@ pub fn write_files(comm_dir: &Path, files: &[CommFile], owner: (u32, u32)) -> st
     std::fs::create_dir_all(comm_dir)?;
     for f in files {
         let tmp = comm_dir.join(format!("{}.tmp", f.name));
-        std::fs::write(&tmp, &f.bytes)?;
+        // Born with its mode: created under the umask and chmod'ed after,
+        // the file was readable to others for the gap between the two
+        // (s3csi/SECURITY.md §4.6, until 2026-10-03). `create_new` refuses
+        // a leftover of an interrupted write, so one is removed first
+        // rather than inherited with whatever mode it had.
+        let _ = std::fs::remove_file(&tmp);
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut fh = std::fs::OpenOptions::new().write(true).create_new(true).mode(f.mode).open(&tmp)?;
+            fh.write_all(&f.bytes)?;
+        }
+        // The umask may have narrowed the mode at creation; set it exactly.
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(f.mode))?;
         // chown only where we can (root on the node); a rig running the
         // unit tests as a user keeps its own ownership.
@@ -732,22 +781,36 @@ mod tests {
             StsReplace::Refuse(m) => assert!(m.contains(word), "{m}"),
             v => panic!("wanted a refusal naming {word}, got {v:?}"),
         };
+        let inst = |g: u64, exp: &'static str| Some(Installed { generation: g, expiration: exp, fingerprint: None });
         let far = "2030-01-01T01:00:00Z"; // 3600 s left
         assert_eq!(sts_replace_decision(None, &cand(1, far), now), StsReplace::Install, "first install");
-        assert_eq!(sts_replace_decision(Some((1, far)), &cand(2, far), now), StsReplace::Install, "higher generation");
-        assert_eq!(sts_replace_decision(Some((2, far)), &cand(2, far), now), StsReplace::Idempotent, "same generation, same expiration");
-        refused(sts_replace_decision(Some((2, far)), &cand(1, far), now), "lower");
-        refused(sts_replace_decision(Some((2, far)), &cand(2, "2030-01-01T02:00:00Z"), now), "HIGHER");
+        assert_eq!(sts_replace_decision(inst(1, far), &cand(2, far), now), StsReplace::Install, "higher generation");
+        assert_eq!(sts_replace_decision(inst(2, far), &cand(2, far), now), StsReplace::Idempotent, "same generation, same expiration, no fingerprint kept (a pre-2026-10-03 state)");
+        // The same generation and expiration with the SAME keys is unchanged; with OTHER keys it is a reused generation, refused.
+        let fp = creds_fingerprint(&cand(2, far).creds);
+        let with_fp = Some(Installed { generation: 2, expiration: far, fingerprint: Some(fp.as_str()) });
+        assert_eq!(sts_replace_decision(with_fp, &cand(2, far), now), StsReplace::Idempotent, "same keys");
+        let other_keys = StsSecret {
+            creds: Creds { access_key_id: "AK2".into(), secret_access_key: "SK2".into(), session_token: None, expiration: far.into() },
+            generation: 2,
+            namespace: None,
+            service_account: None,
+            mount: None,
+        };
+        refused(sts_replace_decision(with_fp, &other_keys, now), "DIFFERENT keys");
+        refused(sts_replace_decision(with_fp, &other_keys, now), "generation 3");
+        refused(sts_replace_decision(inst(2, far), &cand(1, far), now), "lower");
+        refused(sts_replace_decision(inst(2, far), &cand(2, "2030-01-01T02:00:00Z"), now), "HIGHER");
         // The floor: under 120 s left is refused whether or not anything is installed...
         let soon = "2030-01-01T00:01:59Z"; // 119 s
         refused(sts_replace_decision(None, &cand(1, soon), now), "120");
-        refused(sts_replace_decision(Some((1, far)), &cand(2, soon), now), "120");
-        assert_eq!(sts_replace_decision(Some((1, far)), &cand(2, "2030-01-01T00:02:00Z"), now), StsReplace::Install, "exactly 120 s installs");
+        refused(sts_replace_decision(inst(1, far), &cand(2, soon), now), "120");
+        assert_eq!(sts_replace_decision(inst(1, far), &cand(2, "2030-01-01T00:02:00Z"), now), StsReplace::Install, "exactly 120 s installs");
         // ...but the installed generation re-offered unchanged is idempotent even near its end: nothing to say.
-        assert_eq!(sts_replace_decision(Some((2, soon)), &cand(2, soon), now), StsReplace::Idempotent);
+        assert_eq!(sts_replace_decision(inst(2, soon), &cand(2, soon), now), StsReplace::Idempotent);
         // A refused generation is retryable: gen 3 refused under the floor, then gen 3 with life installs.
-        refused(sts_replace_decision(Some((2, far)), &cand(3, soon), now), "120");
-        assert_eq!(sts_replace_decision(Some((2, far)), &cand(3, "2030-01-01T03:00:00Z"), now), StsReplace::Install);
+        refused(sts_replace_decision(inst(2, far), &cand(3, soon), now), "120");
+        assert_eq!(sts_replace_decision(inst(2, far), &cand(3, "2030-01-01T03:00:00Z"), now), StsReplace::Install);
     }
 
     /// The CR's region beats the node's default and an empty stamp does not.
@@ -907,5 +970,33 @@ mod tests {
         let p = d.path().join("auth.token");
         assert_eq!(std::fs::read(&p).unwrap(), b"x");
         assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(!d.path().join("auth.token.tmp").exists(), "the tmp file was renamed away");
+        // A leftover tmp of an interrupted write is replaced, not inherited.
+        std::fs::write(d.path().join("auth.token.tmp"), b"stale").unwrap();
+        write_files(d.path(), &door_arm("y").files, me).unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"y");
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    /// The fingerprint moves with any key field, not with the expiration
+    /// (judged on its own), and is hex of a fixed length, never the keys.
+    #[test]
+    fn the_key_fingerprint_follows_the_keys_and_not_the_expiration() {
+        let mk = |ak: &str, sk: &str, st: Option<&str>, exp: &str| Creds {
+            access_key_id: ak.into(),
+            secret_access_key: sk.into(),
+            session_token: st.map(str::to_string),
+            expiration: exp.into(),
+        };
+        let fp = creds_fingerprint(&mk("AK", "SK", Some("ST"), "2030-01-01T00:00:00Z"));
+        assert_eq!(fp.len(), 64);
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(fp, creds_fingerprint(&mk("AK", "SK", Some("ST"), "2031-01-01T00:00:00Z")), "the expiration is not in it");
+        assert_ne!(fp, creds_fingerprint(&mk("AK2", "SK", Some("ST"), "2030-01-01T00:00:00Z")));
+        assert_ne!(fp, creds_fingerprint(&mk("AK", "SK2", Some("ST"), "2030-01-01T00:00:00Z")));
+        assert_ne!(fp, creds_fingerprint(&mk("AK", "SK", None, "2030-01-01T00:00:00Z")));
+        assert_ne!(fp, creds_fingerprint(&mk("AK", "SK", Some("ST2"), "2030-01-01T00:00:00Z")));
+        // Length-prefixed: moving a boundary is a different tuple.
+        assert_ne!(creds_fingerprint(&mk("AKS", "K", None, "x")), creds_fingerprint(&mk("AK", "SK", None, "x")));
     }
 }

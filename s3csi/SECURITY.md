@@ -25,7 +25,7 @@ webhook. The keys exist on the node and in the worker pod only.
 |---|---|---|
 | the tenant pod spec is not edited | there is no webhook; the plugin writes nothing into a pod | `s3csi/node.rs` `node_publish_volume` |
 | the worker's env carries no secret | its env is the mode, the comm path and the preStop budget | `s3csi/worker.rs` `build_pod` |
-| keys are written host-side, 0600, into the worker's memory-backed `comm` emptyDir | tmp file, chmod, chown to the worker uid, rename | `s3csi/creds.rs` `write_files` |
+| keys are written host-side, 0600, into the worker's memory-backed `comm` emptyDir | tmp file created at its mode (`create_new`, 2026-10-03), chown to the worker uid, rename | `s3csi/creds.rs` `write_files` |
 | served on the loopback door, token-gated | `127.0.0.1:9911`; 401 without `auth.token` | `flint-s3-worker/src/main.rs` `door_response` |
 | the door is reachable only inside the worker pod's network namespace | the worker is never `hostNetwork`, and admission refuses it | `worker::build_pod`; `flint-s3-csi-chart/templates/workers-policy.yaml` |
 | **exception: the `static` arm** | the pod's Secret keys go to mount-s3's ENVIRONMENT over the launch socket, not the door; by design of the interim arm | `creds::static_arm`; leg S5c pins it |
@@ -70,7 +70,7 @@ candidate, now).
 |---|---|---|
 | unknown Secret keys refused by name; the kubelet token key ignored | `parse_sts_secret` | `s3csi/creds.rs` |
 | the envelope (`namespace`, `serviceAccount`, `mount`), when present, must match the pod and CR | `check_envelope` | `s3csi/creds.rs` |
-| same generation, same expiration → idempotent; lower generation → refused; same generation, other expiration → refused; under 120 s left → refused; else installed | `sts_replace_decision` | `s3csi/creds.rs` |
+| same generation, same expiration, same key fingerprint → idempotent; same generation and expiration with OTHER keys → refused (2026-10-03); lower generation → refused; same generation, other expiration → refused; under 120 s left → refused; else installed | `sts_replace_decision`, `creds_fingerprint` (SHA-256 of the key tuple, kept in the state; no key material) | `s3csi/creds.rs`, `s3csi/state.rs` |
 | a refusal never touches the installed file; `CredentialRefused` once per reason, `CredentialReplaced` on install | `refresh_sts_secret` | `s3csi/node.rs` |
 | the timing budget: refresh ≥ the mounter's one ask + a republish period; the note says the same lead in both places | `the_credential_timing_budget_agrees` | `s3csi/node.rs` tests |
 
@@ -80,7 +80,8 @@ mounter already holds in memory.
 
 | | enforced by | in code |
 |---|---|---|
-| a broker REFUSAL on an unshared volume removes `creds.json`; an OUTAGE keeps it | `republish`, `revocation_removes_the_key`, `exchange` error sorting | `s3csi/node.rs`, `s3csi/creds.rs` |
+| a broker REFUSAL on an unshared volume removes `creds.json`; an OUTAGE keeps it | `republish`, `revocation_removes_the_key`, `classify_exchange` (4xx final, else transient) | `s3csi/node.rs`, `s3csi/creds.rs` |
+| a TokenReview the API server did not ANSWER is an outage (503 `ServiceUnavailable`), not a refusal: only its verdict on the token refuses (2026-10-03) | `review_outcome`, `ReviewError` | `s3csi/broker.rs` |
 | the pod is told: `CredentialRefreshFailed` (class wording on a shared member) | `republish` | `s3csi/node.rs` |
 | the mount is never torn down on a refusal | `republish` | `s3csi/node.rs` |
 | the door answers 503 once the file is gone | `door_response` | `flint-s3-worker/src/main.rs` |
@@ -159,7 +160,7 @@ Secrets RBAC), never refreshed, never shared.
 | assumption | how it is verified | if it is false |
 |---|---|---|
 | kubelet authors the pod identity keys in `volume_context` (the CSI contract) | `attrs.rs` refuses pod-authored spellings; S6, S7 | a pod could name another SA; P2 falls |
-| the pod network between plugin and broker is trusted | NOT verified; see §4.1 | a token and the keys it buys are readable in flight |
+| the pod network between plugin and broker is encrypted by the SERVICE MESH (decided 2026-10-03: TLS is the mesh's job, not the chart's; see §4.1) | not by this repo — the mesh's PeerAuthentication STRICT on the broker's namespace is the operator's | a token and the keys it buys are readable in flight |
 | mount-s3 honours `Expiration` and asks the door once, 300 s before it | measured on real STS sessions (R1, 2026-10-02) | the budget in `the_credential_timing_budget_agrees` is wrong; rotation gaps |
 | the store enforces the credential's expiry and session policy | real STS: R1; AWS: A6. The kind rig's `static` backend does NOT (synthetic `Expiration`) | P6's windows are longer than stated; S10 on kind is a weaker result than its AWS twin |
 | the kubelet root on the node is root-only | kubelet's own | the persisted SA token and the state nonce are readable (§4.6) |
@@ -173,8 +174,8 @@ Secrets RBAC), never refreshed, never shared.
 | P2 | `token_review_identity_needs_authenticated_sa_and_audience`; `decide_refuses_each_break_in_the_chain_by_name`; `a_grant_is_the_registration_narrowed_by_the_cr_never_widened`; `consumers_absent_denies_and_names_the_field`; `listed_sa_passes_others_named_in_the_refusal`; `unknown_attributes_are_refused_by_name`; `non_ephemeral_and_missing_pod_info_are_refused` | S6, S7, S10; A11 | campaign 3 run 4 | the absent-pod-uid-extra path (§4.2) has no test |
 | P3 | (generic) | M2 | design doc only: "multi 22/0" 2026-09-04; no results README | none written since |
 | P4 | `write_flags_track_read_only`; `a_read_only_volume_registers_a_read_grant_on_the_wire` | S5, S24 (shared mount refuses a write); R3, R6, R9; A9; O5 | campaign 3 run 4; `run-rights.sh` has no results README | the append in `publish_passthrough` has no unit test |
-| P5 | `sts_secret_parses_the_tuple_and_its_envelope`; `…refuses_each_missing_or_malformed_field_by_name`; `…refuses_unknown_keys_by_name_but_ignores_the_token_key`; `sts_envelope_mismatch_is_refused_per_field_and_absence_passes`; `sts_replace_decision_table`; `the_credential_timing_budget_agrees` (+ two mutation controls, 2026-10-03) | S31; R1 | sts runs 1–2; R1 13/0 (2026-10-02) | same-generation/different-contents only at unit level; see §4.4 |
-| P6 | `a_refusal_removes_the_key_only_from_an_unshared_mounter`; `exchange_errors_sort_refusals_from_outages`; `exchange_outages_are_unavailable_and_refusals_are_denied` | S10, S29, S8 (outage control); L3 | campaign 3 run 4; review-fixes run 2 (2026-09-30) | §4.5 |
+| P5 | `sts_secret_parses_the_tuple_and_its_envelope`; `…refuses_each_missing_or_malformed_field_by_name`; `…refuses_unknown_keys_by_name_but_ignores_the_token_key`; `sts_envelope_mismatch_is_refused_per_field_and_absence_passes`; `sts_replace_decision_table` (incl. a reused generation with other keys); `the_key_fingerprint_follows_the_keys_and_not_the_expiration`; `the_credential_timing_budget_agrees` (+ two mutation controls, 2026-10-03) | S31 (step 6, the reused generation, written 2026-10-03, NOT RUN); R1 | sts runs 1–2; R1 13/0 (2026-10-02) | S31 step 6 until it runs |
+| P6 | `a_refusal_removes_the_key_only_from_an_unshared_mounter`; `exchange_errors_sort_refusals_from_outages`; `exchange_outages_are_unavailable_and_refusals_are_denied`; `a_token_review_the_api_server_did_not_answer_is_unavailable_not_refused` | S10, S29, S8 (outage control); L3 | campaign 3 run 4; review-fixes run 2 (2026-09-30) | no leg fails the API server under the broker (S8 fails the broker itself) |
 | P7 | `passthrough_worker_is_unprivileged_and_hostpath_free` | S2, S3, S19 | campaign 3 run 4 | no leg sets TLS or the NetworkPolicy; nothing checks the broker link |
 | P8 | `uid_gid_must_be_integers`; `dir_names_cannot_escape`; `name_and_hash_are_stable_and_label_sized` | S15, S24; P3 (16 tenants) | campaign 3 run 4; kind S24+S30 (2026-10-01) | cross-pod door reachability; state-dir mode |
 | P9 | `only_read_only_members_with_cr_scoped_credentials_share`; `sharing_cannot_run_on_a_per_pod_secret`; `the_class_is_node_namespace_cr_owner_mode_and_argv`; `a_shared_mount_round_trips_and_membership_is_a_set`; `a_shared_worker_is_named_by_its_class_and_says_so` | S24, S28, S29, S30; S34 (written 2026-10-03, NOT RUN) | kind S24+S30 46/0 (2026-10-01); sts run 1 | S34's probe-under-load question is open until it runs |
@@ -193,7 +194,10 @@ Secrets RBAC), never refreshed, never shared.
    the 1-hour pod-bound token and the 15-minute keys it buys are readable
    in flight. The worker NetworkPolicy is off by default and egress-only,
    and the plugin has none. Earlier notes that said "CA-pinned" were
-   wrong and are corrected.
+   wrong and are corrected. **Decided 2026-10-03: the chart stays http;
+   encryption on the pod network is the service mesh's job** (Istio
+   mTLS, PeerAuthentication STRICT on the broker's namespace), so this
+   is §2's assumption, not an open item.
 2. **The broker's identity binding is as strong as the TokenReview it
    gets.** The audience is checked only when `status.audiences` is
    present, and the pod-uid binding only when the token carries the
@@ -203,21 +207,26 @@ Secrets RBAC), never refreshed, never shared.
    false` turns the nonce binding off.
 3. **Passthrough narrows, lean refuses** (P4). A read-only consumer
    asking read-write gets a read-only mount and no error.
-4. **`stsSecret` judges "unchanged" on (generation, expiration).** The
-   same pair with DIFFERENT keys is silently kept, neither installed nor
-   refused. The decision table test never varies the key.
-5. **An API-server failure at the broker reads as a refusal.** A
-   TokenReview transport error becomes 400 `InvalidIdentityToken`, which
-   the plugin sorts as a refusal, so the key file is removed on an
-   outage; the next successful republish puts it back.
-   `CredentialRefreshFailed` fires on every failed refresh, outages
-   included.
+4. ~~**`stsSecret` judges "unchanged" on (generation, expiration).**~~
+   **Closed 2026-10-03:** the state keeps a SHA-256 fingerprint of the
+   installed key tuple, and the same generation and expiration with
+   other keys is refused ("a generation is never reused"); a state
+   written before the fingerprint existed is judged as before until its
+   next install.
+5. ~~**An API-server failure at the broker reads as a refusal.**~~
+   **Closed 2026-10-03:** a TokenReview the API server did not answer
+   (transport error, timeout, 5xx, or a 401/403/429 on the broker's own
+   request) is 503 `ServiceUnavailable`, which the plugin keeps the key
+   through; only the API server's verdict on the token is 400. Still
+   true: `CredentialRefreshFailed` fires on every failed refresh,
+   outages included.
 6. **Two things persist on node disk under the kubelet root:** the
    pod-bound SA token (`volumes/<vid>/token`, 0600) and the nonce in
    `state.json`, which is both the door's auth token and the
-   registration binding. `write_files` creates its tmp file under the
-   umask before the chmod. Lean's `launch.json` carries the arm's env,
-   static keys included, with default permissions in the comm dir.
+   registration binding. ~~`write_files` creates its tmp file under the
+   umask before the chmod~~ (closed 2026-10-03: born at its mode).
+   Lean's `launch.json` carries the arm's env, static keys included,
+   with default permissions in the comm dir.
 7. **uid/gid: the pod's `volumeAttributes.chert.us/uid` overrides the
    CR's `spec.uid`** (as built; the design doc §3.6 said the opposite
    order and is corrected). It is presentation inside the pod's own
@@ -238,11 +247,11 @@ Secrets RBAC), never refreshed, never shared.
 
 | # | what would close it | cost |
 |---|---|---|
-| 1 | TLS to the broker by default in the chart (cert from cert-manager or a chart-made CA), the plugin trusting that CA only, and a leg that fails when the link is plain | M |
-| 2 | broker: a TokenReview transport error answers 503 `Unavailable`, not 400; unit test on `review`; the plugin then keeps the key through it | S |
-| 3 | `sts_replace_decision`: same generation + same expiration + DIFFERENT keys → Refuse("same generation, different contents"); the table test varies the key; S31 gains the case | S |
+| 1 | ~~TLS to the broker by default in the chart~~ — not this repo's: the service mesh encrypts the pod network (decided 2026-10-03; §2) | — |
+| 2 | ~~broker: a TokenReview transport error answers 503, not 400~~ — done 2026-10-03 (`review_outcome`, `ReviewError`; the node principal's review answers 503 the same way) | — |
+| 3 | ~~`sts_replace_decision`: a reused generation with other keys is refused~~ — done 2026-10-03 (`creds_fingerprint` in the state; S31 step 6 written, not run) | — |
 | 4 | legs: the door tried from a sibling pod and from the node (expect refused); the capacity race (parallel publishes over the ceiling); a NetworkPolicy leg; an M2 results README | M |
-| 5 | `write_files`: create the tmp with mode 0600 (`OpenOptions::mode`) instead of chmod after | S |
+| 5 | ~~`write_files`: create the tmp at its mode~~ — done 2026-10-03 (`create_new` + `mode`; a stale tmp is replaced) | — |
 | 6 | the worker test asserts `hostNetwork` absent; `worker_capacity` gets a unit test | S |
 | 7 | run S34 (the probe under load) on the box, and calibrate its floor | S (box time) |
 | 8 | lean's `launch.json` written 0600 | S |

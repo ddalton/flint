@@ -2306,6 +2306,20 @@ if wait_phase reader-sts Running 180; then
     sleep 100
     n2=$(mount_events reader-sts | grep -c 'CredentialRefused.*serviceaccount' || true)
     [ "${n1:-0}" -ge 1 ] && [ "$n1" = "$n2" ] && ok "the unknown-key refusal was said once ($n1), not again a republish later" || bad "the refusal count went $n1 → $n2 over one republish period"
+    # 6. The installed generation re-offered with the SAME expiration but
+    #    OTHER keys is refused (the state keeps a fingerprint of the key
+    #    tuple since 2026-10-03; before, it passed as "unchanged", neither
+    #    installed nor said): the key id behind the door must not move.
+    #    Then the keys are put back, which is the installed tuple again —
+    #    idempotent, nothing said. NOT RUN as of 2026-10-03.
+    creds_key() { $K -n $WNS exec "$1" -- cat /comm/creds.json 2>/dev/null | jq -r '.AccessKeyId // empty' 2>/dev/null; }
+    key_before=$(creds_key "$w")
+    $K -n $NS patch secret sts-session --type=merge -p '{"stringData":{"AWS_ACCESS_KEY_ID":"drill-other"}}' >/dev/null
+    wait_event reader-sts CredentialRefused "DIFFERENT keys" 240 >/dev/null && ok "generation 4 re-offered with its expiration and OTHER keys is refused, and the refusal says to mint under 5" || bad "no refusal for a reused generation with other keys within 240 s"
+    key_after=$(creds_key "$w")
+    [ -n "$key_before" ] && [ "$key_after" = "$key_before" ] && ok "the door's key id is unchanged ($key_before) through the reused generation" || bad "the door's key id went '$key_before' → '$key_after' on a reused generation"
+    [ "$(creds_exp "$w")" = "$e4" ] && ok "the door kept generation 4's expiration through the reused generation" || bad "the door moved on a reused generation: '$(creds_exp "$w")'"
+    $K -n $NS patch secret sts-session --type=merge -p '{"stringData":{"AWS_ACCESS_KEY_ID":"drill"}}' >/dev/null
     # No remount through all of it: the same mount-s3 process.
     p2=$(mounter_pid "$w")
     [ -n "$p1" ] && [ "$p1" = "$p2" ] && ok "the same mount-s3 process (pid $p1) served every generation — no remount" || bad "mount-s3 pid changed $p1 → $p2, or was not found"

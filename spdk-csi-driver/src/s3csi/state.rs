@@ -71,6 +71,13 @@ pub struct VolumeState {
     /// refusal is not an Event per republish; cleared by an install.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sts_refusal: Option<String>,
+    /// `stsSecret`: SHA-256 of the installed key tuple
+    /// (`creds::creds_fingerprint`), so the installed generation re-offered
+    /// with the same expiration but other keys is refused, not passed as
+    /// unchanged. No key material. Absent in a state written before
+    /// 2026-10-03; then the judgement is generation and expiration only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creds_fingerprint: Option<String>,
     pub read_only: bool,
     pub owner_uid: u32,
     pub owner_gid: u32,
@@ -377,6 +384,7 @@ mod tests {
             creds_generation: None,
             attempted_generation: None,
             sts_refusal: None,
+            creds_fingerprint: None,
             read_only: false,
             owner_uid: 1001,
             owner_gid: 1001,
@@ -449,6 +457,7 @@ mod tests {
             creds_generation: None,
             attempted_generation: None,
             sts_refusal: None,
+            creds_fingerprint: None,
             read_only: false,
             owner_uid: 1001,
             owner_gid: 1001,
