@@ -129,3 +129,10 @@ emit ProbeReaderSkipped Spec ProbeReaderSkipped "" $RD
 # copy: with them this grew ~1.75x a level past 27M states at depth 14.
 emit ReaderScopeHolds Spec "$INV,Inv_ReaderSound" "$PROPS,Prop_AgentWorkKept,Prop_ScopeRespected" \
   Free={p2} MaxRemovals=0 MaxCopies=0 MaxFetchFails=1 MaxAges=0 Readers={B} "Scopes={{p1},{p1,p2}}"
+# 2026-10-03: ALL ON. ReaderScopeHolds's shape plus one rescope and one
+# restart (the replay), so the reader can rescope and pull mid-rescope.
+# Checked against MCLeanP1All.tla (LeanP1 plus the two probes below).
+AL="Free={p2} MaxRemovals=0 MaxCopies=0 MaxFetchFails=1 MaxAges=0 Readers={B} Scopes={{p1},{p1,p2}} MaxRescopes=1 MaxRestarts=1"
+emit AllHolds Spec "$INV,Inv_ReaderSound" "$SPROPS" $AL
+emit ProbeReaderRescoped Spec TypeOK ProbeReaderRescoped $AL
+emit ProbeReaderPulledMidRescope Spec TypeOK ProbeReaderPulledMidRescope $AL

@@ -1,0 +1,15 @@
+LeanP1 ALL ON (2026-10-03): scope, rescope, a failed fetch and a reader together.
+Module: MCLeanP1All.tla (EXTENDS LeanP1, md5 94da7541; adds only the two probes).
+Cfgs: gen-leanp1.sh's AL shape (ReaderScopeHolds plus MaxRescopes=1 MaxRestarts=1).
+
+Probes (Mac, 3 workers):
+tlcrs ProbeReaderRescoped           rc=12  0s | Action property ProbeReaderRescoped is violated | 1326 distinct, depth 4
+tlc   ProbeReaderRescoped           rc=13  1s | Action property ProbeReaderRescoped is violated
+tlcrs ProbeReaderPulledMidRescope   rc=12  0s | Action property ProbeReaderPulledMidRescope is violated | 1368 distinct, depth 4
+tlc   ProbeReaderPulledMidRescope   rc=13  1s | Action property ProbeReaderPulledMidRescope is violated
+Both fire on both checkers: a reader rescopes, and a reader's pull completes
+while its rescope is saved but not begun.
+
+AllHolds sizing (box, tlc-rs 2aa87d67, 2 workers): started 19:05:32Z, STOPPED by
+hand at 19:06:36Z (cores for flint-27's OPEN3 reruns) at depth 10, 609,870
+distinct, 371,311 on queue. NO VERDICT YET; size it after the gate.

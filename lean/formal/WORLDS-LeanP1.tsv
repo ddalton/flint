@@ -48,3 +48,6 @@ LeanP1ReaderScopeHolds	HOLDS
 LeanP1ReaderOwedIgnored	Inv_ReaderSound
 LeanP1ProbeReaderPulled	ProbeReaderPulled
 LeanP1ProbeReaderSkipped	ProbeReaderSkipped
+LeanP1AllHolds	HOLDS
+LeanP1ProbeReaderRescoped	ProbeReaderRescoped
+LeanP1ProbeReaderPulledMidRescope	ProbeReaderPulledMidRescope
