@@ -23,7 +23,8 @@ Hub or private ECR (Docker Hub, unreleased `step6-<sha>` tags).
 - A: a real hub is ~90 MiB RSS at any size, ~5 m CPU idle, 10–12 s to
   Ready.
 - B: wakes do not depend on file count: 13–14 s from suspend, ~27 s from
-  hibernate, of which ~12 s is outside the pod.
+  hibernate, of which ~12 s is outside the pod. Broken down and fixed
+  2026-10-02 (`results-box-wakeparts/`): 2.4–2.9 s and 5.7–7.3 s.
 - C: the proxy spends ~0.18 ms CPU per metadata op, about the hub's
   own, so one core serves ~5,500 ops/s; mTLS adds ~10% on metadata,
   ~40% on bulk reads.

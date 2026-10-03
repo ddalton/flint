@@ -276,6 +276,13 @@ path, which writes no annotations at all, so it survives and holds the
 ladder's first signal — which is the whole basis of the agent-mount
 contract below.
 
+**A stamp only wakes a share if it is newer than the share's last
+move.** Once the share parks, a keepalive stamp left from when it ran is
+older than `chert.us/idle-since` and is not read as a request; only a
+stamp written after the park (allowing 5 s for the writer's clock) wakes
+it. Calling `/wake` on a parked share always qualifies. See *Waking* in
+`docs/flint-lite-operator.md`.
+
 `wakeWaitSecs` (default 25) bounds how long one request will hold.
 
 **Measured**: an `IdleSuspended` share came back and served the request

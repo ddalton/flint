@@ -202,7 +202,7 @@ backend seqids are tracked per hub, never copied from the client.
 | **Hub restarts** (state persisted) | `BADSESSION` → `CREATE_SESSION`, no reclaim | Hub returns `BADSESSION` to the proxy; proxy re-`CREATE_SESSION`s on the same backend clientid and retries. **The client sees nothing but latency.** |
 | **Proxy restarts** | — | The client sees `BADSESSION`, re-`CREATE_SESSION`s on its clientid. That works because the proxy's client table is **persisted** (small SQLite DB on a PVC, written only at `EXCHANGE_ID` confirm and `DESTROY_CLIENTID`). Backend clients are re-attached with the same owner and verifier, so the hubs return the **same** clientid with state intact — no reclaim anywhere. |
 | **Hub loses a client's state** (hibernate deleted the PVC, `state.db` quarantined) | Remount, not resume (hibernate already means this) | Hub returns `STALE_CLIENTID`; proxy re-registers. **The proxy must NOT set `SEQ4_STATUS_ADMIN_STATE_REVOKED`.** The census measured Linux 6.12 treating that flag client-wide: revoking one export's state lost byte-range locks in the *other* export on the same session (census Part 3). Behind the proxy, that means every workspace the node mounts. Instead: (1) **hibernation requires zero live leases** (the HIB-1 fix), so hibernation never destroys state a client holds; (2) for the remaining losses, return per-op errors on that hub's stateids only, with no SEQUENCE flag. **Measured (step 3 `revoke`, Linux 6.12): the recovery stays per-state.** One process holds a lock in ws-a and in ws-b; hub A loses every client's state. ws-a's write returns EIO and the kernel logs "lost 1 locks"; ws-b's write succeeds and its lock still holds on hub B. |
-| **Hub parked** (idle ladder, replicas 0) | `hard` mount hangs; nothing can wake it (an NFS client cannot write an annotation) | Proxy gets connection refused, stamps `chert.us/requested-at` on the FlintShare (the hub-gateway's `/wake` code), and returns **`NFS4ERR_DELAY`** until the hub is Ready. **This fixes the agent-mount hazard** for proxied clients. |
+| **Hub parked** (idle ladder, replicas 0) | `hard` mount hangs; nothing can wake it (an NFS client cannot write an annotation) | Proxy gets connection refused, stamps `chert.us/requested-at` on the FlintShare (the hub-gateway's `/wake` code), and **holds the compound**, retrying the hub every 250 ms and re-asking every 5 s, for up to `wakeHoldSecs` (20 s, under the client's 60 s timeout); only past that does it answer **`NFS4ERR_DELAY`**. It does not stamp a share whose `idle-state` is already Active. **This fixes the agent-mount hazard** for proxied clients. |
 
 The last row is an improvement over direct mounts: the proxy is the
 first NFS-side component that can wake a hub. It also holds the hub's
@@ -640,8 +640,10 @@ workspaces down. That is new protocol surface to save configuration.
 2. Real per-hub load is far heavier than step 6 measured. Those numbers
    are idle and light load, extrapolated from 30 hubs.
 3. Wakes must be near-instant. Loading a workspace into a running hub
-   would beat 13 s (suspend) and 27 s (hibernate). The cheaper first
-   step is the ~12 s of the hibernate wake spent outside the pod.
+   would beat ~3 s (suspend) and ~6–7 s (hibernate), which is what is
+   left after the 2026-10-02 wake fixes (they were 13 s and 27 s:
+   `tests/lima/nfs-proxy-census/results-box-wakeparts/`). The hibernate
+   wake is now provisioning, pod start and import.
 4. A future driver brings back EIO-on-roll, and restarts at ~100 hubs a
    node become the outage again.
 
@@ -950,7 +952,11 @@ isolation.
    Headlines:
    - a real hub is ~90 MiB and ~5 m CPU idle at any size;
    - wakes are size-independent: ~13 s from suspend, ~27 s from
-     hibernate;
+     hibernate. **Cut 2026-10-02 to 2.4–2.9 s and 5.7–7.3 s**
+     (`results-box-wakeparts/`): 21 s of the 27 were a 10 s startup
+     probe period and the client's DELAY backoff. The hub's probes now
+     check every second, and the proxy holds a compound for a waking hub
+     instead of answering DELAY at once;
    - the proxy spends ~0.18 ms CPU per metadata op, about the hub's own
      (one core ≈ 5,500 ops/s);
    - 150 live + 10,000 parked: the operator at 235 MiB / 181 m, with 183
