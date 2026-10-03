@@ -19,7 +19,8 @@ model and the one-mounter rule), docs/flint-approach-radar.html
 ("Mountpoint for S3 completes the upload on fsync/close"),
 lean/e2e/perf/results/door-drill-2026-09-10.md (no data cache, Minimal
 metadata TTL without --cache), the lean poster and the syncer/gateway
-code under lean/, and lean/formal/LeanSubtree.tla for the invariants.
+code under lean/, and lean/PROTOCOL.md (formal/LeanP1.tla, the shape that
+ships since 2026-09-25) for the rules and the invariants.
 
 Run:  python3 acid-poster.py [outdir] [--preview] [--pdf] [--emf]
 """
@@ -60,10 +61,10 @@ GLOSSARY = [
     ("the pointer", ".flint/lean/current — the ONE mutable metadata object. "
                     "Entries live in immutable, chunked manifests"),
 
-    ("epoch · lease", "the bucket-side single-writer cell. A syncer that loses "
-                      "the CAS is fenced and says so"),
-    ("the inbox", "the queue of UI writes waiting to be cited. An entry names "
-                  "an object and its ETag, never a manifest edit"),
+    ("epoch · fence", "the bucket-side commit cell: one writer commits at a "
+                      "time, and a deposed holder is refused"),
+    ("P2", "since 2026-09-25 a UI verb COMMITS: one pointer CAS, judged "
+           "against the version the UI read, else 412"),
     ("CRC-64", "the checksum the manifest carries per entry, computed by the "
                "client that moved the bytes; every fetch is checked"),
     ("RPO", "recovery point. Passthrough has none to state; lean's is the "
@@ -133,7 +134,7 @@ def build():
            fill=d.CLIENT_F, line=d.CLIENT_L, line_weight=0.013,
            title_size=9.6, body_size=7.2)
     d.node(p, "rect", x1 + 3.45, y0 + 0.72, 2.20, 1.05, "flint-sync",
-           "the only writer of the prefix — it holds the lease",
+           "a writer of the prefix: it holds the fence to commit",
            fill=d.WORK_F, line=d.WORK_L, line_weight=0.013, title_size=9.6,
            body_size=7.2)
     d.node(p, "cylinder", x1 + 6.75, y0 + 0.45, 3.45, 0.72, "files/<path>",
@@ -193,8 +194,8 @@ def build():
           "CAS on .flint/lean/current cites the whole set: a checkout, a sync "
           "or the gateway reads the boundary entire or not at all. A rename "
           "is one generation — destination entry and source removal in the "
-          "same CAS. A UI's write is two steps, object then inbox entry, and "
-          "is cited at the syncer's next barrier. The one reader with no "
+          "same CAS. A UI's save, delete or rename is ONE CAS of its own, "
+          "cited when it is acknowledged. The one reader with no "
           "atomicity is a raw-key reader on files/: a browser, or a "
           "passthrough mount on the same prefix, sees objects land one by "
           "one.")),
@@ -214,10 +215,10 @@ def build():
           "writer computed; every fetch is verified against it and a "
           "mismatch refuses the checkout with nothing written. The claim "
           "refuses a foreign prefix; the epoch fences a deposed writer on "
-          "every request. The invariants are machine-checked "
-          "(LeanSubtree.tla): every acked UI write stays tracked until "
-          "cited, and a performed rename never shows the bytes under both "
-          "names, or under neither.")),
+          "every request. The invariants are machine-checked against the "
+          "shape that ships (LeanP1.tla): an acknowledged UI write is never "
+          "lost unaccounted (Inv_AckedNamed), and a handle is never cited "
+          "under two names (Inv_OneName).")),
         ("I — isolated",
          "can two writers, or a writer and a reader, corrupt each other?",
          ("NONE, BY DESIGN.",
@@ -229,15 +230,15 @@ def build():
           "lever is readOnly, per mount. A pod that wants git, pip or sqlite "
           "on the tree wants lean, whose boundary is what makes those "
           "safe."),
-         ("ONE WRITER PER PREFIX, enforced in the bucket.",
-          "The syncer holds the lease (the epoch cell) and is fenced on a "
-          "lost CAS: a second syncer is refused, not merged. UI writers are "
-          "the SECOND writer, serialised through the inbox — a write is "
-          "refused 409 + Retry-After while a barrier window is open, an "
-          "overwrite must name what it read (428 / 412), and a draft is "
-          "invisible until promoted. When the agent and a UI touch the same "
-          "path, locally-dirty wins and the UI's bytes are preserved as a "
-          "conflict copy, never deleted.")),
+         ("ONE COMMIT AT A TIME, ordered by the pointer CAS.",
+          "Writers take turns at the fence (the epoch cell) for their commit "
+          "only; a CAS on a stale read is refused and merged three ways onto "
+          "the current document, and a deposed holder is fenced on every "
+          "request. A UI save is one CAS judged against the version it read "
+          "(428 / 412) and never waits for the fence; a draft is invisible "
+          "until promoted. When the agent and a UI change the same path, the "
+          "agent's version wins and the UI's is preserved as a conflict "
+          "copy, never deleted.")),
         ("D — durable",
          "when the call returns, where are the bytes — and what can still "
          "lose them?",
@@ -255,11 +256,10 @@ def build():
           "the agent writes .flint/publish, and the ack says ok only when "
           "the boundary is in the bucket. RPO is the last barrier, never the "
           "last write: a pod that dies between barriers loses the "
-          "difference (a graceful shutdown drains at NodeUnpublish). Gated "
-          "mode uploads first and cites later, so bytes are durable NOW and "
-          "visible on one CAS. A checkout fsyncs every file before it "
-          "writes the marker that vouches for it; a UI's PUT is durable when "
-          "it returns.")),
+          "difference (a graceful shutdown drains at NodeUnpublish). A "
+          "checkout fsyncs every file before it writes the marker that "
+          "vouches for it; a UI's PUT is durable and committed when it "
+          "returns.")),
     ]
 
     for label, question, (pt, pb), (lt, lb) in ROWS:
@@ -287,8 +287,8 @@ def build():
           "multi-writer coherence, byte-range locks, cross-pod O_EXCL — "
           "those need an arbiter that answers in milliseconds, which is the "
           "hub. And neither is isolated from a raw-key writer holding the "
-          "credential: lean DETECTS the foreign overwrite (If-Match on "
-          "consume, a conflict copy); passthrough cannot.",
+          "credential: lean DETECTS the foreign overwrite (every fetch is "
+          "If-Match the cited etag: refused, not served); passthrough cannot.",
           fill="#FDECEC", line="#C0392B", line_weight=0.011, title_size=9.6,
           body_size=7.4, body_color="#8C2F22")
     y += 0.92 + 0.30
@@ -308,13 +308,13 @@ def build():
 
         "THE UI'S WRITE IS A THIRD CONTRACT, and it is the agent's turned "
         "around. Through the gateway — or the flint-lean-gateway crate "
-        "called in-process — a write is DURABLE when the call returns "
-        "(object first, inbox entry second) and CITED at the syncer's next "
-        "barrier; the agent's write is VISIBLE when write() returns and "
-        "DURABLE at the barrier. Both keep the manifest single-writer, "
-        "which is what keeps the two safe together, and every gateway "
-        "reader sees the UI's bytes at once because the read door overlays "
-        "the inbox on the citation.",
+        "called in-process — a write is DURABLE AND COMMITTED when the call "
+        "returns: the object at a fresh handle, then ONE pointer CAS judged "
+        "against the version the UI read (P2, since 2026-09-25). The "
+        "agent's write is VISIBLE when write() returns and DURABLE at the "
+        "barrier. The pointer CAS is what keeps the two safe together: a "
+        "syncer whose CAS loses to a save merges again onto it, and every "
+        "gateway read is the citation, one fetch.",
 
         "“CONSISTENT” MEANS SOMETHING DIFFERENT AT EACH DOOR. At "
         "passthrough it is S3's word: read-after-write on one key. At lean "

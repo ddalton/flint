@@ -6,8 +6,8 @@ writers on one workspace, and the rule that keeps them coherent. Lean is a
 STRONGLY CONSISTENT SHARED LOG with EVENTUALLY CONSISTENT WORKING COPIES —
 git with automatic push and pull. The bucket orders every boundary with one
 conditional write of the manifest pointer; each writer's tree is a working
-copy that its TICK keeps close to that log, and a UI reads and writes the
-bucket directly.
+copy that its TICK keeps close to that log, and a UI reads the bucket and
+COMMITS to it directly (P2, since 2026-09-25: one pointer CAS per verb).
 
 The page is built for the DYNAMICS, because that is where the two
 consistency claims live: a sequence diagram with time running down (two
@@ -21,7 +21,8 @@ Sources of record: lean/syncer/src/barrier.rs (the tick's idle path, the
 pull-only arm, the commit section and step 7), lean/syncer/src/lease.rs (the
 per-barrier fence, the FIFO ticket, the head poll, the handoff), sentinel.rs
 (the floor tick, remote.seq), lean/syncer/AGENTS.md (the contract every
-mount carries), lean/gateway (the UI's write and read), lean/formal/README.md
+mount carries), lean/gateway (the UI's commit and read), lean/PROTOCOL.md (the
+rules as they ship), lean/formal/README.md
 (the model), and lean/e2e/writers-live/results/2026-09-14-contention/ (the
 numbers: six writers, one workspace, 5 s floor, real S3).
 
@@ -47,7 +48,7 @@ RED_L, RED_F = "#C0392B", "#FDECEC"
 
 GLOSSARY = [
     ("tick", "a writer's own poll for work, every floorSecs: scan the tree, "
-             "GET the inbox, GET the pointer — then stop, pull or publish"),
+             "GET the request cell, GET the pointer — then stop, pull or publish"),
     ("floorSecs", "the tick interval (default 60 s). A publish touch does not "
                   "wait for it: a 1 s local poll runs that barrier at once"),
     ("barrier · boundary", "the work, and what it makes: one barrier installs "
@@ -64,12 +65,12 @@ GLOSSARY = [
     ("FIFO ticket", "a waiter enqueues once; the holder's handoff names the "
                     "head, which polls every 200 ms; the rest every second"),
 
-    ("the inbox · window", "UI writes waiting to be cited, and the 'a barrier "
-                           "is committing' sign in the same cell"),
-    ("foreign queue", "a writer's local list of peers' changes its merge "
-                      "carried into the log but not yet into its tree"),
-    ("consume", "the first thing a barrier does: apply inbox entries and "
-                "queued peer changes onto files the agent has not modified"),
+    ("the request cell", ".flint/lean/inbox: 'please publish' and 'please "
+                         "pull' from outside the pod. No UI writes since P2"),
+    ("merge base", "a writer's baseline: the version it integrated at each "
+                   "path. Its commit merges three ways onto the CURRENT log"),
+    ("consume", "the first thing a barrier does: take what the tree is OWED "
+                "— the log differs from the baseline, the file is clean"),
     ("pull-only", "a barrier with nothing of its own to publish: it takes the "
                   "peers' changes and their manifest as its base, no lock"),
 
@@ -127,7 +128,7 @@ def build():
              "consistent working copies: git with automatic push and pull. "
              "One conditional write on the bucket orders every boundary; each "
              "writer's TICK keeps its tree close to that log, and a UI reads "
-             "and writes the bucket directly.")
+             "the bucket and commits to it directly, one CAS per verb.")
 
     # =====================================================================
     # 1 · the structure: working copies on the left, the log on the right
@@ -163,8 +164,8 @@ def build():
            line_weight=0.013, title_size=9.2, body_size=7.1)
     d.node(p, "rect", 5.25, 4.94, 4.15, 0.86,
            "flint-lean-gateway — a door, or a crate",
-           "no tick: reads the bucket when asked; a write is durable when it "
-           "returns", fill=UI_F, line=UI_L, line_weight=0.015,
+           "no tick: reads the bucket when asked; a write is COMMITTED, one "
+           "CAS, when it returns", fill=UI_F, line=UI_L, line_weight=0.015,
            title_size=9.2, body_size=7.1)
     p.arrow([(4.28, 5.37), (5.25, 5.37)], color=ALT, weight=W,
             begin_arrow=k.ARROW_FILLED)
@@ -186,16 +187,16 @@ def build():
             p.arrow([(gx + i * (gw + gg) - gg, gy + gh / 2),
                      (gx + i * (gw + gg), gy + gh / 2)], color=d.S3_L, weight=W)
     d.node(p, "cylinder", 19.55, 2.60, 2.10, 0.92, ".flint/lean/current",
-           "THE pointer — one CAS per boundary", fill=d.S3_HOT_F, line=d.S3_L,
+           "THE pointer — one CAS per boundary or UI verb", fill=d.S3_HOT_F, line=d.S3_L,
            line_weight=0.016, cap=0.18, title_size=8.6, body_size=6.9)
     p.arrow([(19.55, 3.06), (gx + 2 * (gw + gg) + gw, 3.06)], color=DUR,
             weight=W)
     d.node(p, "cylinder", 13.30, 3.72, 4.05, 0.80, "files/<path>",
-           "whole objects; PUT and GC delete If-Match", fill=d.S3_F,
+           "a fresh immutable handle per write; If-None-Match", fill=d.S3_F,
            line=d.S3_L, line_weight=0.013, cap=0.18, title_size=9.0,
            body_size=6.9)
     d.node(p, "cylinder", 17.60, 3.72, 4.05, 0.80, ".flint/lean/inbox",
-           "UI writes to cite · the barrier window", fill=d.S3_F, line=d.S3_L,
+           "the request cell: please publish · please pull", fill=d.S3_F, line=d.S3_L,
            line_weight=0.013, cap=0.18, title_size=9.0, body_size=6.9)
     d.node(p, "cylinder", 13.30, 4.74, 8.35, 0.90,
            ".flint/lean/epoch — THE FENCE: whose turn it is to commit",
@@ -214,12 +215,12 @@ def build():
              size=6.9)
     p.arrow([(13.05, 4.25), (9.40, 4.25)], color=FLOW, weight=WT)
     d.flabel(p, 11.22, 4.01, "PULL, on a tick", FLOW, w=2.0, size=7.6)
-    d.flabel(p, 11.22, 4.51, "GET pointer · GET inbox — no lock", FLOW,
+    d.flabel(p, 11.22, 4.51, "GET pointer · GET cell — no lock", FLOW,
              w=3.3, size=6.9)
     p.arrow([(9.40, 5.37), (13.05, 5.37)], color=ALT, weight=W,
             begin_arrow=k.ARROW_FILLED)
-    d.flabel(p, 11.22, 5.13, "object, then inbox entry", ALT, w=2.6, size=7.2)
-    d.flabel(p, 11.22, 5.63, "reads: citation + inbox overlay", ALT, w=3.1,
+    d.flabel(p, 11.22, 5.13, "object, then ONE pointer CAS", ALT, w=2.6, size=7.2)
+    d.flabel(p, 11.22, 5.63, "reads: the citation, one fetch", ALT, w=3.1,
              size=6.9)
 
     # =====================================================================
@@ -298,9 +299,9 @@ def build():
     msg(0, "agent B", "flint-sync B", "edits y", FLOW, dashed=True)
     tick(1, "flint-sync A", -1)
     tick(1, "flint-sync B", +1)
-    msg(1, "flint-sync A", "the log · the fence", "PUT files/x If-Match — no lock",
+    msg(1, "flint-sync A", "the log · the fence", "PUT files/x@ a fresh handle — no lock",
         DUR)
-    msg(1, "flint-sync B", "the log · the fence", "PUT files/y If-Match — no lock",
+    msg(1, "flint-sync B", "the log · the fence", "PUT files/y@ a fresh handle — no lock",
         DUR)
     msg(2, "flint-sync A", "the log · the fence", "claim the fence: held", CTL)
     msg(3, "flint-sync B", "the log · the fence", "claim: queued behind A", CTL)
@@ -312,20 +313,20 @@ def build():
         "read 43 · merge y onto it", DUR)
     msg(7, "flint-sync B", "the log · the fence",
         "CAS If-Match 43 → seq 44  ★", DUR, weight=WT)
-    msg(8, "flint-sync B", "the log · the fence", "hand off · queue A's x", CTL)
+    msg(8, "flint-sync B", "the log · the fence", "hand off the fence", CTL)
     msg(8, "flint-sync B", "agent B", "ack ok · 44", FLOW, dashed=True)
     msg(9, "UI", "the log · the fence", "", ALT)
-    d.flabel(p, 8.85, ry(9) - 0.20, "UI: PUT files/z, then inbox — durable now",
+    d.flabel(p, 8.85, ry(9) - 0.20, "UI: PUT z, CAS 44 → 45 — committed now",
              ALT, w=2.95, size=6.9)
     tick(10, "flint-sync B", +1)
-    msg(10, "the log · the fence", "flint-sync B", "tick: inbox has z", FLOW)
-    msg(11, "flint-sync B", "agent B", "apply x, z", FLOW, dy=-0.20)
+    msg(10, "the log · the fence", "flint-sync B", "tick: pointer moved, 45", FLOW)
+    msg(11, "flint-sync B", "agent B", "take x, z", FLOW, dy=-0.20)
     d.caption(p, X["agent B"] + 0.22, ry(11) + 0.10, 1.60,
               "B in sync", size=7.0, color=d.CLIENT_L, halign=0)
     tick(12, "flint-sync A", -1)
     msg(12, "the log · the fence", "flint-sync A",
         "tick: pointer moved → pull, no lock", FLOW)
-    msg(13, "flint-sync A", "agent A", "apply y, z", FLOW)
+    msg(13, "flint-sync A", "agent A", "take y, z", FLOW)
     d.caption(p, 0.52, ry(13) + 0.10, 0.62, "A in sync", size=7.0,
               color=d.CLIENT_L, halign=0)
     d.caption(p, 0.55, ry(0) + 0.10, 0.60, "time ↓", size=7.4,
@@ -352,18 +353,18 @@ def build():
     SX = mx + 2.05
     state(SX, sy + 0.78, 2.60, "IDLE", "until floorSecs, or a publish touch",
           d.PLAIN_F, d.PLAIN_L)
-    state(SX, sy + 1.72, 2.60, "TICK", "scan · GET inbox · GET pointer",
+    state(SX, sy + 1.72, 2.60, "TICK", "scan · GET cell · GET pointer",
           d.CLIENT_F, d.CLIENT_L)
     state(mx + 0.25, sy + 2.86, 2.25, "PULL",
-          "queue peers' changes · no lock", d.CLIENT_F, d.CLIENT_L)
+          "take what is owed · no lock", d.CLIENT_F, d.CLIENT_L)
     state(mx + 3.55, sy + 2.86, 2.70, "CONSUME · UPLOAD",
-          "apply inbox + queue · PUT If-Match", d.CLIENT_F, d.CLIENT_L)
+          "take what is owed · PUT new handles", d.CLIENT_F, d.CLIENT_L)
     state(mx + 3.55, sy + 3.86, 2.70, "WAIT FOR THE FENCE",
           "enqueue · the head polls 200 ms", "#F3EEFB", d.WORK_L)
     state(mx + 3.55, sy + 4.86, 2.70, "COMMIT",
           "re-read · merge · CAS the pointer", "#F3EEFB", d.WORK_L)
-    state(mx + 3.55, sy + 5.86, 2.70, "GC · QUEUE · HAND OFF",
-          "delete If-Match · ack ok", "#F3EEFB", d.WORK_L)
+    state(mx + 3.55, sy + 5.86, 2.70, "RETIRE · HAND OFF",
+          "log what it retired · ack ok", "#F3EEFB", d.WORK_L)
 
     cxs = SX + 1.30
     p.arrow([(cxs, sy + 1.40), (cxs, sy + 1.72)], color=FLOW, weight=W)
@@ -543,10 +544,12 @@ def build():
         "and handoff move it, and a holder that stands still for 60 s is "
         "deposed. A publish touch does not wait for the tick.",
 
-        "WHAT DOES NOT CONVERGE ON ITS OWN. A writer lost for good between "
-        "its upload and its commit leaves an uncited object that the trees "
-        "and a fresh checkout disagree about until someone rewrites the "
-        "path; nothing acknowledged is lost. On Ozone 2.2.x a DELETE ignores "
+        "WHAT IS LEFT BEHIND, AND WHAT IS NOT. A writer lost for good between "
+        "its upload and its commit leaves an uncited handle, which the orphan "
+        "sweep takes; its agent was never told ok, so nothing acknowledged is "
+        "lost. What a commit stops citing is kept for the retire age G "
+        "(600 s), so a reader that loaded the log less than G ago can still "
+        "fetch everything it cites. On Ozone 2.2.x a DELETE ignores "
         "If-Match, so the garbage collector's guard is void there: run one "
         "writer per workspace until 2.3.0.",
     ])
@@ -555,7 +558,7 @@ def build():
     d.legend(p, 0.55, y, [
         ("a publish: bytes and the commit, into the log", DUR, False),
         ("a pull: the log, into a working copy", FLOW, False),
-        ("a UI: straight to the bucket, no pod", ALT, False),
+        ("a UI: one CAS straight to the bucket, no pod", ALT, False),
         ("one directory, two views · an ack back to the agent", FLOW, True),
     ], span=5.35)
     d.glossary(p, 0.55, y + 0.45, 21.3, GLOSSARY)

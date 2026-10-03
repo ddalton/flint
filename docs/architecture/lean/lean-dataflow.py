@@ -67,10 +67,10 @@ GLOSSARY = [
 
     ("HITL", "human in the loop: a write that reaches the workspace from a "
              "UI rather than from the agent"),
-    ("the inbox", "the queue of UI writes waiting to be adopted. Entries "
-                  "name an object and its ETag, never a manifest edit"),
-    ("the window", "the barrier-in-progress token, in the SAME cell as the "
-                   "inbox — carrying a deadline, so it cannot wedge"),
+    ("the request cell", ".flint/lean/inbox: the two verb requests from "
+                         "outside the pod, please publish and please pull"),
+    ("P2", "since 2026-09-25 a UI verb COMMITS: one pointer CAS, judged "
+           "against the version the UI read, else 412"),
     ("epoch-validated", "checked PER REQUEST against the cell's current "
                         "epoch, so a deposed worker's write is refused"),
 ]
@@ -153,7 +153,7 @@ def build():
            fill=d.S3_F, line=d.S3_L, line_weight=0.013, cap=0.28,
            body_size=7.4)
     d.node(p, "cylinder", 16.70, 3.95, 4.15, 0.85, ".flint/lean/current",
-           "THE pointer. ONE CAS installs a whole boundary — entries in manifests/ + chunks/",
+           "THE pointer. ONE CAS per boundary or per UI verb — entries in manifests/ + chunks/",
            fill=d.S3_HOT_F, line=d.S3_L, line_weight=0.015, cap=0.28,
            body_size=7.4)
     d.node(p, "cylinder", 16.70, 4.95, 4.15, 0.85, ".flint/lean/epoch",
@@ -161,8 +161,8 @@ def build():
            fill=d.S3_F, line=d.S3_L, line_weight=0.013, cap=0.28,
            body_size=7.4)
     d.node(p, "cylinder", 16.70, 5.95, 4.15, 0.85, ".flint/lean/inbox",
-           "ONE CAS cell that is BOTH the HITL inbox and the barrier-window "
-           "token — opened at barrier intent, cleared after the manifest CAS",
+           "the request cell: ONE CAS document, the two verb requests from "
+           "outside the pod. No UI writes in it since P2",
            fill=d.S3_HOT_F, line=d.S3_L, line_weight=0.015, cap=0.28,
            body_size=7.4)
     p.text(17.90, 7.20, 2.95, "\u2026workspace #1's prefix, above",
@@ -203,7 +203,7 @@ def build():
     d.flabel(p, 15.02, 5.135, "claim · hand off", DUR, w=1.20, size=7.4)
     p.arrow([(14.45, 6.375), (16.70, 6.375)], color=DUR, weight=WT,
             begin_arrow=k.ARROW_FILLED)
-    d.flabel(p, 15.02, 6.135, "consume", DUR, w=1.10, size=7.4)
+    d.flabel(p, 15.02, 6.135, "requests", DUR, w=1.10, size=7.4)
     p.arrow([(11.05, 7.55), (11.60, 7.55)], color=ALT, weight=WT)
     p.arrow([(15.27, 7.55), (17.50, 7.55), (17.50, 6.80)], color=ALT,
             weight=WT)
@@ -243,8 +243,8 @@ def build():
            "the same verbs called in-process by your own backend.\n"
            "It talks to the BUCKET, never to the pod. GET /snapshot · /files · "
            "/status · drafts · DELETE /files · POST /rename — and the HITL "
-           "write: PUT the object FIRST, append the inbox entry SECOND, and "
-           "NEVER edit the manifest.",
+           "write: PUT the object at a fresh handle, then ONE pointer CAS "
+           "cites it (P2), never waiting on the writers' lease.",
            fill="#FFF6E2", line="#B0862A", line_weight=0.016,
            title_size=9.8, body_size=7.2)
 
@@ -305,26 +305,26 @@ def build():
           fill=d.CLIENT_F, line=d.CLIENT_L, line_weight=0.012,
           title_size=9.6, body_size=7.3, body_color=SUB)
     p.box(7.70, 12.15, 7.00, 1.45,
-          "the UI's write — DURABLE, and UNCITED",
-          "PUT /files/{path} is a CONDITIONAL whole-object PUT (If-Match on "
-          "what it read, else 409 concurrent-write). When it returns, the "
-          "BYTES are in S3 and every gateway reader sees them at once — but "
-          "nothing cites them: not the manifest, not the agent's tree. "
-          "ADOPTION is a separate event at the syncer's next barrier, and it "
-          "can go against them. Durable is not committed. Refused 409 + Retry-After while a window is open, and "
-          "stamped epoch: 0 — deliberately the SECOND writer.",
+          "the UI's write — DURABLE, and COMMITTED",
+          "PUT /files/{path} names the version it read (If-Match, else 428). "
+          "The bytes go to a fresh handle, then ONE pointer CAS cites them, "
+          "landing only over that version: a stale save is a 412 that "
+          "records nothing. Acknowledged once cited, so every reader and the "
+          "next consume see it. Stamped epoch: 0, it never takes the writers' "
+          "lease or waits for a barrier: a syncer mid-publish loses its CAS "
+          "and merges again onto the save.",
           fill="#FFF6E2", line="#B0862A", line_weight=0.012,
           title_size=9.6, body_size=7.3, body_color=SUB)
     p.box(14.90, 12.15, 7.00, 1.45,
           "and when the two collide — the bytes are NOT deleted",
-          "On consume the syncer HEADs each entry If-Match: superseded → "
-          "dropped, object missing → conflict, path uncontainable → "
-          "conflict. If the agent also touched that path, LOCALLY-DIRTY "
-          "WINS — but the UI's bytes are COPIED to "
-          ".flint/lean/conflicts/<uuid>/<path> (If-None-Match, so a "
-          "preserve never clobbers) BEFORE the local version publishes over "
-          "files/<path>, and a ConflictRecord names path, foreign ETag and "
-          "preserved key. v1 gap: that record is written to the POD's "
+          "A syncer's commit is a three-way merge onto the CURRENT document, "
+          "its baseline the merge base. Where the agent also changed a path "
+          "the UI saved, the AGENT'S version wins — but the UI's is first "
+          "COPIED to .flint/lean/conflicts/<uuid>/<path> (If-None-Match, so "
+          "a preserve never clobbers) and a ConflictRecord names it (R7). An "
+          "agent deleting a path the UI saved since deletes it, and the UI's "
+          "version is preserved the same way (M3). v1 gap: the record is "
+          "written to the POD's "
           ".flint-sync/conflicts.jsonl and rides only a sync ack — the UI is "
           "never told that it lost.",
           fill="#FDECEC", line="#C0392B", line_weight=0.012,
@@ -368,33 +368,34 @@ def build():
         "it is a CRATE too: a backend depends on flint-lean-gateway and calls "
         "the verbs in-process, holding nothing but credentials for the "
         "prefixes it serves. GET /snapshot returns {manifest, manifest_etag, "
-        "inbox} in one read; GET /files/{path} reads guarded on the "
-        "citation and consults the inbox only when that fails, so an "
-        "overwrite reads at once and the common read costs nothing extra; "
-        "delete and rename are DECLARED removals the syncer performs at its "
-        "barrier (a rename is one generation; a removal of a dirty path is "
-        "refused, never retried); drafts are durable edits nobody sees until "
-        "promoted.",
+        "inbox} in one read, the inbox carrying only the standing requests; "
+        "GET /files/{path} reads the handle the manifest cites, and since "
+        "every UI edit commits, that is the newest version and a read is one "
+        "fetch; delete and rename are ONE pointer CAS each (a delete stops "
+        "citing the path and deletes no object, its tombstone naming what it "
+        "retired; a rename moves the citation, no bytes move); drafts are "
+        "durable edits nobody sees until promoted.",
 
-        "THE HITL WRITE IS THREE ORDERED STEPS AND THE MANIFEST IS NOT ONE "
-        "OF THEM. PUT /files/{path} writes the OBJECT first and appends an "
-        "INBOX entry second — never a manifest edit — so only syncers write "
-        "the pointer, one commit at a time. A worker consumes the inbox at "
-        "its next barrier (HEAD each entry If-Match; a superseded entry is "
-        "dropped, not an error), materialises it into the tree and cites it "
-        "in the next manifest. A write is refused 409 + Retry-After while a "
-        "barrier window is open, and every gateway replica reads that window "
-        "from the CELL rather than from its own memory — which is what makes "
-        "two stateless replicas safe.",
+        "THE HITL WRITE IS TWO ORDERED STEPS AND THE SECOND IS THE COMMIT "
+        "(P2, since 2026-09-25). PUT /files/{path} writes the OBJECT at a "
+        "fresh handle first, then ONE pointer CAS cites it, judged against "
+        "the version the UI read: a save over a version someone else "
+        "published since is a 412 that records nothing, and the UI re-reads "
+        "and reconciles. It never takes the writers' lease and never waits "
+        "for a barrier — a syncer mid-publish loses its CAS, merges again "
+        "onto the save and retries — so the cost of heavy saving falls on "
+        "the writers, never on the person saving. Before step 5 a write was "
+        "an object plus an inbox entry a syncer later cited; that cell now "
+        "carries only the two verb requests.",
 
-        "THE WINDOW CANNOT WEDGE, AND A DEPOSED WORKER CANNOT WRITE. The "
-        "window carries a deadline and a successor epoch may override a "
-        "stale one, so a dead worker does not block HITL forever; and every "
-        "worker-facing verb — window/open, window/clear, inbox/drop, "
-        "manifest — is epoch-validated PER REQUEST, so a write whose claimed "
-        "epoch is not the cell's current epoch is rejected. Rotation alone "
-        "leaves that door open, which is exactly what the model's "
-        "LeanNoEpochCheck mutation proves.",
+        "A DEPOSED WORKER CANNOT WRITE, AND NOTHING CAN WEDGE THE UI. The "
+        "worker-facing verb (POST /manifest) is epoch-validated PER "
+        "REQUEST, so a write whose claimed epoch is not the cell's current "
+        "epoch is rejected — rotation alone leaves that door open, which is "
+        "exactly what the model's LeanNoEpochCheck mutation proves. And "
+        "there is no barrier window any more: a UI save never waits on a "
+        "worker, so a dead one blocks nobody (Prop_UISaveCompletes, fair to "
+        "the gateway's CAS alone).",
 
         "AND ONE VERB IS DELIBERATELY CARRIED, NEVER PERFORMED. \u201cPlease "
         "publish\u201d from outside the pod is honoured; \u201cplease pull\u201d is "
@@ -421,38 +422,28 @@ def build():
         "because an unauthenticated gateway is an open writer to every "
         "workspace configured.",
 
-        "WHY THE GATEWAY APPENDS TO AN INBOX AND NEVER CASes THE "
-        "MANIFEST. Not because a second CAS writer would corrupt it — CAS "
-        "would arbitrate that perfectly well. Because a manifest write is "
-        "not a metadata edit, it is a CLAIM ABOUT A TREE: a boundary means "
-        "\u201ceverything ordered-before T\u201d, and the entries it cites are one "
-        "half of a pair whose other half is the syncer\u2019s on-disk baseline "
-        "— classify() derives uploads from \u201cchanged vs the baseline\u201d and "
-        "deletes from \u201cabsent twice AND present in the baseline\u201d. The "
+        "WHY THE GATEWAY MAY CAS THE MANIFEST AFTER ALL. The old reason it "
+        "did not still holds: a BOUNDARY is a claim about a tree, and the "
         "gateway has no tree (its root is literally /nonexistent), no "
-        "baseline and no scan, so it cannot honestly say what a coherent "
-        "boundary contains. It CAN honestly say \u201cthese bytes exist and "
-        "somebody asked for them\u201d, and that is exactly what an inbox entry "
-        "is: a proposal about content, not a claim about a tree.",
+        "baseline and no scan. P2 makes that not matter. A UI verb edits "
+        "ONE path's citation, judged against the version the UI read, and "
+        "claims nothing about any other path. And a writer no longer "
+        "adopts a pointer that moved under it: its baseline IS its merge "
+        "base, what its tree is owed is derived from the document at each "
+        "consume (P1-lite), and its commit is a three-way merge onto the "
+        "CURRENT document — so a save that landed between a syncer's read "
+        "and its CAS is merged in, never lost.",
 
-        "CONCURRENT UI WRITERS ARE HANDLED IN TWO PLACES AND MISSED IN A "
-        "THIRD. The inbox cell is CAS\u2019d with a five-attempt retry, so two "
-        "browsers appending at once serialise and the loser retries — past "
-        "five it fails the request rather than dropping the entry. And the "
-        "queue holds ONE entry per path: a newer write supersedes the "
-        "queued one, and at consume an entry whose ETag no longer matches "
-        "the object is dropped as superseded. So one path yields one "
-        "adoption of the last write, however many browsers raced. The "
-        "object PUT is conditional as well — but on a FRESH HEAD the "
-        "gateway takes immediately before writing, which closes the "
-        "HEAD-to-PUT window and is NOT end-to-end optimistic concurrency: "
-        "so an overwrite must now NAME what it read: 428 "
-        "precondition-required without an If-Match, 412 file-changed on a "
-        "stale one, and the current etag on the 412\u2019s own header. That is "
-        "forge\u2019s taxonomy, adopted so the three doors are one shape. Until "
-        "this landed the route accepted no caller If-Match at all, and two "
-        "browsers that each read v1 and then wrote BOTH succeeded — the "
-        "second silently winning.",
+        "CONCURRENT UI WRITERS ARE SETTLED BY THE ONE CAS. Every overwrite "
+        "NAMES what it read: 428 precondition-required without an If-Match, "
+        "412 file-changed on a stale one, and the current etag on the "
+        "412\u2019s own header — forge\u2019s taxonomy, adopted so the three "
+        "doors are one shape. Two browsers that each read v1 and then save: "
+        "one CAS lands, the other is a 412 that records nothing and "
+        "re-reads. A verb that loses its CAS to the WRITERS rather than to "
+        "another save re-reads, re-judges and retries. Before If-Match was "
+        "required, two such browsers BOTH succeeded — the second silently "
+        "winning.",
 
         "AND WHY NOT SIMPLY ROUTE TO THE WORKER, the way lite\u2019s gateway "
         "routes to a hub? Because half the time there is nothing to route "
@@ -474,37 +465,33 @@ def build():
         "visible at once and durable only at the next barrier — the "
         "AGENT\u2019s bargain. The UI\u2019s 200 would then precede the bytes "
         "reaching S3, and a pod that dies in between loses the write. The "
-        "inbox inverts exactly that: durable when the call returns, adopted "
-        "later. The same line is already drawn inside the pod — the UDS "
+        "gateway\u2019s commit inverts exactly that: durable and committed when "
+        "the call returns. The same line is already drawn inside the pod — the UDS "
         "sync verb EXECUTES, \u201cbecause the caller is inside the pod: it is "
         "the agent asking for its own tree to be updated, which is the "
         "agent\u2019s own decision to make\u201d, while the gateway\u2019s sync request "
         "is carried and never performed. Inside the pod is a decision; "
         "outside it is a proposal.",
 
-        "AND THREE CONSEQUENCES FOLLOW FROM THAT ONE. A manifest write "
-        "would need the fence the gateway does not hold — it stamps epoch: "
-        "0 — so either the gateway queues for the fence like a syncer and "
-        "runs a merge, or manifest writes stop being fenced, which "
-        "is the deposed-straggler hole. It would move the pointer\u2019s ETag "
-        "on every UI write, so baseline.manifest_etag would no longer match "
-        "and the syncer would take its adopt-a-foreign-manifest path on "
-        "every one of them — an exceptional path made the common path. And "
-        "it would read-modify-write an entries set that runs to hundreds of "
-        "MiB at a million files, racing the barrier\u2019s own commit. The "
-        "inbox is a few hundred bytes, needs agreement with nobody, and "
-        "doubles as the barrier-window token, so \u201cis a barrier in "
-        "flight?\u201d and \u201cqueue this write\u201d are one read and one CAS.",
+        "WHAT P2 COSTS, AND WHERE IT FALLS. Every UI verb moves the "
+        "pointer every syncer and reader checks, so an editor autosaves to "
+        "a DRAFT, never with a commit: drafts live under the reserved "
+        "namespace no scan, checkout or sweep can see, and a promote commits "
+        "conditioned on the base it recorded. A syncer whose CAS loses to a "
+        "save merges again, so heavy saving costs the writers. And what a "
+        "save replaced is not deleted: nothing cites it, the retire log "
+        "keeps it for the retire age G (600 s) and only then may a sweep "
+        "take it, so a reader that loaded the document less than G ago can "
+        "still fetch every handle it cites (Inv_ReaderFetches).",
 
-        "THE GATEWAY IS A WRITER, BUT NOT THE SAME KIND OF WRITER, and "
-        "the two guarantees are exact opposites: the agent's write is "
-        "visible before it is durable, the UI's is durable before it is "
-        "visible. What keeps that safe is that only the SYNCERS write the "
-        "manifest, one commit at a time. The gateway stamps epoch: 0 and "
-        "never edits the pointer; a syncer holds the fence for its commit "
-        "and cites the inbox at its own barrier. So \u201cwritten\u201d means different things at the two doors, "
-        "and a UI that reports success on a PUT is reporting durability, "
-        "never adoption.",
+        "THE GATEWAY IS A WRITER, AND THE TWO DOORS STILL MEAN DIFFERENT "
+        "THINGS: the agent's write is visible before it is durable, the "
+        "UI's is durable and committed when the call returns. The gateway "
+        "stamps epoch: 0 and never takes the fence — its CAS is judged "
+        "against the version the UI read, not against the lease — while a "
+        "syncer holds the fence for its own commit. So \u201cwritten\u201d "
+        "still means different things at the two doors, and a UI that "
+        "reports success on a PUT is reporting a commit.",
 
         "TWO WORKSPACES SHARE THE MACHINERY AND NOTHING ELSE. The node "
         "plugin is one per node, the broker is one Deployment, and the "
@@ -539,7 +526,7 @@ def build():
     d.legend(p, 0.55, y, [
         ("the workspace — one directory, two views, never a wire", FLOW,
          True),
-        ("durable path — only workers write the prefix, a commit at a time", DUR,
+        ("durable path — the writers and the gateway, a CAS at a time", DUR,
          False),
         ("control plane — never carries a file", CTL, True),
         ("the file protocol — boundary verbs in the tree, REST at the "
