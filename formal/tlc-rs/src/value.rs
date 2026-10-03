@@ -827,3 +827,60 @@ impl fmt::Debug for Value {
         fmt::Display::fmt(self, f)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every reference-counted node of `a`, in visiting order, as addresses.
+    fn nodes(v: &Value, out: &mut Vec<usize>) {
+        match v {
+            Value::Bool(_) | Value::Int(_) | Value::Str(_) | Value::Model(_) => {}
+            Value::Set(xs) | Value::Seq(xs) => {
+                out.push(xs.as_ptr() as usize);
+                xs.iter().for_each(|x| nodes(x, out));
+            }
+            Value::Func(f) => {
+                out.push(Arc::as_ptr(f) as usize);
+                out.push(f.keys.as_ptr() as usize);
+                f.keys.iter().chain(f.vals.iter()).for_each(|x| nodes(x, out));
+            }
+            Value::Lazy(l) => {
+                out.push(Arc::as_ptr(l) as usize);
+                match &**l {
+                    Lazy::Subset(a) | Lazy::SeqOf(a) => nodes(a, out),
+                    Lazy::FuncSet(a, b) => {
+                        nodes(a, out);
+                        nodes(b, out)
+                    }
+                    Lazy::Product(xs) => xs.iter().for_each(|x| nodes(x, out)),
+                    Lazy::RecSet(fs) => fs.iter().for_each(|(_, x)| nodes(x, out)),
+                    Lazy::Nat | Lazy::Int | Lazy::Strings => {}
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn deep_clone_is_equal_and_shares_no_counted_node() {
+        let leaf = Value::Set(vec![Value::Int(1), Value::Str(3)].into());
+        let f = Value::Func(Arc::new(Func {
+            keys: vec![Value::Model(0), Value::Model(1)].into(),
+            vals: vec![leaf.clone(), Value::Seq(vec![leaf.clone(), Value::Bool(true)].into())].into(),
+        }));
+        let lazy = Value::Lazy(Arc::new(Lazy::FuncSet(leaf.clone(), Value::Lazy(Arc::new(Lazy::SeqOf(leaf.clone()))))));
+        let rec = Value::Lazy(Arc::new(Lazy::RecSet(vec![(7, leaf.clone())].into())));
+        let v = Value::Seq(vec![f, lazy, rec, Value::Lazy(Arc::new(Lazy::Nat))].into());
+
+        let c = v.deep_clone();
+        // Printed, not ==: Seq(S) is infinite and cannot be compared.
+        assert_eq!(format!("{c:?}"), format!("{v:?}"), "the copy must be the same value");
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        nodes(&v, &mut a);
+        nodes(&c, &mut b);
+        assert_eq!(a.len(), b.len(), "same shape");
+        assert!(a.len() > 10, "the fixture must reach every kind of node");
+        let shared: Vec<_> = b.iter().filter(|p| a.contains(p)).collect();
+        assert!(shared.is_empty(), "the copy shares {} counted nodes with the original", shared.len());
+    }
+}

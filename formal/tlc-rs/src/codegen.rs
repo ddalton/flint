@@ -764,3 +764,42 @@ pub fn generate(l: &Loaded, dir: &Path) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::rt::G;
+    use crate::value::Value;
+
+    fn pool() -> G {
+        let set = Value::Set(vec![Value::Int(1), Value::Int(2)].into());
+        G { k: vec![set.clone(), Value::Seq(vec![set.clone()].into())], c: vec![Some(set), None] }
+    }
+
+    fn arc(v: &Value) -> usize {
+        match v {
+            Value::Set(xs) | Value::Seq(xs) => xs.as_ptr() as usize,
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn local_is_one_private_copy_per_thread() {
+        let g = pool();
+        let a = g.local();
+        assert!(std::ptr::eq(a, g.local()), "a thread reuses its copy");
+        assert!(!std::ptr::eq(a, &g), "the copy is not the shared pool");
+        assert!(a.k == g.k && a.c == g.c, "the copy holds the same constants");
+        for (x, y) in a.k.iter().zip(&g.k) {
+            assert_ne!(arc(x), arc(y), "a constant's count is shared with the pool");
+        }
+        assert_ne!(arc(a.c[0].as_ref().unwrap()), arc(g.c[0].as_ref().unwrap()));
+
+        let (ga, other) = (a as *const G as usize, &g);
+        let theirs = std::thread::scope(|s| s.spawn(|| other.local() as *const G as usize).join().unwrap());
+        assert_ne!(theirs, ga, "another thread gets its own copy");
+
+        // A second pool on this thread is not served the first one's copy.
+        let h = pool();
+        assert!(!std::ptr::eq(h.local(), a));
+    }
+}
