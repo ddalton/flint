@@ -318,6 +318,40 @@ impl Identity {
     }
 }
 
+/// What a TokenReview came back as. The API server's VERDICT on a token
+/// (not authenticated, wrong audience, not a ServiceAccount) is a refusal
+/// of that identity, final for it. The API server NOT ANSWERING — a
+/// transport error, a timeout, a 5xx, or a 401/403/429 on this broker's
+/// own right to ask — judged nothing about the token and must not read as
+/// a refusal: the plugin sorts a 4xx from this broker as final and
+/// REMOVES the pod's key file (`creds::classify_exchange`), so until
+/// 2026-10-03 an apiserver blip during a refresh cost a tenant its
+/// credential (s3csi/SECURITY.md §4.5). Unavailable is answered 503,
+/// which the plugin keeps a still-valid key through.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReviewError {
+    Refused(String),
+    Unavailable(String),
+}
+
+impl std::fmt::Display for ReviewError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReviewError::Refused(m) => write!(f, "{m}"),
+            ReviewError::Unavailable(m) => write!(f, "TokenReview unavailable: {m}"),
+        }
+    }
+}
+
+/// Sort a TokenReview's outcome: only a review the API server ANSWERED
+/// can refuse an identity.
+pub fn review_outcome(created: Result<TokenReview, kube::Error>, audience: &str) -> Result<Identity, ReviewError> {
+    match created {
+        Ok(tr) => identity_from_review(&tr, audience).map_err(ReviewError::Refused),
+        Err(e) => Err(ReviewError::Unavailable(e.to_string())),
+    }
+}
+
 pub fn identity_from_review(tr: &TokenReview, audience: &str) -> Result<Identity, String> {
     let st = tr.status.as_ref().ok_or("TokenReview returned no status")?;
     if let Some(e) = &st.error {
@@ -435,14 +469,13 @@ impl Broker {
         })
     }
 
-    async fn review(&self, token: &str) -> Result<Identity, String> {
+    async fn review(&self, token: &str) -> Result<Identity, ReviewError> {
         let api: Api<TokenReview> = Api::all(self.client.clone());
         let tr = TokenReview {
             spec: TokenReviewSpec { token: Some(token.to_string()), audiences: Some(vec![self.cfg.audience.clone()]) },
             ..Default::default()
         };
-        let out = api.create(&PostParams::default(), &tr).await.map_err(|e| format!("TokenReview: {e}"))?;
-        identity_from_review(&out, &self.cfg.audience)
+        review_outcome(api.create(&PostParams::default(), &tr).await, &self.cfg.audience)
     }
 
     async fn target_of(&self, mode: &str, ns: &str, cr: &str) -> Result<Option<Target>, String> {
@@ -568,12 +601,18 @@ impl Broker {
         let session = f.role_session_name.clone().unwrap_or_default();
         let id = match self.review(token).await {
             Ok(id) => id,
-            Err(e) => {
+            Err(ReviewError::Refused(e)) => {
                 self.refused.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!("exchange refused (InvalidIdentityToken) at TokenReview: {e}");
                 // 400, as AWS STS answers it: a client can tell "not a
                 // valid token" from "a valid token with no entitlement".
                 return sts_error(StatusCode::BAD_REQUEST, "InvalidIdentityToken", &e);
+            }
+            Err(e @ ReviewError::Unavailable(_)) => {
+                // Not a refusal and not counted as one: nothing was judged.
+                // 503 is what the plugin keeps a still-valid key through.
+                tracing::warn!("exchange not answered: {e}");
+                return sts_error(StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailable", &e.to_string());
             }
         };
         let reg = self.registrations.lock().unwrap().values().find(|r| r.nonce == session).cloned();
@@ -625,21 +664,27 @@ impl Broker {
         }
     }
 
-    async fn node_authenticated(&self, bearer: Option<String>) -> Result<(), String> {
+    /// The node principal's token, reviewed: a refusal is 403; an API
+    /// server that did not answer is 503, so the plugin retries a
+    /// registration it could not make instead of reading "forbidden".
+    async fn node_authenticated(&self, bearer: Option<String>) -> Result<(), (StatusCode, String)> {
         let token = bearer
             .as_deref()
             .and_then(|b| b.strip_prefix("Bearer "))
-            .ok_or("missing bearer")?;
-        let id = self.review(token).await?;
+            .ok_or((StatusCode::FORBIDDEN, "missing bearer".to_string()))?;
+        let id = self.review(token).await.map_err(|e| match e {
+            ReviewError::Refused(m) => (StatusCode::FORBIDDEN, m),
+            ReviewError::Unavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m),
+        })?;
         if id.username != self.cfg.node_principal {
-            return Err(format!("{} may not register publishes", id.username));
+            return Err((StatusCode::FORBIDDEN, format!("{} may not register publishes", id.username)));
         }
         Ok(())
     }
 
     pub async fn register(&self, bearer: Option<String>, reg: Registration) -> (StatusCode, String) {
         if let Err(e) = self.node_authenticated(bearer).await {
-            return (StatusCode::FORBIDDEN, e);
+            return e;
         }
         tracing::info!(
             volume = %reg.volume_id,
@@ -657,7 +702,7 @@ impl Broker {
 
     pub async fn deregister(&self, bearer: Option<String>, volume_id: String) -> (StatusCode, String) {
         if let Err(e) = self.node_authenticated(bearer).await {
-            return (StatusCode::FORBIDDEN, e);
+            return e;
         }
         let removed = self.registrations.lock().unwrap().remove(&volume_id).is_some();
         tracing::info!(volume = %volume_id, removed, "deregistered");
@@ -778,6 +823,39 @@ pub fn sts_success(id: &Identity, cr: &str, session: &str, c: &Creds, audience: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A review the API server did not ANSWER is not a refusal. The plugin
+    /// removes a pod's key file on a 4xx from this broker, so an apiserver
+    /// blip must come back 503 (kept through), never 400 InvalidIdentityToken.
+    /// Every code the API server can fail the broker's OWN request with is
+    /// unavailable; only a review it answered can refuse.
+    #[test]
+    fn a_token_review_the_api_server_did_not_answer_is_unavailable_not_refused() {
+        let aud = "s3.csi.chert.us";
+        for code in [500u16, 502, 503, 504, 429, 401, 403] {
+            // kube 3.0's Api error carries a Status; built from its wire form
+            // so the test does not depend on the struct's field set.
+            let status: kube::core::Status = serde_json::from_value(serde_json::json!({
+                "status": "Failure",
+                "code": code,
+                "message": format!("the apiserver answered {code} to the TokenReview itself"),
+                "reason": "",
+            }))
+            .unwrap();
+            let e = kube::Error::Api(Box::new(status));
+            match review_outcome(Err(e), aud) {
+                Err(ReviewError::Unavailable(m)) => assert!(m.contains(&code.to_string()), "{m}"),
+                Err(ReviewError::Refused(m)) => panic!("code {code} read as a REFUSAL: {m}"),
+                Ok(_) => panic!("code {code} produced an identity"),
+            }
+        }
+        // The API server's own verdict on the token IS a refusal, final for it.
+        let unauthenticated = TokenReview {
+            status: Some(k8s_openapi::api::authentication::v1::TokenReviewStatus { authenticated: Some(false), ..Default::default() }),
+            ..Default::default()
+        };
+        assert!(matches!(review_outcome(Ok(unauthenticated), aud), Err(ReviewError::Refused(_))));
+    }
     use k8s_openapi::api::authentication::v1::{TokenReviewStatus, UserInfo};
 
     fn review(authenticated: bool, user: &str, pod_uid: Option<&str>, auds: Vec<&str>) -> TokenReview {
