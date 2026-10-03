@@ -419,7 +419,7 @@ def page1(doc):
              "3   routed to the headless Service: the runner → git http-backend → upload-pack | receive-pack\n"
              "4   the REST file API — same auth, same consumers list, same wake, on the syncer's own port\n"
              "5   proc-receive hands the syncer a request over a Unix socket and WAITS for the bucket\n"
-             "6   the batch: every pack up first, then ONE snapshot CAS, then the local refs, then the report\n"
+             "6   the batch: the packs its pushes need up first, then ONE snapshot CAS, the local refs, the report\n"
              "7   cold start, or a wake from replicas 0: restore the emptyDir from the snapshot alone\n"
              "8   the operator applies four objects and polls /status — it reads no object in the bucket\n"
              "9   bundle URI / LFS: presigned, client-to-store — the pod sees a few hundred bytes of JSON",
@@ -484,8 +484,11 @@ def page2(doc):
         ("renew the lease — once, for the batch",
          "Gated on the byte counter: renew only if the operation moved.",
          PAPER, MUTE),
-        ("upload every pack the bucket does not have",
-         "With its siblings. Content-named, so the PUT is unconditional and "
+        ("upload the packs the accepted pushes need",
+         "Named off git: the packs holding what the accepted tips reach "
+         "and the snapshot's refs do not. A refused push's residue is "
+         "never named; an object in no pack fails the batch. With its "
+         "siblings. Content-named, so the PUT is unconditional and "
          "a retry is byte-identical — and its POINT is to refresh the "
          "object's age, which the sweep reads, so a retried upload must "
          "never be skipped as “already there”. Multipart above 64 MiB, "
@@ -1099,7 +1102,8 @@ def page5(doc):
          "(X11).", SYNC_F, SYNC_L),
         ("sweep",
          "Orphaned multipart uploads, and unnamed packs from the "
-         "predecessor's crash.", SYNC_F, SYNC_L),
+         "predecessor's crash — renewing the lease before every DELETE, "
+         "so only the holder deletes.", SYNC_F, SYNC_L),
         ("restore",
          "The snapshot's packs into the emptyDir, the refs installed "
          "exactly, fsck --connectivity-only.", SYNC_F, SYNC_L),

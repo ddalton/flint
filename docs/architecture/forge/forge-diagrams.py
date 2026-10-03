@@ -282,8 +282,8 @@ def plate_02():
 # ═════════════════════════════════════════════════════════════════════════
 def plate_03():
     s = Plate(W, H, "The durable path: a push as a transaction. proc-receive hands the commands to the syncer and waits; "
-                    "the syncer judges under the agreed view, renews the lease once, uploads every complete pack as an "
-                    "immutable content-named object (multipart above 64 MiB with the CRC accumulated as the parts are read), "
+                    "the syncer judges under the agreed view, renews the lease once, uploads the packs the accepted pushes need as "
+                    "immutable content-named objects (multipart above 64 MiB with the CRC accumulated as the parts are read), "
                     "CASes one snapshot on the etag it last saw, applies the ref transaction and only then reports ok. S3 holds "
                     "the packs, the snapshot, the lease cell, bundles, LFS objects and the export. The theorems the model checks, "
                     "the one residual, and how a fresh pod restores from the bucket alone.")
@@ -292,7 +292,7 @@ def plate_03():
     s.text(M + 22, 48, "One batch, one transaction — receive-pack serialises nothing under proc-receive, so the syncer does", "t1")
     steps = [("collect and judge", "every pending push, in arrival order, against the local refs, the snapshot AND the syncer's running view; old-oid must match both or ng stale, fetch first; fast-forward and policy here, since receive-pack no longer checks them; a refs/for/<target> runs the merge and packs what it created", "durable"),
              ("renew the lease, once", "epoch_renew with If-Match on our token; a 412 takes the lost-response rule (re-read; adopt if the cell still names us) else it is the fence: ng to every hook, stop serving reads too, exit", "control"),
-             ("hash and upload the packs", "every local pack the snapshot does not name and whose .idx exists, with .idx .bitmap .rev: unconditional PUTs of content-named keys, siblings four in flight; multipart above 64 MiB, the CRC-64/NVME accumulated per part beside its PUT and judged by S3 at Complete", "durable"),
+             ("name and upload the packs", "the packs holding what the accepted tips reach and the snapshot's refs do not, read off git; residue never named, an object in no pack fails the batch. Unconditional PUTs with .idx .bitmap .rev; multipart above 64 MiB, CRC-64/NVME per part, judged at Complete", "durable"),
              ("ONE snapshot CAS", "If-Match on the etag this syncer last synced (If-None-Match:* when none): refs and the full pack list move as one object; a reader never sees half a batch. Under the lock a 412 can only be another server — the fence", "durable"),
              ("the ref transaction", "git update-ref --stdin applies every accepted ref locally as one transaction", "durable"),
              ("THEN the report", "ok or ng per ref to each waiting hook; per-ref ok reaches the client as it is emitted, so the report follows the whole transaction. A crash before this fails every push at the client; the restart restores from the snapshot", "durable"),
@@ -351,7 +351,7 @@ def plate_03():
             ("b", "runbx: 40 GiB push acknowledged in 1113 s, 641 parts, the CRC accepted at Complete, the snapshot at the tip; 40 of 40 pushes told ok were in the bucket across both takeover arms."),
             ("b", "S4, four kills placed INSIDE the multipart upload by watching list-multipart-uploads: told failed ⇒ the bucket unchanged; told ok ⇒ durable; every orphaned upload swept once the successor served."),
             ("h", "The one write the pack directory has"),
-            "git's own gc is off. The syncer repacks under its lock between batches, uploads the new pack, CASes a snapshot naming only it, then sweeps what no snapshot names — after a listing, after re-reading the snapshot, after a HEAD past a grace that outlives the longest upload. Measured cost: a full repack re-uploads the repository (every 24 pushes at the shipped threshold); geometric repack is the lever and needs a multi-pack bitmap."], FE)
+            "git's own gc is off. The syncer repacks under its lock between batches, uploads the new pack, CASes a snapshot naming only it, then sweeps what no snapshot names — after a listing, after re-reading the snapshot, after a HEAD past a grace that outlives the longest upload, and renewing the lease before every DELETE, so a deposed holder is fenced rather than deleting a pack its successor named. Measured cost: a full repack re-uploads the repository (every 24 pushes at the shipped threshold); geometric repack is the lever and needs a multi-pack bitmap."], FE)
     s.box(M, 796, W - 2 * M, 62, None, "panel")
     s.text(M + 22, 820, "What is NOT on this path", "t2")
     s.para(M + 22, 838, "The runner and the door carry bytes and never write the bucket; the operator never reads it; the export and the derived dumb-protocol files are written after the report and are never a gate; a refused push's pack is never uploaded. Everything that can change what a restore sees goes through steps 3 and 4, under one lock, in one process.", W - 2 * M - 44)
@@ -429,7 +429,7 @@ def plate_04():
             ("m", "orphan grace: outlives the longest upload"),
             ("gap",),
             "A takeover costs one small CAS on the snapshot plus the restore. A clean roll costs one request: the successor claims the released cell at once. A crash costs the quiet polls, then the restore.",
-            ("b", "Nothing pins a straggler's writes: its packs are content-named and unnamed by any snapshot, so a straggler that completes an upload after the sweep leaves an object the next sweep removes — hygiene, not integrity, which is why no mutation run exists for the sweep."),
+            ("b", "Nothing pins a straggler's writes: its packs are content-named and unnamed by any snapshot, so a straggler that completes an upload after the sweep leaves an object the next sweep removes. A straggler's DELETE is another matter: a deposed sweeper once took a pack its successor had re-uploaded (same bytes, same name) and named, so both sweeps renew the lease before every DELETE (29195947; the sweep-window worlds in formal/pending)."),
             "In-flight multipart parts are billed until aborted: one interrupted 2 GiB push left 384 MiB of parts on runbw. The sweep runs at the claim and between batches, with no grace, because at those two moments nothing of ours is in flight."], FE)
     s.card(M + 2 * (cw + GAP), y1, cw, 316, "How the lease relates to the other two planes",
            ["The lease cell is coordination — the control plane — and the fence it produces is what the durable path relies on: a 412 on any CAS of ours stops acknowledging AND stops serving reads. Pushes fail while S3 is unreachable; clones keep working for six heartbeats, then the holder withdraws readiness until a renewal lands — the lease and the process are kept (X13, found by the Continuity comparison and built the same day).",

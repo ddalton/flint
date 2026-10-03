@@ -191,11 +191,13 @@
 <text class="t4" x="563" y="672">the restore.</text>
 <text class="t4b" x="563" y="687">Nothing pins a straggler's writes: its packs are content-named and unnamed by any</text>
 <text class="t4b" x="563" y="702">snapshot, so a straggler that completes an upload after the sweep leaves an object the</text>
-<text class="t4b" x="563" y="717">next sweep removes — hygiene, not integrity, which is why no mutation run exists for</text>
-<text class="t4b" x="563" y="732">the sweep.</text>
-<text class="t4" x="563" y="747">In-flight multipart parts are billed until aborted: one interrupted 2 GiB push left 384 MiB of</text>
-<text class="t4" x="563" y="762">parts on runbw. The sweep runs at the claim and between batches, with no grace, because at</text>
-<text class="t4" x="563" y="777">those two moments nothing of ours is in flight.</text>
+<text class="t4b" x="563" y="717">next sweep removes. A straggler's DELETE is another matter: a deposed sweeper</text>
+<text class="t4b" x="563" y="732">once took a pack its successor had re-uploaded (same bytes, same name) and named,</text>
+<text class="t4b" x="563" y="747">so both sweeps renew the lease before every DELETE (29195947; the sweep-window</text>
+<text class="t4b" x="563" y="762">worlds in formal/pending).</text>
+<text class="t4" x="563" y="777">In-flight multipart parts are billed until aborted: one interrupted 2 GiB push left 384 MiB of</text>
+<text class="t4" x="563" y="792">parts on runbw. The sweep runs at the claim and between batches, with no grace, because at</text>
+<text class="t4" x="563" y="807">those two moments nothing of ours is in flight.</text>
 <rect x="1071" y="516" width="505" height="316" rx="7" class="bx"/>
 <path class="f-forge" d="M1078,516 H1569 A7,7 0 0 1 1576,523 V521 H1071 V523 A7,7 0 0 1 1078,516 Z"/>
 <text class="t2 c-forge" x="1087" y="540">How the lease relates to the other two planes</text>

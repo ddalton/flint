@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 880" role="img"
-     aria-label="The durable path: a push as a transaction. proc-receive hands the commands to the syncer and waits; the syncer judges under the agreed view, renews the lease once, uploads every complete pack as an immutable content-named object (multipart above 64 MiB with the CRC accumulated as the parts are read), CASes one snapshot on the etag it last saw, applies the ref transaction and only then reports ok. S3 holds the packs, the snapshot, the lease cell, bundles, LFS objects and the export. The theorems the model checks, the one residual, and how a fresh pod restores from the bucket alone.">
+     aria-label="The durable path: a push as a transaction. proc-receive hands the commands to the syncer and waits; the syncer judges under the agreed view, renews the lease once, uploads the packs the accepted pushes need as immutable content-named objects (multipart above 64 MiB with the CRC accumulated as the parts are read), CASes one snapshot on the etag it last saw, applies the ref transaction and only then reports ok. S3 holds the packs, the snapshot, the lease cell, bundles, LFS objects and the export. The theorems the model checks, the one residual, and how a fresh pod restores from the bucket alone.">
 <style>
   text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
   .t1{font-size:17.0px;font-weight:600}
@@ -74,17 +74,17 @@
 <rect x="480" y="66" width="205" height="240" rx="7" class="bx"/>
 <circle cx="500" cy="88" r="11" class="f-forge"/>
 <text class="num" x="500" y="92" style="text-anchor:middle">3</text>
-<text class="t2" x="518" y="92">hash and upload the</text>
+<text class="t2" x="518" y="92">name and upload the</text>
 <text class="t2" x="518" y="107">packs</text>
-<text class="t4" x="494" y="134">every local pack the snapshot</text>
-<text class="t4" x="494" y="149">does not name and whose .idx</text>
-<text class="t4" x="494" y="164">exists, with .idx .bitmap .rev:</text>
-<text class="t4" x="494" y="179">unconditional PUTs of</text>
-<text class="t4" x="494" y="194">content-named keys, siblings four</text>
-<text class="t4" x="494" y="209">in flight; multipart above 64 MiB,</text>
-<text class="t4" x="494" y="224">the CRC-64/NVME accumulated</text>
-<text class="t4" x="494" y="239">per part beside its PUT and judged</text>
-<text class="t4" x="494" y="254">by S3 at Complete</text>
+<text class="t4" x="494" y="134">the packs holding what the</text>
+<text class="t4" x="494" y="149">accepted tips reach and the</text>
+<text class="t4" x="494" y="164">snapshot's refs do not, read off</text>
+<text class="t4" x="494" y="179">git; residue never named, an</text>
+<text class="t4" x="494" y="194">object in no pack fails the batch.</text>
+<text class="t4" x="494" y="209">Unconditional PUTs with .idx</text>
+<text class="t4" x="494" y="224">.bitmap .rev; multipart above 64</text>
+<text class="t4" x="494" y="239">MiB, CRC-64/NVME per part,</text>
+<text class="t4" x="494" y="254">judged at Complete</text>
 <line class="l-ink" x1="685" y1="180" x2="697" y2="180" marker-end="url(#a-ink)"/>
 <rect x="697" y="66" width="205" height="240" rx="7" class="bx"/>
 <circle cx="717" cy="88" r="11" class="f-forge"/>
@@ -218,9 +218,11 @@
 <text class="t4" x="1218" y="654">batches, uploads the new pack, CASes a snapshot naming only it,</text>
 <text class="t4" x="1218" y="669">then sweeps what no snapshot names — after a listing, after</text>
 <text class="t4" x="1218" y="684">re-reading the snapshot, after a HEAD past a grace that outlives the</text>
-<text class="t4" x="1218" y="699">longest upload. Measured cost: a full repack re-uploads the</text>
-<text class="t4" x="1218" y="714">repository (every 24 pushes at the shipped threshold); geometric</text>
-<text class="t4" x="1218" y="729">repack is the lever and needs a multi-pack bitmap.</text>
+<text class="t4" x="1218" y="699">longest upload, and renewing the lease before every DELETE, so a</text>
+<text class="t4" x="1218" y="714">deposed holder is fenced rather than deleting a pack its successor</text>
+<text class="t4" x="1218" y="729">named. Measured cost: a full repack re-uploads the repository</text>
+<text class="t4" x="1218" y="744">(every 24 pushes at the shipped threshold); geometric repack is the</text>
+<text class="t4" x="1218" y="759">lever and needs a multi-pack bitmap.</text>
 <rect x="24" y="796" width="1552" height="62" rx="7" class="panel"/>
 <text class="t2" x="46" y="820">What is NOT on this path</text>
 <text class="t4" x="46" y="838">The runner and the door carry bytes and never write the bucket; the operator never reads it; the export and the derived dumb-protocol files are written after the report and are never a gate; a refused push's pack is never uploaded. Everything that can change what a restore sees goes through steps 3</text>
