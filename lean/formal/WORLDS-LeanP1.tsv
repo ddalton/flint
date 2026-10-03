@@ -44,6 +44,7 @@ LeanP1SyncLeftRecorded	Inv_ShortcutSound
 LeanP1ProbeFetchFailed	ProbeFetchFailed
 LeanP1ScopeFetchHolds	HOLDS
 LeanP1ReaderHolds	HOLDS
+LeanP1ReaderScopeHolds	HOLDS
 LeanP1ReaderOwedIgnored	Inv_ReaderSound
 LeanP1ProbeReaderPulled	ProbeReaderPulled
 LeanP1ProbeReaderSkipped	ProbeReaderSkipped
