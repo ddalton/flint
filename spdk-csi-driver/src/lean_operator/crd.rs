@@ -515,4 +515,34 @@ mod tests {
             assert!(props.get(*k).is_none(), "{k} is still in the CRD schema");
         }
     }
+
+    /// The chart ships `crds/flintleanworkspaces.yaml` for install-time
+    /// bootstrap, and `release.sh` diffs it against `crdgen` at RELEASE
+    /// time. This is the same check at `cargo test` time. The lean copy
+    /// drifted (a reworded doc comment, never regenerated) and was caught
+    /// only by the gate during the 1.57.0 publish, after two other charts
+    /// had already been pushed. `lite_operator::bootstrap` has had this
+    /// test for the share CRD since 2026-09-28.
+    #[test]
+    fn the_shipped_crd_is_what_crdgen_prints() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../flint-lean-chart/crds/flintleanworkspaces.yaml"
+        );
+        let shipped = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("cannot read the shipped CRD at {path}: {e}"));
+        let generated = serde_yaml::to_string(&super::crd()).expect("CRD serializes");
+        if shipped != generated {
+            let first_diff = shipped
+                .lines()
+                .zip(generated.lines())
+                .enumerate()
+                .find(|(_, (a, b))| a != b)
+                .map(|(i, (a, b))| format!("line {}: shipped {a:?} vs generated {b:?}", i + 1))
+                .unwrap_or_else(|| "one file is a prefix of the other".to_string());
+            panic!(
+                "{path} is STALE ({first_diff}) — regenerate with:\n  cargo run --bin crdgen -- lean > {path}"
+            );
+        }
+    }
 }
