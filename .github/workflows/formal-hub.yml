@@ -89,11 +89,18 @@ jobs:
     needs: plan
     name: 'shard ${{ matrix.shard.id }} (${{ matrix.shard.runs }} runs)'
     runs-on: ubuntu-latest
-    # The heaviest shard is FlintReplication's 71 runs, ~29% of the gate.
-    # Module granularity cannot split it further; if it alone approaches
-    # this limit, the next step is to teach the filter cfg-level names
-    # rather than to raise the ceiling again.
-    timeout-minutes: 90
+    # The filter now takes cfg-level names (Module/Config.cfg), so a
+    # module whose runs outgrow a shard is split into them
+    # (scripts/tla-shards.sh, rows in tla-module-cost.tsv). What no
+    # partition can split is ONE run: ForgeSync.cfg took 2960 s on the
+    # 2026-09-30 runner and 4576 s (76 min) on the 2026-10-03 one, model
+    # unchanged; it is the floor of whichever shard holds it. That run
+    # alone cancelled four gates in a row at 90 minutes (shard 1 held all
+    # 24 ForgeSync runs). The ceiling is set over that floor with room for
+    # a slower runner; a shard that needs it costs only its own minutes.
+    # Make ForgeSync.cfg cheaper, or split its state space, before raising
+    # this again.
+    timeout-minutes: 120
     strategy:
       # Every shard reports. A gate whose first failure hides the state
       # of the other five turns one red run into several round trips.

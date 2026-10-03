@@ -542,6 +542,12 @@ trap print_profile EXIT
 # unset means the whole gate, which is what a developer running this by
 # hand gets and what the file has always meant.
 #
+# An entry may also name ONE run, as `Module/Config.cfg`.  A module whose
+# single heaviest run is most of a job (ForgeSync.cfg: 49-76 min on the
+# runner, 2026-09-30 and 2026-10-03) cannot be balanced at module
+# granularity, so scripts/tla-shards.sh splits such a module into its
+# runs, and a shard is handed those by name.
+#
 # A FILTER'S CHARACTERISTIC FAILURE IS A SHARD THAT CHECKS NOTHING AND
 # REPORTS IT IN GREEN — one typo'd module name and the road is empty.
 # Two things stop that, and neither is a comment:
@@ -555,16 +561,16 @@ trap print_profile EXIT
 #     left out of the matrix by forgetting to list it somewhere else.
 RAN=0
 SKIPPED=0
-want_module() { # <module>
+want_run() { # <module> <cfg>
   [ -z "${TLA_MODULES:-}" ] && return 0
   case " ${TLA_MODULES} " in
-    *" $1 "*) return 0 ;;
-    *)        return 1 ;;
+    *" $1 "*|*" $1/$2 "*) return 0 ;;
+    *)                    return 1 ;;
   esac
 }
 
 strict_run() { # <module> <cfg> <label>
-  want_module "$1" || { SKIPPED=$((SKIPPED+1)); return 0; }
+  want_run "$1" "$2" || { SKIPPED=$((SKIPPED+1)); return 0; }
   RAN=$((RAN+1))
   echo "== $3 ($2): invariants must hold =="
   local OUT
@@ -575,7 +581,7 @@ strict_run() { # <module> <cfg> <label>
 }
 
 mutation_run() { # <module> <cfg> <label> <expected-violation-regex>
-  want_module "$1" || { SKIPPED=$((SKIPPED+1)); return 0; }
+  want_run "$1" "$2" || { SKIPPED=$((SKIPPED+1)); return 0; }
   RAN=$((RAN+1))
   echo "== $3 ($2): TLC must FIND the loss =="
   local MOUT PAT
@@ -587,7 +593,7 @@ mutation_run() { # <module> <cfg> <label> <expected-violation-regex>
 }
 
 liveness_mutation_run() { # <module> <cfg> <label>
-  want_module "$1" || { SKIPPED=$((SKIPPED+1)); return 0; }
+  want_run "$1" "$2" || { SKIPPED=$((SKIPPED+1)); return 0; }
   RAN=$((RAN+1))
   echo "== $3 ($2): TLC must FIND the starvation lasso =="
   local MOUT

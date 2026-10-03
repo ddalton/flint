@@ -15,8 +15,10 @@
 # this file from a full green run and the guesses go away.
 #
 # The number that decides the shape of the matrix: ForgeSync.cfg is a
-# SINGLE run of 2071s. No partition of this gate can finish faster than
-# that, at any granularity, until that model is made cheaper.
+# SINGLE run (2960 s on 2026-09-30, 4576 s on 2026-10-03). No partition of
+# this gate can finish faster than that, at any granularity, until that
+# model is made cheaper; ForgeSync is split into its runs (below) so that
+# run is all its shard holds.
 #
 # module<TAB>seconds<TAB># provenance
 FlintA2Probe	3	# measured 3/3 runs
@@ -36,4 +38,18 @@ FlintTierMarker	210	# NOT MEASURED — never reached before the 120-min timeout;
 FlintTierSession	210	# NOT MEASURED — never reached before the 120-min timeout; 7 runs at 30s
 FlintTruncate	9	# measured 7/7 runs
 ForgeMergeChain	90	# NOT MEASURED — never reached before the 120-min timeout; 3 runs at 30s
-ForgeSync	2883	# measured 15/24 runs, +9 estimated at 30s
+# ForgeSync is split into its runs (scripts/tla-shards.sh): one run,
+# ForgeSync.cfg, is most of a job by itself. The rest of its 24 runs
+# fall back to the default; together they took 42 s on 2026-09-30.
+ForgeSync/ForgeSync.cfg	4576	# measured: 4576 s on the 2026-10-03 runner (run 37086231549), 2960 s on 2026-09-30 (36651219224) — the slower one, as the floor of its shard
+ForgeSync/ForgeSyncLive.cfg	405	# measured: 405 s 2026-10-03, 239 s 2026-09-30
+ForgeSync/ForgeSyncReclaimBySet.cfg	369	# measured 238 s 2026-09-30, x1.55 for the 2026-10-03 runner
+ForgeSync/ForgeSyncReclaimAtRestore.cfg	360	# measured 232 s 2026-09-30, x1.55 for the 2026-10-03 runner
+ForgeSync/ForgeSyncFoldCommitMidBatch.cfg	205	# measured 132 s 2026-09-30, x1.55 for the 2026-10-03 runner
+ForgeSync/ForgeSyncReclaimUnlinksServing.cfg	169	# measured 109 s 2026-09-30, x1.55 for the 2026-10-03 runner
+ForgeSync/ForgeSyncReclaimWhileServing.cfg	160	# measured 103 s 2026-09-30, x1.55 for the 2026-10-03 runner
+ForgeSync/ForgeSyncListingKeepsRetained.cfg	130	# measured 84 s 2026-09-30, x1.55 for the 2026-10-03 runner
+ForgeSync/ForgeSyncFoldSupersedesArrivals.cfg	81	# measured 52 s 2026-09-30, x1.55 for the 2026-10-03 runner
+ForgeSync/ForgeSyncFoldReachableCoverage.cfg	78	# measured 50 s 2026-09-30, x1.55 for the 2026-10-03 runner
+ForgeSync/ForgeSyncFoldNoRenew.cfg	45	# measured 29 s 2026-09-30, x1.55 for the 2026-10-03 runner
+ForgeSync/ForgeSyncFoldTicksBatchSensor.cfg	16	# measured 10 s 2026-09-30, x1.55 for the 2026-10-03 runner

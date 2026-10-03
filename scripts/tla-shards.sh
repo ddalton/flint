@@ -24,6 +24,17 @@
 # slower shard, never a missed run: correctness rests on the partition
 # being a partition, not on the weights being right.
 #
+# SPLITTING A MODULE INTO ITS RUNS
+#
+# A module is the unit until one of its runs is most of a job by itself:
+# ForgeSync.cfg alone took 2960 s on the 2026-09-30 runner and 4576 s on
+# the 2026-10-03 one, so the ForgeSync shard (24 runs) went from 71 min to
+# past the 90-min timeout with no model change. A module with any
+# `Module/Config.cfg` row in the cost file is split into one unit per run
+# (each run's weight is its row, else DEFAULT_SECS), and check-tla.sh is
+# handed those units by name. The partition check below counts runs, so
+# a split module is held to the same "nothing dropped" rule.
+#
 # Usage:
 #   scripts/tla-shards.sh [N]            # JSON matrix for N shards (default 6)
 #   scripts/tla-shards.sh [N] --explain  # human-readable table
@@ -50,6 +61,7 @@ awk -v n="$N" -v mode="$MODE" -v defsecs="$DEFAULT_SECS" -v costs="$COSTS" '
     if ($0 ~ /^(strict_run|mutation_run|liveness_mutation_run)[ ]/) {
       runs[$2]++; total_runs++
       if (!($2 in seen)) { seen[$2]=1; mods[++m]=$2 }
+      cfg[$2, runs[$2]] = $3
     }
     next
   }
@@ -58,31 +70,48 @@ awk -v n="$N" -v mode="$MODE" -v defsecs="$DEFAULT_SECS" -v costs="$COSTS" '
   # estimate, not a measurement. It must not be reported as measured —
   # "all 18 modules measured" over six guesses is the kind of confident
   # summary that stops anyone going back to fill them in.
-  { if ($0 !~ /^#/ && NF>=2) { cost[$1]=$2; if ($0 !~ /NOT MEASURED/) measured[$1]=1 } }
+  { if ($0 !~ /^#/ && NF>=2) {
+      cost[$1]=$2; if ($0 !~ /NOT MEASURED/) measured[$1]=1
+      if (index($1, "/")) { split($1, parts, "/"); splitmod[parts[1]]=1 }
+  } }
 
   END {
     if (m==0) { print "no modules found in the gate — refusing to emit an empty matrix" > "/dev/stderr"; exit 3 }
-    if (n > m) n = m
 
+    # The units: a module, or each run of a module the cost file splits.
+    u = 0
     for (i=1; i<=m; i++) {
       mod = mods[i]
-      w[i] = (mod in cost) ? cost[mod] : runs[mod]*defsecs
-      idx[i] = i
+      if (mod in splitmod) {
+        for (r=1; r<=runs[mod]; r++) {
+          name = mod "/" cfg[mod, r]
+          units[++u] = name; uruns[u] = 1
+          w[u] = (name in cost) ? cost[name] : defsecs
+          if (!(name in cost)) estimated[name] = 1
+          else if (!(name in measured)) estimated[name] = 1
+        }
+      } else {
+        units[++u] = mod; uruns[u] = runs[mod]
+        w[u] = (mod in cost) ? cost[mod] : runs[mod]*defsecs
+        if (!(mod in measured)) estimated[mod] = 1
+      }
     }
+    for (i=1; i<=u; i++) idx[i] = i
+    if (n > u) n = u
     # LPT: heaviest first into the lightest shard.  Insertion sort — m is
     # ~20, and a shell-portable awk has nothing better.
-    for (i=2; i<=m; i++) {
+    for (i=2; i<=u; i++) {
       key=idx[i]; j=i-1
       while (j>=1 && w[idx[j]] < w[key]) { idx[j+1]=idx[j]; j-- }
       idx[j+1]=key
     }
     for (b=1; b<=n; b++) { load[b]=0; list[b]=""; bruns[b]=0 }
-    for (i=1; i<=m; i++) {
+    for (i=1; i<=u; i++) {
       src=idx[i]; best=1
       for (b=2; b<=n; b++) if (load[b] < load[best]) best=b
       load[best] += w[src]
-      bruns[best] += runs[mods[src]]
-      list[best] = (list[best]=="" ? mods[src] : list[best] " " mods[src])
+      bruns[best] += uruns[src]
+      list[best] = (list[best]=="" ? units[src] : list[best] " " units[src])
     }
 
     # ── the partition IS the safety property: assert it ───────────────
@@ -98,15 +127,15 @@ awk -v n="$N" -v mode="$MODE" -v defsecs="$DEFAULT_SECS" -v costs="$COSTS" '
     }
 
     if (mode == "--explain") {
-      printf "%d modules, %d runs, %d shards\n\n", m, total_runs, n
+      printf "%d modules (%d units), %d runs, %d shards\n\n", m, u, total_runs, n
       for (b=1; b<=n; b++)
         printf "shard %d: %3d runs, ~%5ds  %s\n", b, bruns[b], load[b], list[b]
       printf "\nweights: "
-      nm=0; for (i=1;i<=m;i++) if (!(mods[i] in measured)) nm++
-      if (nm==0) printf "all %d modules measured (%s)\n", m, costs
+      nm=0; for (i=1;i<=u;i++) if (units[i] in estimated) nm++
+      if (nm==0) printf "all %d units measured (%s)\n", u, costs
       else {
-        printf "%d of %d modules measured; %d ESTIMATED:", m-nm, m, nm
-        for (i=1;i<=m;i++) if (!(mods[i] in measured)) printf " %s", mods[i]
+        printf "%d of %d units measured; %d ESTIMATED:", u-nm, u, nm
+        for (i=1;i<=u;i++) if (units[i] in estimated) printf " %s", units[i]
         printf "\n"
       }
       exit 0
