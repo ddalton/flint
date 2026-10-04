@@ -12,6 +12,17 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.57.1] - 2026-10-03
+
+A patch release for passthrough and two lean fixes. A shared s3csi
+mounter that was busy, not dead, was replaced under its members; an
+API-server blip during a refresh cost a pod its credential; `stsSecret`
+took a reused generation with other keys as unchanged. Beside them,
+lean's ack names every conflict across a rotation, an idle lean tick
+reads the manifest pointer once, and a lite wake survives clock skew.
+Every chart takes a patch bump (appVersion 1.57.1); no chart template
+or CRD changed.
+
 ### Added
 
 - **flint-s3-csi: what passthrough guarantees about credentials, written
@@ -9345,7 +9356,8 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.57.0...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.57.1...HEAD
+[1.57.1]: https://github.com/ddalton/flint/compare/v1.57.0...v1.57.1
 [1.57.0]: https://github.com/ddalton/flint/compare/v1.56.0...v1.57.0
 [1.56.0]: https://github.com/ddalton/flint/compare/v1.55.0...v1.56.0
 [1.55.0]: https://github.com/ddalton/flint/compare/v1.54.0...v1.55.0
