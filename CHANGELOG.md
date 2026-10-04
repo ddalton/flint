@@ -12,6 +12,28 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Fixed
+
+- **flint-s3-csi: `workers.maxPerNode` holds under a burst of pods**
+  (2026-10-04, `s3csi/SECURITY.md` §4.8). The ceiling counted the node's
+  live workers and then created one, with nothing spanning the two
+  across volumes, so pods publishing at once each passed the count: on
+  kind, six pods with room for one put nine workers on a node capped at
+  seven, and three of them mounted. The count and the create are now one
+  step under a node-wide lock (held only when a ceiling is set, released
+  once the worker exists); the same burst peaks at seven and mounts one.
+
+### Added
+
+- **flint-s3-csi: two legs for promises that had none** (2026-10-04). S35
+  tries the credential door from outside its worker — loopback only in
+  the worker's netns, refused from a sibling pod and from the node at the
+  worker's IP, while inside a token-less request is refused and the token
+  is served. S36 publishes six pods at once into a ceiling with room for
+  one. The worker test now asserts the worker shares none of the node's
+  network, pid or ipc namespaces, and the ceiling's arithmetic has a unit
+  test. Results: `s3csi/e2e/results/2026-10-04-kind-s35-s36/`.
+
 ## [1.57.1] - 2026-10-03
 
 A patch release for passthrough and two lean fixes. A shared s3csi

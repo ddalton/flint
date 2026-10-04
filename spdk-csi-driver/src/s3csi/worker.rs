@@ -767,6 +767,12 @@ mod tests {
         assert_eq!(psc.run_as_user, Some(1001));
         assert_eq!(psc.seccomp_profile.as_ref().unwrap().type_, "RuntimeDefault");
         assert!(spec.volumes.as_ref().unwrap().iter().all(|v| v.host_path.is_none()), "no hostPath for passthrough");
+        // The door binds 127.0.0.1 in the worker's OWN netns (SECURITY.md
+        // P1; kind S35): on the host's network that loopback is the node's,
+        // and every hostNetwork pod on the node could read the key.
+        assert_ne!(spec.host_network, Some(true), "the worker must not share the node's network");
+        assert_ne!(spec.host_pid, Some(true), "the worker must not share the node's pid namespace");
+        assert_ne!(spec.host_ipc, Some(true), "the worker must not share the node's ipc namespace");
         let c = &spec.containers[0];
         let sc = c.security_context.as_ref().unwrap();
         assert_eq!(sc.privileged, Some(false));

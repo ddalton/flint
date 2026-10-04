@@ -1016,12 +1016,14 @@ impl S3Node {
             cache_host_dir: st.cache_dir.clone(),
             shared_key: None,
         });
-        if let Err(e) = self.worker_capacity(&st, "worker").await {
-            return Err(self.fail(dir, &st, e).await);
-        }
+        let admitted = match self.worker_capacity(&st, "worker").await {
+            Ok(g) => g,
+            Err(e) => return Err(self.fail(dir, &st, e).await),
+        };
         if let Err(e) = worker::ensure(&self.client, &pod).await {
             return Err(self.fail(dir, &st,Status::unavailable(e)).await);
         }
+        drop(admitted);
         let worker_uid = match worker::wait_running(&self.client, &st.worker_namespace, &st.worker_name, WORKER_RUNNING_WAIT).await {
             Ok(WaitOutcome::Running { uid }) => uid,
             Ok(WaitOutcome::Failed { reason, message }) => {
@@ -1306,12 +1308,14 @@ impl S3Node {
                 cache_host_dir: sm.cache_dir.clone(),
                 shared_key: Some(&key),
             });
-            if let Err(e) = self.worker_capacity(&st, "shared worker").await {
-                return Err(self.fail(dir, &st, e).await);
-            }
+            let admitted = match self.worker_capacity(&st, "shared worker").await {
+                Ok(g) => g,
+                Err(e) => return Err(self.fail(dir, &st, e).await),
+            };
             if let Err(e) = worker::ensure(&self.client, &pod).await {
                 return Err(self.fail(dir, &st, Status::unavailable(e)).await);
             }
+            drop(admitted);
             let worker_uid = match worker::wait_running(&self.client, &st.worker_namespace, &st.worker_name, WORKER_RUNNING_WAIT).await {
                 Ok(WaitOutcome::Running { uid }) => uid,
                 Ok(WaitOutcome::Failed { reason, message }) => {
@@ -1464,13 +1468,23 @@ impl S3Node {
     /// reschedules it, so the message says what frees room. Off by default
     /// — kubelet's own admission then stays the only ceiling
     /// (`worker_refused`).
-    async fn worker_capacity(&self, st: &VolumeState, what: &str) -> Result<(), Status> {
-        let Some(cap) = self.cfg.max_workers_per_node else { return Ok(()) };
+    ///
+    /// The count and the create are one step: the returned guard is a
+    /// node-wide lock, taken before the count and held by the caller until
+    /// `worker::ensure` has made the worker an API object the next count
+    /// sees. Without it the check was check-then-act across volumes — kind
+    /// S36 (2026-10-04): six pods at once with room for one put nine
+    /// workers on a node capped at seven. Taken after the volume and class
+    /// locks and released before any wait, so it orders after both and
+    /// is held for one count and one create.
+    async fn worker_capacity(&self, st: &VolumeState, what: &str) -> Result<Option<tokio::sync::OwnedMutexGuard<()>>, Status> {
+        let Some(cap) = self.cfg.max_workers_per_node else { return Ok(None) };
+        let admit = self.lock(&format!("capacity:{}", self.cfg.node_name)).await?;
         let live = worker::count_live_on_node(&self.client, &self.cfg.worker_namespace, &self.cfg.node_name, &st.worker_name)
             .await
             .map_err(Status::unavailable)?;
-        if live < cap as usize {
-            return Ok(());
+        if !over_capacity(live, cap) {
+            return Ok(Some(admit));
         }
         let msg = format!(
             "{}: node {} already runs {live} flint-s3 workers and workers.maxPerNode is {cap}, so no {what} is created for pod \
@@ -2087,8 +2101,9 @@ impl S3Node {
             cache_host_dir: None,
             shared_key: None,
         });
-        self.worker_capacity(st, "syncer").await?;
+        let admitted = self.worker_capacity(st, "syncer").await?;
         worker::ensure(&self.client, &pod).await.map_err(Status::unavailable)?;
+        drop(admitted);
         let worker_uid = match worker::wait_running(&self.client, &st.worker_namespace, &st.worker_name, WORKER_RUNNING_WAIT).await {
             Ok(WaitOutcome::Running { uid }) => uid,
             Ok(WaitOutcome::Failed { reason, message }) => return Err(self.worker_refused(st, "syncer", &reason, &message).await),
@@ -2966,6 +2981,13 @@ impl csi::identity_server::Identity for S3Identity {
     }
 }
 
+/// Would one more worker pass `workers.maxPerNode`? `live` counts the
+/// node's live workers other than this volume's own (a retried publish
+/// adopts its worker, so it does not count against itself).
+pub fn over_capacity(live: usize, cap: u32) -> bool {
+    live >= cap as usize
+}
+
 /// How long a liveness statfs (the join's, and every republish's) may take
 /// before it counts as unanswered.
 pub const LIVENESS_PROBE_BUDGET: Duration = Duration::from_secs(3);
@@ -3016,6 +3038,16 @@ mod tests {
     /// tell a controller the same lead, in minutes, in BOTH places it says
     /// it (§2 Timing and the §8 checklist — §8 carried a stale "four" for a
     /// day, 2026-10-03). Until this test the agreement lived in comments.
+    #[test]
+    fn the_worker_ceiling_admits_up_to_and_not_past_its_number() {
+        // maxPerNode N admits a worker while fewer than N others live.
+        assert!(!over_capacity(0, 1));
+        assert!(over_capacity(1, 1));
+        assert!(!over_capacity(2, 3));
+        assert!(over_capacity(3, 3));
+        assert!(over_capacity(4, 3), "already past it (a race, or the ceiling lowered): still refused");
+    }
+
     #[test]
     fn a_shared_mounter_is_dead_only_on_evidence_and_silence_is_busy() {
         use super::fuse::Probe;

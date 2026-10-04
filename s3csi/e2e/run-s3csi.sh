@@ -2412,6 +2412,96 @@ else
 fi
 $K -n $NS delete pod cap-reader --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
 
+# ── S35 the door answers only inside its worker (SECURITY.md P1) ──────
+# The credential door (creds.json behind 127.0.0.1:9911) is unreachable
+# from outside the worker BY CONSTRUCTION — it binds loopback in the
+# worker's own netns — and until this leg nothing tried. Three outside
+# attempts and two inside controls: the listening socket's address, asked
+# of `ss` in the worker's netns (netlink, like S34's peer lookup — the
+# first Mac run read /proc/net/tcp through nsenter and found nothing
+# while the door served 200); a sibling pod and the
+# node, each at the worker's pod IP; and inside the netns a request
+# WITHOUT the token (refused) and one with it (served) — so the outside
+# refusals are not a door that is simply down.
+leg S35 "the credential door answers only inside its worker: it listens on 127.0.0.1, a sibling pod and the node are refused at the worker's pod IP, and inside, no token is refused while the token is served"
+w=$(worker_of reader)
+if require_pod reader >/dev/null && [ -n "$w" ] && $K -n $WNS exec "$w" -- test -f /comm/auth.token 2>/dev/null; then
+    ok "PRECONDITION: reader's worker $w runs the door (/comm/auth.token present)"
+    pid=$(worker_pid "$w"); ip=$($K -n $WNS get pod "$w" -o jsonpath='{.status.podIP}' 2>/dev/null)
+    # Every listener on the port must be 127.0.0.1.
+    lis=$(onnode "nsenter -t $pid -n ss -Hltn 'sport = :9911'" | awk '{ print $4 }' | sort -u | tr '\n' ' ')
+    case "$lis" in
+        "127.0.0.1:9911 ") ok "the door listens on 127.0.0.1:9911 only, in the worker's netns" ;;
+        "") bad "no listener on :9911 in the worker's netns (pid '$pid') — the refusals below would prove nothing" ;;
+        *) bad "the door listens beyond loopback: $lis" ;;
+    esac
+    [ -n "$ip" ] || bad "no pod IP for worker $w"
+    out=$(inpod reader "wget -T 3 -qO- http://$ip:9911/v1/creds 2>&1; echo rc=\$?")
+    case "$out" in
+        *rc=0*) bad "a SIBLING pod read the door at $ip:9911: $(echo "$out" | head -1 | cut -c1-80)" ;;
+        *refused*) ok "a sibling pod is refused at $ip:9911 (connection refused)" ;;
+        *) ok "a sibling pod cannot reach $ip:9911 ($(echo "$out" | tr '\n' ' ' | cut -c1-90))" ;;
+    esac
+    out=$(onnode "curl -s -m 3 -o /dev/null -w '%{http_code}' http://$ip:9911/v1/creds; echo \" rc=\$?\"")
+    case "$out" in
+        *" rc=7"*) ok "the node is refused at $ip:9911 (curl: could not connect)" ;;
+        *" rc=0"*) bad "the NODE read the door at $ip:9911 (http $out)" ;;
+        *) ok "the node cannot reach $ip:9911 ($out)" ;;
+    esac
+    code=$(onnode "nsenter -t $pid -n curl -s -m 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:9911/v1/creds")
+    case "$code" in
+        401|403) ok "CONTROL: inside the worker, a request without the token is refused ($code)" ;;
+        *) bad "CONTROL: inside the worker, a token-less request answered '$code' (want 401/403)" ;;
+    esac
+    tok=$($K -n $WNS exec "$w" -- cat /comm/auth.token 2>/dev/null)
+    code=$(onnode "nsenter -t $pid -n curl -s -m 3 -o /dev/null -w '%{http_code}' -H 'Authorization: $tok' http://127.0.0.1:9911/v1/creds")
+    [ "$code" = 200 ] && ok "CONTROL: inside the worker, the token is served (200) — the door is up" || bad "CONTROL: inside the worker, the token got '$code' (want 200) — the refusals above may be a door that is down"
+else
+    bad "PRECONDITION: reader is not Running or its worker '$w' has no /comm/auth.token — S35 made no observation"
+fi
+
+# ── S36 workers.maxPerNode under a burst (SECURITY.md §4.8) ───────────
+# `worker_capacity` counts the node's live workers, then the publish goes
+# on to create one: check-then-act, serialised only per volume and per
+# class. S33 proved the ceiling for ONE publish; this asks whether a
+# burst of pods publishing AT ONCE can each pass the count before any of
+# them has created its worker. The ceiling is set one above the node's
+# live count, six pods of a per-pod CR go in together, and the node's
+# workers are counted every second: the peak must not pass the ceiling.
+leg S36 "workers.maxPerNode under a burst: six pods published at once never put more workers on the node than the ceiling, and exactly the room left is used"
+S36_PODS=${S36_PODS:-6}
+live_workers() { $K -n $WNS get pods -l chert.us/node=$NODE -o json 2>/dev/null | python3 -c "
+import json,sys
+print(sum(1 for p in json.load(sys.stdin)['items'] if not p['metadata'].get('deletionTimestamp') and p.get('status',{}).get('phase') not in ('Succeeded','Failed')))"; }
+live=$(live_workers)
+cap=$(( ${live:-0} + 1 ))
+if [ "${live:-0}" -ge 1 ] && chart_up --set workers.maxPerNode="$cap" >/dev/null 2>&1 && plugin_rolled; then
+    ok "chart rolled with workers.maxPerNode=$cap ($live live, room for one)"
+    for i in $(seq 1 "$S36_PODS"); do
+        sed -e "s#__NAME__#race-$i#g" -e "s#__CR__#datasets#g" -e "s#__NODE__#$NODE#g" pt-pod.yaml.tpl
+        echo "---"
+    done | $K apply -f - >/dev/null
+    peak=0; trace=""
+    for t in $(seq 1 90); do
+        n=$(live_workers); [ -n "$n" ] && [ "$n" -gt "$peak" ] && peak=$n
+        [ $((t % 10)) = 0 ] && trace="$trace $n"
+        sleep 1
+    done
+    note "live workers on $NODE every 10 s during the burst:$trace (peak $peak, ceiling $cap)"
+    if [ "$peak" -le "$cap" ]; then ok "the ceiling held under the burst: peak $peak workers, maxPerNode $cap"
+    else bad "the ceiling was PASSED under the burst: peak $peak workers with maxPerNode $cap — worker_capacity is check-then-act across volumes (SECURITY.md §4.8)"
+    fi
+    up=0; for i in $(seq 1 "$S36_PODS"); do wait_phase "race-$i" Running 1 && up=$((up + 1)); done
+    [ "$up" = 1 ] && ok "exactly one of the $S36_PODS pods mounted — the one worker of room" || bad "$up of the $S36_PODS pods mounted with room for one"
+    nrefused=0; for i in $(seq 1 "$S36_PODS"); do mount_events "race-$i" | grep -q WorkerCapacity && nrefused=$((nrefused + 1)); done
+    [ "$nrefused" -ge $((S36_PODS - 1)) ] && ok "$nrefused pods were told WorkerCapacity" || bad "only $nrefused of the $((S36_PODS - 1)) refused pods carry a WorkerCapacity event"
+    chart_up >/dev/null 2>&1 && plugin_rolled || bad "chart restore failed"
+else
+    bad "PRECONDITION: no live workers on $NODE, or chart_up with workers.maxPerNode=$cap did not roll — S36 made no observation"
+    chart_up >/dev/null 2>&1 && plugin_rolled
+fi
+for i in $(seq 1 "$S36_PODS"); do echo "race-$i"; done | xargs $K -n $NS delete pod --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
+
 # ── S21 (audit 2026-09-03, finding 4) ─────────────────────────────────
 # A node reboot empties the worker's memory-backed comm dir: the
 # supervisor restarts with no launch record, sits in its accept loop,

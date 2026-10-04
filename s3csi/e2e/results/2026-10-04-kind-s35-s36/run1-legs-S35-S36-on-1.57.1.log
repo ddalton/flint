@@ -1,0 +1,18 @@
+
+── S35 — the credential door answers only inside its worker: it listens on 127.0.0.1, a sibling pod and the node are refused at the worker's pod IP, and inside, no token is refused while the token is served
+  ok: PRECONDITION: reader's worker s3w-e85655aa4e78424b runs the door (/comm/auth.token present)
+  BAD: no listener on :9911 in the worker's netns (pid '6128') — the refusals below would prove nothing
+  ok: a sibling pod is refused at 10.244.0.14:9911 (connection refused)
+  ok: the node is refused at 10.244.0.14:9911 (curl: could not connect)
+  ok: CONTROL: inside the worker, a request without the token is refused (401)
+  ok: CONTROL: inside the worker, the token is served (200) — the door is up
+
+── S36 — workers.maxPerNode under a burst: six pods published at once never put more workers on the node than the ceiling, and exactly the room left is used
+  ok: chart rolled with workers.maxPerNode=7 (6 live, room for one)
+  NOTE: live workers on flint-s3csi-control-plane every 10 s during the burst: 9 9 9 9 9 9 9 9 9 (peak 9, ceiling 7)
+  BAD: the ceiling was PASSED under the burst: peak 9 workers with maxPerNode 7 — worker_capacity is check-then-act across volumes (SECURITY.md §4.8)
+  BAD: 3 of the 6 pods mounted with room for one
+  BAD: only 3 of the 5 refused pods carry a WorkerCapacity event
+
+════════════════════════════════════════
+s3.csi.chert.us legs [S35 S36] of run-s3csi.sh: 6 ok, 4 bad

@@ -144,7 +144,7 @@ counted at the API before every worker create; a join creates none.
 | | enforced by | in code |
 |---|---|---|
 | `ResourceExhausted` + `WorkerCapacity` over the ceiling | `worker_capacity`, `count_live_on_node` | `s3csi/node.rs`, `s3csi/worker.rs` |
-| **check-then-act**: no node-wide lock; two concurrent publishes can both pass the count | (none) | |
+| the count and the create are one step: a node-wide lock from the count until the worker is an API object | `worker_capacity` (returns the guard), its three callers | `s3csi/node.rs` |
 
 **P12. The `static` arm is interim.** Keys from the pod's
 `nodePublishSecretRef`, delivered by kubelet (the node SA has no
@@ -171,7 +171,7 @@ Secrets RBAC), never refreshed, never shared.
 
 | promise | unit tests (`cargo test --lib`) | rig legs (`s3csi/e2e/`) | newest run | falsifier gap |
 |---|---|---|---|---|
-| P1 | `door_refuses_without_the_token_and_serves_with_it`; `door_arm_points_at_loopback_with_a_token_file`; `files_are_written_with_mode`; `passthrough_worker_is_unprivileged_and_hostpath_free` | S1, S3, S31 (no secret in mount-s3's env) | campaign 3 run 4 (2026-09-30); sts run 1 (2026-10-02) | nothing tries the door from outside the worker's netns; the worker test does not assert `hostNetwork: false` |
+| P1 | `door_refuses_without_the_token_and_serves_with_it`; `door_arm_points_at_loopback_with_a_token_file`; `files_are_written_with_mode`; `passthrough_worker_is_unprivileged_and_hostpath_free` | S1, S3, S31 (no secret in mount-s3's env) | campaign 3 run 4 (2026-09-30); sts run 1 (2026-10-02) | S35 (2026-10-04, kind): the door listens on 127.0.0.1 only; a sibling pod and the node are refused at the worker's IP; the worker test asserts no `hostNetwork`/`hostPID`/`hostIPC` |
 | P2 | `token_review_identity_needs_authenticated_sa_and_audience`; `decide_refuses_each_break_in_the_chain_by_name`; `a_grant_is_the_registration_narrowed_by_the_cr_never_widened`; `consumers_absent_denies_and_names_the_field`; `listed_sa_passes_others_named_in_the_refusal`; `unknown_attributes_are_refused_by_name`; `non_ephemeral_and_missing_pod_info_are_refused` | S6, S7, S10; A11 | campaign 3 run 4 | the absent-pod-uid-extra path (§4.2) has no test |
 | P3 | (generic) | M2 | design doc only: "multi 22/0" 2026-09-04; no results README | none written since |
 | P4 | `write_flags_track_read_only`; `a_read_only_volume_registers_a_read_grant_on_the_wire` | S5, S24 (shared mount refuses a write); R3, R6, R9; A9; O5 | campaign 3 run 4; `run-rights.sh` has no results README | the append in `publish_passthrough` has no unit test |
@@ -181,7 +181,7 @@ Secrets RBAC), never refreshed, never shared.
 | P8 | `uid_gid_must_be_integers`; `dir_names_cannot_escape`; `name_and_hash_are_stable_and_label_sized` | S15, S24; P3 (16 tenants) | campaign 3 run 4; kind S24+S30 (2026-10-01) | cross-pod door reachability; state-dir mode |
 | P9 | `only_read_only_members_with_cr_scoped_credentials_share`; `sharing_cannot_run_on_a_per_pod_secret`; `the_class_is_node_namespace_cr_owner_mode_and_argv`; `a_shared_mount_round_trips_and_membership_is_a_set`; `a_shared_worker_is_named_by_its_class_and_says_so`; `a_shared_mounter_is_dead_only_on_evidence_and_silence_is_busy`; `only_enotconn_is_a_dead_mount_and_silence_is_not` | S24, S28, S29, S30; S34 | kind S24+S30 46/0 (2026-10-01); sts run 1; S34 61/0 + S9 + S24 86/0 (2026-10-03, after the §4.12 fix) | a hung (not dead) shared mounter is waited for indefinitely (§4.12) |
 | P10 | `redaction_masks_secret_shaped_arguments`; `creds_json_is_the_container_credentials_shape`; `our_audience_token_is_picked_and_never_debug_printed`; `the_start_up_line_never_prints_a_secret`; `token_is_written_once_at_0600_and_reloaded` | S3, S31 | sts runs | nothing greps events or the broker log for key material |
-| P11 | (none for `worker_capacity`) | S33 | sts run 1, 6/0 | the race has no leg: S33 is sequential |
+| P11 | `the_worker_ceiling_admits_up_to_and_not_past_its_number` | S33, S36 | S36 on kind 2026-10-04: 1.57.1 peak 9 over a ceiling of 7 (the race); fixed, peak 7, one of six mounted | — |
 | P12 | `static_arm_needs_both_keys_and_passes_region`; `sharing_cannot_run_on_a_per_pod_secret` | S5c | sts run 2, 2/2 | — |
 
 ## 4. What is NOT claimed
@@ -233,14 +233,20 @@ Secrets RBAC), never refreshed, never shared.
    order and is corrected). It is presentation inside the pod's own
    mount and the class key for sharing, not a grant; `--uid 0` reaches
    mount-s3 while the worker process maps 0 to 65534.
-8. **The ceiling is check-then-act** (P11).
+8. ~~**The ceiling is check-then-act** (P11).~~ Fixed 2026-10-04: S36
+   put nine workers on a node capped at seven with 1.57.1 (six pods at
+   once, room for one); a node-wide lock now spans the count and the
+   create, and the same burst peaks at seven.
 9. **Revocation is bounded by memory, not by the plugin.** Nothing on
    the node can take back the credential mount-s3 already holds; the
    store's own session expiry is the only hard stop. Under sharing, per
    member, it is the pod's lifetime.
-10. **The door's unreachability from outside the worker is by
-    construction, not by a leg.** No test tries it from a sibling pod or
-    from the node network.
+10. ~~**The door's unreachability from outside the worker is by
+    construction, not by a leg.**~~ S35 (2026-10-04) tries it: loopback
+    only in the worker's netns, refused from a sibling pod and from the
+    node, while inside the token is served. A pod on the HOST network of
+    the same node is still not tried — the worker test asserts the
+    worker is not one.
 11. **S10 on kind runs against a store that never expires anything.**
     Its real twin is A6/R1 on AWS.
 12. **A HUNG shared mounter blocks new members; it is not replaced.**
@@ -275,9 +281,9 @@ Secrets RBAC), never refreshed, never shared.
 | 1 | ~~TLS to the broker by default in the chart~~ — not this repo's: the service mesh encrypts the pod network (decided 2026-10-03; §2) | — |
 | 2 | ~~broker: a TokenReview transport error answers 503, not 400~~ — done 2026-10-03 (`review_outcome`, `ReviewError`; the node principal's review answers 503 the same way) | — |
 | 3 | ~~`sts_replace_decision`: a reused generation with other keys is refused~~ — done 2026-10-03 (`creds_fingerprint` in the state; S31 step 6 on kind 2026-10-03, S31 24/24) | — |
-| 4 | legs: the door tried from a sibling pod and from the node (expect refused); the capacity race (parallel publishes over the ceiling); a NetworkPolicy leg; an M2 results README | M |
+| 4 | ~~legs: the door from a sibling pod and the node; the capacity race~~ — done 2026-10-04 (S35; S36 found the race, fixed); still open: a NetworkPolicy leg, an M2 results README | S |
 | 5 | ~~`write_files`: create the tmp at its mode~~ — done 2026-10-03 (`create_new` + `mode`; a stale tmp is replaced) | — |
-| 6 | the worker test asserts `hostNetwork` absent; `worker_capacity` gets a unit test | S |
+| 6 | ~~the worker test asserts `hostNetwork` absent; `worker_capacity` gets a unit test~~ — done 2026-10-04 (positive-controlled) | — |
 | 7 | ~~run S34 (the probe under load) on the box, and calibrate its floor~~ — run 2026-10-03: four readers never reach the probe; 24 do, and the join replaces the mounter (§4.12) | — |
 | 8 | lean's `launch.json` written 0600 | S |
 | 9 | ~~the join path replaces a shared mounter only on evidence of death, and answers silence with `Unavailable`~~ — done 2026-10-03 (`shared_liveness`, `fuse::Probe`; S34 61/0 with both arms) | — |
