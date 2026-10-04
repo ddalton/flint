@@ -1,0 +1,46 @@
+LeanP1 gate, 2026-10-04 (module LeanP1.tla md5 94da7541; MCLeanP1All for
+AllHolds and its two probes). tlc-rs main 129adc8b, COMPILED checkers (one
+per world), spot c8g.48xlarge us-west-1, 00:07Z-00:44Z; torn down, zero
+set verified (us-east-1/us-east-2/us-west-1/us-west-2: no instances, open
+spot requests, volumes, flint-tlc buckets or inline role policies).
+
+Every world of WORLDS-LeanP1.tsv except LeanP1Holds (HOLDS 2026-10-03,
+results/2026-10-03-ec2-deep, 06bd01cf) and LeanP1LiveHolds (replaced by
+LiveHoldsSmall, the user's call 2026-09-28). Phase 1: all 51 at once, 4
+workers, 300 s cap. Phase 2: the 7 left, one at a time, 192 workers.
+Judged as run-gate.sh judges (scripts/leangate.py). RESULTS.txt is the
+gate's own log; <world>.out is each run.
+
+RESULT: 49 of 49 decided worlds as expected, 0 MISMATCH.
+  claims HOLD (9): FetchHolds, ScopeHolds, ScopeFetchHolds, ReaderHolds,
+    LiveHoldsSmall, ReaderScopeHolds, Holds1p3b, AllHolds,
+    DeleteOverrideOff (and LeanP1Holds, 2026-10-03)
+  mutations FIRE (19) and probes FIRE (21): every one, the property named
+    in WORLDS (see RESULTS.txt). 9 + 19 + 21 = 49.
+  RECORD only, not run to a result (stopped at the user's wrap-up
+    deadline): CollectorGreedy (phase 2, depth 19, 171,949,339 distinct at
+    67 s when stopped), NoConvergence (phase 1 only: depth 20, 19,476,414).
+
+FIRST COMPLETIONS
+  LeanP1AllHolds (everything on: reader + scope + a rescope + a restart):
+    HOLDS, 755,918,948 distinct, 3,455,319,146 generated, depth 42, 530.7 s.
+    Never completed before (committed 094aadfa without a verdict).
+  LeanP1DeleteOverrideOff (LeanP1Holds's bounds, the delete-override record
+    off): HOLDS, 1,692,578,345 distinct, 6,873,776,696 generated, depth 39,
+    875.9 s. Never completed on any checker (TLC: expected to time out at
+    6 h). The record is not load-bearing for these safety claims.
+
+CROSS-CHECK WITH TLC
+  LeanP1Holds1p3b: 461,094,969 distinct, depth 46, 226 s — exactly TLC's
+  distinct count for this world in the 2026-09-25 gate. Its bounds leave
+  scope, reader and failed fetch off, so the model changes since did not
+  change its state space.
+
+TLC: the HOLDS verdicts at large bounds (AllHolds, DeleteOverrideOff) are
+tlc-rs only, as LeanP1Holds is (TLC confirmation waived by the user for
+LeanP1Holds on 2026-10-03; not run for these). The mutations and probes
+fire with a counterexample a TLC replay could confirm cheaply.
+
+The box gate this replaces (interpreter, 4 workers, started 2026-10-03
+19:02Z) was stopped at the user's request after 2 worlds
+(box-RESULTS-2026-10-03.txt); its state is deleted.

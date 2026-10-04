@@ -1,0 +1,4 @@
+tlc-rs: LeanP1 (31 variables, 0 symmetry permutations), 4 workers, generated engine; loaded in 0.003s
+progress: depth 24, 2188359 generated, 619922 distinct (0 fingerprint spills), 63993 on queue (0 on disk), 11.1s
+Model checking completed. No error has been found.
+3086937 states generated, 834633 distinct states found. Depth 33. Checked in 16.119s (51781 distinct/s).

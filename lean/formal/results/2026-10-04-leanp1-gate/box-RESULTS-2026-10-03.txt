@@ -1,0 +1,4 @@
+start 2026-10-03T19:02:48Z module 94da7541 tlc-rs 2aa87d67, 4 workers, DEFER=LeanP1DeleteOverrideOff
+LeanP1Holds1p3b                  OK-HOLDS           exp=HOLDS                    rc=0   | No error has been found | 1922766889 states generated, 461094969 distinct states found. Depth 46 | 16476s [tlc-rs 2aa87d67]
+LeanP1NoR7                       OK-FIRES           exp=Prop_NoSilentRevert      rc=12  | Error: Action property Prop_NoSilentRevert is violated by the last step above | 1277519 states generated, 505620 distinct states found. Depth 9 | 10s [tlc-rs 2aa87d67]
+STOPPED 2026-10-04T00:07:51Z (user): moved to a spot c8g (compiled, tlc-rs main 129adc8b)

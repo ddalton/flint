@@ -1,0 +1,18 @@
+tlc-rs: LeanP1 (31 variables, 0 symmetry permutations), 192 workers, generated engine; loaded in 0.003s
+progress: depth 21, 103575073 generated, 28299415 distinct (0 fingerprint spills), 9316952 on queue (0 on disk), 11.1s
+progress: depth 23, 207263181 generated, 55251295 distinct (0 fingerprint spills), 14926390 on queue (0 on disk), 22.3s
+progress: depth 25, 361696407 generated, 95600747 distinct (0 fingerprint spills), 22151670 on queue (0 on disk), 39.3s
+progress: depth 26, 464381350 generated, 122447232 distinct (0 fingerprint spills), 26846485 on queue (0 on disk), 50.8s
+progress: depth 27, 586830965 generated, 154135077 distinct (0 fingerprint spills), 31687845 on queue (0 on disk), 64.5s
+progress: depth 28, 726481557 generated, 189648923 distinct (0 fingerprint spills), 35513846 on queue (0 on disk), 80.8s
+progress: depth 29, 876583849 generated, 226890896 distinct (0 fingerprint spills), 37241973 on queue (0 on disk), 98.4s
+progress: depth 30, 1028712480 generated, 263521012 distinct (0 fingerprint spills), 36630116 on queue (0 on disk), 116.4s
+progress: depth 31, 1176098851 generated, 298041387 distinct (0 fingerprint spills), 34520375 on queue (0 on disk), 133.4s
+progress: depth 32, 1315675505 generated, 330306875 distinct (0 fingerprint spills), 32265488 on queue (0 on disk), 149.8s
+progress: depth 33, 1447346828 generated, 360781279 distinct (0 fingerprint spills), 30474404 on queue (0 on disk), 165.1s
+progress: depth 34, 1570680466 generated, 389119358 distinct (0 fingerprint spills), 28338079 on queue (0 on disk), 180.2s
+progress: depth 35, 1681579461 generated, 413679665 distinct (0 fingerprint spills), 24560307 on queue (0 on disk), 194.0s
+progress: depth 36, 1772262912 generated, 432470499 distinct (0 fingerprint spills), 18790834 on queue (0 on disk), 205.4s
+progress: depth 38, 1875194958 generated, 451985346 distinct (0 fingerprint spills), 7187524 on queue (0 on disk), 218.8s
+Model checking completed. No error has been found.
+1922766889 states generated, 461094969 distinct states found. Depth 46. Checked in 225.670s (2043224 distinct/s).
