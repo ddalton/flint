@@ -14,6 +14,13 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **flint-s3-worker: a lean worker's launch record is written 0600**
+  (2026-10-05, `s3csi/SECURITY.md` §4.6). `comm/launch.json` carries the
+  syncer's environment, static store keys included, and was written with
+  `fs::write` under the umask — world-readable in the worker's comm dir.
+  It is now created at 0600 (a stale tmp from a crash is removed first, so
+  it cannot carry a wider mode into the rename), as the plugin's own
+  credential files are.
 - **flint-s3-csi: `workers.maxPerNode` holds under a burst of pods**
   (2026-10-04, `s3csi/SECURITY.md` §4.8). The ceiling counted the node's
   live workers and then created one, with nothing spanning the two

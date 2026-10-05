@@ -226,8 +226,9 @@ Secrets RBAC), never refreshed, never shared.
    `state.json`, which is both the door's auth token and the
    registration binding. ~~`write_files` creates its tmp file under the
    umask before the chmod~~ (closed 2026-10-03: born at its mode).
-   Lean's `launch.json` carries the arm's env, static keys included,
-   with default permissions in the comm dir.
+   ~~Lean's `launch.json` carries the arm's env, static keys included,
+   with default permissions in the comm dir~~ (closed 2026-10-05: born
+   0600, `persist_launch`).
 7. **uid/gid: the pod's `volumeAttributes.chert.us/uid` overrides the
    CR's `spec.uid`** (as built; the design doc §3.6 said the opposite
    order and is corrected). It is presentation inside the pod's own
@@ -285,7 +286,7 @@ Secrets RBAC), never refreshed, never shared.
 | 5 | ~~`write_files`: create the tmp at its mode~~ — done 2026-10-03 (`create_new` + `mode`; a stale tmp is replaced) | — |
 | 6 | ~~the worker test asserts `hostNetwork` absent; `worker_capacity` gets a unit test~~ — done 2026-10-04 (positive-controlled) | — |
 | 7 | ~~run S34 (the probe under load) on the box, and calibrate its floor~~ — run 2026-10-03: four readers never reach the probe; 24 do, and the join replaces the mounter (§4.12) | — |
-| 8 | lean's `launch.json` written 0600 | S |
+| 8 | ~~lean's `launch.json` written 0600~~ — done 2026-10-05 (`persist_launch`: created 0600, a stale tmp removed first; positive-controlled) | — |
 | 9 | ~~the join path replaces a shared mounter only on evidence of death, and answers silence with `Unavailable`~~ — done 2026-10-03 (`shared_liveness`, `fuse::Probe`; S34 61/0 with both arms) | — |
 
 Docs corrected with this file (2026-10-03): the sts note's "CA-pinned

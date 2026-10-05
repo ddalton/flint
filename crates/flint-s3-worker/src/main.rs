@@ -274,10 +274,7 @@ fn wait_for_launch(comm: &Path, accept_secs: u64) -> (Launch, Option<OwnedFd>) {
                         if launch.mode == "lean" {
                             // Persist BEFORE the child starts, so a restart
                             // never races a half-written file.
-                            let tmp = comm.join(format!("{LAUNCH_NAME}.tmp"));
-                            if let Err(e) = std::fs::write(&tmp, serde_json::to_vec(&launch).unwrap())
-                                .and_then(|_| std::fs::rename(&tmp, comm.join(LAUNCH_NAME)))
-                            {
+                            if let Err(e) = persist_launch(&comm, &launch) {
                                 eprintln!("flint-s3-worker: persist launch: {e}");
                             }
                         }
@@ -352,6 +349,26 @@ fn receive_launch(stream: &UnixStream) -> Result<(Launch, Option<OwnedFd>), Stri
         "passthrough" | "lean" => Ok((launch, fd)),
         other => Err(format!("unknown mode {other:?}")),
     }
+}
+
+/// Persist a lean launch record — the arm's env, static keys included —
+/// at 0600 from its first byte: the tmp is CREATED at that mode (never
+/// written under the umask and narrowed after), a stale tmp from a crash
+/// is removed first so `create_new` cannot trip on it, and the rename
+/// keeps the mode. The plugin's credential files are written the same
+/// way (`s3csi::creds::write_files`).
+fn persist_launch(comm: &Path, launch: &Launch) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let tmp = comm.join(format!("{LAUNCH_NAME}.tmp"));
+    match std::fs::remove_file(&tmp) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+    f.write_all(&serde_json::to_vec(launch).map_err(std::io::Error::other)?)?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, comm.join(LAUNCH_NAME))
 }
 
 fn write_reply(mut stream: &UnixStream, reply: &Reply) -> std::io::Result<()> {
@@ -630,6 +647,26 @@ fn door_response(req: &str, comm: &Path) -> (&'static str, Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_launch_record_is_born_0600_and_a_stale_tmp_does_not_widen_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("s3w-launch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A crash left a world-readable tmp behind.
+        let tmp = dir.join(format!("{LAUNCH_NAME}.tmp"));
+        std::fs::write(&tmp, b"stale").unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let launch: Launch = serde_json::from_str(r#"{"mode":"lean","args":["run"],"env":{"AWS_SECRET_ACCESS_KEY":"s"}}"#).unwrap();
+        persist_launch(&dir, &launch).unwrap();
+        let rec = dir.join(LAUNCH_NAME);
+        assert_eq!(std::fs::metadata(&rec).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(!tmp.exists());
+        let back: Launch = serde_json::from_slice(&std::fs::read(&rec).unwrap()).unwrap();
+        assert_eq!(back.env["AWS_SECRET_ACCESS_KEY"], "s");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn launch_round_trips_and_placeholder_is_literal() {
