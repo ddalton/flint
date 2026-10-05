@@ -1,0 +1,7 @@
+PacksOverlap worlds (2026-10-05), ForgeSyncKeptSet.tla md5 49e1d11d, compiled tlc-rs (main 6e1e7ba2, with compiled VIEW parts). Symmetry over syncers only (SymOverlap).
+Expectations from WORLDS.tsv, written before any run.
+ForgeSyncKeptSetOverlapProbeCovered  OK-FIRES  exp=ProbeKeptSetDropsCovered                | Action property ProbeKeptSetDropsCovered is violated | 1630465 states generated, 485645 distinct states found. Depth 20 | 3s, Mac 4 workers
+ForgeSyncKeptSetOverlapVsOriginal    OK-FIRES  exp=Inv_(AckedIsDurable|LandedPackComplete) | Invariant Inv_LandedPackComplete is violated          | 1434145 states generated, 430116 distinct states found. Depth 20 | 3s, Mac 4 workers
+ForgeSyncKeptSetOverlapHolds         OK-HOLDS  exp=HOLDS                                    | No error has been found                               | 1077924628 states generated, 220895081 distinct states found. Depth 62 | 104s, c8g.48xlarge 192 workers (2,126,210 distinct/s)
+The Mac's OverlapHolds was stopped at depth 40, 132,082,176 distinct, no violation (fingerprints spilling to disk at ~33K/s): out/ForgeSyncKeptSetOverlapHolds-mac-stopped-2026-10-05.out.
+Identity: with PacksOverlap = FALSE the model is unchanged — OffLive reruns at exactly 1,781,559 distinct (tlc-rs, Mac), and every existing cfg differs from its committed version only by the added line "PacksOverlap = FALSE".

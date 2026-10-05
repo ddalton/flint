@@ -187,7 +187,14 @@ CONSTANTS
   KeptSetAnyDrop,       \* mutation: the kept-set reclaim drops without the coverage test
   KeptSetVsOriginal,    \* mutation: each drop tested against the ORIGINAL named set, not what stays kept
   KeptSetWhileServing,  \* mutation: the kept-set reclaim runs between batches on a SERVING syncer
-  KeptSetNoRenew        \* mutation: the kept-set CAS without the renewal before it
+  KeptSetNoRenew,       \* mutation: the kept-set CAS without the renewal before it
+  \* ── 2026-10-05: packs that OVERLAP ──
+  PacksOverlap          \* every push's pack after the first ALSO carries the first push's
+                        \* object, as a real pack may (a parent commit still in flight, an
+                        \* imperfect negotiation). Without it no two named packs ever hold
+                        \* the same object, and the kept set's COVERED drop is unreachable:
+                        \* ProbeCovered and VsOriginal held at exactly Holds' count (EC2
+                        \* 2026-10-05). Breaks the symmetry between pushes: use SymOverlap.
 
 Stages == {"none", "judged", "renewed", "hashed", "initiated", "uploaded",
            "cas", "refs"}
@@ -240,6 +247,9 @@ vars == <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease, lastTok,
 
 NoBatch   == [push |-> 0, stage |-> "none", listed |-> {}]
 ZeroLease == [ep |-> 0, tok |-> 0]
+
+\* The push whose object every other push's pack carries under PacksOverlap.
+FirstPush == CHOOSE p \in Pushes : TRUE
 NoBelief  == [etag |-> 0, main |-> 0, packs |-> {}]
 NoFold    == [id |-> 0, inputs |-> {}, stage |-> "none", base |-> FALSE, at |-> {}, atRest |-> FALSE]
 
@@ -295,7 +305,9 @@ Init ==
   /\ hbDue = [s \in Syncers |-> FALSE]
   /\ pushState = [p \in Pushes |-> "new"]
   /\ pushTo = [p \in Pushes |-> NoSyncer]
-  /\ holds = [q \in PackIds |-> IF q \in Pushes THEN {q} ELSE {}]
+  /\ holds = [q \in PackIds |-> IF q \in Pushes
+                                  THEN {q} \cup (IF PacksOverlap /\ q # FirstPush THEN {FirstPush} ELSE {})
+                                  ELSE {}]
   /\ fold = [s \in Syncers |-> NoFold]
   /\ foldBudget = MaxFolds
   /\ crashes = 0 /\ renewBudget = MaxRenews /\ claimBudget = MaxClaims
@@ -1549,6 +1561,11 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 \* so permuting them is sound.  Not for the liveness run — TLC's
 \* symmetry reduction and temporal checking do not combine.
 Sym == Permutations(Syncers) \cup Permutations(Pushes)
+
+\* With PacksOverlap the first push is distinguished (every other pack also
+\* holds its object), so permuting pushes is no longer sound; syncers stay
+\* interchangeable.
+SymOverlap == Permutations(Syncers)
 
 (***************************************************************************)
 (* The view.  Tokens and etags are minted from one counter and compared    *)

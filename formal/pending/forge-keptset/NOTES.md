@@ -62,6 +62,9 @@ limit each (`RESULTS-mac-2026-09-29.txt`). The box ran the large ones
 | ProbeResidue | fires: it drops a pack holding an unreachable object |
 | ProbeCovered | **does NOT fire** — HOLDS, 86,289,224 distinct, depth 62 (EC2 2026-10-05, compiled tlc-rs, 45 s): exactly Holds' count, so the probe never trips |
 | VsOriginal | **does NOT fire** — HOLDS, 86,289,224 distinct, depth 62 (EC2 2026-10-05, 42 s): the variant changes no reachable state |
+| **OverlapProbeCovered** | **fires** (PacksOverlap): a covered drop lands — 485,645 distinct, depth 20 |
+| **OverlapVsOriginal** | **fires** Inv_LandedPackComplete (PacksOverlap): the shrinking-set re-test is load-bearing |
+| **OverlapHolds** | **HOLDS, 220,895,081 distinct, depth 62** (PacksOverlap, symmetry over syncers only; c8g, 104 s) |
 
 **2026-10-05: both open worlds decided, and both are VACUOUS at these
 bounds** (`RESULTS-ec2-2026-10-05.txt`, `out/*-ec2-2026-10-05.out`). Each reached exactly
@@ -73,6 +76,15 @@ exercise it, a world needs packs that overlap: a second fold, or pushes
 that share an object. Both had been "undecided" since 09-29 only because
 the checker was slow: tlc-rs evaluated the VIEW in its interpreter for
 every state (fixed with compiled VIEW parts; 77K -> 1.9M distinct/s).
+
+**2026-10-05, later: the overlap worlds close it** (`RESULTS-overlap-2026-10-05.txt`).
+`PacksOverlap` makes every push's pack after the first also carry the
+first push's object, as a real pack may. With it the probe fires (a pack
+IS dropped because the kept packs cover it), VsOriginal fires (testing
+each drop against the original set loses a landed pack), and the shipped
+rules HOLD at 220,895,081 distinct. The coverage half of the rule is now
+exercised by a positive run, not only refuted by AnyDrop. Symmetry is
+over syncers only in these worlds: the first push is distinguished.
 
 What is shown: the code's collector (no roll-up, drop only what the
 KEPT packs cover, CAS, unlink) holds on the shipped rules, and it does

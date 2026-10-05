@@ -1,0 +1,18 @@
+tlc-rs: ForgeSyncKeptSet (35 variables, 1 symmetry permutations), 4 workers, generated engine; loaded in 0.010s
+progress: depth 24, 5227630 generated, 1484222 distinct (0 fingerprint spills), 444180 on queue (0 on disk), 10.1s
+progress: depth 26, 10610142 generated, 2988977 distinct (0 fingerprint spills), 882477 on queue (178733 on disk), 22.1s
+progress: depth 27, 15127337 generated, 4255147 distinct (0 fingerprint spills), 1266170 on queue (565242 on disk), 32.5s
+progress: depth 28, 21682674 generated, 6071986 distinct (0 fingerprint spills), 1816839 on queue (1116679 on disk), 47.9s
+progress: depth 29, 31149572 generated, 8641713 distinct (0 fingerprint spills), 2569727 on queue (1872383 on disk), 71.6s
+progress: depth 30, 44561894 generated, 12194045 distinct (0 fingerprint spills), 3552332 on queue (2856524 on disk), 107.5s
+progress: depth 31, 63044695 generated, 16962805 distinct (0 fingerprint spills), 4768760 on queue (4077304 on disk), 159.1s
+progress: depth 32, 87745209 generated, 23168728 distinct (0 fingerprint spills), 6205923 on queue (5516771 on disk), 223.0s
+progress: depth 33, 119803371 generated, 30997496 distinct (0 fingerprint spills), 7828768 on queue (7141152 on disk), 306.8s
+progress: depth 34, 160307964 generated, 40597133 distinct (0 fingerprint spills), 9599637 on queue (8914069 on disk), 415.1s
+progress: depth 35, 210294046 generated, 52069437 distinct (0 fingerprint spills), 11472304 on queue (10787760 on disk), 551.0s
+progress: depth 36, 270549167 generated, 65455974 distinct (0 fingerprint spills), 13386537 on queue (12702761 on disk), 726.1s
+progress: depth 37, 341146573 generated, 80628512 distinct (0 fingerprint spills), 15172538 on queue (14490554 on disk), 931.5s
+progress: depth 38, 420758474 generated, 97224736 distinct (0 fingerprint spills), 16596224 on queue (15916032 on disk), 1155.8s
+progress: depth 39, 506451230 generated, 114625952 distinct (1024 fingerprint spills), 17401216 on queue (16723584 on disk), 1684.7s
+progress: depth 40, 594155310 generated, 132082176 distinct (1024 fingerprint spills), 17456224 on queue (16780640 on disk), 2202.4s
+checkpoint: /private/tmp/claude-503/-Users-ddalton-github-flint/43d3502a-78c0-49e1-a64a-e1c9da8981bf/scratchpad/ov-md/ckpt (depth 40, 132082176 distinct, 17456224 on queue) in 9.9s
