@@ -91,7 +91,7 @@ impl<'p> Checker<'p> {
             source_hash: 0,
         };
         let lay = liveness::layout(&props);
-        Ok(Checker { reference: None, p, e, sk: SymKey::new(p), vbufs: Default::default(), workers, progress: true, props, fair, lay, disk })
+        Ok(Checker { reference: None, p, e, sk: SymKey::new(p, e), vbufs: Default::default(), workers, progress: true, props, fair, lay, disk })
     }
 
     fn needs_graph(&self) -> bool {

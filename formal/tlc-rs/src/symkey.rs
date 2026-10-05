@@ -19,7 +19,7 @@
 //! for the whole run.
 
 use crate::compile::visit;
-use crate::eval::{Bin, Bufs, Expr, Program};
+use crate::eval::{Bin, Bufs, Engine, Expr, Program};
 use crate::value::{combine, var_hash, Value, R};
 use std::cmp::Ordering;
 
@@ -34,6 +34,9 @@ enum Comp<'p> {
 
 pub struct SymKey<'p> {
     p: &'p Program,
+    /// asked first for a VIEW part (`Engine::view_part`): a generated
+    /// checker answers with compiled code, the interpreter with None
+    e: &'p dyn Engine,
     /// 1 + the number of non-identity permutations
     np: usize,
     /// inverse of each non-identity permutation
@@ -120,9 +123,26 @@ pub fn deps(p: &Program, e: &Expr, acc: &mut [bool], seen_ops: &mut [bool]) {
     visit(e, &mut |x| deps(p, x, acc, seen_ops));
 }
 
+/// The VIEW split into the parts the key hashes one by one, each with the
+/// frame it evaluates in: a VIEW naming a parameterless operator whose
+/// body is a tuple is keyed by that tuple's items, a tuple VIEW by its
+/// items, anything else as one part. None without a VIEW. The generator
+/// compiles exactly these parts, so the indices agree (`Engine::view_part`).
+pub fn view_parts(p: &Program) -> Option<Vec<(&Expr, u32)>> {
+    let v = p.view.as_ref()?;
+    Some(match &v.body {
+        Expr::Call(op, args) if args.is_empty() => match &p.ops[*op as usize].body {
+            Expr::Tuple(items) => items.iter().map(|e| (e, p.ops[*op as usize].frame)).collect(),
+            body => vec![(body, p.ops[*op as usize].frame)],
+        },
+        Expr::Tuple(items) => items.iter().map(|e| (e, v.frame)).collect(),
+        body => vec![(body, v.frame)],
+    })
+}
+
 impl<'p> SymKey<'p> {
     /// None when the plain per-variable fingerprint applies.
-    pub fn new(p: &'p Program) -> Option<SymKey<'p>> {
+    pub fn new(p: &'p Program, e: &'p dyn Engine) -> Option<SymKey<'p>> {
         if p.view.is_none() && p.symmetry.is_empty() {
             return None;
         }
@@ -136,17 +156,9 @@ impl<'p> SymKey<'p> {
             let equivariant = equivariant(p, e, &mut vec![0; p.ops.len()]);
             Comp::Expr { e, frame, deps: (0..nv).filter(|&i| acc[i]).collect(), equivariant }
         };
-        let comps = match &p.view {
+        let comps = match view_parts(p) {
             None => (0..nv).map(Comp::Var).collect(),
-            Some(v) => match &v.body {
-                // VIEW names an operator whose body is a tuple: key it by parts.
-                Expr::Call(op, args) if args.is_empty() => match &p.ops[*op as usize].body {
-                    Expr::Tuple(items) => items.iter().map(|e| mk(e, p.ops[*op as usize].frame)).collect(),
-                    body => vec![mk(body, p.ops[*op as usize].frame)],
-                },
-                Expr::Tuple(items) => items.iter().map(|e| mk(e, v.frame)).collect(),
-                body => vec![mk(body, v.frame)],
-            },
+            Some(parts) => parts.into_iter().map(|(e, frame)| mk(e, frame)).collect(),
         };
         let inv = p
             .symmetry
@@ -159,7 +171,7 @@ impl<'p> SymKey<'p> {
                 v
             })
             .collect();
-        Some(SymKey { p, np: 1 + p.symmetry.len(), inv, comps })
+        Some(SymKey { p, e, np: 1 + p.symmetry.len(), inv, comps })
     }
 
     pub fn reset(&self, m: &mut Memo) {
@@ -231,8 +243,7 @@ impl<'p> SymKey<'p> {
                 match &m.cv[c] {
                     Some(v) => v.clone(),
                     None => {
-                        let mut cx = bufs.cx(st, st.len(), *frame);
-                        let v = self.p.eval(e, &mut cx).map_err(|e| format!("evaluating VIEW: {e}"))?.normalized()?;
+                        let v = self.part(c, e, *frame, st, bufs)?;
                         m.cv[c] = Some(v.clone());
                         v
                     }
@@ -241,11 +252,23 @@ impl<'p> SymKey<'p> {
             if k == 0 { var_hash(&v) } else { v.hash_perm(&self.p.symmetry[k - 1], &self.inv[k - 1]) }
         } else {
             let image: Vec<Value> = (0..st.len()).map(|i| self.img(k, i, st, changed, pm, sm)).collect();
-            let mut cx = bufs.cx(&image, st.len(), *frame);
-            var_hash(&self.p.eval(e, &mut cx).map_err(|e| format!("evaluating VIEW: {e}"))?.normalized()?)
+            var_hash(&self.part(c, e, *frame, &image, bufs)?)
         };
         if stale { sm.ch[at] = Some(h) } else { pm.ch[at] = Some(h) }
         Ok(h)
+    }
+
+    /// VIEW part `c` on `st`: the engine's compiled code when it has it,
+    /// else the interpreter.
+    fn part(&self, c: usize, e: &Expr, frame: u32, st: &[Value], bufs: &mut Bufs) -> R<Value> {
+        let v = match self.e.view_part(c, st) {
+            Some(r) => r,
+            None => {
+                let mut cx = bufs.cx(st, st.len(), frame);
+                self.p.eval(e, &mut cx)
+            }
+        };
+        v.map_err(|e| format!("evaluating VIEW: {e}"))?.normalized()
     }
 
     /// The key of `st`. `changed[i]` says variable i differs from the

@@ -288,6 +288,13 @@ pub trait Engine: Sync {
     fn step_prop(&self, _i: usize, _s: &[Value], _t: &[Value]) -> Option<R<bool>> {
         None
     }
+    /// Part `c` of the VIEW (`symkey::view_parts`) on the state `st`, when
+    /// this engine compiled it; None leaves it to the interpreter. The
+    /// seen-set key under SYMMETRY/VIEW asks for one part per new state,
+    /// so an interpreted VIEW costs a generated checker most of its time.
+    fn view_part(&self, _c: usize, _st: &[Value]) -> Option<R<Value>> {
+        None
+    }
 }
 
 impl Engine for Program {

@@ -721,6 +721,18 @@ pub fn generate(l: &Loaded, dir: &Path) -> Result<(), String> {
         None => "return Err(\"no VIEW\".into())".into(),
     };
     let _ = writeln!(code, "fn view(g: &G, st: &[Value]) -> R<Value> {{ let nx: &[Option<Value>] = &[]; Ok({view}) }}\n");
+    // The VIEW's parts as the seen-set key splits them (`symkey::view_parts`),
+    // each compiled: under SYMMETRY/VIEW the key evaluates one part per new
+    // state, and in the interpreter that was most of a generated checker's
+    // time (ForgeSyncKeptSet, 2026-10-05: 63% of its samples).
+    let parts = crate::symkey::view_parts(p).unwrap_or_default();
+    for (c, (e, _)) in parts.iter().enumerate() {
+        let body = g.val(e);
+        let _ = writeln!(code, "fn vpart_{c}(g: &G, st: &[Value]) -> R<Value> {{ let nx: &[Option<Value>] = &[]; Ok({body}) }}\n");
+    }
+    let vparts: String = (0..parts.len())
+        .map(|c| format!("{c} => match vpart_{c}(self.g.local(), st) {{ Err(e) if e == UNSUPPORTED => None, r => Some(r) }}, "))
+        .collect();
     g.nx = "cx.next";
     g.nx_arg = "&cx.next[..]";
     for (name, a) in [("init", &p.init.body), ("next", &p.next.body)] {
@@ -755,6 +767,7 @@ pub fn generate(l: &Loaded, dir: &Path) -> Result<(), String> {
          fn constraint(&self, i: usize, cx: &mut Cx) -> R<bool> {{ match i {{ {} _ => unreachable!() }} }}\n\
          fn view(&self, cx: &mut Cx) -> R<Value> {{ view(self.g.local(), cx.state) }}\n\
          fn step_prop(&self, i: usize, s: &[Value], t: &[Value]) -> Option<R<bool>> {{ match i {{ {aprops}_ => None }} }}\n\
+         fn view_part(&self, c: usize, st: &[Value]) -> Option<R<Value>> {{ match c {{ {vparts}_ => None }} }}\n\
          }}\n\n\
          fn make(p: &Program) -> Box<dyn Engine + '_> {{ Box::new(E {{ g: G::new(p), p }}) }}\n\n\
          fn main() -> std::process::ExitCode {{ tlc_rs::cli::main(Some(Generated {{ source_hash: {:#x}, make }})) }}\n",
