@@ -127,6 +127,10 @@ spec:
             - { name: FLINT_S3B_NODE_PRINCIPAL, value: {{ include "flint-s3-csi.nodePrincipal" . | quote }} }
             - { name: FLINT_S3B_DEFAULT_LIFETIME_SECS, value: {{ .Values.broker.defaultLifetimeSecs | quote }} }
             - { name: FLINT_S3B_MAX_LIFETIME_SECS, value: {{ .Values.broker.maxLifetimeSecs | quote }} }
+{{- if .Values.broker.registrationTtlSecs }}
+            - { name: FLINT_S3B_REGISTRATION_TTL_SECS, value: {{ .Values.broker.registrationTtlSecs | quote }} }
+{{- end }}
+            - { name: FLINT_S3B_MAX_INFLIGHT_REVIEWS, value: {{ .Values.broker.maxInflightReviews | quote }} }
             - { name: FLINT_S3B_REQUIRE_REGISTRATION, value: {{ .Values.broker.requireRegistration | quote }} }
             # Reported on /v1/status. The registration table is per
             # replica; the plugin's exchange carries its registration and

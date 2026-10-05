@@ -1,0 +1,56 @@
+== MUTATED src/s3csi/node.rs: if allowed.contains(&mode) {  ->  if true || allowed.contains(&mode) {
+       Compiling spdk-csi-driver v1.3.0 (/mnt/nvme/nvme2-moved/flint-hard/spdk-csi-driver)
+    test s3csi::node::tests::identity_modes_default_leaves_ambient_out_and_a_refusal_names_the_knob ... FAILED
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2741 filtered out; finished in 0.00s
+== RESTORED src/s3csi/node.rs
+       Compiling spdk-csi-driver v1.3.0 (/mnt/nvme/nvme2-moved/flint-hard/spdk-csi-driver)
+    test s3csi::node::tests::identity_modes_default_leaves_ambient_out_and_a_refusal_names_the_knob ... ok
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2741 filtered out; finished in 0.00s
+== MUTATED src/s3csi/node.rs: if allow.iter().any(|p| host_matches(&host, p)) {  ->  if true || allow.iter().any(|p| host_matches(&host, p)) {
+       Compiling spdk-csi-driver v1.3.0 (/mnt/nvme/nvme2-moved/flint-hard/spdk-csi-driver)
+    test s3csi::node::tests::endpoint_allow_matches_hosts_and_suffixes_and_empty_admits_any ... FAILED
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2741 filtered out; finished in 0.00s
+== RESTORED src/s3csi/node.rs
+       Compiling spdk-csi-driver v1.3.0 (/mnt/nvme/nvme2-moved/flint-hard/spdk-csi-driver)
+    test s3csi::node::tests::endpoint_allow_matches_hosts_and_suffixes_and_empty_admits_any ... ok
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2741 filtered out; finished in 0.00s
+== MUTATED src/s3csi/broker.rs: .find(|e| now.duration_since(e.at) < ttl && e.reg.nonce == session)  ->  .find(|e| e.reg.nonce == session)
+       Compiling spdk-csi-driver v1.3.0 (/mnt/nvme/nvme2-moved/flint-hard/spdk-csi-driver)
+    test s3csi::broker::tests::a_registration_past_the_ttl_is_not_live_and_a_renewal_restarts_its_clock ... FAILED
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2741 filtered out; finished in 0.02s
+== RESTORED src/s3csi/broker.rs
+       Compiling spdk-csi-driver v1.3.0 (/mnt/nvme/nvme2-moved/flint-hard/spdk-csi-driver)
+    test s3csi::broker::tests::a_registration_past_the_ttl_is_not_live_and_a_renewal_restarts_its_clock ... ok
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2741 filtered out; finished in 0.02s
+== MUTATED src/s3csi/broker.rs: parts.len() == 3  ->  parts.len() >= 1
+       Compiling spdk-csi-driver v1.3.0 (/mnt/nvme/nvme2-moved/flint-hard/spdk-csi-driver)
+    test s3csi::broker::tests::a_token_that_is_not_a_jwt_is_refused_without_a_review ... FAILED
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2741 filtered out; finished in 0.00s
+== RESTORED src/s3csi/broker.rs
+       Compiling spdk-csi-driver v1.3.0 (/mnt/nvme/nvme2-moved/flint-hard/spdk-csi-driver)
+    test s3csi::broker::tests::a_token_that_is_not_a_jwt_is_refused_without_a_review ... ok
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2741 filtered out; finished in 0.02s
+== MUTATED src/s3csi/state.rs:     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;  ->      // mutated: no chmod on the dir
+       Compiling spdk-csi-driver v1.3.0 (/mnt/nvme/nvme2-moved/flint-hard/spdk-csi-driver)
+    test s3csi::state::tests::state_is_born_0600_in_a_0700_dir_and_a_stale_tmp_does_not_widen_it ... FAILED
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2741 filtered out; finished in 0.00s
+== RESTORED src/s3csi/state.rs
+       Compiling spdk-csi-driver v1.3.0 (/mnt/nvme/nvme2-moved/flint-hard/spdk-csi-driver)
+    test s3csi::state::tests::state_is_born_0600_in_a_0700_dir_and_a_stale_tmp_does_not_widen_it ... ok
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2741 filtered out; finished in 0.00s
+== MUTATED src/s3csi/broker.rs: let Ok(_permit) = self.reviews.try_acquire() else {  ->  let Ok(_permit) = Ok::<(), ()>(()) else {
+       Compiling spdk-csi-driver v1.3.0 (/mnt/nvme/nvme2-moved/flint-hard/spdk-csi-driver)
+    test s3csi::broker::tests::in_flight_reviews_are_bounded_and_the_overflow_is_an_outage_not_a_refusal ... FAILED
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2741 filtered out; finished in 0.02s
+== RESTORED src/s3csi/broker.rs
+       Compiling spdk-csi-driver v1.3.0 (/mnt/nvme/nvme2-moved/flint-hard/spdk-csi-driver)
+    test s3csi::broker::tests::in_flight_reviews_are_bounded_and_the_overflow_is_an_outage_not_a_refusal ... ok
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2741 filtered out; finished in 0.02s
+== MUTATIONS DONE 21:04:22
+ M ../crates/flint-s3-worker/src/main.rs
+ M src/s3csi/broker.rs
+ M src/s3csi/fuse.rs
+ M src/s3csi/node.rs
+ M src/s3csi/resolve.rs
+ M src/s3csi/state.rs
+?? ../s3csi/e2e/aws-write-grant.sh

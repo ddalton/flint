@@ -59,7 +59,7 @@ use serde::{Deserialize, Serialize};
 
 /// The launch message (the contract with the node plugin's
 /// `s3csi::fuse`/`s3csi::worker`). Field names are the protocol.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct Launch {
     /// `passthrough` | `lean`.
     pub mode: String,
@@ -70,6 +70,18 @@ pub struct Launch {
     /// Extra environment for the child, layered over this process's.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for Launch {
+    /// Env VALUES may be secrets (the static arm's keys, a lean store's
+    /// key): keys only, and the args redacted as the start-up line is.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Launch")
+            .field("mode", &self.mode)
+            .field("args", &redact(&self.args))
+            .field("env_keys", &self.env.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 /// What we answer on the same socket, once.
@@ -666,6 +678,21 @@ mod tests {
         let back: Launch = serde_json::from_slice(&std::fs::read(&rec).unwrap()).unwrap();
         assert_eq!(back.env["AWS_SECRET_ACCESS_KEY"], "s");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A launch's env carries the syncer's store keys under `static`:
+    /// its Debug names the keys and never a value, and its args go
+    /// through the same redaction as the start-up line.
+    #[test]
+    fn a_launch_debug_prints_env_keys_and_never_a_value() {
+        let l = Launch {
+            mode: "lean".into(),
+            args: vec!["--session-token".into(), "tok-secret".into()],
+            env: BTreeMap::from([("AWS_SECRET_ACCESS_KEY".to_string(), "hunter2-secret".to_string())]),
+        };
+        let d = format!("{l:?}");
+        assert!(d.contains("AWS_SECRET_ACCESS_KEY") && d.contains("--session-token"), "{d}");
+        assert!(!d.contains("hunter2") && !d.contains("tok-secret"), "{d}");
     }
 
     #[test]

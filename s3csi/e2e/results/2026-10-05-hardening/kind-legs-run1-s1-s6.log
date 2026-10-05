@@ -1,0 +1,23 @@
+
+── S1 — the driver is registered, the plugin is Ready, and there is NO webhook
+  ok: CSIDriver s3.csi.chert.us exists
+  ok: CSINode flint-s3csi-control-plane lists s3.csi.chert.us (the registrar did its job, 0s after the plugin came up)
+  ok: DaemonSet numberReady=1
+  ok: zero flint MutatingWebhookConfigurations
+  ok: PRECONDITION: reader is gone while the plugin can still unmount it
+  ok: CONTROL: without the plugin a new pod stays ContainerCreating with a mount event
+  ok: the same pod mounts once the plugin is back
+
+── S6 — an SA not in consumers is refused by name; an absent consumers list denies
+  ok: event names bob and spec.consumers.serviceAccounts
+  ok: the CR exists (the refusal is about the SA, not the CR)
+  ok: absent consumers denies and says so
+  ok: CONTROL: the identical pod under SA trainer is Running
+
+── S38 — the operator's allowlists: identity.mode ambient is refused by name under the chart's default list; a CR whose endpoint is off node.endpointAllow is refused by name; no worker is made for either; both proceed once the lists admit them
+  ok: PRECONDITION: the plugin rolled with the chart's default identityModes and endpointAllow=*.amazonaws.com
+  BAD: no FailedMount naming 'identity.mode ambient is not allowed' on s38-ambient in 180 s: FailedMount: MountVolume.SetUp failed for volume "data" : rpc error: code = NotFound desc = FlintPassthroughMount s3-tenants/pt-ambient does not exist — the pod's volumeAttributes name it, and the C
+  ok: a pod on a CR whose endpoint is off the list is refused, naming the host and the knob: spec.endpoint host "minio.flint-system.svc" is not in node.endpointAllow (FLINT_S3CSI_ENDPOINT_ALLOW: "*.amazonaws.com") 
+  ok: no worker exists for either refused pod: the refusal came before any worker
+  ok: chart restored (ambient listed, no endpoint list)
+  ok: CONTROL: with no endpoint list the same CR mounts and reads

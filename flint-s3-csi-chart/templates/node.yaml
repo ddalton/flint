@@ -188,6 +188,10 @@ spec:
             - { name: FLINT_S3CSI_NODE_TOKEN_FILE, value: "/var/run/secrets/flint-s3/token" }
             - { name: FLINT_S3CSI_CREDS_LIFETIME_SECS, value: {{ .Values.node.credsLifetimeSecs | quote }} }
             - { name: FLINT_S3CSI_REGION, value: {{ .Values.node.region | quote }} }
+            # The operator's allowlists (SECURITY.md §4.15): the identity.mode
+            # values a CR may select, and the hosts a spec.endpoint may name.
+            - { name: FLINT_S3CSI_IDENTITY_MODES, value: {{ .Values.node.identityModes | quote }} }
+            - { name: FLINT_S3CSI_ENDPOINT_ALLOW, value: {{ .Values.node.endpointAllow | quote }} }
             - { name: RUST_LOG, value: {{ .Values.node.logLevel | quote }} }
           # Served by the liveness-probe sidecar (same pod netns): it
           # calls the plugin's CSI Probe over the socket and answers

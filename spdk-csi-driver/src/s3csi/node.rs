@@ -114,6 +114,14 @@ pub struct Config {
     /// `workers.cacheSizeMib`: the cache a sharing CR that names none gets
     /// when the cache is placed.
     pub cache_size_mib: u64,
+    /// `node.identityModes` (FLINT_S3CSI_IDENTITY_MODES): the `identity.mode`
+    /// values a CR may select on this node. `ambient` is the worker's own
+    /// chain — on EC2 the node's instance role — and is not in the default
+    /// list (`DEFAULT_IDENTITY_MODES`; SECURITY.md §4.15).
+    pub identity_modes: Vec<CredentialMode>,
+    /// `node.endpointAllow` (FLINT_S3CSI_ENDPOINT_ALLOW): the hosts a CR's
+    /// `spec.endpoint` may name (`host`, or `*.suffix`); empty = any.
+    pub endpoint_allow: Vec<String>,
 }
 
 impl std::fmt::Debug for Config {
@@ -125,6 +133,8 @@ impl std::fmt::Debug for Config {
             .field("lean_image", &self.lean_image)
             .field("broker", &self.broker.as_ref().map(|b| b.base_url().to_string()))
             .field("creds_lifetime_secs", &self.creds_lifetime_secs)
+            .field("identity_modes", &self.identity_modes)
+            .field("endpoint_allow", &self.endpoint_allow)
             .field("plugin_root", &self.plugin_root)
             .field("cache_host_path", &self.cache_host_path)
             .finish_non_exhaustive()
@@ -224,6 +234,8 @@ impl Config {
             scratch_size: opt("FLINT_S3CSI_SCRATCH_SIZE").unwrap_or_else(|| "1Gi".into()),
             cache_host_path,
             cache_size_mib: opt("FLINT_S3CSI_CACHE_SIZE_MIB").and_then(|v| v.parse().ok()).unwrap_or(4096),
+            identity_modes: parse_identity_modes(&opt("FLINT_S3CSI_IDENTITY_MODES").unwrap_or_else(|| DEFAULT_IDENTITY_MODES.into()))?,
+            endpoint_allow: parse_host_list(&opt("FLINT_S3CSI_ENDPOINT_ALLOW").unwrap_or_default()),
         })
     }
 }
@@ -738,6 +750,14 @@ impl S3Node {
         // Resolve + authorize. The selector names a CR in the POD'S namespace.
         let resolved = resolve::fetch(&self.client, &pr.selector, &pr.pod_namespace).await.map_err(refusal_status)?;
         let policy = resolved.policy().map_err(refusal_status)?;
+        // The operator's say over the CR author's choices (SECURITY.md
+        // §4.15): which credential modes a tenant may select, and which
+        // hosts a mount may be sent to. Refused here, before any worker
+        // exists, by name.
+        identity_mode_allowed(policy.credential_mode, &self.cfg.identity_modes).map_err(Status::failed_precondition)?;
+        if let Some(ep) = resolved.endpoint() {
+            endpoint_allowed(ep, &self.cfg.endpoint_allow).map_err(Status::failed_precondition)?;
+        }
         let kind = match resolved {
             Resolved::Passthrough { .. } => "FlintPassthroughMount",
             Resolved::Lean { .. } => "FlintLeanWorkspace",
@@ -864,6 +884,7 @@ impl S3Node {
                         )));
                     }
                     broker.register(&self.registration_of(st)).await.map_err(Status::unavailable)?;
+                    st.registered_unix = Some(chrono::Utc::now().timestamp());
                     return Ok(creds::web_identity_arm(&role_arn, broker.base_url(), &st.nonce, &token.token, &self.cfg.region));
                 }
                 // ONE request: the registration rides with the exchange, so
@@ -873,6 +894,7 @@ impl S3Node {
                     .await
                     .map_err(|e| exchange_status(&st.cr, e))?;
                 st.creds_expiration = Some(c.expiration.clone());
+                st.registered_unix = Some(chrono::Utc::now().timestamp());
                 let mut m = creds::door_arm(&st.nonce);
                 m.files.push(creds::CommFile { name: creds::CREDS_FILE.into(), bytes: creds::creds_json(&c), mode: 0o600 });
                 Ok(m)
@@ -985,6 +1007,7 @@ impl S3Node {
             attempted_generation: None,
             sts_refusal: None,
             creds_fingerprint: None,
+            registered_unix: None,
             read_only,
             owner_uid,
             owner_gid,
@@ -1187,6 +1210,7 @@ impl S3Node {
             attempted_generation: None,
             sts_refusal: None,
             creds_fingerprint: None,
+            registered_unix: None,
             read_only: true,
             owner_uid,
             owner_gid,
@@ -1626,11 +1650,32 @@ impl S3Node {
             // (docs/plans/passthrough-sts-secret-mode.md).
             match (CredentialMode::parse(&st.credential_mode).unwrap_or(CredentialMode::Ambient), pr.token.as_ref()) {
                 (CredentialMode::WebIdentity, Some(token)) => {
-                    if st.token_expiration.as_deref() != Some(token.expiration.as_str()) {
+                    let rotated = st.token_expiration.as_deref() != Some(token.expiration.as_str());
+                    if rotated {
                         let f = creds::CommFile { name: creds::TOKEN_FILE.into(), bytes: token.token.as_bytes().to_vec(), mode: 0o600 };
                         if creds::write_files(&comm, &[f], worker_owner(&st)).is_ok() {
                             st.token_expiration = Some(token.expiration.clone());
                             changed = true;
+                        }
+                    }
+                    // The broker forgets a registration not renewed within
+                    // its TTL (SECURITY.md §4.13), and this arm's exchange —
+                    // the worker's own SDK, the plain form — cannot carry
+                    // one: re-register on every rotation and at least every
+                    // WEB_IDENTITY_REREGISTER_SECS. A register that fails is
+                    // retried next republish, and the entry it would have
+                    // renewed is live for the rest of the TTL.
+                    let now = chrono::Utc::now().timestamp();
+                    let due = st.registered_unix.map(|t| now - t >= WEB_IDENTITY_REREGISTER_SECS).unwrap_or(true);
+                    if rotated || due {
+                        if let Some(broker) = &self.cfg.broker {
+                            match broker.register(&self.registration_of(&st)).await {
+                                Ok(()) => {
+                                    st.registered_unix = Some(now);
+                                    changed = true;
+                                }
+                                Err(e) => tracing::warn!(volume = %st.volume_id, "re-register (webIdentity): {e}"),
+                            }
                         }
                     }
                 }
@@ -1665,6 +1710,7 @@ impl S3Node {
                                     let f = creds::CommFile { name: creds::CREDS_FILE.into(), bytes: creds::creds_json(&c), mode: 0o600 };
                                     if creds::write_files(&comm, &[f], worker_owner(&st)).is_ok() {
                                         st.creds_expiration = Some(c.expiration);
+                                        st.registered_unix = Some(chrono::Utc::now().timestamp());
                                         st.token_expiration = Some(token.expiration.clone());
                                         changed = true;
                                     }
@@ -1998,6 +2044,7 @@ impl S3Node {
             attempted_generation: None,
             sts_refusal: None,
             creds_fingerprint: None,
+            registered_unix: None,
             // The decided access (per-user access design §4.1): the tenant
             // bind below, the syncer's mode and the broker's credential all
             // follow it.
@@ -2911,6 +2958,107 @@ pub fn published_action(st: &VolumeState, target_mounted: bool, src_mounted: boo
     PublishedAction::StartOver
 }
 
+/// The `identity.mode` values a CR may select when the operator says
+/// nothing (FLINT_S3CSI_IDENTITY_MODES, chart `node.identityModes`).
+/// `ambient` is left out: it is the worker's own chain — on EC2 the
+/// node's instance role, read-write to whatever that role reaches — and a
+/// CR author naming it would be choosing the node's identity for a
+/// tenant pod (SECURITY.md §4.15).
+pub const DEFAULT_IDENTITY_MODES: &str = "broker webIdentity static stsSecret";
+
+/// A `webIdentity` publish re-registers at least this often. The broker
+/// forgets a registration not renewed within its TTL
+/// (`broker::REGISTRATION_TTL_FLOOR_SECS` at the least, §4.13), and this
+/// arm's exchange — the worker's own SDK, the plain STS form — cannot
+/// carry one the way the broker arm's does.
+pub const WEB_IDENTITY_REREGISTER_SECS: i64 = 1800;
+
+/// Words separated by commas or whitespace, in order, deduplicated.
+fn words(s: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for w in s.split(|c: char| c == ',' || c.is_whitespace()).filter(|w| !w.is_empty()) {
+        if !out.iter().any(|x| x == w) {
+            out.push(w.to_string());
+        }
+    }
+    out
+}
+
+/// `FLINT_S3CSI_IDENTITY_MODES`: every word a `CredentialMode`, a misspelt
+/// one a startup error by name, an empty list an error too (a node that
+/// admits no mode publishes nothing, and should say so at start).
+pub fn parse_identity_modes(s: &str) -> Result<Vec<CredentialMode>, String> {
+    let mut out = Vec::new();
+    for w in words(s) {
+        let m = CredentialMode::parse(&w).map_err(|e| format!("FLINT_S3CSI_IDENTITY_MODES (node.identityModes): {e}"))?;
+        if !out.contains(&m) {
+            out.push(m);
+        }
+    }
+    if out.is_empty() {
+        return Err("FLINT_S3CSI_IDENTITY_MODES (node.identityModes) names no mode".into());
+    }
+    Ok(out)
+}
+
+pub fn identity_mode_allowed(mode: CredentialMode, allowed: &[CredentialMode]) -> Result<(), String> {
+    if allowed.contains(&mode) {
+        return Ok(());
+    }
+    Err(format!(
+        "identity.mode {} is not allowed on this node driver: node.identityModes (FLINT_S3CSI_IDENTITY_MODES) is \"{}\" — \
+         use one of those, or have the operator add it",
+        mode.as_str(),
+        allowed.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(" ")
+    ))
+}
+
+/// `FLINT_S3CSI_ENDPOINT_ALLOW`: hosts, lowercased.
+pub fn parse_host_list(s: &str) -> Vec<String> {
+    words(s).into_iter().map(|w| w.to_ascii_lowercase()).collect()
+}
+
+/// The host of an endpoint URL, lowercased: scheme and userinfo off the
+/// front, port and path off the back; an IPv6 literal keeps its brackets.
+pub fn endpoint_host(url: &str) -> Option<String> {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let hostport = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    let host = match hostport.strip_prefix('[').and_then(|h| h.find(']')) {
+        Some(end) => &hostport[..end + 2],
+        None => hostport.split(':').next().unwrap_or(""),
+    };
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+/// `*.suffix` matches a host with at least one label before the suffix,
+/// never the bare suffix; anything else must be the host itself.
+fn host_matches(host: &str, pattern: &str) -> bool {
+    match pattern.strip_prefix("*.") {
+        Some(suffix) => host.len() > suffix.len() + 1 && host.ends_with(suffix) && host.as_bytes()[host.len() - suffix.len() - 1] == b'.',
+        None => host == pattern,
+    }
+}
+
+/// An empty list admits any endpoint (the chart's default: the endpoint
+/// is the CR author's own choice, and the credential a worker carries is
+/// already bounded to its CR); a non-empty one is where a mount may be
+/// sent, and nowhere else.
+pub fn endpoint_allowed(url: &str, allow: &[String]) -> Result<(), String> {
+    if allow.is_empty() {
+        return Ok(());
+    }
+    let host = endpoint_host(url).ok_or_else(|| format!("spec.endpoint {url:?} names no host"))?;
+    if allow.iter().any(|p| host_matches(&host, p)) {
+        return Ok(());
+    }
+    Err(format!(
+        "spec.endpoint host {host:?} is not in node.endpointAllow (FLINT_S3CSI_ENDPOINT_ALLOW: \"{}\") — this node driver sends \
+         mounts only to those hosts",
+        allow.join(" ")
+    ))
+}
+
 fn refusal_status(r: Refusal) -> Status {
     match r {
         Refusal::NotFound(m) => Status::not_found(m),
@@ -3151,6 +3299,62 @@ mod tests {
         assert_eq!(refusal_status(Refusal::Transient("x".into())).code(), tonic::Code::Unavailable);
     }
 
+    /// The operator's allowlist of identity modes: the default leaves
+    /// `ambient` out, commas or spaces separate, duplicates fold, a
+    /// misspelt mode and an empty list are errors by name, and a refusal
+    /// names the mode, the knob and the list.
+    #[test]
+    fn identity_modes_default_leaves_ambient_out_and_a_refusal_names_the_knob() {
+        let d = parse_identity_modes(DEFAULT_IDENTITY_MODES).unwrap();
+        assert_eq!(d, vec![CredentialMode::Broker, CredentialMode::WebIdentity, CredentialMode::Static, CredentialMode::StsSecret]);
+        for m in &d {
+            assert!(identity_mode_allowed(*m, &d).is_ok(), "{m:?}");
+        }
+        let e = identity_mode_allowed(CredentialMode::Ambient, &d).unwrap_err();
+        assert!(e.contains("identity.mode ambient") && e.contains("node.identityModes") && e.contains("FLINT_S3CSI_IDENTITY_MODES"), "{e}");
+        assert!(e.contains("broker webIdentity static stsSecret"), "the list is named: {e}");
+        assert_eq!(parse_identity_modes("ambient, broker,broker").unwrap(), vec![CredentialMode::Ambient, CredentialMode::Broker]);
+        assert!(identity_mode_allowed(CredentialMode::Ambient, &parse_identity_modes("broker ambient").unwrap()).is_ok());
+        assert!(parse_identity_modes("broker knox").unwrap_err().contains("knox"));
+        assert!(parse_identity_modes(" , ").unwrap_err().contains("names no mode"));
+    }
+
+    /// `spec.endpoint` against the operator's host list: empty admits any;
+    /// a host matches itself or a `*.suffix`, never the bare suffix nor a
+    /// longer tail; scheme, userinfo, port, path and case do not count.
+    #[test]
+    fn endpoint_allow_matches_hosts_and_suffixes_and_empty_admits_any() {
+        assert_eq!(endpoint_host("http://minio.flint-system.svc:9000").as_deref(), Some("minio.flint-system.svc"));
+        assert_eq!(endpoint_host("https://User:pw@S3.US-West-1.AmazonAWS.com/x?y#z").as_deref(), Some("s3.us-west-1.amazonaws.com"));
+        assert_eq!(endpoint_host("http://[::1]:9000/").as_deref(), Some("[::1]"));
+        assert_eq!(endpoint_host("minio:9000").as_deref(), Some("minio"));
+        assert_eq!(endpoint_host("http://"), None);
+        let allow = parse_host_list("*.amazonaws.com, minio.flint-system.svc");
+        assert_eq!(allow, vec!["*.amazonaws.com".to_string(), "minio.flint-system.svc".to_string()]);
+        assert!(endpoint_allowed("https://s3.us-west-1.amazonaws.com", &allow).is_ok());
+        assert!(endpoint_allowed("http://minio.flint-system.svc:9000/", &allow).is_ok());
+        assert!(endpoint_allowed("http://MINIO.flint-system.svc:9000", &allow).is_ok(), "case does not count");
+        for bad in [
+            "https://amazonaws.com",
+            "https://s3.amazonaws.com.evil.example",
+            "http://minio.flint-system.svc.evil:9000",
+            "http://rustfs.flint-system.svc:9000",
+            "http://xminio.flint-system.svc:9000",
+        ] {
+            let e = endpoint_allowed(bad, &allow).unwrap_err();
+            assert!(e.contains("node.endpointAllow") && e.contains("FLINT_S3CSI_ENDPOINT_ALLOW"), "{bad}: {e}");
+        }
+        assert!(endpoint_allowed("http://anything.example", &[]).is_ok(), "an empty list admits any endpoint");
+        assert!(endpoint_allowed("http://", &allow).unwrap_err().contains("names no host"));
+    }
+
+    /// The webIdentity re-register period sits under half the broker's
+    /// TTL floor, so an entry is renewed before it can lapse.
+    #[test]
+    fn web_identity_reregisters_within_half_the_table_ttl_floor() {
+        assert!(2 * WEB_IDENTITY_REREGISTER_SECS as u64 <= crate::s3csi::broker::REGISTRATION_TTL_FLOOR_SECS);
+    }
+
     #[test]
     fn config_requires_the_image_and_node_name() {
         std::env::remove_var("FLINT_S3CSI_NODE_NAME");
@@ -3171,6 +3375,18 @@ mod tests {
         assert_eq!(c.creds_lifetime_secs, 900);
         assert!(c.broker.is_none());
         assert_eq!(c.quiesce_secs, 30, "F72: the mounter gets 30 s to exit on its own by default");
+        assert_eq!(c.identity_modes, parse_identity_modes(DEFAULT_IDENTITY_MODES).unwrap());
+        assert!(!c.identity_modes.contains(&CredentialMode::Ambient), "ambient is not in the default list");
+        assert!(c.endpoint_allow.is_empty(), "no endpoint list ⇒ any endpoint");
+        std::env::set_var("FLINT_S3CSI_IDENTITY_MODES", "broker knox");
+        assert!(Config::from_env().unwrap_err().contains("knox"), "a misspelt mode is a startup error by name");
+        std::env::set_var("FLINT_S3CSI_IDENTITY_MODES", "ambient");
+        std::env::set_var("FLINT_S3CSI_ENDPOINT_ALLOW", "*.amazonaws.com, MINIO.flint-system.svc");
+        let c = Config::from_env().unwrap();
+        assert_eq!(c.identity_modes, vec![CredentialMode::Ambient]);
+        assert_eq!(c.endpoint_allow, vec!["*.amazonaws.com".to_string(), "minio.flint-system.svc".to_string()]);
+        std::env::remove_var("FLINT_S3CSI_IDENTITY_MODES");
+        std::env::remove_var("FLINT_S3CSI_ENDPOINT_ALLOW");
         std::env::remove_var("FLINT_S3CSI_NODE_NAME");
         std::env::remove_var("FLINT_S3CSI_PASSTHROUGH_IMAGE");
     }
@@ -3241,6 +3457,7 @@ mod tests {
             attempted_generation: None,
             sts_refusal: None,
             creds_fingerprint: None,
+            registered_unix: None,
             read_only: false,
             owner_uid: 1001,
             owner_gid: 1001,

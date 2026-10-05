@@ -1,0 +1,34 @@
+work dir: /home/ddalton/tmp/aws-wg/ctl; bucket flint-access-drill-20261005 (us-west-1); role arn:aws:iam::204754237123:role/flint-acc-role-20261005
+unnarrowed keys: arn:aws:iam::204754237123:user/flint-acc-rw-20261005
+POLICY OVERRIDDEN from /home/ddalton/tmp/aws-wg/weak.json — this run is a control, not a result
+policy (491 bytes): {"Statement": [{"Action": ["s3:GetObject", "s3:GetObjectVersion", "s3:DeleteObject", "s3:DeleteObjectVersion", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"], "Effect": "Allow", "Resource": "arn:aws:s3:::flint-access-drill-20261005/team/proj1/*"}, {"Action": ["s3:ListBucket", "s3:ListBucketVersions"], "Condition": {"StringLike": {"s3:prefix": ["team/proj1", "team/proj1/*"]}}, "Effect": "Allow", "Resource": "arn:aws:s3:::flint-access-drill-20261005"}], "Version": "2012-10-17"}
+PASS A0 AWS STS accepted the broker's write policy (PackedPolicySize 25% of the limit; arn:aws:sts::204754237123:assumed-role/flint-acc-role-20261005/writer)
+PASS A0b the packed policy is at most half the cap (25%): room for a longer bucket and prefix
+PASS A1 checkout of the empty prefix on the write keys
+FAIL A2 the first barrier failed: flint-sync: could not ask this store whether it enforces conditional writes (cannot write the probe object: not authorized: put_whole: 403 AccessDenied) — the probe could not write its own object. Continuing UNVERIFIED, exactly as before this check existed; the verb below will report the underlying error itself flint-sync: store: not authorized: put_whole: 403 AccessDenied 
+FAIL A3 the second barrier failed: flint-sync: store: not authorized: put_whole: 403 AccessDenied
+FAIL A3 the third barrier failed: flint-sync: store: not authorized: put_whole: 403 AccessDenied
+FAIL A4 the writer was DENIED something it asked for — an action the policy misses:
+flint-sync: could not ask this store whether it enforces conditional writes (cannot write the probe object: not authorized: put_whole: 403 AccessDenied) — the probe could not write its own object. Continuing UNVERIFIED, exactly as before this check existed; the verb below will report the underlying error itself
+flint-sync: store: not authorized: put_whole: 403 AccessDenied
+flint-sync: could not ask this store whether it enforces conditional writes (cannot write the probe object: not authorized: put_whole: 403 AccessDenied) — the probe could not write its own object. Continuing UNVERIFIED, exactly as before this check existed; the verb below will report the underlying error itself
+flint-sync: store: not authorized: put_whole: 403 AccessDenied
+flint-sync: could not ask this store whether it enforces conditional writes (cannot write the probe object: not authorized: put_whole: 403 AccessDenied) — the probe could not write its own object. Continuing UNVERIFIED, exactly as before this check existed; the verb below will report the underlying error itself
+FAIL A5 the reader did not see the writes (a.txt='', README absent, big.bin absent; see /home/ddalton/tmp/aws-wg/ctl/r-checkout.log)
+PASS B1 PUT to another prefix: AccessDenied
+PASS B2 GET of another prefix: AccessDenied
+PASS B3 DELETE in another prefix: AccessDenied
+PASS B4 LIST of another prefix: AccessDenied
+PASS B5 LIST of the whole bucket (no prefix): AccessDenied
+PASS B-control the unnarrowed keys read and write the other prefix (the narrowing is the session policy's)
+FAIL C1 ListBucket under the prefix failed or saw nothing: None	None	team/proj1/	None
+PASS C1b HeadBucket without a prefix: 403 (the listing condition holds; mount-s3 probes with ListObjectsV2 under its prefix, C1)
+FAIL C2 put/head/get/delete under the prefix failed: aws: [ERROR]: An error occurred (AccessDenied) when calling the PutObject operation: User: arn:aws:sts::204754237123:assumed-role/flint-acc-role-20261005/writer is not authorized to perform: s3:PutObject on resource: "arn:aws:s3:::flint-access-drill-20261005/team/proj1/mount-s3.txt" because no session policy allows the s3:PutObject action
+FAIL C3 multipart under the prefix failed: aws: [ERROR]: An error occurred (AccessDenied) when calling the CreateMultipartUpload operation: User: arn:aws:sts::204754237123:assumed-role/flint-acc-role-20261005/writer is not authorized to perform: s3:PutObject on resource: "arn:aws:s3:::flint-access-drill-20261005/team/proj1/mpu.bin" because no session policy allows the s3:PutObject action
+PASS C4 a multipart upload in another prefix: AccessDenied
+PASS C5 ListBucketVersions under the prefix, GetObjectVersion of the deleted object's version, DeleteObjectVersion of its marker
+PASS D1 GetBucketVersioning: AccessDenied
+PASS D2 ListMultipartUploads: AccessDenied
+PASS D3 GetLifecycleConfiguration: AccessDenied
+PASS D-control the unnarrowed keys do both (the denial is the session policy's)
+RESULT pass=16 fail=8

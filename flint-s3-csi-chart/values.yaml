@@ -121,6 +121,24 @@ node:
   # (FLINT_S3CSI_REGION).
   region: us-east-1
 
+  # The identity.mode values a CR may select on this cluster
+  # (FLINT_S3CSI_IDENTITY_MODES; space- or comma-separated). The default
+  # leaves `ambient` out: it is the worker's OWN chain — on EC2 the node's
+  # instance role, read-write to whatever that role reaches — and a CR
+  # author naming it would be choosing the node's identity for a tenant
+  # pod (s3csi/SECURITY.md §4.15). Add it for a cluster whose workers'
+  # ambient identity is meant for every tenant. A CR naming a mode off
+  # this list fails its publish with a message naming this knob, before
+  # any worker is made.
+  identityModes: "broker webIdentity static stsSecret"
+
+  # The hosts a CR's spec.endpoint may name (FLINT_S3CSI_ENDPOINT_ALLOW;
+  # space- or comma-separated; a host, or `*.suffix`). Empty ⇒ any: the
+  # endpoint is the CR author's own choice and the credential a worker
+  # carries is already bounded to its CR. Set it to confine worker egress
+  # to known stores, e.g. "*.amazonaws.com minio.flint-system.svc".
+  endpointAllow: ""
+
   # Above every tenant workload: a kubelet DiskPressure eviction of this
   # pod would strand every mounted pod on the node with nobody to
   # unpublish it (§6.2). Same class the block CSI node uses.
@@ -545,6 +563,19 @@ broker:
   # and defaultLifetimeSecs when the request names none.
   defaultLifetimeSecs: 900
   maxLifetimeSecs: 3600
+
+  # How long a publish registration lives in a replica's table without
+  # being renewed (FLINT_S3B_REGISTRATION_TTL_SECS). Empty ⇒ twice
+  # maxLifetimeSecs, never under 7200. The plugin's exchange renews its
+  # registration on every refresh; a deregister reaches one replica and
+  # the other forgets within this (s3csi/SECURITY.md §4.13).
+  registrationTtlSecs: ""
+
+  # TokenReviews in flight at once (FLINT_S3B_MAX_INFLIGHT_REVIEWS). The
+  # exchange is unauthenticated until the review; past this an exchange is
+  # answered 503 — an outage the plugin keeps its key through — and the
+  # API server is not asked.
+  maxInflightReviews: 64
 
   # The broker mints only for publishes the node plugin registered
   # first (FLINT_S3B_REQUIRE_REGISTRATION). `false` exists for rigs that

@@ -848,7 +848,10 @@ uploads, so the no-write property is not resting on the guard alone.
 - **D16 `AccessIsolation` is `Unknown` under the broker.** The operator
   cannot see the broker's backend, and the chart's default backend is
   `static` without a read key, so `True` would be false on a default
-  install. The broker reports its own `readEnforcement`.
+  install. The broker reports its own `readEnforcement`. AWS's own evaluator agrees (2026-10-05): `s3csi/e2e/aws-write-grant.sh`
+  ran the write-grant drill against AWS STS and S3 on a bucket-wide role,
+  22/0, and 16/8 with PutObject removed, AWS naming the session policy
+  in its denial (`s3csi/e2e/results/2026-10-05-hardening/`).
 
 **Verified.**
 

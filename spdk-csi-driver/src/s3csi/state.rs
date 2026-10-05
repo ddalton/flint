@@ -78,6 +78,13 @@ pub struct VolumeState {
     /// 2026-10-03; then the judgement is generation and expiration only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creds_fingerprint: Option<String>,
+    /// When this volume's publish was last registered at the broker (unix
+    /// seconds): by the exchange that carried it, or by `register`. The
+    /// broker forgets an entry not renewed within its TTL; `webIdentity`,
+    /// whose exchange cannot carry one, re-registers from this
+    /// (`node::WEB_IDENTITY_REREGISTER_SECS`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registered_unix: Option<i64>,
     pub read_only: bool,
     pub owner_uid: u32,
     pub owner_gid: u32,
@@ -125,6 +132,32 @@ pub struct VolumeState {
 /// everything under the plugin directory; 0600 regardless.
 pub const TOKEN_FILE: &str = "token";
 
+/// A file under the plugin's own directory — `state.json` holds the
+/// door's nonce, `token` the pod-bound token — born 0600 in a directory
+/// made 0700, and renamed into place. Created AT its mode rather than
+/// created and chmod'ed (the gap was readable under the umask), and a
+/// stale tmp from a crash is removed first so it cannot carry a wider
+/// mode into the rename: the same shape as `creds::write_files`
+/// (s3csi/SECURITY.md §4.6, §4.15).
+fn write_private(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    std::fs::create_dir_all(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    let tmp = dir.join(format!("{name}.tmp"));
+    match std::fs::remove_file(&tmp) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        f.write_all(bytes)?;
+    }
+    // The umask may have narrowed it further; set it exactly.
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::rename(tmp, dir.join(name))
+}
+
 /// Write the token if it differs from what is on disk. `Ok(true)` when
 /// it was written.
 pub fn save_token_if_changed(dir: &Path, token: &str) -> std::io::Result<bool> {
@@ -132,11 +165,7 @@ pub fn save_token_if_changed(dir: &Path, token: &str) -> std::io::Result<bool> {
     if std::fs::read_to_string(&p).map(|t| t == token).unwrap_or(false) {
         return Ok(false);
     }
-    std::fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!("{TOKEN_FILE}.tmp"));
-    std::fs::write(&tmp, token)?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-    std::fs::rename(tmp, p)?;
+    write_private(dir, TOKEN_FILE, token.as_bytes())?;
     Ok(true)
 }
 
@@ -189,12 +218,9 @@ impl VolumeState {
         }
     }
 
-    /// Atomic: write `state.json.tmp`, rename over.
+    /// Atomic: write `state.json.tmp` (0600, in a 0700 dir), rename over.
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(dir)?;
-        let tmp = dir.join("state.json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
-        std::fs::rename(tmp, Self::path(dir))
+        write_private(dir, "state.json", &serde_json::to_vec_pretty(self)?)
     }
 
     /// Every `volumes/*/state.json` under the plugin root, for adoption.
@@ -304,12 +330,9 @@ impl SharedMount {
         }
     }
 
-    /// Atomic: write `state.json.tmp`, rename over.
+    /// Atomic: write `state.json.tmp` (0600, in a 0700 dir), rename over.
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(dir)?;
-        let tmp = dir.join("state.json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
-        std::fs::rename(tmp, Self::path(dir))
+        write_private(dir, "state.json", &serde_json::to_vec_pretty(self)?)
     }
 
     /// Every `shared/*/state.json` under the plugin root, for adoption.
@@ -385,6 +408,7 @@ mod tests {
             attempted_generation: None,
             sts_refusal: None,
             creds_fingerprint: None,
+            registered_unix: None,
             read_only: false,
             owner_uid: 1001,
             owner_gid: 1001,
@@ -458,6 +482,7 @@ mod tests {
             attempted_generation: None,
             sts_refusal: None,
             creds_fingerprint: None,
+            registered_unix: None,
             read_only: false,
             owner_uid: 1001,
             owner_gid: 1001,
@@ -487,7 +512,48 @@ mod tests {
         assert_eq!(load_token(&d).as_deref(), Some("eyJ.b"));
         let mode = std::fs::metadata(d.join(TOKEN_FILE)).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+        assert_eq!(std::fs::metadata(&d).unwrap().permissions().mode() & 0o777, 0o700, "the volume dir is 0700");
         assert!(!d.join(format!("{TOKEN_FILE}.tmp")).exists());
+    }
+
+    /// `state.json` holds the door's nonce: born 0600 in a 0700 directory,
+    /// and a stale tmp a crash left world-readable is removed rather than
+    /// inherited with its mode (SECURITY.md §4.15). The shared record the
+    /// same.
+    #[test]
+    fn state_is_born_0600_in_a_0700_dir_and_a_stale_tmp_does_not_widen_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let d = volume_dir(root.path(), "csi-1");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let tmp = d.join("state.json.tmp");
+        std::fs::write(&tmp, b"stale").unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let s = VolumeState::load(&volume_dir(root.path(), "none")).unwrap();
+        assert!(s.is_none());
+        let mut st: VolumeState = serde_json::from_value(serde_json::json!({
+            "version": 1, "volumeId": "csi-1", "mode": "passthrough", "cr": "datasets",
+            "tenant": {"namespace": "t", "pod": "p", "pod_uid": "u", "service_account": "s"},
+            "targetPath": "/t", "src": "/s", "workerNamespace": "flint-workers", "workerName": "s3w-x",
+            "phase": "published", "credentialMode": "broker", "nonce": "the-door-token",
+            "readOnly": false, "ownerUid": 1001, "ownerGid": 1001
+        }))
+        .unwrap();
+        st.registered_unix = Some(1_700_000_000);
+        st.save(&d).unwrap();
+        let p = VolumeState::path(&d);
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600, "state.json is 0600");
+        assert_eq!(std::fs::metadata(&d).unwrap().permissions().mode() & 0o777, 0o700, "the dir was narrowed to 0700");
+        assert!(!tmp.exists(), "the stale tmp is gone, not renamed over");
+        let back = VolumeState::load(&d).unwrap().unwrap();
+        assert_eq!(back.nonce, "the-door-token");
+        assert_eq!(back.registered_unix, Some(1_700_000_000));
+        // A record written before the field existed loads with none.
+        let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        v.as_object_mut().unwrap().remove("registeredUnix");
+        std::fs::write(&p, serde_json::to_vec(&v).unwrap()).unwrap();
+        assert_eq!(VolumeState::load(&d).unwrap().unwrap().registered_unix, None);
     }
 }
 

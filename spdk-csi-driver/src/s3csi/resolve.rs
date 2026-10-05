@@ -47,6 +47,15 @@ impl Refusal {
 }
 
 impl Resolved {
+    /// The CR's `spec.endpoint`, if it names one — what the operator's
+    /// `node.endpointAllow` is checked against before any worker exists.
+    pub fn endpoint(&self) -> Option<&str> {
+        match self {
+            Resolved::Passthrough { spec } => spec.endpoint.as_deref(),
+            Resolved::Lean { spec, .. } => spec.endpoint.as_deref(),
+        }
+    }
+
     pub fn policy(&self) -> Result<Policy, Refusal> {
         let (consumers, identity) = match self {
             Resolved::Passthrough { spec } => (spec.consumers.clone(), spec.identity.clone()),

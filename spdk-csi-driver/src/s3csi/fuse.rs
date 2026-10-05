@@ -30,13 +30,24 @@ pub const FUSE_DEV: &str = "/dev/fuse";
 pub const FUSE_FD_PLACEHOLDER: &str = "{FUSE_FD}";
 
 /// The launch message (the worker crate's `Launch`; JSON is the contract).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct Launch {
     pub mode: String,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for Launch {
+    /// Env VALUES may be secrets (the static arm's keys): keys only.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Launch")
+            .field("mode", &self.mode)
+            .field("args", &self.args)
+            .field("env_keys", &self.env.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -373,6 +384,19 @@ pub async fn wait_ready(src: &Path, deadline: Duration) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A launch's env may carry a secret (the static arm's keys): its
+    /// Debug names the keys and never a value.
+    #[test]
+    fn a_launch_debug_prints_env_keys_and_never_a_value() {
+        let l = Launch {
+            mode: "passthrough".into(),
+            args: vec!["b".into()],
+            env: BTreeMap::from([("AWS_SECRET_ACCESS_KEY".to_string(), "hunter2-secret".to_string())]),
+        };
+        let d = format!("{l:?}");
+        assert!(d.contains("AWS_SECRET_ACCESS_KEY") && d.contains("passthrough") && !d.contains("hunter2"), "{d}");
+    }
 
     /// Only ENOTCONN is death. A probe that timed out — what a mounter
     /// whose FUSE threads are all busy serving reads gives (S34) — and

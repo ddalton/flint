@@ -1,0 +1,27 @@
+work dir: /home/ddalton/tmp/aws-wg/run1; bucket flint-access-drill-20261005 (us-west-1); role arn:aws:iam::204754237123:role/flint-acc-role-20261005
+unnarrowed keys: arn:aws:iam::204754237123:user/flint-acc-rw-20261005
+policy (481 bytes): {"Statement":[{"Action":["s3:GetObject","s3:GetObjectVersion","s3:PutObject","s3:DeleteObject","s3:DeleteObjectVersion","s3:AbortMultipartUpload","s3:ListMultipartUploadParts"],"Effect":"Allow","Resource":"arn:aws:s3:::flint-access-drill-20261005/team/proj1/*"},{"Action":["s3:ListBucket","s3:ListBucketVersions"],"Condition":{"StringLike":{"s3:prefix":["team/proj1","team/proj1/*"]}},"Effect":"Allow","Resource":"arn:aws:s3:::flint-access-drill-20261005"}],"Version":"2012-10-17"}
+PASS A0 AWS STS accepted the broker's write policy (PackedPolicySize 25% of the limit; arn:aws:sts::204754237123:assumed-role/flint-acc-role-20261005/writer)
+PASS A0b the packed policy is at most half the cap (25%): room for a longer bucket and prefix
+PASS A1 checkout of the empty prefix on the write keys
+FAIL A2 the first barrier failed: flint-sync: store: store: put_whole: dispatch failure 
+PASS A4 the writer was denied nothing it asked for
+PASS A5 a reader on the unnarrowed keys checked out the edit, the delete and the 20 MiB file byte-identical
+PASS B1 PUT to another prefix: AccessDenied
+PASS B2 GET of another prefix: AccessDenied
+PASS B3 DELETE in another prefix: AccessDenied
+PASS B4 LIST of another prefix: AccessDenied
+PASS B5 LIST of the whole bucket (no prefix): AccessDenied
+PASS B-control the unnarrowed keys read and write the other prefix (the narrowing is the session policy's)
+PASS C1 ListBucket under the prefix lists the writer's objects
+FAIL C1b HeadBucket refused — mount-s3 would fail at startup: 
+aws: [ERROR]: An error occurred (403) when calling the HeadBucket operation: Forbidden
+PASS C2 PutObject, HeadObject, GetObject and DeleteObject under the prefix on the write keys
+PASS C3 a multipart upload under the prefix: created, a part uploaded, parts listed, aborted
+PASS C4 a multipart upload in another prefix: AccessDenied
+FAIL C5 the versioned verbs under the prefix failed (version=None marker=None): 
+PASS D1 GetBucketVersioning: AccessDenied
+PASS D2 ListMultipartUploads: AccessDenied
+PASS D3 GetLifecycleConfiguration: AccessDenied
+PASS D-control the unnarrowed keys do both (the denial is the session policy's)
+RESULT pass=19 fail=3

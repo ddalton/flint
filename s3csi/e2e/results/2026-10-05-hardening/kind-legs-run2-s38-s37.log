@@ -1,0 +1,25 @@
+
+── S38 — the operator's allowlists: identity.mode ambient is refused by name under the chart's default list; a CR whose endpoint is off node.endpointAllow is refused by name; no worker is made for either; both proceed once the lists admit them
+  ok: PRECONDITION: the plugin rolled with the chart's default identityModes and endpointAllow=*.amazonaws.com
+  ok: the ambient CR's pod is refused, naming the mode
+  ok: …and the knob: node.identityModes (FLINT_S3CSI_IDENTITY_MODES) is "broker webIdentity static stsSecret" 
+  ok: a pod on a CR whose endpoint is off the list is refused, naming the host and the knob: spec.endpoint host "minio.flint-system.svc" is not in node.endpointAllow (FLINT_S3CSI_ENDPOINT_ALLOW: "*.amazonaws.com") 
+  ok: no worker exists for either refused pod: the refusal came before any worker
+  ok: chart restored (ambient listed, no endpoint list)
+  ok: CONTROL: with no endpoint list the same CR mounts and reads
+  ok: CONTROL: with ambient listed the allowlist no longer refuses the ambient CR (pod Pending; FailedMount: MountVolume.SetUp failed for volume "data" : rpc error: code = Unavailable desc = mounter did not)
+
+── S37 — two broker replicas: tenants refreshing on every republish for 300 s see zero 'no live publish registration' refusals and zero CredentialRefreshFailed, every door's expiration moves, and both replicas issued
+  ok: PRECONDITION: two broker replicas Running (after 0s)
+  ok: PRECONDITION: 8/8 tenants Running on flint-s3csi-control-plane
+  NOTE: 8 readers for 300 s; key lifetime 120 s, so every republish refreshes
+  ok: 480 reads across 8 tenants
+  ok: zero read errors
+  ok: every door's Expiration moved (8/8): the refreshes landed
+  ok: zero 'no live publish registration' refusals in the replicas' logs
+  ok: PRECONDITION: both replicas issued (65 issued lines)
+  ok: zero CredentialRefreshFailed events on the tenants
+  ok: chart restored (one broker replica)
+
+════════════════════════════════════════
+s3.csi.chert.us legs [S38 S37] of run-s3csi.sh: 17 ok, 0 bad

@@ -292,6 +292,15 @@ record in §11.1.
   answers by removing the key. One request cannot split
   (`s3csi/SECURITY.md` §4.13; kind S37). `webIdentity`, whose exchange
   is the worker's own SDK's, is refused on a broker above one replica.
+  **The table also forgets (2026-10-05):** an entry not renewed within
+  `broker.registrationTtlSecs` (twice `maxLifetimeSecs`, never under
+  7200 s) is not live, so the replica a `deregister` missed is clean
+  within one TTL; the plugin's exchange renews its own on every refresh,
+  and `webIdentity` re-registers on every token rotation and at least
+  every 1800 s (`node::WEB_IDENTITY_REREGISTER_SECS`). And the operator
+  now lists what a CR may choose — `node.identityModes` (default without
+  `ambient`) and `node.endpointAllow` — judged at publish before any
+  worker exists (`s3csi/SECURITY.md` §4.15; kind S38).
 - *The lean syncer needs `AWS_REGION` in its environment.* mount-s3
   takes `--region` on its argv, so passthrough never showed this; the
   syncer's SDK client fails its first request as a bare "dispatch
@@ -1632,7 +1641,7 @@ Why this shape (the spine's, with security-first's discipline grafted in):
 | `irsa` / `pod-identity` | the same files with AWS STS / EKS Pod Identity endpoints (Mountpoint CSI's `authenticationSource: pod`, [web-fuse-csi-priorart §2]) | same | AWS-native clusters |
 | `static` (interim, deprecated) | `AWS_*` from the pod's `nodePublishSecretRef`, handed to mount-s3's ENVIRONMENT over the launch socket (as built: `creds::static_arm`; never the door, never a file; leg S5c) | none (as today) | rigs, migration |
 | `stsSecret` (2026-10-02, `passthrough-sts-secret-mode.md`) | the door form above; the credential, its `AWS_CREDENTIAL_EXPIRATION` and a `generation` come from the pod's `nodePublishSecretRef`, kept fresh by a controller | `creds.json` rewritten on republish when the Secret offers a HIGHER generation with ≥ 120 s left (`creds::sts_replace_decision`); never on a lower, an equal-but-different or a near-dead one; each refusal said once | AWC's STS handoff (awc-docs PR #136); any controller that mints sessions |
-| `ambient` | nothing; the worker's own chain | client-managed | dev |
+| `ambient` | nothing; the worker's own chain | client-managed | dev — and **not in `node.identityModes` by default** (2026-10-05, `s3csi/SECURITY.md` §4.15): on EC2 this is the node's instance role, so the operator lists it deliberately |
 
 ### 4.5 The interim static arm
 
@@ -1885,7 +1894,9 @@ work: it finishes on its own and the marker is the durable signal.
 Two `NodePublishVolume` calls with two volume ids; two target paths under
 two pod UIDs; two workers with their own uid, cgroup, netns, emptyDir
 cache, token file and STS keys; two CR lookups in two namespaces; the
-plugin's per-volume state dirs are `0700 root`. Nothing is shared (§3.6).
+plugin's per-volume state dirs are `0700 root` (enforced since 2026-10-05
+by `state::write_private`; before that the claim was the umask's). Nothing
+is shared (§3.6).
 The existing legs A2b/A7 (prefix scoping; two workspaces in one bucket,
 `run-agent.sh:361-379`) are the oracle and run unchanged.
 

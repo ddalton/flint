@@ -42,6 +42,8 @@ the broker decides from a TokenReview and its own registration.
 | the broker validates the pod-bound token with its audience | TokenReview, `identity_from_review` | `s3csi/broker.rs` |
 | the registration must match the token's namespace, SA and pod uid, the asked CR and mode, and the `RoleSessionName` | `decide` | `s3csi/broker.rs` |
 | the plugin's exchange CARRIES its registration (the `Registration` form field, under the node principal), so the replica that answers holds it; a registration the broker cannot accept is 503, never a refusal of the pod (2026-10-05, §4.13) | `assume`, `carried_registration` | `s3csi/broker.rs`; `creds::BrokerClient::exchange_registered` |
+| a registration not renewed within `registrationTtlSecs` is not live on that replica, whatever its table still holds: the plugin's exchange renews its own on every refresh, and `webIdentity` re-registers on every token rotation and at least every 1800 s (2026-10-05, §4.16) | `remember`, `live_registration`; `WEB_IDENTITY_REREGISTER_SECS` | `s3csi/broker.rs`; `s3csi/node.rs` |
+| the unauthenticated exchange is bounded before the API server is asked: a token that is not JWT-shaped is refused without a TokenReview, reviews in flight are capped (`maxInflightReviews`; 503 past it, an outage the plugin keeps its key through), and a request body is capped at 64 KiB (2026-10-05, §4.16) | `jwt_shaped`, `review`, `BODY_LIMIT` | `s3csi/broker.rs` |
 | the CR is fetched again in the TOKEN's namespace and `consumers` re-checked | `assume` | `s3csi/broker.rs` |
 | register (standalone, for `webIdentity`), deregister and a carried registration need the node principal | `assume`/`register` | `s3csi/broker.rs` |
 
@@ -117,6 +119,7 @@ key.** A pod cannot reach another pod's worker, door or state.
 | one worker per volume id; a pod with another volume's id is never adopted | `worker_name`, `ensure` | `s3csi/worker.rs` |
 | the door is in the worker's own network namespace, behind a per-volume nonce | `build_pod`; `new_nonce` | `s3csi/worker.rs`, `s3csi/node.rs` |
 | state dirs cannot escape the plugin root | `volume_dir` | `s3csi/state.rs` |
+| the volume and shared-class directories are 0700; `state.json` (the door's nonce) and `token` are born 0600, a stale tmp removed first (2026-10-05, §4.16) | `write_private` | `s3csi/state.rs` |
 | the shared class key is (node, namespace, CR, uid, gid, credential mode, argv) | `share_key` | `s3csi/state.rs` |
 
 **P9. Sharing is read-only and only for credentials that are a function
@@ -135,6 +138,7 @@ of the CR alone.**
 
 | | enforced by | in code |
 |---|---|---|
+| the launch record (`Launch`, env values included) prints env KEYS only under Debug, in the plugin and in the worker; the worker's Debug redacts its args as its start-up line does (2026-10-05, §4.16) | `impl Debug for Launch` | `s3csi/fuse.rs`; `crates/flint-s3-worker/src/main.rs` |
 | the worker masks argv values whose flag names a secret, token or password | `redact` | `flint-s3-worker/src/main.rs` |
 | the door logs `Expiration` only | `door_response` | `flint-s3-worker/src/main.rs` |
 | `Creds`, `Materialized`, `SaToken`, `Backend`, `StaticKeys` have redacting `Debug` | | `s3csi/creds.rs`, `s3csi/attrs.rs`, `s3csi/broker.rs` |
@@ -158,6 +162,17 @@ Secrets RBAC), never refreshed, never shared.
 | republish does nothing for it | `republish` | `s3csi/node.rs` |
 | sharing refused | `validate` | `passthrough/spec.rs` |
 
+**P13. The operator bounds what a CR author may choose.** A CR names its
+`identity.mode` and `spec.endpoint`; the node driver admits only what its
+operator listed (2026-10-05, §4.15).
+
+| | enforced by | in code |
+|---|---|---|
+| `identity.mode` must be in `node.identityModes`; the default list leaves out `ambient` (the worker's own chain — on EC2 the node's instance role, read-write to whatever that role reaches) | `identity_mode_allowed`, `DEFAULT_IDENTITY_MODES` | `s3csi/node.rs` |
+| when `node.endpointAllow` is set, `spec.endpoint`'s host must be in it (a host, or `*.suffix`; never the bare suffix); empty admits any | `endpoint_allowed`, `endpoint_host` | `s3csi/node.rs` |
+| both are judged at publish, before any worker exists; the refusal is FailedPrecondition naming the knob, and kubelet carries it as the pod's FailedMount | `publish` | `s3csi/node.rs` |
+| a misspelt mode in the list, or an empty list, is a start-up error by name | `parse_identity_modes` | `s3csi/node.rs` |
+
 ## 2. What the protocol ASSUMES
 
 | assumption | how it is verified | if it is false |
@@ -174,17 +189,18 @@ Secrets RBAC), never refreshed, never shared.
 | promise | unit tests (`cargo test --lib`) | rig legs (`s3csi/e2e/`) | newest run | falsifier gap |
 |---|---|---|---|---|
 | P1 | `door_refuses_without_the_token_and_serves_with_it`; `door_arm_points_at_loopback_with_a_token_file`; `files_are_written_with_mode`; `passthrough_worker_is_unprivileged_and_hostpath_free` | S1, S3, S31 (no secret in mount-s3's env) | campaign 3 run 4 (2026-09-30); sts run 1 (2026-10-02) | S35 (2026-10-04, kind): the door listens on 127.0.0.1 only; a sibling pod and the node are refused at the worker's IP; the worker test asserts no `hostNetwork`/`hostPID`/`hostIPC` |
-| P2 | `token_review_identity_needs_authenticated_sa_and_audience`; `decide_refuses_each_break_in_the_chain_by_name` (incl. a carried registration for another session); `a_grant_is_the_registration_narrowed_by_the_cr_never_widened`; `consumers_absent_denies_and_names_the_field`; `listed_sa_passes_others_named_in_the_refusal`; `unknown_attributes_are_refused_by_name`; `non_ephemeral_and_missing_pod_info_are_refused`; `a_carried_registration_is_parsed_from_the_form_or_refused_by_name`; `exchange_registered_carries_the_registration_under_the_node_token_in_one_request` | S6, S7, S10, S37; A11 | campaign 3 run 4; S37 2026-10-05 (see `s3csi/e2e/results/2026-10-05-registry-and-write-policy/`) | the absent-pod-uid-extra path (§4.2) has no test |
+| P2 | `token_review_identity_needs_authenticated_sa_and_audience`; `decide_refuses_each_break_in_the_chain_by_name` (incl. a carried registration for another session); `a_grant_is_the_registration_narrowed_by_the_cr_never_widened`; `consumers_absent_denies_and_names_the_field`; `listed_sa_passes_others_named_in_the_refusal`; `unknown_attributes_are_refused_by_name`; `non_ephemeral_and_missing_pod_info_are_refused`; `a_carried_registration_is_parsed_from_the_form_or_refused_by_name`; `exchange_registered_carries_the_registration_under_the_node_token_in_one_request`; `a_registration_past_the_ttl_is_not_live_and_a_renewal_restarts_its_clock`; `a_token_that_is_not_a_jwt_is_refused_without_a_review`; `in_flight_reviews_are_bounded_and_the_overflow_is_an_outage_not_a_refusal` | S6, S7, S10, S37; A11 | campaign 3 run 4; S37 2026-10-05 (see `s3csi/e2e/results/2026-10-05-registry-and-write-policy/`) | the absent-pod-uid-extra path (§4.2) has no test |
 | P3 | (generic) | M2 | design doc only: "multi 22/0" 2026-09-04; no results README | none written since |
-| P4 | `write_flags_track_read_only`; `a_read_only_volume_registers_a_read_grant_on_the_wire`; `the_read_session_policy_reads_the_prefix_and_nothing_else`; `the_write_session_policy_writes_the_prefix_and_nothing_else`; `sts_attaches_the_read_policy_to_a_read_grant_and_the_write_policy_to_a_read_write_one` | S5, S24 (shared mount refuses a write); R3, R6, R9; A9; O5; `lean/e2e/access/read-grant-minio.sh` and `write-grant-minio.sh` (MinIO's evaluator, the exact policies) | campaign 3 run 4; `run-rights.sh` has no results README; write-grant drill 2026-10-05: 17/0, and 11/8 with `PutObject` removed (`s3csi/e2e/results/2026-10-05-registry-and-write-policy/`) | the append in `publish_passthrough` has no unit test; the write policy has run against MinIO's evaluator, not AWS's or RGW's |
+| P4 | `write_flags_track_read_only`; `a_read_only_volume_registers_a_read_grant_on_the_wire`; `the_read_session_policy_reads_the_prefix_and_nothing_else`; `the_write_session_policy_writes_the_prefix_and_nothing_else`; `sts_attaches_the_read_policy_to_a_read_grant_and_the_write_policy_to_a_read_write_one` | S5, S24 (shared mount refuses a write); R3, R6, R9; A9; O5; `lean/e2e/access/read-grant-minio.sh` and `write-grant-minio.sh` (MinIO's evaluator, the exact policies); `s3csi/e2e/aws-write-grant.sh` (AWS's) | campaign 3 run 4; `run-rights.sh` has no results README; write-grant drill 2026-10-05: 17/0, and 11/8 with `PutObject` removed (`s3csi/e2e/results/2026-10-05-registry-and-write-policy/`); against AWS STS and S3 2026-10-05: 22/0, and 16/8 with `PutObject` removed (`s3csi/e2e/results/2026-10-05-hardening/`) | the append in `publish_passthrough` has no unit test; the write policy has run against MinIO's and AWS's evaluators, not RGW's |
 | P5 | `sts_secret_parses_the_tuple_and_its_envelope`; `…refuses_each_missing_or_malformed_field_by_name`; `…refuses_unknown_keys_by_name_but_ignores_the_token_key`; `sts_envelope_mismatch_is_refused_per_field_and_absence_passes`; `sts_replace_decision_table` (incl. a reused generation with other keys); `the_key_fingerprint_follows_the_keys_and_not_the_expiration`; `the_credential_timing_budget_agrees` (+ two mutation controls, 2026-10-03) | S31 (step 6, the reused generation, written 2026-10-03, NOT RUN); R1 | sts runs 1–2; R1 13/0 (2026-10-02) | S31 step 6 until it runs |
 | P6 | `a_refusal_removes_the_key_only_from_an_unshared_mounter`; `exchange_errors_sort_refusals_from_outages`; `exchange_outages_are_unavailable_and_refusals_are_denied`; `a_token_review_the_api_server_did_not_answer_is_unavailable_not_refused` | S10, S29, S8 (outage control); L3 | campaign 3 run 4; review-fixes run 2 (2026-09-30) | no leg fails the API server under the broker (S8 fails the broker itself) |
 | P7 | `passthrough_worker_is_unprivileged_and_hostpath_free` | S2, S3, S19 | campaign 3 run 4 | no leg sets TLS or the NetworkPolicy; nothing checks the broker link |
-| P8 | `uid_gid_must_be_integers`; `dir_names_cannot_escape`; `name_and_hash_are_stable_and_label_sized` | S15, S24; P3 (16 tenants) | campaign 3 run 4; kind S24+S30 (2026-10-01) | cross-pod door reachability; state-dir mode |
+| P8 | `uid_gid_must_be_integers`; `dir_names_cannot_escape`; `name_and_hash_are_stable_and_label_sized`; `state_is_born_0600_in_a_0700_dir_and_a_stale_tmp_does_not_widen_it`; `token_is_written_once_at_0600_and_reloaded` (the dir's mode too) | S15, S24; P3 (16 tenants); S35 (the door from a sibling pod) | campaign 3 run 4; kind S24+S30 (2026-10-01); S35 2026-10-04 | — |
 | P9 | `only_read_only_members_with_cr_scoped_credentials_share`; `sharing_cannot_run_on_a_per_pod_secret`; `the_class_is_node_namespace_cr_owner_mode_and_argv`; `a_shared_mount_round_trips_and_membership_is_a_set`; `a_shared_worker_is_named_by_its_class_and_says_so`; `a_shared_mounter_is_dead_only_on_evidence_and_silence_is_busy`; `only_enotconn_is_a_dead_mount_and_silence_is_not` | S24, S28, S29, S30; S34 | kind S24+S30 46/0 (2026-10-01); sts run 1; S34 61/0 + S9 + S24 86/0 (2026-10-03, after the §4.12 fix) | a hung (not dead) shared mounter is waited for indefinitely (§4.12) |
-| P10 | `redaction_masks_secret_shaped_arguments`; `creds_json_is_the_container_credentials_shape`; `our_audience_token_is_picked_and_never_debug_printed`; `the_start_up_line_never_prints_a_secret`; `token_is_written_once_at_0600_and_reloaded` | S3, S31 | sts runs | nothing greps events or the broker log for key material |
+| P10 | `redaction_masks_secret_shaped_arguments`; `creds_json_is_the_container_credentials_shape`; `our_audience_token_is_picked_and_never_debug_printed`; `the_start_up_line_never_prints_a_secret`; `token_is_written_once_at_0600_and_reloaded`; `a_launch_debug_prints_env_keys_and_never_a_value` (plugin and worker) | S3, S31 | sts runs | nothing greps events or the broker log for key material |
 | P11 | `the_worker_ceiling_admits_up_to_and_not_past_its_number` | S33, S36 | S36 on kind 2026-10-04: 1.57.1 peak 9 over a ceiling of 7 (the race); fixed, peak 7, one of six mounted | — |
 | P12 | `static_arm_needs_both_keys_and_passes_region`; `sharing_cannot_run_on_a_per_pod_secret` | S5c | sts run 2, 2/2 | — |
+| P13 | `identity_modes_default_leaves_ambient_out_and_a_refusal_names_the_knob`; `endpoint_allow_matches_hosts_and_suffixes_and_empty_admits_any`; `config_requires_the_image_and_node_name` (the env parse, a misspelt mode); `web_identity_reregisters_within_half_the_table_ttl_floor` | S38 | kind 2026-10-05: S38 + S37 17/0 (`s3csi/e2e/results/2026-10-05-hardening/`) | a mount made before a list changed is not re-judged on republish; `node.endpointAllow` is empty by default |
 
 ## 4. What is NOT claimed
 
@@ -297,10 +313,11 @@ Secrets RBAC), never refreshed, never shared.
     on a broker above one replica (`/v1/status` `replicas`,
     `FLINT_S3B_REPLICAS`). Kind S37 2026-10-05 (two replicas, eight
     tenants refreshing on every republish for 300 s): see
-    `s3csi/e2e/results/2026-10-05-registry-and-write-policy/` for both arms. Still true:
-    `deregister` reaches one replica, so the other keeps a stale entry
-    until it restarts (bytes, not authority: the nonce is per publish
-    and the pod's token dies with the pod).
+    `s3csi/e2e/results/2026-10-05-registry-and-write-policy/` for both arms. `deregister` reaches
+    one replica; the other kept a stale entry until it restarted (bytes,
+    not authority: the nonce is per publish and the pod's token dies
+    with the pod) — since 2026-10-05 the table forgets an entry not
+    renewed within `registrationTtlSecs` (§4.16).
 14. **A read-write grant was role-wide on `sts`; now it is the prefix's
     (2026-10-05).** `mint` attached a session policy to READ grants
     only (per-user access design D14: "a hardening with its own
@@ -316,7 +333,49 @@ Secrets RBAC), never refreshed, never shared.
     `rest` is the door's; and the CR's author still names the bucket and
     prefix — the design's admin-owned namespace-to-project binding
     (csi design §4.2 step 2) is not built, so this bounds a grant to
-    what its CR says, not what an administrator allowed.
+    what its CR says, not what an administrator allowed. **AWS's
+    evaluator agrees (2026-10-05):** `s3csi/e2e/aws-write-grant.sh` ran
+    the same four sections against AWS STS and S3 on a bucket-wide role
+    — 22/0: STS accepted the policy at 25 % of the packed-size cap, the
+    writer syncer ran whole (a 20 MiB multipart included), another
+    prefix, the whole-bucket listing, HeadBucket and the operator's
+    verbs were denied, the versioned verbs under the prefix allowed; and
+    16/8 with PutObject removed, failing at the writer's first PUT with
+    AWS naming the session policy in its denial
+    (`s3csi/e2e/results/2026-10-05-hardening/`). Ceph RGW is not run.
+15. **The CR author chose the node's identity and the mount's host, and
+    the operator had no say; now the operator lists both (2026-10-05).**
+    `identity.mode: ambient` is the worker's own AWS chain — on EC2 the
+    node's instance role, read-write to whatever that role reaches — and
+    any CR author could name it; `spec.endpoint` sent a mount's traffic
+    to any host from the workers namespace, whose NetworkPolicy is off
+    by default. `node.identityModes` (default `broker webIdentity static
+    stsSecret`) and `node.endpointAllow` (default empty = any) are judged
+    at publish, before any worker exists, and the refusal names the knob
+    (P13; kind S38 with both control arms). Still true: a mount made
+    before a list changed is not re-judged on republish — the lists
+    apply to new publishes; the endpoint list is empty by default,
+    because the endpoint is the CR author's own choice and the worker's
+    credential is already its CR's; `static` remains any Secret in the
+    pod's namespace (P12); and the design's admin-owned namespace-to-
+    project binding (§4.14) is still not built.
+16. **Four bounds that had been open (2026-10-05).** The broker's
+    registration table forgets an entry not renewed within
+    `registrationTtlSecs` (twice `maxLifetimeSecs`, never under 7200 s;
+    the plugin's exchange renews its own on every refresh, and
+    `webIdentity` re-registers on every token rotation and at least every
+    1800 s), so a `deregister` that reached the other replica, or a node
+    that died, leaves nothing past it. The unauthenticated exchange
+    refuses a token that is not JWT-shaped without a TokenReview, caps
+    reviews in flight (`maxInflightReviews`, default 64; 503 past it)
+    and request bodies (64 KiB) — a bound on what `POST /` can make the
+    API server do, not a defence of the broker's own CPU (the warp
+    server has no request rate limit). The volume and shared-class
+    directories are 0700 and `state.json` — the door's nonce — and
+    `token` are born 0600 (the design's §3.6 had said 0700 since
+    2026-09-04; it was the umask). The launch record prints env keys
+    only under Debug, in the plugin and in the worker. Still true: the
+    broker's TLS and the NetworkPolicy are as §4.1 says.
 
 ## 5. The open list
 
@@ -333,8 +392,11 @@ Secrets RBAC), never refreshed, never shared.
 | 9 | ~~the join path replaces a shared mounter only on evidence of death, and answers silence with `Unavailable`~~ — done 2026-10-03 (`shared_liveness`, `fuse::Probe`; S34 61/0 with both arms) | — |
 | 10 | ~~the registration rides with the exchange, so two broker replicas cannot split a refresh~~ — done 2026-10-05 (§4.13; S37 with the 1.57.1 known-bad arm) | — |
 | 11 | ~~a read-write grant on `sts` is bounded to its prefix~~ — done 2026-10-05 (§4.14; `write_session_policy`, the write-grant MinIO drill) | — |
-| 12 | the write policy against AWS STS and Ceph RGW (MinIO only so far); `deregister` fanned out, or a TTL on the table, so a replica keeps no stale entries | S |
-| 13 | an operator allowlist of `identity.mode` values (`ambient` is the node's own identity and is tenant-selectable; `static` is any Secret in the namespace) | S |
+| 12 | ~~the write policy against AWS STS; a TTL on the table so a replica keeps no stale entries~~ — done 2026-10-05 (§4.14 AWS run, `s3csi/e2e/aws-write-grant.sh`; §4.16 `registrationTtlSecs`) | — |
+| 13 | ~~an operator allowlist of `identity.mode` values~~ — done 2026-10-05 (§4.15; `node.identityModes`, with `node.endpointAllow` beside it; S38) | — |
+| 14 | the write policy against Ceph RGW (MinIO and AWS agree; RGW's evaluator is its own) | S |
+| 15 | re-judge a published mount against `node.identityModes`/`node.endpointAllow` on republish when a list changes (today the lists apply to new publishes; a pod re-created after the change is refused) | S |
+| 16 | the admin-owned namespace-to-project binding (csi design §4.2 step 2): today a CR author names any bucket and prefix, and the grant is bounded to what the CR says | M |
 
 Docs corrected with this file (2026-10-03): the sts note's "CA-pinned
 client"; the sharing design's §5 paragraph that said a refusal removes

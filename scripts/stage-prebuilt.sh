@@ -20,6 +20,21 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
+# BSD (macOS) and GNU/uutils (the Linux box) spell stat and date
+# differently, and releases have run from both; everything below goes
+# through these.
+if stat -c '%Y' / >/dev/null 2>&1; then
+    STAT_MN=(stat -c '%Y %n')
+    stat_m() { stat -c '%Y' "$1"; }
+    stat_z() { stat -c '%s' "$1"; }
+    date_of() { date -d "@$1" "$2"; }
+else
+    STAT_MN=(stat -f '%m %N')
+    stat_m() { stat -f '%m' "$1"; }
+    stat_z() { stat -f '%z' "$1"; }
+    date_of() { date -r "$1" "$2"; }
+fi
+
 here=$(cd "$(dirname "$0")" && pwd)
 crate=$(cd "$here/../spdk-csi-driver" && pwd)
 dest="$crate/docker/prebuilt"
@@ -137,7 +152,7 @@ fi
 # Newest thing that can change a binary. Cargo.lock matters as much as
 # src/ — a dependency bump with no source edit still changes the output.
 newest_src=$(find "$crate/src" "$crate/Cargo.toml" "$crate/Cargo.lock" -type f -print0 \
-             | xargs -0 stat -f '%m %N' | sort -rn | head -1)
+             | xargs -0 "${STAT_MN[@]}" | sort -rn | head -1)
 src_mtime=${newest_src%% *}
 src_name=${newest_src#* }
 # An empty or non-numeric answer means the comparison below would silently
@@ -148,7 +163,7 @@ case "$src_mtime" in
         echo "cannot determine the newest source mtime — refusing to stage blind" >&2
         exit 2 ;;
 esac
-echo "newest source: $(date -r "$src_mtime" '+%Y-%m-%d %H:%M:%S')  ${src_name#$crate/}"
+echo "newest source: $(date_of "$src_mtime" '+%Y-%m-%d %H:%M:%S')  ${src_name#$crate/}"
 
 # The lean crate has its OWN newest-source clock, and it must include
 # crates/flint-store: the syncer links it, so a store edit changes the
@@ -163,7 +178,7 @@ store_crate=$(cd "$here/../crates/flint-store" && pwd)
 newest_lean=$(find "$lean_crate/src" "$lean_crate/Cargo.toml" "$lean_crate/Cargo.lock" \
                    "$store_crate/src" "$store_crate/Cargo.toml" \
                    -type f -print0 \
-              | xargs -0 stat -f '%m %N' | sort -rn | head -1)
+              | xargs -0 "${STAT_MN[@]}" | sort -rn | head -1)
 lean_mtime=${newest_lean%% *}
 lean_name=${newest_lean#* }
 case "$lean_mtime" in
@@ -171,7 +186,7 @@ case "$lean_mtime" in
         echo "cannot determine the newest LEAN source mtime — refusing to stage blind" >&2
         exit 2 ;;
 esac
-echo "newest lean source: $(date -r "$lean_mtime" '+%Y-%m-%d %H:%M:%S')  ${lean_name#$here/../}"
+echo "newest lean source: $(date_of "$lean_mtime" '+%Y-%m-%d %H:%M:%S')  ${lean_name#$here/../}"
 
 # The gateway crate links lean/syncer AND crates/flint-store, so its
 # clock is the union of all three — the same argument one crate further
@@ -182,7 +197,7 @@ if [ -n "$GW_BINS" ]; then
                      "$lean_crate/src" "$lean_crate/Cargo.toml" \
                      "$store_crate/src" "$store_crate/Cargo.toml" \
                      -type f -print0 \
-                | xargs -0 stat -f '%m %N' | sort -rn | head -1)
+                | xargs -0 "${STAT_MN[@]}" | sort -rn | head -1)
     gw_mtime=${newest_gw%% *}
     gw_name=${newest_gw#* }
     case "$gw_mtime" in
@@ -190,7 +205,7 @@ if [ -n "$GW_BINS" ]; then
             echo "cannot determine the newest GATEWAY source mtime — refusing to stage blind" >&2
             exit 2 ;;
     esac
-    echo "newest gateway source: $(date -r "$gw_mtime" '+%Y-%m-%d %H:%M:%S')  ${gw_name#$here/../}"
+    echo "newest gateway source: $(date_of "$gw_mtime" '+%Y-%m-%d %H:%M:%S')  ${gw_name#$here/../}"
 fi
 
 # The worker crate (crates/flint-s3-worker) has its own clock too. It
@@ -204,7 +219,7 @@ if [ -n "$FORGE_BINS" ]; then
     newest_forge=$(find "$forge_crate/src" "$forge_crate/Cargo.toml" "$forge_crate/Cargo.lock" \
                         "$store_crate/src" "$store_crate/Cargo.toml" \
                         -type f -print0 \
-                   | xargs -0 stat -f '%m %N' | sort -rn | head -1)
+                   | xargs -0 "${STAT_MN[@]}" | sort -rn | head -1)
     forge_mtime=${newest_forge%% *}
     forge_name=${newest_forge#* }
     case "$forge_mtime" in
@@ -212,13 +227,13 @@ if [ -n "$FORGE_BINS" ]; then
             echo "cannot determine the newest FORGE source mtime — refusing to stage blind" >&2
             exit 2 ;;
     esac
-    echo "newest forge source: $(date -r "$forge_mtime" '+%Y-%m-%d %H:%M:%S')  ${forge_name#$here/../}"
+    echo "newest forge source: $(date_of "$forge_mtime" '+%Y-%m-%d %H:%M:%S')  ${forge_name#$here/../}"
 fi
 
 worker_crate=$(cd "$here/../crates/flint-s3-worker" && pwd)
 newest_worker=$(find "$worker_crate/src" "$worker_crate/Cargo.toml" "$worker_crate/Cargo.lock" \
                      -type f -print0 \
-                | xargs -0 stat -f '%m %N' | sort -rn | head -1)
+                | xargs -0 "${STAT_MN[@]}" | sort -rn | head -1)
 worker_mtime=${newest_worker%% *}
 worker_name=${newest_worker#* }
 case "$worker_mtime" in
@@ -226,7 +241,7 @@ case "$worker_mtime" in
         echo "cannot determine the newest WORKER source mtime — refusing to stage blind" >&2
         exit 2 ;;
 esac
-echo "newest worker source: $(date -r "$worker_mtime" '+%Y-%m-%d %H:%M:%S')  ${worker_name#$here/../}"
+echo "newest worker source: $(date_of "$worker_mtime" '+%Y-%m-%d %H:%M:%S')  ${worker_name#$here/../}"
 
 stale=0
 for arch_pair in "x86_64:amd64" "aarch64:arm64"; do
@@ -239,13 +254,13 @@ for arch_pair in "x86_64:amd64" "aarch64:arm64"; do
             echo "  ✗ MISSING $arch/$b — build it before staging" >&2
             stale=1; continue
         fi
-        m=$(stat -f '%m' "$src")
+        m=$(stat_m "$src")
         if [ "$m" -lt "$src_mtime" ]; then
-            echo "  ✗ STALE   $arch/$b built $(date -r "$m" '+%m-%d %H:%M') — older than the source" >&2
+            echo "  ✗ STALE   $arch/$b built $(date_of "$m" '+%m-%d %H:%M') — older than the source" >&2
             stale=1; continue
         fi
         cp "$src" "$dest/$arch/$b"
-        echo "  ✓ staged  $arch/$b  ($(date -r "$m" '+%m-%d %H:%M'), $(( $(stat -f '%z' "$src") / 1048576 )) MiB)"
+        echo "  ✓ staged  $arch/$b  ($(date_of "$m" '+%m-%d %H:%M'), $(( $(stat_z "$src") / 1048576 )) MiB)"
     done
     for b in $FORGE_BINS; do
         src="$forge_crate/target/$triple/release/$b"
@@ -255,13 +270,13 @@ for arch_pair in "x86_64:amd64" "aarch64:arm64"; do
             echo "               --target $triple)" >&2
             stale=1; continue
         fi
-        m=$(stat -f '%m' "$src")
+        m=$(stat_m "$src")
         if [ "$m" -lt "$forge_mtime" ]; then
-            echo "  ✗ STALE   $arch/$b built $(date -r "$m" '+%m-%d %H:%M') — older than the forge source" >&2
+            echo "  ✗ STALE   $arch/$b built $(date_of "$m" '+%m-%d %H:%M') — older than the forge source" >&2
             stale=1; continue
         fi
         cp "$src" "$dest/$arch/$b"
-        echo "  ✓ staged  $arch/$b  ($(date -r "$m" '+%m-%d %H:%M'), $(( $(stat -f '%z' "$src") / 1048576 )) MiB)"
+        echo "  ✓ staged  $arch/$b  ($(date_of "$m" '+%m-%d %H:%M'), $(( $(stat_z "$src") / 1048576 )) MiB)"
     done
     for b in $LEAN_BINS; do
         src="$lean_crate/target/$triple/release/$b"
@@ -271,13 +286,13 @@ for arch_pair in "x86_64:amd64" "aarch64:arm64"; do
             echo "               --target $triple)" >&2
             stale=1; continue
         fi
-        m=$(stat -f '%m' "$src")
+        m=$(stat_m "$src")
         if [ "$m" -lt "$lean_mtime" ]; then
-            echo "  ✗ STALE   $arch/$b built $(date -r "$m" '+%m-%d %H:%M') — older than the lean source" >&2
+            echo "  ✗ STALE   $arch/$b built $(date_of "$m" '+%m-%d %H:%M') — older than the lean source" >&2
             stale=1; continue
         fi
         cp "$src" "$dest/$arch/$b"
-        echo "  ✓ staged  $arch/$b  ($(date -r "$m" '+%m-%d %H:%M'), $(( $(stat -f '%z' "$src") / 1048576 )) MiB)"
+        echo "  ✓ staged  $arch/$b  ($(date_of "$m" '+%m-%d %H:%M'), $(( $(stat_z "$src") / 1048576 )) MiB)"
     done
     for b in $GW_BINS; do
         src="$gw_crate/target/$triple/release/$b"
@@ -287,13 +302,13 @@ for arch_pair in "x86_64:amd64" "aarch64:arm64"; do
             echo "               --target $triple)" >&2
             stale=1; continue
         fi
-        m=$(stat -f '%m' "$src")
+        m=$(stat_m "$src")
         if [ "$m" -lt "$gw_mtime" ]; then
-            echo "  ✗ STALE   $arch/$b built $(date -r "$m" '+%m-%d %H:%M') — older than the gateway source" >&2
+            echo "  ✗ STALE   $arch/$b built $(date_of "$m" '+%m-%d %H:%M') — older than the gateway source" >&2
             stale=1; continue
         fi
         cp "$src" "$dest/$arch/$b"
-        echo "  ✓ staged  $arch/$b  ($(date -r "$m" '+%m-%d %H:%M'), $(( $(stat -f '%z' "$src") / 1048576 )) MiB)"
+        echo "  ✓ staged  $arch/$b  ($(date_of "$m" '+%m-%d %H:%M'), $(( $(stat_z "$src") / 1048576 )) MiB)"
     done
     for b in $WORKER_BINS; do
         src="$worker_crate/target/$triple/release/$b"
@@ -302,13 +317,13 @@ for arch_pair in "x86_64:amd64" "aarch64:arm64"; do
             echo "            (cd crates/flint-s3-worker && cargo zigbuild --release --target $triple)" >&2
             stale=1; continue
         fi
-        m=$(stat -f '%m' "$src")
+        m=$(stat_m "$src")
         if [ "$m" -lt "$worker_mtime" ]; then
-            echo "  ✗ STALE   $arch/$b built $(date -r "$m" '+%m-%d %H:%M') — older than the worker source" >&2
+            echo "  ✗ STALE   $arch/$b built $(date_of "$m" '+%m-%d %H:%M') — older than the worker source" >&2
             stale=1; continue
         fi
         cp "$src" "$dest/$arch/$b"
-        echo "  ✓ staged  $arch/$b  ($(date -r "$m" '+%m-%d %H:%M'), $(( $(stat -f '%z' "$src") / 1048576 )) MiB)"
+        echo "  ✓ staged  $arch/$b  ($(date_of "$m" '+%m-%d %H:%M'), $(( $(stat_z "$src") / 1048576 )) MiB)"
     done
 done
 

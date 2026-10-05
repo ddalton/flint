@@ -14,6 +14,18 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **flint-s3-csi: the plugin's per-volume directory and state are private**
+  (2026-10-05, `s3csi/SECURITY.md` §4.16). `state.json` carries the
+  volume's door nonce and was written under the umask in a directory made
+  under the umask; the design had said 0700 since 2026-09-04. The volume
+  and shared-class directories are now 0700 and `state.json` and the kept
+  pod token are born 0600, a stale tmp from a crash removed rather than
+  renamed over (as the worker's launch record and the credential files
+  already were).
+- **flint-s3-csi, flint-s3-worker: the launch record never Debug-prints a
+  value** (2026-10-05). `Launch` derived `Debug` while its env can hold
+  the static arm's keys; both crates now print env keys only, and the
+  worker's redacts its args as its start-up line does.
 - **flint-s3-csi: two broker replicas can no longer refuse a refresh**
   (2026-10-05, `s3csi/SECURITY.md` §4.13). The broker keeps publish
   registrations in memory, per replica; the chart runs two; the plugin's
@@ -34,6 +46,34 @@ covered by the stability guarantee.
 
 ### Changed
 
+- **flint-s3-csi: the operator lists the identity modes and the endpoint
+  hosts a CR may use** (2026-10-05, `s3csi/SECURITY.md` §4.15, P13). A
+  FlintPassthroughMount or FlintLeanWorkspace author chose `identity.mode`
+  and `spec.endpoint` with no operator say; `ambient` is the worker's own
+  AWS chain — on EC2 the node's instance role, read-write to whatever it
+  reaches. `node.identityModes` (`FLINT_S3CSI_IDENTITY_MODES`, default
+  `broker webIdentity static stsSecret`) now lists what a CR may select,
+  and `node.endpointAllow` (`FLINT_S3CSI_ENDPOINT_ALLOW`; hosts or
+  `*.suffix`; empty = any, the default) the hosts a mount may be sent to.
+  Both are judged at publish before any worker exists; the refusal names
+  the knob. **A cluster whose CRs use `identity.mode: ambient` must add
+  `ambient` to `node.identityModes`** — the kind rig does. Kind S38
+  exercises both refusals and both control arms.
+- **flint-s3-broker: the registration table forgets stale entries, and the
+  exchange is bounded before the API server is asked** (2026-10-05,
+  `s3csi/SECURITY.md` §4.16). A registration not renewed within
+  `broker.registrationTtlSecs` (`FLINT_S3B_REGISTRATION_TTL_SECS`; default
+  twice `maxLifetimeSecs`, never under 7200 s) is no longer live on that
+  replica — the plugin's exchange renews its own on every refresh, and
+  `identity.mode webIdentity` re-registers on every token rotation and at
+  least every 1800 s — so a `deregister` that reached the other replica
+  leaves nothing behind. `POST /` refuses a token that is not JWT-shaped
+  without a TokenReview, caps reviews in flight
+  (`broker.maxInflightReviews`, `FLINT_S3B_MAX_INFLIGHT_REVIEWS`, default
+  64; 503 past it, which the plugin treats as an outage and keeps its key
+  through) and request bodies (64 KiB). `/v1/status` reports
+  `registrationTtlSecs` and `maxInflightReviews`, and counts live
+  registrations only.
 - **flint-s3-broker: a read-write grant on the `sts` backend is bounded to
   its CR's bucket and prefix** (2026-10-05, `s3csi/SECURITY.md` §4.14).
   Only read grants carried a session policy; a write grant carried none,
@@ -76,6 +116,21 @@ covered by the stability guarantee.
 
 ### Added
 
+- **flint-s3-csi: the write policy against AWS itself; kind leg S38**
+  (2026-10-05). `s3csi/e2e/aws-write-grant.sh` is the write-grant MinIO
+  drill run where the evaluator is AWS's: AssumeRole on a bucket-wide
+  role with the exact `write_session_policy`, then a writer syncer whole
+  on the narrowed keys, another prefix out of reach, the mount-s3 action
+  set in and out of the prefix, the operator's bucket verbs denied, each
+  denial with its control on the unnarrowed keys, and the policy's
+  PackedPolicySize recorded. AWS STS accepted the policy at 25 % of the
+  packed-size cap and the drill passed 22/0; with PutObject removed it
+  failed 16/8 at the writer's first PUT, AWS naming the session policy in
+  its denial. S38 installs the
+  chart's default `node.identityModes` and an `endpointAllow` that does
+  not name the rig's store, and shows both refusals by name before any
+  worker exists, then both CRs proceeding once the lists admit them.
+  Results: `s3csi/e2e/results/2026-10-05-hardening/`.
 - **flint-s3-csi: kind leg S37 and the write-grant MinIO drill**
   (2026-10-05). S37 installs two broker replicas, publishes eight
   tenants whose 120 s keys refresh on every republish, reads for 300 s,

@@ -50,6 +50,7 @@
 //! own in `sts`/`rest` mode, or accept a `RoleArn` it did not shape.
 
 use std::collections::{BTreeMap, HashMap};
+use std::time::Instant;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -129,6 +130,18 @@ impl std::fmt::Debug for Backend {
     }
 }
 
+/// The least a publish registration lives in a replica's table (§4.13):
+/// the default TTL is twice the longest credential and never under this,
+/// and the plugin's `webIdentity` arm — whose exchange cannot carry its
+/// registration — re-registers within half of it
+/// (`node::WEB_IDENTITY_REREGISTER_SECS`).
+pub const REGISTRATION_TTL_FLOOR_SECS: u64 = 7200;
+
+/// The most a request body may carry: a pod-bound token (~1 KiB) and a
+/// registration (~0.5 KiB) fit many times over; a body past it is
+/// refused before it is read.
+const BODY_LIMIT: u64 = 64 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct BrokerConfig {
     pub listen: SocketAddr,
@@ -153,6 +166,19 @@ pub struct BrokerConfig {
     /// (the worker's SDK exchanging on its own) needs the one replica
     /// that was registered with, and the plugin refuses that mode above 1.
     pub replicas: u32,
+    /// How long a registration lives in this replica's table without
+    /// being renewed (`FLINT_S3B_REGISTRATION_TTL_SECS`; default twice
+    /// `max_lifetime_secs`, never under `REGISTRATION_TTL_FLOOR_SECS`).
+    /// The plugin's exchange renews its own on every refresh, within one
+    /// credential lifetime; so a `deregister` that reached the other
+    /// replica, or a node that died, leaves no entry here past it.
+    pub registration_ttl_secs: u64,
+    /// How many TokenReviews may be in flight at once
+    /// (`FLINT_S3B_MAX_INFLIGHT_REVIEWS`, default 64): past it an
+    /// exchange is answered 503 without reaching the API server. `POST /`
+    /// is unauthenticated until the review, and this bounds what it can
+    /// make the API server do.
+    pub max_inflight_reviews: usize,
 }
 
 impl BrokerConfig {
@@ -195,6 +221,7 @@ impl BrokerConfig {
             }
             other => return Err(format!("FLINT_S3B_BACKEND {other:?} is not static | sts | rest")),
         };
+        let max_lifetime_secs: u64 = opt("FLINT_S3B_MAX_LIFETIME_SECS").and_then(|v| v.parse().ok()).unwrap_or(3600);
         Ok(Self {
             listen: opt("FLINT_S3B_LISTEN").unwrap_or_else(|| "0.0.0.0:8080".into()).parse().map_err(|e| format!("FLINT_S3B_LISTEN: {e}"))?,
             tls_cert: opt("FLINT_S3B_TLS_CERT"),
@@ -202,11 +229,15 @@ impl BrokerConfig {
             backend,
             audience: opt("FLINT_S3B_AUDIENCE").unwrap_or_else(|| DRIVER_NAME.into()),
             node_principal: opt("FLINT_S3B_NODE_PRINCIPAL").unwrap_or_else(|| "system:serviceaccount:flint-system:flint-s3-csi-node".into()),
-            max_lifetime_secs: opt("FLINT_S3B_MAX_LIFETIME_SECS").and_then(|v| v.parse().ok()).unwrap_or(3600),
+            max_lifetime_secs,
             default_lifetime_secs: opt("FLINT_S3B_DEFAULT_LIFETIME_SECS").and_then(|v| v.parse().ok()).unwrap_or(900),
             require_registration: opt("FLINT_S3B_REQUIRE_REGISTRATION").map(|v| v != "false").unwrap_or(true),
             arn_partition: opt("FLINT_S3B_ARN_PARTITION").unwrap_or_else(|| "aws".into()),
             replicas: opt("FLINT_S3B_REPLICAS").and_then(|v| v.parse().ok()).unwrap_or(1),
+            registration_ttl_secs: opt("FLINT_S3B_REGISTRATION_TTL_SECS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(|| (2 * max_lifetime_secs).max(REGISTRATION_TTL_FLOOR_SECS)),
+            max_inflight_reviews: opt("FLINT_S3B_MAX_INFLIGHT_REVIEWS").and_then(|v| v.parse().ok()).unwrap_or(64),
         })
     }
 }
@@ -498,6 +529,18 @@ pub fn decide(
 /// field, the JSON of `creds::Registration` — or none, for a client that
 /// knows only the STS form (the worker's own SDK under `webIdentity`). A
 /// malformed one is refused by name, never read as absent.
+/// Three non-empty base64url segments: the shape of every Kubernetes
+/// ServiceAccount token. Anything else cannot pass a TokenReview, so it
+/// is refused without one — with `max_inflight_reviews`, a bound on what
+/// an unauthenticated `POST /` can make the API server do.
+pub fn jwt_shaped(token: &str) -> bool {
+    let parts: Vec<&str> = token.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'='))
+}
+
 pub fn carried_registration(form: &HashMap<String, String>) -> Result<Option<Registration>, String> {
     match form.get("Registration") {
         None => Ok(None),
@@ -505,11 +548,20 @@ pub fn carried_registration(form: &HashMap<String, String>) -> Result<Option<Reg
     }
 }
 
+/// A table entry: the registration and when it was last (re)inserted.
+/// Live for `registration_ttl_secs` from then (§4.13).
+struct Registered {
+    reg: Registration,
+    at: Instant,
+}
+
 pub struct Broker {
     cfg: BrokerConfig,
     client: Client,
     http: reqwest::Client,
-    registrations: Mutex<HashMap<String, Registration>>,
+    registrations: Mutex<HashMap<String, Registered>>,
+    /// In-flight TokenReviews, bounded by `max_inflight_reviews`.
+    reviews: tokio::sync::Semaphore,
     issued: AtomicU64,
     refused: AtomicU64,
 }
@@ -537,9 +589,11 @@ struct RestCreds {
 
 impl Broker {
     pub fn new(cfg: BrokerConfig, client: Client) -> Arc<Self> {
+        let reviews = tokio::sync::Semaphore::new(cfg.max_inflight_reviews);
         Arc::new(Self {
             cfg,
             client,
+            reviews,
             http: reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build().expect("http client"),
             registrations: Mutex::new(HashMap::new()),
             issued: AtomicU64::new(0),
@@ -548,6 +602,18 @@ impl Broker {
     }
 
     async fn review(&self, token: &str) -> Result<Identity, ReviewError> {
+        // Not even a JWT: no TokenReview could pass it, so none is made.
+        if !jwt_shaped(token) {
+            return Err(ReviewError::Refused("the token is not a JWT (three base64url segments)".into()));
+        }
+        // Past the bound, an outage — the plugin keeps a still-valid key
+        // through a 503 and asks again; the API server is not asked now.
+        let Ok(_permit) = self.reviews.try_acquire() else {
+            return Err(ReviewError::Unavailable(format!(
+                "{} TokenReviews already in flight (FLINT_S3B_MAX_INFLIGHT_REVIEWS)",
+                self.cfg.max_inflight_reviews
+            )));
+        };
         let api: Api<TokenReview> = Api::all(self.client.clone());
         let tr = TokenReview {
             spec: TokenReviewSpec { token: Some(token.to_string()), audiences: Some(vec![self.cfg.audience.clone()]) },
@@ -731,10 +797,10 @@ impl Broker {
                     access = r.access.as_str(),
                     "registered (carried with the exchange)"
                 );
-                self.registrations.lock().unwrap().insert(r.volume_id.clone(), r.clone());
+                self.remember(r.clone(), Instant::now());
                 Some(r)
             }
-            None => self.registrations.lock().unwrap().values().find(|r| r.nonce == session).cloned(),
+            None => self.live_registration(&session, Instant::now()),
         };
         let (mode, cr) = match creds::parse_role_arn(role_arn) {
             Some(x) => x,
@@ -802,6 +868,34 @@ impl Broker {
         Ok(())
     }
 
+    /// Insert (or renew) a registration, sweeping every entry past the
+    /// TTL on the way. The table is small — one entry per published
+    /// volume that reached this replica — so the sweep is a walk.
+    fn remember(&self, reg: Registration, now: Instant) {
+        let ttl = std::time::Duration::from_secs(self.cfg.registration_ttl_secs);
+        let mut t = self.registrations.lock().unwrap();
+        t.retain(|_, e| now.duration_since(e.at) < ttl);
+        t.insert(reg.volume_id.clone(), Registered { reg, at: now });
+    }
+
+    /// The LIVE registration whose nonce is `session`, or none: an entry
+    /// past the TTL is not live whatever the table still holds, so a
+    /// replica that never saw a `deregister` forgets within one TTL.
+    fn live_registration(&self, session: &str, now: Instant) -> Option<Registration> {
+        let ttl = std::time::Duration::from_secs(self.cfg.registration_ttl_secs);
+        self.registrations
+            .lock()
+            .unwrap()
+            .values()
+            .find(|e| now.duration_since(e.at) < ttl && e.reg.nonce == session)
+            .map(|e| e.reg.clone())
+    }
+
+    fn live_count(&self, now: Instant) -> usize {
+        let ttl = std::time::Duration::from_secs(self.cfg.registration_ttl_secs);
+        self.registrations.lock().unwrap().values().filter(|e| now.duration_since(e.at) < ttl).count()
+    }
+
     pub async fn register(&self, bearer: Option<String>, reg: Registration) -> (StatusCode, String) {
         if let Err(e) = self.node_authenticated(bearer).await {
             return e;
@@ -816,7 +910,7 @@ impl Broker {
             on_behalf_of = ?reg.on_behalf_of,
             "registered"
         );
-        self.registrations.lock().unwrap().insert(reg.volume_id.clone(), reg);
+        self.remember(reg, Instant::now());
         (StatusCode::NO_CONTENT, String::new())
     }
 
@@ -831,7 +925,7 @@ impl Broker {
 
     pub fn status(&self) -> serde_json::Value {
         serde_json::json!({
-            "registrations": self.registrations.lock().unwrap().len(),
+            "registrations": self.live_count(Instant::now()),
             "issued": self.issued.load(Ordering::Relaxed),
             "refused": self.refused.load(Ordering::Relaxed),
             "backend": match &self.cfg.backend { Backend::Static{..} => "static", Backend::Sts{..} => "sts", Backend::Rest{..} => "rest" },
@@ -844,6 +938,9 @@ impl Broker {
             // The plugin refuses `webIdentity` above 1: that arm's exchange
             // is the worker's own and cannot carry a registration.
             "replicas": self.cfg.replicas,
+            // An entry not renewed within it is gone from this replica.
+            "registrationTtlSecs": self.cfg.registration_ttl_secs,
+            "maxInflightReviews": self.cfg.max_inflight_reviews,
         })
     }
 
@@ -859,6 +956,7 @@ impl Broker {
         let assume = warp::post()
             .and(warp::path::end())
             .and(warp::header::optional::<String>("authorization"))
+            .and(warp::body::content_length_limit(BODY_LIMIT))
             .and(warp::body::form::<HashMap<String, String>>())
             .and_then(move |auth, form| {
                 let b = b.clone();
@@ -871,6 +969,7 @@ impl Broker {
         let register = warp::post()
             .and(warp::path!("v1" / "volumes"))
             .and(warp::header::optional::<String>("authorization"))
+            .and(warp::body::content_length_limit(BODY_LIMIT))
             .and(warp::body::json::<Registration>())
             .and_then(move |auth, reg| {
                 let b = b.clone();
@@ -1249,6 +1348,8 @@ mod tests {
                 require_registration: true,
                 arn_partition: "aws".into(),
                 replicas: 1,
+                registration_ttl_secs: 7200,
+                max_inflight_reviews: 64,
             };
             let line = format!("{cfg:?}");
             for secret in ["SECRET-WRITE", "TOKEN-WRITE", "SECRET-READ", "TOKEN-READ", "HEADER-SECRET"] {
@@ -1272,6 +1373,86 @@ mod tests {
         assert_eq!(Backend::Rest { url: "u".into(), extra_headers: BTreeMap::new() }.write_enforcement(), "restDoor");
     }
 
+    /// The one-key static backend, for brokers whose test never mints.
+    fn static_backend() -> Backend {
+        Backend::Static { access_key_id: "k".into(), secret_access_key: "s".into(), session_token: None, read: None }
+    }
+
+    /// The table forgets what nobody renews (§4.13): an entry is live for
+    /// the TTL from its last insert, a renewal restarts its clock, the
+    /// status count is of live entries only, and an insert sweeps the
+    /// dead. The replica that never saw a `deregister` is clean within
+    /// one TTL.
+    #[tokio::test]
+    async fn a_registration_past_the_ttl_is_not_live_and_a_renewal_restarts_its_clock() {
+        let b = broker(static_backend());
+        let ttl = std::time::Duration::from_secs(b.cfg.registration_ttl_secs);
+        let s1 = std::time::Duration::from_secs(1);
+        let t0 = Instant::now();
+        b.remember(reg("n1"), t0);
+        assert_eq!(b.live_registration("n1", t0 + ttl - s1).map(|r| r.nonce), Some("n1".to_string()));
+        assert_eq!(b.live_registration("n2", t0), None, "another nonce is not it");
+        assert_eq!(b.live_registration("n1", t0 + ttl), None, "at the TTL the entry is not live");
+        assert_eq!(b.live_count(t0 + ttl), 0);
+        assert_eq!(b.live_count(t0 + ttl - s1), 1);
+        // Renewed just in time: live for a whole TTL again.
+        b.remember(reg("n1"), t0 + ttl - s1);
+        assert!(b.live_registration("n1", t0 + 2 * ttl - 2 * s1).is_some());
+        assert_eq!(b.live_registration("n1", t0 + 2 * ttl - s1), None);
+        // Another volume registering past that sweeps the dead entry out.
+        let mut other = reg("n9");
+        other.volume_id = "v9".into();
+        b.remember(other, t0 + 2 * ttl);
+        assert_eq!(b.registrations.lock().unwrap().len(), 1, "the sweep left only the live entry");
+        assert_eq!(b.live_registration("n9", t0 + 2 * ttl).map(|r| r.volume_id), Some("v9".to_string()));
+    }
+
+    /// A token that is not even JWT-shaped is refused before any
+    /// TokenReview. This broker's kube client points at a closed port, so
+    /// a review ATTEMPTED comes back Unavailable — which is what the
+    /// shaped control gets, and what the unshaped token must not.
+    #[tokio::test]
+    async fn a_token_that_is_not_a_jwt_is_refused_without_a_review() {
+        for (t, want) in [
+            ("a.b.c", true),
+            ("eyJhbGciOi.eyJzdWIiOiJ4.c2ln_-=", true),
+            ("nope", false),
+            ("a..c", false),
+            ("a.b.c.d", false),
+            ("a.b/c.d", false),
+            ("a.b.c d", false),
+            ("", false),
+        ] {
+            assert_eq!(jwt_shaped(t), want, "{t:?}");
+        }
+        let b = broker(static_backend());
+        match b.review("nope").await {
+            Err(ReviewError::Refused(m)) => assert!(m.contains("JWT"), "{m}"),
+            Err(ReviewError::Unavailable(m)) => panic!("a review was attempted: {m}"),
+            Ok(_) => panic!("accepted"),
+        }
+        assert!(matches!(b.review("a.b.c").await, Err(ReviewError::Unavailable(_))), "the control: a shaped token reaches the review");
+    }
+
+    /// Past `max_inflight_reviews` a review is an OUTAGE (the plugin keeps
+    /// its key through a 503), not a refusal, and the API server is not
+    /// asked; with the permits back it is asked again.
+    #[tokio::test]
+    async fn in_flight_reviews_are_bounded_and_the_overflow_is_an_outage_not_a_refusal() {
+        let b = broker(static_backend());
+        let all = b.reviews.acquire_many(b.cfg.max_inflight_reviews as u32).await.unwrap();
+        match b.review("a.b.c").await {
+            Err(ReviewError::Unavailable(m)) => assert!(m.contains("in flight") && m.contains("FLINT_S3B_MAX_INFLIGHT_REVIEWS"), "{m}"),
+            Err(ReviewError::Refused(m)) => panic!("refused, not an outage: {m}"),
+            Ok(_) => panic!("accepted"),
+        }
+        drop(all);
+        match b.review("a.b.c").await {
+            Err(ReviewError::Unavailable(m)) => assert!(!m.contains("in flight"), "still bounded after the permits came back: {m}"),
+            other => panic!("{}", other.map(|_| "accepted".to_string()).unwrap_or_else(|e| e.to_string())),
+        }
+    }
+
     /// A broker over `backend`, for `mint`. Its kube client points at
     /// nothing: `mint` never calls the apiserver.
     fn broker(backend: Backend) -> Arc<Broker> {
@@ -1287,6 +1468,8 @@ mod tests {
             require_registration: true,
             arn_partition: "aws".into(),
             replicas: 1,
+            registration_ttl_secs: 7200,
+            max_inflight_reviews: 64,
         };
         crate::install_crypto_provider();
         let client = Client::try_from(kube::Config::new("http://127.0.0.1:9".parse().unwrap())).unwrap();
@@ -1397,6 +1580,20 @@ mod tests {
         std::env::set_var("FLINT_S3B_REPLICAS", "2");
         assert_eq!(BrokerConfig::from_env().unwrap().replicas, 2);
         std::env::remove_var("FLINT_S3B_REPLICAS");
+        // The table TTL: twice the longest credential, never under the
+        // floor; both knobs overridable.
+        let c = BrokerConfig::from_env().unwrap();
+        assert_eq!(c.registration_ttl_secs, REGISTRATION_TTL_FLOOR_SECS, "2 × 3600 = the floor");
+        assert_eq!(c.max_inflight_reviews, 64);
+        std::env::set_var("FLINT_S3B_MAX_LIFETIME_SECS", "7200");
+        assert_eq!(BrokerConfig::from_env().unwrap().registration_ttl_secs, 14400);
+        std::env::set_var("FLINT_S3B_REGISTRATION_TTL_SECS", "600");
+        std::env::set_var("FLINT_S3B_MAX_INFLIGHT_REVIEWS", "3");
+        let c = BrokerConfig::from_env().unwrap();
+        assert_eq!((c.registration_ttl_secs, c.max_inflight_reviews), (600, 3));
+        for k in ["FLINT_S3B_MAX_LIFETIME_SECS", "FLINT_S3B_REGISTRATION_TTL_SECS", "FLINT_S3B_MAX_INFLIGHT_REVIEWS"] {
+            std::env::remove_var(k);
+        }
         // Static: a read key set is both halves or neither.
         std::env::set_var("FLINT_S3B_BACKEND", "static");
         std::env::set_var("FLINT_S3B_STATIC_ACCESS_KEY_ID", "W");
