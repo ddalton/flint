@@ -185,6 +185,27 @@ pub async fn restore(sc: &mut Syncer) -> ForgeResult<RestoreReport> {
         }
     }
 
+    // A pack the snapshot NAMES is not on its way out: take it off the
+    // retained list (`ForgeSyncRewind`'s RestoreDropsNamedRetention). One
+    // can be both — this syncer folded and retained it, history was
+    // rewound, and a re-push reproduced it by name on a successor whose
+    // snapshot names it again. Left there, the next batch, which names the
+    // snapshot's packs LESS what retention holds, drops it from the
+    // snapshot with the only copy of objects a ref still needs, and
+    // retention then unlinks it from the disk.
+    {
+        let named: BTreeSet<&String> = cell.snap.packs.iter().collect();
+        let before = sc.retained.len();
+        sc.retained.retain(|r| !named.contains(&r.name));
+        if sc.retained.len() != before {
+            eprintln!(
+                "flint-forge: restore took {} pack(s) the snapshot names off the retained list",
+                before - sc.retained.len()
+            );
+            super::fold::save_retained(sc)?;
+        }
+    }
+
     // The base marker: the named pack whose bitmap the bucket carries;
     // the largest of them if a legacy `repack -b` pack coexists with a
     // new base (git picks one bitmap silently).

@@ -4706,6 +4706,44 @@ async fn a_restore_prunes_packs_the_snapshot_does_not_name_unless_retained() {
     assert!(rig.sc.git.pack_path(&named[0]).exists(), "the named pack is kept");
 }
 
+/// A restore takes every pack the snapshot NAMES off the retained list
+/// (`ForgeSyncRewind`'s RestoreDropsNamedRetention, 2026-09-28). A pack
+/// can be both: this syncer folded it and retained it, history was
+/// rewound, a re-push reproduced it by name on a successor, and the
+/// snapshot names it again. Left on the list, the next batch — which
+/// names the snapshot's packs LESS what retention holds — drops it from
+/// the snapshot, and with it the only copy of objects a ref still needs;
+/// retention then unlinks it from the disk too.
+///
+/// The fixture puts the snapshot's own pack on the retained list, which
+/// is that state without the rewind. The control is the batch after the
+/// restore: it must still name the pack that holds the ref's history.
+#[tokio::test]
+async fn a_restore_takes_a_pack_the_snapshot_names_off_the_retained_list() {
+    let mut rig = Rig::new().await;
+    rig.tiers_only();
+    rig.start().await;
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+    let named = rig.sc.cell().unwrap().snap.packs.clone();
+    assert_eq!(named.len(), 1, "fixture: one named pack holds c0");
+    rig.sc.retained.push(fold::Retained { name: named[0].clone(), unlink_after_unix: 0 });
+    fold::save_retained(&rig.sc).unwrap();
+
+    restore::restore(&mut rig.sc).await.expect("restore");
+    assert!(
+        !rig.sc.retained.iter().any(|r| r.name == named[0]),
+        "a pack the snapshot names is not on its way out: {:?}",
+        rig.sc.retained
+    );
+    fold::load_state(&mut rig.sc).unwrap();
+    assert!(!rig.sc.retained.iter().any(|r| r.name == named[0]), "and the saved list says so too");
+
+    let _c1 = rig.push_commit("refs/heads/main", Some(&c0), "c1").await;
+    let packs = rig.sc.cell().unwrap().snap.packs.clone();
+    assert!(packs.contains(&named[0]), "the next batch still names the pack holding c0: {packs:?}");
+    assert!(rig.sc.git.pack_path(&named[0]).exists(), "and it is on the disk");
+}
+
 /// The counters M6's vacuity guard rests on. A byte window in which no
 /// fold committed has measured the ladder's ABSENCE, not the ladder, and
 /// the drill needs that as a fact reported by the process rather than a

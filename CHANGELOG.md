@@ -12,6 +12,23 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Fixed
+
+- **flint-forge: a restore takes the packs its snapshot names off the
+  retained list** (2026-10-05). A pack can be both named and retained: a
+  syncer folds and retains it, history is rewound, and a re-push
+  reproduces it by name on a successor whose snapshot names it again.
+  When the first syncer later restored, the pack stayed on its retained
+  list, and its next batch, which names the snapshot's packs less what
+  retention holds, dropped it from the snapshot together with the only
+  copy of objects a ref still needed. A successor's restore would then
+  refuse the repository, and retention and the sweep removed the pack.
+  The restore now drops every named pack from retention and saves the
+  list, the rule `ForgeSyncRewind` added in the model on 2026-09-28.
+  Test-first: `a_restore_takes_a_pack_the_snapshot_names_off_the_retained_list`
+  failed at both the retained list and the next batch's snapshot before
+  the fix.
+
 ## [1.58.0] - 2026-10-05
 
 A hardening release for the S3 CSI driver and its broker, after a gap
