@@ -1,0 +1,6 @@
+tlc-rs compiled checkers (99beb8d0 + compiled VIEW parts), 192 workers, spot c8g.48xlarge, 2026-10-05; ForgeSyncKeptSet.tla md5 d20e8651.
+Expectations from WORLDS.tsv (written before any run): both must fire. Neither does.
+ForgeSyncKeptSetProbeCovered     MISMATCH (probe never fires)  exp=ProbeKeptSetDropsCovered                 | No error has been found | 420041931 states generated, 86289224 distinct states found. Depth 62 | 45s, 1,921,348 distinct/s
+ForgeSyncKeptSetVsOriginal       MISMATCH (variant vacuous)    exp=Inv_(AckedIsDurable|LandedPackComplete)  | No error has been found | 420041931 states generated, 86289224 distinct states found. Depth 62 | 42s, 2,054,722 distinct/s
+Both equal TLC's ForgeSyncKeptSetHolds count (RESULTS-box-2026-09-29.txt: 86,289,224 distinct, depth 62, 83 min) — at 192 workers.
+An earlier ProbeCovered on 99beb8d0's tlc-rs (VIEW interpreted) ran at ~77K distinct/s and was stopped at depth 39, 45,718,337 distinct.

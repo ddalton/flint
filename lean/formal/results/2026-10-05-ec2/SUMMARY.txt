@@ -1,0 +1,57 @@
+Spot c8g.48xlarge (192 vCPU, 371 GB), us-west-1c, 2026-10-05 18:26Z-20:08Z, $1.28/h
+(~$2.20). Torn down: instance terminated, spot request cancelled, bucket and inline
+policy deleted, zero set checked in us-east-1/us-east-2/us-west-1/us-west-2.
+
+Payload: main 99beb8d0 (LeanP1.tla md5 94da7541, ForgeSyncKeptSet.tla md5 d20e8651).
+One compiled tlc-rs checker per world, 192 workers. The forge worlds ran on tlc-rs with
+compiled VIEW parts (the commit beside this one); everything else on 99beb8d0's tlc-rs.
+RESULTS.txt is the run's own log, including the lines added by hand.
+
+LEANP1 RECORD WORLDS — decided for the first time
+  NoConvergence (ContentConverges=FALSE, Holds1p3b's bounds): HOLDS, 652,173,065 distinct,
+    depth 46, 315 s. Content convergence is not load-bearing for the safety claims; with it
+    on the same world is 461,094,969 (convergence is an economy, not a rule).
+  CollectorGreedy (CollectorSparesCited=FALSE): STOPPED by hand at depth 30. Its counts are
+    LeanP1Holds' exactly (595,889,257 generated / 171,949,339 distinct at depth 19;
+    544,004,332 at depth 23): the flag is read only in Collect, and RetireAge=TRUE (shipped)
+    discards what it filters. The world is vacuous on the shipped shape.
+  The rule's real test, with retire age OFF:
+    NoAge / CollectorGreedyNoAge: both violate Inv_ReaderFetches at depth 8 (by design: a
+      reader loses a retired handle without the age, = ReaderLoses). That masks the rest.
+    NoAgeNoReader (every other invariant): HOLDS, 713,160,844 distinct, depth 36.
+    CollectorGreedyNoAgeNoReader: HOLDS with the SAME counts (3,044,269,759 generated /
+      713,160,844 distinct). "Spare what the install cites" changes no reachable state even
+      without retire age: the retired set is what the commit stopped citing, so the install
+      never cites it. The guard is redundant by construction in the model.
+
+THREE SYNCERS (open-list row 13) — Holds1p3b's invariants, one path, MaxSyncs 0, MaxCopies 1
+  rung  bounds (MaxMint UI Barriers Restarts)   2 syncers          3 syncers
+  L1    2 0 1 0                                 16,481 (Mac)        449,595 HOLDS (Mac)
+  L2    2 1 2 0                                 510,613 (Mac)       39,330,288 HOLDS (Mac)
+  L3    3 1 2 0                                 10,676,334 (Mac)    1,421,211,248 HOLDS (box, depth 44)
+  L4    3 1 3 0                                 48,353,470 HOLDS    UNDECIDED: OOM-killed at depth 26,
+                                                                    983,406,036 distinct, no violation
+  The third syncer multiplies the world by 27 (L1), 77 (L2), 133 (L3). L4 W3 died for memory:
+  its 262M-state queue stayed in RAM (-queue-mem 200000 is MB of SERIALIZED queue; the live
+  states it expands into took the rest of 371 GB). A rerun needs -queue-mem ~40000 and
+  likely more than the 300 GB disk.
+
+FORGE OPEN3 (formal/pending/forge-keptset) — see its NOTES.md
+  ProbeCovered and VsOriginal: both "No error has been found", 420,041,931 generated /
+  86,289,224 distinct, depth 62 — exactly TLC's count for ForgeSyncKeptSetHolds (09-29, 83 min).
+  Both are vacuous at these bounds.
+
+TLC (#2, conditional): AllHolds probed 600 s each: 48 workers 93,566,475 distinct, 192 workers
+  90,058,346 (96%). Does not scale; the full run was not made (the user's condition).
+
+THE COMPILED CHECKER AND VIEW: ProbeCovered first ran at ~77K distinct/s on 192 cores
+  (pre-fix: 45,718,337 distinct at depth 39 in 594 s). perf (20 s, 183K samples): 63% in
+  tlc_rs::eval::Program (eval/each/bind) — symkey.rs evaluated each VIEW part in the
+  interpreter for every new state; the rest in Value::elems/drop/clone. With the VIEW parts
+  compiled: 1,921,348 distinct/s (ProbeCovered, 45 s) and 2,054,722/s (VsOriginal, 42 s),
+  25x. The LeanP1 worlds have no VIEW/SYMMETRY and were unaffected.
+
+Run-handling notes: the reorder (by hand, via SSM, to run LeanP1 work first) also killed the
+results sync loop (same command line as the runner); results reached S3 again from ~19:12Z,
+nothing lost on the box. The first speed monitor read S3 timestamps, which the sync rewrites
+every minute, and tracked the wrong world for a while.

@@ -1,0 +1,23 @@
+start 2026-10-05T18:27:21Z; deadline 2026-10-06T03:26:58Z; LeanP1.tla md5 94da7541; ForgeSyncKeptSet.tla md5 d20e8651
+LeanP1CollectorGreedy                STOPPED-BY-HAND  identical to LeanP1Holds through depth 28 (595,889,257 gen / 171,949,339 distinct at d19; 544,004,332 at d23): CollectorSparesCited is read only in Collect, where RetireAge=TRUE discards it; vacuous on the shipped shape. Replaced by LeanP1NoAge + LeanP1CollectorGreedyNoAge (after the jobs).
+LeanP1CollectorGreedy              RECORDED       exp=RECORD                                   |                                                            | progress: depth 30, 5846158049 generated, 1470103771 distinct (0 fingerprint spills), 98072706 on queue (0 on disk), 737 | 779s cap 7200s
+LeanP1NoConvergence                RECORDED       exp=RECORD                                   | No error has been found                                    | 2681470817 states generated, 652173065 distinct states found. Depth 46 | 315s cap 7200s
+ForgeSyncKeptSetProbeCovered         STOPPED-BY-HAND  ~77K distinct/s (perf: 63% in tlc-rs's interpreter inside the compiled checker); rerun after compile support lands; LeanP1 work moved ahead (user)
+start 2026-10-05T18:58:16Z; deadline 2026-10-06T03:26:58Z; LeanP1.tla md5 94da7541; ForgeSyncKeptSet.tla md5 d20e8651
+LeanP1NoAge                        MISMATCH       exp=HOLDS                                    | Error: Invariant Inv_ReaderFetches is violated             | 456524 states generated, 187970 distinct states found. Depth 8 | 0s cap 3600s
+LeanP1CollectorGreedyNoAge         RECORDED       exp=RECORD                                   | Error: Invariant Inv_ReaderFetches is violated             | 355676 states generated, 147980 distinct states found. Depth 8 | 0s cap 3600s
+LeanP1NoAge / LeanP1CollectorGreedyNoAge: Inv_ReaderFetches fails at depth 8 without RetireAge (by design, = ReaderLoses) and masks the rest; my HOLDS expectation was wrong. Requeued as ...NoReader (every other invariant), before the forge worlds.
+LeanP1Size3L3W3                    OK-HOLDS       exp=HOLDS                                    | No error has been found                                    | 6284200437 states generated, 1421211248 distinct states found. Depth 44 | 827s cap 5400s
+LeanP1Size3L4W2                    OK-HOLDS       exp=HOLDS                                    | No error has been found                                    | 180146151 states generated, 48353470 distinct states found. Depth 44 | 21s cap 1800s
+LeanP1Size3L4W3                    MISMATCH       exp=HOLDS                                    |                                                            | progress: depth 26, 3945375616 generated, 983406036 distinct (0 fingerprint spills), 262042955 on queue (0 on disk), 507 | 647s cap 7200s
+LEANDONE 2026-10-05T19:25:48Z
+start 2026-10-05T19:27:09Z; deadline 2026-10-06T03:26:58Z; LeanP1.tla md5 94da7541; ForgeSyncKeptSet.tla md5 d20e8651
+LeanP1Size3L4W3: NOT a mismatch — OOM-KILLED at 19:25:38Z (anon-rss 386 GB of 371 GB; the queue held 262M states in memory, 0 on disk, despite -queue-mem 200000). UNDECIDED at depth 26, 983,406,036 distinct, no violation found.
+LeanP1NoAgeNoReader                OK-HOLDS       exp=HOLDS                                    | No error has been found                                    | 3044269759 states generated, 713160844 distinct states found. Depth 36 | 366s cap 3600s
+LeanP1CollectorGreedyNoAgeNoReader RECORDED       exp=RECORD                                   | No error has been found                                    | 3044269759 states generated, 713160844 distinct states found. Depth 36 | 355s cap 3600s
+ForgeSyncKeptSetProbeCovered       MISMATCH       exp=ProbeKeptSetDropsCovered                 | No error has been found                                    | 420041931 states generated, 86289224 distinct states found. Depth 62 | 45s cap 13102s
+ForgeSyncKeptSetVsOriginal         MISMATCH       exp=Inv_(AckedIsDurable|LandedPackComplete)  | No error has been found                                    | 420041931 states generated, 86289224 distinct states found. Depth 62 | 42s cap 13102s
+FORGEDONE 2026-10-05T19:42:53Z
+TLC scaling on AllHolds, 600 s each: 48 workers 93566475 distinct, 192 workers 90058346
+TLC: 192/48 = 96%, a full run needs ~5036s at 192, 24819s usable
+TLC: does not scale or does not fit — not run (user's condition)

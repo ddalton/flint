@@ -60,8 +60,19 @@ limit each (`RESULTS-mac-2026-09-29.txt`). The box ran the large ones
 | WhileServing | fires Inv_LandedPackComplete |
 | ProbeCommits | fires: a kept-set commit lands |
 | ProbeResidue | fires: it drops a pack holding an unreachable object |
-| ProbeCovered | no result in 15 min on the Mac; running on the box since 01:15 (6 h cap) |
-| VsOriginal | no result in 15 min on the Mac; queued behind it (`after-holds.sh`) |
+| ProbeCovered | **does NOT fire** — HOLDS, 86,289,224 distinct, depth 62 (EC2 2026-10-05, compiled tlc-rs, 45 s): exactly Holds' count, so the probe never trips |
+| VsOriginal | **does NOT fire** — HOLDS, 86,289,224 distinct, depth 62 (EC2 2026-10-05, 42 s): the variant changes no reachable state |
+
+**2026-10-05: both open worlds decided, and both are VACUOUS at these
+bounds** (`RESULTS-ec2-2026-10-05.txt`, `out/*-ec2-2026-10-05.out`). Each reached exactly
+TLC's Holds count (86,289,224 distinct, depth 62): the probe never fires
+and the shrinking-set re-test never matters, because no reachable state
+has two named packs holding the same reachable object — the case both
+need. The coverage half of the rule is still refuted only by AnyDrop. To
+exercise it, a world needs packs that overlap: a second fold, or pushes
+that share an object. Both had been "undecided" since 09-29 only because
+the checker was slow: tlc-rs evaluated the VIEW in its interpreter for
+every state (fixed with compiled VIEW parts; 77K -> 1.9M distinct/s).
 
 What is shown: the code's collector (no roll-up, drop only what the
 KEPT packs cover, CAS, unlink) holds on the shipped rules, and it does

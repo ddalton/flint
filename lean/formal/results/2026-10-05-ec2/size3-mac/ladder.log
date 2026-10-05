@@ -1,0 +1,8 @@
+LeanP1.tla md5 94da7541
+L1 w2 mint=2 ui=0 bar=1 rst=0 syn=0 cop=1  5s  No error has been found | 59274 states generated, 16481 distinct states found. Depth 25. Checked in 0.238s (69338 distinct/s).
+L1 w3 mint=2 ui=0 bar=1 rst=0 syn=0 cop=1  10s  No error has been found | 1954072 states generated, 449595 distinct states found. Depth 33. Checked in 8.202s (54815 distinct/s).
+L2 w2 mint=2 ui=1 bar=2 rst=0 syn=0 cop=1  10s  No error has been found | 1736885 states generated, 510613 distinct states found. Depth 32. Checked in 6.313s (80887 distinct/s).
+L2 w3 mint=2 ui=1 bar=2 rst=0 syn=0 cop=1  893s  No error has been found | 162815122 states generated, 39330288 distinct states found. Depth 40. Checked in 890.025s (44190 distinct/s).
+L3 w2 mint=3 ui=1 bar=2 rst=0 syn=0 cop=1  192s  No error has been found | 39223077 states generated, 10676334 distinct states found. Depth 36. Checked in 190.026s (56184 distinct/s).
+L3 w3 mint=3 ui=1 bar=2 rst=0 syn=0 cop=1  904s  CAP-15min | progress: depth 19, 155476435 generated, 43171817 distinct (0 fingerprint spills), 17925961 on queue (17537865 on disk), 877.2s
+L4 w2 mint=3 ui=1 bar=3 rst=0 syn=0 cop=1  1560s  CAP-15min | progress: depth 29, 102796547 generated, 28937630 distinct (0 fingerprint spills), 3670224 on queue (3178960 on disk), 502.1s

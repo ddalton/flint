@@ -211,8 +211,16 @@ large HOLDS verdicts are from tlc-rs alone (the compiled checker, main
 129adc8b) — TLC was waived for LeanP1Holds and not run for the other two;
 where both ran (`Holds1p3b`) the distinct counts agree exactly. Liveness
 holds only at a reduced bound (`LiveHoldsSmall`: one path, no removals;
-the full `LiveHolds` cannot finish). Two RECORD worlds (CollectorGreedy,
-NoConvergence) were stopped, not decided.
+the full `LiveHolds` cannot finish). The two RECORD worlds were stopped
+then and decided on 2026-10-05 (`formal/results/2026-10-05-ec2/`):
+NoConvergence HOLDS (652,173,065 distinct), so content convergence is an
+economy, not a safety rule; CollectorGreedy is LeanP1Holds' world state for
+state (`CollectorSparesCited` is read only where `RetireAge` discards it),
+and even with the retire age off the guard changes no reachable state —
+NoAgeNoReader and CollectorGreedyNoAgeNoReader both hold at 713,160,844
+distinct, identically, because the retired set is what the commit stopped
+citing. "Spare what the install cites" is redundant by construction in the
+model; whether a crash or restart path in the code needs it is not modelled.
 
 The model gained scope and rescope on 2026-10-01 (4da62d4e; it found
 L-131, a narrow that unlinked the agent's write), a failed fetch
@@ -225,8 +233,14 @@ delete, a rename) are a third party writing the same document. The UI
 is not a third syncer: it holds no tree, takes no lease, never consumes
 and never sweeps, so what only a third syncer exercises — a lease passed
 among three, a sweep while two others hold handles, a conflict naming
-two losers — is unmodelled here. §4.2's three-writer world is the
-pre-step-5 model (`LeanSubtree.tla`).
+two losers — was unmodelled here until 2026-10-05: three-syncer worlds at
+Holds1p3b's invariants (one path, no syncs, one copy) HOLD at three rungs —
+449,595 and 39,330,288 distinct (Mac), and 1,421,211,248 at MaxMint 3, a UI
+save and two barriers (EC2, depth 44). The next rung (three barriers) died
+for memory at 983M distinct with no violation. A third syncer multiplies
+these worlds 27-133x, so the full Holds bounds with three syncers are out
+of reach. §4.2's three-writer world is the pre-step-5 model
+(`LeanSubtree.tla`).
 
 A behaviour change that follows from the scope filter: a scoped tree no
 longer receives a peer's change, or a UI promote, outside its scope.
@@ -511,7 +525,7 @@ encodes today's answer.
 | 10 | ~~retire or restate the three enforcers no run checks, and `Inv_NoResurrection` over state (§4.12)~~ **done 2026-09-20**: the three definitions are out of `LeanSubtree.tla` (their rows retired from §1 on 2026-09-19), and S4 row 1 is now the action property `Prop_NoResurrection` — no step that is a restart creates a local file — which the rematerialise mutation must violate, in place of a ghost only the mutation wrote | — |
 | 11 | ~~the review of 2026-09-18's other routes~~ **H2, H3, M7, H4, H5, H7 done 2026-09-19** (§4.15); H6 shipped (row H6); H5's compose path done in f6f6a892 (`ComposeSpec` takes the opened file, across flint-store, forge packio and the CSI tier). **Open:** the review's M3 (a renew inside the pre-CAS phase, availability only since H2) | a day |
 | 12 | a TLC confirmation of one large LeanP1 HOLDS (LeanP1Holds, AllHolds or DeleteOverrideOff), so the headline verdicts are not one checker's word | an EC2 box, hours |
-| 13 | a three-SYNCER LeanP1 world (one path, `Writers = {A, B, C}`), so lease handoff, the sweep and conflict records are checked with more than two holders on the shipped shape | sizing first; likely a box |
+| 13 | a three-SYNCER LeanP1 world — **partly done 2026-10-05**: three rungs HOLD (up to 1.42B distinct, one path, a UI save, two barriers; §3.2); the three-barrier rung was OOM-killed at 983M with no violation and needs a disk-spilling rerun; Holds1p3b's full bounds with three syncers are tens of billions of states | the three-barrier rung: a box with more disk, ~2 h |
 
 Regenerate `COVERAGE.md` with `python3 lean/formal/coverage.py` and check
 it with `--check`.
