@@ -58,7 +58,7 @@ awk -v n="$N" -v mode="$MODE" -v defsecs="$DEFAULT_SECS" -v costs="$COSTS" '
   # ever stops being true the count assertion in check-tla.sh fails
   # loudly rather than quietly under-checking.
   FNR==NR {
-    if ($0 ~ /^(strict_run|mutation_run|liveness_mutation_run)[ ]/) {
+    if ($0 ~ /^(strict_run|mutation_run|liveness_mutation_run|action_mutation_run)[ ]/) {
       runs[$2]++; total_runs++
       if (!($2 in seen)) { seen[$2]=1; mods[++m]=$2 }
       cfg[$2, runs[$2]] = $3

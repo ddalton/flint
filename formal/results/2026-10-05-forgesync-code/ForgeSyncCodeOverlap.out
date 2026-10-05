@@ -1,0 +1,9 @@
+tlc-rs: ForgeSync (35 variables, 1 symmetry permutations), 192 workers, generated engine; loaded in 0.003s
+progress: depth 34, 127522793 generated, 32305110 distinct (0 fingerprint spills), 7299243 on queue (0 on disk), 12.2s
+progress: depth 37, 258540558 generated, 61303203 distinct (0 fingerprint spills), 10751488 on queue (0 on disk), 24.6s
+progress: depth 39, 371223171 generated, 84701450 distinct (0 fingerprint spills), 11880363 on queue (0 on disk), 35.2s
+progress: depth 41, 485685302 generated, 107680256 distinct (0 fingerprint spills), 11206742 on queue (0 on disk), 46.0s
+progress: depth 44, 624923354 generated, 134667881 distinct (0 fingerprint spills), 7664074 on queue (0 on disk), 59.5s
+progress: depth 49, 729764583 generated, 153080161 distinct (0 fingerprint spills), 1593154 on queue (0 on disk), 70.1s
+Model checking completed. No error has been found.
+745985842 states generated, 155567536 distinct states found. Depth 63. Checked in 72.341s (2150461 distinct/s).

@@ -1,5 +1,23 @@
 ------------------------------ MODULE ForgeSync ------------------------------
 (***************************************************************************)
+(* 2026-10-05: two sandboxes merged in, the rules the code now runs.      *)
+(*  - NameNeeded (formal/pending/forge-needed, code 381bcc90): a batch     *)
+(*    names what its push NEEDS — the local packs holding an object of    *)
+(*    the new tip that no named pack holds (rev-list --objects <new tips> *)
+(*    --not <snapshot tips>, then the packs whose index holds one). It is *)
+(*    derived from git and the snapshot at the batch: no hook record to   *)
+(*    lose, no fallback (D5's), no directory listing whose retained packs *)
+(*    must be subtracted (F6). It overrides NameAcceptedSet when both are *)
+(*    on. Mutation: NeededNamesQueued (the rev-list over a QUEUED push's  *)
+(*    tip too — its pack named before its ref moves, the runcd gap).      *)
+(*  - ReclaimKeptSet (formal/pending/forge-keptset, OPEN3): the restore's *)
+(*    reclaim as restore.rs reclaim_at_rest runs it — it builds NOTHING;  *)
+(*    it drops what the KEPT named packs cover, renews, CASes, unlinks.   *)
+(*    Mutations KeptSetAnyDrop/VsOriginal/WhileServing/NoRenew; probes    *)
+(*    ProbeKeptSet{Commits,DropsResidue,DropsCovered}; PacksOverlap makes *)
+(*    two named packs share an object so the COVERED drop is reachable.   *)
+(***************************************************************************)
+(***************************************************************************)
 (* flint forge's push path: hook -> batch -> pack upload -> ONE snapshot   *)
 (* CAS -> ref update -> acknowledgement, with a crash at every step; the   *)
 (* lease's progress-gated renewer beside it; a challenger that counts     *)
@@ -181,14 +199,30 @@ CONSTANTS
   ForgetPushPack,       \* mutation: direction 5 without the push->pack mapping
   ProveFromDisk,        \* mutation: a proof is taken over the object DIRECTORY, not the named packs (F2)
   ListingKeepsRetained, \* mutation: a batch lists the packs retention holds on disk
-  GraceOutlivesUpload   \* the grace axiom; FALSE is lean's RacyGrace mutation
+  GraceOutlivesUpload,  \* the grace axiom; FALSE is lean's RacyGrace mutation
+  \* ── 2026-10-05: the batch names what its pushes NEED (381bcc90) ──
+  NameNeeded,           \* a batch names what its push needs (overrides the two above)
+  NeededNamesQueued,    \* mutation: the need is taken over the queued pushes' tips too
+  \* ── OPEN3 (2026-09-29): the collector AS THE CODE RUNS IT ──
+  ReclaimKeptSet,       \* the reclaim builds NOTHING: restore.rs reclaim_at_rest (see KeptSetRead)
+  KeptSetAnyDrop,       \* mutation: the kept-set reclaim drops without the coverage test
+  KeptSetVsOriginal,    \* mutation: each drop tested against the ORIGINAL named set, not what stays kept
+  KeptSetWhileServing,  \* mutation: the kept-set reclaim runs between batches on a SERVING syncer
+  KeptSetNoRenew,       \* mutation: the kept-set CAS without the renewal before it
+  \* ── 2026-10-05: packs that OVERLAP ──
+  PacksOverlap          \* every push's pack after the first ALSO carries the first push's
+                        \* object, as a real pack may (a parent commit still in flight, an
+                        \* imperfect negotiation). Without it no two named packs ever hold
+                        \* the same object, and the kept set's COVERED drop is unreachable:
+                        \* ProbeCovered and VsOriginal held at exactly Holds' count (EC2
+                        \* 2026-10-05). Breaks the symmetry between pushes: use SymOverlap.
 
 Stages == {"none", "judged", "renewed", "hashed", "initiated", "uploaded",
            "cas", "refs"}
 States == {"idle", "watching", "claimed", "rotating", "restoring",
            "reclaiming", "serving", "pushing"}
 PushStates == {"new", "sent", "acked", "failed"}
-FoldStages == {"none", "planned", "initiated", "uploaded", "renewed"}
+FoldStages == {"none", "planned", "initiated", "uploaded", "renewed", "keptRenewed"}
 
 VARIABLES
   \* ── the bucket ──
@@ -234,6 +268,9 @@ vars == <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease, lastTok,
 
 NoBatch   == [push |-> 0, stage |-> "none", listed |-> {}]
 ZeroLease == [ep |-> 0, tok |-> 0]
+
+\* The push whose object every other push's pack carries under PacksOverlap.
+FirstPush == CHOOSE p \in Pushes : TRUE
 NoBelief  == [etag |-> 0, main |-> 0, packs |-> {}]
 NoFold    == [id |-> 0, inputs |-> {}, stage |-> "none", base |-> FALSE, at |-> {}, atRest |-> FALSE]
 
@@ -289,7 +326,9 @@ Init ==
   /\ hbDue = [s \in Syncers |-> FALSE]
   /\ pushState = [p \in Pushes |-> "new"]
   /\ pushTo = [p \in Pushes |-> NoSyncer]
-  /\ holds = [q \in PackIds |-> IF q \in Pushes THEN {q} ELSE {}]
+  /\ holds = [q \in PackIds |-> IF q \in Pushes
+                                  THEN {q} \cup (IF PacksOverlap /\ q # FirstPush THEN {FirstPush} ELSE {})
+                                  ELSE {}]
   /\ fold = [s \in Syncers |-> NoFold]
   /\ foldBudget = MaxFolds
   /\ crashes = 0 /\ renewBudget = MaxRenews /\ claimBudget = MaxClaims
@@ -787,13 +826,27 @@ AcceptedListing(s, lost) ==
   IF ~lost THEN kept \cup ({batch[s].push} \cap (localPacks[s] \ retained[s]))
   ELSE IF ForgetPushPack THEN kept ELSE Listing(s)
 
+\* NAME WHAT IS NEEDED (NameNeeded).  What the snapshot already names, plus
+\* every pack on the DISK (retention included: nothing is subtracted)
+\* holding a pushed object no named pack holds.  History is linear, so
+\* the tip's ancestors have landed and are held (Inv_LandedPackComplete);
+\* the new objects are the push's own.  The mutation takes the tips of
+\* every push queued here as well.
+NeededListing(s) ==
+  LET kept == belief[s].packs
+      have == UNION {holds[q] : q \in kept}
+      tips == {batch[s].push} \cup (IF NeededNamesQueued THEN Queued(s) ELSE {})
+      need == tips \ have IN
+  kept \cup {q \in localPacks[s] : holds[q] \cap need # {}}
+
 \* The checksum pass over every pack above the whole-PUT ceiling: real
 \* work; it ticks progress only in the fixed tree.
 BatchHash(s) ==
   /\ st[s] = "pushing" /\ batch[s].stage = "renewed"
-  /\ \E lost \in (IF NameAcceptedSet THEN BOOLEAN ELSE {FALSE}) :
+  /\ \E lost \in (IF NameAcceptedSet /\ ~NameNeeded THEN BOOLEAN ELSE {FALSE}) :
        batch' = [batch EXCEPT ![s].stage = "hashed",
-                   ![s].listed = IF NameAcceptedSet THEN AcceptedListing(s, lost) ELSE Listing(s)]
+                   ![s].listed = IF NameNeeded THEN NeededListing(s)
+                                 ELSE IF NameAcceptedSet THEN AcceptedListing(s, lost) ELSE Listing(s)]
   /\ realMoved' = [realMoved EXCEPT ![s] = TRUE]
   /\ sensorMoved' = [sensorMoved EXCEPT ![s] = @ \/ TickOnHash]
   /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease,
@@ -961,7 +1014,10 @@ Crash(s) ==
 \* allowed (the base rebuild's case), which is what lets two pushes
 \* reach every ordering the mutations need.
 FoldPlan(s) ==
-  /\ st[s] \in {"serving", "reclaiming"} /\ batch[s].stage = "none"
+  \* ReclaimKeptSet: the code builds no pack in the reclaim window, so
+  \* no fold is planned there; the window's collector is KeptSetRead.
+  /\ st[s] \in (IF ReclaimKeptSet THEN {"serving"} ELSE {"serving", "reclaiming"})
+  /\ batch[s].stage = "none"
   /\ fold[s].stage = "none" /\ foldBudget > 0
   /\ \E f \in FoldIds, S \in SUBSET belief[s].packs, base \in BOOLEAN :
        /\ holds[f] = {} /\ Cardinality(S) >= 1
@@ -1142,7 +1198,7 @@ ReclaimDropSet(s) ==
 \* rather than recover from one.
 FoldAbandon(s) ==
   /\ ~FoldNoCoverageCheck
-  /\ fold[s].stage # "none"
+  /\ fold[s].stage \notin {"none", "keptRenewed"}
   /\ ~FoldCovers(s)
   /\ fold' = [fold EXCEPT ![s] = NoFold]
   /\ UNCHANGED <<cell, nextTok, snap, packObj, idxObj, uploads, st, lease,
@@ -1286,6 +1342,113 @@ FoldCommit(s) ==
   /\ UNCHANGED FoldPlanVars
 
 (***************************************************************************)
+(* OPEN3 (2026-09-29): THE COLLECTOR THE CODE RUNS.                        *)
+(*                                                                         *)
+(* FoldCommit's reclaim arm above names the fold's own roll-up `f` beside  *)
+(* the kept set, so "the kept set ALONE covers" was argued a fortiori and  *)
+(* never checked. `restore.rs` reclaim_inner builds no pack: it reads what *)
+(* the snapshot's refs reach, keeps a named pack unless every REACHABLE    *)
+(* object in it is held by a pack still KEPT (a greedy that re-tests       *)
+(* against the shrinking kept set), asserts that over the final set,       *)
+(* renews, CASes the snapshot to `packs \ drop`, and only then unlinks the *)
+(* dropped packs (not into `retained`). It runs once, between the restore  *)
+(* and Phase::Serving (the `AtRest` token), and declines when fewer than   *)
+(* two packs are named or a named pack is not on disk with its index.      *)
+(*                                                                         *)
+(* The greedy is modelled as ANY drop set its final check accepts, so a    *)
+(* green covers every order the greedy could take and more.                *)
+(*                                                                         *)
+(* Two steps, as FoldRenew/FoldCommit are: the read and the renewal, then  *)
+(* the CAS. The fold record carries the drop set (stage "keptRenewed",     *)
+(* id 0), so a Fall between the two clears it as it clears a fold.         *)
+(*                                                                         *)
+(* Reachability is `snap.history` (this model's history is FF-only, so     *)
+(* every landed push is reachable from the tip). The code reads the refs   *)
+(* from its cached cell; if the bucket moved since, the CAS below fails    *)
+(* on the etag whatever was read, so reading the bucket's history here is  *)
+(* the same on every path that commits.                                    *)
+(***************************************************************************)
+KeptSetCovers(s, D) ==
+  \A q \in D :
+    (holds[q] \cap snap.history) \subseteq
+      UNION {holds[k] : k \in (IF KeptSetVsOriginal THEN belief[s].packs \ {q}
+                                                   ELSE belief[s].packs \ D)}
+
+KeptSetRead(s) ==
+  /\ ReclaimKeptSet
+  /\ IF KeptSetWhileServing
+       THEN st[s] \in {"reclaiming", "serving"} /\ batch[s].stage = "none"
+       ELSE st[s] = "reclaiming"
+  /\ fold[s].stage = "none"
+  /\ Cardinality(belief[s].packs) >= 2           \* "fewer than two named packs"
+  /\ belief[s].packs \subseteq localPacks[s]     \* "a named pack has no .idx / is not on disk"
+  /\ \E D \in SUBSET belief[s].packs :
+       /\ D # {}                                 \* nothing to drop: returns before the renewal
+       /\ (KeptSetAnyDrop \/ KeptSetCovers(s, D))
+       /\ LET kf == [id |-> 0, inputs |-> D, stage |-> "keptRenewed", base |-> FALSE,
+                     at |-> snap.history, atRest |-> TRUE] IN
+          IF KeptSetNoRenew
+            THEN /\ fold' = [fold EXCEPT ![s] = kf]
+                 /\ UNCHANGED <<cell, nextTok, lease, renewBudget, st, batch,
+                                pushState, quiet, sensorMoved, realMoved>>
+            ELSE /\ renewBudget > 0
+                 /\ renewBudget' = renewBudget - 1
+                 /\ IF cell.held /\ cell.holder = s /\ cell.tok = lease[s].tok
+                      THEN /\ cell' = [cell EXCEPT !.tok = nextTok]
+                           /\ lease' = [lease EXCEPT ![s].tok = nextTok]
+                           /\ nextTok' = nextTok + 1
+                           /\ fold' = [fold EXCEPT ![s] = kf]
+                           /\ UNCHANGED <<st, batch, pushState, quiet, sensorMoved, realMoved>>
+                      ELSE /\ Fall(s)            \* check_fence / renew refused: Fenced
+                           /\ UNCHANGED <<cell, nextTok>>
+  /\ UNCHANGED <<snap, packObj, idxObj, uploads, lastTok, belief, localMain,
+                 localPacks, migrating, hbDue, pushTo, crashes, claimBudget>>
+  /\ UNCHANGED FoldPlanVars /\ UNCHANGED Untouched
+
+\* The CAS, then the unlink. A mismatch is the fence (the code's
+\* `snapshot::cas` error propagates and the process exits Fenced). On
+\* success the syncer serves: reclaim_at_rest returns into Phase::Serving.
+\* The CAS-then-unlink pair is one step here; a crash between them in the
+\* code leaves an unnamed pack on disk, which the next restore unlinks.
+KeptSetCommit(s) ==
+  /\ fold[s].stage = "keptRenewed"
+  /\ LET D == fold[s].inputs
+         named == belief[s].packs \ D IN
+     IF snap.etag = belief[s].etag
+       THEN /\ snap' = [snap EXCEPT !.etag = nextTok, !.packs = named]
+            /\ nextTok' = nextTok + 1
+            /\ belief' = [belief EXCEPT ![s].etag = nextTok, ![s].packs = named]
+            /\ localPacks' = [localPacks EXCEPT ![s] = @ \ D]
+            /\ fold' = [fold EXCEPT ![s] = NoFold]
+            /\ st' = [st EXCEPT ![s] = "serving"]
+            /\ realMoved' = [realMoved EXCEPT ![s] = TRUE]
+            /\ sensorMoved' = [sensorMoved EXCEPT ![s] = TRUE]
+            /\ stragglerLand' = (stragglerLand \/ SuccessorRestored(s))
+            /\ UNCHANGED <<lease, batch, pushState, quiet>>
+       ELSE /\ Fall(s)
+            /\ UNCHANGED <<snap, nextTok, belief, localPacks, stragglerLand>>
+  /\ UNCHANGED <<cell, packObj, idxObj, uploads, lastTok, localMain, migrating,
+                 hbDue, pushTo, crashes, renewBudget, claimBudget,
+                 ackNotDurable, skipOverMovement, unrestorable,
+                 toldFailedButDurable, renewOverWedge, provedOffBucket,
+                 provedOverRetained, retained>>
+  /\ UNCHANGED FoldPlanVars
+
+\* PROBES (non-vacuity), each an action property that MUST be violated:
+\* a kept-set commit lands; it drops a pack holding an UNREACHABLE object
+\* (the residue the collector exists for); it drops a pack holding a
+\* REACHABLE object, so the coverage test carried the drop.
+KeptSetLanded(s) ==
+  /\ fold[s].stage = "keptRenewed" /\ fold'[s].stage = "none"
+  /\ snap'.etag # snap.etag /\ snap'.packs = belief[s].packs \ fold[s].inputs
+ProbeKeptSetCommits ==
+  [][~\E s \in Syncers : KeptSetLanded(s)]_vars
+ProbeKeptSetDropsResidue ==
+  [][~\E s \in Syncers : KeptSetLanded(s) /\ \E q \in fold[s].inputs : holds[q] \ snap.history # {}]_vars
+ProbeKeptSetDropsCovered ==
+  [][~\E s \in Syncers : KeptSetLanded(s) /\ \E q \in fold[s].inputs : holds[q] \cap snap.history # {}]_vars
+
+(***************************************************************************)
 (* THE PROOF, AND THE RETENTION IT MUST NOT REST ON (follow.rs, fold.rs).  *)
 (*                                                                         *)
 (* `fold::commit` leaves a roll-up's superseded inputs ON DISK for         *)
@@ -1402,6 +1565,7 @@ Next ==
        \/ BatchRefs(s) \/ BatchAck(s)
        \/ FoldPlan(s) \/ FoldInit(s) \/ FoldComplete(s)
        \/ FoldRenew(s) \/ FoldCommit(s) \/ FoldAbandon(s)
+       \/ KeptSetRead(s) \/ KeptSetCommit(s)
        \/ SweepDelete(s) \/ Checkpoint(s) \/ UnlinkRetained(s)
        \/ CleanRelease(s) \/ Crash(s)
        \/ \E p \in Pushes : PushSend(p, s) \/ IdxLand(s, p)
@@ -1422,6 +1586,7 @@ Fairness ==
     /\ WF_vars(BatchLateUpload(s)) /\ WF_vars(BatchRefs(s)) /\ WF_vars(BatchAck(s))
     /\ WF_vars(FoldInit(s)) /\ WF_vars(FoldComplete(s))
     /\ WF_vars(FoldRenew(s)) /\ WF_vars(FoldCommit(s)) /\ WF_vars(FoldAbandon(s))
+    /\ WF_vars(KeptSetCommit(s))
     /\ \A p \in Pushes : WF_vars(IdxLand(s, p))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
@@ -1431,6 +1596,11 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 \* so permuting them is sound.  Not for the liveness run — TLC's
 \* symmetry reduction and temporal checking do not combine.
 Sym == Permutations(Syncers) \cup Permutations(Pushes)
+
+\* With PacksOverlap the first push is distinguished (every other pack also
+\* holds its object), so permuting pushes is no longer sound; syncers stay
+\* interchangeable.
+SymOverlap == Permutations(Syncers)
 
 (***************************************************************************)
 (* The view.  Tokens and etags are minted from one counter and compared    *)
@@ -1513,6 +1683,14 @@ Inv_ProofIsOfTheBucket          == ~provedOffBucket
 \* above and checked separately, because TLC reaches that one by a
 \* shorter route (see Checkpoint).
 Inv_ProofNeverRestsOnRetention  == ~provedOverRetained
+
+\* NOTHING NAMED THAT NO REF REACHES (Inv_NamedIsLanded).  History is linear and
+\* fast-forward only, so "reached" is "landed".  Where it holds, a pack's
+\* reachable content IS its content, the reachable supersede rule and the
+\* strict one choose the same inputs, and a refused push's residue is
+\* never named — the pinning directions 1, 4 and 5 were built against
+\* cannot arise.
+Inv_NamedIsLanded == \A q \in snap.packs : holds[q] \subseteq snap.history
 
 Inv_NoSkipOverMovement          == ~skipOverMovement
 Inv_NoRenewOverWedge            == ~renewOverWedge

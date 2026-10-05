@@ -43,6 +43,8 @@ ForgeMergeChain	90	# NOT MEASURED — never reached before the 120-min timeout; 
 # fall back to the default; together they took 42 s on 2026-09-30.
 ForgeSync/ForgeSync.cfg	4576	# measured: 4576 s on the 2026-10-03 runner (run 37086231549), 2960 s on 2026-09-30 (36651219224) — the slower one, as the floor of its shard
 ForgeSync/ForgeSyncLive.cfg	405	# measured: 405 s 2026-10-03, 239 s 2026-09-30
+ForgeSync/ForgeSyncCode.cfg	1560	# NOT MEASURED on TLC — scaled from ForgeSync.cfg by distinct states (30,277,694 / 89,146,934 x 4576 s, tlc-rs 2026-10-05)
+ForgeSync/ForgeSyncCodeLive.cfg	345	# NOT MEASURED on TLC — scaled from ForgeSyncLive.cfg (1,500,985 / 1,781,559 x 405 s)
 ForgeSync/ForgeSyncReclaimBySet.cfg	369	# measured 238 s 2026-09-30, x1.55 for the 2026-10-03 runner
 ForgeSync/ForgeSyncReclaimAtRestore.cfg	360	# measured 232 s 2026-09-30, x1.55 for the 2026-10-03 runner
 ForgeSync/ForgeSyncFoldCommitMidBatch.cfg	205	# measured 132 s 2026-09-30, x1.55 for the 2026-10-03 runner

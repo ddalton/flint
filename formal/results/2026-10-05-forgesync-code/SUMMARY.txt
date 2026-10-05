@@ -1,0 +1,33 @@
+ForgeSync.tla merged with its two sandboxes (2026-10-05): NameNeeded (code 381bcc90,
+formal/pending/forge-needed) and ReclaimKeptSet (restore.rs reclaim_at_rest,
+formal/pending/forge-keptset, with PacksOverlap). Module md5 06095e21. Checked on a
+spot c8g.48xlarge (us-west-1, 23:23Z-23:38Z, ~$0.35), compiled tlc-rs at main 2a3b0f59,
+192 workers; torn down, zero set checked in four regions. RESULTS.txt is the run's log.
+
+1. THE 24 GATED WORLDS, new rules OFF — the 09-28 shipped gate, reproduced:
+   ForgeSync HOLDS 89,146,934 distinct, depth 62 (TLC 09-28: 89,146,934) in 43 s;
+   ForgeSyncLive HOLDS 1,781,559 (TLC: 1,781,559); all 22 mutations fire their
+   expected invariant (WORLDS-ForgeSyncShipped.tsv).
+
+2. THE CODE'S COMBINATION (gen-forgesync-code.sh, WORLDS-ForgeSyncCode.tsv), 11/11:
+   ForgeSyncCode         HOLDS 30,277,694 distinct, depth 60 (every claim + Inv_NamedIsLanded)
+   ForgeSyncCodeLive     HOLDS 1,500,985
+   ForgeSyncCodeOverlap  HOLDS 155,567,536 (PacksOverlap, symmetry over syncers only)
+   NeededQueued fires Inv_NamedIsLanded; KeptSetAnyDrop fires Inv_AckedIsDurable;
+   KeptSetVsOriginal, KeptSetWhileServing fire Inv_LandedPackComplete; KeptSetNoRenew
+   fires Inv_NoStragglerLandAfterRestore; ProbeKeptSet{Commits,DropsResidue,DropsCovered}
+   are reached.
+
+3. WHAT THE FIRST PASS FOUND (kept in RESULTS.txt above the RERUN line):
+   - With NameNeeded and packs that do not overlap, the kept-set reclaim NEVER
+     commits: KeptSetWhileServing, KeptSetNoRenew and both probes held at exactly
+     ForgeSyncCode's count (30,277,694). No named pack is covered by the others, so
+     there is nothing to drop. With needed packs the reclaim matters only when real
+     packs overlap; its teeth now run with PacksOverlap (they fire, depth 20-24).
+   - Inv_NamedIsLanded ("nothing named that no ref reaches") is FALSE with
+     overlapping packs (depth 11): the needed listing names p2's pack for p1's
+     object, and p2's commit has not landed. It is an idealisation of disjoint packs,
+     not a durability claim; the overlap hold checks every other invariant.
+
+The overlap hold is not in check-tla.sh (TLC: hours, past a 120-min CI shard); the
+other 10 are, with action_mutation_run for the probes (tla-shards.sh taught the name).

@@ -115,3 +115,5 @@ must-fire worlds fire) stands as written above. The coverage half of
 the rule is still exercised only by AnyDrop's refutation. To finish
 it, rerun `ProbeCovered` and `VsOriginal` with `run.sh` (it skips
 decided worlds) on a box that can give each world its 6-hour cap.
+
+**2026-10-05: MERGED into `formal/ForgeSync.tla`** (md5 06095e21) and gated: the worlds on the code's combination are `formal/WORLDS-ForgeSyncCode.tsv` (gen `formal/gen-forgesync-code.sh`), results `formal/results/2026-10-05-forgesync-code/`. This sandbox is kept as the record of how the rule was found.

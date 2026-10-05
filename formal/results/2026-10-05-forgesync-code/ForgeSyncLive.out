@@ -1,0 +1,15 @@
+tlc-rs: ForgeSync (35 variables, 0 symmetry permutations), 192 workers, generated engine; loaded in 0.003s
+liveness: 1145 expanded states checked, no violation yet (0.0s)
+liveness: 2355 expanded states checked, no violation yet (0.0s)
+liveness: 7555 expanded states checked, no violation yet (0.0s)
+liveness: 18675 expanded states checked, no violation yet (0.0s)
+liveness: 38807 expanded states checked, no violation yet (0.0s)
+liveness: 87463 expanded states checked, no violation yet (0.1s)
+liveness: 190405 expanded states checked, no violation yet (0.2s)
+liveness: 476113 expanded states checked, no violation yet (0.5s)
+liveness: 1029435 expanded states checked, no violation yet (1.4s)
+liveness: checking 3 property instances under 54 fairness instances
+liveness: graph of 1781559 nodes loaded in 2.7s
+liveness: all properties checked in 2.8s
+Model checking completed. No error has been found.
+6452369 states generated, 1781559 distinct states found. Depth 41. Checked in 7.718s (230817 distinct/s).

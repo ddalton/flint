@@ -1,0 +1,4 @@
+tlc-rs: ForgeSync (35 variables, 3 symmetry permutations), 192 workers, generated engine; loaded in 0.003s
+progress: depth 41, 100105504 generated, 22341467 distinct (0 fingerprint spills), 1719056 on queue (0 on disk), 10.3s
+Model checking completed. No error has been found.
+140912765 states generated, 30277694 distinct states found. Depth 60. Checked in 15.262s (1983887 distinct/s).
