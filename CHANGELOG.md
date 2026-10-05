@@ -12,6 +12,22 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.58.0] - 2026-10-05
+
+A hardening release for the S3 CSI driver and its broker, after a gap
+analysis of the passthrough design. The broker's two replicas could
+refuse a credential refresh (the registration now rides in the exchange,
+and the table forgets stale entries); a read-write grant on the `sts`
+backend was as wide as its role (now bounded to its prefix, checked
+against MinIO's and AWS's evaluators); the operator now lists which
+`identity.mode` values and endpoint hosts a CR may use (`ambient` — the
+node's own identity — is out of the default list, so a cluster using it
+must add it); the plugin's per-volume state is private; the exchange is
+bounded before the API server is asked; `workers.maxPerNode` holds under
+a burst; and lean's `SAFETY.md` says what shipped. `flint-s3-csi` takes a
+minor chart bump for its new values; every other chart a patch bump for
+appVersion 1.58.0.
+
 ### Fixed
 
 - **flint-s3-csi: the plugin's per-volume directory and state are private**
@@ -9492,7 +9508,8 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.57.1...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.58.0...HEAD
+[1.58.0]: https://github.com/ddalton/flint/compare/v1.57.1...v1.58.0
 [1.57.1]: https://github.com/ddalton/flint/compare/v1.57.0...v1.57.1
 [1.57.0]: https://github.com/ddalton/flint/compare/v1.56.0...v1.57.0
 [1.56.0]: https://github.com/ddalton/flint/compare/v1.55.0...v1.56.0

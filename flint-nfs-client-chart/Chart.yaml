@@ -6,10 +6,10 @@ description: >-
   kubelet-mounted `nfs:` volumes can use `xprtsec=mtls` and name their
   cluster to the proxy.
 type: application
-version: 0.1.1
+version: 0.1.2
 # The flint release whose image carries flint-nfs-client-identity (the
 # flint-lite-operator image, beside flint-nfs-proxy).
-appVersion: "1.57.1"
+appVersion: "1.58.0"
 keywords:
   - nfs
   - tls
