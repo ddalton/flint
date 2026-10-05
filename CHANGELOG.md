@@ -21,6 +21,15 @@ covered by the stability guarantee.
   It is now created at 0600 (a stale tmp from a crash is removed first, so
   it cannot carry a wider mode into the rename), as the plugin's own
   credential files are.
+- **docs: lean's `SAFETY.md` says what shipped** (2026-10-05). §3.2 still said
+  the LeanP1 gate had not passed and the model had no scope; it passed
+  49/49 on 2026-10-04 with scope, rescope, a reader and a failed fetch
+  modelled, and says which HOLDS verdicts are tlc-rs alone. The open list
+  marks immutable handles shipped (1.57.0) and H5's compose path done,
+  and adds a TLC confirmation of one large verdict and a three-syncer
+  world — LeanP1 has two syncers plus the gateway's UI verbs, which commit
+  but neither hold, consume nor sweep. `COVERAGE.md` regenerated.
+
 - **flint-s3-csi: `workers.maxPerNode` holds under a burst of pods**
   (2026-10-04, `s3csi/SECURITY.md` §4.8). The ceiling counted the node's
   live workers and then created one, with nothing spanning the two

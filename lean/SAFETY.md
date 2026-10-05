@@ -196,13 +196,37 @@ model is `formal/LeanP1.tla` (`PROTOCOL.md` is written from it):
   Tests only; no model.
 
 What checks it: the trace check replays the code against `LeanP1.tla`
-(41/41, §3). The model's own gate — 28 worlds (`gen-leanp1.sh`,
-expectations in `WORLDS-LeanP1.tsv`, written before any run) — has NOT
-passed: its first run (2026-09-25) reports `Inv_ShortcutSound` violated in
-both shipped worlds. Until it passes, no row in this section is certified
-by an exhaustive run. The model has no scope (every path is held); the
-scope filter is pinned by tests only
-(`a_scoped_tree_never_receives_a_peers_change_outside_its_scope`).
+(41/41 at f6f6a892, §3), and the model's own gate (`gen-leanp1.sh`,
+expectations in `WORLDS-LeanP1.tsv`, written before any run). The gate
+**passed 2026-10-04**: 49 of 49 decided worlds as expected — 9 claims
+hold, 19 mutations and 21 probes fire, 0 mismatches
+(`formal/results/2026-10-04-leanp1-gate/SUMMARY.txt`). LeanP1Holds holds
+at full bounds (1,669,205,616 distinct, depth 39;
+`formal/results/2026-10-03-ec2-deep/`), and so do the two worlds that had
+never completed: AllHolds (reader + scope + a rescope + a restart, 756M
+distinct) and DeleteOverrideOff (1.69B). Its first run (2026-09-25) had
+reported `Inv_ShortcutSound` violated in both shipped worlds; that was
+settled before this gate. **What that run does not give:** the three
+large HOLDS verdicts are from tlc-rs alone (the compiled checker, main
+129adc8b) — TLC was waived for LeanP1Holds and not run for the other two;
+where both ran (`Holds1p3b`) the distinct counts agree exactly. Liveness
+holds only at a reduced bound (`LiveHoldsSmall`: one path, no removals;
+the full `LiveHolds` cannot finish). Two RECORD worlds (CollectorGreedy,
+NoConvergence) were stopped, not decided.
+
+The model gained scope and rescope on 2026-10-01 (4da62d4e; it found
+L-131, a narrow that unlinked the agent's write), a failed fetch
+(978d910a) and a reader (694248f5); the scope filter is no longer pinned
+by tests alone.
+
+**Writers in this model.** Every LeanP1 world has at most TWO syncers
+(`Writers = {A, B}`) plus the gateway, whose UI verbs (`GPut`/`GCas`, a
+delete, a rename) are a third party writing the same document. The UI
+is not a third syncer: it holds no tree, takes no lease, never consumes
+and never sweeps, so what only a third syncer exercises — a lease passed
+among three, a sweep while two others hold handles, a conflict naming
+two losers — is unmodelled here. §4.2's three-writer world is the
+pre-step-5 model (`LeanSubtree.tla`).
 
 A behaviour change that follows from the scope filter: a scoped tree no
 longer receives a peer's change, or a UI promote, outside its scope.
@@ -213,9 +237,11 @@ longer receives a peer's change, or a UI promote, outside its scope.
    two paths, two barriers, a handful of generations. TLC exhausts the
    world, not the protocol. There is no inductive proof, so nothing here
    rules out a failure that needs a fourth writer or a third path.
-2. **Three writers, only in one world.** The gate now runs the
-   three-writer world (2026-09-15); it carries 9 of the 21 invariants. The
-   other 12 are still checked with two writers only.
+2. **Three writers, only in one world — and only in the OLD model.** The
+   LeanSubtree gate runs a three-writer world (2026-09-15); it carries 9 of
+   its 21 invariants. The shipped shape's model (`LeanP1.tla`, §3.2) has no
+   three-syncer world at all: two syncers and the gateway's UI verbs, which
+   commit but do not hold, consume or sweep.
 3. **Refutation is now complete, and that is recent.** Every invariant in
    §1 has at least one mutation that must make it fail. Until 2026-09-15
    two did not (`Inv_CommitExclusive`, `Inv_CellHeldByHolder`), and their
@@ -481,9 +507,11 @@ encodes today's answer.
 | 7 | ~~refuse a store that fails `probe-conditional` instead of documenting it~~ **done 2026-09-15**: the syncer probes before its first verb — a broken conditional PUT refuses the workspace; a broken conditional DELETE turned the collector off until immutable handles, and is now reported and nothing more (`conformance.rs`; the posture field it set is gone, 2026-09-21) | — |
 | 8 | an inductive invariant (TLAPS) for S2 and S5 — of whose rows only `Inv_NoDangling`, `Inv_CommitExclusive` and `Inv_CellHeldByHolder` are stated over states today; the rest are ghost stamps | weeks; the only route to a claim that does not say "in this world" |
 | 9 | `IMPL` variants of the sentinel, removal, narrow and sync worlds, so S1 rows 1-5, S3 rows 2-3 and S4 rows 2-3 are certified on the shipped shape (§4.11) | a day on a laptop for the one-path worlds; the two-path sentinel needs a box |
-| H6 | **the structural fix is a design of record with its model arm built (2026-09-19)**: immutable object handles — every write to a handle nobody else writes, the manifest cites handles, unconditional batched collection of what an install retired, the sweep under the lease, the commit re-reading its uploads and surfacing what it publishes over (the slot's 412 arm, taken at the CAS); retires the conditional-DELETE and same-bytes rows of §2 and six defect classes (`docs/plans/flint-lean-immutable-objects-design.md` §3). Fetch-by-bare-path relaxed everywhere by decision. **Code built 2026-09-19 (uncommitted): the store type, the syncer's commit section and the gateway's verbs, in the one realisation (fresh keys)** — the syncer battery 244 green, the gateway's 56, twenty-five same-key tests retired with named replacements (design §3.1); the model then found one gap in that code, a refused rename's destination never published while the source kept its handle (L-117: two rules, a rename moves the source's pending entry with it and an answered removal still applies to a tree holding the named version clean; found by the rename world and then by the new core model `lean/formal/LeanCore.tla`; three tests and a mutation world) and one more on its eighth run (L-118: a repair yields to a later UI write the document cites; a test and a mutation world), and one more on its tenth (L-119: a refused rename's destination stays pending in the cell until its source leaves, instead of being dropped as gone when its adopter commits first; a test in the code, the rule in both models with its mutation world and reachability probe). NOT drilled: the writers drill's host legs on S3, MinIO and Ozone (the ingress leg, the lost-writer leg, the collector-on-MinIO leg) are tranche 6. Until the drill, H6 stands as documented in `AGENTS.md` | the drill: a week |
+| H6 | ~~the structural fix: immutable object handles~~ **built and shipped**: committed with the simplified protocol (f6f6a892, 2026-09-26), released in 1.57.0 — every write to a handle nobody else writes, the manifest cites handles, unconditional batched collection of what an install retired, the sweep under the lease (`docs/plans/flint-lean-immutable-objects-design.md`). The model found L-117, L-118 and L-119 in its code before it shipped. The bucket-protocol suites re-derived for handles are green on MinIO and RustFS (verbs 16/16, chaos 12/12; deb91d71, `lean/e2e/results/2026-10-03-store-swap/`). **Still open:** the writers drill's host legs on AWS S3 and on Ozone (the ingress leg, the lost-writer leg, the collector leg) | the drill on S3 + Ozone: days |
 | 10 | ~~retire or restate the three enforcers no run checks, and `Inv_NoResurrection` over state (§4.12)~~ **done 2026-09-20**: the three definitions are out of `LeanSubtree.tla` (their rows retired from §1 on 2026-09-19), and S4 row 1 is now the action property `Prop_NoResurrection` — no step that is a restart creates a local file — which the rematerialise mutation must violate, in place of a ghost only the mutation wrote | — |
-| 11 | ~~the review of 2026-09-18's other routes~~ **H2, H3, M7, H4, H5, H7 done 2026-09-19** (§4.15). **Open:** H6 (a contract decision); H5's compose path (a `ComposeSpec` read from a descriptor, across hub and forge); M3 (a renew inside the pre-CAS phase, availability only since H2) | H6: a decision, then a day; the rest a day |
+| 11 | ~~the review of 2026-09-18's other routes~~ **H2, H3, M7, H4, H5, H7 done 2026-09-19** (§4.15); H6 shipped (row H6); H5's compose path done in f6f6a892 (`ComposeSpec` takes the opened file, across flint-store, forge packio and the CSI tier). **Open:** the review's M3 (a renew inside the pre-CAS phase, availability only since H2) | a day |
+| 12 | a TLC confirmation of one large LeanP1 HOLDS (LeanP1Holds, AllHolds or DeleteOverrideOff), so the headline verdicts are not one checker's word | an EC2 box, hours |
+| 13 | a three-SYNCER LeanP1 world (one path, `Writers = {A, B, C}`), so lease handoff, the sweep and conflict records are checked with more than two holders on the shipped shape | sizing first; likely a box |
 
 Regenerate `COVERAGE.md` with `python3 lean/formal/coverage.py` and check
 it with `--check`.

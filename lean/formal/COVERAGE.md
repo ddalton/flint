@@ -6,7 +6,7 @@ invariant in a world with that feature on. Some pairs are meaningless
 (a rename invariant in a world with no renames); the rest are holes, and
 `lean/SAFETY.md` is where each is either argued away or listed as open.
 
-Worlds: 167 cfgs over `LeanSubtree.tla` — 48 strict (must hold), 107 mutations (must fail), 0 probes, 12 not run by the gate.
+Worlds: 185 cfgs over `LeanSubtree.tla` — 51 strict (must hold), 111 mutations (must fail), 0 probes, 23 not run by the gate.
 
 | invariant | strict runs | refuted by | 2+ writers | 3 writers | 2+ paths | crash | restart | UI write | sentinel | same bytes | barrier lease | writer queue | sync verb | declared removal | narrow (scoped) |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -16,28 +16,29 @@ Worlds: 167 cfgs over `LeanSubtree.tla` — 48 strict (must hold), 107 mutations
 | `Inv_AckBoundaryCoherent` | 5 | 2 | 5 | **0** | 4 | **0** | 2 | 3 | 5 | **0** | 1 | 1 | **0** | **0** | **0** |
 | `Inv_AckImpliesCited` | 5 | 4 | 5 | **0** | 4 | **0** | 2 | 3 | 5 | **0** | 1 | 1 | **0** | **0** | **0** |
 | `Inv_BoundaryNamesItsClock` | 1 | 1 | 1 | **0** | 1 | **0** | **0** | 1 | 1 | **0** | **0** | **0** | **0** | **0** | **0** |
-| `Inv_CellHeldByHolder` | 29 | 1 | 29 | 1 | 12 | 8 | 9 | 10 | 1 | 2 | 29 | 23 | **0** | 1 | **0** |
-| `Inv_CommitExclusive` | 29 | 1 | 29 | 1 | 12 | 8 | 9 | 10 | 1 | 2 | 29 | 23 | **0** | 1 | **0** |
-| `Inv_HITLDurable` | 36 | 10 | 36 | 1 | 19 | 10 | 12 | 17 | 4 | 2 | 27 | 23 | 1 | 3 | 1 |
-| `Inv_HITLTracked` | 34 | 3 | 34 | 1 | 17 | 10 | 11 | 14 | 1 | 2 | 30 | 23 | 1 | 3 | **0** |
-| `Inv_NarrowNeverDeletes` | 1 | 1 | 1 | **0** | 1 | **0** | **0** | **0** | **0** | **0** | **0** | **0** | **0** | **0** | 1 |
-| `Inv_NarrowNeverRecites` | 1 | 1 | 1 | **0** | 1 | **0** | **0** | **0** | **0** | **0** | **0** | **0** | **0** | **0** | 1 |
-| `Inv_NoDangling` | 43 | 8 | 43 | 1 | 26 | 10 | 12 | 17 | 4 | 2 | 31 | 23 | 3 | 3 | 1 |
-| `Inv_NoDeleteResurrected` | 23 | 3 | 23 | 1 | 8 | 7 | 6 | 9 | 1 | 1 | 23 | 23 | **0** | 1 | **0** |
-| `Inv_NoDeposedPut` | 35 | 1 | 35 | 1 | 19 | 10 | 10 | 13 | **0** | 2 | 28 | 22 | 2 | 3 | **0** |
+| `Inv_CellHeldByHolder` | 32 | 1 | 32 | 1 | 13 | 8 | 9 | 10 | 1 | 2 | 32 | 26 | 2 | 1 | 1 |
+| `Inv_CommitExclusive` | 32 | 1 | 32 | 1 | 13 | 8 | 9 | 10 | 1 | 2 | 32 | 26 | 2 | 1 | 1 |
+| `Inv_ConsumeNeverRegresses` | 1 | 1 | 1 | **0** | **0** | **0** | **0** | **0** | **0** | **0** | 1 | 1 | 1 | **0** | **0** |
+| `Inv_HITLDurable` | 39 | 10 | 39 | 1 | 20 | 10 | 12 | 17 | 4 | 2 | 30 | 26 | 3 | 3 | 2 |
+| `Inv_HITLTracked` | 37 | 3 | 37 | 1 | 18 | 10 | 11 | 14 | 1 | 2 | 33 | 26 | 3 | 3 | 1 |
+| `Inv_NarrowNeverDeletes` | 2 | 2 | 2 | **0** | 2 | **0** | **0** | **0** | **0** | **0** | 1 | 1 | **0** | **0** | 2 |
+| `Inv_NarrowNeverRecites` | 2 | 2 | 2 | **0** | 2 | **0** | **0** | **0** | **0** | **0** | 1 | 1 | **0** | **0** | 2 |
+| `Inv_NoDangling` | 46 | 8 | 46 | 1 | 27 | 10 | 12 | 17 | 4 | 2 | 34 | 26 | 5 | 3 | 2 |
+| `Inv_NoDeleteResurrected` | 26 | 3 | 26 | 1 | 9 | 7 | 6 | 9 | 1 | 1 | 26 | 26 | 2 | 1 | 1 |
+| `Inv_NoDeposedPut` | 38 | 1 | 38 | 1 | 20 | 10 | 10 | 13 | **0** | 2 | 31 | 25 | 4 | 3 | 1 |
 | `Inv_NoFencedOkAck` | 4 | 1 | 4 | **0** | 3 | **0** | 2 | 2 | 4 | **0** | 1 | 1 | **0** | **0** | **0** |
 | `Inv_NoForeignLost` | 2 | 2 | 2 | **0** | 2 | **0** | **0** | **0** | **0** | **0** | 1 | **0** | 2 | **0** | **0** |
 | `Inv_NoNonceOrphan` | 4 | 1 | 4 | **0** | 3 | **0** | 2 | 2 | 4 | **0** | 1 | 1 | **0** | **0** | **0** |
-| `Inv_NoStaleOverride` | 31 | 2 | 31 | 1 | 14 | 8 | 9 | 11 | 1 | 2 | 31 | 23 | 1 | 1 | **0** |
-| `Inv_NoStragglerInstall` | 36 | 3 | 36 | 1 | 20 | 10 | 10 | 13 | 1 | 2 | 28 | 22 | 2 | 3 | **0** |
-| `Inv_OneName` | 10 | 3 | 10 | **0** | 5 | 2 | 2 | 4 | **0** | **0** | 10 | 10 | **0** | 1 | **0** |
+| `Inv_NoStaleOverride` | 34 | 2 | 34 | 1 | 15 | 8 | 9 | 11 | 1 | 2 | 34 | 26 | 3 | 1 | 1 |
+| `Inv_NoStragglerInstall` | 39 | 3 | 39 | 1 | 21 | 10 | 10 | 13 | 1 | 2 | 31 | 25 | 4 | 3 | 1 |
+| `Inv_OneName` | 13 | 3 | 13 | **0** | 6 | 2 | 2 | 4 | **0** | **0** | 13 | 13 | 2 | 1 | 1 |
 | `Inv_QuiescentConverged` | 2 | 1 | 2 | **0** | **0** | 2 | **0** | **0** | **0** | **0** | 2 | 2 | **0** | **0** | **0** |
 | `Inv_RemovalNamesItsVersion` | 3 | 1 | 3 | **0** | 3 | 1 | 1 | 2 | **0** | **0** | 1 | 1 | **0** | 3 | **0** |
 | `Inv_RenameAtomic` | 3 | 1 | 3 | **0** | 3 | 1 | 1 | 2 | **0** | **0** | 1 | 1 | **0** | 3 | **0** |
 | `Inv_RenameNoHole` | 3 | 1 | 3 | **0** | 3 | 1 | 1 | 2 | **0** | **0** | 1 | 1 | **0** | 3 | **0** |
-| `Inv_SyncNeverDestroysDirty` | 2 | 1 | 2 | **0** | 2 | **0** | **0** | 1 | **0** | **0** | **0** | **0** | 2 | **0** | **0** |
+| `Inv_SyncNeverDestroysDirty` | 4 | 1 | 4 | **0** | 2 | **0** | **0** | 1 | **0** | **0** | 2 | 2 | 4 | **0** | **0** |
 | `Inv_TreesConverged` | 4 | 4 | 4 | **0** | **0** | 1 | **0** | **0** | **0** | **0** | 4 | 4 | **0** | **0** | **0** |
-| `TypeOK` | 47 | **0** | 47 | 1 | 27 | 11 | 12 | 18 | 5 | 2 | 34 | 25 | 3 | 3 | 1 |
+| `TypeOK` | 50 | **0** | 50 | 1 | 28 | 11 | 12 | 18 | 5 | 2 | 37 | 28 | 5 | 3 | 2 |
 
 `refuted by` counts the MUTATION runs that require this invariant to be violated. A 0 there is the sharper hole: the invariant has never been shown capable of failing, so a green run over it may be vacuous.
 
@@ -77,10 +78,13 @@ Probe markers (must-fail reachability checks, not safety): 43 — `ProbeAckAfter
 | `LeanImmutableHitlOverAny.cfg` | 11 | TwoWriters | 2 | 2+ paths, UI write, barrier lease, writer queue |
 | `LeanImmutableHolds.cfg` | 11 | TwoWriters | 2 | 2+ paths, crash, restart, UI write, barrier lease, writer queue |
 | `LeanImmutableLeakHolds.cfg` | 12 | TwoWriters | 1 | barrier lease, writer queue |
+| `LeanImmutableNarrowHolds.cfg` | 13 | TwoWriters | 2 | 2+ paths, barrier lease, writer queue, narrow (scoped) |
 | `LeanImmutableOrphanCollected.cfg` | 11 | TwoWriters | 1 | crash, barrier lease, writer queue |
 | `LeanImmutableQueueHolds.cfg` | 11 | TwoWriters | 1 | UI write, barrier lease, writer queue |
 | `LeanImmutableRenameHolds.cfg` | 14 | TwoWriters | 3 | 2+ paths, UI write, barrier lease, writer queue, declared removal |
 | `LeanImmutableStragglerGC.cfg` | 11 | TwoWriters | 1 | barrier lease, writer queue |
+| `LeanImmutableSyncQueueHolds.cfg` | 13 | TwoWriters | 1 | barrier lease, writer queue, sync verb |
+| `LeanImmutableSyncQueueShippedInvs.cfg` | 12 | TwoWriters | 1 | barrier lease, writer queue, sync verb |
 | `LeanNarrowHolds.cfg` | 5 | TwoWriters | 2 | 2+ paths, narrow (scoped) |
 | `LeanNoWindowHolds.cfg` | 3 | TwoWriters | 2 | 2+ paths, UI write |
 | `LeanRefineProbe.cfg` | 4 | TwoWriters | 2 | 2+ paths, barrier lease, writer queue |
