@@ -40,9 +40,10 @@ the broker decides from a TokenReview and its own registration.
 | the CR is fetched in the pod's namespace | `resolve_cr` | `s3csi/resolve.rs` |
 | the SA must be in `consumers`; an absent list denies | `authorize` → `MountConsumers::access` | `s3csi/resolve.rs`, `s3csi/policy.rs` |
 | the broker validates the pod-bound token with its audience | TokenReview, `identity_from_review` | `s3csi/broker.rs` |
-| the registration is found by nonce and must match the token's namespace, SA and pod uid, and the asked CR and mode | `decide` | `s3csi/broker.rs` |
+| the registration must match the token's namespace, SA and pod uid, the asked CR and mode, and the `RoleSessionName` | `decide` | `s3csi/broker.rs` |
+| the plugin's exchange CARRIES its registration (the `Registration` form field, under the node principal), so the replica that answers holds it; a registration the broker cannot accept is 503, never a refusal of the pod (2026-10-05, §4.13) | `assume`, `carried_registration` | `s3csi/broker.rs`; `creds::BrokerClient::exchange_registered` |
 | the CR is fetched again in the TOKEN's namespace and `consumers` re-checked | `assume` | `s3csi/broker.rs` |
-| register and deregister need the node principal | `assume`/`register` | `s3csi/broker.rs` |
+| register (standalone, for `webIdentity`), deregister and a carried registration need the node principal | `assume`/`register` | `s3csi/broker.rs` |
 
 **P3. A token minted on one cluster buys nothing on another.** The
 broker asks its OWN API server; a foreign token fails TokenReview.
@@ -60,6 +61,7 @@ scope are the braces.
 | `--read-only` on mount-s3's argv for a read-only CR or a read-only grant | `mounter_args_for`; `publish_passthrough` appends it; shared mounts always carry it | `passthrough/mounter.rs`, `s3csi/node.rs` |
 | the kernel mount is `MS_RDONLY`; the bind comes from an ro stage | `open_and_mount`, `bind_mount` | `s3csi/fuse.rs` |
 | the broker credential is narrowed to read | `registered_access`, `decide` | `s3csi/node.rs`, `s3csi/broker.rs` |
+| on `sts`, EVERY grant is bounded to the CR's bucket and prefix by a session policy: reads for a read grant, reads and the clients' writes for a read-write one (2026-10-05; before that a write grant's scope was the role's, §4.13) | `read_session_policy`, `write_session_policy`, `mint` | `s3csi/broker.rs` |
 | **the contract is NARROWING, not refusal** | a read-only consumer asking read-write gets read-only (lean refuses instead: a syncer cannot run narrowed) | `resolve::authorize`, `policy.rs` |
 
 **P5. A replacement credential is installed only when it is newer and
@@ -172,9 +174,9 @@ Secrets RBAC), never refreshed, never shared.
 | promise | unit tests (`cargo test --lib`) | rig legs (`s3csi/e2e/`) | newest run | falsifier gap |
 |---|---|---|---|---|
 | P1 | `door_refuses_without_the_token_and_serves_with_it`; `door_arm_points_at_loopback_with_a_token_file`; `files_are_written_with_mode`; `passthrough_worker_is_unprivileged_and_hostpath_free` | S1, S3, S31 (no secret in mount-s3's env) | campaign 3 run 4 (2026-09-30); sts run 1 (2026-10-02) | S35 (2026-10-04, kind): the door listens on 127.0.0.1 only; a sibling pod and the node are refused at the worker's IP; the worker test asserts no `hostNetwork`/`hostPID`/`hostIPC` |
-| P2 | `token_review_identity_needs_authenticated_sa_and_audience`; `decide_refuses_each_break_in_the_chain_by_name`; `a_grant_is_the_registration_narrowed_by_the_cr_never_widened`; `consumers_absent_denies_and_names_the_field`; `listed_sa_passes_others_named_in_the_refusal`; `unknown_attributes_are_refused_by_name`; `non_ephemeral_and_missing_pod_info_are_refused` | S6, S7, S10; A11 | campaign 3 run 4 | the absent-pod-uid-extra path (§4.2) has no test |
+| P2 | `token_review_identity_needs_authenticated_sa_and_audience`; `decide_refuses_each_break_in_the_chain_by_name` (incl. a carried registration for another session); `a_grant_is_the_registration_narrowed_by_the_cr_never_widened`; `consumers_absent_denies_and_names_the_field`; `listed_sa_passes_others_named_in_the_refusal`; `unknown_attributes_are_refused_by_name`; `non_ephemeral_and_missing_pod_info_are_refused`; `a_carried_registration_is_parsed_from_the_form_or_refused_by_name`; `exchange_registered_carries_the_registration_under_the_node_token_in_one_request` | S6, S7, S10, S37; A11 | campaign 3 run 4; S37 2026-10-05 (see `s3csi/e2e/results/2026-10-05-registry-and-write-policy/`) | the absent-pod-uid-extra path (§4.2) has no test |
 | P3 | (generic) | M2 | design doc only: "multi 22/0" 2026-09-04; no results README | none written since |
-| P4 | `write_flags_track_read_only`; `a_read_only_volume_registers_a_read_grant_on_the_wire` | S5, S24 (shared mount refuses a write); R3, R6, R9; A9; O5 | campaign 3 run 4; `run-rights.sh` has no results README | the append in `publish_passthrough` has no unit test |
+| P4 | `write_flags_track_read_only`; `a_read_only_volume_registers_a_read_grant_on_the_wire`; `the_read_session_policy_reads_the_prefix_and_nothing_else`; `the_write_session_policy_writes_the_prefix_and_nothing_else`; `sts_attaches_the_read_policy_to_a_read_grant_and_the_write_policy_to_a_read_write_one` | S5, S24 (shared mount refuses a write); R3, R6, R9; A9; O5; `lean/e2e/access/read-grant-minio.sh` and `write-grant-minio.sh` (MinIO's evaluator, the exact policies) | campaign 3 run 4; `run-rights.sh` has no results README; write-grant drill 2026-10-05: 17/0, and 11/8 with `PutObject` removed (`s3csi/e2e/results/2026-10-05-registry-and-write-policy/`) | the append in `publish_passthrough` has no unit test; the write policy has run against MinIO's evaluator, not AWS's or RGW's |
 | P5 | `sts_secret_parses_the_tuple_and_its_envelope`; `…refuses_each_missing_or_malformed_field_by_name`; `…refuses_unknown_keys_by_name_but_ignores_the_token_key`; `sts_envelope_mismatch_is_refused_per_field_and_absence_passes`; `sts_replace_decision_table` (incl. a reused generation with other keys); `the_key_fingerprint_follows_the_keys_and_not_the_expiration`; `the_credential_timing_budget_agrees` (+ two mutation controls, 2026-10-03) | S31 (step 6, the reused generation, written 2026-10-03, NOT RUN); R1 | sts runs 1–2; R1 13/0 (2026-10-02) | S31 step 6 until it runs |
 | P6 | `a_refusal_removes_the_key_only_from_an_unshared_mounter`; `exchange_errors_sort_refusals_from_outages`; `exchange_outages_are_unavailable_and_refusals_are_denied`; `a_token_review_the_api_server_did_not_answer_is_unavailable_not_refused` | S10, S29, S8 (outage control); L3 | campaign 3 run 4; review-fixes run 2 (2026-09-30) | no leg fails the API server under the broker (S8 fails the broker itself) |
 | P7 | `passthrough_worker_is_unprivileged_and_hostpath_free` | S2, S3, S19 | campaign 3 run 4 | no leg sets TLS or the NetworkPolicy; nothing checks the broker link |
@@ -274,6 +276,47 @@ Secrets RBAC), never refreshed, never shared.
     MounterDead event inside the leg's window. Reachable on any shared
     class whose members read more files at once than the mounter has
     threads, over a link slower than they want.
+13. ~~**Two broker replicas could refuse a refresh, and the plugin read
+    it as a revocation.**~~ **Fixed 2026-10-05.** The chart runs
+    `broker.replicas: 2`; the registration table is in memory, per
+    replica; the Service has no affinity and kube-proxy balances per
+    CONNECTION. The plugin's refresh was two requests — `POST
+    /v1/volumes` (register), then `POST /` (exchange) — on one pooled
+    client, so with two or more pooled connections the exchange could
+    reach the replica that never saw the register, which refused "no
+    live publish registration": a 403, sorted as a REFUSAL, and on an
+    unshared mounter the refresh path removed `creds.json` for a
+    republish period. Every rig pinned `broker.replicas=1` (P14 only
+    rolls two), so the shipped default had never been under a rotation.
+    Now the plugin's exchange carries its registration in the SAME
+    request (`Registration` form field under the plugin's bearer;
+    `creds::BrokerClient::exchange_registered`), the broker accepts it
+    under the node principal and inserts it, and a registration it
+    cannot accept is 503 (kept key), never a 4xx. `webIdentity` — the
+    worker's own SDK, the plain form — cannot carry one and is REFUSED
+    on a broker above one replica (`/v1/status` `replicas`,
+    `FLINT_S3B_REPLICAS`). Kind S37 2026-10-05 (two replicas, eight
+    tenants refreshing on every republish for 300 s): see
+    `s3csi/e2e/results/2026-10-05-registry-and-write-policy/` for both arms. Still true:
+    `deregister` reaches one replica, so the other keeps a stale entry
+    until it restarts (bytes, not authority: the nonce is per publish
+    and the pod's token dies with the pod).
+14. **A read-write grant was role-wide on `sts`; now it is the prefix's
+    (2026-10-05).** `mint` attached a session policy to READ grants
+    only (per-user access design D14: "a hardening with its own
+    rollout"); a write grant carried none, so its authority was the
+    whole role's, and `keyPrefix` bounded writes only through mount-s3's
+    `--prefix` and the syncer's configuration. `write_session_policy`
+    is the read policy with the clients' writes added (PutObject,
+    DeleteObject, DeleteObjectVersion, AbortMultipartUpload,
+    ListMultipartUploadParts on the prefix; the same prefix-conditioned
+    listing), checked against MinIO's evaluator by
+    `lean/e2e/access/write-grant-minio.sh`. Still true: `static` is one
+    key, bucket-wide, and `/v1/status` says `writeEnforcement: none`;
+    `rest` is the door's; and the CR's author still names the bucket and
+    prefix — the design's admin-owned namespace-to-project binding
+    (csi design §4.2 step 2) is not built, so this bounds a grant to
+    what its CR says, not what an administrator allowed.
 
 ## 5. The open list
 
@@ -288,6 +331,10 @@ Secrets RBAC), never refreshed, never shared.
 | 7 | ~~run S34 (the probe under load) on the box, and calibrate its floor~~ — run 2026-10-03: four readers never reach the probe; 24 do, and the join replaces the mounter (§4.12) | — |
 | 8 | ~~lean's `launch.json` written 0600~~ — done 2026-10-05 (`persist_launch`: created 0600, a stale tmp removed first; positive-controlled) | — |
 | 9 | ~~the join path replaces a shared mounter only on evidence of death, and answers silence with `Unavailable`~~ — done 2026-10-03 (`shared_liveness`, `fuse::Probe`; S34 61/0 with both arms) | — |
+| 10 | ~~the registration rides with the exchange, so two broker replicas cannot split a refresh~~ — done 2026-10-05 (§4.13; S37 with the 1.57.1 known-bad arm) | — |
+| 11 | ~~a read-write grant on `sts` is bounded to its prefix~~ — done 2026-10-05 (§4.14; `write_session_policy`, the write-grant MinIO drill) | — |
+| 12 | the write policy against AWS STS and Ceph RGW (MinIO only so far); `deregister` fanned out, or a TTL on the table, so a replica keeps no stale entries | S |
+| 13 | an operator allowlist of `identity.mode` values (`ambient` is the node's own identity and is tenant-selectable; `static` is any Secret in the namespace) | S |
 
 Docs corrected with this file (2026-10-03): the sts note's "CA-pinned
 client"; the sharing design's §5 paragraph that said a refusal removes

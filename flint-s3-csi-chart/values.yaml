@@ -477,8 +477,14 @@ workers:
 broker:
   enabled: true
 
-  # Two: the broker is stateless and every publish and every republish
-  # of a broker-mode volume goes through it.
+  # Two: every publish and every republish of a broker-mode volume goes
+  # through it. The broker keeps its publish registrations in memory,
+  # per replica; the plugin's exchange carries its registration in the
+  # same request (2026-10-05 — before that a register and an exchange
+  # could land on two replicas, and the second refused the refresh:
+  # s3csi/SECURITY.md §4.13), so replicas do not need to agree. The one
+  # arm that cannot carry it, identity.mode webIdentity (the worker's
+  # own STS client), needs 1 here and the plugin refuses it otherwise.
   replicas: 2
 
   # Where the broker gets the credential it hands out
@@ -501,6 +507,13 @@ broker:
   # static.readSecretRef's keys, and without one hands out the one key
   # and reports readEnforcement: cooperative on /v1/status — the pod's
   # mount and syncer keep it read-only, the bucket does not.
+  # A read-write pod is bounded to its CR's bucket and prefix the same
+  # way where the backend can: sts attaches a session policy of the
+  # reads and the writes mount-s3 and the syncer make, on that prefix
+  # (2026-10-05; before that a write grant's scope was the whole
+  # role's); rest sends "access": "readWrite"; static cannot — its one
+  # key reaches whatever the key reaches, and /v1/status says
+  # writeEnforcement: none.
   backend: static
 
   # backend: static. A Secret in the RELEASE namespace with keys
@@ -518,7 +531,7 @@ broker:
   sts:
     url: ""            # FLINT_S3B_STS_URL, e.g. https://sts.amazonaws.com
     roleArn: ""        # FLINT_S3B_STS_ROLE_ARN, optional
-    # The ARN partition of a read-only pod's session policy
+    # The ARN partition of a pod's session policy
     # (FLINT_S3B_ARN_PARTITION): aws (default), aws-cn, aws-us-gov.
     arnPartition: ""
 

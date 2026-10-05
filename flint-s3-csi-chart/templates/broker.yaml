@@ -128,6 +128,11 @@ spec:
             - { name: FLINT_S3B_DEFAULT_LIFETIME_SECS, value: {{ .Values.broker.defaultLifetimeSecs | quote }} }
             - { name: FLINT_S3B_MAX_LIFETIME_SECS, value: {{ .Values.broker.maxLifetimeSecs | quote }} }
             - { name: FLINT_S3B_REQUIRE_REGISTRATION, value: {{ .Values.broker.requireRegistration | quote }} }
+            # Reported on /v1/status. The registration table is per
+            # replica; the plugin's exchange carries its registration and
+            # does not mind, but identity.mode webIdentity (the worker's
+            # own STS client) does, and the plugin refuses it above 1.
+            - { name: FLINT_S3B_REPLICAS, value: {{ .Values.broker.replicas | quote }} }
             - { name: RUST_LOG, value: {{ .Values.broker.logLevel | quote }} }
           ports:
             - { name: http, containerPort: 8080 }

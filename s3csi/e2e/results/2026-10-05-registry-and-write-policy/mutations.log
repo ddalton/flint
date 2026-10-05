@@ -1,0 +1,20 @@
+1
+CONTROL M1: FAILED as it must (exit 101)
+thread 's3csi::broker::tests::decide_refuses_each_break_in_the_chain_by_name' (11867) panicked at src/s3csi/broker.rs:1048:81:
+RESTORED M1: passes
+0
+CONTROL M2: FAILED as it must (exit 101)
+thread 's3csi::broker::tests::sts_attaches_the_read_policy_to_a_read_grant_and_the_write_policy_to_a_read_write_one' (12846) panicked at src/s3csi/broker.rs:1330:9:
+assertion `left == right` failed: a write grant is bounded to the CR's prefix too (2026-10-05; D14 superseded)
+RESTORED M2: passes
+0
+CONTROL M3: FAILED as it must (exit 101)
+thread 's3csi::creds::tests::exchange_registered_carries_the_registration_under_the_node_token_in_one_request' (13543) panicked at src/s3csi/creds.rs:1093:80:
+RESTORED M3: passes
+--- final: whole s3csi/passthrough suite after restores ---
+test result: ok. 119 passed; 0 failed; 0 ignored; 0 measured; 2615 filtered out; finished in 0.05s
+--- cargo check --bins ---
+check exit 0
+33f2111a2100f1f248b528ed59f76ce4  src/s3csi/broker.rs
+a09ede7b0af0b683016c45a023d296e9  src/s3csi/creds.rs
+MUTATIONS DONE

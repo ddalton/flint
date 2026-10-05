@@ -282,7 +282,16 @@ record in §11.1.
   registration" until the key expired, and the tenant lost the mount.
   The plugin now re-registers before EVERY refresh — the registration
   is idempotent and node-authenticated, and a failure there is an
-  outage (keep the cached key), not a refusal (drop it).
+  outage (keep the cached key), not a refusal (drop it). **2026-10-05:
+  the registration now rides IN the exchange** (`Registration` form
+  field under the plugin's bearer, `creds::BrokerClient::exchange_registered`),
+  because the table is per REPLICA too: with the chart's two replicas
+  and no Service affinity, a separate register and exchange could land
+  on two processes and the second refused "no live publish
+  registration" — a 4xx the refresh path reads as a revocation and
+  answers by removing the key. One request cannot split
+  (`s3csi/SECURITY.md` §4.13; kind S37). `webIdentity`, whose exchange
+  is the worker's own SDK's, is refused on a broker above one replica.
 - *The lean syncer needs `AWS_REGION` in its environment.* mount-s3
   takes `--region` on its argv, so passthrough never showed this; the
   syncer's SDK client fails its first request as a bare "dispatch

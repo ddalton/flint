@@ -847,13 +847,29 @@ impl S3Node {
                     )));
                 };
                 st.token_expiration = Some(token.expiration.clone());
-                broker.register(&self.registration_of(st)).await.map_err(Status::unavailable)?;
                 let role_arn = creds::role_arn(&st.mode, &st.cr);
                 if mode == CredentialMode::WebIdentity {
+                    // The worker's own SDK exchanges, with the plain STS form:
+                    // it cannot carry the registration, so the registration
+                    // must sit in the table of the ONE replica its request
+                    // reaches. The broker's registration table is per
+                    // replica (SECURITY.md §4.13), so this arm needs one.
+                    let replicas = broker.status().await.map_err(Status::unavailable)?.get("replicas").and_then(|v| v.as_u64()).unwrap_or(1);
+                    if replicas > 1 {
+                        return Err(Status::failed_precondition(format!(
+                            "identity.mode webIdentity needs broker.replicas: 1 (the broker runs {replicas}): the worker's own \
+                             STS client exchanges with the plain form and the broker's registration table is per replica, \
+                             so a replica other than the one registered with refuses it — use identity.mode broker, whose \
+                             exchange carries its registration"
+                        )));
+                    }
+                    broker.register(&self.registration_of(st)).await.map_err(Status::unavailable)?;
                     return Ok(creds::web_identity_arm(&role_arn, broker.base_url(), &st.nonce, &token.token, &self.cfg.region));
                 }
+                // ONE request: the registration rides with the exchange, so
+                // whichever broker replica answers holds it (SECURITY.md §4.13).
                 let c = broker
-                    .exchange(&token.token, &role_arn, &st.nonce, self.cfg.creds_lifetime_secs)
+                    .exchange_registered(&self.registration_of(st), &token.token, &role_arn, self.cfg.creds_lifetime_secs)
                     .await
                     .map_err(|e| exchange_status(&st.cr, e))?;
                 st.creds_expiration = Some(c.expiration.clone());
@@ -1628,17 +1644,22 @@ impl S3Node {
                     // with a republish period to spare (BROKER_REFRESH_SECS).
                     if left < BROKER_REFRESH_SECS {
                         if let Some(broker) = &self.cfg.broker {
-                            // Re-register on EVERY refresh: the broker's registry is
-                            // in-memory, and a broker restart (a roll, an eviction)
-                            // would otherwise refuse every later exchange — measured:
-                            // S8's broker-down control left every tenant on the node
-                            // with "no live publish registration" until expiry. The
-                            // registration is idempotent and node-authenticated; a
-                            // failure here is an outage (kept key), not a refusal.
-                            let refreshed = match broker.register(&self.registration_of(&st)).await {
-                                Ok(()) => broker.exchange(&token.token, &creds::role_arn(&st.mode, &st.cr), &st.nonce, self.cfg.creds_lifetime_secs).await,
-                                Err(e) => Err(ExchangeError::Outage(format!("re-registration before refresh: {e}"))),
-                            };
+                            // The registration travels WITH every refresh's exchange,
+                            // in one request. Two reasons, one old and one new: the
+                            // broker's registry is in-memory, so a broker restart (a
+                            // roll, an eviction) would otherwise refuse every later
+                            // exchange — measured: S8's broker-down control left every
+                            // tenant on the node with "no live publish registration"
+                            // until expiry; and the registry is PER REPLICA, so a
+                            // separate `register` and a separate `exchange` could land
+                            // on two replicas and the second refuse the same way — a
+                            // 4xx this path reads as a revocation and answers by
+                            // removing the key (SECURITY.md §4.13; S37). A registration
+                            // the broker cannot accept comes back 503: an outage, the
+                            // key kept.
+                            let refreshed = broker
+                                .exchange_registered(&self.registration_of(&st), &token.token, &creds::role_arn(&st.mode, &st.cr), self.cfg.creds_lifetime_secs)
+                                .await;
                             match refreshed {
                                 Ok(c) => {
                                     let f = creds::CommFile { name: creds::CREDS_FILE.into(), bytes: creds::creds_json(&c), mode: 0o600 };
@@ -2314,9 +2335,8 @@ impl S3Node {
         };
         let Some(uid) = st.worker_uid.clone() else { return Err("the volume state names no worker".into()) };
         let lifetime = creds::drain_key_lifetime_secs(grace, self.cfg.creds_lifetime_secs);
-        broker.register(&self.registration_of(st)).await.map_err(|e| format!("re-registration: {e}"))?;
         let c = broker
-            .exchange(&token, &creds::role_arn(&st.mode, &st.cr), &st.nonce, lifetime)
+            .exchange_registered(&self.registration_of(st), &token, &creds::role_arn(&st.mode, &st.cr), lifetime)
             .await
             .map_err(|e| e.to_string())?;
         let comm = worker::comm_dir(&self.cfg.kubelet_root, &uid);

@@ -26,6 +26,7 @@ set -uo pipefail
 REPO=/Users/ddalton/github/flint
 SYNC=${SYNC:-$REPO/lean/syncer/target/debug/flint-sync}
 WORK=${WORK:-$(mktemp -d)}
+mkdir -p "$WORK"
 PORT=${PORT:-19000}
 NAME=flint-read-grant-minio
 EP=http://127.0.0.1:$PORT

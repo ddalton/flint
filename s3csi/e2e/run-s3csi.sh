@@ -2502,6 +2502,75 @@ else
 fi
 for i in $(seq 1 "$S36_PODS"); do echo "race-$i"; done | xargs $K -n $NS delete pod --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
 
+# ── S37 two broker replicas: the registration rides with the exchange ──
+# The broker keeps publish registrations in memory, PER REPLICA, and the
+# plugin used to send two requests — register, then exchange — that a
+# two-replica Service balances per CONNECTION: with several pooled
+# connections the exchange could reach the replica that never saw the
+# register, which refused "no live publish registration", a 4xx the
+# refresh path reads as a REVOCATION and answers by removing the pod's
+# key for a republish period (SECURITY.md §4.13). Every rig pinned
+# broker.replicas=1, so the chart's default of 2 had never been under a
+# rotation. Here it is: two replicas, S37_PODS tenants on one node whose
+# $CREDS_LIFETIME s keys refresh on EVERY republish (120 < the plugin's
+# 420 s refresh point), read every 5 s for S37_SECS. Zero refusals in
+# either replica's log, zero CredentialRefreshFailed events, every door's
+# expiration moved (the refreshes happened — a key REMOVED reads as an
+# empty expiration here), and BOTH replicas issued, else the Service
+# sent everything one way and the split had no chance: the leg says so
+# rather than passing over an empty road.
+# KNOWN-BAD: the same leg against the published 1.57.1 images (TAG=1.57.1,
+# the chart from this tree) — recorded in results/2026-10-05-registry-and-write-policy/.
+leg S37 "two broker replicas: tenants refreshing on every republish for ${S37_SECS:-300} s see zero 'no live publish registration' refusals and zero CredentialRefreshFailed, every door's expiration moves, and both replicas issued"
+S37_PODS=${S37_PODS:-8}; S37_SECS=${S37_SECS:-300}
+# Both replicas' logs since $1 (RFC 3339), ANSI stripped, each line led by its pod.
+broker_logs() { local p; for p in $($K -n $SYS get pods -l app.kubernetes.io/component=broker -o name 2>/dev/null); do $K -n $SYS logs "$p" --since-time="$1" 2>/dev/null | sed "s/$(printf '\033')\[[0-9;]*m//g" | sed "s#^#${p#pod/} #"; done; }
+if chart_up --set broker.replicas=2 >/dev/null 2>&1 && $K -n $SYS rollout status deploy/flint-s3-broker --timeout=180s >/dev/null 2>&1 && plugin_rolled; then
+    # Live replicas: Running and NOT terminating. Right after the roll the
+    # old ReplicaSet's pods are still Running with a deletionTimestamp, and
+    # a bare phase count read 4 (run 1, 2026-10-05).
+    live_brokers() { $K -n $SYS get pods -l app.kubernetes.io/component=broker -o json 2>/dev/null | python3 -c "
+import json,sys
+print(sum(1 for p in json.load(sys.stdin)['items'] if not p['metadata'].get('deletionTimestamp') and p.get('status',{}).get('phase')=='Running'))"; }
+    i=0; nb=$(live_brokers); while [ $i -lt 120 ] && [ "${nb:-0}" != 2 ]; do sleep 5; i=$((i + 5)); nb=$(live_brokers); done
+    [ "$nb" = 2 ] && ok "PRECONDITION: two broker replicas Running (after ${i}s)" || bad "PRECONDITION: $nb live broker replicas, wanted 2"
+    t0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    for i in $(seq 1 "$S37_PODS"); do
+        sed -e "s#__NAME__#s37-r$i#g" -e "s#__CR__#datasets#g" -e "s#__NODE__#$NODE#g" pt-pod.yaml.tpl; echo "---"
+    done | $K apply -f - >/dev/null
+    up=0; for i in $(seq 1 "$S37_PODS"); do wait_phase "s37-r$i" Running 300 && up=$((up + 1)); done
+    [ "$up" = "$S37_PODS" ] && ok "PRECONDITION: $up/$S37_PODS tenants Running on $NODE" || bad "PRECONDITION: only $up/$S37_PODS tenants Running"
+    exp0=(); for i in $(seq 1 "$S37_PODS"); do w=$(worker_of "s37-r$i"); exp0[$i]=$(creds_exp "$w"); done
+    # Readers in the background, content asserted, errors counted.
+    for i in $(seq 1 "$S37_PODS"); do
+        $K -n $NS exec "s37-r$i" -c agent -- /bin/sh -c "e=0; n=0; end=\$((\$(date +%s)+$S37_SECS)); while [ \$(date +%s) -lt \$end ]; do n=\$((n+1)); [ \"\$(cat /mnt/s3/shard-01.txt 2>/dev/null)\" = seeded-object-01 ] || e=\$((e+1)); sleep 5; done; echo \"S37 reads=\$n errors=\$e\" > /tmp/s37" >/dev/null 2>&1 &
+    done
+    note "$S37_PODS readers for $S37_SECS s; key lifetime $CREDS_LIFETIME s, so every republish refreshes"
+    sleep $((S37_SECS + 15)); wait
+    errs=0; reads=0
+    for i in $(seq 1 "$S37_PODS"); do
+        line=$(inpod "s37-r$i" "cat /tmp/s37"); n=$(echo "$line" | sed -n 's/.*reads=\([0-9]*\).*/\1/p'); e=$(echo "$line" | sed -n 's/.*errors=\([0-9]*\).*/\1/p')
+        reads=$((reads + ${n:-0})); errs=$((errs + ${e:-0}))
+    done
+    [ "$reads" -ge $((S37_PODS * S37_SECS / 10)) ] && ok "$reads reads across $S37_PODS tenants" || bad "only $reads reads across $S37_PODS tenants ($S37_SECS s at one per 5 s)"
+    [ "$errs" = 0 ] && ok "zero read errors" || bad "$errs read errors"
+    moved=0; gone=0
+    for i in $(seq 1 "$S37_PODS"); do w=$(worker_of "s37-r$i"); e1=$(creds_exp "$w"); [ -z "$e1" ] && gone=$((gone + 1)); [ -n "$e1" ] && [ "$e1" != "${exp0[$i]}" ] && moved=$((moved + 1)); done
+    [ "$moved" = "$S37_PODS" ] && ok "every door's Expiration moved ($moved/$S37_PODS): the refreshes landed" || bad "only $moved/$S37_PODS doors moved ($gone with NO creds.json — a refusal removed the key)"
+    logs=$(broker_logs "$t0")
+    refusals=$(echo "$logs" | grep -c 'no live publish registration' || true)
+    [ "${refusals:-0}" = 0 ] && ok "zero 'no live publish registration' refusals in the replicas' logs" || { bad "$refusals 'no live publish registration' refusals — a registration and its exchange landed on different replicas (SECURITY.md §4.13)"; echo "$logs" | grep 'no live publish registration' | head -2 | cut -c1-220; }
+    issuers=$(echo "$logs" | grep -w issued | awk '{print $1}' | sort -u | wc -l | tr -d ' ')
+    [ "$issuers" = 2 ] && ok "PRECONDITION: both replicas issued ($(echo "$logs" | grep -cw issued) issued lines)" || bad "PRECONDITION: only $issuers replica(s) issued — the Service sent everything one way, so a split had no chance here"
+    nev=0; for i in $(seq 1 "$S37_PODS"); do nev=$((nev + $(mount_events "s37-r$i" | grep -c CredentialRefreshFailed || true))); done
+    [ "$nev" = 0 ] && ok "zero CredentialRefreshFailed events on the tenants" || bad "$nev CredentialRefreshFailed events: $(for i in $(seq 1 "$S37_PODS"); do mount_events "s37-r$i"; done | grep CredentialRefreshFailed | head -1 | cut -c1-200)"
+    for i in $(seq 1 "$S37_PODS"); do echo "s37-r$i"; done | xargs $K -n $NS delete pod --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
+    chart_up >/dev/null 2>&1 && $K -n $SYS rollout status deploy/flint-s3-broker --timeout=180s >/dev/null 2>&1 && plugin_rolled && ok "chart restored (one broker replica)" || bad "chart restore failed"
+else
+    bad "PRECONDITION: chart_up with broker.replicas=2 did not roll — S37 made no observation"
+    chart_up >/dev/null 2>&1 && plugin_rolled
+fi
+
 # ── S21 (audit 2026-09-03, finding 4) ─────────────────────────────────
 # A node reboot empties the worker's memory-backed comm dir: the
 # supervisor restarts with no launch record, sits in its accept loop,

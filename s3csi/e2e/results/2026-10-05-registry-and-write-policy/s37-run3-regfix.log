@@ -1,0 +1,15 @@
+
+── S37 — two broker replicas: tenants refreshing on every republish for 300 s see zero 'no live publish registration' refusals and zero CredentialRefreshFailed, every door's expiration moves, and both replicas issued
+  ok: PRECONDITION: two broker replicas Running (after 0s)
+  ok: PRECONDITION: 8/8 tenants Running on flint-s3csi-control-plane
+  NOTE: 8 readers for 300 s; key lifetime 120 s, so every republish refreshes
+  ok: 480 reads across 8 tenants
+  ok: zero read errors
+  ok: every door's Expiration moved (8/8): the refreshes landed
+  ok: zero 'no live publish registration' refusals in the replicas' logs
+  ok: PRECONDITION: both replicas issued (68 issued lines)
+  ok: zero CredentialRefreshFailed events on the tenants
+  ok: chart restored (one broker replica)
+
+════════════════════════════════════════
+s3.csi.chert.us legs [S37] of run-s3csi.sh: 9 ok, 0 bad

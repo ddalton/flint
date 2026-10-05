@@ -14,6 +14,41 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **flint-s3-csi: two broker replicas can no longer refuse a refresh**
+  (2026-10-05, `s3csi/SECURITY.md` §4.13). The broker keeps publish
+  registrations in memory, per replica; the chart runs two; the plugin's
+  refresh was two requests — register, then exchange — that a Service
+  balances per connection, so the exchange could reach the replica that
+  never saw the register, which refused "no live publish registration",
+  a 4xx the refresh path reads as a revocation and answers by removing
+  the pod's key for a republish period. Every rig had pinned one replica.
+  The plugin's exchange now carries its registration in the same request
+  (`Registration` form field under the plugin's own bearer); the broker
+  accepts it under the node principal and inserts it; one it cannot
+  accept is a 503 the plugin keeps its key through. `identity.mode
+  webIdentity`, whose exchange is the worker's own SDK's, is refused on a
+  broker above one replica (`/v1/status` now reports `replicas`, from
+  `FLINT_S3B_REPLICAS`). Kind S37 (two replicas, eight tenants refreshing
+  on every republish for 300 s): the published 1.57.1 refuses and removes
+  keys; this tree does not — `s3csi/e2e/results/2026-10-05-registry-and-write-policy/`.
+
+### Changed
+
+- **flint-s3-broker: a read-write grant on the `sts` backend is bounded to
+  its CR's bucket and prefix** (2026-10-05, `s3csi/SECURITY.md` §4.14).
+  Only read grants carried a session policy; a write grant carried none,
+  so its authority was the whole role's and `keyPrefix` bounded writes
+  only on the client's side of the wire. `write_session_policy` is the
+  read policy with the clients' writes added (PutObject, DeleteObject,
+  DeleteObjectVersion, AbortMultipartUpload, ListMultipartUploadParts on
+  the prefix; the same prefix-conditioned listing), none of the lean
+  operator's bucket verbs. The per-user access design's D14 is
+  superseded and says why. `/v1/status` gains `writeEnforcement`
+  (`sessionPolicy` | `restDoor` | `none`). Checked against MinIO's
+  evaluator by `lean/e2e/access/write-grant-minio.sh`: a writer syncer
+  runs whole on the exact policy, a 20 MiB file included, and the keys
+  cannot touch another prefix or do the operator's verbs.
+
 - **flint-s3-worker: a lean worker's launch record is written 0600**
   (2026-10-05, `s3csi/SECURITY.md` §4.6). `comm/launch.json` carries the
   syncer's environment, static store keys included, and was written with
@@ -41,6 +76,14 @@ covered by the stability guarantee.
 
 ### Added
 
+- **flint-s3-csi: kind leg S37 and the write-grant MinIO drill**
+  (2026-10-05). S37 installs two broker replicas, publishes eight
+  tenants whose 120 s keys refresh on every republish, reads for 300 s,
+  and asserts zero `no live publish registration` refusals in either
+  replica's log, zero `CredentialRefreshFailed`, every door's expiration
+  moved, and that BOTH replicas issued (else it says it observed no
+  split opportunity). `lean/e2e/access/write-grant-minio.sh` is the read
+  drill's twin for `write_session_policy`.
 - **flint-s3-csi: two legs for promises that had none** (2026-10-04). S35
   tries the credential door from outside its worker — loopback only in
   the worker's netns, refused from a sibling pod and from the node at the

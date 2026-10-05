@@ -1,0 +1,29 @@
+work dir: /mnt/nvme2/wg-work-ctl
+minio version RELEASE.2026-09-22T19-25-18Z (commit-id=df34868a88cc8c396807e04a7e220810b321bdaa)
+POLICY OVERRIDDEN from /mnt/nvme2/wg-weak.json — this run is a control, not a result
+policy: {"Statement": [{"Action": ["s3:GetObject", "s3:GetObjectVersion", "s3:DeleteObject", "s3:DeleteObjectVersion", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"], "Effect": "Allow", "Resource": "arn:aws:s3:::flint-ws/team/proj1/*"}, {"Action": ["s3:ListBucket", "s3:ListBucketVersions"], "Condition": {"StringLike": {"s3:prefix": ["team/proj1", "team/proj1/*"]}}, "Effect": "Allow", "Resource": "arn:aws:s3:::flint-ws"}], "Version": "2012-10-17"}
+PASS AssumeRole accepted the broker's write policy
+PASS A1 checkout of the empty prefix on the write keys
+FAIL A2 the first barrier failed: flint-sync: could not ask this store whether it enforces conditional writes (cannot write the probe object: not authorized: put_whole: 403 AccessDenied) — the probe could not write its own object. Continuing UNVERIFIED, exactly as before this check existed; the verb below will report the underlying error itself flint-sync: store: not authorized: put_whole: 403 AccessDenied 
+FAIL A3 the second barrier failed: flint-sync: store: not authorized: put_whole: 403 AccessDenied
+FAIL A3 the third barrier failed: flint-sync: store: not authorized: put_whole: 403 AccessDenied
+FAIL A4 the writer was DENIED something it asked for — an action the policy misses (D14's worry):
+flint-sync: could not ask this store whether it enforces conditional writes (cannot write the probe object: not authorized: put_whole: 403 AccessDenied) — the probe could not write its own object. Continuing UNVERIFIED, exactly as before this check existed; the verb below will report the underlying error itself
+flint-sync: store: not authorized: put_whole: 403 AccessDenied
+flint-sync: could not ask this store whether it enforces conditional writes (cannot write the probe object: not authorized: put_whole: 403 AccessDenied) — the probe could not write its own object. Continuing UNVERIFIED, exactly as before this check existed; the verb below will report the underlying error itself
+flint-sync: store: not authorized: put_whole: 403 AccessDenied
+flint-sync: could not ask this store whether it enforces conditional writes (cannot write the probe object: not authorized: put_whole: 403 AccessDenied) — the probe could not write its own object. Continuing UNVERIFIED, exactly as before this check existed; the verb below will report the underlying error itself
+FAIL A5 the reader did not see the writes (a.txt='', README absent, big.bin absent; see /mnt/nvme2/wg-work-ctl/r-checkout.log)
+PASS B1 PUT to another prefix: AccessDenied
+PASS B2 GET of another prefix: AccessDenied
+PASS B3 DELETE in another prefix: AccessDenied
+PASS B4 LIST of another prefix: AccessDenied
+PASS B-control the parent's keys read and write the other prefix (the narrowing is the session policy's)
+FAIL C1 ListBucket under the prefix failed or saw nothing: None	None	team/proj1/	None
+FAIL C2 put/get/delete under the prefix failed: aws: [ERROR]: An error occurred (AccessDenied) when calling the PutObject operation: Access Denied.
+FAIL C3 multipart under the prefix failed: aws: [ERROR]: An error occurred (AccessDenied) when calling the CreateMultipartUpload operation: Access Denied.
+PASS C4 a multipart upload in another prefix: AccessDenied
+PASS D1 GetBucketVersioning: AccessDenied
+PASS D2 ListMultipartUploads: AccessDenied
+PASS D-control the parent's keys do both (the denial is the session policy's)
+RESULT pass=11 fail=8

@@ -19,7 +19,11 @@
 //!    `deletionTimestamp`; offline verification would honour it to `exp`.
 //! 2. The `RoleSessionName` must equal the nonce of a LIVE registration
 //!    the node plugin made for this pod-uid and CR — the one binding a
-//!    pod cannot self-mint (§2.4 T2).
+//!    pod cannot self-mint (§2.4 T2). The plugin CARRIES that registration
+//!    with its exchange (a `Registration` form field under the plugin's
+//!    own bearer), so the replica that answers is the replica that holds
+//!    it: the table is per process, and `POST /v1/volumes` followed by
+//!    `POST /` could land on two replicas (s3csi/SECURITY.md §4.13).
 //! 3. The CR named by `RoleArn`, in the TOKEN'S namespace (never a
 //!    request field), must list the SA in `spec.consumers`, and decides
 //!    its ACCESS: the registration's (the pod's `csi.readOnly`, as the
@@ -37,7 +41,10 @@
 //! scopes; `static` hands out its read key set when one is configured.
 //! A `static` backend with no read key hands out its one key, and its
 //! `issued` line and `/v1/status` say `cooperative`: the mount and the
-//! syncer keep that pod read-only, the bucket does not.
+//! syncer keep that pod read-only, the bucket does not. A READ-WRITE
+//! grant on `sts` is bounded the same way (2026-10-05): a session policy
+//! of the reads and the writes the two clients make, on the CR's bucket
+//! and prefix and nowhere else — until then its scope was the role's.
 //!
 //! What it never does: read tenant Secrets, hold a bucket key of its
 //! own in `sts`/`rest` mode, or accept a `RoleArn` it did not shape.
@@ -136,9 +143,16 @@ pub struct BrokerConfig {
     pub default_lifetime_secs: u64,
     /// `false` only for rigs that exercise the exchange without a plugin.
     pub require_registration: bool,
-    /// The ARN partition of a read grant's session policy (`aws`,
-    /// `aws-cn`, `aws-us-gov`). S3-compatible STS servers take `aws`.
+    /// The ARN partition of a grant's session policy (`aws`, `aws-cn`,
+    /// `aws-us-gov`). S3-compatible STS servers take `aws`.
     pub arn_partition: String,
+    /// How many replicas this Deployment runs (`FLINT_S3B_REPLICAS`, the
+    /// chart's `broker.replicas`), reported on `/v1/status`. The
+    /// registration table is per replica; the plugin's own exchange
+    /// carries its registration and does not care, but `webIdentity`
+    /// (the worker's SDK exchanging on its own) needs the one replica
+    /// that was registered with, and the plugin refuses that mode above 1.
+    pub replicas: u32,
 }
 
 impl BrokerConfig {
@@ -192,6 +206,7 @@ impl BrokerConfig {
             default_lifetime_secs: opt("FLINT_S3B_DEFAULT_LIFETIME_SECS").and_then(|v| v.parse().ok()).unwrap_or(900),
             require_registration: opt("FLINT_S3B_REQUIRE_REGISTRATION").map(|v| v != "false").unwrap_or(true),
             arn_partition: opt("FLINT_S3B_ARN_PARTITION").unwrap_or_else(|| "aws".into()),
+            replicas: opt("FLINT_S3B_REPLICAS").and_then(|v| v.parse().ok()).unwrap_or(1),
         })
     }
 }
@@ -207,6 +222,17 @@ impl Backend {
             Backend::Static { read: None, .. } => "cooperative",
         }
     }
+
+    /// How a READ-WRITE grant is held to its CR's bucket and prefix —
+    /// `sts` by the write session policy, `rest` by the door, `static`
+    /// not at all (one key, bucket-agnostic).
+    pub fn write_enforcement(&self) -> &'static str {
+        match self {
+            Backend::Sts { .. } => "sessionPolicy",
+            Backend::Rest { .. } => "restDoor",
+            Backend::Static { .. } => "none",
+        }
+    }
 }
 
 /// The session policy a READ grant carries on the `sts` backend: object
@@ -217,13 +243,49 @@ impl Backend {
 /// bucket), covering both the prefix itself and everything under it. A
 /// session policy intersects with the role's own, so a broker configured
 /// with a too-wide role still hands a reader keys that cannot write, and
-/// cannot read another prefix. A read-write grant carries no session policy:
-/// its scope is the role's, as before this field existed.
+/// cannot read another prefix. A read-write grant carries
+/// `write_session_policy`, the same shape with the writes added.
 ///
 /// No `s3:GetObjectAttributes`: nothing flint runs calls it, and Ceph RGW
 /// Squid's policy parser does not know the action, so a policy naming it is
 /// refused whole (`ERR_MALFORMED_DOC`) and every read grant with it.
 pub fn read_session_policy(partition: &str, bucket: &str, prefix: &str) -> String {
+    session_policy(partition, bucket, prefix, &READ_OBJECT_ACTIONS)
+}
+
+/// The object actions of a read grant.
+const READ_OBJECT_ACTIONS: [&str; 2] = ["s3:GetObject", "s3:GetObjectVersion"];
+
+/// The object actions of a read-write grant: the reads, and the writes
+/// the two clients make. mount-s3 documents PutObject, DeleteObject and
+/// AbortMultipartUpload (its CONFIGURATION.md, "IAM permissions"); the
+/// lean syncer adds DeleteObjectVersion (`delete_objects` on a versioned
+/// bucket) and ListMultipartUploadParts (its own multipart uploads). Not
+/// here on purpose: GetBucketVersioning, the lifecycle verbs and
+/// ListBucketMultipartUploads — the lean OPERATOR's posture check and MPU
+/// sweep run under the operator's credential, never a grant's.
+const WRITE_OBJECT_ACTIONS: [&str; 7] = [
+    "s3:GetObject",
+    "s3:GetObjectVersion",
+    "s3:PutObject",
+    "s3:DeleteObject",
+    "s3:DeleteObjectVersion",
+    "s3:AbortMultipartUpload",
+    "s3:ListMultipartUploadParts",
+];
+
+/// The session policy a READ-WRITE grant carries on the `sts` backend
+/// (2026-10-05; per-user access design §4.3 as written, D14 superseded):
+/// `WRITE_OBJECT_ACTIONS` on the CR's prefix, and the same prefix-bounded
+/// listing a read grant has. Before this a write grant carried no policy
+/// and its scope was the role's, so `keyPrefix` bounded writes only through
+/// mount-s3's `--prefix` and the syncer's configuration — on the client's
+/// side of the wire.
+pub fn write_session_policy(partition: &str, bucket: &str, prefix: &str) -> String {
+    session_policy(partition, bucket, prefix, &WRITE_OBJECT_ACTIONS)
+}
+
+fn session_policy(partition: &str, bucket: &str, prefix: &str, object_actions: &[&str]) -> String {
     let prefix = prefix.trim_matches('/');
     let objects = if prefix.is_empty() {
         format!("arn:{partition}:s3:::{bucket}/*")
@@ -243,7 +305,7 @@ pub fn read_session_policy(partition: &str, bucket: &str, prefix: &str) -> Strin
         "Statement": [
             {
                 "Effect": "Allow",
-                "Action": ["s3:GetObject", "s3:GetObjectVersion"],
+                "Action": object_actions,
                 "Resource": objects,
             },
             list,
@@ -403,6 +465,11 @@ pub fn decide(
         let reg = registration.ok_or_else(|| {
             format!("no live publish registration for RoleSessionName {session_name:?} — only the node plugin's publish path may mint for a pod")
         })?;
+        // Found by nonce this is a tautology; carried with the exchange it
+        // is the check that the registration is for THIS session.
+        if reg.nonce != session_name {
+            return Err(format!("the registration is not for RoleSessionName {session_name:?}"));
+        }
         if reg.namespace != id.namespace || reg.service_account != id.service_account {
             return Err("the registration belongs to another identity".into());
         }
@@ -425,6 +492,17 @@ pub fn decide(
         ));
     };
     Ok(Grant { mode, cr, access })
+}
+
+/// The registration a plugin's exchange carries — the `Registration` form
+/// field, the JSON of `creds::Registration` — or none, for a client that
+/// knows only the STS form (the worker's own SDK under `webIdentity`). A
+/// malformed one is refused by name, never read as absent.
+pub fn carried_registration(form: &HashMap<String, String>) -> Result<Option<Registration>, String> {
+    match form.get("Registration") {
+        None => Ok(None),
+        Some(j) => serde_json::from_str::<Registration>(j).map(Some).map_err(|e| format!("Registration: {e}")),
+    }
 }
 
 pub struct Broker {
@@ -539,9 +617,17 @@ impl Broker {
                 if let Some(r) = role_arn {
                     form.push(("RoleArn", r.clone()));
                 }
-                if grant.access.is_read() {
-                    form.push(("Policy", read_session_policy(&self.cfg.arn_partition, &target.bucket, &target.prefix)));
-                }
+                // Every grant is bounded to the CR's bucket and prefix by a
+                // session policy: reads for a read grant, reads and the
+                // clients' writes for a read-write one. A session policy
+                // only intersects with the role's own, so a role wider than
+                // one prefix still hands out keys for that prefix alone.
+                let policy = if grant.access.is_read() {
+                    read_session_policy(&self.cfg.arn_partition, &target.bucket, &target.prefix)
+                } else {
+                    write_session_policy(&self.cfg.arn_partition, &target.bucket, &target.prefix)
+                };
+                form.push(("Policy", policy));
                 let resp = self.http.post(url).form(&form).send().await.map_err(|e| format!("upstream STS: {e}"))?;
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
@@ -586,8 +672,17 @@ impl Broker {
         }
     }
 
-    /// `POST /` — the exchange.
-    pub async fn assume(&self, form: HashMap<String, String>) -> (StatusCode, String) {
+    /// `POST /` — the exchange. `bearer` is the node plugin's own token
+    /// when the form carries a `Registration`; the worker's SDK sends
+    /// neither and is served from the table.
+    pub async fn assume(&self, bearer: Option<String>, form: HashMap<String, String>) -> (StatusCode, String) {
+        let carried = match carried_registration(&form) {
+            Ok(c) => c,
+            Err(e) => return sts_error(StatusCode::BAD_REQUEST, "InvalidInput", &e),
+        };
+        if carried.is_some() && bearer.is_none() {
+            return sts_error(StatusCode::BAD_REQUEST, "InvalidInput", "Registration needs the node principal's Authorization bearer");
+        }
         let f: StsForm = match serde_urlencoded::from_str(&serde_urlencoded::to_string(&form).unwrap_or_default()) {
             Ok(f) => f,
             Err(e) => return sts_error(StatusCode::BAD_REQUEST, "InvalidInput", &e.to_string()),
@@ -615,7 +710,32 @@ impl Broker {
                 return sts_error(StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailable", &e.to_string());
             }
         };
-        let reg = self.registrations.lock().unwrap().values().find(|r| r.nonce == session).cloned();
+        let reg = match carried {
+            // The plugin's exchange: the registration rides with it under
+            // the node principal, so THIS replica holds it whatever replica
+            // `POST /v1/volumes` reached. Not accepting it is the
+            // registration path's failure, which the plugin has always read
+            // as an OUTAGE (keep the key, retry) — so 503, never a 4xx that
+            // would take a pod's key away for a broker-side cause.
+            Some(r) => {
+                if let Err((code, m)) = self.node_authenticated(bearer).await {
+                    tracing::warn!(volume = %r.volume_id, %code, "carried registration not accepted: {m}");
+                    return sts_error(StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailable", &format!("registration not accepted: {m}"));
+                }
+                tracing::info!(
+                    volume = %r.volume_id,
+                    ns = %r.namespace,
+                    sa = %r.service_account,
+                    cr = %r.cr,
+                    node = %r.node,
+                    access = r.access.as_str(),
+                    "registered (carried with the exchange)"
+                );
+                self.registrations.lock().unwrap().insert(r.volume_id.clone(), r.clone());
+                Some(r)
+            }
+            None => self.registrations.lock().unwrap().values().find(|r| r.nonce == session).cloned(),
+        };
         let (mode, cr) = match creds::parse_role_arn(role_arn) {
             Some(x) => x,
             None => return sts_error(StatusCode::BAD_REQUEST, "InvalidParameterValue", &format!("RoleArn {role_arn:?}")),
@@ -638,7 +758,7 @@ impl Broker {
         };
         let on_behalf_of = reg.as_ref().and_then(|r| r.on_behalf_of.clone());
         let lifetime = f.duration_seconds.unwrap_or(self.cfg.default_lifetime_secs).clamp(60, self.cfg.max_lifetime_secs);
-        let enforcement = if grant.access.is_read() { self.cfg.backend.read_enforcement() } else { "none" };
+        let enforcement = if grant.access.is_read() { self.cfg.backend.read_enforcement() } else { self.cfg.backend.write_enforcement() };
         match self.mint(&id, &grant, &target, on_behalf_of.as_deref(), token, &session, lifetime).await {
             Ok(c) => {
                 self.issued.fetch_add(1, Ordering::Relaxed);
@@ -718,6 +838,12 @@ impl Broker {
             // How a read-only pod is held to reads by THIS broker:
             // `cooperative` means its key could write.
             "readEnforcement": self.cfg.backend.read_enforcement(),
+            // How a read-write pod is held to its CR's prefix: `none`
+            // means its key is the backend's one key, bucket-wide.
+            "writeEnforcement": self.cfg.backend.write_enforcement(),
+            // The plugin refuses `webIdentity` above 1: that arm's exchange
+            // is the worker's own and cannot carry a registration.
+            "replicas": self.cfg.replicas,
         })
     }
 
@@ -732,11 +858,12 @@ impl Broker {
         let b = self.clone();
         let assume = warp::post()
             .and(warp::path::end())
+            .and(warp::header::optional::<String>("authorization"))
             .and(warp::body::form::<HashMap<String, String>>())
-            .and_then(move |form| {
+            .and_then(move |auth, form| {
                 let b = b.clone();
                 async move {
-                    let (code, body) = b.assume(form).await;
+                    let (code, body) = b.assume(auth, form).await;
                     Ok::<_, Rejection>(warp::reply::with_status(warp::reply::with_header(body, "content-type", "text/xml"), code))
                 }
             });
@@ -917,6 +1044,8 @@ mod tests {
         );
         // No registration.
         assert!(decide(&id(), &arn, "n1", None, true, Some(&allow)).unwrap_err().contains("registration"));
+        // A registration carried with the exchange, for another session.
+        assert!(decide(&id(), &arn, "n2", Some(&reg("n1")), true, Some(&allow)).unwrap_err().contains("RoleSessionName"));
         // Wrong pod.
         let mut other = reg("n1");
         other.pod_uid = "p2".into();
@@ -997,6 +1126,97 @@ mod tests {
         }
     }
 
+    /// The write policy is the read policy with the clients' writes added:
+    /// the same two statements, the same prefix, nothing bucket-wide beyond
+    /// the prefix-conditioned listing, and none of the operator's verbs.
+    #[test]
+    fn the_write_session_policy_writes_the_prefix_and_nothing_else() {
+        let got: serde_json::Value = serde_json::from_str(&write_session_policy("aws", "b", "/ws/proj1/")).unwrap();
+        let want = serde_json::json!({
+            "Version": "2012-10-17",
+            "Statement": [
+                { "Effect": "Allow",
+                  "Action": ["s3:GetObject", "s3:GetObjectVersion", "s3:PutObject", "s3:DeleteObject",
+                             "s3:DeleteObjectVersion", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"],
+                  "Resource": "arn:aws:s3:::b/ws/proj1/*" },
+                { "Effect": "Allow",
+                  "Action": ["s3:ListBucket", "s3:ListBucketVersions"],
+                  "Resource": "arn:aws:s3:::b",
+                  "Condition": { "StringLike": { "s3:prefix": ["ws/proj1", "ws/proj1/*"] } } },
+            ],
+        });
+        assert_eq!(got, want);
+        // Every action on the BUCKET resource is a listing under the prefix
+        // condition; every other action is on the prefix's objects.
+        for st in got["Statement"].as_array().unwrap() {
+            let res = st["Resource"].as_str().unwrap();
+            if res == "arn:aws:s3:::b" {
+                assert!(st.get("Condition").is_some(), "a bucket statement without the prefix condition lists the whole bucket");
+                for a in st["Action"].as_array().unwrap() {
+                    assert!(a.as_str().unwrap().starts_with("s3:ListBucket"), "{a} on the bucket is not a listing");
+                }
+            } else {
+                assert_eq!(res, "arn:aws:s3:::b/ws/proj1/*", "an object statement must be the prefix's objects");
+            }
+            for a in st["Action"].as_array().unwrap() {
+                let a = a.as_str().unwrap();
+                assert_ne!(a, "s3:*");
+                // The operator's verbs and the sweep's run under the operator's
+                // credential, never a grant's (D14's worry, answered by exclusion).
+                for op in ["s3:GetBucketVersioning", "s3:PutBucketVersioning", "s3:ListBucketMultipartUploads",
+                           "s3:GetLifecycleConfiguration", "s3:PutLifecycleConfiguration", "s3:PutBucketPolicy", "s3:GetObjectAttributes"] {
+                    assert_ne!(a, op, "{op} must not be in a grant");
+                }
+            }
+        }
+        // What the two clients are documented to need is in it: mount-s3's
+        // CONFIGURATION.md "IAM permissions" (ListBucket, GetObject, PutObject,
+        // AbortMultipartUpload, DeleteObject); the syncer's multipart upload
+        // and versioned delete (ListMultipartUploadParts, DeleteObjectVersion).
+        let all: Vec<&str> = got["Statement"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|st| st["Action"].as_array().unwrap().iter().map(|a| a.as_str().unwrap()))
+            .collect();
+        for need in ["s3:ListBucket", "s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload", "s3:DeleteObject",
+                     "s3:ListMultipartUploadParts", "s3:DeleteObjectVersion"] {
+            assert!(all.contains(&need), "{need} missing: a writer would be denied it");
+        }
+        // The read policy is a strict subset: a reader's shape did not move.
+        let read: serde_json::Value = serde_json::from_str(&read_session_policy("aws", "b", "/ws/proj1/")).unwrap();
+        assert_eq!(read["Statement"][1], got["Statement"][1], "the listing statement is the same in both grants");
+        for a in read["Statement"][0]["Action"].as_array().unwrap() {
+            assert!(got["Statement"][0]["Action"].as_array().unwrap().contains(a), "{a} is in the read grant but not the write grant");
+        }
+        // A workspace at the bucket root: every object, and no condition.
+        let root: serde_json::Value = serde_json::from_str(&write_session_policy("aws-cn", "b", "")).unwrap();
+        assert_eq!(root["Statement"][0]["Resource"], "arn:aws-cn:s3:::b/*");
+        assert!(root["Statement"][1].get("Condition").is_none());
+        // Written for the live check (lean/e2e/access/write-grant-minio.sh).
+        if let Ok(out) = std::env::var("FLINT_S3B_WRITE_WRITE_POLICY") {
+            let (bucket, prefix) = std::env::var("FLINT_S3B_WRITE_POLICY_TARGET")
+                .ok()
+                .and_then(|t| t.split_once('/').map(|(b, p)| (b.to_string(), p.to_string())))
+                .unwrap_or(("b".into(), "ws/proj1".into()));
+            std::fs::write(out, write_session_policy("aws", &bucket, &prefix)).unwrap();
+        }
+    }
+
+    /// The registration a plugin's exchange carries is read from the form;
+    /// absence is the SDK's plain exchange, and a malformed one is refused
+    /// by name rather than read as absent (which would fall through to the
+    /// table and refuse "no live publish registration" for the wrong reason).
+    #[test]
+    fn a_carried_registration_is_parsed_from_the_form_or_refused_by_name() {
+        let mut form: HashMap<String, String> = HashMap::new();
+        assert_eq!(carried_registration(&form).unwrap(), None);
+        form.insert("Registration".into(), serde_json::to_string(&reg("n1")).unwrap());
+        assert_eq!(carried_registration(&form).unwrap(), Some(reg("n1")));
+        form.insert("Registration".into(), "{not json".into());
+        assert!(carried_registration(&form).unwrap_err().starts_with("Registration:"));
+    }
+
     #[test]
     fn the_start_up_line_never_prints_a_secret() {
         let backends = [
@@ -1028,6 +1248,7 @@ mod tests {
                 default_lifetime_secs: 900,
                 require_registration: true,
                 arn_partition: "aws".into(),
+                replicas: 1,
             };
             let line = format!("{cfg:?}");
             for secret in ["SECRET-WRITE", "TOKEN-WRITE", "SECRET-READ", "TOKEN-READ", "HEADER-SECRET"] {
@@ -1045,6 +1266,10 @@ mod tests {
         assert_eq!(st(Some(keys)).read_enforcement(), "readKey");
         assert_eq!(Backend::Sts { url: "u".into(), role_arn: None }.read_enforcement(), "sessionPolicy");
         assert_eq!(Backend::Rest { url: "u".into(), extra_headers: BTreeMap::new() }.read_enforcement(), "restDoor");
+        // A writer is held to its prefix by sts and rest, by nobody on static.
+        assert_eq!(st(None).write_enforcement(), "none");
+        assert_eq!(Backend::Sts { url: "u".into(), role_arn: None }.write_enforcement(), "sessionPolicy");
+        assert_eq!(Backend::Rest { url: "u".into(), extra_headers: BTreeMap::new() }.write_enforcement(), "restDoor");
     }
 
     /// A broker over `backend`, for `mint`. Its kube client points at
@@ -1061,6 +1286,7 @@ mod tests {
             default_lifetime_secs: 900,
             require_registration: true,
             arn_partition: "aws".into(),
+            replicas: 1,
         };
         crate::install_crypto_provider();
         let client = Client::try_from(kube::Config::new("http://127.0.0.1:9".parse().unwrap())).unwrap();
@@ -1089,7 +1315,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sts_attaches_the_read_policy_to_a_read_grant_and_nothing_to_a_write_grant() {
+    async fn sts_attaches_the_read_policy_to_a_read_grant_and_the_write_policy_to_a_read_write_one() {
         let c = Creds { access_key_id: "AK".into(), secret_access_key: "SK".into(), session_token: Some("t".into()), expiration: "2026-09-02T00:15:00Z".into() };
         let (url, seen) = capture(sts_success(&id(), "proj1", "n1", &c, DRIVER_NAME)).await;
         let b = broker(Backend::Sts { url, role_arn: Some("arn:aws:iam::1:role/agents".into()) });
@@ -1101,7 +1327,11 @@ mod tests {
         assert_eq!(f.get("RoleArn").map(String::as_str), Some("arn:aws:iam::1:role/agents"));
 
         b.mint(&id(), &grant(Access::ReadWrite), &target(), None, "tok", "n1", 900).await.unwrap();
-        assert_eq!(form(1).get("Policy"), None, "a write grant keeps the role's own scope");
+        assert_eq!(
+            form(1).get("Policy"),
+            Some(&write_session_policy("aws", "b", "ws/proj1")),
+            "a write grant is bounded to the CR's prefix too (2026-10-05; D14 superseded)"
+        );
     }
 
     #[tokio::test]
@@ -1145,7 +1375,7 @@ mod tests {
 
     #[test]
     fn config_backends_parse() {
-        for k in ["FLINT_S3B_BACKEND", "FLINT_S3B_STATIC_ACCESS_KEY_ID", "FLINT_S3B_STATIC_SECRET_ACCESS_KEY", "FLINT_S3B_REST_URL", "FLINT_S3B_STS_URL"] {
+        for k in ["FLINT_S3B_BACKEND", "FLINT_S3B_STATIC_ACCESS_KEY_ID", "FLINT_S3B_STATIC_SECRET_ACCESS_KEY", "FLINT_S3B_REST_URL", "FLINT_S3B_STS_URL", "FLINT_S3B_REPLICAS"] {
             std::env::remove_var(k);
         }
         assert!(BrokerConfig::from_env().unwrap_err().contains("FLINT_S3B_STATIC_ACCESS_KEY_ID"));
@@ -1163,6 +1393,10 @@ mod tests {
         }
         assert!(c.require_registration);
         assert_eq!(c.arn_partition, "aws");
+        assert_eq!(c.replicas, 1, "unset: one replica, the shape every rig runs");
+        std::env::set_var("FLINT_S3B_REPLICAS", "2");
+        assert_eq!(BrokerConfig::from_env().unwrap().replicas, 2);
+        std::env::remove_var("FLINT_S3B_REPLICAS");
         // Static: a read key set is both halves or neither.
         std::env::set_var("FLINT_S3B_BACKEND", "static");
         std::env::set_var("FLINT_S3B_STATIC_ACCESS_KEY_ID", "W");

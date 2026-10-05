@@ -592,7 +592,10 @@ impl BrokerClient {
     }
 
     /// `AssumeRoleWithWebIdentity` at the façade, exactly as the AWS
-    /// clients would call it.
+    /// clients would call it: no registration carried, so the broker
+    /// serves it from the table `register` filled (the shape the worker's
+    /// own SDK sends under `webIdentity`; rigs with `requireRegistration:
+    /// false`). The plugin's own path is `exchange_registered`.
     pub async fn exchange(
         &self,
         web_identity_token: &str,
@@ -600,18 +603,56 @@ impl BrokerClient {
         session_name: &str,
         duration_secs: u64,
     ) -> Result<Creds, ExchangeError> {
+        let duration = duration_secs.to_string();
         let form = [
             ("Action", "AssumeRoleWithWebIdentity"),
             ("Version", "2011-06-15"),
             ("RoleArn", role_arn),
             ("RoleSessionName", session_name),
             ("WebIdentityToken", web_identity_token),
-            ("DurationSeconds", &duration_secs.to_string()),
+            ("DurationSeconds", duration.as_str()),
         ];
-        let resp = self
-            .http
-            .post(format!("{}/", self.base))
-            .form(&form)
+        self.post_exchange(&form, None).await
+    }
+
+    /// The plugin's exchange: `AssumeRoleWithWebIdentity` WITH this
+    /// publish's registration in the SAME request — the `Registration`
+    /// form field, under the plugin's own bearer — so the broker replica
+    /// that answers is the one that holds it. Until 2026-10-05 the plugin
+    /// sent `POST /v1/volumes` and then `POST /`, two requests that a
+    /// Service with two replicas and an in-memory table could land on two
+    /// processes: the second then refused "no live publish registration",
+    /// a 4xx the refresh path reads as a REVOCATION and answers by removing
+    /// the pod's key (s3csi/SECURITY.md §4.13). One request cannot split.
+    /// The session name is the registration's nonce, by construction.
+    pub async fn exchange_registered(
+        &self,
+        reg: &Registration,
+        web_identity_token: &str,
+        role_arn: &str,
+        duration_secs: u64,
+    ) -> Result<Creds, ExchangeError> {
+        let registration = serde_json::to_string(reg).map_err(|e| ExchangeError::Outage(format!("registration: {e}")))?;
+        let node_token = self.node_token().map_err(ExchangeError::Outage)?;
+        let duration = duration_secs.to_string();
+        let form = [
+            ("Action", "AssumeRoleWithWebIdentity"),
+            ("Version", "2011-06-15"),
+            ("RoleArn", role_arn),
+            ("RoleSessionName", reg.nonce.as_str()),
+            ("WebIdentityToken", web_identity_token),
+            ("DurationSeconds", duration.as_str()),
+            ("Registration", registration.as_str()),
+        ];
+        self.post_exchange(&form, Some(node_token)).await
+    }
+
+    async fn post_exchange(&self, form: &[(&str, &str)], bearer: Option<String>) -> Result<Creds, ExchangeError> {
+        let mut req = self.http.post(format!("{}/", self.base)).form(form);
+        if let Some(t) = bearer {
+            req = req.bearer_auth(t);
+        }
+        let resp = req
             .send()
             .await
             .map_err(|e| ExchangeError::Outage(format!("transport: {e}")))?;
@@ -998,5 +1039,68 @@ mod tests {
         assert_ne!(fp, creds_fingerprint(&mk("AK", "SK", Some("ST2"), "2030-01-01T00:00:00Z")));
         // Length-prefixed: moving a boundary is a different tuple.
         assert_ne!(creds_fingerprint(&mk("AKS", "K", None, "x")), creds_fingerprint(&mk("AK", "SK", None, "x")));
+    }
+
+    /// The plugin's exchange carries its registration under the node
+    /// token, in ONE request; the plain exchange carries neither. A
+    /// capturing server stands in for the broker; the response is the
+    /// four tags every STS client reads.
+    #[tokio::test]
+    async fn exchange_registered_carries_the_registration_under_the_node_token_in_one_request() {
+        use std::sync::{Arc, Mutex};
+        use warp::Filter;
+        let seen: Arc<Mutex<Vec<(Option<String>, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        let reply = "<AssumeRoleWithWebIdentityResponse><AssumeRoleWithWebIdentityResult><Credentials>\
+<AccessKeyId>AK</AccessKeyId><SecretAccessKey>SK</SecretAccessKey><SessionToken>ST</SessionToken>\
+<Expiration>2030-01-01T00:00:00Z</Expiration></Credentials></AssumeRoleWithWebIdentityResult></AssumeRoleWithWebIdentityResponse>";
+        let route = warp::post()
+            .and(warp::header::optional::<String>("authorization"))
+            .and(warp::body::bytes())
+            .map(move |auth: Option<String>, b: bytes::Bytes| {
+                s2.lock().unwrap().push((auth, String::from_utf8_lossy(&b).into_owned()));
+                reply
+            });
+        let (addr, server) = warp::serve(route).bind_ephemeral(([127, 0, 0, 1], 0));
+        tokio::spawn(server);
+        let dir = std::env::temp_dir().join(format!("flint-exchange-registered-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let node_token_file = dir.join("token");
+        std::fs::write(&node_token_file, "NODE-TOKEN\n").unwrap();
+        let client = BrokerClient { base: format!("http://{addr}"), http: reqwest::Client::new(), node_token_file };
+        let reg = Registration {
+            volume_id: "csi-v1".into(),
+            pod_uid: "p1".into(),
+            namespace: "team-a".into(),
+            pod: "agent".into(),
+            service_account: "trainer".into(),
+            cr: "datasets".into(),
+            mode: "passthrough".into(),
+            nonce: "n0nce".into(),
+            node: "node-1".into(),
+            access: super::super::policy::Access::Read,
+            on_behalf_of: Some("alice".into()),
+        };
+
+        let c = client.exchange_registered(&reg, "POD-TOKEN", &role_arn("passthrough", "datasets"), 900).await.unwrap();
+        assert_eq!((c.access_key_id.as_str(), c.session_token.as_deref(), c.expiration.as_str()), ("AK", Some("ST"), "2030-01-01T00:00:00Z"));
+        let (auth, body) = seen.lock().unwrap()[0].clone();
+        assert_eq!(auth.as_deref(), Some("Bearer NODE-TOKEN"), "the registration must travel under the plugin's own token");
+        let f: HashMap<String, String> = serde_urlencoded::from_str(&body).unwrap();
+        assert_eq!(f.get("Action").map(String::as_str), Some("AssumeRoleWithWebIdentity"));
+        assert_eq!(f.get("WebIdentityToken").map(String::as_str), Some("POD-TOKEN"));
+        assert_eq!(f.get("RoleSessionName").map(String::as_str), Some("n0nce"), "the session name IS the registration's nonce");
+        assert_eq!(f.get("DurationSeconds").map(String::as_str), Some("900"));
+        let carried: Registration = serde_json::from_str(f.get("Registration").expect("the Registration field")).unwrap();
+        assert_eq!(carried, reg, "the registration arrives whole, in the same request as the exchange");
+
+        // The plain exchange: the SDK's shape, no registration and no bearer.
+        client.exchange("POD-TOKEN", &role_arn("passthrough", "datasets"), "n0nce", 900).await.unwrap();
+        let (auth, body) = seen.lock().unwrap()[1].clone();
+        assert_eq!(auth, None);
+        let f: HashMap<String, String> = serde_urlencoded::from_str(&body).unwrap();
+        assert!(f.get("Registration").is_none());
+        assert_eq!(seen.lock().unwrap().len(), 2, "one request per exchange — the registration is not a second one");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

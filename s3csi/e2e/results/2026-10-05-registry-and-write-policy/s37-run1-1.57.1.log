@@ -1,0 +1,17 @@
+
+── S37 — two broker replicas: tenants refreshing on every republish for 300 s see zero 'no live publish registration' refusals and zero CredentialRefreshFailed, every door's expiration moves, and both replicas issued
+  BAD: PRECONDITION: 4 broker replicas Running, wanted 2
+  ok: PRECONDITION: 8/8 tenants Running on flint-s3csi-control-plane
+  NOTE: 8 readers for 300 s; key lifetime 120 s, so every republish refreshes
+  ok: 476 reads across 8 tenants
+  BAD: 13 read errors
+  ok: every door's Expiration moved (8/8): the refreshes landed
+  BAD: 3 'no live publish registration' refusals — a registration and its exchange landed on different replicas (SECURITY.md §4.13)
+flint-s3-broker-5484ffdcc-8tvpq 2026-10-05T17:28:26.541518Z  WARN spdk_csi_driver::s3csi::broker: exchange refused (AccessDenied): no live publish registration for RoleSessionName "a23e49d82a21bb23720c7ce954a1551e" — o
+flint-s3-broker-5484ffdcc-8tvpq 2026-10-05T17:29:49.310238Z  WARN spdk_csi_driver::s3csi::broker: exchange refused (AccessDenied): no live publish registration for RoleSessionName "0e3ad675ef48420bfb5e8b999c5e3520" — o
+  ok: PRECONDITION: both replicas issued (76 issued lines)
+  BAD: 1 CredentialRefreshFailed events: CredentialRefreshFailed: datasets: broker refused the exchange: 403: AccessDenied: no live publish registration for RoleSessionName "0e3ad675ef48420bfb5e8b999c5e3520" — only the node plugin's publis
+  ok: chart restored (one broker replica)
+
+════════════════════════════════════════
+s3.csi.chert.us legs [S37] of run-s3csi.sh: 5 ok, 4 bad

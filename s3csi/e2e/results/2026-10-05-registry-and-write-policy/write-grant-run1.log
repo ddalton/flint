@@ -1,0 +1,21 @@
+work dir: /mnt/nvme2/wg-work
+minio version RELEASE.2026-09-22T19-25-18Z (commit-id=df34868a88cc8c396807e04a7e220810b321bdaa)
+policy: {"Statement":[{"Action":["s3:GetObject","s3:GetObjectVersion","s3:PutObject","s3:DeleteObject","s3:DeleteObjectVersion","s3:AbortMultipartUpload","s3:ListMultipartUploadParts"],"Effect":"Allow","Resource":"arn:aws:s3:::flint-ws/team/proj1/*"},{"Action":["s3:ListBucket","s3:ListBucketVersions"],"Condition":{"StringLike":{"s3:prefix":["team/proj1","team/proj1/*"]}},"Effect":"Allow","Resource":"arn:aws:s3:::flint-ws"}],"Version":"2012-10-17"}
+PASS AssumeRole accepted the broker's write policy
+PASS A1 checkout of the empty prefix on the write keys
+PASS A2 the first barrier (create ×3, one over the part size) published on the write keys
+PASS A4 the writer was denied nothing it asked for
+PASS A5 a reader checked out the writer's edit, delete and the 20 MiB file byte-identical
+PASS B1 PUT to another prefix: AccessDenied
+PASS B2 GET of another prefix: AccessDenied
+PASS B3 DELETE in another prefix: AccessDenied
+PASS B4 LIST of another prefix: AccessDenied
+PASS B-control the parent's keys read and write the other prefix (the narrowing is the session policy's)
+PASS C1 ListBucket under the prefix lists the writer's objects
+PASS C2 PutObject, GetObject and DeleteObject under the prefix on the write keys
+PASS C3 a multipart upload under the prefix: created, a part uploaded, parts listed, aborted
+PASS C4 a multipart upload in another prefix: AccessDenied
+PASS D1 GetBucketVersioning: AccessDenied
+PASS D2 ListMultipartUploads: AccessDenied
+PASS D-control the parent's keys do both (the denial is the session policy's)
+RESULT pass=17 fail=0

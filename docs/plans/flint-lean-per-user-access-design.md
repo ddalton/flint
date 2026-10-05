@@ -820,6 +820,26 @@ uploads, so the no-write property is not resting on the guard alone.
   verb, a conformance probe) fails every writer at once — a hardening
   with its own rollout, not part of read-only. A reader's policy has no
   such risk: readers are new.
+  **SUPERSEDED 2026-10-05** (nothing is deployed, so there is no
+  rollout to stage; the passthrough gap analysis of that day found a
+  read-write CR's key was as wide as the role on every cluster): `mint`
+  now attaches `write_session_policy` — §4.3's readWrite list exactly
+  (the read statements plus PutObject, DeleteObject, DeleteObjectVersion,
+  AbortMultipartUpload, ListMultipartUploadParts on the prefix) — and
+  D14's worry is answered by enumeration: the syncer's verbs
+  (`crates/flint-store/src/s3.rs`: put/get/head/delete/delete_objects,
+  create/upload/complete/abort multipart, upload_part_copy and
+  copy_object within the prefix, list_objects_v2, list_object_versions)
+  are all object or listing actions under the prefix; the conformance
+  probes (`probe_conditional_writes`, `probe_conditional_delete`,
+  `probe_cross_key_copy`) PUT, DELETE and copy under the prefix; the
+  verbs that are NOT in it (`head_bucket` + `get_bucket_versioning` in
+  `bootstrap`, the lifecycle rule, `list_multipart_uploads` in the MPU
+  sweep) are the lean OPERATOR's, run under its own credential. The
+  live check is `lean/e2e/access/write-grant-minio.sh`: a writer syncer
+  runs whole on the exact policy (a file over the part size included),
+  and the keys cannot touch another prefix or do the operator's verbs.
+  `s3csi/SECURITY.md` §4.14 carries the claim.
 - **D15 A `static` broker without a read key still serves readers, and
   says so.** Refusing them would break every existing read-only
   passthrough mount on a static broker (the chart's default backend).
