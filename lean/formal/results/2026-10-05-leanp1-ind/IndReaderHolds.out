@@ -1,0 +1,5 @@
+tlc-rs: MCLeanP1Ind (31 variables, 0 symmetry permutations), 2 workers, generated engine; loaded in 0.041s
+progress: depth 20, 1293609 generated, 379574 distinct (0 fingerprint spills), 69915 on queue (0 on disk), 12.2s
+progress: depth 25, 2423335 generated, 688783 distinct (0 fingerprint spills), 68861 on queue (0 on disk), 23.0s
+Model checking completed. No error has been found.
+3086937 states generated, 834633 distinct states found. Depth 33. Checked in 29.477s (28315 distinct/s).

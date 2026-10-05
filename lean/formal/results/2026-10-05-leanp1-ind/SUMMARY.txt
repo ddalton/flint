@@ -1,0 +1,44 @@
+TLC pre-check of the inductive-proof plan's candidate conjuncts, 2026-10-05
+(docs/plans/lean-tlaps-inductive-proof-plan.md §3, I0-I11).
+
+MCLeanP1Ind.tla EXTENDS LeanP1.tla UNCHANGED (md5 94da7541, the module the
+2026-10-04 gate checked) and states the twelve conjuncts as INVARIANTs,
+plus Ind4Ctl, the positive control (I4's citation clause with its pc guard
+widened to "cased", which the Install must violate).  Checked with tlc-rs
+compiled checkers (-codegen) built on the Linux box from Mac HEAD 99beb8d0
+(formal/tlc-rs at 129adc8b); run dir /mnt/nvme/leanp1-ind-2026-10-05.
+Every world's cfg is the gate's cfg with its INVARIANT/PROPERTY lines
+replaced by TypeOK + Ind0..Ind11; the constants are untouched.
+
+RESULT: all twelve conjuncts HOLD in all four worlds; the control FIRES.
+Every distinct count is EXACTLY the gate's (adding invariants must not move
+the state space; a matching count says the same world was checked).
+
+  world (gate cfg's constants)   verdict                      distinct      generated       depth  time
+  Ind1p3bCtl  (Holds1p3b)        Ind4Ctl VIOLATED, depth 8      21,120         60,604          8   0.13 s   <- control
+  Ind1p3b     (Holds1p3b)        HOLDS                     461,094,969  1,922,766,889         46   5,478 s  8 workers
+  IndReaderHolds                 HOLDS                         834,633      3,086,937         33   29 s     2 workers niced
+  IndFetchHolds                  HOLDS                       3,510,269     11,504,466         33   117 s    2 workers niced
+  IndScopeHolds                  HOLDS                       8,057,963     25,158,316         30   234 s    2 workers niced
+
+Gate reference (results/2026-10-04-leanp1-gate/RESULTS.txt): Holds1p3b
+461,094,969 / 1,922,766,889 / depth 46; ScopeHolds 8,057,963; FetchHolds
+3,510,269; ReaderHolds 834,633.
+
+What each world exercises (what Holds1p3b alone leaves vacuous):
+  Holds1p3b    one path, 3 barriers, a restart, a sync, 2 copies, no removals,
+               no reader, no rescope, no failed fetch  -> I0, I7b, I9 and the
+               removal side of I11 are VACUOUS here
+  ScopeHolds   two paths, a UI removal, a rescope      -> I0, I7b, I11a with a removal
+  ReaderHolds  a reader (B), a failed fetch            -> I9
+  FetchHolds   a failed fetch (ConsumeKeepsLeft/SyncKeepsLeft) -> I8 with derived = 0
+
+What this is NOT: a proof, a claim about unbounded worlds, or a check of
+INDUCTIVENESS (that Ind0-11 /\ Next => Ind0-11') -- TLC cannot start from
+the set of states satisfying the conjuncts at this size; that obligation is
+TLAPS's (plan §4, M0-M4).  What it rules out: a conjunct that is not even an
+invariant, which no proof could close.
+
+The control's trace (Ind1p3bCtl.out): B edits p1 (gen 2), scans, uploads,
+claims, verifies, and at state 9 installs -- doc = <<p1, 2>> = B.snap[p1]
+with B.pc = "cased", upDone = {p1}: cited, as I4 excludes by its pc guard.
