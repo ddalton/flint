@@ -1,0 +1,30 @@
+tlc-rs: ForgeSync (41 variables, 3 symmetry permutations), 192 workers, generated engine; loaded in 0.003s
+progress: depth 32, 117439928 generated, 28341292 distinct (0 fingerprint spills), 9731816 on queue (0 on disk), 12.0s
+progress: depth 34, 264408418 generated, 60316710 distinct (0 fingerprint spills), 18336006 on queue (0 on disk), 26.6s
+progress: depth 35, 377811185 generated, 84035591 distinct (0 fingerprint spills), 23718881 on queue (0 on disk), 37.9s
+progress: depth 36, 523111695 generated, 113702138 distinct (0 fingerprint spills), 29666547 on queue (0 on disk), 52.4s
+progress: depth 37, 703691436 generated, 149788609 distinct (0 fingerprint spills), 36086471 on queue (0 on disk), 70.3s
+progress: depth 38, 922454083 generated, 192684263 distinct (0 fingerprint spills), 42895654 on queue (0 on disk), 91.9s
+progress: depth 39, 1181497274 generated, 242666238 distinct (0 fingerprint spills), 49981975 on queue (0 on disk), 117.8s
+progress: depth 40, 1481560507 generated, 299819627 distinct (0 fingerprint spills), 57153389 on queue (0 on disk), 147.7s
+progress: depth 41, 1821681722 generated, 364000000 distinct (0 fingerprint spills), 64180373 on queue (0 on disk), 181.5s
+progress: depth 42, 2199517315 generated, 434830307 distinct (0 fingerprint spills), 70830307 on queue (0 on disk), 219.3s
+progress: depth 43, 2611971762 generated, 511660895 distinct (0 fingerprint spills), 76830588 on queue (0 on disk), 260.1s
+progress: depth 44, 3055405877 generated, 593561325 distinct (0 fingerprint spills), 81900430 on queue (0 on disk), 304.2s
+progress: depth 45, 3525709068 generated, 679377721 distinct (0 fingerprint spills), 85816396 on queue (0 on disk), 350.6s
+progress: depth 46, 4018158752 generated, 767829079 distinct (0 fingerprint spills), 88451358 on queue (0 on disk), 398.1s
+progress: depth 47, 4526941046 generated, 857459828 distinct (0 fingerprint spills), 89630749 on queue (0 on disk), 448.8s
+progress: depth 48, 5044712563 generated, 946696921 distinct (0 fingerprint spills), 89237093 on queue (0 on disk), 499.1s
+progress: depth 49, 5563276235 generated, 1034012982 distinct (0 fingerprint spills), 87316061 on queue (0 on disk), 548.0s
+progress: depth 50, 6074026586 generated, 1117953402 distinct (0 fingerprint spills), 83940420 on queue (0 on disk), 595.2s
+progress: depth 51, 6566893869 generated, 1196895077 distinct (0 fingerprint spills), 78941675 on queue (0 on disk), 640.0s
+progress: depth 52, 7029028294 generated, 1268919860 distinct (0 fingerprint spills), 72024783 on queue (0 on disk), 681.7s
+progress: depth 53, 7445957800 generated, 1332145269 distinct (0 fingerprint spills), 63225409 on queue (0 on disk), 718.0s
+progress: depth 54, 7805430926 generated, 1385324611 distinct (0 fingerprint spills), 53179342 on queue (0 on disk), 750.2s
+progress: depth 55, 8101275147 generated, 1428225073 distinct (0 fingerprint spills), 42900462 on queue (0 on disk), 776.6s
+progress: depth 56, 8334487109 generated, 1461527237 distinct (0 fingerprint spills), 33302164 on queue (0 on disk), 798.0s
+progress: depth 57, 8511238032 generated, 1486455297 distinct (0 fingerprint spills), 24928060 on queue (0 on disk), 814.4s
+progress: depth 58, 8640137916 generated, 1504422130 distinct (0 fingerprint spills), 17966833 on queue (0 on disk), 826.4s
+progress: depth 60, 8790847662 generated, 1525024423 distinct (0 fingerprint spills), 8185417 on queue (0 on disk), 841.0s
+Model checking completed. No error has been found.
+8875886270 states generated, 1535961438 distinct states found. Depth 70. Checked in 850.211s (1806565 distinct/s).

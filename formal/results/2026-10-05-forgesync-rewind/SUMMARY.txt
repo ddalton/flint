@@ -1,0 +1,34 @@
+The rewind module merged into ForgeSync.tla (2026-10-05, md5 3f296d75), checked on a spot
+c8g.48xlarge (us-west-1, 23:54Z-01:13Z, ~$1.70), compiled tlc-rs main ce2a1af6, 192 workers;
+torn down, zero set checked in four regions. RESULTS.txt is the run's log (41 worlds).
+
+THE QUESTION: the restore fix (restore.rs ce2a1af6 — a restore takes the packs its snapshot
+names off the retained list) and its batch-side twin (NamingUnretains: a batch that re-names a
+retained pack takes it off the list — the code does NOT do this) — is either load-bearing on the
+code's combination (shipped baseline + NameNeeded + ReclaimKeptSet, strict-coverage fold) once
+refs can be rewound and commits re-pushed?
+
+ANSWER AT THESE BOUNDS (two syncers, two pushes, one fold, one rewind, one re-push): NO.
+  ForgeSyncCodeRewind       (the code now: restore fix ON, batch twin OFF)  no error, 1,535,961,438 distinct
+  ForgeSyncCodeRewindNoFix  (the code before ce2a1af6: both OFF)            no error, 1,535,961,438 distinct
+  ForgeSyncCodeRewindModel  (both ON, the sandbox's rules)                  HOLDS,    1,535,961,438 distinct
+The three are the same reachable state space (8,875,886,270 generated each): neither rule changes
+a reachable state. The loss they guard against needs the refuted reachable-coverage fold — the
+09-28 argument, now checked rather than reasoned. The restore fix stays as defence in depth: its
+unit test shows the code loses IF that state arises.
+
+TWO EXPECTATIONS FAILED (written before the run, from the sandbox):
+  ForgeSyncCodeRewindTrustsDisk     exp Inv_LandedPackComplete -> no error at 1,535,961,438
+  ForgeSyncCodeRewindProbeResurrected exp ProbeResurrected     -> no error at 1,535,961,438
+On the code's combination a re-push never needs an object no local pack holds, and never
+resurrects a retained pack: both mutation and probe are vacuous here (they fired on the sandbox's
+baseline with the refuted fold). ProbeRewoundCollected fires (a rewound commit's pack is
+collected).
+
+IDENTITY: the 24 gated worlds (rewind constants all off) reproduce the 09-28 gate again
+(ForgeSync 89,146,934; ForgeSyncLive 1,781,559; 22 mutations fire), and the 11 code worlds give
+today's counts (Code 30,277,694; CodeLive 1,500,985; CodeOverlap 155,567,536) with the restore fix
+now ON in them.
+
+NOT IN CI: the six rewind worlds (~1.5 B distinct each; hours on TLC). OPEN: larger rewind bounds
+(two rewinds, more pushes) are untested.

@@ -14,7 +14,7 @@ emit() { # <name> <base cfg> <INVARIANTS list|-> <PROPERTIES list|-> <flips...>
   local name=$1 base=$2 invs=$3 props=$4; shift 4
   local out=ForgeSyncCode$name.cfg
   cp "$base" "$out"
-  for kv in NameNeeded=TRUE ReclaimKeptSet=TRUE "$@"; do
+  for kv in NameNeeded=TRUE ReclaimKeptSet=TRUE RestoreDropsNamedRetention=TRUE "$@"; do
     grep -q "^  ${kv%%=*} = " "$out" || { echo "gen: $out has no ${kv%%=*}" >&2; exit 1; }
     sed -i '' -e "s/^  ${kv%%=*} = .*/  ${kv%%=*} = ${kv#*=}/" "$out"
   done
@@ -60,3 +60,19 @@ overlap KeptSetNoRenew        ForgeSync.cfg     "$MUT" - KeptSetNoRenew=TRUE
 overlap ProbeKeptSetCommits   ForgeSync.cfg     TypeOK ProbeKeptSetCommits
 overlap ProbeKeptSetResidue   ForgeSync.cfg     TypeOK ProbeKeptSetDropsResidue
 overlap ProbeKeptSetCovered   ForgeSync.cfg     TypeOK ProbeKeptSetDropsCovered
+# Ref REWINDS on the code's combination (2026-10-05; the rewind sandbox,
+# formal/pending/forge-needed, ran only before the shipped baseline and with
+# the refuted reachable-coverage fold). One rewind, one re-push. Inv_NamedIsLanded
+# is out: a rewind is exactly a named pack holding what no ref reaches.
+#   Rewind        — the code at ce2a1af6: the restore drops named packs from
+#                   retention; a batch that re-names a retained pack does not
+#                   (NamingUnretains=FALSE). RECORD: whether the code loses.
+#   RewindNoFix   — the code before ce2a1af6. RECORD.
+#   RewindModel   — both rules (the sandbox's). Must hold.
+RALL="$ALLO"
+emit    Rewind                ForgeSync.cfg     "$RALL" - MaxRewinds=1 MaxResends=1
+emit    RewindNoFix           ForgeSync.cfg     "$RALL" - MaxRewinds=1 MaxResends=1 RestoreDropsNamedRetention=FALSE
+emit    RewindModel           ForgeSync.cfg     "$RALL" - MaxRewinds=1 MaxResends=1 NamingUnretains=TRUE
+emit    RewindTrustsDisk      ForgeSync.cfg     "$RALL" - MaxRewinds=1 MaxResends=1 NamingUnretains=TRUE NeededTrustsDisk=TRUE
+emit    RewindProbeCollected  ForgeSync.cfg     TypeOK,ProbeRewoundCollected - MaxRewinds=1 MaxResends=1 NamingUnretains=TRUE
+emit    RewindProbeResurrected ForgeSync.cfg    TypeOK,ProbeResurrected - MaxRewinds=1 MaxResends=1 NamingUnretains=TRUE

@@ -1284,6 +1284,10 @@ mutation_run ForgeSync ForgeSyncFoldTicksBatchSensor.cfg "forge-sync fold-sensor
 # syncers only. NOT IN THIS GATE: ForgeSyncCodeOverlap.cfg, the hold with
 # overlapping packs (tlc-rs: ~1-2 min on a c8g; TLC: hours, past a CI
 # shard) — run on a box, results in formal/results/2026-10-05-forgesync-code/.
+# Also NOT IN THIS GATE: the six ForgeSyncCodeRewind* worlds (ref rewinds on
+# the code's combination; ~1.5 billion distinct states each, minutes on a c8g
+# with tlc-rs, far past a CI shard on TLC) — results in
+# formal/results/2026-10-05-forgesync-rewind/.
 strict_run ForgeSync ForgeSyncCode.cfg "forge-sync on the CODE's rules (shipped baseline + NameNeeded + ReclaimKeptSet): every claim, and nothing named that no ref reaches"
 strict_run ForgeSync ForgeSyncCodeLive.cfg "forge-sync liveness on the CODE's rules"
 mutation_run ForgeSync ForgeSyncCodeNeededQueued.cfg "forge-sync needed-packs mutation (NeededNamesQueued=TRUE: the rev-list taken over a QUEUED push's tip too — its pack named before its ref moves, the runcd gap)" "Inv_NamedIsLanded"
