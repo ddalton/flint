@@ -1,0 +1,53 @@
+The tie of LeanP1Anc.tla to LeanP1.tla, 2026-10-05/06
+(docs/plans/lean-tlaps-inductive-proof-plan.md, M0's fallback).
+
+WHY  tlapm 1.6.0-pre refuses any module containing a RECURSIVE operator
+     (results/2026-10-05-tlaps-m0/), and LeanP1.tla has two (Derives,
+     Supersedes).  LeanP1Anc.tla is GENERATED from LeanP1.tla (md5 94da7541)
+     by make-anc.py here: a ghost `anc` (per minted handle, every handle on
+     its base chain; written by the step from `base`, which is write-once per
+     handle), Derives/Supersedes restated as a one-level search over it, two
+     ASSUMEs TLC gets free from model values, the module name.  Nothing else
+     (the diff is 54 lines; `diff LeanP1.tla LeanP1Anc.tla`).  LeanP1Anc.tla
+     md5 84faf692.
+
+THE TIE  `anc` is a function of `base`, so the copy must have EXACTLY the
+     original's distinct states, and the gate's cfg (every invariant and
+     action property it lists) must give the same verdict.  tlc-rs compiled
+     checkers (main 129adc8b build on the box, formal/tlc-rs), Linux box, 8
+     workers for the big world, 2 niced for the small ones.
+
+  world                 cfg                              verdict  distinct     generated      depth  time
+  TieHolds1p3b          LeanP1Holds1p3b.cfg BYTE-IDENTICAL HOLDS  461,094,969  1,922,766,889   46   6,123 s
+  CheckReaderHolds      LeanP1ReaderHolds.cfg + 3 below  HOLDS      834,633      3,086,937     33      52 s
+  CheckFetchHolds       LeanP1FetchHolds.cfg  + 3 below  HOLDS    3,510,269     11,504,466     33     192 s
+  CheckScopeHolds       LeanP1ScopeHolds.cfg  + 3 below  HOLDS    8,057,963     25,158,316     30   1,013 s
+
+  Gate reference (results/2026-10-04-leanp1-gate/RESULTS.txt, LeanP1.tla):
+  Holds1p3b 461,094,969 / 1,922,766,889 / 46; ReaderHolds 834,633 /
+  3,086,937; FetchHolds 3,510,269 / 11,504,466; ScopeHolds 8,057,963 /
+  25,158,316.  Every distinct AND generated count matches.  The per-level
+  progress lines of TieHolds1p3b match the original's run of 2026-10-05
+  (results/2026-10-05-leanp1-ind/Ind1p3b.out) at every depth sampled
+  (29: 226,890,896 / 876,583,849; 31: 298,041,387 / 1,176,098,851).
+
+THE EQUIVALENCE, state by state  The three Check worlds run
+     MCLeanP1AncCheck.tla (TLC ONLY: it carries LeanP1.tla's RECURSIVE
+     originals as DerivesRec/SupersedesRec) with three invariants on top of
+     the gate's cfg: AncSound (anc[h] = the base chain), DerivesEquiv and
+     SupersedesEquiv (the restated operator agrees with the recursive one on
+     every pair in Opt(Handles), every path).  All hold.
+
+TLAPM  LeanP1AncParse.tla (EXTENDS LeanP1Anc, TLAPS; the two trivial Init
+     theorems that crashed tlapm on LeanP1.tla): "All 2 obligations proved",
+     44 s (LeanP1AncParse.out) -- the elaboration cost every proof run on
+     this module will pay.
+
+NOT SHOWN  equivalence on a world Holds1p3b/ScopeHolds do not reach (three
+     syncers, two paths with a rename AND a reader at once); the AllHolds and
+     LeanP1Holds ties (756M and 1.69B states) were not run.  The generator's
+     anchors assert LeanP1.tla has not moved; a changed original fails it
+     rather than producing a drifted copy.
+
+NEXT  LeanP1Proof.tla EXTENDS LeanP1Anc, TLAPS: Spec => []TypeOK (M0's
+     last step), then M1.

@@ -1,0 +1,33 @@
+M0 of docs/plans/lean-tlaps-inductive-proof-plan.md: TLAPS installed on the
+Linux box, 2026-10-05.
+
+INSTALL  tlapm 1.6.0-pre (the maintainers' rolling pre-release; the last
+         versioned release, 1.5.0, is from 2022-10), asset
+         tlapm-1.6.0-pre-x86_64-linux-gnu.tar.gz dated 2026-10-01T08:28:54Z,
+         sha256 in sha256.txt, build bfa9468 (version.txt), OCaml 5.1.0.
+         Relocatable tarball unpacked at /mnt/nvme/tlaps/unpack/tlapm;
+         binary /mnt/nvme/tlaps/unpack/tlapm/bin/tlapm.  Bundled backends
+         (config.txt): Zenon 0.8.4, Z3 4.8.9, LS4, Isabelle2025 (poly heaps).
+         Not bundled: cvc4, yices, veriT, SPASS, zipperposition.
+         Box: x86_64, Ubuntu 25.10, glibc 2.42.
+
+SMOKE    Smoke.tla: a one-variable inductive invariant (Init, Next, PTL for
+         the []): "All 6 obligations proved" (Smoke.out, --strict, rc=0).
+
+FINDING  tlapm REFUSES LeanP1.tla as written.  LeanP1Parse.tla EXTENDS
+         LeanP1 (md5 94da7541, unchanged) with two trivial theorems about
+         Init; tlapm dies in module elaboration before any theorem:
+           tlapm ending abnormally with Failure("Expr.Anon: Recursive")
+         (LeanP1Parse.out, rc=3).  Diagnosis with a control: Rec.tla, a
+         module that merely CONTAINS a RECURSIVE operator the theorem never
+         uses, fails the same way (Rec.out, rc=3); NoRec.tla, identical
+         without it, proves (NoRec.out, rc=0).  The presence of
+         `RECURSIVE Derives(_, _)` (LeanP1.tla:190) and
+         `RECURSIVE Supersedes(_, _, _)` (:845) is enough.
+
+CONSEQUENCE  The plan's M0 fallback applies from the start: the proof
+         module cannot EXTEND LeanP1.tla.  It must be built on a copy of
+         the module in which Derives and Supersedes are restated without
+         recursion (the plan's M5 ghost `anc`, brought forward), tied to
+         the original by an exact distinct count on Holds1p3b
+         (461,094,969) and the gate's other worlds.  Not done here.

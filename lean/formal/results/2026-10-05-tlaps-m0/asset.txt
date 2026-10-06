@@ -1,0 +1,5 @@
+1.6.0-pre True tlapm-1.6.0-pre-x86_64-linux-gnu.tar.gz 46747327 2026-10-01T08:28:54Z https://github.com/tlaplus/tlapm/releases/download/1.6.0-pre/tlapm-1.6.0-pre-x86_64-linux-gnu.tar.gz
+202210041448 False tlaps-1.5.0-x86_64-linux-gnu-inst.bin 151669984 2022-10-04T15:04:10Z https://github.com/tlaplus/tlapm/releases/download/202210041448/tlaps-1.5.0-x86_64-linux-gnu-inst.bin
+202208050903 True tlaps-1.5.0-x86_64-linux-gnu-inst.bin 151674353 2022-08-05T09:18:08Z https://github.com/tlaplus/tlapm/releases/download/202208050903/tlaps-1.5.0-x86_64-linux-gnu-inst.bin
+v1.4.5 False tlaps-1.4.5-x86_64-linux-gnu-inst.bin 148496198 2020-03-02T14:53:08Z https://github.com/tlaplus/tlapm/releases/download/v1.4.5/tlaps-1.4.5-x86_64-linux-gnu-inst.bin
+v1.4.4 False tlaps-1.4.4-x86_64-linux-gnu-inst.bin 148496435 2020-02-11T13:25:11Z https://github.com/tlaplus/tlapm/releases/download/v1.4.4/tlaps-1.4.4-x86_64-linux-gnu-inst.bin

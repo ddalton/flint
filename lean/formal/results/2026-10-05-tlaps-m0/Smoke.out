@@ -1,0 +1,6 @@
+(* fingerprints file ".tlacache/Smoke.tlaps/fingerprints" removed *)
+(* created new ".tlacache/Smoke.tlaps/Smoke.thy" *)
+(* fingerprints written in ".tlacache/Smoke.tlaps/fingerprints" *)
+File "./Smoke.tla", line 1, character 1 to line 13, character 4:
+[INFO]: All 6 obligations proved.
+rc=0

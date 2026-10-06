@@ -1,0 +1,34 @@
+tlc-rs: LeanP1Anc (32 variables, 0 symmetry permutations), 8 workers, generated engine; loaded in 0.010s
+progress: depth 15, 5014882 generated, 1429726 distinct (0 fingerprint spills), 625883 on queue (0 on disk), 15.9s
+progress: depth 16, 8757680 generated, 2519208 distinct (0 fingerprint spills), 1089482 on queue (0 on disk), 29.4s
+progress: depth 17, 15168116 generated, 4382920 distinct (0 fingerprint spills), 1863712 on queue (0 on disk), 52.9s
+progress: depth 18, 25882564 generated, 7432524 distinct (0 fingerprint spills), 3049604 on queue (0 on disk), 92.7s
+progress: depth 19, 42907980 generated, 12146575 distinct (0 fingerprint spills), 4714051 on queue (0 on disk), 156.3s
+progress: depth 20, 68274154 generated, 18982463 distinct (0 fingerprint spills), 6835888 on queue (0 on disk), 251.7s
+progress: depth 21, 103575073 generated, 28299415 distinct (0 fingerprint spills), 9316952 on queue (0 on disk), 384.1s
+progress: depth 22, 149742740 generated, 40324905 distinct (0 fingerprint spills), 12025490 on queue (1799570 on disk), 557.5s
+progress: depth 23, 207263181 generated, 55251295 distinct (0 fingerprint spills), 14926390 on queue (4756022 on disk), 775.7s
+progress: depth 24, 277109513 generated, 73449077 distinct (0 fingerprint spills), 18197782 on queue (8084502 on disk), 1042.8s
+progress: depth 25, 361696407 generated, 95600747 distinct (0 fingerprint spills), 22151670 on queue (12057078 on disk), 1342.8s
+progress: depth 26, 464381350 generated, 122447232 distinct (0 fingerprint spills), 26846485 on queue (16763157 on disk), 1642.5s
+progress: depth 27, 586830965 generated, 154135077 distinct (0 fingerprint spills), 31687845 on queue (21605797 on disk), 2002.6s
+checkpoint: /mnt/nvme/leanp1-anc-2026-10-05/states-tie/ckpt (depth 27, 154135077 distinct, 31687845 on queue) in 3.7s
+progress: depth 28, 726481557 generated, 189648923 distinct (0 fingerprint spills), 35513846 on queue (25430518 on disk), 2430.4s
+progress: depth 29, 876583849 generated, 226890896 distinct (0 fingerprint spills), 37241973 on queue (27159413 on disk), 2881.7s
+progress: depth 30, 1028712480 generated, 263521012 distinct (0 fingerprint spills), 36630116 on queue (26549860 on disk), 3336.8s
+progress: depth 31, 1176098851 generated, 298041387 distinct (0 fingerprint spills), 34520375 on queue (24454199 on disk), 3777.5s
+progress: depth 32, 1315675505 generated, 330306875 distinct (0 fingerprint spills), 32265488 on queue (22218512 on disk), 4192.2s
+checkpoint: /mnt/nvme/leanp1-anc-2026-10-05/states-tie/ckpt (depth 32, 330306875 distinct, 32265488 on queue) in 19.2s
+progress: depth 33, 1447346828 generated, 360781279 distinct (0 fingerprint spills), 30474404 on queue (20434340 on disk), 4607.4s
+progress: depth 34, 1570680466 generated, 389119358 distinct (0 fingerprint spills), 28338079 on queue (18256031 on disk), 4986.7s
+progress: depth 35, 1681579461 generated, 413679665 distinct (1024 fingerprint spills), 24560307 on queue (14445747 on disk), 5341.9s
+progress: depth 36, 1772262912 generated, 432470499 distinct (1024 fingerprint spills), 18790834 on queue (8625074 on disk), 5635.8s
+progress: depth 37, 1836365467 generated, 444797822 distinct (1024 fingerprint spills), 12327323 on queue (2096539 on disk), 5841.7s
+progress: depth 38, 1875194958 generated, 451985346 distinct (1024 fingerprint spills), 7187524 on queue (0 on disk), 5965.5s
+progress: depth 39, 1896889988 generated, 456146108 distinct (1024 fingerprint spills), 4160762 on queue (0 on disk), 6034.2s
+checkpoint: /mnt/nvme/leanp1-anc-2026-10-05/states-tie/ckpt (depth 39, 456146108 distinct, 4160762 on queue) in 3.2s
+progress: depth 40, 1909414896 generated, 458673727 distinct (1024 fingerprint spills), 2527619 on queue (0 on disk), 6077.7s
+progress: depth 41, 1916810091 generated, 460123461 distinct (1024 fingerprint spills), 1449734 on queue (0 on disk), 6102.1s
+progress: depth 42, 1920682247 generated, 460804661 distinct (1024 fingerprint spills), 681200 on queue (0 on disk), 6115.2s
+Model checking completed. No error has been found.
+1922766889 states generated, 461094969 distinct states found. Depth 46. Checked in 6123.310s (75302 distinct/s).

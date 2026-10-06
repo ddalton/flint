@@ -1,0 +1,45 @@
+-------------------- tlapm configuration --------------------
+version == "bfa9468"
+built_with == "OCaml 5.1.0"
+tlapm_executable == "/mnt/nvme/tlaps/unpack/tlapm/bin/tlapm"
+max_threads == 8
+library_path == "/mnt/nvme/tlaps/unpack/tlapm/lib/tlapm/stdlib"
+search_path == << "/mnt/nvme/tlaps/unpack/tlapm/lib/tlapm/stdlib" >>
+Isabelle == "PATH='/mnt/nvme/tlaps/unpack/tlapm/lib/tlapm/backends/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin'; export ISABELLE_HOME='/mnt/nvme/tlaps/unpack/tlapm/lib/tlapm/backends/Isabelle-install'; export ML_HOME='/mnt/nvme/tlaps/unpack/tlapm/lib/tlapm/backends/Isabelle-install/poly'; echo 'PolyML.SaveState.loadState \"/mnt/nvme/tlaps/unpack/tlapm/lib/tlapm/backends/Isabelle-install/heaps/Options\"; (use_thy \"'\"$file\"'\"; writeln \"((TLAPS SUCCESS))\");' | /mnt/nvme/tlaps/unpack/tlapm/lib/tlapm/backends/Isabelle-install/poly/poly"
+Isabelle version == "Isabelle2025"
+zenon == "PATH='/mnt/nvme/tlaps/unpack/tlapm/lib/tlapm/backends/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin'; zenon -p0 -x tla -oisar -max-time 1d \"$file\""
+zenon version == "zenon version 0.8.4 [a268] 2017-11-14"
+Executable "cvc4" not found in this PATH:
+/mnt/nvme/tlaps/unpack/tlapm/lib/tlapm/backends/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+
+Executable "yices" not found in this PATH:
+/mnt/nvme/tlaps/unpack/tlapm/lib/tlapm/backends/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+
+Z3 == "PATH='/mnt/nvme/tlaps/unpack/tlapm/lib/tlapm/backends/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin'; z3 -smt2 -v:0 AUTO_CONFIG=false smt.MBQI=true \"$file\""
+Z3 version == "Z3 version 4.8.9 - 64 bit"
+Executable "veriT" not found in this PATH:
+/mnt/nvme/tlaps/unpack/tlapm/lib/tlapm/backends/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+
+SMT == "PATH='/mnt/nvme/tlaps/unpack/tlapm/lib/tlapm/backends/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin'; z3 -smt2 -v:0 AUTO_CONFIG=false smt.MBQI=true \"$file\""
+SMT version == "Z3 version 4.8.9 - 64 bit"
+Executable "SPASS" not found in this PATH:
+/mnt/nvme/tlaps/unpack/tlapm/lib/tlapm/backends/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+
+Executable "zipperposition" not found in this PATH:
+/mnt/nvme/tlaps/unpack/tlapm/lib/tlapm/backends/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+
+LS4 == "PATH='/mnt/nvme/tlaps/unpack/tlapm/lib/tlapm/backends/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin'; ptl_to_trp -i $file | ls4"
+LS4 version == "unknown"
+flatten_obligations == TRUE
+normalize == TRUE
+=============================================================
+Executable "cvc4" not found in this PATH:
+/mnt/nvme/tlaps/unpack/tlapm/lib/tlapm/backends/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+Executable "yices" not found in this PATH:
+/mnt/nvme/tlaps/unpack/tlapm/lib/tlapm/backends/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+Executable "veriT" not found in this PATH:
+/mnt/nvme/tlaps/unpack/tlapm/lib/tlapm/backends/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+Executable "SPASS" not found in this PATH:
+/mnt/nvme/tlaps/unpack/tlapm/lib/tlapm/backends/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+Executable "zipperposition" not found in this PATH:
+/mnt/nvme/tlaps/unpack/tlapm/lib/tlapm/backends/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
