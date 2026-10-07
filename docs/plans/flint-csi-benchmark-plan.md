@@ -66,7 +66,7 @@ CPU budgets, not engines. So:
 
 | Role | Count | Instance (proposed) | Why |
 |------|-------|---------------------|-----|
-| Storage + control plane + load | 3 | i4i.2xlarge (8 vCPU, 64 GiB, 1 × 1,875 GB NVMe instance store), us-east-2 | Ice Lake: meets spdk-tgt's VPCLMULQDQ requirement |
+| Storage + control plane + load | 3 | i4i.2xlarge (8 vCPU, 64 GiB, 1 × 1,875 GB NVMe instance store), us-east-2 | local NVMe on every node, like the hyperconverged deployments these drivers target |
 
 - **No dedicated control-plane or client nodes.** k3s with the control
   plane on storage node 1. fio and pgbench run on the storage nodes

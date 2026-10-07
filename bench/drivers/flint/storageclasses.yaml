@@ -1,0 +1,24 @@
+# Flint StorageClasses for the benchmark: replica count 1 and 3 (plan §3).
+# Thick provisioning, so no test pays allocate-on-first-write; run-fio.sh
+# preconditions the whole file anyway.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: flint-bench-r1
+provisioner: disk.csi.chert.us
+parameters:
+  numReplicas: "1"
+  thinProvision: "false"
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: flint-bench-r3
+provisioner: disk.csi.chert.us
+parameters:
+  numReplicas: "3"
+  thinProvision: "false"
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer

@@ -1,0 +1,1 @@
+{"node":"flint-chainsaw-spdk-worker","window_s":8,"node_busy_cores":1.329,"procs":{"spdk":{"cores":0.335,"rss_mib":326,"pids":1},"agent":{"cores":0.000,"rss_mib":91,"pids":2},"nfs":{"cores":0.000,"rss_mib":0,"pids":0}}}
