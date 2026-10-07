@@ -1,0 +1,146 @@
+13:52:13 used 2 avail 1477   10G
+13:53:13 used 10 avail 1469   10G
+13:54:13 used 74 avail 1404   14G
+13:55:13 used 94 avail 1384   15G
+13:56:13 used 116 avail 1362   19G
+13:57:13 used 203 avail 1276   22G
+13:58:13 used 193 avail 1285   22G
+13:59:13 used 272 avail 1206   23G
+14:00:13 used 242 avail 1236   28G
+14:01:13 used 317 avail 1162   33G
+14:02:13 used 244 avail 1234   33G
+14:03:13 used 322 avail 1156   35G
+14:04:13 used 395 avail 1084   35G
+14:05:13 used 401 avail 1078   71G
+14:05:29 used 204 avail 1275   71G maps 
+14:06:22 used 3 avail 1475   46G maps 104
+14:07:22 used 63 avail 1416   48G maps 1225
+14:08:22 used 81 avail 1398   51G maps 1232
+14:09:22 used 102 avail 1376   17G maps 1741
+14:10:22 used 187 avail 1291   22G maps 8575
+14:11:22 used 177 avail 1301   22G maps 16386
+14:12:22 used 256 avail 1223   22G maps 27981
+14:13:22 used 218 avail 1261   27G maps 17758
+14:14:23 used 299 avail 1179   32G maps 37261
+14:15:23 used 324 avail 1155   41G maps 44313
+14:16:23 used 324 avail 1155   53G maps 44313
+14:17:23 used 193 avail 1286   57G maps 27916
+14:18:23 used 272 avail 1206   58G maps 29505
+14:19:23 used 336 avail 1142   61G maps 47640
+14:20:23 used 336 avail 1142   71G maps 47640
+14:21:23 used 336 avail 1142   79G maps 47640
+14:22:23 used 336 avail 1143   83G maps 47641
+14:23:23 used 336 avail 1143   97G maps 47645
+14:24:23 used 336 avail 1143  106G maps 47646
+14:25:23 used 336 avail 1143  114G maps 47643
+14:26:23 used 336 avail 1143  126G maps 47643
+14:27:23 used 194 avail 1284  103G maps 21871
+14:28:23 used 272 avail 1206  104G maps 29430
+14:29:23 used 336 avail 1142  109G maps 47370
+14:30:23 used 335 avail 1143  119G maps 47370
+14:31:03 used 123 avail 1355  123G maps 0
+14:32:03 used 3 avail 1476   11G maps 
+14:33:03 used 3 avail 1475   12G maps 
+14:34:03 used 4 avail 1475   16G maps 
+14:35:03 used 4 avail 1475   15G maps 
+14:36:03 used 4 avail 1475   21G maps 
+14:36:14 used 2 avail 1476   18G maps 
+14:37:14 used 6 avail 1473   10G maps 1199
+14:38:14 used 69 avail 1409   14G maps 1222
+14:39:14 used 89 avail 1389   15G maps 1228
+14:40:14 used 112 avail 1367   19G maps 1754
+14:41:14 used 198 avail 1280   22G maps 11573
+14:42:14 used 195 avail 1283   22G maps 16375
+14:43:14 used 253 avail 1226   23G maps 26070
+14:44:14 used 251 avail 1227   29G maps 23460
+14:45:14 used 326 avail 1153   40G maps 44304
+14:46:14 used 240 avail 1239   57G maps 27891
+14:47:15 used 319 avail 1159   59G maps 42250
+14:48:15 used 338 avail 1141  123G maps 47555
+14:49:15 used 246 avail 1232  106G maps 21937
+14:50:15 used 324 avail 1154  109G maps 43629
+14:51:15 used 353 avail 1125  180G maps 47434
+14:52:15 used 200 avail 1278  176G maps 27779
+14:53:15 used 281 avail 1197  178G maps 27779
+14:54:15 used 352 avail 1126  189G maps 46282
+14:55:15 used 352 avail 1126  270G maps 46290
+14:56:15 used 352 avail 1126  346G maps 46290
+14:57:15 used 232 avail 1246  247G maps 20887
+14:58:16 used 309 avail 1169  248G maps 34159
+14:59:16 used 351 avail 1127  280G maps 45979
+15:00:16 used 351 avail 1127  355G maps 45979
+15:01:16 used 351 avail 1127  432G maps 45976
+15:02:16 used 298 avail 1180  504G maps 30144
+15:03:16 used 267 avail 1211  314G maps 27468
+15:04:16 used 342 avail 1136  317G maps 43263
+15:05:16 used 351 avail 1127  387G maps 45974
+15:06:16 used 385 avail 1093  461G maps 45972
+15:07:16 used 383 avail 1095  541G maps 45974
+15:08:17 used 383 avail 1095  618G maps 45973
+15:09:17 used 273 avail 1205  389G maps 20881
+15:10:17 used 349 avail 1129  393G maps 36521
+15:11:17 used 383 avail 1095  433G maps 45968
+15:12:17 used 383 avail 1095  507G maps 45966
+15:13:17 used 383 avail 1095  575G maps 45971
+15:14:17 used 383 avail 1095  650G maps 45964
+15:15:17 used 317 avail 1161  710G maps 26728
+15:16:17 used 295 avail 1183  423G maps 27458
+15:17:17 used 371 avail 1107  424G maps 42622
+15:18:17 used 383 avail 1095  481G maps 45966
+15:19:18 used 383 avail 1095  553G maps 45965
+15:20:18 used 383 avail 1095  627G maps 45965
+15:21:18 used 383 avail 1094  701G maps 45964
+15:22:18 used 293 avail 1185  758G maps 20154
+15:23:18 used 301 avail 1177  443G maps 23035
+15:24:18 used 371 avail 1107  444G maps 42637
+15:25:18 used 384 avail 1094  501G maps 46094
+15:26:18 used 384 avail 1094  572G maps 46095
+15:27:18 used 384 avail 1094  641G maps 46095
+15:28:18 used 384 avail 1094  712G maps 46096
+15:29:18 used 318 avail 1160  774G maps 26855
+15:30:18 used 292 avail 1186  446G maps 27585
+15:31:18 used 363 avail 1115  448G maps 40076
+15:32:19 used 385 avail 1093  497G maps 46227
+15:33:19 used 385 avail 1093  569G maps 46232
+15:34:19 used 385 avail 1093  643G maps 46231
+15:35:19 used 385 avail 1093  719G maps 46229
+15:36:19 used 328 avail 1150  786G maps 29376
+15:37:19 used 331 avail 1147  460G maps 21571
+15:38:19 used 406 avail 1072  458G maps 39159
+15:39:19 used 449 avail 1029  485G maps 50747
+15:40:19 used 448 avail 1029  550G maps 50747
+15:41:19 used 449 avail 1029  622G maps 50748
+15:42:20 used 448 avail 1029  693G maps 50750
+15:43:20 used 448 avail 1029  763G maps 50747
+15:44:20 used 332 avail 1146  459G maps 32104
+15:45:20 used 403 avail 1075  460G maps 38121
+15:46:20 used 449 avail 1029  484G maps 50806
+15:47:20 used 449 avail 1029  549G maps 50808
+15:48:20 used 449 avail 1029  610G maps 50807
+15:49:20 used 449 avail 1029  675G maps 50809
+15:50:20 used 449 avail 1029  740G maps 50809
+15:51:20 used 332 avail 1146  444G maps 20967
+15:52:21 used 395 avail 1083  445G maps 35907
+15:53:21 used 450 avail 1028  452G maps 51031
+15:54:21 used 450 avail 1028  514G maps 51032
+15:55:21 used 450 avail 1028  574G maps 51029
+15:56:21 used 450 avail 1028  639G maps 51032
+15:57:21 used 382 avail 1095  691G maps 31596
+15:58:21 used 356 avail 1122  405G maps 32326
+15:59:21 used 417 avail 1061  408G maps 42048
+16:00:21 used 453 avail 1025  438G maps 51536
+16:01:21 used 453 avail 1025  497G maps 51537
+16:02:22 used 453 avail 1025  558G maps 51536
+16:03:22 used 317 avail 1161  333G maps 21472
+16:04:22 used 375 avail 1103  337G maps 30235
+16:05:22 used 434 avail 1044  337G maps 46242
+16:06:22 used 457 avail 1021  378G maps 52156
+16:07:22 used 387 avail 1091  423G maps 32212
+16:08:22 used 354 avail 1124  250G maps 32942
+16:09:22 used 414 avail 1064  255G maps 40689
+16:10:22 used 425 avail 1053  267G maps 42108
+16:11:22 used 353 avail 1125  186G maps 23721
+16:12:23 used 409 avail 1070  186G maps 39251
+16:13:23 used 299 avail 1179  175G maps 21305
+16:14:23 used 237 avail 1241  178G maps 2275
+16:15:23 used 213 avail 1265  179G maps 2275

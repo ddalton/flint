@@ -1,0 +1,45 @@
+2026-10-06 EC2: the three-syncer, three-barrier LeanP1 rung (SAFETY.md open-list row 13)
+
+World     LeanP1Size3L4W3.cfg = LeanP1Holds1p3b.cfg with Writers {A, B, C}, MaxMint 3, MaxUI 1,
+          MaxBarriers 3, MaxRestarts 0, MaxSyncs 0, MaxCopies 1 (Holds1p3b's 8 invariants + 2 step properties)
+Model     LeanP1.tla md5 94da7541 (tree = git archive a466e463)
+Checker   tlc-rs compiled (-codegen), every formula compiled (no ENABLED; both step properties compiled),
+          192 workers, -fpmem 200000 -queue-mem 150000, with the LevelWriter patch below
+Box       spot r8g.48xlarge us-west-1c (192 vCPU, 1.5 TB), $1.49/h, 13:51Z-16:17Z; 1 TB gp3 grown to 2 TB live
+Verdict   HOLDS: 44,056,598,280 generated, 9,821,039,047 distinct, depth 52, 5925 s (1.66M distinct/s). tlc-rs only.
+
+Three runs:
+  run 1  died 14:04Z at depth 26 (983,406,036 distinct, no violation): "memory allocation of 178749 bytes failed"
+         with 1.08 TB free. The process held 65,531 maps = vm.max_map_count (65530). The 10-05 c8g "OOM" at the
+         same count was this limit, not memory. Fix: sysctl vm.max_map_count=16777216 (peak use ~48K maps).
+  run 2  same build, map limit raised; stopped by hand 14:31Z at depth 27 after profiling (below).
+  run 3  patched tlc-rs; per-depth counts equal run 2's exactly through depth 27 (both spilled at 26 and 27):
+         depth 26  3,945,375,616 gen / 983,406,036 distinct   run 2: 274 s for the level, run 3: 137 s
+         depth 27  5,278,339,394 gen / 1,316,260,333 distinct run 2: 600 s,                run 3: 176 s
+         Control before run 3: interpreter old vs patched on L1W3 with -queue-mem 1: both 1,954,072 gen /
+         449,595 distinct / depth 33 (= the 10-05 Mac ladder). It finished before printing progress, so it does
+         not show the spill path ran; run 3's depth 26-27 counts do.
+
+Bottleneck 1 (FIXED in run 3, patch scripts/levelwriter.patch; committed with basic validation, no full gate — user's call):
+  once a BFS level outgrew -queue-mem, LevelWriter::push held the disk mutex across the pwrite AND
+  batch.clear() (dropping 256 deep states). gdb, all threads (gdb-bt.txt): 176 of 192 workers in
+  Mutex::lock_contended under LevelWriter::push; mpstat 10% user, 90% idle (prof-1419.txt). The patch keeps
+  only the offset reservation + block record under the lock (block order preserved), writes with
+  write_all_at and drops the batch outside it, and moves the mem path's enc.clone() out of its lock.
+  After: 99% busy, spilled levels at the in-memory rate.
+  Validation (Mac, old HEAD build vs patched, interpreter, -queue-mem 1): cargo test --release green;
+  L1W3 at 1 and 8 workers: both 1,954,072 gen / 449,595 distinct / depth 33, 43,920 of 45,456 queued on disk
+  (spill ran); SYMMETRY worlds at 1 worker: ForgeSyncNoRotate both Inv_NoStragglerLandAfterRestore at
+  326,844 gen / 93,174 distinct / 19-state trace, ForgeSyncRacyGrace both Inv_AckedIsDurable at 512,460 gen /
+  157,168 distinct / 20-state trace. Plus run 3 vs run 2 above at 192 workers.
+
+Next speedups (prof3.txt, patched build, 99% CPU):
+  23%  step properties: the compiled aprop builds the full 31-var `vars` tuple of both states and compares
+       them deeply on EVERY transition before evaluating the action (Prop_DeleteSettles alone 15%). Evaluate
+       the action first, and compare the states slot by slot (same()) instead of building tuples. ~15-20%.
+  25%  alloc/clone/drop: with step properties (keep_all) every successor is materialised before the seen
+       check; ~3 in 4 are already seen. Evaluate step properties on cx.next in place and allocate only new
+       states. ~10-15%.
+  15%  decoding the serialized level (store::decode_states) — the cost of the serialized-queue design.
+Resource notes: RSS peaked ~450 GB; queue files + trace logs peaked ~790 GB on disk (two levels on disk at
+once, ~660 B/state) — the original 1 TB root would have been marginal.

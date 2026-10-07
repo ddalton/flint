@@ -1,0 +1,33 @@
+tlc-rs: LeanP1 (31 variables, 0 symmetry permutations), 192 workers, generated engine; loaded in 0.003s
+progress: depth 18, 104511147 generated, 28248305 distinct (0 fingerprint spills), 12823163 on queue (0 on disk), 12.5s
+progress: depth 19, 188454830 generated, 50604610 distinct (0 fingerprint spills), 22356305 on queue (0 on disk), 22.6s
+progress: depth 20, 331909909 generated, 87878516 distinct (0 fingerprint spills), 37273906 on queue (0 on disk), 40.0s
+progress: depth 21, 563557768 generated, 146566644 distinct (0 fingerprint spills), 58688128 on queue (0 on disk), 68.4s
+progress: depth 22, 912959945 generated, 233438204 distinct (0 fingerprint spills), 86871560 on queue (0 on disk), 112.0s
+progress: depth 23, 1405007876 generated, 354509790 distinct (0 fingerprint spills), 121071586 on queue (0 on disk), 174.0s
+progress: depth 24, 2058422381 generated, 515066444 distinct (0 fingerprint spills), 160556654 on queue (0 on disk), 255.9s
+progress: depth 25, 2893352283 generated, 721363081 distinct (0 fingerprint spills), 206296637 on queue (0 on disk), 363.9s
+progress: depth 26, 3945375616 generated, 983406036 distinct (0 fingerprint spills), 262042955 on queue (37495371 on disk), 500.7s
+progress: depth 27, 5278339394 generated, 1316260333 distinct (0 fingerprint spills), 332854297 on queue (108848665 on disk), 677.1s
+progress: depth 28, 6974861395 generated, 1735446528 distinct (0 fingerprint spills), 419186195 on queue (195774227 on disk), 899.8s
+progress: depth 29, 9092467559 generated, 2247915866 distinct (0 fingerprint spills), 512469338 on queue (289315930 on disk), 1177.0s
+progress: depth 30, 11620401070 generated, 2846395165 distinct (0 fingerprint spills), 598479299 on queue (375496387 on disk), 1509.1s
+progress: depth 31, 14478218470 generated, 3511583496 distinct (0 fingerprint spills), 665188331 on queue (442219243 on disk), 1888.8s
+progress: depth 32, 17560979305 generated, 4219428440 distinct (0 fingerprint spills), 707844944 on queue (484882000 on disk), 2289.2s
+progress: depth 33, 20783798520 generated, 4945892742 distinct (0 fingerprint spills), 726464302 on queue (503447598 on disk), 2707.1s
+progress: depth 34, 24067024935 generated, 5669316822 distinct (0 fingerprint spills), 723424080 on queue (500342096 on disk), 3133.2s
+progress: depth 35, 27331074476 generated, 6377493595 distinct (0 fingerprint spills), 708176773 on queue (485108613 on disk), 3557.5s
+progress: depth 36, 30535682580 generated, 7067849133 distinct (0 fingerprint spills), 690355538 on queue (467373394 on disk), 3992.1s
+progress: depth 37, 33644426276 generated, 7728671027 distinct (0 fingerprint spills), 660821894 on queue (437735814 on disk), 4414.0s
+progress: depth 38, 36525465248 generated, 8323360871 distinct (0 fingerprint spills), 594689844 on queue (371228980 on disk), 4811.8s
+progress: depth 39, 38949061527 generated, 8806235697 distinct (0 fingerprint spills), 482874826 on queue (258581962 on disk), 5150.5s
+progress: depth 40, 40753395734 generated, 9158521447 distinct (0 fingerprint spills), 352285750 on queue (127311414 on disk), 5412.8s
+progress: depth 41, 41983948354 generated, 9400210182 distinct (0 fingerprint spills), 241688735 on queue (15970207 on disk), 5598.2s
+progress: depth 42, 42807155187 generated, 9565250708 distinct (0 fingerprint spills), 165040526 on queue (0 on disk), 5724.1s
+progress: depth 43, 43353368542 generated, 9676835239 distinct (0 fingerprint spills), 111584531 on queue (0 on disk), 5811.6s
+progress: depth 44, 43689552360 generated, 9746335319 distinct (0 fingerprint spills), 69500080 on queue (0 on disk), 5864.3s
+progress: depth 45, 43873266313 generated, 9784198997 distinct (0 fingerprint spills), 37863678 on queue (0 on disk), 5893.6s
+progress: depth 46, 43967373025 generated, 9803354268 distinct (0 fingerprint spills), 19155271 on queue (0 on disk), 5908.9s
+progress: depth 48, 44042097467 generated, 9818507844 distinct (0 fingerprint spills), 5066748 on queue (0 on disk), 5921.1s
+Model checking completed. No error has been found.
+44056598280 states generated, 9821039047 distinct states found. Depth 52. Checked in 5925.415s (1657443 distinct/s).

@@ -1,0 +1,2338 @@
+gdb: warning: Couldn't determine a path for the index cache directory.
+[New LWP 72495]
+[New LWP 72494]
+[New LWP 72493]
+[New LWP 72492]
+[New LWP 72491]
+[New LWP 72490]
+[New LWP 72489]
+[New LWP 72488]
+[New LWP 72487]
+[New LWP 72486]
+[New LWP 72485]
+[New LWP 72484]
+[New LWP 72483]
+[New LWP 72482]
+[New LWP 72481]
+[New LWP 72480]
+[New LWP 72479]
+[New LWP 72478]
+[New LWP 72477]
+[New LWP 72476]
+[New LWP 72475]
+[New LWP 72474]
+[New LWP 72473]
+[New LWP 72472]
+[New LWP 72471]
+[New LWP 72470]
+[New LWP 72469]
+[New LWP 72468]
+[New LWP 72467]
+[New LWP 72466]
+[New LWP 72465]
+[New LWP 72464]
+[New LWP 72463]
+[New LWP 72462]
+[New LWP 72461]
+[New LWP 72460]
+[New LWP 72459]
+[New LWP 72458]
+[New LWP 72457]
+[New LWP 72456]
+[New LWP 72455]
+[New LWP 72454]
+[New LWP 72453]
+[New LWP 72452]
+[New LWP 72451]
+[New LWP 72450]
+[New LWP 72449]
+[New LWP 72448]
+[New LWP 72447]
+[New LWP 72446]
+[New LWP 72445]
+[New LWP 72444]
+[New LWP 72443]
+[New LWP 72442]
+[New LWP 72441]
+[New LWP 72440]
+[New LWP 72439]
+[New LWP 72438]
+[New LWP 72437]
+[New LWP 72436]
+[New LWP 72435]
+[New LWP 72434]
+[New LWP 72433]
+[New LWP 72432]
+[New LWP 72431]
+[New LWP 72430]
+[New LWP 72429]
+[New LWP 72428]
+[New LWP 72427]
+[New LWP 72426]
+[New LWP 72425]
+[New LWP 72424]
+[New LWP 72423]
+[New LWP 72422]
+[New LWP 72421]
+[New LWP 72420]
+[New LWP 72419]
+[New LWP 72418]
+[New LWP 72417]
+[New LWP 72416]
+[New LWP 72415]
+[New LWP 72414]
+[New LWP 72413]
+[New LWP 72412]
+[New LWP 72411]
+[New LWP 72410]
+[New LWP 72409]
+[New LWP 72408]
+[New LWP 72407]
+[New LWP 72406]
+[New LWP 72405]
+[New LWP 72404]
+[New LWP 72403]
+[New LWP 72402]
+[New LWP 72401]
+[New LWP 72400]
+[New LWP 72399]
+[New LWP 72398]
+[New LWP 72397]
+[New LWP 72396]
+[New LWP 72395]
+[New LWP 72394]
+[New LWP 72393]
+[New LWP 72392]
+[New LWP 72391]
+[New LWP 72390]
+[New LWP 72389]
+[New LWP 72388]
+[New LWP 72387]
+[New LWP 72386]
+[New LWP 72385]
+[New LWP 72384]
+[New LWP 72383]
+[New LWP 72382]
+[New LWP 72381]
+[New LWP 72380]
+[New LWP 72379]
+[New LWP 72378]
+[New LWP 72377]
+[New LWP 72376]
+[New LWP 72375]
+[New LWP 72374]
+[New LWP 72373]
+[New LWP 72372]
+[New LWP 72371]
+[New LWP 72370]
+[New LWP 72369]
+[New LWP 72368]
+[New LWP 72367]
+[New LWP 72366]
+[New LWP 72365]
+[New LWP 72364]
+[New LWP 72363]
+[New LWP 72362]
+[New LWP 72361]
+[New LWP 72360]
+[New LWP 72359]
+[New LWP 72358]
+[New LWP 72357]
+[New LWP 72356]
+[New LWP 72355]
+[New LWP 72354]
+[New LWP 72353]
+[New LWP 72352]
+[New LWP 72351]
+[New LWP 72350]
+[New LWP 72349]
+[New LWP 72348]
+[New LWP 72347]
+[New LWP 72346]
+[New LWP 72345]
+[New LWP 72344]
+[New LWP 72343]
+[New LWP 72342]
+[New LWP 72341]
+[New LWP 72340]
+[New LWP 72339]
+[New LWP 72338]
+[New LWP 72337]
+[New LWP 72336]
+[New LWP 72335]
+[New LWP 72334]
+[New LWP 72333]
+[New LWP 72332]
+[New LWP 72331]
+[New LWP 72330]
+[New LWP 72329]
+[New LWP 72328]
+[New LWP 72327]
+[New LWP 72326]
+[New LWP 72325]
+[New LWP 72324]
+[New LWP 72323]
+[New LWP 72322]
+[New LWP 72321]
+[New LWP 72320]
+[New LWP 72319]
+[New LWP 72318]
+[New LWP 72317]
+[New LWP 72316]
+[New LWP 72315]
+[New LWP 72314]
+[New LWP 72313]
+[New LWP 72312]
+[New LWP 72311]
+[New LWP 72310]
+[New LWP 72309]
+[New LWP 72308]
+[New LWP 72307]
+[New LWP 72306]
+[New LWP 72305]
+[New LWP 72304]
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib64/libthread_db.so.1".
+0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+
+Thread 193 (Thread 0xffff5231f080 (LWP 72304) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 192 (Thread 0xfffd0d6bf080 (LWP 72305) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 191 (Thread 0xffff539cf080 (LWP 72306) "tlcgen-leanp1"):
+#0  0x0000aaaae4b9cd10 in tlcgen_leanp1::next::{closure#0} ()
+#1  0x0000aaaae4bbb3bc in tlcgen_leanp1::next ()
+#2  0x0000aaaae4c1caf4 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#3  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#4  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#5  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#6  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#7  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 190 (Thread 0xffff80a5f080 (LWP 72307) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 189 (Thread 0xffff79eff080 (LWP 72308) "tlcgen-leanp1"):
+#0  0x0000aaaae4c1e45c in core::ptr::drop_glue::<tlc_rs::value::Value> ()
+#1  0x0000aaaae4c1e7ec in <alloc::sync::Arc<tlc_rs::value::Func>>::drop_slow ()
+#2  0x0000aaaae4c1e7ec in <alloc::sync::Arc<tlc_rs::value::Func>>::drop_slow ()
+#3  0x0000aaaae4c1f1c8 in <tlc_rs::store::LevelWriter>::push ()
+#4  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#5  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#6  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#7  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#8  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#9  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 188 (Thread 0xffff816bf080 (LWP 72309) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 187 (Thread 0xfffe4042f080 (LWP 72310) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 186 (Thread 0xfffd0c21f080 (LWP 72311) "tlcgen-leanp1"):
+#0  0x0000aaaae4b7bd00 in core::ptr::drop_glue::<tlc_rs::value::Value> ()
+#1  0x0000aaaae4bd7378 in tlcgen_leanp1::aprop_1 ()
+#2  0x0000aaaae4bdb8e0 in <tlcgen_leanp1::E as tlc_rs::eval::Engine>::step_prop ()
+#3  0x0000aaaae4c1d2e4 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 185 (Thread 0xffff7b39f080 (LWP 72312) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 184 (Thread 0xffff8042f080 (LWP 72313) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 183 (Thread 0xffff83bdf080 (LWP 72314) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 182 (Thread 0xfffe4231f080 (LWP 72315) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 181 (Thread 0xfffd854af080 (LWP 72316) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 180 (Thread 0xfffd8718f080 (LWP 72317) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 179 (Thread 0xffff80e7f080 (LWP 72318) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 178 (Thread 0xffff5252f080 (LWP 72319) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 177 (Thread 0xffffa0a7b080 (LWP 72320) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 176 (Thread 0xfffd0e52f080 (LWP 72321) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 175 (Thread 0xfffd8673f080 (LWP 72322) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 174 (Thread 0xffffa10ba080 (LWP 72323) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 173 (Thread 0xffffa0ea5080 (LWP 72324) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 172 (Thread 0xffffa0c90080 (LWP 72325) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 171 (Thread 0xffffa086b080 (LWP 72326) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 170 (Thread 0xffffa0656080 (LWP 72327) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 169 (Thread 0xffffa0441080 (LWP 72328) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 168 (Thread 0xffff83fff080 (LWP 72329) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 167 (Thread 0xffff83def080 (LWP 72330) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 166 (Thread 0xffff839cf080 (LWP 72331) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 165 (Thread 0xffff837bf080 (LWP 72332) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 164 (Thread 0xffff835af080 (LWP 72333) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 163 (Thread 0xffff8339f080 (LWP 72334) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 162 (Thread 0xffff8318f080 (LWP 72335) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 161 (Thread 0xffff82f7f080 (LWP 72336) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 160 (Thread 0xffff82d6f080 (LWP 72337) "tlcgen-leanp1"):
+#0  0x0000aaaae4c1e480 in core::ptr::drop_glue::<tlc_rs::value::Value> ()
+#1  0x0000aaaae4c1e7ec in <alloc::sync::Arc<tlc_rs::value::Func>>::drop_slow ()
+#2  0x0000aaaae4c1db68 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#3  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#4  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#5  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#6  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#7  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 159 (Thread 0xffff82b5f080 (LWP 72338) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 158 (Thread 0xffff8294f080 (LWP 72339) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 157 (Thread 0xffff8273f080 (LWP 72340) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 156 (Thread 0xffff8252f080 (LWP 72341) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 155 (Thread 0xffff8231f080 (LWP 72342) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 154 (Thread 0xffff8210f080 (LWP 72343) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 153 (Thread 0xffff81eff080 (LWP 72344) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 152 (Thread 0xffff81cef080 (LWP 72345) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 151 (Thread 0xffff81adf080 (LWP 72346) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 150 (Thread 0xffff818cf080 (LWP 72347) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 149 (Thread 0xffff814af080 (LWP 72348) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 148 (Thread 0xffff8129f080 (LWP 72349) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 147 (Thread 0xffff8108f080 (LWP 72350) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 146 (Thread 0xffff80c6f080 (LWP 72351) "tlcgen-leanp1"):
+#0  0x0000aaaae4c2e958 in <tlc_rs::value::Value as core::cmp::Ord>::cmp ()
+#1  0x0000aaaae4bd8974 in <tlc_rs::value::Value>::apply_ref ()
+#2  0x0000aaaae4bd6f08 in tlcgen_leanp1::aprop_1 ()
+#3  0x0000aaaae4bdb8e0 in <tlcgen_leanp1::E as tlc_rs::eval::Engine>::step_prop ()
+#4  0x0000aaaae4c1d2e4 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#5  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#6  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#7  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#8  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#9  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 145 (Thread 0xffff8084f080 (LWP 72352) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 144 (Thread 0xffff8063f080 (LWP 72353) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 143 (Thread 0xffff8021f080 (LWP 72354) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 142 (Thread 0xffff7bfff080 (LWP 72355) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 141 (Thread 0xffff7bdef080 (LWP 72356) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 140 (Thread 0xffff7bbdf080 (LWP 72357) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 139 (Thread 0xffff7b9cf080 (LWP 72358) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 138 (Thread 0xffff7b7bf080 (LWP 72359) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 137 (Thread 0xffff7b5af080 (LWP 72360) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 136 (Thread 0xffff7b18f080 (LWP 72361) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 135 (Thread 0xffff7af7f080 (LWP 72362) "tlcgen-leanp1"):
+#0  0x0000aaaae4caaa20 in _mi_page_malloc_zero ()
+#1  0x0000aaaae4c207b0 in <alloc::vec::Vec<tlc_rs::value::Value> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<tlc_rs::value::Value, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::ops::range::Range<u64>, tlc_rs::store::decode::{closure#0}::{closure#0}>, core::result::Result<core::convert::Infallible, alloc::string::String>>>>::from_iter ()
+#2  0x0000aaaae4c20540 in tlc_rs::store::decode ()
+#3  0x0000aaaae4c2080c in <alloc::vec::Vec<tlc_rs::value::Value> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<tlc_rs::value::Value, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::ops::range::Range<u64>, tlc_rs::store::decode::{closure#0}::{closure#0}>, core::result::Result<core::convert::Infallible, alloc::string::String>>>>::from_iter ()
+#4  0x0000aaaae4c209c0 in core::iter::adapters::try_process::<core::iter::adapters::map::Map<core::ops::range::Range<u64>, tlc_rs::store::decode::{closure#0}::{closure#0}>, tlc_rs::value::Value, core::result::Result<core::convert::Infallible, alloc::string::String>, <core::result::Result<alloc::vec::Vec<tlc_rs::value::Value>, alloc::string::String> as core::iter::traits::collect::FromIterator<core::result::Result<tlc_rs::value::Value, alloc::string::String>>>::from_iter<core::iter::adapters::map::Map<core::ops::range::Range<u64>, tlc_rs::store::decode::{closure#0}::{closure#0}>>::{closure#0}, alloc::vec::Vec<tlc_rs::value::Value>> ()
+#5  0x0000aaaae4c2064c in tlc_rs::store::decode ()
+#6  0x0000aaaae4c2080c in <alloc::vec::Vec<tlc_rs::value::Value> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<tlc_rs::value::Value, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::ops::range::Range<u64>, tlc_rs::store::decode::{closure#0}::{closure#0}>, core::result::Result<core::convert::Infallible, alloc::string::String>>>>::from_iter ()
+#7  0x0000aaaae4c209c0 in core::iter::adapters::try_process::<core::iter::adapters::map::Map<core::ops::range::Range<u64>, tlc_rs::store::decode::{closure#0}::{closure#0}>, tlc_rs::value::Value, core::result::Result<core::convert::Infallible, alloc::string::String>, <core::result::Result<alloc::vec::Vec<tlc_rs::value::Value>, alloc::string::String> as core::iter::traits::collect::FromIterator<core::result::Result<tlc_rs::value::Value, alloc::string::String>>>::from_iter<core::iter::adapters::map::Map<core::ops::range::Range<u64>, tlc_rs::store::decode::{closure#0}::{closure#0}>>::{closure#0}, alloc::vec::Vec<tlc_rs::value::Value>> ()
+#8  0x0000aaaae4c2064c in tlc_rs::store::decode ()
+#9  0x0000aaaae4c1e9d4 in tlc_rs::store::decode_states ()
+#10 0x0000aaaae4c1bef8 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#11 0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#12 0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#13 0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+
+Thread 134 (Thread 0xffff7ad6f080 (LWP 72363) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 133 (Thread 0xffff7ab5f080 (LWP 72364) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 132 (Thread 0xffff7a94f080 (LWP 72365) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 131 (Thread 0xffff7a73f080 (LWP 72366) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 130 (Thread 0xffff7a52f080 (LWP 72367) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 129 (Thread 0xffff7a31f080 (LWP 72368) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 128 (Thread 0xffff7a10f080 (LWP 72369) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 127 (Thread 0xffff79cef080 (LWP 72370) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 126 (Thread 0xffff79adf080 (LWP 72371) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 125 (Thread 0xffff798cf080 (LWP 72372) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 124 (Thread 0xffff796bf080 (LWP 72373) "tlcgen-leanp1"):
+#0  0x0000aaaae4b7bd00 in core::ptr::drop_glue::<tlc_rs::value::Value> ()
+#1  0x0000aaaae4b7f2cc in tlc_rs::codegen::rt::upd::<tlcgen_leanp1::next::{closure#109}> ()
+#2  0x0000aaaae4bbaea8 in tlcgen_leanp1::next ()
+#3  0x0000aaaae4c1caf4 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 123 (Thread 0xffff794af080 (LWP 72374) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 122 (Thread 0xffff7929f080 (LWP 72375) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 121 (Thread 0xffff7908f080 (LWP 72376) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 120 (Thread 0xffff78e7f080 (LWP 72377) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 119 (Thread 0xffff78c6f080 (LWP 72378) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 118 (Thread 0xffff78a5f080 (LWP 72379) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 117 (Thread 0xffff7884f080 (LWP 72380) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 116 (Thread 0xffff7863f080 (LWP 72381) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 115 (Thread 0xffff7842f080 (LWP 72382) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 114 (Thread 0xffff7821f080 (LWP 72383) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 113 (Thread 0xffff53fff080 (LWP 72384) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 112 (Thread 0xffff53def080 (LWP 72385) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 111 (Thread 0xffff53bdf080 (LWP 72386) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 110 (Thread 0xffff537bf080 (LWP 72387) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 109 (Thread 0xffff535af080 (LWP 72388) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 108 (Thread 0xffff5339f080 (LWP 72389) "tlcgen-leanp1"):
+#0  0x0000aaaae4c1e45c in core::ptr::drop_glue::<tlc_rs::value::Value> ()
+#1  0x0000aaaae4c1e748 in <alloc::sync::Arc<[tlc_rs::value::Value]>>::drop_slow ()
+#2  0x0000aaaae4bdc3dc in <tlcgen_leanp1::E as tlc_rs::eval::Engine>::step_prop ()
+#3  0x0000aaaae4c1d2e4 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 107 (Thread 0xffff5318f080 (LWP 72390) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 106 (Thread 0xffff52f7f080 (LWP 72391) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 105 (Thread 0xffff52d6f080 (LWP 72392) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 104 (Thread 0xffff52b5f080 (LWP 72393) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 103 (Thread 0xffff5294f080 (LWP 72394) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 102 (Thread 0xffff5273f080 (LWP 72395) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 101 (Thread 0xffff5210f080 (LWP 72396) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 100 (Thread 0xffff51eff080 (LWP 72397) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 99 (Thread 0xffff51cef080 (LWP 72398) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 98 (Thread 0xffff51adf080 (LWP 72399) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 97 (Thread 0xffff518cf080 (LWP 72400) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 96 (Thread 0xffff516bf080 (LWP 72401) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 95 (Thread 0xffff514af080 (LWP 72402) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 94 (Thread 0xffff5129f080 (LWP 72403) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 93 (Thread 0xffff5108f080 (LWP 72404) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 92 (Thread 0xffff50e7f080 (LWP 72405) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 91 (Thread 0xffff50c6f080 (LWP 72406) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 90 (Thread 0xffff50a5f080 (LWP 72407) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 89 (Thread 0xffff5084f080 (LWP 72408) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 88 (Thread 0xffff5063f080 (LWP 72409) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 87 (Thread 0xffff5042f080 (LWP 72410) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 86 (Thread 0xffff5021f080 (LWP 72411) "tlcgen-leanp1"):
+#0  0x0000aaaae4c20798 in <alloc::vec::Vec<tlc_rs::value::Value> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<tlc_rs::value::Value, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::ops::range::Range<u64>, tlc_rs::store::decode::{closure#0}::{closure#0}>, core::result::Result<core::convert::Infallible, alloc::string::String>>>>::from_iter ()
+#1  0x0000aaaae4c20540 in tlc_rs::store::decode ()
+#2  0x0000aaaae4c2080c in <alloc::vec::Vec<tlc_rs::value::Value> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<tlc_rs::value::Value, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::ops::range::Range<u64>, tlc_rs::store::decode::{closure#0}::{closure#0}>, core::result::Result<core::convert::Infallible, alloc::string::String>>>>::from_iter ()
+#3  0x0000aaaae4c209c0 in core::iter::adapters::try_process::<core::iter::adapters::map::Map<core::ops::range::Range<u64>, tlc_rs::store::decode::{closure#0}::{closure#0}>, tlc_rs::value::Value, core::result::Result<core::convert::Infallible, alloc::string::String>, <core::result::Result<alloc::vec::Vec<tlc_rs::value::Value>, alloc::string::String> as core::iter::traits::collect::FromIterator<core::result::Result<tlc_rs::value::Value, alloc::string::String>>>::from_iter<core::iter::adapters::map::Map<core::ops::range::Range<u64>, tlc_rs::store::decode::{closure#0}::{closure#0}>>::{closure#0}, alloc::vec::Vec<tlc_rs::value::Value>> ()
+#4  0x0000aaaae4c2064c in tlc_rs::store::decode ()
+#5  0x0000aaaae4c20760 in <alloc::vec::Vec<tlc_rs::value::Value> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<tlc_rs::value::Value, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::ops::range::Range<u64>, tlc_rs::store::decode::{closure#0}::{closure#0}>, core::result::Result<core::convert::Infallible, alloc::string::String>>>>::from_iter ()
+#6  0x0000aaaae4c209c0 in core::iter::adapters::try_process::<core::iter::adapters::map::Map<core::ops::range::Range<u64>, tlc_rs::store::decode::{closure#0}::{closure#0}>, tlc_rs::value::Value, core::result::Result<core::convert::Infallible, alloc::string::String>, <core::result::Result<alloc::vec::Vec<tlc_rs::value::Value>, alloc::string::String> as core::iter::traits::collect::FromIterator<core::result::Result<tlc_rs::value::Value, alloc::string::String>>>::from_iter<core::iter::adapters::map::Map<core::ops::range::Range<u64>, tlc_rs::store::decode::{closure#0}::{closure#0}>>::{closure#0}, alloc::vec::Vec<tlc_rs::value::Value>> ()
+#7  0x0000aaaae4c2064c in tlc_rs::store::decode ()
+#8  0x0000aaaae4c1e9d4 in tlc_rs::store::decode_states ()
+#9  0x0000aaaae4c1bef8 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#10 0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#11 0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#12 0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#13 0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 85 (Thread 0xfffe43fff080 (LWP 72412) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 84 (Thread 0xfffe43def080 (LWP 72413) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 83 (Thread 0xfffe43bdf080 (LWP 72414) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 82 (Thread 0xfffe439cf080 (LWP 72415) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 81 (Thread 0xfffe437bf080 (LWP 72416) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 80 (Thread 0xfffe435af080 (LWP 72417) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 79 (Thread 0xfffe4339f080 (LWP 72418) "tlcgen-leanp1"):
+#0  0x0000aaaae4c2ac54 in <tlc_rs::value::Value>::normalized ()
+#1  0x0000aaaae4bd46b4 in tlcgen_leanp1::op_30 ()
+#2  0x0000aaaae4bd6bac in tlcgen_leanp1::aprop_1 ()
+#3  0x0000aaaae4bdb8e0 in <tlcgen_leanp1::E as tlc_rs::eval::Engine>::step_prop ()
+#4  0x0000aaaae4c1d2e4 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#5  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#6  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#7  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#8  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#9  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 78 (Thread 0xfffe4318f080 (LWP 72419) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 77 (Thread 0xfffe42f7a080 (LWP 72420) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 76 (Thread 0xfffe42b5f080 (LWP 72421) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 75 (Thread 0xfffe4294f080 (LWP 72422) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 74 (Thread 0xfffe4273f080 (LWP 72423) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 73 (Thread 0xfffe4252f080 (LWP 72424) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 72 (Thread 0xfffe4210f080 (LWP 72425) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 71 (Thread 0xfffe41eff080 (LWP 72426) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 70 (Thread 0xfffe41cef080 (LWP 72427) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 69 (Thread 0xfffe41adf080 (LWP 72428) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 68 (Thread 0xfffe418cf080 (LWP 72429) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 67 (Thread 0xfffe416bf080 (LWP 72430) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 66 (Thread 0xfffe414af080 (LWP 72431) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 65 (Thread 0xfffe4129f080 (LWP 72432) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 64 (Thread 0xfffe4108f080 (LWP 72433) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 63 (Thread 0xfffe40e7f080 (LWP 72434) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 62 (Thread 0xfffe40c6f080 (LWP 72435) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 61 (Thread 0xfffe40a5f080 (LWP 72436) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 60 (Thread 0xfffe4084f080 (LWP 72437) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 59 (Thread 0xfffe4063f080 (LWP 72438) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 58 (Thread 0xfffd87fff080 (LWP 72439) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 57 (Thread 0xfffd87def080 (LWP 72440) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 56 (Thread 0xfffd87bdf080 (LWP 72441) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 55 (Thread 0xfffd879cf080 (LWP 72442) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 54 (Thread 0xfffd877bf080 (LWP 72443) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 53 (Thread 0xfffd875af080 (LWP 72444) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 52 (Thread 0xfffd8739f080 (LWP 72445) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 51 (Thread 0xfffd86f7f080 (LWP 72446) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 50 (Thread 0xfffd86d6f080 (LWP 72447) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 49 (Thread 0xfffd86b5f080 (LWP 72448) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 48 (Thread 0xfffd8694f080 (LWP 72449) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 47 (Thread 0xfffd8652f080 (LWP 72450) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 46 (Thread 0xfffd8631f080 (LWP 72451) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 45 (Thread 0xfffd8610f080 (LWP 72452) "tlcgen-leanp1"):
+#0  0x0000aaaae4c22520 in <tlc_rs::value::Value>::hash ()
+#1  0x0000aaaae4c224a4 in <tlc_rs::value::Value>::hash ()
+#2  0x0000aaaae4c224a4 in <tlc_rs::value::Value>::hash ()
+#3  0x0000aaaae4c224a4 in <tlc_rs::value::Value>::hash ()
+#4  0x0000aaaae4c35308 in <tlc_rs::check::Checker>::expand::{closure#1} ()
+#5  0x0000aaaae4b9e3b8 in tlcgen_leanp1::next::{closure#0} ()
+#6  0x0000aaaae4bb9688 in tlcgen_leanp1::next ()
+#7  0x0000aaaae4c1caf4 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#8  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#9  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#10 0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#11 0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#12 0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 44 (Thread 0xfffd85eff080 (LWP 72453) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 43 (Thread 0xfffd85cef080 (LWP 72454) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 42 (Thread 0xfffd85adf080 (LWP 72455) "tlcgen-leanp1"):
+#0  0x0000aaaae4b7bcbc in core::ptr::drop_glue::<tlc_rs::value::Value> ()
+#1  0x0000aaaae4bd1be8 in tlcgen_leanp1::op_21 ()
+#2  0x0000aaaae4bd8f5c in <tlcgen_leanp1::E as tlc_rs::eval::Engine>::invariant ()
+#3  0x0000aaaae4c226f8 in <tlc_rs::check::Checker>::holds ()
+#4  0x0000aaaae4c1dbb4 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#5  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#6  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#7  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#8  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#9  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 41 (Thread 0xfffd858cf080 (LWP 72456) "tlcgen-leanp1"):
+#0  0x0000aaaae4c2a1c0 in <tlc_rs::value::Value>::elems ()
+#1  0x0000aaaae4c2c588 in tlc_rs::eval::binop ()
+#2  0x0000aaaae4bc7f08 in tlcgen_leanp1::next ()
+#3  0x0000aaaae4c1caf4 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 40 (Thread 0xfffd856bf080 (LWP 72457) "tlcgen-leanp1"):
+#0  0x0000aaaae4c2e958 in <tlc_rs::value::Value as core::cmp::Ord>::cmp ()
+#1  0x0000aaaae4bd8974 in <tlc_rs::value::Value>::apply_ref ()
+#2  0x0000aaaae4bcfea8 in tlcgen_leanp1::op_21 ()
+#3  0x0000aaaae4bd8f5c in <tlcgen_leanp1::E as tlc_rs::eval::Engine>::invariant ()
+#4  0x0000aaaae4c226f8 in <tlc_rs::check::Checker>::holds ()
+#5  0x0000aaaae4c1dbb4 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#6  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#7  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#8  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#9  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#10 0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 39 (Thread 0xfffd8529f080 (LWP 72458) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 38 (Thread 0xfffd8505f080 (LWP 72459) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 37 (Thread 0xfffd84e38080 (LWP 72460) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 36 (Thread 0xfffd84c28080 (LWP 72461) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 35 (Thread 0xfffd84a18080 (LWP 72462) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 34 (Thread 0xfffd8471b080 (LWP 72463) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 33 (Thread 0xfffd8450b080 (LWP 72464) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 32 (Thread 0xfffd842fb080 (LWP 72465) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 31 (Thread 0xfffd0ffff080 (LWP 72466) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 30 (Thread 0xfffd0fdef080 (LWP 72467) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 29 (Thread 0xfffd0fbdf080 (LWP 72468) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 28 (Thread 0xfffd0f9cf080 (LWP 72469) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 27 (Thread 0xfffd0f7bf080 (LWP 72470) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 26 (Thread 0xfffd0f5af080 (LWP 72471) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 25 (Thread 0xfffd0f39f080 (LWP 72472) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 24 (Thread 0xfffd0f18f080 (LWP 72473) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 23 (Thread 0xfffd0ef7f080 (LWP 72474) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 22 (Thread 0xfffd0ed6f080 (LWP 72475) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 21 (Thread 0xfffd0eb5f080 (LWP 72476) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 20 (Thread 0xfffd0e94f080 (LWP 72477) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 19 (Thread 0xfffd0e73f080 (LWP 72478) "tlcgen-leanp1"):
+#0  0x0000aaaae4c2c6f8 in tlc_rs::eval::binop ()
+#1  0x0000aaaae4bd3860 in tlcgen_leanp1::op_21 ()
+#2  0x0000aaaae4bd8f5c in <tlcgen_leanp1::E as tlc_rs::eval::Engine>::invariant ()
+#3  0x0000aaaae4c226f8 in <tlc_rs::check::Checker>::holds ()
+#4  0x0000aaaae4c1dbb4 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#5  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#6  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#7  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#8  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#9  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 18 (Thread 0xfffd0e31f080 (LWP 72479) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 17 (Thread 0xfffd0e10f080 (LWP 72480) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 16 (Thread 0xfffd0deff080 (LWP 72481) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 15 (Thread 0xfffd0dcef080 (LWP 72482) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 14 (Thread 0xfffd0dadf080 (LWP 72483) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 13 (Thread 0xfffd0d8cf080 (LWP 72484) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 12 (Thread 0xfffd0d4af080 (LWP 72485) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 11 (Thread 0xfffd0d29f080 (LWP 72486) "tlcgen-leanp1"):
+#0  0x0000aaaae4c1e49c in core::ptr::drop_glue::<tlc_rs::value::Value> ()
+#1  0x0000aaaae4c1e748 in <alloc::sync::Arc<[tlc_rs::value::Value]>>::drop_slow ()
+#2  0x0000aaaae4bdc3dc in <tlcgen_leanp1::E as tlc_rs::eval::Engine>::step_prop ()
+#3  0x0000aaaae4c1d2e4 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 10 (Thread 0xfffd0d08f080 (LWP 72487) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 9 (Thread 0xfffd0ce7f080 (LWP 72488) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 8 (Thread 0xfffd0cc6f080 (LWP 72489) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 7 (Thread 0xfffd0ca5f080 (LWP 72490) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 6 (Thread 0xfffd0c84f080 (LWP 72491) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 5 (Thread 0xfffd0c63f080 (LWP 72492) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 4 (Thread 0xfffd0c42f080 (LWP 72493) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 3 (Thread 0xfffc8bfff080 (LWP 72494) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 2 (Thread 0xfffc897ef080 (LWP 72495) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4b71224 in <std::sys::sync::mutex::futex::Mutex>::lock_contended ()
+#2  0x0000aaaae4c1f064 in <tlc_rs::store::LevelWriter>::push ()
+#3  0x0000aaaae4c1dc54 in <tlc_rs::check::Checker>::search::{closure#2}::{closure#0}::{closure#1} ()
+#4  0x0000aaaae4c1bf50 in std::sys::backtrace::__rust_begin_short_backtrace::<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()> ()
+#5  0x0000aaaae4c50acc in <std::thread::lifecycle::spawn_unchecked<<tlc_rs::check::Checker>::search::{closure#2}::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} ()
+#6  0x0000aaaae4c0ed8c in <std::sys::thread::unix::Thread>::new::thread_start ()
+#7  0x0000ffffa15e6b78 in start_thread () from /lib64/libc.so.6
+#8  0x0000ffffa165421c [PAC] in thread_start () from /lib64/libc.so.6
+
+Thread 1 (Thread 0xffffa17ba020 (LWP 66769) "tlcgen-leanp1"):
+#0  0x0000ffffa164fba4 in syscall () from /lib64/libc.so.6
+#1  0x0000aaaae4c12a6c in <std::thread::thread::Thread>::park ()
+#2  0x0000aaaae4c43a30 in <tlc_rs::check::Checker>::run ()
+#3  0x0000aaaae4bb0f64 in tlcgen_leanp1::main ()
+#4  0x0000aaaae4b7bd5c in std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode> ()
+#5  0x0000aaaae4b9ad90 in std::rt::lang_start::<std::process::ExitCode>::{closure#0} ()
+#6  0x0000aaaae4c13960 in std::rt::lang_start_internal ()
+#7  0x0000aaaae4bdc878 in main ()
+[Inferior 1 (process 66769) detached]

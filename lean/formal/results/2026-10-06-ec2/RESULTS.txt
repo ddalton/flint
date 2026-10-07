@@ -1,0 +1,9 @@
+2026-10-06T13:52:13Z start; LeanP1.tla md5 94da7541; nproc 192; mem 1485 GB; disk avail  991G
+2026-10-06T13:53:08Z checker built; running
+2026-10-06T14:05:29Z run 1 failed: map count 65531 = vm.max_map_count at depth 26, 983,406,036 distinct, no violation; restarting with max_map_count=16777216, -queue-mem 150000
+2026-10-06T14:06:22Z run 1 failed: map count 65531 = vm.max_map_count at depth 26, 983,406,036 distinct, no violation; restarting with max_map_count=16777216, -queue-mem 150000
+2026-10-06T14:31:01Z run 2 stopped by hand for the LevelWriter patch
+2026-10-06T14:36:41Z control L1W3 (Mac ladder: 1954072 gen, 449595 distinct, depth 33) -queue-mem 1: old [1954072 states generated, 449595 distinct states found. Depth 33] new [1954072 states generated, 449595 distinct states found. Depth 33] (max )
+2026-10-06T14:37:12Z patched checker built; run 3 starting
+2026-10-06T16:15:59Z LeanP1Size3L4W3 run 3 rc=0 5927s (124 = 5 h cap) | No error has been found | 44056598280 states generated, 9821039047 distinct states found. Depth 52. Checked in 5925.415s (1657443 distinct/s).
+2026-10-06T16:15:59Z DONE

@@ -1,0 +1,12 @@
+tlc-rs: LeanP1 (31 variables, 0 symmetry permutations), 192 workers, generated engine; loaded in 0.003s
+progress: depth 18, 104511147 generated, 28248305 distinct (0 fingerprint spills), 12823163 on queue (0 on disk), 12.8s
+progress: depth 19, 188454830 generated, 50604610 distinct (0 fingerprint spills), 22356305 on queue (0 on disk), 23.0s
+progress: depth 20, 331909909 generated, 87878516 distinct (0 fingerprint spills), 37273906 on queue (0 on disk), 40.4s
+progress: depth 21, 563557768 generated, 146566644 distinct (0 fingerprint spills), 58688128 on queue (0 on disk), 68.8s
+progress: depth 22, 912959945 generated, 233438204 distinct (0 fingerprint spills), 86871560 on queue (0 on disk), 112.0s
+progress: depth 23, 1405007876 generated, 354509790 distinct (0 fingerprint spills), 121071586 on queue (0 on disk), 173.5s
+progress: depth 24, 2058422381 generated, 515066444 distinct (0 fingerprint spills), 160556654 on queue (0 on disk), 258.6s
+progress: depth 25, 2893352283 generated, 721363081 distinct (0 fingerprint spills), 206296637 on queue (0 on disk), 371.2s
+progress: depth 26, 3945375616 generated, 983406036 distinct (0 fingerprint spills), 262042955 on queue (0 on disk), 516.6s
+memory allocation of 178749 bytes failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

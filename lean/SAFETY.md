@@ -236,10 +236,11 @@ among three, a sweep while two others hold handles, a conflict naming
 two losers — was unmodelled here until 2026-10-05: three-syncer worlds at
 Holds1p3b's invariants (one path, no syncs, one copy) HOLD at three rungs —
 449,595 and 39,330,288 distinct (Mac), and 1,421,211,248 at MaxMint 3, a UI
-save and two barriers (EC2, depth 44). The next rung (three barriers) died
-for memory at 983M distinct with no violation. A third syncer multiplies
-these worlds 27-133x, so the full Holds bounds with three syncers are out
-of reach. §4.2's three-writer world is the pre-step-5 model
+save and two barriers (EC2, depth 44), and 9,821,039,047 at three barriers
+(2026-10-06, EC2, depth 52, tlc-rs only; `formal/results/2026-10-06-ec2/`).
+That rung had died twice at 983M distinct; it was the kernel's map-count
+limit, not memory. A third syncer multiplies these worlds 27-133x, so the
+full Holds bounds with three syncers are out of reach. §4.2's three-writer world is the pre-step-5 model
 (`LeanSubtree.tla`).
 
 A behaviour change that follows from the scope filter: a scoped tree no
@@ -525,7 +526,7 @@ encodes today's answer.
 | 10 | ~~retire or restate the three enforcers no run checks, and `Inv_NoResurrection` over state (§4.12)~~ **done 2026-09-20**: the three definitions are out of `LeanSubtree.tla` (their rows retired from §1 on 2026-09-19), and S4 row 1 is now the action property `Prop_NoResurrection` — no step that is a restart creates a local file — which the rematerialise mutation must violate, in place of a ghost only the mutation wrote | — |
 | 11 | ~~the review of 2026-09-18's other routes~~ **H2, H3, M7, H4, H5, H7 done 2026-09-19** (§4.15); H6 shipped (row H6); H5's compose path done in f6f6a892 (`ComposeSpec` takes the opened file, across flint-store, forge packio and the CSI tier). **Open:** the review's M3 (a renew inside the pre-CAS phase, availability only since H2) | a day |
 | 12 | a TLC confirmation of one large LeanP1 HOLDS (LeanP1Holds, AllHolds or DeleteOverrideOff), so the headline verdicts are not one checker's word | an EC2 box, hours |
-| 13 | a three-SYNCER LeanP1 world — **partly done 2026-10-05**: three rungs HOLD (up to 1.42B distinct, one path, a UI save, two barriers; §3.2); the three-barrier rung was OOM-killed at 983M with no violation and needs a disk-spilling rerun; Holds1p3b's full bounds with three syncers are tens of billions of states | the three-barrier rung: a box with more disk, ~2 h |
+| 13 | a three-SYNCER LeanP1 world — **four rungs HOLD (2026-10-05/06)**: up to 9,821,039,047 distinct at one path, a UI save and three barriers (§3.2; tlc-rs only); Holds1p3b's full bounds with three syncers (restarts, syncs, copies) are tens of billions of states and stay open | the next rung (a restart): a larger box and the tlc-rs speedups listed in `formal/results/2026-10-06-ec2/SUMMARY.txt` |
 
 Regenerate `COVERAGE.md` with `python3 lean/formal/coverage.py` and check
 it with `--check`.

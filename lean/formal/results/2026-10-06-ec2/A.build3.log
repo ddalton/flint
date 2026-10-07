@@ -1,0 +1,11 @@
+tlc-rs: generated a checker for LeanP1 in /data/gen (0.004s)
+    Updating crates.io index
+     Locking 6 packages to highest Rust 1.99.0 compatible versions
+   Compiling find-msvc-tools v0.1.14
+   Compiling shlex v2.0.1
+   Compiling cc v1.6.0
+   Compiling libmimalloc-sys v0.1.49
+   Compiling mimalloc v0.1.52
+   Compiling tlc-rs v0.1.0 (/opt/flint/formal/tlc-rs)
+   Compiling tlcgen-leanp1 v0.1.0 (/data/gen)
+    Finished `release` profile [optimized] target(s) in 30.87s
