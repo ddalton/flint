@@ -1,0 +1,115 @@
+M1: Inv_OneHolder, Prop_DeleteSettles, Prop_NarrowNeverDeletes -- 2026-10-07.
+The proof text is appended to lean/formal/LeanP1Proof.tla by gen-proof.py here
+(it runs results/2026-10-06-tlaps-typeok/gen-proof.py for M0 and adds M1).
+
+THE INVARIANT.  IndM1 == IndTypeOK /\ M1 with
+  M1 == Inv_OneHolder /\ Holder /\ Cased /\ Mine /\ Ups /\ Off /\ Rescope
+  Holder  (I1)  holder # "none" => w[holder].pc \in {claimed, cased} /\ On(holder)
+  Cased   (I6)  pc = cased => every delete's inst is Nil
+  Mine          deletes \cap uploads = {} /\ gone \subseteq uploads
+  Ups           pc \in {scanned, claimed, cased} => (uploads \cup deletes) \cap unlinked = {}
+  Off           st = "off" => w[s] = WriterInit
+  Rescope = R1 (I7a) pc \in {consumed..cased} => sStage = none
+            R2 (I7b) p \in unlinked /\ sStage = none => local[p] = baseline[p]
+            R3  p \in unlinked /\ sStage \in {saved, mid} =>
+                  local[p] = baseline[p]
+                  \/ (p \in sDrop \ sKeep /\ baseline[p] = Nil /\ local[p] # Nil /\ sHeld[p] = local[p])
+            R4  sStage = mid => \A p \in sDrop \ sKeep : baseline[p] = Nil
+            R5  pc = pulling => sStage \in {none, saved}
+The six beyond the plan's list (Mine, Ups, Off, R3, R4, R5) were read off the
+actions while writing the step lemmas, and TLC-checked first
+(MCLeanP1M1.tla, the M1*.cfg worlds, SUMMARY.txt) -- the house rule.
+
+WHY EACH IS THERE (the step that needs it):
+  Mine  Install's `Cased'`: InstallInst(s)[p] for p \in deletes is Nil only
+        if p is not in gone and not in uploads \cap upDone (the IF chain), and
+        then only with DeleteWinsPreserved -- the rule constant this
+        milestone uses (its TLC world: LeanP1DeleteOutranked, which FIRES on
+        Prop_DeleteSettles, gate 2026-10-04).
+  Ups   UploadCopy's and Finish's `R2'`: a copy upload rewrites local[p] for
+        p \in uploads, and Finish rewrites baseline on uploads \cap upDone and
+        on landed deletes; an unlinked path is clean (R2), so it is in
+        neither set at the scan, and from the scan on `unlinked` only shrinks.
+  Off   Checkout: the one step without On(s); its tree is WriterInit, so
+        every conjunct about it is vacuous (no "cased while off" argument).
+  R3/R4 RescopeSecond's `R2'`: with sStage = mid, R2 says nothing about an
+        unlinked path.  What is true there: the first half (RescopeUnciteFirst)
+        dropped its baseline, kept its bytes and recorded them in sHeld, so
+        the second half's RescopeUnlink test (sHeld # Nil, same Content)
+        fires and the tree ends Nil = baseline.  R4 is what makes `local =
+        baseline` and `p \in sDrop \ sKeep` incompatible with RescopeUnlink
+        (baseline Nil there, so local Nil, so no unlink).  R3 carries through
+        "saved" too: a Restart between the halves goes mid -> saved and
+        keeps the tree, so "saved" can hold an uncited unlinked path -- the
+        replay's KeepSet excludes it (baseline Nil) and the first half
+        re-derives the same state.  `p \notin sKeep` is in R3's second
+        disjunct because the second half's RescopeDrop is sDrop \ sKeep.
+  R5    RPullSync in mid would rewrite baseline on owed paths and break R4;
+        a pull starts only with sStage \in {none, saved} and nothing moves
+        sStage while pulling.
+The rule constants used: DeleteWinsPreserved (Cased at Install) and
+RescopeUnciteFirst (R2/R3 at RescopeFirst/RescopeSecond).  Controls (plan
+section 5): each dropped from Shipped must fail a named obligation; their
+TLC worlds (DeleteOutranked -> Prop_DeleteSettles, NarrowUnlinkFirst ->
+Prop_NarrowNeverDeletes) fire in the gate.  Plus M1's own control: Claim
+without `holder = "none"` must fail Inv_OneHolder' at Claim.
+
+THE PROOF SHAPE.  One generic lemma per conjunct (HolderWrite, CasedWrite,
+MineWrite, UpsWrite, OffWrite, RescopeWrite / RescopeShrink, NarrowWrite),
+each taking the step's new tree R and `\A t : w'[t] = IF t = s THEN R ELSE
+w[t]` (WriteAny, from TypeOK alone) and a hypothesis on R's fields; a step
+lemma reads R's thirteen relevant fields once (`<1>3 BY DEF <Step>W`) and
+discharges each hypothesis from the reads, the guards and the conjunct for
+s.  IndTypeOK' comes from M0's step lemma.  Steps that write no tree
+(gateway, Sweep, Age, Reap, RLoad) use M1Keep.  The two action properties:
+Prop_DeleteSettles is Cased at Finish (one obligation); Prop_NarrowNeverDeletes
+is NarrowOK, proved with each step lemma (only Scan reaches pc = scanned
+from consumed, and its deletes are ScanAbsent, dirty paths).
+
+THE TLC PRE-CHECK (run-m1.sh, out in SUMMARY.txt).  M1All HOLDS in the three
+small worlds with the gate's exact counts (ReaderHolds 834,633; FetchHolds
+3,510,269; ScopeHolds 8,057,963).  THE CONTROL DID NOT FIRE in ScopeHolds
+(M1ScopeCtl: R3 without its second disjunct, 8,057,963 states, no error),
+and that is the WORLD'S doing, not the conjunct's: R3's second case needs
+a path that a narrow unlinked (local = baseline = Nil, out of scope), a
+widen that re-admits it while the document lacks it (RescopeAdd skips it,
+so it stays unlinked and joins the scope), a save that recreates it in the
+document and a consume that fetches it (local = baseline = h, still
+unlinked -- a consume is not the agent), and a second narrow whose first
+half uncites it: three rescopes, a removal and a save.  ScopeHolds allows
+ONE rescope; Holds1p3b none.  So the gate-derived worlds leave R3's second
+disjunct VACUOUS, and a control that cannot reach the case rules nothing
+out (the house rule).  Added: M1Scope3 / M1Scope3Ctl -- ScopeHolds's
+constants with Free = {} and MaxRescopes = 3 (run-m1b.sh); the control must
+fire there, and M1All must hold.
+
+THE RUNS (box dir /mnt/nvme/leanp1-proof-2026-10-06, fingerprints reused
+between them so only changed obligations are re-proved; M0's 1,917 are
+untouched by the addition and stay "already proved"):
+  run 14  27/4282 failed (out/run14-m1-first.summary.txt), two generator
+          defects, both confined to steps with a path parameter p:
+          (1) the Cased hypothesis `\A p \in R.deletes : R.inst[p] = Nil`
+          SHADOWED the step's p inside EditW(s, p) -- a different, unprovable
+          statement; the bound variable is q now;
+          (2) the default proofs of the Ups/Cased hypotheses assumed a
+          literal pc ("idle", ...) and cited only the field reads; a step
+          that keeps w[s].pc needs the conjunct for s (`<1>m DEF Ups/Cased`).
+          Plus four single omissions: the old tree's sStage/sDrop typing
+          (Restart's and RescopeFirst's R3/R4 steps), `deletes \subseteq
+          Paths` for InstallInst(s)[q] (Install's <1>i), and the guard
+          (pc = idle) in two rescope QEDs.
+  run 15  1/4304 failed: PullOnly's field reads.  Not Z3: the table said
+          `gone` unchanged and PullOnlyW RESETS it -- a false statement,
+          proved so by `tlapm --toolbox 1926 1939` on the one step (120 s
+          budget, split in two, without `inst = doc`: all three fail).
+          Every other step's table was then checked against the model.
+  run 16  ALL 4304 PROVED (409 s with fingerprints).
+  run 17  THE RECORD: --cleanfp, the TLC checkers SIGSTOPped, then the three
+          controls with the record's fingerprints copied in, then the
+          checkers resumed (run-record-m1.sh).  RESULTS.txt.
+Two tool facts: `tlapm --toolbox L1 L2` proves only the obligations whose
+step starts within the line range (a single-step experiment costs the 44 s
+elaboration plus the step); and a `systemd-run --user` unit dies with the
+user manager when the last ssh session closes unless `loginctl
+enable-linger` is on (it is now) -- the first M1 TLC build and the first
+proof run 14 both died that way.

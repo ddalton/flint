@@ -268,6 +268,33 @@ I0, I1, I6, I7. Acceptance: three theorems closed; the control of §5 run
 for `Inv_OneHolder` (drop `Claim`'s `holder = "none"` guard in a scratch
 copy: the `Claim` obligation must fail). Effort: 2 days.
 
+*M1 result, 2026-10-07* (`lean/formal/results/2026-10-07-tlaps-m1/`; the
+record run `out/run17-record.out`): the three theorems are closed in
+`LeanP1Proof.tla` -- `Spec => []Inv_OneHolder`, `Spec =>
+Prop_DeleteSettles`, `Spec => Prop_NarrowNeverDeletes` -- through
+`IndM1`, which is `IndTypeOK` with I1, I6, I7 and six more facts read off
+the actions while writing the step lemmas: the scan's two sets are
+disjoint and the verify's withheld set is a subset of the uploads; from the
+scan to the finish no published or deleted path is one a rescope unlinked;
+a writer that is off is pristine; and three about a rescope in flight --
+an unlinked path in `saved`/`mid` is clean or uncited by the first half
+(dropped, not kept, baseline gone, bytes recorded in `sHeld`), between the
+halves every dropped-and-not-kept path is uncited, and a reader's pull
+never spans the halves. All six went to TLC first (house rule): they hold
+in the four gate-derived worlds with the gate's exact counts, and the
+control for the rescope conjunct was VACUOUS there -- its second case
+needs three rescopes, a removal and a save -- so a three-rescope world was
+added, where the control fires at depth 14 and the conjuncts hold. The
+record: 4,304 obligations (M0's 1,917 plus 2,387), all closed, none
+omitted, the slowest 6.4 s of 60, 906 s in all from an erased cache. The
+section-5 controls each fail exactly the named obligation: `Claim` without
+its lease guard fails `Inv_OneHolder'` at `Claim`; `Shipped` without
+`DeleteWinsPreserved` fails the delete step of `Install`'s `Cased'`;
+without `RescopeUnciteFirst` the two halves' tree-shape reads fail. Both
+rules' TLC worlds fire on the same two claims in the gate. Effort: one
+day, not two: the per-conjunct generic lemmas (one hypothesis on the new
+tree each) made every step lemma a list of field reads.
+
 **M2 — `Inv_CitationsLive`, `Inv_OneName`.** I2–I5. Acceptance: both
 closed; controls: `CommitVerifiesUploads` and `SweepUnderLease` and
 `GatewaySweepGrace` each removed from `Shipped` in turn, each with a named

@@ -1,0 +1,35 @@
+14:31:35Z
+@!!type:obligationsnumber
+[ERROR]: 27/4282 obligations failed.
+WALL 904.38 s MAXRSS 5423608 kB rc 0
+PROOFDONE 14:30:58Z
+     26 @!!status:being proved      27 @!!status:failed    1261 @!!status:proved    4282 @!!status:to be proved    2994 @!!status:trivial 
+--- failed (line reason):
+      1 1463 timeout
+      1 1464 timeout
+      1 1467 timeout
+      1 1515 timeout
+      1 1516 timeout
+      1 1519 timeout
+      1 1820 timeout
+      1 1821 timeout
+      1 1824 timeout
+      1 1861 timeout
+      1 1862 timeout
+      1 1865 timeout
+      1 1915 timeout
+      1 2028 timeout
+      1 2059 timeout
+      1 2136 timeout
+      1 2258 timeout
+      1 2297 timeout
+      1 2301 timeout
+      1 2358 timeout
+      1 2362 timeout
+      1 2411 timeout
+      1 2415 timeout
+      1 2434 timeout
+      1 2435 timeout
+      1 2476 timeout
+      1 2480 timeout
+

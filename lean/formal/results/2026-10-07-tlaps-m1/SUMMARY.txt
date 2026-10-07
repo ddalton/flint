@@ -1,0 +1,40 @@
+TLC pre-check of M1's inductive strengthening, 2026-10-07 (the house rule: a
+conjunct goes to TLC before it goes to TLAPS).
+
+MCLeanP1M1.tla EXTENDS LeanP1.tla UNCHANGED (md5 94da7541, the module the
+2026-10-04 gate checked) and states the six conjuncts the M1 proof needs
+beyond the plan's I1/I6/I7 (NOTES.txt: Mine, Ups, Off, R3, R4, R5; M1All is
+their conjunction), plus M1R3Ctl, the positive control: R3 without its
+second disjunct.  Checked with the tlc-rs compiled checkers of the
+2026-10-05 pre-check (box dir /mnt/nvme/leanp1-m1-2026-10-07; run-m1.sh,
+run-m1b.sh).  The four gate-derived cfgs are the 2026-10-05 ones with
+TypeOK + M1All as the invariants; M1Scope3 is ScopeHolds's constants with
+Free = {} and MaxRescopes = 3.
+
+  world (constants)          invariants        verdict                  distinct      generated      depth  time
+  M1ScopeCtl  (ScopeHolds)   M1R3Ctl           HOLDS (vacuous, see below)  8,057,963   25,158,316     30   163 s
+  M1Scope3Ctl (Scope3)       M1R3Ctl           VIOLATED at depth 14      2,620,933    7,726,277     14    60 s   <- the control
+  M1ReaderHolds              TypeOK + M1All    HOLDS                       834,633    3,086,937     33    24 s
+  M1FetchHolds               TypeOK + M1All    HOLDS                     3,510,269   11,504,466     33    81 s
+  M1ScopeHolds               TypeOK + M1All    HOLDS                     8,057,963   25,158,316     30   183 s
+  M11p3b      (Holds1p3b)    TypeOK + M1All    PENDING
+  M1Scope3    (Scope3)       TypeOK + M1All    PENDING
+
+The gate-derived counts are EXACTLY the gate's (adding invariants must not
+move the state space).
+
+THE CONTROL.  In ScopeHolds it does not fire, and the world is why: R3's
+second case needs a path a narrow unlinked, a widen that re-admits it while
+the document lacks it, a save and a consume that re-fetch it, and a second
+narrow -- three rescopes; ScopeHolds allows one (Holds1p3b none).  A
+control that cannot reach the case rules nothing out, so M1Scope3 was
+added; there the control fires at depth 14 (out/M1Scope3Ctl.out, 15
+states): A checks out p1 and p2; the UI deletes p2; A narrows to {p1}
+(the first half uncites p2, the second unlinks it: p2 unlinked, tree and
+baseline Nil); A widens back to {p1, p2} while the document lacks p2 (the
+widen fetches nothing; p2 stays unlinked and joins the scope); the UI
+saves p2 (<<p2, 2>>); A's consume takes it (local = baseline = <<p2, 2>>,
+still unlinked -- a consume is not the agent); A begins a second narrow
+to {p1} (sDrop = {p2}) and its first half uncites p2: unlinked, baseline
+Nil, bytes <<p2, 2>> recorded in sHeld -- R3's second disjunct, and the
+state the second half's unlink test needs.
