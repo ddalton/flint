@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Run every gate entry through tlc-rs; compare the verdict with the gate's expectation."""
-import os, re, subprocess, sys, time, json, shlex
+"""Run every gate entry through tla-mc; compare the verdict with the gate's expectation.
+
+  sweep.py [TLA_MC_BINARY] [TIMEOUT_S] [OUT.jsonl]   (binary default: $TLAMC, else tla-mc on PATH)
+"""
+import os, re, subprocess, sys, time, json, shlex, shutil, tempfile
 
 ROOT = os.environ.get("FLINT_ROOT", "/Users/ddalton/github/flint")
-BIN = sys.argv[1] if len(sys.argv) > 1 else ROOT + "/formal/tlc-rs/target/release/tlc-rs"
+BIN = sys.argv[1] if len(sys.argv) > 1 else (os.environ.get("TLAMC") or shutil.which("tla-mc") or sys.exit("no tla-mc: cargo install tla-mc"))
 TIMEOUT = float(sys.argv[2]) if len(sys.argv) > 2 else 15
 OUT = sys.argv[3] if len(sys.argv) > 3 else "sweep.jsonl"
 
@@ -38,7 +41,7 @@ with open(OUT, "w") as f:
         try:
             # a run killed at the timeout leaves its spilled queue behind:
             # give each run its own metadir and always remove it
-            meta = f"{ROOT}/formal/tlc-rs/gen/sweep-meta"
+            meta = f"{tempfile.gettempdir()}/tla-mc-sweep-meta"
             p = subprocess.run([BIN, "-workers", "8", "-metadir", meta, "-config", cfg, mod + ".tla"], cwd=f"{ROOT}/{d}",
                                capture_output=True, text=True, timeout=TIMEOUT)
             out, rc = p.stdout + p.stderr, p.returncode
@@ -46,7 +49,7 @@ with open(OUT, "w") as f:
             out, rc = "TIMEOUT", -1
         finally:
             import shutil
-            shutil.rmtree(f"{ROOT}/formal/tlc-rs/gen/sweep-meta", ignore_errors=True)
+            shutil.rmtree(meta, ignore_errors=True)
         secs = time.time() - t0
         m = re.search(r"(\d+) distinct states found", out)
         distinct = int(m.group(1)) if m else None

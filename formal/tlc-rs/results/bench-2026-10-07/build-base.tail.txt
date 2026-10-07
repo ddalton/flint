@@ -1,3 +1,0 @@
-   Compiling tlc-rs v0.1.0 (/opt/flint/base/formal/tlc-rs)
-   Compiling tlcgen-leanp1 v0.1.0 (/data/gen-base)
-    Finished `release` profile [optimized] target(s) in 31.13s

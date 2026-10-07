@@ -1,9 +1,0 @@
-progress: depth 19, 7023293 generated, 2131266 distinct (0 fingerprint spills), 625751 on queue (0 on disk), 11.6s
-progress: depth 22, 15139865 generated, 4461175 distinct (0 fingerprint spills), 815337 on queue (0 on disk), 26.6s
-progress: depth 24, 21200546 generated, 6124612 distinct (0 fingerprint spills), 844148 on queue (0 on disk), 37.6s
-progress: depth 26, 28015965 generated, 7974185 distinct (0 fingerprint spills), 944910 on queue (0 on disk), 51.0s
-progress: depth 28, 34405857 generated, 9527903 distinct (0 fingerprint spills), 675942 on queue (0 on disk), 64.2s
-progress: depth 34, 39163267 generated, 10668226 distinct (0 fingerprint spills), 34270 on queue (0 on disk), 74.5s
-real 75.01
-user 539.06
-sys 5.69

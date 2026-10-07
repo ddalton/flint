@@ -1282,11 +1282,11 @@ mutation_run ForgeSync ForgeSyncFoldTicksBatchSensor.cfg "forge-sync fold-sensor
 # the others), so its teeth run with PacksOverlap — a push's pack also
 # carrying an earlier push's object, as real packs do — and symmetry over
 # syncers only. NOT IN THIS GATE: ForgeSyncCodeOverlap.cfg, the hold with
-# overlapping packs (tlc-rs: ~1-2 min on a c8g; TLC: hours, past a CI
+# overlapping packs (tla-mc, see formal/tla-mc-gate: ~1-2 min on a c8g; TLC: hours, past a CI
 # shard) — run on a box, results in formal/results/2026-10-05-forgesync-code/.
 # Also NOT IN THIS GATE: the six ForgeSyncCodeRewind* worlds (ref rewinds on
 # the code's combination; ~1.5 billion distinct states each, minutes on a c8g
-# with tlc-rs, far past a CI shard on TLC) — results in
+# with tla-mc, far past a CI shard on TLC) — results in
 # formal/results/2026-10-05-forgesync-rewind/.
 strict_run ForgeSync ForgeSyncCode.cfg "forge-sync on the CODE's rules (shipped baseline + NameNeeded + ReclaimKeptSet): every claim, and nothing named that no ref reaches"
 strict_run ForgeSync ForgeSyncCodeLive.cfg "forge-sync liveness on the CODE's rules"

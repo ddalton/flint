@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Gate for the codegen fixes: every 'agree' entry of the gate sweep, through
-the interpreter AND a generated checker built from THIS tree, in parallel.
+"""The tla-mc gate: every 'agree' entry of the gate sweep, through tla-mc's
+interpreter AND a checker it generates and builds, in parallel.
 Pass = same verdict as the gate's expectation, and (for runs that hold)
 the same distinct count from both engines (and TLC's, where recorded).
 
@@ -10,8 +10,9 @@ import json, re, subprocess, sys, time, os, shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 ROOT, SRC, TLC, OUT, JOBS = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
-BIN = f"{ROOT}/formal/tlc-rs/target/release/tlc-rs"
-WORK = "/data/gate-work"
+# tla-mc as installed (cargo install tla-mc --version X --locked): $TLAMC, else on PATH
+BIN = os.environ.get("TLAMC") or shutil.which("tla-mc") or sys.exit("no tla-mc: cargo install tla-mc")
+WORK = os.environ.get("GATE_WORK", "/data/gate-work")
 VIOL = re.compile(r"(?:Invariant|Temporal property|Action property|Property) (\S+)(?: \(for [^)]*\))? is violated")
 
 
