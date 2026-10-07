@@ -1,0 +1,133 @@
+M2: Inv_CitationsLive, Inv_OneName -- started 2026-10-07.
+
+THE CLAIMS.  Inv_CitationsLive: every cited handle is live.  Inv_OneName: no
+two paths cite the same handle.  Citations change at GCas (cites gw[p]),
+GRename (moves one), GDelete (drops one) and Install (cites the writer's
+snap[p] for p in uploads \cap upDone \ gone, keeps or drops the rest); live
+shrinks at Sweep and Reap (an uncited handle each) and, with RetireAge, not
+at Collect.  So the two claims rest on: a save in flight is live and
+uncited (I3); an upload at the CAS is uncited, at its own path, and -- once
+verified -- live (I4, I5).
+
+WHY THE PLAN'S I2-I5 ARE NOT ENOUGH AS STATED, and what the proof needs:
+  I4 ranges over upDone.  Upload(s, p) moves p from uploads into upDone and
+  must know snap[p]'s properties at that moment: uncited, unretired, in no
+  save in flight, in no other tree or snapshot, at its own path.  Where do
+  they come from?  THE THREAD IS `upped`: a handle that was never PUT is
+  not live (live \subseteq upped), so not cited (Inv_CitationsLive), not
+  retiring or aged (both \subseteq upped), not a save in flight (gw[p] is
+  live); and it is PRIVATE to the writer that minted it, at its own path
+  (M2Private: an un-upped tree entry is in no other tree or snapshot and
+  its path component is its path) -- bytes enter a tree only by Edit (a
+  fresh mint), UploadCopy (a fresh copy, PUT at once), or from the document
+  (consume, sync, checkout, a widen's fetch: cited, so PUT).  So at the
+  PUT, Upload's first case (h \notin upped) has everything; its second
+  case mints a copy, fresh.  M2Pending carries the snapshot's privacy from
+  the scan (snap := local) to the PUT, since the agent may edit the path
+  meanwhile and the handle then lives in the snapshot alone.
+  A first draft said "every dirty tree entry is its writer's own uncited
+  handle" (out/ is the record: it never ran).  False: after Install the
+  uploaded entries are CITED and still dirty until Finish rewrites the
+  baseline, and a Restart in that state keeps them so -- the model's copy
+  mechanism (an already-PUT handle is re-uploaded as a copy) is what keeps
+  Inv_OneName, not any privacy of dirty entries.  Phrasing the invariant
+  over `upped` instead of dirtiness is what made it true.
+  I3 and I4 as checked exclude other trees' local AND baseline; the proof
+  needs local and SNAPSHOT: a baseline never flows into a citation (Finish
+  copies the writer's own snapshot into it), a snapshot does (Install cites
+  it), so ~Cited is preserved across another writer's Install only if that
+  writer's snapshot cannot hold the handle.  The snapshot clause follows
+  inductively from the local one (a scan copies local into snap), but an
+  invariant has to say it.  No conjunct mentions a baseline.
+  I2e (every handle anywhere is minted) is trimmed to the snapshot: doc, gw
+  and local are M0's Minted; baseline, tomb, rdoc, conflicts, acked, udel
+  do not bear on these two claims.
+  Inv_CitationsLive is itself a conjunct: (retiring \cup aged) \subseteq
+  upped needs it (RetUpdate retires cited handles, cited => live => upped).
+  M2Unverified (a scanned writer is not verified): Claim keeps `verified`,
+  so M2Verified at Claim needs it.
+
+THE RULE CONSTANTS M2 USES (plan section 5: each must fail a named
+obligation when dropped; each has a TLC world that fires):
+  CommitVerifiesUploads  Verify's gone = the uploads not live: M2Verified
+                         at Verify.                          (VerifyOff)
+  SweepUnderLease        a sweep spares the holder's uploads; with OneHolder
+                         the claimed writer IS the holder: M2Verified at
+                         Sweep.                              (SweepFree)
+  GatewaySweepGrace      a sweep spares a save in flight: M2Flight (gw[p]
+                         live) at Sweep.                     (SweepNoGrace)
+  RetireAge              Collect does not shrink live: M2Verified and
+                         M2Flight at Collect.  (The plan lists it for M4;
+                         if Collect's obligation needs it, it is M2's too.)
+And M1's: Inv_OneHolder (Sweep's and Reap's holder = the claimed writer).
+
+THE TLC PRE-CHECK: MCLeanP1M2.tla (M2All = the eight conjuncts + the two
+claims) on the five worlds (the four gate-derived, the three-rescope one),
+with two controls, both in Holds1p3b: M2UpsCtl (I4's citation clause with
+"cased" admitted: Install cites the upload) and M2PrivCtl (privacy without
+the never-PUT condition: two writers hold the document's handle).
+run-m2.sh; SUMMARY.txt.
+
+THE RUNS (box dir /mnt/nvme/leanp1-proof-2026-10-06; fingerprints reused, so
+M0's and M1's 4,304 obligations stay "already proved"):
+  run 18  tlapm CRASHED (rc 3, `e_levels.ml line 502: Assertion failed`,
+          "Please give feedback to developers") after M0 and M1, with no
+          failed obligation.  Isolated with `--toolbox L1 L2 --threads 1`
+          (single-threaded, so the last @!!loc before the crash names the
+          obligation): a PRIMED OPERATOR APPLICATION WHOSE ARGUMENT ALREADY
+          CARRIES A PRIME -- `~Cited(gw'[p])'`, `Priv(s, w'[s].local[p])'`,
+          `Up(s, w'[s].snap[p])'` in the SUFFICES goals of FlightKeep,
+          PrivateWrite, PendingWrite, UploadedWrite -- is a double prime,
+          which tlapm's level computation asserts on instead of rejecting.
+          (`Cited(h)'` with h a NEW constant, and a lemma concluding
+          `Priv(t, h)'` cited as a fact, are fine: exp5/Pt.tla.)  Fix: those
+          goals state the primed conjuncts with the prime pushed inside
+          (`\E k : doc'[k] = ...`, `w'[u].local[q] # ...`), and the QEDs
+          that match a lemma's `Up(s, h)'` to them add DEF Up, Priv, Cited.
+          Rule: never prime an application whose arguments mention a primed
+          variable; write the primed body out.
+  run 19  92/8307 failed, no crash, 3,233 s (the box shared with the TLC
+          worlds; tlapm 18 GB RSS for the 5,100-line module).  Three
+          classes: (a) the generic lemmas' NIL CASE -- `Cited(Nil)` holds
+          wherever the document has a hole, so Unupped and MintPriv take
+          `h # Nil`, and the steps that read a tree entry or a snapshot as
+          "in minted" cite the fact that it is not Nil; one SUFFICES that
+          assumed `\notin upped` for a goal about `upped'`; a DEFINE over a
+          state term (`h == w[s].snap[p]`) whose later priming moved it to
+          the new snapshot (written out instead); (b) restatements listing
+          `upped` where the action keeps it inside `aux` (DEF aux), and
+          the no-tree events needing `"none" \notin Writers`; (c) THE M1
+          BUG AGAIN in a new place: the generated per-step hypotheses
+          quantified over `p`, which in Edit, Delete and Upload CAPTURES the
+          step's own `p` -- `--printallobs` shows the goal as
+          `UploadW(s, p_1).local[p_1]`, a different tree, so the field reads
+          never apply and Z3 spends the whole budget.  The bound variable is
+          `pp` now.  (`--printallobs` prints every obligation as tlapm sees
+          it; `--debug tempfiles --cache-dir D` keeps the .smt files.)
+  run 20  15/8485 failed, 989 s on a quiet box.  `--printallobs` on one
+          "trivial" failure (PendingWrite: `w[s].snap[p] \in minted` from
+          SnapMinted) showed the gap: p is drawn from the NEW tree's upload
+          set, and the generic lemma never said that set lies in Paths, so
+          SnapMinted's \A p \in Paths could not be instantiated.  The
+          Pending and Uploaded lemmas now take `w' \in [Writers -> Writer]`
+          (from IndTypeOK', which every step lemma has) and derive p \in
+          Paths by WriterFields.  Also: FlightKeep's instance of Flight in
+          two steps; the freshness bound by cases (h old / h the mint);
+          MintFlight over RetEv instead of `retiring' = retiring` (a
+          set-comprehension equality Z3 would not settle); GRename restated
+          in the action's own tuple; Reap's in-flight clause as a step.
+  run 21  5/8645 failed: Gen(h) must be known a NUMBER for `<` to carry
+          (minted \subseteq Handles, HandleGen); GCas's Uploaded' lacked the
+          typing fact; GRename's restatement wants M0's exact shape with
+          RenameAtomic alone; Reap's `gw[k] # h` needs Nil \notin Handles.
+  run 22  ALL 8,659 PROVED (843 s with fingerprints).
+  run 23  THE RECORD: --cleanfp, the TLC checkers SIGSTOPped, then the four
+          controls with the record's fingerprints copied in, then the
+          checkers resumed (run-record-m2.sh).  RESULTS.txt.
+          19:48Z: ALL 8,659 PROVED in 1,829 s (19.0 GB RSS -- twice M1's;
+          the 24 GB cap held); the four controls fail EXACTLY at the
+          predicted obligations: ctl-sul and ctl-gsg at Sweep_M2 <1>e (the
+          sweep's events), ctl-cvu at Verify_M2 <1>10a (Verified'), ctl-rage
+          at the 25 frame steps' <1>r and Collect_M2's live' = live (26).
+          The TLC checker resumed at 19:48Z for M21p3b (M2Scope3 had
+          finished before the chain: HOLDS at M1Scope3's exact count).

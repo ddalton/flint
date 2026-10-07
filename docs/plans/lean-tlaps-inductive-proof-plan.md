@@ -302,6 +302,41 @@ obligation that then fails (`Install`, `Sweep`, `Sweep`), matching the
 three mutation worlds `VerifyOff`, `SweepFree`, `SweepNoGrace` that fire
 in TLC. Effort: 1–1.5 weeks.
 
+*M2 result, 2026-10-07* (`lean/formal/results/2026-10-07-tlaps-m2/`; the
+record run `out/run23-record.out`): both theorems are closed in
+`LeanP1Proof.tla` -- `Spec => []Inv_CitationsLive`, `Spec =>
+[]Inv_OneName` -- through `IndM2`, which is `IndM1` with eight conjuncts:
+freshness (I2: `live` within `upped` within `minted`, the retiring and
+aged sets within `upped`, every minted generation below `nextGen` or a
+copy's), every snapshot minted, a save in flight (I3: live, uncited, not
+retiring, named by its path, in no tree), a tree entry never PUT is
+private to its minter at its path, an upload's snapshot before its PUT is
+such an entry, an upload PUT but not installed (I4: uncited, not retiring,
+not in flight, private), a verified upload not withheld is live (I5), and
+a scanned writer is unverified. The first draft of the privacy conjunct
+("every dirty tree entry is its writer's own uncited handle") was refuted
+on paper before TLC: after an `Install` the uploaded entries are cited and
+still dirty until `Finish`, and a `Restart` keeps them; stating privacy
+over `upped` is what holds. All eight went to TLC first: exact counts in
+the four gate-derived worlds and in M1's three-rescope world, two
+controls firing (the citation clause admitted past the CAS, depth 8;
+privacy stated over tree entries, depth 2); the big world's row is in
+`SUMMARY.txt` there. The record: 8,659 obligations (M0's 1,917, M1's
+2,387, M2's 4,355), all closed, none omitted, the slowest 6.2 s of 60,
+1,829 s from an erased cache. The section-5 controls are four, not three,
+and each fails exactly the predicted obligations: `SweepUnderLease` and
+`GatewaySweepGrace` each fail `Sweep`'s events step (the sweep spares
+the holder's PUTs; a save in flight stays live); `CommitVerifiesUploads`
+fails `Verify`'s `Verified'` -- the plan above named `Install`, but the
+rule is used where `verified` is set, `Install` only cites; and
+`RetireAge`, listed under M4, is load-bearing here too (it is what keeps
+`Collect` from shrinking `live` and gives every step its retiring-set
+events), failing 26 obligations. The three named rules' TLC worlds fire on
+`Inv_CitationsLive` in the gate. Effort: one day, not 1–1.5 weeks; the
+cost was in finding the invariant, and tlapm's two traps of the day
+(priming an application whose argument is primed crashes it; a generated
+`\A p` captured a step's own `p`) are in `NOTES.txt`.
+
 **M3 — `Inv_ShortcutSound`, `Inv_ReaderSound`.** I8–I10. Acceptance: both
 closed; controls `RecheckSkipped`, `CommitAdvanceGuarded`, `ConsumeKeepsLeft`,
 `SyncKeepsLeft`, `ReaderRechecksOwed` (five mutation worlds fire in TLC;

@@ -1,0 +1,39 @@
+TLC pre-check of M2's inductive strengthening, 2026-10-07 (the house rule: a
+conjunct goes to TLC before it goes to TLAPS).
+
+MCLeanP1M2.tla EXTENDS LeanP1.tla UNCHANGED (md5 94da7541, the module the
+2026-10-04 gate checked) and states the eight conjuncts the M2 proof needs
+(NOTES.txt: M2Fresh, M2SnapMinted, M2Flight, M2Private, M2Pending,
+M2Uploaded, M2Verified, M2Unverified; M2All is their conjunction with the
+two claims), plus two positive controls: M2UpsCtl (I4's citation clause
+with "cased" admitted: the Install cites the upload) and M2PrivCtl (privacy
+without the never-PUT condition: two writers hold the document's handle).
+Checked with the tlc-rs compiled checkers of the 2026-10-05 pre-check (box
+dir /mnt/nvme/leanp1-m2-2026-10-07; run-m2.sh).  The cfgs are M1's
+(2026-10-07-tlaps-m1/) with TypeOK + M2All as the invariants.
+
+  world (constants)          invariants        verdict                  distinct      generated      depth  time
+  M21p3bCtl   (Holds1p3b)    M2UpsCtl          VIOLATED at depth 8          20,521         58,419      8   0.5 s   <- control
+  M21p3bPrivCtl (Holds1p3b)  M2PrivCtl         VIOLATED at depth 2              14             19      2   0.0 s   <- control
+  M2ReaderHolds              TypeOK + M2All    HOLDS                       834,633      3,086,937     33    40 s
+  M2FetchHolds               TypeOK + M2All    HOLDS                     3,510,269     11,504,466     33   134 s
+  M2ScopeHolds               TypeOK + M2All    HOLDS                     8,057,963     25,158,316     30   244 s
+  M2Scope3    (Scope3)       TypeOK + M2All    HOLDS                    67,707,098    221,095,194     37    548 s
+  M21p3b      (Holds1p3b)    TypeOK + M2All    PENDING
+
+The gate-derived counts are EXACTLY the gate's, and M2Scope3's are exactly
+M1Scope3's (2026-10-07-tlaps-m1/SUMMARY.txt: 67,707,098 / 221,095,194 /
+37) -- adding invariants must not move the state space.  out/M2*.out.
+
+THE CONTROLS.  M2PrivCtl fails at depth 2: both writers check out and hold
+the document's handle at p1 -- privacy is a property of handles never PUT,
+not of tree entries.  M2UpsCtl fails at depth 8: B edits, scans, uploads,
+claims, verifies and installs, and in "cased" its upDone snapshot is cited
+-- I4 ends at the CAS.
+
+A FIRST DRAFT of the conjuncts (never run; NOTES.txt) said every dirty tree
+entry is its writer's own uncited handle.  Working through the step cases
+showed it false after an Install (the uploaded entries are cited and still
+dirty until Finish) and after a Restart in that state; phrasing privacy
+over `upped` is what made the conjunct true, and the controls above are
+the two that pin that phrasing.
