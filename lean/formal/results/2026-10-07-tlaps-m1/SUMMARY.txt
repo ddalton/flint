@@ -17,11 +17,13 @@ Free = {} and MaxRescopes = 3.
   M1ReaderHolds              TypeOK + M1All    HOLDS                       834,633    3,086,937     33    24 s
   M1FetchHolds               TypeOK + M1All    HOLDS                     3,510,269   11,504,466     33    81 s
   M1ScopeHolds               TypeOK + M1All    HOLDS                     8,057,963   25,158,316     30   183 s
-  M11p3b      (Holds1p3b)    TypeOK + M1All    PENDING
-  M1Scope3    (Scope3)       TypeOK + M1All    PENDING
+  M11p3b      (Holds1p3b)    TypeOK + M1All    HOLDS                   461,094,969  1,922,766,889     46  6,084 s*
+  M1Scope3    (Scope3)       TypeOK + M1All    HOLDS                    67,707,098    221,095,194     37    556 s
 
 The gate-derived counts are EXACTLY the gate's (adding invariants must not
-move the state space).
+move the state space).  *The big world was SIGSTOPped for ~30 min while the
+proof's record run and controls had the box; its checker clock includes
+the pause.  out/M11p3b.out, out/M1Scope3.out.
 
 THE CONTROL.  In ScopeHolds it does not fire, and the world is why: R3's
 second case needs a path a narrow unlinked, a widen that re-admits it while

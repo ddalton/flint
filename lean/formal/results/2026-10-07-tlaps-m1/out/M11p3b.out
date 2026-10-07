@@ -1,0 +1,38 @@
+tlc-rs: MCLeanP1M1 (31 variables, 0 symmetry permutations), 8 workers, generated engine; loaded in 0.004s
+progress: depth 15, 5014882 generated, 1429726 distinct (0 fingerprint spills), 625883 on queue (154331 on disk), 13.4s
+progress: depth 16, 8757680 generated, 2519208 distinct (0 fingerprint spills), 1089482 on queue (619978 on disk), 23.9s
+progress: depth 17, 15168116 generated, 4382920 distinct (0 fingerprint spills), 1863712 on queue (1394208 on disk), 42.6s
+progress: depth 18, 25882564 generated, 7432524 distinct (0 fingerprint spills), 3049604 on queue (2582404 on disk), 77.4s
+progress: depth 19, 42907980 generated, 12146575 distinct (0 fingerprint spills), 4714051 on queue (4247875 on disk), 123.7s
+progress: depth 20, 68274154 generated, 18982463 distinct (0 fingerprint spills), 6835888 on queue (6369712 on disk), 228.8s
+progress: depth 21, 103575073 generated, 28299415 distinct (0 fingerprint spills), 9316952 on queue (8850776 on disk), 389.2s
+progress: depth 22, 149742740 generated, 40324905 distinct (0 fingerprint spills), 12025490 on queue (11560082 on disk), 483.9s
+progress: depth 23, 207263181 generated, 55251295 distinct (0 fingerprint spills), 14926390 on queue (14462006 on disk), 611.5s
+progress: depth 24, 277109513 generated, 73449077 distinct (0 fingerprint spills), 18197782 on queue (17734166 on disk), 769.7s
+progress: depth 25, 361696407 generated, 95600747 distinct (0 fingerprint spills), 22151670 on queue (21689078 on disk), 962.0s
+progress: depth 26, 464381350 generated, 122447232 distinct (1024 fingerprint spills), 26846485 on queue (26385429 on disk), 1209.5s
+progress: depth 27, 586830965 generated, 154135077 distinct (1024 fingerprint spills), 31687845 on queue (31227813 on disk), 1502.8s
+progress: depth 28, 726481557 generated, 189648923 distinct (1024 fingerprint spills), 35513846 on queue (35054070 on disk), 3536.2s
+checkpoint: /mnt/nvme/leanp1-m1-2026-10-07/meta/ckpt (depth 28, 189648923 distinct, 35513846 on queue) in 1.2s
+progress: depth 29, 876583849 generated, 226890896 distinct (2048 fingerprint spills), 37241973 on queue (36782197 on disk), 3842.9s
+progress: depth 30, 1028712480 generated, 263521012 distinct (2048 fingerprint spills), 36630116 on queue (36169828 on disk), 4147.8s
+progress: depth 31, 1176098851 generated, 298041387 distinct (2048 fingerprint spills), 34520375 on queue (34060343 on disk), 4442.1s
+progress: depth 32, 1315675505 generated, 330306875 distinct (3072 fingerprint spills), 32265488 on queue (31805968 on disk), 4759.0s
+progress: depth 33, 1447346828 generated, 360781279 distinct (3072 fingerprint spills), 30474404 on queue (30015396 on disk), 5027.7s
+progress: depth 34, 1570680466 generated, 389119358 distinct (3072 fingerprint spills), 28338079 on queue (27877791 on disk), 5279.4s
+progress: depth 35, 1681579461 generated, 413679665 distinct (4096 fingerprint spills), 24560307 on queue (24097971 on disk), 5521.0s
+checkpoint: /mnt/nvme/leanp1-m1-2026-10-07/meta/ckpt (depth 35, 413679665 distinct, 24560307 on queue) in 6.4s
+progress: depth 36, 1772262912 generated, 432470499 distinct (4096 fingerprint spills), 18790834 on queue (18326194 on disk), 5727.3s
+progress: depth 37, 1836365467 generated, 444797822 distinct (4096 fingerprint spills), 12327323 on queue (11861659 on disk), 5879.9s
+progress: depth 38, 1875194958 generated, 451985346 distinct (4096 fingerprint spills), 7187524 on queue (6724676 on disk), 5970.2s
+progress: depth 39, 1896889988 generated, 456146108 distinct (4096 fingerprint spills), 4160762 on queue (3698426 on disk), 6021.1s
+progress: depth 40, 1909414896 generated, 458673727 distinct (4096 fingerprint spills), 2527619 on queue (2063491 on disk), 6050.4s
+progress: depth 41, 1916810091 generated, 460123461 distinct (4096 fingerprint spills), 1449734 on queue (988678 on disk), 6068.7s
+progress: depth 43, 1922245361 generated, 461038637 distinct (4096 fingerprint spills), 233976 on queue (0 on disk), 6082.1s
+Model checking completed. No error has been found.
+1922766889 states generated, 461094969 distinct states found. Depth 46. Checked in 6084.033s (75788 distinct/s).
+
+real	101m24.068s
+user	492m26.469s
+sys	8m31.360s
+rc=0 16:05:04Z
