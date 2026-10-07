@@ -13,7 +13,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
@@ -643,7 +643,10 @@ pub struct LevelWriter<'a> {
     /// changed TLC-exact counts (found by flint-27 on ForgeSyncRewind)
     spilled: std::sync::atomic::AtomicBool,
     mem: Mutex<Vec<MemBlock>>,
-    disk: Mutex<(Option<(File, PathBuf)>, u64, Vec<Block>)>,
+    /// the level's file, opened by the first batch that spills
+    file: OnceLock<(File, PathBuf)>,
+    /// (bytes reserved in the file, the blocks in the order reserved)
+    disk: Mutex<(u64, Vec<Block>)>,
 }
 
 impl<'a> LevelWriter<'a> {
@@ -655,11 +658,16 @@ impl<'a> LevelWriter<'a> {
             mem_bytes: AtomicU64::new(0),
             spilled: std::sync::atomic::AtomicBool::new(false),
             mem: Mutex::new(Vec::new()),
-            disk: Mutex::new((None, 0, Vec::new())),
+            file: OnceLock::new(),
+            disk: Mutex::new((0, Vec::new())),
         }
     }
     /// Hand over a worker's batch, serialized: kept in memory while the
     /// level's bytes are under the budget, else written out as a block.
+    /// The locks cover only the bookkeeping: copying the bytes, the write
+    /// and dropping the batch's states happen outside them (L4W3,
+    /// 2026-10-06: with the write and the drop under the disk lock, 176 of
+    /// 192 workers waited on it once a level spilled).
     pub fn push(&self, batch: &mut Vec<(u64, State)>, enc: &mut Vec<u8>) -> R<()> {
         if batch.is_empty() {
             return Ok(());
@@ -667,30 +675,38 @@ impl<'a> LevelWriter<'a> {
         enc.clear();
         encode_states(batch, enc);
         let n = enc.len() as u64;
+        let count = batch.len() as u64;
         if !self.spilled.load(Ordering::Relaxed) {
             if self.mem_bytes.fetch_add(n, Ordering::Relaxed) + n <= self.budget {
-                self.mem.lock().unwrap().push(MemBlock { bytes: enc.clone(), count: batch.len() as u64 });
+                let block = MemBlock { bytes: enc.clone(), count };
+                self.mem.lock().unwrap().push(block);
                 batch.clear();
                 return Ok(());
             }
             self.mem_bytes.fetch_sub(n, Ordering::Relaxed);
             self.spilled.store(true, Ordering::Relaxed);
         }
-        let mut d = self.disk.lock().unwrap();
-        if d.0.is_none() {
-            let p = self.meta.path(&self.name)?;
-            let f = io("queue file", OpenOptions::new().create(true).truncate(true).read(true).write(true).open(&p))?;
-            d.0 = Some((f, p));
-        }
-        let off = d.1;
-        io("queue file", d.0.as_ref().unwrap().0.write_all_at(enc, off))?;
-        d.1 += enc.len() as u64;
-        d.2.push(Block { off, len: enc.len() as u64, count: batch.len() as u64 });
+        // reserve the block's place in the file; blocks stay in the order
+        // reserved, and the level is read only after every write is done
+        let off = {
+            let mut d = self.disk.lock().unwrap();
+            if self.file.get().is_none() {
+                let p = self.meta.path(&self.name)?;
+                let f = io("queue file", OpenOptions::new().create(true).truncate(true).read(true).write(true).open(&p))?;
+                let _ = self.file.set((f, p));
+            }
+            let off = d.0;
+            d.0 += n;
+            d.1.push(Block { off, len: n, count });
+            off
+        };
+        io("queue file", self.file.get().unwrap().0.write_all_at(enc, off))?;
         batch.clear();
         Ok(())
     }
     pub fn finish(self) -> Level {
-        let (file, _, blocks) = self.disk.into_inner().unwrap();
+        let (_, blocks) = self.disk.into_inner().unwrap();
+        let file = self.file.into_inner();
         Level { mem: self.mem.into_inner().unwrap(), blocks, file }
     }
 }
