@@ -73,6 +73,8 @@ pub struct Checker<'p> {
     pub progress: bool,
     /// property leaves, instantiated; fairness instances
     pub props: Vec<Inst<'p>>,
+    /// the indices in `props` of the step properties `[][A]_v`
+    pub steps: Vec<usize>,
     pub fair: Vec<FairInst<'p>>,
     /// where each liveness instance's predicate bits sit in a graph node
     pub lay: Layout,
@@ -91,7 +93,8 @@ impl<'p> Checker<'p> {
             source_hash: 0,
         };
         let lay = liveness::layout(&props);
-        Ok(Checker { reference: None, p, e, sk: SymKey::new(p, e), vbufs: Default::default(), workers, progress: true, props, fair, lay, disk })
+        let steps = props.iter().enumerate().filter(|(_, i)| matches!(i.leaf, crate::eval::TProp::ActionBox(..))).map(|(k, _)| k).collect();
+        Ok(Checker { reference: None, p, e, sk: SymKey::new(p, e), vbufs: Default::default(), workers, progress: true, props, steps, fair, lay, disk })
     }
 
     fn needs_graph(&self) -> bool {
@@ -156,7 +159,7 @@ impl<'p> Checker<'p> {
         hv: &mut Vec<u64>,
         hs: &mut Vec<u64>,
         sc: &mut Scratch,
-        out: &mut Vec<(u64, State)>,
+        out: &mut Vec<(u64, State, u8)>,
     ) -> Result<(u64, u64), String> {
         let p = self.p;
         let nvars = p.vars.len();
@@ -185,7 +188,7 @@ impl<'p> Checker<'p> {
                     sk.reset(succ);
                     let fp = sk.key(&s, changed, parent, succ, vbufs)?;
                     if keep_all || !seen.contains(fp)? {
-                        out.push((fp, s.into_boxed_slice()));
+                        out.push((fp, s.into_boxed_slice(), 0));
                     }
                     Ok(())
                 })?;
@@ -197,6 +200,12 @@ impl<'p> Checker<'p> {
         // (k = 0 is the identity). A successor's untouched variables reuse
         // the parent's hash under every permutation, never re-permuted.
         let np = 1;
+        // every transition must meet the step properties, but with no
+        // liveness graph a transition into a state already seen needs
+        // nothing else (L4W3, 2026-10-06: building, then dropping, the
+        // ~3 in 4 successors already seen was a quarter of the run)
+        let early = keep_all && !self.steps.is_empty() && !self.needs_graph();
+        let no_constraints = self.p.constraints.is_empty();
         hv.clear();
         hv.extend(st.iter().map(var_hash));
         let pfp = combine(hv);
@@ -222,8 +231,30 @@ impl<'p> Checker<'p> {
                 }
             }
             let fp = (0..np).map(|k| combine(&hs[k * nvars..(k + 1) * nvars])).min().unwrap();
+            if early {
+                // the step properties on the successor as the action left
+                // it: one into a state already seen needs nothing more and
+                // is never built. One that fails, or that this engine cannot
+                // check here, goes to `search` unmarked, which checks it
+                // again and reports it in its place.
+                let ok = self.steps.iter().all(|&pi| matches!(self.e.step_prop_nx(pi, st, &cx.next[..]), Some(Ok(true))));
+                if !ok {
+                    out.push((fp, cx.next.iter().map(|v| v.clone().unwrap()).collect(), 0));
+                } else if no_constraints {
+                    // no constraint can turn it away: claim it now, one
+                    // shard lock as `search` would take (a `contains` here
+                    // as well cost more than the allocations it saved at
+                    // 192 workers, 2026-10-07)
+                    if seen.insert(fp)? {
+                        out.push((fp, cx.next.iter().map(|v| v.clone().unwrap()).collect(), 2));
+                    }
+                } else if !seen.contains(fp)? {
+                    out.push((fp, cx.next.iter().map(|v| v.clone().unwrap()).collect(), 1));
+                }
+                return Ok(());
+            }
             if keep_all || !seen.contains(fp)? {
-                out.push((fp, cx.next.iter().map(|v| v.clone().unwrap()).collect()));
+                out.push((fp, cx.next.iter().map(|v| v.clone().unwrap()).collect(), 0));
             }
             Ok(())
         })?;
@@ -465,7 +496,7 @@ impl<'p> Checker<'p> {
                         let frontier = frontier_ref;
                         let mut log = trace.logs[w].lock().unwrap();
                         let mut bufs = Bufs::default();
-                        let mut succ: Vec<(u64, State)> = Vec::new();
+                        let mut succ: Vec<(u64, State, u8)> = Vec::new();
                         let (mut hv, mut hs) = (Vec::new(), Vec::new());
                         let mut sc = Scratch::default();
                         let mut enc: Vec<u8> = Vec::new();
@@ -503,9 +534,11 @@ impl<'p> Checker<'p> {
                                 (0, Vec::new())
                             };
                             node_edges.clear();
-                            for (fp, s) in succ.drain(..) {
+                            for (fp, s, done) in succ.drain(..) {
                                 if keep_all {
-                                    for (pi, inst) in self.props.iter().enumerate().filter(|(_, i)| matches!(i.leaf, crate::eval::TProp::ActionBox(..))) {
+                                    // `done` 1: `expand` found every step property true; 2: and
+                                    // claimed the state in `seen` (it is new)
+                                    for (pi, inst) in self.props.iter().enumerate().filter(|(_, i)| done == 0 && matches!(i.leaf, crate::eval::TProp::ActionBox(..))) {
                                         let ok = match self.e.step_prop(pi, st, &s) {
                                             Some(r) => r,
                                             None => liveness::step_ok(self.p, inst, st, &s, &mut bufs),
@@ -531,7 +564,7 @@ impl<'p> Checker<'p> {
                                         Err(e) => return Some(Failure::Eval(e, Some(pidx))),
                                     }
                                 }
-                                match seen.insert(fp) {
+                                match if done == 2 { Ok(true) } else { seen.insert(fp) } {
                                     Ok(true) => {}
                                     Ok(false) => continue,
                                     Err(e) => return Some(Failure::Eval(e, None)),
@@ -625,6 +658,16 @@ impl<'p> Checker<'p> {
             }
             if stop.load(Ordering::Relaxed) {
                 break;
+            }
+            // TLCRS_STOP_AFTER_SECS: end the run at the first level boundary
+            // past N seconds, with a normal exit (no verdict) — the sample
+            // run of a profile-guided build (scripts/pgo-build.sh) writes its
+            // profile only on a normal exit
+            if let Some(n) = std::env::var("TLCRS_STOP_AFTER_SECS").ok().and_then(|v| v.parse::<u64>().ok()) {
+                if t0.elapsed().as_secs() >= n {
+                    eprintln!("TLCRS_STOP_AFTER_SECS={n}: stopped after level {depth} with no verdict");
+                    std::process::exit(3);
+                }
             }
             std::mem::replace(&mut frontier, writer.finish()).discard();
             if !frontier.is_empty() {

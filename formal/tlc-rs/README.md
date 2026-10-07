@@ -481,5 +481,23 @@ mid-level).
 4. Codegen of lazy LET: one closure per definition, not the body inlined
    at each reference (LeanSubtree's generated `next`: 135 MB → 428 KB).
 5. Measured and dropped: a per-allocation memo of hashes and permuted
-   images (20.2 → 22.4 s); PGO (+4–7%).
+   images (20.2 → 22.4 s).
 6. mimalloc, fat LTO, one codegen unit, `target-cpu=native`, `panic=abort`.
+7. A level that spilled serialized every worker on one lock: the write and
+   the drop of a batch were done holding it (L4W3 at 192 workers, the box
+   90% idle; spilled levels 2× and 3.4× faster after).
+8. Step properties `[][A]_v` (L3W3, three syncers, levels 0–30 at 192
+   workers: 575.6 s → 524.7 s → 498.9 s, −13.3%). The compiled check built the
+   whole `vars` tuple of both states and compared them on every
+   transition; a subscript that is a tuple of variables now compares the
+   slots (−8.8%). And with step properties every successor was built
+   before the seen check; they are now checked on the successor as the
+   action left it, and one already seen is never built, the state claimed
+   with the one `seen.insert` the search takes anyway (a `contains`
+   first cost more at 192 workers than the allocations it saved).
+9. Profile-guided builds, opt-in for long runs: `scripts/pgo-build.sh`
+   generates the checker, runs it instrumented for a sample period
+   (`TLCRS_STOP_AFTER_SECS`, a normal exit at the next level boundary),
+   and rebuilds with the profile. ~8% on LeanP1 (8–9% on EC2 2026-10-03;
+   −3.8/−10.1/−10.3% CPU, Mac, 2026-10-07); the extra build and sample
+   cost a few minutes, so not for small worlds.

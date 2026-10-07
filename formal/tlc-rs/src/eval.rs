@@ -288,6 +288,13 @@ pub trait Engine: Sync {
     fn step_prop(&self, _i: usize, _s: &[Value], _t: &[Value]) -> Option<R<bool>> {
         None
     }
+    /// The same step property on s -> the successor as an action leaves it
+    /// (`nx`, every slot assigned), before the checker has built the
+    /// successor: a transition into a state already seen is then checked
+    /// without ever allocating it.
+    fn step_prop_nx(&self, _i: usize, _s: &[Value], _nx: &[Option<Value>]) -> Option<R<bool>> {
+        None
+    }
     /// Part `c` of the VIEW (`symkey::view_parts`) on the state `st`, when
     /// this engine compiled it; None leaves it to the interpreter. The
     /// seen-set key under SYMMETRY/VIEW asks for one part per new state,
