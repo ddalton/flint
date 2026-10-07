@@ -1,0 +1,49 @@
+162c162
+<         out: &mut Vec<(u64, State, bool)>,
+---
+>         out: &mut Vec<(u64, State, u8)>,
+191c191
+<                         out.push((fp, s.into_boxed_slice(), false));
+---
+>                         out.push((fp, s.into_boxed_slice(), 0));
+207a208
+>         let no_constraints = self.p.constraints.is_empty();
+240,241c241,252
+<                 if !ok || !seen.contains(fp)? {
+<                     out.push((fp, cx.next.iter().map(|v| v.clone().unwrap()).collect(), ok));
+---
+>                 if !ok {
+>                     out.push((fp, cx.next.iter().map(|v| v.clone().unwrap()).collect(), 0));
+>                 } else if no_constraints {
+>                     // no constraint can turn it away: claim it now, one
+>                     // shard lock as `search` would take (a `contains` here
+>                     // as well cost more than the allocations it saved at
+>                     // 192 workers, 2026-10-07)
+>                     if seen.insert(fp)? {
+>                         out.push((fp, cx.next.iter().map(|v| v.clone().unwrap()).collect(), 2));
+>                     }
+>                 } else if !seen.contains(fp)? {
+>                     out.push((fp, cx.next.iter().map(|v| v.clone().unwrap()).collect(), 1));
+246c257
+<                 out.push((fp, cx.next.iter().map(|v| v.clone().unwrap()).collect(), false));
+---
+>                 out.push((fp, cx.next.iter().map(|v| v.clone().unwrap()).collect(), 0));
+488c499
+<                         let mut succ: Vec<(u64, State, bool)> = Vec::new();
+---
+>                         let mut succ: Vec<(u64, State, u8)> = Vec::new();
+526c537
+<                             for (fp, s, stepped) in succ.drain(..) {
+---
+>                             for (fp, s, done) in succ.drain(..) {
+528,529c539,541
+<                                     // `stepped`: `expand` already found every step property true
+<                                     for (pi, inst) in self.props.iter().enumerate().filter(|(_, i)| !stepped && matches!(i.leaf, crate::eval::TProp::ActionBox(..))) {
+---
+>                                     // `done` 1: `expand` found every step property true; 2: and
+>                                     // claimed the state in `seen` (it is new)
+>                                     for (pi, inst) in self.props.iter().enumerate().filter(|(_, i)| done == 0 && matches!(i.leaf, crate::eval::TProp::ActionBox(..))) {
+555c567
+<                                 match seen.insert(fp) {
+---
+>                                 match if done == 2 { Ok(true) } else { seen.insert(fp) } {

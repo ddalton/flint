@@ -1,0 +1,21 @@
+2026-10-07T14:26:26Z start; nproc 192; mem 371 GB; max_map_count 16777216
+2026-10-07T14:27:19Z base built: /data/gt-base/release/tlcgen-leanp1
+2026-10-07T14:28:14Z s1 built: /data/gt-s1/release/tlcgen-leanp1
+2026-10-07T14:29:10Z s2 built: /data/gt-s2/release/tlcgen-leanp1
+2026-10-07T14:38:55Z base-r1: levels 0..30 wall-sum 573.4s | process 583.752861320s | level-30 busy 100% | 
+2026-10-07T14:47:51Z s1-r1: levels 0..30 wall-sum 524.9s | process 536.157790539s | level-30 busy 100% | 
+2026-10-07T14:57:50Z s2-r1: levels 0..30 wall-sum 587.5s | process 598.979648955s | level-30 busy 100% | 
+2026-10-07T15:07:43Z base-r2: levels 0..30 wall-sum 582.1s | process 592.555472017s | level-30 busy 100% | 
+2026-10-07T15:16:43Z s1-r2: levels 0..30 wall-sum 529.8s | process 539.938453030s | level-30 busy 100% | 
+2026-10-07T15:26:40Z s2-r2: levels 0..30 wall-sum 579.6s | process 596.991111178s | level-30 busy 100% | 
+2026-10-07T15:36:23Z base-r3: levels 0..30 wall-sum 571.4s | process 583.113170790s | level-30 busy 100% | 
+2026-10-07T15:45:24Z s1-r3: levels 0..30 wall-sum 528.4s | process 540.498191068s | level-30 busy 100% | 
+2026-10-07T15:54:36Z s2-r3: levels 0..30 wall-sum 541.0s | process 552.244904936s | level-30 busy 100% | 
+2026-10-07T15:54:38Z s2-full stopped by hand (not needed)
+2026-10-07T15:54:38Z s2-full: levels 0..0 wall-sum 1.7s | process 2.231892530s | level-0 busy 98% | 
+2026-10-07T15:54:38Z DONE
+2026-10-07T15:55:40Z s3 built (box kept: shutdown re-armed +80)
+2026-10-07T16:04:15Z s3-r1: levels 0..30 wall-sum 503.8s | process 515.653059863s | 
+2026-10-07T16:13:04Z s1-r4: levels 0..30 wall-sum 515.8s | process 528.919702381s | 
+2026-10-07T16:24:51Z s3-full: levels 0..0 wall-sum 696.3s | process 706.537160997s | No error has been found 1421211248 distinct states found. Depth 44 
+2026-10-07T16:24:51Z DONE2

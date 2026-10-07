@@ -1,0 +1,64 @@
+level 1: 1 states, wall 6.6 ms, workers busy 0%
+level 2: 6 states, wall 6.0 ms, workers busy 0%
+level 3: 26 states, wall 5.3 ms, workers busy 1%
+level 4: 100 states, wall 5.1 ms, workers busy 2%
+level 5: 351 states, wall 6.5 ms, workers busy 4%
+level 6: 1135 states, wall 10.2 ms, workers busy 11%
+level 7: 3417 states, wall 18.2 ms, workers busy 26%
+level 8: 9583 states, wall 12.3 ms, workers busy 70%
+level 9: 25024 states, wall 27.1 ms, workers busy 62%
+level 10: 60767 states, wall 47.9 ms, workers busy 77%
+level 11: 137353 states, wall 91.0 ms, workers busy 87%
+level 12: 290078 states, wall 178.1 ms, workers busy 93%
+level 13: 577154 states, wall 343.3 ms, workers busy 95%
+level 14: 1095277 states, wall 654.0 ms, workers busy 97%
+level 15: 2013591 states, wall 1210.8 ms, workers busy 98%
+level 16: 3630229 states, wall 2182.5 ms, workers busy 98%
+level 17: 6413446 states, wall 3894.1 ms, workers busy 99%
+level 18: 10988318 states, wall 6601.8 ms, workers busy 100%
+progress: depth 19, 155476435 generated, 43171817 distinct (0 fingerprint spills), 17925961 on queue (0 on disk), 15.4s
+level 19: 17925961 states, wall 10769.1 ms, workers busy 100%
+progress: depth 20, 259157187 generated, 70566294 distinct (0 fingerprint spills), 27394477 on queue (0 on disk), 26.4s
+level 20: 27394477 states, wall 16002.3 ms, workers busy 100%
+progress: depth 21, 410566079 generated, 109364374 distinct (0 fingerprint spills), 38798080 on queue (0 on disk), 42.5s
+level 21: 38798080 states, wall 21650.5 ms, workers busy 100%
+progress: depth 22, 614707106 generated, 160359850 distinct (0 fingerprint spills), 50995476 on queue (0 on disk), 64.3s
+level 22: 50995476 states, wall 27718.9 ms, workers busy 100%
+progress: depth 23, 870661909 generated, 223179223 distinct (0 fingerprint spills), 62819373 on queue (0 on disk), 92.3s
+level 23: 62819373 states, wall 32267.5 ms, workers busy 100%
+progress: depth 24, 1175099019 generated, 297050230 distinct (0 fingerprint spills), 73871007 on queue (0 on disk), 124.8s
+level 24: 73871007 states, wall 38013.3 ms, workers busy 100%
+progress: depth 25, 1527375795 generated, 381369865 distinct (0 fingerprint spills), 84319635 on queue (0 on disk), 163.3s
+level 25: 84319635 states, wall 43360.6 ms, workers busy 100%
+progress: depth 26, 1928200918 generated, 475667358 distinct (0 fingerprint spills), 94297493 on queue (0 on disk), 207.0s
+level 26: 94297493 states, wall 47173.2 ms, workers busy 100%
+progress: depth 27, 2378005411 generated, 580104653 distinct (0 fingerprint spills), 104437295 on queue (0 on disk), 254.7s
+level 27: 104437295 states, wall 52882.3 ms, workers busy 100%
+progress: depth 28, 2879049499 generated, 695319273 distinct (0 fingerprint spills), 115214620 on queue (0 on disk), 307.9s
+level 28: 115214620 states, wall 59577.1 ms, workers busy 100%
+progress: depth 29, 3429920641 generated, 820125451 distinct (0 fingerprint spills), 124806178 on queue (0 on disk), 368.8s
+level 29: 124806178 states, wall 65170.3 ms, workers busy 100%
+progress: depth 30, 4013260448 generated, 948517507 distinct (0 fingerprint spills), 128392056 on queue (0 on disk), 434.7s
+level 30: 128392056 states, wall 64072.8 ms, workers busy 100%
+progress: depth 31, 4584787113 generated, 1069046552 distinct (0 fingerprint spills), 120529045 on queue (0 on disk), 500.7s
+level 31: 120529045 states, wall 55258.5 ms, workers busy 100%
+progress: depth 32, 5080284565 generated, 1169802803 distinct (0 fingerprint spills), 100756251 on queue (0 on disk), 557.9s
+level 32: 100756251 states, wall 44473.1 ms, workers busy 100%
+progress: depth 33, 5458100053 generated, 1246299288 distinct (0 fingerprint spills), 76496485 on queue (0 on disk), 603.1s
+level 33: 76496485 states, wall 32367.2 ms, workers busy 100%
+progress: depth 34, 5728763069 generated, 1302577350 distinct (0 fingerprint spills), 56278062 on queue (0 on disk), 635.6s
+level 34: 56278062 states, wall 22608.2 ms, workers busy 100%
+progress: depth 35, 5926218725 generated, 1344831915 distinct (0 fingerprint spills), 42254565 on queue (0 on disk), 658.3s
+level 35: 42254565 states, wall 17701.2 ms, workers busy 100%
+progress: depth 36, 6070480058 generated, 1376087112 distinct (0 fingerprint spills), 31255197 on queue (0 on disk), 676.0s
+level 36: 31255197 states, wall 12758.2 ms, workers busy 100%
+progress: depth 37, 6166712447 generated, 1396760761 distinct (0 fingerprint spills), 20673649 on queue (0 on disk), 688.8s
+level 37: 20673649 states, wall 7905.8 ms, workers busy 100%
+level 38: 11699036 states, wall 4314.3 ms, workers busy 99%
+progress: depth 39, 6252545980 generated, 1414723734 distinct (0 fingerprint spills), 6263937 on queue (0 on disk), 701.1s
+level 39: 6263937 states, wall 2345.8 ms, workers busy 99%
+level 40: 3607124 states, wall 1462.1 ms, workers busy 98%
+level 41: 1931108 states, wall 736.0 ms, workers busy 94%
+level 42: 747982 states, wall 279.0 ms, workers busy 89%
+level 43: 179316 states, wall 85.8 ms, workers busy 76%
+level 44: 21984 states, wall 14.7 ms, workers busy 20%

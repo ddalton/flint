@@ -1,0 +1,97 @@
+diff --git a/formal/tlc-rs/src/check.rs b/formal/tlc-rs/src/check.rs
+index 19a7b171..0108dd05 100644
+--- a/formal/tlc-rs/src/check.rs
++++ b/formal/tlc-rs/src/check.rs
+@@ -73,6 +73,8 @@ pub struct Checker<'p> {
+     pub progress: bool,
+     /// property leaves, instantiated; fairness instances
+     pub props: Vec<Inst<'p>>,
++    /// the indices in `props` of the step properties `[][A]_v`
++    pub steps: Vec<usize>,
+     pub fair: Vec<FairInst<'p>>,
+     /// where each liveness instance's predicate bits sit in a graph node
+     pub lay: Layout,
+@@ -91,7 +93,8 @@ impl<'p> Checker<'p> {
+             source_hash: 0,
+         };
+         let lay = liveness::layout(&props);
+-        Ok(Checker { reference: None, p, e, sk: SymKey::new(p, e), vbufs: Default::default(), workers, progress: true, props, fair, lay, disk })
++        let steps = props.iter().enumerate().filter(|(_, i)| matches!(i.leaf, crate::eval::TProp::ActionBox(..))).map(|(k, _)| k).collect();
++        Ok(Checker { reference: None, p, e, sk: SymKey::new(p, e), vbufs: Default::default(), workers, progress: true, props, steps, fair, lay, disk })
+     }
+ 
+     fn needs_graph(&self) -> bool {
+@@ -156,7 +159,7 @@ impl<'p> Checker<'p> {
+         hv: &mut Vec<u64>,
+         hs: &mut Vec<u64>,
+         sc: &mut Scratch,
+-        out: &mut Vec<(u64, State)>,
++        out: &mut Vec<(u64, State, bool)>,
+     ) -> Result<(u64, u64), String> {
+         let p = self.p;
+         let nvars = p.vars.len();
+@@ -185,7 +188,7 @@ impl<'p> Checker<'p> {
+                     sk.reset(succ);
+                     let fp = sk.key(&s, changed, parent, succ, vbufs)?;
+                     if keep_all || !seen.contains(fp)? {
+-                        out.push((fp, s.into_boxed_slice()));
++                        out.push((fp, s.into_boxed_slice(), false));
+                     }
+                     Ok(())
+                 })?;
+@@ -197,6 +200,11 @@ impl<'p> Checker<'p> {
+         // (k = 0 is the identity). A successor's untouched variables reuse
+         // the parent's hash under every permutation, never re-permuted.
+         let np = 1;
++        // every transition must meet the step properties, but with no
++        // liveness graph a transition into a state already seen needs
++        // nothing else (L4W3, 2026-10-06: building, then dropping, the
++        // ~3 in 4 successors already seen was a quarter of the run)
++        let early = keep_all && !self.steps.is_empty() && !self.needs_graph();
+         hv.clear();
+         hv.extend(st.iter().map(var_hash));
+         let pfp = combine(hv);
+@@ -222,8 +230,20 @@ impl<'p> Checker<'p> {
+                 }
+             }
+             let fp = (0..np).map(|k| combine(&hs[k * nvars..(k + 1) * nvars])).min().unwrap();
++            if early {
++                // the step properties on the successor as the action left
++                // it: one into a state already seen needs nothing more and
++                // is never built. One that fails, or that this engine cannot
++                // check here, goes to `search` unmarked, which checks it
++                // again and reports it in its place.
++                let ok = self.steps.iter().all(|&pi| matches!(self.e.step_prop_nx(pi, st, &cx.next[..]), Some(Ok(true))));
++                if !ok || !seen.contains(fp)? {
++                    out.push((fp, cx.next.iter().map(|v| v.clone().unwrap()).collect(), ok));
++                }
++                return Ok(());
++            }
+             if keep_all || !seen.contains(fp)? {
+-                out.push((fp, cx.next.iter().map(|v| v.clone().unwrap()).collect()));
++                out.push((fp, cx.next.iter().map(|v| v.clone().unwrap()).collect(), false));
+             }
+             Ok(())
+         })?;
+@@ -465,7 +485,7 @@ impl<'p> Checker<'p> {
+                         let frontier = frontier_ref;
+                         let mut log = trace.logs[w].lock().unwrap();
+                         let mut bufs = Bufs::default();
+-                        let mut succ: Vec<(u64, State)> = Vec::new();
++                        let mut succ: Vec<(u64, State, bool)> = Vec::new();
+                         let (mut hv, mut hs) = (Vec::new(), Vec::new());
+                         let mut sc = Scratch::default();
+                         let mut enc: Vec<u8> = Vec::new();
+@@ -503,9 +523,10 @@ impl<'p> Checker<'p> {
+                                 (0, Vec::new())
+                             };
+                             node_edges.clear();
+-                            for (fp, s) in succ.drain(..) {
++                            for (fp, s, stepped) in succ.drain(..) {
+                                 if keep_all {
+-                                    for (pi, inst) in self.props.iter().enumerate().filter(|(_, i)| matches!(i.leaf, crate::eval::TProp::ActionBox(..))) {
++                                    // `stepped`: `expand` already found every step property true
++                                    for (pi, inst) in self.props.iter().enumerate().filter(|(_, i)| !stepped && matches!(i.leaf, crate::eval::TProp::ActionBox(..))) {
+                                         let ok = match self.e.step_prop(pi, st, &s) {
+                                             Some(r) => r,
+                                             None => liveness::step_ok(self.p, inst, st, &s, &mut bufs),

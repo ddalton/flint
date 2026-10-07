@@ -1,0 +1,141 @@
+diff --git a/formal/tlc-rs/src/codegen.rs b/formal/tlc-rs/src/codegen.rs
+index a993b292..afd705c4 100644
+--- a/formal/tlc-rs/src/codegen.rs
++++ b/formal/tlc-rs/src/codegen.rs
+@@ -67,6 +67,20 @@ pub mod rt {
+         }
+     }
+ 
++    /// One slot of `v' = v` for a subscript that is a tuple of variables:
++    /// the tuple compares its elements, each normalized, so this is that
++    /// comparison without building either tuple.
++    #[inline(always)]
++    pub fn slot_eq(a: &Value, b: &Value) -> R<bool> {
++        if crate::value::same(a, b) {
++            return Ok(true);
++        }
++        if matches!(a, Value::Lazy(_)) || matches!(b, Value::Lazy(_)) {
++            return Ok(a.clone().normalized()? == b.clone().normalized()?);
++        }
++        Ok(a == b)
++    }
++
+     #[inline(always)]
+     pub fn primed<'a>(v: &'a Option<Value>, name: &str) -> R<&'a Value> {
+         v.as_ref().ok_or_else(|| format!("{name}' is read before the action assigns it"))
+@@ -696,6 +710,12 @@ pub fn generate(l: &Loaded, dir: &Path) -> Result<(), String> {
+     // so a checker generated from a spec with them no longer evaluates them
+     // in the interpreter on every transition. The others (none in our specs
+     // today) fall back to it: `step_prop` returns None for their index.
++    // The step is checked against the successor as the action leaves it
++    // (`nx`), so the checker can test a transition before it builds the
++    // successor; `aprop_{i}` on a built successor wraps it. When the
++    // subscript `v` is a tuple of variables (`vars`), `v' = v` compares
++    // those slots instead of building both tuples (L4W3, 2026-10-06: the
++    // tuples were most of the step properties' 23% of the run).
+     let (insts, _) = crate::liveness::instances(p)?;
+     let mut compiled = Vec::new();
+     for (i, inst) in insts.iter().enumerate() {
+@@ -703,15 +723,29 @@ pub fn generate(l: &Loaded, dir: &Path) -> Result<(), String> {
+         if !inst.env.is_empty() {
+             continue;
+         }
+-        let (sv, ab) = (g.val(sub), g.boolean(a));
++        let ab = g.boolean(a);
++        let mut slots = Vec::new();
++        let flat = tuple_vars(p, sub, &mut slots, 0);
++        let unchanged = if flat && slots.is_empty() {
++            "return Ok(true);".to_string()
++        } else if flat {
++            let list: Vec<String> = slots.iter().map(|j| j.to_string()).collect();
++            format!(
++                "let mut unch = true; for &j in &[{}usize] {{ if !slot_eq(&s[j], nx[j].as_ref().ok_or(\"a step leaves a variable unassigned\")?)? {{ unch = false; break; }} }} \
++                 if unch {{ return Ok(true); }}",
++                list.join("usize, ")
++            )
++        } else {
++            let sv = g.val(sub);
++            format!(
++                "let t: Vec<Value> = nx.iter().map(|v| v.clone().ok_or(\"a step leaves a variable unassigned\")).collect::<Result<_, _>>()?; \
++                 {{ let nx: &[Option<Value>] = &[]; let v0 = {{ let st = s; {sv} }}; let v1 = {{ let st = &t[..]; {sv} }}; if v0 == v1 {{ return Ok(true); }} }}"
++            )
++        };
+         let _ = writeln!(
+             code,
+-            "// {} (step property)\nfn aprop_{i}(g: &G, s: &[Value], t: &[Value]) -> R<bool> {{ \
+-             let nx: &[Option<Value>] = &[]; \
+-             let v0 = {{ let st = s; {sv} }}; let v1 = {{ let st = t; {sv} }}; \
+-             if v0 == v1 {{ return Ok(true); }} \
+-             let nxv: Vec<Option<Value>> = t.iter().map(|v| Some(v.clone())).collect(); \
+-             let nx: &[Option<Value>] = &nxv; let st = s; Ok({ab}) }}\n",
++            "// {} (step property)\nfn aprop_nx_{i}(g: &G, s: &[Value], nx: &[Option<Value>]) -> R<bool> {{ {unchanged} let st = s; Ok({ab}) }}\n\
++             fn aprop_{i}(g: &G, s: &[Value], t: &[Value]) -> R<bool> {{ let nxv: Vec<Option<Value>> = t.iter().map(|v| Some(v.clone())).collect(); aprop_nx_{i}(g, s, &nxv) }}\n",
+             inst.name
+         );
+         compiled.push(i);
+@@ -748,6 +782,10 @@ pub fn generate(l: &Loaded, dir: &Path) -> Result<(), String> {
+         .iter()
+         .map(|i| format!("{i} => match aprop_{i}(self.g.local(), s, t) {{ Err(e) if e == UNSUPPORTED => None, r => Some(r) }}, "))
+         .collect();
++    let aprops_nx: String = compiled
++        .iter()
++        .map(|i| format!("{i} => match aprop_nx_{i}(self.g.local(), s, nx) {{ Err(e) if e == UNSUPPORTED => None, r => Some(r) }}, "))
++        .collect();
+     let arms = |kind: &str, interp: &str, n: usize| -> String {
+         (0..n)
+             .map(|i| {
+@@ -767,6 +805,7 @@ pub fn generate(l: &Loaded, dir: &Path) -> Result<(), String> {
+          fn constraint(&self, i: usize, cx: &mut Cx) -> R<bool> {{ match i {{ {} _ => unreachable!() }} }}\n\
+          fn view(&self, cx: &mut Cx) -> R<Value> {{ view(self.g.local(), cx.state) }}\n\
+          fn step_prop(&self, i: usize, s: &[Value], t: &[Value]) -> Option<R<bool>> {{ match i {{ {aprops}_ => None }} }}\n\
++         fn step_prop_nx(&self, i: usize, s: &[Value], nx: &[Option<Value>]) -> Option<R<bool>> {{ match i {{ {aprops_nx}_ => None }} }}\n\
+          fn view_part(&self, c: usize, st: &[Value]) -> Option<R<Value>> {{ match c {{ {vparts}_ => None }} }}\n\
+          }}\n\n\
+          fn make(p: &Program) -> Box<dyn Engine + '_> {{ Box::new(E {{ g: G::new(p), p }}) }}\n\n\
+@@ -796,6 +835,28 @@ pub fn generate(l: &Loaded, dir: &Path) -> Result<(), String> {
+     Ok(())
+ }
+ 
++/// The state variables `e` is a tuple of, in order, through zero-argument
++/// operators and nested tuples (`vars == <<x, y, aux>>`, `aux == <<z>>`);
++/// false if it is anything else.
++fn tuple_vars(p: &Program, e: &Expr, out: &mut Vec<u32>, depth: usize) -> bool {
++    if depth > 64 {
++        return false;
++    }
++    match e {
++        Expr::Var(i) => {
++            out.push(*i);
++            true
++        }
++        Expr::Tuple(v) => v.iter().all(|x| tuple_vars(p, x, out, depth + 1)),
++        Expr::Memo(_, false, x) => tuple_vars(p, x, out, depth + 1),
++        Expr::Call(op, args) if args.is_empty() => {
++            let o = &p.ops[*op as usize];
++            o.nparams == 0 && o.cached.is_none() && tuple_vars(p, &o.body, out, depth + 1)
++        }
++        _ => false,
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::rt::G;
+diff --git a/formal/tlc-rs/src/eval.rs b/formal/tlc-rs/src/eval.rs
+index 993ca581..f3d6ffd1 100644
+--- a/formal/tlc-rs/src/eval.rs
++++ b/formal/tlc-rs/src/eval.rs
+@@ -288,6 +288,13 @@ pub trait Engine: Sync {
+     fn step_prop(&self, _i: usize, _s: &[Value], _t: &[Value]) -> Option<R<bool>> {
+         None
+     }
++    /// The same step property on s -> the successor as an action leaves it
++    /// (`nx`, every slot assigned), before the checker has built the
++    /// successor: a transition into a state already seen is then checked
++    /// without ever allocating it.
++    fn step_prop_nx(&self, _i: usize, _s: &[Value], _nx: &[Option<Value>]) -> Option<R<bool>> {
++        None
++    }
+     /// Part `c` of the VIEW (`symkey::view_parts`) on the state `st`, when
+     /// this engine compiled it; None leaves it to the interpreter. The
+     /// seen-set key under SYMMETRY/VIEW asks for one part per new state,
