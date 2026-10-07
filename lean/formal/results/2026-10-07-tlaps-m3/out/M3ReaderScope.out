@@ -1,0 +1,27 @@
+tlc-rs: MCLeanP1M3 (31 variables, 0 symmetry permutations), 2 workers, interp engine; loaded in 0.004s
+progress: depth 12, 1711025 generated, 538540 distinct (0 fingerprint spills), 231955 on queue (0 on disk), 15.3s
+progress: depth 13, 2866821 generated, 866173 distinct (0 fingerprint spills), 327633 on queue (0 on disk), 25.6s
+progress: depth 14, 4427998 generated, 1299840 distinct (0 fingerprint spills), 433667 on queue (27907 on disk), 39.6s
+progress: depth 15, 6439978 generated, 1866891 distinct (0 fingerprint spills), 567051 on queue (163083 on disk), 58.1s
+progress: depth 16, 9044826 generated, 2619745 distinct (0 fingerprint spills), 752854 on queue (351446 on disk), 82.5s
+progress: depth 17, 12504088 generated, 3623048 distinct (0 fingerprint spills), 1003303 on queue (602919 on disk), 115.3s
+progress: depth 18, 17091955 generated, 4922296 distinct (0 fingerprint spills), 1299248 on queue (899120 on disk), 158.5s
+progress: depth 19, 22918767 generated, 6500249 distinct (0 fingerprint spills), 1577953 on queue (1179873 on disk), 212.5s
+progress: depth 20, 29742126 generated, 8249346 distinct (0 fingerprint spills), 1749097 on queue (1352041 on disk), 275.3s
+progress: depth 21, 36955124 generated, 9998949 distinct (0 fingerprint spills), 1749603 on queue (1353315 on disk), 341.3s
+progress: depth 22, 43883086 generated, 11653601 distinct (0 fingerprint spills), 1654652 on queue (1259644 on disk), 407.0s
+progress: depth 23, 50382360 generated, 13338869 distinct (0 fingerprint spills), 1685268 on queue (1291796 on disk), 471.8s
+progress: depth 24, 57087672 generated, 15230798 distinct (0 fingerprint spills), 1891929 on queue (1499993 on disk), 541.1s
+progress: depth 25, 64510879 generated, 17221555 distinct (0 fingerprint spills), 1990757 on queue (1599077 on disk), 618.5s
+progress: depth 26, 71911252 generated, 18933836 distinct (0 fingerprint spills), 1712281 on queue (1320089 on disk), 700.2s
+progress: depth 27, 77805326 generated, 20102029 distinct (0 fingerprint spills), 1168193 on queue (776513 on disk), 765.3s
+progress: depth 28, 81518342 generated, 20755938 distinct (0 fingerprint spills), 653909 on queue (260693 on disk), 807.5s
+progress: depth 29, 83463366 generated, 21062621 distinct (0 fingerprint spills), 306683 on queue (0 on disk), 827.0s
+progress: depth 31, 84597753 generated, 21206469 distinct (0 fingerprint spills), 31620 on queue (0 on disk), 838.2s
+Model checking completed. No error has been found.
+84689619 states generated, 21213823 distinct states found. Depth 34. Checked in 839.102s (25282 distinct/s).
+
+real	13m59.115s
+user	27m47.477s
+sys	0m7.649s
+rc=0 20:38:15Z

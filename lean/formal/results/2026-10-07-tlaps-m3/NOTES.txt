@@ -1,0 +1,117 @@
+M3 -- Inv_ShortcutSound and Inv_ReaderSound in TLAPS, 2026-10-07.
+
+THE INVARIANT.  IndM3 = IndM2 /\ M3, M3 = six conjuncts (MCLeanP1M3.tla states
+them over LeanP1.tla for TLC; gen-proof.py states them in the proof):
+
+  M3Seq       seq >= 1.  Init sets seq = 1 and seq never falls, so a record of
+              0 ("nothing derived": a consume or sync that left a path, a
+              rescope's second half) never matches the pointer.
+  Bounds      derived <= seq, memo <= seq, rnow <= seq, and derived # 0 =>
+              memo <= derived -- for every tree (the plan's I9 and I10; a
+              non-reader's memo is 0).  `memo` is written only by RPullSync,
+              as `rnow`, and RPullSync writes `derived` = seq >= rnow or 0.
+  Record      the plan's I8: derived = seq /\ sStage = "none" =>
+              every held path where doc # baseline is in `skipped`.
+  CasedMine   pc = "cased" => every path of uploads \cap upDone has
+              inst = snap (Install puts the snapshot there, and takes `gone`
+              out of upDone).
+  CasedAdv    pc = "cased" /\ adv => every held path outside the install's
+              own (uploads \cap upDone, deletes) where inst # baseline is
+              skipped.  Install sets adv only when derived = seq
+              (CommitAdvanceGuarded), so Record held over the document it
+              replaced, and the install keeps that document at every such
+              path (InstallInst: `gone` keeps doc[p], a foreign path keeps
+              doc[p]).
+  CasedSame   pc = "cased" /\ derived = seq => adv /\ inst = doc: a record
+              still current after the CAS means the CAS moved nothing.
+
+WHY FINISH NEEDS THE THREE CASED FACTS.  Finish sets derived := seq when
+adv /\ inst = doc, moves the baseline to the snapshot on the install's own
+paths and to Nil on its deletes, and takes those paths out of `skipped`.
+For Record afterwards: on its own paths the baseline is snap = inst = doc
+(CasedMine); on a delete, inst = Nil (M1's Cased) = the new baseline = doc;
+everywhere else the baseline is unchanged, doc = inst, and CasedAdv says the
+path is skipped.  When the finish does not advance, CasedSame says the
+record was not current, so Record is vacuous.
+
+WHY NOTHING ELSE NEEDS MORE.  Record reads doc, seq and five tree fields
+(derived, sStage, baseline, scope, skipped); never `local`.  The agent's
+edits only touch `local`, and the cheap path re-checks the skipped paths
+against `local` (RecheckSkipped) -- that is where an edit back to the
+baseline is caught.  Every step that moves the document moves seq
+(SeqEv: seq' = seq => doc' = doc; GCas without its CAS and Install
+with nothing to install move neither), so a record current after a step was
+current before it with the same document.  The consume and the two syncs
+record derived = seq only when nothing was left (ConsumeKeepsLeft,
+SyncKeepsLeft); then a path they did not take was not owed, and a held,
+moved, un-owed path is dirty (ConsumeHonorsScope: an owed path is held), so
+it is in the new `skipped`.  A checkout's baseline is the document on its
+scope and Nil off it.  A rescope's halves set sStage (the first) and
+derived = 0 (the second).
+
+THE CLAIMS.  Inv_ShortcutSound: an idle, rescope-free writer on the cheap
+path has derived = seq and every skipped path dirty (RecheckSkipped); an
+owed path is held, moved and clean (ConsumeHonorsScope); Record puts it in
+`skipped`; contradiction.  Inv_ReaderSound: a reader that skips has memo =
+seq and (ReaderRechecksOwed) derived # 0 and every skipped path dirty;
+Bounds gives seq = memo <= derived <= seq; then as above.  Both are lemmas
+off the invariant (ShortcutFromRecord, ReaderFromRecord), not conjuncts, so
+the two rules they use are controls at those lemmas.
+
+THE TLC PRE-CHECK (house rule; SUMMARY.txt).  The plan's I8-I10 were
+already in the 2026-10-05 pre-check (results/2026-10-05-leanp1-ind/); the
+new conjuncts are M3Seq, the memo bound for every tree, and the three cased
+facts.  Two controls, both in the two-path ScopeHolds world (in the one-path
+worlds a cased writer has uploaded or deleted the one path, so the
+first is vacuous, and the second needs a rescope):
+  M3AdvCtl     CasedAdv without `adv`: fires at depth 8 -- A consumes (derived
+               1), the gateway renames p1 to p2 (seq 2), A deletes p1, scans,
+               claims, verifies, installs; adv is FALSE, and p2 is held (the
+               scope), inst[p2] # baseline[p2] = Nil, not skipped.
+  M3RecordCtl  Record without the rescope guard: fires at depth 4 -- a
+               rename, a checkout over both paths (derived = seq = 2), a narrow
+               to {p1}; its first half drops p2's baseline while the record
+               still names seq 2.
+
+THE PROOF'S SHAPE.  One generic lemma, M3Write: from M3, the step's SeqEv
+and its written tree R (Wr(t, R); t = "none" for the gateway and the
+no-tree steps), five facts about R -- RB (bounds), RRec (record), RMine,
+RAdv, RSame -- give M3'.  Every step lemma restates the step, reads R's
+fields in two batches of seven, and proves the five facts; most are one
+line (a field kept, or pc not "cased").  The real cases: Consume's second
+tree, Sync, RPullSync (RRec: nothing left, and a path not taken was not
+owed); Install (RRec, RAdv, RSame: the only writer step that moves the
+document); Finish (RRec by the three cased facts); Checkout (RRec by
+CheckoutHeld); RescopeSecond (RRec: derived = 0 # seq).
+
+THE BOX.  flint-53 holds the box for the CSI benchmark from 20:13Z; it
+agreed to a slice of 2 cores, nice 19, MemoryMax=4G for the small TLC
+worlds (run-m3.sh, run-m3-extra.sh: interpreted tlc-rs).  M3Scope3 and
+M31p3b need compiled checkers and the whole box; they wait.
+
+RUNS.
+  run 1   20:30Z, in flint-53's slice (2 threads, nice 19, MemoryMax=4G),
+          the M3 section only (`--toolbox 5223 6563`, the M2 record's
+          fingerprints for the rest).  STOPPED at 21:07Z when the box came
+          free: tlapm sat at the 4 GB cap (4.07 GB resident, 35% CPU, no Z3
+          running) -- the cap, not the proof, was the bottleneck.  5 failures
+          by then: Upload's two trees' RMine/RAdv (the default proofs did not
+          cite the step's guard, pc = "scanned", so the cased facts were not
+          seen vacuous), and Install's RMine (one obligation unfolding
+          InstallInst over all paths).  Fixed: the defaults cite <L>g;
+          Install's RMine is a per-path SUFFICES with p \notin gone,
+          p \in InstallMine; the path sets are typed in <1>f.  Stopping the
+          systemd unit killed its Z3 children with it (none left).
+  run 2   21:08Z, 4 threads, MemoryMax=24G, the M3 section: ALL 2,191
+          obligations proved (663 by a backend, 1,528 trivial), 545 s,
+          2.3 GB RSS.
+  record  21:19Z: run-record-m3.sh -- the whole module, --cleanfp, the TLC
+          unit FROZEN (systemctl --user freeze: its cgroup, cargo included),
+          then the six controls with the record's fingerprints, then thawed.
+          22:00Z: ALL 10,850 PROVED in 2,502 s (23.9 GiB, under the 24 GiB
+          cap).  Controls 22:00-23:37Z: ctl-rs, ctl-ckl, ctl-skl, ctl-rro
+          fail exactly as predicted; ctl-chs fails only the two claim
+          lemmas (the record steps already know the path is held);
+          ctl-cag's first text was a parse error (a deleted step still
+          cited), rerun 23:37-23:57Z with `<1>s. TRUE OBVIOUS`: 1 failure,
+          Install_M3's `adv` fact.  RESULTS.txt.

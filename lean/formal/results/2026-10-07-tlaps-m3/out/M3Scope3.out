@@ -1,0 +1,28 @@
+tlc-rs: MCLeanP1M3 (31 variables, 0 symmetry permutations), 4 workers, generated engine; loaded in 0.004s
+progress: depth 14, 5669196 generated, 1932450 distinct (0 fingerprint spills), 721591 on queue (219831 on disk), 15.2s
+progress: depth 16, 13013234 generated, 4363712 distinct (0 fingerprint spills), 1412717 on queue (915309 on disk), 36.6s
+progress: depth 17, 18755811 generated, 6263633 distinct (0 fingerprint spills), 1899921 on queue (1404817 on disk), 53.7s
+progress: depth 18, 26199601 generated, 8702393 distinct (0 fingerprint spills), 2438760 on queue (1945192 on disk), 75.9s
+progress: depth 19, 35501348 generated, 11735466 distinct (0 fingerprint spills), 3033073 on queue (2540273 on disk), 104.0s
+progress: depth 20, 46794711 generated, 15399457 distinct (0 fingerprint spills), 3663991 on queue (3172215 on disk), 138.4s
+progress: depth 21, 60000685 generated, 19638456 distinct (0 fingerprint spills), 4238999 on queue (3748759 on disk), 174.3s
+progress: depth 22, 74885334 generated, 24381511 distinct (0 fingerprint spills), 4743055 on queue (4254095 on disk), 218.2s
+progress: depth 23, 91229573 generated, 29568577 distinct (0 fingerprint spills), 5187066 on queue (4698874 on disk), 269.7s
+progress: depth 24, 108663668 generated, 35054875 distinct (0 fingerprint spills), 5486298 on queue (4999642 on disk), 320.1s
+progress: depth 25, 126603020 generated, 40619037 distinct (0 fingerprint spills), 5564162 on queue (5078786 on disk), 377.3s
+progress: depth 26, 144260833 generated, 46006542 distinct (0 fingerprint spills), 5387505 on queue (4903665 on disk), 434.4s
+progress: depth 27, 160757281 generated, 50964679 distinct (0 fingerprint spills), 4958137 on queue (4475321 on disk), 482.8s
+progress: depth 28, 175463509 generated, 55324567 distinct (0 fingerprint spills), 4359888 on queue (3879120 on disk), 520.2s
+progress: depth 29, 188105359 generated, 59042853 distinct (0 fingerprint spills), 3718286 on queue (3237774 on disk), 552.1s
+progress: depth 30, 198743633 generated, 62178365 distinct (0 fingerprint spills), 3135512 on queue (2655256 on disk), 579.3s
+progress: depth 31, 207580709 generated, 64696244 distinct (0 fingerprint spills), 2517879 on queue (2037111 on disk), 8870.7s
+checkpoint: states/MCLeanP1M3-tlcrs-1791407358-241026/ckpt (depth 31, 64696244 distinct, 2517879 on queue) in 1.0s
+progress: depth 32, 214326304 generated, 66408326 distinct (0 fingerprint spills), 1712082 on queue (1229266 on disk), 8892.1s
+progress: depth 33, 218495951 generated, 67293916 distinct (0 fingerprint spills), 885590 on queue (399958 on disk), 8906.0s
+Model checking completed. No error has been found.
+221095194 states generated, 67707098 distinct states found. Depth 37. Checked in 8914.953s (7595 distinct/s).
+
+real	148m34.977s
+user	42m29.509s
+sys	0m24.787s
+rc=0 23:37:53Z

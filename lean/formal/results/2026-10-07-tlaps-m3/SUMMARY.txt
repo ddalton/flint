@@ -1,0 +1,54 @@
+TLC pre-check of M3's inductive strengthening, 2026-10-07 (the house rule: a
+conjunct goes to TLC before it goes to TLAPS).
+
+MCLeanP1M3.tla EXTENDS LeanP1.tla UNCHANGED (md5 94da7541, the module the
+2026-10-04 gate checked) and states the six conjuncts the M3 proof needs
+(NOTES.txt: M3Seq, M3Bounds, M3Record, M3CasedMine, M3CasedAdv,
+M3CasedSame; M3All is their conjunction with the two claims), plus two
+positive controls: M3AdvCtl (M3CasedAdv without `adv`) and M3RecordCtl
+(M3Record without the rescope guard).  Checked with the interpreted tlc-rs
+of the 2026-10-05 pre-check build, 2 workers at nice 19 under MemoryMax=4G
+(flint-53 held the box for the CSI benchmark and agreed to that slice; box
+dir /mnt/nvme/leanp1-m3-2026-10-07; run-m3.sh, run-m3-extra.sh).  The cfgs
+are M2's (2026-10-07-tlaps-m2/) with TypeOK + M3All as the invariants;
+M3ReaderScope is the gate's LeanP1ReaderScopeHolds constants (two paths, a
+rescope, a reader) with the same.
+
+  world (constants)           invariants        verdict                  distinct      generated      depth  time
+  M3ScopeHoldsAdvCtl          M3AdvCtl          VIOLATED at depth 8          72,752        179,177      8   1.2 s  <- control
+  M3ScopeHoldsRecordCtl       M3RecordCtl       VIOLATED at depth 4             552            838      4   0.0 s  <- control
+  M3ReaderHolds               TypeOK + M3All    HOLDS                       834,633      3,086,937     33    25 s
+  M3FetchHolds                TypeOK + M3All    HOLDS                     3,510,269     11,504,466     33   105 s
+  M3ScopeHolds                TypeOK + M3All    HOLDS                     8,057,963     25,158,316     30   200 s
+  M3ReaderScope (ReaderScope) TypeOK + M3All    HOLDS                    21,213,823     84,689,619     34   839 s
+  M3ScopeIgnored              the two claims    VIOLATED at depth 2              24             27      2   0.0 s  <- rule world
+  M3Scope3    (Scope3)        TypeOK + M3All    HOLDS                    67,707,098    221,095,194     37  8,915 s*
+  M31p3b      (Holds1p3b)     TypeOK + M3All    PENDING (queued behind M2's M21p3b)
+
+*M3Scope3: compiled checker, 4 workers, started 21:09Z when flint-53 freed the box
+and FROZEN (systemctl freeze) for the 2.3 h of M3's record run; its clock includes
+the freeze.  The count is exactly M1Scope3's and M2Scope3's (67,707,098 / 221,095,194
+/ 37).  out/M3Scope3.out.
+
+The gate-derived counts are EXACTLY the gate's (adding invariants must not
+move the state space; ReaderScopeHolds: 21,213,823 / 84,689,619 / 34 in
+results/2026-10-04-leanp1-gate/RESULTS.txt).  out/M3*.out.
+
+THE CONTROLS.  M3AdvCtl fails at depth 8: A consumes (derived 1), the
+gateway renames p1 to p2 (seq 2), A deletes p1, scans, claims, verifies and
+installs; `adv` is FALSE (the document moved since the consume), and p2 --
+held by the scope -- differs from the baseline and is not skipped.  The
+`adv` guard is exactly what M3CasedAdv needs.  M3RecordCtl fails at depth
+4: a rename, a checkout over both paths (derived = seq = 2), a narrow to
+{p1}, whose first half drops p2's baseline while the record still names
+seq 2 -- the record holds only outside a rescope.  Both controls need two
+paths (in a one-path world a cased writer has uploaded or deleted the path,
+and there is no rescope), so they run in ScopeHolds.
+
+THE SIXTH RULE.  The proof also uses ConsumeHonorsScope (an owed path is
+held).  The gate's LeanP1ScopeIgnored world checks only Prop_ScopeRespected;
+M3ScopeIgnored runs its constants against the two claims, and
+Inv_ShortcutSound fails at depth 2: a rename to p2, then a checkout scoped
+to {p1} -- p2 is not held, so not in the record, yet without the rule it
+counts as owed.  So the rule is load-bearing for the claim as stated, and
+the proof's sixth control (ctl-chs) has its TLC world.

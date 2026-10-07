@@ -1,0 +1,21 @@
+tlc-rs: MCLeanP1M3 (31 variables, 0 symmetry permutations), 2 workers, interp engine; loaded in 0.003s
+progress: depth 12, 1414366 generated, 508024 distinct (0 fingerprint spills), 202759 on queue (0 on disk), 10.2s
+progress: depth 14, 3302148 generated, 1146596 distinct (0 fingerprint spills), 359579 on queue (0 on disk), 24.5s
+progress: depth 15, 4627761 generated, 1593421 distinct (0 fingerprint spills), 446825 on queue (0 on disk), 34.7s
+progress: depth 16, 6238403 generated, 2143551 distinct (0 fingerprint spills), 550130 on queue (26354 on disk), 47.1s
+progress: depth 17, 8167505 generated, 2801958 distinct (0 fingerprint spills), 658407 on queue (138471 on disk), 62.3s
+progress: depth 18, 10382307 generated, 3539155 distinct (0 fingerprint spills), 737197 on queue (220077 on disk), 79.7s
+progress: depth 19, 12772446 generated, 4315435 distinct (0 fingerprint spills), 776280 on queue (261464 on disk), 98.7s
+progress: depth 20, 15195756 generated, 5091997 distinct (0 fingerprint spills), 776562 on queue (264306 on disk), 118.1s
+progress: depth 21, 17487794 generated, 5809209 distinct (0 fingerprint spills), 717212 on queue (207772 on disk), 136.6s
+progress: depth 22, 19495957 generated, 6421262 distinct (0 fingerprint spills), 612053 on queue (104405 on disk), 153.1s
+progress: depth 23, 21163020 generated, 6934348 distinct (0 fingerprint spills), 513086 on queue (4670 on disk), 166.8s
+progress: depth 24, 22543160 generated, 7371088 distinct (0 fingerprint spills), 436740 on queue (0 on disk), 178.4s
+progress: depth 26, 24521138 generated, 7939674 distinct (0 fingerprint spills), 218354 on queue (0 on disk), 195.1s
+Model checking completed. No error has been found.
+25158316 states generated, 8057963 distinct states found. Depth 30. Checked in 200.228s (40244 distinct/s).
+
+real	3m20.237s
+user	6m38.909s
+sys	0m1.044s
+rc=0 20:24:16Z

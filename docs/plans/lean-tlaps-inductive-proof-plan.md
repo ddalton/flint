@@ -344,6 +344,33 @@ five named obligations must fail). Effort: 3–5 days. This is the milestone
 with the best ratio: the claim the code's one-GET fast path rests on,
 proved for any number of writers.
 
+*M3 result, 2026-10-07* (`lean/formal/results/2026-10-07-tlaps-m3/`; the
+record run `out/runrecord.out`): both theorems are closed in
+`LeanP1Proof.tla` -- `Spec => []Inv_ShortcutSound`, `Spec =>
+[]Inv_ReaderSound` -- through `IndM3`, which is `IndM2` with six
+conjuncts: the plan's I8 (while `derived = seq` and no rescope is in
+flight, every held path where the document and the baseline differ is
+skipped), I9 and I10 for every tree, `seq >= 1` (so a record of 0 never
+matches), and three facts a writer carries from its CAS to its finish,
+which the plan did not have: the install's own paths hold the snapshot;
+with `adv`, every other held path where the INSTALLED document differs
+from the baseline is skipped (this is where `CommitAdvanceGuarded` is
+used); and a record still current after the CAS means the CAS moved
+nothing. Both claims are lemmas off the invariant, not conjuncts. All six
+went to TLC first: exact counts in the four gate-derived worlds and the
+three-rescope world, two controls firing (the `adv` guard dropped, depth 8;
+the rescope guard dropped from I8, depth 4). The record: 10,850
+obligations (M0-M2's 8,659 and M3's 2,191), all closed, none omitted, the
+slowest 6.6 s of 60, 2,502 s from an erased cache. The section-5 controls
+are six, not five: each of the plan's five fails exactly at the step that
+uses it -- `RecheckSkipped` and `ReaderRechecksOwed` at the two claim
+lemmas, `CommitAdvanceGuarded` at `Install`'s `adv` fact,
+`ConsumeKeepsLeft` at `Consume`'s record, `SyncKeepsLeft` at `Sync`'s and
+`RPullSync`'s -- and `ConsumeHonorsScope`, which the claims also need (an
+owed path is held), fails both claim lemmas; its gate world fires only on
+scope respect, so a TLC run of its constants against the claim was added
+(the shortcut claim fails at depth 2). Effort: one day.
+
 **M4 — `Inv_ReaderFetches`.** I11 and the never-re-cited lemma. Control:
 `RetireAge` (world `ReaderLoses`). Effort: 2–3 days.
 

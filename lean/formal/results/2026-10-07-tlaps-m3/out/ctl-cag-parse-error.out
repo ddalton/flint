@@ -1,0 +1,64 @@
+CONTROL ctl-cag 2026-10-07T22:20:44Z
+9a06fcbf8f186a0c4f1e5e92a44c0bd8  LeanP1Anc.tla
+eb8c2ffeee6b365e40b857be7386b1ad  LeanP1Proof.tla
+
+\* TLAPM version bfa9468
+\* launched at 2026-10-07 22:20:44 with command line:
+\* /mnt/nvme/tlaps/unpack/tlapm/bin/tlapm --toolbox 0 0 --method smt --stretch 12 --threads 4 -k LeanP1Proof.tla
+
+File "./LeanP1Proof.tla", line 6039, characters 73-76:
+Error: Operator "<1>s" not found
+ tlapm ending abnormally with Failure("Expr.Anon: 4")
+Raised at Stdlib.failwith in file "stdlib.ml", line 29, characters 17-33
+Called from Tlapm_lib__E_anon.anon#expr in file "src/expr/e_anon.ml", line 308, characters 22-63
+Called from Tlapm_lib__E_anon.anon#expr in file "src/expr/e_anon.ml", line 308, characters 22-63
+Called from Stdlib__List.rev_map.rmap_f in file "list.ml", line 105, characters 22-25
+Called from Tlapm_lib__Ext.List.map in file "src/util/ext.ml", line 48, characters 22-37
+Called from Tlapm_lib__P_anon.anon#usable in file "src/proof/p_anon.ml", line 248, characters 20-70
+Called from Tlapm_lib__P_visit.map#proof in file "src/proof/p_visit.ml", line 26, characters 12-30
+Called from Tlapm_lib__P_anon.anon#step in file "src/proof/p_anon.ml", line 101, characters 12-30
+Called from Tlapm_lib__P_visit.map#steps in file "src/proof/p_visit.ml", line 35, characters 24-40
+Called from Tlapm_lib__P_anon.anon#proof in file "src/proof/p_anon.ml", line 63, characters 27-47
+Called from Tlapm_lib__P_anon.anon#step in file "src/proof/p_anon.ml", line 101, characters 12-30
+Called from Tlapm_lib__P_visit.map#steps in file "src/proof/p_visit.ml", line 35, characters 24-40
+Called from Tlapm_lib__P_visit.map#steps in file "src/proof/p_visit.ml", line 36, characters 25-43
+Called from Tlapm_lib__P_visit.map#steps in file "src/proof/p_visit.ml", line 36, characters 25-43
+Called from Tlapm_lib__P_visit.map#steps in file "src/proof/p_visit.ml", line 36, characters 25-43
+Called from Tlapm_lib__P_visit.map#steps in file "src/proof/p_visit.ml", line 36, characters 25-43
+Called from Tlapm_lib__P_visit.map#steps in file "src/proof/p_visit.ml", line 36, characters 25-43
+Called from Tlapm_lib__P_visit.map#steps in file "src/proof/p_visit.ml", line 36, characters 25-43
+Called from Tlapm_lib__P_visit.map#steps in file "src/proof/p_visit.ml", line 36, characters 25-43
+Called from Tlapm_lib__P_visit.map#steps in file "src/proof/p_visit.ml", line 36, characters 25-43
+Called from Tlapm_lib__P_visit.map#steps in file "src/proof/p_visit.ml", line 36, characters 25-43
+Called from Tlapm_lib__P_visit.map#steps in file "src/proof/p_visit.ml", line 36, characters 25-43
+Called from Tlapm_lib__P_visit.map#steps in file "src/proof/p_visit.ml", line 36, characters 25-43
+Called from Tlapm_lib__P_visit.map#steps in file "src/proof/p_visit.ml", line 36, characters 25-43
+Called from Tlapm_lib__P_visit.map#steps in file "src/proof/p_visit.ml", line 36, characters 25-43
+Called from Tlapm_lib__P_visit.map#steps in file "src/proof/p_visit.ml", line 36, characters 25-43
+Called from Tlapm_lib__P_visit.map#steps in file "src/proof/p_visit.ml", line 36, characters 25-43
+Called from Tlapm_lib__P_visit.map#steps in file "src/proof/p_visit.ml", line 36, characters 25-43
+Called from Tlapm_lib__P_visit.map#steps in file "src/proof/p_visit.ml", line 36, characters 25-43
+Called from Tlapm_lib__P_visit.map#steps in file "src/proof/p_visit.ml", line 36, characters 25-43
+Called from Tlapm_lib__P_visit.map#steps in file "src/proof/p_visit.ml", line 36, characters 25-43
+Called from Tlapm_lib__P_visit.map#steps in file "src/proof/p_visit.ml", line 36, characters 25-43
+Called from Tlapm_lib__P_anon.anon#proof in file "src/proof/p_anon.ml", line 63, characters 27-47
+Called from Tlapm_lib__M_elab.normalize.spin.map_proof in file "src/module/m_elab.ml", line 1142, characters 21-48
+Called from Tlapm_lib__M_elab.normalize in file "src/module/m_elab.ml", line 1274, characters 12-66
+Called from Tlapm_lib.process_module in file "src/tlapm_lib.ml", line 325, characters 29-68
+Called from Tlapm_lib.main.f in file "src/tlapm_lib.ml", line 621, characters 23-43
+Called from Stdlib__List.fold_left in file "list.ml", line 123, characters 24-34
+Called from Tlapm_lib.main in file "src/tlapm_lib.ml", line 624, characters 13-40
+Called from Tlapm_lib.init in file "src/tlapm_lib.ml", line 641, characters 8-59
+
+@!!BEGIN
+@!!type:warning
+@!!msg:File "./LeanP1Proof.tla", line 6039, characters 73-76
+
+Operator "<1>s" not found
+
+
+@!!END
+
+Command exited with non-zero status 3
+WALL 8.36 s MAXRSS 204856 kB rc 3
+PROOFDONE 22:20:52Z
