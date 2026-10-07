@@ -1,20 +1,29 @@
 ----------------------------- MODULE LeanP1Anc -------------------------------
-(* LeanP1.tla for TLAPS: the SAME protocol, with its two RECURSIVE operators
-   restated over a ghost.  tlapm (1.6.0-pre, bfa9468) dies in module
-   elaboration on the mere presence of a RECURSIVE definition
-   (results/2026-10-05-tlaps-m0/), so the proof module cannot EXTEND
-   LeanP1.tla.  This copy is GENERATED from it by
-   results/2026-10-05-tlaps-m0-tie/make-anc.py and differs ONLY in: the
+(* LeanP1.tla for TLAPS: the SAME protocol, restated where tlapm needs it.
+   tlapm (1.6.0-pre, bfa9468) dies in module elaboration on the mere
+   presence of a RECURSIVE definition (results/2026-10-05-tlaps-m0/), so the
+   proof module cannot EXTEND LeanP1.tla.  This copy is GENERATED from it by
+   results/2026-10-06-tlaps-typeok/make-anc.py and differs ONLY in: the
    module name; two ASSUMEs TLC gets free from model values; the variable
    `anc` -- for each minted handle, every handle its base chain reaches --
    written by the step (`AncUpdate`, like `TookUpdate`) from `base`, which
-   is write-once per handle; and `Derives` / `Supersedes` restated as the
-   one-level search over `anc` that their recursion computed.  `anc` is a
-   function of `base`, so it adds no distinct states: the tie to LeanP1.tla
-   is the EXACT distinct count on the gate's worlds (Holds1p3b =
-   461,094,969), and MCLeanP1AncCheck.tla checks the restated operators
-   against the recursive originals state by state.  LeanP1.tla stays the
-   module the gate checks; this one is what LeanP1Proof.tla EXTENDS.      *)
+   is write-once per handle; `Derives` / `Supersedes` restated as the
+   one-level search over `anc` that their recursion computed; and every
+   writer step's new tree written as an EXPLICIT record, an operator
+   `<Step>W(..)` (the fields the step changes new, every other one w[s]'s),
+   with the LET names those records need lifted to operators -- tlapm
+   prepares each obligation against the whole module, expanding hidden
+   LETs by substitution and giving Z3 axioms for every record EXCEPT it
+   finds, and LeanP1.tla's shapes cost each obligation 9 s and 2.2 GB and
+   put every record goal past Z3's time limit
+   (results/2026-10-06-tlaps-typeok/NOTES.txt).  `anc` is a function of
+   `base`, and a record with the changed fields new and the rest w[s]'s IS
+   the EXCEPT whenever w[s] has Writer's fields (TypeOK), so the copy has
+   exactly the original's states: the tie to LeanP1.tla is the EXACT
+   distinct count on the gate's worlds (Holds1p3b = 461,094,969), and
+   MCLeanP1AncCheck.tla checks the restated operators against the
+   recursive originals state by state.  LeanP1.tla stays the module the
+   gate checks; this one is what LeanP1Proof.tla EXTENDS.               *)
 (* --- LeanP1.tla's own header follows unchanged. ---                        *)
 (* Lean's handles protocol as the code runs it after P2 AND P1-lite (step
    5, slices 1-4, 2026-09-25): the gateway commits, and a writer's baseline
@@ -295,31 +304,111 @@ GDelete(p) ==
 ------------------------------------------------------------------------------
 (* The agent.                                                               *)
 
+\* The tree after each writer step: an explicit record (see the header).
+EditW(s, p) ==
+  [st |-> w[s].st,
+   pc |-> w[s].pc,
+   local |-> [w[s].local EXCEPT ![p] = <<p, nextGen>>],
+   baseline |-> w[s].baseline,
+   integrated |-> w[s].integrated \cup {nextGen},
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> w[s].snap,
+   upDone |-> w[s].upDone,
+   gone |-> w[s].gone,
+   verified |-> w[s].verified,
+   inst |-> w[s].inst,
+   retire |-> w[s].retire,
+   collected |-> w[s].collected,
+   adv |-> w[s].adv,
+   synced |-> w[s].synced,
+   derived |-> w[s].derived,
+   skipped |-> w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked \ {p},
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow]
 Edit(s, p) ==
   /\ On(s) /\ nextGen <= MaxMint
   /\ LET h == <<p, nextGen>> IN
      /\ minted' = minted \cup {h}
      /\ base' = [base EXCEPT ![h] = w[s].baseline[p]]
-     /\ w' = [w EXCEPT ![s].local[p] = h, ![s].integrated = @ \cup {nextGen},
-                       ![s].unlinked = @ \ {p}]
+     /\ w' = [w EXCEPT ![s] = EditW(s, p)]
      /\ nextGen' = nextGen + 1
   /\ UNCHANGED <<live, doc, seq, tomb, acked, conflicts, holder, ui, reqs, barriers, gw, mv, udel, aux>>
 
+DeleteW(s, p) ==
+  [st |-> w[s].st,
+   pc |-> w[s].pc,
+   local |-> [w[s].local EXCEPT ![p] = Nil],
+   baseline |-> w[s].baseline,
+   integrated |-> w[s].integrated,
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> w[s].snap,
+   upDone |-> w[s].upDone,
+   gone |-> w[s].gone,
+   verified |-> w[s].verified,
+   inst |-> w[s].inst,
+   retire |-> w[s].retire,
+   collected |-> w[s].collected,
+   adv |-> w[s].adv,
+   synced |-> w[s].synced,
+   derived |-> w[s].derived,
+   skipped |-> w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked \ {p},
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow]
 Delete(s, p) ==
   /\ On(s) /\ w[s].local[p] # Nil
-  /\ w' = [w EXCEPT ![s].local[p] = Nil, ![s].unlinked = @ \ {p}]
+  /\ w' = [w EXCEPT ![s] = DeleteW(s, p)]
   /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
 
 \* A checkout materializes what its scope admits (`checkout_scoped`).
+\* What a checkout with scope T materializes.
+CheckoutHeld(s, T) == [p \in Paths |-> IF p \in T THEN doc[p] ELSE Nil]
+CheckoutW(s, T) ==
+  [st |-> "on",
+   pc |-> w[s].pc,
+   local |-> CheckoutHeld(s, T),
+   baseline |-> CheckoutHeld(s, T),
+   integrated |-> {Gen(doc[p]) : p \in {q \in T : doc[q] # Nil}},
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> w[s].snap,
+   upDone |-> w[s].upDone,
+   gone |-> w[s].gone,
+   verified |-> w[s].verified,
+   inst |-> doc,
+   retire |-> w[s].retire,
+   collected |-> w[s].collected,
+   adv |-> w[s].adv,
+   synced |-> seq,
+   derived |-> seq,
+   skipped |-> {},
+   scope |-> T,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow]
 Checkout(s) ==
   /\ w[s].st = "off"
-  /\ \E T \in Scopes :
-       LET held == [p \in Paths |-> IF p \in T THEN doc[p] ELSE Nil] IN
-       w' = [w EXCEPT ![s].st = "on",
-                      ![s].local = held, ![s].baseline = held, ![s].inst = doc,
-                      ![s].integrated = {Gen(doc[p]) : p \in {q \in T : doc[q] # Nil}},
-                      ![s].synced = seq, ![s].derived = seq, ![s].skipped = {},
-                      ![s].scope = T]
+  /\ \E T \in Scopes : w' = [w EXCEPT ![s] = CheckoutW(s, T)]
   /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
 
 ------------------------------------------------------------------------------
@@ -352,81 +441,237 @@ Converges(s, p) ==
 CheapPath(s) ==
   /\ w[s].derived = seq
   /\ RecheckSkipped => \A p \in w[s].skipped : w[s].local[p] # w[s].baseline[p]
+\* The consume's parts (LeanP1.tla: `Consume`'s LET).
+ConsumeOwed(s) == {p \in Paths : Owed(s, p)}
+ConsumeConv(s) == {p \in Paths : Converges(s, p)}
+ConsumeTaken(s, fail) == (ConsumeOwed(s) \ fail) \cup ConsumeConv(s)
+ConsumeCheapW(s) ==
+  [st |-> w[s].st,
+   pc |-> "consumed",
+   local |-> w[s].local,
+   baseline |-> w[s].baseline,
+   integrated |-> w[s].integrated,
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> w[s].snap,
+   upDone |-> w[s].upDone,
+   gone |-> w[s].gone,
+   verified |-> w[s].verified,
+   inst |-> w[s].inst,
+   retire |-> w[s].retire,
+   collected |-> w[s].collected,
+   adv |-> w[s].adv,
+   synced |-> w[s].synced,
+   derived |-> w[s].derived,
+   skipped |-> w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow]
+\* Something left owed (fail # {}): the tree is not integrated with this
+\* document, and nothing is recorded as derived.  A dirty path left untaken
+\* is the agent's work, owed again the moment the agent backs out (a revert,
+\* or a new file deleted unpublished): `skipped`.
+ConsumeW(s, fail) ==
+  [st |-> w[s].st,
+   pc |-> "consumed",
+   local |-> [p \in Paths |-> IF p \in ConsumeTaken(s, fail) THEN doc[p] ELSE w[s].local[p]],
+   baseline |-> [p \in Paths |-> IF p \in ConsumeTaken(s, fail) THEN doc[p] ELSE w[s].baseline[p]],
+   integrated |-> w[s].integrated \cup {Gen(doc[p]) : p \in {q \in ConsumeTaken(s, fail) : doc[q] # Nil}},
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> w[s].snap,
+   upDone |-> w[s].upDone,
+   gone |-> w[s].gone,
+   verified |-> w[s].verified,
+   inst |-> w[s].inst,
+   retire |-> w[s].retire,
+   collected |-> w[s].collected,
+   adv |-> w[s].adv,
+   synced |-> IF fail # {} THEN w[s].synced ELSE seq,
+   derived |-> IF fail # {} /\ ConsumeKeepsLeft THEN 0 ELSE seq,
+   skipped |-> {p \in Paths \ ConsumeTaken(s, fail) : doc[p] # w[s].baseline[p] /\ Held(s, p)
+                                            /\ w[s].local[p] # w[s].baseline[p]},
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow]
 Consume(s) ==
   /\ On(s) /\ s \notin Readers /\ w[s].pc = "idle" /\ barriers < MaxBarriers
   \* Step 0 replays a rescope in flight first (`run_barrier`).
   /\ w[s].sStage = "none"
   /\ IF CheapPath(s)
-     THEN /\ w' = [w EXCEPT ![s].pc = "consumed"]
+     THEN /\ w' = [w EXCEPT ![s] = ConsumeCheapW(s)]
           /\ UNCHANGED <<regressed, fails>>
-     ELSE LET owed == {p \in Paths : Owed(s, p)}
-              conv == {p \in Paths : Converges(s, p)}
-          IN \E fail \in SUBSET owed :
-             LET taken == (owed \ fail) \cup conv
-                 left == fail # {}
-             IN /\ fails + Cardinality(fail) <= MaxFetchFails
-                /\ w' = [w EXCEPT ![s].pc = "consumed",
-                         ![s].local = [p \in Paths |-> IF p \in taken THEN doc[p] ELSE @[p]],
-                         ![s].baseline = [p \in Paths |-> IF p \in taken THEN doc[p] ELSE @[p]],
-                         ![s].integrated = @ \cup {Gen(doc[p]) : p \in {q \in taken : doc[q] # Nil}},
-                         \* Something left owed: the tree is not integrated with
-                         \* this document, and nothing is recorded as derived.
-                         ![s].synced = IF left THEN @ ELSE seq,
-                         ![s].derived = IF left /\ ConsumeKeepsLeft THEN 0 ELSE seq,
-                         \* A dirty path left untaken is the agent's work, owed
-                         \* again the moment the agent backs out (a revert, or a
-                         \* new file deleted unpublished).
-                         ![s].skipped = {p \in Paths \ taken : doc[p] # w[s].baseline[p] /\ Held(s, p)
-                                                             /\ w[s].local[p] # w[s].baseline[p]}]
-                /\ fails' = fails + Cardinality(fail)
-                /\ regressed' = (regressed \/ \E p \in owed \ fail : Back(s, p))
+     ELSE \E fail \in SUBSET ConsumeOwed(s) :
+             /\ fails + Cardinality(fail) <= MaxFetchFails
+             /\ w' = [w EXCEPT ![s] = ConsumeW(s, fail)]
+             /\ fails' = fails + Cardinality(fail)
+             /\ regressed' = (regressed \/ \E p \in ConsumeOwed(s) \ fail : Back(s, p))
   /\ UNCHANGED <<live, minted, doc, seq, tomb, base, acked, conflicts, holder, gw, mv, udel,
                  nextGen, ui, reqs, barriers, restarts, syncs, rescopes, upped, copies, orig>>
 
 \* Step 2: what differs from the baseline is an upload or a deletion; a
 \* deletion may wait for the next walk (the two-scan guard: any subset).
+\* The scan's parts (LeanP1.tla: `Scan`'s LET).
+ScanDirty(s) == {p \in Paths : w[s].local[p] # w[s].baseline[p]}
+ScanUps(s) == {p \in ScanDirty(s) : w[s].local[p] # Nil}
+ScanAbsent(s) == {p \in ScanDirty(s) : w[s].local[p] = Nil}
+ScanW(s, dels) ==
+  [st |-> w[s].st,
+   pc |-> "scanned",
+   local |-> w[s].local,
+   baseline |-> w[s].baseline,
+   integrated |-> w[s].integrated,
+   uploads |-> ScanUps(s),
+   deletes |-> dels,
+   snap |-> w[s].local,
+   upDone |-> {},
+   gone |-> {},
+   verified |-> FALSE,
+   inst |-> w[s].inst,
+   retire |-> {},
+   collected |-> FALSE,
+   adv |-> w[s].adv,
+   synced |-> w[s].synced,
+   derived |-> w[s].derived,
+   skipped |-> w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow]
 Scan(s) ==
   /\ On(s) /\ w[s].pc = "consumed"
-  /\ LET W == w[s]
-         dirty == {p \in Paths : W.local[p] # W.baseline[p]}
-         ups == {p \in dirty : W.local[p] # Nil}
-         absent == {p \in dirty : W.local[p] = Nil}
-     IN \E dels \in SUBSET absent :
-          w' = [w EXCEPT ![s].pc = "scanned",
-                         ![s].uploads = ups, ![s].deletes = dels,
-                         ![s].snap = W.local,
-                         ![s].upDone = {}, ![s].gone = {}, ![s].verified = FALSE,
-                         ![s].retire = {}, ![s].collected = FALSE]
+  /\ \E dels \in SUBSET ScanAbsent(s) : w' = [w EXCEPT ![s] = ScanW(s, dels)]
   /\ barriers' = barriers + 1
   /\ UNCHANGED <<bucket, nextGen, ui, reqs, aux>>
 
 \* Skip-on-no-diff: no scan, no CAS.
+SkipW(s) ==
+  [st |-> w[s].st,
+   pc |-> "idle",
+   local |-> w[s].local,
+   baseline |-> w[s].baseline,
+   integrated |-> w[s].integrated,
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> w[s].snap,
+   upDone |-> w[s].upDone,
+   gone |-> w[s].gone,
+   verified |-> w[s].verified,
+   inst |-> w[s].inst,
+   retire |-> w[s].retire,
+   collected |-> w[s].collected,
+   adv |-> w[s].adv,
+   synced |-> w[s].synced,
+   derived |-> w[s].derived,
+   skipped |-> w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow]
 Skip(s) ==
   /\ On(s) /\ w[s].pc = "consumed" /\ barriers < MaxBarriers
   /\ \A p \in Paths : w[s].local[p] = w[s].baseline[p]
   /\ seq = w[s].synced
-  /\ w' = [w EXCEPT ![s].pc = "idle"]
+  /\ w' = [w EXCEPT ![s] = SkipW(s)]
   /\ barriers' = barriers + 1
   /\ UNCHANGED <<bucket, nextGen, ui, reqs, aux>>
 
 \* Step 4: each upload lands at a fresh key.  Bytes PUT before (a withheld
 \* upload's, a restarted writer's) land at a COPY handle, which names them
 \* from here on.
+UploadW(s, p) ==
+  [st |-> w[s].st,
+   pc |-> w[s].pc,
+   local |-> w[s].local,
+   baseline |-> w[s].baseline,
+   integrated |-> w[s].integrated,
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> w[s].snap,
+   upDone |-> w[s].upDone \cup {p},
+   gone |-> w[s].gone,
+   verified |-> w[s].verified,
+   inst |-> w[s].inst,
+   retire |-> w[s].retire,
+   collected |-> w[s].collected,
+   adv |-> w[s].adv,
+   synced |-> w[s].synced,
+   derived |-> w[s].derived,
+   skipped |-> w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow]
+\* ...and with the bytes landed at the copy c, which names them from here on.
+UploadCopyW(s, p, c) ==
+  [st |-> w[s].st,
+   pc |-> w[s].pc,
+   local |-> [w[s].local EXCEPT ![p] = IF w[s].local[p] = w[s].snap[p] THEN c ELSE w[s].local[p]],
+   baseline |-> w[s].baseline,
+   integrated |-> w[s].integrated,
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> [w[s].snap EXCEPT ![p] = c],
+   upDone |-> w[s].upDone \cup {p},
+   gone |-> w[s].gone,
+   verified |-> w[s].verified,
+   inst |-> w[s].inst,
+   retire |-> w[s].retire,
+   collected |-> w[s].collected,
+   adv |-> w[s].adv,
+   synced |-> w[s].synced,
+   derived |-> w[s].derived,
+   skipped |-> w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow]
 Upload(s, p) ==
   /\ On(s) /\ w[s].pc = "scanned"
   /\ p \in w[s].uploads \ w[s].upDone
   /\ LET h == w[s].snap[p] IN
      IF h \notin upped
      THEN /\ live' = live \cup {h} /\ upped' = upped \cup {h}
-          /\ w' = [w EXCEPT ![s].upDone = @ \cup {p}]
+          /\ w' = [w EXCEPT ![s] = UploadW(s, p)]
           /\ UNCHANGED <<minted, base, copies, orig>>
      ELSE /\ copies < MaxCopies
           /\ LET c == <<p, MaxMint + copies + 1>> IN
              /\ live' = live \cup {c} /\ upped' = upped \cup {c} /\ minted' = minted \cup {c}
              /\ base' = [base EXCEPT ![c] = base[h]]
              /\ orig' = [orig EXCEPT ![c] = Content(h)]
-             /\ w' = [w EXCEPT ![s].upDone = @ \cup {p}, ![s].snap[p] = c,
-                               ![s].local[p] = IF @ = h THEN c ELSE @]
+             /\ w' = [w EXCEPT ![s] = UploadCopyW(s, p, c)]
           /\ copies' = copies + 1
   /\ UNCHANGED <<doc, seq, tomb, acked, conflicts, holder, gw, mv, udel,
                  nextGen, ui, reqs, barriers, restarts, syncs, regressed, rescopes, fails>>
@@ -446,37 +691,117 @@ MergeForeign(s) == {p \in Paths : p \notin MineInMerge(s) /\ Foreign(s, p) /\ do
 MergeGone(s) == {p \in Paths : p \notin MineInMerge(s) \cup w[s].deletes /\ doc[p] = Nil /\ w[s].baseline[p] # Nil}
 
 \* Nothing to publish: no claim, no CAS; the merge base follows the document.
+PullOnlyW(s) ==
+  [st |-> w[s].st,
+   pc |-> "idle",
+   local |-> w[s].local,
+   baseline |-> w[s].baseline,
+   integrated |-> w[s].integrated,
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> [p \in Paths |-> Nil],
+   upDone |-> {},
+   gone |-> {},
+   verified |-> FALSE,
+   inst |-> doc,
+   retire |-> w[s].retire,
+   collected |-> w[s].collected,
+   adv |-> w[s].adv,
+   synced |-> seq,
+   derived |-> w[s].derived,
+   skipped |-> w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow]
 PullOnly(s) ==
   /\ On(s) /\ w[s].pc = "scanned"
   /\ w[s].uploads = {} /\ w[s].deletes = {}
-  /\ w' = [w EXCEPT ![s].pc = "idle",
-                    ![s].inst = doc, ![s].synced = seq,
-                    ![s].snap = [p \in Paths |-> Nil],
-                    ![s].upDone = {}, ![s].gone = {}, ![s].verified = FALSE]
+  /\ w' = [w EXCEPT ![s] = PullOnlyW(s)]
   /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
 
 ------------------------------------------------------------------------------
 (* The writers' commit section: one writer at a time.  The gateway is not in
    it and does not wait for it (G1).                                       *)
 
+ClaimW(s) ==
+  [st |-> w[s].st,
+   pc |-> "claimed",
+   local |-> w[s].local,
+   baseline |-> w[s].baseline,
+   integrated |-> w[s].integrated,
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> w[s].snap,
+   upDone |-> w[s].upDone,
+   gone |-> w[s].gone,
+   verified |-> w[s].verified,
+   inst |-> w[s].inst,
+   retire |-> w[s].retire,
+   collected |-> w[s].collected,
+   adv |-> w[s].adv,
+   synced |-> w[s].synced,
+   derived |-> w[s].derived,
+   skipped |-> w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow]
 Claim(s) ==
   /\ On(s) /\ w[s].pc = "scanned"
   /\ w[s].uploads \subseteq w[s].upDone
   /\ w[s].uploads \cup w[s].deletes # {}
   /\ holder = "none"
   /\ holder' = s
-  /\ w' = [w EXCEPT ![s].pc = "claimed"]
+  /\ w' = [w EXCEPT ![s] = ClaimW(s)]
   /\ UNCHANGED <<live, minted, doc, seq, tomb, base, acked, conflicts, gw, mv, udel,
                  nextGen, ui, reqs, barriers, aux>>
 
 \* R4a: the commit re-reads every upload it is about to cite and withholds
 \* what a sweep took.
+VerifyW(s) ==
+  [st |-> w[s].st,
+   pc |-> w[s].pc,
+   local |-> w[s].local,
+   baseline |-> w[s].baseline,
+   integrated |-> w[s].integrated,
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> w[s].snap,
+   upDone |-> w[s].upDone,
+   gone |-> IF CommitVerifiesUploads
+           THEN {p \in w[s].uploads \cap w[s].upDone : w[s].snap[p] \notin live}
+           ELSE {},
+   verified |-> TRUE,
+   inst |-> w[s].inst,
+   retire |-> w[s].retire,
+   collected |-> w[s].collected,
+   adv |-> w[s].adv,
+   synced |-> w[s].synced,
+   derived |-> w[s].derived,
+   skipped |-> w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow]
 Verify(s) ==
   /\ On(s) /\ w[s].pc = "claimed" /\ holder = s /\ ~w[s].verified
-  /\ w' = [w EXCEPT ![s].verified = TRUE,
-                    ![s].gone = IF CommitVerifiesUploads
-                                THEN {p \in w[s].uploads \cap w[s].upDone : w[s].snap[p] \notin live}
-                                ELSE {}]
+  /\ w' = [w EXCEPT ![s] = VerifyW(s)]
   /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
 
 \* Step 5: the merge onto the CURRENT document, and the CAS.  Mine: the
@@ -486,28 +811,60 @@ Verify(s) ==
 \* tree never integrated at that path.  Mine re-creating a path theirs
 \* deleted since the merge base records the deleted version; mine DELETING
 \* over a version theirs changed applies, and records theirs (M3).
+\* The merge's parts (LeanP1.tla: `Install`'s LET).
+InstallMine(s) == w[s].uploads \cap w[s].upDone
+InstallContested(s) == IF CommitSurfacesForeign
+                       THEN {p \in InstallMine(s) \ w[s].gone : Foreign(s, p) /\ doc[p] # Nil}
+                       ELSE {}
+InstallDelOverridden(s) == IF CommitRecordsDeleteOverride
+                           THEN {p \in InstallMine(s) \ w[s].gone : Foreign(s, p) /\ doc[p] = Nil /\ w[s].baseline[p] # Nil}
+                           ELSE {}
+InstallDelOver(s) == IF DeleteWinsPreserved
+                     THEN {p \in w[s].deletes : Foreign(s, p) /\ doc[p] # Nil}
+                     ELSE {}
+InstallInst(s) == [p \in Paths |->
+                     IF p \in w[s].gone THEN doc[p]
+                     ELSE IF p \in InstallMine(s) THEN w[s].snap[p]
+                     ELSE IF p \in w[s].deletes /\ DeleteWinsPreserved THEN Nil
+                     ELSE IF Foreign(s, p) THEN doc[p]
+                     ELSE IF p \in w[s].deletes THEN Nil
+                     ELSE doc[p]]
+InstallRetired(s) == {doc[p] : p \in {q \in Paths : doc[q] # Nil /\ InstallInst(s)[q] # doc[q]}}
+\* `adv`: the CAS replaced exactly the derived document: the installed one
+\* is it plus this tree's own changes.
+InstallW(s) ==
+  [st |-> w[s].st,
+   pc |-> "cased",
+   local |-> w[s].local,
+   baseline |-> w[s].baseline,
+   integrated |-> w[s].integrated,
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> w[s].snap,
+   upDone |-> w[s].upDone \ w[s].gone,
+   gone |-> w[s].gone,
+   verified |-> w[s].verified,
+   inst |-> InstallInst(s),
+   retire |-> InstallRetired(s),
+   collected |-> InstallRetired(s) = {},
+   adv |-> IF CommitAdvanceGuarded THEN seq = w[s].derived ELSE TRUE,
+   synced |-> w[s].synced,
+   derived |-> w[s].derived,
+   skipped |-> w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow]
 Install(s) ==
   /\ On(s) /\ w[s].pc = "claimed" /\ holder = s /\ w[s].verified
   /\ LET W == w[s]
-         mine == W.uploads \cap W.upDone
-         contested == IF CommitSurfacesForeign
-                      THEN {p \in mine \ W.gone : Foreign(s, p) /\ doc[p] # Nil}
-                      ELSE {}
-         delOverridden == IF CommitRecordsDeleteOverride
-                          THEN {p \in mine \ W.gone : Foreign(s, p) /\ doc[p] = Nil /\ W.baseline[p] # Nil}
-                          ELSE {}
-         delOver == IF DeleteWinsPreserved
-                    THEN {p \in W.deletes : Foreign(s, p) /\ doc[p] # Nil}
-                    ELSE {}
-         inst == [p \in Paths |->
-                    IF p \in W.gone THEN doc[p]
-                    ELSE IF p \in mine THEN W.snap[p]
-                    ELSE IF p \in W.deletes /\ DeleteWinsPreserved THEN Nil
-                    ELSE IF Foreign(s, p) THEN doc[p]
-                    ELSE IF p \in W.deletes THEN Nil
-                    ELSE doc[p]]
+         inst == InstallInst(s)
          nothing == inst = doc
-         retired == {doc[p] : p \in {q \in Paths : doc[q] # Nil /\ inst[q] # doc[q]}}
      IN
        /\ doc' = inst
        /\ seq' = IF nothing THEN seq ELSE seq + 1
@@ -515,27 +872,49 @@ Install(s) ==
                                    ELSE IF doc[p] # Nil THEN doc[p]
                                    ELSE tomb[p]]
        /\ conflicts' = conflicts \cup {<<p, W.snap[p]>> : p \in W.gone}
-                                 \cup {<<p, doc[p]>> : p \in contested}
-                                 \cup {<<p, DeletedAt(s, p)>> : p \in delOverridden}
-                                 \cup {<<p, doc[p]>> : p \in delOver}
-       /\ w' = [w EXCEPT ![s].pc = "cased",
-                         ![s].upDone = @ \ W.gone,
-                         ![s].inst = inst, ![s].retire = retired,
-                         \* The CAS replaced exactly the derived document: the
-                         \* installed one is it plus this tree's own changes.
-                         ![s].adv = IF CommitAdvanceGuarded THEN seq = W.derived ELSE TRUE,
-                         ![s].collected = retired = {}]
+                                 \cup {<<p, doc[p]>> : p \in InstallContested(s)}
+                                 \cup {<<p, DeletedAt(s, p)>> : p \in InstallDelOverridden(s)}
+                                 \cup {<<p, doc[p]>> : p \in InstallDelOver(s)}
+       /\ w' = [w EXCEPT ![s] = InstallW(s)]
   /\ UNCHANGED <<live, minted, base, acked, holder, gw, mv, udel, nextGen, ui, reqs, barriers, aux>>
 
 \* Step 6: the retired set, in one batch, sparing what the installed
 \* document still cites — at once only without the retire age; with it,
 \* the commit's retirements were logged (`RetUpdate`) and `Reap` takes them.
+CollectW(s) ==
+  [st |-> w[s].st,
+   pc |-> w[s].pc,
+   local |-> w[s].local,
+   baseline |-> w[s].baseline,
+   integrated |-> w[s].integrated,
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> w[s].snap,
+   upDone |-> w[s].upDone,
+   gone |-> w[s].gone,
+   verified |-> w[s].verified,
+   inst |-> w[s].inst,
+   retire |-> {},
+   collected |-> TRUE,
+   adv |-> w[s].adv,
+   synced |-> w[s].synced,
+   derived |-> w[s].derived,
+   skipped |-> w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow]
 Collect(s) ==
   /\ On(s) /\ w[s].pc = "cased" /\ ~w[s].collected
   /\ LET W == w[s]
          taken == {h \in W.retire : ~(CollectorSparesCited /\ \E q \in Paths : W.inst[q] = h)}
      IN /\ live' = IF RetireAge THEN live ELSE live \ taken
-        /\ w' = [w EXCEPT ![s].retire = {}, ![s].collected = TRUE]
+        /\ w' = [w EXCEPT ![s] = CollectW(s)]
   /\ UNCHANGED <<minted, doc, seq, tomb, base, acked, conflicts, holder, gw, mv, udel,
                  nextGen, ui, reqs, barriers, aux>>
 
@@ -555,23 +934,42 @@ Sweep(s, h) ==
 
 \* Step 7: the baseline follows what this barrier published; the pointer is
 \* where this install left it, and what its merge saw untaken is owed.
+FinishW(s) ==
+  [st |-> w[s].st,
+   pc |-> "idle",
+   local |-> w[s].local,
+   baseline |-> [p \in Paths |->
+                   IF p \in w[s].uploads \cap w[s].upDone THEN w[s].snap[p]
+                   ELSE IF p \in w[s].deletes /\ w[s].inst[p] = Nil THEN Nil
+                   ELSE w[s].baseline[p]],
+   integrated |-> w[s].integrated,
+   uploads |-> {},
+   deletes |-> {},
+   snap |-> [p \in Paths |-> Nil],
+   upDone |-> {},
+   gone |-> {},
+   verified |-> FALSE,
+   inst |-> w[s].inst,
+   retire |-> w[s].retire,
+   collected |-> FALSE,
+   adv |-> FALSE,
+   synced |-> IF w[s].inst = doc THEN seq ELSE w[s].synced,
+   derived |-> IF w[s].adv /\ w[s].inst = doc THEN seq ELSE w[s].derived,
+   skipped |-> IF w[s].adv /\ w[s].inst = doc
+                 THEN w[s].skipped \ ((w[s].uploads \cap w[s].upDone) \cup {p \in w[s].deletes : w[s].inst[p] = Nil})
+                 ELSE w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow]
 Finish(s) ==
   /\ On(s) /\ w[s].pc = "cased" /\ w[s].collected
-  /\ LET W == w[s] IN
-     w' = [w EXCEPT ![s].pc = "idle",
-             ![s].baseline = [p \in Paths |->
-                                IF p \in W.uploads \cap W.upDone THEN W.snap[p]
-                                ELSE IF p \in W.deletes /\ W.inst[p] = Nil THEN Nil
-                                ELSE @[p]],
-             ![s].synced = IF W.inst = doc THEN seq ELSE @,
-             ![s].derived = IF W.adv /\ W.inst = doc THEN seq ELSE @,
-             ![s].skipped = IF W.adv /\ W.inst = doc
-                              THEN @ \ ((W.uploads \cap W.upDone) \cup {p \in W.deletes : W.inst[p] = Nil})
-                              ELSE @,
-             ![s].adv = FALSE,
-             ![s].uploads = {}, ![s].deletes = {}, ![s].snap = [p \in Paths |-> Nil],
-             ![s].upDone = {}, ![s].gone = {}, ![s].verified = FALSE,
-             ![s].collected = FALSE]
+  /\ w' = [w EXCEPT ![s] = FinishW(s)]
   /\ holder' = "none"
   /\ UNCHANGED <<live, minted, doc, seq, tomb, base, acked, conflicts, gw, mv, udel,
                  nextGen, ui, reqs, barriers, aux>>
@@ -581,17 +979,38 @@ Finish(s) ==
 
 \* A restart keeps the tree and the baseline (with `synced`, `derived` and `skipped`, all
 \* on disk) and drops the barrier in flight.  No journal is read back.
+\* The intent is on disk; its replay starts the apply over (`sStage`).
+RestartW(s) ==
+  [st |-> w[s].st,
+   pc |-> "idle",
+   local |-> w[s].local,
+   baseline |-> w[s].baseline,
+   integrated |-> w[s].integrated,
+   uploads |-> {},
+   deletes |-> {},
+   snap |-> [p \in Paths |-> Nil],
+   upDone |-> {},
+   gone |-> {},
+   verified |-> FALSE,
+   inst |-> [p \in Paths |-> Nil],
+   retire |-> {},
+   collected |-> FALSE,
+   adv |-> FALSE,
+   synced |-> w[s].synced,
+   derived |-> w[s].derived,
+   skipped |-> w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> IF w[s].sStage = "none" THEN "none" ELSE "saved",
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> {},
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow]
 Restart(s) ==
   /\ On(s) /\ restarts < MaxRestarts
-  /\ w' = [w EXCEPT ![s].pc = "idle",
-                    ![s].uploads = {}, ![s].deletes = {},
-                    ![s].snap = [p \in Paths |-> Nil],
-                    ![s].upDone = {}, ![s].gone = {}, ![s].verified = FALSE,
-                    ![s].inst = [p \in Paths |-> Nil], ![s].retire = {},
-                    ![s].collected = FALSE, ![s].adv = FALSE,
-                    \* The intent is on disk; its replay starts the apply over.
-                    ![s].sStage = IF @ = "none" THEN "none" ELSE "saved",
-                    ![s].sKeep = {}]
+  /\ w' = [w EXCEPT ![s] = RestartW(s)]
   /\ holder' = IF holder = s THEN "none" ELSE holder
   /\ restarts' = restarts + 1
   /\ UNCHANGED <<live, minted, doc, seq, tomb, base, acked, conflicts, gw, mv, udel,
@@ -602,23 +1021,49 @@ Restart(s) ==
 \* with the document moved) (`sync.rs` step 5).  It does not move `synced`.
 \* A sync does not replay a rescope; it can run after a crash left one
 \* "saved" (the scope it reads is still the old one).
+\* The sync's parts (LeanP1.tla: `Sync`'s and `RPullSync`'s LET): what is
+\* owed, what of it this sync takes (the rest failed to fetch), the baseline
+\* after it.
+SyncAll(s) == {p \in Paths : Owed(s, p)}
+SyncOwed(s, fail) == SyncAll(s) \ fail
+SyncBl(s, fail) == [p \in Paths |-> IF p \in SyncOwed(s, fail) THEN doc[p] ELSE w[s].baseline[p]]
+SyncW(s, fail) ==
+  [st |-> w[s].st,
+   pc |-> w[s].pc,
+   local |-> [p \in Paths |-> IF p \in SyncOwed(s, fail) THEN doc[p] ELSE w[s].local[p]],
+   baseline |-> SyncBl(s, fail),
+   integrated |-> w[s].integrated \cup {Gen(doc[p]) : p \in {q \in SyncOwed(s, fail) : doc[q] # Nil}},
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> w[s].snap,
+   upDone |-> w[s].upDone,
+   gone |-> w[s].gone,
+   verified |-> w[s].verified,
+   inst |-> w[s].inst,
+   retire |-> w[s].retire,
+   collected |-> w[s].collected,
+   adv |-> w[s].adv,
+   synced |-> w[s].synced,
+   derived |-> IF fail # {} /\ SyncKeepsLeft THEN 0 ELSE seq,
+   skipped |-> IF fail # {} /\ SyncKeepsLeft THEN {}
+              ELSE {p \in Paths : doc[p] # SyncBl(s, fail)[p] /\ w[s].local[p] # SyncBl(s, fail)[p] /\ Held(s, p)},
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow]
 Sync(s) ==
   /\ On(s) /\ s \notin Readers /\ w[s].pc = "idle" /\ syncs < MaxSyncs /\ w[s].sStage \in {"none", "saved"}
   /\ \E p \in Paths : Owed(s, p)
-  /\ LET all == {p \in Paths : Owed(s, p)} IN
-     \E fail \in SUBSET all :
-     LET owed == all \ fail
-         left == fail # {}
-         bl == [p \in Paths |-> IF p \in owed THEN doc[p] ELSE w[s].baseline[p]]
-     IN /\ fails + Cardinality(fail) <= MaxFetchFails
-        /\ w' = [w EXCEPT ![s].local = [p \in Paths |-> IF p \in owed THEN doc[p] ELSE @[p]],
-                       ![s].baseline = bl,
-                       ![s].integrated = @ \cup {Gen(doc[p]) : p \in {q \in owed : doc[q] # Nil}},
-                       ![s].derived = IF left /\ SyncKeepsLeft THEN 0 ELSE seq,
-                       ![s].skipped = IF left /\ SyncKeepsLeft THEN {}
-                                      ELSE {p \in Paths : doc[p] # bl[p] /\ w[s].local[p] # bl[p] /\ Held(s, p)}]
-        /\ fails' = fails + Cardinality(fail)
-        /\ regressed' = (regressed \/ \E p \in owed : Back(s, p))
+  /\ \E fail \in SUBSET SyncAll(s) :
+       /\ fails + Cardinality(fail) <= MaxFetchFails
+       /\ w' = [w EXCEPT ![s] = SyncW(s, fail)]
+       /\ fails' = fails + Cardinality(fail)
+       /\ regressed' = (regressed \/ \E p \in SyncOwed(s, fail) : Back(s, p))
   /\ syncs' = syncs + 1
   /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, restarts, rescopes, upped, copies, orig>>
 
@@ -635,13 +1080,39 @@ Sync(s) ==
 \* What a target drops: the paths the baseline holds that it does not admit.
 Leaving(s, T) == {p \in Paths : w[s].baseline[p] # Nil /\ p \notin T}
 
+RescopeBeginW(s, T) ==
+  [st |-> w[s].st,
+   pc |-> w[s].pc,
+   local |-> w[s].local,
+   baseline |-> w[s].baseline,
+   integrated |-> w[s].integrated,
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> w[s].snap,
+   upDone |-> w[s].upDone,
+   gone |-> w[s].gone,
+   verified |-> w[s].verified,
+   inst |-> w[s].inst,
+   retire |-> w[s].retire,
+   collected |-> w[s].collected,
+   adv |-> w[s].adv,
+   synced |-> w[s].synced,
+   derived |-> w[s].derived,
+   skipped |-> w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> "saved",
+   sTgt |-> T,
+   sDrop |-> Leaving(s, T),
+   sKeep |-> {},
+   sHeld |-> [p \in Paths |-> Nil],
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow]
 RescopeBegin(s) ==
   /\ On(s) /\ w[s].pc = "idle" /\ w[s].sStage = "none" /\ rescopes < MaxRescopes
   /\ \E T \in Scopes \ {w[s].scope} :
        /\ \A p \in Leaving(s, T) : w[s].local[p] = w[s].baseline[p]
-       /\ w' = [w EXCEPT ![s].sStage = "saved", ![s].sTgt = T,
-                         ![s].sDrop = Leaving(s, T), ![s].sKeep = {},
-                         ![s].sHeld = [p \in Paths |-> Nil]]
+       /\ w' = [w EXCEPT ![s] = RescopeBeginW(s, T)]
   /\ rescopes' = rescopes + 1
   /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, restarts, syncs, regressed, fails, upped, copies, orig>>
 
@@ -652,68 +1123,113 @@ KeepSet(s) == IF RescopeKeepsDirty
               THEN {p \in w[s].sDrop : w[s].baseline[p] # Nil /\ w[s].local[p] # w[s].baseline[p]}
               ELSE {}
 
+\* What the first half drops: the drop set less what the apply keeps.
+RescopeFirstDd(s) == w[s].sDrop \ KeepSet(s)
+\* `sHeld`: what it uncites, recorded with the intent; a replay keeps what an
+\* earlier run recorded.
+RescopeFirstW(s) ==
+  [st |-> w[s].st,
+   pc |-> w[s].pc,
+   local |-> IF RescopeUnciteFirst
+             THEN w[s].local
+             ELSE [p \in Paths |-> IF p \in RescopeFirstDd(s) THEN Nil ELSE w[s].local[p]],
+   baseline |-> IF RescopeUnciteFirst
+                THEN [p \in Paths |-> IF p \in RescopeFirstDd(s) THEN Nil ELSE w[s].baseline[p]]
+                ELSE w[s].baseline,
+   integrated |-> w[s].integrated,
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> w[s].snap,
+   upDone |-> w[s].upDone,
+   gone |-> w[s].gone,
+   verified |-> w[s].verified,
+   inst |-> w[s].inst,
+   retire |-> w[s].retire,
+   collected |-> w[s].collected,
+   adv |-> w[s].adv,
+   synced |-> w[s].synced,
+   derived |-> w[s].derived,
+   skipped |-> w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> "mid",
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> KeepSet(s),
+   sHeld |-> [p \in Paths |-> IF p \in RescopeFirstDd(s) /\ w[s].baseline[p] # Nil
+                             THEN w[s].baseline[p] ELSE w[s].sHeld[p]],
+   unlinked |-> IF RescopeUnciteFirst
+                THEN w[s].unlinked
+                ELSE w[s].unlinked \cup {p \in RescopeFirstDd(s) : w[s].local[p] # Nil},
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow]
 RescopeFirst(s) ==
   /\ On(s) /\ w[s].pc = "idle" /\ w[s].sStage = "saved"
-  /\ LET keep == KeepSet(s)
-         dd == w[s].sDrop \ keep
-     IN w' = [w EXCEPT ![s].sStage = "mid", ![s].sKeep = keep,
-                       \* What it uncites, recorded with the intent; a replay
-                       \* keeps what an earlier run recorded.
-                       ![s].sHeld = [p \in Paths |-> IF p \in dd /\ w[s].baseline[p] # Nil
-                                                     THEN w[s].baseline[p] ELSE @[p]],
-                       ![s].baseline = IF RescopeUnciteFirst
-                                       THEN [p \in Paths |-> IF p \in dd THEN Nil ELSE @[p]]
-                                       ELSE @,
-                       ![s].local = IF RescopeUnciteFirst
-                                    THEN @
-                                    ELSE [p \in Paths |-> IF p \in dd THEN Nil ELSE @[p]],
-                       ![s].unlinked = IF RescopeUnciteFirst
-                                       THEN @
-                                       ELSE @ \cup {p \in dd : w[s].local[p] # Nil}]
+  /\ w' = [w EXCEPT ![s] = RescopeFirstW(s)]
   /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
 
 \* The second half, the widen, and the new scope; then the intent clears.
 \* The widen fetches each admitted citation the tree does not hold, adopts
 \* bytes already there that ARE the document's, and keeps a file the agent
 \* made there (L-130: uncited, published by the next barrier).
+\* The widen's parts (LeanP1.tla: `RescopeSecond`'s LET).
+RescopeDrop(s) == w[s].sDrop \ w[s].sKeep
+\* The unlink: what the uncite dropped, unless the tree's bytes there are
+\* no longer those (the agent wrote since).
+RescopeUnlink(s, p) == /\ p \in RescopeDrop(s) /\ w[s].local[p] # Nil
+                       /\ \/ ~UnlinkChecksBytes
+                          \/ w[s].sHeld[p] # Nil /\ Content(w[s].local[p]) = Content(w[s].sHeld[p])
+RescopeLocal1(s) == IF RescopeUnciteFirst
+                    THEN [p \in Paths |-> IF RescopeUnlink(s, p) THEN Nil ELSE w[s].local[p]]
+                    ELSE w[s].local
+RescopeBase1(s) == IF RescopeUnciteFirst
+                   THEN w[s].baseline
+                   ELSE [p \in Paths |-> IF p \in RescopeDrop(s) THEN Nil ELSE w[s].baseline[p]]
+RescopeAdd(s) == {p \in w[s].sTgt : RescopeBase1(s)[p] = Nil /\ doc[p] # Nil}
+RescopeKept(s) == IF WidenKeepsLocal
+                  THEN {p \in RescopeAdd(s) : RescopeLocal1(s)[p] # Nil /\ Content(RescopeLocal1(s)[p]) # Content(doc[p])}
+                  ELSE {}
+RescopeFetch0(s) == RescopeAdd(s) \ RescopeKept(s)
+\* What the widen fetches once the failed fetches are taken out.
+RescopeFetch(s, wfail) == RescopeFetch0(s) \ wfail
+\* Fetched where the tree has nothing (or, unguarded, over whatever it has);
+\* adopted where its bytes ARE the document's.
+RescopeSecondW(s, wfail) ==
+  [st |-> w[s].st,
+   pc |-> w[s].pc,
+   local |-> [p \in Paths |->
+                IF p \in RescopeFetch(s, wfail) /\ (RescopeLocal1(s)[p] = Nil \/ ~WidenKeepsLocal)
+                THEN doc[p] ELSE RescopeLocal1(s)[p]],
+   baseline |-> [p \in Paths |-> IF p \in RescopeFetch(s, wfail) THEN doc[p] ELSE RescopeBase1(s)[p]],
+   integrated |-> w[s].integrated \cup {Gen(doc[p]) : p \in RescopeFetch(s, wfail)},
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> w[s].snap,
+   upDone |-> w[s].upDone,
+   gone |-> w[s].gone,
+   verified |-> w[s].verified,
+   inst |-> w[s].inst,
+   retire |-> w[s].retire,
+   collected |-> w[s].collected,
+   adv |-> w[s].adv,
+   synced |-> seq,
+   derived |-> 0,
+   skipped |-> {},
+   scope |-> w[s].sTgt,
+   sStage |-> "none",
+   sTgt |-> {},
+   sDrop |-> {},
+   sKeep |-> {},
+   sHeld |-> [p \in Paths |-> Nil],
+   unlinked |-> (w[s].unlinked \cup {p \in Paths : RescopeUnlink(s, p) /\ RescopeUnciteFirst})
+                \ RescopeFetch(s, wfail),
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow]
 RescopeSecond(s) ==
   /\ On(s) /\ w[s].pc = "idle" /\ w[s].sStage = "mid"
-  /\ LET W == w[s]
-         dd == W.sDrop \ W.sKeep
-         \* The unlink: what the uncite dropped, unless the tree's bytes
-         \* there are no longer those (the agent wrote since).
-         unlink(p) == /\ p \in dd /\ W.local[p] # Nil
-                      /\ \/ ~UnlinkChecksBytes
-                         \/ W.sHeld[p] # Nil /\ Content(W.local[p]) = Content(W.sHeld[p])
-         local1 == IF RescopeUnciteFirst
-                   THEN [p \in Paths |-> IF unlink(p) THEN Nil ELSE W.local[p]]
-                   ELSE W.local
-         base1 == IF RescopeUnciteFirst
-                  THEN W.baseline
-                  ELSE [p \in Paths |-> IF p \in dd THEN Nil ELSE W.baseline[p]]
-         add == {p \in W.sTgt : base1[p] = Nil /\ doc[p] # Nil}
-         kept == IF WidenKeepsLocal
-                 THEN {p \in add : local1[p] # Nil /\ Content(local1[p]) # Content(doc[p])}
-                 ELSE {}
-         fetch0 == add \ kept
-     IN \E wfail \in SUBSET {p \in fetch0 : local1[p] = Nil \/ ~WidenKeepsLocal} :
-        LET fetch == fetch0 \ wfail IN
+  /\ \E wfail \in SUBSET {p \in RescopeFetch0(s) : RescopeLocal1(s)[p] = Nil \/ ~WidenKeepsLocal} :
         /\ fails + Cardinality(wfail) <= MaxFetchFails
         /\ fails' = fails + Cardinality(wfail)
-        /\ w' = [w EXCEPT ![s].sStage = "none",
-                       \* Fetched where the tree has nothing (or, unguarded,
-                       \* over whatever it has); adopted where its bytes ARE
-                       \* the document's.
-                       ![s].local = [p \in Paths |->
-                                       IF p \in fetch /\ (local1[p] = Nil \/ ~WidenKeepsLocal)
-                                       THEN doc[p] ELSE local1[p]],
-                       ![s].baseline = [p \in Paths |-> IF p \in fetch THEN doc[p] ELSE base1[p]],
-                       ![s].integrated = @ \cup {Gen(doc[p]) : p \in fetch},
-                       ![s].scope = W.sTgt,
-                       ![s].synced = seq, ![s].derived = 0, ![s].skipped = {},
-                       ![s].sTgt = {}, ![s].sDrop = {}, ![s].sKeep = {},
-                       ![s].sHeld = [p \in Paths |-> Nil],
-                       ![s].unlinked = (@ \cup {p \in Paths : unlink(p) /\ RescopeUnciteFirst}) \ fetch]
+        /\ w' = [w EXCEPT ![s] = RescopeSecondW(s, wfail)]
   /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers,
                  restarts, syncs, regressed, rescopes, upped, copies, orig>>
 
@@ -729,32 +1245,79 @@ StillOwed(s) == w[s].derived = 0 \/ \E p \in w[s].skipped : w[s].local[p] = w[s]
 ReaderSkips(s) == w[s].memo = seq /\ (ReaderRechecksOwed => ~StillOwed(s))
 
 \* The pointer GET.
+RPullReadW(s) ==
+  [st |-> w[s].st,
+   pc |-> "pulling",
+   local |-> w[s].local,
+   baseline |-> w[s].baseline,
+   integrated |-> w[s].integrated,
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> w[s].snap,
+   upDone |-> w[s].upDone,
+   gone |-> w[s].gone,
+   verified |-> w[s].verified,
+   inst |-> w[s].inst,
+   retire |-> w[s].retire,
+   collected |-> w[s].collected,
+   adv |-> w[s].adv,
+   synced |-> w[s].synced,
+   derived |-> w[s].derived,
+   skipped |-> w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> seq]
 RPullRead(s) ==
   /\ On(s) /\ s \in Readers /\ w[s].pc = "idle" /\ w[s].sStage \in {"none", "saved"}
   /\ ~ReaderSkips(s)
-  /\ w' = [w EXCEPT ![s].pc = "pulling", ![s].rnow = seq]
+  /\ w' = [w EXCEPT ![s] = RPullReadW(s)]
   /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
 
 \* The whole-tree sync, against the document as it is NOW (it reads both
 \* again), recording what it derived as a consume would; then the memo is
 \* the pointer read BEFORE it.
+RPullSyncW(s, fail) ==
+  [st |-> w[s].st,
+   pc |-> "idle",
+   local |-> [p \in Paths |-> IF p \in SyncOwed(s, fail) THEN doc[p] ELSE w[s].local[p]],
+   baseline |-> SyncBl(s, fail),
+   integrated |-> w[s].integrated \cup {Gen(doc[p]) : p \in {q \in SyncOwed(s, fail) : doc[q] # Nil}},
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> w[s].snap,
+   upDone |-> w[s].upDone,
+   gone |-> w[s].gone,
+   verified |-> w[s].verified,
+   inst |-> w[s].inst,
+   retire |-> w[s].retire,
+   collected |-> w[s].collected,
+   adv |-> w[s].adv,
+   synced |-> w[s].synced,
+   derived |-> IF fail # {} /\ SyncKeepsLeft THEN 0 ELSE seq,
+   skipped |-> IF fail # {} /\ SyncKeepsLeft THEN {}
+              ELSE {p \in Paths : doc[p] # SyncBl(s, fail)[p] /\ w[s].local[p] # SyncBl(s, fail)[p] /\ Held(s, p)},
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].rnow,
+   rnow |-> w[s].rnow]
 RPullSync(s) ==
   /\ On(s) /\ s \in Readers /\ w[s].pc = "pulling"
-  /\ LET all == {p \in Paths : Owed(s, p)} IN
-     \E fail \in SUBSET all :
-     LET owed == all \ fail
-         left == fail # {}
-         bl == [p \in Paths |-> IF p \in owed THEN doc[p] ELSE w[s].baseline[p]]
-     IN /\ fails + Cardinality(fail) <= MaxFetchFails
-        /\ w' = [w EXCEPT ![s].pc = "idle", ![s].memo = w[s].rnow,
-                       ![s].local = [p \in Paths |-> IF p \in owed THEN doc[p] ELSE @[p]],
-                       ![s].baseline = bl,
-                       ![s].integrated = @ \cup {Gen(doc[p]) : p \in {q \in owed : doc[q] # Nil}},
-                       ![s].derived = IF left /\ SyncKeepsLeft THEN 0 ELSE seq,
-                       ![s].skipped = IF left /\ SyncKeepsLeft THEN {}
-                                      ELSE {p \in Paths : doc[p] # bl[p] /\ w[s].local[p] # bl[p] /\ Held(s, p)}]
-        /\ fails' = fails + Cardinality(fail)
-        /\ regressed' = (regressed \/ \E p \in owed : Back(s, p))
+  /\ \E fail \in SUBSET SyncAll(s) :
+       /\ fails + Cardinality(fail) <= MaxFetchFails
+       /\ w' = [w EXCEPT ![s] = RPullSyncW(s, fail)]
+       /\ fails' = fails + Cardinality(fail)
+       /\ regressed' = (regressed \/ \E p \in SyncOwed(s, fail) : Back(s, p))
   /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, restarts, syncs, rescopes, upped, copies, orig>>
 
 ------------------------------------------------------------------------------

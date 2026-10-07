@@ -1,0 +1,33 @@
+Zenon error: exhausted search space without finding a proof
+Zenon error: exhausted search space without finding a proof
+(* created new ".tlacache/Asm.tlaps/Asm.thy" *)
+(* fingerprints written in ".tlacache/Asm.tlaps/fingerprints" *)
+File "./Asm.tla", line 8, characters 29-30:
+[ERROR]: Could not prove or check:
+           ASSUME NEW CONSTANT K,
+                  Zenon 
+           PROVE  K + 1 \in Nat
+File "./Asm.tla", line 7, characters 29-30:
+[ERROR]: Could not prove or check:
+           ASSUME NEW CONSTANT K,
+                  SMT 
+           PROVE  K + 1 \in Nat
+File "./Asm.tla", line 6, characters 29-35:
+[ERROR]: Could not prove or check:
+           ASSUME NEW CONSTANT K
+           PROVE  K + 1 \in Nat
+File "./Asm.tla", line 1, character 1 to line 9, character 4:
+[ERROR]: 3/5 obligations failed.
+There were backend errors processing module `"Asm"`.
+ tlapm ending abnormally with Failure("backend errors: there are unproved obligations")
+Raised at Stdlib.failwith in file "stdlib.ml", line 29, characters 17-33
+Called from Tlapm_lib.process_module in file "src/tlapm_lib.ml", line 492, characters 12-77
+Called from Tlapm_lib.main.f in file "src/tlapm_lib.ml", line 621, characters 23-43
+Called from Stdlib__List.fold_left in file "list.ml", line 123, characters 24-34
+Called from Tlapm_lib.main in file "src/tlapm_lib.ml", line 624, characters 13-40
+Called from Tlapm_lib.init in file "src/tlapm_lib.ml", line 641, characters 8-59
+
+
+real	0m5.117s
+user	0m0.085s
+sys	0m0.046s

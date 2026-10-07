@@ -1,0 +1,26 @@
+Per-definition bisect of the v2 copy (Install's and RescopeSecond's LETs lifted),
+zenon only, `THEOREM Tru == TRUE OBVIOUS` over the module prefix BEFORE each definition
+(exp2/, 2026-10-06 14:2xZ; /usr/bin/time: wall, max RSS):
+Claim(s) ==            before line  467: 0.17 s 35972 kB rc 0
+Verify(s) ==           before line  479: 0.16 s 36252 kB rc 0
+InstallMine(s) ==      before line  496: 0.15 s 36320 kB rc 0
+Install(s) ==          before line  514: 0.16 s 36400 kB rc 0
+Collect(s) ==          before line  542: 0.17 s 37264 kB rc 0
+Sweep(s, h) ==         before line  554: 0.17 s 36888 kB rc 0
+Finish(s) ==           before line  567: 0.17 s 37380 kB rc 0
+Restart(s) ==          before line  593: 1.66 s 465384 kB rc 0     <- Finish alone: +1.5 s, +430 MB
+RescopeBegin(s) ==     before line  647: 1.77 s 516380 kB rc 0
+KeepSet(s) ==          before line  660: 1.76 s 517404 kB rc 0
+RescopeFirst(s) ==     before line  664: 1.76 s 517784 kB rc 0
+RescopeDrop(s) ==      before line  689: 1.79 s 522792 kB rc 0
+RescopeSecond(s) ==    before line  706: 1.78 s 523276 kB rc 0
+StillOwed(s) ==        before line  739: 2.48 s 719868 kB rc 0     <- RescopeSecond (LET lifted): +0.7 s, +200 MB
+(The smt half of 04-v2-bisect-sections.out is invalid: the script clobbered the file name, rc 3 = file not found.)
+
+v3 experiment (exp3/: Finish and RescopeSecond's tree as operators FinishW / RescopeSecondW, no `@`):
+v3 --method zenon ProbeAnc.tla: 0.40 s 100948 kB rc 0
+v3 --method smt,zenon ProbeAnc.tla: 0.56 s 149772 kB rc 0
+v3 --method zenon LeanP1AncParse.tla: All 2 obligations proved. 0.63 s 144536 kB rc 0
+v3 --method smt,zenon LeanP1AncParse.tla: All 2 obligations proved. 2.63 s 267280 kB rc 0
+v2 baseline, same smt,zenon ProbeAnc.tla: 4.08 s 1134828 kB rc 0
+Original copy (md5 84faf692), same two-theorem module, smt,zenon: 44.33 s, 6011072 kB.

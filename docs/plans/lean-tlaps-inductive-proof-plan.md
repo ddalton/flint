@@ -213,6 +213,56 @@ gate's numbers — and the three small worlds match too, with a TLC-only
 module checking the restated `Derives`/`Supersedes` against the recursive
 originals state by state. TypeOK is M0's remaining step.
 
+*TypeOK, 2026-10-06* (`lean/formal/LeanP1Proof.tla`; the record in
+`lean/formal/results/2026-10-06-tlaps-typeok/`): three things about
+tlapm had to be found and worked around before any obligation closed,
+each pinned by a one-screen control module in `micro/`:
+
+1. **tlapm uses no unnamed ASSUME.** The proof module restates
+   `LeanP1Anc.tla`'s six with names and adds the two the cfg gives TLC
+   for free (`MaxCopies \in Nat`, `IsFiniteSet(Paths)`).
+2. **The default backend ladder is Zenon then Isabelle; Z3 is never
+   tried unless asked** (`--method smt,zenon`). The bundled Isabelle was
+   also broken: its TLA+ heap records its parent heap at the GitHub
+   build path; three symlinks on the box fix it, and it proves nothing
+   Z3 cannot here.
+3. **tlapm prepares every obligation against the whole module context,
+   and `LeanP1.tla`'s shapes made that cost 9 s and 2.2 GB per
+   obligation** -- `TRUE OBVIOUS` included -- so the first run of the
+   module was OOM-killed at 31 GB with no verdict. Bisected to two
+   things (`probes/`): hidden LET chains are expanded by substitution
+   (`Install`, `RescopeSecond`), and every record EXCEPT in a hidden
+   definition hands Z3 an axiom set, so under the actions' context any
+   record goal timed out. Generator v3 therefore writes every writer
+   step's new tree as an explicit 27-field record operator `<Step>W(..)`
+   and `w' = [w EXCEPT ![s] = <Step>W(..)]`, with the LET names lifted
+   to operators (`LeanP1Anc.tla` is now 213 lines further from the
+   original, still generated and still tied by the exact counts:
+   `RESULTS.txt`). Under it a record obligation closes in 7-12 s.
+   Two rules for every later milestone: never write a tree update as an
+   operator over `[w[s] EXCEPT ..]` (Z3 fails outright), and Z3 cannot
+   take a record EXCEPT membership past about seven clauses.
+
+The proof's shape: `IndTypeOK` = TypeOK + the three untyped upload
+ghosts + `mv = Nil` (I0) + `nextGen > Seed` + `Minted` (every handle the
+document, a save in flight or a tree names is minted; an upload's
+snapshot is minted). One lemma per step, all the same shape; a step
+cites only the facts it needs, since an obligation carrying the whole
+invariant expanded puts Z3 past its limit on goals it closes in seconds
+otherwise. Also found: `TypeOK` as shipped omits `upped`, `copies` and
+`orig`; the proof's invariant types them (whether to fold that into
+`LeanP1.tla` is flint-46's call).
+
+*M0 result, 2026-10-06* (`results/2026-10-06-tlaps-typeok/RESULTS.txt`;
+the record run `out/run13-record.out`): all 1,917 obligations of
+`LeanP1Proof.tla` closed, none failed, none `OMITTED` -- 1,377 trivial,
+540 by Z3 (the one temporal step by LS4), the slowest 6.3 s of a 60 s
+budget, 445 s in all on the box from an erased fingerprint cache. The
+proof text is generated (`gen-proof.py` there, byte for byte) and
+reruns with `run-record.sh`. The v3 copy's tie is exact on all four
+worlds (`Holds1p3b` 461,094,969 distinct, 1,922,766,889 generated,
+depth 46, every claim holding). **M0 is met.**
+
 **M1 — `Inv_OneHolder`, `Prop_DeleteSettles`, `Prop_NarrowNeverDeletes`.**
 I0, I1, I6, I7. Acceptance: three theorems closed; the control of §5 run
 for `Inv_OneHolder` (drop `Claim`'s `holder = "none"` guard in a scratch

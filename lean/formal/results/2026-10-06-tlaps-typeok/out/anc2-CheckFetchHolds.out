@@ -1,0 +1,20 @@
+tlc-rs: MCLeanP1AncCheck (32 variables, 0 symmetry permutations), 2 workers, generated engine; loaded in 0.013s
+progress: depth 15, 877765 generated, 299230 distinct (0 fingerprint spills), 105409 on queue (0 on disk), 12.0s
+progress: depth 17, 1890775 generated, 626849 distinct (0 fingerprint spills), 184149 on queue (0 on disk), 27.4s
+progress: depth 18, 2595410 generated, 854700 distinct (0 fingerprint spills), 227851 on queue (0 on disk), 37.9s
+progress: depth 19, 3426321 generated, 1128351 distinct (0 fingerprint spills), 273651 on queue (0 on disk), 48.2s
+progress: depth 20, 4380403 generated, 1435491 distinct (0 fingerprint spills), 307140 on queue (0 on disk), 63.5s
+progress: depth 21, 5422018 generated, 1754474 distinct (0 fingerprint spills), 318983 on queue (0 on disk), 76.8s
+progress: depth 22, 6477105 generated, 2066893 distinct (0 fingerprint spills), 312419 on queue (0 on disk), 92.9s
+progress: depth 23, 7480428 generated, 2364786 distinct (0 fingerprint spills), 297893 on queue (0 on disk), 105.5s
+progress: depth 24, 8426558 generated, 2655986 distinct (0 fingerprint spills), 291200 on queue (0 on disk), 121.6s
+progress: depth 25, 9333631 generated, 2933156 distinct (0 fingerprint spills), 277170 on queue (0 on disk), 135.4s
+progress: depth 26, 10144760 generated, 3160541 distinct (0 fingerprint spills), 227385 on queue (0 on disk), 148.8s
+progress: depth 28, 11056249 generated, 3381458 distinct (0 fingerprint spills), 74898 on queue (0 on disk), 161.2s
+Model checking completed. No error has been found.
+11504466 states generated, 3510269 distinct states found. Depth 33. Checked in 167.336s (20977 distinct/s).
+
+real	2m47.360s
+user	5m33.848s
+sys	0m0.519s
+rc=0 14:32:12Z

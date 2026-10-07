@@ -1,0 +1,155 @@
+M0, the TypeOK proof: lean/formal/LeanP1Proof.tla EXTENDS LeanP1Anc (md5 84faf692),
+TLAPS, FiniteSetTheorems.  tlapm 1.6.0-pre bfa9468 at /mnt/nvme/tlaps/unpack/tlapm
+on the Linux box (results/2026-10-05-tlaps-m0/ has the install record).
+
+Three things pinned before the proof was written (micro/, each a one-screen
+module with its tlapm output):
+  Asm.tla   an UNNAMED module-level ASSUME is NOT usable by a proof: 3/5 fail
+            (the three theorems that need `K \in Nat`).  So the proof module
+            restates LeanP1Anc.tla's six unnamed ASSUMEs with names and adds
+            the two the cfg gave TLC for free (MaxCopies \in Nat, Paths finite).
+  Bool.tla  `(a = b) \in BOOLEAN` closes (7/7): the record fields `adv` and
+            `collected` that Install sets to equalities type-check.
+  Rec27.tla the 27-field Writer record: an EXCEPT on three fields (one a
+            nested function update) is in Writer -- 4/4 in 2.7 s.
+
+Run 1 (out/run1.out), the whole module, `--threads 8 -k`, default methods:
+  KILLED by the kernel OOM killer at 23m44s: tlapm itself at 31.2 GB RSS
+  (anon-rss 31192960 kB, pid 6703; dmesg in out/run1-oom.txt).  Twelve lines
+  of output, no verdicts (non-toolbox mode prints them at the end).
+  Two things the fingerprints (out/run1-fingerprints.txt) showed:
+  1. The DEFAULT method ladder in this build is Zenon (10 s) then Isabelle
+     `auto` (30 s).  Z3 is never tried unless asked: `--method smt,zenon`
+     (comma-separated, tried in order; micro/method-tests.txt).
+  2. Every Isabelle call failed in ~30 s: the bundled TLA+ heap records its
+     PARENT heap at the build machine's path
+     /home/runner/work/tlapm/tlapm/_build/default/deps/isabelle/Isabelle/heaps/polyml-5.9.1_x86_64_32-linux/Pure
+     (strace: openat ... ENOENT), so `PolyML.SaveState.loadState` raises
+     SysErr and `use_thy` is undefined.  FIX on the box: that directory
+     created (sudo) with symlinks Pure, Options, TLA+ to the tarball's heaps;
+     after it `--method auto` proves 3/7 of Bool.tla by Isabelle.
+
+WHERE THE MEMORY WENT (probes/, 2026-10-06 14:05-14:25Z, all under
+`systemd-run --user --scope -p MemoryMax=24G`, /usr/bin/time wall and max RSS):
+  `tlapm -N` (no backends) on the whole proof module: 0.58 s, 63 MB.  So the
+  cost is per OBLIGATION, in backend preparation.  A module that EXTENDS
+  LeanP1Anc and proves `TRUE OBVIOUS` (probes/Probe.tla) pays 9.3 s and
+  2.2 GB with Zenon, 44 s and 6 GB with Z3 then Zenon; --noflatten and
+  --nonormal change nothing (probes/01).  Cutting the module (probes/02, 03):
+  without the actions 0.08 s / 22 MB; Init, Next, Spec and the claims add
+  nothing; the commit section adds 1.4 s / 430 MB and the rescope section
+  7.5 s / 1.75 GB.  Per definition (probes/05): `Install`'s LET chain and
+  `RescopeSecond`'s LET chain (v2 lift: 9.3 s -> 2.5 s), then `Finish` alone
+  +1.5 s / 430 MB and the lifted `RescopeSecond` still +0.7 s / 200 MB --
+  the long EXCEPTs with `@`.  tlapm expands a hidden definition's LETs by
+  substitution and pays for each `@`, for every obligation, used or not.
+  FIX (make-anc.py v2, LeanP1Anc.tla md5 ca232fa6): the two LET chains
+  lifted to module-level operators (`Install*`, `Rescope*`), and the tree
+  `Finish` and `RescopeSecond` write made operators `FinishW(s)` /
+  `RescopeSecondW(s, wfail)` with old fields explicit.  Context-only probe:
+  0.40 s / 100 MB (Zenon), 0.56 s / 150 MB (Z3); the two-theorem parse
+  module 2.6 s / 267 MB with Z3 (was 44 s / 6 GB).  The copy is re-tied:
+  see RESULTS.txt.
+
+WHAT Z3 CAN TAKE OF A 27-FIELD RECORD (micro/Rec27b.tla, Rec27c.tla,
+--method smt --stretch 4 = 20 s, small module):
+  membership read field by field (R5, all 27 at once)      2.3 s   proved
+  one field (R6)                                           1.6 s   proved
+  the record constructor WriterInit \in Writer (R7)        0.8 s   proved
+  EXCEPT of 3 clauses (R1, R2), nested function update     <3 s    proved
+  EXCEPT of 6 or 7 clauses, values inline or opaque (E3-5) 1.7 s   proved
+  EXCEPT of 13 clauses, even constant values (E1, E2, R8)  20 s    FAILED
+  field reads THROUGH a 13-clause EXCEPT (E6)              0.3 s   proved
+  Zenon: R1, R2, R5 yes; R6, R7, R8 no.  Isabelle `auto`: none within 120 s.
+  So a membership proof for a tree written with more than ~7 clauses must
+  be chained (membership of a 6-clause EXCEPT, then the rest on top).
+  UNDER THE REAL CONTEXT (exp3/CtxRec.tla) all four shapes time out at 20 s
+  (even W.memo \in Nat): the context multiplies Z3's preparation.  Bisected
+  in probes/06 (pending).
+
+THE RECORD CONTEXT (probes/06-record-context-bisect.out, micro/Ctx*.tla):
+  With `WriterInit \in Writer` as the probe over the v2 copy's prefixes, Z3's
+  time climbs with each section of actions in scope -- 2.1 s with none, 2.5 s
+  after the gateway, 8.0 s after Edit/Delete/Checkout, 17.6 s after the
+  barrier, 20 s (the limit) from the commit section on.  tlapm's SMT
+  translation gives Z3 an axiom set for every record EXCEPT in a hidden
+  definition.  Twenty hidden actions written as `[w EXCEPT ![s].f = ..]`
+  cost a little (CtxA 1.6 s); twenty written as an operator
+  `[w[s] EXCEPT !.f = ..]` -- the v2 `FinishW` shape -- break Z3 outright
+  (CtxC: a two-field goal times out); twenty written as EXPLICIT 27-field
+  records cost nothing (CtxB 1.4 s; CtxB2 with realistic field values 2.3 s,
+  and the membership of such a record from the types of what it reads
+  2.1 s, a field read through it 0.0 s).
+  FIX (make-anc.py v3, LeanP1Anc.tla md5 9a06fcbf, 1565 lines): every
+  writer step's new tree is an explicit record operator `<Step>W(..)`, the
+  step `w' = [w EXCEPT ![s] = <Step>W(..)]`; the LET names the records need
+  are operators (`Consume*`, `Scan*`, `Sync*`, `Install*`, `Rescope*`,
+  `CheckoutHeld`).  Under the v3 context (exp3/CtxRec3.tla) every record
+  obligation the proof needs closes with Z3: `WriterInit \in Writer` 10 s,
+  two and eight field reads 10 s, `ConsumeW(s, fail) \in Writer` 12 s,
+  `FinishW(s) \in Writer` 7 s, field reads through a record 0.1 s.
+  The v2 copy (md5 ca232fa6) was tied on the three small worlds before it
+  was superseded (ReaderHolds 834,633 / FetchHolds 3,510,269 / ScopeHolds
+  8,057,963, generated counts exact; out/anc2-*.out); its big tie was
+  stopped at depth 16.  The v3 tie: RESULTS.txt.
+
+THE HYPOTHESES (out/run5-*.toolbox.out, the v3 copy with the first proof text):
+  12 of the first 200 obligations timed out, all borderline (30-42 s against a
+  30 s limit), and all in lemmas that opened with `USE DEF IndTypeOK, TypeOK,
+  Ghosts, Minted`: every step then carried the whole invariant expanded --
+  thirty quantified facts -- and Z3 (or tlapm's encoder) spent its budget on
+  them.  `ClaimW(s) \in Writer` (one field changed) timed out there and closes
+  in seconds with `w[s] \in Writer` alone.  Fix (the proof as committed):
+  each lemma takes TypeOK, Ghosts and Minted from IndTypeOK as three hidden
+  facts and each step cites only what it needs, with `WriteOne` giving the
+  typing of `w'` and `w'[t] = IF t = s THEN R ELSE w[t]` once.
+  Then (out/run7-stopped.out, the box free, 40 s per obligation): five
+  genuine timeouts in the first 220 -- the `Minted'` combination (a
+  22-tuple UNCHANGED, the EXCEPT characterisation of w' and four quantified
+  goals in one obligation) and three record memberships whose fields carry
+  `doc` or `seq` but whose step never cited those variables' types, so the
+  goal was unprovable.  Fix: `MintedKeep` / `MintedWrite`, proved once, close
+  `Minted'` from a step's three equalities and the record's `local`,
+  `uploads` and `snap`; every step lemma states the types of `doc`, `seq` and
+  `live` as a fact (`<1>d`) and cites it for the membership.
+  Runs 8-11 (out/run*-stopped.out) each cleared the previous failures and
+  found the next: a gateway step's `gw' = [gw EXCEPT ..]` read needs gw's
+  DOMAIN (TypeOK's gw conjunct, cited as a fact); restating UNCHANGED as flat
+  equalities makes things WORSE (the restating step then pays the tuple
+  extraction: GCas and GRename timed out), so the tuples stay; a function
+  EXCEPT's membership is proved once (`ExceptFun`) and instantiated; and
+  `--threads 8` OVERSUBSCRIBES the box -- tlapm's encoder and Z3 are two
+  CPU-bound processes per obligation, so eight threads on eight cores
+  double every obligation's wall time and trivial reads that passed in one
+  run hit the limit in the next ("internal timeout" = the encoder's own
+  clock).  The run that counts uses `--threads 4 --stretch 12` (60 s).
+
+RUN 12 (out/run12-clean-4thr-60s.out; the proof as committed, md5 e91afc1d,
+  over the v3 copy, md5 9a06fcbf): ALL 1917 OBLIGATIONS PROVED, none failed,
+  none omitted -- 540 by Z3, 1377 trivial (closed by tlapm itself), rc 0,
+  4,339 s wall, tlapm 4.0 GB RSS, `--method smt --stretch 12 --threads 4 -k`.
+  That run reused fingerprints from runs 8-11 (the cache was 232 KB) and
+  shared the box with seventeen Z3 workers orphaned by the `kill -9` of
+  earlier tlapm runs (a killed tlapm does not reap its backends; `pkill -9
+  -f "[z]3 -smt2"` before the next run), so it is not the record.
+RUN 13, THE RECORD (out/run13-record.out): the same command with `--cleanfp`,
+  the cache erased first, the box otherwise idle (the tie paused), started
+  18:46:54Z.  Its header carries the tlapm build and both md5s.
+  RESULT: ALL 1917 PROVED in 445 s (7.4 min), 4.0 GB, rc 0 -- 1377 trivial,
+  540 by a backend (Z3; the PTL step by LS4; 162 of them repeats closed
+  earlier in the same run, `already:true`); the slowest backend obligation
+  6.3 s of its 60 s, median 1.4 s, 378 fresh Z3 calls 761 s CPU in all.
+  The proof needs nothing near the budget.
+  WHAT THE 72 MINUTES OF RUN 12 WERE: the orphans.  `kill -9` of a tlapm
+  leaves its Z3 children running to their own limit or forever (they are
+  reparented to init; tlapm kills them only on its own exit); each stopped
+  run 7-11 left two to four behind, seventeen in all by run 12 (pids 22093
+  .. 81170, load average 17 on 8 cores).  Run 12 ran under that load and
+  still passed; run 13, after `pkill -9 -f "[z]3 -smt2"`, took a tenth of
+  the time.  So the runs 8-11 conclusion that `--threads 8` oversubscribes
+  the box was taken under the WRONG configuration and rules nothing out:
+  the orphans, not the thread count, may have been what doubled the wall
+  times.  It is not re-tested -- 4 threads / 60 s closes everything with a
+  tenfold margin, and that is the recorded configuration.  Rule for every
+  later milestone: after killing a tlapm, kill its Z3s, and check
+  `uptime` before reading a timeout as the proof's fault.

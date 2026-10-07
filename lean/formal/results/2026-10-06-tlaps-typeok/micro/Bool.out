@@ -1,0 +1,8 @@
+(* created new ".tlacache/Bool.tlaps/Bool.thy" *)
+(* fingerprints written in ".tlacache/Bool.tlaps/fingerprints" *)
+File "./Bool.tla", line 1, character 1 to line 9, character 4:
+[INFO]: All 7 obligations proved.
+
+real	0m0.088s
+user	0m0.075s
+sys	0m0.032s

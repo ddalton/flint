@@ -1,0 +1,49 @@
+=== R1 upto line 230 (last def Busy(p))
+loc:3 status:proved prover:smt time-used: 2.1 
+loc:4 status:proved prover:smt time-used: 0.1 
+real	0m4.955s
+=== R2 upto line 302 (last def GDelete(p))
+loc:3 status:proved prover:smt time-used: 2.5 
+loc:4 status:proved prover:smt time-used: 0.0 
+real	0m5.481s
+=== R3 upto line 332 (last def Checkout(s))
+loc:3 status:proved prover:smt time-used: 8.0 
+loc:4 status:proved prover:smt time-used: 0.0 
+real	0m16.417s
+=== R4 upto line 441 (last def Upload(s,)
+loc:3 status:proved prover:smt time-used: 17.6 
+loc:4 status:proved prover:smt time-used: 0.0 
+real	0m37.777s
+=== R5 upto line 465 (last def PullOnly(s))
+loc:4 status:failed prover:smt time-used: 20.0 
+loc:3 status:proved prover:smt time-used: 20.3 
+real	0m37.819s
+=== R6 upto line 593 (last def Finish(s))
+loc:3 status:failed prover:smt time-used: 20.0 
+loc:4 status:proved prover:smt time-used: 0.0 
+real	0m35.735s
+=== R7 upto line 639 (last def Sync(s))
+loc:3 status:failed prover:smt time-used: 20.0 
+loc:4 status:failed prover:smt time-used: 20.0 
+real	0m41.915s
+=== R8 upto line 738 (last def RescopeSecond(s))
+loc:3 status:failed prover:smt time-used: 20.0 
+loc:4 status:failed prover:smt time-used: 20.0 
+real	0m43.232s
+=== R9 upto line 778 (last def RPullSync(s))
+loc:3 status:failed prover:smt time-used: 20.0 
+loc:4 status:failed prover:smt time-used: 20.0 
+real	0m44.014s
+=== R10 upto line 812 (last def RLoad)
+loc:3 status:failed prover:smt time-used: 20.0 
+loc:4 status:failed prover:smt time-used: 20.0 
+real	0m42.534s
+=== R11 upto line 813 (last def RLoad)
+loc:3 status:failed prover:smt time-used: 20.0 
+loc:4 status:failed prover:smt time-used: 20.0 
+real	0m42.584s
+=== R12 upto line 99999 (last def ProbeShortcut)
+loc:3 status:failed prover:smt time-used: 20.0 
+loc:4 status:failed prover:smt time-used: 20.0 
+real	0m42.493s
+RECBISECTDONE

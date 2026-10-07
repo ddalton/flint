@@ -1,0 +1,11 @@
+tlc-rs: MCLeanP1AncCheck (32 variables, 0 symmetry permutations), 2 workers, generated engine; loaded in 0.013s
+progress: depth 18, 783669 generated, 241133 distinct (0 fingerprint spills), 59714 on queue (0 on disk), 10.2s
+progress: depth 22, 1777525 generated, 499622 distinct (0 fingerprint spills), 56248 on queue (0 on disk), 23.4s
+progress: depth 26, 2660802 generated, 750132 distinct (0 fingerprint spills), 61349 on queue (0 on disk), 37.2s
+Model checking completed. No error has been found.
+3086937 states generated, 834633 distinct states found. Depth 33. Checked in 43.926s (19001 distinct/s).
+
+real	0m43.951s
+user	1m27.444s
+sys	0m0.119s
+rc=0 14:30:08Z

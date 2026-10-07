@@ -1,0 +1,63 @@
+run 4: the v2 copy (md5 ca232fa6) with the first proof text, --method smt,zenon --stretch 4 --threads 4, STOPPED at 14:52Z (superseded); the 3.3 MB toolbox stream trimmed to its status counts and the failed obligations' locations/provers/times.
+
+  31 @!!status:being proved
+  54 @!!status:failed
+   3 @!!status:interrupted
+ 146 @!!status:proved
+ 964 @!!status:to be proved
+ 314 @!!status:trivial
+
+loc:97:1:97:3 prover:smt time-used: 20.0  reason:internal timeout
+loc:127:5:127:7 prover:smt time-used: 20.0  reason:internal timeout
+loc:142:29:142:31 prover:smt time-used: 20.0  reason:internal timeout
+loc:127:5:127:7 prover:zenon time-used: 36.4  reason:false
+loc:144:14:144:16 prover:smt time-used: 21.0  reason:timeout
+loc:144:14:144:16 prover:zenon time-used: 28.1  reason:false
+loc:229:34:229:36 prover:smt time-used: 20.0  reason:internal timeout
+loc:230:43:230:45 prover:smt time-used: 20.0  reason:internal timeout
+loc:229:34:229:36 prover:zenon time-used: 43.0  reason:timeout
+loc:247:34:247:36 prover:smt time-used: 20.0  reason:internal timeout
+loc:235:15:235:17 prover:smt time-used: 25.4  reason:timeout
+loc:235:15:235:17 prover:zenon time-used: 40.4  reason:timeout
+loc:266:3:266:5 prover:smt time-used: 20.0  reason:internal timeout
+loc:251:15:251:17 prover:smt time-used: 36.3  reason:timeout
+loc:269:3:269:5 prover:smt time-used: 20.0  reason:internal timeout
+loc:251:15:251:17 prover:zenon time-used: 46.9  reason:timeout
+loc:273:34:273:36 prover:smt time-used: 20.0  reason:internal timeout
+loc:277:16:277:18 prover:smt time-used: 20.0  reason:internal timeout
+loc:273:34:273:36 prover:zenon time-used: 55.0  reason:timeout
+loc:291:3:291:5 prover:smt time-used: 20.0  reason:internal timeout
+loc:277:16:277:18 prover:zenon time-used: 40.7  reason:timeout
+loc:298:14:298:16 prover:smt time-used: 20.0  reason:internal timeout
+loc:323:14:323:16 prover:smt time-used: 20.0  reason:internal timeout
+loc:316:7:316:9 prover:smt time-used: 20.0  reason:internal timeout
+loc:322:7:322:9 prover:smt time-used: 20.0  reason:internal timeout
+loc:323:14:323:16 prover:zenon time-used: 58.1  reason:timeout
+loc:351:34:351:36 prover:smt time-used: 20.0  reason:internal timeout
+loc:351:34:351:36 prover:zenon time-used: 45.8  reason:timeout
+loc:367:34:367:36 prover:smt time-used: 20.0  reason:internal timeout
+loc:355:15:355:17 prover:smt time-used: 33.0  reason:timeout
+loc:355:15:355:17 prover:zenon time-used: 41.1  reason:timeout
+loc:371:15:371:17 prover:smt time-used: 29.7  reason:timeout
+loc:390:36:390:38 prover:smt time-used: 20.0  reason:internal timeout
+loc:371:15:371:17 prover:zenon time-used: 40.2  reason:timeout
+loc:390:36:390:38 prover:zenon time-used: 45.1  reason:timeout
+loc:394:17:394:19 prover:smt time-used: 21.6  reason:timeout
+loc:408:36:408:38 prover:smt time-used: 20.0  reason:internal timeout
+loc:394:17:394:19 prover:zenon time-used: 44.7  reason:timeout
+loc:408:36:408:38 prover:zenon time-used: 47.5  reason:timeout
+loc:433:3:433:5 prover:smt time-used: 20.0  reason:internal timeout
+loc:414:17:414:19 prover:smt time-used: 31.8  reason:timeout
+loc:434:34:434:36 prover:smt time-used: 20.0  reason:internal timeout
+loc:414:17:414:19 prover:zenon time-used: 43.3  reason:timeout
+loc:434:34:434:36 prover:zenon time-used: 55.8  reason:timeout
+loc:450:34:450:36 prover:smt time-used: 20.0  reason:internal timeout
+loc:438:15:438:17 prover:smt time-used: 36.0  reason:timeout
+loc:438:15:438:17 prover:zenon time-used: 50.9  reason:timeout
+loc:469:34:469:36 prover:smt time-used: 20.0  reason:internal timeout
+loc:454:15:454:17 prover:smt time-used: 36.6  reason:timeout
+loc:454:15:454:17 prover:zenon time-used: 50.2  reason:timeout
+loc:469:34:469:36 prover:zenon time-used: 51.1  reason:timeout
+loc:500:3:500:5 prover:smt time-used: 20.0  reason:internal timeout
+loc:473:15:473:17 prover:smt time-used: 25.7  reason:timeout
+loc:502:3:502:5 prover:smt time-used: 20.0  reason:internal timeout

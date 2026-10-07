@@ -1,0 +1,35 @@
+### timing phases of the full Probe
+File "./Probe.tla", line 4, characters 26-32:
+[ERROR]: Could not prove or check:
+           PROVE  1 + 1 = 2
+File "./Probe.tla", line 1, character 1 to line 6, character 4:
+[ERROR]: 1/2 obligations failed.
+There were backend errors processing module `"Probe"`.
+ tlapm ending abnormally with Failure("backend errors: there are unproved obligations")
+Raised at Stdlib.failwith in file "stdlib.ml", line 29, characters 17-33
+Called from Tlapm_lib.process_module in file "src/tlapm_lib.ml", line 492, characters 12-77
+Called from Tlapm_lib.main.f in file "src/tlapm_lib.ml", line 621, characters 23-43
+Called from Stdlib__List.fold_left in file "list.ml", line 123, characters 24-34
+Called from Tlapm_lib.main in file "src/tlapm_lib.ml", line 624, characters 13-40
+Called from Tlapm_lib.init in file "src/tlapm_lib.ml", line 641, characters 8-59
+=== S1-upto-line-295-last-GDelete(p): ProbeS1.tla 14:15:51Z
+WALL 0.10 s  MAXRSS 22572 kB  rc 0
+=== S2-upto-line-325-last-Checkout(s): ProbeS2.tla 14:15:51Z
+WALL 0.11 s  MAXRSS 25208 kB  rc 0
+=== S3-upto-line-434-last-Upload(s,: ProbeS3.tla 14:15:51Z
+WALL 0.16 s  MAXRSS 35660 kB  rc 0
+=== S4-upto-line-458-last-PullOnly(s): ProbeS4.tla 14:15:52Z
+WALL 0.15 s  MAXRSS 35884 kB  rc 0
+=== S5-upto-line-579-last-Finish(s): ProbeS5.tla 14:15:52Z
+WALL 1.59 s  MAXRSS 466856 kB  rc 0
+=== S6-upto-line-625-last-Sync(s): ProbeS6.tla 14:15:53Z
+WALL 1.74 s  MAXRSS 517128 kB  rc 0
+=== S7-upto-line-720-last-RescopeSecond(s): ProbeS7.tla 14:15:55Z
+WALL 9.25 s  MAXRSS 2264876 kB  rc 0
+=== S8-upto-line-760-last-RPullSync(s): ProbeS8.tla 14:16:05Z
+WALL 9.34 s  MAXRSS 2266632 kB  rc 0
+=== S9-upto-line-794-last-RLoad: ProbeS9.tla 14:16:14Z
+WALL 9.13 s  MAXRSS 2227904 kB  rc 0
+=== S10-upto-line-795-last-RLoad: ProbeS10.tla 14:16:23Z
+WALL 9.28 s  MAXRSS 2232092 kB  rc 0
+SECTDONE

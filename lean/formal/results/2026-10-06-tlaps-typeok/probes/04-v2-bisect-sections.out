@@ -1,0 +1,45 @@
+=== T1-zenon-upto-228-last-Busy(p): --method zenon ProbeT1.tla 14:21:21Z
+WALL 0.10 s  MAXRSS 22524 kB  rc 0
+=== T1-zenon-upto-228-last-Busy(p)-smt-upto-228-last-Busy(p): --method smt --stretch 4 ProbeT1-zenon-upto-228-last-Busy(p).tla 14:21:21Z
+WALL 0.06 s  MAXRSS 16748 kB  rc 3
+=== T2-zenon-upto-300-last-GDelete(p): --method zenon ProbeT2.tla 14:21:21Z
+WALL 0.10 s  MAXRSS 22448 kB  rc 0
+=== T2-zenon-upto-300-last-GDelete(p)-smt-upto-300-last-GDelete(p): --method smt --stretch 4 ProbeT2-zenon-upto-300-last-GDelete(p).tla 14:21:22Z
+WALL 0.05 s  MAXRSS 17128 kB  rc 3
+=== T3-zenon-upto-330-last-Checkout(s): --method zenon ProbeT3.tla 14:21:22Z
+WALL 0.12 s  MAXRSS 25180 kB  rc 0
+=== T3-zenon-upto-330-last-Checkout(s)-smt-upto-330-last-Checkout(s): --method smt --stretch 4 ProbeT3-zenon-upto-330-last-Checkout(s).tla 14:21:22Z
+WALL 0.06 s  MAXRSS 17124 kB  rc 3
+=== T4-zenon-upto-439-last-Upload(s,: --method zenon ProbeT4.tla 14:21:22Z
+WALL 0.16 s  MAXRSS 35644 kB  rc 0
+=== T4-zenon-upto-439-last-Upload(s,-smt-upto-439-last-Upload(s,: --method smt --stretch 4 ProbeT4-zenon-upto-439-last-Upload(s,.tla 14:21:22Z
+WALL 0.06 s  MAXRSS 17092 kB  rc 3
+=== T5-zenon-upto-463-last-PullOnly(s): --method zenon ProbeT5.tla 14:21:22Z
+WALL 0.16 s  MAXRSS 36228 kB  rc 0
+=== T5-zenon-upto-463-last-PullOnly(s)-smt-upto-463-last-PullOnly(s): --method smt --stretch 4 ProbeT5-zenon-upto-463-last-PullOnly(s).tla 14:21:22Z
+WALL 0.05 s  MAXRSS 17288 kB  rc 3
+=== T6-zenon-upto-588-last-Finish(s): --method zenon ProbeT6.tla 14:21:22Z
+WALL 1.62 s  MAXRSS 465512 kB  rc 0
+=== T6-zenon-upto-588-last-Finish(s)-smt-upto-588-last-Finish(s): --method smt --stretch 4 ProbeT6-zenon-upto-588-last-Finish(s).tla 14:21:24Z
+WALL 0.05 s  MAXRSS 17212 kB  rc 3
+=== T7-zenon-upto-634-last-Sync(s): --method zenon ProbeT7.tla 14:21:24Z
+WALL 1.78 s  MAXRSS 516388 kB  rc 0
+=== T7-zenon-upto-634-last-Sync(s)-smt-upto-634-last-Sync(s): --method smt --stretch 4 ProbeT7-zenon-upto-634-last-Sync(s).tla 14:21:26Z
+WALL 0.06 s  MAXRSS 16936 kB  rc 3
+=== T8-zenon-upto-733-last-RescopeSecond(s): --method zenon ProbeT8.tla 14:21:26Z
+WALL 2.47 s  MAXRSS 720764 kB  rc 0
+=== T8-zenon-upto-733-last-RescopeSecond(s)-smt-upto-733-last-RescopeSecond(s): --method smt --stretch 4 ProbeT8-zenon-upto-733-last-RescopeSecond(s).tla 14:21:29Z
+WALL 0.05 s  MAXRSS 16740 kB  rc 3
+=== T9-zenon-upto-773-last-RPullSync(s): --method zenon ProbeT9.tla 14:21:29Z
+WALL 2.52 s  MAXRSS 723716 kB  rc 0
+=== T9-zenon-upto-773-last-RPullSync(s)-smt-upto-773-last-RPullSync(s): --method smt --stretch 4 ProbeT9-zenon-upto-773-last-RPullSync(s).tla 14:21:31Z
+WALL 0.05 s  MAXRSS 17176 kB  rc 3
+=== T10-zenon-upto-807-last-RLoad: --method zenon ProbeT10.tla 14:21:31Z
+WALL 2.49 s  MAXRSS 722444 kB  rc 0
+=== T10-zenon-upto-807-last-RLoad-smt-upto-807-last-RLoad: --method smt --stretch 4 ProbeT10-zenon-upto-807-last-RLoad.tla 14:21:34Z
+WALL 0.05 s  MAXRSS 16984 kB  rc 3
+=== T11-zenon-upto-808-last-RLoad: --method zenon ProbeT11.tla 14:21:34Z
+WALL 2.52 s  MAXRSS 722976 kB  rc 0
+=== T11-zenon-upto-808-last-RLoad-smt-upto-808-last-RLoad: --method smt --stretch 4 ProbeT11-zenon-upto-808-last-RLoad.tla 14:21:36Z
+WALL 0.05 s  MAXRSS 16924 kB  rc 3
+SECT2DONE

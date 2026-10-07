@@ -1,0 +1,25 @@
+=== parse-smtzenon: --method smt,zenon LeanP1AncParse.tla 14:08:43Z
+[INFO]: All 2 obligations proved.
+WALL 44.33 s  MAXRSS 6011072 kB  rc 0
+=== parse-zenon: --method zenon LeanP1AncParse.tla 14:09:28Z
+[INFO]: All 2 obligations proved.
+WALL 17.91 s  MAXRSS 3635608 kB  rc 0
+=== parse-noflatten: --method smt,zenon --noflatten LeanP1AncParse.tla 14:09:46Z
+[INFO]: All 2 obligations proved.
+WALL 44.30 s  MAXRSS 6087976 kB  rc 0
+=== parse-nonormal: --method smt,zenon --nonormal LeanP1AncParse.tla 14:10:30Z
+[INFO]: All 2 obligations proved.
+WALL 44.19 s  MAXRSS 6075160 kB  rc 0
+=== parse-both: --method smt,zenon --noflatten --nonormal LeanP1AncParse.tla 14:11:14Z
+[INFO]: All 2 obligations proved.
+WALL 44.14 s  MAXRSS 6274976 kB  rc 0
+=== probe-default: Probe.tla 14:11:58Z
+Zenon error: exhausted search space without finding a proof
+[INFO]: All 2 obligations proved.
+WALL 43.77 s  MAXRSS 5538048 kB  rc 0
+=== probe-smt: --method smt Probe.tla 14:12:42Z
+[ERROR]: 2/2 obligations failed.
+There were backend errors processing module `"Probe"`.
+ tlapm ending abnormally with Failure("backend errors: there are unproved obligations")
+WALL 27.45 s  MAXRSS 5311584 kB  rc 3
+EXPDONE

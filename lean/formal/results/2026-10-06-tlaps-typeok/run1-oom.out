@@ -1,0 +1,12 @@
+Zenon error: could not find a proof within the memory size limit
+Zenon error: could not find a proof within the memory size limit
+Zenon error: could not find a proof within the memory size limit
+Zenon error: could not find a proof within the memory size limit
+Zenon error: exhausted search space without finding a proof
+Zenon error: exhausted search space without finding a proof
+Zenon error: could not find a proof within the memory size limit
+bash: line 1:  6703 Killed                  /mnt/nvme/tlaps/unpack/tlapm/bin/tlapm --cleanfp --threads 8 -k LeanP1Proof.tla
+
+real	23m43.701s
+user	12m31.686s
+sys	2m7.948s
