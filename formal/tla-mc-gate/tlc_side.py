@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""For each entry tla-mc decided, run TLC the way the gate does and record time + distinct states."""
+"""For each entry tla-mc decided, run TLC the way the gate does and record time + distinct states.
+
+  tlc_side.py SWEEP.jsonl OUT.jsonl [TIMEOUT_S]   ($FLINT_ROOT, $TLC_JAR, $TLC_WORKERS: default auto)
+"""
 import json, re, subprocess, sys, time, os
 
-ROOT = "/Users/ddalton/github/flint"
-JAR = ROOT + "/.tla2tools.jar"
+ROOT = os.environ.get("FLINT_ROOT", "/Users/ddalton/github/flint")
+JAR = os.environ.get("TLC_JAR", ROOT + "/.tla2tools.jar")
+TLC_WORKERS = os.environ.get("TLC_WORKERS", "auto")
 SRC, OUT = sys.argv[1], sys.argv[2]
 TIMEOUT = float(sys.argv[3]) if len(sys.argv) > 3 else 300
 META = os.path.dirname(os.path.abspath(OUT)) + "/tlcmeta"
@@ -13,7 +17,7 @@ with open(OUT, "w") as f:
     for r in rows:
         if r["status"] not in ("agree", "DISAGREE"):
             continue
-        cmd = ["java", "-XX:+UseParallelGC", "-cp", JAR, "tlc2.TLC", "-workers", "auto",
+        cmd = ["java", "-XX:+UseParallelGC", "-cp", JAR, "tlc2.TLC", "-workers", TLC_WORKERS,
                "-metadir", f"{META}/{r['cfg']}", "-config", r["cfg"], r["module"] + ".tla"]
         t0 = time.time()
         try:

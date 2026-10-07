@@ -33,6 +33,10 @@ for script, d in [("scripts/check-tla.sh", "formal"), ("lean/formal/check.sh", "
 
 import os
 only = set(open(os.environ['ONLY']).read().split()) if os.environ.get('ONLY') else None
+# SHARD=k/n: every n-th entry from the k-th, for parallel sweeps (each with its own TMPDIR)
+if os.environ.get('SHARD'):
+    _k, _n = map(int, os.environ['SHARD'].split('/'))
+    entries = entries[_k::_n]
 with open(OUT, "w") as f:
     for d, kind, mod, cfg, want in entries:
         if only is not None and cfg not in only:

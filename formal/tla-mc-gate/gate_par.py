@@ -33,11 +33,14 @@ def parse(out, rc, s):
                 timeout=out == "TIMEOUT", tail=out.strip().splitlines()[-1][:160] if out.strip() else "")
 
 
+# the first file that has an entry wins: pass today's tlc_side.py output first, recorded
+# counts after it (2026-10-07: a 2026-09-26 count of an older ForgeSyncLive overrode
+# today's and showed as a difference)
 tlc = {}
 for fn in TLC.split(","):
     for line in open(fn):
         r = json.loads(line)
-        tlc[(r["dir"], r["cfg"])] = r
+        tlc.setdefault((r["dir"], r["cfg"]), r)
 
 
 def one(i, r):
@@ -45,7 +48,7 @@ def one(i, r):
     if not os.path.exists(f"{cwd}/{r['cfg']}"):
         r["skip"] = "cfg gone"
         return r
-    base = ["-workers", "4", "-config", r["cfg"], r["module"] + ".tla"]
+    base = ["-workers", os.environ.get("GATE_WORKERS", "4"), "-config", r["cfg"], r["module"] + ".tla"]
     r["interp"] = parse(*run([BIN, "-engine", "interp", "-metadir", f"{WORK}/md-i{i}"] + base, cwd, 1200))
     d = f"{WORK}/gen{i}"
     tgt = f"{WORK}/tgt{i}"
