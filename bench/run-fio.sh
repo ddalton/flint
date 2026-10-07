@@ -109,10 +109,26 @@ kubectl get nodes -o wide > "$OUT/nodes.txt"
 kubectl version -o yaml > "$OUT/kubectl-version.yaml" 2>/dev/null || true
 kubectl get pods -A -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{range .spec.containers[*]}{.image}{" "}{end}{"\n"}{end}' > "$OUT/images.tsv"
 kubectl -n "$NS" get pvc "$PVC" -o yaml > "$OUT/pvc.yaml"
+kubectl get pv "$(kubectl -n "$NS" get pvc "$PVC" -o jsonpath='{.spec.volumeName}')" -o yaml > "$OUT/pv.yaml"
 cp "$HERE/matrix.tsv" "$OUT/"
 cat "$OUT/env.yaml" >&2
 
 samplers=$(kubectl -n "$NS" get pods -l app=bench-sampler -o jsonpath='{.items[*].metadata.name}')
+
+# ENA "allowance exceeded" counters (AWS throttling: bandwidth, pps, conntrack)
+# read in the HOST network namespace through the hostPID samplers. A rise
+# between before and after means the instance's network limits, not the
+# storage, bound part of the run. Off AWS (no ENA) this records "n/a".
+net_counters() {  # <label>
+  local s
+  for s in $samplers; do
+    kubectl -n "$NS" exec "$s" -- sh -c '
+      i=$(nsenter -t 1 -n -m -- ip route get 1.1.1.1 2>/dev/null | sed -n "s/.* dev \([^ ]*\).*/\1/p")
+      [ -n "$i" ] && nsenter -t 1 -n -m -- ethtool -S "$i" 2>/dev/null | grep -E "allowance_exceeded|bw_in|bw_out" || echo n/a' \
+      > "$OUT/net-$1-$s.txt" 2>&1 || true
+  done
+}
+net_counters before
 
 fio_common="--filename=/data/bench.dat --size=$FILE_SIZE --direct=1 --ioengine=libaio \
 --group_reporting --output-format=json --randrepeat=0 --random_generator=tausworthe64"
@@ -155,4 +171,5 @@ for rep in $(seq 1 "$REPS"); do
   done < "$HERE/matrix.tsv"
 done
 
+net_counters after
 step "done: $OUT"

@@ -1,0 +1,22 @@
+# Flint on a trove EC2 cluster for the benchmark (Phase 1): trove's own
+# install settings, minus the pNFS servers and the dashboard (neither is
+# on the block path; their idle CPU would land in the measurements).
+# Everything else -- including the SPDK reactor mask (one core) -- is the
+# chart default: Pass A measures Flint as shipped.
+deployment:
+  nodeMode: three-container
+dashboard:
+  enabled: false
+pnfs:
+  enabled: false
+spdkTarget:
+  hugepages:
+    enabled: true
+    size: 2Mi
+    amount: 2Gi
+storageClass:
+  create: true
+  isDefaultClass: false
+  name: flint-spdk
+  parameters:
+    nfsEmptyDir: false

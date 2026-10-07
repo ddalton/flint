@@ -52,8 +52,29 @@ validate this harness. **Numbers from kind are not results:** all nodes
 share one kernel and one NVMe, the network is loopback, and SPDK runs
 with kind-mode small memory pools.
 
+## Phase 2: every driver on one cluster
+
+`phase2.sh` runs the whole comparison on one cluster: it removes the Flint
+trove preinstalls, measures the ceilings on the raw disks, then for each
+driver installs it, runs replica count 1 and 3, uninstalls it and wipes
+the disks (`drivers/wipe-disks.sh`, which also hands an NVMe controller a
+userspace driver took back to the kernel). Flint runs again at the end to
+detect drift. `PASS_B=1` adds a 1-polling-core pass for the drivers that
+default to more. Progress is one line per step in `$OUT/status`.
+
+| Driver | Version | Install | Polling cores (default) |
+|--------|---------|---------|-------------------------|
+| Flint | 1.58.0 | `drivers/flint/ec2-up.sh` | 1 |
+| Mayastor (OpenEBS) | 4.6.2 (Mayastor 2.12.2) | `drivers/mayastor/install.sh` | 2 |
+| Longhorn, v2 data engine | 1.13.0 | `drivers/longhorn/install.sh` | 2 |
+| Rook-Ceph | v1.21.0 (Ceph v20.2.4) | `drivers/rook-ceph/install.sh` | none |
+
+The install scripts follow each project's documented setup; what each
+changes from its chart defaults is said at the top of the script and in
+its values. `lib/host.sh` runs host commands through the sampler pods.
+
 ## Not built yet
 
 pgbench (Q4), RWX (Q5), node loss and rebuild (Q6, Q7), provisioning and
-snapshot timing (Q8), the other drivers' install scripts, and the EC2
-cluster bring-up.
+snapshot timing (Q8), and running the harness inside the cluster (so the
+laptop can be off) with results streamed to S3.

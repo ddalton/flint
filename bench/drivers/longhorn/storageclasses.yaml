@@ -1,0 +1,17 @@
+# Longhorn v2 data engine StorageClasses (plan §3): replica count 1 and 3,
+# ext4 like every other driver here. dataLocality stays at its default.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata: {name: longhorn-v2-bench-r1}
+provisioner: driver.longhorn.io
+parameters: {dataEngine: "v2", numberOfReplicas: "1", fsType: ext4, staleReplicaTimeout: "2880"}
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata: {name: longhorn-v2-bench-r3}
+provisioner: driver.longhorn.io
+parameters: {dataEngine: "v2", numberOfReplicas: "3", fsType: ext4, staleReplicaTimeout: "2880"}
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
