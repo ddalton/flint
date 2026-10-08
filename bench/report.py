@@ -9,6 +9,12 @@ beside it (plan §5: a difference inside overlapping ranges is "no
 difference"). Storage CPU is the sum, over all nodes, of the cores used by
 the processes the run's CPU_PATTERNS matched, measured inside fio's
 window; IOPS/core divides total IOPS by it.
+
+A rep whose fio.json is empty or unparseable (a test still in flight) is
+left out. A rep where any node's CPU sample is empty or truncated keeps
+its fio numbers but drops its CPU figures: storage cores is a sum over
+nodes, so a partial sum would undercount. Both are warned on stderr, and a
+cell built from fewer reps than the row says is marked "(n/m reps)".
 """
 import argparse
 import csv
@@ -46,20 +52,32 @@ def fio_metrics(path):
     return m
 
 
+def warn(msg):
+    sys.stderr.write(f"report.py: WARNING: {msg}\n")
+
+
 def cpu_metrics(rep_dir):
+    """The rep's CPU figures, or None when any node's sample is missing,
+    empty or truncated (a partial sum over nodes would undercount)."""
     storage = 0.0
     busy = 0.0
     n = 0
     for f in sorted(rep_dir.glob("cpu-*.json")):
         text = f.read_text().strip()
-        if not text:
-            raise SystemExit(f"{f}: empty sampler output (see {f.with_suffix('.err')})")
-        o = json.loads(text)
-        busy += o["node_busy_cores"]
-        storage += sum(p["cores"] for p in o["procs"].values())
+        try:
+            o = json.loads(text)
+            b = float(o["node_busy_cores"])
+            c = sum(float(p["cores"]) for p in o["procs"].values())
+        except (ValueError, KeyError, TypeError, AttributeError) as e:
+            why = "empty" if not text else f"truncated or malformed ({e.__class__.__name__})"
+            warn(f"{f}: {why} sampler output (see {f.with_suffix('.err').name}); CPU figures for {rep_dir} dropped")
+            return None
+        busy += b
+        storage += c
         n += 1
     if n == 0:
-        raise SystemExit(f"{rep_dir}: no sampler output")
+        warn(f"{rep_dir}: no sampler output; CPU figures dropped")
+        return None
     out = {"storage_cores": storage, "node_busy_cores": busy}
     # Reactor busy share (REACTOR_TICKS): "<busy0> <idle0> <n> <busy1> <idle1> <n>"
     # per node; report the busiest node's reactors, the one that would bind.
@@ -88,9 +106,15 @@ def collect(d):
     for test_dir in sorted(p for p in d.iterdir() if p.is_dir() and p.name != "idle"):
         reps = []
         for rep in sorted(test_dir.glob("rep*")):
-            m = fio_metrics(rep / "fio.json")
-            m.update(cpu_metrics(rep))
-            m["iops_per_core"] = m["iops"] / m["storage_cores"] if m["storage_cores"] > 0 else float("nan")
+            try:
+                m = fio_metrics(rep / "fio.json")
+            except (OSError, ValueError, KeyError, IndexError) as e:
+                warn(f"{rep}: no usable fio.json ({e.__class__.__name__}); rep left out")
+                continue
+            c = cpu_metrics(rep)
+            if c is not None:
+                m.update(c)
+                m["iops_per_core"] = m["iops"] / m["storage_cores"] if m["storage_cores"] > 0 else float("nan")
             reps.append(m)
         if reps:
             rows[test_dir.name] = reps
@@ -144,7 +168,10 @@ def main():
     for d, env, _ in runs:
         if (d / "idle").is_dir():
             c = cpu_metrics(d / "idle")
-            out.write(f"| {label(d, env)} | {env.get('storageclass')} | {c['storage_cores']:.2f} | {c['node_busy_cores']:.2f} |\n")
+            if c is None:
+                out.write(f"| {label(d, env)} | {env.get('storageclass')} | – | – |\n")
+            else:
+                out.write(f"| {label(d, env)} | {env.get('storageclass')} | {c['storage_cores']:.2f} | {c['node_busy_cores']:.2f} |\n")
     for t in tests:
         out.write(f"\n### {t}\n\n")
         present = [(k, h, dg) for k, h, dg in COLUMNS
@@ -158,7 +185,10 @@ def main():
             cells = []
             for k, _, dg in present:
                 s = summarize(reps, k)
-                cells.append(fmt(s, dg))
+                cell = fmt(s, dg)
+                if s and s[3] < len(reps):
+                    cell += f" ({s[3]}/{len(reps)} reps)"
+                cells.append(cell)
                 if s:
                     long_rows.append({"driver": env.get("driver"), "storageclass": env.get("storageclass"),
                                       "test": t, "metric": k, "median": s[0], "min": s[1], "max": s[2],
