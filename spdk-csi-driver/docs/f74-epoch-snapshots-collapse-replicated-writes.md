@@ -169,7 +169,13 @@ behind; the epoch interval moves the average further. Parity needs no copy
 on the normal path at all — a dirty bitmap kept by the healthy side (mark
 before write), snapshots cut only when a rebuild needs them — which
 rewrites catch-up, hot rejoin, reassembly admission and the §11 lineage
-rules. Not chosen; revisit only against measured numbers.
+rules. That path was evaluated and rejected before this defect existed:
+`incremental-replica-rebuild.md` §8 lists the in-raid in-memory bitmap as
+incorrect for a roaming raid and the persisted md-style on-base bitmap as
+"a large crash-consistent format change" that "duplicates dirty info the
+blobstore already persists", and §7 declines Longhorn's delta-bitmap RPCs.
+The epoch snapshots are that on-disk record. Not chosen here either;
+revisit only against measured numbers, and against §8 first.
 
 ### 5.4 Validation
 
