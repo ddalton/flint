@@ -1,0 +1,51 @@
+M4, THE READER FETCHES -- 2026-10-07/08, THE RECORD RUN (out/runrecord.out).
+lean/formal/LeanP1Proof.tla (md5 a40c68ba, M0 + M1 + M2 + M3 + M4, generated
+by gen-proof.py here) EXTENDS the copy LeanP1Anc.tla (md5 9a06fcbf, tied:
+results/2026-10-06-tlaps-typeok/RESULTS.txt) and proves, under Shipped:
+  THEOREM ReaderFetches == Spec => []Inv_ReaderFetches
+through LEMMA M4Invariant == Spec => []IndM4 (NOTES.txt: the invariant).
+tlapm 1.6.0-pre bfa9468, Linux box (8 cores, 30 GB), `--cleanfp --method smt
+--stretch 12 --threads 4 -k`, under systemd-run MemoryMax=28G, the TLC unit
+frozen for the run (run-record-m4.sh; the output's header carries both md5s).
+
+  obligations  11,746   ALL PROVED, none failed, none OMITTED
+    8,301  trivial (closed by tlapm itself)
+    3,445  by a backend: Z3 (smt) 3,432, the thirteen temporal steps (PTL)
+           by LS4; 1,415 of these repeats of an obligation closed earlier in
+           the same run (the fingerprint file was erased first)
+    of which M4's own: 896 obligations (543 trivial, 353 by a backend)
+  slowest backend obligation 6.2 s of the 60 s budget; p90 3.4 s; median
+  1.7 s; 2,017 fresh Z3 calls total 3,833 s CPU
+  wall 2,679 s, tlapm 25.9 GiB RSS (M3's record 23.9 GiB; the box has 30),
+  rc 0
+
+  Run 3 (out/proof-run3.out: the M4 section alone, M3's record fingerprints
+  for the rest) gave the same 896 / 0 failed.  Runs 1 and 2 failed one
+  obligation each, Age_M4's NeverReCited': the restatement of Age omitted
+  `retiring' = {}`, so the step could not see that the new retiring set is
+  empty (NOTES.txt).
+
+THE CONTROL (plan section 5: RetireAge, world LeanP1ReaderLoses;
+make-controls.py, run-record-m4.sh with the record's fingerprints;
+out/ctl-rage4.out).  RetireAge dropped from Shipped and from every step that
+cites it -- M2's frame steps as well as M4's, since it is one Shipped
+conjunct:
+
+  obligations failed  53 / 11,721, EXACTLY the predicted set:
+    26 of M2's -- the same 26 M2's own ctl-rage failed
+       (results/2026-10-07-tlaps-m2/RESULTS.txt): the 25 frame steps' RetEv
+       and Collect_M2's live' = live;
+    27 of M4's -- the 25 frame steps' exact retire log (<1>r: retiring' =
+       retiring \cup (CitedSet \ CitedSet'), by RetExact), Sweep_M4's
+       LiveLoss (the swept handle is not retiring) and Collect_M4's
+       LiveLoss (live' = live).
+  Age_M4, Reap_M4 and RLoad_M4, which take their events from the action
+  itself, still close.  The other 11,668 obligations close (1,499 s).
+  The rule's TLC world fires: the gate's LeanP1ReaderLoses on
+  Inv_ReaderFetches at depth 8, and M4ReaderLoses here on M4All at depth 2
+  (SUMMARY.txt).
+
+THE TLC PRE-CHECK of the two conjuncts: SUMMARY.txt (every world exact and
+holding, the age world included; both controls and the rule world firing;
+M41p3b not run: queued behind M2's and M3's big worlds when the box was
+shut down at 01:15Z).

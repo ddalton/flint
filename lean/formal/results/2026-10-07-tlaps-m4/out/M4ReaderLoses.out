@@ -1,0 +1,107 @@
+tlc-rs: MCLeanP1M4 (31 variables, 0 symmetry permutations), 2 workers, interp engine; loaded in 0.003s
+State 1:
+/\ live = {<<p1, 1>>}
+/\ minted = {<<p1, 1>>}
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ seq = 1
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ base = (<<p1, 1>> :> Nil @@ <<p1, 2>> :> Nil @@ <<p1, 3>> :> Nil @@ <<p1, 4>> :> Nil @@ <<p2, 1>> :> Nil @@ <<p2, 2>> :> Nil @@ <<p2, 3>> :> Nil @@ <<p2, 4>> :> Nil)
+/\ acked = {}
+/\ conflicts = {}
+/\ holder = "none"
+/\ nextGen = 2
+/\ ui = 0
+/\ reqs = 0
+/\ barriers = 0
+/\ w = (A :> [st |-> "off", pc |-> "idle", local |-> (p1 :> Nil @@ p2 :> Nil), baseline |-> (p1 :> Nil @@ p2 :> Nil), integrated |-> {}, uploads |-> {}, deletes |-> {}, snap |-> (p1 :> Nil @@ p2 :> Nil), upDone |-> {}, gone |-> {}, verified |-> FALSE, inst |-> (p1 :> Nil @@ p2 :> Nil), retire |-> {}, collected |-> FALSE, adv |-> FALSE, synced |-> 0, derived |-> 0, skipped |-> {}, scope |-> {}, sStage |-> "none", sTgt |-> {}, sDrop |-> {}, sKeep |-> {}, sHeld |-> (p1 :> Nil @@ p2 :> Nil), unlinked |-> {}, memo |-> 0, rnow |-> 0] @@ B :> [st |-> "off", pc |-> "idle", local |-> (p1 :> Nil @@ p2 :> Nil), baseline |-> (p1 :> Nil @@ p2 :> Nil), integrated |-> {}, uploads |-> {}, deletes |-> {}, snap |-> (p1 :> Nil @@ p2 :> Nil), upDone |-> {}, gone |-> {}, verified |-> FALSE, inst |-> (p1 :> Nil @@ p2 :> Nil), retire |-> {}, collected |-> FALSE, adv |-> FALSE, synced |-> 0, derived |-> 0, skipped |-> {}, scope |-> {}, sStage |-> "none", sTgt |-> {}, sDrop |-> {}, sKeep |-> {}, sHeld |-> (p1 :> Nil @@ p2 :> Nil), unlinked |-> {}, memo |-> 0, rnow |-> 0])
+/\ took = (A :> (p1 :> {} @@ p2 :> {}) @@ B :> (p1 :> {} @@ p2 :> {}))
+/\ gw = (p1 :> Nil @@ p2 :> Nil)
+/\ mv = Nil
+/\ udel = {}
+/\ restarts = 0
+/\ syncs = 0
+/\ regressed = FALSE
+/\ rescopes = 0
+/\ fails = 0
+/\ upped = {<<p1, 1>>}
+/\ copies = 0
+/\ orig = (<<p1, 1>> :> Nil @@ <<p1, 2>> :> Nil @@ <<p1, 3>> :> Nil @@ <<p1, 4>> :> Nil @@ <<p2, 1>> :> Nil @@ <<p2, 2>> :> Nil @@ <<p2, 3>> :> Nil @@ <<p2, 4>> :> Nil)
+/\ retiring = {}
+/\ aged = {}
+/\ ages = 0
+/\ rdoc = (p1 :> Nil @@ p2 :> Nil)
+/\ rlag = TRUE
+
+State 2:
+/\ live = {<<p1, 1>>}
+/\ minted = {<<p1, 1>>}
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ seq = 1
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ base = (<<p1, 1>> :> Nil @@ <<p1, 2>> :> Nil @@ <<p1, 3>> :> Nil @@ <<p1, 4>> :> Nil @@ <<p2, 1>> :> Nil @@ <<p2, 2>> :> Nil @@ <<p2, 3>> :> Nil @@ <<p2, 4>> :> Nil)
+/\ acked = {}
+/\ conflicts = {}
+/\ holder = "none"
+/\ nextGen = 2
+/\ ui = 0
+/\ reqs = 0
+/\ barriers = 0
+/\ w = (A :> [st |-> "off", pc |-> "idle", local |-> (p1 :> Nil @@ p2 :> Nil), baseline |-> (p1 :> Nil @@ p2 :> Nil), integrated |-> {}, uploads |-> {}, deletes |-> {}, snap |-> (p1 :> Nil @@ p2 :> Nil), upDone |-> {}, gone |-> {}, verified |-> FALSE, inst |-> (p1 :> Nil @@ p2 :> Nil), retire |-> {}, collected |-> FALSE, adv |-> FALSE, synced |-> 0, derived |-> 0, skipped |-> {}, scope |-> {}, sStage |-> "none", sTgt |-> {}, sDrop |-> {}, sKeep |-> {}, sHeld |-> (p1 :> Nil @@ p2 :> Nil), unlinked |-> {}, memo |-> 0, rnow |-> 0] @@ B :> [st |-> "off", pc |-> "idle", local |-> (p1 :> Nil @@ p2 :> Nil), baseline |-> (p1 :> Nil @@ p2 :> Nil), integrated |-> {}, uploads |-> {}, deletes |-> {}, snap |-> (p1 :> Nil @@ p2 :> Nil), upDone |-> {}, gone |-> {}, verified |-> FALSE, inst |-> (p1 :> Nil @@ p2 :> Nil), retire |-> {}, collected |-> FALSE, adv |-> FALSE, synced |-> 0, derived |-> 0, skipped |-> {}, scope |-> {}, sStage |-> "none", sTgt |-> {}, sDrop |-> {}, sKeep |-> {}, sHeld |-> (p1 :> Nil @@ p2 :> Nil), unlinked |-> {}, memo |-> 0, rnow |-> 0])
+/\ took = (A :> (p1 :> {} @@ p2 :> {}) @@ B :> (p1 :> {} @@ p2 :> {}))
+/\ gw = (p1 :> Nil @@ p2 :> Nil)
+/\ mv = Nil
+/\ udel = {}
+/\ restarts = 0
+/\ syncs = 0
+/\ regressed = FALSE
+/\ rescopes = 0
+/\ fails = 0
+/\ upped = {<<p1, 1>>}
+/\ copies = 0
+/\ orig = (<<p1, 1>> :> Nil @@ <<p1, 2>> :> Nil @@ <<p1, 3>> :> Nil @@ <<p1, 4>> :> Nil @@ <<p2, 1>> :> Nil @@ <<p2, 2>> :> Nil @@ <<p2, 3>> :> Nil @@ <<p2, 4>> :> Nil)
+/\ retiring = {}
+/\ aged = {}
+/\ ages = 0
+/\ rdoc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ rlag = FALSE
+
+State 3:
+/\ live = {<<p1, 1>>}
+/\ minted = {<<p1, 1>>}
+/\ doc = (p1 :> Nil @@ p2 :> Nil)
+/\ seq = 2
+/\ tomb = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ base = (<<p1, 1>> :> Nil @@ <<p1, 2>> :> Nil @@ <<p1, 3>> :> Nil @@ <<p1, 4>> :> Nil @@ <<p2, 1>> :> Nil @@ <<p2, 2>> :> Nil @@ <<p2, 3>> :> Nil @@ <<p2, 4>> :> Nil)
+/\ acked = {}
+/\ conflicts = {}
+/\ holder = "none"
+/\ nextGen = 2
+/\ ui = 0
+/\ reqs = 1
+/\ barriers = 0
+/\ w = (A :> [st |-> "off", pc |-> "idle", local |-> (p1 :> Nil @@ p2 :> Nil), baseline |-> (p1 :> Nil @@ p2 :> Nil), integrated |-> {}, uploads |-> {}, deletes |-> {}, snap |-> (p1 :> Nil @@ p2 :> Nil), upDone |-> {}, gone |-> {}, verified |-> FALSE, inst |-> (p1 :> Nil @@ p2 :> Nil), retire |-> {}, collected |-> FALSE, adv |-> FALSE, synced |-> 0, derived |-> 0, skipped |-> {}, scope |-> {}, sStage |-> "none", sTgt |-> {}, sDrop |-> {}, sKeep |-> {}, sHeld |-> (p1 :> Nil @@ p2 :> Nil), unlinked |-> {}, memo |-> 0, rnow |-> 0] @@ B :> [st |-> "off", pc |-> "idle", local |-> (p1 :> Nil @@ p2 :> Nil), baseline |-> (p1 :> Nil @@ p2 :> Nil), integrated |-> {}, uploads |-> {}, deletes |-> {}, snap |-> (p1 :> Nil @@ p2 :> Nil), upDone |-> {}, gone |-> {}, verified |-> FALSE, inst |-> (p1 :> Nil @@ p2 :> Nil), retire |-> {}, collected |-> FALSE, adv |-> FALSE, synced |-> 0, derived |-> 0, skipped |-> {}, scope |-> {}, sStage |-> "none", sTgt |-> {}, sDrop |-> {}, sKeep |-> {}, sHeld |-> (p1 :> Nil @@ p2 :> Nil), unlinked |-> {}, memo |-> 0, rnow |-> 0])
+/\ took = (A :> (p1 :> {} @@ p2 :> {}) @@ B :> (p1 :> {} @@ p2 :> {}))
+/\ gw = (p1 :> Nil @@ p2 :> Nil)
+/\ mv = Nil
+/\ udel = {<<p1, <<p1, 1>>>>}
+/\ restarts = 0
+/\ syncs = 0
+/\ regressed = FALSE
+/\ rescopes = 0
+/\ fails = 0
+/\ upped = {<<p1, 1>>}
+/\ copies = 0
+/\ orig = (<<p1, 1>> :> Nil @@ <<p1, 2>> :> Nil @@ <<p1, 3>> :> Nil @@ <<p1, 4>> :> Nil @@ <<p2, 1>> :> Nil @@ <<p2, 2>> :> Nil @@ <<p2, 3>> :> Nil @@ <<p2, 4>> :> Nil)
+/\ retiring = {}
+/\ aged = {}
+/\ ages = 0
+/\ rdoc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ rlag = FALSE
+
+Error: Invariant M4All is violated.
+69 states generated, 50 distinct states found. Depth 2. Checked in 0.004s (13673 distinct/s).
+
+real	0m0.010s
+user	0m0.005s
+sys	0m0.006s
+rc=12 22:01:12Z

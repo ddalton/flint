@@ -1,0 +1,56 @@
+M4 -- Inv_ReaderFetches in TLAPS, 2026-10-07 (started while M3's record run
+and controls were on the box).
+
+THE INVARIANT.  IndM4 = IndM3 /\ M4, M4 = two conjuncts (MCLeanP1M4.tla
+states them over LeanP1.tla for TLC as M4NeverReCited and M4ReaderLive):
+
+  NeverReCited  every cited handle is neither retiring nor aged.  The plan's
+                "once uncited, never cited again" as a state predicate: a
+                step cites a fresh handle (GCas: the save in flight, M2's
+                Flight puts it outside retiring and aged; Install: an upload,
+                M2's Up does) or moves a cited one (GRename), and what stops
+                being cited is logged retiring (RetUpdate), never still cited.
+  ReaderLive    the plan's I11: ~rlag => every handle the reader loaded is
+                live, not aged, and cited or retiring.  The sweep spares the
+                retiring (RetireAge) and takes only the uncited; the reaper
+                takes only the aged; `aged` grows only when G elapses, which
+                sets rlag; a reload re-reads the document, whose handles are
+                live (Inv_CitationsLive), not aged (NeverReCited) and cited.
+
+WHY ONE LEMMA.  Every gateway and writer step carries Frame, so RetUpdate:
+under RetireAge, retiring' = retiring \cup (CitedSet \ CitedSet') exactly
+(RetExact), and aged, rdoc, rlag stay.  Then M4' follows from two facts
+about the step: DocNew (what the document now cites was cited, or is
+neither retiring nor aged) and LiveLoss (what `live` loses is uncited and
+not retiring).  Only GCas, GRename, GDelete and Install move the document
+(GRenameFinish is disabled: mv = Nil); only Sweep and Reap shrink `live`
+(Collect keeps it under RetireAge).  Age, Reap and RLoad are outside Frame
+and get their own lemmas.
+
+THE CONTROL.  RetireAge is the plan's one rule for M4 (gate world
+LeanP1ReaderLoses fires on Inv_ReaderFetches).  It sits in the one Shipped
+conjunction M2 also cites (M2's ctl-rage), so its control fails M2's 26
+again AND M4's own: every frame step's RetExact (<1>r), Sweep's
+`h \notin retiring` and Collect's `live' = live`.
+
+THE TLC PRE-CHECK.  The gate-derived small worlds have MaxAges = 0 (G never
+elapses), so there M4 is mostly vacuous; the age world is the gate's
+LeanP1LiveHoldsSmall (one path, two writers, MaxAges = 1; 10,676,334
+states), checked under Spec instead of LSpec (fairness does not change the
+reachable states).  Controls there: M4CitedCtl (the reader's handles still
+cited, without the retiring case) and M4AgedCtl (never aged, without the
+rlag guard).  M4ReaderLoses: the gate's RetireAge = FALSE world against M4All.
+
+RUNS.
+  run 1   2026-10-07 22:01Z, the M4 section (`--toolbox 6592 ...`, 2 threads,
+          M3's record fingerprints): 893 / 894; Age_M4's NeverReCited'
+          timed out.
+  run 2   22:25Z: the restatement given `doc' = doc` (it had UNCHANGED <<doc>>)
+          and the conjunct read out first: still 1 failure -- the obligation
+          was UNPROVABLE as stated: the restatement of Age omitted
+          `retiring' = {}`.
+  run 3   22:31Z: with `retiring' = {}`: ALL 896 proved, 151 s.
+  record  23:57Z (behind M3's chain): ALL 11,746 proved, 2,679 s, 25.9 GiB.
+          ctl-rage4 00:42-01:07Z: 53 failures, exactly M2's 26 and M4's 27.
+          flint-53 ran a kind A/B test beside the control (00:42Z on; the
+          TLC unit held frozen by hold-tlc.sh until it was done).

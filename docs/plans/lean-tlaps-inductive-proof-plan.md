@@ -374,6 +374,26 @@ scope respect, so a TLC run of its constants against the claim was added
 **M4 — `Inv_ReaderFetches`.** I11 and the never-re-cited lemma. Control:
 `RetireAge` (world `ReaderLoses`). Effort: 2–3 days.
 
+*M4 result, 2026-10-08* (`lean/formal/results/2026-10-07-tlaps-m4/`; the
+record run `out/runrecord.out`): `Spec => []Inv_ReaderFetches` is closed in
+`LeanP1Proof.tla` through `IndM4`, which is `IndM3` with two conjuncts: the
+never-re-cited lemma as a state predicate (a cited handle is neither
+retiring nor aged) and the plan's I11 (while the reader is not lagging,
+every handle it loaded is live, not aged, and cited or retiring). Because
+every gateway and writer step logs exactly what it stops citing, one lemma
+covers them all from two facts per step -- what the document may newly
+cite, and what `live` may lose; only four steps move the document and two
+shrink `live`. Both conjuncts went to TLC first: exact counts in the
+gate-derived worlds and in LiveHoldsSmall, the one small world where the
+retire age elapses (10,676,334 states); both controls (the retiring case
+dropped, depth 3; the lag guard dropped, depth 4) and the rule world fire.
+The record: 11,746 obligations (M0-M3's 10,850 and M4's 896), all closed,
+none omitted, the slowest 6.2 s of 60, 2,679 s from an erased cache. The
+`RetireAge` control fails 53 obligations, exactly the predicted set: M2's
+26 (the rule is one conjunct of `Shipped`, which M2 also cites) and M4's
+27 -- every frame step's retire log, the sweep's and the collector's
+`live` facts. Effort: under a day.
+
 **M5 — `Inv_AckedNamed`, `Prop_NoSilentRevert`, `Inv_NoRegress`.** The
 ghost `anc` goes into `LeanP1.tla`; `Derives` and `Supersedes` are
 restated over it; TLC ties the edit to the original by (a) the exact

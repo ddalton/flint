@@ -1,0 +1,40 @@
+TLC pre-check of M4's inductive strengthening, 2026-10-07 (the house rule: a
+conjunct goes to TLC before it goes to TLAPS).
+
+MCLeanP1M4.tla EXTENDS LeanP1.tla UNCHANGED (md5 94da7541, the module the
+2026-10-04 gate checked) and states the two conjuncts the M4 proof needs
+(NOTES.txt: M4NeverReCited, M4ReaderLive; M4All is their conjunction with
+Inv_ReaderFetches), plus two positive controls: M4CitedCtl (the reader's
+handles still cited, without the retiring case) and M4AgedCtl (never aged,
+without the rlag guard).  Interpreted tlc-rs (the 2026-10-05 pre-check
+build), 2 workers at nice 10, beside M3's controls (box dir
+/mnt/nvme/leanp1-m4-2026-10-07; run-m4.sh).  The gate-derived cfgs are M3's
+with TypeOK + M4All; M4LiveSmall is the gate's LeanP1LiveHoldsSmall
+constants (MaxAges = 1, the only small world where G elapses) under Spec;
+M4ReaderLoses is the gate's RetireAge = FALSE world.
+
+  world (constants)           invariants        verdict                  distinct      generated      depth  time
+  M4LiveSmallCitedCtl         M4CitedCtl        VIOLATED at depth 3              58             78      3   0.0 s  <- control
+  M4LiveSmallAgedCtl          M4AgedCtl         VIOLATED at depth 4             144            237      4   0.0 s  <- control
+  M4ReaderLoses (RetireAge = FALSE)  TypeOK + M4All  VIOLATED at depth 2       50             69      2   0.0 s  <- rule world
+  M4LiveSmall (LiveHoldsSmall) TypeOK + M4All   HOLDS                    10,676,334     39,223,077     36   307 s
+  M4ReaderHolds               TypeOK + M4All    HOLDS                       834,633      3,086,937     33    24 s
+  M4FetchHolds                TypeOK + M4All    HOLDS                     3,510,269     11,504,466     33    98 s
+  M4ScopeHolds                TypeOK + M4All    HOLDS                     8,057,963     25,158,316     30   197 s
+  M4ReaderScope (ReaderScope) TypeOK + M4All    HOLDS                    21,213,823     84,689,619     34   779 s
+  M41p3b      (Holds1p3b)     TypeOK + M4All    NOT RUN (queued behind M2's and M3's big worlds; the box was shut down 2026-10-08 01:15Z)
+
+Every count is EXACTLY the gate's (LiveHoldsSmall: 10,676,334 / 39,223,077 /
+36 in results/2026-10-04-leanp1-gate/RESULTS.txt, there under LSpec).
+Only M4LiveSmall and Holds1p3b let G elapse (MaxAges = 1); in the others
+`aged` stays empty and `rlag` falls only once, so M4 is checked there only
+in part.  out/M4*.out.
+
+THE CONTROLS.  M4CitedCtl fails at depth 3: a save, the reader loads p1's
+handle, the save lands -- the loaded handle is uncited and RETIRING, which
+is the case the conjunct needs.  M4AgedCtl fails at depth 4: the same, then
+G elapses -- the loaded handle is aged, and `rlag` is what excuses it.
+M4ReaderLoses fails at depth 2: the reader loads, the gateway deletes p1,
+and without the retire age nothing logs the handle as retiring, so it is
+neither cited nor retiring -- two steps before the gate's own
+Inv_ReaderFetches violation (depth 8), which needs the sweep to take it.
