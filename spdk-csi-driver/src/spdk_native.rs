@@ -343,12 +343,21 @@ impl SpdkNative {
     }
     
     /// Create Logical Volume Store - matches SPDK v25.05.x bdev_lvol_create_lvstore RPC
-    pub async fn create_lvs(&self, bdev_name: &str, lvs_name: &str, cluster_size: u64) -> Result<LvsInfo> {
-        let params = json!({
+    pub async fn create_lvs(
+        &self,
+        bdev_name: &str,
+        lvs_name: &str,
+        cluster_size: u64,
+        num_md_pages_per_cluster_ratio: Option<u32>,
+    ) -> Result<LvsInfo> {
+        let mut params = json!({
             "bdev_name": bdev_name,
             "lvs_name": lvs_name,
             "cluster_sz": cluster_size
         });
+        if let Some(ratio) = num_md_pages_per_cluster_ratio {
+            params["num_md_pages_per_cluster_ratio"] = json!(ratio);
+        }
         
         let result = self.call_rpc("bdev_lvol_create_lvstore", Some(params)).await?;
         

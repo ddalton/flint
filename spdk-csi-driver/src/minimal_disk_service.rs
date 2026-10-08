@@ -8,6 +8,21 @@ use tracing::{debug, info, warn, error};
 use crate::minimal_models::{DiskInfo, MinimalStateError, LvolHealthStatus};
 use crate::reserved_devices::ReservedDevices;
 
+/// lvstore cluster size: 128 KiB (F74 change 1; was 1 MiB). After an epoch
+/// snapshot, the first write to each cluster copies the whole cluster, so
+/// the copy per small write shrinks 8×; 128 KiB is also the nvmf TCP
+/// transport's max I/O size, so a full-size write can cover a cluster.
+/// New lvstores only: an existing lvstore keeps the size it was made with.
+pub const LVS_CLUSTER_SZ: u64 = 128 * 1024;
+
+/// Metadata pages reserved per 100 clusters (SPDK default 100 = one 4 KiB
+/// page per cluster). 8× the clusters at the default would grow the md
+/// region 8× (7 → 57 GiB on a 1.875 TB disk) and the crash-recovery scan
+/// with it; 13 keeps the region at about one page per MiB, as with 1 MiB
+/// clusters. Pages actually used are ~1 per 512 allocated clusters (extent
+/// pages) plus one or more per blob.
+pub const LVS_MD_PAGES_PER_CLUSTER_RATIO: u32 = 13;
+
 /// Device discovery strategy
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DiscoveryMode {
@@ -227,7 +242,8 @@ impl MinimalDiskService {
             "params": {
                 "bdev_name": bdev_name,
                 "lvs_name": lvs_name,
-                "cluster_sz": 1048576  // 1MB clusters
+                "cluster_sz": LVS_CLUSTER_SZ,
+                "num_md_pages_per_cluster_ratio": LVS_MD_PAGES_PER_CLUSTER_RATIO
             }
         });
 
@@ -1845,9 +1861,13 @@ impl MinimalDiskService {
                     .ok_or("Missing params for lvstore creation")?;
                 let bdev_name = params["bdev_name"].as_str().unwrap_or("");
                 let lvs_name = params["lvs_name"].as_str().unwrap_or("");
-                let cluster_sz = params["cluster_sz"].as_u64().unwrap_or(1048576);
-                
-                spdk.create_lvs(bdev_name, lvs_name, cluster_sz).await?;
+                let cluster_sz = params["cluster_sz"].as_u64().unwrap_or(LVS_CLUSTER_SZ);
+                let md_ratio = params
+                    .get("num_md_pages_per_cluster_ratio")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32);
+
+                spdk.create_lvs(bdev_name, lvs_name, cluster_sz, md_ratio).await?;
                 json!("success")
             }
             "bdev_lvol_create" => {
@@ -2276,6 +2296,24 @@ struct PhysicalDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F74 change 1: smaller clusters must not grow the lvstore's metadata
+    /// region (or the crash-recovery scan over it). At 1 MiB clusters and
+    /// SPDK's default ratio 100 the region was one 4 KiB page per MiB of
+    /// disk; the new pair must stay within ±10% of that.
+    #[test]
+    fn lvstore_md_region_stays_one_page_per_mib() {
+        const MIB: u64 = 1024 * 1024;
+        assert!(LVS_CLUSTER_SZ < MIB && MIB % LVS_CLUSTER_SZ == 0);
+        let clusters_per_mib = MIB / LVS_CLUSTER_SZ;
+        // pages per MiB, scaled by 100: ratio% of clusters_per_mib
+        let pages_per_mib_x100 = LVS_MD_PAGES_PER_CLUSTER_RATIO as u64 * clusters_per_mib;
+        assert!(
+            (90..=110).contains(&pages_per_mib_x100),
+            "md region would be {}% of today's (one page per MiB)",
+            pages_per_mib_x100
+        );
+    }
     use std::sync::{Arc, Mutex};
 
     /// F73: kind mode turns physical discovery off; everything else keeps
