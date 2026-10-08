@@ -64,7 +64,7 @@ kubectl -n "$NS" exec "ceil-$a" -- iperf3 -c "$ip_b" -p 5201 -P "$NET_STREAMS" -
 kubectl -n "$NS" exec "ceil-$b" -- pkill iperf3 || true
 
 for n in $nodes; do
-  dev=$(kubectl -n "$NS" exec "ceil-$n" -- sh -c "for d in /sys/block/nvme*n1; do m=\$(cat \$d/device/model 2>/dev/null | sed 's/ *\$//'); [ \"\$m\" = '$DISK_MODEL' ] && echo /dev/\$(basename \$d); done" | head -1)
+  dev=$(kubectl -n "$NS" exec "ceil-$n" -- sh -c "for d in /sys/block/nvme*n1; do m=\$(cat \$d/device/model 2>/dev/null | sed 's/ *\$//'); [ \"\$m\" = '$DISK_MODEL' ] && echo /dev/\$(basename \$d); done; true" | head -1)
   [ -n "$dev" ] || { echo "no '$DISK_MODEL' device on $n" >&2; exit 1; }
   echo "$n $dev" >> "$OUT/disks.txt"
   step "disk: $n $dev (raw), the matrix at ${RUNTIME}s"
