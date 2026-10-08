@@ -27,6 +27,7 @@ step "helm install openebs $VERSION (Mayastor io_engine.cpuCount=$CPU_CORES)"
 pull=$(mktemp -d)
 helm_private pull openebs --repo https://openebs.github.io/openebs --version "$VERSION" -d "$pull"
 helm_private upgrade --install openebs "$pull"/openebs-*.tgz -n "$NS" --create-namespace \
+  --set openebs-crds.csi.volumeSnapshots.enabled=false \
   --set engines.local.lvm.enabled=false \
   --set engines.local.zfs.enabled=false \
   --set loki.enabled=false --set alloy.enabled=false \
