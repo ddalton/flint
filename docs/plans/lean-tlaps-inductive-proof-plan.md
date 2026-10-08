@@ -409,6 +409,27 @@ per disjunct. Effort: 2–3 weeks, uncertain; may end at "`Inv_AckedNamed`
 on one path" with the multi-path case left to TLC. Decide whether to start
 it after M4 reports.
 
+*M5 started, 2026-10-08* (`lean/formal/results/2026-10-07-tlaps-m5/`,
+NOTES.txt). Part A is proved: `Spec => []IndM5` with `IndM5 = IndM4 /\
+Hist`. `Hist` says `base`, `anc` and `orig` are written only at the handle
+a step mints, so `Derives` and `Content` between minted handles never move
+across a step (`DerivesKeep`). Every M5 claim compares `Derives` before
+and after a step, so the rest of M5 builds on this. 1,347 obligations,
+all closed, M5's section only, on M4's fingerprints; the record run and a
+control are still to do. NO M5 CLAIM IS PROVED, and two cannot be as stated.
+Every gate world allows at most one gateway removal (`MaxRemovals <= 1`);
+with three -- a rename, a rename back, a delete -- TLC finds, with one
+writer at depth 13: `Inv_NoRegress` fails (the writer re-creates a path
+over a renamed fork, the gateway deletes it and renames the fork back, and
+the consume steps the tree back with no conflict naming its baseline), and
+`Inv_AckedNamed` fails once the retire age lets the reaper run (the
+rename's ack at the second path is named only at that path, and the record
+that names the version -- the acknowledged delete -- is at the first).
+Neither is silent: a record names the version each time; the claims
+account per path more narrowly than the protocol's records. Restating
+them is `LeanP1.tla`'s, flint-46's call. `Prop_NoSilentRevert` holds there
+without the retire age (7,469,230 states) and with it (78,039,582).
+
 Total for M0–M4: 4–5 weeks of one person's time, box time negligible. M5
 on top: 2–3 more, with the least certainty.
 

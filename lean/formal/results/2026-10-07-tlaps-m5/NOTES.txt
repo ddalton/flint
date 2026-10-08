@@ -1,0 +1,128 @@
+M5 -- Inv_AckedNamed, Prop_NoSilentRevert, Inv_NoRegress: exploration,
+started 2026-10-07 while M3's record run and M4's checks were on the box.
+
+WHERE THE PLAN SAYS THE WORK IS.  Inv_AckedNamed's Sweep obligation: a
+sweep deletes a live, uncited, unpreserved, non-retiring handle, so an
+acked handle in that state must already be named by a non-live disjunct.
+(The plan's other M5 step -- restating Derives/Supersedes over the ghost
+`anc` -- was done in M0: LeanP1Anc.tla, tied by exact counts.)
+
+E1 (MCLeanP1M5.tla: M5NoLive).  Conjecture: under Shipped, Inv_AckedNamed
+holds WITHOUT its `h \in live` disjunct.  Reason: a handle enters `acked`
+only through a CAS that cites it (GCas at its own path; GRename at the
+destination), and each step that later uncites a cited handle leaves one
+of the other names:
+  GCas over it        the new save's base is the version it read (judged:
+                      doc[p] = base[h']), so doc[p] derives from it (anc).
+  GDelete             tomb[p] := it, and udel gains <<p, it>> (permanent:
+                      udel only grows, Derives is write-once through anc,
+                      Content through orig).
+  GRename p -> q      it stays cited at q, and acked gains <<q, it>>.
+  Install             a path of the writer's own replaces it with an upload
+                      whose base chain starts at the writer's baseline; if
+                      the document moved past the baseline the path is
+                      contested (CommitSurfacesForeign: conflicts names
+                      doc[p]); a delete sets tomb[p] or is preserved
+                      (DeleteWinsPreserved).
+If E1 holds, Sweep and Reap (which change only `live`) cannot break the
+claim, and the obligation the plan calls the real work disappears.  The
+hard cases left are the steps that REMOVE a name: GCas and Install clear
+tomb[p]; a later document can replace a derived one by a non-derived one
+only through the contested-path conflict, which names the replaced handle,
+not its ancestors (there the later-ack disjunct, b at p with
+Later(b[2], h), has to carry it); and acked copies (generation > MaxMint,
+reachable only by renaming a writer-published copy) are never Later than a
+fresh save's handle.
+
+The probe M5CitedProbe (every acked handle still cited) must FAIL, so a
+holding E1 is not E1 holding for the trivial reason.
+
+RUNS.
+  E1      2026-10-07 22:24-22:48Z, interpreted tlc-rs, 2 workers (run-m5.sh):
+          M5NoLive HOLDS in M5FetchHolds (3,510,269 distinct),
+          M5ScopeHolds (8,057,963), M5LiveSmall (10,676,334: the age world,
+          so Sweep and Reap both run) and M5ReaderScope (21,213,823) --
+          each the gate's exact count.  The probe M5CitedProbe FAILS at
+          depth 3: a save is acked, then the gateway deletes it -- uncited,
+          and named by tomb[p1] and udel.  So in these worlds the live
+          disjunct is never the one that holds the claim: the sweep and the
+          reaper cannot break it.  Not yet checked: Holds1p3b (MaxCopies,
+          three barriers -- the acked-copy case needs a writer-published
+          copy renamed, and Holds1p3b has one path, so no rename) and the
+          gate's two-path Holds world (too large for the box today).
+  copy    The probe M5CopyAckedProbe (no acked handle is a copy) FAILS in
+          ScopeHolds at depth 14 (995,365 distinct): a writer publishes the
+          copy <<p1, 4>> (MaxMint = 3) and the gateway renames it to p2,
+          acking <<p2, <<p1, 4>>>>.  So the renamed-copy case IS reachable
+          in ScopeHolds, and M5NoLive held there -- it is covered.
+
+2026-10-08 (box back up; flint-53 confirmed it free).
+
+E2  M5NoBack (Inv_NoRegress's strengthening: no tree's baseline derives
+    from a different-content published version without a conflict naming
+    the baseline) HOLDS at the gate's exact counts in FetchHolds
+    (3,510,269), ScopeHolds (8,057,963), LiveSmall (10,676,334) and
+    ReaderScope (21,213,823) -- every one of them MaxRemovals <= 1.
+E3  Hist (HistNew, HistAnc, HistMinted, BaselineMinted over LeanP1Anc)
+    HOLDS in FetchHolds and ScopeHolds (exact counts).  TLAPS part A
+    (gen-proof.py: Hist, HistWrite, DerivesKeep) is in tlapm (run 1).
+E4  M5NoBackX (cross-path) FAILS in ScopeHolds at depth 10: a rename forks
+    <<p1,1>> to p2, the writer re-creates p1 over it, and its baseline at
+    p1 derives from doc[p2].  Harmless; narrowed to M5NoBackY (E4b).
+
+E6  INV_NOREGRESS ITSELF FAILS once the gateway may remove three times.
+    No gate world has MaxRemovals > 1 (19 worlds 0, 34 worlds 1), so TLC
+    had never looked; the proof has to.  World: ScopeHolds with
+    MaxRemovals = 3, copies/restarts/rescopes off (e6/E6Rem3.cfg);
+    1,252,399 distinct, depth 13 (out/E6Rem3.out), ONE writer:
+      rename p1 -> p2 (doc[p2] = <<p1,1>>, tomb[p1] names it);
+      the writer edits p1 to <<p1,2>> (base <<p1,1>>), consumes p2, and
+        commits: re-creating p1 over the deleted path records
+        conflict <<p1, <<p1,1>>>>; Finish: baseline[p1] = <<p1,2>>;
+      the gateway DELETES p1 (udel and tomb name <<p1,2>>);
+      the gateway renames p2 BACK to p1 (doc[p1] = <<p1,1>>);
+      the next consume takes <<p1,1>> under the baseline <<p1,2>> that
+        derives from it, no conflict names <<p1,2>>: regressed.
+    The tree steps back to what the gateway's own rename put there, after
+    an acknowledged delete of the newer version -- arguably not a SILENT
+    revert (two records name it: udel <<p1,<<p1,2>>>>, the rename's ack),
+    so the claim's exemption ("a conflict names the baseline") is narrower
+    than PROTOCOL.md's wording ("unless a record names what it steps
+    over").  Two candidate widenings checked in the same world, both FAIL:
+      M5NoBackU (an acked delete at p names the baseline): depth 14, a UI
+        save <<p1,3>> over <<p1,2>> is what the delete names.
+      M5NoBackD (an acked delete at p names a version derived from the
+        baseline): depth 17 -- but that trace is the STRENGTHENING's fault,
+        not the claim's: the writer's own delete is installed, then the
+        rename back lands while it is cased; Finish clears that baseline.
+    DECISION NEEDED (LeanP1.tla is flint-46's): restate Inv_NoRegress's
+    exemption, or prove it under MaxRemovals <= 1, or leave it to TLC.
+
+    User's call (2026-10-08): take Inv_AckedNamed first; the NoRegress
+    finding is written up here for flint-46.
+
+E7  E6's three-removal world (no retire age): Inv_AckedNamed HOLDS and
+    Prop_NoSilentRevert HOLDS (7,469,230 distinct each).  But E1
+    (M5NoLive) FAILS at depth 10 (out/E6Rem3-M5NoLive.out): rename p1 -> p2
+    and back acks <<p2, <<p1,1>>>>; a fresh install at p2 clears tomb[p2];
+    <<p1,1>> is cited at p1, so only `live` names it for the ack at p2.
+E8  ...with the retire age (MaxAges = 1, so the reaper can take it):
+    INV_ACKEDNAMED ITSELF FAILS at depth 13, ONE writer, no edit of p1
+    (out/E6Rem3Age-Inv_AckedNamed.out):
+      rename p1 -> p2: acked <<p2, <<p1,1>>>>, tomb[p1] names it;
+      rename p2 -> p1: acked <<p1, <<p1,1>>>>, tomb[p2] names it;
+      the gateway deletes p1: udel <<p1, <<p1,1>>>>, retiring;
+      the writer creates p2 fresh (<<p2,2>>): the install clears tomb[p2];
+      the retire age, then the reaper takes <<p1,1>>.
+    The ack at p2 is accounted only by a name AT p2 (its q-clause reaches
+    other paths only when the ack's path is the handle's own, p = h[1]);
+    the record that names <<p1,1>> -- the acknowledged delete -- is at p1.
+    As with E6: no gate world reaches it (rename, rename back, delete is
+    three removals); the version is not lost silently (udel names it), the
+    claim's per-path accounting is narrower than the protocol's records.
+    M5NoLiveC (cited anywhere in place of live) fails there too (depth 11).
+    (E2's per-rule sweep and E5 stopped at this point: both are 1-removal
+    worlds, and the claims themselves are now in question.)
+E8b ...Prop_NoSilentRevert HOLDS in Rem3Age (78,039,582 distinct, depth 32,
+    30 min, out/E6Rem3Age-Revert.out): the one M5 claim that survives the
+    three-removal world.

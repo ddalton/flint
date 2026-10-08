@@ -1,0 +1,51 @@
+TLC experiments for M5, 2026-10-07/08 (the house rule: a conjunct goes to
+TLC before it goes to TLAPS).  Interpreted tlc-rs (the 2026-10-05 pre-check
+build), box dir /mnt/nvme/leanp1-m5-2026-10-07, run-m5.sh .. run-e8b.sh.
+MCLeanP1M5.tla EXTENDS LeanP1.tla UNCHANGED (md5 94da7541); MCLeanP1M5Anc.tla
+EXTENDS LeanP1Anc.tla (md5 9a06fcbf); MCLeanP1M5E5.tla EXTENDS MCLeanP1M5.
+The gate-derived worlds are M4's; E6Rem3* is ScopeHolds with MaxRemovals = 3,
+copies, restarts and rescopes off (MaxAges = 1 in the *Age* ones).
+
+  exp  world             invariant(s)                       verdict                     distinct     depth
+  E1   FetchHolds        M5NoLive                           HOLDS                       3,510,269     33
+  E1   ScopeHolds        M5NoLive                           HOLDS                       8,057,963     30
+  E1   LiveSmall         M5NoLive                           HOLDS                      10,676,334     36
+  E1   ReaderScope       M5NoLive                           HOLDS                      21,213,823     34
+  E1   ScopeHolds        M5CitedProbe                       VIOLATED (probe, a delete)                 3
+  E1   ScopeHolds        M5CopyAckedProbe                   VIOLATED (probe, a renamed copy)  995,365  14
+  E2   FetchHolds        M5NoBack + Inv_NoRegress           HOLDS                       3,510,269     33
+  E2   ScopeHolds        M5NoBack + Inv_NoRegress           HOLDS                       8,057,963     30
+  E2   LiveSmall         M5NoBack + Inv_NoRegress           HOLDS                      10,676,334     36
+  E2   ReaderScope       M5NoBack + Inv_NoRegress           HOLDS                      21,213,823     34
+  E2   FetchHolds, each of 10 rules off in turn             all HOLD (no rule load-bearing in this world; see NOTES)
+  E3   FetchHolds        Hist + M5NoBack                    HOLDS                       3,510,269     33
+  E3   ScopeHolds        Hist + M5NoBack                    HOLDS                       8,057,963     30
+  E3   LiveSmall         Hist + M5NoBack                    HOLDS                      10,676,334     36
+  E3   ReaderScope       Hist + M5NoBack                    HOLDS                      21,213,823     34
+  E4   FetchHolds        M5NoBackX + FlightNoKin            HOLDS                       3,510,269     33
+  E4   ScopeHolds        M5NoBackX + FlightNoKin            VIOLATED (NoBackX, a rename fork)  231,483  10
+  E4   LiveSmall         M5NoBackX + FlightNoKin            HOLDS                      10,676,334     36
+  E4   ReaderScope       M5NoBackX + FlightNoKin            HOLDS                      21,213,823     34
+  E4b  FetchHolds        M5NoBack + M5NoBackY + FlightNoKin HOLDS                       3,510,269     33
+  E4b  ScopeHolds        M5NoBack + M5NoBackY + FlightNoKin VIOLATED (NoBackY)        2,476,995     16
+  E4b  LiveSmall         M5NoBack + M5NoBackY + FlightNoKin HOLDS                      10,676,334     36
+  E6   Rem3              Inv_NoRegress                      VIOLATED -- THE CLAIM       1,252,399     13
+  E6   Rem3              M5NoBackU                          VIOLATED                    1,843,930     14
+  E6   Rem3              M5NoBack                           VIOLATED                      803,845     12
+  E6   Rem3              M5NoBackD                          VIOLATED                    3,912,912     17
+  E7   Rem3              Inv_AckedNamed                     HOLDS                       7,469,230     28
+  E7   Rem3              Prop_NoSilentRevert                HOLDS                       7,469,230     28
+  E7   Rem3              M5NoLive                           VIOLATED                      199,890     10
+  E8   Rem3Age           Inv_AckedNamed                     VIOLATED -- THE CLAIM       2,877,580     13
+  E8   Rem3Age           M5NoLiveC                          VIOLATED                    1,030,629     11
+  E8b  Rem3Age           Prop_NoSilentRevert                HOLDS                      78,039,582     32
+
+Every HOLDS count in a gate-derived world is EXACTLY the gate's.  No gate
+world has MaxRemovals > 1 (19 worlds 0, 34 worlds 1): E6-E8 are the first
+look at a rename, a rename back and a delete in one run.
+
+E2's per-rule sweep ran 10 of the 22 rules (stopped when E6 put the claim
+itself in question): with each off, M5NoBack and Inv_NoRegress still hold in
+FetchHolds, so that world has no control for them.  E5 (one more disjunct
+dropped from E1) was stopped before it ran.  E4b ReaderScope was still
+running at the commit; its ScopeHolds violation already retires M5NoBackY.
