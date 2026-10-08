@@ -1,0 +1,9 @@
+# Locality pass: the r1 bench class with dataLocality strict-local, which
+# keeps the volume's only replica on the node it attaches to.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata: {name: longhorn-v2-bench-r1-local}
+provisioner: driver.longhorn.io
+parameters: {dataEngine: "v2", numberOfReplicas: "1", dataLocality: "strict-local", fsType: ext4, staleReplicaTimeout: "2880"}
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer

@@ -63,7 +63,9 @@ kubectl -n "$NS" rollout status ds/bench-sampler --timeout=300s >/dev/null
 
 step "PVC $PVC ($SIZE on $SC) and fio pod $POD"
 pin=""
-[ -z "$FIO_NODE" ] || pin="nodeName: $FIO_NODE"
+# nodeSelector, not nodeName: nodeName bypasses the scheduler, and a
+# WaitForFirstConsumer volume binds only when the scheduler picks the node.
+[ -z "$FIO_NODE" ] || pin="nodeSelector: {kubernetes.io/hostname: $FIO_NODE}"
 install=""
 case "$FIO_IMAGE" in alpine:*) install="apk add --no-cache fio >/dev/null &&" ;; esac
 kubectl apply -f - >/dev/null <<EOF

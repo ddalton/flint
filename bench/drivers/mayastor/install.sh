@@ -9,11 +9,16 @@
 #   VERSION=4.6.2 [CPU_CORES=2] ./install.sh
 #
 # CPU_CORES sets io_engine.cpuCount (chart default 2; Pass B uses 1).
+# POOL_LABELS=1 labels each DiskPool bench-pool=<its node>, so a StorageClass
+# with poolAffinityTopologyLabel can pin replicas to one node (the locality
+# pass: Mayastor's CSI driver ignores the CSI topology hint and has no
+# "local" parameter; replica placement follows pool/node labels only).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/../../lib/host.sh"
 VERSION="${VERSION:-4.6.2}"
 CPU_CORES="${CPU_CORES:-2}"
+POOL_LABELS="${POOL_LABELS:-0}"
 NS=openebs
 
 samplers_up
@@ -40,6 +45,8 @@ step "one DiskPool per node on its instance store"
 for n in $(nodes); do
   read -r dev bdf byid <<<"$(instance_store "$n")"
   [ -n "${byid:-}" ] || fail "$n: no instance store by-id link"
+  topo=""
+  [ "$POOL_LABELS" != 1 ] || topo="  topology: {labelled: {bench-pool: $n}}"
   kubectl apply -f - <<YAML
 apiVersion: openebs.io/v1beta3
 kind: DiskPool
@@ -47,6 +54,7 @@ metadata: {name: pool-$n, namespace: $NS}
 spec:
   node: $n
   disks: ["aio://$byid"]
+$topo
 YAML
 done
 for i in $(seq 1 60); do
