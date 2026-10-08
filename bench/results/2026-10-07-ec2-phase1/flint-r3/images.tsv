@@ -1,0 +1,30 @@
+flint-bench	bench-sampler-76n8m	alpine:3.20 
+flint-bench	bench-sampler-r2qtx	alpine:3.20 
+flint-bench	bench-sampler-tq7ws	alpine:3.20 
+flint-bench	fio-flint-r3	alpine:3.20 
+flint-system	flint-csi-controller-64ff5d4478-8bz2q	dilipdalton/flint-driver:1.58.0 registry.k8s.io/sig-storage/csi-provisioner:v3.6.0 registry.k8s.io/sig-storage/csi-attacher:v4.4.0 registry.k8s.io/sig-storage/csi-resizer:v1.9.0 registry.k8s.io/sig-storage/csi-snapshotter:v6.3.0 registry.k8s.io/sig-storage/livenessprobe:v2.11.0 
+flint-system	flint-csi-node-d6x6f	dilipdalton/flint-driver:1.58.0 registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.9.0 registry.k8s.io/sig-storage/livenessprobe:v2.11.0 
+flint-system	flint-csi-node-lzgf2	dilipdalton/flint-driver:1.58.0 registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.9.0 registry.k8s.io/sig-storage/livenessprobe:v2.11.0 
+flint-system	flint-csi-node-zqrx2	dilipdalton/flint-driver:1.58.0 registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.9.0 registry.k8s.io/sig-storage/livenessprobe:v2.11.0 
+flint-system	snapshot-controller-75cc446f55-qttj8	registry.k8s.io/sig-storage/snapshot-controller:v6.3.0 
+flux-system	flux-operator-55c7f6cff-pcbjd	ghcr.io/controlplaneio-fluxcd/flux-operator:v0.61.0 
+flux-system	helm-controller-76f789c696-bklz4	ghcr.io/fluxcd/helm-controller:v1.6.5@sha256:0d52fff5c4d476277b8fcb6beb9041e269adb5db943fe69f5a806ea0c92b1511 
+flux-system	kustomize-controller-569759577b-cmmvc	ghcr.io/fluxcd/kustomize-controller:v1.9.6@sha256:2ebeaa341da77d52b6abbbba5efcee0450d47f8b42f0e6f33b08f9020262d606 
+flux-system	notification-controller-54f75fd8c7-n5kxd	ghcr.io/fluxcd/notification-controller:v1.9.4@sha256:840f318265ee26f0d2c48a158bf7896b22aa4e998e320a18646309f0e40b15da 
+flux-system	source-controller-78c659b7dd-tnznr	ghcr.io/fluxcd/source-controller:v1.9.6@sha256:6a6693172589f8ff26123a231d5fa6ceb194a6efb4dc647cdf057c959f76a2e3 
+kube-system	cilium-4b487	quay.io/cilium/cilium:v1.16.5@sha256:758ca0793f5995bb938a2fa219dcce63dc0b3fa7fc4ce5cc851125281fb7361d 
+kube-system	cilium-c2t4j	quay.io/cilium/cilium:v1.16.5@sha256:758ca0793f5995bb938a2fa219dcce63dc0b3fa7fc4ce5cc851125281fb7361d 
+kube-system	cilium-envoy-h842j	quay.io/cilium/cilium-envoy:v1.30.8-1733837904-eaae5aca0fb988583e5617170a65ac5aa51c0aa8@sha256:709c08ade3d17d52da4ca2af33f431360ec26268d288d9a6cd1d98acc9a1dced 
+kube-system	cilium-envoy-j22lm	quay.io/cilium/cilium-envoy:v1.30.8-1733837904-eaae5aca0fb988583e5617170a65ac5aa51c0aa8@sha256:709c08ade3d17d52da4ca2af33f431360ec26268d288d9a6cd1d98acc9a1dced 
+kube-system	cilium-envoy-mrgg6	quay.io/cilium/cilium-envoy:v1.30.8-1733837904-eaae5aca0fb988583e5617170a65ac5aa51c0aa8@sha256:709c08ade3d17d52da4ca2af33f431360ec26268d288d9a6cd1d98acc9a1dced 
+kube-system	cilium-jj5dd	quay.io/cilium/cilium:v1.16.5@sha256:758ca0793f5995bb938a2fa219dcce63dc0b3fa7fc4ce5cc851125281fb7361d 
+kube-system	cilium-operator-66964b9657-hdgq8	quay.io/cilium/operator-generic:v1.16.5@sha256:f7884848483bbcd7b1e0ccfd34ba4546f258b460cb4b7e2f06a1bcc96ef88039 
+kube-system	coredns-66bc5c9577-5fx6g	registry.k8s.io/coredns/coredns:v1.12.1 
+kube-system	coredns-66bc5c9577-g852h	registry.k8s.io/coredns/coredns:v1.12.1 
+kube-system	etcd-bench2-cp-1	registry.k8s.io/etcd:3.6.5-0 
+kube-system	kube-apiserver-bench2-cp-1	registry.k8s.io/kube-apiserver:v1.34.12 
+kube-system	kube-controller-manager-bench2-cp-1	registry.k8s.io/kube-controller-manager:v1.34.12 
+kube-system	kube-proxy-b6tq4	registry.k8s.io/kube-proxy:v1.34.12 
+kube-system	kube-proxy-bvn6n	registry.k8s.io/kube-proxy:v1.34.12 
+kube-system	kube-proxy-kkv55	registry.k8s.io/kube-proxy:v1.34.12 
+kube-system	kube-scheduler-bench2-cp-1	registry.k8s.io/kube-scheduler:v1.34.12 

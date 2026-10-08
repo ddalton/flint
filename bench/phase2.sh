@@ -51,7 +51,7 @@ run_driver() {  # <driver> <label> <cores or "">
       local out="$OUT/$label-r$r"
       [ ! -e "$out" ] || { echo "$out exists" >&2; exit 1; }
       status "run $label r$r ($sc)"
-      SC=$sc DRIVER="$label-r$r" CPU_PATTERNS="$CPU_PATTERNS" OUT="$out" \
+      SC=$sc DRIVER="$label-r$r" CPU_PATTERNS="$CPU_PATTERNS" REACTOR_TICKS="${REACTOR_TICKS:-}" OUT="$out" \
         "$HERE/run-fio.sh" > "$out.log" 2>&1
       status "done $label r$r"
     done )

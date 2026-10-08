@@ -1,0 +1,1 @@
+{"node":"bench2-cp-1","window_s":118,"node_busy_cores":1.245,"procs":{"spdk":{"cores":1.002,"rss_mib":37,"pids":1},"agent":{"cores":0.000,"rss_mib":40,"pids":1},"nfs":{"cores":0.000,"rss_mib":0,"pids":0}}}

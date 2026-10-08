@@ -22,6 +22,10 @@
 #   FIO_NODE      pin the fio pod to this node (unset: scheduler's choice)
 #   FIO_IMAGE     image with fio, or alpine to `apk add fio` (alpine:3.20)
 #   KEEP          1 = leave the PVC and fio pod in place (0)
+#   REACTOR_TICKS optional host command printing "<busy> <idle> <reactors>"
+#                 cumulative ticks of the driver's polling reactors (env.sh);
+#                 sampled at both edges of each window, because a polling
+#                 core shows 100% process CPU whether it works or not
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -100,6 +104,7 @@ step "environment"
   echo "ramp_s: $RAMP"
   echo "reps: $REPS"
   echo "cpu_patterns: $CPU_PATTERNS"
+  echo "reactor_ticks: ${REACTOR_TICKS:+yes}"
   echo "fio_node: $(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.spec.nodeName}')"
   echo "fio_version: $(kubectl -n "$NS" exec "$POD" -- fio --version)"
   echo "bench_git: $(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -145,13 +150,21 @@ run_one() {  # <dir> <name> <rw> <bs> <iodepth> <numjobs> <rwmixread>
       > "$dir/cpu-$s.json" 2> "$dir/cpu-$s.err" &
     pids+=($!)
   done
+  if [ -n "${REACTOR_TICKS:-}" ]; then
+    for s in $samplers; do
+      ( tick() { kubectl -n "$NS" exec "$s" -- nsenter -t 1 -m -u -n -i -p -- sh -c "$REACTOR_TICKS"; }
+        sleep "$(( RAMP + 1 ))"; a=$(tick); sleep "$(( RUNTIME - 2 ))"; b=$(tick)
+        echo "$a $b" ) > "$dir/reactor-$s.txt" 2> "$dir/reactor-$s.err" &
+      pids+=($!)
+    done
+  fi
   local extra=""
   [ "$mix" = - ] || extra="--rwmixread=$mix"
   kubectl -n "$NS" exec "$POD" -- fio --name="$name" $fio_common \
     --rw="$rw" --bs="$bs" --iodepth="$qd" --numjobs="$nj" $extra \
     --time_based --runtime="$RUNTIME" --ramp_time="$RAMP" \
     --percentile_list=50:99:99.9 > "$dir/fio.json"
-  for p in "${pids[@]}"; do wait "$p" || fail "a sampler failed in $dir (see cpu-*.err)"; done
+  for p in "${pids[@]}"; do wait "$p" || fail "a sampler failed in $dir (see cpu-*.err, reactor-*.err)"; done
 }
 
 step "idle: the driver's CPU with no I/O (a polling engine's floor)"

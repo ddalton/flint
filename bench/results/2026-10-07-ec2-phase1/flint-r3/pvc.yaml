@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"annotations":{},"name":"bench-flint-r3","namespace":"flint-bench"},"spec":{"accessModes":["ReadWriteOnce"],"resources":{"requests":{"storage":"100Gi"}},"storageClassName":"flint-bench-r3"}}
+    pv.kubernetes.io/bind-completed: "yes"
+    pv.kubernetes.io/bound-by-controller: "yes"
+    volume.beta.kubernetes.io/storage-provisioner: disk.csi.chert.us
+    volume.kubernetes.io/selected-node: bench2-aws-2
+    volume.kubernetes.io/storage-provisioner: disk.csi.chert.us
+  creationTimestamp: "2026-10-07T23:15:00Z"
+  finalizers:
+  - kubernetes.io/pvc-protection
+  name: bench-flint-r3
+  namespace: flint-bench
+  resourceVersion: "27212"
+  uid: 36d76950-22c9-4a69-96fe-8a3b3a4d1740
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: flint-bench-r3
+  volumeMode: Filesystem
+  volumeName: pvc-36d76950-22c9-4a69-96fe-8a3b3a4d1740
+status:
+  accessModes:
+  - ReadWriteOnce
+  capacity:
+    storage: 100Gi
+  phase: Bound

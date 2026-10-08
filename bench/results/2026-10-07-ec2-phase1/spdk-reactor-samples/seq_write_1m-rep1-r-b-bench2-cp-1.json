@@ -1,0 +1,37 @@
+{
+  "tick_rate": 2900000000,
+  "pid": 1,
+  "reactors": [
+    {
+      "lcore": 0,
+      "numa_id": 0,
+      "tid": 1,
+      "busy": 737475805994,
+      "idle": 18195071078924,
+      "in_interrupt": false,
+      "irq": 28,
+      "sys": 69683,
+      "usr": 583128,
+      "lw_threads": [
+        {
+          "name": "app_thread",
+          "id": 1,
+          "cpumask": "1",
+          "elapsed": 18932547296326
+        },
+        {
+          "name": "nvmf_tgt_poll_group_000",
+          "id": 2,
+          "cpumask": "1",
+          "elapsed": 18932401631238
+        },
+        {
+          "name": "iscsi_poll_group_0",
+          "id": 3,
+          "cpumask": "1",
+          "elapsed": 18932109782526
+        }
+      ]
+    }
+  ]
+}

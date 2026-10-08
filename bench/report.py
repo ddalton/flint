@@ -60,7 +60,19 @@ def cpu_metrics(rep_dir):
         n += 1
     if n == 0:
         raise SystemExit(f"{rep_dir}: no sampler output")
-    return {"storage_cores": storage, "node_busy_cores": busy}
+    out = {"storage_cores": storage, "node_busy_cores": busy}
+    # Reactor busy share (REACTOR_TICKS): "<busy0> <idle0> <n> <busy1> <idle1> <n>"
+    # per node; report the busiest node's reactors, the one that would bind.
+    shares = []
+    for f in sorted(rep_dir.glob("reactor-*.txt")):
+        v = f.read_text().split()
+        if len(v) == 6:
+            db, di = int(v[3]) - int(v[0]), int(v[4]) - int(v[1])
+            if db + di > 0:
+                shares.append(100.0 * db / (db + di))
+    if shares:
+        out["reactor_busy_max_pct"] = max(shares)
+    return out
 
 
 def collect(d):
@@ -103,6 +115,7 @@ COLUMNS = [
     ("write_p99_us", "write p99 µs", 0),
     ("write_p99.9_us", "write p99.9 µs", 0),
     ("storage_cores", "storage cores", 2),
+    ("reactor_busy_max_pct", "reactor busy % (max node)", 0),
     ("iops_per_core", "IOPS/core", 0),
 ]
 

@@ -1,0 +1,3 @@
+bench2-aws-1 /dev/nvme1n1
+bench2-aws-2 /dev/nvme1n1
+bench2-cp-1 /dev/nvme1n1
