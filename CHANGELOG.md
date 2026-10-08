@@ -12,6 +12,26 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Added
+
+- **A head-to-head CSI benchmark harness and its first results**
+  (2026-10-07/08). `bench/` runs one fio matrix (`matrix.tsv`) against
+  any driver on one cluster, with CPU, SPDK reactor and ENA counters
+  recorded per test, raw-disk and network ceilings first, and a report
+  with run-to-run ranges; `phase2.sh` installs Mayastor, Longhorn v2 and
+  Rook-Ceph in turn and wipes the disks between them. Phase 1 on three
+  i4i.2xlarge nodes found **F74**: on every volume with two or more
+  replicas, the epoch snapshots cut every five minutes make the next
+  write to each 1 MiB cluster a serialized copy, so 4K random writes run
+  at ~570 IOPS against ~110,000 on one replica. Root cause confirmed by
+  A/B; the decision is to keep the epochs and make the copy cheap
+  (smaller clusters, parallel copies, a longer interval), recorded in
+  `spdk-csi-driver/docs/f74-epoch-snapshots-collapse-replicated-writes.md`.
+  Reviewing its reaping found **F75**: the catch-up revert leaves a stale
+  replica's pre-failure epochs under live names, pinned by an ignored
+  test (`revert_reaps_the_stale_replicas_epochs_newer_than_its_base`)
+  until fixed. Neither is fixed in this entry.
+
 ### Fixed
 
 - **flint-forge: a restore takes the packs its snapshot names off the
