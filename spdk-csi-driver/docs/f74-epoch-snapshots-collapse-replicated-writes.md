@@ -1,7 +1,8 @@
 # F74 — epoch snapshots collapse small writes on every replicated volume (~190× on EC2)
 
 Status: **FOUND 2026-10-07 by the CSI benchmark (Phase 1 on EC2); CAUSE
-CONFIRMED 2026-10-08 by A/B. NOT FIXED — the fix is a design choice (§5).**
+CONFIRMED 2026-10-08 by A/B. NOT FIXED — design chosen 2026-10-08 after
+verification against SPDK v26.05 and the Flint tree (§5); not implemented.**
 Affects every volume with `numReplicas >= 2` on a chart with the replication
 orchestrators on, which is the default since they shipped. Blocks the
 head-to-head benchmark (`docs/plans/flint-csi-benchmark-plan.md`): against
@@ -82,15 +83,88 @@ epoch history the raid reassembly admission is attach-everything, so a leg
 that truly diverged would be re-admitted as an equal read source. Equally, the
 benchmark must run Flint as shipped; an epochs-off arm is a diagnostic only.
 
-## 5. Fix options (design call, not made)
+## 5. Fix (design chosen 2026-10-08; not implemented)
 
-| Option | Effect | Cost / risk |
+Keep the epochs — catch-up, warm standby, hot rejoin, reassembly admission
+and the §11 snapshot lineage all stand on them — and make the copy after
+each cut cheap. Three changes in a fixed order, plus one chart default to
+decide. The order is forced by the facts in §5.1: at 1 MiB clusters, the
+"parallel copies" and "skip the copy" changes do nothing.
+
+### 5.1 Facts the design rests on (verified in SPDK v26.05 / the Flint tree)
+
+- **No write reaching the blobstore is larger than 128 KiB.** Flint's nvmf
+  target uses the TCP transport defaults (`docker/Dockerfile.spdk` sets only
+  `trtype`): `max_io_size` = 131072 (`lib/nvmf/tcp.c:45`) → MDTS 128 KiB
+  (`lib/nvmf/ctrlr.c:3424`), which the kernel initiator never exceeds. So at
+  1 MiB clusters no write ever covers a cluster. RAID1 advertises no optimal
+  I/O boundary (`module/bdev/raid/raid1.c` sets none → noiob 0,
+  `lib/nvmf/ctrlr_bdev.c:215`), so the kernel's 128 KiB pieces are
+  cluster-aligned only where ext4 happened to place the file's blocks; the
+  lvol bdev then splits them at cluster boundaries (`vbdev_lvol.c:1196`).
+- **One copy at a time per lvstore per thread, not per volume.** The
+  `need_cluster_alloc` queue lives on the blobstore channel, and the lvol
+  bdev's channel is the lvstore's (`lib/lvol/lvol.c:1642`). With one reactor,
+  every volume on a node's disk queues behind every other volume's copies.
+- **At 1 MiB the copy is disk-bound even when serialized.** 1.75 ms per copy
+  = 1 MiB at the i4i's read cap (0.74 ms) + 1 MiB at its write cap
+  (0.94 ms). One copy saturates the device; overlapping copies cannot go
+  faster until copies are smaller.
+- **Same-extent-page metadata writes are already ordered.** SPDK `453faf015`
+  (2025-11-04, in v26.05) queues cluster ops per blob by extent table id
+  (`blobstore.c:8915-8954`, covering `blob_insert_cluster_on_md_thread`).
+  Parallel copies need no guard of their own for this.
+- **The lvstore reserves one 4 KiB md page per cluster**
+  (`lib/lvol/lvol.c:621,670`, ratio 100), and an unclean shutdown replays the
+  whole region (`blobstore.c:5074` — the scan the carried
+  `blob-recovery-batched.patch` speeds up: 893,592 pages in 4.6 s,
+  `attach-detach-campaign-2026-07.md:2002`). Anything that multiplies the
+  cluster count multiplies crash-recovery time unless the ratio is lowered.
+- **Flint has one 1 MiB constant** (`minimal_disk_service.rs:230`). Volume
+  sizes round to MiB (`:337,453`, a multiple of any smaller power-of-two
+  cluster); hot rejoin reads `cluster_size` from the lvstore at runtime
+  (`hot_rejoin.rs:1181`); `clear_head_sb` works at the raid level; the
+  shallow-copy stall detector counts clusters (finer clusters make it more
+  sensitive, not less).
+- Longhorn v2 uses 1 MiB clusters too
+  (`longhorn-spdk-engine/pkg/spdk/disk.go:34`): same primitive, same copy
+  cost, but a snapshot exists there only during a rebuild or when a user
+  takes one.
+
+### 5.2 The changes
+
+| # | Change | Effect | Cost / what to guard |
+|---|---|---|---|
+| 1 | **128 KiB lvstore clusters** (`minimal_disk_service.rs:230`), **with `num_md_pages_per_cluster_ratio` lowered** on `bdev_lvol_create_lvstore` (`vbdev_lvol_rpc.c:102`) so the md region stays the size it is today (the need is ~1 page per 512 clusters, not 1 per cluster) | copy per 4 KiB write 8× smaller; makes 2 and 3 effective | without the ratio: md region 7 → 57 GiB on a 1.875 TB disk (3%) and ~8× longer crash recovery. Per-blob cluster array 8× (6.5 MB per 100 GiB blob, heap). Existing lvstores keep 1 MiB (nothing is deployed). Then try 64 KiB. |
+| 2 | **Parallel copies** in `bs_allocate_and_copy_cluster`: wait per cluster instead of the per-channel FIFO; a copy buffer and md page per in-flight copy (today one `new_cluster_page` per channel, `blobstore.c:3696`); cap in flight (~32) | copies overlap up to the disk's bandwidth | SPDK patch, upstreamable. Metadata ordering is already handled (`453faf015`). Memory: cap × (cluster + 4 KiB). |
+| 3 | **Full-cluster writes skip the copy**: write the user data into the new cluster, then insert; on `-EEXIST` re-execute against the winner's cluster as today | aligned 128 KiB writes cost no read | only after `filefrag -v` on a bench file shows the aligned fraction; needs clusters ≤ 128 KiB (§5.1). Alternative: raise `max_io_size` to 1 MiB — the TCP shared-buffer pool scales with it. |
+| — | **Epoch interval default** (`epochIntervalSecs`, 300) | the only lever on the *average*: the tax per epoch is working set × copy cost, so 30–60 min cuts it 6–12× | rebuild delta up to T_snap of writes (still bounded); K·T_snap retention grows the same way. A chart decision, not code. |
+
+### 5.3 What to expect (estimates — to be measured, not promised)
+
+| r3, after an epoch cut | today | after 1 + 2 |
 |---|---|---|
-| Smaller lvstore clusters (e.g. 64 KiB) | copy size 16× smaller | still one copy at a time; more metadata; existing lvstores keep 1 MiB (only new ones change) |
-| Sparser epochs (`epochIntervalSecs`) | fewer collapses | each one is as bad; widens catch-up deltas |
-| Dirty tracking without snapshots (a raid1 write-intent bitmap, md-style) | removes the copy-on-write entirely | the largest change: new SPDK patch or module, and the catch-up/hot-rejoin admission rules re-proved against it (the epoch history is what they rely on today) |
-| Parallel cluster allocation in SPDK blobstore | removes the serialization | upstream SPDK change; the copy amplification stays |
+| 4K randwrite, copy-bound phase | 572 IOPS | ~5–8k per replica (disk bandwidth ÷ 256 KiB of traffic per write) |
+| 4K randwrite, 120 s window on the 90 GiB file, 300 s epochs | 572 | ~10k average, varying with where in the epoch the window lands (the r3 mixed spread 2,278–13,653 in §1 is this effect already) |
+| 1M / 128K seq write | 320 MiB/s | ~8× today; near the disk cap only with 3 and aligned extents |
 
-Measuring any fix: `bench/experiments/epoch-cow-ab.sh` for the mechanism on
-kind, then the Phase 1 r3 matrix on EC2 (`bench/`, `phase2.sh` with
-`DRIVERS=flint`) as shipped, with epochs on.
+Mayastor and Longhorn do not copy on the normal write path and should land
+around 50k+ on that test. These changes take Flint from ~190× to ~5–10×
+behind; the epoch interval moves the average further. Parity needs no copy
+on the normal path at all — a dirty bitmap kept by the healthy side (mark
+before write), snapshots cut only when a rebuild needs them — which
+rewrites catch-up, hot rejoin, reassembly admission and the §11 lineage
+rules. Not chosen; revisit only against measured numbers.
+
+### 5.4 Validation
+
+1. SPDK unit tests for 2 and 3 (`test/unit/lib/blob`), including a forced
+   `-EEXIST` on 3.
+2. `bench/experiments/epoch-cow-ab.sh` on kind after each change
+   (mechanism only — kind cannot measure r3 latency, §3).
+3. The Phase 1 r3 matrix on EC2 (`bench/`, `phase2.sh` with
+   `DRIVERS=flint`) as shipped, epochs on, with the harness logging each
+   cut so results split into copy phase and steady state.
+4. Crash-recovery time of a full lvstore before and after change 1 (the md
+   ratio is what keeps it flat).
+5. Fix the stale "Default-disabled" header in `epoch_scheduler.rs` on the way.
