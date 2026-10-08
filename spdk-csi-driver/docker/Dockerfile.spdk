@@ -48,6 +48,7 @@ COPY blob-recovery-batched.patch /tmp/
 COPY blob-shutdown-debug.patch /tmp/
 COPY nvmf-hostlog.patch /tmp/
 COPY raid-skip-rebuild.patch /tmp/
+COPY blob-parallel-cluster-alloc.patch /tmp/
 
 # Clone, configure, and build SPDK v26.05 with full NVMe-oF and ublk support.
 # v26.05 is required for `bdev_raid_delete clear_sb` (phase 0 superblock
@@ -85,6 +86,12 @@ RUN git clone https://github.com/spdk/spdk.git . && \
     # RPC pair. Ships dark: plain add behavior is unchanged.
     patch -p1 < /tmp/raid-skip-rebuild.patch && \
     echo "✅ raid skip_rebuild + leased quiesce patch applied" && \
+    # F74 change 2: a channel runs up to 32 cluster allocations (copy-on-
+    # write after an epoch snapshot) at once, one per cluster, instead of
+    # one at a time; ops for a cluster being allocated wait on it. Applies
+    # after blob-recovery-batched / blob-shutdown-debug (same file).
+    patch -p1 < /tmp/blob-parallel-cluster-alloc.patch && \
+    echo "✅ parallel cluster allocation patch applied" && \
     rm /tmp/*.patch && \
     # --target-arch is NOT cosmetic. SPDK's configure defaults it to
     # `native`, which compiles DPDK for the BUILD MACHINE's CPU and bakes

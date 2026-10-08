@@ -1,0 +1,633 @@
+diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
+index 880af453c..9e3b28eb1 100644
+--- a/lib/blob/blobstore.c
++++ b/lib/blob/blobstore.c
+@@ -2650,6 +2650,7 @@ struct spdk_blob_copy_cluster_ctx {
+ 	uint32_t new_extent_page;
+ 	spdk_bs_sequence_t *seq;
+ 	struct spdk_blob_md_page *new_cluster_page;
++	struct spdk_bs_cluster_alloc_slot *slot;
+ };
+ 
+ struct spdk_blob_free_cluster_ctx {
+@@ -2663,17 +2664,58 @@ struct spdk_blob_free_cluster_ctx {
+ 	struct spdk_bs_channel *bs_channel;
+ };
+ 
++static struct spdk_bs_cluster_alloc_slot *
++bs_find_alloc_slot(struct spdk_bs_channel *ch, struct spdk_blob *blob, uint32_t cluster_number)
++{
++	uint32_t i;
++
++	for (i = 0; i < SPDK_BS_MAX_INFLIGHT_CLUSTER_ALLOCS; i++) {
++		if (ch->alloc_slots[i].blob == blob &&
++		    ch->alloc_slots[i].cluster_number == cluster_number) {
++			return &ch->alloc_slots[i];
++		}
++	}
++	return NULL;
++}
++
++static struct spdk_bs_cluster_alloc_slot *
++bs_claim_alloc_slot(struct spdk_bs_channel *ch, struct spdk_blob *blob, uint32_t cluster_number)
++{
++	uint32_t i;
++
++	for (i = 0; i < SPDK_BS_MAX_INFLIGHT_CLUSTER_ALLOCS; i++) {
++		if (ch->alloc_slots[i].blob == NULL) {
++			assert(TAILQ_EMPTY(&ch->alloc_slots[i].waiters));
++			ch->alloc_slots[i].blob = blob;
++			ch->alloc_slots[i].cluster_number = cluster_number;
++			ch->alloc_slots_used++;
++			return &ch->alloc_slots[i];
++		}
++	}
++	return NULL;
++}
++
+ static void
+ blob_allocate_and_copy_cluster_cpl(void *cb_arg, int bserrno)
+ {
+ 	struct spdk_blob_copy_cluster_ctx *ctx = cb_arg;
+ 	struct spdk_bs_request_set *set = (struct spdk_bs_request_set *)ctx->seq;
++	struct spdk_bs_channel *ch = set->channel;
++	struct spdk_bs_cluster_alloc_slot *slot = ctx->slot;
+ 	TAILQ_HEAD(, spdk_bs_request_set) requests;
+ 	spdk_bs_user_op_t *op;
+ 
++	/* Release the slot BEFORE re-executing anything: a waiter or a retried
++	 * op may start a new allocation and needs a free slot to do so. */
+ 	TAILQ_INIT(&requests);
+-	TAILQ_SWAP(&set->channel->need_cluster_alloc, &requests, spdk_bs_request_set, link);
+-
++	TAILQ_SWAP(&slot->waiters, &requests, spdk_bs_request_set, link);
++	slot->blob = NULL;
++	assert(ch->alloc_slots_used > 0);
++	ch->alloc_slots_used--;
++
++	/* The ops for this cluster: the cluster is now allocated (or another
++	 * thread won the race and allocated it), so they re-execute as plain
++	 * I/O; on failure they fail with it. */
+ 	while (!TAILQ_EMPTY(&requests)) {
+ 		op = TAILQ_FIRST(&requests);
+ 		TAILQ_REMOVE(&requests, op, link);
+@@ -2684,6 +2726,17 @@ blob_allocate_and_copy_cluster_cpl(void *cb_arg, int bserrno)
+ 		}
+ 	}
+ 
++	/* A slot freed: retry, in arrival order, the ops that found every slot
++	 * in use. Swapped out first so that one which must wait again re-queues
++	 * on the (now empty) channel list instead of being retried in a loop. */
++	TAILQ_INIT(&requests);
++	TAILQ_SWAP(&ch->need_cluster_alloc, &requests, spdk_bs_request_set, link);
++	while (!TAILQ_EMPTY(&requests)) {
++		op = TAILQ_FIRST(&requests);
++		TAILQ_REMOVE(&requests, op, link);
++		bs_user_op_execute(op);
++	}
++
+ 	spdk_free(ctx->buf);
+ 	free(ctx);
+ }
+@@ -2866,6 +2919,7 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
+ {
+ 	struct spdk_bs_cpl cpl;
+ 	struct spdk_bs_channel *ch;
++	struct spdk_bs_cluster_alloc_slot *slot;
+ 	struct spdk_blob_copy_cluster_ctx *ctx;
+ 	uint64_t cluster_start_io_unit;
+ 	uint32_t cluster_number;
+@@ -2877,14 +2931,6 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
+ 
+ 	ch = spdk_io_channel_get_ctx(_ch);
+ 
+-	if (!TAILQ_EMPTY(&ch->need_cluster_alloc)) {
+-		/* There are already operations pending. Queue this user op
+-		 * and return because it will be re-executed when the outstanding
+-		 * cluster allocation completes. */
+-		TAILQ_INSERT_TAIL(&ch->need_cluster_alloc, op, link);
+-		return;
+-	}
+-
+ 	/* Round the io_unit offset down to the first io_unit in the cluster */
+ 	cluster_start_io_unit = bs_io_unit_to_cluster_start(blob, io_unit);
+ 
+@@ -2892,6 +2938,23 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
+ 	 * cluster is supposed to be at. */
+ 	cluster_number = bs_io_unit_to_cluster_number(blob, io_unit);
+ 
++	/* This cluster is already being allocated on this channel: wait for that
++	 * allocation and re-execute after it, as plain I/O. Allocations of
++	 * DIFFERENT clusters proceed in parallel, up to the slot count. */
++	slot = bs_find_alloc_slot(ch, blob, cluster_number);
++	if (slot != NULL) {
++		TAILQ_INSERT_TAIL(&slot->waiters, op, link);
++		return;
++	}
++
++	/* Every slot in use, or earlier ops already waiting for one (keep their
++	 * order): queue; the op is retried when a slot frees. */
++	if (!TAILQ_EMPTY(&ch->need_cluster_alloc) ||
++	    ch->alloc_slots_used == SPDK_BS_MAX_INFLIGHT_CLUSTER_ALLOCS) {
++		TAILQ_INSERT_TAIL(&ch->need_cluster_alloc, op, link);
++		return;
++	}
++
+ 	ctx = calloc(1, sizeof(*ctx));
+ 	if (!ctx) {
+ 		bs_user_op_abort(op, -ENOMEM);
+@@ -2902,7 +2965,6 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
+ 
+ 	ctx->blob = blob;
+ 	ctx->io_unit = cluster_start_io_unit;
+-	ctx->new_cluster_page = ch->new_cluster_page;
+ 
+ 	/* Check if the cluster that we intend to do CoW for is valid for
+ 	 * the backing dev. For zeroes backing dev, it'll be always valid.
+@@ -2955,8 +3017,15 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
+ 		return;
+ 	}
+ 
+-	/* Queue the user op to block other incoming operations */
+-	TAILQ_INSERT_TAIL(&ch->need_cluster_alloc, op, link);
++	/* Nothing below can fail synchronously: take the slot (checked free
++	 * above, and nothing else runs on this channel's thread in between) and
++	 * park the user op on it; it re-executes when the allocation completes,
++	 * and ops for this same cluster queue behind it. */
++	slot = bs_claim_alloc_slot(ch, blob, cluster_number);
++	assert(slot != NULL);
++	ctx->slot = slot;
++	ctx->new_cluster_page = slot->new_cluster_page;
++	TAILQ_INSERT_TAIL(&slot->waiters, op, link);
+ 
+ 	if (blob->parent_id != SPDK_BLOBID_INVALID && !is_zeroes) {
+ 		if (can_copy) {
+@@ -3677,20 +3746,30 @@ bs_channel_create(void *io_device, void *ctx_buf)
+ 		return -1;
+ 	}
+ 
+-	channel->new_cluster_page = spdk_zmalloc(bs->md_page_size, 0, NULL, SPDK_ENV_NUMA_ID_ANY,
+-				    SPDK_MALLOC_DMA);
+-	if (!channel->new_cluster_page) {
+-		SPDK_ERRLOG("Failed to allocate new cluster page\n");
+-		free(channel->req_mem);
+-		channel->dev->destroy_channel(channel->dev, channel->dev_channel);
+-		return -1;
++	channel->alloc_slots_used = 0;
++	for (i = 0; i < SPDK_BS_MAX_INFLIGHT_CLUSTER_ALLOCS; i++) {
++		channel->alloc_slots[i].blob = NULL;
++		TAILQ_INIT(&channel->alloc_slots[i].waiters);
++		channel->alloc_slots[i].new_cluster_page = spdk_zmalloc(bs->md_page_size, 0, NULL,
++				SPDK_ENV_NUMA_ID_ANY, SPDK_MALLOC_DMA);
++		if (!channel->alloc_slots[i].new_cluster_page) {
++			SPDK_ERRLOG("Failed to allocate new cluster page\n");
++			while (i-- > 0) {
++				spdk_free(channel->alloc_slots[i].new_cluster_page);
++			}
++			free(channel->req_mem);
++			channel->dev->destroy_channel(channel->dev, channel->dev_channel);
++			return -1;
++		}
+ 	}
+ 
+ 	channel->release_cluster_page = spdk_zmalloc(bs->md_page_size, 0, NULL, SPDK_ENV_NUMA_ID_ANY,
+ 					SPDK_MALLOC_DMA);
+ 	if (!channel->release_cluster_page) {
+ 		SPDK_ERRLOG("Failed to allocate release cluster page\n");
+-		spdk_free(channel->new_cluster_page);
++		for (i = 0; i < SPDK_BS_MAX_INFLIGHT_CLUSTER_ALLOCS; i++) {
++			spdk_free(channel->alloc_slots[i].new_cluster_page);
++		}
+ 		free(channel->req_mem);
+ 		channel->dev->destroy_channel(channel->dev, channel->dev_channel);
+ 		return -1;
+@@ -3710,6 +3789,15 @@ bs_channel_destroy(void *io_device, void *ctx_buf)
+ {
+ 	struct spdk_bs_channel *channel = ctx_buf;
+ 	spdk_bs_user_op_t *op;
++	uint32_t i;
++
++	for (i = 0; i < SPDK_BS_MAX_INFLIGHT_CLUSTER_ALLOCS; i++) {
++		while (!TAILQ_EMPTY(&channel->alloc_slots[i].waiters)) {
++			op = TAILQ_FIRST(&channel->alloc_slots[i].waiters);
++			TAILQ_REMOVE(&channel->alloc_slots[i].waiters, op, link);
++			bs_user_op_abort(op, -EIO);
++		}
++	}
+ 
+ 	while (!TAILQ_EMPTY(&channel->need_cluster_alloc)) {
+ 		op = TAILQ_FIRST(&channel->need_cluster_alloc);
+@@ -3726,7 +3814,9 @@ bs_channel_destroy(void *io_device, void *ctx_buf)
+ 	blob_esnap_destroy_bs_channel(channel);
+ 
+ 	free(channel->req_mem);
+-	spdk_free(channel->new_cluster_page);
++	for (i = 0; i < SPDK_BS_MAX_INFLIGHT_CLUSTER_ALLOCS; i++) {
++		spdk_free(channel->alloc_slots[i].new_cluster_page);
++	}
+ 	spdk_free(channel->release_cluster_page);
+ 	assert(TAILQ_EMPTY(&channel->pending_free_cluster));
+ 	channel->dev->destroy_channel(channel->dev, channel->dev_channel);
+diff --git a/lib/blob/blobstore.h b/lib/blob/blobstore.h
+index 0338a24bc..e3e78710d 100644
+--- a/lib/blob/blobstore.h
++++ b/lib/blob/blobstore.h
+@@ -207,6 +207,23 @@ struct spdk_blob_store {
+ 	void				*esnap_unload_cb_arg;
+ };
+ 
++/* Cluster allocations (copy-on-write or first write to a thin cluster) one
++ * channel may have in flight at once. Each in-flight allocation holds one
++ * cluster-sized DMA buffer when it copies. */
++#define SPDK_BS_MAX_INFLIGHT_CLUSTER_ALLOCS 32
++
++/* One in-flight cluster allocation on a channel. Ops that need the SAME
++ * cluster wait on it; ops for other clusters start their own. */
++struct spdk_bs_cluster_alloc_slot {
++	struct spdk_blob		*blob;	/* NULL: slot free */
++	uint32_t			cluster_number;
++	/* Used only during insert of this slot's new cluster. */
++	struct spdk_blob_md_page	*new_cluster_page;
++	/* The op that started the allocation, then every op for the same
++	 * cluster; all re-execute when the allocation completes. */
++	TAILQ_HEAD(, spdk_bs_request_set) waiters;
++};
++
+ struct spdk_bs_channel {
+ 	struct spdk_bs_request_set	*req_mem;
+ 	TAILQ_HEAD(, spdk_bs_request_set) reqs;
+@@ -216,9 +233,11 @@ struct spdk_bs_channel {
+ 	struct spdk_bs_dev		*dev;
+ 	struct spdk_io_channel		*dev_channel;
+ 
+-	/* This page is only used during insert of a new cluster. */
+-	struct spdk_blob_md_page	*new_cluster_page;
++	struct spdk_bs_cluster_alloc_slot alloc_slots[SPDK_BS_MAX_INFLIGHT_CLUSTER_ALLOCS];
++	uint32_t			alloc_slots_used;
+ 
++	/* Ops that need a cluster allocation while every slot is in use, in
++	 * arrival order; retried when a slot frees. */
+ 	TAILQ_HEAD(, spdk_bs_request_set) need_cluster_alloc;
+ 	TAILQ_HEAD(, spdk_bs_request_set) queued_io;
+ 
+diff --git a/test/unit/lib/blob/blob.c/blob_ut.c b/test/unit/lib/blob/blob.c/blob_ut.c
+index 9c55cec5d..2b11f442b 100644
+--- a/test/unit/lib/blob/blob.c/blob_ut.c
++++ b/test/unit/lib/blob/blob.c/blob_ut.c
+@@ -5602,6 +5602,345 @@ bs_load_iter_test(void)
+ 	g_bs = NULL;
+ }
+ 
++/*
++ * Parallel cluster allocation (F74 change 2). One channel may now have up to
++ * SPDK_BS_MAX_INFLIGHT_CLUSTER_ALLOCS cluster allocations in flight, one per
++ * cluster; ops for a cluster already being allocated wait on it. The test
++ * dev completes I/O by thread message, so between submission and
++ * poll_threads() the allocations are observably in flight.
++ */
++static int g_cow_done;
++static int g_cow_err;
++
++static void
++cow_op_complete(void *cb_arg, int bserrno)
++{
++	g_cow_done++;
++	if (bserrno != 0) {
++		g_cow_err = bserrno;
++	}
++}
++
++static uint32_t
++cow_queue_len(struct spdk_bs_channel *ch, struct spdk_bs_cluster_alloc_slot *slot)
++{
++	struct spdk_bs_request_set *set;
++	uint32_t n = 0;
++
++	if (slot != NULL) {
++		TAILQ_FOREACH(set, &slot->waiters, link) {
++			n++;
++		}
++	} else {
++		TAILQ_FOREACH(set, &ch->need_cluster_alloc, link) {
++			n++;
++		}
++	}
++	return n;
++}
++
++/* A thin blob of n clusters, every byte written 0xE5, then snapshotted: its
++ * clusters now belong to the snapshot and the next write to each one must
++ * allocate and copy. */
++static void
++ut_cow_blob_with_snapshot(struct spdk_blob_store *bs, struct spdk_io_channel *channel, uint32_t n,
++			  struct spdk_blob **blob, struct spdk_blob **snapshot)
++{
++	struct spdk_blob_opts opts;
++	uint64_t len = n * spdk_bs_get_cluster_size(bs);
++	uint8_t *buf = malloc(len);
++
++	SPDK_CU_ASSERT_FATAL(buf != NULL);
++	memset(buf, 0xE5, len);
++	ut_spdk_blob_opts_init(&opts);
++	opts.thin_provision = true;
++	opts.num_clusters = n;
++	*blob = ut_blob_create_and_open(bs, &opts);
++	spdk_blob_io_write(*blob, channel, buf, 0, len / spdk_bs_get_io_unit_size(bs),
++			   blob_op_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++	free(buf);
++
++	spdk_bs_create_snapshot(bs, spdk_blob_get_id(*blob), NULL, blob_op_with_id_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++	SPDK_CU_ASSERT_FATAL(g_blobid != SPDK_BLOBID_INVALID);
++	spdk_bs_open_blob(bs, g_blobid, blob_op_with_handle_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++	SPDK_CU_ASSERT_FATAL(g_blob != NULL);
++	*snapshot = g_blob;
++}
++
++/* Read all n clusters of blob; caller frees. */
++static uint8_t *
++ut_cow_read_all(struct spdk_blob *blob, struct spdk_io_channel *channel, uint32_t n)
++{
++	struct spdk_blob_store *bs = blob->bs;
++	uint64_t len = n * spdk_bs_get_cluster_size(bs);
++	uint8_t *buf = malloc(len);
++
++	SPDK_CU_ASSERT_FATAL(buf != NULL);
++	memset(buf, 0, len);
++	spdk_blob_io_read(blob, channel, buf, 0, len / spdk_bs_get_io_unit_size(bs),
++			  blob_op_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++	return buf;
++}
++
++/* Expected image: every byte 0xE5 except io unit `unit` of each cluster i
++ * with marks[i] set, which is 0xAA. */
++static uint8_t *
++ut_cow_expected(struct spdk_blob_store *bs, uint32_t n, const bool *marks, uint64_t unit)
++{
++	uint64_t csz = spdk_bs_get_cluster_size(bs);
++	uint64_t iou = spdk_bs_get_io_unit_size(bs);
++	uint8_t *buf = malloc(n * csz);
++	uint32_t i;
++
++	SPDK_CU_ASSERT_FATAL(buf != NULL);
++	memset(buf, 0xE5, n * csz);
++	for (i = 0; i < n; i++) {
++		if (marks[i]) {
++			memset(buf + i * csz + unit * iou, 0xAA, iou);
++		}
++	}
++	return buf;
++}
++
++static void
++blob_cow_parallel_clusters(void)
++{
++	struct spdk_blob_store *bs = g_bs;
++	struct spdk_io_channel *channel = spdk_bs_alloc_io_channel(bs);
++	struct spdk_bs_channel *ch = spdk_io_channel_get_ctx(channel);
++	struct spdk_blob *blob, *snapshot;
++	uint64_t iou = spdk_bs_get_io_unit_size(bs);
++	uint64_t cluster_io = spdk_bs_get_cluster_size(bs) / iou;
++	const uint32_t n = 4;
++	bool marks[4] = { true, true, true, true };
++	bool none[4] = { false, false, false, false };
++	uint64_t free_before;
++	uint8_t *w, *got, *want;
++	uint32_t i;
++
++	SPDK_CU_ASSERT_FATAL(cluster_io >= 2);
++	ut_cow_blob_with_snapshot(bs, channel, n, &blob, &snapshot);
++	free_before = spdk_bs_free_cluster_count(bs);
++
++	w = malloc(iou);
++	SPDK_CU_ASSERT_FATAL(w != NULL);
++	memset(w, 0xAA, iou);
++	g_cow_done = 0;
++	g_cow_err = 0;
++	for (i = 0; i < n; i++) {
++		spdk_blob_io_write(blob, channel, w, i * cluster_io + 1, 1, cow_op_complete, NULL);
++	}
++	/* All four allocations in flight together; none waits for another. */
++	CU_ASSERT(ch->alloc_slots_used == n);
++	CU_ASSERT(cow_queue_len(ch, NULL) == 0);
++	CU_ASSERT(g_cow_done == 0);
++
++	poll_threads();
++	CU_ASSERT(g_cow_done == (int)n);
++	CU_ASSERT(g_cow_err == 0);
++	CU_ASSERT(ch->alloc_slots_used == 0);
++	CU_ASSERT(free_before - spdk_bs_free_cluster_count(bs) == n);
++
++	/* The written unit is new; the rest of each cluster was copied. */
++	got = ut_cow_read_all(blob, channel, n);
++	want = ut_cow_expected(bs, n, marks, 1);
++	CU_ASSERT(memcmp(got, want, n * spdk_bs_get_cluster_size(bs)) == 0);
++	free(got);
++	free(want);
++	/* The snapshot did not change. */
++	got = ut_cow_read_all(snapshot, channel, n);
++	want = ut_cow_expected(bs, n, none, 1);
++	CU_ASSERT(memcmp(got, want, n * spdk_bs_get_cluster_size(bs)) == 0);
++	free(got);
++	free(want);
++
++	free(w);
++	ut_blob_close_and_delete(bs, blob);
++	ut_blob_close_and_delete(bs, snapshot);
++	spdk_bs_free_io_channel(channel);
++	poll_threads();
++}
++
++static void
++blob_cow_same_cluster_waits(void)
++{
++	struct spdk_blob_store *bs = g_bs;
++	struct spdk_io_channel *channel = spdk_bs_alloc_io_channel(bs);
++	struct spdk_bs_channel *ch = spdk_io_channel_get_ctx(channel);
++	struct spdk_bs_cluster_alloc_slot *slot;
++	struct spdk_blob *blob, *snapshot;
++	uint64_t iou = spdk_bs_get_io_unit_size(bs);
++	uint64_t csz = spdk_bs_get_cluster_size(bs);
++	const uint32_t n = 2;
++	bool marks[2] = { true, false };
++	uint64_t free_before;
++	uint8_t *w, *got, *want;
++
++	SPDK_CU_ASSERT_FATAL(csz / iou >= 3);
++	ut_cow_blob_with_snapshot(bs, channel, n, &blob, &snapshot);
++	free_before = spdk_bs_free_cluster_count(bs);
++
++	w = malloc(iou);
++	SPDK_CU_ASSERT_FATAL(w != NULL);
++	memset(w, 0xAA, iou);
++	g_cow_done = 0;
++	g_cow_err = 0;
++	spdk_blob_io_write(blob, channel, w, 1, 1, cow_op_complete, NULL);
++	spdk_blob_io_write(blob, channel, w, 2, 1, cow_op_complete, NULL);
++	/* One allocation of cluster 0; the second write waits on it rather than
++	 * allocating cluster 0 again. */
++	CU_ASSERT(ch->alloc_slots_used == 1);
++	slot = bs_find_alloc_slot(ch, blob, 0);
++	SPDK_CU_ASSERT_FATAL(slot != NULL);
++	CU_ASSERT(cow_queue_len(ch, slot) == 2);
++
++	poll_threads();
++	CU_ASSERT(g_cow_done == 2);
++	CU_ASSERT(g_cow_err == 0);
++	CU_ASSERT(ch->alloc_slots_used == 0);
++	CU_ASSERT(free_before - spdk_bs_free_cluster_count(bs) == 1);
++
++	got = ut_cow_read_all(blob, channel, n);
++	want = ut_cow_expected(bs, n, marks, 1);
++	memset(want + 2 * iou, 0xAA, iou);
++	CU_ASSERT(memcmp(got, want, n * csz) == 0);
++	free(got);
++	free(want);
++
++	free(w);
++	ut_blob_close_and_delete(bs, blob);
++	ut_blob_close_and_delete(bs, snapshot);
++	spdk_bs_free_io_channel(channel);
++	poll_threads();
++}
++
++static void
++blob_cow_slot_cap(void)
++{
++	struct spdk_blob_store *bs = g_bs;
++	struct spdk_io_channel *channel = spdk_bs_alloc_io_channel(bs);
++	struct spdk_bs_channel *ch = spdk_io_channel_get_ctx(channel);
++	struct spdk_blob *blob, *snapshot;
++	uint64_t iou = spdk_bs_get_io_unit_size(bs);
++	uint64_t cluster_io = spdk_bs_get_cluster_size(bs) / iou;
++	const uint32_t n = SPDK_BS_MAX_INFLIGHT_CLUSTER_ALLOCS + 2;
++	bool marks[SPDK_BS_MAX_INFLIGHT_CLUSTER_ALLOCS + 2];
++	uint8_t *w, *got, *want;
++	uint32_t i;
++
++	ut_cow_blob_with_snapshot(bs, channel, n, &blob, &snapshot);
++	w = malloc(iou);
++	SPDK_CU_ASSERT_FATAL(w != NULL);
++	memset(w, 0xAA, iou);
++	g_cow_done = 0;
++	g_cow_err = 0;
++	for (i = 0; i < n; i++) {
++		marks[i] = true;
++		spdk_blob_io_write(blob, channel, w, i * cluster_io + 1, 1, cow_op_complete, NULL);
++	}
++	/* Every slot taken; the last two wait, in order, for a slot. */
++	CU_ASSERT(ch->alloc_slots_used == SPDK_BS_MAX_INFLIGHT_CLUSTER_ALLOCS);
++	CU_ASSERT(cow_queue_len(ch, NULL) == 2);
++
++	poll_threads();
++	CU_ASSERT(g_cow_done == (int)n);
++	CU_ASSERT(g_cow_err == 0);
++	CU_ASSERT(ch->alloc_slots_used == 0);
++	CU_ASSERT(cow_queue_len(ch, NULL) == 0);
++
++	got = ut_cow_read_all(blob, channel, n);
++	want = ut_cow_expected(bs, n, marks, 1);
++	CU_ASSERT(memcmp(got, want, n * spdk_bs_get_cluster_size(bs)) == 0);
++	free(got);
++	free(want);
++
++	free(w);
++	ut_blob_close_and_delete(bs, blob);
++	ut_blob_close_and_delete(bs, snapshot);
++	spdk_bs_free_io_channel(channel);
++	poll_threads();
++}
++
++/* Allocations in flight when a snapshot of the blob starts. Freeze does not
++ * wait for in-flight I/O, so this was reachable before (one per channel,
++ * across channels); parallel allocation makes it several per channel. The
++ * head must read its writes, the new snapshot must hold each written unit
++ * either old or new (never anything else), and no cluster may leak. */
++static void
++blob_cow_inflight_across_snapshot(void)
++{
++	struct spdk_blob_store *bs = g_bs;
++	struct spdk_io_channel *channel = spdk_bs_alloc_io_channel(bs);
++	struct spdk_blob *blob, *snapshot, *snapshot2;
++	uint64_t iou = spdk_bs_get_io_unit_size(bs);
++	uint64_t csz = spdk_bs_get_cluster_size(bs);
++	uint64_t cluster_io = csz / iou;
++	const uint32_t n = 3;
++	bool marks[3] = { true, true, true };
++	uint64_t free_start = spdk_bs_free_cluster_count(bs);
++	uint8_t *w, *got, *want;
++	uint32_t i;
++	uint64_t b;
++
++	ut_cow_blob_with_snapshot(bs, channel, n, &blob, &snapshot);
++	w = malloc(iou);
++	SPDK_CU_ASSERT_FATAL(w != NULL);
++	memset(w, 0xAA, iou);
++	g_cow_done = 0;
++	g_cow_err = 0;
++	for (i = 0; i < n; i++) {
++		spdk_blob_io_write(blob, channel, w, i * cluster_io + 1, 1, cow_op_complete, NULL);
++	}
++	spdk_bs_create_snapshot(bs, spdk_blob_get_id(blob), NULL, blob_op_with_id_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_cow_done == (int)n);
++	CU_ASSERT(g_cow_err == 0);
++	CU_ASSERT(g_bserrno == 0);
++	SPDK_CU_ASSERT_FATAL(g_blobid != SPDK_BLOBID_INVALID);
++	spdk_bs_open_blob(bs, g_blobid, blob_op_with_handle_complete, NULL);
++	poll_threads();
++	SPDK_CU_ASSERT_FATAL(g_blob != NULL);
++	snapshot2 = g_blob;
++
++	got = ut_cow_read_all(blob, channel, n);
++	want = ut_cow_expected(bs, n, marks, 1);
++	CU_ASSERT(memcmp(got, want, n * csz) == 0);
++	free(got);
++	free(want);
++
++	got = ut_cow_read_all(snapshot2, channel, n);
++	for (i = 0; i < n; i++) {
++		uint8_t first = got[i * csz + iou];
++
++		CU_ASSERT(first == 0xAA || first == 0xE5);
++		for (b = 0; b < csz; b++) {
++			uint8_t expect = (b >= iou && b < 2 * iou) ? first : 0xE5;
++
++			if (got[i * csz + b] != expect) {
++				CU_FAIL("snapshot taken across in-flight allocations holds a torn cluster");
++				break;
++			}
++		}
++	}
++	free(got);
++
++	free(w);
++	ut_blob_close_and_delete(bs, blob);
++	ut_blob_close_and_delete(bs, snapshot2);
++	ut_blob_close_and_delete(bs, snapshot);
++	spdk_bs_free_io_channel(channel);
++	poll_threads();
++	CU_ASSERT(spdk_bs_free_cluster_count(bs) == free_start);
++}
++
+ static void
+ blob_snapshot_rw(void)
+ {
+@@ -10653,6 +10992,10 @@ main(int argc, char **argv)
+ 		CU_ADD_TEST(suite, blob_esnap_io_512_4096);
+ 		CU_ADD_TEST(suite_esnap_bs, blob_esnap_thread_add_remove);
+ 		CU_ADD_TEST(suite_esnap_bs, blob_esnap_clone_snapshot);
++		CU_ADD_TEST(suite_esnap_bs, blob_cow_parallel_clusters);
++		CU_ADD_TEST(suite_esnap_bs, blob_cow_same_cluster_waits);
++		CU_ADD_TEST(suite_esnap_bs, blob_cow_slot_cap);
++		CU_ADD_TEST(suite_esnap_bs, blob_cow_inflight_across_snapshot);
+ 		CU_ADD_TEST(suite_esnap_bs, blob_esnap_clone_inflate);
+ 		CU_ADD_TEST(suite_esnap_bs, blob_esnap_clone_decouple);
+ 		CU_ADD_TEST(suite_esnap_bs, blob_esnap_clone_reload);
