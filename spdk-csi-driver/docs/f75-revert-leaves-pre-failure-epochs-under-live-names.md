@@ -127,3 +127,25 @@ The fake's new property (`FakeRpc::deleted` / `created`): one name per
 lvstore, `bdev_lvol_delete` removes it from the listing, a clone, create
 or snapshot brings it back, and a snapshot under a standing name is
 refused with "File exists".
+
+## 7. The formal models
+
+Unchanged by the fix, and neither proves nor refutes the defect.
+`formal/FlintSnapshots.tla` (the epoch chain at block-content level) keeps
+ONE `tgtBase` per target and takes the base's content from the shared
+chain: "the target sits on a RETAINED epoch (its content IS that epoch's
+content — a based copy clones from the shared base snapshot)". That is
+the premise this defect breaks — the replica holds a snapshot *named*
+`X` whose content is not chain `X`'s — and the model has no state in
+which to say so, so `Inv_SessionFaithful` holds vacuously over it.
+`formal/FlintReplication.tla` models content as a write-set and an epoch
+cut as a single event; it has no per-replica snapshot content at all.
+
+To make TLC catch this class, in the style of the module's three existing
+mutations: give the target its own snapshot map (`tgtSnaps`, epoch id →
+content, its lvstore), start `CopyBased` from `tgtSnaps[tgtBase]` rather
+than `chain[j].content`, add a `Revert` that under a `ReapNewer = FALSE`
+mutation leaves entries newer than the base in `tgtSnaps`, and an align
+step that under the same mutation does not overwrite a standing id. A
+second session based on a leftover then violates `Inv_SessionFaithful`.
+Worth doing with the fix, not before it.
