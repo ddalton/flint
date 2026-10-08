@@ -67,3 +67,50 @@ discarded). `summary.md` / `summary.csv` are `report.py flint-r1 flint-r3`.
 samples, PV, ENA counters (`flint-r3/net-after-manual-*.txt` were read by
 hand after the stop); `spdk-reactor-samples/`; `ec2-up.log`; `run-phase1.sh`
 as run; `phase1.status`.
+
+## Root cause of finding 1 — CONFIRMED 2026-10-08
+
+**Confirmed by A/B** (`../2026-10-08-epoch-cow-ab/`): on one r3 volume with
+the scheduler off, a single `bdev_lvol_snapshot` on its replicas took 4K
+randwrite from 13,606 to 275 IOPS, and rewriting every cluster brought it
+back to 10,510. The analysis below was written before the test.
+
+The r3 write cost is SPDK blobstore copy-on-write after Flint's epoch
+snapshots.
+
+1. The 1.58.0 chart sets `FLINT_EPOCH_SCHEDULER=enabled` and
+   `FLINT_EPOCH_INTERVAL_SECS=300` (`templates/controller.yaml:70-82`,
+   `values.yaml` `replication.orchestrators`, "ON BY DEFAULT ... a strict
+   no-op for single-replica volumes"). Every 5 min it cuts a
+   `bdev_lvol_snapshot` on every in-sync replica of every attached volume
+   with >= 2 replicas (`epoch_scheduler.rs`; its header still says
+   "default-disabled" -- stale). r1 volumes are skipped: that is the r1/r3
+   split.
+2. After a snapshot the head is a thin clone; the next write to each
+   cluster allocates a new cluster and copies the old one. Flint's lvstores
+   use **1 MiB clusters** (`minimal_disk_service.rs:230`), so a 4 KiB write
+   costs a 1 MiB read + 1 MiB write + metadata: ~256x amplification.
+3. SPDK v26.05 `lib/blob/blobstore.c:2863` `bs_allocate_and_copy_cluster`
+   **serializes cluster allocations per I/O channel** ("There are already
+   operations pending. Queue this user op"), and copies even when the write
+   covers the whole cluster. Flint runs one reactor per node, so one
+   copy-on-write at a time per replica.
+
+Numbers it explains: 572 IOPS x 1 MiB = ~570 MiB/s written + ~570 MiB/s read
+per disk -- at the instance's disk caps, with the network and the reactor
+idle-ish (they were). ~1.75 ms per serialized copy = ~570/s, independent of
+queue depth; QD1 2.7 ms (copy + metadata + the slowest of three legs). 1M
+seq write also copies -> 320 MiB/s. Random 4K writes over a 90 GiB file
+almost always hit a cluster not yet rewritten since the last epoch, so the
+benchmark sees the worst case continuously; a workload with a small hot set
+pays once per cluster per epoch.
+
+**Decisive test:** r3 with `replication.orchestrators.enabled=false` (or
+`FLINT_EPOCH_SCHEDULER=disabled`) vs as shipped, same rig, same matrix.
+Prediction: epochs off -> r3 randwrite in the tens of thousands of IOPS;
+on -> ~570.
+
+**Benchmark consequence:** the chart calls running r>=2 without the
+orchestrators "actively hazardous" (raid re-admission needs epoch history),
+so the comparison must run Flint AS SHIPPED; an epochs-off arm is a
+diagnostic, labelled as such, never the headline.

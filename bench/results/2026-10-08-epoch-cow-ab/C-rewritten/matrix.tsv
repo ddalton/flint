@@ -1,0 +1,12 @@
+# The fio matrix (docs/plans/flint-csi-benchmark-plan.md §2, Q1-Q3).
+# One row per test. Columns are tab- or space-separated:
+#   name  rw  bs  iodepth  numjobs  rwmixread(- for none)
+lat_randread_4k     randread   4k    1   1  -
+lat_randwrite_4k    randwrite  4k    1   1  -
+iops_randread_4k    randread   4k    32  4  -
+iops_randwrite_4k   randwrite  4k    32  4  -
+iops_mixed70_4k     randrw     4k    32  4  70
+seq_read_128k       read       128k  16  1  -
+seq_write_128k      write      128k  16  1  -
+seq_read_1m         read       1m    16  1  -
+seq_write_1m        write      1m    16  1  -

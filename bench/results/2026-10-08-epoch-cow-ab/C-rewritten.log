@@ -1,0 +1,38 @@
+
+▶ samplers on every node
+
+▶ PVC bench-cowab (20Gi on flint-bench-r3) and fio pod fio-cowab
+
+▶ environment
+date_utc: 2026-10-08T00:59:06Z
+driver: cowab
+storageclass: flint-bench-r3
+pvc_size: 20Gi
+file_size: 16G
+runtime_s: 30
+ramp_s: 5
+reps: 2
+precondition: 1
+cpu_patterns: spdk=spdk_tgt,agent=csi-driver,nfs=flint-nfs-server
+reactor_ticks: yes
+fio_node: flint-chainsaw-spdk-worker2
+fio_version: fio-3.36
+bench_git: unknown
+
+▶ precondition: write all of 16G once
+
+▶ idle: the driver's CPU with no I/O (a polling engine's floor)
+
+▶ rep 1/2: lat_randwrite_4k (randwrite bs=4k qd=1 jobs=1)
+
+▶ rep 1/2: iops_randwrite_4k (randwrite bs=4k qd=32 jobs=4)
+
+▶ rep 1/2: seq_write_1m (write bs=1m qd=16 jobs=1)
+
+▶ rep 2/2: lat_randwrite_4k (randwrite bs=4k qd=1 jobs=1)
+
+▶ rep 2/2: iops_randwrite_4k (randwrite bs=4k qd=32 jobs=4)
+
+▶ rep 2/2: seq_write_1m (write bs=1m qd=16 jobs=1)
+
+▶ done: /home/ddalton/bench-2026-10-07/results/2026-10-08-epoch-cow-ab/C-rewritten

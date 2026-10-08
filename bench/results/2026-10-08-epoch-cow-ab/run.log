@@ -1,0 +1,11 @@
+00:43:55Z A: scheduler off, preconditioned
+00:54:56Z B: snapshot every replica lvol (pvc-10f72492-8724-4cd0-9cea-aa8803a55797)
+adb25c40-e482-4072-ba94-03b16405c158
+00:54:56Z   snapshot lvs_kind/vol_pvc-10f72492-8724-4cd0-9cea-aa8803a55797_replica_0 on flint-chainsaw-spdk-control-plane
+2661f490-701d-40ec-b241-4224629ec64e
+00:54:57Z   snapshot lvs_kind/vol_pvc-10f72492-8724-4cd0-9cea-aa8803a55797_replica_1 on flint-chainsaw-spdk-worker
+93ecb290-0ea1-4e92-9a4f-3145964002cb
+00:54:57Z   snapshot lvs_kind/vol_pvc-10f72492-8724-4cd0-9cea-aa8803a55797_replica_2 on flint-chainsaw-spdk-worker2
+00:59:05Z C: rewrite every cluster, measure again
+01:09:42Z done
+EXIT=0

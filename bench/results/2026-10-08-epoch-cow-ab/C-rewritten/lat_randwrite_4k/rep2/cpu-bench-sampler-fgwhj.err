@@ -1,0 +1,1 @@
+/bench/sample.sh: line 10: can't open /proc/26223/cmdline: no such file

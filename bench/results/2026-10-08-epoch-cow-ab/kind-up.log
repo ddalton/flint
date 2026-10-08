@@ -1,0 +1,127 @@
+1.58.0: Pulling from dilipdalton/flint-driver
+Digest: sha256:dcefe59ae4e550700ad4fec1d00f1ff7cdb2c9db4d6cd16d9a170a8d761c8a55
+Status: Image is up to date for dilipdalton/flint-driver:1.58.0
+docker.io/dilipdalton/flint-driver:1.58.0
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile.spdk_kind
+#1 transferring dockerfile: 616B 0.0s done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/dilipdalton/spdk-tgt:1.7.0
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/3] FROM docker.io/dilipdalton/spdk-tgt:1.7.0
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 44B done
+#5 DONE 0.0s
+
+#6 [2/3] COPY spdk-csi-start-kind.sh /usr/local/bin/spdk-csi-start-kind.sh
+#6 CACHED
+
+#7 [3/3] RUN chmod +x /usr/local/bin/spdk-csi-start-kind.sh
+#7 CACHED
+
+#8 exporting to image
+#8 exporting layers done
+#8 writing image sha256:9ea4e8a06f492ee36143d4249d630c321df0553f0ff516a9a599d6644d0c9475 done
+#8 naming to localhost:5002/dilipdalton/spdk-tgt-kind:1.58.0 done
+#8 DONE 0.0s
+
+▶ LVM on /dev/nvme1n1 (serial 2535529271A2): VG flintkindspdk, one LV per node
+  LV                                VG            Attr       LSize    Pool Origin Data%  Meta%  Move Log Cpy%Sync Convert
+  flint-chainsaw-spdk-control-plane flintkindspdk -wi-a----- <307.40g                                                    
+  flint-chainsaw-spdk-worker        flintkindspdk -wi-a----- <307.40g                                                    
+  flint-chainsaw-spdk-worker2       flintkindspdk -wi-a-----  316.71g                                                    
+
+▶ registry flint-chainsaw-spdk-registry on 127.0.0.1:5002
+
+▶ kind cluster flint-chainsaw-spdk: 3 nodes on the host's /dev, node <n> uses LV flintkindspdk/<n>
+Creating cluster "flint-chainsaw-spdk" ...
+ • Ensuring node image (kindest/node:v1.34.0) 🖼  ...
+ ✓ Ensuring node image (kindest/node:v1.34.0) 🖼
+ • Preparing nodes 📦 📦 📦   ...
+ ✓ Preparing nodes 📦 📦 📦 
+ • Writing configuration 📜  ...
+ ✓ Writing configuration 📜
+ • Starting control-plane 🕹️  ...
+ ✓ Starting control-plane 🕹️
+ • Installing CNI 🔌  ...
+ ✓ Installing CNI 🔌
+ • Installing StorageClass 💾  ...
+ ✓ Installing StorageClass 💾
+ • Joining worker nodes 🚜  ...
+ ✓ Joining worker nodes 🚜
+Set kubectl context to "kind-flint-chainsaw-spdk"
+You can now use your cluster with:
+
+kubectl cluster-info --context kind-flint-chainsaw-spdk --kubeconfig /home/ddalton/bench-2026-10-07/kube/kubeconfig
+
+Thanks for using kind! 😊
+
+▶ helm install flint-csi (SPDK kindMode on /dev/flintkindspdk/<node>, image tag 1.58.0)
+Release "flint-csi" does not exist. Installing it now.
+W1008 00:42:57.568593  309376 warnings.go:70] unrecognized format "int64"
+NAME: flint-csi
+LAST DEPLOYED: Thu Oct  8 00:42:59 2026
+NAMESPACE: flint-system
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+Flint CSI driver installed in namespace "flint-system".
+
+Verify the controller and node pods are running:
+  kubectl get pods -n flint-system
+
+If you plan to use Volume Snapshots / Clones:
+
+  The VolumeSnapshot CRDs are a CLUSTER-WIDE prerequisite that the
+  Flint chart does not install (they are shared across all CSI drivers).
+  Verify they are installed:
+
+    kubectl get crd volumesnapshotclasses.snapshot.storage.k8s.io
+
+  If that returns "NotFound", install once per cluster:
+
+    kubectl apply -k https://github.com/kubernetes-csi/external-snapshotter/client/config/crd?ref=v8.2.0
+
+  Without these CRDs, the bundled snapshot-controller Deployment will
+  CrashLoopBackOff and snapshot RPCs will be rejected. Non-snapshot
+  operations are unaffected. The Flint controller logs a startup
+  warning if the CRDs are missing — see:
+
+    kubectl logs -n flint-system -l app=flint-csi-controller -c flint-csi-driver | grep PREFLIGHT
+
+Snapshot support notes:
+  - SPDK-backed StorageClasses: snapshots supported.
+  - pNFS-backed StorageClasses (parameters.layout: pnfs): snapshots
+    NOT supported in the no-SPDK deployment mode. Use a non-pNFS
+    StorageClass for volumes that need snapshots.
+
+See the full README for prerequisites, disk-init, and StorageClass
+examples: https://github.com/ddalton/flint
+
+(Looking for the standalone flint-lite hub? It moved to its own chart:
+flint-lite-chart/ — see docs/flint-lite.md.)
+pod/flint-csi-node-7bhqd condition met
+pod/flint-csi-node-f29dh condition met
+pod/flint-csi-node-x44vm condition met
+pod/flint-csi-controller-5b769cf966-vt6qt condition met
+
+▶ every SPDK target opened its volume
+Disk ready: lvs_kind on uring_dm-2 (device-backed)
+Disk ready: lvs_kind on uring_dm-1 (device-backed)
+Disk ready: lvs_kind on uring_dm-0 (device-backed)
+
+▶ pods run the images under test
+KEEP=1: cluster flint-chainsaw-spdk and registry flint-chainsaw-spdk-registry left up; KUBECONFIG=/home/ddalton/bench-2026-10-07/kube/kubeconfig
+storageclass.storage.k8s.io/flint-bench-r1 created
+storageclass.storage.k8s.io/flint-bench-r3 created
+EXIT=0

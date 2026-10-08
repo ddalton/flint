@@ -1,0 +1,4 @@
+NAME                                STATUS   ROLES           AGE   VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                         KERNEL-VERSION          CONTAINER-RUNTIME
+flint-chainsaw-spdk-control-plane   Ready    control-plane   16m   v1.34.0   172.18.0.3    <none>        Debian GNU/Linux 12 (bookworm)   6.12.0-061200-generic   containerd://2.1.3
+flint-chainsaw-spdk-worker          Ready    <none>          16m   v1.34.0   172.18.0.4    <none>        Debian GNU/Linux 12 (bookworm)   6.12.0-061200-generic   containerd://2.1.3
+flint-chainsaw-spdk-worker2         Ready    <none>          16m   v1.34.0   172.18.0.2    <none>        Debian GNU/Linux 12 (bookworm)   6.12.0-061200-generic   containerd://2.1.3

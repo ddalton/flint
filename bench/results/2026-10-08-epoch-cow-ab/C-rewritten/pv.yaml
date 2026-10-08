@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  annotations:
+    chert.us/block-device-backend: Nvmeof
+    chert.us/chain-gen: "1"
+    chert.us/nvme-device: nvme2
+    chert.us/nvmeof-nqn: nqn.2024-11.com.flint:volume:pvc-10f72492-8724-4cd0-9cea-aa8803a55797
+    disk.chert.us/filesystem-initialized: "true"
+    disk.chert.us/replica-sync-state: '{"writer_set":{"lvol_uuids":["0f35bd7f-5633-4495-978d-6c74a8fc9151","5d688725-2198-4e3d-8c9a-f0cb8111c87f","eae09c59-3196-4687-8e54-f84f8e52af70"],"since":"2026-10-08T00:44:06Z"},"replicas":[{"node_name":"flint-chainsaw-spdk-control-plane","node_uid":"eeb0a9fd-9c39-4b8e-b064-103e5403efcc","lvol_uuid":"eae09c59-3196-4687-8e54-f84f8e52af70","sync_state":"in_sync"},{"node_name":"flint-chainsaw-spdk-worker","node_uid":"07bf6e0a-c881-430e-a305-2184eb5ec666","lvol_uuid":"0f35bd7f-5633-4495-978d-6c74a8fc9151","sync_state":"in_sync"},{"node_name":"flint-chainsaw-spdk-worker2","node_uid":"96690f95-e386-4434-afa8-95a05050a106","lvol_uuid":"5d688725-2198-4e3d-8c9a-f0cb8111c87f","sync_state":"in_sync"}]}'
+    pv.kubernetes.io/provisioned-by: disk.csi.chert.us
+    volume.kubernetes.io/provisioner-deletion-secret-name: ""
+    volume.kubernetes.io/provisioner-deletion-secret-namespace: ""
+  creationTimestamp: "2026-10-08T00:44:03Z"
+  finalizers:
+  - kubernetes.io/pv-protection
+  - external-attacher/disk-csi-chert-us
+  labels:
+    disk.chert.us/replica-07bf6e0a-c881-430e-a305-2184eb5ec666: "true"
+    disk.chert.us/replica-96690f95-e386-4434-afa8-95a05050a106: "true"
+    disk.chert.us/replica-eeb0a9fd-9c39-4b8e-b064-103e5403efcc: "true"
+  name: pvc-10f72492-8724-4cd0-9cea-aa8803a55797
+  resourceVersion: "984"
+  uid: 2e2da98e-c7a4-4aec-9f41-910c08421bc0
+spec:
+  accessModes:
+  - ReadWriteOnce
+  capacity:
+    storage: 20Gi
+  claimRef:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    name: bench-cowab
+    namespace: flint-bench
+    resourceVersion: "936"
+    uid: 10f72492-8724-4cd0-9cea-aa8803a55797
+  csi:
+    driver: disk.csi.chert.us
+    volumeAttributes:
+      disk.chert.us/replica-count: "3"
+      disk.chert.us/replicas: '[{"node_name":"flint-chainsaw-spdk-control-plane","node_uid":"eeb0a9fd-9c39-4b8e-b064-103e5403efcc","disk_pci_address":"0000:00:00:0","lvol_uuid":"eae09c59-3196-4687-8e54-f84f8e52af70","lvol_name":"vol_pvc-10f72492-8724-4cd0-9cea-aa8803a55797_replica_0","lvs_name":"lvs_kind","nqn":null,"target_ip":null,"target_port":null,"health":"online"},{"node_name":"flint-chainsaw-spdk-worker","node_uid":"07bf6e0a-c881-430e-a305-2184eb5ec666","disk_pci_address":"0000:00:00:0","lvol_uuid":"0f35bd7f-5633-4495-978d-6c74a8fc9151","lvol_name":"vol_pvc-10f72492-8724-4cd0-9cea-aa8803a55797_replica_1","lvs_name":"lvs_kind","nqn":null,"target_ip":null,"target_port":null,"health":"online"},{"node_name":"flint-chainsaw-spdk-worker2","node_uid":"96690f95-e386-4434-afa8-95a05050a106","disk_pci_address":"0000:00:00:0","lvol_uuid":"5d688725-2198-4e3d-8c9a-f0cb8111c87f","lvol_name":"vol_pvc-10f72492-8724-4cd0-9cea-aa8803a55797_replica_2","lvs_name":"lvs_kind","nqn":null,"target_ip":null,"target_port":null,"health":"online"}]'
+      disk.chert.us/role: block
+      size: 20Gi
+      storage.kubernetes.io/csiProvisionerIdentity: 1791420202101-620-disk.csi.chert.us
+    volumeHandle: pvc-10f72492-8724-4cd0-9cea-aa8803a55797
+  persistentVolumeReclaimPolicy: Delete
+  storageClassName: flint-bench-r3
+  volumeMode: Filesystem
+status:
+  lastPhaseTransitionTime: "2026-10-08T00:44:03Z"
+  phase: Bound

@@ -1,0 +1,16 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"storage.k8s.io/v1","kind":"StorageClass","metadata":{"annotations":{},"name":"flint-bench-r3"},"parameters":{"numReplicas":"3","thinProvision":"false"},"provisioner":"disk.csi.chert.us","reclaimPolicy":"Delete","volumeBindingMode":"WaitForFirstConsumer"}
+  creationTimestamp: "2026-10-08T00:43:36Z"
+  name: flint-bench-r3
+  resourceVersion: "845"
+  uid: 6d028af3-9be3-483c-9b4b-389929562cda
+parameters:
+  numReplicas: "3"
+  thinProvision: "false"
+provisioner: disk.csi.chert.us
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer

@@ -75,6 +75,13 @@ def cpu_metrics(rep_dir):
     return out
 
 
+def label(d, env):
+    """The driver label, plus the result dir when it says something more
+    (an experiment reuses one volume, so one driver label, across arms)."""
+    drv = env.get("driver") or "?"
+    return drv if d.name.endswith(drv) else f"{drv} ({d.name})"
+
+
 def collect(d):
     env = load_env(d)
     rows = {}
@@ -137,7 +144,7 @@ def main():
     for d, env, _ in runs:
         if (d / "idle").is_dir():
             c = cpu_metrics(d / "idle")
-            out.write(f"| {env.get('driver')} | {env.get('storageclass')} | {c['storage_cores']:.2f} | {c['node_busy_cores']:.2f} |\n")
+            out.write(f"| {label(d, env)} | {env.get('storageclass')} | {c['storage_cores']:.2f} | {c['node_busy_cores']:.2f} |\n")
     for t in tests:
         out.write(f"\n### {t}\n\n")
         present = [(k, h, dg) for k, h, dg in COLUMNS
@@ -156,7 +163,7 @@ def main():
                     long_rows.append({"driver": env.get("driver"), "storageclass": env.get("storageclass"),
                                       "test": t, "metric": k, "median": s[0], "min": s[1], "max": s[2],
                                       "reps": s[3], "dir": str(d)})
-            out.write(f"| {env.get('driver')} | {env.get('storageclass')} | {len(reps)} | " + " | ".join(cells) + " |\n")
+            out.write(f"| {label(d, env)} | {env.get('storageclass')} | {len(reps)} | " + " | ".join(cells) + " |\n")
 
     if a.csv:
         with a.csv.open("w", newline="") as f:

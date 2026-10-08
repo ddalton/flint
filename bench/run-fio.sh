@@ -22,6 +22,8 @@
 #   FIO_NODE      pin the fio pod to this node (unset: scheduler's choice)
 #   FIO_IMAGE     image with fio, or alpine to `apk add fio` (alpine:3.20)
 #   KEEP          1 = leave the PVC and fio pod in place (0)
+#   PRECONDITION  0 = skip the full write (only for experiments that reuse a
+#                 KEEP=1 volume on purpose); default 1
 #   REACTOR_TICKS optional host command printing "<busy> <idle> <reactors>"
 #                 cumulative ticks of the driver's polling reactors (env.sh);
 #                 sampled at both edges of each window, because a polling
@@ -103,6 +105,7 @@ step "environment"
   echo "runtime_s: $RUNTIME"
   echo "ramp_s: $RAMP"
   echo "reps: $REPS"
+  echo "precondition: ${PRECONDITION:-1}"
   echo "cpu_patterns: $CPU_PATTERNS"
   echo "reactor_ticks: ${REACTOR_TICKS:+yes}"
   echo "fio_node: $(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.spec.nodeName}')"
@@ -138,9 +141,13 @@ net_counters before
 fio_common="--filename=/data/bench.dat --size=$FILE_SIZE --direct=1 --ioengine=libaio \
 --group_reporting --output-format=json --randrepeat=0 --random_generator=tausworthe64"
 
-step "precondition: write all of $FILE_SIZE once"
-kubectl -n "$NS" exec "$POD" -- fio --name=precondition $fio_common \
-  --rw=write --bs=1m --iodepth=16 --numjobs=1 > "$OUT/precondition.json"
+if [ "${PRECONDITION:-1}" = 1 ]; then
+  step "precondition: write all of $FILE_SIZE once"
+  kubectl -n "$NS" exec "$POD" -- fio --name=precondition $fio_common \
+    --rw=write --bs=1m --iodepth=16 --numjobs=1 > "$OUT/precondition.json"
+else
+  step "precondition SKIPPED (PRECONDITION=0)"
+fi
 
 run_one() {  # <dir> <name> <rw> <bs> <iodepth> <numjobs> <rwmixread>
   local dir=$1 name=$2 rw=$3 bs=$4 qd=$5 nj=$6 mix=$7 s pids=()
