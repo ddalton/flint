@@ -1,8 +1,10 @@
 # F74 — epoch snapshots collapse small writes on every replicated volume (~190× on EC2)
 
 Status: **FOUND 2026-10-07 by the CSI benchmark (Phase 1 on EC2); CAUSE
-CONFIRMED 2026-10-08 by A/B. NOT FIXED — design chosen 2026-10-08 after
-verification against SPDK v26.05 and the Flint tree (§5); not implemented.**
+CONFIRMED 2026-10-08 by A/B. NOT FIXED — DECIDED 2026-10-08: keep the
+epochs and make their cost small (§5, verified against SPDK v26.05 and the
+Flint tree); the no-copy redesign is rejected unless measurement after §5
+says otherwise. Not implemented.**
 Affects every volume with `numReplicas >= 2` on a chart with the replication
 orchestrators on, which is the default since they shipped. Blocks the
 head-to-head benchmark (`docs/plans/flint-csi-benchmark-plan.md`): against
@@ -83,13 +85,26 @@ epoch history the raid reassembly admission is attach-everything, so a leg
 that truly diverged would be re-admitted as an equal read source. Equally, the
 benchmark must run Flint as shipped; an epochs-off arm is a diagnostic only.
 
-## 5. Fix (design chosen 2026-10-08; not implemented)
+## 5. Fix (DECIDED 2026-10-08; not implemented)
 
-Keep the epochs — catch-up, warm standby, hot rejoin, reassembly admission
-and the §11 snapshot lineage all stand on them — and make the copy after
-each cut cheap. Three changes in a fixed order, plus one chart default to
-decide. The order is forced by the facts in §5.1: at 1 MiB clusters, the
-"parallel copies" and "skip the copy" changes do nothing.
+**Decision: keep the epochs and make their cost small.** The periodic cut
+is insurance paid in advance — a point known equal on every replica
+*before* one fails, so a returning replica reverts to its own copy of it and
+receives only the delta, with no SPDK on-disk format change and no tracker
+that dies with the roaming raid (`incremental-replica-rebuild.md` §2, §7,
+§8). The design priced that insurance in space only; its write-path cost
+(this finding) was never measured. The alternative — no snapshots while
+healthy, a persisted mark-before-write change map on each replica — is
+copy-free and would reach parity on continuous random writes, but is the
+format change the design rejected plus a rewrite of catch-up, hot rejoin and
+reassembly admission with new proofs. Rejected for now; revisit only if the
+measured steady state after this section is unacceptable for a workload
+that matters.
+
+Three changes in a fixed order, plus the epoch interval default, which is
+part of the decision (raise it; exact value set with the rebuild-delta
+trade-off stated). The order is forced by the facts in §5.1: at 1 MiB
+clusters, the "parallel copies" and "skip the copy" changes do nothing.
 
 ### 5.1 Facts the design rests on (verified in SPDK v26.05 / the Flint tree)
 
@@ -138,7 +153,7 @@ decide. The order is forced by the facts in §5.1: at 1 MiB clusters, the
 | 1 | **128 KiB lvstore clusters** (`minimal_disk_service.rs:230`), **with `num_md_pages_per_cluster_ratio` lowered** on `bdev_lvol_create_lvstore` (`vbdev_lvol_rpc.c:102`) so the md region stays the size it is today (the need is ~1 page per 512 clusters, not 1 per cluster) | copy per 4 KiB write 8× smaller; makes 2 and 3 effective | without the ratio: md region 7 → 57 GiB on a 1.875 TB disk (3%) and ~8× longer crash recovery. Per-blob cluster array 8× (6.5 MB per 100 GiB blob, heap). Existing lvstores keep 1 MiB (nothing is deployed). Then try 64 KiB. |
 | 2 | **Parallel copies** in `bs_allocate_and_copy_cluster`: wait per cluster instead of the per-channel FIFO; a copy buffer and md page per in-flight copy (today one `new_cluster_page` per channel, `blobstore.c:3696`); cap in flight (~32) | copies overlap up to the disk's bandwidth | SPDK patch, upstreamable. Metadata ordering is already handled (`453faf015`). Memory: cap × (cluster + 4 KiB). |
 | 3 | **Full-cluster writes skip the copy**: write the user data into the new cluster, then insert; on `-EEXIST` re-execute against the winner's cluster as today | aligned 128 KiB writes cost no read | only after `filefrag -v` on a bench file shows the aligned fraction; needs clusters ≤ 128 KiB (§5.1). Alternative: raise `max_io_size` to 1 MiB — the TCP shared-buffer pool scales with it. |
-| — | **Epoch interval default** (`epochIntervalSecs`, 300) | the only lever on the *average*: the tax per epoch is working set × copy cost, so 30–60 min cuts it 6–12× | rebuild delta up to T_snap of writes (still bounded); K·T_snap retention grows the same way. A chart decision, not code. |
+| 4 | **Raise the epoch interval default** (`epochIntervalSecs`, 300 → 30–60 min; value to set) | the only lever on the *average*: the tax per epoch is working set × copy cost, so 30–60 min cuts it 6–12× | rebuild delta up to T_snap of writes (still bounded); K·T_snap retention and the space each epoch pins grow the same way. Part of the decision above. |
 
 ### 5.3 What to expect (estimates — to be measured, not promised)
 
