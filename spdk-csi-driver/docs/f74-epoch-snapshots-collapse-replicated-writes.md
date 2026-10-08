@@ -183,3 +183,9 @@ rules. Not chosen; revisit only against measured numbers.
 4. Crash-recovery time of a full lvstore before and after change 1 (the md
    ratio is what keeps it flat).
 5. Fix the stale "Default-disabled" header in `epoch_scheduler.rs` on the way.
+6. **F75** (`f75-revert-leaves-pre-failure-epochs-under-live-names.md`)
+   lands with change 4: a raised interval makes its common form — a
+   returning replica's target epoch is a name it already holds — the
+   normal case. Retention is a count (`FLINT_EPOCH_RETAIN`, 6), so set K
+   with the interval; a detached volume keeps its last K epochs until it
+   is attached again.

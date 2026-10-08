@@ -3011,6 +3011,13 @@ mod tests {
         fail_clear_sb: bool,
         /// node → (lvol name, uuid)
         lvols: HashMap<String, Vec<(String, String)>>,
+        /// (node, lvol name) removed by `bdev_lvol_delete`; a clone, create
+        /// or snapshot of the name brings it back. SPDK keeps ONE name per
+        /// lvstore, so a snapshot under a standing name is refused ("File
+        /// exists") — the property F75 turns on. The listing honours both.
+        deleted: Mutex<HashSet<(String, String)>>,
+        /// (node, snapshot name) cut by `bdev_lvol_snapshot` in this run.
+        created: Mutex<HashSet<(String, String)>>,
         /// node → raid bdev records
         raids: Mutex<HashMap<String, Vec<Value>>>,
         /// (node, bdev name) → bdev record
@@ -3035,6 +3042,8 @@ mod tests {
                 fail: HashMap::new(),
                 fail_clear_sb: false,
                 lvols: HashMap::new(),
+                deleted: Mutex::new(HashSet::new()),
+                created: Mutex::new(HashSet::new()),
                 raids: Mutex::new(HashMap::new()),
                 bdevs: Mutex::new(HashMap::new()),
                 controllers: Mutex::new(HashSet::new()),
@@ -3071,15 +3080,46 @@ mod tests {
             }
             match method.as_str() {
                 "bdev_lvol_get_lvols" => {
-                    let arr: Vec<Value> = self
+                    let deleted = self.deleted.lock().unwrap();
+                    let created = self.created.lock().unwrap();
+                    let gone = |n: &str| deleted.contains(&(node.to_string(), n.to_string()));
+                    let mut arr: Vec<Value> = self
                         .lvols
                         .get(node)
                         .cloned()
                         .unwrap_or_default()
                         .iter()
+                        .filter(|(n, _)| !gone(n))
                         .map(|(n, u)| json!({ "name": n, "uuid": u, "alias": format!("lvs0/{}", n) }))
                         .collect();
+                    for (cn, n) in created.iter() {
+                        if cn == node && !gone(n) {
+                            arr.push(json!({ "name": n, "uuid": format!("uuid-of-{}", n), "alias": format!("lvs0/{}", n) }));
+                        }
+                    }
                     Ok(json!({ "result": arr }))
+                }
+                "bdev_lvol_snapshot" => {
+                    let name = payload["params"]["snapshot_name"].as_str().unwrap_or("").to_string();
+                    let key = (node.to_string(), name.clone());
+                    let standing = !self.deleted.lock().unwrap().contains(&key)
+                        && (self.created.lock().unwrap().contains(&key)
+                            || self
+                                .lvols
+                                .get(node)
+                                .map(|v| v.iter().any(|(n, _)| *n == name))
+                                .unwrap_or(false));
+                    if standing {
+                        return Err("File exists".into());
+                    }
+                    self.created.lock().unwrap().insert(key);
+                    Ok(json!({ "result": format!("uuid-of-{}", name) }))
+                }
+                "bdev_lvol_delete" => {
+                    let alias = payload["params"]["name"].as_str().unwrap_or("");
+                    let name = alias.rsplit('/').next().unwrap_or(alias).to_string();
+                    self.deleted.lock().unwrap().insert((node.to_string(), name));
+                    Ok(json!({ "result": true }))
                 }
                 "bdev_get_bdevs" => {
                     let name = payload["params"]["name"].as_str().unwrap_or("");
@@ -3088,8 +3128,14 @@ mod tests {
                         None => Err("No such device".into()),
                     }
                 }
-                "bdev_lvol_clone" => Ok(json!({ "result": self.clone_uuid })),
-                "bdev_lvol_create" => Ok(json!({ "result": self.clone_uuid })),
+                "bdev_lvol_clone" | "bdev_lvol_create" => {
+                    // Re-creating a name (the revert's delete + clone) lifts
+                    // the deletion.
+                    let key = if method == "bdev_lvol_clone" { "clone_name" } else { "lvol_name" };
+                    let name = payload["params"][key].as_str().unwrap_or("").to_string();
+                    self.deleted.lock().unwrap().remove(&(node.to_string(), name));
+                    Ok(json!({ "result": self.clone_uuid }))
+                }
                 "bdev_raid_get_bdevs" => Ok(json!({
                     "result": self.raids.lock().unwrap().get(node).cloned().unwrap_or_default()
                 })),
@@ -4005,6 +4051,95 @@ mod tests {
             "superseded head must be reaped, got {:?}",
             deletes
         );
+    }
+
+    /// F75 (docs/f75-revert-leaves-pre-failure-epochs-under-live-names.md):
+    /// the §5 revert leaves the stale replica's own epochs NEWER than its
+    /// base in place, under the live names. `align_head` then takes SPDK's
+    /// "File exists" as convergence, so the replica carries a pre-failure
+    /// snapshot under a post-catch-up name; `select_base_epoch` tests
+    /// presence by name, so a second failure within T_back of the next cut
+    /// can revert to it and resurrect what the first revert discarded. The
+    /// revert must reap them (newest first), and BEFORE the record marks
+    /// the head reverted — a crash after that write resumes without a
+    /// revert and would never reap.
+    #[tokio::test]
+    #[ignore = "F75: not fixed — the revert does not reap the stale replica's epochs newer than its base"]
+    async fn revert_reaps_the_stale_replicas_epochs_newer_than_its_base() {
+        // uuid-b failed at 10:20 holding epochs 3, 4 and 5; 5 was cut at
+        // 10:19, inside T_back, so the base is 4. No survivor epoch since:
+        // the outage was shorter than the interval, so the target epoch's
+        // name is exactly the leftover's.
+        let mut record = VolumeSyncRecord::initial(&replicas3());
+        let all: Vec<String> =
+            vec!["uuid-a".to_string(), "uuid-b".to_string(), "uuid-c".to_string()];
+        record.apply_epoch_cut(&epoch("vol1", 3), &all, "2026-06-11T10:00:00Z");
+        record.apply_epoch_cut(&epoch("vol1", 4), &all, "2026-06-11T10:05:00Z");
+        record.apply_epoch_cut(&epoch("vol1", 5), &all, "2026-06-11T10:19:00Z");
+        record.mark_stale("uuid-b", "leg failed", "2026-06-11T10:20:00Z");
+        let rpc = {
+            let mut rpc = FakeRpc::new("uuid-b-v2");
+            rpc.lvols.insert(
+                "node-b".to_string(),
+                vec![
+                    ("lvol-uuid-b".to_string(), "uuid-b".to_string()),
+                    (epoch("vol1", 3), "s3".to_string()),
+                    (epoch("vol1", 4), "s4".to_string()),
+                    (epoch("vol1", 5), "s5-cut-before-the-failure".to_string()),
+                ],
+            );
+            rpc
+        };
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 3), &epoch("vol1", 4), &epoch("vol1", 5)],
+        );
+        let store = FakeStore::new(record);
+        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg())
+            .await
+            .unwrap();
+
+        // The base is epoch 4: the copy is base-inclusive from it.
+        let srcs: Vec<String> = rpc
+            .calls_of("bdev_lvol_start_shallow_copy")
+            .iter()
+            .map(|(_, p)| p["params"]["src_lvol_name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(srcs, vec!["lvs0/epoch-vol1-4".to_string(), "lvs0/epoch-vol1-5".to_string()]);
+
+        let calls = rpc.calls.lock().unwrap().clone();
+        let on_b = |method: &str, key: &str, value: &str| {
+            calls.iter().position(|(n, p)| {
+                n == "node-b" && p["method"] == method && p["params"][key] == value
+            })
+        };
+        // The leftover epoch 5 is reaped at the revert ...
+        let reaped = on_b("bdev_lvol_delete", "name", "lvs0/epoch-vol1-5")
+            .expect("the stale replica's epoch 5, newer than its base, must be reaped at revert");
+        // ... BEFORE alignment cuts the real epoch 5 from the repaired head.
+        // The fake refuses a duplicate name as SPDK does: without the reap
+        // the cut is refused and align_head's "already exists" path keeps
+        // the pre-failure snapshot under the live name.
+        let aligned = on_b("bdev_lvol_snapshot", "snapshot_name", "epoch-vol1-5")
+            .expect("alignment must cut epoch 5 on the destination");
+        assert!(
+            reaped < aligned,
+            "the reap (call {}) must precede the alignment cut (call {})",
+            reaped, aligned
+        );
+        assert!(
+            rpc.created.lock().unwrap().contains(&("node-b".to_string(), epoch("vol1", 5))),
+            "the destination's epoch 5 must be a fresh cut, not the pre-failure leftover"
+        );
+        // The base is the clone parent and everything older is the GC's:
+        // the revert must not touch them.
+        for seq in [3u64, 4] {
+            assert!(
+                on_b("bdev_lvol_delete", "name", &format!("lvs0/{}", epoch("vol1", seq))).is_none(),
+                "epoch {} must not be deleted by the revert",
+                seq
+            );
+        }
     }
 
     #[tokio::test]
