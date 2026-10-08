@@ -9,6 +9,9 @@
 # CHART is an OCI reference; the package is pulled and its version checked.
 #
 #   KUBECONFIG=~/.kube/bench2.yaml VERSION=1.58.0 ./ec2-up.sh
+#
+# HELM_EXTRA: extra helm arguments, word-split, e.g.
+#   HELM_EXTRA="--set replication.orchestrators.epochIntervalSecs=3600"
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 : "${VERSION:?e.g. 1.58.0}"
@@ -26,7 +29,7 @@ pkg=$(ls "$pull"/*.tgz)
 got=$(helm show chart "$pkg" | awk '/^version:/{print $2; exit}')   # reads the LOCAL package
 [ "$got" = "$VERSION" ] || fail "pulled chart is version '$got', wanted $VERSION"
 helm upgrade --install flint-csi "$pkg" \
-  --namespace flint-system --create-namespace -f "$HERE/ec2-values.yaml" --wait --timeout 15m
+  --namespace flint-system --create-namespace -f "$HERE/ec2-values.yaml" ${HELM_EXTRA:-} --wait --timeout 15m
 kubectl -n flint-system wait --for=condition=Ready pod -l app=flint-csi-node --timeout=600s   # OnDelete DS: no rollout status
 helm -n flint-system list
 
