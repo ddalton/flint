@@ -415,8 +415,12 @@ Hist`. `Hist` says `base`, `anc` and `orig` are written only at the handle
 a step mints, so `Derives` and `Content` between minted handles never move
 across a step (`DerivesKeep`). Every M5 claim compares `Derives` before
 and after a step, so the rest of M5 builds on this. 1,347 obligations,
-all closed, M5's section only, on M4's fingerprints; the record run and a
-control are still to do. NO M5 CLAIM IS PROVED, and two cannot be as stated.
+all closed. The record run (2026-10-08, whole module, `--cleanfp`) proved
+all 13,093 obligations (M0-M4 + part A) at 27.9 GiB, at its 28 GiB cap.
+Two controls each failed exactly the obligations predicted for them:
+dropping `BaselineMinted` failed 2, and mutating a copy's `orig` failed 1
+on its second run (the first run had left a typing fact unmutated).
+NO M5 CLAIM IS PROVED, and two cannot be as stated.
 Every gate world allows at most one gateway removal (`MaxRemovals <= 1`);
 with three -- a rename, a rename back, a delete -- TLC finds, with one
 writer at depth 13: `Inv_NoRegress` fails (the writer re-creates a path

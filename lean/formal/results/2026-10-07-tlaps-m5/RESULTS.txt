@@ -22,8 +22,7 @@ tlapm 1.6.0-pre bfa9468, Linux box (8 cores, 30 GB), `--method smt
 --stretch 12 --threads 4 -k`, nice 10, under systemd-run MemoryMax=12G
 (run-proof-m5.sh), beside the TLC experiments.  THE M5 SECTION ONLY
 (`--toolbox 7198 8048`), M4's record fingerprints (copied) for everything
-before it -- NOT a record run (`--cleanfp` over the whole module, as M1-M4
-each had); that is still to do.
+before it -- the record run below followed.
 
   obligations  1,347   ALL PROVED, none failed, none OMITTED
       866  trivial (closed by tlapm itself)
@@ -40,7 +39,34 @@ each had); that is still to do.
   the three minting steps' HistEv in one QED each.  Run 2 split HistEv into
   its four conjuncts (mint_hist in gen-proof.py), Init into three.
 
-NO CONTROL YET.  Part A reads no Shipped rule, so a dropped-rule control
-(plan section 5) cannot apply; the control for it is a mutation of the
-history writes (say, Edit's base written at an already-minted handle),
-not yet built.
+RECORD RUN (out/proof-record.out, run-record-m5.sh), 2026-10-08: the whole
+module, M0-M4 + M5 part A, `--toolbox 0 0 --cleanfp --threads 4`, fingerprints
+erased, nothing else heavy on the box, under systemd-run MemoryMax=28G.
+LeanP1Proof.tla md5 a5812043, LeanP1Anc.tla md5 9a06fcbf.
+
+  obligations  13,093   ALL PROVED, none failed, none OMITTED
+                        (M4's 11,746 + part A's 1,347)
+  wall 5,046 s, tlapm 27.9 GiB RSS (the cap is 28: the next record run needs
+  more headroom or fewer threads), rc 0
+
+CONTROLS (make-controls.py; plan section 5).  Part A reads no Shipped rule,
+so a dropped-rule control cannot apply; instead two knock out one
+load-bearing fact each and PREDICT the failing obligations.  Each ran the
+whole module on the record run's fingerprints (`--toolbox 0 0`).
+
+  ctl-blm  BaselineMinted dropped from Hist (proof text only).
+           Predicted: Edit_M5's <2>5 and HistWrite's <1>4 <2>2.
+           out/ctl-blm.out: 2/13,093 failed, lines 7505 and 7322 --
+           EXACTLY the prediction.  wall 1,383 s.
+  ctl-cor  THE MODEL MUTATED (scratch LeanP1Anc copy): a re-upload's copy
+           records orig := h, not Content(h).  The proof's restatements of
+           the write follow the mutation.
+           Predicted: Upload_M5's <3>6 <4>1 (case orig[h] # Nil) only.
+           Run 1 (out/ctl-cor-run1.out): 2/13,093 failed, line 7682 (the
+           prediction) AND line 673, Upload_TypeOK's <2>7 -- the control
+           had not followed the typing fact <2>3 (Content(h) \in
+           Opt(Handles)) that types orig'[c]: the misprediction was the
+           control's, a restatement left at the unmutated write.
+           Run 2 (out/ctl-cor.out, run-ctl-cor2.sh), <2>3 restated as
+           h \in Opt(Handles): 1/13,092 failed, line 7682 -- EXACTLY the
+           prediction.  wall 1,453 s.
