@@ -420,7 +420,15 @@ all 13,093 obligations (M0-M4 + part A) at 27.9 GiB, at its 28 GiB cap.
 Two controls each failed exactly the obligations predicted for them:
 dropping `BaselineMinted` failed 2, and mutating a copy's `orig` failed 1
 on its second run (the first run had left a typing fact unmutated).
-NO M5 CLAIM IS PROVED, and two cannot be as stated.
+Part B proves `Prop_NoSilentRevert` (2026-10-08) from part A and the
+typing alone: only `GCas` and `Install` replace a published version with
+another, `GCas` only over the version its save read (so the new one derives
+from it through `anc`), `Install` only over its own baseline or by recording
+the foreign version. 190 obligations; the record run proved all 13,283
+(M0-M5B) at 28.9 GiB, at its 29 GiB cap on a 30 GiB box. Dropping either
+rule it cites (`GatewayJudgesRead`, `CommitSurfacesForeign`) fails exactly
+the predicted obligation, and in TLC either rule off gives a silent revert
+at depth 10. The other two M5 claims cannot be proved as stated:
 Every gate world allows at most one gateway removal (`MaxRemovals <= 1`);
 with three -- a rename, a rename back, a delete -- TLC finds, with one
 writer at depth 13: `Inv_NoRegress` fails (the writer re-creates a path

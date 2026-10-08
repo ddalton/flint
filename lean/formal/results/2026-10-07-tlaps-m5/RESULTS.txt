@@ -70,3 +70,35 @@ whole module on the record run's fingerprints (`--toolbox 0 0`).
            Run 2 (out/ctl-cor.out, run-ctl-cor2.sh), <2>3 restated as
            h \in Opt(Handles): 1/13,092 failed, line 7682 -- EXACTLY the
            prediction.  wall 1,453 s.
+
+PART B: Prop_NoSilentRevert PROVED (gen-proof.py's PARTB; THEOREM
+NoSilentRevert == Spec => Prop_NoSilentRevert).  LeanP1Proof.tla md5
+fa2df520, 8,153 lines; part B is lines 8050-8153.  Lemmas: RevClear (a step
+that keeps, clears or fills every path reverts nothing), GCas_Rev, Install_Rev,
+Next_Rev; the theorem by PTL over M5Invariant.  Uses part A (HistAnc) and the
+typing only.
+
+  run 1 (out/proofb-run1.out, run-proof-m5b.sh): `--toolbox 8050 8153`, the
+  record run's fingerprints for everything before it, `--threads 4`
+  obligations  190   ALL PROVED, none failed, none OMITTED
+      133 trivial, 56 Z3, 1 LS4 (the theorem's temporal step)
+  wall 85 s, 1.3 GiB, rc 0
+
+  RECORD RUN (out/proofb-record.out, run-record-m5b.sh), 2026-10-08: the whole
+  module, M0-M4 + M5 parts A and B, `--toolbox 0 0 --cleanfp --threads 4`,
+  fingerprints erased, nothing else on the box, systemd-run MemoryMax=29G.
+  obligations  13,283   ALL PROVED, none failed, none OMITTED
+                        (part A's record 13,093 + part B's 190)
+  wall 4,923 s, tlapm 28.9 GiB RSS -- at the 29G cap, and the box has 30:
+  the next milestone's record run cannot simply raise the cap again
+  (split the module, or run it on a larger box).
+
+CONTROLS (make-controls-b.py, run-ctl-m5b.sh): the two shipped rules part B
+cites, each dropped from Shipped (proof text only), part B's section only.
+  ctl-gjr  GatewayJudgesRead dropped.  Predicted: GCas_Rev <1>1 (line 8074).
+           out/ctl-gjr.out: 1/190 failed, line 8074 -- EXACTLY.
+  ctl-csf  CommitSurfacesForeign dropped.  Predicted: Install_Rev <1>5 <2>1
+           (line 8100).  out/ctl-csf.out: 1/190 failed, line 8100 -- EXACTLY.
+And in the model (NOTES.txt E9): with either rule off, TLC finds a silent
+revert at depth 10, at that rule's step; with both on it holds at the gate's
+FetchHolds count.

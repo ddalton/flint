@@ -126,3 +126,21 @@ E8  ...with the retire age (MaxAges = 1, so the reaper can take it):
 E8b ...Prop_NoSilentRevert HOLDS in Rem3Age (78,039,582 distinct, depth 32,
     30 min, out/E6Rem3Age-Revert.out): the one M5 claim that survives the
     three-removal world.
+
+E9  PART B's TLC control (run-e9.sh, e9/), FetchHolds, Prop_NoSilentRevert:
+    every rule on: HOLDS, 3,510,269 distinct (the gate's count), depth 33.
+    GatewayJudgesRead off: FAILS at depth 10 -- a save that read <<p1,1>>
+      lands as <<p1,2>> over A's commit <<p1,3>>, nothing recorded (GCas).
+    CommitSurfacesForeign off: FAILS at depth 10 -- A, claimed with
+      baseline <<p1,1>>, installs <<p1,3>> over the foreign <<p1,2>> and
+      records no conflict (Install).
+    So each rule part B's proof cites is load-bearing in the model, at the
+    step the proof says.
+
+PART B (2026-10-08): Prop_NoSilentRevert PROVED (RESULTS.txt).  It needs no
+other M5 claim: only GCas and Install replace a published version with
+another, GCas only over the version its save read (so the new one derives
+from it through anc -- HistAnc), Install only over its own baseline or by
+recording the foreign version as a conflict.  That is why it survives the
+three-removal world where Inv_NoRegress and Inv_AckedNamed fail: removals
+only clear or move versions, and the property never needed those two.
