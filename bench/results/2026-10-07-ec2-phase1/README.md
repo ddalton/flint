@@ -68,7 +68,7 @@ samples, PV, ENA counters (`flint-r3/net-after-manual-*.txt` were read by
 hand after the stop); `spdk-reactor-samples/`; `ec2-up.log`; `run-phase1.sh`
 as run; `phase1.status`.
 
-## Root cause of finding 1 — CONFIRMED 2026-10-08
+## Root cause of finding 1 — CONFIRMED 2026-10-08 (tracked as F74: `spdk-csi-driver/docs/f74-epoch-snapshots-collapse-replicated-writes.md`)
 
 **Confirmed by A/B** (`../2026-10-08-epoch-cow-ab/`): on one r3 volume with
 the scheduler off, a single `bdev_lvol_snapshot` on its replicas took 4K
