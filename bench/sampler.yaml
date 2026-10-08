@@ -72,6 +72,11 @@ spec:
     spec:
       hostPID: true
       tolerations: [{operator: Exists}]
+      # The samplers are how the harness reaches the hosts (hostexec). On
+      # 2026-10-08 all three were evicted when a driver's image pull put the
+      # 8 GiB roots into DiskPressure, and the run died mid-step. Critical
+      # pods are admitted under pressure and evicted last.
+      priorityClassName: system-node-critical
       containers:
       - name: sampler
         image: alpine:3.20

@@ -76,7 +76,10 @@ if [ "$CEILINGS" = 1 ]; then
   CONFIRM_WIPE=yes "$HERE/drivers/wipe-disks.sh" > "$OUT/wipe-ceilings.log" 2>&1
 fi
 
-done_list=""
+# DONE_LIST: drivers an earlier invocation already ran (a relaunch after a
+# failure), so a repeat labels itself "-again<n>" instead of colliding.
+done_list="${DONE_LIST:-}"
+prune_images
 for d in $DRIVERS; do
   n=$(( $(printf '%s\n' $done_list | grep -cx "$d" || true) + 1 )); done_list="$done_list $d"
   label="$d-a"; [ "$n" = 1 ] || label="$d-a-again$n"
@@ -86,6 +89,7 @@ for d in $DRIVERS; do
   status "uninstall $d"
   "$HERE/drivers/$d/uninstall.sh" > "$OUT/uninstall-$label.log" 2>&1
   CONFIRM_WIPE=yes "$HERE/drivers/wipe-disks.sh" > "$OUT/wipe-$label.log" 2>&1
+  prune_images
 
   default_cores=$( . "$HERE/drivers/$d/env.sh"; echo "${DEFAULT_CORES:-}" )
   if [ "$PASS_B" = 1 ] && [ "$n" = 1 ] && [ -n "$default_cores" ] && [ "$default_cores" -gt 1 ]; then
@@ -96,6 +100,7 @@ for d in $DRIVERS; do
     status "uninstall $d"
     "$HERE/drivers/$d/uninstall.sh" > "$OUT/uninstall-$label.log" 2>&1
     CONFIRM_WIPE=yes "$HERE/drivers/wipe-disks.sh" > "$OUT/wipe-$label.log" 2>&1
+    prune_images
   fi
 done
 

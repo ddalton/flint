@@ -39,6 +39,25 @@ instance_store() {  # <node>
     done'
 }
 
+# The nodes' roots are 8 GiB and the competitors' images are 1-3 GiB each:
+# on 2026-10-08 Longhorn's pull on top of Mayastor's leftovers put all three
+# nodes into DiskPressure, the kubelet evicted the sampler mid-install, and
+# the run died. Drop every image no container uses (ctr: the nodes have no
+# crictl) and print what the root holds.
+prune_images() {
+  local n
+  for n in $(nodes); do
+    hostexec "$n" '
+      used=$(ctr -n k8s.io containers ls 2>/dev/null | awk "NR>1{print \$2}" | sort -u); k=0
+      for img in $(ctr -n k8s.io images ls -q 2>/dev/null); do
+        echo "$used" | grep -qx "$img" && continue
+        case "$img" in *pause*) continue ;; esac
+        ctr -n k8s.io images rm --sync "$img" >/dev/null 2>&1 && k=$((k+1))
+      done
+      echo "'"$n"': pruned $k image refs; root: $(df -h / | tail -1)"' >&2
+  done
+}
+
 # helm with private cache/config/data dirs: on the Mac the default dirs are
 # root-owned and `helm repo add` / OCI pulls fail there.
 helm_private() {
