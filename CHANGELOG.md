@@ -32,6 +32,37 @@ covered by the stability guarantee.
   test (`revert_reaps_the_stale_replicas_epochs_newer_than_its_base`)
   until fixed. Neither is fixed in this entry.
 
+### Changed
+
+- **F74 write fix, changes 1 and 2: replicated random writes ~97x
+  faster** (2026-10-08). New lvstores use 128 KiB clusters instead of
+  1 MiB, with `num_md_pages_per_cluster_ratio` lowered to 13 so the
+  metadata region (and unclean-shutdown replay) stays at one page per
+  MiB (`minimal_disk_service.rs`); an lvstore keeps the cluster size it
+  was created with. The spdk-tgt image gains
+  `blob-parallel-cluster-alloc.patch`: a blobstore channel runs up to 32
+  copy-on-write cluster allocations at once instead of one, and an op on
+  a cluster being allocated waits for it (blob_ut 520/520, four new
+  tests, mutation-checked). On EC2 (3 x i4i.2xlarge, r3, 300 s epochs)
+  the test images took 4K random writes from 572 to 55,374 IOPS, mixed
+  70/30 from 7,966 to 119,161, QD1 write p50 from 2,671 to 473 us and
+  1 MiB sequential writes from 320 to 518 MiB/s; the baseline is from a
+  different cluster and the same-cluster control is still to run. **Not
+  yet released:** the chart still pins flint-driver 1.58.0 and spdk-tgt
+  1.7.0, and the fix must first pass a correctness gate (fio verify
+  across epoch cuts with a replica scrub, spdk-tgt killed with copies in
+  flight, catch-up and hot rejoin at 128 KiB clusters).
+- **Benchmark Phase 2 results and harness fixes** (2026-10-08).
+  Mayastor 4.6.2 and Longhorn 1.13.0 (v2) at r1 and r3 plus the F74 arm,
+  in `bench/results/2026-10-08-ec2-phase2/`; Rook-Ceph, the Mayastor
+  repeat, the epoch-interval arm and a replica-locality pass (Mayastor
+  pool labels, Longhorn `strict-local`) are scripted but not yet run.
+  The harness now prunes images between drivers and runs its samplers
+  at node-critical priority (8 GiB roots hit DiskPressure),
+  `report.py` skips truncated samples instead of crashing, and
+  `FIO_NODE` pins with a nodeSelector so WaitForFirstConsumer volumes
+  bind.
+
 ### Fixed
 
 - **flint-forge: a restore takes the packs its snapshot names off the
