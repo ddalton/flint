@@ -195,3 +195,52 @@ revisit only against measured numbers, and against §8 first.
    normal case. Retention is a count (`FLINT_EPOCH_RETAIN`, 6), so set K
    with the interval; a detached volume keeps its last K epochs until it
    is attached again.
+
+### 5.5 Correctness gate (before release)
+
+§5.4 measures speed and mechanism. Nothing there checks that data survives
+the new copy path, so changes 1 and 2 ship in no release until all of the
+following pass. Change 2 alters copy-on-write ordering inside the
+blobstore and change 1 alters the unit every cluster-granular operation
+works in (copy-on-write, shallow copy, esnap clones, hot rejoin); either
+can corrupt data without moving a benchmark number. Run on real NVMe
+(EC2), r3, 300 s epochs, the change 1 driver and change 2 spdk-tgt images
+together.
+
+1. **Data integrity across epoch cuts.** fio random and sequential
+   writes with `verify=crc32c` (`do_verify=1`, `verify_backlog` so reads
+   check during the run), at QD32 x 4 jobs, long enough to span at least
+   three cuts, with writes landing on clusters that are mid-copy. Then
+   quiesce and compare the three replicas with the fs-allocated-only
+   scrub (`UnansweredOn7b.md`, "fs-allocated-only scrub, three legs":
+   snapshot each leg, e2fsck-replay a clone, hash the allocated map on
+   all three). Pass: zero verify errors, three equal digests.
+2. **spdk-tgt killed with copies in flight.** Under item 1's load, start
+   a cut, then `kill -9` spdk-tgt on one replica node while up to 32
+   allocations are in flight (confirm with the copy count in the
+   reactor's log or `bdev_lvol_get_lvols` allocated clusters rising).
+   Repeat on the node holding the raid. This is the F5 dirty-restart
+   drill (`attach-detach-campaign-2026-07.md`) with the new failure
+   window. Pass: the blobstore loads (no recovery error), the volume
+   rejoins, fio verify passes on read-back, item 1's scrub passes.
+3. **Catch-up and hot rejoin at 128 KiB clusters.** Fail one replica
+   (stop its spdk-tgt), keep writing across at least two cuts, bring it
+   back; let catch-up (shallow copy or esnap clone of the target epoch)
+   and hot rejoin admit it. Repeat with the failure landing inside a
+   copy burst. Pass: rejoin completes without a full rebuild, item 1's
+   scrub passes, verify passes. Include an esnap clone from a 1 MiB-
+   cluster lvstore onto a 128 KiB one only if a mixed fleet is possible
+   (nothing is deployed, so it is not today).
+4. **Crash-recovery time** (§5.4 item 4): a full lvstore at 128 KiB with
+   ratio 13 replays no slower than the 1 MiB / ratio 100 baseline.
+5. **F75 regression stays pinned**: its ignored test still fails at the
+   same assertion until F75 is fixed (it is not part of this gate, but
+   the gate must not mask it).
+
+Status 2026-10-09: none of 1-5 run. Done so far: change 2's blob unit
+tests (520/520, four new, mutation-checked) and change 1's driver tests
+(2737/0), and the r3 matrix for changes 1+2 on EC2
+(`bench/results/2026-10-08-ec2-phase2/flint-r3-f74c2`: 4K random write
+572 -> 55,374 IOPS, QD1 write p50 2,671 -> 473 us; baseline from another
+cluster, same-cluster control not yet run). Both changes are on main but
+unreleased: the chart pins flint-driver 1.58.0 and spdk-tgt 1.7.0.
