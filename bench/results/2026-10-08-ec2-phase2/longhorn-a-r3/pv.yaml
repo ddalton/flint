@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  annotations:
+    longhorn.io/volume-scheduling-error: ""
+    pv.kubernetes.io/provisioned-by: driver.longhorn.io
+    volume.kubernetes.io/provisioner-deletion-secret-name: ""
+    volume.kubernetes.io/provisioner-deletion-secret-namespace: ""
+  creationTimestamp: "2026-10-08T22:31:24Z"
+  finalizers:
+  - external-provisioner.volume.kubernetes.io/finalizer
+  - kubernetes.io/pv-protection
+  - external-attacher/driver-longhorn-io
+  name: pvc-7d12c740-7848-4cd5-9181-a2b94beec3fa
+  resourceVersion: "94902"
+  uid: fc51e810-3ef0-4c3b-a0f6-119f4bba5e19
+spec:
+  accessModes:
+  - ReadWriteOnce
+  capacity:
+    storage: 100Gi
+  claimRef:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    name: bench-longhorn-a-r3
+    namespace: flint-bench
+    resourceVersion: "94816"
+    uid: 7d12c740-7848-4cd5-9181-a2b94beec3fa
+  csi:
+    driver: driver.longhorn.io
+    fsType: ext4
+    volumeAttributes:
+      dataEngine: v2
+      fsType: ext4
+      numberOfReplicas: "3"
+      staleReplicaTimeout: "2880"
+      storage.kubernetes.io/csiProvisionerIdentity: 1791494120967-7028-driver.longhorn.io
+    volumeHandle: pvc-7d12c740-7848-4cd5-9181-a2b94beec3fa
+  persistentVolumeReclaimPolicy: Delete
+  storageClassName: longhorn-v2-bench-r3
+  volumeMode: Filesystem
+status:
+  lastPhaseTransitionTime: "2026-10-08T22:31:24Z"
+  phase: Bound

@@ -1,0 +1,2 @@
+/bench/sample.sh: line 10: can't open /proc/584458/cmdline: no such file
+/bench/sample.sh: line 10: can't open /proc/584470/cmdline: no such file

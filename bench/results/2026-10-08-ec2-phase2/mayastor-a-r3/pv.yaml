@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  annotations:
+    pv.kubernetes.io/provisioned-by: io.openebs.csi-mayastor
+    volume.kubernetes.io/provisioner-deletion-secret-name: ""
+    volume.kubernetes.io/provisioner-deletion-secret-namespace: ""
+  creationTimestamp: "2026-10-08T19:22:25Z"
+  finalizers:
+  - external-provisioner.volume.kubernetes.io/finalizer
+  - kubernetes.io/pv-protection
+  - external-attacher/io-openebs-csi-mayastor
+  name: pvc-6b55ce58-ddfa-43ee-b796-e247bfe5a214
+  resourceVersion: "33085"
+  uid: 26dd63ef-86a8-4e5d-b086-c1b0bb32480d
+spec:
+  accessModes:
+  - ReadWriteOnce
+  capacity:
+    storage: 100Gi
+  claimRef:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    name: bench-mayastor-a-r3
+    namespace: flint-bench
+    resourceVersion: "33064"
+    uid: 6b55ce58-ddfa-43ee-b796-e247bfe5a214
+  csi:
+    driver: io.openebs.csi-mayastor
+    fsType: ext4
+    volumeAttributes:
+      csi.storage.k8s.io/pv/name: pvc-6b55ce58-ddfa-43ee-b796-e247bfe5a214
+      csi.storage.k8s.io/pvc/name: bench-mayastor-a-r3
+      csi.storage.k8s.io/pvc/namespace: flint-bench
+      fsType: ext4
+      protocol: nvmf
+      repl: "3"
+      storage.kubernetes.io/csiProvisionerIdentity: 1791482625806-6539-io.openebs.csi-mayastor
+      thin: "false"
+    volumeHandle: 6b55ce58-ddfa-43ee-b796-e247bfe5a214
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: openebs.io/csi-node
+          operator: In
+          values:
+          - mayastor
+  persistentVolumeReclaimPolicy: Delete
+  storageClassName: mayastor-bench-r3
+  volumeMode: Filesystem
+status:
+  lastPhaseTransitionTime: "2026-10-08T19:22:25Z"
+  phase: Bound

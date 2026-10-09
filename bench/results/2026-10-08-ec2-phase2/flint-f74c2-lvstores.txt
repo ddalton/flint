@@ -1,0 +1,36 @@
+[
+  {
+    "uuid": "7071f85b-5e31-4635-9cbe-67277a9da8fa",
+    "name": "lvs_bench3-cp-1_0000-00-00-0",
+    "base_bdev": "nvme_0000_00_1f_0n1",
+    "total_data_clusters": 14246982,
+    "free_clusters": 14246982,
+    "block_size": 512,
+    "cluster_size": 131072,
+    "max_growable_size": 244807892992
+  }
+]
+[
+  {
+    "uuid": "8fac5d11-dafd-48df-83b5-4db034683245",
+    "name": "lvs_bench3-aws-2_0000-00-00-0",
+    "base_bdev": "nvme_0000_00_1f_0n1",
+    "total_data_clusters": 14246982,
+    "free_clusters": 14246982,
+    "block_size": 512,
+    "cluster_size": 131072,
+    "max_growable_size": 244807892992
+  }
+]
+[
+  {
+    "uuid": "0ecaa471-318d-4875-a268-56661f2a080a",
+    "name": "lvs_bench3-aws-1_0000-00-00-0",
+    "base_bdev": "nvme_0000_00_1f_0n1",
+    "total_data_clusters": 14246982,
+    "free_clusters": 14246982,
+    "block_size": 512,
+    "cluster_size": 131072,
+    "max_growable_size": 244807892992
+  }
+]

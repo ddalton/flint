@@ -1,0 +1,36 @@
+
+▶ network: bench3-aws-1 -> bench3-aws-2 (172.31.40.169), 4 streams, 900 s (burst drain)
+
+▶ disk: bench3-aws-1 /dev/nvme0n1 (raw), the matrix at 30s
+
+▶ disk: bench3-aws-2 /dev/nvme1n1 (raw), the matrix at 30s
+
+▶ disk: bench3-cp-1 /dev/nvme1n1 (raw), the matrix at 30s
+iperf3-bench3-aws-1-bench3-aws-2.json: per-minute Gbit/s 11.91 11.91 11.91 11.91 11.91 11.91 11.91 10.34 4.65 4.65 4.65 4.65 4.65 4.65 4.65; mean 8.42
+disk-bench3-aws-1 iops_mixed70_4k: 285,710 IOPS 1,116 MiB/s
+disk-bench3-aws-1 iops_randread_4k: 200,010 IOPS 781 MiB/s
+disk-bench3-aws-1 iops_randwrite_4k: 110,135 IOPS 430 MiB/s
+disk-bench3-aws-1 lat_randread_4k: 38,495 IOPS 150 MiB/s
+disk-bench3-aws-1 lat_randwrite_4k: 37,613 IOPS 147 MiB/s
+disk-bench3-aws-1 seq_read_128k: 10,850 IOPS 1,356 MiB/s
+disk-bench3-aws-1 seq_read_1m: 1,356 IOPS 1,356 MiB/s
+disk-bench3-aws-1 seq_write_128k: 8,491 IOPS 1,061 MiB/s
+disk-bench3-aws-1 seq_write_1m: 1,061 IOPS 1,062 MiB/s
+disk-bench3-aws-2 iops_mixed70_4k: 285,784 IOPS 1,116 MiB/s
+disk-bench3-aws-2 iops_randread_4k: 200,013 IOPS 781 MiB/s
+disk-bench3-aws-2 iops_randwrite_4k: 110,126 IOPS 430 MiB/s
+disk-bench3-aws-2 lat_randread_4k: 39,929 IOPS 156 MiB/s
+disk-bench3-aws-2 lat_randwrite_4k: 38,213 IOPS 149 MiB/s
+disk-bench3-aws-2 seq_read_128k: 10,850 IOPS 1,356 MiB/s
+disk-bench3-aws-2 seq_read_1m: 1,356 IOPS 1,356 MiB/s
+disk-bench3-aws-2 seq_write_128k: 8,491 IOPS 1,061 MiB/s
+disk-bench3-aws-2 seq_write_1m: 1,061 IOPS 1,062 MiB/s
+disk-bench3-cp-1 iops_mixed70_4k: 285,750 IOPS 1,116 MiB/s
+disk-bench3-cp-1 iops_randread_4k: 199,994 IOPS 781 MiB/s
+disk-bench3-cp-1 iops_randwrite_4k: 110,133 IOPS 430 MiB/s
+disk-bench3-cp-1 lat_randread_4k: 37,411 IOPS 146 MiB/s
+disk-bench3-cp-1 lat_randwrite_4k: 37,458 IOPS 146 MiB/s
+disk-bench3-cp-1 seq_read_128k: 10,850 IOPS 1,356 MiB/s
+disk-bench3-cp-1 seq_read_1m: 1,356 IOPS 1,356 MiB/s
+disk-bench3-cp-1 seq_write_128k: 8,491 IOPS 1,061 MiB/s
+disk-bench3-cp-1 seq_write_1m: 1,061 IOPS 1,062 MiB/s

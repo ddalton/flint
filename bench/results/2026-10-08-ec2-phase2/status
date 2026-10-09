@@ -1,0 +1,43 @@
+2026-10-08T16:55:57Z start: drivers=[mayastor longhorn rook-ceph mayastor] pass_b=0 reps=3 runtime=120s
+2026-10-08T16:55:58Z remove the preinstalled Flint
+2026-10-08T16:56:51Z FAILED at line 70 (rc=1)
+phase2 EXIT=1 2026-10-08T16:56:51Z
+--- relaunch 16:59:45Z
+2026-10-08T16:59:47Z start: drivers=[mayastor longhorn rook-ceph mayastor] pass_b=0 reps=3 runtime=120s
+2026-10-08T16:59:56Z ceilings
+2026-10-08T17:15:08Z FAILED at line 77 (rc=1)
+phase2 EXIT=1 2026-10-08T17:15:08Z
+--- relaunch after ceilings lookup fix 17:15:34Z
+2026-10-08T17:15:35Z start: drivers=[mayastor longhorn rook-ceph mayastor] pass_b=0 reps=3 runtime=120s
+2026-10-08T17:15:44Z ceilings
+2026-10-08T17:49:03Z install mayastor 4.6.2 (Pass A, defaults)
+2026-10-08T17:49:26Z FAILED at line 40 (rc=1)
+phase2 EXIT=1 2026-10-08T17:49:26Z
+2026-10-08T17:49:39Z flint-epochs: phase2 did not finish ALL-DONE -- Flint epoch runs SKIPPED
+--- relaunch after mayastor crd fix 17:50:19Z
+2026-10-08T17:50:21Z start: drivers=[mayastor longhorn rook-ceph mayastor] pass_b=0 reps=3 runtime=120s
+2026-10-08T17:50:21Z install mayastor 4.6.2 (Pass A, defaults)
+2026-10-08T18:04:59Z run mayastor-a r1 (mayastor-bench-r1)
+2026-10-08T19:22:22Z done mayastor-a r1
+2026-10-08T19:22:22Z run mayastor-a r3 (mayastor-bench-r3)
+2026-10-08T20:35:53Z done mayastor-a r3
+2026-10-08T20:35:53Z uninstall mayastor
+2026-10-08T20:38:47Z install longhorn 1.13.0 (Pass A, defaults)
+2026-10-08T20:40:04Z FAILED at line 40 (rc=1)
+phase2 EXIT=1 2026-10-08T20:40:04Z
+2026-10-08T20:40:24Z flint-epochs: phase2 did not finish ALL-DONE -- Flint epoch runs SKIPPED
+2026-10-08T20:40:29Z flint-f74c1: epoch runs did not finish ALL-DONE -- f74c1 run SKIPPED
+2026-10-08T21:13:54Z relaunch after longhorn disk-pressure fix (roots 8->32 GiB, discard_unpacked_layers, critical samplers, prune_images)
+2026-10-08T21:13:57Z start: drivers=[longhorn rook-ceph mayastor] pass_b=0 reps=3 runtime=120s
+2026-10-08T21:14:04Z install longhorn 1.13.0 (Pass A, defaults)
+2026-10-08T21:16:30Z run longhorn-a r1 (longhorn-v2-bench-r1)
+2026-10-08T22:31:20Z done longhorn-a r1
+2026-10-08T22:31:20Z run longhorn-a r3 (longhorn-v2-bench-r3)
+2026-10-08T23:41:09Z reorder (user): fixed Flint next -- run-phase2-b and the b runners stopped; Longhorn r3 finishes in flight; run-queue-c.sh + run-locality-c.sh take over
+2026-10-08T23:41:09Z queue-c: start (reorder: fixed Flint next)
+2026-10-08T23:45:40Z done longhorn-a r3
+2026-10-08T23:45:40Z queue-c: uninstall longhorn
+2026-10-08T23:49:07Z queue-c: install flint arm f74c2 (epoch 300, spdk-tgt 1.7.0-f74c2)
+2026-10-08T23:55:13Z queue-c: flint r3 matrix (arm f74c2; 3 lvstores at 131072)
+2026-10-09T01:08:18Z PAUSE (user): queue-c and locality-c stopped; f74c2 arm finishing its last test; then teardown of bench3
+2026-10-09T01:14:40Z TEARDOWN: trove project 173 deleted; 3 instances terminated 01:12:57Z; root volumes gone; all regions 0 instances/volumes/EIPs. NOT RUN: change 1 alone, 1.58.0 same-cluster control, rook-ceph, mayastor repeat, epoch 3600, locality pass

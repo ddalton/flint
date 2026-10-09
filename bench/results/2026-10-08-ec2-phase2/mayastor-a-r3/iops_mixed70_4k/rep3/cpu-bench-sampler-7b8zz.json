@@ -1,0 +1,1 @@
+{"node":"bench3-cp-1","window_s":118,"node_busy_cores":2.470,"procs":{"engine":{"cores":2.004,"rss_mib":50,"pids":2},"csi":{"cores":0.000,"rss_mib":37,"pids":3},"agents":{"cores":2.004,"rss_mib":51,"pids":3}}}

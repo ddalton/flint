@@ -1,0 +1,42 @@
+
+▶ helm install openebs 4.6.2 (Mayastor io_engine.cpuCount=2)
+WARNING: Kubernetes configuration file is group-readable. This is insecure. Location: /Users/ddalton/.kube/bench3.yaml
+WARNING: Kubernetes configuration file is world-readable. This is insecure. Location: /Users/ddalton/.kube/bench3.yaml
+WARNING: Kubernetes configuration file is group-readable. This is insecure. Location: /Users/ddalton/.kube/bench3.yaml
+WARNING: Kubernetes configuration file is world-readable. This is insecure. Location: /Users/ddalton/.kube/bench3.yaml
+Release "openebs" does not exist. Installing it now.
+NAME: openebs
+LAST DEPLOYED: Thu Oct  8 10:50:39 2026
+NAMESPACE: openebs
+STATUS: deployed
+REVISION: 1
+NOTES:
+Successfully installed OpenEBS.
+
+Check the status by running: kubectl get pods -n openebs
+
+The default values will install both Local PV and Replicated PV. However,
+the Replicated PV will require additional configuration to be functional.
+The Local PV offers non-replicated local storage using 3 different storage
+backends i.e Hostpath, LVM and ZFS, while the Replicated PV provides one replicated highly-available
+storage backend i.e Mayastor.
+
+For more information, 
+- view the online documentation at https://openebs.io/docs
+- connect with an active community on our Kubernetes slack channel.
+        - Sign up to Kubernetes slack: https://slack.k8s.io
+        - #openebs channel: https://kubernetes.slack.com/messages/openebs
+pod/openebs-io-engine-27fvv condition met
+pod/openebs-io-engine-2hrzh condition met
+pod/openebs-io-engine-zh8h2 condition met
+
+▶ one DiskPool per node on its instance store
+diskpool.openebs.io/pool-bench3-aws-1 created
+diskpool.openebs.io/pool-bench3-aws-2 created
+diskpool.openebs.io/pool-bench3-cp-1 created
+NAME                NODE           STATE     STATUS   ERROR   ALERTS    ENCRYPTED   CAPACITY   USED   AVAILABLE   DISK-CAPACITY   MAX-EXPANDABLE-SIZE
+pool-bench3-aws-1   bench3-aws-1   Created   Online           Healthy   false       1.7 TiB    0 B    1.7 TiB     1.7 TiB         1.7 TiB
+pool-bench3-aws-2   bench3-aws-2   Created   Online           Healthy   false       1.7 TiB    0 B    1.7 TiB     1.7 TiB         1.7 TiB
+pool-bench3-cp-1    bench3-cp-1    Created   Online           Healthy   false       1.7 TiB    0 B    1.7 TiB     1.7 TiB         1.7 TiB
+storageclass.storage.k8s.io/mayastor-bench-r1 created
+storageclass.storage.k8s.io/mayastor-bench-r3 created

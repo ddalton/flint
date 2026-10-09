@@ -1,0 +1,4 @@
+NAME           STATUS   ROLES           AGE   VERSION    INTERNAL-IP     EXTERNAL-IP   OS-IMAGE                        KERNEL-VERSION                    CONTAINER-RUNTIME
+bench3-aws-1   Ready    <none>          76m   v1.34.12   172.31.37.7     <none>        Amazon Linux 2023.12.20260930   6.18.51-120.163.amzn2023.x86_64   containerd://2.2.7+unknown
+bench3-aws-2   Ready    <none>          76m   v1.34.12   172.31.40.169   <none>        Amazon Linux 2023.12.20260930   6.18.51-120.163.amzn2023.x86_64   containerd://2.2.7+unknown
+bench3-cp-1    Ready    control-plane   77m   v1.34.12   172.31.46.88    <none>        Amazon Linux 2023.12.20260930   6.18.51-120.163.amzn2023.x86_64   containerd://2.2.7+unknown

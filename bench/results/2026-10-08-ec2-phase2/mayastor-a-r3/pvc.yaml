@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"annotations":{},"name":"bench-mayastor-a-r3","namespace":"flint-bench"},"spec":{"accessModes":["ReadWriteOnce"],"resources":{"requests":{"storage":"100Gi"}},"storageClassName":"mayastor-bench-r3"}}
+    pv.kubernetes.io/bind-completed: "yes"
+    pv.kubernetes.io/bound-by-controller: "yes"
+    volume.beta.kubernetes.io/storage-provisioner: io.openebs.csi-mayastor
+    volume.kubernetes.io/selected-node: bench3-aws-1
+    volume.kubernetes.io/storage-provisioner: io.openebs.csi-mayastor
+  creationTimestamp: "2026-10-08T19:22:24Z"
+  finalizers:
+  - kubernetes.io/pvc-protection
+  name: bench-mayastor-a-r3
+  namespace: flint-bench
+  resourceVersion: "33072"
+  uid: 6b55ce58-ddfa-43ee-b796-e247bfe5a214
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: mayastor-bench-r3
+  volumeMode: Filesystem
+  volumeName: pvc-6b55ce58-ddfa-43ee-b796-e247bfe5a214
+status:
+  accessModes:
+  - ReadWriteOnce
+  capacity:
+    storage: 100Gi
+  phase: Bound

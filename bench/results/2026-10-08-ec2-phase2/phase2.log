@@ -1,0 +1,8 @@
+2026-10-08T17:50:21Z start: drivers=[mayastor longhorn rook-ceph mayastor] pass_b=0 reps=3 runtime=120s
+2026-10-08T17:50:21Z install mayastor 4.6.2 (Pass A, defaults)
+2026-10-08T18:04:59Z run mayastor-a r1 (mayastor-bench-r1)
+2026-10-08T19:22:22Z done mayastor-a r1
+2026-10-08T19:22:22Z run mayastor-a r3 (mayastor-bench-r3)
+2026-10-08T20:35:53Z done mayastor-a r3
+2026-10-08T20:35:53Z uninstall mayastor
+2026-10-08T20:38:47Z install longhorn 1.13.0 (Pass A, defaults)

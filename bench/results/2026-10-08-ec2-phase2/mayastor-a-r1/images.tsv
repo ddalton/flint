@@ -1,0 +1,47 @@
+flint-bench	bench-sampler-59c7f	alpine:3.20 
+flint-bench	bench-sampler-5hmzp	alpine:3.20 
+flint-bench	bench-sampler-7b8zz	alpine:3.20 
+flint-bench	fio-mayastor-a-r1	alpine:3.20 
+flux-system	flux-operator-55c7f6cff-l8x75	ghcr.io/controlplaneio-fluxcd/flux-operator:v0.61.0 
+flux-system	helm-controller-76f789c696-ltcbk	ghcr.io/fluxcd/helm-controller:v1.6.5@sha256:0d52fff5c4d476277b8fcb6beb9041e269adb5db943fe69f5a806ea0c92b1511 
+flux-system	kustomize-controller-569759577b-2swmv	ghcr.io/fluxcd/kustomize-controller:v1.9.6@sha256:2ebeaa341da77d52b6abbbba5efcee0450d47f8b42f0e6f33b08f9020262d606 
+flux-system	notification-controller-54f75fd8c7-6f2m6	ghcr.io/fluxcd/notification-controller:v1.9.4@sha256:840f318265ee26f0d2c48a158bf7896b22aa4e998e320a18646309f0e40b15da 
+flux-system	source-controller-78c659b7dd-xdsvj	ghcr.io/fluxcd/source-controller:v1.9.6@sha256:6a6693172589f8ff26123a231d5fa6ceb194a6efb4dc647cdf057c959f76a2e3 
+kube-system	cilium-2rk7x	quay.io/cilium/cilium:v1.16.5@sha256:758ca0793f5995bb938a2fa219dcce63dc0b3fa7fc4ce5cc851125281fb7361d 
+kube-system	cilium-6jkds	quay.io/cilium/cilium:v1.16.5@sha256:758ca0793f5995bb938a2fa219dcce63dc0b3fa7fc4ce5cc851125281fb7361d 
+kube-system	cilium-envoy-4zgkk	quay.io/cilium/cilium-envoy:v1.30.8-1733837904-eaae5aca0fb988583e5617170a65ac5aa51c0aa8@sha256:709c08ade3d17d52da4ca2af33f431360ec26268d288d9a6cd1d98acc9a1dced 
+kube-system	cilium-envoy-59cr4	quay.io/cilium/cilium-envoy:v1.30.8-1733837904-eaae5aca0fb988583e5617170a65ac5aa51c0aa8@sha256:709c08ade3d17d52da4ca2af33f431360ec26268d288d9a6cd1d98acc9a1dced 
+kube-system	cilium-envoy-tm47p	quay.io/cilium/cilium-envoy:v1.30.8-1733837904-eaae5aca0fb988583e5617170a65ac5aa51c0aa8@sha256:709c08ade3d17d52da4ca2af33f431360ec26268d288d9a6cd1d98acc9a1dced 
+kube-system	cilium-kwmcj	quay.io/cilium/cilium:v1.16.5@sha256:758ca0793f5995bb938a2fa219dcce63dc0b3fa7fc4ce5cc851125281fb7361d 
+kube-system	cilium-operator-7c88748874-8mgcf	quay.io/cilium/operator-generic:v1.16.5@sha256:f7884848483bbcd7b1e0ccfd34ba4546f258b460cb4b7e2f06a1bcc96ef88039 
+kube-system	coredns-66bc5c9577-9b8vt	registry.k8s.io/coredns/coredns:v1.12.1 
+kube-system	coredns-66bc5c9577-v9lmq	registry.k8s.io/coredns/coredns:v1.12.1 
+kube-system	etcd-bench3-cp-1	registry.k8s.io/etcd:3.6.5-0 
+kube-system	kube-apiserver-bench3-cp-1	registry.k8s.io/kube-apiserver:v1.34.12 
+kube-system	kube-controller-manager-bench3-cp-1	registry.k8s.io/kube-controller-manager:v1.34.12 
+kube-system	kube-proxy-27ctf	registry.k8s.io/kube-proxy:v1.34.12 
+kube-system	kube-proxy-lgmv4	registry.k8s.io/kube-proxy:v1.34.12 
+kube-system	kube-proxy-qb78h	registry.k8s.io/kube-proxy:v1.34.12 
+kube-system	kube-scheduler-bench3-cp-1	registry.k8s.io/kube-scheduler:v1.34.12 
+openebs	openebs-agent-core-6998756967-dst2n	docker.io/openebs/mayastor-agent-core:v2.12.2 docker.io/openebs/mayastor-agent-ha-cluster:v2.12.2 
+openebs	openebs-agent-ha-node-5dr7d	docker.io/openebs/mayastor-agent-ha-node:v2.12.2 
+openebs	openebs-agent-ha-node-nj8fd	docker.io/openebs/mayastor-agent-ha-node:v2.12.2 
+openebs	openebs-agent-ha-node-zz8r8	docker.io/openebs/mayastor-agent-ha-node:v2.12.2 
+openebs	openebs-api-rest-5b8ff89df8-kgmfj	docker.io/openebs/mayastor-api-rest:v2.12.2 
+openebs	openebs-csi-controller-6f88c5c948-mvktw	docker.io/openebs/mayastor-csi-controller:v2.12.2 registry.k8s.io/sig-storage/csi-provisioner:v5.2.0 registry.k8s.io/sig-storage/csi-attacher:v4.8.1 registry.k8s.io/sig-storage/csi-snapshotter:v8.2.0 registry.k8s.io/sig-storage/snapshot-controller:v8.2.0 registry.k8s.io/sig-storage/csi-resizer:v1.13.2 
+openebs	openebs-csi-node-7jtsx	docker.io/openebs/mayastor-csi-node:v2.12.2 registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0 
+openebs	openebs-csi-node-9zzxh	docker.io/openebs/mayastor-csi-node:v2.12.2 registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0 
+openebs	openebs-csi-node-l92s7	docker.io/openebs/mayastor-csi-node:v2.12.2 registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0 
+openebs	openebs-etcd-0	docker.io/openebs/etcd:3.6.4-debian-12-r0 
+openebs	openebs-etcd-1	docker.io/openebs/etcd:3.6.4-debian-12-r0 
+openebs	openebs-etcd-2	docker.io/openebs/etcd:3.6.4-debian-12-r0 
+openebs	openebs-eventing-aggregator-79bfd9fff4-klk2s	docker.io/openebs/mayastor-eventing-aggregator:v2.12.2 
+openebs	openebs-io-engine-27fvv	docker.io/openebs/mayastor-io-engine:v2.12.2 docker.io/openebs/mayastor-metrics-exporter-io-engine:v2.12.2 
+openebs	openebs-io-engine-2hrzh	docker.io/openebs/mayastor-io-engine:v2.12.2 docker.io/openebs/mayastor-metrics-exporter-io-engine:v2.12.2 
+openebs	openebs-io-engine-zh8h2	docker.io/openebs/mayastor-io-engine:v2.12.2 docker.io/openebs/mayastor-metrics-exporter-io-engine:v2.12.2 
+openebs	openebs-localpv-provisioner-7447df5fdf-d2xpx	docker.io/openebs/provisioner-localpv:4.6.0 
+openebs	openebs-nats-0	docker.io/nats:2.9.17-alpine docker.io/natsio/nats-server-config-reloader:0.10.1 docker.io/natsio/prometheus-nats-exporter:0.11.0 
+openebs	openebs-nats-1	docker.io/nats:2.9.17-alpine docker.io/natsio/nats-server-config-reloader:0.10.1 docker.io/natsio/prometheus-nats-exporter:0.11.0 
+openebs	openebs-nats-2	docker.io/nats:2.9.17-alpine docker.io/natsio/nats-server-config-reloader:0.10.1 docker.io/natsio/prometheus-nats-exporter:0.11.0 
+openebs	openebs-obs-callhome-5f6966b579-qntpd	docker.io/openebs/mayastor-obs-callhome:v2.12.2 docker.io/openebs/mayastor-obs-callhome-stats:v2.12.2 
+openebs	openebs-operator-diskpool-5d78fb5d58-n6p6w	docker.io/openebs/mayastor-operator-diskpool:v2.12.2 

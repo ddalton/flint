@@ -1,0 +1,16 @@
+
+▶ bench3-aws-1: give the instance store back to the kernel nvme driver
+
+▶ bench3-aws-1: discard /dev/nvme0n1 (0000:00:1f.0)
+clean
+
+▶ bench3-aws-2: give the instance store back to the kernel nvme driver
+0000:00:1f.0: bound to uio_pci_generic; rebinding to nvme
+
+▶ bench3-aws-2: discard /dev/nvme1n1 (0000:00:1f.0)
+clean
+
+▶ bench3-cp-1: give the instance store back to the kernel nvme driver
+
+▶ bench3-cp-1: discard /dev/nvme1n1 (0000:00:1f.0)
+clean

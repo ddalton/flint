@@ -1,0 +1,73 @@
+
+▶ helm upgrade flint-csi to 1.58.0
+WARNING: Kubernetes configuration file is group-readable. This is insecure. Location: /Users/ddalton/.kube/bench3.yaml
+WARNING: Kubernetes configuration file is world-readable. This is insecure. Location: /Users/ddalton/.kube/bench3.yaml
+Pulled: registry-1.docker.io/dilipdalton/flint-csi-driver-chart:1.58.0
+Digest: sha256:a773d48426e8339adf9664293caf26c448fbda1b6cf463aca55c18ddd8c8d397
+WARNING: Kubernetes configuration file is group-readable. This is insecure. Location: /Users/ddalton/.kube/bench3.yaml
+WARNING: Kubernetes configuration file is world-readable. This is insecure. Location: /Users/ddalton/.kube/bench3.yaml
+WARNING: Kubernetes configuration file is group-readable. This is insecure. Location: /Users/ddalton/.kube/bench3.yaml
+WARNING: Kubernetes configuration file is world-readable. This is insecure. Location: /Users/ddalton/.kube/bench3.yaml
+Release "flint-csi" does not exist. Installing it now.
+NAME: flint-csi
+LAST DEPLOYED: Thu Oct  8 16:49:11 2026
+NAMESPACE: flint-system
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+Flint CSI driver installed in namespace "flint-system".
+
+Verify the controller and node pods are running:
+  kubectl get pods -n flint-system
+
+If you plan to use Volume Snapshots / Clones:
+
+  The VolumeSnapshot CRDs are a CLUSTER-WIDE prerequisite that the
+  Flint chart does not install (they are shared across all CSI drivers).
+  Verify they are installed:
+
+    kubectl get crd volumesnapshotclasses.snapshot.storage.k8s.io
+
+  If that returns "NotFound", install once per cluster:
+
+    kubectl apply -k https://github.com/kubernetes-csi/external-snapshotter/client/config/crd?ref=v8.2.0
+
+  Without these CRDs, the bundled snapshot-controller Deployment will
+  CrashLoopBackOff and snapshot RPCs will be rejected. Non-snapshot
+  operations are unaffected. The Flint controller logs a startup
+  warning if the CRDs are missing — see:
+
+    kubectl logs -n flint-system -l app=flint-csi-controller -c flint-csi-driver | grep PREFLIGHT
+
+Snapshot support notes:
+  - SPDK-backed StorageClasses: snapshots supported.
+  - pNFS-backed StorageClasses (parameters.layout: pnfs): snapshots
+    NOT supported in the no-SPDK deployment mode. Use a non-pNFS
+    StorageClass for volumes that need snapshots.
+
+See the full README for prerequisites, disk-init, and StorageClass
+examples: https://github.com/ddalton/flint
+
+(Looking for the standalone flint-lite hub? It moved to its own chart:
+flint-lite-chart/ — see docs/flint-lite.md.)
+pod/flint-csi-node-mbzrt condition met
+pod/flint-csi-node-ncs6q condition met
+pod/flint-csi-node-zldkx condition met
+WARNING: Kubernetes configuration file is group-readable. This is insecure. Location: /Users/ddalton/.kube/bench3.yaml
+WARNING: Kubernetes configuration file is world-readable. This is insecure. Location: /Users/ddalton/.kube/bench3.yaml
+NAME     	NAMESPACE   	REVISION	UPDATED                             	STATUS  	CHART                        	APP VERSION
+flint-csi	flint-system	1       	2026-10-08 16:49:11.031327 -0700 PDT	deployed	flint-csi-driver-chart-1.58.0	1.58.0     
+
+▶ initialize each node's instance store
+bench3-cp-1: 0000:00:00:0
+{"success":true,"setup_disks":["0000:00:00:0"],"failed_disks":[],"warnings":[],"completed_at":"2026-10-08T23:51:25.380041002+00:00"}
+drivers/flint/ec2-up.sh: line 42: 31162 Terminated: 15          kubectl -n flint-system port-forward "$p" "$port:9081" > /dev/null 2>&1
+bench3-aws-2: 0000:00:00:0
+{"success":true,"setup_disks":["0000:00:00:0"],"failed_disks":[],"warnings":[],"completed_at":"2026-10-08T23:53:15.914262679+00:00"}
+drivers/flint/ec2-up.sh: line 42: 31760 Terminated: 15          kubectl -n flint-system port-forward "$p" "$port:9081" > /dev/null 2>&1
+bench3-aws-1: 0000:00:00:0
+{"success":true,"setup_disks":["0000:00:00:0"],"failed_disks":[],"warnings":[],"completed_at":"2026-10-08T23:55:06.784345447+00:00"}
+storageclass.storage.k8s.io/flint-bench-r1 created
+storageclass.storage.k8s.io/flint-bench-r3 created
+drivers/flint/ec2-up.sh: line 64: 32503 Terminated: 15          kubectl -n flint-system port-forward "$p" "$port:9081" > /dev/null 2>&1

@@ -1,0 +1,18 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"storage.k8s.io/v1","kind":"StorageClass","metadata":{"annotations":{},"name":"longhorn-v2-bench-r3"},"parameters":{"dataEngine":"v2","fsType":"ext4","numberOfReplicas":"3","staleReplicaTimeout":"2880"},"provisioner":"driver.longhorn.io","reclaimPolicy":"Delete","volumeBindingMode":"WaitForFirstConsumer"}
+  creationTimestamp: "2026-10-08T21:16:30Z"
+  name: longhorn-v2-bench-r3
+  resourceVersion: "74765"
+  uid: e89e02ab-eef9-4dd1-8c5a-995cd636926f
+parameters:
+  dataEngine: v2
+  fsType: ext4
+  numberOfReplicas: "3"
+  staleReplicaTimeout: "2880"
+provisioner: driver.longhorn.io
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer

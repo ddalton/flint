@@ -1,0 +1,9 @@
+2026-10-08T21:13:57Z start: drivers=[longhorn rook-ceph mayastor] pass_b=0 reps=3 runtime=120s
+bench3-aws-1: pruned 7 image refs; root: /dev/nvme1n1p1   32G  3.8G   29G  12% /
+bench3-aws-2: pruned 6 image refs; root: /dev/nvme0n1p1   32G  3.6G   29G  12% /
+bench3-cp-1: pruned 8 image refs; root: /dev/nvme0n1p1   32G  4.2G   28G  14% /
+2026-10-08T21:14:04Z install longhorn 1.13.0 (Pass A, defaults)
+2026-10-08T21:16:30Z run longhorn-a r1 (longhorn-v2-bench-r1)
+2026-10-08T22:31:20Z done longhorn-a r1
+2026-10-08T22:31:20Z run longhorn-a r3 (longhorn-v2-bench-r3)
+2026-10-08T23:45:40Z done longhorn-a r3

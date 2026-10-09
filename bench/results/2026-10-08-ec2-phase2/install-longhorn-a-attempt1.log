@@ -1,0 +1,60 @@
+
+▶ host prerequisites
+
+Installed:
+  iscsi-initiator-utils-6.2.1.4-10.git2a8f9d8.amzn2023.0.4.x86_64               
+  iscsi-initiator-utils-iscsiuio-6.2.1.4-10.git2a8f9d8.amzn2023.0.4.x86_64      
+  isns-utils-libs-0.101-6.amzn2023.0.1.x86_64                                   
+
+HugePages_Total:    1024
+
+Installed:
+  iscsi-initiator-utils-6.2.1.4-10.git2a8f9d8.amzn2023.0.4.x86_64               
+  iscsi-initiator-utils-iscsiuio-6.2.1.4-10.git2a8f9d8.amzn2023.0.4.x86_64      
+  isns-utils-libs-0.101-6.amzn2023.0.1.x86_64                                   
+
+HugePages_Total:    1024
+
+Installed:
+  iscsi-initiator-utils-6.2.1.4-10.git2a8f9d8.amzn2023.0.4.x86_64               
+  iscsi-initiator-utils-iscsiuio-6.2.1.4-10.git2a8f9d8.amzn2023.0.4.x86_64      
+  isns-utils-libs-0.101-6.amzn2023.0.1.x86_64                                   
+
+HugePages_Total:    1024
+
+▶ helm install longhorn 1.13.0 (v2 engine, cpu mask 0x3, guaranteed v2 CPU 25%)
+WARNING: Kubernetes configuration file is group-readable. This is insecure. Location: /Users/ddalton/.kube/bench3.yaml
+WARNING: Kubernetes configuration file is world-readable. This is insecure. Location: /Users/ddalton/.kube/bench3.yaml
+WARNING: Kubernetes configuration file is group-readable. This is insecure. Location: /Users/ddalton/.kube/bench3.yaml
+WARNING: Kubernetes configuration file is world-readable. This is insecure. Location: /Users/ddalton/.kube/bench3.yaml
+Release "longhorn" does not exist. Installing it now.
+W1008 13:39:18.582120   45533 warnings.go:70] unrecognized format "int64"
+W1008 13:39:18.582130   45533 warnings.go:70] unrecognized format "int64"
+W1008 13:39:18.591352   45533 warnings.go:70] unrecognized format "int64"
+W1008 13:39:18.608016   45533 warnings.go:70] unrecognized format "int64"
+W1008 13:39:18.610363   45533 warnings.go:70] unrecognized format "int64"
+W1008 13:39:18.653877   45533 warnings.go:70] unrecognized format "int64"
+NAME: longhorn
+LAST DEPLOYED: Thu Oct  8 13:39:11 2026
+NAMESPACE: longhorn-system
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+Longhorn is now installed on the cluster!
+
+Please wait a few minutes for other Longhorn components such as CSI deployments, Engine Images, and Instance Managers to be initialized.
+
+Visit our documentation at https://longhorn.io/docs/
+pod/instance-manager-18166477a9400f99a87f0e6bae7d8f53 condition met
+pod/instance-manager-c078c5e04e4fb1e918653e884b361ce5 condition met
+pod/instance-manager-d28d60f5bd7bc95af4c749f392356c9e condition met
+pod/instance-manager-db9cc1a77142c6f63a94fab7e85fe781 condition met
+
+▶ add each node's instance store as a block-type disk (driver auto)
+node.longhorn.io/bench3-aws-1 patched
+node.longhorn.io/bench3-aws-2 patched
+error: Internal error occurred: error executing command in container: failed to exec in container: failed to create exec "0c1b2ee986fd1e162e07957dc4a233e23889f5a831ba74117c05bcfcf33eb4f4": cannot exec in a deleted state
+
+✗ bench3-cp-1: no instance store
+2026-10-08T20:40:04Z FAILED at line 40 (rc=1)

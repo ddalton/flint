@@ -1,0 +1,3 @@
+bench3-aws-1: pruned 33 image refs; root: /dev/nvme1n1p1   32G  3.7G   29G  12% /
+bench3-aws-2: pruned 33 image refs; root: /dev/nvme0n1p1   32G  3.6G   29G  12% /
+bench3-cp-1: pruned 30 image refs; root: /dev/nvme0n1p1   32G  4.3G   28G  14% /

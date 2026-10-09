@@ -1,0 +1,16 @@
+2026-10-08T18:01:54Z removed the control-plane NoSchedule taint from bench3-cp-1: Mayastor's etcd/nats/io-engine need all 3 nodes (3-member bootstrap, r3), and Flint used all 3 in Phase 1 (its DaemonSet tolerates the taint). Applies to every driver from Mayastor on.
+2026-10-08T19:05:24Z mayastor-a r1: the volume's single replica is on bench3-aws-1 (pool used 107 GB), the fio pod on bench3-aws-2 -- Mayastor's default placement put r1 data REMOTE, so every r1 I/O crosses NVMe-oF/TCP. Flint's r1 (Phase 1) was local to its consumer. Both are each driver's default; report must say so.
+
+2026-10-08 20:40Z Longhorn attempt 1 FAILED (install-longhorn-a-attempt1.log): all three
+8 GiB roots in DiskPressure after Longhorn's pull on top of Mayastor's images;
+samplers and Longhorn pods evicted. Uninstall then hung: manager pods gone, so
+the admission webhook had no endpoints and blocked the uninstall job; removed
+the two webhook configs, stripped longhorn.io finalizers on 5 CRs, deleted the
+chart's CRDs, SCs, RBAC and priority class by hand, wiped. Fixes: EBS roots
+8 -> 32 GiB on all three nodes (modify-volume + growpart + xfs_growfs; 26-27 GiB
+free after), containerd discard_unpacked_layers=true, samplers
+system-node-critical, prune_images between drivers (commit 9e173e50).
+Relaunched 21:13Z as run-phase2-b.sh (longhorn rook-ceph mayastor, DONE_LIST
+mayastor) with run-flint-epochs-b.sh / run-flint-f74c1-b.sh keyed to the new
+marker. Mayastor's r1/r3 runs predate the change and stand; the repeat at the
+end checks that the larger root moved nothing.

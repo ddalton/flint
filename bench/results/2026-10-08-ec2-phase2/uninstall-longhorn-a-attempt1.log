@@ -1,0 +1,7 @@
+No resources found
+No resources found
+setting.longhorn.io/deleting-confirmation-flag patched
+WARNING: Kubernetes configuration file is group-readable. This is insecure. Location: /Users/ddalton/.kube/bench3.yaml
+WARNING: Kubernetes configuration file is world-readable. This is insecure. Location: /Users/ddalton/.kube/bench3.yaml
+Error: timed out waiting for the condition
+namespace "longhorn-system" deleted

@@ -1,0 +1,18 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"storage.k8s.io/v1","kind":"StorageClass","metadata":{"annotations":{},"name":"mayastor-bench-r1"},"parameters":{"fsType":"ext4","protocol":"nvmf","repl":"1","thin":"false"},"provisioner":"io.openebs.csi-mayastor","reclaimPolicy":"Delete","volumeBindingMode":"WaitForFirstConsumer"}
+  creationTimestamp: "2026-10-08T18:04:58Z"
+  name: mayastor-bench-r1
+  resourceVersion: "16683"
+  uid: f7d1a759-b42a-4aed-934a-e0da2bb2b150
+parameters:
+  fsType: ext4
+  protocol: nvmf
+  repl: "1"
+  thin: "false"
+provisioner: io.openebs.csi-mayastor
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer

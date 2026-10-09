@@ -1,0 +1,80 @@
+
+▶ samplers on every node
+
+▶ PVC bench-longhorn-a-r1 (100Gi on longhorn-v2-bench-r1) and fio pod fio-longhorn-a-r1
+
+▶ environment
+date_utc: 2026-10-08T21:16:46Z
+driver: longhorn-a-r1
+storageclass: longhorn-v2-bench-r1
+pvc_size: 100Gi
+file_size: 90G
+runtime_s: 120
+ramp_s: 30
+reps: 3
+precondition: 1
+cpu_patterns: spdk=spdk_tgt,im=longhorn-instance-manager,mgr=longhorn-manager,csi=longhorn-csi-plugin
+reactor_ticks: 
+fio_node: bench3-aws-1
+fio_version: fio-3.36
+bench_git: 9e173e50
+
+▶ precondition: write all of 90G once
+
+▶ idle: the driver's CPU with no I/O (a polling engine's floor)
+
+▶ rep 1/3: lat_randread_4k (randread bs=4k qd=1 jobs=1)
+
+▶ rep 1/3: lat_randwrite_4k (randwrite bs=4k qd=1 jobs=1)
+
+▶ rep 1/3: iops_randread_4k (randread bs=4k qd=32 jobs=4)
+
+▶ rep 1/3: iops_randwrite_4k (randwrite bs=4k qd=32 jobs=4)
+
+▶ rep 1/3: iops_mixed70_4k (randrw bs=4k qd=32 jobs=4)
+
+▶ rep 1/3: seq_read_128k (read bs=128k qd=16 jobs=1)
+
+▶ rep 1/3: seq_write_128k (write bs=128k qd=16 jobs=1)
+
+▶ rep 1/3: seq_read_1m (read bs=1m qd=16 jobs=1)
+
+▶ rep 1/3: seq_write_1m (write bs=1m qd=16 jobs=1)
+
+▶ rep 2/3: lat_randread_4k (randread bs=4k qd=1 jobs=1)
+
+▶ rep 2/3: lat_randwrite_4k (randwrite bs=4k qd=1 jobs=1)
+
+▶ rep 2/3: iops_randread_4k (randread bs=4k qd=32 jobs=4)
+
+▶ rep 2/3: iops_randwrite_4k (randwrite bs=4k qd=32 jobs=4)
+
+▶ rep 2/3: iops_mixed70_4k (randrw bs=4k qd=32 jobs=4)
+
+▶ rep 2/3: seq_read_128k (read bs=128k qd=16 jobs=1)
+
+▶ rep 2/3: seq_write_128k (write bs=128k qd=16 jobs=1)
+
+▶ rep 2/3: seq_read_1m (read bs=1m qd=16 jobs=1)
+
+▶ rep 2/3: seq_write_1m (write bs=1m qd=16 jobs=1)
+
+▶ rep 3/3: lat_randread_4k (randread bs=4k qd=1 jobs=1)
+
+▶ rep 3/3: lat_randwrite_4k (randwrite bs=4k qd=1 jobs=1)
+
+▶ rep 3/3: iops_randread_4k (randread bs=4k qd=32 jobs=4)
+
+▶ rep 3/3: iops_randwrite_4k (randwrite bs=4k qd=32 jobs=4)
+
+▶ rep 3/3: iops_mixed70_4k (randrw bs=4k qd=32 jobs=4)
+
+▶ rep 3/3: seq_read_128k (read bs=128k qd=16 jobs=1)
+
+▶ rep 3/3: seq_write_128k (write bs=128k qd=16 jobs=1)
+
+▶ rep 3/3: seq_read_1m (read bs=1m qd=16 jobs=1)
+
+▶ rep 3/3: seq_write_1m (write bs=1m qd=16 jobs=1)
+
+▶ done: results/2026-10-08-ec2-phase2/longhorn-a-r1

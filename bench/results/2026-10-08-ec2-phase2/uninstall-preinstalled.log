@@ -1,0 +1,7 @@
+No resources found
+No resources found
+WARNING: Kubernetes configuration file is group-readable. This is insecure. Location: /Users/ddalton/.kube/bench3.yaml
+WARNING: Kubernetes configuration file is world-readable. This is insecure. Location: /Users/ddalton/.kube/bench3.yaml
+release "flint-csi" uninstalled
+namespace "flint-system" deleted
+storageclass.storage.k8s.io "flint-nfs" deleted

@@ -1,0 +1,5 @@
+flint-csi-controller-54b96b48f4-5mh4v	dilipdalton/flint-driver:1.58.0-f74c1 registry.k8s.io/sig-storage/csi-provisioner:v3.6.0 registry.k8s.io/sig-storage/csi-attacher:v4.4.0 registry.k8s.io/sig-storage/csi-resizer:v1.9.0 registry.k8s.io/sig-storage/csi-snapshotter:v6.3.0 registry.k8s.io/sig-storage/livenessprobe:v2.11.0 
+flint-csi-node-mbzrt	dilipdalton/spdk-tgt:1.7.0-f74c2 dilipdalton/flint-driver:1.58.0-f74c1 registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.9.0 registry.k8s.io/sig-storage/livenessprobe:v2.11.0 
+flint-csi-node-ncs6q	dilipdalton/spdk-tgt:1.7.0-f74c2 dilipdalton/flint-driver:1.58.0-f74c1 registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.9.0 registry.k8s.io/sig-storage/livenessprobe:v2.11.0 
+flint-csi-node-zldkx	dilipdalton/spdk-tgt:1.7.0-f74c2 dilipdalton/flint-driver:1.58.0-f74c1 registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.9.0 registry.k8s.io/sig-storage/livenessprobe:v2.11.0 
+snapshot-controller-75cc446f55-kt7sg	registry.k8s.io/sig-storage/snapshot-controller:v6.3.0 

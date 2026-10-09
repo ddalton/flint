@@ -1,0 +1,1 @@
+{"node":"bench3-aws-1","window_s":118,"node_busy_cores":2.301,"procs":{"spdk":{"cores":1.992,"rss_mib":33,"pids":2},"im":{"cores":0.016,"rss_mib":221,"pids":3},"mgr":{"cores":0.007,"rss_mib":257,"pids":3},"csi":{"cores":0.000,"rss_mib":0,"pids":0}}}

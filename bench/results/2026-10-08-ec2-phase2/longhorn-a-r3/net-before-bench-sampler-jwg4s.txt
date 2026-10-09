@@ -1,0 +1,5 @@
+     bw_in_allowance_exceeded: 6847120
+     bw_out_allowance_exceeded: 241855668
+     pps_allowance_exceeded: 1487
+     conntrack_allowance_exceeded: 0
+     linklocal_allowance_exceeded: 0
