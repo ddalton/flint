@@ -501,7 +501,6 @@ impl PnfsOperationHandler {
                   device_info.device_id, addr_list(&device_info));
 
             DeviceAddr4 {
-                netid: "tcp".to_string(),
                 ds_list: vec![addr_list(&device_info)],
             }
         } else if let Some(group) = self.layout_manager.stripe_group_devices(&args.device_id) {
@@ -533,7 +532,6 @@ impl PnfsOperationHandler {
             }
 
             DeviceAddr4 {
-                netid: "tcp".to_string(),
                 ds_list,
             }
         } else {
@@ -1006,9 +1004,13 @@ pub struct GetDeviceInfoResult {
 /// extras the kernel adds a transport per). The two dimensions must
 /// never be conflated: the outer list is the stripe map, the inner
 /// list is bandwidth to a single DS.
+///
+/// There is no netid field: each endpoint carries its own transport
+/// (`rdma://host:port`, bare = tcp — `protocol::split_endpoint_transport`)
+/// because netaddr4 does, per address. One field for the whole device
+/// could not say "this DS over RDMA, that one over TCP".
 #[derive(Debug, Clone)]
 pub struct DeviceAddr4 {
-    pub netid: String,
     pub ds_list: Vec<Vec<String>>,
 }
 

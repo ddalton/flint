@@ -4809,7 +4809,7 @@ impl CompoundDispatcher {
         addr: &crate::pnfs::mds::operations::DeviceAddr4,
     ) -> Result<Bytes, String> {
         use crate::nfs::xdr::XdrEncoder;
-        use crate::pnfs::protocol::endpoint_to_uaddr;
+        use crate::pnfs::protocol::{endpoint_to_uaddr, split_endpoint_transport};
 
         let mut encoder = XdrEncoder::new();
         let n = addr.ds_list.len();
@@ -4826,10 +4826,13 @@ impl CompoundDispatcher {
             encoder.encode_u32(ds_addrs.len() as u32);
             for ep in ds_addrs {
                 // netaddr4: netid + universal address
-                // ("10.42.214.18:2049" → "10.42.214.18.8.1").
-                encoder.encode_string(&addr.netid);
-                let uaddr = endpoint_to_uaddr(ep)
+                // ("10.42.214.18:2049" → "tcp", "10.42.214.18.8.1";
+                // "rdma://10.42.214.18:20049" → "rdma", "10.42.214.18.78.81").
+                let (netid, hostport) = split_endpoint_transport(ep)
                     .map_err(|e| format!("DS[{i}] endpoint {ep}: {e}"))?;
+                let uaddr = endpoint_to_uaddr(hostport)
+                    .map_err(|e| format!("DS[{i}] endpoint {ep}: {e}"))?;
+                encoder.encode_string(netid);
                 encoder.encode_string(&uaddr);
             }
             debug!("   DS[{}]: {:?}", i, ds_addrs);
@@ -6266,7 +6269,6 @@ mod tests {
         use crate::nfs::xdr::XdrDecoder;
 
         let addr = crate::pnfs::mds::operations::DeviceAddr4 {
-            netid: "tcp".to_string(),
             ds_list: vec![
                 vec!["10.0.0.1:2049".to_string(), "10.0.1.1:2049".to_string()],
                 vec!["10.0.0.2:2049".to_string()],
@@ -6295,6 +6297,46 @@ mod tests {
         assert_eq!(d.decode_string().unwrap(), "10.0.0.2.8.1");
     }
 
+    /// Each netaddr4 carries the netid of ITS endpoint: an `rdma://`
+    /// DS goes out as "rdma" with the scheme stripped from the uaddr,
+    /// while the bare endpoint beside it in the same device stays
+    /// "tcp" — the control that shows the netid is per address and not
+    /// a device-wide switch.
+    #[test]
+    fn rdma_endpoint_encodes_rdma_netid_per_address() {
+        use crate::nfs::xdr::XdrDecoder;
+
+        let addr = crate::pnfs::mds::operations::DeviceAddr4 {
+            ds_list: vec![
+                vec!["rdma://10.0.0.1:20049".to_string()],
+                vec!["10.0.0.2:2049".to_string()],
+            ],
+        };
+        let body = CompoundDispatcher::encode_device_addr(&addr)
+            .expect("an rdma:// IPv4 literal must encode");
+        let mut d = XdrDecoder::new(body);
+        assert_eq!(d.decode_u32().unwrap(), 2); // stripe_indices
+        d.decode_u32().unwrap();
+        d.decode_u32().unwrap();
+        assert_eq!(d.decode_u32().unwrap(), 2); // ds_list
+
+        assert_eq!(d.decode_u32().unwrap(), 1);
+        assert_eq!(d.decode_string().unwrap(), "rdma");
+        assert_eq!(d.decode_string().unwrap(), "10.0.0.1.78.81"); // 20049
+
+        assert_eq!(d.decode_u32().unwrap(), 1);
+        assert_eq!(d.decode_string().unwrap(), "tcp");
+        assert_eq!(d.decode_string().unwrap(), "10.0.0.2.8.1");
+
+        let bad = crate::pnfs::mds::operations::DeviceAddr4 {
+            ds_list: vec![vec!["rmda://10.0.0.1:20049".to_string()]],
+        };
+        assert!(
+            CompoundDispatcher::encode_device_addr(&bad).is_err(),
+            "a misspelt transport must fail the encode, not go out as tcp"
+        );
+    }
+
     /// An endpoint that cannot become a universal address must FAIL the
     /// encode, not be written through as itself.
     ///
@@ -6311,7 +6353,6 @@ mod tests {
     #[test]
     fn a_device_address_that_will_not_encode_is_an_error_not_a_string() {
         let bad = crate::pnfs::mds::operations::DeviceAddr4 {
-            netid: "tcp".to_string(),
             // .invalid is reserved by RFC 2606 and never resolves.
             ds_list: vec![vec!["nonexistent.invalid:2049".to_string()]],
         };
@@ -6323,7 +6364,6 @@ mod tests {
         );
 
         let good = crate::pnfs::mds::operations::DeviceAddr4 {
-            netid: "tcp".to_string(),
             ds_list: vec![vec!["10.0.0.2:2049".to_string()]],
         };
         assert!(

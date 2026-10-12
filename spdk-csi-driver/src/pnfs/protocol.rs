@@ -660,6 +660,30 @@ pub fn encode_file_layout(
     encoder.finish()
 }
 
+/// Split a DS client-path endpoint into the netid GETDEVICEINFO puts on
+/// the wire and the `host:port` it names.
+///
+/// A bare `host:port` is TCP — every endpoint configured before RDMA
+/// existed keeps meaning what it meant. `rdma://host:port` is NFS over
+/// RPC-over-RDMA (RFC 8166/8267): the Linux client opens that DS
+/// connection through xprtrdma (it maps the netid via
+/// `xprt_find_transport_ident`), while the MDS connection stays TCP.
+/// `tcp://` is accepted for symmetry.
+///
+/// An unknown scheme is an ERROR, not TCP: `rdmaa://` or `udp://`
+/// falling through to "tcp" would advertise a transport the operator
+/// did not ask for, and the client would take it without complaint.
+pub fn split_endpoint_transport(endpoint: &str) -> Result<(&'static str, &str), String> {
+    match endpoint.split_once("://") {
+        None => Ok(("tcp", endpoint)),
+        Some(("tcp", rest)) => Ok(("tcp", rest)),
+        Some(("rdma", rest)) => Ok(("rdma", rest)),
+        Some((scheme, _)) => Err(format!(
+            "unknown transport `{scheme}://` in DS endpoint {endpoint} (want tcp:// or rdma://)"
+        )),
+    }
+}
+
 /// Convert `host:port` to NFSv4 universal address format `h1.h2.h3.h4.p1.p2`
 /// (RFC 5665 §5.2.3.4).
 ///
@@ -731,6 +755,24 @@ mod tests {
         // 20491 = 0x500B = (high=0x50=80, low=0x0B=11)
         let r = endpoint_to_uaddr("localhost:20491").unwrap();
         assert_eq!(r, "127.0.0.1.80.11", "localhost should resolve to 127.0.0.1; got {}", r);
+    }
+
+    #[test]
+    fn bare_endpoint_is_tcp_and_rdma_scheme_is_rdma() {
+        assert_eq!(split_endpoint_transport("10.0.0.1:2049").unwrap(), ("tcp", "10.0.0.1:2049"));
+        assert_eq!(split_endpoint_transport("tcp://10.0.0.1:2049").unwrap(), ("tcp", "10.0.0.1:2049"));
+        assert_eq!(split_endpoint_transport("rdma://10.0.0.1:20049").unwrap(), ("rdma", "10.0.0.1:20049"));
+    }
+
+    /// The failure must be an error: a misspelt scheme that fell back to
+    /// "tcp" would advertise the wrong transport and the client would
+    /// accept it. The control is the correct spelling, which parses.
+    #[test]
+    fn unknown_transport_scheme_is_an_error_not_tcp() {
+        let err = split_endpoint_transport("rdmaa://10.0.0.1:20049").unwrap_err();
+        assert!(err.contains("rdmaa://"), "error must name the scheme: {err}");
+        assert!(split_endpoint_transport("udp://10.0.0.1:2049").is_err());
+        assert!(split_endpoint_transport("rdma://10.0.0.1:20049").is_ok());
     }
 
     #[test]

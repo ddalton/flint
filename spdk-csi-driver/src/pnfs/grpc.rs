@@ -405,11 +405,18 @@ impl MdsControl for MdsControlService {
                 (Some(ce), _) => Some(ce.clone()),
                 (None, 0) => None,
                 (None, port) => {
-                    let host = device_info
-                        .primary_endpoint
+                    // The control channel is gRPC over TCP whatever the
+                    // client path speaks: strip an `rdma://` scheme, or
+                    // the derived host would be "rdma://10.0.0.5".
+                    let hostport = crate::pnfs::protocol::split_endpoint_transport(
+                        &device_info.primary_endpoint,
+                    )
+                    .map(|(_, hp)| hp)
+                    .unwrap_or(device_info.primary_endpoint.as_str());
+                    let host = hostport
                         .rsplit_once(':')
                         .map(|(h, _)| h)
-                        .unwrap_or(device_info.primary_endpoint.as_str());
+                        .unwrap_or(hostport);
                     Some(format!("{}:{}", host, port))
                 }
             };
@@ -431,7 +438,31 @@ impl MdsControl for MdsControlService {
             for ep in std::iter::once(&device_info.primary_endpoint)
                 .chain(device_info.endpoints.iter())
             {
-                if let Err(e) = Self::ds_endpoint_accepts(ep).await {
+                // The dial is TCP. An rdma-cm listener is not a TCP
+                // socket, so dialing an `rdma://` endpoint would NACK
+                // this DS forever; skip it, and say that F68b does not
+                // cover that address. A misspelt scheme is NACKed here
+                // rather than registered and failed later at
+                // GETDEVICEINFO.
+                let hostport = match crate::pnfs::protocol::split_endpoint_transport(ep) {
+                    Ok(("tcp", hp)) => hp,
+                    Ok((netid, _)) => {
+                        warn!(
+                            "🚧 F68b: {} client-path endpoint {} is {} — the MDS cannot dial it \
+                             over TCP; registering WITHOUT a reachability check for it",
+                            req.device_id, ep, netid
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        return Ok(Response::new(RegisterResponse {
+                            accepted: false,
+                            message: e,
+                            assigned_device_id: String::new(),
+                        }));
+                    }
+                };
+                if let Err(e) = Self::ds_endpoint_accepts(hostport).await {
                     warn!(
                         "🚧 F68b: NACKing registration of {} — client-path endpoint {} not yet \
                          reachable from the MDS ({}); the DS will retry",
@@ -3055,6 +3086,77 @@ mod create_volume_tests {
         assert!(r.accepted, "all-live multipath must register: {}", r.message);
         let d = registry.get("ds-f68b-mp").unwrap();
         assert_eq!(d.endpoints, vec![live2_addr]);
+    }
+
+    /// An `rdma://` client-path endpoint with F68b on: the TCP dial
+    /// cannot reach an rdma-cm listener, so the gate skips it instead
+    /// of NACKing the DS forever. The control is the SAME dead address
+    /// spelt bare (tcp), which still NACKs — so the accept below comes
+    /// from the rdma arm, not from a dial that happened to connect. The
+    /// derived DsControl endpoint must not keep the scheme, and a
+    /// misspelt scheme NACKs instead of registering.
+    #[tokio::test]
+    async fn f68b_rdma_endpoint_registers_and_control_host_drops_the_scheme() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(DeviceRegistry::new());
+        let layout_manager = crate::pnfs::mds::layout::LayoutManager::new(
+            Arc::clone(&registry),
+            crate::pnfs::config::LayoutPolicy::Stripe,
+            8 * 1024 * 1024,
+            Arc::new(crate::state_backend::MemoryBackend::new()),
+        );
+        let parked = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let dead_addr = parked.local_addr().unwrap().to_string();
+        drop(parked);
+
+        let s = MdsControlService::new(
+            Arc::clone(&registry),
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            dir.path().to_path_buf(),
+            layout_manager,
+            2049,
+            false,
+            true, // verify_ds_reachability
+        );
+        let reg_req = |id: &str, ep: &str| RegisterRequest {
+            device_id: id.into(),
+            endpoint: ep.into(),
+            multipath_endpoints: vec![],
+            mount_points: vec!["/data".into()],
+            capacity: 1 << 30,
+            used: 0,
+            protocol_version: 1,
+            identity_created_at: 0,
+            control_port: 21491,
+        };
+
+        let r = s
+            .register_data_server(Request::new(reg_req("ds-tcp", &dead_addr)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!r.accepted, "control: the dead address over tcp must NACK");
+
+        let rdma_ep = format!("rdma://{dead_addr}");
+        let r = s
+            .register_data_server(Request::new(reg_req("ds-rdma", &rdma_ep)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(r.accepted, "an rdma:// endpoint must register: {}", r.message);
+        let d = registry.get("ds-rdma").unwrap();
+        assert_eq!(d.primary_endpoint, rdma_ep, "the scheme is kept for GETDEVICEINFO");
+        assert_eq!(d.control_endpoint.as_deref(), Some("127.0.0.1:21491"));
+
+        let r = s
+            .register_data_server(Request::new(reg_req("ds-typo", &format!("rmda://{dead_addr}"))))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!r.accepted, "a misspelt transport must NACK");
+        assert!(r.message.contains("rmda://"), "message: {}", r.message);
+        assert!(registry.get("ds-typo").is_none());
     }
 
     #[tokio::test]
