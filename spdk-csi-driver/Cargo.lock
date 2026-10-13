@@ -2231,9 +2231,9 @@ dependencies = [
 
 [[package]]
 name = "krb5"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95ab455811230d5ed705a194cd24e5603e4c26f8d1104eacafbb676154f4c72c"
+checksum = "9b1a4480f9137447d23a9c4d59297b949ea206d435be2efb5da2964ae1a48901"
 dependencies = [
  "aes",
  "chrono",
