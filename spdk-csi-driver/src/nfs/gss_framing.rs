@@ -15,7 +15,7 @@
 
 use bytes::Bytes;
 
-use super::krb::token::{ContextKey, PerMessageTokens};
+use krb5::token::{ContextKey, PerMessageTokens};
 use super::rpc::{Auth, AuthFlavor, AuthStat};
 use super::rpcsec_gss::GssService;
 use super::xdr::{XdrDecoder, XdrEncoder};
@@ -287,7 +287,7 @@ pub fn init_reply_verifier(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nfs::krb::token::Role;
+    use krb5::token::Role;
 
     /// RFC 8009 Appendix A's 128-bit base key — a published value, so the
     /// context these tests run on is not invented.

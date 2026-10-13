@@ -222,13 +222,10 @@ thiserror = "1.0"
 rand = "0.8"
 dashmap = "6.1"  # Lock-free concurrent HashMap for high-performance state management
 sha2 = "0.10"
-sha1 = "0.10"  # SHA-1 for Kerberos HMAC-SHA1
 crossbeam = "0.8"  # Lock-free channels and queues
-# Pure Rust Kerberos cryptography - no glibc dependencies
-aes = "0.8"  # AES encryption for Kerberos
-cbc = { version = "0.1", features = ["alloc"] }  # CBC mode
-hmac = "0.12"  # HMAC for Kerberos integrity
-pbkdf2 = { version = "0.12", features = ["simple"] }  # Key derivation
+# Pure Rust Kerberos 5 acceptor - no glibc dependencies
+krb5 = "0.1"  # Kerberos 5 acceptor (github.com/ddalton/krb5)
+hmac = "0.12"
 filetime = "0.2.26"
 # Pure-Rust embedded SQLite (no system libsqlite dependency); used by
 # state_backend::sqlite for durable NFSv4/pNFS state persistence.
