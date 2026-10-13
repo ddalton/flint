@@ -1,0 +1,12 @@
+tla-mc: building a checker for MCLeanP1M5R (cache: /work/cache/W2Rem3-AN3)
+tla-mc: built in 33.3s
+tla-mc: MCLeanP1M5R (31 variables, 0 symmetry permutations), 19 workers, generated engine; loaded in 0.003s
+progress: depth 11, 37580393 generated, 15993183 distinct (0 fingerprint spills), 11178908 on queue (0 on disk), 30.4s
+progress: depth 12, 118089596 generated, 47807611 distinct (0 fingerprint spills), 31814428 on queue (7686940 on disk), 96.1s
+progress: depth 13, 333636479 generated, 128219035 distinct (0 fingerprint spills), 80411424 on queue (56486688 on disk), 315.7s
+Terminated
+
+real	23m39.920s
+user	208m40.423s
+sys	3m46.445s
+rc=143 13:58:19Z

@@ -800,9 +800,11 @@ LEMMA Install_TypeOK ==
                                 \cup {<<p, DeletedAt(s, p)>> : p \in InstallDelOverridden(s)}
                                 \cup {<<p, doc[p]>> : p \in InstallDelOver(s)}
       /\ w' = [w EXCEPT ![s] = InstallW(s)]
-      /\ UNCHANGED <<live, minted, base, acked, holder, gw, mv, udel, nextGen, ui, reqs, barriers,
+      /\ udel' = udel \cup {<<p, doc[p]>> : p \in {q \in Paths : doc[q] # Nil /\ InstallInst(s)[q] = Nil}}
+      /\ UNCHANGED <<live, minted, base, acked, holder, gw, mv, nextGen, ui, reqs, barriers,
                      restarts, syncs, regressed, rescopes, fails, upped, copies, orig>>
   BY DEF Install, aux
+<1>1u. udel' \subseteq Paths \X Handles BY <1>a, <1>1 DEF TypeOK, Opt
 <1>2. \A p \in InstallMine(s) : w[s].snap[p] \in minted /\ w[s].snap[p] \in Handles
   BY <1>a, <1>0, <1>c, WriterFields DEF InstallMine, Minted, TypeOK
 <1>3. InstallInst(s) \in [Paths -> Opt(Handles)] /\ \A p \in Paths : InstallInst(s)[p] \in Opt(minted)
@@ -815,7 +817,7 @@ LEMMA Install_TypeOK ==
   BY <1>a, <1>1, <1>6, WriteOne
 <1>8. tomb' \in [Paths -> Opt(Handles)] BY <1>a, <1>1, <1>3 DEF TypeOK, Opt
 <1>9. FrameOK BY <1>a, <1>1, <1>3, <1>7, FrameTypeOK DEF TypeOK
-<1>10. TypeOK' BY <1>a, <1>1, <1>3, <1>5, <1>7, <1>8, <1>9 DEF TypeOK, FrameOK
+<1>10. TypeOK' BY <1>a, <1>1, <1>1u, <1>3, <1>5, <1>7, <1>8, <1>9 DEF TypeOK, FrameOK
 <1>11. Ghosts' /\ mv' = Nil /\ nextGen' > Seed BY <1>b, <1>1 DEF Ghosts
 <1>12. /\ \A q \in Paths : InstallW(s).local[q] \in Opt(minted')
        /\ \A q \in InstallW(s).uploads : InstallW(s).snap[q] \in minted'

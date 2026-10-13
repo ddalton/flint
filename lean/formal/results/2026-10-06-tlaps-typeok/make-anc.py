@@ -338,7 +338,8 @@ rep_span('Install(s) ==\n', '\\* Step 6: the retired set, in one batch, sparing 
     '                                 \\cup {<<p, DeletedAt(s, p)>> : p \\in InstallDelOverridden(s)}\n'
     '                                 \\cup {<<p, doc[p]>> : p \\in InstallDelOver(s)}\n'
     '       /\\ w\' = [w EXCEPT ![s] = InstallW(s)]\n'
-    '  /\\ UNCHANGED <<live, minted, base, acked, holder, gw, mv, udel, nextGen, ui, reqs, barriers, aux>>\n'
+    '       /\\ udel\' = udel \\cup {<<p, doc[p]>> : p \\in {q \\in Paths : doc[q] # Nil /\\ inst[q] = Nil}}\n'
+    '  /\\ UNCHANGED <<live, minted, base, acked, holder, gw, mv, nextGen, ui, reqs, barriers, aux>>\n'
     '\n')
 
 rep_span('Collect(s) ==\n', '\\* The orphan sweep (R4b): nothing cites it, no record preserves it',

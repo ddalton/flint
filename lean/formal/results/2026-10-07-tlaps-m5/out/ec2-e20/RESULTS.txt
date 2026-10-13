@@ -1,0 +1,34 @@
+START 2026-10-13T13:34:39Z tla-mc 0.1.2 192 cpus
+E20W2Rem3-Rel rc=12 Error: Invariant RelAll is violated. 887674 states generated, 432751 distinct states found. Depth 8. Checked in 0.700s (618315 distinct/s). 
+E20P3-Rel rc=12 Error: Invariant RelAll is violated. 133225821 states generated, 46934217 distinct states found. Depth 16. Checked in 107.488s (436645 distinct/s). 
+E20P3-S3X rc=12 Error: Invariant S3X is violated. 255064013 states generated, 85327513 distinct states found. Depth 19. Checked in 210.306s (405730 distinct/s). 
+E20P3Age-Rel rc=12 Error: Invariant RelAll is violated. 464154951 states generated, 158192466 distinct states found. Depth 16. Checked in 381.237s (414945 distinct/s). 
+RUNNER2 2026-10-13T13:46:30Z
+E20P3Age-S3X rc=143 
+E20W2Rem3-S3X rc=143 
+E20W2Rem3-AN3 rc=143 
+E20W2Rem3-AN3 KILLED 13:58Z: vacuous (MaxAges = 0: AN3 cannot fail without the retire age, E12); E20P3Age-S3X and E20W2Rem3-S3X KILLED: S3X superseded (box E19)
+E21W2C-NR3 rc=12 Error: Action property NR3 is violated by the last step above. 1537159797 states generated, 456764935 distinct states found. Depth 19. Checked in 1403.570s (325431 distinct/s). 
+E21W2CR3-NR3 rc=143 
+DONE2 2026-10-13T14:12:58Z
+E21W2CR3-NR3 KILLED 14:14Z: W2C (its sub-world) already FAILS NR3 at d19
+RUNNER3 2026-10-13T14:14:01Z
+HOLD 14:21:53Z: hard cap moved to 18:50Z (user)
+RUNNER5 2026-10-13T14:27:13Z c6e469328226a760c510b61812f893fd cc4c0d070430ba9aec232df0d3d15488 
+E23W2C-NR3G rc=12 Error: Action property NR3G is violated by the last step above. 1557089942 states generated, 461456141 distinct states found. Depth 19. Checked in 1576.752s (292663 distinct/s). 
+RUNNER4 2026-10-13T14:41:20Z LeanP1.tla md5 c6e469328226a760c510b61812f893fd
+E26TieP1 rc=0 1923270905 states generated, 461265725 distinct states found. Depth 46. Checked in 1345.020s (342943 distinct/s). 
+E26TieAnc rc=0 1923270905 states generated, 461265725 distinct states found. Depth 46. Checked in 1559.371s (295802 distinct/s). 
+DONE5 2026-10-13T14:54:08Z
+E20P3Age-AN3 rc=0 3661023575 states generated, 1090176224 distinct states found. Depth 32. Checked in 5738.209s (189985 distinct/s). 
+E20P3Age-NR3 rc=0 3661023575 states generated, 1090176224 distinct states found. Depth 32. Checked in 6384.289s (170759 distinct/s). 
+E23W2C-NR4 rc=143 
+DONE3 2026-10-13T15:51:43Z
+E23W2C-NR4 KILLED 15:52Z at d24 (2,039,534,993 distinct, no violation past E21s d19): disk 80%; E24W2C-NR3 (the edited model) answers W2C
+E24W2C-S3W rc=143 
+E20W2Rem3-NR3 rc=143 
+DONE 2026-10-13T16:31:26Z
+16:32Z KILLED for disk (92%): E24W2C-S3W at d22 (1,172,753,422 distinct, no violation; same state space as E24W2C-NR3); E20W2Rem3-NR3 at d16 (1,299,203,398 distinct, no violation)
+E24W2C-NR3 rc=124 
+DONE4 2026-10-13T17:11:43Z
+E24W2C-NR3 rc=124 TIMEOUT 17:11Z at d24 (2,036,408,285 distinct, no violation; old model failed d19)

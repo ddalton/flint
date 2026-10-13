@@ -1,0 +1,20 @@
+tla-mc: building a checker for MCLeanP1M5G (cache: /work/cache/W2C-NR4)
+tla-mc: built in 40.4s
+tla-mc: MCLeanP1M5G (32 variables, 0 symmetry permutations), 80 workers, generated engine; loaded in 0.003s
+progress: depth 14, 82798942 generated, 28120571 distinct (0 fingerprint spills), 14496614 on queue (0 on disk), 17.0s
+progress: depth 15, 164500313 generated, 53732204 distinct (0 fingerprint spills), 25611633 on queue (1960305 on disk), 34.7s
+progress: depth 16, 303376926 generated, 96046575 distinct (0 fingerprint spills), 42314371 on queue (18727299 on disk), 69.7s
+progress: depth 17, 525447728 generated, 162458334 distinct (0 fingerprint spills), 66411759 on queue (42958319 on disk), 168.6s
+progress: depth 18, 863333217 generated, 262071114 distinct (0 fingerprint spills), 99612780 on queue (76281708 on disk), 434.5s
+progress: depth 19, 1353225814 generated, 404155977 distinct (0 fingerprint spills), 142084863 on queue (118853375 on disk), 902.2s
+progress: depth 20, 2030485260 generated, 597779548 distinct (0 fingerprint spills), 193623571 on queue (170526995 on disk), 1512.1s
+progress: depth 21, 2932531025 generated, 851772372 distinct (1024 fingerprint spills), 253992824 on queue (230965368 on disk), 2079.7s
+progress: depth 22, 4096746830 generated, 1173629964 distinct (1024 fingerprint spills), 321857592 on queue (298884152 on disk), 2885.2s
+progress: depth 23, 5545403176 generated, 1568370017 distinct (1024 fingerprint spills), 394740053 on queue (371789397 on disk), 4145.1s
+progress: depth 24, 7278300854 generated, 2039534993 distinct (2048 fingerprint spills), 471164976 on queue (448260656 on disk), 5763.2s
+Terminated
+
+real	97m34.784s
+user	2262m58.937s
+sys	277m39.815s
+rc=143 15:51:36Z

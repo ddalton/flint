@@ -218,3 +218,96 @@ tlapm checks only the module it is given).  Record run of each, --cleanfp,
   M5B 190 (69 s, 1.3 GB)
   TOTAL 13,283 -- exactly the single-file record run's -- in 3,975 s (single: 4,923 s),
   peak 9.6 GB (single: 28.9 GB, at the 30 GB box's limit).
+
+2026-10-13 (part C, box + EC2 E20/E21)
+E18 TakeAt3 == TakeAt \/ Converges(s, p) (the Consume convergence case);
+    S3Wide3 (invariant) and TakeOwed3 (step property).  HOLD in ScopeHolds
+    (8,057,963 -- where E17's TakeOwed2 failed), Rem3 (7,469,230), FetchHolds
+    (3,510,269), ReaderScope (21,213,823), Rem3Age (78,039,582, d32) and P3
+    (132,974,766, d28, exhaustive) -- every world.  NR3 = S3Wide3 + TakeOwed3.
+    Known-bad, MN2 in Rem3: S3Wide3 FAILS (d12), as NR3 does (E14).
+E19 unguarded strengthenings, all FAIL (traces in out/E19*.out):
+    S3X (BackR3 only in the cased-own-delete transient): Rem3 d19 -- a cased
+    tree's installed version was edited from an OLDER baseline, so a rename back
+    puts the current baseline behind; neither guard holds there (local # baseline,
+    inst # doc), and Finish moves the baseline on.  (ScopeHolds: holds.)
+    RelAll (doc derives from the baseline, or a record names it, or cased delete):
+    ScopeHolds d8 -- a Restart after the tree's own installed delete leaves a DEAD
+    baseline (local Nil; Edit mints fresh, never owed again); Rem3 d16 -- a cased
+    tree's own install need not derive from its baseline (file new when edited).
+    RelGAll (RelAll guarded to local = baseline, + cased inst = doc): HOLDS Rem3,
+    ScopeHolds; FAILS FetchHolds d8 -- another tree's committed DELETE leaves only
+    a tombstone.  RelG2All (+ the tombstone): FAILS FetchHolds d10 -- the gateway
+    puts a fresh file on the emptied path: unrelated to the baseline, and no step
+    back.  "doc derives from the baseline" is the wrong shape.
+    Known-bad MN2: every Rel* fails at d2-d4 (the gateway delete without udel).
+LESSON: the strengthening must be guarded (S3Wide3's TakeAt3), and the fact the
+    rename case needs is about where an OLDER version can come from: an unexempted
+    take-able baseline at an emptied path must have no strictly older version
+    published at another path or in a rename in flight.
+GAP IN THE EVIDENCE: no world has two COMMITTING writers with gateway removals
+    (FetchHolds: MaxRemovals 0; W2Rem3: B is a reader).  Suspected NR3 counter-
+    example: rename h1 p1->p2; A commits h2 (from h1) at p1; B takes h2; A's commit
+    deletes p1 (tombstone only); rename h1 back; B owes p1 and steps back h2 -> h1,
+    exempted by nothing in BackR3.  E21 (EC2): W2C (Writers {A,B}, Readers {},
+    MaxBarriers 4, MaxRemovals 2) and W2CR3 (3 removals), NR3.
+E20 (EC2 c8g.48xlarge us-west-1, 2 TB gp3; tla-mc 0.1.2 -compile, ~400-600k
+    distinct/s per 19-worker run): RelAll FAILS W2Rem3 d8, P3 d16, P3Age d16;
+    S3X FAILS P3 d19.  P3Age-S3X, W2Rem3-S3X killed (superseded); W2Rem3-AN3
+    killed (MaxAges 0: vacuous).  P3Age NR3/AN3, W2Rem3 NR3: running.
+E21 (EC2) W2C -- two COMMITTING writers, no readers, MaxBarriers 4, MaxRemovals 2:
+    NR3 FAILS at d19 (456,764,935 distinct; out/ec2-e20/E21W2C-NR3.out).  Rename h1
+    p1->p2; B edits h2 from h1 and commits it into the empty p1 (conflict on h1); A
+    takes h2; A's commit deletes p1 (tombstone only); rename h1 p2->p1 (the rename
+    clears the tombstone); B, holding h2 unedited, takes h1.  An explicit delete
+    and an explicit rename: no silent regress -- the CLAIM lacked the record.
+E23 cdel (a commit's deletes) as a history variable, MCLeanP1M5G.tla; NR4 = NR3 +
+    the cdel exemption.  Rem3 HOLDS (7,476,042); MN2 FAILS d13 (known-bad).
+DECISION (user, 2026-10-13): record a commit's deletes in udel IN LeanP1.tla.
+    Install: udel' = udel \cup {<<p, doc[p]>> : doc[p] # Nil /\ inst[p] = Nil}.
+    udel's only claim reader is Accounted (Inv_AckedNamed / AN3): its exemption
+    widens the same way.  Only exemptions widen, so every earlier HOLDS carries
+    over; the controls are rebuilt from the edited module (E24).
+    Proof: make-anc.py and the TypeOK generator restate Install with the udel
+    write (Install_TypeOK: one typing step); LeanP1Anc.tla and LeanP1Proof.tla
+    regenerated (diffs: Install only).  Split check (fingerprints carried):
+    /mnt/nvme/leanp1-split2.  Tie: E26 on EC2 (Holds1p3b, both modules).
+E22 NoOlder (old model) FAILS Rem3/ScopeHolds/Rem3Age d16 only at the tree's own
+    installed delete (now in udel); E25 re-runs it on the edited model.
+SPLIT2 (box, fingerprints carried from the 10-13 record run, NOT --cleanfp):
+    after the udel change every module proves -- M0 1,921 (+4: Install_TypeOK's
+    udel typing), M1 2,387, M2 4,355, M3 2,191, M4 896, M5A 1,347, M5B 190 =
+    13,287.  A --cleanfp record run of the regenerated proof is still owed.
+E26 TIE (EC2) after the udel change, Holds1p3b, every invariant (no PROPERTY):
+    LeanP1.tla and the regenerated LeanP1Anc.tla both 461,265,725 distinct, d46,
+    no error (before the change: 461,094,969).  The copy still has exactly the
+    original's states; the edited model holds every invariant in the gate world.
+E20 P3Age (3 paths, 3 removals, the retire age; old model -- carries over):
+    NR3 HOLDS and AN3 HOLDS, EXHAUSTIVE: 1,090,176,224 distinct, d32 (EC2, 19
+    workers each, ~95-105 min).  E13 left this world undecided (disk full).
+E23 W2C NR4 (old model + cdel): no violation through d24 (2,039,534,993
+    distinct, past E21's d19); killed for disk at 80% -- E24 W2C (edited model)
+    is the claim's run.
+E24 (box) the EDITED LeanP1.tla (md5 c6e46932): NR3, AN3, S3Wide3 + TakeOwed3 HOLD
+    in Rem3 (7,463,023), ScopeHolds (8,046,694), FetchHolds (3,510,269), ReaderScope
+    (21,242,539), Rem3Age (77,893,354) -- every claim in every world.
+    Known-bad, rebuilt from the edited module: MN2 breaks NR3 (d13), MA1 breaks AN3
+    (d10).  (Fewer distinct than the old model in some worlds: a gateway delete and
+    a commit's delete of one version now leave the same udel, so states merge.)
+E25 NoOlder on the edited model HOLDS in all five box worlds; MN2 breaks it (d11).
+SPLIT2 RECORD (--cleanfp, --threads 4, box, 2026-10-13 15:08-16:07Z): the
+    regenerated proof after the udel change -- M0 1,921 (539 s, 4.1 GB), M1 2,387
+    (505 s, 5.4 GB), M2 4,355 (1,006 s, 9.7 GB), M3 2,191 (740 s, 7.0 GB), M4 896
+    (210 s, 3.0 GB), M5A 1,347 (465 s, 5.6 GB), M5B 190 (74 s, 1.3 GB):
+    13,287 PROVED, 3,539 s, peak 9.7 GB (out/split2/record-*.out).
+16:32Z, EC2 disk 92%: killed E24 W2C-S3W at d22 (1,172,753,422 distinct, no
+    violation; NR3's state space twice over) and E20 W2Rem3-NR3 at d16
+    (1,299,203,398 distinct, no violation -- E13 reached d12).  BOUNDED, no verdict.
+
+E24 W2C NR3 (the edited model, udel records a commit's deletes), EC2 c8g.48xlarge,
+24 workers, timeout 9000 s: rc=124 TIMEOUT 17:11Z at depth 24, 2,036,408,285
+distinct, NO violation. The old model fails W2C NR3 at depth 19 (E21, 456,764,935
+distinct); the edited model passes 5 levels beyond that. Bounded, not exhaustive.
+EC2 torn down 18:36Z 2026-10-13: instance terminated, spot request cancelled,
+inline policy and bucket deleted; zero set verified in us-east-1/2, us-west-1/2.
+Outputs in out/ec2-e20/.

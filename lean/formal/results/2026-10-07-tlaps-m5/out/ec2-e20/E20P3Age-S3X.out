@@ -1,0 +1,17 @@
+tla-mc: building a checker for MCLeanP1M5R (cache: /work/cache/P3Age-S3X)
+tla-mc: built in 33.0s
+tla-mc: MCLeanP1M5R (31 variables, 0 symmetry permutations), 19 workers, generated engine; loaded in 0.003s
+progress: depth 12, 28938141 generated, 11591416 distinct (0 fingerprint spills), 6695398 on queue (0 on disk), 19.1s
+progress: depth 13, 62888501 generated, 23946276 distinct (0 fingerprint spills), 12354860 on queue (0 on disk), 42.3s
+progress: depth 14, 119576003 generated, 43564446 distinct (0 fingerprint spills), 19618170 on queue (0 on disk), 82.3s
+progress: depth 15, 204115352 generated, 72290207 distinct (0 fingerprint spills), 28725761 on queue (1234945 on disk), 141.5s
+progress: depth 16, 323125068 generated, 112278294 distinct (0 fingerprint spills), 39988087 on queue (12685175 on disk), 253.4s
+progress: depth 17, 483682520 generated, 164700344 distinct (0 fingerprint spills), 52422050 on queue (25253794 on disk), 373.1s
+progress: depth 18, 694972522 generated, 232773397 distinct (0 fingerprint spills), 68073053 on queue (40942685 on disk), 641.3s
+progress: depth 19, 965462449 generated, 318052508 distinct (0 fingerprint spills), 85279111 on queue (58173831 on disk), 1214.7s
+Terminated
+
+real	23m14.597s
+user	238m21.083s
+sys	4m17.332s
+rc=143 13:57:54Z

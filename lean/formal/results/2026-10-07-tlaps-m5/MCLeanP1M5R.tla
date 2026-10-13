@@ -82,4 +82,64 @@ S3Wide == \A s \in Writers, p \in Paths : TakeAt(s, p) => ~BackR3(s, p)
 TakeOwed2 == [][\A s \in Writers, p \in Paths :
                   (w[s].baseline[p] # Nil /\ doc[p] # Nil /\ w'[s].baseline[p] # w[s].baseline[p] /\ Takes(s, p))
                   => TakeAt(s, p)]_vars
+\* E18: E17's ScopeHolds trace found the third take: Consume adopts doc[p] at a
+\* path whose LOCAL already holds the document's content (Converges).
+TakeAt3(s, p) == TakeAt(s, p) \/ Converges(s, p)
+S3Wide3 == \A s \in Writers, p \in Paths : TakeAt3(s, p) => ~BackR3(s, p)
+TakeOwed3 == [][\A s \in Writers, p \in Paths :
+                  (w[s].baseline[p] # Nil /\ doc[p] # Nil /\ w'[s].baseline[p] # w[s].baseline[p] /\ Takes(s, p))
+                  => TakeAt3(s, p)]_vars
+\* E19: NR3's unguarded strengthening.  E15's S3All failed only where the
+\* tree's own commit installed a delete at p (cased, p among its deletes) and
+\* the gateway renamed an older version back; Finish then drops the baseline.
+\* A back position is only ever that; neither a take path's guard holds there.
+Excuse(s, p) == /\ w[s].pc = "cased" /\ p \in w[s].deletes /\ w[s].inst[p] = Nil
+                /\ w[s].local[p] # w[s].baseline[p] /\ ~Converges(s, p)
+S3X == \A s \in Writers, p \in Paths : BackR3(s, p) => Excuse(s, p)
+\* E19, the relation S3X needs to be inductive: a tree's baseline at p is
+\* behind the document (doc derives from it), or a record names where it went
+\* (a conflict, an acknowledged delete, an acknowledgement at another path),
+\* or the tree's own commit installed the delete (cased, before Finish).
+Rel(s, p) == w[s].baseline[p] # Nil =>
+  \/ doc[p] # Nil /\ Derives(doc[p], w[s].baseline[p])
+  \/ <<p, w[s].baseline[p]>> \in conflicts
+  \/ \E d \in udel : d[1] = p /\ Derives(d[2], w[s].baseline[p])
+  \/ \E a \in acked : a[1] # p /\ Derives(a[2], w[s].baseline[p])
+  \/ w[s].pc = "cased" /\ p \in w[s].deletes /\ w[s].inst[p] = Nil
+RelAll == \A s \in Writers, p \in Paths : Rel(s, p)
+\* E19b: RelAll fails twice (E19): a restart after the tree's own installed
+\* delete leaves a dead baseline (local Nil; Edit mints fresh, so never owed
+\* again), and a cased tree's own install need not derive from its baseline
+\* (the file was new when edited).  The relation, guarded to where a take
+\* can happen: the tree holds its baseline unedited, or it installed doc[p].
+RelG(s, p) == (w[s].baseline[p] # Nil /\ w[s].local[p] = w[s].baseline[p]) =>
+  \/ doc[p] # Nil /\ Derives(doc[p], w[s].baseline[p])
+  \/ <<p, w[s].baseline[p]>> \in conflicts
+  \/ \E d \in udel : d[1] = p /\ Derives(d[2], w[s].baseline[p])
+  \/ \E a \in acked : a[1] # p /\ Derives(a[2], w[s].baseline[p])
+  \/ w[s].pc = "cased" /\ w[s].inst[p] = doc[p]
+RelGAll == \A s \in Writers, p \in Paths : RelG(s, p)
+\* E19c: RelG fails in FetchHolds (E19b): another tree's committed delete
+\* leaves the path empty with only its tombstone naming the version.
+RelG2(s, p) == (w[s].baseline[p] # Nil /\ w[s].local[p] = w[s].baseline[p]) =>
+  \/ doc[p] # Nil /\ Derives(doc[p], w[s].baseline[p])
+  \/ doc[p] = Nil /\ tomb[p] # Nil /\ Derives(tomb[p], w[s].baseline[p])
+  \/ <<p, w[s].baseline[p]>> \in conflicts
+  \/ \E d \in udel : d[1] = p /\ Derives(d[2], w[s].baseline[p])
+  \/ \E a \in acked : a[1] # p /\ Derives(a[2], w[s].baseline[p])
+  \/ w[s].pc = "cased" /\ w[s].inst[p] = doc[p]
+RelG2All == \A s \in Writers, p \in Paths : RelG2(s, p)
+\* E22: the fact S3Wide3's rename case needs.  A rename lands only on an
+\* empty path; it steps a tree back only by bringing a STRICTLY OLDER version
+\* of the tree's baseline from another path.  So: a take-able baseline at an
+\* emptied path that no record exempts has no older version published anywhere.
+Exempt(s, p) ==
+  \/ <<p, w[s].baseline[p]>> \in conflicts
+  \/ \E d \in udel : d[1] = p /\ Derives(d[2], w[s].baseline[p])
+  \/ \E a \in acked : a[1] # p /\ Derives(a[2], w[s].baseline[p])
+TakeAble(s, p) == w[s].local[p] = w[s].baseline[p] \/ (w[s].pc = "cased" /\ w[s].inst[p] = doc[p])
+Older(b, h) == h # Nil /\ Derives(b, h) /\ Content(h) # Content(b)
+NoOlder == \A s \in Writers, p \in Paths :
+  (w[s].baseline[p] # Nil /\ doc[p] = Nil /\ TakeAble(s, p) /\ ~Exempt(s, p))
+    => \A q \in Paths : ~Older(w[s].baseline[p], doc[q])
 ==============================================================================

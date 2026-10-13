@@ -106,7 +106,7 @@ VARIABLES
   nextGen, ui, reqs, barriers, w, took,
   gw,     \* per path, the save in flight: its fresh handle, not yet cited
   mv,     \* a two-CAS rename between its CASes (only when ~RenameAtomic)
-  udel,   \* the deletes the gateway ACKNOWLEDGED: <<path, version deleted>>
+  udel,   \* the ACKNOWLEDGED deletes, the gateway's and a commit's: <<path, version deleted>>
   restarts, syncs, regressed, rescopes, fails,
   upped, copies, orig,  \* every handle PUT; the copies made; a copy's original
   \* RETIRE-AGE G (M1, slice 5).  `retiring`: what a commit stopped citing,
@@ -502,7 +502,10 @@ Install(s) ==
                          \* installed one is it plus this tree's own changes.
                          ![s].adv = IF CommitAdvanceGuarded THEN seq = W.derived ELSE TRUE,
                          ![s].collected = retired = {}]
-  /\ UNCHANGED <<live, minted, base, acked, holder, gw, mv, udel, nextGen, ui, reqs, barriers, aux>>
+       \* A commit's delete is acknowledged as the gateway's is (E21: without
+       \* it, a delete then a rename back reads as a regress at a peer).
+       /\ udel' = udel \cup {<<p, doc[p]>> : p \in {q \in Paths : doc[q] # Nil /\ inst[q] = Nil}}
+  /\ UNCHANGED <<live, minted, base, acked, holder, gw, mv, nextGen, ui, reqs, barriers, aux>>
 
 \* Step 6: the retired set, in one batch, sparing what the installed
 \* document still cites — at once only without the retire age; with it,

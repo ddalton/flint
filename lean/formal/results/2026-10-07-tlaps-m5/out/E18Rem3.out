@@ -1,0 +1,19 @@
+tla-mc: building a checker for MCLeanP1M5R (cache: /mnt/nvme/leanp1-m5-2026-10-07/cache-E18Rem3)
+tla-mc: built in 28.7s
+tla-mc: MCLeanP1M5R (31 variables, 0 symmetry permutations), 2 workers, generated engine; loaded in 0.003s
+progress: depth 13, 2323440 generated, 931508 distinct (0 fingerprint spills), 375714 on queue (0 on disk), 13.3s
+progress: depth 15, 5353723 generated, 2029777 distinct (0 fingerprint spills), 604069 on queue (0 on disk), 31.1s
+progress: depth 16, 7309482 generated, 2692680 distinct (0 fingerprint spills), 662903 on queue (0 on disk), 42.1s
+progress: depth 17, 9449575 generated, 3404373 distinct (0 fingerprint spills), 711693 on queue (0 on disk), 56.0s
+progress: depth 18, 11732319 generated, 4164044 distinct (0 fingerprint spills), 759671 on queue (0 on disk), 69.2s
+progress: depth 19, 14003884 generated, 4894408 distinct (0 fingerprint spills), 730364 on queue (0 on disk), 84.3s
+progress: depth 20, 15969050 generated, 5497747 distinct (0 fingerprint spills), 603339 on queue (0 on disk), 96.1s
+progress: depth 22, 18679729 generated, 6374584 distinct (0 fingerprint spills), 416021 on queue (0 on disk), 114.4s
+progress: depth 24, 20954720 generated, 7195723 distinct (0 fingerprint spills), 381219 on queue (0 on disk), 129.5s
+Model checking completed. No error has been found.
+22185575 states generated, 7469230 distinct states found. Depth 28. Checked in 138.735s (53838 distinct/s).
+
+real	2m47.438s
+user	5m5.001s
+sys	0m1.424s
+rc=0 13:26:31Z
