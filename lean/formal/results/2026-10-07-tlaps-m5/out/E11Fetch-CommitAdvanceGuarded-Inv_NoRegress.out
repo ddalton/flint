@@ -1,0 +1,17 @@
+tlc-rs: MCLeanP1M5R (31 variables, 0 symmetry permutations), 2 workers, interp engine; loaded in 0.005s
+progress: depth 16, 1312531 generated, 440157 distinct (0 fingerprint spills), 141677 on queue (0 on disk), 15.0s
+progress: depth 18, 2570001 generated, 841393 distinct (0 fingerprint spills), 221015 on queue (0 on disk), 30.0s
+progress: depth 20, 4310586 generated, 1402740 distinct (0 fingerprint spills), 296739 on queue (0 on disk), 51.0s
+progress: depth 21, 5324945 generated, 1710329 distinct (0 fingerprint spills), 307589 on queue (0 on disk), 63.2s
+progress: depth 22, 6351076 generated, 2010810 distinct (0 fingerprint spills), 300481 on queue (0 on disk), 75.3s
+progress: depth 23, 7324723 generated, 2294866 distinct (0 fingerprint spills), 284056 on queue (0 on disk), 86.8s
+progress: depth 24, 8236219 generated, 2568822 distinct (0 fingerprint spills), 273956 on queue (0 on disk), 97.1s
+progress: depth 26, 9865694 generated, 3033866 distinct (0 fingerprint spills), 206903 on queue (0 on disk), 115.8s
+progress: depth 29, 10812440 generated, 3256850 distinct (0 fingerprint spills), 37484 on queue (0 on disk), 126.3s
+Model checking completed. No error has been found.
+11042178 states generated, 3319827 distinct states found. Depth 33. Checked in 128.874s (25760 distinct/s).
+
+real	2m8.885s
+user	4m16.771s
+sys	0m0.480s
+rc=0 21:30:27Z

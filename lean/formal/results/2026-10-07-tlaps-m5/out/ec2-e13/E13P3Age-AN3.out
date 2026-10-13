@@ -1,0 +1,16 @@
+tla-mc: building a checker for MCLeanP1M5R (cache: /work/cache/P3Age-AN3)
+tla-mc: built in 32.4s
+tla-mc: MCLeanP1M5R (31 variables, 0 symmetry permutations), 20 workers, generated engine; loaded in 0.003s
+progress: depth 12, 28938141 generated, 11591416 distinct (0 fingerprint spills), 6695398 on queue (0 on disk), 18.9s
+progress: depth 13, 62888501 generated, 23946276 distinct (0 fingerprint spills), 12354860 on queue (0 on disk), 41.7s
+progress: depth 14, 119576003 generated, 43564446 distinct (0 fingerprint spills), 19618170 on queue (0 on disk), 80.6s
+progress: depth 15, 204115352 generated, 72290207 distinct (0 fingerprint spills), 28725761 on queue (0 on disk), 255.0s
+progress: depth 16, 323125068 generated, 112278294 distinct (1024 fingerprint spills), 39988087 on queue (0 on disk), 401.9s
+progress: depth 17, 483682520 generated, 164700344 distinct (1024 fingerprint spills), 52422050 on queue (1719202 on disk), 568.9s
+Error: queue file: No space left on device (os error 28)
+680270209 states generated, 228032952 distinct states found. Depth 17. Checked in 970.321s (235008 distinct/s).
+
+real	16m43.186s
+user	154m25.836s
+sys	3m11.901s
+rc=12 23:44:25Z

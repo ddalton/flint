@@ -1,0 +1,24 @@
+tla-mc: building a checker for MCLeanP1M5R (cache: /work/cache/P3-AN3)
+tla-mc: built in 31.9s
+tla-mc: MCLeanP1M5R (31 variables, 0 symmetry permutations), 20 workers, generated engine; loaded in 0.003s
+progress: depth 13, 27169935 generated, 10709908 distinct (0 fingerprint spills), 4992786 on queue (0 on disk), 19.7s
+progress: depth 14, 47107150 generated, 17866699 distinct (0 fingerprint spills), 7156791 on queue (0 on disk), 35.1s
+progress: depth 15, 74038510 generated, 27454264 distinct (0 fingerprint spills), 9587565 on queue (0 on disk), 56.0s
+progress: depth 16, 107593457 generated, 38742196 distinct (0 fingerprint spills), 11287932 on queue (0 on disk), 82.1s
+progress: depth 17, 145541429 generated, 50844893 distinct (0 fingerprint spills), 12102697 on queue (0 on disk), 111.7s
+progress: depth 18, 186140526 generated, 63778911 distinct (0 fingerprint spills), 12934018 on queue (0 on disk), 142.9s
+progress: depth 19, 228280842 generated, 77013887 distinct (0 fingerprint spills), 13234976 on queue (0 on disk), 272.6s
+progress: depth 20, 268261445 generated, 89370178 distinct (0 fingerprint spills), 12356291 on queue (0 on disk), 304.1s
+progress: depth 21, 302129083 generated, 99523866 distinct (0 fingerprint spills), 10153688 on queue (0 on disk), 352.7s
+progress: depth 22, 329541742 generated, 108270022 distinct (1024 fingerprint spills), 8746156 on queue (0 on disk), 422.5s
+progress: depth 23, 354488562 generated, 117176587 distinct (1024 fingerprint spills), 8906565 on queue (0 on disk), 443.9s
+progress: depth 24, 378985636 generated, 125576351 distinct (1024 fingerprint spills), 8399764 on queue (0 on disk), 465.3s
+progress: depth 25, 398653507 generated, 130932562 distinct (1024 fingerprint spills), 5356211 on queue (0 on disk), 483.1s
+progress: depth 26, 408385811 generated, 132697074 distinct (1024 fingerprint spills), 1764512 on queue (0 on disk), 505.8s
+Model checking completed. No error has been found.
+411176475 states generated, 132974766 distinct states found. Depth 28. Checked in 509.797s (260839 distinct/s).
+
+real	9m1.788s
+user	109m32.385s
+sys	0m40.529s
+rc=0 23:36:44Z

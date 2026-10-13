@@ -1,0 +1,58 @@
+PROPOSAL: restate Inv_NoRegress and Inv_AckedNamed (LeanP1.tla)
+Written 2026-10-12 by flint-3f for flint-46, or whoever owns LeanP1.tla.
+flint-46 was not running, so the proposal is left here. LeanP1.tla is NOT edited.
+The candidates live in MCLeanP1M5R.tla (EXTENDS LeanP1 unchanged).
+Evidence: NOTES.txt E6-E14 and RESULTS.txt.
+
+WHY: both claims are FALSE as stated once the gateway may remove three times.
+Every gate world allows at most one removal, so the gate never looked.
+- Inv_NoRegress (E6): rename, re-create, delete, rename back; the tree regresses.
+- Inv_AckedNamed (E8): renamed and back, deleted, a fresh install clears the
+  tomb, the handle is reaped.
+In every counterexample a record still names the version: an acknowledged
+delete, an acknowledged rename, or a later acknowledged save. The claims look
+for that record in too few places. These are scope gaps, not losses.
+
+ALSO: Inv_AckedNamed cannot fail in a world without the retire age
+(MaxAges = 0). No handle is ever reaped there, so `h \in live` names every
+ack. That is every gate world, so the gate never tested the claim (E12).
+
+PROPOSED: NR3 for Inv_NoRegress.
+  Back(s, p) as now, and additionally exempt when:
+  - an acknowledged delete at p retired the tree's baseline, or a version
+    derived from it (udel);
+  - the baseline, or a version derived from it, is acknowledged at ANOTHER
+    path, i.e. it was renamed away (acked).
+  It is stated as a step property over the step that takes doc[p]:
+    BackR3(s, p) == /\ Back(s, p)
+                    /\ ~\E d \in udel : d[1] = p /\ Derives(d[2], w[s].baseline[p])
+                    /\ ~\E a \in acked : a[1] # p /\ Derives(a[2], w[s].baseline[p])
+    NR3 == [][\A s \in Writers, p \in Paths :
+                ~(BackR3(s, p) /\ w'[s].baseline[p] = doc[p])]_vars
+  It could also stay a flag set in Consume, Sync and RPullSync, as
+  `regressed` is today, with BackR3 in place of Back.
+
+PROPOSED: AN3 for Inv_AckedNamed.
+  An acked <<p, h>> is accounted for along h's whole RENAME CHAIN:
+    Chain(p, h) == {p, h[1]} \cup {q : <<q, h>> \in acked}
+  - the record clauses (doc, tomb, took, udel) at any path in the chain;
+  - the later-ack clause at any path in the chain.
+  Today the record clauses look only at p, and at the acked paths only when
+  p = h[1]; the later-ack clause looks only at p.
+
+EVIDENCE (TLC; tla-mc 0.1.1/0.1.2, and tlc-rs on the box):
+  holds:
+    NR3: Rem3, Rem3Age (via NR2, which NR3 weakens: 78,039,582), ScopeHolds, P3.
+    AN3: Rem3, Rem3Age (78,039,582), ScopeHolds, P3.
+    P3 is three paths and three removals: 132,974,766 distinct, exhaustive.
+  fails (known-bad):
+    NR3 under MN2 (the delete not recorded in udel): Rem3, Rem3Age, d13.
+    AN3 under MA1 (the gateway's delete records nothing): Rem3Age, d10.
+  weaker candidates that fail:
+    NR1, NR2 (P3, the rename-away case), AN1, AN2 (Rem3Age, a stale ack at a
+    renamed-through path).
+  undecided (the disk filled on EC2; no violation up to there):
+    P3Age (to d17, about 228M) and the two-writer W2Rem3 (to d12, about 125M).
+
+NEXT: flint-3f proves NR3 and then AN3 in TLAPS as M5 part C, stated in the
+proof module. If the wording above is changed, the proof follows it.

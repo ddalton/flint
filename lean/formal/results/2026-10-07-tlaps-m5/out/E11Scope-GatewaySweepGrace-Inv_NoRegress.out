@@ -1,0 +1,22 @@
+tlc-rs: MCLeanP1M5R (31 variables, 0 symmetry permutations), 2 workers, interp engine; loaded in 0.003s
+progress: depth 13, 2298801 generated, 817679 distinct (0 fingerprint spills), 298188 on queue (0 on disk), 15.3s
+progress: depth 15, 4965046 generated, 1741016 distinct (0 fingerprint spills), 523434 on queue (9898 on disk), 33.7s
+progress: depth 16, 6898728 generated, 2422011 distinct (0 fingerprint spills), 680995 on queue (170275 on disk), 47.3s
+progress: depth 17, 9348508 generated, 3282058 distinct (0 fingerprint spills), 860047 on queue (352655 on disk), 64.8s
+progress: depth 18, 12326985 generated, 4304020 distinct (0 fingerprint spills), 1021962 on queue (517130 on disk), 86.0s
+progress: depth 19, 15733021 generated, 5440457 distinct (0 fingerprint spills), 1136437 on queue (633909 on disk), 110.5s
+progress: depth 20, 19354432 generated, 6617765 distinct (0 fingerprint spills), 1177308 on queue (676828 on disk), 136.8s
+progress: depth 21, 22906704 generated, 7743227 distinct (0 fingerprint spills), 1125462 on queue (627798 on disk), 162.7s
+progress: depth 22, 26133774 generated, 8740825 distinct (0 fingerprint spills), 997598 on queue (501982 on disk), 186.5s
+progress: depth 23, 28885873 generated, 9586172 distinct (0 fingerprint spills), 845347 on queue (349731 on disk), 207.0s
+progress: depth 24, 31170573 generated, 10304443 distinct (0 fingerprint spills), 718271 on queue (223423 on disk), 224.4s
+progress: depth 25, 33069727 generated, 10897053 distinct (0 fingerprint spills), 592610 on queue (96994 on disk), 239.0s
+progress: depth 26, 34533471 generated, 11308364 distinct (0 fingerprint spills), 411311 on queue (0 on disk), 250.3s
+progress: depth 29, 35953307 generated, 11611411 distinct (0 fingerprint spills), 19998 on queue (0 on disk), 260.9s
+Model checking completed. No error has been found.
+35986443 states generated, 11615555 distinct states found. Depth 31. Checked in 261.193s (44471 distinct/s).
+
+real	4m21.202s
+user	8m40.283s
+sys	0m1.726s
+rc=0 22:50:33Z

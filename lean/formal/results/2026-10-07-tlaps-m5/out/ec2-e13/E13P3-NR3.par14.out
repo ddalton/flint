@@ -1,0 +1,5 @@
+tla-mc: MCLeanP1M5R (31 variables, 0 symmetry permutations), 14 workers, interp engine; loaded in 0.003s
+progress: depth 11, 6003975 generated, 2634638 distinct (0 fingerprint spills), 1580759 on queue (1137367 on disk), 19.9s
+progress: depth 12, 13753497 generated, 5717122 distinct (0 fingerprint spills), 3082484 on queue (2641908 on disk), 43.5s
+progress: depth 13, 27169935 generated, 10709908 distinct (0 fingerprint spills), 4992786 on queue (4554002 on disk), 79.1s
+progress: depth 14, 47107150 generated, 17866699 distinct (0 fingerprint spills), 7156791 on queue (6719543 on disk), 401.8s

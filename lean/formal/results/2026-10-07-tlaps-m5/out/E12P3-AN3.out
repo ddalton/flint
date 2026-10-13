@@ -1,0 +1,9 @@
+tlc-rs: MCLeanP1M5R (31 variables, 0 symmetry permutations), 2 workers, interp engine; loaded in 0.003s
+progress: depth 10, 2264537 generated, 1053879 distinct (0 fingerprint spills), 689642 on queue (237802 on disk), 23.3s
+progress: depth 11, 6003975 generated, 2634638 distinct (0 fingerprint spills), 1580759 on queue (1135319 on disk), 63.0s
+progress: depth 12, 13753497 generated, 5717122 distinct (0 fingerprint spills), 3082484 on queue (2639860 on disk), 137.8s
+progress: depth 13, 27169935 generated, 10709908 distinct (0 fingerprint spills), 4992786 on queue (4551442 on disk), 282.6s
+progress: depth 14, 47107150 generated, 17866699 distinct (0 fingerprint spills), 7156791 on queue (6715447 on disk), 483.9s
+progress: depth 15, 74038510 generated, 27454264 distinct (0 fingerprint spills), 9587565 on queue (9148013 on disk), 779.3s
+progress: depth 16, 107593457 generated, 38742196 distinct (0 fingerprint spills), 11287932 on queue (10852220 on disk), 1190.5s
+progress: depth 17, 145541429 generated, 50844893 distinct (0 fingerprint spills), 12102697 on queue (11668777 on disk), 1614.0s

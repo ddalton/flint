@@ -1,0 +1,27 @@
+tlc-rs: MCLeanP1M5R (31 variables, 0 symmetry permutations), 3 workers, interp engine; loaded in 0.003s
+progress: depth 12, 3185044 generated, 1297385 distinct (0 fingerprint spills), 671089 on queue (136049 on disk), 20.4s
+progress: depth 13, 6160160 generated, 2400966 distinct (0 fingerprint spills), 1103581 on queue (573405 on disk), 40.3s
+progress: depth 14, 10717188 generated, 4032392 distinct (0 fingerprint spills), 1631426 on queue (1104322 on disk), 72.8s
+progress: depth 15, 17221365 generated, 6330018 distinct (0 fingerprint spills), 2297626 on queue (1774106 on disk), 116.9s
+progress: depth 16, 26245127 generated, 9468786 distinct (0 fingerprint spills), 3138768 on queue (2619088 on disk), 176.7s
+progress: depth 17, 38626234 generated, 13692450 distinct (0 fingerprint spills), 4223664 on queue (3704240 on disk), 266.9s
+progress: depth 18, 55608767 generated, 19419429 distinct (0 fingerprint spills), 5726979 on queue (5207299 on disk), 399.8s
+progress: depth 19, 77692660 generated, 26575756 distinct (0 fingerprint spills), 7156327 on queue (6635623 on disk), 576.6s
+progress: depth 20, 102718934 generated, 34305516 distinct (0 fingerprint spills), 7729760 on queue (7208544 on disk), 767.6s
+progress: depth 21, 126774784 generated, 41430705 distinct (0 fingerprint spills), 7125189 on queue (6603717 on disk), 964.8s
+progress: depth 22, 147050590 generated, 47284605 distinct (0 fingerprint spills), 5853900 on queue (5332684 on disk), 1126.2s
+progress: depth 23, 164361655 generated, 52541674 distinct (0 fingerprint spills), 5257069 on queue (4737389 on disk), 1268.0s
+progress: depth 24, 182303479 generated, 58348005 distinct (0 fingerprint spills), 5806331 on queue (5287675 on disk), 1400.3s
+progress: depth 25, 203074553 generated, 64907110 distinct (0 fingerprint spills), 6559105 on queue (6039681 on disk), 1553.4s
+progress: depth 26, 224492599 generated, 71078428 distinct (0 fingerprint spills), 6171318 on queue (5650358 on disk), 1722.8s
+progress: depth 27, 241357307 generated, 75340991 distinct (0 fingerprint spills), 4262563 on queue (3739299 on disk), 1850.4s
+checkpoint: states/MCLeanP1M5R-tlcrs-1791837454-74441/ckpt (depth 27, 75340991 distinct, 4262563 on queue) in 1.3s
+progress: depth 28, 250690410 generated, 77342260 distinct (0 fingerprint spills), 2001269 on queue (1476213 on disk), 1931.5s
+progress: depth 29, 254158403 generated, 77934109 distinct (0 fingerprint spills), 591849 on queue (66025 on disk), 1962.2s
+Model checking completed. No error has been found.
+255110359 states generated, 78039582 distinct states found. Depth 32. Checked in 1969.837s (39617 distinct/s).
+
+real	32m49.859s
+user	97m44.694s
+sys	0m31.484s
+rc=0 21:10:24Z

@@ -1,0 +1,26 @@
+START 2026-10-12T23:10:16Z tla-mc: unknown argument -version 192 cpus
+BEGIN E13P3-NR2 2026-10-12T23:10:16Z
+E13P3-NR2 rc=12 Error: Action property NR2 is violated by the last step above. 35533564 states generated, 13703388 distinct states found. Depth 13. Checked in 84.008s (163119 distinct/s). 
+BEGIN E13P3-AN3 2026-10-12T23:11:40Z
+RUNNER2 2026-10-12T23:16:52Z parallel, 14 workers each, 20 min cap
+E13P3-Inv_NoRegress rc=12 Error: Invariant Inv_NoRegress is violated. 39638170 states generated, 15154521 distinct states found. Depth 13. Checked in 219.217s (69130 distinct/s). 
+RUNNER3 2026-10-12T23:25:23Z compiled, 20 workers each, -queue-mem 30000, 20 min cap
+E13P3Age-NR3 rc=2 
+E13P3-AN3 rc=2 
+E13P3-Inv_AckedNamed rc=2 
+E13W2Rem3-AN3 rc=2 
+E13P3Age-Inv_AckedNamed rc=2 
+E13P3Age-AN3 rc=2 
+E13W2Rem3-Inv_AckedNamed rc=2 
+RUNNER4 2026-10-12T23:27:42Z compiled, own cache each, 20 workers, -queue-mem 30000, 20 min cap
+E13P3Age-Inv_AckedNamed rc=12 Error: Invariant Inv_AckedNamed is violated. 64833471 states generated, 24636229 distinct states found. Depth 13. Checked in 41.142s (598814 distinct/s). 
+E13P3-NR3 rc=0 411176475 states generated, 132974766 distinct states found. Depth 28. Checked in 483.543s (275001 distinct/s). 
+E13P3-Inv_AckedNamed rc=0 411176475 states generated, 132974766 distinct states found. Depth 28. Checked in 486.091s (273559 distinct/s). 
+E13P3-AN3 rc=0 411176475 states generated, 132974766 distinct states found. Depth 28. Checked in 509.797s (260839 distinct/s). 
+E13W2Rem3-NR3 rc=12 318064821 states generated, 122496403 distinct states found. Depth 12. Checked in 990.594s (123660 distinct/s). 
+DONE3 2026-10-12T23:43:27Z
+E13P3Age-NR3 rc=12 682601559 states generated, 228627918 distinct states found. Depth 17. Checked in 970.879s (235485 distinct/s). 
+E13P3Age-AN3 rc=12 680270209 states generated, 228032952 distinct states found. Depth 17. Checked in 970.321s (235008 distinct/s). 
+E13W2Rem3-Inv_AckedNamed rc=12 331829316 states generated, 127520118 distinct states found. Depth 12. Checked in 971.838s (131215 distinct/s). 
+E13W2Rem3-AN3 rc=12 324552113 states generated, 124945019 distinct states found. Depth 12. Checked in 973.433s (128355 distinct/s). 
+DONE4 2026-10-12T23:44:27Z

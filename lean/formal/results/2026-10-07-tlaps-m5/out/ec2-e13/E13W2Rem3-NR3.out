@@ -1,0 +1,12 @@
+tla-mc: building a checker for MCLeanP1M5R (cache: /root/.cache/tla-mc)
+tla-mc: built in 16.8s
+tla-mc: MCLeanP1M5R (31 variables, 0 symmetry permutations), 20 workers, generated engine; loaded in 0.003s
+progress: depth 11, 37580393 generated, 15993183 distinct (0 fingerprint spills), 11178908 on queue (0 on disk), 27.4s
+progress: depth 12, 118089596 generated, 47807611 distinct (0 fingerprint spills), 31814428 on queue (0 on disk), 86.7s
+Error: queue file: No space left on device (os error 28)
+318064821 states generated, 122496403 distinct states found. Depth 12. Checked in 990.594s (123660 distinct/s).
+
+real	16m47.680s
+user	78m2.686s
+sys	0m44.729s
+rc=12 23:43:27Z

@@ -1,0 +1,3 @@
+tlc-rs: MCLeanP1M5R (31 variables, 0 symmetry permutations), 2 workers, interp engine; loaded in 0.005s
+progress: depth 12, 1325359 generated, 555794 distinct (0 fingerprint spills), 260646 on queue (0 on disk), 13.1s
+progress: depth 14, 3671619 generated, 1425708 distinct (0 fingerprint spills), 494200 on queue (0 on disk), 34.5s
