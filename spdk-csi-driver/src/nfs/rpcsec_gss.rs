@@ -10,13 +10,25 @@
 
 use crate::nfs::gss_framing::{GssReject, ValidatedCall};
 use crate::nfs::xdr::{XdrDecoder, XdrEncoder};
-use crate::nfs::kerberos::{Keytab, KerberosContext};
+use krb5::{Keytab, KerberosContext};
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn, error};
+
+/// Clock-skew tolerance for an AP-REQ authenticator, in seconds.
+///
+/// RFC 4120 §5.3 recommends 5 minutes; a site with worse clocks needs to
+/// say so rather than patching the binary.
+fn krb5_clock_skew() -> i64 {
+    std::env::var("FLINT_NFS_KRB5_CLOCK_SKEW_SECS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(krb5::DEFAULT_CLOCK_SKEW_SECS)
+}
 
 /// RPCSEC_GSS version
 pub const RPCSEC_GSS_VERSION: u32 = 1;
@@ -408,7 +420,7 @@ impl RpcSecGssManager {
     pub async fn tokens_for(
         &self,
         handle: &[u8],
-    ) -> Option<crate::nfs::krb::token::PerMessageTokens<crate::nfs::krb::token::ContextKey>> {
+    ) -> Option<krb5::token::PerMessageTokens<krb5::token::ContextKey>> {
         let contexts = self.contexts.read().await;
         contexts
             .get(handle)
@@ -446,7 +458,7 @@ impl RpcSecGssManager {
         // leave a context behind, so a peer with no credential at all grew
         // this map by one entry per RPC.
         let (context, gss_token) = if let Some(ref keytab) = self.keytab {
-            match KerberosContext::accept_token(keytab, init_token) {
+            match KerberosContext::accept_token_with_skew(keytab, init_token, krb5_clock_skew()) {
                 Ok((krb_ctx, ap_rep)) => {
                     info!("✅ Kerberos context established (Pure Rust): client={}", krb_ctx.client_principal);
                     (GssContext::with_kerberos(handle.clone(), cred.service, krb_ctx), ap_rep)

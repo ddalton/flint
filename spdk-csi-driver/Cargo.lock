@@ -725,12 +725,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "base64ct"
-version = "1.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e050f626429857a27ddccb31e0aca21356bfa709c04041aefddac081a8f068a"
-
-[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -773,15 +767,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "block-padding"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8894febbff9f758034a5b8e12d87918f56dfc64a8e1fe757d65e29041538d93"
-dependencies = [
- "generic-array",
-]
-
-[[package]]
 name = "bumpalo"
 version = "3.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -807,15 +792,6 @@ checksum = "7dafe3a8757b027e2be6e4e5601ed563c55989fcf1546e933c66c8eb3a058d35"
 dependencies = [
  "bytes",
  "either",
-]
-
-[[package]]
-name = "cbc"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26b52a9543ae338f279b96b0b9fed9c8093744685043739079ce85cd58f289a6"
-dependencies = [
- "cipher",
 ]
 
 [[package]]
@@ -2106,7 +2082,6 @@ version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
- "block-padding",
  "generic-array",
 ]
 
@@ -2252,6 +2227,23 @@ dependencies = [
  "jiff",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "krb5"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95ab455811230d5ed705a194cd24e5603e4c26f8d1104eacafbb676154f4c72c"
+dependencies = [
+ "aes",
+ "chrono",
+ "hmac 0.12.1",
+ "pbkdf2",
+ "rand",
+ "sha1 0.10.6",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "tracing",
 ]
 
 [[package]]
@@ -2698,17 +2690,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "password-hash"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "346f04948ba92c43e8469c1ee6736c7563d71012b17d40745260fe106aac2166"
-dependencies = [
- "base64ct",
- "rand_core",
- "subtle",
-]
-
-[[package]]
 name = "pbkdf2"
 version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2716,8 +2697,6 @@ checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
 dependencies = [
  "digest 0.10.7",
  "hmac 0.12.1",
- "password-hash",
- "sha2 0.10.9",
 ]
 
 [[package]]
@@ -3705,14 +3684,12 @@ dependencies = [
 name = "spdk-csi-driver"
 version = "1.3.0"
 dependencies = [
- "aes",
  "anyhow",
  "async-trait",
  "aws-config",
  "aws-sdk-s3",
  "base64 0.22.1",
  "bytes",
- "cbc",
  "chrono",
  "clap",
  "crossbeam",
@@ -3725,11 +3702,11 @@ dependencies = [
  "io-uring",
  "jsonwebtoken",
  "k8s-openapi",
+ "krb5",
  "kube",
  "libc",
  "mimalloc",
  "nix",
- "pbkdf2",
  "prost",
  "prost-build",
  "prost-types",
@@ -3744,7 +3721,6 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "serde_yaml",
- "sha1 0.10.6",
  "sha2 0.10.9",
  "shuttle",
  "tempfile",
