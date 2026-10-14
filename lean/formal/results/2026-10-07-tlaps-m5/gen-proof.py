@@ -317,9 +317,9 @@ BODY += gstep('Sweep', 'Sweep(s, h)', ', NEW s \\in Writers, NEW h \\in Handles'
 BODY += '------------------------------------------------------------------------------\n(* M5: the agent, the commit section, the sync, the rescope, the reader.    *)\n\n'
 # Edit mints h = <<p, nextGen>> with base the tree's baseline.
 BODY += W5('Edit', 'Edit(s, p)', ', NEW p \\in Paths', "w' = [w EXCEPT ![s] = EditW(s, p)] BY DEF Edit", 'EditW(s, p)', 'EditW',
-           hist=mint_hist(1, 'h', 'w[s].baseline[p]', 'orig[h]',
+           hist=mint_hist(1, 'h', '(IF w[s].local[p] # Nil THEN w[s].local[p] ELSE IF p \\in w[s].uploads THEN w[s].snap[p] ELSE w[s].baseline[p])', 'orig[h]',
     """  <2>. DEFINE h == <<p, nextGen>>
-  <2>1. /\\ minted' = minted \\cup {h} /\\ base' = [base EXCEPT ![h] = w[s].baseline[p]] /\\ orig' = orig
+  <2>1. /\\ minted' = minted \\cup {h} /\\ base' = [base EXCEPT ![h] = IF w[s].local[p] # Nil THEN w[s].local[p] ELSE IF p \\in w[s].uploads THEN w[s].snap[p] ELSE w[s].baseline[p]] /\\ orig' = orig
         /\\ nextGen <= MaxMint
     BY DEF Edit, aux
   <2>2. nextGen \\in Nat /\\ nextGen > Seed BY DEF IndM5, IndM4, IndM3, IndM2, IndM1, IndTypeOK, TypeOK
@@ -329,7 +329,10 @@ BODY += W5('Edit', 'Edit(s, p)', ', NEW p \\in Paths', "w' = [w EXCEPT ![s] = Ed
     <3>1. \\A m \\in minted : Gen(m) < nextGen \\/ Gen(m) > MaxMint BY DEF IndM5, IndM4, IndM3, IndM2, M2, Fresh
     <3>. QED BY <3>1, <2>1, <2>2, MaxMintNat DEF Gen
 """,
-    "  <2>5. w[s].baseline[p] \\in Opt(minted) BY <1>c DEF Hist, BaselineMinted\n",
+    "  <2>5a. w[s].baseline[p] \\in Opt(minted) BY <1>c DEF Hist, BaselineMinted\n"
+    "  <2>5b. w[s].local[p] \\in Opt(minted) BY DEF IndM5, IndM4, IndM3, IndM2, IndM1, IndTypeOK, Minted\n"
+    "  <2>5c. w[s].snap[p] \\in Opt(minted) BY DEF IndM5, IndM4, IndM3, IndM2, M2, SnapMinted\n"
+    "  <2>5. (IF w[s].local[p] # Nil THEN w[s].local[p] ELSE IF p \\in w[s].uploads THEN w[s].snap[p] ELSE w[s].baseline[p]) \\in Opt(minted) BY <2>5a, <2>5b, <2>5c\n",
     "  <2>6. orig[h] \\in Opt(minted) /\\ (orig[h] # Nil => orig[orig[h]] = Nil) BY <2>3, <2>4, <1>c DEF Hist, HistNew, Opt\n").replace('<1>h.', '<L>h.'))
 BODY += W5('Delete', 'Delete(s, p)', ', NEW p \\in Paths', f"w' = [w EXCEPT ![s] = DeleteW(s, p)] /\\ {KEEP} BY DEF Delete, bucket, aux", 'DeleteW(s, p)', 'DeleteW')
 BODY += W5('Checkout', 'Checkout(s)', '', f"PICK T \\in Scopes : w' = [w EXCEPT ![s] = CheckoutW(s, T)] /\\ {KEEP} BY DEF Checkout, bucket, aux",

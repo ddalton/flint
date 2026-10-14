@@ -1,0 +1,4 @@
+tla-mc: building a checker for MCLeanP1M5R (cache: /mnt/nvme/leanp1-m5-2026-10-07/cache-E32Scope-NSR)
+tla-mc: built in 30.8s
+tla-mc: MCLeanP1M5R (31 variables, 0 symmetry permutations), 2 workers, generated engine; loaded in 0.005s
+rc=143 22:45:56Z

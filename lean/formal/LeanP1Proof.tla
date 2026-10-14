@@ -399,7 +399,7 @@ LEMMA Edit_TypeOK ==
 <1>0. w[s] \in Writer BY <1>a DEF TypeOK
 <1>1. /\ nextGen <= MaxMint
       /\ minted' = minted \cup {<<p, nextGen>>}
-      /\ base' = [base EXCEPT ![<<p, nextGen>>] = w[s].baseline[p]]
+      /\ base' = [base EXCEPT ![<<p, nextGen>>] = IF w[s].local[p] # Nil THEN w[s].local[p] ELSE IF p \in w[s].uploads THEN w[s].snap[p] ELSE w[s].baseline[p]]
       /\ w' = [w EXCEPT ![s] = EditW(s, p)]
       /\ nextGen' = nextGen + 1
       /\ UNCHANGED <<live, doc, seq, tomb, acked, conflicts, holder, ui, reqs, barriers, gw, mv, udel,
@@ -7497,7 +7497,7 @@ LEMMA Edit_M5 ==
 <1>b. BlEv BY <1>2, <1>4, BlWrite
 <1>h. HistEv
   <2>. DEFINE h == <<p, nextGen>>
-  <2>1. /\ minted' = minted \cup {h} /\ base' = [base EXCEPT ![h] = w[s].baseline[p]] /\ orig' = orig
+  <2>1. /\ minted' = minted \cup {h} /\ base' = [base EXCEPT ![h] = IF w[s].local[p] # Nil THEN w[s].local[p] ELSE IF p \in w[s].uploads THEN w[s].snap[p] ELSE w[s].baseline[p]] /\ orig' = orig
         /\ nextGen <= MaxMint
     BY DEF Edit, aux
   <2>2. nextGen \in Nat /\ nextGen > Seed BY DEF IndM5, IndM4, IndM3, IndM2, IndM1, IndTypeOK, TypeOK
@@ -7505,7 +7505,10 @@ LEMMA Edit_M5 ==
   <2>4. h \notin minted
     <3>1. \A m \in minted : Gen(m) < nextGen \/ Gen(m) > MaxMint BY DEF IndM5, IndM4, IndM3, IndM2, M2, Fresh
     <3>. QED BY <3>1, <2>1, <2>2, MaxMintNat DEF Gen
-  <2>5. w[s].baseline[p] \in Opt(minted) BY <1>c DEF Hist, BaselineMinted
+  <2>5a. w[s].baseline[p] \in Opt(minted) BY <1>c DEF Hist, BaselineMinted
+  <2>5b. w[s].local[p] \in Opt(minted) BY DEF IndM5, IndM4, IndM3, IndM2, IndM1, IndTypeOK, Minted
+  <2>5c. w[s].snap[p] \in Opt(minted) BY DEF IndM5, IndM4, IndM3, IndM2, M2, SnapMinted
+  <2>5. (IF w[s].local[p] # Nil THEN w[s].local[p] ELSE IF p \in w[s].uploads THEN w[s].snap[p] ELSE w[s].baseline[p]) \in Opt(minted) BY <2>5a, <2>5b, <2>5c
   <2>6. orig[h] \in Opt(minted) /\ (orig[h] # Nil => orig[orig[h]] = Nil) BY <2>3, <2>4, <1>c DEF Hist, HistNew, Opt
 <2>q1. minted \subseteq minted' BY <2>1
 <2>q2. \A x \in minted : base'[x] = base[x] /\ orig'[x] = orig[x]
@@ -7517,7 +7520,7 @@ LEMMA Edit_M5 ==
                        /\ (orig'[x] # Nil => orig[orig'[x]] = Nil)
     OBVIOUS
   <3>2. x = h BY <2>1
-  <3>3. base'[h] = w[s].baseline[p] /\ orig'[h] = orig[h] BY <2>1, <2>3, <1>ty DEF HistTy
+  <3>3. base'[h] = (IF w[s].local[p] # Nil THEN w[s].local[p] ELSE IF p \in w[s].uploads THEN w[s].snap[p] ELSE w[s].baseline[p]) /\ orig'[h] = orig[h] BY <2>1, <2>3, <1>ty DEF HistTy
   <3>. QED BY <3>2, <3>3, <2>5, <2>6
 <2>q4. \A x \in Handles \ minted' : base'[x] = Nil /\ orig'[x] = Nil
   <3>1. SUFFICES ASSUME NEW x \in Handles \ minted' PROVE base'[x] = Nil /\ orig'[x] = Nil

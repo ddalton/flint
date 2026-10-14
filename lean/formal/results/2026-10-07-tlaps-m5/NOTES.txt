@@ -311,3 +311,73 @@ distinct); the edited model passes 5 levels beyond that. Bounded, not exhaustive
 EC2 torn down 18:36Z 2026-10-13: instance terminated, spot request cancelled,
 inline policy and bucket deleted; zero set verified in us-east-1/2, us-west-1/2.
 Outputs in out/ec2-e20/.
+
+2026-10-13 (part C, the proof's case analysis, box)
+E27 NR3 FAILS on the edited model (udel records a commit's deletes), by a hand-
+    found trace too deep for BFS (27 states; the narrow BFS worlds E27Hunt/HuntW
+    doubled per level, killed at d13).  Checked as a SCRIPTED behaviour,
+    MCLeanP1M5H.tla: each step is one named Next action with Next's frame, and
+    HIsNext ([][Next]_vars) holds; tla-mc and TLC 2.19 both report NR3 violated
+    at the last step.  b0 renamed P1 -> P2; A edits k1 from b0 and commits it into
+    the empty P1 (conflict <<P1, b0>>); before Finish A edits k2 -- Edit's ghost
+    base was the tree's BASELINE, still b0, so k2 does not derive from A's own
+    published k1; B (reader) takes k1; A commits k2 over k1 (not foreign: no
+    record); the gateway deletes k2 (udel <<P1, k2>>, not derived from k1) and
+    renames b0 back; B steps k1 -> b0, exempted by nothing.  The model's ghost was
+    wrong, not the protocol: the agent edited k1's bytes.
+    (SilentRevert's `took` clause had special-cased the same stale base.)
+E28 DECISION (user): Edit's base is the bytes the agent edited.  First form, local
+    when non-Nil else the baseline (staging copy): the script passes NR3; NR3, AN3
+    and Prop_NoSilentRevert hold in Rem3 (7,597,037), Scope (8,424,090) and Fetch
+    (3,565,469); MN2 breaks NR3 (d13), MA1 breaks AN3 (d10).  Superseded by E31/E33.
+E29 NR3 FAILS on E28's model (MCLeanP1M5H2.tla, 29 states; tla-mc and TLC): the
+    conflict names a SUCCESSOR of the baseline.  A commits b (from o) into the
+    empty P1, restarts before Finish (baseline stays o); B takes b; the gateway
+    saves b' over b; A deletes its file and writes c (base: its baseline o),
+    commits over b' (foreign: conflict <<P1, b'>>); the gateway deletes c and
+    renames o back; B steps b -> o.  The CLAIM lacked the reading: NR5 reads a
+    conflict as udel and acked are read, by derivation from the baseline
+    (MCLeanP1M5R.tla: NamedAt, BackR5, NR5).  E27 and E29 pass NR5.
+E31 NR5 FAILS on E28's model (MCLeanP1M5H3.tla): E27 with the second edit over a
+    DELETED file (local Nil) between the install and the finish -- the base falls
+    back to the stale baseline.  E33 (MCLeanP1M5H4.tla): the same, deleted after
+    the scan, before the install.  Both tla-mc and TLC.
+DECISION (user): Edit's base is the tree's NEWEST version at p: its bytes; else,
+    in a barrier that uploads p, the snapshot it publishes; else the baseline.
+    LeanP1.tla (md5 f9b09a41), make-anc.py and both generators restate it;
+    LeanP1Anc.tla (e7649712) and LeanP1Proof.tla regenerated (diffs: Edit only).
+    E27, E29, E31, E33 all pass NR5 on it.  A restart after the install with the
+    file gone still bases on the baseline, but the next commit is then foreign
+    and its conflict names the published version (NR5 reads it by derivation).
+E35 (box) on the final model (LeanP1.tla f9b09a41): the four scripts pass NR5;
+    NR5 and AN3 HOLD in Rem3 (7,435,952), ScopeHolds (8,284,768), FetchHolds
+    (3,524,707), ReaderScope (21,234,387, d34) and Rem3Age (77,160,864, d32);
+    Prop_NoSilentRevert HOLDS in Rem3, ScopeHolds, FetchHolds.  Known-bad,
+    rebuilt from the final module: MN2 breaks NR5 (d13), MA1 breaks AN3 (d10).
+SPLIT3 (box, fingerprints carried from SPLIT2): the regenerated proof proves --
+    M0 1,921, M1 2,387, M2 4,355, M3 2,191, M4 896, M5A 1,353 (+6: Edit's base
+    typing, after one DEF fix in the generator), M5B 190 = 13,293.
+E36 (box) the planned M5C strengthening as state invariants (MCLeanP1M5C.tla,
+    J5C: the rank, copies share history, uploads only in a barrier, a tree's
+    bytes derive from its baseline and its snapshots, PC1/PC2): HOLDS in
+    FetchHolds (3,524,707), Rem3 (7,435,952), ScopeHolds (8,284,768),
+    ReaderScope (21,234,387), Rem3Age (77,160,864); MN2 breaks it at d2 (PC1:
+    the gateway's delete names nothing).
+M5C PROVED (part C; m5c/LeanP1ProofM5C.tla, EXTENDS LeanP1ProofM5B, md5 45d03154,
+    over LeanP1Anc.tla md5 47ece26b): THEOREM NoRegress == Spec => NR5.
+    The invariant IndC == IndM5 /\ HistC /\ TreeC:
+      HistC: the rank CR(h) = Gen(Content(h)), strictly lower along anc;
+        originals minted below nextGen; copies share their original's anc;
+        anc closed -- so a version deriving from x is never strictly older.
+      TreeC, per tree: uploads only in a barrier; bytes derive from the
+        baseline (LDB) and, in a barrier, from the snapshot (LDS); the
+        snapshot from the baseline (SDB); a clean baseline is derived from by
+        doc[p] or named at p (PC1); a cased tree's installed snapshots too (PC2).
+    NR5's step: a baseline moves onto doc[p] only from a clean baseline (PC1 +
+    rank), from bytes holding doc's (LDB, same content same anc), or from the
+    installed snapshot (SDB).  E36 checked J5C first as state invariants.
+    RECORD (--cleanfp, --threads 3, box): All 3,933 obligations proved,
+    2,889 s, peak 19.9 GB (out/m5c/record-M5C.out).  CONTROL MN2 on
+    LeanP1Anc.tla (the gateway's delete leaves udel): exactly 1 obligation
+    fails, GDelete_C's udel step (out/m5c/ctl-MN2-M5C.out).
+    Whole proof: M0-M5B 13,293 (SPLIT3) + M5C 3,933 = 17,226.

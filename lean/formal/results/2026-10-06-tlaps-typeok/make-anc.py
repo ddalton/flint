@@ -142,7 +142,7 @@ rep_span('Edit(s, p) ==\n', 'Delete(s, p) ==\n',
     '  /\\ On(s) /\\ nextGen <= MaxMint\n'
     '  /\\ LET h == <<p, nextGen>> IN\n'
     '     /\\ minted\' = minted \\cup {h}\n'
-    '     /\\ base\' = [base EXCEPT ![h] = w[s].baseline[p]]\n'
+    '     /\\ base\' = [base EXCEPT ![h] = IF w[s].local[p] # Nil THEN w[s].local[p] ELSE IF p \\in w[s].uploads THEN w[s].snap[p] ELSE w[s].baseline[p]]\n'
     '     /\\ w\' = [w EXCEPT ![s] = EditW(s, p)]\n'
     '     /\\ nextGen\' = nextGen + 1\n'
     '  /\\ UNCHANGED <<live, doc, seq, tomb, acked, conflicts, holder, ui, reqs, barriers, gw, mv, udel, aux>>\n'

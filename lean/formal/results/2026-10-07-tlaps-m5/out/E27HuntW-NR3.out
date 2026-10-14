@@ -1,0 +1,11 @@
+tla-mc: building a checker for MCLeanP1M5R (cache: /mnt/nvme/leanp1-m5-2026-10-07/cache-E27HuntW-NR3)
+tla-mc: built in 26.5s
+tla-mc: MCLeanP1M5R (31 variables, 0 symmetry permutations), 3 workers, generated engine; loaded in 0.004s
+progress: depth 11, 2662505 generated, 992885 distinct (0 fingerprint spills), 623009 on queue (0 on disk), 12.7s
+progress: depth 12, 6877676 generated, 2419329 distinct (0 fingerprint spills), 1426444 on queue (0 on disk), 31.0s
+progress: depth 13, 16093162 generated, 5370700 distinct (0 fingerprint spills), 2951371 on queue (0 on disk), 72.7s
+
+real	2m39.163s
+user	7m2.390s
+sys	0m2.006s
+rc=143 22:19:49Z

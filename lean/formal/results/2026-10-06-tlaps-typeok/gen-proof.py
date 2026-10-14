@@ -430,7 +430,7 @@ BODY += r'''LEMMA Edit_TypeOK ==
 <1>0. w[s] \in Writer BY <1>a DEF TypeOK
 <1>1. /\ nextGen <= MaxMint
       /\ minted' = minted \cup {<<p, nextGen>>}
-      /\ base' = [base EXCEPT ![<<p, nextGen>>] = w[s].baseline[p]]
+      /\ base' = [base EXCEPT ![<<p, nextGen>>] = IF w[s].local[p] # Nil THEN w[s].local[p] ELSE IF p \in w[s].uploads THEN w[s].snap[p] ELSE w[s].baseline[p]]
       /\ w' = [w EXCEPT ![s] = EditW(s, p)]
       /\ nextGen' = nextGen + 1
       /\ UNCHANGED <<live, doc, seq, tomb, acked, conflicts, holder, ui, reqs, barriers, gw, mv, udel,

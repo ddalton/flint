@@ -1,0 +1,16 @@
+tla-mc: building a checker for MCLeanP1M5R (cache: /mnt/nvme/leanp1-m5-2026-10-07/cache-E28Rem3Age-NR3)
+tla-mc: built in 32.8s
+tla-mc: MCLeanP1M5R (31 variables, 0 symmetry permutations), 2 workers, generated engine; loaded in 0.004s
+progress: depth 12, 3240888 generated, 1323911 distinct (0 fingerprint spills), 684819 on queue (0 on disk), 18.2s
+progress: depth 13, 6270043 generated, 2448685 distinct (0 fingerprint spills), 1124774 on queue (0 on disk), 35.5s
+progress: depth 14, 10905807 generated, 4108704 distinct (0 fingerprint spills), 1660019 on queue (0 on disk), 63.1s
+progress: depth 15, 17512372 generated, 6441417 distinct (0 fingerprint spills), 2332713 on queue (0 on disk), 104.9s
+progress: depth 16, 26661981 generated, 9622428 distinct (0 fingerprint spills), 3181011 on queue (0 on disk), 159.9s
+progress: depth 17, 39201906 generated, 13898697 distinct (0 fingerprint spills), 4276269 on queue (0 on disk), 240.8s
+progress: depth 18, 56384888 generated, 19687838 distinct (0 fingerprint spills), 5789141 on queue (0 on disk), 352.6s
+progress: depth 19, 78693854 generated, 26908839 distinct (0 fingerprint spills), 7221001 on queue (672265 on disk), 487.9s
+
+real	10m2.600s
+user	19m26.421s
+sys	0m5.079s
+rc=143 22:41:00Z

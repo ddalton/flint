@@ -1,0 +1,21 @@
+tla-mc: building a checker for MCLeanP1M5R (cache: /mnt/nvme/leanp1-m5-2026-10-07/cache-E32Rem3-NR5)
+tla-mc: built in 29.0s
+tla-mc: MCLeanP1M5R (31 variables, 0 symmetry permutations), 2 workers, generated engine; loaded in 0.005s
+progress: depth 13, 2371299 generated, 953197 distinct (0 fingerprint spills), 384192 on queue (0 on disk), 15.4s
+progress: depth 15, 5460369 generated, 2072370 distinct (0 fingerprint spills), 614931 on queue (0 on disk), 31.5s
+progress: depth 16, 7450104 generated, 2746857 distinct (0 fingerprint spills), 674487 on queue (0 on disk), 43.6s
+progress: depth 17, 9626952 generated, 3470026 distinct (0 fingerprint spills), 723169 on queue (0 on disk), 56.7s
+progress: depth 18, 11945313 generated, 4240286 distinct (0 fingerprint spills), 770260 on queue (0 on disk), 74.4s
+progress: depth 19, 14249299 generated, 4980702 distinct (0 fingerprint spills), 740416 on queue (0 on disk), 90.8s
+progress: depth 20, 16241429 generated, 5592397 distinct (0 fingerprint spills), 611695 on queue (0 on disk), 104.5s
+progress: depth 21, 17771057 generated, 6057588 distinct (0 fingerprint spills), 465191 on queue (0 on disk), 115.6s
+progress: depth 22, 18979888 generated, 6475962 distinct (0 fingerprint spills), 418374 on queue (0 on disk), 125.6s
+progress: depth 23, 20142566 generated, 6920788 distinct (0 fingerprint spills), 444826 on queue (0 on disk), 135.7s
+progress: depth 25, 22112390 generated, 7524631 distinct (0 fingerprint spills), 215077 on queue (0 on disk), 150.6s
+Model checking completed. No error has been found.
+22564942 states generated, 7597037 distinct states found. Depth 28. Checked in 153.684s (49433 distinct/s).
+
+real	3m2.808s
+user	5m34.267s
+sys	0m1.746s
+rc=0 22:44:25Z

@@ -142,4 +142,17 @@ Older(b, h) == h # Nil /\ Derives(b, h) /\ Content(h) # Content(b)
 NoOlder == \A s \in Writers, p \in Paths :
   (w[s].baseline[p] # Nil /\ doc[p] = Nil /\ TakeAble(s, p) /\ ~Exempt(s, p))
     => \A q \in Paths : ~Older(w[s].baseline[p], doc[q])
+\* E29: NR3 FAILS on the model with E27's Edit base: the conflict at p names a
+\* SUCCESSOR of the baseline (a save over it), not the baseline, and nothing
+\* else does (a stale tree's commit over that save; then a delete and a rename
+\* back).  NR5: a conflict is read as udel and acked are, by what derives from
+\* the baseline (Back's <<p, baseline>> is the case k = baseline).
+NamedAt(p, b) ==
+  \/ \E c \in conflicts : c[1] = p /\ Derives(c[2], b)
+  \/ \E d \in udel : d[1] = p /\ Derives(d[2], b)
+  \/ \E a \in acked : a[1] # p /\ Derives(a[2], b)
+BackR5(s, p) == /\ doc[p] # Nil /\ w[s].baseline[p] # Nil /\ Derives(w[s].baseline[p], doc[p])
+                /\ Content(doc[p]) # Content(w[s].baseline[p])
+                /\ ~NamedAt(p, w[s].baseline[p])
+NR5 == [][\A s \in Writers, p \in Paths : ~(BackR5(s, p) /\ Takes(s, p))]_vars
 ==============================================================================

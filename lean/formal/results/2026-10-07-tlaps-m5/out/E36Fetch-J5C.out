@@ -1,0 +1,19 @@
+tla-mc: building a checker for MCLeanP1M5C (cache: /mnt/nvme/leanp1-m5-2026-10-07/cache-E36Fetch)
+tla-mc: built in 43.9s
+tla-mc: MCLeanP1M5C (31 variables, 0 symmetry permutations), 1 workers, generated engine; loaded in 0.006s
+progress: depth 15, 887359 generated, 302830 distinct (0 fingerprint spills), 106615 on queue (0 on disk), 14.7s
+progress: depth 17, 1910961 generated, 634087 distinct (0 fingerprint spills), 186137 on queue (0 on disk), 33.4s
+progress: depth 18, 2622364 generated, 864132 distinct (0 fingerprint spills), 230045 on queue (0 on disk), 46.2s
+progress: depth 19, 3460215 generated, 1140051 distinct (0 fingerprint spills), 275919 on queue (0 on disk), 61.7s
+progress: depth 20, 4421011 generated, 1449223 distinct (0 fingerprint spills), 309172 on queue (0 on disk), 79.0s
+progress: depth 21, 5468388 generated, 1769662 distinct (0 fingerprint spills), 320439 on queue (0 on disk), 100.1s
+progress: depth 22, 6527449 generated, 2082905 distinct (0 fingerprint spills), 313243 on queue (0 on disk), 121.5s
+progress: depth 23, 7532902 generated, 2381106 distinct (0 fingerprint spills), 298201 on queue (0 on disk), 142.2s
+progress: depth 24, 8479648 generated, 2672280 distinct (0 fingerprint spills), 291174 on queue (0 on disk), 160.8s
+progress: depth 25, 9386329 generated, 2949301 distinct (0 fingerprint spills), 277021 on queue (0 on disk), 179.2s
+progress: depth 26, 10197191 generated, 3176627 distinct (0 fingerprint spills), 227326 on queue (0 on disk), 195.7s
+progress: depth 27, 10786561 generated, 3322597 distinct (0 fingerprint spills), 145970 on queue (0 on disk), 207.2s
+progress: depth 30, 11384226 generated, 3481941 distinct (0 fingerprint spills), 38718 on queue (0 on disk), 218.0s
+Model checking completed. No error has been found.
+11552518 states generated, 3524707 distinct states found. Depth 33. Checked in 220.497s (15985 distinct/s).
+rc=0

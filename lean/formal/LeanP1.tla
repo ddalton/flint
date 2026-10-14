@@ -276,7 +276,13 @@ Edit(s, p) ==
   /\ On(s) /\ nextGen <= MaxMint
   /\ LET h == <<p, nextGen>> IN
      /\ minted' = minted \cup {h}
-     /\ base' = [base EXCEPT ![h] = w[s].baseline[p]]
+     \* The tree's newest version at p: its bytes; else, in a barrier that
+     \* uploads p, the snapshot it publishes; else what it integrated (E27,
+     \* E31, E33: a stale baseline left an edit over the tree's own
+     \* published version underived from it).
+     /\ base' = [base EXCEPT ![h] = IF w[s].local[p] # Nil THEN w[s].local[p]
+                                    ELSE IF p \in w[s].uploads THEN w[s].snap[p]
+                                    ELSE w[s].baseline[p]]
      /\ w' = [w EXCEPT ![s].local[p] = h, ![s].integrated = @ \cup {nextGen},
                        ![s].unlinked = @ \ {p}]
      /\ nextGen' = nextGen + 1
