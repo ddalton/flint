@@ -146,11 +146,16 @@ pub struct PendingSentinel {
     /// scoped touches must not narrow it (review 2026-09-12, inbox-7).
     #[serde(default)]
     pub whole_tree: bool,
-    /// Fresh on every fold: each touch declares the tree as it stands
-    /// when it is consumed, so an install that carried an earlier fold of
-    /// this record does not carry this one (`IntentJournal::carrier`).
-    /// Empty on a record written before the field, or torn: then nothing
-    /// matches it and the ack reads the honoring barrier's own report.
+    /// Minted when the record is created and kept across every fold, so
+    /// the carrier (`IntentJournal::carrier`) of an install that carried
+    /// an EARLIER touch of this record still answers when a later touch
+    /// coalesces with it. Fresh on every fold, it orphaned that carrier:
+    /// a peer's delete of a path the first touch declared, between that
+    /// touch's install and its ack, was answered `ok` once a second touch
+    /// folded in (row 15 plan, D7, 2026-10-14). A retired record takes its
+    /// id with it, so a carrier left from it matches nothing. Empty on a
+    /// record written before the field: then nothing matches it and the
+    /// ack reads the honoring barrier's own report.
     #[serde(default)]
     pub id: String,
 }
@@ -171,7 +176,7 @@ pub struct Ack {
     pub seq: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest_etag: Option<String>,
-    /// "sentinel" | "sentinel-deferred" | "drain" | "recovered".
+    /// "sentinel" | "sentinel-deferred" | "drain".
     pub boundary: String,
     pub completed_unix: u64,
     /// Set on a refusal (`refused-scope`, `refused-read-only`): what was
@@ -576,7 +581,9 @@ impl Syncer {
             whole_tree: false,
             id: String::new(),
         });
-        pending.id = uuid::Uuid::new_v4().to_string();
+        if pending.id.is_empty() {
+            pending.id = uuid::Uuid::new_v4().to_string();
+        }
         pending.consumed_mtime_unix_ns = pending.consumed_mtime_unix_ns.max(ns);
         pending.consumed_at = now_unix();
         pending.torn |= torn;
@@ -820,9 +827,12 @@ impl Syncer {
             sentinel_mtime_unix_ns: pending.consumed_mtime_unix_ns,
             seq: report.seq,
             manifest_etag: baseline.manifest_etag.clone(),
-            boundary: if forced { "sentinel-deferred".into() } else { "sentinel".into() },
+            // The clock the CAS stamped (`source`), so the ack and the
+            // bucket name the same one — the drain's included, which used
+            // to be acked `sentinel-deferred` and re-written `drain`.
+            boundary: source.unwrap_or(if forced { "sentinel-deferred" } else { "sentinel" }).into(),
             completed_unix: now_unix(),
-        reason: None,
+            reason: None,
             report: AckReport {
                 uploaded: report.uploaded.len(),
                 deleted: report.deleted.len(),
@@ -1150,13 +1160,21 @@ impl Syncer {
             let is_publish = matches!(verb, Verb::Publish);
             if self.load_pending(verb)?.is_some() {
                 match self.honor_pending_as(verb, true, Some("drain")).await {
-                    Ok(Some(mut a)) => {
-                        a.boundary = "drain".into();
-                        // Re-write with the drain stamp so the agent can
-                        // tell a drained boundary from a live one.
-                        let bytes = serde_json::to_vec_pretty(&a)
-                            .map_err(|e| LeanError::State(format!("ack: {e}")))?;
-                        write_atomic(&self.ack_path(verb), &bytes)?;
+                    Ok(Some(a)) => {
+                        // A publish ack already names the `drain` clock: its
+                        // barrier's stamp. A sync ack is re-written with it,
+                        // so the agent can tell a drained answer from a live
+                        // one.
+                        let a = if a.boundary == "drain" {
+                            a
+                        } else {
+                            let mut a = a;
+                            a.boundary = "drain".into();
+                            let bytes = serde_json::to_vec_pretty(&a)
+                                .map_err(|e| LeanError::State(format!("ack: {e}")))?;
+                            write_atomic(&self.ack_path(verb), &bytes)?;
+                            a
+                        };
                         published |= is_publish && a.status == "ok";
                         acks.push(a);
                     }

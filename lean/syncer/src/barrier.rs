@@ -604,7 +604,8 @@ impl Syncer {
         // not the caller). So it confirms first absences as a declared
         // barrier does, stamps the deferred clock, and journals itself
         // with its CAS as the install the ack names (`IntentJournal::
-        // carrier`). A torn record has no id and carries nothing.
+        // carrier`). A record written before the id field has none and
+        // carries nothing.
         let carries: Option<String> = self
             .load_pending(super::sentinel::Verb::Publish)
             .ok()

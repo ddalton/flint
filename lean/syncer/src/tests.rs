@@ -11582,6 +11582,66 @@ async fn the_floors_cadence_barrier_after_a_failed_honor_carries_the_whole_decla
     h10_assert_ack_is_honest(dir_a.path(), &ack, peer_seq);
 }
 
+/// Row 15 plan, D7 (2026-10-14): a second touch must not orphan the
+/// first touch's carrier. H10's failed-ack route, with the agent touching
+/// AGAIN after the peer's delete: the fold used to mint a fresh record id,
+/// the carrier of the install that carried `n-1` matched nothing, and the
+/// honor's pull of B's document was acked `ok` for both nonces.
+#[tokio::test]
+async fn a_second_touch_does_not_orphan_the_carrier_of_the_first() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (mut a, mut b) = h10_declared_edit(&store, dir_a.path(), dir_b.path()).await;
+    let first = a.load_pending(Verb::Publish).unwrap().expect("fixture: no pending").id;
+
+    let squat = dir_a.path().join(super::CONTROL_DIR).join(control::PUBLISH_ACK);
+    let _ = std::fs::remove_file(&squat);
+    std::fs::create_dir_all(squat.join("occupied")).unwrap();
+    clear_min_interval(&a);
+    assert!(a.honor_pending(Verb::Publish, false).await.is_err(), "fixture: the ack write did not fail");
+    h10_assert_carried(&store, &a).await;
+    std::fs::remove_dir_all(&squat).unwrap();
+
+    let peer_seq = h10_peer_deletes(&store, &mut b, dir_b.path()).await;
+
+    // The agent, still waiting, touches again; the touch coalesces.
+    touch_sentinel(dir_a.path(), control::PUBLISH, r#"{"nonce":"n-2"}"#);
+    a.poll_sentinels().unwrap();
+    let pending = a.load_pending(Verb::Publish).unwrap().expect("fixture: the second touch was not folded");
+    assert_eq!(pending.nonces, vec!["n-1".to_string(), "n-2".to_string()], "fixture: the touches did not coalesce");
+    assert_eq!(pending.id, first, "a fold minted a new record id: the first touch's carrier no longer matches");
+
+    let ack = a.honor_pending(Verb::Publish, true).await.unwrap().expect("nothing was answered");
+    assert_eq!(ack.nonces, vec!["n-1".to_string(), "n-2".to_string()], "{ack:?}");
+    h10_assert_ack_is_honest(dir_a.path(), &ack, peer_seq);
+}
+
+/// Row 15 plan, D4 (2026-10-14): the drain's publish ack names the clock
+/// its barrier stamped on the bucket, in its one write. It used to be
+/// written `sentinel-deferred` (the honor's `forced` clock) and re-written
+/// `drain` after: between the two, the ack and the bucket disagreed, and a
+/// failure of the second write left them so.
+#[tokio::test]
+async fn the_drains_publish_ack_names_the_drain_clock_in_its_one_write() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture).unwrap();
+    a.checkout().await.unwrap();
+    write(dir.path(), "w.txt", "drained");
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"d-1"}"#);
+    a.poll_sentinels().unwrap();
+
+    // The drain's honor, without the drain's re-write after it.
+    let ack = a.honor_pending_as(Verb::Publish, true, Some("drain")).await.unwrap().expect("nothing was answered");
+    let on_disk = a.read_ack(Verb::Publish).expect("no ack was written");
+    let pointer = manifest::load_pointer(store.as_ref(), &a.cfg).await.unwrap().unwrap();
+    assert_eq!(pointer.pointer.boundary_source.as_deref(), Some("drain"), "fixture: the drain's barrier was not stamped drain");
+    assert_eq!(on_disk.boundary, "drain", "the ack names a clock the bucket does not: {on_disk:?}");
+    assert_eq!(ack.boundary, "drain", "{ack:?}");
+}
+
 // ---- review 2026-09-18, H4: a declared removal removes the version it named
 
 
