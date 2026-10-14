@@ -70,21 +70,31 @@ the code: `lean/syncer/src/barrier.rs:2032` `merge_base()`, `:1013-1022`,
 "derived from", not what the code does. What has to be confirmed is that the
 ghost tells the truth about provenance:
 
-- [ ] **Edit over a file the agent still has:** its bytes derive from the
+- [x] **Edit over a file the agent still has:** its bytes derive from the
   file's current bytes, not from the baseline. This is true by
   construction: the editor writes the file.
-- [ ] **A file deleted and re-created while its upload is pending (between
-  the scan and the finish):** confirm whether "derives from the snapshot
-  being published" is the intended reading. The code records no
-  provenance. The baseline moves to the snapshot only at step 7
-  (`barrier.rs:1309-1334`).
-- [ ] **A restart between the CAS and step 7:** the baseline keeps the old
-  version, so the next merge treats the tree's OWN published snapshot as
-  theirs, changed since the base. The model covers this case: Restart from
-  "cased" keeps the baseline, and NR5/AN5 still hold. Confirm the code
-  records it the same way: the R7 `overridden` conflict
-  (`manifest.rs:1274-1282`), not a silent overwrite. This is an inference
-  from reading the code, not yet traced end to end.
+- [x] **A file deleted and re-created while its upload is pending (between
+  the scan and the finish):** CHECKED 2026-10-14. Step 7 makes the published
+  snapshot the baseline (`barrier.rs:1324`), so the re-created file's merge
+  base is that snapshot. It publishes as the snapshot's successor with no
+  record, which is the model's "else the snapshot it publishes".
+- [x] **A restart between the CAS and step 7:** CHECKED 2026-10-14.
+  - If the agent left the path alone, the next consume finds the tree's
+    bytes equal the document's, and the baseline follows
+    (`barrier.rs:145-146` names this case; the convergence code is at
+    `:290-310`). This is the model's `Converges`.
+  - If the agent re-edited it, the path is dirty and publishes over the
+    tree's own snapshot. The merge base (the old baseline) differs from
+    theirs, so `merge` lists the path as `overridden`
+    (`manifest.rs:1274-1282`). The baseline doesn't name the snapshot, so
+    it isn't "integrated", and step 6 preserves a copy and records
+    `commit-surfaced-foreign` (`barrier.rs:1188-1209`). This is the
+    model's contested install: a conflict naming the snapshot.
+  - If the agent deleted it, the delete applies over theirs and
+    `commit-deleted-over-theirs` preserves the snapshot
+    (`barrier.rs:1227-1241`, DeleteWinsPreserved).
+  - Nothing is silent. The cost is one spurious conflict record naming the
+    tree's own version.
 - [ ] **Docs:** `lean/PROTOCOL.md:54` still says Edit mints "h derived from
   `baseline[p]`". Update it to the new rule.
 

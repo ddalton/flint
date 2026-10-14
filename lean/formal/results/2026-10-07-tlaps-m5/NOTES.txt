@@ -467,3 +467,15 @@ M6 PROVED (m6/LeanP1ProofM6.tla, EXTENDS LeanP1ProofM5D): THEOREM AgentWorkKept
     Whole proof: 18,433 + M6 789 = 19,222.  Every claim in the plan's target
     list (section 1, items 1-8) is now proved, with NR5 and AN5 for items 8's
     restated claims.
+E43 (box) the other half of M6's controls: each cited rule OFF in ScopeHolds
+    breaks its claim in TLC.  ConsumeHonorsScope = FALSE: Prop_ScopeRespected
+    violated by a 4-state trace (a consume takes a path the tree neither holds nor
+    admits).  UnlinkChecksBytes = FALSE: Prop_AgentWorkKept violated by a 7-state trace
+    (a narrow's unlink removes bytes the agent wrote and nobody PUT).
+CODE CHECK (2026-10-14, docs/plans/lean-model-code-action-items-2026-10-14.md):
+    the Edit-base fix agrees with the syncer.  A restart between the CAS and
+    step 7 is the model's Converges (barrier.rs:145, 290-310) when the tree is
+    unchanged, and the model's contested install when it was re-edited
+    (merge's `overridden`, then step 6's commit-surfaced-foreign record and
+    preserved copy, barrier.rs:1188-1209).  A file re-created while its upload
+    is pending derives from the snapshot, which step 7 makes the baseline.
