@@ -210,7 +210,7 @@ impl Syncer {
     /// One LIST of the files prefix per sweep, on the untracked sweep's
     /// cadence (`untracked_sweep_secs`); best effort by design.
     pub(crate) async fn sweep_orphans_if_due(
-        &self,
+        &mut self,
         installed: &manifest::LeanManifest,
         own_flush: &str,
         now: u64,
@@ -235,7 +235,7 @@ impl Syncer {
 
     /// The sweep itself, whenever the caller decides it is due.
     pub(crate) async fn sweep_orphans(
-        &self,
+        &mut self,
         installed: &manifest::LeanManifest,
         own_flush: &str,
         now: u64,
@@ -261,7 +261,7 @@ impl Syncer {
         if orphans.is_empty() {
             return Ok(0);
         }
-        let report = self.store.delete_many(&orphans).await?;
+        let report = self.delete_many_renewing(&orphans).await?;
         // The handles taken, named: a trace check maps each to the version
         // it held (`TraceCore.tla`'s Sweep takes one handle per step).
         let taken: Vec<&String> = orphans.iter().filter(|k| !report.failed.iter().any(|(f, _)| f == *k)).collect();
@@ -287,7 +287,27 @@ pub(crate) struct RetireLedger {
     pub due: Vec<(String, manifest::RetireLog)>,
 }
 
+/// Keys per `delete_many` call inside a commit section: one S3
+/// DeleteObjects request, and a renew between two of them.
+pub(crate) const DELETE_RENEW_BATCH: usize = 1000;
+
 impl Syncer {
+    /// `delete_many` in batches with a renew between them (review
+    /// 2026-09-18, M3): a mass delete is the longest stretch of a commit
+    /// section, and nothing else moves the cell's token during it. A
+    /// deposal stops it: what is left is a leak the next holder's sweeps
+    /// take, never a deletion under a successor's cell.
+    pub(crate) async fn delete_many_renewing(&mut self, keys: &[String]) -> LeanResult<flint_store::DeleteManyReport> {
+        let mut all = flint_store::DeleteManyReport::default();
+        for batch in keys.chunks(DELETE_RENEW_BATCH) {
+            super::lease::renew_if_due(self).await?;
+            let r = self.store.delete_many(batch).await?;
+            all.deleted += r.deleted;
+            all.failed.extend(r.failed);
+        }
+        Ok(all)
+    }
+
     /// List the retire logs and read the ones not read before. One LIST per
     /// commit section; a GET per log, once.
     pub(crate) async fn retire_ledger(&self, now: u64) -> LeanResult<RetireLedger> {
@@ -326,7 +346,7 @@ impl Syncer {
     /// log's CHUNKS are only no longer spared: the chunk reaper, with its
     /// fence, decides them. Returns the handles collected.
     pub(crate) async fn reap_retired(
-        &self,
+        &mut self,
         ledger: &RetireLedger,
         installed: &manifest::LeanManifest,
         own_flush: &str,
@@ -342,7 +362,7 @@ impl Syncer {
         handles.dedup();
         let mut collected = 0;
         if !handles.is_empty() {
-            let report = self.store.delete_many(&handles).await?;
+            let report = self.delete_many_renewing(&handles).await?;
             collected = report.deleted;
             let taken: Vec<&String> = handles.iter().filter(|k| !report.failed.iter().any(|(f, _)| f == *k)).collect();
             // Named, as the orphan sweep's are: a trace check maps each key.
@@ -353,6 +373,9 @@ impl Syncer {
                 return Ok(collected);
             }
         }
+        // The logs are deleted under the cell too: renew first, and a
+        // deposal leaves them for the next holder (M3).
+        super::lease::renew_if_due(self).await?;
         let mut cache = self.state.load_retire_cache();
         for (key, _) in &ledger.due {
             match self.store.delete(key).await {

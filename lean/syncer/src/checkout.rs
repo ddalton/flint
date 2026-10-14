@@ -1209,7 +1209,15 @@ impl Syncer {
         report.already_held =
             m.entries.keys().filter(|p| covered(p) && baseline.entries.contains_key(*p)).count();
         if !add.is_empty() {
+            // Review 2026-09-18, M3: the rescope holds the fence for its
+            // whole run, and the widen's fetch is its long stretch. Renew
+            // before it (deposed here, nothing is fetched yet and the
+            // baseline above is saved: stop) and after it (best effort: the
+            // rescope writes nothing to the store, so a fence lost during
+            // the fetch costs a release, not a byte).
+            super::lease::renew_if_due(self).await?;
             let results = self.materialize(add, m.sole_writer).await;
+            let _ = super::lease::renew_if_due(self).await;
             for r in results {
                 let f = r?;
                 if let Some(why) = f.refused {

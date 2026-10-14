@@ -1009,6 +1009,14 @@ impl Syncer {
                 // both ways: deposed before this load, and this read sees
                 // it; deposed after, and the successor's rotation has moved
                 // the pointer this CAS expects.
+                //
+                // Review 2026-09-18, M3: renew first if the cell has stood
+                // still for half the takeover threshold. Nothing else moves
+                // the token between the claim and the end of the section, so
+                // a live holder whose verify, merge or CAS retries ran past
+                // it was deposed by a waiter, and two such writers could
+                // depose each other every floor.
+                super::lease::renew_if_due(self).await?;
                 self.verify_not_deposed().await?;
                 // The baseline IS the merge base (P1-lite).
                 let base = merge_base(&baseline);
@@ -1295,7 +1303,7 @@ impl Syncer {
             // committed. Inside the commit section, under the cell, so the
             // commit's re-read of its own uploads above and this CAS are
             // race-free against it; never this barrier's own handles.
-            if let Some(l) = &ledger {
+            if let Some(l) = ledger.as_ref().filter(|_| self.lease.is_some()) {
                 match self.sweep_orphans_if_due(&installed, &flush_uuid, now_unix(), &l.spared).await {
                     Ok(n) => report.swept = n,
                     Err(e) => eprintln!("flint-sync: orphan sweep (retrying next time it is due): {e}"),
@@ -1342,7 +1350,17 @@ impl Syncer {
             // entries PUT and the pointer CAS leaves behind. Best effort by
             // design: a publish that succeeded is not un-done by a failure
             // to tidy up after it.
-            let swept_generations = match manifest::sweep_generations(self.store.as_ref(), &self.cfg).await {
+            // A deposal after the CAS stops every deletion after it (M3):
+            // what is left is a leak the next holder's sweeps take, never a
+            // deletion under a successor's cell. The reap and the orphan
+            // sweep renew between their batches (`delete_many_renewing`);
+            // these two renew once before they start.
+            let may_delete = self.lease.is_some() && super::lease::renew_if_due(self).await.is_ok();
+            let swept_generations = match may_delete {
+                false => Ok(0),
+                true => manifest::sweep_generations(self.store.as_ref(), &self.cfg).await,
+            };
+            let swept_generations = match swept_generations {
                 Ok(0) => 0,
                 Ok(n) => {
                     eprintln!("flint-sync: reaped {n} superseded manifest generation(s)");
@@ -1364,7 +1382,9 @@ impl Syncer {
             // in the bucket forever. The rules ran in the model and in the
             // suite and never once in production. `the_barrier_reaps...`
             // below is the test that asks whether this line exists at all.
+            let may_delete = may_delete && self.lease.is_some() && super::lease::renew_if_due(self).await.is_ok();
             let swept_chunks = match ledger.as_ref() {
+                _ if !may_delete => Ok(0),
                 None => Ok(0),
                 Some(l) => manifest::sweep_chunks_sparing(self.store.as_ref(), &self.cfg, &l.spared).await,
             };

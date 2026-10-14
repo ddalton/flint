@@ -9831,12 +9831,16 @@ async fn readers_never_touch_the_cell() {
 /// L8 — what the fence costs: a no-change boundary touches the cell not
 /// at all (the inbox GET and the pointer GET, exactly as before), and a
 /// publishing one pays two reads and two writes of a few-hundred-byte
-/// cell — claim, verify, handoff — and no heartbeat renewal.
+/// cell — claim, verify, handoff — and no heartbeat renewal. At the
+/// SHIPPED spacing: the battery's collapsed fence renews at every chance
+/// (review M3's `renew_if_due`), and a section shorter than half the
+/// takeover threshold renews nothing.
 #[tokio::test]
 async fn the_fence_costs_a_publishing_boundary_four_cell_requests_and_an_idle_one_none() {
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
     let mut a = syncer(&store, dir.path()).await;
+    a.cfg.claim_quiet_spacing_secs = lease::QUIET_SPACING_SECS;
     a.checkout().await.unwrap();
     write(dir.path(), "f.txt", "v1");
     a.floor_tick().await.unwrap();
@@ -11837,6 +11841,121 @@ async fn a_holder_deposed_during_its_commit_heads_does_not_install_onto_its_succ
         "A, deposed during its commit, installed onto its successor's rotated document: {r:?}"
     );
     assert!(matches!(r, Err(LeanError::Fenced(_))), "a deposed holder's barrier must end fenced: {r:?}");
+}
+
+/// Review 2026-09-18, M3 (and M4): a holder renews once its cell has
+/// stood still for half the takeover threshold — judged by its own
+/// monotonic clock, never by comparing a node clock with the store's —
+/// and not before.
+#[tokio::test]
+async fn a_holder_renews_once_its_cell_has_stood_still_half_the_takeover_threshold() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    // The shipped spacing: six spaced polls of 10 s depose, so renew at 30 s.
+    a.cfg.claim_quiet_spacing_secs = lease::QUIET_SPACING_SECS;
+    let key = a.cfg.epoch_key();
+    lease::renew_if_due(&mut a).await.expect("no lease is nothing to renew");
+    assert!(store.epoch_read(&key).await.unwrap().is_none(), "a renew without a lease wrote the cell");
+
+    assert!(claim_until_held(&mut a, 3).await);
+    let at_claim = store.epoch_read(&key).await.unwrap().unwrap().token;
+    lease::renew_if_due(&mut a).await.unwrap();
+    assert_eq!(
+        store.epoch_read(&key).await.unwrap().unwrap().token,
+        at_claim,
+        "renewed a cell written a moment ago"
+    );
+
+    a.cell_written_at = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(31));
+    lease::renew_if_due(&mut a).await.unwrap();
+    assert_ne!(
+        store.epoch_read(&key).await.unwrap().unwrap().token,
+        at_claim,
+        "a cell that stood still 31 s of a 60 s takeover threshold was not renewed"
+    );
+    assert!(a.cell_written_at.unwrap().elapsed() < std::time::Duration::from_secs(5), "the renew did not restart the clock");
+}
+
+/// Review 2026-09-18, M3: nothing moved the cell's token between the
+/// claim and the end of the commit section, so a live holder whose
+/// verify, CAS retries or deletes ran past the takeover threshold was
+/// deposed by a waiter, and two such writers could depose each other
+/// every floor. The battery's fence spacing is 0, so a holder renews at
+/// every chance and one barrier shows both kinds of site.
+#[tokio::test]
+async fn a_commit_section_renews_its_cell_before_the_cas_and_before_it_deletes() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.checkout().await.unwrap();
+    write(dir.path(), "f.txt", "v1");
+    a.run_barrier().await.unwrap();
+    let buf = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    a.cfg.event_trace = Some(crate::trace::Sink::Memory(buf.clone()));
+    write(dir.path(), "f.txt", "v2");
+    a.run_barrier().await.unwrap();
+    let evs: Vec<String> = buf
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["ev"].as_str().unwrap_or("").to_string())
+        .collect();
+    let at = |name: &str| evs.iter().position(|e| e == name).unwrap_or_else(|| panic!("no {name}: {evs:?}"));
+    let (claim, cas, release) = (at("claim"), at("cas"), at("release"));
+    assert!(evs[claim..cas].iter().any(|e| e == "renew"), "no renew between the claim and the CAS: {evs:?}");
+    assert!(evs[cas..release].iter().any(|e| e == "renew"), "no renew between the CAS and the release: {evs:?}");
+}
+
+/// Review 2026-09-18, M3, after the CAS: a holder deposed while its
+/// collector runs must delete nothing more — the deletes are made safe by
+/// the cell, and the cell is its successor's. What is left (here, the
+/// retire log) is a leak the next holder's commit takes. The publish
+/// itself landed and stands.
+#[tokio::test]
+async fn a_holder_deposed_after_its_cas_deletes_nothing_under_its_successor() {
+    let inner = Arc::new(MemoryStore::new());
+    let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = hooked_syncer(&hooked, dir_a.path());
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "f.txt", "v1");
+    a.run_barrier().await.unwrap();
+    syncer(&inner, dir_b.path()).await.checkout().await.unwrap();
+    let v1 = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.entries["f.txt"].key.clone();
+
+    // When A's collector reaches v1's handle — after A's CAS retired it —
+    // B deposes A (six quiet polls, the rotation).
+    let deposed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let (inner, root_b, deposed) = (inner.clone(), dir_b.path().to_path_buf(), deposed.clone());
+        hooked.before_delete(&v1, move || {
+            let (inner, root_b) = (inner.clone(), root_b.clone());
+            std::thread::spawn(move || {
+                tokio::runtime::Runtime::new().unwrap().block_on(async {
+                    let mut b = syncer(&inner, &root_b).await;
+                    assert!(claim_until_held(&mut b, 10).await, "fixture: B never deposed A");
+                })
+            })
+            .join()
+            .unwrap();
+            deposed.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+    write(dir_a.path(), "f.txt", "v2");
+    let mut r = a.run_barrier().await;
+    if !deposed.load(std::sync::atomic::Ordering::SeqCst) {
+        // The retirement is collected by the NEXT commit section.
+        write(dir_a.path(), "f.txt", "v3");
+        r = a.run_barrier().await;
+    }
+    assert!(deposed.load(std::sync::atomic::Ordering::SeqCst), "fixture: A's collector never reached v1's handle");
+    assert!(r.is_ok(), "the publish landed before the deposal and stands: {r:?}");
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_ne!(m.entries["f.txt"].key, v1, "fixture: A's CAS did not land");
+    assert!(a.lease.is_none(), "A still believes it holds the cell its successor took");
+    let logs = inner.list(&manifest::retired_prefix(&a.cfg)).await.unwrap();
+    assert!(!logs.is_empty(), "A, deposed, went on deleting retire logs under its successor's cell");
 }
 
 /// Review 2026-09-18, H2 (the rotation a restart skipped). B deposes A —

@@ -492,6 +492,41 @@ pub async fn renew(sc: &mut Syncer) -> LeanResult<()> {
     }
 }
 
+/// Renew if the cell has not moved for half the takeover threshold
+/// (`QUIET_POLLS` spaced observations: 30 s of 60 at the shipped spacing),
+/// so a waiter never counts a live holder dead however long its commit
+/// section runs (review 2026-09-18, M3) — judged by THIS node's
+/// monotonic clock (`cell_written_at`, stamped at every claim and renew):
+/// a node clock behind the store's never mistakes a stale token for a
+/// fresh one (review 2026-09-18, M4 / lease-4). Only a deposal is an
+/// error; any other failure leaves the token where it was, the next call
+/// retries, and the section goes on — a renew is availability, and the
+/// fence before the CAS (`verify_not_deposed`) is what safety rests on.
+pub async fn renew_if_due(sc: &mut Syncer) -> LeanResult<()> {
+    if sc.lease.is_none() {
+        return Ok(());
+    }
+    let after = Duration::from_secs(QUIET_POLLS as u64 * sc.cfg.claim_quiet_spacing_secs / 2);
+    let due = sc.cell_written_at.map_or(true, |t| t.elapsed() >= after);
+    if !due {
+        return Ok(());
+    }
+    match renew(sc).await {
+        Ok(()) => {
+            sc.trace("renew", serde_json::json!({"epoch": sc.lease.as_ref().map(|l| l.epoch)}));
+            Ok(())
+        }
+        Err(e @ LeanError::Fenced(_)) => {
+            sc.trace("fence", serde_json::json!({"where": "renew", "detail": e.to_string()}));
+            Err(e)
+        }
+        Err(e) => {
+            eprintln!("flint-sync: renew inside the commit section failed ({e}); the next one retries");
+            Ok(())
+        }
+    }
+}
+
 /// The claim precondition (audit 2026-09-03, finding 5). With a project
 /// id stamped (`FLINT_SYNC_PROJECT_ID`), refuse to run over a prefix
 /// whose claim cell names ANOTHER project. The operator's refuse-foreign
