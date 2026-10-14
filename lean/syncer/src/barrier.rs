@@ -606,6 +606,18 @@ impl Syncer {
         // with its CAS as the install the ack names (`IntentJournal::
         // carrier`). A record written before the id field has none and
         // carries nothing.
+        // Step 1's first half: the cell's verb requests (§2.5's doors ride
+        // this GET), read BEFORE the carry is decided. Read after it, a
+        // gateway `boundary_request` folded into the pending here was not
+        // carried by the barrier that read it: its install journalled no
+        // carrier, and a peer's delete of a path it published, before the
+        // honour, was answered `ok` (L-135, 2026-10-14). A failure here
+        // must never fail the barrier: the request is idempotent state and
+        // the next tick re-reads it.
+        let inbox_doc = inbox::load(self.store.as_ref(), &self.cfg).await?.doc;
+        if let Err(e) = self.note_verb_requests(&inbox_doc) {
+            eprintln!("flint-sync: verb request not consumed (retrying next tick): {e}");
+        }
         let carries: Option<String> = self
             .load_pending(super::sentinel::Verb::Publish)
             .ok()
@@ -642,15 +654,9 @@ impl Syncer {
             );
         }
 
-        // Step 1: the cell's verb requests (§2.5's doors ride this GET), then
-        // what the tree is owed. A UI save, delete or rename COMMITS (P2), so
-        // it reaches the tree as a peer's change does: derived, not queued.
-        let inbox_doc = inbox::load(self.store.as_ref(), &self.cfg).await?.doc;
-        // A failure here must never fail the barrier: the request is
-        // idempotent state and the next tick re-reads it.
-        if let Err(e) = self.note_verb_requests(&inbox_doc) {
-            eprintln!("flint-sync: verb request not consumed (retrying next tick): {e}");
-        }
+        // Step 1's second half: what the tree is owed. A UI save, delete or
+        // rename COMMITS (P2), so it reaches the tree as a peer's change
+        // does: derived, not queued.
         let (consumed, seen_pointer) = self.consume_owed().await?;
         report.consumed = consumed;
         // The agent runs alongside: what it does to the tree between the

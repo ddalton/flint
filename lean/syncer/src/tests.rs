@@ -11616,6 +11616,45 @@ async fn a_second_touch_does_not_orphan_the_carrier_of_the_first() {
     h10_assert_ack_is_honest(dir_a.path(), &ack, peer_seq);
 }
 
+/// L-135 (2026-10-14, found by the LeanP1 gate's AckHolds1): a barrier
+/// carries the gateway's boundary request it reads itself. The request
+/// folded in at step 1, after the barrier had decided it carried nothing,
+/// so the cadence barrier that published the agent's file journalled no
+/// carrier; the UI deleted the file before the honour, and the honour's
+/// pull of that document answered `ok`.
+#[tokio::test]
+async fn a_barrier_carries_the_gateway_request_it_reads() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture).unwrap();
+    a.checkout().await.unwrap();
+    write(dir.path(), "seed.txt", "s");
+    a.floor_tick().await.unwrap();
+    a.floor_tick().await.unwrap();
+
+    write(dir.path(), "work.txt", "the declared bytes");
+    inbox::gateway_request(store.as_ref(), &a.cfg, inbox::RequestedVerb::Boundary, "ci@example").await.unwrap();
+    // The floor's barrier reads the request and publishes the file.
+    a.cadence_barrier().await.unwrap();
+    assert!(a.load_pending(Verb::Publish).unwrap().is_some(), "fixture: the request was not folded");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("work.txt"), "fixture: the barrier did not publish the file");
+    assert_eq!(
+        manifest::load_pointer(store.as_ref(), &a.cfg).await.unwrap().unwrap().pointer.boundary_source.as_deref(),
+        Some("sentinel-deferred"),
+        "the barrier that read the request did not carry it"
+    );
+
+    // The UI deletes the declared file before the honour.
+    hitl_remove(&store, &a.cfg, "work.txt", "reviewer").await;
+
+    let ack = a.honor_pending(Verb::Publish, true).await.unwrap().expect("nothing was answered");
+    assert_eq!(ack.status, "partial", "the ack says the declared file is in seq {:?}, which no longer cites it: {ack:?}", ack.seq);
+    assert_eq!(ack.report.dropped, vec!["work.txt".to_string()], "{ack:?}");
+}
+
 /// Row 15 plan, D4 (2026-10-14): the drain's publish ack names the clock
 /// its barrier stamped on the bucket, in its one write. It used to be
 /// written `sentinel-deferred` (the honor's `forced` clock) and re-written
