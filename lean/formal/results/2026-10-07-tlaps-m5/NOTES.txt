@@ -442,3 +442,28 @@ M5D PROVED (part D; m5d/LeanP1ProofM5D.tla, EXTENDS LeanP1ProofM5C, md5 a03f13c4
     FOLLOW-UPS (docs/plans/lean-model-code-action-items-2026-10-14.md): the
     gate worlds; the code against the two modelling fixes; NR5/AN5 into
     LeanP1.tla (owner's approval); PROTOCOL.md rows 32, 54.
+
+2026-10-14: M6 -- the plan's item 7, Prop_AgentWorkKept and Prop_ScopeRespected.
+E42 (box; MCLeanP1M6.tla J6 == BU /\ SU /\ OU /\ OC /\ UpSnap, with both
+    properties): HOLD in FetchHolds (3,524,707), Rem3 (7,435,952), ScopeHolds
+    (8,284,768), ReaderScope (21,234,387), Rem3Age (77,160,864).
+M6 PROVED (m6/LeanP1ProofM6.tla, EXTENDS LeanP1ProofM5D): THEOREM AgentWorkKept
+    == Spec => Prop_AgentWorkKept; THEOREM ScopeRespected == Spec =>
+    Prop_ScopeRespected.  ScopeRespected needs no strengthening: a consume or
+    a sync takes only a held path (ConsumeHonorsScope), a widen fetches only
+    inside its new scope, an unlink is of a dropped path, a copy at upload
+    keeps the bytes.  AgentWorkKept needs UI: a baseline, a recorded uncite
+    (sHeld) and, in a barrier, an uploaded snapshot are PUT; a copy and its
+    original are PUT.  Then a take is of a clean baseline (PUT) or of the same
+    bytes; an unlink is of the uncite's bytes (UnlinkChecksBytes); a copy is
+    made of a PUT snapshot.
+    RECORD (--cleanfp, --threads 3, box): All 789 obligations proved, 25:23
+    wall, peak 5.9 GB (out/m6/record-M6.out, md5.txt).  CONTROLS (the rule
+    dropped from Shipped in LeanP1ProofM0.tla): ConsumeHonorsScope -- exactly
+    3 fail, its citation in Consume_M6, Sync_M6, RPullSync_M6;
+    UnlinkChecksBytes -- exactly 1 fails, its citation in RescopeSecond_M6
+    (out/m6/ctl-*.out).  These show where the proof cites each rule; the
+    rule-off TLC worlds (the plan's other half) are the gate's mutation runs.
+    Whole proof: 18,433 + M6 789 = 19,222.  Every claim in the plan's target
+    list (section 1, items 1-8) is now proved, with NR5 and AN5 for items 8's
+    restated claims.
