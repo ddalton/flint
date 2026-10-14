@@ -56,3 +56,13 @@ EVIDENCE (TLC; tla-mc 0.1.1/0.1.2, and tlc-rs on the box):
 
 NEXT: flint-3f proves NR3 and then AN3 in TLAPS as M5 part C, stated in the
 proof module. If the wording above is changed, the proof follows it.
+
+UPDATE 2026-10-14 (NOTES.txt E27-E41):
+  NR3 -> NR5: a conflict is read as udel and acked are, by derivation from the
+    baseline (E29); with Edit's base fixed in LeanP1.tla (E27, E31, E33).
+    PROVED: m5c/LeanP1ProofM5C.tla, Spec => NR5.
+  AN3 -> AN5: AN3 is FALSE (E38, E39: a copy's acked successor contested away
+    or renamed on, the copy reaped).  AN5 == AN3, or a conflict on the chain
+    naming a version derived from h, or an acknowledged version with other
+    bytes derived from h (user's choice).  PROVED: m5d/LeanP1ProofM5D.tla,
+    Spec => []AN5.  MA1 still breaks AN5 (d10).

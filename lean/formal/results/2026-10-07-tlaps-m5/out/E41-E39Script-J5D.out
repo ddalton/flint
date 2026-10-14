@@ -1,0 +1,4 @@
+tla-mc: MCLeanP1M5H6 (32 variables, 0 symmetry permutations), 1 workers, interp engine; loaded in 0.008s
+Model checking completed. No error has been found.
+55 states generated, 55 distinct states found. Depth 32. Checked in 0.019s (2868 distinct/s).
+rc=0

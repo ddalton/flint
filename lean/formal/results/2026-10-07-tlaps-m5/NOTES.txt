@@ -381,3 +381,64 @@ M5C PROVED (part C; m5c/LeanP1ProofM5C.tla, EXTENDS LeanP1ProofM5B, md5 45d03154
     LeanP1Anc.tla (the gateway's delete leaves udel): exactly 1 obligation
     fails, GDelete_C's udel step (out/m5c/ctl-MN2-M5C.out).
     Whole proof: M0-M5B 13,293 (SPLIT3) + M5C 3,933 = 17,226.
+
+2026-10-14: M5 PART D -- AN3's proof.
+E37 (box; MCLeanP1M5D.tla A1-A4, TU) which of AN3's names a proof needs.  AN3
+    without `h \in live` (A1), also without the tombstone (A2), without the
+    tree's memory (A3), and TU (a tombstone is an acked delete or a rename's
+    source): HOLD in Rem3 (7,435,952), ScopeHolds (8,284,768), FetchHolds
+    (3,524,707).  A4 (no later-ack clause) FAILS Rem3 d12.  MA1 breaks A1 at
+    d3.  Stopped before Reader/Rem3Age: superseded by E41.
+E38 (box; scripted, MCLeanP1M5H5.tla) AN3 IS FALSE.  One writer, two paths:
+    A edits k from the seed, uploads it, restarts, re-uploads it as the COPY
+    c and commits c at p1 (its tree clean at c from then on).  The gateway
+    renames p1 -> p2 (acked <<p2, c>>), a save h' lands over c at p2, G
+    elapses, a save lands in the empty p1 (tombstone cleared).  A's consume
+    fails to fetch p1 (its tree keeps c); A commits a new file at p2 over h'
+    (conflict <<p2, h'>>) and reaps c.  Nothing AN3 reads names c: the
+    conflict names h', which derives from c; the later saves' generations are
+    below the copy's (MaxMint + 1); the tree still holds c.  tla-mc and TLC
+    2.19: AN3 violated at depth 28; HIsNext holds; HReach reached.  World:
+    MaxMint 5, MaxUI 2, MaxRemovals 1, MaxBarriers 3, MaxRestarts 1,
+    MaxCopies 1, MaxAges 1, MaxFetchFails 1 -- past every BFS world.
+E39 (box; MCLeanP1M5H6.tla) the three-path variant: h' renamed on to p3, saves
+    land in both of c's paths.  AN3 and AN4 (AN3 + a conflict on the chain
+    read by derivation) FAIL (tla-mc, TLC); what names c is h''s ack at p3.
+    USER'S CHOICE (2026-10-14): AN5 == AN3, or a conflict on the chain naming
+    a version derived from h, or an acknowledged version with other bytes
+    derived from h (MCLeanP1M5D.tla).  AN5 holds on both scripts.
+E41 (box) AN5 and the proof's strengthening J5D (MCLeanP1M5D.tla: KD2 /\ CHI
+    /\ BT /\ UD) on the final model.  Scripts E38/E39: J5D holds (tla-mc,
+    TLC).  KD2: an acked version is cited, or preserved, or has an acked
+    strict descendant, or is acked-deleted on its chain, or a tree that took
+    it on its chain has moved on.  CHI: a cited version is at its own path or
+    acked there.  BT: a tree's memory has its baseline.  UD: an upload's
+    bytes are not its baseline.  KNOWN-BAD: MA1 breaks AN5 (d10) and KD2 (d2:
+    rename, then an unrecorded delete).
+    WORLDS (E41, final model, tla-mc -compile): AN5 and J5D HOLD in Rem3
+    (7,435,952), ScopeHolds (8,284,768), FetchHolds (3,524,707), ReaderScope
+    (21,234,387, d34), Rem3Age (77,160,864, d32) -- each the gate's exact count.
+M5D PROVED (part D; m5d/LeanP1ProofM5D.tla, EXTENDS LeanP1ProofM5C, md5 a03f13c4,
+    over LeanP1Anc.tla md5 47ece26b): THEOREM AckedNamed == Spec => []AN5.
+    The invariant DInv == AckMin /\ CHI /\ BT /\ UD /\ KDall, over IndC
+    (LEMMA DInvariant: Spec => []DInv, from DStep and CInvariant):
+      KD(h): cited, or preserved, or an acked strict descendant (Desc), or
+        acked-deleted on its chain, or a tree that took it on its chain has
+        moved on.  Each way a cited version stops being cited leaves one: a
+        save over it (Desc: its base is the version, the rank orders the
+        bytes), a delete (udel), a contested commit (conflict), a commit
+        from a clean baseline (the tree took it: BT; its bytes differ: UD).
+        A tree takes it back only while it is cited (LocalOK).
+      No tombstone, no later-ack clause, no live disjunct: E1's conjecture
+      holds for AN5.  KDToAN5: IndC /\ DInv => AN5.
+    Three runs to close: two missing citations in GCas_D (minted g, h in
+    anc[g]; x minted for DerivesStep).
+    RECORD (--cleanfp, --threads 3, box): All 1,207 obligations proved,
+    16:34 wall, peak 9.0 GB (out/m5d/record-M5D.out, md5.txt).  CONTROL MA1
+    on LeanP1Anc.tla (the gateway's delete leaves no tombstone, no udel):
+    exactly 1 obligation fails, GDelete_D's step reading the delete's udel
+    record (line 330; out/m5d/ctl-MA1-M5D.out).
+    Whole proof: M0-M5B 13,293 + M5C 3,933 + M5D 1,207 = 18,433.
+    FOLLOW-UPS (docs/plans/lean-model-code-action-items-2026-10-14.md): the
+    gate worlds; the code against the two modelling fixes; NR5/AN5 into
+    LeanP1.tla (owner's approval); PROTOCOL.md rows 32, 54.
