@@ -20,8 +20,9 @@ theirs applies and theirs is recorded (M3), and a commit's retirements are
 collected only after the retire age G (M1, with a reader ghost).
 `../PROTOCOL.md` is written from it. Everything below this section —
 `LeanSubtree.tla`, `LeanCore.tla`, the 182-run `check.sh` gate — models the
-shape before step 5 (the inbox cell, the writer-local queue, citation
-repairs) and is the record of what was checked on it.
+shape before step 5 (the inbox cell's entries and removals, the writer-local
+queue, citation repairs; the cell itself stays, carrying only the two
+verb requests) and is the record of what was checked on it.
 
 ```
 ./gen-leanp1.sh                                   # the worlds' cfgs (WORLDS-LeanP1.tsv)
