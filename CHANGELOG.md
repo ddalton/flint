@@ -14,6 +14,15 @@ covered by the stability guarantee.
 
 ### Added
 
+- **pNFS: a data server reachable over RPC-over-RDMA** (2026-10-12). A
+  DS endpoint spelt `rdma://host:port` goes out in GETDEVICEINFO with
+  netid `rdma` (RFC 8166/8267) while the MDS connection stays TCP; a bare
+  `host:port` stays `tcp`, and an unknown scheme is an error, never a
+  fall back to TCP. The netid is per address, so `DeviceAddr4` loses its
+  device-wide field. The F68b reachability dial is TCP and skips `rdma://`
+  endpoints with a warning. `prototypes/rpcrdma-ds` gains its M2 data
+  path (SEQUENCE/PUTFH/READ/WRITE/COMMIT, payloads by RDMA Write and
+  Read), checked live against the kernel client (`tests/rdma/rdma-drill.sh`).
 - **A head-to-head CSI benchmark harness and its first results**
   (2026-10-07/08). `bench/` runs one fio matrix (`matrix.tsv`) against
   any driver on one cluster, with CPU, SPDK reactor and ENA counters
@@ -34,6 +43,14 @@ covered by the stability guarantee.
 
 ### Changed
 
+- **NFS Kerberos: the acceptor is the `krb5` crate (0.2)** (2026-10-13).
+  `nfs/kerberos.rs` and `nfs/krb/` moved to the standalone `krb5` crate;
+  `FLINT_NFS_KRB5_CLOCK_SKEW_SECS` is still read here and passed to the
+  acceptor. 0.2 fixes the AP-REP's `cusec` DER encoding (the leading zero
+  octet was dropped whenever the top bit was set, so about one
+  mutual-auth handshake in 30 failed with `KRB_AP_ERR_MUT_FAIL`, in the
+  in-tree acceptor too). Drops the `aes`, `pbkdf2`, `sha1` and `cbc`
+  dependencies.
 - **F74 write fix, changes 1 and 2: replicated random writes ~97x
   faster** (2026-10-08). New lvstores use 128 KiB clusters instead of
   1 MiB, with `num_md_pages_per_cluster_ratio` lowered to 13 so the
@@ -65,6 +82,17 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **lean: a live holder is no longer deposed during a long commit
+  section** (2026-10-14, review M3, `lean/FINDINGS.md` L-132). Nothing
+  renewed the writers' lease between the claim and the handoff, so a
+  commit whose verify, retries, collection or rescope fetch ran past the
+  takeover threshold (~60 s) was deposed by a waiting writer, and two
+  such writers could depose each other on every floor tick without
+  either publishing. The syncer now renews once the lease has stood
+  still for half the threshold, judged by its own monotonic clock, at
+  each step of the section and between delete batches; a writer deposed
+  after its commit deletes nothing more. Availability only: the fence
+  before the commit already kept a deposed writer from publishing.
 - **flint-forge: a restore takes the packs its snapshot names off the
   retained list** (2026-10-05). A pack can be both named and retained: a
   syncer folds and retains it, history is rewound, and a re-push
