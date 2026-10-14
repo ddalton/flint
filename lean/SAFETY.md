@@ -11,9 +11,12 @@ Read it with two companions: `lean/formal/COVERAGE.md` (generated: which
 invariant is checked in which world) and `lean/FINDINGS.md` (every defect
 found so far, with how it was found).
 
-Nothing here is a proof. Every check below is exhaustive over a SMALL
-world, or a replay of a run that actually happened. §5 says what that
-leaves open.
+Since 2026-10-14 the claims of the shipped shape's model are PROVED, in
+TLAPS, for every path count, writer count and bound (§3.3). That is a
+proof about the MODEL. That the code is the model rests on the trace check,
+the tests and the drills, and every other check below is exhaustive over a
+SMALL world, or a replay of a run that actually happened. §5 says what
+that leaves open.
 
 ## 1. The promises
 
@@ -51,7 +54,7 @@ as a conflict copy with a record naming it.
 | no install drops the last tracked reference to acked bytes | `Inv_HITLDurable` |
 | `sync` never destroys genuinely dirty local work | `Inv_SyncNeverDestroysDirty` |
 | a merge base never advances past a change neither integrated nor surfaced | `Inv_NoForeignLost`; since step 5 the merge base IS the baseline and what the tree is owed is derived from the document at each consume (`Inv_ShortcutSound`, §3.2) |
-| an agent's delete over a version a peer or the UI changed applies, and that version is preserved under a record (`commit-deleted-over-theirs`; M3, step 5) | `Prop_DeleteSettles`, `Inv_AckedNamed` (`LeanP1.tla`) |
+| an agent's delete over a version a peer or the UI changed applies, and that version is preserved under a record (`commit-deleted-over-theirs`; M3, step 5) | `Prop_DeleteSettles`, `AN5` (`LeanP1.tla`; it restates `Inv_AckedNamed`, §3.3) |
 | a delete or rename asked for from outside removes the version it was asked about, never a newer one | `Inv_RemovalNamesItsVersion` (review 2026-09-18, H4); since step 5 it is one CAS on the current document, judged against `if_match` when given (`FileChanged`, 412) |
 
 **S4. A deletion is never resurrected; a rename is one generation.**
@@ -100,6 +103,8 @@ A claim with unnamed assumptions is a claim about nothing.
 | the live drill | the binary is the code: each fix has a control arm that fails | host legs H1-H6, storm legs S0-S5 (2026-09-15) |
 | trace validation on the shipped shape (step 5) | the code's conformance traces are behaviours of `LeanP1.tla` (`formal/trace/TraceCore.tla`) | 41/41 on 2026-09-25: 15 traces accepted, 16 mutations and 10 controls rejected |
 | the unit battery | each finding pinned by a test whose control fails it; every step-5 line mutation-checked | 257 syncer tests; gateway 24 unit, 31 verbs, 5 battery (2026-09-25) |
+| the TLAPS proof of the shipped shape's model (§3.3) | every claim of `LeanP1.tla` (`PROTOCOL.md`'s table) and the liveness claim, for EVERY path count, writer count and bound, under the shipped rules | 19,235 obligations, 11 modules (2026-10-14) |
+| the LeanP1 gate on the restated claims (§3.2) | the same claims, exhaustively, in 69 worlds; every rule removed one at a time; the deep counterexamples as scripted traces | 68 of 69 as expected, the 69th decided by the proof (2026-10-14) |
 
 ### 3.1 What certifies each promise, on which shape (H8/H9, 2026-09-19)
 
@@ -196,27 +201,43 @@ model is `formal/LeanP1.tla` (`PROTOCOL.md` is written from it):
   Tests only; no model.
 
 What checks it: the trace check replays the code against `LeanP1.tla`
-(41/41 at f6f6a892, §3), and the model's own gate (`gen-leanp1.sh`,
-expectations in `WORLDS-LeanP1.tsv`, written before any run). The gate
-**passed 2026-10-04**: 49 of 49 decided worlds as expected — 9 claims
-hold, 19 mutations and 21 probes fire, 0 mismatches
-(`formal/results/2026-10-04-leanp1-gate/SUMMARY.txt`). LeanP1Holds holds
-at full bounds (1,669,205,616 distinct, depth 39;
-`formal/results/2026-10-03-ec2-deep/`), and so do the two worlds that had
-never completed: AllHolds (reader + scope + a rescope + a restart, 756M
-distinct) and DeleteOverrideOff (1.69B). Its first run (2026-09-25) had
-reported `Inv_ShortcutSound` violated in both shipped worlds; that was
-settled before this gate. **What that run does not give:** the three
-large HOLDS verdicts are from tlc-rs alone (the compiled checker, main
-129adc8b) — TLC was waived for LeanP1Holds and not run for the other two;
-where both ran (`Holds1p3b`) the distinct counts agree exactly. Liveness
-holds only at a reduced bound (`LiveHoldsSmall`: one path, no removals;
-the full `LiveHolds` cannot finish). The two RECORD worlds were stopped
-then and decided on 2026-10-05 (`formal/results/2026-10-05-ec2/`):
-NoConvergence HOLDS (652,173,065 distinct), so content convergence is an
-economy, not a safety rule; CollectorGreedy is LeanP1Holds' world state for
-state (`CollectorSparesCited` is read only where `RetireAge` discards it),
-and even with the retire age off the guard changes no reachable state —
+(41/41 at f6f6a892, §3), the model's own gate (`gen-leanp1.sh`,
+expectations in `WORLDS-LeanP1.tsv`, written before any run), and since
+2026-10-14 a proof (§3.3).
+
+**The gate passed again 2026-10-14, on the restated claims**
+(`formal/results/2026-10-14-leanp1-gate-ec2/`; tla-mc 0.1.2, compiled, one
+c8g.48xlarge): 68 of 69 worlds as expected — 12 hold, 54 mutations, probes
+and scripted traces fire, 2 recorded, 0 mismatches — and the 69th,
+`LeanP1LiveHolds`, is decided by the proof instead (below). The large
+holds: Holds 1,656,295,238 distinct (depth 39), DeleteOverrideOff
+1,679,526,957, AllHolds 761,172,620, Holds1p3b 458,940,173. Outside the
+gate, P3Age (three paths, three removals, the retire age) holds AN5 and
+NR5 exhaustively at 1,080,412,937 distinct. The counts differ from
+2026-10-04's because the model changed since (a commit's deletes are
+acknowledged; an edit's provenance base), not the checker. New in this
+gate: the worlds where the original claims fail (`Rem3`, `Rem3Age`, three
+removals), the two rules the proof found load-bearing, removed (`MN2Rem3`,
+`MA1Rem3Age`), and the proof's counterexamples as scripted traces (E27,
+E29, E31, E33, E38, E39), each of which must reach its end with the
+claims holding and break what it was found against.
+
+The first gate **passed 2026-10-04**: 49 of 49 decided worlds as expected
+(`formal/results/2026-10-04-leanp1-gate/SUMMARY.txt`), on tlc-rs alone for
+the large holds — TLC was waived for LeanP1Holds and not run for AllHolds
+or DeleteOverrideOff; where both ran (`Holds1p3b`) the distinct counts
+agree exactly. Its first run (2026-09-25) had reported
+`Inv_ShortcutSound` violated in both shipped worlds; that was settled
+before it. **Liveness:** `LeanP1LiveHolds` has Holds's bounds and has never
+finished on a checker — TLC ran out at 103M distinct (2026-09-28), and
+tla-mc on 371 GB was at 640 bytes a state at 173M (2026-10-14, stopped) —
+so it is PROVED instead (§3.3); TLC checks it at a reduced bound
+(`LeanP1LiveHoldsSmall`). The two RECORD worlds were decided on 2026-10-05
+(`formal/results/2026-10-05-ec2/`): NoConvergence HOLDS (651,437,949
+distinct on today's model), so content convergence is an economy, not a
+safety rule; CollectorGreedy is LeanP1Holds' world state for state
+(`CollectorSparesCited` is read only where `RetireAge` discards it), and
+even with the retire age off the guard changes no reachable state —
 NoAgeNoReader and CollectorGreedyNoAgeNoReader both hold at 713,160,844
 distinct, identically, because the retired set is what the commit stopped
 citing. "Spare what the install cites" is redundant by construction in the
@@ -246,17 +267,71 @@ full Holds bounds with three syncers are out of reach. §4.2's three-writer worl
 A behaviour change that follows from the scope filter: a scoped tree no
 longer receives a peer's change, or a UI promote, outside its scope.
 
+### 3.3 The proof (TLAPS, 2026-10-05 to 2026-10-14)
+
+`docs/plans/lean-tlaps-inductive-proof-plan.md` is the plan; the modules
+are `formal/LeanP1Proof.tla` (generated, split one module per milestone),
+`formal/results/2026-10-07-tlaps-m5/` (parts C and D, M6) and
+`formal/results/2026-10-14-tlaps-live/` (L1). What is proved, each for
+every `Paths`, `Writers` and bound, under the shipped rules (`Shipped`,
+every rule constant TRUE):
+
+| theorem | claim | obligations |
+|---|---|---|
+| M0 `TypeInvariant` | `Spec => []TypeOK` | 1,907 |
+| M1 `OneHolder`, `DeleteSettles`, `NarrowNeverDeletes` | `Inv_OneHolder`, `Prop_DeleteSettles`, `Prop_NarrowNeverDeletes` | 2,387 |
+| M2 `CitationsLive`, `OneName` | `Inv_CitationsLive`, `Inv_OneName` | 4,355 |
+| M3 `ShortcutSound`, `ReaderSound` | `Inv_ShortcutSound`, `Inv_ReaderSound` | 2,191 |
+| M4 `ReaderFetches` | `Inv_ReaderFetches` | 896 |
+| M5A, M5B `NoSilentRevert` | the history the claims read; `Prop_NoSilentRevert` | 1,353 + 190 |
+| M5C `NoRegress` | NR5 | 3,933 |
+| M5D `AckedNamed` | AN5 | 1,207 |
+| M6 `AgentWorkKept`, `ScopeRespected` | `Prop_AgentWorkKept`, `Prop_ScopeRespected` | 789 |
+| L1 `UISaveCompletes` | `LSpec => Prop_UISaveCompletes` (G1: every save the gateway starts is answered) | 27 |
+
+**Two of the original claims were FALSE**, and the proof found it: once the
+gateway may remove three times, `Inv_NoRegress` fails (E29: a conflict
+naming the baseline's successor) and `Inv_AckedNamed` fails (E38, E39: a
+copy, two or three UI saves, a rename, the retire age and a failed fetch,
+28-32 steps deep — beyond any world the gate could search). Both stay in
+`LeanP1.tla` as the record; the gate and the proof use their restatements,
+NR5 and AN5 (`PROTOCOL.md`'s table). Two modelling fixes the proof needed
+were checked against the code (`docs/plans/lean-model-code-action-items-2026-10-14.md`
+§2): an edit's provenance base (E27, E31, E33) and a commit's deletes
+being acknowledged (E21; `udel` is a ghost of the replies).
+
+**Controls.** A proof that cannot fail shows nothing, so each rule a
+theorem cites was dropped from `Shipped` and the proof re-run: the
+obligations that cite it fail, and only those (M5D: MA1, at `GDelete`'s
+delete; M6: `ConsumeHonorsScope` 3, `UnlinkChecksBytes` 1; L1:
+`GatewayIgnoresLease` 1, at the step that needs the gateway not to wait for
+the lease). The same rules off in TLC break the claims (the gate's
+mutation worlds).
+
+**What the proof does not give.** It is a proof about `LeanP1Anc.tla`,
+the copy of `LeanP1.tla` that tlapm can read (no RECURSIVE operator; a
+history variable `anc`; each writer step's record written out). The tie
+between the two is the exact distinct count on the gate's worlds and
+`MCLeanP1AncCheck.tla`, which checks the restated operators against the
+recursive originals state by state — a check, not a proof. It trusts
+tlapm and its backends (Z3, Zenon, Isabelle, LS4). And it is about the
+model: what the model leaves out (§4) it leaves out of the proof too.
+
 ## 4. What is NOT claimed
 
-1. **Unboundedness.** Every world is small — one to three writers, one or
-   two paths, two barriers, a handful of generations. TLC exhausts the
-   world, not the protocol. There is no inductive proof, so nothing here
-   rules out a failure that needs a fourth writer or a third path.
-2. **Three writers, only in one world — and only in the OLD model.** The
-   LeanSubtree gate runs a three-writer world (2026-09-15); it carries 9 of
-   its 21 invariants. The shipped shape's model (`LeanP1.tla`, §3.2) has no
-   three-syncer world at all: two syncers and the gateway's UI verbs, which
-   commit but do not hold, consume or sweep.
+1. **Unboundedness — answered for the shipped shape's model only.** Every
+   checked world is small — one to three writers, one to three paths, two
+   or three barriers, a handful of generations; TLC exhausts the world, not
+   the protocol. Since 2026-10-14 the claims of `LeanP1.tla` are PROVED for
+   every writer count, path count and bound (§3.3), so a failure of THOSE
+   claims that needs a fourth writer or a third path is ruled out in the
+   model. Nothing else here is unbounded: the pre-step-5 models (§3.1), the
+   ack and slot machinery, and whatever `LeanP1.tla` does not model (the
+   rest of this section).
+2. **Three writers.** The LeanSubtree gate runs a three-writer world
+   (2026-09-15; the OLD model, 9 of its 21 invariants). For the shipped
+   shape's model the proof covers any number of syncers (§3.3), and
+   three-syncer LeanP1 worlds hold to 9,821,039,047 distinct (§3.2).
 3. **Refutation is now complete, and that is recent.** Every invariant in
    §1 has at least one mutation that must make it fail. Until 2026-09-15
    two did not (`Inv_CommitExclusive`, `Inv_CellHeldByHolder`), and their
@@ -520,13 +595,13 @@ encodes today's answer.
 | 5 | replay every path of every storm leg in CI, invariants on | a day, then free |
 | 6 | exhaust the two-path sentinel world (box-scale) | a TLC box, ~$5-20 |
 | 7 | ~~refuse a store that fails `probe-conditional` instead of documenting it~~ **done 2026-09-15**: the syncer probes before its first verb — a broken conditional PUT refuses the workspace; a broken conditional DELETE turned the collector off until immutable handles, and is now reported and nothing more (`conformance.rs`; the posture field it set is gone, 2026-09-21) | — |
-| 8 | an inductive invariant (TLAPS) for S2 and S5 — of whose rows only `Inv_NoDangling`, `Inv_CommitExclusive` and `Inv_CellHeldByHolder` are stated over states today; the rest are ghost stamps | weeks; the only route to a claim that does not say "in this world" |
+| 8 | ~~an inductive invariant (TLAPS)~~ **done 2026-10-14** (§3.3): every claim of the shipped shape's model, and its liveness claim, proved for every bound (19,235 obligations). It is a proof about the handles model `LeanP1.tla`; the S2/S5 rows of the pre-step-5 ack and slot machinery (§3.1) are not in that model and are not proved | — |
 | 9 | `IMPL` variants of the sentinel, removal, narrow and sync worlds, so S1 rows 1-5, S3 rows 2-3 and S4 rows 2-3 are certified on the shipped shape (§4.11) | a day on a laptop for the one-path worlds; the two-path sentinel needs a box |
 | H6 | ~~the structural fix: immutable object handles~~ **built and shipped**: committed with the simplified protocol (f6f6a892, 2026-09-26), released in 1.57.0 — every write to a handle nobody else writes, the manifest cites handles, unconditional batched collection of what an install retired, the sweep under the lease (`docs/plans/flint-lean-immutable-objects-design.md`). The model found L-117, L-118 and L-119 in its code before it shipped. The bucket-protocol suites re-derived for handles are green on MinIO and RustFS (verbs 16/16, chaos 12/12; deb91d71, `lean/e2e/results/2026-10-03-store-swap/`). **Still open:** the writers drill's host legs on AWS S3 and on Ozone (the ingress leg, the lost-writer leg, the collector leg) | the drill on S3 + Ozone: days |
 | 10 | ~~retire or restate the three enforcers no run checks, and `Inv_NoResurrection` over state (§4.12)~~ **done 2026-09-20**: the three definitions are out of `LeanSubtree.tla` (their rows retired from §1 on 2026-09-19), and S4 row 1 is now the action property `Prop_NoResurrection` — no step that is a restart creates a local file — which the rematerialise mutation must violate, in place of a ghost only the mutation wrote | — |
 | 11 | ~~the review of 2026-09-18's other routes~~ **H2, H3, M7, H4, H5, H7 done 2026-09-19** (§4.15); H6 shipped (row H6); H5's compose path done in f6f6a892 (`ComposeSpec` takes the opened file, across flint-store, forge packio and the CSI tier). **Open:** the review's M3 (a renew inside the pre-CAS phase, availability only since H2) | a day |
 | 12 | a TLC confirmation of one large LeanP1 HOLDS (LeanP1Holds, AllHolds or DeleteOverrideOff), so the headline verdicts are not one checker's word | an EC2 box, hours |
-| 13 | a three-SYNCER LeanP1 world — **four rungs HOLD (2026-10-05/06)**: up to 9,821,039,047 distinct at one path, a UI save and three barriers (§3.2; tlc-rs only); Holds1p3b's full bounds with three syncers (restarts, syncs, copies) are tens of billions of states and stay open | the next rung (a restart): a larger box and the tlc-rs speedups listed in `formal/results/2026-10-06-ec2/SUMMARY.txt` |
+| 13 | ~~a three-SYNCER LeanP1 world~~ **answered by the proof 2026-10-14** (§3.3: every claim for any number of syncers); four three-syncer rungs also HOLD in TLC (2026-10-05/06, up to 9,821,039,047 distinct, §3.2) | — |
 
 Regenerate `COVERAGE.md` with `python3 lean/formal/coverage.py` and check
 it with `--check`.

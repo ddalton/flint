@@ -1,0 +1,13 @@
+# tla-mc -compile -workers 4 -metadir /work/out/p1/meta-LeanP1ScopeHolds -checkpoint 0 -fpmem 2000 -queue-mem 6000 -config /work/formal/LeanP1ScopeHolds.cfg LeanP1.tla  (cwd /work/formal)
+tla-mc: building a checker for LeanP1 (cache: /work/out/p1/cache-LeanP1ScopeHolds)
+tla-mc: built in 37.9s
+tla-mc: LeanP1 (31 variables, 0 symmetry permutations), 4 workers, generated engine; loaded in 0.003s
+progress: depth 14, 3410204 generated, 1190654 distinct (0 fingerprint spills), 374163 on queue (0 on disk), 12.2s
+progress: depth 16, 6447263 generated, 2223687 distinct (0 fingerprint spills), 569023 on queue (0 on disk), 23.5s
+progress: depth 18, 10708997 generated, 3661031 distinct (0 fingerprint spills), 758579 on queue (0 on disk), 40.1s
+progress: depth 20, 15651146 generated, 5257120 distinct (0 fingerprint spills), 797884 on queue (0 on disk), 59.8s
+progress: depth 22, 20061458 generated, 6620357 distinct (0 fingerprint spills), 626878 on queue (0 on disk), 78.1s
+progress: depth 24, 23165027 generated, 7585643 distinct (0 fingerprint spills), 442881 on queue (0 on disk), 91.3s
+progress: depth 27, 25626694 generated, 8254272 distinct (0 fingerprint spills), 91309 on queue (0 on disk), 102.3s
+Model checking completed. No error has been found.
+25826396 states generated, 8284768 distinct states found. Depth 30. Checked in 103.210s (80271 distinct/s).

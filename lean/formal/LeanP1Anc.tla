@@ -1421,8 +1421,12 @@ LSpec == Spec /\ \A p \in Paths : WF_vars(GCas(p) /\ TookUpdate /\ RetUpdate /\ 
 Inv_CitationsLive == \A p \in Paths : doc[p] # Nil => doc[p] \in live
 Inv_OneName == \A p, q \in Paths : p # q /\ doc[p] # Nil => doc[p] # doc[q]
 
-\* An acknowledged handle that is gone is accounted for by something in the
-\* state that names it (`LeanCore`'s, plus the acknowledged delete).
+\* SUPERSEDED (2026-10-14) by AN5 below; kept as the record.  An
+\* acknowledged handle that is gone is accounted for by something in the
+\* state that names it (`LeanCore`'s, plus the acknowledged delete).  FALSE
+\* once the gateway may remove three times (results/2026-10-07-tlaps-m5/
+\* NOTES.txt E8: renamed away and back, deleted, a fresh install clears the
+\* tomb, reaped); no gate world before 2026-10-14 had MaxRemovals >= 3.
 Accounted(p, h) ==
   \/ h \in live
   \/ Preserved(h)
@@ -1434,6 +1438,34 @@ Accounted(p, h) ==
           \/ \E d \in udel : d[1] = q /\ Derives(d[2], h)
   \/ \E b \in acked : b[1] = p /\ Later(b[2], h)
 Inv_AckedNamed == \A a \in acked : Accounted(a[1], a[2])
+
+\* THE CLAIM (AN5, 2026-10-14; proved: results/2026-10-07-tlaps-m5/m5d/,
+\* Spec => []AN5).  An acked <<p, h>> is accounted for along h's RENAME
+\* CHAIN -- its own path and every path it was acked at: by a record there
+\* (the document, a tombstone, a tree that took it and moved on, an
+\* acknowledged delete, a conflict naming a version derived from it), by a
+\* later ack there, or by an ACKNOWLEDGED version with other bytes derived
+\* from it (a save over it).  AN3 (the chain, without the last two) is FALSE
+\* (E38, E39: a copy's acked successor contested away or renamed on, the copy
+\* reaped).  An acknowledged delete is the gateway's answer or the commit's
+\* report: `udel` is a ghost of the acknowledgements (PROTOCOL.md).
+Chain(p, h) == {p, h[1]} \cup {q \in Paths : <<q, h>> \in acked}
+AccountedAt(p, h, Q) ==
+  \/ h \in live
+  \/ Preserved(h)
+  \/ \E q \in Q :
+       \/ doc[q] # Nil /\ Derives(doc[q], h)
+       \/ tomb[q] # Nil /\ Derives(tomb[q], h)
+       \/ \E s \in Writers : Gen(h) \in took[s][q] /\ w[s].local[q] # h
+       \/ \E d \in udel : d[1] = q /\ Derives(d[2], h)
+  \/ \E b \in acked : b[1] = p /\ Later(b[2], h)
+AccountedChain(p, h) ==
+  \/ AccountedAt(p, h, Chain(p, h))
+  \/ \E b \in acked : b[1] \in Chain(p, h) /\ Later(b[2], h)
+ConfAt(q, h) == \E c \in conflicts : c[1] = q /\ c[2] # Nil /\ Derives(c[2], h)
+Desc(h) == \E b \in acked : Derives(b[2], h) /\ Content(b[2]) # Content(h)
+AN5 == \A a \in acked : \/ AccountedChain(a[1], a[2]) \/ Desc(a[2])
+                        \/ \E q \in Chain(a[1], a[2]) : ConfAt(q, a[2])
 
 \* LeanP1.tla: recursive over base[k], the acked clause tried at every level.
 Supersedes(k, h, p) ==
@@ -1451,7 +1483,25 @@ SilentRevert(p) ==
 Prop_NoSilentRevert == [][\A p \in Paths : ~SilentRevert(p)]_vars
 
 Inv_OneHolder == \A s \in Writers : w[s].pc \in {"claimed", "cased"} => holder = s
+\* SUPERSEDED (2026-10-14) by NR5 below; kept as the record (`regressed` and
+\* `Back` stay as its ghost).  FALSE once the gateway may remove three times
+\* (NOTES.txt E6: rename, re-create, delete, rename back, a consume regresses).
 Inv_NoRegress == ~regressed
+
+\* THE CLAIM (NR5, 2026-10-14; proved: results/2026-10-07-tlaps-m5/m5c/,
+\* Spec => NR5).  A tree never takes the document's version at p while that
+\* steps BACK -- to a version its baseline derives from, with other bytes --
+\* unless a record at p names a version derived from the baseline: a
+\* conflict, an acknowledged delete, or an acknowledgement at another path.
+NamedAt(p, b) ==
+  \/ \E c \in conflicts : c[1] = p /\ Derives(c[2], b)
+  \/ \E d \in udel : d[1] = p /\ Derives(d[2], b)
+  \/ \E a \in acked : a[1] # p /\ Derives(a[2], b)
+BackR5(s, p) == /\ doc[p] # Nil /\ w[s].baseline[p] # Nil /\ Derives(w[s].baseline[p], doc[p])
+                /\ Content(doc[p]) # Content(w[s].baseline[p])
+                /\ ~NamedAt(p, w[s].baseline[p])
+Takes(s, p) == w'[s].baseline[p] = doc[p]
+NR5 == [][\A s \in Writers, p \in Paths : ~(BackR5(s, p) /\ Takes(s, p))]_vars
 
 \* M1: a reader that loaded a document less than G ago can fetch every
 \* handle it cites.  (One lagging longer re-resolves the pointer.)

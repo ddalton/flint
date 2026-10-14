@@ -85,9 +85,9 @@ Predicates on a state, and two on a step. Each world's list is in
 |---|---|---|
 | **Inv_CitationsLive** | every citation names a live handle: `∀ p: doc[p] ≠ Nil ⇒ doc[p] ∈ live` | the commit re-reading its uploads (`LeanP1VerifyOff`), the sweep under the lease (`LeanP1SweepFree`), the sweep sparing a save in flight (`LeanP1SweepNoGrace`) |
 | **Inv_OneName** | one handle is never cited under two names | a rename in one CAS (`LeanP1RenameTwoCAS`) |
-| **Inv_AckedNamed** | an acknowledged handle that is gone is accounted for by something in the state that names it: a conflict record; a citation or tombstone derived from it at its path or where the human moved it; an acknowledged delete of a version derived from it; a later acknowledged write at its path; or a tree that took it in at that path and no longer holds it | — (every rule above that names it) |
+| **AN5** (was `Inv_AckedNamed`) | an acknowledged version that is gone is accounted for along its chain — the path it was acked at, the path its handle was minted at, and every path it was acked at since (a rename): a citation, tombstone or acknowledged delete there of a version derived from it, a record preserving it, a tree that took it in there and no longer holds it, or a later acknowledged write; or an acknowledged strict descendant exists; or a conflict on the chain names a version derived from it. The original (one path, no descendant) is FALSE at three removals (E38, E39) and stays in `LeanP1.tla` as the record | the delete recording what it took (`LeanP1MA1Rem3Age`) |
 | **Inv_OneHolder** | a writer in its commit section is the cell's holder | the lease |
-| **Inv_NoRegress** | a consume or a sync never steps a tree back to a version its own derives from, unless a record names what it steps over (L-123's class) | — |
+| **NR5** (an action property; was `Inv_NoRegress`) | no step moves a writer's baseline back onto the document when the document is an ancestor of it with other bytes, unless a conflict or an acknowledged delete at that path, or an acknowledgement at another path, names a version derived from the baseline's (L-123's class). The original ghost form is FALSE at three removals (E29) and stays as the record | the gateway's delete acknowledging (`LeanP1MN2Rem3`) |
 | **Inv_ShortcutSound** | an idle writer with no rescope in flight, whose pointer is where it left it and that nothing marked owed, is owed nothing | the merge marking what it saw untaken (`LeanP1OwedUnmarked`); a consume or a sync that left a path recording nothing as derived (`LeanP1ConsumeLeftRecorded`, `LeanP1SyncLeftRecorded`, L-128) |
 | **Inv_ReaderFetches** | a reader that loaded the document less than G ago can fetch every handle it cites (one lagging longer re-resolves the pointer) | the retire age (`LeanP1ReaderLoses`) |
 | **Prop_NoSilentRevert** | no lost update: a commit replaces a published version only if its tree held it at the path, the new version derives from it, a record preserves it, it moves to another path, or it was the human's own earlier acknowledged version there | R7 (`LeanP1NoR7`), the gateway judging a save against the version read (`LeanP1GatewayBlind`) |
@@ -97,10 +97,19 @@ Predicates on a state, and two on a step. Each world's list is in
 | **Prop_ScopeRespected** | no step but the agent's writes the tree at a path it neither holds nor admits | the consume's scope filter (`LeanP1ScopeIgnored`) |
 | **Prop_NarrowNeverDeletes** | a narrow is an unwatch, never an absence: no barrier publishes the delete of a path a rescope unlinked that the agent has not touched since | the uncite before the unlink (`LeanP1NarrowUnlinkFirst`) |
 
-`Prop_UISaveCompletes` (`LeanP1LiveHolds`) is the liveness claim: fair to
-the gateway's CAS alone, every save completes, with the writers free to
-stop anywhere, the lease holder included; `LeanP1LiveWaitsOnLease` is its
-mutation (a gateway that waits for the lease).
+`Prop_UISaveCompletes` is the liveness claim: fair to the gateway's CAS
+alone, every save the gateway starts is answered (it lands, or it is a
+412), with the writers free to stop anywhere, the lease holder included
+(G1). It is PROVED in TLAPS for every bound (`LeanP1ProofL1.tla`,
+2026-10-14) and checked by TLC at a reduced bound (`LeanP1LiveHoldsSmall`);
+`LeanP1LiveWaitsOnLeaseSmall` is its mutation (a gateway that waits for
+the lease).
+
+Every claim in this table is PROVED in TLAPS for every path count, writer
+count and bound under the shipped rules
+(`formal/results/2026-10-07-tlaps-m5/`, `formal/results/2026-10-14-tlaps-live/`;
+`lean/SAFETY.md` §3.3), and so is `TypeOK`: the theorem names are in
+`formal/README.md`.
 
 ## Honest limits
 
@@ -137,7 +146,7 @@ retire log either.
 
 `took` — per path, every version a tree has taken in there — is the trees'
 memory, and the shipped baseline keeps only the CURRENT one, so the
-`Inv_AckedNamed` disjunct that reads it reads more than the workspace on
+AN5 disjunct that reads it reads more than the workspace on
 disk holds. Nothing asks the code to compute it; the model keeps it as
 state a step writes, so the claim stays a predicate on a state.
 

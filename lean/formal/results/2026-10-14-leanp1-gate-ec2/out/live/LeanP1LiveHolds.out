@@ -1,0 +1,21 @@
+# tla-mc -compile -workers 192 -metadir /work/out/live/meta-LeanP1LiveHolds -checkpoint 0 -fpmem 48000 -queue-mem 150000 -config /work/formal/LeanP1LiveHolds.cfg LeanP1.tla  (cwd /work/formal)
+tla-mc: building a checker for LeanP1 (cache: /work/out/live/cache-LeanP1LiveHolds)
+tla-mc: built in 32.3s
+tla-mc: LeanP1 (31 variables, 0 symmetry permutations), 192 workers, generated engine; loaded in 0.003s
+liveness: 1320 expanded states checked, no violation yet (0.0s)
+liveness: 5788 expanded states checked, no violation yet (0.0s)
+liveness: 22892 expanded states checked, no violation yet (0.0s)
+liveness: 80778 expanded states checked, no violation yet (0.1s)
+liveness: 253462 expanded states checked, no violation yet (0.3s)
+liveness: 709378 expanded states checked, no violation yet (1.1s)
+liveness: 1780679 expanded states checked, no violation yet (3.3s)
+liveness: 4038743 expanded states checked, no violation yet (7.8s)
+progress: depth 13, 25401112 generated, 8347645 distinct (0 fingerprint spills), 4308902 on queue (0 on disk), 15.2s
+liveness: 8347645 expanded states checked, no violation yet (20.0s)
+progress: depth 14, 50027269 generated, 15877155 distinct (0 fingerprint spills), 7529510 on queue (0 on disk), 37.5s
+liveness: 28118341 expanded states checked, no violation yet (84.2s)
+progress: depth 16, 154874849 generated, 47016910 distinct (0 fingerprint spills), 18898569 on queue (0 on disk), 132.1s
+progress: depth 17, 252085569 generated, 75306762 distinct (0 fingerprint spills), 28289852 on queue (0 on disk), 142.6s
+liveness: 75306762 expanded states checked, no violation yet (264.8s)
+progress: depth 18, 395788495 generated, 116301166 distinct (0 fingerprint spills), 40994404 on queue (0 on disk), 422.7s
+progress: depth 19, 599130351 generated, 172811438 distinct (0 fingerprint spills), 56510272 on queue (0 on disk), 443.5s

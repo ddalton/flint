@@ -6,8 +6,18 @@ This is that plan, written against `lean/formal/LeanP1.tla` as it is at
 `99beb8d0` (md5 `94da7541`, the module the 2026-10-04 gate checked: 31
 variables, 29 actions, a 27-field writer record, 14 claims).
 
-Nothing below is done. No TLAPS is installed on the Mac (arm64; `tlapm`
-absent, no OCaml, no Apalache) and the Linux box is powered off.
+**Status (2026-10-14): DONE.** Every claim in §1 is proved, items 1-8,
+19,235 obligations in all (`lean/SAFETY.md` §3.3 has the table). Item 8's
+two history claims were FALSE as stated and are proved as their
+restatements, NR5 and AN5 (`formal/results/2026-10-07-tlaps-m5/NOTES.txt`,
+E29, E38, E39). The liveness claim this plan left to TLC (§0) is proved
+too (L1, `formal/results/2026-10-14-tlaps-live/`), because its full-bound
+world never finished on a checker. The plan below is the record of how it
+was approached; where it and the modules disagree, the modules are right.
+The proof runs on the Linux box (tlapm 1.6.0-pre, bfa9468), never the Mac.
+
+At the time of writing: no TLAPS was installed on the Mac (arm64; `tlapm`
+absent, no OCaml, no Apalache) and the Linux box was powered off.
 
 ## 0. What a proof buys, and what it does not
 
@@ -28,6 +38,9 @@ fourth writer or a third path") for the invariants it covers, and item 13
   the control that the theorem's hypothesis is load-bearing (§5).
 - No liveness. `Prop_UISaveCompletes` stays with TLC at a bound
   (`LiveHoldsSmall`). TLAPS can prove liveness; it is not worth it here.
+  (Superseded 2026-10-14: proved, L1, 27 obligations — WF1 on the
+  gateway's CAS, which nothing but the lease could disable, and under G1
+  the gateway does not wait for the lease.)
 - `Inv_NoRegress` and `Inv_AckedNamed` reason about derivation history
   (`Derives`, `took`, `regressed`), which is the hard tail (M5). The plan
   front-loads what S2 and S5 actually need.

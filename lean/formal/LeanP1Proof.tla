@@ -497,7 +497,7 @@ LEMMA Checkout_TypeOK ==
   BY <1>0, <1>c, <1>1, <1>2, <1>3, <1>4, <1>5, WriterFields DEF CheckoutW, CheckoutHeld, Minted, Opt
 <1>13. /\ minted \subseteq minted' /\ \A q \in Paths : doc'[q] \in Opt(minted') /\ \A q \in Paths : gw'[q] \in Opt(minted')
   BY <1>c, <1>1, <1>2 DEF Minted, Opt
-<1>14. Minted' BY <1>c, <1>7, <1>11, <1>12, <1>13, MintedWrite
+<1>14. Minted' BY <1>c, <1>7, <1>11, <1>12, <1>13 DEF Minted, Opt
 <1>. QED BY <1>9, <1>10, <1>14 DEF IndTypeOK
 
 ------------------------------------------------------------------------------
@@ -588,7 +588,7 @@ LEMMA Scan_TypeOK ==
   BY <1>0, <1>c, <1>1, <1>2, <1>3, WriterFields DEF ScanW, ScanUps, ScanDirty, Minted, Opt
 <1>11. /\ minted \subseteq minted' /\ \A q \in Paths : doc'[q] \in Opt(minted') /\ \A q \in Paths : gw'[q] \in Opt(minted')
   BY <1>c, <1>1, <1>2 DEF Minted, Opt
-<1>12. Minted' BY <1>c, <1>5, <1>9, <1>10, <1>11, MintedWrite
+<1>12. Minted' BY <1>c, <1>5, <1>9, <1>10, <1>11 DEF Minted, Opt
 <1>. QED BY <1>7, <1>8, <1>12 DEF IndTypeOK
 
 LEMMA Skip_TypeOK ==
@@ -617,7 +617,7 @@ LEMMA Skip_TypeOK ==
   BY <1>0, <1>c, <1>1, <1>2, WriterFields DEF SkipW, Minted, Opt
 <1>10. /\ minted \subseteq minted' /\ \A q \in Paths : doc'[q] \in Opt(minted') /\ \A q \in Paths : gw'[q] \in Opt(minted')
   BY <1>c, <1>1, <1>2 DEF Minted, Opt
-<1>11. Minted' BY <1>c, <1>4, <1>8, <1>9, <1>10, MintedWrite
+<1>11. Minted' BY <1>c, <1>4, <1>8, <1>9, <1>10 DEF Minted, Opt
 <1>. QED BY <1>6, <1>7, <1>11 DEF IndTypeOK
 
 LEMMA Upload_TypeOK ==
@@ -722,7 +722,7 @@ LEMMA PullOnly_TypeOK ==
   BY <1>0, <1>c, <1>1, <1>2, WriterFields DEF PullOnlyW, Minted, Opt
 <1>10. /\ minted \subseteq minted' /\ \A q \in Paths : doc'[q] \in Opt(minted') /\ \A q \in Paths : gw'[q] \in Opt(minted')
   BY <1>c, <1>1, <1>2 DEF Minted, Opt
-<1>11. Minted' BY <1>c, <1>4, <1>8, <1>9, <1>10, MintedWrite
+<1>11. Minted' BY <1>c, <1>4, <1>8, <1>9, <1>10 DEF Minted, Opt
 <1>. QED BY <1>6, <1>7, <1>11 DEF IndTypeOK
 
 LEMMA Claim_TypeOK ==
@@ -751,7 +751,7 @@ LEMMA Claim_TypeOK ==
   BY <1>0, <1>c, <1>1, <1>2, WriterFields DEF ClaimW, Minted, Opt
 <1>10. /\ minted \subseteq minted' /\ \A q \in Paths : doc'[q] \in Opt(minted') /\ \A q \in Paths : gw'[q] \in Opt(minted')
   BY <1>c, <1>1, <1>2 DEF Minted, Opt
-<1>11. Minted' BY <1>c, <1>4, <1>8, <1>9, <1>10, MintedWrite
+<1>11. Minted' BY <1>c, <1>4, <1>8, <1>9, <1>10 DEF Minted, Opt
 <1>. QED BY <1>6, <1>7, <1>11 DEF IndTypeOK
 
 LEMMA Verify_TypeOK ==
@@ -779,7 +779,7 @@ LEMMA Verify_TypeOK ==
   BY <1>0, <1>c, <1>1, <1>2, WriterFields DEF VerifyW, Minted, Opt
 <1>10. /\ minted \subseteq minted' /\ \A q \in Paths : doc'[q] \in Opt(minted') /\ \A q \in Paths : gw'[q] \in Opt(minted')
   BY <1>c, <1>1, <1>2 DEF Minted, Opt
-<1>11. Minted' BY <1>c, <1>4, <1>8, <1>9, <1>10, MintedWrite
+<1>11. Minted' BY <1>c, <1>4, <1>8, <1>9, <1>10 DEF Minted, Opt
 <1>. QED BY <1>6, <1>7, <1>11 DEF IndTypeOK
 
 LEMMA Install_TypeOK ==
@@ -898,7 +898,7 @@ LEMMA Finish_TypeOK ==
   BY <1>0, <1>c, <1>1, <1>2, WriterFields DEF FinishW, Minted, Opt
 <1>10. /\ minted \subseteq minted' /\ \A q \in Paths : doc'[q] \in Opt(minted') /\ \A q \in Paths : gw'[q] \in Opt(minted')
   BY <1>c, <1>1, <1>2 DEF Minted, Opt
-<1>11. Minted' BY <1>c, <1>4, <1>8, <1>9, <1>10, MintedWrite
+<1>11. Minted' BY <1>c, <1>4, <1>8, <1>9, <1>10 DEF Minted, Opt
 <1>. QED BY <1>6, <1>7, <1>11 DEF IndTypeOK
 
 ------------------------------------------------------------------------------
@@ -931,7 +931,7 @@ LEMMA Restart_TypeOK ==
   BY <1>0, <1>c, <1>1, <1>2, WriterFields DEF RestartW, Minted, Opt
 <1>10. /\ minted \subseteq minted' /\ \A q \in Paths : doc'[q] \in Opt(minted') /\ \A q \in Paths : gw'[q] \in Opt(minted')
   BY <1>c, <1>1, <1>2 DEF Minted, Opt
-<1>11. Minted' BY <1>c, <1>4, <1>8, <1>9, <1>10, MintedWrite
+<1>11. Minted' BY <1>c, <1>4, <1>8, <1>9, <1>10 DEF Minted, Opt
 <1>. QED BY <1>6, <1>7, <1>11 DEF IndTypeOK
 
 LEMMA Sync_TypeOK ==
@@ -972,7 +972,7 @@ LEMMA Sync_TypeOK ==
   BY <1>0, <1>c, <1>1, <1>2, <1>3, <1>4, <1>5, <1>6, WriterFields DEF SyncW, SyncBl, Minted, Opt
 <1>14. /\ minted \subseteq minted' /\ \A q \in Paths : doc'[q] \in Opt(minted') /\ \A q \in Paths : gw'[q] \in Opt(minted')
   BY <1>c, <1>1, <1>2 DEF Minted, Opt
-<1>15. Minted' BY <1>c, <1>8, <1>12, <1>13, <1>14, MintedWrite
+<1>15. Minted' BY <1>c, <1>8, <1>12, <1>13, <1>14 DEF Minted, Opt
 <1>. QED BY <1>10, <1>11, <1>15 DEF IndTypeOK
 
 ------------------------------------------------------------------------------
@@ -1008,7 +1008,7 @@ LEMMA RescopeBegin_TypeOK ==
   BY <1>0, <1>c, <1>1, <1>2, <1>3, WriterFields DEF RescopeBeginW, Minted, Opt
 <1>11. /\ minted \subseteq minted' /\ \A q \in Paths : doc'[q] \in Opt(minted') /\ \A q \in Paths : gw'[q] \in Opt(minted')
   BY <1>c, <1>1, <1>2 DEF Minted, Opt
-<1>12. Minted' BY <1>c, <1>5, <1>9, <1>10, <1>11, MintedWrite
+<1>12. Minted' BY <1>c, <1>5, <1>9, <1>10, <1>11 DEF Minted, Opt
 <1>. QED BY <1>7, <1>8, <1>12 DEF IndTypeOK
 
 LEMMA RescopeFirst_TypeOK ==
@@ -1038,7 +1038,7 @@ LEMMA RescopeFirst_TypeOK ==
   BY <1>0, <1>c, <1>1, <1>2, <1>3, WriterFields DEF RescopeFirstW, Minted, Opt
 <1>11. /\ minted \subseteq minted' /\ \A q \in Paths : doc'[q] \in Opt(minted') /\ \A q \in Paths : gw'[q] \in Opt(minted')
   BY <1>c, <1>1, <1>2 DEF Minted, Opt
-<1>12. Minted' BY <1>c, <1>5, <1>9, <1>10, <1>11, MintedWrite
+<1>12. Minted' BY <1>c, <1>5, <1>9, <1>10, <1>11 DEF Minted, Opt
 <1>. QED BY <1>7, <1>8, <1>12 DEF IndTypeOK
 
 LEMMA RescopeSecond_TypeOK ==
@@ -1078,7 +1078,7 @@ LEMMA RescopeSecond_TypeOK ==
   BY <1>0, <1>c, <1>2, <1>5 DEF RescopeSecondW, Minted, Opt
 <1>12a. /\ minted \subseteq minted' /\ \A q \in Paths : doc'[q] \in Opt(minted') /\ \A q \in Paths : gw'[q] \in Opt(minted')
   BY <1>c, <1>2 DEF Minted, Opt
-<1>13. Minted' BY <1>c, <1>8, <1>12, <1>12a, MintedWrite
+<1>13. Minted' BY <1>c, <1>8, <1>12, <1>12a DEF Minted, Opt
 <1>. QED BY <1>10, <1>11, <1>13 DEF IndTypeOK
 
 ------------------------------------------------------------------------------
@@ -1109,7 +1109,7 @@ LEMMA RPullRead_TypeOK ==
   BY <1>0, <1>c, <1>1, <1>2, WriterFields DEF RPullReadW, Minted, Opt
 <1>10. /\ minted \subseteq minted' /\ \A q \in Paths : doc'[q] \in Opt(minted') /\ \A q \in Paths : gw'[q] \in Opt(minted')
   BY <1>c, <1>1, <1>2 DEF Minted, Opt
-<1>11. Minted' BY <1>c, <1>4, <1>8, <1>9, <1>10, MintedWrite
+<1>11. Minted' BY <1>c, <1>4, <1>8, <1>9, <1>10 DEF Minted, Opt
 <1>. QED BY <1>6, <1>7, <1>11 DEF IndTypeOK
 
 LEMMA RPullSync_TypeOK ==
@@ -1149,7 +1149,7 @@ LEMMA RPullSync_TypeOK ==
   BY <1>0, <1>c, <1>1, <1>2, <1>3, <1>4, <1>5, <1>6, WriterFields DEF RPullSyncW, SyncBl, Minted, Opt
 <1>14. /\ minted \subseteq minted' /\ \A q \in Paths : doc'[q] \in Opt(minted') /\ \A q \in Paths : gw'[q] \in Opt(minted')
   BY <1>c, <1>1, <1>2 DEF Minted, Opt
-<1>15. Minted' BY <1>c, <1>8, <1>12, <1>13, <1>14, MintedWrite
+<1>15. Minted' BY <1>c, <1>8, <1>12, <1>13, <1>14 DEF Minted, Opt
 <1>. QED BY <1>10, <1>11, <1>15 DEF IndTypeOK
 
 ------------------------------------------------------------------------------

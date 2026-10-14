@@ -1,0 +1,23 @@
+# tla-mc -compile -workers 192 -metadir /work/out/p2/meta-LeanP1AllHolds -checkpoint 0 -fpmem 48000 -queue-mem 150000 -config /work/formal/LeanP1AllHolds.cfg MCLeanP1All.tla  (cwd /work/formal)
+tla-mc: building a checker for MCLeanP1All (cache: /work/out/p2/cache-LeanP1AllHolds)
+tla-mc: built in 34.1s
+tla-mc: MCLeanP1All (31 variables, 0 symmetry permutations), 192 workers, generated engine; loaded in 0.003s
+progress: depth 16, 106693155 generated, 26584429 distinct (0 fingerprint spills), 9686416 on queue (0 on disk), 11.7s
+progress: depth 18, 239935249 generated, 59326902 distinct (0 fingerprint spills), 19087731 on queue (0 on disk), 26.7s
+progress: depth 19, 346107094 generated, 85730597 distinct (0 fingerprint spills), 26403695 on queue (0 on disk), 38.9s
+progress: depth 20, 490086882 generated, 121230716 distinct (0 fingerprint spills), 35500119 on queue (0 on disk), 55.8s
+progress: depth 21, 678429651 generated, 166452092 distinct (0 fingerprint spills), 45221376 on queue (0 on disk), 78.5s
+progress: depth 22, 910180432 generated, 220181894 distinct (0 fingerprint spills), 53729802 on queue (0 on disk), 106.4s
+progress: depth 23, 1175236439 generated, 279611211 distinct (0 fingerprint spills), 59429317 on queue (0 on disk), 137.8s
+progress: depth 24, 1457955778 generated, 341755906 distinct (0 fingerprint spills), 62144695 on queue (0 on disk), 171.8s
+progress: depth 25, 1745504192 generated, 405231093 distinct (0 fingerprint spills), 63475187 on queue (0 on disk), 206.6s
+progress: depth 26, 2034090646 generated, 470475697 distinct (0 fingerprint spills), 65244604 on queue (0 on disk), 242.5s
+progress: depth 27, 2326618480 generated, 537792953 distinct (0 fingerprint spills), 67317256 on queue (0 on disk), 280.2s
+progress: depth 28, 2621573418 generated, 604360447 distinct (0 fingerprint spills), 66567494 on queue (0 on disk), 319.3s
+progress: depth 29, 2901492883 generated, 663359617 distinct (0 fingerprint spills), 58999170 on queue (0 on disk), 356.8s
+progress: depth 30, 3135491495 generated, 707857916 distinct (0 fingerprint spills), 44498299 on queue (0 on disk), 388.8s
+progress: depth 31, 3300212794 generated, 735834578 distinct (0 fingerprint spills), 27976662 on queue (0 on disk), 411.9s
+progress: depth 32, 3396780802 generated, 750595912 distinct (0 fingerprint spills), 14761334 on queue (0 on disk), 425.7s
+progress: depth 35, 3473409980 generated, 760843390 distinct (0 fingerprint spills), 897735 on queue (0 on disk), 436.8s
+Model checking completed. No error has been found.
+3476764235 states generated, 761172620 distinct states found. Depth 42. Checked in 437.926s (1738132 distinct/s).

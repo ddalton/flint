@@ -8,26 +8,11 @@ EXTENDS LeanP1ProofM5C
 (* derived from h (NR5's reading of a conflict), or by an acknowledged      *)
 (* version with other bytes derived from h.  AN3 is FALSE (E38, E39): a     *)
 (* copy's acked successor contested away or renamed on, the copy reaped.    *)
-(* The claim as MCLeanP1M5D.tla states it over LeanP1.tla; `Derives` here   *)
-(* is LeanP1Anc's.                                                          *)
+(* The claim is LeanP1.tla's AN5 (since 2026-10-14); `Derives` here is     *)
+(* LeanP1Anc's.                                                             *)
 
-Chain(p, h) == {p, h[1]} \cup {q \in Paths : <<q, h>> \in acked}
-AccountedAt(p, h, Q) ==
-  \/ h \in live
-  \/ Preserved(h)
-  \/ \E q \in Q :
-       \/ doc[q] # Nil /\ Derives(doc[q], h)
-       \/ tomb[q] # Nil /\ Derives(tomb[q], h)
-       \/ \E s \in Writers : Gen(h) \in took[s][q] /\ w[s].local[q] # h
-       \/ \E d \in udel : d[1] = q /\ Derives(d[2], h)
-  \/ \E b \in acked : b[1] = p /\ Later(b[2], h)
-AccountedChain(p, h) ==
-  \/ AccountedAt(p, h, Chain(p, h))
-  \/ \E b \in acked : b[1] \in Chain(p, h) /\ Later(b[2], h)
-ConfAt(q, h) == \E c \in conflicts : c[1] = q /\ c[2] # Nil /\ Derives(c[2], h)
-Desc(h) == \E b \in acked : Derives(b[2], h) /\ Content(b[2]) # Content(h)
-AN5 == \A a \in acked : \/ AccountedChain(a[1], a[2]) \/ Desc(a[2])
-                        \/ \E q \in Chain(a[1], a[2]) : ConfAt(q, a[2])
+\* Chain, AccountedAt, AccountedChain, ConfAt, Desc and AN5 are LeanP1.tla's
+\* (2026-10-14), via LeanP1Anc.
 
 ------------------------------------------------------------------------------
 (* The strengthening (MCLeanP1M5D.tla's J5D, TLC-checked: E41).  An acked   *)

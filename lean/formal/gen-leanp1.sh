@@ -34,14 +34,20 @@ emit() { # <name> <spec> <invariants> <properties> <overrides...>
     echo "CHECK_DEADLOCK FALSE"
     echo "CONSTANTS"
     echo "  Nil = Nil"
+    [ -z "${XC:-}" ] || printf '%s\n' $XC | sed 's/^/  /; s/=/ = /'
     for k in $KEYS; do eval "echo \"  $k = \$c_$k\""; done
     local i
     for i in ${invs//,/ }; do echo "INVARIANT $i"; done
     for i in ${props//,/ }; do echo "PROPERTY $i"; done
   } > "LeanP1$name.cfg"
 }
-INV="TypeOK,Inv_CitationsLive,Inv_OneName,Inv_AckedNamed,Inv_OneHolder,Inv_NoRegress,Inv_ShortcutSound,Inv_ReaderFetches"
-PROPS="Prop_NoSilentRevert,Prop_DeleteSettles"
+# 2026-10-14: the restated claims.  AN5 replaces Inv_AckedNamed and NR5 (an
+# action property) Inv_NoRegress: both originals are FALSE once the gateway
+# may remove three times (results/2026-10-07-tlaps-m5/NOTES.txt E6, E8), and
+# both restatements are PROVED for every bound (m5c/, m5d/).  The originals
+# stay in LeanP1.tla as the record.
+INV="TypeOK,Inv_CitationsLive,Inv_OneName,AN5,Inv_OneHolder,Inv_ShortcutSound,Inv_ReaderFetches"
+PROPS="Prop_NoSilentRevert,Prop_DeleteSettles,NR5"
 Q1="Paths={p1} Free={} MaxBarriers=3 MaxRemovals=0 MaxRestarts=1 MaxSyncs=1 MaxCopies=2"
 # The shipped shape.
 emit Holds Spec "$INV" "$PROPS"
@@ -136,3 +142,35 @@ AL="Free={p2} MaxRemovals=0 MaxCopies=0 MaxFetchFails=1 MaxAges=0 Readers={B} Sc
 emit AllHolds Spec "$INV,Inv_ReaderSound" "$SPROPS" $AL
 emit ProbeReaderRescoped Spec TypeOK ProbeReaderRescoped $AL
 emit ProbeReaderPulledMidRescope Spec TypeOK ProbeReaderPulledMidRescope $AL
+# 2026-10-14: THREE REMOVALS AND THE RETIRE AGE.  Every world above has
+# MaxRemovals <= 1, where Inv_NoRegress and Inv_AckedNamed cannot fail; both
+# fail at three (E6, E8).  One writer (two committing writers at these bounds
+# grew past 125M at depth 12, W2Rem3, undecided).  7,435,952 and 77,160,864
+# distinct (E35, E41).
+R3="Writers={A} MaxRemovals=3 MaxCopies=0 MaxAges=0"
+emit Rem3 Spec "$INV" "$PROPS" $R3
+emit Rem3Age Spec "$INV" "$PROPS" $R3 MaxAges=1
+# The model mutations (gen-leanp1-mutants.py; the world's fourth column in
+# WORLDS-LeanP1.tsv names the mutant): a delete not acknowledged breaks NR5,
+# a delete that records nothing breaks AN5.
+emit MN2Rem3 Spec TypeOK NR5 $R3
+emit MA1Rem3Age Spec TypeOK,AN5 "" $R3 MaxAges=1
+# 2026-10-14: THE SCRIPTED TRACES (MCLeanP1Trace*.tla): hand-found behaviours
+# too deep for BFS (27-31 steps in worlds of billions), each step a Next step
+# (HIsNext).  Each must reach its end with the claims holding (HReach is the
+# end), and break what it was found against: E27, E31, E33 the old Edit base
+# (the EditBase mutant), E29 Inv_NoRegress, E38, E39 Inv_AckedNamed.
+TW="Writers={A,B} Readers={B} MaxUI=0 MaxRemovals=3 MaxCopies=0 MaxAges=0"
+for e in E27 E31 E33; do
+  XC="WA=A WB=B P1=p1 P2=p2" emit Trace$e HSpec TypeOK,AN5,HReach NR5,HIsNext $TW
+  XC="WA=A WB=B P1=p1 P2=p2" emit Trace${e}EditBase HSpec TypeOK NR5,HIsNext $TW
+done
+T29="Writers={A,B} Readers={B} MaxMint=4 MaxUI=1 MaxRemovals=3 MaxRestarts=1 MaxCopies=0 MaxAges=0"
+XC="WA=A WB=B P1=p1 P2=p2" emit TraceE29 HSpec TypeOK,AN5,HReach NR5,HIsNext $T29
+XC="WA=A WB=B P1=p1 P2=p2" emit TraceE29Old HSpec TypeOK,Inv_NoRegress HIsNext $T29
+T38="Writers={A} MaxMint=5 MaxUI=2 MaxRemovals=1 MaxBarriers=3 MaxRestarts=1 MaxCopies=1 MaxAges=1 MaxFetchFails=1"
+XC="WA=A P1=p1 P2=p2" emit TraceE38 HSpec TypeOK,AN5,HReach NR5,HIsNext $T38
+XC="WA=A P1=p1 P2=p2" emit TraceE38Old HSpec TypeOK,Inv_AckedNamed HIsNext $T38
+T39="Paths={p1,p2,p3} Free={p2,p3} Writers={A} MaxMint=6 MaxUI=3 MaxRemovals=2 MaxBarriers=3 MaxRestarts=1 MaxCopies=1 MaxAges=1 MaxFetchFails=1"
+XC="WA=A P1=p1 P2=p2 P3=p3" emit TraceE39 HSpec TypeOK,AN5,HReach NR5,HIsNext $T39
+XC="WA=A P1=p1 P2=p2 P3=p3" emit TraceE39Old HSpec TypeOK,Inv_AckedNamed HIsNext $T39

@@ -1,0 +1,59 @@
+LeanP1 gate on the restated claims (AN5, NR5), EC2, 2026-10-14
+==============================================================
+Module: lean/formal/LeanP1.tla md5 6063c024 (the payload in/formal.tgz is
+lean/formal at that state; its LeanP1.tla has the same md5).  Checker:
+tla-mc 0.1.2 (crates.io), -compile, on one c8g.48xlarge spot (us-west-1c,
+192 vCPU, 371 GB, 1 TB gp3), 16:52Z-18:50Z.  Runner: lean/formal/leanp1-gate.py
+(in/runner.sh; then in/p2b.sh, which replaced runner.sh's phase 2 and
+in/live.sh, both sent by SSM, as below); expectations: WORLDS-LeanP1.tsv,
+written before any run.
+
+RESULT: 68 of 69 worlds as expected, 0 mismatch -- 12 hold, 54 fire
+(mutations, probes, the two model mutants, twelve scripted traces), 2
+recorded.  The 69th, LeanP1LiveHolds, was stopped undecided and is decided
+by the TLAPS proof L1 instead (results/2026-10-14-tlaps-live/).
+
+Phase 1 (out/phase1.log, out/p1/): every world but the seven large, 24 at a
+time, 4 workers each, 2400 s cap.  62 run, 62 as expected (8 OK-HOLDS, 54
+OK-FIRES), 16:54-17:25Z.  The slowest was VerifyOff (fires
+Inv_CitationsLive at 149,162,504 distinct, depth 18, 1875 s).
+
+Phase 2 (out/phase2.log, out/p2/): the six large, one at a time.  Started
+at 136 workers beside P3Age; P3Age finished first, so it was restarted at
+192 workers at 17:28:50Z (the user's call; Holds1p3b lost 3 min; the
+136-worker loop's log, out/phase2-136w-stopped.log, has one line: the
+killed Holds1p3b, 196 s in, no verdict, which the runner prints as MISMATCH).
+  LeanP1Holds1p3b                    OK-HOLDS     exp=HOLDS | 1912419500 states generated, 458940173 distinct states found. Depth 46 | 243s
+  LeanP1AllHolds                     OK-HOLDS     exp=HOLDS | 3476764235 states generated, 761172620 distinct states found. Depth 42 | 472s
+  LeanP1Holds                        OK-HOLDS     exp=HOLDS | 6719341912 states generated, 1656295238 distinct states found. Depth 39 | 817s
+  LeanP1DeleteOverrideOff            OK-HOLDS     exp=HOLDS | 6824752483 states generated, 1679526957 distinct states found. Depth 39 | 921s
+  LeanP1NoConvergence                RECORDED     exp=RECORD | 2675823720 states generated, 651437949 distinct states found. Depth 46 | 321s
+  LeanP1CollectorGreedy              RECORDED     exp=RECORD | 6719341912 states generated, 1656295238 distinct states found. Depth 39 | 818s
+  The 2026-10-04 gate's counts differ (Holds 1,669,205,616; Holds1p3b
+  461,094,969; AllHolds 755,918,948; DeleteOverrideOff 1,692,578,345;
+  NoConvergence 652,173,065) because the model changed since: a commit's
+  deletes are acknowledged (udel), an edit's provenance base.
+  CollectorGreedy equals Holds exactly, at every depth: CollectorSparesCited
+  is read only where RetireAge discards it (as on 2026-10-05).
+
+P3Age (out/P3Age-AN5-NR5.out, in/P3Age-AN5-NR5.cfg): three paths, three
+removals, the retire age; TypeOK, AN5, NR5.  HOLDS: 3,631,731,585 generated,
+1,080,412,937 distinct, depth 32, 1134.6 s at 48 workers.  (E20 checked the
+same world for NR3/AN3 on the older model: 1,090,176,224.)
+
+LeanP1LiveHolds (out/live/): Prop_UISaveCompletes under LSpec at Holds's
+bounds, 192 workers, from 18:28:42Z.  tla-mc checks liveness as it goes
+(stop-the-world passes over the expanded states).  At 173M distinct (depth
+19) the checker held 74.6 GB at 116M -- ~640 bytes a state against Holds's
+~150 for safety -- so the 1.66B states would need ~1 TB.  STOPPED by the
+user at 18:44Z (the runner's "MISMATCH" line is the killed run, no
+verdict).  Decided by TLAPS: LeanP1ProofL1.tla, THEOREM UISaveCompletes,
+for every bound.
+
+Trap: the runner's 60 s `aws s3 sync` of out/ uploaded tla-mc's metadirs
+(queue spills; 175 GB by the end).  Only the logs were kept here; next time
+exclude meta-* and cache-*.
+
+Torn down 18:50Z: instance terminated, spot request cancelled, bucket and
+its inline policy deleted; zero instances, open spot requests and volumes
+in us-east-1, us-east-2, us-west-1, us-west-2.

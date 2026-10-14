@@ -24,16 +24,56 @@ shape before step 5 (the inbox cell, the writer-local queue, citation
 repairs) and is the record of what was checked on it.
 
 ```
-./gen-leanp1.sh                                   # the 28 worlds' cfgs
-results/2026-09-25-leanp1-gate/run-leanp1.sh      # the gate (a big box)
+./gen-leanp1.sh                                   # the worlds' cfgs (WORLDS-LeanP1.tsv)
+python3 leanp1-gate.py --compile --jobs 2         # the gate on tla-mc (--only/--skip a subset)
 ./trace/trace-check-core.sh                       # the code's traces against it
 ```
 
+**The claims are proved (TLAPS, 2026-10-14)** for every path count, writer
+count and bound under the shipped rules: `results/2026-10-07-tlaps-m5/`
+(NOTES.txt, the m5c/, m5d/ and m6/ modules) over the split proof of
+`LeanP1Proof.tla`, and the liveness claim in
+`results/2026-10-14-tlaps-live/LeanP1ProofL1.tla` — 19,235 obligations in
+all (`../SAFETY.md` §3.3). The theorems: `TypeInvariant`
+(`Spec => []TypeOK`), `OneHolder`, `DeleteSettles`, `NarrowNeverDeletes`,
+`CitationsLive`, `OneName`, `ShortcutSound`, `ReaderSound`,
+`ReaderFetches`, `NoSilentRevert`, `NoRegress` (NR5), `AckedNamed` (AN5),
+`AgentWorkKept`, `ScopeRespected`, and `UISaveCompletes`
+(`LSpec => Prop_UISaveCompletes`). `LeanP1Proof.tla` is generated
+(`results/2026-10-07-tlaps-m5/gen-proof.py`, which chains the earlier
+milestones' generators) and split by `split-proof.py`; edit the
+generators, never the output. Two of the original claims were FALSE once the gateway
+may remove three times, and stay in `LeanP1.tla` as the record:
+`Inv_AckedNamed` (restated as `AN5`) and `Inv_NoRegress` (restated as the
+action property `NR5`). The gate checks the restatements, and since
+2026-10-14 also:
+- `Rem3` and `Rem3Age`: three removals, with and without the retire age —
+  the worlds where the originals fail;
+- the model mutations `MN2Rem3` (a delete not acknowledged: NR5 must break)
+  and `MA1Rem3Age` (a delete recording nothing: AN5 must break), built by
+  `gen-leanp1-mutants.py` in a scratch copy (WORLDS-LeanP1.tsv's fourth
+  column), never over the module;
+- the scripted traces `MCLeanP1Trace*.tla`: hand-found behaviours too deep
+  for BFS (26-31 steps in worlds of billions), each step a Next step. Each
+  must reach its end with the claims holding (`HReach`), and break what it
+  was found against: the old Edit base (`EditBase` mutant) for E27, E31,
+  E33; `Inv_NoRegress` for E29; `Inv_AckedNamed` for E38, E39.
+
 Expectations were written before any run (`WORLDS-LeanP1.tsv`). The trace
-check accepts 41/41 (`results/2026-09-25-tracecore-on-leanp1/`). **The
-gate has not passed:** its first run (2026-09-25) reports
-`Inv_ShortcutSound` violated in both shipped worlds (`LeanP1Holds`,
-`LeanP1Holds1p3b`).
+check accepts 41/41 (`results/2026-09-25-tracecore-on-leanp1/`). **The gate
+passed 2026-10-14 on the restated claims** (`results/2026-10-14-leanp1-gate-ec2/`,
+SUMMARY.txt): 68 of 69 worlds as expected — 12 hold, 54 fire, 2 recorded —
+and `LeanP1LiveHolds`, which no checker has finished (Holds's 1.66B states
+with a liveness graph), is decided by the proof instead. It passed first on
+2026-10-04 (49/49, `results/2026-10-04-leanp1-gate/`). Its first run
+(2026-09-25) had reported `Inv_ShortcutSound` violated in both shipped
+worlds; that was settled before 2026-10-04.
+
+The runner's large worlds need a big box: on one c8g.48xlarge (192 vCPU,
+371 GB) phase 1 (62 worlds, 24 at a time, 4 workers each) took 31 min and
+the six large worlds 60 min at 192 workers. Its `--out` holds tla-mc's
+metadirs while a world runs (tens of GB each): a sync of it must exclude
+`meta-*` and `cache-*`.
 
 ## Running
 

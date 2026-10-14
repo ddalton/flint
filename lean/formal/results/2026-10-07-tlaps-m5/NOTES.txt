@@ -479,3 +479,39 @@ CODE CHECK (2026-10-14, docs/plans/lean-model-code-action-items-2026-10-14.md):
     (merge's `overridden`, then step 6's commit-surfaced-foreign record and
     preserved copy, barrier.rs:1188-1209).  A file re-created while its upload
     is pending derives from the snapshot, which step 7 makes the baseline.
+
+2026-10-14: the gate on the restated claims; M0 made robust; L1.
+GATE CHANGES (owner's approval): NR5 and AN5 (with Chain, AccountedAt,
+    AccountedChain, ConfAt, Desc, NamedAt, BackR5, Takes) moved into
+    LeanP1.tla (md5 6063c024); Accounted, Inv_AckedNamed, Inv_NoRegress stay,
+    marked SUPERSEDED.  LeanP1Anc.tla regenerated (make-anc.py, 8edd660d);
+    m5c/ and m5d/ now read the claims from it.  gen-leanp1.sh: 15 cfgs swap
+    the originals for AN5, 8 gain NR5; new worlds Rem3, Rem3Age, MN2Rem3,
+    MA1Rem3Age (mutants from gen-leanp1-mutants.py, in a scratch copy), and
+    the scripted traces as gate worlds (lean/formal/MCLeanP1Trace*.tla,
+    copies of MCLeanP1M5H*.tla with EXTENDS LeanP1).  WORLDS-LeanP1.tsv: 69
+    rows, a module and a mutant column.  Runner: lean/formal/leanp1-gate.py.
+HREACH CORRECTION: the E27, E31, E33 scripts' HReach end markers were one
+    index past the script's reachable end (its last alternatives land one
+    step early), so E35's runs never hit them and only showed the take was
+    reached.  The gate copies use k < 26, 27, 27; each now reaches HReach.
+GATE RESULT (EC2, ../2026-10-14-leanp1-gate-ec2/SUMMARY.txt): 68/69 as
+    expected, 0 mismatch; P3Age AN5+NR5 HOLD 1,080,412,937; LiveHolds
+    stopped undecided (liveness graph ~640 B a state), decided by L1.
+M0 MADE ROBUST.  The full record (run-record-full.sh, box) lost 4/1921 M0
+    obligations to timeouts (lines 591, 975, 1081, 1152, all `Minted' BY ...,
+    MintedWrite`), and a clean re-record lost the same 4.  Alone, 975 and 1152
+    prove in 3 s (load); 591 and 1081 time out at 200 s against the NEW
+    LeanP1Anc and prove in 3 s against the old (47ece26b) -- and also with
+    either new block (AN5's, NR5's) deleted.  Nothing in M0 uses those
+    definitions: the extra definitions perturb how Z3 picks MintedWrite's R.
+    FIX (../2026-10-06-tlaps-typeok/gen-proof.py, the generic step template
+    and RescopeSecond's hard-coded step): `Minted' BY ... DEF Minted, Opt`
+    instead of the lemma.  LeanP1Proof.tla regenerated: exactly 14 steps
+    differ; split, only M0 changes (M1..M5B byte-identical).  RECORD
+    (--cleanfp, --stretch 12, --threads 3, under load): All 1907 obligations
+    proved (14 fewer: the lemma applications), 1662 s, 4.2 GB
+    (out/m0fix/record-M0.out; the before-fix runs beside it).
+    Whole proof now: 19,222 - 1,921 + 1,907 + L1 27 = 19,235.
+L1 PROVED (../2026-10-14-tlaps-live/NOTES.txt): LSpec => Prop_UISaveCompletes,
+    27 obligations; control GatewayIgnoresLease: exactly 1 fails.

@@ -1,0 +1,12 @@
+LeanP1Holds1p3b                    OK-HOLDS     exp=HOLDS                        | No error has been found                                    | 1912419500 states generated, 458940173 distinct states found. Depth 46 | 243s
+leanp1 gate: 1 world(s) run, 1 as expected, 0 not: -
+LeanP1AllHolds                     OK-HOLDS     exp=HOLDS                        | No error has been found                                    | 3476764235 states generated, 761172620 distinct states found. Depth 42 | 472s
+leanp1 gate: 1 world(s) run, 1 as expected, 0 not: -
+LeanP1Holds                        OK-HOLDS     exp=HOLDS                        | No error has been found                                    | 6719341912 states generated, 1656295238 distinct states found. Depth 39 | 817s
+leanp1 gate: 1 world(s) run, 1 as expected, 0 not: -
+LeanP1DeleteOverrideOff            OK-HOLDS     exp=HOLDS                        | No error has been found                                    | 6824752483 states generated, 1679526957 distinct states found. Depth 39 | 921s
+leanp1 gate: 1 world(s) run, 1 as expected, 0 not: -
+LeanP1NoConvergence                RECORDED     exp=RECORD                       | No error has been found                                    | 2675823720 states generated, 651437949 distinct states found. Depth 46 | 321s
+leanp1 gate: 1 world(s) run, 1 as expected, 0 not: -
+LeanP1CollectorGreedy              RECORDED     exp=RECORD                       | No error has been found                                    | 6719341912 states generated, 1656295238 distinct states found. Depth 39 | 818s
+leanp1 gate: 1 world(s) run, 1 as expected, 0 not: -

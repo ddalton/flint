@@ -1,0 +1,14 @@
+START 2026-10-14T16:54:13Z tla-mc 0.1.2 192 cpus; LeanP1.tla 6063c024
+P3Age-AN5-NR5 No error has been found 1080412937 distinct states found. Depth 32 
+PHASE1 rc=0 2026-10-14T17:25:29Z leanp1 gate: 62 world(s) run, 62 as expected, 0 not: -
+PHASE2 RESTART 192w 2026-10-14T17:28:50Z
+PHASE2 LeanP1Holds1p3b rc=0 2026-10-14T17:32:53Z LeanP1Holds1p3b                    OK-HOLDS     exp=HOLDS                        | No error has been found                                    | 1912419500 states generated, 458940173 distinct states found. Depth 46 | 243s
+PHASE2 LeanP1AllHolds rc=0 2026-10-14T17:40:45Z LeanP1AllHolds                     OK-HOLDS     exp=HOLDS                        | No error has been found                                    | 3476764235 states generated, 761172620 distinct states found. Depth 42 | 472s
+PHASE2 LeanP1Holds rc=0 2026-10-14T17:54:22Z LeanP1Holds                        OK-HOLDS     exp=HOLDS                        | No error has been found                                    | 6719341912 states generated, 1656295238 distinct states found. Depth 39 | 817s
+PHASE2 LeanP1DeleteOverrideOff rc=0 2026-10-14T18:09:43Z LeanP1DeleteOverrideOff            OK-HOLDS     exp=HOLDS                        | No error has been found                                    | 6824752483 states generated, 1679526957 distinct states found. Depth 39 | 921s
+PHASE2 LeanP1NoConvergence rc=0 2026-10-14T18:15:03Z LeanP1NoConvergence                RECORDED     exp=RECORD                       | No error has been found                                    | 2675823720 states generated, 651437949 distinct states found. Depth 46 | 321s
+PHASE2 LeanP1CollectorGreedy rc=0 2026-10-14T18:28:42Z LeanP1CollectorGreedy              RECORDED     exp=RECORD                       | No error has been found                                    | 6719341912 states generated, 1656295238 distinct states found. Depth 39 | 818s
+LIVE START 2026-10-14T18:28:42Z
+LIVE STOPPED by user 2026-10-14T18:44:00Z: decided by TLAPS (LeanP1ProofL1, UISaveCompletes)
+LIVE rc=1 2026-10-14T18:44:01Z LeanP1LiveHolds                    MISMATCH     exp=HOLDS                        |                                                            |  | 920s
+DONE-LIVE 2026-10-14T18:44:01Z

@@ -1,0 +1,12 @@
+# tla-mc -compile -workers 4 -metadir /work/out/p1/meta-LeanP1Rem3 -checkpoint 0 -fpmem 2000 -queue-mem 6000 -config /work/formal/LeanP1Rem3.cfg LeanP1.tla  (cwd /work/formal)
+tla-mc: building a checker for LeanP1 (cache: /work/out/p1/cache-LeanP1Rem3)
+tla-mc: built in 38.0s
+tla-mc: LeanP1 (31 variables, 0 symmetry permutations), 4 workers, generated engine; loaded in 0.003s
+progress: depth 14, 3726186 generated, 1447942 distinct (0 fingerprint spills), 500467 on queue (0 on disk), 12.1s
+progress: depth 16, 7396998 generated, 2724286 distinct (0 fingerprint spills), 666872 on queue (0 on disk), 25.1s
+progress: depth 18, 11834000 generated, 4195927 distinct (0 fingerprint spills), 758190 on queue (0 on disk), 42.0s
+progress: depth 20, 16048149 generated, 5517367 distinct (0 fingerprint spills), 595721 on queue (0 on disk), 57.6s
+progress: depth 22, 18699158 generated, 6369077 distinct (0 fingerprint spills), 401888 on queue (0 on disk), 67.7s
+progress: depth 25, 21689339 generated, 7369475 distinct (0 fingerprint spills), 203518 on queue (0 on disk), 81.1s
+Model checking completed. No error has been found.
+22110887 states generated, 7435952 distinct states found. Depth 28. Checked in 82.991s (89599 distinct/s).

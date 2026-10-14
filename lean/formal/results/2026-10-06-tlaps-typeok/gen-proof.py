@@ -411,7 +411,10 @@ def step(name, sig, binders, pick, rec, rec_defs, other_primed, unch, unch_defs,
     st += f'<1>{n}. {r2}\n  BY <1>0, <1>c, <1>1, <1>2, {cc}WriterFields DEF {reads_defs}\n'; rd2 = n; n += 1
     rd = f'{rd1}, <1>{rd2}'
     st += f'<1>{n}. /\\ minted \\subseteq minted\' /\\ \\A q \\in Paths : doc\'[q] \\in Opt(minted\') /\\ \\A q \\in Paths : gw\'[q] \\in Opt(minted\')\n  BY <1>c, <1>1, <1>2 DEF Minted, Opt\n'; ev = n; n += 1
-    st += f'<1>{n}. Minted\' BY <1>c, <1>{wt}, <1>{rd}, <1>{ev}, MintedWrite\n'; mi = n; n += 1
+    # DEF, not MintedWrite: SMT's choice of R was sensitive to the module's other
+    # definitions (2026-10-14: Scan and two more timed out at 200 s once AN5/NR5
+    # were added to LeanP1Anc; the direct form proves in 3 s).
+    st += f'<1>{n}. Minted\' BY <1>c, <1>{wt}, <1>{rd}, <1>{ev} DEF Minted, Opt\n'; mi = n; n += 1
     st += f'<1>. QED BY <1>{tk}, <1>{gh}, <1>{mi} DEF IndTypeOK\n\n'
     return st
 
@@ -829,7 +832,7 @@ BODY += r'''LEMMA RescopeSecond_TypeOK ==
   BY <1>0, <1>c, <1>2, <1>5 DEF RescopeSecondW, Minted, Opt
 <1>12a. /\ minted \subseteq minted' /\ \A q \in Paths : doc'[q] \in Opt(minted') /\ \A q \in Paths : gw'[q] \in Opt(minted')
   BY <1>c, <1>2 DEF Minted, Opt
-<1>13. Minted' BY <1>c, <1>8, <1>12, <1>12a, MintedWrite
+<1>13. Minted' BY <1>c, <1>8, <1>12, <1>12a DEF Minted, Opt
 <1>. QED BY <1>10, <1>11, <1>13 DEF IndTypeOK
 
 '''

@@ -48,6 +48,22 @@ LeanP1ReaderScopeHolds	HOLDS
 LeanP1ReaderOwedIgnored	Inv_ReaderSound
 LeanP1ProbeReaderPulled	ProbeReaderPulled
 LeanP1ProbeReaderSkipped	ProbeReaderSkipped
-LeanP1AllHolds	HOLDS
-LeanP1ProbeReaderRescoped	ProbeReaderRescoped
-LeanP1ProbeReaderPulledMidRescope	ProbeReaderPulledMidRescope
+LeanP1AllHolds	HOLDS	MCLeanP1All.tla
+LeanP1ProbeReaderRescoped	ProbeReaderRescoped	MCLeanP1All.tla
+LeanP1ProbeReaderPulledMidRescope	ProbeReaderPulledMidRescope	MCLeanP1All.tla
+LeanP1Rem3	HOLDS
+LeanP1Rem3Age	HOLDS
+LeanP1MN2Rem3	NR5	LeanP1.tla	MN2
+LeanP1MA1Rem3Age	AN5	LeanP1.tla	MA1
+LeanP1TraceE27	HReach	MCLeanP1TraceE27.tla
+LeanP1TraceE27EditBase	NR5	MCLeanP1TraceE27.tla	EditBase
+LeanP1TraceE31	HReach	MCLeanP1TraceE31.tla
+LeanP1TraceE31EditBase	NR5	MCLeanP1TraceE31.tla	EditBase
+LeanP1TraceE33	HReach	MCLeanP1TraceE33.tla
+LeanP1TraceE33EditBase	NR5	MCLeanP1TraceE33.tla	EditBase
+LeanP1TraceE29	HReach	MCLeanP1TraceE29.tla
+LeanP1TraceE29Old	Inv_NoRegress	MCLeanP1TraceE29.tla
+LeanP1TraceE38	HReach	MCLeanP1TraceE38.tla
+LeanP1TraceE38Old	Inv_AckedNamed	MCLeanP1TraceE38.tla
+LeanP1TraceE39	HReach	MCLeanP1TraceE39.tla
+LeanP1TraceE39Old	Inv_AckedNamed	MCLeanP1TraceE39.tla

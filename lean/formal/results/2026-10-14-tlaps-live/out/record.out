@@ -1,0 +1,840 @@
+RECORD L1 2026-10-14T18:42:44Z tlapm bfa9468
+md5: 8edd660d9bbfb5c3d5366385f4399190  LeanP1Anc.tla 049fcdd6ae11ae3ff916bc81644e257b  LeanP1ProofM0.tla 3c9cf8184c4214b629d67bbc7bf812db  LeanP1ProofL1.tla 
+cmd: tlapm --toolbox 0 0 --cleanfp --stretch 12 --threads 2 -k LeanP1ProofL1.tla
+
+\* TLAPM version bfa9468
+\* launched at 2026-10-14 18:42:44 with command line:
+\* /mnt/nvme/tlaps/unpack/tlapm/bin/tlapm --toolbox 0 0 --cleanfp --stretch 12 --threads 2 -k LeanP1ProofL1.tla
+
+(* fingerprints file ".tlacache/LeanP1ProofL1.tlaps/fingerprints" removed *)
+@!!BEGIN
+@!!type:obligation
+@!!id:1
+@!!loc:37:1:37:3
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:2
+@!!loc:44:10:44:12
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:3
+@!!loc:44:13:44:17
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:4
+@!!loc:44:19:44:23
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:5
+@!!loc:44:25:44:38
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:6
+@!!loc:42:18:42:20
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:7
+@!!loc:42:21:42:33
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:8
+@!!loc:43:35:43:37
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:9
+@!!loc:62:10:62:12
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:10
+@!!loc:62:13:62:17
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:11
+@!!loc:62:19:62:23
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:12
+@!!loc:62:25:62:29
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:13
+@!!loc:62:31:62:35
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:14
+@!!loc:62:37:62:41
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:15
+@!!loc:62:43:62:47
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:16
+@!!loc:62:49:62:52
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:17
+@!!loc:50:6:50:8
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:18
+@!!loc:54:3:54:10
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:19
+@!!loc:56:3:56:5
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:20
+@!!loc:56:6:56:13
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:21
+@!!loc:58:3:58:5
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:22
+@!!loc:58:6:58:16
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:23
+@!!loc:59:29:59:31
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:24
+@!!loc:60:30:60:32
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:25
+@!!loc:61:41:61:43
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:26
+@!!loc:61:44:61:57
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:27
+@!!loc:61:59:61:62
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligationsnumber
+@!!count:27
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:1
+@!!loc:37:1:37:3
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.8 (1%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:3
+@!!loc:44:13:44:17
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:4
+@!!loc:44:19:44:23
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:5
+@!!loc:44:25:44:38
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:2
+@!!loc:44:10:44:12
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.9 (2%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:7
+@!!loc:42:21:42:33
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:6
+@!!loc:42:18:42:20
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.9 (2%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:8
+@!!loc:43:35:43:37
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.3 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:10
+@!!loc:62:13:62:17
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:11
+@!!loc:62:19:62:23
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:12
+@!!loc:62:25:62:29
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:13
+@!!loc:62:31:62:35
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:14
+@!!loc:62:37:62:41
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:15
+@!!loc:62:43:62:47
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:16
+@!!loc:62:49:62:52
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:9
+@!!loc:62:10:62:12
+@!!status:proved
+@!!prover:ls4
+@!!meth:time-limit: 120; time-used: 1.4 (1%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:17
+@!!loc:50:6:50:8
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.3 (1%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:18
+@!!loc:54:3:54:10
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.3 (1%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:20
+@!!loc:56:6:56:13
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:19
+@!!loc:56:3:56:5
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.5 (1%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:22
+@!!loc:58:6:58:16
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:23
+@!!loc:59:29:59:31
+@!!status:failed
+@!!prover:smt
+@!!meth:time-limit: 60
+@!!reason:Backend.Smtlib: Unsupported expression
+@!!already:false
+@!!obl:
+ASSUME NEW CONSTANT Nil,
+       NEW CONSTANT Paths,
+       NEW CONSTANT Free,
+       NEW CONSTANT Writers,
+       NEW CONSTANT MaxMint,
+       NEW CONSTANT MaxUI,
+       NEW CONSTANT MaxRemovals,
+       NEW CONSTANT MaxBarriers,
+       NEW CONSTANT MaxRestarts,
+       NEW CONSTANT MaxSyncs,
+       NEW CONSTANT MaxAges,
+       NEW CONSTANT MaxCopies,
+       NEW CONSTANT CommitSurfacesForeign,
+       NEW CONSTANT CommitVerifiesUploads,
+       NEW CONSTANT SweepUnderLease,
+       NEW CONSTANT CollectorSparesCited,
+       NEW CONSTANT CommitRecordsDeleteOverride,
+       NEW CONSTANT DeleteWinsPreserved,
+       NEW CONSTANT ContentConverges,
+       NEW CONSTANT RecheckSkipped,
+       NEW CONSTANT CommitAdvanceGuarded,
+       NEW CONSTANT RetireAge,
+       NEW CONSTANT GatewayIgnoresLease,
+       NEW CONSTANT GatewayJudgesRead,
+       NEW CONSTANT GatewaySweepGrace,
+       NEW CONSTANT RenameAtomic,
+       NEW CONSTANT Scopes,
+       NEW CONSTANT MaxRescopes,
+       NEW CONSTANT ConsumeHonorsScope,
+       NEW CONSTANT RescopeUnciteFirst,
+       NEW CONSTANT RescopeKeepsDirty,
+       NEW CONSTANT WidenKeepsLocal,
+       NEW CONSTANT UnlinkChecksBytes,
+       NEW CONSTANT MaxFetchFails,
+       NEW CONSTANT ConsumeKeepsLeft,
+       NEW CONSTANT SyncKeepsLeft,
+       NEW CONSTANT Readers,
+       NEW CONSTANT ReaderRechecksOwed,
+       NEW VARIABLE live,
+       NEW VARIABLE minted,
+       NEW VARIABLE doc,
+       NEW VARIABLE seq,
+       NEW VARIABLE tomb,
+       NEW VARIABLE base,
+       NEW VARIABLE acked,
+       NEW VARIABLE conflicts,
+       NEW VARIABLE holder,
+       NEW VARIABLE nextGen,
+       NEW VARIABLE ui,
+       NEW VARIABLE reqs,
+       NEW VARIABLE barriers,
+       NEW VARIABLE w,
+       NEW VARIABLE took,
+       NEW VARIABLE gw,
+       NEW VARIABLE mv,
+       NEW VARIABLE udel,
+       NEW VARIABLE restarts,
+       NEW VARIABLE syncs,
+       NEW VARIABLE regressed,
+       NEW VARIABLE rescopes,
+       NEW VARIABLE fails,
+       NEW VARIABLE upped,
+       NEW VARIABLE copies,
+       NEW VARIABLE orig,
+       NEW VARIABLE retiring,
+       NEW VARIABLE aged,
+       NEW VARIABLE ages,
+       NEW VARIABLE rdoc,
+       NEW VARIABLE rlag,
+       NEW VARIABLE anc,
+       NEW CONSTANT p \in Paths
+PROVE  Spec
+       /\ (\A p_1 \in Paths :
+              WF_(vars) (GCas(p_1) /\ TookUpdate /\ RetUpdate /\ AncUpdate
+                         /\ UNCHANGED <<aged, ages, rdoc, rlag>>))
+       => Spec
+          /\ (\A q \in Paths :
+                 WF_(vars) (GCas(q) /\ TookUpdate /\ RetUpdate /\ AncUpdate
+                            /\ UNCHANGED <<aged, ages, rdoc, rlag>>))
+
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:23
+@!!loc:59:29:59:31
+@!!status:failed
+@!!prover:zenon
+@!!meth:time-limit: 120
+@!!reason:Zenon: unsupported operator Fair
+@!!already:false
+@!!obl:
+ASSUME NEW CONSTANT Nil,
+       NEW CONSTANT Paths,
+       NEW CONSTANT Free,
+       NEW CONSTANT Writers,
+       NEW CONSTANT MaxMint,
+       NEW CONSTANT MaxUI,
+       NEW CONSTANT MaxRemovals,
+       NEW CONSTANT MaxBarriers,
+       NEW CONSTANT MaxRestarts,
+       NEW CONSTANT MaxSyncs,
+       NEW CONSTANT MaxAges,
+       NEW CONSTANT MaxCopies,
+       NEW CONSTANT CommitSurfacesForeign,
+       NEW CONSTANT CommitVerifiesUploads,
+       NEW CONSTANT SweepUnderLease,
+       NEW CONSTANT CollectorSparesCited,
+       NEW CONSTANT CommitRecordsDeleteOverride,
+       NEW CONSTANT DeleteWinsPreserved,
+       NEW CONSTANT ContentConverges,
+       NEW CONSTANT RecheckSkipped,
+       NEW CONSTANT CommitAdvanceGuarded,
+       NEW CONSTANT RetireAge,
+       NEW CONSTANT GatewayIgnoresLease,
+       NEW CONSTANT GatewayJudgesRead,
+       NEW CONSTANT GatewaySweepGrace,
+       NEW CONSTANT RenameAtomic,
+       NEW CONSTANT Scopes,
+       NEW CONSTANT MaxRescopes,
+       NEW CONSTANT ConsumeHonorsScope,
+       NEW CONSTANT RescopeUnciteFirst,
+       NEW CONSTANT RescopeKeepsDirty,
+       NEW CONSTANT WidenKeepsLocal,
+       NEW CONSTANT UnlinkChecksBytes,
+       NEW CONSTANT MaxFetchFails,
+       NEW CONSTANT ConsumeKeepsLeft,
+       NEW CONSTANT SyncKeepsLeft,
+       NEW CONSTANT Readers,
+       NEW CONSTANT ReaderRechecksOwed,
+       NEW VARIABLE live,
+       NEW VARIABLE minted,
+       NEW VARIABLE doc,
+       NEW VARIABLE seq,
+       NEW VARIABLE tomb,
+       NEW VARIABLE base,
+       NEW VARIABLE acked,
+       NEW VARIABLE conflicts,
+       NEW VARIABLE holder,
+       NEW VARIABLE nextGen,
+       NEW VARIABLE ui,
+       NEW VARIABLE reqs,
+       NEW VARIABLE barriers,
+       NEW VARIABLE w,
+       NEW VARIABLE took,
+       NEW VARIABLE gw,
+       NEW VARIABLE mv,
+       NEW VARIABLE udel,
+       NEW VARIABLE restarts,
+       NEW VARIABLE syncs,
+       NEW VARIABLE regressed,
+       NEW VARIABLE rescopes,
+       NEW VARIABLE fails,
+       NEW VARIABLE upped,
+       NEW VARIABLE copies,
+       NEW VARIABLE orig,
+       NEW VARIABLE retiring,
+       NEW VARIABLE aged,
+       NEW VARIABLE ages,
+       NEW VARIABLE rdoc,
+       NEW VARIABLE rlag,
+       NEW VARIABLE anc,
+       NEW CONSTANT p \in Paths
+PROVE  Spec
+       /\ (\A p_1 \in Paths :
+              WF_(vars) (GCas(p_1) /\ TookUpdate /\ RetUpdate /\ AncUpdate
+                         /\ UNCHANGED <<aged, ages, rdoc, rlag>>))
+       => Spec
+          /\ (\A q \in Paths :
+                 WF_(vars) (GCas(q) /\ TookUpdate /\ RetUpdate /\ AncUpdate
+                            /\ UNCHANGED <<aged, ages, rdoc, rlag>>))
+
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:21
+@!!loc:58:3:58:5
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.6 (1%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:24
+@!!loc:60:30:60:32
+@!!status:failed
+@!!prover:smt
+@!!meth:time-limit: 60
+@!!reason:Backend.Smtlib: Unsupported expression
+@!!already:false
+@!!obl:
+ASSUME NEW CONSTANT Nil,
+       NEW CONSTANT Paths,
+       NEW CONSTANT Free,
+       NEW CONSTANT Writers,
+       NEW CONSTANT MaxMint,
+       NEW CONSTANT MaxUI,
+       NEW CONSTANT MaxRemovals,
+       NEW CONSTANT MaxBarriers,
+       NEW CONSTANT MaxRestarts,
+       NEW CONSTANT MaxSyncs,
+       NEW CONSTANT MaxAges,
+       NEW CONSTANT MaxCopies,
+       NEW CONSTANT CommitSurfacesForeign,
+       NEW CONSTANT CommitVerifiesUploads,
+       NEW CONSTANT SweepUnderLease,
+       NEW CONSTANT CollectorSparesCited,
+       NEW CONSTANT CommitRecordsDeleteOverride,
+       NEW CONSTANT DeleteWinsPreserved,
+       NEW CONSTANT ContentConverges,
+       NEW CONSTANT RecheckSkipped,
+       NEW CONSTANT CommitAdvanceGuarded,
+       NEW CONSTANT RetireAge,
+       NEW CONSTANT GatewayIgnoresLease,
+       NEW CONSTANT GatewayJudgesRead,
+       NEW CONSTANT GatewaySweepGrace,
+       NEW CONSTANT RenameAtomic,
+       NEW CONSTANT Scopes,
+       NEW CONSTANT MaxRescopes,
+       NEW CONSTANT ConsumeHonorsScope,
+       NEW CONSTANT RescopeUnciteFirst,
+       NEW CONSTANT RescopeKeepsDirty,
+       NEW CONSTANT WidenKeepsLocal,
+       NEW CONSTANT UnlinkChecksBytes,
+       NEW CONSTANT MaxFetchFails,
+       NEW CONSTANT ConsumeKeepsLeft,
+       NEW CONSTANT SyncKeepsLeft,
+       NEW CONSTANT Readers,
+       NEW CONSTANT ReaderRechecksOwed,
+       NEW VARIABLE live,
+       NEW VARIABLE minted,
+       NEW VARIABLE doc,
+       NEW VARIABLE seq,
+       NEW VARIABLE tomb,
+       NEW VARIABLE base,
+       NEW VARIABLE acked,
+       NEW VARIABLE conflicts,
+       NEW VARIABLE holder,
+       NEW VARIABLE nextGen,
+       NEW VARIABLE ui,
+       NEW VARIABLE reqs,
+       NEW VARIABLE barriers,
+       NEW VARIABLE w,
+       NEW VARIABLE took,
+       NEW VARIABLE gw,
+       NEW VARIABLE mv,
+       NEW VARIABLE udel,
+       NEW VARIABLE restarts,
+       NEW VARIABLE syncs,
+       NEW VARIABLE regressed,
+       NEW VARIABLE rescopes,
+       NEW VARIABLE fails,
+       NEW VARIABLE upped,
+       NEW VARIABLE copies,
+       NEW VARIABLE orig,
+       NEW VARIABLE retiring,
+       NEW VARIABLE aged,
+       NEW VARIABLE ages,
+       NEW VARIABLE rdoc,
+       NEW VARIABLE rlag,
+       NEW VARIABLE anc,
+       NEW CONSTANT p \in Paths
+PROVE  (\A q \in Paths : WF_(vars) (GA(q))) => (WF_(vars) (GA(p)))
+
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:24
+@!!loc:60:30:60:32
+@!!status:failed
+@!!prover:zenon
+@!!meth:time-limit: 120
+@!!reason:Zenon: unsupported operator Fair
+@!!already:false
+@!!obl:
+ASSUME NEW CONSTANT Nil,
+       NEW CONSTANT Paths,
+       NEW CONSTANT Free,
+       NEW CONSTANT Writers,
+       NEW CONSTANT MaxMint,
+       NEW CONSTANT MaxUI,
+       NEW CONSTANT MaxRemovals,
+       NEW CONSTANT MaxBarriers,
+       NEW CONSTANT MaxRestarts,
+       NEW CONSTANT MaxSyncs,
+       NEW CONSTANT MaxAges,
+       NEW CONSTANT MaxCopies,
+       NEW CONSTANT CommitSurfacesForeign,
+       NEW CONSTANT CommitVerifiesUploads,
+       NEW CONSTANT SweepUnderLease,
+       NEW CONSTANT CollectorSparesCited,
+       NEW CONSTANT CommitRecordsDeleteOverride,
+       NEW CONSTANT DeleteWinsPreserved,
+       NEW CONSTANT ContentConverges,
+       NEW CONSTANT RecheckSkipped,
+       NEW CONSTANT CommitAdvanceGuarded,
+       NEW CONSTANT RetireAge,
+       NEW CONSTANT GatewayIgnoresLease,
+       NEW CONSTANT GatewayJudgesRead,
+       NEW CONSTANT GatewaySweepGrace,
+       NEW CONSTANT RenameAtomic,
+       NEW CONSTANT Scopes,
+       NEW CONSTANT MaxRescopes,
+       NEW CONSTANT ConsumeHonorsScope,
+       NEW CONSTANT RescopeUnciteFirst,
+       NEW CONSTANT RescopeKeepsDirty,
+       NEW CONSTANT WidenKeepsLocal,
+       NEW CONSTANT UnlinkChecksBytes,
+       NEW CONSTANT MaxFetchFails,
+       NEW CONSTANT ConsumeKeepsLeft,
+       NEW CONSTANT SyncKeepsLeft,
+       NEW CONSTANT Readers,
+       NEW CONSTANT ReaderRechecksOwed,
+       NEW VARIABLE live,
+       NEW VARIABLE minted,
+       NEW VARIABLE doc,
+       NEW VARIABLE seq,
+       NEW VARIABLE tomb,
+       NEW VARIABLE base,
+       NEW VARIABLE acked,
+       NEW VARIABLE conflicts,
+       NEW VARIABLE holder,
+       NEW VARIABLE nextGen,
+       NEW VARIABLE ui,
+       NEW VARIABLE reqs,
+       NEW VARIABLE barriers,
+       NEW VARIABLE w,
+       NEW VARIABLE took,
+       NEW VARIABLE gw,
+       NEW VARIABLE mv,
+       NEW VARIABLE udel,
+       NEW VARIABLE restarts,
+       NEW VARIABLE syncs,
+       NEW VARIABLE regressed,
+       NEW VARIABLE rescopes,
+       NEW VARIABLE fails,
+       NEW VARIABLE upped,
+       NEW VARIABLE copies,
+       NEW VARIABLE orig,
+       NEW VARIABLE retiring,
+       NEW VARIABLE aged,
+       NEW VARIABLE ages,
+       NEW VARIABLE rdoc,
+       NEW VARIABLE rlag,
+       NEW VARIABLE anc,
+       NEW CONSTANT p \in Paths
+PROVE  (\A q \in Paths : WF_(vars) (GA(q))) => (WF_(vars) (GA(p)))
+
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:23
+@!!loc:59:29:59:31
+@!!status:proved
+@!!prover:isabelle
+@!!meth:auto; time-limit: 360; time-used: 0.5 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:25
+@!!loc:61:41:61:43
+@!!status:proved
+@!!prover:ls4
+@!!meth:time-limit: 120; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:26
+@!!loc:61:44:61:57
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:27
+@!!loc:61:59:61:62
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:24
+@!!loc:60:30:60:32
+@!!status:proved
+@!!prover:isabelle
+@!!meth:auto; time-limit: 360; time-used: 0.6 (0%)
+@!!already:false
+@!!END
+
+(* created new ".tlacache/LeanP1ProofL1.tlaps/LeanP1ProofL1.thy" *)
+(* fingerprints written in ".tlacache/LeanP1ProofL1.tlaps/fingerprints" *)
+File "./LeanP1ProofL1.tla", line 1, character 1 to line 64, character 78:
+[INFO]: All 27 obligations proved.
+	Command being timed: "nice -n 5 /mnt/nvme/tlaps/unpack/tlapm/bin/tlapm --toolbox 0 0 --cleanfp --stretch 12 --threads 2 -k LeanP1ProofL1.tla"
+	User time (seconds): 8.44
+	System time (seconds): 0.31
+	Percent of CPU this job got: 103%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:08.45
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 213140
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 1
+	Minor (reclaiming a frame) page faults: 101452
+	Voluntary context switches: 805
+	Involuntary context switches: 642
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 1224
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+rc=0

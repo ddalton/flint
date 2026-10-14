@@ -1,0 +1,48 @@
+L1: LSpec => Prop_UISaveCompletes in TLAPS (2026-10-14)
+=======================================================
+Why: LeanP1LiveHolds (the claim at LeanP1Holds's bounds) has never been
+decided by a checker.  TLC was stopped out of heap at 103M distinct
+(2026-09-28); tla-mc 0.1.2 on a c8g.48xlarge held ~640 bytes a state for the
+liveness graph (74.6 GB at 116M) against 1.66B states, and was stopped at
+173M (../2026-10-14-leanp1-gate-ec2/SUMMARY.txt).  LiveHoldsSmall (one
+path, no removals) is the gate's bounded check.
+
+Module: LeanP1ProofL1.tla, EXTENDS LeanP1ProofM0 (M0's TypeInvariant and
+ShippedShape).  tlapm checks only this module.
+
+The argument: WF1 for each path p, with P == gw[p] # Nil, Q == gw[p] = Nil,
+and A == GA(p), LSpec's fair action (GCas(p) and the step's frame:
+TookUpdate, RetUpdate, AncUpdate, the reader ghosts unchanged).
+  P /\ [Next]_vars => P' \/ Q'   Q is ~P.
+  P /\ <<A>>_vars => Q'          GCas sets gw'[p] = Nil (needs TypeOK: gw a
+                                 function on Paths, so the EXCEPT clears p).
+  P => ENABLED <<A>>_vars        GCas's guard is gw[p] # Nil /\ LeaseGuard,
+                                 and LeaseGuard is TRUE under Shipped
+                                 (GatewayIgnoresLease, G1); every variable A
+                                 writes is a function of the state.
+LeanP1LiveHolds sets every rule constant TRUE (= Shipped), so it is an
+instance.  The tie to LeanP1.tla is M0's; for liveness also: `anc` is a
+history variable written by a deterministic update, so a LeanP1 step is
+A's exactly when the LeanP1Anc step with AncUpdate is, and each is enabled
+exactly when the other is.
+
+What it took (each a tlapm lesson):
+  - ExpandENABLED needs every operator applied to a primed value unfolded:
+    Gen (TookUpdate) and AncOf (AncUpdate), or it refuses ("Hidden
+    definition ... needs expansion for soundly expanding ENABLED").
+  - --method smt alone cannot instantiate a quantified fairness conjunct
+    (\A q : WF_vars(GA(q))) nor use PTL: run on tlapm's default chain, and
+    name the conjunct (Fair).  Zenon fails it; Isabelle and the default
+    chain prove it (scratch test LeanP1L1T.tla on the box).
+  - PTL links a state predicate to its prime only when written (P)': state
+    the WF1 premises with DEFINE'd P and Q, not gw'[p] = Nil.
+
+RECORD (--cleanfp, default backends, --threads 2, box, LeanP1Anc 8edd660d,
+M0 049fcdd6, L1 md5 in out/record.out): All 27 obligations proved, 8.5 s
+wall, 213 MB peak (out/record.out).
+CONTROL (GatewayIgnoresLease dropped from Shipped in M0; out/ctl-*.out):
+exactly 1/27 fails, line 42, `<1>1. LeaseGuard` in L1_Enabled -- the one
+place the proof needs the gateway not to wait for the lease.  The TLC half
+is the gate's LeanP1LiveWaitsOnLeaseSmall, which fires.
+
+Run: run-l1.sh (on the box, /mnt/nvme/leanp1-l1).

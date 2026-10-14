@@ -1,0 +1,21 @@
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded tla-mc v0.1.2
+  Installing tla-mc v0.1.2
+    Updating crates.io index
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded cc v1.5.1
+  Downloaded mimalloc v0.1.52
+  Downloaded shlex v2.0.1
+  Downloaded find-msvc-tools v0.1.14
+  Downloaded libmimalloc-sys v0.1.49
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.14
+   Compiling cc v1.5.1
+   Compiling libmimalloc-sys v0.1.49
+   Compiling mimalloc v0.1.52
+   Compiling tla-mc v0.1.2
+    Finished `release` profile [optimized] target(s) in 19.61s
+  Installing /root/.cargo/bin/tla-mc
+   Installed package `tla-mc v0.1.2` (executable `tla-mc`)

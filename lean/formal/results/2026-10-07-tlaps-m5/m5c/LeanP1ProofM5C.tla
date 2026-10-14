@@ -7,18 +7,10 @@ EXTENDS LeanP1ProofM5B
 (* version at p while that steps BACK -- to a version its baseline derives *)
 (* from with other bytes -- unless a record at p names a version derived   *)
 (* from the baseline: a conflict, an acknowledged delete, or an            *)
-(* acknowledgement at another path.  The claim, as MCLeanP1M5R.tla states  *)
-(* it over LeanP1.tla; `Derives` here is LeanP1Anc's.                       *)
+(* acknowledgement at another path.  The claim is LeanP1.tla's NR5        *)
+(* (since 2026-10-14); `Derives` here is LeanP1Anc's.                      *)
 
-NamedAt(p, b) ==
-  \/ \E c \in conflicts : c[1] = p /\ Derives(c[2], b)
-  \/ \E d \in udel : d[1] = p /\ Derives(d[2], b)
-  \/ \E a \in acked : a[1] # p /\ Derives(a[2], b)
-BackR5(s, p) == /\ doc[p] # Nil /\ w[s].baseline[p] # Nil /\ Derives(w[s].baseline[p], doc[p])
-                /\ Content(doc[p]) # Content(w[s].baseline[p])
-                /\ ~NamedAt(p, w[s].baseline[p])
-Takes(s, p) == w'[s].baseline[p] = doc[p]
-NR5 == [][\A s \in Writers, p \in Paths : ~(BackR5(s, p) /\ Takes(s, p))]_vars
+\* NamedAt, BackR5, Takes and NR5 are LeanP1.tla's (2026-10-14), via LeanP1Anc.
 
 ------------------------------------------------------------------------------
 (* The history's order.  A handle's RANK is the generation of the bytes it  *)
