@@ -95,8 +95,8 @@ ghost tells the truth about provenance:
     (`barrier.rs:1227-1241`, DeleteWinsPreserved).
   - Nothing is silent. The cost is one spurious conflict record naming the
     tree's own version.
-- [ ] **Docs:** `lean/PROTOCOL.md:54` still says Edit mints "h derived from
-  `baseline[p]`". Update it to the new rule.
+- [x] **Docs:** `lean/PROTOCOL.md` row Edit gives the new rule, and says it
+  is provenance only (2026-10-14).
 
 ### Fix 2: a commit's deletes are acknowledged (E21; `LeanP1.tla` `Install`, `udel`)
 
@@ -104,19 +104,15 @@ In the model, `udel` is the set of acknowledged deletes, from the gateway and
 from a commit alike. It only grows. AN5's proof uses it: a delete is what
 accounts for an acked version that is no longer cited. NR5 uses it too.
 
-- [ ] **What a writer's commit acknowledges:** confirm the commit
-  acknowledges each delete it performs, as the gateway's reply does. The
-  code writes a tombstone for both (`manifest.rs:1288-1305` for a commit,
-  `gateway/src/workspace.rs:874-913` for the gateway). But a tombstone is
-  the model's `tomb`, not `udel`: it is cleared when the path is cited
-  again, and pruned after `TOMBSTONE_KEEP_SEQS` (`manifest.rs:98`).
-  Nothing durable corresponds to `udel`. The commit's only acknowledgement
-  is `report.deleted` (`barrier.rs:1256`) and the trace. Decide whether
-  that is acknowledgement enough. If it is, the model's reading is right.
-  If it is not, AN5's delete clause rests on a record the code does not
-  keep.
-- [ ] **Docs:** `lean/PROTOCOL.md:32` maps `udel` to "the gateway's answers"
-  for UI deletes only. Add the commit's deletes.
+- [x] **What a writer's commit acknowledges:** DECIDED 2026-10-14 (user):
+  THE REPLY COUNTS. An acknowledged delete means the requester was told:
+  the gateway's answer to a UI delete, and for a commit its report
+  (`BarrierReport::deleted`, `barrier.rs:1256`) and the publish ack. `udel`
+  stays a model-only ghost of those acknowledgements. The code's tombstones
+  are the model's `tomb` (cleared on re-citation, pruned after
+  `TOMBSTONE_KEEP_SEQS`); AN5 does not rely on them. No code change.
+- [x] **Docs:** `lean/PROTOCOL.md` row `udel` now names both kinds of
+  delete and says it is a ghost of the acknowledgements (2026-10-14).
 
 ---
 
