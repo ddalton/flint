@@ -30,6 +30,7 @@ pub mod xdr;          // XDR encoding/decoding (shared with RPC)
 pub mod rpc;          // RPC message handling (shared with NFSv4)
 pub mod gss_framing;  // RPCSEC_GSS message framing (RFC 2203 §5.3)
 pub mod rpcsec_gss;   // RPCSEC_GSS authentication (Kerberos support)
+pub mod gss_idmap;  // Kerberos principal -> unix identity (FLINT_NFS_GSS_IDMAP)
 pub mod gss_principals;  // which principals may establish a GSS context (FLINT_NFS_GSS_PRINCIPALS)
 pub mod sec_policy;   // Minimum security flavor floor (FLINT_NFS_MIN_SEC)
 pub mod export_access; // Per-network export access: `access[].network` + `permissions` (ro/rw), decided once per connection

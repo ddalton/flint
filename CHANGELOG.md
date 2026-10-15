@@ -14,6 +14,20 @@ covered by the stability guarantee.
 
 ### Added
 
+- **Kerberos callers are their principal's unix identity:
+  `FLINT_NFS_GSS_IDMAP`** (2026-10-15). An RPCSEC_GSS call carried no
+  uid, so it was not permission-checked, and what it created was the
+  server's. Rules `<principal pattern>=<uid>:<gid>[:<groups>]` (first
+  match wins) now make it a uid, gid and groups that authz checks and
+  creates stamp. That is an authenticated identity, where an AUTH_SYS uid
+  is a claim. A principal no rule names is `FLINT_NFS_GSS_ANON`
+  (default nobody, 65534:65534), never unchecked. Chart:
+  `nfs.kerberos.idmap` (user rules), `machineIdentity` (`host/*`,
+  `nfs/*`, default `0:0`), `anonIdentity`, and `nfs.enforcePermissions`
+  for every NFS server. Principals in `idmap` are allowed to connect by
+  default. kind: bob, mapped to 2000:2000, owns what he creates and is
+  denied root's 0600 file.
+
 - **Which Kerberos principals may connect: `FLINT_NFS_GSS_PRINCIPALS`**
   (2026-10-15). Kerberos calls carry no uid, so any principal of the
   realm with a ticket for the NFS server had the whole volume. A comma

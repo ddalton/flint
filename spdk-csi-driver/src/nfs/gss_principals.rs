@@ -22,10 +22,54 @@ use std::fmt;
 /// The env var the NFS server reads.
 pub const ENV: &str = "FLINT_NFS_GSS_PRINCIPALS";
 
+/// One principal pattern (also the left side of an idmap rule).
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Pattern {
+pub struct Pattern {
     components: Vec<String>,
     realm: String,
+}
+
+impl fmt::Display for Pattern {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}@{}", self.components.join("/"), self.realm)
+    }
+}
+
+impl Pattern {
+    /// `<component>[/<component>...]@<REALM>`, the realm spelt out.
+    pub fn parse(entry: &str) -> Result<Self, String> {
+        let (name, realm) = entry
+            .rsplit_once('@')
+            .ok_or_else(|| format!("{entry:?}: no @REALM (the realm is always spelt out)"))?;
+        if realm.is_empty() || realm.contains('*') {
+            return Err(format!(
+                "{entry:?}: the realm must be spelt out, without '*'"
+            ));
+        }
+        let components: Vec<String> = name.split('/').map(str::to_string).collect();
+        if components.iter().any(|c| c.is_empty()) {
+            return Err(format!("{entry:?}: an empty name component"));
+        }
+        Ok(Pattern {
+            components,
+            realm: realm.to_string(),
+        })
+    }
+
+    /// Whether `principal` (`name@REALM`) matches.
+    pub fn matches(&self, principal: &str) -> bool {
+        let Some((name, realm)) = principal.rsplit_once('@') else {
+            return false;
+        };
+        let components: Vec<&str> = name.split('/').collect();
+        self.realm == realm
+            && self.components.len() == components.len()
+            && self
+                .components
+                .iter()
+                .zip(&components)
+                .all(|(pc, c)| !c.is_empty() && glob(pc, c))
+    }
 }
 
 /// The principals that may establish a context. Empty refuses everyone.
@@ -36,11 +80,7 @@ pub struct PrincipalAllowlist {
 
 impl fmt::Display for PrincipalAllowlist {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s: Vec<String> = self
-            .patterns
-            .iter()
-            .map(|p| format!("{}@{}", p.components.join("/"), p.realm))
-            .collect();
+        let s: Vec<String> = self.patterns.iter().map(Pattern::to_string).collect();
         write!(f, "{}", s.join(","))
     }
 }
@@ -74,22 +114,7 @@ impl PrincipalAllowlist {
     pub fn parse(spec: &str) -> Result<Self, String> {
         let mut patterns = Vec::new();
         for entry in spec.split(',').map(str::trim).filter(|e| !e.is_empty()) {
-            let (name, realm) = entry
-                .rsplit_once('@')
-                .ok_or_else(|| format!("{entry:?}: no @REALM (the realm is always spelt out)"))?;
-            if realm.is_empty() || realm.contains('*') {
-                return Err(format!(
-                    "{entry:?}: the realm must be spelt out, without '*'"
-                ));
-            }
-            let components: Vec<String> = name.split('/').map(str::to_string).collect();
-            if components.iter().any(|c| c.is_empty()) {
-                return Err(format!("{entry:?}: an empty name component"));
-            }
-            patterns.push(Pattern {
-                components,
-                realm: realm.to_string(),
-            });
+            patterns.push(Pattern::parse(entry)?);
         }
         if patterns.is_empty() {
             return Err("no principals".into());
@@ -113,18 +138,7 @@ impl PrincipalAllowlist {
     /// Whether `principal` (`name@REALM`, as the acceptor reports it) may
     /// connect.
     pub fn permits(&self, principal: &str) -> bool {
-        let Some((name, realm)) = principal.rsplit_once('@') else {
-            return false;
-        };
-        let components: Vec<&str> = name.split('/').collect();
-        self.patterns.iter().any(|p| {
-            p.realm == realm
-                && p.components.len() == components.len()
-                && p.components
-                    .iter()
-                    .zip(&components)
-                    .all(|(pc, c)| !c.is_empty() && glob(pc, c))
-        })
+        self.patterns.iter().any(|p| p.matches(principal))
     }
 }
 

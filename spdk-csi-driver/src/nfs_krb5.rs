@@ -148,18 +148,57 @@ pub fn prepare_node_mount(server_ip: &str, mount_opts: &str) -> Result<(), Strin
     Ok(())
 }
 
-/// What an NFS server pod gets for Kerberos: the keytab Secret's volume and
-/// mount, `KRB5_KTNAME`, the `FLINT_NFS_MIN_SEC` floor, and the principals
-/// that may connect (`FLINT_NFS_GSS_PRINCIPALS`).
-pub fn server_pod_parts(
-    keytab_secret: Option<&str>,
-    min_sec: Option<&str>,
-    gss_principals: Option<&str>,
-) -> (Vec<EnvVar>, Vec<Volume>, Vec<VolumeMount>) {
+/// The NFS servers' security settings, as the controller passes them on
+/// (chart `nfs.kerberos`, `nfs.enforcePermissions`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ServerSecurity {
+    /// The Secret with `nfs/<server name>`'s keytab.
+    pub keytab_secret: Option<String>,
+    /// `FLINT_NFS_MIN_SEC`.
+    pub min_sec: Option<String>,
+    /// `FLINT_NFS_GSS_PRINCIPALS`: who may connect with Kerberos.
+    pub gss_principals: Option<String>,
+    /// `FLINT_NFS_GSS_IDMAP`: principal → uid:gid[:groups].
+    pub gss_idmap: Option<String>,
+    /// `FLINT_NFS_GSS_ANON`: who an unmapped principal is.
+    pub gss_anon: Option<String>,
+    /// `FLINT_NFS_ENFORCE_PERMISSIONS`: off, warn or enforce.
+    pub enforce_permissions: Option<String>,
+}
+
+impl ServerSecurity {
+    /// From the controller's env (`NFS_KRB5_KEYTAB_SECRET`, `NFS_MIN_SEC`,
+    /// `NFS_GSS_PRINCIPALS`, `NFS_GSS_IDMAP`, `NFS_GSS_ANON`,
+    /// `NFS_ENFORCE_PERMISSIONS`).
+    pub fn from_env() -> Self {
+        let var = |k: &str| std::env::var(k).ok().filter(|s| !s.trim().is_empty());
+        ServerSecurity {
+            keytab_secret: var("NFS_KRB5_KEYTAB_SECRET"),
+            min_sec: var("NFS_MIN_SEC"),
+            gss_principals: var("NFS_GSS_PRINCIPALS"),
+            gss_idmap: var("NFS_GSS_IDMAP"),
+            gss_anon: var("NFS_GSS_ANON"),
+            enforce_permissions: var("NFS_ENFORCE_PERMISSIONS"),
+        }
+    }
+}
+
+/// What an NFS server pod gets: the keytab Secret's volume and mount with
+/// `KRB5_KTNAME`, and the server's env for the rest of `sec`.
+pub fn server_pod_parts(sec: &ServerSecurity) -> (Vec<EnvVar>, Vec<Volume>, Vec<VolumeMount>) {
     let mut env = Vec::new();
     let mut volumes = Vec::new();
     let mut mounts = Vec::new();
-    if let Some(secret) = keytab_secret.filter(|s| !s.is_empty()) {
+    let set = |env: &mut Vec<EnvVar>, name: &str, v: &Option<String>| {
+        if let Some(v) = v.as_deref().filter(|v| !v.is_empty()) {
+            env.push(EnvVar {
+                name: name.into(),
+                value: Some(v.into()),
+                ..Default::default()
+            });
+        }
+    };
+    if let Some(secret) = sec.keytab_secret.as_deref().filter(|s| !s.is_empty()) {
         env.push(EnvVar {
             name: "KRB5_KTNAME".into(),
             value: Some(format!("{KEYTAB_DIR}/krb5.keytab")),
@@ -182,20 +221,19 @@ pub fn server_pod_parts(
             ..Default::default()
         });
     }
-    if let Some(list) = gss_principals.filter(|s| !s.is_empty()) {
-        env.push(EnvVar {
-            name: crate::nfs::gss_principals::ENV.into(),
-            value: Some(list.into()),
-            ..Default::default()
-        });
-    }
-    if let Some(floor) = min_sec.filter(|s| !s.is_empty()) {
-        env.push(EnvVar {
-            name: "FLINT_NFS_MIN_SEC".into(),
-            value: Some(floor.into()),
-            ..Default::default()
-        });
-    }
+    set(
+        &mut env,
+        crate::nfs::gss_principals::ENV,
+        &sec.gss_principals,
+    );
+    set(&mut env, crate::nfs::gss_idmap::ENV, &sec.gss_idmap);
+    set(&mut env, crate::nfs::gss_idmap::ANON_ENV, &sec.gss_anon);
+    set(&mut env, "FLINT_NFS_MIN_SEC", &sec.min_sec);
+    set(
+        &mut env,
+        "FLINT_NFS_ENFORCE_PERMISSIONS",
+        &sec.enforce_permissions,
+    );
     (env, volumes, mounts)
 }
 
@@ -300,12 +338,16 @@ mod tests {
     }
 
     #[test]
-    fn the_server_pod_gets_the_keytab_and_the_floor() {
-        let (env, vols, mounts) = server_pod_parts(
-            Some("flint-nfs-krb5-keytab"),
-            Some("krb5i"),
-            Some("host/*@FLINT.TEST"),
-        );
+    fn the_server_pod_gets_the_keytab_and_its_security_env() {
+        let sec = ServerSecurity {
+            keytab_secret: Some("flint-nfs-krb5-keytab".into()),
+            min_sec: Some("krb5i".into()),
+            gss_principals: Some("host/*@FLINT.TEST".into()),
+            gss_idmap: Some("host/*@FLINT.TEST=0:0".into()),
+            gss_anon: Some("65534:65534".into()),
+            enforce_permissions: Some("enforce".into()),
+        };
+        let (env, vols, mounts) = server_pod_parts(&sec);
         let get = |n: &str| {
             env.iter()
                 .find(|e| e.name == n)
@@ -321,6 +363,15 @@ mod tests {
             get("FLINT_NFS_GSS_PRINCIPALS").as_deref(),
             Some("host/*@FLINT.TEST")
         );
+        assert_eq!(
+            get("FLINT_NFS_GSS_IDMAP").as_deref(),
+            Some("host/*@FLINT.TEST=0:0")
+        );
+        assert_eq!(get("FLINT_NFS_GSS_ANON").as_deref(), Some("65534:65534"));
+        assert_eq!(
+            get("FLINT_NFS_ENFORCE_PERMISSIONS").as_deref(),
+            Some("enforce")
+        );
         let s = vols[0].secret.as_ref().unwrap();
         assert_eq!(s.secret_name.as_deref(), Some("flint-nfs-krb5-keytab"));
         assert_eq!(
@@ -329,12 +380,21 @@ mod tests {
             "readable by the non-root server"
         );
         assert_eq!(mounts[0].mount_path, KEYTAB_DIR);
-        let (env, vols, mounts) = server_pod_parts(None, None, None);
+        let (env, vols, mounts) = server_pod_parts(&ServerSecurity::default());
         assert!(
             env.is_empty() && vols.is_empty() && mounts.is_empty(),
-            "nothing without Kerberos"
+            "nothing without settings"
         );
-        let (env, vols, _) = server_pod_parts(Some(""), Some("krb5"), Some(""));
-        assert_eq!((env.len(), vols.len()), (1, 0), "a floor alone");
+        let floor_only = ServerSecurity {
+            keytab_secret: Some(String::new()),
+            enforce_permissions: Some("warn".into()),
+            ..Default::default()
+        };
+        let (env, vols, _) = server_pod_parts(&floor_only);
+        assert_eq!(
+            (env.len(), vols.len()),
+            (1, 0),
+            "permissions apply to sys volumes too"
+        );
     }
 }

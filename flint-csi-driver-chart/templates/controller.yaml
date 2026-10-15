@@ -149,12 +149,20 @@ spec:
             - name: NFS_VERBOSE
               value: "true"
             {{- end }}
+            {{- with .Values.nfs.enforcePermissions }}
+            - name: NFS_ENFORCE_PERMISSIONS
+              value: {{ . | quote }}
+            {{- end }}
             {{- if .Values.nfs.kerberos.enabled }}
             # Kerberos (nfs.kerberos): the servers' keytab, nfs/<serverName>.
             - name: NFS_KRB5_KEYTAB_SECRET
               value: {{ include "flint-csi-driver-chart.nfsKrb5KeytabSecret" . | quote }}
             - name: NFS_GSS_PRINCIPALS
               value: {{ include "flint-csi-driver-chart.nfsKrb5Principals" . | quote }}
+            - name: NFS_GSS_IDMAP
+              value: {{ include "flint-csi-driver-chart.nfsKrb5Idmap" . | quote }}
+            - name: NFS_GSS_ANON
+              value: {{ .Values.nfs.kerberos.anonIdentity | quote }}
             {{- with .Values.nfs.kerberos.minSec }}
             - name: NFS_MIN_SEC
               value: {{ . | quote }}

@@ -11,7 +11,9 @@ spec:
     entry for the server's ClusterIP), and the pods share files; a sec=sys
     mount is refused by the servers' krb5i floor; a user principal with a
     real ticket (alice, uid 1000 on a node) is refused by the servers'
-    principal allowlist, while the node's machine principal is not.
+    principal allowlist, while the node's machine principal is not; bob,
+    mapped to 2000:2000, owns what he creates and is denied a file only
+    root may read.
   steps:
   - name: volumes-and-pods
     try:
@@ -121,3 +123,52 @@ spec:
           kubectl -n flint-system delete kerberosprincipal rwx-krb5-alice --ignore-not-found
           node=$(kubectl -n "$NAMESPACE" get pod krb5-a -o jsonpath='{.spec.nodeName}' 2>/dev/null) &&
             docker exec "$node" rm -f /tmp/alice.keytab /tmp/krb5cc_1000 || true
+  - name: a-mapped-user-is-who-the-map-says
+    try:
+    - script:
+        timeout: 4m
+        content: |
+          set -eu
+          # bob@FLINT.TEST is 2000:2000 (nfs.kerberos.idmap in kind-nfs-only.sh).
+          cat <<YAML | kubectl apply -f -
+          apiVersion: krb5.ddalton.dev/v1alpha1
+          kind: KerberosPrincipal
+          metadata:
+            name: rwx-krb5-bob
+            namespace: flint-system
+          spec:
+            realmRef: flint
+            principals: [bob]
+          YAML
+          kubectl -n flint-system wait kerberosprincipal/rwx-krb5-bob --timeout=2m \
+            --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True
+          node=$(kubectl -n "$NAMESPACE" get pod krb5-a -o jsonpath='{.spec.nodeName}')
+          kubectl -n flint-system get secret rwx-krb5-bob -o jsonpath='{.data.krb5\.keytab}' | base64 -d |
+            docker exec -i "$node" sh -c 'cat > /tmp/bob.keytab'
+          docker exec "$node" sh -c 'kinit -k -t /tmp/bob.keytab -c /tmp/krb5cc_2000 bob@FLINT.TEST &&
+            chown 2000 /tmp/krb5cc_2000'
+          # root (the machine principal): a directory anyone may write, and
+          # a file only root may read.
+          kubectl -n "$NAMESPACE" exec krb5-a -- sh -c 'mkdir -p /data/shared && chmod 1777 /data/shared &&
+            echo secret > /data/secret && chmod 0600 /data/secret'
+          sed "s/NODE/$node/; s/alice-pod/bob-pod/; s/runAsUser: 1000/runAsUser: 2000/; s/runAsGroup: 1000/runAsGroup: 2000/" \
+            alice-pod.yaml.tpl | kubectl -n "$NAMESPACE" apply -f -
+          kubectl -n "$NAMESPACE" wait pod/bob-pod --for=condition=Ready --timeout=2m
+          kubectl -n "$NAMESPACE" exec bob-pod -- sh -c 'echo hi > /data/shared/bob'
+          # Created as bob's mapped identity, as root sees it.
+          owner=$(kubectl -n "$NAMESPACE" exec krb5-a -- stat -c %u:%g /data/shared/bob)
+          [ "$owner" = 2000:2000 ] || { echo "FAIL: /data/shared/bob is $owner, not 2000:2000"; exit 1; }
+          # Permissions now apply to a Kerberos caller.
+          if kubectl -n "$NAMESPACE" exec bob-pod -- cat /data/secret 2>/tmp/bob.err; then
+            echo "FAIL: bob read root's 0600 file"; exit 1
+          fi
+          cat /tmp/bob.err
+          [ "$(kubectl -n "$NAMESPACE" exec krb5-a -- cat /data/secret)" = secret ]
+          echo PASS
+    finally:
+    - script:
+        content: |
+          kubectl -n "$NAMESPACE" delete pod bob-pod --ignore-not-found --grace-period=1
+          kubectl -n flint-system delete kerberosprincipal rwx-krb5-bob --ignore-not-found
+          node=$(kubectl -n "$NAMESPACE" get pod krb5-a -o jsonpath='{.spec.nodeName}' 2>/dev/null) &&
+            docker exec "$node" rm -f /tmp/bob.keytab /tmp/krb5cc_2000 || true
