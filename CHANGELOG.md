@@ -122,6 +122,18 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **A created file's owner, as the client first sees it** (2026-10-15).
+  OPEN(create) and CREATE stamp the caller's uid and gid with a chown, but
+  did not bump the change counter, which is what invalidates the stat
+  cache. So the lstat cached at create time (owned by the server, uid
+  65532 in the pod) stayed valid, and the GETATTR in the same compound
+  reported the server as the owner. Clients cache that reply: for AUTH_SYS
+  and Kerberos creates alike, a new file looked like the server's for up
+  to `actimeo`. Under Kerberos the client's sticky-directory rule
+  (`fs.protected_regular`) then refused the creator's own open with
+  EACCES. Found by the kind suite, reproduced against a real kernel client
+  with the server as 65532; both stamps now bump.
+
 - **lean: the publish ack names a declared file the UI replaced by a rename**
   (2026-10-15, `lean/FINDINGS.md` L-137; found by the rows 15-17 proof). If
   the UI deleted a file the agent had just published and renamed another
