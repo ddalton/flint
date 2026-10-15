@@ -149,10 +149,12 @@ pub fn prepare_node_mount(server_ip: &str, mount_opts: &str) -> Result<(), Strin
 }
 
 /// What an NFS server pod gets for Kerberos: the keytab Secret's volume and
-/// mount, `KRB5_KTNAME`, and the `FLINT_NFS_MIN_SEC` floor.
+/// mount, `KRB5_KTNAME`, the `FLINT_NFS_MIN_SEC` floor, and the principals
+/// that may connect (`FLINT_NFS_GSS_PRINCIPALS`).
 pub fn server_pod_parts(
     keytab_secret: Option<&str>,
     min_sec: Option<&str>,
+    gss_principals: Option<&str>,
 ) -> (Vec<EnvVar>, Vec<Volume>, Vec<VolumeMount>) {
     let mut env = Vec::new();
     let mut volumes = Vec::new();
@@ -177,6 +179,13 @@ pub fn server_pod_parts(
             name: "krb5-keytab".into(),
             mount_path: KEYTAB_DIR.into(),
             read_only: Some(true),
+            ..Default::default()
+        });
+    }
+    if let Some(list) = gss_principals.filter(|s| !s.is_empty()) {
+        env.push(EnvVar {
+            name: crate::nfs::gss_principals::ENV.into(),
+            value: Some(list.into()),
             ..Default::default()
         });
     }
@@ -292,7 +301,11 @@ mod tests {
 
     #[test]
     fn the_server_pod_gets_the_keytab_and_the_floor() {
-        let (env, vols, mounts) = server_pod_parts(Some("flint-nfs-krb5-keytab"), Some("krb5i"));
+        let (env, vols, mounts) = server_pod_parts(
+            Some("flint-nfs-krb5-keytab"),
+            Some("krb5i"),
+            Some("host/*@FLINT.TEST"),
+        );
         let get = |n: &str| {
             env.iter()
                 .find(|e| e.name == n)
@@ -304,6 +317,10 @@ mod tests {
             "a bare path, no FILE:"
         );
         assert_eq!(get("FLINT_NFS_MIN_SEC").as_deref(), Some("krb5i"));
+        assert_eq!(
+            get("FLINT_NFS_GSS_PRINCIPALS").as_deref(),
+            Some("host/*@FLINT.TEST")
+        );
         let s = vols[0].secret.as_ref().unwrap();
         assert_eq!(s.secret_name.as_deref(), Some("flint-nfs-krb5-keytab"));
         assert_eq!(
@@ -312,12 +329,12 @@ mod tests {
             "readable by the non-root server"
         );
         assert_eq!(mounts[0].mount_path, KEYTAB_DIR);
-        let (env, vols, mounts) = server_pod_parts(None, None);
+        let (env, vols, mounts) = server_pod_parts(None, None, None);
         assert!(
             env.is_empty() && vols.is_empty() && mounts.is_empty(),
             "nothing without Kerberos"
         );
-        let (env, vols, _) = server_pod_parts(Some(""), Some("krb5"));
+        let (env, vols, _) = server_pod_parts(Some(""), Some("krb5"), Some(""));
         assert_eq!((env.len(), vols.len()), (1, 0), "a floor alone");
     }
 }

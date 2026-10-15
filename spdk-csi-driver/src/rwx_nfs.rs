@@ -131,6 +131,9 @@ pub struct NfsConfig {
     pub krb5_keytab_secret: Option<String>,
     /// `FLINT_NFS_MIN_SEC` for the NFS servers (`NFS_MIN_SEC`).
     pub min_sec: Option<String>,
+    /// `FLINT_NFS_GSS_PRINCIPALS` for the NFS servers
+    /// (`NFS_GSS_PRINCIPALS`): who may connect with Kerberos.
+    pub gss_principals: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -199,6 +202,7 @@ impl NfsConfig {
                 .unwrap_or(false),
             krb5_keytab_secret: env::var("NFS_KRB5_KEYTAB_SECRET").ok().filter(|s| !s.is_empty()),
             min_sec: env::var("NFS_MIN_SEC").ok().filter(|s| !s.is_empty()),
+            gss_principals: env::var("NFS_GSS_PRINCIPALS").ok().filter(|s| !s.is_empty()),
         };
         
         eprintln!("✅ [NFS] NFS support ENABLED");
@@ -441,6 +445,7 @@ pub async fn create_nfs_server_pod(
     let (krb5_env, krb5_volumes, krb5_mounts) = crate::nfs_krb5::server_pod_parts(
         config.krb5_keytab_secret.as_deref(),
         config.min_sec.as_deref(),
+        config.gss_principals.as_deref(),
     );
     let pod = Pod {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {

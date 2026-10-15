@@ -153,6 +153,15 @@ NFS namespace, the servers' keytab Secret.
 {{- .Values.nfs.kerberos.serverName | default (printf "flint-nfs.%s.svc.%s" (include "flint-csi-driver-chart.nfsNamespace" .) .Values.nfs.kerberos.clusterDomain) -}}
 {{- end }}
 
+{{- define "flint-csi-driver-chart.nfsKrb5Principals" -}}
+{{- $k := .Values.nfs.kerberos -}}
+{{- if $k.allowedPrincipals -}}
+{{- join "," $k.allowedPrincipals -}}
+{{- else -}}
+{{- printf "host/*@%s,nfs/*@%s" $k.realm $k.realm -}}
+{{- end -}}
+{{- end }}
+
 {{- define "flint-csi-driver-chart.nfsKrb5KeytabSecret" -}}
 flint-nfs-krb5-keytab
 {{- end }}

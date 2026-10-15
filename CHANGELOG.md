@@ -14,6 +14,17 @@ covered by the stability guarantee.
 
 ### Added
 
+- **Which Kerberos principals may connect: `FLINT_NFS_GSS_PRINCIPALS`**
+  (2026-10-15). Kerberos calls carry no uid, so any principal of the
+  realm with a ticket for the NFS server had the whole volume. A comma
+  list of patterns (`host/*@REALM`, `*` within one component, the realm
+  always spelled out) now decides who may establish an RPCSEC_GSS
+  context; anyone else's INIT fails and is logged. A malformed list
+  refuses everyone. Chart `nfs.kerberos.allowedPrincipals` defaults to
+  the nodes' machine principals (`host/*@<realm>`, `nfs/*@<realm>`).
+  kind: alice's real ticket, uid 1000 on a node, is refused while root
+  on the node reads the volume.
+
 - **Kerberos for RWX NFS volumes, with keys from krb5-operator**
   (2026-10-15). Chart `nfs.kerberos`: one server principal
   (`nfs/flint-nfs.<ns>.svc.<clusterDomain>`, a KerberosPrincipal) whose

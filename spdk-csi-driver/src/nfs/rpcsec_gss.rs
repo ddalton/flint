@@ -9,6 +9,7 @@
 //! - RFC 1964: The Kerberos Version 5 GSS-API Mechanism
 
 use crate::nfs::gss_framing::{GssReject, ValidatedCall};
+use crate::nfs::gss_principals::PrincipalAllowlist;
 use crate::nfs::xdr::{XdrDecoder, XdrEncoder};
 use krb5::{Keytab, KerberosContext};
 use bytes::Bytes;
@@ -326,6 +327,9 @@ pub struct RpcSecGssManager {
     /// Establish contexts with no keytab and no authentication. See
     /// [`PLACEHOLDER_ENV`] — off unless explicitly asked for.
     allow_placeholder: bool,
+    /// Who may establish a context (`FLINT_NFS_GSS_PRINCIPALS`); `None`:
+    /// every principal the keytab authenticates.
+    allowed: Option<PrincipalAllowlist>,
 }
 
 impl RpcSecGssManager {
@@ -376,7 +380,24 @@ impl RpcSecGssManager {
             }
         }
 
+        let allowed = PrincipalAllowlist::from_env();
+        match (&keytab, &allowed) {
+            (Some(_), Some(a)) => info!("🔐 RPCSEC_GSS principals allowed: {}", a),
+            (Some(_), None) => warn!(
+                "⚠️  {} is not set: EVERY principal of the realm with a ticket for this \
+                 server may connect, and Kerberos calls carry no uid to check",
+                crate::nfs::gss_principals::ENV
+            ),
+            _ => {}
+        }
         Self::with_policy_and_keytab(keytab, GssQuotas::from_env(), allow_placeholder)
+            .with_allowed_principals(allowed)
+    }
+
+    /// Only these principals may establish a context (`None`: any).
+    pub fn with_allowed_principals(mut self, allowed: Option<PrincipalAllowlist>) -> Self {
+        self.allowed = allowed;
+        self
     }
 
     /// Construct with explicit policy instead of reading the
@@ -409,6 +430,7 @@ impl RpcSecGssManager {
             keytab,
             quotas,
             allow_placeholder,
+            allowed: None,
         }
     }
 
@@ -459,6 +481,14 @@ impl RpcSecGssManager {
         // this map by one entry per RPC.
         let (context, gss_token) = if let Some(ref keytab) = self.keytab {
             match KerberosContext::accept_token_with_skew(keytab, init_token, krb5_clock_skew()) {
+                Ok((krb_ctx, _)) if self.allowed.as_ref().is_some_and(|a| !a.permits(&krb_ctx.client_principal)) => {
+                    warn!(
+                        "❌ RPCSEC_GSS_INIT refused: {} is not in {}",
+                        krb_ctx.client_principal,
+                        crate::nfs::gss_principals::ENV
+                    );
+                    return Self::init_failure(handle);
+                }
                 Ok((krb_ctx, ap_rep)) => {
                     info!("✅ Kerberos context established (Pure Rust): client={}", krb_ctx.client_principal);
                     (GssContext::with_kerberos(handle.clone(), cred.service, krb_ctx), ap_rep)

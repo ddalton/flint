@@ -389,6 +389,14 @@ nfs:
     # FLINT_NFS_MIN_SEC for every NFS server: "krb5" or "krb5i" refuses
     # sec=sys mounts of every RWX volume. Empty: no floor.
     minSec: ""
+    # Who may connect with Kerberos (FLINT_NFS_GSS_PRINCIPALS): patterns
+    # <component>[/<component>...]@<REALM>, '*' within a component. A
+    # Kerberos call carries no uid to check, so a principal that connects
+    # has the whole volume: by default only the nodes' machine principals,
+    # host/*@<realm> and nfs/*@<realm>. Anyone who can create principals
+    # in the realm can mint such a name: keep the realm's allowedNamespaces
+    # to trusted namespaces.
+    allowedPrincipals: []
     # Delete or Retain the principals when the release is uninstalled.
     deletionPolicy: Delete
     storageClass:
