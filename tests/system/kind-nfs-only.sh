@@ -114,6 +114,12 @@ docker image inspect "$IMAGE" >/dev/null || fail "image $IMAGE not found locally
 step "registry $REG_NAME on 127.0.0.1:$REG_PORT"
 docker rm -f "$REG_NAME" >/dev/null 2>&1 || true
 docker run -d --restart=no --name "$REG_NAME" -p "127.0.0.1:${REG_PORT}:5000" registry:2 >/dev/null
+# The registry listens a moment after the container starts: a push before
+# that is "connection reset" (seen on the second, KRB5=1, run).
+for _ in $(seq 30); do
+  curl -fsS "http://127.0.0.1:${REG_PORT}/v2/" >/dev/null 2>&1 && break
+  sleep 1
+done
 docker push "$IMAGE" >/dev/null
 
 step "kind cluster $CLUSTER (1 control plane + 2 workers, $KIND_NODE_IMAGE)"
