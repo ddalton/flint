@@ -4681,6 +4681,11 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             );
             let mount_opts =
                 spdk_csi_driver::mount_opts::build_rwx_nfs_mount_opts(readonly, &user_flags);
+            // sec=krb5*: rpc.gssd names the server from this ClusterIP
+            // through the HOST's resolver, so the host must map it to the
+            // Kerberos server name first (nfs_krb5).
+            spdk_csi_driver::nfs_krb5::prepare_node_mount(server_ip, &mount_opts)
+                .map_err(tonic::Status::failed_precondition)?;
             
             // PRE-MOUNT CHECKS
             eprintln!("🔍 [NFS_MOUNT] Pre-mount checks:");

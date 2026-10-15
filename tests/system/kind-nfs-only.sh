@@ -16,6 +16,12 @@
 #      NFS server pod over an emptyDir) plus the `flint-nfs` StorageClass;
 #   4. runs tests-nfs-only/ with chainsaw-nfs-only.yaml.
 #
+# KRB5=1: the Kerberos suite instead (tests-nfs-krb5/). Nodes from
+# krb5/kind-node.Dockerfile (rpc.gssd); krb5-operator installed from its
+# release (KRB5_OPERATOR_VERSION) with a KerberosRealm FLINT.TEST; the chart
+# with nfs.kerberos (server keytab, node keytabs, the flint-krb5 class, a
+# krb5i floor); rpc.gssd started on each node once its keytab is there.
+#
 # Why nfs-only: the SPDK suites need hugepages and a ublk-capable kernel,
 # which a hosted runner does not have. This mode exercises the controller,
 # the node plugin, the NFS server pod and the kernel NFS client for real.
@@ -27,6 +33,7 @@
 #      KIND_NODE_IMAGE (kindest/node:v1.34.0, kind v0.30.0's default)
 #      TESTS (tests-nfs-only; e.g. tests-nfs-only/rwo-pvc-migration)
 #      HELM_EXTRA (extra helm flags, e.g. "--set nfs.verbose=true")
+#      KRB5 (0; 1 = the Kerberos suite)  KRB5_OPERATOR_VERSION (0.3.0)
 # Uses a PRIVATE kubeconfig: never touches ~/.kube/config.
 set -euo pipefail
 
@@ -39,6 +46,8 @@ TAG="${TAG:-$(git -C "$ROOT" rev-parse --short HEAD)}"
 BUILD="${BUILD:-1}"
 KEEP="${KEEP:-0}"
 KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.34.0}"
+KRB5="${KRB5:-0}"
+KRB5_OPERATOR_VERSION="${KRB5_OPERATOR_VERSION:-0.3.0}"
 IMAGE="localhost:${REG_PORT}/dilipdalton/flint-driver:${TAG}"
 export KUBECONFIG="${KUBECONFIG_PRIVATE:-$(mktemp -d)/kubeconfig}"
 
@@ -71,6 +80,16 @@ trap cleanup EXIT
 step "kernel NFS client"
 grep -qw nfs4 /proc/filesystems || sudo -n modprobe nfs || fail "no nfs4 in /proc/filesystems and modprobe nfs failed"
 grep -qw nfs4 /proc/filesystems || fail "nfs4 still not in /proc/filesystems"
+
+if [ "$KRB5" = 1 ]; then
+  # The GSS upcall and the krb5 enctypes, in the same kernel.
+  step "kernel RPCSEC_GSS (auth_rpcgss, rpcsec_gss_krb5)"
+  sudo -n modprobe auth_rpcgss && sudo -n modprobe rpcsec_gss_krb5 || fail "cannot load auth_rpcgss/rpcsec_gss_krb5"
+  step "kind node image with rpc.gssd"
+  docker build -q --build-arg KIND_NODE_IMAGE="$KIND_NODE_IMAGE" -t flint-kind-node-krb5:latest \
+    -f "$HERE/krb5/kind-node.Dockerfile" "$HERE/krb5"
+  KIND_NODE_IMAGE=flint-kind-node-krb5:latest
+fi
 
 if [ "$BUILD" = 1 ]; then
   # The shipped build (scripts/stage-prebuilt.sh + publish-images.sh): musl
@@ -120,6 +139,20 @@ for n in $(kind get nodes --name "$CLUSTER"); do
     docker exec -i "$n" cp /dev/stdin "/etc/containerd/certs.d/localhost:${REG_PORT}/hosts.toml"
 done
 
+if [ "$KRB5" = 1 ]; then
+  step "krb5-operator $KRB5_OPERATOR_VERSION and realm FLINT.TEST"
+  ops="https://raw.githubusercontent.com/ddalton/krb5-operator/v$KRB5_OPERATOR_VERSION/deploy"
+  kubectl apply --server-side -f "$ops/crds.yaml" -f "$ops/operator.yaml"
+  kubectl -n krb5-operator rollout status deploy/krb5-operator --timeout=5m
+  kubectl create namespace flint-system --dry-run=client -o yaml | kubectl apply -f -
+  kubectl apply -f "$HERE/krb5/realm.yaml"
+  kubectl -n flint-system wait kerberosrealm/flint --timeout=5m \
+    --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True
+  HELM_EXTRA="${HELM_EXTRA:-} --set nfs.kerberos.enabled=true --set nfs.kerberos.realm=FLINT.TEST
+    --set nfs.kerberos.realmRef=flint --set nfs.kerberos.minSec=krb5i
+    --set nfs.kerberos.nodeKeytab.tolerations[0].operator=Exists"
+fi
+
 step "helm install flint-csi (nfs-only, image tag $TAG)"
 helm upgrade --install flint-csi "$ROOT/flint-csi-driver-chart" \
   --namespace flint-system --create-namespace \
@@ -151,12 +184,30 @@ volumeBindingMode: WaitForFirstConsumer
 allowVolumeExpansion: true
 EOF
 
+if [ "$KRB5" = 1 ]; then
+  step "Kerberos keys: the NFS servers' and every node's"
+  kubectl -n flint-system wait kerberosprincipal/flint-nfs-server --timeout=5m \
+    --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True
+  kubectl wait kerberosnodekeytab --all --timeout=5m \
+    --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True
+  # rpc-gssd's unit starts only once /etc/krb5.keytab exists.
+  for n in $(kind get nodes --name "$CLUSTER"); do
+    docker exec "$n" klist -k /etc/krb5.keytab
+    docker exec "$n" systemctl restart rpc-gssd
+    docker exec "$n" systemctl is-active rpc-gssd ||
+      { docker exec "$n" journalctl -u rpc-gssd --no-pager | tail -20; fail "rpc-gssd is not running on $n"; }
+  done
+fi
+
 # The image under test, not a registry's: every flint pod must run $TAG.
 step "pods run the image under test"
 bad=$(kubectl -n flint-system get pods -o jsonpath='{range .items[*]}{range .spec.containers[*]}{.image}{"\n"}{end}{end}' |
   grep '/flint-driver:' | grep -v ":${TAG}\$" || true)
 [ -z "$bad" ] || fail "flint pods run another image: $bad"
 
+if [ "$KRB5" = 1 ]; then
+  TESTS="${TESTS:-tests-nfs-krb5}"
+fi
 TESTS="${TESTS:-tests-nfs-only}"
 step "chainsaw: $TESTS"
 report=()

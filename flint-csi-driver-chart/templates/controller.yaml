@@ -149,6 +149,15 @@ spec:
             - name: NFS_VERBOSE
               value: "true"
             {{- end }}
+            {{- if .Values.nfs.kerberos.enabled }}
+            # Kerberos (nfs.kerberos): the servers' keytab, nfs/<serverName>.
+            - name: NFS_KRB5_KEYTAB_SECRET
+              value: {{ include "flint-csi-driver-chart.nfsKrb5KeytabSecret" . | quote }}
+            {{- with .Values.nfs.kerberos.minSec }}
+            - name: NFS_MIN_SEC
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
             {{- else }}
             # NFS support disabled - existing RWO-only behavior maintained
             - name: NFS_ENABLED

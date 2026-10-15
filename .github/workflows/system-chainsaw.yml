@@ -115,9 +115,23 @@ jobs:
           kind version; helm version --short; kubectl version --client; chainsaw version
           tests/system/kind-nfs-only.sh
 
+      # The Kerberos suite (docs/nfs-kerberos.md): the image built above,
+      # kind nodes with rpc.gssd, krb5-operator, sec=krb5i RWX volumes.
+      - name: tests/system/kind-nfs-only.sh (KRB5=1)
+        if: ${{ !cancelled() }}
+        env:
+          TAG: ci-${{ github.sha }}
+          BUILD: "0"
+          KRB5: "1"
+          CLUSTER: flint-krb5
+          REPORT_DIR: ${{ runner.temp }}/chainsaw-report-krb5
+        run: tests/system/kind-nfs-only.sh
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: chainsaw-nfs-only-report
-          path: ${{ runner.temp }}/chainsaw-report
+          path: |
+            ${{ runner.temp }}/chainsaw-report
+            ${{ runner.temp }}/chainsaw-report-krb5
           if-no-files-found: ignore

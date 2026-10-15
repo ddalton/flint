@@ -80,6 +80,7 @@ spec:
           image: "{{ include "flint-csi-driver-chart.imagePrefix" . }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
           imagePullPolicy: Always
           env:
+            {{- include "flint-csi-driver-chart.nfsKrb5NodeEnv" . | nindent 12 }}
             - name: CSI_MODE
               value: "node"
             - name: CSI_ENDPOINT
@@ -152,6 +153,7 @@ spec:
           securityContext:
             privileged: true
           volumeMounts:
+            {{- include "flint-csi-driver-chart.nfsKrb5NodeMounts" . | nindent 12 }}
             - name: kubelet-dir
               mountPath: /var/lib/kubelet
               mountPropagation: "Bidirectional"
@@ -370,6 +372,7 @@ spec:
           image: "{{ include "flint-csi-driver-chart.imagePrefix" . }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
           imagePullPolicy: Always
           env:
+            {{- include "flint-csi-driver-chart.nfsKrb5NodeEnv" . | nindent 12 }}
             - name: CSI_MODE
               value: "node"
             - name: CSI_ENDPOINT
@@ -457,6 +460,7 @@ spec:
             periodSeconds: 10
             failureThreshold: 5
           volumeMounts:
+            {{- include "flint-csi-driver-chart.nfsKrb5NodeMounts" . | nindent 12 }}
             - name: kubelet-dir
               mountPath: /var/lib/kubelet
               mountPropagation: "Bidirectional"
@@ -614,6 +618,7 @@ spec:
           image: "{{ include "flint-csi-driver-chart.imagePrefix" . }}/{{ .Values.images.flintCsiDriver.name }}:{{ .Values.images.flintCsiDriver.tag }}"
           imagePullPolicy: Always
           env:
+            {{- include "flint-csi-driver-chart.nfsKrb5NodeEnv" . | nindent 12 }}
             - name: CSI_MODE
               value: "node"
             - name: CSI_ENDPOINT
@@ -648,6 +653,7 @@ spec:
             periodSeconds: 10
             failureThreshold: 10
           volumeMounts:
+            {{- include "flint-csi-driver-chart.nfsKrb5NodeMounts" . | nindent 12 }}
             - name: kubelet-dir
               mountPath: /var/lib/kubelet
               mountPropagation: "Bidirectional"
@@ -736,5 +742,13 @@ spec:
           hostPath:
             path: /etc/udev/rules.d
             type: Directory
+        {{- end }}
+        {{- if .Values.nfs.kerberos.enabled }}
+        # sec=krb5* mounts: the node plugin maps NFS ClusterIPs to the
+        # Kerberos server name here, for rpc.gssd (nfs_krb5.rs).
+        - name: host-etc-hosts
+          hostPath:
+            path: /etc/hosts
+            type: File
         {{- end }}
 {{- end }}{{- /* end lite-profile guard */}}

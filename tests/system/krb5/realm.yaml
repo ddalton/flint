@@ -1,0 +1,8 @@
+# The test realm (krb5-operator): a KDC in flint-system.
+apiVersion: krb5.ddalton.dev/v1alpha1
+kind: KerberosRealm
+metadata:
+  name: flint
+  namespace: flint-system
+spec:
+  realm: FLINT.TEST
