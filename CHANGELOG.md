@@ -82,6 +82,13 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **lean: the publish ack names a declared file the UI replaced by a rename**
+  (2026-10-15, `lean/FINDINGS.md` L-137; found by the rows 15-17 proof). If
+  the UI deleted a file the agent had just published and renamed another
+  file onto its path, the next honour answered `ok`: the carrier checked
+  only that the path was still cited. It now keeps the checksum each
+  carried upload published and names the path in `dropped` when the
+  document cites other bytes there.
 - **lean: the publish ack no longer says `ok` for bytes a later barrier
   lost track of** (2026-10-14, `lean/FINDINGS.md` L-133 to L-136; found
   while modelling the ack in `LeanP1.tla`, SAFETY rows 15-17). An agent's
