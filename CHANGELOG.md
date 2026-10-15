@@ -82,6 +82,21 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **lean: the publish ack no longer says `ok` for bytes a later barrier
+  lost track of** (2026-10-14, `lean/FINDINGS.md` L-133 to L-136; found
+  while modelling the ack in `LeanP1.tla`, SAFETY rows 15-17). An agent's
+  publish is answered by the barrier that honours it, and the H10 carrier
+  journals what the carrying barriers published so the answer survives a
+  restart or a failed ack write. Four ways that record went wrong are
+  fixed: a second touch minted a new record id and orphaned the first
+  touch's carrier (L-133); the drain's ack was written with one clock and
+  re-written with another, disagreeing with the bucket in between
+  (L-134); a gateway boundary request read during a barrier was carried
+  by nobody (L-135); and a path the agent deleted, then re-created and
+  published, stayed a "delete" in the carrier (L-136). In each case a
+  peer's or the UI's delete of the agent's published file before the
+  honour was answered `ok` for a seq that does not hold it; it is now
+  `partial`, naming the path. Each fix has a test that fails without it.
 - **lean: a live holder is no longer deposed during a long commit
   section** (2026-10-14, review M3, `lean/FINDINGS.md` L-132). Nothing
   renewed the writers' lease between the claim and the handoff, so a
