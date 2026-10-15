@@ -116,6 +116,8 @@ spec:
     finally:
     - script:
         content: |
+          # The pod holds krb5-pvc: left, it blocks the PVC's deletion.
+          kubectl -n "$NAMESPACE" delete pod alice-pod --ignore-not-found --grace-period=1
           kubectl -n flint-system delete kerberosprincipal rwx-krb5-alice --ignore-not-found
           node=$(kubectl -n "$NAMESPACE" get pod krb5-a -o jsonpath='{.spec.nodeName}' 2>/dev/null) &&
             docker exec "$node" rm -f /tmp/alice.keytab /tmp/krb5cc_1000 || true
