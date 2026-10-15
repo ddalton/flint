@@ -20,7 +20,8 @@
 # krb5/kind-node.Dockerfile (rpc.gssd); krb5-operator installed from its
 # release (KRB5_OPERATOR_VERSION) with a KerberosRealm FLINT.TEST; the chart
 # with nfs.kerberos (server keytab, node keytabs, the flint-krb5 class, a
-# krb5i floor); rpc.gssd started on each node once its keytab is there.
+# krb5i floor, bob@FLINT.TEST mapped to 2000:2000) and permissions
+# enforced; rpc.gssd started on each node once its keytab is there.
 #
 # Why nfs-only: the SPDK suites need hugepages and a ublk-capable kernel,
 # which a hosted runner does not have. This mode exercises the controller,
@@ -156,7 +157,9 @@ if [ "$KRB5" = 1 ]; then
     --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True
   HELM_EXTRA="${HELM_EXTRA:-} --set nfs.kerberos.enabled=true --set nfs.kerberos.realm=FLINT.TEST
     --set nfs.kerberos.realmRef=flint --set nfs.kerberos.minSec=krb5i
-    --set nfs.kerberos.nodeKeytab.tolerations[0].operator=Exists"
+    --set nfs.kerberos.nodeKeytab.tolerations[0].operator=Exists
+    --set nfs.kerberos.idmap[0].principal=bob@FLINT.TEST --set nfs.kerberos.idmap[0].uid=2000
+    --set nfs.kerberos.idmap[0].gid=2000 --set nfs.enforcePermissions=enforce"
 fi
 
 step "helm install flint-csi (nfs-only, image tag $TAG)"

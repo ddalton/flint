@@ -352,6 +352,13 @@ nfs:
   # Image pull secrets for NFS server (if registry requires authentication)
   imagePullSecrets: []
 
+  # FLINT_NFS_ENFORCE_PERMISSIONS for every NFS server: "warn" (the
+  # server's default: evaluate POSIX permissions, log what would be
+  # denied, deny nothing), "enforce", or "off". Empty: the default. An
+  # AUTH_SYS uid is a claim; a Kerberos caller's (nfs.kerberos.idmap) is
+  # authenticated.
+  enforcePermissions: ""
+
   # Kerberos for RWX volumes (sec=krb5, krb5i, krb5p), with principals and
   # keytabs from krb5-operator (github.com/ddalton/krb5-operator, 0.3+),
   # which must be installed, with a KerberosRealm.
@@ -397,6 +404,23 @@ nfs:
     # in the realm can mint such a name: keep the realm's allowedNamespaces
     # to trusted namespaces.
     allowedPrincipals: []
+    # Kerberos principal -> unix identity (FLINT_NFS_GSS_IDMAP), as knfsd's
+    # idmapping: a Kerberos caller is permission-checked as, and owns what
+    # it creates as, its principal's uid. First match wins, user rules
+    # first, then the nodes' machine principals (machineIdentity). Every
+    # principal listed here may also connect (unless allowedPrincipals is
+    # set). Example:
+    #   - principal: alice@CORP.EXAMPLE
+    #     uid: 1000
+    #     gid: 1000
+    #     groups: [100]
+    idmap: []
+    # host/* and nfs/* of the realm: the kernel client's root and lease
+    # traffic. 0:0 is root (the server does not squash root).
+    machineIdentity: "0:0"
+    # Who a principal no rule names is ("uid:gid"): nobody, never an
+    # unchecked caller.
+    anonIdentity: "65534:65534"
     # Delete or Retain the principals when the release is uninstalled.
     deletionPolicy: Delete
     storageClass:

@@ -14,6 +14,20 @@ covered by the stability guarantee.
 
 ### Added
 
+- **Kerberos callers are their principal's unix identity:
+  `FLINT_NFS_GSS_IDMAP`** (2026-10-15). An RPCSEC_GSS call carried no
+  uid, so it was not permission-checked, and what it created was the
+  server's. Rules `<principal pattern>=<uid>:<gid>[:<groups>]` (first
+  match wins) now make it a uid, gid and groups that authz checks and
+  creates stamp. That is an authenticated identity, where an AUTH_SYS uid
+  is a claim. A principal no rule names is `FLINT_NFS_GSS_ANON`
+  (default nobody, 65534:65534), never unchecked. Chart:
+  `nfs.kerberos.idmap` (user rules), `machineIdentity` (`host/*`,
+  `nfs/*`, default `0:0`), `anonIdentity`, and `nfs.enforcePermissions`
+  for every NFS server. Principals in `idmap` are allowed to connect by
+  default. kind: bob, mapped to 2000:2000, owns what he creates and is
+  denied root's 0600 file.
+
 - **Which Kerberos principals may connect: `FLINT_NFS_GSS_PRINCIPALS`**
   (2026-10-15). Kerberos calls carry no uid, so any principal of the
   realm with a ticket for the NFS server had the whole volume. A comma
@@ -107,6 +121,18 @@ covered by the stability guarantee.
   bind.
 
 ### Fixed
+
+- **A created file's owner, as the client first sees it** (2026-10-15).
+  OPEN(create) and CREATE stamp the caller's uid and gid with a chown, but
+  did not bump the change counter, which is what invalidates the stat
+  cache. So the lstat cached at create time (owned by the server, uid
+  65532 in the pod) stayed valid, and the GETATTR in the same compound
+  reported the server as the owner. Clients cache that reply: for AUTH_SYS
+  and Kerberos creates alike, a new file looked like the server's for up
+  to `actimeo`. Under Kerberos the client's sticky-directory rule
+  (`fs.protected_regular`) then refused the creator's own open with
+  EACCES. Found by the kind suite, reproduced against a real kernel client
+  with the server as 65532; both stamps now bump.
 
 - **lean: the publish ack names a declared file the UI replaced by a rename**
   (2026-10-15, `lean/FINDINGS.md` L-137; found by the rows 15-17 proof). If

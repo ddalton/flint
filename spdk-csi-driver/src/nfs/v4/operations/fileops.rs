@@ -3799,15 +3799,20 @@ impl FileOperationHandler {
                     // owned by the server, and a 0700 directory then locks
                     // its own creator out, which is exactly the failure this
                     // stamp exists to prevent.
-                    if let Ok(Err(e)) = tokio::task::spawn_blocking(move || {
+                    let stamped = tokio::task::spawn_blocking(move || {
                         if is_symlink {
                             std::os::unix::fs::lchown(&p, Some(uid), Some(gid))
                         } else {
                             std::os::unix::fs::chown(&p, Some(uid), Some(gid))
                         }
                     })
-                    .await
-                    {
+                    .await;
+                    if let Ok(Ok(())) = stamped {
+                        // Bump, or the cached lstat (owned by the server)
+                        // outlives the chown; see OPEN(create).
+                        crate::nfs::v4::change_counter::bump_path(&obj_path);
+                    }
+                    if let Ok(Err(e)) = stamped {
                         warn!(
                             "CREATE: chown {:?} to {}:{} failed: {} — the object is owned \
                              by the SERVER, not its creator. A mode-0700 directory now \

@@ -32,7 +32,9 @@ set `sec=` in any class's `mountOptions`.
 | `KerberosNodeKeytab <release>-nfs-clients` | `host/` and `nfs/<node>` for every selected node, installed into `/etc/krb5.keytab` by the operator's DaemonSet, along with the realm's `krb5.conf`. That `krb5.conf` maps `.svc.<clusterDomain>` to the realm, which `rpc.gssd` needs in order to pick the server's realm. |
 | node plugin | Before a `sec=krb5*` mount, writes `<volume ClusterIP> <server name>` into the node's `/etc/hosts`. |
 | `minSec` | `FLINT_NFS_MIN_SEC` for every NFS server. `krb5i` refuses `sec=sys` mounts. |
-| `allowedPrincipals` | `FLINT_NFS_GSS_PRINCIPALS`: who may establish a GSS context. The default is the nodes' machine principals, `host/*@<realm>` and `nfs/*@<realm>`. |
+| `allowedPrincipals` | `FLINT_NFS_GSS_PRINCIPALS`: who may establish a GSS context. The default is the nodes' machine principals (`host/*@<realm>`, `nfs/*@<realm>`) plus every principal `idmap` names. |
+| `idmap`, `machineIdentity`, `anonIdentity` | `FLINT_NFS_GSS_IDMAP` and `FLINT_NFS_GSS_ANON`: which uid, gid and groups a Kerberos caller is. |
+| `nfs.enforcePermissions` | `FLINT_NFS_ENFORCE_PERMISSIONS` for every NFS server (`warn` by default, `enforce`, `off`). |
 
 ## Who may connect
 
@@ -68,9 +70,49 @@ create them. Anyone allowed to make a `KerberosPrincipal` in the realm can
 make a `host/whatever` principal. Keep the realm's `allowedNamespaces` to
 trusted namespaces (the default, `Same`, allows only the realm's own).
 
-Not done yet: mapping principals to uids (so users get their own
-permissions and file ownership works under Kerberos), and restricting a
-volume to the nodes Kubernetes published it to.
+## Who a caller is
+
+`nfs.kerberos.idmap` maps principals to unix identities, the way knfsd's
+idmapping does:
+
+```yaml
+nfs:
+  enforcePermissions: enforce
+  kerberos:
+    idmap:
+    - principal: alice@CORP.EXAMPLE
+      uid: 1000
+      gid: 1000
+      groups: [100]
+```
+
+- **Matching:** rules are tried in order and the first match wins. The
+  user rules come first, then the nodes' machine principals
+  (`machineIdentity`, `0:0`). The kernel client uses the machine principal
+  for root and for lease traffic. The server does not squash root, so
+  that is root, as an AUTH_SYS root is.
+- **Unmatched principals** are `anonIdentity` (`65534:65534`, nobody),
+  never an unchecked caller. A malformed map makes everyone nobody.
+- **What a mapped caller gets:** a Kerberos caller is permission-checked
+  as its identity and owns what it creates. This is the first identity
+  the server can trust. An AUTH_SYS uid is whatever the client claims,
+  while this one is proven by a ticket. With `nfs.enforcePermissions:
+  enforce`, the checks deny (by default they only log).
+- **Users on the node:** a process that is not root needs its own ticket
+  on the node, in `/tmp/krb5cc_<uid>`, where `rpc.gssd` looks.
+- **What a user with no usable credential sees:** a user with no ticket, or
+  whose principal the allowlist refuses, gets "Permission denied" on files
+  and "Stale file handle" on the mount's root directory. `rpc.gssd` hands
+  the kernel EACCES; the Linux client (6.8) reports the root directory as
+  ESTALE. knfsd gives exactly the same two errors (measured side by side).
+  It is the client's report, not the server's: without a ticket, no
+  request reaches the server at all.
+
+Not done yet:
+- reading identities from a directory (LDAP or SSSD, as idmapd does) in
+  place of the explicit list;
+- root squashing;
+- restricting a volume to the nodes Kubernetes published it to.
 
 ## Why the hosts entry
 
@@ -123,4 +165,6 @@ pNFS volumes are not covered.
   `sec=sys` mount is refused by the floor. In the same run, a user
   principal with a real ticket (alice, uid 1000 on a node) is refused by
   the allowlist, while root on that node (the machine principal) still
-  reads the volume. CI runs it after the nfs-only suite.
+  reads the volume. With permissions enforced, bob (mapped to 2000:2000)
+  creates a file that root sees owned by 2000:2000, and is denied root's
+  0600 file. CI runs it after the nfs-only suite.

@@ -158,8 +158,26 @@ NFS namespace, the servers' keytab Secret.
 {{- if $k.allowedPrincipals -}}
 {{- join "," $k.allowedPrincipals -}}
 {{- else -}}
-{{- printf "host/*@%s,nfs/*@%s" $k.realm $k.realm -}}
+{{- $list := list (printf "host/*@%s" $k.realm) (printf "nfs/*@%s" $k.realm) -}}
+{{- range $k.idmap }}{{ $list = append $list .principal }}{{ end -}}
+{{- join "," $list -}}
 {{- end -}}
+{{- end }}
+
+{{/*
+FLINT_NFS_GSS_IDMAP: the user rules, then the machine principals.
+*/}}
+{{- define "flint-csi-driver-chart.nfsKrb5Idmap" -}}
+{{- $k := .Values.nfs.kerberos -}}
+{{- $rules := list -}}
+{{- range $k.idmap -}}
+{{- $id := printf "%s=%v:%v" (required "nfs.kerberos.idmap[].principal" .principal) (required "nfs.kerberos.idmap[].uid" .uid) (required "nfs.kerberos.idmap[].gid" .gid) -}}
+{{- if .groups }}{{ $id = printf "%s:%s" $id (join ";" .groups) }}{{ end -}}
+{{- $rules = append $rules $id -}}
+{{- end -}}
+{{- $rules = append $rules (printf "host/*@%s=%s" $k.realm $k.machineIdentity) -}}
+{{- $rules = append $rules (printf "nfs/*@%s=%s" $k.realm $k.machineIdentity) -}}
+{{- join "," $rules -}}
 {{- end }}
 
 {{- define "flint-csi-driver-chart.nfsKrb5KeytabSecret" -}}

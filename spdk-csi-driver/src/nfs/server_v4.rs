@@ -875,8 +875,15 @@ async fn handle_compound(
     };
     // AUTH_SYS (uid, gid) — file-creating ops stamp it onto the backing
     // object so ownership round-trips (postgres-class workloads check it).
-    let unix_cred = call.cred.unix_uid_gid();
-    let unix_gids = call.cred.unix_gids();
+    // A Kerberos caller is its principal's identity under
+    // FLINT_NFS_GSS_IDMAP (nobody when no rule names it), so it is
+    // permission-checked and owns what it creates.
+    let (unix_cred, unix_gids) = crate::nfs::gss_idmap::compound_identity(
+        gss.and_then(|v| v.client_principal.as_deref()),
+        call.cred.unix_uid_gid(),
+        call.cred.unix_gids(),
+        crate::nfs::gss_idmap::GssIdmap::global(),
+    );
 
     // Dispatch to COMPOUND handler
     let compound_resp = dispatcher

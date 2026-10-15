@@ -1304,11 +1304,24 @@ impl IoOperationHandler {
                                 // instead of the caller's uid, silently.
                                 // The wrong answer is worse than the refusal,
                                 // so at minimum it must be visible.
-                                if let Ok(Err(e)) = tokio::task::spawn_blocking(move || {
+                                let stamped = tokio::task::spawn_blocking(move || {
                                     std::os::unix::fs::chown(&p, want_uid, want_gid)
                                 })
-                                .await
-                                {
+                                .await;
+                                if let Ok(Ok(())) = stamped {
+                                    // A chown is a mutation like any other:
+                                    // bump, or the lstat cached at create
+                                    // (owned by the SERVER) stays valid and
+                                    // GETATTR, in this very compound, tells
+                                    // the client the server owns the file.
+                                    // Measured: a krb5 caller mapped to
+                                    // 2000 saw 65532:65532, and the client's
+                                    // sticky-directory rule
+                                    // (fs.protected_regular) then refused
+                                    // its own create with EACCES.
+                                    crate::nfs::v4::change_counter::bump_path(&file_path);
+                                }
+                                if let Ok(Err(e)) = stamped {
                                     warn!(
                                         "OPEN(create): chown {:?} to {:?}:{:?} failed: {} — \
                                          the file is owned by the SERVER, not the caller. \
