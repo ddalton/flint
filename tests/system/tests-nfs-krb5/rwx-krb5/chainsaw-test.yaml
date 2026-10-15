@@ -9,7 +9,9 @@ spec:
     nodes (their rpc.gssd with keys from krb5-operator, the server's
     nfs/flint-nfs.flint-system.svc.cluster.local key, the node's hosts
     entry for the server's ClusterIP), and the pods share files; a sec=sys
-    mount is refused by the servers' krb5i floor.
+    mount is refused by the servers' krb5i floor; a user principal with a
+    real ticket (alice, uid 1000 on a node) is refused by the servers'
+    principal allowlist, while the node's machine principal is not.
   steps:
   - name: volumes-and-pods
     try:
@@ -68,3 +70,54 @@ spec:
             sleep 3
           done
           echo "FAIL: no FailedMount for sys-pod"; kubectl -n "$NAMESPACE" describe pod sys-pod; exit 1
+  - name: a-user-principal-is-refused
+    try:
+    - script:
+        timeout: 4m
+        content: |
+          set -eu
+          # alice@FLINT.TEST: a principal of the realm, not a machine's.
+          cat <<YAML | kubectl apply -f -
+          apiVersion: krb5.ddalton.dev/v1alpha1
+          kind: KerberosPrincipal
+          metadata:
+            name: rwx-krb5-alice
+            namespace: flint-system
+          spec:
+            realmRef: flint
+            principals: [alice]
+          YAML
+          kubectl -n flint-system wait kerberosprincipal/rwx-krb5-alice --timeout=2m \
+            --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True
+          node=$(kubectl -n "$NAMESPACE" get pod krb5-a -o jsonpath='{.spec.nodeName}')
+          # Her ticket in uid 1000's ccache on that node, where rpc.gssd
+          # looks for it.
+          kubectl -n flint-system get secret rwx-krb5-alice -o jsonpath='{.data.krb5\.keytab}' | base64 -d |
+            docker exec -i "$node" sh -c 'cat > /tmp/alice.keytab'
+          docker exec "$node" sh -c 'kinit -k -t /tmp/alice.keytab -c /tmp/krb5cc_1000 alice@FLINT.TEST &&
+            chown 1000 /tmp/krb5cc_1000 && klist -c /tmp/krb5cc_1000'
+          sed "s/NODE/$node/" alice-pod.yaml.tpl | kubectl -n "$NAMESPACE" apply -f -
+          kubectl -n "$NAMESPACE" wait pod/alice-pod --for=condition=Ready --timeout=2m
+          if kubectl -n "$NAMESPACE" exec alice-pod -- ls /data 2>/tmp/alice.err; then
+            echo "FAIL: alice reads the volume"; exit 1
+          fi
+          cat /tmp/alice.err
+          # The server says why: alice is not on its list.
+          for i in $(seq 30); do
+            if kubectl -n flint-system logs -l app=flint-nfs-server --tail=-1 | grep -F 'alice@FLINT.TEST is not in FLINT_NFS_GSS_PRINCIPALS'; then
+              # root on the same node (the machine principal) still reads it.
+              [ "$(kubectl -n "$NAMESPACE" exec krb5-a -- cat /data/a)" = from-a ]
+              echo PASS; exit 0
+            fi
+            sleep 2
+          done
+          echo "FAIL: the server did not refuse alice by its allowlist"
+          kubectl -n flint-system logs -l app=flint-nfs-server --tail=40; exit 1
+    finally:
+    - script:
+        content: |
+          # The pod holds krb5-pvc: left, it blocks the PVC's deletion.
+          kubectl -n "$NAMESPACE" delete pod alice-pod --ignore-not-found --grace-period=1
+          kubectl -n flint-system delete kerberosprincipal rwx-krb5-alice --ignore-not-found
+          node=$(kubectl -n "$NAMESPACE" get pod krb5-a -o jsonpath='{.spec.nodeName}' 2>/dev/null) &&
+            docker exec "$node" rm -f /tmp/alice.keytab /tmp/krb5cc_1000 || true

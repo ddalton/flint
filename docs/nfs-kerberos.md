@@ -32,6 +32,45 @@ set `sec=` in any class's `mountOptions`.
 | `KerberosNodeKeytab <release>-nfs-clients` | `host/` and `nfs/<node>` for every selected node, installed into `/etc/krb5.keytab` by the operator's DaemonSet, along with the realm's `krb5.conf`. That `krb5.conf` maps `.svc.<clusterDomain>` to the realm, which `rpc.gssd` needs in order to pick the server's realm. |
 | node plugin | Before a `sec=krb5*` mount, writes `<volume ClusterIP> <server name>` into the node's `/etc/hosts`. |
 | `minSec` | `FLINT_NFS_MIN_SEC` for every NFS server. `krb5i` refuses `sec=sys` mounts. |
+| `allowedPrincipals` | `FLINT_NFS_GSS_PRINCIPALS`: who may establish a GSS context. The default is the nodes' machine principals, `host/*@<realm>` and `nfs/*@<realm>`. |
+
+## Who may connect
+
+A valid ticket proves who a caller is, not that it may use the volume.
+flint's server maps no principal to a uid, and a call that carries no uid
+is not permission-checked. So without a list, every principal of the realm
+that can get a ticket for `nfs/<server name>` has the whole volume: users,
+services, anything.
+
+Servers like knfsd, NetApp and Isilon handle this in three layers:
+
+1. **Map principals to identities.** idmapd or SSSD, or the server's
+   name-mapping rules, turn `user@REALM` into a uid. A principal that maps
+   to nothing becomes `nobody`, never full access.
+2. **Treat machine principals specially.** `nfs/`, `host/` and
+   `root/<host>` are a client machine (knfsd maps them to root, and
+   `root_squash` then applies).
+3. **Restrict each export** to the security flavors (`sec=`) and client
+   hosts it allows.
+
+The allowlist is the part of that which decides who connects. Only the
+listed principals may establish a context; anyone else's `RPCSEC_GSS_INIT`
+fails (logged as `<principal> is not in FLINT_NFS_GSS_PRINCIPALS`), and
+the client gets EACCES.
+
+Patterns look like `<component>[/<component>...]@<REALM>`. `*` matches
+within one component, the number of components must match, and the realm
+is always spelled out, because a wildcard realm would admit a cross-realm
+trust. A malformed list refuses everyone rather than failing open.
+
+The list names principals, so it is only as good as control over who can
+create them. Anyone allowed to make a `KerberosPrincipal` in the realm can
+make a `host/whatever` principal. Keep the realm's `allowedNamespaces` to
+trusted namespaces (the default, `Same`, allows only the realm's own).
+
+Not done yet: mapping principals to uids (so users get their own
+permissions and file ownership works under Kerberos), and restricting a
+volume to the nodes Kubernetes published it to.
 
 ## Why the hosts entry
 
@@ -63,7 +102,8 @@ Kerberos and leaves the rest of the file alone.
 ## What Kerberos gives here
 
 The server maps no principal to a uid, because requests under Kerberos
-carry none. So Kerberos authenticates the node and protects the wire
+carry none. So Kerberos authenticates the node (and, with the allowlist,
+only nodes connect) and protects the wire
 (`krb5i` for integrity, `krb5p` for privacy), but it does not give per-user
 file permissions. Keep ownership-sensitive workloads, such as postgres, on
 `sec=sys`. A `minSec` floor makes every volume Kerberos. `krb5p` cannot be
@@ -80,5 +120,7 @@ pNFS volumes are not covered.
 - **kind:** `KRB5=1 tests/system/kind-nfs-only.sh` uses kind nodes with
   `rpc.gssd`, krb5-operator, and `tests-nfs-krb5/`. There, an RWX volume
   mounts with `sec=krb5i` on two nodes and the pods share files, while a
-  `sec=sys` mount is refused by the floor. CI runs it after the nfs-only
-  suite.
+  `sec=sys` mount is refused by the floor. In the same run, a user
+  principal with a real ticket (alice, uid 1000 on a node) is refused by
+  the allowlist, while root on that node (the machine principal) still
+  reads the volume. CI runs it after the nfs-only suite.

@@ -153,6 +153,8 @@ spec:
             # Kerberos (nfs.kerberos): the servers' keytab, nfs/<serverName>.
             - name: NFS_KRB5_KEYTAB_SECRET
               value: {{ include "flint-csi-driver-chart.nfsKrb5KeytabSecret" . | quote }}
+            - name: NFS_GSS_PRINCIPALS
+              value: {{ include "flint-csi-driver-chart.nfsKrb5Principals" . | quote }}
             {{- with .Values.nfs.kerberos.minSec }}
             - name: NFS_MIN_SEC
               value: {{ . | quote }}
