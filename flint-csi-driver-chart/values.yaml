@@ -352,6 +352,62 @@ nfs:
   # Image pull secrets for NFS server (if registry requires authentication)
   imagePullSecrets: []
 
+  # Kerberos for RWX volumes (sec=krb5, krb5i, krb5p), with principals and
+  # keytabs from krb5-operator (github.com/ddalton/krb5-operator, 0.3+),
+  # which must be installed, with a KerberosRealm.
+  #
+  # - Every NFS server answers to ONE principal, nfs/<serverName>: the
+  #   chart makes it (KerberosPrincipal) and every server pod mounts its
+  #   keytab. Before a Kerberos mount, the node plugin maps the volume's
+  #   ClusterIP to serverName in the node's /etc/hosts: rpc.gssd names the
+  #   server from that IP through the node's resolver, which knows no
+  #   cluster DNS.
+  # - Nodes need their own keys (host/, nfs/<node>) for rpc.gssd: a
+  #   KerberosNodeKeytab (cluster-scoped) installs them into
+  #   /etc/krb5.keytab, with the realm's krb5.conf.
+  # - Node prerequisites: nfs-utils with rpc-gssd running. Its systemd
+  #   unit only starts when /etc/krb5.keytab exists: start (or restart) it
+  #   once the keytab is installed.
+  # - Mount with the StorageClass below (mountOptions sec=<sec>).
+  #
+  # Identity: the server maps no principal to a uid (requests under
+  # Kerberos carry none), so Kerberos authenticates the node and protects
+  # the wire (krb5i: integrity, krb5p: privacy); it does not give
+  # per-user file permissions. Keep ownership-sensitive workloads on sec=sys.
+  kerberos:
+    enabled: false
+    # The realm (EXAMPLE.COM), the KerberosRealm (krb5-operator) and its
+    # namespace (default: the release's; it must allow the NFS namespace).
+    realm: ""
+    realmRef: ""
+    realmNamespace: ""
+    # The name every NFS server goes by (default
+    # flint-nfs.<NFS namespace>.svc.<clusterDomain>). Nodes' krb5.conf maps
+    # .svc.<clusterDomain> to the realm (krb5-operator writes that mapping).
+    serverName: ""
+    clusterDomain: cluster.local
+    # FLINT_NFS_MIN_SEC for every NFS server: "krb5" or "krb5i" refuses
+    # sec=sys mounts of every RWX volume. Empty: no floor.
+    minSec: ""
+    # Delete or Retain the principals when the release is uninstalled.
+    deletionPolicy: Delete
+    storageClass:
+      create: true
+      name: flint-krb5
+      # krb5, krb5i or krb5p.
+      sec: krb5i
+    # Node keys (KerberosNodeKeytab, cluster-scoped).
+    nodeKeytab:
+      create: true
+      # The nodes that mount with Kerberos (every node: {}).
+      nodeSelector: {}
+      tolerations: []
+      # Appended to node hostnames without a dot.
+      domain: ""
+      keytabPath: /etc/krb5.keytab
+      # The realm's krb5.conf for rpc.gssd ("" leaves the node's alone).
+      krb5ConfPath: /etc/krb5.conf
+
 # pNFS support (Parallel NFS, RFC 8881) — opt-in.
 #
 # When enabled, StorageClasses with `parameters.layout: pnfs` are

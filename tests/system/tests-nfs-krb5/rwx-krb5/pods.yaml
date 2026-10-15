@@ -1,0 +1,73 @@
+# Two pods on different nodes share the Kerberos volume; each writes its
+# file and reads the other's.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: krb5-a
+  labels:
+    app: krb5-rwx
+spec:
+  terminationGracePeriodSeconds: 1
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app: krb5-rwx
+        topologyKey: kubernetes.io/hostname
+  containers:
+  - name: c
+    image: busybox
+    command: [sh, -c, "echo from-a > /data/a && sleep 3600"]
+    volumeMounts:
+    - name: data
+      mountPath: /data
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: krb5-pvc
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: krb5-b
+  labels:
+    app: krb5-rwx
+spec:
+  terminationGracePeriodSeconds: 1
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app: krb5-rwx
+        topologyKey: kubernetes.io/hostname
+  containers:
+  - name: c
+    image: busybox
+    command: [sh, -c, "echo from-b > /data/b && sleep 3600"]
+    volumeMounts:
+    - name: data
+      mountPath: /data
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: krb5-pvc
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sys-pod
+spec:
+  terminationGracePeriodSeconds: 1
+  containers:
+  - name: c
+    image: busybox
+    command: [sh, -c, "sleep 3600"]
+    volumeMounts:
+    - name: data
+      mountPath: /data
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: sys-pvc

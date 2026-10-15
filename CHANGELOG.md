@@ -14,6 +14,21 @@ covered by the stability guarantee.
 
 ### Added
 
+- **Kerberos for RWX NFS volumes, with keys from krb5-operator**
+  (2026-10-15). Chart `nfs.kerberos`: one server principal
+  (`nfs/flint-nfs.<ns>.svc.<clusterDomain>`, a KerberosPrincipal) whose
+  keytab every NFS server pod mounts (`KRB5_KTNAME`), node keys
+  (KerberosNodeKeytab: `host/` and `nfs/<node>` into `/etc/krb5.keytab`,
+  with the realm's krb5.conf), a `flint-krb5` StorageClass
+  (`mountOptions: sec=krb5i`), and an optional `FLINT_NFS_MIN_SEC` floor
+  (`minSec`). Before a `sec=krb5*` mount the node plugin maps the volume's
+  ClusterIP to the server name in the node's `/etc/hosts`: rpc.gssd names
+  the server from the mount address through the node's resolver, which
+  knows no cluster DNS (measured against nfs-utils 2.6.4: by IP or by a
+  cluster name the mount fails; with the entry it works). CI runs a kind
+  suite (`KRB5=1 kind-nfs-only.sh`): sec=krb5i RWX on two nodes, sys
+  refused by the floor. `docs/nfs-kerberos.md`.
+
 - **pNFS: a data server reachable over RPC-over-RDMA** (2026-10-12). A
   DS endpoint spelt `rdma://host:port` goes out in GETDEVICEINFO with
   netid `rdma` (RFC 8166/8267) while the MDS connection stays TCP; a bare

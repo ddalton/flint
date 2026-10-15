@@ -1,0 +1,23 @@
+# One RWX volume of the Kerberos class (mountOptions sec=krb5i), and one
+# of the plain class (sec=sys), which the servers' krb5i floor refuses.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: krb5-pvc
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: flint-krb5
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sys-pvc
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: flint-nfs

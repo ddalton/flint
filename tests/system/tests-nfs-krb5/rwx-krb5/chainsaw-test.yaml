@@ -1,0 +1,70 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/v0.2.15/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rwx-krb5
+spec:
+  description: >-
+    An RWX volume of the flint-krb5 class mounts with sec=krb5i on two
+    nodes (their rpc.gssd with keys from krb5-operator, the server's
+    nfs/flint-nfs.flint-system.svc.cluster.local key, the node's hosts
+    entry for the server's ClusterIP), and the pods share files; a sec=sys
+    mount is refused by the servers' krb5i floor.
+  steps:
+  - name: volumes-and-pods
+    try:
+    - apply:
+        file: pvcs.yaml
+    - apply:
+        file: pods.yaml
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: krb5-a
+          status:
+            phase: Running
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: krb5-b
+          status:
+            phase: Running
+  - name: kerberos-mounts-share-files
+    try:
+    - script:
+        content: |
+          set -eu
+          for p in krb5-a krb5-b; do
+            m=$(kubectl -n "$NAMESPACE" exec "$p" -- grep ' /data ' /proc/mounts)
+            echo "$p: $m"
+            case "$m" in *sec=krb5i*) ;; *) echo "FAIL: $p is not mounted with sec=krb5i"; exit 1 ;; esac
+          done
+          for i in $(seq 30); do
+            a=$(kubectl -n "$NAMESPACE" exec krb5-b -- cat /data/a 2>/dev/null || true)
+            b=$(kubectl -n "$NAMESPACE" exec krb5-a -- cat /data/b 2>/dev/null || true)
+            [ "$a" = from-a ] && [ "$b" = from-b ] && { echo PASS; exit 0; }
+            sleep 2
+          done
+          echo "FAIL: a=$a b=$b"; exit 1
+  - name: sys-refused-by-the-floor
+    try:
+    - script:
+        timeout: 4m
+        content: |
+          set -eu
+          # The sys volume's pod never runs: its mount is refused.
+          for i in $(seq 60); do
+            if kubectl -n "$NAMESPACE" get events --field-selector involvedObject.name=sys-pod,reason=FailedMount -o name | grep -q .; then
+              kubectl -n "$NAMESPACE" get events --field-selector involvedObject.name=sys-pod,reason=FailedMount \
+                -o jsonpath='{.items[0].message}'; echo
+              phase=$(kubectl -n "$NAMESPACE" get pod sys-pod -o jsonpath='{.status.phase}')
+              [ "$phase" != Running ] || { echo "FAIL: sys-pod is Running"; exit 1; }
+              echo PASS; exit 0
+            fi
+            sleep 3
+          done
+          echo "FAIL: no FailedMount for sys-pod"; kubectl -n "$NAMESPACE" describe pod sys-pod; exit 1

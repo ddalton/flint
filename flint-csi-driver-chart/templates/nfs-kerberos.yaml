@@ -1,0 +1,79 @@
+{{- if not .Values.lite.enabled }}{{- /* suppressed by the flint-lite profile — see templates/lite.yaml */}}
+{{- if and .Values.nfs.enabled .Values.nfs.kerberos.enabled }}
+{{- $k := .Values.nfs.kerberos }}
+{{- $realmRef := required "nfs.kerberos.realmRef: the KerberosRealm (krb5-operator)" $k.realmRef }}
+{{- $realm := required "nfs.kerberos.realm: the realm (EXAMPLE.COM)" $k.realm }}
+{{- $realmNs := $k.realmNamespace | default .Release.Namespace }}
+{{- if not (has $k.storageClass.sec (list "krb5" "krb5i" "krb5p")) }}
+{{- fail "nfs.kerberos.storageClass.sec: krb5, krb5i or krb5p" }}
+{{- end }}
+# Kerberos for RWX NFS volumes (values nfs.kerberos). The NFS servers'
+# principal: every server pod mounts this keytab.
+apiVersion: krb5.ddalton.dev/v1alpha1
+kind: KerberosPrincipal
+metadata:
+  name: flint-nfs-server
+  namespace: {{ include "flint-csi-driver-chart.nfsNamespace" . }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+spec:
+  realmRef: {{ $realmRef }}
+  realmNamespace: {{ $realmNs }}
+  principals:
+  - nfs/{{ include "flint-csi-driver-chart.nfsKrb5ServerName" . }}@{{ $realm }}
+  secretName: {{ include "flint-csi-driver-chart.nfsKrb5KeytabSecret" . }}
+  deletionPolicy: {{ $k.deletionPolicy }}
+{{- if $k.nodeKeytab.create }}
+---
+# The nodes' machine credentials for rpc.gssd (host/ and nfs/<node>), in
+# their /etc/krb5.keytab, with the realm's krb5.conf.
+apiVersion: krb5.ddalton.dev/v1alpha1
+kind: KerberosNodeKeytab
+metadata:
+  name: {{ include "flint-csi-driver-chart.fullname" . | trunc 30 | trimSuffix "-" }}-nfs-clients
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+spec:
+  realmRef: {{ $realmRef }}
+  realmNamespace: {{ $realmNs }}
+  services: [host, nfs]
+  {{- with $k.nodeKeytab.nodeSelector }}
+  nodeSelector:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with $k.nodeKeytab.tolerations }}
+  tolerations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with $k.nodeKeytab.domain }}
+  domain: {{ . }}
+  {{- end }}
+  keytabPath: {{ $k.nodeKeytab.keytabPath }}
+  {{- with $k.nodeKeytab.krb5ConfPath }}
+  krb5ConfPath: {{ . }}
+  {{- end }}
+  deletionPolicy: {{ $k.deletionPolicy }}
+{{- end }}
+{{- if $k.storageClass.create }}
+---
+# RWX volumes mounted with Kerberos.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ $k.storageClass.name }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+provisioner: {{ .Values.driver.name }}
+reclaimPolicy: {{ .Values.storageClass.reclaimPolicy }}
+allowVolumeExpansion: {{ .Values.storageClass.allowVolumeExpansion }}
+volumeBindingMode: WaitForFirstConsumer
+mountOptions:
+- sec={{ $k.storageClass.sec }}
+parameters:
+  numReplicas: "{{ .Values.storageClass.parameters.numReplicas }}"
+  autoRebuild: "{{ .Values.storageClass.parameters.autoRebuild }}"
+  thinProvision: "{{ .Values.storageClass.parameters.thinProvision }}"
+  nfsEmptyDir: "{{ .Values.storageClass.parameters.nfsEmptyDir | default "false" }}"
+{{- end }}
+{{- end }}
+{{- end }}{{- /* end lite-profile guard */}}

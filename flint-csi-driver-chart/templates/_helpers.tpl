@@ -140,3 +140,35 @@ branch renders it as a YAML list.
 {{- define "flint-csi-driver-chart.sidecarPrefix" -}}
 {{- include "flint-csi-driver-chart.registryPrefix" (dict "root" . "registry" .Values.csiSidecars.registry) }}{{ .Values.csiSidecars.repository }}
 {{- end }}
+
+{{/*
+Kerberos for RWX NFS (nfs.kerberos): the name every NFS server goes by, the
+NFS namespace, the servers' keytab Secret.
+*/}}
+{{- define "flint-csi-driver-chart.nfsNamespace" -}}
+{{- .Values.nfs.namespace | default .Release.Namespace -}}
+{{- end }}
+
+{{- define "flint-csi-driver-chart.nfsKrb5ServerName" -}}
+{{- .Values.nfs.kerberos.serverName | default (printf "flint-nfs.%s.svc.%s" (include "flint-csi-driver-chart.nfsNamespace" .) .Values.nfs.kerberos.clusterDomain) -}}
+{{- end }}
+
+{{- define "flint-csi-driver-chart.nfsKrb5KeytabSecret" -}}
+flint-nfs-krb5-keytab
+{{- end }}
+
+{{- define "flint-csi-driver-chart.nfsKrb5NodeEnv" -}}
+{{- if and .Values.nfs.enabled .Values.nfs.kerberos.enabled }}
+- name: FLINT_NFS_KRB5_SERVER_NAME
+  value: {{ include "flint-csi-driver-chart.nfsKrb5ServerName" . | quote }}
+- name: FLINT_NFS_KRB5_HOSTS_FILE
+  value: /host/etc/hosts
+{{- end }}
+{{- end }}
+
+{{- define "flint-csi-driver-chart.nfsKrb5NodeMounts" -}}
+{{- if and .Values.nfs.enabled .Values.nfs.kerberos.enabled }}
+- name: host-etc-hosts
+  mountPath: /host/etc/hosts
+{{- end }}
+{{- end }}

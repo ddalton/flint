@@ -125,6 +125,12 @@ pub struct NfsConfig {
     /// A data-path tax measured at multiples of the request latency
     /// under bulk load — debugging only, never the default.
     pub verbose: bool,
+    /// The Secret with the servers' Kerberos keytab (`nfs/<server name>`,
+    /// from krb5-operator), mounted into every NFS server pod
+    /// (`NFS_KRB5_KEYTAB_SECRET`; chart `nfs.kerberos`).
+    pub krb5_keytab_secret: Option<String>,
+    /// `FLINT_NFS_MIN_SEC` for the NFS servers (`NFS_MIN_SEC`).
+    pub min_sec: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -191,6 +197,8 @@ impl NfsConfig {
             verbose: env::var("NFS_VERBOSE")
                 .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
                 .unwrap_or(false),
+            krb5_keytab_secret: env::var("NFS_KRB5_KEYTAB_SECRET").ok().filter(|s| !s.is_empty()),
+            min_sec: env::var("NFS_MIN_SEC").ok().filter(|s| !s.is_empty()),
         };
         
         eprintln!("✅ [NFS] NFS support ENABLED");
@@ -429,6 +437,11 @@ pub async fn create_nfs_server_pod(
     };
     
     // Build NFS server pod
+    // Kerberos (chart nfs.kerberos): the servers' keytab and sec floor.
+    let (krb5_env, krb5_volumes, krb5_mounts) = crate::nfs_krb5::server_pod_parts(
+        config.krb5_keytab_secret.as_deref(),
+        config.min_sec.as_deref(),
+    );
     let pod = Pod {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(pod_name.clone()),
@@ -474,11 +487,15 @@ pub async fn create_nfs_server_pod(
                     protocol: Some("TCP".to_string()),
                     ..Default::default()
                 }]),
-                volume_mounts: Some(vec![VolumeMount {
-                    name: "volume-data".to_string(),
-                    mount_path: "/mnt/volume".to_string(),
-                    ..Default::default()
-                }]),
+                volume_mounts: Some(
+                    std::iter::once(VolumeMount {
+                        name: "volume-data".to_string(),
+                        mount_path: "/mnt/volume".to_string(),
+                        ..Default::default()
+                    })
+                    .chain(krb5_mounts)
+                    .collect(),
+                ),
                 // Stable per-volume file-handle instance id: without it the
                 // server mints a boot-time id and rejects every handle held
                 // by clients across a pod bounce (permanent EBADHANDLE on
@@ -498,7 +515,10 @@ pub async fn create_nfs_server_pod(
                         value: Some("1".to_string()),
                         ..Default::default()
                     },
-                ]),
+                ]
+                .into_iter()
+                .chain(krb5_env)
+                .collect()),
                 resources: Some(resources),
                 // Non-root NFS server (F26 §12 C3, decided 2026-07-19).
                 // The caps activate via FILE capabilities on the
@@ -528,7 +548,7 @@ pub async fn create_nfs_server_pod(
                 ..Default::default()
             }],
             
-            volumes: Some(vec![Volume {
+            volumes: Some(std::iter::once(Volume {
                 name: "volume-data".to_string(),
                 persistent_volume_claim: if backend == NfsBackend::Pvc {
                     Some(PersistentVolumeClaimVolumeSource {
@@ -547,7 +567,9 @@ pub async fn create_nfs_server_pod(
                     None
                 },
                 ..Default::default()
-            }]),
+            })
+            .chain(krb5_volumes)
+            .collect()),
             
             restart_policy: Some("Always".to_string()),
             
