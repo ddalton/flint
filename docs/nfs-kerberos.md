@@ -100,6 +100,13 @@ nfs:
   enforce`, the checks deny (by default they only log).
 - **Users on the node:** a process that is not root needs its own ticket
   on the node, in `/tmp/krb5cc_<uid>`, where `rpc.gssd` looks.
+- **What a user with no usable credential sees:** a user with no ticket, or
+  whose principal the allowlist refuses, gets "Permission denied" on files
+  and "Stale file handle" on the mount's root directory. `rpc.gssd` hands
+  the kernel EACCES; the Linux client (6.8) reports the root directory as
+  ESTALE. knfsd gives exactly the same two errors (measured side by side).
+  It is the client's report, not the server's: without a ticket, no
+  request reaches the server at all.
 
 Not done yet:
 - reading identities from a directory (LDAP or SSSD, as idmapd does) in
