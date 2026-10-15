@@ -1,0 +1,63 @@
+START 2026-10-14T20:49:58Z tla-mc 0.1.2 192 cpus; LeanP1.tla c1dcb658
+NEW LeanP1AckCap rc=0 2026-10-14T20:51:20Z LeanP1AckCap                       OK-HOLDS     exp=HOLDS                        | No error has been found                                    | 90634552 states generated, 31916163 distinct states found. Depth 33 | 82s
+NEW LeanP1ResHolds rc=0 2026-10-14T20:54:33Z LeanP1ResHolds                     OK-HOLDS     exp=HOLDS                        | No error has been found                                    | 311381738 states generated, 88776330 distinct states found. Depth 39 | 192s
+NEW LeanP1DeposeNoAgeHolds rc=0 2026-10-14T20:55:18Z LeanP1DeposeNoAgeHolds             OK-HOLDS     exp=HOLDS                        | No error has been found                                    | 9630092 states generated, 2725409 distinct states found. Depth 32 | 45s
+NEW LeanP1AckWithheldHolds rc=1 2026-10-14T21:08:48Z LeanP1AckWithheldHolds             MISMATCH     exp=HOLDS                        | Error: Action property AK1 is violated by the last step ab | 1441408831 states generated, 483553704 distinct states found. Depth 21 | 810s
+NEW LeanP1DeposeHolds rc=0 2026-10-14T21:10:11Z LeanP1DeposeHolds                  OK-HOLDS     exp=HOLDS                        | No error has been found                                    | 70433167 states generated, 18691838 distinct states found. Depth 36 | 83s
+NEW LeanP1DeposeAck rc=1 2026-10-14T21:12:32Z LeanP1DeposeAck                    MISMATCH     exp=HOLDS                        | Error: Action property AK1 is violated by the last step ab | 196103039 states generated, 67949883 distinct states found. Depth 17 | 141s
+NEW LeanP1AckHolds1 rc=1 2026-10-14T21:13:26Z LeanP1AckHolds1                    MISMATCH     exp=HOLDS                        | Error: Action property AK1 is violated by the last step ab | 36600236 states generated, 14328539 distinct states found. Depth 15 | 54s
+NEW LeanP1AckHolds2 rc=1 2026-10-14T21:14:07Z LeanP1AckHolds2                    MISMATCH     exp=HOLDS                        | Error: expected a set, got B                               | 0 states generated, 0 distinct states found. Depth 0 | 41s
+LANE2 START 2026-10-14T21:15:51Z LeanP1.tla 66e2395f
+P3Age-AN5-NR5 No error has been found 1080412937 distinct states found. Depth 32 
+NEW2 LeanP1AckCap rc=0 2026-10-14T21:17:12Z LeanP1AckCap                       OK-HOLDS     exp=HOLDS                        | No error has been found                                    | 90634552 states generated, 31916163 distinct states found. Depth 33 | 81s
+PHASE1 rc=1 2026-10-14T21:32:48Z leanp1 gate: 83 world(s) run, 81 as expected, 2 not: LeanP1VerifyOff LeanP1AckIgnoresWithheld
+VERIFYOFF RERUN 2026-10-14T21:40:31Z leanp1 gate: 1 world(s) run, 1 as expected, 0 not: -
+LANE3 stopped phase 2 (runner.sh): parent 6467, gate 41635 21:41:08Z
+LANE3 stopped lane 2's HOLDS loop: parent 34451, gate 37485 21:41:08Z
+LANE3 START 2026-10-14T21:41:13Z LeanP1.tla 66e2395f
+LANE4 stopped AckIgnoresWithheld (lane 2, 4 workers): 34466
+34543 21:48:37Z
+LANE5 stopped meta-LeanP1DeposeAck: 48869 21:50:46Z
+LANE5 stopped meta-LeanP1AckWithheldHolds: 48868 21:50:46Z
+LANE5 stopped lane 4's main loop (AckHolds2 alone, phase 2c): 54112
+54292
+LANE3 NEW 2026-10-14T21:50:54Z leanp1 gate: 4 world(s) run, 0 as expected, 4 not: LeanP1AckHolds1 LeanP1AckHolds2 LeanP1AckWithheldHolds LeanP1DeposeAck
+LANE5 lane 3 ended 2026-10-14T21:50:56Z: leanp1 gate: 4 world(s) run, 0 as expected, 4 not: LeanP1AckHolds1 LeanP1AckHolds2 LeanP1AckWithheldHolds LeanP1DeposeAck
+LANE5 stopped lane 3's script: 48801
+48845
+LANE5 START 2026-10-14T21:51:51Z LeanP1.tla 66e2395f
+CLEANUP 21:5x: stopped the rejected lane 5 (56060) and its Holds1p3b (56156/56161), lane 3s leftover Holds1p3b (56080/56082), lane 2s script (34463/34464); the queue is lane 5 (62677) alone
+PAUSED the mutant AckIgnoresWithheld (54353, SIGSTOP) 21:53:56Z: AckHolds1 alone on 192 cores (user)
+NEW5 LeanP1AckHolds1 rc=1 2026-10-14T21:55:17Z LeanP1AckHolds1                    MISMATCH     exp=HOLDS                        | Error: Action property AK1 is violated by the last step ab | 982583792 states generated, 359027712 distinct states found. Depth 22 | 206s 1 oom-kills so far
+LANE6 stopped lane 5's script: 62677
+63763
+LANE6 stopped the pn5 gate: 70735
+LANE6 stopped the pn5 checkers: 70737 21:59:51Z
+LANE6 stopped the pm4 gate: 54293
+LANE6 stopped the pm4 checkers: 54353 21:59:51Z
+LANE6 START 2026-10-14T22:00:10Z LeanP1.tla aacd05a4; Mem:             371           4         367           0           0         366
+LANE7 stopped lane 6's script: 75551
+75714
+LANE7 stopped the pm6 gate: 75715
+LANE7 stopped the pm6 checkers: 80489 22:14:29Z
+LANE7 START 2026-10-14T22:14:48Z LeanP1.tla d3d5290d; Mem:             371           4         367           0           0         366
+MUT7 LeanP1CarrierKeepsDelete rc=0 2026-10-14T22:17:05Z LeanP1CarrierKeepsDelete           OK-FIRES     exp=AK1                          | Error: Action property AK1 is violated by the last step ab | 966891625 states generated, 354179836 distinct states found. Depth 22 | 136s
+MUT7 LeanP1AckReadsOwnReport rc=0 2026-10-14T22:17:45Z LeanP1AckReadsOwnReport            OK-FIRES     exp=AK1                          | Error: Action property AK1 is violated by the last step ab | 39790048 states generated, 15368979 distinct states found. Depth 15 | 40s
+MUT7 LeanP1AckIgnoresUncited rc=0 2026-10-14T22:18:25Z LeanP1AckIgnoresUncited            OK-FIRES     exp=AK1                          | Error: Action property AK1 is violated by the last step ab | 40230213 states generated, 15498074 distinct states found. Depth 15 | 40s
+MUT7 LeanP1CarrierPerFold rc=0 2026-10-14T22:19:09Z LeanP1CarrierPerFold               OK-FIRES     exp=AK1                          | Error: Action property AK1 is violated by the last step ab | 78160044 states generated, 29526784 distinct states found. Depth 16 | 44s
+MUT7 LeanP1RequestAfterCarry rc=0 2026-10-14T22:19:50Z LeanP1RequestAfterCarry            OK-FIRES     exp=AK1                          | Error: Action property AK1 is violated by the last step ab | 55764230 states generated, 21324398 distinct states found. Depth 15 | 41s
+MUT7 LeanP1AckIgnoresWithheld rc=0 2026-10-14T22:25:02Z LeanP1AckIgnoresWithheld           OK-FIRES     exp=AK1                          | Error: Action property AK1 is violated by the last step ab | 1572557727 states generated, 529497553 distinct states found. Depth 21 | 312s
+NEW7 LeanP1AckHolds1 rc=0 2026-10-14T22:48:07Z LeanP1AckHolds1                    OK-HOLDS     exp=HOLDS                        | No error has been found                                    | 9349708495 states generated, 2916984743 distinct states found. Depth 43 | 1385s 1 oom-kills so far
+NEW7 LeanP1AckWithheldHolds rc=1 2026-10-14T23:29:29Z LeanP1AckWithheldHolds             MISMATCH     exp=HOLDS                        | Error: Action property AK1 is violated by the last step ab | 6935514538 states generated, 2194134435 distinct states found. Depth 25 | 2482s 1 oom-kills so far
+LANE8 stopped lane 7's script: 86822
+86925
+LANE8 stopped the pn7 gate: 129318
+LANE8 stopped the pn7 checkers: 129320 23:40:11Z
+LANE8 START 2026-10-14T23:40:40Z LeanP1.tla 4be149ab; Mem:             371           3         368           0           0         367
+MUT8 LeanP1AckIgnoresWithheld rc=0 2026-10-14T23:45:08Z LeanP1AckIgnoresWithheld           OK-FIRES     exp=AK1                          | Error: Action property AK1 is violated by the last step ab | 1361529486 states generated, 457865665 distinct states found. Depth 21 | 268s
+MUT8 LeanP1CarrierKeepsDelete rc=0 2026-10-14T23:47:14Z LeanP1CarrierKeepsDelete           OK-FIRES     exp=AK1                          | Error: Action property AK1 is violated by the last step ab | 864031318 states generated, 317557240 distinct states found. Depth 22 | 125s
+MUT8 LeanP1AckReadsOwnReport rc=0 2026-10-14T23:47:54Z LeanP1AckReadsOwnReport            OK-FIRES     exp=AK1                          | Error: Action property AK1 is violated by the last step ab | 41412631 states generated, 15978336 distinct states found. Depth 15 | 41s
+MUT8 LeanP1AckIgnoresUncited rc=0 2026-10-14T23:48:35Z LeanP1AckIgnoresUncited            OK-FIRES     exp=AK1                          | Error: Action property AK1 is violated by the last step ab | 42163756 states generated, 16222749 distinct states found. Depth 15 | 40s
+MUT8 LeanP1CarrierPerFold rc=0 2026-10-14T23:49:18Z LeanP1CarrierPerFold               OK-FIRES     exp=AK1                          | Error: Action property AK1 is violated by the last step ab | 75366513 states generated, 28577344 distinct states found. Depth 16 | 43s
+MUT8 LeanP1RequestAfterCarry rc=0 2026-10-14T23:49:59Z LeanP1RequestAfterCarry            OK-FIRES     exp=AK1                          | Error: Action property AK1 is violated by the last step ab | 48703296 states generated, 18764290 distinct states found. Depth 15 | 40s
+STOPPED DeposeAck 2026-10-15T00:07:53Z on 4be149ab: disk 60% and filling ~25 GB/min (queue spill), depth 23 not reached in 13 min; record = clean through depth 22, 741964626 distinct (user: wrap up). LANE8 ENDED; AckHolds2 not run (proof).

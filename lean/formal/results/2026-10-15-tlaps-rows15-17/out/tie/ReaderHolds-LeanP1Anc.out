@@ -1,0 +1,11 @@
+tla-mc: building a checker for LeanP1Anc (cache: /mnt/nvme/leanp1-anc4/cache-ReaderHolds-LeanP1Anc)
+tla-mc: built in 54.6s
+tla-mc: LeanP1Anc (32 variables, 0 symmetry permutations), 4 workers, generated engine; loaded in 0.007s
+progress: depth 24, 2206291 generated, 624554 distinct (0 fingerprint spills), 63669 on queue (0 on disk), 11.0s
+Model checking completed. No error has been found.
+3101946 states generated, 838613 distinct states found. Depth 33. Checked in 15.735s (53297 distinct/s).
+
+real	1m10.404s
+user	1m56.034s
+sys	0m1.081s
+rc=0 00:18:06Z

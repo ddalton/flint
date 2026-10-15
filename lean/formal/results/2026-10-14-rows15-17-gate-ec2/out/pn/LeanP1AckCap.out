@@ -1,0 +1,9 @@
+# tla-mc -compile -workers 48 -metadir /work/out/pn/meta-LeanP1AckCap -checkpoint 0 -fpmem 16000 -queue-mem 48000 -config /work/formal/LeanP1AckCap.cfg LeanP1.tla  (cwd /work/formal)
+tla-mc: building a checker for LeanP1 (cache: /work/out/pn/cache-LeanP1AckCap)
+tla-mc: built in 39.3s
+tla-mc: LeanP1 (31 variables, 0 symmetry permutations), 48 workers, generated engine; loaded in 0.004s
+progress: depth 21, 27225374 generated, 10729516 distinct (0 fingerprint spills), 3025870 on queue (0 on disk), 11.5s
+progress: depth 24, 51808119 generated, 19107774 distinct (0 fingerprint spills), 2497083 on queue (0 on disk), 22.8s
+progress: depth 27, 74243234 generated, 26807802 distinct (0 fingerprint spills), 2615461 on queue (0 on disk), 33.9s
+Model checking completed. No error has been found.
+90634552 states generated, 31916163 distinct states found. Depth 33. Checked in 42.580s (749561 distinct/s).

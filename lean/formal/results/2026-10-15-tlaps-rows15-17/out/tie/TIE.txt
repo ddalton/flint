@@ -1,0 +1,5 @@
+ReaderHolds EXACT | orig: 3101946 states generated, 838613 distinct states found No error has been found | anc: 3101946 states generated, 838613 distinct states found No error has been found
+DeposeNoAgeHolds EXACT | orig: 9630092 states generated, 2725409 distinct states found No error has been found | anc: 9630092 states generated, 2725409 distinct states found No error has been found
+FetchHolds EXACT | orig: 11552518 states generated, 3524707 distinct states found No error has been found | anc: 11552518 states generated, 3524707 distinct states found No error has been found
+ScopeHolds EXACT | orig: 25826396 states generated, 8284768 distinct states found No error has been found | anc: 25826396 states generated, 8284768 distinct states found No error has been found
+DeposeHolds EXACT | orig: 70433167 states generated, 18691838 distinct states found No error has been found | anc: 70433167 states generated, 18691838 distinct states found No error has been found

@@ -1,0 +1,23 @@
+# md5 of each LeanP1.tla span make-anc.py rewrites; re-pin (RECORD_SPANS=1)
+# only after reviewing the rewrite against the changed span.
+4273add0cb9f05ee34ba710d7ffb25f7 (* The boundary verbs' answer (row 15; `sentinel.rs`).
+5237c42ecd0022da6b17f8cd7791ef1d Checkout(s) ==
+9e6eaae925f2e6f4f19703943b46e5de Claim(s) ==
+98746eb03cf11b5a84417a575c0198b7 Collect(s) ==
+ebae00be991f9cf178180437cbe332c4 Consume(s) ==
+15e063d1cfc0254d6f9f42c9ec87796b Delete(s, p) ==
+1f5da2dd995be98d8f1c8bdb88658d97 Edit(s, p) ==
+a8ae0e350023d8417810dc09bd47d713 Finish(s) ==
+3bad53605c257cd08f51502257991d8f Install(s) ==
+19aaa479867257db8714eeda466686b2 PullOnly(s) ==
+382d011ed0b30c55fa96662971164bde RPullRead(s) ==
+b9c7e29bbd0614bd5f4b8d59e34faf34 RPullSync(s) ==
+ce362f7ae737aaf1abe99942d0f53baa RescopeBegin(s) ==
+143847a75eb452ce24732d6629bfbbae RescopeFirst(s) ==
+153485f09f5b1f3a386405e8c3a273f3 RescopeSecond(s) ==
+83b4b13db752db457a87122f322ee500 Restart(s) ==
+fc4f7c1f0a2001f9d45867e3c1e2d78c Scan(s) ==
+06e5bf49eb6acfdf53bbbd1fee51a5dd Skip(s) ==
+6e45d0c9d3656e56322981a7f824dc79 Sync(s) ==
+d6bfc0b7616f307f427778c75fc4a200 Upload(s, p) ==
+da89d84514d490d04a4bf9e9045b0071 Verify(s) ==

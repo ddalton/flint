@@ -1,0 +1,9 @@
+# tla-mc -compile -workers 46 -metadir /work/out/pn3/meta-LeanP1DeposeAck -checkpoint 0 -fpmem 16000 -queue-mem 40000 -config /work/formal2/LeanP1DeposeAck.cfg LeanP1.tla  (cwd /work/formal2)
+tla-mc: building a checker for LeanP1 (cache: /work/out/pn3/cache-LeanP1DeposeAck)
+tla-mc: built in 38.5s
+tla-mc: LeanP1 (31 variables, 0 symmetry permutations), 46 workers, generated engine; loaded in 0.004s
+progress: depth 15, 36649766 generated, 13111073 distinct (0 fingerprint spills), 6816390 on queue (0 on disk), 19.4s
+progress: depth 16, 72156564 generated, 25633032 distinct (0 fingerprint spills), 12521959 on queue (0 on disk), 39.2s
+progress: depth 17, 135296404 generated, 47604516 distinct (0 fingerprint spills), 21971484 on queue (0 on disk), 74.8s
+progress: depth 18, 245411363 generated, 85413633 distinct (0 fingerprint spills), 37809117 on queue (0 on disk), 138.8s
+progress: depth 19, 436255108 generated, 150439798 distinct (0 fingerprint spills), 65026165 on queue (22420341 on disk), 267.7s

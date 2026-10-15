@@ -1120,6 +1120,12 @@ impl Syncer {
                                 .filter(|c| &c.pending_id == id)
                                 .unwrap_or_else(|| Carrier { pending_id: id.clone(), ..Default::default() });
                             c.paths.extend(classified.uploads.iter().chain(&classified.deletes).cloned());
+                            // L-136: an earlier carry's delete that this one
+                            // uploads is an upload again, so a peer's delete
+                            // of it is named (`note_carrier_uncited`).
+                            for p in &classified.uploads {
+                                c.deletes.remove(p);
+                            }
                             c.deletes.extend(classified.deletes.iter().cloned());
                             // `honor_publish`'s dropped set, decided here:
                             // parks and deferrals are settled before the

@@ -1,0 +1,16 @@
+tla-mc: building a checker for LeanP1 (cache: /mnt/nvme/leanp1-anc4/cache-FetchHolds-LeanP1)
+tla-mc: built in 32.0s
+tla-mc: LeanP1 (31 variables, 0 symmetry permutations), 4 workers, generated engine; loaded in 0.005s
+progress: depth 17, 1910961 generated, 634087 distinct (0 fingerprint spills), 186137 on queue (0 on disk), 10.9s
+progress: depth 20, 4421011 generated, 1449223 distinct (0 fingerprint spills), 309172 on queue (0 on disk), 26.8s
+progress: depth 22, 6527449 generated, 2082905 distinct (0 fingerprint spills), 313243 on queue (0 on disk), 43.2s
+progress: depth 24, 8479648 generated, 2672280 distinct (0 fingerprint spills), 291174 on queue (0 on disk), 60.0s
+progress: depth 26, 10197191 generated, 3176627 distinct (0 fingerprint spills), 227326 on queue (0 on disk), 76.2s
+progress: depth 29, 11268875 generated, 3443223 distinct (0 fingerprint spills), 45979 on queue (0 on disk), 86.5s
+Model checking completed. No error has been found.
+11552518 states generated, 3524707 distinct states found. Depth 33. Checked in 89.463s (39398 distinct/s).
+
+real	2m1.472s
+user	6m26.994s
+sys	0m1.616s
+rc=0 00:21:54Z

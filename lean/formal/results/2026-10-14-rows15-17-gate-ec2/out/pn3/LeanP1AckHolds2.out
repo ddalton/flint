@@ -1,0 +1,7 @@
+# tla-mc -compile -workers 46 -metadir /work/out/pn3/meta-LeanP1AckHolds2 -checkpoint 0 -fpmem 16000 -queue-mem 40000 -config /work/formal2/LeanP1AckHolds2.cfg LeanP1.tla  (cwd /work/formal2)
+tla-mc: building a checker for LeanP1 (cache: /work/out/pn3/cache-LeanP1AckHolds2)
+tla-mc: built in 38.4s
+tla-mc: LeanP1 (31 variables, 0 symmetry permutations), 46 workers, generated engine; loaded in 0.004s
+progress: depth 11, 28319045 generated, 11626869 distinct (0 fingerprint spills), 8327516 on queue (0 on disk), 15.1s
+progress: depth 12, 96297719 generated, 37999359 distinct (0 fingerprint spills), 26372490 on queue (0 on disk), 51.5s
+progress: depth 13, 301763825 generated, 115259269 distinct (0 fingerprint spills), 77259910 on queue (40287878 on disk), 176.0s

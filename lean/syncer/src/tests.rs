@@ -11655,6 +11655,60 @@ async fn a_barrier_carries_the_gateway_request_it_reads() {
     assert_eq!(ack.report.dropped, vec!["work.txt".to_string()], "{ack:?}");
 }
 
+/// L-136 (2026-10-14, found by the LeanP1 gate's AckHolds1): a later
+/// carry's upload of a path an earlier carry deleted is an upload again.
+/// The carrier kept the path in `deletes`, so when the UI deleted the
+/// re-created file the honour's document "honoured the declared delete"
+/// and the ack said `ok` for bytes the agent wrote and no seq cites.
+#[tokio::test]
+async fn a_carried_delete_then_upload_names_a_later_delete_of_the_upload() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture).unwrap();
+    a.checkout().await.unwrap();
+    write(dir.path(), "f.txt", "v1");
+    a.floor_tick().await.unwrap();
+    a.floor_tick().await.unwrap();
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("f.txt"), "fixture: v1 was not published");
+
+    let squat = dir.path().join(super::CONTROL_DIR).join(control::PUBLISH_ACK);
+    let fail_honor = |a: &Syncer| {
+        let _ = std::fs::remove_file(&squat);
+        std::fs::create_dir_all(squat.join("occupied")).unwrap();
+        clear_min_interval(a);
+    };
+
+    // The agent deletes the file and declares it; the carrying barrier's ack write fails.
+    std::fs::remove_file(dir.path().join("f.txt")).unwrap();
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n-1"}"#);
+    a.poll_sentinels().unwrap();
+    fail_honor(&a);
+    assert!(a.honor_pending(Verb::Publish, false).await.is_err(), "fixture: the ack write did not fail");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(!m.entries.contains_key("f.txt"), "fixture: the declared delete was not carried");
+    std::fs::remove_dir_all(&squat).unwrap();
+
+    // It re-creates the file and touches again (the record folds); that carry's ack fails too.
+    write(dir.path(), "f.txt", "v2, the declared bytes");
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n-2"}"#);
+    a.poll_sentinels().unwrap();
+    fail_honor(&a);
+    assert!(a.honor_pending(Verb::Publish, false).await.is_err(), "fixture: the second ack write did not fail");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("f.txt"), "fixture: the re-created file was not carried");
+    std::fs::remove_dir_all(&squat).unwrap();
+
+    // The UI deletes the agent's upload before the honour.
+    hitl_remove(&store, &a.cfg, "f.txt", "reviewer").await;
+
+    let ack = a.honor_pending(Verb::Publish, true).await.unwrap().expect("nothing was answered");
+    assert_eq!(ack.status, "partial", "the ack says the declared file is in seq {:?}, which no longer cites it: {ack:?}", ack.seq);
+    assert_eq!(ack.report.dropped, vec!["f.txt".to_string()], "{ack:?}");
+}
+
 /// Row 15 plan, D4 (2026-10-14): the drain's publish ack names the clock
 /// its barrier stamped on the bucket, in its one write. It used to be
 /// written `sentinel-deferred` (the honor's `forced` clock) and re-written

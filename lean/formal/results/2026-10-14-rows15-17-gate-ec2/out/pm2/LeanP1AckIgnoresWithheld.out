@@ -1,0 +1,11 @@
+# tla-mc -compile -workers 4 -metadir /work/out/pm2/meta-LeanP1AckIgnoresWithheld -checkpoint 0 -fpmem 2000 -queue-mem 8000 -config /work/formal2/LeanP1AckIgnoresWithheld.cfg LeanP1.tla  (cwd /work/out/pm2/mut/AckIgnoresWithheld)
+tla-mc: building a checker for LeanP1 (cache: /work/out/pm2/cache-LeanP1AckIgnoresWithheld)
+tla-mc: built in 38.7s
+tla-mc: LeanP1 (31 variables, 0 symmetry permutations), 4 workers, generated engine; loaded in 0.004s
+progress: depth 12, 3189707 generated, 1178307 distinct (0 fingerprint spills), 717827 on queue (0 on disk), 15.0s
+progress: depth 13, 7755096 generated, 2819734 distinct (0 fingerprint spills), 1641427 on queue (0 on disk), 36.7s
+progress: depth 14, 17469893 generated, 6287963 distinct (0 fingerprint spills), 3468229 on queue (0 on disk), 83.0s
+progress: depth 15, 36563570 generated, 13062965 distinct (0 fingerprint spills), 6775002 on queue (0 on disk), 176.0s
+progress: depth 16, 71664342 generated, 25386930 distinct (0 fingerprint spills), 12323965 on queue (3727485 on disk), 349.0s
+progress: depth 17, 133151368 generated, 46621294 distinct (0 fingerprint spills), 21234364 on queue (12679356 on disk), 654.2s
+progress: depth 18, 237751465 generated, 82126361 distinct (0 fingerprint spills), 35505067 on queue (26967211 on disk), 1217.9s

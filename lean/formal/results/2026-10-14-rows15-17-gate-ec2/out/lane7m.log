@@ -1,0 +1,12 @@
+LeanP1CarrierKeepsDelete           OK-FIRES     exp=AK1                          | Error: Action property AK1 is violated by the last step ab | 966891625 states generated, 354179836 distinct states found. Depth 22 | 136s
+leanp1 gate: 1 world(s) run, 1 as expected, 0 not: -
+LeanP1AckReadsOwnReport            OK-FIRES     exp=AK1                          | Error: Action property AK1 is violated by the last step ab | 39790048 states generated, 15368979 distinct states found. Depth 15 | 40s
+leanp1 gate: 1 world(s) run, 1 as expected, 0 not: -
+LeanP1AckIgnoresUncited            OK-FIRES     exp=AK1                          | Error: Action property AK1 is violated by the last step ab | 40230213 states generated, 15498074 distinct states found. Depth 15 | 40s
+leanp1 gate: 1 world(s) run, 1 as expected, 0 not: -
+LeanP1CarrierPerFold               OK-FIRES     exp=AK1                          | Error: Action property AK1 is violated by the last step ab | 78160044 states generated, 29526784 distinct states found. Depth 16 | 44s
+leanp1 gate: 1 world(s) run, 1 as expected, 0 not: -
+LeanP1RequestAfterCarry            OK-FIRES     exp=AK1                          | Error: Action property AK1 is violated by the last step ab | 55764230 states generated, 21324398 distinct states found. Depth 15 | 41s
+leanp1 gate: 1 world(s) run, 1 as expected, 0 not: -
+LeanP1AckIgnoresWithheld           OK-FIRES     exp=AK1                          | Error: Action property AK1 is violated by the last step ab | 1572557727 states generated, 529497553 distinct states found. Depth 21 | 312s
+leanp1 gate: 1 world(s) run, 1 as expected, 0 not: -

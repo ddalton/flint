@@ -13,6 +13,31 @@ loudly rather than producing a mutant that mutates nothing.
   EditBase  Edit's ghost base is the baseline, as before 2026-10-13: the
             scripted traces E27, E31, E33 must break NR5 (the fix they pin).
 
+  Rows 15-17 (2026-10-14; docs/plans/lean-row15-boundary-verbs-model-plan-2026-10-14.md):
+  AckIgnoresWithheld   inbox-1: a withheld upload is not named, by the honour
+                       or the carrier: AK1 must break.
+  AckReadsOwnReport    before H10 (L-110): the ack reads only its own
+                       barrier, never the carrier: AK1.
+  AckIgnoresUncited    H10: a peer's delete after the carrying CAS is not
+                       named: AK1.
+  CarrierPerFold       L-133: every fold mints a fresh record id, so a second
+                       touch orphans the first one's carrier: AK1.
+  CarrierKeepsDelete   L-136: a later carry's upload of a path an earlier one
+                       deleted stays a delete, so a peer's delete of it is
+                       not named: AK1.
+  FoldClobbers         settle-before-consume: a touch replaces the pending
+                       record instead of folding into it: AK3.
+  StampIndependent     the ack's clock chosen apart from the bucket's stamp: AK4.
+  Rematerialise        a restart materialises the baseline where the tree has
+                       nothing (a re-checkout over a live tree): NR1.
+  ConsumeTakesDeleted  a consume takes the document's version over a path the
+                       agent deleted: NR1.
+  FinishReleasesForeign  a straggler's release frees its successor's lease:
+                       Inv_OneHolder.
+  RequestAfterCarry    L-135: the gateway's request folds in after the
+                       barrier decided what it carries (between Consume and
+                       Scan): AK1.
+
 Run from lean/formal:  python3 gen-leanp1-mutants.py OUTDIR [NAME...]"""
 import os, sys
 out = sys.argv[1]
@@ -26,6 +51,37 @@ M = {
   'MN2': [(GD_T, "  /\\ tomb' = [tomb EXCEPT ![p] = doc[p]]\n  /\\ UNCHANGED udel\n")],
   'MA1': [(GD_T, "  /\\ UNCHANGED <<tomb, udel>>\n")],
   'EditBase': [(EDIT, "     /\\ base' = [base EXCEPT ![h] = w[s].baseline[p]]\n")],
+  'AckIgnoresWithheld': [
+    ("         dr == W.bound.wd \\cup carried\n", "         dr == carried\n"),
+    ("!.dropped = @ \\cup W.gone \\cup {p \\in W.deletes : inst[p] # Nil}]",
+     "!.dropped = @ \\cup {p \\in W.deletes : inst[p] # Nil}]")],
+  'AckReadsOwnReport': [
+    ("carried == IF W.car.id = W.pend.id THEN W.car.dropped \\cup W.car.uncited ELSE {}",
+     "carried == {}")],
+  'AckIgnoresUncited': [
+    ("carried == IF W.car.id = W.pend.id THEN W.car.dropped \\cup W.car.uncited ELSE {}",
+     "carried == IF W.car.id = W.pend.id THEN W.car.dropped ELSE {}")],
+  'CarrierPerFold': [
+    ("![s].pend = [id |-> IF fresh THEN n ELSE W.pend.id, fold |-> n, nonces |-> kept],",
+     "![s].pend = [id |-> n, fold |-> n, nonces |-> kept],")],
+  'CarrierKeepsDelete': [
+    ("!.deletes = (@ \\ W.uploads) \\cup W.deletes,", "!.deletes = @ \\cup W.deletes,")],
+  'FoldClobbers': [
+    ("         ns == (IF fresh THEN {} ELSE W.pend.nonces) \\cup {n}\n", "         ns == {n}\n")],
+  'StampIndependent': [
+    ("  /\\ \\E src \\in {w[s].bound.clk} :\n", "  /\\ \\E src \\in Clocks :\n")],
+  'Rematerialise': [
+    ("                    ![s].sKeep = {},\n                    ![s].cId = 0,",
+     "                    ![s].sKeep = {},\n                    ![s].local = [p \\in Paths |-> IF @[p] = Nil THEN w[s].baseline[p] ELSE @[p]],\n                    ![s].cId = 0,")],
+  'ConsumeTakesDeleted': [
+    ("Owed(s, p) == /\\ doc[p] # w[s].baseline[p] /\\ w[s].local[p] = w[s].baseline[p]\n",
+     "Owed(s, p) == /\\ doc[p] # w[s].baseline[p] /\\ (w[s].local[p] = w[s].baseline[p] \\/ w[s].local[p] = Nil)\n")],
+  'RequestAfterCarry': [
+    ("  /\\ On(s) /\\ w[s].pc = \"idle\" /\\ w[s].nt < MaxTouches\n",
+     "  /\\ On(s) /\\ w[s].pc \\in {\"idle\", \"consumed\"} /\\ w[s].nt < MaxTouches\n")],
+  'FinishReleasesForeign': [
+    ("  \\* successor holds (`lease::release`).\n  /\\ holder' = IF holder = s THEN \"none\" ELSE holder\n",
+     "  \\* successor holds (`lease::release`).\n  /\\ holder' = \"none\"\n")],
 }
 for name, edits in M.items():
     if want and name not in want:

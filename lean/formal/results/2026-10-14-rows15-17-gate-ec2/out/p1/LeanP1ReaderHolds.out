@@ -1,0 +1,8 @@
+# tla-mc -compile -workers 4 -metadir /work/out/p1/meta-LeanP1ReaderHolds -checkpoint 0 -fpmem 2000 -queue-mem 6000 -config /work/formal/LeanP1ReaderHolds.cfg LeanP1.tla  (cwd /work/formal)
+tla-mc: building a checker for LeanP1 (cache: /work/out/p1/cache-LeanP1ReaderHolds)
+tla-mc: built in 43.2s
+tla-mc: LeanP1 (31 variables, 0 symmetry permutations), 4 workers, generated engine; loaded in 0.004s
+progress: depth 21, 1568457 generated, 448456 distinct (0 fingerprint spills), 64121 on queue (0 on disk), 10.1s
+progress: depth 28, 2996793 generated, 822382 distinct (0 fingerprint spills), 24704 on queue (0 on disk), 20.7s
+Model checking completed. No error has been found.
+3101946 states generated, 838613 distinct states found. Depth 33. Checked in 21.483s (39037 distinct/s).

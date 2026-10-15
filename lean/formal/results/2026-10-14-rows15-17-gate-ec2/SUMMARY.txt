@@ -1,0 +1,52 @@
+LeanP1 gate after rows 15-17 (ack, restart, deposal) entered the model
+c8g.48xlarge spot, us-west-1c, 2026-10-14 20:48Z - 2026-10-15 00:10Z; tla-mc 0.1.2 -compile
+Torn down 2026-10-15 ~00:10Z; zero set verified (us-east-1/2, us-west-1/2: 0 instances,
+0 open spot, 0 volumes; bucket flint-tlc-gate-20261014b removed; inline policy deleted).
+Plan: docs/plans/lean-row15-boundary-verbs-model-plan-2026-10-14.md.  Logs: out/RESULTS.txt.
+
+FINAL MODEL: LeanP1.tla 4be149ab.
+
+REGRESSION (old worlds; the new state is written only when MaxTouches > 0
+or MaxDeposals > 0, and every old cfg has both 0):
+  phase 1: every world as expected (VerifyOff UNDECIDED when oversubscribed,
+  fired on its re-run).  Each fully explored old world reproduces its
+  distinct count from results/2026-10-14-leanp1-gate-ec2; P3Age AN5+NR5
+  HOLDS, 1,080,412,937 distinct, depth 32 (identical).  The six large old
+  worlds (Holds, AllHolds, ...) were NOT re-run; their cfgs differ only in
+  the five new constants at 0/default.
+
+NEW WORLDS (final model unless noted):
+  AckHolds1         HOLDS 2,916,984,743 distinct, depth 43, 1346 s (192 workers)
+  AckCap            HOLDS 31,916,163
+  ResHolds          HOLDS 88.8M
+  DeposeHolds       HOLDS 18.7M
+  DeposeNoAgeHolds  HOLDS 2.7M
+  DeposeAck         clean through depth 22, 741,964,626 distinct; stopped
+                    (queue spill filling the disk); identical counts on the
+                    stricter claim d3d5290d
+  AckWithheldHolds  NOT decided on the final claim (user: left to the proof);
+                    on d3d5290d it fired the model gap below at depth 25
+  AckHolds2         NOT run on the final claim (left to the proof)
+  Mutants: all fire as the TSV expects.  The six AK1 controls on 4be149ab:
+  AckIgnoresWithheld (d21, 458M), CarrierKeepsDelete (d22), AckReadsOwnReport,
+  AckIgnoresUncited, CarrierPerFold, RequestAfterCarry.  Probes all fire.
+
+WHAT THE GATE FOUND:
+  L-135 (code): a barrier did not carry the gateway request it read (AckHolds1 d15).
+  L-136 (code): the carrier kept a path in `deletes` after a later carry
+    uploaded it, so a peer's delete of the upload was acked ok (AckHolds1
+    d22, 359M).  Fixed in barrier.rs and the model's Install; test
+    a_carried_delete_then_upload_names_a_later_delete_of_the_upload fails
+    without the fix; mutant CarrierKeepsDelete.
+  Claim errors (AK1), all restated:
+    1-3. the declaration took already-published bytes; "dropped subset of dset".
+    4. DeletedLater (lane 6) was itself WRONG -- it hid H10's peer delete;
+       AckReadsOwnReport stopped firing; reverted.  The real cause was L-136.
+    5. SurfacedDecl required a conflict's version to stay live; a reap after
+       the age takes the handle while the code's conflicts/ copy keeps the
+       bytes (AckWithheldHolds d25, 2.19B).  Writer ghost `lost` (own
+       uploads swept before the CAS) separates the one kind of conflict
+       whose bytes no copy keeps (user: option A).
+
+OWED: the TLAPS proof of the new claims at every bound (M7-M9), which covers
+AckWithheldHolds, AckHolds2 and DeposeAck beyond depth 22.

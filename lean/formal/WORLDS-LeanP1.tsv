@@ -67,3 +67,33 @@ LeanP1TraceE38	HReach	MCLeanP1TraceE38.tla
 LeanP1TraceE38Old	Inv_AckedNamed	MCLeanP1TraceE38.tla
 LeanP1TraceE39	HReach	MCLeanP1TraceE39.tla
 LeanP1TraceE39Old	Inv_AckedNamed	MCLeanP1TraceE39.tla
+LeanP1AckHolds1	HOLDS
+LeanP1AckHolds2	HOLDS
+LeanP1AckCap	HOLDS
+LeanP1ProbeCapDropped	ProbeCapDropped
+LeanP1AckWithheldHolds	HOLDS
+LeanP1AckIgnoresWithheld	AK1	LeanP1.tla	AckIgnoresWithheld
+LeanP1AckReadsOwnReport	AK1	LeanP1.tla	AckReadsOwnReport
+LeanP1AckIgnoresUncited	AK1	LeanP1.tla	AckIgnoresUncited
+LeanP1CarrierPerFold	AK1	LeanP1.tla	CarrierPerFold
+LeanP1CarrierKeepsDelete	AK1	LeanP1.tla	CarrierKeepsDelete
+LeanP1RequestAfterCarry	AK1	LeanP1.tla	RequestAfterCarry
+LeanP1FoldClobbers	AK3	LeanP1.tla	FoldClobbers
+LeanP1StampIndependent	AK4	LeanP1.tla	StampIndependent
+LeanP1ProbeAckOk	ProbeAckOk
+LeanP1ProbeAckPartial	ProbeAckPartial
+LeanP1ProbeAckDeferred	ProbeAckDeferred
+LeanP1ProbeRetiredAfterRestart	ProbeRetiredAfterRestart
+LeanP1ResHolds	HOLDS
+LeanP1Rematerialise	NR1	LeanP1.tla	Rematerialise
+LeanP1ConsumeTakesDeleted	NR1	LeanP1.tla	ConsumeTakesDeleted
+LeanP1ProbeDeleteSurvivesRestart	ProbeDeleteSurvivesRestart
+LeanP1DeposeHolds	HOLDS
+LeanP1DeposeNoAgeHolds	HOLDS
+LeanP1DeletesOffLease	DP2
+LeanP1InstallUnfenced	DP1
+LeanP1FinishReleasesForeign	Inv_OneHolder	LeanP1.tla	FinishReleasesForeign
+LeanP1DeposeAck	HOLDS
+LeanP1ProbeDeposed	ProbeDeposed
+LeanP1ProbeFencedBeforeCas	ProbeFencedBeforeCas
+LeanP1ProbeFencedAfterCas	ProbeFencedAfterCas

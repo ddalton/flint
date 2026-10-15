@@ -1,0 +1,6 @@
+# tla-mc -compile -workers 48 -metadir /work/out/pn/meta-LeanP1DeposeNoAgeHolds -checkpoint 0 -fpmem 16000 -queue-mem 48000 -config /work/formal/LeanP1DeposeNoAgeHolds.cfg LeanP1.tla  (cwd /work/formal)
+tla-mc: building a checker for LeanP1 (cache: /work/out/pn/cache-LeanP1DeposeNoAgeHolds)
+tla-mc: built in 40.0s
+tla-mc: LeanP1 (31 variables, 0 symmetry permutations), 48 workers, generated engine; loaded in 0.004s
+Model checking completed. No error has been found.
+9630092 states generated, 2725409 distinct states found. Depth 32. Checked in 5.114s (532962 distinct/s).

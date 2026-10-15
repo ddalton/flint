@@ -321,10 +321,13 @@ def convert(lines):
             "ContentConverges", "RecheckSkipped", "CommitAdvanceGuarded", "RetireAge", "GatewayIgnoresLease", "GatewayJudgesRead",
             "GatewaySweepGrace", "RenameAtomic",
             "ConsumeHonorsScope", "RescopeUnciteFirst", "RescopeKeepsDirty", "WidenKeepsLocal",
-            "UnlinkChecksBytes", "ConsumeKeepsLeft", "SyncKeepsLeft", "ReaderRechecksOwed")},
+            "UnlinkChecksBytes", "ConsumeKeepsLeft", "SyncKeepsLeft", "ReaderRechecksOwed",
+            "InstallFenced", "DeletesUnderLease")},
         # The traces check out unscoped, never rescope, never fail a fetch,
         # and every tree in them writes.
         "Scopes": {frozenset(paths)}, "MaxRescopes": 0, "MaxFetchFails": 0, "Readers": set(),
+        # Rows 15-17 (2026-10-14): no request, no deposal, until the traces carry them.
+        "MaxTouches": 0, "MaxNonces": 32, "MaxDeposals": 0,
     }
     return steps, consts, ver_of
 

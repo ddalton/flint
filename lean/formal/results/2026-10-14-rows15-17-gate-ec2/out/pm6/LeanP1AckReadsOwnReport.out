@@ -1,0 +1,13 @@
+# tla-mc -compile -workers 192 -metadir /work/out/pm6/meta-LeanP1AckReadsOwnReport -checkpoint 0 -fpmem 16000 -queue-mem 60000 -config /work/formal3/LeanP1AckReadsOwnReport.cfg LeanP1.tla  (cwd /work/out/pm6/mut/AckReadsOwnReport)
+tla-mc: building a checker for LeanP1 (cache: /work/out/pm6/cache-LeanP1AckReadsOwnReport)
+tla-mc: built in 36.3s
+tla-mc: LeanP1 (31 variables, 0 symmetry permutations), 192 workers, generated engine; loaded in 0.004s
+progress: depth 18, 133189799 generated, 49382064 distinct (0 fingerprint spills), 19841254 on queue (0 on disk), 13.4s
+progress: depth 20, 342841171 generated, 126498572 distinct (0 fingerprint spills), 46732405 on queue (0 on disk), 34.9s
+progress: depth 21, 534522555 generated, 197761452 distinct (0 fingerprint spills), 71262880 on queue (0 on disk), 55.0s
+progress: depth 22, 817213464 generated, 300778532 distinct (0 fingerprint spills), 103017080 on queue (3099000 on disk), 85.6s
+progress: depth 23, 1205100667 generated, 436627825 distinct (0 fingerprint spills), 135849293 on queue (36423245 on disk), 131.6s
+progress: depth 24, 1689556681 generated, 598972056 distinct (0 fingerprint spills), 162344231 on queue (63354919 on disk), 191.5s
+progress: depth 25, 2248081261 generated, 780546060 distinct (0 fingerprint spills), 181574004 on queue (83012980 on disk), 262.9s
+progress: depth 26, 2870934159 generated, 982807127 distinct (1024 fingerprint spills), 202261067 on queue (104213579 on disk), 349.9s
+progress: depth 27, 3576204328 generated, 1216071969 distinct (1024 fingerprint spills), 233264842 on queue (135791818 on disk), 447.4s

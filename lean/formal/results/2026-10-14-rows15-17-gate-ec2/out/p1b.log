@@ -1,0 +1,2 @@
+LeanP1VerifyOff                    OK-FIRES     exp=Inv_CitationsLive            | Error: Invariant Inv_CitationsLive is violated.            | 512649994 states generated, 148647352 distinct states found. Depth 18 | 421s
+leanp1 gate: 1 world(s) run, 1 as expected, 0 not: -

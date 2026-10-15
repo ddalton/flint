@@ -1,0 +1,6 @@
+# tla-mc -compile -workers 48 -metadir /work/out/pn/meta-LeanP1AckHolds2 -checkpoint 0 -fpmem 16000 -queue-mem 48000 -config /work/formal/LeanP1AckHolds2.cfg LeanP1.tla  (cwd /work/formal)
+tla-mc: building a checker for LeanP1 (cache: /work/out/pn/cache-LeanP1AckHolds2)
+tla-mc: built in 41.0s
+tla-mc: LeanP1 (31 variables, 0 symmetry permutations), 48 workers, generated engine; loaded in 0.004s
+Error: expected a set, got B
+0 states generated, 0 distinct states found. Depth 0. Checked in 0.001s (0 distinct/s).

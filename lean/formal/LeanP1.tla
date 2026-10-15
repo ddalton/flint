@@ -41,9 +41,23 @@
    something is still owed (L-129); it then remembers the pointer it read
    BEFORE the sync, so a document that moved in between is pulled again.
 
+   THE BOUNDARY VERBS' ANSWER, THE RESTART, DEPOSAL (2026-10-14, the plan
+   `docs/plans/lean-row15-boundary-verbs-model-plan-2026-10-14.md`, SAFETY
+   rows 15-17): an agent's or the gateway's request folds into a pending
+   record (`Touch`), any barrier that begins while it stands carries it and
+   journals what its CAS published (the carrier), and the answer is the
+   ack (`Honor`), `ok` or `partial`, retired by the restart rule
+   (`RetireByAck`).  A takeover deposes a holder judged dead (`Depose`,
+   with the rotation), and the straggler learns it at its next cell read
+   (`Fence`).  All of it is per-writer state in `Writer`, written only when
+   a touch or a deposal exists: with `MaxTouches = 0` and `MaxDeposals = 0`
+   every state is the model's without it.
+
    Differences from the code the model keeps on purpose: a scoped SYNC (D4,
    a request scope narrower than the workspace's) is not modelled; the
-   reader's second etag (the request cell) is not either.               *)
+   reader's second etag (the request cell) is not either; nor the sync
+   verb's ack (D1), a touch without a nonce (D8), or the budget's
+   arithmetic (a barrier's clock is a choice).                          *)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS
@@ -87,12 +101,20 @@ CONSTANTS
   SyncKeepsLeft,                \* likewise a sync (L-128)
   \* Readers.
   Readers,                      \* the trees with read access (a subset of Writers)
-  ReaderRechecksOwed            \* a reader pulls while its baseline says something is owed (L-129)
+  ReaderRechecksOwed,           \* a reader pulls while its baseline says something is owed (L-129)
+  \* The boundary verbs' answer (row 15).
+  MaxTouches,                   \* requests per writer: the agent's touch, the gateway's, the door's
+  MaxNonces,                    \* the pending record keeps this many nonces (`MAX_NONCES`)
+  \* Deposal (row 17).
+  MaxDeposals,                  \* takeovers per writer
+  InstallFenced,                \* H2: the fence read before the CAS (an install needs the lease)
+  DeletesUnderLease             \* L-132: a holder deposed after its CAS deletes nothing more
 
 ASSUME Free \subseteq Paths
 ASSUME MaxMint \in Nat /\ MaxMint >= 1
 ASSUME Scopes \subseteq SUBSET Paths /\ Scopes # {}
 ASSUME Readers \subseteq Writers
+ASSUME MaxTouches \in Nat /\ MaxNonces \in Nat /\ MaxNonces >= 1 /\ MaxDeposals \in Nat
 
 Seed == 1
 Gens == Seed..(MaxMint + MaxCopies)
@@ -100,6 +122,11 @@ Handles == Paths \X Gens
 Gen(h) == h[2]
 Later(h, k) == Gen(h) > Gen(k)
 Opt(S) == S \cup {Nil}
+\* The clock a carrying barrier stamps (`boundary_source`) and its ack names.
+Clocks == {"sentinel", "sentinel-deferred", "drain"}
+NoPend == [id |-> 0, fold |-> 0, nonces |-> {}]
+NoAck == [st |-> "none", nonces |-> {}, seq |-> 0, src |-> "none", dropped |-> {}, inst |-> FALSE]
+NoCar == [id |-> 0, paths |-> {}, deletes |-> {}, dropped |-> {}, uncited |-> {}]
 
 VARIABLES
   live, minted, doc, seq, tomb, base, acked, conflicts, holder,
@@ -151,7 +178,46 @@ Writer ==
    unlinked : SUBSET Paths,
    \* A reader: the pointer its last completed pull synced against
    \* (`reader.json`, 0: none), and the one this pull read.
-   memo : Nat, rnow : Nat]
+   memo : Nat, rnow : Nat,
+   \* THE ANSWER (row 15).  `nt`: the requests so far.  `pend`: the pending
+   \* record (`publish.pending.json`; id 0: none): its id, minted when the
+   \* record is created and kept across folds (L-133), the request that last
+   \* folded into it, and its nonces.  `ack`: `.flint/publish.ack` (st
+   \* "none": none).  `car`: the carrier (`IntentJournal::carrier`; id 0:
+   \* none).  The barrier in flight: the record it carries (`cId`, 0: none;
+   \* read at its start), the fold it read (`cFold`), its clock (`clk`), the
+   \* seq its CAS installed and whether it did (`iseq`, `instd`).  `bound`:
+   \* the last carrying barrier, ended: the document it ended at and its own
+   \* withheld uploads.  All files on disk: a restart keeps them and drops
+   \* the barrier's.
+   nt : Nat,
+   pend : [id : Nat, fold : Nat, nonces : SUBSET Nat],
+   ack : [st : {"none", "ok", "partial", "refused-read-only"}, nonces : SUBSET Nat, seq : Nat,
+          src : Clocks \cup {"none"}, dropped : SUBSET Paths, inst : BOOLEAN],
+   car : [id : Nat, paths : SUBSET Paths, deletes : SUBSET Paths,
+          dropped : SUBSET Paths, uncited : SUBSET Paths],
+   cId : Nat, cFold : Nat, clk : Clocks \cup {"none"}, iseq : Nat, instd : BOOLEAN,
+   bound : [id : Nat, fold : Nat, doc : [Paths -> Opt(Handles)], seq : Nat,
+            wd : SUBSET Paths, inst : BOOLEAN, clk : Clocks \cup {"none"}],
+   \* GHOSTS the answer's claims read; no guard reads them.  Every nonce
+   \* consumed, acked, or dropped by the cap; what the record's requests
+   \* declared (`dset`: the paths dirty at a fold; `decl`: their versions
+   \* then; `dMint`: the mint counter then); the declared paths the agent
+   \* wrote or deleted since (`moved`); what each carrying CAS stamped.
+   cN : SUBSET Nat, aN : SUBSET Nat, capped : SUBSET Nat,
+   dset : SUBSET Paths, decl : [Paths -> Opt(Handles)], dMint : [Paths -> Nat],
+   \* (`stamps` and `lost` are typed loosely, a clock or "none" and a handle
+   \* or Nil: what they hold is narrower, but only an invariant says so, and
+   \* no guard or claim reads their types.)
+   moved : SUBSET Paths, stamps : SUBSET (Nat \X (Clocks \cup {"none"})),
+   \* `lost`: this writer's uploads another writer swept before its CAS
+   \* (`gone`).  Their conflict record names bytes no copy keeps; every
+   \* other conflict's version is copied to `conflicts/` first
+   \* (`preserve_conflict_copy`), and the copy outlives a reap of the handle.
+   lost : SUBSET Opt(Handles),
+   \* DEPOSAL (row 17): a takeover deposed this writer and it has not yet
+   \* learned so; `nd`: the takeovers it made.
+   deposed : BOOLEAN, nd : Nat]
 
 WriterInit ==
   [st |-> "off", pc |-> "idle",
@@ -162,7 +228,14 @@ WriterInit ==
    verified |-> FALSE, inst |-> [p \in Paths |-> Nil], retire |-> {},
    collected |-> FALSE, adv |-> FALSE, synced |-> 0, derived |-> 0, skipped |-> {},
    scope |-> {}, sStage |-> "none", sTgt |-> {}, sDrop |-> {}, sKeep |-> {},
-   sHeld |-> [p \in Paths |-> Nil], unlinked |-> {}, memo |-> 0, rnow |-> 0]
+   sHeld |-> [p \in Paths |-> Nil], unlinked |-> {}, memo |-> 0, rnow |-> 0,
+   nt |-> 0, pend |-> NoPend, ack |-> NoAck, car |-> NoCar,
+   cId |-> 0, cFold |-> 0, clk |-> "none", iseq |-> 0, instd |-> FALSE,
+   bound |-> [id |-> 0, fold |-> 0, doc |-> [p \in Paths |-> Nil], seq |-> 0,
+              wd |-> {}, inst |-> FALSE, clk |-> "none"],
+   cN |-> {}, aN |-> {}, capped |-> {},
+   dset |-> {}, decl |-> [p \in Paths |-> Nil], dMint |-> [p \in Paths |-> 0],
+   moved |-> {}, stamps |-> {}, lost |-> {}, deposed |-> FALSE, nd |-> 0]
 
 TypeOK ==
   /\ live \subseteq Handles /\ minted \subseteq Handles /\ live \subseteq minted
@@ -196,6 +269,17 @@ Preserved(h) == \E c \in conflicts : c[2] = h
 InFlight(h) == \E p \in Paths : gw[p] = h
 LeaseGuard == GatewayIgnoresLease \/ holder = "none"
 Busy(p) == gw[p] # Nil \/ (mv # Nil /\ mv[1] = p)
+\* The barrier in flight carries a standing declaration (`barrier.rs:600-616`).
+Carries(s) == w[s].cId # 0
+\* The clock a barrier that begins now may stamp: a carrying one's is the
+\* honour's (`sentinel`), the floor's or a deferred honour's
+\* (`sentinel-deferred`), or the drain's.
+CarryClocks(s) == IF w[s].pend.id # 0 THEN Clocks ELSE {"none"}
+\* The carried uploads a document does not cite (`note_carrier_uncited`).
+Uncited(c, d) == {p \in c.paths : p \notin c.deletes /\ d[p] = Nil}
+\* The ack already answers the pending record (`ack_matches`, the nonce arm).
+Covered(s) == w[s].ack.st # "none" /\ w[s].pend.nonces \subseteq w[s].ack.nonces
+Oldest(S) == CHOOSE m \in S : \A x \in S : m <= x
 
 ------------------------------------------------------------------------------
 (* The gateway (`lean/gateway/src/workspace.rs`: `put_file` → `commit_save`,
@@ -284,13 +368,15 @@ Edit(s, p) ==
                                     ELSE IF p \in w[s].uploads THEN w[s].snap[p]
                                     ELSE w[s].baseline[p]]
      /\ w' = [w EXCEPT ![s].local[p] = h, ![s].integrated = @ \cup {nextGen},
-                       ![s].unlinked = @ \ {p}]
+                       ![s].unlinked = @ \ {p},
+                       ![s].moved = IF w[s].pend.id # 0 THEN @ \cup {p} ELSE @]
      /\ nextGen' = nextGen + 1
   /\ UNCHANGED <<live, doc, seq, tomb, acked, conflicts, holder, ui, reqs, barriers, gw, mv, udel, aux>>
 
 Delete(s, p) ==
   /\ On(s) /\ w[s].local[p] # Nil
-  /\ w' = [w EXCEPT ![s].local[p] = Nil, ![s].unlinked = @ \ {p}]
+  /\ w' = [w EXCEPT ![s].local[p] = Nil, ![s].unlinked = @ \ {p},
+                    ![s].moved = IF w[s].pend.id # 0 THEN @ \cup {p} ELSE @]
   /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
 
 \* A checkout materializes what its scope admits (`checkout_scoped`).
@@ -339,8 +425,10 @@ Consume(s) ==
   /\ On(s) /\ s \notin Readers /\ w[s].pc = "idle" /\ barriers < MaxBarriers
   \* Step 0 replays a rescope in flight first (`run_barrier`).
   /\ w[s].sStage = "none"
-  /\ IF CheapPath(s)
-     THEN /\ w' = [w EXCEPT ![s].pc = "consumed"]
+  /\ \E ck \in CarryClocks(s) :
+     IF CheapPath(s)
+     THEN /\ w' = [w EXCEPT ![s].pc = "consumed",
+                   ![s].cId = w[s].pend.id, ![s].cFold = w[s].pend.fold, ![s].clk = ck]
           /\ UNCHANGED <<regressed, fails>>
      ELSE LET owed == {p \in Paths : Owed(s, p)}
               conv == {p \in Paths : Converges(s, p)}
@@ -349,6 +437,7 @@ Consume(s) ==
                  left == fail # {}
              IN /\ fails + Cardinality(fail) <= MaxFetchFails
                 /\ w' = [w EXCEPT ![s].pc = "consumed",
+                         ![s].cId = w[s].pend.id, ![s].cFold = w[s].pend.fold, ![s].clk = ck,
                          ![s].local = [p \in Paths |-> IF p \in taken THEN doc[p] ELSE @[p]],
                          ![s].baseline = [p \in Paths |-> IF p \in taken THEN doc[p] ELSE @[p]],
                          ![s].integrated = @ \cup {Gen(doc[p]) : p \in {q \in taken : doc[q] # Nil}},
@@ -374,7 +463,9 @@ Scan(s) ==
          dirty == {p \in Paths : W.local[p] # W.baseline[p]}
          ups == {p \in dirty : W.local[p] # Nil}
          absent == {p \in dirty : W.local[p] = Nil}
-     IN \E dels \in SUBSET absent :
+         \* A carrying barrier confirms first absences: every absent dirty
+         \* path is deleted (`confirm_absences`, the declared form).
+     IN \E dels \in IF Carries(s) THEN {absent} ELSE SUBSET absent :
           w' = [w EXCEPT ![s].pc = "scanned",
                          ![s].uploads = ups, ![s].deletes = dels,
                          ![s].snap = W.local,
@@ -388,7 +479,14 @@ Skip(s) ==
   /\ On(s) /\ w[s].pc = "consumed" /\ barriers < MaxBarriers
   /\ \A p \in Paths : w[s].local[p] = w[s].baseline[p]
   /\ seq = w[s].synced
-  /\ w' = [w EXCEPT ![s].pc = "idle"]
+  /\ LET W == w[s] IN
+     w' = [w EXCEPT ![s].pc = "idle",
+                    ![s].car = IF W.car.id # 0 THEN [W.car EXCEPT !.uncited = Uncited(W.car, doc)] ELSE @,
+                    ![s].bound = IF W.cId # 0
+                                 THEN [id |-> W.cId, fold |-> W.cFold, doc |-> doc, seq |-> seq,
+                                       wd |-> {}, inst |-> FALSE, clk |-> W.clk]
+                                 ELSE @,
+                    ![s].cId = 0, ![s].cFold = 0, ![s].clk = "none", ![s].iseq = 0, ![s].instd = FALSE]
   /\ barriers' = barriers + 1
   /\ UNCHANGED <<bucket, nextGen, ui, reqs, aux>>
 
@@ -432,10 +530,17 @@ MergeGone(s) == {p \in Paths : p \notin MineInMerge(s) \cup w[s].deletes /\ doc[
 PullOnly(s) ==
   /\ On(s) /\ w[s].pc = "scanned"
   /\ w[s].uploads = {} /\ w[s].deletes = {}
-  /\ w' = [w EXCEPT ![s].pc = "idle",
+  /\ LET W == w[s] IN
+     w' = [w EXCEPT ![s].pc = "idle",
                     ![s].inst = doc, ![s].synced = seq,
                     ![s].snap = [p \in Paths |-> Nil],
-                    ![s].upDone = {}, ![s].gone = {}, ![s].verified = FALSE]
+                    ![s].upDone = {}, ![s].gone = {}, ![s].verified = FALSE,
+                    ![s].car = IF W.car.id # 0 THEN [W.car EXCEPT !.uncited = Uncited(W.car, doc)] ELSE @,
+                    ![s].bound = IF W.cId # 0
+                                 THEN [id |-> W.cId, fold |-> W.cFold, doc |-> doc, seq |-> seq,
+                                       wd |-> {}, inst |-> FALSE, clk |-> W.clk]
+                                 ELSE @,
+                    ![s].cId = 0, ![s].cFold = 0, ![s].clk = "none", ![s].iseq = 0, ![s].instd = FALSE]
   /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
 
 ------------------------------------------------------------------------------
@@ -455,7 +560,7 @@ Claim(s) ==
 \* R4a: the commit re-reads every upload it is about to cite and withholds
 \* what a sweep took.
 Verify(s) ==
-  /\ On(s) /\ w[s].pc = "claimed" /\ holder = s /\ ~w[s].verified
+  /\ On(s) /\ w[s].pc = "claimed" /\ (holder = s \/ w[s].deposed) /\ ~w[s].verified
   /\ w' = [w EXCEPT ![s].verified = TRUE,
                     ![s].gone = IF CommitVerifiesUploads
                                 THEN {p \in w[s].uploads \cap w[s].upDone : w[s].snap[p] \notin live}
@@ -470,7 +575,7 @@ Verify(s) ==
 \* deleted since the merge base records the deleted version; mine DELETING
 \* over a version theirs changed applies, and records theirs (M3).
 Install(s) ==
-  /\ On(s) /\ w[s].pc = "claimed" /\ holder = s /\ w[s].verified
+  /\ On(s) /\ w[s].pc = "claimed" /\ (InstallFenced => holder = s) /\ w[s].verified
   /\ LET W == w[s]
          mine == W.uploads \cap W.upDone
          contested == IF CommitSurfacesForeign
@@ -507,7 +612,24 @@ Install(s) ==
                          \* The CAS replaced exactly the derived document: the
                          \* installed one is it plus this tree's own changes.
                          ![s].adv = IF CommitAdvanceGuarded THEN seq = W.derived ELSE TRUE,
-                         ![s].collected = retired = {}]
+                         ![s].collected = retired = {},
+                         \* H10: what a carrying CAS published of the declaration,
+                         \* journalled with it (`barrier.rs:1107-1125`): every dirty
+                         \* path it took, which were deletes, and what it did not
+                         \* carry (withheld uploads, deletes the merge outranked).
+                         \* A barrier that adds nothing makes no CAS and no entry.
+                         ![s].car = IF Carries(s) /\ ~nothing
+                                    THEN LET c0 == IF W.car.id = W.cId THEN W.car ELSE [NoCar EXCEPT !.id = W.cId]
+                                         IN [c0 EXCEPT !.paths = @ \cup W.uploads \cup W.deletes,
+                                                       \* L-136: a later carry's upload of a path an
+                                                       \* earlier one deleted is an upload again.
+                                                       !.deletes = (@ \ W.uploads) \cup W.deletes,
+                                                       !.dropped = @ \cup W.gone \cup {p \in W.deletes : inst[p] # Nil}]
+                                    ELSE @,
+                         ![s].stamps = IF Carries(s) /\ ~nothing THEN @ \cup {<<seq + 1, W.clk>>} ELSE @,
+                         ![s].lost = IF MaxTouches > 0 THEN @ \cup {W.snap[p] : p \in W.gone} ELSE @,
+                         ![s].iseq = IF Carries(s) THEN (IF nothing THEN seq ELSE seq + 1) ELSE @,
+                         ![s].instd = IF Carries(s) THEN ~nothing ELSE @]
        \* A commit's delete is acknowledged as the gateway's is (E21: without
        \* it, a delete then a rename back reads as a regress at a peer).
        /\ udel' = udel \cup {<<p, doc[p]>> : p \in {q \in Paths : doc[q] # Nil /\ inst[q] = Nil}}
@@ -518,6 +640,7 @@ Install(s) ==
 \* the commit's retirements were logged (`RetUpdate`) and `Reap` takes them.
 Collect(s) ==
   /\ On(s) /\ w[s].pc = "cased" /\ ~w[s].collected
+  /\ DeletesUnderLease => holder = s
   /\ LET W == w[s]
          taken == {h \in W.retire : ~(CollectorSparesCited /\ \E q \in Paths : W.inst[q] = h)}
      IN /\ live' = IF RetireAge THEN live ELSE live \ taken
@@ -557,8 +680,18 @@ Finish(s) ==
              ![s].adv = FALSE,
              ![s].uploads = {}, ![s].deletes = {}, ![s].snap = [p \in Paths |-> Nil],
              ![s].upDone = {}, ![s].gone = {}, ![s].verified = FALSE,
-             ![s].collected = FALSE]
-  /\ holder' = "none"
+             ![s].collected = FALSE,
+             \* The ack names the document this install left (`note_carrier_uncited`).
+             ![s].car = IF W.car.id # 0 THEN [W.car EXCEPT !.uncited = Uncited(W.car, W.inst)] ELSE @,
+             ![s].bound = IF W.cId # 0
+                          THEN [id |-> W.cId, fold |-> W.cFold, doc |-> W.inst, seq |-> W.iseq,
+                                wd |-> W.gone, inst |-> W.instd, clk |-> W.clk]
+                          ELSE @,
+             ![s].cId = 0, ![s].cFold = 0, ![s].clk = "none", ![s].iseq = 0, ![s].instd = FALSE,
+             ![s].deposed = FALSE]
+  \* The release is a CAS on this writer's token: a no-op on a cell a
+  \* successor holds (`lease::release`).
+  /\ holder' = IF holder = s THEN "none" ELSE holder
   /\ UNCHANGED <<live, minted, doc, seq, tomb, base, acked, conflicts, gw, mv, udel,
                  nextGen, ui, reqs, barriers, aux>>
 
@@ -577,7 +710,9 @@ Restart(s) ==
                     ![s].collected = FALSE, ![s].adv = FALSE,
                     \* The intent is on disk; its replay starts the apply over.
                     ![s].sStage = IF @ = "none" THEN "none" ELSE "saved",
-                    ![s].sKeep = {}]
+                    ![s].sKeep = {},
+                    ![s].cId = 0, ![s].cFold = 0, ![s].clk = "none", ![s].iseq = 0, ![s].instd = FALSE,
+                    ![s].deposed = FALSE]
   /\ holder' = IF holder = s THEN "none" ELSE holder
   /\ restarts' = restarts + 1
   /\ UNCHANGED <<live, minted, doc, seq, tomb, base, acked, conflicts, gw, mv, udel,
@@ -744,6 +879,114 @@ RPullSync(s) ==
   /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, restarts, syncs, rescopes, upped, copies, orig>>
 
 ------------------------------------------------------------------------------
+(* The boundary verbs' answer (row 15; `sentinel.rs`).                     *)
+
+\* A request: the agent's touch of `.flint/publish`, the gateway's
+\* `boundary_request`, the UDS door.  Each is consumed and folded into the
+\* pending record at once (`consume_sentinel`, `fold_into_pending`): its
+\* nonce appended, the oldest dropped past `MaxNonces`.  A new record mints
+\* its id; a fold into a standing one keeps it (L-133).  Between barriers:
+\* the file and the door are polled between ticks, and a barrier reads the
+\* gateway's request BEFORE it decides what it carries (L-135, found here:
+\* read after, the barrier that published a requested path did not carry
+\* it, and a peer's delete before the honour was answered `ok`).
+Touch(s) ==
+  /\ On(s) /\ w[s].pc = "idle" /\ w[s].nt < MaxTouches
+  /\ LET W == w[s]
+         n == W.nt + 1
+         fresh == W.pend.id = 0
+         ns == (IF fresh THEN {} ELSE W.pend.nonces) \cup {n}
+         kept == IF Cardinality(ns) > MaxNonces THEN ns \ {Oldest(ns)} ELSE ns
+         \* What this request declares: the tree as it stands (the record's
+         \* `id` comment): the paths it changed whose bytes the document does
+         \* not already hold, at their present versions.  (A path whose bytes
+         \* an install already published, with step 7 not yet run, is the
+         \* published path the contract lets a peer delete, AGENTS.md: the
+         \* gate's AckHolds1, after a restart between a CAS and step 7.)
+         dirty == {p \in Paths : W.local[p] # W.baseline[p] /\ Content(W.local[p]) # Content(doc[p])}
+     IN w' = [w EXCEPT ![s].nt = n,
+                       ![s].pend = [id |-> IF fresh THEN n ELSE W.pend.id, fold |-> n, nonces |-> kept],
+                       ![s].cN = @ \cup {n}, ![s].capped = @ \cup (ns \ kept),
+                       ![s].dset = (IF fresh THEN {} ELSE @) \cup dirty,
+                       ![s].decl = [p \in Paths |-> IF p \in dirty THEN W.local[p]
+                                                   ELSE IF fresh THEN Nil ELSE @[p]],
+                       ![s].dMint = [p \in Paths |-> IF p \in dirty THEN nextGen
+                                                    ELSE IF fresh THEN 0 ELSE @[p]],
+                       ![s].moved = (IF fresh THEN {} ELSE @) \ dirty]
+  /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
+
+\* The honour (`honor_pending_as`, `honor_publish`): at idle, once a barrier
+\* that began after the latest fold has ended (the honour's own, or the
+\* floor's), and the ack does not already answer the record.  What it did
+\* not carry: that barrier's withheld uploads and, for this record, the
+\* carrier's `dropped` and `uncited`.  `ok` iff nothing; the seq and the
+\* clock are the barrier's.  The pending is retired by `RetireByAck`.
+Honor(s) ==
+  /\ On(s) /\ s \notin Readers /\ w[s].pc = "idle"
+  /\ w[s].pend.id # 0 /\ ~Covered(s)
+  /\ w[s].bound.id = w[s].pend.id /\ w[s].bound.fold = w[s].pend.fold
+  /\ \E src \in {w[s].bound.clk} :
+     LET W == w[s]
+         carried == IF W.car.id = W.pend.id THEN W.car.dropped \cup W.car.uncited ELSE {}
+         dr == W.bound.wd \cup carried
+     IN w' = [w EXCEPT ![s].ack = [st |-> IF dr = {} THEN "ok" ELSE "partial",
+                                    nonces |-> W.pend.nonces, seq |-> W.bound.seq,
+                                    src |-> src, dropped |-> dr, inst |-> W.bound.inst],
+                       ![s].aN = @ \cup W.pend.nonces]
+  /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
+
+\* A reader answers and publishes nothing (`honor_publish`'s first arm).
+HonorReader(s) ==
+  /\ On(s) /\ s \in Readers /\ w[s].pc = "idle"
+  /\ w[s].pend.id # 0 /\ ~Covered(s)
+  /\ w' = [w EXCEPT ![s].ack = [NoAck EXCEPT !.st = "refused-read-only", !.nonces = w[s].pend.nonces],
+                    ![s].aN = @ \cup w[s].pend.nonces]
+  /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
+
+\* The retire after the ack, and the restart rule: a pending its ack already
+\* answers is retired, never re-run (`ack_matches`).
+RetireByAck(s) ==
+  /\ On(s) /\ w[s].pc = "idle" /\ w[s].pend.id # 0 /\ Covered(s)
+  /\ w' = [w EXCEPT ![s].pend = NoPend]
+  /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
+
+------------------------------------------------------------------------------
+(* Deposal (row 17; `lease.rs::claim_step`, `barrier.rs`).                 *)
+
+\* A claim that finds a held cell standing still past the threshold deposes
+\* its holder and ROTATES the manifest: a content-identical CAS, seq + 1,
+\* so a CAS the straggler computed on the old document fails.  The model
+\* has no clock: any holder, at any point of its section, may be judged
+\* dead (D9).
+Depose(t) ==
+  /\ On(t) /\ w[t].pc = "scanned" /\ w[t].nd < MaxDeposals
+  /\ w[t].uploads \subseteq w[t].upDone /\ w[t].uploads \cup w[t].deletes # {}
+  /\ holder \in Writers /\ holder # t
+  /\ holder' = t
+  /\ seq' = seq + 1
+  /\ w' = [w EXCEPT ![t].pc = "claimed", ![t].nd = @ + 1, ![holder].deposed = TRUE]
+  /\ UNCHANGED <<live, minted, doc, tomb, base, acked, conflicts, gw, mv, udel,
+                 nextGen, ui, reqs, barriers, aux>>
+
+\* The straggler's next read of the cell is `Fenced`: before its CAS (the
+\* fence read, `verify_not_deposed`) the barrier is abandoned, its uploads
+\* stand and the pending stays; after it, the deletes stop (`may_delete`)
+\* and step 7 still follows the install.
+Fence(s) ==
+  /\ On(s) /\ w[s].deposed
+  /\ \/ /\ w[s].pc = "claimed"
+        /\ w' = [w EXCEPT ![s].pc = "idle", ![s].deposed = FALSE,
+                    ![s].uploads = {}, ![s].deletes = {},
+                    ![s].snap = [p \in Paths |-> Nil],
+                    ![s].upDone = {}, ![s].gone = {}, ![s].verified = FALSE,
+                    ![s].inst = [p \in Paths |-> Nil], ![s].retire = {},
+                    ![s].collected = FALSE, ![s].adv = FALSE,
+                    ![s].cId = 0, ![s].cFold = 0, ![s].clk = "none", ![s].iseq = 0, ![s].instd = FALSE]
+     \/ /\ w[s].pc = "cased" /\ ~w[s].collected
+        /\ w' = [w EXCEPT ![s].retire = {}, ![s].collected = TRUE]
+  /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
+
+------------------------------------------------------------------------------
 (* The retire age (M1) and a reader of the document.                       *)
 
 \* Every step that moves the document LOGS the handles it stopped citing
@@ -809,6 +1052,7 @@ WriterStep ==
        \/ Verify(s) \/ Install(s) \/ Collect(s) \/ Finish(s) \/ Restart(s) \/ Sync(s)
        \/ RescopeBegin(s) \/ RescopeFirst(s) \/ RescopeSecond(s)
        \/ RPullRead(s) \/ RPullSync(s)
+       \/ Touch(s) \/ Honor(s) \/ HonorReader(s) \/ RetireByAck(s) \/ Depose(s) \/ Fence(s)
   \/ \E s \in Writers, p \in Paths : Edit(s, p) \/ Delete(s, p) \/ Upload(s, p)
   \/ \E s \in Writers, h \in Handles : Sweep(s, h)
 
@@ -900,7 +1144,13 @@ SilentRevert(p) ==
                          /\ (w[s].baseline[p] = doc[p] \/ Gen(doc[p]) \in took[s][p])
 Prop_NoSilentRevert == [][\A p \in Paths : ~SilentRevert(p)]_vars
 
-Inv_OneHolder == \A s \in Writers : w[s].pc \in {"claimed", "cased"} => holder = s
+\* Restated 2026-10-14 for deposal (row 17): a writer in its commit section
+\* holds the lease unless a takeover deposed it, and the holder is in its
+\* section, not deposed.  With `MaxDeposals = 0` the first half is the claim
+\* as it was.
+Inv_OneHolder ==
+  /\ \A s \in Writers : w[s].pc \in {"claimed", "cased"} /\ ~w[s].deposed => holder = s
+  /\ holder \in Writers => w[holder].pc \in {"claimed", "cased"} /\ ~w[holder].deposed
 \* SUPERSEDED (2026-10-14) by NR5 below; kept as the record (`regressed` and
 \* `Back` stay as its ghost).  FALSE once the gateway may remove three times
 \* (NOTES.txt E6: rename, re-create, delete, rename back, a consume regresses).
@@ -997,6 +1247,75 @@ ProbeOutOfScopePublished ==
 
 \* G1: every save the gateway starts is answered.  Checked under LSpec.
 Prop_UISaveCompletes == \A p \in Paths : (gw[p] # Nil) ~> (gw[p] = Nil)
+
+------------------------------------------------------------------------------
+(* Rows 15-17 (2026-10-14).                                                 *)
+
+\* THE ANSWER.  A declared path is BROKEN in document `d` when the agent has
+\* not moved on from what it declared there, `d` does not hold those bytes,
+\* what `d` holds is not a later version (derived from the declared one,
+\* or minted after the declaring request; a declared delete answered by any
+\* later file), and no record preserves the declared bytes (R7's "never a
+\* silent winner": a peer's later boundary may win, loudly).
+LaterVersion(s, p, d) ==
+  /\ d[p] # Nil
+  /\ \/ w[s].decl[p] = Nil
+     \/ Derives(d[p], w[s].decl[p])
+     \/ Gen(Content(d[p])) >= w[s].dMint[p]
+\* A conflict preserves the declared bytes while they are live, or when its
+\* version is not a swept upload: the copy keeps those (AckWithheldHolds,
+\* 2026-10-14: a reap of the handle after the age is not a loss).
+SurfacedDecl(s, p) ==
+  \E c \in conflicts : /\ c[1] = p /\ c[2] # Nil /\ Content(c[2]) = Content(w[s].decl[p])
+                       /\ (c[2] \in live \/ c[2] \notin UNION {w[t].lost : t \in Writers})
+Broken(s, p, d) ==
+  /\ p \in w[s].dset /\ p \notin w[s].moved
+  /\ Content(d[p]) # Content(w[s].decl[p])
+  /\ ~LaterVersion(s, p, d)
+  /\ ~SurfacedDecl(s, p)
+AckWrite(s) == w'[s].ack # w[s].ack /\ w'[s].ack.st \in {"ok", "partial"}
+\* AK1 (S1 rows 1 and 2): the ack names every declared path its document
+\* does not carry; `ok` names none.  (It may name more: a path the agent
+\* wrote after the request whose upload was withheld is not in the seq
+\* either, and saying so is honest; the gate's AckWithheldHolds, DeposeAck.)
+AK1 == [][\A s \in Writers :
+            AckWrite(s) => {p \in Paths : Broken(s, p, w[s].bound.doc)} \subseteq w'[s].ack.dropped]_vars
+\* AK3 (S1 row 4): every consumed request is pending or was answered, but
+\* for what the nonce cap dropped (D2; `ProbeCapDropped` shows it).
+AK3 == \A s \in Writers : w[s].cN \ w[s].capped \subseteq w[s].pend.nonces \cup w[s].aN
+\* AK4 (S1 row 5): an ack whose barrier installed names the clock its CAS
+\* stamped on the bucket.
+AK4 == \A s \in Writers :
+         w[s].ack.st \in {"ok", "partial"} /\ w[s].ack.inst => <<w[s].ack.seq, w[s].ack.src>> \in w[s].stamps
+
+\* NR1 (row 16, S4 row 1): a path the tree deleted and has not published
+\* comes back only by the agent's own write.
+NR1 == [][\A s \in Writers, p \in Paths :
+            w[s].local[p] = Nil /\ w[s].baseline[p] # Nil /\ w'[s].local[p] # Nil
+              => w'[s].local[p] = <<p, nextGen>> /\ nextGen' = nextGen + 1]_vars
+
+\* DP1 (row 17, S5 row 3): an install is the lease holder's.
+DP1 == [][\A s \in Writers : w[s].pc = "claimed" /\ w'[s].pc = "cased" => holder = s]_vars
+\* DP2 (L-132): the collector deletes only under the lease.  (The orphan
+\* sweep and the reap are guarded in place.)
+DP2 == [][\A s \in Writers : ~w[s].collected /\ w'[s].collected /\ live' # live => holder = s]_vars
+
+\* Probes (each must fire: the step is reachable).
+ProbeAckPartial == \A s \in Writers : w[s].ack.st # "partial"
+ProbeAckOk == \A s \in Writers : w[s].ack.st # "ok"
+ProbeAckDeferred == \A s \in Writers : w[s].ack.src # "sentinel-deferred"
+ProbeCapDropped == \A s \in Writers : w[s].capped = {}
+ProbeRetiredAfterRestart ==
+  [][~\E s \in Writers : restarts > 0 /\ w[s].pend.id # 0 /\ w'[s].pend.id = 0]_vars
+ProbeDeleteSurvivesRestart ==
+  [][~\E s \in Writers, p \in Paths : restarts' = restarts + 1 /\ w[s].local[p] = Nil
+                                     /\ w[s].baseline[p] # Nil /\ w'[s].local[p] = Nil]_vars
+ProbeDeposed == \A s \in Writers : ~w[s].deposed
+ProbeFencedBeforeCas ==
+  [][~\E s \in Writers : w[s].deposed /\ w[s].pc = "claimed" /\ w'[s].pc = "idle" /\ restarts' = restarts]_vars
+ProbeFencedAfterCas ==
+  [][~\E s \in Writers : w[s].deposed /\ w[s].pc = "cased" /\ w[s].retire # {} /\ w'[s].collected
+                          /\ live' = live /\ w'[s].retire = {}]_vars
 
 ------------------------------------------------------------------------------
 (* Probes (non-vacuity): a world that violates one has taken the step.     *)

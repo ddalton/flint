@@ -1,0 +1,12 @@
+# tla-mc -compile -workers 4 -metadir /work/out/p1/meta-LeanP1VerifyOff -checkpoint 0 -fpmem 2000 -queue-mem 6000 -config /work/formal/LeanP1VerifyOff.cfg LeanP1.tla  (cwd /work/formal)
+tla-mc: building a checker for LeanP1 (cache: /work/out/p1/cache-LeanP1VerifyOff)
+tla-mc: built in 39.1s
+tla-mc: LeanP1 (31 variables, 0 symmetry permutations), 4 workers, generated engine; loaded in 0.004s
+progress: depth 11, 4890378 generated, 1780679 distinct (0 fingerprint spills), 1071301 on queue (0 on disk), 26.0s
+progress: depth 12, 11734305 generated, 4038743 distinct (0 fingerprint spills), 2258064 on queue (0 on disk), 61.7s
+progress: depth 13, 25401112 generated, 8347645 distinct (0 fingerprint spills), 4308902 on queue (0 on disk), 133.4s
+progress: depth 14, 50027269 generated, 15877155 distinct (0 fingerprint spills), 7529510 on queue (1976614 on disk), 264.9s
+progress: depth 15, 90858720 generated, 28118341 distinct (0 fingerprint spills), 12241186 on queue (6717986 on disk), 485.8s
+progress: depth 16, 154874849 generated, 47016910 distinct (0 fingerprint spills), 18898569 on queue (13382537 on disk), 846.6s
+progress: depth 17, 252085569 generated, 75306762 distinct (0 fingerprint spills), 28289852 on queue (22776892 on disk), 1399.7s
+progress: depth 18, 395788495 generated, 116301166 distinct (1024 fingerprint spills), 40994404 on queue (35499364 on disk), 2206.9s

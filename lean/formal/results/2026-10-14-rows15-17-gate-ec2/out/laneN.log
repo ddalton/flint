@@ -1,0 +1,16 @@
+LeanP1AckCap                       OK-HOLDS     exp=HOLDS                        | No error has been found                                    | 90634552 states generated, 31916163 distinct states found. Depth 33 | 82s
+leanp1 gate: 1 world(s) run, 1 as expected, 0 not: -
+LeanP1ResHolds                     OK-HOLDS     exp=HOLDS                        | No error has been found                                    | 311381738 states generated, 88776330 distinct states found. Depth 39 | 192s
+leanp1 gate: 1 world(s) run, 1 as expected, 0 not: -
+LeanP1DeposeNoAgeHolds             OK-HOLDS     exp=HOLDS                        | No error has been found                                    | 9630092 states generated, 2725409 distinct states found. Depth 32 | 45s
+leanp1 gate: 1 world(s) run, 1 as expected, 0 not: -
+LeanP1AckWithheldHolds             MISMATCH     exp=HOLDS                        | Error: Action property AK1 is violated by the last step ab | 1441408831 states generated, 483553704 distinct states found. Depth 21 | 810s
+leanp1 gate: 1 world(s) run, 0 as expected, 1 not: LeanP1AckWithheldHolds
+LeanP1DeposeHolds                  OK-HOLDS     exp=HOLDS                        | No error has been found                                    | 70433167 states generated, 18691838 distinct states found. Depth 36 | 83s
+leanp1 gate: 1 world(s) run, 1 as expected, 0 not: -
+LeanP1DeposeAck                    MISMATCH     exp=HOLDS                        | Error: Action property AK1 is violated by the last step ab | 196103039 states generated, 67949883 distinct states found. Depth 17 | 141s
+leanp1 gate: 1 world(s) run, 0 as expected, 1 not: LeanP1DeposeAck
+LeanP1AckHolds1                    MISMATCH     exp=HOLDS                        | Error: Action property AK1 is violated by the last step ab | 36600236 states generated, 14328539 distinct states found. Depth 15 | 54s
+leanp1 gate: 1 world(s) run, 0 as expected, 1 not: LeanP1AckHolds1
+LeanP1AckHolds2                    MISMATCH     exp=HOLDS                        | Error: expected a set, got B                               | 0 states generated, 0 distinct states found. Depth 0 | 41s
+leanp1 gate: 1 world(s) run, 0 as expected, 1 not: LeanP1AckHolds2

@@ -1,0 +1,18 @@
+# tla-mc -compile -workers 48 -metadir /work/out/pn/meta-LeanP1ResHolds -checkpoint 0 -fpmem 16000 -queue-mem 48000 -config /work/formal/LeanP1ResHolds.cfg LeanP1.tla  (cwd /work/formal)
+tla-mc: building a checker for LeanP1 (cache: /work/out/pn/cache-LeanP1ResHolds)
+tla-mc: built in 42.3s
+tla-mc: LeanP1 (31 variables, 0 symmetry permutations), 48 workers, generated engine; loaded in 0.004s
+progress: depth 18, 26337308 generated, 8491770 distinct (0 fingerprint spills), 2632735 on queue (0 on disk), 11.0s
+progress: depth 20, 51013295 generated, 16185035 distinct (0 fingerprint spills), 4261752 on queue (0 on disk), 22.0s
+progress: depth 22, 86803543 generated, 27151497 distinct (0 fingerprint spills), 5874445 on queue (0 on disk), 38.5s
+progress: depth 23, 108432670 generated, 33751798 distinct (0 fingerprint spills), 6600301 on queue (0 on disk), 48.7s
+progress: depth 24, 132347908 generated, 40997186 distinct (0 fingerprint spills), 7245388 on queue (0 on disk), 60.2s
+progress: depth 25, 158132290 generated, 48642236 distinct (0 fingerprint spills), 7645050 on queue (0 on disk), 72.5s
+progress: depth 26, 184712444 generated, 56294610 distinct (0 fingerprint spills), 7652374 on queue (0 on disk), 85.3s
+progress: depth 27, 210721354 generated, 63519665 distinct (0 fingerprint spills), 7225055 on queue (0 on disk), 97.7s
+progress: depth 28, 234897172 generated, 69995055 distinct (0 fingerprint spills), 6475390 on queue (0 on disk), 109.4s
+progress: depth 29, 256225337 generated, 75564318 distinct (0 fingerprint spills), 5569263 on queue (0 on disk), 120.0s
+progress: depth 31, 288333733 generated, 83757642 distinct (0 fingerprint spills), 3587561 on queue (0 on disk), 136.6s
+progress: depth 34, 309367634 generated, 88466294 distinct (0 fingerprint spills), 695740 on queue (0 on disk), 148.5s
+Model checking completed. No error has been found.
+311381738 states generated, 88776330 distinct states found. Depth 39. Checked in 149.803s (592622 distinct/s).

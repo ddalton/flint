@@ -1,0 +1,4 @@
+LeanP1AckHolds1                    OK-HOLDS     exp=HOLDS                        | No error has been found                                    | 9349708495 states generated, 2916984743 distinct states found. Depth 43 | 1385s
+leanp1 gate: 1 world(s) run, 1 as expected, 0 not: -
+LeanP1AckWithheldHolds             MISMATCH     exp=HOLDS                        | Error: Action property AK1 is violated by the last step ab | 6935514538 states generated, 2194134435 distinct states found. Depth 25 | 2482s
+leanp1 gate: 1 world(s) run, 0 as expected, 1 not: LeanP1AckWithheldHolds

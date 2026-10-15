@@ -12,18 +12,21 @@ CommitSurfacesForeign CommitVerifiesUploads SweepUnderLease CollectorSparesCited
 CommitRecordsDeleteOverride DeleteWinsPreserved ContentConverges RecheckSkipped CommitAdvanceGuarded RetireAge \
 GatewayIgnoresLease GatewayJudgesRead GatewaySweepGrace RenameAtomic \
 Scopes MaxRescopes ConsumeHonorsScope RescopeUnciteFirst RescopeKeepsDirty WidenKeepsLocal UnlinkChecksBytes \
-MaxFetchFails ConsumeKeepsLeft SyncKeepsLeft Readers ReaderRechecksOwed"
+MaxFetchFails ConsumeKeepsLeft SyncKeepsLeft Readers ReaderRechecksOwed \
+MaxTouches MaxNonces MaxDeposals InstallFenced DeletesUnderLease"
 emit() { # <name> <spec> <invariants> <properties> <overrides...>
   local name=$1 spec=$2 invs=$3 props=$4; shift 4
   local c_Paths='{p1, p2}' c_Free='{p2}' c_Writers='{A, B}'
   local c_MaxMint=3 c_MaxUI=1 c_MaxRemovals=1 c_MaxBarriers=2 c_MaxRestarts=0 c_MaxSyncs=0 c_MaxCopies=1 c_MaxAges=1
   local c_Scopes= c_MaxRescopes=0 c_MaxFetchFails=0 c_Readers='{}'
+  # Rows 15-17 (2026-10-14): off unless a world turns them on.
+  local c_MaxTouches=0 c_MaxNonces=32 c_MaxDeposals=0
   local k kv v
   for k in CommitSurfacesForeign CommitVerifiesUploads SweepUnderLease CollectorSparesCited \
            CommitRecordsDeleteOverride DeleteWinsPreserved ContentConverges RecheckSkipped CommitAdvanceGuarded RetireAge \
            GatewayIgnoresLease GatewayJudgesRead GatewaySweepGrace RenameAtomic \
            ConsumeHonorsScope RescopeUnciteFirst RescopeKeepsDirty WidenKeepsLocal UnlinkChecksBytes \
-           ConsumeKeepsLeft SyncKeepsLeft ReaderRechecksOwed; do
+           ConsumeKeepsLeft SyncKeepsLeft ReaderRechecksOwed InstallFenced DeletesUnderLease; do
     eval "local c_$k=TRUE"
   done
   for kv in "$@"; do k=${kv%%=*}; v=${kv#*=}; eval "c_$k=\"\$v\""; done
@@ -47,7 +50,8 @@ emit() { # <name> <spec> <invariants> <properties> <overrides...>
 # both restatements are PROVED for every bound (m5c/, m5d/).  The originals
 # stay in LeanP1.tla as the record.
 INV="TypeOK,Inv_CitationsLive,Inv_OneName,AN5,Inv_OneHolder,Inv_ShortcutSound,Inv_ReaderFetches"
-PROPS="Prop_NoSilentRevert,Prop_DeleteSettles,NR5"
+# NR1 (row 16, 2026-10-14): an action property; it adds no state.
+PROPS="Prop_NoSilentRevert,Prop_DeleteSettles,NR5,NR1"
 Q1="Paths={p1} Free={} MaxBarriers=3 MaxRemovals=0 MaxRestarts=1 MaxSyncs=1 MaxCopies=2"
 # The shipped shape.
 emit Holds Spec "$INV" "$PROPS"
@@ -97,7 +101,7 @@ emit ProbeRestartAfterCas Spec TypeOK ProbeRestartAfterCas $Q1
 # LeanP1Holds's. No retire age (orthogonal; LeanP1Holds checks it). Two
 # writers at these bounds grew 2.5x a level past 21M states at depth 12.
 SC="Scopes={{p1},{p1,p2}} MaxRescopes=1 MaxRestarts=1 Writers={A} MaxAges=0"
-SPROPS="Prop_NoSilentRevert,Prop_DeleteSettles,Prop_AgentWorkKept,Prop_ScopeRespected,Prop_NarrowNeverDeletes"
+SPROPS="Prop_NoSilentRevert,Prop_DeleteSettles,Prop_AgentWorkKept,Prop_ScopeRespected,Prop_NarrowNeverDeletes,NR1"
 emit ScopeHolds Spec "$INV" "$SPROPS" $SC
 emit ScopeIgnored Spec TypeOK Prop_ScopeRespected ConsumeHonorsScope=FALSE $SC
 emit WidenOverwrites Spec TypeOK Prop_AgentWorkKept WidenKeepsLocal=FALSE $SC
@@ -174,3 +178,54 @@ XC="WA=A P1=p1 P2=p2" emit TraceE38Old HSpec TypeOK,Inv_AckedNamed HIsNext $T38
 T39="Paths={p1,p2,p3} Free={p2,p3} Writers={A} MaxMint=6 MaxUI=3 MaxRemovals=2 MaxBarriers=3 MaxRestarts=1 MaxCopies=1 MaxAges=1 MaxFetchFails=1"
 XC="WA=A P1=p1 P2=p2 P3=p3" emit TraceE39 HSpec TypeOK,AN5,HReach NR5,HIsNext $T39
 XC="WA=A P1=p1 P2=p2 P3=p3" emit TraceE39Old HSpec TypeOK,Inv_AckedNamed HIsNext $T39
+# 2026-10-14: ROWS 15-17 (docs/plans/lean-row15-boundary-verbs-model-plan-2026-10-14.md).
+# THE ANSWER.  One writer, one path, two requests, a UI save and a UI
+# delete, three barriers and a restart: H10's routes (an answer left to a
+# later barrier) and L-133's (a second request folding in after a peer's
+# delete) are both in it.  The mutants (fourth column of the TSV) run here.
+AINV="$INV,AK3,AK4"
+APROPS="$PROPS,AK1"
+A1="Paths={p1} Free={} Writers={A} MaxTouches=2 MaxBarriers=3 MaxRestarts=1"
+emit AckHolds1 Spec "$AINV" "$APROPS" $A1
+# Two writers, two paths: a peer's commit, not only the gateway, moves the
+# document under the declaration; one request each.
+emit AckHolds2 Spec "$AINV" "$APROPS" "Writers={A,B}" MaxTouches=1
+# The cap (D2): three requests, two kept.  AK3 holds with the cap visible.
+AC="Paths={p1} Free={} Writers={A} MaxTouches=3 MaxNonces=2 MaxRemovals=0"
+emit AckCap Spec "$AINV" "$APROPS" $AC
+emit ProbeCapDropped Spec ProbeCapDropped "" $AC
+# A withheld upload needs another writer's sweep of it.
+AW="Paths={p1} Free={} Writers={A,B} MaxTouches=1 MaxRemovals=0"
+emit AckWithheldHolds Spec "$AINV" "$APROPS" $AW
+emit AckIgnoresWithheld Spec TypeOK AK1 $AW
+emit AckReadsOwnReport Spec TypeOK AK1 $A1
+emit AckIgnoresUncited Spec TypeOK AK1 $A1
+emit CarrierPerFold Spec TypeOK AK1 $A1
+emit CarrierKeepsDelete Spec TypeOK AK1 $A1
+emit RequestAfterCarry Spec TypeOK AK1 $A1
+emit FoldClobbers Spec TypeOK,AK3 "" $A1
+emit StampIndependent Spec TypeOK,AK4 "" $A1
+emit ProbeAckOk Spec ProbeAckOk "" $A1
+emit ProbeAckPartial Spec ProbeAckPartial "" $A1
+emit ProbeAckDeferred Spec ProbeAckDeferred "" $A1
+emit ProbeRetiredAfterRestart Spec TypeOK ProbeRetiredAfterRestart $A1
+# THE RESTART.  One writer, two paths, two restarts: an unpublished delete
+# across a restart, then published.
+RS="Writers={A} MaxRestarts=2 MaxBarriers=3"
+emit ResHolds Spec "$INV" "$PROPS" $RS
+emit Rematerialise Spec TypeOK NR1 $RS
+emit ConsumeTakesDeleted Spec TypeOK NR1 $RS
+emit ProbeDeleteSurvivesRestart Spec TypeOK ProbeDeleteSurvivesRestart $RS
+# DEPOSAL.  Two writers, one path, one takeover each.  With the retire age
+# the collector logs and the reap deletes (guarded in place); without it
+# the collector deletes, which is where L-132's rule bites.
+DP="Paths={p1} Free={} Writers={A,B} MaxDeposals=1 MaxRemovals=0"
+emit DeposeHolds Spec "$INV" "$PROPS,DP1,DP2" $DP
+emit DeposeNoAgeHolds Spec TypeOK,Inv_OneHolder,Inv_CitationsLive,Inv_OneName DP1,DP2 $DP RetireAge=FALSE MaxAges=0
+emit DeletesOffLease Spec TypeOK DP2 $DP RetireAge=FALSE MaxAges=0 DeletesUnderLease=FALSE
+emit InstallUnfenced Spec TypeOK DP1 $DP InstallFenced=FALSE
+emit FinishReleasesForeign Spec TypeOK,Inv_OneHolder "" $DP
+emit DeposeAck Spec "$AINV" "$APROPS,DP1,DP2" $DP MaxTouches=1
+emit ProbeDeposed Spec ProbeDeposed "" $DP
+emit ProbeFencedBeforeCas Spec TypeOK ProbeFencedBeforeCas $DP
+emit ProbeFencedAfterCas Spec TypeOK ProbeFencedAfterCas $DP RetireAge=FALSE MaxAges=0

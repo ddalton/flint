@@ -1,0 +1,26 @@
+# tla-mc -compile -workers 192 -metadir /work/out/pn7/meta-LeanP1AckHolds1 -checkpoint 0 -fpmem 32000 -queue-mem 60000 -config /work/formal4/LeanP1AckHolds1.cfg LeanP1.tla  (cwd /work/formal4)
+tla-mc: building a checker for LeanP1 (cache: /work/out/pn7/cache-LeanP1AckHolds1)
+tla-mc: built in 37.7s
+tla-mc: LeanP1 (31 variables, 0 symmetry permutations), 192 workers, generated engine; loaded in 0.004s
+progress: depth 18, 133189799 generated, 49382064 distinct (0 fingerprint spills), 19841254 on queue (0 on disk), 14.5s
+progress: depth 20, 342841171 generated, 126498572 distinct (0 fingerprint spills), 46732405 on queue (0 on disk), 38.3s
+progress: depth 21, 534522555 generated, 197761452 distinct (0 fingerprint spills), 71262880 on queue (0 on disk), 60.4s
+progress: depth 22, 817213464 generated, 300778478 distinct (0 fingerprint spills), 103017026 on queue (3097922 on disk), 94.0s
+progress: depth 23, 1205100289 generated, 436626961 distinct (0 fingerprint spills), 135848483 on queue (36328995 on disk), 143.2s
+progress: depth 24, 1689551524 generated, 598965990 distinct (0 fingerprint spills), 162339029 on queue (63168213 on disk), 207.3s
+progress: depth 25, 2248048465 generated, 780518628 distinct (0 fingerprint spills), 181552638 on queue (82754046 on disk), 280.6s
+progress: depth 26, 2870797071 generated, 982715408 distinct (0 fingerprint spills), 202196780 on queue (103857964 on disk), 365.7s
+progress: depth 27, 3575773687 generated, 1215831534 distinct (0 fingerprint spills), 233116126 on queue (135227870 on disk), 464.5s
+progress: depth 28, 4383216145 generated, 1483338520 distinct (0 fingerprint spills), 267506986 on queue (169968170 on disk), 589.9s
+progress: depth 29, 5267898982 generated, 1766847140 distinct (1024 fingerprint spills), 283508620 on queue (186182028 on disk), 738.9s
+progress: depth 30, 6146815436 generated, 2031954502 distinct (1024 fingerprint spills), 265107362 on queue (167884962 on disk), 874.0s
+progress: depth 31, 6926389805 generated, 2252777385 distinct (1024 fingerprint spills), 220822883 on queue (123804771 on disk), 984.9s
+progress: depth 32, 7564725148 generated, 2428872080 distinct (1024 fingerprint spills), 176094695 on queue (79527911 on disk), 1075.0s
+progress: depth 33, 8081327911 generated, 2574397837 distinct (1024 fingerprint spills), 145525757 on queue (49487613 on disk), 1148.8s
+progress: depth 34, 8507322761 generated, 2696782322 distinct (1024 fingerprint spills), 122384485 on queue (26730085 on disk), 1211.6s
+progress: depth 35, 8846348175 generated, 2792020587 distinct (1024 fingerprint spills), 95238265 on queue (0 on disk), 1263.2s
+progress: depth 36, 9086849457 generated, 2855472482 distinct (1024 fingerprint spills), 63451895 on queue (0 on disk), 1300.9s
+progress: depth 37, 9231286560 generated, 2890709049 distinct (1024 fingerprint spills), 35236567 on queue (0 on disk), 1323.6s
+progress: depth 38, 9303649427 generated, 2907334283 distinct (1024 fingerprint spills), 16625234 on queue (0 on disk), 1335.6s
+Model checking completed. No error has been found.
+9349708495 states generated, 2916984743 distinct states found. Depth 43. Checked in 1346.182s (2166857 distinct/s).

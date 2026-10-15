@@ -1,0 +1,22 @@
+tla-mc: building a checker for LeanP1Anc (cache: /mnt/nvme/leanp1-anc4/cache-ScopeHolds-LeanP1Anc)
+tla-mc: built in 55.7s
+tla-mc: LeanP1Anc (32 variables, 0 symmetry permutations), 4 workers, generated engine; loaded in 0.007s
+progress: depth 13, 2302950 generated, 816491 distinct (0 fingerprint spills), 290379 on queue (0 on disk), 15.5s
+progress: depth 15, 4783060 generated, 1654664 distinct (0 fingerprint spills), 464010 on queue (0 on disk), 32.7s
+progress: depth 16, 6447263 generated, 2223687 distinct (0 fingerprint spills), 569023 on queue (0 on disk), 44.6s
+progress: depth 17, 8433586 generated, 2902452 distinct (0 fingerprint spills), 678765 on queue (0 on disk), 61.6s
+progress: depth 18, 10708997 generated, 3661031 distinct (0 fingerprint spills), 758579 on queue (0 on disk), 81.6s
+progress: depth 19, 13163245 generated, 4459236 distinct (0 fingerprint spills), 798205 on queue (0 on disk), 103.2s
+progress: depth 20, 15651146 generated, 5257120 distinct (0 fingerprint spills), 797884 on queue (0 on disk), 125.0s
+progress: depth 21, 18002926 generated, 5993479 distinct (0 fingerprint spills), 736359 on queue (0 on disk), 145.0s
+progress: depth 22, 20061458 generated, 6620357 distinct (0 fingerprint spills), 626878 on queue (0 on disk), 162.5s
+progress: depth 23, 21763850 generated, 7142762 distinct (0 fingerprint spills), 522405 on queue (0 on disk), 176.3s
+progress: depth 25, 24322637 generated, 7940936 distinct (0 fingerprint spills), 355293 on queue (0 on disk), 193.6s
+progress: depth 28, 25784336 generated, 8279774 distinct (0 fingerprint spills), 25502 on queue (0 on disk), 203.7s
+Model checking completed. No error has been found.
+25826396 states generated, 8284768 distinct states found. Depth 30. Checked in 203.999s (40612 distinct/s).
+
+real	4m19.712s
+user	13m15.142s
+sys	0m2.834s
+rc=0 00:26:31Z

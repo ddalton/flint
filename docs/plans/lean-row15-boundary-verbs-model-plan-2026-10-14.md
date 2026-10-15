@@ -13,7 +13,26 @@ one edit, one re-proof.
 Step 0 (the code fixes) DONE 2026-10-14: `FINDINGS.md` L-133 (D7, the record
 id kept across folds) and L-134 (D4, the drain's ack in one write), each
 pinned by a test that fails on the old code; the syncer suite passes (284).
-Steps 1-5 in progress.
+
+**Progress (2026-10-15).** Steps 1-2 DONE: the model additions and the gate
+(`lean/formal/results/2026-10-14-rows15-17-gate-ec2/SUMMARY.txt`). Every old
+world reproduces its count and verdict; AckHolds1 HOLDS on the final model
+(2,916,984,743 distinct, depth 43); every mutant and probe fires. The gate
+found two more code defects, L-135 (a barrier did not carry the gateway
+request it read) and L-136 (the carrier kept a re-uploaded path as a delete),
+both fixed with tests that fail on the old code. AK1 was restated as the gate
+showed claim errors: the declaration excludes bytes the document already
+holds; "dropped is within the declaration" is gone; a conflict preserves the
+declared bytes unless its version is one of the writer's own uploads swept
+before its CAS (the Writer ghost `lost`: the code copies every other
+conflict's bytes to `conflicts/`, and the copy outlives a reap). A
+restatement that excused a peer's later delete (DeletedLater) was tried and
+withdrawn: the AckReadsOwnReport control stopped firing. AckWithheldHolds and
+AckHolds2 are not decided by the gate and are left to the proof (owner),
+DeposeAck to depth 22. Step 3 (trace events) not started. Step 4 (the proof)
+STARTED: `lean/formal/results/2026-10-15-tlaps-rows15-17/STATUS.txt` --
+make-anc.py v4 (v3 silently dropped edits inside the spans it rewrites; v4
+pins them), the tie on five worlds exact, M0's first run.
 
 **Revision (2026-10-14, second draft).** The first draft covered row 15
 only. Its code references were checked line by line against the tree at
@@ -201,14 +220,15 @@ written only when a touch or a deposal exists, so with `MaxTouches = 0` and
 world the box can run must reproduce its 2026-10-14 distinct count to the
 state (§5). That is the regression check for the change itself.
 
-**Where the state goes.** Per-writer state goes into the `Writer` record
-(`:125-155`) as new fields, not new variables: every `w' = [w EXCEPT ...]`
-keeps them, `TypeOK`'s record type is regenerated once, and the
-`UNCHANGED` lists of the existing actions do not change for them. Only
-three names are new VARIABLES, and every existing action's frame gains
-them: `touches`, `deposals` (bounds), and `stampAt` (a ghost).
+**Where the state goes.** All of it goes into the `Writer` record as new
+fields; there are NO new variables (as built, 2026-10-14). Every
+`w' = [w EXCEPT ...]` keeps the new fields, `TypeOK`'s text does not
+change (the record type does), and no action's `UNCHANGED` list changes,
+so `vars` and the proof's frame lemmas are as they were. The bounds are
+per writer (`nt`, `nd`), and the bucket's clock stamp is recorded by the
+writer whose CAS wrote it (`stamps`): each seq is one CAS's.
 
-**Constants.** `MaxTouches` (touches in a behaviour, agent and gateway
+**Constants.** `MaxTouches` (requests per writer, agent and gateway
 together; 0 in every existing world), `MaxNonces` (the code's 32, set low
 in a world that should reach the cap; §9, D2), `MaxDeposals` (0 in every
 existing world), and two rule constants, shipped TRUE: `DeletesUnderLease`
@@ -219,62 +239,62 @@ are one edit.
 
 ### 3.1 The ack (row 15)
 
-New `Writer` fields:
+New `Writer` fields (as built; `0` and `"none"` stand for "no record"):
 
 ```
-pend     : Nil or [id : Nat, nonces : SUBSET Nonces]   \* the pending record
-ack      : Nil or [status : {"ok", "partial", "refused-read-only"},
-                   nonces : SUBSET Nonces, seq : Nat, src : Clocks,
-                   dropped : SUBSET Paths]              \* `.flint/publish.ack`
-carrier  : Nil or [id : Nat, paths, deletes, dropped, uncited : SUBSET Paths]
-                                                       \* the code's journal
-carryId  : Nil or Nat     \* the pending id the barrier in flight read at its scan
-bound    : Nil or [id : Nat, doc : [Paths -> Opt(Handles)], seq : Nat,
-                   gone : SUBSET Paths, outranked : SUBSET Paths]
-                          \* the document the last carrying barrier ended at,
-                          \* and what that barrier itself withheld
-\* ghosts (the truth the claims read; no action's guard reads them)
-consumedN, ackedN, capped : SUBSET Nonces   \* ever consumed / ever acked / dropped by the cap
-cUp      : [Paths -> Opt(Handles)]          \* what this fold's carrying installs published at p
-cDel     : SUBSET Paths                     \* which of them were deletes
+nt     : Nat                                         \* requests so far
+pend   : [id, fold : Nat, nonces : SUBSET Nat]       \* publish.pending.json
+ack    : [st : {"none","ok","partial","refused-read-only"}, nonces : SUBSET Nat,
+          seq : Nat, src : Clocks + "none", dropped : SUBSET Paths, inst : BOOLEAN]
+car    : [id : Nat, paths, deletes, dropped, uncited : SUBSET Paths]   \* the carrier
+cId, cFold : Nat; clk; iseq : Nat; instd : BOOLEAN  \* the barrier in flight
+bound  : [id, fold, doc, seq, wd (its withheld uploads), inst, clk]    \* the last carrying barrier, ended
+\* ghosts: no guard reads them
+cN, aN, capped : SUBSET Nat                         \* consumed / acked / dropped by the cap
+dset : SUBSET Paths; decl : [Paths -> Opt(Handles)]; dMint : [Paths -> Nat]
+moved : SUBSET Paths; stamps : SUBSET (Nat \X Clocks)
+deposed : BOOLEAN; nd : Nat                          \* row 17
 ```
 
 `Clocks == {"sentinel", "sentinel-deferred", "drain"}` (after D4; the
-cadence stamp never reaches an ack, `barrier.rs:615`). A nonce is an
-identity: `Nonces == 1..MaxTouches`, and a touch's nonce is `touches'`.
-`stampAt : [Nat -> Clocks ∪ {Nil}]` is written only by a carrying CAS.
+cadence stamp never reaches an ack, `barrier.rs:615`). A nonce is the
+request's number, `nt'`, so nonces are unique per writer and the oldest is
+the least.
 
 **Actions** (all in `WriterStep`):
 
 | action | what it does | code |
 |---|---|---|
-| `Touch(s)` | `touches < MaxTouches`; a fresh nonce for writer `s`, folded at once: appended to `pend.nonces` (a new record if none), a fresh `id` (= `touches'`), `consumedN` grows; past `MaxNonces` the oldest nonce drops into `capped` | `consume_sentinel`, `request_boundary`, `fold_into_pending` |
-| `Honor(s)` | `pc = "idle"`, `pend # Nil`, `bound # Nil /\ bound.id = pend.id` (a barrier that read THIS fold has ended; D7 says what a fold does to the carrier), `s \notin Readers`. Chooses due or deferred. `dropped` = `bound.gone ∪ bound.outranked ∪ carrier.dropped ∪ carrier.uncited` (the carrier only if its id matches); `ack` := [ok iff dropped = {}, pend.nonces, bound.seq, the clock, dropped]; `ackedN` grows; `pend` := Nil | `honor_pending_as`, `honor_publish` |
-| `HonorReader(s)` | `s \in Readers`, `pend # Nil`: `ack` := refused-read-only; `pend` := Nil | `honor_publish`, first arm |
-| `RetireByAck(s)` | `pend # Nil`, `ack # Nil`, `ack` minted after the fold (`ack.id >= pend.id` under a per-ack id, or an order ghost) and `pend.nonces \subseteq ack.nonces`: `pend` := Nil, nothing written | `ack_matches` (the nonce arm; the bare-touch arm is D8) |
+| `Touch(s)` | `nt < MaxTouches`; nonce `nt'`, folded at once: added to `pend.nonces` (a new record, with id `nt'`, if none; a fold keeps the id, L-133), `pend.fold := nt'`; `cN` grows; past `MaxNonces` the oldest drops into `capped`; the ghosts record the declaration | `consume_sentinel`, `request_boundary`, `fold_into_pending` |
+| `Honor(s)` | at idle, a writer, the record not already answered, and `bound` is a barrier that began after the latest fold (`bound.id = pend.id`, `bound.fold = pend.fold`). `dropped` = `bound.wd ∪` (for this record's carrier) `car.dropped ∪ car.uncited`; `ack` := [ok iff dropped = {}, pend.nonces, bound.seq, bound.clk, dropped, bound.inst]; `aN` grows. The pending stays until `RetireByAck` | `honor_pending_as`, `honor_publish` |
+| `HonorReader(s)` | a reader with a pending: `ack` := refused-read-only | `honor_publish`, first arm |
+| `RetireByAck(s)` | at idle, the ack names every nonce of the pending: `pend` := none. This is the retire after the ack and the restart rule at once: a restart between the ack and the retire leaves exactly this state | `ack_matches` (the nonce arm; the bare-touch arm is D8), `retire_pending` |
 
 The touch and the fold are one step: nothing observable lies between the
 rename into staging and the record write except a crash, which
 `recover_consume_staging` makes equivalent to the fold having happened.
 
 **Changes to existing actions** (each a conjunct, not a rewrite):
-- `Scan(s)`: `carryId' = IF pend # Nil THEN pend.id ELSE Nil`; while
-  `carryId' # Nil`, `dels` = every absent dirty path (the declared form)
-  instead of any subset.
-- `Install(s)`: while `carryId # Nil`, update `carrier` as
+- `Consume(s)` (the barrier's start, where the code reads the pending,
+  `barrier.rs:608`): `cId`, `cFold` := the pending's id and fold, and the
+  barrier's clock is chosen.
+- `Scan(s)`: while the barrier carries, `dels` = every absent dirty path
+  (the declared form) instead of any subset.
+- `Install(s)`: while the barrier carries, update the carrier as
   `barrier.rs:1107-1125` does (same id: extend; else: a new record for
-  this id), write the ghosts `cUp`/`cDel` from `mine` and the applied
-  deletes, and `stampAt[seq']` := the clock of this barrier (a
-  nondeterministic choice at `Scan` between `sentinel` and
-  `sentinel-deferred`, recorded in a field; the drain is a third value).
-- `Finish(s)`, `Skip(s)`, `PullOnly(s)`: recompute `carrier.uncited` from
-  the document in hand (`:2091-2107`); if `carryId # Nil`, set `bound` :=
-  [carryId, doc', seq', gone, outranked]; `carryId` := Nil.
-- `Restart(s)`: keeps `pend`, `ack`, `carrier`, `bound` (all on disk);
-  `carryId` := Nil with the barrier in flight.
-- `Fence(s)` (§3.3) on an abandoned barrier: as `Restart` for `carryId`.
-- `Next`'s writer disjunct gains the new actions; every other disjunct
-  gains `UNCHANGED <<touches, deposals, stampAt>>`.
+  this id), and record the stamp `<<seq', clk>>`; a barrier that adds
+  nothing makes no CAS and no entry (the code's adds-nothing path).
+- `Finish(s)`, `Skip(s)`, `PullOnly(s)`: recompute `car.uncited` from the
+  document the barrier ended at (`W.inst` after an install, else `doc`;
+  `:2091-2107`); if the barrier carried, set `bound` := [its id and fold,
+  that document, its seq, its withheld uploads, whether it installed, its
+  clock]; the barrier's fields reset.
+- `Restart(s)`: keeps `pend`, `ack`, `car`, `bound` and the ghosts (all on
+  disk); the barrier's fields reset with the barrier in flight.
+- `Fence(s)` (§3.3) before the CAS: as `Restart` for the barrier's fields.
+- `Edit(s, p)`, `Delete(s, p)`: while a record stands, `p` joins `moved`.
+- `Next`'s writer disjunct gains the new actions. No `UNCHANGED` list
+  changes.
 
 ### 3.2 The restart (row 16)
 
@@ -331,28 +351,38 @@ proof can use them and the mutations cannot satisfy them by construction.
 
 **Row 15.**
 
-- **AK1 — an `ok` ack carries its declaration** (S1 rows 1 and 2). On the
-  step that writes an ack: if the new ack is `ok`, then for every path
-  `p` with `cUp[s][p] # Nil`, `bound.doc[p] = cUp[s][p]`; for every `p \in
-  cDel[s]`, `bound.doc[p] = Nil`; `bound.gone` and `bound.outranked` are
-  empty; and `ack.seq = bound.seq`. If it is `partial`, `ack.dropped` is
-  exactly the set of paths that fail one of those. A peer's delete is not
-  the writer's: `bound.doc[p] = Nil` with `cUp[s][p] # Nil` is a failure.
+- **AK1 — an `ok` ack carries its declaration** (S1 rows 1 and 2). The
+  declaration is what the code says it is: the tree as it stands when the
+  request is consumed. The ghosts record it at the fold (`dset`: the
+  paths dirty then; `decl`: their versions; `dMint`: the mint counter),
+  merged across the folds of one record (D7), with `moved` the declared
+  paths the agent wrote or deleted since. (A first draft took the
+  declaration from the carrying scan; the first run refuted it in 9
+  steps: an edit made after the touch counted as declared.) A declared
+  path is BROKEN in the ack's document when the agent has not moved on,
+  the document does not hold the declared bytes, what it holds is not a
+  later version (derived from the declared one, or minted after the
+  request; a declared delete is answered by any later file), and no
+  live conflict record preserves the declared bytes (R7: a peer's later
+  boundary may win, loudly). On the step that writes an ack: every
+  broken path is in `ack.dropped`, and `ack.dropped` names only declared
+  paths. `ok` names none, so an `ok` ack has no broken path. A peer's
+  delete is a break: nothing at the path is not a later version.
   Row 2 ("cites everything this workspace integrated") is part of AK1:
   under P1-lite the scan publishes every path that differs from the
   baseline, so a separate claim would restate it (§9, D5). What AK1 says
   about a touch that coalesced with an earlier fold is D7.
 - **AK3 — no consumed nonce is orphaned** (S1 row 4). An invariant:
-  `consumedN \ capped \subseteq pend.nonces \cup ackedN` (every nonce ever
+  `cN \ capped \subseteq pend.nonces \cup aN` (every nonce ever
   consumed is still pending or was named by SOME ack; the old model's
   `ackN` accumulated the same way). The cap is visible, not hidden:
   `ProbeCapDropped == \A s : capped = {}` must fire in `AckCap` (§9, D2).
 - **AK4 — one clock** (S1 row 5). An invariant: an ack whose barrier
-  installed (`~no_change`, i.e. `bound.seq` was written by that barrier's
-  CAS) names the clock `stampAt[ack.seq]`. Stated after D4's code fix; on
+  installed (`~no_change`) names the clock that barrier's CAS stamped at
+  the seq it names (`<<ack.seq, ack.src>> \in stamps`). Stated after D4's code fix; on
   today's code the model would have to allow the drain's second write.
 - **L2 — a request is answered** (optional). Under a spec fair to writer
-  `s`'s own steps, a consumed nonce is eventually in `ackedN`. This needs
+  `s`'s own steps, a consumed nonce is eventually in `aN`. This needs
   more fairness than L1 (a writer whose CAS loses to peers forever, or is
   deposed at every section, never answers), so it may need an assumption
   that peers eventually quiesce (§9, D6).
@@ -490,7 +520,7 @@ in one edit means this happens once.
 
 **What each module proves.**
 - **M7 (the ack):** AK1, AK3, AK4, by an inductive strengthening over the
-  ghosts: `cUp`/`cDel` record what the carrying installs did, the carrier
+  ghosts: `dset`/`decl` record what the requests declared, the carrier
   agrees with them where the shipped rules hold, and `carrier.uncited`
   agrees with `bound.doc`.
 - **M8 (the restart):** NR1, per action: about thirty obligations, the

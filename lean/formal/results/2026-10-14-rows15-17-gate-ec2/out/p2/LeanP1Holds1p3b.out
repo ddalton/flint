@@ -1,0 +1,20 @@
+# tla-mc -compile -workers 144 -metadir /work/out/p2/meta-LeanP1Holds1p3b -checkpoint 0 -fpmem 40000 -queue-mem 120000 -config /work/formal/LeanP1Holds1p3b.cfg LeanP1.tla  (cwd /work/formal)
+tla-mc: building a checker for LeanP1 (cache: /work/out/p2/cache-LeanP1Holds1p3b)
+tla-mc: built in 44.0s
+tla-mc: LeanP1 (31 variables, 0 symmetry permutations), 144 workers, generated engine; loaded in 0.004s
+progress: depth 20, 69055074 generated, 19209385 distinct (0 fingerprint spills), 6906034 on queue (0 on disk), 13.1s
+progress: depth 22, 151206924 generated, 40729903 distinct (0 fingerprint spills), 12119304 on queue (0 on disk), 30.0s
+progress: depth 23, 209111963 generated, 55751599 distinct (0 fingerprint spills), 15021696 on queue (0 on disk), 43.6s
+progress: depth 24, 279316605 generated, 74035077 distinct (0 fingerprint spills), 18283478 on queue (0 on disk), 60.8s
+progress: depth 25, 364179419 generated, 96249689 distinct (0 fingerprint spills), 22214612 on queue (0 on disk), 82.9s
+progress: depth 26, 466994376 generated, 123122408 distinct (0 fingerprint spills), 26872719 on queue (0 on disk), 109.5s
+progress: depth 27, 589370745 generated, 154788073 distinct (0 fingerprint spills), 31665665 on queue (0 on disk), 141.7s
+progress: depth 28, 728716980 generated, 190221870 distinct (0 fingerprint spills), 35433797 on queue (0 on disk), 178.4s
+progress: depth 29, 878265063 generated, 227319242 distinct (0 fingerprint spills), 37097372 on queue (0 on disk), 218.5s
+progress: depth 30, 1029567177 generated, 263741107 distinct (0 fingerprint spills), 36421865 on queue (0 on disk), 259.0s
+progress: depth 31, 1175852645 generated, 297995149 distinct (0 fingerprint spills), 34254042 on queue (0 on disk), 297.1s
+progress: depth 32, 1314057849 generated, 329939097 distinct (0 fingerprint spills), 31943948 on queue (0 on disk), 333.4s
+progress: depth 33, 1444105338 generated, 360047750 distinct (0 fingerprint spills), 30108653 on queue (0 on disk), 367.1s
+progress: depth 34, 1565691542 generated, 388011875 distinct (0 fingerprint spills), 27964125 on queue (0 on disk), 399.9s
+progress: depth 35, 1674968401 generated, 412242070 distinct (0 fingerprint spills), 24230195 on queue (0 on disk), 426.5s
+progress: depth 36, 1764359050 generated, 430780606 distinct (0 fingerprint spills), 18538536 on queue (0 on disk), 446.3s
