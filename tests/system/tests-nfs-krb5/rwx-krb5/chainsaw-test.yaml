@@ -154,7 +154,14 @@ spec:
           sed "s/NODE/$node/; s/alice-pod/bob-pod/; s/runAsUser: 1000/runAsUser: 2000/; s/runAsGroup: 1000/runAsGroup: 2000/" \
             alice-pod.yaml.tpl | kubectl -n "$NAMESPACE" apply -f -
           kubectl -n "$NAMESPACE" wait pod/bob-pod --for=condition=Ready --timeout=2m
-          kubectl -n "$NAMESPACE" exec bob-pod -- sh -c 'echo hi > /data/shared/bob'
+          if ! kubectl -n "$NAMESPACE" exec bob-pod -- sh -c 'echo hi > /data/shared/bob'; then
+            echo "FAIL: bob cannot create in a 1777 directory; the NFS server's view:"
+            kubectl -n flint-system get pods -l app=flint-nfs-server -o jsonpath='{range .items[*].spec.containers[*].env[*]}{.name}={.value}{"\n"}{end}' |
+              grep -E 'GSS|ENFORCE|MIN_SEC'
+            kubectl -n flint-system logs -l app=flint-nfs-server --tail=-1 | grep -aE 'bob|DENIED|would deny|refused|map to unix' | tail -20
+            kubectl -n "$NAMESPACE" exec krb5-a -- ls -la /data /data/shared
+            exit 1
+          fi
           # Created as bob's mapped identity, as root sees it.
           owner=$(kubectl -n "$NAMESPACE" exec krb5-a -- stat -c %u:%g /data/shared/bob)
           [ "$owner" = 2000:2000 ] || { echo "FAIL: /data/shared/bob is $owner, not 2000:2000"; exit 1; }
