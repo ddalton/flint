@@ -183,11 +183,17 @@ pub struct Carrier {
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub deletes: BTreeSet<String>,
     /// Carried uploads the document the LAST barrier ended at does not
-    /// cite: a peer deleted them after this writer published them. The
-    /// ack's document is that one, so it says so (H10). Recomputed at
-    /// every barrier's end from the document in hand; no request.
+    /// cite with the bytes this writer published: a peer deleted them after
+    /// this writer published them, or replaced them (L-137: deleted, then
+    /// renamed another file onto the path). The ack's document is that
+    /// one, so it says so (H10). Recomputed at every barrier's end from the
+    /// document in hand; no request.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub uncited: BTreeSet<String>,
+    /// The bytes each carried upload published: the `crc64_b64` of the
+    /// entry its CAS wrote. What `uncited` compares the document against.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub published: BTreeMap<String, String>,
     /// Declared paths they did not carry (parked, deferred, or a delete
     /// the merge outranked) — the ack's `report.dropped` survives them.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]

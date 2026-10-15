@@ -1123,8 +1123,17 @@ impl Syncer {
                             // L-136: an earlier carry's delete that this one
                             // uploads is an upload again, so a peer's delete
                             // of it is named (`note_carrier_uncited`).
+                            // L-137: the bytes it published, so a peer's
+                            // replacement of them is named too.
                             for p in &classified.uploads {
                                 c.deletes.remove(p);
+                                match upserts.get(p) {
+                                    Some(e) => c.published.insert(p.clone(), e.crc64_b64.clone()),
+                                    None => c.published.remove(p),
+                                };
+                            }
+                            for p in &classified.deletes {
+                                c.published.remove(p);
                             }
                             c.deletes.extend(classified.deletes.iter().cloned());
                             // `honor_publish`'s dropped set, decided here:
@@ -2107,7 +2116,15 @@ impl Syncer {
         let uncited: BTreeSet<String> = c
             .paths
             .iter()
-            .filter(|p| !c.deletes.contains(*p) && !doc.entries.contains_key(p.as_str()))
+            .filter(|p| {
+                !c.deletes.contains(*p)
+                    && match doc.entries.get(p.as_str()) {
+                        None => true,
+                        // L-137: other bytes at the path are not the upload
+                        // this writer carried.
+                        Some(e) => c.published.get(p.as_str()).is_some_and(|crc| *crc != e.crc64_b64),
+                    }
+            })
             .cloned()
             .collect();
         if uncited != c.uncited {

@@ -155,7 +155,7 @@ Opt(S) == S \cup {Nil}
 Clocks == {"sentinel", "sentinel-deferred", "drain"}
 NoPend == [id |-> 0, fold |-> 0, nonces |-> {}]
 NoAck == [st |-> "none", nonces |-> {}, seq |-> 0, src |-> "none", dropped |-> {}, inst |-> FALSE]
-NoCar == [id |-> 0, paths |-> {}, deletes |-> {}, dropped |-> {}, uncited |-> {}]
+NoCar == [id |-> 0, paths |-> {}, deletes |-> {}, dropped |-> {}, uncited |-> {}, pub |-> [p \in Paths |-> Nil]]
 
 VARIABLES
   live, minted, doc, seq, tomb, base, acked, conflicts, holder,
@@ -225,7 +225,7 @@ Writer ==
    ack : [st : {"none", "ok", "partial", "refused-read-only"}, nonces : SUBSET Nat, seq : Nat,
           src : Clocks \cup {"none"}, dropped : SUBSET Paths, inst : BOOLEAN],
    car : [id : Nat, paths : SUBSET Paths, deletes : SUBSET Paths,
-          dropped : SUBSET Paths, uncited : SUBSET Paths],
+          dropped : SUBSET Paths, uncited : SUBSET Paths, pub : [Paths -> Opt(Handles)]],
    cId : Nat, cFold : Nat, clk : Clocks \cup {"none"}, iseq : Nat, instd : BOOLEAN,
    bound : [id : Nat, fold : Nat, doc : [Paths -> Opt(Handles)], seq : Nat,
             wd : SUBSET Paths, inst : BOOLEAN, clk : Clocks \cup {"none"}],
@@ -307,8 +307,13 @@ Carries(s) == w[s].cId # 0
 \* honour's (`sentinel`), the floor's or a deferred honour's
 \* (`sentinel-deferred`), or the drain's.
 CarryClocks(s) == IF w[s].pend.id # 0 THEN Clocks ELSE {"none"}
-\* The carried uploads a document does not cite (`note_carrier_uncited`).
-Uncited(c, d) == {p \in c.paths : p \notin c.deletes /\ d[p] = Nil}
+\* The carried uploads a document does not cite with the bytes they
+\* published (`note_carrier_uncited`; L-137, found by the proof's AckRename
+\* world: a UI delete then a rename of another file onto the path left the
+\* ack `ok`).  `pub`: what each carried upload published (`published`).
+Uncited(c, d) == {p \in c.paths : /\ p \notin c.deletes
+                                  /\ \/ d[p] = Nil
+                                     \/ c.pub[p] # Nil /\ Content(d[p]) # Content(c.pub[p])}
 \* The ack already answers the pending record (`ack_matches`, the nonce arm).
 Covered(s) == w[s].ack.st # "none" /\ w[s].pend.nonces \subseteq w[s].ack.nonces
 Oldest(S) == CHOOSE m \in S : \A x \in S : m <= x
@@ -777,7 +782,7 @@ Scan(s) ==
 \* Skip-on-no-diff: no scan, no CAS.
 \* The carrier's `uncited` recomputed from a document (`note_carrier_uncited`).
 CarUncited(c, d) == [id |-> c.id, paths |-> c.paths, deletes |-> c.deletes,
-                     dropped |-> c.dropped, uncited |-> Uncited(c, d)]
+                     dropped |-> c.dropped, uncited |-> Uncited(c, d), pub |-> c.pub]
 SkipW(s) ==
   [st |-> w[s].st,
    pc |-> "idle",
@@ -1181,13 +1186,17 @@ InstallRetired(s) == {doc[p] : p \in {q \in Paths : doc[q] # Nil /\ InstallInst(
 InstallNothing(s) == InstallInst(s) = doc
 \* H10: what a carrying CAS published of the declaration, journalled with it.
 InstallCar0(s) == IF w[s].car.id = w[s].cId THEN w[s].car
-                  ELSE [id |-> w[s].cId, paths |-> {}, deletes |-> {}, dropped |-> {}, uncited |-> {}]
+                  ELSE [id |-> w[s].cId, paths |-> {}, deletes |-> {}, dropped |-> {}, uncited |-> {},
+                        pub |-> [p \in Paths |-> Nil]]
 InstallCar(s) ==
   [id |-> InstallCar0(s).id,
    paths |-> InstallCar0(s).paths \cup w[s].uploads \cup w[s].deletes,
    deletes |-> (InstallCar0(s).deletes \ w[s].uploads) \cup w[s].deletes,
    dropped |-> InstallCar0(s).dropped \cup w[s].gone \cup {p \in w[s].deletes : InstallInst(s)[p] # Nil},
-   uncited |-> InstallCar0(s).uncited]
+   uncited |-> InstallCar0(s).uncited,
+   pub |-> [p \in Paths |-> IF p \in w[s].uploads \ w[s].gone THEN w[s].snap[p]
+                           ELSE IF p \in w[s].uploads \cup w[s].deletes THEN Nil
+                           ELSE InstallCar0(s).pub[p]]]
 \* `adv`: the CAS replaced exactly the derived document: the installed one
 \* is it plus this tree's own changes.
 InstallW(s) ==

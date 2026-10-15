@@ -11709,6 +11709,51 @@ async fn a_carried_delete_then_upload_names_a_later_delete_of_the_upload() {
     assert_eq!(ack.report.dropped, vec!["f.txt".to_string()], "{ack:?}");
 }
 
+/// L-137 (2026-10-15, found by the rows 15-17 proof's AckRename world): the
+/// carrier named a carried upload only when the document stopped citing
+/// the path, so a UI delete followed by a rename of another file onto the
+/// path left the ack `ok` for bytes the document no longer holds. The
+/// carrier now keeps the bytes each carried upload published and names the
+/// path when the document cites other bytes there.
+#[tokio::test]
+async fn a_carried_upload_the_ui_replaced_by_a_rename_is_named() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture).unwrap();
+    a.checkout().await.unwrap();
+    write(dir.path(), "f.txt", "v1");
+    write(dir.path(), "g.txt", "an older, unrelated file");
+    a.floor_tick().await.unwrap();
+    a.floor_tick().await.unwrap();
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("f.txt") && m.entries.contains_key("g.txt"), "fixture: the files were not published");
+
+    // The agent edits the file and declares it; the carrying barrier
+    // publishes it, and the honour's ack write fails.
+    let squat = dir.path().join(super::CONTROL_DIR).join(control::PUBLISH_ACK);
+    write(dir.path(), "f.txt", "v2, the declared bytes");
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n-1"}"#);
+    a.poll_sentinels().unwrap();
+    std::fs::create_dir_all(squat.join("occupied")).unwrap();
+    clear_min_interval(&a);
+    assert!(a.honor_pending(Verb::Publish, false).await.is_err(), "fixture: the ack write did not fail");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let published = m.entries.get("f.txt").expect("fixture: the declared file was not carried").crc64_b64.clone();
+    std::fs::remove_dir_all(&squat).unwrap();
+
+    // The UI deletes the agent's upload, then renames the other file onto its path.
+    hitl_remove(&store, &a.cfg, "f.txt", "reviewer").await;
+    hitl_rename(&store, &a.cfg, "g.txt", "f.txt", "reviewer").await;
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_ne!(m.entries["f.txt"].crc64_b64, published, "fixture: the path still cites the declared bytes");
+
+    let ack = a.honor_pending(Verb::Publish, true).await.unwrap().expect("nothing was answered");
+    assert_eq!(ack.status, "partial", "the ack says the declared file is in seq {:?}, which cites other bytes there: {ack:?}", ack.seq);
+    assert_eq!(ack.report.dropped, vec!["f.txt".to_string()], "{ack:?}");
+}
+
 /// Row 15 plan, D4 (2026-10-14): the drain's publish ack names the clock
 /// its barrier stamped on the bucket, in its one write. It used to be
 /// written `sentinel-deferred` (the honor's `forced` clock) and re-written

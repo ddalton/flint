@@ -262,7 +262,7 @@ rep_span('Scan(s) ==\n', '\\* Skip-on-no-diff: no scan, no CAS.\n',
 rep_span('Skip(s) ==\n', '\\* Step 4: each upload lands at a fresh key.',
     '\\* The carrier\'s `uncited` recomputed from a document (`note_carrier_uncited`).\n'
     'CarUncited(c, d) == [id |-> c.id, paths |-> c.paths, deletes |-> c.deletes,\n'
-    '                     dropped |-> c.dropped, uncited |-> Uncited(c, d)]\n'
+    '                     dropped |-> c.dropped, uncited |-> Uncited(c, d), pub |-> c.pub]\n'
     + rec('SkipW', 's', dict(BARRIER_RESET, pc='"idle"', car=car_uncited('doc'),
                              bound=bound_of('doc', 'seq', '{}', 'FALSE'))) +
     'Skip(s) ==\n'
@@ -360,13 +360,17 @@ rep_span('Install(s) ==\n', '\\* Step 6: the retired set, in one batch, sparing 
     'InstallNothing(s) == InstallInst(s) = doc\n'
     '\\* H10: what a carrying CAS published of the declaration, journalled with it.\n'
     'InstallCar0(s) == IF w[s].car.id = w[s].cId THEN w[s].car\n'
-    '                  ELSE [id |-> w[s].cId, paths |-> {}, deletes |-> {}, dropped |-> {}, uncited |-> {}]\n'
+    '                  ELSE [id |-> w[s].cId, paths |-> {}, deletes |-> {}, dropped |-> {}, uncited |-> {},\n'
+    '                        pub |-> [p \\in Paths |-> Nil]]\n'
     'InstallCar(s) ==\n'
     '  [id |-> InstallCar0(s).id,\n'
     '   paths |-> InstallCar0(s).paths \\cup w[s].uploads \\cup w[s].deletes,\n'
     '   deletes |-> (InstallCar0(s).deletes \\ w[s].uploads) \\cup w[s].deletes,\n'
     '   dropped |-> InstallCar0(s).dropped \\cup w[s].gone \\cup {p \\in w[s].deletes : InstallInst(s)[p] # Nil},\n'
-    '   uncited |-> InstallCar0(s).uncited]\n'
+    '   uncited |-> InstallCar0(s).uncited,\n'
+    '   pub |-> [p \\in Paths |-> IF p \\in w[s].uploads \\ w[s].gone THEN w[s].snap[p]\n'
+    '                           ELSE IF p \\in w[s].uploads \\cup w[s].deletes THEN Nil\n'
+    '                           ELSE InstallCar0(s).pub[p]]]\n'
     '\\* `adv`: the CAS replaced exactly the derived document: the installed one\n'
     '\\* is it plus this tree\'s own changes.\n'
     + rec('InstallW', 's', {

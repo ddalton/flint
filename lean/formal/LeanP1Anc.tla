@@ -67,9 +67,23 @@
    something is still owed (L-129); it then remembers the pointer it read
    BEFORE the sync, so a document that moved in between is pulled again.
 
+   THE BOUNDARY VERBS' ANSWER, THE RESTART, DEPOSAL (2026-10-14, the plan
+   `docs/plans/lean-row15-boundary-verbs-model-plan-2026-10-14.md`, SAFETY
+   rows 15-17): an agent's or the gateway's request folds into a pending
+   record (`Touch`), any barrier that begins while it stands carries it and
+   journals what its CAS published (the carrier), and the answer is the
+   ack (`Honor`), `ok` or `partial`, retired by the restart rule
+   (`RetireByAck`).  A takeover deposes a holder judged dead (`Depose`,
+   with the rotation), and the straggler learns it at its next cell read
+   (`Fence`).  All of it is per-writer state in `Writer`, written only when
+   a touch or a deposal exists: with `MaxTouches = 0` and `MaxDeposals = 0`
+   every state is the model's without it.
+
    Differences from the code the model keeps on purpose: a scoped SYNC (D4,
    a request scope narrower than the workspace's) is not modelled; the
-   reader's second etag (the request cell) is not either.               *)
+   reader's second etag (the request cell) is not either; nor the sync
+   verb's ack (D1), a touch without a nonce (D8), or the budget's
+   arithmetic (a barrier's clock is a choice).                          *)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS
@@ -113,12 +127,20 @@ CONSTANTS
   SyncKeepsLeft,                \* likewise a sync (L-128)
   \* Readers.
   Readers,                      \* the trees with read access (a subset of Writers)
-  ReaderRechecksOwed            \* a reader pulls while its baseline says something is owed (L-129)
+  ReaderRechecksOwed,           \* a reader pulls while its baseline says something is owed (L-129)
+  \* The boundary verbs' answer (row 15).
+  MaxTouches,                   \* requests per writer: the agent's touch, the gateway's, the door's
+  MaxNonces,                    \* the pending record keeps this many nonces (`MAX_NONCES`)
+  \* Deposal (row 17).
+  MaxDeposals,                  \* takeovers per writer
+  InstallFenced,                \* H2: the fence read before the CAS (an install needs the lease)
+  DeletesUnderLease             \* L-132: a holder deposed after its CAS deletes nothing more
 
 ASSUME Free \subseteq Paths
 ASSUME MaxMint \in Nat /\ MaxMint >= 1
 ASSUME Scopes \subseteq SUBSET Paths /\ Scopes # {}
 ASSUME Readers \subseteq Writers
+ASSUME MaxTouches \in Nat /\ MaxNonces \in Nat /\ MaxNonces >= 1 /\ MaxDeposals \in Nat
 
 Seed == 1
 Gens == Seed..(MaxMint + MaxCopies)
@@ -129,6 +151,11 @@ ASSUME "none" \notin Writers
 Gen(h) == h[2]
 Later(h, k) == Gen(h) > Gen(k)
 Opt(S) == S \cup {Nil}
+\* The clock a carrying barrier stamps (`boundary_source`) and its ack names.
+Clocks == {"sentinel", "sentinel-deferred", "drain"}
+NoPend == [id |-> 0, fold |-> 0, nonces |-> {}]
+NoAck == [st |-> "none", nonces |-> {}, seq |-> 0, src |-> "none", dropped |-> {}, inst |-> FALSE]
+NoCar == [id |-> 0, paths |-> {}, deletes |-> {}, dropped |-> {}, uncited |-> {}, pub |-> [p \in Paths |-> Nil]]
 
 VARIABLES
   live, minted, doc, seq, tomb, base, acked, conflicts, holder,
@@ -181,7 +208,46 @@ Writer ==
    unlinked : SUBSET Paths,
    \* A reader: the pointer its last completed pull synced against
    \* (`reader.json`, 0: none), and the one this pull read.
-   memo : Nat, rnow : Nat]
+   memo : Nat, rnow : Nat,
+   \* THE ANSWER (row 15).  `nt`: the requests so far.  `pend`: the pending
+   \* record (`publish.pending.json`; id 0: none): its id, minted when the
+   \* record is created and kept across folds (L-133), the request that last
+   \* folded into it, and its nonces.  `ack`: `.flint/publish.ack` (st
+   \* "none": none).  `car`: the carrier (`IntentJournal::carrier`; id 0:
+   \* none).  The barrier in flight: the record it carries (`cId`, 0: none;
+   \* read at its start), the fold it read (`cFold`), its clock (`clk`), the
+   \* seq its CAS installed and whether it did (`iseq`, `instd`).  `bound`:
+   \* the last carrying barrier, ended: the document it ended at and its own
+   \* withheld uploads.  All files on disk: a restart keeps them and drops
+   \* the barrier's.
+   nt : Nat,
+   pend : [id : Nat, fold : Nat, nonces : SUBSET Nat],
+   ack : [st : {"none", "ok", "partial", "refused-read-only"}, nonces : SUBSET Nat, seq : Nat,
+          src : Clocks \cup {"none"}, dropped : SUBSET Paths, inst : BOOLEAN],
+   car : [id : Nat, paths : SUBSET Paths, deletes : SUBSET Paths,
+          dropped : SUBSET Paths, uncited : SUBSET Paths, pub : [Paths -> Opt(Handles)]],
+   cId : Nat, cFold : Nat, clk : Clocks \cup {"none"}, iseq : Nat, instd : BOOLEAN,
+   bound : [id : Nat, fold : Nat, doc : [Paths -> Opt(Handles)], seq : Nat,
+            wd : SUBSET Paths, inst : BOOLEAN, clk : Clocks \cup {"none"}],
+   \* GHOSTS the answer's claims read; no guard reads them.  Every nonce
+   \* consumed, acked, or dropped by the cap; what the record's requests
+   \* declared (`dset`: the paths dirty at a fold; `decl`: their versions
+   \* then; `dMint`: the mint counter then); the declared paths the agent
+   \* wrote or deleted since (`moved`); what each carrying CAS stamped.
+   cN : SUBSET Nat, aN : SUBSET Nat, capped : SUBSET Nat,
+   dset : SUBSET Paths, decl : [Paths -> Opt(Handles)], dMint : [Paths -> Nat],
+   \* (`stamps` and `lost` are typed loosely, a clock or "none" and a handle
+   \* or Nil: what they hold is narrower, but only an invariant says so, and
+   \* no guard or claim reads their types.)
+   moved : SUBSET Paths, stamps : SUBSET (Nat \X (Clocks \cup {"none"})),
+   \* `lost`: this writer's uploads another writer swept before its CAS
+   \* (`gone`).  Their conflict record names bytes no copy keeps; every
+   \* other conflict's version is copied to `conflicts/` first
+   \* (`preserve_conflict_copy`), and the copy outlives a reap of the handle.
+   lost : SUBSET Opt(Handles),
+   \* DEPOSAL (row 17): a takeover deposed this writer and it has not yet
+   \* learned so; `nd`: the takeovers it made.
+   deposed : BOOLEAN, nd : Nat]
 
 WriterInit ==
   [st |-> "off", pc |-> "idle",
@@ -192,7 +258,14 @@ WriterInit ==
    verified |-> FALSE, inst |-> [p \in Paths |-> Nil], retire |-> {},
    collected |-> FALSE, adv |-> FALSE, synced |-> 0, derived |-> 0, skipped |-> {},
    scope |-> {}, sStage |-> "none", sTgt |-> {}, sDrop |-> {}, sKeep |-> {},
-   sHeld |-> [p \in Paths |-> Nil], unlinked |-> {}, memo |-> 0, rnow |-> 0]
+   sHeld |-> [p \in Paths |-> Nil], unlinked |-> {}, memo |-> 0, rnow |-> 0,
+   nt |-> 0, pend |-> NoPend, ack |-> NoAck, car |-> NoCar,
+   cId |-> 0, cFold |-> 0, clk |-> "none", iseq |-> 0, instd |-> FALSE,
+   bound |-> [id |-> 0, fold |-> 0, doc |-> [p \in Paths |-> Nil], seq |-> 0,
+              wd |-> {}, inst |-> FALSE, clk |-> "none"],
+   cN |-> {}, aN |-> {}, capped |-> {},
+   dset |-> {}, decl |-> [p \in Paths |-> Nil], dMint |-> [p \in Paths |-> 0],
+   moved |-> {}, stamps |-> {}, lost |-> {}, deposed |-> FALSE, nd |-> 0]
 
 TypeOK ==
   /\ live \subseteq Handles /\ minted \subseteq Handles /\ live \subseteq minted
@@ -228,6 +301,22 @@ Preserved(h) == \E c \in conflicts : c[2] = h
 InFlight(h) == \E p \in Paths : gw[p] = h
 LeaseGuard == GatewayIgnoresLease \/ holder = "none"
 Busy(p) == gw[p] # Nil \/ (mv # Nil /\ mv[1] = p)
+\* The barrier in flight carries a standing declaration (`barrier.rs:600-616`).
+Carries(s) == w[s].cId # 0
+\* The clock a barrier that begins now may stamp: a carrying one's is the
+\* honour's (`sentinel`), the floor's or a deferred honour's
+\* (`sentinel-deferred`), or the drain's.
+CarryClocks(s) == IF w[s].pend.id # 0 THEN Clocks ELSE {"none"}
+\* The carried uploads a document does not cite with the bytes they
+\* published (`note_carrier_uncited`; L-137, found by the proof's AckRename
+\* world: a UI delete then a rename of another file onto the path left the
+\* ack `ok`).  `pub`: what each carried upload published (`published`).
+Uncited(c, d) == {p \in c.paths : /\ p \notin c.deletes
+                                  /\ \/ d[p] = Nil
+                                     \/ c.pub[p] # Nil /\ Content(d[p]) # Content(c.pub[p])}
+\* The ack already answers the pending record (`ack_matches`, the nonce arm).
+Covered(s) == w[s].ack.st # "none" /\ w[s].pend.nonces \subseteq w[s].ack.nonces
+Oldest(S) == CHOOSE m \in S : \A x \in S : m <= x
 
 ------------------------------------------------------------------------------
 (* The gateway (`lean/gateway/src/workspace.rs`: `put_file` → `commit_save`,
@@ -332,7 +421,28 @@ EditW(s, p) ==
    sHeld |-> w[s].sHeld,
    unlinked |-> w[s].unlinked \ {p},
    memo |-> w[s].memo,
-   rnow |-> w[s].rnow]
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> w[s].car,
+   cId |-> w[s].cId,
+   cFold |-> w[s].cFold,
+   clk |-> w[s].clk,
+   iseq |-> w[s].iseq,
+   instd |-> w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> IF w[s].pend.id # 0 THEN w[s].moved \cup {p} ELSE w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
 Edit(s, p) ==
   /\ On(s) /\ nextGen <= MaxMint
   /\ LET h == <<p, nextGen>> IN
@@ -369,7 +479,28 @@ DeleteW(s, p) ==
    sHeld |-> w[s].sHeld,
    unlinked |-> w[s].unlinked \ {p},
    memo |-> w[s].memo,
-   rnow |-> w[s].rnow]
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> w[s].car,
+   cId |-> w[s].cId,
+   cFold |-> w[s].cFold,
+   clk |-> w[s].clk,
+   iseq |-> w[s].iseq,
+   instd |-> w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> IF w[s].pend.id # 0 THEN w[s].moved \cup {p} ELSE w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
 Delete(s, p) ==
   /\ On(s) /\ w[s].local[p] # Nil
   /\ w' = [w EXCEPT ![s] = DeleteW(s, p)]
@@ -405,7 +536,28 @@ CheckoutW(s, T) ==
    sHeld |-> w[s].sHeld,
    unlinked |-> w[s].unlinked,
    memo |-> w[s].memo,
-   rnow |-> w[s].rnow]
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> w[s].car,
+   cId |-> w[s].cId,
+   cFold |-> w[s].cFold,
+   clk |-> w[s].clk,
+   iseq |-> w[s].iseq,
+   instd |-> w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
 Checkout(s) ==
   /\ w[s].st = "off"
   /\ \E T \in Scopes : w' = [w EXCEPT ![s] = CheckoutW(s, T)]
@@ -445,7 +597,7 @@ CheapPath(s) ==
 ConsumeOwed(s) == {p \in Paths : Owed(s, p)}
 ConsumeConv(s) == {p \in Paths : Converges(s, p)}
 ConsumeTaken(s, fail) == (ConsumeOwed(s) \ fail) \cup ConsumeConv(s)
-ConsumeCheapW(s) ==
+ConsumeCheapW(s, ck) ==
   [st |-> w[s].st,
    pc |-> "consumed",
    local |-> w[s].local,
@@ -472,12 +624,33 @@ ConsumeCheapW(s) ==
    sHeld |-> w[s].sHeld,
    unlinked |-> w[s].unlinked,
    memo |-> w[s].memo,
-   rnow |-> w[s].rnow]
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> w[s].car,
+   cId |-> w[s].pend.id,
+   cFold |-> w[s].pend.fold,
+   clk |-> ck,
+   iseq |-> w[s].iseq,
+   instd |-> w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
 \* Something left owed (fail # {}): the tree is not integrated with this
 \* document, and nothing is recorded as derived.  A dirty path left untaken
 \* is the agent's work, owed again the moment the agent backs out (a revert,
 \* or a new file deleted unpublished): `skipped`.
-ConsumeW(s, fail) ==
+ConsumeW(s, fail, ck) ==
   [st |-> w[s].st,
    pc |-> "consumed",
    local |-> [p \in Paths |-> IF p \in ConsumeTaken(s, fail) THEN doc[p] ELSE w[s].local[p]],
@@ -505,17 +678,39 @@ ConsumeW(s, fail) ==
    sHeld |-> w[s].sHeld,
    unlinked |-> w[s].unlinked,
    memo |-> w[s].memo,
-   rnow |-> w[s].rnow]
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> w[s].car,
+   cId |-> w[s].pend.id,
+   cFold |-> w[s].pend.fold,
+   clk |-> ck,
+   iseq |-> w[s].iseq,
+   instd |-> w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
 Consume(s) ==
   /\ On(s) /\ s \notin Readers /\ w[s].pc = "idle" /\ barriers < MaxBarriers
   \* Step 0 replays a rescope in flight first (`run_barrier`).
   /\ w[s].sStage = "none"
-  /\ IF CheapPath(s)
-     THEN /\ w' = [w EXCEPT ![s] = ConsumeCheapW(s)]
+  /\ \E ck \in CarryClocks(s) :
+     IF CheapPath(s)
+     THEN /\ w' = [w EXCEPT ![s] = ConsumeCheapW(s, ck)]
           /\ UNCHANGED <<regressed, fails>>
      ELSE \E fail \in SUBSET ConsumeOwed(s) :
              /\ fails + Cardinality(fail) <= MaxFetchFails
-             /\ w' = [w EXCEPT ![s] = ConsumeW(s, fail)]
+             /\ w' = [w EXCEPT ![s] = ConsumeW(s, fail, ck)]
              /\ fails' = fails + Cardinality(fail)
              /\ regressed' = (regressed \/ \E p \in ConsumeOwed(s) \ fail : Back(s, p))
   /\ UNCHANGED <<live, minted, doc, seq, tomb, base, acked, conflicts, holder, gw, mv, udel,
@@ -554,14 +749,40 @@ ScanW(s, dels) ==
    sHeld |-> w[s].sHeld,
    unlinked |-> w[s].unlinked,
    memo |-> w[s].memo,
-   rnow |-> w[s].rnow]
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> w[s].car,
+   cId |-> w[s].cId,
+   cFold |-> w[s].cFold,
+   clk |-> w[s].clk,
+   iseq |-> w[s].iseq,
+   instd |-> w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
 Scan(s) ==
   /\ On(s) /\ w[s].pc = "consumed"
-  /\ \E dels \in SUBSET ScanAbsent(s) : w' = [w EXCEPT ![s] = ScanW(s, dels)]
+  \* A carrying barrier confirms first absences (the declared form).
+  /\ \E dels \in IF Carries(s) THEN {ScanAbsent(s)} ELSE SUBSET ScanAbsent(s) :
+       w' = [w EXCEPT ![s] = ScanW(s, dels)]
   /\ barriers' = barriers + 1
   /\ UNCHANGED <<bucket, nextGen, ui, reqs, aux>>
 
 \* Skip-on-no-diff: no scan, no CAS.
+\* The carrier's `uncited` recomputed from a document (`note_carrier_uncited`).
+CarUncited(c, d) == [id |-> c.id, paths |-> c.paths, deletes |-> c.deletes,
+                     dropped |-> c.dropped, uncited |-> Uncited(c, d), pub |-> c.pub]
 SkipW(s) ==
   [st |-> w[s].st,
    pc |-> "idle",
@@ -589,7 +810,31 @@ SkipW(s) ==
    sHeld |-> w[s].sHeld,
    unlinked |-> w[s].unlinked,
    memo |-> w[s].memo,
-   rnow |-> w[s].rnow]
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> IF w[s].car.id # 0 THEN CarUncited(w[s].car, doc) ELSE w[s].car,
+   cId |-> 0,
+   cFold |-> 0,
+   clk |-> "none",
+   iseq |-> 0,
+   instd |-> FALSE,
+   bound |-> IF w[s].cId # 0
+             THEN [id |-> w[s].cId, fold |-> w[s].cFold, doc |-> doc, seq |-> seq,
+                   wd |-> {}, inst |-> FALSE, clk |-> w[s].clk]
+             ELSE w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
 Skip(s) ==
   /\ On(s) /\ w[s].pc = "consumed" /\ barriers < MaxBarriers
   /\ \A p \in Paths : w[s].local[p] = w[s].baseline[p]
@@ -628,7 +873,28 @@ UploadW(s, p) ==
    sHeld |-> w[s].sHeld,
    unlinked |-> w[s].unlinked,
    memo |-> w[s].memo,
-   rnow |-> w[s].rnow]
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> w[s].car,
+   cId |-> w[s].cId,
+   cFold |-> w[s].cFold,
+   clk |-> w[s].clk,
+   iseq |-> w[s].iseq,
+   instd |-> w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
 \* ...and with the bytes landed at the copy c, which names them from here on.
 UploadCopyW(s, p, c) ==
   [st |-> w[s].st,
@@ -657,7 +923,28 @@ UploadCopyW(s, p, c) ==
    sHeld |-> w[s].sHeld,
    unlinked |-> w[s].unlinked,
    memo |-> w[s].memo,
-   rnow |-> w[s].rnow]
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> w[s].car,
+   cId |-> w[s].cId,
+   cFold |-> w[s].cFold,
+   clk |-> w[s].clk,
+   iseq |-> w[s].iseq,
+   instd |-> w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
 Upload(s, p) ==
   /\ On(s) /\ w[s].pc = "scanned"
   /\ p \in w[s].uploads \ w[s].upDone
@@ -718,7 +1005,31 @@ PullOnlyW(s) ==
    sHeld |-> w[s].sHeld,
    unlinked |-> w[s].unlinked,
    memo |-> w[s].memo,
-   rnow |-> w[s].rnow]
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> IF w[s].car.id # 0 THEN CarUncited(w[s].car, doc) ELSE w[s].car,
+   cId |-> 0,
+   cFold |-> 0,
+   clk |-> "none",
+   iseq |-> 0,
+   instd |-> FALSE,
+   bound |-> IF w[s].cId # 0
+             THEN [id |-> w[s].cId, fold |-> w[s].cFold, doc |-> doc, seq |-> seq,
+                   wd |-> {}, inst |-> FALSE, clk |-> w[s].clk]
+             ELSE w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
 PullOnly(s) ==
   /\ On(s) /\ w[s].pc = "scanned"
   /\ w[s].uploads = {} /\ w[s].deletes = {}
@@ -756,7 +1067,28 @@ ClaimW(s) ==
    sHeld |-> w[s].sHeld,
    unlinked |-> w[s].unlinked,
    memo |-> w[s].memo,
-   rnow |-> w[s].rnow]
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> w[s].car,
+   cId |-> w[s].cId,
+   cFold |-> w[s].cFold,
+   clk |-> w[s].clk,
+   iseq |-> w[s].iseq,
+   instd |-> w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
 Claim(s) ==
   /\ On(s) /\ w[s].pc = "scanned"
   /\ w[s].uploads \subseteq w[s].upDone
@@ -798,9 +1130,30 @@ VerifyW(s) ==
    sHeld |-> w[s].sHeld,
    unlinked |-> w[s].unlinked,
    memo |-> w[s].memo,
-   rnow |-> w[s].rnow]
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> w[s].car,
+   cId |-> w[s].cId,
+   cFold |-> w[s].cFold,
+   clk |-> w[s].clk,
+   iseq |-> w[s].iseq,
+   instd |-> w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
 Verify(s) ==
-  /\ On(s) /\ w[s].pc = "claimed" /\ holder = s /\ ~w[s].verified
+  /\ On(s) /\ w[s].pc = "claimed" /\ (holder = s \/ w[s].deposed) /\ ~w[s].verified
   /\ w' = [w EXCEPT ![s] = VerifyW(s)]
   /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
 
@@ -830,6 +1183,20 @@ InstallInst(s) == [p \in Paths |->
                      ELSE IF p \in w[s].deletes THEN Nil
                      ELSE doc[p]]
 InstallRetired(s) == {doc[p] : p \in {q \in Paths : doc[q] # Nil /\ InstallInst(s)[q] # doc[q]}}
+InstallNothing(s) == InstallInst(s) = doc
+\* H10: what a carrying CAS published of the declaration, journalled with it.
+InstallCar0(s) == IF w[s].car.id = w[s].cId THEN w[s].car
+                  ELSE [id |-> w[s].cId, paths |-> {}, deletes |-> {}, dropped |-> {}, uncited |-> {},
+                        pub |-> [p \in Paths |-> Nil]]
+InstallCar(s) ==
+  [id |-> InstallCar0(s).id,
+   paths |-> InstallCar0(s).paths \cup w[s].uploads \cup w[s].deletes,
+   deletes |-> (InstallCar0(s).deletes \ w[s].uploads) \cup w[s].deletes,
+   dropped |-> InstallCar0(s).dropped \cup w[s].gone \cup {p \in w[s].deletes : InstallInst(s)[p] # Nil},
+   uncited |-> InstallCar0(s).uncited,
+   pub |-> [p \in Paths |-> IF p \in w[s].uploads \ w[s].gone THEN w[s].snap[p]
+                           ELSE IF p \in w[s].uploads \cup w[s].deletes THEN Nil
+                           ELSE InstallCar0(s).pub[p]]]
 \* `adv`: the CAS replaced exactly the derived document: the installed one
 \* is it plus this tree's own changes.
 InstallW(s) ==
@@ -859,9 +1226,30 @@ InstallW(s) ==
    sHeld |-> w[s].sHeld,
    unlinked |-> w[s].unlinked,
    memo |-> w[s].memo,
-   rnow |-> w[s].rnow]
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> IF Carries(s) /\ ~InstallNothing(s) THEN InstallCar(s) ELSE w[s].car,
+   cId |-> w[s].cId,
+   cFold |-> w[s].cFold,
+   clk |-> w[s].clk,
+   iseq |-> IF Carries(s) THEN (IF InstallNothing(s) THEN seq ELSE seq + 1) ELSE w[s].iseq,
+   instd |-> IF Carries(s) THEN ~InstallNothing(s) ELSE w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> IF Carries(s) /\ ~InstallNothing(s) THEN w[s].stamps \cup {<<seq + 1, w[s].clk>>} ELSE w[s].stamps,
+   lost |-> IF MaxTouches > 0 THEN w[s].lost \cup {w[s].snap[p] : p \in w[s].gone} ELSE w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
 Install(s) ==
-  /\ On(s) /\ w[s].pc = "claimed" /\ holder = s /\ w[s].verified
+  /\ On(s) /\ w[s].pc = "claimed" /\ (InstallFenced => holder = s) /\ w[s].verified
   /\ LET W == w[s]
          inst == InstallInst(s)
          nothing == inst = doc
@@ -909,9 +1297,31 @@ CollectW(s) ==
    sHeld |-> w[s].sHeld,
    unlinked |-> w[s].unlinked,
    memo |-> w[s].memo,
-   rnow |-> w[s].rnow]
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> w[s].car,
+   cId |-> w[s].cId,
+   cFold |-> w[s].cFold,
+   clk |-> w[s].clk,
+   iseq |-> w[s].iseq,
+   instd |-> w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
 Collect(s) ==
   /\ On(s) /\ w[s].pc = "cased" /\ ~w[s].collected
+  /\ DeletesUnderLease => holder = s
   /\ LET W == w[s]
          taken == {h \in W.retire : ~(CollectorSparesCited /\ \E q \in Paths : W.inst[q] = h)}
      IN /\ live' = IF RetireAge THEN live ELSE live \ taken
@@ -967,11 +1377,36 @@ FinishW(s) ==
    sHeld |-> w[s].sHeld,
    unlinked |-> w[s].unlinked,
    memo |-> w[s].memo,
-   rnow |-> w[s].rnow]
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> IF w[s].car.id # 0 THEN CarUncited(w[s].car, w[s].inst) ELSE w[s].car,
+   cId |-> 0,
+   cFold |-> 0,
+   clk |-> "none",
+   iseq |-> 0,
+   instd |-> FALSE,
+   bound |-> IF w[s].cId # 0
+             THEN [id |-> w[s].cId, fold |-> w[s].cFold, doc |-> w[s].inst, seq |-> w[s].iseq,
+                   wd |-> w[s].gone, inst |-> w[s].instd, clk |-> w[s].clk]
+             ELSE w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> FALSE,
+   nd |-> w[s].nd]
 Finish(s) ==
   /\ On(s) /\ w[s].pc = "cased" /\ w[s].collected
   /\ w' = [w EXCEPT ![s] = FinishW(s)]
-  /\ holder' = "none"
+  \* The release is a CAS on this writer's token (`lease::release`).
+  /\ holder' = IF holder = s THEN "none" ELSE holder
   /\ UNCHANGED <<live, minted, doc, seq, tomb, base, acked, conflicts, gw, mv, udel,
                  nextGen, ui, reqs, barriers, aux>>
 
@@ -1008,7 +1443,28 @@ RestartW(s) ==
    sHeld |-> w[s].sHeld,
    unlinked |-> w[s].unlinked,
    memo |-> w[s].memo,
-   rnow |-> w[s].rnow]
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> w[s].car,
+   cId |-> 0,
+   cFold |-> 0,
+   clk |-> "none",
+   iseq |-> 0,
+   instd |-> FALSE,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> FALSE,
+   nd |-> w[s].nd]
 Restart(s) ==
   /\ On(s) /\ restarts < MaxRestarts
   /\ w' = [w EXCEPT ![s] = RestartW(s)]
@@ -1056,7 +1512,28 @@ SyncW(s, fail) ==
    sHeld |-> w[s].sHeld,
    unlinked |-> w[s].unlinked,
    memo |-> w[s].memo,
-   rnow |-> w[s].rnow]
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> w[s].car,
+   cId |-> w[s].cId,
+   cFold |-> w[s].cFold,
+   clk |-> w[s].clk,
+   iseq |-> w[s].iseq,
+   instd |-> w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
 Sync(s) ==
   /\ On(s) /\ s \notin Readers /\ w[s].pc = "idle" /\ syncs < MaxSyncs /\ w[s].sStage \in {"none", "saved"}
   /\ \E p \in Paths : Owed(s, p)
@@ -1108,7 +1585,28 @@ RescopeBeginW(s, T) ==
    sHeld |-> [p \in Paths |-> Nil],
    unlinked |-> w[s].unlinked,
    memo |-> w[s].memo,
-   rnow |-> w[s].rnow]
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> w[s].car,
+   cId |-> w[s].cId,
+   cFold |-> w[s].cFold,
+   clk |-> w[s].clk,
+   iseq |-> w[s].iseq,
+   instd |-> w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
 RescopeBegin(s) ==
   /\ On(s) /\ w[s].pc = "idle" /\ w[s].sStage = "none" /\ rescopes < MaxRescopes
   /\ \E T \in Scopes \ {w[s].scope} :
@@ -1162,7 +1660,28 @@ RescopeFirstW(s) ==
                 THEN w[s].unlinked
                 ELSE w[s].unlinked \cup {p \in RescopeFirstDd(s) : w[s].local[p] # Nil},
    memo |-> w[s].memo,
-   rnow |-> w[s].rnow]
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> w[s].car,
+   cId |-> w[s].cId,
+   cFold |-> w[s].cFold,
+   clk |-> w[s].clk,
+   iseq |-> w[s].iseq,
+   instd |-> w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
 RescopeFirst(s) ==
   /\ On(s) /\ w[s].pc = "idle" /\ w[s].sStage = "saved"
   /\ w' = [w EXCEPT ![s] = RescopeFirstW(s)]
@@ -1224,7 +1743,28 @@ RescopeSecondW(s, wfail) ==
    unlinked |-> (w[s].unlinked \cup {p \in Paths : RescopeUnlink(s, p) /\ RescopeUnciteFirst})
                 \ RescopeFetch(s, wfail),
    memo |-> w[s].memo,
-   rnow |-> w[s].rnow]
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> w[s].car,
+   cId |-> w[s].cId,
+   cFold |-> w[s].cFold,
+   clk |-> w[s].clk,
+   iseq |-> w[s].iseq,
+   instd |-> w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
 RescopeSecond(s) ==
   /\ On(s) /\ w[s].pc = "idle" /\ w[s].sStage = "mid"
   /\ \E wfail \in SUBSET {p \in RescopeFetch0(s) : RescopeLocal1(s)[p] = Nil \/ ~WidenKeepsLocal} :
@@ -1273,7 +1813,28 @@ RPullReadW(s) ==
    sHeld |-> w[s].sHeld,
    unlinked |-> w[s].unlinked,
    memo |-> w[s].memo,
-   rnow |-> seq]
+   rnow |-> seq,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> w[s].car,
+   cId |-> w[s].cId,
+   cFold |-> w[s].cFold,
+   clk |-> w[s].clk,
+   iseq |-> w[s].iseq,
+   instd |-> w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
 RPullRead(s) ==
   /\ On(s) /\ s \in Readers /\ w[s].pc = "idle" /\ w[s].sStage \in {"none", "saved"}
   /\ ~ReaderSkips(s)
@@ -1311,7 +1872,28 @@ RPullSyncW(s, fail) ==
    sHeld |-> w[s].sHeld,
    unlinked |-> w[s].unlinked,
    memo |-> w[s].rnow,
-   rnow |-> w[s].rnow]
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> w[s].car,
+   cId |-> w[s].cId,
+   cFold |-> w[s].cFold,
+   clk |-> w[s].clk,
+   iseq |-> w[s].iseq,
+   instd |-> w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
 RPullSync(s) ==
   /\ On(s) /\ s \in Readers /\ w[s].pc = "pulling"
   /\ \E fail \in SUBSET SyncAll(s) :
@@ -1320,6 +1902,460 @@ RPullSync(s) ==
        /\ fails' = fails + Cardinality(fail)
        /\ regressed' = (regressed \/ \E p \in SyncOwed(s, fail) : Back(s, p))
   /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, restarts, syncs, rescopes, upped, copies, orig>>
+
+------------------------------------------------------------------------------
+(* The boundary verbs' answer (row 15; `sentinel.rs`).                     *)
+
+\* A request's parts (LeanP1.tla: `Touch`'s LET).
+TouchN(s) == w[s].nt + 1
+TouchFresh(s) == w[s].pend.id = 0
+TouchNs(s) == (IF TouchFresh(s) THEN {} ELSE w[s].pend.nonces) \cup {TouchN(s)}
+TouchKept(s) == IF Cardinality(TouchNs(s)) > MaxNonces THEN TouchNs(s) \ {Oldest(TouchNs(s))} ELSE TouchNs(s)
+TouchDirty(s) == {p \in Paths : w[s].local[p] # w[s].baseline[p] /\ Content(w[s].local[p]) # Content(doc[p])}
+TouchW(s) ==
+  [st |-> w[s].st,
+   pc |-> w[s].pc,
+   local |-> w[s].local,
+   baseline |-> w[s].baseline,
+   integrated |-> w[s].integrated,
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> w[s].snap,
+   upDone |-> w[s].upDone,
+   gone |-> w[s].gone,
+   verified |-> w[s].verified,
+   inst |-> w[s].inst,
+   retire |-> w[s].retire,
+   collected |-> w[s].collected,
+   adv |-> w[s].adv,
+   synced |-> w[s].synced,
+   derived |-> w[s].derived,
+   skipped |-> w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow,
+   nt |-> TouchN(s),
+   pend |-> [id |-> IF TouchFresh(s) THEN TouchN(s) ELSE w[s].pend.id, fold |-> TouchN(s), nonces |-> TouchKept(s)],
+   ack |-> w[s].ack,
+   car |-> w[s].car,
+   cId |-> w[s].cId,
+   cFold |-> w[s].cFold,
+   clk |-> w[s].clk,
+   iseq |-> w[s].iseq,
+   instd |-> w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN \cup {TouchN(s)},
+   aN |-> w[s].aN,
+   capped |-> w[s].capped \cup (TouchNs(s) \ TouchKept(s)),
+   dset |-> (IF TouchFresh(s) THEN {} ELSE w[s].dset) \cup TouchDirty(s),
+   decl |-> [p \in Paths |-> IF p \in TouchDirty(s) THEN w[s].local[p]
+                            ELSE IF TouchFresh(s) THEN Nil ELSE w[s].decl[p]],
+   dMint |-> [p \in Paths |-> IF p \in TouchDirty(s) THEN nextGen
+                             ELSE IF TouchFresh(s) THEN 0 ELSE w[s].dMint[p]],
+   moved |-> (IF TouchFresh(s) THEN {} ELSE w[s].moved) \ TouchDirty(s),
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
+Touch(s) ==
+  /\ On(s) /\ w[s].pc = "idle" /\ w[s].nt < MaxTouches
+  /\ w' = [w EXCEPT ![s] = TouchW(s)]
+  /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
+
+\* The honour's parts (LeanP1.tla: `Honor`'s LET).
+HonorCarried(s) == IF w[s].car.id = w[s].pend.id THEN w[s].car.dropped \cup w[s].car.uncited ELSE {}
+HonorDr(s) == w[s].bound.wd \cup HonorCarried(s)
+HonorW(s) ==
+  [st |-> w[s].st,
+   pc |-> w[s].pc,
+   local |-> w[s].local,
+   baseline |-> w[s].baseline,
+   integrated |-> w[s].integrated,
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> w[s].snap,
+   upDone |-> w[s].upDone,
+   gone |-> w[s].gone,
+   verified |-> w[s].verified,
+   inst |-> w[s].inst,
+   retire |-> w[s].retire,
+   collected |-> w[s].collected,
+   adv |-> w[s].adv,
+   synced |-> w[s].synced,
+   derived |-> w[s].derived,
+   skipped |-> w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> [st |-> IF HonorDr(s) = {} THEN "ok" ELSE "partial",
+            nonces |-> w[s].pend.nonces, seq |-> w[s].bound.seq,
+            src |-> w[s].bound.clk, dropped |-> HonorDr(s), inst |-> w[s].bound.inst],
+   car |-> w[s].car,
+   cId |-> w[s].cId,
+   cFold |-> w[s].cFold,
+   clk |-> w[s].clk,
+   iseq |-> w[s].iseq,
+   instd |-> w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN \cup w[s].pend.nonces,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
+Honor(s) ==
+  /\ On(s) /\ s \notin Readers /\ w[s].pc = "idle"
+  /\ w[s].pend.id # 0 /\ ~Covered(s)
+  /\ w[s].bound.id = w[s].pend.id /\ w[s].bound.fold = w[s].pend.fold
+  /\ w' = [w EXCEPT ![s] = HonorW(s)]
+  /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
+
+HonorReaderW(s) ==
+  [st |-> w[s].st,
+   pc |-> w[s].pc,
+   local |-> w[s].local,
+   baseline |-> w[s].baseline,
+   integrated |-> w[s].integrated,
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> w[s].snap,
+   upDone |-> w[s].upDone,
+   gone |-> w[s].gone,
+   verified |-> w[s].verified,
+   inst |-> w[s].inst,
+   retire |-> w[s].retire,
+   collected |-> w[s].collected,
+   adv |-> w[s].adv,
+   synced |-> w[s].synced,
+   derived |-> w[s].derived,
+   skipped |-> w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> [st |-> "refused-read-only", nonces |-> w[s].pend.nonces, seq |-> 0,
+            src |-> "none", dropped |-> {}, inst |-> FALSE],
+   car |-> w[s].car,
+   cId |-> w[s].cId,
+   cFold |-> w[s].cFold,
+   clk |-> w[s].clk,
+   iseq |-> w[s].iseq,
+   instd |-> w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN \cup w[s].pend.nonces,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
+HonorReader(s) ==
+  /\ On(s) /\ s \in Readers /\ w[s].pc = "idle"
+  /\ w[s].pend.id # 0 /\ ~Covered(s)
+  /\ w' = [w EXCEPT ![s] = HonorReaderW(s)]
+  /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
+
+RetireByAckW(s) ==
+  [st |-> w[s].st,
+   pc |-> w[s].pc,
+   local |-> w[s].local,
+   baseline |-> w[s].baseline,
+   integrated |-> w[s].integrated,
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> w[s].snap,
+   upDone |-> w[s].upDone,
+   gone |-> w[s].gone,
+   verified |-> w[s].verified,
+   inst |-> w[s].inst,
+   retire |-> w[s].retire,
+   collected |-> w[s].collected,
+   adv |-> w[s].adv,
+   synced |-> w[s].synced,
+   derived |-> w[s].derived,
+   skipped |-> w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> NoPend,
+   ack |-> w[s].ack,
+   car |-> w[s].car,
+   cId |-> w[s].cId,
+   cFold |-> w[s].cFold,
+   clk |-> w[s].clk,
+   iseq |-> w[s].iseq,
+   instd |-> w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
+RetireByAck(s) ==
+  /\ On(s) /\ w[s].pc = "idle" /\ w[s].pend.id # 0 /\ Covered(s)
+  /\ w' = [w EXCEPT ![s] = RetireByAckW(s)]
+  /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
+
+------------------------------------------------------------------------------
+(* Deposal (row 17; `lease.rs::claim_step`, `barrier.rs`).                 *)
+
+\* The taker's tree, and the deposed holder's.
+DeposeW(s) ==
+  [st |-> w[s].st,
+   pc |-> "claimed",
+   local |-> w[s].local,
+   baseline |-> w[s].baseline,
+   integrated |-> w[s].integrated,
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> w[s].snap,
+   upDone |-> w[s].upDone,
+   gone |-> w[s].gone,
+   verified |-> w[s].verified,
+   inst |-> w[s].inst,
+   retire |-> w[s].retire,
+   collected |-> w[s].collected,
+   adv |-> w[s].adv,
+   synced |-> w[s].synced,
+   derived |-> w[s].derived,
+   skipped |-> w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> w[s].car,
+   cId |-> w[s].cId,
+   cFold |-> w[s].cFold,
+   clk |-> w[s].clk,
+   iseq |-> w[s].iseq,
+   instd |-> w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd + 1]
+DeposedW(s) ==
+  [st |-> w[s].st,
+   pc |-> w[s].pc,
+   local |-> w[s].local,
+   baseline |-> w[s].baseline,
+   integrated |-> w[s].integrated,
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> w[s].snap,
+   upDone |-> w[s].upDone,
+   gone |-> w[s].gone,
+   verified |-> w[s].verified,
+   inst |-> w[s].inst,
+   retire |-> w[s].retire,
+   collected |-> w[s].collected,
+   adv |-> w[s].adv,
+   synced |-> w[s].synced,
+   derived |-> w[s].derived,
+   skipped |-> w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> w[s].car,
+   cId |-> w[s].cId,
+   cFold |-> w[s].cFold,
+   clk |-> w[s].clk,
+   iseq |-> w[s].iseq,
+   instd |-> w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> TRUE,
+   nd |-> w[s].nd]
+Depose(t) ==
+  /\ On(t) /\ w[t].pc = "scanned" /\ w[t].nd < MaxDeposals
+  /\ w[t].uploads \subseteq w[t].upDone /\ w[t].uploads \cup w[t].deletes # {}
+  /\ holder \in Writers /\ holder # t
+  /\ holder' = t
+  /\ seq' = seq + 1
+  /\ w' = [w EXCEPT ![t] = DeposeW(t), ![holder] = DeposedW(holder)]
+  /\ UNCHANGED <<live, minted, doc, tomb, base, acked, conflicts, gw, mv, udel,
+                 nextGen, ui, reqs, barriers, aux>>
+
+\* The straggler learns it: before its CAS the barrier is abandoned; after
+\* it, the deletes stop.
+FenceBeforeW(s) ==
+  [st |-> w[s].st,
+   pc |-> "idle",
+   local |-> w[s].local,
+   baseline |-> w[s].baseline,
+   integrated |-> w[s].integrated,
+   uploads |-> {},
+   deletes |-> {},
+   snap |-> [p \in Paths |-> Nil],
+   upDone |-> {},
+   gone |-> {},
+   verified |-> FALSE,
+   inst |-> [p \in Paths |-> Nil],
+   retire |-> {},
+   collected |-> FALSE,
+   adv |-> FALSE,
+   synced |-> w[s].synced,
+   derived |-> w[s].derived,
+   skipped |-> w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> w[s].car,
+   cId |-> 0,
+   cFold |-> 0,
+   clk |-> "none",
+   iseq |-> 0,
+   instd |-> FALSE,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> FALSE,
+   nd |-> w[s].nd]
+FenceAfterW(s) ==
+  [st |-> w[s].st,
+   pc |-> w[s].pc,
+   local |-> w[s].local,
+   baseline |-> w[s].baseline,
+   integrated |-> w[s].integrated,
+   uploads |-> w[s].uploads,
+   deletes |-> w[s].deletes,
+   snap |-> w[s].snap,
+   upDone |-> w[s].upDone,
+   gone |-> w[s].gone,
+   verified |-> w[s].verified,
+   inst |-> w[s].inst,
+   retire |-> {},
+   collected |-> TRUE,
+   adv |-> w[s].adv,
+   synced |-> w[s].synced,
+   derived |-> w[s].derived,
+   skipped |-> w[s].skipped,
+   scope |-> w[s].scope,
+   sStage |-> w[s].sStage,
+   sTgt |-> w[s].sTgt,
+   sDrop |-> w[s].sDrop,
+   sKeep |-> w[s].sKeep,
+   sHeld |-> w[s].sHeld,
+   unlinked |-> w[s].unlinked,
+   memo |-> w[s].memo,
+   rnow |-> w[s].rnow,
+   nt |-> w[s].nt,
+   pend |-> w[s].pend,
+   ack |-> w[s].ack,
+   car |-> w[s].car,
+   cId |-> w[s].cId,
+   cFold |-> w[s].cFold,
+   clk |-> w[s].clk,
+   iseq |-> w[s].iseq,
+   instd |-> w[s].instd,
+   bound |-> w[s].bound,
+   cN |-> w[s].cN,
+   aN |-> w[s].aN,
+   capped |-> w[s].capped,
+   dset |-> w[s].dset,
+   decl |-> w[s].decl,
+   dMint |-> w[s].dMint,
+   moved |-> w[s].moved,
+   stamps |-> w[s].stamps,
+   lost |-> w[s].lost,
+   deposed |-> w[s].deposed,
+   nd |-> w[s].nd]
+Fence(s) ==
+  /\ On(s) /\ w[s].deposed
+  /\ \/ w[s].pc = "claimed" /\ w' = [w EXCEPT ![s] = FenceBeforeW(s)]
+     \/ w[s].pc = "cased" /\ ~w[s].collected /\ w' = [w EXCEPT ![s] = FenceAfterW(s)]
+  /\ UNCHANGED <<bucket, nextGen, ui, reqs, barriers, aux>>
 
 ------------------------------------------------------------------------------
 (* The retire age (M1) and a reader of the document.                       *)
@@ -1388,6 +2424,7 @@ WriterStep ==
        \/ Verify(s) \/ Install(s) \/ Collect(s) \/ Finish(s) \/ Restart(s) \/ Sync(s)
        \/ RescopeBegin(s) \/ RescopeFirst(s) \/ RescopeSecond(s)
        \/ RPullRead(s) \/ RPullSync(s)
+       \/ Touch(s) \/ Honor(s) \/ HonorReader(s) \/ RetireByAck(s) \/ Depose(s) \/ Fence(s)
   \/ \E s \in Writers, p \in Paths : Edit(s, p) \/ Delete(s, p) \/ Upload(s, p)
   \/ \E s \in Writers, h \in Handles : Sweep(s, h)
 
@@ -1482,7 +2519,13 @@ SilentRevert(p) ==
                          /\ (w[s].baseline[p] = doc[p] \/ Gen(doc[p]) \in took[s][p])
 Prop_NoSilentRevert == [][\A p \in Paths : ~SilentRevert(p)]_vars
 
-Inv_OneHolder == \A s \in Writers : w[s].pc \in {"claimed", "cased"} => holder = s
+\* Restated 2026-10-14 for deposal (row 17): a writer in its commit section
+\* holds the lease unless a takeover deposed it, and the holder is in its
+\* section, not deposed.  With `MaxDeposals = 0` the first half is the claim
+\* as it was.
+Inv_OneHolder ==
+  /\ \A s \in Writers : w[s].pc \in {"claimed", "cased"} /\ ~w[s].deposed => holder = s
+  /\ holder \in Writers => w[holder].pc \in {"claimed", "cased"} /\ ~w[holder].deposed
 \* SUPERSEDED (2026-10-14) by NR5 below; kept as the record (`regressed` and
 \* `Back` stay as its ghost).  FALSE once the gateway may remove three times
 \* (NOTES.txt E6: rename, re-create, delete, rename back, a consume regresses).
@@ -1579,6 +2622,75 @@ ProbeOutOfScopePublished ==
 
 \* G1: every save the gateway starts is answered.  Checked under LSpec.
 Prop_UISaveCompletes == \A p \in Paths : (gw[p] # Nil) ~> (gw[p] = Nil)
+
+------------------------------------------------------------------------------
+(* Rows 15-17 (2026-10-14).                                                 *)
+
+\* THE ANSWER.  A declared path is BROKEN in document `d` when the agent has
+\* not moved on from what it declared there, `d` does not hold those bytes,
+\* what `d` holds is not a later version (derived from the declared one,
+\* or minted after the declaring request; a declared delete answered by any
+\* later file), and no record preserves the declared bytes (R7's "never a
+\* silent winner": a peer's later boundary may win, loudly).
+LaterVersion(s, p, d) ==
+  /\ d[p] # Nil
+  /\ \/ w[s].decl[p] = Nil
+     \/ Derives(d[p], w[s].decl[p])
+     \/ Gen(Content(d[p])) >= w[s].dMint[p]
+\* A conflict preserves the declared bytes while they are live, or when its
+\* version is not a swept upload: the copy keeps those (AckWithheldHolds,
+\* 2026-10-14: a reap of the handle after the age is not a loss).
+SurfacedDecl(s, p) ==
+  \E c \in conflicts : /\ c[1] = p /\ c[2] # Nil /\ Content(c[2]) = Content(w[s].decl[p])
+                       /\ (c[2] \in live \/ c[2] \notin UNION {w[t].lost : t \in Writers})
+Broken(s, p, d) ==
+  /\ p \in w[s].dset /\ p \notin w[s].moved
+  /\ Content(d[p]) # Content(w[s].decl[p])
+  /\ ~LaterVersion(s, p, d)
+  /\ ~SurfacedDecl(s, p)
+AckWrite(s) == w'[s].ack # w[s].ack /\ w'[s].ack.st \in {"ok", "partial"}
+\* AK1 (S1 rows 1 and 2): the ack names every declared path its document
+\* does not carry; `ok` names none.  (It may name more: a path the agent
+\* wrote after the request whose upload was withheld is not in the seq
+\* either, and saying so is honest; the gate's AckWithheldHolds, DeposeAck.)
+AK1 == [][\A s \in Writers :
+            AckWrite(s) => {p \in Paths : Broken(s, p, w[s].bound.doc)} \subseteq w'[s].ack.dropped]_vars
+\* AK3 (S1 row 4): every consumed request is pending or was answered, but
+\* for what the nonce cap dropped (D2; `ProbeCapDropped` shows it).
+AK3 == \A s \in Writers : w[s].cN \ w[s].capped \subseteq w[s].pend.nonces \cup w[s].aN
+\* AK4 (S1 row 5): an ack whose barrier installed names the clock its CAS
+\* stamped on the bucket.
+AK4 == \A s \in Writers :
+         w[s].ack.st \in {"ok", "partial"} /\ w[s].ack.inst => <<w[s].ack.seq, w[s].ack.src>> \in w[s].stamps
+
+\* NR1 (row 16, S4 row 1): a path the tree deleted and has not published
+\* comes back only by the agent's own write.
+NR1 == [][\A s \in Writers, p \in Paths :
+            w[s].local[p] = Nil /\ w[s].baseline[p] # Nil /\ w'[s].local[p] # Nil
+              => w'[s].local[p] = <<p, nextGen>> /\ nextGen' = nextGen + 1]_vars
+
+\* DP1 (row 17, S5 row 3): an install is the lease holder's.
+DP1 == [][\A s \in Writers : w[s].pc = "claimed" /\ w'[s].pc = "cased" => holder = s]_vars
+\* DP2 (L-132): the collector deletes only under the lease.  (The orphan
+\* sweep and the reap are guarded in place.)
+DP2 == [][\A s \in Writers : ~w[s].collected /\ w'[s].collected /\ live' # live => holder = s]_vars
+
+\* Probes (each must fire: the step is reachable).
+ProbeAckPartial == \A s \in Writers : w[s].ack.st # "partial"
+ProbeAckOk == \A s \in Writers : w[s].ack.st # "ok"
+ProbeAckDeferred == \A s \in Writers : w[s].ack.src # "sentinel-deferred"
+ProbeCapDropped == \A s \in Writers : w[s].capped = {}
+ProbeRetiredAfterRestart ==
+  [][~\E s \in Writers : restarts > 0 /\ w[s].pend.id # 0 /\ w'[s].pend.id = 0]_vars
+ProbeDeleteSurvivesRestart ==
+  [][~\E s \in Writers, p \in Paths : restarts' = restarts + 1 /\ w[s].local[p] = Nil
+                                     /\ w[s].baseline[p] # Nil /\ w'[s].local[p] = Nil]_vars
+ProbeDeposed == \A s \in Writers : ~w[s].deposed
+ProbeFencedBeforeCas ==
+  [][~\E s \in Writers : w[s].deposed /\ w[s].pc = "claimed" /\ w'[s].pc = "idle" /\ restarts' = restarts]_vars
+ProbeFencedAfterCas ==
+  [][~\E s \in Writers : w[s].deposed /\ w[s].pc = "cased" /\ w[s].retire # {} /\ w'[s].collected
+                          /\ live' = live /\ w'[s].retire = {}]_vars
 
 ------------------------------------------------------------------------------
 (* Probes (non-vacuity): a world that violates one has taken the step.     *)

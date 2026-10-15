@@ -25,6 +25,9 @@ loudly rather than producing a mutant that mutates nothing.
   CarrierKeepsDelete   L-136: a later carry's upload of a path an earlier one
                        deleted stays a delete, so a peer's delete of it is
                        not named: AK1.
+  CarrierCitesAny      L-137: a carried upload is named only when the document
+                       stops citing its path, not when it cites other bytes there
+                       (a UI delete, then a rename onto the path): AK1.
   FoldClobbers         settle-before-consume: a touch replaces the pending
                        record instead of folding into it: AK3.
   StampIndependent     the ack's clock chosen apart from the bucket's stamp: AK4.
@@ -53,8 +56,8 @@ M = {
   'EditBase': [(EDIT, "     /\\ base' = [base EXCEPT ![h] = w[s].baseline[p]]\n")],
   'AckIgnoresWithheld': [
     ("         dr == W.bound.wd \\cup carried\n", "         dr == carried\n"),
-    ("!.dropped = @ \\cup W.gone \\cup {p \\in W.deletes : inst[p] # Nil}]",
-     "!.dropped = @ \\cup {p \\in W.deletes : inst[p] # Nil}]")],
+    ("!.dropped = @ \\cup W.gone \\cup {p \\in W.deletes : inst[p] # Nil},",
+     "!.dropped = @ \\cup {p \\in W.deletes : inst[p] # Nil},")],
   'AckReadsOwnReport': [
     ("carried == IF W.car.id = W.pend.id THEN W.car.dropped \\cup W.car.uncited ELSE {}",
      "carried == {}")],
@@ -66,6 +69,9 @@ M = {
      "![s].pend = [id |-> n, fold |-> n, nonces |-> kept],")],
   'CarrierKeepsDelete': [
     ("!.deletes = (@ \\ W.uploads) \\cup W.deletes,", "!.deletes = @ \\cup W.deletes,")],
+  'CarrierCitesAny': [
+    ("                                  /\\ \\/ d[p] = Nil\n                                     \\/ c.pub[p] # Nil /\\ Content(d[p]) # Content(c.pub[p])}",
+     "                                  /\\ d[p] = Nil}")],
   'FoldClobbers': [
     ("         ns == (IF fresh THEN {} ELSE W.pend.nonces) \\cup {n}\n", "         ns == {n}\n")],
   'StampIndependent': [

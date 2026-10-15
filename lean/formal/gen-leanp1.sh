@@ -203,6 +203,11 @@ emit AckIgnoresUncited Spec TypeOK AK1 $A1
 emit CarrierPerFold Spec TypeOK AK1 $A1
 emit CarrierKeepsDelete Spec TypeOK AK1 $A1
 emit RequestAfterCarry Spec TypeOK AK1 $A1
+# L-137 (2026-10-15, found by the proof): the UI deletes a carried upload and
+# renames another file onto its path before the honour.  Two removals.
+AR="Paths={p1,p2} Free={} Writers={A} MaxTouches=1 MaxBarriers=3 MaxRemovals=2 MaxUI=0 MaxAges=0"
+emit AckRename Spec "$AINV" "$APROPS" $AR
+emit CarrierCitesAny Spec TypeOK AK1 $AR
 emit FoldClobbers Spec TypeOK,AK3 "" $A1
 emit StampIndependent Spec TypeOK,AK4 "" $A1
 emit ProbeAckOk Spec ProbeAckOk "" $A1

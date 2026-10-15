@@ -1,0 +1,57 @@
+--- state 1 (init)
+--- state 2
+    took = (A :> (p1 :> {1} @@ p2 :> {}))
+    w[A] st: "on"; inst: (p1 :> <<p1, 1>> @@ p2 :> <<p2, 1>>); local: (p1 :> <<p1, 1>> @@ p2 :> Nil); baseline: (p1 :> <<p1, 1>> @@ p2 :> Nil); integrated: {1}; synced: 1; derived: 1; scope: {p1}
+--- state 3
+    minted = {<<p1, 1>>, <<p1, 2>>, <<p2, 1>>}
+    base = (<<p1, 1>> :> Nil @@ <<p1, 2>> :> <<p1, 1>> @@ <<p1, 3>> :> Nil @@ <<p1, 4>> :> Nil @@ <<p2, 1>> :> Nil @@ <<p2, 2>> :> Nil @@ <<p2, 3>> :> Nil @@ <<p2, 4>> :> Nil)
+    nextGen = 3
+    took = (A :> (p1 :> {1, 2} @@ p2 :> {}))
+    w[A] local: (p1 :> <<p1, 2>> @@ p2 :> Nil); integrated: {1, 2}
+--- state 4
+    w[A] nt: 1; pend: [id |-> 1, fold |-> 1, nonces |-> {1}]; cN: {1}; dset: {p1}; decl: (p1 :> <<p1, 2>> @@ p2 :> Nil); dMint: (p1 :> 3 @@ p2 :> 0)
+--- state 5
+    w[A] pc: "consumed"; cId: 1; cFold: 1; clk: "drain"
+--- state 6
+    barriers = 1
+    w[A] pc: "scanned"; uploads: {p1}; snap: (p1 :> <<p1, 2>> @@ p2 :> Nil)
+--- state 7
+    live = {<<p1, 1>>, <<p1, 2>>, <<p2, 1>>}
+    upped = {<<p1, 1>>, <<p1, 2>>, <<p2, 1>>}
+    w[A] upDone: {p1}
+--- state 8
+    holder = A
+    w[A] pc: "claimed"
+--- state 9
+    w[A] verified: TRUE
+--- state 10
+    doc = (p1 :> <<p1, 2>> @@ p2 :> <<p2, 1>>)
+    seq = 2
+    retiring = {<<p1, 1>>}
+    w[A] inst: (p1 :> <<p1, 2>> @@ p2 :> <<p2, 1>>); pc: "cased"; retire: {<<p1, 1>>}; adv: TRUE; car: [id |-> 1, dropped |-> {}, paths |-> {p1}, deletes |-> {}, uncited |-> {}]; iseq: 2; instd: TRUE; stamps: {<<2, "drain">>}
+--- state 11
+    doc = (p1 :> Nil @@ p2 :> <<p2, 1>>)
+    seq = 3
+    tomb = (p1 :> <<p1, 2>> @@ p2 :> Nil)
+    reqs = 1
+    udel = {<<p1, <<p1, 2>>>>}
+    retiring = {<<p1, 1>>, <<p1, 2>>}
+--- state 12
+    doc = (p1 :> <<p2, 1>> @@ p2 :> Nil)
+    seq = 4
+    tomb = (p1 :> Nil @@ p2 :> <<p2, 1>>)
+    acked = {<<p1, <<p2, 1>>>>}
+    reqs = 2
+--- state 13
+    w[A] retire: {}; collected: TRUE
+--- state 14
+    holder = "none"
+    w[A] pc: "idle"; baseline: (p1 :> <<p1, 2>> @@ p2 :> Nil); uploads: {}; snap: (p1 :> Nil @@ p2 :> Nil); upDone: {}; verified: FALSE; collected: FALSE; adv: FALSE; cId: 0; cFold: 0; clk: "none"; iseq: 0; instd: FALSE; bound: [id |-> 1, fold |-> 1, seq |-> 2, inst |-> TRUE, doc |-> (p1 :> <<p1, 2>> @@ p2 :> <<p2, 1>>), clk |-> "drain", wd |-> {}]
+--- state 15
+    w[A] pc: "consumed"; local: (p1 :> <<p2, 1>> @@ p2 :> Nil); baseline: (p1 :> <<p2, 1>> @@ p2 :> Nil); synced: 4; derived: 4; cId: 1; cFold: 1; clk: "sentinel"
+--- state 16
+    barriers = 2
+    w[A] pc: "idle"; cId: 0; cFold: 0; clk: "none"; bound: [id |-> 1, fold |-> 1, seq |-> 4, inst |-> FALSE, doc |-> (p1 :> <<p2, 1>> @@ p2 :> Nil), clk |-> "sentinel", wd |-> {}]
+--- state 17
+    w[A] ack: [nonces |-> {1}, st |-> "ok", seq |-> 4, src |-> "sentinel", dropped |-> {}, inst |-> FALSE]; aN: {1}
+Error: Action property AK1 is violated by the last step above.

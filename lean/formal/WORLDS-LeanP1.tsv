@@ -77,6 +77,8 @@ LeanP1AckReadsOwnReport	AK1	LeanP1.tla	AckReadsOwnReport
 LeanP1AckIgnoresUncited	AK1	LeanP1.tla	AckIgnoresUncited
 LeanP1CarrierPerFold	AK1	LeanP1.tla	CarrierPerFold
 LeanP1CarrierKeepsDelete	AK1	LeanP1.tla	CarrierKeepsDelete
+LeanP1AckRename	HOLDS	LeanP1.tla	
+LeanP1CarrierCitesAny	AK1	LeanP1.tla	CarrierCitesAny
 LeanP1RequestAfterCarry	AK1	LeanP1.tla	RequestAfterCarry
 LeanP1FoldClobbers	AK3	LeanP1.tla	FoldClobbers
 LeanP1StampIndependent	AK4	LeanP1.tla	StampIndependent
