@@ -8344,6 +8344,7 @@ mod tests {
             device_id,
             FILE_ID,
             WIDTH,
+            None,
         );
 
         // nfl_first_stripe_index: deviceid(16) + nfl_util(4).
@@ -8383,6 +8384,7 @@ mod tests {
             device_id,
             FILE_ID,
             WIDTH,
+            None,
         );
         assert_eq!(enc, enc_ok, "the segment list must not reach the wire at all");
     }
