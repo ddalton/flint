@@ -1,0 +1,20 @@
+ 984 WARNING: Failed to create machine krb5 context with cred cache FILE:/tmp/krb5ccmachine_FLINT.TEST for server ds1.flint.test
+ 984 WARNING: Failed to create krb5 context for user with uid 0 for server nfs@ds1.flint.test
+ 972 WARNING: Failed to create machine krb5 context with cred cache FILE:/tmp/krb5ccmachine_FLINT.TEST for server ds2.flint.test
+ 972 WARNING: Failed to create krb5 context for user with uid 0 for server nfs@ds2.flint.test
+ 492 ERROR: Failed to create machine krb5 context with any credentials cache for server ds1.flint.test
+ 486 ERROR: Failed to create machine krb5 context with any credentials cache for server ds2.flint.test
+   2 create_auth_rpc_client(0x786f7a9fe6c0): creating context with server nfs@ds1.flint.test
+   2 create_auth_rpc_client(0x786f7a1fd6c0): creating context with server nfs@ds1.flint.test
+   2 create_auth_rpc_client(0x786f799fc6c0): creating context with server nfs@ds1.flint.test
+   2 create_auth_rpc_client(0x786f791fb6c0): creating context with server nfs@ds1.flint.test
+   2 create_auth_rpc_client(0x786f789fa6c0): creating context with server nfs@ds1.flint.test
+   2 create_auth_rpc_client(0x786f73fff6c0): creating context with server nfs@ds2.flint.test
+   2 create_auth_rpc_client(0x786f737fe6c0): creating context with server nfs@ds2.flint.test
+   2 create_auth_rpc_client(0x786f72ffd6c0): creating context with server nfs@ds2.flint.test
+   2 create_auth_rpc_client(0x786f727fc6c0): creating context with server nfs@ds2.flint.test
+   2 create_auth_rpc_client(0x786f71ffb6c0): creating context with server nfs@ds2.flint.test
+   2 create_auth_rpc_client(0x786f717fa6c0): creating context with server nfs@ds1.flint.test
+   2 create_auth_rpc_client(0x786f70ff96c0): creating context with server nfs@ds1.flint.test
+   2 create_auth_rpc_client(0x786f6bfff6c0): creating context with server nfs@ds2.flint.test
+   2 create_auth_rpc_client(0x786f6b7fe6c0): creating context with server nfs@ds1.flint.test

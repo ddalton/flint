@@ -2424,6 +2424,14 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         if req.volume_context.contains_key(spdk_csi_driver::pnfs_csi::ctx_keys::MDS_IP) {
             publish_context.insert("volumeType".to_string(), "pnfs".to_string());
             publish_context.insert("volumeId".to_string(), volume_id.clone());
+            // pNFS Kerberos (chart pnfs.kerberos): the name of the MDS
+            // shard serving this volume, which the node maps the MDS IP to
+            // before a sec=krb5* mount so rpc.gssd asks for that shard's
+            // principal (`nfs_krb5::prepare_pnfs_node_mount`). Absent with
+            // it off (PNFS_KRB5_MDS_NAME_BASE unset).
+            if let Some(name) = spdk_csi_driver::nfs_krb5::pnfs_mds_server_name_from_env(&volume_id) {
+                publish_context.insert(spdk_csi_driver::nfs_krb5::SERVER_NAME_CONTEXT.to_string(), name);
+            }
 
             // Block-class volumes DO have per-node attach state (design
             // doc §5, "per-node hostnqn registration via
@@ -4603,6 +4611,18 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
 
             let mount_opts =
                 spdk_csi_driver::pnfs_csi::build_pnfs_mount_opts(mds_port, readonly, &user_flags);
+            // sec=krb5*: rpc.gssd names the MDS from its IP through the
+            // HOST's resolver, so the host must map it to the MDS shard's
+            // Kerberos name first. Strict: no name in the publish context
+            // fails the mount rather than guessing one (nfs_krb5).
+            spdk_csi_driver::nfs_krb5::prepare_pnfs_node_mount(
+                mds_ip,
+                &mount_opts,
+                req.publish_context
+                    .get(spdk_csi_driver::nfs_krb5::SERVER_NAME_CONTEXT)
+                    .map(String::as_str),
+            )
+            .map_err(tonic::Status::failed_precondition)?;
 
             eprintln!("📋 [pNFS] mount -t nfs4 -o {} {} {}",
                       mount_opts, nfs_source, target_path);

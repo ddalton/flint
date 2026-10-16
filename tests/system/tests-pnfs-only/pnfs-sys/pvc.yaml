@@ -1,0 +1,11 @@
+# A pNFS volume of the plain class (flint-pnfs, sec=sys).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pnfs-pvc
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: flint-pnfs
