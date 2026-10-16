@@ -213,6 +213,19 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         read_only: args.read_only,
     };
 
+    // Only the nodes the volume is attached to (FLINT_NFS_ATTACHED_NODES_ONLY):
+    // keep their set from the volume's VolumeAttachments. Until the first
+    // list arrives every node is refused.
+    if let Some(nodes) = spdk_csi_driver::nfs::node_authz::global() {
+        let pv = std::env::var(spdk_csi_driver::nfs::node_authz::PV_ENV)
+            .ok()
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| args.volume_id.clone());
+        let domain = std::env::var(spdk_csi_driver::nfs::node_authz::DOMAIN_ENV).ok().filter(|d| !d.is_empty());
+        info!("🔐 Only the nodes PersistentVolume {} is attached to may use this server", pv);
+        tokio::spawn(spdk_csi_driver::nfs::node_authz::watch(nodes, pv, domain));
+    }
+
     // Create and start NFS server
     let server = match NfsServer::new(config).await {
         Ok(s) => s,

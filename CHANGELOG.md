@@ -36,6 +36,22 @@ covered by the stability guarantee.
 
 ### Added
 
+- **Only the nodes a volume is attached to: `FLINT_NFS_ATTACHED_NODES_ONLY`,
+  chart `nfs.kerberos.attachedNodesOnly`** (2026-10-15). An RWX volume's
+  server served every node whose machine key it accepted. Now it keeps
+  the set of nodes its PersistentVolume is attached to (its
+  VolumeAttachments, watched, with the nodes' hostnames) and, by
+  Kerberos machine principal: only those nodes make NFS clients and
+  sessions (EXCHANGE_ID, CREATE_SESSION: NFS4ERR_ACCESS otherwise);
+  using a session (SEQUENCE, BIND_CONN_TO_SESSION) needs its client to be
+  an attached node's, and a machine principal riding it to be one too,
+  while users ride attached nodes' sessions; a detached node's sessions
+  fail at its next call (NFS4ERR_BADSESSION). Until the first list, every
+  node is refused. Every RWX mount must then be Kerberos (AUTH_SYS has
+  no node identity). The server pods get a service account reading
+  VolumeAttachments and Nodes. kind: the control plane, with a valid
+  machine key but no attachment, cannot mount the volume.
+
 - **`root_squash`: `FLINT_NFS_ROOT_SQUASH`, chart `nfs.rootSquash`**
   (2026-10-15), as knfsd's. uid 0 from any client and any flavor (an
   AUTH_SYS root, or a Kerberos machine principal mapped to 0) becomes the

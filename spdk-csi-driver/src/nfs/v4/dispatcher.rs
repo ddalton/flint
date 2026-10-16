@@ -1020,6 +1020,14 @@ impl CompoundDispatcher {
             }
         }
 
+        // Only the nodes the volume is attached to may make or use its
+        // clients and sessions (`nfs::node_authz`, off by default).
+        if let Some(nodes) = crate::nfs::node_authz::global() {
+            if let Some(refused) = self.unattached_refusal(nodes, &operation, context) {
+                return refused;
+            }
+        }
+
         match operation {
             // Session operations (NFSv4.1)
             Operation::ExchangeId { clientowner, flags, state_protect, impl_id } => {
@@ -4971,6 +4979,60 @@ fn read_only_refusal(op: &Operation) -> Option<(&'static str, OperationResult)> 
 /// PUTFH — because every operation on a file needs one first and answers
 /// NFS4ERR_NOFILEHANDLE without it; refusing at the root is what makes a
 /// denied client's mount fail with EACCES instead of half-working.
+impl CompoundDispatcher {
+    /// [`crate::nfs::node_authz`]: EXCHANGE_ID and CREATE_SESSION only from
+    /// an attached node's machine principal (NFS4ERR_ACCESS otherwise);
+    /// SEQUENCE and BIND_CONN_TO_SESSION only on a session of an attached
+    /// node's client, and by an attached node's machine principal or a
+    /// user (NFS4ERR_BADSESSION otherwise: a detached node's client is
+    /// gone, and its next EXCHANGE_ID is refused). An unknown session is
+    /// left to the handler.
+    fn unattached_refusal(
+        &self,
+        nodes: &crate::nfs::node_authz::AttachedNodes,
+        op: &Operation,
+        ctx: &CompoundContext,
+    ) -> Option<OperationResult> {
+        let who = || String::from_utf8_lossy(&ctx.principal).into_owned();
+        let client_principal = |sid: &SessionId| {
+            self.state_mgr
+                .sessions
+                .session_limits(sid)
+                .and_then(|s| self.state_mgr.clients.get_client(s.client_id))
+                .map(|c| c.principal)
+        };
+        match op {
+            Operation::ExchangeId { .. } if !nodes.may_create(&ctx.principal) => {
+                warn!("EXCHANGE_ID refused: {} is not a node this volume is attached to", who());
+                Some(OperationResult::ExchangeId(Nfs4Status::Access, None))
+            }
+            Operation::CreateSession { .. } if !nodes.may_create(&ctx.principal) => {
+                warn!("CREATE_SESSION refused: {} is not a node this volume is attached to", who());
+                Some(OperationResult::CreateSession(Nfs4Status::Access, None))
+            }
+            Operation::Sequence { sessionid, .. } => {
+                let owner = client_principal(sessionid)?;
+                (!nodes.may_use(&ctx.principal, &owner)).then(|| {
+                    warn!(
+                        "SEQUENCE refused: {} on a session of {}, not of an attached node",
+                        who(),
+                        String::from_utf8_lossy(&owner)
+                    );
+                    OperationResult::Sequence(Nfs4Status::BadSession, None)
+                })
+            }
+            Operation::BindConnToSession { sessionid, dir, use_conn_in_rdma_mode } => {
+                let owner = client_principal(sessionid)?;
+                (!nodes.may_use(&ctx.principal, &owner)).then(|| {
+                    warn!("BIND_CONN_TO_SESSION refused: {} on a session of {}", who(), String::from_utf8_lossy(&owner));
+                    OperationResult::BindConnToSession(Nfs4Status::BadSession, None, *dir, *use_conn_in_rdma_mode)
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
 fn denied_peer_refusal(op: &Operation) -> Option<(&'static str, OperationResult)> {
     let access = Nfs4Status::Access;
     Some(match op {

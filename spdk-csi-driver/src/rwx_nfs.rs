@@ -451,6 +451,9 @@ pub async fn create_nfs_server_pod(
             ..Default::default()
         },
         spec: Some(PodSpec {
+            // Attached-nodes-only servers watch VolumeAttachments and Nodes
+            // (chart RBAC); the rest need no API access.
+            service_account_name: config.security.service_account.clone(),
             node_name: if backend == NfsBackend::EmptyDir {
                 replica_nodes.first().cloned()
             } else {
@@ -511,6 +514,13 @@ pub async fn create_nfs_server_pod(
                 ]
                 .into_iter()
                 .chain(krb5_env)
+                // The PersistentVolume whose attachments decide who may
+                // use this server (`nfs::node_authz`).
+                .chain(config.security.attached_nodes_only.is_some().then(|| EnvVar {
+                    name: crate::nfs::node_authz::PV_ENV.to_string(),
+                    value: Some(volume_id.to_string()),
+                    ..Default::default()
+                }))
                 .collect()),
                 resources: Some(resources),
                 // Non-root NFS server (F26 §12 C3, decided 2026-07-19).

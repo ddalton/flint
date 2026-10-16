@@ -428,6 +428,14 @@ nfs:
     # Who a principal no rule names is ("uid:gid"): nobody, never an
     # unchecked caller.
     anonIdentity: "65534:65534"
+    # Each volume's NFS server serves only the nodes the volume is attached
+    # to (its VolumeAttachments), by their machine principals: only they
+    # make NFS clients and sessions, a user's calls ride an attached node's
+    # session, and a detached node loses its sessions at its next call.
+    # Every RWX mount must then be Kerberos (AUTH_SYS has no node identity:
+    # set minSec). The servers get a service account that reads
+    # VolumeAttachments and Nodes (cluster-wide, read-only).
+    attachedNodesOnly: false
     # Delete or Retain the principals when the release is uninstalled.
     deletionPolicy: Delete
     storageClass:
