@@ -30,6 +30,7 @@ tests/system/
 ├── chainsaw-nfs-only.yaml
 ├── chainsaw-clean-shutdown.yaml
 ├── chainsaw-replica-rebuild.yaml
+├── chainsaw-pnfs.yaml              # the pNFS suites (kind-nfs-only.sh PNFS=1)
 ├── kind-nfs-only.sh                # build this tree, run nfs-only on kind (the CI gate)
 ├── kind-spdk.sh                    # SPDK suites on kind over one real disk (single-host limits: README below)
 ├── tests-standard/                 # SPDK suite (StorageClass `flint`)
@@ -41,6 +42,9 @@ tests/system/
 │   └── rwx-single-replica/  snapshot-restore/  volume-expansion/
 ├── tests-nfs-only/                 # no-SPDK suite (StorageClass `flint-nfs`)
 │   └── ephemeral-inline/  rwo-pvc-migration/  rwx-single-replica/  volume-expansion/
+├── tests-nfs-krb5/rwx-krb5/        # Kerberos RWX (KRB5=1)
+├── tests-pnfs-only/pnfs-sys/       # pNFS, AUTH_SYS (PNFS=1)
+├── tests-pnfs-krb5/pnfs-krb5/      # pNFS Kerberos, Phase 1 (KRB5=1 PNFS=1)
 ├── tests/clean-shutdown/           # SPDK, run alone (chainsaw-clean-shutdown.yaml)
 ├── tests-replica-rebuild/          # SPDK, run alone (chainsaw-replica-rebuild.yaml)
 └── results/                        # dated run evidence (e.g. 2026-10-02-aws-spdk)
@@ -62,6 +66,9 @@ resource files it applies and asserts:
 | NFS-only | `chainsaw-nfs-only.yaml` | `tests-nfs-only` | 4 | `flint-nfs` (`nfsEmptyDir: true`) | emptyDir + NFS |
 | Clean shutdown | `chainsaw-clean-shutdown.yaml` | `tests` | 1 | `flint` | SPDK blobstore |
 | Replica rebuild | `chainsaw-replica-rebuild.yaml` | `tests-replica-rebuild` | 1 | created in-test (`numReplicas: 2`) | SPDK blobstore |
+| NFS Kerberos | `chainsaw-nfs-only.yaml` | `tests-nfs-krb5` | 1 | `flint-krb5`, `flint-nfs` | emptyDir + NFS, krb5-operator |
+| pNFS | `chainsaw-pnfs.yaml` | `tests-pnfs-only` | 1 | `flint-pnfs` | in-chart MDS + 2 DSes on `standard` |
+| pNFS Kerberos | `chainsaw-pnfs.yaml` | `tests-pnfs-krb5` | 1 | `flint-pnfs-krb5`, `flint-pnfs` | the same, krb5-operator |
 
 **CI.** `.github/workflows/system-chainsaw.yml` runs the NFS-only suite on
 every change to the driver, its path dependencies, the charts or these
@@ -72,6 +79,25 @@ it is published (cargo-zigbuild musl + `Dockerfile.csi.prebuilt`), starts a
 reproduces a CI result on any Linux host with docker. The SPDK suites need
 hugepages and a ublk-capable kernel, which a hosted runner lacks; they stay
 on the metal/AWS rigs.
+
+The same script runs the Kerberos and pNFS suites on kind (not in CI yet
+for pNFS):
+
+```bash
+KRB5=1 ./kind-nfs-only.sh          # tests-nfs-krb5: RWX with sec=krb5i
+PNFS=1 ./kind-nfs-only.sh          # tests-pnfs-only: AUTH_SYS pNFS, stripes on the DSes
+KRB5=1 PNFS=1 ./kind-nfs-only.sh   # tests-pnfs-krb5: pNFS Kerberos, Phase 1
+```
+
+`PNFS=1` also builds the `flint-pnfs` image (`flint-pnfs-mds`,
+`flint-pnfs-ds`, `Dockerfile.pnfs.prebuilt`) and pushes it to the local
+registry as `dilipdalton/flint-pnfs:$TAG`; with `BUILD=0` it must exist
+locally under `localhost:$REG_PORT/dilipdalton/flint-pnfs:$TAG` next to the
+driver image. The chart runs one MDS shard and two data servers (files
+layout, 1 MiB stripes, PVCs on kind's `standard` class), and the host
+loads `nfs_layout_nfsv41_files`. With `KRB5=1` it sets
+`pnfs.kerberos.enabled` and leaves `nfs.kerberos.enabled` off, so the
+node keys come from the pNFS side of the chart.
 
 The replica-rebuild test kills a replica leg's spdk-tgt under active writes
 and asserts the incremental heal pipeline (stale → catch-up → hot rejoin →

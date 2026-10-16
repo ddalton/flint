@@ -187,7 +187,21 @@ the CA bundle are named, not copied: the servers read them from the Secret
 and ConfigMap.
 */}}
 {{- define "flint-csi-driver-chart.nfsKrb5LdapEnv" -}}
-{{- $k := .Values.nfs.kerberos -}}
+{{- include "flint-csi-driver-chart.krb5LdapEnv" (dict "root" . "server" false) -}}
+{{- end }}
+
+{{/*
+The directory lookup's env, for the controller (server: false, NFS_GSS_LDAP_*,
+the password Secret and CA by name, which nfs_krb5::server_pod_parts turns
+into the RWX servers' env) or for a server pod the chart makes itself
+(server: true, the pNFS MDS: FLINT_NFS_GSS_LDAP_*, the password as a
+secretKeyRef, the CA as a file from flint-csi-driver-chart.krb5ServerVolumes).
+*/}}
+{{- define "flint-csi-driver-chart.krb5LdapEnv" -}}
+{{- $root := .root -}}
+{{- $server := .server -}}
+{{- $p := ternary "FLINT_NFS_GSS_LDAP_" "NFS_GSS_LDAP_" $server -}}
+{{- $k := $root.Values.nfs.kerberos -}}
 {{- $l := $k.ldap -}}
 {{- if $l.enabled }}
 {{- $url := required "nfs.kerberos.ldap.url" $l.url -}}
@@ -203,62 +217,78 @@ and ConfigMap.
 {{- if and $l.ca.configMap $l.ca.secret -}}
 {{- fail "nfs.kerberos.ldap.ca: a configMap or a secret, not both" -}}
 {{- end }}
-- name: NFS_GSS_LDAP_URL
+- name: {{ $p }}URL
   value: {{ $url | quote }}
 {{- if $l.insecure }}
-- name: NFS_GSS_LDAP_INSECURE
+- name: {{ $p }}INSECURE
   value: "true"
 {{- end }}
-- name: NFS_GSS_LDAP_REALMS
+- name: {{ $p }}REALMS
   value: {{ join "," ($l.realms | default (list $k.realm)) | quote }}
-- name: NFS_GSS_LDAP_USER_BASE
+- name: {{ $p }}USER_BASE
   value: {{ required "nfs.kerberos.ldap.userBase" $l.userBase | quote }}
 {{- with $l.groupBase }}
-- name: NFS_GSS_LDAP_GROUP_BASE
+- name: {{ $p }}GROUP_BASE
   value: {{ . | quote }}
 {{- end }}
 {{- with $l.userFilter }}
-- name: NFS_GSS_LDAP_USER_FILTER
+- name: {{ $p }}USER_FILTER
   value: {{ . | quote }}
 {{- end }}
 {{- with $l.principalAttribute }}
-- name: NFS_GSS_LDAP_PRINCIPAL_ATTR
+- name: {{ $p }}PRINCIPAL_ATTR
   value: {{ . | quote }}
 {{- end }}
 {{- with $l.groupMembership }}
-- name: NFS_GSS_LDAP_GROUP_MEMBERSHIP
+- name: {{ $p }}GROUP_MEMBERSHIP
   value: {{ . | quote }}
 {{- end }}
 {{- with $l.bindDN }}
-- name: NFS_GSS_LDAP_BIND_DN
+- name: {{ $p }}BIND_DN
   value: {{ . | quote }}
-- name: NFS_GSS_LDAP_BIND_PASSWORD_SECRET
+{{- if $server }}
+- name: {{ $p }}BIND_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ $l.bindPasswordSecret.name | quote }}
+      key: {{ $l.bindPasswordSecret.key | default "password" | quote }}
+      optional: false
+{{- else }}
+- name: {{ $p }}BIND_PASSWORD_SECRET
   value: {{ $l.bindPasswordSecret.name | quote }}
-- name: NFS_GSS_LDAP_BIND_PASSWORD_KEY
+- name: {{ $p }}BIND_PASSWORD_KEY
   value: {{ $l.bindPasswordSecret.key | default "password" | quote }}
 {{- end }}
+{{- end }}
+{{- if $server }}
+{{- if or $l.ca.configMap $l.ca.secret }}
+- name: {{ $p }}CA_FILE
+  value: /etc/flint-ldap-ca/ca.crt
+{{- end }}
+{{- else }}
 {{- with $l.ca.configMap }}
-- name: NFS_GSS_LDAP_CA_CONFIGMAP
+- name: {{ $p }}CA_CONFIGMAP
   value: {{ . | quote }}
 {{- end }}
 {{- with $l.ca.secret }}
-- name: NFS_GSS_LDAP_CA_SECRET
+- name: {{ $p }}CA_SECRET
   value: {{ . | quote }}
 {{- end }}
 {{- if or $l.ca.configMap $l.ca.secret }}
-- name: NFS_GSS_LDAP_CA_KEY
+- name: {{ $p }}CA_KEY
   value: {{ $l.ca.key | default "ca.crt" | quote }}
 {{- end }}
-- name: NFS_GSS_LDAP_TTL
+{{- end }}
+- name: {{ $p }}TTL
   value: {{ $l.cacheTTL | toString | quote }}
-- name: NFS_GSS_LDAP_NEGATIVE_TTL
+- name: {{ $p }}NEGATIVE_TTL
   value: {{ $l.negativeCacheTTL | toString | quote }}
-- name: NFS_GSS_LDAP_TIMEOUT
+- name: {{ $p }}TIMEOUT
   value: {{ $l.timeout | toString | quote }}
-- name: NFS_GSS_LDAP_MAX_CONCURRENT
+- name: {{ $p }}MAX_CONCURRENT
   value: {{ $l.maxConcurrent | toString | quote }}
 {{- if $l.allowRoot }}
-- name: NFS_GSS_LDAP_ALLOW_ROOT
+- name: {{ $p }}ALLOW_ROOT
   value: "true"
 {{- end }}
 {{- end }}
@@ -282,12 +312,165 @@ flint-nfs-krb5-keytab
   value: {{ include "flint-csi-driver-chart.nfsKrb5ServerName" . | quote }}
 - name: FLINT_NFS_KRB5_HOSTS_FILE
   value: /host/etc/hosts
+{{- else if include "flint-csi-driver-chart.pnfsKrb5Enabled" . }}
+# pNFS Kerberos: the node maps each MDS shard's IP to its name here.
+- name: FLINT_NFS_KRB5_HOSTS_FILE
+  value: /host/etc/hosts
 {{- end }}
 {{- end }}
 
 {{- define "flint-csi-driver-chart.nfsKrb5NodeMounts" -}}
-{{- if and .Values.nfs.enabled .Values.nfs.kerberos.enabled }}
+{{- if or (and .Values.nfs.enabled .Values.nfs.kerberos.enabled) (include "flint-csi-driver-chart.pnfsKrb5Enabled" .) }}
 - name: host-etc-hosts
   mountPath: /host/etc/hosts
+{{- end }}
+{{- end }}
+
+{{/*
+pNFS Kerberos (pnfs.kerberos) is on: "true", else empty. It reuses
+nfs.kerberos's realm, allowlist, idmap, directory and node keys, whether or
+not RWX Kerberos (nfs.kerberos.enabled) is on.
+*/}}
+{{- define "flint-csi-driver-chart.pnfsKrb5Enabled" -}}
+{{- if and .Values.pnfs.enabled (.Values.pnfs.kerberos).enabled -}}true{{- end -}}
+{{- end }}
+
+{{/*
+The DNS suffix of the MDS shard Services (pnfs-mds.yaml), under which each
+shard's Kerberos name is flint-pnfs-mds-<shard>.<this>. The controller's
+PNFS_KRB5_MDS_NAME_BASE; the principals in pnfs-kerberos.yaml.
+*/}}
+{{- define "flint-csi-driver-chart.pnfsKrb5NameBase" -}}
+{{- printf "%s.svc.%s" .Release.Namespace .Values.nfs.kerberos.clusterDomain -}}
+{{- end }}
+
+{{/*
+KerberosNodeKeytab: the nodes' machine credentials for rpc.gssd. Rendered
+by nfs-kerberos.yaml when RWX Kerberos is on, else by pnfs-kerberos.yaml
+when pNFS Kerberos is on (flint-csi-driver-chart.krb5NodeKeytabByRwx says
+which), so it is never rendered twice.
+*/}}
+{{- define "flint-csi-driver-chart.krb5NodeKeytabByRwx" -}}
+{{- if and (not .Values.lite.enabled) .Values.nfs.enabled .Values.nfs.kerberos.enabled -}}true{{- end -}}
+{{- end }}
+
+{{- define "flint-csi-driver-chart.krb5NodeKeytab" -}}
+{{- $k := .Values.nfs.kerberos -}}
+# The nodes' machine credentials for rpc.gssd (host/ and nfs/<node>), in
+# their /etc/krb5.keytab, with the realm's krb5.conf.
+apiVersion: krb5.ddalton.dev/v1alpha1
+kind: KerberosNodeKeytab
+metadata:
+  name: {{ include "flint-csi-driver-chart.fullname" . | trunc 30 | trimSuffix "-" }}-nfs-clients
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+spec:
+  realmRef: {{ $k.realmRef }}
+  realmNamespace: {{ $k.realmNamespace | default .Release.Namespace }}
+  services: [host, nfs]
+  {{- with $k.nodeKeytab.nodeSelector }}
+  nodeSelector:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with $k.nodeKeytab.tolerations }}
+  tolerations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with $k.nodeKeytab.domain }}
+  domain: {{ . }}
+  {{- end }}
+  keytabPath: {{ $k.nodeKeytab.keytabPath }}
+  {{- with $k.nodeKeytab.krb5ConfPath }}
+  krb5ConfPath: {{ . }}
+  {{- end }}
+  {{- with $k.nodeKeytab.restartServices }}
+  restartServices:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  deletionPolicy: {{ $k.deletionPolicy }}
+{{- end }}
+
+{{/*
+A Kerberos NFS server pod's security env, for the server pods the chart
+makes itself (the pNFS MDS). The same settings, by the same names, as
+nfs_krb5::server_pod_parts gives the RWX servers from the controller's
+NFS_* env: tests/system/krb5-server-env-names.txt lists them, and both a
+unit test (nfs_krb5.rs) and tests/system/chart-kerberos-defaults.sh check
+it. Change all three together.
+
+Arguments: root, minSec, requireMachCred, enforcePermissions. The keytab is
+at /etc/flint-krb5/krb5.keytab (flint-csi-driver-chart.krb5ServerVolumes):
+not under /etc/flint, which is the MDS's ConfigMap, a read-only volume
+that must not hold other volumes' mount points.
+*/}}
+{{- define "flint-csi-driver-chart.krb5ServerEnv" -}}
+{{- $root := .root -}}
+{{- $k := $root.Values.nfs.kerberos -}}
+- name: KRB5_KTNAME
+  value: /etc/flint-krb5/krb5.keytab
+- name: FLINT_NFS_GSS_PRINCIPALS
+  value: {{ include "flint-csi-driver-chart.nfsKrb5Principals" $root | quote }}
+- name: FLINT_NFS_GSS_IDMAP
+  value: {{ include "flint-csi-driver-chart.nfsKrb5Idmap" $root | quote }}
+- name: FLINT_NFS_GSS_ANON
+  value: {{ $k.anonIdentity | quote }}
+{{- with .minSec }}
+- name: FLINT_NFS_MIN_SEC
+  value: {{ . | quote }}
+{{- end }}
+{{- with .enforcePermissions }}
+- name: FLINT_NFS_ENFORCE_PERMISSIONS
+  value: {{ . | quote }}
+{{- end }}
+{{- if $root.Values.nfs.rootSquash }}
+- name: FLINT_NFS_ROOT_SQUASH
+  value: "true"
+{{- end }}
+{{- if .requireMachCred }}
+- name: FLINT_NFS_REQUIRE_MACH_CRED
+  value: "true"
+{{- end }}
+{{- with include "flint-csi-driver-chart.krb5LdapEnv" (dict "root" $root "server" true) }}
+{{ . | trim }}
+{{- end }}
+{{- end }}
+
+{{/*
+The volumes a Kerberos server pod needs (arguments: root, keytabSecret):
+its keytab, and the directory's CA bundle when there is one. Mounted by
+flint-csi-driver-chart.krb5ServerMounts.
+*/}}
+{{- define "flint-csi-driver-chart.krb5ServerVolumes" -}}
+{{- $l := .root.Values.nfs.kerberos.ldap -}}
+- name: krb5-keytab
+  secret:
+    secretName: {{ .keytabSecret }}
+    # The server may run as non-root; the Secret's files are root's.
+    defaultMode: 0444
+{{- if and $l.enabled (or $l.ca.configMap $l.ca.secret) }}
+- name: ldap-ca
+  {{- if $l.ca.configMap }}
+  configMap:
+    name: {{ $l.ca.configMap }}
+  {{- else }}
+  secret:
+    secretName: {{ $l.ca.secret }}
+  {{- end }}
+    items:
+    - key: {{ $l.ca.key | default "ca.crt" }}
+      path: ca.crt
+    defaultMode: 0444
+{{- end }}
+{{- end }}
+
+{{- define "flint-csi-driver-chart.krb5ServerMounts" -}}
+{{- $l := .root.Values.nfs.kerberos.ldap -}}
+- name: krb5-keytab
+  mountPath: /etc/flint-krb5
+  readOnly: true
+{{- if and $l.enabled (or $l.ca.configMap $l.ca.secret) }}
+- name: ldap-ca
+  mountPath: /etc/flint-ldap-ca
+  readOnly: true
 {{- end }}
 {{- end }}

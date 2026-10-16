@@ -169,6 +169,20 @@ async fn async_main(worker_threads: usize) -> Result<(), Box<dyn std::error::Err
         return Err(e.into());
     }
 
+    // Validate the security env BEFORE anything listens, as the RWX
+    // server does (`NfsServer::new`): a typo in FLINT_NFS_MIN_SEC,
+    // FLINT_NFS_REQUIRE_MACH_CRED or FLINT_PNFS_LAYOUTS_FOR_GSS must not
+    // resolve to "off". An operator who set a floor asked for it, and
+    // starting anyway would serve every sec=sys client while they
+    // believed otherwise. Exits non-zero.
+    let sec_env = match spdk_csi_driver::pnfs::mds::krb5::MdsSecEnv::from_env() {
+        Ok(e) => e,
+        Err(e) => {
+            error!("❌ Security settings refused: {}", e);
+            return Err(e.into());
+        }
+    };
+
     let mut mds_config = config
         .mds
         .ok_or("standalone/mds mode requires an 'mds' section (bind, state, exports)")?;
@@ -195,6 +209,7 @@ async fn async_main(worker_threads: usize) -> Result<(), Box<dyn std::error::Err
     for export in &exports {
         info!("     - {} (fsid={})", export.path, export.fsid);
     }
+    info!("   • Security: {}", sec_env.describe());
     info!("   • State Backend: {:?}", mds_config.state.backend);
     if mds_config.ha.enabled {
         info!("   • HA Enabled: {} replicas", mds_config.ha.replicas);

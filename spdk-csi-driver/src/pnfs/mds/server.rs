@@ -386,6 +386,11 @@ impl MetadataServer {
             .transpose()
             .map_err(crate::pnfs::Error::Config)?
             .unwrap_or_default();
+        // The security env (`pnfs::mds::krb5`): FLINT_NFS_REQUIRE_MACH_CRED,
+        // as the RWX server, and whether Kerberos callers get layouts. A
+        // typo refuses startup rather than serving without the refusal.
+        let sec_env = crate::pnfs::mds::krb5::MdsSecEnv::from_env()
+            .map_err(crate::pnfs::Error::Config)?;
         let base_dispatcher = Arc::new(
             CompoundDispatcher::new_with_pnfs(
                 Arc::clone(&fh_manager),
@@ -394,8 +399,24 @@ impl MetadataServer {
                 pnfs_ops,
             )
             .with_read_only(read_only)
-            .with_export_access(access),
+            .with_export_access(access)
+            .with_require_mach_cred(sec_env.require_mach_cred)
+            .with_gss_layouts_withheld(sec_env.withhold_gss_layouts),
         );
+        if sec_env.require_mach_cred {
+            info!(
+                "🔒 SP4_MACH_CRED required: an EXCHANGE_ID that does not ask for it \
+                 (SP4_NONE) gets NFS4ERR_ACCESS, so every session is bound to its machine"
+            );
+        }
+        if sec_env.withhold_gss_layouts && !standalone {
+            info!(
+                "🔒 layouts withheld from Kerberos (RPCSEC_GSS) callers: their LAYOUTGET \
+                 answers LAYOUTUNAVAIL and all their I/O goes through the MDS (the data \
+                 servers do no Kerberos; set {}=true once they do)",
+                crate::pnfs::mds::krb5::LAYOUTS_FOR_GSS_ENV
+            );
+        }
         if read_only {
             info!(
                 "🔒 export is READ-ONLY (`ro` in export options): every mutating \

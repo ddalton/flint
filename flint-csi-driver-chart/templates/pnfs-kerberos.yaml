@@ -1,0 +1,96 @@
+{{- /*
+Kerberos for pNFS volumes (pnfs.kerberos; docs/nfs-kerberos.md, "pNFS").
+Phase 1 of docs/plans/pnfs-kerberos-plan.md: the MDS does Kerberos.
+
+- One KerberosPrincipal per MDS shard, named after the shard's per-shard
+  Service (pnfs-mds.yaml): nfs/flint-pnfs-mds-<i>.<namespace>.svc.<domain>.
+  ControllerPublish passes that name to the node (PNFS_KRB5_MDS_NAME_BASE),
+  which maps the PV's MDS IP to it in /etc/hosts, so rpc.gssd asks for this
+  principal. Shard 0 has the same name whichever of its two Services (the
+  per-shard flint-pnfs-mds-0 or the legacy alias flint-pnfs-mds) a PV's IP
+  is. Each shard's keytab is a Secret of its own, which only that shard's
+  pod mounts.
+- The nodes' keys (KerberosNodeKeytab), unless nfs-kerberos.yaml renders
+  them already (RWX Kerberos on): one object, never two.
+- A StorageClass like pnfs-storageclass.yaml's, mounting with sec=<sec>.
+
+The realm, allowlist, idmap, directory and node keys are nfs.kerberos's.
+*/}}
+{{- if include "flint-csi-driver-chart.pnfsKrb5Enabled" . }}
+{{- $k := .Values.nfs.kerberos }}
+{{- $pk := .Values.pnfs.kerberos }}
+{{- if not .Values.pnfs.server.enabled }}
+{{- fail "pnfs.kerberos.enabled needs the in-chart MDS (pnfs.server.enabled): the principals are named after its shard Services" }}
+{{- end }}
+{{- $realmRef := required "pnfs.kerberos needs nfs.kerberos.realmRef: the KerberosRealm (krb5-operator)" $k.realmRef }}
+{{- $realm := required "pnfs.kerberos needs nfs.kerberos.realm: the realm (EXAMPLE.COM)" $k.realm }}
+{{- $realmNs := $k.realmNamespace | default .Release.Namespace }}
+{{- if not (has $pk.storageClass.sec (list "krb5" "krb5i" "krb5p")) }}
+{{- fail "pnfs.kerberos.storageClass.sec: krb5, krb5i or krb5p" }}
+{{- end }}
+{{- if and $pk.requireMachCred (not $pk.minSec) }}
+{{- fail "pnfs.kerberos.minSec is empty but requireMachCred is on: a sec=sys mount cannot ask for SP4_MACH_CRED, so every one would be refused. Keep minSec (krb5i), or set pnfs.kerberos.requireMachCred=false as well" }}
+{{- end }}
+{{- $count := int (.Values.pnfs.server.mds.count | default 1) }}
+{{- range $i := until $count }}
+---
+# MDS shard {{ $i }}'s principal; its pod mounts the keytab Secret.
+apiVersion: krb5.ddalton.dev/v1alpha1
+kind: KerberosPrincipal
+metadata:
+  name: flint-pnfs-mds-{{ $i }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: pnfs-mds
+    chert.us/mds-shard: {{ $i | quote }}
+spec:
+  realmRef: {{ $realmRef }}
+  realmNamespace: {{ $realmNs }}
+  principals:
+  - nfs/flint-pnfs-mds-{{ $i }}.{{ include "flint-csi-driver-chart.pnfsKrb5NameBase" $ }}@{{ $realm }}
+  secretName: flint-pnfs-mds-{{ $i }}-krb5
+  deletionPolicy: {{ $k.deletionPolicy }}
+{{- end }}
+{{- if and $k.nodeKeytab.create (not (include "flint-csi-driver-chart.krb5NodeKeytabByRwx" .)) }}
+---
+{{ include "flint-csi-driver-chart.krb5NodeKeytab" . }}
+{{- end }}
+{{- if $pk.storageClass.create }}
+---
+# pNFS volumes mounted with Kerberos: the flint-pnfs class's parameters,
+# and sec={{ $pk.storageClass.sec }}.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ $pk.storageClass.name }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pnfs
+provisioner: {{ .Values.driver.name }}
+reclaimPolicy: {{ .Values.pnfs.storageClass.reclaimPolicy }}
+volumeBindingMode: {{ .Values.pnfs.storageClass.volumeBindingMode }}
+allowVolumeExpansion: true
+parameters:
+  layout: pnfs
+  {{- with .Values.pnfs.storageClass.stripeSize }}
+  pnfs.chert.us/stripeSize: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.pnfs.storageClass.stripeWidth }}
+  pnfs.chert.us/stripeWidth: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.pnfs.storageClass.dirGid }}
+  pnfs.chert.us/dirGid: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.pnfs.storageClass.dirMode }}
+  pnfs.chert.us/dirMode: {{ . | quote }}
+  {{- end }}
+mountOptions:
+- sec={{ $pk.storageClass.sec }}
+{{- range (.Values.pnfs.storageClass.mountOptions | default list) }}
+{{- if not (hasPrefix "sec=" (toString .)) }}
+- {{ . }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
