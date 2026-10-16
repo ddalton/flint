@@ -4276,8 +4276,9 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         // findmnt-on-staging-path check misclassified every shared-volume
         // consumer (the staging dir reports the parent filesystem, never
         // nfs), and gates passed only while the teardown race was won.
-        // findmnt survives solely as the fallback when the PV is
-        // unreadable. The synthetic backing volume (`nfs-server-…` handle)
+        // findmnt survives solely as the fallback when the PV no longer
+        // exists (deleted mid-teardown); a PV the API cannot read makes
+        // the unstage retry. The synthetic backing volume (`nfs-server-…` handle)
         // is exempt: it IS the block consumer. Resolution goes through the
         // ONE cached role resolver (identity Phase 1; modes are immutable
         // and ids never reused, so the cache cannot go stale).
@@ -4298,12 +4299,23 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         {
             false
         } else {
-            match self.driver.role_resolver.resolve(&actual_volume_id).await {
-                Ok(role) => matches!(role, spdk_csi_driver::identity::Role::NfsShared { .. }),
+            match self.driver.role_resolver.resolve_present(&actual_volume_id).await {
+                Ok(Some(role)) => matches!(role, spdk_csi_driver::identity::Role::NfsShared { .. }),
+                // Unreadable is not absent. The sniff below misreads every
+                // shared consumer as block (its staging path never holds
+                // the NFS mount), and the block path's SPDK teardown then
+                // detaches the live raid legs and deletes the NFS server's
+                // backing export (see above). A transient API error must
+                // not decide that: retryable, kubelet re-drives.
                 Err(e) => {
+                    return Err(tonic::Status::unavailable(format!(
+                        "classifying {actual_volume_id} for unstage: reading its PV's access modes: {e}"
+                    )));
+                }
+                Ok(None) => {
                     println!(
-                        "⚠️ [NODE] Cannot read PV {} access modes ({}) — falling back to mount-state sniffing",
-                        actual_volume_id, e
+                        "⚠️ [NODE] PV {} is gone — falling back to mount-state sniffing",
+                        actual_volume_id
                     );
                     std::process::Command::new("sh")
                         .arg("-c")

@@ -335,8 +335,14 @@ covered by the stability guarantee.
   already did), and the PV reads strip the pin. And a PV the API cannot
   read is no longer taken for "not pNFS" (which sent the volume to the
   SPDK teardown): NodeUnstage answers UNAVAILABLE and kubelet retries; only
-  a PV that does not exist reads as not pNFS. Found by the pNFS Kerberos
-  Phase 2 kind step, whose revocation rides on the detach.
+  a PV that does not exist reads as not pNFS. The same holds for the
+  access-mode lookup before it: when the API could not read the PV (not
+  when the PV is gone), NodeUnstage fell back to sniffing the staging path,
+  which reads every shared RWX/ROX consumer as block, and the block path's
+  SPDK teardown is the one that detached live raid legs and deleted the
+  NFS server's backing export (2026-06-12, 2026-07-03). It now retries
+  instead; a deleted PV still takes the fallback. Found by the pNFS
+  Kerberos Phase 2 kind step, whose revocation rides on the detach.
 - **A created file's owner, as the client first sees it** (2026-10-15).
   OPEN(create) and CREATE stamp the caller's uid and gid with a chown, but
   did not bump the change counter, which is what invalidates the stat

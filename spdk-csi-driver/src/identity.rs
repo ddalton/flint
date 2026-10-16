@@ -718,12 +718,24 @@ impl RoleResolver {
     /// `Err(reason)` when the PV is unreadable — caller applies its
     /// per-RPC default; the miss is NOT cached.
     pub async fn resolve(&self, storage_id: &str) -> Result<Role, String> {
+        self.resolve_present(storage_id)
+            .await?
+            .ok_or_else(|| format!("PersistentVolume {storage_id} not found"))
+    }
+
+    /// [`resolve`](Self::resolve), telling an absent PV (`Ok(None)`, a
+    /// 404) from one the API could not read (`Err`: unreachable, 5xx,
+    /// forbidden, timeout). A caller with a fallback for a deleted PV must
+    /// not take it for an unreadable one.
+    pub async fn resolve_present(&self, storage_id: &str) -> Result<Option<Role>, String> {
         if let Some(role) = self.cache.get(storage_id) {
-            return Ok(role);
+            return Ok(Some(role));
         }
         use k8s_openapi::api::core::v1::PersistentVolume;
         let pvs: kube::Api<PersistentVolume> = kube::Api::all(self.kube_client.clone());
-        let pv = pvs.get(storage_id).await.map_err(|e| e.to_string())?;
+        let Some(pv) = pvs.get_opt(storage_id).await.map_err(|e| e.to_string())? else {
+            return Ok(None);
+        };
         let modes = pv
             .spec
             .as_ref()
@@ -731,7 +743,7 @@ impl RoleResolver {
             .unwrap_or_default();
         let role = Self::role_from_modes(&modes);
         self.cache.put(storage_id, role);
-        Ok(role)
+        Ok(Some(role))
     }
 
     /// Resolve a full volumeHandle to a [`VolumeRef`]. Backing handles
@@ -1711,4 +1723,66 @@ mod tests {
         assert_eq!(parts[2].chars().next().unwrap(), '4', "version nibble: {id}");
         assert!(matches!(parts[3].chars().next().unwrap(), '8' | '9' | 'a' | 'b'), "variant: {id}");
     }
+
+    /// A stand-in API server: every request gets `status` with a
+    /// Kubernetes `Status` body (`reason`), until the test ends.
+    async fn fake_apiserver(status: u16, reason: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { return };
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let mut got = Vec::new();
+                    while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match sock.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => got.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let body = format!(
+                        r#"{{"kind":"Status","apiVersion":"v1","metadata":{{}},"status":"Failure","message":"{reason}","reason":"{reason}","code":{status}}}"#
+                    );
+                    let resp = format!(
+                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn resolver_at(url: &str) -> RoleResolver {
+        crate::install_crypto_provider();
+        let config = kube::Config::new(url.parse().unwrap());
+        RoleResolver::new(kube::Client::try_from(config).unwrap())
+    }
+
+    #[tokio::test]
+    async fn an_absent_pv_is_none_and_an_unreadable_one_is_an_error() {
+        // 404: the PV is gone (NodeUnstage's mount-state fallback).
+        let r = resolver_at(&fake_apiserver(404, "NotFound").await);
+        assert_eq!(r.resolve_present("pvc-gone").await, Ok(None));
+        assert!(r.resolve("pvc-gone").await.is_err(), "resolve keeps its contract");
+        // 500 and 403: the API could not say. Never None.
+        let r = resolver_at(&fake_apiserver(500, "InternalError").await);
+        assert!(r.resolve_present("pvc-x").await.is_err());
+        let r = resolver_at(&fake_apiserver(403, "Forbidden").await);
+        assert!(r.resolve_present("pvc-x").await.is_err());
+        // Nothing listening.
+        let dead = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", l.local_addr().unwrap())
+        };
+        assert!(resolver_at(&dead).resolve_present("pvc-x").await.is_err());
+        // A cached role never asks.
+        let r = resolver_at(&dead);
+        r.cache.put("pvc-c", Role::NfsShared { read_only: false });
+        assert_eq!(r.resolve_present("pvc-c").await, Ok(Some(Role::NfsShared { read_only: false })));
+    }
 }
+
