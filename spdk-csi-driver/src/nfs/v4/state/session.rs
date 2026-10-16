@@ -17,7 +17,7 @@ use super::super::protocol::SessionId;
 use crate::state_backend::{SessionRecord, StateBackend, WriteOp};
 use dashmap::DashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+
 use tracing::{debug, info, warn};
 
 /// Maximum slots per session (conservative default)
@@ -311,9 +311,6 @@ impl Session {
 /// - Lock-free SEQUENCE operations (exactly-once semantics)
 /// - Per-session granularity for high concurrency
 pub struct SessionManager {
-    /// Counter for generating session IDs (lock-free atomic)
-    next_session_id: AtomicU64,
-
     /// Active sessions (session_id → session)
     /// DashMap enables lock-free concurrent access
     sessions: DashMap<SessionId, Session>,
@@ -334,7 +331,6 @@ impl SessionManager {
         info!("SessionManager created");
 
         Self {
-            next_session_id: AtomicU64::new(1),
             sessions: DashMap::new(),
             client_sessions: DashMap::new(),
             backend,
@@ -357,26 +353,13 @@ impl SessionManager {
     /// returns the same `client_id` — case 1 of §18.35.5) followed
     /// by a fresh `CREATE_SESSION`. That gives us a new in-memory
     /// session with empty slots that's consistent with the client's
-    /// fresh slot state. The persisted session record is kept on
-    /// disk for forensics + counter bumping but never repopulates
-    /// the live map.
-    ///
-    /// We still bump `next_session_id` past the highest persisted id
-    /// so a re-CREATE_SESSION never collides with a session id from
-    /// a previous run.
+    /// fresh slot state. The persisted records never repopulate the
+    /// live map; they are dropped. New session ids are random, so none
+    /// collides with one from a previous run.
     pub fn load_records(&self, records: Vec<SessionRecord>) {
-        let mut max_id: u64 = 0;
         let count = records.len();
-        for r in &records {
-            let mut num_buf = [0u8; 8];
-            num_buf.copy_from_slice(&r.session_id[0..8]);
-            max_id = max_id.max(u64::from_be_bytes(num_buf));
-        }
-        if max_id >= self.next_session_id.load(Ordering::SeqCst) {
-            self.next_session_id.store(max_id + 1, Ordering::SeqCst);
-        }
-        // Drop the records from the backend too — once we know the
-        // counter is bumped past their ids, the persisted rows are
+        // Drop the records from the backend too: new session ids are
+        // random (and checked against the live map), so the persisted rows are
         // dead weight on the durable file and could only confuse a
         // future operator. Fire-and-forget delete; same rationale as
         // every other persist call.
@@ -384,8 +367,8 @@ impl SessionManager {
             self.backend.enqueue_write(WriteOp::DeleteSession(r.session_id));
         }
         info!(
-            "SessionManager observed {} persisted sessions; bumped counter past max_id={}, dropped them so kernel re-CREATE_SESSIONs naturally on BADSESSION",
-            count, max_id
+            "SessionManager observed {} persisted sessions; dropped them so kernel re-CREATE_SESSIONs naturally on BADSESSION",
+            count
         );
     }
 
@@ -414,12 +397,19 @@ impl SessionManager {
         cb_cred: Option<crate::nfs::v4::compound::CallbackSecParms>,
         minorversion: u32,
     ) -> Session {
-        // Generate session ID (lock-free atomic increment)
-        let session_id_num = self.next_session_id.fetch_add(1, Ordering::SeqCst);
-        let mut session_id_bytes = [0u8; 16];
-        session_id_bytes[0..8].copy_from_slice(&session_id_num.to_be_bytes());
-        session_id_bytes[8..16].copy_from_slice(&client_id.to_be_bytes());
-        let session_id = SessionId(session_id_bytes);
+        // 64 random bits, then the clientid (itself random). A session id
+        // is all SEQUENCE checks, so it must not be guessable: it used to
+        // be a counter, 1, 2, 3..., beside a counter clientid, and any
+        // peer could drive another client's session by naming it.
+        let session_id = loop {
+            let mut b = [0u8; 16];
+            b[0..8].copy_from_slice(&rand::random::<u64>().to_be_bytes());
+            b[8..16].copy_from_slice(&client_id.to_be_bytes());
+            let id = SessionId(b);
+            if !self.sessions.contains_key(&id) {
+                break id;
+            }
+        };
 
         let session = Session::new(
             session_id,
@@ -599,6 +589,24 @@ impl SessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A session id is all SEQUENCE checks: it must not be guessable from
+    /// the ones before it (it was a counter, 1, 2, 3...).
+    #[test]
+    fn session_ids_are_not_guessable() {
+        let mgr = SessionManager::new(crate::state_backend::memory_backend());
+        let ids: Vec<[u8; 16]> =
+            (0..64).map(|_| mgr.create_session(7, 0, 0, 1024, 1024, 1024, 16, 8, 0, None, 1).session_id.0).collect();
+        let prefixes: std::collections::HashSet<u64> =
+            ids.iter().map(|b| u64::from_be_bytes(b[0..8].try_into().unwrap())).collect();
+        assert_eq!(prefixes.len(), 64, "all distinct");
+        assert!(prefixes.iter().all(|p| *p > 64), "not a counter from 1");
+        let mut sorted: Vec<u64> = prefixes.into_iter().collect();
+        sorted.sort();
+        assert!(sorted.windows(2).all(|w| w[1] - w[0] > 1), "not consecutive");
+        // The clientid stays in the second half (the proxy's tests read it).
+        assert!(ids.iter().all(|b| u64::from_be_bytes(b[8..16].try_into().unwrap()) == 7));
+    }
 
     #[test]
     fn test_session_creation() {

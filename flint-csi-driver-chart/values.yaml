@@ -359,6 +359,13 @@ nfs:
   # authenticated.
   enforcePermissions: ""
 
+  # knfsd's root_squash (FLINT_NFS_ROOT_SQUASH): uid 0 from any client, by
+  # AUTH_SYS or a Kerberos machine principal, is the anonymous identity
+  # (nfs.kerberos.anonIdentity, default nobody). Root containers and the
+  # kubelet then cannot chown, or read files only root may read, on RWX
+  # volumes. Off by default: the server has always honoured root.
+  rootSquash: false
+
   # Kerberos for RWX volumes (sec=krb5, krb5i, krb5p), with principals and
   # keytabs from krb5-operator (github.com/ddalton/krb5-operator, 0.3+),
   # which must be installed, with a KerberosRealm.

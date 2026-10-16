@@ -878,12 +878,18 @@ async fn handle_compound(
     // A Kerberos caller is its principal's identity under
     // FLINT_NFS_GSS_IDMAP (nobody when no rule names it), so it is
     // permission-checked and owns what it creates.
-    let (unix_cred, unix_gids) = crate::nfs::gss_idmap::compound_identity(
+    let identity = crate::nfs::gss_idmap::compound_identity(
         gss.and_then(|v| v.client_principal.as_deref()),
         call.cred.unix_uid_gid(),
         call.cred.unix_gids(),
         crate::nfs::gss_idmap::GssIdmap::global(),
     );
+    // root_squash (FLINT_NFS_ROOT_SQUASH): uid 0, from any client and any
+    // flavor, is the anonymous identity.
+    let (unix_cred, unix_gids) = match crate::nfs::gss_idmap::root_squash() {
+        Some(anon) => crate::nfs::gss_idmap::squash_root(identity, anon),
+        None => identity,
+    };
 
     // Dispatch to COMPOUND handler
     let compound_resp = dispatcher

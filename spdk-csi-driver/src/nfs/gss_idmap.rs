@@ -26,6 +26,8 @@ use super::gss_principals::Pattern;
 
 pub const ENV: &str = "FLINT_NFS_GSS_IDMAP";
 pub const ANON_ENV: &str = "FLINT_NFS_GSS_ANON";
+/// knfsd's `root_squash`, for every caller (AUTH_SYS and Kerberos).
+pub const ROOT_SQUASH_ENV: &str = "FLINT_NFS_ROOT_SQUASH";
 /// nobody/nogroup.
 pub const NOBODY: Identity = Identity {
     uid: 65534,
@@ -165,6 +167,42 @@ pub fn compound_identity(
     }
 }
 
+/// knfsd's `root_squash`: uid 0 becomes `anon` (gid and groups too), and
+/// gid 0 is replaced, and dropped from the groups, for everyone else. A
+/// root on any client is then an ordinary, unprivileged caller.
+pub fn squash_root(id: (Option<(u32, u32)>, Vec<u32>), anon: &Identity) -> (Option<(u32, u32)>, Vec<u32>) {
+    match id {
+        (Some((0, _)), _) => (Some((anon.uid, anon.gid)), anon.gids.clone()),
+        (Some((uid, gid)), gids) => (
+            Some((uid, if gid == 0 { anon.gid } else { gid })),
+            gids.into_iter().filter(|g| *g != 0).collect(),
+        ),
+        none => none,
+    }
+}
+
+/// Who root becomes when [`ROOT_SQUASH_ENV`] is on (the anonymous
+/// identity, [`ANON_ENV`]); `None` when it is off. Read once.
+pub fn root_squash() -> Option<&'static Identity> {
+    static SQUASH: std::sync::OnceLock<Option<Identity>> = std::sync::OnceLock::new();
+    SQUASH
+        .get_or_init(|| {
+            let on = std::env::var(ROOT_SQUASH_ENV)
+                .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+                .unwrap_or(false);
+            if !on {
+                return None;
+            }
+            let anon = std::env::var(ANON_ENV)
+                .ok()
+                .and_then(|a| Identity::parse(&a).ok())
+                .unwrap_or(NOBODY);
+            tracing::info!("🔐 root_squash: uid 0 is {}:{}", anon.uid, anon.gid);
+            Some(anon)
+        })
+        .as_ref()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +308,16 @@ mod tests {
             compound_identity(Some("alice@FLINT.TEST"), None, vec![], None),
             (None, vec![])
         );
+    }
+
+    #[test]
+    fn root_squash_makes_root_anonymous_and_strips_gid_0() {
+        let anon = NOBODY;
+        assert_eq!(squash_root((Some((0, 0)), vec![0, 10]), &anon), (Some((65534, 65534)), vec![]));
+        assert_eq!(squash_root((Some((0, 5)), vec![]), &anon), (Some((65534, 65534)), vec![]));
+        assert_eq!(squash_root((Some((7, 0)), vec![0, 10]), &anon), (Some((7, 65534)), vec![10]));
+        assert_eq!(squash_root((Some((7, 8)), vec![9]), &anon), (Some((7, 8)), vec![9]), "others untouched");
+        assert_eq!(squash_root((None, vec![]), &anon), (None, vec![]), "no uid stays no uid");
     }
 
     #[test]

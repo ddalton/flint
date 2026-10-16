@@ -108,10 +108,14 @@ nfs:
   It is the client's report, not the server's: without a ticket, no
   request reaches the server at all.
 
+- **Root:** with `nfs.rootSquash: true`, root on a client (the machine
+  principal, or an AUTH_SYS uid 0) is the anonymous identity, as knfsd's
+  `root_squash`. Root containers and the kubelet then cannot chown, or
+  read what only root may read, on RWX volumes.
+
 Not done yet:
 - reading identities from a directory (LDAP or SSSD, as idmapd does) in
   place of the explicit list;
-- root squashing;
 - restricting a volume to the nodes Kubernetes published it to.
 
 ## Why the hosts entry
