@@ -1259,6 +1259,7 @@ mod tests {
                     cs_cached_res: None,
                     initial_cs_sequence: 1,
                     reclaim_complete: false,
+                    mach_cred: false,
                 };
                 b.put_client(&c).await.unwrap();
             }));

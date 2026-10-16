@@ -426,6 +426,14 @@ pub struct ClientRecord {
     /// cleanly.
     #[serde(default)]
     pub reclaim_complete: bool,
+    /// The client is under SP4_MACH_CRED state protection (RFC 8881
+    /// §18.35): its session-management ops need the machine credential
+    /// that made it, and its sessions are bound to their connections.
+    /// Persisted, or a restart would quietly drop the protection while
+    /// the client keeps its clientid and sessions. Default `false`, as
+    /// the SQLite column's.
+    #[serde(default)]
+    pub mach_cred: bool,
 }
 
 /// One NFSv4.1 session. Slot replay state is deliberately not
@@ -1599,6 +1607,7 @@ mod tests {
             cs_cached_res: Some(cs.clone()),
             initial_cs_sequence: 1,
             reclaim_complete: false,
+            mach_cred: true,
         };
         b.put_client(&client).await.unwrap();
         assert_eq!(b.get_client(42).await.unwrap(), Some(client.clone()));
@@ -1775,6 +1784,7 @@ mod tests {
             cs_cached_res: None,
             initial_cs_sequence: 1,
             reclaim_complete: false,
+            mach_cred: false,
         };
         b.put_client(&c).await.unwrap();
         c.confirmed = true;

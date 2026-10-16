@@ -272,6 +272,22 @@ impl CompoundDispatcher {
             .unwrap_or(false)
     }
 
+    /// SP4_MACH_CRED (RFC 8881 §18.35): `client_id`'s must_enforce ops
+    /// (BIND_CONN_TO_SESSION, CREATE_SESSION, DESTROY_SESSION,
+    /// DESTROY_CLIENTID) need the principal that made it. `true` when this
+    /// call's principal may not send them: NFS4ERR_WRONG_CRED.
+    fn wrong_mach_cred(&self, client_id: u64, ctx: &CompoundContext) -> bool {
+        self.state_mgr
+            .clients
+            .mach_cred_principal(client_id)
+            .is_some_and(|p| p != ctx.principal)
+    }
+
+    /// The client a session belongs to.
+    fn session_client(&self, sid: &crate::nfs::v4::protocol::SessionId) -> Option<u64> {
+        self.state_mgr.sessions.session_limits(sid).map(|s| s.client_id)
+    }
+
     /// Read-only handle to the back-channel registry. Callers (the
     /// pNFS `CallbackManager`, future delegation recall paths) look
     /// up `Arc<BackChannelWriter>` by session id and emit callback
@@ -391,8 +407,9 @@ impl CompoundDispatcher {
         back_channel: Option<Arc<crate::nfs::v4::back_channel::BackChannelWriter>>,
         may_splice: bool,
         peer: crate::nfs::export_access::PeerPolicy,
+        gss_protected: bool,
     ) -> CompoundResponse {
-        self.dispatch_compound_inner(request, principal, unix_cred, unix_gids, back_channel, may_splice, peer)
+        self.dispatch_compound_inner(request, principal, unix_cred, unix_gids, back_channel, may_splice, peer, gss_protected)
             .await
     }
 
@@ -410,7 +427,7 @@ impl CompoundDispatcher {
         // `may_splice: false` — see `CompoundContext::can_splice`. Only
         // the plain-TCP reply path may splice; every other entry, this
         // one included, is safe by default rather than by a guard.
-        self.dispatch_compound_inner(request, principal, None, Vec::new(), back_channel, false, Default::default())
+        self.dispatch_compound_inner(request, principal, None, Vec::new(), back_channel, false, Default::default(), false)
             .await
     }
 
@@ -484,6 +501,7 @@ impl CompoundDispatcher {
         back_channel: Option<Arc<crate::nfs::v4::back_channel::BackChannelWriter>>,
         may_splice: bool,
         peer: crate::nfs::export_access::PeerPolicy,
+        gss_protected: bool,
     ) -> CompoundResponse {
         debug!("COMPOUND: tag={}, operations={}", request.tag, request.operations.len());
 
@@ -652,6 +670,7 @@ impl CompoundDispatcher {
         // What this connection's peer may do to the export (decided once
         // per connection; see `peer_policy`).
         context.peer = peer;
+        context.gss_protected = gss_protected;
 
         // Process operations sequentially
         let mut results = Vec::new();
@@ -1030,7 +1049,7 @@ impl CompoundDispatcher {
 
         match operation {
             // Session operations (NFSv4.1)
-            Operation::ExchangeId { clientowner, flags, state_protect, impl_id } => {
+            Operation::ExchangeId { clientowner, flags, state_protect, sp4_must_allow, impl_id } => {
                 // Parse impl_id into ClientImplId struct
                 // impl_id is optional client implementation details (domain, name, date)
                 // For now, we leave it as None since it's purely informational
@@ -1049,6 +1068,7 @@ impl CompoundDispatcher {
                     verifier: clientowner.verifier,
                     flags,
                     state_protect,
+                    sp4_must_allow,
                     client_impl_id,
                 };
                 let res = self.session_handler.handle_exchange_id(op, context);
@@ -1071,6 +1091,7 @@ impl CompoundDispatcher {
                         clientid: res.clientid,
                         sequenceid: res.sequenceid,
                         flags,
+                        mach_cred: res.mach_cred,
                         server_owner: res.server_owner,
                         server_scope: res.server_scope,
                     }))
@@ -1080,6 +1101,10 @@ impl CompoundDispatcher {
             }
 
             Operation::CreateSession { clientid, sequence, flags, fore_chan_attrs, back_chan_attrs, cb_program, cb_sec } => {
+                if self.wrong_mach_cred(clientid, context) {
+                    warn!("CREATE_SESSION: client {clientid} is SP4_MACH_CRED and this is not its principal → WRONG_CRED");
+                    return OperationResult::CreateSession(Nfs4Status::WrongCred, None);
+                }
                 let op = CreateSessionOp {
                     clientid,
                     sequence,
@@ -1148,6 +1173,25 @@ impl CompoundDispatcher {
             }
 
             Operation::Sequence { sessionid, sequenceid, slotid, highest_slotid, cachethis } => {
+                // Session binding. An SP4_MACH_CRED client's sessions are
+                // used only on connections bound to them (by
+                // CREATE_SESSION, or by BIND_CONN_TO_SESSION, which needs
+                // its machine credential), as knfsd: a session id seen on
+                // the wire is no use from another connection. The client
+                // answers by binding the connection. Checked before the
+                // slot, so a refused call changes nothing.
+                if let Some(cid) = self.session_client(&sessionid) {
+                    if self.state_mgr.clients.mach_cred_principal(cid).is_some()
+                        && !self.conn_bound_to_session(&sessionid, context)
+                    {
+                        warn!(
+                            "SEQUENCE: session {:?} is SP4_MACH_CRED and not bound to this \
+                             connection → CONN_NOT_BOUND_TO_SESSION",
+                            sessionid,
+                        );
+                        return OperationResult::Sequence(Nfs4Status::ConnNotBoundToSession, None);
+                    }
+                }
                 let op = SequenceOp {
                     sessionid,
                     sequenceid,
@@ -1208,6 +1252,10 @@ impl CompoundDispatcher {
             }
 
             Operation::DestroySession(sessionid) => {
+                if self.session_client(&sessionid).is_some_and(|c| self.wrong_mach_cred(c, context)) {
+                    warn!("DESTROY_SESSION: SP4_MACH_CRED session, not its principal → WRONG_CRED");
+                    return OperationResult::DestroySession(Nfs4Status::WrongCred);
+                }
                 // RFC 8881 §18.37.3: DESTROY_SESSION must arrive on a
                 // connection bound to the session (pynfs DSESS9001). Only
                 // gate sessions that exist — unknown ids stay BADSESSION.
@@ -1232,6 +1280,15 @@ impl CompoundDispatcher {
 
             Operation::BindConnToSession { sessionid, dir, use_conn_in_rdma_mode } => {
                 info!("BIND_CONN_TO_SESSION: sessionid={:?}, dir={}", sessionid, dir);
+                if self.session_client(&sessionid).is_some_and(|c| self.wrong_mach_cred(c, context)) {
+                    warn!("BIND_CONN_TO_SESSION: SP4_MACH_CRED session, not its principal → WRONG_CRED");
+                    return OperationResult::BindConnToSession(
+                        Nfs4Status::WrongCred,
+                        None,
+                        dir,
+                        use_conn_in_rdma_mode,
+                    );
+                }
                 if self.state_mgr.sessions.has_session(&sessionid) {
                     info!("BIND_CONN_TO_SESSION: Session found, binding connection");
                     self.bind_conn_to_session(sessionid, context);
@@ -1287,6 +1344,10 @@ impl CompoundDispatcher {
                 if self.state_mgr.clients.get_client(clientid).is_none() {
                     warn!("DESTROY_CLIENTID: unknown clientid {}", clientid);
                     return OperationResult::DestroyClientId(Nfs4Status::StaleClientId);
+                }
+                if self.wrong_mach_cred(clientid, context) {
+                    warn!("DESTROY_CLIENTID: client {clientid} is SP4_MACH_CRED, not its principal → WRONG_CRED");
+                    return OperationResult::DestroyClientId(Nfs4Status::WrongCred);
                 }
                 // §18.50.3 says "any state", not "any session". The gate
                 // checked sessions alone, and `remove_client` reaches only
@@ -5299,7 +5360,7 @@ mod tests {
         let eid = || one(Operation::ExchangeId {
             clientowner: ClientId { verifier: 7, id: b"lapsed-client".to_vec() },
             flags: 0,
-            state_protect: 0,
+            state_protect: 0, sp4_must_allow: Vec::new(),
             impl_id: vec![],
         });
         let cs = |clientid: u64, sequence: u32| one(Operation::CreateSession {
@@ -5345,7 +5406,7 @@ mod tests {
                     operations: vec![Operation::ExchangeId {
                         clientowner: ClientId { verifier: 99, id: b"reptoobig".to_vec() },
                         flags: 0,
-                        state_protect: 0,
+                        state_protect: 0, sp4_must_allow: Vec::new(),
                         impl_id: vec![],
                     }],
                     wire_size: 0,
@@ -7705,7 +7766,7 @@ mod tests {
                         id: b"test-client".to_vec(),
                     },
                     flags: 0,
-                    state_protect: 0,
+                    state_protect: 0, sp4_must_allow: Vec::new(),
                     impl_id: vec![],
                 },
             ],
@@ -7753,7 +7814,7 @@ mod tests {
                         id: b"pnfs-flag-probe".to_vec(),
                     },
                     flags: 0,
-                    state_protect: 0,
+                    state_protect: 0, sp4_must_allow: Vec::new(),
                     impl_id: vec![],
                 }],
                 wire_size: 0,
@@ -7838,7 +7899,7 @@ mod tests {
                         id: b"test".to_vec(),
                     },
                     flags: 0,
-                    state_protect: 0,
+                    state_protect: 0, sp4_must_allow: Vec::new(),
                     impl_id: vec![],
                 },
             ],
@@ -8784,7 +8845,7 @@ mod tests {
         ops: Vec<Operation>,
     ) -> CompoundResponse {
         let req = CompoundRequest { tag: String::new(), tag_valid: true, minor_version: 0, operations: ops, wire_size: 0 };
-        d.dispatch_compound_with_cred(req, Vec::new(), None, Vec::new(), None, false, policy).await
+        d.dispatch_compound_with_cred(req, Vec::new(), None, Vec::new(), None, false, policy, false).await
     }
 
     /// The example config's shape — the cluster network read-write, the
@@ -8863,7 +8924,7 @@ mod tests {
             vec![Operation::ExchangeId {
                 clientowner: ClientId { verifier: 7, id: b"denied-peer".to_vec() },
                 flags: 0,
-                state_protect: 0,
+                state_protect: 0, sp4_must_allow: Vec::new(),
                 impl_id: vec![],
             }],
         )
@@ -8908,5 +8969,234 @@ mod tests {
             READ_ONLY_EXPORT_DENIED_ACCESS_BITS,
             "the read-write peer is granted them (the control): {rw:#x}"
         );
+    }
+
+    // ── SP4_MACH_CRED: sessions bound to their machine (RFC 8881 §18.35) ──
+    //
+    // Under krb5i a session id crosses the wire in the clear. With
+    // SP4_MACH_CRED, as knfsd does it, that id is no use to anyone but the
+    // machine that made the client: another connection must bind to the
+    // session first, and binding needs the machine's own credential.
+
+    mod mach_cred {
+        use super::*;
+        use crate::nfs::v4::back_channel::BackChannelWriter;
+
+        const NODE: &[u8] = b"gss:nfs/w1.corp@CORP";
+        const OTHER_NODE: &[u8] = b"gss:nfs/w2.corp@CORP";
+        const BOB: &[u8] = b"gss:bob@CORP";
+
+        /// A connection: its writer is the connection's identity.
+        async fn conn() -> Arc<BackChannelWriter> {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (c, acc) = tokio::join!(tokio::net::TcpStream::connect(addr), listener.accept());
+            let (_r, w) = c.unwrap().into_split();
+            std::mem::forget(acc.unwrap());
+            BackChannelWriter::new(tokio::io::BufWriter::new(w))
+        }
+
+        /// One COMPOUND from `principal` on connection `c`, under krb5i
+        /// when `krb5i`.
+        async fn call(
+            d: &CompoundDispatcher,
+            ops: Vec<Operation>,
+            principal: &[u8],
+            c: &Arc<BackChannelWriter>,
+            krb5i: bool,
+        ) -> CompoundResponse {
+            let req = CompoundRequest {
+                tag: "mc".into(),
+                tag_valid: true,
+                minor_version: 2,
+                operations: ops,
+                wire_size: 0,
+            };
+            d.dispatch_compound_with_cred(
+                req,
+                principal.to_vec(),
+                None,
+                Vec::new(),
+                Some(Arc::clone(c)),
+                false,
+                Default::default(),
+                krb5i,
+            )
+            .await
+        }
+
+        fn exchange_id(sp4: u32) -> Operation {
+            Operation::ExchangeId {
+                clientowner: ClientId { verifier: 7, id: b"Linux NFSv4.2 w1.corp".to_vec() },
+                flags: 0,
+                state_protect: sp4,
+                // The Linux client's offer is wider than what is granted.
+                sp4_must_allow: vec![u32::MAX, u32::MAX],
+                impl_id: vec![],
+            }
+        }
+
+        /// EXCHANGE_ID and CREATE_SESSION from NODE on `c`, under krb5i.
+        async fn mount(d: &CompoundDispatcher, c: &Arc<BackChannelWriter>, sp4: u32) -> (u64, SessionId) {
+            let r = call(d, vec![exchange_id(sp4)], NODE, c, true).await;
+            let (cid, seq) = match &r.results[0] {
+                OperationResult::ExchangeId(Nfs4Status::Ok, Some(x)) => (x.clientid, x.sequenceid),
+                o => panic!("EXCHANGE_ID: {o:?}"),
+            };
+            let r = call(d, vec![create_session(cid, seq)], NODE, c, true).await;
+            match &r.results[0] {
+                OperationResult::CreateSession(Nfs4Status::Ok, Some(x)) => (cid, x.sessionid),
+                o => panic!("CREATE_SESSION: {o:?}"),
+            }
+        }
+
+        fn create_session(clientid: u64, sequence: u32) -> Operation {
+            Operation::CreateSession {
+                clientid,
+                sequence,
+                flags: 0,
+                fore_chan_attrs: Default::default(),
+                back_chan_attrs: Default::default(),
+                cb_program: 0x4000_0000,
+                cb_sec: vec![],
+            }
+        }
+
+        fn sequence(sessionid: SessionId, sequenceid: u32) -> Operation {
+            Operation::Sequence { sessionid, sequenceid, slotid: 0, highest_slotid: 0, cachethis: false }
+        }
+
+        fn bind(sessionid: SessionId) -> Operation {
+            Operation::BindConnToSession { sessionid, dir: 3, use_conn_in_rdma_mode: false }
+        }
+
+        fn bits(ops: &[u32]) -> Vec<u32> {
+            let mut w = vec![0u32; 2];
+            for &op in ops {
+                w[(op / 32) as usize] |= 1 << (op % 32);
+            }
+            w
+        }
+
+        #[tokio::test]
+        async fn granted_under_krb5i_with_knfsds_op_sets_and_refused_without() {
+            let (d, _t) = create_test_dispatcher();
+            let c = conn().await;
+
+            let r = call(&d, vec![exchange_id(1)], NODE, &c, false).await;
+            assert_eq!(r.status, Nfs4Status::Inval, "no machine credential without GSS integrity");
+
+            let r = call(&d, vec![exchange_id(1)], NODE, &c, true).await;
+            let mc = match &r.results[0] {
+                OperationResult::ExchangeId(Nfs4Status::Ok, Some(x)) => x.mach_cred.clone().expect("granted"),
+                o => panic!("{o:?}"),
+            };
+            assert_eq!(
+                mc.must_enforce,
+                bits(&[
+                    opcode::BIND_CONN_TO_SESSION,
+                    opcode::EXCHANGE_ID,
+                    opcode::CREATE_SESSION,
+                    opcode::DESTROY_SESSION,
+                    opcode::DESTROY_CLIENTID,
+                ]),
+                "the five the Linux client requires"
+            );
+            assert_eq!(
+                mc.must_allow,
+                bits(&[
+                    opcode::CLOSE,
+                    opcode::OPEN_DOWNGRADE,
+                    opcode::LOCKU,
+                    opcode::DELEGRETURN,
+                    opcode::TEST_STATEID,
+                    opcode::FREE_STATEID,
+                ]),
+                "the offer narrowed to state cleanup: not WRITE or COMMIT"
+            );
+
+            // On the wire: spr_how SP4_MACH_CRED, then the two bitmaps.
+            use crate::nfs::v4::xdr::Nfs4XdrDecoder;
+            let mut x = crate::nfs::xdr::XdrDecoder::new(r.encode());
+            assert_eq!(x.decode_u32().unwrap(), 0, "compound status");
+            let _tag = x.decode_opaque().unwrap();
+            assert_eq!(x.decode_u32().unwrap(), 1, "one result");
+            assert_eq!(x.decode_u32().unwrap(), opcode::EXCHANGE_ID);
+            assert_eq!(x.decode_u32().unwrap(), 0);
+            let (_cid, _seq, _flags) = (x.decode_u64().unwrap(), x.decode_u32().unwrap(), x.decode_u32().unwrap());
+            assert_eq!(x.decode_u32().unwrap(), 1, "spr_how = SP4_MACH_CRED");
+            assert_eq!(x.decode_bitmap().unwrap(), mc.must_enforce);
+            assert_eq!(x.decode_bitmap().unwrap(), mc.must_allow);
+
+            let r = call(&d, vec![exchange_id(0)], NODE, &c, true).await;
+            assert!(
+                matches!(&r.results[0], OperationResult::ExchangeId(Nfs4Status::Ok, Some(x)) if x.mach_cred.is_none()),
+                "SP4_NONE asked, SP4_NONE given"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_sniffed_session_id_is_no_use_from_another_connection() {
+            let (d, _t) = create_test_dispatcher();
+            let (a, b) = (conn().await, conn().await);
+            let (_cid, sid) = mount(&d, &a, 1).await;
+
+            // A user rides the node's session on the node's connection.
+            assert_eq!(call(&d, vec![sequence(sid, 1)], BOB, &a, true).await.status, Nfs4Status::Ok);
+
+            // Someone else with the id, on their own connection: refused,
+            // whoever they are, before the slot is touched.
+            for who in [BOB, OTHER_NODE] {
+                let r = call(&d, vec![sequence(sid, 2)], who, &b, true).await;
+                assert_eq!(r.status, Nfs4Status::ConnNotBoundToSession);
+                let r = call(&d, vec![bind(sid)], who, &b, true).await;
+                assert_eq!(r.status, Nfs4Status::WrongCred, "binding needs the node's own key");
+                let r = call(&d, vec![Operation::DestroySession(sid)], who, &b, true).await;
+                assert_eq!(r.status, Nfs4Status::WrongCred);
+            }
+
+            // The node itself reconnecting: it binds, and carries on with
+            // the slot's next seqid (the refused calls consumed nothing).
+            assert_eq!(call(&d, vec![sequence(sid, 2)], NODE, &b, true).await.status, Nfs4Status::ConnNotBoundToSession);
+            assert_eq!(call(&d, vec![bind(sid)], NODE, &b, true).await.status, Nfs4Status::Ok);
+            assert_eq!(call(&d, vec![sequence(sid, 2)], NODE, &b, true).await.status, Nfs4Status::Ok);
+            assert_eq!(call(&d, vec![sequence(sid, 3)], BOB, &b, true).await.status, Nfs4Status::Ok);
+        }
+
+        #[tokio::test]
+        async fn an_sp4_none_session_still_binds_on_first_use() {
+            let (d, _t) = create_test_dispatcher();
+            let (a, b) = (conn().await, conn().await);
+            let (_cid, sid) = mount(&d, &a, 0).await;
+            assert_eq!(
+                call(&d, vec![sequence(sid, 1)], BOB, &b, true).await.status,
+                Nfs4Status::Ok,
+                "RFC 8881 §2.10.3.1: SP4_NONE binds implicitly (AUTH_SYS and krb5 clients)"
+            );
+        }
+
+        #[tokio::test]
+        async fn the_client_is_its_machines_alone() {
+            let (d, _t) = create_test_dispatcher();
+            let (a, b) = (conn().await, conn().await);
+            let (cid, sid) = mount(&d, &a, 1).await;
+
+            let r = call(&d, vec![create_session(cid, 2)], OTHER_NODE, &b, true).await;
+            assert_eq!(r.status, Nfs4Status::WrongCred);
+            let r = call(&d, vec![Operation::DestroyClientId(cid)], BOB, &b, true).await;
+            assert_eq!(r.status, Nfs4Status::WrongCred);
+
+            // Even with no session left, the record is the node's while
+            // its lease runs: another node's EXCHANGE_ID for the same
+            // owner is a collision, not a takeover. (SP4_NONE would let
+            // it replace a stateless record.)
+            assert_eq!(call(&d, vec![Operation::DestroySession(sid)], NODE, &a, true).await.status, Nfs4Status::Ok);
+            let r = call(&d, vec![exchange_id(1)], OTHER_NODE, &b, true).await;
+            assert_eq!(r.status, Nfs4Status::ClIdInUse);
+
+            // The node itself may destroy its client.
+            let r = call(&d, vec![Operation::DestroyClientId(cid)], NODE, &a, true).await;
+            assert_eq!(r.status, Nfs4Status::Ok);
+        }
     }
 }

@@ -150,10 +150,41 @@ account.
   and its next EXCHANGE_ID is refused.
 - **Before the first list:** every node is refused.
 
-Every RWX mount must then be Kerberos. Session ids are random, but with
-`krb5i` they are visible on the wire: a principal allowed to connect, on an
-attached node, could reuse a session id it sniffed. Use `krb5p` where that
-matters.
+Every RWX mount must then be Kerberos.
+
+## Sessions are bound to their machine
+
+Session ids are random, but under `krb5i` they cross the wire in the
+clear. So the server binds each Kerberos client's sessions to the machine
+that made them, using SP4_MACH_CRED state protection (RFC 8881 §18.35), as
+knfsd does. The Linux client asks for it on every `krb5i` or `krb5p` mount.
+
+- **Granted only under integrity:** the server grants SP4_MACH_CRED only to
+  an EXCHANGE_ID sent with `krb5i` or `krb5p`. Over AUTH_SYS or plain
+  `krb5`, the client gets NFS4ERR_INVAL and falls back to SP4_NONE.
+- **The machine's own ops:** BIND_CONN_TO_SESSION, CREATE_SESSION,
+  DESTROY_SESSION and DESTROY_CLIENTID need the principal that made the
+  client. Anyone else gets NFS4ERR_WRONG_CRED.
+- **Connections:** a session is used only on connections bound to it. A
+  SEQUENCE on any other connection gets NFS4ERR_CONN_NOT_BOUND_TO_SESSION
+  before its slot is touched. The client then binds the connection with
+  its machine credential (BIND_CONN_TO_SESSION), which it does after every
+  reconnect. A sniffed session id is no use to anyone else: they would
+  need the node's key.
+- **The client record:** while the client's lease runs, no other principal
+  can take over its client owner, even with no state held (that is
+  NFS4ERR_CLID_INUSE).
+- **Restarts:** the protection is stored with the client record, so it
+  survives a server restart.
+
+A user rides the node's session on the node's connection, which is how
+the kernel sends every user's calls. Root on the node holds the machine
+key, so it can do anything the node can.
+
+A client that does not ask for SP4_MACH_CRED is not protected this way.
+The Linux kernel asks whenever `rpc.gssd` is running, since it then does
+its state management over `krb5i`, whatever the mount's `sec=`. Without
+`rpc.gssd` it uses AUTH_SYS, which the default floor refuses.
 
 Not done yet:
 - reading identities from a directory (LDAP or SSSD, as idmapd does) in
@@ -208,6 +239,11 @@ pNFS volumes are not covered.
 - **Chart defaults:** `tests/system/chart-kerberos-defaults.sh` renders
   the chart with Kerberos off, on, and with each opt-out, and checks the
   servers' settings (`helm` only; CI runs it).
+- **Session binding:** unit tests in `dispatcher.rs` (`mach_cred`) and,
+  against the real kernel client in the VM rig,
+  `tests/krb5/run-mach-cred.sh` (connection killed, server restarted,
+  session id stolen by a user with a valid ticket, and an SP4_NONE
+  control).
 - **Unit tests:** `nfs_krb5.rs` covers flavor detection, `/proc/mounts`
   parsing, the hosts file rewritten in place and only our lines, and the
   server pod's keytab and floor.

@@ -172,8 +172,12 @@ pub struct ExchangeIdOp {
     /// Flags (SP4_NONE, SP4_MACH_CRED, etc.)
     pub flags: u32,
 
-    /// State protection (we'll use SP4_NONE for simplicity)
+    /// State protection asked for: SP4_NONE (0), SP4_MACH_CRED (1) or
+    /// SP4_SSV (2, unsupported).
     pub state_protect: u32,
+
+    /// SP4_MACH_CRED's spo_must_allow as the client offered it.
+    pub sp4_must_allow: Vec<u32>,
 
     /// Client implementation details
     pub client_impl_id: Option<ClientImplId>,
@@ -192,6 +196,8 @@ pub struct ExchangeIdRes {
     pub clientid: u64,
     pub sequenceid: u32,
     pub flags: u32,
+    /// SP4_MACH_CRED as granted; `None` is SP4_NONE.
+    pub mach_cred: Option<crate::nfs::v4::compound::Sp4MachCred>,
     pub server_owner: String,
     pub server_scope: Vec<u8>,
 }
@@ -266,9 +272,56 @@ fn exchange_id_err(status: Nfs4Status) -> ExchangeIdRes {
         clientid: 0,
         sequenceid: 0,
         flags: 0,
+        mach_cred: None,
         server_owner: String::new(),
         server_scope: Vec::new(),
     }
+}
+
+/// SP4_MACH_CRED as granted, knfsd's sets (RFC 8881 §18.35.3).
+///
+/// - **must_enforce:** the ops that make, bind, and tear down the client
+///   and its sessions. Only the machine principal that made the client
+///   may send them, so no other principal can bind a connection to its
+///   sessions or destroy them. The Linux client requires all five
+///   (`nfs4_sp4_select_mode`).
+/// - **must_allow:** the client's offer narrowed to the state cleanup
+///   ops a client sends with its machine credential once a user's ticket
+///   has gone (CLOSE, OPEN_DOWNGRADE, LOCKU, DELEGRETURN, TEST_STATEID,
+///   FREE_STATEID). Not WRITE or COMMIT: those keep the user's identity,
+///   which the permission checks need.
+fn mach_cred_grant(client_must_allow: &[u32]) -> crate::nfs::v4::compound::Sp4MachCred {
+    use crate::nfs::v4::protocol::opcode;
+    let bit = |op: u32| -> (usize, u32) { ((op / 32) as usize, 1u32 << (op % 32)) };
+    let set = |ops: &[u32]| -> Vec<u32> {
+        let mut words = vec![0u32; 2];
+        for &op in ops {
+            let (w, b) = bit(op);
+            words[w] |= b;
+        }
+        words
+    };
+    let must_enforce = set(&[
+        opcode::BIND_CONN_TO_SESSION,
+        opcode::EXCHANGE_ID,
+        opcode::CREATE_SESSION,
+        opcode::DESTROY_SESSION,
+        opcode::DESTROY_CLIENTID,
+    ]);
+    let allowable = set(&[
+        opcode::CLOSE,
+        opcode::OPEN_DOWNGRADE,
+        opcode::LOCKU,
+        opcode::DELEGRETURN,
+        opcode::TEST_STATEID,
+        opcode::FREE_STATEID,
+    ]);
+    let must_allow = allowable
+        .iter()
+        .enumerate()
+        .map(|(i, a)| a & client_must_allow.get(i).copied().unwrap_or(0))
+        .collect();
+    crate::nfs::v4::compound::Sp4MachCred { must_enforce, must_allow }
 }
 
 /// SEQUENCE operation (opcode 53)
@@ -436,6 +489,14 @@ impl SessionOperationHandler {
             warn!("EXCHANGE_ID: SP4_SSV requested — unsupported → ENCR_ALG_UNSUPP");
             return exchange_id_err(Nfs4Status::EncrAlgUnsupp);
         }
+        // SP4_MACH_CRED: only for a krb5i or krb5p call, as knfsd. Over
+        // AUTH_SYS or plain krb5 nothing protects the ops it guards, and
+        // the client falls back to SP4_NONE on INVAL.
+        let mach_cred = op.state_protect == 1;
+        if mach_cred && !ctx.gss_protected {
+            warn!("EXCHANGE_ID: SP4_MACH_CRED without GSS integrity → INVAL");
+            return exchange_id_err(Nfs4Status::Inval);
+        }
 
         // RFC 8881 §18.35.5 client-record state machine. Principal is the
         // RPC-level identity of the caller; an empty Vec for AUTH_NONE.
@@ -483,7 +544,12 @@ impl SessionOperationHandler {
         // peer destroy it one operation later by confirming its own new id.
         let outcome = match outcome {
             ExchangeIdOutcome::ClientCollision { incumbent } => {
-                if self.client_has_live_state(incumbent) {
+                // A client under SP4_MACH_CRED is its machine's for as
+                // long as its lease runs, state or not: EXCHANGE_ID is
+                // in its must_enforce set.
+                let protected = self.state_mgr.clients.mach_cred_principal(incumbent).is_some()
+                    && self.state_mgr.leases.is_valid(incumbent);
+                if protected || self.client_has_live_state(incumbent) {
                     warn!(
                         "EXCHANGE_ID: case 3 — client {} holds live state under an \
                          unexpired lease; refusing the collision with CLID_INUSE",
@@ -530,6 +596,18 @@ impl SessionOperationHandler {
                 return exchange_id_err(Nfs4Status::Perm);
             }
         };
+
+        // Only the record's own principal gets here (a different one is
+        // case 3, refused or replaced above), so the protection follows
+        // its latest EXCHANGE_ID.
+        self.state_mgr.clients.set_mach_cred(clientid, mach_cred);
+        if mach_cred {
+            info!(
+                "🔐 EXCHANGE_ID: client {clientid} is SP4_MACH_CRED, bound to {}",
+                String::from_utf8_lossy(&ctx.principal)
+            );
+        }
+        let mach_cred = mach_cred.then(|| mach_cred_grant(&op.sp4_must_allow));
 
         // Build server response flags per RFC 8881 Section 18.35
         let mut response_flags = 0u32;
@@ -583,6 +661,7 @@ impl SessionOperationHandler {
             clientid,
             sequenceid,
             flags: response_flags,
+            mach_cred,
             server_owner,
             server_scope,
         }
@@ -1310,7 +1389,7 @@ mod tests {
                 client_owner: b"c9-client".to_vec(),
                 verifier: 1,
                 flags: 0,
-                state_protect: 0,
+                state_protect: 0, sp4_must_allow: Vec::new(),
                 client_impl_id: None,
             },
             &CompoundContext::new(1),
@@ -1508,7 +1587,7 @@ mod tests {
                 client_owner: b"c9-replay".to_vec(),
                 verifier: 1,
                 flags: 0,
-                state_protect: 0,
+                state_protect: 0, sp4_must_allow: Vec::new(),
                 client_impl_id: None,
             },
             &CompoundContext::new(1),
@@ -1617,7 +1696,7 @@ mod tests {
             client_owner: b"test-client".to_vec(),
             verifier: 12345,
             flags: 0,
-            state_protect: 0,
+            state_protect: 0, sp4_must_allow: Vec::new(),
             client_impl_id: None,
         };
 
@@ -1639,7 +1718,7 @@ mod tests {
             client_owner: b"test-client".to_vec(),
             verifier: 12345,
             flags: 0,
-            state_protect: 0,
+            state_protect: 0, sp4_must_allow: Vec::new(),
             client_impl_id: None,
         };
         let exchange_res = handler.handle_exchange_id(exchange_op, &CompoundContext::new(1));
@@ -1670,7 +1749,7 @@ mod tests {
             client_owner: b"test-client".to_vec(),
             verifier: 12345,
             flags: 0,
-            state_protect: 0,
+            state_protect: 0, sp4_must_allow: Vec::new(),
             client_impl_id: None,
         };
         let exchange_res = handler.handle_exchange_id(exchange_op, &CompoundContext::new(1));
@@ -1744,7 +1823,7 @@ mod tests {
             client_owner: b"test-client".to_vec(),
             verifier: 12345,
             flags: 0,
-            state_protect: 0,
+            state_protect: 0, sp4_must_allow: Vec::new(),
             client_impl_id: None,
         };
         let exchange_res = handler.handle_exchange_id(exchange_op, &CompoundContext::new(1));
@@ -1809,7 +1888,7 @@ mod tests {
                 client_owner: b"uncached-client".to_vec(),
                 verifier: 1,
                 flags: 0,
-                state_protect: 0,
+                state_protect: 0, sp4_must_allow: Vec::new(),
                 client_impl_id: None,
             },
             &CompoundContext::new(1),
@@ -1869,7 +1948,7 @@ mod tests {
                 client_owner: b"clamp-client".to_vec(),
                 verifier: 1,
                 flags: 0,
-                state_protect: 0,
+                state_protect: 0, sp4_must_allow: Vec::new(),
                 client_impl_id: None,
             },
             &CompoundContext::new(1),
@@ -1937,7 +2016,7 @@ mod tests {
                     client_owner: owner.to_vec(),
                     verifier: 1,
                     flags: 0,
-                    state_protect: 0,
+                    state_protect: 0, sp4_must_allow: Vec::new(),
                     client_impl_id: None,
                 },
                 &CompoundContext::new(1),
@@ -1984,7 +2063,7 @@ mod tests {
                 client_owner: b"one-session".to_vec(),
                 verifier: 1,
                 flags: 0,
-                state_protect: 0,
+                state_protect: 0, sp4_must_allow: Vec::new(),
                 client_impl_id: None,
             },
             &CompoundContext::new(1),
@@ -2031,7 +2110,7 @@ mod tests {
                 client_owner: b"cap-client".to_vec(),
                 verifier: 1,
                 flags: UNIMPLEMENTED,
-                state_protect: 0,
+                state_protect: 0, sp4_must_allow: Vec::new(),
                 client_impl_id: None,
             },
             &CompoundContext::new(1),
@@ -2069,7 +2148,7 @@ mod tests {
         ctx1.principal = b"principal-one".to_vec();
         let ex = handler.handle_exchange_id(
             ExchangeIdOp { client_owner: owner.clone(), verifier: 1, flags: 0,
-                           state_protect: 0, client_impl_id: None },
+                           state_protect: 0, sp4_must_allow: Vec::new(), client_impl_id: None },
             &ctx1,
         );
         // Confirm it AND leave it holding a session: live state.
@@ -2087,7 +2166,7 @@ mod tests {
         ctx2.principal = b"principal-two".to_vec();
         let collide = handler.handle_exchange_id(
             ExchangeIdOp { client_owner: owner, verifier: 2, flags: 0,
-                           state_protect: 0, client_impl_id: None },
+                           state_protect: 0, sp4_must_allow: Vec::new(), client_impl_id: None },
             &ctx2,
         );
 
@@ -2123,7 +2202,7 @@ mod tests {
         ctx1.principal = b"principal-one".to_vec();
         let ex = handler.handle_exchange_id(
             ExchangeIdOp { client_owner: owner.clone(), verifier: 1, flags: 0,
-                           state_protect: 0, client_impl_id: None },
+                           state_protect: 0, sp4_must_allow: Vec::new(), client_impl_id: None },
             &ctx1,
         );
         let cs = handler.handle_create_session(
@@ -2147,7 +2226,7 @@ mod tests {
         ctx2.principal = b"principal-two".to_vec();
         let collide = handler.handle_exchange_id(
             ExchangeIdOp { client_owner: owner, verifier: 2, flags: 0,
-                           state_protect: 0, client_impl_id: None },
+                           state_protect: 0, sp4_must_allow: Vec::new(), client_impl_id: None },
             &ctx2,
         );
 
@@ -2170,7 +2249,7 @@ mod tests {
                 client_owner: b"oversize-client".to_vec(),
                 verifier: 1,
                 flags: 0,
-                state_protect: 0,
+                state_protect: 0, sp4_must_allow: Vec::new(),
                 client_impl_id: None,
             },
             &CompoundContext::new(1),
@@ -2213,7 +2292,7 @@ mod tests {
             client_owner: b"test-client".to_vec(),
             verifier: 12345,
             flags: 0,
-            state_protect: 0,
+            state_protect: 0, sp4_must_allow: Vec::new(),
             client_impl_id: None,
         };
         let exchange_res = handler.handle_exchange_id(exchange_op, &CompoundContext::new(1));

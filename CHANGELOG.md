@@ -14,6 +14,23 @@ covered by the stability guarantee.
 
 ### Security
 
+- **Kerberos sessions are bound to their machine** (2026-10-16). Under
+  `krb5i` a session id crosses the wire in the clear, and any allowed
+  principal holding one could use the session from its own connection,
+  bind connections to it, or destroy it. The server now grants
+  SP4_MACH_CRED (RFC 8881 §18.35), which it used to decode and drop, as
+  knfsd does. It grants it only to a `krb5i` or `krb5p` EXCHANGE_ID; the
+  Linux client asks for it on every Kerberos mount.
+  BIND_CONN_TO_SESSION, CREATE_SESSION, DESTROY_SESSION and
+  DESTROY_CLIENTID need the client's machine principal (otherwise
+  NFS4ERR_WRONG_CRED). A SEQUENCE on a connection not bound to the
+  session gets NFS4ERR_CONN_NOT_BOUND_TO_SESSION, and the client binds it
+  with its machine key. While its lease runs, no other principal can take
+  over the client's owner. The protection is persisted with the client
+  record (an SQLite column, backfilled on existing databases).
+  `tests/krb5/run-mach-cred.sh` passes 17/17 against the kernel client,
+  including a stolen session id refused and an SP4_NONE control.
+
 - **Kerberos is secure by default** (2026-10-16). With
   `nfs.kerberos.enabled`, the chart now defaults to `minSec: krb5i`,
   `attachedNodesOnly: true` and `nfs.enforcePermissions: enforce`. Before,
