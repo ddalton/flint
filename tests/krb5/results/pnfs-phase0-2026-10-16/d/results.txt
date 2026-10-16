@@ -1,0 +1,14 @@
+
+=== arm D: sec=krb5i, rpc.gssd on ===
+mounted: sec=krb5i
+read-back INTACT
+write rc=0  write+fsync 0.4 s  read 1.5 s  md5 008e7b7f8ac8e87df9cdff15dde8f043
+allocated bytes: DS1 33579008  DS2 33579008  MDS export 16384
+layout stats: 
+dmesg: 
+KDC asked for: 
+KDC unknown: 
+flavors by port: 20490/none/null:1 20490/gss/compound:648 20490/gss/null:7 20491/none/null:98 20491/sys/compound:588 20491/gss/null:984 20492/none/null:97 20492/sys/compound:582 20492/gss/null:972
+gssd upcalls: 
+
+=== done ===

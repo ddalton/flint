@@ -1,0 +1,38 @@
+
+=== arm A: sec=sys, rpc.gssd on ===
+mounted: sec=sys
+read-back INTACT
+write rc=0  write+fsync 0.4 s  read 0.2 s  md5 5c80f1ee8c8d4bf239aed40fce178aab
+allocated bytes: DS1 33579008  DS2 33579008  MDS export 16384
+layout stats: 
+dmesg: 
+KDC asked for: 
+KDC unknown: 
+flavors by port: 20490/none/null:1 20490/sys/compound:17 20490/gss/compound:6 20490/gss/null:4 20491/none/null:2 20491/sys/compound:179 20492/none/null:2 20492/sys/compound:176
+gssd upcalls: 
+
+=== arm B: sec=sys, rpc.gssd off ===
+mounted: sec=sys
+read-back INTACT
+write rc=0  write+fsync 0.3 s  read 0.2 s  md5 5c80f1ee8c8d4bf239aed40fce178aab
+allocated bytes: DS1 33579008  DS2 33579008  MDS export 16384
+layout stats: 
+dmesg: 
+KDC asked for: 
+KDC unknown: 
+flavors by port: 20490/none/null:1 20490/sys/compound:23 20491/none/null:2 20491/sys/compound:179 20492/none/null:2 20492/sys/compound:176
+gssd upcalls: 
+
+=== arm C: sec=krb5i, rpc.gssd on ===
+mounted: sec=krb5i
+read-back INTACT
+write rc=0  write+fsync 0.4 s  read 2.3 s  md5 5c80f1ee8c8d4bf239aed40fce178aab
+allocated bytes: DS1 33579008  DS2 33579008  MDS export 16384
+layout stats: 
+dmesg: 
+KDC asked for: 
+KDC unknown: 
+flavors by port: 20490/none/null:1 20490/gss/compound:645 20490/gss/null:6 20491/none/null:99 20491/sys/compound:594 20492/none/null:98 20492/sys/compound:588
+gssd upcalls: 
+
+=== done ===
