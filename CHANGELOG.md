@@ -12,6 +12,17 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Security
+
+- **krb5 0.12.1** (2026-10-15), from 0.2. The NFS server's RPCSEC_GSS
+  acceptor parses AP-REQs from any peer that reaches port 2049; before
+  krb5 0.12.1 a malformed one could panic it before any decryption (found
+  by the crate's fuzzing). Since 0.11 the acceptor also refuses a replayed
+  AP-REQ (a process-wide replay cache over the skew window, as MIT's
+  acceptors have). No code changes: the crate's breaking changes are new
+  fields on types flint does not build. `tests/krb5/run-krb5i.sh` (8/8)
+  and `run-krb5p.sh` (6/6) pass against the kernel client.
+
 ### Added
 
 - **Kerberos callers are their principal's unix identity:

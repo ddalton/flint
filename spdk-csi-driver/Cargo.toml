@@ -224,7 +224,7 @@ dashmap = "6.1"  # Lock-free concurrent HashMap for high-performance state manag
 sha2 = "0.10"
 crossbeam = "0.8"  # Lock-free channels and queues
 # Pure Rust Kerberos 5 acceptor - no glibc dependencies
-krb5 = "0.2"  # Kerberos 5 acceptor (github.com/ddalton/krb5)
+krb5 = "0.12.1"  # Kerberos 5 acceptor (github.com/ddalton/krb5)
 hmac = "0.12"
 filetime = "0.2.26"
 # Pure-Rust embedded SQLite (no system libsqlite dependency); used by
