@@ -156,6 +156,12 @@ pub struct Client {
     /// just because the in-memory state evaporated.
     pub reclaim_complete: bool,
 
+    /// Under SP4_MACH_CRED state protection (RFC 8881 §18.35): set by
+    /// the EXCHANGE_ID that made or renewed the record, from a krb5i or
+    /// krb5p call. Session-management ops then need `principal`, and
+    /// the client's sessions are used only on connections bound to them.
+    pub mach_cred: bool,
+
     /// RFC 8881 §18.35.5 case 5: when EXCHANGE_ID detects a client
     /// reboot (same owner+principal, fresh verifier), the server
     /// allocates a NEW clientid but MUST keep the OLD client's state
@@ -214,6 +220,7 @@ impl Client {
             cs_cached_res: None,
             initial_cs_sequence: 0,
             reclaim_complete: false,
+            mach_cred: false,
             pending_replaces: None,
         }
     }
@@ -333,6 +340,7 @@ impl Client {
             }),
             initial_cs_sequence: self.initial_cs_sequence,
             reclaim_complete: self.reclaim_complete,
+            mach_cred: self.mach_cred,
         }
     }
 
@@ -369,6 +377,7 @@ impl Client {
             }),
             initial_cs_sequence: r.initial_cs_sequence,
             reclaim_complete: r.reclaim_complete,
+            mach_cred: r.mach_cred,
             // Deferred replacements never survive restart by design;
             // a half-confirmed clientid is dropped post-restart.
             pending_replaces: None,
@@ -744,6 +753,29 @@ impl ClientManager {
             }
         });
         snapshot.unwrap_or(ReclaimCompleteOutcome::NoSuchClient)
+    }
+
+    /// Put `client_id` under SP4_MACH_CRED, or take it out (EXCHANGE_ID),
+    /// persisting a change.
+    pub fn set_mach_cred(&self, client_id: u64, on: bool) {
+        let snap = self.clients.get_mut(&client_id).and_then(|mut c| {
+            (c.mach_cred != on).then(|| {
+                c.mach_cred = on;
+                c.clone()
+            })
+        });
+        if let Some(s) = snap {
+            self.persist(&s);
+        }
+    }
+
+    /// The principal `client_id`'s session-management ops must carry:
+    /// `Some` only under SP4_MACH_CRED.
+    pub fn mach_cred_principal(&self, client_id: u64) -> Option<Vec<u8>> {
+        self.clients
+            .get(&client_id)
+            .filter(|c| c.mach_cred)
+            .map(|c| c.principal.clone())
     }
 
     /// Read the persisted `reclaim_complete` bit. Used by the

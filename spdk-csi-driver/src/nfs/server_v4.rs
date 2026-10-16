@@ -904,6 +904,13 @@ async fn handle_compound(
             // for it. Plain TCP only, and only when switched on.
             gss.is_none() && crate::nfs::splice::enabled(),
             peer_policy,
+            gss.is_some_and(|v| {
+                matches!(
+                    v.service,
+                    crate::nfs::rpcsec_gss::GssService::Integrity
+                        | crate::nfs::rpcsec_gss::GssService::Privacy
+                )
+            }),
         )
         .await;
 

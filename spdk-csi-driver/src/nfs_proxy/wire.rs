@@ -445,7 +445,7 @@ mod tests {
     fn the_proxy_reads_the_hubs_session_setup_replies() {
         let b = hub_body(vec![OperationResult::ExchangeId(
             Nfs4Status::Ok,
-            Some(ExchangeIdResult { clientid: 0xAB, sequenceid: 1, flags: 0x10003, server_owner: "hub".into(), server_scope: b"s".to_vec() }),
+            Some(ExchangeIdResult { clientid: 0xAB, sequenceid: 1, flags: 0x10003, mach_cred: None, server_owner: "hub".into(), server_scope: b"s".to_vec() }),
         )]);
         assert_eq!(decode_exchange_id_reply(b).unwrap(), (Nfs4Status::Ok, Some(ExchangeIdOk { clientid: 0xAB, sequenceid: 1, flags: 0x10003 })));
 

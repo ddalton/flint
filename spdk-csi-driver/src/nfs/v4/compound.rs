@@ -332,6 +332,9 @@ pub enum Operation {
         clientowner: ClientId,
         flags: u32,
         state_protect: u32,      // SP4_NONE = 0
+        /// SP4_MACH_CRED's spo_must_allow (empty otherwise): the ops the
+        /// client may send with its machine credential.
+        sp4_must_allow: Vec<u32>,
         impl_id: Vec<u8>,
     },
     CreateSession {
@@ -524,8 +527,19 @@ pub struct ExchangeIdResult {
     pub clientid: u64,
     pub sequenceid: u32,
     pub flags: u32,
+    /// `Some` when the client record is under SP4_MACH_CRED.
+    pub mach_cred: Option<Sp4MachCred>,
     pub server_owner: String,
     pub server_scope: Vec<u8>,
+}
+
+/// SP4_MACH_CRED state protection as granted (RFC 8881 §18.35.3,
+/// state_protect_ops4): the ops that must, and those that may, carry the
+/// machine credential that made the client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sp4MachCred {
+    pub must_enforce: Vec<u32>,
+    pub must_allow: Vec<u32>,
 }
 
 /// Result for CREATE_SESSION operation
@@ -1016,6 +1030,11 @@ pub struct CompoundContext {
     /// API, unit tests) has it, and the export-wide `ro`
     /// (`CompoundDispatcher::with_read_only`) applies on top of it.
     pub peer: crate::nfs::export_access::PeerPolicy,
+    /// The call came under RPCSEC_GSS integrity or privacy (krb5i,
+    /// krb5p). EXCHANGE_ID grants SP4_MACH_CRED only then (RFC 8881
+    /// §18.35.4, as knfsd): without integrity the machine credential
+    /// protects nothing on the wire.
+    pub gss_protected: bool,
 }
 
 /// "Current stateid" sentinel: `seqid=1, other=00…00`. RFC 8881
@@ -1055,6 +1074,7 @@ impl CompoundContext {
             current_stateid: None,
             back_channel: None,
             peer: Default::default(),
+            gss_protected: false,
         }
     }
 
@@ -1743,12 +1763,15 @@ impl CompoundRequest {
                 // bodies must be consumed or everything after them decodes
                 // garbage (an SP4_SSV request used to surface as BADXDR).
                 let state_protect = decoder.decode_u32()?;
+                let mut sp4_must_allow = Vec::new();
                 match state_protect {
                     0 => { /* SP4_NONE — void */ }
                     1 | 2 => {
-                        // state_protect_ops4: two bitmap4s.
+                        // state_protect_ops4: two bitmap4s. The server
+                        // sets must_enforce itself; must_allow is the
+                        // client's offer, which the reply narrows.
                         let _must_enforce = decoder.decode_bitmap()?;
-                        let _must_allow = decoder.decode_bitmap()?;
+                        sp4_must_allow = decoder.decode_bitmap()?;
                         if state_protect == 2 {
                             // ssv_sp_parms4 tail: hash algs, encr algs
                             // (arrays of sec_oid4), window, num_gss_handles.
@@ -1802,6 +1825,7 @@ impl CompoundRequest {
                     clientowner,
                     flags,
                     state_protect,
+                    sp4_must_allow,
                     impl_id,
                 })
             }
@@ -2794,7 +2818,14 @@ impl CompoundResponse {
                         encoder.encode_u64(res.clientid);
                         encoder.encode_u32(res.sequenceid);
                         encoder.encode_u32(res.flags);
-                        encoder.encode_u32(0); // state_protect: SP4_NONE
+                        match &res.mach_cred {
+                            None => encoder.encode_u32(0), // SP4_NONE
+                            Some(mc) => {
+                                encoder.encode_u32(1); // SP4_MACH_CRED
+                                encoder.encode_bitmap(&mc.must_enforce);
+                                encoder.encode_bitmap(&mc.must_allow);
+                            }
+                        }
                         // server_owner4: struct with so_minor_id (u64) and so_major_id (opaque)
                         // Per RFC 8881 Section 18.35
                         encoder.encode_u64(0); // so_minor_id (using 0 for simplicity)

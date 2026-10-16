@@ -2798,7 +2798,7 @@ mod tests {
             client_owner: owner.clone(),
             verifier,
             flags: 0,
-            state_protect: 0,
+            state_protect: 0, sp4_must_allow: Vec::new(),
             client_impl_id: None,
         };
         let confirm = |clientid: u64, sequence: u32| CreateSessionOp {

@@ -233,6 +233,22 @@ impl SqliteBackend {
             .map_err(|e| StateBackendError::Storage(format!("stateids open_owner: {}", e)))?;
         }
 
+        // SP4_MACH_CRED on client records. Backfill for databases created
+        // before: 0 is SP4_NONE, which is what those clients negotiated.
+        let has_mach_cred: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('clients') WHERE name='mach_cred'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| StateBackendError::Storage(format!("clients introspect: {}", e)))?;
+        if has_mach_cred == 0 {
+            conn.execute_batch(
+                "ALTER TABLE clients ADD COLUMN mach_cred INTEGER NOT NULL DEFAULT 0;",
+            )
+            .map_err(|e| StateBackendError::Storage(format!("clients mach_cred: {}", e)))?;
+        }
+
         // Schema version: insert if first run, else verify match. This
         // is the operator-visible canary for "the DB is from an older
         // build" — better to fail open than silently misread rows.
@@ -507,8 +523,8 @@ fn apply_write_op(conn: &Connection, op: &WriteOp) -> rusqlite::Result<()> {
                  (client_id, owner, verifier, server_owner, server_scope,
                   sequence_id, flags, principal, confirmed,
                   last_cs_sequence, cs_cached_res, initial_cs_sequence,
-                  reclaim_complete)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                  reclaim_complete, mach_cred)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             )?
             .execute(params![
                 u64_to_i64(c.client_id),
@@ -524,6 +540,7 @@ fn apply_write_op(conn: &Connection, op: &WriteOp) -> rusqlite::Result<()> {
                 cs_json,
                 c.initial_cs_sequence as i64,
                 bool_to_i64(c.reclaim_complete),
+                bool_to_i64(c.mach_cred),
             ])?;
         }
         WriteOp::DeleteClient(id) => {
@@ -1345,7 +1362,7 @@ impl StateBackend for SqliteBackend {
                     "SELECT client_id, owner, verifier, server_owner, server_scope,
                             sequence_id, flags, principal, confirmed,
                             last_cs_sequence, cs_cached_res, initial_cs_sequence,
-                            reclaim_complete
+                            reclaim_complete, mach_cred
                      FROM clients WHERE client_id = ?1",
                     params![id],
                     decode_client_row,
@@ -1363,7 +1380,7 @@ impl StateBackend for SqliteBackend {
                     "SELECT client_id, owner, verifier, server_owner, server_scope,
                             sequence_id, flags, principal, confirmed,
                             last_cs_sequence, cs_cached_res, initial_cs_sequence,
-                            reclaim_complete
+                            reclaim_complete, mach_cred
                      FROM clients",
                 )?;
                 let rows: rusqlite::Result<Vec<_>> = stmt
@@ -2409,6 +2426,7 @@ fn decode_client_row(r: &rusqlite::Row) -> rusqlite::Result<StateBackendResult<C
     let cs_json: Option<String> = r.get(10)?;
     let initial_cs_sequence: i64 = r.get(11)?;
     let reclaim_complete: i64 = r.get(12)?;
+    let mach_cred: i64 = r.get(13)?;
 
     Ok((|| -> StateBackendResult<ClientRecord> {
         let cs_cached_res = match cs_json {
@@ -2431,6 +2449,7 @@ fn decode_client_row(r: &rusqlite::Row) -> rusqlite::Result<StateBackendResult<C
             cs_cached_res,
             initial_cs_sequence: initial_cs_sequence as u32,
             reclaim_complete: i64_to_bool(reclaim_complete),
+            mach_cred: i64_to_bool(mach_cred),
         })
     })())
 }
@@ -2609,7 +2628,9 @@ CREATE TABLE IF NOT EXISTS clients (
     initial_cs_sequence INTEGER NOT NULL,
     -- Set once RECLAIM_COMPLETE lands, so a restarted MDS returns
     -- NFS4ERR_COMPLETE_ALREADY on a second one instead of succeeding.
-    reclaim_complete INTEGER NOT NULL DEFAULT 0
+    reclaim_complete INTEGER NOT NULL DEFAULT 0,
+    -- SP4_MACH_CRED state protection (ClientRecord::mach_cred).
+    mach_cred INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -3280,6 +3301,41 @@ mod tests {
         SqliteBackend::open(&fresh).expect("re-open our own database");
     }
 
+    /// A DB from before SP4_MACH_CRED (no `clients.mach_cred` column)
+    /// opens: the column is backfilled, its clients read as SP4_NONE
+    /// (what they negotiated), and the flag then round-trips.
+    #[tokio::test]
+    async fn a_db_written_before_mach_cred_gains_the_column() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            let column = ",\n    -- SP4_MACH_CRED state protection (ClientRecord::mach_cred).\n    mach_cred INTEGER NOT NULL DEFAULT 0";
+            assert!(SCHEMA_SQL.contains(column), "the test must remove the real column");
+            conn.execute_batch(&SCHEMA_SQL.replace(column, "")).unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_version (id, version) VALUES (1, ?1)",
+                rusqlite::params![SCHEMA_VERSION],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO clients (client_id, owner, verifier, server_owner, server_scope,
+                  sequence_id, flags, principal, confirmed, last_cs_sequence, cs_cached_res,
+                  initial_cs_sequence, reclaim_complete)
+                 VALUES (7, x'01', 1, 'flint-nfs', x'02', 0, 0, x'03', 1, NULL, NULL, 1, 0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let b = SqliteBackend::open(&path).expect("a pre-mach_cred DB must still open");
+        let mut c = b.get_client(7).await.unwrap().expect("the old row reads back");
+        assert!(!c.mach_cred, "an old client was SP4_NONE");
+        c.mach_cred = true;
+        b.put_client(&c).await.unwrap();
+        assert!(b.get_client(7).await.unwrap().unwrap().mach_cred);
+    }
+
     /// The whole cost argument for putting geometry in the state backend
     /// rests on this: a NEW table needs no schema-version bump, because
     /// `execute_batch(SCHEMA_SQL)` runs BEFORE the version check and
@@ -3477,6 +3533,7 @@ mod tests {
                 cs_cached_res: Some(cs.clone()),
                 initial_cs_sequence: 1,
                 reclaim_complete: true,
+                mach_cred: true,
             };
             b.put_client(&client).await.unwrap();
             b.put_session(&SessionRecord {
