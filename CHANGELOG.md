@@ -156,6 +156,11 @@ covered by the stability guarantee.
 
 ### Changed
 
+- **krb5 1.0.0** (2026-10-16), the Kerberos acceptor's crate, up from
+  0.12.1. Its API is settled for 1.0: the raw crypto modules are private
+  and its errors and option structs are `#[non_exhaustive]`. The NFS
+  server uses none of what changed, so nothing else moves.
+
 - **NFS Kerberos: the acceptor is the `krb5` crate (0.2)** (2026-10-13).
   `nfs/kerberos.rs` and `nfs/krb/` moved to the standalone `krb5` crate;
   `FLINT_NFS_KRB5_CLOCK_SKEW_SECS` is still read here and passed to the
