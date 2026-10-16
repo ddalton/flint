@@ -76,8 +76,11 @@ spec:
           [ "$p" = "nfs/$want@FLINT.TEST" ] || { echo "FAIL: principal '$p', want nfs/$want@FLINT.TEST"; exit 1; }
           # The MDS pod mounts its shard's keytab Secret and no other.
           mds=$(kubectl -n flint-system get pod -l app=flint-pnfs-mds -o jsonpath='{.items[0].metadata.name}')
+          # Its keytab and no other (the control TLS Secret aside: a CA
+          # and certificate, no key of the realm).
           secrets=$(kubectl -n flint-system get pod "$mds" -o jsonpath='{range .spec.volumes[*]}{.secret.secretName}{" "}{end}')
-          [ "$(echo $secrets)" = flint-pnfs-mds-0-krb5 ] || { echo "FAIL: the MDS mounts Secrets '$secrets'"; exit 1; }
+          krb=$(echo $secrets | tr ' ' '\n' | grep -vx flint-pnfs-control-tls | xargs)
+          [ "$krb" = flint-pnfs-mds-0-krb5 ] || { echo "FAIL: the MDS mounts Secrets '$secrets'"; exit 1; }
           kubectl -n flint-system get pod "$mds" -o jsonpath='{range .spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' |
             grep -x 'KRB5_KTNAME=/etc/flint-krb5/krb5.keytab'
           # The keytab holds the shard's principal and nothing else.
