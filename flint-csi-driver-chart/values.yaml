@@ -535,6 +535,13 @@ nfs:
       keytabPath: /etc/krb5.keytab
       # The realm's krb5.conf for rpc.gssd ("" leaves the node's alone).
       krb5ConfPath: /etc/krb5.conf
+      # systemd units the operator's node agent starts once the keys are in
+      # and restarts when they change (krb5-operator >= 0.4,
+      # restartServices), e.g. [rpc-gssd]: nfs-utils' rpc-gssd unit runs
+      # only once /etc/krb5.keytab exists, so a node that booted before its
+      # keys has no rpc.gssd until something starts it. Off by default: the
+      # agent then mounts the host's systemd socket and can start any unit.
+      restartServices: []
 
 # pNFS support (Parallel NFS, RFC 8881) — opt-in.
 #
