@@ -325,13 +325,24 @@ spec:
           [ "$(kubectl -n "$NAMESPACE" exec pnfs-b -- cat /data/a)" = from-a ]
           [ "$(kubectl -n "$NAMESPACE" exec pnfs-c -- cat /data/c)" = from-c ]
           # Detach: pnfs-a's node loses solo-pvc, and keeps krb5-pvc.
+          # In the order Kubernetes does it: kubelet unmounts (NodeUnpublish,
+          # NodeUnstage) and drops the volume from the node's volumesInUse;
+          # only then does the attach/detach controller delete the
+          # VolumeAttachment. On a Ready node nothing times out, so a stuck
+          # unstage holds the attachment forever: name the stuck layer.
           kubectl -n "$NAMESPACE" delete pod pnfs-c --grace-period=1
-          for i in $(seq 60); do
-            kubectl get volumeattachments -o jsonpath='{range .items[*]}{.spec.source.persistentVolumeName}{"\n"}{end}' | grep -qx "$pv" || break
-            sleep 2
-          done
-          if kubectl get volumeattachments -o jsonpath='{range .items[*]}{.spec.source.persistentVolumeName}{"\n"}{end}' | grep -qx "$pv"; then
-            echo "FAIL: solo-pvc is still attached"; exit 1
+          in_use() { kubectl get node "$na" -o jsonpath='{range .status.volumesInUse[*]}{@}{"\n"}{end}' | grep -q "\^$pv~m"; }
+          for i in $(seq 60); do in_use || break; sleep 2; done
+          if in_use; then
+            echo "FAIL: kubelet on $na still has $pv in use: NodeUnstage did not finish"
+            docker exec "$na" sh -c 'journalctl -u kubelet --no-pager | grep -E "UnmountDevice|$pv" | tail -5' || true
+            exit 1
+          fi
+          attached() { kubectl get volumeattachments -o jsonpath='{range .items[*]}{.spec.source.persistentVolumeName}{"\n"}{end}' | grep -qx "$pv"; }
+          for i in $(seq 60); do attached || break; sleep 2; done
+          if attached; then
+            echo "FAIL: $pv left $na's volumesInUse but is still attached"
+            kubectl get volumeattachments -o wide | grep "$pv"; exit 1
           fi
           before=$(mds_log | grep -acE "refused: volume $vol is not attached" || true)
           docker exec "$na" mkdir -p /mnt/rogue
