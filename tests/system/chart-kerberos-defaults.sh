@@ -185,6 +185,7 @@ PNFS=(--set pnfs.enabled=true --set pnfs.server.enabled=true --set pnfs.server.m
 PK=(--set pnfs.kerberos.enabled=true --set nfs.kerberos.realm=CORP.EXAMPLE --set nfs.kerberos.realmRef=corp)
 
 if renders "pNFS, Kerberos off" "${PNFS[@]}"; then
+  check "pNFS, Kerberos off" "no data server names" bash -c "! grep -q FLINT_PNFS_KRB5_DS '$TMP/out.yaml'"
   check "pNFS, Kerberos off" "no MDS principal" bash -c "! grep -q 'kind: KerberosPrincipal' '$TMP/out.yaml'"
   check "pNFS, Kerberos off" "no keytab, no floor anywhere" bash -c "! grep -qE 'KRB5_KTNAME|FLINT_NFS_MIN_SEC|PNFS_KRB5_MDS_NAME_BASE|flint-pnfs-krb5|host-etc-hosts' '$TMP/out.yaml'"
   check "pNFS, Kerberos off" "no KerberosNodeKeytab" bash -c "! grep -q 'kind: KerberosNodeKeytab' '$TMP/out.yaml'"
@@ -209,7 +210,7 @@ if renders "pNFS Kerberos on" "${PNFS[@]}" "${PK[@]}"; then
       for kv in KRB5_KTNAME=/etc/flint-krb5/krb5.keytab FLINT_NFS_MIN_SEC=krb5i \
         FLINT_NFS_REQUIRE_MACH_CRED=true FLINT_NFS_ENFORCE_PERMISSIONS=enforce \
         FLINT_NFS_GSS_ANON=65534:65534 FLINT_NFS_ATTACHED_NODES_ONLY=true FLINT_NFS_ROOT_SQUASH=- \
-        FLINT_PNFS_LAYOUTS_FOR_GSS=-; do
+        FLINT_PNFS_LAYOUTS_FOR_GSS=true; do
         got=$(env_of "${kv%%=*}" "$TMP/doc.yaml")
         if [ "$got" = "${kv#*=}" ]; then echo "✓ $c: ${kv%%=*}=${kv#*=}"
         else echo "✗ $c: ${kv%%=*} is $got, want ${kv#*=}"; fails=$((fails + 1)); fi
@@ -239,6 +240,51 @@ if renders "pNFS Kerberos on" "${PNFS[@]}" "${PK[@]}"; then
     echo "✗ pNFS Kerberos on: no ClusterRole for the MDS"; fails=$((fails + 1))
   fi
   check "pNFS Kerberos on" "bound to the MDS's ServiceAccount" doc_of ClusterRoleBinding t-flint-csi-driver-chart-pnfs-mds
+fi
+
+# Phase 3: the data servers' principals, keys, server env, and the nodes'
+# names for them.
+if renders "pNFS Kerberos, data servers" "${PNFS[@]}" "${PK[@]}" --set pnfs.server.dataServers.count=2 \
+    --set pnfs.server.dataServers.multipathServices=1; then
+  c="pNFS Kerberos, data servers"
+  if doc_of KerberosPrincipal flint-pnfs-ds; then
+    check "$c" "a principal per pod of the StatefulSet" grep -q 'statefulSet: flint-pnfs-ds$' "$TMP/doc.yaml"
+    check "$c" "for nfs/" grep -q 'services: \[nfs\]' "$TMP/doc.yaml"
+    check "$c" "into flint-pnfs-ds-krb5" grep -q 'secretName: flint-pnfs-ds-krb5$' "$TMP/doc.yaml"
+  else
+    echo "✗ $c: no KerberosPrincipal flint-pnfs-ds"; fails=$((fails + 1))
+  fi
+  if doc_of StatefulSet flint-pnfs-ds; then
+    for kv in KRB5_KTNAME=/etc/flint-krb5/krb5.keytab FLINT_NFS_MIN_SEC=krb5i FLINT_NFS_REQUIRE_MACH_CRED=- \
+      FLINT_NFS_ENFORCE_PERMISSIONS=-; do
+      got=$(env_of "${kv%%=*}" "$TMP/doc.yaml")
+      if [ "$got" = "${kv#*=}" ]; then echo "✓ $c: ${kv%%=*}=${kv#*=}"
+      else echo "✗ $c: ${kv%%=*} is $got, want ${kv#*=}"; fails=$((fails + 1)); fi
+    done
+    check "$c" "each pod mounts its own keytab only" grep -q 'subPathExpr: $(POD_NAME).keytab' "$TMP/doc.yaml"
+    check "$c" "from flint-pnfs-ds-krb5" grep -q 'secretName: flint-pnfs-ds-krb5$' "$TMP/doc.yaml"
+  else
+    echo "✗ $c: no StatefulSet flint-pnfs-ds"; fails=$((fails + 1))
+  fi
+  ds=$(env_of FLINT_PNFS_KRB5_DS)
+  want="flint-pnfs-ds-0.flint-system.svc.cluster.local=flint-pnfs-ds-0.flint-pnfs-ds-headless.flint-system.svc.cluster.local"
+  want="$want,flint-pnfs-ds-0-mp1.flint-system.svc.cluster.local=flint-pnfs-ds-0.flint-pnfs-ds-headless.flint-system.svc.cluster.local"
+  want="$want,flint-pnfs-ds-1.flint-system.svc.cluster.local=flint-pnfs-ds-1.flint-pnfs-ds-headless.flint-system.svc.cluster.local"
+  want="$want,flint-pnfs-ds-1-mp1.flint-system.svc.cluster.local=flint-pnfs-ds-1.flint-pnfs-ds-headless.flint-system.svc.cluster.local"
+  if [ "$ds" = "$want" ]; then echo "✓ $c: the nodes name every data server address"
+  else echo "✗ $c: FLINT_PNFS_KRB5_DS is $ds"; fails=$((fails + 1)); fi
+fi
+
+if renders "pNFS Kerberos, data servers off" "${PNFS[@]}" "${PK[@]}" --set pnfs.kerberos.dataServers=false; then
+  c="pNFS Kerberos, data servers off"
+  check "$c" "no data server principal" bash -c "! grep -q 'name: flint-pnfs-ds-krb5\|statefulSet: flint-pnfs-ds' '$TMP/out.yaml'"
+  expect "$c" FLINT_PNFS_KRB5_DS -
+  doc_of StatefulSet flint-pnfs-ds
+  check "$c" "no keytab on the data servers" bash -c "! grep -q KRB5_KTNAME '$TMP/doc.yaml'"
+  doc_of Deployment flint-pnfs-mds
+  got=$(env_of FLINT_PNFS_LAYOUTS_FOR_GSS "$TMP/doc.yaml")
+  if [ "$got" = - ]; then echo "✓ $c: no layouts for Kerberos callers"
+  else echo "✗ $c: FLINT_PNFS_LAYOUTS_FOR_GSS is $got"; fails=$((fails + 1)); fi
 fi
 
 if renders "pNFS and RWX Kerberos on" "${PNFS[@]}" "${PK[@]}" --set nfs.kerberos.enabled=true; then

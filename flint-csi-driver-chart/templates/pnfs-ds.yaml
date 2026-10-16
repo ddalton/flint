@@ -213,6 +213,12 @@ spec:
             {{- end }}
             - name: RUST_LOG
               value: {{ .Values.pnfs.server.logLevel | default "info" | quote }}
+            {{- if include "flint-csi-driver-chart.pnfsKrb5DataServers" . }}
+            {{- $pk := .Values.pnfs.kerberos }}
+            # Kerberos (pnfs.kerberos.dataServers): this pod's own key and
+            # the MDS's server env (floor, allowlist, directory).
+            {{- include "flint-csi-driver-chart.krb5ServerEnv" (dict "root" . "minSec" $pk.minSec "requireMachCred" false "enforcePermissions" "") | nindent 12 }}
+            {{- end }}
             {{- if .Values.pnfs.controlToken.enabled }}
             # Attached to registration/heartbeat gRPC — see
             # templates/pnfs-security.yaml.
@@ -244,6 +250,11 @@ spec:
               mountPath: /etc/flint
             - name: data
               mountPath: /data
+            {{- if include "flint-csi-driver-chart.pnfsKrb5DataServers" . }}
+            # This pod's keytab alone, out of the Secret that holds every
+            # pod's (hostPrincipals). A rekey needs a restart.
+            {{- include "flint-csi-driver-chart.krb5ServerMounts" (dict "root" . "keytabSubPathExpr" "$(POD_NAME).keytab") | nindent 12 }}
+            {{- end }}
           {{- with .Values.pnfs.server.dataServers.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -252,6 +263,9 @@ spec:
         - name: config
           configMap:
             name: flint-pnfs-ds-config
+        {{- if include "flint-csi-driver-chart.pnfsKrb5DataServers" . }}
+        {{- include "flint-csi-driver-chart.krb5ServerVolumes" (dict "root" . "keytabSecret" "flint-pnfs-ds-krb5") | nindent 8 }}
+        {{- end }}
   volumeClaimTemplates:
     - metadata:
         name: data

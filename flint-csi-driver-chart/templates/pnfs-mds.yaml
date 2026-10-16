@@ -313,8 +313,15 @@ spec:
             # Kerberos (pnfs.kerberos): this shard's key,
             # nfs/flint-pnfs-mds-{{ $i }}.<namespace>.svc.<clusterDomain>,
             # and the same server security env as the RWX servers.
-            # Kerberos callers get no layouts (FLINT_PNFS_LAYOUTS_FOR_GSS).
+            # Kerberos callers get layouts only when the data servers do
+            # Kerberos too (FLINT_PNFS_LAYOUTS_FOR_GSS).
             {{- include "flint-csi-driver-chart.krb5ServerEnv" (dict "root" $ "minSec" $pk.minSec "requireMachCred" $pk.requireMachCred "enforcePermissions" $pk.enforcePermissions) | nindent 12 }}
+            {{- if include "flint-csi-driver-chart.pnfsKrb5DataServers" $ }}
+            # The data servers do Kerberos (pnfs.kerberos.dataServers):
+            # Kerberos callers get layouts again.
+            - name: FLINT_PNFS_LAYOUTS_FOR_GSS
+              value: "true"
+            {{- end }}
             {{- if $pk.attachedNodesOnly }}
             # Each volume only to the nodes it is attached to.
             - name: FLINT_NFS_ATTACHED_NODES_ONLY

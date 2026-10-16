@@ -317,6 +317,39 @@ flint-nfs-krb5-keytab
 - name: FLINT_NFS_KRB5_HOSTS_FILE
   value: /host/etc/hosts
 {{- end }}
+{{- if include "flint-csi-driver-chart.pnfsKrb5DataServers" . }}
+# And each data server's Services (its own, its multipath ones) to the
+# name its principal is for (nfs_krb5::PNFS_DS_ENV).
+- name: FLINT_PNFS_KRB5_DS
+  value: {{ include "flint-csi-driver-chart.pnfsKrb5DsNames" . | quote }}
+{{- end }}
+{{- end }}
+
+{{/*
+pnfs.kerberos.dataServers in effect (Phase 3): the data servers do
+Kerberos, so Kerberos callers get layouts.
+*/}}
+{{- define "flint-csi-driver-chart.pnfsKrb5DataServers" -}}
+{{- if and (include "flint-csi-driver-chart.pnfsKrb5Enabled" .) (.Values.pnfs.kerberos).dataServers -}}true{{- end -}}
+{{- end }}
+
+{{/*
+FLINT_PNFS_KRB5_DS: <service>=<principal host> for every data server
+Service. The principal host is the pod's DNS name under the StatefulSet's
+headless Service, as krb5-operator's hostPrincipals name it.
+*/}}
+{{- define "flint-csi-driver-chart.pnfsKrb5DsNames" -}}
+{{- $base := include "flint-csi-driver-chart.pnfsKrb5NameBase" . -}}
+{{- $mp := int (.Values.pnfs.server.dataServers.multipathServices | default 0) -}}
+{{- $out := list -}}
+{{- range $i := until (int .Values.pnfs.server.dataServers.count) -}}
+{{- $host := printf "flint-pnfs-ds-%d.flint-pnfs-ds-headless.%s" $i $base -}}
+{{- $out = append $out (printf "flint-pnfs-ds-%d.%s=%s" $i $base $host) -}}
+{{- range $j := until $mp -}}
+{{- $out = append $out (printf "flint-pnfs-ds-%d-mp%d.%s=%s" $i (add1 $j) $base $host) -}}
+{{- end -}}
+{{- end -}}
+{{- join "," $out -}}
 {{- end }}
 
 {{- define "flint-csi-driver-chart.nfsKrb5NodeMounts" -}}
@@ -473,9 +506,17 @@ flint-csi-driver-chart.krb5ServerMounts.
 
 {{- define "flint-csi-driver-chart.krb5ServerMounts" -}}
 {{- $l := .root.Values.nfs.kerberos.ldap -}}
+{{- if .keytabSubPathExpr }}
+# One file of the keytab Secret: this pod's (hostPrincipals).
+- name: krb5-keytab
+  mountPath: /etc/flint-krb5/krb5.keytab
+  subPathExpr: {{ .keytabSubPathExpr }}
+  readOnly: true
+{{- else }}
 - name: krb5-keytab
   mountPath: /etc/flint-krb5
   readOnly: true
+{{- end }}
 {{- if and $l.enabled (or $l.ca.configMap $l.ca.secret) }}
 - name: ldap-ca
   mountPath: /etc/flint-ldap-ca
