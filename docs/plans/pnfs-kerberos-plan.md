@@ -78,6 +78,18 @@ compared. Evidence: `tests/krb5/results/pnfs-phase0-2026-10-16/`.
    is set), and E1 must be rerun against a DS that refuses: whether the
    client then falls back to the MDS or fails the I/O is still unknown.
 
+**E5 (TokenReview half), kind v1.34:** a token from `kubectl create token
+<sa> --audience flint-pnfs-mds --bound-object-kind Pod ...` reviews as
+`system:serviceaccount:<ns>:<sa>` with `extra` carrying
+`authentication.kubernetes.io/pod-name`, `pod-uid`, `node-name` and
+`node-uid`; the same token reviewed for audience `flint-pnfs-ds` is
+refused ("token audiences [flint-pnfs-mds] is invalid"). So Phase 5's
+per-DS identity (pod name == `device_id`) needs no per-pod certificate.
+Caveat: the token still reviewed `authenticated: true` 3 s after its pod
+was deleted (the apiserver caches token results briefly), so revocation
+is not instant; Phase 5 must not rely on it. The tonic/rustls half of E5
+is a compile spike, left to Phase 5.
+
 ## Phase 1: the MDS gets Kerberos
 
 Gives the floor, allowlist, idmap, enforced permissions, root squash and
@@ -255,6 +267,6 @@ differentials that guard AUTH_SYS.
    AUTH_SYS (rerun E1 in Phase 3).
 4. SP4_NONE accepted from a DS after asking SP4_MACH_CRED (E2).
 5. Kernel recovery from a refused DS filehandle (E4).
-6. TokenReview `pod-name` extra; tonic + rustls (E5).
+6. ~~TokenReview `pod-name` extra~~ — settled (E5); tonic + rustls still a spike.
 7. Whether the MDS honours `FLINT_NFS_ENFORCE_PERMISSIONS` and root squash
    through the shared ioops (grep + unit test in Phase 1).
