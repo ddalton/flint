@@ -149,7 +149,7 @@ spec:
             - name: NFS_VERBOSE
               value: "true"
             {{- end }}
-            {{- with .Values.nfs.enforcePermissions }}
+            {{- with include "flint-csi-driver-chart.nfsEnforcePermissions" . }}
             - name: NFS_ENFORCE_PERMISSIONS
               value: {{ . | quote }}
             {{- end }}

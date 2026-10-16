@@ -107,6 +107,9 @@ jobs:
           install -m 0755 chainsaw "$HOME/bin/chainsaw"
           echo "$HOME/bin" >> "$GITHUB_PATH"
 
+      - name: tests/system/chart-kerberos-defaults.sh
+        run: tests/system/chart-kerberos-defaults.sh
+
       - name: tests/system/kind-nfs-only.sh
         env:
           TAG: ci-${{ github.sha }}

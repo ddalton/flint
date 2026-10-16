@@ -352,11 +352,11 @@ nfs:
   # Image pull secrets for NFS server (if registry requires authentication)
   imagePullSecrets: []
 
-  # FLINT_NFS_ENFORCE_PERMISSIONS for every NFS server: "warn" (the
-  # server's default: evaluate POSIX permissions, log what would be
-  # denied, deny nothing), "enforce", or "off". Empty: the default. An
-  # AUTH_SYS uid is a claim; a Kerberos caller's (nfs.kerberos.idmap) is
-  # authenticated.
+  # FLINT_NFS_ENFORCE_PERMISSIONS for every NFS server: "warn" (evaluate
+  # POSIX permissions, log what would be denied, deny nothing), "enforce",
+  # or "off". Empty: "enforce" with nfs.kerberos.enabled, else the
+  # server's default, "warn". An AUTH_SYS uid is a claim; a Kerberos
+  # caller's (nfs.kerberos.idmap) is authenticated.
   enforcePermissions: ""
 
   # knfsd's root_squash (FLINT_NFS_ROOT_SQUASH): uid 0 from any client, by
@@ -369,6 +369,11 @@ nfs:
   # Kerberos for RWX volumes (sec=krb5, krb5i, krb5p), with principals and
   # keytabs from krb5-operator (github.com/ddalton/krb5-operator, 0.3+),
   # which must be installed, with a KerberosRealm.
+  #
+  # Secure by default: enabled, every RWX volume is Kerberos only (minSec
+  # krb5i), served only to the nodes it is attached to
+  # (attachedNodesOnly), with permissions enforced (nfs.enforcePermissions).
+  # Each can be relaxed explicitly; see docs/nfs-kerberos.md.
   #
   # - Every NFS server answers to ONE principal, nfs/<serverName>: the
   #   chart makes it (KerberosPrincipal) and every server pod mounts its
@@ -384,10 +389,9 @@ nfs:
   #   once the keytab is installed.
   # - Mount with the StorageClass below (mountOptions sec=<sec>).
   #
-  # Identity: the server maps no principal to a uid (requests under
-  # Kerberos carry none), so Kerberos authenticates the node and protects
-  # the wire (krb5i: integrity, krb5p: privacy); it does not give
-  # per-user file permissions. Keep ownership-sensitive workloads on sec=sys.
+  # Identity: a Kerberos call carries no uid. A principal is the unix
+  # identity idmap gives it (the nodes' machine principals are
+  # machineIdentity, root by default); one no rule names is anonIdentity.
   kerberos:
     enabled: false
     # The realm (EXAMPLE.COM), the KerberosRealm (krb5-operator) and its
@@ -400,9 +404,11 @@ nfs:
     # .svc.<clusterDomain> to the realm (krb5-operator writes that mapping).
     serverName: ""
     clusterDomain: cluster.local
-    # FLINT_NFS_MIN_SEC for every NFS server: "krb5" or "krb5i" refuses
-    # sec=sys mounts of every RWX volume. Empty: no floor.
-    minSec: ""
+    # FLINT_NFS_MIN_SEC for every NFS server: "krb5i" (the default) or
+    # "krb5" refuses sec=sys mounts of every RWX volume. "" for no floor,
+    # which also needs attachedNodesOnly: false (a sec=sys mount has no
+    # node identity to admit).
+    minSec: krb5i
     # Who may connect with Kerberos (FLINT_NFS_GSS_PRINCIPALS): patterns
     # <component>[/<component>...]@<REALM>, '*' within a component. A
     # Kerberos call carries no uid to check, so a principal that connects
@@ -432,10 +438,11 @@ nfs:
     # to (its VolumeAttachments), by their machine principals: only they
     # make NFS clients and sessions, a user's calls ride an attached node's
     # session, and a detached node loses its sessions at its next call.
-    # Every RWX mount must then be Kerberos (AUTH_SYS has no node identity:
-    # set minSec). The servers get a service account that reads
-    # VolumeAttachments and Nodes (cluster-wide, read-only).
-    attachedNodesOnly: false
+    # Every RWX mount must then be Kerberos (AUTH_SYS has no node
+    # identity). The servers get a service account that reads
+    # VolumeAttachments and Nodes (cluster-wide, read-only). false: every
+    # node with an allowed principal reaches every volume.
+    attachedNodesOnly: true
     # Delete or Retain the principals when the release is uninstalled.
     deletionPolicy: Delete
     storageClass:

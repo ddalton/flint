@@ -14,6 +14,18 @@ covered by the stability guarantee.
 
 ### Security
 
+- **Kerberos is secure by default** (2026-10-16). With
+  `nfs.kerberos.enabled`, the chart now defaults to `minSec: krb5i`,
+  `attachedNodesOnly: true` and `nfs.enforcePermissions: enforce`. Before,
+  each was opt-in, so turning Kerberos on alone still let `sec=sys` mounts
+  claim any uid, let any node with a machine key reach every volume, and
+  only logged permission denials. **Breaking for Kerberos installs:** every
+  RWX volume is Kerberos only, and a `sec=sys` StorageClass stops
+  mounting. Each setting can be relaxed explicitly; `minSec: ""` with
+  `attachedNodesOnly` on fails to render, since it would refuse every
+  mount. `tests/system/chart-kerberos-defaults.sh` checks the defaults and
+  opt-outs, and the kind Kerberos suite now runs on the defaults.
+
 - **krb5 0.12.1** (2026-10-15), from 0.2. The NFS server's RPCSEC_GSS
   acceptor parses AP-REQs from any peer that reaches port 2049; before
   krb5 0.12.1 a malformed one could panic it before any decryption (found
