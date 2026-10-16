@@ -285,6 +285,32 @@ if renders "pNFS Kerberos, data servers" "${PNFS[@]}" "${PK[@]}" --set pnfs.serv
   else echo "✗ $c: FLINT_PNFS_KRB5_DS is $ds"; fails=$((fails + 1)); fi
 fi
 
+# Phase 4: signed data server filehandles, on with pNFS Kerberos.
+if renders "pNFS Kerberos, signed handles" "${PNFS[@]}" "${PK[@]}"; then
+  c="pNFS Kerberos, signed handles"
+  check "$c" "a key Secret" doc_of Secret flint-pnfs-fh-key
+  check "$c" "its key is <id>:<64 hex>" bash -c "grep -A8 'name: flint-pnfs-fh-key' '$TMP/out.yaml' | grep -oE 'current: [A-Za-z0-9+/=]+' | cut -d' ' -f2 | base64 -d | grep -qE '^1:[0-9a-f]{64}\$'"
+  doc_of StatefulSet flint-pnfs-ds
+  check "$c" "the data servers have the key" grep -q 'name: FLINT_PNFS_FH_KEY$' "$TMP/doc.yaml"
+  got=$(env_of FLINT_PNFS_DS_FH_AUTH "$TMP/doc.yaml")
+  if [ "$got" = enforce ]; then echo "✓ $c: the data servers enforce"; else echo "✗ $c: FLINT_PNFS_DS_FH_AUTH is $got"; fails=$((fails + 1)); fi
+  doc_of Deployment flint-pnfs-mds
+  check "$c" "the MDS signs" grep -q 'name: FLINT_PNFS_FH_KEY$' "$TMP/doc.yaml"
+  check "$c" "the MDS enforces nothing" bash -c "! grep -q FLINT_PNFS_DS_FH_AUTH '$TMP/doc.yaml'"
+fi
+if renders "pNFS, signed handles off" "${PNFS[@]}"; then
+  check "pNFS, signed handles off" "no key" bash -c "! grep -qE 'flint-pnfs-fh-key|FLINT_PNFS_FH_KEY' '$TMP/out.yaml'"
+fi
+if renders "pNFS, signed handles without Kerberos" "${PNFS[@]}" --set pnfs.dsAuth.enabled=true --set pnfs.dsAuth.enforce=false; then
+  c="pNFS, signed handles without Kerberos"
+  check "$c" "a key Secret" doc_of Secret flint-pnfs-fh-key
+  doc_of StatefulSet flint-pnfs-ds
+  check "$c" "not enforcing" bash -c "! grep -q FLINT_PNFS_DS_FH_AUTH '$TMP/doc.yaml'"
+fi
+if renders "pNFS Kerberos, signed handles off" "${PNFS[@]}" "${PK[@]}" --set pnfs.kerberos.dsAuth=false; then
+  check "pNFS Kerberos, signed handles off" "no key" bash -c "! grep -qE 'flint-pnfs-fh-key|FLINT_PNFS_FH_KEY' '$TMP/out.yaml'"
+fi
+
 if renders "pNFS Kerberos, data servers off" "${PNFS[@]}" "${PK[@]}" --set pnfs.kerberos.dataServers=false; then
   c="pNFS Kerberos, data servers off"
   check "$c" "no data server principal" bash -c "! grep -q 'name: flint-pnfs-ds-krb5\|statefulSet: flint-pnfs-ds' '$TMP/out.yaml'"

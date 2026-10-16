@@ -33,6 +33,31 @@ data:
   token: {{ randAlphaNum 48 | b64enc }}
   {{- end }}
 {{- end }}
+{{- if and (include "flint-csi-driver-chart.pnfsDsAuth" .) (not .Values.pnfs.dsAuth.existingSecret) }}
+{{- $secretName := "flint-pnfs-fh-key" }}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $secretName }}
+---
+# The data server filehandle signing key (pnfs.dsAuth, Phase 4). Generated
+# once and reused on upgrades: a new key would invalidate every layout the
+# clients hold (they recover with fresh layouts, E4, but all at once).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: flint-pnfs
+type: Opaque
+data:
+  {{- if and $existing $existing.data (index $existing.data "current") }}
+  current: {{ index $existing.data "current" }}
+  {{- if index $existing.data "previous" }}
+  previous: {{ index $existing.data "previous" }}
+  {{- end }}
+  {{- else }}
+  current: {{ printf "1:%s" (sha256sum (randAlphaNum 64)) | b64enc }}
+  {{- end }}
+{{- end }}
 {{- if and (include "flint-csi-driver-chart.pnfsControlTls" .) (not .Values.pnfs.controlTls.existingSecret) }}
 {{- $secretName := "flint-pnfs-control-tls" }}
 {{- $existing := lookup "v1" "Secret" .Release.Namespace $secretName }}

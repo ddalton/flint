@@ -338,6 +338,37 @@ pnfs.kerberos.attachedNodesOnly is on.
 {{- end }}
 
 {{/*
+Signed data server filehandles (pnfs.dsAuth, or pnfs.kerberos.dsAuth with
+pNFS Kerberos on): "true", else empty.
+*/}}
+{{- define "flint-csi-driver-chart.pnfsDsAuth" -}}
+{{- if and .Values.pnfs.server.enabled (or (.Values.pnfs.dsAuth).enabled (and (include "flint-csi-driver-chart.pnfsKrb5Enabled" .) (.Values.pnfs.kerberos).dsAuth)) -}}true{{- end -}}
+{{- end }}
+
+{{/*
+The signing key env (arguments: root, ds): both keys from the Secret, and
+for a data server the enforcement.
+*/}}
+{{- define "flint-csi-driver-chart.pnfsDsFhEnv" -}}
+{{- $secret := .root.Values.pnfs.dsAuth.existingSecret | default "flint-pnfs-fh-key" -}}
+- name: FLINT_PNFS_FH_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ $secret }}
+      key: current
+- name: FLINT_PNFS_FH_KEY_PREVIOUS
+  valueFrom:
+    secretKeyRef:
+      name: {{ $secret }}
+      key: previous
+      optional: true
+{{- if and .ds .root.Values.pnfs.dsAuth.enforce }}
+- name: FLINT_PNFS_DS_FH_AUTH
+  value: enforce
+{{- end }}
+{{- end }}
+
+{{/*
 TLS on the pNFS control path (pnfs.controlTls, Phase 5): "true", else empty.
 */}}
 {{- define "flint-csi-driver-chart.pnfsControlTls" -}}

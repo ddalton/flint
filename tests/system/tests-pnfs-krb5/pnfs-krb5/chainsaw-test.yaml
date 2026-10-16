@@ -164,6 +164,13 @@ spec:
             if echo "$l" | grep -F 'Refusing sec='; then
               echo "FAIL: a client sent $d calls below the floor"; exit 1
             fi
+            # Phase 4: only signed handles, and every one the MDS handed
+            # out verified for its node's session.
+            echo "$l" | grep -F 'Filehandles: signed handles only' ||
+              { echo "FAIL: $d does not enforce signed handles"; echo "$l" | grep -F Filehandles; exit 1; }
+            if echo "$l" | grep -F 'DS PUTFH refused'; then
+              echo "FAIL: $d refused a handle the MDS handed out"; exit 1
+            fi
           done
           kubectl -n flint-system logs "$mds" -c mds --tail=-1 | grep -F 'layouts for Kerberos callers granted'
           echo PASS

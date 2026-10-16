@@ -232,6 +232,11 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             {{- end }}
+            {{- if include "flint-csi-driver-chart.pnfsDsAuth" . }}
+            # Signed data server filehandles (pnfs.dsAuth): the key, and
+            # enforcement.
+            {{- include "flint-csi-driver-chart.pnfsDsFhEnv" (dict "root" . "ds" true) | nindent 12 }}
+            {{- end }}
             {{- if include "flint-csi-driver-chart.pnfsControlTls" . }}
             # TLS on the control path (pnfs.controlTls).
             {{- include "flint-csi-driver-chart.pnfsControlTlsEnv" . | nindent 12 }}

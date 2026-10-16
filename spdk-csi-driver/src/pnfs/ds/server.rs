@@ -147,6 +147,19 @@ impl DataServer {
             .ok()
             .filter(|k| !k.trim().is_empty())
             .map(|k| Arc::new(RpcSecGssManager::new(Some(k))));
+        // Phase 4: the MDS's signed handles (FLINT_PNFS_FH_KEY), checked
+        // here (FLINT_PNFS_DS_FH_AUTH). A bad key or mode stops the DS.
+        let fh_policy = crate::pnfs::ds_fh::DsPolicy::from_env()
+            .map_err(|e| crate::pnfs::Error::Config(format!("data server filehandles: {e}")))?;
+        info!(
+            "✓ Filehandles: {}",
+            match (&fh_policy.keys, fh_policy.enforce) {
+                (Some(_), true) => "signed handles only (FLINT_PNFS_DS_FH_AUTH=enforce)",
+                (Some(_), false) => "signed handles verified, unsigned ones still served",
+                (None, _) => "unsigned (no FLINT_PNFS_FH_KEY)",
+            }
+        );
+        crate::pnfs::ds_fh::init_ds_policy(fh_policy);
         info!(
             "✓ Security: floor {}; Kerberos {}",
             floor.floor().name(),
@@ -451,6 +464,10 @@ impl DataServer {
         // Process operations (only READ/WRITE/COMMIT supported)
         let mut results: Vec<(u32, Nfs4Status, OpBody)> = Vec::new();  // (opcode, status, body)
         let mut current_fh: Option<Vec<u8>> = None;
+        // The principal that made this compound's session's client, once
+        // SEQUENCE has named the session: Phase 4 checks a signed handle
+        // against its node.
+        let mut session_owner: Option<Vec<u8>> = None;
 
         for _ in 0..op_count {
             let opcode = match decoder.decode_u32() {
@@ -773,6 +790,9 @@ impl DataServer {
                     // Handle SEQUENCE via session manager
                     match session_mgr.handle_sequence(sessionid, sequenceid, slotid, highest_slotid) {
                         Ok(result) => {
+                            // The session id begins with its client id.
+                            let client_id = u64::from_be_bytes(sessionid[..8].try_into().expect("16 bytes"));
+                            session_owner = client_mgr.get_client(client_id).map(|c| c.principal);
                             let mut encoder = XdrEncoder::new();
                             encoder.encode_fixed_opaque(&result.sessionid);
                             encoder.encode_u32(result.sequenceid);
@@ -794,10 +814,25 @@ impl DataServer {
                 opcode::PUTFH => {
                     // Store current filehandle
                     match decoder.decode_filehandle() {
-                        Ok(fh) => {
-                            current_fh = Some(fh.data);
-                            (Nfs4Status::Ok, Bytes::new())
-                        }
+                        // Phase 4 (`pnfs::ds_fh`): a signed handle must
+                        // verify for this session's node; with
+                        // FLINT_PNFS_DS_FH_AUTH=enforce nothing else is
+                        // served. BADHANDLE: the client fetches a fresh
+                        // layout (E4).
+                        Ok(fh) => match crate::pnfs::ds_fh::ds_policy().admit(&fh.data, session_owner.as_deref()) {
+                            Ok(resolved) => {
+                                current_fh = Some(resolved);
+                                (Nfs4Status::Ok, Bytes::new())
+                            }
+                            Err(why) => {
+                                warn!(
+                                    "DS PUTFH refused: {why} (session of {})",
+                                    session_owner.as_deref().map(String::from_utf8_lossy).unwrap_or_default()
+                                );
+                                current_fh = None;
+                                (Nfs4Status::BadHandle, Bytes::new())
+                            }
+                        },
                         Err(_) => (Nfs4Status::BadHandle, Bytes::new()),
                     }
                 }

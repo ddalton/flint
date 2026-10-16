@@ -391,6 +391,16 @@ impl MetadataServer {
         // typo refuses startup rather than serving without the refusal.
         let sec_env = crate::pnfs::mds::krb5::MdsSecEnv::from_env()
             .map_err(crate::pnfs::Error::Config)?;
+        // Phase 4: sign the data server handles of files layouts
+        // (`pnfs::ds_fh`). A malformed key refuses startup.
+        let ds_fh_keys = crate::pnfs::ds_fh::FhKeys::from_env().map_err(crate::pnfs::Error::Config)?;
+        if let Some(k) = &ds_fh_keys {
+            info!(
+                "🔏 data server filehandles signed (key {}{}): bound to the asking session's node; legacy pins get no layout",
+                k.current.id,
+                k.previous.as_ref().map(|p| format!(", previous {} still verifies", p.id)).unwrap_or_default()
+            );
+        }
         let base_dispatcher = Arc::new(
             CompoundDispatcher::new_with_pnfs(
                 Arc::clone(&fh_manager),
@@ -401,7 +411,8 @@ impl MetadataServer {
             .with_read_only(read_only)
             .with_export_access(access)
             .with_require_mach_cred(sec_env.require_mach_cred)
-            .with_gss_layouts_withheld(sec_env.withhold_gss_layouts),
+            .with_gss_layouts_withheld(sec_env.withhold_gss_layouts)
+            .with_ds_fh_keys(ds_fh_keys.clone()),
         );
         if sec_env.require_mach_cred {
             info!(
