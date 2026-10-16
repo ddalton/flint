@@ -287,6 +287,112 @@ fn pnfs_krb5_mds_name<'a>(mount_opts: &str, mds_name: Option<&'a str>) -> Result
     }
 }
 
+/// Node plugin env (chart `pnfs.kerberos`, Phase 3): the pNFS data
+/// servers, as `<service>=<name>` pairs separated by commas: each Service
+/// a data server is reached at (its own and its multipath ones), and the
+/// name its principal is for, `nfs/<name>`
+/// (`flint-pnfs-ds-<i>.flint-pnfs-ds-headless.<ns>.svc.<domain>`, which
+/// krb5-operator's `hostPrincipals` mint). Unset with pNFS Kerberos off.
+pub const PNFS_DS_ENV: &str = "FLINT_PNFS_KRB5_DS";
+
+/// Marks the data servers' `/etc/hosts` lines. Not a suffix of
+/// [`HOSTS_MARKER`]'s lines, nor theirs of it: the RWX/MDS writer drops its
+/// lines for IPs no Kerberos mount uses, and no mount ever names a data
+/// server's IP, so these must not be its lines.
+pub const DS_HOSTS_MARKER: &str = "# flint-pnfs-ds-krb5";
+
+/// [`PNFS_DS_ENV`]'s pairs, in order; malformed items are skipped.
+pub fn parse_pnfs_ds(value: &str) -> Vec<(String, String)> {
+    value
+        .split(',')
+        .filter_map(|item| {
+            let (svc, name) = item.trim().split_once('=')?;
+            let (svc, name) = (svc.trim(), name.trim());
+            (!svc.is_empty() && !name.is_empty()).then(|| (svc.to_string(), name.to_string()))
+        })
+        .collect()
+}
+
+/// `hosts` with the data servers' lines replaced by `entries` (IP to
+/// name), after everything else.
+pub fn ds_hosts_with(hosts: &str, entries: &BTreeMap<String, String>) -> String {
+    let mut out: String = hosts
+        .lines()
+        .filter(|l| !l.trim_end().ends_with(DS_HOSTS_MARKER))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    for (ip, name) in entries {
+        out.push_str(&format!("{ip} {name} {DS_HOSTS_MARKER}\n"));
+    }
+    out
+}
+
+/// Make the data servers' lines of `hosts_file` exactly `entries`, in
+/// place under an exclusive lock (as [`ensure_host_entry`]). Whether it
+/// changed the file.
+pub fn ensure_ds_hosts(hosts_file: &Path, entries: &BTreeMap<String, String>) -> std::io::Result<bool> {
+    use std::os::fd::AsRawFd;
+    let mut f = std::fs::OpenOptions::new().read(true).write(true).open(hosts_file)?;
+    // SAFETY: flock on a descriptor this function owns; released on close.
+    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let current = std::fs::read_to_string(hosts_file)?;
+    let next = ds_hosts_with(&current, entries);
+    if next == current {
+        return Ok(false);
+    }
+    f.set_len(0)?;
+    f.rewind()?;
+    f.write_all(next.as_bytes())?;
+    f.sync_all()?;
+    Ok(true)
+}
+
+/// The node plugin, before a pNFS mount: for a Kerberos mount with the
+/// data servers named ([`PNFS_DS_ENV`]), map every data server address to
+/// its principal's name in the host's hosts file. The Linux client names a
+/// data server by the reverse lookup of the address GETDEVICEINFO gave it,
+/// so without these lines rpc.gssd asks for no principal it can get (and
+/// the client then sent the data server its I/O as AUTH_SYS, plan Phase 0
+/// E1). Each Service name is resolved here, through the cluster's DNS
+/// (the node plugin runs ClusterFirstWithHostNet), to the ClusterIP the
+/// MDS hands out. A name that does not resolve is left out, loudly; none
+/// resolving is an error. Nothing for `sec=sys` or with the env unset.
+pub fn prepare_pnfs_ds_hosts(mount_opts: &str) -> Result<(), String> {
+    if !is_krb5_sec(mount_opts) {
+        return Ok(());
+    }
+    let Some(pairs) = std::env::var(PNFS_DS_ENV).ok().map(|v| parse_pnfs_ds(&v)).filter(|p| !p.is_empty()) else {
+        return Ok(());
+    };
+    let mut entries = BTreeMap::new();
+    for (svc, name) in &pairs {
+        use std::net::ToSocketAddrs;
+        match (svc.as_str(), 2049).to_socket_addrs() {
+            Ok(addrs) => {
+                for a in addrs {
+                    entries.insert(a.ip().to_string(), name.clone());
+                }
+            }
+            Err(e) => eprintln!("⚠️ [NFS_KRB5] data server {svc} does not resolve ({e}): no hosts line for it"),
+        }
+    }
+    if entries.is_empty() {
+        return Err(format!(
+            "a sec=krb5* pNFS mount needs the data servers' addresses, and none of {} resolved",
+            pairs.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    let hosts = std::env::var(HOSTS_FILE_ENV).unwrap_or_else(|_| DEFAULT_HOSTS_FILE.to_string());
+    match ensure_ds_hosts(Path::new(&hosts), &entries) {
+        Ok(true) => eprintln!("🔐 [NFS_KRB5] {hosts}: {} data server address(es) named for rpc.gssd", entries.len()),
+        Ok(false) => {}
+        Err(e) => return Err(format!("writing the data servers' lines to {hosts}: {e}")),
+    }
+    Ok(())
+}
+
 /// The NFS servers' security settings, as the controller passes them on
 /// (chart `nfs.kerberos`, `nfs.enforcePermissions`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -975,5 +1081,50 @@ mod tests {
             .collect();
         want.sort();
         assert_eq!(got, want, "server_pod_parts and {file} disagree: change both, and the chart helper");
+    }
+
+    #[test]
+    fn data_server_names_parse_as_service_name_pairs() {
+        assert_eq!(
+            parse_pnfs_ds("a.ns.svc.x=ds-0.h.ns.svc.x, a-mp1.ns.svc.x=ds-0.h.ns.svc.x,bad,=n,s=,"),
+            vec![
+                ("a.ns.svc.x".to_string(), "ds-0.h.ns.svc.x".to_string()),
+                ("a-mp1.ns.svc.x".to_string(), "ds-0.h.ns.svc.x".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_data_server_lines_and_the_server_lines_leave_each_other_alone() {
+        let base = "127.0.0.1 localhost\n10.0.0.9 mds.ns.svc.x # flint-nfs-krb5\n10.0.0.1 old.ds # flint-pnfs-ds-krb5\n";
+        let ds = BTreeMap::from([
+            ("10.0.0.2".to_string(), "ds-0.h".to_string()),
+            ("10.0.0.3".to_string(), "ds-0.h".to_string()),
+        ]);
+        let after = ds_hosts_with(base, &ds);
+        assert_eq!(
+            after,
+            "127.0.0.1 localhost\n10.0.0.9 mds.ns.svc.x # flint-nfs-krb5\n10.0.0.2 ds-0.h # flint-pnfs-ds-krb5\n10.0.0.3 ds-0.h # flint-pnfs-ds-krb5\n"
+        );
+        // The server writer neither reads the data server lines as its
+        // own nor drops them.
+        assert_eq!(our_entries(&after), BTreeMap::from([("10.0.0.9".to_string(), "mds.ns.svc.x".to_string())]));
+        let rewritten = hosts_with(&after, &BTreeMap::new());
+        assert!(rewritten.contains("10.0.0.2 ds-0.h # flint-pnfs-ds-krb5"));
+        assert!(!rewritten.contains("flint-nfs-krb5"));
+    }
+
+    #[test]
+    fn data_server_lines_are_rewritten_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let hosts = dir.path().join("hosts");
+        std::fs::write(&hosts, "127.0.0.1 localhost\n").unwrap();
+        let ds = BTreeMap::from([("10.0.0.2".to_string(), "ds-0.h".to_string())]);
+        assert!(ensure_ds_hosts(&hosts, &ds).unwrap());
+        assert!(!ensure_ds_hosts(&hosts, &ds).unwrap(), "unchanged the second time");
+        assert_eq!(
+            std::fs::read_to_string(&hosts).unwrap(),
+            "127.0.0.1 localhost\n10.0.0.2 ds-0.h # flint-pnfs-ds-krb5\n"
+        );
     }
 }

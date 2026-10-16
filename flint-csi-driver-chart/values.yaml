@@ -772,6 +772,15 @@ pnfs:
     # handed out before a detach keep working at the data servers until
     # they do Kerberos (docs/plans/pnfs-kerberos-plan.md, Phase 4).
     attachedNodesOnly: true
+    # The data servers do Kerberos too (Phase 3): each gets its own
+    # principal, nfs/flint-pnfs-ds-<i>.flint-pnfs-ds-headless.<ns>.svc.<domain>
+    # (krb5-operator hostPrincipals; each pod mounts only its own key), the
+    # MDS's floor and allowlist, and refuses RPCSEC_GSS without a key. The
+    # nodes map every data server address to its name, and the MDS hands
+    # Kerberos callers layouts again, so their I/O is striped and signed
+    # (krb5i) or sealed (krb5p) end to end. false: no layouts for Kerberos
+    # callers, every byte through the MDS (Phase 1).
+    dataServers: true
     # pNFS volumes mounted with Kerberos: the flint-pnfs class's
     # parameters (pnfs.storageClass) plus mountOptions sec=<sec>.
     storageClass:

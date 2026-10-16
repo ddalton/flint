@@ -90,6 +90,45 @@ subjects:
 - kind: ServiceAccount
   name: flint-pnfs-mds
   namespace: {{ .Release.Namespace }}
+{{- if include "flint-csi-driver-chart.pnfsDsAttachedNodesOnly" . }}
+# The data servers keep the same node set (the union over every volume).
+- kind: ServiceAccount
+  name: flint-pnfs-ds
+  namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end }}
+{{- if include "flint-csi-driver-chart.pnfsDsAttachedNodesOnly" . }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flint-pnfs-ds
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pnfs-ds
+{{- end }}
+{{- if include "flint-csi-driver-chart.pnfsKrb5DataServers" . }}
+---
+# The data servers' principals (Phase 3): nfs/<pod>.flint-pnfs-ds-headless...
+# for every pod of the StatefulSet, following its replicas. The Secret has
+# each pod's own keytab as <pod>.keytab, which is all a pod mounts.
+apiVersion: krb5.ddalton.dev/v1alpha1
+kind: KerberosPrincipal
+metadata:
+  name: flint-pnfs-ds
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pnfs-ds
+spec:
+  realmRef: {{ $realmRef }}
+  realmNamespace: {{ $realmNs }}
+  hostPrincipals:
+    statefulSet: flint-pnfs-ds
+    services: [nfs]
+  secretName: flint-pnfs-ds-krb5
+  deletionPolicy: {{ $k.deletionPolicy }}
 {{- end }}
 {{- if and $k.nodeKeytab.create (not (include "flint-csi-driver-chart.krb5NodeKeytabByRwx" .)) }}
 ---

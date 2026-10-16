@@ -14,6 +14,27 @@ covered by the stability guarantee.
 
 ### Security
 
+- **pNFS Kerberos: the data servers do Kerberos, and Kerberos callers get
+  layouts again** (2026-10-16; plan Phase 3). With `pnfs.kerberos.enabled`,
+  the new `pnfs.kerberos.dataServers` (default `true`) gives each data
+  server pod its own principal,
+  `nfs/flint-pnfs-ds-<i>.flint-pnfs-ds-headless.<ns>.svc.<domain>`
+  (krb5-operator `hostPrincipals`, Secret `flint-pnfs-ds-krb5`, each pod
+  mounting only its own key), and the MDS's floor and allowlist. The data
+  server runs RPCSEC_GSS through the MDS's own front end (now shared,
+  `nfs::gss_front`), signs or seals its replies, turns splice off under
+  GSS, and refuses AUTH_SYS under the floor. Before, it ignored every
+  credential: it answered RPCSEC_GSS calls unauthenticated. The nodes map
+  every data server address to its principal's name, and the MDS hands
+  layouts to Kerberos callers, so their data is striped and protected end
+  to end (`FLINT_PNFS_LAYOUTS_FOR_GSS=true`; `dataServers: false` keeps
+  every byte on the MDS, as before). Also fixed on the data server:
+  SECINFO_NO_NAME did not read its argument and offered AUTH_NONE first
+  and Kerberos it could not do; EXCHANGE_ID read only the discriminant of
+  `state_protect4_a` and part of `impl_id`, misreading the next operation.
+  With `attachedNodesOnly`, the data servers serve only nodes attached to
+  some pNFS volume (ServiceAccount `flint-pnfs-ds`, the MDS's read-only
+  ClusterRole).
 - **pNFS Kerberos: each volume only to the nodes it is attached to**
   (2026-10-16; plan Phase 2). With `pnfs.kerberos.enabled`, the new
   `pnfs.kerberos.attachedNodesOnly` (default `true`; needs `minSec`) makes

@@ -141,6 +141,16 @@ async fn async_main(worker_threads: usize) -> Result<(), Box<dyn std::error::Err
     info!("   • I/O Queue Depth: {}", ds_config.resources.io_queue_depth);
     info!("");
 
+    // Only the nodes a pNFS volume is attached to (FLINT_NFS_ATTACHED_NODES_ONLY):
+    // the union over every pNFS volume, from the PVs and their
+    // VolumeAttachments, as on the MDS. Until the first lists arrive every
+    // node is refused.
+    if let Some(nodes) = spdk_csi_driver::nfs::node_authz::global() {
+        let domain = std::env::var(spdk_csi_driver::nfs::node_authz::DOMAIN_ENV).ok().filter(|d| !d.is_empty());
+        info!("🔐 Only the nodes a pNFS volume is attached to may use this data server");
+        tokio::spawn(spdk_csi_driver::nfs::node_authz::watch_pnfs(nodes, None, domain));
+    }
+
     // Create and start DS
     info!("⚙️  Initializing Data Server...");
     let ds = spdk_csi_driver::pnfs::ds::DataServer::new(ds_config)?;

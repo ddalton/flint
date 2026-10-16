@@ -14,7 +14,9 @@ use crate::pnfs::ds::io::{IoOperationHandler, WriteStable};
 use crate::pnfs::ds::registration::RegistrationClient;
 use crate::pnfs::ds::session::DsSessionManager;
 use crate::pnfs::Result;
-use crate::nfs::rpc::{CallMessage, ReplyBuilder};
+use crate::nfs::gss_framing::ValidatedCall;
+use crate::nfs::rpc::{AuthFlavor, AuthStat, CallMessage, ReplyBuilder};
+use crate::nfs::rpcsec_gss::RpcSecGssManager;
 use crate::nfs::xdr::{XdrDecoder, XdrEncoder};
 use crate::nfs::v4::protocol::{procedure, NFS4_PROGRAM, opcode, Nfs4Status, exchgid_flags};
 use crate::nfs::v4::xdr::Nfs4XdrDecoder;
@@ -40,6 +42,9 @@ pub struct DataServer {
     /// Creation stamp of the on-volume identity marker (Phase 2);
     /// reported in RegisterRequest so the MDS can spot volume swaps.
     identity_created_at: u64,
+    /// RPCSEC_GSS (pNFS Kerberos plan, Phase 3): `Some` with a keytab
+    /// (`KRB5_KTNAME`). Without one, RPCSEC_GSS calls are refused.
+    gss: Option<Arc<RpcSecGssManager>>,
 }
 
 impl DataServer {
@@ -130,7 +135,25 @@ impl DataServer {
         ));
         info!("✓ Client manager initialized (per-DS server identity)");
 
-        Ok(Self { config, io_handler, registration_clients, session_mgr, client_mgr, identity_created_at })
+        // Kerberos (pNFS Kerberos plan, Phase 3). The floor
+        // (FLINT_NFS_MIN_SEC) is validated before anything listens, as on
+        // the MDS: a typo must not resolve to "no floor". With a keytab,
+        // RPCSEC_GSS calls go through the same front end as the MDS's
+        // (`nfs::gss_front`); without one they are refused, where before
+        // the DS ignored every credential and answered them anyway.
+        let floor = crate::nfs::sec_policy::SecPolicy::validate_env()
+            .map_err(|e| crate::pnfs::Error::Config(format!("security settings: {e}")))?;
+        let gss = std::env::var("KRB5_KTNAME")
+            .ok()
+            .filter(|k| !k.trim().is_empty())
+            .map(|k| Arc::new(RpcSecGssManager::new(Some(k))));
+        info!(
+            "✓ Security: floor {}; Kerberos {}",
+            floor.floor().name(),
+            if gss.is_some() { "on (KRB5_KTNAME)" } else { "off (RPCSEC_GSS calls refused)" }
+        );
+
+        Ok(Self { config, io_handler, registration_clients, session_mgr, client_mgr, identity_created_at, gss })
     }
 
     /// Start the data server
@@ -215,11 +238,12 @@ impl DataServer {
             let io_handler = Arc::clone(&self.io_handler);
             let session_mgr = Arc::clone(&self.session_mgr);
             let client_mgr = Arc::clone(&self.client_mgr);
+            let gss = self.gss.clone();
             let conn_id = connection_count;
             
             tokio::spawn(async move {
                 debug!("🚀 Spawned handler task for connection #{} from {}", conn_id, peer);
-                if let Err(e) = Self::handle_tcp_connection(stream, io_handler, session_mgr, client_mgr, peer).await {
+                if let Err(e) = Self::handle_tcp_connection(stream, io_handler, session_mgr, client_mgr, gss, peer).await {
                     warn!("❌ Connection #{} from {} error: {}", conn_id, peer, e);
                 } else {
                     info!("✓ TCP connection #{} from {} closed cleanly", conn_id, peer);
@@ -234,6 +258,7 @@ impl DataServer {
         io_handler: Arc<IoOperationHandler>,
         session_mgr: Arc<DsSessionManager>,
         client_mgr: Arc<ClientManager>,
+        gss: Option<Arc<RpcSecGssManager>>,
         peer: std::net::SocketAddr,
     ) -> std::io::Result<()> {
         use tokio::time::Instant;
@@ -290,6 +315,7 @@ impl DataServer {
             let sess_c = Arc::clone(&session_mgr);
             let client_c = Arc::clone(&client_mgr);
             let writer_c = Arc::clone(&writer);
+            let gss_c = gss.clone();
             // Backlog hint: bytes already buffered mean the client is
             // pipelining, so concurrent dispatch pays for its overhead.
             let more_queued = !reader.buffer().is_empty();
@@ -300,7 +326,7 @@ impl DataServer {
                 // owns the client's callback path — so the inline fast
                 // path stays available here.
                 false,
-                move |req| Self::dispatch_minimal_nfs(req, io_c, sess_c, client_c),
+                move |req| Self::dispatch_minimal_nfs(req, io_c, sess_c, client_c, gss_c),
                 // The reply arrives as wire segments (see [`OpBody`]): for
                 // a READ, [rpc+compound+head], [payload], [pad]. The 128 KiB
                 // BufWriter coalesces the marker and every small segment
@@ -329,6 +355,7 @@ impl DataServer {
         io_handler: Arc<IoOperationHandler>,
         session_mgr: Arc<DsSessionManager>,
         client_mgr: Arc<ClientManager>,
+        gss: Option<Arc<RpcSecGssManager>>,
     ) -> Vec<crate::nfs::segment::Segment> {
         // Parse RPC call
         let (call, args) = match CallMessage::decode_with_args(request) {
@@ -346,14 +373,35 @@ impl DataServer {
             return vec![ReplyBuilder::prog_unavail(call.xid).into()];
         }
 
+        // Authentication. RPCSEC_GSS through the shared front end (its
+        // INIT/CONTINUE_INIT/DESTROY answered there; DATA checked and
+        // unsealed), every other flavor against the floor.
+        let (args, validated) = if call.cred.flavor == AuthFlavor::RpcsecGss {
+            let Some(mgr) = gss.as_deref() else {
+                warn!("🔒 DS: RPCSEC_GSS call refused: this data server has no keytab (KRB5_KTNAME)");
+                return vec![ReplyBuilder::auth_error(call.xid, AuthStat::RejectedCred).into()];
+            };
+            match crate::nfs::gss_front::gss_front(&call, args, mgr).await {
+                crate::nfs::gss_front::GssFront::Reply(reply) => return reply,
+                crate::nfs::gss_front::GssFront::Data { args, validated } => (args, Some(validated)),
+            }
+        } else {
+            if let Some(refused) = crate::nfs::gss_front::floor_refusal(&call) {
+                return vec![refused];
+            }
+            (args, None)
+        };
+
         // Handle procedure
         match call.procedure {
-            procedure::NULL => {
-                vec![ReplyBuilder::success(call.xid).finish().into()]
-            }
+            procedure::NULL => match validated.as_ref() {
+                None => vec![ReplyBuilder::success(call.xid).finish().into()],
+                // Still a GSS-verified reply.
+                gss => crate::nfs::gss_front::frame_reply(call.xid, gss, vec![]),
+            },
 
             procedure::COMPOUND => {
-                Self::handle_minimal_compound(call, args, io_handler, session_mgr, client_mgr).await
+                Self::handle_minimal_compound(call, args, io_handler, session_mgr, client_mgr, validated.as_ref()).await
             }
 
             _ => vec![ReplyBuilder::proc_unavail(call.xid).into()],
@@ -367,7 +415,14 @@ impl DataServer {
         io_handler: Arc<IoOperationHandler>,
         session_mgr: Arc<DsSessionManager>,
         client_mgr: Arc<ClientManager>,
+        gss: Option<&ValidatedCall>,
     ) -> Vec<crate::nfs::segment::Segment> {
+        // The caller as RFC 8881 §18.35.5 means it: the authenticated
+        // Kerberos principal when there is one.
+        let principal = match gss.and_then(|v| v.client_principal.as_deref()) {
+            Some(name) => [b"gss:".as_slice(), name.as_bytes()].concat(),
+            None => call.cred.principal(),
+        };
         let mut decoder = XdrDecoder::new(args);
 
         // Decode COMPOUND header
@@ -407,6 +462,26 @@ impl DataServer {
             };
 
             debug!("DS: Processing opcode={}", opcode);
+
+            // Only the nodes a pNFS volume is attached to
+            // (FLINT_NFS_ATTACHED_NODES_ONLY, `nfs::node_authz`), as on the
+            // MDS: clients and sessions from an attached node's machine
+            // principal, and a session used only while its node is
+            // attached. The union over every pNFS volume: which volume a
+            // stripe belongs to is not known here (Phase 4).
+            if let Some(nodes) = crate::nfs::node_authz::global() {
+                if let Some(refused) = Self::unattached_refusal(nodes, opcode, &principal, &decoder, &client_mgr) {
+                    let op = match opcode {
+                        opcode::EXCHANGE_ID => "EXCHANGE_ID",
+                        opcode::CREATE_SESSION => "CREATE_SESSION",
+                        _ => "SEQUENCE",
+                    };
+                    warn!("DS: {op} refused: {} is not a node a pNFS volume is attached to", String::from_utf8_lossy(&principal));
+                    results.push((opcode, refused, OpBody::Inline(Bytes::new())));
+                    break;
+                }
+            }
+
             let (status, result_data) = match opcode {
                 opcode::EXCHANGE_ID => {
                     // Decode EXCHANGE_ID arguments properly for server trunking
@@ -435,13 +510,37 @@ impl DataServer {
                     // Decode flags
                     let client_flags = decoder.decode_u32().unwrap_or(0);
                     
-                    // Decode state_protect (we use SP4_NONE)
+                    // state_protect4_a: decoded whole, so impl_id below is
+                    // read from where it is. SP4_MACH_CRED carries two
+                    // bitmaps (spo_must_enforce, spo_must_allow); the DS
+                    // answers SP4_NONE to it (sessions here are not bound
+                    // to the machine principal yet: Phase 3b). SP4_SSV is
+                    // refused, as the MDS refuses it.
                     let state_protect = decoder.decode_u32().unwrap_or(0);
+                    match state_protect {
+                        0 => {}
+                        1 => {
+                            use crate::nfs::v4::xdr::Nfs4XdrDecoder as _;
+                            if decoder.decode_bitmap().and_then(|_| decoder.decode_bitmap()).is_err() {
+                                results.push((opcode, Nfs4Status::BadXdr, OpBody::Inline(Bytes::new())));
+                                break;
+                            }
+                        }
+                        _ => {
+                            results.push((opcode, Nfs4Status::EncrAlgUnsupp, OpBody::Inline(Bytes::new())));
+                            break;
+                        }
+                    }
                     
-                    // Skip optional impl_id
+                    // Skip the optional impl_id (nfs_impl_id4<1>): domain,
+                    // name and nfstime4 date. Only the domain was skipped,
+                    // which left the next operation misread.
                     let has_impl_id = decoder.decode_bool().unwrap_or(false);
                     if has_impl_id {
                         let _ = decoder.decode_opaque();
+                        let _ = decoder.decode_opaque();
+                        let _ = decoder.decode_u64();
+                        let _ = decoder.decode_u32();
                     }
                     
                     info!("📥 DS: EXCHANGE_ID REQUEST from client:");
@@ -457,7 +556,7 @@ impl DataServer {
                         client_owner.clone(),
                         verifier,
                         client_flags,
-                        Vec::new(), // DS doesn't currently track principal
+                        principal.clone(),
                     );
                     let (clientid, sequenceid, is_new) = match outcome {
                         ExchangeIdOutcome::NewUnconfirmed { client_id, sequence_id } =>
@@ -715,7 +814,10 @@ impl DataServer {
                     let count = decoder.decode_u32().unwrap_or(0);
 
                     if let Some(ref fh) = current_fh {
-                        match io_handler.read(fh, offset, count).await {
+                        // No splice under GSS: the reply body is signed or
+                        // sealed as one octet stream, so its payload must
+                        // be in memory.
+                        match io_handler.read_with(fh, offset, count, gss.is_none() && crate::nfs::splice::enabled()).await {
                             Ok(read_result) => {
                                 // The payload is NOT encoded: encode only
                                 // the READ4resok head (eof + length) and
@@ -789,25 +891,13 @@ impl DataServer {
                 }
 
                 opcode::SECINFO_NO_NAME => {
-                    // Advertise supported auth flavors: AUTH_NULL, AUTH_SYS, and RPCSEC_GSS
+                    // The flavors this DS accepts, strongest first: the
+                    // MDS's list (floor and keytab applied), where this
+                    // used to offer AUTH_NONE first and Kerberos it could
+                    // not do.
+                    let _style = decoder.decode_u32();
                     let mut encoder = XdrEncoder::new();
-                    encoder.encode_u32(3);  // secinfo count (3 flavors)
-
-                    // AUTH_NULL (flavor 0)
-                    encoder.encode_u32(0);
-
-                    // AUTH_SYS (flavor 1)
-                    encoder.encode_u32(1);
-
-                    // RPCSEC_GSS (flavor 6) - Kerberos
-                    encoder.encode_u32(6);
-                    // OID for Kerberos V5 (1.2.840.113554.1.2.2)
-                    let krb5_oid = vec![0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02];
-                    encoder.encode_opaque(&krb5_oid);  // GSS mechanism OID
-                    encoder.encode_u32(0);  // QOP (quality of protection)
-                    encoder.encode_u32(1);  // Service: rpc_gss_svc_none (authentication only)
-
-                    debug!("DS: Advertised AUTH_NULL, AUTH_SYS, and RPCSEC_GSS (Kerberos)");
+                    crate::nfs::v4::compound::encode_secinfo_flavors(&mut encoder);
                     (Nfs4Status::Ok, encoder.finish())
                 }
 
@@ -910,7 +1000,40 @@ impl DataServer {
         // One pass, RPC header first, payloads passed through as their
         // own segments — replaces the flatten that copied a READ payload
         // three times (op encoder -> compound encoder -> reply encoder).
-        assemble_reply(call.xid, results)
+        // Under GSS the body is framed by the shared front end: a MIC'd
+        // verifier and the body signed or sealed.
+        match gss {
+            None => assemble_reply(call.xid, results),
+            Some(v) => crate::nfs::gss_front::frame_reply(call.xid, Some(v), assemble_body(XdrEncoder::new(), results)),
+        }
+    }
+
+    /// [`crate::nfs::node_authz`] at the DS, before `opcode` runs (its
+    /// arguments still unread in `decoder`): EXCHANGE_ID and
+    /// CREATE_SESSION only from an attached node's machine principal
+    /// (NFS4ERR_ACCESS); SEQUENCE only on a session of an attached node's
+    /// client, by that node or a user (NFS4ERR_BADSESSION). A session the
+    /// DS does not know is left to SEQUENCE.
+    fn unattached_refusal(
+        nodes: &crate::nfs::node_authz::AttachedNodes,
+        opcode: u32,
+        principal: &[u8],
+        decoder: &XdrDecoder,
+        client_mgr: &ClientManager,
+    ) -> Option<Nfs4Status> {
+        match opcode {
+            opcode::EXCHANGE_ID | opcode::CREATE_SESSION => {
+                (!nodes.may_create(principal)).then_some(Nfs4Status::Access)
+            }
+            opcode::SEQUENCE => {
+                // The session id begins with its client id (DsSessionManager).
+                let head: [u8; 8] = decoder.peek_bytes(8).try_into().ok()?;
+                let client_id = u64::from_be_bytes(head);
+                let owner = client_mgr.get_client(client_id)?;
+                (!nodes.may_use(principal, &owner.principal)).then_some(Nfs4Status::BadSession)
+            }
+            _ => None,
+        }
     }
 
     /// The client-reachable address this DS advertises to the MDS.
@@ -1685,7 +1808,6 @@ pub(crate) fn assemble_reply(
     xid: u32,
     results: Vec<(u32, Nfs4Status, OpBody)>,
 ) -> Vec<crate::nfs::segment::Segment> {
-    let mut segs: Vec<crate::nfs::segment::Segment> = Vec::with_capacity(3);
     let mut cur = XdrEncoder::new();
 
     // RPC reply header — same six words ReplyBuilder::success emits.
@@ -1695,6 +1817,17 @@ pub(crate) fn assemble_reply(
     cur.encode_u32(0); // AUTH_NONE
     cur.encode_u32(0); // auth length
     cur.encode_u32(0); // SUCCESS
+    assemble_body(cur, results)
+}
+
+/// The COMPOUND reply body after whatever `cur` already holds (the RPC
+/// header for [`assemble_reply`], nothing for a GSS reply, which
+/// `gss_front::frame_reply` frames).
+pub(crate) fn assemble_body(
+    mut cur: XdrEncoder,
+    results: Vec<(u32, Nfs4Status, OpBody)>,
+) -> Vec<crate::nfs::segment::Segment> {
+    let mut segs: Vec<crate::nfs::segment::Segment> = Vec::with_capacity(3);
 
     // COMPOUND response header. The overall status has always been
     // encoded as OK here (clients act on per-op statuses); preserved
@@ -2120,7 +2253,7 @@ mod deleg_stateid_pin_tests {
             verf: Auth::null(),
             cred_span: Bytes::new(),
         };
-        let segs = DataServer::handle_minimal_compound(call, args.finish(), io, sessions, clients).await;
+        let segs = DataServer::handle_minimal_compound(call, args.finish(), io, sessions, clients, None).await;
         // `into_test_bytes`, not `as_mem`: on Linux the DS answers a
         // READ through the splice path, so the payload segment is a
         // pipe, not bytes. `as_mem` panics on it by design. (macOS
@@ -2188,3 +2321,243 @@ mod deleg_stateid_pin_tests {
         assert_ne!(read2, Nfs4Status::Ok, "a garbage fh must not read OK");
     }
 }
+
+/// Kerberos on the data server (pNFS Kerberos plan, Phase 3): what the DS
+/// answers before and around the GSS front end. The front end itself is
+/// `nfs::gss_front`'s, tested with the MDS's.
+#[cfg(test)]
+mod ds_gss_tests {
+    use super::*;
+    use crate::nfs::rpc::Auth;
+    use crate::nfs::v4::state::LeaseManager;
+
+    fn parts(base: &std::path::Path) -> (Arc<IoOperationHandler>, Arc<DsSessionManager>, Arc<ClientManager>) {
+        let io = Arc::new(IoOperationHandler::new(base).unwrap());
+        let sessions = Arc::new(DsSessionManager::new());
+        let clients = Arc::new(ClientManager::new(
+            Arc::new(LeaseManager::new()),
+            "ds-gss",
+            crate::state_backend::memory_backend(),
+        ));
+        (io, sessions, clients)
+    }
+
+    fn flat(segs: Vec<crate::nfs::segment::Segment>) -> Bytes {
+        let mut v = Vec::new();
+        for s in segs {
+            v.extend_from_slice(&s.into_test_bytes());
+        }
+        Bytes::from(v)
+    }
+
+    /// An RPC CALL record: COMPOUND (or `proc`) with `flavor` and an
+    /// opaque credential body, a null verifier, then `args`.
+    fn call_record(proc_: u32, flavor: u32, cred: &[u8], args: &[u8]) -> Bytes {
+        let mut e = XdrEncoder::new();
+        e.encode_u32(0x7a11); // xid
+        e.encode_u32(0); // CALL
+        e.encode_u32(2); // RPC version
+        e.encode_u32(NFS4_PROGRAM);
+        e.encode_u32(4);
+        e.encode_u32(proc_);
+        e.encode_u32(flavor);
+        e.encode_opaque(cred);
+        e.encode_u32(0); // verifier: AUTH_NONE
+        e.encode_u32(0);
+        e.append_raw(args);
+        e.finish()
+    }
+
+    #[tokio::test]
+    async fn without_a_keytab_an_rpcsec_gss_call_is_refused_not_answered() {
+        let dir = tempfile::tempdir().unwrap();
+        let (io, s, c) = parts(dir.path());
+        // Any RPCSEC_GSS credential: the DS must not look past the flavor.
+        let rec = call_record(procedure::NULL, 6, &[0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0], &[]);
+        let reply = flat(DataServer::dispatch_minimal_nfs(rec, io, s, c, None).await);
+        let mut dec = XdrDecoder::new(reply);
+        assert_eq!(dec.decode_u32().unwrap(), 0x7a11);
+        assert_eq!(dec.decode_u32().unwrap(), 1, "REPLY");
+        assert_eq!(dec.decode_u32().unwrap(), 1, "MSG_DENIED: before, the DS answered it as if unauthenticated");
+        assert_eq!(dec.decode_u32().unwrap(), 1, "AUTH_ERROR");
+        assert_eq!(dec.decode_u32().unwrap(), AuthStat::RejectedCred as u32);
+    }
+
+    #[tokio::test]
+    async fn secinfo_no_name_reads_its_style_and_puts_auth_sys_before_auth_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let (io, s, c) = parts(dir.path());
+        let mut a = XdrEncoder::new();
+        a.encode_u32(0); // tag
+        a.encode_u32(1); // minorversion
+        a.encode_u32(2);
+        a.encode_u32(opcode::PUTFH);
+        a.encode_opaque(&[0xAB; 16]);
+        a.encode_u32(opcode::SECINFO_NO_NAME);
+        a.encode_u32(0); // SECINFO_STYLE4_CURRENT_FH
+        let call = CallMessage {
+            xid: 1,
+            program: NFS4_PROGRAM,
+            version: 4,
+            procedure: procedure::COMPOUND,
+            cred: Auth::null(),
+            verf: Auth::null(),
+            cred_span: Bytes::new(),
+        };
+        let reply = flat(DataServer::handle_minimal_compound(call, a.finish(), io, s, c, None).await);
+        let mut dec = XdrDecoder::new(reply);
+        for _ in 0..8 {
+            dec.decode_u32().unwrap();
+        }
+        assert_eq!(dec.decode_u32().unwrap(), 2, "both ops answered");
+        assert_eq!(dec.decode_u32().unwrap(), opcode::PUTFH);
+        assert_eq!(dec.decode_u32().unwrap(), Nfs4Status::Ok as u32);
+        assert_eq!(dec.decode_u32().unwrap(), opcode::SECINFO_NO_NAME);
+        assert_eq!(dec.decode_u32().unwrap(), Nfs4Status::Ok as u32);
+        let n = dec.decode_u32().unwrap();
+        assert!(n >= 1);
+        // No floor and no keytab here: AUTH_SYS, then AUTH_NONE, and no
+        // Kerberos it cannot do (it offered AUTH_NONE first, and krb5).
+        assert_eq!(dec.decode_u32().unwrap(), 1, "AUTH_SYS first");
+        let rest: Vec<u32> = (1..n).map(|_| dec.decode_u32().unwrap()).collect();
+        assert_eq!(rest, vec![0], "then AUTH_NONE, nothing else");
+    }
+
+    /// EXCHANGE_ID with `state_protect` (its words), an impl_id, then a
+    /// PUTFH: the PUTFH decodes only if EXCHANGE_ID read its arguments
+    /// whole.
+    fn exchange_id_then_putfh(state_protect: &[u32]) -> Bytes {
+        let mut a = XdrEncoder::new();
+        a.encode_u32(0); // tag
+        a.encode_u32(1);
+        a.encode_u32(2);
+        a.encode_u32(opcode::EXCHANGE_ID);
+        a.encode_u64(42); // verifier
+        a.encode_opaque(b"client-owner");
+        a.encode_u32(0); // flags
+        for w in state_protect {
+            a.encode_u32(*w);
+        }
+        a.encode_bool(true); // impl_id: domain, name, date
+        a.encode_opaque(b"kernel.org");
+        a.encode_opaque(b"Linux");
+        a.encode_u64(0);
+        a.encode_u32(0);
+        a.encode_u32(opcode::PUTFH);
+        a.encode_opaque(&[0xAB; 16]);
+        a.finish()
+    }
+
+    /// (EXCHANGE_ID's status, then the next result's (opcode, status)
+    /// if there is one).
+    async fn exchange_id_then_putfh_status(state_protect: &[u32]) -> (Nfs4Status, Option<(u32, Nfs4Status)>) {
+        let dir = tempfile::tempdir().unwrap();
+        let (io, s, c) = parts(dir.path());
+        let call = CallMessage {
+            xid: 2,
+            program: NFS4_PROGRAM,
+            version: 4,
+            procedure: procedure::COMPOUND,
+            cred: Auth::null(),
+            verf: Auth::null(),
+            cred_span: Bytes::new(),
+        };
+        let reply = flat(
+            DataServer::handle_minimal_compound(call, exchange_id_then_putfh(state_protect), io, s, c, None).await,
+        );
+        let mut dec = XdrDecoder::new(reply);
+        for _ in 0..8 {
+            dec.decode_u32().unwrap();
+        }
+        let n = dec.decode_u32().unwrap();
+        assert_eq!(dec.decode_u32().unwrap(), opcode::EXCHANGE_ID);
+        let st = Nfs4Status::from_u32(dec.decode_u32().unwrap());
+        if st != Nfs4Status::Ok {
+            assert_eq!(n, 1, "an error ends the compound");
+            return (st, None);
+        }
+        // EXCHANGE_ID4resok: clientid, sequenceid, flags, state_protect
+        // (SP4_NONE), server_owner, server_scope, impl_id<>.
+        dec.decode_u64().unwrap();
+        dec.decode_u32().unwrap();
+        dec.decode_u32().unwrap();
+        assert_eq!(dec.decode_u32().unwrap(), 0, "the DS answers SP4_NONE");
+        dec.decode_u64().unwrap();
+        dec.decode_opaque().unwrap();
+        dec.decode_opaque().unwrap();
+        assert_eq!(dec.decode_u32().unwrap(), 0);
+        assert_eq!(n, 2);
+        let op = dec.decode_u32().unwrap();
+        (st, Some((op, Nfs4Status::from_u32(dec.decode_u32().unwrap()))))
+    }
+
+    #[tokio::test]
+    async fn exchange_id_decodes_every_state_protection() {
+        let putfh_ok = Some((opcode::PUTFH, Nfs4Status::Ok));
+        // SP4_NONE.
+        assert_eq!(exchange_id_then_putfh_status(&[0]).await, (Nfs4Status::Ok, putfh_ok));
+        // SP4_MACH_CRED, two one-word bitmaps: read whole, so the PUTFH
+        // after it decodes (only the discriminant was read before, and
+        // the bitmaps were taken for the impl_id).
+        assert_eq!(
+            exchange_id_then_putfh_status(&[1, 1, 0x0000_0003, 1, 0x0000_0010]).await,
+            (Nfs4Status::Ok, putfh_ok)
+        );
+        // SP4_SSV: refused, as on the MDS.
+        assert_eq!(exchange_id_then_putfh_status(&[2, 0, 0, 0, 0, 0]).await, (Nfs4Status::EncrAlgUnsupp, None));
+    }
+
+    #[test]
+    fn only_attached_nodes_make_and_use_data_server_sessions() {
+        use crate::nfs::node_authz::AttachedNodes;
+        use crate::nfs::v4::state::client::ExchangeIdOutcome;
+        let dir = tempfile::tempdir().unwrap();
+        let (_io, _s, clients) = parts(dir.path());
+        let nodes = AttachedNodes::default();
+        nodes.set(std::collections::HashSet::from(["w1".to_string()]));
+        let none = XdrDecoder::new(Bytes::new());
+        let w1 = b"gss:nfs/w1@CORP".as_slice();
+        let w2 = b"gss:nfs/w2@CORP".as_slice();
+        // Making a client or a session: an attached node's key only.
+        for op in [opcode::EXCHANGE_ID, opcode::CREATE_SESSION] {
+            assert_eq!(DataServer::unattached_refusal(&nodes, op, w1, &none, &clients), None);
+            assert_eq!(DataServer::unattached_refusal(&nodes, op, w2, &none, &clients), Some(Nfs4Status::Access));
+            assert_eq!(DataServer::unattached_refusal(&nodes, op, b"gss:bob@CORP", &none, &clients), Some(Nfs4Status::Access));
+            assert_eq!(DataServer::unattached_refusal(&nodes, op, b"", &none, &clients), Some(Nfs4Status::Access));
+        }
+        // Using one: the session's client must be an attached node's.
+        let id = |principal: &[u8]| match clients.exchange_id(principal.to_vec(), 1, 0, principal.to_vec()) {
+            ExchangeIdOutcome::NewUnconfirmed { client_id, .. } => client_id,
+            other => panic!("{other:?}"),
+        };
+        let seq = |client_id: u64| {
+            let mut sid = client_id.to_be_bytes().to_vec();
+            sid.extend_from_slice(&[0; 8]);
+            XdrDecoder::new(Bytes::from(sid))
+        };
+        let c1 = id(w1);
+        let c2 = id(w2);
+        assert_eq!(DataServer::unattached_refusal(&nodes, opcode::SEQUENCE, w1, &seq(c1), &clients), None);
+        assert_eq!(
+            DataServer::unattached_refusal(&nodes, opcode::SEQUENCE, b"gss:bob@CORP", &seq(c1), &clients),
+            None,
+            "a user rides an attached node's session"
+        );
+        assert_eq!(
+            DataServer::unattached_refusal(&nodes, opcode::SEQUENCE, w2, &seq(c1), &clients),
+            Some(Nfs4Status::BadSession),
+            "another node's key on w1's session"
+        );
+        assert_eq!(
+            DataServer::unattached_refusal(&nodes, opcode::SEQUENCE, w2, &seq(c2), &clients),
+            Some(Nfs4Status::BadSession),
+            "w2 is attached to nothing"
+        );
+        // Detached: w1's session stops.
+        nodes.set(std::collections::HashSet::new());
+        assert_eq!(DataServer::unattached_refusal(&nodes, opcode::SEQUENCE, w1, &seq(c1), &clients), Some(Nfs4Status::BadSession));
+        // Reads and writes are not gated here: they ride the session.
+        assert_eq!(DataServer::unattached_refusal(&nodes, opcode::READ, w2, &none, &clients), None);
+    }
+}
+

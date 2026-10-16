@@ -4659,6 +4659,10 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     .map(String::as_str),
             )
             .map_err(tonic::Status::failed_precondition)?;
+            // And every data server's address to its own principal's
+            // name, for the I/O the layouts send there (Phase 3).
+            spdk_csi_driver::nfs_krb5::prepare_pnfs_ds_hosts(&mount_opts)
+                .map_err(tonic::Status::failed_precondition)?;
 
             eprintln!("📋 [pNFS] mount -t nfs4 -o {} {} {}",
                       mount_opts, nfs_source, target_path);

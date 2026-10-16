@@ -183,6 +183,29 @@ volume refused, a detach revokes).
 
 ## Phase 3: Kerberos on the data servers
 
+**Built** (2026-10-16): `nfs::gss_front` (the shared front end; `serve_tcp`
+is a caller), the DS on it (`pnfs/ds/server.rs`: refuse GSS without a
+keytab, the floor for every other flavor, splice off under GSS, framing by
+`gss_front::frame_reply`, SECINFO_NO_NAME from the floor, EXCHANGE_ID
+decoding `state_protect4_a` and the whole `impl_id`, the RPC principal
+recorded), the chart (`pnfs.kerberos.dataServers`, default on:
+`hostPrincipals` keys, per-pod keytab mounts, the DS server env, the MDS's
+`FLINT_PNFS_LAYOUTS_FOR_GSS`), and the node's DS hosts lines
+(`nfs_krb5::prepare_pnfs_ds_hosts`, resolving the Services through the
+cluster DNS rather than listing them, so the node needs no new RBAC).
+Kind: 8 MiB under `krb5i` striped on both DSes, all their calls GSS.
+The DS union gate is built too (`watch_pnfs` with no per-volume map,
+`DataServer::unattached_refusal`; ServiceAccount `flint-pnfs-ds`). **Not
+built yet:** multipath in kind and the lima byte-identical guard. The VM
+legs ran (`tests/krb5/results/pnfs-phase3-2026-10-16/`): krb5i and krb5p
+stripe under GSS; **E1 against a refusing DS: the client falls back to the
+MDS** (its data then reaches the DSes over the F66 relay, Phase 5's path);
+a DS with Kerberos but no floor takes the client's AUTH_SYS downgrade, which
+the chart cannot render (one switch sets floor, keytab and the MDS's grant).
+Follow-up: the DS reports its floor at registration, and the MDS grants
+Kerberos callers layouts only for DSes that report one.
+
+
 - **Share the GSS code:** extract `gss_front` from
   `handle_rpcsec_gss_call` (`nfs/server_v4.rs:1052-1180`: INIT,
   CONTINUE_INIT, DESTROY, DATA validate/floor/verifier/sequence/unseal),
