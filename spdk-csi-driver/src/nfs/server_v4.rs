@@ -888,14 +888,28 @@ async fn handle_compound(
     // AUTH_SYS (uid, gid) — file-creating ops stamp it onto the backing
     // object so ownership round-trips (postgres-class workloads check it).
     // A Kerberos caller is its principal's identity under
-    // FLINT_NFS_GSS_IDMAP (nobody when no rule names it), so it is
-    // permission-checked and owns what it creates.
-    let identity = crate::nfs::gss_idmap::compound_identity(
-        gss.and_then(|v| v.client_principal.as_deref()),
+    // FLINT_NFS_GSS_IDMAP, else the directory's (FLINT_NFS_GSS_LDAP_URL,
+    // cached), else nobody, so it is permission-checked and owns what it
+    // creates.
+    let mapped = match gss.and_then(|v| v.client_principal.as_deref()) {
+        Some(p) => Some(crate::nfs::gss_idmap::map_global(p).await),
+        None => None,
+    };
+    let Some(identity) = crate::nfs::gss_idmap::compound_identity(
+        mapped.as_ref(),
         call.cred.unix_uid_gid(),
         call.cred.unix_gids(),
-        crate::nfs::gss_idmap::GssIdmap::global(),
-    );
+    ) else {
+        // The directory cannot say who this is (its cached answer ran
+        // out): refuse rather than run the call as anyone. CREDPROBLEM
+        // makes the client re-establish the context, and that INIT is
+        // refused until the directory answers (`gss_idmap::admit`).
+        warn!(
+            "❌ COMPOUND refused: {} has no identity until the directory answers",
+            gss.and_then(|v| v.client_principal.as_deref()).unwrap_or("?")
+        );
+        return vec![ReplyBuilder::auth_error(call.xid, AuthStat::RpcsecGssCredProblem).into()];
+    };
     // root_squash (FLINT_NFS_ROOT_SQUASH): uid 0, from any client and any
     // flavor, is the anonymous identity.
     let (unix_cred, unix_gids) = match crate::nfs::gss_idmap::root_squash() {

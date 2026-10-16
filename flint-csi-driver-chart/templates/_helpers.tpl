@@ -181,6 +181,90 @@ FLINT_NFS_GSS_IDMAP: the user rules, then the machine principals.
 {{- end }}
 
 {{/*
+The directory lookup (nfs.kerberos.ldap): the controller's NFS_GSS_LDAP_*,
+which every NFS server gets as FLINT_NFS_GSS_LDAP_*. The bind password and
+the CA bundle are named, not copied: the servers read them from the Secret
+and ConfigMap.
+*/}}
+{{- define "flint-csi-driver-chart.nfsKrb5LdapEnv" -}}
+{{- $k := .Values.nfs.kerberos -}}
+{{- $l := $k.ldap -}}
+{{- if $l.enabled }}
+{{- $url := required "nfs.kerberos.ldap.url" $l.url -}}
+{{- if not (or (hasPrefix "ldaps://" $url) (hasPrefix "ldap://" $url)) -}}
+{{- fail "nfs.kerberos.ldap.url: ldaps://host or ldap://host (StartTLS)" -}}
+{{- end -}}
+{{- if and $l.bindDN (not $l.bindPasswordSecret.name) -}}
+{{- fail "nfs.kerberos.ldap.bindDN needs bindPasswordSecret.name" -}}
+{{- end -}}
+{{- if and $l.bindPasswordSecret.name (not $l.bindDN) -}}
+{{- fail "nfs.kerberos.ldap.bindPasswordSecret needs bindDN" -}}
+{{- end -}}
+{{- if and $l.ca.configMap $l.ca.secret -}}
+{{- fail "nfs.kerberos.ldap.ca: a configMap or a secret, not both" -}}
+{{- end }}
+- name: NFS_GSS_LDAP_URL
+  value: {{ $url | quote }}
+{{- if $l.insecure }}
+- name: NFS_GSS_LDAP_INSECURE
+  value: "true"
+{{- end }}
+- name: NFS_GSS_LDAP_REALMS
+  value: {{ join "," ($l.realms | default (list $k.realm)) | quote }}
+- name: NFS_GSS_LDAP_USER_BASE
+  value: {{ required "nfs.kerberos.ldap.userBase" $l.userBase | quote }}
+{{- with $l.groupBase }}
+- name: NFS_GSS_LDAP_GROUP_BASE
+  value: {{ . | quote }}
+{{- end }}
+{{- with $l.userFilter }}
+- name: NFS_GSS_LDAP_USER_FILTER
+  value: {{ . | quote }}
+{{- end }}
+{{- with $l.principalAttribute }}
+- name: NFS_GSS_LDAP_PRINCIPAL_ATTR
+  value: {{ . | quote }}
+{{- end }}
+{{- with $l.groupMembership }}
+- name: NFS_GSS_LDAP_GROUP_MEMBERSHIP
+  value: {{ . | quote }}
+{{- end }}
+{{- with $l.bindDN }}
+- name: NFS_GSS_LDAP_BIND_DN
+  value: {{ . | quote }}
+- name: NFS_GSS_LDAP_BIND_PASSWORD_SECRET
+  value: {{ $l.bindPasswordSecret.name | quote }}
+- name: NFS_GSS_LDAP_BIND_PASSWORD_KEY
+  value: {{ $l.bindPasswordSecret.key | default "password" | quote }}
+{{- end }}
+{{- with $l.ca.configMap }}
+- name: NFS_GSS_LDAP_CA_CONFIGMAP
+  value: {{ . | quote }}
+{{- end }}
+{{- with $l.ca.secret }}
+- name: NFS_GSS_LDAP_CA_SECRET
+  value: {{ . | quote }}
+{{- end }}
+{{- if or $l.ca.configMap $l.ca.secret }}
+- name: NFS_GSS_LDAP_CA_KEY
+  value: {{ $l.ca.key | default "ca.crt" | quote }}
+{{- end }}
+- name: NFS_GSS_LDAP_TTL
+  value: {{ $l.cacheTTL | toString | quote }}
+- name: NFS_GSS_LDAP_NEGATIVE_TTL
+  value: {{ $l.negativeCacheTTL | toString | quote }}
+- name: NFS_GSS_LDAP_TIMEOUT
+  value: {{ $l.timeout | toString | quote }}
+- name: NFS_GSS_LDAP_MAX_CONCURRENT
+  value: {{ $l.maxConcurrent | toString | quote }}
+{{- if $l.allowRoot }}
+- name: NFS_GSS_LDAP_ALLOW_ROOT
+  value: "true"
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
 FLINT_NFS_ENFORCE_PERMISSIONS: as set, else "enforce" under Kerberos (whose
 callers' identities are proven), else the server's default.
 */}}

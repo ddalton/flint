@@ -123,4 +123,45 @@ else
   echo "✗ no floor, requireMachCred on: failed for another reason"; head -3 "$TMP/err.txt"; fails=$((fails + 1))
 fi
 
+# The directory (nfs.kerberos.ldap): off by default, and off without
+# Kerberos even when enabled.
+if renders "Kerberos on, no directory" "${KRB5[@]}"; then
+  expect "Kerberos on, no directory" NFS_GSS_LDAP_URL -
+fi
+LDAP=(--set nfs.kerberos.ldap.enabled=true --set nfs.kerberos.ldap.url=ldaps://ldap.corp.example
+  --set 'nfs.kerberos.ldap.userBase=ou=People\,dc=corp\,dc=example'
+  --set 'nfs.kerberos.ldap.bindDN=cn=nfs\,dc=corp\,dc=example'
+  --set nfs.kerberos.ldap.bindPasswordSecret.name=flint-ldap-bind
+  --set nfs.kerberos.ldap.ca.configMap=corp-ca)
+if renders "directory, Kerberos off" "${LDAP[@]}"; then
+  expect "directory, Kerberos off" NFS_GSS_LDAP_URL -
+fi
+if renders "directory" "${KRB5[@]}" "${LDAP[@]}"; then
+  expect "directory" NFS_GSS_LDAP_URL ldaps://ldap.corp.example
+  expect "directory" NFS_GSS_LDAP_REALMS CORP.EXAMPLE
+  expect "directory" NFS_GSS_LDAP_USER_BASE "ou=People,dc=corp,dc=example"
+  expect "directory" NFS_GSS_LDAP_INSECURE -
+  expect "directory" NFS_GSS_LDAP_BIND_PASSWORD_SECRET flint-ldap-bind
+  expect "directory" NFS_GSS_LDAP_BIND_PASSWORD_KEY password
+  expect "directory" NFS_GSS_LDAP_CA_CONFIGMAP corp-ca
+  expect "directory" NFS_GSS_LDAP_TTL 300
+  expect "directory" NFS_GSS_LDAP_ALLOW_ROOT -
+  # The password is named, never a value in a manifest.
+  expect "directory" NFS_GSS_LDAP_BIND_PASSWORD -
+  expect "directory" FLINT_NFS_GSS_LDAP_BIND_PASSWORD -
+  # The static allowlist is unchanged: the directory's users are admitted
+  # by the servers, not by a longer list.
+  expect "directory" NFS_GSS_PRINCIPALS "host/*@CORP.EXAMPLE,nfs/*@CORP.EXAMPLE"
+fi
+for bad in "nfs.kerberos.ldap.userBase=" "nfs.kerberos.ldap.url=http://ldap" \
+  "nfs.kerberos.ldap.bindPasswordSecret.name=" "nfs.kerberos.ldap.ca.secret=corp-ca"; do
+  if render "${KRB5[@]}" "${LDAP[@]}" --set "$bad"; then
+    echo "✗ directory with $bad: rendered"; fails=$((fails + 1))
+  elif grep -q 'nfs.kerberos.ldap' "$TMP/err.txt"; then
+    echo "✓ directory with $bad: refused"
+  else
+    echo "✗ directory with $bad: failed for another reason"; head -3 "$TMP/err.txt"; fails=$((fails + 1))
+  fi
+done
+
 [ "$fails" -eq 0 ] && echo PASS || { echo "FAIL: $fails"; exit 1; }

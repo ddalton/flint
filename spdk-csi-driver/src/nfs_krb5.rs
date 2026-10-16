@@ -28,7 +28,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Seek, Write};
 use std::path::Path;
 
-use k8s_openapi::api::core::v1::{EnvVar, SecretVolumeSource, Volume, VolumeMount};
+use k8s_openapi::api::core::v1::{
+    ConfigMapVolumeSource, EnvVar, EnvVarSource, KeyToPath, SecretKeySelector, SecretVolumeSource,
+    Volume, VolumeMount,
+};
 
 /// Marks the `/etc/hosts` lines this module owns.
 pub const HOSTS_MARKER: &str = "# flint-nfs-krb5";
@@ -87,6 +90,9 @@ pub fn volume_principal_name(volume_id: &str) -> String {
 pub fn volume_keytab_secret(volume_id: &str) -> String {
     format!("flint-nfs-krb5-{volume_id}")
 }
+
+/// Where an NFS server pod has the LDAP directory's CA bundle, as `ca.crt`.
+pub const LDAP_CA_DIR: &str = "/etc/flint/ldap-ca";
 
 /// Whether NFS mount options ask for Kerberos (`sec=krb5`, `krb5i`,
 /// `krb5p`, or a list naming one).
@@ -256,6 +262,22 @@ pub struct ServerSecurity {
     pub realm_namespace: Option<String>,
     pub server_name: Option<String>,
     pub deletion_policy: Option<String>,
+    /// The directory lookup (`nfs::gss_ldap`): each set
+    /// `NFS_GSS_LDAP_<S>` of [`crate::nfs::gss_ldap::PASSED_ON`], as
+    /// (`<S>`, value).
+    pub gss_ldap: Vec<(String, String)>,
+    /// The Secret (name, key) with the bind password: the server reads it
+    /// as an env var from the Secret, so it is never in the pod spec.
+    pub gss_ldap_password: Option<(String, String)>,
+    /// The directory's CA bundle: a ConfigMap or a Secret, and its key.
+    pub gss_ldap_ca: Option<LdapCa>,
+}
+
+/// Where the LDAP CA bundle comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LdapCa {
+    ConfigMap { name: String, key: String },
+    Secret { name: String, key: String },
 }
 
 impl ServerSecurity {
@@ -263,10 +285,28 @@ impl ServerSecurity {
     /// `NFS_GSS_PRINCIPALS`, `NFS_GSS_IDMAP`, `NFS_GSS_ANON`,
     /// `NFS_ENFORCE_PERMISSIONS`, `NFS_ROOT_SQUASH`, `NFS_ATTACHED_NODES_ONLY`,
     /// `NFS_NODE_DOMAIN`, `NFS_REQUIRE_MACH_CRED`,
-    /// `NFS_SERVER_SERVICE_ACCOUNT`).
+    /// `NFS_SERVER_SERVICE_ACCOUNT`, `NFS_GSS_LDAP_*`).
     pub fn from_env() -> Self {
         let var = |k: &str| std::env::var(k).ok().filter(|s| !s.trim().is_empty());
+        let gss_ldap = crate::nfs::gss_ldap::PASSED_ON
+            .iter()
+            .filter_map(|s| var(&format!("NFS_GSS_LDAP_{s}")).map(|v| (s.to_string(), v)))
+            .collect();
+        let ca_key = var("NFS_GSS_LDAP_CA_KEY").unwrap_or_else(|| "ca.crt".into());
+        let gss_ldap_ca = match (var("NFS_GSS_LDAP_CA_CONFIGMAP"), var("NFS_GSS_LDAP_CA_SECRET")) {
+            (Some(name), _) => Some(LdapCa::ConfigMap { name, key: ca_key }),
+            (None, Some(name)) => Some(LdapCa::Secret { name, key: ca_key }),
+            (None, None) => None,
+        };
         ServerSecurity {
+            gss_ldap,
+            gss_ldap_password: var("NFS_GSS_LDAP_BIND_PASSWORD_SECRET").map(|name| {
+                (
+                    name,
+                    var("NFS_GSS_LDAP_BIND_PASSWORD_KEY").unwrap_or_else(|| "password".into()),
+                )
+            }),
+            gss_ldap_ca,
             keytab_secret: var("NFS_KRB5_KEYTAB_SECRET"),
             min_sec: var("NFS_MIN_SEC"),
             gss_principals: var("NFS_GSS_PRINCIPALS"),
@@ -444,6 +484,68 @@ pub fn server_pod_parts(sec: &ServerSecurity) -> (Vec<EnvVar>, Vec<Volume>, Vec<
         crate::nfs::v4::operations::session::REQUIRE_MACH_CRED_ENV,
         &sec.require_mach_cred,
     );
+    // The directory lookup: its settings as they are, the bind password
+    // from its Secret, the CA bundle as a file.
+    for (s, v) in &sec.gss_ldap {
+        set(&mut env, &format!("FLINT_NFS_GSS_LDAP_{s}"), &Some(v.clone()));
+    }
+    if let Some((name, key)) = &sec.gss_ldap_password {
+        env.push(EnvVar {
+            name: crate::nfs::gss_ldap::BIND_PASSWORD_ENV.into(),
+            value_from: Some(EnvVarSource {
+                secret_key_ref: Some(SecretKeySelector {
+                    name: name.clone(),
+                    key: key.clone(),
+                    optional: Some(false),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+    }
+    if let Some(ca) = &sec.gss_ldap_ca {
+        let item = |key: &str| {
+            Some(vec![KeyToPath {
+                key: key.into(),
+                path: "ca.crt".into(),
+                ..Default::default()
+            }])
+        };
+        let mut volume = Volume {
+            name: "ldap-ca".into(),
+            ..Default::default()
+        };
+        match ca {
+            LdapCa::ConfigMap { name, key } => {
+                volume.config_map = Some(ConfigMapVolumeSource {
+                    name: name.clone(),
+                    items: item(key),
+                    default_mode: Some(0o444),
+                    ..Default::default()
+                })
+            }
+            LdapCa::Secret { name, key } => {
+                volume.secret = Some(SecretVolumeSource {
+                    secret_name: Some(name.clone()),
+                    items: item(key),
+                    default_mode: Some(0o444),
+                    ..Default::default()
+                })
+            }
+        }
+        volumes.push(volume);
+        mounts.push(VolumeMount {
+            name: "ldap-ca".into(),
+            mount_path: LDAP_CA_DIR.into(),
+            read_only: Some(true),
+            ..Default::default()
+        });
+        env.push(EnvVar {
+            name: crate::nfs::gss_ldap::CA_FILE_ENV.into(),
+            value: Some(format!("{LDAP_CA_DIR}/ca.crt")),
+            ..Default::default()
+        });
+    }
     (env, volumes, mounts)
 }
 
@@ -667,6 +769,59 @@ mod tests {
             (env.len(), vols.len()),
             (1, 0),
             "permissions apply to sys volumes too"
+        );
+    }
+
+    #[test]
+    fn the_server_pod_gets_the_directory_with_its_password_from_the_secret() {
+        let sec = ServerSecurity {
+            gss_ldap: vec![
+                ("URL".into(), "ldaps://ldap.corp.example".into()),
+                ("REALMS".into(), "CORP.EXAMPLE".into()),
+                ("USER_BASE".into(), "ou=People,dc=corp,dc=example".into()),
+            ],
+            gss_ldap_password: Some(("flint-ldap-bind".into(), "password".into())),
+            gss_ldap_ca: Some(LdapCa::ConfigMap {
+                name: "corp-ca".into(),
+                key: "root.pem".into(),
+            }),
+            ..Default::default()
+        };
+        let (env, vols, mounts) = server_pod_parts(&sec);
+        let get = |n: &str| env.iter().find(|e| e.name == n);
+        assert_eq!(
+            get("FLINT_NFS_GSS_LDAP_URL").and_then(|e| e.value.as_deref()),
+            Some("ldaps://ldap.corp.example")
+        );
+        assert_eq!(
+            get("FLINT_NFS_GSS_LDAP_USER_BASE").and_then(|e| e.value.as_deref()),
+            Some("ou=People,dc=corp,dc=example")
+        );
+        let pw = get("FLINT_NFS_GSS_LDAP_BIND_PASSWORD").unwrap();
+        assert_eq!(pw.value, None, "never a literal in the pod spec");
+        let r = pw.value_from.as_ref().unwrap().secret_key_ref.as_ref().unwrap();
+        assert_eq!((r.name.as_str(), r.key.as_str()), ("flint-ldap-bind", "password"));
+        assert_eq!(
+            get("FLINT_NFS_GSS_LDAP_CA_FILE").and_then(|e| e.value.as_deref()),
+            Some("/etc/flint/ldap-ca/ca.crt")
+        );
+        let cm = vols[0].config_map.as_ref().unwrap();
+        assert_eq!(cm.name, "corp-ca");
+        let item = &cm.items.as_ref().unwrap()[0];
+        assert_eq!((item.key.as_str(), item.path.as_str()), ("root.pem", "ca.crt"));
+        assert_eq!(mounts[0].mount_path, LDAP_CA_DIR);
+        // From a Secret instead.
+        let sec = ServerSecurity {
+            gss_ldap_ca: Some(LdapCa::Secret {
+                name: "corp-ca".into(),
+                key: "ca.crt".into(),
+            }),
+            ..Default::default()
+        };
+        let (_, vols, _) = server_pod_parts(&sec);
+        assert_eq!(
+            vols[0].secret.as_ref().unwrap().secret_name.as_deref(),
+            Some("corp-ca")
         );
     }
 }
