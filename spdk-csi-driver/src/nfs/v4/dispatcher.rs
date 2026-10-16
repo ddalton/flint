@@ -114,6 +114,13 @@ pub struct CompoundDispatcher {
     /// Without it such a client gets SP4_NONE, and its session ids, in the
     /// clear under krb5i, work for any allowed principal on any connection.
     require_mach_cred: bool,
+
+    /// pNFS Kerberos, Phase 1: a files-class LAYOUTGET from an
+    /// RPCSEC_GSS call answers NFS4ERR_LAYOUTUNAVAIL, so a Kerberos
+    /// client's I/O goes through the MDS under Kerberos. Our DSes do no
+    /// GSS, and the Linux client then sends DS I/O as AUTH_SYS, silently
+    /// (`pnfs::mds::krb5`). Off unless the MDS has a keytab.
+    withhold_gss_layouts: bool,
 }
 
 /// One pnfs_scsi_layout4 extent as encoded on the wire (RFC 8154
@@ -170,6 +177,23 @@ impl CompoundDispatcher {
     pub fn with_require_mach_cred(mut self, on: bool) -> Self {
         self.require_mach_cred = on;
         self
+    }
+
+    /// Give RPCSEC_GSS callers no files layouts (`withhold_gss_layouts`;
+    /// the MDS sets it from `pnfs::mds::krb5::MdsSecEnv`). AUTH_SYS
+    /// callers are untouched.
+    pub fn with_gss_layouts_withheld(mut self, on: bool) -> Self {
+        self.withhold_gss_layouts = on;
+        self
+    }
+
+    /// Whether this call's files layout is withheld: Kerberos on the MDS
+    /// and the COMPOUND came under RPCSEC_GSS (its principal is
+    /// `gss:<name>`, `server_v4::handle_compound`; `gss:<handle>` before
+    /// the name is known). Decided per call, by the call's own flavor:
+    /// a node's AUTH_SYS and Kerberos mounts of one MDS share a client.
+    fn gss_layout_withheld(&self, context: &CompoundContext) -> bool {
+        self.withhold_gss_layouts && context.principal.starts_with(b"gss:")
     }
 
     /// Whether this dispatcher refuses mutating operations (F70).
@@ -240,6 +264,7 @@ impl CompoundDispatcher {
             access: Default::default(),
             reap_on_compound: true,
             require_mach_cred: false,
+            withhold_gss_layouts: false,
         };
         // The grant path's callback_ready (rule 7) and the MDS
         // posture refusal both live on StateManager; hand it the
@@ -3429,6 +3454,29 @@ impl CompoundDispatcher {
             fsid: 1,
         };
 
+        // pNFS Kerberos, Phase 1: no files layout for a Kerberos caller
+        // (`withhold_gss_layouts`). LAYOUTUNAVAIL is the answer the
+        // client already treats as "do this file's I/O through the MDS".
+        // Ahead of the delegation fence below (no recall for a layout
+        // that will not be granted) and of any placement mint, so the
+        // file stays MDS-native. F67: a stub with bytes is never pinned
+        // later, so a file a Kerberos client writes stays on the MDS.
+        // The scsi class is not withheld: its data goes over NVMe-oF,
+        // not NFS, and the MDS lane cannot serve it.
+        if self.gss_layout_withheld(context)
+            && pnfs.layout_class_for(&file_key) != crate::pnfs::mds::layout::LayoutClass::Scsi
+        {
+            if let Some(m) = &self.f68a {
+                m.layoutget_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            debug!(
+                "LAYOUTGET '{}' iomode {}: RPCSEC_GSS caller, layouts withheld \
+                 (FLINT_PNFS_LAYOUTS_FOR_GSS off) → LAYOUTUNAVAIL",
+                file_key, iomode
+            );
+            return OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None);
+        }
+
         // Conflict site 9 (design §5.2, slice 5): a write-capable
         // layout — RW, or ANY, which the client may write under — on a
         // file some other client holds a READ delegation on. The
@@ -4472,6 +4520,26 @@ impl CompoundDispatcher {
                 return OperationResult::LayoutCommit(Nfs4Status::Stale, None);
             }
         };
+
+        // pNFS Kerberos, Phase 1: a Kerberos caller is never granted a
+        // files layout (`withhold_gss_layouts`), so it has none to
+        // commit. Refused rather than applied: the commit below extends
+        // the file with no permission check, which a Kerberos caller
+        // could otherwise use to grow a file it may not write. The kernel
+        // sends LAYOUTCOMMIT over the mount that holds the layout, so an
+        // AUTH_SYS mount's commit is not caught here.
+        if self.gss_layout_withheld(context) {
+            let scsi = match (self.pnfs_current_fh_key(context), self.pnfs_handler.as_ref()) {
+                (Some(k), Some(p)) => {
+                    p.layout_class_for(&k) == crate::pnfs::mds::layout::LayoutClass::Scsi
+                }
+                _ => false,
+            };
+            if !scsi {
+                warn!("❌ LAYOUTCOMMIT from an RPCSEC_GSS caller: no layout was granted → BADLAYOUT");
+                return OperationResult::LayoutCommit(Nfs4Status::BadLayout, None);
+            }
+        }
 
         // Conflict site for the MDS lane (design §5.2, slice 5): the
         // commit publishes bytes written on the data servers — size,
@@ -8596,6 +8664,164 @@ mod tests {
         assert!(matches!(r, OperationResult::DelegReturn(Nfs4Status::Ok)));
         let r = d.dispatch_operation(layoutget(2), &mut ctx).await;
         assert!(matches!(r, OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None)), "{r:?}");
+    }
+
+    /// A PnfsOperations that GRANTS a one-DS files layout and counts its
+    /// LAYOUTGETs, so a test can tell a grant from a refusal and see
+    /// whether a refusal came from the handler or before it.
+    struct GrantingPnfs {
+        layoutgets: std::sync::atomic::AtomicUsize,
+    }
+
+    #[tonic::async_trait]
+    impl crate::pnfs::PnfsOperations for GrantingPnfs {
+        fn layoutget(
+            &self,
+            args: crate::pnfs::mds::operations::LayoutGetArgs,
+        ) -> Result<
+            crate::pnfs::mds::operations::LayoutGetResult,
+            crate::pnfs::mds::operations::LayoutGetError,
+        > {
+            self.layoutgets.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(crate::pnfs::mds::operations::LayoutGetResult {
+                return_on_close: false,
+                stateid: [7; 16],
+                layouts: vec![crate::pnfs::mds::operations::Layout {
+                    offset: 0,
+                    length: u64::MAX,
+                    iomode: args.iomode,
+                    layout_type: args.layout_type,
+                    segments: vec![crate::pnfs::mds::layout::LayoutSegment {
+                        offset: 0,
+                        length: u64::MAX,
+                        iomode: args.iomode,
+                        device_id: "ds-0".into(),
+                        stripe_index: 0,
+                        pattern_offset: 0,
+                    }],
+                    stripe_unit: 65536,
+                    device_id_bin: [1; 16],
+                    file_id: 42,
+                    stripe_width: 1,
+                }],
+            })
+        }
+
+        fn getdeviceinfo(
+            &self,
+            _args: crate::pnfs::mds::operations::GetDeviceInfoArgs,
+        ) -> Result<
+            crate::pnfs::mds::operations::GetDeviceInfoResult,
+            crate::pnfs::mds::operations::GetDeviceInfoError,
+        > {
+            Err(crate::pnfs::mds::operations::GetDeviceInfoError::NoEnt)
+        }
+
+        fn layoutreturn(
+            &self,
+            _args: crate::pnfs::mds::operations::LayoutReturnArgs,
+        ) -> Result<(), crate::pnfs::mds::operations::LayoutReturnError> {
+            Ok(())
+        }
+
+        fn write_layout_holders(&self, _file_key: &str) -> Vec<u64> {
+            Vec::new()
+        }
+    }
+
+    /// pNFS Kerberos, Phase 1 (option B): with layouts withheld, a
+    /// LAYOUTGET from an RPCSEC_GSS call answers LAYOUTUNAVAIL without
+    /// reaching the handler (no placement is minted), an AUTH_SYS call
+    /// on the same session still gets its layout, and with the knob off
+    /// (`FLINT_PNFS_LAYOUTS_FOR_GSS`, or no keytab) the GSS call gets one
+    /// too. A GSS LAYOUTCOMMIT, having no layout, is refused and leaves
+    /// the size alone.
+    #[tokio::test]
+    async fn gss_callers_get_no_files_layout_when_withheld() {
+        let build = |withheld: bool| {
+            let t = TempDir::new().unwrap();
+            let export = t.path().canonicalize().unwrap();
+            let pnfs = Arc::new(GrantingPnfs { layoutgets: Default::default() });
+            let d = CompoundDispatcher::new_with_pnfs(
+                Arc::new(FileHandleManager::new(export.clone())),
+                Arc::new(StateManager::new_in_memory("")),
+                Arc::new(LockManager::new()),
+                Some(Arc::clone(&pnfs) as Arc<dyn crate::pnfs::PnfsOperations>),
+            )
+            .with_gss_layouts_withheld(withheld);
+            std::fs::write(export.join("f"), b"data").unwrap();
+            d.state_mgr.leases.end_grace();
+            (d, pnfs, export, t)
+        };
+        let layoutget = |iomode: u32| Operation::LayoutGet {
+            signal_layout_avail: false,
+            layout_type: 1,
+            iomode,
+            offset: 0,
+            length: u64::MAX,
+            minlength: 4096,
+            stateid: StateId { seqid: 0, other: [0; 12] },
+            maxcount: 65536,
+        };
+        let ctx_for = |d: &CompoundDispatcher, export: &std::path::Path, principal: &[u8]| {
+            let s = d.state_mgr.sessions.create_session(9, 0, 0, 65536, 65536, 16384, 16, 16, 0, None, 1);
+            let mut ctx = CompoundContext::with_principal(1, principal.to_vec());
+            ctx.session_id = Some(s.session_id);
+            ctx.current_fh =
+                Some(d.file_handler.fh_manager().path_to_filehandle(&export.join("f")).unwrap());
+            ctx
+        };
+        let calls = |p: &Arc<GrantingPnfs>| p.layoutgets.load(std::sync::atomic::Ordering::SeqCst);
+
+        let (d, pnfs, export, _t) = build(true);
+        // GSS (krb5i/krb5p alike: the flavor decides, not the service).
+        for principal in [&b"gss:host/w1.corp@CORP"[..], &b"gss:alice@CORP"[..]] {
+            for iomode in [1, 2] {
+                let mut ctx = ctx_for(&d, &export, principal);
+                let r = d.dispatch_operation(layoutget(iomode), &mut ctx).await;
+                assert!(
+                    matches!(r, OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None)),
+                    "{principal:?} iomode {iomode}: {r:?}"
+                );
+            }
+        }
+        assert_eq!(calls(&pnfs), 0, "withheld before the handler: nothing minted");
+        // AUTH_SYS: a layout, exactly as before.
+        let mut ctx = ctx_for(&d, &export, b"sys:w1:0");
+        let r = d.dispatch_operation(layoutget(2), &mut ctx).await;
+        assert!(matches!(r, OperationResult::LayoutGet(Nfs4Status::Ok, Some(_))), "{r:?}");
+        assert_eq!(calls(&pnfs), 1);
+        // AUTH_NONE (empty principal) is not GSS either.
+        let mut ctx = ctx_for(&d, &export, b"");
+        let r = d.dispatch_operation(layoutget(1), &mut ctx).await;
+        assert!(matches!(r, OperationResult::LayoutGet(Nfs4Status::Ok, Some(_))), "{r:?}");
+
+        // LAYOUTCOMMIT from GSS: no layout, so BADLAYOUT, size untouched.
+        let commit = || Operation::LayoutCommit {
+            offset: 0,
+            length: u64::MAX,
+            reclaim: false,
+            stateid: StateId { seqid: 0, other: [0; 12] },
+            last_write_offset: Some(1 << 20),
+            time_modify: None,
+            layout_type: 1,
+            layoutupdate: Bytes::new(),
+        };
+        let mut ctx = ctx_for(&d, &export, b"gss:alice@CORP");
+        let r = d.dispatch_operation(commit(), &mut ctx).await;
+        assert!(matches!(r, OperationResult::LayoutCommit(Nfs4Status::BadLayout, _)), "{r:?}");
+        assert_eq!(std::fs::metadata(export.join("f")).unwrap().len(), 4, "size untouched");
+
+        // Knob on (or no keytab): the GSS caller gets its layout, and its
+        // commit is applied as any other.
+        let (d, pnfs, export, _t) = build(false);
+        let mut ctx = ctx_for(&d, &export, b"gss:alice@CORP");
+        let r = d.dispatch_operation(layoutget(2), &mut ctx).await;
+        assert!(matches!(r, OperationResult::LayoutGet(Nfs4Status::Ok, Some(_))), "{r:?}");
+        assert_eq!(calls(&pnfs), 1);
+        let mut ctx = ctx_for(&d, &export, b"gss:alice@CORP");
+        let r = d.dispatch_operation(commit(), &mut ctx).await;
+        assert!(matches!(r, OperationResult::LayoutCommit(Nfs4Status::Ok, _)), "{r:?}");
     }
 
     /// The LAYOUTCOMMIT lane: it moves size/mtime/change on the MDS for

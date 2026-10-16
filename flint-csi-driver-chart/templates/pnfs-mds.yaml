@@ -307,6 +307,15 @@ spec:
                   name: {{ $.Values.pnfs.controlToken.existingSecret | default "flint-pnfs-control-token" }}
                   key: token
             {{- end }}
+            {{- if include "flint-csi-driver-chart.pnfsKrb5Enabled" $ }}
+            {{- $pk := $.Values.pnfs.kerberos }}
+            # Kerberos (pnfs.kerberos): this shard's key,
+            # nfs/flint-pnfs-mds-{{ $i }}.<namespace>.svc.<clusterDomain>,
+            # and the same server security env as the RWX servers. No
+            # attached-nodes-only yet: the MDS has no attachment watcher.
+            # Kerberos callers get no layouts (FLINT_PNFS_LAYOUTS_FOR_GSS).
+            {{- include "flint-csi-driver-chart.krb5ServerEnv" (dict "root" $ "minSec" $pk.minSec "requireMachCred" $pk.requireMachCred "enforcePermissions" $pk.enforcePermissions) | nindent 12 }}
+            {{- end }}
           ports:
             - containerPort: 2049
               name: nfs
@@ -330,6 +339,9 @@ spec:
             - name: spdk-socket
               mountPath: /var/tmp
             {{- end }}
+            {{- if include "flint-csi-driver-chart.pnfsKrb5Enabled" $ }}
+            {{- include "flint-csi-driver-chart.krb5ServerMounts" (dict "root" $) | nindent 12 }}
+            {{- end }}
           {{- with $.Values.pnfs.server.mds.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -346,6 +358,10 @@ spec:
           hostPath:
             path: /var/lib/flint-spdk
             type: DirectoryOrCreate
+        {{- end }}
+        {{- if include "flint-csi-driver-chart.pnfsKrb5Enabled" $ }}
+        # This shard's keytab (krb5-operator writes it; the pod waits).
+        {{- include "flint-csi-driver-chart.krb5ServerVolumes" (dict "root" $ "keytabSecret" (printf "flint-pnfs-mds-%d-krb5" $i)) | nindent 8 }}
         {{- end }}
 {{- end }}
 {{- end }}

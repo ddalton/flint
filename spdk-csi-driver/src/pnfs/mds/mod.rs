@@ -33,6 +33,10 @@ pub mod layout;
 /// MDS server implementation
 pub mod server;
 
+/// Kerberos on the MDS: the security env, validated at startup, and
+/// whether RPCSEC_GSS callers get layouts.
+pub mod krb5;
+
 /// pNFS-specific operations
 pub mod operations;
 

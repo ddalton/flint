@@ -394,16 +394,111 @@ workload, such as postgres, before turning Kerberos on.
 `krb5p` cannot be a floor (see `tests/krb5/README.md`), but a client can
 mount with `sec=krb5p` over the `krb5i` floor.
 
-pNFS volumes are not covered ([below](#pnfs)).
+pNFS volumes are covered by `pnfs.kerberos`, with the limits [below](#pnfs).
 
 ## pNFS
 
-None of the above protects a pNFS volume today. The MDS shares most of
-the code, but nothing turns it on, and the data servers do no RPC
-authentication at all. Rust paths are under `spdk-csi-driver/src/`, chart
-templates under `flint-csi-driver-chart/templates/`, as of this commit.
+`pnfs.kerberos.enabled` (off by default) gives the pNFS metadata server
+(MDS) Kerberos. It is Phase 1 of the
+[plan](plans/pnfs-kerberos-plan.md): the data servers (DSes) do no
+Kerberos yet, so a Kerberos client is given no layouts and **all of its
+I/O, data included, goes through the MDS**, under Kerberos.
 
-### What the MDS already shares
+```sh
+helm upgrade --install flint-csi flint-csi-driver-chart -n flint-system \
+  --set pnfs.enabled=true --set pnfs.server.enabled=true \
+  --set pnfs.kerberos.enabled=true \
+  --set nfs.kerberos.realm=CORP.EXAMPLE --set nfs.kerberos.realmRef=corp
+```
+
+Then use the `flint-pnfs-krb5` StorageClass (the `flint-pnfs` class's
+parameters, `mountOptions: [sec=krb5i]`). It needs the in-chart MDS
+(`pnfs.server.enabled`) and krb5-operator, as above.
+
+**Settings.** `pnfs.kerberos` has its own `minSec` (`krb5i`),
+`requireMachCred` (`true`), `enforcePermissions` (`enforce`) and
+`storageClass`, with the same meaning and render guards as RWX. Everything
+else is `nfs.kerberos`'s: `realm`, `realmRef`, `realmNamespace`,
+`clusterDomain`, `allowedPrincipals`, `idmap`, `machineIdentity`,
+`anonIdentity`, `ldap`, `nodeKeytab`, `deletionPolicy`, and
+`nfs.rootSquash`. `nfs.kerberos.enabled` itself may stay off. The MDS
+runs in the release namespace, so the realm must allow that namespace,
+and an LDAP bind password Secret and CA must be there too.
+
+| Piece | What it is |
+|---|---|
+| `KerberosPrincipal flint-pnfs-mds-<i>` | One per MDS shard: `nfs/flint-pnfs-mds-<i>.<namespace>.svc.<clusterDomain>`, named after the shard's own Service. Its keytab is in Secret `flint-pnfs-mds-<i>-krb5`, which only that shard's pod mounts (`KRB5_KTNAME`). |
+| MDS pods | The same server env as the RWX servers (floor, allowlist, idmap, anonymous identity, root squash, enforced permissions, SP4_MACH_CRED, the directory), from one chart helper. A bad floor or `FLINT_NFS_REQUIRE_MACH_CRED` stops the MDS at startup. |
+| ControllerPublishVolume | Puts the volume's shard name in the publish context (`nfs.chert.us/krb5-server-name`): shard from the volume id's `~m<i>` suffix, none being shard 0. |
+| node plugin | Before a `sec=krb5*` pNFS mount, maps the PV's MDS IP to that name in `/etc/hosts`, so `rpc.gssd` asks for the shard's principal. Without a name it refuses the mount; it never falls back to the RWX servers' name. Shard 0 has the same name whether the PV carries its per-shard Service's IP or the legacy `flint-pnfs-mds` alias's. |
+| `KerberosNodeKeytab` | The nodes' keys, as for RWX; rendered once when both are on. |
+
+**What it protects.** Every pNFS call from a Kerberos mount is
+authenticated and signed (`krb5i`) or sealed (`krb5p`), metadata and data:
+the floor refuses `sec=sys` mounts, the allowlist decides who connects, a
+caller is its `idmap`/directory identity with permissions enforced, and
+sessions are bound to their machine (SP4_MACH_CRED).
+
+**No layouts for Kerberos callers.** Measured (plan, "Phase 0 results"):
+a Linux client with a `sec=krb5i` mount that cannot get a GSS context with
+a DS sends that DS its I/O as AUTH_SYS, silently, and our DSes take it.
+Handing such a client a layout would put its data on the wire
+unauthenticated while the mount looks protected. So with a keytab
+configured (`KRB5_KTNAME`), the MDS answers LAYOUTGET from an RPCSEC_GSS
+call with NFS4ERR_LAYOUTUNAVAIL, and the client does its I/O through the
+MDS. The decision is per call, by the call's credential flavor; AUTH_SYS
+calls still get layouts (but the floor refuses `sec=sys` mounts). A
+LAYOUTCOMMIT from a Kerberos caller, which holds no layout, is refused
+with NFS4ERR_BADLAYOUT. `pnfs-block` (SCSI layout) volumes are not
+affected: their data goes over NVMe-oF, which Kerberos does not cover.
+`FLINT_PNFS_LAYOUTS_FOR_GSS=true` on the MDS hands layouts to Kerberos
+callers again; it is for when the DSes do Kerberos (Phase 3), not before.
+
+**What it does not protect yet.**
+
+- **No pNFS.** A Kerberos client's throughput is the MDS's: one pod per
+  shard, no striping. The F68a data-path meter on the MDS reports this
+  traffic as MDS-lane I/O; that is expected here.
+- **Files stay on the MDS.** A file a Kerberos client writes lives in the
+  MDS's export (its PVC, `pnfs.server.mds.storage`), not on the DSes: no
+  placement is minted for it. The F67 guard never pins a file that already
+  has bytes, so it stays there after Phase 3, and a later layout request
+  for it is refused (with an F67 error in the MDS log) and its I/O keeps
+  going through the MDS, until it is migrated. Size the MDS PVC for the
+  data Kerberos clients write. Files written before, under AUTH_SYS, stay
+  on the DSes, and the MDS relays a Kerberos client's I/O to them (F66),
+  over the unauthenticated MDS-to-DS control path.
+- **No attached-nodes-only on the MDS.** Every node with an allowed
+  machine principal reaches every pNFS volume of a shard (the MDS has no
+  attachment watcher yet; Phase 2). `nfs.kerberos.attachedNodesOnly` does
+  not apply to it.
+- **The DSes and the control path** have no Kerberos and no TLS
+  (Phases 3 to 5). Something that reaches a DS on 2049 is still served
+  without a credential; keep `pnfs.networkPolicy` on.
+
+**Turning it on (migration).** The floor applies to every pNFS volume of
+the release, so a `sec=sys` pNFS mount stops working. Worse, a node with a
+live `sec=sys` pNFS mount reuses that AUTH_SYS client for new mounts of
+the same MDS IP, which the floor refuses: **drain every `sec=sys` pNFS
+mount from a node** (move its pods, or unmount) before enabling. A PV
+keeps the mount options it was made with (`sec=sys` is the pNFS default),
+so existing volumes need `sec=krb5i` in their `spec.mountOptions`; new
+ones come from `flint-pnfs-krb5`. Volumes attached before the
+upgrade have no MDS name in their VolumeAttachment: a `sec=krb5*` mount
+of one fails until it is re-attached (detach and attach, e.g. by
+rescheduling its pods off the node and back).
+
+### Before Phase 1: what it would take
+
+This analysis was written before Phase 1, against the code as it was then
+(Rust paths under `spdk-csi-driver/src/`, chart templates under
+`flint-csi-driver-chart/templates/`; line numbers are of that commit). It
+is kept as the reasoning behind the phases: Phase 1 above is work item 1
+of its bottom line (the MDS wiring) plus the no-layouts rule, which
+replaces its "expected, not measured" fallback through the MDS with a
+measured one. Items 2 to 5 are still open.
+
+#### What the MDS already shares
 
 The MDS serves NFS through the same function as the RWX server,
 `nfs::server_v4::serve_tcp` (`pnfs/mds/server.rs:1855-1862`, calling
@@ -428,7 +523,7 @@ the keytab and the same env (`nfs_krb5::server_pod_parts`) in
 entry for the MDS ClusterIP before the pNFS mount, and an attached-nodes
 check that works per volume.
 
-### The data servers: no RPC authentication
+#### The data servers: no RPC authentication
 
 The DS has its own minimal NFS loop (`pnfs/ds/server.rs:231-361`), not
 `serve_tcp`.
@@ -503,7 +598,7 @@ For the DS to carry the same protections, it needs:
    DS session id can be used from another connection, as before
    SP4_MACH_CRED on the RWX server.
 
-### The MDS to DS control path
+#### The MDS to DS control path
 
 The control path is tonic gRPC over **plain TCP**, with no TLS. That
 covers the MDS's `MdsControl` on 50051 (`pnfs/mds/server.rs:1824-1826`),
@@ -520,7 +615,7 @@ checking it against the device id at registration) or at least TLS. It
 is separate from Kerberos, but without it Kerberos on 2049 can be
 bypassed by registering a rogue DS.
 
-### Layouts
+#### Layouts
 
 - **Files layout** (`LAYOUT4_NFSV4_1_FILES`) is the only NFS layout
   served. `FS_LAYOUT_TYPES` advertises FILES or SCSI
@@ -542,7 +637,7 @@ bypassed by registering a rogue DS.
   Kerberos does not apply. That path is guarded by the per-subsystem
   host-NQN allow-list (`docs/pnfs-operator-runbook.md`, "Port 4420").
 
-### Bottom line
+#### Bottom line
 
 Work items, in order of how much they buy:
 
@@ -584,6 +679,17 @@ model").
   allowlist, a file she creates is owned by 3000:3000, a principal the
   directory lacks is refused, and with the directory scaled to zero a
   new principal is refused while carol works until her TTL runs out.
+- **pNFS:** `chart-kerberos-defaults.sh` also renders `pnfs.kerberos`
+  (off: no change; on: a principal and keytab per shard, the server env
+  by the names in `tests/system/krb5-server-env-names.txt`, which a unit
+  test also holds `server_pod_parts` to, no attached-nodes-only, the
+  StorageClass, one node keytab; and the guards). Unit tests: the
+  dispatcher's `gss_callers_get_no_files_layout_when_withheld`,
+  `pnfs::mds::krb5` (the MDS env, refusals to start) and `nfs_krb5`
+  (the shard name, the strict hosts entry). In the VM rig,
+  `tests/krb5/pnfs-e1.sh` (results in `tests/krb5/results/pnfs-phase1-2026-10-16/`):
+  under `sec=krb5i` no RPC reaches a DS and the data is on the MDS, while
+  `sec=sys` still stripes. On kind, see below.
 - **Session binding:** unit tests in `dispatcher.rs` (`mach_cred`) and,
   against the real kernel client in the VM rig,
   `tests/krb5/run-mach-cred.sh` (connection killed, server restarted,
@@ -613,6 +719,21 @@ model").
   `nfs/<pv>.flint-nfs.…` key, the node maps its ClusterIP to that name,
   and deleting the volume deletes its `KerberosPrincipal`. CI runs it
   after the nfs-only suite.
+- **kind, pNFS:** `KRB5=1 PNFS=1 tests/system/kind-nfs-only.sh` also
+  builds the `flint-pnfs` image, installs the in-chart MDS (one shard) and
+  two DSes with `pnfs.kerberos.enabled` (and `nfs.kerberos.enabled` off),
+  loads `nfs_layout_nfsv41_files` on the host, and runs
+  `tests-pnfs-krb5/`: a `flint-pnfs-krb5` volume mounts with `sec=krb5i`
+  on two nodes and the pods share files; the shard's `KerberosPrincipal`
+  is `nfs/flint-pnfs-mds-0.flint-system.svc.cluster.local`, its keytab
+  Secret is the only one the MDS pod mounts and holds that principal
+  alone, the VolumeAttachments name it, and each node maps the PV's MDS
+  IP to it; 8 MiB written under `krb5i` are allocated in the MDS's export
+  and not on the DSes, with the MDS's F68a meter counting refused
+  LAYOUTGETs and no grants; a `sec=sys` pNFS mount is refused by the
+  `krb5i` floor; alice is refused by the allowlist. `PNFS=1` alone runs
+  `tests-pnfs-only/`, the AUTH_SYS control: the same write is striped on
+  both DSes and the MDS keeps a sparse stub. Not in CI yet.
 
 ## Tested on
 
@@ -620,7 +741,7 @@ Only two kinds of host have run this:
 
 - **kind, Debian-based nodes.** `KRB5=1 tests/system/kind-nfs-only.sh`
   builds `tests/system/krb5/kind-node.Dockerfile`: `kindest/node:v1.34.0`
-  (`kind-nfs-only.sh:49`) plus `nfs-common` and `krb5-user` from apt.
+  (`kind-nfs-only.sh:61`) plus `nfs-common` and `krb5-user` from apt.
   CI runs it on `ubuntu-latest` (`.github/workflows/system-chainsaw.yml:63`,
   `:123-131`). A kind node uses the host's kernel, so the client kernel
   is the runner's (or Docker Desktop's VM's), and systemd runs inside the

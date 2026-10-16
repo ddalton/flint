@@ -212,16 +212,79 @@ pub fn prepare_node_mount(server_ip: &str, mount_opts: &str, server_name: Option
             )
         })?;
     let name = server_name.filter(|n| !n.is_empty()).map(str::to_string).unwrap_or(shared);
+    write_host_entry(server_ip, &name)
+}
+
+/// `<server_ip> <name>` into the host's hosts file (see [`ensure_host_entry`]).
+fn write_host_entry(server_ip: &str, name: &str) -> Result<(), String> {
     let hosts = std::env::var(HOSTS_FILE_ENV).unwrap_or_else(|_| DEFAULT_HOSTS_FILE.to_string());
     let live = std::fs::read_to_string("/proc/mounts")
         .map(|m| krb5_mount_ips(&m))
         .unwrap_or_default();
-    match ensure_host_entry(Path::new(&hosts), server_ip, &name, &live) {
+    match ensure_host_entry(Path::new(&hosts), server_ip, name, &live) {
         Ok(true) => eprintln!("🔐 [NFS_KRB5] {hosts}: {server_ip} is {name} for rpc.gssd"),
         Ok(false) => {}
         Err(e) => return Err(format!("writing {server_ip} {name} to {hosts}: {e}")),
     }
     Ok(())
+}
+
+/// Controller env (chart `pnfs.kerberos`): the DNS suffix the MDS shard
+/// Services live under, `<namespace>.svc.<cluster domain>`. Set only with
+/// pNFS Kerberos on.
+pub const PNFS_MDS_NAME_BASE_ENV: &str = "PNFS_KRB5_MDS_NAME_BASE";
+
+/// The Kerberos name of the MDS shard serving `volume_id`:
+/// `flint-pnfs-mds-<shard>.<base>`, the shard from the volume id's
+/// `~m<shard>` suffix (none: shard 0, the volumes made before sharding).
+/// It is the shard's per-shard Service (`pnfs-mds.yaml`), whose
+/// `KerberosPrincipal` is `nfs/<this name>` (`pnfs-kerberos.yaml`). Shard
+/// 0 is the same name whether a PV carries the per-shard Service's
+/// ClusterIP or the legacy alias `flint-pnfs-mds`'s: the node maps the
+/// PV's IP to it, and rpc.gssd asks for the principal by that name.
+pub fn pnfs_mds_server_name(base: &str, volume_id: &str) -> String {
+    let shard = crate::pnfs_csi::parse_shard_suffix(volume_id)
+        .map(|(_, s)| s)
+        .unwrap_or(0);
+    format!("flint-pnfs-mds-{shard}.{base}")
+}
+
+/// [`pnfs_mds_server_name`] from [`PNFS_MDS_NAME_BASE_ENV`]; `None` with
+/// pNFS Kerberos off.
+pub fn pnfs_mds_server_name_from_env(volume_id: &str) -> Option<String> {
+    std::env::var(PNFS_MDS_NAME_BASE_ENV)
+        .ok()
+        .filter(|b| !b.trim().is_empty())
+        .map(|b| pnfs_mds_server_name(b.trim(), volume_id))
+}
+
+/// The node plugin, before a pNFS mount of `mds_ip`: for a Kerberos mount,
+/// the hosts entry rpc.gssd needs, naming the MDS shard by `mds_name` (the
+/// publish context's [`SERVER_NAME_CONTEXT`], from ControllerPublish).
+/// Stricter than [`prepare_node_mount`]: there is no shared name to fall
+/// back to (the RWX servers' `nfs/<serverName>` is not the MDS's key), so
+/// a missing name is an error, never a guess. Nothing for `sec=sys`.
+pub fn prepare_pnfs_node_mount(mds_ip: &str, mount_opts: &str, mds_name: Option<&str>) -> Result<(), String> {
+    let Some(name) = pnfs_krb5_mds_name(mount_opts, mds_name)? else {
+        return Ok(());
+    };
+    write_host_entry(mds_ip, name)
+}
+
+/// The name [`prepare_pnfs_node_mount`] maps the MDS to: `None` for a
+/// mount that is not Kerberos, an error for one with no name.
+fn pnfs_krb5_mds_name<'a>(mount_opts: &str, mds_name: Option<&'a str>) -> Result<Option<&'a str>, String> {
+    if !is_krb5_sec(mount_opts) {
+        return Ok(None);
+    }
+    match mds_name.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => Ok(Some(n)),
+        None => Err(format!(
+            "a sec=krb5* pNFS mount needs the MDS shard's Kerberos name ({SERVER_NAME_CONTEXT} \
+             in the publish context): install the chart with pnfs.kerberos.enabled, then \
+             re-attach the volume (a VolumeAttachment made before has no name)"
+        )),
+    }
 }
 
 /// The NFS servers' security settings, as the controller passes them on
@@ -823,5 +886,98 @@ mod tests {
             vols[0].secret.as_ref().unwrap().secret_name.as_deref(),
             Some("corp-ca")
         );
+    }
+
+    #[test]
+    fn the_pnfs_mds_name_is_its_shard_service() {
+        let base = "flint-system.svc.cluster.local";
+        assert_eq!(
+            pnfs_mds_server_name(base, "pvc-0a1b~m3"),
+            "flint-pnfs-mds-3.flint-system.svc.cluster.local"
+        );
+        // No suffix: made before sharding, served by shard 0 (through the
+        // legacy alias Service, whose IP the node maps to this name too).
+        assert_eq!(
+            pnfs_mds_server_name(base, "pvc-0a1b"),
+            "flint-pnfs-mds-0.flint-system.svc.cluster.local"
+        );
+        assert_eq!(
+            pnfs_mds_server_name(base, "pvc-0a1b~m0"),
+            "flint-pnfs-mds-0.flint-system.svc.cluster.local"
+        );
+        // A suffix that is not one (no digits) is shard 0, as the
+        // controller's own routing reads it.
+        assert_eq!(
+            pnfs_mds_server_name(base, "pvc~mx"),
+            "flint-pnfs-mds-0.flint-system.svc.cluster.local"
+        );
+    }
+
+    #[test]
+    fn a_kerberos_pnfs_mount_needs_the_mds_name() {
+        // sec=sys: nothing to do, name or not, and no file is touched.
+        assert_eq!(pnfs_krb5_mds_name("minorversion=2,sec=sys", None), Ok(None));
+        assert_eq!(pnfs_krb5_mds_name("minorversion=2,sec=sys", Some("x")), Ok(None));
+        assert!(prepare_pnfs_node_mount("10.96.0.9", "minorversion=2,sec=sys,port=2049", None).is_ok());
+        // sec=krb5*: the publish context's name, never a fallback.
+        for opts in ["minorversion=2,sec=krb5i", "sec=krb5", "sec=krb5p,port=2049"] {
+            let e = pnfs_krb5_mds_name(opts, None).unwrap_err();
+            assert!(e.contains(SERVER_NAME_CONTEXT) && e.contains("pnfs.kerberos"), "{e}");
+            assert!(pnfs_krb5_mds_name(opts, Some("  ")).is_err(), "blank is no name");
+            assert_eq!(
+                pnfs_krb5_mds_name(opts, Some("flint-pnfs-mds-1.ns.svc.cluster.local")),
+                Ok(Some("flint-pnfs-mds-1.ns.svc.cluster.local"))
+            );
+        }
+        // The RWX shared name (FLINT_NFS_KRB5_SERVER_NAME) is never read:
+        // that key is the RWX servers', not the MDS's.
+        assert!(prepare_pnfs_node_mount("10.96.0.9", "sec=krb5i", None).is_err());
+    }
+
+    /// The MDS pods get the server security env from the chart
+    /// (`flint-csi-driver-chart.krb5ServerEnv`), the RWX servers from
+    /// [`server_pod_parts`]. The names both must set are
+    /// `tests/system/krb5-server-env-names.txt`, which
+    /// `tests/system/chart-kerberos-defaults.sh` checks the chart against.
+    /// The two node-gate names are left out: attached-nodes-only is not
+    /// on the MDS yet (it has no attachment watcher).
+    #[test]
+    fn server_env_names_match_the_chart_helper() {
+        let sec = ServerSecurity {
+            keytab_secret: Some("k".into()),
+            min_sec: Some("krb5i".into()),
+            gss_principals: Some("host/*@R".into()),
+            gss_idmap: Some("host/*@R=0:0".into()),
+            gss_anon: Some("65534:65534".into()),
+            enforce_permissions: Some("enforce".into()),
+            root_squash: Some("true".into()),
+            attached_nodes_only: Some("true".into()),
+            node_domain: Some("corp".into()),
+            require_mach_cred: Some("true".into()),
+            gss_ldap: crate::nfs::gss_ldap::PASSED_ON
+                .iter()
+                .map(|s| (s.to_string(), "v".to_string()))
+                .collect(),
+            gss_ldap_password: Some(("pw".into(), "password".into())),
+            gss_ldap_ca: Some(LdapCa::ConfigMap { name: "ca".into(), key: "ca.crt".into() }),
+            ..Default::default()
+        };
+        let (env, _, _) = server_pod_parts(&sec);
+        let mut got: Vec<String> = env
+            .into_iter()
+            .map(|e| e.name)
+            .filter(|n| n != crate::nfs::node_authz::ENV && n != crate::nfs::node_authz::DOMAIN_ENV)
+            .collect();
+        got.sort();
+        let file = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/system/krb5-server-env-names.txt");
+        let mut want: Vec<String> = std::fs::read_to_string(file)
+            .unwrap()
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(str::to_string)
+            .collect();
+        want.sort();
+        assert_eq!(got, want, "server_pod_parts and {file} disagree: change both, and the chart helper");
     }
 }

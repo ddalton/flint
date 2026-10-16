@@ -1,0 +1,49 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/v0.2.15/.schemas/json/configuration-chainsaw-v1alpha2.json
+# The pNFS suites on kind (kind-nfs-only.sh with PNFS=1): tests-pnfs-only/
+# (AUTH_SYS) and, with KRB5=1, tests-pnfs-krb5/. The chart's in-chart MDS
+# (one shard) and two data servers serve every volume, and the tests count
+# bytes on them, so the tests run one at a time.
+# Run: chainsaw test --config chainsaw-pnfs.yaml --test-dir tests-pnfs-krb5
+apiVersion: chainsaw.kyverno.io/v1alpha2
+kind: Configuration
+metadata:
+  name: flint-pnfs
+spec:
+  timeouts:
+    apply: 300s
+    assert: 300s
+    cleanup: 300s
+    delete: 300s
+    error: 300s
+    exec: 300s
+  execution:
+    parallel: 1
+  discovery:
+    testFile: chainsaw-test
+  # The pod scripts carry `$(...)`.
+  templating:
+    enabled: false
+  error:
+    catch:
+    - events: {}
+    - describe:
+        apiVersion: v1
+        kind: Pod
+    - describe:
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+    # Why a pNFS mount or a layout was refused: the MDS, then the DSes.
+    - podLogs:
+        namespace: flint-system
+        selector: chert.us/role=pnfs-mds
+        tail: 80
+    - podLogs:
+        namespace: flint-system
+        selector: app=flint-pnfs-ds
+        tail: 30
+    # The node plugin's pNFS mount line and the hosts entry it wrote.
+    - podLogs:
+        namespace: flint-system
+        selector: app=flint-csi-node
+        container: flint-csi-driver
+        tail: 40

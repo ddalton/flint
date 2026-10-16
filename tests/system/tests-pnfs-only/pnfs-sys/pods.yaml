@@ -1,0 +1,55 @@
+# Two pods on the two workers share the pNFS volume; each writes its file
+# and reads the other's.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pnfs-a
+  labels:
+    app: pnfs-sys
+spec:
+  terminationGracePeriodSeconds: 1
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app: pnfs-sys
+        topologyKey: kubernetes.io/hostname
+  containers:
+  - name: c
+    image: busybox
+    command: [sh, -c, "echo from-a > /data/a && sleep 3600"]
+    volumeMounts:
+    - name: data
+      mountPath: /data
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: pnfs-pvc
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pnfs-b
+  labels:
+    app: pnfs-sys
+spec:
+  terminationGracePeriodSeconds: 1
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app: pnfs-sys
+        topologyKey: kubernetes.io/hostname
+  containers:
+  - name: c
+    image: busybox
+    command: [sh, -c, "echo from-b > /data/b && sleep 3600"]
+    volumeMounts:
+    - name: data
+      mountPath: /data
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: pnfs-pvc

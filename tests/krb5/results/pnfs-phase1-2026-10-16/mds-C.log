@@ -1,0 +1,120 @@
+2026-10-16T18:29:48.400258Z  INFO ╔═══════════════════════════════════════════════════════════╗
+2026-10-16T18:29:48.400278Z  INFO ║      Flint pNFS Metadata Server (MDS)                    ║
+2026-10-16T18:29:48.400281Z  INFO ║      NFSv4.1+ Parallel NFS - Control Plane               ║
+2026-10-16T18:29:48.400283Z  INFO ╚═══════════════════════════════════════════════════════════╝
+2026-10-16T18:29:48.400284Z  INFO 
+2026-10-16T18:29:48.400289Z  INFO raised RLIMIT_NOFILE to the hard limit from=1024 to=1048576
+2026-10-16T18:29:48.400294Z  INFO 📄 Loading configuration from: "/tmp/pnfs-e1/mds.yaml"
+2026-10-16T18:29:48.400598Z  INFO 📊 Configuration:
+2026-10-16T18:29:48.400606Z  INFO    • Worker Threads: 8 (FLINT_MDS_WORKER_THREADS)
+2026-10-16T18:29:48.400609Z  INFO    • Bind: 0.0.0.0:20490
+2026-10-16T18:29:48.400612Z  INFO    • Layout Type: File
+2026-10-16T18:29:48.400618Z  INFO    • Stripe Size: 1048576 bytes
+2026-10-16T18:29:48.400620Z  INFO    • Layout Policy: Stripe
+2026-10-16T18:29:48.400622Z  INFO    • Data Servers: 2
+2026-10-16T18:29:48.400624Z  INFO      - ds-1 @ 127.0.0.2:20491
+2026-10-16T18:29:48.400626Z  INFO      - ds-2 @ 127.0.0.3:20492
+2026-10-16T18:29:48.400629Z  INFO    • Exports: 1
+2026-10-16T18:29:48.400631Z  INFO      - /tmp/pnfs-e1/mds-export (fsid=1)
+2026-10-16T18:29:48.400642Z  INFO    • Security: floor none (every flavor accepted); Kerberos on (KRB5_KTNAME); SP4_MACH_CRED not required; layouts for Kerberos callers WITHHELD (all their I/O through the MDS)
+2026-10-16T18:29:48.400644Z  INFO    • State Backend: Memory
+2026-10-16T18:29:48.400647Z  INFO 
+2026-10-16T18:29:48.400649Z  INFO ⚙️  Initializing Metadata Server...
+2026-10-16T18:29:48.400669Z  INFO Initializing Metadata Server
+2026-10-16T18:29:48.400682Z  INFO 📂 MDS export path: "/tmp/pnfs-e1/mds-export"
+2026-10-16T18:29:48.400846Z  INFO 🔑 MDS server id (persistent): 11274655688588071989 — FHs stamped with this survive restart
+2026-10-16T18:29:48.400860Z  INFO 🔧 FileHandleManager created:
+2026-10-16T18:29:48.400863Z  INFO    Instance ID: 11274655688588071989 (shared across pNFS cluster)
+2026-10-16T18:29:48.400865Z  INFO    Export path: "/tmp/pnfs-e1/mds-export"
+2026-10-16T18:29:48.400868Z  INFO    Export name: volume
+2026-10-16T18:29:48.400870Z  INFO 🌳 Pseudo-filesystem created (instance_id=11274655688588071989)
+2026-10-16T18:29:48.400873Z  INFO    RFC 7530 Section 7: Unified namespace for NFSv4 exports
+2026-10-16T18:29:48.400875Z  INFO 📁 Adding export to pseudo-filesystem:
+2026-10-16T18:29:48.400877Z  INFO    Name: volume
+2026-10-16T18:29:48.400880Z  INFO    Path: "/tmp/pnfs-e1/mds-export"
+2026-10-16T18:29:48.400882Z  INFO    ID: 1
+2026-10-16T18:29:48.400884Z  INFO    pNFS: Enabled
+2026-10-16T18:29:48.401013Z  INFO LeaseManager created - grace period for 90s
+2026-10-16T18:29:48.401061Z  INFO ClientManager created - mode="mds", server_owner=flint-pnfs, server_scope=flint-pnfs-mds
+2026-10-16T18:29:48.401139Z  INFO SessionManager created
+2026-10-16T18:29:48.401147Z  INFO StateIdManager created
+2026-10-16T18:29:48.401195Z  INFO Layout manager initialized: policy=Stripe, stripe_size=1048576
+2026-10-16T18:29:48.401225Z  INFO fd cache bounded (reaps least-recently-used above hiwat; see FdBudget) hiwat=16384 lowat=12288
+2026-10-16T18:29:48.401238Z  INFO 🔒 layouts withheld from Kerberos (RPCSEC_GSS) callers: their LAYOUTGET answers LAYOUTUNAVAIL and all their I/O goes through the MDS (the data servers do no Kerberos; set FLINT_PNFS_LAYOUTS_FOR_GSS=true once they do)
+2026-10-16T18:29:48.401244Z  INFO 🔐 export access list (most specific network wins; peers outside every network are refused): 0.0.0.0/0 rw
+2026-10-16T18:29:48.401282Z  INFO 🧺 laundromat armed (traffic-independent lease expiry) every_secs=30
+2026-10-16T18:29:48.401295Z  INFO deleg: recall machinery installed — grants are now possible          (revoke deadline 90s, CB_PATH_DOWN window 30s)
+2026-10-16T18:29:48.401310Z  INFO ✅ Registering new device: ds-1 @ 127.0.0.2:20491
+2026-10-16T18:29:48.401325Z  INFO 📊 Device registry: 1 total, 1 active
+2026-10-16T18:29:48.401332Z  INFO ✅ Registering new device: ds-2 @ 127.0.0.3:20492
+2026-10-16T18:29:48.401336Z  INFO 📊 Device registry: 2 total, 2 active
+2026-10-16T18:29:48.401339Z  INFO Device registry initialized with 2 data servers
+2026-10-16T18:29:48.401349Z  INFO 🔐 Initializing RPCSEC_GSS manager (Pure Rust implementation)
+2026-10-16T18:29:48.401352Z  INFO 📁 Loading keytab from: /tmp/flint-nfs.keytab
+2026-10-16T18:29:48.401355Z  INFO Loading keytab from: /tmp/flint-nfs.keytab
+2026-10-16T18:29:48.401459Z  INFO Loaded 4 keys from keytab
+2026-10-16T18:29:48.401468Z  INFO ✅ Keytab loaded successfully with 4 keys
+2026-10-16T18:29:48.401479Z  WARN ⚠️  FLINT_NFS_GSS_PRINCIPALS is not set: EVERY principal of the realm with a ticket for this server may connect, and Kerberos calls carry no uid to check
+2026-10-16T18:29:48.401487Z  INFO F33 self-fencing ARMED deadline_secs=90 export="/tmp/pnfs-e1/mds-export"
+2026-10-16T18:29:48.401680Z  INFO [FENCE] backing-store watchdog armed (F33) deadline_secs=90 interval_ms=10000
+2026-10-16T18:29:48.401719Z  INFO privilege: CAP_CHOWN present — created objects will carry the caller's AUTH_SYS identity
+2026-10-16T18:29:48.401724Z  INFO 🚀 Starting Metadata Server...
+2026-10-16T18:29:48.401726Z  INFO 
+2026-10-16T18:29:48.401762Z  INFO 📊 deleg reporter: delegations are OFF (FLINT_NFS_DELEGATIONS unset) — no grants will be made and no periodic report follows
+2026-10-16T18:29:48.401769Z  INFO MDS server binary: release build
+2026-10-16T18:29:48.401771Z  INFO ╔════════════════════════════════════════════════════╗
+2026-10-16T18:29:48.401774Z  INFO ║   Flint pNFS Metadata Server (MDS) - RUNNING      ║
+2026-10-16T18:29:48.401776Z  INFO ╚════════════════════════════════════════════════════╝
+2026-10-16T18:29:48.401777Z  INFO 
+2026-10-16T18:29:48.401779Z  INFO Listening on: 0.0.0.0:20490
+2026-10-16T18:29:48.401786Z  INFO Layout Type: File
+2026-10-16T18:29:48.401789Z  INFO Stripe Size: 1048576 bytes
+2026-10-16T18:29:48.401791Z  INFO Layout Policy: Stripe
+2026-10-16T18:29:48.401794Z  INFO Registered Data Servers: 2
+2026-10-16T18:29:48.401796Z  INFO 
+2026-10-16T18:29:48.401805Z  INFO 📈 MDS instance counter: 1 (incremented at startup; persisted across restart)
+2026-10-16T18:29:48.401813Z  INFO ClientManager loaded 0 records from backend
+2026-10-16T18:29:48.401816Z  INFO SessionManager observed 0 persisted sessions; dropped them so kernel re-CREATE_SESSIONs naturally on BADSESSION
+2026-10-16T18:29:48.401825Z  INFO StateIdManager loaded 0 records from backend (0 delegation holder markers)
+2026-10-16T18:29:48.401845Z  INFO StateManager loaded 0 clients, 0 sessions, 0 stateids from backend
+2026-10-16T18:29:48.401853Z  INFO nothing to reclaim on this volume — callers that cannot reclaim are not held by grace
+2026-10-16T18:29:48.401866Z  INFO LayoutManager loaded 0 records from backend
+2026-10-16T18:29:48.401873Z  INFO 📦 MDS reloaded 0 persisted layouts from backend
+2026-10-16T18:29:48.401885Z  INFO LayoutManager loaded 0 placements from backend
+2026-10-16T18:29:48.401897Z  INFO 📦 MDS reloaded 0 persisted placements from backend
+2026-10-16T18:29:48.402018Z  WARN 📐 volume '.flint-nfs' has no geometry record — new files in it will use the fleet default (stripe_size=1048576, all data servers). Expected for volumes created before per-volume geometry; otherwise the record was lost.
+2026-10-16T18:29:48.402160Z  INFO 📐 MDS loaded 0 volume geometry record(s)
+2026-10-16T18:29:48.402250Z  INFO Stale-device sweep holds for 30s boot grace (then every 10s, timeout 30s)
+2026-10-16T18:29:48.402312Z  INFO Heartbeat monitor started (timeout: 30 seconds)
+2026-10-16T18:29:48.402370Z  INFO Lease sweep holds for 179s (one lease window past grace), then every 30s
+2026-10-16T18:29:48.402420Z  INFO Status reporter started (interval: 60 seconds)
+2026-10-16T18:29:48.402448Z  INFO ✅ Metadata Server is ready to accept connections
+2026-10-16T18:29:48.402457Z  INFO 
+2026-10-16T18:29:48.402527Z  WARN ⚠️ FLINT_PNFS_CONTROL_TOKEN unset — MDS control plane is UNAUTHENTICATED (any pod that can reach 50051 can register as a DS)
+2026-10-16T18:29:48.402546Z  INFO 🔧 Starting MDS gRPC control server on 0.0.0.0:50051
+2026-10-16T18:29:48.402707Z  INFO ─────────────────────────────────────────────────────
+2026-10-16T18:29:48.402772Z  INFO MDS Status Report:
+2026-10-16T18:29:48.402785Z  INFO   Data Servers: 2 active / 2 total
+2026-10-16T18:29:48.402796Z  INFO   Active Layouts: 0
+2026-10-16T18:29:48.402803Z  INFO   Capacity: 0 bytes total, 0 bytes used
+2026-10-16T18:29:48.402811Z  INFO ─────────────────────────────────────────────────────
+2026-10-16T18:29:48.402475Z  INFO gRPC control server started on port 50051 (for DS registration)
+2026-10-16T18:29:48.402857Z  INFO 🚀 pNFS MDS serving NFSv4 on 0.0.0.0:20490
+2026-10-16T18:29:48.402867Z  INFO NFS connection cap: 1024 concurrent (FLINT_NFS_MAX_CONNECTIONS)
+2026-10-16T18:29:48.402876Z  INFO NFS idle-read deadline: 360s (FLINT_NFS_IDLE_TIMEOUT_SECS)
+2026-10-16T18:29:48.402908Z  INFO ✅ NFSv4.2 TCP server listening on 0.0.0.0:20490
+2026-10-16T18:29:48.402915Z  INFO 
+2026-10-16T18:29:50.423798Z  INFO 📝 DS Registration: device_id=ds-1, ds-reported endpoint=0.0.0.0:20491 → using configured endpoint=127.0.0.2:20491 (+0 multipath), capacity=40483942400 bytes
+2026-10-16T18:29:50.423857Z  WARN 🔄 Device ds-1 already registered, updating
+2026-10-16T18:29:50.423866Z  INFO 📊 Device registry: 2 total, 2 active
+2026-10-16T18:29:50.423871Z  INFO ✅ DS registered successfully: ds-1
+2026-10-16T18:29:50.424022Z  INFO 📝 DS Registration: device_id=ds-2, ds-reported endpoint=0.0.0.0:20492 → using configured endpoint=127.0.0.3:20492 (+0 multipath), capacity=40483942400 bytes
+2026-10-16T18:29:50.424046Z  WARN 🔄 Device ds-2 already registered, updating
+2026-10-16T18:29:50.424052Z  INFO 📊 Device registry: 2 total, 2 active
+2026-10-16T18:29:50.424055Z  INFO ✅ DS registered successfully: ds-2
+2026-10-16T18:29:57.454401Z  INFO ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-10-16T18:29:57.454439Z  INFO 📡 [NFS_SERVER] Connection #1 from 127.0.0.1:1002 (Active connections: 1)
+2026-10-16T18:29:57.454453Z  INFO    Timestamp: SystemTime { tv_sec: 1792175397, tv_nsec: 454452669 }
+2026-10-16T18:29:57.454465Z  INFO ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-10-16T18:29:57.454664Z  INFO 🚀 [NFS_SERVER] Spawned handler task for connection #1 from 127.0.0.1:1002
+2026-10-16T18:29:57.454717Z  INFO 🔌 [NFS_SERVER] Connection #1 handler started for 127.0.0.1:1002
