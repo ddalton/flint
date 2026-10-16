@@ -13,7 +13,7 @@ use super::v4::operations::lockops::LockManager;
 use super::v4::protocol::{NFS4_PROGRAM, procedure};
 use super::v4::state::StateManager;
 // LocalFilesystem removed - NFSv4 uses direct filesystem access via filehandle manager
-use super::xdr::{XdrDecoder, XdrEncoder};
+use super::xdr::XdrDecoder;
 use bytes::Bytes;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1602,6 +1602,7 @@ mod deleg_wiring_tests {
 #[cfg(test)]
 mod export_access_wiring_tests {
     use super::*;
+    use crate::nfs::xdr::XdrEncoder;
     use crate::nfs::export_access::{AccessRule, ExportAccess};
     use crate::nfs::rpc::Auth;
     use crate::nfs::v4::protocol::{opcode, Nfs4Status};
