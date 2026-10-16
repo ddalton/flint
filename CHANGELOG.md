@@ -14,6 +14,61 @@ covered by the stability guarantee.
 
 ### Security
 
+- **Each NFS volume's server has a Kerberos key of its own** (2026-10-16).
+  Every NFS server pod used to mount the one shared keytab
+  (`nfs/flint-nfs.<ns>.svc.<domain>`), so anyone who got into one server
+  pod could read the tickets nodes present to every other volume's server
+  and pass for any of them. With `nfs.kerberos.perVolumeKeys` (default
+  `true`), the controller creates a `KerberosPrincipal` for each new
+  volume, `nfs/<volume>.<shared server name>`, whose keytab Secret only
+  that volume's server mounts. The node maps the volume's ClusterIP to
+  that name in `/etc/hosts` (it gets the name in the publish context).
+  Deleting the volume deletes its principal. Volumes made before keep the
+  shared principal until they are recreated. The chart gives the
+  controller a Role for `kerberosprincipals` in the NFS namespace.
+  `perVolumeKeys: false` keeps the shared key for every volume.
+
+- **Every Kerberos client must bind its sessions to its machine**
+  (2026-10-16). A client that did not ask for SP4_MACH_CRED (no
+  `rpc.gssd`, a non-Linux client, or one downgraded on purpose) got
+  SP4_NONE, and its session id, in the clear under `krb5i`, could be used
+  by any other allowed principal. With the new
+  `nfs.kerberos.requireMachCred` (`FLINT_NFS_REQUIRE_MACH_CRED`), on by
+  default with `nfs.kerberos.enabled`, the server refuses an EXCHANGE_ID
+  that does not ask for SP4_MACH_CRED with NFS4ERR_ACCESS. The Linux
+  client asks whenever `rpc.gssd` runs, since it then makes its client
+  over `krb5i` whatever the mount's `sec=`, so `krb5`, `krb5i` and
+  `krb5p` mounts keep working. `minSec: ""` with `requireMachCred` on
+  fails to render, since a `sec=sys` mount cannot ask. A value of the
+  variable that is neither true nor false stops the server from starting.
+  **Breaking for Kerberos installs** whose clients do not ask: set
+  `requireMachCred: false` for them. Unit tests and the chart test cover
+  it, and `tests/krb5/run-mach-cred.sh` passes 22/22 against the kernel
+  client (Ubuntu 24.04, kernel 6.8): a `sec=krb5` mount still gets
+  SP4_MACH_CRED, an SP4_NONE client cannot mount (its EXCHANGE_ID is
+  refused), and the knob-off control is served.
+
+- **Kerberos users' identities can come from LDAP** (2026-10-16).
+  `FLINT_NFS_GSS_IDMAP` maps the principals it names, and everyone else was
+  nobody and refused by the allowlist. With `nfs.kerberos.ldap` (off by
+  default), each NFS server looks user principals up in an LDAP directory
+  (RFC 2307: `uid` or `krbPrincipalName`, `uidNumber`, `gidNumber`,
+  `posixGroup` `memberUid` or `member`), over `ldaps://` or StartTLS with
+  rustls, and caches the answers (300 s for a user found, 60 s for one not
+  found). An `idmap` rule still wins, so machine principals keep
+  `machineIdentity`. A user the directory has may connect without being
+  in `allowedPrincipals`. The directory fails closed. It never makes uid
+  or gid 0 (unless `allowRoot`), it refuses two entries for one principal,
+  and the entry must name the principal exactly, since LDAP compares
+  `uid` without case and Kerberos with it. When the directory is
+  unreachable or slow (a 5 s timeout, 4 lookups at once per server), a
+  cached user keeps working until its TTL runs out and anyone else is
+  refused, never made anonymous. A call whose cached identity has
+  expired gets `RPCSEC_GSS_CREDPROBLEM`. The bind password reaches the
+  servers as a Secret reference only. New dependency: `ldap3` 0.12
+  (rustls on aws-lc-rs, no OpenSSL). `chart-kerberos-defaults.sh` checks
+  the chart side; there is no kind leg yet (docs/nfs-kerberos.md, "Tests").
+
 - **Kerberos sessions are bound to their machine** (2026-10-16). Under
   `krb5i` a session id crosses the wire in the clear, and any allowed
   principal holding one could use the session from its own connection,
@@ -155,6 +210,11 @@ covered by the stability guarantee.
   until fixed. Neither is fixed in this entry.
 
 ### Changed
+
+- **krb5 1.0.0** (2026-10-16), the Kerberos acceptor's crate, up from
+  0.12.1. Its API is settled for 1.0: the raw crypto modules are private
+  and its errors and option structs are `#[non_exhaustive]`. The NFS
+  server uses none of what changed, so nothing else moves.
 
 - **NFS Kerberos: the acceptor is the `krb5` crate (0.2)** (2026-10-13).
   `nfs/kerberos.rs` and `nfs/krb/` moved to the standalone `krb5` crate;

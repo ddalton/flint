@@ -152,6 +152,11 @@ impl NfsServer {
         // `bring_up` so this front-end and `MetadataServer` cannot drift.
         let lock_mgr = LockManager::bring_up(state_mgr.backend(), state_lost).await;
 
+        // FLINT_NFS_REQUIRE_MACH_CRED: a typo refuses to start, as the
+        // floor below does, rather than serving SP4_NONE clients.
+        let require_mach_cred = crate::nfs::v4::operations::session::require_mach_cred_from_env()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+
         // Create COMPOUND dispatcher (creates handlers internally)
         // F70: the read-only bit the CSI controller sent us (`--read-only`
         // for a ROX volume) reaches the dispatcher here. Before 2026-09-28
@@ -159,8 +164,15 @@ impl NfsServer {
         // export was read-write to any client that did not mount `ro`.
         let dispatcher = Arc::new(
             CompoundDispatcher::new(fh_mgr, state_mgr.clone(), lock_mgr.clone())
-                .with_read_only(config.read_only),
+                .with_read_only(config.read_only)
+                .with_require_mach_cred(require_mach_cred),
         );
+        if require_mach_cred {
+            info!(
+                "🔒 SP4_MACH_CRED required: an EXCHANGE_ID that does not ask for it \
+                 (SP4_NONE) gets NFS4ERR_ACCESS, so every session is bound to its machine"
+            );
+        }
         if config.read_only {
             info!(
                 "🔒 export is READ-ONLY (ROX): every mutating operation answers \
@@ -876,14 +888,28 @@ async fn handle_compound(
     // AUTH_SYS (uid, gid) — file-creating ops stamp it onto the backing
     // object so ownership round-trips (postgres-class workloads check it).
     // A Kerberos caller is its principal's identity under
-    // FLINT_NFS_GSS_IDMAP (nobody when no rule names it), so it is
-    // permission-checked and owns what it creates.
-    let identity = crate::nfs::gss_idmap::compound_identity(
-        gss.and_then(|v| v.client_principal.as_deref()),
+    // FLINT_NFS_GSS_IDMAP, else the directory's (FLINT_NFS_GSS_LDAP_URL,
+    // cached), else nobody, so it is permission-checked and owns what it
+    // creates.
+    let mapped = match gss.and_then(|v| v.client_principal.as_deref()) {
+        Some(p) => Some(crate::nfs::gss_idmap::map_global(p).await),
+        None => None,
+    };
+    let Some(identity) = crate::nfs::gss_idmap::compound_identity(
+        mapped.as_ref(),
         call.cred.unix_uid_gid(),
         call.cred.unix_gids(),
-        crate::nfs::gss_idmap::GssIdmap::global(),
-    );
+    ) else {
+        // The directory cannot say who this is (its cached answer ran
+        // out): refuse rather than run the call as anyone. CREDPROBLEM
+        // makes the client re-establish the context, and that INIT is
+        // refused until the directory answers (`gss_idmap::admit`).
+        warn!(
+            "❌ COMPOUND refused: {} has no identity until the directory answers",
+            gss.and_then(|v| v.client_principal.as_deref()).unwrap_or("?")
+        );
+        return vec![ReplyBuilder::auth_error(call.xid, AuthStat::RpcsecGssCredProblem).into()];
+    };
     // root_squash (FLINT_NFS_ROOT_SQUASH): uid 0, from any client and any
     // flavor, is the anonymous identity.
     let (unix_cred, unix_gids) = match crate::nfs::gss_idmap::root_squash() {

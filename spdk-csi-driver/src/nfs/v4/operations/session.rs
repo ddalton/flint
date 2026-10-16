@@ -278,6 +278,30 @@ fn exchange_id_err(status: Nfs4Status) -> ExchangeIdRes {
     }
 }
 
+/// Every EXCHANGE_ID must ask for SP4_MACH_CRED (chart
+/// `nfs.kerberos.requireMachCred`, on with Kerberos). See
+/// `CompoundDispatcher::with_require_mach_cred`.
+pub const REQUIRE_MACH_CRED_ENV: &str = "FLINT_NFS_REQUIRE_MACH_CRED";
+
+/// [`REQUIRE_MACH_CRED_ENV`]'s value: unset or empty is off. A value that
+/// is neither on nor off is an error, not off: an operator who wrote
+/// `ture` asked for the refusal, and the server must not come up without
+/// it (as `FLINT_NFS_MIN_SEC`, `nfs::sec_policy`).
+pub fn parse_require_mach_cred(value: Option<&str>) -> Result<bool, String> {
+    match value.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") | Some("0") | Some("false") | Some("no") | Some("off") => Ok(false),
+        Some("1") | Some("true") | Some("yes") | Some("on") => Ok(true),
+        Some(other) => Err(format!(
+            "{REQUIRE_MACH_CRED_ENV}={other:?}: expected true or false"
+        )),
+    }
+}
+
+/// [`parse_require_mach_cred`] of this process's env.
+pub fn require_mach_cred_from_env() -> Result<bool, String> {
+    parse_require_mach_cred(std::env::var(REQUIRE_MACH_CRED_ENV).ok().as_deref())
+}
+
 /// SP4_MACH_CRED as granted, knfsd's sets (RFC 8881 §18.35.3).
 ///
 /// - **must_enforce:** the ops that make, bind, and tear down the client
