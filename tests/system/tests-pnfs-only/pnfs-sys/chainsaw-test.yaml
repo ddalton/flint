@@ -1,0 +1,91 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/kyverno/chainsaw/v0.2.15/.schemas/json/test-chainsaw-v1alpha1.json
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: pnfs-sys
+spec:
+  description: >-
+    The AUTH_SYS pNFS smoke (kind-nfs-only.sh PNFS=1, no Kerberos): a volume
+    of the flint-pnfs class mounts (sec=sys, NFSv4.1+) on two nodes and the
+    pods share files; a few MiB written land on both data servers, striped,
+    and the MDS keeps only a sparse stub. The control arm for
+    tests-pnfs-krb5/, where the same write stays on the MDS.
+  steps:
+  - name: volume-and-pods
+    try:
+    - apply:
+        file: pvc.yaml
+    - apply:
+        file: pods.yaml
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: pnfs-a
+          status:
+            phase: Running
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: pnfs-b
+          status:
+            phase: Running
+  - name: mounts-share-files
+    try:
+    - script:
+        content: |
+          set -eu
+          for p in pnfs-a pnfs-b; do
+            m=$(kubectl -n "$NAMESPACE" exec "$p" -- grep ' /data ' /proc/mounts)
+            echo "$p: $m"
+            case "$m" in *sec=sys*) ;; *) echo "FAIL: $p is not mounted with sec=sys"; exit 1 ;; esac
+            case "$m" in *vers=4.1*|*vers=4.2*) ;; *) echo "FAIL: $p is not an NFSv4.1+ mount"; exit 1 ;; esac
+          done
+          for i in $(seq 30); do
+            a=$(kubectl -n "$NAMESPACE" exec pnfs-b -- cat /data/a 2>/dev/null || true)
+            b=$(kubectl -n "$NAMESPACE" exec pnfs-a -- cat /data/b 2>/dev/null || true)
+            [ "$a" = from-a ] && [ "$b" = from-b ] && { echo PASS; exit 0; }
+            sleep 2
+          done
+          echo "FAIL: a=$a b=$b"; exit 1
+  - name: data-is-striped-on-the-data-servers
+    try:
+    - script:
+        timeout: 4m
+        content: |
+          set -eu
+          ds_bytes() { kubectl -n flint-system exec "$1" -c ds -- du -s --block-size=1 /data | cut -f1; }
+          dss=$(kubectl -n flint-system get pod -l app=flint-pnfs-ds -o jsonpath='{.items[*].metadata.name}')
+          [ "$(echo $dss | wc -w)" = 2 ] || { echo "FAIL: DS pods '$dss'"; exit 1; }
+          for d in $dss; do eval "before_$(echo $d | tr - _)=$(ds_bytes $d)"; done
+          # 8 MiB in 1 MiB stripes (pnfs.server.stripeSize) over both DSes.
+          kubectl -n "$NAMESPACE" exec pnfs-a -- dd if=/dev/urandom of=/data/big bs=1048576 count=8 conv=fsync
+          sum_a=$(kubectl -n "$NAMESPACE" exec pnfs-a -- md5sum /data/big | cut -d' ' -f1)
+          sum_b=$(kubectl -n "$NAMESPACE" exec pnfs-b -- md5sum /data/big | cut -d' ' -f1)
+          [ "$sum_a" = "$sum_b" ] || { echo "FAIL: pnfs-b reads $sum_b, pnfs-a wrote $sum_a"; exit 1; }
+          for d in $dss; do
+            b=$(eval echo "\$before_$(echo $d | tr - _)"); a=$(ds_bytes $d)
+            echo "$d: /data $b -> $a bytes"
+            # About 4 MiB each; at least 2 MiB says the stripes are there.
+            [ $((a - b)) -ge 2097152 ] || { echo "FAIL: $d grew by only $((a - b)) bytes"; exit 1; }
+          done
+          mds=$(kubectl -n flint-system get pod -l app=flint-pnfs-mds -o jsonpath='{.items[0].metadata.name}')
+          f=$(kubectl -n flint-system exec "$mds" -c mds -- find /data/exports -type f -name big)
+          [ "$(echo "$f" | wc -l)" = 1 ] && [ -n "$f" ] || { echo "FAIL: the MDS has '$f'"; exit 1; }
+          size=$(kubectl -n flint-system exec "$mds" -c mds -- stat -c %s "$f")
+          alloc=$(kubectl -n flint-system exec "$mds" -c mds -- du -s --block-size=1 "$f" | cut -f1)
+          echo "MDS $f: size $size, allocated $alloc"
+          [ "$size" = 8388608 ] || { echo "FAIL: size $size"; exit 1; }
+          [ "$alloc" -lt 1048576 ] || { echo "FAIL: the MDS holds $alloc bytes of the file: I/O went through the MDS (F68)"; exit 1; }
+          echo PASS
+    catch:
+    - script:
+        content: |
+          for d in $(kubectl -n flint-system get pod -l app=flint-pnfs-ds -o jsonpath='{.items[*].metadata.name}'); do
+            echo "== $d"; kubectl -n flint-system exec "$d" -c ds -- sh -c 'find /data -type f | head -20; du -s --block-size=1 /data'
+          done
+          mds=$(kubectl -n flint-system get pod -l app=flint-pnfs-mds -o jsonpath='{.items[0].metadata.name}')
+          kubectl -n flint-system logs "$mds" -c mds --tail=-1 | grep -aE 'F68a|LAYOUT|register|Active' | tail -30

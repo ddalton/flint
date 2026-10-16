@@ -41,6 +41,9 @@ covered by the stability guarantee.
   `sec=sys` pNFS mount from each node: the kernel reuses a node's AUTH_SYS
   client for new mounts of the same MDS, which the floor refuses. With
   `pnfs.kerberos.enabled` false the chart renders exactly as before.
+  The kind suite: `KRB5=1 PNFS=1 tests/system/kind-nfs-only.sh`
+  (`tests-pnfs-krb5/`; `PNFS=1` alone runs an AUTH_SYS pNFS control,
+  `tests-pnfs-only/`), which builds the `flint-pnfs` image too.
   See docs/nfs-kerberos.md, "pNFS".
 
 - **Each NFS volume's server has a Kerberos key of its own** (2026-10-16).

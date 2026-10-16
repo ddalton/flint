@@ -1,0 +1,82 @@
+# Two pods on the two workers share the Kerberos volume; each writes its
+# file and reads the other's. The sys pod runs on the control plane, a node
+# with no Kerberos mount of the MDS: the kernel shares one NFS client per
+# server address, so a sec=sys attempt on a worker could interfere with the
+# Kerberos mounts there (docs/nfs-kerberos.md, "Turning it on").
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pnfs-a
+  labels:
+    app: pnfs-krb5
+spec:
+  terminationGracePeriodSeconds: 1
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app: pnfs-krb5
+        topologyKey: kubernetes.io/hostname
+  containers:
+  - name: c
+    image: busybox
+    command: [sh, -c, "echo from-a > /data/a && sleep 3600"]
+    volumeMounts:
+    - name: data
+      mountPath: /data
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: krb5-pvc
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pnfs-b
+  labels:
+    app: pnfs-krb5
+spec:
+  terminationGracePeriodSeconds: 1
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app: pnfs-krb5
+        topologyKey: kubernetes.io/hostname
+  containers:
+  - name: c
+    image: busybox
+    command: [sh, -c, "echo from-b > /data/b && sleep 3600"]
+    volumeMounts:
+    - name: data
+      mountPath: /data
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: krb5-pvc
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sys-pod
+spec:
+  terminationGracePeriodSeconds: 1
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: ""
+  tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+  containers:
+  - name: c
+    image: busybox
+    command: [sh, -c, "sleep 3600"]
+    volumeMounts:
+    - name: data
+      mountPath: /data
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: sys-pvc

@@ -673,7 +673,10 @@ model").
   StorageClass, one node keytab; and the guards). Unit tests: the
   dispatcher's `gss_callers_get_no_files_layout_when_withheld`,
   `pnfs::mds::krb5` (the MDS env, refusals to start) and `nfs_krb5`
-  (the shard name, the strict hosts entry). Not yet in kind or the VM.
+  (the shard name, the strict hosts entry). In the VM rig,
+  `tests/krb5/pnfs-e1.sh` (results in `tests/krb5/results/pnfs-phase1-2026-10-16/`):
+  under `sec=krb5i` no RPC reaches a DS and the data is on the MDS, while
+  `sec=sys` still stripes. On kind, see below.
 - **Session binding:** unit tests in `dispatcher.rs` (`mach_cred`) and,
   against the real kernel client in the VM rig,
   `tests/krb5/run-mach-cred.sh` (connection killed, server restarted,
@@ -703,6 +706,21 @@ model").
   `nfs/<pv>.flint-nfs.…` key, the node maps its ClusterIP to that name,
   and deleting the volume deletes its `KerberosPrincipal`. CI runs it
   after the nfs-only suite.
+- **kind, pNFS:** `KRB5=1 PNFS=1 tests/system/kind-nfs-only.sh` also
+  builds the `flint-pnfs` image, installs the in-chart MDS (one shard) and
+  two DSes with `pnfs.kerberos.enabled` (and `nfs.kerberos.enabled` off),
+  loads `nfs_layout_nfsv41_files` on the host, and runs
+  `tests-pnfs-krb5/`: a `flint-pnfs-krb5` volume mounts with `sec=krb5i`
+  on two nodes and the pods share files; the shard's `KerberosPrincipal`
+  is `nfs/flint-pnfs-mds-0.flint-system.svc.cluster.local`, its keytab
+  Secret is the only one the MDS pod mounts and holds that principal
+  alone, the VolumeAttachments name it, and each node maps the PV's MDS
+  IP to it; 8 MiB written under `krb5i` are allocated in the MDS's export
+  and not on the DSes, with the MDS's F68a meter counting refused
+  LAYOUTGETs and no grants; a `sec=sys` pNFS mount is refused by the
+  `krb5i` floor; alice is refused by the allowlist. `PNFS=1` alone runs
+  `tests-pnfs-only/`, the AUTH_SYS control: the same write is striped on
+  both DSes and the MDS keeps a sparse stub. Not in CI yet.
 
 ## Tested on
 
@@ -710,7 +728,7 @@ Only two kinds of host have run this:
 
 - **kind, Debian-based nodes.** `KRB5=1 tests/system/kind-nfs-only.sh`
   builds `tests/system/krb5/kind-node.Dockerfile`: `kindest/node:v1.34.0`
-  (`kind-nfs-only.sh:49`) plus `nfs-common` and `krb5-user` from apt.
+  (`kind-nfs-only.sh:61`) plus `nfs-common` and `krb5-user` from apt.
   CI runs it on `ubuntu-latest` (`.github/workflows/system-chainsaw.yml:63`,
   `:123-131`). A kind node uses the host's kernel, so the client kernel
   is the runner's (or Docker Desktop's VM's), and systemd runs inside the
@@ -728,8 +746,8 @@ what we know or expect to differ. **None of it is measured.**
 The `rpc-gssd` unit starts only when `/etc/krb5.keytab` exists, so a
 node that boots before its KerberosNodeKeytab is Ready has no `rpc.gssd`
 until someone starts it. The kind suite does that by hand after the
-"Kerberos keys" step (`tests/system/kind-nfs-only.sh:199-210`,
-`systemctl restart rpc-gssd` at `:207`). `systemctl try-restart` would
+"Kerberos keys" step (`tests/system/kind-nfs-only.sh:266-287`,
+`systemctl restart rpc-gssd` at `:284`). `systemctl try-restart` would
 not do: it restarts only a running unit, and this one never started.
 
 [krb5-operator PR #14](https://github.com/ddalton/krb5-operator/pull/14)
@@ -741,7 +759,7 @@ systemd's private socket (`/run/systemd/private`, hostPath type `Socket`),
 so it needs no `hostPID`, no capabilities and no `privileged`. Its README
 also gives a host path unit (`PathChanged=/etc/krb5.keytab`) for clusters
 that would rather not grant that. flint pins
-`KRB5_OPERATOR_VERSION=0.3.0` (`kind-nfs-only.sh:51`), so the suite
+`KRB5_OPERATOR_VERSION=0.3.0` (`kind-nfs-only.sh:63`), so the suite
 keeps the manual restart until an operator release has the field.
 
 **Non-systemd hosts** (OpenRC, runit, or hosts with no init you can
