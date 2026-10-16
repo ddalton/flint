@@ -299,6 +299,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            {{- if include "flint-csi-driver-chart.pnfsDsAuth" $ }}
+            # Signed data server filehandles (pnfs.dsAuth).
+            {{- include "flint-csi-driver-chart.pnfsDsFhEnv" (dict "root" $ "ds" false) | nindent 12 }}
+            {{- end }}
             {{- if $.Values.pnfs.controlToken.enabled }}
             # Required Bearer token on every MdsControl gRPC — see
             # templates/pnfs-security.yaml.

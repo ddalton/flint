@@ -108,6 +108,7 @@ pub mod mds;
 
 // Data Server module
 pub mod ds;
+pub mod ds_fh;  // MAC'd data server filehandles (pNFS Kerberos Phase 4)
 
 // Re-exports for convenience
 pub use config::{PnfsConfig, PnfsMode, MdsConfig, DsConfig};
