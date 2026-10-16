@@ -180,8 +180,9 @@ spec:
                     app: flint-pnfs-ds
                 topologyKey: kubernetes.io/hostname
       {{- end }}
-      {{- if include "flint-csi-driver-chart.pnfsDsAttachedNodesOnly" . }}
-      # Reads pNFS PVs, VolumeAttachments and Nodes (pnfs-kerberos.yaml).
+      {{- if include "flint-csi-driver-chart.pnfsDsServiceAccount" . }}
+      # Reads pNFS PVs, VolumeAttachments and Nodes (pnfs-kerberos.yaml);
+      # reviews the MDS's token and presents its own (pnfs.controlAuth).
       serviceAccountName: flint-pnfs-ds
       {{- end }}
       containers:
@@ -237,6 +238,14 @@ spec:
             # enforcement.
             {{- include "flint-csi-driver-chart.pnfsDsFhEnv" (dict "root" . "ds" true) | nindent 12 }}
             {{- end }}
+            {{- if include "flint-csi-driver-chart.pnfsControlAuth" . }}
+            # Per-pod identities (pnfs.controlAuth): review the MDS's
+            # token; present our own (device_id is our pod name).
+            - name: FLINT_PNFS_CONTROL_AUTH
+              value: serviceaccount
+            - name: FLINT_PNFS_MDS_TOKEN_FILE
+              value: /var/run/secrets/flint/pnfs-mds-token/token
+            {{- end }}
             {{- if include "flint-csi-driver-chart.pnfsControlTls" . }}
             # TLS on the control path (pnfs.controlTls).
             {{- include "flint-csi-driver-chart.pnfsControlTlsEnv" . | nindent 12 }}
@@ -280,6 +289,9 @@ spec:
             {{- if include "flint-csi-driver-chart.pnfsControlTls" . }}
             {{- include "flint-csi-driver-chart.pnfsControlTlsMount" . | nindent 12 }}
             {{- end }}
+            {{- if include "flint-csi-driver-chart.pnfsControlAuth" . }}
+            {{- include "flint-csi-driver-chart.pnfsTokenMount" (dict "name" "pnfs-mds-token") | nindent 12 }}
+            {{- end }}
           {{- with .Values.pnfs.server.dataServers.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -287,6 +299,9 @@ spec:
       volumes:
         {{- if include "flint-csi-driver-chart.pnfsControlTls" . }}
         {{- include "flint-csi-driver-chart.pnfsControlTlsVolume" . | nindent 8 }}
+        {{- end }}
+        {{- if include "flint-csi-driver-chart.pnfsControlAuth" . }}
+        {{- include "flint-csi-driver-chart.pnfsTokenVolume" (dict "name" "pnfs-mds-token" "audience" "flint-pnfs-mds") | nindent 8 }}
         {{- end }}
         - name: config
           configMap:

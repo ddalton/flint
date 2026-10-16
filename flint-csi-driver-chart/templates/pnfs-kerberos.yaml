@@ -97,17 +97,7 @@ subjects:
   namespace: {{ .Release.Namespace }}
 {{- end }}
 {{- end }}
-{{- if include "flint-csi-driver-chart.pnfsDsAttachedNodesOnly" . }}
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: flint-pnfs-ds
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
-    app.kubernetes.io/component: pnfs-ds
-{{- end }}
+
 {{- if include "flint-csi-driver-chart.pnfsKrb5DataServers" . }}
 ---
 # The data servers' principals (Phase 3): nfs/<pod>.flint-pnfs-ds-headless...

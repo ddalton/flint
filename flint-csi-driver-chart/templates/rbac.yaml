@@ -154,7 +154,7 @@ roleRef:
   name: flint-csi-node
   apiGroup: rbac.authorization.k8s.io
 
-{{- if and (.Values.pnfs.server).enabled (or ((((.Values.pnfs.server).mds).blockExport).witness).enabled (include "flint-csi-driver-chart.pnfsAttachedNodesOnly" .)) }}
+{{- if and (.Values.pnfs.server).enabled (include "flint-csi-driver-chart.pnfsMdsServiceAccount" .) }}
 ---
 # The MDS's identity: the composition witness's Role (below) and
 # pnfs.kerberos.attachedNodesOnly's ClusterRole (pnfs-kerberos.yaml).

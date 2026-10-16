@@ -111,4 +111,17 @@ spec:
               echo "FAIL: TLS errors on $d"; exit 1
             fi
           done
+          # pnfs.controlAuth (default on): each caller's own ServiceAccount
+          # token, reviewed; the shared token is not accepted, so the
+          # registrations above and the volumes this suite made prove every
+          # identity (DS, controller) was reviewed and allowed.
+          kubectl -n flint-system logs "$mds" -c mds --tail=-1 | grep -F "each caller's ServiceAccount token" ||
+            { echo "FAIL: the MDS does not check ServiceAccount tokens"; exit 1; }
+          if kubectl -n flint-system logs "$mds" -c mds --tail=-1 | grep -F 'control call' | grep -F 'refused'; then
+            echo "FAIL: the MDS refused one of the chart's own callers"; exit 1
+          fi
+          for d in $(kubectl -n flint-system get pod -l app=flint-pnfs-ds -o jsonpath='{.items[*].metadata.name}'); do
+            kubectl -n flint-system logs "$d" -c ds --tail=-1 | grep -F "DsControl: the MDS's ServiceAccount token" ||
+              { echo "FAIL: $d does not check the MDS's token"; exit 1; }
+          done
           echo PASS

@@ -317,7 +317,7 @@ if renders "pNFS Kerberos, data servers off" "${PNFS[@]}" "${PK[@]}" --set pnfs.
   expect "$c" FLINT_PNFS_KRB5_DS -
   doc_of StatefulSet flint-pnfs-ds
   check "$c" "no keytab on the data servers" bash -c "! grep -q KRB5_KTNAME '$TMP/doc.yaml'"
-  check "$c" "no gate on the data servers" bash -c "! grep -qE 'FLINT_NFS_ATTACHED_NODES_ONLY|serviceAccountName' '$TMP/doc.yaml'"
+  check "$c" "no gate on the data servers" bash -c "! grep -q FLINT_NFS_ATTACHED_NODES_ONLY '$TMP/doc.yaml'"
   doc_of Deployment flint-pnfs-mds
   got=$(env_of FLINT_PNFS_LAYOUTS_FOR_GSS "$TMP/doc.yaml")
   if [ "$got" = - ]; then echo "✓ $c: no layouts for Kerberos callers"
@@ -341,6 +341,35 @@ if renders "pNFS control TLS" "${PNFS[@]}"; then
     fi
   done
 fi
+# Phase 5b: per-pod identities on the control path, on by default.
+if renders "pNFS control identities" "${PNFS[@]}"; then
+  c="pNFS control identities"
+  check "$c" "a TokenReview ClusterRole" doc_of ClusterRole t-flint-csi-driver-chart-pnfs-tokenreview
+  check "$c" "that only creates tokenreviews" bash -c "grep -q 'resources: \[tokenreviews\]' '$TMP/doc.yaml' && grep -q 'verbs: \[create\]' '$TMP/doc.yaml'"
+  check "$c" "bound to the MDS and the data servers" bash -c "doc_of() { :; }; grep -A20 'name: t-flint-csi-driver-chart-pnfs-tokenreview\$' '$TMP/out.yaml' | grep -q 'name: flint-pnfs-ds\$'"
+  check "$c" "a ServiceAccount flint-pnfs-ds" doc_of ServiceAccount flint-pnfs-ds
+  check "$c" "a ServiceAccount flint-pnfs-mds" doc_of ServiceAccount flint-pnfs-mds
+  for spec in "Deployment flint-pnfs-mds FLINT_PNFS_DS_TOKEN_FILE flint-pnfs-ds" \
+              "StatefulSet flint-pnfs-ds FLINT_PNFS_MDS_TOKEN_FILE flint-pnfs-mds" \
+              "Deployment flint-csi-controller FLINT_PNFS_MDS_TOKEN_FILE flint-pnfs-mds" \
+              "DaemonSet flint-csi-node FLINT_PNFS_MDS_TOKEN_FILE flint-pnfs-mds"; do
+    set -- $spec
+    if doc_of "$1" "$2"; then
+      [ "$(env_of "$3" "$TMP/doc.yaml")" != - ] && echo "✓ $c: $2 has $3" || { echo "✗ $c: $2 has no $3"; fails=$((fails + 1)); }
+      check "$c" "$2's token is for audience $4" grep -q "audience: $4\$" "$TMP/doc.yaml"
+    else
+      echo "✗ $c: no $1 $2"; fails=$((fails + 1))
+    fi
+  done
+  for d in "Deployment flint-pnfs-mds" "StatefulSet flint-pnfs-ds"; do
+    doc_of $d
+    [ "$(env_of FLINT_PNFS_CONTROL_AUTH "$TMP/doc.yaml")" = serviceaccount ] && echo "✓ $c: $d checks ServiceAccounts" || { echo "✗ $c: $d does not check ServiceAccounts"; fails=$((fails + 1)); }
+  done
+fi
+if renders "pNFS control identities off" "${PNFS[@]}" --set pnfs.controlAuth.serviceAccounts=false; then
+  check "pNFS control identities off" "no tokens, no TokenReview" bash -c "! grep -qE 'FLINT_PNFS_CONTROL_AUTH|FLINT_PNFS_MDS_TOKEN_FILE|pnfs-tokenreview' '$TMP/out.yaml'"
+fi
+
 if renders "pNFS control TLS off" "${PNFS[@]}" --set pnfs.controlTls.enabled=false; then
   check "pNFS control TLS off" "plaintext, no Secret" bash -c "! grep -qE 'flint-pnfs-control-tls|FLINT_PNFS_CONTROL_TLS_DIR' '$TMP/out.yaml'"
 fi
@@ -357,7 +386,7 @@ fi
 
 if renders "pNFS Kerberos, relaxed" "${PNFS[@]}" "${PK[@]}" --set pnfs.kerberos.minSec= \
     --set pnfs.kerberos.requireMachCred=false --set pnfs.kerberos.attachedNodesOnly=false \
-    --set pnfs.kerberos.enforcePermissions=warn --set nfs.rootSquash=true; then
+    --set pnfs.kerberos.enforcePermissions=warn --set nfs.rootSquash=true --set pnfs.controlAuth.serviceAccounts=false; then
   check "pNFS Kerberos, relaxed" "no MDS ServiceAccount" bash -c "! grep -q 'name: flint-pnfs-mds$' <(grep -A3 'kind: ServiceAccount' '$TMP/out.yaml')"
   check "pNFS Kerberos, relaxed" "no ClusterRole for the MDS" bash -c "! grep -q 'name: t-flint-csi-driver-chart-pnfs-mds$' '$TMP/out.yaml'"
   doc_of Deployment flint-pnfs-mds

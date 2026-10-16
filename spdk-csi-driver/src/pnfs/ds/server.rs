@@ -1501,13 +1501,13 @@ impl DataServer {
                     return;
                 }
             };
-        let svc = DsControlService {
-            device_id: self.config.device_id.clone(),
-            data_dir: std::path::PathBuf::from(
+        let svc = DsControlService::new(
+            self.config.device_id.clone(),
+            std::path::PathBuf::from(
                 self.config.bdevs.first().map(|b| b.mount_point.clone())
                     .unwrap_or_else(|| "/data".to_string()),
             ),
-        };
+        );
         info!("🎛️ DsControl gRPC listener on {}", addr);
         tokio::spawn(async move {
             // Phase 5b: the MDS's own ServiceAccount token, reviewed.

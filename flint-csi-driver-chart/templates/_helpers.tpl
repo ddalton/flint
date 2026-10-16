@@ -327,6 +327,11 @@ flint-nfs-krb5-keytab
 # The node plugin dials the MDS too (pnfs-block): TLS on the control path.
 {{ include "flint-csi-driver-chart.pnfsControlTlsEnv" . }}
 {{- end }}
+{{- if include "flint-csi-driver-chart.pnfsControlAuth" . }}
+# ... with its own token (pnfs.controlAuth).
+- name: FLINT_PNFS_MDS_TOKEN_FILE
+  value: /var/run/secrets/flint/pnfs-mds-token/token
+{{- end }}
 {{- end }}
 
 {{/*
@@ -397,6 +402,43 @@ TLS on the pNFS control path (pnfs.controlTls, Phase 5): "true", else empty.
     defaultMode: 0444
 {{- end }}
 
+{{/*
+Per-pod identities on the pNFS control path (pnfs.controlAuth, Phase 5b).
+*/}}
+{{- define "flint-csi-driver-chart.pnfsControlAuth" -}}
+{{- if and .Values.pnfs.enabled .Values.pnfs.server.enabled (.Values.pnfs.controlAuth).serviceAccounts -}}true{{- end -}}
+{{- end }}
+
+{{/* The MDS runs as ServiceAccount flint-pnfs-mds. */}}
+{{- define "flint-csi-driver-chart.pnfsMdsServiceAccount" -}}
+{{- if or (((.Values.pnfs.server.mds.blockExport).witness).enabled) (include "flint-csi-driver-chart.pnfsAttachedNodesOnly" .) (include "flint-csi-driver-chart.pnfsControlAuth" .) -}}true{{- end -}}
+{{- end }}
+
+{{/* The data servers run as ServiceAccount flint-pnfs-ds. */}}
+{{- define "flint-csi-driver-chart.pnfsDsServiceAccount" -}}
+{{- if or (include "flint-csi-driver-chart.pnfsDsAttachedNodesOnly" .) (include "flint-csi-driver-chart.pnfsControlAuth" .) -}}true{{- end -}}
+{{- end }}
+
+{{/*
+A projected ServiceAccount token for calls to `audience` (arguments: name,
+audience), mounted at /var/run/secrets/flint/<name>/token.
+*/}}
+{{- define "flint-csi-driver-chart.pnfsTokenVolume" -}}
+- name: {{ .name }}
+  projected:
+    sources:
+      - serviceAccountToken:
+          audience: {{ .audience }}
+          expirationSeconds: 3600
+          path: token
+{{- end }}
+
+{{- define "flint-csi-driver-chart.pnfsTokenMount" -}}
+- name: {{ .name }}
+  mountPath: /var/run/secrets/flint/{{ .name }}
+  readOnly: true
+{{- end }}
+
 {{- define "flint-csi-driver-chart.pnfsKrb5DataServers" -}}
 {{- if and (include "flint-csi-driver-chart.pnfsKrb5Enabled" .) (.Values.pnfs.kerberos).dataServers -}}true{{- end -}}
 {{- end }}
@@ -429,6 +471,9 @@ headless Service, as krb5-operator's hostPrincipals name it.
 # The node plugin dials the MDS too (pnfs-block: AttachBlockNode,
 # BlockSessionUp at NodeStage): TLS on the control path.
 {{ include "flint-csi-driver-chart.pnfsControlTlsMount" . }}
+{{- end }}
+{{- if include "flint-csi-driver-chart.pnfsControlAuth" . }}
+{{ include "flint-csi-driver-chart.pnfsTokenMount" (dict "name" "pnfs-mds-token") }}
 {{- end }}
 {{- end }}
 
