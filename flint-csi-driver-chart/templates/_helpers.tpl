@@ -180,6 +180,14 @@ FLINT_NFS_GSS_IDMAP: the user rules, then the machine principals.
 {{- join "," $rules -}}
 {{- end }}
 
+{{/*
+FLINT_NFS_ENFORCE_PERMISSIONS: as set, else "enforce" under Kerberos (whose
+callers' identities are proven), else the server's default.
+*/}}
+{{- define "flint-csi-driver-chart.nfsEnforcePermissions" -}}
+{{- .Values.nfs.enforcePermissions | default (ternary "enforce" "" .Values.nfs.kerberos.enabled) -}}
+{{- end }}
+
 {{- define "flint-csi-driver-chart.nfsKrb5KeytabSecret" -}}
 flint-nfs-krb5-keytab
 {{- end }}

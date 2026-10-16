@@ -155,12 +155,13 @@ if [ "$KRB5" = 1 ]; then
   kubectl apply -f "$HERE/krb5/realm.yaml"
   kubectl -n flint-system wait kerberosrealm/flint --timeout=5m \
     --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True
+  # The krb5i floor, enforced permissions and attached-nodes-only are the
+  # chart's defaults under Kerberos: not set here, so the suite tests them.
   HELM_EXTRA="${HELM_EXTRA:-} --set nfs.kerberos.enabled=true --set nfs.kerberos.realm=FLINT.TEST
-    --set nfs.kerberos.realmRef=flint --set nfs.kerberos.minSec=krb5i
+    --set nfs.kerberos.realmRef=flint
     --set nfs.kerberos.nodeKeytab.tolerations[0].operator=Exists
     --set nfs.kerberos.idmap[0].principal=bob@FLINT.TEST --set nfs.kerberos.idmap[0].uid=2000
-    --set nfs.kerberos.idmap[0].gid=2000 --set nfs.enforcePermissions=enforce
-    --set nfs.kerberos.attachedNodesOnly=true"
+    --set nfs.kerberos.idmap[0].gid=2000"
 fi
 
 step "helm install flint-csi (nfs-only, image tag $TAG)"
