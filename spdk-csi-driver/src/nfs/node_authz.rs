@@ -128,6 +128,11 @@ pub async fn watch(nodes: &'static AttachedNodes, pv: String, domain: Option<Str
     use kube::api::{Api, ListParams};
     use kube::runtime::watcher;
 
+    // The NFS server's first TLS client: without a process-level provider
+    // `Client::try_default` panics ("Could not automatically determine the
+    // process-level CryptoProvider"), the task dies, and every node is
+    // refused forever. See `crate::install_crypto_provider`.
+    crate::install_crypto_provider();
     let client = loop {
         match kube::Client::try_default().await {
             Ok(c) => break c,
