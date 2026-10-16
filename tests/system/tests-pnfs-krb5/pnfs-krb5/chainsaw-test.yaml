@@ -336,20 +336,27 @@ spec:
             echo "FAIL: $pv left $na's volumesInUse but is still attached"
             kubectl get volumeattachments -o wide | grep "$pv"; exit 1
           fi
+          # The node may still MOUNT it: both volumes are directories of
+          # one export, so the kernel shares one superblock between them,
+          # and solo-pvc's directory is still in that superblock's dentry
+          # cache from pnfs-c, which needs no LOOKUP. Reading its data does
+          # (OPEN, PUTFH), and that is what the detach must refuse.
           before=$(mds_log | grep -acE "refused: volume $vol is not attached" || true)
           docker exec "$na" mkdir -p /mnt/rogue
           ok=0
           for i in $(seq 15); do
-            if docker exec "$na" timeout 90 mount -t nfs4 -o vers=4.2,sec=krb5i "$ip:/$vol" /mnt/rogue 2>/dev/null; then
+            docker exec "$na" timeout 90 mount -t nfs4 -o vers=4.2,sec=krb5i "$ip:/$vol" /mnt/rogue 2>/dev/null || { ok=1; break; }
+            if docker exec "$na" timeout 30 cat /mnt/rogue/c 2>/dev/null; then
               # The watch may not have seen the detach yet: try again.
               docker exec "$na" umount -f /mnt/rogue || true
               sleep 2; continue
             fi
+            docker exec "$na" umount -f /mnt/rogue || true
             ok=1; break
           done
-          [ "$ok" = 1 ] || { echo "FAIL: $na still mounts $vol after the detach"; exit 1; }
+          [ "$ok" = 1 ] || { echo "FAIL: $na still reads $vol after the detach"; exit 1; }
           after=$(mds_log | grep -acE "refused: volume $vol is not attached" || true)
-          [ "$after" -gt "$before" ] || { echo "FAIL: $na's mount failed, but not by the MDS's gate"; exit 1; }
+          [ "$after" -gt "$before" ] || { echo "FAIL: $na was refused $vol, but not by the MDS's gate"; exit 1; }
           mds_log | grep -aE "refused: volume $vol is not attached" | tail -2
           [ "$(kubectl -n "$NAMESPACE" exec pnfs-a -- cat /data/b)" = from-b ]
           echo PASS

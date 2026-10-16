@@ -461,9 +461,16 @@ the nodes it is attached to, by their machine principals' hostnames:
   reach what the node does. LAYOUTGET, READ and WRITE need a filehandle
   first, so they are covered.
 - **A detach** takes effect at the node's next call into the volume: its
-  mount of it fails with EACCES (the MDS logs `refused: volume <v> is not
-  attached to the node of this session`), while its other volumes keep
-  working.
+  reads, writes and opens there fail with EACCES (the MDS logs `refused:
+  volume <v> is not attached to the node of this session`), while its
+  other volumes keep working. A fresh mount of the volume may still
+  succeed when the node has another volume of the same MDS mounted: the
+  kernel shares one superblock per export and walks the path from its
+  dentry cache, without a LOOKUP. Nothing under it can be read.
+- **The detach itself** happens only after kubelet has unmounted the
+  volume on that node (NodeUnpublish, NodeUnstage); on a Ready node
+  Kubernetes never times that out. A pod's volume therefore stays
+  reachable from its node until its last pod there is gone and unmounted.
 - Until the first lists arrive, every node and volume is refused. With
   several shards, the node set is the union over every shard's volumes,
   and each shard only ever looks up its own.
@@ -767,8 +774,9 @@ model").
   `krb5i` floor; alice is refused by the allowlist; a second volume used
   only on one node cannot be mounted from the other (which holds a session
   for the first volume), the MDS logging the refusal, and after its pod is
-  deleted and the volume detached, the first node cannot mount it either,
-  while both keep the first volume. `PNFS=1` alone runs
+  deleted, the volume leaves the node's `volumesInUse` and is detached, and
+  the first node can no longer read it (the MDS refusing it), while both
+  keep the first volume. `PNFS=1` alone runs
   `tests-pnfs-only/`, the AUTH_SYS control: the same write is striped on
   both DSes and the MDS keeps a sparse stub. Not in CI yet.
 
