@@ -1,0 +1,200 @@
+2026-10-16T17:53:00.549908Z  INFO ╔═══════════════════════════════════════════════════════════╗
+2026-10-16T17:53:00.549926Z  INFO ║      Flint pNFS Data Server (DS)                         ║
+2026-10-16T17:53:00.549928Z  INFO ║      NFSv4.1+ Parallel NFS - Data Plane                  ║
+2026-10-16T17:53:00.549930Z  INFO ╚═══════════════════════════════════════════════════════════╝
+2026-10-16T17:53:00.549931Z  INFO 
+2026-10-16T17:53:00.549932Z  INFO 📄 Loading configuration from: "/tmp/pnfs-e1/ds1.yaml"
+2026-10-16T17:53:00.550074Z  INFO 📊 Configuration:
+2026-10-16T17:53:00.550078Z  INFO    • Worker Threads: 8 (FLINT_DS_WORKER_THREADS)
+2026-10-16T17:53:00.550080Z  INFO    • Device ID: ds-1 (after env var expansion)
+2026-10-16T17:53:00.550081Z  INFO    • Bind: 0.0.0.0:20491
+2026-10-16T17:53:00.550083Z  INFO    • MDS Endpoint: 127.0.0.1:50051
+2026-10-16T17:53:00.550085Z  INFO    • Heartbeat Interval: 10 seconds
+2026-10-16T17:53:00.550086Z  INFO    • Block Devices: 1
+2026-10-16T17:53:00.550088Z  INFO      - lvol0 mounted at /tmp/pnfs-e1/ds1
+2026-10-16T17:53:00.550089Z  INFO    • Max Connections: 100
+2026-10-16T17:53:00.550091Z  INFO    • I/O Queue Depth: 32
+2026-10-16T17:53:00.550092Z  INFO 
+2026-10-16T17:53:00.550094Z  INFO ⚙️  Initializing Data Server...
+2026-10-16T17:53:00.550106Z  INFO Initializing Data Server: ds-1
+2026-10-16T17:53:00.550114Z  INFO ✓ Mount point verified: /tmp/pnfs-e1/ds1
+2026-10-16T17:53:00.550125Z  INFO 🔧 FileHandleManager created:
+2026-10-16T17:53:00.550128Z  INFO    Instance ID: 1792173180550122095 (shared across pNFS cluster)
+2026-10-16T17:53:00.550130Z  INFO    Export path: "/tmp/pnfs-e1/ds1"
+2026-10-16T17:53:00.550132Z  INFO    Export name: volume
+2026-10-16T17:53:00.550136Z  INFO 🌳 Pseudo-filesystem created (instance_id=1792173180550122095)
+2026-10-16T17:53:00.550138Z  INFO    RFC 7530 Section 7: Unified namespace for NFSv4 exports
+2026-10-16T17:53:00.550140Z  INFO 📁 Adding export to pseudo-filesystem:
+2026-10-16T17:53:00.550141Z  INFO    Name: volume
+2026-10-16T17:53:00.550143Z  INFO    Path: "/tmp/pnfs-e1/ds1"
+2026-10-16T17:53:00.550144Z  INFO    ID: 1
+2026-10-16T17:53:00.550145Z  INFO    pNFS: Enabled
+2026-10-16T17:53:00.550245Z  INFO I/O handler initialized with data path: "/tmp/pnfs-e1/ds1"
+2026-10-16T17:53:00.550296Z  INFO ✓ I/O handler initialized with data path: /tmp/pnfs-e1/ds1
+2026-10-16T17:53:00.550322Z  INFO ✓ Identity marker verified: device 'ds-1' (volume first stamped at unix 1792173180)
+2026-10-16T17:53:00.550328Z  INFO ✓ Session manager initialized (NFSv4.1 support)
+2026-10-16T17:53:00.550331Z  INFO LeaseManager created - grace period for 90s
+2026-10-16T17:53:00.550345Z  INFO ClientManager created - mode="ds", server_owner=flint-pnfs-ds-ds-1, server_scope=flint-pnfs-ds-ds-1
+2026-10-16T17:53:00.550378Z  INFO ✓ Client manager initialized (per-DS server identity)
+2026-10-16T17:53:00.550383Z  INFO 🚀 Starting Data Server...
+2026-10-16T17:53:00.550384Z  INFO 
+2026-10-16T17:53:00.550386Z  INFO ╔════════════════════════════════════════════════════╗
+2026-10-16T17:53:00.550387Z  INFO ║   Flint pNFS Data Server (DS) - RUNNING           ║
+2026-10-16T17:53:00.550388Z  INFO ╚════════════════════════════════════════════════════╝
+2026-10-16T17:53:00.550390Z  INFO 
+2026-10-16T17:53:00.550391Z  INFO Device ID: ds-1
+2026-10-16T17:53:00.550392Z  INFO Listening on: 0.0.0.0:20491
+2026-10-16T17:53:00.550394Z  INFO MDS Endpoint [shard 0]: 127.0.0.1:50051
+2026-10-16T17:53:00.550395Z  INFO Block Devices: 1
+2026-10-16T17:53:00.550397Z  INFO   - lvol0 mounted at /tmp/pnfs-e1/ds1
+2026-10-16T17:53:00.550398Z  INFO     SPDK volume: lvol0
+2026-10-16T17:53:00.550400Z  INFO 
+2026-10-16T17:53:00.550416Z  INFO 🚀 pNFS DS TCP server listening on 0.0.0.0:20491
+2026-10-16T17:53:00.550422Z  INFO 📡 Registering with endpoint: 0.0.0.0:20491 extra(multipath)=[] (FLINT_DS_ADVERTISE_ADDR=None, POD_IP=None)
+2026-10-16T17:53:00.550427Z  INFO Registering with MDS at 127.0.0.1:50051 [shard 0]...
+2026-10-16T17:53:00.550429Z  INFO Registering device ds-1 with MDS at 127.0.0.1:50051
+2026-10-16T17:53:00.550431Z  INFO Connecting to MDS gRPC service at http://127.0.0.1:50051
+2026-10-16T17:53:00.550738Z  INFO ✅ Connected to MDS gRPC service
+2026-10-16T17:53:00.551080Z  INFO ✅ Registration successful: Registration successful for ds-1
+2026-10-16T17:53:00.551083Z  INFO ✅ Successfully registered with MDS (127.0.0.1:50051)
+2026-10-16T17:53:00.551118Z  INFO Heartbeat sender started on dedicated thread ds-heartbeat-0 (interval: 10 seconds)
+2026-10-16T17:53:00.551121Z  INFO Status reporter started (interval: 60 seconds)
+2026-10-16T17:53:00.551124Z  WARN ⚠️ FLINT_PNFS_CONTROL_TOKEN unset — DsControl listener is UNAUTHENTICATED; anyone who can reach port 21491 can truncate stripe files
+2026-10-16T17:53:00.551126Z  INFO 🎛️ DsControl gRPC listener on 0.0.0.0:21491
+2026-10-16T17:53:00.551129Z  INFO ✅ Data Server is ready to serve I/O requests
+2026-10-16T17:53:00.551131Z  INFO 
+2026-10-16T17:53:00.551132Z  INFO    Serving: EXCHANGE_ID, CREATE_SESSION, SEQUENCE, READ, WRITE, COMMIT operations
+2026-10-16T17:53:00.551133Z  INFO 
+2026-10-16T17:53:00.551685Z  INFO ─────────────────────────────────────────────────────
+2026-10-16T17:53:00.551690Z  INFO DS Status Report:
+2026-10-16T17:53:00.551691Z  INFO   Device ID: ds-1
+2026-10-16T17:53:00.551693Z  INFO   Block Devices: 1
+2026-10-16T17:53:00.551694Z  INFO   MDS: 127.0.0.1:50051
+2026-10-16T17:53:00.551696Z  INFO ─────────────────────────────────────────────────────
+2026-10-16T17:53:00.556693Z  INFO Connecting to MDS gRPC service at http://127.0.0.1:50051
+2026-10-16T17:53:00.557100Z  INFO ✅ Connected to MDS gRPC service
+2026-10-16T17:53:07.775088Z  INFO 📡 New TCP connection #1 from 127.0.0.1:929
+2026-10-16T17:53:07.776165Z  INFO 📡 New TCP connection #2 from 127.0.0.1:36058
+2026-10-16T17:53:07.776849Z  INFO 🔌 DS connection from 127.0.0.1:36058 closed after 658.18µs (1 RPCs)
+2026-10-16T17:53:07.776874Z  INFO ✓ TCP connection #2 from 127.0.0.1:36058 closed cleanly
+2026-10-16T17:53:07.777212Z  INFO 📡 New TCP connection #3 from 127.0.0.1:36064
+2026-10-16T17:53:07.777484Z  INFO 🔌 DS connection from 127.0.0.1:36064 closed after 253.069µs (1 RPCs)
+2026-10-16T17:53:07.777513Z  INFO ✓ TCP connection #3 from 127.0.0.1:36064 closed cleanly
+2026-10-16T17:53:07.778005Z  INFO 📡 New TCP connection #4 from 127.0.0.1:36076
+2026-10-16T17:53:07.778109Z  INFO 🔌 DS connection from 127.0.0.1:36076 closed after 83.8µs (1 RPCs)
+2026-10-16T17:53:07.778130Z  INFO ✓ TCP connection #4 from 127.0.0.1:36076 closed cleanly
+2026-10-16T17:53:07.778476Z  INFO 📡 New TCP connection #5 from 127.0.0.1:36086
+2026-10-16T17:53:07.778598Z  INFO 🔌 DS connection from 127.0.0.1:36086 closed after 109.211µs (1 RPCs)
+2026-10-16T17:53:07.778611Z  INFO ✓ TCP connection #5 from 127.0.0.1:36086 closed cleanly
+2026-10-16T17:53:07.779020Z  INFO 📡 New TCP connection #6 from 127.0.0.1:36094
+2026-10-16T17:53:07.779138Z  INFO 🔌 DS connection from 127.0.0.1:36094 closed after 85.824µs (1 RPCs)
+2026-10-16T17:53:07.779152Z  INFO ✓ TCP connection #6 from 127.0.0.1:36094 closed cleanly
+2026-10-16T17:53:07.779415Z  INFO 📡 New TCP connection #7 from 127.0.0.1:36108
+2026-10-16T17:53:07.779511Z  INFO 🔌 DS connection from 127.0.0.1:36108 closed after 83.177µs (1 RPCs)
+2026-10-16T17:53:07.779529Z  INFO ✓ TCP connection #7 from 127.0.0.1:36108 closed cleanly
+2026-10-16T17:53:07.779998Z  INFO 📡 New TCP connection #8 from 127.0.0.1:36118
+2026-10-16T17:53:07.780108Z  INFO 🔌 DS connection from 127.0.0.1:36118 closed after 47.082µs (1 RPCs)
+2026-10-16T17:53:07.780122Z  INFO ✓ TCP connection #8 from 127.0.0.1:36118 closed cleanly
+2026-10-16T17:53:07.780453Z  INFO 📡 New TCP connection #9 from 127.0.0.1:36134
+2026-10-16T17:53:07.780585Z  INFO 🔌 DS connection from 127.0.0.1:36134 closed after 82.727µs (1 RPCs)
+2026-10-16T17:53:07.780601Z  INFO ✓ TCP connection #9 from 127.0.0.1:36134 closed cleanly
+2026-10-16T17:53:07.780668Z  INFO 📥 DS: EXCHANGE_ID REQUEST from client:
+2026-10-16T17:53:07.780676Z  INFO    client_owner="Linux NFSv4.1 lima-flint-drill"
+2026-10-16T17:53:07.780679Z  INFO    verifier=0x18df126d96e0bb7c
+2026-10-16T17:53:07.780681Z  INFO    client_flags=0x00040103
+2026-10-16T17:53:07.780683Z  INFO    state_protect=0x00000000
+2026-10-16T17:53:07.780711Z  INFO Lease created for client 7768104731303121103
+2026-10-16T17:53:07.780717Z  INFO EXCHANGE_ID: new client 7768104731303121103 (no existing record)
+2026-10-16T17:53:07.780719Z  INFO DS: EXCHANGE_ID - client_owner="Linux NFSv4.1 lima-flint-drill", verifier=1792171438608792444, clientid=7768104731303121103, is_new=true
+2026-10-16T17:53:07.780723Z  INFO 🔍 DS EXCHANGE_ID response encoding:
+2026-10-16T17:53:07.780724Z  INFO    clientid=7768104731303121103 (0x6bcdda188f5a90cf)
+2026-10-16T17:53:07.780726Z  INFO    sequenceid=1
+2026-10-16T17:53:07.780728Z  INFO    flags=0x00040000
+2026-10-16T17:53:07.780730Z  INFO    server_owner="flint-pnfs-ds-ds-1"
+2026-10-16T17:53:07.780732Z  INFO    server_scope="flint-pnfs-ds-ds-1"
+2026-10-16T17:53:07.780733Z  INFO    Total bytes: 80
+2026-10-16T17:53:07.780735Z  INFO    First 80 bytes: [6b, cd, da, 18, 8f, 5a, 90, cf, 00, 00, 00, 01, 00, 04, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 12, 66, 6c, 69, 6e, 74, 2d, 70, 6e, 66, 73, 2d, 64, 73, 2d, 64, 73, 2d, 31, 00, 00, 00, 00, 00, 12, 66, 6c, 69, 6e, 74, 2d, 70, 6e, 66, 73, 2d, 64, 73, 2d, 64, 73, 2d, 31, 00, 00, 00, 00, 00, 00]
+2026-10-16T17:53:07.780831Z  INFO 📥 DS: EXCHANGE_ID REQUEST from client:
+2026-10-16T17:53:07.780835Z  INFO    client_owner="Linux NFSv4.1 lima-flint-drill"
+2026-10-16T17:53:07.780837Z  INFO    verifier=0x18df126d96e0bb7c
+2026-10-16T17:53:07.780839Z  INFO    client_flags=0x00040103
+2026-10-16T17:53:07.780840Z  INFO    state_protect=0x00000000
+2026-10-16T17:53:07.780845Z  INFO Lease removed for client 7768104731303121103
+2026-10-16T17:53:07.780849Z  INFO Lease created for client 7114127839094621346
+2026-10-16T17:53:07.780851Z  INFO DS: EXCHANGE_ID - client_owner="Linux NFSv4.1 lima-flint-drill", verifier=1792171438608792444, clientid=7114127839094621346, is_new=true
+2026-10-16T17:53:07.780854Z  INFO 🔍 DS EXCHANGE_ID response encoding:
+2026-10-16T17:53:07.780855Z  INFO    clientid=7114127839094621346 (0x62ba7593cff3c4a2)
+2026-10-16T17:53:07.780857Z  INFO    sequenceid=1
+2026-10-16T17:53:07.780858Z  INFO    flags=0x00040000
+2026-10-16T17:53:07.780859Z  INFO    server_owner="flint-pnfs-ds-ds-1"
+2026-10-16T17:53:07.780861Z  INFO    server_scope="flint-pnfs-ds-ds-1"
+2026-10-16T17:53:07.780862Z  INFO    Total bytes: 80
+2026-10-16T17:53:07.780864Z  INFO    First 80 bytes: [62, ba, 75, 93, cf, f3, c4, a2, 00, 00, 00, 01, 00, 04, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 12, 66, 6c, 69, 6e, 74, 2d, 70, 6e, 66, 73, 2d, 64, 73, 2d, 64, 73, 2d, 31, 00, 00, 00, 00, 00, 12, 66, 6c, 69, 6e, 74, 2d, 70, 6e, 66, 73, 2d, 64, 73, 2d, 64, 73, 2d, 31, 00, 00, 00, 00, 00, 00]
+2026-10-16T17:53:07.780902Z  INFO DS: CREATE_SESSION - clientid=7114127839094621346, sequence=1
+2026-10-16T17:53:07.780909Z  INFO DS: CREATE_SESSION successful - sessionid=[62, ba, 75, 93, cf, f3, c4, a2]
+2026-10-16T17:53:07.781702Z  INFO 📡 New TCP connection #10 from 127.0.0.1:36140
+2026-10-16T17:53:07.781811Z  INFO 🔌 DS connection from 127.0.0.1:36140 closed after 84.053µs (1 RPCs)
+2026-10-16T17:53:07.781833Z  INFO ✓ TCP connection #10 from 127.0.0.1:36140 closed cleanly
+2026-10-16T17:53:07.782237Z  INFO 📡 New TCP connection #11 from 127.0.0.1:36150
+2026-10-16T17:53:07.782367Z  INFO 🔌 DS connection from 127.0.0.1:36150 closed after 104.35µs (1 RPCs)
+2026-10-16T17:53:07.782388Z  INFO ✓ TCP connection #11 from 127.0.0.1:36150 closed cleanly
+2026-10-16T17:53:07.790080Z  INFO 📡 New TCP connection #12 from 127.0.0.1:36156
+2026-10-16T17:53:07.790220Z  INFO 🔌 DS connection from 127.0.0.1:36156 closed after 112.97µs (1 RPCs)
+2026-10-16T17:53:07.790242Z  INFO ✓ TCP connection #12 from 127.0.0.1:36156 closed cleanly
+2026-10-16T17:53:07.790858Z  INFO 📡 New TCP connection #13 from 127.0.0.1:36166
+2026-10-16T17:53:07.790945Z  INFO 🔌 DS connection from 127.0.0.1:36166 closed after 57.409µs (1 RPCs)
+2026-10-16T17:53:07.790966Z  INFO ✓ TCP connection #13 from 127.0.0.1:36166 closed cleanly
+2026-10-16T17:53:07.817902Z  INFO 📡 New TCP connection #14 from 127.0.0.1:36182
+2026-10-16T17:53:07.829064Z  INFO 🔌 DS connection from 127.0.0.1:36182 closed after 11.125898ms (1 RPCs)
+2026-10-16T17:53:07.829102Z  INFO ✓ TCP connection #14 from 127.0.0.1:36182 closed cleanly
+2026-10-16T17:53:07.830198Z  INFO 📡 New TCP connection #15 from 127.0.0.1:36196
+2026-10-16T17:53:07.833767Z  INFO 🔌 DS connection from 127.0.0.1:36196 closed after 3.533412ms (1 RPCs)
+2026-10-16T17:53:07.833799Z  INFO ✓ TCP connection #15 from 127.0.0.1:36196 closed cleanly
+2026-10-16T17:53:07.856647Z  INFO DS: DESTROY_SESSION [62, ba, 75, 93, cf, f3, c4, a2] — destroyed
+2026-10-16T17:53:07.856800Z  INFO Lease removed for client 7114127839094621346
+2026-10-16T17:53:07.856814Z  INFO Client 7114127839094621346 removed
+2026-10-16T17:53:07.856816Z  INFO DS: DESTROY_CLIENTID 7114127839094621346 — record removed
+2026-10-16T17:53:07.856963Z  INFO 🔌 DS connection from 127.0.0.1:929 closed after 81.484361ms (7 RPCs)
+2026-10-16T17:53:07.856999Z  INFO ✓ TCP connection #1 from 127.0.0.1:929 closed cleanly
+2026-10-16T17:53:08.093827Z  INFO 📡 New TCP connection #16 from 127.0.0.1:866
+2026-10-16T17:53:08.094980Z  INFO 📡 New TCP connection #17 from 127.0.0.1:36198
+2026-10-16T17:53:08.095271Z  INFO 🔌 DS connection from 127.0.0.1:36198 closed after 218.045µs (1 RPCs)
+2026-10-16T17:53:08.095325Z  INFO ✓ TCP connection #17 from 127.0.0.1:36198 closed cleanly
+2026-10-16T17:53:08.095810Z  INFO 📡 New TCP connection #18 from 127.0.0.1:36202
+2026-10-16T17:53:08.095917Z  INFO 🔌 DS connection from 127.0.0.1:36202 closed after 79.156µs (1 RPCs)
+2026-10-16T17:53:08.095936Z  INFO ✓ TCP connection #18 from 127.0.0.1:36202 closed cleanly
+2026-10-16T17:53:08.096537Z  INFO 📡 New TCP connection #19 from 127.0.0.1:36212
+2026-10-16T17:53:08.096688Z  INFO 🔌 DS connection from 127.0.0.1:36212 closed after 123.955µs (1 RPCs)
+2026-10-16T17:53:08.096712Z  INFO ✓ TCP connection #19 from 127.0.0.1:36212 closed cleanly
+2026-10-16T17:53:08.096990Z  INFO 📡 New TCP connection #20 from 127.0.0.1:36224
+2026-10-16T17:53:08.097132Z  INFO 🔌 DS connection from 127.0.0.1:36224 closed after 124.3µs (1 RPCs)
+2026-10-16T17:53:08.097148Z  INFO ✓ TCP connection #20 from 127.0.0.1:36224 closed cleanly
+2026-10-16T17:53:08.097603Z  INFO 📡 New TCP connection #21 from 127.0.0.1:36226
+2026-10-16T17:53:08.097740Z  INFO 🔌 DS connection from 127.0.0.1:36226 closed after 126.791µs (1 RPCs)
+2026-10-16T17:53:08.097755Z  INFO ✓ TCP connection #21 from 127.0.0.1:36226 closed cleanly
+2026-10-16T17:53:08.098030Z  INFO 📡 New TCP connection #22 from 127.0.0.1:36236
+2026-10-16T17:53:08.098171Z  INFO 🔌 DS connection from 127.0.0.1:36236 closed after 125.058µs (1 RPCs)
+2026-10-16T17:53:08.098184Z  INFO ✓ TCP connection #22 from 127.0.0.1:36236 closed cleanly
+2026-10-16T17:53:08.098655Z  INFO 📡 New TCP connection #23 from 127.0.0.1:36242
+2026-10-16T17:53:08.098773Z  INFO 🔌 DS connection from 127.0.0.1:36242 closed after 100.087µs (1 RPCs)
+2026-10-16T17:53:08.098790Z  INFO ✓ TCP connection #23 from 127.0.0.1:36242 closed cleanly
+2026-10-16T17:53:08.099045Z  INFO 📡 New TCP connection #24 from 127.0.0.1:36252
+2026-10-16T17:53:08.099167Z  INFO 🔌 DS connection from 127.0.0.1:36252 closed after 105.635µs (1 RPCs)
+2026-10-16T17:53:08.099184Z  INFO ✓ TCP connection #24 from 127.0.0.1:36252 closed cleanly
+2026-10-16T17:53:08.099266Z  INFO 📥 DS: EXCHANGE_ID REQUEST from client:
+2026-10-16T17:53:08.099272Z  INFO    client_owner="Linux NFSv4.1 lima-flint-drill"
+2026-10-16T17:53:08.099274Z  INFO    verifier=0x18df126d96e0bb7c
+2026-10-16T17:53:08.099276Z  INFO    client_flags=0x00040103
+2026-10-16T17:53:08.099278Z  INFO    state_protect=0x00000000
+2026-10-16T17:53:08.099289Z  INFO Lease created for client 9377530055255229526
+2026-10-16T17:53:08.099294Z  INFO EXCHANGE_ID: new client 9377530055255229526 (no existing record)
+2026-10-16T17:53:08.099296Z  INFO DS: EXCHANGE_ID - client_owner="Linux NFSv4.1 lima-flint-drill", verifier=1792171438608792444, clientid=9377530055255229526, is_new=true
+2026-10-16T17:53:08.099299Z  INFO 🔍 DS EXCHANGE_ID response encoding:
+2026-10-16T17:53:08.099301Z  INFO    clientid=9377530055255229526 (0x8223ade6a6098456)
+2026-10-16T17:53:08.099302Z  INFO    sequenceid=1
+2026-10-16T17:53:08.099304Z  INFO    flags=0x00040000
+2026-10-16T17:53:08.099305Z  INFO    server_owner="flint-pnfs-ds-ds-1"
+2026-10-16T17:53:08.099307Z  INFO    server_scope="flint-pnfs-ds-ds-1"
+2026-10-16T17:53:08.099308Z  INFO    Total bytes: 80
+2026-10-16T17:53:08.099309Z  INFO    First 80 bytes: [82, 23, ad, e6, a6, 09, 84, 56, 00, 00, 00, 01, 00, 04, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 12, 66, 6c, 69, 6e, 74, 2d, 70, 6e, 66, 73, 2d, 64, 73, 2d, 64, 73, 2d, 31, 00, 00, 00, 00, 00, 12, 66, 6c, 69, 6e, 74, 2d, 70, 6e, 66, 73, 2d, 64, 73, 2d, 64, 73, 2d, 31, 00, 00, 00, 00, 00, 00]
+2026-10-16T17:53:08.099388Z  INFO 📥 DS: EXCHANGE_ID REQUEST from client:

@@ -1,0 +1,200 @@
+2026-10-16T17:52:58.546244Z  INFO ╔═══════════════════════════════════════════════════════════╗
+2026-10-16T17:52:58.546262Z  INFO ║      Flint pNFS Metadata Server (MDS)                    ║
+2026-10-16T17:52:58.546265Z  INFO ║      NFSv4.1+ Parallel NFS - Control Plane               ║
+2026-10-16T17:52:58.546267Z  INFO ╚═══════════════════════════════════════════════════════════╝
+2026-10-16T17:52:58.546269Z  INFO 
+2026-10-16T17:52:58.546273Z  INFO raised RLIMIT_NOFILE to the hard limit from=1024 to=1048576
+2026-10-16T17:52:58.546278Z  INFO 📄 Loading configuration from: "/tmp/pnfs-e1/mds.yaml"
+2026-10-16T17:52:58.546486Z  INFO 📊 Configuration:
+2026-10-16T17:52:58.546493Z  INFO    • Worker Threads: 8 (FLINT_MDS_WORKER_THREADS)
+2026-10-16T17:52:58.546496Z  INFO    • Bind: 0.0.0.0:20490
+2026-10-16T17:52:58.546498Z  INFO    • Layout Type: File
+2026-10-16T17:52:58.546501Z  INFO    • Stripe Size: 1048576 bytes
+2026-10-16T17:52:58.546503Z  INFO    • Layout Policy: Stripe
+2026-10-16T17:52:58.546505Z  INFO    • Data Servers: 2
+2026-10-16T17:52:58.546507Z  INFO      - ds-1 @ 127.0.0.2:20491
+2026-10-16T17:52:58.546509Z  INFO      - ds-2 @ 127.0.0.3:20492
+2026-10-16T17:52:58.546512Z  INFO    • Exports: 1
+2026-10-16T17:52:58.546514Z  INFO      - /tmp/pnfs-e1/mds-export (fsid=1)
+2026-10-16T17:52:58.546516Z  INFO    • State Backend: Memory
+2026-10-16T17:52:58.546519Z  INFO 
+2026-10-16T17:52:58.546523Z  INFO ⚙️  Initializing Metadata Server...
+2026-10-16T17:52:58.546547Z  INFO Initializing Metadata Server
+2026-10-16T17:52:58.546557Z  INFO 📂 MDS export path: "/tmp/pnfs-e1/mds-export"
+2026-10-16T17:52:58.546739Z  INFO 🔑 MDS server id (persistent): 10141448047987319701 — FHs stamped with this survive restart
+2026-10-16T17:52:58.546761Z  INFO 🔧 FileHandleManager created:
+2026-10-16T17:52:58.546768Z  INFO    Instance ID: 10141448047987319701 (shared across pNFS cluster)
+2026-10-16T17:52:58.546771Z  INFO    Export path: "/tmp/pnfs-e1/mds-export"
+2026-10-16T17:52:58.546774Z  INFO    Export name: volume
+2026-10-16T17:52:58.546779Z  INFO 🌳 Pseudo-filesystem created (instance_id=10141448047987319701)
+2026-10-16T17:52:58.546785Z  INFO    RFC 7530 Section 7: Unified namespace for NFSv4 exports
+2026-10-16T17:52:58.546792Z  INFO 📁 Adding export to pseudo-filesystem:
+2026-10-16T17:52:58.546794Z  INFO    Name: volume
+2026-10-16T17:52:58.546799Z  INFO    Path: "/tmp/pnfs-e1/mds-export"
+2026-10-16T17:52:58.546802Z  INFO    ID: 1
+2026-10-16T17:52:58.546804Z  INFO    pNFS: Enabled
+2026-10-16T17:52:58.546959Z  INFO LeaseManager created - grace period for 90s
+2026-10-16T17:52:58.546991Z  INFO ClientManager created - mode="mds", server_owner=flint-pnfs, server_scope=flint-pnfs-mds
+2026-10-16T17:52:58.547025Z  INFO SessionManager created
+2026-10-16T17:52:58.547043Z  INFO StateIdManager created
+2026-10-16T17:52:58.547109Z  INFO Layout manager initialized: policy=Stripe, stripe_size=1048576
+2026-10-16T17:52:58.547129Z  INFO fd cache bounded (reaps least-recently-used above hiwat; see FdBudget) hiwat=16384 lowat=12288
+2026-10-16T17:52:58.547149Z  INFO 🔐 export access list (most specific network wins; peers outside every network are refused): 0.0.0.0/0 rw
+2026-10-16T17:52:58.547169Z  INFO 🧺 laundromat armed (traffic-independent lease expiry) every_secs=30
+2026-10-16T17:52:58.547198Z  INFO deleg: recall machinery installed — grants are now possible          (revoke deadline 90s, CB_PATH_DOWN window 30s)
+2026-10-16T17:52:58.547213Z  INFO ✅ Registering new device: ds-1 @ 127.0.0.2:20491
+2026-10-16T17:52:58.547233Z  INFO 📊 Device registry: 1 total, 1 active
+2026-10-16T17:52:58.547237Z  INFO ✅ Registering new device: ds-2 @ 127.0.0.3:20492
+2026-10-16T17:52:58.547241Z  INFO 📊 Device registry: 2 total, 2 active
+2026-10-16T17:52:58.547244Z  INFO Device registry initialized with 2 data servers
+2026-10-16T17:52:58.547248Z  INFO 🔐 Initializing RPCSEC_GSS manager (Pure Rust implementation)
+2026-10-16T17:52:58.547250Z  INFO 📁 Loading keytab from: /tmp/flint-nfs.keytab
+2026-10-16T17:52:58.547259Z  INFO Loading keytab from: /tmp/flint-nfs.keytab
+2026-10-16T17:52:58.547483Z  INFO Loaded 4 keys from keytab
+2026-10-16T17:52:58.547495Z  INFO ✅ Keytab loaded successfully with 4 keys
+2026-10-16T17:52:58.547503Z  WARN ⚠️  FLINT_NFS_GSS_PRINCIPALS is not set: EVERY principal of the realm with a ticket for this server may connect, and Kerberos calls carry no uid to check
+2026-10-16T17:52:58.547517Z  INFO F33 self-fencing ARMED deadline_secs=90 export="/tmp/pnfs-e1/mds-export"
+2026-10-16T17:52:58.547689Z  INFO privilege: CAP_CHOWN present — created objects will carry the caller's AUTH_SYS identity
+2026-10-16T17:52:58.547696Z  INFO 🚀 Starting Metadata Server...
+2026-10-16T17:52:58.547699Z  INFO 
+2026-10-16T17:52:58.547725Z  INFO 📊 deleg reporter: delegations are OFF (FLINT_NFS_DELEGATIONS unset) — no grants will be made and no periodic report follows
+2026-10-16T17:52:58.547728Z  INFO MDS server binary: release build
+2026-10-16T17:52:58.547730Z  INFO ╔════════════════════════════════════════════════════╗
+2026-10-16T17:52:58.547733Z  INFO ║   Flint pNFS Metadata Server (MDS) - RUNNING      ║
+2026-10-16T17:52:58.547735Z  INFO ╚════════════════════════════════════════════════════╝
+2026-10-16T17:52:58.547737Z  INFO 
+2026-10-16T17:52:58.547739Z  INFO Listening on: 0.0.0.0:20490
+2026-10-16T17:52:58.547746Z  INFO Layout Type: File
+2026-10-16T17:52:58.547749Z  INFO Stripe Size: 1048576 bytes
+2026-10-16T17:52:58.547752Z  INFO Layout Policy: Stripe
+2026-10-16T17:52:58.547754Z  INFO Registered Data Servers: 2
+2026-10-16T17:52:58.547757Z  INFO 
+2026-10-16T17:52:58.547769Z  INFO 📈 MDS instance counter: 1 (incremented at startup; persisted across restart)
+2026-10-16T17:52:58.547787Z  INFO ClientManager loaded 0 records from backend
+2026-10-16T17:52:58.547795Z  INFO SessionManager observed 0 persisted sessions; dropped them so kernel re-CREATE_SESSIONs naturally on BADSESSION
+2026-10-16T17:52:58.547799Z  INFO StateIdManager loaded 0 records from backend (0 delegation holder markers)
+2026-10-16T17:52:58.547805Z  INFO StateManager loaded 0 clients, 0 sessions, 0 stateids from backend
+2026-10-16T17:52:58.547809Z  INFO nothing to reclaim on this volume — callers that cannot reclaim are not held by grace
+2026-10-16T17:52:58.547820Z  INFO LayoutManager loaded 0 records from backend
+2026-10-16T17:52:58.547823Z  INFO 📦 MDS reloaded 0 persisted layouts from backend
+2026-10-16T17:52:58.547828Z  INFO LayoutManager loaded 0 placements from backend
+2026-10-16T17:52:58.547835Z  INFO 📦 MDS reloaded 0 persisted placements from backend
+2026-10-16T17:52:58.547973Z  WARN 📐 volume '.flint-nfs' has no geometry record — new files in it will use the fleet default (stripe_size=1048576, all data servers). Expected for volumes created before per-volume geometry; otherwise the record was lost.
+2026-10-16T17:52:58.548020Z  INFO 📐 MDS loaded 0 volume geometry record(s)
+2026-10-16T17:52:58.548135Z  INFO Heartbeat monitor started (timeout: 30 seconds)
+2026-10-16T17:52:58.548153Z  INFO Status reporter started (interval: 60 seconds)
+2026-10-16T17:52:58.548164Z  INFO ✅ Metadata Server is ready to accept connections
+2026-10-16T17:52:58.548170Z  INFO 
+2026-10-16T17:52:58.548233Z  INFO gRPC control server started on port 50051 (for DS registration)
+2026-10-16T17:52:58.548247Z  INFO 🚀 pNFS MDS serving NFSv4 on 0.0.0.0:20490
+2026-10-16T17:52:58.548283Z  INFO NFS connection cap: 1024 concurrent (FLINT_NFS_MAX_CONNECTIONS)
+2026-10-16T17:52:58.548296Z  INFO NFS idle-read deadline: 360s (FLINT_NFS_IDLE_TIMEOUT_SECS)
+2026-10-16T17:52:58.548360Z  INFO ✅ NFSv4.2 TCP server listening on 0.0.0.0:20490
+2026-10-16T17:52:58.548379Z  INFO 
+2026-10-16T17:52:58.548347Z  INFO [FENCE] backing-store watchdog armed (F33) deadline_secs=90 interval_ms=10000
+2026-10-16T17:52:58.548470Z  INFO Lease sweep holds for 179s (one lease window past grace), then every 30s
+2026-10-16T17:52:58.548536Z  WARN ⚠️ FLINT_PNFS_CONTROL_TOKEN unset — MDS control plane is UNAUTHENTICATED (any pod that can reach 50051 can register as a DS)
+2026-10-16T17:52:58.548565Z  INFO 🔧 Starting MDS gRPC control server on 0.0.0.0:50051
+2026-10-16T17:52:58.548964Z  INFO Stale-device sweep holds for 30s boot grace (then every 10s, timeout 30s)
+2026-10-16T17:52:58.549658Z  INFO ─────────────────────────────────────────────────────
+2026-10-16T17:52:58.549669Z  INFO MDS Status Report:
+2026-10-16T17:52:58.549672Z  INFO   Data Servers: 2 active / 2 total
+2026-10-16T17:52:58.549676Z  INFO   Active Layouts: 0
+2026-10-16T17:52:58.549679Z  INFO   Capacity: 0 bytes total, 0 bytes used
+2026-10-16T17:52:58.549681Z  INFO ─────────────────────────────────────────────────────
+2026-10-16T17:53:00.550919Z  INFO 📝 DS Registration: device_id=ds-2, ds-reported endpoint=0.0.0.0:20492 → using configured endpoint=127.0.0.3:20492 (+0 multipath), capacity=40483942400 bytes
+2026-10-16T17:53:00.550919Z  INFO 📝 DS Registration: device_id=ds-1, ds-reported endpoint=0.0.0.0:20491 → using configured endpoint=127.0.0.2:20491 (+0 multipath), capacity=40483942400 bytes
+2026-10-16T17:53:00.550937Z  WARN 🔄 Device ds-1 already registered, updating
+2026-10-16T17:53:00.550937Z  WARN 🔄 Device ds-2 already registered, updating
+2026-10-16T17:53:00.550945Z  INFO 📊 Device registry: 2 total, 2 active
+2026-10-16T17:53:00.550945Z  INFO 📊 Device registry: 2 total, 2 active
+2026-10-16T17:53:00.550947Z  INFO ✅ DS registered successfully: ds-2
+2026-10-16T17:53:00.550948Z  INFO ✅ DS registered successfully: ds-1
+2026-10-16T17:53:07.615171Z  INFO ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-10-16T17:53:07.615217Z  INFO 📡 [NFS_SERVER] Connection #1 from 127.0.0.1:743 (Active connections: 1)
+2026-10-16T17:53:07.615232Z  INFO    Timestamp: SystemTime { tv_sec: 1792173187, tv_nsec: 615231432 }
+2026-10-16T17:53:07.615259Z  INFO ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-10-16T17:53:07.615456Z  INFO 🚀 [NFS_SERVER] Spawned handler task for connection #1 from 127.0.0.1:743
+2026-10-16T17:53:07.615548Z  INFO 🔌 [NFS_SERVER] Connection #1 handler started for 127.0.0.1:743
+2026-10-16T17:53:07.615563Z  INFO    Start time: SystemTime { tv_sec: 1792173187, tv_nsec: 615562234 }
+2026-10-16T17:53:07.615729Z  INFO >>> NULL procedure
+2026-10-16T17:53:07.627155Z  INFO ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-10-16T17:53:07.627194Z  INFO 📡 [NFS_SERVER] Connection #2 from 127.0.0.1:56984 (Active connections: 2)
+2026-10-16T17:53:07.627211Z  INFO    Timestamp: SystemTime { tv_sec: 1792173187, tv_nsec: 627210975 }
+2026-10-16T17:53:07.627225Z  INFO ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-10-16T17:53:07.627306Z  INFO 🚀 [NFS_SERVER] Spawned handler task for connection #2 from 127.0.0.1:56984
+2026-10-16T17:53:07.627350Z  INFO 🔌 [NFS_SERVER] Connection #2 handler started for 127.0.0.1:56984
+2026-10-16T17:53:07.627364Z  INFO    Start time: SystemTime { tv_sec: 1792173187, tv_nsec: 627363384 }
+2026-10-16T17:53:07.628831Z  INFO 🔐 [NFS_SERVER] Connection #2, RPC #1: RPCSEC_GSS authentication detected
+2026-10-16T17:53:07.628890Z  INFO 🔐 GSS Cred: version=1, procedure=1, seq=0, service=None
+2026-10-16T17:53:07.628920Z  INFO 🔐 RPCSEC_GSS_INIT
+2026-10-16T17:53:07.628951Z  INFO 🔐 GSS_INIT: service=None, token_len=915
+2026-10-16T17:53:07.628959Z  INFO 🔐 RPCSEC_GSS_INIT: service=None, token_len=915
+2026-10-16T17:53:07.629023Z  INFO 🔐 Accepting Kerberos GSS token with FULL CRYPTOGRAPHY: 915 bytes
+2026-10-16T17:53:07.629085Z  INFO    Found service key: nfs/flintsrv.flint.test@FLINT.TEST
+2026-10-16T17:53:07.629224Z  INFO    ✅ Ticket decrypted, extracted session key: 32 bytes
+2026-10-16T17:53:07.629275Z  INFO    ✅ Authenticator validated: time_skew=0s
+2026-10-16T17:53:07.629285Z  INFO    Adopting the initiator's subkey as the per-message base key
+2026-10-16T17:53:07.629357Z  INFO ✅ FULL CRYPTO: Kerberos context established: client=host/lima-flint-drill.flint.test@FLINT.TEST
+2026-10-16T17:53:07.629381Z  INFO    Session key: 32 bytes, enctype=AES256CtsHmacSha384192
+2026-10-16T17:53:07.629394Z  INFO ✅ Kerberos context established (Pure Rust): client=host/lima-flint-drill.flint.test@FLINT.TEST
+2026-10-16T17:53:07.629486Z  INFO ✅ GSS_INIT complete: handle_len=16, major=0, minor=0
+2026-10-16T17:53:07.630339Z  INFO 🔐 [NFS_SERVER] Connection #1, RPC #2: RPCSEC_GSS authentication detected
+2026-10-16T17:53:07.630373Z  INFO 🔐 GSS Cred: version=1, procedure=0, seq=1, service=Integrity
+2026-10-16T17:53:07.630384Z  INFO 🔐 RPCSEC_GSS_DATA
+2026-10-16T17:53:07.630381Z  INFO 🔌 [NFS_SERVER] Connection #2 from 127.0.0.1:56984 closed after 3.023172ms (1 RPCs processed)
+2026-10-16T17:53:07.630475Z  INFO ✅ GSS authentication successful, processing COMPOUND
+2026-10-16T17:53:07.630600Z  INFO ✓ [NFS_SERVER] Connection #2 from 127.0.0.1:56984 closed cleanly (Active: 1)
+2026-10-16T17:53:07.630628Z  INFO EXCHANGE_ID: owner=[76, 105, 110, 117, 120, 32, 78, 70, 83, 118, 52, 46, 49, 32, 108, 105, 109, 97, 45, 102, 108, 105, 110, 116, 45, 100, 114, 105, 108, 108], verifier=1792171438608792444
+2026-10-16T17:53:07.630711Z  INFO Lease created for client 13837017094050067260
+2026-10-16T17:53:07.630722Z  INFO EXCHANGE_ID: new client 13837017094050067260 (no existing record)
+2026-10-16T17:53:07.630742Z  INFO EXCHANGE_ID: new unconfirmed clientid 13837017094050067260
+2026-10-16T17:53:07.630754Z  INFO 🔐 EXCHANGE_ID: client 13837017094050067260 is SP4_MACH_CRED, bound to gss:host/lima-flint-drill.flint.test@FLINT.TEST
+2026-10-16T17:53:07.630769Z  INFO EXCHANGE_ID response - server_owner="flint-pnfs", server_scope="flint-pnfs-mds", flags=0x00020000
+2026-10-16T17:53:07.631348Z  INFO 🔐 [NFS_SERVER] Connection #1, RPC #3: RPCSEC_GSS authentication detected
+2026-10-16T17:53:07.631377Z  INFO 🔐 GSS Cred: version=1, procedure=0, seq=2, service=Integrity
+2026-10-16T17:53:07.631387Z  INFO 🔐 RPCSEC_GSS_DATA
+2026-10-16T17:53:07.631481Z  INFO ✅ GSS authentication successful, processing COMPOUND
+2026-10-16T17:53:07.631544Z  INFO EXCHANGE_ID: owner=[76, 105, 110, 117, 120, 32, 78, 70, 83, 118, 52, 46, 49, 32, 108, 105, 109, 97, 45, 102, 108, 105, 110, 116, 45, 100, 114, 105, 108, 108], verifier=1792171438608792444
+2026-10-16T17:53:07.631584Z  INFO Lease removed for client 13837017094050067260
+2026-10-16T17:53:07.631613Z  INFO Lease created for client 18140984809225016041
+2026-10-16T17:53:07.631621Z  INFO EXCHANGE_ID: new unconfirmed clientid 18140984809225016041
+2026-10-16T17:53:07.631632Z  INFO 🔐 EXCHANGE_ID: client 18140984809225016041 is SP4_MACH_CRED, bound to gss:host/lima-flint-drill.flint.test@FLINT.TEST
+2026-10-16T17:53:07.631647Z  INFO EXCHANGE_ID response - server_owner="flint-pnfs", server_scope="flint-pnfs-mds", flags=0x00020000
+2026-10-16T17:53:07.631931Z  INFO 🔐 [NFS_SERVER] Connection #1, RPC #4: RPCSEC_GSS authentication detected
+2026-10-16T17:53:07.631948Z  INFO 🔐 GSS Cred: version=1, procedure=0, seq=3, service=Integrity
+2026-10-16T17:53:07.631956Z  INFO 🔐 RPCSEC_GSS_DATA
+2026-10-16T17:53:07.632059Z  INFO ✅ GSS authentication successful, processing COMPOUND
+2026-10-16T17:53:07.632102Z  INFO CREATE_SESSION: clientid=18140984809225016041, sequence=1
+2026-10-16T17:53:07.632111Z  INFO CREATE_SESSION: Client requested - max_request=1049620, max_response=1049480, max_ops=8
+2026-10-16T17:53:07.632128Z  INFO CREATE_SESSION: Negotiated: req=1049620, resp=1049480, ops=8
+2026-10-16T17:53:07.632159Z  INFO Session created: client=18140984809225016041, session_id=SessionId([21, 204, 7, 68, 103, 64, 7, 95, 251, 193, 185, 145, 165, 157, 82, 233])
+2026-10-16T17:53:07.632180Z  INFO CREATE_SESSION: client offered 1 callback credential(s): [Sys { stamp: 2531310460, machinename: "lima-flint-drill", uid: 0, gid: 0, gids: [] }] → selected Some(Sys { stamp: 2531310460, machinename: "lima-flint-drill", uid: 0, gid: 0, gids: [] })
+2026-10-16T17:53:07.632205Z  INFO CREATE_SESSION: Session SessionId([21, 204, 7, 68, 103, 64, 7, 95, 251, 193, 185, 145, 165, 157, 82, 233]) created for client 18140984809225016041 with 1025KB buffers
+2026-10-16T17:53:07.632252Z  INFO CREATE_SESSION: back channel ACCEPTED for session SessionId([21, 204, 7, 68, 103, 64, 7, 95, 251, 193, 185, 145, 165, 157, 82, 233]) — csr_flags echoes CONN_BACK_CHAN, callbacks will use this connection
+2026-10-16T17:53:07.632583Z  INFO 🔐 [NFS_SERVER] Connection #1, RPC #5: RPCSEC_GSS authentication detected
+2026-10-16T17:53:07.632600Z  INFO 🔐 GSS Cred: version=1, procedure=0, seq=4, service=Integrity
+2026-10-16T17:53:07.632608Z  INFO 🔐 RPCSEC_GSS_DATA
+2026-10-16T17:53:07.632687Z  INFO ✅ GSS authentication successful, processing COMPOUND
+2026-10-16T17:53:07.632730Z  INFO RECLAIM_COMPLETE: one_fs=false
+2026-10-16T17:53:07.632748Z  INFO RECLAIM_COMPLETE: client 18140984809225016041 now exited grace mode
+2026-10-16T17:53:07.635249Z  INFO ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-10-16T17:53:07.635279Z  INFO 📡 [NFS_SERVER] Connection #3 from 127.0.0.1:56998 (Active connections: 2)
+2026-10-16T17:53:07.635294Z  INFO    Timestamp: SystemTime { tv_sec: 1792173187, tv_nsec: 635294100 }
+2026-10-16T17:53:07.635306Z  INFO ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-10-16T17:53:07.635379Z  INFO 🚀 [NFS_SERVER] Spawned handler task for connection #3 from 127.0.0.1:56998
+2026-10-16T17:53:07.635398Z  INFO 🔌 [NFS_SERVER] Connection #3 handler started for 127.0.0.1:56998
+2026-10-16T17:53:07.635407Z  INFO    Start time: SystemTime { tv_sec: 1792173187, tv_nsec: 635406989 }
+2026-10-16T17:53:07.635816Z  INFO 🔐 [NFS_SERVER] Connection #3, RPC #1: RPCSEC_GSS authentication detected
+2026-10-16T17:53:07.635878Z  INFO 🔐 GSS Cred: version=1, procedure=1, seq=0, service=None
+2026-10-16T17:53:07.635891Z  INFO 🔐 RPCSEC_GSS_INIT
+2026-10-16T17:53:07.635900Z  INFO 🔐 GSS_INIT: service=None, token_len=915
+2026-10-16T17:53:07.635908Z  INFO 🔐 RPCSEC_GSS_INIT: service=None, token_len=915
+2026-10-16T17:53:07.635935Z  INFO 🔐 Accepting Kerberos GSS token with FULL CRYPTOGRAPHY: 915 bytes
+2026-10-16T17:53:07.635957Z  INFO    Found service key: nfs/flintsrv.flint.test@FLINT.TEST
+2026-10-16T17:53:07.636060Z  INFO    ✅ Ticket decrypted, extracted session key: 32 bytes
+2026-10-16T17:53:07.636111Z  INFO    ✅ Authenticator validated: time_skew=0s
+2026-10-16T17:53:07.636121Z  INFO    Adopting the initiator's subkey as the per-message base key
+2026-10-16T17:53:07.636171Z  INFO ✅ FULL CRYPTO: Kerberos context established: client=host/lima-flint-drill.flint.test@FLINT.TEST
+2026-10-16T17:53:07.636189Z  INFO    Session key: 32 bytes, enctype=AES256CtsHmacSha384192
+2026-10-16T17:53:07.636201Z  INFO ✅ Kerberos context established (Pure Rust): client=host/lima-flint-drill.flint.test@FLINT.TEST
