@@ -1766,6 +1766,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                                     spdk_csi_driver::identity::ROLE_CONTEXT_KEY.to_string(),
                                     role_value.clone(),
                                 );
+                                spdk_csi_driver::nfs_krb5::mark_new_volume(&mut vol.volume_context);
                             }
                             return Ok(resp);
                         }
@@ -1777,6 +1778,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                                     spdk_csi_driver::identity::ROLE_CONTEXT_KEY.to_string(),
                                     role_value.clone(),
                                 );
+                                spdk_csi_driver::nfs_krb5::mark_new_volume(&mut vol.volume_context);
                             }
                             return Ok(resp);
                         }
@@ -1819,6 +1821,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                 spdk_csi_driver::identity::ROLE_CONTEXT_KEY.to_string(),
                 role_value.clone(),
             );
+            spdk_csi_driver::nfs_krb5::mark_new_volume(&mut volume_context);
 
             // Echo back content_source if this was a clone/snapshot request
             // The provisioner requires this in the response to confirm the clone was handled
@@ -1921,6 +1924,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     spdk_csi_driver::identity::ROLE_CONTEXT_KEY.to_string(),
                     role_value.clone(),
                 );
+                spdk_csi_driver::nfs_krb5::mark_new_volume(&mut volume_context);
 
                 // Add replica count
                 volume_context.insert(
@@ -2673,6 +2677,13 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             publish_context.insert("nfs.chert.us/export-path".to_string(), 
                                    format!("/exports/{}", volume_id));
             publish_context.insert("nfs.chert.us/port".to_string(), "2049".to_string());
+            // The name its Kerberos key is for: the node maps the IP to it.
+            if let Some(name) = spdk_csi_driver::rwx_nfs::nfs_pod_krb5_server_name(
+                self.driver.kube_client.clone(),
+                &volume_id,
+            ).await {
+                publish_context.insert(spdk_csi_driver::nfs_krb5::SERVER_NAME_CONTEXT.to_string(), name);
+            }
             
             // For RWX volumes, we don't need to setup NVMe-oF to client nodes
             // Client nodes will mount NFS instead
@@ -4684,8 +4695,14 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             // sec=krb5*: rpc.gssd names the server from this ClusterIP
             // through the HOST's resolver, so the host must map it to the
             // Kerberos server name first (nfs_krb5).
-            spdk_csi_driver::nfs_krb5::prepare_node_mount(server_ip, &mount_opts)
-                .map_err(tonic::Status::failed_precondition)?;
+            spdk_csi_driver::nfs_krb5::prepare_node_mount(
+                server_ip,
+                &mount_opts,
+                req.publish_context
+                    .get(spdk_csi_driver::nfs_krb5::SERVER_NAME_CONTEXT)
+                    .map(String::as_str),
+            )
+            .map_err(tonic::Status::failed_precondition)?;
             
             // PRE-MOUNT CHECKS
             eprintln!("🔍 [NFS_MOUNT] Pre-mount checks:");

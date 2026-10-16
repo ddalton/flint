@@ -14,6 +14,20 @@ covered by the stability guarantee.
 
 ### Security
 
+- **Each NFS volume's server has a Kerberos key of its own** (2026-10-16).
+  Every NFS server pod used to mount the one shared keytab
+  (`nfs/flint-nfs.<ns>.svc.<domain>`), so anyone who got into one server
+  pod could read the tickets nodes present to every other volume's server
+  and pass for any of them. With `nfs.kerberos.perVolumeKeys` (default
+  `true`), the controller creates a `KerberosPrincipal` for each new
+  volume, `nfs/<volume>.<shared server name>`, whose keytab Secret only
+  that volume's server mounts. The node maps the volume's ClusterIP to
+  that name in `/etc/hosts` (it gets the name in the publish context).
+  Deleting the volume deletes its principal. Volumes made before keep the
+  shared principal until they are recreated. The chart gives the
+  controller a Role for `kerberosprincipals` in the NFS namespace.
+  `perVolumeKeys: false` keeps the shared key for every volume.
+
 - **Kerberos sessions are bound to their machine** (2026-10-16). Under
   `krb5i` a session id crosses the wire in the clear, and any allowed
   principal holding one could use the session from its own connection,

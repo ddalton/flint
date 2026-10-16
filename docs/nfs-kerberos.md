@@ -32,6 +32,7 @@ Turning Kerberos on turns on everything that makes it hold:
 | `nfs.kerberos.minSec` | `krb5i` | Every RWX volume refuses `sec=sys` mounts. | `minSec: ""` (needs `attachedNodesOnly: false` too) |
 | `nfs.kerberos.attachedNodesOnly` | `true` | A volume's server serves only the nodes it is attached to ([below](#only-the-nodes-a-volume-is-attached-to)). | `attachedNodesOnly: false` |
 | `nfs.enforcePermissions` | `enforce` | POSIX permissions deny, checked against each caller's mapped identity. | `warn` (log only) or `off` |
+| `nfs.kerberos.perVolumeKeys` | `true` | Each new volume's server has a principal of its own ([below](#each-volume-has-its-own-server-key)). | `perVolumeKeys: false` |
 
 Without these, Kerberos would only protect the wire. A `sec=sys` mount
 would still claim any uid, any node with a machine key would reach every
@@ -49,9 +50,10 @@ mount carries no node identity, so every one would be refused anyway.
 
 | Piece | What it is |
 |---|---|
-| `KerberosPrincipal flint-nfs-server` | `nfs/flint-nfs.<nfs namespace>.svc.<clusterDomain>`, the one principal every NFS server pod uses. Its keytab is in Secret `flint-nfs-krb5-keytab`, which each server pod mounts (`KRB5_KTNAME`). |
+| `KerberosPrincipal flint-nfs-server` | `nfs/flint-nfs.<nfs namespace>.svc.<clusterDomain>`, the shared server principal. Its keytab is in Secret `flint-nfs-krb5-keytab`. Only servers of volumes made with `perVolumeKeys` off (or before it existed) mount it. |
+| `KerberosPrincipal flint-nfs-<volume>` | Made by the controller for each new volume (`perVolumeKeys`): `nfs/<volume>.<shared server name>`, keytab in Secret `flint-nfs-krb5-<volume>`, which only that volume's server pod mounts (`KRB5_KTNAME`). Deleted with the volume. The chart gives the controller a Role for these in the NFS namespace. |
 | `KerberosNodeKeytab <release>-nfs-clients` | `host/` and `nfs/<node>` for every selected node, installed into `/etc/krb5.keytab` by the operator's DaemonSet, along with the realm's `krb5.conf`. That `krb5.conf` maps `.svc.<clusterDomain>` to the realm, which `rpc.gssd` needs in order to pick the server's realm. |
-| node plugin | Before a `sec=krb5*` mount, writes `<volume ClusterIP> <server name>` into the node's `/etc/hosts`. |
+| node plugin | Before a `sec=krb5*` mount, writes `<volume ClusterIP> <that volume's server name>` into the node's `/etc/hosts`. |
 | `minSec` | `FLINT_NFS_MIN_SEC` for every NFS server. `krb5i` (the default) refuses `sec=sys` mounts. |
 | `allowedPrincipals` | `FLINT_NFS_GSS_PRINCIPALS`: who may establish a GSS context. The default is the nodes' machine principals (`host/*@<realm>`, `nfs/*@<realm>`) plus every principal `idmap` names. |
 | `idmap`, `machineIdentity`, `anonIdentity` | `FLINT_NFS_GSS_IDMAP` and `FLINT_NFS_GSS_ANON`: which uid, gid and groups a Kerberos caller is. |
@@ -190,6 +192,41 @@ Not done yet:
 - reading identities from a directory (LDAP or SSSD, as idmapd does) in
   place of the explicit list;
 
+## Each volume has its own server key
+
+With one shared server principal, every NFS server pod holds the same
+key. Anyone who gets into one server pod could then decrypt the tickets
+nodes present to every other volume's server, and pass for any of them.
+So by default (`perVolumeKeys: true`) each new volume's server gets a
+principal of its own:
+
+- **Its name:** `nfs/<volume>.<shared server name>@<realm>`, for example
+  `nfs/pvc-0a1b….flint-nfs.flint-system.svc.cluster.local`. A volume id
+  that is not a DNS label is replaced by `v-<16 hex digits>` of its
+  SHA-256. The name stays under `.svc.<clusterDomain>`, which the nodes'
+  `krb5.conf` already maps to the realm.
+- **Its key:** the controller creates `KerberosPrincipal flint-nfs-<volume>`
+  before it starts the volume's server pod. krb5-operator writes the
+  keytab to Secret `flint-nfs-krb5-<volume>`, and the pod waits for it.
+  That pod mounts this Secret only, not the shared keytab.
+- **The node's side:** the server pod carries the name in its
+  `chert.us/krb5-server-name` annotation. ControllerPublishVolume passes
+  it to the node (`nfs.chert.us/krb5-server-name`), and the node maps the
+  volume's ClusterIP to it in `/etc/hosts`, so `rpc.gssd` asks for that
+  principal.
+- **Deletion:** deleting the volume deletes its `KerberosPrincipal`, and
+  krb5-operator removes it from the KDC unless `deletionPolicy: Retain`.
+  This happens whether or not `perVolumeKeys` is still on.
+- **Existing volumes:** CreateVolume marks a new volume
+  (`nfs.chert.us/krb5-volume-key` in its volume context). Volumes made
+  before keep the shared principal, even when their server pod is
+  recreated, since their nodes may still hold tickets for it. Recreate a
+  volume to move it to its own key.
+
+Root on a node that mounts the volume still holds tickets for the
+server. A per-volume key limits what a broken server pod gives away; it
+does not protect against a node.
+
 ## Why the hosts entry
 
 A node mounts a volume by its Service's ClusterIP. `rpc.gssd`, on the node,
@@ -204,8 +241,8 @@ real `rpc.gssd` (nfs-utils 2.6.4):
 - **With `<ip> <name>` in `/etc/hosts`:** it works. `gssd` reverse-resolves
   the IP to the name and asks for `nfs/<name>`.
 
-Every volume's IP maps to the same name, so one server principal serves
-every volume. The node plugin owns the lines that end in
+Each volume's IP maps to its own server's name (or, for volumes with the
+shared principal, to the shared name). The node plugin owns the lines that end in
 `# flint-nfs-krb5`. It drops the lines of volumes no longer mounted with
 Kerberos and leaves the rest of the file alone.
 
@@ -245,8 +282,9 @@ pNFS volumes are not covered.
   session id stolen by a user with a valid ticket, and an SP4_NONE
   control).
 - **Unit tests:** `nfs_krb5.rs` covers flavor detection, `/proc/mounts`
-  parsing, the hosts file rewritten in place and only our lines, and the
-  server pod's keytab and floor.
+  parsing, the hosts file rewritten in place and only our lines (each IP
+  with its own name), the server pod's keytab and floor, the per-volume
+  server name, and which volumes get a principal of their own.
 - **kind:** `KRB5=1 tests/system/kind-nfs-only.sh` uses kind nodes with
   `rpc.gssd`, krb5-operator, and `tests-nfs-krb5/`. There, an RWX volume
   mounts with `sec=krb5i` on two nodes and the pods share files, while a
@@ -257,4 +295,7 @@ pNFS volumes are not covered.
   the allowlist, while root on that node (the machine principal) still
   reads the volume. With permissions enforced, bob (mapped to 2000:2000)
   creates a file that root sees owned by 2000:2000, and is denied root's
-  0600 file. CI runs it after the nfs-only suite.
+  0600 file. The volume's server holds only its own
+  `nfs/<pv>.flint-nfs.…` key, the node maps its ClusterIP to that name,
+  and deleting the volume deletes its `KerberosPrincipal`. CI runs it
+  after the nfs-only suite.
