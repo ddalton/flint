@@ -63,6 +63,12 @@ fn usage() -> ! {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // TLS to the MDS when FLINT_PNFS_CONTROL_TLS_DIR is set (Phase 5), as
+    // the CSI driver: a bad directory is an error, never plaintext.
+    if let Err(e) = spdk_csi_driver::pnfs::control_tls::init_from_env() {
+        eprintln!("control TLS: {e}");
+        return ExitCode::from(2);
+    }
     // THE SESSION CODE TALKS THROUGH `tracing`, AND NOBODY WAS
     // LISTENING. `pnfs_block_session` reports the whole redirect lane —
     // which target the volume moved to, whether the new path was added
