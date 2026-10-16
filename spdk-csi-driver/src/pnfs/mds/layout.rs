@@ -1175,6 +1175,21 @@ impl LayoutManager {
     /// Which layout class serves `file_key`'s volume — the per-volume
     /// dispatch the design doc's §5 seam branches on. Legacy volumes
     /// (no geometry record) are File by construction.
+    /// The active data servers a Kerberos caller's files layout must not
+    /// name: no keytab, or a floor that admits AUTH_SYS
+    /// ([`super::device::DeviceInfo::gss_ready`]).
+    pub fn gss_unready_data_servers(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .device_registry
+            .list_active()
+            .into_iter()
+            .filter(|d| !d.gss_ready())
+            .map(|d| d.device_id)
+            .collect();
+        out.sort();
+        out
+    }
+
     pub fn layout_class_for(&self, file_key: &str) -> LayoutClass {
         self.geometry_for(file_key).layout_class
     }

@@ -500,7 +500,11 @@ DS address (each DS's Service and its multipath Services, resolved through
 the cluster DNS) to that DS's principal name in `/etc/hosts`, with its own
 marker (`# flint-pnfs-ds-krb5`), before every `sec=krb5*` pNFS mount
 (`FLINT_PNFS_KRB5_DS`). The MDS then hands Kerberos callers layouts
-(`FLINT_PNFS_LAYOUTS_FOR_GSS=true`).
+(`FLINT_PNFS_LAYOUTS_FOR_GSS=true`), but only while every registered DS
+reported, at registration, a keytab and a floor of krb5 or stronger: a DS
+that would take the client's AUTH_SYS fallback (no floor), or one from
+before the report, withholds layouts from every Kerberos caller, and their
+I/O goes through the MDS (`tests/krb5/results/pnfs-ds-posture-2026-10-16/`).
 
 **Without the data servers: no layouts for Kerberos callers.** Measured
 (plan, "Phase 0 results"):

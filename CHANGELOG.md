@@ -14,6 +14,16 @@ covered by the stability guarantee.
 
 ### Security
 
+- **pNFS Kerberos: no layouts for Kerberos callers while a data server
+  would take AUTH_SYS** (2026-10-16). A Linux client that cannot get a GSS
+  context with a data server sends it the data as AUTH_SYS; only the data
+  server's floor stops that (the client then falls back to the MDS). Each
+  data server now reports its posture when it registers (a keytab, and its
+  `FLINT_NFS_MIN_SEC`), and the MDS answers a Kerberos caller's files
+  LAYOUTGET with LAYOUTUNAVAIL while any registered data server lacks a
+  keytab or a floor of krb5 or stronger, including one from before the
+  report. The chart cannot render such a data server; this covers one
+  started by hand, by an older image, or with its env edited.
 - **pNFS Kerberos: the data servers do Kerberos, and Kerberos callers get
   layouts again** (2026-10-16; plan Phase 3). With `pnfs.kerberos.enabled`,
   the new `pnfs.kerberos.dataServers` (default `true`) gives each data

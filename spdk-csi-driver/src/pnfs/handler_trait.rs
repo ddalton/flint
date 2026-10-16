@@ -259,6 +259,13 @@ pub trait PnfsOperations: Send + Sync {
         crate::pnfs::mds::layout::LayoutClass::File
     }
 
+    /// The data servers a Kerberos caller's files layout must not name
+    /// (no keytab, or a floor that admits AUTH_SYS). Empty by default:
+    /// handlers without a device registry name no data servers.
+    fn gss_unready_data_servers(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// The durable state backend carrying the extent allocator, when
     /// this handler can serve block-class volumes. `None` (the
     /// default) makes every scsi LAYOUTGET answer LAYOUTUNAVAILABLE —
