@@ -14,6 +14,18 @@ covered by the stability guarantee.
 
 ### Security
 
+- **pNFS: signed data server filehandles** (2026-10-16; plan Phase 4).
+  The data server handles in a files layout were `file_id` and stripe in
+  the clear, so whoever reached a data server and knew or guessed a file
+  id read and wrote its stripes. The MDS now signs each handle
+  (HMAC-SHA256, version 5), bound under Kerberos to the machine of the
+  session that asked for the layout, and the data servers serve only
+  handles that verify for the caller's session
+  (`FLINT_PNFS_DS_FH_AUTH=enforce`); anything else gets NFS4ERR_BADHANDLE,
+  and the client fetches a fresh layout or goes through the MDS. Chart
+  `pnfs.dsAuth` (on with pNFS Kerberos via `pnfs.kerberos.dsAuth`), key
+  Secret `flint-pnfs-fh-key` (generated once; rotation keeps a `previous`
+  key verifying). A legacy pin (no file id) gets no layout while signing.
 - **pNFS Kerberos: no layouts for Kerberos callers while a data server
   would take AUTH_SYS** (2026-10-16). A Linux client that cannot get a GSS
   context with a data server sends it the data as AUTH_SYS; only the data

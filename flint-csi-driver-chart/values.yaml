@@ -710,6 +710,25 @@ pnfs:
   # and injects FLINT_PNFS_CONTROL_TOKEN into the MDS, DS fleet, and
   # CSI controller. Default ON whenever the in-chart server is
   # deployed — turning it off prints a loud MDS boot warning.
+  # ── Signed data server filehandles (pNFS Kerberos plan, Phase 4) ──
+  # The MDS signs each data server filehandle it hands out in a layout
+  # (HMAC, bound to the asking node's machine principal under Kerberos),
+  # and the data servers serve only handles that verify: knowing or
+  # guessing a file id no longer reaches its stripes, nor does another
+  # node's layout. Works without Kerberos too (the handle is then not bound
+  # to a node). On with pnfs.kerberos (pnfs.kerberos.dsAuth). Key Secret
+  # flint-pnfs-fh-key (key `current`, `<id>:<64 hex>`, generated once;
+  # key `previous` during a rotation: move current to previous, set a new
+  # current with a new id, restart the data servers, then the MDS).
+  dsAuth:
+    enabled: false
+    # The data servers refuse every unsigned handle (FLINT_PNFS_DS_FH_AUTH
+    # =enforce). false: signed handles must verify, unsigned ones are
+    # still served (while older layouts drain).
+    enforce: true
+    # An existing Secret with keys `current` (and `previous`) instead.
+    existingSecret: ""
+
   controlToken:
     enabled: true
     # Name of an existing Secret with key `token` to use instead of a
@@ -781,6 +800,8 @@ pnfs:
     # (krb5i) or sealed (krb5p) end to end. false: no layouts for Kerberos
     # callers, every byte through the MDS (Phase 1).
     dataServers: true
+    # Signed data server filehandles (pnfs.dsAuth) with Kerberos on.
+    dsAuth: true
     # pNFS volumes mounted with Kerberos: the flint-pnfs class's
     # parameters (pnfs.storageClass) plus mountOptions sec=<sec>.
     storageClass:

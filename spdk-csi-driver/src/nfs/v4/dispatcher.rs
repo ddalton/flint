@@ -121,6 +121,10 @@ pub struct CompoundDispatcher {
     /// GSS, and the Linux client then sends DS I/O as AUTH_SYS, silently
     /// (`pnfs::mds::krb5`). Off unless the MDS has a keytab.
     withhold_gss_layouts: bool,
+    /// Phase 4: sign the data server filehandles of files layouts
+    /// (`pnfs::ds_fh`), bound to the asking session's node. `None`: v2
+    /// handles, unsigned.
+    ds_fh_keys: Option<Arc<crate::pnfs::ds_fh::FhKeys>>,
 }
 
 /// One pnfs_scsi_layout4 extent as encoded on the wire (RFC 8154
@@ -184,6 +188,14 @@ impl CompoundDispatcher {
     /// callers are untouched.
     pub fn with_gss_layouts_withheld(mut self, on: bool) -> Self {
         self.withhold_gss_layouts = on;
+        self
+    }
+
+    /// Sign the data server filehandles of every files layout with `keys`
+    /// (Phase 4, `pnfs::ds_fh`); a legacy pin (no file id), which can
+    /// only carry the MDS's own handle, then gets no layout.
+    pub fn with_ds_fh_keys(mut self, keys: Option<crate::pnfs::ds_fh::FhKeys>) -> Self {
+        self.ds_fh_keys = keys.map(Arc::new);
         self
     }
 
@@ -265,6 +277,7 @@ impl CompoundDispatcher {
             reap_on_compound: true,
             require_mach_cred: false,
             withhold_gss_layouts: false,
+            ds_fh_keys: None,
         };
         // The grant path's callback_ready (rule 7) and the MDS
         // posture refusal both live on StateManager; hand it the
@@ -3670,6 +3683,18 @@ impl CompoundDispatcher {
                     // file's pinned placement (carried on the Layout),
                     // NOT the live config/registry — they must match
                     // what GETDEVICEINFO will resolve for this group.
+                    // Phase 4: the DS handles signed for this session's
+                    // node. A legacy pin carries the MDS's own handle,
+                    // which a DS enforcing signed handles refuses: no
+                    // layout, so the I/O goes through the MDS.
+                    let node = self
+                        .ds_fh_keys
+                        .as_ref()
+                        .map(|_| crate::pnfs::ds_fh::node_of(&self.session_client_principal(context).unwrap_or_default()));
+                    if self.ds_fh_keys.is_some() && layout.file_id == 0 {
+                        warn!("LAYOUTGET '{}': a legacy pin cannot carry a signed data server handle → LAYOUTUNAVAIL", lg_file);
+                        return OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None);
+                    }
                     let layout_content = Self::encode_file_layout_striped(
                         &layout.segments,
                         &filehandle,
@@ -3677,6 +3702,7 @@ impl CompoundDispatcher {
                         layout.device_id_bin,
                         layout.file_id,
                         layout.stripe_width,
+                        self.ds_fh_keys.as_deref().zip(node.as_deref()),
                     );
 
                     debug!("   📤 FILE layout content encoded: {} bytes", layout_content.len());
@@ -4819,6 +4845,7 @@ impl CompoundDispatcher {
         device_id_bytes: [u8; 16],
         file_id: u64,
         stripe_width: usize,
+        signer: Option<(&crate::pnfs::ds_fh::FhKeys, &[u8])>,
     ) -> Bytes {
         use crate::nfs::xdr::XdrEncoder;
         use std::collections::hash_map::DefaultHasher;
@@ -4913,12 +4940,18 @@ impl CompoundDispatcher {
             // reading its predecessor's stripes.
             encoder.encode_u32(stripe_width as u32);
             for j in 0..stripe_width {
-                let fh = crate::nfs::v4::filehandle_pnfs::generate_pnfs_filehandle_from_id(
-                    0, // instance check disabled DS-side (PNFS_INSTANCE_ID unset)
-                    file_id,
-                    j as u32,
-                );
-                encoder.encode_opaque(&fh.data);
+                match signer {
+                    // Phase 4: signed for the asking session's node.
+                    Some((keys, node)) => encoder.encode_opaque(&keys.mint(file_id, j as u32, node)),
+                    None => {
+                        let fh = crate::nfs::v4::filehandle_pnfs::generate_pnfs_filehandle_from_id(
+                            0, // instance check disabled DS-side (PNFS_INSTANCE_ID unset)
+                            file_id,
+                            j as u32,
+                        );
+                        encoder.encode_opaque(&fh.data);
+                    }
+                }
             }
             let result = encoder.finish();
             debug!(
@@ -5281,11 +5314,18 @@ impl CompoundDispatcher {
     /// node's (EXCHANGE_ID admits nothing else under the gate); no
     /// session, no volume.
     fn session_reaches(&self, volumes: &crate::nfs::node_authz::VolumeNodes, volume: &str, ctx: &CompoundContext) -> bool {
+        self.session_client_principal(ctx)
+            .is_some_and(|p| volumes.may_reach(volume, &p))
+    }
+
+    /// The principal that made the client of this compound's session (a
+    /// node's machine principal under Kerberos); `None` without a session.
+    fn session_client_principal(&self, ctx: &CompoundContext) -> Option<Vec<u8>> {
         ctx.session_id
             .as_ref()
             .and_then(|sid| self.state_mgr.sessions.session_limits(sid))
             .and_then(|s| self.state_mgr.clients.get_client(s.client_id))
-            .is_some_and(|c| volumes.may_reach(volume, &c.principal))
+            .map(|c| c.principal)
     }
 
     /// After PUTFH or RESTOREFH: true (and the current filehandle
@@ -8254,7 +8294,7 @@ mod tests {
             .collect();
         let device_id = crate::pnfs::mds::layout::composite_device_id(&ids);
         let enc = CompoundDispatcher::encode_file_layout_striped(
-            &segments, fh, 8 << 20, device_id, file_id, n_ds,
+            &segments, fh, 8 << 20, device_id, file_id, n_ds, None,
         );
         u32::from_be_bytes(enc[20..24].try_into().unwrap())
     }
@@ -8304,6 +8344,7 @@ mod tests {
             device_id,
             FILE_ID,
             WIDTH,
+            None,
         );
 
         // nfl_first_stripe_index: deviceid(16) + nfl_util(4).
@@ -8343,6 +8384,7 @@ mod tests {
             device_id,
             FILE_ID,
             WIDTH,
+            None,
         );
         assert_eq!(enc, enc_ok, "the segment list must not reach the wire at all");
     }
@@ -8944,13 +8986,67 @@ mod tests {
         }
     }
 
-    /// pNFS Kerberos, Phase 1 (option B): with layouts withheld, a
-    /// LAYOUTGET from an RPCSEC_GSS call answers LAYOUTUNAVAIL without
-    /// reaching the handler (no placement is minted), an AUTH_SYS call
-    /// on the same session still gets its layout, and with the knob off
-    /// (`FLINT_PNFS_LAYOUTS_FOR_GSS`, or no keytab) the GSS call gets one
-    /// too. A GSS LAYOUTCOMMIT, having no layout, is refused and leaves
-    /// the size alone.
+    #[tokio::test]
+    async fn keyed_layouts_carry_data_server_handles_signed_for_the_asking_node() {
+        use crate::nfs::v4::state::client::ExchangeIdOutcome;
+        const K: &str = "1:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+        let keys = crate::pnfs::ds_fh::FhKeys::from_values(Some(K), None).unwrap().unwrap();
+        let t = TempDir::new().unwrap();
+        let export = t.path().canonicalize().unwrap();
+        let pnfs = Arc::new(GrantingPnfs { layoutgets: Default::default(), unready: Default::default() });
+        let d = CompoundDispatcher::new_with_pnfs(
+            Arc::new(FileHandleManager::new(export.clone())),
+            Arc::new(StateManager::new_in_memory("")),
+            Arc::new(LockManager::new()),
+            Some(Arc::clone(&pnfs) as Arc<dyn crate::pnfs::PnfsOperations>),
+        )
+        .with_ds_fh_keys(Some(keys.clone()));
+        std::fs::write(export.join("f"), b"data").unwrap();
+        d.state_mgr.leases.end_grace();
+        // A session of a client made by w1's machine key.
+        let client_id = match d.state_mgr.clients.exchange_id(b"w1".to_vec(), 1, 0, b"gss:nfs/w1.corp@CORP".to_vec()) {
+            ExchangeIdOutcome::NewUnconfirmed { client_id, .. } => client_id,
+            other => panic!("{other:?}"),
+        };
+        let s = d.state_mgr.sessions.create_session(client_id, 0, 0, 65536, 65536, 16384, 16, 16, 0, None, 1);
+        let mut ctx = CompoundContext::with_principal(1, b"gss:nfs/w1.corp@CORP".to_vec());
+        ctx.session_id = Some(s.session_id);
+        ctx.current_fh = Some(d.file_handler.fh_manager().path_to_filehandle(&export.join("f")).unwrap());
+        let op = Operation::LayoutGet {
+            signal_layout_avail: false,
+            layout_type: 1,
+            iomode: 2,
+            offset: 0,
+            length: u64::MAX,
+            minlength: 4096,
+            stateid: StateId { seqid: 0, other: [0; 12] },
+            maxcount: 65536,
+        };
+        let OperationResult::LayoutGet(Nfs4Status::Ok, Some(body)) = d.dispatch_operation(op, &mut ctx).await else {
+            panic!("no layout");
+        };
+        // LAYOUTGET4resok: return_on_close, stateid, one layout4: offset,
+        // length, iomode, type, then the nfsv4_1_file_layout4 opaque.
+        let mut dec = crate::nfs::xdr::XdrDecoder::new(body);
+        dec.decode_bool().unwrap();
+        dec.decode_fixed_opaque(16).unwrap();
+        assert_eq!(dec.decode_u32().unwrap(), 1);
+        dec.decode_u64().unwrap();
+        dec.decode_u64().unwrap();
+        dec.decode_u32().unwrap();
+        assert_eq!(dec.decode_u32().unwrap(), 1, "files layout");
+        let mut l = crate::nfs::xdr::XdrDecoder::new(dec.decode_opaque().unwrap());
+        l.decode_fixed_opaque(16).unwrap(); // deviceid
+        l.decode_u32().unwrap(); // nfl_util
+        l.decode_u32().unwrap(); // first stripe index
+        l.decode_u64().unwrap(); // pattern offset
+        assert_eq!(l.decode_u32().unwrap(), 1, "one handle per slot");
+        let fh = l.decode_opaque().unwrap();
+        assert_eq!(fh[0], crate::pnfs::ds_fh::VERSION);
+        assert_eq!(keys.verify(&fh, b"w1.corp"), Some((42, 0)), "file 42, stripe 0, for w1");
+        assert_eq!(keys.verify(&fh, b"w2.corp"), None, "not for another node");
+    }
+
     #[tokio::test]
     async fn gss_callers_get_layouts_only_while_every_data_server_refuses_auth_sys() {
         let t = TempDir::new().unwrap();
@@ -9002,6 +9098,13 @@ mod tests {
         assert!(matches!(r, OperationResult::LayoutGet(Nfs4Status::Ok, Some(_))), "{r:?}");
     }
 
+    /// pNFS Kerberos, Phase 1 (option B): with layouts withheld, a
+    /// LAYOUTGET from an RPCSEC_GSS call answers LAYOUTUNAVAIL without
+    /// reaching the handler (no placement is minted), an AUTH_SYS call
+    /// on the same session still gets its layout, and with the knob off
+    /// (`FLINT_PNFS_LAYOUTS_FOR_GSS`, or no keytab) the GSS call gets one
+    /// too. A GSS LAYOUTCOMMIT, having no layout, is refused and leaves
+    /// the size alone.
     #[tokio::test]
     async fn gss_callers_get_no_files_layout_when_withheld() {
         let build = |withheld: bool| {

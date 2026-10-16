@@ -1,0 +1,47 @@
+== vm p4 at 96ea6f19 21:37:10
+
+=== arm K: MDS key 1, DS key 1 (enforce) ===
+mounted: sec=krb5i
+read-back INTACT
+write rc=0  write+fsync 2.9 s  read 4.3 s  md5 5a471e1899eac4867d0cd1b758edeeaf
+allocated bytes: DS1 33579008  DS2 33579008  MDS export 16384
+layout stats: 
+dmesg: 
+KDC asked for: 
+KDC unknown: 
+flavors by port: 20490/none/null:1 20490/gss/compound:26 20490/gss/null:8 20491/none/null:2 20491/gss/compound:174 20491/gss/null:13 20492/none/null:2 20492/gss/compound:178 20492/gss/null:16
+ds1: Filehandles: signed handles only (FLINT_PNFS_DS_FH_AUTH=enforce) | GSS DATA 205 | PUTFH refused: 0 
+ds2: Filehandles: signed handles only (FLINT_PNFS_DS_FH_AUTH=enforce) | GSS DATA 206 | PUTFH refused: 0 
+gssd upcalls: 
+
+=== arm X: MDS key 1, DS key 2 (enforce) ===
+mounted: sec=krb5i
+read-back INTACT
+write rc=0  write+fsync 3.0 s  read 6.3 s  md5 5a471e1899eac4867d0cd1b758edeeaf
+allocated bytes: DS1 33579008  DS2 33579008  MDS export 16384
+layout stats: 
+dmesg: [15566.729811] NFS: Server wrote zero bytes, expected 1048576.|
+KDC asked for: 
+KDC unknown: 
+flavors by port: 20490/none/null:1 20490/gss/compound:743 20490/gss/null:8 20491/none/null:104 20491/gss/compound:771 20491/gss/null:778 20492/none/null:107 20492/gss/compound:791 20492/gss/null:813
+ds1: Filehandles: signed handles only (FLINT_PNFS_DS_FH_AUTH=enforce) | GSS DATA 817 | PUTFH refused: 193 DS PUTFH refused: a signed handle that does not verify for this session's node 
+ds2: Filehandles: signed handles only (FLINT_PNFS_DS_FH_AUTH=enforce) | GSS DATA 834 | PUTFH refused: 192 DS PUTFH refused: a signed handle that does not verify for this session's node 
+gssd upcalls: 
+
+=== arm U: MDS key -, DS key 1 (enforce) ===
+mounted: sec=krb5i
+read-back INTACT
+write rc=0  write+fsync 3.0 s  read 6.3 s  md5 5a471e1899eac4867d0cd1b758edeeaf
+allocated bytes: DS1 33579008  DS2 33579008  MDS export 16384
+layout stats: 
+dmesg: 
+KDC asked for: 
+KDC unknown: 
+flavors by port: 20490/none/null:1 20490/gss/compound:747 20490/gss/null:7 20491/none/null:110 20491/gss/compound:808 20491/gss/null:825 20492/none/null:111 20492/gss/compound:819 20492/gss/null:843
+ds1: Filehandles: signed handles only (FLINT_PNFS_DS_FH_AUTH=enforce) | GSS DATA 852 | PUTFH refused: 192 DS PUTFH refused: an unsigned handle 
+ds2: Filehandles: signed handles only (FLINT_PNFS_DS_FH_AUTH=enforce) | GSS DATA 859 | PUTFH refused: 193 DS PUTFH refused: an unsigned handle 
+gssd upcalls: 
+
+=== done ===
+== vm p4 done 21:40:05
+
