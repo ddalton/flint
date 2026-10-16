@@ -217,7 +217,8 @@ impl LdapConfig {
         if realms.is_empty() {
             return Err(format!("{REALMS_ENV}: no realm (whose principals to look up)"));
         }
-        if let Some(r) = realms.iter().find(|r| r.contains('*') || r.contains('@')) {
+        let unspelt = realms.iter().find(|r| r.contains('*') || r.contains('@'));
+        if let Some(r) = unspelt {
             return Err(format!("{REALMS_ENV}: {r:?}: a realm is spelt out"));
         }
         let user_bases = list(USER_BASE_ENV, ';');
