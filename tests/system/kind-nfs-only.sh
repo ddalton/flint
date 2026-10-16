@@ -47,6 +47,8 @@
 #      KRB5 (0; 1 = the Kerberos suite)  KRB5_OPERATOR_VERSION (0.3.0)
 #      PNFS (0; 1 = the pNFS suite; with BUILD=0 the flint-pnfs image
 #      localhost:$REG_PORT/dilipdalton/flint-pnfs:$TAG must exist locally too)
+#      CARGO_TARGET_DIR (where the BUILD's binaries are)  KIND_CTX_DIR (the
+#      docker build context; default under spdk-csi-driver/target)
 # Uses a PRIVATE kubeconfig: never touches ~/.kube/config.
 set -euo pipefail
 
@@ -127,11 +129,15 @@ if [ "$BUILD" = 1 ]; then
   [ "$PNFS" = 1 ] && bins+=(--bin flint-pnfs-mds --bin flint-pnfs-ds)
   (cd "$ROOT/spdk-csi-driver" &&
     cargo zigbuild --release --target x86_64-unknown-linux-musl "${bins[@]}")
-  # Under target/ (gitignored), not mktemp: a snap-packaged docker sees a
-  # private /tmp and reports the context "not found".
-  ctx="$ROOT/spdk-csi-driver/target/kind-nfs-only-ctx"
+  # Where cargo put them (CARGO_TARGET_DIR, else target/). The context goes
+  # under target/ (gitignored), not mktemp: a snap-packaged docker sees a
+  # private /tmp and reports the context "not found". KIND_CTX_DIR moves it
+  # (a snap docker also sees nothing outside $HOME, so a target/ that is a
+  # symlink elsewhere needs it).
+  rel="${CARGO_TARGET_DIR:-$ROOT/spdk-csi-driver/target}/x86_64-unknown-linux-musl/release"
+  ctx="${KIND_CTX_DIR:-$ROOT/spdk-csi-driver/target/kind-nfs-only-ctx}"
   rm -rf "$ctx" && mkdir -p "$ctx/amd64"
-  cp "$ROOT/spdk-csi-driver/target/x86_64-unknown-linux-musl/release/"{csi-driver,flint-nfs-server} "$ctx/amd64/"
+  cp "$rel/"{csi-driver,flint-nfs-server} "$ctx/amd64/"
   DOCKER_BUILDKIT=1 docker build --platform linux/amd64 \
     -f "$ROOT/spdk-csi-driver/docker/Dockerfile.csi.prebuilt" --build-arg BIN_DIR=. \
     -t "$IMAGE" "$ctx"
@@ -141,7 +147,7 @@ if [ "$BUILD" = 1 ]; then
     # publish-images.sh builds flint-pnfs.
     step "build $PNFS_IMAGE (Dockerfile.pnfs.prebuilt, as published)"
     rm -rf "$ctx" && mkdir -p "$ctx/amd64"
-    cp "$ROOT/spdk-csi-driver/target/x86_64-unknown-linux-musl/release/"{flint-pnfs-mds,flint-pnfs-ds} "$ctx/amd64/"
+    cp "$rel/"{flint-pnfs-mds,flint-pnfs-ds} "$ctx/amd64/"
     DOCKER_BUILDKIT=1 docker build --platform linux/amd64 \
       -f "$ROOT/spdk-csi-driver/docker/Dockerfile.pnfs.prebuilt" --build-arg BIN_DIR=. \
       -t "$PNFS_IMAGE" "$ctx"
