@@ -825,9 +825,15 @@ impl DataServer {
                                 (Nfs4Status::Ok, Bytes::new())
                             }
                             Err(why) => {
+                                // The handle's clear part (version, key id,
+                                // file id, stripe), never its MAC.
+                                let clear: String = fh.data.iter().take(17).map(|b| format!("{b:02x}")).collect();
                                 warn!(
-                                    "DS PUTFH refused: {why} (session of {})",
-                                    session_owner.as_deref().map(String::from_utf8_lossy).unwrap_or_default()
+                                    "DS PUTFH refused: {why} (session of {}, node {:?}, handle {}…, {} bytes)",
+                                    session_owner.as_deref().map(String::from_utf8_lossy).unwrap_or_default(),
+                                    String::from_utf8_lossy(&session_owner.as_deref().map(crate::pnfs::ds_fh::node_of).unwrap_or_default()),
+                                    clear,
+                                    fh.data.len()
                                 );
                                 current_fh = None;
                                 (Nfs4Status::BadHandle, Bytes::new())
