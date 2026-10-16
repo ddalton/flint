@@ -462,6 +462,26 @@ impl DataServer {
             };
 
             debug!("DS: Processing opcode={}", opcode);
+
+            // Only the nodes a pNFS volume is attached to
+            // (FLINT_NFS_ATTACHED_NODES_ONLY, `nfs::node_authz`), as on the
+            // MDS: clients and sessions from an attached node's machine
+            // principal, and a session used only while its node is
+            // attached. The union over every pNFS volume: which volume a
+            // stripe belongs to is not known here (Phase 4).
+            if let Some(nodes) = crate::nfs::node_authz::global() {
+                if let Some(refused) = Self::unattached_refusal(nodes, opcode, &principal, &decoder, &client_mgr) {
+                    let op = match opcode {
+                        opcode::EXCHANGE_ID => "EXCHANGE_ID",
+                        opcode::CREATE_SESSION => "CREATE_SESSION",
+                        _ => "SEQUENCE",
+                    };
+                    warn!("DS: {op} refused: {} is not a node a pNFS volume is attached to", String::from_utf8_lossy(&principal));
+                    results.push((opcode, refused, OpBody::Inline(Bytes::new())));
+                    break;
+                }
+            }
+
             let (status, result_data) = match opcode {
                 opcode::EXCHANGE_ID => {
                     // Decode EXCHANGE_ID arguments properly for server trunking
@@ -985,6 +1005,34 @@ impl DataServer {
         match gss {
             None => assemble_reply(call.xid, results),
             Some(v) => crate::nfs::gss_front::frame_reply(call.xid, Some(v), assemble_body(XdrEncoder::new(), results)),
+        }
+    }
+
+    /// [`crate::nfs::node_authz`] at the DS, before `opcode` runs (its
+    /// arguments still unread in `decoder`): EXCHANGE_ID and
+    /// CREATE_SESSION only from an attached node's machine principal
+    /// (NFS4ERR_ACCESS); SEQUENCE only on a session of an attached node's
+    /// client, by that node or a user (NFS4ERR_BADSESSION). A session the
+    /// DS does not know is left to SEQUENCE.
+    fn unattached_refusal(
+        nodes: &crate::nfs::node_authz::AttachedNodes,
+        opcode: u32,
+        principal: &[u8],
+        decoder: &XdrDecoder,
+        client_mgr: &ClientManager,
+    ) -> Option<Nfs4Status> {
+        match opcode {
+            opcode::EXCHANGE_ID | opcode::CREATE_SESSION => {
+                (!nodes.may_create(principal)).then_some(Nfs4Status::Access)
+            }
+            opcode::SEQUENCE => {
+                // The session id begins with its client id (DsSessionManager).
+                let head: [u8; 8] = decoder.peek_bytes(8).try_into().ok()?;
+                let client_id = u64::from_be_bytes(head);
+                let owner = client_mgr.get_client(client_id)?;
+                (!nodes.may_use(principal, &owner.principal)).then_some(Nfs4Status::BadSession)
+            }
+            _ => None,
         }
     }
 
@@ -2458,4 +2506,58 @@ mod ds_gss_tests {
         // SP4_SSV: refused, as on the MDS.
         assert_eq!(exchange_id_then_putfh_status(&[2, 0, 0, 0, 0, 0]).await, (Nfs4Status::EncrAlgUnsupp, None));
     }
+
+    #[test]
+    fn only_attached_nodes_make_and_use_data_server_sessions() {
+        use crate::nfs::node_authz::AttachedNodes;
+        use crate::nfs::v4::state::client::ExchangeIdOutcome;
+        let dir = tempfile::tempdir().unwrap();
+        let (_io, _s, clients) = parts(dir.path());
+        let nodes = AttachedNodes::default();
+        nodes.set(std::collections::HashSet::from(["w1".to_string()]));
+        let none = XdrDecoder::new(Bytes::new());
+        let w1 = b"gss:nfs/w1@CORP".as_slice();
+        let w2 = b"gss:nfs/w2@CORP".as_slice();
+        // Making a client or a session: an attached node's key only.
+        for op in [opcode::EXCHANGE_ID, opcode::CREATE_SESSION] {
+            assert_eq!(DataServer::unattached_refusal(&nodes, op, w1, &none, &clients), None);
+            assert_eq!(DataServer::unattached_refusal(&nodes, op, w2, &none, &clients), Some(Nfs4Status::Access));
+            assert_eq!(DataServer::unattached_refusal(&nodes, op, b"gss:bob@CORP", &none, &clients), Some(Nfs4Status::Access));
+            assert_eq!(DataServer::unattached_refusal(&nodes, op, b"", &none, &clients), Some(Nfs4Status::Access));
+        }
+        // Using one: the session's client must be an attached node's.
+        let id = |principal: &[u8]| match clients.exchange_id(principal.to_vec(), 1, 0, principal.to_vec()) {
+            ExchangeIdOutcome::NewUnconfirmed { client_id, .. } => client_id,
+            other => panic!("{other:?}"),
+        };
+        let seq = |client_id: u64| {
+            let mut sid = client_id.to_be_bytes().to_vec();
+            sid.extend_from_slice(&[0; 8]);
+            XdrDecoder::new(Bytes::from(sid))
+        };
+        let c1 = id(w1);
+        let c2 = id(w2);
+        assert_eq!(DataServer::unattached_refusal(&nodes, opcode::SEQUENCE, w1, &seq(c1), &clients), None);
+        assert_eq!(
+            DataServer::unattached_refusal(&nodes, opcode::SEQUENCE, b"gss:bob@CORP", &seq(c1), &clients),
+            None,
+            "a user rides an attached node's session"
+        );
+        assert_eq!(
+            DataServer::unattached_refusal(&nodes, opcode::SEQUENCE, w2, &seq(c1), &clients),
+            Some(Nfs4Status::BadSession),
+            "another node's key on w1's session"
+        );
+        assert_eq!(
+            DataServer::unattached_refusal(&nodes, opcode::SEQUENCE, w2, &seq(c2), &clients),
+            Some(Nfs4Status::BadSession),
+            "w2 is attached to nothing"
+        );
+        // Detached: w1's session stops.
+        nodes.set(std::collections::HashSet::new());
+        assert_eq!(DataServer::unattached_refusal(&nodes, opcode::SEQUENCE, w1, &seq(c1), &clients), Some(Nfs4Status::BadSession));
+        // Reads and writes are not gated here: they ride the session.
+        assert_eq!(DataServer::unattached_refusal(&nodes, opcode::READ, w2, &none, &clients), None);
+    }
 }
+

@@ -206,7 +206,7 @@ async fn async_main(worker_threads: usize) -> Result<(), Box<dyn std::error::Err
         let volumes = spdk_csi_driver::nfs::node_authz::enable_volumes();
         let domain = std::env::var(spdk_csi_driver::nfs::node_authz::DOMAIN_ENV).ok().filter(|d| !d.is_empty());
         info!("🔐 Each pNFS volume only to the nodes it is attached to");
-        tokio::spawn(spdk_csi_driver::nfs::node_authz::watch_pnfs(nodes, volumes, domain));
+        tokio::spawn(spdk_csi_driver::nfs::node_authz::watch_pnfs(nodes, Some(volumes), domain));
     }
 
     info!("📊 Configuration:");

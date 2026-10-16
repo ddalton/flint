@@ -280,13 +280,14 @@ pub fn pnfs_volume_hosts(
     out
 }
 
-/// The MDS's [`watch`]: keep `volumes` equal to, per pNFS volume (a PV
-/// with `pnfs.chert.us/volume-file`), the nodes it is attached to, and
-/// `nodes` to their union, re-listing on every PersistentVolume,
+/// The pNFS servers' [`watch`]: keep `volumes` (the MDS's; a data server
+/// has none) equal to, per pNFS volume (a PV with
+/// `pnfs.chert.us/volume-file`), the nodes it is attached to, and `nodes`
+/// to their union, re-listing on every PersistentVolume,
 /// VolumeAttachment or Node change. Volumes of every MDS shard are kept;
 /// a shard holds only its own, so the others' names are never looked up
 /// here. Runs until the process ends.
-pub async fn watch_pnfs(nodes: &'static AttachedNodes, volumes: &'static VolumeNodes, domain: Option<String>) {
+pub async fn watch_pnfs(nodes: &'static AttachedNodes, volumes: Option<&'static VolumeNodes>, domain: Option<String>) {
     use futures::StreamExt;
     use k8s_openapi::api::core::v1::{Node, PersistentVolume};
     use k8s_openapi::api::storage::v1::VolumeAttachment;
@@ -378,7 +379,9 @@ pub async fn watch_pnfs(nodes: &'static AttachedNodes, volumes: &'static VolumeN
                 // reverse (a volume admitting a node whose sessions are
                 // still refused is harmless either way).
                 nodes.set(map.values().flatten().cloned().collect());
-                volumes.set(map.clone());
+                if let Some(volumes) = volumes {
+                    volumes.set(map.clone());
+                }
                 last = Some(map);
             }
             Ok(_) => {}

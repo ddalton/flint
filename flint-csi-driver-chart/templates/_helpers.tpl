@@ -329,6 +329,14 @@ flint-nfs-krb5-keytab
 pnfs.kerberos.dataServers in effect (Phase 3): the data servers do
 Kerberos, so Kerberos callers get layouts.
 */}}
+{{/*
+The data servers' attached-nodes gate: they do Kerberos and
+pnfs.kerberos.attachedNodesOnly is on.
+*/}}
+{{- define "flint-csi-driver-chart.pnfsDsAttachedNodesOnly" -}}
+{{- if and (include "flint-csi-driver-chart.pnfsKrb5DataServers" .) (include "flint-csi-driver-chart.pnfsAttachedNodesOnly" .) -}}true{{- end -}}
+{{- end }}
+
 {{- define "flint-csi-driver-chart.pnfsKrb5DataServers" -}}
 {{- if and (include "flint-csi-driver-chart.pnfsKrb5Enabled" .) (.Values.pnfs.kerberos).dataServers -}}true{{- end -}}
 {{- end }}

@@ -194,8 +194,9 @@ recorded), the chart (`pnfs.kerberos.dataServers`, default on:
 (`nfs_krb5::prepare_pnfs_ds_hosts`, resolving the Services through the
 cluster DNS rather than listing them, so the node needs no new RBAC).
 Kind: 8 MiB under `krb5i` striped on both DSes, all their calls GSS.
-**Not built yet:** the DS union gate (attached nodes only at the DS; the
-DS has no watcher), and the VM legs (E1 against a refusing DS, krb5p,
+The DS union gate is built too (`watch_pnfs` with no per-volume map,
+`DataServer::unattached_refusal`; ServiceAccount `flint-pnfs-ds`). **Not
+built yet:** the VM legs (E1 against a refusing DS, krb5p,
 multipath, the lima byte-identical guard).
 
 

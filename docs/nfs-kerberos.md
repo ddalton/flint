@@ -521,13 +521,15 @@ callers again; it is for when the DSes do Kerberos (Phase 3), not before.
 
 **What it does not protect yet.**
 
-- **A DS checks the caller, not the layout.** Any principal the allowlist
-  admits (every node's machine key, every allowed user) that reaches a DS
-  can read or write any stripe file it can name; the DS does not check
-  that the caller holds a layout for it, nor that the volume is attached
-  to the caller's node (the MDS's per-volume gate stops at the MDS). A
-  layout granted before a detach keeps working at the DSes until it is
-  returned. The plan's Phase 4 (a MAC'd DS filehandle) closes this.
+- **A DS checks the caller, not the layout.** With `attachedNodesOnly`
+  a DS serves only nodes attached to SOME pNFS volume (it watches the same
+  PVs and VolumeAttachments as the MDS, through ServiceAccount
+  `flint-pnfs-ds`: clients and sessions from those nodes' machine keys, a
+  session dropped when its node detaches from everything). But it does not
+  know which volume a stripe belongs to: such a node, or an allowed user on
+  it, can read or write any stripe file it can name, and a layout granted
+  before a detach keeps working while the node has another pNFS volume.
+  The plan's Phase 4 (a MAC'd DS filehandle) closes this.
 - **DS sessions are not bound to the machine.** The DS answers SP4_NONE
   to an SP4_MACH_CRED request (Phase 3b).
 - **The control path** between the MDS and the DSes (gRPC: registration,

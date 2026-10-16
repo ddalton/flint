@@ -32,6 +32,9 @@ covered by the stability guarantee.
   SECINFO_NO_NAME did not read its argument and offered AUTH_NONE first
   and Kerberos it could not do; EXCHANGE_ID read only the discriminant of
   `state_protect4_a` and part of `impl_id`, misreading the next operation.
+  With `attachedNodesOnly`, the data servers serve only nodes attached to
+  some pNFS volume (ServiceAccount `flint-pnfs-ds`, the MDS's read-only
+  ClusterRole).
 - **pNFS Kerberos: each volume only to the nodes it is attached to**
   (2026-10-16; plan Phase 2). With `pnfs.kerberos.enabled`, the new
   `pnfs.kerberos.attachedNodesOnly` (default `true`; needs `minSec`) makes

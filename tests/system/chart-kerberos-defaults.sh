@@ -262,6 +262,10 @@ if renders "pNFS Kerberos, data servers" "${PNFS[@]}" "${PK[@]}" --set pnfs.serv
       else echo "✗ $c: ${kv%%=*} is $got, want ${kv#*=}"; fails=$((fails + 1)); fi
     done
     check "$c" "each pod mounts its own keytab only" grep -q 'subPathExpr: $(POD_NAME).keytab' "$TMP/doc.yaml"
+    got=$(env_of FLINT_NFS_ATTACHED_NODES_ONLY "$TMP/doc.yaml")
+    if [ "$got" = true ]; then echo "✓ $c: attached nodes only at the data servers"
+    else echo "✗ $c: FLINT_NFS_ATTACHED_NODES_ONLY is $got on the data servers"; fails=$((fails + 1)); fi
+    check "$c" "the data servers run as flint-pnfs-ds" grep -q 'serviceAccountName: flint-pnfs-ds$' "$TMP/doc.yaml"
     check "$c" "from flint-pnfs-ds-krb5" grep -q 'secretName: flint-pnfs-ds-krb5$' "$TMP/doc.yaml"
   else
     echo "✗ $c: no StatefulSet flint-pnfs-ds"; fails=$((fails + 1))
@@ -271,6 +275,12 @@ if renders "pNFS Kerberos, data servers" "${PNFS[@]}" "${PK[@]}" --set pnfs.serv
   want="$want,flint-pnfs-ds-0-mp1.flint-system.svc.cluster.local=flint-pnfs-ds-0.flint-pnfs-ds-headless.flint-system.svc.cluster.local"
   want="$want,flint-pnfs-ds-1.flint-system.svc.cluster.local=flint-pnfs-ds-1.flint-pnfs-ds-headless.flint-system.svc.cluster.local"
   want="$want,flint-pnfs-ds-1-mp1.flint-system.svc.cluster.local=flint-pnfs-ds-1.flint-pnfs-ds-headless.flint-system.svc.cluster.local"
+  if doc_of ClusterRoleBinding t-flint-csi-driver-chart-pnfs-mds; then
+    check "$c" "the read-only ClusterRole is bound to flint-pnfs-ds too" grep -q 'name: flint-pnfs-ds$' "$TMP/doc.yaml"
+  else
+    echo "✗ $c: no ClusterRoleBinding for the MDS"; fails=$((fails + 1))
+  fi
+  check "$c" "a ServiceAccount flint-pnfs-ds" doc_of ServiceAccount flint-pnfs-ds
   if [ "$ds" = "$want" ]; then echo "✓ $c: the nodes name every data server address"
   else echo "✗ $c: FLINT_PNFS_KRB5_DS is $ds"; fails=$((fails + 1)); fi
 fi
@@ -281,6 +291,7 @@ if renders "pNFS Kerberos, data servers off" "${PNFS[@]}" "${PK[@]}" --set pnfs.
   expect "$c" FLINT_PNFS_KRB5_DS -
   doc_of StatefulSet flint-pnfs-ds
   check "$c" "no keytab on the data servers" bash -c "! grep -q KRB5_KTNAME '$TMP/doc.yaml'"
+  check "$c" "no gate on the data servers" bash -c "! grep -qE 'FLINT_NFS_ATTACHED_NODES_ONLY|serviceAccountName' '$TMP/doc.yaml'"
   doc_of Deployment flint-pnfs-mds
   got=$(env_of FLINT_PNFS_LAYOUTS_FOR_GSS "$TMP/doc.yaml")
   if [ "$got" = - ]; then echo "✓ $c: no layouts for Kerberos callers"

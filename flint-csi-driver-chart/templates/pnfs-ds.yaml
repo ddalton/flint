@@ -180,6 +180,10 @@ spec:
                     app: flint-pnfs-ds
                 topologyKey: kubernetes.io/hostname
       {{- end }}
+      {{- if include "flint-csi-driver-chart.pnfsDsAttachedNodesOnly" . }}
+      # Reads pNFS PVs, VolumeAttachments and Nodes (pnfs-kerberos.yaml).
+      serviceAccountName: flint-pnfs-ds
+      {{- end }}
       containers:
         - name: ds
           image: "{{ include "flint-csi-driver-chart.imagePrefix" . }}/{{ .Values.pnfs.server.image.name }}:{{ required "pnfs.server.image.tag is required when pnfs.server.enabled" .Values.pnfs.server.image.tag }}"
@@ -218,6 +222,15 @@ spec:
             # Kerberos (pnfs.kerberos.dataServers): this pod's own key and
             # the MDS's server env (floor, allowlist, directory).
             {{- include "flint-csi-driver-chart.krb5ServerEnv" (dict "root" . "minSec" $pk.minSec "requireMachCred" false "enforcePermissions" "") | nindent 12 }}
+            {{- end }}
+            {{- if include "flint-csi-driver-chart.pnfsDsAttachedNodesOnly" . }}
+            # Only the nodes a pNFS volume is attached to (the union).
+            - name: FLINT_NFS_ATTACHED_NODES_ONLY
+              value: "true"
+            {{- with .Values.nfs.kerberos.nodeKeytab.domain }}
+            - name: FLINT_NFS_NODE_DOMAIN
+              value: {{ . | quote }}
+            {{- end }}
             {{- end }}
             {{- if .Values.pnfs.controlToken.enabled }}
             # Attached to registration/heartbeat gRPC — see

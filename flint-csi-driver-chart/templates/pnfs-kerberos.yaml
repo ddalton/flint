@@ -90,6 +90,23 @@ subjects:
 - kind: ServiceAccount
   name: flint-pnfs-mds
   namespace: {{ .Release.Namespace }}
+{{- if include "flint-csi-driver-chart.pnfsDsAttachedNodesOnly" . }}
+# The data servers keep the same node set (the union over every volume).
+- kind: ServiceAccount
+  name: flint-pnfs-ds
+  namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end }}
+{{- if include "flint-csi-driver-chart.pnfsDsAttachedNodesOnly" . }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flint-pnfs-ds
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pnfs-ds
 {{- end }}
 {{- if include "flint-csi-driver-chart.pnfsKrb5DataServers" . }}
 ---
