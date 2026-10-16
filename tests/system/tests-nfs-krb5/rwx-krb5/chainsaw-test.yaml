@@ -209,7 +209,7 @@ spec:
             echo "FAIL: $cp mounted a volume not attached to it"; exit 1
           fi
           for i in $(seq 30); do
-            if kubectl -n flint-system logs -l app=flint-nfs-server --tail=-1 | grep -F "EXCHANGE_ID refused: gss:host/$cp@FLINT.TEST is not a node this volume is attached to"; then
+            if kubectl -n flint-system logs -l app=flint-nfs-server --tail=-1 | grep -E "EXCHANGE_ID refused: gss:(host|nfs)/$cp@FLINT.TEST is not a node this volume is attached to"; then
               # The attached nodes still use it.
               [ "$(kubectl -n "$NAMESPACE" exec krb5-b -- cat /data/a)" = from-a ]
               echo PASS; exit 0
