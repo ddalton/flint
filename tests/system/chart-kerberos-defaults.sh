@@ -5,7 +5,7 @@
 # and each new volume a server principal of its own; each relaxes only
 # when set explicitly; Kerberos off changes nothing. pnfs.kerberos gives
 # each MDS shard its principal and the same server env (the names in
-# tests/system/krb5-server-env-names.txt), without attached-nodes-only.
+# tests/system/krb5-server-env-names.txt), attached-nodes-only included.
 #
 # helm only, no cluster. Runs in CI before the kind suites.
 #
@@ -208,7 +208,7 @@ if renders "pNFS Kerberos on" "${PNFS[@]}" "${PK[@]}"; then
     if doc_of Deployment "$dep"; then
       for kv in KRB5_KTNAME=/etc/flint-krb5/krb5.keytab FLINT_NFS_MIN_SEC=krb5i \
         FLINT_NFS_REQUIRE_MACH_CRED=true FLINT_NFS_ENFORCE_PERMISSIONS=enforce \
-        FLINT_NFS_GSS_ANON=65534:65534 FLINT_NFS_ATTACHED_NODES_ONLY=- FLINT_NFS_ROOT_SQUASH=- \
+        FLINT_NFS_GSS_ANON=65534:65534 FLINT_NFS_ATTACHED_NODES_ONLY=true FLINT_NFS_ROOT_SQUASH=- \
         FLINT_PNFS_LAYOUTS_FOR_GSS=-; do
         got=$(env_of "${kv%%=*}" "$TMP/doc.yaml")
         if [ "$got" = "${kv#*=}" ]; then echo "✓ $c: ${kv%%=*}=${kv#*=}"
@@ -217,6 +217,7 @@ if renders "pNFS Kerberos on" "${PNFS[@]}" "${PK[@]}"; then
       check "$c" "mounts its own keytab, and no other shard's" bash -c \
         "grep -q 'secretName: flint-pnfs-mds-$i-krb5' '$TMP/doc.yaml' && [ \$(grep -c 'secretName: flint-pnfs-mds-.*-krb5' '$TMP/doc.yaml') = 1 ]"
       check "$c" "the keytab mounted where KRB5_KTNAME points" grep -q 'mountPath: /etc/flint-krb5$' "$TMP/doc.yaml"
+      check "$c" "runs as flint-pnfs-mds (reads attachments)" grep -q 'serviceAccountName: flint-pnfs-mds$' "$TMP/doc.yaml"
     else
       echo "✗ $c: no Deployment $dep"; fails=$((fails + 1))
     fi
@@ -229,6 +230,15 @@ if renders "pNFS Kerberos on" "${PNFS[@]}" "${PK[@]}"; then
   fi
   check "pNFS Kerberos on" "one KerberosNodeKeytab" bash -c "[ \$(grep -c 'kind: KerberosNodeKeytab' '$TMP/out.yaml') = 1 ]"
   check "pNFS Kerberos on" "the node maps hosts" grep -q 'mountPath: /host/etc/hosts' "$TMP/out.yaml"
+  check "pNFS Kerberos on" "the MDS's ServiceAccount" doc_of ServiceAccount flint-pnfs-mds
+  if doc_of ClusterRole t-flint-csi-driver-chart-pnfs-mds; then
+    check "pNFS Kerberos on" "the MDS reads PersistentVolumes and Nodes" grep -q 'resources: \[persistentvolumes, nodes\]' "$TMP/doc.yaml"
+    check "pNFS Kerberos on" "the MDS reads VolumeAttachments" grep -q 'resources: \[volumeattachments\]' "$TMP/doc.yaml"
+    check "pNFS Kerberos on" "and writes nothing" bash -c "! grep -qE 'create|update|patch|delete' '$TMP/doc.yaml'"
+  else
+    echo "✗ pNFS Kerberos on: no ClusterRole for the MDS"; fails=$((fails + 1))
+  fi
+  check "pNFS Kerberos on" "bound to the MDS's ServiceAccount" doc_of ClusterRoleBinding t-flint-csi-driver-chart-pnfs-mds
 fi
 
 if renders "pNFS and RWX Kerberos on" "${PNFS[@]}" "${PK[@]}" --set nfs.kerberos.enabled=true; then
@@ -242,9 +252,14 @@ if renders "pNFS Kerberos, StorageClass off" "${PNFS[@]}" "${PK[@]}" --set pnfs.
 fi
 
 if renders "pNFS Kerberos, relaxed" "${PNFS[@]}" "${PK[@]}" --set pnfs.kerberos.minSec= \
-    --set pnfs.kerberos.requireMachCred=false --set pnfs.kerberos.enforcePermissions=warn --set nfs.rootSquash=true; then
+    --set pnfs.kerberos.requireMachCred=false --set pnfs.kerberos.attachedNodesOnly=false \
+    --set pnfs.kerberos.enforcePermissions=warn --set nfs.rootSquash=true; then
+  check "pNFS Kerberos, relaxed" "no MDS ServiceAccount" bash -c "! grep -q 'name: flint-pnfs-mds$' <(grep -A3 'kind: ServiceAccount' '$TMP/out.yaml')"
+  check "pNFS Kerberos, relaxed" "no ClusterRole for the MDS" bash -c "! grep -q 'name: t-flint-csi-driver-chart-pnfs-mds$' '$TMP/out.yaml'"
   doc_of Deployment flint-pnfs-mds
-  for kv in FLINT_NFS_MIN_SEC=- FLINT_NFS_REQUIRE_MACH_CRED=- FLINT_NFS_ENFORCE_PERMISSIONS=warn FLINT_NFS_ROOT_SQUASH=true; do
+  check "pNFS Kerberos, relaxed" "the MDS runs as the default ServiceAccount" bash -c "! grep -q serviceAccountName '$TMP/doc.yaml'"
+  for kv in FLINT_NFS_MIN_SEC=- FLINT_NFS_REQUIRE_MACH_CRED=- FLINT_NFS_ATTACHED_NODES_ONLY=- \
+    FLINT_NFS_ENFORCE_PERMISSIONS=warn FLINT_NFS_ROOT_SQUASH=true; do
     got=$(env_of "${kv%%=*}" "$TMP/doc.yaml")
     if [ "$got" = "${kv#*=}" ]; then echo "✓ pNFS Kerberos, relaxed: ${kv%%=*}=${kv#*=}"
     else echo "✗ pNFS Kerberos, relaxed: ${kv%%=*} is $got, want ${kv#*=}"; fails=$((fails + 1)); fi
@@ -254,6 +269,7 @@ fi
 # The MDS's server env, by name, is the RWX servers' (nfs_krb5::server_pod_parts):
 # every optional setting on, the names must be exactly the list.
 if renders "pNFS Kerberos, every setting" "${PNFS[@]}" "${PK[@]}" "${LDAP[@]}" --set nfs.rootSquash=true \
+    --set nfs.kerberos.nodeKeytab.domain=corp.example \
     --set nfs.kerberos.ldap.insecure=true --set nfs.kerberos.ldap.allowRoot=true \
     --set nfs.kerberos.ldap.groupBase=ou=Groups --set nfs.kerberos.ldap.principalAttribute=krbPrincipalName; then
   doc_of Deployment flint-pnfs-mds
@@ -283,7 +299,8 @@ refused() { # <case> <error text> <helm args...>
 }
 refused "pNFS Kerberos, no realm" "nfs.kerberos.realm" "${PNFS[@]}" --set pnfs.kerberos.enabled=true --set nfs.kerberos.realmRef=corp
 refused "pNFS Kerberos, no realmRef" "nfs.kerberos.realmRef" "${PNFS[@]}" --set pnfs.kerberos.enabled=true --set nfs.kerberos.realm=CORP.EXAMPLE
-refused "pNFS Kerberos, no floor, requireMachCred on" "requireMachCred" "${PNFS[@]}" "${PK[@]}" --set pnfs.kerberos.minSec=
+refused "pNFS Kerberos, no floor, requireMachCred on" "requireMachCred" "${PNFS[@]}" "${PK[@]}" --set pnfs.kerberos.minSec= --set pnfs.kerberos.attachedNodesOnly=false
+refused "pNFS Kerberos, no floor, attachedNodesOnly on" "attachedNodesOnly is on" "${PNFS[@]}" "${PK[@]}" --set pnfs.kerberos.minSec= --set pnfs.kerberos.requireMachCred=false
 refused "pNFS Kerberos, external MDS" "pnfs.server.enabled" --set pnfs.enabled=true --set pnfs.mdsEndpoint=mds:50051 "${PK[@]}"
 refused "pNFS Kerberos, bad sec" "pnfs.kerberos.storageClass.sec" "${PNFS[@]}" "${PK[@]}" --set pnfs.kerberos.storageClass.sec=sys
 

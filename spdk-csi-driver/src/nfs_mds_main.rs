@@ -191,6 +191,24 @@ async fn async_main(worker_threads: usize) -> Result<(), Box<dyn std::error::Err
     }
     let exports = config.exports;
 
+    // Only the nodes a volume is attached to may reach it
+    // (FLINT_NFS_ATTACHED_NODES_ONLY): per volume, from the pNFS
+    // PersistentVolumes and their VolumeAttachments. Until the first lists
+    // arrive every node and every volume is refused.
+    if let Some(nodes) = spdk_csi_driver::nfs::node_authz::global() {
+        if standalone {
+            error!(
+                "❌ {} is for the pNFS MDS: a standalone hub's volumes have no pNFS PersistentVolumes, so every node would be refused",
+                spdk_csi_driver::nfs::node_authz::ENV
+            );
+            return Err("attached-nodes-only on a standalone hub".into());
+        }
+        let volumes = spdk_csi_driver::nfs::node_authz::enable_volumes();
+        let domain = std::env::var(spdk_csi_driver::nfs::node_authz::DOMAIN_ENV).ok().filter(|d| !d.is_empty());
+        info!("🔐 Each pNFS volume only to the nodes it is attached to");
+        tokio::spawn(spdk_csi_driver::nfs::node_authz::watch_pnfs(nodes, volumes, domain));
+    }
+
     info!("📊 Configuration:");
     info!("   • Worker Threads: {} (FLINT_MDS_WORKER_THREADS)", worker_threads);
     info!("   • Bind: {}:{}", mds_config.bind.address, mds_config.bind.port);

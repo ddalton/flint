@@ -1089,6 +1089,15 @@ impl CompoundDispatcher {
                 return refused;
             }
         }
+        // On a pNFS MDS, each volume only to the nodes it is attached to:
+        // a name looked up, opened, made, removed, renamed or linked at
+        // the export root is a volume (`nfs::node_authz::VolumeNodes`).
+        // PUTFH and RESTOREFH are checked in their arms below.
+        if let Some(volumes) = crate::nfs::node_authz::volumes() {
+            if let Some(refused) = self.unattached_volume_refusal(volumes, &operation, context) {
+                return refused;
+            }
+        }
 
         match operation {
             // Session operations (NFSv4.1)
@@ -1503,6 +1512,9 @@ impl CompoundDispatcher {
                 context.current_stateid = None;
                 let op = PutFhOp { filehandle };
                 let res = self.file_handler.handle_putfh(op, context);
+                if res.status == Nfs4Status::Ok && self.current_fh_out_of_reach("PUTFH", context) {
+                    return OperationResult::PutFh(Nfs4Status::Access);
+                }
                 OperationResult::PutFh(res.status)
             }
 
@@ -1529,6 +1541,10 @@ impl CompoundDispatcher {
                 // the current stateid so a follow-up CLOSE(current_stateid)
                 // (after intervening LOOKUPs etc.) still works.
                 let res = self.file_handler.handle_restorefh(RestoreFhOp, context);
+                if res.status == Nfs4Status::Ok && self.current_fh_out_of_reach("RESTOREFH", context) {
+                    context.current_stateid = None;
+                    return OperationResult::RestoreFh(Nfs4Status::Access);
+                }
                 if res.status == Nfs4Status::Ok {
                     context.current_stateid = context.saved_stateid;
                 } else {
@@ -5205,6 +5221,175 @@ impl CompoundDispatcher {
             }
             _ => None,
         }
+    }
+}
+
+/// Where a filehandle is, for the per-volume gate.
+#[derive(Debug, PartialEq, Eq)]
+enum FhPlace {
+    /// The pseudo-root, or outside the export: no volume.
+    Above,
+    /// The export root: every name in it is a volume.
+    Root,
+    /// Inside this volume.
+    In(String),
+    /// Does not resolve (stale, or unlinked while open): the handler
+    /// answers for it, and no path reaches anything through it.
+    Unknown,
+}
+
+impl CompoundDispatcher {
+    fn fh_place(&self, fh: &Nfs4FileHandle) -> FhPlace {
+        let mgr = self.file_handler.fh_manager();
+        if mgr.is_pseudo_root(fh) {
+            return FhPlace::Above;
+        }
+        let Ok(path) = mgr.resolve_handle(fh) else {
+            return FhPlace::Unknown;
+        };
+        match path.strip_prefix(mgr.get_export_path()) {
+            Ok(rel) => crate::nfs::node_authz::volume_of(rel).map_or(FhPlace::Root, FhPlace::In),
+            Err(_) => FhPlace::Above,
+        }
+    }
+
+    /// May this compound's session reach `volume`? Its client is a
+    /// node's (EXCHANGE_ID admits nothing else under the gate); no
+    /// session, no volume.
+    fn session_reaches(&self, volumes: &crate::nfs::node_authz::VolumeNodes, volume: &str, ctx: &CompoundContext) -> bool {
+        ctx.session_id
+            .as_ref()
+            .and_then(|sid| self.state_mgr.sessions.session_limits(sid))
+            .and_then(|s| self.state_mgr.clients.get_client(s.client_id))
+            .is_some_and(|c| volumes.may_reach(volume, &c.principal))
+    }
+
+    /// After PUTFH or RESTOREFH: true (and the current filehandle
+    /// cleared) when the per-volume gate is on and it is inside a volume
+    /// the session's node is not attached to.
+    fn current_fh_out_of_reach(&self, op: &str, ctx: &mut CompoundContext) -> bool {
+        let Some(volumes) = crate::nfs::node_authz::volumes() else {
+            return false;
+        };
+        let Some(fh) = ctx.current_fh.as_ref() else {
+            return false;
+        };
+        let FhPlace::In(volume) = self.fh_place(fh) else {
+            return false;
+        };
+        if self.session_reaches(volumes, &volume, ctx) {
+            return false;
+        }
+        warn!(
+            "{op} refused: volume {volume} is not attached to the node of this session ({})",
+            String::from_utf8_lossy(&ctx.principal)
+        );
+        ctx.current_fh = None;
+        true
+    }
+
+    /// [`crate::nfs::node_authz::VolumeNodes`] for the operations that
+    /// name an entry of a directory filehandle: at the export root the
+    /// name is a volume, inside a volume it is that volume. NFS4ERR_ACCESS
+    /// before the handler runs, so nothing is looked up, opened, made,
+    /// removed, renamed or linked. A total match, as `read_only_refusal`.
+    fn unattached_volume_refusal(
+        &self,
+        volumes: &crate::nfs::node_authz::VolumeNodes,
+        op: &Operation,
+        ctx: &CompoundContext,
+    ) -> Option<OperationResult> {
+        let access = Nfs4Status::Access;
+        let cur = ctx.current_fh.as_ref();
+        let saved = ctx.saved_fh.as_ref();
+        let (name, targets, refused): (&str, Vec<(Option<&Nfs4FileHandle>, &str)>, OperationResult) = match op {
+            Operation::Lookup(n) => ("LOOKUP", vec![(cur, n.as_str())], OperationResult::Lookup(access)),
+            // By name: CLAIM_NULL, CLAIM_DELEGATE_CUR, CLAIM_DELEGATE_PREV.
+            Operation::Open { claim, .. } if matches!(claim.claim_type, 0 | 2 | 3) => {
+                ("OPEN", vec![(cur, claim.file.as_str())], OperationResult::Open(access, None))
+            }
+            Operation::Create { objname, .. } => {
+                ("CREATE", vec![(cur, objname.as_str())], OperationResult::Create(access, None, Vec::new()))
+            }
+            Operation::Remove(n) => ("REMOVE", vec![(cur, n.as_str())], OperationResult::Remove(access, None)),
+            Operation::Rename { oldname, newname } => (
+                "RENAME",
+                vec![(saved, oldname.as_str()), (cur, newname.as_str())],
+                OperationResult::Rename(access, None, None),
+            ),
+            Operation::Link(n) => ("LINK", vec![(cur, n.as_str())], OperationResult::Link(access, None)),
+
+            // A filehandle already checked (CLAIM_FH and the reclaims),
+            // or no name at all.
+            Operation::Open { .. }
+            | Operation::Write { .. }
+            | Operation::Commit { .. }
+            | Operation::SetAttr { .. }
+            | Operation::Lock { .. }
+            | Operation::Allocate { .. }
+            | Operation::Deallocate { .. }
+            | Operation::Copy { .. }
+            | Operation::Clone { .. }
+            | Operation::LayoutGet { .. }
+            | Operation::LayoutCommit { .. }
+            | Operation::PutRootFh
+            | Operation::PutFh(_)
+            | Operation::GetFh
+            | Operation::SaveFh
+            | Operation::RestoreFh
+            | Operation::PutPubFh
+            | Operation::LookupP
+            | Operation::ReadDir { .. }
+            | Operation::Close { .. }
+            | Operation::OpenDowngrade { .. }
+            | Operation::Read { .. }
+            | Operation::DelegPurge { .. }
+            | Operation::BackchannelCtl { .. }
+            | Operation::DelegReturn { .. }
+            | Operation::GetAttr(_)
+            | Operation::Verify { .. }
+            | Operation::Nverify { .. }
+            | Operation::Access(_)
+            | Operation::ReadLink
+            | Operation::ExchangeId { .. }
+            | Operation::CreateSession { .. }
+            | Operation::DestroySession(_)
+            | Operation::DestroyClientId(_)
+            | Operation::BindConnToSession { .. }
+            | Operation::Sequence { .. }
+            | Operation::ReclaimComplete(_)
+            | Operation::SecInfo(_)
+            | Operation::SecInfoNoName(_)
+            | Operation::TestStateId(_)
+            | Operation::FreeStateId(_)
+            | Operation::LockT { .. }
+            | Operation::LockU { .. }
+            | Operation::Seek { .. }
+            | Operation::ReadPlus { .. }
+            | Operation::IoAdvise { .. }
+            | Operation::GetDeviceInfo { .. }
+            | Operation::LayoutReturn { .. }
+            | Operation::Unsupported(_)
+            | Operation::BadXdr(_)
+            | Operation::InvalidName(_) => return None,
+        };
+        for (dir, entry) in targets {
+            // No filehandle: the handler answers NOFILEHANDLE.
+            let Some(dir) = dir else { continue };
+            let volume = match self.fh_place(dir) {
+                FhPlace::Root => entry.to_string(),
+                FhPlace::In(v) => v,
+                FhPlace::Above | FhPlace::Unknown => continue,
+            };
+            if !self.session_reaches(volumes, &volume, ctx) {
+                warn!(
+                    "{name} {entry:?} refused: volume {volume} is not attached to the node of this session ({})",
+                    String::from_utf8_lossy(&ctx.principal)
+                );
+                return Some(refused);
+            }
+        }
+        None
     }
 }
 

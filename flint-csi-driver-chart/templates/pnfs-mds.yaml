@@ -248,11 +248,12 @@ spec:
       {{- with $.Values.priorityClassName }}
       priorityClassName: {{ . }}
       {{- end }}
-      {{- if ((($.Values.pnfs.server.mds.blockExport).witness).enabled) }}
+      {{- if or ((($.Values.pnfs.server.mds.blockExport).witness).enabled) (include "flint-csi-driver-chart.pnfsAttachedNodesOnly" $) }}
       # The composition witness reads and CAS's ConfigMaps in this
       # namespace; without this ServiceAccount the MDS falls back to its
       # own record and says so at startup, and replicated volumes cannot
-      # fail over.
+      # fail over. pnfs.kerberos.attachedNodesOnly reads PVs,
+      # VolumeAttachments and Nodes with it.
       serviceAccountName: flint-pnfs-mds
       {{- end }}
       {{- if $be.enabled }}
@@ -311,10 +312,18 @@ spec:
             {{- $pk := $.Values.pnfs.kerberos }}
             # Kerberos (pnfs.kerberos): this shard's key,
             # nfs/flint-pnfs-mds-{{ $i }}.<namespace>.svc.<clusterDomain>,
-            # and the same server security env as the RWX servers. No
-            # attached-nodes-only yet: the MDS has no attachment watcher.
+            # and the same server security env as the RWX servers.
             # Kerberos callers get no layouts (FLINT_PNFS_LAYOUTS_FOR_GSS).
             {{- include "flint-csi-driver-chart.krb5ServerEnv" (dict "root" $ "minSec" $pk.minSec "requireMachCred" $pk.requireMachCred "enforcePermissions" $pk.enforcePermissions) | nindent 12 }}
+            {{- if $pk.attachedNodesOnly }}
+            # Each volume only to the nodes it is attached to.
+            - name: FLINT_NFS_ATTACHED_NODES_ONLY
+              value: "true"
+            {{- with $.Values.nfs.kerberos.nodeKeytab.domain }}
+            - name: FLINT_NFS_NODE_DOMAIN
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
             {{- end }}
           ports:
             - containerPort: 2049

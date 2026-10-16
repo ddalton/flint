@@ -762,6 +762,16 @@ pnfs:
     requireMachCred: true
     # FLINT_NFS_ENFORCE_PERMISSIONS on the MDS: enforce, warn or off.
     enforcePermissions: enforce
+    # Each pNFS volume only to the nodes it is attached to (its
+    # VolumeAttachments), by their machine principals, as
+    # nfs.kerberos.attachedNodesOnly: only attached nodes make clients and
+    # sessions on an MDS shard, and a node reaches only the volumes
+    # attached to it (NFS4ERR_ACCESS on any other). Needs minSec. The MDS
+    # gets a service account that reads PersistentVolumes,
+    # VolumeAttachments and Nodes (cluster-wide, read-only). Layouts
+    # handed out before a detach keep working at the data servers until
+    # they do Kerberos (docs/plans/pnfs-kerberos-plan.md, Phase 4).
+    attachedNodesOnly: true
     # pNFS volumes mounted with Kerberos: the flint-pnfs class's
     # parameters (pnfs.storageClass) plus mountOptions sec=<sec>.
     storageClass:

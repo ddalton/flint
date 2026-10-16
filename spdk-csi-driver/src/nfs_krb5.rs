@@ -963,11 +963,7 @@ mod tests {
             ..Default::default()
         };
         let (env, _, _) = server_pod_parts(&sec);
-        let mut got: Vec<String> = env
-            .into_iter()
-            .map(|e| e.name)
-            .filter(|n| n != crate::nfs::node_authz::ENV && n != crate::nfs::node_authz::DOMAIN_ENV)
-            .collect();
+        let mut got: Vec<String> = env.into_iter().map(|e| e.name).collect();
         got.sort();
         let file = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/system/krb5-server-env-names.txt");
         let mut want: Vec<String> = std::fs::read_to_string(file)
